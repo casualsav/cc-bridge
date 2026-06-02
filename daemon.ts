@@ -247,6 +247,77 @@ const bot = new Bot(TOKEN)
 let botUsername = ''
 const pendingPermissions = new Map<string, { tool_name: string; description: string; input_preview: string }>()
 
+// ---- Typing presence ----
+// Telegram's "typing…" chat action auto-expires after ~5s. To signal that
+// Claude is busy for the *whole* duration of a turn, re-send it on an interval
+// while the watched pane reports a working state. Armed when a message is
+// relayed; cleared when the turn returns to idle (or after a hard time cap).
+//
+// The loop is self-correcting: it starts optimistically (an inbound message
+// almost always kicks off work), then defers to observed pane state. So even if
+// detectWorking misses a spinner variant, the indicator fades on its own rather
+// than sticking — at worst a few seconds of typing, never a stuck one.
+class TypingPresence {
+  private targets = new Map<string, number>()   // chat_id -> expiry ms
+  private working = false
+  private sawWorking = false
+  private optimisticUntil = 0
+  private timer: ReturnType<typeof setInterval> | null = null
+  private static readonly CAP_MS = 15 * 60_000
+  private static readonly TICK_MS = 4_000
+  private static readonly OPTIMISTIC_MS = 8_000
+
+  private ping(chat_id: string): void {
+    void bot.api.sendChatAction(chat_id, 'typing').catch(() => {})
+  }
+
+  // An inbound message was relayed to Claude — begin showing presence.
+  arm(chat_id: string): void {
+    this.ping(chat_id)
+    // With no pane to observe we can't tell when work ends — just ping once.
+    if (!paneWatcher) return
+    this.targets.set(chat_id, Date.now() + TypingPresence.CAP_MS)
+    this.optimisticUntil = Date.now() + TypingPresence.OPTIMISTIC_MS
+    this.sawWorking = false
+    if (!this.timer) this.timer = setInterval(() => this.tick(), TypingPresence.TICK_MS)
+  }
+
+  // Fresh working state from each pane change.
+  update(working: boolean): void {
+    this.working = working
+    if (working) this.sawWorking = true
+    else if (this.sawWorking) this.clearAll()   // worked, now idle → turn done
+  }
+
+  private active(): boolean {
+    return this.working || Date.now() < this.optimisticUntil
+  }
+
+  private tick(): void {
+    const now = Date.now()
+    for (const [chat, exp] of this.targets) if (exp < now) this.targets.delete(chat)
+    if (this.targets.size === 0) { this.stop(); return }
+    if (this.active()) {
+      for (const chat of this.targets.keys()) this.ping(chat)
+    } else if (!this.sawWorking) {
+      this.clearAll()   // optimistic window elapsed, no work ever seen → give up
+    }
+  }
+
+  private clearAll(): void {
+    this.targets.clear()
+    this.sawWorking = false
+    this.working = false
+    this.stop()
+  }
+
+  private stop(): void {
+    if (this.timer) { clearInterval(this.timer); this.timer = null }
+  }
+}
+
+const typingPresence = new TypingPresence()
+
 // ---- Pane / tmux layer ----
 
 type CcMode = 'default' | 'acceptEdits' | 'plan' | 'auto' | 'bypassPermissions'
@@ -329,6 +400,18 @@ function detectCurrentMode(paneText: string): CcMode {
   if (/\bauto\b/i.test(footer)) return 'auto'
   if (/accept.?edit/i.test(footer)) return 'acceptEdits'
   return 'default'
+}
+
+// True while Claude Code is mid-turn. The TUI shows a spinner + "esc to
+// interrupt" footer while working and clears it when the turn ends, so the
+// footer is the ground truth. Markers are intentionally broad — detection only
+// drives the typing indicator, which self-corrects from pane state.
+function detectWorking(paneText: string): boolean {
+  const footer = paneText.split('\n').map(l => stripAnsi(l)).slice(-8).join('\n')
+  if (/esc to interrupt/i.test(footer)) return true
+  // Spinner glyph followed by an elapsed timer, e.g. "✻ Working… (12s · …)".
+  if (/[✢✳✶✻✽✺✷✸✹·●◐◓◑◒][^\n]*\(\d+s\b/.test(footer)) return true
+  return false
 }
 
 function modeLabel(mode: CcMode): string {
@@ -536,6 +619,9 @@ function replayBuffer(write: (msg: DaemonToShim) => void): void {
 function onPaneEvent(text: string): void {
   // Opportunistically update the known ring from passive observation.
   updateKnownRing(detectCurrentMode(text))
+
+  // Keep the Telegram "typing…" indicator alive while Claude is working.
+  typingPresence.update(detectWorking(text))
 
   const prompt = detectUserPrompt(text)
   if (!prompt) return
@@ -937,7 +1023,7 @@ async function handleInbound(
     return
   }
 
-  void bot.api.sendChatAction(chat_id, 'typing').catch(() => {})
+  typingPresence.arm(chat_id)
 
   if (access.ackReaction && msgId != null) {
     void bot.api.setMessageReaction(chat_id, msgId, [
