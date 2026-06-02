@@ -701,29 +701,47 @@ async function downloadTelegramFile(file_id: string): Promise<string> {
 // resulting text reaches the session. Backend is chosen at install time via
 // TELEGRAM_TRANSCRIBE (off | local | groq | openai); see ACCESS.md.
 type TranscribeProvider = 'off' | 'local' | 'groq' | 'openai'
-const TRANSCRIBE = (process.env.TELEGRAM_TRANSCRIBE ?? 'off').toLowerCase() as TranscribeProvider
-const TRANSCRIBE_MODEL = process.env.TELEGRAM_TRANSCRIBE_MODEL ?? ''
+
+// Transcription config is read live from the .env file (process env as
+// fallback) on each call, so /telegram:configure changes apply on the next
+// voice message without restarting the long-lived daemon. The .env file wins
+// for these keys because the configure skill writes there.
+function tConfig(key: string): string | undefined {
+  try {
+    for (const line of readFileSync(ENV_FILE, 'utf8').split('\n')) {
+      const m = line.match(/^(\w+)=(.*)$/)
+      if (m && m[1] === key) return m[2]
+    }
+  } catch {}
+  return process.env[key]
+}
+
+function transcribeProvider(): TranscribeProvider {
+  return (tConfig('TELEGRAM_TRANSCRIBE') ?? 'off').toLowerCase() as TranscribeProvider
+}
 
 // Returns the transcript, or null if disabled/unconfigured/failed (caller falls
 // back to a placeholder so a bad transcription never drops the message).
 async function transcribe(audioPath: string): Promise<string | null> {
+  const provider = transcribeProvider()
+  const model = tConfig('TELEGRAM_TRANSCRIBE_MODEL') ?? ''
   try {
-    switch (TRANSCRIBE) {
+    switch (provider) {
       case 'groq':
         return await transcribeHttp(audioPath,
           'https://api.groq.com/openai/v1/audio/transcriptions',
-          process.env.GROQ_API_KEY, TRANSCRIBE_MODEL || 'whisper-large-v3-turbo')
+          tConfig('GROQ_API_KEY'), model || 'whisper-large-v3-turbo')
       case 'openai':
         return await transcribeHttp(audioPath,
           'https://api.openai.com/v1/audio/transcriptions',
-          process.env.OPENAI_API_KEY, TRANSCRIBE_MODEL || 'whisper-1')
+          tConfig('OPENAI_API_KEY'), model || 'whisper-1')
       case 'local':
-        return await transcribeLocal(audioPath, TRANSCRIBE_MODEL || 'base')
+        return await transcribeLocal(audioPath, model || 'base')
       default:
         return null
     }
   } catch (err) {
-    process.stderr.write(`daemon: transcription (${TRANSCRIBE}) failed: ${err}\n`)
+    process.stderr.write(`daemon: transcription (${provider}) failed: ${err}\n`)
     return null
   }
 }
@@ -747,10 +765,13 @@ async function transcribeHttp(
 
 // Local faster-whisper via the bundled Python helper (no API, fully private).
 async function transcribeLocal(audioPath: string, model: string): Promise<string | null> {
-  const python = process.env.TELEGRAM_WHISPER_PYTHON || 'python3'
+  const python = tConfig('TELEGRAM_WHISPER_PYTHON') || 'python3'
   const script = join(import.meta.dir, 'transcribe_local.py')
+  const env = { ...process.env }
+  const device = tConfig('TELEGRAM_WHISPER_DEVICE'); if (device) env.TELEGRAM_WHISPER_DEVICE = device
+  const compute = tConfig('TELEGRAM_WHISPER_COMPUTE'); if (compute) env.TELEGRAM_WHISPER_COMPUTE = compute
   const { stdout } = await exec(python, [script, audioPath, model], {
-    timeout: 300_000, maxBuffer: 10 * 1024 * 1024,
+    timeout: 300_000, maxBuffer: 10 * 1024 * 1024, env,
   })
   return stdout.trim() || null
 }
@@ -760,7 +781,7 @@ async function transcribeLocal(audioPath: string, model: string): Promise<string
 async function audioInboundText(
   ctx: Context, file_id: string, fallback: string,
 ): Promise<{ text: string; transcribed: boolean }> {
-  if (TRANSCRIBE === 'off') return { text: fallback, transcribed: false }
+  if (transcribeProvider() === 'off') return { text: fallback, transcribed: false }
   void bot.api.sendChatAction(String(ctx.chat!.id), 'typing').catch(() => {})
   let path: string
   try { path = await downloadTelegramFile(file_id) }
