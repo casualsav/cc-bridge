@@ -6,9 +6,10 @@ import { z } from 'zod'
 import { randomBytes } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { spawn } from 'node:child_process'
+import { openSync, closeSync, statSync, renameSync, mkdirSync } from 'node:fs'
 import net from 'node:net'
 import { join } from 'node:path'
-import { frame, makeLineReader, SOCKET_PATH, DAEMON_PID_FILE, type ShimToDaemon, type DaemonToShim } from './common.ts'
+import { frame, makeLineReader, STATE_DIR, SOCKET_PATH, DAEMON_PID_FILE, type ShimToDaemon, type DaemonToShim } from './common.ts'
 
 // Resolve the stable tmux pane id for this session (opus-direct Block A).
 function resolvePaneId(): string | null {
@@ -43,14 +44,31 @@ function send(msg: ShimToDaemon): void {
   if (sock && sockReady) sock.write(frame(msg))
 }
 
+// Open (and size-rotate) the daemon log so its diagnostics survive instead of
+// being discarded. Falls back to 'ignore' if the log can't be opened.
+function openDaemonLog(): number | 'ignore' {
+  try {
+    mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 })
+    const logPath = join(STATE_DIR, 'daemon.log')
+    try {
+      if (statSync(logPath).size > 5 * 1024 * 1024) renameSync(logPath, logPath + '.old')
+    } catch {}   // no existing log, or rotation raced — fine
+    return openSync(logPath, 'a', 0o600)
+  } catch {
+    return 'ignore'
+  }
+}
+
 function spawnDaemon(): void {
   const daemonPath = join(import.meta.dir, 'daemon.ts')
+  const log = openDaemonLog()
   const child = spawn('bun', [daemonPath], {
     detached: true,
-    stdio: 'ignore',
+    stdio: ['ignore', log, log],
     env: process.env,
   })
   child.unref()
+  if (typeof log === 'number') { try { closeSync(log) } catch {} }   // parent's copy; child keeps its own
 }
 
 async function connectWithRetry(maxAttempts = 12, delayMs = 500): Promise<void> {

@@ -21,6 +21,17 @@ import {
 const exec = promisify(execFile)
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
 
+// Timestamp daemon diagnostics so the log file (the shim redirects the daemon's
+// stderr there) is readable after the fact. Every daemon write is a whole line,
+// so prefixing each write yields exactly one timestamp per line.
+const _origStderrWrite = process.stderr.write.bind(process.stderr)
+process.stderr.write = ((chunk: string | Uint8Array, ...args: unknown[]): boolean => {
+  const s = typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8')
+  return (_origStderrWrite as (c: string | Uint8Array, ...a: unknown[]) => boolean)(
+    `[${new Date().toISOString()}] ${s}`, ...args,
+  )
+}) as typeof process.stderr.write
+
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN
 const STATIC = process.env.TELEGRAM_ACCESS_MODE === 'static'
 
