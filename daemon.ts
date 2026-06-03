@@ -776,13 +776,27 @@ async function transcribeLocal(audioPath: string, model: string): Promise<string
   return stdout.trim() || null
 }
 
+// Chats already nudged about disabled transcription (in-memory; one hint per
+// chat per daemon run is enough).
+const voiceNudged = new Set<string>()
+
+function nudgeTranscribeOff(ctx: Context): void {
+  const chat_id = String(ctx.chat!.id)
+  if (voiceNudged.has(chat_id)) return
+  voiceNudged.add(chat_id)
+  void bot.api.sendMessage(chat_id,
+    '🎙️ Voice transcription is off. To talk to Claude by voice, enable it with ' +
+    '/telegram:configure transcribe in your Claude Code session.',
+  ).catch(() => {})
+}
+
 // Build inbound text for an audio message: transcribe when enabled, else use the
-// placeholder. Sends an immediate typing hint since transcription adds latency.
+// placeholder. Called post-gate from handleInbound (typing already armed), so it
+// never runs for unauthorized senders.
 async function audioInboundText(
   ctx: Context, file_id: string, fallback: string,
 ): Promise<{ text: string; transcribed: boolean }> {
-  if (transcribeProvider() === 'off') return { text: fallback, transcribed: false }
-  void bot.api.sendChatAction(String(ctx.chat!.id), 'typing').catch(() => {})
+  if (transcribeProvider() === 'off') { nudgeTranscribeOff(ctx); return { text: fallback, transcribed: false } }
   let path: string
   try { path = await downloadTelegramFile(file_id) }
   catch (err) { process.stderr.write(`daemon: audio download failed: ${err}\n`); return { text: fallback, transcribed: false } }
@@ -1119,6 +1133,7 @@ async function handleInbound(
   text: string,
   downloadImage: (() => Promise<string | undefined>) | undefined,
   attachment?: AttachmentMeta,
+  transcribeAudio?: () => Promise<{ text: string; transcribed: boolean }>,
 ): Promise<void> {
   const result = gate(ctx)
   if (result.action === 'drop') return
@@ -1158,10 +1173,20 @@ async function handleInbound(
     ]).catch(() => {})
   }
 
+  // Transcription runs here, post-gate, so we never download or pay for an
+  // API transcription on senders who aren't allowed through.
+  let content = text
+  let attach = attachment
+  if (transcribeAudio) {
+    const r = await transcribeAudio()
+    content = r.text
+    if (attach && r.transcribed) attach = { ...attach, transcribed: true }
+  }
+
   const imagePath = downloadImage ? await downloadImage() : undefined
 
   const params: InboundParams = {
-    content: text,
+    content,
     meta: {
       chat_id,
       ...(msgId != null ? { message_id: String(msgId) } : {}),
@@ -1169,13 +1194,13 @@ async function handleInbound(
       user_id: String(from.id),
       ts: new Date((ctx.message?.date ?? 0) * 1000).toISOString(),
       ...(imagePath ? { image_path: imagePath } : {}),
-      ...(attachment ? {
-        attachment_kind: attachment.kind,
-        attachment_file_id: attachment.file_id,
-        ...(attachment.size != null ? { attachment_size: String(attachment.size) } : {}),
-        ...(attachment.mime ? { attachment_mime: attachment.mime } : {}),
-        ...(attachment.name ? { attachment_name: attachment.name } : {}),
-        ...(attachment.transcribed ? { attachment_transcribed: 'true' } : {}),
+      ...(attach ? {
+        attachment_kind: attach.kind,
+        attachment_file_id: attach.file_id,
+        ...(attach.size != null ? { attachment_size: String(attach.size) } : {}),
+        ...(attach.mime ? { attachment_mime: attach.mime } : {}),
+        ...(attach.name ? { attachment_name: attach.name } : {}),
+        ...(attach.transcribed ? { attachment_transcribed: 'true' } : {}),
       } : {}),
     },
   }
@@ -1242,20 +1267,19 @@ bot.on('message:document', async ctx => {
 
 bot.on('message:voice', async ctx => {
   const voice = ctx.message.voice
-  const { text, transcribed } = await audioInboundText(ctx, voice.file_id, ctx.message.caption ?? '(voice message)')
-  await handleInbound(ctx, text, undefined, {
-    kind: 'voice', file_id: voice.file_id, size: voice.file_size, mime: voice.mime_type, transcribed,
-  })
+  const fallback = ctx.message.caption ?? '(voice message)'
+  await handleInbound(ctx, fallback, undefined,
+    { kind: 'voice', file_id: voice.file_id, size: voice.file_size, mime: voice.mime_type },
+    () => audioInboundText(ctx, voice.file_id, fallback))
 })
 
 bot.on('message:audio', async ctx => {
   const audio = ctx.message.audio
   const name = safeName(audio.file_name)
   const fallback = ctx.message.caption ?? `(audio: ${safeName(audio.title) ?? name ?? 'audio'})`
-  const { text, transcribed } = await audioInboundText(ctx, audio.file_id, fallback)
-  await handleInbound(ctx, text, undefined, {
-    kind: 'audio', file_id: audio.file_id, size: audio.file_size, mime: audio.mime_type, name, transcribed,
-  })
+  await handleInbound(ctx, fallback, undefined,
+    { kind: 'audio', file_id: audio.file_id, size: audio.file_size, mime: audio.mime_type, name },
+    () => audioInboundText(ctx, audio.file_id, fallback))
 })
 
 bot.on('message:video', async ctx => {
