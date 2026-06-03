@@ -25,7 +25,7 @@ people you approve can reach your session.
 - **Permission prompts** — when Claude needs approval for a tool call, you get an
   inline-keyboard Allow/Deny right in the chat.
 - **Mode switching** — change permission mode from Telegram: `/plan`, `/auto`,
-  `/default`, `/acceptedits`, `/yolo`, or the interactive `/mode`.
+  `/default`, `/acceptedits`, `/bypass`, or the interactive `/mode`.
 - **Interrupt** — `/stop` sends Esc to the session, cancelling the current turn.
 - **Attachments** — send photos and documents in; Claude can attach files back.
 - **Voice & audio transcription** — inbound voice/audio notes can be transcribed
@@ -152,7 +152,7 @@ formatted. Bot commands:
 | `/start` | Pairing instructions |
 | `/status` | Check your pairing state |
 | `/mode` | Interactive permission-mode switcher |
-| `/plan` `/auto` `/default` `/acceptedits` `/yolo` | Quick mode switch |
+| `/plan` `/auto` `/default` `/acceptedits` `/bypass` | Quick mode switch |
 | `/stop` | Interrupt the current task (sends Esc) |
 
 Any other `/slash` command is relayed straight to Claude Code. Photos and
