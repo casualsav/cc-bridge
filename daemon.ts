@@ -1223,6 +1223,7 @@ bot.on('callback_query:data', async ctx => {
       await waitForSettle(activePaneId!, 300, 5000)
     })
     lastRelayedPromptHash = ''  // allow next prompt to relay
+    await ctx.editMessageReplyMarkup().catch(() => {})  // drop the keyboard — signals the answer landed
     return
   }
 
