@@ -67,10 +67,12 @@ This is a Claude Code plugin. Add it and install:
 
 ```
 /plugin marketplace add casualsav/better-claude-telegram
-/plugin install telegram@better-claude-telegram
+/plugin install telegram@better-claude-plugins
 ```
 
-(Adjust the marketplace/plugin identifiers if you've renamed the repo.)
+(The `marketplace add` argument is the repo path — update it if you rename the
+repo. The `@better-claude-plugins` suffix is the marketplace name from
+`.claude-plugin/marketplace.json` and is independent of the repo name.)
 
 ## Setup
 
