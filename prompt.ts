@@ -2,7 +2,10 @@
 // daemon can relay them to Telegram as inline buttons. Pure and dependency-free
 // → unit-testable in isolation.
 
-export type PromptInfo = { question: string; options: string[] }
+// An option carries its short label plus the indented description AskUserQuestion
+// renders beneath it (when present).
+export type PromptOption = { label: string; description?: string }
+export type PromptInfo = { question: string; options: PromptOption[]; multiSelect: boolean }
 
 export function stripAnsi(s: string): string {
   return s.replace(/\x1b\[[0-9;]*[mGKHFJABCDsuhl]/g, '').replace(/\x1b\([AB]/g, '')
@@ -20,6 +23,15 @@ const RESULT_GLYPH = /^[⎿⏺●○◉└├▪▸•·◦]/
 // Footer under an interactive select prompt (e.g. AskUserQuestion), which renders
 // no box frame or ❯ cursor of its own: "Enter to select · ↑/↓ to navigate · Esc to cancel".
 const SELECT_HINT = /Enter to select|to navigate|Esc to cancel/i
+// A multi-select prompt toggles options with Space and submits with Enter, so its
+// footer reads differently ("Space to select · Enter to confirm"). Checkbox glyphs
+// in the option block are a second tell.
+const MULTI_HINT = /space to (?:select|toggle|check)|enter to (?:confirm|submit|finish|done)/i
+const CHECKBOX_GLYPH = /[☐☑▢▣◻◼⬜✅]/
+// An option's wrapped description: deeper indentation than the option line itself,
+// tolerating one leading box border. The normal in-box prefix is "│ " (one space),
+// so a description needs ≥2 spaces after the optional border to qualify.
+const INDENTED = /^\s*│?\s{2,}\S/
 
 // Walk upward from `start` and gather the contiguous question text — it may wrap
 // across several lines — stopping at a blank line, box border, or tool-output
@@ -43,6 +55,23 @@ function looksLikeRealPrompt(relevant: string[], blockStart: number, blockEnd: n
   return win.some(l => PROMPT_BOX.test(l) || PROMPT_CURSOR.test(l) || SELECT_HINT.test(l))
 }
 
+// True if the prompt around the option block is a multi-select: its footer hint
+// mentions Space/confirm, or the block carries checkbox glyphs.
+function looksMultiSelect(relevant: string[], blockStart: number, blockEnd: number): boolean {
+  const win = relevant.slice(Math.max(0, blockStart - 1), Math.min(relevant.length, blockEnd + 6))
+  return win.some(l => MULTI_HINT.test(l) || CHECKBOX_GLYPH.test(l))
+}
+
+// Attach an indented description line to the most recently collected option,
+// appending (space-joined) if the description itself wraps across lines.
+function attachDescription(options: PromptOption[], text: string): void {
+  const last = options[options.length - 1]
+  if (!last) return
+  const clean = text.replace(/^[\s│]*/, '').replace(/[\s│]*$/, '').trim()
+  if (!clean) return
+  last.description = last.description ? `${last.description} ${clean}` : clean
+}
+
 export function detectUserPrompt(paneText: string): PromptInfo | null {
   const lines = paneText.split('\n').map(l => stripAnsi(l).trimEnd())
   const halfStart = Math.floor(lines.length / 2)
@@ -50,10 +79,10 @@ export function detectUserPrompt(paneText: string): PromptInfo | null {
 
   // Numbered list: "1. opt" / "2) opt", tolerating the box border and cursor that
   // frame a real prompt ("│ ❯ 1. opt │"). AskUserQuestion renders an indented
-  // description under each option and a divider before meta-options, so skip
-  // blank / border / indented lines between options instead of ending the block.
+  // description under each option and a divider before meta-options, so we capture
+  // the indented lines as descriptions and skip blanks / borders between options.
   const numberedRe = /^\s*(?:│\s*)?(?:[❯►▶]\s*)?(\d+)[.)]\s+(.+)$/
-  const options: string[] = []
+  const options: PromptOption[] = []
   let blockStart = -1
   let blockEnd = -1
   for (let i = 0; i < relevant.length; i++) {
@@ -61,12 +90,16 @@ export function detectUserPrompt(paneText: string): PromptInfo | null {
     if (m) {
       if (blockStart === -1) blockStart = i
       blockEnd = i
-      options.push(m[2].replace(/\s*│\s*$/, '').trim())
+      options.push({ label: m[2].replace(/\s*│\s*$/, '').trim() })
     } else if (options.length > 0) {
       const line = relevant[i]
       if (line.trim() === '') continue          // blank gap between options
       if (BOXY_LINE.test(line)) continue        // divider / border between options
-      if (/^\s{2,}\S/.test(line)) continue      // indented description under an option
+      if (INDENTED.test(line)) {                // indented description under an option
+        attachDescription(options, line)
+        blockEnd = i
+        continue
+      }
       break                                      // a real non-option line ends the block
     }
   }
@@ -75,25 +108,36 @@ export function detectUserPrompt(paneText: string): PromptInfo | null {
   // otherwise arbitrary numbered scrollback gets mis-detected as a question.
   if (options.length >= 2 && looksLikeRealPrompt(relevant, blockStart, blockEnd)) {
     const question = findQuestionAbove(relevant, blockStart - 1)
-    if (question) return { question, options }
+    if (question) {
+      return { question, options, multiSelect: looksMultiSelect(relevant, blockStart, blockEnd) }
+    }
   }
 
-  // Ink / inquirer ❯ ● ○ style — the marker is itself the prompt anchor.
-  const inkRe = /^\s*(?:│\s*)?[❯►●◉]\s+(.+)$|^\s*(?:│\s*)?[○◯]\s+(.+)$/
-  const inkOpts: string[] = []
+  // Ink / inquirer ❯ ● ○ style, plus checkbox glyphs for multi-select — the marker
+  // is itself the prompt anchor. Descriptions may be indented beneath each option.
+  const inkRe = /^\s*(?:│\s*)?[❯►●◉☑▣◼✅]\s+(.+)$|^\s*(?:│\s*)?[○◯☐▢◻⬜]\s+(.+)$/
+  const inkOpts: PromptOption[] = []
   let inkStart = -1
+  let inkEnd = -1
   for (let i = 0; i < relevant.length; i++) {
     const m = relevant[i].match(inkRe)
     if (m) {
       if (inkStart === -1) inkStart = i
-      inkOpts.push((m[1] ?? m[2]).replace(/\s*│\s*$/, '').trim())
-    } else if (inkOpts.length > 0 && relevant[i].trim() !== '') {
+      inkEnd = i
+      inkOpts.push({ label: (m[1] ?? m[2]).replace(/\s*│\s*$/, '').trim() })
+    } else if (inkOpts.length > 0) {
+      const line = relevant[i]
+      if (line.trim() === '') continue
+      if (BOXY_LINE.test(line)) continue
+      if (INDENTED.test(line)) { attachDescription(inkOpts, line); inkEnd = i; continue }
       break
     }
   }
   if (inkOpts.length >= 2) {
     const question = findQuestionAbove(relevant, inkStart - 1)
-    if (question) return { question, options: inkOpts }
+    if (question) {
+      return { question, options: inkOpts, multiSelect: looksMultiSelect(relevant, inkStart, inkEnd) }
+    }
   }
 
   return null

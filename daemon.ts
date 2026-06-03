@@ -21,8 +21,8 @@ import {
 // Code fingerprint captured at startup; sent to shims so they can detect and
 // replace a daemon left running stale code after a plugin upgrade.
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
-import { mdToTelegramHtml, chunkHtml } from './markdown.ts'
-import { detectUserPrompt, stripAnsi, type PromptInfo } from './prompt.ts'
+import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
+import { detectUserPrompt, stripAnsi, type PromptInfo, type PromptOption } from './prompt.ts'
 
 const exec = promisify(execFile)
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
@@ -507,6 +507,12 @@ let paneWatcher: PaneWatcher | null = null
 // Tracks the last prompt sent to Telegram to avoid double-relay.
 let lastRelayedPromptHash = ''
 
+// In-flight multi-select prompts, keyed by `${chatId}:${messageId}` of the relayed
+// Telegram message. Each tap toggles an index in `selected`; Submit replays the
+// selection into the pane as Space/Down keystrokes. Cleared on submit.
+type PendingMultiSelect = { paneId: string; options: PromptOption[]; selected: Set<number> }
+const pendingMultiSelect = new Map<string, PendingMultiSelect>()
+
 function shimWrite(msg: DaemonToShim): void {
   if (activeShim) activeShim.write(msg)
 }
@@ -564,24 +570,60 @@ function onPaneEvent(text: string): void {
   void relayPromptToTelegram(prompt)
 }
 
+// Render a prompt as Telegram HTML: bold question, then each numbered option with
+// its description (if any) as a blockquote beneath it.
+function renderPromptHtml(prompt: PromptInfo): string {
+  const lines = [`❓ <b>${escapeHtml(prompt.question)}</b>`]
+  if (prompt.multiSelect) lines.push('<i>Pick one or more, then tap ✅ Submit.</i>')
+  lines.push('')
+  prompt.options.forEach((opt, i) => {
+    lines.push(`<b>${i + 1}.</b> ${escapeHtml(opt.label)}`)
+    if (opt.description) lines.push(`<blockquote>${escapeHtml(opt.description)}</blockquote>`)
+  })
+  return lines.join('\n')
+}
+
+// Toggle keyboard for a multi-select prompt: a checkbox button per option (3 per
+// row) plus a Submit button. ☑ marks currently-selected indices.
+function multiSelectKeyboard(options: PromptOption[], selected: Set<number>): InlineKeyboard {
+  const kb = new InlineKeyboard()
+  options.forEach((_, i) => {
+    kb.text(`${selected.has(i) ? '☑' : '☐'} ${i + 1}`, `msel:${i + 1}`)
+    if ((i + 1) % 3 === 0) kb.row()
+  })
+  kb.row().text('✅ Submit', 'msel:submit')
+  return kb
+}
+
 async function relayPromptToTelegram(prompt: PromptInfo): Promise<void> {
   const access = loadAccess()
   const targets = access.allowFrom
   if (targets.length === 0) return
 
-  const lines = [`❓ ${prompt.question}`, '']
-  prompt.options.forEach((opt, i) => lines.push(`${i + 1}. ${opt}`))
-  const text = lines.join('\n')
-
-  const keyboard = new InlineKeyboard()
-  prompt.options.forEach((_, i) => {
-    keyboard.text(String(i + 1), `prompt:${i + 1}`)
-  })
+  const text = renderPromptHtml(prompt)
 
   for (const chat_id of targets) {
-    void bot.api.sendMessage(chat_id, text, { reply_markup: keyboard }).catch(e => {
+    try {
+      if (prompt.multiSelect && activePaneId) {
+        const selected = new Set<number>()
+        const sent = await bot.api.sendMessage(chat_id, text, {
+          parse_mode: 'HTML',
+          reply_markup: multiSelectKeyboard(prompt.options, selected),
+        })
+        pendingMultiSelect.set(`${chat_id}:${sent.message_id}`, {
+          paneId: activePaneId, options: prompt.options, selected,
+        })
+      } else {
+        const keyboard = new InlineKeyboard()
+        prompt.options.forEach((_, i) => {
+          keyboard.text(String(i + 1), `prompt:${i + 1}`)
+          if ((i + 1) % 3 === 0) keyboard.row()
+        })
+        await bot.api.sendMessage(chat_id, text, { parse_mode: 'HTML', reply_markup: keyboard })
+      }
+    } catch (e) {
       process.stderr.write(`daemon: prompt relay to ${chat_id} failed: ${e}\n`)
-    })
+    }
   }
 }
 
@@ -1011,6 +1053,56 @@ bot.on('callback_query:data', async ctx => {
       await waitForSettle(activePaneId!, 300, 5000)
     })
     lastRelayedPromptHash = ''  // allow next prompt to relay
+    return
+  }
+
+  // Multi-select prompt buttons (toggle an option, or submit the selection)
+  const mselMatch = /^msel:(\d+|submit)$/.exec(data)
+  if (mselMatch) {
+    const access = loadAccess()
+    if (!access.allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    const key = `${ctx.chat?.id}:${ctx.callbackQuery.message?.message_id}`
+    const state = pendingMultiSelect.get(key)
+    if (!state) {
+      await ctx.answerCallbackQuery({ text: 'This prompt is no longer active.' }).catch(() => {})
+      return
+    }
+
+    if (mselMatch[1] !== 'submit') {
+      const idx = Number(mselMatch[1]) - 1
+      if (state.selected.has(idx)) state.selected.delete(idx)
+      else state.selected.add(idx)
+      await ctx.answerCallbackQuery().catch(() => {})
+      await ctx.editMessageReplyMarkup({
+        reply_markup: multiSelectKeyboard(state.options, state.selected),
+      }).catch(() => {})
+      return
+    }
+
+    // Submit: drive the TUI from the top option down, toggling Space on each
+    // selected row and Enter at the end. Nothing has moved the cursor since the
+    // prompt appeared, so the cursor still rests on the first option.
+    if (!activePaneId || !paneWatcher) {
+      await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {})
+      return
+    }
+    const keys: string[] = []
+    state.options.forEach((_, i) => {
+      if (state.selected.has(i)) keys.push('Space')
+      if (i < state.options.length - 1) keys.push('Down')
+    })
+    keys.push('Enter')
+    await ctx.answerCallbackQuery({ text: `Submitted ${state.selected.size} selected` }).catch(() => {})
+    await paneWatcher.withInjection(async () => {
+      await sendKeys(activePaneId!, keys)
+      await waitForSettle(activePaneId!, 300, 5000)
+    })
+    pendingMultiSelect.delete(key)
+    lastRelayedPromptHash = ''  // allow next prompt to relay
+    await ctx.editMessageReplyMarkup().catch(() => {})  // drop the keyboard once answered
     return
   }
 
