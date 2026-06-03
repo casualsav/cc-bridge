@@ -18,6 +18,7 @@ import {
   type ShimToDaemon, type DaemonToShim, type InboundParams,
 } from './common.ts'
 import { mdToTelegramHtml, chunkHtml } from './markdown.ts'
+import { detectUserPrompt, stripAnsi, type PromptInfo } from './prompt.ts'
 
 const exec = promisify(execFile)
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
@@ -336,10 +337,6 @@ const typingPresence = new TypingPresence()
 
 type CcMode = 'default' | 'acceptEdits' | 'plan' | 'auto' | 'bypassPermissions'
 
-function stripAnsi(s: string): string {
-  return s.replace(/\x1b\[[0-9;]*[mGKHFJABCDsuhl]/g, '').replace(/\x1b\([AB]/g, '')
-}
-
 async function capturePane(paneId: string): Promise<string> {
   const { stdout } = await exec('tmux', ['capture-pane', '-p', '-t', paneId, '-J'], { timeout: 3000 })
   return stdout
@@ -490,89 +487,7 @@ async function switchToMode(paneId: string, target: CcMode, watcher: PaneWatcher
   })
 }
 
-// ---- Prompt detection ----
-
-type PromptInfo = { question: string; options: string[] }
-
-// Anchors that mark a genuine Claude Code prompt: its box frame or the cursor
-// rendered on the active option. Plain numbered text in scrollback has neither.
-const PROMPT_BOX = /[╭╮╰╯]/
-const PROMPT_CURSOR = /[❯►▶]/
-// A line that is nothing but box-drawing chars / whitespace (a border or divider).
-const BOXY_LINE = /^[╭╮╰╯─│\s]*$/
-// Glyphs that begin a tool-result / output / bullet line — never a question.
-const RESULT_GLYPH = /^[⎿⏺●○◉└├▪▸•·◦]/
-
-// Walk upward from `start` to find the prompt's question line, skipping blanks,
-// box borders, and tool-output lines. Strips surrounding box chars. '' if none.
-function findQuestionAbove(relevant: string[], start: number): string {
-  for (let i = start; i >= Math.max(0, start - 6); i--) {
-    const raw = relevant[i] ?? ''
-    if (!raw.trim()) continue
-    if (BOXY_LINE.test(raw)) continue                       // pure border / divider
-    const inner = raw.replace(/^[\s>│]*/, '').replace(/[\s│]*$/, '').trim()
-    if (!inner || RESULT_GLYPH.test(inner)) continue        // tool output, not a question
-    return inner.replace(/^[?❓]\s*/, '').trim()
-  }
-  return ''
-}
-
-// True if a numbered block at [blockStart, blockEnd] sits inside Claude's real
-// prompt UI (framed by a box and/or carrying a ❯ cursor on an option).
-function looksLikeRealPrompt(relevant: string[], blockStart: number, blockEnd: number): boolean {
-  const win = relevant.slice(Math.max(0, blockStart - 4), Math.min(relevant.length, blockEnd + 3))
-  return win.some(l => PROMPT_BOX.test(l) || PROMPT_CURSOR.test(l))
-}
-
-function detectUserPrompt(paneText: string): PromptInfo | null {
-  const lines = paneText.split('\n').map(l => stripAnsi(l).trimEnd())
-  const halfStart = Math.floor(lines.length / 2)
-  const relevant = lines.slice(halfStart)
-
-  // Numbered list: a block of "  1. opt" lines. Tolerates the box border and
-  // cursor that frame a real prompt ("│ ❯ 1. opt │"); trailing border stripped.
-  const numberedRe = /^\s*(?:│\s*)?(?:[❯►▶]\s*)?(\d+)[.)]\s+(.+)$/
-  const options: string[] = []
-  let blockStart = -1
-  let blockEnd = -1
-  for (let i = 0; i < relevant.length; i++) {
-    const m = relevant[i].match(numberedRe)
-    if (m) {
-      if (blockStart === -1) blockStart = i
-      blockEnd = i
-      options.push(m[2].replace(/\s*│\s*$/, '').trim())
-    } else if (options.length > 0 && relevant[i].trim() !== '') {
-      break
-    }
-  }
-
-  // Only relay a numbered block if it's actually framed as a Claude prompt —
-  // otherwise arbitrary numbered scrollback gets mis-detected as a question.
-  if (options.length >= 2 && looksLikeRealPrompt(relevant, blockStart, blockEnd)) {
-    const question = findQuestionAbove(relevant, blockStart - 1)
-    if (question) return { question, options }
-  }
-
-  // Ink / inquirer ❯ ● ○ style — the marker is itself the prompt anchor.
-  const inkRe = /^\s*(?:│\s*)?[❯►●◉]\s+(.+)$|^\s*(?:│\s*)?[○◯]\s+(.+)$/
-  const inkOpts: string[] = []
-  let inkStart = -1
-  for (let i = 0; i < relevant.length; i++) {
-    const m = relevant[i].match(inkRe)
-    if (m) {
-      if (inkStart === -1) inkStart = i
-      inkOpts.push((m[1] ?? m[2]).replace(/\s*│\s*$/, '').trim())
-    } else if (inkOpts.length > 0 && relevant[i].trim() !== '') {
-      break
-    }
-  }
-  if (inkOpts.length >= 2) {
-    const question = findQuestionAbove(relevant, inkStart - 1)
-    if (question) return { question, options: inkOpts }
-  }
-
-  return null
-}
+// Prompt detection (pane-scrape → PromptInfo) lives in ./prompt.ts.
 
 // ---- Session management ----
 

@@ -59,6 +59,10 @@ Back in the session, configure the channel (use the **test** bot token):
 - Send a **voice note**; it arrives transcribed (or, if transcription is off, you
   get the one-time enable hint).
 - `/stop` interrupts a running task.
+- **Interactive prompts:** trigger a question (e.g. ask Claude to use
+  AskUserQuestion, or any tmux prompt with numbered/▢ options) and confirm it
+  arrives in Telegram as tappable option buttons, and that tapping one selects it
+  in the session.
 - Reactions: set `ackReaction` via `/telegram:access set ackReaction 👀` and
   confirm the bot reacts to your messages; confirm Claude can react too.
 - Check `~/.claude/channels/telegram/daemon.log` for clean startup and no errors.
