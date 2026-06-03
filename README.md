@@ -191,6 +191,24 @@ code, so it doesn't move the fingerprint. Apply a token change with the restart
 documented in `/telegram:configure` (restart the session, or
 `kill "$(cat ~/.claude/channels/telegram/daemon.pid)"`).
 
+## Uninstalling
+
+Run `/telegram:configure uninstall` for a guided teardown. It stops the
+long-lived daemon and (if you ask for a full reset) removes the channel state
+in `~/.claude/channels/telegram/` — the bot token, allowlist, and pairings.
+Keep that state instead if you're just reinstalling/upgrading and want to stay
+paired. The skill then prints the plugin-removal commands it can't run itself:
+
+```
+/plugin uninstall telegram@better-claude-plugins
+/plugin marketplace remove better-claude-plugins
+```
+
+Plugins are cached, so to guarantee a fresh fetch on reinstall, also clear
+`~/.claude/plugins/marketplaces/better-claude-plugins` and
+`~/.claude/plugins/cache/better-claude-plugins`, then re-add the marketplace and
+reinstall. Restart Claude Code to apply.
+
 ## Security
 
 - Secrets (`.env`) are written `0600` and never echoed back in full.

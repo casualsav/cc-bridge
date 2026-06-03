@@ -1,6 +1,6 @@
 ---
 name: configure
-description: Set up the Telegram channel — save the bot token, choose voice transcription, and review access policy. Use when the user pastes a Telegram bot token, asks to configure Telegram, set up voice transcription, asks "how do I set this up" or "who can reach me," or wants to check channel status.
+description: Set up the Telegram channel — save the bot token, choose voice transcription, and review access policy. Use when the user pastes a Telegram bot token, asks to configure Telegram, set up voice transcription, asks "how do I set this up" or "who can reach me," wants to check channel status, or asks to uninstall / remove / tear down the Telegram channel.
 user-invocable: true
 allowed-tools:
   - Read
@@ -12,6 +12,7 @@ allowed-tools:
   - Bash(python3 -m pip *)
   - Bash(nvidia-smi)
   - Bash(kill *)
+  - Bash(rm -rf ~/.claude/channels/telegram*)
 ---
 
 # /telegram:configure — Telegram Channel Setup
@@ -51,6 +52,11 @@ Read both state files and give the user a complete picture:
      <code>`."*
    - Token set, someone allowed → *"Ready. DM your bot to reach the
      assistant."*
+
+5. **Available actions** — briefly list what this skill can do so the menu is
+   discoverable: `<token>` (save token), `transcribe` (voice), `clear` (remove
+   token), `uninstall` (stop the bot and tear down the channel), plus
+   `/telegram:access` for the allowlist. Keep it to one compact line.
 
 **Push toward lockdown — always.** The goal for every setup is `allowlist`
 with a defined list. `pairing` is not a policy to stay on; it's a temporary
@@ -148,6 +154,53 @@ voice message — no restart needed (the daemon reads these settings live).
 ### `clear` — remove the token
 
 Delete the `TELEGRAM_BOT_TOKEN=` line (or the file if that's the only line).
+
+### `uninstall` — tear down the channel
+
+A guided teardown. This skill can stop the running bot and remove this
+channel's local state; it **cannot** remove the plugin itself (that's a
+`/plugin` command, and skills can't invoke slash commands or run host-shell
+uninstall steps), so it hands those off at the end.
+
+**Confirm before doing anything** — this stops the running bot. Ask the user to
+confirm, and ask one branching question: do they want to **keep** the saved
+token + pairing/access config (so a later reinstall stays paired — the default,
+recommended when reinstalling/upgrading), or do a **full reset** that deletes
+it? Don't delete state unless they explicitly choose the full reset.
+
+1. **Stop the daemon.** Read `~/.claude/channels/telegram/daemon.pid`. If it
+   exists, `kill <pid>` — the daemon is long-lived and outlives the session, so
+   it must be stopped explicitly or the old bot keeps running. If there's no
+   pid file, it isn't running; say so and move on.
+
+2. **Channel state** — act on the user's choice from above:
+   - **Keep** (default) → leave `~/.claude/channels/telegram/` untouched. The
+     bot token, `access.json` allowlist, and pairings survive for reinstall.
+   - **Full reset** → `rm -rf ~/.claude/channels/telegram` to delete the token,
+     `access.json`, inbox, and sockets. Tell the user plainly that the bot
+     token and allowlist are now gone and they'll reconfigure from scratch.
+
+3. **Remove the plugin** — this skill can't run `/plugin` commands, so print
+   these for the user to run in their session:
+   ```
+   /plugin uninstall telegram@better-claude-plugins
+   /plugin marketplace remove better-claude-plugins
+   ```
+   The plugin is cached, so to guarantee a fresh fetch on any reinstall, from a
+   shell:
+   ```
+   rm -rf ~/.claude/plugins/marketplaces/better-claude-plugins
+   rm -rf ~/.claude/plugins/cache/better-claude-plugins
+   ```
+   To reinstall later:
+   ```
+   /plugin marketplace add casualsav/better-claude-telegram
+   /plugin install telegram@better-claude-plugins
+   ```
+   Restart Claude Code to apply either removal or reinstall.
+
+End with a short summary of what was done (daemon stopped; state kept or
+removed) and exactly what's left for the user to run.
 
 ---
 
