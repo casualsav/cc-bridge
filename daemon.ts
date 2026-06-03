@@ -431,7 +431,7 @@ function detectWorking(paneText: string): boolean {
 
 function modeLabel(mode: CcMode): string {
   switch (mode) {
-    case 'default': return '⚡ Default'
+    case 'default': return '🏠 Default'
     case 'acceptEdits': return '✏️ Accept Edits'
     case 'plan': return '📋 Plan'
     case 'auto': return '🪄 Auto'
