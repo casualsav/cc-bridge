@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AskUserQuestion — Telegram preview</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; padding: 32px 16px;
+    background: #0e1621;
+    font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    display: flex; flex-direction: column; align-items: center; gap: 28px;
+  }
+  .chat { width: 100%; max-width: 460px; display: flex; flex-direction: column; gap: 24px; }
+  .caption { color: #6d7f8f; font-size: 12px; text-align: center; letter-spacing: .04em; text-transform: uppercase; }
+  .msg { background: #182533; border-radius: 12px 12px 12px 4px; padding: 8px 10px 6px; color: #e9edf0; font-size: 15px; line-height: 1.42; box-shadow: 0 1px 1px rgba(0,0,0,.25); }
+  .msg p { margin: 0 0 2px; white-space: pre-wrap; }
+  .msg b { font-weight: 600; }
+  .msg i { color: #8aa1b4; }
+  .msg blockquote {
+    margin: 1px 0 6px; padding: 2px 0 2px 9px;
+    border-left: 3px solid #5288c1; color: #aab8c4; font-size: 14px;
+  }
+  .time { float: right; color: #5c6b7a; font-size: 11px; margin: 2px 0 0 8px; }
+  /* inline keyboard */
+  .kb { margin-top: 6px; display: flex; flex-direction: column; gap: 3px; }
+  .kb-row { display: flex; gap: 3px; }
+  .btn {
+    flex: 1; text-align: center; padding: 9px 6px;
+    background: #232e3c; color: #6ab3f3; font-size: 14px; font-weight: 500;
+    border-radius: 7px; cursor: default; user-select: none;
+  }
+  .btn.checked { color: #e9edf0; background: #2b6cb0; }
+  .btn.submit { color: #ffffff; background: #2ea043; }
+</style>
+</head>
+<body>
+<div class="chat">
+
+  <div class="caption">Single-select prompt</div>
+  <div>
+    <div class="msg">
+      <p>❓ <b>Which database should we use for the new service?</b></p>
+      <p><b>1.</b> PostgreSQL</p>
+      <blockquote>Robust relational database with strong JSON support and ACID guarantees.</blockquote>
+      <p><b>2.</b> SQLite</p>
+      <blockquote>Lightweight embedded option — zero ops, great for local/dev.</blockquote>
+      <p><b>3.</b> MongoDB</p>
+      <blockquote>Document store, flexible schema for rapidly changing data.<span class="time">14:32</span></blockquote>
+    </div>
+    <div class="kb">
+      <div class="kb-row">
+        <div class="btn">1</div>
+        <div class="btn">2</div>
+        <div class="btn">3</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="caption">Multi-select prompt (option 1 &amp; 3 toggled on)</div>
+  <div>
+    <div class="msg">
+      <p>❓ <b>Which features do you want to enable?</b></p>
+      <p><i>Pick one or more, then tap ✅ Submit.</i></p>
+      <p><b>1.</b> Authentication</p>
+      <blockquote>User login and session management.</blockquote>
+      <p><b>2.</b> Billing</p>
+      <blockquote>Stripe integration for subscriptions.</blockquote>
+      <p><b>3.</b> Analytics</p>
+      <blockquote>Usage tracking and dashboards.</blockquote>
+      <p><b>4.</b> Notifications</p>
+      <blockquote>Email + push delivery.<span class="time">14:35</span></blockquote>
+    </div>
+    <div class="kb">
+      <div class="kb-row">
+        <div class="btn checked">☑ 1</div>
+        <div class="btn">☐ 2</div>
+        <div class="btn checked">☑ 3</div>
+      </div>
+      <div class="kb-row">
+        <div class="btn">☐ 4</div>
+      </div>
+      <div class="kb-row">
+        <div class="btn submit">✅ Submit</div>
+      </div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>
