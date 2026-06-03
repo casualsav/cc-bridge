@@ -435,7 +435,7 @@ function modeLabel(mode: CcMode): string {
     case 'acceptEdits': return '✏️ Accept Edits'
     case 'plan': return '📋 Plan'
     case 'auto': return '🪄 Auto'
-    case 'bypassPermissions': return '🚨 Bypass (Yolo)'
+    case 'bypassPermissions': return '🚨 Bypass'
   }
 }
 
