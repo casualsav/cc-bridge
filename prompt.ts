@@ -45,6 +45,12 @@ function findQuestionAbove(relevant: string[], start: number): string {
     if (!inner || RESULT_GLYPH.test(inner)) { if (collected.length) break; else continue }
     collected.unshift(inner.replace(/^[?❓]\s*/, '').trim())
   }
+  // Drop a leading header chip: AskUserQuestion renders a short (≤12-char) category
+  // label above the question, which otherwise gets glued onto the question text.
+  // Guarded by length + lack of terminal punctuation so real question lines stay.
+  if (collected.length >= 2 && collected[0].length <= 14 && !/[?.!:]$/.test(collected[0])) {
+    collected.shift()
+  }
   return collected.join(' ').trim()
 }
 
@@ -105,9 +111,11 @@ export function detectUserPrompt(paneText: string): PromptInfo | null {
   }
 
   // Only relay a numbered block if it's actually framed as a Claude prompt —
-  // otherwise arbitrary numbered scrollback gets mis-detected as a question.
+  // otherwise arbitrary numbered scrollback gets mis-detected as a question. The
+  // question can sit above the half-pane window (long mode help / history pushes
+  // it up), so search for it across the FULL pane via the absolute block index.
   if (options.length >= 2 && looksLikeRealPrompt(relevant, blockStart, blockEnd)) {
-    const question = findQuestionAbove(relevant, blockStart - 1)
+    const question = findQuestionAbove(lines, halfStart + blockStart - 1)
     if (question) {
       return { question, options, multiSelect: looksMultiSelect(relevant, blockStart, blockEnd) }
     }
@@ -134,7 +142,7 @@ export function detectUserPrompt(paneText: string): PromptInfo | null {
     }
   }
   if (inkOpts.length >= 2) {
-    const question = findQuestionAbove(relevant, inkStart - 1)
+    const question = findQuestionAbove(lines, halfStart + inkStart - 1)
     if (question) {
       return { question, options: inkOpts, multiSelect: looksMultiSelect(relevant, inkStart, inkEnd) }
     }
