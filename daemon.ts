@@ -990,6 +990,9 @@ bot.command('auto', ctx => handleModeCommand(ctx, 'auto'))
 bot.command('default', ctx => handleModeCommand(ctx, 'default'))
 bot.command('acceptedits', ctx => handleModeCommand(ctx, 'acceptEdits'))
 bot.command('bypass', ctx => handleModeCommand(ctx, 'bypassPermissions'))
+// Hidden alias: /yolo is the community nickname for bypass mode. Handled here for
+// muscle memory but deliberately kept out of the setMyCommands menu below.
+bot.command('yolo', ctx => handleModeCommand(ctx, 'bypassPermissions'))
 
 // Interrupt the current turn by sending Esc to the pane (same as pressing Esc
 // in the TUI). withInjection pauses the watcher and re-baselines afterward so
