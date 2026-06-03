@@ -154,13 +154,13 @@ formatted. Bot commands:
 | `/mode` | Interactive permission-mode switcher |
 | `/plan` `/auto` `/default` `/acceptedits` `/bypass` | Quick mode switch |
 | `/stop` | Interrupt the current task (sends Esc) |
-| `/key <text>` | Type literal text into the session, then Enter (e.g. a `/login` code) |
+| `/reply <response>` | Type a response into the session, then Enter (e.g. a `/login` code) |
 
 Any other `/slash` command is relayed straight to Claude Code. Photos and
 documents you send are made available to Claude to read.
 
 When a flow like `/login` prints a sign-in URL, the bot relays it as a tappable
-link; open it, then **reply to that message** with the code (or use `/key <code>`)
+link; open it, then **reply to that message** with the code (or use `/reply <code>`)
 to feed it back into the session.
 
 ## Configuration

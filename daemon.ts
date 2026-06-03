@@ -583,6 +583,10 @@ function replayBuffer(write: (msg: DaemonToShim) => void): void {
 
 // ---- Pane event dispatch ----
 
+// Footer for messages whose input method is a free-text reply, telling the user
+// both ways to respond. Kept in one place so the wording stays consistent.
+const REPLY_FOOTER = `💬 <b>Reply to this message</b>, or use <code>/reply (response)</code>.`
+
 // A sign-in URL surfaced by /login (OAuth authorize link). Scoped to oauth/
 // authorize URLs so ordinary links in Claude's replies aren't re-relayed here —
 // those already arrive through the MCP reply tool.
@@ -682,8 +686,8 @@ async function relayAuthUrlToTelegram(url: string): Promise<void> {
   const text =
     `🔑 <b>Sign-in link from Claude Code</b>\n\n` +
     `<a href="${safe}">${safe}</a>\n\n` +
-    `Open it in your browser, then <b>reply to this message</b> with the code — ` +
-    `or send <code>/key &lt;code&gt;</code>.`
+    `Open it in your browser to get your code.\n\n` +
+    REPLY_FOOTER
 
   for (const chat_id of targets) {
     try {
@@ -1022,7 +1026,7 @@ bot.command('help', async ctx => {
     `/mode — interactive mode switcher\n` +
     `/plan, /auto, /default, /acceptedits, /bypass — quick mode switch\n` +
     `/stop — interrupt the current task (Esc)\n` +
-    `/key <text> — type text into the session (e.g. a /login code)\n\n` +
+    `/reply <response> — type a response into the session (e.g. a /login code)\n\n` +
     `Any other /slash commands are relayed directly to Claude Code.`
   )
 })
@@ -1068,7 +1072,7 @@ bot.command('yolo', ctx => handleModeCommand(ctx, 'bypassPermissions'))
 
 // Type literal text into the session and press Enter — for free-text TUI prompts
 // the button relay can't represent (e.g. pasting a /login code, a filename, etc.).
-bot.command('key', async ctx => {
+bot.command('reply', async ctx => {
   if (!dmCommandGate(ctx)) return
   if (!activePaneId || !paneWatcher) {
     await ctx.reply('No active Claude Code session with tmux.')
@@ -1076,7 +1080,7 @@ bot.command('key', async ctx => {
   }
   const text = (ctx.match ?? '').toString()
   if (!text.trim()) {
-    await ctx.reply('Usage: /key <text> — types the text into the session, then Enter.')
+    await ctx.reply('Usage: /reply <response> — types the text into the session, then Enter.')
     return
   }
   const ok = await injectText(activePaneId, paneWatcher, text)
@@ -1602,7 +1606,7 @@ void (async () => {
               { command: 'acceptedits', description: 'Switch to accept-edits mode' },
               { command: 'bypass', description: 'Switch to bypass-permissions mode' },
               { command: 'stop', description: 'Interrupt the current task (Esc)' },
-              { command: 'key', description: 'Type text into the session (e.g. a /login code)' },
+              { command: 'reply', description: 'Type a response into the session (e.g. a /login code)' },
             ],
             { scope: { type: 'all_private_chats' } },
           ).catch(() => {})
