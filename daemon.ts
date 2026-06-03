@@ -360,6 +360,27 @@ async function sendKeys(paneId: string, keys: string[]): Promise<boolean> {
   return true
 }
 
+// Send a literal string into the pane (tmux -l), so codes/URLs with characters
+// that would otherwise be read as key names ("Enter", "C-c", "-foo") are typed
+// verbatim. The trailing `--` guards strings that begin with a dash.
+async function sendKeysLiteral(paneId: string, text: string): Promise<boolean> {
+  if (!(await paneAlive(paneId))) return false
+  await exec('tmux', ['send-keys', '-l', '-t', paneId, '--', text], { timeout: 2000 })
+  return true
+}
+
+// Type `text` into the pane's input and submit it with Enter, pausing the watcher
+// so the resulting change isn't mistaken for a new prompt/event.
+async function injectText(paneId: string, watcher: PaneWatcher, text: string): Promise<boolean> {
+  return watcher.withInjection(async () => {
+    const ok = await sendKeysLiteral(paneId, text)
+    if (!ok) return false
+    await sendKeys(paneId, ['Enter'])
+    await waitForSettle(paneId, 300, 5000)
+    return true
+  })
+}
+
 function hashText(s: string): string {
   return createHash('md5').update(s).digest('hex')
 }
@@ -513,6 +534,13 @@ let lastRelayedPromptHash = ''
 type PendingMultiSelect = { paneId: string; options: PromptOption[]; selected: Set<number> }
 const pendingMultiSelect = new Map<string, PendingMultiSelect>()
 
+// Auth/login URLs surfaced from the pane (e.g. /login's OAuth link), so the user
+// can open them in a browser and reply with the code. `lastRelayedAuthUrl` dedups
+// the same link across watcher ticks; `authUrlMessageIds` (`${chatId}:${msgId}`)
+// marks the relayed messages so a Telegram reply to one is injected into the pane.
+let lastRelayedAuthUrl = ''
+const authUrlMessageIds = new Set<string>()
+
 function shimWrite(msg: DaemonToShim): void {
   if (activeShim) activeShim.write(msg)
 }
@@ -555,12 +583,28 @@ function replayBuffer(write: (msg: DaemonToShim) => void): void {
 
 // ---- Pane event dispatch ----
 
+// A sign-in URL surfaced by /login (OAuth authorize link). Scoped to oauth/
+// authorize URLs so ordinary links in Claude's replies aren't re-relayed here —
+// those already arrive through the MCP reply tool.
+const AUTH_URL_RE = /https?:\/\/[^\s│"')]*(?:oauth|authorize)[^\s│"')]*/i
+
 function onPaneEvent(text: string): void {
   // Opportunistically update the known ring from passive observation.
   updateKnownRing(detectCurrentMode(text))
 
   // Keep the Telegram "typing…" indicator alive while Claude is working.
   typingPresence.update(detectWorking(text))
+
+  // Surface a /login sign-in link if one appears (independent of prompt detection,
+  // since the URL is printed as plain output, not a multiple-choice menu).
+  const authUrl = stripAnsi(text).match(AUTH_URL_RE)?.[0]
+  if (authUrl) {
+    const h = hashText(authUrl)
+    if (h !== lastRelayedAuthUrl) {
+      lastRelayedAuthUrl = h
+      void relayAuthUrlToTelegram(authUrl)
+    }
+  }
 
   const prompt = detectUserPrompt(text)
   if (!prompt) return
@@ -623,6 +667,33 @@ async function relayPromptToTelegram(prompt: PromptInfo): Promise<void> {
       }
     } catch (e) {
       process.stderr.write(`daemon: prompt relay to ${chat_id} failed: ${e}\n`)
+    }
+  }
+}
+
+// Relay a sign-in link to allowed chats and remember the message ids, so a reply
+// to one is routed into the pane (see the message:text handler).
+async function relayAuthUrlToTelegram(url: string): Promise<void> {
+  const access = loadAccess()
+  const targets = access.allowFrom
+  if (targets.length === 0) return
+
+  const safe = escapeHtml(url)
+  const text =
+    `🔑 <b>Sign-in link from Claude Code</b>\n\n` +
+    `<a href="${safe}">${safe}</a>\n\n` +
+    `Open it in your browser, then <b>reply to this message</b> with the code — ` +
+    `or send <code>/key &lt;code&gt;</code>.`
+
+  for (const chat_id of targets) {
+    try {
+      const sent = await bot.api.sendMessage(chat_id, text, {
+        parse_mode: 'HTML',
+        link_preview_options: { is_disabled: true },
+      })
+      authUrlMessageIds.add(`${chat_id}:${sent.message_id}`)
+    } catch (e) {
+      process.stderr.write(`daemon: auth-url relay to ${chat_id} failed: ${e}\n`)
     }
   }
 }
@@ -950,7 +1021,8 @@ bot.command('help', async ctx => {
     `/start — pairing instructions\n/status — check your pairing state\n` +
     `/mode — interactive mode switcher\n` +
     `/plan, /auto, /default, /acceptedits, /bypass — quick mode switch\n` +
-    `/stop — interrupt the current task (Esc)\n\n` +
+    `/stop — interrupt the current task (Esc)\n` +
+    `/key <text> — type text into the session (e.g. a /login code)\n\n` +
     `Any other /slash commands are relayed directly to Claude Code.`
   )
 })
@@ -993,6 +1065,23 @@ bot.command('bypass', ctx => handleModeCommand(ctx, 'bypassPermissions'))
 // Hidden alias: /yolo is the community nickname for bypass mode. Handled here for
 // muscle memory but deliberately kept out of the setMyCommands menu below.
 bot.command('yolo', ctx => handleModeCommand(ctx, 'bypassPermissions'))
+
+// Type literal text into the session and press Enter — for free-text TUI prompts
+// the button relay can't represent (e.g. pasting a /login code, a filename, etc.).
+bot.command('key', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  if (!activePaneId || !paneWatcher) {
+    await ctx.reply('No active Claude Code session with tmux.')
+    return
+  }
+  const text = (ctx.match ?? '').toString()
+  if (!text.trim()) {
+    await ctx.reply('Usage: /key <text> — types the text into the session, then Enter.')
+    return
+  }
+  const ok = await injectText(activePaneId, paneWatcher, text)
+  await ctx.reply(ok ? '✅ Sent to the session.' : 'Could not reach the session pane.')
+})
 
 // Interrupt the current turn by sending Esc to the pane (same as pressing Esc
 // in the TUI). withInjection pauses the watcher and re-baselines afterward so
@@ -1237,6 +1326,20 @@ async function handleInbound(
 
 bot.on('message:text', async ctx => {
   const text = ctx.message.text
+
+  // Reply to a relayed sign-in link → inject the code into the pane (the login
+  // input field), not the agent's inbound queue.
+  const replyTo = ctx.message.reply_to_message
+  if (replyTo && authUrlMessageIds.has(`${ctx.chat?.id}:${replyTo.message_id}`)) {
+    if (!dmCommandGate(ctx)) return
+    if (!activePaneId || !paneWatcher) {
+      await ctx.reply('No active Claude Code session with tmux.')
+      return
+    }
+    const ok = await injectText(activePaneId, paneWatcher, text)
+    await ctx.reply(ok ? '✅ Pasted into the session.' : 'Could not reach the session pane.')
+    return
+  }
 
   // Relay unhandled slash commands to CC via tmux (after gate check)
   if (text.startsWith('/') && ctx.chat?.type === 'private') {
@@ -1499,6 +1602,7 @@ void (async () => {
               { command: 'acceptedits', description: 'Switch to accept-edits mode' },
               { command: 'bypass', description: 'Switch to bypass-permissions mode' },
               { command: 'stop', description: 'Interrupt the current task (Esc)' },
+              { command: 'key', description: 'Type text into the session (e.g. a /login code)' },
             ],
             { scope: { type: 'all_private_chats' } },
           ).catch(() => {})
