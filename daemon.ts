@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { Bot, GrammyError, InlineKeyboard, InputFile, type Context } from 'grammy'
+import { Bot, GrammyError, InlineKeyboard, Keyboard, InputFile, type Context } from 'grammy'
 import type { ReactionTypeEmoji } from 'grammy/types'
 import { randomBytes, createHash } from 'node:crypto'
 import {
@@ -471,6 +471,36 @@ async function readCurrentModel(paneId: string, watcher: PaneWatcher): Promise<s
     await sendKeys(paneId, ['Escape'])
     await waitForSettle(paneId, 200, 3000)
     return parseCurrentModel(text)
+  })
+}
+
+// Pull the most recent block of command output from a pane capture: the last
+// contiguous run of non-empty content lines sitting above the input box / footer.
+// Best-effort — used to relay read-only readouts (/cost, /context) back to
+// Telegram without the surrounding TUI chrome. Returns '' → null.
+function extractRecentBlock(paneText: string): string | null {
+  const lines = paneText.split('\n').map(l => stripAnsi(l).replace(/\s+$/, ''))
+  const isChrome = (l: string) =>
+    /^[─╭╮╰╯│\s]*$/.test(l) ||                                  // box border / blank
+    /^\s*[❯>]\s*$/.test(l) ||                                    // empty input cursor
+    /shift\+tab to cycle|esc to interrupt|to cycle\)/i.test(l)   // footer hint
+  let i = lines.length - 1
+  while (i >= 0 && (isChrome(lines[i]) || !lines[i].trim())) i--   // skip bottom chrome
+  if (i < 0) return null
+  const block: string[] = []
+  for (; i >= 0; i--) {
+    if (!lines[i].trim()) break                                   // blank gap ends the block
+    block.unshift(lines[i].replace(/^\s*│\s?/, '').replace(/\s*│\s*$/, ''))
+  }
+  return block.join('\n').trim() || null
+}
+
+// Inject a read-only slash command and return the block of output it renders.
+async function readSlashOutput(paneId: string, watcher: PaneWatcher, command: string): Promise<string | null> {
+  return watcher.withInjection(async () => {
+    if (!(await sendKeys(paneId, [command, 'Enter']))) return null
+    await waitForSettle(paneId, 250, 6000)
+    return extractRecentBlock(await capturePane(paneId))
   })
 }
 
@@ -1056,20 +1086,91 @@ async function handleModeCommand(
 // /new and /clear both reset the conversation. Relay the command with no 👍 (the
 // confirmation below is the acknowledgement), then report the model the fresh
 // session is on.
+// Reset the conversation and return the confirmation text (with the active
+// model). Callers ensure activePaneId/paneWatcher are set.
+async function performReset(command: string): Promise<string> {
+  await injectSlash(activePaneId!, paneWatcher!, command)
+  const model = await readCurrentModel(activePaneId!, paneWatcher!)
+  return model
+    ? `🆕 New session started · model: <b>${escapeHtml(model)}</b>`
+    : '🆕 New session started.'
+}
+
 async function handleResetCommand(ctx: Context, command: string): Promise<void> {
   if (!dmCommandGate(ctx)) return
-  if (!activePaneId || !paneWatcher) {
-    await ctx.reply('No active Claude Code session with tmux.')
-    return
-  }
-  await injectSlash(activePaneId, paneWatcher, command)
+  if (!activePaneId || !paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
+  await ctx.reply(await performReset(command), { parse_mode: 'HTML' })
+}
+
+// Ask for confirmation before /new resets the session (the 🆕 New button is easy
+// to hit by accident); the reset runs on the Yes tap — see the newconfirm handler.
+async function confirmNewSession(ctx: Context): Promise<void> {
+  if (!dmCommandGate(ctx)) return
+  if (!activePaneId || !paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
+  const keyboard = new InlineKeyboard().text('✅ Yes', 'newconfirm:yes').text('❌ No', 'newconfirm:no')
+  await ctx.reply('🆕 Start a new session? This clears the current conversation.\n\nConfirm:', { reply_markup: keyboard })
+}
+
+// ---- Shared actions (used by both slash commands and the control bar) ----
+// Each gates and checks for an active pane itself, so it's safe to call from a
+// /command handler or from a control-bar button tap.
+
+async function doStop(ctx: Context): Promise<void> {
+  if (!dmCommandGate(ctx)) return
+  if (!activePaneId || !paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
+  const ok = await paneWatcher.withInjection(() => sendKeys(activePaneId!, ['Escape']))
+  await ctx.reply(ok ? '🛑 Sent interrupt (Esc) to Claude Code.' : 'Could not reach the session pane.')
+}
+
+// Cycle the permission mode one step and confirm the mode reached.
+async function doModeCycle(ctx: Context): Promise<void> {
+  if (!dmCommandGate(ctx)) return
+  if (!activePaneId || !paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
+  await paneWatcher.withInjection(async () => {
+    await sendKeys(activePaneId!, ['BTab'])
+    await waitForSettle(activePaneId!, 300, 5000)
+  })
+  const mode = detectCurrentMode(await capturePane(activePaneId))
+  await ctx.reply(`✅ Mode switched to ${modeLabel(mode)}`)
+}
+
+// Report the active model (the /model no-arg behavior).
+async function doShowModel(ctx: Context): Promise<void> {
+  if (!dmCommandGate(ctx)) return
+  if (!activePaneId || !paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
   const model = await readCurrentModel(activePaneId, paneWatcher)
   await ctx.reply(
     model
-      ? `🆕 New session started · model: <b>${escapeHtml(model)}</b>`
-      : '🆕 New session started.',
+      ? `🧠 Current model: <b>${escapeHtml(model)}</b>`
+      : 'Could not determine the current model. Use /model &lt;name&gt; to switch.',
     { parse_mode: 'HTML' },
   )
+}
+
+// Run /cost and relay the readout it prints.
+async function doCost(ctx: Context): Promise<void> {
+  if (!dmCommandGate(ctx)) return
+  if (!activePaneId || !paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
+  const out = await readSlashOutput(activePaneId, paneWatcher, '/cost')
+  await ctx.reply(
+    out ? `📊 <b>Cost</b>\n<pre>${escapeHtml(out)}</pre>` : 'Could not read /cost output.',
+    { parse_mode: 'HTML' },
+  )
+}
+
+// ---- Control bar (docked quick-action keyboard) ----
+// Buttons send their label as a normal message; the message:text handler matches
+// these exact labels and routes each to the action above before any other handling.
+const BTN_MODE = '🔄 Mode'
+const BTN_MODEL = '🧠 Model'
+const BTN_COST = '📊 Cost'
+const BTN_STOP = '🛑 Stop'
+const BTN_NEW = '🆕 New'
+
+function controlKeyboard(): Keyboard {
+  return new Keyboard()
+    .text(BTN_MODE).text(BTN_MODEL).text(BTN_COST).text(BTN_STOP).text(BTN_NEW)
+    .resized().persistent()
 }
 
 // ---- Telegram bot handlers ----
@@ -1167,32 +1268,32 @@ bot.command('model', async ctx => {
     void relaySlashCommand(activePaneId, paneWatcher, `/model ${arg}`, chat_id, ctx.message!.message_id)
     return
   }
-  const model = await readCurrentModel(activePaneId, paneWatcher)
-  await ctx.reply(
-    model
-      ? `🧠 Current model: <b>${escapeHtml(model)}</b>`
-      : 'Could not determine the current model. Use /model &lt;name&gt; to switch.',
-    { parse_mode: 'HTML' },
-  )
+  await doShowModel(ctx)
 })
 
-// /new and /clear reset the session; both confirm with "🆕 New session started"
-// plus the active model instead of a 👍 (handled in handleResetCommand).
-bot.command('new', ctx => handleResetCommand(ctx, '/new'))
+// /new asks to confirm first (it clears the conversation); /clear is immediate.
+// Both confirm with "🆕 New session started" plus the active model, not a 👍.
+bot.command('new', confirmNewSession)
 bot.command('clear', ctx => handleResetCommand(ctx, '/clear'))
+
+// /menu shows the docked control bar; /menu off hides it.
+bot.command('menu', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  const arg = (ctx.match ?? '').toString().trim().toLowerCase()
+  if (arg === 'off' || arg === 'hide') {
+    await ctx.reply('Control bar hidden — /menu to show it again.', { reply_markup: { remove_keyboard: true } })
+    return
+  }
+  await ctx.reply('🎛 Control bar ready.', { reply_markup: controlKeyboard() })
+})
+
+// /cost relays the session's cost readout.
+bot.command('cost', doCost)
 
 // Interrupt the current turn by sending Esc to the pane (same as pressing Esc
 // in the TUI). withInjection pauses the watcher and re-baselines afterward so
 // the resulting pane change isn't mistaken for a new prompt/event.
-bot.command('stop', async ctx => {
-  if (!dmCommandGate(ctx)) return
-  if (!activePaneId || !paneWatcher) {
-    await ctx.reply('No active Claude Code session with tmux.')
-    return
-  }
-  const ok = await paneWatcher.withInjection(() => sendKeys(activePaneId!, ['Escape']))
-  await ctx.reply(ok ? '🛑 Sent interrupt (Esc) to Claude Code.' : 'Could not reach the session pane.')
-})
+bot.command('stop', doStop)
 
 // Inline-button handler for permission requests + mode cycling + prompt answers.
 bot.on('callback_query:data', async ctx => {
@@ -1219,6 +1320,29 @@ bot.on('callback_query:data', async ctx => {
     const newMode = detectCurrentMode(newModeText)
     const keyboard = new InlineKeyboard().text(modeLabel(newMode), 'mode:cycle')
     await ctx.editMessageText('Choose mode:', { reply_markup: keyboard }).catch(() => {})
+    return
+  }
+
+  // New-session confirmation (Yes/No under the "Start a new session?" prompt)
+  const newMatch = /^newconfirm:(yes|no)$/.exec(data)
+  if (newMatch) {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    if (newMatch[1] === 'no') {
+      await ctx.answerCallbackQuery({ text: 'Cancelled' }).catch(() => {})
+      await ctx.editMessageText('🆕 New session — cancelled.').catch(() => {})
+      return
+    }
+    if (!activePaneId || !paneWatcher) {
+      await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {})
+      return
+    }
+    await ctx.answerCallbackQuery({ text: 'Starting…' }).catch(() => {})
+    await ctx.editMessageText('🆕 Starting a new session…').catch(() => {})
+    const result = await performReset('/new')
+    await ctx.editMessageText(result, { parse_mode: 'HTML' }).catch(() => {})
     return
   }
 
@@ -1424,6 +1548,16 @@ async function handleInbound(
 
 bot.on('message:text', async ctx => {
   const text = ctx.message.text
+
+  // Control-bar taps arrive as a normal message carrying the button label.
+  // Route exact matches to their action before any other handling.
+  switch (text) {
+    case BTN_MODE:  await doModeCycle(ctx); return
+    case BTN_MODEL: await doShowModel(ctx); return
+    case BTN_COST:  await doCost(ctx); return
+    case BTN_STOP:  await doStop(ctx); return
+    case BTN_NEW:   await confirmNewSession(ctx); return
+  }
 
   // Reply to a relayed sign-in link → inject the code into the pane (the login
   // input field), not the agent's inbound queue.
@@ -1702,6 +1836,9 @@ void (async () => {
               { command: 'stop', description: 'Interrupt the current task (Esc)' },
               { command: 'reply', description: 'Type a response into the session (e.g. a /login code)' },
               { command: 'model', description: 'Show the current model (or /model <name> to switch)' },
+              { command: 'menu', description: 'Show the docked control bar (/menu off to hide)' },
+              { command: 'cost', description: 'Show the session cost readout' },
+              { command: 'new', description: 'Start a new session (shows the model)' },
             ],
             { scope: { type: 'all_private_chats' } },
           ).catch(() => {})
