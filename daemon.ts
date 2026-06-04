@@ -413,6 +413,18 @@ async function injectText(paneId: string, watcher: PaneWatcher, text: string): P
   })
 }
 
+// Move the option cursor down `n` rows, one press at a time. Sending the Downs as
+// a single batch makes this TUI coalesce/drop them (the cursor doesn't move), so we
+// space them out and let it settle before the caller's follow-up key.
+async function navigateDown(paneId: string, n: number): Promise<void> {
+  if (n <= 0) return
+  for (let i = 0; i < n; i++) {
+    await sendKeys(paneId, ['Down'])
+    await sleep(140)
+  }
+  await waitForSettle(paneId, 150, 2000)
+}
+
 function hashText(s: string): string {
   return createHash('md5').update(s).digest('hex')
 }
@@ -1847,7 +1859,8 @@ bot.on('callback_query:data', async ctx => {
     const num = Number(mqMatch[1])
     await ctx.answerCallbackQuery({ text: `Selected ${num}` }).catch(() => {})
     await paneWatcher.withInjection(async () => {
-      await sendKeys(activePaneId!, [...Array(num - 1).fill('Down'), 'Enter'])
+      await navigateDown(activePaneId!, num - 1)
+      await sendKeys(activePaneId!, ['Enter'])
       await waitForSettle(activePaneId!, 300, 5000)
     })
     await ctx.editMessageReplyMarkup().catch(() => {})
@@ -1897,7 +1910,8 @@ bot.on('callback_query:data', async ctx => {
     }
     await ctx.answerCallbackQuery({ text: 'Dismissing — go ahead and type.' }).catch(() => {})
     await paneWatcher.withInjection(async () => {
-      await sendKeys(activePaneId!, [...Array(cp.downCount).fill('Down'), 'Enter'])
+      await navigateDown(activePaneId!, cp.downCount)
+      await sendKeys(activePaneId!, ['Enter'])
       await waitForSettle(activePaneId!, 300, 5000)
     })
     lastRelayedPromptHash = ''
@@ -2104,10 +2118,7 @@ bot.on('message:text', async ctx => {
       // typed — otherwise the field isn't focused and the answer resolves empty
       // (to "__other__"). Settle again after typing so Enter commits the full text.
       await paneWatcher.withInjection(async () => {
-        if (ft.downCount > 0) {
-          await sendKeys(activePaneId!, Array(ft.downCount).fill('Down'))
-          await waitForSettle(activePaneId!, 150, 2000)
-        }
+        await navigateDown(activePaneId!, ft.downCount)
         await sendKeysLiteral(activePaneId!, text)
         await waitForSettle(activePaneId!, 150, 2000)
         await sendKeys(activePaneId!, ['Enter'])
