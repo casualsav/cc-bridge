@@ -719,31 +719,72 @@ const AUTH_URL_RE = /https?:\/\/[^\s│"')]*(?:oauth|authorize)[^\s│"')]*/i
 
 const DEBUG_PANE = (process.env.TELEGRAM_DEBUG_PANE ?? '') === '1'
 
-// Best-effort auto-capture of the usage-limit screen for later analysis. The
-// current screen is a one-line status, e.g. "You've hit your session limit •
-// resets 10:20am (UTC)" (it used to be a numbered Wait/Upgrade picker). We anchor
-// on the whole distinctive shape — "hit your <x> limit … resets … (UTC)" on one
-// line — rather than a bare "limit" mention, so ordinary prose doesn't trip it.
-// Saves the frame (deduped) to a capped log file for building the relay + auto-
-// /resetin against a real in-situ capture.
+// Detect Claude Code's usage-limit screen and act on it. The current screen is a
+// one-line status just above the input box — "You've hit your session limit •
+// resets 10:20am (UTC)" — paired with a "/upgrade to increase your usage limit."
+// line (it used to be a numbered Wait/Upgrade picker). When we see it we log it,
+// relay it to Telegram (Claude can't, being rate-limited), and auto-schedule the
+// reset reminder from the embedded time so the user needn't run /resetin by hand.
+//
+// False-positive guards — this very chat can contain the trigger text, so:
+//  - bottom-anchored: only the live status zone (last ~12 non-blank lines) counts,
+//    so scrolled-up transcript quotes don't trip it;
+//  - both the limit line AND the "/upgrade…" line must be present;
+//  - a same-reset-time lockout (~12h): genuine limit windows are ~5h, so the same
+//    reset clock-time can't legitimately recur that fast — this kills re-fires from
+//    repaints, daemon restarts, or a stray quote that does reach the live zone.
 const USAGE_LIMIT_RE = /hit your [\w-]+ limit\b.{0,12}resets\b.{0,40}\(utc\)/i
+const UPGRADE_LINE_RE = /\/upgrade to increase your usage limit/i
+const RESET_TIME_RE = /\bresets\s+(\d{1,2}):(\d{2})\s*([ap])m\s*\(utc\)/i
 const USAGE_CAPTURE_FILE = join(STATE_DIR, 'usage-limit-capture.log')
-let lastUsageCaptureHash = ''
-function maybeCaptureUsageLimit(text: string): void {
-  const clean = stripAnsi(text)
-  if (!USAGE_LIMIT_RE.test(clean)) return
-  const h = hashText(clean)
-  if (h === lastUsageCaptureHash) return
-  lastUsageCaptureHash = h
+const RESET_RELOCK_MS = (11 * 60 + 59) * 60_000
+let lastActedResetKey = ''
+let lastActedResetAt = 0
+
+// The next future UTC instant matching "resets HH:MMam (UTC)" (ms), or null.
+function parseResetTime(line: string): number | null {
+  const m = line.match(RESET_TIME_RE)
+  if (!m) return null
+  let hour = parseInt(m[1], 10) % 12
+  if (m[3].toLowerCase() === 'p') hour += 12
+  const fire = new Date()
+  fire.setUTCHours(hour, parseInt(m[2], 10), 0, 0)
+  if (fire.getTime() <= Date.now()) fire.setUTCDate(fire.getUTCDate() + 1)
+  return fire.getTime()
+}
+
+function handleUsageLimit(text: string): void {
+  const tail = stripAnsi(text).split('\n').map(l => l.trim()).filter(Boolean).slice(-12)
+  const limitLine = tail.find(l => USAGE_LIMIT_RE.test(l))
+  if (!limitLine || !tail.some(l => UPGRADE_LINE_RE.test(l))) return
+
+  const tm = limitLine.match(RESET_TIME_RE)
+  const key = tm ? `${tm[1]}:${tm[2]}${tm[3].toLowerCase()}` : limitLine
+  const now = Date.now()
+  if (key === lastActedResetKey && now - lastActedResetAt < RESET_RELOCK_MS) return
+  lastActedResetKey = key
+  lastActedResetAt = now
+
   try {
     let prev = ''
     try { if (statSync(USAGE_CAPTURE_FILE).size < 256 * 1024) prev = readFileSync(USAGE_CAPTURE_FILE, 'utf8') } catch {}
-    writeFileSync(USAGE_CAPTURE_FILE, `${prev}\n===== ${new Date().toISOString()} =====\n${clean}\n`, { mode: 0o600 })
+    writeFileSync(USAGE_CAPTURE_FILE, `${prev}\n===== ${new Date().toISOString()} =====\n${stripAnsi(text)}\n`, { mode: 0o600 })
   } catch {}
+
+  const chats = loadAccess().allowFrom
+  if (chats.length === 0) return
+  const fireAt = parseResetTime(limitLine)
+  const note = fireAt
+    ? `\n\n⏰ I'll ping you when it resets${loadAccess().autoContinue !== false ? ' and auto-continue' : ''}.`
+    : ''
+  for (const chat_id of chats) {
+    void bot.api.sendMessage(chat_id, `⛔ <b>Claude hit the usage limit.</b>\n${escapeHtml(limitLine)}${note}`, { parse_mode: 'HTML' }).catch(() => {})
+  }
+  if (fireAt) scheduleReset(fireAt, chats)
 }
 
 function onPaneEvent(text: string): void {
-  maybeCaptureUsageLimit(text)
+  handleUsageLimit(text)
   // Diagnostic: when TELEGRAM_DEBUG_PANE=1, append each pane frame + the prompt
   // detection result to /tmp/tg-pane-debug.log, so a missed prompt can be traced
   // against the exact rendering. Off by default; no effect on normal operation.
