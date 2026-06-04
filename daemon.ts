@@ -1411,6 +1411,42 @@ bot.command('alerts', async ctx => {
   await ctx.reply(`🔔 Idle alerts are ${on ? 'ON' : 'OFF'}. Use /alerts on or /alerts off to change.`)
 })
 
+// Trim a captured pane tail down to its content: strip ANSI, drop the trailing
+// input-box / footer chrome and surrounding blanks, and keep the last `maxLines`.
+function cleanPaneTail(raw: string, maxLines: number): string {
+  let lines = raw.split('\n').map(l => stripAnsi(l).replace(/\s+$/, ''))
+  const isChrome = (l: string) =>
+    !l.trim() ||
+    /^[─╭╮╰╯│\s]*$/.test(l) ||                                                  // borders / blank
+    /^\s*[❯>]\s*$/.test(l) ||                                                    // empty input cursor
+    /shift\+tab to cycle|esc to interrupt|to manage|auto-update failed/i.test(l) // footer chrome
+  while (lines.length && isChrome(lines[lines.length - 1])) lines.pop()
+  while (lines.length && !lines[0].trim()) lines.shift()
+  if (lines.length > maxLines) lines = lines.slice(-maxLines)
+  return lines.join('\n')
+}
+
+// /tail [N] — dump the last N lines of the terminal (default 40, capped) so you can
+// catch up on recent session activity. Read-only: just captures the pane scrollback.
+bot.command('tail', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  if (!activePaneId) { await ctx.reply('No active Claude Code session with tmux.'); return }
+  const arg = parseInt((ctx.match ?? '').toString().trim(), 10)
+  const n = Number.isFinite(arg) ? Math.max(5, Math.min(arg, 200)) : 40
+  let raw: string
+  try {
+    raw = (await exec('tmux', ['capture-pane', '-p', '-t', activePaneId, '-S', `-${n + 20}`, '-J'], { timeout: 3000 })).stdout
+  } catch {
+    await ctx.reply('Could not read the session pane.')
+    return
+  }
+  const body = cleanPaneTail(raw, n)
+  if (!body) { await ctx.reply('Nothing recent to show.'); return }
+  const limit = Math.max(1, Math.min(loadAccess().textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT))
+  const chunks = chunkHtml(`📜 <b>Recent terminal (${body.split('\n').length} lines)</b>\n<pre>${escapeHtml(body)}</pre>`, limit)
+  for (const c of chunks) await bot.api.sendMessage(String(ctx.chat!.id), c, { parse_mode: 'HTML' }).catch(() => {})
+})
+
 // Interrupt the current turn by sending Esc to the pane (same as pressing Esc
 // in the TUI). withInjection pauses the watcher and re-baselines afterward so
 // the resulting pane change isn't mistaken for a new prompt/event.
@@ -1953,6 +1989,7 @@ void (async () => {
               { command: 'context', description: 'Show the token-context usage' },
               { command: 'session', description: 'Show cwd, branch, mode, and model' },
               { command: 'alerts', description: 'Toggle the "Claude finished" ping (/alerts on|off)' },
+              { command: 'tail', description: 'Show recent terminal activity (/tail [N] lines)' },
               { command: 'new', description: 'Start a new session (shows the model)' },
             ],
             { scope: { type: 'all_private_chats' } },
