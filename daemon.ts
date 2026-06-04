@@ -264,7 +264,6 @@ if (!STATIC) setInterval(checkApprovals, 5000).unref()
 
 const bot = new Bot(TOKEN)
 let botUsername = ''
-const pendingPermissions = new Map<string, { tool_name: string; description: string; input_preview: string }>()
 
 // ---- Typing presence ----
 // Telegram's "typing…" chat action auto-expires after ~5s. To signal that
@@ -714,6 +713,22 @@ function renderPromptHtml(prompt: PromptInfo): string {
     if (opt.description) lines.push(`<blockquote>${escapeHtml(opt.description)}</blockquote>`)
   })
   return lines.join('\n')
+}
+
+// Permission request as a self-contained message: the tool name as the heading,
+// then its description and (pretty-printed, length-capped) input, then "Approve?".
+// All the context is inline so there's no separate "see more" step.
+function formatPermission(tool_name: string, description: string, input_preview: string): string {
+  let pretty: string
+  try { pretty = JSON.stringify(JSON.parse(input_preview), null, 2) } catch { pretty = input_preview }
+  const parts = [`🔐 <b>${escapeHtml(tool_name)}</b>`, '']
+  if (description.trim()) parts.push(escapeHtml(description), '')
+  if (pretty.trim()) {
+    const capped = pretty.length > 1500 ? pretty.slice(0, 1500) + '\n…(truncated)' : pretty
+    parts.push(`<pre>${escapeHtml(capped)}</pre>`, '')
+  }
+  parts.push('<b>Approve?</b>')
+  return parts.join('\n')
 }
 
 // Toggle keyboard for a multi-select prompt: a checkbox button per option (3 per
@@ -1482,7 +1497,7 @@ bot.on('callback_query:data', async ctx => {
   }
 
   // Permission buttons
-  const permMatch = /^perm:(allow|deny|more):([a-km-z]{5})$/.exec(data)
+  const permMatch = /^perm:(allow|deny|guide):([a-km-z]{5})$/.exec(data)
   if (!permMatch) {
     await ctx.answerCallbackQuery().catch(() => {})
     return
@@ -1495,28 +1510,19 @@ bot.on('callback_query:data', async ctx => {
   }
   const [, behavior, request_id] = permMatch
 
-  if (behavior === 'more') {
-    const details = pendingPermissions.get(request_id)
-    if (!details) {
-      await ctx.answerCallbackQuery({ text: 'Details no longer available.' }).catch(() => {})
-      return
-    }
-    const { tool_name, description, input_preview } = details
-    let prettyInput: string
-    try { prettyInput = JSON.stringify(JSON.parse(input_preview), null, 2) } catch { prettyInput = input_preview }
-    const expanded =
-      `🔐 Permission: ${tool_name}\n\ntool_name: ${tool_name}\ndescription: ${description}\ninput_preview:\n${prettyInput}`
-    const keyboard = new InlineKeyboard()
-      .text('✅ Allow', `perm:allow:${request_id}`)
-      .text('❌ Deny', `perm:deny:${request_id}`)
-    await ctx.editMessageText(expanded, { reply_markup: keyboard }).catch(() => {})
-    await ctx.answerCallbackQuery().catch(() => {})
+  // Deny, then invite the user to redirect Claude — their next message reaches it
+  // as normal (the MCP permission protocol carries only allow/deny, no message).
+  if (behavior === 'guide') {
+    shimWrite({ t: 'permission', params: { request_id, behavior: 'deny' } })
+    await ctx.answerCallbackQuery({ text: 'Denied — send your guidance' }).catch(() => {})
+    const m = ctx.callbackQuery.message
+    const base = m && 'text' in m && m.text ? m.text : '🔐 Permission'
+    await ctx.editMessageText(`${base}\n\n❌ Denied — reply with what Claude should do instead.`).catch(() => {})
     return
   }
 
   // Send permission result back to active shim (which forwards to Claude).
   shimWrite({ t: 'permission', params: { request_id, behavior: behavior as 'allow' | 'deny' } })
-  pendingPermissions.delete(request_id)
   const label = behavior === 'allow' ? '✅ Allowed' : '❌ Denied'
   await ctx.answerCallbackQuery({ text: label }).catch(() => {})
   const msg = ctx.callbackQuery.message
@@ -1761,15 +1767,15 @@ function handleShimConnection(socket: net.Socket): void {
         }
         case 'permission_request': {
           const { request_id, tool_name, description, input_preview } = msg.params
-          pendingPermissions.set(request_id, { tool_name, description, input_preview })
           const access = loadAccess()
-          const permText = `🔐 Permission: ${tool_name}`
+          const permText = formatPermission(tool_name, description, input_preview)
           const keyboard = new InlineKeyboard()
-            .text('See more', `perm:more:${request_id}`)
             .text('✅ Allow', `perm:allow:${request_id}`)
             .text('❌ Deny', `perm:deny:${request_id}`)
+            .row()
+            .text('💬 Deny & guide', `perm:guide:${request_id}`)
           for (const chat_id of access.allowFrom) {
-            void bot.api.sendMessage(chat_id, permText, { reply_markup: keyboard }).catch(e => {
+            void bot.api.sendMessage(chat_id, permText, { parse_mode: 'HTML', reply_markup: keyboard }).catch(e => {
               process.stderr.write(`daemon: permission_request to ${chat_id} failed: ${e}\n`)
             })
           }
