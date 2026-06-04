@@ -300,13 +300,14 @@ function maybeNotifyIdle(chats: string[]): void {
 
 class TypingPresence {
   private targets = new Map<string, number>()   // chat_id -> expiry ms
-  private working = false
+  private lastWorkingAt = 0
   private sawWorking = false
   private optimisticUntil = 0
   private timer: ReturnType<typeof setInterval> | null = null
   private static readonly CAP_MS = 15 * 60_000
   private static readonly TICK_MS = 4_000
   private static readonly OPTIMISTIC_MS = 8_000
+  private static readonly GRACE_MS = 10_000   // keep typing through idle gaps between steps
 
   private ping(chat_id: string): void {
     void bot.api.sendChatAction(chat_id, 'typing').catch(() => {})
@@ -321,39 +322,41 @@ class TypingPresence {
     this.targets.set(chat_id, Date.now() + TypingPresence.CAP_MS)
     this.optimisticUntil = Date.now() + TypingPresence.OPTIMISTIC_MS
     this.sawWorking = false
+    this.lastWorkingAt = 0
     if (!this.timer) this.timer = setInterval(() => this.tick(), TypingPresence.TICK_MS)
   }
 
-  // Fresh working state from each pane change.
+  // Fresh working state from each pane change. Record only the latest time work was
+  // seen; a single idle frame no longer ends the turn — the tick decides that from
+  // sustained idle — so the indicator survives brief gaps between steps (e.g. a
+  // withInjection pause while reading the model, or the lull between tool calls).
   update(working: boolean): void {
-    this.working = working
-    if (working) this.sawWorking = true
-    else if (this.sawWorking) {                  // worked, now idle → turn done
-      const chats = [...this.targets.keys()]
-      this.clearAll()
-      maybeNotifyIdle(chats)
-    }
-  }
-
-  private active(): boolean {
-    return this.working || Date.now() < this.optimisticUntil
+    if (working) { this.sawWorking = true; this.lastWorkingAt = Date.now() }
   }
 
   private tick(): void {
     const now = Date.now()
     for (const [chat, exp] of this.targets) if (exp < now) this.targets.delete(chat)
     if (this.targets.size === 0) { this.stop(); return }
-    if (this.active()) {
+
+    // Keep typing during the optimistic startup window, or while work was seen within
+    // the grace period — this bridges pauses between tool calls / pane updates.
+    const recentlyWorked = this.sawWorking && now - this.lastWorkingAt < TypingPresence.GRACE_MS
+    if (now < this.optimisticUntil || recentlyWorked) {
       for (const chat of this.targets.keys()) this.ping(chat)
-    } else if (!this.sawWorking) {
-      this.clearAll()   // optimistic window elapsed, no work ever seen → give up
+      return
     }
+    // Idle past the grace → the turn is over: stop, and notify if work was seen.
+    const chats = [...this.targets.keys()]
+    const finished = this.sawWorking
+    this.clearAll()
+    if (finished) maybeNotifyIdle(chats)
   }
 
   private clearAll(): void {
     this.targets.clear()
     this.sawWorking = false
-    this.working = false
+    this.lastWorkingAt = 0
     this.stop()
   }
 
