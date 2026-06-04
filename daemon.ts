@@ -64,6 +64,7 @@ type Access = {
   textChunkLimit?: number
   chunkMode?: 'length' | 'newline'
   renderMarkdown?: boolean
+  notifyIdle?: boolean
 }
 
 function defaultAccess(): Access {
@@ -88,6 +89,7 @@ function readAccessFile(): Access {
       textChunkLimit: parsed.textChunkLimit,
       chunkMode: parsed.chunkMode,
       renderMarkdown: parsed.renderMarkdown,
+      notifyIdle: parsed.notifyIdle,
     }
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return defaultAccess()
@@ -275,6 +277,27 @@ let botUsername = ''
 // almost always kicks off work), then defers to observed pane state. So even if
 // detectWorking misses a spinner variant, the indicator fades on its own rather
 // than sticking — at worst a few seconds of typing, never a stuck one.
+// Set when a reply tool call goes out during a turn; reset when a new inbound is
+// relayed. Lets the idle alert skip turns where Claude already messaged the user.
+let repliedSinceArm = false
+
+// On a Telegram-initiated turn finishing (work seen, then idle) without a reply,
+// ping the originating chats so the user knows Claude is done. Re-checks after a
+// short delay to avoid firing on a one-frame spinner gap. Gated by notifyIdle
+// (default on).
+function maybeNotifyIdle(chats: string[]): void {
+  if (chats.length === 0 || repliedSinceArm) return
+  if (loadAccess().notifyIdle === false) return
+  const paneId = activePaneId
+  setTimeout(async () => {
+    try { if (paneId && detectWorking(await capturePane(paneId))) return } catch { return }
+    if (repliedSinceArm) return
+    for (const chat_id of chats) {
+      void bot.api.sendMessage(chat_id, '✅ Claude finished').catch(() => {})
+    }
+  }, 1500)
+}
+
 class TypingPresence {
   private targets = new Map<string, number>()   // chat_id -> expiry ms
   private working = false
@@ -292,6 +315,7 @@ class TypingPresence {
   // An inbound message was relayed to Claude — begin showing presence.
   arm(chat_id: string): void {
     this.ping(chat_id)
+    repliedSinceArm = false
     // With no pane to observe we can't tell when work ends — just ping once.
     if (!paneWatcher) return
     this.targets.set(chat_id, Date.now() + TypingPresence.CAP_MS)
@@ -304,7 +328,11 @@ class TypingPresence {
   update(working: boolean): void {
     this.working = working
     if (working) this.sawWorking = true
-    else if (this.sawWorking) this.clearAll()   // worked, now idle → turn done
+    else if (this.sawWorking) {                  // worked, now idle → turn done
+      const chats = [...this.targets.keys()]
+      this.clearAll()
+      maybeNotifyIdle(chats)
+    }
   }
 
   private active(): boolean {
@@ -963,6 +991,7 @@ async function handleCall(
         const files = (args.files as string[] | undefined) ?? []
         const format = args.format as string | undefined
 
+        repliedSinceArm = true   // Claude messaged the user — suppress the idle alert
         assertAllowedChat(chat_id)
         for (const f of files) {
           assertSendable(f)
@@ -1365,6 +1394,25 @@ bot.command('menu', async ctx => {
 bot.command('cost', doCost)
 bot.command('context', doContext)
 bot.command('session', doSession)
+
+// /alerts on|off toggles the "Claude finished" idle ping (default on); bare
+// /alerts reports the current state.
+bot.command('alerts', async ctx => {
+  const gated = dmCommandGate(ctx)
+  if (!gated) return
+  const arg = (ctx.match ?? '').toString().trim().toLowerCase()
+  if (arg === 'on' || arg === 'off') {
+    gated.access.notifyIdle = arg === 'on'
+    saveAccess(gated.access)
+    const msgId = ctx.message?.message_id
+    if (msgId != null) {
+      void bot.api.setMessageReaction(String(ctx.chat!.id), msgId, [{ type: 'emoji', emoji: '👍' }]).catch(() => {})
+    }
+    return
+  }
+  const on = gated.access.notifyIdle !== false
+  await ctx.reply(`🔔 Idle alerts are ${on ? 'ON' : 'OFF'}. Use /alerts on or /alerts off to change.`)
+})
 
 // Interrupt the current turn by sending Esc to the pane (same as pressing Esc
 // in the TUI). withInjection pauses the watcher and re-baselines afterward so
@@ -1907,6 +1955,7 @@ void (async () => {
               { command: 'cost', description: 'Show the session cost readout' },
               { command: 'context', description: 'Show the token-context usage' },
               { command: 'session', description: 'Show cwd, branch, mode, and model' },
+              { command: 'alerts', description: 'Toggle the "Claude finished" ping (/alerts on|off)' },
               { command: 'new', description: 'Start a new session (shows the model)' },
             ],
             { scope: { type: 'all_private_chats' } },
