@@ -1157,12 +1157,6 @@ async function performReset(command: string): Promise<string> {
     : '🆕 New session started.'
 }
 
-async function handleResetCommand(ctx: Context, command: string): Promise<void> {
-  if (!dmCommandGate(ctx)) return
-  if (!activePaneId || !paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
-  await ctx.reply(await performReset(command), { parse_mode: 'HTML' })
-}
-
 // Ask for confirmation before /new resets the session (the 🆕 New button is easy
 // to hit by accident); the reset runs on the Yes tap — see the newconfirm handler.
 async function confirmNewSession(ctx: Context): Promise<void> {
@@ -1374,10 +1368,10 @@ bot.command('model', async ctx => {
   await doShowModel(ctx)
 })
 
-// /new asks to confirm first (it clears the conversation); /clear is immediate.
-// Both confirm with "🆕 New session started" plus the active model, not a 👍.
+// /new asks to confirm, then resets and reports the model. /clear is a hidden
+// alias for /new (kept for muscle memory; deliberately left out of the menu).
 bot.command('new', confirmNewSession)
-bot.command('clear', ctx => handleResetCommand(ctx, '/clear'))
+bot.command('clear', confirmNewSession)
 
 // /menu shows the docked control bar; /menu off hides it.
 bot.command('menu', async ctx => {
@@ -1957,7 +1951,6 @@ void (async () => {
               { command: 'session', description: 'Show cwd, branch, mode, and model' },
               { command: 'alerts', description: 'Toggle the "Claude finished" ping (/alerts on|off)' },
               { command: 'new', description: 'Start a new session (shows the model)' },
-              { command: 'clear', description: 'Clear the conversation (shows the model)' },
             ],
             { scope: { type: 'all_private_chats' } },
           ).catch(() => {})
