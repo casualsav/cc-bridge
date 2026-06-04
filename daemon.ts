@@ -438,39 +438,56 @@ function detectCurrentMode(paneText: string): CcMode {
   return 'default'
 }
 
-// Pull the active model out of a /model picker capture. Prefers an explicit
-// "current/active model" marker, then a "(current)" suffix, then the cursor-
-// highlighted row (the picker opens with the cursor on the model in use).
+// Pull the active model name out of a /model picker capture (see parseCurrentModel
+// for the row format). Guard against grabbing transcript prose instead of a model
+// name when the picker didn't render cleanly: real model names are short, word-like,
+// and free of sentence or arrow/glyph noise.
+function looksLikeModel(s: string): boolean {
+  if (!s || s.length > 40) return false
+  if (/[→←⏺●⎿│]/.test(s)) return false       // arrows / transcript glyphs
+  if (/[.!?]\s/.test(s)) return false          // sentence punctuation = prose
+  return s.split(/\s+/).length <= 6
+}
+
 function parseCurrentModel(pickerText: string): string | null {
-  const clean = (s: string) =>
-    s.replace(/^[│>\s]+/, '').replace(/[│\s]+$/, '')
-     .replace(/^\d+[.)]\s*/, '').replace(/^[✔✓☑●◉❯►▶]\s*/, '')
-     .replace(/\s*\((?:current|active|in use|recommended)\)\s*$/i, '').trim()
   const lines = pickerText.split('\n').map(l => stripAnsi(l))
-  for (const l of lines) {
-    const m = l.match(/(?:current|active)\s*model\s*[:\-]?\s*(.+)/i)
-    if (m) { const v = clean(m[1]); if (v) return v }
-    const c = l.match(/(.+?)\s*\((?:current|active|in use)\)/i)
-    if (c) { const v = clean(c[1]); if (v) return v }
-  }
-  for (const l of lines) {
-    const m = l.match(/^[\s│]*[❯►▶]\s*(.+)$/)
-    if (m) { const v = clean(m[1]); if (v) return v }
-  }
-  return null
+  // Each option renders as "[❯] N. <Label> [✔]   <Version> · <description>", with
+  // the active model marked by ✔ (the cursor ❯ also opens on it). Take that row and
+  // return the version — the first "·"-segment of the description column (the text
+  // after the run of 2+ spaces that separates label from description).
+  const isOption = (l: string) => /^\s*(?:[❯►▶]\s*)?\d+[.)]\s/.test(l)
+  const row =
+    lines.find(l => isOption(l) && /[❯►▶]/.test(l) && /[✔✓]/.test(l)) ??
+    lines.find(l => isOption(l) && /[✔✓]/.test(l)) ??
+    lines.find(l => /^\s*[❯►▶]\s*\d+[.)]\s/.test(l))
+  if (!row) return null
+  const rest = row.replace(/^\s*[❯►▶]?\s*\d+[.)]\s*/, '').trim()
+  const cols = rest.split(/\s{2,}/).map(s => s.trim()).filter(Boolean)
+  const desc = cols.length >= 2 ? cols[cols.length - 1] : (cols[0] ?? '')
+  const name = desc.split('·')[0].replace(/[✔✓]/g, '').trim()
+  return looksLikeModel(name) ? name : null
 }
 
 // Read the active model by briefly opening the /model picker, reading the marked
 // entry, then dismissing it with Esc. withInjection pauses the watcher (so the
 // picker is never relayed as buttons) and re-baselines it on exit.
+// Last successfully-read model, used as a fallback when a read comes back empty
+// (e.g. the picker didn't render cleanly because the session was mid-turn).
+let lastKnownModel: string | null = null
+
 async function readCurrentModel(paneId: string, watcher: PaneWatcher): Promise<string | null> {
   return watcher.withInjection(async () => {
-    if (!(await sendKeys(paneId, ['/model', 'Enter']))) return null
+    // Opening /model only works when Claude is idle — mid-turn it just queues the
+    // text. Skip the read while busy and fall back to the last known value.
+    if (detectWorking(await capturePane(paneId))) return lastKnownModel
+    if (!(await sendKeys(paneId, ['/model', 'Enter']))) return lastKnownModel
     await waitForSettle(paneId, 200, 4000)
     const text = await capturePane(paneId)
     await sendKeys(paneId, ['Escape'])
     await waitForSettle(paneId, 200, 3000)
-    return parseCurrentModel(text)
+    const parsed = parseCurrentModel(text)
+    if (parsed) lastKnownModel = parsed
+    return parsed ?? lastKnownModel
   })
 }
 
@@ -1158,6 +1175,48 @@ async function doCost(ctx: Context): Promise<void> {
   )
 }
 
+// Run /context and relay the token-usage readout it prints.
+async function doContext(ctx: Context): Promise<void> {
+  if (!dmCommandGate(ctx)) return
+  if (!activePaneId || !paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
+  const out = await readSlashOutput(activePaneId, paneWatcher, '/context')
+  await ctx.reply(
+    out ? `📐 <b>Context</b>\n<pre>${escapeHtml(out)}</pre>` : 'Could not read /context output.',
+    { parse_mode: 'HTML' },
+  )
+}
+
+// /session shows where the active session is: cwd, git branch (+dirty), mode, model.
+// cwd/branch are read deterministically from tmux + git (no pane scraping).
+async function doSession(ctx: Context): Promise<void> {
+  if (!dmCommandGate(ctx)) return
+  if (!activePaneId || !paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
+  let cwd = ''
+  try {
+    const { stdout } = await exec('tmux', ['display-message', '-p', '-t', activePaneId, '#{pane_current_path}'], { timeout: 2000 })
+    cwd = stdout.trim()
+  } catch {}
+  let branch = ''
+  if (cwd) {
+    try {
+      branch = (await exec('git', ['-C', cwd, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 2000 })).stdout.trim()
+      const dirty = (await exec('git', ['-C', cwd, 'status', '--porcelain'], { timeout: 3000 })).stdout.trim()
+      if (dirty) branch += ' *'
+    } catch {}   // not a git repo, or git unavailable
+  }
+  const mode = detectCurrentMode(await capturePane(activePaneId))
+  // Use the cached model to stay non-invasive; only open /model (idle-guarded)
+  // if we've never read it. /model, /new, and the 🧠 button keep the cache fresh.
+  const model = lastKnownModel ?? await readCurrentModel(activePaneId, paneWatcher)
+  const lines = [
+    `📁 <b>cwd:</b> <code>${escapeHtml(cwd || 'unknown')}</code>`,
+    ...(branch ? [`🌿 <b>branch:</b> <code>${escapeHtml(branch)}</code>`] : []),
+    `🎚 <b>mode:</b> ${escapeHtml(modeLabel(mode))}`,
+    `🧠 <b>model:</b> ${model ? escapeHtml(model) : 'unknown — run /model'}`,
+  ]
+  await ctx.reply(lines.join('\n'), { parse_mode: 'HTML' })
+}
+
 // ---- Control bar (docked quick-action keyboard) ----
 // Buttons send their label as a normal message; the message:text handler matches
 // these exact labels and routes each to the action above before any other handling.
@@ -1287,8 +1346,10 @@ bot.command('menu', async ctx => {
   await ctx.reply('🎛 Control bar ready.', { reply_markup: controlKeyboard() })
 })
 
-// /cost relays the session's cost readout.
+// /cost, /context, /session relay session visibility info.
 bot.command('cost', doCost)
+bot.command('context', doContext)
+bot.command('session', doSession)
 
 // Interrupt the current turn by sending Esc to the pane (same as pressing Esc
 // in the TUI). withInjection pauses the watcher and re-baselines afterward so
@@ -1838,6 +1899,8 @@ void (async () => {
               { command: 'model', description: 'Show the current model (or /model <name> to switch)' },
               { command: 'menu', description: 'Show the docked control bar (/menu off to hide)' },
               { command: 'cost', description: 'Show the session cost readout' },
+              { command: 'context', description: 'Show the token-context usage' },
+              { command: 'session', description: 'Show cwd, branch, mode, and model' },
               { command: 'new', description: 'Start a new session (shows the model)' },
             ],
             { scope: { type: 'all_private_chats' } },
