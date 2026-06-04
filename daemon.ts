@@ -656,6 +656,77 @@ let activeShim: ActiveShim | null = null
 let activePaneId: string | null = null
 let paneWatcher: PaneWatcher | null = null
 
+// ---- Multi-session registry ----
+// Every connected shim is a session; we keep ALL of them (not last-subscriber-wins)
+// and track which one is "focused". Inbound messages, pane-watching, the control
+// surface, and permission replies follow the focused session — mirrored into
+// activeShim/activePaneId/paneWatcher above so the rest of the daemon is unchanged.
+// A new session never steals focus: the first/only session is focused, additional
+// ones are announced and switched to explicitly with /use.
+type Session = {
+  socket: net.Socket
+  write: (msg: DaemonToShim) => void
+  paneId: string | null
+  label: string
+  subscribedAt: number
+}
+const sessions = new Map<string, Session>()   // insertion-ordered; keyed by sessionId
+let currentSessionId: string | null = null
+let noTmuxSeq = 0
+
+// Permission requests awaiting a Telegram answer, keyed by request_id → the writer
+// of the session that asked, so allow/deny goes back to the session that requested
+// it rather than whichever happens to be focused.
+const permissionOrigin = new Map<string, (msg: DaemonToShim) => void>()
+
+function orderedSessions(): { id: string; s: Session }[] {
+  return [...sessions.entries()].map(([id, s]) => ({ id, s }))
+}
+
+// Point the focused-session mirrors at `sessionId` and (re)start its pane watcher.
+// Resets pane-derived relay dedups so the newly-focused pane surfaces fresh.
+function setFocus(sessionId: string | null): void {
+  if (paneWatcher) { paneWatcher.stop(); paneWatcher = null }
+  currentSessionId = sessionId
+  const s = sessionId ? sessions.get(sessionId) ?? null : null
+  activeShim = s ? { socket: s.socket, write: s.write } : null
+  activePaneId = s?.paneId ?? null
+  lastRelayedPromptHash = ''
+  lastRelayedAuthUrl = ''
+  if (activePaneId) startPaneWatcher(activePaneId)
+}
+
+// Remove a session; refocus the next one (if any) if it was the focused one.
+function dropSession(sessionId: string): void {
+  if (!sessions.delete(sessionId)) return
+  if (currentSessionId === sessionId) setFocus(orderedSessions()[0]?.id ?? null)
+}
+
+// End a session (socket closed or its pane died) and tell the user if focus moved.
+function endSession(sessionId: string): void {
+  const s = sessions.get(sessionId)
+  if (!s) return
+  const wasFocused = currentSessionId === sessionId
+  dropSession(sessionId)
+  if (wasFocused) {
+    const next = currentSessionId ? sessions.get(currentSessionId) : null
+    notifyChats(next
+      ? `🔚 Session “${s.label}” ended — focus moved to “${next.label}”.`
+      : `🔚 Session “${s.label}” ended — no active sessions left.`)
+  }
+}
+
+// Route a permission decision back to the session that requested it.
+function respondPermission(request_id: string, behavior: 'allow' | 'deny'): void {
+  const w = permissionOrigin.get(request_id) ?? activeShim?.write
+  permissionOrigin.delete(request_id)
+  w?.({ t: 'permission', params: { request_id, behavior } })
+}
+
+function notifyChats(text: string): void {
+  for (const chat_id of loadAccess().allowFrom) void bot.api.sendMessage(chat_id, text).catch(() => {})
+}
+
 // Tracks the last prompt sent to Telegram to avoid double-relay.
 let lastRelayedPromptHash = ''
 
@@ -690,10 +761,6 @@ const chatPrompts = new Map<string, ChatPrompt>()
 // marks the relayed messages so a Telegram reply to one is injected into the pane.
 let lastRelayedAuthUrl = ''
 const authUrlMessageIds = new Set<string>()
-
-function shimWrite(msg: DaemonToShim): void {
-  if (activeShim) activeShim.write(msg)
-}
 
 function emitInbound(params: InboundParams): void {
   if (activeShim) {
@@ -1123,8 +1190,9 @@ function startPaneWatcher(paneId: string): void {
     text => onPaneEvent(text),
     () => {
       process.stderr.write(`daemon: pane ${paneId} died\n`)
-      activePaneId = null
-      paneWatcher = null
+      const entry = [...sessions.entries()].find(([, s]) => s.paneId === paneId)
+      if (entry) endSession(entry[0])
+      else { activePaneId = null; paneWatcher = null }
     },
   )
   paneWatcher.start()
@@ -1837,6 +1905,31 @@ bot.command('autocontinue', async ctx => {
   )
 })
 
+// /sessions lists the connected Claude Code sessions (★ = focused); /use <n>
+// switches which one Telegram is wired to.
+bot.command('sessions', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  const list = orderedSessions()
+  if (list.length === 0) { await ctx.reply('No active Claude Code sessions.'); return }
+  const lines = list.map((o, i) =>
+    `${i + 1}. ${o.id === currentSessionId ? '★ ' : ''}<b>${escapeHtml(o.s.label)}</b>  <code>${o.s.paneId ?? 'no-tmux'}</code>`)
+  await ctx.reply(`🗂 <b>Sessions</b> (★ = active):\n${lines.join('\n')}\n\nSwitch with <code>/use N</code>.`, { parse_mode: 'HTML' })
+})
+
+bot.command('use', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  const list = orderedSessions()
+  const n = parseInt((ctx.match ?? '').toString().trim(), 10)
+  if (!Number.isInteger(n) || n < 1 || n > list.length) {
+    await ctx.reply(`Usage: <code>/use N</code> (1–${list.length || 1}). See /sessions.`, { parse_mode: 'HTML' })
+    return
+  }
+  const target = list[n - 1]
+  if (target.id === currentSessionId) { await ctx.reply(`Already on “${target.s.label}”.`); return }
+  setFocus(target.id)
+  await ctx.reply(`✅ Switched to <b>${escapeHtml(target.s.label)}</b> (<code>${target.s.paneId ?? 'no-tmux'}</code>).`, { parse_mode: 'HTML' })
+})
+
 // Interrupt the current turn by sending Esc to the pane (same as pressing Esc
 // in the TUI). withInjection pauses the watcher and re-baselines afterward so
 // the resulting pane change isn't mistaken for a new prompt/event.
@@ -2079,7 +2172,7 @@ bot.on('callback_query:data', async ctx => {
   // Deny, then invite the user to redirect Claude — their next message reaches it
   // as normal (the MCP permission protocol carries only allow/deny, no message).
   if (behavior === 'guide') {
-    shimWrite({ t: 'permission', params: { request_id, behavior: 'deny' } })
+    respondPermission(request_id, 'deny')
     await ctx.answerCallbackQuery({ text: 'Denied — send your guidance' }).catch(() => {})
     const m = ctx.callbackQuery.message
     const base = m && 'text' in m && m.text ? m.text : '🔐 Permission'
@@ -2087,8 +2180,8 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
-  // Send permission result back to active shim (which forwards to Claude).
-  shimWrite({ t: 'permission', params: { request_id, behavior: behavior as 'allow' | 'deny' } })
+  // Send permission result back to the session that asked (forwards to Claude).
+  respondPermission(request_id, behavior as 'allow' | 'deny')
   const label = behavior === 'allow' ? '✅ Allowed' : '❌ Denied'
   await ctx.answerCallbackQuery({ text: label }).catch(() => {})
   const msg = ctx.callbackQuery.message
@@ -2122,13 +2215,10 @@ async function handleInbound(
   // Permission text-reply intercept ("yes xxxxx" / "no xxxxx")
   const permMatch = PERMISSION_REPLY_RE.exec(text)
   if (permMatch) {
-    shimWrite({
-      t: 'permission',
-      params: {
-        request_id: permMatch[2]!.toLowerCase(),
-        behavior: permMatch[1]!.toLowerCase().startsWith('y') ? 'allow' : 'deny',
-      },
-    })
+    respondPermission(
+      permMatch[2]!.toLowerCase(),
+      permMatch[1]!.toLowerCase().startsWith('y') ? 'allow' : 'deny',
+    )
     if (msgId != null) {
       const emoji = permMatch[1]!.toLowerCase().startsWith('y') ? '✅' : '❌'
       void bot.api.setMessageReaction(chat_id, msgId, [{ type: 'emoji', emoji: emoji as ReactionTypeEmoji['emoji'] }]).catch(() => {})
@@ -2340,20 +2430,26 @@ function handleShimConnection(socket: net.Socket): void {
     async msg => {
       switch (msg.t) {
         case 'subscribe': {
-          // Detach previous shim (last-subscriber-wins)
-          if (activeShim) {
-            try { activeShim.write({ t: 'detached' }) } catch {}
-          }
-          if (paneWatcher) { paneWatcher.stop(); paneWatcher = null }
-
-          activeShim = { socket, write }
-
+          const sessionId = msg.paneId ?? `no-tmux-${++noTmuxSeq}`
+          let label = msg.paneId ?? 'no-tmux'
           if (msg.paneId) {
-            activePaneId = msg.paneId
-            startPaneWatcher(msg.paneId)
+            try {
+              const { stdout } = await exec('tmux', ['display-message', '-p', '-t', msg.paneId, '#{pane_current_path}'], { timeout: 2000 })
+              const cwd = stdout.trim()
+              if (cwd) label = cwd.split('/').filter(Boolean).pop() ?? label
+            } catch {}
           }
+          sessions.set(sessionId, { socket, write, paneId: msg.paneId, label, subscribedAt: Date.now() })
 
-          replayBuffer(write)
+          // Focus it only when nothing valid holds focus (the first/only session, or
+          // a reconnect of the focused pane). Otherwise announce — never steal focus.
+          if (currentSessionId === null || currentSessionId === sessionId || !sessions.has(currentSessionId)) {
+            setFocus(sessionId)
+            replayBuffer(write)
+          } else {
+            const idx = orderedSessions().findIndex(o => o.id === sessionId) + 1
+            notifyChats(`🆕 New session available — #${idx} “${label}”. Switch with /use ${idx}.`)
+          }
           break
         }
         case 'call': {
@@ -2363,6 +2459,7 @@ function handleShimConnection(socket: net.Socket): void {
         }
         case 'permission_request': {
           const { request_id, tool_name, description, input_preview } = msg.params
+          permissionOrigin.set(request_id, write)
           const access = loadAccess()
           const permText = formatPermission(tool_name, description, input_preview)
           const keyboard = new InlineKeyboard()
@@ -2385,10 +2482,8 @@ function handleShimConnection(socket: net.Socket): void {
   socket.on('data', reader)
 
   socket.on('close', () => {
-    if (activeShim?.socket === socket) {
-      activeShim = null
-      // Keep paneWatcher alive — daemon persists between sessions
-    }
+    const entry = [...sessions.entries()].find(([, s]) => s.socket === socket)
+    if (entry) endSession(entry[0])
   })
 
   socket.on('error', () => {})
@@ -2511,6 +2606,8 @@ void (async () => {
               { command: 'tail', description: 'Recent terminal activity (alias of /terminal)' },
               { command: 'resetin', description: 'Ping me when my usage limit resets (/resetin 2h51m)' },
               { command: 'autocontinue', description: 'Auto-send "continue" when the limit resets (on/off)' },
+              { command: 'sessions', description: 'List connected Claude Code sessions' },
+              { command: 'use', description: 'Switch which session Telegram is wired to (/use N)' },
               { command: 'new', description: 'Start a new session (shows the model)' },
             ],
             { scope: { type: 'all_private_chats' } },
