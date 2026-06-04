@@ -744,9 +744,11 @@ const DEBUG_PANE = (process.env.TELEGRAM_DEBUG_PANE ?? '') === '1'
 //  - bottom-anchored: only the live status zone (last ~14 non-blank lines) counts;
 //  - a same-reset-time lockout (~12h): genuine limit windows are ~5h, so the same
 //    reset clock-time can't legitimately recur that fast — kills repaint re-fires.
-// Matches either the one-time "hit your … limit" note or the persistent
-// "used N% of your … limit" throttle banner, each carrying "resets … (UTC)".
-const USAGE_LIMIT_RE = /(?:hit your|used \d+% of your) [\w-]+ limit\b.{0,12}resets\b.{0,40}\(utc\)/i
+// Matches an actual limit *hit* — the "hit your … limit" note or the "used 100% of
+// your … limit" throttle banner — each carrying "resets … (UTC)". Deliberately does
+// NOT match sub-100% advisory warnings (e.g. "used 75% of your weekly limit"), which
+// must not trigger the limit-reached relay / auto-schedule / auto-continue.
+const USAGE_LIMIT_RE = /(?:hit your|used 100% of your) [\w-]+ limit\b.{0,12}resets\b.{0,40}\(utc\)/i
 const RESET_TIME_RE = /\bresets\s+(\d{1,2}):(\d{2})\s*([ap])m\s*\(utc\)/i
 const USAGE_CAPTURE_FILE = join(STATE_DIR, 'usage-limit-capture.log')
 const RESET_RELOCK_MS = (11 * 60 + 59) * 60_000
