@@ -292,7 +292,10 @@ function maybeNotifyIdle(chats: string[]): void {
   if (loadAccess().notifyIdle === false) return
   const paneId = activePaneId
   setTimeout(async () => {
-    try { if (paneId && detectWorking(await capturePane(paneId))) return } catch { return }
+    // Don't claim "finished" if Claude is actually still working, or if it's frozen
+    // at a usage-limit banner (blocked ≠ done — this caused false fires during the
+    // 2.5h limit freeze and long agent pauses).
+    try { const cap = paneId ? await capturePane(paneId) : ''; if (detectWorking(cap) || detectLimited(cap)) return } catch { return }
     if (repliedSinceArm) return
     for (const chat_id of chats) {
       void bot.api.sendMessage(chat_id, '✅ Claude finished').catch(() => {})
@@ -309,7 +312,7 @@ class TypingPresence {
   private static readonly CAP_MS = 15 * 60_000
   private static readonly TICK_MS = 4_000
   private static readonly OPTIMISTIC_MS = 8_000
-  private static readonly GRACE_MS = 10_000   // keep typing through idle gaps between steps
+  private static readonly GRACE_MS = 30_000   // keep typing through idle gaps between steps (agent pauses can be long)
 
   private ping(chat_id: string): void {
     void bot.api.sendChatAction(chat_id, 'typing').catch(() => {})
@@ -577,6 +580,16 @@ function detectWorking(paneText: string): boolean {
   return false
 }
 
+// True when the pane is showing a usage-limit / throttle banner near the bottom —
+// i.e. Claude is blocked, not finished. Used to suppress the "✅ Claude finished"
+// idle notification while frozen at the limit.
+function detectLimited(paneText: string): boolean {
+  const tail = paneText.split('\n').map(l => stripAnsi(l)).slice(-10).join('\n')
+  // Only the actual-frozen state (100% / "hit your … limit") — NOT sub-100% warnings,
+  // which persist for days at the weekly limit while Claude keeps working fine.
+  return /used 100% of your [\w-]+ limit|hit your [\w-]+ limit/i.test(tail)
+}
+
 function modeLabel(mode: CcMode): string {
   switch (mode) {
     case 'default': return '🏠 Default'
@@ -761,6 +774,25 @@ let lastActedResetAt = 0
 // already sent for the current reset period, so 76/77/… don't re-notify.
 const usageWarnState = new Map<string, { resetKey: string; threshold: number }>()
 
+// Persist the hit + warning dedup across daemon restarts. In-memory state was the
+// cause of repeated 75% alerts during development (each restart re-armed them).
+const USAGE_NOTIF_STATE_FILE = join(STATE_DIR, 'usage-notif-state.json')
+try {
+  const s = JSON.parse(readFileSync(USAGE_NOTIF_STATE_FILE, 'utf8'))
+  if (typeof s.lastActedResetKey === 'string') lastActedResetKey = s.lastActedResetKey
+  if (typeof s.lastActedResetAt === 'number') lastActedResetAt = s.lastActedResetAt
+  for (const [k, v] of Object.entries(s.warn ?? {})) {
+    if (v && typeof (v as { resetKey?: unknown }).resetKey === 'string' && typeof (v as { threshold?: unknown }).threshold === 'number') {
+      usageWarnState.set(k, v as { resetKey: string; threshold: number })
+    }
+  }
+} catch {}
+function saveUsageNotifState(): void {
+  try {
+    writeFileSync(USAGE_NOTIF_STATE_FILE, JSON.stringify({ lastActedResetKey, lastActedResetAt, warn: Object.fromEntries(usageWarnState) }), { mode: 0o600 })
+  } catch {}
+}
+
 // The next future UTC instant matching "resets HH:MMam (UTC)" (ms), or null.
 function parseResetTime(line: string): number | null {
   const m = line.match(RESET_TIME_RE)
@@ -799,6 +831,7 @@ function handleUsageLimit(text: string): void {
     if (key === lastActedResetKey && now - lastActedResetAt < RESET_RELOCK_MS) return
     lastActedResetKey = key
     lastActedResetAt = now
+    saveUsageNotifState()
 
     try {
       let prev = ''
@@ -830,8 +863,9 @@ function handleUsageLimit(text: string): void {
   const threshold = pct >= 95 ? 95 : 75
   const prev = usageWarnState.get(type)
   const firedThisPeriod = prev && prev.resetKey === resetKey ? prev.threshold : 0
-  if (threshold <= firedThisPeriod) { usageWarnState.set(type, { resetKey, threshold: firedThisPeriod }); return }
+  if (threshold <= firedThisPeriod) { usageWarnState.set(type, { resetKey, threshold: firedThisPeriod }); saveUsageNotifState(); return }
   usageWarnState.set(type, { resetKey, threshold })
+  saveUsageNotifState()
   const chats = loadAccess().allowFrom
   if (chats.length === 0) return
   const emoji = threshold >= 95 ? '🚨' : '⚠️'
