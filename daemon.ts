@@ -65,6 +65,7 @@ type Access = {
   chunkMode?: 'length' | 'newline'
   renderMarkdown?: boolean
   notifyIdle?: boolean
+  autoContinue?: boolean
 }
 
 function defaultAccess(): Access {
@@ -90,6 +91,7 @@ function readAccessFile(): Access {
       chunkMode: parsed.chunkMode,
       renderMarkdown: parsed.renderMarkdown,
       notifyIdle: parsed.notifyIdle,
+      autoContinue: parsed.autoContinue,
     }
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return defaultAccess()
@@ -717,12 +719,14 @@ const AUTH_URL_RE = /https?:\/\/[^\s│"')]*(?:oauth|authorize)[^\s│"')]*/i
 
 const DEBUG_PANE = (process.env.TELEGRAM_DEBUG_PANE ?? '') === '1'
 
-// Best-effort auto-capture of the usage-limit screen for later analysis (so we can
-// build auto-detection without racing a screenshot). The limit screen offers
-// numbered "Wait …" / "Upgrade …" choices — a structure that doesn't appear in
-// ordinary output or prose — so matching an option line of that shape catches it
-// without false-firing. Saves the frame (deduped) to a capped log file.
-const USAGE_LIMIT_RE = /^\s*(?:│\s*)?(?:[❯►▶]\s*)?\d+[.)]\s*(?:wait\b|upgrade\b)/im
+// Best-effort auto-capture of the usage-limit screen for later analysis. The
+// current screen is a one-line status, e.g. "You've hit your session limit •
+// resets 10:20am (UTC)" (it used to be a numbered Wait/Upgrade picker). We anchor
+// on the whole distinctive shape — "hit your <x> limit … resets … (UTC)" on one
+// line — rather than a bare "limit" mention, so ordinary prose doesn't trip it.
+// Saves the frame (deduped) to a capped log file for building the relay + auto-
+// /resetin against a real in-situ capture.
+const USAGE_LIMIT_RE = /hit your [\w-]+ limit\b.{0,12}resets\b.{0,40}\(utc\)/i
 const USAGE_CAPTURE_FILE = join(STATE_DIR, 'usage-limit-capture.log')
 let lastUsageCaptureHash = ''
 function maybeCaptureUsageLimit(text: string): void {
@@ -1582,11 +1586,21 @@ function parseDuration(s: string): number | null {
 }
 
 function fireResetNotification(chats: string[]): void {
+  try { unlinkSync(SCHEDULED_RESET_FILE) } catch {}
+  // Auto-continue (default on): when the reset comes due, type "continue" into the
+  // session automatically so the user doesn't have to tap a button. Falls back to
+  // the manual Continue button when disabled (/autocontinue off) or no live session.
+  if (loadAccess().autoContinue !== false && activePaneId && paneWatcher) {
+    for (const chat_id of chats) {
+      void bot.api.sendMessage(chat_id, '🕛 Usage limit reset — ▶️ auto-continuing… (turn off with /autocontinue off)').catch(() => {})
+    }
+    void injectText(activePaneId, paneWatcher, 'continue')
+    return
+  }
   const keyboard = new InlineKeyboard().text('▶️ Continue', 'usage:continue')
   for (const chat_id of chats) {
     void bot.api.sendMessage(chat_id, '🕛 Usage limit reset — continue?', { reply_markup: keyboard }).catch(() => {})
   }
-  try { unlinkSync(SCHEDULED_RESET_FILE) } catch {}
 }
 
 function scheduleReset(fireAt: number, chats: string[]): void {
@@ -1635,6 +1649,31 @@ bot.command('resetin', async ctx => {
   scheduleReset(Date.now() + ms, [chat_id])
   const mins = Math.round(ms / 60_000)
   await ctx.reply(`⏰ Got it — I'll ping you when your usage limit resets, in ~${Math.floor(mins / 60)}h ${mins % 60}m.`)
+})
+
+// /autocontinue on|off toggles whether the reset reminder auto-types "continue"
+// (default on); bare /autocontinue shows the current state.
+bot.command('autocontinue', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  const arg = (ctx.match ?? '').toString().trim().toLowerCase()
+  if (arg && arg !== 'on' && arg !== 'off') {
+    await ctx.reply('Usage: <code>/autocontinue on</code> | <code>off</code>', { parse_mode: 'HTML' })
+    return
+  }
+  if (arg) {
+    const access = loadAccess()
+    access.autoContinue = arg === 'on'
+    saveAccess(access)
+  }
+  const on = loadAccess().autoContinue !== false
+  await ctx.reply(
+    `▶️ Auto-continue on reset is <b>${on ? 'ON' : 'OFF'}</b>.\n` +
+    (on
+      ? 'When your usage limit resets, I\'ll automatically send "continue" into the session.'
+      : 'When your usage limit resets, I\'ll show a ▶️ Continue button for you to tap.') +
+    '\nToggle with <code>/autocontinue on</code> | <code>off</code>.',
+    { parse_mode: 'HTML' },
+  )
 })
 
 // Interrupt the current turn by sending Esc to the pane (same as pressing Esc
@@ -2310,6 +2349,7 @@ void (async () => {
               { command: 'alerts', description: 'Toggle the "Claude finished" ping (/alerts on|off)' },
               { command: 'tail', description: 'Show recent terminal activity (/tail [N] lines)' },
               { command: 'resetin', description: 'Ping me when my usage limit resets (/resetin 2h51m)' },
+              { command: 'autocontinue', description: 'Auto-send "continue" when the limit resets (on/off)' },
               { command: 'new', description: 'Start a new session (shows the model)' },
             ],
             { scope: { type: 'all_private_chats' } },
