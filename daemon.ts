@@ -1957,6 +1957,7 @@ void (async () => {
               { command: 'session', description: 'Show cwd, branch, mode, and model' },
               { command: 'alerts', description: 'Toggle the "Claude finished" ping (/alerts on|off)' },
               { command: 'new', description: 'Start a new session (shows the model)' },
+              { command: 'clear', description: 'Clear the conversation (shows the model)' },
             ],
             { scope: { type: 'all_private_chats' } },
           ).catch(() => {})
