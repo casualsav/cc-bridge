@@ -2572,7 +2572,7 @@ function prettyModel(id: string | null): string | null {
 // pane capture; model from the session's transcript. Both degrade to "—" rather than blocking.
 async function sessionPinText(rows: SessionRow[]): Promise<string> {
   const cur = rows.find(r => r.current)
-  if (!cur) return '💻 <b>No active session</b>'
+  if (!cur) return '🗂️ <b>No active session</b>'
   let mode = '—', model = lastKnownModel
   if (activePaneId) {
     try { const cap = await capturePane(activePaneId); if (onNormalPrompt(cap)) mode = modeLabel(detectCurrentMode(cap)) } catch {}
@@ -2582,7 +2582,7 @@ async function sessionPinText(rows: SessionRow[]): Promise<string> {
       model = (file && prettyModel(lastModelInTranscript(file))) || model
     } catch {}
   }
-  return `💻 <b>${escapeHtml(cur.label)}</b> • model (${escapeHtml(model ?? '—')}) • mode (${escapeHtml(mode)})`
+  return `🗂️ <b>${escapeHtml(cur.label)}</b> • 🧠 ${escapeHtml(model ?? '—')} • 🧭 ${escapeHtml(mode)}`
 }
 
 let pinUpdating = false
