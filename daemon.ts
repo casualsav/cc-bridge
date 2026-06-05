@@ -510,6 +510,15 @@ function detectCurrentMode(paneText: string): CcMode {
   return 'default'
 }
 
+// True when the pane is at Claude Code's normal prompt (input box visible), where reading or
+// changing the mode is valid. A settings/config screen or another modal lacks this footer, so
+// detectCurrentMode would there fall through to a false 'default' — mode ops guard on this and
+// report "another screen" instead of silently switching/mis-reporting.
+function onNormalPrompt(paneText: string): boolean {
+  const tail = paneText.split('\n').map(l => stripAnsi(l)).slice(-8).join('\n').toLowerCase()
+  return /shift\+tab to cycle|\? for shortcuts|esc to interrupt/.test(tail)
+}
+
 // Pull the active model name out of a /model picker capture (see parseCurrentModel
 // for the row format). Guard against grabbing transcript prose instead of a model
 // name when the picker didn't render cleanly: real model names are short, word-like,
@@ -1982,6 +1991,10 @@ async function handleModeCommand(
     await ctx.reply('No active Claude Code session with tmux. Send a message from CC first.')
     return
   }
+  if (!onNormalPrompt(await capturePane(activePaneId))) {
+    await ctx.reply('⚠️ The terminal is on another screen (settings/menu) — can’t change the mode right now.')
+    return
+  }
 
   const msgId = ctx.message?.message_id
   const chat_id = String(ctx.chat!.id)
@@ -2045,28 +2058,50 @@ async function doStop(ctx: Context): Promise<void> {
   await ctx.reply(ok ? '🛑 Sent interrupt (Esc) to Claude Code.' : 'Could not reach the session pane.')
 }
 
-// Cycle the permission mode one step and confirm the mode reached.
-async function doModeCycle(ctx: Context): Promise<void> {
-  if (!dmCommandGate(ctx)) return
-  if (!activePaneId || !paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
-  await paneWatcher.withInjection(async () => {
-    await sendKeys(activePaneId!, ['BTab'])
-    await waitForSettle(activePaneId!, 300, 5000)
+// Mode picker — a button per mode (current marked ●) plus a quick-switch tip. Shared by /mode
+// and the 🔄 Mode button; the mode:set:<mode> callback applies a tapped choice.
+const MODES: CcMode[] = ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions']
+const MODE_TIP = '💡 Tip: /default, /acceptedits, /plan, /auto, /bypass to switch fast.'
+
+function modePickerKeyboard(current: CcMode): InlineKeyboard {
+  const kb = new InlineKeyboard()
+  MODES.forEach((m, i) => {
+    kb.text(`${m === current ? '● ' : ''}${modeLabel(m)}`, `mode:set:${m}`)
+    if ((i + 1) % 2 === 0) kb.row()
   })
-  const mode = detectCurrentMode(await capturePane(activePaneId))
-  await ctx.reply(`✅ Mode switched to ${modeLabel(mode)}`)
+  return kb
 }
 
-// Report the active model (the /model no-arg behavior).
-async function doShowModel(ctx: Context): Promise<void> {
+async function doModePicker(ctx: Context): Promise<void> {
+  if (!dmCommandGate(ctx)) return
+  if (!activePaneId || !paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
+  const cap = await capturePane(activePaneId)
+  if (!onNormalPrompt(cap)) { await ctx.reply('⚠️ The terminal is on another screen (settings/menu) — can’t change the mode right now.'); return }
+  const current = detectCurrentMode(cap)
+  await ctx.reply(`🎚 <b>Mode</b> — currently ${modeLabel(current)}\n\n${MODE_TIP}`, { parse_mode: 'HTML', reply_markup: modePickerKeyboard(current) })
+}
+
+// Model picker — buttons for the common aliases plus a tip for any specific name. Shared by
+// /model (no arg) and the 🧠 Model button; the model:set:<alias> callback applies a choice.
+const MODEL_ALIASES = ['default', 'opus', 'sonnet', 'haiku']
+const MODEL_TIP = '💡 Tip: <code>/model &lt;name&gt;</code> to set any specific model.'
+
+function modelPickerKeyboard(): InlineKeyboard {
+  const kb = new InlineKeyboard()
+  MODEL_ALIASES.forEach((m, i) => {
+    kb.text(m.charAt(0).toUpperCase() + m.slice(1), `model:set:${m}`)
+    if ((i + 1) % 2 === 0) kb.row()
+  })
+  return kb
+}
+
+async function doModelPicker(ctx: Context): Promise<void> {
   if (!dmCommandGate(ctx)) return
   if (!activePaneId || !paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
   const model = await readCurrentModel(activePaneId, paneWatcher)
   await ctx.reply(
-    model
-      ? `🧠 Current model: <b>${escapeHtml(model)}</b>`
-      : 'Could not determine the current model. Use /model &lt;name&gt; to switch.',
-    { parse_mode: 'HTML' },
+    `🧠 <b>Model</b> — currently ${model ? escapeHtml(model) : 'unknown'}\n\n${MODEL_TIP}`,
+    { parse_mode: 'HTML', reply_markup: modelPickerKeyboard() },
   )
 }
 
@@ -2151,17 +2186,7 @@ bot.command('status', async ctx => {
   await ctx.reply(`🔗 Not paired. Send me a message to get a pairing code.`)
 })
 
-bot.command('mode', async ctx => {
-  const gated = dmCommandGate(ctx)
-  if (!gated) return
-  if (!activePaneId) {
-    await ctx.reply('No active Claude Code session with tmux.')
-    return
-  }
-  const current = detectCurrentMode(await capturePane(activePaneId))
-  const keyboard = new InlineKeyboard().text(modeLabel(current), 'mode:cycle')
-  await ctx.reply('Choose mode:', { reply_markup: keyboard })
-})
+bot.command('mode', doModePicker)
 
 bot.command('plan', ctx => handleModeCommand(ctx, 'plan'))
 bot.command('auto', ctx => handleModeCommand(ctx, 'auto'))
@@ -2188,7 +2213,7 @@ bot.command('model', async ctx => {
     void relaySlashCommand(activePaneId, paneWatcher, `/model ${arg}`, chat_id, ctx.message!.message_id)
     return
   }
-  await doShowModel(ctx)
+  await doModelPicker(ctx)
 })
 
 // /new asks to confirm, then resets and reports the model. /clear is a hidden
@@ -2439,11 +2464,10 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
-  // Mode cycle button
-  if (data === 'mode:cycle') {
-    const access = loadAccess()
-    const senderId = String(ctx.from.id)
-    if (!access.allowFrom.includes(senderId)) {
+  // Mode picker — apply a tapped mode
+  const modeSet = /^mode:set:(default|acceptEdits|plan|auto|bypassPermissions)$/.exec(data)
+  if (modeSet) {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
       return
     }
@@ -2451,15 +2475,41 @@ bot.on('callback_query:data', async ctx => {
       await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {})
       return
     }
+    if (!onNormalPrompt(await capturePane(activePaneId))) {
+      await ctx.answerCallbackQuery({ text: 'Terminal is on another screen — can’t change mode.' }).catch(() => {})
+      return
+    }
+    const target = modeSet[1] as CcMode
     await ctx.answerCallbackQuery().catch(() => {})
-    await paneWatcher.withInjection(async () => {
-      await sendKeys(activePaneId!, ['BTab'])
-      await waitForSettle(activePaneId!, 300, 5000)
-    })
-    const newModeText = await capturePane(activePaneId)
-    const newMode = detectCurrentMode(newModeText)
-    const keyboard = new InlineKeyboard().text(modeLabel(newMode), 'mode:cycle')
-    await ctx.editMessageText('Choose mode:', { reply_markup: keyboard }).catch(() => {})
+    const reached = await switchToMode(activePaneId, target, paneWatcher)
+    if (reached === null) {
+      await ctx.answerCallbackQuery({ text: `Could not switch to ${modeLabel(target)}.` }).catch(() => {})
+      return
+    }
+    await ctx.editMessageText(`🎚 <b>Mode</b> — now ${modeLabel(reached)}\n\n${MODE_TIP}`, {
+      parse_mode: 'HTML', reply_markup: modePickerKeyboard(reached),
+    }).catch(() => {})
+    return
+  }
+
+  // Model picker — apply a tapped model alias
+  const modelSet = /^model:set:(default|opus|sonnet|haiku)$/.exec(data)
+  if (modelSet) {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    if (!activePaneId || !paneWatcher) {
+      await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {})
+      return
+    }
+    const alias = modelSet[1]
+    await ctx.answerCallbackQuery({ text: `Switching to ${alias}…` }).catch(() => {})
+    await injectSlash(activePaneId, paneWatcher, `/model ${alias}`)
+    const model = await readCurrentModel(activePaneId, paneWatcher)
+    await ctx.editMessageText(`🧠 <b>Model</b> — now ${model ? escapeHtml(model) : escapeHtml(alias)}\n\n${MODEL_TIP}`, {
+      parse_mode: 'HTML', reply_markup: modelPickerKeyboard(),
+    }).catch(() => {})
     return
   }
 
@@ -2798,8 +2848,8 @@ bot.on('message:text', async ctx => {
   // Control-bar taps arrive as a normal message carrying the button label.
   // Route exact matches to their action before any other handling.
   switch (text) {
-    case BTN_MODE:  await doModeCycle(ctx); return
-    case BTN_MODEL: await doShowModel(ctx); return
+    case BTN_MODE:  await doModePicker(ctx); return
+    case BTN_MODEL: await doModelPicker(ctx); return
     case BTN_COST:  await doCost(ctx); return
     case BTN_STOP:  await doStop(ctx); return
     case BTN_NEW:   await confirmNewSession(ctx); return
