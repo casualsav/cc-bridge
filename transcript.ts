@@ -72,6 +72,13 @@ export type Activity = { tool: string; detail: string }
 function toolDetail(input: unknown): string {
   if (!input || typeof input !== 'object') return ''
   const o = input as Record<string, unknown>
+  // TodoWrite: show the task in progress (its present-tense activeForm), else the count.
+  if (Array.isArray(o.todos)) {
+    const todos = o.todos as Array<{ content?: string; activeForm?: string; status?: string }>
+    const active = todos.find(t => t?.status === 'in_progress')
+    const s = active ? (active.activeForm || active.content || '').trim() : `${todos.length} task${todos.length === 1 ? '' : 's'}`
+    return s.length > 56 ? s.slice(0, 55) + '…' : s
+  }
   const pick = o.command ?? o.file_path ?? o.path ?? o.pattern ?? o.url ?? o.query ?? o.description ?? o.prompt
   const s = (typeof pick === 'string' ? pick : '').replace(/\s+/g, ' ').trim()
   return s.length > 56 ? s.slice(0, 55) + '…' : s

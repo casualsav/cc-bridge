@@ -969,12 +969,30 @@ function renderDigestMirror(raw: string, done: boolean): string {
   return `${header}\n\n${escapeHtml(blocks.join('\n').slice(0, 3500))}`
 }
 
+// Per-tool emoji + human label for the live mirror. The transcript already carries the tool
+// name + input, so richer rendering here is entirely free (no model calls).
+const TOOL_BADGE: Record<string, [string, string]> = {
+  Bash: ['💻', 'terminal'], TodoWrite: ['📋', 'todo'],
+  Read: ['📖', 'read'], Edit: ['✏️', 'edit'], MultiEdit: ['✏️', 'edit'], Write: ['📝', 'write'],
+  Grep: ['🔍', 'search'], Glob: ['🔍', 'find'], LS: ['📂', 'list'],
+  WebFetch: ['🌐', 'fetch'], WebSearch: ['🌐', 'search'], Task: ['🤖', 'agent'],
+  NotebookEdit: ['📓', 'notebook'],
+}
+function toolBadge(tool: string): [string, string] {
+  if (TOOL_BADGE[tool]) return TOOL_BADGE[tool]
+  if (tool.startsWith('mcp__')) return ['🔌', tool.split('__').pop() || tool]   // mcp__server__action → action
+  return ['🔧', tool]
+}
+
 function renderToolsMirror(acts: Activity[], done: boolean): string {
-  // Just the latest few tool calls — oldest fall off as new ones arrive (no "+N earlier").
-  const lines = [done ? `✅ <b>Done</b> · ${acts.length} step${acts.length === 1 ? '' : 's'}` : '⚙️ <b>Working…</b>']
+  // No "Working…" header — just the latest few tool calls scrolling by (oldest fall off as
+  // new ones arrive). A Done summary still caps the feed when the turn settles.
+  const lines: string[] = []
+  if (done) lines.push(`✅ <b>Done</b> · ${acts.length} step${acts.length === 1 ? '' : 's'}`)
   for (const a of acts.slice(-MIRROR_TOOLS)) {
-    const d = a.detail ? ` <code>${escapeHtml(a.detail)}</code>` : ''
-    lines.push(`🔧 ${escapeHtml(a.tool)}${d}`)
+    const [emoji, label] = toolBadge(a.tool)
+    const d = a.detail ? `: <code>${escapeHtml(a.detail)}</code>` : ''
+    lines.push(`${emoji} ${label}${d}`)
   }
   return lines.join('\n')
 }
