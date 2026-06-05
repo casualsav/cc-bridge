@@ -87,17 +87,28 @@ it replies with a pairing code; approve with `/telegram:access pair <code>`, the
 with `/telegram:access policy allowlist`.)
 
 ## 5. Run a session off-MCP — the daemon finds it
-Launch the work session **plugin-less** in a tmux pane:
+Launch the work session **plugin-less** in a tmux pane. The one flag that matters is
+`--strict-mcp-config`: it drops the plugin's MCP server (so you don't pay the per-request MCP
+context tax) **and** is the signature the daemon scans for to auto-discover the pane.
 ```sh
-claude --strict-mcp-config --mcp-config '{"mcpServers":{}}'
+claude --strict-mcp-config
 ```
 That's it — the daemon **auto-discovers** the plugin-less pane and binds to it automatically
 (no `TELEGRAM_FORCE_PANE`, no restart). If there are several plugin-less panes it asks which to
 use; to pin a specific one, set `TELEGRAM_FORCE_PANE=<pane id>` in the `.env` to override.
 
-Permission prompts are relayed to Telegram with **Yes / allow-all / No** buttons, so you can
-approve permission-gated work remotely — or add `--dangerously-skip-permissions` to not be
-asked at all.
+**Add a `claude-tg` shortcut** (recommended) — drop this in `~/.bashrc` / `~/.zshrc`:
+```sh
+alias claude-tg='claude --strict-mcp-config'
+```
+Then `claude-tg` just works. Anything you append rides along:
+- **Your own MCP servers** — `--strict-mcp-config` ignores *configured* servers but still loads
+  what you pass explicitly, so the per-request tax is gone but you keep your tooling:
+  ```sh
+  claude-tg --mcp-config ~/my-mcp.json
+  ```
+- **Skip permission prompts** — `claude-tg --dangerously-skip-permissions`. Otherwise prompts
+  are relayed to Telegram with **Yes / allow-all / No** buttons so you can approve remotely.
 
 ## 6. Verify end to end
 From Telegram, message the session → you get its reply (read from the transcript), no MCP
