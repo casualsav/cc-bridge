@@ -3124,6 +3124,13 @@ bot.on('message:text', async ctx => {
     }
     const msgId = ctx.message.message_id
     const chat_id = String(ctx.chat.id)
+    // /exit (and /quit) closes the session — confirm with a text reply naming it, not a 👍.
+    if (/^\/(exit|quit)\b/i.test(text)) {
+      const label = await paneLabel(activePaneId)
+      await injectSlash(activePaneId, paneWatcher, text)
+      await ctx.reply(`✅ Session <b>${escapeHtml(label)}</b> exited.`, { parse_mode: 'HTML' })
+      return
+    }
     void relaySlashCommand(activePaneId, paneWatcher, text, chat_id, msgId)
     return
   }
