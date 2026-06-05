@@ -880,11 +880,15 @@ const DEBUG_PANE = (process.env.TELEGRAM_DEBUG_PANE ?? '') === '1'
 //  - a same-reset-time lockout (~12h): genuine limit windows are ~5h, so the same
 //    reset clock-time can't legitimately recur that fast — kills repaint re-fires.
 // Matches an actual limit *hit* — the "hit your … limit" note or the "used 100% of
-// your … limit" throttle banner — each carrying "resets … (UTC)". Deliberately does
-// NOT match sub-100% advisory warnings (e.g. "used 75% of your weekly limit"), which
-// must not trigger the limit-reached relay / auto-schedule / auto-continue.
-const USAGE_LIMIT_RE = /(?:hit your|used 100% of your) [\w-]+ limit\b.{0,12}resets\b.{0,40}\(utc\)/i
-const RESET_TIME_RE = /\bresets\s+(\d{1,2}):(\d{2})\s*([ap])m\s*\(utc\)/i
+// your … limit" throttle banner. Anchors on the phrase + "resets <digit…>", NOT on the
+// trailing "(UTC)": a narrow terminal truncates "(UTC) · /upgrade…" off the right, which
+// used to drop detection so a real hit never scheduled the reset / auto-continue. The
+// specific phrase + the free-standing-line guard + the ~12h lockout keep false positives
+// out. Deliberately does NOT match sub-100% advisory warnings.
+const USAGE_LIMIT_RE = /(?:hit your|used 100% of your) [\w-]+ limit\b.{0,12}resets\b.{0,40}\d/i
+// Reset clock-time; "(UTC)" optional and the trailing "m" optional, so a clipped
+// "resets 5:10a" still parses (the am/pm letter survives — that's what we need).
+const RESET_TIME_RE = /\bresets\s+(\d{1,2}):(\d{2})\s*([ap])m?\b/i
 // Sub-100% advisory banner, e.g. "used 76% of your weekly limit · resets Jun 7, 4pm
 // (UTC) · try /mod…". Captures: percent, limit type (session/weekly/…), reset descr.
 const USAGE_WARN_RE = /used (\d+)% of your ([\w-]+) limit\b.{0,12}resets\s+([^·\n]+?)\s*(?:·|$)/i
@@ -892,6 +896,9 @@ const USAGE_CAPTURE_FILE = join(STATE_DIR, 'usage-limit-capture.log')
 const RESET_RELOCK_MS = (11 * 60 + 59) * 60_000
 let lastActedResetKey = ''
 let lastActedResetAt = 0
+// Last limit-ish line written to the near-miss diagnostic, so a static banner across
+// many pane ticks isn't logged repeatedly.
+let lastLimitDebugLine = ''
 // Per limit type ('session'/'weekly'/…): the highest warning threshold (75/95)
 // already sent for the current reset period (`resetKey`), plus when it was sent
 // (`at`) so a width-clipped repaint of the same banner can't re-fire it within a
@@ -963,6 +970,19 @@ function handleUsageLimit(text: string): void {
   for (let i = lines.length - 1; i >= 0 && bottom.length < 14; i--) if (lines[i].trim()) bottom.push(i)
   // ── Limit HIT: relay + auto-schedule + auto-continue ─────────────────────────
   const hitIdx = bottom.find(i => !inBlock[i] && USAGE_LIMIT_RE.test(lines[i]))
+  // Diagnostic: a limit-ish banner is in the live zone but strict detection skipped it →
+  // snapshot the frame + why (in-block? regex miss?), deduped, so a missed auto-continue
+  // can be traced to the real render next time.
+  const looseIdx = bottom.find(i => /\blimit\b.{0,24}resets\b/i.test(lines[i]))
+  if (looseIdx !== undefined && hitIdx === undefined && lines[looseIdx].trim() !== lastLimitDebugLine) {
+    lastLimitDebugLine = lines[looseIdx].trim()
+    try {
+      const why = JSON.stringify({ line: lines[looseIdx].trim(), inBlock: inBlock[looseIdx], limitRe: USAGE_LIMIT_RE.test(lines[looseIdx]), timeRe: RESET_TIME_RE.test(lines[looseIdx]) })
+      const f = join(STATE_DIR, 'limit-debug.log')
+      let prev = ''; try { if (statSync(f).size < 256 * 1024) prev = readFileSync(f, 'utf8') } catch {}
+      writeFileSync(f, `${prev}\n===== ${new Date().toISOString()} skip ${why} =====\n${stripAnsi(text)}\n`, { mode: 0o600 })
+    } catch {}
+  }
   if (hitIdx !== undefined) {
     const limitLine = lines[hitIdx].trim()
     const tm = limitLine.match(RESET_TIME_RE)
