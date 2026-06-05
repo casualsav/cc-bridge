@@ -2575,7 +2575,8 @@ async function sessionPinText(rows: SessionRow[]): Promise<string> {
   if (!cur) return '🗂️ <b>No active session</b>'
   let mode = '—', model = lastKnownModel
   if (activePaneId) {
-    try { const cap = await capturePane(activePaneId); if (onNormalPrompt(cap)) mode = modeLabel(detectCurrentMode(cap)) } catch {}
+    // Strip modeLabel's leading per-mode emoji — the pin uses a single generic 🧭.
+    try { const cap = await capturePane(activePaneId); if (onNormalPrompt(cap)) mode = modeLabel(detectCurrentMode(cap)).replace(/^\S+\s+/, '') } catch {}
     try {
       const cwd = await paneCwd(activePaneId)
       const file = cwd ? resolveTranscript(cwd) : null
