@@ -15,6 +15,21 @@ the single restart in Step 3 brings everything up already configured.
 - **Platform:** Linux or macOS. On Windows, run inside [WSL2](https://learn.microsoft.com/windows/wsl/)
   (native Windows has no `tmux`).
 
+## 0.5. Pre-flight: remove the old costly MCP version (if present)
+This bridge is the off-MCP successor to the upstream **`telegram@claude-plugins-official`**
+plugin, which loads an always-on MCP server and pays a per-request context tax on *every* turn.
+This setup doesn't need it, and running both would double-bridge Telegram. Most users won't have
+it — but check and offer to remove it before continuing:
+
+1. Look for it in `~/.claude/settings.json` (`enabledPlugins["telegram@claude-plugins-official"]`)
+   and the `claude-plugins-official` marketplace in `~/.claude.json`.
+2. **Not present** → say so and continue; nothing to do.
+3. **Present** → tell the user it's the old costly MCP-mode version and **ask whether to remove it**
+   (recommended). On yes, the clean path is having them run
+   `/plugin uninstall telegram@claude-plugins-official` in Claude Code; or set that
+   `enabledPlugins` entry to `false` to just disable it. On no, continue but warn that both
+   versions will try to bridge Telegram at once.
+
 ## 1. Interview the human and write the config (before any restart)
 Ask these one by one (don't assume defaults silently — confirm each), then write the two
 files below. **You can write them now even though the plugin isn't installed yet** — they
