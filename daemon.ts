@@ -1114,13 +1114,20 @@ async function processTree(rootPid: string): Promise<string[]> {
   return all
 }
 
+// A process's full argv. Linux exposes it via /proc; macOS/BSD has no /proc, so fall back to
+// `ps -ww` (unlimited width, no truncation). Keeps off-MCP auto-discovery portable.
+async function processArgv(pid: string): Promise<string> {
+  try { return readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ').trim() } catch {}
+  try { return (await exec('ps', ['-ww', '-p', pid, '-o', 'args='], { timeout: 2000 })).stdout.trim() } catch {}
+  return ''
+}
+
 // True if the pane shell `panePid` has a claude child launched plugin-less
 // (--strict-mcp-config — the off-MCP session signature).
 async function isPluginlessClaude(panePid: string): Promise<boolean> {
   for (const pid of await processTree(panePid)) {
-    let argv = ''
-    try { argv = readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ') } catch { continue }
-    if (!/\bclaude\b/.test(argv)) continue
+    const argv = await processArgv(pid)
+    if (!argv || !/\bclaude\b/.test(argv)) continue
     return argv.includes('--strict-mcp-config')
   }
   return false
