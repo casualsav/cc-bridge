@@ -9,6 +9,12 @@ running task.
 It ships built-in access control (pairing, allowlists, group policy), so only
 people you approve can reach your session.
 
+> **Running without the MCP server (off-MCP mode):** the bridge can drive a
+> plugin-less Claude session so it doesn't pay the per-request MCP context tax —
+> inbound is typed into the pane, replies are read back from the transcript, and a
+> `tg` CLI handles file-send/react/edit. To set it up (or have a fresh Claude
+> install it), see **[`off-mcp/INSTALL.md`](./off-mcp/INSTALL.md)**.
+
 ---
 
 ## Features
