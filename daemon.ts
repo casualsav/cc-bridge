@@ -2176,7 +2176,7 @@ bot.on('callback_query:data', async ctx => {
     })
     lastRelayedPromptHash = ''
     await ctx.editMessageReplyMarkup().catch(() => {})
-    await ctx.reply('💬 Dismissed the question — send your message and I\'ll pass it to the session.').catch(() => {})
+    await ctx.reply('💬 Chat about this — send your message below 👇').catch(() => {})
     return
   }
 
