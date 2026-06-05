@@ -365,12 +365,9 @@ class TypingPresence {
     const chats = [...this.targets.keys()]
     const finished = this.sawWorking
     this.clearAll()
-    // Off-MCP: relay the agent's reply from the transcript; otherwise (MCP mode) the
-    // agent replied via the reply tool, so just ping "finished" if it didn't.
-    if (finished) {
-      if (TRANSCRIPT_OUTBOUND) relayTranscriptReply()
-      else maybeNotifyIdle(chats)
-    }
+    // Off-MCP relays the actual reply (per-inject poll), so skip the "finished" ping;
+    // in MCP mode, ping if the agent didn't already reply via the reply tool.
+    if (finished && !TRANSCRIPT_OUTBOUND) maybeNotifyIdle(chats)
   }
 
   private clearAll(): void {
@@ -816,9 +813,9 @@ function enqueueInboundInject(paneId: string, watcher: PaneWatcher, params: Inbo
     .then(ok => {
       if (ok) {
         process.stderr.write(`daemon: inbound injected to pane ${paneId} chat=${params.meta.chat_id}\n`)
-        // Off-MCP: remember what we injected so the turn-finished hook can read the
-        // agent's reply to *this* message out of the transcript and relay it.
-        if (TRANSCRIPT_OUTBOUND) pendingTranscriptReply = { paneId, injectedText: block, chats: [params.meta.chat_id] }
+        // Off-MCP: once the agent's turn settles, read its reply to *this* message out
+        // of the transcript and relay it (no MCP reply tool involved).
+        if (TRANSCRIPT_OUTBOUND) scheduleTranscriptRelay(paneId, block, [params.meta.chat_id])
       }
       else { process.stderr.write(`daemon: inbound inject no-op (pane ${paneId} gone) — buffering\n`); bufferEvent(params) }
     })
@@ -827,10 +824,6 @@ function enqueueInboundInject(paneId: string, watcher: PaneWatcher, params: Inbo
 }
 
 // ---- Off-MCP outbound: relay the agent's reply from the transcript ----
-
-// The injected message awaiting a reply, set on inject and consumed when the turn goes
-// idle. Only the latest is tracked — replies are relayed per finished turn.
-let pendingTranscriptReply: { paneId: string; injectedText: string; chats: string[] } | null = null
 
 async function paneCwd(paneId: string): Promise<string | null> {
   try {
@@ -852,29 +845,35 @@ async function sendAgentText(chats: string[], text: string): Promise<void> {
   }
 }
 
-// A Telegram-initiated turn finished: read the agent's reply (the final text block of
-// its response to the injected message) from the transcript and relay it. Re-checks
-// after a short delay so the transcript has flushed and the pane isn't mid-spinner.
-function relayTranscriptReply(): void {
-  const pending = pendingTranscriptReply
-  pendingTranscriptReply = null
-  if (!pending) return
-  let tries = 0
-  const attempt = async () => {
+// After injecting a message, wait for the agent's turn to settle, then read its reply
+// (the final text block of its response to that exact message) from the transcript and
+// relay it. Self-driven (not tied to the typing/idle signal, which can miss a fast
+// turn): poll the pane until it's been idle for a couple of cycles AND the transcript
+// holds a reply for our anchor. One poll per injected message, so two quick messages
+// each get their own answer relayed.
+function scheduleTranscriptRelay(paneId: string, injectedText: string, chats: string[]): void {
+  const POLL_MS = 1500, MAX_MS = 8 * 60_000, IDLE_NEEDED = 2
+  let waited = 0, idleStreak = 0
+  const tick = async () => {
+    waited += POLL_MS
     let cap = ''
-    try { cap = await capturePane(pending.paneId) } catch { return }
-    // The tick fires after sustained idle, so this usually passes first try; poll a few
-    // times in case the agent resumed (e.g. a tool call) before settling for good.
-    if ((detectWorking(cap) || detectLimited(cap)) && ++tries < 20) { setTimeout(attempt, 1500); return }
-    const cwd = await paneCwd(pending.paneId)
-    const file = cwd ? resolveTranscript(cwd) : null
-    if (!file) { process.stderr.write(`daemon: transcript-outbound: no transcript for cwd=${cwd}\n`); return }
-    const reply = finalReplyForInjected(file, pending.injectedText)
-    if (!reply) { process.stderr.write(`daemon: transcript-outbound: no reply text found in ${file}\n`); return }
-    process.stderr.write(`daemon: transcript-outbound relaying ${reply.length} chars to ${pending.chats.join(',')}\n`)
-    await sendAgentText(pending.chats, reply)
+    try { cap = await capturePane(paneId) } catch { return }
+    idleStreak = (detectWorking(cap) || detectLimited(cap)) ? 0 : idleStreak + 1
+    if (idleStreak >= IDLE_NEEDED) {
+      const cwd = await paneCwd(paneId)
+      const file = cwd ? resolveTranscript(cwd) : null
+      const reply = file ? finalReplyForInjected(file, injectedText) : null
+      if (reply) {
+        process.stderr.write(`daemon: transcript-outbound relaying ${reply.length} chars to ${chats.join(',')}\n`)
+        await sendAgentText(chats, reply)
+        return
+      }
+      // Idle but the reply isn't in the transcript yet (still flushing) — keep polling.
+    }
+    if (waited < MAX_MS) setTimeout(tick, POLL_MS)
+    else process.stderr.write(`daemon: transcript-outbound: gave up waiting for reply on ${paneId}\n`)
   }
-  setTimeout(attempt, 1500)
+  setTimeout(tick, POLL_MS)
 }
 
 // Deliver an inbound Telegram message to the focused session. Claude Code only lets
