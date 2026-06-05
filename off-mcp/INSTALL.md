@@ -136,9 +136,9 @@ loaded. Ask it to "send me a file with `tg`" to confirm outbound actions.
 ## What you get, from Telegram
 - Two-way chat with the session; send/receive files; inbound voice notes transcribed.
 - **Permission prompts** relayed with tap-to-approve buttons.
-- **Live activity mirror** — one self-updating message of what Claude is doing; on long tasks
-  the agent can drive a **progress bar** (`tg progress`).
-- **/session** (list · `/session #` switch · `/session name # <label>`), **/mode** & **/model**
+- **Live activity mirror** — one self-updating message of what Claude is doing (tool feed, read
+  from the transcript), on by default.
+- **/sessions** (list · `/sessions #` switch · `/sessions name # <label>`), **/mode** & **/model**
   pickers, **/cost**, **/context**, **/stop**, **/new**, **/terminal**.
 - **Auto-continue** when a usage limit resets (self-verifies + retries).
 

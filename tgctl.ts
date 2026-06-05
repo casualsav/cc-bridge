@@ -8,8 +8,6 @@
 //   tgctl react <chat_id> <message_id> <emoji>   add an emoji reaction
 //   tgctl edit  <chat_id> <message_id> <text|->   edit a message the bot sent (- reads stdin)
 //   tgctl reply <chat_id> <text|->                send a text message (- reads stdin)
-//   tgctl progress <cur> <total> [label…]         drive the live progress bar (goes to allowFrom)
-//   tgctl progress done [label…]                  finish the progress bar
 import net from 'node:net'
 import { readFileSync } from 'node:fs'
 import { frame, makeLineReader, SOCKET_PATH, type ShimToDaemon, type DaemonToShim } from './common.ts'
@@ -23,17 +21,8 @@ switch (cmd) {
   case 'react': name = 'react';        args = { chat_id, message_id: a, emoji: b }; break
   case 'edit':  name = 'edit_message'; args = { chat_id, message_id: a, text: fromStdin(b) }; break
   case 'reply': name = 'reply';        args = { chat_id, text: fromStdin(a) }; break
-  case 'progress': {
-    // No chat_id — progress drives the shared live mirror message. argv[3..] = cur total [label…]
-    // or "done [label…]".
-    name = 'progress'
-    const rest = process.argv.slice(3)
-    if (rest[0] === 'done') args = { done: true, ...(rest.length > 1 ? { label: rest.slice(1).join(' ') } : {}) }
-    else args = { cur: Number(rest[0]), total: Number(rest[1]), ...(rest.length > 2 ? { label: rest.slice(2).join(' ') } : {}) }
-    break
-  }
   default:
-    process.stderr.write('usage: tgctl <send|react|edit|reply|progress> ...\n')
+    process.stderr.write('usage: tgctl <send|react|edit|reply> ...\n')
     process.exit(2)
 }
 

@@ -66,8 +66,8 @@ Prefer to do it by hand? [`off-mcp/INSTALL.md`](./off-mcp/INSTALL.md) lists ever
   mode, with 🗂️ Sessions / 🧠 Model / 🧭 Mode quick buttons.
 - **Live activity mirror** — a single self-updating message shows what Claude is doing
   in real time (💻 terminal, 📋 todo, 📖 read, ✏️ edit, 🔍 search, 🤖 agent…), read
-  straight from the transcript so it costs zero usage. On by default; long tasks can
-  drive a progress bar. Opt out with `terminalMirror: "off"`.
+  straight from the transcript so it costs zero usage. On by default; opt out with
+  `terminalMirror: "off"`.
 
 ## How it works
 

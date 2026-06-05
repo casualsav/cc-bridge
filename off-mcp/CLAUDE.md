@@ -33,19 +33,7 @@ incoming message.
 
 For long/multiline text pass `-` and pipe via stdin, e.g. `printf '%s' "$BODY" | tg edit <CHAT> <id> -`.
 
-## Progress blocks (use them on long, multi-step plans)
-For a task with several distinct phases (a build/deploy, a multi-file change, a migration),
-drive the live progress display so the user can watch without the terminal. It renders one
-large block per phase, filled as each one completes — episodic and calm, set `<total>` to your
-number of phases and bump `<step>` only when a phase actually finishes:
-
-```
-tg progress <step> <total> "<short label>"   # update — creates the display on the first call
-tg progress done "<final note>"               # finish (shows ✅)
-```
-
-The daemon renders the blocks and edits one self-updating message, so your only cost is the short
-command. **Piggyback it** onto commands you're already running to keep it ~free, e.g.
-`bun build … && tg progress 3 6 "transpiled"`. It takes over the live view from the automatic
-tool mirror while active, and auto-expires if you stop updating. No `<CHAT>` — it goes to the
-configured chat(s). Reserve it for genuinely multi-phase work; a quick answer needs nothing.
+## Live activity
+The daemon already mirrors what you're doing — a self-updating message showing your tool feed
+(terminal, todo, read, edit…), read straight from the transcript. It's automatic and free; you
+don't drive it.

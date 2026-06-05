@@ -901,33 +901,8 @@ const mirrorMsgIds = new Map<string, number>()   // chat_id → the live mirror 
 let mirrorLastText = ''
 let mirrorLastEditAt = 0
 
-// Agent-driven progress bar. When the agent pushes progress (via `tg progress`), it takes over
-// the mirror message — a real % bar with a step label — instead of the mechanical tool/digest
-// view. The agent supplies the semantics (cur/total/label); the daemon renders + edits, so the
-// agent's token cost is just a short command. Auto-expires if the agent stops updating it.
-const PROGRESS_STALE_MS = 15 * 60_000
-type Progress = { cur: number; total: number; label: string; at: number }
-let currentProgress: Progress | null = null
-
-function progressActive(): boolean {
-  if (currentProgress && Date.now() - currentProgress.at > PROGRESS_STALE_MS) currentProgress = null
-  return currentProgress !== null
-}
-
-// Episodic progress for a multi-step plan: one ▰ block per phase, filled as each step
-// completes. Calm by design — it fills a block when a phase finishes, no running %.
-function renderProgressBar(p: Progress, done: boolean): string {
-  const total = Math.max(1, p.total)
-  const cur = Math.max(0, Math.min(total, p.cur))
-  const blocks = '▰'.repeat(cur) + '▱'.repeat(total - cur)
-  const head = done ? '✅ <b>Done</b>' : '⏳ <b>Working…</b>'
-  const label = p.label ? ` ${escapeHtml(p.label)}` : ''
-  return `${head}\n${blocks}${label}`
-}
-
 // Live tool-use feed. On by default ('tools') — opt out via access.json
-// `terminalMirror: "off"` (or pick `"digest"`). The agent progress bar (`tg progress`)
-// takes precedence over this feed when active.
+// `terminalMirror: "off"` (or pick `"digest"`).
 function mirrorMode(): 'tools' | 'digest' | 'off' {
   const v = loadAccess().terminalMirror
   if (v === 'off' || v === false) return 'off'
@@ -997,10 +972,8 @@ function renderToolsMirror(acts: Activity[], done: boolean): string {
   return lines.join('\n')
 }
 
-// The mirror text for the active mode, or null when there's nothing to show yet. An active
-// agent progress bar takes precedence over the mechanical tool/digest view.
+// The mirror text for the active mode, or null when there's nothing to show yet.
 async function buildMirrorText(done: boolean): Promise<string | null> {
-  if (progressActive()) return renderProgressBar(currentProgress!, done)
   if (mirrorMode() === 'digest') {
     const raw = await mirrorCapture()
     return raw ? renderDigestMirror(raw, done) : null
@@ -1017,10 +990,8 @@ async function buildMirrorText(done: boolean): Promise<string | null> {
 // fresh one on the next call (the "multiple working messages" bug). Caller passes the same
 // 2-tick streak the reply relay uses.
 async function updateTerminalMirror(settled: boolean): Promise<void> {
-  if (mirrorMode() === 'off' && !progressActive()) { if (mirrorMsgIds.size) await finalizeTerminalMirror(); return }
-  // An active progress bar owns its own lifecycle (the agent ends it with `tg progress done`,
-  // or it expires), so it isn't finalized here either.
-  if (settled && !progressActive()) { await finalizeTerminalMirror(); return }
+  if (mirrorMode() === 'off') { if (mirrorMsgIds.size) await finalizeTerminalMirror(); return }
+  if (settled) { await finalizeTerminalMirror(); return }
 
   const text = await buildMirrorText(false)
   if (!text) return
@@ -1042,28 +1013,12 @@ async function updateTerminalMirror(settled: boolean): Promise<void> {
 // Freeze the open mirror on its final state and stop tracking it, so the next work burst opens
 // a fresh message. No-op if no mirror is open.
 async function finalizeTerminalMirror(): Promise<void> {
-  if (mirrorMsgIds.size === 0) { currentProgress = null; return }
+  if (mirrorMsgIds.size === 0) return
   const text = (await buildMirrorText(true)) ?? '🖥️ <b>Session</b> · idle'
   for (const [chat, mid] of mirrorMsgIds) {
     await bot.api.editMessageText(chat, mid, text, { parse_mode: 'HTML' }).catch(() => {})
   }
-  mirrorMsgIds.clear(); mirrorLastText = ''; mirrorLastEditAt = 0; currentProgress = null
-}
-
-// Push the current state to the mirror message immediately (create or edit), bypassing the
-// tick throttle — used when the agent pushes a progress update so it shows up at once.
-async function pushMirrorNow(): Promise<void> {
-  const text = await buildMirrorText(false)
-  if (!text) return
-  mirrorLastText = text; mirrorLastEditAt = Date.now()
-  if (mirrorMsgIds.size === 0) {
-    for (const chat of loadAccess().allowFrom) {
-      try { const m = await bot.api.sendMessage(chat, text, { parse_mode: 'HTML' }); mirrorMsgIds.set(chat, m.message_id) }
-      catch (e) { process.stderr.write(`daemon: progress mirror create failed: ${e}\n`) }
-    }
-  } else {
-    for (const [chat, mid] of mirrorMsgIds) await bot.api.editMessageText(chat, mid, text, { parse_mode: 'HTML' }).catch(() => {})
-  }
+  mirrorMsgIds.clear(); mirrorLastText = ''; mirrorLastEditAt = 0
 }
 
 async function relayLoopTick(gen: number): Promise<void> {
@@ -2022,22 +1977,6 @@ async function handleCall(
         )
         const msgId = typeof edited === 'object' ? edited.message_id : args.message_id
         text = `edited (id: ${msgId})`
-        break
-      }
-      case 'progress': {
-        // Agent-driven progress bar over the live mirror message (sent to allowFrom, like the
-        // mirror — no chat_id). `tg progress <cur> <total> [label]` updates; `… done [label]` ends.
-        if (args.done) {
-          if (currentProgress && args.label) currentProgress.label = String(args.label)
-          await finalizeTerminalMirror()   // renders the bar as done (buildMirrorText sees it), then clears
-          text = 'progress done'
-        } else {
-          const cur = Number(args.cur), total = Number(args.total)
-          if (!Number.isFinite(cur) || !Number.isFinite(total) || total <= 0) throw new Error('usage: tg progress <cur> <total> [label]')
-          currentProgress = { cur, total, label: (args.label as string) || '', at: Date.now() }
-          await pushMirrorNow()
-          text = `progress ${cur}/${total}`
-        }
         break
       }
       default:

@@ -94,7 +94,7 @@ Configure outbound behavior with `/telegram:access set <key> <value>`.
 
 **`renderMarkdown`** (default `true`) renders the standard Markdown in Claude's replies as native Telegram formatting — bold, italic, inline/block code, links, headings, lists, blockquotes. Claude just writes normal Markdown; no escaping needed. Set `false` to deliver replies as plain text. Read live, so changes apply on the next message.
 
-**`terminalMirror`** (default `"tools"`) controls the live activity mirror — one self-updating message of what Claude is doing. `"tools"` shows the tool feed (💻 terminal, 📋 todo, 📖 read, ✏️ edit…) read straight from the transcript (zero usage); `"digest"` shows Claude's recent `●` narration blocks scraped from the pane; `"off"` disables it. An agent progress bar (`tg progress`) takes over the view when active.
+**`terminalMirror`** (default `"tools"`) controls the live activity mirror — one self-updating message of what Claude is doing. `"tools"` shows the tool feed (💻 terminal, 📋 todo, 📖 read, ✏️ edit…) read straight from the transcript (zero usage); `"digest"` shows Claude's recent `●` narration blocks scraped from the pane; `"off"` disables it.
 
 ## Voice transcription
 
