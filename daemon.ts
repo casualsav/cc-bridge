@@ -23,6 +23,16 @@ import {
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
 import { detectUserPrompt, isSubmitScreen, stripAnsi, type PromptInfo, type PromptOption } from './prompt.ts'
+import { resolveTranscript, finalReplyForInjected } from './transcript.ts'
+
+// Off-MCP outbound (experimental): instead of the agent calling the MCP reply tool,
+// the daemon reads its reply from the session transcript and relays it — lets a session
+// run with NO telegram MCP loaded (reclaims the per-request tool/instruction context).
+const TRANSCRIPT_OUTBOUND = (process.env.TELEGRAM_TRANSCRIPT_OUTBOUND ?? '') === '1'
+// Pin focus to a specific pane (no shim subscribe needed) — lets the daemon drive a
+// plugin-less session for off-MCP testing/standalone use. When set, shim subscribes
+// register but don't steal this focus.
+const FORCE_PANE = process.env.TELEGRAM_FORCE_PANE || null
 
 const exec = promisify(execFile)
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
@@ -355,7 +365,12 @@ class TypingPresence {
     const chats = [...this.targets.keys()]
     const finished = this.sawWorking
     this.clearAll()
-    if (finished) maybeNotifyIdle(chats)
+    // Off-MCP: relay the agent's reply from the transcript; otherwise (MCP mode) the
+    // agent replied via the reply tool, so just ping "finished" if it didn't.
+    if (finished) {
+      if (TRANSCRIPT_OUTBOUND) relayTranscriptReply()
+      else maybeNotifyIdle(chats)
+    }
   }
 
   private clearAll(): void {
@@ -796,13 +811,70 @@ function formatChannelBlock(params: InboundParams): string {
 // keystrokes. A failed inject (pane died mid-send) re-buffers for the next session.
 let inboundInjectChain: Promise<unknown> = Promise.resolve()
 function enqueueInboundInject(paneId: string, watcher: PaneWatcher, params: InboundParams): void {
-  const run = () => injectPaste(paneId, watcher, formatChannelBlock(params))
+  const block = formatChannelBlock(params)
+  const run = () => injectPaste(paneId, watcher, block)
     .then(ok => {
-      if (ok) process.stderr.write(`daemon: inbound injected to pane ${paneId} chat=${params.meta.chat_id}\n`)
+      if (ok) {
+        process.stderr.write(`daemon: inbound injected to pane ${paneId} chat=${params.meta.chat_id}\n`)
+        // Off-MCP: remember what we injected so the turn-finished hook can read the
+        // agent's reply to *this* message out of the transcript and relay it.
+        if (TRANSCRIPT_OUTBOUND) pendingTranscriptReply = { paneId, injectedText: block, chats: [params.meta.chat_id] }
+      }
       else { process.stderr.write(`daemon: inbound inject no-op (pane ${paneId} gone) — buffering\n`); bufferEvent(params) }
     })
     .catch(err => process.stderr.write(`daemon: inbound inject failed: ${err}\n`))
   inboundInjectChain = inboundInjectChain.then(run, run)
+}
+
+// ---- Off-MCP outbound: relay the agent's reply from the transcript ----
+
+// The injected message awaiting a reply, set on inject and consumed when the turn goes
+// idle. Only the latest is tracked — replies are relayed per finished turn.
+let pendingTranscriptReply: { paneId: string; injectedText: string; chats: string[] } | null = null
+
+async function paneCwd(paneId: string): Promise<string | null> {
+  try {
+    const { stdout } = await exec('tmux', ['display-message', '-p', '-t', paneId, '#{pane_current_path}'], { timeout: 2000 })
+    return stdout.trim() || null
+  } catch { return null }
+}
+
+// Send agent markdown to chats using the same render/chunk path as the reply tool.
+async function sendAgentText(chats: string[], text: string): Promise<void> {
+  const access = loadAccess()
+  const render = access.renderMarkdown !== false
+  const limit = Math.max(1, Math.min(access.textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT))
+  const chunks = render ? chunkHtml(mdToTelegramHtml(text), limit) : chunk(text, limit, access.chunkMode ?? 'length')
+  for (const chat_id of chats) {
+    for (const c of chunks) {
+      await bot.api.sendMessage(chat_id, c, render ? { parse_mode: 'HTML' } : {}).catch(e => process.stderr.write(`daemon: transcript relay send failed: ${e}\n`))
+    }
+  }
+}
+
+// A Telegram-initiated turn finished: read the agent's reply (the final text block of
+// its response to the injected message) from the transcript and relay it. Re-checks
+// after a short delay so the transcript has flushed and the pane isn't mid-spinner.
+function relayTranscriptReply(): void {
+  const pending = pendingTranscriptReply
+  pendingTranscriptReply = null
+  if (!pending) return
+  let tries = 0
+  const attempt = async () => {
+    let cap = ''
+    try { cap = await capturePane(pending.paneId) } catch { return }
+    // The tick fires after sustained idle, so this usually passes first try; poll a few
+    // times in case the agent resumed (e.g. a tool call) before settling for good.
+    if ((detectWorking(cap) || detectLimited(cap)) && ++tries < 20) { setTimeout(attempt, 1500); return }
+    const cwd = await paneCwd(pending.paneId)
+    const file = cwd ? resolveTranscript(cwd) : null
+    if (!file) { process.stderr.write(`daemon: transcript-outbound: no transcript for cwd=${cwd}\n`); return }
+    const reply = finalReplyForInjected(file, pending.injectedText)
+    if (!reply) { process.stderr.write(`daemon: transcript-outbound: no reply text found in ${file}\n`); return }
+    process.stderr.write(`daemon: transcript-outbound relaying ${reply.length} chars to ${pending.chats.join(',')}\n`)
+    await sendAgentText(pending.chats, reply)
+  }
+  setTimeout(attempt, 1500)
 }
 
 // Deliver an inbound Telegram message to the focused session. Claude Code only lets
@@ -2518,7 +2590,10 @@ function handleShimConnection(socket: net.Socket): void {
 
           // Focus it only when nothing valid holds focus (the first/only session, or
           // a reconnect of the focused pane). Otherwise announce — never steal focus.
-          if (currentSessionId === null || currentSessionId === sessionId || !sessions.has(currentSessionId)) {
+          // A pinned pane (FORCE_PANE) holds focus regardless.
+          if (FORCE_PANE) {
+            process.stderr.write(`daemon: session ${sessionId} registered (focus pinned to ${FORCE_PANE})\n`)
+          } else if (currentSessionId === null || currentSessionId === sessionId || !sessions.has(currentSessionId)) {
             setFocus(sessionId)
             replayBuffer()
           } else {
@@ -2643,6 +2718,15 @@ await new Promise<void>((resolve, reject) => {
     reject(err)
   })
 })
+
+// Off-MCP standalone: pin focus to the configured pane so transcript-outbound can drive
+// a plugin-less session immediately, without waiting for a shim subscribe.
+if (FORCE_PANE) {
+  currentSessionId = FORCE_PANE
+  activePaneId = FORCE_PANE
+  startPaneWatcher(FORCE_PANE)
+  process.stderr.write(`daemon: focus pinned to ${FORCE_PANE} (TELEGRAM_FORCE_PANE)\n`)
+}
 
 // Re-arm any persisted usage-limit reset reminder across the restart.
 loadScheduledReset()
