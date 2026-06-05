@@ -903,13 +903,15 @@ function progressActive(): boolean {
   return currentProgress !== null
 }
 
+// Episodic progress for a multi-step plan: one large block per phase, filled as each step
+// completes. Calm by design — it only moves when a phase finishes, not on a running %.
 function renderProgressBar(p: Progress, done: boolean): string {
-  const frac = p.total > 0 ? Math.max(0, Math.min(1, p.cur / p.total)) : 0
-  const slots = 14, filled = Math.round(frac * slots)
-  const bar = '▰'.repeat(filled) + '▱'.repeat(slots - filled)
+  const total = Math.max(1, p.total)
+  const cur = Math.max(0, Math.min(total, p.cur))
+  const blocks = '🟩'.repeat(cur) + '⬜'.repeat(total - cur)
   const head = done ? '✅ <b>Done</b>' : '⏳ <b>Working…</b>'
   const label = p.label ? ` · ${escapeHtml(p.label)}` : ''
-  return `${head}\n<code>${bar}</code> ${Math.round(frac * 100)}% · ${p.cur}/${p.total}${label}`
+  return `${head}\n${blocks} ${cur}/${total}${label}`
 }
 
 function mirrorMode(): 'tools' | 'digest' | 'off' {
@@ -1467,6 +1469,12 @@ function promptHash(prompt: PromptInfo): string {
   return hashText(prompt.question + '|' + prompt.options.map(o => o.label).join('|'))
 }
 
+// Telegram sizes a bubble to the wider of its text or its inline keyboard. Permission and
+// question prompts have short lines + narrow buttons, so they render skinnier than a normal
+// message. A trailing line of braille-blank (U+2800) padding — invisible but width-bearing —
+// snaps the bubble out to a normal width without showing any stray characters.
+const WIDTH_PAD = '\n' + '⠀'.repeat(40)
+
 // Render a prompt as Telegram HTML: bold question, then each numbered option with
 // its description (if any) as a blockquote beneath it.
 function renderPromptHtml(prompt: PromptInfo): string {
@@ -1481,7 +1489,7 @@ function renderPromptHtml(prompt: PromptInfo): string {
   // The "Type something" button only rides on the single-select keyboard; multi-select
   // shows checkboxes + Submit (no free-text button), so don't advertise it there.
   if (prompt.freeText && !prompt.multiSelect) lines.push('', '✏️ <i>…or tap “Type something” to write your own answer.</i>')
-  return lines.join('\n')
+  return lines.join('\n') + WIDTH_PAD
 }
 
 // Permission request as a self-contained message: the tool name as the heading,
@@ -1590,7 +1598,7 @@ async function relayPermissionToTelegram(perm: PermissionPrompt): Promise<void> 
 
   const parts = [`🔐 <b>${escapeHtml(perm.question)}</b>`]
   if (perm.preview) parts.push(`<blockquote>${escapeHtml(perm.preview)}</blockquote>`)
-  const body = parts.join('\n')
+  const body = parts.join('\n') + WIDTH_PAD
 
   const kb = new InlineKeyboard()
   for (const opt of perm.options) kb.text(permButtonLabel(opt), `pperm:${opt.n}`).row()
@@ -2048,7 +2056,7 @@ async function doStop(ctx: Context): Promise<void> {
 // Mode picker — a button per mode (current marked ●) plus a quick-switch tip. Shared by /mode
 // and the 🔄 Mode button; the mode:set:<mode> callback applies a tapped choice.
 const MODES: CcMode[] = ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions']
-const MODE_TIP = '💡 Tip: use /default, /acceptedits, /plan, /auto, /bypass for fast switching.'
+const MODE_TIP = '💡 Tip: use /default, /acceptedits, /plan, /auto, /bypass for fast switching'
 
 function modePickerKeyboard(current: CcMode): InlineKeyboard {
   const kb = new InlineKeyboard()
@@ -2106,7 +2114,8 @@ function stripCommonIndent(lines: string[]): string {
 }
 
 // /context renders inline as a "⎿ Context Usage …" block after the command echo — pull the
-// whole block (it can run past one screen, hence a scrollback capture upstream).
+// whole block (it can run past one screen, hence a scrollback capture upstream), then reflow
+// it for mobile. Falls back to the raw block if the shape isn't recognized.
 function extractContextReadout(raw: string): string | null {
   const lines = raw.split('\n').map(l => stripAnsi(l).replace(/\s+$/, '').replace('⎿', ' '))
   let start = -1
@@ -2117,7 +2126,38 @@ function extractContextReadout(raw: string): string | null {
     if (/^─{10,}/.test(lines[i].trim()) || /Press up to edit queued/i.test(lines[i])) break
     body.push(lines[i])
   }
-  return stripCommonIndent(body) || null
+  return compactContext(body) ?? (stripCommonIndent(body) || null)
+}
+
+// The raw /context block is a 2-D square grid with the per-category legend wedged to its right;
+// on a phone the wide grid rows shove the labels off-screen and wrap mid-sentence. Reflow into a
+// compact readout: a one-line usage summary + a short bar, then one category per full-width line.
+// Returns null (→ caller falls back to the raw block) if the usage figures aren't found.
+function compactContext(body: string[]): string | null {
+  const stripGrid = (l: string) => l.replace(/^(?:[^\sA-Za-z0-9(]+\s+)+/, '').trim()
+  const usageIdx = body.findIndex(l => /[\d.]+[kKmM]?\s*\/\s*[\d.]+[kKmM]?\s*tokens?\s*\(\d+%\)/.test(l))
+
+  // Each legend entry is "<Name>: <tokens> … (NN.N%)" — anchoring on the name+colon skips the
+  // leading grid squares and the category-color glyph without needing to know their codepoints.
+  const cats: string[] = []
+  for (const l of body) {
+    const m = l.match(/([A-Za-z][A-Za-z ./&-]*?):\s*([\d.]+[kKmM]?)\b[^()]*?\((\d+(?:\.\d+)?%)\)/)
+    if (m) cats.push(`• ${m[1].trim()} — ${m[2]} (${m[3]})`)
+  }
+  if (usageIdx < 0 && cats.length === 0) return null
+
+  const out: string[] = []
+  if (usageIdx >= 0) {
+    const summary = stripGrid(body[usageIdx])
+    out.push(summary)
+    const pm = summary.match(/\((\d+)%\)/)
+    if (pm) {
+      const filled = Math.round((Math.max(0, Math.min(100, Number(pm[1]))) / 100) * 10)
+      out.push('▰'.repeat(filled) + '▱'.repeat(10 - filled))
+    }
+  }
+  if (cats.length) { if (out.length) out.push(''); out.push(...cats) }
+  return out.join('\n')
 }
 
 // /cost opens a modal (tab bar "Settings Status … Stats" … "Esc to cancel") — take the body
@@ -2442,8 +2482,31 @@ async function sessionRows(): Promise<SessionRow[]> {
   return rows
 }
 
-// /session — list the connected sessions (★ = focused). /session N switches focus;
-// /session name N <label> renames one.
+// Switch focus to session #n (1-based over sessionRows). Returns the HTML confirmation, or
+// an HTML error if the number is out of range / the target can't be focused.
+async function switchSessionTo(n: number): Promise<string> {
+  const rows = await sessionRows()
+  if (n < 1 || n > rows.length) return `No session #${n}. See /session.`
+  const row = rows[n - 1]
+  if (row.current) return `Already on <b>${escapeHtml(row.label)}</b>.`
+  if (!row.shim) return 'That session is the active pane already.'
+  setFocus(row.key)
+  return `✅ Switched to <b>${escapeHtml(row.label)}</b> (<code>${row.paneId ?? 'no-tmux'}</code>).`
+}
+
+// One tappable button per session for the /session listing — ★ marks the active one,
+// ▶️ the others. Tapping fires switchsession:<#>. Four per row to stay compact.
+function sessionSwitchKeyboard(rows: SessionRow[]): InlineKeyboard {
+  const kb = new InlineKeyboard()
+  rows.forEach((r, i) => {
+    kb.text(`${r.current ? '★' : '▶️'} ${i + 1}`, `switchsession:${i + 1}`)
+    if ((i + 1) % 4 === 0) kb.row()
+  })
+  return kb
+}
+
+// /session — list the connected sessions (★ = focused). /session # switches focus;
+// /session name # <label> renames one.
 bot.command('session', async ctx => {
   if (!dmCommandGate(ctx)) return
   const arg = (ctx.match ?? '').toString().trim()
@@ -2463,12 +2526,8 @@ bot.command('session', async ctx => {
 
   const n = parseInt(arg, 10)
   if (arg && Number.isInteger(n)) {
-    if (n < 1 || n > rows.length) { await ctx.reply(`Usage: <code>/session N</code> (1–${rows.length || 1}).`, { parse_mode: 'HTML' }); return }
-    const row = rows[n - 1]
-    if (row.current) { await ctx.reply(`Already on “${row.label}”.`); return }
-    if (!row.shim) { await ctx.reply('That session is the active pane already.'); return }
-    setFocus(row.key)
-    await ctx.reply(`✅ Switched to <b>${escapeHtml(row.label)}</b> (<code>${row.paneId ?? 'no-tmux'}</code>).`, { parse_mode: 'HTML' })
+    if (n < 1 || n > rows.length) { await ctx.reply(`Usage: <code>/session #</code> (1–${rows.length || 1}).`, { parse_mode: 'HTML' }); return }
+    await ctx.reply(await switchSessionTo(n), { parse_mode: 'HTML' })
     return
   }
 
@@ -2476,8 +2535,8 @@ bot.command('session', async ctx => {
   const lines = rows.map((r, i) => `${i + 1}. ${r.current ? '★ ' : ''}<b>${escapeHtml(r.label)}</b>  <code>${r.paneId ?? 'no-tmux'}</code>`)
   await ctx.reply(
     `🗂 <b>Sessions</b> (★ = active):\n${lines.join('\n')}\n\n` +
-    `<code>/session N</code> to switch · <code>/session name N label</code> to rename.`,
-    { parse_mode: 'HTML' })
+    `Tap a number below, or <code>/session #</code> to switch · <code>/session name # label</code> to rename.`,
+    { parse_mode: 'HTML', reply_markup: sessionSwitchKeyboard(rows) })
 })
 
 // Interrupt the current turn by sending Esc to the pane (same as pressing Esc
@@ -2601,6 +2660,21 @@ bot.on('callback_query:data', async ctx => {
     await ctx.editMessageText('🆕 Starting a new session…').catch(() => {})
     const result = await performReset('/new')
     await ctx.editMessageText(result, { parse_mode: 'HTML' }).catch(() => {})
+    return
+  }
+
+  // Session switch button (from the /session listing) → focus that session, confirm, and
+  // refresh the listing's ★ so the keyboard stays in sync.
+  const switchMatch = /^switchsession:(\d+)$/.exec(data)
+  if (switchMatch) {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    const msg = await switchSessionTo(Number(switchMatch[1]))
+    await ctx.answerCallbackQuery().catch(() => {})
+    await ctx.editMessageReplyMarkup({ reply_markup: sessionSwitchKeyboard(await sessionRows()) }).catch(() => {})
+    await ctx.reply(msg, { parse_mode: 'HTML' }).catch(() => {})
     return
   }
 
@@ -3109,7 +3183,7 @@ function handleShimConnection(socket: net.Socket): void {
           const { request_id, tool_name, description, input_preview } = msg.params
           permissionOrigin.set(request_id, write)
           const access = loadAccess()
-          const permText = formatPermission(tool_name, description, input_preview)
+          const permText = formatPermission(tool_name, description, input_preview) + WIDTH_PAD
           const keyboard = new InlineKeyboard()
             .text('✅ Allow', `perm:allow:${request_id}`)
             .text('❌ Deny', `perm:deny:${request_id}`)
@@ -3257,7 +3331,7 @@ void (async () => {
               { command: 'menu', description: 'Show the docked control bar (/menu off to hide)' },
               { command: 'cost', description: 'Show the session cost readout' },
               { command: 'context', description: 'Show the token-context usage' },
-              { command: 'session', description: 'List sessions (/session N switch, /session name N label)' },
+              { command: 'session', description: 'List sessions (/session # switch, /session name # label)' },
               { command: 'terminal', description: 'Show recent terminal activity (/terminal [N] lines)' },
               { command: 'autocontinue', description: 'Auto-send "continue" when the limit resets (on/off)' },
               { command: 'new', description: 'Start a new session' },
