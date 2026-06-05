@@ -1234,7 +1234,13 @@ async function discoverPanes(): Promise<void> {
   for (const p of [...offMcpPanes]) if (!live.has(p)) offMcpPanes.delete(p)
 
   const haveFocus = !!activePaneId && await paneAlive(activePaneId)
-  if (!haveFocus && panes.length) adoptPane(panes[0])   // sets focus + adds to offMcpPanes
+  if (!haveFocus && panes.length) {
+    // Prefer the pane we were on before (persisted by adoptPane) if it's still a live
+    // candidate, so focus survives a daemon restart instead of snapping back to panes[0].
+    let prev = ''
+    try { prev = readFileSync(ADOPTED_PANE_FILE, 'utf8').trim() } catch {}
+    adoptPane(panes.includes(prev) ? prev : panes[0])   // sets focus + adds to offMcpPanes
+  }
 
   for (const p of panes) {
     if (p === activePaneId) { offMcpPanes.add(p); continue }
