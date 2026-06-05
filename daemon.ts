@@ -1171,7 +1171,7 @@ function adoptPane(paneId: string): void {
   let prev = ''
   try { prev = readFileSync(ADOPTED_PANE_FILE, 'utf8').trim() } catch {}
   try { writeFileSync(ADOPTED_PANE_FILE, paneId, { mode: 0o600 }) } catch {}
-  if (prev !== paneId) notifyChats(`🔗 Connected to the Claude session in pane ${paneId}.`)
+  if (prev !== paneId) notifyChats(`🔗 Connected to the Claude session.`)
 }
 
 // Point the bridge at an off-MCP pane (no shim socket): drive it directly and read its
@@ -2665,8 +2665,10 @@ const newSessionReplyTargets = new Set<string>()   // `${chatId}:${messageId}` o
 
 async function resolveNewSessionDir(input: string): Promise<string> {
   const t = input.trim()
-  if (!t || t === '~') return homedir()
-  if (/^here$/i.test(t) || t === '.') return (activePaneId && await paneCwd(activePaneId)) || homedir()
+  const here = async () => (activePaneId && await paneCwd(activePaneId)) || homedir()
+  if (!t) return here()
+  if (t === '~') return homedir()
+  if (/^here$/i.test(t) || t === '.') return here()
   if (t.startsWith('~/')) return join(homedir(), t.slice(2))
   return t
 }
@@ -2677,7 +2679,9 @@ async function spawnSession(dir: string): Promise<boolean> {
     if (activePaneId) {
       try {
         const { stdout } = await exec('tmux', ['display-message', '-p', '-t', activePaneId, '#{session_name}'], { timeout: 2000 })
-        if (stdout.trim()) target = ['-t', stdout.trim()]   // the daemon isn't inside tmux; pick the active session
+        // Trailing colon = "this session, next free window index". Without it, `-t name`
+        // is read as a target *window* and defaults to index 0 → "index 0 in use".
+        if (stdout.trim()) target = ['-t', `${stdout.trim()}:`]
       } catch {}
     }
     await exec('tmux', ['new-window', '-d', ...target, '-c', dir, 'claude --strict-mcp-config'], { timeout: 5000 })
@@ -2692,7 +2696,7 @@ async function spawnSession(dir: string): Promise<boolean> {
 async function doSessionList(ctx: Context): Promise<void> {
   const rows = await sessionRows()
   if (rows.length === 0) { await ctx.reply('No active Claude Code session.'); return }
-  const lines = rows.map((r, i) => `${i + 1}. ${r.current ? '★ ' : ''}<b>${escapeHtml(r.label)}</b>  <code>${r.paneId ?? 'no-tmux'}</code>`)
+  const lines = rows.map((r, i) => `${i + 1}. ${r.current ? '★ ' : ''}<b>${escapeHtml(r.label)}</b>`)
   await ctx.reply(
     `🗂 <b>Sessions</b> (★ = active):\n${lines.join('\n')}\n\n` +
     `Tap a number below, or <code>/session #</code> to switch · <code>/session name # label</code> to rename.`,
@@ -2871,7 +2875,8 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
-  // "➕ New session" button → ask for a folder via force-reply; the reply spawns the session.
+  // "➕ New session" button → turn the sessions list in place into a folder chooser:
+  // This folder / Home / Specify. The first two spawn immediately; Specify drops a force-reply.
   if (data === 'newsession') {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
@@ -2879,14 +2884,47 @@ bot.on('callback_query:data', async ctx => {
     }
     await ctx.answerCallbackQuery().catch(() => {})
     const cwd = activePaneId ? await paneCwd(activePaneId) : null
-    const hereLine = cwd
-      ? `<code>Here</code> = current folder (<code>${escapeHtml(cwd)}</code>)`
-      : '<code>Here</code> = current session’s folder'
-    const sent = await ctx.reply(`📂 New session — reply with a folder path.\n${hereLine} · empty = home`, {
-      parse_mode: 'HTML',
-      reply_markup: { force_reply: true, input_field_placeholder: 'Folder (Here = current, empty = home)' },
-    }).catch(() => null)
-    if (sent) newSessionReplyTargets.add(`${ctx.chat?.id}:${sent.message_id}`)
+    const currentLine = cwd
+      ? `Current: <code>${escapeHtml(cwd)}</code>`
+      : 'Current: <i>current session’s folder</i>'
+    const kb = new InlineKeyboard()
+      .text('📁 This folder', 'newsession:here')
+      .text('🏠 Home', 'newsession:home')
+      .text('✏️ Specify', 'newsession:specify')
+    await ctx.editMessageText(`📂 <b>New session — choose folder</b>\n\n${currentLine}`, {
+      parse_mode: 'HTML', reply_markup: kb,
+    }).catch(() => {})
+    return
+  }
+
+  // Folder chooser buttons. here/home spawn straight away (editing the chooser into a
+  // confirmation); specify drops a force-reply for a typed path.
+  const nsMatch = /^newsession:(here|home|specify)$/.exec(data)
+  if (nsMatch) {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    await ctx.answerCallbackQuery().catch(() => {})
+    if (nsMatch[1] === 'specify') {
+      const cwd = activePaneId ? await paneCwd(activePaneId) : null
+      const currentLine = cwd
+        ? `Current: <code>${escapeHtml(cwd)}</code>`
+        : 'Current: <i>current session’s folder</i>'
+      const sent = await ctx.reply(`📂 <b>New session — choose folder</b>\n\n${currentLine}\n\nReply with a folder path · empty = current folder`, {
+        parse_mode: 'HTML',
+        reply_markup: { force_reply: true, input_field_placeholder: 'Folder path (empty = current folder)' },
+      }).catch(() => null)
+      if (sent) newSessionReplyTargets.add(`${ctx.chat?.id}:${sent.message_id}`)
+      await ctx.editMessageReplyMarkup().catch(() => {})   // chooser is spent — strip its buttons
+      return
+    }
+    const dir = nsMatch[1] === 'home' ? homedir() : await resolveNewSessionDir('')
+    const ok = await spawnSession(dir)
+    await ctx.editMessageText(ok
+      ? `🚀 Starting a new session in <code>${escapeHtml(dir)}</code> — it'll pop up here with a ▶️ Switch button shortly.`
+      : `❌ Couldn't start a session in <code>${escapeHtml(dir)}</code> — does that folder exist?`,
+      { parse_mode: 'HTML' }).catch(() => {})
     return
   }
 
@@ -3424,13 +3462,15 @@ function handleShimConnection(socket: net.Socket): void {
             process.stderr.write(`daemon: session ${sessionId} registered (focus pinned to ${FORCE_PANE})\n`)
           } else if (adoptionHolds) {
             const idx = orderedSessions().findIndex(o => o.id === sessionId) + 1
-            notifyChats(`🆕 New session available — #${idx} “${label}”. Switch with /session ${idx}.`)
+            notifyChats(`🆕 New Claude session: <b>${escapeHtml(label)}</b> (session ${idx})`,
+              { reply_markup: new InlineKeyboard().text(`▶️ Switch to ${label}`, `switchsession:${idx}`), parse_mode: 'HTML' })
           } else if (currentSessionId === null || currentSessionId === sessionId || !sessions.has(currentSessionId)) {
             setFocus(sessionId)
             replayBuffer()
           } else {
             const idx = orderedSessions().findIndex(o => o.id === sessionId) + 1
-            notifyChats(`🆕 New session available — #${idx} “${label}”. Switch with /session ${idx}.`)
+            notifyChats(`🆕 New Claude session: <b>${escapeHtml(label)}</b> (session ${idx})`,
+              { reply_markup: new InlineKeyboard().text(`▶️ Switch to ${label}`, `switchsession:${idx}`), parse_mode: 'HTML' })
           }
           break
         }
