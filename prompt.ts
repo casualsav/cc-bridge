@@ -191,3 +191,72 @@ export function detectUserPrompt(paneText: string): PromptInfo | null {
   const tabbed = TABBED_HINT.test(lines[footerIdx])
   return { question, options, multiSelect, tabbed, freeText, chat }
 }
+
+// ---- Permission / confirmation prompts (a different shape from select menus) ----
+// CC asks "Do you want to <create file / run cmd / fetch …>?" with numbered Yes / Yes-
+// allow-all / No options and a footer "Esc to cancel · Tab to amend" — note the footer
+// carries NO "Enter to select / ↑↓" wording, so detectUserPrompt never matches it. The
+// off-MCP daemon relays these so the user can approve/deny from Telegram without the
+// terminal. `preview` is a best-effort one-glance summary of what's being approved.
+export type PermissionOption = { n: number; label: string }
+export type PermissionPrompt = { question: string; preview: string; options: PermissionOption[] }
+
+const PERM_FOOTER = /esc to cancel\s*·\s*tab to amend/i
+const PERM_QUESTION = /^(do you want to .+\?)$/i
+const PERM_OPT = /^\s*(?:❯\s*)?(\d+)\.\s+(.+?)\s*$/
+// A dashed diff divider (skipped inside the preview); a solid ──── box rule ends it.
+const DASH_DIVIDER = /^[\s╌┄┈─—-]*$/
+const SOLID_RULE = /^[\s─]{4,}$/
+
+export function detectPermissionPrompt(paneText: string): PermissionPrompt | null {
+  const lines = paneText.split('\n').map(l => stripAnsi(l).trimEnd())
+
+  // The permission footer, at the very bottom (≤1 non-blank line below → live, not a
+  // scrolled-up past prompt).
+  let footerIdx = -1
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (PERM_FOOTER.test(lines[i])) { footerIdx = i; break }
+  }
+  if (footerIdx === -1) return null
+  let belowNonBlank = 0
+  for (let i = footerIdx + 1; i < lines.length; i++) if (lines[i].trim()) belowNonBlank++
+  if (belowNonBlank > 1) return null
+
+  // Numbered options directly above the footer.
+  const options: PermissionOption[] = []
+  let topOptIdx = -1
+  for (let i = footerIdx - 1; i >= 0; i--) {
+    if (!lines[i].trim()) { if (options.length) break; else continue }
+    const m = lines[i].match(PERM_OPT)
+    if (m) { options.unshift({ n: Number(m[1]), label: m[2].trim() }); topOptIdx = i; continue }
+    break
+  }
+  if (options.length < 2 || topOptIdx < 0) return null
+  // Require the Yes…/No shape so a numbered text list can't masquerade as a permission.
+  const labels = options.map(o => o.label.toLowerCase())
+  if (!labels.some(l => l.startsWith('yes')) || !labels.some(l => l.startsWith('no'))) return null
+
+  // The "Do you want …?" question just above the options.
+  let question = '', questionIdx = -1
+  for (let i = topOptIdx - 1; i >= 0; i--) {
+    const t = lines[i].trim()
+    if (!t) continue
+    const m = t.match(PERM_QUESTION)
+    if (m) { question = m[1].trim(); questionIdx = i }
+    break
+  }
+  if (!question) return null
+
+  // Preview: the action block above the question — clean lines up to the box's solid rule
+  // or the ● tool header, skipping dashed diff rulers. Best-effort, capped.
+  const preview: string[] = []
+  for (let i = questionIdx - 1; i >= 0 && preview.length < 8; i--) {
+    const raw = lines[i]
+    if (SOLID_RULE.test(raw) || /^\s*●/.test(raw)) break
+    if (DASH_DIVIDER.test(raw)) continue
+    const clean = raw.replace(/^[\s│╭╮╰╯>]*/, '').replace(/[\s│]*$/, '').trim()
+    if (clean) preview.unshift(clean)
+  }
+
+  return { question, preview: preview.join('\n').slice(0, 400), options }
+}

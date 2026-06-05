@@ -22,7 +22,7 @@ import {
 // replace a daemon left running stale code after a plugin upgrade.
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
-import { detectUserPrompt, isSubmitScreen, stripAnsi, type PromptInfo, type PromptOption } from './prompt.ts'
+import { detectUserPrompt, detectPermissionPrompt, isSubmitScreen, stripAnsi, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
 import { resolveTranscript, latestFinalReply } from './transcript.ts'
 
 // Off-MCP outbound (experimental): instead of the agent calling the MCP reply tool,
@@ -477,12 +477,13 @@ function hashText(s: string): string {
 async function verifyPromptClosed(): Promise<void> {
   if (!activePaneId || !paneWatcher) return
   const cap = await capturePane(activePaneId).catch(() => '')
-  if (!cap || !detectUserPrompt(cap)) return
+  if (!cap || (!detectUserPrompt(cap) && !detectPermissionPrompt(cap))) return
   await paneWatcher.withInjection(async () => {
     await sendKeys(activePaneId!, ['Escape'])
     await waitForSettle(activePaneId!, 200, 1500)
   })
   lastRelayedPromptHash = ''
+  lastRelayedPermissionHash = ''
   notifyChats('⚠️ That answer didn’t register cleanly in the session — I dismissed the prompt so the terminal wouldn’t hang. Please try again.')
 }
 
@@ -746,6 +747,7 @@ function setFocus(sessionId: string | null): void {
   activeShim = s ? { socket: s.socket, write: s.write } : null
   activePaneId = s?.paneId ?? null
   lastRelayedPromptHash = ''
+  lastRelayedPermissionHash = ''
   lastRelayedAuthUrl = ''
   if (activePaneId) { startPaneWatcher(activePaneId); startRelayLoop() }
 }
@@ -783,6 +785,7 @@ function notifyChats(text: string): void {
 
 // Tracks the last prompt sent to Telegram to avoid double-relay.
 let lastRelayedPromptHash = ''
+let lastRelayedPermissionHash = ''
 
 // In-flight multi-select prompts, keyed by `${chatId}:${messageId}` of the relayed
 // Telegram message. Each tap toggles an index in `selected`; Submit replays the
@@ -1305,6 +1308,19 @@ function onPaneEvent(text: string): void {
     }
   }
 
+  // Permission prompts ("Do you want to …?") have their own footer and detector, so they
+  // never collide with the select-menu path. Relay them so the user can approve/deny from
+  // Telegram — the whole point of off-MCP is never needing the terminal.
+  const perm = detectPermissionPrompt(text)
+  if (perm) {
+    const ph = hashText(perm.question + '|' + perm.preview + '|' + perm.options.map(o => o.label).join('|'))
+    if (ph !== lastRelayedPermissionHash) {
+      lastRelayedPermissionHash = ph
+      void relayPermissionToTelegram(perm)
+    }
+    return
+  }
+
   const prompt = detectUserPrompt(text)
   if (!prompt) return
   const h = promptHash(prompt)
@@ -1420,6 +1436,39 @@ async function relayPromptToTelegram(prompt: PromptInfo): Promise<void> {
       }
     } catch (e) {
       process.stderr.write(`daemon: prompt relay to ${chat_id} failed: ${e}\n`)
+    }
+  }
+}
+
+// An option's button face: a leading emoji by intent (Yes / Yes-allow-all / No), the label
+// trimmed of its "(shift+tab)" hint and capped so it fits a Telegram button.
+function permButtonLabel(opt: { n: number; label: string }): string {
+  const bare = opt.label.replace(/\s*\([^)]*\)\s*$/, '').trim()
+  const low = bare.toLowerCase()
+  const icon = low === 'yes' ? '✅' : low.startsWith('yes') ? '🔁' : low.startsWith('no') ? '❌' : '•'
+  const short = bare.length > 38 ? bare.slice(0, 37) + '…' : bare
+  return `${icon} ${short}`
+}
+
+// Relay a permission prompt to Telegram: the question, a short preview of what's being
+// approved, and a button per option (callback pperm:<n>) that injects that choice into the
+// pane. One button per row — the labels (esp. "allow all this session") are long.
+async function relayPermissionToTelegram(perm: PermissionPrompt): Promise<void> {
+  const targets = loadAccess().allowFrom
+  if (targets.length === 0 || !activePaneId) return
+
+  const parts = [`🔐 <b>${escapeHtml(perm.question)}</b>`]
+  if (perm.preview) parts.push(`<blockquote>${escapeHtml(perm.preview)}</blockquote>`)
+  const body = parts.join('\n')
+
+  const kb = new InlineKeyboard()
+  for (const opt of perm.options) kb.text(permButtonLabel(opt), `pperm:${opt.n}`).row()
+
+  for (const chat_id of targets) {
+    try {
+      await bot.api.sendMessage(chat_id, body, { parse_mode: 'HTML', reply_markup: kb })
+    } catch (e) {
+      process.stderr.write(`daemon: permission relay to ${chat_id} failed: ${e}\n`)
     }
   }
 }
@@ -2317,6 +2366,29 @@ bot.on('callback_query:data', async ctx => {
   }
 
   // Prompt answer buttons
+  // Permission-prompt answer: inject the chosen digit (Yes / allow-all / No) + Enter.
+  const ppermMatch = /^pperm:(\d+)$/.exec(data)
+  if (ppermMatch) {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    if (!activePaneId || !paneWatcher) {
+      await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {})
+      return
+    }
+    const num = ppermMatch[1]
+    await ctx.answerCallbackQuery({ text: `Answered ${num}` }).catch(() => {})
+    await paneWatcher.withInjection(async () => {
+      await sendKeys(activePaneId!, [num, 'Enter'])
+      await waitForSettle(activePaneId!, 300, 5000)
+    })
+    lastRelayedPermissionHash = ''  // allow the next permission prompt to relay
+    await ctx.editMessageReplyMarkup().catch(() => {})  // drop the buttons — the answer landed
+    await verifyPromptClosed()
+    return
+  }
+
   const promptMatch = /^prompt:(\d+)$/.exec(data)
   if (promptMatch) {
     const access = loadAccess()
