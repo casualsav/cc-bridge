@@ -977,11 +977,15 @@ async function buildMirrorText(done: boolean): Promise<string | null> {
 }
 
 // While working, post/refresh the mirror; freeze it when the turn settles.
-async function updateTerminalMirror(idle: boolean): Promise<void> {
+// `settled` = the turn is really over (sustained idle), NOT a single idle tick — a turn
+// flickers idle between tool calls, and finalizing on those would end the message and start a
+// fresh one on the next call (the "multiple working messages" bug). Caller passes the same
+// 2-tick streak the reply relay uses.
+async function updateTerminalMirror(settled: boolean): Promise<void> {
   if (mirrorMode() === 'off' && !progressActive()) { if (mirrorMsgIds.size) await finalizeTerminalMirror(); return }
   // An active progress bar owns its own lifecycle (the agent ends it with `tg progress done`,
-  // or it expires), so a brief idle between the agent's tool calls must NOT finalize it.
-  if (idle && !progressActive()) { await finalizeTerminalMirror(); return }
+  // or it expires), so it isn't finalized here either.
+  if (settled && !progressActive()) { await finalizeTerminalMirror(); return }
 
   const text = await buildMirrorText(false)
   if (!text) return
@@ -1035,8 +1039,9 @@ async function relayLoopTick(gen: number): Promise<void> {
   const idle = cap !== '' && !detectWorking(cap) && !detectLimited(cap)
   relayIdleStreak = idle ? relayIdleStreak + 1 : 0
 
-  // Live terminal mirror: a digest of Claude's recent ● blocks (captures its own scrollback).
-  await updateTerminalMirror(idle).catch(() => {})
+  // Live activity mirror — finalize only when the turn is settled (2-tick streak), so brief
+  // idle gaps between tool calls don't spawn a fresh status message each time.
+  await updateTerminalMirror(relayIdleStreak >= 2).catch(() => {})
 
   if (relayIdleStreak >= 2) {
     const cwd = await paneCwd(paneId)
