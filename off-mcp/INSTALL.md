@@ -12,6 +12,8 @@ the single restart in Step 3 brings everything up already configured.
 ## 0. Prerequisites
 - [Bun](https://bun.sh) on PATH and `tmux` (the daemon drives sessions through tmux panes).
 - A Telegram bot token from [@BotFather](https://t.me/BotFather).
+- **Platform:** Linux or macOS. On Windows, run inside [WSL2](https://learn.microsoft.com/windows/wsl/)
+  (native Windows has no `tmux`).
 
 ## 1. Interview the human and write the config (before any restart)
 Ask these one by one (don't assume defaults silently — confirm each), then write the two

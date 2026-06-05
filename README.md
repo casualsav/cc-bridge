@@ -86,6 +86,15 @@ Telegram  ⇄  daemon.ts  ⇄  shim.ts (MCP server)  ⇄  Claude Code session
   session pane). Core messaging works without it.
 - Optional, for local voice transcription: `faster-whisper` (a venv is fine).
 
+### Platform support
+
+- **Linux** — fully supported.
+- **macOS** — fully supported (off-MCP pane discovery reads process args via `ps`
+  where there's no `/proc`).
+- **Windows** — via **[WSL2](https://learn.microsoft.com/windows/wsl/)** only; it's a
+  real Linux environment, so everything works as on Linux. Native Windows is not
+  supported (no `tmux`, which the daemon relies on to drive the session pane).
+
 ## Install
 
 This is a Claude Code plugin. Add it and install:
