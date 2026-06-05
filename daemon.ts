@@ -2666,7 +2666,7 @@ const newSessionReplyTargets = new Set<string>()   // `${chatId}:${messageId}` o
 async function resolveNewSessionDir(input: string): Promise<string> {
   const t = input.trim()
   if (!t || t === '~') return homedir()
-  if (t === '.') return (activePaneId && await paneCwd(activePaneId)) || homedir()
+  if (/^here$/i.test(t) || t === '.') return (activePaneId && await paneCwd(activePaneId)) || homedir()
   if (t.startsWith('~/')) return join(homedir(), t.slice(2))
   return t
 }
@@ -2878,9 +2878,9 @@ bot.on('callback_query:data', async ctx => {
       return
     }
     await ctx.answerCallbackQuery().catch(() => {})
-    const sent = await ctx.reply('📂 New session — reply with a folder path.\n<code>.</code> = current session’s folder · empty = home', {
+    const sent = await ctx.reply('📂 New session — reply with a folder path.\n<code>Here</code> = current session’s folder · empty = home', {
       parse_mode: 'HTML',
-      reply_markup: { force_reply: true, input_field_placeholder: 'Folder (. = current, empty = home)' },
+      reply_markup: { force_reply: true, input_field_placeholder: 'Folder (Here = current, empty = home)' },
     }).catch(() => null)
     if (sent) newSessionReplyTargets.add(`${ctx.chat?.id}:${sent.message_id}`)
     return
