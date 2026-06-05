@@ -1182,8 +1182,9 @@ function focusOffMcpPane(paneId: string): void {
 // Announce a newly discovered sibling pane with a one-tap switch button — never steals focus.
 async function announceNewSession(paneId: string): Promise<void> {
   const label = await paneLabel(paneId)
+  const n = await sessionNumber(paneId)
   const kb = new InlineKeyboard().text(`▶️ Switch to ${label}`, `adoptpane:${paneId}`)
-  notifyChats(`🆕 New Claude session: <b>${escapeHtml(label)}</b> (<code>${paneId}</code>).`,
+  notifyChats(`🆕 New Claude session: <b>${escapeHtml(label)}</b>${n ? ` (session ${n})` : ''}`,
     { reply_markup: kb, parse_mode: 'HTML' })
 }
 
@@ -2518,6 +2519,12 @@ async function sessionRows(): Promise<SessionRow[]> {
   return rows
 }
 
+// 1-based position of a session key in the list — the number users see in /session.
+async function sessionNumber(key: string): Promise<number | null> {
+  const i = (await sessionRows()).findIndex(r => r.key === key)
+  return i >= 0 ? i + 1 : null
+}
+
 // Switch focus to session #n (1-based over sessionRows). Returns the HTML confirmation, or
 // an HTML error if the number is out of range / the target can't be focused.
 async function switchSessionTo(n: number): Promise<string> {
@@ -2525,10 +2532,10 @@ async function switchSessionTo(n: number): Promise<string> {
   if (n < 1 || n > rows.length) return `No session #${n}. See /session.`
   const row = rows[n - 1]
   if (row.current) return `Already on <b>${escapeHtml(row.label)}</b>.`
-  if (row.shim) { setFocus(row.key); return `✅ Switched to <b>${escapeHtml(row.label)}</b> (<code>${row.paneId ?? 'no-tmux'}</code>).` }
+  if (row.shim) { setFocus(row.key); return `✅ Switched to <b>${escapeHtml(row.label)}</b> (session ${n})` }
   if (!row.paneId || !(await paneAlive(row.paneId))) return 'That session’s pane is gone.'
   focusOffMcpPane(row.paneId)
-  return `✅ Switched to <b>${escapeHtml(row.label)}</b> (<code>${row.paneId}</code>).`
+  return `✅ Switched to <b>${escapeHtml(row.label)}</b> (session ${n})`
 }
 
 // One tappable button per session for the /session listing — ★ marks the active one,
@@ -2693,7 +2700,7 @@ bot.on('callback_query:data', async ctx => {
     }
     if (newMatch[1] === 'no') {
       await ctx.answerCallbackQuery({ text: 'Cancelled' }).catch(() => {})
-      await ctx.editMessageText('🆕 New session — cancelled.').catch(() => {})
+      await ctx.editMessageText('🆕 New session — cancelled').catch(() => {})
       return
     }
     if (!activePaneId || !paneWatcher) {
@@ -2740,7 +2747,8 @@ bot.on('callback_query:data', async ctx => {
     focusOffMcpPane(paneId)
     await ctx.answerCallbackQuery({ text: 'Switched.' }).catch(() => {})
     await ctx.editMessageReplyMarkup({}).catch(() => {})
-    await ctx.reply(`✅ Switched to <b>${escapeHtml(await paneLabel(paneId))}</b> (<code>${paneId}</code>).`, { parse_mode: 'HTML' }).catch(() => {})
+    const n = await sessionNumber(paneId)
+    await ctx.reply(`✅ Switched to <b>${escapeHtml(await paneLabel(paneId))}</b>${n ? ` (session ${n})` : ''}`, { parse_mode: 'HTML' }).catch(() => {})
     return
   }
 
@@ -3128,7 +3136,7 @@ bot.on('message:text', async ctx => {
     if (/^\/(exit|quit)\b/i.test(text)) {
       const label = await paneLabel(activePaneId)
       await injectSlash(activePaneId, paneWatcher, text)
-      await ctx.reply(`✅ Session <b>${escapeHtml(label)}</b> exited.`, { parse_mode: 'HTML' })
+      await ctx.reply(`✅ Session <b>${escapeHtml(label)}</b> exited`, { parse_mode: 'HTML' })
       return
     }
     void relaySlashCommand(activePaneId, paneWatcher, text, chat_id, msgId)
