@@ -576,34 +576,6 @@ async function readCurrentModel(paneId: string, watcher: PaneWatcher): Promise<s
 
 // Pull the most recent block of command output from a pane capture: the last
 // contiguous run of non-empty content lines sitting above the input box / footer.
-// Best-effort — used to relay read-only readouts (/cost, /context) back to
-// Telegram without the surrounding TUI chrome. Returns '' → null.
-function extractRecentBlock(paneText: string): string | null {
-  const lines = paneText.split('\n').map(l => stripAnsi(l).replace(/\s+$/, ''))
-  const isChrome = (l: string) =>
-    /^[─╭╮╰╯│\s]*$/.test(l) ||                                  // box border / blank
-    /^\s*[❯>]\s*$/.test(l) ||                                    // empty input cursor
-    /shift\+tab to cycle|esc to interrupt|to cycle\)/i.test(l)   // footer hint
-  let i = lines.length - 1
-  while (i >= 0 && (isChrome(lines[i]) || !lines[i].trim())) i--   // skip bottom chrome
-  if (i < 0) return null
-  const block: string[] = []
-  for (; i >= 0; i--) {
-    if (!lines[i].trim()) break                                   // blank gap ends the block
-    block.unshift(lines[i].replace(/^\s*│\s?/, '').replace(/\s*│\s*$/, ''))
-  }
-  return block.join('\n').trim() || null
-}
-
-// Inject a read-only slash command and return the block of output it renders.
-async function readSlashOutput(paneId: string, watcher: PaneWatcher, command: string): Promise<string | null> {
-  return watcher.withInjection(async () => {
-    if (!(await sendKeys(paneId, [command, 'Enter']))) return null
-    await waitForSettle(paneId, 250, 6000)
-    return extractRecentBlock(await capturePane(paneId))
-  })
-}
-
 // True while Claude Code is mid-turn. The TUI shows a spinner + "esc to
 // interrupt" footer while working and clears it when the turn ends, so the
 // footer is the ground truth. Markers are intentionally broad — detection only
@@ -2108,25 +2080,79 @@ async function doModelPicker(ctx: Context): Promise<void> {
 }
 
 // Run /cost and relay the readout it prints.
-async function doCost(ctx: Context): Promise<void> {
-  if (!dmCommandGate(ctx)) return
-  if (!activePaneId || !paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
-  const out = await readSlashOutput(activePaneId, paneWatcher, '/cost')
-  await ctx.reply(
-    out ? `📊 <b>Cost</b>\n<pre>${escapeHtml(out)}</pre>` : 'Could not read /cost output.',
-    { parse_mode: 'HTML' },
-  )
+// Strip the common left margin from a block (so a <pre> isn't pushed off-screen) while
+// keeping the inner monospace alignment; trims leading/trailing blank lines.
+function stripCommonIndent(lines: string[]): string {
+  const nonblank = lines.filter(l => l.trim())
+  if (!nonblank.length) return ''
+  const indent = Math.min(...nonblank.map(l => l.match(/^\s*/)![0].length))
+  const out = lines.map(l => l.slice(indent))
+  while (out.length && !out[0].trim()) out.shift()
+  while (out.length && !out[out.length - 1].trim()) out.pop()
+  return out.join('\n')
 }
 
-// Run /context and relay the token-usage readout it prints.
-async function doContext(ctx: Context): Promise<void> {
+// /context renders inline as a "⎿ Context Usage …" block after the command echo — pull the
+// whole block (it can run past one screen, hence a scrollback capture upstream).
+function extractContextReadout(raw: string): string | null {
+  const lines = raw.split('\n').map(l => stripAnsi(l).replace(/\s+$/, '').replace('⎿', ' '))
+  let start = -1
+  for (let i = lines.length - 1; i >= 0; i--) if (/❯\s*\/context\b/.test(lines[i])) { start = i; break }
+  if (start < 0) return null
+  const body: string[] = []
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^─{10,}/.test(lines[i].trim()) || /Press up to edit queued/i.test(lines[i])) break
+    body.push(lines[i])
+  }
+  return stripCommonIndent(body) || null
+}
+
+// /cost opens a modal (tab bar "Settings Status … Stats" … "Esc to cancel") — take the body
+// between them.
+function extractCostReadout(raw: string): string | null {
+  const lines = raw.split('\n').map(l => stripAnsi(l).replace(/\s+$/, ''))
+  let start = lines.findIndex(l => /Settings\s+Status\s+Config\s+Usage\s+Stats/.test(l))
+  start = start < 0 ? 0 : start + 1
+  let end = lines.findIndex((l, i) => i > start && /Esc to cancel/i.test(l))
+  if (end < 0) end = lines.length
+  return stripCommonIndent(lines.slice(start, end)) || null
+}
+
+// /cost (a modal) and /context (inline) are read-only readouts, but typed while Claude is
+// working they just queue — so doReadout gates on the working state and confirms before
+// interrupting; idle, it runs straight away.
+async function doReadout(ctx: Context, kind: 'cost' | 'context'): Promise<void> {
   if (!dmCommandGate(ctx)) return
   if (!activePaneId || !paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
-  const out = await readSlashOutput(activePaneId, paneWatcher, '/context')
-  await ctx.reply(
-    out ? `📐 <b>Context</b>\n<pre>${escapeHtml(out)}</pre>` : 'Could not read /context output.',
-    { parse_mode: 'HTML' },
-  )
+  if (detectWorking(await capturePane(activePaneId))) {
+    const kb = new InlineKeyboard().text('▶️ Go ahead', `readout:${kind}`).text('✖️ Cancel', 'readout:cancel')
+    await ctx.reply(`⏳ Claude is working — running /${kind} will interrupt the current turn. Go ahead?`, { reply_markup: kb })
+    return
+  }
+  await runReadout(String(ctx.chat!.id), kind)
+}
+
+// Inject the command, capture + relay its real output (chunked), and dismiss the /cost modal.
+async function runReadout(chatId: string, kind: 'cost' | 'context'): Promise<void> {
+  const paneId = activePaneId, watcher = paneWatcher
+  if (!paneId || !watcher) return
+  const raw = await watcher.withInjection(async () => {
+    await sendKeysLiteral(paneId, `/${kind}`)
+    await sendKeys(paneId, ['Enter'])
+    await waitForSettle(paneId, 400, 6000)
+    const buf = kind === 'context'
+      ? await exec('tmux', ['capture-pane', '-p', '-t', paneId, '-S', '-150', '-J'], { timeout: 3000 }).then(r => r.stdout).catch(() => '')
+      : await capturePane(paneId)
+    if (kind === 'cost') { await sendKeys(paneId, ['Escape']); await waitForSettle(paneId, 200, 2000) }  // close the modal
+    return buf
+  })
+  const out = kind === 'cost' ? extractCostReadout(raw) : extractContextReadout(raw)
+  if (!out) { await bot.api.sendMessage(chatId, `Could not read /${kind} output.`).catch(() => {}); return }
+  const title = kind === 'cost' ? '📊 <b>Cost</b>' : '📐 <b>Context</b>'
+  const limit = Math.max(1, Math.min(loadAccess().textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT))
+  for (const c of chunkHtml(`${title}\n<pre>${escapeHtml(out)}</pre>`, limit)) {
+    await bot.api.sendMessage(chatId, c, { parse_mode: 'HTML' }).catch(() => {})
+  }
 }
 
 // /session shows where the active session is: cwd, git branch (+dirty), mode, model.
@@ -2235,8 +2261,8 @@ bot.command('menu', async ctx => {
 })
 
 // /cost, /context relay session visibility info. (/session is the registry — below.)
-bot.command('cost', doCost)
-bot.command('context', doContext)
+bot.command('cost', ctx => doReadout(ctx, 'cost'))
+bot.command('context', ctx => doReadout(ctx, 'context'))
 
 // Trim a captured pane tail down to its content: strip ANSI, drop the trailing
 // input-box / footer chrome and surrounding blanks, and keep the last `maxLines`.
@@ -2491,6 +2517,33 @@ bot.on('callback_query:data', async ctx => {
     await ctx.editMessageText(`🎚 <b>Mode</b> — now ${modeLabel(reached)}\n\n${MODE_TIP}`, {
       parse_mode: 'HTML', reply_markup: modePickerKeyboard(reached),
     }).catch(() => {})
+    return
+  }
+
+  // /cost or /context confirmed while Claude was working — interrupt (Esc), then run it.
+  const readoutMatch = /^readout:(cost|context|cancel)$/.exec(data)
+  if (readoutMatch) {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    if (readoutMatch[1] === 'cancel') {
+      await ctx.answerCallbackQuery().catch(() => {})
+      await ctx.editMessageText('Cancelled.').catch(() => {})
+      return
+    }
+    if (!activePaneId || !paneWatcher) {
+      await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {})
+      return
+    }
+    const kind = readoutMatch[1] as 'cost' | 'context'
+    await ctx.answerCallbackQuery({ text: 'Interrupting…' }).catch(() => {})
+    await paneWatcher.withInjection(async () => {
+      await sendKeys(activePaneId!, ['Escape'])
+      await waitForSettle(activePaneId!, 400, 5000)
+    })
+    await ctx.editMessageText(`▶️ Interrupted — running /${kind}…`).catch(() => {})
+    await runReadout(String(ctx.chat?.id), kind)
     return
   }
 
@@ -2852,7 +2905,7 @@ bot.on('message:text', async ctx => {
   switch (text) {
     case BTN_MODE:  await doModePicker(ctx); return
     case BTN_MODEL: await doModelPicker(ctx); return
-    case BTN_COST:  await doCost(ctx); return
+    case BTN_COST:  await doReadout(ctx, 'cost'); return
     case BTN_STOP:  await doStop(ctx); return
     case BTN_NEW:   await confirmNewSession(ctx); return
   }
