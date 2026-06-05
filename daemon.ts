@@ -939,6 +939,28 @@ const mirrorMsgIds = new Map<string, number>()   // chat_id → the live mirror 
 let mirrorLastText = ''
 let mirrorLastEditAt = 0
 
+// Agent-driven progress bar. When the agent pushes progress (via `tg progress`), it takes over
+// the mirror message — a real % bar with a step label — instead of the mechanical tool/digest
+// view. The agent supplies the semantics (cur/total/label); the daemon renders + edits, so the
+// agent's token cost is just a short command. Auto-expires if the agent stops updating it.
+const PROGRESS_STALE_MS = 15 * 60_000
+type Progress = { cur: number; total: number; label: string; at: number }
+let currentProgress: Progress | null = null
+
+function progressActive(): boolean {
+  if (currentProgress && Date.now() - currentProgress.at > PROGRESS_STALE_MS) currentProgress = null
+  return currentProgress !== null
+}
+
+function renderProgressBar(p: Progress, done: boolean): string {
+  const frac = p.total > 0 ? Math.max(0, Math.min(1, p.cur / p.total)) : 0
+  const slots = 14, filled = Math.round(frac * slots)
+  const bar = '▰'.repeat(filled) + '▱'.repeat(slots - filled)
+  const head = done ? '✅ <b>Done</b>' : '⏳ <b>Working…</b>'
+  const label = p.label ? ` · ${escapeHtml(p.label)}` : ''
+  return `${head}\n<code>${bar}</code> ${Math.round(frac * 100)}% · ${p.cur}/${p.total}${label}`
+}
+
 function mirrorMode(): 'tools' | 'digest' | 'off' {
   const v = loadAccess().terminalMirror
   if (v === false || v === 'off') return 'off'
@@ -991,8 +1013,10 @@ function renderToolsMirror(acts: Activity[], done: boolean): string {
   return lines.join('\n')
 }
 
-// The mirror text for the active mode, or null when there's nothing to show yet.
+// The mirror text for the active mode, or null when there's nothing to show yet. An active
+// agent progress bar takes precedence over the mechanical tool/digest view.
 async function buildMirrorText(done: boolean): Promise<string | null> {
+  if (progressActive()) return renderProgressBar(currentProgress!, done)
   if (mirrorMode() === 'digest') {
     const raw = await mirrorCapture()
     return raw ? renderDigestMirror(raw, done) : null
@@ -1005,8 +1029,10 @@ async function buildMirrorText(done: boolean): Promise<string | null> {
 
 // While working, post/refresh the mirror; freeze it when the turn settles.
 async function updateTerminalMirror(idle: boolean): Promise<void> {
-  if (mirrorMode() === 'off') { if (mirrorMsgIds.size) await finalizeTerminalMirror(); return }
-  if (idle) { await finalizeTerminalMirror(); return }
+  if (mirrorMode() === 'off' && !progressActive()) { if (mirrorMsgIds.size) await finalizeTerminalMirror(); return }
+  // An active progress bar owns its own lifecycle (the agent ends it with `tg progress done`,
+  // or it expires), so a brief idle between the agent's tool calls must NOT finalize it.
+  if (idle && !progressActive()) { await finalizeTerminalMirror(); return }
 
   const text = await buildMirrorText(false)
   if (!text) return
@@ -1028,12 +1054,28 @@ async function updateTerminalMirror(idle: boolean): Promise<void> {
 // Freeze the open mirror on its final state and stop tracking it, so the next work burst opens
 // a fresh message. No-op if no mirror is open.
 async function finalizeTerminalMirror(): Promise<void> {
-  if (mirrorMsgIds.size === 0) return
+  if (mirrorMsgIds.size === 0) { currentProgress = null; return }
   const text = (await buildMirrorText(true)) ?? '🖥️ <b>Session</b> · idle'
   for (const [chat, mid] of mirrorMsgIds) {
     await bot.api.editMessageText(chat, mid, text, { parse_mode: 'HTML' }).catch(() => {})
   }
-  mirrorMsgIds.clear(); mirrorLastText = ''; mirrorLastEditAt = 0
+  mirrorMsgIds.clear(); mirrorLastText = ''; mirrorLastEditAt = 0; currentProgress = null
+}
+
+// Push the current state to the mirror message immediately (create or edit), bypassing the
+// tick throttle — used when the agent pushes a progress update so it shows up at once.
+async function pushMirrorNow(): Promise<void> {
+  const text = await buildMirrorText(false)
+  if (!text) return
+  mirrorLastText = text; mirrorLastEditAt = Date.now()
+  if (mirrorMsgIds.size === 0) {
+    for (const chat of loadAccess().allowFrom) {
+      try { const m = await bot.api.sendMessage(chat, text, { parse_mode: 'HTML' }); mirrorMsgIds.set(chat, m.message_id) }
+      catch (e) { process.stderr.write(`daemon: progress mirror create failed: ${e}\n`) }
+    }
+  } else {
+    for (const [chat, mid] of mirrorMsgIds) await bot.api.editMessageText(chat, mid, text, { parse_mode: 'HTML' }).catch(() => {})
+  }
 }
 
 async function relayLoopTick(gen: number): Promise<void> {
@@ -1909,6 +1951,22 @@ async function handleCall(
         )
         const msgId = typeof edited === 'object' ? edited.message_id : args.message_id
         text = `edited (id: ${msgId})`
+        break
+      }
+      case 'progress': {
+        // Agent-driven progress bar over the live mirror message (sent to allowFrom, like the
+        // mirror — no chat_id). `tg progress <cur> <total> [label]` updates; `… done [label]` ends.
+        if (args.done) {
+          if (currentProgress && args.label) currentProgress.label = String(args.label)
+          await finalizeTerminalMirror()   // renders the bar as done (buildMirrorText sees it), then clears
+          text = 'progress done'
+        } else {
+          const cur = Number(args.cur), total = Number(args.total)
+          if (!Number.isFinite(cur) || !Number.isFinite(total) || total <= 0) throw new Error('usage: tg progress <cur> <total> [label]')
+          currentProgress = { cur, total, label: (args.label as string) || '', at: Date.now() }
+          await pushMirrorNow()
+          text = `progress ${cur}/${total}`
+        }
         break
       }
       default:
