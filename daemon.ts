@@ -1140,6 +1140,8 @@ async function findOffMcpPane(): Promise<string | null> {
 // Mirror the FORCE_PANE binding for an auto-discovered pane: drive it directly, no Session
 // (there's no shim socket). Tracked in adoptedPaneId so a later shim subscribe announces
 // rather than silently stealing it.
+const ADOPTED_PANE_FILE = join(STATE_DIR, 'adopted-pane')
+
 function adoptPane(paneId: string): void {
   adoptedPaneId = paneId
   currentSessionId = paneId
@@ -1147,7 +1149,13 @@ function adoptPane(paneId: string): void {
   startPaneWatcher(paneId)
   startRelayLoop()
   process.stderr.write(`daemon: adopted off-MCP pane ${paneId} (auto-discovery)\n`)
-  notifyChats(`🔗 Connected to the Claude session in pane ${paneId}.`)
+  // Only announce a genuinely NEW pane. A daemon restart (frequent during dev, or on reboot)
+  // re-adopts the same pane and shouldn't re-ping "Connected". Persisted so it survives the
+  // restart; the next work burst's status message is enough of a signal anyway.
+  let prev = ''
+  try { prev = readFileSync(ADOPTED_PANE_FILE, 'utf8').trim() } catch {}
+  try { writeFileSync(ADOPTED_PANE_FILE, paneId, { mode: 0o600 }) } catch {}
+  if (prev !== paneId) notifyChats(`🔗 Connected to the Claude session in pane ${paneId}.`)
 }
 
 // Adopt a pane when nothing valid is driving. Runs at startup and on a slow interval, so a
