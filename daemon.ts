@@ -1371,7 +1371,7 @@ function handleUsageLimit(text: string): void {
     for (const chat_id of chats) {
       void bot.api.sendMessage(chat_id, `⛔ <b>Claude hit the usage limit.</b>\n${escapeHtml(limitLine)}${note}`, { parse_mode: 'HTML' }).catch(() => {})
     }
-    if (fireAt) scheduleReset(fireAt, chats)
+    if (fireAt) scheduleReset(fireAt + RESET_GRACE_MS, chats)
     return
   }
 
@@ -2305,39 +2305,69 @@ function parseDuration(s: string): number | null {
   return ms > 0 ? ms : null
 }
 
-function fireResetNotification(chats: string[]): void {
-  try { unlinkSync(SCHEDULED_RESET_FILE) } catch {}
-  // Auto-continue (default on): when the reset comes due, type "continue" into the
-  // session automatically so the user doesn't have to tap a button. Falls back to
-  // the manual Continue button when disabled (/autocontinue off) or no live session.
+// Claude prints a ROUNDED reset time ("resets 9:30am"), so the real reset can land a little
+// later — firing "continue" exactly then re-hits the limit. Fire a touch after the printed
+// time, then verify the session actually resumed and retry a few times if it's still frozen.
+const RESET_GRACE_MS = 90_000
+const CONTINUE_VERIFY_MS = 12_000
+const CONTINUE_RETRY_MS = 3 * 60_000
+const CONTINUE_MAX_ATTEMPTS = 5
+
+function fireResetNotification(chats: string[], attempt = 0): void {
+  // Auto-continue (default on): type "continue" into the session automatically. Falls back
+  // to the manual Continue button when disabled (/autocontinue off) or no live session.
   if (loadAccess().autoContinue !== false && activePaneId && paneWatcher) {
-    for (const chat_id of chats) {
-      void bot.api.sendMessage(chat_id, '🕛 Usage limit reset — ▶️ auto-continuing… (turn off with /autocontinue off)').catch(() => {})
-    }
-    void injectText(activePaneId, paneWatcher, 'continue')
+    const msg = attempt === 0
+      ? '🕛 Usage limit reset — ▶️ auto-continuing… (turn off with /autocontinue off)'
+      : `🔁 Still limited — retrying continue (attempt ${attempt + 1}/${CONTINUE_MAX_ATTEMPTS})…`
+    for (const chat_id of chats) void bot.api.sendMessage(chat_id, msg).catch(() => {})
+    void (async () => {
+      const ok = await injectText(activePaneId!, paneWatcher!, 'continue')
+      setTimeout(() => void verifyAutoContinue(chats, attempt, ok), CONTINUE_VERIFY_MS)
+    })()
     return
   }
+  try { unlinkSync(SCHEDULED_RESET_FILE) } catch {}
   const keyboard = new InlineKeyboard().text('▶️ Continue', 'usage:continue')
   for (const chat_id of chats) {
     void bot.api.sendMessage(chat_id, '🕛 Usage limit reset — continue?', { reply_markup: keyboard }).catch(() => {})
   }
 }
 
-function scheduleReset(fireAt: number, chats: string[]): void {
+// After auto-continue types "continue", confirm the session actually resumed. If it's still
+// showing the frozen limit banner (the reset hadn't really landed yet), reschedule a retry a
+// few minutes out — persisted + capped — instead of giving up after one early attempt.
+async function verifyAutoContinue(chats: string[], attempt: number, injected: boolean): Promise<void> {
+  const cap = activePaneId ? await capturePane(activePaneId).catch(() => '') : ''
+  const resumed = injected && !!cap && !detectLimited(cap)
+  if (resumed) {
+    try { unlinkSync(SCHEDULED_RESET_FILE) } catch {}
+    for (const chat_id of chats) void bot.api.sendMessage(chat_id, '✅ Session resumed.').catch(() => {})
+    return
+  }
+  if (attempt + 1 >= CONTINUE_MAX_ATTEMPTS) {
+    try { unlinkSync(SCHEDULED_RESET_FILE) } catch {}
+    for (const chat_id of chats) void bot.api.sendMessage(chat_id, '⚠️ Still limited after several tries — stopping auto-retry. Send "continue" once it lifts.').catch(() => {})
+    return
+  }
+  scheduleReset(Date.now() + CONTINUE_RETRY_MS, chats, attempt + 1)
+}
+
+function scheduleReset(fireAt: number, chats: string[], attempt = 0): void {
   if (resetTimer) { clearTimeout(resetTimer); resetTimer = null }
-  try { writeFileSync(SCHEDULED_RESET_FILE, JSON.stringify({ fireAt, chats }), { mode: 0o600 }) } catch {}
+  try { writeFileSync(SCHEDULED_RESET_FILE, JSON.stringify({ fireAt, chats, attempt }), { mode: 0o600 }) } catch {}
   const delay = fireAt - Date.now()
-  if (delay <= 0) { fireResetNotification(chats); return }
-  resetTimer = setTimeout(() => { resetTimer = null; fireResetNotification(chats) }, delay)
+  if (delay <= 0) { fireResetNotification(chats, attempt); return }
+  resetTimer = setTimeout(() => { resetTimer = null; fireResetNotification(chats, attempt) }, delay)
 }
 
 // Re-arm a persisted reminder on daemon startup (or fire it if it just came due).
 function loadScheduledReset(): void {
-  let data: { fireAt: number; chats: string[] }
+  let data: { fireAt: number; chats: string[]; attempt?: number }
   try { data = JSON.parse(readFileSync(SCHEDULED_RESET_FILE, 'utf8')) } catch { return }
   if (!data?.fireAt || !Array.isArray(data.chats)) { try { unlinkSync(SCHEDULED_RESET_FILE) } catch {}; return }
   if (data.fireAt < Date.now() - 10 * 60_000) { try { unlinkSync(SCHEDULED_RESET_FILE) } catch {}; return }  // missed long ago
-  scheduleReset(data.fireAt, data.chats)
+  scheduleReset(data.fireAt, data.chats, data.attempt ?? 0)
 }
 
 // /resetin <dur> schedules the reset ping; bare /resetin shows it; /resetin off cancels.
