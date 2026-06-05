@@ -1012,15 +1012,15 @@ function handleUsageLimit(text: string): void {
     return
   }
 
-  // ── Usage WARNING: one heads-up per threshold (75/95) per reset period ───────
+  // ── Usage WARNING: one heads-up per threshold (50/75/90) per reset period ────
   const warnIdx = bottom.find(i => !inBlock[i] && USAGE_WARN_RE.test(lines[i]))
   if (warnIdx === undefined) return
   const wm = lines[warnIdx].match(USAGE_WARN_RE)!
   const pct = parseInt(wm[1], 10)
-  if (pct < 75 || pct >= 100) return   // <75 not notable; 100 is a hit (handled above)
+  if (pct < 50 || pct >= 100) return   // <50 not notable; 100 is a hit (handled above)
   const type = wm[2].toLowerCase()
   const resetKey = normResetKey(wm[3])
-  const threshold = pct >= 95 ? 95 : 75
+  const threshold = pct >= 90 ? 90 : pct >= 75 ? 75 : 50
   const prev = usageWarnState.get(type)
   const firedThisPeriod = prev && prev.resetKey === resetKey ? prev.threshold : 0
   // Suppress when this period already saw ≥ this threshold, OR (backstop) we sent the
@@ -1038,7 +1038,7 @@ function handleUsageLimit(text: string): void {
   process.stderr.write(`daemon: usage warn fired type=${type} threshold=${threshold} key="${resetKey}"\n`)
   const chats = loadAccess().allowFrom
   if (chats.length === 0) return
-  const emoji = threshold >= 95 ? '🚨' : '⚠️'
+  const emoji = threshold >= 90 ? '🚨' : threshold >= 75 ? '⚠️' : 'ℹ️'
   for (const chat_id of chats) {
     void bot.api.sendMessage(chat_id, `${emoji} You've used ${threshold}% of your ${escapeHtml(type)} limit`).catch(() => {})
   }
