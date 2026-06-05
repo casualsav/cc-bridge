@@ -925,14 +925,14 @@ function renderProgressBar(p: Progress, done: boolean): string {
   return `${head}\n${blocks}${label}`
 }
 
-// Live tool-use feed. Off by default — opt in via access.json `terminalMirror: "tools"|"digest"`.
-// The mirror machinery is kept intact; only the default is disabled. The agent progress bar
-// (`tg progress`) bypasses this gate, so it still works with the feed off.
+// Live tool-use feed. On by default ('tools') — opt out via access.json
+// `terminalMirror: "off"` (or pick `"digest"`). The agent progress bar (`tg progress`)
+// takes precedence over this feed when active.
 function mirrorMode(): 'tools' | 'digest' | 'off' {
   const v = loadAccess().terminalMirror
-  if (v === 'tools') return 'tools'
+  if (v === 'off' || v === false) return 'off'
   if (v === 'digest') return 'digest'
-  return 'off'
+  return 'tools'   // unset, true, or 'tools'
 }
 
 // Claude's recent "● <text>" blocks from the pane — each leading bullet plus its indented
