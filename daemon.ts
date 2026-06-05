@@ -2084,8 +2084,8 @@ async function performReset(command: string): Promise<string> {
 async function confirmNewSession(ctx: Context): Promise<void> {
   if (!dmCommandGate(ctx)) return
   if (!activePaneId || !paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
-  const keyboard = new InlineKeyboard().text('✅ Yes', 'newconfirm:yes').text('❌ No', 'newconfirm:no')
-  await ctx.reply('🆕 Start a new session? This clears the current conversation.\n\nConfirm:', { reply_markup: keyboard })
+  const keyboard = new InlineKeyboard().text('✅ Yes, start new session', 'newconfirm:yes')
+  await ctx.reply('🆕 Start a new session? This clears the current conversation.\n\nTap to confirm:', { reply_markup: keyboard })
 }
 
 // ---- Shared actions (used by both slash commands and the control bar) ----
@@ -2097,8 +2097,8 @@ async function confirmNewSession(ctx: Context): Promise<void> {
 async function confirmStop(ctx: Context): Promise<void> {
   if (!dmCommandGate(ctx)) return
   if (!activePaneId || !paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
-  const keyboard = new InlineKeyboard().text('🛑 Yes, stop', 'stopconfirm:yes').text('❌ No', 'stopconfirm:no')
-  await ctx.reply('🛑 Interrupt the current task?\n\nConfirm:', { reply_markup: keyboard })
+  const keyboard = new InlineKeyboard().text('🛑 Yes, interrupt', 'stopconfirm:yes')
+  await ctx.reply('🛑 Interrupt the current task?\n\nTap to confirm:', { reply_markup: keyboard })
 }
 
 // The actual interrupt — Esc into the pane. Returns the status line for the caller to show.
@@ -2798,15 +2798,9 @@ bot.on('callback_query:data', async ctx => {
   }
 
   // New-session confirmation (Yes/No under the "Start a new session?" prompt)
-  const newMatch = /^newconfirm:(yes|no)$/.exec(data)
-  if (newMatch) {
+  if (data === 'newconfirm:yes') {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
-    if (newMatch[1] === 'no') {
-      await ctx.answerCallbackQuery({ text: 'Cancelled' }).catch(() => {})
-      await ctx.editMessageText('🆕 New session — cancelled').catch(() => {})
       return
     }
     if (!activePaneId || !paneWatcher) {
@@ -2821,15 +2815,9 @@ bot.on('callback_query:data', async ctx => {
   }
 
   // Stop confirmation (Yes/No under the "Interrupt the current task?" prompt)
-  const stopMatch = /^stopconfirm:(yes|no)$/.exec(data)
-  if (stopMatch) {
+  if (data === 'stopconfirm:yes') {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
-    if (stopMatch[1] === 'no') {
-      await ctx.answerCallbackQuery({ text: 'Cancelled' }).catch(() => {})
-      await ctx.editMessageText('🛑 Stop — cancelled').catch(() => {})
       return
     }
     await ctx.answerCallbackQuery({ text: 'Interrupting…' }).catch(() => {})
