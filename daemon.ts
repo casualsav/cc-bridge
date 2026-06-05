@@ -458,8 +458,32 @@ async function navigateDown(paneId: string, n: number): Promise<void> {
   await waitForSettle(paneId, 150, 2000)
 }
 
+// Send keys one at a time with a gap. A batched `send-keys k1 k2 k3` can outrun the TUI
+// renderer and drop a key (a dropped Down mis-aligns a multi-select toggle onto the wrong
+// row); pacing them the way navigateDown does keeps every keystroke landing.
+async function sendKeysPaced(paneId: string, keys: string[], gapMs = 150): Promise<void> {
+  for (const k of keys) { await sendKeys(paneId, [k]); await sleep(gapMs) }
+}
+
 function hashText(s: string): string {
   return createHash('md5').update(s).digest('hex')
+}
+
+// Defense-in-depth for relayed-prompt answers that should fully close their modal (single
+// -select, multi-select submit, non-tabbed free text). If a drive sequence ever fails to
+// match the TUI, the modal stays open and captures ALL keyboard input — a "frozen" pane the
+// user can only escape by detaching. So after answering, if a prompt is still up, Esc it and
+// say so. NOT used on tabbed/multi-question paths, where a remaining prompt is the next tab.
+async function verifyPromptClosed(): Promise<void> {
+  if (!activePaneId || !paneWatcher) return
+  const cap = await capturePane(activePaneId).catch(() => '')
+  if (!cap || !detectUserPrompt(cap)) return
+  await paneWatcher.withInjection(async () => {
+    await sendKeys(activePaneId!, ['Escape'])
+    await waitForSettle(activePaneId!, 200, 1500)
+  })
+  lastRelayedPromptHash = ''
+  notifyChats('⚠️ That answer didn’t register cleanly in the session — I dismissed the prompt so the terminal wouldn’t hang. Please try again.')
 }
 
 // PaneWatcher — ONE loop per active session (opus-direct Block C).
@@ -2311,6 +2335,7 @@ bot.on('callback_query:data', async ctx => {
     })
     lastRelayedPromptHash = ''  // allow next prompt to relay
     await ctx.editMessageReplyMarkup().catch(() => {})  // drop the keyboard — signals the answer landed
+    await verifyPromptClosed()
     return
   }
 
@@ -2426,20 +2451,26 @@ bot.on('callback_query:data', async ctx => {
       await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {})
       return
     }
-    const keys: string[] = []
+    // Toggle each selected row from the top (Space toggles; Down steps between rows).
+    const toggles: string[] = []
     state.options.forEach((_, i) => {
-      if (state.selected.has(i)) keys.push('Space')
-      if (i < state.options.length - 1) keys.push('Down')
+      if (state.selected.has(i)) toggles.push('Space')
+      if (i < state.options.length - 1) toggles.push('Down')
     })
-    keys.push('Enter')
     await ctx.answerCallbackQuery({ text: `Submitted ${state.selected.size} selected` }).catch(() => {})
     await paneWatcher.withInjection(async () => {
-      await sendKeys(activePaneId!, keys)
+      if (toggles.length) { await sendKeysPaced(activePaneId!, toggles); await waitForSettle(activePaneId!, 200, 3000) }
+      // This build renders even a single multi-select question with its own Submit tab —
+      // toggling never submits. Move right to the Submit tab and confirm "Submit answers".
+      await sendKeys(activePaneId!, ['Right'])
+      await waitForSettle(activePaneId!, 200, 3000)
+      await sendKeys(activePaneId!, ['Enter'])
       await waitForSettle(activePaneId!, 300, 5000)
     })
     pendingMultiSelect.delete(key)
     lastRelayedPromptHash = ''  // allow next prompt to relay
     await ctx.editMessageReplyMarkup().catch(() => {})  // drop the keyboard once answered
+    await verifyPromptClosed()
     return
   }
 
@@ -2605,7 +2636,7 @@ bot.on('message:text', async ctx => {
       })
       lastRelayedPromptHash = ''
       if (ft.tabbed) await handleTabbedAdvance(String(ctx.chat?.id))
-      else await ctx.reply('✅ Sent your answer.')
+      else { await ctx.reply('✅ Sent your answer.'); await verifyPromptClosed() }
       return
     }
   }

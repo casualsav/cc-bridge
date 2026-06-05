@@ -48,6 +48,14 @@ const SELECT_HINT = /enter to select|↑\/↓|\bto navigate\b/i
 const MULTI_HINT = /space to (?:select|toggle|check)/i
 // Checkbox glyphs in the option block — a second tell for multi-select.
 const CHECKBOX_GLYPH = /[☐☑▢▣◻◼⬜✅]/
+// Some Claude Code builds (e.g. v2.1.x) render multi-select boxes as ASCII "[ ]" / "[x]" /
+// "[✔]" AND reuse the single-select footer wording ("Enter to select"), so the bracket box
+// is the only multi-select tell. Anchored at an option's start (after its number) so a
+// literal "[x]" inside option prose can't trip it.
+const BRACKET_BOX_OPT = /^\s*(?:│\s*)?(?:[❯►▶]\s*)?\d+[.)]\s+\[[ xX✔✓]\]/
+// A leading checkbox token on a parsed label, stripped so labels read cleanly and the
+// meta-option labels ("Type something" / "Chat about this") still match after the box.
+const LEADING_BOX = /^\[[ xX✔✓]\]\s*/
 // Footer wording unique to a multi-question (tabbed) AskUserQuestion: the user
 // moves between question tabs with Tab/arrow keys, so the hint reads "Tab/Arrow
 // keys to navigate". A single-question prompt's hint reads "↑/↓ to navigate".
@@ -110,7 +118,7 @@ function parseOptions(region: string[], re: RegExp): PromptOption[] | null {
   for (const line of region) {
     const m = line.match(re)
     if (m) {
-      options.push({ label: (m[2] ?? m[1]).replace(/\s*│\s*$/, '').trim() })
+      options.push({ label: (m[2] ?? m[1]).replace(/\s*│\s*$/, '').trim().replace(LEADING_BOX, '').trim() })
     } else if (options.length > 0) {
       if (line.trim() === '') continue          // blank gap between options
       if (BOXY_LINE.test(line)) continue        // divider / border between options
@@ -178,7 +186,8 @@ export function detectUserPrompt(paneText: string): PromptInfo | null {
   const question = findQuestionAbove(lines, topOpt - 1)
   if (!question) return null
 
-  const multiSelect = MULTI_HINT.test(lines[footerIdx]) || region.some(l => CHECKBOX_GLYPH.test(l))
+  const multiSelect = MULTI_HINT.test(lines[footerIdx])
+    || region.some(l => CHECKBOX_GLYPH.test(l) || BRACKET_BOX_OPT.test(l))
   const tabbed = TABBED_HINT.test(lines[footerIdx])
   return { question, options, multiSelect, tabbed, freeText, chat }
 }
