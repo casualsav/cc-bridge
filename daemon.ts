@@ -416,6 +416,24 @@ async function injectText(paneId: string, watcher: PaneWatcher, text: string): P
   })
 }
 
+// Bracket-paste `text` into the pane, then submit with Enter. Unlike injectText
+// (literal keystrokes, where an embedded newline reads as Enter and submits early),
+// bracketed paste (`paste-buffer -p`) lands multiline content — e.g. a relayed
+// Telegram message — as one block so only the trailing Enter submits. Pauses the
+// watcher so the inject + the agent's reply aren't misread as a new prompt/event.
+const INJECT_BUFFER = 'tg-inbound'
+async function injectPaste(paneId: string, watcher: PaneWatcher, text: string): Promise<boolean> {
+  return watcher.withInjection(async () => {
+    if (!(await paneAlive(paneId))) return false
+    await exec('tmux', ['set-buffer', '-b', INJECT_BUFFER, '--', text], { timeout: 2000 })
+    await exec('tmux', ['paste-buffer', '-d', '-p', '-b', INJECT_BUFFER, '-t', paneId], { timeout: 2000 })
+    await waitForSettle(paneId, 200, 4000)
+    await sendKeys(paneId, ['Enter'])
+    await waitForSettle(paneId, 300, 5000)
+    return true
+  })
+}
+
 // Move the option cursor down `n` rows, one press at a time. Sending the Downs as
 // a single batch makes this TUI coalesce/drop them (the cursor doesn't move), so we
 // space them out and let it settle before the caller's follow-up key.
@@ -762,8 +780,41 @@ const chatPrompts = new Map<string, ChatPrompt>()
 let lastRelayedAuthUrl = ''
 const authUrlMessageIds = new Set<string>()
 
+// Build the <channel> block the agent recognizes (per the shim's MCP instructions)
+// from an inbound message: source + every meta field as an attribute, content as the
+// body — identical shape to a native channel notification, so a session that reads it
+// as typed input still knows to reply via the reply tool with the right chat_id.
+function formatChannelBlock(params: InboundParams): string {
+  const attrs = Object.entries(params.meta)
+    .map(([k, v]) => `${k}="${v.replace(/"/g, '&quot;')}"`)
+    .join(' ')
+  return `<channel source="telegram"${attrs ? ' ' + attrs : ''}>${params.content}</channel>`
+}
+
+// Inbound injections are serialized through one chain: two Telegram messages arriving
+// close together would otherwise drive the same pane concurrently and interleave
+// keystrokes. A failed inject (pane died mid-send) re-buffers for the next session.
+let inboundInjectChain: Promise<unknown> = Promise.resolve()
+function enqueueInboundInject(paneId: string, watcher: PaneWatcher, params: InboundParams): void {
+  const run = () => injectPaste(paneId, watcher, formatChannelBlock(params))
+    .then(ok => {
+      if (ok) process.stderr.write(`daemon: inbound injected to pane ${paneId} chat=${params.meta.chat_id}\n`)
+      else { process.stderr.write(`daemon: inbound inject no-op (pane ${paneId} gone) — buffering\n`); bufferEvent(params) }
+    })
+    .catch(err => process.stderr.write(`daemon: inbound inject failed: ${err}\n`))
+  inboundInjectChain = inboundInjectChain.then(run, run)
+}
+
+// Deliver an inbound Telegram message to the focused session. Claude Code only lets
+// the channel's *primary* --channels session consume inbound notifications, so a
+// focused-but-secondary session would never see a socket-delivered message. Typing the
+// <channel> block into its pane bypasses that consumer limit and works for any focused
+// session. No-tmux sessions (no pane to drive) fall back to the socket; with nothing
+// focused, buffer for replay when a session next takes focus.
 function emitInbound(params: InboundParams): void {
-  if (activeShim) {
+  if (activePaneId && paneWatcher) {
+    enqueueInboundInject(activePaneId, paneWatcher, params)
+  } else if (activeShim) {
     activeShim.write({ t: 'inbound', params })
   } else {
     bufferEvent(params)
@@ -785,16 +836,20 @@ function bufferEvent(params: InboundParams): void {
   }
 }
 
-function replayBuffer(write: (msg: DaemonToShim) => void): void {
-  // Truncate first so new events buffer fresh; deliver from in-memory copy.
-  // If delivery fails mid-replay, those events are lost but the file stays clean.
+function replayBuffer(): void {
+  // Truncate first so new events buffer fresh; deliver from the in-memory copy through
+  // emitInbound, so a replay uses the same focused-session path (pane inject / socket)
+  // as a live message. Called only after setFocus, so focus is set and won't re-buffer.
   let lines: string[] = []
   try {
     lines = readFileSync(PENDING_EVENTS_FILE, 'utf8').split('\n').filter(l => l.trim())
     writeFileSync(PENDING_EVENTS_FILE, '', { mode: 0o600 })
   } catch { return }
   for (const line of lines) {
-    try { write(JSON.parse(line) as DaemonToShim) } catch {}
+    try {
+      const msg = JSON.parse(line) as DaemonToShim
+      if (msg.t === 'inbound') emitInbound(msg.params)
+    } catch {}
   }
 }
 
@@ -2445,7 +2500,7 @@ function handleShimConnection(socket: net.Socket): void {
           // a reconnect of the focused pane). Otherwise announce — never steal focus.
           if (currentSessionId === null || currentSessionId === sessionId || !sessions.has(currentSessionId)) {
             setFocus(sessionId)
-            replayBuffer(write)
+            replayBuffer()
           } else {
             const idx = orderedSessions().findIndex(o => o.id === sessionId) + 1
             notifyChats(`🆕 New session available — #${idx} “${label}”. Switch with /use ${idx}.`)
