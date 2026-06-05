@@ -9,7 +9,7 @@ import { join } from 'node:path'
 
 const PROJECTS_DIR = join(homedir(), '.claude', 'projects')
 
-type Entry = { type?: string; timestamp?: string; cwd?: string; message?: { content?: unknown } }
+type Entry = { type?: string; uuid?: string; timestamp?: string; cwd?: string; message?: { content?: unknown } }
 
 // Text content of an entry: a bare string, or the joined `text` blocks of a content
 // array (tool_use / thinking blocks contribute nothing).
@@ -64,4 +64,24 @@ export function finalReplyForInjected(file: string, injectedText: string): strin
     }
   }
   return last
+}
+
+// The most recent assistant `text` block in the transcript, with its entry uuid — the
+// conclusion of the latest completed turn when read at idle. Unlike finalReplyForInjected
+// this needs no anchor, so it relays proactive messages (status pings, a "done" after a
+// long task) too; the caller dedups on the uuid so nothing sends twice. Returns null if
+// the tail is tool_use/thinking only (still working) or the transcript is unreadable.
+export function latestFinalReply(file: string): { uuid: string; text: string } | null {
+  let lines: string[]
+  try { lines = readFileSync(file, 'utf8').split('\n') } catch { return null }
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const l = lines[i].trim()
+    if (!l) continue
+    let e: Entry
+    try { e = JSON.parse(l) } catch { continue }
+    if (e.type !== 'assistant') continue
+    const t = textOf(e.message?.content).trim()
+    if (t) return { uuid: e.uuid ?? '', text: t }
+  }
+  return null
 }

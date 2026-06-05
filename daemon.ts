@@ -23,7 +23,7 @@ import {
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
 import { detectUserPrompt, isSubmitScreen, stripAnsi, type PromptInfo, type PromptOption } from './prompt.ts'
-import { resolveTranscript, finalReplyForInjected } from './transcript.ts'
+import { resolveTranscript, latestFinalReply } from './transcript.ts'
 
 // Off-MCP outbound (experimental): instead of the agent calling the MCP reply tool,
 // the daemon reads its reply from the session transcript and relays it — lets a session
@@ -723,7 +723,7 @@ function setFocus(sessionId: string | null): void {
   activePaneId = s?.paneId ?? null
   lastRelayedPromptHash = ''
   lastRelayedAuthUrl = ''
-  if (activePaneId) startPaneWatcher(activePaneId)
+  if (activePaneId) { startPaneWatcher(activePaneId); startRelayLoop() }
 }
 
 // Remove a session; refocus the next one (if any) if it was the focused one.
@@ -813,9 +813,8 @@ function enqueueInboundInject(paneId: string, watcher: PaneWatcher, params: Inbo
     .then(ok => {
       if (ok) {
         process.stderr.write(`daemon: inbound injected to pane ${paneId} chat=${params.meta.chat_id}\n`)
-        // Off-MCP: once the agent's turn settles, read its reply to *this* message out
-        // of the transcript and relay it (no MCP reply tool involved).
-        if (TRANSCRIPT_OUTBOUND) scheduleTranscriptRelay(paneId, block, [params.meta.chat_id])
+        // Off-MCP outbound is handled by the continuous relay loop (startRelayLoop), which
+        // relays this turn's reply — and any proactive message — once, keyed by uuid.
       }
       else { process.stderr.write(`daemon: inbound inject no-op (pane ${paneId} gone) — buffering\n`); bufferEvent(params) }
     })
@@ -882,29 +881,137 @@ async function sendAgentText(chats: string[], text: string): Promise<void> {
 // turn): poll the pane until it's been idle for a couple of cycles AND the transcript
 // holds a reply for our anchor. One poll per injected message, so two quick messages
 // each get their own answer relayed.
-function scheduleTranscriptRelay(paneId: string, injectedText: string, chats: string[]): void {
-  const POLL_MS = 1500, MAX_MS = 8 * 60_000, IDLE_NEEDED = 2
-  let waited = 0, idleStreak = 0
-  const tick = async () => {
-    waited += POLL_MS
-    let cap = ''
-    try { cap = await capturePane(paneId) } catch { return }
-    idleStreak = (detectWorking(cap) || detectLimited(cap)) ? 0 : idleStreak + 1
-    if (idleStreak >= IDLE_NEEDED) {
-      const cwd = await paneCwd(paneId)
-      const file = cwd ? resolveTranscript(cwd) : null
-      const reply = file ? finalReplyForInjected(file, injectedText) : null
-      if (reply) {
-        process.stderr.write(`daemon: transcript-outbound relaying ${reply.length} chars to ${chats.join(',')}\n`)
-        await sendAgentText(chats, reply)
-        return
+// Continuous off-MCP outbound. Instead of arming a relay only when an inbound Telegram
+// message is injected, a single self-driven loop watches the focused pane and relays each
+// completed turn's final assistant text ONCE — keyed by the transcript entry uuid. That
+// covers inbound replies AND proactive messages (status pings, a "done" after a long task,
+// a reply to terminal-typed input), which the inbound-only relay silently dropped. Idle is
+// required (2 consecutive non-working reads) so mid-turn narration isn't relayed, and the
+// cursor is primed to the current tail on (re)start so existing backlog never re-sends.
+const RELAY_POLL_MS = 1500
+let lastRelayedUuid = ''
+let relayCursorPrimed = false
+let relayIdleStreak = 0
+let relayLoopGen = 0   // bump to retire the running loop when focus moves
+
+async function relayLoopTick(gen: number): Promise<void> {
+  if (gen !== relayLoopGen || !activePaneId || !TRANSCRIPT_OUTBOUND) return
+  const paneId = activePaneId
+  let cap = ''
+  try { cap = await capturePane(paneId) } catch { /* transient capture miss — retry next tick */ }
+  const idle = cap !== '' && !detectWorking(cap) && !detectLimited(cap)
+  relayIdleStreak = idle ? relayIdleStreak + 1 : 0
+  if (relayIdleStreak >= 2) {
+    const cwd = await paneCwd(paneId)
+    const file = cwd ? resolveTranscript(cwd) : null
+    const reply = file ? latestFinalReply(file) : null
+    if (reply && reply.uuid) {
+      if (!relayCursorPrimed) {
+        // First settle after (re)start: adopt the tail as the cursor without relaying it,
+        // so we never replay what was already on screen before we started watching.
+        lastRelayedUuid = reply.uuid
+        relayCursorPrimed = true
+      } else if (reply.uuid !== lastRelayedUuid) {
+        lastRelayedUuid = reply.uuid   // advance before the await so a fast next tick can't double-send
+        const chats = loadAccess().allowFrom
+        process.stderr.write(`daemon: transcript-outbound relaying ${reply.text.length} chars (uuid ${reply.uuid.slice(0, 8)}) to ${chats.join(',')}\n`)
+        await sendAgentText(chats, reply.text).catch(e => process.stderr.write(`daemon: relay send failed: ${e}\n`))
       }
-      // Idle but the reply isn't in the transcript yet (still flushing) — keep polling.
     }
-    if (waited < MAX_MS) setTimeout(tick, POLL_MS)
-    else process.stderr.write(`daemon: transcript-outbound: gave up waiting for reply on ${paneId}\n`)
   }
-  setTimeout(tick, POLL_MS)
+  if (gen === relayLoopGen) setTimeout(() => void relayLoopTick(gen), RELAY_POLL_MS)
+}
+
+// (Re)start the relay loop for the focused pane, retiring any prior loop and re-priming the
+// cursor so the new pane's existing tail isn't relayed. No-op unless off-MCP outbound is on.
+function startRelayLoop(): void {
+  if (!TRANSCRIPT_OUTBOUND) return
+  const gen = ++relayLoopGen
+  relayCursorPrimed = false
+  relayIdleStreak = 0
+  setTimeout(() => void relayLoopTick(gen), RELAY_POLL_MS)
+}
+
+// ---- Off-MCP pane auto-discovery ----
+// When no pane is pinned (FORCE_PANE) and no shim session is driving, find a plugin-less
+// `claude` pane on its own and adopt it — no .env edit / restart to bind a work session.
+// Plugin (MCP) sessions register over the shim socket, so they live in `sessions` and are
+// excluded here; and we only adopt panes whose claude argv carries --strict-mcp-config, so
+// even an unregistered MCP pane is never grabbed. Explicit FORCE_PANE always wins.
+let adoptedPaneId: string | null = null
+
+// All pids in the process tree rooted at `rootPid` (the pane's shell), so we can find the
+// claude process — it runs as a child of the pane shell, not the pane's own pid.
+async function processTree(rootPid: string): Promise<string[]> {
+  const all = [rootPid], queue = [rootPid]
+  while (queue.length) {
+    const pid = queue.shift()!
+    try {
+      const { stdout } = await exec('pgrep', ['-P', pid], { timeout: 2000 })
+      for (const c of stdout.split('\n').map(s => s.trim()).filter(Boolean)) { all.push(c); queue.push(c) }
+    } catch {}
+  }
+  return all
+}
+
+// True if the pane shell `panePid` has a claude child launched plugin-less
+// (--strict-mcp-config — the off-MCP session signature).
+async function isPluginlessClaude(panePid: string): Promise<boolean> {
+  for (const pid of await processTree(panePid)) {
+    let argv = ''
+    try { argv = readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ') } catch { continue }
+    if (!/\bclaude\b/.test(argv)) continue
+    return argv.includes('--strict-mcp-config')
+  }
+  return false
+}
+
+// Scan tmux for an adoptable plugin-less claude pane. Exactly one → its id; none → null;
+// several → null after telling the user to disambiguate with FORCE_PANE.
+async function findOffMcpPane(): Promise<string | null> {
+  let out = ''
+  try {
+    const { stdout } = await exec('tmux',
+      ['list-panes', '-a', '-F', '#{pane_id}\t#{pane_pid}\t#{pane_current_command}'], { timeout: 3000 })
+    out = stdout
+  } catch { return null }
+
+  const candidates: string[] = []
+  for (const line of out.split('\n')) {
+    if (!line.trim()) continue
+    const [paneId, panePid, cmd] = line.split('\t')
+    if (!/^(claude|node|bun)$/.test(cmd)) continue   // cheap prefilter before walking the tree
+    if (sessions.has(paneId)) continue               // a registered (plugin/MCP) session — never adopt
+    if (await isPluginlessClaude(panePid)) candidates.push(paneId)
+  }
+  if (candidates.length > 1) {
+    notifyChats(`🔍 Found ${candidates.length} plugin-less Claude panes (${candidates.join(', ')}). ` +
+      `Pin one with TELEGRAM_FORCE_PANE=<pane> in the channel .env and restart.`)
+    return null
+  }
+  return candidates[0] ?? null
+}
+
+// Mirror the FORCE_PANE binding for an auto-discovered pane: drive it directly, no Session
+// (there's no shim socket). Tracked in adoptedPaneId so a later shim subscribe announces
+// rather than silently stealing it.
+function adoptPane(paneId: string): void {
+  adoptedPaneId = paneId
+  currentSessionId = paneId
+  activePaneId = paneId
+  startPaneWatcher(paneId)
+  startRelayLoop()
+  process.stderr.write(`daemon: adopted off-MCP pane ${paneId} (auto-discovery)\n`)
+  notifyChats(`🔗 Connected to the Claude session in pane ${paneId}.`)
+}
+
+// Adopt a pane when nothing valid is driving. Runs at startup and on a slow interval, so a
+// work session started before/after the daemon (or restarted) gets picked up on its own.
+async function discoverAndAdopt(): Promise<void> {
+  if (FORCE_PANE || !TRANSCRIPT_OUTBOUND) return
+  if (activePaneId && await paneAlive(activePaneId)) return
+  const paneId = await findOffMcpPane()
+  if (paneId) adoptPane(paneId)
 }
 
 // Deliver an inbound Telegram message to the focused session. Claude Code only lets
@@ -1369,7 +1476,11 @@ function startPaneWatcher(paneId: string): void {
       process.stderr.write(`daemon: pane ${paneId} died\n`)
       const entry = [...sessions.entries()].find(([, s]) => s.paneId === paneId)
       if (entry) endSession(entry[0])
-      else { activePaneId = null; paneWatcher = null }
+      else {
+        activePaneId = null; paneWatcher = null
+        // Adopted off-MCP pane: clear the binding so the rescan re-adopts a fresh one.
+        if (adoptedPaneId === paneId) { adoptedPaneId = null; currentSessionId = null }
+      }
     },
   )
   paneWatcher.start()
@@ -2630,8 +2741,12 @@ function handleShimConnection(socket: net.Socket): void {
           // Focus it only when nothing valid holds focus (the first/only session, or
           // a reconnect of the focused pane). Otherwise announce — never steal focus.
           // A pinned pane (FORCE_PANE) holds focus regardless.
+          const adoptionHolds = adoptedPaneId !== null && activePaneId === adoptedPaneId
           if (FORCE_PANE) {
             process.stderr.write(`daemon: session ${sessionId} registered (focus pinned to ${FORCE_PANE})\n`)
+          } else if (adoptionHolds) {
+            const idx = orderedSessions().findIndex(o => o.id === sessionId) + 1
+            notifyChats(`🆕 New session available — #${idx} “${label}”. Switch with /use ${idx}.`)
           } else if (currentSessionId === null || currentSessionId === sessionId || !sessions.has(currentSessionId)) {
             setFocus(sessionId)
             replayBuffer()
@@ -2764,7 +2879,13 @@ if (FORCE_PANE) {
   currentSessionId = FORCE_PANE
   activePaneId = FORCE_PANE
   startPaneWatcher(FORCE_PANE)
+  startRelayLoop()
   process.stderr.write(`daemon: focus pinned to ${FORCE_PANE} (TELEGRAM_FORCE_PANE)\n`)
+} else if (TRANSCRIPT_OUTBOUND) {
+  // Off-MCP with no pinned pane: find and adopt a plugin-less work session on our own,
+  // then keep watching so a session started later (or restarted) gets picked up.
+  void discoverAndAdopt()
+  setInterval(() => void discoverAndAdopt(), 30_000)
 }
 
 // Make the `tg` CLI + ensure-daemon launcher available to plugin-less sessions, no setup.
