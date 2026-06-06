@@ -2474,7 +2474,7 @@ let resetTimer: ReturnType<typeof setTimeout> | null = null
 // Claude prints a ROUNDED reset time ("resets 9:30am"), so the real reset can land a little
 // later — firing "continue" exactly then re-hits the limit. Fire a touch after the printed
 // time, then verify the session actually resumed and retry a few times if it's still frozen.
-const RESET_GRACE_MS = 90_000
+const RESET_GRACE_MS = 60_000
 const CONTINUE_VERIFY_MS = 12_000
 const CONTINUE_RETRY_MS = 3 * 60_000
 const CONTINUE_MAX_ATTEMPTS = 5
