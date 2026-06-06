@@ -3859,7 +3859,6 @@ void (async () => {
           void bot.api.setMyCommands(
             [
               { command: 'start', description: 'Welcome + everything this bot can do' },
-              { command: 'dock', description: 'Show the docked control bar (/dock off to hide)' },
               { command: 'stop', description: 'Interrupt the current task (Esc)' },
               { command: 'model', description: 'Show the current model (or /model <name> to switch)' },
               { command: 'mode', description: 'Interactive mode switcher' },
@@ -3871,6 +3870,7 @@ void (async () => {
               { command: 'context', description: 'Show the token-context usage' },
               { command: 'compact', description: 'Compact the conversation to free up context' },
               { command: 'autocontinue', description: 'Auto-send "continue" when the limit resets (on/off)' },
+              { command: 'dock', description: 'Show the docked control bar (/dock off to hide)' },
               { command: 'pin', description: 'Toggle the pinned status message (on/off)' },
               { command: 'status', description: 'Check your pairing status' },
             ],
