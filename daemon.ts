@@ -3064,6 +3064,16 @@ bot.command('resume', async ctx => {
     { parse_mode: 'HTML', reply_markup: kb })
 })
 
+// /rename <name> — silent alias to rename the current (focused) session.
+bot.command('rename', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  const name = (ctx.match ?? '').toString().trim()
+  if (!name) { await ctx.reply('Usage: <code>/rename &lt;new name&gt;</code>', { parse_mode: 'HTML' }); return }
+  const pane = await resolveActivePane()
+  if (!pane) { await ctx.reply('No active session to rename.'); return }
+  await ctx.reply(await renamePane(pane, name), { parse_mode: 'HTML' })
+})
+
 bot.command(['sessions', 'session'], async ctx => {   // /sessions is canonical; /session is the alias
   if (!dmCommandGate(ctx)) return
   const arg = (ctx.match ?? '').toString().trim()
