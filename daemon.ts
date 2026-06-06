@@ -917,18 +917,33 @@ function renderDigestMirror(raw: string, done: boolean): string {
 }
 
 // Per-tool emoji + human label for the live mirror. The transcript already carries the tool
-// name + input, so richer rendering here is entirely free (no model calls).
+// name + input, so richer rendering here is entirely free (no model calls). Emoji set aligned
+// with the Hermes tool_progress registry where it maps to Claude Code's actual tools.
 const TOOL_BADGE: Record<string, [string, string]> = {
-  Bash: ['💻', 'terminal'], TodoWrite: ['📋', 'todo'],
-  Read: ['📖', 'read'], Edit: ['✏️', 'edit'], MultiEdit: ['✏️', 'edit'], Write: ['📝', 'write'],
-  Grep: ['🔍', 'search'], Glob: ['🔍', 'find'], LS: ['📂', 'list'],
-  WebFetch: ['🌐', 'fetch'], WebSearch: ['🌐', 'search'], Task: ['🤖', 'agent'],
-  NotebookEdit: ['📓', 'notebook'],
+  Bash: ['💻', 'terminal'],
+  BashOutput: ['⚙️', 'process'], KillShell: ['⚙️', 'process'], KillBash: ['⚙️', 'process'],
+  Read: ['📖', 'read'], Write: ['✍️', 'write'],
+  Edit: ['✏️', 'edit'], MultiEdit: ['✏️', 'edit'], NotebookEdit: ['📓', 'notebook'],
+  Grep: ['🔎', 'search'], Glob: ['🔎', 'find'], LS: ['📂', 'list'],
+  WebSearch: ['🔍', 'web search'], WebFetch: ['📄', 'web fetch'],
+  Task: ['🔀', 'delegate'], TodoWrite: ['📋', 'todo'],
+  AskUserQuestion: ['❓', 'clarify'], ExitPlanMode: ['📝', 'plan'],
+  Skill: ['📚', 'skill'], SlashCommand: ['📚', 'command'],
 }
 function toolBadge(tool: string): [string, string] {
   if (TOOL_BADGE[tool]) return TOOL_BADGE[tool]
-  if (tool.startsWith('mcp__')) return ['🔌', tool.split('__').pop() || tool]   // mcp__server__action → action
-  return ['🔧', tool]
+  if (tool.startsWith('mcp__')) {
+    // mcp__server__action → keyword-match the action for browser/web MCPs, else a plug.
+    const action = (tool.split('__').pop() || tool).replace(/^browser_/, '')
+    if (/navigat|goto|open/i.test(action)) return ['🌐', action]
+    if (/screenshot|vision|snapshot|image/i.test(action)) return ['📸', action]
+    if (/click|tap|press/i.test(action)) return ['👆', action]
+    if (/type|fill|input|key/i.test(action)) return ['⌨️', action]
+    if (/scroll/i.test(action)) return ['📜', action]
+    if (/search|query|find/i.test(action)) return ['🔍', action]
+    return ['🔌', action]
+  }
+  return ['⚡', tool]   // unregistered tool (Hermes fallback)
 }
 
 function renderToolsMirror(acts: Activity[], done: boolean): string {
