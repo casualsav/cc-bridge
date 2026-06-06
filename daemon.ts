@@ -843,6 +843,7 @@ async function sendAgentText(chats: string[], text: string): Promise<void> {
 // required (2 consecutive non-working reads) so mid-turn narration isn't relayed, and the
 // cursor is primed to the current tail on (re)start so existing backlog never re-sends.
 const RELAY_POLL_MS = 1500
+const MIRROR_SETTLE_TICKS = 6   // ~9s of sustained idle before the mirror caps to "Done"
 let lastRelayedUuid = ''
 let relayCursorPrimed = false
 // Last uuid relayed per transcript file, so switching back to a session can replay what it
@@ -1000,9 +1001,11 @@ async function relayLoopTick(gen: number): Promise<void> {
   const idle = cap !== '' && !detectWorking(cap) && !detectLimited(cap)
   relayIdleStreak = idle ? relayIdleStreak + 1 : 0
 
-  // Live activity mirror — finalize only when the turn is settled (2-tick streak), so brief
-  // idle gaps between tool calls don't spawn a fresh status message each time.
-  await updateTerminalMirror(relayIdleStreak >= 2).catch(() => {})
+  // Live activity mirror — finalize (and tear down) only after sustained idle, well past the
+  // 2-tick reply-relay threshold, so a brief pause mid-turn (a tool boundary, a slow render,
+  // a permission prompt) doesn't end the message and start a fresh one on resume. Keeps the
+  // whole turn as one continuous self-updating message.
+  await updateTerminalMirror(relayIdleStreak >= MIRROR_SETTLE_TICKS).catch(() => {})
 
   if (relayIdleStreak >= 2) {
     const cwd = await paneCwd(paneId)
