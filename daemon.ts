@@ -2088,18 +2088,39 @@ async function confirmNewSession(ctx: Context): Promise<void> {
 // /command handler or from a control-bar button tap.
 
 // Show a Yes/No confirmation before interrupting — the Esc is sent on the Yes tap (see the
+// The pane to interrupt — prefer the live binding, but fall back to known panes so a brief
+// binding gap (e.g. a daemon restart mid shim-reconnect) doesn't block /stop. /stop only needs
+// to send Esc to the pane; it doesn't need the full watcher.
+async function resolveActivePane(): Promise<string | null> {
+  const tries: (string | null | undefined)[] = [activePaneId]
+  if (currentSessionId) tries.push(sessions.get(currentSessionId)?.paneId)
+  try { tries.push(readFileSync(ADOPTED_PANE_FILE, 'utf8').trim()) } catch {}
+  for (const p of tries) if (p && await paneAlive(p)) return p
+  // last resort: a single live claude pane (any kind)
+  try {
+    const { stdout } = await exec('tmux', ['list-panes', '-a', '-F', '#{pane_id} #{pane_current_command}'], { timeout: 2000 })
+    const claudes = stdout.split('\n').filter(l => /\bclaude\b/.test(l)).map(l => l.split(' ')[0])
+    if (claudes.length === 1) return claudes[0]
+  } catch {}
+  return null
+}
+
 // stopconfirm handler). Shared by /stop and the 🛑 Stop button.
 async function confirmStop(ctx: Context): Promise<void> {
   if (!dmCommandGate(ctx)) return
-  if (!activePaneId || !paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
+  if (!(await resolveActivePane())) { await ctx.reply('No active Claude Code session with tmux.'); return }
   const keyboard = new InlineKeyboard().text('🛑 Yes, interrupt', 'stopconfirm:yes')
   await ctx.reply('🛑 Interrupt the current task?\n\nTap to confirm:', { reply_markup: keyboard })
 }
 
 // The actual interrupt — Esc into the pane. Returns the status line for the caller to show.
 async function performStop(): Promise<string> {
-  if (!activePaneId || !paneWatcher) return 'No active Claude Code session with tmux.'
-  const ok = await paneWatcher.withInjection(() => sendKeys(activePaneId!, ['Escape']))
+  const pane = await resolveActivePane()
+  if (!pane) return 'No active Claude Code session with tmux.'
+  // Use the watcher's injection guard only when it owns this pane; otherwise send Esc directly.
+  const ok = paneWatcher && pane === activePaneId
+    ? await paneWatcher.withInjection(() => sendKeys(pane, ['Escape']))
+    : await sendKeys(pane, ['Escape'])
   return ok ? '🛑 Sent interrupt (Esc) to Claude Code.' : 'Could not reach the session pane.'
 }
 
