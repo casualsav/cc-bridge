@@ -1196,7 +1196,7 @@ async function announceNewSession(paneId: string): Promise<void> {
   if (tfile && !lastRelayedByFile.has(tfile)) lastRelayedByFile.set(tfile, latestFinalReply(tfile)?.uuid ?? '')
   const who = `Session ${n ?? '?'}`
   const where = cwd ? ` (<code>${escapeHtml(cwd)}</code>)` : ''
-  const kb = new InlineKeyboard().text(`♻️ Switch to ${who}`, `adoptpane:${paneId}`)
+  const kb = new InlineKeyboard().text(`♻️ Switch to ${who}`, `adoptpane:${paneId}`).text('✏️ Name', `namesession:${paneId}`)
   notifyChats(`🆕 New Claude session: <b>${who}</b>${where}`, { reply_markup: kb, parse_mode: 'HTML' })
 }
 
@@ -2720,9 +2720,35 @@ bot.command('autocontinue', async ctx => {
   )
 })
 
-// User-set session names (paneId → label), overriding the cwd-derived default. In-memory:
-// re-derived from cwd on a daemon restart.
+// User-set session names (paneId → label), overriding the cwd-derived default. Persisted so
+// they survive a daemon restart (tmux pane ids are stable across one); a tmux restart re-derives.
+const SESSION_NAMES_FILE = join(STATE_DIR, 'session-names.json')
 const sessionNames = new Map<string, string>()
+try { for (const [k, v] of Object.entries(JSON.parse(readFileSync(SESSION_NAMES_FILE, 'utf8')) as Record<string, string>)) sessionNames.set(k, v) } catch {}
+function persistSessionNames(): void {
+  try { writeFileSync(SESSION_NAMES_FILE, JSON.stringify(Object.fromEntries(sessionNames)), { mode: 0o600 }) } catch {}
+}
+const renameReplyTargets = new Set<string>()           // `${chatId}:${messageId}` of list "Rename" prompts
+const nameReplyTargets = new Map<string, string>()     // `${chatId}:${messageId}` → paneId of "Name" prompts
+
+// Name a specific pane. Returns the HTML confirmation / error.
+async function renamePane(paneId: string, label: string): Promise<string> {
+  const clean = label.trim().slice(0, 40)
+  if (!clean) return 'Give it a name.'
+  sessionNames.set(paneId, clean); persistSessionNames()
+  void updateSessionPin()
+  const n = await sessionNumber(paneId)
+  return `✅ ${n ? `Session ${n}` : 'Session'} renamed to <b>${escapeHtml(clean)}</b>`
+}
+
+// Rename session #n (1-based over sessionRows).
+async function renameSession(n: number, label: string): Promise<string> {
+  const rows = await sessionRows()
+  if (n < 1 || n > rows.length) return `No session ${n}.`
+  const row = rows[n - 1]
+  if (!row.paneId) return 'That session has no pane to name.'
+  return renamePane(row.paneId, label)
+}
 
 // A pane's display label: a user-set name, else the last path segment of its cwd, else the
 // pane id.
@@ -2941,6 +2967,7 @@ function sessionSwitchKeyboard(rows: SessionRow[]): InlineKeyboard {
     if ((i + 1) % 4 === 0) kb.row()
   })
   kb.row().text('➕ New session', 'newsession')
+  if (rows.length > 1) kb.text('✏️ Rename', 'renamesession')
   return kb
 }
 
@@ -3024,13 +3051,7 @@ bot.command(['sessions', 'session'], async ctx => {   // /sessions is canonical;
 
   const nameMatch = arg.match(/^name\s+(\d+)\s+(.+)$/i)
   if (nameMatch) {
-    const n = Number(nameMatch[1])
-    if (n < 1 || n > rows.length) { await ctx.reply(`No session ${n}. See /session.`); return }
-    const row = rows[n - 1]
-    if (!row.paneId) { await ctx.reply('That session has no pane to name.'); return }
-    const label = nameMatch[2].trim().slice(0, 40)
-    sessionNames.set(row.paneId, label)
-    await ctx.reply(`✅ Session ${n} renamed to <b>${escapeHtml(label)}</b>.`, { parse_mode: 'HTML' })
+    await ctx.reply(await renameSession(Number(nameMatch[1]), nameMatch[2]), { parse_mode: 'HTML' })
     return
   }
 
@@ -3274,6 +3295,37 @@ bot.on('callback_query:data', async ctx => {
     await ctx.editMessageText(`📂 <b>New session — choose folder</b>\n\n${currentLine}`, {
       parse_mode: 'HTML', reply_markup: kb,
     }).catch(() => {})
+    return
+  }
+
+  // "✏️ Rename" (session list) → force-reply asking for "<#> <new name>".
+  if (data === 'renamesession') {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    await ctx.answerCallbackQuery().catch(() => {})
+    const sent = await ctx.reply('✏️ Reply with: <code>&lt;session #&gt; &lt;new name&gt;</code>\ne.g. <code>2 API work</code>', {
+      parse_mode: 'HTML',
+      reply_markup: { force_reply: true, input_field_placeholder: '2 New name' },
+    }).catch(() => null)
+    if (sent) renameReplyTargets.add(`${ctx.chat?.id}:${sent.message_id}`)
+    return
+  }
+
+  // "✏️ Name" (new-session announcement) → force-reply for a name; targets that pane directly.
+  const nameMatch = /^namesession:(%\d+)$/.exec(data)
+  if (nameMatch) {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    await ctx.answerCallbackQuery().catch(() => {})
+    const sent = await ctx.reply('✏️ Reply with a name for this session.', {
+      parse_mode: 'HTML',
+      reply_markup: { force_reply: true, input_field_placeholder: 'Session name' },
+    }).catch(() => null)
+    if (sent) nameReplyTargets.set(`${ctx.chat?.id}:${sent.message_id}`, nameMatch[1])
     return
   }
 
@@ -3678,6 +3730,23 @@ bot.on('message:text', async ctx => {
   // hand off to handleTabbedAdvance; otherwise the single question resolves.
   const replyTo = ctx.message.reply_to_message
   if (replyTo) {
+    const replyKey = `${ctx.chat?.id}:${replyTo.message_id}`
+    // Reply to a "✏️ Rename" (list) force-reply → parse "<#> <name>".
+    if (renameReplyTargets.has(replyKey)) {
+      renameReplyTargets.delete(replyKey)
+      if (!dmCommandGate(ctx)) return
+      const m = text.match(/^(\d+)\s+(.+)$/)
+      await ctx.reply(m ? await renameSession(Number(m[1]), m[2]) : 'Format: <code>&lt;#&gt; &lt;name&gt;</code>, e.g. <code>2 API work</code>', { parse_mode: 'HTML' })
+      return
+    }
+    // Reply to a "✏️ Name" (announcement) force-reply → name that specific pane.
+    if (nameReplyTargets.has(replyKey)) {
+      const paneId = nameReplyTargets.get(replyKey)!
+      nameReplyTargets.delete(replyKey)
+      if (!dmCommandGate(ctx)) return
+      await ctx.reply(await renamePane(paneId, text), { parse_mode: 'HTML' })
+      return
+    }
     // Reply to a "📂 New session" force-reply → resolve the folder and spawn the session.
     const nsKey = `${ctx.chat?.id}:${replyTo.message_id}`
     if (newSessionReplyTargets.has(nsKey)) {
@@ -3853,7 +3922,7 @@ function handleShimConnection(socket: net.Socket): void {
           sessions.set(sessionId, { socket, write, paneId: msg.paneId, label, subscribedAt: Date.now() })
           const announce = (idx: number) => notifyChats(
             `🆕 New Claude session: <b>Session ${idx}</b>${cwdPath ? ` (<code>${escapeHtml(cwdPath)}</code>)` : ''}`,
-            { reply_markup: new InlineKeyboard().text(`♻️ Switch to Session ${idx}`, `switchsession:${idx}`), parse_mode: 'HTML' })
+            { reply_markup: (() => { const k = new InlineKeyboard().text(`♻️ Switch to Session ${idx}`, `switchsession:${idx}`); if (msg.paneId) k.text('✏️ Name', `namesession:${msg.paneId}`); return k })(), parse_mode: 'HTML' })
 
           // Focus it only when nothing valid holds focus (the first/only session, or
           // a reconnect of the focused pane). Otherwise announce — never steal focus.
