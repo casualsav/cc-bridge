@@ -3032,7 +3032,8 @@ async function doSessionList(ctx: Context): Promise<void> {
   const lines = rows.map((r, i) => `${i + 1}. ${r.current ? '★ ' : ''}<b>${escapeHtml(r.label)}</b>`)
   await ctx.reply(
     `🖥️ <b>Sessions</b> (★ = active):\n\n${lines.join('\n')}\n\n` +
-    `Tap the number below to switch • or use <code>/session #</code>`,
+    `Tap the number below to switch • or use <code>/session #</code>\n\n` +
+    `💡 Tip: Use <code>/rename (name)</code> to rename the current session`,
     { parse_mode: 'HTML', reply_markup: sessionSwitchKeyboard(rows) })
 }
 
