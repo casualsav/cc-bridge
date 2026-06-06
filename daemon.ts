@@ -2604,17 +2604,43 @@ function whisperReady(): boolean {
   }
   return false
 }
-// Readiness note for a transcription backend.
+// Install the local Whisper engine on demand (system pip, falling back to a venv on a
+// PEP 668 externally-managed Python). Runs in the background; notifies the chats on finish.
+let whisperInstalling = false
+async function provisionWhisper(chats: string[]): Promise<void> {
+  if (whisperInstalling) return
+  whisperInstalling = true
+  const note = (msg: string) => { for (const c of chats) void bot.api.sendMessage(c, msg, { parse_mode: 'HTML' }).catch(() => {}) }
+  try {
+    try {
+      await exec('python3', ['-m', 'pip', 'install', '--quiet', 'faster-whisper'], { timeout: 600_000 })
+    } catch {
+      // externally-managed Python → dedicated venv, recorded in .env
+      const venvPy = join(STATE_DIR, 'whisper-venv', 'bin', 'python')
+      await exec('python3', ['-m', 'venv', join(STATE_DIR, 'whisper-venv')], { timeout: 120_000 })
+      await exec(venvPy, ['-m', 'pip', 'install', '--quiet', 'faster-whisper'], { timeout: 600_000 })
+      writeEnvVars({ TELEGRAM_WHISPER_PYTHON: venvPy })
+    }
+    note(whisperReady() ? '✅ Whisper engine installed — local transcription is ready.' : '⚠️ Engine installed but not importable — try <code>/telegram:configure transcribe local</code>.')
+  } catch (e) {
+    process.stderr.write(`daemon: whisper provision failed: ${e}\n`)
+    note('⚠️ Couldn’t auto-install the Whisper engine. Set it up once in terminal: <code>/telegram:configure transcribe local</code>')
+  } finally { whisperInstalling = false }
+}
+
+// Readiness note for a transcription backend. Local installs from here; API keys must be
+// added in the terminal — keys are deliberately never collected over Telegram (chat history).
 function voiceReady(b: string): string {
-  if (b === 'local') return whisperReady() ? '✅ engine ready' : '⚠️ engine not installed — one-time setup in terminal: <code>/telegram:configure transcribe local</code>'
-  if (b === 'groq') return envHas('GROQ_API_KEY') ? '✅ key set' : '⚠️ no GROQ_API_KEY — add it in terminal (keys aren’t taken over Telegram)'
-  if (b === 'openai') return envHas('OPENAI_API_KEY') ? '✅ key set' : '⚠️ no OPENAI_API_KEY — add it in terminal (keys aren’t taken over Telegram)'
+  if (b === 'local') return whisperInstalling ? '⏳ installing engine…' : whisperReady() ? '✅ engine ready' : '⚙️ engine not installed — tap 💻 Local to install it here'
+  if (b === 'groq') return envHas('GROQ_API_KEY') ? '✅ key set' : '🔑 needs a key — for security, add it in the terminal: <code>/telegram:configure transcribe groq</code>'
+  if (b === 'openai') return envHas('OPENAI_API_KEY') ? '✅ key set' : '🔑 needs a key — for security, add it in the terminal: <code>/telegram:configure transcribe openai</code>'
   return 'voice notes arrive as placeholders'
 }
 function voiceText(): string {
   const b = transcribeStatus()
   return `🎙️ <b>Voice transcription</b>\n\nBackend: <b>${b}</b> — ${voiceReady(b)}\n\n` +
-    `💻 <b>Local</b> — private &amp; free, runs here\n☁️ <b>Groq / OpenAI</b> — hosted (needs an API key)\n🔇 <b>Off</b> — disabled\n\nPick a backend:`
+    `💻 <b>Local</b> — private &amp; free, installs &amp; runs right here\n☁️ <b>Groq / OpenAI</b> — hosted; the API key is set in the terminal for security\n🔇 <b>Off</b> — disabled\n\n` +
+    `🔒 <i>Local is fully configurable from here. For Groq/OpenAI, tapping sets the backend, then add the key in terminal so it never lands in chat history.</i>\n\nPick a backend:`
 }
 function voiceKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
@@ -3045,8 +3071,11 @@ bot.on('callback_query:data', async ctx => {
       return
     }
     if (choice === 'off') writeEnvVars({ TELEGRAM_TRANSCRIBE: 'off' })
-    else if (choice === 'local') writeEnvVars({ TELEGRAM_TRANSCRIBE: 'local', ...(envHas('TELEGRAM_TRANSCRIBE_MODEL') ? {} : { TELEGRAM_TRANSCRIBE_MODEL: 'base' }) })
-    else writeEnvVars({ TELEGRAM_TRANSCRIBE: choice })   // groq / openai — key checked in voiceReady
+    else if (choice === 'local') {
+      writeEnvVars({ TELEGRAM_TRANSCRIBE: 'local', ...(envHas('TELEGRAM_TRANSCRIBE_MODEL') ? {} : { TELEGRAM_TRANSCRIBE_MODEL: 'base' }) })
+      if (!whisperReady() && !whisperInstalling) void provisionWhisper(loadAccess().allowFrom)   // install engine here
+    }
+    else writeEnvVars({ TELEGRAM_TRANSCRIBE: choice })   // groq / openai — key added in terminal (see voiceReady)
     await ctx.editMessageText(voiceText(), { parse_mode: 'HTML', reply_markup: voiceKeyboard() }).catch(() => {})
     return
   }
