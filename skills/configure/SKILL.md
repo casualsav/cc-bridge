@@ -14,6 +14,7 @@ allowed-tools:
   - Bash(nvidia-smi)
   - Bash(kill *)
   - Bash(rm -rf ~/.claude/channels/telegram*)
+  - Bash(rm -f ~/.bun/bin/tg ~/.local/bin/tg)
 ---
 
 # /telegram:configure — Telegram Channel Setup
@@ -184,10 +185,11 @@ Delete the `TELEGRAM_BOT_TOKEN=` line (or the file if that's the only line).
 
 ### `uninstall` — tear down the channel
 
-A guided teardown. This skill can stop the running bot and remove this
-channel's local state; it **cannot** remove the plugin itself (that's a
-`/plugin` command, and skills can't invoke slash commands or run host-shell
-uninstall steps), so it hands those off at the end.
+A guided teardown. This skill stops the running bot, removes this channel's
+local state, and cleans the install's settings/PATH footprint (the `SessionStart`
+hook, the appended `CLAUDE.md` block, the `tg` CLI); it **cannot** remove the
+plugin itself (that's a `/plugin` command, and skills can't invoke slash commands
+or run host-shell uninstall steps), so it hands those off at the end.
 
 **Confirm before doing anything** — this stops the running bot. Ask the user to
 confirm, and ask one branching question: do they want to **keep** the saved
@@ -200,14 +202,28 @@ it? Don't delete state unless they explicitly choose the full reset.
    it must be stopped explicitly or the old bot keeps running. If there's no
    pid file, it isn't running; say so and move on.
 
-2. **Channel state** — act on the user's choice from above:
+2. **Remove the install footprint** — things the setup added *outside* the
+   plugin system, which `/plugin uninstall` won't touch (do these every time, on
+   keep or full reset):
+   - **`~/.claude/settings.json`** — read the JSON and delete the `SessionStart`
+     hook whose command references `channels/telegram/ensure-daemon.js`; write it
+     back. Drop a now-empty `SessionStart` array (and `hooks` object) if removing
+     it leaves them empty. Leave `enabledPlugins` / `extraKnownMarketplaces` —
+     the `/plugin` commands in the next step remove those.
+   - **`~/.claude/CLAUDE.md`** — remove the appended convention block, from the
+     `# Reachable over Telegram (no MCP)` heading through the end of its
+     `## Live activity` section. Preserve everything else in the file.
+   - **The `tg` CLI** — `rm -f ~/.bun/bin/tg ~/.local/bin/tg` (the daemon
+     provisions it onto PATH; it's dead once the daemon is gone).
+
+3. **Channel state** — act on the user's choice from above:
    - **Keep** (default) → leave `~/.claude/channels/telegram/` untouched. The
      bot token, `access.json` allowlist, and pairings survive for reinstall.
    - **Full reset** → `rm -rf ~/.claude/channels/telegram` to delete the token,
      `access.json`, inbox, and sockets. Tell the user plainly that the bot
      token and allowlist are now gone and they'll reconfigure from scratch.
 
-3. **Remove the plugin** — this skill can't run `/plugin` commands, so print
+4. **Remove the plugin** — this skill can't run `/plugin` commands, so print
    these for the user to run in their session:
    ```
    /plugin uninstall telegram@better-claude-plugins
@@ -226,8 +242,9 @@ it? Don't delete state unless they explicitly choose the full reset.
    ```
    Restart Claude Code to apply either removal or reinstall.
 
-End with a short summary of what was done (daemon stopped; state kept or
-removed) and exactly what's left for the user to run.
+End with a short summary of what was done (daemon stopped; hook + `CLAUDE.md`
+block + `tg` CLI removed; channel state kept or removed) and exactly what's left
+for the user to run (the `/plugin` commands).
 
 ---
 
