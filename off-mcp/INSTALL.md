@@ -34,6 +34,26 @@ it — but check and offer to remove it before continuing:
    `enabledPlugins` entry to `false` to just disable it. On no, continue but warn that both
    versions will try to bridge Telegram at once.
 
+## 0.7. Choose the run mode (off-MCP vs MCP)
+This plugin can bridge Telegram two ways. **The default is off-MCP** — present the choice to
+the user and let them pick:
+
+| | **Off-MCP** (default) | **MCP** |
+| --- | --- | --- |
+| Per-request cost | **Zero** — no MCP server; replies are read from the transcript | ~700 tokens of tool schemas **+** an instruction block injected on **every** request |
+| Requires | **tmux** (the daemon drives the session's pane) | nothing — works without tmux |
+| Launch with | `claude --strict-mcp-config` (alias `claude-tg`) | plain `claude` |
+| Functions | **Full** — reply, react, edit, files, permission prompts, every command | Full (identical) |
+
+Both modes expose the exact same features (reactions, file send/receive, permission buttons,
+all `/commands`) — off-MCP just routes deliberate actions through the `tg` CLI instead of MCP
+tools. **Off-MCP is recommended** unless the user genuinely can't use tmux.
+
+The MCP server ships **disabled** (`mcp.json.disabled`), so off-MCP is the out-of-the-box
+default. To turn MCP on, run `/telegram:configure mcp on` (restores `.mcp.json`) and launch
+with plain `claude`; `/telegram:configure mcp off` disables it again. Ask the user which they
+want and default to off-MCP.
+
 ## 1. Interview the human and write the config (before any restart)
 Ask these one by one (don't assume defaults silently — confirm each), then write the two
 files below. **You can write them now even though the plugin isn't installed yet** — they
