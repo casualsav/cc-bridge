@@ -2852,16 +2852,15 @@ async function sessionPinText(rows: SessionRow[]): Promise<string> {
   const lines = [`🖥️ <b>${escapeHtml(cur.label)}</b> • 🧠 ${escapeHtml(model ?? '—')} • 🧭 ${escapeHtml(mode)}`]
   if (cwd) lines.push(`📁 <code>${escapeHtml(cwd)}</code>${branch ? ` · 🌿 ${escapeHtml(branch)}` : ''}`)
   if (rows.length > 1) lines.push(`🖥️ Session ${rows.findIndex(r => r.current) + 1} of ${rows.length}`)
-  lines.push(`📌 <i>Tap below to switch session, model, or mode.</i>`)
+  lines.push('──────────────────────────')   // full-width rule so the bubble fills the message width
   return lines.join('\n\n')   // blank line between each → a taller, easier-to-spot card
 }
 
 // Quick-action buttons on the pinned status message — same emojis as the pin's own fields.
 function pinKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
-    .text('🖥️ Sessions', 'pin:sessions')
-    .text('🧠 Model', 'pin:model')
-    .text('🧭 Mode', 'pin:mode')
+    .text('🖥️ Sessions', 'pin:sessions').text('🧠 Model', 'pin:model').row()
+    .text('🧭 Mode', 'pin:mode').text('⚙️ Settings', 'pin:settings')
 }
 
 let pinUpdating = false
@@ -3074,8 +3073,8 @@ bot.command('stop', confirmStop)
 bot.on('callback_query:data', async ctx => {
   const data = ctx.callbackQuery.data
 
-  // Pinned-message quick actions → the same pickers as /sessions, /model, /mode.
-  if (data === 'pin:sessions' || data === 'pin:model' || data === 'pin:mode') {
+  // Pinned-message quick actions → the same pickers as /sessions, /model, /mode, /settings.
+  if (data === 'pin:sessions' || data === 'pin:model' || data === 'pin:mode' || data === 'pin:settings') {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
       return
@@ -3083,7 +3082,8 @@ bot.on('callback_query:data', async ctx => {
     await ctx.answerCallbackQuery().catch(() => {})
     if (data === 'pin:sessions') await doSessionList(ctx)
     else if (data === 'pin:model') await doModelPicker(ctx)
-    else await doModePicker(ctx)
+    else if (data === 'pin:mode') await doModePicker(ctx)
+    else await ctx.reply(settingsText(), { parse_mode: 'HTML', reply_markup: settingsKeyboard() })
     return
   }
 
