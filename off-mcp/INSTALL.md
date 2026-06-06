@@ -50,9 +50,16 @@ all `/commands`) — off-MCP just routes deliberate actions through the `tg` CLI
 tools. **Off-MCP is recommended** unless the user genuinely can't use tmux.
 
 The MCP server ships **disabled** (`mcp.json.disabled`), so off-MCP is the out-of-the-box
-default. To turn MCP on, run `/telegram:configure mcp on` (restores `.mcp.json`) and launch
-with plain `claude`; `/telegram:configure mcp off` disables it again. Ask the user which they
-want and default to off-MCP.
+default. **Record the user's choice now** — you act on it after the plugin is installed (Step 5):
+
+- **Off-MCP (default):** leave the server disabled; work sessions launch with `claude-tg`.
+- **MCP:** after the plugin is installed, **enable it** — rename `mcp.json.disabled` → `.mcp.json`
+  in the plugin dir (or run `/telegram:configure mcp on`). Once enabled, the MCP server **loads
+  automatically on every plain `claude` launch** — the *only* ways it won't load are starting
+  with `--strict-mcp-config` (`claude-tg`), or turning it off via `/settings` or
+  `/telegram:configure mcp off`. Work sessions then launch with **plain `claude`** (not `claude-tg`).
+
+Default to off-MCP.
 
 ## 1. Interview the human and write the config (before any restart)
 Ask these one by one (don't assume defaults silently — confirm each), then write the two
@@ -125,10 +132,21 @@ Have them DM the bot — it should respond. (No ID given in Step 1? They DM the 
 it replies with a pairing code; approve with `/telegram:access pair <code>`, then lock
 with `/telegram:access policy allowlist`.)
 
-## 5. Run a session off-MCP — the daemon finds it
-Launch the work session **plugin-less** in a tmux pane. The one flag that matters is
-`--strict-mcp-config`: it drops the plugin's MCP server (so you don't pay the per-request MCP
-context tax) **and** is the signature the daemon scans for to auto-discover the pane.
+## 5. Run a session — the daemon finds it
+
+**If the user chose MCP mode (Step 0.7), enable it now** — the plugin is installed, so flip the
+server on so it auto-loads for every plain `claude` session:
+```sh
+DIR=$(ls -d ~/.claude/plugins/cache/better-claude-plugins/telegram/*/ | sort -V | tail -1)
+[ -f "$DIR/mcp.json.disabled" ] && mv "$DIR/mcp.json.disabled" "$DIR/.mcp.json"   # MCP on
+```
+Then they launch work sessions with **plain `claude`** (no flag) — the MCP server loads every
+time. To later turn it off: `/telegram:configure mcp off` or `/settings`. (Skip this whole step
+for off-MCP, the default — leave the server disabled.)
+
+**Off-MCP (default):** launch the work session **plugin-less** in a tmux pane. The one flag that
+matters is `--strict-mcp-config`: it drops the plugin's MCP server (so you don't pay the
+per-request MCP context tax) **and** is the signature the daemon scans for to auto-discover the pane.
 ```sh
 claude --strict-mcp-config
 ```
