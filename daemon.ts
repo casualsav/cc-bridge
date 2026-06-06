@@ -2303,7 +2303,7 @@ async function runReadout(chatId: string, kind: 'cost' | 'context'): Promise<voi
 // these exact labels and routes each to the action above before any other handling.
 const BTN_MODE = '🧭 Mode'
 const BTN_MODEL = '🧠 Model'
-const BTN_SESSIONS = '🗂 Session'
+const BTN_SESSIONS = '🖥️ Session'
 const BTN_COST = '📊 Cost'
 const BTN_STOP = '🛑 Stop'
 const BTN_NEW = '🆕 New'
@@ -2333,7 +2333,7 @@ function startHelpText(paired: boolean): string {
     `<code>/mode plan·auto·default·acceptedits·bypass</code> — jump to a mode\n` +
     `<code>/model</code> — show the model (<code>/model &lt;name&gt;</code> to switch)\n\n` +
 
-    `🗂️ <b>Sessions</b>\n` +
+    `🖥️ <b>Sessions</b>\n` +
     `<code>/sessions</code> — list &amp; switch (<code>/sessions #</code> to switch · <code>/sessions name # label</code> to rename)\n` +
     `<code>/resume</code> — pick a recent session (with times) to relaunch\n` +
     `• ➕ <b>New session</b> button — start one in any folder\n` +
@@ -2350,7 +2350,7 @@ function startHelpText(paired: boolean): string {
     `<code>/new</code> — start a fresh conversation\n` +
     `<code>/autocontinue</code> — auto-send "continue" when the limit resets\n\n` +
 
-    `📌 <b>Pinned bar</b> — your session · model · mode, with 🗂️ 🧠 🧭 quick buttons (<code>/pin</code> to toggle). <code>/dock</code> shows a tap-keyboard of quick actions.\n` +
+    `📌 <b>Pinned bar</b> — your session · model · mode, with 🖥️ 🧠 🧭 quick buttons (<code>/pin</code> to toggle). <code>/dock</code> shows a tap-keyboard of quick actions.\n` +
     `⚙️ <code>/settings</code> — mirror, pin, auto-continue, MCP mode in one panel.\n` +
     `🔁 Any other <code>/command</code> is relayed straight to Claude Code.`
 
@@ -2851,7 +2851,7 @@ async function sessionPinText(rows: SessionRow[]): Promise<string> {
   const branch = cwd ? await gitBranch(cwd) : null
   const lines = [`🖥️ <b>${escapeHtml(cur.label)}</b> • 🧠 ${escapeHtml(model ?? '—')} • 🧭 ${escapeHtml(mode)}`]
   if (cwd) lines.push(`📁 <code>${escapeHtml(cwd)}</code>${branch ? ` · 🌿 ${escapeHtml(branch)}` : ''}`)
-  if (rows.length > 1) lines.push(`🗂️ Session ${rows.findIndex(r => r.current) + 1} of ${rows.length}`)
+  if (rows.length > 1) lines.push(`🖥️ Session ${rows.findIndex(r => r.current) + 1} of ${rows.length}`)
   lines.push(`📌 <i>Tap below to switch session, model, or mode.</i>`)
   return lines.join('\n\n')   // blank line between each → a taller, easier-to-spot card
 }
@@ -2859,7 +2859,7 @@ async function sessionPinText(rows: SessionRow[]): Promise<string> {
 // Quick-action buttons on the pinned status message — same emojis as the pin's own fields.
 function pinKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
-    .text('🗂️ Sessions', 'pin:sessions')
+    .text('🖥️ Sessions', 'pin:sessions')
     .text('🧠 Model', 'pin:model')
     .text('🧭 Mode', 'pin:mode')
 }
@@ -3011,8 +3011,8 @@ async function doSessionList(ctx: Context): Promise<void> {
   if (rows.length === 0) { await ctx.reply('No active Claude Code session.'); return }
   const lines = rows.map((r, i) => `${i + 1}. ${r.current ? '★ ' : ''}<b>${escapeHtml(r.label)}</b>`)
   await ctx.reply(
-    `🗂 <b>Sessions</b> (★ = active):\n${lines.join('\n')}\n\n` +
-    `Tap a number below, or <code>/sessions #</code> to switch · <code>/sessions name # label</code> to rename.`,
+    `🖥️ <b>Sessions</b> (★ = active):\n\n${lines.join('\n')}\n\n` +
+    `Tap the number below to switch • or use <code>/session #</code>`,
     { parse_mode: 'HTML', reply_markup: sessionSwitchKeyboard(rows) })
 }
 
