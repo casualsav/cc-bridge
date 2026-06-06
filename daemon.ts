@@ -2796,20 +2796,33 @@ function prettyModel(id: string | null): string | null {
 
 // Status line for the focused session: 💻 name • model (…) • mode (…). Mode is read live from a
 // pane capture; model from the session's transcript. Both degrade to "—" rather than blocking.
+async function gitBranch(dir: string): Promise<string | null> {
+  try {
+    const { stdout } = await exec('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 2000 })
+    const b = stdout.trim()
+    return b && b !== 'HEAD' ? b : null
+  } catch { return null }
+}
+
 async function sessionPinText(rows: SessionRow[]): Promise<string> {
   const cur = rows.find(r => r.current)
-  if (!cur) return '🗂️ <b>No active session</b>'
-  let mode = '—', model = lastKnownModel
+  if (!cur) return '🖥️ <b>No active session</b>'
+  let mode = '—', model = lastKnownModel, cwd: string | null = null
   if (activePaneId) {
     // Strip modeLabel's leading per-mode emoji — the pin uses a single generic 🧭.
     try { const cap = await capturePane(activePaneId); if (onNormalPrompt(cap)) mode = modeLabel(detectCurrentMode(cap)).replace(/^\S+\s+/, '') } catch {}
     try {
-      const cwd = await paneCwd(activePaneId)
+      cwd = await paneCwd(activePaneId)
       const file = cwd ? resolveTranscript(cwd) : null
       model = (file && prettyModel(lastModelInTranscript(file))) || model
     } catch {}
   }
-  return `🗂️ <b>${escapeHtml(cur.label)}</b> • 🧠 ${escapeHtml(model ?? '—')} • 🧭 ${escapeHtml(mode)}`
+  const branch = cwd ? await gitBranch(cwd) : null
+  const lines = [`🖥️ <b>${escapeHtml(cur.label)}</b> • 🧠 ${escapeHtml(model ?? '—')} • 🧭 ${escapeHtml(mode)}`]
+  if (cwd) lines.push(`📁 <code>${escapeHtml(cwd)}</code>${branch ? ` · 🌿 ${escapeHtml(branch)}` : ''}`)
+  if (rows.length > 1) lines.push(`🗂️ Session ${rows.findIndex(r => r.current) + 1} of ${rows.length}`)
+  lines.push(`📌 <i>Tap below to switch session, model, or mode.</i>`)
+  return lines.join('\n')
 }
 
 // Quick-action buttons on the pinned status message — same emojis as the pin's own fields.
