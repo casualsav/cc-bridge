@@ -282,75 +282,42 @@ const bot = new Bot(TOKEN)
 let botUsername = ''
 
 // ---- Typing presence ----
-// Telegram's "typing…" chat action auto-expires after ~5s. To signal that
-// Claude is busy for the *whole* duration of a turn, re-send it on an interval
-// while the watched pane reports a working state. Armed when a message is
-// relayed; cleared when the turn returns to idle (or after a hard time cap).
+// Telegram's "typing…" chat action auto-expires after ~5s, so to keep it lit for a whole
+// turn we re-send it every few seconds while Claude is working. The signal is a single
+// "keep-alive window": observe(true) — fed every pane poll (~800ms) by the live
+// `esc to interrupt` footer — pushes the window out; a steady ping timer re-sends typing
+// while the window is open and falls silent (so Telegram clears it) once work stops.
 //
-// The loop is self-correcting: it starts optimistically (an inbound message
-// almost always kicks off work), then defers to observed pane state. So even if
-// detectWorking misses a spinner variant, the indicator fades on its own rather
-// than sticking — at worst a few seconds of typing, never a stuck one.
+// This is self-correcting by construction: the ping timer always runs, gated only on the
+// window, so it can never get stuck on (work ends → window lapses → ~GRACE+5s tail) or
+// stuck off (work seen → window reopens → typing resumes). No optimistic/dead-timer edge cases.
 class TypingPresence {
-  private targets = new Map<string, number>()   // chat_id -> expiry ms
-  private lastWorkingAt = 0
-  private sawWorking = false
-  private optimisticUntil = 0
+  private chats = new Set<string>()             // chats that have messaged — where typing shows
+  private workingUntil = 0                      // keep pinging until this time
   private timer: ReturnType<typeof setInterval> | null = null
-  private static readonly CAP_MS = 15 * 60_000
-  private static readonly TICK_MS = 4_000
-  private static readonly OPTIMISTIC_MS = 8_000
-  private static readonly GRACE_MS = 30_000   // keep typing through idle gaps between steps (agent pauses can be long)
+  private static readonly PING_MS = 4_000       // < Telegram's ~5s expiry, so typing stays solid
+  private static readonly GRACE_MS = 5_000      // bridge brief gaps (tool boundaries / inject pauses)
 
-  private ping(chat_id: string): void {
-    void bot.api.sendChatAction(chat_id, 'typing').catch(() => {})
+  private pingAll(): void {
+    for (const chat of this.chats) void bot.api.sendChatAction(chat, 'typing').catch(() => {})
+  }
+  private ensureTimer(): void {
+    if (!this.timer) this.timer = setInterval(() => { if (Date.now() < this.workingUntil) this.pingAll() }, TypingPresence.PING_MS)
   }
 
-  // An inbound message was relayed to Claude — begin showing presence.
+  // An inbound message was relayed — show presence immediately (work almost always follows),
+  // and remember this chat so the indicator lands where the conversation is.
   arm(chat_id: string): void {
-    this.ping(chat_id)
-    // With no pane to observe we can't tell when work ends — just ping once.
-    if (!paneWatcher) return
-    this.targets.set(chat_id, Date.now() + TypingPresence.CAP_MS)
-    this.optimisticUntil = Date.now() + TypingPresence.OPTIMISTIC_MS
-    this.sawWorking = false
-    this.lastWorkingAt = 0
-    if (!this.timer) this.timer = setInterval(() => this.tick(), TypingPresence.TICK_MS)
+    this.chats.add(chat_id)
+    this.workingUntil = Date.now() + TypingPresence.GRACE_MS
+    this.pingAll()
+    this.ensureTimer()
   }
 
-  // Fresh working state from each pane change. Record only the latest time work was
-  // seen; a single idle frame no longer ends the turn — the tick decides that from
-  // sustained idle — so the indicator survives brief gaps between steps (e.g. a
-  // withInjection pause while reading the model, or the lull between tool calls).
-  update(working: boolean): void {
-    if (working) { this.sawWorking = true; this.lastWorkingAt = Date.now() }
-  }
-
-  private tick(): void {
-    const now = Date.now()
-    for (const [chat, exp] of this.targets) if (exp < now) this.targets.delete(chat)
-    if (this.targets.size === 0) { this.stop(); return }
-
-    // Keep typing during the optimistic startup window, or while work was seen within
-    // the grace period — this bridges pauses between tool calls / pane updates.
-    const recentlyWorked = this.sawWorking && now - this.lastWorkingAt < TypingPresence.GRACE_MS
-    if (now < this.optimisticUntil || recentlyWorked) {
-      for (const chat of this.targets.keys()) this.ping(chat)
-      return
-    }
-    // Idle past the grace → the turn is over: stop the typing indicator.
-    this.clearAll()
-  }
-
-  private clearAll(): void {
-    this.targets.clear()
-    this.sawWorking = false
-    this.lastWorkingAt = 0
-    this.stop()
-  }
-
-  private stop(): void {
-    if (this.timer) { clearInterval(this.timer); this.timer = null }
+  // Live working state from each pane poll. Working extends the keep-alive window; not-working
+  // does nothing — the window simply lapses, which is what stops the indicator when done.
+  observe(working: boolean): void {
+    if (working) { this.workingUntil = Date.now() + TypingPresence.GRACE_MS; this.ensureTimer() }
   }
 }
 
@@ -469,6 +436,7 @@ class PaneWatcher {
     private paneId: string,
     private onEvent: (text: string) => void,
     private onDead: () => void,
+    private onPoll?: (text: string) => void,   // every tick (even when unchanged) — drives typing
   ) {}
 
   start(): void {
@@ -493,6 +461,7 @@ class PaneWatcher {
     let text: string
     try { text = await capturePane(this.paneId) }
     catch { this.stop(); this.onDead(); return }
+    this.onPoll?.(text)                 // every poll — a live working signal even when static
     const h = hashText(text)
     if (h === this.lastHash) return
     this.lastHash = h
@@ -1481,8 +1450,7 @@ function onPaneEvent(text: string): void {
     } catch {}
   }
 
-  // Keep the Telegram "typing…" indicator alive while Claude is working.
-  typingPresence.update(detectWorking(text))
+  // (Typing presence is driven by the watcher's per-poll signal — see startPaneWatcher.)
 
   // Surface a /login sign-in link if one appears (independent of prompt detection,
   // since the URL is printed as plain output, not a multiple-choice menu).
@@ -1756,6 +1724,7 @@ function startPaneWatcher(paneId: string): void {
       // Down to a single session → focus it automatically, then refresh the pin.
       void refocusSoleSession().then(() => updateSessionPin())
     },
+    text => typingPresence.observe(detectWorking(text)),   // live typing signal, every poll
   )
   paneWatcher.start()
 }
