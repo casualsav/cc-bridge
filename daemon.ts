@@ -2352,7 +2352,7 @@ function startHelpText(paired: boolean): string {
     `<code>/new</code> — start a fresh conversation\n` +
     `<code>/autocontinue</code> — auto-send "continue" when the limit resets\n\n` +
 
-    `📌 <b>Pinned bar</b> — your session · model · mode, with 🗂️ 🧠 🧭 quick buttons (<code>/pin</code> to toggle).\n` +
+    `📌 <b>Pinned bar</b> — your session · model · mode, with 🗂️ 🧠 🧭 quick buttons (<code>/pin</code> to toggle). <code>/dock</code> shows a tap-keyboard of quick actions.\n` +
     `🔁 Any other <code>/command</code> is relayed straight to Claude Code.`
 
   if (paired) return guide
