@@ -2583,6 +2583,45 @@ function transcribeStatus(): string {
   try { return readFileSync(ENV_FILE, 'utf8').match(/TELEGRAM_TRANSCRIBE=(\S+)/)?.[1]?.replace(/['"]/g, '') || 'off' }
   catch { return 'off' }
 }
+// Set/remove keys in .env, preserving everything else and the 600 perms.
+function writeEnvVars(updates: Record<string, string | null>): void {
+  let lines: string[] = []
+  try { lines = readFileSync(ENV_FILE, 'utf8').split('\n') } catch {}
+  const keys = new Set(Object.keys(updates))
+  const kept = lines.filter(l => l.trim() && !keys.has(l.split('=')[0]?.trim()))
+  for (const [k, v] of Object.entries(updates)) if (v !== null) kept.push(`${k}=${v}`)
+  try { writeFileSync(ENV_FILE, kept.join('\n') + '\n', { mode: 0o600 }) } catch (e) { process.stderr.write(`daemon: env write failed: ${e}\n`) }
+}
+function envHas(key: string): boolean {
+  try { return new RegExp(`^${key}=\\S`, 'm').test(readFileSync(ENV_FILE, 'utf8')) } catch { return false }
+}
+// Is the local Whisper engine importable (system python, or the configured venv)?
+function whisperReady(): boolean {
+  const tries = ['python3']
+  try { const py = readFileSync(ENV_FILE, 'utf8').match(/TELEGRAM_WHISPER_PYTHON=(\S+)/)?.[1]; if (py) tries.unshift(py) } catch {}
+  for (const py of tries) {
+    try { execFileSync(py, ['-c', 'import faster_whisper'], { timeout: 5000, stdio: 'ignore' }); return true } catch {}
+  }
+  return false
+}
+// Readiness note for a transcription backend.
+function voiceReady(b: string): string {
+  if (b === 'local') return whisperReady() ? '✅ engine ready' : '⚠️ engine not installed — one-time setup in terminal: <code>/telegram:configure transcribe local</code>'
+  if (b === 'groq') return envHas('GROQ_API_KEY') ? '✅ key set' : '⚠️ no GROQ_API_KEY — add it in terminal (keys aren’t taken over Telegram)'
+  if (b === 'openai') return envHas('OPENAI_API_KEY') ? '✅ key set' : '⚠️ no OPENAI_API_KEY — add it in terminal (keys aren’t taken over Telegram)'
+  return 'voice notes arrive as placeholders'
+}
+function voiceText(): string {
+  const b = transcribeStatus()
+  return `🎙️ <b>Voice transcription</b>\n\nBackend: <b>${b}</b> — ${voiceReady(b)}\n\n` +
+    `💻 <b>Local</b> — private &amp; free, runs here\n☁️ <b>Groq / OpenAI</b> — hosted (needs an API key)\n🔇 <b>Off</b> — disabled\n\nPick a backend:`
+}
+function voiceKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text('🔇 Off', 'voice:off').text('💻 Local', 'voice:local').row()
+    .text('☁️ Groq', 'voice:groq').text('☁️ OpenAI', 'voice:openai').row()
+    .text('‹ Back', 'voice:back')
+}
 function settingsText(): string {
   const a = loadAccess()
   return `⚙️ <b>Settings</b>\n\n` +
@@ -2590,13 +2629,14 @@ function settingsText(): string {
     `📌 Pinned message — <b>${a.sessionPin !== false ? 'on' : 'off'}</b>\n` +
     `▶️ Auto-continue — <b>${a.autoContinue !== false ? 'on' : 'off'}</b>\n` +
     `🔌 MCP mode — <b>${mcpEnabled() ? 'on' : 'off'}</b> <i>(new sessions; relaunch to apply)</i>\n` +
-    `🎙️ Voice transcription — <b>${transcribeStatus()}</b> <i>(change via /telegram:configure)</i>\n\n` +
+    `🎙️ Voice transcription — <b>${transcribeStatus()}</b>\n\n` +
     `Tap to change:`
 }
 function settingsKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
     .text('🖥️ Mirror', 'set:mirror').text('📌 Pin', 'set:pin').row()
-    .text('▶️ Auto-continue', 'set:autocontinue').text('🔌 MCP', 'set:mcp')
+    .text('▶️ Auto-continue', 'set:autocontinue').text('🔌 MCP', 'set:mcp').row()
+    .text('🎙️ Voice transcription', 'set:voice')
 }
 bot.command('settings', async ctx => {
   if (!dmCommandGate(ctx)) return
@@ -2981,10 +3021,33 @@ bot.on('callback_query:data', async ctx => {
     } else if (setMatch[1] === 'autocontinue') {
       a.autoContinue = a.autoContinue === false
       saveAccess(a)
+    } else if (setMatch[1] === 'voice') {
+      await ctx.editMessageText(voiceText(), { parse_mode: 'HTML', reply_markup: voiceKeyboard() }).catch(() => {})
+      return
     } else {
       toggleMcp()
     }
     await ctx.editMessageText(settingsText(), { parse_mode: 'HTML', reply_markup: settingsKeyboard() }).catch(() => {})
+    return
+  }
+
+  // Voice-transcription sub-panel → switch backend (live; daemon reads .env per voice note).
+  const voiceMatch = /^voice:(off|local|groq|openai|back)$/.exec(data)
+  if (voiceMatch) {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    await ctx.answerCallbackQuery().catch(() => {})
+    const choice = voiceMatch[1]
+    if (choice === 'back') {
+      await ctx.editMessageText(settingsText(), { parse_mode: 'HTML', reply_markup: settingsKeyboard() }).catch(() => {})
+      return
+    }
+    if (choice === 'off') writeEnvVars({ TELEGRAM_TRANSCRIBE: 'off' })
+    else if (choice === 'local') writeEnvVars({ TELEGRAM_TRANSCRIBE: 'local', ...(envHas('TELEGRAM_TRANSCRIBE_MODEL') ? {} : { TELEGRAM_TRANSCRIBE_MODEL: 'base' }) })
+    else writeEnvVars({ TELEGRAM_TRANSCRIBE: choice })   // groq / openai — key checked in voiceReady
+    await ctx.editMessageText(voiceText(), { parse_mode: 'HTML', reply_markup: voiceKeyboard() }).catch(() => {})
     return
   }
 

@@ -211,6 +211,7 @@ formatted. Bot commands:
 | `/autocontinue` | Auto-send "continue" when the usage limit resets (on/off) |
 | `/dock` | Show the docked control-bar keyboard (`/dock off` to hide) |
 | `/pin` | Toggle the pinned status message (`/pin on` \| `off`) |
+| `/settings` | Channel settings panel — live mirror, pin, auto-continue, MCP mode, voice transcription |
 | `/reply <response>` | Type a response into the session, then Enter (e.g. a `/login` code) |
 
 Any other `/slash` command is relayed straight to Claude Code. Photos and
