@@ -1011,12 +1011,17 @@ async function relayLoopTick(gen: number): Promise<void> {
     const cwd = await paneCwd(paneId)
     const file = cwd ? resolveTranscript(cwd) : null
     const reply = file ? latestFinalReply(file) : null
+    // Don't relay Claude's own usage-limit banner — the daemon's ⛔ limit handler already
+    // sends a (richer) one, so relaying this too is the redundant second message.
+    const isLimitBanner = reply && /\b(hit your|used \d+% of your) [\w-]+ limit\b/i.test(reply.text)
     if (relayCursorPrimed && reply && reply.uuid && reply.uuid !== lastRelayedUuid) {
       lastRelayedUuid = reply.uuid   // advance before the await so a fast next tick can't double-send
       if (file) lastRelayedByFile.set(file, reply.uuid)
-      const chats = loadAccess().allowFrom
-      process.stderr.write(`daemon: transcript-outbound relaying ${reply.text.length} chars (uuid ${reply.uuid.slice(0, 8)}) to ${chats.join(',')}\n`)
-      await sendAgentText(chats, reply.text).catch(e => process.stderr.write(`daemon: relay send failed: ${e}\n`))
+      if (!isLimitBanner) {
+        const chats = loadAccess().allowFrom
+        process.stderr.write(`daemon: transcript-outbound relaying ${reply.text.length} chars (uuid ${reply.uuid.slice(0, 8)}) to ${chats.join(',')}\n`)
+        await sendAgentText(chats, reply.text).catch(e => process.stderr.write(`daemon: relay send failed: ${e}\n`))
+      }
     }
   }
   if (gen === relayLoopGen) setTimeout(() => void relayLoopTick(gen), RELAY_POLL_MS)
@@ -2206,8 +2211,9 @@ async function doReadout(ctx: Context, kind: 'cost' | 'context'): Promise<void> 
   if (!dmCommandGate(ctx)) return
   if (!activePaneId || !paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
   if (detectWorking(await capturePane(activePaneId))) {
-    const kb = new InlineKeyboard().text('▶️ Go ahead', `readout:${kind}`).text('✖️ Cancel', 'readout:cancel')
-    await ctx.reply(`⏳ Claude is working — running /${kind} will interrupt the current turn. Go ahead?`, { reply_markup: kb })
+    // Injecting into a busy session just queues the command (it never runs → nothing to read)
+    // and resizing the pane mid-render leaves artifacts. Wait for a resting prompt instead.
+    await ctx.reply(`⏳ Claude is working — <code>/${kind}</code> needs a resting prompt. Run it again once the turn finishes.`, { parse_mode: 'HTML' })
     return
   }
   await runReadout(String(ctx.chat!.id), kind)
@@ -2422,10 +2428,10 @@ bot.command(['dock', 'menu'], async ctx => {
   if (!dmCommandGate(ctx)) return
   const arg = (ctx.match ?? '').toString().trim().toLowerCase()
   if (arg === 'off' || arg === 'hide') {
-    await ctx.reply('Control bar hidden — /dock to show it again.', { reply_markup: { remove_keyboard: true } })
+    await ctx.reply('Control bar hidden — /dock to show it again', { reply_markup: { remove_keyboard: true } })
     return
   }
-  await ctx.reply('🎛 Control bar ready.', { reply_markup: controlKeyboard() })
+  await ctx.reply('🎛 Control bar ready', { reply_markup: controlKeyboard() })
 })
 
 // /cost, /context relay session visibility info. (/session is the registry — below.)
@@ -2886,7 +2892,7 @@ async function switchSessionTo(n: number): Promise<string> {
   const rows = await sessionRows()
   if (n < 1 || n > rows.length) return `No session #${n}. See /session.`
   const row = rows[n - 1]
-  if (row.current) return `Already on <b>Session ${n}</b>.`
+  if (row.current) return `Already on <b>Session ${n}</b>`
   if (row.shim) { setFocus(row.key); return switchedMsg(n, row.paneId) }
   if (!row.paneId || !(await paneAlive(row.paneId))) return 'That session’s pane is gone.'
   focusOffMcpPane(row.paneId)
