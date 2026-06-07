@@ -117,6 +117,7 @@ use pairing instead if they didn't give an ID):
   "better-claude-plugins": { "source": { "source": "github", "repo": "casualsav/better-claude-telegram" } }
 },
 "enabledPlugins": { "telegram@better-claude-plugins": true },
+"statusLine": { "type": "command", "command": "bash ~/.claude/statusline-command.sh" },
 "hooks": {
   "SessionStart": [ { "hooks": [ { "type": "command", "command": "bun \"$(ls -d ~/.claude/plugins/cache/better-claude-plugins/telegram/*/ 2>/dev/null | sort -V | tail -1)ensure-daemon.ts\" >/dev/null 2>&1 || true" } ] } ]
 }
@@ -126,6 +127,18 @@ the very first restart with **nothing pre-written** — in pure off-MCP no shim 
 hook is the *only* thing that starts the daemon, and it can't depend on a launcher the daemon
 writes only after its first run. (The daemon still drops a `~/.claude/channels/telegram/ensure-daemon.js`
 shim on startup for older hooks; the inline glob above just removes the bootstrap dependency on it.)
+- **Install the bundled status line.** It's what populates the pinned message's live metrics —
+  the daemon reads the statusline rendered in the session's pane (context bar, tokens, cost,
+  session/api time, and the 5h/7d rate-limit bars for Pro/Max). Copy it from this repo and make it
+  executable:
+  ```sh
+  cp off-mcp/statusline-command.sh ~/.claude/statusline-command.sh && chmod +x ~/.claude/statusline-command.sh
+  ```
+  It needs only `bash` + `python3` (no jq), reads everything from Claude Code's session JSON, and
+  degrades to a bare line if `python3` is missing. **If the user already has a `statusLine`
+  configured, leave theirs in place** — skip the `statusLine` settings entry above; the pin parses
+  the common fields (ctx %, `$`cost, `↑↓` tokens, `5h`/`7d`) from any reasonably-formatted
+  statusline, so it still works, just don't clobber their command.
 - Append this repo's `off-mcp/CLAUDE.md` into `~/.claude/CLAUDE.md` so every plugin-less
   session knows how to chat + use `tg`.
 
