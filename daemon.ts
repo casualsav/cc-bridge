@@ -493,6 +493,47 @@ function onNormalPrompt(paneText: string): boolean {
   return /shift\+tab to cycle|\? for shortcuts|esc to interrupt/.test(tail)
 }
 
+// ---- First-run onboarding driver ----
+// Walk Claude Code's setup (theme · folder trust · login) from Telegram instead of punting to
+// the terminal. Only ever runs on a freshly adopted pane that has NEVER reached the REPL
+// (onboardedPanes), so a genuine AskUserQuestion is never mistaken for a setup screen.
+const onboardedPanes = new Set<string>()
+const onboardingState = { tag: '', at: 0 }   // debounce: a screen repaints many times per second
+let loginChoiceSent = false
+
+// Which onboarding screen the pane is showing, or null. Theme is only matched with a live select
+// footer so "theme" in ordinary output can't trigger it; trust/enter are distinctive enough alone.
+function classifyOnboarding(cap: string): 'login' | 'theme' | 'trust' | 'enter' | null {
+  const low = cap.toLowerCase()
+  const isSelect = /enter to select|↑\/↓|to navigate/.test(low)
+  if (isSelect && /select login method|log in with|claude account|anthropic console|with your api key/.test(low)) return 'login'
+  if (/do you trust|trust the files|trust this folder/.test(low)) return 'trust'
+  if (isSelect && /(text style|dark mode|light mode|color theme|choose .*theme)/.test(low)) return 'theme'
+  if (/press enter to continue|enter to continue/.test(low)) return 'enter'
+  return null
+}
+
+// Offer the login method as buttons — the one step we don't auto-pick (subscription opens an
+// OAuth link we can relay; an API key must be typed in the terminal, never over Telegram).
+function relayLoginChoice(): void {
+  if (loginChoiceSent) return
+  loginChoiceSent = true
+  const kb = new InlineKeyboard().text('🔐 Subscription (claude.ai)', 'login:sub').row().text('🔑 API key (console)', 'login:api')
+  notifyChats('🔐 Claude needs to log in. How do you sign in?', { reply_markup: kb })
+}
+
+async function driveOnboarding(paneId: string, stage: 'login' | 'theme' | 'trust' | 'enter'): Promise<void> {
+  if (onboardingState.tag === stage && Date.now() - onboardingState.at < 4000) return   // same screen, just repainting
+  onboardingState.tag = stage
+  onboardingState.at = Date.now()
+  if (stage === 'login') { relayLoginChoice(); return }
+  // theme / trust / enter → accept the highlighted default. Drive through the watcher so the
+  // relay loop doesn't misread the keystroke as activity.
+  process.stderr.write(`daemon: onboarding auto-advance (${stage})\n`)
+  if (paneWatcher) await paneWatcher.withInjection(async () => { await sendKeys(paneId, ['Enter']); await waitForSettle(paneId, 200, 3000) })
+  else await sendKeys(paneId, ['Enter'])
+}
+
 // Pull the active model name out of a /model picker capture (see parseCurrentModel
 // for the row format). Guard against grabbing transcript prose instead of a model
 // name when the picker didn't render cleanly: real model names are short, word-like,
@@ -1186,8 +1227,8 @@ function adoptPane(paneId: string): void {
 async function announceAdopted(paneId: string): Promise<void> {
   const cap = await capturePane(paneId).catch(() => '')
   if (cap && !onNormalPrompt(cap)) {
-    notifyChats('🔗 Found a Claude session, but it looks like it\'s still on first-run setup ' +
-      '(theme picker / login). Finish that once in the terminal — then your messages will go through.')
+    notifyChats('🔗 Found a Claude session on first-run setup — I\'ll walk you through it here ' +
+      '(theme, folder trust, then login). Or finish it in the terminal if you prefer.')
   } else {
     notifyChats('🔗 Connected to the Claude session.')
   }
@@ -1602,6 +1643,17 @@ function onPaneEvent(text: string): void {
     if (h !== lastRelayedAuthUrl) {
       lastRelayedAuthUrl = h
       void relayAuthUrlToTelegram(authUrl)
+    }
+  }
+
+  // First-run onboarding: drive theme/trust/login from here. Once the pane reaches the REPL it's
+  // marked onboarded and never driven again (kept BELOW the auth-URL relay so a login link still
+  // surfaces). Skipped entirely for already-onboarded panes, so real questions pass through.
+  if (activePaneId) {
+    if (onNormalPrompt(text)) { onboardedPanes.add(activePaneId); loginChoiceSent = false }
+    else if (adoptedPaneId === activePaneId && !onboardedPanes.has(activePaneId)) {
+      const stage = classifyOnboarding(text)
+      if (stage) { void driveOnboarding(activePaneId, stage); return }
     }
   }
 
@@ -3749,6 +3801,29 @@ bot.on('callback_query:data', async ctx => {
     await ctx.answerCallbackQuery({ text: existed ? 'Cancelled.' : 'Already gone.' }).catch(() => {})
     if (scheduledMsgs.length) await ctx.editMessageText(scheduledListText(), { parse_mode: 'HTML', reply_markup: scheduledCancelKeyboard() }).catch(() => {})
     else await ctx.editMessageText('📅 No scheduled messages left.').catch(() => {})
+    return
+  }
+
+  // Login-method choice during first-run onboarding (see driveOnboarding / relayLoginChoice).
+  if (data === 'login:sub' || data === 'login:api') {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    await ctx.answerCallbackQuery().catch(() => {})
+    const paneId = activePaneId
+    if (!paneId || !paneWatcher) { await ctx.reply('No active session to drive.'); return }
+    if (data === 'login:sub') {
+      // Subscription is the default (top) option → Enter selects it; the OAuth link then appears
+      // and relays on its own, and you reply to that link message with the code.
+      await paneWatcher.withInjection(async () => { await sendKeys(paneId, ['Enter']); await waitForSettle(paneId, 300, 5000) })
+      await ctx.reply('🔗 Opening the claude.ai sign-in link — I\'ll send it here. Tap it, approve, then reply to that link message with the code shown.')
+    } else {
+      // API key: select the second option so the key field is ready — but the key itself must be
+      // typed in the terminal; we never accept it over Telegram.
+      await paneWatcher.withInjection(async () => { await navigateDown(paneId, 1); await sendKeys(paneId, ['Enter']); await waitForSettle(paneId, 300, 5000) })
+      await ctx.reply('🔑 For security I won\'t handle API keys over Telegram. I\'ve selected the API-key option — paste your key directly in the terminal window.')
+    }
     return
   }
 
