@@ -3,7 +3,7 @@ import { test, expect } from 'bun:test'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { latestFinalReply, finalRepliesAfter, currentTurnActivity, finalReplyForInjected } from './transcript.ts'
+import { latestFinalReply, finalRepliesAfter, textBlocksAfter, conclusionBlocks, currentTurnActivity, finalReplyForInjected } from './transcript.ts'
 
 function fixture(entries: object[]): string {
   const f = join(mkdtempSync(join(tmpdir(), 'tg-transcript-')), 'session.jsonl')
@@ -70,6 +70,37 @@ test('currentTurnActivity renders a todo count when nothing is in progress', () 
   const todos = [{ content: 'a', status: 'pending', activeForm: 'Doing a' }, { content: 'b', status: 'pending', activeForm: 'Doing b' }]
   const f = fixture([user('go', 'u1'), tool('TodoWrite', { todos }, 't1')])
   expect(currentTurnActivity(f)[0].detail).toBe('2 tasks')
+})
+
+test('textBlocksAfter streams every text block after the cursor (not one per turn)', () => {
+  const f = fixture([user('q', 'u1'), asst('one', 'a1'), tool('Bash', {}, 't1'), asst('two', 'a2')])
+  expect(textBlocksAfter(f, '').map(x => x.text)).toEqual(['one', 'two'])
+  expect(textBlocksAfter(f, 'a1').map(x => x.text)).toEqual(['two'])
+})
+
+test('textBlocksAfter with a lost cursor returns just the latest', () => {
+  const f = fixture([user('q', 'u1'), asst('a', 'a1'), asst('b', 'a2')])
+  expect(textBlocksAfter(f, 'gone').map(x => x.text)).toEqual(['b'])
+})
+
+test('conclusionBlocks = text after the last tool call', () => {
+  const f = fixture([user('q', 'u1'), asst('narration', 'a1'), tool('Bash', {}, 't1'), asst('done', 'a2')])
+  expect(conclusionBlocks(f).map(x => x.text)).toEqual(['done'])
+})
+
+test('conclusionBlocks returns multiple trailing blocks', () => {
+  const f = fixture([user('q', 'u1'), tool('Bash', {}, 't1'), asst('part 1', 'a1'), asst('part 2', 'a2')])
+  expect(conclusionBlocks(f).map(x => x.text)).toEqual(['part 1', 'part 2'])
+})
+
+test('conclusionBlocks: a no-tool turn is all conclusion', () => {
+  const f = fixture([user('q', 'u1'), asst('a', 'a1'), asst('b', 'a2')])
+  expect(conclusionBlocks(f).map(x => x.text)).toEqual(['a', 'b'])
+})
+
+test('conclusionBlocks is empty while still mid-tool (no trailing text yet)', () => {
+  const f = fixture([user('q', 'u1'), asst('narration', 'a1'), tool('Bash', {}, 't1')])
+  expect(conclusionBlocks(f)).toEqual([])
 })
 
 test('finalReplyForInjected returns the conclusion to a specific injected message', () => {

@@ -213,3 +213,53 @@ export function finalRepliesAfter(file: string, afterUuid: string): { uuid: stri
   flush()
   return out
 }
+
+// Every assistant `text` block after `afterUuid`, oldest first — for play-by-play streaming
+// (the "all" reply mode). Unlike finalRepliesAfter (one per turn) this yields EVERY block. If
+// the cursor is gone (compaction), falls back to the latest block so it never dumps history.
+export function textBlocksAfter(file: string, afterUuid: string): { uuid: string; text: string }[] {
+  let lines: string[]
+  try { lines = readFileSync(file, 'utf8').split('\n') } catch { return [] }
+  const entries: Entry[] = []
+  for (const l of lines) { if (l.trim()) try { entries.push(JSON.parse(l)) } catch {} }
+
+  const at = afterUuid ? entries.findIndex(e => e.uuid === afterUuid) : -1
+  if (afterUuid && at < 0) { const latest = latestFinalReply(file); return latest ? [latest] : [] }
+
+  const out: { uuid: string; text: string }[] = []
+  for (let i = at + 1; i < entries.length; i++) {
+    const e = entries[i]
+    if (e.type === 'assistant') { const t = textOf(e.message?.content).trim(); if (t) out.push({ uuid: e.uuid ?? '', text: t }) }
+  }
+  return out
+}
+
+// The conclusion of the latest turn: the assistant `text` block(s) in entries AFTER the last
+// `tool_use` — Claude's wrap-up once the work is done. Usually one; more if it writes several
+// trailing paragraphs as separate entries. If the turn used no tools, the whole reply is the
+// conclusion. Oldest first; empty while the turn is still mid-tool (no trailing text yet).
+export function conclusionBlocks(file: string): { uuid: string; text: string }[] {
+  let lines: string[]
+  try { lines = readFileSync(file, 'utf8').split('\n') } catch { return [] }
+  const entries: Entry[] = []
+  for (const l of lines) { if (l.trim()) try { entries.push(JSON.parse(l)) } catch {} }
+
+  // Turn start = the last real user message.
+  let start = -1
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (entries[i].type === 'user' && textOf(entries[i].message?.content).trim()) { start = i; break }
+  }
+  // Last assistant entry that made a tool call this turn (stays at `start` if none → no-tools turn).
+  let lastTool = start
+  for (let i = start + 1; i < entries.length; i++) {
+    const c = entries[i].message?.content
+    if (entries[i].type === 'assistant' && Array.isArray(c) && (c as any[]).some(b => b?.type === 'tool_use')) lastTool = i
+  }
+  const out: { uuid: string; text: string }[] = []
+  for (let i = lastTool + 1; i < entries.length; i++) {
+    const e = entries[i]
+    if (e.type === 'user' && textOf(e.message?.content).trim()) break          // safety: next turn began
+    if (e.type === 'assistant') { const t = textOf(e.message?.content).trim(); if (t) out.push({ uuid: e.uuid ?? '', text: t }) }
+  }
+  return out
+}
