@@ -495,14 +495,6 @@ function onNormalPrompt(paneText: string): boolean {
   return /shift\+tab to cycle|\? for shortcuts|esc to interrupt/.test(tail)
 }
 
-// True only when the REPL is back at its idle prompt — the input hints are showing AND nothing
-// is interruptible. A reliable "the turn is fully over" signal (mid-turn the footer reads "esc
-// to interrupt"), so final/live modes relay one message per turn instead of mid-turn fragments.
-function atIdlePrompt(paneText: string): boolean {
-  const tail = paneText.split('\n').map(l => stripAnsi(l)).slice(-8).join('\n').toLowerCase()
-  return /shift\+tab to cycle|\? for shortcuts/.test(tail) && !/esc to interrupt/.test(tail)
-}
-
 // ---- First-run onboarding driver ----
 // Walk Claude Code's setup (theme · folder trust · login) from Telegram instead of punting to
 // the terminal. Only ever runs on a freshly adopted pane that has NEVER reached the REPL
@@ -606,8 +598,10 @@ async function readCurrentModel(paneId: string, watcher: PaneWatcher): Promise<s
 function detectWorking(paneText: string): boolean {
   const footer = paneText.split('\n').map(l => stripAnsi(l)).slice(-8).join('\n')
   if (/esc to interrupt/i.test(footer)) return true
-  // Spinner glyph followed by an elapsed timer, e.g. "✻ Working… (12s · …)".
-  if (/[✢✳✶✻✽✺✷✸✹·●◐◓◑◒][^\n]*\(\d+s\b/.test(footer)) return true
+  // Spinner glyph followed by an elapsed timer: "(12s", "(3m 56s", "(1h 2m" — any h/m/s unit.
+  // (The old /\(\d+s/ missed minute-format timers, so long turns read as idle and relayed
+  // mid-turn fragments.)
+  if (/[✢✳✶✻✽✺✷✸✹·●◐◓◑◒][^\n]*\(\d+\s*[hms]/.test(footer)) return true
   return false
 }
 
@@ -1101,16 +1095,16 @@ async function relayLoopTick(gen: number): Promise<void> {
   await updateTerminalMirror(!idle).catch(() => {})
   if (relayIdleStreak >= MIRROR_IDLE_BACKSTOP) await finalizeTerminalMirror().catch(() => {})
 
-  // stream relays each conclusion at the first stable idle (play-by-play); final/live hold until
-  // the turn truly returns to the idle REPL, so only the turn's single conclusion is sent.
-  const readyToRelay = replyMode() === 'stream' ? relayIdleStreak >= 2 : (relayIdleStreak >= 2 && atIdlePrompt(cap))
+  // stream = play-by-play: relay every new text block as it lands. final/live = one per turn:
+  // wait for sustained idle, which is a real turn end now that detectWorking sees minute timers.
+  const readyToRelay = replyMode() === 'stream' ? true : relayIdleStreak >= 2
   if (readyToRelay) {
     const cwd = await paneCwd(paneId)
     const file = cwd ? resolveTranscript(cwd) : null
     const reply = file ? latestFinalReply(file) : null
-    // Don't relay Claude's own usage-limit banner — the daemon's ⛔ limit handler already
-    // sends a (richer) one, so relaying this too is the redundant second message.
-    const isLimitBanner = reply && /\b(hit your|used \d+% of your) [\w-]+ limit\b/i.test(reply.text)
+    // Suppress Claude's own usage-limit banner echo (the ⛔ handler sends a richer one), but only
+    // a short, banner-shaped reply — so a real message that merely mentions a limit isn't eaten.
+    const isLimitBanner = reply && reply.text.length < 200 && /\b(hit your|used \d+% of your) [\w-]+ limit\b/i.test(reply.text)
     if (relayCursorPrimed && reply && reply.uuid && reply.uuid !== lastRelayedUuid) {
       lastRelayedUuid = reply.uuid   // advance before the await so a fast next tick can't double-send
       if (file) lastRelayedByFile.set(file, reply.uuid)
