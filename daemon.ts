@@ -3812,6 +3812,28 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
+  // Confirm/cancel exiting the only session (see the /exit handler's only-session guard).
+  if (data === 'exitconfirm:yes' || data === 'exitconfirm:no') {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    if (data === 'exitconfirm:no') {
+      await ctx.answerCallbackQuery({ text: 'Kept.' }).catch(() => {})
+      await ctx.editMessageText('✖️ Exit cancelled — session kept.').catch(() => {})
+      return
+    }
+    if (!activePaneId || !paneWatcher) {
+      await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {})
+      return
+    }
+    const label = await paneLabel(activePaneId)
+    await ctx.answerCallbackQuery({ text: 'Exiting…' }).catch(() => {})
+    await injectSlash(activePaneId, paneWatcher, '/exit')
+    await ctx.editMessageText(`✅ Session <b>${escapeHtml(label)}</b> exited`, { parse_mode: 'HTML' }).catch(() => {})
+    return
+  }
+
   // Stop confirmation (Yes/No under the "Interrupt the current task?" prompt)
   if (data === 'stopconfirm:yes') {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
@@ -4433,8 +4455,14 @@ bot.on('message:text', async ctx => {
     }
     const msgId = ctx.message.message_id
     const chat_id = String(ctx.chat.id)
-    // /exit (and /quit) closes the session — confirm with a text reply naming it, not a 👍.
+    // /exit (and /quit) closes the session. If it's the only one, confirm first (Yes/No) so the
+    // user can't accidentally leave themselves with no session; otherwise exit straight away.
     if (/^\/(exit|quit)\b/i.test(text)) {
+      if ((await sessionRows()).length <= 1) {
+        const kb = new InlineKeyboard().text('✅ Yes, exit', 'exitconfirm:yes').text('✖️ No', 'exitconfirm:no')
+        await ctx.reply('⚠️ This is the only session — confirm exit?', { reply_markup: kb })
+        return
+      }
       const label = await paneLabel(activePaneId)
       await injectSlash(activePaneId, paneWatcher, text)
       await ctx.reply(`✅ Session <b>${escapeHtml(label)}</b> exited`, { parse_mode: 'HTML' })
