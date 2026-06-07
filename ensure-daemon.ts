@@ -4,10 +4,10 @@
 // a crash or reboot when there's no MCP session to respawn it (run from a SessionStart
 // hook). Idempotent: if the daemon's socket answers, do nothing.
 import net from 'node:net'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { readdirSync, statSync, openSync, existsSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { SOCKET_PATH, STATE_DIR } from './common.ts'
 
 // Newest plugin-cache copy of daemon.ts (version dirs sort ascending; take the last).
@@ -34,6 +34,18 @@ const daemonPath = findDaemon()
 if (!daemonPath) { process.stderr.write('ensure-daemon: daemon.ts not found in plugin cache\n'); process.exit(1) }
 
 const log = openSync(join(STATE_DIR, 'daemon.log'), 'a')
+
+// A partial cache copy (no node_modules) makes `bun daemon.ts` auto-install on the fly, which
+// floats grammy to a build that fails `debug` resolution under bun. Install once against the
+// shipped lockfile before the first launch so the pinned versions win. Idempotent: skipped when
+// the deps are already present.
+const daemonDir = dirname(daemonPath)
+if (!existsSync(join(daemonDir, 'node_modules', 'grammy'))) {
+  process.stderr.write(`ensure-daemon: installing daemon deps in ${daemonDir}\n`)
+  const r = spawnSync('bun', ['install', '--no-summary'], { cwd: daemonDir, stdio: ['ignore', log, log] })
+  if (r.status !== 0) process.stderr.write(`ensure-daemon: bun install exited ${r.status}\n`)
+}
+
 const child = spawn('bun', [daemonPath], { detached: true, stdio: ['ignore', log, log], env: process.env })
 child.unref()
 process.stderr.write(`ensure-daemon: launched ${daemonPath} (pid ${child.pid})\n`)
