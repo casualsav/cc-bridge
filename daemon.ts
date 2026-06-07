@@ -1167,7 +1167,21 @@ function adoptPane(paneId: string): void {
   let prev = ''
   try { prev = readFileSync(ADOPTED_PANE_FILE, 'utf8').trim() } catch {}
   try { writeFileSync(ADOPTED_PANE_FILE, paneId, { mode: 0o600 }) } catch {}
-  if (prev !== paneId) notifyChats(`🔗 Connected to the Claude session.`)
+  if (prev !== paneId) void announceAdopted(paneId)
+}
+
+// "Connected" — but if the freshly adopted pane is sitting on Claude's first-run onboarding
+// (theme picker / login), it can't accept a chat yet, so say that instead of a misleading
+// "Connected". onNormalPrompt covers both the idle prompt and a running task; neither is
+// onboarding.
+async function announceAdopted(paneId: string): Promise<void> {
+  const cap = await capturePane(paneId).catch(() => '')
+  if (cap && !onNormalPrompt(cap)) {
+    notifyChats('🔗 Found a Claude session, but it looks like it\'s still on first-run setup ' +
+      '(theme picker / login). Finish that once in the terminal — then your messages will go through.')
+  } else {
+    notifyChats('🔗 Connected to the Claude session.')
+  }
 }
 
 // Point the bridge at an off-MCP pane (no shim socket): drive it directly and read its
@@ -1238,7 +1252,25 @@ function emitInbound(params: InboundParams): void {
     activeShim.write({ t: 'inbound', params })
   } else {
     bufferEvent(params)
+    void hintNoSession(params)
   }
+}
+
+// With nothing to deliver to, inbound just buffers silently — the most common "it's not
+// working". Nudge the user once (throttled) to launch a session; the daemon auto-discovers it
+// and replays the buffer. Skipped if any pane exists (it may just be momentarily unfocused).
+let lastNoSessionHintTs = 0
+async function hintNoSession(params: InboundParams): Promise<void> {
+  if (activeShim || offMcpPanes.size > 0) return
+  const chat = params.meta?.chat_id
+  if (!chat) return
+  if (Date.now() - lastNoSessionHintTs < 60_000) return
+  lastNoSessionHintTs = Date.now()
+  await bot.api.sendMessage(chat,
+    '🕳️ <b>No active session</b> — your message is buffered. Start one in tmux to receive it:\n' +
+    '<code>claude-tg</code>  (alias for <code>claude --strict-mcp-config</code>)\n' +
+    'The daemon auto-discovers the pane and replays anything buffered.',
+    { parse_mode: 'HTML' }).catch(() => {})
 }
 
 // ---- Event buffering ----
@@ -2644,8 +2676,19 @@ function loadScheduledReset(): void {
 bot.command('pin', async ctx => {
   if (!dmCommandGate(ctx)) return
   const arg = (ctx.match ?? '').toString().trim().toLowerCase()
-  if (arg && arg !== 'on' && arg !== 'off') {
-    await ctx.reply('Usage: <code>/pin on</code> | <code>off</code>', { parse_mode: 'HTML' })
+  if (arg && arg !== 'on' && arg !== 'off' && arg !== 'refresh') {
+    await ctx.reply('Usage: <code>/pin on</code> | <code>off</code> | <code>refresh</code>', { parse_mode: 'HTML' })
+    return
+  }
+  // /pin refresh re-pins a fresh message — recovers a pin dismissed in the client (which the
+  // API still reports as pinned, so a normal update can't bring it back).
+  if (arg === 'refresh') {
+    if (loadAccess().sessionPin === false) {
+      await ctx.reply('📌 Pinned status message is <b>OFF</b> — turn it on with <code>/pin on</code>.', { parse_mode: 'HTML' })
+    } else {
+      await refreshSessionPin()
+      await ctx.reply('📌 Re-pinned a fresh status message.', { parse_mode: 'HTML' })
+    }
     return
   }
   if (arg) {
@@ -2661,7 +2704,7 @@ bot.command('pin', async ctx => {
     (on
       ? 'It stays pinned up top with the active session · model · mode and quick buttons.'
       : 'No pinned status message is shown.') +
-    '\nToggle with <code>/pin on</code> | <code>off</code>.',
+    '\nToggle with <code>/pin on</code> | <code>off</code>; <code>/pin refresh</code> re-pins a fresh one.',
     { parse_mode: 'HTML' },
   )
 })
@@ -2879,6 +2922,14 @@ async function removeSessionPins(): Promise<void> {
   sessionPins.clear(); persistSessionPins()
 }
 
+// Force a fresh pin: unpin+delete the old one, then recreate. Recovers a pin the user dismissed
+// in their client — Telegram still reports it pinned, so updateSessionPin can't tell it's hidden,
+// and editing the same id won't bring it back; only pinning a new message will.
+async function refreshSessionPin(): Promise<void> {
+  await removeSessionPins()
+  await updateSessionPin()
+}
+
 // The model the focused session last used, read from its transcript (non-intrusive, per
 // session) — falls back to lastKnownModel. The transcript stores raw ids like
 // "claude-opus-4-8"; prettyModel turns that into "Opus 4.8".
@@ -2935,6 +2986,21 @@ function pinKeyboard(): InlineKeyboard {
     .text('🧠 Model', 'pin:model').text('🧭 Mode', 'pin:mode')
 }
 
+// True when an edit failed because the target message is gone (deleted) rather than a transient
+// like "message is not modified" — a gone pin must be recreated, not re-edited forever.
+function pinMessageGone(e: unknown): boolean {
+  const d = String((e as { description?: string })?.description ?? e)
+  return /message to edit not found|message can'?t be edited|message to pin not found|MESSAGE_ID_INVALID/i.test(d)
+}
+
+async function createSessionPin(chat: string, text: string, reply_markup: InlineKeyboard): Promise<void> {
+  try {
+    const m = await bot.api.sendMessage(chat, text, { parse_mode: 'HTML', reply_markup })
+    await bot.api.pinChatMessage(chat, m.message_id, { disable_notification: true }).catch(() => {})
+    sessionPins.set(chat, m.message_id); persistSessionPins()
+  } catch (e) { process.stderr.write(`daemon: session pin create failed: ${e}\n`) }
+}
+
 let pinUpdating = false
 async function updateSessionPin(): Promise<void> {
   if (loadAccess().sessionPin === false) return // disabled via /pin off
@@ -2946,19 +3012,23 @@ async function updateSessionPin(): Promise<void> {
     for (const chat of loadAccess().allowFrom) {
       const existing = sessionPins.get(chat)
       if (existing) {
-        await bot.api.editMessageText(chat, existing, text, { parse_mode: 'HTML', reply_markup }).catch(() => {})
-        // If the user unpinned it, re-pin on the next update (e.g. a session switch) so it returns.
-        const info = await bot.api.getChat(chat).catch(() => null)
-        if (info?.pinned_message?.message_id !== existing) {
-          await bot.api.pinChatMessage(chat, existing, { disable_notification: true }).catch(() => {})
+        try {
+          await bot.api.editMessageText(chat, existing, text, { parse_mode: 'HTML', reply_markup })
+        } catch (e) {
+          // Deleted out from under us → drop the stale id and recreate below. Transient errors
+          // ("message is not modified") leave it in place — the pin is still good.
+          if (pinMessageGone(e)) { sessionPins.delete(chat); persistSessionPins() }
         }
-        continue
+        if (sessionPins.has(chat)) {
+          // If the user unpinned it, re-pin on the next update (e.g. a session switch) so it returns.
+          const info = await bot.api.getChat(chat).catch(() => null)
+          if (info?.pinned_message?.message_id !== existing) {
+            await bot.api.pinChatMessage(chat, existing, { disable_notification: true }).catch(() => {})
+          }
+          continue
+        }
       }
-      try {
-        const m = await bot.api.sendMessage(chat, text, { parse_mode: 'HTML', reply_markup })
-        await bot.api.pinChatMessage(chat, m.message_id, { disable_notification: true }).catch(() => {})
-        sessionPins.set(chat, m.message_id); persistSessionPins()
-      } catch (e) { process.stderr.write(`daemon: session pin create failed: ${e}\n`) }
+      await createSessionPin(chat, text, reply_markup)
     }
   } finally { pinUpdating = false }
 }
