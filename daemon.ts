@@ -2908,6 +2908,7 @@ async function sessionNumber(key: string): Promise<number | null> {
 // edits the existing pin instead of pinning a new one.
 const SESSION_PIN_FILE = join(STATE_DIR, 'session-pin.json')
 const sessionPins = new Map<string, number>()
+const pinTextCache = new Map<string, string>()   // last rendered text per chat — skip no-op edits on the 10s refresh
 try { for (const [c, m] of Object.entries(JSON.parse(readFileSync(SESSION_PIN_FILE, 'utf8')) as Record<string, number>)) sessionPins.set(c, m) } catch {}
 function persistSessionPins(): void {
   try { writeFileSync(SESSION_PIN_FILE, JSON.stringify(Object.fromEntries(sessionPins)), { mode: 0o600 }) } catch {}
@@ -2919,7 +2920,7 @@ async function removeSessionPins(): Promise<void> {
     await bot.api.unpinChatMessage(chat, mid).catch(() => {})
     await bot.api.deleteMessage(chat, mid).catch(() => {})
   }
-  sessionPins.clear(); persistSessionPins()
+  sessionPins.clear(); pinTextCache.clear(); persistSessionPins()
 }
 
 // Force a fresh pin: unpin+delete the old one, then recreate. Recovers a pin the user dismissed
@@ -2958,13 +2959,84 @@ async function gitBranch(dir: string): Promise<string | null> {
   } catch { return null }
 }
 
+// ---- statusline → pin enrichment ----
+// The configured Claude Code statusLine renders rich session metrics (context, tokens, cost,
+// rate-limit windows) at the bottom of the pane. The daemon already captures that pane, so rather
+// than recompute anything we lift those fields straight out of the capture and re-render them in
+// the pin's own layout. Scoped to the statusline's slot — the lines just above Claude Code's
+// footer hint — so we never pick up numbers from Claude's reply text higher in the pane.
+
+type StatuslineData = {
+  ctxPct: number | null
+  tokens: string | null
+  cost: string | null
+  sessionTime: string | null
+  apiTime: string | null
+  h5: { pct: number; reset: string } | null
+  d7: { pct: number; reset: string } | null
+}
+
+const PIN_RULE = '──────────────────────────'
+const STATUS_DUR = '(\\d+h\\d+m|\\d+m\\d+s|\\d+h|\\d+m|\\d+s)'
+
+function pinBar(pct: number, width = 10): string {
+  const p = Math.max(0, Math.min(100, pct))
+  const filled = Math.round((p / 100) * width)
+  return '█'.repeat(filled) + '░'.repeat(Math.max(0, width - filled))
+}
+
+// The contiguous non-empty, non-border lines directly above the pane's last footer hint — i.e.
+// the custom statusline's slot. null when there's no statusline there (the line above the footer
+// is the input-box border) or the pane is in a transient state.
+function statuslineBlock(paneText: string): string | null {
+  const lines = paneText.split('\n').map(l => stripAnsi(l).replace(/\s+$/, ''))
+  let last = lines.length - 1
+  while (last >= 0 && !lines[last].trim()) last--
+  if (last < 1) return null
+  const out: string[] = []
+  for (let i = last - 1; i >= 0 && last - i <= 6; i--) {
+    const l = lines[i]
+    if (!l.trim()) break
+    if (/^[\s─━│┃┌┐└┘├┤┬┴┼╭╮╰╯╶╴╵╷]+$/.test(l)) break   // input-box border — statusline ends here
+    out.unshift(l)
+  }
+  return out.length ? out.join('\n') : null
+}
+
+function parseStatusline(paneText: string): StatuslineData | null {
+  const block = statuslineBlock(paneText)
+  if (!block) return null
+  const str = (re: RegExp): string | null => { const m = block.match(re); return m?.[1] ?? null }
+  const up = str(/↑\s*([\d.]+[kKmM]?)/), down = str(/↓\s*([\d.]+[kKmM]?)/)
+  const costRaw = str(/\$\s*([\d.]+)/)
+  const limit = (re: RegExp): { pct: number; reset: string } | null => {
+    const m = block.match(re); return m ? { pct: parseInt(m[1], 10), reset: m[2] } : null
+  }
+  const data: StatuslineData = {
+    ctxPct: (() => { const m = block.match(/ctx\D*?(\d+)\s*%/i); return m ? parseInt(m[1], 10) : null })(),
+    tokens: up || down ? `↑${up ?? '?'} ↓${down ?? '?'}` : null,
+    cost: costRaw ? `$${parseFloat(costRaw).toFixed(2)}` : null,
+    sessionTime: str(new RegExp(`\\$[\\d.]+[^|]*\\|\\s*\\D*?${STATUS_DUR}`)),  // first duration after cost
+    apiTime: str(new RegExp(`api\\s+${STATUS_DUR}`, 'i')),
+    h5: limit(new RegExp(`5h\\D*?(\\d+)\\s*%\\D*?${STATUS_DUR}`)),
+    d7: limit(new RegExp(`7d\\D*?(\\d+)\\s*%\\D*?${STATUS_DUR}`)),
+  }
+  const empty = data.ctxPct == null && !data.tokens && !data.cost && !data.sessionTime && !data.h5 && !data.d7
+  return empty ? null : data
+}
+
 async function sessionPinText(rows: SessionRow[]): Promise<string> {
   const cur = rows.find(r => r.current)
   if (!cur) return '🖥️ <b>No active session</b>'
   let mode = '—', model = lastKnownModel, cwd: string | null = null
+  let status: StatuslineData | null = null
   if (activePaneId) {
-    // Strip modeLabel's leading per-mode emoji — the pin uses a single generic 🧭.
-    try { const cap = await capturePane(activePaneId); if (onNormalPrompt(cap)) mode = modeLabel(detectCurrentMode(cap)).replace(/^\S+\s+/, '') } catch {}
+    try {
+      const cap = await capturePane(activePaneId)
+      // Strip modeLabel's leading per-mode emoji — the pin uses a single generic 🧭.
+      if (onNormalPrompt(cap)) mode = modeLabel(detectCurrentMode(cap)).replace(/^\S+\s+/, '')
+      status = parseStatusline(cap)
+    } catch {}
     try {
       cwd = await paneCwd(activePaneId)
       const file = cwd ? resolveTranscript(cwd) : null
@@ -2972,11 +3044,29 @@ async function sessionPinText(rows: SessionRow[]): Promise<string> {
     } catch {}
   }
   const branch = cwd ? await gitBranch(cwd) : null
-  const lines = [`🖥️ <b>${escapeHtml(cur.label)}</b> • 🧠 ${escapeHtml(model ?? '—')} • 🧭 ${escapeHtml(mode)}`]
-  if (cwd) lines.push(`📁 <code>${escapeHtml(cwd)}</code>${branch ? ` · 🌿 ${escapeHtml(branch)}` : ''}`)
-  if (rows.length > 1) lines.push(`🖥️ Session ${rows.findIndex(r => r.current) + 1} of ${rows.length}`)
-  lines.push('──────────────────────────')   // full-width rule so the bubble fills the message width
-  return lines.join('\n\n')   // blank line between each → a taller, easier-to-spot card
+
+  // First line is the collapsed preview Telegram shows up top — keep it identity-only. Everything
+  // below is revealed when the pin is expanded, grouped into rule-separated cards.
+  const head = `🖥️ <b>${escapeHtml(cur.label)}</b> • 🧠 ${escapeHtml(model ?? '—')} • 🧭 ${escapeHtml(mode)}`
+  const groups: string[] = []
+  if (cwd) groups.push(`📁 <code>${escapeHtml(cwd)}</code>${branch ? ` · 🌿 ${escapeHtml(branch)}` : ''}`)
+  if (status) {
+    const usage: string[] = []
+    if (status.ctxPct != null) usage.push(`🧠 Context <code>${pinBar(status.ctxPct)}</code> ${status.ctxPct}%${status.tokens ? `  ·  ${status.tokens}` : ''}`)
+    const ct: string[] = []
+    if (status.cost) ct.push(`💰 ${status.cost}`)
+    if (status.sessionTime) ct.push(`⏱ ${status.sessionTime}`)
+    if (status.apiTime) ct.push(`⚡ api ${status.apiTime}`)
+    if (ct.length) usage.push(ct.join('  ·  '))
+    if (usage.length) groups.push(usage.join('\n'))
+    const lim: string[] = []
+    if (status.h5) lim.push(`📊 5h <code>${pinBar(status.h5.pct)}</code> ${status.h5.pct}%  ↻ ${status.h5.reset}`)
+    if (status.d7) lim.push(`📅 7d <code>${pinBar(status.d7.pct)}</code> ${status.d7.pct}%  ↻ ${status.d7.reset}`)
+    if (lim.length) groups.push(lim.join('\n'))
+  }
+  if (rows.length > 1) groups.push(`🖥️ Session ${rows.findIndex(r => r.current) + 1} of ${rows.length}`)
+
+  return groups.length ? `${head}\n\n${groups.join(`\n${PIN_RULE}\n`)}` : head
 }
 
 // Quick-action buttons on the pinned status message — same emojis as the pin's own fields.
@@ -2997,7 +3087,7 @@ async function createSessionPin(chat: string, text: string, reply_markup: Inline
   try {
     const m = await bot.api.sendMessage(chat, text, { parse_mode: 'HTML', reply_markup })
     await bot.api.pinChatMessage(chat, m.message_id, { disable_notification: true }).catch(() => {})
-    sessionPins.set(chat, m.message_id); persistSessionPins()
+    sessionPins.set(chat, m.message_id); pinTextCache.set(chat, text); persistSessionPins()
   } catch (e) { process.stderr.write(`daemon: session pin create failed: ${e}\n`) }
 }
 
@@ -3011,13 +3101,16 @@ async function updateSessionPin(): Promise<void> {
     const reply_markup = pinKeyboard()
     for (const chat of loadAccess().allowFrom) {
       const existing = sessionPins.get(chat)
+      if (existing && pinTextCache.get(chat) === text) continue   // nothing changed — skip the no-op edit
       if (existing) {
         try {
           await bot.api.editMessageText(chat, existing, text, { parse_mode: 'HTML', reply_markup })
+          pinTextCache.set(chat, text)
         } catch (e) {
           // Deleted out from under us → drop the stale id and recreate below. Transient errors
           // ("message is not modified") leave it in place — the pin is still good.
-          if (pinMessageGone(e)) { sessionPins.delete(chat); persistSessionPins() }
+          if (pinMessageGone(e)) { sessionPins.delete(chat); pinTextCache.delete(chat); persistSessionPins() }
+          else pinTextCache.set(chat, text)   // "not modified" → it already shows this text
         }
         if (sessionPins.has(chat)) {
           // If the user unpinned it, re-pin on the next update (e.g. a session switch) so it returns.
@@ -4234,6 +4327,7 @@ if (FORCE_PANE) {
   void discoverPanes()
   setInterval(() => void discoverPanes(), 30_000)
   setInterval(() => void checkCrossSessionUnread(), 4_000)   // ping unread in unfocused sessions
+  setInterval(() => void updateSessionPin(), 10_000)         // keep the pin's live metrics fresh (no-op edits skipped)
 }
 
 // Make the `tg` CLI + ensure-daemon launcher available to plugin-less sessions, no setup.
