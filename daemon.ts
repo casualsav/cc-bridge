@@ -3099,6 +3099,7 @@ async function updateSessionPin(): Promise<void> {
   try {
     const text = await sessionPinText(await sessionRows())
     const reply_markup = pinKeyboard()
+    const hasSession = !!(activePaneId || activeShim)   // off-MCP pane or MCP shim — either counts
     for (const chat of loadAccess().allowFrom) {
       const existing = sessionPins.get(chat)
       if (existing && pinTextCache.get(chat) === text) continue   // nothing changed — skip the no-op edit
@@ -3121,7 +3122,7 @@ async function updateSessionPin(): Promise<void> {
           continue
         }
       }
-      await createSessionPin(chat, text, reply_markup)
+      if (hasSession) await createSessionPin(chat, text, reply_markup)   // don't pin "No active session" out of nowhere
     }
   } finally { pinUpdating = false }
 }
@@ -4327,8 +4328,12 @@ if (FORCE_PANE) {
   void discoverPanes()
   setInterval(() => void discoverPanes(), 30_000)
   setInterval(() => void checkCrossSessionUnread(), 4_000)   // ping unread in unfocused sessions
-  setInterval(() => void updateSessionPin(), 10_000)         // keep the pin's live metrics fresh (no-op edits skipped)
 }
+
+// Keep the pinned status message's live metrics fresh in EVERY mode — off-MCP pane or MCP shim
+// session — once per 10s. No-op edits are skipped and no pin is created when nothing's active, so
+// this is cheap when idle and works the same whether or not the plugin's MCP server is loaded.
+setInterval(() => void updateSessionPin(), 10_000)
 
 // Make the `tg` CLI + ensure-daemon launcher available to plugin-less sessions, no setup.
 provisionOffMcpTooling()

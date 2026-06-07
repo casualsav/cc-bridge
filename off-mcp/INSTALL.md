@@ -134,7 +134,7 @@ shim on startup for older hooks; the inline glob above just removes the bootstra
   below. Do NOT run the `/statusline` command or hand this off to the `statusline-setup` subagent;
   it's unreliable and has failed installs.** Two steps, both you:
   ```sh
-  cp off-mcp/statusline-command.sh ~/.claude/statusline-command.sh && chmod +x ~/.claude/statusline-command.sh
+  cp statusline-command.sh ~/.claude/statusline-command.sh && chmod +x ~/.claude/statusline-command.sh
   ```
   and ensure `settings.json` has the `"statusLine"` block shown above (command
   `bash ~/.claude/statusline-command.sh`).
