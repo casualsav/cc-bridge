@@ -1552,7 +1552,7 @@ function maybeWarn(type: string, pct: number, resetKey: string): void {
   process.stderr.write(`daemon: usage warn fired type=${type} threshold=${threshold} key="${resetKey}"\n`)
   const chats = loadAccess().allowFrom
   if (chats.length === 0) return
-  const emoji = threshold >= 90 ? '🚨' : threshold >= 75 ? '⚠️' : '📊'
+  const emoji = threshold >= 90 ? '🚨' : threshold >= 75 ? '⚠️' : 'ℹ️'
   for (const chat_id of chats) {
     void bot.api.sendMessage(chat_id, `${emoji} You've used ${threshold}% of your ${escapeHtml(type)} limit`).catch(() => {})
   }
