@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # One-time convenience: add a `claude-tg` alias for launching a Telegram-bridged
 # Claude Code session. Mode-aware (default off-MCP, the recommended mode):
-#   off-mcp  ->  claude --strict-mcp-config
-#                (no per-request MCP tax; the daemon drives the session's tmux pane)
+#   off-mcp  ->  claude --dangerously-skip-permissions
+#                (bypass-permissions / autonomy mode; the plugin's MCP ships disabled so the
+#                 session is already plugin-less, and the flag is the daemon's adopt signature)
 #   mcp      ->  claude --dangerously-load-development-channels plugin:telegram@better-claude-plugins --dangerously-skip-permissions
 #
 # Idempotent — re-running updates the alias in place if the mode changed. Run from the repo root:
@@ -12,7 +13,7 @@ set -euo pipefail
 MODE="${1:-off-mcp}"
 ALIAS_NAME="claude-tg"
 case "$MODE" in
-  off-mcp) ALIAS_CMD="claude --strict-mcp-config" ;;
+  off-mcp) ALIAS_CMD="claude --dangerously-skip-permissions" ;;
   mcp)     ALIAS_CMD="claude --dangerously-load-development-channels plugin:telegram@better-claude-plugins --dangerously-skip-permissions" ;;
   *)       echo "usage: setup-alias.sh [off-mcp|mcp]  (default: off-mcp)" >&2; exit 2 ;;
 esac

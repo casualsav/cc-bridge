@@ -175,8 +175,8 @@ DIR=$(ls -d ~/.claude/plugins/cache/better-claude-plugins/telegram/*/ | sort -V 
 - **`on`/`off`** → do the rename (skip if already in that state).
 
 Then tell the user it applies to **sessions started afterward** (Claude Code loads MCP servers
-at launch) — and that off-MCP sessions (`claude-tg` / `--strict-mcp-config`) ignore this
-entirely, since the flag drops all MCP servers regardless. (You can also flip this from
+at launch) — and that off-MCP `claude-tg` sessions don't load the plugin's MCP server anyway
+(it ships disabled), so this doesn't affect them. (You can also flip this from
 Telegram with `/settings`.)
 
 ### `clear` — remove the token

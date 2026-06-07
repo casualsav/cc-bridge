@@ -155,10 +155,12 @@ alias claude-tg='claude --dangerously-load-development-channels plugin:telegram@
 `~/.zshrc` or `~/.bashrc` (idempotently):
 
 ```bash
-bash scripts/setup-alias.sh
+bash scripts/setup-alias.sh mcp
 ```
 
-Then reload your shell (or `source` the rc) and launch with `claude-tg`.
+Then reload your shell (or `source` the rc) and launch with `claude-tg`. (For the off-MCP
+default instead, `bash scripts/setup-alias.sh` aliases `claude-tg` to
+`claude --dangerously-skip-permissions`.)
 
 > Note: `/plugin install` can't add the alias for you — plugins are copied to a
 > cache and don't run host-shell install scripts. The setup script above is the

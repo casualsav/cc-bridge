@@ -69,7 +69,7 @@ the user and let them pick:
 | --- | --- | --- |
 | Per-request cost | **Zero** — no MCP server; replies are read from the transcript | ~700 tokens of tool schemas **+** an instruction block injected on **every** request |
 | Requires | **tmux** (the daemon drives the session's pane) | nothing — works without tmux |
-| Launch with | `claude --strict-mcp-config` (alias `claude-tg`) | plain `claude` |
+| Launch with | `claude-tg` (alias for `claude --dangerously-skip-permissions`) | plain `claude` |
 | Functions | **Full** — reply, react, edit, files, permission prompts, every command | Full (identical) |
 
 Both modes expose the exact same features (reactions, file send/receive, permission buttons,
@@ -83,8 +83,8 @@ default. **Record the user's choice now** — you act on it after the plugin is 
 - **MCP:** after the plugin is installed, **enable it** — rename `mcp.json.disabled` → `.mcp.json`
   in the plugin dir (or run `/telegram:configure mcp on`). Once enabled, the MCP server **loads
   automatically on every plain `claude` launch** — the *only* ways it won't load are starting
-  with `--strict-mcp-config` (`claude-tg`), or turning it off via `/settings` or
-  `/telegram:configure mcp off`. Work sessions then launch with **plain `claude`** (not `claude-tg`).
+  with `--strict-mcp-config`, or turning it off via `/settings` or
+  `/telegram:configure mcp off`. Work sessions then launch with **plain `claude`**.
 
 Default to off-MCP.
 
@@ -167,9 +167,12 @@ shim on startup for older hooks; the inline glob above just removes the bootstra
   `bash ~/.claude/statusline-command.sh`).
   The script **relies on `python3`** (used to parse Claude Code's session JSON — no jq), and
   degrades to a bare `user@host:cwd` line if `python3` is missing, so confirm `python3` is on PATH.
-  **If the user already has a `statusLine` configured, leave theirs in place** — skip the
-  `statusLine` settings entry; the pin parses the common fields (ctx %, `$`cost, `↑↓` tokens,
-  `5h`/`7d`) from any reasonably-formatted statusline, so it still works, just don't clobber it.
+  **Statusline policy — our layout wins unless theirs is already complete.** The pin needs all of:
+  context %, token counts, `$`cost, and the `5h`/`7d` rate-limit %. If the user has **no**
+  statusline (the common case — just install it) **or** one that's missing any of those fields,
+  install ours (write the `statusLine` entry + copy the script above), overriding theirs. **Only**
+  leave an existing statusline untouched if it already shows **all** of those fields (the pin
+  parses them from any reasonably-formatted line). When in doubt, install ours.
 - Append this repo's `off-mcp/CLAUDE.md` into `~/.claude/CLAUDE.md` so every plugin-less
   session knows how to chat + use `tg`. **Wrap it in these exact marker comments** so `/update`
   can keep it current automatically (the updater swaps the content between them; a marker-less
@@ -194,31 +197,24 @@ EACCES line in `daemon.log` is the signature; the fix is to let `ensure-daemon` 
 idempotent) or `bun install` in the cache dir manually.
 
 ## 4. Confirm
+**Run these checks yourself — do NOT hand the user a terminal checklist. The only thing to ask
+the user is to message the bot (last paragraph).**
 ```sh
 pgrep -fa daemon.ts        # one daemon — note the path: it must be the NEWEST version dir
-command -v tg              # auto-provisioned CLI on PATH
-tg react 0 0 👍            # "not allowlisted" error = CLI reaches the daemon
 tail -5 ~/.claude/channels/telegram/daemon.log   # want "polling as @<bot>", NOT an EACCES crash
-```
-**Verify the running build is current (catches the stale-cache trap from §0.6):**
-```sh
-# daemon is running the newest cache version, not an old frozen one:
-pgrep -fa daemon.ts | grep -o 'telegram/[^/]*/' 
+# running build == newest cache version (catches the stale-cache trap from §0.6):
+pgrep -fa daemon.ts | grep -o 'telegram/[^/]*/'
 ls -d ~/.claude/plugins/cache/better-claude-plugins/telegram/*/ | sort -V | tail -1   # should match
 # grammy resolved to the pinned good version (not 1.43.x):
 cat "$(ls -d ~/.claude/plugins/cache/better-claude-plugins/telegram/*/ | sort -V | tail -1)node_modules/grammy/package.json" | grep '"version"'
-# the bot's command menu is populated (commands are set with scope all_private_chats — the
-# default scope shows []; query the right scope). Sanity-check a known command is present:
-source ~/.claude/channels/telegram/.env
-curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMyCommands" --data-urlencode 'scope={"type":"all_private_chats"}' | grep -o '"command":"[^"]*"'
 ```
-If the running daemon path is an **older** version dir than the newest on disk, or a command you
-expect is missing, you're on stale code — go back to §0.6 and force-refresh. Telegram clients also
-**cache** the command menu, so after a refresh the human may need to reopen the chat / tap "/".
+If the running daemon path is an **older** version dir than the newest on disk, you're on stale
+code — go back to §0.6 and force-refresh. Telegram clients also **cache** the command menu, so
+after a refresh the human may need to reopen the chat / tap "/".
 
-Have them DM the bot — it should respond. (No ID given in Step 1? They DM the bot now,
-it replies with a pairing code; approve with `/telegram:access pair <code>`, then lock
-with `/telegram:access policy allowlist`.)
+**The only user-facing step: ask them to send a message to the bot — it should reply.** (No ID
+given in Step 1? Their first DM returns a pairing code; approve with `/telegram:access pair
+<code>`, then lock with `/telegram:access policy allowlist`.)
 
 ## 5. Run a session — the daemon finds it
 
@@ -246,41 +242,36 @@ in case a previous install or a re-download left one in place:
 DIR=$(ls -d ~/.claude/plugins/cache/better-claude-plugins/telegram/*/ | sort -V | tail -1)
 [ -f "$DIR/.mcp.json" ] && mv "$DIR/.mcp.json" "$DIR/mcp.json.disabled"   # MCP off (off-MCP mode)
 ```
-Off-MCP never enables the server — work sessions launch with `claude-tg` (`--strict-mcp-config`).
+Off-MCP keeps the plugin's MCP server disabled, so a plain `claude` is already plugin-less — no
+`--strict-mcp-config` needed for that anymore.
 
-**Off-MCP (default):** launch the work session **plugin-less** in a tmux pane. The one flag that
-matters is `--strict-mcp-config`: it drops the plugin's MCP server (so you don't pay the
-per-request MCP context tax) **and** is the signature the daemon scans for to auto-discover the pane.
+**Off-MCP (default):** run the work session in a tmux pane, launched so the daemon recognizes it as
+a bridge session. The signature the daemon scans for is the launch flag
+`--dangerously-skip-permissions` (the older `--strict-mcp-config` is still accepted too). **Auto-add
+a `claude-tg` shortcut for it yourself** — append to the user's `~/.bashrc` (or `~/.zshrc`):
 ```sh
-claude --strict-mcp-config
+alias claude-tg='claude --dangerously-skip-permissions'
 ```
-That's it — the daemon **auto-discovers** the plugin-less pane and binds to it automatically
-(no `TELEGRAM_FORCE_PANE`, no restart). If there are several plugin-less panes it asks which to
-use; to pin a specific one, set `TELEGRAM_FORCE_PANE=<pane id>` in the `.env` to override.
+Then **tell the user:** launch work sessions with `claude-tg`. It starts Claude in
+**bypass-permissions (autonomy) mode** — actions run without stopping to ask, which is what you want
+when driving from Telegram. You can still switch modes any time (Shift+Tab, or `/mode`); in a
+non-bypass mode, permission prompts are relayed to Telegram with **Yes / allow-all / No** buttons to
+approve remotely.
 
-**Add a `claude-tg` shortcut** (recommended) — drop this in `~/.bashrc` / `~/.zshrc`:
-```sh
-alias claude-tg='claude --strict-mcp-config'
-```
-Then `claude-tg` just works. Anything you append rides along:
-- **Your own MCP servers** — `--strict-mcp-config` ignores *configured* servers but still loads
-  what you pass explicitly, so the per-request tax is gone but you keep your tooling:
-  ```sh
-  claude-tg --mcp-config ~/my-mcp.json
-  ```
-- **Skip permission prompts** — `claude-tg --dangerously-skip-permissions`. Otherwise prompts
-  are relayed to Telegram with **Yes / allow-all / No** buttons so you can approve remotely.
+That's it — the daemon **auto-discovers** the pane and binds automatically (no `TELEGRAM_FORCE_PANE`,
+no restart). Several bridge panes? It asks which to use; to pin one, set `TELEGRAM_FORCE_PANE=<pane
+id>` in `.env`. Your own MCP servers still load if you pass them (`claude-tg --mcp-config ~/my-mcp.json`).
 
 ## 6. Verify end to end
 From Telegram, message the session → you get its reply (read from the transcript), no MCP
 loaded. Ask it to "send me a file with `tg`" to confirm outbound actions.
 
 **If inbound never reaches the session (pin shows "No active session"):** the daemon only
-auto-adopts a pane whose `claude` was launched with **`--strict-mcp-config`** (the off-MCP
-signature). A session started with plain `claude` or only `--dangerously-skip-permissions` is
-**not** adopted — confirm in `daemon.log` you see `adopted off-MCP pane …` or `focus pinned to …`.
-Fixes, in order of preference: (a) relaunch the work session with `claude-tg`
-(`--strict-mcp-config`); or (b) pin the existing pane explicitly — get its id with
+auto-adopts a pane whose `claude` argv carries a bridge signature — **`--dangerously-skip-permissions`**
+(the `claude-tg` alias) or **`--strict-mcp-config`** (legacy). A session started with a bare
+`claude` (no such flag) is **not** adopted — confirm in `daemon.log` you see `adopted off-MCP pane …`
+or `focus pinned to …`. Fixes, in order of preference: (a) relaunch the work session with `claude-tg`;
+or (b) pin the existing pane explicitly — get its id with
 `tmux list-panes -a -F '#{pane_id} #{pane_current_command}'`, then set
 `TELEGRAM_FORCE_PANE=<pane id>` in `.env` and restart the daemon. (`%`-ids are valid only while
 that tmux server lives.) The daemon also DMs a one-time hint when a message arrives with no

@@ -1222,8 +1222,9 @@ function startRelayLoop(): void {
 // When no pane is pinned (FORCE_PANE) and no shim session is driving, find a plugin-less
 // `claude` pane on its own and adopt it — no .env edit / restart to bind a work session.
 // Plugin (MCP) sessions register over the shim socket, so they live in `sessions` and are
-// excluded here; and we only adopt panes whose claude argv carries --strict-mcp-config, so
-// even an unregistered MCP pane is never grabbed. Explicit FORCE_PANE always wins.
+// excluded here; and we only adopt panes whose claude argv carries the bridge opt-in flag
+// (--dangerously-skip-permissions or --strict-mcp-config), so a plain unrelated claude is never
+// grabbed. Explicit FORCE_PANE always wins.
 let adoptedPaneId: string | null = null
 
 // Every plugin-less pane we currently know about (the focused one plus any unfocused
@@ -1252,13 +1253,17 @@ async function processArgv(pid: string): Promise<string> {
   return ''
 }
 
-// True if the pane shell `panePid` has a claude child launched plugin-less
-// (--strict-mcp-config — the off-MCP session signature).
+// True if the pane shell `panePid` has a `claude` child the user opted in for bridging. The
+// opt-in is the launch flag: `--dangerously-skip-permissions` (the `claude-tg` autonomy alias)
+// or, kept for back-compat, `--strict-mcp-config` (the older off-MCP launcher). Either marks the
+// pane as "bridge me", so a plain `claude` doing unrelated work is never grabbed. (The plugin's
+// MCP server ships disabled, so off-MCP no longer hinges on --strict-mcp-config — it's just one
+// of the accepted signatures now.)
 async function isPluginlessClaude(panePid: string): Promise<boolean> {
   for (const pid of await processTree(panePid)) {
     const argv = await processArgv(pid)
     if (!argv || !/\bclaude\b/.test(argv)) continue
-    return argv.includes('--strict-mcp-config')
+    return argv.includes('--dangerously-skip-permissions') || argv.includes('--strict-mcp-config')
   }
   return false
 }
@@ -1399,7 +1404,7 @@ async function hintNoSession(params: InboundParams): Promise<void> {
   lastNoSessionHintTs = Date.now()
   await bot.api.sendMessage(chat,
     '🕳️ <b>No active session</b> — your message is buffered. Start one in tmux to receive it:\n' +
-    '<code>claude-tg</code>  (alias for <code>claude --strict-mcp-config</code>)\n' +
+    '<code>claude-tg</code>  (alias for <code>claude --dangerously-skip-permissions</code>)\n' +
     'The daemon auto-discovers the pane and replays anything buffered.',
     { parse_mode: 'HTML' }).catch(() => {})
 }
@@ -2839,7 +2844,7 @@ async function restartFocusedSession(chat: string): Promise<void> {
   await paneWatcher.withInjection(async () => {
     await sendKeys(pane, ['/exit', 'Enter'])
     for (let i = 0; i < 40 && (await paneCommand(pane)) === 'claude'; i++) await waitForSettle(pane, 200, 1500)
-    await sendKeys(pane, [`claude --strict-mcp-config --resume ${id}`, 'Enter'])
+    await sendKeys(pane, [`claude --dangerously-skip-permissions --resume ${id}`, 'Enter'])
     await waitForSettle(pane, 400, 30_000)
   })
   await dm('✅ Session restarted on the new Claude — your conversation was resumed.')
@@ -3719,7 +3724,7 @@ async function spawnSession(dir: string, extra = ''): Promise<boolean> {
         if (stdout.trim()) target = ['-t', `${stdout.trim()}:`]
       } catch {}
     }
-    const cmd = `claude --strict-mcp-config${extra ? ` ${extra}` : ''}`   // extra e.g. "--resume <id>"
+    const cmd = `claude --dangerously-skip-permissions${extra ? ` ${extra}` : ''}`   // bypass mode + adopt signature; extra e.g. "--resume <id>"
     await exec('tmux', ['new-window', '-d', ...target, '-c', dir, cmd], { timeout: 5000 })
     return true
   } catch (e) { process.stderr.write(`daemon: spawn session in ${dir} failed: ${e}\n`); return false }

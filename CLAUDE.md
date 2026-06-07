@@ -19,8 +19,8 @@ Follow **[`off-mcp/INSTALL.md`](off-mcp/INSTALL.md)** step by step — it is wri
 2. Add the marketplace + enable the plugin + add the `SessionStart` daemon hook in
    `~/.claude/settings.json`, and append `off-mcp/CLAUDE.md` to `~/.claude/CLAUDE.md`.
 3. Have the user restart Claude Code once → the daemon comes up fully configured.
-4. Launch a plugin-less session (`claude --strict-mcp-config --mcp-config '{"mcpServers":{}}'`)
-   — the daemon finds it automatically.
+4. Launch a bridge session with `claude-tg` (the auto-added alias for
+   `claude --dangerously-skip-permissions`) — the daemon finds it automatically.
 
 Don't guess config values — ask. The only non-automatable bits are getting the token from the
 human and the one Claude Code restart; do everything else yourself.
