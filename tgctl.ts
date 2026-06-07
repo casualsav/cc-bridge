@@ -21,8 +21,10 @@ switch (cmd) {
   case 'react': name = 'react';        args = { chat_id, message_id: a, emoji: b }; break
   case 'edit':  name = 'edit_message'; args = { chat_id, message_id: a, text: fromStdin(b) }; break
   case 'reply': name = 'reply';        args = { chat_id, text: fromStdin(a) }; break
+  // `tg update` / `tg update check` — the second token lands in `chat_id`.
+  case 'update': name = 'update';      args = { mode: chat_id === 'check' ? 'check' : 'apply' }; break
   default:
-    process.stderr.write('usage: tgctl <send|react|edit|reply> ...\n')
+    process.stderr.write('usage: tgctl <send|react|edit|reply|update> ...\n')
     process.exit(2)
 }
 

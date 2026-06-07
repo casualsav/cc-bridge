@@ -31,7 +31,10 @@ try { writeFileSync(WATCHDOG_PID_FILE, String(process.pid), { mode: 0o600 }) } c
 function findDaemon(): string | null {
   const base = join(homedir(), '.claude', 'plugins', 'cache', 'better-claude-plugins', 'telegram')
   let versions: string[]
-  try { versions = readdirSync(base).sort() } catch { return null }
+  // Only real version dirs (x.y.z) — never a backup/temp dir like 0.0.6.bak-… or .build-…,
+  // which would otherwise sort highest and get launched. Numeric sort so 0.0.10 > 0.0.9.
+  try { versions = readdirSync(base).filter(v => /^\d+\.\d+\.\d+$/.test(v)) } catch { return null }
+  versions.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
   for (const v of versions.reverse()) {
     const p = join(base, v, 'daemon.ts')
     if (existsSync(p)) return p

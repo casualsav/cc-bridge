@@ -4,7 +4,7 @@ import type { ReactionTypeEmoji } from 'grammy/types'
 import { randomBytes, createHash } from 'node:crypto'
 import {
   readFileSync, writeFileSync, appendFileSync, mkdirSync, readdirSync, rmSync,
-  statSync, renameSync, realpathSync, chmodSync, unlinkSync, existsSync, openSync, closeSync,
+  statSync, renameSync, realpathSync, chmodSync, unlinkSync, existsSync, openSync, closeSync, copyFileSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, extname, basename, sep } from 'node:path'
@@ -862,11 +862,29 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 const base = join(homedir(), '.claude', 'plugins', 'cache', 'better-claude-plugins', 'telegram')
 let t = null
-try { for (const v of readdirSync(base).sort().reverse()) { const p = join(base, v, 'ensure-daemon.ts'); if (existsSync(p)) { t = p; break } } } catch {}
+try { const vs = readdirSync(base).filter(v => /^\\d+\\.\\d+\\.\\d+$/.test(v)).sort((a, b) => a.localeCompare(b, undefined, { numeric: true })); for (const v of vs.reverse()) { const p = join(base, v, 'ensure-daemon.ts'); if (existsSync(p)) { t = p; break } } } catch {}
 if (t) await import(t)
 `, { mode: 0o755 })
     process.stderr.write(`daemon: provisioned off-mcp tooling (tg CLI${binDir ? ` → ${binDir}` : ' — no bin dir'}, ensure-daemon)\n`)
   } catch (e) { process.stderr.write(`daemon: off-mcp provision failed: ${e}\n`) }
+}
+
+// Kick off a self-update. update.ts rebuilds the cache dir we run from and restarts us, so it
+// must outlive this process: copy it to a stable spot outside the cache and spawn it DETACHED.
+// `mode` is 'apply' (pull + rebuild + restart, with rollback) or 'check' (report only). All
+// progress + the result are DM'd by update.ts to `chatId`.
+function startUpdate(chatId: string, mode: 'apply' | 'check'): { ok: boolean; error?: string } {
+  try {
+    const src = join(import.meta.dir, 'update.ts')
+    if (!existsSync(src)) return { ok: false, error: 'update.ts not found in plugin cache' }
+    const runner = join(STATE_DIR, 'update-run.ts')
+    copyFileSync(src, runner)
+    const log = openSync(DAEMON_LOG_FILE, 'a')
+    const child = spawn('bun', [runner, chatId, mode], { detached: true, stdio: ['ignore', log, log], env: process.env })
+    child.unref()
+    process.stderr.write(`daemon: started self-update (${mode}) pid ${child.pid}\n`)
+    return { ok: true }
+  } catch (e) { return { ok: false, error: String(e) } }
 }
 
 async function paneCwd(paneId: string): Promise<string | null> {
@@ -2193,6 +2211,14 @@ async function handleCall(
         text = sentIds.length === 1 ? `sent (id: ${sentIds[0]})` : `sent ${sentIds.length} parts (ids: ${sentIds.join(', ')})`
         break
       }
+      case 'update': {
+        const mode = (args.mode as string) === 'check' ? 'check' : 'apply'
+        const chat = loadAccess().allowFrom[0]
+        if (!chat) { text = 'no owner chat configured (access.json allowFrom is empty)'; break }
+        const r = startUpdate(chat, mode)
+        text = r.ok ? (mode === 'check' ? 'checking for updates' : 'update started') : `failed: ${r.error}`
+        break
+      }
       case 'react': {
         assertAllowedChat(args.chat_id as string)
         await bot.api.setMessageReaction(args.chat_id as string, Number(args.message_id), [
@@ -2724,6 +2750,17 @@ bot.command('compact', async ctx => {
   if (!dmCommandGate(ctx)) return
   if (!activePaneId || !paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
   void relaySlashCommand(activePaneId, paneWatcher, '/compact', String(ctx.chat!.id), ctx.message!.message_id)
+})
+
+// /update pulls the latest plugin code, rebuilds the cache, and restarts the daemon (with
+// auto-rollback); /update check only reports whether you're behind. Owner-gated via the same
+// allowlist as every other command. The work runs in a detached helper (update.ts) so it can
+// restart this very process — it DMs progress + the result back here.
+bot.command('update', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  const mode = (ctx.match ?? '').toString().trim().toLowerCase() === 'check' ? 'check' : 'apply'
+  const r = startUpdate(String(ctx.chat!.id), mode)
+  if (!r.ok) await ctx.reply(`Couldn't start update: ${r.error}`)
 })
 
 // /dock shows the docked control bar; /dock off hides it. /menu stays as a hidden alias.
@@ -4821,6 +4858,7 @@ void (async () => {
               { command: 'mcp', description: 'Toggle MCP mode for new sessions' },
               { command: 'settings', description: 'Channel settings — mirror, pin, auto-continue, MCP, voice' },
               { command: 'status', description: 'Check your pairing status' },
+              { command: 'update', description: 'Update the bridge to the latest version (/update check to peek)' },
             ],
             { scope: { type: 'all_private_chats' } },
           ).catch(() => {})
