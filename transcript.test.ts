@@ -107,12 +107,12 @@ test('turnInProgress: a no-tool turn concludes immediately (no card)', () => {
   expect(turnInProgress(f)).toBe(false)
 })
 
-test('currentTurnFeed interleaves narration and tool calls in transcript order', () => {
+test('currentTurnFeed interleaves narration + tools, dropping the conclusion text', () => {
   const f = fixture([user('q', 'u1'), narr('looking', 'a1'), tool('Read', { file_path: '/x' }, 't1'), asst('done', 'a2')])
+  // 'done' is the conclusion (relayed as its own message) — it must NOT appear in the card.
   expect(currentTurnFeed(f)).toEqual([
     { kind: 'text', text: 'looking' },
     { kind: 'tool', tool: 'Read', detail: '/x' },
-    { kind: 'text', text: 'done' },
   ])
 })
 

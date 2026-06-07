@@ -290,8 +290,11 @@ export function currentTurnFeed(file: string): FeedItem[] {
     if (e.isSidechain || e.type !== 'assistant') continue
     const content = e.message?.content
     if (!Array.isArray(content)) continue
+    // Mid-turn narration only (stop_reason 'tool_use'); the conclusion text is relayed as its own
+    // message, so showing it in the card too would just echo the final reply.
+    const narration = e.message?.stop_reason === 'tool_use'
     for (const b of content as any[]) {
-      if (b?.type === 'text' && typeof b.text === 'string' && b.text.trim()) out.push({ kind: 'text', text: b.text.trim() })
+      if (narration && b?.type === 'text' && typeof b.text === 'string' && b.text.trim()) out.push({ kind: 'text', text: b.text.trim() })
       else if (b?.type === 'tool_use' && typeof b.name === 'string') out.push({ kind: 'tool', tool: b.name, detail: toolDetail(b.input) })
     }
   }

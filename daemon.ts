@@ -921,10 +921,6 @@ async function sendAgentText(chats: string[], text: string): Promise<void> {
 // required (2 consecutive non-working reads) so mid-turn narration isn't relayed, and the
 // cursor is primed to the current tail on (re)start so existing backlog never re-sends.
 const RELAY_POLL_MS = 1500
-// Backstop only: cap an open mirror after this much sustained idle when a turn ended without
-// relaying a reply (interrupt / no text). Normal turns cap precisely when their reply relays,
-// so this is large on purpose — it must never fire on a mid-turn pause.
-const MIRROR_IDLE_BACKSTOP = 20   // ~30s
 let lastRelayedUuid = ''
 let relayCursorPrimed = false
 // Last uuid relayed per transcript file, so switching back to a session can replay what it
@@ -1096,22 +1092,23 @@ async function buildMirrorText(done: boolean): Promise<string | null> {
   return acts.length ? renderToolsMirror(acts, done) : null
 }
 
-// While working, post/refresh the mirror; freeze it when the turn settles.
-// `settled` = the turn is really over (sustained idle), NOT a single idle tick — a turn
-// flickers idle between tool calls, and finalizing on those would end the message and start a
-// fresh one on the next call (the "multiple working messages" bug). Caller passes the same
-// 2-tick streak the reply relay uses.
+// The card's whole lifecycle lives here, driven by one signal — `working` = turnInProgress(file)
+// from the transcript. While the turn runs we open the card once and edit it in place; the
+// instant the turn settles (working false) we cap it (✅ Done) and clear it. Nothing else opens
+// or closes the card, so there's no create/finalize ping-pong (the cause of the re-send storm:
+// the pane-idle backstop fought turnInProgress on this bridged pane, which never shows the
+// "esc to interrupt" footer). Idempotent: repeated not-working ticks are a no-op once cleared.
 async function updateTerminalMirror(working: boolean): Promise<void> {
   const mode = replyMode()
-  // all → never a card. hybrid → always a card (it carries the thought stream). final → only
-  // when the mirror isn't off.
+  // all → never a card. final+terminalMirror:off → no card.
   if (mode === 'all' || (mode === 'final' && mirrorMode() === 'off')) { if (mirrorMsgIds.size) await finalizeTerminalMirror(); return }
+
+  if (!working) { if (mirrorMsgIds.size) await finalizeTerminalMirror(); return }   // turn settled → cap the card once
 
   const text = await buildMirrorText(false)
   if (!text) return
   const now = Date.now()
   if (mirrorMsgIds.size === 0) {
-    if (!working) return   // never open a fresh mirror while idle — the turn is over (or hasn't started)
     // The card always streams silently in both final and hybrid — it's the ambient mirror; the
     // alerting message is the conclusion relayed at turn end.
     mirrorLastText = text; mirrorLastEditAt = now
@@ -1149,18 +1146,20 @@ async function relayLoopTick(gen: number): Promise<void> {
   const cwd = await paneCwd(paneId)
   const file = cwd ? resolveTranscript(cwd) : null
 
-  // Drive the live card off the transcript's turn state, not pane idle: it opens when the turn
-  // starts working and closes the instant a conclusion lands (below) — so exactly one card per
-  // turn, never a duplicate from an idle flicker. A long-idle backstop still caps a turn that
-  // ended without any conclusion (interrupt / killed pane), where no close event ever fires.
+  // The card opens/edits/closes entirely inside updateTerminalMirror, off the transcript's turn
+  // state (turnInProgress) — NOT pane idle. This bridged pane never shows the "esc to interrupt"
+  // footer, so detectWorking reads idle the whole turn; gating the card on that produced a
+  // create/finalize storm. turnInProgress is the ground truth, so the card caps exactly when the
+  // turn concludes. (relayIdleStreak/detectWorking now only feed ambient signals elsewhere.)
   const working = file ? turnInProgress(file) : !idle
   await updateTerminalMirror(working).catch(() => {})
-  if (relayIdleStreak >= MIRROR_IDLE_BACKSTOP) await finalizeTerminalMirror().catch(() => {})
 
   // Relay off the transcript, classified by stop_reason: 'all' sends every text block as it
   // lands (play-by-play); 'final'/'hybrid' send only conclusion blocks (stop_reason !== tool_use)
   // and skip mid-turn narration. No pane-idle gate — a block relays the moment it's written, so
-  // a turn's conclusion can't leak early and narration can't slip into final/hybrid.
+  // a turn's conclusion can't leak early and narration can't slip into final/hybrid. The card is
+  // already capped by updateTerminalMirror above (which ran before this send), so the ✅ Done
+  // lands just before the conclusion message.
   if (relayCursorPrimed && file) {
     const mode = replyMode()
     // Suppress Claude's own usage-limit banner echo (the ⛔ handler sends a richer one), but
@@ -1175,7 +1174,6 @@ async function relayLoopTick(gen: number): Promise<void> {
         process.stderr.write(`daemon: relaying ${b.text.length} chars (uuid ${b.uuid.slice(0, 8)}, ${b.conclusion ? 'conclusion' : 'narration'}) to ${chats.join(',')}\n`)
         await sendAgentText(chats, b.text).catch(e => process.stderr.write(`daemon: relay send failed: ${e}\n`))
       }
-      if (b.conclusion && mode !== 'all') await finalizeTerminalMirror().catch(() => {})   // cap the card at turn end
     }
   }
   if (gen === relayLoopGen) setTimeout(() => void relayLoopTick(gen), RELAY_POLL_MS)
