@@ -24,7 +24,7 @@ import {
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
 import { detectUserPrompt, detectPermissionPrompt, isSubmitScreen, stripAnsi, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
-import { resolveTranscript, latestFinalReply, finalRepliesAfter, textBlocksAfter, conclusionBlocks, currentTurnActivity, listRecentSessions, findSessionCwd, type Activity } from './transcript.ts'
+import { resolveTranscript, latestFinalReply, finalRepliesAfter, textEntriesAfter, turnInProgress, currentTurnActivity, currentTurnFeed, listRecentSessions, findSessionCwd, type Activity, type FeedItem } from './transcript.ts'
 
 // Off-MCP outbound (experimental): instead of the agent calling the MCP reply tool,
 // the daemon reads its reply from the session transcript and relays it — lets a session
@@ -1052,20 +1052,46 @@ function renderToolsMirror(acts: Activity[], done: boolean): string {
   return lines.join('\n')
 }
 
-// The mirror text for the active mode, or null when there's nothing to show yet.
-//   all    → no card (thoughts go out as messages).
-//   hybrid → digest card (Claude's ● blocks carry both narration and tool headers).
-//   final  → the tool-use feed (or digest if terminalMirror=digest; none if it's off).
+// Hybrid card: the current turn's narration + tool calls interleaved (transcript-driven, so no
+// pane scraping), the latest few items. Text shows as a 💭 thought line; tools keep their badge.
+const MIRROR_FEED = 9        // hybrid: max interleaved items shown
+function renderHybridMirror(feed: FeedItem[], done: boolean): string {
+  const header = done ? '🖥️ <b>Session</b> · idle' : '🖥️ <b>Session</b> · live'
+  const lines: string[] = []
+  for (const it of feed.slice(-MIRROR_FEED)) {
+    if (it.kind === 'text') {
+      const t = it.text.replace(/\s+/g, ' ').trim()
+      lines.push(`💭 <i>${escapeHtml(t.length > 160 ? t.slice(0, 159) + '…' : t)}</i>`)
+    } else {
+      const [emoji, label] = toolBadge(it.tool)
+      const d = it.detail ? `: <code>${escapeHtml(it.detail)}</code>` : ''
+      lines.push(`${emoji} ${label}${d}`)
+    }
+  }
+  if (done) lines.push(`✅ <b>Done</b>`)
+  return `${header}\n\n${lines.join('\n').slice(0, 3500)}`
+}
+
+// The mirror text for the active mode, or null when there's nothing to show yet. All of it is
+// built from the transcript — no pane scraping — so it can't drop or garble blocks.
+//   all    → no card (every block goes out as its own message).
+//   hybrid → narration + tool calls interleaved (the thought stream the user asked for).
+//   final  → the tool-use feed (or, opt-in, the legacy pane digest; none if terminalMirror=off).
 async function buildMirrorText(done: boolean): Promise<string | null> {
   const mode = replyMode()
   if (mode === 'all') return null
-  if (mode === 'hybrid' || mirrorMode() === 'digest') {
+  const cwd = activePaneId ? await paneCwd(activePaneId) : null
+  const file = cwd ? resolveTranscript(cwd) : null
+  if (mode === 'hybrid') {
+    const feed = file ? currentTurnFeed(file) : []
+    return feed.length ? renderHybridMirror(feed, done) : null
+  }
+  // final
+  if (mirrorMode() === 'off') return null
+  if (mirrorMode() === 'digest') {
     const raw = await mirrorCapture()
     return raw ? renderDigestMirror(raw, done) : null
   }
-  if (mirrorMode() === 'off') return null
-  const cwd = activePaneId ? await paneCwd(activePaneId) : null
-  const file = cwd ? resolveTranscript(cwd) : null
   const acts = file ? currentTurnActivity(file) : []
   return acts.length ? renderToolsMirror(acts, done) : null
 }
@@ -1086,11 +1112,11 @@ async function updateTerminalMirror(working: boolean): Promise<void> {
   const now = Date.now()
   if (mirrorMsgIds.size === 0) {
     if (!working) return   // never open a fresh mirror while idle — the turn is over (or hasn't started)
-    // Hybrid's card streams silently (the alerting message is the conclusion at turn end).
-    const silent = mode === 'hybrid'
+    // The card always streams silently in both final and hybrid — it's the ambient mirror; the
+    // alerting message is the conclusion relayed at turn end.
     mirrorLastText = text; mirrorLastEditAt = now
     for (const chat of loadAccess().allowFrom) {
-      try { const m = await bot.api.sendMessage(chat, text, { parse_mode: 'HTML', disable_notification: silent }); mirrorMsgIds.set(chat, m.message_id) }
+      try { const m = await bot.api.sendMessage(chat, text, { parse_mode: 'HTML', disable_notification: true }); mirrorMsgIds.set(chat, m.message_id) }
       catch (e) { process.stderr.write(`daemon: activity mirror create failed: ${e}\n`) }
     }
   } else if (text !== mirrorLastText && now - mirrorLastEditAt >= MIRROR_THROTTLE_MS) {
@@ -1120,41 +1146,36 @@ async function relayLoopTick(gen: number): Promise<void> {
   const idle = cap !== '' && !detectWorking(cap) && !detectLimited(cap)
   relayIdleStreak = idle ? relayIdleStreak + 1 : 0
 
-  // Keep the live mirror refreshed every tick. It's finalized only when the turn actually
-  // concludes (a new final reply relays, below) — never on a mid-turn pause, however long —
-  // so the whole turn stays one message. A long-idle backstop caps a turn that ended without
-  // relaying any reply (interrupt / no text).
-  await updateTerminalMirror(!idle).catch(() => {})
+  const cwd = await paneCwd(paneId)
+  const file = cwd ? resolveTranscript(cwd) : null
+
+  // Drive the live card off the transcript's turn state, not pane idle: it opens when the turn
+  // starts working and closes the instant a conclusion lands (below) — so exactly one card per
+  // turn, never a duplicate from an idle flicker. A long-idle backstop still caps a turn that
+  // ended without any conclusion (interrupt / killed pane), where no close event ever fires.
+  const working = file ? turnInProgress(file) : !idle
+  await updateTerminalMirror(working).catch(() => {})
   if (relayIdleStreak >= MIRROR_IDLE_BACKSTOP) await finalizeTerminalMirror().catch(() => {})
 
-  // Relay by mode: 'all' streams every text block as it lands (play-by-play); 'final'/'hybrid'
-  // send only the conclusion block(s) once the turn has truly settled (sustained idle).
-  if (relayCursorPrimed) {
-    const cwd = await paneCwd(paneId)
-    const file = cwd ? resolveTranscript(cwd) : null
-    if (file) {
-      // Suppress Claude's own usage-limit banner echo (the ⛔ handler sends a richer one), but
-      // only a short banner-shaped block — a real reply that merely mentions a limit isn't eaten.
-      const isBanner = (t: string) => t.length < 200 && /\b(hit your|used \d+% of your) [\w-]+ limit\b/i.test(t)
-      const send = async (b: { uuid: string; text: string }) => {
-        if (!b.uuid) return
-        lastRelayedUuid = b.uuid                 // advance before the await so a fast tick can't double-send
-        lastRelayedByFile.set(file, b.uuid)
-        if (isBanner(b.text)) return
+  // Relay off the transcript, classified by stop_reason: 'all' sends every text block as it
+  // lands (play-by-play); 'final'/'hybrid' send only conclusion blocks (stop_reason !== tool_use)
+  // and skip mid-turn narration. No pane-idle gate — a block relays the moment it's written, so
+  // a turn's conclusion can't leak early and narration can't slip into final/hybrid.
+  if (relayCursorPrimed && file) {
+    const mode = replyMode()
+    // Suppress Claude's own usage-limit banner echo (the ⛔ handler sends a richer one), but
+    // only a short banner-shaped block — a real reply that merely mentions a limit isn't eaten.
+    const isBanner = (t: string) => t.length < 200 && /\b(hit your|used \d+% of your) [\w-]+ limit\b/i.test(t)
+    for (const b of textEntriesAfter(file, lastRelayedUuid)) {
+      if (!b.uuid || b.uuid === lastRelayedUuid) continue
+      lastRelayedUuid = b.uuid                 // advance before the await so a fast tick can't double-send
+      lastRelayedByFile.set(file, b.uuid)
+      if ((mode === 'all' || b.conclusion) && !isBanner(b.text)) {
         const chats = loadAccess().allowFrom
-        process.stderr.write(`daemon: relaying ${b.text.length} chars (uuid ${b.uuid.slice(0, 8)}) to ${chats.join(',')}\n`)
+        process.stderr.write(`daemon: relaying ${b.text.length} chars (uuid ${b.uuid.slice(0, 8)}, ${b.conclusion ? 'conclusion' : 'narration'}) to ${chats.join(',')}\n`)
         await sendAgentText(chats, b.text).catch(e => process.stderr.write(`daemon: relay send failed: ${e}\n`))
       }
-      if (replyMode() === 'all') {
-        for (const b of textBlocksAfter(file, lastRelayedUuid)) if (b.uuid !== lastRelayedUuid) await send(b)
-      } else if (relayIdleStreak >= 2) {
-        // The turn settled — send any not-yet-sent conclusion block(s), then cap the card.
-        const blocks = conclusionBlocks(file)
-        const at = blocks.findIndex(b => b.uuid === lastRelayedUuid)
-        const fresh = at >= 0 ? blocks.slice(at + 1) : blocks
-        for (const b of fresh) if (b.uuid !== lastRelayedUuid) await send(b)
-        if (fresh.length) await finalizeTerminalMirror().catch(() => {})
-      }
+      if (b.conclusion && mode !== 'all') await finalizeTerminalMirror().catch(() => {})   // cap the card at turn end
     }
   }
   if (gen === relayLoopGen) setTimeout(() => void relayLoopTick(gen), RELAY_POLL_MS)

@@ -9,7 +9,7 @@ import { join } from 'node:path'
 
 const PROJECTS_DIR = join(homedir(), '.claude', 'projects')
 
-type Entry = { type?: string; uuid?: string; timestamp?: string; cwd?: string; message?: { content?: unknown } }
+type Entry = { type?: string; uuid?: string; timestamp?: string; cwd?: string; isSidechain?: boolean; message?: { content?: unknown; stop_reason?: string | null } }
 
 // Text content of an entry: a bare string, or the joined `text` blocks of a content
 // array (tool_use / thinking blocks contribute nothing).
@@ -17,6 +17,31 @@ function textOf(content: unknown): string {
   if (typeof content === 'string') return content
   if (Array.isArray(content)) return content.filter((c: any) => c?.type === 'text').map((c: any) => c.text).join('\n')
   return ''
+}
+
+// Parse a transcript file into its entries, skipping blank/garbled lines. Shared by the
+// readers below so they all see the same view.
+function readEntries(file: string): Entry[] {
+  let lines: string[]
+  try { lines = readFileSync(file, 'utf8').split('\n') } catch { return [] }
+  const entries: Entry[] = []
+  for (const l of lines) { if (l.trim()) try { entries.push(JSON.parse(l)) } catch {} }
+  return entries
+}
+
+// A main-thread assistant entry that carries real text. Subagent (Task) output is recorded
+// with isSidechain=true in the SAME transcript — it's the subagent's internal narration, not
+// the session's reply, so it must never relay. This is the single gate every text reader uses.
+function isMainAssistantText(e: Entry): boolean {
+  return e.type === 'assistant' && !e.isSidechain && textOf(e.message?.content).trim() !== ''
+}
+
+// Whether an assistant entry is a turn CONCLUSION vs mid-turn narration. The model only stops
+// with stop_reason 'tool_use' when it's pausing to call a tool — i.e. it will continue — so
+// that (and only that) is narration. end_turn / stop_sequence / an unrecorded null all mean the
+// turn wrapped up. This replaces the fragile "text after the last tool_use" heuristic.
+function isConclusionEntry(e: Entry): boolean {
+  return e.message?.stop_reason !== 'tool_use'
 }
 
 // A resumable session: id, its working dir, last-activity time, and a short title (the
@@ -155,11 +180,11 @@ export function currentTurnActivity(file: string): Activity[] {
 
   let anchor = -1
   for (let i = entries.length - 1; i >= 0; i--) {
-    if (entries[i].type === 'user' && textOf(entries[i].message?.content).trim()) { anchor = i; break }
+    if (entries[i].type === 'user' && !entries[i].isSidechain && textOf(entries[i].message?.content).trim()) { anchor = i; break }
   }
   const acts: Activity[] = []
   for (let i = anchor + 1; i < entries.length; i++) {
-    if (entries[i].type !== 'assistant') continue
+    if (entries[i].type !== 'assistant' || entries[i].isSidechain) continue
     const content = entries[i].message?.content
     if (!Array.isArray(content)) continue
     for (const b of content as any[]) {
@@ -175,16 +200,11 @@ export function currentTurnActivity(file: string): Activity[] {
 // long task) too; the caller dedups on the uuid so nothing sends twice. Returns null if
 // the tail is tool_use/thinking only (still working) or the transcript is unreadable.
 export function latestFinalReply(file: string): { uuid: string; text: string } | null {
-  let lines: string[]
-  try { lines = readFileSync(file, 'utf8').split('\n') } catch { return null }
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const l = lines[i].trim()
-    if (!l) continue
-    let e: Entry
-    try { e = JSON.parse(l) } catch { continue }
-    if (e.type !== 'assistant') continue
-    const t = textOf(e.message?.content).trim()
-    if (t) return { uuid: e.uuid ?? '', text: t }
+  const entries = readEntries(file)
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i]
+    if (!isMainAssistantText(e)) continue
+    return { uuid: e.uuid ?? '', text: textOf(e.message?.content).trim() }
   }
   return null
 }
@@ -194,11 +214,7 @@ export function latestFinalReply(file: string): { uuid: string; text: string } |
 // said while it was unfocused. Oldest first. If `afterUuid` is gone (compaction/rotation)
 // we return just the latest, so a lost cursor never dumps the whole backlog.
 export function finalRepliesAfter(file: string, afterUuid: string): { uuid: string; text: string }[] {
-  let lines: string[]
-  try { lines = readFileSync(file, 'utf8').split('\n') } catch { return [] }
-  const entries: Entry[] = []
-  for (const l of lines) { if (l.trim()) try { entries.push(JSON.parse(l)) } catch {} }
-
+  const entries = readEntries(file)
   const at = afterUuid ? entries.findIndex(e => e.uuid === afterUuid) : -1
   if (afterUuid && at < 0) { const latest = latestFinalReply(file); return latest ? [latest] : [] }
 
@@ -207,59 +223,77 @@ export function finalRepliesAfter(file: string, afterUuid: string): { uuid: stri
   const flush = () => { if (pending) { out.push(pending); pending = null } }
   for (let i = at + 1; i < entries.length; i++) {
     const e = entries[i]
-    if (e.type === 'user' && textOf(e.message?.content).trim()) { flush(); continue }  // turn boundary
-    if (e.type === 'assistant') { const t = textOf(e.message?.content).trim(); if (t) pending = { uuid: e.uuid ?? '', text: t } }
+    if (e.type === 'user' && !e.isSidechain && textOf(e.message?.content).trim()) { flush(); continue }  // turn boundary
+    if (isMainAssistantText(e)) pending = { uuid: e.uuid ?? '', text: textOf(e.message?.content).trim() }
   }
   flush()
   return out
 }
 
-// Every assistant `text` block after `afterUuid`, oldest first — for play-by-play streaming
-// (the "all" reply mode). Unlike finalRepliesAfter (one per turn) this yields EVERY block. If
-// the cursor is gone (compaction), falls back to the latest block so it never dumps history.
-export function textBlocksAfter(file: string, afterUuid: string): { uuid: string; text: string }[] {
-  let lines: string[]
-  try { lines = readFileSync(file, 'utf8').split('\n') } catch { return [] }
-  const entries: Entry[] = []
-  for (const l of lines) { if (l.trim()) try { entries.push(JSON.parse(l)) } catch {} }
-
+// Every main-thread assistant `text` entry after `afterUuid`, oldest first, each tagged with
+// whether it's a turn CONCLUSION (stop_reason !== 'tool_use') or mid-turn narration. This is
+// the single feed the relay loop walks: 'all' sends every entry; 'final'/'hybrid' send only the
+// conclusions and skip narration — all keyed off the transcript, no pane-idle guessing. If the
+// cursor is gone (compaction) it falls back to the latest entry so it never dumps history.
+export function textEntriesAfter(file: string, afterUuid: string): { uuid: string; text: string; conclusion: boolean }[] {
+  const entries = readEntries(file)
   const at = afterUuid ? entries.findIndex(e => e.uuid === afterUuid) : -1
-  if (afterUuid && at < 0) { const latest = latestFinalReply(file); return latest ? [latest] : [] }
-
-  const out: { uuid: string; text: string }[] = []
+  if (afterUuid && at < 0) {
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const e = entries[i]
+      if (isMainAssistantText(e)) return [{ uuid: e.uuid ?? '', text: textOf(e.message?.content).trim(), conclusion: isConclusionEntry(e) }]
+    }
+    return []
+  }
+  const out: { uuid: string; text: string; conclusion: boolean }[] = []
   for (let i = at + 1; i < entries.length; i++) {
     const e = entries[i]
-    if (e.type === 'assistant') { const t = textOf(e.message?.content).trim(); if (t) out.push({ uuid: e.uuid ?? '', text: t }) }
+    if (isMainAssistantText(e)) out.push({ uuid: e.uuid ?? '', text: textOf(e.message?.content).trim(), conclusion: isConclusionEntry(e) })
   }
   return out
 }
 
-// The conclusion of the latest turn: the assistant `text` block(s) in entries AFTER the last
-// `tool_use` — Claude's wrap-up once the work is done. Usually one; more if it writes several
-// trailing paragraphs as separate entries. If the turn used no tools, the whole reply is the
-// conclusion. Oldest first; empty while the turn is still mid-tool (no trailing text yet).
-export function conclusionBlocks(file: string): { uuid: string; text: string }[] {
-  let lines: string[]
-  try { lines = readFileSync(file, 'utf8').split('\n') } catch { return [] }
-  const entries: Entry[] = []
-  for (const l of lines) { if (l.trim()) try { entries.push(JSON.parse(l)) } catch {} }
-
-  // Turn start = the last real user message.
+// Whether the latest turn is still running, read straight from the transcript: there's been
+// main-thread assistant activity since the last real user message, but no conclusion entry has
+// landed yet (stop_reason is still 'tool_use'). Drives the live mirror card's open/close so a
+// card opens exactly once per working turn and closes the instant the turn concludes — no
+// reliance on flaky pane-idle detection (the source of the duplicate-card bug). A no-tools turn
+// concludes immediately, so this returns false for it (no card for a sub-tick reply).
+export function turnInProgress(file: string): boolean {
+  const entries = readEntries(file)
   let start = -1
   for (let i = entries.length - 1; i >= 0; i--) {
-    if (entries[i].type === 'user' && textOf(entries[i].message?.content).trim()) { start = i; break }
+    if (entries[i].type === 'user' && !entries[i].isSidechain && textOf(entries[i].message?.content).trim()) { start = i; break }
   }
-  // Last assistant entry that made a tool call this turn (stays at `start` if none → no-tools turn).
-  let lastTool = start
+  let sawAssistant = false, concluded = false
   for (let i = start + 1; i < entries.length; i++) {
-    const c = entries[i].message?.content
-    if (entries[i].type === 'assistant' && Array.isArray(c) && (c as any[]).some(b => b?.type === 'tool_use')) lastTool = i
-  }
-  const out: { uuid: string; text: string }[] = []
-  for (let i = lastTool + 1; i < entries.length; i++) {
     const e = entries[i]
-    if (e.type === 'user' && textOf(e.message?.content).trim()) break          // safety: next turn began
-    if (e.type === 'assistant') { const t = textOf(e.message?.content).trim(); if (t) out.push({ uuid: e.uuid ?? '', text: t }) }
+    if (e.isSidechain || e.type !== 'assistant') continue
+    sawAssistant = true
+    if (textOf(e.message?.content).trim() && isConclusionEntry(e)) concluded = true
+  }
+  return sawAssistant && !concluded
+}
+
+// The current turn's chronological feed of what Claude said and did — text narration and tool
+// calls interleaved in transcript order — for the hybrid mirror card. Subagent output skipped.
+export type FeedItem = { kind: 'text'; text: string } | { kind: 'tool'; tool: string; detail: string }
+export function currentTurnFeed(file: string): FeedItem[] {
+  const entries = readEntries(file)
+  let start = -1
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (entries[i].type === 'user' && !entries[i].isSidechain && textOf(entries[i].message?.content).trim()) { start = i; break }
+  }
+  const out: FeedItem[] = []
+  for (let i = start + 1; i < entries.length; i++) {
+    const e = entries[i]
+    if (e.isSidechain || e.type !== 'assistant') continue
+    const content = e.message?.content
+    if (!Array.isArray(content)) continue
+    for (const b of content as any[]) {
+      if (b?.type === 'text' && typeof b.text === 'string' && b.text.trim()) out.push({ kind: 'text', text: b.text.trim() })
+      else if (b?.type === 'tool_use' && typeof b.name === 'string') out.push({ kind: 'tool', tool: b.name, detail: toolDetail(b.input) })
+    }
   }
   return out
 }

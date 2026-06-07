@@ -3,7 +3,7 @@ import { test, expect } from 'bun:test'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { latestFinalReply, finalRepliesAfter, textBlocksAfter, conclusionBlocks, currentTurnActivity, finalReplyForInjected } from './transcript.ts'
+import { latestFinalReply, finalRepliesAfter, textEntriesAfter, turnInProgress, currentTurnActivity, currentTurnFeed, finalReplyForInjected } from './transcript.ts'
 
 function fixture(entries: object[]): string {
   const f = join(mkdtempSync(join(tmpdir(), 'tg-transcript-')), 'session.jsonl')
@@ -11,8 +11,12 @@ function fixture(entries: object[]): string {
   return f
 }
 const user = (text: string, uuid: string) => ({ type: 'user', uuid, message: { content: text } })
-const asst = (text: string, uuid: string) => ({ type: 'assistant', uuid, message: { content: [{ type: 'text', text }] } })
-const tool = (name: string, input: unknown, uuid: string) => ({ type: 'assistant', uuid, message: { content: [{ type: 'tool_use', name, input }] } })
+// A conclusion text block (stop_reason end_turn) by default; pass 'tool_use' for mid-turn narration.
+const asst = (text: string, uuid: string, stop: string = 'end_turn') => ({ type: 'assistant', uuid, message: { stop_reason: stop, content: [{ type: 'text', text }] } })
+const narr = (text: string, uuid: string) => asst(text, uuid, 'tool_use')
+const tool = (name: string, input: unknown, uuid: string) => ({ type: 'assistant', uuid, message: { stop_reason: 'tool_use', content: [{ type: 'tool_use', name, input }] } })
+// A subagent (sidechain) text block — same transcript, but never the session's own reply.
+const sub = (text: string, uuid: string) => ({ type: 'assistant', uuid, isSidechain: true, message: { stop_reason: 'end_turn', content: [{ type: 'text', text }] } })
 
 test('latestFinalReply returns the last assistant text block', () => {
   const f = fixture([user('hi', 'u1'), asst('hello', 'a1'), asst('world', 'a2')])
@@ -72,35 +76,44 @@ test('currentTurnActivity renders a todo count when nothing is in progress', () 
   expect(currentTurnActivity(f)[0].detail).toBe('2 tasks')
 })
 
-test('textBlocksAfter streams every text block after the cursor (not one per turn)', () => {
-  const f = fixture([user('q', 'u1'), asst('one', 'a1'), tool('Bash', {}, 't1'), asst('two', 'a2')])
-  expect(textBlocksAfter(f, '').map(x => x.text)).toEqual(['one', 'two'])
-  expect(textBlocksAfter(f, 'a1').map(x => x.text)).toEqual(['two'])
+test('textEntriesAfter streams every block, tagged conclusion vs narration', () => {
+  const f = fixture([user('q', 'u1'), narr('one', 'a1'), tool('Bash', {}, 't1'), asst('two', 'a2')])
+  expect(textEntriesAfter(f, '')).toEqual([
+    { uuid: 'a1', text: 'one', conclusion: false },
+    { uuid: 'a2', text: 'two', conclusion: true },
+  ])
+  expect(textEntriesAfter(f, 'a1').map(x => x.text)).toEqual(['two'])
 })
 
-test('textBlocksAfter with a lost cursor returns just the latest', () => {
+test('textEntriesAfter excludes subagent (sidechain) text', () => {
+  const f = fixture([user('q', 'u1'), sub('internal subagent line', 's1'), asst('real reply', 'a1')])
+  expect(textEntriesAfter(f, '').map(x => x.text)).toEqual(['real reply'])
+})
+
+test('textEntriesAfter with a lost cursor returns just the latest', () => {
   const f = fixture([user('q', 'u1'), asst('a', 'a1'), asst('b', 'a2')])
-  expect(textBlocksAfter(f, 'gone').map(x => x.text)).toEqual(['b'])
+  expect(textEntriesAfter(f, 'gone').map(x => x.text)).toEqual(['b'])
 })
 
-test('conclusionBlocks = text after the last tool call', () => {
-  const f = fixture([user('q', 'u1'), asst('narration', 'a1'), tool('Bash', {}, 't1'), asst('done', 'a2')])
-  expect(conclusionBlocks(f).map(x => x.text)).toEqual(['done'])
+test('turnInProgress: true while mid-tool, false once a conclusion lands', () => {
+  const working = fixture([user('q', 'u1'), narr('working', 'a1'), tool('Bash', {}, 't1')])
+  expect(turnInProgress(working)).toBe(true)
+  const done = fixture([user('q', 'u1'), narr('working', 'a1'), tool('Bash', {}, 't1'), asst('done', 'a2')])
+  expect(turnInProgress(done)).toBe(false)
 })
 
-test('conclusionBlocks returns multiple trailing blocks', () => {
-  const f = fixture([user('q', 'u1'), tool('Bash', {}, 't1'), asst('part 1', 'a1'), asst('part 2', 'a2')])
-  expect(conclusionBlocks(f).map(x => x.text)).toEqual(['part 1', 'part 2'])
+test('turnInProgress: a no-tool turn concludes immediately (no card)', () => {
+  const f = fixture([user('q', 'u1'), asst('answer', 'a1')])
+  expect(turnInProgress(f)).toBe(false)
 })
 
-test('conclusionBlocks: a no-tool turn is all conclusion', () => {
-  const f = fixture([user('q', 'u1'), asst('a', 'a1'), asst('b', 'a2')])
-  expect(conclusionBlocks(f).map(x => x.text)).toEqual(['a', 'b'])
-})
-
-test('conclusionBlocks is empty while still mid-tool (no trailing text yet)', () => {
-  const f = fixture([user('q', 'u1'), asst('narration', 'a1'), tool('Bash', {}, 't1')])
-  expect(conclusionBlocks(f)).toEqual([])
+test('currentTurnFeed interleaves narration and tool calls in transcript order', () => {
+  const f = fixture([user('q', 'u1'), narr('looking', 'a1'), tool('Read', { file_path: '/x' }, 't1'), asst('done', 'a2')])
+  expect(currentTurnFeed(f)).toEqual([
+    { kind: 'text', text: 'looking' },
+    { kind: 'tool', tool: 'Read', detail: '/x' },
+    { kind: 'text', text: 'done' },
+  ])
 })
 
 test('finalReplyForInjected returns the conclusion to a specific injected message', () => {
