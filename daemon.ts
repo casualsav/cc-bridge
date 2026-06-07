@@ -4,17 +4,18 @@ import type { ReactionTypeEmoji } from 'grammy/types'
 import { randomBytes, createHash } from 'node:crypto'
 import {
   readFileSync, writeFileSync, appendFileSync, mkdirSync, readdirSync, rmSync,
-  statSync, renameSync, realpathSync, chmodSync, unlinkSync, existsSync,
+  statSync, renameSync, realpathSync, chmodSync, unlinkSync, existsSync, openSync, closeSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, extname, basename, sep } from 'node:path'
-import { execFile, execFileSync } from 'node:child_process'
+import { execFile, execFileSync, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import net from 'node:net'
 import {
   frame, makeLineReader, computeCodeFingerprint,
   STATE_DIR, ACCESS_FILE, APPROVED_DIR, ENV_FILE, INBOX_DIR,
   SOCKET_PATH, DAEMON_PID_FILE, PENDING_EVENTS_FILE,
+  DAEMON_LOG_FILE, WATCHDOG_PID_FILE, HEARTBEAT_FILE,
   type ShimToDaemon, type DaemonToShim, type InboundParams,
 } from './common.ts'
 
@@ -4320,6 +4321,29 @@ async function acquireInstance(): Promise<boolean> {
   return true
 }
 
+// ---- Crash-restart heartbeat + watchdog cross-guard ----
+
+// HEARTBEAT_FILE exists while we run and is removed on a graceful shutdown — so if it's
+// still here at the next startup, the previous instance died uncleanly (a crash, OOM, or
+// kill -9). `crashRestart` records that across startup so onStart can announce it once.
+let crashRestart = false
+function touchHeartbeat(): void { try { writeFileSync(HEARTBEAT_FILE, String(Date.now()), { mode: 0o600 }) } catch {} }
+
+// Cross-guard the watchdog (it guards us): revive it if its pid is gone, so neither staying
+// down needs a new Claude session. ensure-daemon (SessionStart) covers the both-dead case.
+function ensureWatchdog(): void {
+  const watchdogPath = join(import.meta.dir, 'watchdog.ts')
+  if (!existsSync(watchdogPath)) return
+  try { const pid = parseInt(readFileSync(WATCHDOG_PID_FILE, 'utf8'), 10); if (pid > 1) { process.kill(pid, 0); return } } catch {}
+  try {
+    const log = openSync(DAEMON_LOG_FILE, 'a')
+    const child = spawn('bun', [watchdogPath], { detached: true, stdio: ['ignore', log, log], env: process.env })
+    child.unref()
+    closeSync(log)
+    process.stderr.write(`daemon: launched watchdog (pid ${child.pid})\n`)
+  } catch (e) { process.stderr.write(`daemon: watchdog launch failed: ${e}\n`) }
+}
+
 // ---- Shutdown ----
 
 let shuttingDown = false
@@ -4332,6 +4356,7 @@ function shutdown(): void {
     if (parseInt(readFileSync(DAEMON_PID_FILE, 'utf8'), 10) === process.pid) unlinkSync(DAEMON_PID_FILE)
   } catch {}
   try { unlinkSync(SOCKET_PATH) } catch {}
+  try { unlinkSync(HEARTBEAT_FILE) } catch {}   // clean exit → next startup won't read a crash
   setTimeout(() => process.exit(0), 2000)
   void Promise.resolve(bot.stop()).finally(() => process.exit(0))
 }
@@ -4346,6 +4371,15 @@ process.on('uncaughtException', err => process.stderr.write(`daemon: uncaught ex
 // ---- Main ----
 
 if (!(await acquireInstance())) process.exit(0)
+
+// Detect an unclean previous exit before we (re)create the heartbeat, then keep it fresh.
+crashRestart = existsSync(HEARTBEAT_FILE)
+touchHeartbeat()
+setInterval(touchHeartbeat, 10_000).unref()
+
+// Bring up / cross-guard the watchdog that keeps us alive between sessions.
+ensureWatchdog()
+setInterval(ensureWatchdog, 60_000).unref()
 
 // Set umask before listen so the socket file is created 0o600 from the start,
 // closing the window between bind and chmodSync.
@@ -4413,6 +4447,11 @@ void (async () => {
           networkErrors = 0
           botUsername = info.username
           process.stderr.write(`telegram daemon: polling as @${info.username}\n`)
+          // Announce a crash recovery once, only after we're actually connected.
+          if (crashRestart) {
+            crashRestart = false
+            for (const chat_id of loadAccess().allowFrom) void bot.api.sendMessage(chat_id, '♻️ Daemon restarted after a crash.').catch(() => {})
+          }
           void bot.api.setMyCommands(
             [
               { command: 'start', description: 'Welcome + everything this bot can do' },

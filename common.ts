@@ -12,6 +12,11 @@ export const INBOX_DIR = join(STATE_DIR, 'inbox')
 export const SOCKET_PATH = join(STATE_DIR, 'daemon.sock')
 export const DAEMON_PID_FILE = join(STATE_DIR, 'daemon.pid')
 export const PENDING_EVENTS_FILE = join(STATE_DIR, 'pending-events.jsonl')
+export const DAEMON_LOG_FILE = join(STATE_DIR, 'daemon.log')
+export const WATCHDOG_PID_FILE = join(STATE_DIR, 'watchdog.pid')
+// Present while the daemon runs; removed on graceful shutdown — so if it survives to the
+// next startup, the previous instance died uncleanly (a crash) and we announce the restart.
+export const HEARTBEAT_FILE = join(STATE_DIR, 'daemon-heartbeat')
 
 // Load .env into process.env — real env wins. Runs at import time.
 try {
