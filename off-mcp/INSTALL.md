@@ -172,6 +172,14 @@ DIR=$(ls -d ~/.claude/plugins/cache/better-claude-plugins/telegram/*/ | sort -V 
 Then they launch work sessions with **plain `claude`** (no flag) — the MCP server loads every
 time. To later turn it off: `/telegram:configure mcp off` or `/settings`.
 
+> **tmux note for the pinned-message metrics.** The pin's live status card (context bar, cost,
+> tokens, 5h/7d limits) is read from the **statusline rendered in the session's pane**, so the
+> daemon needs a pane to read. Off-MCP always runs in tmux, so it always has one; MCP mode doesn't
+> *require* tmux. An MCP session **running inside tmux** gets the full pin card; an MCP session
+> **not** in tmux still works in every other way, but the pin falls back to the identity line only
+> (the statusline still shows in their own terminal). For the full pin in MCP mode, run the session
+> inside `tmux`.
+
 **Off-MCP (default): explicitly ensure the server stays disabled.** MCP loads purely from the
 presence of the plugin's `.mcp.json`, so don't just skip — actively confirm it's renamed aside,
 in case a previous install or a re-download left one in place:
