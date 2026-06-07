@@ -4755,6 +4755,10 @@ if (FORCE_PANE) {
   startPaneWatcher(FORCE_PANE)
   startRelayLoop()
   process.stderr.write(`daemon: focus pinned to ${FORCE_PANE} (TELEGRAM_FORCE_PANE)\n`)
+  // Refresh the session pin so it reflects the pinned pane immediately. Without this the pin
+  // keeps whatever stale text it last had (e.g. "No active session" from before the pane
+  // existed), since the auto-discovery path — which normally calls this — is skipped here.
+  void updateSessionPin()
 } else if (TRANSCRIPT_OUTBOUND) {
   // Off-MCP with no pinned pane: find and adopt a plugin-less work session on our own,
   // then keep watching so a session started later (or restarted) gets picked up — siblings

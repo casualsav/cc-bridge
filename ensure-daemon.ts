@@ -6,7 +6,7 @@
 // the both-dead case (e.g. a fresh container that has never started either).
 import net from 'node:net'
 import { spawn, spawnSync } from 'node:child_process'
-import { readdirSync, openSync, existsSync, readFileSync } from 'node:fs'
+import { readdirSync, openSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { SOCKET_PATH, DAEMON_LOG_FILE, WATCHDOG_PID_FILE } from './common.ts'
@@ -51,6 +51,20 @@ if (!(await socketAlive())) {
   // shipped lockfile before the first launch so the pinned versions win. Idempotent: skipped
   // when the deps are already present.
   const daemonDir = dirname(daemonPath)
+  // The plugin cache copy often arrives with ONLY the .ts files — no package.json/bun.lock — so
+  // a bare `bun install` here has nothing to pin against and `bun daemon.ts` floats grammy to a
+  // build that crashes with `EACCES … resolving 'debug'`. Drop a pinned manifest in first so the
+  // install resolves the known-good versions. Idempotent: only written when absent.
+  const pkgPath = join(daemonDir, 'package.json')
+  if (!existsSync(pkgPath)) {
+    writeFileSync(pkgPath, JSON.stringify({
+      name: 'claude-channel-telegram-daemon',
+      private: true,
+      type: 'module',
+      dependencies: { grammy: '1.41.1', '@modelcontextprotocol/sdk': '^1.0.0' },
+    }, null, 2) + '\n', { mode: 0o644 })
+    process.stderr.write(`ensure-daemon: wrote pinned package.json to ${daemonDir}\n`)
+  }
   if (!existsSync(join(daemonDir, 'node_modules', 'grammy'))) {
     process.stderr.write(`ensure-daemon: installing daemon deps in ${daemonDir}\n`)
     const r = spawnSync('bun', ['install', '--no-summary'], { cwd: daemonDir, stdio: ['ignore', log, log] })

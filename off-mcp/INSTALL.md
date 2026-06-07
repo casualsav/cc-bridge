@@ -34,6 +34,33 @@ it — but check and offer to remove it before continuing:
    `enabledPlugins` entry to `false` to just disable it. On no, continue but warn that both
    versions will try to bridge Telegram at once.
 
+## 0.6. Upgrading: force-refresh a stale plugin cache (if this plugin was installed before)
+The plugin cache is **keyed by the version string** in `.claude-plugin/plugin.json` /
+`marketplace.json`. If a previous install left a cache dir and the version string is **unchanged**,
+Claude Code treats it as "already installed" and **never re-copies the newer code** — even after the
+marketplace clone pulls a newer HEAD. The result: the daemon keeps running a frozen old build, and
+repo changes (new commands, fixes) silently never appear. Always do this when any
+`~/.claude/plugins/cache/better-claude-plugins/telegram/*/` dir already exists:
+
+1. **Stop the running daemon + watchdog** (otherwise they keep serving old code, and a restart
+   would replay buffered inbound):
+   ```sh
+   for p in $(pgrep -f 'telegram/.*/(daemon|watchdog)\.ts'); do kill "$p"; done
+   : > ~/.claude/channels/telegram/pending-events.jsonl   # avoid replaying buffered inbound
+   rm -f ~/.claude/channels/telegram/daemon.sock ~/.claude/channels/telegram/*.pid
+   ```
+2. **Refresh the source the cache is built from** — update the marketplace clone to current HEAD
+   (`/plugin marketplace update better-claude-plugins`, or `git -C
+   ~/.claude/plugins/marketplaces/better-claude-plugins pull`).
+3. **Make sure the version was bumped.** If the marketplace clone's `plugin.json` version equals an
+   existing cache dir name, the cache will NOT refresh on its own. The maintainer must bump the
+   version on every shipped change (see the repo `CLAUDE.md` "Deploy loop"). If you're installing and
+   the version wasn't bumped, **delete the stale cache dir(s)** so the restart re-copies:
+   ```sh
+   rm -rf ~/.claude/plugins/cache/better-claude-plugins/telegram/*/   # forces a clean re-copy
+   ```
+4. Continue with the install; Step 4 below verifies the **running** build matches what you expect.
+
 ## 0.7. Choose the run mode (off-MCP vs MCP)
 This plugin can bridge Telegram two ways. **The default is off-MCP** — present the choice to
 the user and let them pick:
@@ -151,12 +178,37 @@ shim on startup for older hooks; the inline glob above just removes the bootstra
 daemon starts — reading the `.env` + `access.json` you already wrote, so the bot comes up
 **fully configured and locked to their ID**, transcription set, off-MCP on.
 
+The plugin cache often arrives as **just the `.ts` files** (no `package.json`/`bun.lock`/
+`node_modules`). `ensure-daemon.ts` handles this: before launch it writes a **version-pinned
+`package.json`** into the cache dir if absent and runs `bun install`, so grammy resolves to the
+known-good **1.41.1** instead of floating to a build that crashes with
+`EACCES … resolving 'debug'`. No action needed — but if the daemon ever fails to come up, that
+EACCES line in `daemon.log` is the signature; the fix is to let `ensure-daemon` re-run (it's
+idempotent) or `bun install` in the cache dir manually.
+
 ## 4. Confirm
 ```sh
-pgrep -fa daemon.ts        # one daemon
+pgrep -fa daemon.ts        # one daemon — note the path: it must be the NEWEST version dir
 command -v tg              # auto-provisioned CLI on PATH
 tg react 0 0 👍            # "not allowlisted" error = CLI reaches the daemon
+tail -5 ~/.claude/channels/telegram/daemon.log   # want "polling as @<bot>", NOT an EACCES crash
 ```
+**Verify the running build is current (catches the stale-cache trap from §0.6):**
+```sh
+# daemon is running the newest cache version, not an old frozen one:
+pgrep -fa daemon.ts | grep -o 'telegram/[^/]*/' 
+ls -d ~/.claude/plugins/cache/better-claude-plugins/telegram/*/ | sort -V | tail -1   # should match
+# grammy resolved to the pinned good version (not 1.43.x):
+cat "$(ls -d ~/.claude/plugins/cache/better-claude-plugins/telegram/*/ | sort -V | tail -1)node_modules/grammy/package.json" | grep '"version"'
+# the bot's command menu is populated (commands are set with scope all_private_chats — the
+# default scope shows []; query the right scope). Sanity-check a known command is present:
+source ~/.claude/channels/telegram/.env
+curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMyCommands" --data-urlencode 'scope={"type":"all_private_chats"}' | grep -o '"command":"[^"]*"'
+```
+If the running daemon path is an **older** version dir than the newest on disk, or a command you
+expect is missing, you're on stale code — go back to §0.6 and force-refresh. Telegram clients also
+**cache** the command menu, so after a refresh the human may need to reopen the chat / tap "/".
+
 Have them DM the bot — it should respond. (No ID given in Step 1? They DM the bot now,
 it replies with a pairing code; approve with `/telegram:access pair <code>`, then lock
 with `/telegram:access policy allowlist`.)
@@ -215,6 +267,17 @@ Then `claude-tg` just works. Anything you append rides along:
 ## 6. Verify end to end
 From Telegram, message the session → you get its reply (read from the transcript), no MCP
 loaded. Ask it to "send me a file with `tg`" to confirm outbound actions.
+
+**If inbound never reaches the session (pin shows "No active session"):** the daemon only
+auto-adopts a pane whose `claude` was launched with **`--strict-mcp-config`** (the off-MCP
+signature). A session started with plain `claude` or only `--dangerously-skip-permissions` is
+**not** adopted — confirm in `daemon.log` you see `adopted off-MCP pane …` or `focus pinned to …`.
+Fixes, in order of preference: (a) relaunch the work session with `claude-tg`
+(`--strict-mcp-config`); or (b) pin the existing pane explicitly — get its id with
+`tmux list-panes -a -F '#{pane_id} #{pane_current_command}'`, then set
+`TELEGRAM_FORCE_PANE=<pane id>` in `.env` and restart the daemon. (`%`-ids are valid only while
+that tmux server lives.) The daemon also DMs a one-time hint when a message arrives with no
+adoptable pane.
 
 ## What you get, from Telegram
 - Two-way chat with the session; send/receive files; inbound voice notes transcribed.

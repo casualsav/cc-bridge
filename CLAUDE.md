@@ -42,3 +42,18 @@ and the marketplace dir → `bun build daemon.ts --target=bun` to type-check (gr
 in the cache) → restart the daemon (`kill "$(cat ~/.claude/channels/telegram/daemon.pid)"`; the
 SessionStart hook / a connected shim respawns it) → test live, then commit. Commits end with
 `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`.
+
+**Releasing (so end-user installs actually get the change) — DON'T SKIP:** the plugin cache is
+**keyed by the version string**. If you ship code without bumping `version` in **both**
+`.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json`, every existing install keeps
+running its cached old build forever (Claude Code sees "version already installed" and never
+re-copies, even after the marketplace pulls your new HEAD). So **bump the version on every shipped
+change**, then push. End-users upgrading a same-version cache must force-refresh (see
+`off-mcp/INSTALL.md` §0.6).
+
+**The cache needs deps, not just `.ts`.** A fresh cache copy is often only the `.ts` files — no
+`package.json`/`bun.lock`/`node_modules` — so `bun daemon.ts` floats grammy to a build that crashes
+with `EACCES … resolving 'debug'`. `ensure-daemon.ts` self-heals (writes a pinned `package.json` +
+`bun install` before launch), but when hand-copying to a cache dir, also copy `package.json` +
+`bun.lock` and run `bun install` there so grammy pins to **1.41.1**. Keep the grammy version pinned
+in `package.json` and in `ensure-daemon.ts`'s generated manifest in sync.

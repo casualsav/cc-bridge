@@ -31,10 +31,12 @@ State dir: `~/.claude/channels/telegram/` · plugin cache:
 **Fix:** copy `package.json` + `bun.lock` into the cache version dir and run `bun install`
 there. The lockfile pins grammy **1.41.1**, which resolves cleanly. After that the daemon
 starts and logs `polling as @<bot>`.
-**Repo fix (recommended):** make `ensure-daemon` run `bun install` before launch (mirror the
-`package.json` `start` script: `bun install --no-summary && bun shim.ts`), and/or ship a
-lockfile-pinned `node_modules` in the plugin package. Optionally pin grammy tighter until the
-1.43.0 + bun `debug` resolution is understood.
+**Repo fix (DONE):** `ensure-daemon` now (a) writes a pinned `package.json` (`grammy: 1.41.1`)
+into the cache dir when one is absent — the cache copy ships only `.ts` files, so without this
+`bun install` has nothing to pin against — then (b) runs `bun install` before launching the
+daemon. With the manifest present the install resolves the known-good grammy instead of floating
+to the crashing 1.43.0. Still worth shipping a lockfile-pinned `node_modules` in the plugin
+package so the install can be skipped entirely.
 
 ## 3. Off-MCP bootstrap deadlock (daemon never starts on a clean install)
 **Symptom:** after restart, nothing brings the daemon up; `tg` never appears.
