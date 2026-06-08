@@ -163,8 +163,9 @@ bash scripts/setup-alias.sh mcp
 
 Then reload your shell (or `source` the rc) and launch with `claude-tg`. (For the off-MCP
 default instead, `bash scripts/setup-alias.sh` aliases `claude-tg` to
-`claude --tg --dangerously-skip-permissions` — where `--tg` is the daemon's bridge marker and the
-bypass flag is just bundled convenience.)
+`claude --tg --allow-dangerously-skip-permissions` — `--tg` is the daemon's bridge marker; this
+starts in a normal mode (prompts relay to Telegram) with bypass switchable on demand from `/mode`.
+For full bypass from launch, use a `claude-yolo` alias with `--dangerously-skip-permissions`.)
 
 > Note: `/plugin install` can't add the alias for you — plugins are copied to a
 > cache and don't run host-shell install scripts. The setup script above is the

@@ -1600,8 +1600,9 @@ async function hintNoSession(params: InboundParams): Promise<void> {
   lastNoSessionHintTs = Date.now()
   await bot.api.sendMessage(chat,
     '🕳️ <b>No active session</b> — your message is buffered. Start one in tmux to receive it:\n' +
-    '<code>claude-tg</code>  (alias for <code>claude --tg --dangerously-skip-permissions</code>)\n' +
-    'The daemon auto-discovers the pane and replays anything buffered.',
+    '<code>claude-tg</code>   — safe start, bypass on demand from /mode\n' +
+    '<code>claude-yolo</code> — full bypass from launch\n' +
+    'The daemon auto-discovers the pane (the <code>--tg</code> marker) and replays anything buffered.',
     { parse_mode: 'HTML' }).catch(() => {})
 }
 
@@ -2604,7 +2605,7 @@ async function handleModeCommand(
 
   if (reached === null) {
     const notAvailableMsg = target === 'bypassPermissions'
-      ? 'Not available — restart Claude Code with --dangerously-skip-permissions.'
+      ? 'Not available — this session was launched without bypass enabled. Relaunch with claude-tg (bypass-on-demand) or claude-yolo (full bypass).'
       : target === 'auto'
       ? 'Not available — auto mode requires a qualifying plan or prior detection.'
       : `Could not switch to ${modeLabel(target)}.`
@@ -3163,7 +3164,7 @@ async function restartFocusedSession(chat: string): Promise<void> {
   await paneWatcher.withInjection(async () => {
     await sendKeys(pane, ['/exit', 'Enter'])
     for (let i = 0; i < 40 && (await paneCommand(pane)) === 'claude'; i++) await waitForSettle(pane, 200, 1500)
-    await sendKeys(pane, [`claude --tg --dangerously-skip-permissions --resume ${id}`, 'Enter'])
+    await sendKeys(pane, [`claude --tg --allow-dangerously-skip-permissions --resume ${id}`, 'Enter'])
     await waitForSettle(pane, 400, 30_000)
   })
   await dm('✅ Session restarted on the new Claude — your conversation was resumed.')
@@ -4146,7 +4147,7 @@ async function spawnSession(dir: string, extra = ''): Promise<boolean> {
         if (stdout.trim()) target = ['-t', `${stdout.trim()}:`]
       } catch {}
     }
-    const cmd = `claude --tg --dangerously-skip-permissions${extra ? ` ${extra}` : ''}`   // --tg adopt marker + bypass autonomy; extra e.g. "--resume <id>"
+    const cmd = `claude --tg --allow-dangerously-skip-permissions${extra ? ` ${extra}` : ''}`   // --tg adopt marker; safe start with bypass switchable from /mode; extra e.g. "--resume <id>"
     await exec('tmux', ['new-window', '-d', ...target, '-c', dir, cmd], { timeout: 5000 })
     return true
   } catch (e) { process.stderr.write(`daemon: spawn session in ${dir} failed: ${e}\n`); return false }
