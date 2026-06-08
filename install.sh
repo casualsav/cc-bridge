@@ -38,4 +38,13 @@ fi
 cd "$DEST"
 bun install --no-summary
 say "Launching the setup wizard…"
-exec bun setup.ts
+# The wizard is interactive. When this script is piped (`curl … | bash`), our stdin is the
+# script pipe, not the terminal — so reattach it to the controlling tty for the prompts.
+if [ -t 0 ]; then
+  exec bun setup.ts
+elif [ -e /dev/tty ]; then
+  exec bun setup.ts < /dev/tty
+else
+  echo "No interactive terminal available. Re-run with:  bash <(curl -fsSL $REPO_URL/raw/main/install.sh)" >&2
+  exit 1
+fi
