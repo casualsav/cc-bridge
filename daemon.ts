@@ -2642,6 +2642,32 @@ async function doModelPicker(ctx: Context): Promise<void> {
   )
 }
 
+// /effort — Claude Code's reasoning-effort slash command (low|medium|high|max). Relayed straight
+// to the session like /model; the current level is read from the statusline (ε:<level>).
+const EFFORT_LEVELS = ['low', 'medium', 'high', 'max']
+const EFFORT_TIP = '💡 <code>/effort &lt;low|medium|high|max&gt;</code> sets reasoning effort.'
+function effortPickerKeyboard(): InlineKeyboard {
+  const kb = new InlineKeyboard()
+  EFFORT_LEVELS.forEach((e, i) => {
+    kb.text(e.charAt(0).toUpperCase() + e.slice(1), `effort:set:${e}`)
+    if ((i + 1) % 2 === 0) kb.row()
+  })
+  return kb
+}
+async function currentEffort(): Promise<string | null> {
+  if (!activePaneId) return null
+  try { return parseStatusline(await capturePane(activePaneId))?.effort ?? null } catch { return null }
+}
+async function doEffortPicker(ctx: Context): Promise<void> {
+  if (!dmCommandGate(ctx)) return
+  if (!activePaneId || !paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
+  const eff = await currentEffort()
+  await ctx.reply(
+    `⚡ <b>Effort</b> — currently ${eff ? escapeHtml(eff) : 'unknown'}\n\n${EFFORT_TIP}`,
+    { parse_mode: 'HTML', reply_markup: effortPickerKeyboard() },
+  )
+}
+
 // Run /cost and relay the readout it prints.
 // Strip the common left margin from a block (so a <pre> isn't pushed off-screen) while
 // keeping the inner monospace alignment; trims leading/trailing blank lines.
@@ -2946,6 +2972,19 @@ bot.command('model', async ctx => {
     return
   }
   await doModelPicker(ctx)
+})
+
+// /effort low|medium|high|max — relay to the session; bare opens a picker.
+bot.command('effort', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  if (!activePaneId || !paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
+  const arg = (ctx.match ?? '').toString().trim().toLowerCase()
+  if (arg) {
+    if (!EFFORT_LEVELS.includes(arg)) { await ctx.reply('Usage: <code>/effort low | medium | high | max</code>', { parse_mode: 'HTML' }); return }
+    void relaySlashCommand(activePaneId, paneWatcher, `/effort ${arg}`, String(ctx.chat!.id), ctx.message!.message_id)
+    return
+  }
+  await doEffortPicker(ctx)
 })
 
 // /new asks to confirm, then resets and reports the model. /clear is a hidden
@@ -3647,6 +3686,8 @@ type StatuslineData = {
   apiTime: string | null
   h5: { pct: number; reset: string } | null
   d7: { pct: number; reset: string } | null
+  effort: string | null   // ε:<level> from the statusline
+  think: boolean          // ✻think badge present
 }
 
 const PIN_RULE = '──────────────────────────'
@@ -3693,6 +3734,8 @@ function parseStatusline(paneText: string): StatuslineData | null {
     apiTime: str(new RegExp(`api\\s+${STATUS_DUR}`, 'i')),
     h5: limit(new RegExp(`5h\\D*?(\\d+)\\s*%\\D*?${STATUS_DUR}`)),
     d7: limit(new RegExp(`7d\\D*?(\\d+)\\s*%\\D*?${STATUS_DUR}`)),
+    effort: str(/ε:\s*(\w+)/),
+    think: /✻\s*think/i.test(block),
   }
   const empty = data.ctxPct == null && !data.tokens && !data.cost && !data.sessionTime && !data.h5 && !data.d7
   return empty ? null : data
@@ -3721,7 +3764,9 @@ async function sessionPinText(rows: SessionRow[]): Promise<string> {
   // First line is the collapsed preview Telegram shows up top — keep it identity-only. Everything
   // below is revealed when the pin is expanded, grouped into rule-separated cards.
   const quick = status?.h5 ? ` • 📊 ${status.h5.pct}%` : ''
-  const head = `🖥️ <b>${escapeHtml(cur.label)}</b>${quick} • 🧠 ${escapeHtml(model ?? '—')} • 🧭 ${escapeHtml(mode)}`
+  const effortBadge = status?.effort ? ` • ⚡ ${escapeHtml(status.effort)}` : ''
+  const thinkBadge = status?.think ? ' • ✻ think' : ''
+  const head = `🖥️ <b>${escapeHtml(cur.label)}</b>${quick} • 🧠 ${escapeHtml(model ?? '—')}${effortBadge} • 🧭 ${escapeHtml(mode)}${thinkBadge}`
   const groups: string[] = []
   if (cwd) groups.push(`📁 <code>${escapeHtml(cwd)}</code>${branch ? ` · 🌿 ${escapeHtml(branch)}` : ''}`)
   if (status) {
@@ -4165,6 +4210,21 @@ bot.on('callback_query:data', async ctx => {
     const model = await readCurrentModel(activePaneId, paneWatcher)
     await ctx.editMessageText(`🧠 <b>Model</b> — now ${model ? escapeHtml(model) : escapeHtml(alias)}\n\n${MODEL_TIP}`, {
       parse_mode: 'HTML', reply_markup: modelPickerKeyboard(),
+    }).catch(() => {})
+    return
+  }
+
+  // Effort picker — apply a tapped effort level
+  const effortSet = /^effort:set:(low|medium|high|max)$/.exec(data)
+  if (effortSet) {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) { await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {}); return }
+    if (!activePaneId || !paneWatcher) { await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {}); return }
+    const level = effortSet[1]
+    await ctx.answerCallbackQuery({ text: `Effort → ${level}…` }).catch(() => {})
+    await injectSlash(activePaneId, paneWatcher, `/effort ${level}`)
+    const eff = await currentEffort()
+    await ctx.editMessageText(`⚡ <b>Effort</b> — now ${eff ? escapeHtml(eff) : escapeHtml(level)}\n\n${EFFORT_TIP}`, {
+      parse_mode: 'HTML', reply_markup: effortPickerKeyboard(),
     }).catch(() => {})
     return
   }
@@ -5207,6 +5267,7 @@ void (async () => {
               { command: 'resume', description: 'Resume a recent session (lists them with times)' },
               { command: 'new', description: 'Start a new session' },
               { command: 'stream', description: 'How replies arrive: thoughts · tools · hybrid · off' },
+              { command: 'effort', description: 'Reasoning effort: low · medium · high · max' },
               { command: 'cost', description: 'Show the session cost readout' },
               { command: 'context', description: 'Show the token-context usage' },
               { command: 'compact', description: 'Compact the conversation to free up context' },
