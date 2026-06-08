@@ -1783,7 +1783,7 @@ function maybeWarn(type: string, pct: number, resetKey: string): void {
   if (chats.length === 0) return
   const emoji = threshold >= 90 ? '🚨' : threshold >= 75 ? '⚠️' : 'ℹ️'
   for (const chat_id of chats) {
-    void bot.api.sendMessage(chat_id, `${emoji} You've used ${threshold}% of your ${escapeHtml(type)} limit`).catch(() => {})
+    void bot.api.sendMessage(chat_id, `${emoji} You've used ${threshold}% of your ${escapeHtml(type)} limit`, { disable_notification: true }).catch(() => {})
   }
 }
 
