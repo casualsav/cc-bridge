@@ -1101,7 +1101,8 @@ function replyMode(): 'thoughts' | 'tools' | 'hybrid' | 'off' {
   if (v === 'thoughts' || v === 'all' || v === 'stream') return 'thoughts'
   if (v === 'tools' || v === 'final') return 'tools'
   if (v === 'off') return 'off'
-  return 'hybrid'   // 'hybrid', 'live', or unset
+  if (v === 'hybrid' || v === 'live') return 'hybrid'
+  return 'thoughts'   // default (unset)
 }
 
 // Claude's recent "● <text>" blocks from the pane — each leading bullet plus its indented
@@ -3554,7 +3555,7 @@ const STREAM_DESC: Record<'thoughts' | 'tools' | 'hybrid' | 'off', string> = {
   off: 'just the final message — no live mirror.',
 }
 
-// /stream thoughts|tools|hybrid|off sets how Claude's text reaches you (default hybrid); bare shows it.
+// /stream thoughts|tools|hybrid|off sets how Claude's text reaches you (default thoughts); bare shows it.
 bot.command('stream', async ctx => {
   if (!dmCommandGate(ctx)) return
   const arg = (ctx.match ?? '').toString().trim().toLowerCase()
@@ -3970,8 +3971,24 @@ function pinMessageGone(e: unknown): boolean {
   return /message to edit not found|message can'?t be edited|message to pin not found|MESSAGE_ID_INVALID/i.test(d)
 }
 
+// Delete every currently-pinned message in the chat. getChat only reports the topmost pinned
+// message, so delete that and re-fetch until none remain (bounded). deleteMessage also clears the
+// pin; if a message is too old to delete, unpin it so the loop still advances. Run right before
+// pinning a fresh card → there is only ever one pin, and creating a new one removes all old ones
+// (tracked or orphaned from a prior daemon run / a pin misfire).
+async function clearAllPins(chat: string): Promise<void> {
+  for (let i = 0; i < 12; i++) {
+    const info = await bot.api.getChat(chat).catch(() => null)
+    const pid = (info as { pinned_message?: { message_id?: number } } | null)?.pinned_message?.message_id
+    if (!pid) break
+    const deleted = await bot.api.deleteMessage(chat, pid).then(() => true).catch(() => false)
+    if (!deleted) { await bot.api.unpinChatMessage(chat, pid).catch(() => {}); break }
+  }
+}
+
 async function createSessionPin(chat: string, text: string, reply_markup: InlineKeyboard): Promise<void> {
   try {
+    await clearAllPins(chat)   // single-pin guarantee: remove any prior/orphaned pins before the new one
     const m = await bot.api.sendMessage(chat, text, { parse_mode: 'HTML', reply_markup })
     await bot.api.pinChatMessage(chat, m.message_id, { disable_notification: true }).catch(() => {})
     sessionPins.set(chat, m.message_id); pinTextCache.set(chat, text); persistSessionPins()
