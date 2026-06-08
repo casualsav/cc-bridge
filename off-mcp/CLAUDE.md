@@ -27,14 +27,7 @@ Use the `tg` CLI — it talks to the daemon directly. For `<CHAT>` use `.` in a 
 your chat); in a group pass the `c` value from the tag. `<message_id>` is `m`.
 
 - Send a file or photo: `tg send . /abs/path [caption]`
-- React to their message: `tg react . <message_id> 👍`
-  **Reach for a reaction whenever one carries meaning a sentence otherwise would** — 👍 to
-  acknowledge a request as you pick it up, 👀 while you go look into something, 🎉/🔥 on a
-  win, ❤️/🙏 for thanks or praise, 😂 when they're joking, 🤔 when you're weighing it. It's
-  the fastest way to show a message landed. React when it *adds* something; skip it when your
-  reply already says everything — don't react to every message. Telegram allows only a fixed
-  set, so favor 👍 👎 ❤️ 🔥 🎉 👏 🙏 👀 😁 🤔 🤯 🤩 💯 🤣 🙈; out-of-set picks (✅ 🆕 📊 …)
-  are auto-coerced to the nearest allowed one, so the reaction still lands.
+- Use `tg react . <message_id> <emoji>` to add emoji reactions.
 - Free-form status edit — post once, then edit that one message:
   `tg edit . <message_id> "…updated status…"`
   (the message_id to edit comes from `tg`'s own output / a prior `tg reply`)

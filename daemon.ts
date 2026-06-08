@@ -802,6 +802,7 @@ function orderedSessions(): { id: string; s: Session }[] {
 function setFocus(sessionId: string | null): void {
   if (paneWatcher) { paneWatcher.stop(); paneWatcher = null }
   currentSessionId = sessionId
+  if (sessionId) reactionCueArmed = true   // fresh focus → re-surface the reaction affordance once
   const s = sessionId ? sessions.get(sessionId) ?? null : null
   activeShim = s ? { socket: s.socket, write: s.write } : null
   activePaneId = s?.paneId ?? null
@@ -914,8 +915,29 @@ function formatChannelBlock(params: InboundParams): string {
 // close together would otherwise drive the same pane concurrently and interleave
 // keystrokes. A failed inject (pane died mid-send) re-buffers for the next session.
 let inboundInjectChain: Promise<unknown> = Promise.resolve()
+// Reaction-affordance cue (off-mcp). In MCP mode `react` is a first-class tool the harness
+// re-surfaces every turn, so the model naturally reaches for it; off-mcp has only the `tg react`
+// CLI, taught once in CLAUDE.md, whose pull fades as the context window fills. To re-surface the
+// affordance *without* a per-request tax, append a one-line nudge to the FIRST inbound after a
+// fresh context (daemon start, pane focus/adoption, /new) and after a long idle gap (likely a
+// compaction). It fires at most once per fresh context, so it amortizes to ~nothing.
+let reactionCueArmed = true
+let lastInboundAt = 0
+const REACTION_CUE_IDLE_MS = 30 * 60_000
+function maybeReactionCue(params: InboundParams): string {
+  const m = params.meta
+  if (!m.message_id) return ''
+  const now = Date.now()
+  const armed = reactionCueArmed || (lastInboundAt > 0 && now - lastInboundAt > REACTION_CUE_IDLE_MS)
+  lastInboundAt = now
+  if (!armed) return ''
+  reactionCueArmed = false
+  const isDm = !!m.user_id && m.chat_id === m.user_id
+  const target = isDm ? '.' : m.chat_id
+  return `\n(Use \`tg react ${target} ${m.message_id} <emoji>\` to add emoji reactions.)`
+}
 function enqueueInboundInject(paneId: string, watcher: PaneWatcher, params: InboundParams): void {
-  const block = formatChannelBlock(params)
+  const block = formatChannelBlock(params) + maybeReactionCue(params)
   const run = () => injectPaste(paneId, watcher, block)
     .then(ok => {
       if (ok) {
@@ -1047,7 +1069,7 @@ let relayLoopGen = 0   // bump to retire the running loop when focus moves
 // Telegram's edit limits. No mirror opens for a sub-tick (tool-less) turn.
 const MIRROR_THROTTLE_MS = 3000
 const MIRROR_BLOCKS = 8        // digest mode: max ● blocks shown
-const MIRROR_TOOLS = 3         // tools mode: max tool rows shown (just the latest few)
+const MIRROR_TOOLS = 5         // tools mode: max tool rows shown (newest replaces oldest until ✅ Done)
 const mirrorMsgIds = new Map<string, number>()   // chat_id → the live mirror message id
 let mirrorLastText = ''
 let mirrorLastEditAt = 0
@@ -1264,6 +1286,19 @@ async function finalizeTerminalMirror(): Promise<void> {
   mirrorMsgIds.clear(); mirrorLastText = ''; mirrorLastEditAt = 0
 }
 
+// Drop the open card entirely (delete, don't cap) and stop tracking it, so the next relay tick
+// re-sends a fresh one at the BOTTOM of the chat. Used when stream mode changes mid-turn: the old
+// card sits above the just-posted command + confirmation, which looks backwards — deleting it lets
+// the live mirror respawn below them, staying the newest message. No-op if no card is open (e.g.
+// the change happened while idle, or the new mode is 'off' so nothing respawns).
+async function respawnTerminalMirror(): Promise<void> {
+  if (mirrorMsgIds.size === 0) return
+  for (const [chat, mid] of mirrorMsgIds) {
+    await bot.api.deleteMessage(chat, mid).catch(() => {})
+  }
+  mirrorMsgIds.clear(); mirrorLastText = ''; mirrorLastEditAt = 0
+}
+
 async function relayLoopTick(gen: number): Promise<void> {
   if (gen !== relayLoopGen || !activePaneId || !TRANSCRIPT_OUTBOUND) return
   const paneId = activePaneId
@@ -1457,6 +1492,7 @@ function focusOffMcpPane(paneId: string): void {
   if (paneWatcher) { paneWatcher.stop(); paneWatcher = null }
   adoptedPaneId = paneId
   currentSessionId = paneId
+  reactionCueArmed = true   // newly adopted/switched off-mcp pane → re-surface the reaction affordance
   activePaneId = paneId
   activeShim = null
   lastRelayedPromptHash = ''
@@ -2532,6 +2568,8 @@ async function handleModeCommand(
 // model). Callers ensure activePaneId/paneWatcher are set.
 async function performReset(command: string): Promise<string> {
   await injectSlash(activePaneId!, paneWatcher!, command)
+  reactionCueArmed = true   // context cleared by /new or /clear → re-surface the reaction affordance
+
   const model = await readCurrentModel(activePaneId!, paneWatcher!)
   return model
     ? `✅ New session started · model: <b>${escapeHtml(model)}</b>`
@@ -3403,6 +3441,7 @@ bot.command('stream', async ctx => {
   }
   const m = replyMode()
   await ctx.reply(`💬 Stream mode is <b>${m}</b> — ${STREAM_DESC[m]}\nChange with <code>/stream thoughts | tools | hybrid | off</code>.`, { parse_mode: 'HTML' })
+  await respawnTerminalMirror()   // a mode change shouldn't leave the old card stranded above this confirmation
 })
 
 // ---- /schedule: deferred messages into a chosen session ----
@@ -4081,6 +4120,7 @@ bot.on('callback_query:data', async ctx => {
       // Cycle thoughts → tools → hybrid → off → thoughts.
       a.replyMode = m === 'thoughts' ? 'tools' : m === 'tools' ? 'hybrid' : m === 'hybrid' ? 'off' : 'thoughts'
       saveAccess(a)
+      await respawnTerminalMirror()   // re-spawn the live card below the panel after a mode change
     } else if (setMatch[1] === 'pin') {
       a.sessionPin = a.sessionPin === false                 // flip
       saveAccess(a)
