@@ -3647,18 +3647,11 @@ function lastModelInTranscript(file: string): string | null {
   }
   return null
 }
+// Family name only — "Opus" / "Sonnet" / "Haiku" (no version), for the pin tagline.
 function prettyModel(id: string | null): string | null {
   if (!id) return id
-  const cap = (s: string) => s[0].toUpperCase() + s.slice(1).toLowerCase()
-  // New ids: claude-<family>-<major>-<minor>[-<date>] → "Opus 4.8".
-  let m = id.match(/(opus|sonnet|haiku)-(\d+)-(\d+)/i)
-  if (m) return `${cap(m[1])} ${m[2]}.${m[3]}`
-  // Legacy ids: claude-<major>-<minor>-<family> → "Sonnet 3.5".
-  m = id.match(/(\d+)-(\d+)-(opus|sonnet|haiku)/i)
-  if (m) return `${cap(m[3])} ${m[1]}.${m[2]}`
-  // Family only (no parseable version).
-  m = id.match(/(opus|sonnet|haiku)/i)
-  return m ? cap(m[1]) : id
+  const m = id.match(/(opus|sonnet|haiku)/i)
+  return m ? m[1][0].toUpperCase() + m[1].slice(1).toLowerCase() : id
 }
 
 // Status line for the focused session: 💻 name • model (…) • mode (…). Mode is read live from a
@@ -3763,11 +3756,11 @@ async function sessionPinText(rows: SessionRow[]): Promise<string> {
 
   // First line is the collapsed preview Telegram shows up top — keep it identity-only. Everything
   // below is revealed when the pin is expanded, grouped into rule-separated cards.
-  // Tagline order: session · mode · model · 5h usage, then the effort/think badges.
+  // Tagline order: session · usage · model · effort · mode, then the think badge.
   const usage = status?.h5 ? ` • 📊 ${status.h5.pct}%` : ''
   const effortBadge = status?.effort ? ` • ⚡ ${escapeHtml(status.effort)}` : ''
   const thinkBadge = status?.think ? ' • ✻ think' : ''
-  const head = `🖥️ <b>${escapeHtml(cur.label)}</b> • 🎛️ ${escapeHtml(mode)} • 🧠 ${escapeHtml(model ?? '—')}${usage}${effortBadge}${thinkBadge}`
+  const head = `🖥️ <b>${escapeHtml(cur.label)}</b>${usage} • 🧠 ${escapeHtml(model ?? '—')}${effortBadge} • 🎛️ ${escapeHtml(mode)}${thinkBadge}`
   const groups: string[] = []
   if (cwd) groups.push(`📁 <code>${escapeHtml(cwd)}</code>${branch ? ` · 🌿 ${escapeHtml(branch)}` : ''}`)
   if (status) {
