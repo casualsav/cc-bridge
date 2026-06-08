@@ -90,8 +90,6 @@ Telegram  ⇄  daemon.ts  ⇄  shim.ts (MCP server)  ⇄  Claude Code session
 - **`common.ts`** holds the shared wire protocol and state-dir paths;
   **`markdown.ts`** holds the Markdown→Telegram-HTML converter and the
   chunk-safe splitter.
-- **`server.ts`** is a legacy standalone (MCP + bot in one process), kept for
-  compatibility; the plugin runs the shim+daemon split.
 
 ## Requirements
 
@@ -293,7 +291,6 @@ reinstall. Restart Claude Code to apply.
 | `prompt.ts` | Pane-scrape detection of interactive prompts → Telegram buttons |
 | `transcript.ts` | Off-MCP outbound: read replies + live activity from CC's transcript JSONL |
 | `*.test.ts` | `bun test` unit suite for the parsers/formatters (markdown, transcript, prompt) |
-| `server.ts` | Legacy all-in-one (kept for compatibility) |
 | `transcribe_local.py` | Local faster-whisper transcription helper |
 | `skills/` | `/telegram:configure` and `/telegram:access` skills |
 | `ACCESS.md` | Access-control and delivery-config reference |

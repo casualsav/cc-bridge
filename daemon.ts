@@ -71,7 +71,7 @@ if (!TOKEN) {
   process.exit(1)
 }
 
-// ---- Access control (verbatim from server.ts) ----
+// ---- Access control ----
 
 type PendingEntry = { senderId: string; chatId: string; createdAt: number; expiresAt: number; replies: number }
 type GroupPolicy = { requireMention: boolean; allowFrom: string[] }
