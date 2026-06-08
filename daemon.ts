@@ -119,9 +119,24 @@ function readJsonAccess(path: string): Partial<Access> {
   }
 }
 
+// loadAccess() runs on nearly every poll/relay/inbound — dozens of times a second — and the split
+// made it read+parse TWO files each call. Cache the parsed result keyed by mtime+size so we only
+// re-parse when a file actually changes (statSync is ~free next to readFileSync+JSON.parse).
+// saveAccess() invalidates explicitly, so same-millisecond writes are never missed.
+const _accessFileCache = new Map<string, { mtimeMs: number; size: number; data: Partial<Access> }>()
+function readJsonAccessCached(path: string): Partial<Access> {
+  let st: { mtimeMs: number; size: number }
+  try { st = statSync(path) } catch { _accessFileCache.delete(path); return {} }
+  const hit = _accessFileCache.get(path)
+  if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.data
+  const data = readJsonAccess(path)
+  _accessFileCache.set(path, { mtimeMs: st.mtimeMs, size: st.size, data })
+  return data
+}
+
 // Security half — dmPolicy/allowFrom/groups/pending from access.json. Baked at boot in static mode.
 function readSecurity(): Access {
-  const p = readJsonAccess(ACCESS_FILE)
+  const p = readJsonAccessCached(ACCESS_FILE)
   return {
     dmPolicy: p.dmPolicy ?? 'pairing',
     allowFrom: p.allowFrom ?? [],
@@ -133,8 +148,8 @@ function readSecurity(): Access {
 // Preference half — from prefs.json; always mutable, even under static mode. Migration: before
 // prefs.json exists, fall back to any pref fields still living in the legacy combined access.json.
 function readPrefs(): Partial<Access> {
-  let raw = readJsonAccess(PREFS_FILE)
-  if (Object.keys(raw).length === 0) raw = readJsonAccess(ACCESS_FILE)
+  let raw = readJsonAccessCached(PREFS_FILE)
+  if (Object.keys(raw).length === 0) raw = readJsonAccessCached(ACCESS_FILE)
   const out: Partial<Access> = {}
   for (const k of PREF_KEYS) if (raw[k] !== undefined) (out as Record<string, unknown>)[k] = raw[k]
   return out
@@ -187,9 +202,11 @@ function saveAccess(a: Access): void {
   const prefs: Record<string, unknown> = {}
   for (const k of PREF_KEYS) if (a[k] !== undefined) prefs[k] = a[k]
   writeJsonAtomic(PREFS_FILE, prefs)
+  _accessFileCache.delete(PREFS_FILE)   // invalidate cache — don't wait on mtime resolution
   // Security half is frozen under static mode (tamper-proof allowlist); writable otherwise.
   if (STATIC) return
   writeJsonAtomic(ACCESS_FILE, { dmPolicy: a.dmPolicy, allowFrom: a.allowFrom, groups: a.groups, pending: a.pending })
+  _accessFileCache.delete(ACCESS_FILE)
 }
 
 function pruneExpired(a: Access): boolean {
@@ -963,10 +980,19 @@ function startUpdate(chatId: string, mode: 'apply' | 'check'): { ok: boolean; er
   } catch (e) { return { ok: false, error: String(e) } }
 }
 
+// A focused pane's cwd barely changes, but the relay tick resolves it every 1.5s — each call a
+// tmux subprocess spawn. Cache it briefly so a steady pane costs one spawn per few seconds, not
+// per tick. The short TTL still picks up a real `cd` within seconds.
+const _paneCwdCache = new Map<string, { at: number; cwd: string | null }>()
+const PANE_CWD_TTL_MS = 5_000
 async function paneCwd(paneId: string): Promise<string | null> {
+  const hit = _paneCwdCache.get(paneId)
+  if (hit && Date.now() - hit.at < PANE_CWD_TTL_MS) return hit.cwd
   try {
     const { stdout } = await exec('tmux', ['display-message', '-p', '-t', paneId, '#{pane_current_path}'], { timeout: 2000 })
-    return stdout.trim() || null
+    const cwd = stdout.trim() || null
+    _paneCwdCache.set(paneId, { at: Date.now(), cwd })
+    return cwd
   } catch { return null }
 }
 

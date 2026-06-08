@@ -21,11 +21,27 @@ function textOf(content: unknown): string {
 
 // Parse a transcript file into its entries, skipping blank/garbled lines. Shared by the
 // readers below so they all see the same view.
+// Transcripts are append-only JSONL that grow to many MB, and the relay tick reads the active one
+// 2–3× every 1.5s (turnInProgress + feed/activity + textEntriesAfter). Re-parsing it each time is
+// the daemon's biggest avoidable cost, so cache the parsed entries keyed by mtime+size: an
+// unchanged file (idle tick, or the multiple reads within one tick) returns the cached array, and
+// a grown file (Claude wrote more) re-parses. Bounded to a few files so memory can't balloon when
+// /resume briefly reads many transcripts.
+const _entriesCache = new Map<string, { mtimeMs: number; size: number; entries: Entry[] }>()
+const _ENTRIES_CACHE_MAX = 4
 function readEntries(file: string): Entry[] {
+  let st: { mtimeMs: number; size: number }
+  try { st = statSync(file) } catch { _entriesCache.delete(file); return [] }
+  const hit = _entriesCache.get(file)
+  if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.entries
   let lines: string[]
   try { lines = readFileSync(file, 'utf8').split('\n') } catch { return [] }
   const entries: Entry[] = []
   for (const l of lines) { if (l.trim()) try { entries.push(JSON.parse(l)) } catch {} }
+  if (_entriesCache.size >= _ENTRIES_CACHE_MAX && !_entriesCache.has(file)) {
+    _entriesCache.delete(_entriesCache.keys().next().value!)   // evict oldest (insertion order)
+  }
+  _entriesCache.set(file, { mtimeMs: st.mtimeMs, size: st.size, entries })
   return entries
 }
 
