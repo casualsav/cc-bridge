@@ -15,6 +15,7 @@ allowed-tools:
   - Bash(kill *)
   - Bash(rm -rf ~/.claude/channels/telegram*)
   - Bash(rm -f ~/.bun/bin/tg ~/.local/bin/tg)
+  - Bash(bun *ensure-daemon*)
 ---
 
 # /telegram:configure — Telegram Channel Setup
@@ -23,6 +24,28 @@ Writes the bot token and voice-transcription settings to
 `~/.claude/channels/telegram/.env` and orients the user on access policy.
 
 Arguments passed: `$ARGUMENTS`
+
+---
+
+## Instances (running more than one bot)
+
+A user can run several **independent** bridges (different bots) on one machine, each in its own
+state dir. An optional leading **instance slot number** in `$ARGUMENTS` selects which:
+
+- **slot `1` or omitted** → the default dir `~/.claude/channels/telegram` (everything below uses this).
+- **slot `N` (2, 3, …)** → `~/.claude/channels/telegramN`. **Substitute that path for
+  `~/.claude/channels/telegram` everywhere in the steps below**, and set `TELEGRAM_INSTANCE_ID` is
+  *not* needed — the daemon derives id `N` from the `telegramN` dir name.
+
+So `/telegram:configure 2 <token>` configures bot #2 in `~/.claude/channels/telegram2/`; its
+allowlist/pairings live in that dir's own `access.json`, fully isolated from bot #1.
+
+**After writing a NEW slot's token,** bring its daemon up now (it isn't covered by the already-running
+hook until the next session start): run `bun ~/.claude/channels/telegram/ensure-daemon.js` — it
+enumerates every configured slot and launches any that's down. Then tell the user to launch work
+panes for it with **`claude-tg N`** (the launcher functions take the slot number).
+
+Strip the leading slot number (if present) before parsing the rest of the arguments below.
 
 ---
 

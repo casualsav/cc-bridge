@@ -162,11 +162,12 @@ bash scripts/setup-alias.sh mcp
 ```
 
 Then reload your shell (or `source` the rc) and launch with `claude-tg`. (For the off-MCP
-default instead, `bash scripts/setup-alias.sh` aliases `claude-tg` to
-`tmux set -p @tg_bridge 1; claude --allow-dangerously-skip-permissions` — the `@tg_bridge` tmux
-pane option is the daemon's bridge marker (decoupled from claude's args); this starts in a normal
-mode (prompts relay to Telegram) with bypass switchable on demand from `/mode`. For full bypass
-from launch, use a `claude-yolo` alias with `--dangerously-skip-permissions`.)
+default instead, `bash scripts/setup-alias.sh` adds a `claude-tg` shell function —
+`tmux set -p @tg_bridge "${1:-1}"; claude --allow-dangerously-skip-permissions` — where the
+`@tg_bridge` tmux pane option (valued by instance slot) is the daemon's bridge marker (decoupled
+from claude's args); this starts in a normal mode (prompts relay to Telegram) with bypass switchable
+on demand from `/mode`. `claude-yolo` is the full-bypass variant, and `claude-tg N` routes to a
+second bridge.)
 
 > Note: `/plugin install` can't add the alias for you — plugins are copied to a
 > cache and don't run host-shell install scripts. The setup script above is the

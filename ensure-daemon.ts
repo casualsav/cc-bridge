@@ -1,15 +1,20 @@
 #!/usr/bin/env bun
-// Ensure the telegram daemon AND its watchdog are running, independent of any MCP shim.
-// Run from a SessionStart hook. Idempotent: only spawns what's actually down. The daemon is
-// spawned detached (already survives a session closing); the watchdog keeps it alive between
-// sessions and restarts it after a crash. Each revives the other, so this mainly has to cover
-// the both-dead case (e.g. a fresh container that has never started either).
+// Ensure the telegram daemon(s) AND their watchdog(s) are running, independent of any MCP shim.
+// Run from a SessionStart hook. Idempotent: only spawns what's actually down.
+//
+// Multi-instance: a user can run several independent bridges (different bots) on one machine, each
+// in its own state dir `~/.claude/channels/telegram` (slot 1) or `telegram<N>` (slot N), with its
+// own .env/token/access.json/socket. We enumerate every such dir that holds a bot token and ensure
+// a daemon + watchdog for each, scoped via TELEGRAM_STATE_DIR. Slots with no token are skipped (an
+// unconfigured bridge has nothing to poll). Each daemon is spawned detached (survives the session);
+// each watchdog keeps its own daemon alive between sessions / after a crash.
 import net from 'node:net'
 import { spawn, spawnSync } from 'node:child_process'
 import { readdirSync, openSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { SOCKET_PATH, DAEMON_LOG_FILE, WATCHDOG_PID_FILE } from './common.ts'
+
+const CHANNELS_DIR = join(homedir(), '.claude', 'channels')
 
 // Newest plugin-cache copy of daemon.ts (version dirs sort ascending; take the last).
 function findDaemon(): string | null {
@@ -26,9 +31,26 @@ function findDaemon(): string | null {
   return null
 }
 
-function socketAlive(): Promise<boolean> {
+// Every configured bridge instance: a `telegram`/`telegram<N>` state dir whose .env carries a bot
+// token. (The slot scheme is numeric; a custom-named dir is launched by hand, not auto-enumerated.)
+function instanceDirs(): string[] {
+  let names: string[]
+  try { names = readdirSync(CHANNELS_DIR) } catch { return [] }
+  const dirs: string[] = []
+  for (const name of names) {
+    if (!/^telegram(\d+)?$/.test(name)) continue
+    const dir = join(CHANNELS_DIR, name)
+    try {
+      const env = readFileSync(join(dir, '.env'), 'utf8')
+      if (/^\s*TELEGRAM_BOT_TOKEN\s*=\s*\S/m.test(env)) dirs.push(dir)
+    } catch {}   // no .env / unreadable → not a configured instance
+  }
+  return dirs
+}
+
+function socketAlive(socketPath: string): Promise<boolean> {
   return new Promise(resolve => {
-    const s = net.createConnection(SOCKET_PATH)
+    const s = net.createConnection(socketPath)
     s.on('connect', () => { s.destroy(); resolve(true) })
     s.on('error', () => resolve(false))
     setTimeout(() => { s.destroy(); resolve(false) }, 1500)
@@ -45,19 +67,14 @@ function pidAlive(file: string): boolean {
 
 const daemonPath = findDaemon()
 if (!daemonPath) { process.stderr.write('ensure-daemon: daemon.ts not found in plugin cache\n'); process.exit(1) }
+const daemonDir = dirname(daemonPath)
+const watchdogPath = join(daemonDir, 'watchdog.ts')
 
-const log = openSync(DAEMON_LOG_FILE, 'a')
-
-if (!(await socketAlive())) {
-  // A partial cache copy (no node_modules) makes `bun daemon.ts` auto-install on the fly, which
-  // floats grammy to a build that fails `debug` resolution under bun. Install once against the
-  // shipped lockfile before the first launch so the pinned versions win. Idempotent: skipped
-  // when the deps are already present.
-  const daemonDir = dirname(daemonPath)
-  // The plugin cache copy often arrives with ONLY the .ts files — no package.json/bun.lock — so
-  // a bare `bun install` here has nothing to pin against and `bun daemon.ts` floats grammy to a
-  // build that crashes with `EACCES … resolving 'debug'`. Drop a pinned manifest in first so the
-  // install resolves the known-good versions. Idempotent: only written when absent.
+// Deps live in the cache dir and are shared by all instances, so bootstrap them once. A partial
+// cache copy (no node_modules) makes `bun daemon.ts` auto-install on the fly, which floats grammy
+// to a build that crashes with `EACCES … resolving 'debug'`. Drop a pinned manifest + install
+// against it so the known-good versions win. Idempotent: skipped when deps are already present.
+function ensureDeps(log: number): void {
   const pkgPath = join(daemonDir, 'package.json')
   if (!existsSync(pkgPath)) {
     writeFileSync(pkgPath, JSON.stringify({
@@ -73,17 +90,29 @@ if (!(await socketAlive())) {
     const r = spawnSync('bun', ['install', '--no-summary'], { cwd: daemonDir, stdio: ['ignore', log, log] })
     if (r.status !== 0) process.stderr.write(`ensure-daemon: bun install exited ${r.status}\n`)
   }
-  const child = spawn('bun', [daemonPath], { detached: true, stdio: ['ignore', log, log], env: process.env })
-  child.unref()
-  process.stderr.write(`ensure-daemon: launched daemon ${daemonPath} (pid ${child.pid})\n`)
 }
 
-// Self-bootstrap the watchdog so it survives with no extra hook wiring.
-const watchdogPath = join(dirname(daemonPath), 'watchdog.ts')
-if (existsSync(watchdogPath) && !pidAlive(WATCHDOG_PID_FILE)) {
-  const child = spawn('bun', [watchdogPath], { detached: true, stdio: ['ignore', log, log], env: process.env })
-  child.unref()
-  process.stderr.write(`ensure-daemon: launched watchdog ${watchdogPath} (pid ${child.pid})\n`)
+// Bring up one instance (daemon + watchdog) scoped to its state dir. Only spawns what's down.
+async function ensureInstance(stateDir: string, log: number): Promise<void> {
+  const env = { ...process.env, TELEGRAM_STATE_DIR: stateDir }
+  if (!(await socketAlive(join(stateDir, 'daemon.sock')))) {
+    const child = spawn('bun', [daemonPath], { detached: true, stdio: ['ignore', log, log], env })
+    child.unref()
+    process.stderr.write(`ensure-daemon: launched daemon ${daemonPath} for ${stateDir} (pid ${child.pid})\n`)
+  }
+  if (existsSync(watchdogPath) && !pidAlive(join(stateDir, 'watchdog.pid'))) {
+    const child = spawn('bun', [watchdogPath], { detached: true, stdio: ['ignore', log, log], env })
+    child.unref()
+    process.stderr.write(`ensure-daemon: launched watchdog for ${stateDir} (pid ${child.pid})\n`)
+  }
+}
+
+const dirs = instanceDirs()   // every configured (token-bearing) instance dir; all exist
+if (dirs.length === 0) process.exit(0)   // nothing configured yet → nothing to launch
+
+ensureDeps(openSync(join(dirs[0], 'daemon.log'), 'a'))   // deps are shared (cache dir) — bootstrap once
+for (const dir of dirs) {
+  await ensureInstance(dir, openSync(join(dir, 'daemon.log'), 'a'))   // per-instance log in its state dir
 }
 
 process.exit(0)

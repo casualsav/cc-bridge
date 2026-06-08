@@ -63,11 +63,11 @@ the first-use delay. Working as designed — documented here for completeness.
 ## 5. `scripts/setup-alias.sh` adds the wrong alias for off-MCP (resolved)
 **Symptom (historical):** the alias script wrote the MCP/channel-load launcher for off-MCP.
 **Resolved:** `setup-alias.sh` is mode-aware — off-MCP is now
-`alias claude-tg='tmux set -p @tg_bridge 1 2>/dev/null; claude --allow-dangerously-skip-permissions'`
-(the `@tg_bridge` tmux pane option is the daemon's adopt marker — decoupled from claude's args; the
-plugin's MCP ships disabled so the session is already plugin-less; `--allow-…` starts in a normal
-mode with bypass switchable on demand from `/mode`. The `claude-yolo` variant uses
-`--dangerously-skip-permissions` for full bypass from launch).
+a shell function `claude-tg() { tmux set -p @tg_bridge "${1:-1}" 2>/dev/null; claude --allow-dangerously-skip-permissions; }`
+(the `@tg_bridge` tmux pane option, valued by instance slot, is the daemon's adopt marker —
+decoupled from claude's args; the plugin's MCP ships disabled so the session is already plugin-less;
+`--allow-…` starts in a normal mode with bypass switchable on demand from `/mode`. The `claude-yolo`
+variant uses `--dangerously-skip-permissions` for full bypass; `claude-tg N` routes to bridge N).
 
 ## 6. Inbound delivery needs a bridge-signature tmux pane (most common "it's not working")
 **Symptom:** bot is paired and polling, but Telegram messages never reach a Claude session.
@@ -82,7 +82,7 @@ past it, so the pane is never drivable.
 ```sh
 source ~/.bashrc        # load the claude-tg alias
 tmux new -s tg          # or attach to existing tmux
-claude-tg               # = tmux set -p @tg_bridge 1 ; claude --allow-dangerously-skip-permissions ; pick a theme on first run
+claude-tg               # fn: tmux set -p @tg_bridge "${1:-1}" ; claude --allow-dangerously-skip-permissions ; pick a theme on first run
 ```
 The daemon then discovers and adopts the pane (log: `adopted off-MCP pane …`), announces the
 session to Telegram, and inbound starts flowing. Note: the *dev/terminal* session you ran the

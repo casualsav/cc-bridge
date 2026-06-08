@@ -308,13 +308,15 @@ Off-MCP keeps the plugin's MCP server disabled, so a plain `claude` is already p
 `--strict-mcp-config` needed for that anymore.
 
 **Off-MCP (default):** run the work session in a tmux pane, launched so the daemon recognizes it as
-a bridge session. The signature the daemon scans for is the **`@tg_bridge` tmux pane option** — a
-dedicated marker set at the tmux layer, so it never touches claude's args (immune to claude
-rejecting unknown flags, and decoupled from autonomy mode). **Auto-add two shortcuts that tag the
-pane then launch** — append to the user's `~/.bashrc` (or `~/.zshrc`):
+a bridge session. The signature the daemon scans for is the **`@tg_bridge` tmux pane option** whose
+**value is the instance slot** — a marker set at the tmux layer, so it never touches claude's args
+(immune to claude rejecting unknown flags, and decoupled from autonomy mode). **Auto-add two
+launcher functions that tag the pane then launch** — append to the user's `~/.bashrc` (or
+`~/.zshrc`). They take an optional slot (default `1`), so `claude-tg` is the default bridge and
+`claude-tg 2` routes to a second one:
 ```sh
-alias claude-tg='tmux set -p @tg_bridge 1 2>/dev/null; claude --allow-dangerously-skip-permissions'   # safe start, bypass on demand
-alias claude-yolo='tmux set -p @tg_bridge 1 2>/dev/null; claude --dangerously-skip-permissions'       # full bypass from launch
+claude-tg()   { tmux set -p @tg_bridge "${1:-1}" 2>/dev/null; claude --allow-dangerously-skip-permissions; }  # safe start, bypass on demand
+claude-yolo() { tmux set -p @tg_bridge "${1:-1}" 2>/dev/null; claude --dangerously-skip-permissions; }          # full bypass from launch
 ```
 Then **tell the user:** launch work sessions with **`claude-tg`** (the default). The `@tg_bridge`
 pane option is the bridge marker; the bypass flags are the autonomy choice:
@@ -363,9 +365,12 @@ adoptable pane.
   sessions and reboots — no MCP session needed to keep it alive.
 - `TELEGRAM_FORCE_PANE=<pane>` in the `.env` overrides auto-discovery when you want a specific
   pane.
-- **Running two bridges for the same user** (two bots, one tmux server): give each its own
-  `TELEGRAM_STATE_DIR` (own socket/pid/token/access — clears the single-instance lock) **and** its
-  own **instance id**. The id scopes the `@tg_bridge` pane marker so each daemon adopts only its own
-  panes. The default state dir keeps id `1`; a custom state dir derives the id from its basename, or
-  set `TELEGRAM_INSTANCE_ID` explicitly. Tag that instance's work panes to match — e.g.
-  `alias claude-tg2='tmux set -p @tg_bridge <id> 2>/dev/null; claude --allow-dangerously-skip-permissions'`.
+- **Running more than one bridge for the same user** (several bots, one tmux server): each bridge is
+  a numbered **slot**. Slot 1 is the default (`~/.claude/channels/telegram`, marker value `1`); slot
+  N lives in `~/.claude/channels/telegramN` with its own token/access.json and marker value `N`.
+  - Configure slot N from your terminal: **`/telegram:configure N <token>`** (writes the bot token to
+    `telegramN/.env` and starts that slot's daemon), then **`/telegram:access N pair <code>`** to
+    approve your DM into *its* allowlist. Both are isolated from slot 1.
+  - Launch its work panes with **`claude-tg N`** (the launcher functions take the slot). Each daemon
+    adopts only panes whose `@tg_bridge` equals its own slot, so they never cross-talk.
+  - `ensure-daemon` enumerates every configured slot, so all bridges come back up after a reboot.

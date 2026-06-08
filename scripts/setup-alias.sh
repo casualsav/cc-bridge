@@ -1,28 +1,38 @@
 #!/usr/bin/env bash
-# One-time convenience: add a `claude-tg` alias for launching a Telegram-bridged
-# Claude Code session. Mode-aware (default off-MCP, the recommended mode):
-#   off-mcp  ->  tmux set -p @tg_bridge 1; claude --allow-dangerously-skip-permissions
-#                (`tmux set -p @tg_bridge 1` is the daemon's adopt marker — a tmux PANE option, so
-#                 it never touches claude's args. The plugin's MCP ships disabled so the session is
-#                 already plugin-less. --allow-dangerously-skip-permissions starts in a normal mode
-#                 (prompts relay to Telegram) with bypass switchable on demand from /mode. For a
-#                 full-bypass-from-launch variant, add by hand:
-#                   alias claude-yolo='tmux set -p @tg_bridge 1 2>/dev/null; claude --dangerously-skip-permissions')
-#   mcp      ->  claude --dangerously-load-development-channels plugin:telegram@better-claude-plugins --dangerously-skip-permissions
+# One-time convenience: add the Telegram-bridge launchers to the user's shell rc. Mode-aware
+# (default off-MCP, the recommended mode):
+#   off-mcp -> two shell FUNCTIONS that take an optional instance slot (default 1):
+#                claude-tg [slot]    -> tmux set -p @tg_bridge <slot> ; claude --allow-dangerously-skip-permissions
+#                claude-yolo [slot]  -> tmux set -p @tg_bridge <slot> ; claude --dangerously-skip-permissions
+#              The `@tg_bridge <slot>` tmux PANE option is the daemon's adopt marker (decoupled from
+#              claude's args). `claude-tg` = slot 1 (the default bridge); `claude-tg 2` routes to a
+#              second bridge (its own state dir/token, see /telegram:configure 2). --allow-… starts
+#              in a normal mode (prompts relay to Telegram), bypass switchable on demand from /mode;
+#              claude-yolo starts in full bypass.
+#   mcp     -> a single alias that loads the channel as a dev plugin (no pane marker needed — MCP
+#              sessions register over the socket).
 #
-# Idempotent — re-running updates the alias in place if the mode changed. Run from the repo root:
+# Idempotent — re-running replaces the block in place. Run from the repo root:
 #   bash scripts/setup-alias.sh [off-mcp|mcp]
 set -euo pipefail
 
 MODE="${1:-off-mcp}"
-ALIAS_NAME="claude-tg"
+COMMENT="# better-claude-telegram: Telegram-bridged Claude Code launchers (${MODE})"
+
 case "$MODE" in
-  off-mcp) ALIAS_CMD="tmux set -p @tg_bridge 1 2>/dev/null; claude --allow-dangerously-skip-permissions" ;;
-  mcp)     ALIAS_CMD="claude --dangerously-load-development-channels plugin:telegram@better-claude-plugins --dangerously-skip-permissions" ;;
-  *)       echo "usage: setup-alias.sh [off-mcp|mcp]  (default: off-mcp)" >&2; exit 2 ;;
+  off-mcp)
+    read -r -d '' DEFS <<'EOF' || true
+claude-tg()   { tmux set -p @tg_bridge "${1:-1}" 2>/dev/null; claude --allow-dangerously-skip-permissions; }
+claude-yolo() { tmux set -p @tg_bridge "${1:-1}" 2>/dev/null; claude --dangerously-skip-permissions; }
+EOF
+    ;;
+  mcp)
+    read -r -d '' DEFS <<'EOF' || true
+alias claude-tg='claude --dangerously-load-development-channels plugin:telegram@better-claude-plugins --dangerously-skip-permissions'
+EOF
+    ;;
+  *) echo "usage: setup-alias.sh [off-mcp|mcp]  (default: off-mcp)" >&2; exit 2 ;;
 esac
-ALIAS_LINE="alias ${ALIAS_NAME}='${ALIAS_CMD}'"
-COMMENT="# better-claude-telegram: launch a Telegram-bridged Claude Code session (${MODE})"
 
 # Pick the rc file for the current login shell, falling back to bash.
 case "${SHELL:-}" in
@@ -30,28 +40,22 @@ case "${SHELL:-}" in
   *)    RC="${HOME}/.bashrc" ;;
 esac
 
-if [ -f "$RC" ] && grep -qF "alias ${ALIAS_NAME}=" "$RC"; then
-  if grep -qF "$ALIAS_LINE" "$RC"; then
-    echo "✓ '${ALIAS_NAME}' (${MODE}) already present in ${RC} — nothing to do."
-    exit 0
-  fi
-  # An alias is there but for the other mode — drop our old lines and re-add fresh.
+# Drop any prior block we wrote (our comment + the claude-tg/claude-yolo defs, alias or function
+# form) so re-runs / mode switches replace cleanly, then append the fresh block.
+if [ -f "$RC" ]; then
   tmp=$(mktemp)
-  grep -vE "alias ${ALIAS_NAME}=|^# better-claude-telegram: launch" "$RC" > "$tmp"
-  { echo "$COMMENT"; echo "$ALIAS_LINE"; } >> "$tmp"
+  grep -vE '^# better-claude-telegram: (launch|Telegram-bridged)|^claude-tg\(\)|^claude-yolo\(\)|^alias claude-tg=|^alias claude-yolo=' "$RC" > "$tmp" || true
   cat "$tmp" > "$RC"
   rm -f "$tmp"
-  echo "✓ Updated '${ALIAS_NAME}' alias in ${RC} to ${MODE} mode."
-  echo "  Reload your shell or run:  source ${RC}"
-  exit 0
 fi
 
-{
-  echo ""
-  echo "$COMMENT"
-  echo "$ALIAS_LINE"
-} >> "$RC"
+{ echo ""; echo "$COMMENT"; printf '%s\n' "$DEFS"; } >> "$RC"
 
-echo "✓ Added '${ALIAS_NAME}' alias (${MODE}) to ${RC}"
+echo "✓ Wrote the ${MODE} launchers to ${RC}"
 echo "  Reload your shell or run:  source ${RC}"
-echo "  Then launch with:          ${ALIAS_NAME}"
+if [ "$MODE" = off-mcp ]; then
+  echo "  Launch:  claude-tg        (default bridge, slot 1)"
+  echo "           claude-tg 2      (second bridge — configure it first: /telegram:configure 2 <token>)"
+else
+  echo "  Launch:  claude-tg"
+fi

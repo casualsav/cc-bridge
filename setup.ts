@@ -279,20 +279,21 @@ function patchSettings(mode: Mode): void {
 
   if (mode === 'off-mcp') {
     const bashrc = join(homedir(), process.env.SHELL?.includes('zsh') ? '.zshrc' : '.bashrc')
-    // Two launch aliases. The adopt marker is `tmux set -p @tg_bridge 1` — a tmux PANE option, so
-    // it never touches claude's args (decoupled from the autonomy flag, and immune to claude
-    // rejecting unknown flags). The flag that follows only chooses the start mode:
-    //  claude-tg   — --allow-dangerously-skip-permissions: starts in a normal mode (prompts relay
-    //                to Telegram), bypass is switchable on demand from the /mode picker.
-    //  claude-yolo — --dangerously-skip-permissions: starts in full bypass (autonomy from launch).
+    // Two launch FUNCTIONS, each taking an optional instance slot (default 1): `claude-tg`,
+    // `claude-tg 2`, … The adopt marker is `tmux set -p @tg_bridge <slot>` — a tmux PANE option, so
+    // it never touches claude's args (decoupled from the autonomy flag, immune to claude rejecting
+    // unknown flags) and the slot routes the pane to the matching bridge daemon. The flag chooses
+    // the start mode: claude-tg → --allow-dangerously-skip-permissions (normal start, bypass on
+    // demand from /mode); claude-yolo → --dangerously-skip-permissions (full bypass from launch).
     const want: [string, string][] = [
-      ['claude-tg', "alias claude-tg='tmux set -p @tg_bridge 1 2>/dev/null; claude --allow-dangerously-skip-permissions'"],
-      ['claude-yolo', "alias claude-yolo='tmux set -p @tg_bridge 1 2>/dev/null; claude --dangerously-skip-permissions'"],
+      ['claude-tg', 'claude-tg()   { tmux set -p @tg_bridge "${1:-1}" 2>/dev/null; claude --allow-dangerously-skip-permissions; }'],
+      ['claude-yolo', 'claude-yolo() { tmux set -p @tg_bridge "${1:-1}" 2>/dev/null; claude --dangerously-skip-permissions; }'],
     ]
     const cur = existsSync(bashrc) ? readFileSync(bashrc, 'utf8') : ''
-    const missing = want.filter(([n]) => !new RegExp(`alias ${n}=`).test(cur)).map(([, a]) => a)
-    if (missing.length) { appendFileSync(bashrc, `\n${missing.join('\n')}\n`); console.log(C.ok(`  ✓ aliases → ${bashrc} (claude-tg, claude-yolo)`)) }
-    else console.log(C.dim('  • claude-tg / claude-yolo aliases already present'))
+    // Match either the new function form or a legacy `alias claude-tg=` from an older install.
+    const missing = want.filter(([n]) => !new RegExp(`(^|\\n)\\s*${n}\\s*\\(\\)|alias ${n}=`).test(cur)).map(([, a]) => a)
+    if (missing.length) { appendFileSync(bashrc, `\n${missing.join('\n')}\n`); console.log(C.ok(`  ✓ launchers → ${bashrc} (claude-tg, claude-yolo)`)) }
+    else console.log(C.dim('  • claude-tg / claude-yolo launchers already present'))
   }
 }
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')

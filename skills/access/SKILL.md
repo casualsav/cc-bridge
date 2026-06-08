@@ -26,6 +26,17 @@ Arguments passed: `$ARGUMENTS`
 
 ---
 
+## Instances (more than one bot)
+
+If the user runs multiple bridges, an optional leading **instance slot number** in `$ARGUMENTS`
+picks which one: **`1` or omitted** → `~/.claude/channels/telegram`; **`N`** →
+`~/.claude/channels/telegramN`. Substitute that path for `~/.claude/channels/telegram` everywhere
+below (its own `access.json`, `approved/`, etc.). Each bot's allowlist/pairings are fully isolated.
+That instance's daemon re-reads its own `access.json` live — no restart needed. Strip the leading
+slot number (if present) before parsing the rest of the arguments.
+
+---
+
 ## State shape
 
 `~/.claude/channels/telegram/access.json`:

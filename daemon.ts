@@ -1442,10 +1442,16 @@ const BRIDGE_PANE_OPT = '@tg_bridge'
 // migration), and any custom state dir derives a stable id from its basename. Sanitised to a safe
 // token (the value is read back through a tab-delimited list-panes format).
 const DEFAULT_STATE_DIR = join(homedir(), '.claude', 'channels', 'telegram')
-const INSTANCE_ID = (
-  process.env.TELEGRAM_INSTANCE_ID
-  || (STATE_DIR === DEFAULT_STATE_DIR ? '1' : basename(STATE_DIR))
-).replace(/[^A-Za-z0-9_-]/g, '') || '1'
+function resolveInstanceId(): string {
+  const explicit = process.env.TELEGRAM_INSTANCE_ID
+  if (explicit) return explicit.replace(/[^A-Za-z0-9_-]/g, '') || '1'
+  if (STATE_DIR === DEFAULT_STATE_DIR) return '1'
+  // Slot scheme: the state dir `…/telegram<N>` maps to id `<N>` (so `claude-tg <N>`, which tags
+  // the pane `@tg_bridge <N>`, routes to this daemon). A custom-named dir falls back to its basename.
+  const m = /^telegram(\d+)$/.exec(basename(STATE_DIR))
+  return (m ? m[1] : basename(STATE_DIR)).replace(/[^A-Za-z0-9_-]/g, '') || '1'
+}
+const INSTANCE_ID = resolveInstanceId()
 if (INSTANCE_ID !== '1') process.stderr.write(`daemon: bridge instance id = ${INSTANCE_ID} (state dir ${STATE_DIR})\n`)
 
 // Scan tmux for every adoptable bridge-marked pane (registered MCP sessions excluded). Reads the
