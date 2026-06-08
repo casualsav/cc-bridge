@@ -26,6 +26,17 @@ import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
 import { detectUserPrompt, detectPermissionPrompt, isSubmitScreen, stripAnsi, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
 import { resolveTranscript, latestFinalReply, finalRepliesAfter, textEntriesAfter, turnInProgress, currentTurnActivity, currentTurnFeed, listRecentSessions, findSessionCwd, type Activity, type FeedItem } from './transcript.ts'
 
+// Load .env ourselves. The daemon is (re)launched by the SessionStart hook and the watchdog,
+// neither of which sources a shell — so without this, a post-reboot relaunch comes up with no
+// token (dead bridge) and no TELEGRAM_ACCESS_MODE. Fill only vars not already set, so an explicit
+// env still wins (mirrors update.ts). This retires the manual `source .env` dance.
+try {
+  for (const line of readFileSync(ENV_FILE, 'utf8').split('\n')) {
+    const m = /^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*?)\s*$/.exec(line)
+    if (m && process.env[m[1]] === undefined) process.env[m[1]] = m[2]
+  }
+} catch {}
+
 // Off-MCP outbound (experimental): instead of the agent calling the MCP reply tool,
 // the daemon reads its reply from the session transcript and relays it — lets a session
 // run with NO telegram MCP loaded (reclaims the per-request tool/instruction context).
