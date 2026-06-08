@@ -345,11 +345,13 @@ class TypingPresence {
   private chats = new Set<string>()             // chats that have messaged — where typing shows
   private workingUntil = 0                      // keep pinging until this time
   private timer: ReturnType<typeof setInterval> | null = null
-  private static readonly PING_MS = 4_000       // < Telegram's ~5s expiry, so typing stays solid
-  private static readonly GRACE_MS = 5_000      // bridge brief gaps (tool boundaries / inject pauses)
+  private static readonly PING_MS = 2_000          // Telegram typing expires ~5s; 2s = solid margin (was 4s)
+  private static readonly GRACE_MS = 5_000         // bridge brief gaps (tool boundaries / inject pauses)
+  private static readonly SEND_TIMEOUT_MS = 1_500  // abandon a slow send so it can't pile up across ticks
 
   private pingAll(): void {
-    for (const chat of this.chats) void bot.api.sendChatAction(chat, 'typing').catch(() => {})
+    for (const chat of this.chats)
+      void bot.api.sendChatAction(chat, 'typing', {}, AbortSignal.timeout(TypingPresence.SEND_TIMEOUT_MS)).catch(() => {})
   }
   private ensureTimer(): void {
     if (!this.timer) this.timer = setInterval(() => { if (Date.now() < this.workingUntil) this.pingAll() }, TypingPresence.PING_MS)
@@ -368,6 +370,13 @@ class TypingPresence {
   // does nothing — the window simply lapses, which is what stops the indicator when done.
   observe(working: boolean): void {
     if (working) { this.workingUntil = Date.now() + TypingPresence.GRACE_MS; this.ensureTimer() }
+  }
+
+  // Re-assert typing right after the daemon sends a message — Telegram silently clears the
+  // indicator on every bot send, so without this it blinks off until the next 2s tick. No-op
+  // unless we're inside a working window (so it never re-triggers after the final reply).
+  retrigger(): void {
+    if (this.chats.size && Date.now() < this.workingUntil) this.pingAll()
   }
 }
 
@@ -1122,6 +1131,23 @@ function renderHybridMirror(feed: FeedItem[], done: boolean): string {
   return lines.join('\n').slice(0, 3500)
 }
 
+// Thoughts-only card: just Claude's narration, rendered (not raw markdown) with a blank line
+// between thoughts and no 💭 prefix — in thoughts mode there are no tool rows to distinguish it
+// from, so the bubble is noise. Each thought is converted to Telegram HTML independently (so the
+// HTML stays valid), then oldest are dropped until the whole thing fits the card cap.
+function renderThoughtsMirror(feed: FeedItem[], done: boolean): string {
+  const thoughts = feed
+    .filter((it): it is Extract<FeedItem, { kind: 'text' }> => it.kind === 'text')
+    .map(it => it.text.trim()).filter(Boolean)
+    .slice(-MIRROR_FEED)
+  const rendered = thoughts.map(t => mdToTelegramHtml(t).trim()).filter(Boolean)
+  let body = rendered.join('\n\n')
+  while (body.length > 3500 && rendered.length > 1) { rendered.shift(); body = rendered.join('\n\n') }
+  if (body.length > 3500) body = chunkHtml(body, 3500)[0] ?? body.slice(0, 3500)
+  if (!body) return done ? '✅ <b>Done</b>' : ''
+  return done ? `${body}\n\n✅ <b>Done</b>` : body
+}
+
 // The mirror text for the active mode, or null when there's nothing to show yet. All of it is
 // built from the transcript — no pane scraping — so it can't drop or garble blocks.
 //   off      → no card (just the final message).
@@ -1133,9 +1159,12 @@ async function buildMirrorText(done: boolean): Promise<string | null> {
   if (mode === 'off') return null
   const cwd = activePaneId ? await paneCwd(activePaneId) : null
   const file = cwd ? resolveTranscript(cwd) : null
-  if (mode === 'hybrid' || mode === 'thoughts') {
-    let feed = file ? currentTurnFeed(file) : []
-    if (mode === 'thoughts') feed = feed.filter(it => it.kind === 'text')   // thoughts-only card
+  if (mode === 'thoughts') {
+    const feed = file ? currentTurnFeed(file) : []
+    return renderThoughtsMirror(feed, done) || null   // null when there's no narration yet
+  }
+  if (mode === 'hybrid') {
+    const feed = file ? currentTurnFeed(file) : []
     return feed.length ? renderHybridMirror(feed, done) : null
   }
   // tools (legacy 'final')
@@ -1172,6 +1201,7 @@ async function updateTerminalMirror(working: boolean): Promise<void> {
       try { const m = await bot.api.sendMessage(chat, text, { parse_mode: 'HTML', disable_notification: true }); mirrorMsgIds.set(chat, m.message_id) }
       catch (e) { process.stderr.write(`daemon: activity mirror create failed: ${e}\n`) }
     }
+    typingPresence.retrigger()   // the mirror send clears Telegram's typing state — re-assert it now
   } else if (text !== mirrorLastText && now - mirrorLastEditAt >= MIRROR_THROTTLE_MS) {
     mirrorLastText = text; mirrorLastEditAt = now
     for (const [chat, mid] of mirrorMsgIds) {
@@ -1208,6 +1238,7 @@ async function relayLoopTick(gen: number): Promise<void> {
   // create/finalize storm. turnInProgress is the ground truth, so the card caps exactly when the
   // turn concludes. (relayIdleStreak/detectWorking now only feed ambient signals elsewhere.)
   const working = file ? turnInProgress(file) : !idle
+  typingPresence.observe(working)   // reliable working signal — this bridged pane never shows the spinner
   await updateTerminalMirror(working).catch(() => {})
 
   // Relay off the transcript, classified by stop_reason: every mode sends only conclusion blocks
@@ -1840,12 +1871,6 @@ function promptHash(prompt: PromptInfo): string {
   return hashText(prompt.question + '|' + prompt.options.map(o => o.label).join('|'))
 }
 
-// Telegram sizes a bubble to the wider of its text or its inline keyboard. Permission and
-// question prompts have short lines + narrow buttons, so they render skinnier than a normal
-// message. A trailing line of braille-blank (U+2800) padding — invisible but width-bearing —
-// snaps the bubble out to a normal width without showing any stray characters.
-const WIDTH_PAD = '\n' + '⠀'.repeat(40)
-
 // Render a prompt as Telegram HTML: bold question, then each numbered option with
 // its description (if any) as a blockquote beneath it.
 function renderPromptHtml(prompt: PromptInfo): string {
@@ -1860,7 +1885,7 @@ function renderPromptHtml(prompt: PromptInfo): string {
   // The "Type something" button only rides on the single-select keyboard; multi-select
   // shows checkboxes + Submit (no free-text button), so don't advertise it there.
   if (prompt.freeText && !prompt.multiSelect) lines.push('', '✏️ <i>…or tap “Type something” to write your own answer.</i>')
-  return lines.join('\n') + WIDTH_PAD
+  return lines.join('\n')
 }
 
 // Permission request as a self-contained message: the tool name as the heading,
@@ -1992,7 +2017,7 @@ async function relayPermissionToTelegram(perm: PermissionPrompt): Promise<void> 
   await flushPendingText()   // any preamble text must land before the approve/deny menu
   const parts = [`🔐 <b>${escapeHtml(perm.question)}</b>`]
   if (perm.preview) parts.push(`<blockquote>${escapeHtml(perm.preview)}</blockquote>`)
-  const body = parts.join('\n') + WIDTH_PAD
+  const body = parts.join('\n')
 
   const kb = new InlineKeyboard()
   for (const opt of perm.options) kb.text(permButtonLabel(opt), `pperm:${opt.n}`).row()
@@ -4928,7 +4953,7 @@ function handleShimConnection(socket: net.Socket): void {
           const { request_id, tool_name, description, input_preview } = msg.params
           permissionOrigin.set(request_id, write)
           const access = loadAccess()
-          const permText = formatPermission(tool_name, description, input_preview) + WIDTH_PAD
+          const permText = formatPermission(tool_name, description, input_preview)
           const keyboard = new InlineKeyboard()
             .text('✅ Allow', `perm:allow:${request_id}`)
             .text('❌ Deny', `perm:deny:${request_id}`)
