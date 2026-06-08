@@ -1073,6 +1073,12 @@ const MIRROR_TOOLS = 5         // tools mode: max tool rows shown (newest replac
 const mirrorMsgIds = new Map<string, number>()   // chat_id → the live mirror message id
 let mirrorLastText = ''
 let mirrorLastEditAt = 0
+// Consecutive not-working ticks. The card is finalized (one ✅ Done, then a fresh card on the next
+// turn) only after this crosses the threshold — so a single transient not-working tick (a cwd-lookup
+// miss that nulls `file` and falls back to the unreliable pane-idle signal, or a brief gap between
+// transcript entries) can't split one turn's card into two. Reset to 0 on any working tick.
+let mirrorIdleTicks = 0
+const MIRROR_FINALIZE_TICKS = 3   // ~4.5s sustained idle (RELAY_POLL_MS=1500) before capping the card
 
 // Live tool-use feed. On by default ('tools') — opt out via access.json
 // `terminalMirror: "off"` (or pick `"digest"`).
@@ -1214,7 +1220,8 @@ function renderThoughtsMirror(feed: FeedItem[], done: boolean): string {
   while (body.length > 3500 && rendered.length > 1) { rendered.shift(); body = rendered.join('\n\n') }
   if (body.length > 3500) body = chunkHtml(body, 3500)[0] ?? body.slice(0, 3500)
   if (!body) return done ? '✅ <b>Done</b>' : ''
-  return done ? `${body}\n\n✅ <b>Done</b>` : body
+  const head = `💭 ${body}`   // a single thought-bubble leads the card (before the top thought)
+  return done ? `${head}\n\n✅ <b>Done</b>` : head
 }
 
 // The mirror text for the active mode, or null when there's nothing to show yet. All of it is
@@ -1254,10 +1261,16 @@ async function buildMirrorText(done: boolean): Promise<string | null> {
 // "esc to interrupt" footer). Idempotent: repeated not-working ticks are a no-op once cleared.
 async function updateTerminalMirror(working: boolean): Promise<void> {
   const mode = replyMode()
-  // off → never a card. tools+terminalMirror:off → no card.
-  if (mode === 'off' || (mode === 'tools' && mirrorMode() === 'off')) { if (mirrorMsgIds.size) await finalizeTerminalMirror(); return }
+  // off → never a card. tools+terminalMirror:off → no card. (Explicit off → cap now, no debounce.)
+  if (mode === 'off' || (mode === 'tools' && mirrorMode() === 'off')) { mirrorIdleTicks = 0; if (mirrorMsgIds.size) await finalizeTerminalMirror(); return }
 
-  if (!working) { if (mirrorMsgIds.size) await finalizeTerminalMirror(); return }   // turn settled → cap the card once
+  if (!working) {
+    // Debounce the cap: only finalize after sustained idle, so a one-tick blip doesn't split the
+    // turn's card. A real turn-end stays not-working, so it still caps within a few ticks.
+    if (++mirrorIdleTicks >= MIRROR_FINALIZE_TICKS && mirrorMsgIds.size) await finalizeTerminalMirror()
+    return
+  }
+  mirrorIdleTicks = 0   // working again → reset the debounce
 
   const text = await buildMirrorText(false)
   if (!text) return
@@ -1287,7 +1300,7 @@ async function finalizeTerminalMirror(): Promise<void> {
   for (const [chat, mid] of mirrorMsgIds) {
     await bot.api.editMessageText(chat, mid, text, { parse_mode: 'HTML' }).catch(() => {})
   }
-  mirrorMsgIds.clear(); mirrorLastText = ''; mirrorLastEditAt = 0
+  mirrorMsgIds.clear(); mirrorLastText = ''; mirrorLastEditAt = 0; mirrorIdleTicks = 0
 }
 
 // Drop the open card entirely (delete, don't cap) and stop tracking it, so the next relay tick
