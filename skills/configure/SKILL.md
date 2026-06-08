@@ -31,28 +31,33 @@ Arguments passed: `$ARGUMENTS`
 ## Instances (running more than one bot)
 
 A user can run several **independent** bridges (different bots) on one machine, each in its own
-state dir. **Resolve which instance this invocation targets**, in priority order:
+state dir, identified by an **instance id** — a number *or* a name (e.g. `2`, `work`). **Resolve
+which instance this invocation targets**, in priority order:
 
-1. **Explicit leading slot number** in `$ARGUMENTS` (e.g. `/telegram:configure 2 <token>`) → that slot.
-2. **Otherwise, the current pane's slot.** The session you're running in may itself be tagged for a
-   slot (it was launched with `claude-tg N`). Read it:
-   `tmux display-message -p -t "$TMUX_PANE" '#{@tg_bridge}' 2>/dev/null`. If that prints a non-empty
-   value (e.g. `2`), use it — so a user who ran `claude-tg 2` can just type `/telegram:configure
-   <token>` here and it correctly targets slot 2 (the very session they're in).
-3. **Otherwise** → slot `1` (the default).
+1. **Explicit leading instance id** in `$ARGUMENTS` (e.g. `/telegram:configure work <token>`) → that
+   id. (The first argument is the id *only* if it isn't itself a bot token — a token contains a
+   colon `:`. So `/telegram:configure 123456:ABC…` has no id; `/telegram:configure work 123456:ABC…`
+   targets id `work`.)
+2. **Otherwise, the current pane's id.** The session you're in may be tagged for an instance (it was
+   launched with `claude-tg <id>`). Read it:
+   `tmux display-message -p -t "$TMUX_PANE" '#{@tg_bridge}' 2>/dev/null`. If non-empty (e.g. `work`),
+   use it — so a user who ran `claude-tg work` can just type `/telegram:configure <token>` here and
+   it targets the `work` bridge (the very session they're in).
+3. **Otherwise** → id `1` (the default).
 
-State dir for the resolved slot: slot `1` → `~/.claude/channels/telegram`; slot `N` →
-`~/.claude/channels/telegramN`. **Substitute that path for `~/.claude/channels/telegram` everywhere
-in the steps below.** The daemon derives instance id `N` from the `telegramN` dir name
-(`TELEGRAM_INSTANCE_ID` is not needed). Each slot's token/allowlist/pairings are fully isolated.
+State dir for the resolved id: id `1` → `~/.claude/channels/telegram`; any other id `<id>` →
+`~/.claude/channels/telegram-<id>` (e.g. `work` → `telegram-work`, `2` → `telegram-2`). **Substitute
+that path for `~/.claude/channels/telegram` everywhere in the steps below.** The daemon derives the
+id from the dir name (`TELEGRAM_INSTANCE_ID` is not needed). Each instance's token/allowlist/pairings
+are fully isolated.
 
 **After writing a NEW slot's token,** bring its daemon up now (it isn't covered by the already-running
 hook until the next session start): run `bun ~/.claude/channels/telegram/ensure-daemon.js` — it
-enumerates every configured slot and launches any that's down. The new daemon then auto-discovers
-and adopts the tagged pane (e.g. the `claude-tg N` session the user is in). For panes elsewhere,
-tell the user to launch them with **`claude-tg N`**.
+enumerates every configured instance and launches any that's down. The new daemon then auto-discovers
+and adopts the tagged pane (e.g. the `claude-tg <id>` session the user is in). For panes elsewhere,
+tell the user to launch them with **`claude-tg <id>`**.
 
-Strip the leading slot number (if present) before parsing the rest of the arguments below.
+Strip the leading instance id (if present) before parsing the rest of the arguments below.
 
 ---
 

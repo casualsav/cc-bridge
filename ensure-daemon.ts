@@ -31,14 +31,14 @@ function findDaemon(): string | null {
   return null
 }
 
-// Every configured bridge instance: a `telegram`/`telegram<N>` state dir whose .env carries a bot
-// token. (The slot scheme is numeric; a custom-named dir is launched by hand, not auto-enumerated.)
+// Every configured bridge instance: a `telegram` or `telegram-<id>` state dir whose .env carries a
+// bot token (id is a number or a name — `telegram-2`, `telegram-work`; legacy `telegram<id>` too).
 function instanceDirs(): string[] {
   let names: string[]
   try { names = readdirSync(CHANNELS_DIR) } catch { return [] }
   const dirs: string[] = []
   for (const name of names) {
-    if (!/^telegram(\d+)?$/.test(name)) continue
+    if (!/^telegram([-_]?[A-Za-z0-9]+)?$/.test(name)) continue
     const dir = join(CHANNELS_DIR, name)
     try {
       const env = readFileSync(join(dir, '.env'), 'utf8')

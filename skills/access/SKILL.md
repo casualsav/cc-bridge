@@ -29,18 +29,19 @@ Arguments passed: `$ARGUMENTS`
 
 ## Instances (more than one bot)
 
-If the user runs multiple bridges, **resolve which instance this targets**, in priority order:
-1. **Explicit leading slot number** in `$ARGUMENTS` (e.g. `/telegram:access 2 pair <code>`).
-2. **Otherwise, the current pane's slot:** `tmux display-message -p -t "$TMUX_PANE" '#{@tg_bridge}' 2>/dev/null`
-   — if non-empty (e.g. `2`), use it, so inside a `claude-tg 2` session you can just run
-   `/telegram:access pair <code>` and it targets slot 2.
-3. **Otherwise** → slot `1`.
+If the user runs multiple bridges, **resolve which instance this targets** (an instance id is a
+number *or* a name), in priority order:
+1. **Explicit leading instance id** in `$ARGUMENTS` (e.g. `/telegram:access work pair <code>`).
+2. **Otherwise, the current pane's id:** `tmux display-message -p -t "$TMUX_PANE" '#{@tg_bridge}' 2>/dev/null`
+   — if non-empty (e.g. `work`), use it, so inside a `claude-tg work` session you can just run
+   `/telegram:access pair <code>` and it targets that bridge.
+3. **Otherwise** → id `1`.
 
-State dir: slot `1` → `~/.claude/channels/telegram`; slot `N` → `~/.claude/channels/telegramN`.
-Substitute that path for `~/.claude/channels/telegram` everywhere below (its own `access.json`,
-`approved/`, etc.). Each bot's allowlist/pairings are fully isolated; that instance's daemon
-re-reads its own `access.json` live — no restart needed. Strip the leading slot number (if present)
-before parsing the rest of the arguments.
+State dir: id `1` → `~/.claude/channels/telegram`; any other id `<id>` →
+`~/.claude/channels/telegram-<id>`. Substitute that path for `~/.claude/channels/telegram` everywhere
+below (its own `access.json`, `approved/`, etc.). Each bot's allowlist/pairings are fully isolated;
+that instance's daemon re-reads its own `access.json` live — no restart needed. Strip the leading
+instance id (if present) before parsing the rest of the arguments.
 
 ---
 

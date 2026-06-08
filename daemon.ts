@@ -1446,10 +1446,12 @@ function resolveInstanceId(): string {
   const explicit = process.env.TELEGRAM_INSTANCE_ID
   if (explicit) return explicit.replace(/[^A-Za-z0-9_-]/g, '') || '1'
   if (STATE_DIR === DEFAULT_STATE_DIR) return '1'
-  // Slot scheme: the state dir `…/telegram<N>` maps to id `<N>` (so `claude-tg <N>`, which tags
-  // the pane `@tg_bridge <N>`, routes to this daemon). A custom-named dir falls back to its basename.
-  const m = /^telegram(\d+)$/.exec(basename(STATE_DIR))
-  return (m ? m[1] : basename(STATE_DIR)).replace(/[^A-Za-z0-9_-]/g, '') || '1'
+  // The state dir `…/telegram-<id>` maps to instance id `<id>` — the value the user passes to
+  // `claude-tg <id>` (which tags the pane `@tg_bridge <id>`). The id is arbitrary: a number ("2")
+  // or a name ("work"). The default `…/telegram` is id "1". (Legacy `telegram<id>` with no
+  // separator is tolerated too.)
+  const id = basename(STATE_DIR).replace(/^telegram[-_]?/, '')
+  return id.replace(/[^A-Za-z0-9_-]/g, '') || '1'
 }
 const INSTANCE_ID = resolveInstanceId()
 if (INSTANCE_ID !== '1') process.stderr.write(`daemon: bridge instance id = ${INSTANCE_ID} (state dir ${STATE_DIR})\n`)

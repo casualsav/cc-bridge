@@ -365,12 +365,15 @@ adoptable pane.
   sessions and reboots — no MCP session needed to keep it alive.
 - `TELEGRAM_FORCE_PANE=<pane>` in the `.env` overrides auto-discovery when you want a specific
   pane.
-- **Running more than one bridge for the same user** (several bots, one tmux server): each bridge is
-  a numbered **slot**. Slot 1 is the default (`~/.claude/channels/telegram`, marker value `1`); slot
-  N lives in `~/.claude/channels/telegramN` with its own token/access.json and marker value `N`.
-  - Configure slot N from your terminal: **`/telegram:configure N <token>`** (writes the bot token to
-    `telegramN/.env` and starts that slot's daemon), then **`/telegram:access N pair <code>`** to
-    approve your DM into *its* allowlist. Both are isolated from slot 1.
-  - Launch its work panes with **`claude-tg N`** (the launcher functions take the slot). Each daemon
-    adopts only panes whose `@tg_bridge` equals its own slot, so they never cross-talk.
-  - `ensure-daemon` enumerates every configured slot, so all bridges come back up after a reboot.
+- **Running more than one bridge for the same user** (several bots, one tmux server): each bridge has
+  an **instance id** — a number *or* a name (`2`, `work`). Id `1` is the default
+  (`~/.claude/channels/telegram`, marker value `1`); any other id `<id>` lives in
+  `~/.claude/channels/telegram-<id>` with its own token/access.json and marker value `<id>`.
+  - Configure it from your terminal: **`/telegram:configure work <token>`** (writes the token to
+    `telegram-work/.env` and starts that bridge's daemon), then **`/telegram:access work pair <code>`**
+    to approve your DM into *its* allowlist — isolated from the default bridge.
+  - Launch its work panes with **`claude-tg work`** (the launcher functions take the id). Each daemon
+    adopts only panes whose `@tg_bridge` equals its own id, so they never cross-talk. (Inside such a
+    session you can drop the id — the skills read it off the pane.) For a memorable shortcut a user
+    can add their own wrapper, e.g. `alias work-bot='claude-tg work'`.
+  - `ensure-daemon` enumerates every configured instance, so all bridges come back up after a reboot.
