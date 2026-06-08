@@ -1171,7 +1171,7 @@ function renderHybridMirror(feed: FeedItem[], done: boolean): string {
     }
   }
   if (done) lines.push(`✅ <b>Done</b>`)
-  return lines.join('\n').slice(0, 3500)
+  return lines.join('\n\n').slice(0, 3500)   // blank line between items for readability
 }
 
 // Thoughts-only card: just Claude's narration, rendered (not raw markdown) with a blank line
