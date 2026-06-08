@@ -946,7 +946,10 @@ function maybeReactionCue(params: InboundParams): string {
 }
 function enqueueInboundInject(paneId: string, watcher: PaneWatcher, params: InboundParams): void {
   const block = formatChannelBlock(params) + maybeReactionCue(params)
-  const run = () => injectPaste(paneId, watcher, block)
+  // If an effort-change confirmation is open and the user sent a message instead of tapping, dismiss
+  // it first (= "No, go back", keeps the current level) so the message doesn't type into the modal.
+  const run = () => dismissPendingEffortConfirm()
+    .then(() => injectPaste(paneId, watcher, block))
     .then(ok => {
       if (ok) {
         process.stderr.write(`daemon: inbound injected to pane ${paneId} chat=${params.meta.chat_id}\n`)
@@ -2760,14 +2763,21 @@ async function doModelPicker(ctx: Context): Promise<void> {
   )
 }
 
-// /effort — Claude Code's reasoning-effort slash command (low|medium|high|max). Relayed straight
-// to the session like /model; the current level is read from the statusline (ε:<level>).
-const EFFORT_LEVELS = ['low', 'medium', 'high', 'max']
-const EFFORT_TIP = '💡 <code>/effort &lt;low|medium|high|max&gt;</code> sets reasoning effort.'
+// /effort — Claude Code's reasoning-effort slash command (low|medium|high|xhigh|max|auto). Relayed
+// straight to the session like /model; the current level is read from the statusline (ε:<level>).
+// Changing effort mid-conversation pops a "Change effort level?" confirmation in the TUI — see
+// injectEffortChange / the effortconfirm flow, which relays it as Yes/No buttons.
+const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max', 'auto']
+const EFFORT_TIP = '💡 <code>/effort &lt;low|medium|high|xhigh|max|auto&gt;</code> sets reasoning effort.'
+// Display name for a level (the raw token is what's typed to CC); only xhigh needs prettifying.
+function effortLabel(level: string): string {
+  if (level === 'xhigh') return 'XHigh'
+  return level.charAt(0).toUpperCase() + level.slice(1)
+}
 function effortPickerKeyboard(): InlineKeyboard {
   const kb = new InlineKeyboard()
   EFFORT_LEVELS.forEach((e, i) => {
-    kb.text(e.charAt(0).toUpperCase() + e.slice(1), `effort:set:${e}`)
+    kb.text(effortLabel(e), `effort:set:${e}`)
     if ((i + 1) % 2 === 0) kb.row()
   })
   return kb
@@ -2784,6 +2794,69 @@ async function doEffortPicker(ctx: Context): Promise<void> {
     `⚡ <b>Effort</b> — currently ${eff ? escapeHtml(eff) : 'unknown'}\n\n${EFFORT_TIP}`,
     { parse_mode: 'HTML', reply_markup: effortPickerKeyboard() },
   )
+}
+
+// Mid-conversation, `/effort <level>` doesn't apply straight away — Claude Code shows a
+// "Change effort level?" confirmation (the new level would invalidate the cached history). That
+// modal isn't a select/permission prompt (it lacks their footers), so the generic relayers skip
+// it and the pane would just sit there. We detect it explicitly and relay our own Yes/No buttons.
+function isEffortConfirm(cap: string): boolean {
+  const low = stripAnsi(cap).toLowerCase()
+  return /change effort level\?/.test(low) && /\byes,\s*switch\b/.test(low)
+}
+
+// An open effort confirmation awaiting the user: tapping ✅/❌ answers it; sending any other
+// message dismisses it (= "No, go back") first, then proceeds — see dismissPendingEffortConfirm.
+let pendingEffortConfirm: { level: string; chatId: string; messageId: number } | null = null
+
+// Inject `/effort <level>` and detect whether CC raised the mid-conversation confirmation.
+// Returns 'confirm' (a Yes/No was relayed — answer pending) or 'applied' (took effect directly,
+// e.g. a fresh session with nothing cached). Re-issuing supersedes any open confirm.
+async function injectEffortChange(level: string, chat_id: string): Promise<'confirm' | 'applied'> {
+  if (!activePaneId || !paneWatcher) return 'applied'
+  await dismissPendingEffortConfirm()
+  await injectSlash(activePaneId, paneWatcher, `/effort ${level}`)
+  const cap = await capturePane(activePaneId).catch(() => '')
+  if (cap && isEffortConfirm(cap)) {
+    await relayEffortConfirm(level, chat_id)
+    return 'confirm'
+  }
+  return 'applied'
+}
+
+// Relay the effort-change confirmation as a Telegram message with Yes/No buttons, and remember it
+// as the pending confirm so the next message (if the user doesn't tap) can dismiss it.
+async function relayEffortConfirm(level: string, chat_id: string): Promise<void> {
+  const kb = new InlineKeyboard()
+    .text(`✅ Yes, switch to ${effortLabel(level)}`, 'effortconfirm:yes')
+    .text('❌ No', 'effortconfirm:no')
+  try {
+    const sent = await bot.api.sendMessage(chat_id,
+      `⚡ <b>Change effort level to ${escapeHtml(effortLabel(level))}?</b>\n\n` +
+      '<blockquote>Your next response will be slower and use more tokens. The conversation is ' +
+      'cached for the current level — switching re-reads the full history on your next message.</blockquote>',
+      { parse_mode: 'HTML', reply_markup: kb })
+    pendingEffortConfirm = { level, chatId: chat_id, messageId: sent.message_id }
+  } catch (e) { process.stderr.write(`daemon: effort-confirm relay failed: ${e}\n`) }
+}
+
+// Dismiss an open effort confirmation by pressing Esc (= "No, go back" — keeps the current level),
+// and update the relayed message. No-op when nothing is pending. Called when the user sends another
+// message instead of tapping, or re-issues /effort.
+async function dismissPendingEffortConfirm(): Promise<void> {
+  const pend = pendingEffortConfirm
+  if (!pend) return
+  pendingEffortConfirm = null
+  if (activePaneId && paneWatcher) {
+    try {
+      await paneWatcher.withInjection(async () => {
+        await sendKeys(activePaneId!, ['Escape'])
+        await waitForSettle(activePaneId!, 200, 2000)
+      })
+    } catch (e) { process.stderr.write(`daemon: effort-confirm dismiss failed: ${e}\n`) }
+  }
+  void bot.api.editMessageText(pend.chatId, pend.messageId,
+    '⚡ Effort change dismissed — kept the current level.', { parse_mode: 'HTML' }).catch(() => {})
 }
 
 // Run /cost and relay the readout it prints.
@@ -2968,7 +3041,7 @@ function startHelpText(paired: boolean): string {
     `<code>/mode</code> — interactive mode switcher\n` +
     `<code>/mode plan·auto·default·acceptedits·bypass</code> — jump to a mode\n` +
     `<code>/model</code> — show the model (<code>/model &lt;name&gt;</code> to switch)\n` +
-    `<code>/effort</code> — reasoning effort (low·medium·high·max)\n\n` +
+    `<code>/effort</code> — reasoning effort (low·medium·high·xhigh·max·auto)\n\n` +
 
     `🖥️ <b>Sessions</b>\n` +
     `<code>/sessions</code> — list &amp; switch (<code>/sessions #</code> to switch · <code>/sessions name # label</code> to rename)\n` +
@@ -3103,8 +3176,13 @@ bot.command('effort', async ctx => {
   if (!activePaneId || !paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
   const arg = (ctx.match ?? '').toString().trim().toLowerCase()
   if (arg) {
-    if (!EFFORT_LEVELS.includes(arg)) { await ctx.reply('Usage: <code>/effort low | medium | high | max</code>', { parse_mode: 'HTML' }); return }
-    void relaySlashCommand(activePaneId, paneWatcher, `/effort ${arg}`, String(ctx.chat!.id), ctx.message!.message_id)
+    if (!EFFORT_LEVELS.includes(arg)) { await ctx.reply('Usage: <code>/effort low | medium | high | xhigh | max | auto</code>', { parse_mode: 'HTML' }); return }
+    const chat_id = String(ctx.chat!.id)
+    const result = await injectEffortChange(arg, chat_id)
+    // 'confirm' → a Yes/No was relayed; the 👍 would be premature. 'applied' → it took effect.
+    if (result === 'applied') {
+      void bot.api.setMessageReaction(chat_id, ctx.message!.message_id, [{ type: 'emoji', emoji: '👍' }]).catch(() => {})
+    }
     return
   }
   await doEffortPicker(ctx)
@@ -4452,17 +4530,44 @@ bot.on('callback_query:data', async ctx => {
   }
 
   // Effort picker — apply a tapped effort level
-  const effortSet = /^effort:set:(low|medium|high|max)$/.exec(data)
-  if (effortSet) {
+  const effortSet = /^effort:set:(\w+)$/.exec(data)
+  if (effortSet && EFFORT_LEVELS.includes(effortSet[1])) {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) { await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {}); return }
     if (!activePaneId || !paneWatcher) { await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {}); return }
     const level = effortSet[1]
     await ctx.answerCallbackQuery({ text: `Effort → ${level}…` }).catch(() => {})
-    await injectSlash(activePaneId, paneWatcher, `/effort ${level}`)
-    const eff = await currentEffort()
-    await ctx.editMessageText(`⚡ <b>Effort</b> — now ${eff ? escapeHtml(eff) : escapeHtml(level)}\n\n${EFFORT_TIP}`, {
-      parse_mode: 'HTML', reply_markup: effortPickerKeyboard(),
-    }).catch(() => {})
+    const result = await injectEffortChange(level, String(ctx.chat!.id))
+    if (result === 'confirm') {
+      // A confirmation was relayed as its own Yes/No message — collapse the picker to point at it.
+      await ctx.editMessageText(`⚡ <b>Effort</b> — confirm switching to ${escapeHtml(effortLabel(level))} below 👇`, { parse_mode: 'HTML' }).catch(() => {})
+    } else {
+      const eff = await currentEffort()
+      await ctx.editMessageText(`⚡ <b>Effort</b> — now ${eff ? escapeHtml(eff) : escapeHtml(level)}\n\n${EFFORT_TIP}`, {
+        parse_mode: 'HTML', reply_markup: effortPickerKeyboard(),
+      }).catch(() => {})
+    }
+    return
+  }
+
+  // Effort-change confirmation (the mid-conversation "Change effort level?" modal) — Yes applies it
+  // (digit 1 + Enter, mirroring the generic prompt answerer), No/Esc cancels (keeps current level).
+  if (data === 'effortconfirm:yes' || data === 'effortconfirm:no') {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) { await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {}); return }
+    if (!activePaneId || !paneWatcher) { await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {}); return }
+    const yes = data === 'effortconfirm:yes'
+    const level = pendingEffortConfirm?.level
+    pendingEffortConfirm = null
+    await ctx.answerCallbackQuery({ text: yes ? 'Switching…' : 'Cancelled' }).catch(() => {})
+    await paneWatcher.withInjection(async () => {
+      await sendKeys(activePaneId!, yes ? ['1', 'Enter'] : ['Escape'])
+      await waitForSettle(activePaneId!, 300, 5000)
+    })
+    if (yes) {
+      const eff = await currentEffort()
+      await ctx.editMessageText(`⚡ <b>Effort</b> — now ${eff ? escapeHtml(eff) : escapeHtml(level ?? '')}`, { parse_mode: 'HTML' }).catch(() => {})
+    } else {
+      await ctx.editMessageText('⚡ Effort change cancelled — kept the current level.', { parse_mode: 'HTML' }).catch(() => {})
+    }
     return
   }
 
@@ -5179,6 +5284,9 @@ bot.on('message:text', async ctx => {
       await ctx.reply('No active Claude Code session with tmux.')
       return
     }
+    // A slash command while an effort confirmation is open: dismiss it first so the command isn't
+    // typed into the modal (matches the "next message dismisses → No" behaviour for plain messages).
+    await dismissPendingEffortConfirm()
     const msgId = ctx.message.message_id
     const chat_id = String(ctx.chat.id)
     // /exit (and /quit) closes the session. If it's the only one, confirm first (Yes/No) so the
@@ -5535,7 +5643,7 @@ void (async () => {
               { command: 'new', description: 'Start a new session' },
               { command: 'reset', description: 'Clear the current conversation in place' },
               { command: 'stream', description: 'How replies arrive: thoughts · tools · hybrid · off' },
-              { command: 'effort', description: 'Reasoning effort: low · medium · high · max' },
+              { command: 'effort', description: 'Reasoning effort: low · medium · high · xhigh · max · auto' },
               { command: 'cost', description: 'Show the session cost readout' },
               { command: 'context', description: 'Show the token-context usage' },
               { command: 'compact', description: 'Compact the conversation to free up context' },
