@@ -2920,13 +2920,14 @@ function startHelpText(paired: boolean): string {
 
     `💬 <b>Chatting</b>\n` +
     `• Any message you send is typed into the focused session.\n` +
-    `• Send 📷 photos, 📎 files, or 🎙️ voice notes — they're handed to the session.\n` +
+    `• Send 📷 photos, 📎 files, or 🎙️ voice notes (transcribed to text) — they're handed to the session.\n` +
     `• Whatever the agent says last comes straight back to you here.\n\n` +
 
     `🎚️ <b>Modes &amp; model</b>\n` +
     `<code>/mode</code> — interactive mode switcher\n` +
     `<code>/mode plan·auto·default·acceptedits·bypass</code> — jump to a mode\n` +
-    `<code>/model</code> — show the model (<code>/model &lt;name&gt;</code> to switch)\n\n` +
+    `<code>/model</code> — show the model (<code>/model &lt;name&gt;</code> to switch)\n` +
+    `<code>/effort</code> — reasoning effort (low·medium·high·max)\n\n` +
 
     `🖥️ <b>Sessions</b>\n` +
     `<code>/sessions</code> — list &amp; switch (<code>/sessions #</code> to switch · <code>/sessions name # label</code> to rename)\n` +
@@ -2938,12 +2939,16 @@ function startHelpText(paired: boolean): string {
     `<code>/cost</code> — usage &amp; cost breakdown\n` +
     `<code>/context</code> — token-context usage\n` +
     `<code>/terminal [N]</code> — recent terminal activity\n` +
-    `<code>/compact</code> — compact the conversation to free context\n\n` +
+    `<code>/compact</code> — compact the conversation to free context\n` +
+    `• Live activity card streams what Claude's doing — <code>/stream</code> sets its style (thoughts·tools·hybrid·off)\n\n` +
 
     `🛑 <b>Control</b>\n` +
     `<code>/stop</code> — interrupt the current task (Esc)\n` +
     `<code>/new</code> — start a fresh conversation\n` +
-    `<code>/autocontinue</code> — auto-send "continue" when the limit resets\n\n` +
+    `<code>/autocontinue</code> — auto-send "continue" when the limit resets\n` +
+    `<code>/schedule</code> — queue a message to a session for later\n` +
+    `<code>/reply &lt;text&gt;</code> — type a response into the session (e.g. a <code>/login</code> code)\n` +
+    `• Permission prompts arrive as tap <b>Allow</b> / <b>Deny</b> buttons\n\n` +
 
     `📌 <b>Pinned bar</b> — your session · model · mode, with 🖥️ 🧠 🎚️ quick buttons (<code>/pin</code> to toggle). <code>/dock</code> shows a tap-keyboard of quick actions.\n` +
     `⚙️ <code>/settings</code> — stream, pin, auto-continue, voice in one panel (<code>/mcp</code> toggles MCP mode).\n` +

@@ -56,9 +56,14 @@ Prefer to do it by hand? [`off-mcp/INSTALL.md`](./off-mcp/INSTALL.md) lists ever
   `/default`, `/acceptedits`, `/bypass`, or the interactive `/mode`.
 - **Interrupt** — `/stop` sends Esc to the session, cancelling the current turn.
 - **Attachments** — send photos and documents in; Claude can attach files back.
-- **Voice & audio transcription** — inbound voice/audio notes can be transcribed
+- **Voice & audio transcription** — inbound voice/audio notes are transcribed
   to text before they reach Claude, via a local Whisper model or a hosted API
-  (Groq / OpenAI). Runs entirely outside Claude, so it never consumes usage.
+  (Groq / OpenAI). Runs entirely outside Claude, so it never consumes usage. Pick
+  the backend and (for local) the Whisper model right from `/settings`.
+- **Reasoning effort** — set Claude's thinking effort from Telegram with `/effort`
+  (low · medium · high · max); the current level shows in the pinned bar.
+- **Scheduled messages** — queue a message into a session for later with `/schedule`
+  (e.g. `/schedule 12h`, `/schedule cancel`); it's pasted in when it fires.
 - **Multiple sessions** — run several Claude Code sessions and switch between them
   from Telegram (`/sessions`). Start a new one in any folder with the **➕ New
   session** button (This folder / Home / Specify a path).
@@ -69,8 +74,8 @@ Prefer to do it by hand? [`off-mcp/INSTALL.md`](./off-mcp/INSTALL.md) lists ever
   mode, with 🗂️ Sessions / 🧠 Model / 🧭 Mode quick buttons.
 - **Live activity mirror** — a single self-updating message shows what Claude is doing
   in real time (💻 terminal, 📋 todo, 📖 read, ✏️ edit, 🔍 search, 🤖 agent, ❓ clarify…),
-  read straight from the transcript so it costs zero usage. On by default; opt out with
-  `terminalMirror: "off"`.
+  read straight from the transcript so it costs zero usage. On by default; choose its
+  style with `/stream` (thoughts · tools · hybrid · off).
 
 ## How it works
 
@@ -205,13 +210,16 @@ formatted. Bot commands:
 | `/mode` | Interactive permission-mode switcher (`/mode <name>` jumps straight to one) |
 | `/plan` `/auto` `/default` `/acceptedits` `/bypass` | Quick mode switch |
 | `/model` | Show the current model (or `/model <name>` to switch) |
+| `/effort` | Reasoning effort — picker, or `/effort low\|medium\|high\|max` |
 | `/stop` | Interrupt the current task (sends Esc) |
 | `/new` | Start a fresh conversation in the session |
 | `/compact` | Compact the conversation to free up context |
 | `/cost` | Usage & cost breakdown |
 | `/context` | Token-context usage |
+| `/stream` | Live-activity card style: `thoughts` · `tools` · `hybrid` · `off` |
 | `/terminal [N]` | Show recent terminal activity (N lines) |
 | `/autocontinue` | Auto-send "continue" when the usage limit resets (on/off) |
+| `/schedule` | Queue a message into a session for later (`/schedule 12h` · `/schedule cancel`) |
 | `/dock` | Show the docked control-bar keyboard (`/dock off` to hide) |
 | `/pin` | Toggle the pinned status message (`/pin on` \| `off`) |
 | `/settings` | Channel settings panel — live mirror, pin, auto-continue, MCP mode, voice transcription |
