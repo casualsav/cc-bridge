@@ -3947,12 +3947,13 @@ async function sessionPinText(rows: SessionRow[]): Promise<string> {
 
   // First line is the collapsed preview Telegram shows up top — keep it identity-only. Everything
   // below is revealed when the pin is expanded, grouped into rule-separated cards.
-  // Tagline order: session · usage · model · effort · mode, then the think badge. Items are
-  // separated by a double space — the emojis act as dividers (restore ` • ` to revert).
+  // Tagline order: session · usage · context · model · effort · mode, then the think badge. Items
+  // are separated by a double space — the emojis act as dividers (restore ` • ` to revert).
   const usage = status?.h5 ? `  📈 ${status.h5.pct}%` : ''
+  const ctxBadge = status?.ctxPct != null ? `  💾 ${status.ctxPct}%` : ''
   const effortBadge = status?.effort ? `  ⚡ ${escapeHtml(status.effort)}` : ''
   const thinkBadge = status?.think ? '  ✻ think' : ''
-  const head = `🖥️ <b>${escapeHtml(cur.label)}</b>${usage}  🧠 ${escapeHtml(model ?? '—')}${effortBadge}  🕹️ ${escapeHtml(mode)}${thinkBadge}`
+  const head = `🖥️ <b>${escapeHtml(cur.label)}</b>${usage}${ctxBadge}  🧠 ${escapeHtml(model ?? '—')}${effortBadge}  🕹️ ${escapeHtml(mode)}${thinkBadge}`
   const groups: string[] = []
   if (cwd) groups.push(`📁 <code>${escapeHtml(cwd)}</code>${branch ? ` · 🌿 ${escapeHtml(branch)}` : ''}`)
   if (status) {

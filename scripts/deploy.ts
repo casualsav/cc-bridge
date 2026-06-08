@@ -156,14 +156,21 @@ if (noRestart) {
   const oldPid = parseInt(readFileSync(DAEMON_PID, 'utf8').trim(), 10)
   step(`restarting daemon (old pid ${oldPid})`)
   try { process.kill(oldPid, 'SIGTERM') } catch {}
+  // Wait for the old process to actually exit (and release the socket) so ensure-daemon sees it
+  // down. Then proactively respawn from the new cache rather than waiting on the watchdog's lazy
+  // 20s poll — ensure-daemon is idempotent and gates on socket liveness, so it won't race the
+  // watchdog into a double-spawn.
+  for (let i = 0; i < 20; i++) { Bun.sleepSync(250); try { process.kill(oldPid, 0) } catch { break } }
+  const ed = join(newCache, 'ensure-daemon.ts')
+  if (existsSync(ed)) { step('respawning via ensure-daemon'); sh('bun', [ed], newCache) }
   let newPid = 0
-  for (let i = 0; i < 30; i++) {
+  for (let i = 0; i < 60; i++) { // up to ~30s: covers bun startup + the watchdog fallback path
     Bun.sleepSync(500)
     let p = 0
     try { p = parseInt(readFileSync(DAEMON_PID, 'utf8').trim(), 10) } catch {}
     if (p && p !== oldPid) { try { process.kill(p, 0); newPid = p; break } catch {} }
   }
-  if (!newPid) die(`daemon did not come back within 15s — check ~/.claude/channels/telegram for logs`)
+  if (!newPid) die(`daemon did not come back within 30s — check ~/.claude/channels/telegram for logs`)
   const line = cmdlineOf(newPid)
   if (!line.includes(`/${next}/`)) {
     console.error(`⚠ daemon respawned (pid ${newPid}) but not from cache/${next}:\n  ${line}`)
