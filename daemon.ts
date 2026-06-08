@@ -2756,8 +2756,17 @@ bot.command('status', async ctx => {
   if (!gated) return
   const { access, senderId } = gated
   if (access.allowFrom.includes(senderId)) {
-    const name = ctx.from!.username ? `@${ctx.from!.username}` : senderId
-    await ctx.reply(`Paired as ${name}.`)
+    // Folded into the pin: re-post the status card as the most recent message (delete the old
+    // pinned one, create + pin a fresh one at the bottom) so it lands where the user is reading,
+    // no scrolling up to the original pin.
+    const chat = String(ctx.chat!.id)
+    const old = sessionPins.get(chat)
+    if (old) {
+      await bot.api.unpinChatMessage(chat, old).catch(() => {})
+      await bot.api.deleteMessage(chat, old).catch(() => {})
+      sessionPins.delete(chat); pinTextCache.delete(chat); persistSessionPins()
+    }
+    await createSessionPin(chat, await sessionPinText(await sessionRows()), pinKeyboard())
     return
   }
   for (const [code, p] of Object.entries(access.pending)) {
@@ -3597,6 +3606,7 @@ async function sessionPinText(rows: SessionRow[]): Promise<string> {
     if (lim.length) groups.push(lim.join('\n'))
   }
   if (rows.length > 1) groups.push(`🖥️ Session ${rows.findIndex(r => r.current) + 1} of ${rows.length}`)
+  groups.push(`🔗 Paired${botUsername ? ` · @${escapeHtml(botUsername)}` : ''} · connected`)
 
   return groups.length ? `${head}\n\n${groups.join(`\n${PIN_RULE}\n`)}` : head
 }
@@ -3605,7 +3615,8 @@ async function sessionPinText(rows: SessionRow[]): Promise<string> {
 function pinKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
     .text('🖥️ Sessions', 'pin:sessions').text('⚙️ Settings', 'pin:settings').row()
-    .text('🧠 Model', 'pin:model').text('🧭 Mode', 'pin:mode')
+    .text('🧠 Model', 'pin:model').text('🧭 Mode', 'pin:mode').row()
+    .text('💾 Context', 'pin:context').text('💰 Cost', 'pin:cost')
 }
 
 // True when an edit failed because the target message is gone (deleted) rather than a transient
@@ -3854,6 +3865,17 @@ bot.on('callback_query:data', async ctx => {
     else if (data === 'pin:model') await doModelPicker(ctx)
     else if (data === 'pin:mode') await doModePicker(ctx)
     else await ctx.reply(settingsText(), { parse_mode: 'HTML', reply_markup: settingsKeyboard() })
+    return
+  }
+
+  // Pinned-message readouts → /context and /cost, posted at the bottom.
+  if (data === 'pin:context' || data === 'pin:cost') {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    await ctx.answerCallbackQuery().catch(() => {})
+    await doReadout(ctx, data === 'pin:context' ? 'context' : 'cost')
     return
   }
 
@@ -5046,7 +5068,7 @@ void (async () => {
               { command: 'stream', description: 'How replies arrive: all · final · hybrid' },
               { command: 'mcp', description: 'Toggle MCP mode for new sessions' },
               { command: 'settings', description: 'Channel settings — mirror, pin, auto-continue, MCP, voice' },
-              { command: 'status', description: 'Check your pairing status' },
+              { command: 'status', description: 'Re-post the status pin at the bottom' },
               { command: 'update', description: 'Update the Telegram bridge or Claude itself' },
             ],
             { scope: { type: 'all_private_chats' } },
