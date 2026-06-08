@@ -4333,7 +4333,7 @@ bot.on('callback_query:data', async ctx => {
       await waitForSettle(activePaneId!, 300, 5000)
     })
     lastRelayedPromptHash = ''  // allow next prompt to relay
-    await ctx.editMessageReplyMarkup().catch(() => {})  // drop the keyboard — signals the answer landed
+    await ctx.deleteMessage().catch(() => {})  // remove the prompt entirely once answered (toast confirms)
     await verifyPromptClosed()
     return
   }
@@ -4360,7 +4360,7 @@ bot.on('callback_query:data', async ctx => {
       await sendKeys(activePaneId!, ['Enter'])
       await waitForSettle(activePaneId!, 300, 5000)
     })
-    await ctx.editMessageReplyMarkup().catch(() => {})
+    await ctx.deleteMessage().catch(() => {})  // remove the answered question (next tab relays its own message)
     await handleTabbedAdvance(String(ctx.chat?.id))
     return
   }
@@ -4416,7 +4416,7 @@ bot.on('callback_query:data', async ctx => {
       await waitForSettle(activePaneId!, 300, 5000)
     })
     lastRelayedPromptHash = ''
-    await ctx.editMessageReplyMarkup().catch(() => {})
+    await ctx.deleteMessage().catch(() => {})  // remove the question; the reply below stands in for it
     await ctx.reply('💬 Chat about this — send your message below 👇').catch(() => {})
     return
   }
@@ -4477,7 +4477,7 @@ bot.on('callback_query:data', async ctx => {
     })
     pendingMultiSelect.delete(key)
     lastRelayedPromptHash = ''  // allow next prompt to relay
-    await ctx.editMessageReplyMarkup().catch(() => {})  // drop the keyboard once answered
+    await ctx.deleteMessage().catch(() => {})  // remove the prompt entirely once submitted (toast confirms)
     await verifyPromptClosed()
     return
   }
@@ -4511,10 +4511,7 @@ bot.on('callback_query:data', async ctx => {
   respondPermission(request_id, behavior as 'allow' | 'deny')
   const label = behavior === 'allow' ? '✅ Allowed' : '❌ Denied'
   await ctx.answerCallbackQuery({ text: label }).catch(() => {})
-  const msg = ctx.callbackQuery.message
-  if (msg && 'text' in msg && msg.text) {
-    await ctx.editMessageText(`${msg.text}\n\n${label}`).catch(() => {})
-  }
+  await ctx.deleteMessage().catch(() => {})  // remove the permission prompt entirely once answered (toast confirms)
 })
 
 type AttachmentMeta = { kind: string; file_id: string; size?: number; mime?: string; name?: string; transcribed?: boolean }
