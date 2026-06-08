@@ -157,10 +157,11 @@ use pairing instead if they didn't give an ID):
   "renderMarkdown": true, "autoContinue": <true|false> }
 ```
 
-**If `local`: provision the engine now (don't defer it to the first voice note).** Writing
-`TELEGRAM_TRANSCRIBE=local` into `.env` does **not** trigger the daemon's `provisionWhisper`
-(that only runs from the `/settings` voice toggle), so a `local` install left unprovisioned
-fails the first note with `faster-whisper not installed`. Set it up yourself, in order:
+**If `local`: provision the engine AND download the model now — so it's fully ready before the
+first note.** The daemon will self-heal on the first voice note if you skip this (it auto-installs
+the engine then), but that makes the user wait ~1–3 min mid-conversation, and the daemon can't
+`sudo apt-get install python3-venv` if it's missing. Doing it here makes the first note instant
+and gets the prereq sorted. Set it up yourself, in order:
 
 1. **Ensure `python3-venv` (ensurepip) is present** — `python3 -m venv` fails without it
    (`ensurepip is not available`), and PEP 668 system Python can't `pip install faster-whisper`
@@ -179,15 +180,23 @@ fails the first note with `faster-whisper not installed`. Set it up yourself, in
    ```
 3. **Record the interpreter in `.env`** so the daemon uses it (not bare `python3`):
    `TELEGRAM_WHISPER_PYTHON=<venv>/bin/python`.
-4. **Pre-pull the chosen model weights** so the first real note isn't stalled by a download
-   (`small` ≈ 250 MB, `medium` ≈ 1.5 GB, `large` ≈ 3 GB — into `~/.cache/huggingface`). Run the
-   bundled helper once on any short audio file, or just let the user know the first note carries a
-   one-time download delay:
+4. **Download the chosen model weights now** so the very first voice note transcribes instantly —
+   no one-time download stall when the user starts using the bot. Instantiating the model fetches
+   and caches its weights (`small` ≈ 250 MB, `medium` ≈ 1.5 GB, `large` ≈ 3 GB → `~/.cache/huggingface`).
+   This needs only faster-whisper (just installed) plus the model name, so it runs **here, before
+   the restart**, independent of the plugin cache:
    ```sh
-   "$VENV/bin/python" "$(ls -d ~/.claude/plugins/cache/better-claude-plugins/telegram/*/ | sort -V | tail -1)transcribe_local.py" <some.oga> <model>
+   "$VENV/bin/python" - "<model>" "<cpu|cuda>" <<'PY'
+   import sys
+   from faster_whisper import WhisperModel
+   WhisperModel(sys.argv[1], device=sys.argv[2], compute_type="int8")   # downloads + caches, then exits
+   print("✓ weights cached for", sys.argv[1])
+   PY
    ```
-   (The plugin cache exists only after Step 3's restart; if you provision before that, pre-pull
-   after the restart, or skip it and accept the one-time first-note delay.)
+   Pass the same `<model>` and device you wrote to `.env`. Big models on a slow link take a few
+   minutes — it's one-time and unattended, and it's the whole point: everything's ready before the
+   user's first note. (Verify with a real transcription after Step 3's restart using the bundled
+   helper if you want: `"$VENV/bin/python" "$(ls -d ~/.claude/plugins/cache/better-claude-plugins/telegram/*/ | sort -V | tail -1)transcribe_local.py" <some.oga> <model>`.)
 
 ## 2. Install the plugin + wire the hooks/convention
 - In `~/.claude/settings.json` add the marketplace, enable the plugin, and add the
