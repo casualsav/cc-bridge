@@ -1176,24 +1176,28 @@ function renderToolsMirror(acts: Activity[], done: boolean): string {
 }
 
 // Hybrid card: the current turn's narration + tool calls interleaved (transcript-driven, so no
-// pane scraping), the latest few items. Text shows as a 💭 thought line; tools keep their badge.
-const MIRROR_FEED = 9        // hybrid: max interleaved items shown
+// pane scraping), the latest few items. Tools are distinguished by their emoji badge; thoughts
+// render normally (markdown → Telegram HTML, no 💭 bubble), exactly like /stream thoughts.
+const MIRROR_FEED = 5        // hybrid: max interleaved items shown (matches tools & thoughts)
 const MIRROR_THOUGHTS = 5    // thoughts mode: max thoughts shown (oldest falls off as new flow in)
 function renderHybridMirror(feed: FeedItem[], done: boolean): string {
   const lines: string[] = []
   for (const it of feed.slice(-MIRROR_FEED)) {
     if (it.kind === 'text') {
-      const t = it.text.replace(/\s+/g, ' ').trim()
-      // Test (reversible): thoughts rendered plain, not italic — wrap in <i>…</i> to revert.
-      lines.push(`💭 ${escapeHtml(t.length > 160 ? t.slice(0, 159) + '…' : t)}`)
+      const html = mdToTelegramHtml(it.text.trim()).trim()
+      if (html) lines.push(html)                          // thought: rendered like /stream thoughts
     } else {
       const [emoji, label] = toolBadge(it.tool)
       const d = it.detail ? `: <code>${escapeHtml(it.detail)}</code>` : ''
-      lines.push(`${emoji} ${label}${d}`)
+      lines.push(`${emoji} ${label}${d}`)                 // tool: the emoji badge differentiates it
     }
   }
-  if (done) lines.push(`✅ <b>Done</b>`)
-  return lines.join('\n\n').slice(0, 3500)   // blank line between items for readability
+  if (done) lines.push('✅ <b>Done</b>')
+  // Keep the HTML valid under the card cap: drop oldest lines first, then hard-cap safely.
+  let body = lines.join('\n\n')
+  while (body.length > 3500 && lines.length > 1) { lines.shift(); body = lines.join('\n\n') }
+  if (body.length > 3500) body = chunkHtml(body, 3500)[0] ?? body.slice(0, 3500)
+  return body
 }
 
 // Thoughts-only card: just Claude's narration, rendered (not raw markdown) with a blank line
@@ -2245,6 +2249,22 @@ async function downloadTelegramFile(file_id: string): Promise<string> {
   return path
 }
 
+// Inbox retention. Attachments the user sends (photos, documents) are downloaded into INBOX_DIR so
+// the agent can Read them — they're meant to be transient. Voice/audio temp files are unlinked right
+// after transcription; this sweep is the backstop for everything else, deleting anything older than
+// the TTL so the dir never grows unbounded and old media doesn't linger on disk. TTL is 24h by
+// default; override with TELEGRAM_INBOX_TTL_HOURS in .env.
+const INBOX_TTL_MS = Math.max(1, parseFloat(tConfig('TELEGRAM_INBOX_TTL_HOURS') || '24')) * 3_600_000
+function sweepInbox(): void {
+  let names: string[]
+  try { names = readdirSync(INBOX_DIR) } catch { return }   // no inbox dir yet → nothing to do
+  const cutoff = Date.now() - INBOX_TTL_MS
+  for (const name of names) {
+    const p = join(INBOX_DIR, name)
+    try { if (statSync(p).mtimeMs < cutoff) unlinkSync(p) } catch {}
+  }
+}
+
 // Voice transcription runs entirely outside Claude — a local faster-whisper
 // model or a hosted Whisper API — so it never consumes Claude usage; only the
 // resulting text reaches the session. Backend is chosen at install time via
@@ -2350,24 +2370,28 @@ async function audioInboundText(
   let path: string
   try { path = await downloadTelegramFile(file_id) }
   catch (err) { process.stderr.write(`daemon: audio download failed: ${err}\n`); return { text: fallback, transcribed: false } }
-  // First local voice note before the engine is installed → provision on demand, then transcribe
-  // this same note (no resend). The /settings voice toggle normally kicks this off, but a `local`
-  // value written straight into .env (e.g. by the installer) never did — so this is the backstop
-  // that makes "the first voice note just works" true regardless of how `local` got set.
-  if (provider === 'local' && !whisperReady()) {
-    const chat_id = String(ctx.chat!.id)
-    if (!whisperInstalling) {
-      void bot.api.sendMessage(chat_id,
-        '🎙️ First voice note — installing the local Whisper engine (one-time, ~1–3 min). ' +
-        'This note will transcribe as soon as it’s ready.').catch(() => {})
+  try {
+    // First local voice note before the engine is installed → provision on demand, then transcribe
+    // this same note (no resend). The /settings voice toggle normally kicks this off, but a `local`
+    // value written straight into .env (e.g. by the installer) never did — so this is the backstop
+    // that makes "the first voice note just works" true regardless of how `local` got set.
+    if (provider === 'local' && !whisperReady()) {
+      const chat_id = String(ctx.chat!.id)
+      if (!whisperInstalling) {
+        void bot.api.sendMessage(chat_id,
+          '🎙️ First voice note — installing the local Whisper engine (one-time, ~1–3 min). ' +
+          'This note will transcribe as soon as it’s ready.').catch(() => {})
+      }
+      await provisionWhisper(loadAccess().allowFrom)
+      if (!whisperReady()) return { text: fallback, transcribed: false }   // provisionWhisper already explained why
     }
-    await provisionWhisper(loadAccess().allowFrom)
-    if (!whisperReady()) return { text: fallback, transcribed: false }   // provisionWhisper already explained why
+    const transcript = await transcribe(path)
+    if (!transcript) return { text: fallback, transcribed: false }
+    const caption = ctx.message?.caption
+    return { text: caption ? `${transcript}\n\n[caption] ${caption}` : transcript, transcribed: true }
+  } finally {
+    try { unlinkSync(path) } catch {}   // voice notes are transient — never retained after transcription
   }
-  const transcript = await transcribe(path)
-  if (!transcript) return { text: fallback, transcribed: false }
-  const caption = ctx.message?.caption
-  return { text: caption ? `${transcript}\n\n[caption] ${caption}` : transcript, transcribed: true }
 }
 
 // ---- Tool call handling ----
@@ -4916,8 +4940,11 @@ async function handleInbound(
 
   // Off-MCP: there's no download_attachment tool, so fetch any non-image attachment to a
   // local path up front and inject that path (like image_path) — the agent just Reads it.
+  // Voice/audio is delivered as its transcript (or a placeholder) — the raw .oga is useless to the
+  // agent, so we don't re-download it here or inject an att= path for it. Other attachments (photos
+  // arrive as image_path; documents) are fetched up front so the agent can Read them.
   let attachmentPath: string | undefined
-  if (TRANSCRIPT_OUTBOUND && attach?.file_id && !imagePath) {
+  if (TRANSCRIPT_OUTBOUND && attach?.file_id && !imagePath && attach.kind !== 'voice' && attach.kind !== 'audio') {
     try { attachmentPath = await downloadTelegramFile(attach.file_id) }
     catch (e) { process.stderr.write(`daemon: off-mcp attachment download failed: ${e}\n`) }
   }
@@ -5376,6 +5403,11 @@ if (FORCE_PANE) {
 // session — once per 10s. No-op edits are skipped and no pin is created when nothing's active, so
 // this is cheap when idle and works the same whether or not the plugin's MCP server is loaded.
 setInterval(() => void updateSessionPin(), 10_000)
+
+// Sweep stale inbox attachments at startup and hourly — voice/audio temp files are already unlinked
+// right after transcription; this clears photos/documents past the retention TTL (default 24h).
+sweepInbox()
+setInterval(sweepInbox, 3_600_000).unref()
 
 // Make the `tg` CLI + ensure-daemon launcher available to plugin-less sessions, no setup.
 provisionOffMcpTooling()
