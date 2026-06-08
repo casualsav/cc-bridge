@@ -341,42 +341,58 @@ let botUsername = ''
 // This is self-correcting by construction: the ping timer always runs, gated only on the
 // window, so it can never get stuck on (work ends → window lapses → ~GRACE+5s tail) or
 // stuck off (work seen → window reopens → typing resumes). No optimistic/dead-timer edge cases.
+// Telegram's "typing…" expires ~5s after each send_chat_action, so it must be refreshed on a
+// tight cadence. Modeled on Hermes' approach (which is rock-solid): an independent timer, NOT
+// inferred per-tick from a flaky "is it working" signal, but driven by an explicit lifecycle —
+// armed when we inject a message, stopped the instant the reply is relayed. `observe()` (from the
+// transcript's turnInProgress) is only a keep-alive/robustness layer on top, not the primary gate.
 class TypingPresence {
   private chats = new Set<string>()             // chats that have messaged — where typing shows
-  private workingUntil = 0                      // keep pinging until this time
+  private workingUntil = 0                      // rolling keep-alive while work is observed
+  private pendingUntil = 0                      // startup latch: armed on inbound until first observed work
   private timer: ReturnType<typeof setInterval> | null = null
-  private static readonly PING_MS = 2_000          // Telegram typing expires ~5s; 2s = solid margin (was 4s)
-  private static readonly GRACE_MS = 2_500         // bridges the start gap only (work refreshes every 1.5s poll); keeps the post-reply tail short
-  private static readonly SEND_TIMEOUT_MS = 1_500  // abandon a slow send so it can't pile up across ticks
+  private static readonly PING_MS = 2_000          // « Telegram's ~5s expiry — 2.5x safety margin (Hermes uses 2s)
+  private static readonly WORK_GRACE_MS = 8_000    // keep-alive after the last observed work tick (poll is 1.5s)
+  private static readonly START_GRACE_MS = 60_000  // startup latch cap: hold typing through Claude's pre-first-token
+                                                   // "thinking" (turnInProgress can't see it yet); bounded so a
+                                                   // no-reply message can't pin the indicator on
+  private static readonly SEND_TIMEOUT_MS = 1_500  // abandon a slow send so it can't pile up / stall the cadence
+
+  private active(): boolean { const n = Date.now(); return n < this.workingUntil || n < this.pendingUntil }
 
   private pingAll(): void {
     for (const chat of this.chats)
       void bot.api.sendChatAction(chat, 'typing', {}, AbortSignal.timeout(TypingPresence.SEND_TIMEOUT_MS)).catch(() => {})
   }
   private ensureTimer(): void {
-    if (!this.timer) this.timer = setInterval(() => { if (Date.now() < this.workingUntil) this.pingAll() }, TypingPresence.PING_MS)
+    if (!this.timer) this.timer = setInterval(() => { if (this.active()) this.pingAll() }, TypingPresence.PING_MS)
   }
 
-  // An inbound message was relayed — show presence immediately (work almost always follows),
-  // and remember this chat so the indicator lands where the conversation is.
+  // An inbound message was injected — show presence now and latch it through Claude's startup
+  // "thinking" phase (before the first transcript entry, when observe() is still blind).
   arm(chat_id: string): void {
     this.chats.add(chat_id)
-    this.workingUntil = Date.now() + TypingPresence.GRACE_MS
+    this.pendingUntil = Date.now() + TypingPresence.START_GRACE_MS
     this.pingAll()
     this.ensureTimer()
   }
 
-  // Live working state from each pane poll. Working extends the keep-alive window; not-working
-  // does nothing — the window simply lapses, which is what stops the indicator when done.
+  // turnInProgress from each relay tick. Working extends the rolling keep-alive AND ends the
+  // startup latch (Claude has begun). It also re-arms typing if a fresh turn starts right after a
+  // stop() (e.g. two messages answered back-to-back). Not-working does nothing.
   observe(working: boolean): void {
-    if (working) { this.workingUntil = Date.now() + TypingPresence.GRACE_MS; this.ensureTimer() }
+    if (working) { this.workingUntil = Date.now() + TypingPresence.WORK_GRACE_MS; this.pendingUntil = 0; this.ensureTimer() }
   }
 
-  // Re-assert typing right after the daemon sends a message — Telegram silently clears the
-  // indicator on every bot send, so without this it blinks off until the next 2s tick. No-op
-  // unless we're inside a working window (so it never re-triggers after the final reply).
+  // The reply has been relayed (or the turn was interrupted): stop typing immediately — Telegram
+  // clears it on the reply's own send, and we don't refresh again, so it vanishes the moment the
+  // answer lands. This is the Hermes "clean stop in finally" — no lingering tail.
+  stop(): void { this.workingUntil = 0; this.pendingUntil = 0 }
+
+  // Re-assert typing right after the daemon sends a non-final message (e.g. the live mirror) —
+  // Telegram clears it on every send, so without this it blinks off until the next tick.
   retrigger(): void {
-    if (this.chats.size && Date.now() < this.workingUntil) this.pingAll()
+    if (this.chats.size && this.active()) this.pingAll()
   }
 }
 
@@ -1255,10 +1271,13 @@ async function relayLoopTick(gen: number): Promise<void> {
       if (!b.uuid || b.uuid === lastRelayedUuid) continue
       lastRelayedUuid = b.uuid                 // advance before the await so a fast tick can't double-send
       lastRelayedByFile.set(file, b.uuid)
-      if (b.conclusion && !isBanner(b.text)) {
-        const chats = loadAccess().allowFrom
-        process.stderr.write(`daemon: relaying ${b.text.length} chars (uuid ${b.uuid.slice(0, 8)}, ${b.conclusion ? 'conclusion' : 'narration'}) to ${chats.join(',')}\n`)
-        await sendAgentText(chats, b.text).catch(e => process.stderr.write(`daemon: relay send failed: ${e}\n`))
+      if (b.conclusion) {
+        if (!isBanner(b.text)) {
+          const chats = loadAccess().allowFrom
+          process.stderr.write(`daemon: relaying ${b.text.length} chars (uuid ${b.uuid.slice(0, 8)}, conclusion) to ${chats.join(',')}\n`)
+          await sendAgentText(chats, b.text).catch(e => process.stderr.write(`daemon: relay send failed: ${e}\n`))
+        }
+        typingPresence.stop()   // reply delivered (or banner suppressed) → clean stop, no tail
       }
     }
   }
@@ -2545,6 +2564,7 @@ async function performStop(): Promise<string> {
   const ok = paneWatcher && pane === activePaneId
     ? await paneWatcher.withInjection(() => sendKeys(pane, ['Escape']))
     : await sendKeys(pane, ['Escape'])
+  typingPresence.stop()   // interrupted turn never relays a conclusion — stop typing now
   return ok ? '🛑 Sent interrupt (Esc) to Claude Code.' : 'Could not reach the session pane.'
 }
 
