@@ -1156,6 +1156,7 @@ function renderToolsMirror(acts: Activity[], done: boolean): string {
 // Hybrid card: the current turn's narration + tool calls interleaved (transcript-driven, so no
 // pane scraping), the latest few items. Text shows as a 💭 thought line; tools keep their badge.
 const MIRROR_FEED = 9        // hybrid: max interleaved items shown
+const MIRROR_THOUGHTS = 5    // thoughts mode: max thoughts shown (oldest falls off as new flow in)
 function renderHybridMirror(feed: FeedItem[], done: boolean): string {
   const lines: string[] = []
   for (const it of feed.slice(-MIRROR_FEED)) {
@@ -1181,7 +1182,7 @@ function renderThoughtsMirror(feed: FeedItem[], done: boolean): string {
   const thoughts = feed
     .filter((it): it is Extract<FeedItem, { kind: 'text' }> => it.kind === 'text')
     .map(it => it.text.trim()).filter(Boolean)
-    .slice(-MIRROR_FEED)
+    .slice(-MIRROR_THOUGHTS)   // keep only the latest few; oldest fall off as new thoughts flow in
   const rendered = thoughts.map(t => mdToTelegramHtml(t).trim()).filter(Boolean)
   let body = rendered.join('\n\n')
   while (body.length > 3500 && rendered.length > 1) { rendered.shift(); body = rendered.join('\n\n') }

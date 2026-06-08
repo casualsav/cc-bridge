@@ -13,8 +13,38 @@ import { join } from 'node:path'
 import { SOCKET_PATH, STATE_DIR, WATCHDOG_PID_FILE, DAEMON_LOG_FILE } from './common.ts'
 
 const CHECK_MS = 20_000
+const REAP_MS = 5_000
 const LOG_MAX_BYTES = 10 * 1024 * 1024
 const LOG_KEEP_BYTES = 2 * 1024 * 1024
+
+// ---- Zombie reaper ("tini-lite") ----
+// PID 1 on this host is `sleep infinity`, which never wait()s — so any of our bun processes
+// (daemon/update/transcription) that gets orphaned re-parents to PID 1 and becomes a PERMANENT
+// zombie (this is what piled up 100+ defunct `bun` entries during debugging). Fix: make the
+// watchdog a child-subreaper so future orphaned descendants re-parent to US instead of PID 1,
+// then waitpid() them. This lives in the WATCHDOG, never the daemon: the daemon's constant exec()
+// calls resolve via libuv's own SIGCHLD/waitpid, and a waitpid(-1) there would steal those and
+// hang every tmux capture. The watchdog makes no exec() calls and never awaits its daemon child's
+// exit, so reaping is safe here. (Already-orphaned PID-1 zombies can't be adopted retroactively —
+// those need a reboot — but no new ones accumulate.)
+function setupReaper(): () => void {
+  try {
+    const { dlopen, FFIType, ptr } = require('bun:ffi') as typeof import('bun:ffi')
+    const libc = dlopen('libc.so.6', {
+      prctl: { args: [FFIType.i32, FFIType.u64, FFIType.u64, FFIType.u64, FFIType.u64], returns: FFIType.i32 },
+      waitpid: { args: [FFIType.i32, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
+    })
+    libc.symbols.prctl(36 /* PR_SET_CHILD_SUBREAPER */, 1, 0, 0, 0)
+    const status = new Int32Array(1)
+    return () => {
+      try { let n = 0; while (libc.symbols.waitpid(-1, ptr(status), 1 /* WNOHANG */) > 0 && ++n < 4096) { /* reap all ready */ } } catch {}
+    }
+  } catch (e) {
+    process.stderr.write(`watchdog: child-reaper unavailable (${e}) — orphans won't be auto-reaped\n`)
+    return () => {}
+  }
+}
+const reapZombies = setupReaper()
 
 // Bail if another watchdog with a live pid already owns the post.
 try {
@@ -81,5 +111,7 @@ process.on('SIGTERM', () => {
 })
 
 process.stderr.write(`watchdog: up (pid ${process.pid}), checking every ${CHECK_MS / 1000}s\n`)
+reapZombies()                                   // sweep any orphans already adopted at startup
+setInterval(reapZombies, REAP_MS).unref?.()     // and keep reaping re-parented orphans
 await tick()
 setInterval(() => void tick(), CHECK_MS)
