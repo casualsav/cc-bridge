@@ -163,7 +163,8 @@ bash scripts/setup-alias.sh mcp
 
 Then reload your shell (or `source` the rc) and launch with `claude-tg`. (For the off-MCP
 default instead, `bash scripts/setup-alias.sh` aliases `claude-tg` to
-`claude --dangerously-skip-permissions`.)
+`claude --tg --dangerously-skip-permissions` — where `--tg` is the daemon's bridge marker and the
+bypass flag is just bundled convenience.)
 
 > Note: `/plugin install` can't add the alias for you — plugins are copied to a
 > cache and don't run host-shell install scripts. The setup script above is the

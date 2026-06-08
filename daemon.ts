@@ -1416,9 +1416,9 @@ function startRelayLoop(): void {
 // When no pane is pinned (FORCE_PANE) and no shim session is driving, find a plugin-less
 // `claude` pane on its own and adopt it — no .env edit / restart to bind a work session.
 // Plugin (MCP) sessions register over the shim socket, so they live in `sessions` and are
-// excluded here; and we only adopt panes whose claude argv carries the bridge opt-in flag
-// (--dangerously-skip-permissions), so a plain unrelated claude is never grabbed. Explicit
-// FORCE_PANE still wins when set, but is no longer needed — discovery binds the pane on its own.
+// excluded here; and we only adopt panes whose claude argv carries the bridge opt-in marker
+// (--tg, or the legacy --dangerously-skip-permissions), so a plain unrelated claude is never
+// grabbed. Explicit FORCE_PANE still wins when set, but isn't needed — discovery binds on its own.
 let adoptedPaneId: string | null = null
 
 // Every plugin-less pane we currently know about (the focused one plus any unfocused
@@ -1448,14 +1448,17 @@ async function processArgv(pid: string): Promise<string> {
 }
 
 // True if the pane shell `panePid` has a `claude` child the user opted in for bridging. The
-// opt-in is the launch flag `--dangerously-skip-permissions` (the `claude-tg` autonomy alias),
-// which marks the pane as "bridge me" so a plain `claude` doing unrelated work is never grabbed.
-// (The legacy `--strict-mcp-config` signature is gone — off-MCP works without it now.)
+// opt-in is the `--tg` launch flag — a dedicated bridge marker, decoupled from autonomy mode
+// (Claude Code tolerates the unknown flag and ignores it, so `claude --tg` runs normally). The
+// legacy `--dangerously-skip-permissions` is still accepted so existing `claude-tg` aliases keep
+// binding, but it's no longer required — `claude --tg` (no bypass) is adopted just the same. A
+// plain `claude` carrying neither marker is never grabbed, so unrelated sessions are safe.
 async function isPluginlessClaude(panePid: string): Promise<boolean> {
   for (const pid of await processTree(panePid)) {
     const argv = await processArgv(pid)
     if (!argv || !/\bclaude\b/.test(argv)) continue
-    return argv.includes('--dangerously-skip-permissions')
+    const args = argv.split(/\s+/)
+    return args.includes('--tg') || args.includes('--dangerously-skip-permissions')
   }
   return false
 }
@@ -1597,7 +1600,7 @@ async function hintNoSession(params: InboundParams): Promise<void> {
   lastNoSessionHintTs = Date.now()
   await bot.api.sendMessage(chat,
     '🕳️ <b>No active session</b> — your message is buffered. Start one in tmux to receive it:\n' +
-    '<code>claude-tg</code>  (alias for <code>claude --dangerously-skip-permissions</code>)\n' +
+    '<code>claude-tg</code>  (alias for <code>claude --tg --dangerously-skip-permissions</code>)\n' +
     'The daemon auto-discovers the pane and replays anything buffered.',
     { parse_mode: 'HTML' }).catch(() => {})
 }
@@ -3160,7 +3163,7 @@ async function restartFocusedSession(chat: string): Promise<void> {
   await paneWatcher.withInjection(async () => {
     await sendKeys(pane, ['/exit', 'Enter'])
     for (let i = 0; i < 40 && (await paneCommand(pane)) === 'claude'; i++) await waitForSettle(pane, 200, 1500)
-    await sendKeys(pane, [`claude --dangerously-skip-permissions --resume ${id}`, 'Enter'])
+    await sendKeys(pane, [`claude --tg --dangerously-skip-permissions --resume ${id}`, 'Enter'])
     await waitForSettle(pane, 400, 30_000)
   })
   await dm('✅ Session restarted on the new Claude — your conversation was resumed.')
@@ -4143,7 +4146,7 @@ async function spawnSession(dir: string, extra = ''): Promise<boolean> {
         if (stdout.trim()) target = ['-t', `${stdout.trim()}:`]
       } catch {}
     }
-    const cmd = `claude --dangerously-skip-permissions${extra ? ` ${extra}` : ''}`   // bypass mode + adopt signature; extra e.g. "--resume <id>"
+    const cmd = `claude --tg --dangerously-skip-permissions${extra ? ` ${extra}` : ''}`   // --tg adopt marker + bypass autonomy; extra e.g. "--resume <id>"
     await exec('tmux', ['new-window', '-d', ...target, '-c', dir, cmd], { timeout: 5000 })
     return true
   } catch (e) { process.stderr.write(`daemon: spawn session in ${dir} failed: ${e}\n`); return false }

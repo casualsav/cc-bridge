@@ -279,7 +279,7 @@ function patchSettings(mode: Mode): void {
 
   if (mode === 'off-mcp') {
     const bashrc = join(homedir(), process.env.SHELL?.includes('zsh') ? '.zshrc' : '.bashrc')
-    const alias = "alias claude-tg='claude --dangerously-skip-permissions'"
+    const alias = "alias claude-tg='claude --tg --dangerously-skip-permissions'"
     const cur = existsSync(bashrc) ? readFileSync(bashrc, 'utf8') : ''
     if (!cur.includes('claude-tg')) { appendFileSync(bashrc, `\n${alias}\n`); console.log(C.ok(`  ✓ claude-tg alias → ${bashrc}`)) }
     else console.log(C.dim('  • claude-tg alias already present'))
@@ -348,9 +348,9 @@ async function verifyAndLaunch(cfg: Config): Promise<boolean> {
   if (!polling) { console.log(C.warn('  ⚠ daemon didn\'t reach "polling" in time — check ' + DAEMON_LOG_FILE)); stopCheckoutDaemon(); return false }
   console.log(C.ok(`  ✓ daemon polling${cfg.botUsername ? ` as @${cfg.botUsername}` : ''}`))
 
-  // Spawn the bridge work session (the daemon discovers it by the --dangerously-skip-permissions argv).
+  // Spawn the bridge work session (the daemon discovers it by the --tg marker in the claude argv).
   if (tmuxHasSession(BRIDGE_SESSION)) console.log(C.dim(`  • tmux session "${BRIDGE_SESSION}" already exists — reusing it`))
-  else if (run('tmux', ['new-session', '-d', '-s', BRIDGE_SESSION, 'claude --dangerously-skip-permissions']).ok)
+  else if (run('tmux', ['new-session', '-d', '-s', BRIDGE_SESSION, 'claude --tg --dangerously-skip-permissions']).ok)
     console.log(C.ok(`  ✓ bridge session "${BRIDGE_SESSION}" started`))
   else { console.log(C.warn('  ⚠ couldn\'t start the tmux bridge session — start one with claude-tg after the restart.')); stopCheckoutDaemon(); return false }
 

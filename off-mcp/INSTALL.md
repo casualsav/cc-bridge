@@ -69,7 +69,7 @@ the user and let them pick:
 | --- | --- | --- |
 | Per-request cost | **Zero** — no MCP server; replies are read from the transcript | ~700 tokens of tool schemas **+** an instruction block injected on **every** request |
 | Requires | **tmux** (the daemon drives the session's pane) | nothing — works without tmux |
-| Launch with | `claude-tg` (alias for `claude --dangerously-skip-permissions`) | plain `claude` |
+| Launch with | `claude-tg` (alias for `claude --tg --dangerously-skip-permissions`) | plain `claude` |
 | Functions | **Full** — reply, react, edit, files, permission prompts, every command | Full (identical) |
 
 Both modes expose the exact same features (reactions, file send/receive, permission buttons,
@@ -308,15 +308,17 @@ Off-MCP keeps the plugin's MCP server disabled, so a plain `claude` is already p
 `--strict-mcp-config` needed for that anymore.
 
 **Off-MCP (default):** run the work session in a tmux pane, launched so the daemon recognizes it as
-a bridge session. The signature the daemon scans for is the launch flag
-`--dangerously-skip-permissions`. **Auto-add
+a bridge session. The signature the daemon scans for is the launch flag **`--tg`** — a dedicated
+bridge marker (Claude Code tolerates the unknown flag and ignores it). **Auto-add
 a `claude-tg` shortcut for it yourself** — append to the user's `~/.bashrc` (or `~/.zshrc`):
 ```sh
-alias claude-tg='claude --dangerously-skip-permissions'
+alias claude-tg='claude --tg --dangerously-skip-permissions'
 ```
-Then **tell the user:** launch work sessions with `claude-tg`. It starts Claude in
-**bypass-permissions (autonomy) mode** — actions run without stopping to ask, which is what you want
-when driving from Telegram. You can still switch modes any time (Shift+Tab, or `/mode`); in a
+Then **tell the user:** launch work sessions with `claude-tg`. The `--tg` flag is the bridge marker;
+`--dangerously-skip-permissions` is bundled purely for convenience — it starts Claude in
+**bypass-permissions (autonomy) mode** so actions run without stopping to ask, which is what you want
+when driving from Telegram. It's optional: `claude --tg` (no bypass) is bridged just the same. You can
+switch modes any time (Shift+Tab, or `/mode`); in a
 non-bypass mode, permission prompts are relayed to Telegram with **Yes / allow-all / No** buttons to
 approve remotely.
 
@@ -329,9 +331,9 @@ From Telegram, message the session → you get its reply (read from the transcri
 loaded. Ask it to "send me a file with `tg`" to confirm outbound actions.
 
 **If inbound never reaches the session (pin shows "No active session"):** the daemon only
-auto-adopts a pane whose `claude` argv carries the bridge signature — **`--dangerously-skip-permissions`**
-(the `claude-tg` alias). A session started with a bare
-`claude` (no such flag) is **not** adopted — confirm in `daemon.log` you see `adopted off-MCP pane …`
+auto-adopts a pane whose `claude` argv carries the bridge marker — **`--tg`** (or the legacy
+**`--dangerously-skip-permissions`**), i.e. the `claude-tg` alias. A session started with a bare
+`claude` (no marker) is **not** adopted — confirm in `daemon.log` you see `adopted off-MCP pane …`
 or `focus pinned to …`. Fixes, in order of preference: (a) relaunch the work session with `claude-tg`;
 or (b) pin the existing pane explicitly — get its id with
 `tmux list-panes -a -F '#{pane_id} #{pane_current_command}'`, then set
