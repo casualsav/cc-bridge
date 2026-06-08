@@ -188,7 +188,7 @@ emit() {
 }
 
 # ---------------------------------------------------------------------------
-# LINE 1 — identity & mode:  user@host:cwd (branch) | repo | Model | ε:effort | ✻think
+# LINE 1 — identity & mode:  user@host:cwd (branch) | repo | Model | vim | agent
 # ---------------------------------------------------------------------------
 ident="${GREEN}$(whoami)@$(hostname -s)${R}:${BLUE}${cwd}${R}"
 [ -n "$branch" ] && ident="${ident} ${MAGENTA}(${branch})${R}"
@@ -196,16 +196,20 @@ ident="${GREEN}$(whoami)@$(hostname -s)${R}:${BLUE}${cwd}${R}"
 l1=("$ident")
 [ -n "$git_repo" ]     && l1+=("${DIM}${git_repo}${R}")
 l1+=("${YELLOW}${model_name}${R}")
-[ -n "$effort_level" ] && l1+=("${DIM}ε:${R}${CYAN}${effort_level}${R}")
-[ "$thinking" = "true" ] && l1+=("${MAGENTA}✻think${R}")
 [ -n "$vim_mode" ]     && l1+=("${YELLOW}⌨${vim_mode}${R}")
 [ -n "$agent_name" ]   && l1+=("${CYAN}⛭${agent_name}${R}")
 emit "${l1[@]}"
 
 # ---------------------------------------------------------------------------
-# LINE 2 — session usage:  ctx bar | ↑in ↓out | $cost | ⧗time | api | +/-lines | PR | session | version
+# LINE 2 — session state:  ε:effort | ✻think | ctx bar | ↑in ↓out | $cost | ⧗time | api | +/-lines | PR | session | version
 # ---------------------------------------------------------------------------
+# ε:effort and ✻think lead line 2 rather than trailing line 1: line 1's long cwd pushes them past
+# the pane width, where Claude Code truncates the line with … — so the telegram daemon, which
+# parses the captured pane to populate the pinned status card, never saw them. At the front of the
+# (shorter) line 2 they sit left of any truncation and stay visible to both the user and the daemon.
 l2=()
+[ -n "$effort_level" ] && l2+=("${DIM}ε:${R}${CYAN}${effort_level}${R}")
+[ "$thinking" = "true" ] && l2+=("${MAGENTA}✻think${R}")
 if [ -n "$used_pct" ] && [ "$ctx_size" -gt 0 ] 2>/dev/null; then
   used_int=$(printf '%.0f' "$used_pct")
   bar=$(progress_bar "$used_pct" 10)
