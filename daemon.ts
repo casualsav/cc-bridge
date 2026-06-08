@@ -1450,18 +1450,20 @@ async function processArgv(pid: string): Promise<string> {
   return ''
 }
 
-// True if the pane shell `panePid` has a `claude` child the user opted in for bridging. The
-// opt-in is the `--tg` launch flag — a dedicated bridge marker, decoupled from autonomy mode
-// (Claude Code tolerates the unknown flag and ignores it, so `claude --tg` runs normally). The
-// legacy `--dangerously-skip-permissions` is still accepted so existing `claude-tg` aliases keep
-// binding, but it's no longer required — `claude --tg` (no bypass) is adopted just the same. A
-// plain `claude` carrying neither marker is never grabbed, so unrelated sessions are safe.
+// True if the pane shell `panePid` has a `claude` child the user opted in for bridging. The opt-in
+// marker is `--allow-dangerously-skip-permissions` (bypass available, switchable from /mode) or the
+// full-bypass `--dangerously-skip-permissions` — both real Claude Code flags, so the launched
+// `claude` actually starts. (We also still match the historical `--tg` marker, but current Claude
+// Code REJECTS `--tg` as an unknown option and exits, so it's no longer a usable launch flag — see
+// spawnSession.) A plain `claude` carrying no marker is never grabbed, so unrelated sessions are safe.
 async function isPluginlessClaude(panePid: string): Promise<boolean> {
   for (const pid of await processTree(panePid)) {
     const argv = await processArgv(pid)
     if (!argv || !/\bclaude\b/.test(argv)) continue
     const args = argv.split(/\s+/)
-    return args.includes('--tg') || args.includes('--dangerously-skip-permissions')
+    return args.includes('--allow-dangerously-skip-permissions')
+      || args.includes('--dangerously-skip-permissions')
+      || args.includes('--tg')
   }
   return false
 }
@@ -3243,7 +3245,7 @@ async function restartFocusedSession(chat: string): Promise<void> {
   await paneWatcher.withInjection(async () => {
     await sendKeys(pane, ['/exit', 'Enter'])
     for (let i = 0; i < 40 && (await paneCommand(pane)) === 'claude'; i++) await waitForSettle(pane, 200, 1500)
-    await sendKeys(pane, [`claude --tg --allow-dangerously-skip-permissions --resume ${id}`, 'Enter'])
+    await sendKeys(pane, [`claude --allow-dangerously-skip-permissions --resume ${id}`, 'Enter'])
     await waitForSettle(pane, 400, 30_000)
   })
   await dm('✅ Session restarted on the new Claude — your conversation was resumed.')
@@ -4267,7 +4269,10 @@ async function spawnSession(dir: string, extra = ''): Promise<boolean> {
         if (stdout.trim()) target = ['-t', `${stdout.trim()}:`]
       } catch {}
     }
-    const cmd = `claude --tg --allow-dangerously-skip-permissions${extra ? ` ${extra}` : ''}`   // --tg adopt marker; safe start with bypass switchable from /mode; extra e.g. "--resume <id>"
+    // --allow-dangerously-skip-permissions is the adopt marker AND a real flag (claude starts with
+    // bypass switchable from /mode). NB: the old `--tg` marker is gone — current claude rejects it
+    // as an unknown option and exits, which is why spawned sessions were dying instantly. extra e.g. "--resume <id>".
+    const cmd = `claude --allow-dangerously-skip-permissions${extra ? ` ${extra}` : ''}`
     await exec('tmux', ['new-window', '-d', ...target, '-c', dir, cmd], { timeout: 5000 })
     return true
   } catch (e) { process.stderr.write(`daemon: spawn session in ${dir} failed: ${e}\n`); return false }
