@@ -125,10 +125,11 @@ live in the state dir, and the daemon reads them on first start.
    - **Tight RAM (<4 GB free)** → stay at `small` or below (`medium` peaks ~2 GB, `large` ~4 GB).
 
    Also pick **device** (`cpu`, or `cuda` only if a GPU was detected) and keep **compute `int8`**
-   (good CPU default). Whichever model they choose, you **provision it during install** — see
-   "If `local`: provision the engine now" right after the config writes below. (Don't rely on a
-   first-voice-note auto-install: the daemon's `provisionWhisper` only fires from the `/settings`
-   voice toggle, **not** from a `local` value written straight into `.env` like this flow does.)
+   (good CPU default). Whichever model they choose, **provision it during install** — see
+   "If `local`: provision the engine now" right after the config writes below. (The daemon also
+   self-heals on the first voice note as a backstop, but provisioning at install is better: it
+   makes the first note instant instead of carrying a ~1–3 min install, and the daemon can't
+   `sudo apt-get install python3-venv` if `ensurepip` is missing — you can.)
 4. **Auto-continue when a usage limit resets?** (default yes.)
 
 Markdown rendering is **always on** — Claude's replies are rendered as Telegram formatting; it

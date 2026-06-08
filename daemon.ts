@@ -2345,10 +2345,25 @@ function nudgeTranscribeOff(ctx: Context): void {
 async function audioInboundText(
   ctx: Context, file_id: string, fallback: string,
 ): Promise<{ text: string; transcribed: boolean }> {
-  if (transcribeProvider() === 'off') { nudgeTranscribeOff(ctx); return { text: fallback, transcribed: false } }
+  const provider = transcribeProvider()
+  if (provider === 'off') { nudgeTranscribeOff(ctx); return { text: fallback, transcribed: false } }
   let path: string
   try { path = await downloadTelegramFile(file_id) }
   catch (err) { process.stderr.write(`daemon: audio download failed: ${err}\n`); return { text: fallback, transcribed: false } }
+  // First local voice note before the engine is installed → provision on demand, then transcribe
+  // this same note (no resend). The /settings voice toggle normally kicks this off, but a `local`
+  // value written straight into .env (e.g. by the installer) never did — so this is the backstop
+  // that makes "the first voice note just works" true regardless of how `local` got set.
+  if (provider === 'local' && !whisperReady()) {
+    const chat_id = String(ctx.chat!.id)
+    if (!whisperInstalling) {
+      void bot.api.sendMessage(chat_id,
+        '🎙️ First voice note — installing the local Whisper engine (one-time, ~1–3 min). ' +
+        'This note will transcribe as soon as it’s ready.').catch(() => {})
+    }
+    await provisionWhisper(loadAccess().allowFrom)
+    if (!whisperReady()) return { text: fallback, transcribed: false }   // provisionWhisper already explained why
+  }
   const transcript = await transcribe(path)
   if (!transcript) return { text: fallback, transcribed: false }
   const caption = ctx.message?.caption
@@ -3343,7 +3358,10 @@ async function provisionWhisper(chats: string[]): Promise<void> {
     note(whisperReady() ? '✅ Whisper engine installed — local transcription is ready.' : '⚠️ Engine installed but not importable — try <code>/telegram:configure transcribe local</code>.')
   } catch (e) {
     process.stderr.write(`daemon: whisper provision failed: ${e}\n`)
-    note('⚠️ Couldn’t auto-install the Whisper engine. Set it up once in terminal: <code>/telegram:configure transcribe local</code>')
+    const needsVenv = /ensurepip|venv|No module named pip/i.test(String(e))
+    note(needsVenv
+      ? '⚠️ Couldn’t build the Whisper venv — this box is missing <code>python3-venv</code>. Install it once (<code>sudo apt-get install -y python3-venv</code>), then retry with <code>/telegram:configure transcribe local</code>. Or switch to hosted: <code>/telegram:configure transcribe groq</code>.'
+      : '⚠️ Couldn’t auto-install the Whisper engine. Set it up once in terminal: <code>/telegram:configure transcribe local</code>')
   } finally { whisperInstalling = false }
 }
 
