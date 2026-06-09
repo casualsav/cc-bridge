@@ -22,7 +22,7 @@ import {
 // replace a daemon left running stale code after a plugin upgrade.
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
-import { detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, isSubmitScreen, stripAnsi, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
+import { detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isSubmitScreen, stripAnsi, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
 import { resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnActivity, currentTurnFeed, listRecentSessions, findSessionCwd, type Activity, type FeedItem } from './transcript.ts'
 import { exec, sleep, hashText } from './proc.ts'
 import {
@@ -351,6 +351,21 @@ async function dismissUsageLimitChoice(paneId: string): Promise<void> {
   process.stderr.write('daemon: auto-dismissing usage-limit choice (option 1: stop and wait)\n')
   if (focus.paneWatcher) await focus.paneWatcher.withInjection(async () => { await sendKeys(paneId, ['Enter']); await waitForSettle(paneId, 200, 3000) })
   else await sendKeys(paneId, ['Enter'])
+}
+
+// Auto-confirm the /plugin "Will install:" scope menu on "Install for you (user scope)" (the
+// highlighted default → Enter selects it). isPluginInstallUserScope already gated on the cursor
+// sitting on the user-scope row, so Enter installs to user scope. Deduped via a short window so the
+// menu repainting each poll doesn't fire Enter twice. Driven through the watcher so the relay loop
+// doesn't misread the keystroke as activity.
+let pluginInstallConfirmedAt = 0
+async function confirmPluginInstall(paneId: string): Promise<void> {
+  if (Date.now() - pluginInstallConfirmedAt < 4000) return   // same menu, just repainting
+  pluginInstallConfirmedAt = Date.now()
+  process.stderr.write('daemon: auto-confirming plugin install (user scope)\n')
+  if (focus.paneWatcher) await focus.paneWatcher.withInjection(async () => { await sendKeys(paneId, ['Enter']); await waitForSettle(paneId, 200, 3000) })
+  else await sendKeys(paneId, ['Enter'])
+  notifyChats('🧩 Installed the plugin for you (user scope).')
 }
 
 // Pull the active model name out of a /model picker capture (see parseCurrentModel
@@ -1387,6 +1402,11 @@ function onPaneEvent(text: string): void {
   // (the ⛔ limit note already went out on its own). Deduped via a short window so a repaint of the
   // same menu doesn't fire Enter twice.
   if (focus.activePaneId && isUsageLimitChoice(text)) { void dismissUsageLimitChoice(focus.activePaneId); return }
+
+  // /plugin "Will install:" scope menu — auto-confirm "Install for you (user scope)" (the highlighted
+  // default) with Enter, so adding a plugin from chat or the terminal doesn't wedge on a confirmation
+  // the user already decided. Deduped so a repaint of the same menu doesn't fire Enter twice.
+  if (focus.activePaneId && isPluginInstallUserScope(text)) { void confirmPluginInstall(focus.activePaneId); return }
 
   // /login method menu — relay the actual options as buttons. Its footer is just "Esc to cancel"
   // (no select/permission wording), so the generic detectors below miss it, and it fires for BOTH
@@ -3552,6 +3572,38 @@ bot.command('resume', async ctx => {
     { parse_mode: 'HTML', reply_markup: kb })
 })
 
+// /restart — exit the focused Claude session and relaunch it resuming the same conversation
+// (claude -c), reusing the same pane. Useful to pick up a CLAUDE.md / plugin / config change that
+// only takes effect on a fresh process, without losing the conversation. The pane (and its
+// @tg_bridge tag) is reused, so the daemon re-adopts it automatically once the new REPL comes up.
+bot.command('restart', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  const paneId = await resolveActivePane()
+  if (!paneId) { await ctx.reply('No active session to restart.'); return }
+  const watcher = focus.paneWatcher
+  if (!watcher) { await ctx.reply('No tmux session to restart — send a message from Claude Code first.'); return }
+  if (!onNormalPrompt(await capturePane(paneId))) {
+    await ctx.reply('⚠️ The terminal is on another screen (menu/prompt) — finish or /stop that first, then /restart.')
+    return
+  }
+  await ctx.reply('♻️ Restarting the session — <code>/exit</code> then resume…', { parse_mode: 'HTML' })
+  // Preserve bypass-on-demand: relaunch with the same flag the claude-tg alias uses. `-c` continues
+  // the most recent conversation in the cwd — i.e. the one we just exited.
+  const relaunch = 'claude --allow-dangerously-skip-permissions -c'
+  await watcher.withInjection(async () => {
+    await sendKeys(paneId, ['/exit', 'Enter'])
+    await waitForSettle(paneId, 800, 12_000)   // Claude tears down → shell prompt returns
+    await sendKeysLiteral(paneId, relaunch)
+    await sendKeys(paneId, ['Enter'])
+    await waitForSettle(paneId, 800, 20_000)   // new process boots back to the REPL
+  })
+  // Re-baseline relay state so the resumed REPL's first prompt/reply relays cleanly.
+  lastRelayedPromptHash = ''
+  lastRelayedPermissionHash = ''
+  promptRelayOutstanding = false
+  notifyChats('✅ Session restarted and resumed.')
+})
+
 // /rename <name> — silent alias to rename the current (focused) session.
 bot.command('rename', async ctx => {
   if (!dmCommandGate(ctx)) return
@@ -4997,6 +5049,7 @@ void (async () => {
               { command: 'schedule', description: 'Schedule a message into a session (/schedule 12h · /schedule cancel)' },
               { command: 'resume', description: 'Resume a recent session (lists them with times)' },
               { command: 'new', description: 'Start a new session' },
+              { command: 'restart', description: 'Exit and resume the current session (picks up config changes)' },
               { command: 'reset', description: 'Clear the current conversation in place' },
               { command: 'stream', description: 'How replies arrive: thoughts · tools · hybrid · off' },
               { command: 'effort', description: 'Reasoning effort: low · medium · high · xhigh · max · auto' },

@@ -321,3 +321,30 @@ export function isUsageLimitChoice(paneText: string): boolean {
   if (belowNonBlank > 1) return false   // scrolled-up past menu, not the live one
   return lines.slice(0, footerIdx).some(l => USAGE_CHOICE_OPT.test(l))
 }
+
+// The /plugin "Will install:" scope menu:
+//     > Install for you (user scope)
+//       Install for all collaborators on this repository (project scope)
+//       Install for you, in this repo only (local scope)
+//       Back to plugin list
+//      Enter to select • Esc to go back
+// It carries the standard select footer ("Enter to select"), so detectUserPrompt would relay it as a
+// question — but installing a plugin you just chose is a confirmation, not a decision to offload to
+// chat, and the highlighted default is exactly the scope we want (user). The daemon auto-confirms it
+// with Enter. We only fire when the cursor (❯/>) is actually sitting on the user-scope row, so a user
+// who navigates to a different scope (or "Back") in the terminal is never overridden.
+const PLUGIN_USER_SCOPE = /install for you \(user scope\)/i
+export function isPluginInstallUserScope(paneText: string): boolean {
+  const lines = paneText.split('\n').map(l => stripAnsi(l))
+  let footerIdx = -1
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (/enter to select/i.test(lines[i])) { footerIdx = i; break }
+  }
+  if (footerIdx === -1) return false
+  let belowNonBlank = 0
+  for (let i = footerIdx + 1; i < lines.length; i++) if (lines[i].trim()) belowNonBlank++
+  if (belowNonBlank > 1) return false   // scrolled-up past the live menu
+  const region = lines.slice(0, footerIdx)
+  if (!region.some(l => PLUGIN_USER_SCOPE.test(l))) return false
+  return region.some(l => /^\s*[>❯●]\s*install for you \(user scope\)/i.test(l))
+}
