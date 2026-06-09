@@ -9,6 +9,15 @@ export function parseDuration(s: string): number | null {
   return matched && total > 0 ? total : null
 }
 
+// Split a leading duration off a string: the contiguous run of duration units at the start, and
+// the remaining text. "2h" → { ms, rest: '' }; "2h ping the server" → { ms, rest: 'ping the
+// server' }; "do X" → { ms: null, rest: 'do X' }. Powers the one-shot `/schedule <time> <msg>`.
+export function splitLeadingDuration(s: string): { ms: number | null; rest: string } {
+  const m = s.match(/^((?:\d+\s*[smhdw]\s*)+)(.*)$/is)
+  if (!m) return { ms: null, rest: s.trim() }
+  return { ms: parseDuration(m[1]), rest: m[2].trim() }
+}
+
 // "12h" / "1h 30m" / "3d 4h" — compact, largest units first; for confirmations.
 export function formatDuration(ms: number): string {
   const d = Math.floor(ms / 864e5), h = Math.floor(ms % 864e5 / 36e5), m = Math.floor(ms % 36e5 / 6e4)

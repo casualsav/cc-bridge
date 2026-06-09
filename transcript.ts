@@ -254,29 +254,6 @@ export function finalRepliesAfter(file: string, afterUuid: string): { uuid: stri
   return out
 }
 
-// Every main-thread assistant `text` entry after `afterUuid`, oldest first, each tagged with
-// whether it's a turn CONCLUSION (stop_reason !== 'tool_use') or mid-turn narration. This is
-// the single feed the relay loop walks: 'all' sends every entry; 'final'/'hybrid' send only the
-// conclusions and skip narration — all keyed off the transcript, no pane-idle guessing. If the
-// cursor is gone (compaction) it falls back to the latest entry so it never dumps history.
-export function textEntriesAfter(file: string, afterUuid: string): { uuid: string; text: string; conclusion: boolean }[] {
-  const entries = readEntries(file)
-  const at = afterUuid ? entries.findIndex(e => e.uuid === afterUuid) : -1
-  if (afterUuid && at < 0) {
-    for (let i = entries.length - 1; i >= 0; i--) {
-      const e = entries[i]
-      if (isMainAssistantText(e)) return [{ uuid: e.uuid ?? '', text: textOf(e.message?.content).trim(), conclusion: isConclusionEntry(e) }]
-    }
-    return []
-  }
-  const out: { uuid: string; text: string; conclusion: boolean }[] = []
-  for (let i = at + 1; i < entries.length; i++) {
-    const e = entries[i]
-    if (isMainAssistantText(e)) out.push({ uuid: e.uuid ?? '', text: textOf(e.message?.content).trim(), conclusion: isConclusionEntry(e) })
-  }
-  return out
-}
-
 // Whether the latest turn is still running, read straight from the transcript: there's been
 // main-thread assistant activity since the last real user message, but no conclusion entry has
 // landed yet (stop_reason is still 'tool_use'). Drives the live mirror card's open/close so a
@@ -302,11 +279,26 @@ export function turnInProgress(file: string): boolean {
 // The current turn's chronological feed of what Claude said and did — text narration and tool
 // calls interleaved in transcript order — for the hybrid mirror card. Subagent output skipped.
 export type FeedItem = { kind: 'text'; text: string } | { kind: 'tool'; tool: string; detail: string }
-export function currentTurnFeed(file: string): FeedItem[] {
+// `concluded` = the turn has ended (pass it at card finalize, false while the turn is live). The
+// turn's REPLY — its last main-thread assistant text block — is relayed as its own message, so when
+// the turn has concluded we drop it here, otherwise it "folds" into the live card. The stop_reason
+// gate already drops a normal end_turn reply; the explicit reply-block exclusion additionally
+// catches the case where the reply is followed by a trailing tool call (TodoWrite, `tg react`, a
+// file send…), which stamps the reply text with a 'tool_use' stop_reason and would otherwise leak.
+export function currentTurnFeed(file: string, concluded = false): FeedItem[] {
   const entries = readEntries(file)
   let start = -1
   for (let i = entries.length - 1; i >= 0; i--) {
     if (entries[i].type === 'user' && !entries[i].isSidechain && textOf(entries[i].message?.content).trim()) { start = i; break }
+  }
+  // Locate the reply block (last main-thread assistant text block of the turn) once concluded.
+  let replyEntry = -1, replyBlock = -1
+  if (concluded) {
+    for (let i = start + 1; i < entries.length; i++) {
+      const e = entries[i]
+      if (e.isSidechain || e.type !== 'assistant' || !Array.isArray(e.message?.content)) continue
+      ;(e.message!.content as any[]).forEach((b, bi) => { if (b?.type === 'text' && typeof b.text === 'string' && b.text.trim()) { replyEntry = i; replyBlock = bi } })
+    }
   }
   const out: FeedItem[] = []
   for (let i = start + 1; i < entries.length; i++) {
@@ -317,10 +309,14 @@ export function currentTurnFeed(file: string): FeedItem[] {
     // Mid-turn narration only (stop_reason 'tool_use'); the conclusion text is relayed as its own
     // message, so showing it in the card too would just echo the final reply.
     const narration = e.message?.stop_reason === 'tool_use'
-    for (const b of content as any[]) {
-      if (narration && b?.type === 'text' && typeof b.text === 'string' && b.text.trim()) out.push({ kind: 'text', text: b.text.trim() })
-      else if (b?.type === 'tool_use' && typeof b.name === 'string' && !isReactionToolUse(b)) out.push({ kind: 'tool', tool: b.name, detail: toolDetail(b.input) })
-    }
+    ;(content as any[]).forEach((b, bi) => {
+      if (b?.type === 'text' && typeof b.text === 'string' && b.text.trim()) {
+        if (concluded && i === replyEntry && bi === replyBlock) return   // the reply → its own message, never the card
+        if (narration) out.push({ kind: 'text', text: b.text.trim() })
+      } else if (b?.type === 'tool_use' && typeof b.name === 'string' && !isReactionToolUse(b)) {
+        out.push({ kind: 'tool', tool: b.name, detail: toolDetail(b.input) })
+      }
+    })
   }
   return out
 }

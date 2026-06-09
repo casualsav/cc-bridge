@@ -22,8 +22,8 @@ import {
 // replace a daemon left running stale code after a plugin upgrade.
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
-import { detectUserPrompt, detectPermissionPrompt, isSubmitScreen, stripAnsi, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
-import { resolveTranscript, latestFinalReply, finalRepliesAfter, textEntriesAfter, turnInProgress, currentTurnActivity, currentTurnFeed, listRecentSessions, findSessionCwd, type Activity, type FeedItem } from './transcript.ts'
+import { detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isSubmitScreen, stripAnsi, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
+import { resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnActivity, currentTurnFeed, listRecentSessions, findSessionCwd, type Activity, type FeedItem } from './transcript.ts'
 import { exec, sleep, hashText } from './proc.ts'
 import {
   capturePane, paneAlive, sendKeys, sendKeysLiteral, navigateDown, waitForSettle,
@@ -38,7 +38,7 @@ import {
   _accessFileCache, onboardedPanes, onboardingState, sessions, permissionOrigin,
   pendingMultiSelect, freeTextPrompts, freeTextReplyTargets, chatPrompts, authUrlMessageIds,
   lastRelayedByFile, unreadNotified, unreadNotifMsgs, offMcpPanes,
-  usageWarnState, voiceNudged, scheduleReplyTargets,
+  usageWarnState, voiceNudged, scheduleReplyTargets, scheduleComposeTargets,
   sessionNames, renameReplyTargets, nameReplyTargets, sessionPins, pinTextCache,
   newSessionReplyTargets,
 } from './state.ts'
@@ -50,7 +50,7 @@ import {
 } from './access.ts'
 import { TypingPresence } from './typing.ts'
 import { transcribe, transcribeProvider, transcribeStatus } from './voice.ts'
-import { parseDuration, formatDuration, fmtWhen } from './time.ts'
+import { parseDuration, formatDuration, fmtWhen, splitLeadingDuration } from './time.ts'
 import {
   initScheduler, loadScheduledMsgs, cancelScheduled, addScheduled, scheduledCount,
   scheduledListText, scheduledCancelKeyboard, scheduleDashboard, MAX_TIMEOUT,
@@ -288,34 +288,49 @@ function onNormalPrompt(paneText: string): boolean {
 // Walk Claude Code's setup (theme · folder trust · login) from Telegram instead of punting to
 // the terminal. Only ever runs on a freshly adopted pane that has NEVER reached the REPL
 // (onboardedPanes), so a genuine AskUserQuestion is never mistaken for a setup screen.
-let loginChoiceSent = false
+// (Login is handled separately by detectLoginPrompt — it also fires for a later `/login`.)
 
 // Which onboarding screen the pane is showing, or null. Theme is only matched with a live select
 // footer so "theme" in ordinary output can't trigger it; trust/enter are distinctive enough alone.
-function classifyOnboarding(cap: string): 'login' | 'theme' | 'trust' | 'enter' | null {
+function classifyOnboarding(cap: string): 'theme' | 'trust' | 'enter' | null {
   const low = cap.toLowerCase()
   const isSelect = /enter to select|↑\/↓|to navigate/.test(low)
-  if (isSelect && /select login method|log in with|claude account|anthropic console|with your api key/.test(low)) return 'login'
   if (/do you trust|trust the files|trust this folder/.test(low)) return 'trust'
   if (isSelect && /(text style|dark mode|light mode|color theme|choose .*theme)/.test(low)) return 'theme'
   if (/press enter to continue|enter to continue/.test(low)) return 'enter'
   return null
 }
 
-// Offer the login method as buttons — the one step we don't auto-pick (subscription opens an
-// OAuth link we can relay; an API key must be typed in the terminal, never over Telegram).
-function relayLoginChoice(): void {
-  if (loginChoiceSent) return
-  loginChoiceSent = true
-  const kb = new InlineKeyboard().text('🔐 Subscription (claude.ai)', 'login:sub').row().text('🔑 API key (console)', 'login:api')
-  notifyChats('🔐 Claude needs to log in. How do you sign in?', { reply_markup: kb })
+// The login-method options last relayed as buttons, so a `login:N` tap maps its index back to the
+// option label (to tailor the follow-up message). Set whenever we relay the login choice.
+let lastLoginOptions: PromptOption[] = []
+let lastRelayedLoginHash = ''
+
+// A short, emoji-tagged button label from a login option ("Claude account with subscription •
+// Pro, Max…" → "🔐 Claude account with subscription"). The part before the "•" is the gist.
+function loginButtonLabel(label: string): string {
+  const short = (label.split('•')[0] || label).trim() || label
+  const emoji = /subscription|claude account|pro\b|max\b|team|enterprise/i.test(label) ? '🔐'
+    : /console|api/i.test(label) ? '🔑'
+    : /bedrock|vertex|foundry|3rd|third|platform/i.test(label) ? '☁️' : '▫️'
+  return `${emoji} ${short.length > 30 ? short.slice(0, 29) + '…' : short}`
 }
 
-async function driveOnboarding(paneId: string, stage: 'login' | 'theme' | 'trust' | 'enter'): Promise<void> {
+// Relay the detected login-method options as buttons (one per row), listing the full labels in the
+// body so the long descriptions aren't lost. Deduped by the caller via lastRelayedLoginHash.
+function relayLoginChoice(options: PromptOption[]): void {
+  lastLoginOptions = options
+  const kb = new InlineKeyboard()
+  options.forEach((o, i) => { kb.text(loginButtonLabel(o.label), `login:${i + 1}`).row() })
+  const body = ['🔐 <b>Claude needs to log in.</b> Pick how you sign in:', '',
+    ...options.map((o, i) => `<b>${i + 1}.</b> ${escapeHtml(o.label)}`)].join('\n')
+  notifyChats(body, { reply_markup: kb, parse_mode: 'HTML' })
+}
+
+async function driveOnboarding(paneId: string, stage: 'theme' | 'trust' | 'enter'): Promise<void> {
   if (onboardingState.tag === stage && Date.now() - onboardingState.at < 4000) return   // same screen, just repainting
   onboardingState.tag = stage
   onboardingState.at = Date.now()
-  if (stage === 'login') { relayLoginChoice(); return }
   // theme / trust / enter → accept the highlighted default. Drive through the watcher so the
   // relay loop doesn't misread the keystroke as activity.
   process.stderr.write(`daemon: onboarding auto-advance (${stage})\n`)
@@ -741,28 +756,34 @@ async function relayLoopTick(gen: number): Promise<void> {
   typingPresence.observe(working)   // reliable working signal — this bridged pane never shows the spinner
   await updateTerminalMirror(working).catch(() => {})
 
-  // Relay off the transcript, classified by stop_reason: every mode sends only conclusion blocks
-  // (stop_reason !== tool_use) and skips mid-turn narration — the live narration now lives in the
-  // card (thoughts/hybrid). No pane-idle gate — a block relays the moment it's written, so a
-  // turn's conclusion can't leak early and narration can't slip into the messages. The card is
-  // already capped by updateTerminalMirror above (which ran before this send), so the ✅ Done
-  // lands just before the conclusion message.
-  if (relayCursorPrimed && file) {
+  // A select/permission/login menu sitting on the pane is a question the user must answer. Any
+  // assistant text Claude wrote just before it is the CONTEXT for that question, so flush it now —
+  // the menu was relayed from the pane the moment it appeared, but the preamble text can land in
+  // the transcript a tick later, after the menu. Without this it would only arrive once the turn
+  // finally concludes (i.e. after the question is answered). Bounded to ticks where a menu is up.
+  if (relayCursorPrimed && file && cap && (detectUserPrompt(cap) || detectPermissionPrompt(cap) || detectLoginPrompt(cap))) {
+    await flushPendingText().catch(() => {})
+  }
+
+  // Relay the turn's reply once it concludes (turnInProgress flips false). The reply is the turn's
+  // last main-thread text block — finalRepliesAfter returns exactly that, regardless of any trailing
+  // tool call (TodoWrite / `tg react` / file send) that would otherwise stamp it 'tool_use' and hide
+  // it. Gated on !working so mid-turn narration never leaks into the messages (it lives in the card,
+  // which already dropped this same reply block at finalize — so stream and final stay separate).
+  if (relayCursorPrimed && file && !working) {
     // Suppress Claude's own usage-limit banner echo (the ⛔ handler sends a richer one), but
     // only a short banner-shaped block — a real reply that merely mentions a limit isn't eaten.
     const isBanner = (t: string) => t.length < 200 && /\b(hit your|used \d+% of your) [\w-]+ limit\b/i.test(t)
-    for (const b of textEntriesAfter(file, lastRelayedUuid)) {
-      if (!b.uuid || b.uuid === lastRelayedUuid) continue
-      lastRelayedUuid = b.uuid                 // advance before the await so a fast tick can't double-send
-      lastRelayedByFile.set(file, b.uuid)
-      if (b.conclusion) {
-        if (!isBanner(b.text)) {
-          const chats = loadAccess().allowFrom
-          process.stderr.write(`daemon: relaying ${b.text.length} chars (uuid ${b.uuid.slice(0, 8)}, conclusion) to ${chats.join(',')}\n`)
-          await sendAgentText(chats, b.text).catch(e => process.stderr.write(`daemon: relay send failed: ${e}\n`))
-        }
-        typingPresence.stop()   // reply delivered (or banner suppressed) → clean stop, no tail
+    for (const r of finalRepliesAfter(file, lastRelayedUuid)) {
+      if (!r.uuid || r.uuid === lastRelayedUuid) continue
+      lastRelayedUuid = r.uuid                 // advance before the await so a fast tick can't double-send
+      lastRelayedByFile.set(file, r.uuid)
+      if (!isBanner(r.text)) {
+        const chats = loadAccess().allowFrom
+        process.stderr.write(`daemon: relaying ${r.text.length} chars (uuid ${r.uuid.slice(0, 8)}, reply) to ${chats.join(',')}\n`)
+        await sendAgentText(chats, r.text).catch(e => process.stderr.write(`daemon: relay send failed: ${e}\n`))
       }
+      typingPresence.stop()   // reply delivered (or banner suppressed) → clean stop, no tail
     }
   }
   if (gen === relayLoopGen) setTimeout(() => void relayLoopTick(gen), RELAY_POLL_MS)
@@ -1224,8 +1245,7 @@ function actOnLimitHit(fireAt: number, type: string, banner?: string): void {
   saveUsageNotifState()
   const chats = loadAccess().allowFrom
   if (chats.length === 0) return
-  const resetStr = `${fmtWhen(fireAt)} (in ${formatDuration(Math.max(0, fireAt - Date.now()))})`
-  const note = `\n\n⏰ Resets ${resetStr}.\nI'll ping you when it resets${loadAccess().autoContinue !== false ? ' and auto-continue' : ''}.`
+  const note = `\n\n⏰ Resets in ${formatDuration(Math.max(0, fireAt - Date.now()))}.\nI'll ping you when it resets${loadAccess().autoContinue !== false ? ' and auto-continue' : ''}.`
   const head = banner ? escapeHtml(banner) : `Out of your ${escapeHtml(type)} limit.`
   for (const chat_id of chats) {
     void bot.api.sendMessage(chat_id, `⛔ <b>Claude hit the usage limit.</b>\n${head}${note}`, { parse_mode: 'HTML' }).catch(() => {})
@@ -1339,11 +1359,22 @@ function onPaneEvent(text: string): void {
     }
   }
 
-  // First-run onboarding: drive theme/trust/login from here. Once the pane reaches the REPL it's
-  // marked onboarded and never driven again (kept BELOW the auth-URL relay so a login link still
-  // surfaces). Skipped entirely for already-onboarded panes, so real questions pass through.
+  // /login method menu — relay the actual options as buttons. Its footer is just "Esc to cancel"
+  // (no select/permission wording), so the generic detectors below miss it, and it fires for BOTH
+  // first-run onboarding AND a later `/login` in an established session (the onboarding driver
+  // below only runs pre-REPL, so it can't cover re-auth). Deduped so a repaint doesn't re-ask.
+  const login = detectLoginPrompt(text)
+  if (login) {
+    const lh = hashText(login.options.map(o => o.label).join('|'))
+    if (lh !== lastRelayedLoginHash) { lastRelayedLoginHash = lh; relayLoginChoice(login.options) }
+    return
+  }
+
+  // First-run onboarding: drive theme/trust from here. Once the pane reaches the REPL it's marked
+  // onboarded and never driven again (kept BELOW the auth-URL + login relay so those still
+  // surface). Skipped entirely for already-onboarded panes, so real questions pass through.
   if (focus.activePaneId) {
-    if (onNormalPrompt(text)) { onboardedPanes.add(focus.activePaneId); loginChoiceSent = false }
+    if (onNormalPrompt(text)) { onboardedPanes.add(focus.activePaneId); lastRelayedLoginHash = '' }
     else if (adoptedPaneId === focus.activePaneId && !onboardedPanes.has(focus.activePaneId)) {
       const stage = classifyOnboarding(text)
       if (stage) { void driveOnboarding(focus.activePaneId, stage); return }
@@ -3027,15 +3058,22 @@ bot.command('schedule', async ctx => {
   if (!dmCommandGate(ctx)) return
   const arg = (ctx.match ?? '').toString().trim()
   if (!arg || /^(cancel|list|dash)/i.test(arg)) { await scheduleDashboard(ctx); return }
-  const ms = parseDuration(arg)
+  // One-shot: `/schedule <time> <message>` queues immediately; bare `/schedule <time>` falls
+  // through to the force-reply so the message can be composed in a follow-up.
+  const { ms, rest: oneShotText } = splitLeadingDuration(arg)
   if (!ms) {
-    await ctx.reply('Usage: <code>/schedule 12h</code> — then reply with the message to send.\nUnits: <code>s m h d w</code> (e.g. <code>1h30m</code>). Cancel with <code>/schedule cancel</code>.', { parse_mode: 'HTML' })
+    await ctx.reply('Usage: <code>/schedule 2h ping the server</code> — or <code>/schedule 12h</code> then reply with the message.\nUnits: <code>s m h d w</code> (e.g. <code>1h30m</code>). Cancel with <code>/schedule cancel</code>.', { parse_mode: 'HTML' })
     return
   }
   if (ms > MAX_TIMEOUT) { await ctx.reply('That\'s too far out — max ~24 days.'); return }
   const paneId = focus.activePaneId
   const label = paneId ? (sessionNames.get(paneId) || await paneLabel(paneId)) : 'this session'
   const fireAt = Date.now() + ms
+  if (oneShotText) {
+    addScheduled({ id: randomBytes(4).toString('hex'), fireAt, chatId: String(ctx.chat?.id), paneId, sessionLabel: label, text: oneShotText })
+    await ctx.reply(`✅ Scheduled in <b>${formatDuration(ms)}</b> → <b>${escapeHtml(label)}</b>:\n\n${escapeHtml(oneShotText)}\n\nCancel with <code>/schedule cancel</code>.`, { parse_mode: 'HTML' })
+    return
+  }
   const sent = await ctx.reply(
     `📅 Scheduling in <b>${formatDuration(ms)}</b> (${fmtWhen(fireAt)}) → <b>${escapeHtml(label)}</b>.\n\nReply to this message with what to send.`,
     { parse_mode: 'HTML', reply_markup: { force_reply: true, input_field_placeholder: 'Message to schedule' } },
@@ -3904,8 +3942,26 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
-  // Login-method choice during first-run onboarding (see driveOnboarding / relayLoginChoice).
-  if (data === 'login:sub' || data === 'login:api') {
+  // "➕ Add" on the /schedule dashboard → force-reply asking for "time message" in one line,
+  // parsed (split + queued) when the reply lands. Captures the current session as the target.
+  if (data === 'sched:add') {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    await ctx.answerCallbackQuery().catch(() => {})
+    const paneId = focus.activePaneId
+    const label = paneId ? (sessionNames.get(paneId) || await paneLabel(paneId)) : 'this session'
+    const sent = await ctx.reply(
+      `📅 Reply with <b>time message</b> → <b>${escapeHtml(label)}</b>.\n\nLike <code>2h ping the server</code> or <code>1h30m run the tests</code>.`,
+      { parse_mode: 'HTML', reply_markup: { force_reply: true, input_field_placeholder: 'e.g. 2h ping the server' } })
+    if (sent) scheduleComposeTargets.set(`${ctx.chat?.id}:${sent.message_id}`, { paneId, sessionLabel: label })
+    return
+  }
+
+  // Login-method choice (detectLoginPrompt / relayLoginChoice) — `login:N` drives the Nth option.
+  const loginMatch = /^login:(\d+)$/.exec(data)
+  if (loginMatch) {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
       return
@@ -3913,16 +3969,19 @@ bot.on('callback_query:data', async ctx => {
     await ctx.answerCallbackQuery().catch(() => {})
     const paneId = focus.activePaneId
     if (!paneId || !focus.paneWatcher) { await ctx.reply('No active session to drive.'); return }
-    if (data === 'login:sub') {
-      // Subscription is the default (top) option → Enter selects it; the OAuth link then appears
-      // and relays on its own, and you reply to that link message with the code.
-      await focus.paneWatcher.withInjection(async () => { await sendKeys(paneId, ['Enter']); await waitForSettle(paneId, 300, 5000) })
+    const idx = Number(loginMatch[1]) - 1
+    const optLabel = (lastLoginOptions[idx]?.label || '').toLowerCase()
+    // The menu highlights the top option, so reaching option N is N-1 Down presses, then Enter.
+    await focus.paneWatcher.withInjection(async () => { await navigateDown(paneId, idx); await sendKeys(paneId, ['Enter']); await waitForSettle(paneId, 300, 5000) })
+    if (/subscription|claude account|pro\b|max\b|team|enterprise/.test(optLabel)) {
+      // Subscription → an OAuth link appears and relays on its own; reply to it with the code.
       await ctx.reply('🔗 Opening the claude.ai sign-in link — I\'ll send it here. Tap it, approve, then reply to that link message with the code shown.')
+    } else if (/console|api/.test(optLabel)) {
+      // API key must be typed in the terminal; we never accept it over Telegram.
+      await ctx.reply('🔑 Selected the API-key option. For security I won\'t handle API keys over Telegram — paste your key directly in the terminal window.')
     } else {
-      // API key: select the second option so the key field is ready — but the key itself must be
-      // typed in the terminal; we never accept it over Telegram.
-      await focus.paneWatcher.withInjection(async () => { await navigateDown(paneId, 1); await sendKeys(paneId, ['Enter']); await waitForSettle(paneId, 300, 5000) })
-      await ctx.reply('🔑 For security I won\'t handle API keys over Telegram. I\'ve selected the API-key option — paste your key directly in the terminal window.')
+      // 3rd-party platform (Bedrock/Vertex/Foundry) → provider config is typed in the terminal.
+      await ctx.reply('☁️ Selected that option. Finish the provider/credential setup in the terminal window — I can\'t type those over Telegram.')
     }
     return
   }
@@ -4449,6 +4508,22 @@ bot.on('message:text', async ctx => {
       const msg: ScheduledMessage = { id: randomBytes(4).toString('hex'), fireAt: sched.fireAt, chatId: String(ctx.chat?.id), paneId: sched.paneId, sessionLabel: sched.sessionLabel, text }
       addScheduled(msg)
       await ctx.reply(`✅ Scheduled for ${fmtWhen(msg.fireAt)} → <b>${escapeHtml(msg.sessionLabel)}</b>.\nCancel with <code>/schedule cancel</code>.`, { parse_mode: 'HTML' })
+      return
+    }
+    // Reply to a "➕ Add" force-reply → parse "time message" out of the one line, then queue.
+    const compose = scheduleComposeTargets.get(replyKey)
+    if (compose) {
+      scheduleComposeTargets.delete(replyKey)
+      if (!dmCommandGate(ctx)) return
+      const { ms, rest } = splitLeadingDuration(text.trim())
+      if (!ms || !rest) {
+        await ctx.reply('Couldn\'t read that — send it as <b>time message</b>, e.g. <code>2h ping the server</code>. Try <code>/schedule</code> again.', { parse_mode: 'HTML' })
+        return
+      }
+      if (ms > MAX_TIMEOUT) { await ctx.reply('That\'s too far out — max ~24 days.'); return }
+      const fireAt = Date.now() + ms
+      addScheduled({ id: randomBytes(4).toString('hex'), fireAt, chatId: String(ctx.chat?.id), paneId: compose.paneId, sessionLabel: compose.sessionLabel, text: rest })
+      await ctx.reply(`✅ Scheduled in <b>${formatDuration(ms)}</b> → <b>${escapeHtml(compose.sessionLabel)}</b>:\n\n${escapeHtml(rest)}\n\nCancel with <code>/schedule cancel</code>.`, { parse_mode: 'HTML' })
       return
     }
     const ft = freeTextReplyTargets.get(`${ctx.chat?.id}:${replyTo.message_id}`)

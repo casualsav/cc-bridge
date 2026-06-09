@@ -64,6 +64,9 @@ export const voiceNudged = new Set<string>()
 // The fire-time queue + timers live in scheduler.ts; only the force-reply targets (the
 // daemon's command/inbound plumbing) are shared here.
 export const scheduleReplyTargets = new Map<string, { fireAt: number; paneId: string | null; sessionLabel: string }>()
+// "➕ Add" on the /schedule dashboard: the reply carries BOTH the time and the message ("2h ping"),
+// so fireAt is parsed from it — unlike scheduleReplyTargets where the time is already fixed.
+export const scheduleComposeTargets = new Map<string, { paneId: string | null; sessionLabel: string }>()
 
 // ---- Session names / pins ----
 export const sessionNames = new Map<string, string>()

@@ -75,7 +75,7 @@ test('renderHybridMirror interleaves thoughts and tool badges', () => {
     { kind: 'tool', tool: 'Edit', detail: 'a.ts' },
   ]
   const out = renderHybridMirror(feed, false)
-  expect(out).toContain('planning')
+  expect(out).toContain('🗨️ planning')   // thoughts carry the 🗨️ marker to set them apart from tools
   expect(out).toContain('✏️ edit')
   expect(out).toContain('a.ts')
 })

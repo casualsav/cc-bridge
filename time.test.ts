@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { parseDuration, formatDuration, fmtWhen } from './time.ts'
+import { parseDuration, formatDuration, fmtWhen, splitLeadingDuration } from './time.ts'
 
 test('parseDuration sums unit chunks', () => {
   expect(parseDuration('90s')).toBe(90_000)
@@ -35,6 +35,18 @@ test('parseDuration ∘ formatDuration round-trips on minute-aligned values', ()
   for (const s of ['1h 30m', '2d 5h', '45m']) {
     expect(formatDuration(parseDuration(s)!)).toBe(s)
   }
+})
+
+test('splitLeadingDuration separates a leading duration from the message', () => {
+  expect(splitLeadingDuration('2h')).toEqual({ ms: 2 * 36e5, rest: '' })
+  expect(splitLeadingDuration('2h ping the server')).toEqual({ ms: 2 * 36e5, rest: 'ping the server' })
+  expect(splitLeadingDuration('1h30m do the thing')).toEqual({ ms: 36e5 + 30 * 6e4, rest: 'do the thing' })
+  expect(splitLeadingDuration('1h 30m run tests')).toEqual({ ms: 36e5 + 30 * 6e4, rest: 'run tests' })
+})
+
+test('splitLeadingDuration returns null ms when there is no leading duration', () => {
+  expect(splitLeadingDuration('do the thing')).toEqual({ ms: null, rest: 'do the thing' })
+  expect(splitLeadingDuration('')).toEqual({ ms: null, rest: '' })
 })
 
 test('fmtWhen renders a fixed UTC instant deterministically', () => {

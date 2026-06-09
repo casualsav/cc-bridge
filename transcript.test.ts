@@ -3,7 +3,7 @@ import { test, expect } from 'bun:test'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { latestFinalReply, finalRepliesAfter, textEntriesAfter, turnInProgress, currentTurnActivity, currentTurnFeed, finalReplyForInjected } from './transcript.ts'
+import { latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnActivity, currentTurnFeed, finalReplyForInjected } from './transcript.ts'
 
 function fixture(entries: object[]): string {
   const f = join(mkdtempSync(join(tmpdir(), 'tg-transcript-')), 'session.jsonl')
@@ -76,23 +76,17 @@ test('currentTurnActivity renders a todo count when nothing is in progress', () 
   expect(currentTurnActivity(f)[0].detail).toBe('2 tasks')
 })
 
-test('textEntriesAfter streams every block, tagged conclusion vs narration', () => {
-  const f = fixture([user('q', 'u1'), narr('one', 'a1'), tool('Bash', {}, 't1'), asst('two', 'a2')])
-  expect(textEntriesAfter(f, '')).toEqual([
-    { uuid: 'a1', text: 'one', conclusion: false },
-    { uuid: 'a2', text: 'two', conclusion: true },
+test('finalRepliesAfter is the relay reply: the turn’s last text block, trailing tool and all', () => {
+  // Claude writes the reply, then ends the turn with a trailing tool call (e.g. a todo update /
+  // `tg react`) and an empty end_turn — the reply text carries a 'tool_use' stop_reason. It must
+  // still relay as the reply (not get swallowed as narration).
+  const f = fixture([
+    user('q', 'u1'),
+    narr('here is the answer', 'a1'),               // reply, but stop_reason tool_use (a tool follows)
+    tool('TodoWrite', { todos: [] }, 't1'),
+    { type: 'assistant', uuid: 'a2', message: { stop_reason: 'end_turn', content: [] } },  // empty tail
   ])
-  expect(textEntriesAfter(f, 'a1').map(x => x.text)).toEqual(['two'])
-})
-
-test('textEntriesAfter excludes subagent (sidechain) text', () => {
-  const f = fixture([user('q', 'u1'), sub('internal subagent line', 's1'), asst('real reply', 'a1')])
-  expect(textEntriesAfter(f, '').map(x => x.text)).toEqual(['real reply'])
-})
-
-test('textEntriesAfter with a lost cursor returns just the latest', () => {
-  const f = fixture([user('q', 'u1'), asst('a', 'a1'), asst('b', 'a2')])
-  expect(textEntriesAfter(f, 'gone').map(x => x.text)).toEqual(['b'])
+  expect(finalRepliesAfter(f, '').map(x => x.text)).toEqual(['here is the answer'])
 })
 
 test('turnInProgress: true while mid-tool, false once a conclusion lands', () => {
@@ -114,6 +108,22 @@ test('currentTurnFeed interleaves narration + tools, dropping the conclusion tex
     { kind: 'text', text: 'looking' },
     { kind: 'tool', tool: 'Read', detail: '/x' },
   ])
+})
+
+test('currentTurnFeed(concluded) drops a trailing-tool reply so it never folds into the card', () => {
+  // The reply ('the answer') has a 'tool_use' stop_reason because a TodoWrite follows it. Live
+  // (concluded=false) it shows as a thought; once concluded it's the relayed reply, so the card
+  // must drop it — otherwise the final message folds into the stream.
+  const f = fixture([
+    user('q', 'u1'),
+    narr('checking things', 'a1'),
+    tool('Read', { file_path: '/x' }, 't1'),
+    narr('the answer', 'a2'),                       // the reply (tool_use because a tool follows)
+    tool('TodoWrite', { todos: [] }, 't2'),
+  ])
+  expect(currentTurnFeed(f, false).some(i => i.kind === 'text' && i.text === 'the answer')).toBe(true)
+  expect(currentTurnFeed(f, true).some(i => i.kind === 'text' && i.text === 'the answer')).toBe(false)
+  expect(currentTurnFeed(f, true).some(i => i.kind === 'text' && i.text === 'checking things')).toBe(true)
 })
 
 test('finalReplyForInjected returns the conclusion to a specific injected message', () => {

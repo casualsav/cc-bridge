@@ -260,3 +260,39 @@ export function detectPermissionPrompt(paneText: string): PermissionPrompt | nul
 
   return { question, preview: preview.join('\n').slice(0, 400), options }
 }
+
+// ---- /login method menu (a third shape) ----
+// Claude's "Select login method" screen carries only an "Esc to cancel" footer — NO select-menu
+// wording ("Enter to select / ↑↓") and NO permission "· Tab to amend" — so neither detector above
+// matches it. It shows up at first-run onboarding AND whenever the user runs /login later. We
+// detect it on its own (a distinctive header + numbered options) and relay the actual options as
+// buttons. Selecting drives the pane; whatever the option needs next (an OAuth link, or terminal
+// typing for an API key / 3rd-party platform) is surfaced separately.
+const LOGIN_ANCHOR = /select login method|select login|log ?in with|how would you like to (?:log|sign) ?in|claude account with subscription|anthropic console account/i
+// Numbered option, tolerating the highlight cursor Claude draws (a leading "_", "❯", "►", "•").
+const LOGIN_OPT = /^\s*(?:│\s*)?(?:[_❯►▶•]\s*)?(\d+)[.)]\s+(.+?)\s*$/
+
+export function detectLoginPrompt(paneText: string): { options: PromptOption[] } | null {
+  const lines = paneText.split('\n').map(l => stripAnsi(l).trimEnd())
+  if (!lines.some(l => LOGIN_ANCHOR.test(l))) return null
+
+  // The "Esc to cancel" footer, live at the very bottom (≤1 non-blank line below).
+  let footerIdx = -1
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (/esc to cancel/i.test(lines[i])) { footerIdx = i; break }
+  }
+  if (footerIdx === -1) return null
+  let belowNonBlank = 0
+  for (let i = footerIdx + 1; i < lines.length; i++) if (lines[i].trim()) belowNonBlank++
+  if (belowNonBlank > 1) return null
+
+  // The contiguous numbered options directly above the footer.
+  const opts: PromptOption[] = []
+  for (let i = footerIdx - 1; i >= 0; i--) {
+    const m = lines[i].match(LOGIN_OPT)
+    if (m) { opts.unshift({ label: m[2].replace(/\s*│\s*$/, '').trim() }); continue }
+    if (!lines[i].trim()) { if (opts.length) break; else continue }   // blank gap is fine until options start
+    if (opts.length) break                                            // a real non-option line ends the block
+  }
+  return opts.length >= 2 ? { options: opts } : null
+}

@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { parseStatusline, pinBar } from './statusline.ts'
+import { parseStatusline, pinBar, parseWorkingLine } from './statusline.ts'
 
 // A realistic capture: regular output, a blank line, the statusline slot, then the footer hint.
 const STATUSLINE = 'ctx 45%  ↑1.2k ↓3.4k  $0.42 | 2h30m  api 1m30s  5h 60% ↻ 3h  7d 20% ↻ 12h  ε: high  ✻ think'
@@ -42,6 +42,26 @@ test('parseStatusline returns null when nothing parseable is present', () => {
 test('parseStatusline normalizes cost to 2 decimals', () => {
   expect(parseStatusline(pane('ctx 5%  $3'))!.cost).toBe('$3.00')
   expect(parseStatusline(pane('ctx 5%  $1.2'))!.cost).toBe('$1.20')
+})
+
+test('parseWorkingLine lifts the verb + tokens from the spinner line', () => {
+  const cap = [
+    '  some tool output',
+    '✽ Harmonizing… (19m 20s · ↓ 84.4k tokens)',
+    '─────────────',
+    '❯ ',
+  ].join('\n')
+  expect(parseWorkingLine(cap)).toEqual({ verb: 'Harmonizing', tokens: '↓84.4k' })
+})
+
+test('parseWorkingLine keeps the last (lowest) spinner line and tolerates no tokens', () => {
+  const cap = ['✻ Pondering… (3s · ↑ 1.2k tokens)', 'output', '✶ Moonwalking… (12s)'].join('\n')
+  expect(parseWorkingLine(cap)).toEqual({ verb: 'Moonwalking', tokens: null })
+})
+
+test('parseWorkingLine returns null without an active spinner line', () => {
+  expect(parseWorkingLine('✻ Sautéed for 1m 17s\n❯ ')).toBeNull()   // past-tense line, no paren group
+  expect(parseWorkingLine('just output\n❯ ')).toBeNull()
 })
 
 test('pinBar renders a fixed-width filled/empty bar', () => {

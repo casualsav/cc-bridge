@@ -103,8 +103,11 @@ export function scheduledCancelKeyboard(): InlineKeyboard {
 
 export async function scheduleDashboard(ctx: Context): Promise<void> {
   if (scheduledMsgs.length === 0) {
-    await ctx.reply('📅 <b>No scheduled messages.</b>\n\nSchedule one with <code>/schedule 12h</code> — then reply with the message to send.', { parse_mode: 'HTML' })
+    await ctx.reply('📅 <b>No scheduled messages.</b>\n\nSchedule one with <code>/schedule 2h ping the server</code>, or tap ➕ to compose one.',
+      { parse_mode: 'HTML', reply_markup: new InlineKeyboard().text('➕ Add', 'sched:add') })
     return
   }
-  await ctx.reply(scheduledListText(), { parse_mode: 'HTML', reply_markup: scheduledCancelKeyboard() })
+  const kb = scheduledCancelKeyboard()
+  kb.row().text('➕ Add', 'sched:add')
+  await ctx.reply(scheduledListText(), { parse_mode: 'HTML', reply_markup: kb })
 }

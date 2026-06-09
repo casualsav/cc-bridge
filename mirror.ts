@@ -13,6 +13,7 @@ import { exec } from './proc.ts'
 import { stripAnsi } from './prompt.ts'
 import { paneCwd } from './pane-io.ts'
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
+import { parseWorkingLine, parseStatusline } from './statusline.ts'
 import { resolveTranscript, currentTurnActivity, currentTurnFeed, type Activity, type FeedItem } from './transcript.ts'
 import type { Access } from './types.ts'
 
@@ -41,6 +42,33 @@ let mirrorLastEditAt = 0
 // turn) only after this crosses the threshold — so a single transient not-working tick can't split
 // one turn's card into two. Reset to 0 on any working tick.
 let mirrorIdleTicks = 0
+// When the current card (work burst) opened — drives the live elapsed timer in the status footer.
+// Reset to 0 whenever the card is capped/abandoned so the next burst times from scratch.
+let mirrorStartedAt = 0
+
+// Compact live elapsed for the status footer: "23s" / "1m 40s" / "1h 02m".
+function fmtElapsed(ms: number): string {
+  const s = Math.floor(ms / 1000)
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60), sec = s % 60
+  if (m < 60) return sec ? `${m}m ${sec}s` : `${m}m`
+  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`
+}
+
+// The status line pinned to the bottom of a live card: the whimsical working verb (scraped from
+// Claude's spinner line, which scrolls just above the input box — see parseWorkingLine), the live
+// elapsed time (tracked here, always accurate), and a token count (per-turn from the spinner, else
+// the session ↑↓ from the statusline). Falls back to "Working" when the spinner verb isn't on
+// screen. null when there's nothing to show. (Capping the card replaces this with "✅ Done".)
+async function buildWorkingFooter(cap: string): Promise<string | null> {
+  const wl = cap ? parseWorkingLine(cap) : null
+  const st = cap ? parseStatusline(cap) : null
+  const verb = wl?.verb ?? 'Working'
+  const elapsed = mirrorStartedAt ? fmtElapsed(Date.now() - mirrorStartedAt) : null
+  const tokens = wl?.tokens ?? st?.tokens ?? null
+  const parts = [`⏳ <i>${escapeHtml(verb)}</i>`, elapsed, tokens].filter(Boolean)
+  return parts.length > 1 ? parts.join(' · ') : null
+}
 
 // Live tool-use feed. On by default ('tools') — opt out via access.json
 // `terminalMirror: "off"` (or pick `"digest"`).
@@ -133,7 +161,7 @@ export function renderHybridMirror(feed: FeedItem[], done: boolean): string {
   for (const it of feed.slice(-MIRROR_FEED)) {
     if (it.kind === 'text') {
       const html = mdToTelegramHtml(it.text.trim()).trim()
-      if (html) lines.push(html)                          // thought: rendered like /stream thoughts
+      if (html) lines.push(`🗨️ ${html}`)                  // thought: 🗨️ sets it apart from the tool badges
     } else {
       const [emoji, label] = toolBadge(it.tool)
       const d = it.detail ? `: <code>${escapeHtml(it.detail)}</code>` : ''
@@ -172,22 +200,30 @@ async function buildMirrorText(done: boolean): Promise<string | null> {
   const paneId = deps.getActivePaneId()
   const cwd = paneId ? await paneCwd(paneId) : null
   const file = cwd ? resolveTranscript(cwd) : null
+
+  // A live card needs a pane capture for the status footer (the spinner verb + tokens scroll just
+  // above the input box); tools/digest also renders straight from the pane. Capture once, share.
+  const needCap = !done || (mode === 'tools' && mirrorMode() === 'digest')
+  const cap = needCap ? await mirrorCapture() : ''
+
+  let body: string | null
   if (mode === 'thoughts') {
-    const feed = file ? currentTurnFeed(file) : []
-    return renderThoughtsMirror(feed, done) || null   // null when there's no narration yet
+    body = renderThoughtsMirror(file ? currentTurnFeed(file, done) : [], done) || null   // `done` → drop the reply (relayed on its own)
+  } else if (mode === 'hybrid') {
+    const feed = file ? currentTurnFeed(file, done) : []
+    body = feed.length ? renderHybridMirror(feed, done) : null
+  } else {
+    // tools (legacy 'final')
+    if (mirrorMode() === 'off') return null
+    if (mirrorMode() === 'digest') body = cap ? renderDigestMirror(cap, done) : null
+    else { const acts = file ? currentTurnActivity(file) : []; body = acts.length ? renderToolsMirror(acts, done) : null }
   }
-  if (mode === 'hybrid') {
-    const feed = file ? currentTurnFeed(file) : []
-    return feed.length ? renderHybridMirror(feed, done) : null
-  }
-  // tools (legacy 'final')
-  if (mirrorMode() === 'off') return null
-  if (mirrorMode() === 'digest') {
-    const raw = await mirrorCapture()
-    return raw ? renderDigestMirror(raw, done) : null
-  }
-  const acts = file ? currentTurnActivity(file) : []
-  return acts.length ? renderToolsMirror(acts, done) : null
+  if (body == null) return null
+
+  // Pin the working status to the bottom while the card is live; the capped card already ends in
+  // "✅ Done", so no footer there.
+  if (!done) { const footer = await buildWorkingFooter(cap); if (footer) body = `${body}\n\n${footer}` }
+  return body
 }
 
 // The card's whole lifecycle lives here, driven by one signal — `working` = turnInProgress(file)
@@ -205,6 +241,7 @@ export async function updateTerminalMirror(working: boolean): Promise<void> {
     return
   }
   mirrorIdleTicks = 0   // working again → reset the debounce
+  if (mirrorMsgIds.size === 0 && !mirrorStartedAt) mirrorStartedAt = Date.now()   // start the elapsed clock for this burst
 
   const text = await buildMirrorText(false)
   if (!text) return
@@ -234,7 +271,7 @@ async function finalizeTerminalMirror(): Promise<void> {
   for (const [chat, mid] of mirrorMsgIds) {
     await deps.bot.api.editMessageText(chat, mid, text, { parse_mode: 'HTML' }).catch(() => {})
   }
-  mirrorMsgIds.clear(); mirrorLastText = ''; mirrorLastEditAt = 0; mirrorIdleTicks = 0
+  mirrorMsgIds.clear(); mirrorLastText = ''; mirrorLastEditAt = 0; mirrorIdleTicks = 0; mirrorStartedAt = 0
 }
 
 // Drop the open card entirely (delete, don't cap) and stop tracking it, so the next relay tick
@@ -244,11 +281,11 @@ export async function respawnTerminalMirror(): Promise<void> {
   for (const [chat, mid] of mirrorMsgIds) {
     await deps.bot.api.deleteMessage(chat, mid).catch(() => {})
   }
-  mirrorMsgIds.clear(); mirrorLastText = ''; mirrorLastEditAt = 0
+  mirrorMsgIds.clear(); mirrorLastText = ''; mirrorLastEditAt = 0; mirrorStartedAt = 0
 }
 
 // Abandon tracking of any open card WITHOUT touching the Telegram messages — used when focus/
 // relay moves to a new pane, so the stale card is simply left in place and a fresh one opens.
 export function abandonMirror(): void {
-  mirrorMsgIds.clear(); mirrorLastText = ''; mirrorLastEditAt = 0
+  mirrorMsgIds.clear(); mirrorLastText = ''; mirrorLastEditAt = 0; mirrorStartedAt = 0
 }

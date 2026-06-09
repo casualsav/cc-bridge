@@ -45,6 +45,25 @@ function statuslineBlock(paneText: string): string | null {
   return out.length ? out.join('\n') : null
 }
 
+// Claude's working-spinner line, e.g. "✽ Harmonizing… (19m 20s · ↓ 84.4k tokens)" — a spinner
+// glyph, a whimsical verb, an ellipsis, then a paren group carrying the elapsed time and (usually)
+// a token count. On the bridged pane it scrolls just above the input box rather than sitting in the
+// visible footer, so a scrollback capture (not the bare screen) is where it's found. We pin the
+// verb + tokens to the bottom of the live stream card; the elapsed is tracked by the card itself
+// (always live). Returns the LAST match in the capture — the one closest to the prompt, i.e. the
+// current turn's — or null when no spinner line is on screen (then the card shows "Working").
+const WORKING_RE = /[✶✳✻✽✺✷✸✹✢✣⣾⣽⣻⢿⡿⣟⣯⣷*]\s*([A-Za-z][A-Za-z'’-]{2,})\s*(?:…|\.\.\.)\s*\(([^)]*)\)/
+export function parseWorkingLine(paneText: string): { verb: string; tokens: string | null } | null {
+  let found: { verb: string; tokens: string | null } | null = null
+  for (const raw of paneText.split('\n')) {
+    const m = stripAnsi(raw).match(WORKING_RE)
+    if (!m) continue
+    const tk = m[2].match(/([↑↓])\s*([\d.]+[kKmM]?)\s*tokens?/i)
+    found = { verb: m[1], tokens: tk ? `${tk[1]}${tk[2]}` : null }   // keep overwriting → last wins
+  }
+  return found
+}
+
 export function parseStatusline(paneText: string): StatuslineData | null {
   const block = statuslineBlock(paneText)
   if (!block) return null
