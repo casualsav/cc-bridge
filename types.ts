@@ -27,6 +27,12 @@ export type Access = {
   replyMode?: 'thoughts' | 'tools' | 'hybrid' | 'off' | 'all' | 'final' | 'stream' | 'live'   // all/final/stream/live are legacy aliases
 }
 
+// The focused session's writer mirror (socket + write fn).
+export type ActiveShim = {
+  socket: net.Socket
+  write: (msg: DaemonToShim) => void
+}
+
 // Every connected shim is a session; the daemon keeps ALL of them and tracks which is focused.
 export type Session = {
   socket: net.Socket

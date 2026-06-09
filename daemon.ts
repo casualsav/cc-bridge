@@ -34,6 +34,7 @@ import type {
   PendingMultiSelect, FreeTextPrompt, ChatPrompt, ScheduledMessage,
 } from './types.ts'
 import {
+  focus,
   _accessFileCache, onboardedPanes, onboardingState, sessions, permissionOrigin,
   pendingMultiSelect, freeTextPrompts, freeTextReplyTargets, chatPrompts, authUrlMessageIds,
   lastRelayedByFile, unreadNotified, unreadNotifMsgs, offMcpPanes,
@@ -467,12 +468,12 @@ async function sendKeysPaced(paneId: string, keys: string[], gapMs = 150): Promi
 // user can only escape by detaching. So after answering, if a prompt is still up, Esc it and
 // say so. NOT used on tabbed/multi-question paths, where a remaining prompt is the next tab.
 async function verifyPromptClosed(): Promise<void> {
-  if (!activePaneId || !paneWatcher) return
-  const cap = await capturePane(activePaneId).catch(() => '')
+  if (!focus.activePaneId || !focus.paneWatcher) return
+  const cap = await capturePane(focus.activePaneId).catch(() => '')
   if (!cap || (!detectUserPrompt(cap) && !detectPermissionPrompt(cap))) return
-  await paneWatcher.withInjection(async () => {
-    await sendKeys(activePaneId!, ['Escape'])
-    await waitForSettle(activePaneId!, 200, 1500)
+  await focus.paneWatcher.withInjection(async () => {
+    await sendKeys(focus.activePaneId!, ['Escape'])
+    await waitForSettle(focus.activePaneId!, 200, 1500)
   })
   lastRelayedPromptHash = ''
   lastRelayedPermissionHash = ''
@@ -537,7 +538,7 @@ async function driveOnboarding(paneId: string, stage: 'login' | 'theme' | 'trust
   // theme / trust / enter → accept the highlighted default. Drive through the watcher so the
   // relay loop doesn't misread the keystroke as activity.
   process.stderr.write(`daemon: onboarding auto-advance (${stage})\n`)
-  if (paneWatcher) await paneWatcher.withInjection(async () => { await sendKeys(paneId, ['Enter']); await waitForSettle(paneId, 200, 3000) })
+  if (focus.paneWatcher) await focus.paneWatcher.withInjection(async () => { await sendKeys(paneId, ['Enter']); await waitForSettle(paneId, 200, 3000) })
   else await sendKeys(paneId, ['Enter'])
 }
 
@@ -666,23 +667,13 @@ async function switchToMode(paneId: string, target: CcMode, watcher: PaneWatcher
 
 // ---- Session management ----
 
-type ActiveShim = {
-  socket: net.Socket
-  write: (msg: DaemonToShim) => void
-}
-
-let activeShim: ActiveShim | null = null
-let activePaneId: string | null = null
-let paneWatcher: PaneWatcher | null = null
-
 // ---- Multi-session registry ----
 // Every connected shim is a session; we keep ALL of them (not last-subscriber-wins)
 // and track which one is "focused". Inbound messages, pane-watching, the control
-// surface, and permission replies follow the focused session — mirrored into
-// activeShim/activePaneId/paneWatcher above so the rest of the daemon is unchanged.
+// surface, and permission replies follow the focused session — mirrored into the
+// `focus` holder (state.ts) so the rest of the daemon reads it without walking the registry.
 // A new session never steals focus: the first/only session is focused, additional
 // ones are announced and switched to explicitly with /use.
-let currentSessionId: string | null = null
 let noTmuxSeq = 0
 
 // Permission requests awaiting a Telegram answer, keyed by request_id → the writer
@@ -695,16 +686,16 @@ function orderedSessions(): { id: string; s: Session }[] {
 // Point the focused-session mirrors at `sessionId` and (re)start its pane watcher.
 // Resets pane-derived relay dedups so the newly-focused pane surfaces fresh.
 function setFocus(sessionId: string | null): void {
-  if (paneWatcher) { paneWatcher.stop(); paneWatcher = null }
-  currentSessionId = sessionId
+  if (focus.paneWatcher) { focus.paneWatcher.stop(); focus.paneWatcher = null }
+  focus.currentSessionId = sessionId
   if (sessionId) reactionCueArmed = true   // fresh focus → re-surface the reaction affordance once
   const s = sessionId ? sessions.get(sessionId) ?? null : null
-  activeShim = s ? { socket: s.socket, write: s.write } : null
-  activePaneId = s?.paneId ?? null
+  focus.activeShim = s ? { socket: s.socket, write: s.write } : null
+  focus.activePaneId = s?.paneId ?? null
   lastRelayedPromptHash = ''
   lastRelayedPermissionHash = ''
   lastRelayedAuthUrl = ''
-  if (activePaneId) { startPaneWatcher(activePaneId); startRelayLoop() }
+  if (focus.activePaneId) { startPaneWatcher(focus.activePaneId); startRelayLoop() }
   void updateSessionPin()
 }
 
@@ -712,7 +703,7 @@ function setFocus(sessionId: string | null): void {
 // to another session; the user picks from the session-exit menu (announceFocusedExit).
 function dropSession(sessionId: string): void {
   if (!sessions.delete(sessionId)) return
-  if (currentSessionId === sessionId) setFocus(null)
+  if (focus.currentSessionId === sessionId) setFocus(null)
 }
 
 // End a registered session (its socket closed or pane died); if it was focused, offer the
@@ -720,7 +711,7 @@ function dropSession(sessionId: string): void {
 function endSession(sessionId: string): void {
   const s = sessions.get(sessionId)
   if (!s) return
-  const wasFocused = currentSessionId === sessionId
+  const wasFocused = focus.currentSessionId === sessionId
   dropSession(sessionId)
   if (wasFocused) void announceFocusedExit(s.label)
 }
@@ -738,7 +729,7 @@ async function announceFocusedExit(endedLabel: string): Promise<void> {
 
 // Route a permission decision back to the session that requested it.
 function respondPermission(request_id: string, behavior: 'allow' | 'deny'): void {
-  const w = permissionOrigin.get(request_id) ?? activeShim?.write
+  const w = permissionOrigin.get(request_id) ?? focus.activeShim?.write
   permissionOrigin.delete(request_id)
   w?.({ t: 'permission', params: { request_id, behavior } })
 }
@@ -950,8 +941,8 @@ function replyMode(): 'thoughts' | 'tools' | 'hybrid' | 'off' {
 
 
 async function relayLoopTick(gen: number): Promise<void> {
-  if (gen !== relayLoopGen || !activePaneId || !TRANSCRIPT_OUTBOUND) return
-  const paneId = activePaneId
+  if (gen !== relayLoopGen || !focus.activePaneId || !TRANSCRIPT_OUTBOUND) return
+  const paneId = focus.activePaneId
   let cap = ''
   try { cap = await capturePane(paneId) } catch { /* transient capture miss — retry next tick */ }
   const idle = cap !== '' && !detectWorking(cap) && !detectLimited(cap)
@@ -1001,7 +992,7 @@ async function relayLoopTick(gen: number): Promise<void> {
 // -turn restart still gets a fresh uuid and relays (the earlier idle-priming swallowed it).
 async function primeRelayCursor(): Promise<void> {
   try {
-    const cwd = activePaneId ? await paneCwd(activePaneId) : null
+    const cwd = focus.activePaneId ? await paneCwd(focus.activePaneId) : null
     const file = cwd ? resolveTranscript(cwd) : null
     const latest = file ? latestFinalReply(file) : null
     // If we relayed from this session before and it has spoken since (switched away and
@@ -1132,12 +1123,12 @@ async function announceAdopted(paneId: string): Promise<void> {
 // Point the bridge at an off-MCP pane (no shim socket): drive it directly and read its
 // transcript. Used by initial adoption and when switching to a discovered sibling pane.
 function focusOffMcpPane(paneId: string): void {
-  if (paneWatcher) { paneWatcher.stop(); paneWatcher = null }
+  if (focus.paneWatcher) { focus.paneWatcher.stop(); focus.paneWatcher = null }
   adoptedPaneId = paneId
-  currentSessionId = paneId
+  focus.currentSessionId = paneId
   reactionCueArmed = true   // newly adopted/switched off-mcp pane → re-surface the reaction affordance
-  activePaneId = paneId
-  activeShim = null
+  focus.activePaneId = paneId
+  focus.activeShim = null
   lastRelayedPromptHash = ''
   lastRelayedPermissionHash = ''
   lastRelayedAuthUrl = ''
@@ -1166,7 +1157,7 @@ async function announceNewSession(paneId: string): Promise<void> {
 function registerSpawnedPane(paneId: string): void {
   if (offMcpPanes.has(paneId)) return
   offMcpPanes.add(paneId)
-  if (!activePaneId) adoptPane(paneId)
+  if (!focus.activePaneId) adoptPane(paneId)
   else void announceNewSession(paneId)
 }
 
@@ -1179,7 +1170,7 @@ async function discoverPanes(): Promise<void> {
   const live = new Set(panes)
   for (const p of [...offMcpPanes]) if (!live.has(p)) offMcpPanes.delete(p)
 
-  const haveFocus = !!activePaneId && await paneAlive(activePaneId)
+  const haveFocus = !!focus.activePaneId && await paneAlive(focus.activePaneId)
   if (!haveFocus && panes.length) {
     // Prefer the pane we were on before (persisted by adoptPane) if it's still a live
     // candidate, so focus survives a daemon restart instead of snapping back to panes[0].
@@ -1189,7 +1180,7 @@ async function discoverPanes(): Promise<void> {
   }
 
   for (const p of panes) {
-    if (p === activePaneId) { offMcpPanes.add(p); continue }
+    if (p === focus.activePaneId) { offMcpPanes.add(p); continue }
     if (!offMcpPanes.has(p)) { offMcpPanes.add(p); void announceNewSession(p) }
   }
   void updateSessionPin()
@@ -1202,10 +1193,10 @@ async function discoverPanes(): Promise<void> {
 // session. No-tmux sessions (no pane to drive) fall back to the socket; with nothing
 // focused, buffer for replay when a session next takes focus.
 function emitInbound(params: InboundParams): void {
-  if (activePaneId && paneWatcher) {
-    enqueueInboundInject(activePaneId, paneWatcher, params)
-  } else if (activeShim) {
-    activeShim.write({ t: 'inbound', params })
+  if (focus.activePaneId && focus.paneWatcher) {
+    enqueueInboundInject(focus.activePaneId, focus.paneWatcher, params)
+  } else if (focus.activeShim) {
+    focus.activeShim.write({ t: 'inbound', params })
   } else {
     bufferEvent(params)
     void hintNoSession(params)
@@ -1217,7 +1208,7 @@ function emitInbound(params: InboundParams): void {
 // and replays the buffer. Skipped if any pane exists (it may just be momentarily unfocused).
 let lastNoSessionHintTs = 0
 async function hintNoSession(params: InboundParams): Promise<void> {
-  if (activeShim || offMcpPanes.size > 0) return
+  if (focus.activeShim || offMcpPanes.size > 0) return
   const chat = params.meta?.chat_id
   if (!chat) return
   if (Date.now() - lastNoSessionHintTs < 60_000) return
@@ -1570,11 +1561,11 @@ function onPaneEvent(text: string): void {
   // First-run onboarding: drive theme/trust/login from here. Once the pane reaches the REPL it's
   // marked onboarded and never driven again (kept BELOW the auth-URL relay so a login link still
   // surfaces). Skipped entirely for already-onboarded panes, so real questions pass through.
-  if (activePaneId) {
-    if (onNormalPrompt(text)) { onboardedPanes.add(activePaneId); loginChoiceSent = false }
-    else if (adoptedPaneId === activePaneId && !onboardedPanes.has(activePaneId)) {
+  if (focus.activePaneId) {
+    if (onNormalPrompt(text)) { onboardedPanes.add(focus.activePaneId); loginChoiceSent = false }
+    else if (adoptedPaneId === focus.activePaneId && !onboardedPanes.has(focus.activePaneId)) {
       const stage = classifyOnboarding(text)
-      if (stage) { void driveOnboarding(activePaneId, stage); return }
+      if (stage) { void driveOnboarding(focus.activePaneId, stage); return }
     }
   }
 
@@ -1674,8 +1665,8 @@ function singleAnswerKeyboard(prompt: PromptInfo, prefix: 'prompt' | 'mq'): Inli
 // it's up — so without this the preamble only lands after the menu is answered. Dedups via
 // lastRelayedUuid (advanced before each await, like the loop) so neither path double-sends.
 async function flushPendingText(): Promise<void> {
-  if (!TRANSCRIPT_OUTBOUND || !relayCursorPrimed || !activePaneId) return
-  const cwd = await paneCwd(activePaneId)
+  if (!TRANSCRIPT_OUTBOUND || !relayCursorPrimed || !focus.activePaneId) return
+  const cwd = await paneCwd(focus.activePaneId)
   const file = cwd ? resolveTranscript(cwd) : null
   if (!file) return
   for (const r of finalRepliesAfter(file, lastRelayedUuid)) {
@@ -1690,7 +1681,7 @@ async function flushPendingText(): Promise<void> {
 async function relayPromptToTelegram(prompt: PromptInfo): Promise<void> {
   const access = loadAccess()
   const targets = access.allowFrom
-  if (targets.length === 0 || !activePaneId) return
+  if (targets.length === 0 || !focus.activePaneId) return
 
   await flushPendingText()   // preamble text must land before the menu
   const text = renderPromptHtml(prompt)
@@ -1705,7 +1696,7 @@ async function relayPromptToTelegram(prompt: PromptInfo): Promise<void> {
           reply_markup: multiSelectKeyboard(prompt.options, selected),
         })
         pendingMultiSelect.set(`${chat_id}:${sent.message_id}`, {
-          paneId: activePaneId, options: prompt.options, selected,
+          paneId: focus.activePaneId, options: prompt.options, selected,
         })
       } else {
         sent = await bot.api.sendMessage(chat_id, text, {
@@ -1718,14 +1709,14 @@ async function relayPromptToTelegram(prompt: PromptInfo): Promise<void> {
       // this" sits one further down again.
       if (prompt.freeText) {
         freeTextPrompts.set(`${chat_id}:${sent.message_id}`, {
-          paneId: activePaneId, downCount: prompt.options.length, tabbed: prompt.tabbed, question: prompt.question,
+          paneId: focus.activePaneId, downCount: prompt.options.length, tabbed: prompt.tabbed, question: prompt.question,
         })
       }
       // Register chat-dismiss for every question. If the menu carries its own "Chat about this"
       // option we select it (downCount past the options + free-text); otherwise we Esc-dismiss.
       chatPrompts.set(`${chat_id}:${sent.message_id}`, prompt.chat
-        ? { paneId: activePaneId, downCount: prompt.options.length + 1, tabbed: prompt.tabbed, useEscape: false }
-        : { paneId: activePaneId, downCount: 0, tabbed: prompt.tabbed, useEscape: true })
+        ? { paneId: focus.activePaneId, downCount: prompt.options.length + 1, tabbed: prompt.tabbed, useEscape: false }
+        : { paneId: focus.activePaneId, downCount: 0, tabbed: prompt.tabbed, useEscape: true })
     } catch (e) {
       process.stderr.write(`daemon: prompt relay to ${chat_id} failed: ${e}\n`)
     }
@@ -1747,7 +1738,7 @@ function permButtonLabel(opt: { n: number; label: string }): string {
 // pane. One button per row — the labels (esp. "allow all this session") are long.
 async function relayPermissionToTelegram(perm: PermissionPrompt): Promise<void> {
   const targets = loadAccess().allowFrom
-  if (targets.length === 0 || !activePaneId) return
+  if (targets.length === 0 || !focus.activePaneId) return
 
   await flushPendingText()   // any preamble text must land before the approve/deny menu
   const parts = [`🔐 <b>${escapeHtml(perm.question)}</b>`]
@@ -1787,13 +1778,13 @@ function parseReviewAnswers(paneText: string): { question: string; answer: strin
 // the new screen — we read it here and either relay the next question or, once the
 // review/submit tab is reached, press Enter to submit and report the answers.
 async function handleTabbedAdvance(chat_id: string): Promise<void> {
-  if (!activePaneId || !paneWatcher) return
-  const text = await capturePane(activePaneId)
+  if (!focus.activePaneId || !focus.paneWatcher) return
+  const text = await capturePane(focus.activePaneId)
   if (isSubmitScreen(text)) {
     const answers = parseReviewAnswers(text)
-    await paneWatcher.withInjection(async () => {
-      await sendKeys(activePaneId!, ['Enter'])
-      await waitForSettle(activePaneId!, 300, 5000)
+    await focus.paneWatcher.withInjection(async () => {
+      await sendKeys(focus.activePaneId!, ['Enter'])
+      await waitForSettle(focus.activePaneId!, 300, 5000)
     })
     lastRelayedPromptHash = ''
     const summary = answers.length
@@ -1856,8 +1847,8 @@ async function relayAuthUrlToTelegram(url: string): Promise<void> {
 }
 
 function startPaneWatcher(paneId: string): void {
-  if (paneWatcher) paneWatcher.stop()
-  paneWatcher = new PaneWatcher(
+  if (focus.paneWatcher) focus.paneWatcher.stop()
+  focus.paneWatcher = new PaneWatcher(
     paneId,
     text => onPaneEvent(text),
     () => {
@@ -1865,18 +1856,18 @@ function startPaneWatcher(paneId: string): void {
       const entry = [...sessions.entries()].find(([, s]) => s.paneId === paneId)
       if (entry) { endSession(entry[0]); return }   // registered session: handles focus + menu
       // Off-MCP pane: drop it; if it was the focused one, offer the switch menu (no auto-switch).
-      const wasActive = activePaneId === paneId || currentSessionId === paneId
-      activePaneId = null; paneWatcher = null
+      const wasActive = focus.activePaneId === paneId || focus.currentSessionId === paneId
+      focus.activePaneId = null; focus.paneWatcher = null
       offMcpPanes.delete(paneId)
       if (adoptedPaneId === paneId) adoptedPaneId = null   // clear binding so the rescan re-adopts
-      if (wasActive) currentSessionId = null
+      if (wasActive) focus.currentSessionId = null
       const label = sessionNames.get(paneId) || 'Session'
       if (wasActive) void announceFocusedExit(label).then(() => updateSessionPin())
       else void updateSessionPin()
     },
     text => typingPresence.observe(detectWorking(text)),   // live typing signal, every poll
   )
-  paneWatcher.start()
+  focus.paneWatcher.start()
 }
 
 // ---- File download + transcription ----
@@ -2205,7 +2196,7 @@ async function relaySlashCommand(
 // must have passed the access gate; BANG_SHELL must be enabled.
 async function runBangCommand(chat_id: string, cmd: string): Promise<void> {
   if (!cmd) { await bot.api.sendMessage(chat_id, 'Usage: <code>!&lt;shell command&gt;</code>', { parse_mode: 'HTML' }).catch(() => {}); return }
-  const cwd = (activePaneId && await paneCwd(activePaneId)) || homedir()
+  const cwd = (focus.activePaneId && await paneCwd(focus.activePaneId)) || homedir()
   void bot.api.sendChatAction(chat_id, 'typing').catch(() => {})
   let out = '', code = 0
   try {
@@ -2232,19 +2223,19 @@ async function handleModeCommand(
   const gated = dmCommandGate(ctx)
   if (!gated) return
 
-  if (!activePaneId || !paneWatcher) {
+  if (!focus.activePaneId || !focus.paneWatcher) {
     await ctx.reply('No active Claude Code session with tmux. Send a message from CC first.')
     return
   }
-  if (!onNormalPrompt(await capturePane(activePaneId))) {
+  if (!onNormalPrompt(await capturePane(focus.activePaneId))) {
     await ctx.reply('⚠️ The terminal is on another screen (settings/menu) — can’t change the mode right now.')
     return
   }
 
   const msgId = ctx.message?.message_id
   const chat_id = String(ctx.chat!.id)
-  const paneId = activePaneId
-  const watcher = paneWatcher
+  const paneId = focus.activePaneId
+  const watcher = focus.paneWatcher
 
   const reached = await switchToMode(paneId, target, watcher)
 
@@ -2275,12 +2266,12 @@ async function handleModeCommand(
 // confirmation below is the acknowledgement), then report the model the fresh
 // session is on.
 // Reset the conversation and return the confirmation text (with the active
-// model). Callers ensure activePaneId/paneWatcher are set.
+// model). Callers ensure focus.activePaneId/focus.paneWatcher are set.
 async function performReset(command: string): Promise<string> {
-  await injectSlash(activePaneId!, paneWatcher!, command)
+  await injectSlash(focus.activePaneId!, focus.paneWatcher!, command)
   reactionCueArmed = true   // context cleared by /new or /clear → re-surface the reaction affordance
 
-  const model = await readCurrentModel(activePaneId!, paneWatcher!)
+  const model = await readCurrentModel(focus.activePaneId!, focus.paneWatcher!)
   const head = command === '/clear' ? '🧹 Conversation cleared' : '✅ New session started'
   return model
     ? `${head} · model: <b>${escapeHtml(model)}</b>`
@@ -2293,7 +2284,7 @@ async function performReset(command: string): Promise<string> {
 // /clear and /reset use confirmResetSession below — a plain Yes/No reset-in-place.
 async function confirmNewSession(ctx: Context): Promise<void> {
   if (!dmCommandGate(ctx)) return
-  if (!activePaneId || !paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
+  if (!focus.activePaneId || !focus.paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
   const keyboard = new InlineKeyboard()
     .text('➕ Add new session', 'newsession')
     .text('♻️ Reset current', 'newconfirm:yes')
@@ -2309,7 +2300,7 @@ async function confirmNewSession(ctx: Context): Promise<void> {
 // runs on the Yes tap — see the clearconfirm handler.
 async function confirmResetSession(ctx: Context): Promise<void> {
   if (!dmCommandGate(ctx)) return
-  if (!activePaneId || !paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
+  if (!focus.activePaneId || !focus.paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
   const keyboard = new InlineKeyboard()
     .text('✅ Yes, clear', 'clearconfirm:yes')
     .text('✖️ No', 'clearconfirm:no')
@@ -2325,8 +2316,8 @@ async function confirmResetSession(ctx: Context): Promise<void> {
 // binding gap (e.g. a daemon restart mid shim-reconnect) doesn't block /stop. /stop only needs
 // to send Esc to the pane; it doesn't need the full watcher.
 async function resolveActivePane(): Promise<string | null> {
-  const tries: (string | null | undefined)[] = [activePaneId]
-  if (currentSessionId) tries.push(sessions.get(currentSessionId)?.paneId)
+  const tries: (string | null | undefined)[] = [focus.activePaneId]
+  if (focus.currentSessionId) tries.push(sessions.get(focus.currentSessionId)?.paneId)
   try { tries.push(readFileSync(ADOPTED_PANE_FILE, 'utf8').trim()) } catch {}
   for (const p of tries) if (p && await paneAlive(p)) return p
   // last resort: a single live claude pane (any kind)
@@ -2351,8 +2342,8 @@ async function performStop(): Promise<string> {
   const pane = await resolveActivePane()
   if (!pane) return 'No active Claude Code session with tmux.'
   // Use the watcher's injection guard only when it owns this pane; otherwise send Esc directly.
-  const ok = paneWatcher && pane === activePaneId
-    ? await paneWatcher.withInjection(() => sendKeys(pane, ['Escape']))
+  const ok = focus.paneWatcher && pane === focus.activePaneId
+    ? await focus.paneWatcher.withInjection(() => sendKeys(pane, ['Escape']))
     : await sendKeys(pane, ['Escape'])
   typingPresence.stop()   // interrupted turn never relays a conclusion — stop typing now
   return ok ? '🛑 Sent interrupt (Esc) to Claude Code.' : 'Could not reach the session pane.'
@@ -2374,8 +2365,8 @@ function modePickerKeyboard(current: CcMode): InlineKeyboard {
 
 async function doModePicker(ctx: Context): Promise<void> {
   if (!dmCommandGate(ctx)) return
-  if (!activePaneId || !paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
-  const cap = await capturePane(activePaneId)
+  if (!focus.activePaneId || !focus.paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
+  const cap = await capturePane(focus.activePaneId)
   if (!onNormalPrompt(cap)) { await ctx.reply('⚠️ The terminal is on another screen (settings/menu) — can’t change the mode right now.'); return }
   const current = detectCurrentMode(cap)
   await ctx.reply(`🕹️ <b>Mode</b> — currently ${modeLabel(current)}\n\n${MODE_TIP}`, { parse_mode: 'HTML', reply_markup: modePickerKeyboard(current) })
@@ -2397,8 +2388,8 @@ function modelPickerKeyboard(): InlineKeyboard {
 
 async function doModelPicker(ctx: Context): Promise<void> {
   if (!dmCommandGate(ctx)) return
-  if (!activePaneId || !paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
-  const model = await readCurrentModel(activePaneId, paneWatcher)
+  if (!focus.activePaneId || !focus.paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
+  const model = await readCurrentModel(focus.activePaneId, focus.paneWatcher)
   await ctx.reply(
     `🧠 <b>Model</b> — currently ${model ? escapeHtml(model) : 'unknown'}\n\n${MODEL_TIP}`,
     { parse_mode: 'HTML', reply_markup: modelPickerKeyboard() },
@@ -2425,12 +2416,12 @@ function effortPickerKeyboard(): InlineKeyboard {
   return kb
 }
 async function currentEffort(): Promise<string | null> {
-  if (!activePaneId) return null
-  try { return parseStatusline(await capturePane(activePaneId))?.effort ?? null } catch { return null }
+  if (!focus.activePaneId) return null
+  try { return parseStatusline(await capturePane(focus.activePaneId))?.effort ?? null } catch { return null }
 }
 async function doEffortPicker(ctx: Context): Promise<void> {
   if (!dmCommandGate(ctx)) return
-  if (!activePaneId || !paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
+  if (!focus.activePaneId || !focus.paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
   const eff = await currentEffort()
   await ctx.reply(
     `⚡ <b>Effort</b> — currently ${eff ? escapeHtml(eff) : 'unknown'}\n\n${EFFORT_TIP}`,
@@ -2455,10 +2446,10 @@ let pendingEffortConfirm: { level: string; chatId: string; messageId: number } |
 // Returns 'confirm' (a Yes/No was relayed — answer pending) or 'applied' (took effect directly,
 // e.g. a fresh session with nothing cached). Re-issuing supersedes any open confirm.
 async function injectEffortChange(level: string, chat_id: string): Promise<'confirm' | 'applied'> {
-  if (!activePaneId || !paneWatcher) return 'applied'
+  if (!focus.activePaneId || !focus.paneWatcher) return 'applied'
   await dismissPendingEffortConfirm()
-  await injectSlash(activePaneId, paneWatcher, `/effort ${level}`)
-  const cap = await capturePane(activePaneId).catch(() => '')
+  await injectSlash(focus.activePaneId, focus.paneWatcher, `/effort ${level}`)
+  const cap = await capturePane(focus.activePaneId).catch(() => '')
   if (cap && isEffortConfirm(cap)) {
     await relayEffortConfirm(level, chat_id)
     return 'confirm'
@@ -2489,11 +2480,11 @@ async function dismissPendingEffortConfirm(): Promise<void> {
   const pend = pendingEffortConfirm
   if (!pend) return
   pendingEffortConfirm = null
-  if (activePaneId && paneWatcher) {
+  if (focus.activePaneId && focus.paneWatcher) {
     try {
-      await paneWatcher.withInjection(async () => {
-        await sendKeys(activePaneId!, ['Escape'])
-        await waitForSettle(activePaneId!, 200, 2000)
+      await focus.paneWatcher.withInjection(async () => {
+        await sendKeys(focus.activePaneId!, ['Escape'])
+        await waitForSettle(focus.activePaneId!, 200, 2000)
       })
     } catch (e) { process.stderr.write(`daemon: effort-confirm dismiss failed: ${e}\n`) }
   }
@@ -2580,8 +2571,8 @@ function extractCostReadout(raw: string): string | null {
 // interrupting; idle, it runs straight away.
 async function doReadout(ctx: Context, kind: 'cost' | 'context'): Promise<void> {
   if (!dmCommandGate(ctx)) return
-  if (!activePaneId || !paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
-  if (detectWorking(await capturePane(activePaneId))) {
+  if (!focus.activePaneId || !focus.paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
+  if (detectWorking(await capturePane(focus.activePaneId))) {
     // Injecting into a busy session just queues the command (it never runs → nothing to read)
     // and resizing the pane mid-render leaves artifacts. Wait for a resting prompt instead.
     await ctx.reply(`⏳ Claude is working — <code>/${kind}</code> needs a resting prompt. Run it again once the turn finishes.`, { parse_mode: 'HTML' })
@@ -2592,7 +2583,7 @@ async function doReadout(ctx: Context, kind: 'cost' | 'context'): Promise<void> 
 
 // Inject the command, capture + relay its real output (chunked), then return to the prompt.
 async function runReadout(chatId: string, kind: 'cost' | 'context'): Promise<void> {
-  const paneId = activePaneId, watcher = paneWatcher
+  const paneId = focus.activePaneId, watcher = focus.paneWatcher
   if (!paneId || !watcher) return
   const raw = await watcher.withInjection(async () => {
     if (kind === 'cost') {
@@ -2782,14 +2773,14 @@ bot.command('yolo', ctx => handleModeCommand(ctx, 'bypassPermissions'))
 // pop the picker on Telegram as buttons); /model <name> still relays to switch.
 bot.command('model', async ctx => {
   if (!dmCommandGate(ctx)) return
-  if (!activePaneId || !paneWatcher) {
+  if (!focus.activePaneId || !focus.paneWatcher) {
     await ctx.reply('No active Claude Code session with tmux.')
     return
   }
   const arg = (ctx.match ?? '').toString().trim()
   if (arg) {
     const chat_id = String(ctx.chat!.id)
-    void relaySlashCommand(activePaneId, paneWatcher, `/model ${arg}`, chat_id, ctx.message!.message_id)
+    void relaySlashCommand(focus.activePaneId, focus.paneWatcher, `/model ${arg}`, chat_id, ctx.message!.message_id)
     return
   }
   await doModelPicker(ctx)
@@ -2798,7 +2789,7 @@ bot.command('model', async ctx => {
 // /effort low|medium|high|max — relay to the session; bare opens a picker.
 bot.command('effort', async ctx => {
   if (!dmCommandGate(ctx)) return
-  if (!activePaneId || !paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
+  if (!focus.activePaneId || !focus.paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
   const arg = (ctx.match ?? '').toString().trim().toLowerCase()
   if (arg) {
     if (!EFFORT_LEVELS.includes(arg)) { await ctx.reply('Usage: <code>/effort low | medium | high | xhigh | max | auto</code>', { parse_mode: 'HTML' }); return }
@@ -2822,8 +2813,8 @@ bot.command(['clear', 'reset'], confirmResetSession)
 // /compact relays straight to the session — compact the conversation to free context.
 bot.command('compact', async ctx => {
   if (!dmCommandGate(ctx)) return
-  if (!activePaneId || !paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
-  void relaySlashCommand(activePaneId, paneWatcher, '/compact', String(ctx.chat!.id), ctx.message!.message_id)
+  if (!focus.activePaneId || !focus.paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
+  void relaySlashCommand(focus.activePaneId, focus.paneWatcher, '/compact', String(ctx.chat!.id), ctx.message!.message_id)
 })
 
 // ---- /update: pick what to update — the bridge or Claude itself ----
@@ -2845,8 +2836,8 @@ async function claudeVersion(): Promise<string | null> {
 // The focused off-MCP session's id — the newest transcript under the active pane's cwd, so we can
 // relaunch it with `claude --resume <id>` (same id → same transcript → the conversation continues).
 async function activeSessionId(): Promise<string | null> {
-  if (!activePaneId) return null
-  const cwd = await paneCwd(activePaneId)
+  if (!focus.activePaneId) return null
+  const cwd = await paneCwd(focus.activePaneId)
   const file = cwd ? resolveTranscript(cwd) : null
   return file ? basename(file, '.jsonl') : null
 }
@@ -2856,12 +2847,12 @@ async function activeSessionId(): Promise<string | null> {
 // the watcher (and this bridge) pointed at it; keeping the session id keeps the conversation.
 async function restartFocusedSession(chat: string): Promise<void> {
   const dm = (t: string) => bot.api.sendMessage(chat, t, { parse_mode: 'HTML' }).catch(() => {})
-  const pane = activePaneId
-  if (!pane || !paneWatcher) { await dm('⚠️ No active session to restart.'); return }
+  const pane = focus.activePaneId
+  if (!pane || !focus.paneWatcher) { await dm('⚠️ No active session to restart.'); return }
   const id = await activeSessionId()
   if (!id) { await dm('⚠️ Couldn’t find this session’s id to resume — start a new session manually to pick up the update.'); return }
   await dm('♻️ Restarting this session on the new Claude…')
-  await paneWatcher.withInjection(async () => {
+  await focus.paneWatcher.withInjection(async () => {
     await sendKeys(pane, ['/exit', 'Enter'])
     for (let i = 0; i < 40 && (await paneCommand(pane)) === 'claude'; i++) await waitForSettle(pane, 200, 1500)
     await sendKeys(pane, [`claude --allow-dangerously-skip-permissions --resume ${id}`, 'Enter'])
@@ -2958,12 +2949,12 @@ function cleanPaneTail(raw: string, maxLines: number): string {
 // catch up on recent session activity. Read-only: just captures the pane scrollback.
 bot.command('terminal', async ctx => {
   if (!dmCommandGate(ctx)) return
-  if (!activePaneId) { await ctx.reply('No active Claude Code session with tmux.'); return }
+  if (!focus.activePaneId) { await ctx.reply('No active Claude Code session with tmux.'); return }
   const arg = parseInt((ctx.match ?? '').toString().trim(), 10)
   const n = Number.isFinite(arg) ? Math.max(5, Math.min(arg, 200)) : 40
   let raw: string
   try {
-    raw = (await exec('tmux', ['capture-pane', '-p', '-t', activePaneId, '-S', `-${n + 20}`, '-J'], { timeout: 3000 })).stdout
+    raw = (await exec('tmux', ['capture-pane', '-p', '-t', focus.activePaneId, '-S', `-${n + 20}`, '-J'], { timeout: 3000 })).stdout
   } catch {
     await ctx.reply('Could not read the session pane.')
     return
@@ -2993,13 +2984,13 @@ const CONTINUE_MAX_ATTEMPTS = 5
 function fireResetNotification(chats: string[], attempt = 0): void {
   // Auto-continue (default on): type "continue" into the session automatically. Falls back
   // to the manual Continue button when disabled (/autocontinue off) or no live session.
-  if (loadAccess().autoContinue !== false && activePaneId && paneWatcher) {
+  if (loadAccess().autoContinue !== false && focus.activePaneId && focus.paneWatcher) {
     const msg = attempt === 0
       ? '🕛 Usage limit reset — ▶️ auto-continuing… (turn off with /autocontinue off)'
       : `🔁 Still limited — retrying continue (attempt ${attempt + 1}/${CONTINUE_MAX_ATTEMPTS})…`
     for (const chat_id of chats) void bot.api.sendMessage(chat_id, msg).catch(() => {})
     void (async () => {
-      const ok = await injectText(activePaneId!, paneWatcher!, 'continue')
+      const ok = await injectText(focus.activePaneId!, focus.paneWatcher!, 'continue')
       setTimeout(() => void verifyAutoContinue(chats, attempt, ok), CONTINUE_VERIFY_MS)
     })()
     return
@@ -3015,7 +3006,7 @@ function fireResetNotification(chats: string[], attempt = 0): void {
 // showing the frozen limit banner (the reset hadn't really landed yet), reschedule a retry a
 // few minutes out — persisted + capped — instead of giving up after one early attempt.
 async function verifyAutoContinue(chats: string[], attempt: number, injected: boolean): Promise<void> {
-  const cap = activePaneId ? await capturePane(activePaneId).catch(() => '') : ''
+  const cap = focus.activePaneId ? await capturePane(focus.activePaneId).catch(() => '') : ''
   const resumed = injected && !!cap && !detectLimited(cap)
   if (resumed) {
     try { unlinkSync(SCHEDULED_RESET_FILE) } catch {}
@@ -3338,7 +3329,7 @@ bot.command('schedule', async ctx => {
     return
   }
   if (ms > MAX_TIMEOUT) { await ctx.reply('That\'s too far out — max ~24 days.'); return }
-  const paneId = activePaneId
+  const paneId = focus.activePaneId
   const label = paneId ? (sessionNames.get(paneId) || await paneLabel(paneId)) : 'this session'
   const fireAt = Date.now() + ms
   const sent = await ctx.reply(
@@ -3385,7 +3376,7 @@ async function paneLabel(paneId: string): Promise<string> {
 }
 
 // The unified session list: every shim-registered session PLUS the off-MCP adopted/forced
-// pane (which lives in activePaneId, not the sessions map — without this it shows as "no
+// pane (which lives in focus.activePaneId, not the sessions map — without this it shows as "no
 // sessions"). `shim` marks the ones switchable via setFocus.
 type SessionRow = { key: string; paneId: string | null; label: string; current: boolean; shim: boolean }
 async function sessionRows(): Promise<SessionRow[]> {
@@ -3394,13 +3385,13 @@ async function sessionRows(): Promise<SessionRow[]> {
   for (const { id, s } of orderedSessions()) {
     if (s.paneId) panes.add(s.paneId)
     const label = (s.paneId && sessionNames.get(s.paneId)) || s.label
-    rows.push({ key: id, paneId: s.paneId, label, current: id === currentSessionId, shim: true })
+    rows.push({ key: id, paneId: s.paneId, label, current: id === focus.currentSessionId, shim: true })
   }
   const offMcp = new Set(offMcpPanes)
-  if (activePaneId && !sessions.size) offMcp.add(activePaneId)   // FORCE_PANE / lone adopted pane
+  if (focus.activePaneId && !sessions.size) offMcp.add(focus.activePaneId)   // FORCE_PANE / lone adopted pane
   for (const p of offMcp) {
     if (panes.has(p)) continue                                   // already listed as a shim session
-    rows.push({ key: p, paneId: p, label: await paneLabel(p), current: currentSessionId === p, shim: false })
+    rows.push({ key: p, paneId: p, label: await paneLabel(p), current: focus.currentSessionId === p, shim: false })
   }
   return rows
 }
@@ -3544,15 +3535,15 @@ async function sessionPinText(rows: SessionRow[]): Promise<string> {
   if (!cur) return '🖥️ <b>No active session</b>'
   let mode = '—', model = lastKnownModel, cwd: string | null = null
   let status: StatuslineData | null = null
-  if (activePaneId) {
+  if (focus.activePaneId) {
     try {
-      const cap = await capturePane(activePaneId)
+      const cap = await capturePane(focus.activePaneId)
       // Strip modeLabel's leading per-mode emoji — the pin uses a single generic 🕹️.
       if (onNormalPrompt(cap)) mode = modeLabel(detectCurrentMode(cap)).replace(/^\S+\s+/, '')
       status = parseStatusline(cap)
     } catch {}
     try {
-      cwd = await paneCwd(activePaneId)
+      cwd = await paneCwd(focus.activePaneId)
       const file = cwd ? resolveTranscript(cwd) : null
       model = (file && prettyModel(lastModelInTranscript(file))) || model
     } catch {}
@@ -3639,7 +3630,7 @@ async function updateSessionPin(): Promise<void> {
   try {
     const text = await sessionPinText(await sessionRows())
     const reply_markup = pinKeyboard()
-    const hasSession = !!(activePaneId || activeShim)   // off-MCP pane or MCP shim — either counts
+    const hasSession = !!(focus.activePaneId || focus.activeShim)   // off-MCP pane or MCP shim — either counts
     for (const chat of loadAccess().allowFrom) {
       const existing = sessionPins.get(chat)
       if (existing && pinTextCache.get(chat) === text) continue   // nothing changed — skip the no-op edit
@@ -3674,7 +3665,7 @@ async function updateSessionPin(): Promise<void> {
 async function checkCrossSessionUnread(): Promise<void> {
   if (!TRANSCRIPT_OUTBOUND) return
   for (const pane of offMcpPanes) {
-    if (pane === activePaneId) continue
+    if (pane === focus.activePaneId) continue
     const cwd = await paneCwd(pane)
     const file = cwd ? resolveTranscript(cwd) : null
     if (!file) continue
@@ -3742,7 +3733,7 @@ function sessionSwitchKeyboard(rows: SessionRow[]): InlineKeyboard {
 
 async function resolveNewSessionDir(input: string): Promise<string> {
   const t = input.trim()
-  const here = async () => (activePaneId && await paneCwd(activePaneId)) || homedir()
+  const here = async () => (focus.activePaneId && await paneCwd(focus.activePaneId)) || homedir()
   if (!t) return here()
   if (t === '~') return homedir()
   if (/^here$/i.test(t) || t === '.') return here()
@@ -3779,9 +3770,9 @@ async function spawnSession(dir: string, extra = ''): Promise<boolean> {
   try {
     ensureFolderTrusted(dir)   // so claude doesn't hit a trust dialog it can't answer on a new pane
     let target: string[] = []
-    if (activePaneId) {
+    if (focus.activePaneId) {
       try {
-        const { stdout } = await exec('tmux', ['display-message', '-p', '-t', activePaneId, '#{session_name}'], { timeout: 2000 })
+        const { stdout } = await exec('tmux', ['display-message', '-p', '-t', focus.activePaneId, '#{session_name}'], { timeout: 2000 })
         // Trailing colon = "this session, next free window index". Without it, `-t name`
         // is read as a target *window* and defaults to index 0 → "index 0 in use".
         if (stdout.trim()) target = ['-t', `${stdout.trim()}:`]
@@ -3917,8 +3908,8 @@ bot.on('callback_query:data', async ctx => {
     }
     await ctx.answerCallbackQuery().catch(() => {})
     if (data === 'pin:clear') { await confirmNewSession(ctx); return }
-    if (!activePaneId || !paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
-    void relaySlashCommand(activePaneId, paneWatcher, '/compact', String(ctx.chat!.id), ctx.callbackQuery.message!.message_id)
+    if (!focus.activePaneId || !focus.paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
+    void relaySlashCommand(focus.activePaneId, focus.paneWatcher, '/compact', String(ctx.chat!.id), ctx.callbackQuery.message!.message_id)
     return
   }
 
@@ -4011,12 +4002,12 @@ bot.on('callback_query:data', async ctx => {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
       return
     }
-    if (!activePaneId || !paneWatcher) {
+    if (!focus.activePaneId || !focus.paneWatcher) {
       await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {})
       return
     }
     await ctx.answerCallbackQuery({ text: 'Continuing…' }).catch(() => {})
-    const ok = await injectText(activePaneId, paneWatcher, 'continue')
+    const ok = await injectText(focus.activePaneId, focus.paneWatcher, 'continue')
     await ctx.editMessageText(ok ? '🕛 Usage limit reset — ▶️ continuing…' : '🕛 Usage limit reset (couldn\'t reach the session).').catch(() => {})
     return
   }
@@ -4028,17 +4019,17 @@ bot.on('callback_query:data', async ctx => {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
       return
     }
-    if (!activePaneId || !paneWatcher) {
+    if (!focus.activePaneId || !focus.paneWatcher) {
       await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {})
       return
     }
-    if (!onNormalPrompt(await capturePane(activePaneId))) {
+    if (!onNormalPrompt(await capturePane(focus.activePaneId))) {
       await ctx.answerCallbackQuery({ text: 'Terminal is on another screen — can’t change mode.' }).catch(() => {})
       return
     }
     const target = modeSet[1] as CcMode
     await ctx.answerCallbackQuery().catch(() => {})
-    const reached = await switchToMode(activePaneId, target, paneWatcher)
+    const reached = await switchToMode(focus.activePaneId, target, focus.paneWatcher)
     if (reached === null) {
       await ctx.editMessageText(`Could not switch to ${modeLabel(target)} — try again.`).catch(() => {})
       return
@@ -4062,15 +4053,15 @@ bot.on('callback_query:data', async ctx => {
       await ctx.editMessageText('Cancelled.').catch(() => {})
       return
     }
-    if (!activePaneId || !paneWatcher) {
+    if (!focus.activePaneId || !focus.paneWatcher) {
       await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {})
       return
     }
     const kind = readoutMatch[1] as 'cost' | 'context'
     await ctx.answerCallbackQuery({ text: 'Interrupting…' }).catch(() => {})
-    await paneWatcher.withInjection(async () => {
-      await sendKeys(activePaneId!, ['Escape'])
-      await waitForSettle(activePaneId!, 400, 5000)
+    await focus.paneWatcher.withInjection(async () => {
+      await sendKeys(focus.activePaneId!, ['Escape'])
+      await waitForSettle(focus.activePaneId!, 400, 5000)
     })
     await ctx.editMessageText(`▶️ Interrupted — running /${kind}…`).catch(() => {})
     await runReadout(String(ctx.chat?.id), kind)
@@ -4084,14 +4075,14 @@ bot.on('callback_query:data', async ctx => {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
       return
     }
-    if (!activePaneId || !paneWatcher) {
+    if (!focus.activePaneId || !focus.paneWatcher) {
       await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {})
       return
     }
     const alias = modelSet[1]
     await ctx.answerCallbackQuery({ text: `Switching to ${alias}…` }).catch(() => {})
-    await injectSlash(activePaneId, paneWatcher, `/model ${alias}`)
-    const model = await readCurrentModel(activePaneId, paneWatcher)
+    await injectSlash(focus.activePaneId, focus.paneWatcher, `/model ${alias}`)
+    const model = await readCurrentModel(focus.activePaneId, focus.paneWatcher)
     await ctx.editMessageText(`🧠 <b>Model</b> — now ${model ? escapeHtml(model) : escapeHtml(alias)}\n\n${MODEL_TIP}`, {
       parse_mode: 'HTML', reply_markup: modelPickerKeyboard(),
     }).catch(() => {})
@@ -4102,7 +4093,7 @@ bot.on('callback_query:data', async ctx => {
   const effortSet = /^effort:set:(\w+)$/.exec(data)
   if (effortSet && EFFORT_LEVELS.includes(effortSet[1])) {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) { await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {}); return }
-    if (!activePaneId || !paneWatcher) { await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {}); return }
+    if (!focus.activePaneId || !focus.paneWatcher) { await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {}); return }
     const level = effortSet[1]
     await ctx.answerCallbackQuery({ text: `Effort → ${level}…` }).catch(() => {})
     const result = await injectEffortChange(level, String(ctx.chat!.id))
@@ -4119,14 +4110,14 @@ bot.on('callback_query:data', async ctx => {
   // (digit 1 + Enter, mirroring the generic prompt answerer), No/Esc cancels (keeps current level).
   if (data === 'effortconfirm:yes' || data === 'effortconfirm:no') {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) { await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {}); return }
-    if (!activePaneId || !paneWatcher) { await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {}); return }
+    if (!focus.activePaneId || !focus.paneWatcher) { await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {}); return }
     const yes = data === 'effortconfirm:yes'
     const level = pendingEffortConfirm?.level
     pendingEffortConfirm = null
     await ctx.answerCallbackQuery({ text: yes ? 'Switching…' : 'Cancelled' }).catch(() => {})
-    await paneWatcher.withInjection(async () => {
-      await sendKeys(activePaneId!, yes ? ['1', 'Enter'] : ['Escape'])
-      await waitForSettle(activePaneId!, 300, 5000)
+    await focus.paneWatcher.withInjection(async () => {
+      await sendKeys(focus.activePaneId!, yes ? ['1', 'Enter'] : ['Escape'])
+      await waitForSettle(focus.activePaneId!, 300, 5000)
     })
     if (yes) {
       await ctx.editMessageText(`⚡ Effort switched to ${escapeHtml(effortLabel(level ?? ''))}`, { parse_mode: 'HTML' }).catch(() => {})
@@ -4170,7 +4161,7 @@ bot.on('callback_query:data', async ctx => {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
       return
     }
-    if (!activePaneId || !paneWatcher) {
+    if (!focus.activePaneId || !focus.paneWatcher) {
       await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {})
       return
     }
@@ -4192,7 +4183,7 @@ bot.on('callback_query:data', async ctx => {
       await ctx.editMessageText('✖️ Cancelled — conversation kept.').catch(() => {})
       return
     }
-    if (!activePaneId || !paneWatcher) {
+    if (!focus.activePaneId || !focus.paneWatcher) {
       await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {})
       return
     }
@@ -4214,13 +4205,13 @@ bot.on('callback_query:data', async ctx => {
       await ctx.editMessageText('✖️ Exit cancelled — session kept.').catch(() => {})
       return
     }
-    if (!activePaneId || !paneWatcher) {
+    if (!focus.activePaneId || !focus.paneWatcher) {
       await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {})
       return
     }
-    const label = await paneLabel(activePaneId)
+    const label = await paneLabel(focus.activePaneId)
     await ctx.answerCallbackQuery({ text: 'Exiting…' }).catch(() => {})
-    await injectSlash(activePaneId, paneWatcher, '/exit')
+    await injectSlash(focus.activePaneId, focus.paneWatcher, '/exit')
     await ctx.editMessageText(`✅ Session <b>${escapeHtml(label)}</b> exited`, { parse_mode: 'HTML' }).catch(() => {})
     return
   }
@@ -4274,17 +4265,17 @@ bot.on('callback_query:data', async ctx => {
       return
     }
     await ctx.answerCallbackQuery().catch(() => {})
-    const paneId = activePaneId
-    if (!paneId || !paneWatcher) { await ctx.reply('No active session to drive.'); return }
+    const paneId = focus.activePaneId
+    if (!paneId || !focus.paneWatcher) { await ctx.reply('No active session to drive.'); return }
     if (data === 'login:sub') {
       // Subscription is the default (top) option → Enter selects it; the OAuth link then appears
       // and relays on its own, and you reply to that link message with the code.
-      await paneWatcher.withInjection(async () => { await sendKeys(paneId, ['Enter']); await waitForSettle(paneId, 300, 5000) })
+      await focus.paneWatcher.withInjection(async () => { await sendKeys(paneId, ['Enter']); await waitForSettle(paneId, 300, 5000) })
       await ctx.reply('🔗 Opening the claude.ai sign-in link — I\'ll send it here. Tap it, approve, then reply to that link message with the code shown.')
     } else {
       // API key: select the second option so the key field is ready — but the key itself must be
       // typed in the terminal; we never accept it over Telegram.
-      await paneWatcher.withInjection(async () => { await navigateDown(paneId, 1); await sendKeys(paneId, ['Enter']); await waitForSettle(paneId, 300, 5000) })
+      await focus.paneWatcher.withInjection(async () => { await navigateDown(paneId, 1); await sendKeys(paneId, ['Enter']); await waitForSettle(paneId, 300, 5000) })
       await ctx.reply('🔑 For security I won\'t handle API keys over Telegram. I\'ve selected the API-key option — paste your key directly in the terminal window.')
     }
     return
@@ -4298,7 +4289,7 @@ bot.on('callback_query:data', async ctx => {
       return
     }
     await ctx.answerCallbackQuery().catch(() => {})
-    const cwd = activePaneId ? await paneCwd(activePaneId) : null
+    const cwd = focus.activePaneId ? await paneCwd(focus.activePaneId) : null
     const currentLine = cwd
       ? `Current: <code>${escapeHtml(cwd)}</code>`
       : 'Current: <i>current session’s folder</i>'
@@ -4353,7 +4344,7 @@ bot.on('callback_query:data', async ctx => {
     }
     await ctx.answerCallbackQuery().catch(() => {})
     if (nsMatch[1] === 'specify') {
-      const cwd = activePaneId ? await paneCwd(activePaneId) : null
+      const cwd = focus.activePaneId ? await paneCwd(focus.activePaneId) : null
       const currentLine = cwd
         ? `Current: <code>${escapeHtml(cwd)}</code>`
         : 'Current: <i>current session’s folder</i>'
@@ -4400,7 +4391,7 @@ bot.on('callback_query:data', async ctx => {
       return
     }
     const paneId = adoptMatch[1]
-    if (paneId === activePaneId) { await ctx.answerCallbackQuery({ text: 'Already focused.' }).catch(() => {}); return }
+    if (paneId === focus.activePaneId) { await ctx.answerCallbackQuery({ text: 'Already focused.' }).catch(() => {}); return }
     if (!(await paneAlive(paneId))) {
       await ctx.answerCallbackQuery({ text: 'That pane is gone.' }).catch(() => {})
       await ctx.editMessageReplyMarkup({}).catch(() => {})
@@ -4422,16 +4413,16 @@ bot.on('callback_query:data', async ctx => {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
       return
     }
-    if (!activePaneId || !paneWatcher) {
+    if (!focus.activePaneId || !focus.paneWatcher) {
       await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {})
       return
     }
     const num = ppermMatch[1]
     await ctx.answerCallbackQuery({ text: `Answered ${num}` }).catch(() => {})
     await ctx.editMessageReplyMarkup().catch(() => {})  // drop the buttons immediately on tap, not after the settle
-    await paneWatcher.withInjection(async () => {
-      await sendKeys(activePaneId!, [num, 'Enter'])
-      await waitForSettle(activePaneId!, 300, 5000)
+    await focus.paneWatcher.withInjection(async () => {
+      await sendKeys(focus.activePaneId!, [num, 'Enter'])
+      await waitForSettle(focus.activePaneId!, 300, 5000)
     })
     lastRelayedPermissionHash = ''  // allow the next permission prompt to relay
     await verifyPromptClosed()
@@ -4446,15 +4437,15 @@ bot.on('callback_query:data', async ctx => {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
       return
     }
-    if (!activePaneId || !paneWatcher) {
+    if (!focus.activePaneId || !focus.paneWatcher) {
       await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {})
       return
     }
     const num = promptMatch[1]
     await ctx.answerCallbackQuery({ text: `Selected ${num}` }).catch(() => {})
-    await paneWatcher.withInjection(async () => {
-      await sendKeys(activePaneId!, [num, 'Enter'])
-      await waitForSettle(activePaneId!, 300, 5000)
+    await focus.paneWatcher.withInjection(async () => {
+      await sendKeys(focus.activePaneId!, [num, 'Enter'])
+      await waitForSettle(focus.activePaneId!, 300, 5000)
     })
     lastRelayedPromptHash = ''  // allow next prompt to relay
     await ctx.deleteMessage().catch(() => {})  // remove the prompt entirely once answered (toast confirms)
@@ -4473,16 +4464,16 @@ bot.on('callback_query:data', async ctx => {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
       return
     }
-    if (!activePaneId || !paneWatcher) {
+    if (!focus.activePaneId || !focus.paneWatcher) {
       await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {})
       return
     }
     const num = Number(mqMatch[1])
     await ctx.answerCallbackQuery({ text: `Selected ${num}` }).catch(() => {})
-    await paneWatcher.withInjection(async () => {
-      await navigateDown(activePaneId!, num - 1)
-      await sendKeys(activePaneId!, ['Enter'])
-      await waitForSettle(activePaneId!, 300, 5000)
+    await focus.paneWatcher.withInjection(async () => {
+      await navigateDown(focus.activePaneId!, num - 1)
+      await sendKeys(focus.activePaneId!, ['Enter'])
+      await waitForSettle(focus.activePaneId!, 300, 5000)
     })
     await ctx.deleteMessage().catch(() => {})  // remove the answered question (next tab relays its own message)
     await handleTabbedAdvance(String(ctx.chat?.id))
@@ -4525,19 +4516,19 @@ bot.on('callback_query:data', async ctx => {
       return
     }
     const cp = chatPrompts.get(`${ctx.chat?.id}:${ctx.callbackQuery.message?.message_id}`)
-    if (!cp || !activePaneId || !paneWatcher) {
+    if (!cp || !focus.activePaneId || !focus.paneWatcher) {
       await ctx.answerCallbackQuery({ text: 'This prompt is no longer active.' }).catch(() => {})
       return
     }
     await ctx.answerCallbackQuery({ text: 'Dismissing — go ahead and type.' }).catch(() => {})
-    await paneWatcher.withInjection(async () => {
+    await focus.paneWatcher.withInjection(async () => {
       if (cp.useEscape) {
-        await sendKeys(activePaneId!, ['Escape'])
+        await sendKeys(focus.activePaneId!, ['Escape'])
       } else {
-        await navigateDown(activePaneId!, cp.downCount)
-        await sendKeys(activePaneId!, ['Enter'])
+        await navigateDown(focus.activePaneId!, cp.downCount)
+        await sendKeys(focus.activePaneId!, ['Enter'])
       }
-      await waitForSettle(activePaneId!, 300, 5000)
+      await waitForSettle(focus.activePaneId!, 300, 5000)
     })
     lastRelayedPromptHash = ''
     await ctx.deleteMessage().catch(() => {})  // remove the question; the reply below stands in for it
@@ -4574,7 +4565,7 @@ bot.on('callback_query:data', async ctx => {
     // Submit: drive the TUI from the top option down, toggling Space on each
     // selected row and Enter at the end. Nothing has moved the cursor since the
     // prompt appeared, so the cursor still rests on the first option.
-    if (!activePaneId || !paneWatcher) {
+    if (!focus.activePaneId || !focus.paneWatcher) {
       await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {})
       return
     }
@@ -4585,19 +4576,19 @@ bot.on('callback_query:data', async ctx => {
       if (i < state.options.length - 1) toggles.push('Down')
     })
     await ctx.answerCallbackQuery({ text: `Submitted ${state.selected.size} selected` }).catch(() => {})
-    await paneWatcher.withInjection(async () => {
-      if (toggles.length) { await sendKeysPaced(activePaneId!, toggles); await waitForSettle(activePaneId!, 250, 4000) }
+    await focus.paneWatcher.withInjection(async () => {
+      if (toggles.length) { await sendKeysPaced(focus.activePaneId!, toggles); await waitForSettle(focus.activePaneId!, 250, 4000) }
       // Even a lone multi-select question has its own Submit tab (reached with Right); landing on
       // it renders "Ready to submit your answers?" with "Submit answers" focused. A swallowed Right
       // (render lag) leaves the cursor on an option row, where Enter TOGGLES that row instead of
       // submitting — wedging the prompt. So press Right until the submit screen actually shows
       // (capped), and only then confirm with Enter — never blind-fire Enter on an option row.
-      for (let i = 0; i < 4 && !isSubmitScreen(await capturePane(activePaneId!).catch(() => '')); i++) {
-        await sendKeys(activePaneId!, ['Right'])
-        await waitForSettle(activePaneId!, 250, 4000)
+      for (let i = 0; i < 4 && !isSubmitScreen(await capturePane(focus.activePaneId!).catch(() => '')); i++) {
+        await sendKeys(focus.activePaneId!, ['Right'])
+        await waitForSettle(focus.activePaneId!, 250, 4000)
       }
-      await sendKeys(activePaneId!, ['Enter'])
-      await waitForSettle(activePaneId!, 300, 6000)
+      await sendKeys(focus.activePaneId!, ['Enter'])
+      await waitForSettle(focus.activePaneId!, 300, 6000)
     })
     pendingMultiSelect.delete(key)
     lastRelayedPromptHash = ''  // allow next prompt to relay
@@ -4818,19 +4809,19 @@ bot.on('message:text', async ctx => {
     if (ft) {
       freeTextReplyTargets.delete(`${ctx.chat?.id}:${replyTo.message_id}`)
       if (!dmCommandGate(ctx)) return
-      if (!activePaneId || !paneWatcher) {
+      if (!focus.activePaneId || !focus.paneWatcher) {
         await ctx.reply('No active Claude Code session with tmux.')
         return
       }
       // The cursor must settle on the "Type something" option before the text is
       // typed — otherwise the field isn't focused and the answer resolves empty
       // (to "__other__"). Settle again after typing so Enter commits the full text.
-      await paneWatcher.withInjection(async () => {
-        await navigateDown(activePaneId!, ft.downCount)
-        await sendKeysLiteral(activePaneId!, text)
-        await waitForSettle(activePaneId!, 150, 2000)
-        await sendKeys(activePaneId!, ['Enter'])
-        await waitForSettle(activePaneId!, 300, 5000)
+      await focus.paneWatcher.withInjection(async () => {
+        await navigateDown(focus.activePaneId!, ft.downCount)
+        await sendKeysLiteral(focus.activePaneId!, text)
+        await waitForSettle(focus.activePaneId!, 150, 2000)
+        await sendKeys(focus.activePaneId!, ['Enter'])
+        await waitForSettle(focus.activePaneId!, 300, 5000)
       })
       lastRelayedPromptHash = ''
       if (ft.tabbed) await handleTabbedAdvance(String(ctx.chat?.id))
@@ -4843,11 +4834,11 @@ bot.on('message:text', async ctx => {
   // input field), not the agent's inbound queue.
   if (replyTo && authUrlMessageIds.has(`${ctx.chat?.id}:${replyTo.message_id}`)) {
     if (!dmCommandGate(ctx)) return
-    if (!activePaneId || !paneWatcher) {
+    if (!focus.activePaneId || !focus.paneWatcher) {
       await ctx.reply('No active Claude Code session with tmux.')
       return
     }
-    const paneId = activePaneId, watcher = paneWatcher
+    const paneId = focus.activePaneId, watcher = focus.paneWatcher
     const email = await watcher.withInjection(async () => {
       if (!(await sendKeysLiteral(paneId, text))) return undefined   // pane gone
       await sendKeys(paneId, ['Enter'])
@@ -4871,7 +4862,7 @@ bot.on('message:text', async ctx => {
       }
       return
     }
-    if (!activePaneId || !paneWatcher) {
+    if (!focus.activePaneId || !focus.paneWatcher) {
       await ctx.reply('No active Claude Code session with tmux.')
       return
     }
@@ -4888,12 +4879,12 @@ bot.on('message:text', async ctx => {
         await ctx.reply('⚠️ This is the only session — confirm exit?', { reply_markup: kb })
         return
       }
-      const label = await paneLabel(activePaneId)
-      await injectSlash(activePaneId, paneWatcher, text)
+      const label = await paneLabel(focus.activePaneId)
+      await injectSlash(focus.activePaneId, focus.paneWatcher, text)
       await ctx.reply(`✅ Session <b>${escapeHtml(label)}</b> exited`, { parse_mode: 'HTML' })
       return
     }
-    void relaySlashCommand(activePaneId, paneWatcher, text, chat_id, msgId)
+    void relaySlashCommand(focus.activePaneId, focus.paneWatcher, text, chat_id, msgId)
     return
   }
 
@@ -4999,12 +4990,12 @@ function handleShimConnection(socket: net.Socket): void {
           // Focus it only when nothing valid holds focus (the first/only session, or
           // a reconnect of the focused pane). Otherwise announce — never steal focus.
           // A pinned pane (FORCE_PANE) holds focus regardless.
-          const adoptionHolds = adoptedPaneId !== null && activePaneId === adoptedPaneId
+          const adoptionHolds = adoptedPaneId !== null && focus.activePaneId === adoptedPaneId
           if (FORCE_PANE) {
             process.stderr.write(`daemon: session ${sessionId} registered (focus pinned to ${FORCE_PANE})\n`)
           } else if (adoptionHolds) {
             announce(orderedSessions().findIndex(o => o.id === sessionId) + 1)
-          } else if (currentSessionId === null || currentSessionId === sessionId || !sessions.has(currentSessionId)) {
+          } else if (focus.currentSessionId === null || focus.currentSessionId === sessionId || !sessions.has(focus.currentSessionId)) {
             setFocus(sessionId)
             replayBuffer()
           } else {
@@ -5109,7 +5100,7 @@ function shutdown(): void {
   if (shuttingDown) return
   shuttingDown = true
   process.stderr.write('telegram daemon: shutting down\n')
-  if (paneWatcher) paneWatcher.stop()
+  if (focus.paneWatcher) focus.paneWatcher.stop()
   try {
     if (parseInt(readFileSync(DAEMON_PID_FILE, 'utf8'), 10) === process.pid) unlinkSync(DAEMON_PID_FILE)
   } catch {}
@@ -5165,8 +5156,8 @@ await new Promise<void>((resolve, reject) => {
 // Off-MCP standalone: pin focus to the configured pane so transcript-outbound can drive
 // a plugin-less session immediately, without waiting for a shim subscribe.
 if (FORCE_PANE) {
-  currentSessionId = FORCE_PANE
-  activePaneId = FORCE_PANE
+  focus.currentSessionId = FORCE_PANE
+  focus.activePaneId = FORCE_PANE
   startPaneWatcher(FORCE_PANE)
   startRelayLoop()
   process.stderr.write(`daemon: focus pinned to ${FORCE_PANE} (TELEGRAM_FORCE_PANE)\n`)
@@ -5206,8 +5197,8 @@ initScheduler({
   bot,
   loadAccess,
   injectToPane: (paneId, text) =>
-    paneId === activePaneId && paneWatcher
-      ? injectPaste(paneId, paneWatcher, text)
+    paneId === focus.activePaneId && focus.paneWatcher
+      ? injectPaste(paneId, focus.paneWatcher, text)
       : pasteToPane(paneId, text),
 })
 loadScheduledMsgs()
@@ -5218,7 +5209,7 @@ initMirror({
   bot,
   loadAccess,
   replyMode,
-  getActivePaneId: () => activePaneId,
+  getActivePaneId: () => focus.activePaneId,
   retriggerTyping: () => typingPresence.retrigger(),
 })
 

@@ -9,7 +9,20 @@
 // NOTE: reassigned scalar `let` flags (focus pointers, relay/mirror counters) still live in
 // daemon.ts; they migrate into their domain modules in a later phase.
 import type { DaemonToShim } from './common.ts'
-import type { Access, Session, PendingMultiSelect, FreeTextPrompt, ChatPrompt } from './types.ts'
+import type { Access, Session, PendingMultiSelect, FreeTextPrompt, ChatPrompt, ActiveShim } from './types.ts'
+import type { PaneWatcher } from './pane-io.ts'
+
+// ---- Focused-session pointers ----
+// The daemon mirrors the focused session into these four live pointers so the rest of the code
+// reads "the current pane/shim/watcher" without walking the session registry. They were reassigned
+// module `let`s in daemon.ts; a holder object lets session logic (and any extracted module) read
+// AND write them through a shared reference. setFocus() is the single writer.
+export const focus = {
+  activeShim: null as ActiveShim | null,
+  activePaneId: null as string | null,
+  paneWatcher: null as PaneWatcher | null,
+  currentSessionId: null as string | null,
+}
 
 // ---- Access / prefs ----
 export const _accessFileCache = new Map<string, { mtimeMs: number; size: number; data: Partial<Access> }>()
