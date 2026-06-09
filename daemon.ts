@@ -931,6 +931,12 @@ async function announceAdopted(paneId: string): Promise<void> {
 // Point the bridge at an off-MCP pane (no shim socket): drive it directly and read its
 // transcript. Used by initial adoption and when switching to a discovered sibling pane.
 function focusOffMcpPane(paneId: string): void {
+  // Re-focusing the pane we're already driving is a no-op — NOT a teardown. discoverPanes can
+  // re-adopt the same pane when a transient `paneAlive` timeout (tmux busy under load — i.e. mid
+  // -turn) makes it briefly read as "no focus". Tearing down here would abandonMirror() the live
+  // card (freezing it) and re-prime the relay cursor, splitting one work burst across two stream
+  // messages. Bail before any of that when nothing actually changed.
+  if (paneId === focus.activePaneId && focus.paneWatcher) return
   if (focus.paneWatcher) { focus.paneWatcher.stop(); focus.paneWatcher = null }
   adoptedPaneId = paneId
   focus.currentSessionId = paneId
@@ -978,7 +984,11 @@ async function discoverPanes(): Promise<void> {
   const live = new Set(panes)
   for (const p of [...offMcpPanes]) if (!live.has(p)) offMcpPanes.delete(p)
 
-  const haveFocus = !!focus.activePaneId && await paneAlive(focus.activePaneId)
+  // A single `paneAlive` miss is usually a transient tmux timeout under load, not a dead pane —
+  // confirm a "lost" focus with a second check before re-adopting, so a busy-tmux blip doesn't
+  // churn focus (and split the live mirror) out from under an active session.
+  let haveFocus = !!focus.activePaneId && await paneAlive(focus.activePaneId)
+  if (!haveFocus && focus.activePaneId) haveFocus = await paneAlive(focus.activePaneId)
   if (!haveFocus && panes.length) {
     // Prefer the pane we were on before (persisted by adoptPane) if it's still a live
     // candidate, so focus survives a daemon restart instead of snapping back to panes[0].

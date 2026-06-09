@@ -34,6 +34,11 @@ const MIRROR_TOOLS = 5         // tools mode: max tool rows shown (newest replac
 const MIRROR_FINALIZE_TICKS = 3   // ~4.5s sustained idle (RELAY_POLL_MS=1500) before capping the card
 const MIRROR_FEED = 5        // hybrid: max interleaved items shown (matches tools & thoughts)
 const MIRROR_THOUGHTS = 5    // thoughts mode: max thoughts shown (oldest falls off as new flow in)
+// The status footer (verb · elapsed · tokens) is DISABLED for now — it doesn't track reliably yet
+// (verb/token scraping off the spinner line is flaky). The whole machinery (mirrorFooter,
+// fmtElapsed, the verb/token scrape in syncMirrorBody) is kept intact; flip this to re-enable it
+// once it can be made dependable. While false, composeCard renders the body only.
+const MIRROR_FOOTER_ENABLED = false
 
 const mirrorMsgIds = new Map<string, number>()   // chat_id → the live mirror message id
 // Consecutive not-working ticks. The card is finalized (one ✅ Done, then a fresh card on the next
@@ -241,7 +246,7 @@ async function syncMirrorBody(done: boolean): Promise<boolean> {
 
 // The card text = cached body + the live footer (omitted when done; the body already ends in ✅ Done).
 function composeCard(done: boolean): string {
-  if (done || !mirrorBody) return mirrorBody
+  if (done || !mirrorBody || !MIRROR_FOOTER_ENABLED) return mirrorBody
   const footer = mirrorFooter()
   return footer ? `${mirrorBody}\n\n${footer}` : mirrorBody
 }
