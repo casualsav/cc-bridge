@@ -1547,6 +1547,18 @@ async function relayPromptToTelegram(prompt: PromptInfo): Promise<void> {
   const targets = access.allowFrom
   if (targets.length === 0 || !focus.activePaneId) return
 
+  // The menu is detected from the PANE the instant it appears, but the message Claude wrote just
+  // before an AskUserQuestion lands in the transcript a beat later — and that message is the CONTEXT
+  // for the question, so it must arrive FIRST. Wait up to 2s for it to land (breaking the moment it
+  // does, so there's no fixed penalty), then flush it before sending the menu. Permission/login
+  // prompts take their own instant paths, so only these select menus ever wait — and only until the
+  // preamble shows up.
+  const cwd = await paneCwd(focus.activePaneId).catch(() => null)
+  const file = cwd ? resolveTranscript(cwd) : null
+  for (let waited = 0; file && waited < 2000; waited += 250) {
+    if (finalRepliesAfter(file, lastRelayedUuid).some(r => r.uuid && r.uuid !== lastRelayedUuid)) break
+    await sleep(250)
+  }
   await flushPendingText()   // preamble text must land before the menu
   const text = renderPromptHtml(prompt)
 

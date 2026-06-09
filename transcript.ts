@@ -52,14 +52,6 @@ function isMainAssistantText(e: Entry): boolean {
   return e.type === 'assistant' && !e.isSidechain && textOf(e.message?.content).trim() !== ''
 }
 
-// Whether an assistant entry is a turn CONCLUSION vs mid-turn narration. The model only stops
-// with stop_reason 'tool_use' when it's pausing to call a tool — i.e. it will continue — so
-// that (and only that) is narration. end_turn / stop_sequence / an unrecorded null all mean the
-// turn wrapped up. This replaces the fragile "text after the last tool_use" heuristic.
-function isConclusionEntry(e: Entry): boolean {
-  return e.message?.stop_reason !== 'tool_use'
-}
-
 // A resumable session: id, its working dir, last-activity time, and a short title (the
 // first real user message). For the /resume picker.
 export type RecentSession = { sessionId: string; cwd: string; mtime: number; title: string }
@@ -266,14 +258,21 @@ export function turnInProgress(file: string): boolean {
   for (let i = entries.length - 1; i >= 0; i--) {
     if (entries[i].type === 'user' && !entries[i].isSidechain && textOf(entries[i].message?.content).trim()) { start = i; break }
   }
-  let sawAssistant = false, concluded = false
+  // The turn is running iff the LATEST main-thread assistant entry is still awaiting a tool
+  // (stop_reason 'tool_use'). The moment the model finishes (end_turn / stop / max_tokens) the turn
+  // is concluded — even when the final reply text shared its entry with a trailing tool call (tg
+  // react / file send / TodoWrite) and the closing entry carries no text of its own. Keying on the
+  // last assistant entry's stop_reason (rather than "some TEXT entry concluded") fixes the ~3% case
+  // where such a reply never concluded, so it folded into the live card instead of relaying as its
+  // own message. A no-tools turn (user → end_turn text) still concludes immediately → no card.
+  let lastAssistant: Entry | null = null
   for (let i = start + 1; i < entries.length; i++) {
     const e = entries[i]
     if (e.isSidechain || e.type !== 'assistant') continue
-    sawAssistant = true
-    if (textOf(e.message?.content).trim() && isConclusionEntry(e)) concluded = true
+    lastAssistant = e
   }
-  return sawAssistant && !concluded
+  if (!lastAssistant) return false
+  return lastAssistant.message?.stop_reason === 'tool_use'
 }
 
 // The current turn's chronological feed of what Claude said and did — text narration and tool
