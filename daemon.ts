@@ -2695,7 +2695,7 @@ async function updateClaude(chat: string): Promise<void> {
     await dm(`✅ Claude updated <b>v${escapeHtml(before ?? '?')}</b> → <b>v${escapeHtml(after)}</b>.\n\nRestart this session now to apply it to the running conversation?`,
       new InlineKeyboard().text('♻️ Restart session now', 'claudeupd:restart'))
   } else {
-    await dm(`✅ Claude is already up to date (<b>v${escapeHtml(after ?? before ?? '?')}</b>).`)
+    await dm(`✅ Claude is now up to date (<b>v${escapeHtml(after ?? before ?? '?')}</b>)`)
   }
 }
 
