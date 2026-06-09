@@ -3275,10 +3275,10 @@ function lastModelInTranscript(file: string): string | null {
   }
   return null
 }
-// Family name only — "Opus" / "Sonnet" / "Haiku" (no version), for the pin tagline.
+// Family name only — "Opus" / "Sonnet" / "Haiku" / "Fable" (no version), for the pin tagline.
 function prettyModel(id: string | null): string | null {
   if (!id) return id
-  const m = id.match(/(opus|sonnet|haiku)/i)
+  const m = id.match(/(opus|sonnet|haiku|fable)/i)
   return m ? m[1][0].toUpperCase() + m[1].slice(1).toLowerCase() : id
 }
 
