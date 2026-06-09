@@ -11,7 +11,7 @@ import { join, extname, basename, sep } from 'node:path'
 import { execFileSync, spawn } from 'node:child_process'
 import net from 'node:net'
 import {
-  frame, makeLineReader, computeCodeFingerprint,
+  frame, makeLineReader, computeCodeFingerprint, tConfig,
   STATE_DIR, ACCESS_FILE, PREFS_FILE, APPROVED_DIR, ENV_FILE, INBOX_DIR,
   SOCKET_PATH, DAEMON_PID_FILE, PENDING_EVENTS_FILE,
   DAEMON_LOG_FILE, WATCHDOG_PID_FILE, HEARTBEAT_FILE,
@@ -48,6 +48,8 @@ import {
   STATIC, initAccess, loadAccess, saveAccess, gate, dmCommandGate, isMentioned,
   pruneExpired, defaultAccess, type GateResult,
 } from './access.ts'
+import { TypingPresence } from './typing.ts'
+import { transcribe, transcribeProvider, transcribeStatus } from './voice.ts'
 import { parseDuration, formatDuration, fmtWhen } from './time.ts'
 import {
   initScheduler, loadScheduledMsgs, cancelScheduled, addScheduled, scheduledCount,
@@ -195,63 +197,10 @@ initAccess({ getBotUsername: () => botUsername })
 //
 // This is self-correcting by construction: the ping timer always runs, gated only on the
 // window, so it can never get stuck on (work ends → window lapses → ~GRACE+5s tail) or
-// stuck off (work seen → window reopens → typing resumes). No optimistic/dead-timer edge cases.
-// Telegram's "typing…" expires ~5s after each send_chat_action, so it must be refreshed on a
-// tight cadence. Modeled on Hermes' approach (which is rock-solid): an independent timer, NOT
-// inferred per-tick from a flaky "is it working" signal, but driven by an explicit lifecycle —
-// armed when we inject a message, stopped the instant the reply is relayed. `observe()` (from the
-// transcript's turnInProgress) is only a keep-alive/robustness layer on top, not the primary gate.
-class TypingPresence {
-  private chats = new Set<string>()             // chats that have messaged — where typing shows
-  private workingUntil = 0                      // rolling keep-alive while work is observed
-  private pendingUntil = 0                      // startup latch: armed on inbound until first observed work
-  private timer: ReturnType<typeof setInterval> | null = null
-  private static readonly PING_MS = 2_000          // « Telegram's ~5s expiry — 2.5x safety margin (Hermes uses 2s)
-  private static readonly WORK_GRACE_MS = 8_000    // keep-alive after the last observed work tick (poll is 1.5s)
-  private static readonly START_GRACE_MS = 60_000  // startup latch cap: hold typing through Claude's pre-first-token
-                                                   // "thinking" (turnInProgress can't see it yet); bounded so a
-                                                   // no-reply message can't pin the indicator on
-  private static readonly SEND_TIMEOUT_MS = 1_500  // abandon a slow send so it can't pile up / stall the cadence
-
-  private active(): boolean { const n = Date.now(); return n < this.workingUntil || n < this.pendingUntil }
-
-  private pingAll(): void {
-    for (const chat of this.chats)
-      void bot.api.sendChatAction(chat, 'typing', {}, AbortSignal.timeout(TypingPresence.SEND_TIMEOUT_MS)).catch(() => {})
-  }
-  private ensureTimer(): void {
-    if (!this.timer) this.timer = setInterval(() => { if (this.active()) this.pingAll() }, TypingPresence.PING_MS)
-  }
-
-  // An inbound message was injected — show presence now and latch it through Claude's startup
-  // "thinking" phase (before the first transcript entry, when observe() is still blind).
-  arm(chat_id: string): void {
-    this.chats.add(chat_id)
-    this.pendingUntil = Date.now() + TypingPresence.START_GRACE_MS
-    this.pingAll()
-    this.ensureTimer()
-  }
-
-  // turnInProgress from each relay tick. Working extends the rolling keep-alive AND ends the
-  // startup latch (Claude has begun). It also re-arms typing if a fresh turn starts right after a
-  // stop() (e.g. two messages answered back-to-back). Not-working does nothing.
-  observe(working: boolean): void {
-    if (working) { this.workingUntil = Date.now() + TypingPresence.WORK_GRACE_MS; this.pendingUntil = 0; this.ensureTimer() }
-  }
-
-  // The reply has been relayed (or the turn was interrupted): stop typing immediately — Telegram
-  // clears it on the reply's own send, and we don't refresh again, so it vanishes the moment the
-  // answer lands. This is the Hermes "clean stop in finally" — no lingering tail.
-  stop(): void { this.workingUntil = 0; this.pendingUntil = 0 }
-
-  // Re-assert typing right after the daemon sends a non-final message (e.g. the live mirror) —
-  // Telegram clears it on every send, so without this it blinks off until the next tick.
-  retrigger(): void {
-    if (this.chats.size && this.active()) this.pingAll()
-  }
-}
-
-const typingPresence = new TypingPresence()
+// stuck off (work seen → window reopens → typing resumes). The class lives in typing.ts; the
+// bot is injected here. `observe()` (from the transcript's turnInProgress) is a keep-alive layer
+// on top of the explicit arm()/stop() lifecycle, not the primary gate.
+const typingPresence = new TypingPresence(bot)
 
 // ---- Pane / tmux layer ----
 
@@ -1741,81 +1690,8 @@ function sweepInbox(): void {
 // model or a hosted Whisper API — so it never consumes Claude usage; only the
 // resulting text reaches the session. Backend is chosen at install time via
 // TELEGRAM_TRANSCRIBE (off | local | groq | openai); see ACCESS.md.
-type TranscribeProvider = 'off' | 'local' | 'groq' | 'openai'
-
-// Transcription config is read live from the .env file (process env as
-// fallback) on each call, so /telegram:configure changes apply on the next
-// voice message without restarting the long-lived daemon. The .env file wins
-// for these keys because the configure skill writes there.
-function tConfig(key: string): string | undefined {
-  try {
-    for (const line of readFileSync(ENV_FILE, 'utf8').split('\n')) {
-      const m = line.match(/^(\w+)=(.*)$/)
-      if (m && m[1] === key) return m[2]
-    }
-  } catch {}
-  return process.env[key]
-}
-
-function transcribeProvider(): TranscribeProvider {
-  return (tConfig('TELEGRAM_TRANSCRIBE') ?? 'off').toLowerCase() as TranscribeProvider
-}
-
-// Returns the transcript, or null if disabled/unconfigured/failed (caller falls
-// back to a placeholder so a bad transcription never drops the message).
-async function transcribe(audioPath: string): Promise<string | null> {
-  const provider = transcribeProvider()
-  const model = tConfig('TELEGRAM_TRANSCRIBE_MODEL') ?? ''
-  try {
-    switch (provider) {
-      case 'groq':
-        return await transcribeHttp(audioPath,
-          'https://api.groq.com/openai/v1/audio/transcriptions',
-          tConfig('GROQ_API_KEY'), model || 'whisper-large-v3-turbo')
-      case 'openai':
-        return await transcribeHttp(audioPath,
-          'https://api.openai.com/v1/audio/transcriptions',
-          tConfig('OPENAI_API_KEY'), model || 'whisper-1')
-      case 'local':
-        return await transcribeLocal(audioPath, model || 'base')
-      default:
-        return null
-    }
-  } catch (err) {
-    process.stderr.write(`daemon: transcription (${provider}) failed: ${err}\n`)
-    return null
-  }
-}
-
-// OpenAI-compatible audio transcription endpoint (covers OpenAI and Groq).
-async function transcribeHttp(
-  audioPath: string, endpoint: string, apiKey: string | undefined, model: string,
-): Promise<string | null> {
-  if (!apiKey) {
-    process.stderr.write(`daemon: transcription enabled but API key missing for ${endpoint}\n`)
-    return null
-  }
-  const form = new FormData()
-  form.append('file', new Blob([readFileSync(audioPath)]), basename(audioPath))
-  form.append('model', model)
-  form.append('response_format', 'text')
-  const res = await fetch(endpoint, { method: 'POST', headers: { Authorization: `Bearer ${apiKey}` }, body: form })
-  if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`)
-  return (await res.text()).trim() || null
-}
-
-// Local faster-whisper via the bundled Python helper (no API, fully private).
-async function transcribeLocal(audioPath: string, model: string): Promise<string | null> {
-  const python = tConfig('TELEGRAM_WHISPER_PYTHON') || 'python3'
-  const script = join(import.meta.dir, 'transcribe_local.py')
-  const env = { ...process.env }
-  const device = tConfig('TELEGRAM_WHISPER_DEVICE'); if (device) env.TELEGRAM_WHISPER_DEVICE = device
-  const compute = tConfig('TELEGRAM_WHISPER_COMPUTE'); if (compute) env.TELEGRAM_WHISPER_COMPUTE = compute
-  const { stdout } = await exec(python, [script, audioPath, model], {
-    timeout: 300_000, maxBuffer: 10 * 1024 * 1024, env,
-  })
-  return stdout.trim() || null
-}
+// The transcription engine (provider routing + transcribe*/transcribeStatus) lives in voice.ts;
+// the bot/ctx-coupled glue below (nudge, on-demand provisioning, the inbound builder) stays here.
 
 // Chats already nudged about disabled transcription (in-memory; one hint per
 // chat per daemon run is enough).
@@ -2919,10 +2795,6 @@ function toggleMcp(): void {
     if (existsSync(on)) renameSync(on, off)
     else if (existsSync(off)) renameSync(off, on)
   } catch (e) { process.stderr.write(`daemon: mcp toggle failed: ${e}\n`) }
-}
-function transcribeStatus(): string {
-  try { return readFileSync(ENV_FILE, 'utf8').match(/TELEGRAM_TRANSCRIBE=(\S+)/)?.[1]?.replace(/['"]/g, '') || 'off' }
-  catch { return 'off' }
 }
 // Set/remove keys in .env, preserving everything else and the 600 perms.
 function writeEnvVars(updates: Record<string, string | null>): void {

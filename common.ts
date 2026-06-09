@@ -30,6 +30,19 @@ try {
   }
 } catch {}
 
+// Read a single key live from the .env file (process.env as fallback), so /telegram:configure
+// edits apply on the next read without restarting the long-lived daemon. The .env file wins for
+// these keys because the configure skill writes there. Used by the voice engine + inbox TTL.
+export function tConfig(key: string): string | undefined {
+  try {
+    for (const line of readFileSync(ENV_FILE, 'utf8').split('\n')) {
+      const m = line.match(/^(\w+)=(.*)$/)
+      if (m && m[1] === key) return m[2]
+    }
+  } catch {}
+  return process.env[key]
+}
+
 // Newline-delimited JSON framing (opus-direct).
 // JSON.stringify never emits a raw newline inside strings (control chars are
 // escaped as \n → "\\n"), so '\n' is an unambiguous frame delimiter.
