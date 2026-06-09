@@ -177,7 +177,7 @@ export function renderHybridMirror(feed: FeedItem[], done: boolean): string {
   for (const it of feed.slice(-MIRROR_FEED)) {
     if (it.kind === 'text') {
       const html = mdToTelegramHtml(it.text.trim()).trim()
-      if (html) lines.push(`🗨️ ${html}`)                  // thought: 🗨️ sets it apart from the tool badges
+      if (html) lines.push(`<blockquote>🗨️ ${html}</blockquote>`)   // thought: shaded blockquote sets it apart from the tool badges
     } else {
       const [emoji, label] = toolBadge(it.tool)
       const d = it.detail ? `: <code>${escapeHtml(it.detail)}</code>` : ''
@@ -204,7 +204,7 @@ export function renderThoughtsMirror(feed: FeedItem[], done: boolean): string {
   while (body.length > 3500 && rendered.length > 1) { rendered.shift(); body = rendered.join('\n\n') }
   if (body.length > 3500) body = chunkHtml(body, 3500)[0] ?? body.slice(0, 3500)
   if (!body) return done ? '✅ <b>Done</b>' : ''
-  const head = `💭 ${body}`   // a single thought-bubble leads the card (before the top thought)
+  const head = `<blockquote>💭 ${body}</blockquote>`   // thoughts shaded in a blockquote; ✅ Done stays outside it
   return done ? `${head}\n\n✅ <b>Done</b>` : head
 }
 

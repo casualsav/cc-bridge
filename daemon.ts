@@ -753,7 +753,7 @@ function replyMode(): 'thoughts' | 'tools' | 'hybrid' | 'off' {
   if (v === 'tools' || v === 'final') return 'tools'
   if (v === 'off') return 'off'
   if (v === 'hybrid' || v === 'live') return 'hybrid'
-  return 'thoughts'   // default (unset)
+  return 'hybrid'   // default (unset)
 }
 
 
