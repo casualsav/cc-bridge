@@ -3748,7 +3748,10 @@ async function doSessionList(ctx: Context): Promise<void> {
 }
 
 // Friendly last-activity stamp: relative for the last day, absolute date+time beyond that.
-function fmtWhen(ms: number): string {
+// NB: distinct from time.ts's fmtWhen (absolute UTC fire-time). This is "5m ago"-style for the
+// /resume session list; the two were both named fmtWhen historically, and the later declaration
+// silently shadowed the absolute one — making /schedule confirmations read "just now". Renamed.
+function fmtAgo(ms: number): string {
   const mins = Math.floor((Date.now() - ms) / 60_000)
   if (mins < 1) return 'just now'
   if (mins < 60) return `${mins}m ago`
@@ -3768,7 +3771,7 @@ bot.command('resume', async ctx => {
     const title = s.title ? ` — <i>${escapeHtml(s.title)}</i>` : ''
     kb.text(`${i + 1}`, `resume:${s.sessionId}`)
     if ((i + 1) % 5 === 0) kb.row()
-    return `${i + 1}. <b>${escapeHtml(folder)}</b> · ${fmtWhen(s.mtime)}${title}`
+    return `${i + 1}. <b>${escapeHtml(folder)}</b> · ${fmtAgo(s.mtime)}${title}`
   })
   await ctx.reply(
     `🕘 <b>Recent sessions</b>\n${lines.join('\n')}\n\nTap a number to resume it in a new pane.`,
