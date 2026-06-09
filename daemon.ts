@@ -2673,7 +2673,11 @@ async function restartFocusedSession(chat: string): Promise<void> {
   await focus.paneWatcher.withInjection(async () => {
     await sendKeys(pane, ['/exit', 'Enter'])
     for (let i = 0; i < 40 && (await paneCommand(pane)) === 'claude'; i++) await waitForSettle(pane, 200, 1500)
-    await sendKeys(pane, [`hash -r; claude --allow-dangerously-skip-permissions --resume ${id}`, 'Enter'])
+    // Relaunch by ABSOLUTE path to the binary `claude install` manages (claudeBin), not bare
+    // `claude` — a stale npm-global claude earlier on the pane's PATH would otherwise resume the old
+    // version. `hash -r` stays as hygiene (clears any cached lookup) but the absolute path is what
+    // guarantees the resumed session runs the freshly-installed build regardless of PATH ordering.
+    await sendKeys(pane, [`hash -r; ${claudeBin()} --allow-dangerously-skip-permissions --resume ${id}`, 'Enter'])
     await waitForSettle(pane, 400, 30_000)
   })
   await dm('✅ Session restarted on the new Claude — your conversation was resumed.')
