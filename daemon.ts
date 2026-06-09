@@ -2683,24 +2683,28 @@ async function restartFocusedSession(chat: string): Promise<void> {
   await dm('✅ Session restarted on the new Claude — your conversation was resumed.')
 }
 
-// Run `claude update` in the background; if it moved the version, offer a one-tap session restart.
+// `/update claude` — do the whole thing, no button, no manual relaunch:
+//   message → `claude install` → exit the running session → hash -r → resume it on the new binary.
+// `claude install` (not `claude update`) installs the native build into the user's own dir, so it
+// works without root / a writable global npm prefix. We ALWAYS bounce the live session afterwards
+// (not only when the version string moved): the running session may have launched from a different,
+// older claude than the one we just installed — e.g. a stale npm-global claude shadowing the native
+// install on PATH — so a version-delta check alone would wrongly conclude "already up to date" and
+// leave the session on the old binary. restartFocusedSession resumes by ABSOLUTE native path, so the
+// resumed conversation lands on the freshly-installed build regardless of PATH ordering.
 async function updateClaude(chat: string): Promise<void> {
-  const dm = (t: string, kb?: InlineKeyboard) =>
-    bot.api.sendMessage(chat, t, { parse_mode: 'HTML', ...(kb ? { reply_markup: kb } : {}) }).catch(() => {})
-  await dm('🧠 Updating Claude in the background…')
+  const dm = (t: string) => bot.api.sendMessage(chat, t, { parse_mode: 'HTML' }).catch(() => {})
+  await dm('🧠 Updating Claude — installing, then resuming this session on it…')
   const before = await claudeVersion()
-  // `claude install` (not `claude update`): installs the native build into the user's own dir, so it
-  // works without root / a writable global npm prefix. The follow-up `hash -r` on session restart
-  // makes the pane's shell forget any cached path to the old binary.
   try { await exec(claudeBin(), ['install'], { timeout: 300_000 }) }
-  catch (e) { await dm(`❌ Claude update failed.\n<code>${escapeHtml(String((e as { stderr?: string })?.stderr || e).slice(0, 300))}</code>`); return }
+  catch (e) { await dm(`❌ Claude install failed.\n<code>${escapeHtml(String((e as { stderr?: string })?.stderr || e).slice(0, 300))}</code>`); return }
   const after = await claudeVersion()
-  if (after && after !== before) {
-    await dm(`✅ Claude updated <b>v${escapeHtml(before ?? '?')}</b> → <b>v${escapeHtml(after)}</b>.\n\nRestart this session now to apply it to the running conversation?`,
-      new InlineKeyboard().text('♻️ Restart session now', 'claudeupd:restart'))
-  } else {
-    await dm(`✅ Claude is now up to date (<b>v${escapeHtml(after ?? before ?? '?')}</b>)`)
-  }
+  await dm(after && before && after !== before
+    ? `✅ Claude installed <b>v${escapeHtml(before)}</b> → <b>v${escapeHtml(after)}</b>.`
+    : `✅ Claude installed (<b>v${escapeHtml(after ?? before ?? '?')}</b>).`)
+  // Resume the focused session onto it (exit → hash -r → resume by absolute native path).
+  if (focus.activePaneId && focus.paneWatcher) await restartFocusedSession(chat)
+  else await dm('No active session to resume — start one to use the new Claude.')
 }
 
 async function showUpdateDashboard(ctx: Context): Promise<void> {
