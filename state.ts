@@ -38,9 +38,6 @@ export const lastRelayedByFile = new Map<string, string>()
 export const unreadNotified = new Map<string, string>()
 export const unreadNotifMsgs = new Map<string, Map<string, number>>()
 
-// ---- Live mirror ----
-export const mirrorMsgIds = new Map<string, number>()   // chat_id → the live mirror message id
-
 // ---- Off-MCP panes ----
 export const offMcpPanes = new Set<string>()
 
