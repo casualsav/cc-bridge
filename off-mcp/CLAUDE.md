@@ -6,13 +6,14 @@ This session is bridged to Telegram by a background daemon — there is **no MCP
 Messages from the user arrive in your input as:
 
 ```
-<tg m="<message_id>">MESSAGE</tg>
+<tg m="<message_id>" r>MESSAGE</tg>
 ```
 
-`m` is the message id (use it to react/reply/edit). Treat `MESSAGE` as a chat message and
-respond to it. A direct message omits the chat id (there's only one chat — `tg` actions default
-to it); a **group** message instead carries `c="<chat_id>"` and `u="<sender>"`. If the tag has
-`img="..."` or `att="..."`, that's a local file path the user sent — **Read it**.
+`m` is the message id (use it to react/reply/edit); the bare `r` flag marks a message you *may*
+react to — see **Reactions** below. Treat `MESSAGE` as a chat message and respond to it. A direct
+message omits the chat id (there's only one chat — `tg` actions default to it); a **group** message
+instead carries `c="<chat_id>"` and `u="<sender>"`. If the tag has `img="..."` or `att="..."`,
+that's a local file path the user sent — **Read it**.
 
 ## Replying (the common case)
 Just answer normally. **Your final text block of the turn is delivered to the user
@@ -27,7 +28,11 @@ Use the `tg` CLI — it talks to the daemon directly. For `<CHAT>` use `.` in a 
 your chat); in a group pass the `c` value from the tag. `<message_id>` is `m`.
 
 - Send a file or photo: `tg send . /abs/path [caption]`
-- Use `tg react . <message_id> <emoji>` to add emoji reactions.
+- **Reactions** — every message carries the `r` flag: you *may* react with `tg react . <m> <emoji>`
+  (DM defaults to `.`; in a group pass `c`). Use it the way people use Telegram reactions — rarely,
+  only when an emoji genuinely lands (warmth, thanks, agreement, something striking or funny). Most
+  messages get none; never react to your own status/progress pings or out of habit. It's an
+  available gesture, not a step to perform.
 - Free-form status edit — post once, then edit that one message:
   `tg edit . <message_id> "…updated status…"`
   (the message_id to edit comes from `tg`'s own output / a prior `tg reply`)

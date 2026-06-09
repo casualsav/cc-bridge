@@ -499,7 +499,6 @@ function orderedSessions(): { id: string; s: Session }[] {
 function setFocus(sessionId: string | null): void {
   if (focus.paneWatcher) { focus.paneWatcher.stop(); focus.paneWatcher = null }
   focus.currentSessionId = sessionId
-  if (sessionId) reactionCueArmed = true   // fresh focus → re-surface the reaction affordance once
   const s = sessionId ? sessions.get(sessionId) ?? null : null
   focus.activeShim = s ? { socket: s.socket, write: s.write } : null
   focus.activePaneId = s?.paneId ?? null
@@ -599,7 +598,11 @@ function formatChannelBlock(params: InboundParams): string {
   // Groups keep c so the agent targets the right chat.
   const isDm = !!m.user_id && m.chat_id === m.user_id
   if (m.chat_id && !isDm) a.push(`c="${esc(m.chat_id)}"`)
-  if (m.message_id) a.push(`m="${esc(m.message_id)}"`)
+  // `m` is the react/reply handle; the bare `r` flag right after it is the standing reaction
+  // affordance — an ambient "you may react to this" on every message, decoded by CLAUDE.md (which
+  // also carries the when: sparingly, only when it genuinely lands). Replaces the old verbose
+  // once-per-context cue; ~2 chars keeps it alive without nudging the model into routine reactions.
+  if (m.message_id) { a.push(`m="${esc(m.message_id)}"`); a.push('r') }
   if (m.user && m.user_id && m.chat_id !== m.user_id) a.push(`u="${esc(m.user)}"`)   // group → keep sender
   if (m.image_path) a.push(`img="${esc(m.image_path)}"`)
   if (m.attachment_path) a.push(`att="${esc(m.attachment_path)}"`)
@@ -610,29 +613,11 @@ function formatChannelBlock(params: InboundParams): string {
 // close together would otherwise drive the same pane concurrently and interleave
 // keystrokes. A failed inject (pane died mid-send) re-buffers for the next session.
 let inboundInjectChain: Promise<unknown> = Promise.resolve()
-// Reaction-affordance cue (off-mcp). In MCP mode `react` is a first-class tool the harness
-// re-surfaces every turn, so the model naturally reaches for it; off-mcp has only the `tg react`
-// CLI, taught once in CLAUDE.md, whose pull fades as the context window fills. To re-surface the
-// affordance *without* a per-request tax, append a one-line nudge to the FIRST inbound after a
-// fresh context (daemon start, pane focus/adoption, /new) and after a long idle gap (likely a
-// compaction). It fires at most once per fresh context, so it amortizes to ~nothing.
-let reactionCueArmed = true
-let lastInboundAt = 0
-const REACTION_CUE_IDLE_MS = 30 * 60_000
-function maybeReactionCue(params: InboundParams): string {
-  const m = params.meta
-  if (!m.message_id) return ''
-  const now = Date.now()
-  const armed = reactionCueArmed || (lastInboundAt > 0 && now - lastInboundAt > REACTION_CUE_IDLE_MS)
-  lastInboundAt = now
-  if (!armed) return ''
-  reactionCueArmed = false
-  const isDm = !!m.user_id && m.chat_id === m.user_id
-  const target = isDm ? '.' : m.chat_id
-  return `\n(Use \`tg react ${target} ${m.message_id} <emoji>\` to add emoji reactions.)`
-}
+// The reaction affordance now rides on every message as the bare `r` flag in the tag (see
+// formatChannelBlock) — ambient and ~free — instead of a verbose once-per-context nudge, so it
+// stays alive without driving routine reactions. CLAUDE.md decodes `r` and sets the when (sparing).
 function enqueueInboundInject(paneId: string, watcher: PaneWatcher, params: InboundParams): void {
-  const block = formatChannelBlock(params) + maybeReactionCue(params)
+  const block = formatChannelBlock(params)
   // If an effort-change confirmation is open and the user sent a message instead of tapping, dismiss
   // it first (= "No, go back", keeps the current level) so the message doesn't type into the modal.
   const run = () => dismissPendingEffortConfirm()
@@ -949,7 +934,6 @@ function focusOffMcpPane(paneId: string): void {
   if (focus.paneWatcher) { focus.paneWatcher.stop(); focus.paneWatcher = null }
   adoptedPaneId = paneId
   focus.currentSessionId = paneId
-  reactionCueArmed = true   // newly adopted/switched off-mcp pane → re-surface the reaction affordance
   focus.activePaneId = paneId
   focus.activeShim = null
   lastRelayedPromptHash = ''
@@ -2042,7 +2026,6 @@ async function handleModeCommand(
 // model). Callers ensure focus.activePaneId/focus.paneWatcher are set.
 async function performReset(command: string): Promise<string> {
   await injectSlash(focus.activePaneId!, focus.paneWatcher!, command)
-  reactionCueArmed = true   // context cleared by /new or /clear → re-surface the reaction affordance
 
   const model = await readCurrentModel(focus.activePaneId!, focus.paneWatcher!)
   const head = command === '/clear' ? '🧹 Conversation cleared' : '✅ New session started'
