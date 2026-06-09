@@ -258,6 +258,7 @@ async function verifyPromptClosed(): Promise<void> {
   })
   lastRelayedPromptHash = ''
   lastRelayedPermissionHash = ''
+  promptRelayOutstanding = false
   notifyChats('⚠️ That answer didn’t register cleanly in the session — I dismissed the prompt so the terminal wouldn’t hang. Please try again.')
 }
 
@@ -504,6 +505,7 @@ function setFocus(sessionId: string | null): void {
   focus.activePaneId = s?.paneId ?? null
   lastRelayedPromptHash = ''
   lastRelayedPermissionHash = ''
+  promptRelayOutstanding = false
   lastRelayedAuthUrl = ''
   if (focus.activePaneId) { startPaneWatcher(focus.activePaneId); startRelayLoop() }
   void updateSessionPin()
@@ -551,6 +553,11 @@ function notifyChats(text: string, extra?: { reply_markup?: InlineKeyboard; pars
 // Tracks the last prompt sent to Telegram to avoid double-relay.
 let lastRelayedPromptHash = ''
 let lastRelayedPermissionHash = ''
+// A select/permission prompt has been relayed and not yet answered/dismissed. While it's true we
+// never relay another menu — so a prompt whose rendering repaints (e.g. AskUserQuestion's side-by-
+// side preview, which bleeds varying text into the parsed options and shifts the hash) can't be
+// relayed two or three times. Cleared the moment the pane no longer shows a menu (answered/closed).
+let promptRelayOutstanding = false
 
 // In-flight multi-select prompts, keyed by `${chatId}:${messageId}` of the relayed
 // Telegram message. Each tap toggles an index in `selected`; Submit replays the
@@ -947,6 +954,7 @@ function focusOffMcpPane(paneId: string): void {
   focus.activeShim = null
   lastRelayedPromptHash = ''
   lastRelayedPermissionHash = ''
+  promptRelayOutstanding = false
   lastRelayedAuthUrl = ''
   startPaneWatcher(paneId)
   startRelayLoop()
@@ -1408,18 +1416,21 @@ function onPaneEvent(text: string): void {
   const perm = detectPermissionPrompt(text)
   if (perm) {
     const ph = hashText(perm.question + '|' + perm.preview + '|' + perm.options.map(o => o.label).join('|'))
-    if (ph !== lastRelayedPermissionHash) {
+    if (!promptRelayOutstanding && ph !== lastRelayedPermissionHash) {
       lastRelayedPermissionHash = ph
+      promptRelayOutstanding = true
       void relayPermissionToTelegram(perm)
     }
     return
   }
 
   const prompt = detectUserPrompt(text)
-  if (!prompt) return
+  if (!prompt) { promptRelayOutstanding = false; return }   // no menu on the pane → the last one is resolved
+  if (promptRelayOutstanding) return                        // one's already relayed & unanswered — don't re-send on a repaint
   const h = promptHash(prompt)
   if (h === lastRelayedPromptHash) return
   lastRelayedPromptHash = h
+  promptRelayOutstanding = true
   void relayPromptToTelegram(prompt)
 }
 
@@ -1620,6 +1631,7 @@ async function handleTabbedAdvance(chat_id: string): Promise<void> {
       await waitForSettle(focus.activePaneId!, 300, 5000)
     })
     lastRelayedPromptHash = ''
+    promptRelayOutstanding = false   // the whole tabbed prompt is done
     const summary = answers.length
       ? '\n\n' + answers.map(a => `• ${escapeHtml(a.question)} → <b>${escapeHtml(a.answer)}</b>`).join('\n')
       : ''
@@ -1629,6 +1641,7 @@ async function handleTabbedAdvance(chat_id: string): Promise<void> {
   const next = detectUserPrompt(text)
   if (next?.tabbed) {
     lastRelayedPromptHash = promptHash(next)
+    promptRelayOutstanding = true   // suppress repaints of this next tab; we relay it explicitly here
     await relayPromptToTelegram(next)
   }
 }
