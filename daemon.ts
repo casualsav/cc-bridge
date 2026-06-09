@@ -1989,7 +1989,7 @@ async function relaySlashCommand(
 // must have passed the access gate; BANG_SHELL must be enabled.
 async function runBangCommand(chat_id: string, cmd: string): Promise<void> {
   if (!cmd) { await bot.api.sendMessage(chat_id, 'Usage: <code>!&lt;shell command&gt;</code>', { parse_mode: 'HTML' }).catch(() => {}); return }
-  const cwd = (focus.activePaneId && await paneCwd(focus.activePaneId)) || homedir()
+  const cwd = (focus.activePaneId && await paneCwd(focus.activePaneId).catch(() => null)) || homedir()
   void bot.api.sendChatAction(chat_id, 'typing').catch(() => {})
   let out = '', code = 0
   try {
@@ -2004,7 +2004,12 @@ async function runBangCommand(chat_id: string, cmd: string): Promise<void> {
   if (out.length > 8000) out = out.slice(0, 8000) + '\n…(truncated)'
   const header = `$ ${cmd}${code ? `  · exit ${code}` : ''}`
   const body = `📁 <code>${escapeHtml(cwd)}</code>\n<b>${escapeHtml(header)}</b>\n<pre>${escapeHtml(out)}</pre>`
-  for (const chunk of chunkHtml(body)) await bot.api.sendMessage(chat_id, chunk, { parse_mode: 'HTML' }).catch(() => {})
+  // chunkHtml REQUIRES the length limit — omitting it makes cap NaN, which yields empty chunks that
+  // Telegram rejects with "text must be non-empty" (every other caller passes it).
+  for (const chunk of chunkHtml(body, MAX_CHUNK_LIMIT)) {
+    await bot.api.sendMessage(chat_id, chunk, { parse_mode: 'HTML' })
+      .catch(e => process.stderr.write(`daemon: bang reply send failed: ${e}\n`))
+  }
 }
 
 // ---- Mode command helper ----
