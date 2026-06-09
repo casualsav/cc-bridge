@@ -1,15 +1,14 @@
 #!/usr/bin/env bun
 import { Bot, GrammyError, InlineKeyboard, Keyboard, InputFile, type Context } from 'grammy'
 import type { ReactionTypeEmoji } from 'grammy/types'
-import { randomBytes, createHash } from 'node:crypto'
+import { randomBytes } from 'node:crypto'
 import {
   readFileSync, writeFileSync, appendFileSync, mkdirSync, readdirSync, rmSync,
   statSync, renameSync, realpathSync, chmodSync, unlinkSync, existsSync, openSync, closeSync, copyFileSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, extname, basename, sep } from 'node:path'
-import { execFile, execFileSync, spawn } from 'node:child_process'
-import { promisify } from 'node:util'
+import { execFileSync, spawn } from 'node:child_process'
 import net from 'node:net'
 import {
   frame, makeLineReader, computeCodeFingerprint,
@@ -25,6 +24,11 @@ const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
 import { detectUserPrompt, detectPermissionPrompt, isSubmitScreen, stripAnsi, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
 import { resolveTranscript, latestFinalReply, finalRepliesAfter, textEntriesAfter, turnInProgress, currentTurnActivity, currentTurnFeed, listRecentSessions, findSessionCwd, type Activity, type FeedItem } from './transcript.ts'
+import { exec, sleep, hashText } from './proc.ts'
+import {
+  capturePane, paneAlive, sendKeys, sendKeysLiteral, navigateDown, waitForSettle,
+  windowHeightOf, resizeWindowOf, paneCommand, paneCwd,
+} from './pane-io.ts'
 
 // Load .env ourselves. The daemon is (re)launched by the SessionStart hook and the watchdog,
 // neither of which sources a shell — so without this, a post-reboot relaunch comes up with no
@@ -51,8 +55,6 @@ const FORCE_PANE = process.env.TELEGRAM_FORCE_PANE || null
 // access allowlist.
 const BANG_SHELL = process.env.TELEGRAM_BANG_SHELL === '1'
 
-const exec = promisify(execFile)
-const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
 
 // Timestamp daemon diagnostics so the log file (the shim redirects the daemon's
 // stderr there) is readable after the fact. Every daemon write is a whole line,
@@ -424,34 +426,6 @@ const typingPresence = new TypingPresence()
 
 type CcMode = 'default' | 'acceptEdits' | 'plan' | 'auto' | 'bypassPermissions'
 
-async function capturePane(paneId: string): Promise<string> {
-  const { stdout } = await exec('tmux', ['capture-pane', '-p', '-t', paneId, '-J'], { timeout: 3000 })
-  return stdout
-}
-
-// Pane validation + injection guard (opus-direct Block B).
-async function paneAlive(paneId: string): Promise<boolean> {
-  try {
-    const { stdout } = await exec('tmux', ['display-message', '-p', '-t', paneId, '#{pane_id}'], { timeout: 2000 })
-    return stdout.trim() === paneId
-  } catch { return false }
-}
-
-async function sendKeys(paneId: string, keys: string[]): Promise<boolean> {
-  if (!(await paneAlive(paneId))) return false
-  await exec('tmux', ['send-keys', '-t', paneId, ...keys], { timeout: 2000 })
-  return true
-}
-
-// Send a literal string into the pane (tmux -l), so codes/URLs with characters
-// that would otherwise be read as key names ("Enter", "C-c", "-foo") are typed
-// verbatim. The trailing `--` guards strings that begin with a dash.
-async function sendKeysLiteral(paneId: string, text: string): Promise<boolean> {
-  if (!(await paneAlive(paneId))) return false
-  await exec('tmux', ['send-keys', '-l', '-t', paneId, '--', text], { timeout: 2000 })
-  return true
-}
-
 // Type `text` into the pane's input and submit it with Enter, pausing the watcher
 // so the resulting change isn't mistaken for a new prompt/event.
 async function injectText(paneId: string, watcher: PaneWatcher, text: string): Promise<boolean> {
@@ -482,27 +456,11 @@ async function injectPaste(paneId: string, watcher: PaneWatcher, text: string): 
   })
 }
 
-// Move the option cursor down `n` rows, one press at a time. Sending the Downs as
-// a single batch makes this TUI coalesce/drop them (the cursor doesn't move), so we
-// space them out and let it settle before the caller's follow-up key.
-async function navigateDown(paneId: string, n: number): Promise<void> {
-  if (n <= 0) return
-  for (let i = 0; i < n; i++) {
-    await sendKeys(paneId, ['Down'])
-    await sleep(140)
-  }
-  await waitForSettle(paneId, 150, 2000)
-}
-
 // Send keys one at a time with a gap. A batched `send-keys k1 k2 k3` can outrun the TUI
 // renderer and drop a key (a dropped Down mis-aligns a multi-select toggle onto the wrong
 // row); pacing them the way navigateDown does keeps every keystroke landing.
 async function sendKeysPaced(paneId: string, keys: string[], gapMs = 150): Promise<void> {
   for (const k of keys) { await sendKeys(paneId, [k]); await sleep(gapMs) }
-}
-
-function hashText(s: string): string {
-  return createHash('md5').update(s).digest('hex')
 }
 
 // Defense-in-depth for relayed-prompt answers that should fully close their modal (single
@@ -724,25 +682,6 @@ function modeLabel(mode: CcMode): string {
     case 'plan': return '📋 Plan'
     case 'auto': return '🪄 Auto'
     case 'bypassPermissions': return '🚨 Bypass'
-  }
-}
-
-async function waitForSettle(paneId: string, pollMs: number, maxMs: number): Promise<void> {
-  let lastHash = ''
-  let sameCount = 0
-  const start = Date.now()
-  while (Date.now() - start < maxMs) {
-    try {
-      const text = await capturePane(paneId)
-      const h = hashText(text)
-      if (h === lastHash) {
-        if (++sameCount >= 2) return
-      } else {
-        sameCount = 0
-        lastHash = h
-      }
-    } catch { return }
-    await sleep(pollMs)
   }
 }
 
@@ -1021,19 +960,6 @@ function startUpdate(chatId: string, mode: 'apply' | 'check'): { ok: boolean; er
 // A focused pane's cwd barely changes, but the relay tick resolves it every 1.5s — each call a
 // tmux subprocess spawn. Cache it briefly so a steady pane costs one spawn per few seconds, not
 // per tick. The short TTL still picks up a real `cd` within seconds.
-const _paneCwdCache = new Map<string, { at: number; cwd: string | null }>()
-const PANE_CWD_TTL_MS = 5_000
-async function paneCwd(paneId: string): Promise<string | null> {
-  const hit = _paneCwdCache.get(paneId)
-  if (hit && Date.now() - hit.at < PANE_CWD_TTL_MS) return hit.cwd
-  try {
-    const { stdout } = await exec('tmux', ['display-message', '-p', '-t', paneId, '#{pane_current_path}'], { timeout: 2000 })
-    const cwd = stdout.trim() || null
-    _paneCwdCache.set(paneId, { at: Date.now(), cwd })
-    return cwd
-  } catch { return null }
-}
-
 // Send agent markdown to chats using the same render/chunk path as the reply tool.
 async function sendAgentText(chats: string[], text: string): Promise<void> {
   const access = loadAccess()
@@ -2977,23 +2903,6 @@ async function doReadout(ctx: Context, kind: 'cost' | 'context'): Promise<void> 
   await runReadout(String(ctx.chat!.id), kind)
 }
 
-async function windowHeightOf(paneId: string): Promise<number | null> {
-  try {
-    const { stdout } = await exec('tmux', ['display-message', '-p', '-t', paneId, '#{window_height}'], { timeout: 2000 })
-    const n = parseInt(stdout.trim(), 10)
-    return Number.isFinite(n) ? n : null
-  } catch { return null }
-}
-async function resizeWindowOf(paneId: string, rows: number): Promise<boolean> {
-  try {
-    const { stdout } = await exec('tmux', ['display-message', '-p', '-t', paneId, '#{window_id}'], { timeout: 2000 })
-    const win = stdout.trim()
-    if (!win) return false
-    await exec('tmux', ['resize-window', '-t', win, '-y', String(rows)], { timeout: 2000 })
-    return true
-  } catch { return false }
-}
-
 // Inject the command, capture + relay its real output (chunked), then return to the prompt.
 async function runReadout(chatId: string, kind: 'cost' | 'context'): Promise<void> {
   const paneId = activePaneId, watcher = paneWatcher
@@ -3244,10 +3153,6 @@ function bridgeVersion(): string {
 // Installed Claude version — `claude --version` prints "2.1.168 (Claude Code)".
 async function claudeVersion(): Promise<string | null> {
   try { const { stdout } = await exec('claude', ['--version'], { timeout: 8000 }); return stdout.trim().split(/\s+/)[0] || null } catch { return null }
-}
-
-async function paneCommand(paneId: string): Promise<string> {
-  try { const { stdout } = await exec('tmux', ['display-message', '-p', '-t', paneId, '#{pane_current_command}'], { timeout: 2000 }); return stdout.trim() } catch { return '' }
 }
 
 // The focused off-MCP session's id — the newest transcript under the active pane's cwd, so we can

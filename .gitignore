@@ -6,3 +6,6 @@ pending-events.jsonl
 inbox/
 *.corrupt-*
 __pycache__/
+
+# graphify analysis output
+graphify-out/
