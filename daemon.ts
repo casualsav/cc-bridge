@@ -48,7 +48,10 @@ import {
   STATIC, initAccess, loadAccess, saveAccess, gate, dmCommandGate, isMentioned,
   pruneExpired, defaultAccess, type GateResult,
 } from './access.ts'
-import { setGroupChatId, getGroupChatId, loadTopics } from './topics.ts'
+import {
+  setGroupChatId, getGroupChatId, isTopicMode, loadTopics,
+  getTopicByCwd, setTopic, updateTopic,
+} from './topics.ts'
 import { TypingPresence } from './typing.ts'
 import { transcribe, transcribeProvider, transcribeStatus } from './voice.ts'
 import { parseDuration, formatDuration, fmtWhen, splitLeadingDuration } from './time.ts'
@@ -729,17 +732,55 @@ function startUpdate(chatId: string, mode: 'apply' | 'check'): { ok: boolean; er
 // A focused pane's cwd barely changes, but the relay tick resolves it every 1.5s — each call a
 // tmux subprocess spawn. Cache it briefly so a steady pane costs one spawn per few seconds, not
 // per tick. The short TTL still picks up a real `cd` within seconds.
-// Send agent markdown to chats using the same render/chunk path as the reply tool.
-async function sendAgentText(chats: string[], text: string): Promise<void> {
+// Send agent markdown to chats using the same render/chunk path as the reply tool. In forum-topics
+// mode the caller passes a threadId so the message lands in the session's own topic.
+async function sendAgentText(chats: string[], text: string, threadId?: number): Promise<void> {
   const access = loadAccess()
   const render = access.renderMarkdown !== false
   const limit = Math.max(1, Math.min(access.textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT))
   const chunks = render ? chunkHtml(mdToTelegramHtml(text), limit) : chunk(text, limit, access.chunkMode ?? 'length')
+  const base = render ? { parse_mode: 'HTML' as const } : {}
+  const extra = threadId ? { ...base, message_thread_id: threadId } : base
   for (const chat_id of chats) {
     for (const c of chunks) {
-      await bot.api.sendMessage(chat_id, c, render ? { parse_mode: 'HTML' } : {}).catch(e => process.stderr.write(`daemon: transcript relay send failed: ${e}\n`))
+      await bot.api.sendMessage(chat_id, c, extra).catch(e => process.stderr.write(`daemon: transcript relay send failed: ${e}\n`))
     }
   }
+}
+
+// ---- Forum-topics outbound routing (phase 2b) ----
+// Map a session (keyed by its cwd) to a forum topic, creating it on first use. Returns the topic's
+// thread id, or undefined if creation failed (caller falls back to the General topic).
+async function ensureTopicFor(group: string, cwd: string): Promise<number | undefined> {
+  const existing = getTopicByCwd(cwd)
+  if (existing) {
+    if (existing.closed) {
+      try { await bot.api.reopenForumTopic(group, existing.threadId); updateTopic(cwd, { closed: false }) } catch {}
+    }
+    return existing.threadId
+  }
+  const name = basename(cwd) || 'session'
+  try {
+    const t = await bot.api.createForumTopic(group, name)
+    setTopic(cwd, { threadId: t.message_thread_id, name, closed: false, createdAt: Date.now() })
+    process.stderr.write(`daemon: created topic "${name}" (thread ${t.message_thread_id}) for ${cwd}\n`)
+    return t.message_thread_id
+  } catch (e) {
+    process.stderr.write(`daemon: createForumTopic failed for ${cwd}: ${e}\n`)
+    return undefined
+  }
+}
+
+// Where a session's outbound should go. DM mode → the allowlisted DM chats (no thread). Topic mode →
+// the bound group, threaded to the session's own topic (created on first use; General if no cwd).
+async function outboundTargetsFor(paneId: string | null): Promise<Array<{ chat: string; thread?: number }>> {
+  const dmTargets = () => loadAccess().allowFrom.map(chat => ({ chat }))
+  if (!isTopicMode()) return dmTargets()
+  const group = getGroupChatId()
+  if (!group) return dmTargets()
+  const cwd = paneId ? await paneCwd(paneId).catch(() => null) : null
+  if (!cwd) return [{ chat: group }]
+  return [{ chat: group, thread: await ensureTopicFor(group, cwd) }]
 }
 
 // After injecting a message, wait for the agent's turn to settle, then read its reply
@@ -826,9 +867,9 @@ async function relayLoopTick(gen: number): Promise<void> {
       lastRelayedUuid = r.uuid                 // advance before the await so a fast tick can't double-send
       lastRelayedByFile.set(file, r.uuid)
       if (!isBanner(r.text)) {
-        const chats = loadAccess().allowFrom
-        process.stderr.write(`daemon: relaying ${r.text.length} chars (uuid ${r.uuid.slice(0, 8)}, reply) to ${chats.join(',')}\n`)
-        await sendAgentText(chats, r.text).catch(e => process.stderr.write(`daemon: relay send failed: ${e}\n`))
+        const targets = await outboundTargetsFor(paneId)
+        process.stderr.write(`daemon: relaying ${r.text.length} chars (uuid ${r.uuid.slice(0, 8)}, reply) to ${targets.map(t => t.chat + (t.thread ? `#${t.thread}` : '')).join(',')}\n`)
+        for (const t of targets) await sendAgentText([t.chat], r.text, t.thread).catch(e => process.stderr.write(`daemon: relay send failed: ${e}\n`))
       }
       typingPresence.stop()   // reply delivered (or banner suppressed) → clean stop, no tail
     }
