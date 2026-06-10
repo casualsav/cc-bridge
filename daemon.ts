@@ -1546,12 +1546,13 @@ function maybeWarn(type: string, pct: number, resetKey: string): void {
   usageWarnState.set(type, { resetKey, threshold, at: Date.now() })
   saveUsageNotifState()
   process.stderr.write(`daemon: usage warn fired type=${type} threshold=${threshold} key="${resetKey}"\n`)
-  const chats = loadAccess().allowFrom
-  if (chats.length === 0) return
   const emoji = threshold >= 90 ? '🚨' : threshold >= 75 ? '⚠️' : 'ℹ️'
-  for (const chat_id of chats) {
-    void bot.api.sendMessage(chat_id, `${emoji} You've used ${threshold}% of your ${escapeHtml(type)} limit`, { disable_notification: threshold < 90 }).catch(() => {})
-  }
+  // The snapshot tracks the focused session, so route the heads-up to its topic (forum mode); DM → allowlist.
+  void (async () => {
+    for (const { chat, thread } of await outboundTargetsFor(focus.activePaneId)) {
+      await bot.api.sendMessage(chat, `${emoji} You've used ${threshold}% of your ${escapeHtml(type)} limit`, { disable_notification: threshold < 90, ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
+    }
+  })()
 }
 
 // Context-fill heads-up: one 💾 ping at 50% and again at 75% as the conversation grows. Re-arms
@@ -1565,9 +1566,12 @@ function maybeWarnContext(pct: number | null): void {
   ctxWarnThreshold = threshold
   saveUsageNotifState()
   process.stderr.write(`daemon: context warn fired threshold=${threshold} (pct=${pct})\n`)
-  for (const chat_id of loadAccess().allowFrom) {
-    void bot.api.sendMessage(chat_id, `💾 Context is ${threshold}% full — consider <code>/compact</code> or wrapping up soon.`, { parse_mode: 'HTML' }).catch(() => {})
-  }
+  // Context fill is the focused session's — route to its topic (forum mode); DM → allowlist.
+  void (async () => {
+    for (const { chat, thread } of await outboundTargetsFor(focus.activePaneId)) {
+      await bot.api.sendMessage(chat, `💾 Context is ${threshold}% full — consider <code>/compact</code> or wrapping up soon.`, { parse_mode: 'HTML', ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
+    }
+  })()
 }
 
 // A limit is exhausted: relay it (Claude can't, being limited) and schedule the reset
@@ -1585,9 +1589,12 @@ function actOnLimitHit(fireAt: number, type: string, banner?: string): void {
   if (chats.length === 0) return
   const note = `\n\n⏰ Resets in ${formatDuration(Math.max(0, fireAt - Date.now()))}.\nI'll ping you when it resets${loadAccess().autoContinue !== false ? ' and auto-continue' : ''}.`
   const head = banner ? escapeHtml(banner) : `Out of your ${escapeHtml(type)} limit.`
-  for (const chat_id of chats) {
-    void bot.api.sendMessage(chat_id, `⛔ <b>Claude hit the usage limit.</b>\n${head}${note}`, { parse_mode: 'HTML' }).catch(() => {})
-  }
+  // Route the immediate banner to the session that hit the limit (its topic in forum mode).
+  void (async () => {
+    for (const { chat, thread } of await outboundTargetsFor(focus.activePaneId)) {
+      await bot.api.sendMessage(chat, `⛔ <b>Claude hit the usage limit.</b>\n${head}${note}`, { parse_mode: 'HTML', ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
+    }
+  })()
   scheduleReset(fireAt + RESET_GRACE_MS, chats)
 }
 
@@ -1655,11 +1662,11 @@ function handleUsageLimit(text: string): void {
     lastActedResetKey = key
     lastActedResetAt = Date.now()
     saveUsageNotifState()
-    const chats = loadAccess().allowFrom
-    if (chats.length === 0) return
-    for (const chat_id of chats) {
-      void bot.api.sendMessage(chat_id, `⛔ <b>Claude hit the usage limit.</b>\n${escapeHtml(limitLine)}`, { parse_mode: 'HTML' }).catch(() => {})
-    }
+    void (async () => {
+      for (const { chat, thread } of await outboundTargetsFor(focus.activePaneId)) {
+        await bot.api.sendMessage(chat, `⛔ <b>Claude hit the usage limit.</b>\n${escapeHtml(limitLine)}`, { parse_mode: 'HTML', ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
+      }
+    })()
     return
   }
 
