@@ -976,12 +976,21 @@ function startRelayLoop(): void {
 // behavior is unchanged). Newly-seen panes are primed (skip their existing tail), relay from next tick.
 async function auxRelayTick(): Promise<void> {
   if (TRANSCRIPT_OUTBOUND && isTopicMode()) {
+    // A transcript is resolved by cwd, so multiple panes in the SAME cwd map to the SAME file. Relay
+    // each file exactly once per tick — and never a file the focused rich loop already owns — or the
+    // reply double-sends (once per sibling pane). (Per-session attribution for same-cwd siblings is
+    // Track B; this just stops the duplicate.)
+    const fcwd = focus.activePaneId ? await paneCwd(focus.activePaneId).catch(() => null) : null
+    const focusedFile = fcwd ? resolveTranscript(fcwd) : null
+    const seenFiles = new Set<string>()
     for (const pane of [...offMcpPanes]) {
       if (pane === focus.activePaneId) continue   // the rich relay loop owns the focused pane
       try {
         const cwd = await paneCwd(pane).catch(() => null)
         const file = cwd ? resolveTranscript(cwd) : null
         if (!file) continue
+        if (file === focusedFile || seenFiles.has(file)) continue   // already relayed by the focused loop or a sibling
+        seenFiles.add(file)
         if (!auxRelayPrimed.has(file)) {
           lastRelayedByFile.set(file, latestFinalReply(file)?.uuid ?? '')
           auxRelayPrimed.add(file)
