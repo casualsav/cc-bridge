@@ -23,6 +23,9 @@ type MirrorDeps = {
   replyMode: () => 'thoughts' | 'tools' | 'hybrid' | 'off'
   getActivePaneId: () => string | null
   retriggerTyping: () => void
+  // Where the card should open: the focused session's topic in forum mode, else the DM chats. The
+  // daemon supplies this (outboundTargetsFor) so the mirror doesn't need to know about topics.
+  outboundTargets: () => Promise<Array<{ chat: string; thread?: number }>>
 }
 
 let deps: MirrorDeps
@@ -298,8 +301,9 @@ export async function updateTerminalMirror(working: boolean): Promise<void> {
     mirrorContentKey = contentKey()
     mirrorPaneId = deps.getActivePaneId()   // remember which pane this card tracks (see abandonMirror)
     const text = composeCard(false)
-    for (const chat of deps.loadAccess().allowFrom) {
-      try { const m = await deps.bot.api.sendMessage(chat, text, { parse_mode: 'HTML', disable_notification: true }); mirrorMsgIds.set(chat, m.message_id) }
+    for (const t of await deps.outboundTargets()) {
+      const opts = { parse_mode: 'HTML' as const, disable_notification: true, ...(t.thread ? { message_thread_id: t.thread } : {}) }
+      try { const m = await deps.bot.api.sendMessage(t.chat, text, opts); mirrorMsgIds.set(t.chat, m.message_id) }
       catch (e) { process.stderr.write(`daemon: activity mirror create failed: ${e}\n`) }
     }
     deps.retriggerTyping()   // the mirror send clears Telegram's typing state — re-assert it now

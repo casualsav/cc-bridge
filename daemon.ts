@@ -5437,6 +5437,7 @@ initMirror({
   replyMode,
   getActivePaneId: () => focus.activePaneId,
   retriggerTyping: () => typingPresence.retrigger(),
+  outboundTargets: () => outboundTargetsFor(focus.activePaneId),   // focused session's topic in forum mode, else DM
 })
 
 // Drive usage alerts + limit auto-continue (session + weekly) from the statusline snapshot.
