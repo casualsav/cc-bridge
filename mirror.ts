@@ -41,6 +41,9 @@ const MIRROR_THOUGHTS = 5    // thoughts mode: max thoughts shown (oldest falls 
 const MIRROR_FOOTER_ENABLED = false
 
 const mirrorMsgIds = new Map<string, number>()   // chat_id → the live mirror message id
+// The pane the open card belongs to. A relay-loop restart on the SAME pane (focus re-adoption mid
+// -turn) must keep the existing card rather than orphan it and open a second one — see abandonMirror.
+let mirrorPaneId: string | null = null
 // Consecutive not-working ticks. The card is finalized (one ✅ Done, then a fresh card on the next
 // turn) only after this crosses the threshold — so a single transient not-working tick can't split
 // one turn's card into two. Reset to 0 on any working tick.
@@ -84,6 +87,7 @@ function mirrorFooter(): string {
 function resetMirrorState(): void {
   mirrorBody = ''; mirrorVerb = 'Working'; mirrorTokens = null
   mirrorContentKey = ''; mirrorIdleTicks = 0; mirrorStartedAt = 0; mirrorLastSyncAt = 0
+  mirrorPaneId = null
 }
 
 // Live tool-use feed. On by default ('tools') — opt out via access.json
@@ -292,6 +296,7 @@ export async function updateTerminalMirror(working: boolean): Promise<void> {
   if (mirrorMsgIds.size === 0) {
     // Open the card silently — it's the ambient mirror; the alerting message is the relayed reply.
     mirrorContentKey = contentKey()
+    mirrorPaneId = deps.getActivePaneId()   // remember which pane this card tracks (see abandonMirror)
     const text = composeCard(false)
     for (const chat of deps.loadAccess().allowFrom) {
       try { const m = await deps.bot.api.sendMessage(chat, text, { parse_mode: 'HTML', disable_notification: true }); mirrorMsgIds.set(chat, m.message_id) }
@@ -328,6 +333,10 @@ export async function respawnTerminalMirror(): Promise<void> {
 
 // Abandon tracking of any open card WITHOUT touching the Telegram messages — used when focus/
 // relay moves to a new pane, so the stale card is simply left in place and a fresh one opens.
-export function abandonMirror(): void {
+// If `focusedPaneId` matches the pane the open card already tracks, this is a relay-loop restart on
+// the SAME session (focus re-adoption mid-turn), not a real pane switch — keep the live card so the
+// turn doesn't get a second, duplicate card opened beneath the orphaned first one.
+export function abandonMirror(focusedPaneId?: string | null): void {
+  if (focusedPaneId != null && mirrorMsgIds.size > 0 && focusedPaneId === mirrorPaneId) return
   mirrorMsgIds.clear(); resetMirrorState()
 }

@@ -869,7 +869,7 @@ function startRelayLoop(): void {
   const gen = ++relayLoopGen
   relayCursorPrimed = false
   relayIdleStreak = 0
-  abandonMirror()   // abandon any mirror from the old pane
+  abandonMirror(focus.activePaneId)   // keep the card if this is a relay restart on the same pane; abandon only on a real pane switch
   void primeRelayCursor().finally(() => {
     if (gen === relayLoopGen) setTimeout(() => void relayLoopTick(gen), RELAY_POLL_MS)
   })
