@@ -783,6 +783,29 @@ async function outboundTargetsFor(paneId: string | null): Promise<Array<{ chat: 
   return [{ chat: group, thread: await ensureTopicFor(group, cwd) }]
 }
 
+// Eagerly give a freshly-discovered session its topic (don't wait for its first reply) and post a
+// "session started" notice the user can reply to — so a new session is addressable from the group
+// immediately. Idempotent + in-flight-guarded so concurrent discovery paths create exactly one topic
+// and post exactly one notice. No-op outside topic mode.
+const topicEnsureInFlight = new Set<string>()
+async function ensureSessionTopic(paneId: string): Promise<void> {
+  if (!isTopicMode()) return
+  const group = getGroupChatId()
+  if (!group) return
+  const cwd = await paneCwd(paneId).catch(() => null)
+  if (!cwd) return
+  if (getTopicByCwd(cwd) || topicEnsureInFlight.has(cwd)) return   // already have it / creating it
+  topicEnsureInFlight.add(cwd)
+  try {
+    const thread = await ensureTopicFor(group, cwd)
+    if (thread) await bot.api.sendMessage(group,
+      `🆕 <b>Session started</b>\n<code>${escapeHtml(cwd)}</code>\n\nType in this topic to drive this session.`,
+      { parse_mode: 'HTML', message_thread_id: thread }).catch(() => {})
+  } finally {
+    topicEnsureInFlight.delete(cwd)
+  }
+}
+
 // After injecting a message, wait for the agent's turn to settle, then read its reply
 // (the final text block of its response to that exact message) from the transcript and
 // relay it. Self-driven (not tied to the typing/idle signal, which can miss a fast
@@ -1135,6 +1158,7 @@ async function announceNewSession(paneId: string): Promise<void> {
   const where = cwd ? ` (<code>${escapeHtml(cwd)}</code>)` : ''
   const kb = new InlineKeyboard().text(`♻️ Switch to ${who}`, `adoptpane:${paneId}`).text('✏️ Name', `namesession:${paneId}`)
   notifyChats(`🆕 New Claude session: <b>${who}</b>${where}`, { reply_markup: kb, parse_mode: 'HTML' })
+  void ensureSessionTopic(paneId)   // topic mode: give it its own topic now, not on first reply
 }
 
 // Bind a daemon-spawned pane immediately rather than waiting for the next discovery tick — and do
@@ -1173,6 +1197,7 @@ async function discoverPanes(): Promise<void> {
     if (p === focus.activePaneId) { offMcpPanes.add(p); continue }
     if (!offMcpPanes.has(p)) { offMcpPanes.add(p); void announceNewSession(p) }
   }
+  for (const p of panes) void ensureSessionTopic(p)   // topic mode: ensure every live session has its topic (covers the focused one + restart)
   void updateSessionPin()
 }
 

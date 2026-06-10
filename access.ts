@@ -14,6 +14,7 @@ import { randomBytes } from 'node:crypto'
 import type { Context } from 'grammy'
 import { ACCESS_FILE, PREFS_FILE, STATE_DIR } from './common.ts'
 import { _accessFileCache } from './state.ts'
+import { getGroupChatId } from './topics.ts'
 import type { Access } from './types.ts'
 
 // Static lockdown: the security half is baked + immutable (tamper-proof allowlist).
@@ -171,16 +172,29 @@ export function gate(ctx: Context): GateResult {
   return { action: 'drop' }
 }
 
+// Gate for command handlers. Allows a private chat (DM allowlist/pairing, as before) OR the bound
+// forum-topics command-center group from an allowlisted sender — so slash commands work inside the
+// group, not just in a DM. (Name kept for its many call sites; it now covers both contexts.)
 export function dmCommandGate(ctx: Context): { access: Access; senderId: string } | null {
-  if (ctx.chat?.type !== 'private') return null
   if (!ctx.from) return null
   const senderId = String(ctx.from.id)
   const access = loadAccess()
   const pruned = pruneExpired(access)
   if (pruned) saveAccess(access)
   if (access.dmPolicy === 'disabled') return null
-  if (access.dmPolicy === 'allowlist' && !access.allowFrom.includes(senderId)) return null
-  return { access, senderId }
+  const chatType = ctx.chat?.type
+  if (chatType === 'private') {
+    if (access.dmPolicy === 'allowlist' && !access.allowFrom.includes(senderId)) return null
+    return { access, senderId }
+  }
+  // Bound command-center group: commands run for allowlisted senders (per-group allowlist if set,
+  // else the global allowlist). Only the ONE group registered via /bind qualifies.
+  if ((chatType === 'group' || chatType === 'supergroup') && String(ctx.chat!.id) === getGroupChatId()) {
+    const policy = access.groups[String(ctx.chat!.id)]
+    const allowed = policy?.allowFrom?.length ? policy.allowFrom.includes(senderId) : access.allowFrom.includes(senderId)
+    if (allowed) return { access, senderId }
+  }
+  return null
 }
 
 export function isMentioned(ctx: Context, extraPatterns?: string[]): boolean {
