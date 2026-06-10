@@ -806,6 +806,26 @@ async function ensureSessionTopic(paneId: string): Promise<void> {
   }
 }
 
+// The existing topic thread for a pane's cwd (no creation) — for per-topic typing/pins.
+async function topicThreadFor(paneId: string | null): Promise<{ group: string; thread: number } | null> {
+  if (!isTopicMode() || !paneId) return null
+  const group = getGroupChatId()
+  if (!group) return null
+  const cwd = await paneCwd(paneId).catch(() => null)
+  if (!cwd) return null
+  const t = getTopicByCwd(cwd)
+  if (!t || t.closed) return null
+  return { group, thread: t.threadId }
+}
+
+// Show "typing…" in a session's own topic while it works (topic mode). Telegram's action expires
+// after ~5s; the relay loops re-emit each tick (~1.5s) so it stays lit for the whole turn.
+async function emitTopicTyping(paneId: string | null): Promise<void> {
+  const t = await topicThreadFor(paneId)
+  if (!t) return
+  await bot.api.sendChatAction(t.group, 'typing', { message_thread_id: t.thread }, AbortSignal.timeout(1500)).catch(() => {})
+}
+
 // After injecting a message, wait for the agent's turn to settle, then read its reply
 // (the final text block of its response to that exact message) from the transcript and
 // relay it. Self-driven (not tied to the typing/idle signal, which can miss a fast
@@ -867,7 +887,8 @@ async function relayLoopTick(gen: number): Promise<void> {
   // create/finalize storm. turnInProgress is the ground truth, so the card caps exactly when the
   // turn concludes. (relayIdleStreak/detectWorking now only feed ambient signals elsewhere.)
   const working = file ? turnInProgress(file) : !idle
-  typingPresence.observe(working)   // reliable working signal — this bridged pane never shows the spinner
+  if (isTopicMode()) { if (working) void emitTopicTyping(paneId) }   // topic mode → typing in the session's own topic
+  else typingPresence.observe(working)   // reliable working signal — this bridged pane never shows the spinner
   await updateTerminalMirror(working).catch(() => {})
 
   // A select/permission/login menu sitting on the pane is a question the user must answer. Any
@@ -962,7 +983,7 @@ async function auxRelayTick(): Promise<void> {
           auxRelayPrimed.add(file)
           continue
         }
-        if (turnInProgress(file)) continue        // relay only once the turn concludes
+        if (turnInProgress(file)) { void emitTopicTyping(pane); continue }   // working → typing in its topic, relay only once the turn concludes
         const cursor = lastRelayedByFile.get(file) ?? ''
         for (const r of finalRepliesAfter(file, cursor)) {
           if (!r.uuid || r.uuid === (lastRelayedByFile.get(file) ?? '')) continue
@@ -4820,7 +4841,11 @@ async function handleInbound(
     return
   }
 
-  typingPresence.arm(chat_id)
+  // Topic mode: show typing instantly in the topic the message came from (the relay loops then
+  // sustain it). DM mode keeps the flat keep-alive. Avoids stray typing in the group's General.
+  const inThreadId = ctx.message?.message_thread_id
+  if (isTopicMode()) { if (typeof inThreadId === 'number') void bot.api.sendChatAction(chat_id, 'typing', { message_thread_id: inThreadId }).catch(() => {}) }
+  else typingPresence.arm(chat_id)
 
   if (access.ackReaction && msgId != null) {
     void bot.api.setMessageReaction(chat_id, msgId, [
