@@ -599,6 +599,24 @@ let promptRelayOutstanding = false
 // marks the relayed messages so a Telegram reply to one is injected into the pane.
 let lastRelayedAuthUrl = ''
 
+// Reaction-worthy heuristic for the `↳ react?` hint. The daemon can't judge taste — it only
+// decides when to re-prime the affordance; the model judges whether to act. Crude and slightly
+// generous on purpose: a false positive costs ~12 tokens and the model just declines. Crucially
+// the hint rides ONLY on messages where reacting to *that message* would be right — hint
+// adjacency reads as an imperative (observed live), so a periodic decoupled refresh is exactly
+// the thing that misfires. No timer; organic thanks/wins/greetings keep the affordance alive.
+const REACT_LEX = /\b(thanks|thank you|thx|ty|tysm|lol|lmao|haha+|nice|awesome|amazing|great|love(d)? (it|this|that)|wow|congrats|well done|good ?(morning|night|bye)|gn|bye|goodbye|cheers)\b/i
+const TASK_VERB = /^(ultrathink\b[\s,!.]*)?(please\s+)?(build|fix|investigate|audit|explore|research|refactor|implement|debug|analy[sz]e|review|rewrite|optimi[sz]e|design|dig)\b/i
+function isReactWorthy(text: string): boolean {
+  const t = text.trim()
+  if (!t) return false
+  if (/\p{Extended_Pictographic}/u.test(t)) return true                 // user used emoji
+  if (REACT_LEX.test(t)) return true                                    // warmth / humor / sign-off
+  if (t.length < 80 && !t.includes('?') && t.includes('!')) return true // short exclamatory
+  if (t.length > 200 && TASK_VERB.test(t)) return true                  // big task → 👀 candidate
+  return false
+}
+
 // Build the inbound block the agent reads. Bare minimum, short aliases — it lives in the
 // session's context, so every dropped field is saved tokens: tag name encodes the source,
 // `c`=chat_id (for the tg CLI), `m`=message_id (for react/reply). The sender `u` is kept only
@@ -621,7 +639,13 @@ function formatChannelBlock(params: InboundParams): string {
   if (m.user && m.user_id && m.chat_id !== m.user_id) a.push(`u="${esc(m.user)}"`)   // group → keep sender
   if (m.image_path) a.push(`img="${esc(m.image_path)}"`)
   if (m.attachment_path) a.push(`att="${esc(m.attachment_path)}"`)
-  return `<tg ${a.join(' ')}>${params.content}</tg>`
+  const tag = `<tg ${a.join(' ')}>${params.content}</tg>`
+  // The per-message react affordance (the MCP-tool-presence analog): a ready-made command,
+  // adjacent to the one message it applies to, only when the heuristic says it could land.
+  if (m.message_id && isReactWorthy(params.content)) {
+    return `${tag}\n↳ react? tg react ${isDm ? '.' : m.chat_id} ${m.message_id} <emoji>`
+  }
+  return tag
 }
 
 // Inbound injections are serialized through one chain: two Telegram messages arriving
