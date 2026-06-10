@@ -5290,6 +5290,7 @@ void (async () => {
               { command: 'effort', description: 'Reasoning effort: low · medium · high · xhigh · max · auto' },
               { command: 'cost', description: 'Show the session cost readout' },
               { command: 'context', description: 'Show the token-context usage' },
+              { command: 'terminal', description: 'Dump the last N lines of the terminal (default 40)' },
               { command: 'compact', description: 'Compact the conversation to free up context' },
               { command: 'update', description: 'Update the Telegram bridge or Claude itself' },
             ],
