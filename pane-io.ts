@@ -89,6 +89,20 @@ export async function resizeWindowOf(paneId: string, rows: number): Promise<bool
   } catch { return false }
 }
 
+// Return a window to AUTOMATIC client-following size, undoing any manual `resize-window -y`. This is
+// the robust restore after the /cost grow-to-80: a daemon crash/restart between grow and the restore
+// would otherwise leave the window pinned tall, where Claude renders into a giant pane and the
+// statusline (which the pin scraper reads) is unreadable. Idempotent — a no-op on a normal window.
+export async function autoSizeWindowOf(paneId: string): Promise<boolean> {
+  try {
+    const { stdout } = await exec('tmux', ['display-message', '-p', '-t', paneId, '#{window_id}'], { timeout: 2000 })
+    const win = stdout.trim()
+    if (!win) return false
+    await exec('tmux', ['resize-window', '-t', win, '-A'], { timeout: 2000 })   // -A: size to the largest attached client
+    return true
+  } catch { return false }
+}
+
 export async function paneCommand(paneId: string): Promise<string> {
   try { const { stdout } = await exec('tmux', ['display-message', '-p', '-t', paneId, '#{pane_current_command}'], { timeout: 2000 }); return stdout.trim() } catch { return '' }
 }

@@ -27,7 +27,7 @@ import { resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress,
 import { exec, sleep, hashText } from './proc.ts'
 import {
   capturePane, paneAlive, sendKeys, sendKeysLiteral, navigateDown, waitForSettle,
-  windowHeightOf, resizeWindowOf, paneCommand, paneCwd, PaneWatcher,
+  autoSizeWindowOf, paneCommand, paneCwd, PaneWatcher,
 } from './pane-io.ts'
 import type {
   PendingEntry, GroupPolicy, Access, Session,
@@ -2727,31 +2727,23 @@ async function runReadout(t: CommandTarget, chatId: string, kind: 'cost' | 'cont
   const paneId = t.paneId
   const cmd = kind === 'cost' ? '/cost' : '/context'
   const drive = async () => {
-    // /cost is a modal (its footer is "Esc to cancel") that can run taller than the pane, so a short
-    // terminal clips its lower half — the bottom of the readout is never drawn and so can't be
-    // captured. Grow the window first so the whole modal renders in one frame, then restore it; the
-    // user drives from Telegram, so the brief resize is unseen. /context renders inline (no clip).
-    const grow = kind === 'cost'
-    const h = grow ? await windowHeightOf(paneId) : null
-    const grew = grow && h !== null && h < 80 && await resizeWindowOf(paneId, 80)
-    try {
-      // Type the slash command, then WAIT for the autocomplete menu to filter down to the exact
-      // match before pressing Enter. Submitting too early runs whatever command is highlighted while
-      // the menu is still on a partial prefix (e.g. "/co…" highlights /compact), which is how /cost
-      // used to fire /compact. The settle gates Enter on a quiesced menu so the typed command runs.
-      await sendKeysLiteral(paneId, cmd)
-      await waitForSettle(paneId, 200, 2000)
-      await sendKeys(paneId, ['Enter'])
-      await waitForSettle(paneId, 400, 6000)
-      // -S -200 covers both the inline /context (which can scroll into history) and the grown /cost
-      // modal (now fully on-screen).
-      const buf = await exec('tmux', ['capture-pane', '-p', '-t', paneId, '-S', '-200', '-J'], { timeout: 3000 }).then(r => r.stdout).catch(() => '')
-      await sendKeys(paneId, ['Escape'])              // close the modal / clear the input → back to the terminal
-      await waitForSettle(paneId, 200, 2000)
-      return buf
-    } finally {
-      if (grew && h !== null) await resizeWindowOf(paneId, h)
-    }
+    // DON'T resize the window. The old grow-to-80 (resize → capture → restore) fired a SIGWINCH on a
+    // pane the user may be watching, and Claude's TUI stacks its "────" section dividers down the
+    // screen on resize — a flood of green rules that covers the statusline, so the pin scraper reads
+    // dividers instead of data. We capture at the pane's natural size from scrollback instead; /cost's
+    // "Total cost:" anchor sits near the top of the readout, so even a tall modal yields the figure.
+    //
+    // Type the slash command, then WAIT for the autocomplete menu to filter down to the exact match
+    // before pressing Enter. Submitting too early runs whatever command is highlighted while the menu
+    // is still on a partial prefix (e.g. "/co…" highlights /compact) — how /cost used to fire /compact.
+    await sendKeysLiteral(paneId, cmd)
+    await waitForSettle(paneId, 200, 2000)
+    await sendKeys(paneId, ['Enter'])
+    await waitForSettle(paneId, 400, 6000)
+    const buf = await exec('tmux', ['capture-pane', '-p', '-t', paneId, '-S', '-200', '-J'], { timeout: 3000 }).then(r => r.stdout).catch(() => '')
+    await sendKeys(paneId, ['Escape'])              // close the modal / clear the input → back to the terminal
+    await waitForSettle(paneId, 200, 2000)
+    return buf
   }
   const raw = t.isFocused && t.watcher ? await t.watcher.withInjection(drive) : await drive()
   const out = kind === 'cost' ? extractCostReadout(raw) : extractContextReadout(raw)
@@ -5543,6 +5535,12 @@ if (FORCE_PANE) {
   void discoverPanes()
   setInterval(() => void discoverPanes(), 30_000)
   setInterval(() => void checkCrossSessionUnread(), 4_000)   // ping unread in unfocused sessions
+  // Self-heal any bridge pane left pinned tall by a /cost grow-to-80 that was interrupted (e.g. a
+  // daemon restart between grow and restore) — un-pin to automatic size so Claude stops rendering
+  // into a giant pane and the statusline becomes readable again for the pin scraper. Idempotent.
+  void (async () => {
+    for (const p of await findOffMcpPanes()) await autoSizeWindowOf(p).catch(() => {})
+  })()
 }
 
 // Keep the pinned status message's live metrics fresh in EVERY mode — off-MCP pane or MCP shim
