@@ -27,7 +27,7 @@ import { resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress,
 import { exec, sleep, hashText } from './proc.ts'
 import {
   capturePane, paneAlive, sendKeys, sendKeysLiteral, navigateDown, waitForSettle,
-  paneCommand, paneCwd, PaneWatcher,
+  windowHeightOf, resizeWindowOf, paneCommand, paneCwd, PaneWatcher,
 } from './pane-io.ts'
 import type {
   PendingEntry, GroupPolicy, Access, Session,
@@ -2458,8 +2458,8 @@ function extractCostReadout(raw: string): string | null {
   let end = lines.length
   for (let i = anchor + 1; i < lines.length; i++) {
     const t = lines[i].trim()
-    if (/^─{10,}/.test(t) || /^[╭╮╰╯]/.test(t) || /^❯/.test(t) ||
-        /Press up to edit/i.test(t) || /shift\+tab to cycle|esc to interrupt/i.test(t)) { end = i; break }
+    if (/^─{10,}/.test(t) || /^[╭╮╰╯]/.test(t) || /^❯/.test(t) || /Press up to edit/i.test(t) ||
+        /shift\+tab to cycle|esc to (interrupt|cancel)/i.test(t)) { end = i; break }
   }
   return stripCommonIndent(lines.slice(start, end)) || null
 }
@@ -2485,19 +2485,31 @@ async function runReadout(chatId: string, kind: 'cost' | 'context'): Promise<voi
   if (!paneId || !watcher) return
   const cmd = kind === 'cost' ? '/cost' : '/context'
   const raw = await watcher.withInjection(async () => {
-    // Type the slash command, then WAIT for the autocomplete menu to filter down to the exact
-    // match before pressing Enter. Submitting too early runs whatever command is highlighted while
-    // the menu is still on a partial prefix (e.g. "/co…" highlights /compact), which is how /cost
-    // used to fire /compact. The settle gates Enter on a quiesced menu so the typed command runs.
-    await sendKeysLiteral(paneId, cmd)
-    await waitForSettle(paneId, 200, 2000)
-    await sendKeys(paneId, ['Enter'])
-    await waitForSettle(paneId, 400, 6000)
-    // Both readouts now print inline and can run past one screen, so read the scrollback.
-    const buf = await exec('tmux', ['capture-pane', '-p', '-t', paneId, '-S', '-200', '-J'], { timeout: 3000 }).then(r => r.stdout).catch(() => '')
-    await sendKeys(paneId, ['Escape'])                // clear the input line → back to the terminal
-    await waitForSettle(paneId, 200, 2000)
-    return buf
+    // /cost is a modal (its footer is "Esc to cancel") that can run taller than the pane, so a short
+    // terminal clips its lower half — the bottom of the readout is never drawn and so can't be
+    // captured. Grow the window first so the whole modal renders in one frame, then restore it; the
+    // user drives from Telegram, so the brief resize is unseen. /context renders inline (no clip).
+    const grow = kind === 'cost'
+    const h = grow ? await windowHeightOf(paneId) : null
+    const grew = grow && h !== null && h < 80 && await resizeWindowOf(paneId, 80)
+    try {
+      // Type the slash command, then WAIT for the autocomplete menu to filter down to the exact
+      // match before pressing Enter. Submitting too early runs whatever command is highlighted while
+      // the menu is still on a partial prefix (e.g. "/co…" highlights /compact), which is how /cost
+      // used to fire /compact. The settle gates Enter on a quiesced menu so the typed command runs.
+      await sendKeysLiteral(paneId, cmd)
+      await waitForSettle(paneId, 200, 2000)
+      await sendKeys(paneId, ['Enter'])
+      await waitForSettle(paneId, 400, 6000)
+      // -S -200 covers both the inline /context (which can scroll into history) and the grown /cost
+      // modal (now fully on-screen).
+      const buf = await exec('tmux', ['capture-pane', '-p', '-t', paneId, '-S', '-200', '-J'], { timeout: 3000 }).then(r => r.stdout).catch(() => '')
+      await sendKeys(paneId, ['Escape'])              // close the modal / clear the input → back to the terminal
+      await waitForSettle(paneId, 200, 2000)
+      return buf
+    } finally {
+      if (grew && h !== null) await resizeWindowOf(paneId, h)
+    }
   })
   const out = kind === 'cost' ? extractCostReadout(raw) : extractContextReadout(raw)
   if (!out) { await bot.api.sendMessage(chatId, `Could not read /${kind} output.`).catch(() => {}); return }
