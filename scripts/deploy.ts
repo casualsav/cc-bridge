@@ -19,8 +19,8 @@
 // failed build never mutates your working tree.
 
 import { spawnSync } from 'node:child_process'
-import { existsSync, readdirSync, readFileSync, rmSync, mkdirSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { existsSync, readdirSync, readFileSync, rmSync, mkdirSync, writeFileSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
 const GRAMMY_PIN = '1.41.1' // keep in sync with package.json + ensure-daemon.ts
@@ -80,9 +80,21 @@ function patchVersion(path: string, to: string) {
 
 function syncTrackedInto(dest: string) {
   mkdirSync(dest, { recursive: true })
-  // cp --parents preserves each file's relative subdir (e.g. skills/access/SKILL.md). GNU coreutils.
-  const r = spawnSync('cp', ['--parents', '-f', '-t', dest, ...tracked], { cwd: REPO, encoding: 'utf8' })
-  if (r.status !== 0) die(`cp into ${dest} failed: ${r.stderr}`)
+  // Stream the tracked files through tar (REPO → dest). tar preserves each file's relative subdir
+  // (like `cp --parents`) but OVERWRITES unconditionally — `cp -f`/`--remove-destination` proved
+  // unreliable here, intermittently failing "cannot create regular file: File exists" when the dest
+  // already holds a file from the cloned cache dir. The NUL-separated list goes via a temp file so
+  // any filename is handled safely; pipefail makes a failing producer tar abort the deploy.
+  const listFile = join(tmpdir(), `bct-deploy-${process.pid}-${Date.now()}.list`)
+  writeFileSync(listFile, tracked.join('\0'))
+  try {
+    const r = spawnSync('bash', ['-c',
+      'set -o pipefail; tar -C "$1" --null -T "$2" -cf - | tar -C "$3" -xf -',
+      'bash', REPO, listFile, dest], { encoding: 'utf8' })
+    if (r.status !== 0) die(`tar sync into ${dest} failed: ${r.stderr || r.stdout}`)
+  } finally {
+    try { rmSync(listFile, { force: true }) } catch {}
+  }
 }
 
 // ---- 1. prepare the new cache dir (clone deps from the newest existing version, if any) ----

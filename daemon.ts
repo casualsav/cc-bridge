@@ -48,6 +48,7 @@ import {
   STATIC, initAccess, loadAccess, saveAccess, gate, dmCommandGate, isMentioned,
   pruneExpired, defaultAccess, type GateResult,
 } from './access.ts'
+import { setGroupChatId, getGroupChatId, loadTopics } from './topics.ts'
 import { TypingPresence } from './typing.ts'
 import { transcribe, transcribeProvider, transcribeStatus } from './voice.ts'
 import { parseDuration, formatDuration, fmtWhen, splitLeadingDuration } from './time.ts'
@@ -2799,6 +2800,52 @@ bot.command('update', async ctx => {
   await showUpdateDashboard(ctx)
 })
 
+// /bind — run once inside a forum supergroup to make it the bridge's command center: each Claude
+// Code session then gets its own topic. Bootstrap-safe: the group isn't in the access registry yet,
+// so this gates on the GLOBAL allowlist (a paired operator) rather than dmCommandGate (DM-only) or
+// the per-group policy. On success it registers the group for access AND flips on topic mode.
+// /bind off (or /unbind) clears it, returning to single-chat behavior.
+bot.command(['bind', 'unbind'], async ctx => {
+  const chat = ctx.chat
+  if (!chat || chat.type !== 'supergroup') {
+    await ctx.reply('Run /bind inside the forum supergroup you want as the command center.')
+    return
+  }
+  const senderId = ctx.from ? String(ctx.from.id) : ''
+  const access = loadAccess()
+  if (!access.allowFrom.includes(senderId)) {
+    await ctx.reply('Only a paired operator can bind this group. Pair in a DM with the bot first, then run /bind here.')
+    return
+  }
+  const groupId = String(chat.id)
+  const arg = (ctx.match ?? '').toString().trim().toLowerCase()
+  const unbinding = ctx.message?.text?.startsWith('/unbind') || arg === 'off'
+  if (unbinding) {
+    if (getGroupChatId() === groupId) setGroupChatId(null)
+    await ctx.reply('🔓 Unbound. This group is no longer the command center; per-session topics are off.')
+    return
+  }
+  // Topics must be enabled on the supergroup for per-session threads to exist.
+  if (!('is_forum' in chat) || !chat.is_forum) {
+    await ctx.reply('This supergroup doesn’t have Topics enabled. Turn on Topics in the group settings, then run /bind again.')
+    return
+  }
+  // Register the group for access (allowlist = the paired operators; no @-mention needed inside the
+  // command center) so its messages route like a paired DM, then activate topic mode.
+  const existing = access.groups[groupId]?.allowFrom ?? []
+  access.groups[groupId] = { allowFrom: [...new Set([...existing, ...access.allowFrom])], requireMention: false }
+  saveAccess(access)
+  setGroupChatId(groupId)
+  await ctx.reply(
+    '✅ <b>Bound this forum as the command center.</b>\n\n' +
+    'Each Claude Code session will get its own topic; this <b>General</b> topic stays for global ' +
+    'commands (/sessions, /new, /settings).\n\n' +
+    '⚠️ One more setup step: in @BotFather → <i>Bot Settings → Group Privacy → Turn off</i>, so I can ' +
+    'see messages you type inside a session’s topic (not just commands). Then remove + re-add me to the group.\n\n' +
+    '<i>Topic creation &amp; routing land in the next update.</i>',
+    { parse_mode: 'HTML' })
+})
+
 
 // /cost, /context relay session visibility info. (/session is the registry — below.)
 bot.command('cost', ctx => doReadout(ctx, 'cost'))
@@ -5208,6 +5255,7 @@ initScheduler({
       : pasteToPane(paneId, text),
 })
 loadScheduledMsgs()
+loadTopics()   // forum-topics mode: load the persisted group + session<->topic map at startup
 
 // Wire the live activity mirror's daemon dependencies (bot, access, the shared replyMode
 // helper, the live focused-pane getter, and typing re-assert).
