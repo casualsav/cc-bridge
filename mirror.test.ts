@@ -59,7 +59,7 @@ test('renderThoughtsMirror leads with 💭, drops non-text, appends Done', () =>
     { kind: 'tool', tool: 'Bash', detail: 'ls' },
   ]
   const out = renderThoughtsMirror(feed, true)
-  expect(out.startsWith('💭')).toBe(true)
+  expect(out.startsWith('<blockquote>💭')).toBe(true)   // thoughts render shaded in a blockquote
   expect(out).toContain('thinking hard')
   expect(out).not.toContain('Bash')
   expect(out).toContain('✅ <b>Done</b>')
