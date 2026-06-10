@@ -50,7 +50,7 @@ import {
 } from './access.ts'
 import {
   setGroupChatId, getGroupChatId, isTopicMode, loadTopics,
-  getTopicByCwd, getCwdByThread, setTopic, updateTopic,
+  getTopicByCwd, getCwdByThread, setTopic, updateTopic, listTopics,
 } from './topics.ts'
 import { TypingPresence } from './typing.ts'
 import { transcribe, transcribeProvider, transcribeStatus } from './voice.ts'
@@ -3682,12 +3682,73 @@ async function createSessionPin(chat: string, text: string, reply_markup: Inline
   } catch (e) { process.stderr.write(`daemon: session pin create failed: ${e}\n`) }
 }
 
+// Single-session status card for a forum topic's pin — like sessionPinText but for ANY pane (it
+// captures that session's own pane), so each topic pins its own session's metrics. Informational
+// only (no quick-action buttons yet — their callbacks would need to target this topic's pane; see
+// port.md / the command port).
+async function sessionPinTextFor(paneId: string): Promise<string> {
+  let mode = '—', model = '—', cwd: string | null = null
+  let status: StatuslineData | null = null
+  try {
+    const cap = await capturePane(paneId)
+    if (onNormalPrompt(cap)) mode = modeLabel(detectCurrentMode(cap)).replace(/^\S+\s+/, '')
+    status = parseStatusline(cap)
+  } catch {}
+  try {
+    cwd = await paneCwd(paneId)
+    const file = cwd ? resolveTranscript(cwd) : null
+    model = (file && prettyModel(lastModelInTranscript(file))) || model
+  } catch {}
+  const branch = cwd ? await gitBranch(cwd) : null
+  const label = cwd ? (basename(cwd) || cwd) : 'session'
+  const usage = status?.h5 ? `  📈 ${status.h5.pct}%` : ''
+  const ctxBadge = status?.ctxPct != null ? `  💾 ${status.ctxPct}%` : ''
+  const effortBadge = status?.effort ? `  ⚡ ${escapeHtml(status.effort)}` : ''
+  const head = `🖥️ <b>${escapeHtml(label)}</b>${usage}${ctxBadge}  🧠 ${escapeHtml(model)}${effortBadge}  🕹️ ${escapeHtml(mode)}`
+  const lines: string[] = []
+  if (cwd) lines.push(`📁 <code>${escapeHtml(cwd)}</code>${branch ? ` · 🌿 ${escapeHtml(branch)}` : ''}`)
+  if (status?.ctxPct != null) lines.push(`💾 Context <code>${pinBar(status.ctxPct)}</code> ${status.ctxPct}%${status.tokens ? `  ·  ${status.tokens}` : ''}`)
+  if (status?.cost) lines.push(`💰 ${status.cost}`)
+  return lines.length ? `${head}\n${PIN_RULE}\n${lines.join('\n')}` : head
+}
+
+// Forum mode: one pinned status card PER topic, each tracking its own session. Keyed in sessionPins
+// as `topic:<threadId>` (distinct from DM mode's numeric chat keys, so the persisted map holds both).
+// A topic whose session isn't running keeps its existing pin untouched. No clearAllPins here — each
+// topic has its own single in-thread pin, so we never sweep the whole group's pins.
+async function updateTopicPins(): Promise<void> {
+  const group = getGroupChatId()
+  if (!group) return
+  for (const t of listTopics()) {
+    if (t.closed) continue
+    const paneId = await paneForCwd(t.cwd)
+    if (!paneId) continue
+    const text = await sessionPinTextFor(paneId)
+    const key = `topic:${t.threadId}`
+    const existing = sessionPins.get(key)
+    if (existing && pinTextCache.get(key) === text) continue   // unchanged → skip the edit
+    if (existing) {
+      try { await bot.api.editMessageText(group, existing, text, { parse_mode: 'HTML' }); pinTextCache.set(key, text); continue }
+      catch (e) {
+        if (pinMessageGone(e)) { sessionPins.delete(key); pinTextCache.delete(key); persistSessionPins() }
+        else { pinTextCache.set(key, text); continue }   // "not modified" → already current
+      }
+    }
+    try {
+      const m = await bot.api.sendMessage(group, text, { parse_mode: 'HTML', message_thread_id: t.threadId, disable_notification: true })
+      await bot.api.pinChatMessage(group, m.message_id, { disable_notification: true }).catch(() => {})
+      sessionPins.set(key, m.message_id); pinTextCache.set(key, text); persistSessionPins()
+    } catch (e) { process.stderr.write(`daemon: topic pin create failed: ${e}\n`) }
+  }
+}
+
 let pinUpdating = false
 async function updateSessionPin(): Promise<void> {
   if (loadAccess().sessionPin === false) return // disabled via /pin off
   if (pinUpdating) return                       // serialize — capture + edit can overlap with switches
   pinUpdating = true
   try {
+    if (isTopicMode()) { await updateTopicPins(); return }   // forum mode → per-topic pins, not the DM all-sessions pin
     const text = await sessionPinText(await sessionRows())
     const reply_markup = pinKeyboard()
     const hasSession = !!(focus.activePaneId || focus.activeShim)   // off-MCP pane or MCP shim — either counts
