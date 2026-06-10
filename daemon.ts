@@ -27,7 +27,7 @@ import { resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress,
 import { exec, sleep, hashText } from './proc.ts'
 import {
   capturePane, paneAlive, sendKeys, sendKeysLiteral, navigateDown, waitForSettle,
-  windowHeightOf, resizeWindowOf, paneCommand, paneCwd, PaneWatcher,
+  paneCommand, paneCwd, PaneWatcher,
 } from './pane-io.ts'
 import type {
   PendingEntry, GroupPolicy, Access, Session,
@@ -2434,14 +2434,33 @@ function compactContext(body: string[]): string | null {
   return out.join('\n')
 }
 
-// /cost opens a modal (tab bar "Settings Status … Stats" … "Esc to cancel") — take the body
-// between them.
+// /cost now prints an inline "Session / Total cost: …" block (it used to be a modal). Anchor on
+// the "Total cost:" line — the most stable marker — then take the surrounding block: back up to the
+// "Session" header just above it, and read forward until the input box / next prompt / footer
+// chrome. Falls back to the old modal shape (tab bar "Settings Status … Stats" … "Esc to cancel")
+// for older Claude Code builds.
 function extractCostReadout(raw: string): string | null {
-  const lines = raw.split('\n').map(l => stripAnsi(l).replace(/\s+$/, ''))
-  let start = lines.findIndex(l => /Settings\s+Status\s+Config\s+Usage\s+Stats/.test(l))
-  start = start < 0 ? 0 : start + 1
-  let end = lines.findIndex((l, i) => i > start && /Esc to cancel/i.test(l))
-  if (end < 0) end = lines.length
+  const lines = raw.split('\n').map(l => stripAnsi(l).replace(/\s+$/, '').replace('⎿', ' '))
+  const anchor = lines.findLastIndex(l => /Total cost:/i.test(l))
+  if (anchor < 0) {
+    let start = lines.findIndex(l => /Settings\s+Status\s+Config\s+Usage\s+Stats/.test(l))
+    start = start < 0 ? 0 : start + 1
+    let end = lines.findIndex((l, i) => i > start && /Esc to cancel/i.test(l))
+    if (end < 0) end = lines.length
+    return stripCommonIndent(lines.slice(start, end)) || null
+  }
+  // Start at the "Session" header just above the cost line if it's right there, else the cost line.
+  let start = anchor
+  for (let i = anchor; i >= Math.max(0, anchor - 3); i--) {
+    if (/^\s*Session\b/.test(lines[i])) { start = i; break }
+  }
+  // End at the input box border / next prompt / footer chrome below the block.
+  let end = lines.length
+  for (let i = anchor + 1; i < lines.length; i++) {
+    const t = lines[i].trim()
+    if (/^─{10,}/.test(t) || /^[╭╮╰╯]/.test(t) || /^❯/.test(t) ||
+        /Press up to edit/i.test(t) || /shift\+tab to cycle|esc to interrupt/i.test(t)) { end = i; break }
+  }
   return stripCommonIndent(lines.slice(start, end)) || null
 }
 
@@ -2464,29 +2483,18 @@ async function doReadout(ctx: Context, kind: 'cost' | 'context'): Promise<void> 
 async function runReadout(chatId: string, kind: 'cost' | 'context'): Promise<void> {
   const paneId = focus.activePaneId, watcher = focus.paneWatcher
   if (!paneId || !watcher) return
+  const cmd = kind === 'cost' ? '/cost' : '/context'
   const raw = await watcher.withInjection(async () => {
-    if (kind === 'cost') {
-      // /cost is a modal that can run taller than the pane, so a short terminal clips it
-      // mid-content. Grow the window first so the whole modal renders in one frame, capture,
-      // then restore — the user drives from Telegram, so the brief resize is unseen.
-      const h = await windowHeightOf(paneId)
-      const grew = h !== null && h < 80 && await resizeWindowOf(paneId, 80)
-      try {
-        await sendKeysLiteral(paneId, '/cost')
-        await sendKeys(paneId, ['Enter'])
-        await waitForSettle(paneId, 500, 6000)
-        const buf = await capturePane(paneId)
-        await sendKeys(paneId, ['Escape'])            // close the modal → back to the terminal
-        await waitForSettle(paneId, 200, 2000)
-        return buf
-      } finally {
-        if (grew && h !== null) await resizeWindowOf(paneId, h)
-      }
-    }
-    await sendKeysLiteral(paneId, '/context')
+    // Type the slash command, then WAIT for the autocomplete menu to filter down to the exact
+    // match before pressing Enter. Submitting too early runs whatever command is highlighted while
+    // the menu is still on a partial prefix (e.g. "/co…" highlights /compact), which is how /cost
+    // used to fire /compact. The settle gates Enter on a quiesced menu so the typed command runs.
+    await sendKeysLiteral(paneId, cmd)
+    await waitForSettle(paneId, 200, 2000)
     await sendKeys(paneId, ['Enter'])
     await waitForSettle(paneId, 400, 6000)
-    const buf = await exec('tmux', ['capture-pane', '-p', '-t', paneId, '-S', '-150', '-J'], { timeout: 3000 }).then(r => r.stdout).catch(() => '')
+    // Both readouts now print inline and can run past one screen, so read the scrollback.
+    const buf = await exec('tmux', ['capture-pane', '-p', '-t', paneId, '-S', '-200', '-J'], { timeout: 3000 }).then(r => r.stdout).catch(() => '')
     await sendKeys(paneId, ['Escape'])                // clear the input line → back to the terminal
     await waitForSettle(paneId, 200, 2000)
     return buf
