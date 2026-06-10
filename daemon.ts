@@ -2114,8 +2114,6 @@ async function handleModeCommand(
     return
   }
 
-  const msgId = ctx.message?.message_id
-  const chat_id = String(ctx.chat!.id)
   const paneId = focus.activePaneId
   const watcher = focus.paneWatcher
 
@@ -2136,9 +2134,9 @@ async function handleModeCommand(
     return
   }
 
-  if (msgId) {
-    void bot.api.setMessageReaction(chat_id, msgId, [{ type: 'emoji', emoji: '👍' }]).catch(() => {})
-  }
+  // Confirm the switch with a message (not a 👍 reaction) so the new mode is stated explicitly.
+  // Strip modeLabel's leading per-mode emoji — the ✅ is the confirmation marker here.
+  await ctx.reply(`✅ Mode changed to ${modeLabel(reached).replace(/^\S+\s+/, '')}`)
   void updateSessionPin()
 }
 
@@ -3191,12 +3189,15 @@ bot.command('stream', async ctx => {
   const arg = (ctx.match ?? '').toString().trim().toLowerCase()
   if (arg === 'thoughts' || arg === 'tools' || arg === 'hybrid' || arg === 'off') {
     const access = loadAccess(); access.replyMode = arg; saveAccess(access)
+    await ctx.reply(`✅ Stream mode changed to <b>${arg.charAt(0).toUpperCase() + arg.slice(1)}</b>`, { parse_mode: 'HTML' })
+    await respawnTerminalMirror()   // a mode change shouldn't leave the old card stranded above this confirmation
+    return
   } else if (arg) {
     await ctx.reply('Usage: <code>/stream thoughts | tools | hybrid | off</code>', { parse_mode: 'HTML' }); return
   }
+  // Bare /stream — just report the current mode and how to change it.
   const m = replyMode()
   await ctx.reply(`💬 Stream mode is <b>${m}</b> — ${STREAM_DESC[m]}\nChange with <code>/stream thoughts | tools | hybrid | off</code>.`, { parse_mode: 'HTML' })
-  await respawnTerminalMirror()   // a mode change shouldn't leave the old card stranded above this confirmation
 })
 
 // ---- /md: create a markdown file in the active session's working directory ----
@@ -4388,7 +4389,7 @@ bot.on('callback_query:data', async ctx => {
     }
     const num = ppermMatch[1]
     await ctx.answerCallbackQuery({ text: `Answered ${num}` }).catch(() => {})
-    await ctx.editMessageReplyMarkup().catch(() => {})  // drop the buttons immediately on tap, not after the settle
+    await ctx.deleteMessage().catch(() => {})  // remove the permission prompt entirely once answered (toast confirms)
     await focus.paneWatcher.withInjection(async () => {
       await sendKeys(focus.activePaneId!, [num, 'Enter'])
       await waitForSettle(focus.activePaneId!, 300, 5000)

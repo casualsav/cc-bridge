@@ -52,6 +52,14 @@ function isMainAssistantText(e: Entry): boolean {
   return e.type === 'assistant' && !e.isSidechain && textOf(e.message?.content).trim() !== ''
 }
 
+// Claude Code writes a synthetic assistant entry "No response requested." when a slash command
+// (e.g. /model, /clear) is run directly in the terminal and needs no model turn. It isn't a real
+// reply, so the relay readers skip it — otherwise running /model in the terminal relays this noise
+// to Telegram instead of staying silent.
+function isCommandNoise(text: string): boolean {
+  return /^no response requested\.?$/i.test(text.trim())
+}
+
 // A resumable session: id, its working dir, last-activity time, and a short title (the
 // first real user message). For the /resume picker.
 export type RecentSession = { sessionId: string; cwd: string; mtime: number; title: string }
@@ -220,7 +228,9 @@ export function latestFinalReply(file: string): { uuid: string; text: string } |
   for (let i = entries.length - 1; i >= 0; i--) {
     const e = entries[i]
     if (!isMainAssistantText(e)) continue
-    return { uuid: e.uuid ?? '', text: textOf(e.message?.content).trim() }
+    const text = textOf(e.message?.content).trim()
+    if (isCommandNoise(text)) continue
+    return { uuid: e.uuid ?? '', text }
   }
   return null
 }
@@ -240,7 +250,7 @@ export function finalRepliesAfter(file: string, afterUuid: string): { uuid: stri
   for (let i = at + 1; i < entries.length; i++) {
     const e = entries[i]
     if (e.type === 'user' && !e.isSidechain && textOf(e.message?.content).trim()) { flush(); continue }  // turn boundary
-    if (isMainAssistantText(e)) pending = { uuid: e.uuid ?? '', text: textOf(e.message?.content).trim() }
+    if (isMainAssistantText(e)) { const text = textOf(e.message?.content).trim(); if (!isCommandNoise(text)) pending = { uuid: e.uuid ?? '', text } }
   }
   flush()
   return out
