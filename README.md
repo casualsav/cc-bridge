@@ -70,7 +70,7 @@ Prefer to do it by hand? [`off-mcp/INSTALL.md`](./off-mcp/INSTALL.md) lists ever
 - **Unread replay** — switch back to a session and the messages it produced while
   unfocused replay automatically; you also get a **💬 ping** (with a one-tap switch
   button) the moment an unfocused session speaks.
-- **Pinned control bar** — a pinned status message shows the active session · model ·
+- **Pinned status bar** — a pinned status message shows the active session · model ·
   mode, with 🗂️ Sessions / 🧠 Model / 🧭 Mode quick buttons.
 - **Live activity mirror** — a single self-updating message shows what Claude is doing
   in real time (💻 terminal, 📋 todo, 📖 read, ✏️ edit, 🔍 search, 🤖 agent, ❓ clarify…),
@@ -223,7 +223,6 @@ formatted. Bot commands:
 | `/terminal [N]` | Show recent terminal activity (N lines) |
 | `/autocontinue` | Auto-send "continue" when the usage limit resets (on/off) |
 | `/schedule` | Queue a message into a session for later (`/schedule 12h` · `/schedule cancel`) |
-| `/dock` | Show the docked control-bar keyboard (`/dock off` to hide) |
 | `/pin` | Toggle the pinned status message (`/pin on` \| `off`) |
 | `/settings` | Channel settings panel — live mirror, pin, auto-continue, MCP mode, voice transcription |
 | `/reply <response>` | Type a response into the session, then Enter (e.g. a `/login` code) |

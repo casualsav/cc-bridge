@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { Bot, GrammyError, InlineKeyboard, Keyboard, InputFile, type Context } from 'grammy'
+import { Bot, GrammyError, InlineKeyboard, InputFile, type Context } from 'grammy'
 import type { ReactionTypeEmoji } from 'grammy/types'
 import { randomBytes } from 'node:crypto'
 import {
@@ -2186,7 +2186,7 @@ async function confirmResetSession(ctx: Context): Promise<void> {
   await ctx.reply('♻️ Clear this conversation in place?\n\nTap to confirm:', { reply_markup: keyboard })
 }
 
-// ---- Shared actions (used by both slash commands and the control bar) ----
+// ---- Shared actions (used by the slash commands) ----
 // Each gates and checks for an active pane itself, so it's safe to call from a
 // /command handler or from a control-bar button tap.
 
@@ -2522,21 +2522,6 @@ async function runReadout(chatId: string, kind: 'cost' | 'context'): Promise<voi
 
 // /session shows where the active session is: cwd, git branch (+dirty), mode, model.
 // cwd/branch are read deterministically from tmux + git (no pane scraping).
-// ---- Control bar (docked quick-action keyboard) ----
-// Buttons send their label as a normal message; the message:text handler matches
-// these exact labels and routes each to the action above before any other handling.
-const BTN_MODE = '🕹️ Mode'
-const BTN_MODEL = '🧠 Model'
-const BTN_SESSIONS = '🖥️ Session'
-const BTN_COST = '📊 Cost'
-const BTN_STOP = '🛑 Stop'
-const BTN_NEW = '🆕 New'
-
-function controlKeyboard(): Keyboard {
-  return new Keyboard()
-    .text(BTN_MODEL).text(BTN_MODE).text(BTN_SESSIONS).text(BTN_STOP).text(BTN_NEW)
-    .resized().persistent()
-}
 
 // ---- Telegram bot handlers ----
 
@@ -2567,11 +2552,13 @@ async function sendStartHelp(ctx: Context): Promise<void> {
   if (!gated) return
   const paired = gated.access.allowFrom.includes(gated.senderId)
   const caption = startHelpText(paired)
+  // remove_keyboard clears the retired docked control bar for anyone who still has it stuck on
+  // their client (its taps would otherwise leak the button label to Claude as a plain message).
   // Lead with the Claude starburst (bundled asset) — doubles as the suggested bot profile picture.
   try {
-    await ctx.replyWithPhoto(new InputFile(join(import.meta.dir, 'assets', 'claude.jpg')), { caption, parse_mode: 'HTML' })
+    await ctx.replyWithPhoto(new InputFile(join(import.meta.dir, 'assets', 'claude.jpg')), { caption, parse_mode: 'HTML', reply_markup: { remove_keyboard: true } })
   } catch {
-    await ctx.reply(caption, { parse_mode: 'HTML', link_preview_options: { is_disabled: true } })   // asset missing (stale cache) → text only
+    await ctx.reply(caption, { parse_mode: 'HTML', link_preview_options: { is_disabled: true }, reply_markup: { remove_keyboard: true } })   // asset missing (stale cache) → text only
   }
 }
 
@@ -2812,16 +2799,6 @@ bot.command('update', async ctx => {
   await showUpdateDashboard(ctx)
 })
 
-// /dock shows the docked control bar; /dock off hides it. /menu stays as a hidden alias.
-bot.command(['dock', 'menu'], async ctx => {
-  if (!dmCommandGate(ctx)) return
-  const arg = (ctx.match ?? '').toString().trim().toLowerCase()
-  if (arg === 'off' || arg === 'hide') {
-    await ctx.reply('Control bar hidden — /dock to show it again', { reply_markup: { remove_keyboard: true } })
-    return
-  }
-  await ctx.reply('🎛 Control bar ready', { reply_markup: controlKeyboard() })
-})
 
 // /cost, /context relay session visibility info. (/session is the registry — below.)
 bot.command('cost', ctx => doReadout(ctx, 'cost'))
@@ -4720,17 +4697,6 @@ async function handleInbound(
 
 bot.on('message:text', async ctx => {
   const text = ctx.message.text
-
-  // Control-bar taps arrive as a normal message carrying the button label.
-  // Route exact matches to their action before any other handling.
-  switch (text) {
-    case BTN_MODE:     await doModePicker(ctx); return
-    case BTN_MODEL:    await doModelPicker(ctx); return
-    case BTN_SESSIONS: await doSessionList(ctx); return
-    case BTN_COST:     await doReadout(ctx, 'cost'); return
-    case BTN_STOP:     await confirmStop(ctx); return
-    case BTN_NEW:      await confirmNewSession(ctx); return
-  }
 
   // `!<cmd>` → run a shell command on the host and relay its output (opt-in: TELEGRAM_BANG_SHELL=1),
   // mirroring Claude Code's terminal `!` REPL. Gated by the access allowlist like any inbound.
