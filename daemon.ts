@@ -4447,8 +4447,8 @@ async function statusCardText(paneId: string | null): Promise<string> {
   // a bare emoji at the end. Think lives in the body — with it up top the collapsed pin preview
   // ellipsized.
   // Single-space packing throughout — double spacing pushed the context % off the preview.
-  const effortBadge = status?.effort ? `⚡${escapeHtml(status.effort)}` : ''   // no space before ⚡ — buys the preview one char
-  const modeBadgeStr = mode === '—' ? '' : `${escapeHtml(mode)}`   // no space before 🛡 either — the emoji is the separator
+  const effortBadge = status?.effort ? ` ⚡${escapeHtml(status.effort)}` : ''
+  const modeBadgeStr = mode === '—' ? '' : ` ${escapeHtml(mode)}`
   const stats = [
     status?.h5 ? `🕒 ${status.h5.pct}%` : '',
     status?.d7 ? `📅 ${status.d7.pct}%` : '',
