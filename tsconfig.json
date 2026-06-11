@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "esnext",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "strict": false,
+    "skipLibCheck": true,
+    "types": [
+      "@types/bun"
+    ],
+    "strictNullChecks": true
+  },
+  "exclude": [
+    "node_modules",
+    "graphify-out"
+  ]
+}

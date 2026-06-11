@@ -3217,6 +3217,56 @@ async function updateClaude(chat: string): Promise<void> {
   else await dm('No active session to resume — start one to use the new Claude.')
 }
 
+// ---- Proactive update notifications ----
+// Daily quiet check for bridge + Claude updates. One card per newly-seen version (deduped via
+// UPDATE_NOTIFY_FILE), with one-tap buttons into the EXISTING update flows (upd:bridge /
+// upd:claude — apply, progress, health-check, rollback all already non-agentic). Never
+// auto-applies; `updateChecks: false` pref disables.
+const UPDATE_NOTIFY_FILE = join(STATE_DIR, 'update-notify.json')
+const MP_DIR = join(homedir(), '.claude', 'plugins', 'marketplaces', 'better-claude-plugins')
+
+async function checkBridgeUpdate(): Promise<{ cur: string; latest: string } | null> {
+  try {
+    if (!existsSync(join(MP_DIR, '.git'))) return null
+    await exec('git', ['-C', MP_DIR, 'fetch', '--quiet', 'origin'], { timeout: 60_000 })
+    const branch = (await exec('git', ['-C', MP_DIR, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 5000 })).stdout.trim() || 'main'
+    const remoteJson = (await exec('git', ['-C', MP_DIR, 'show', `origin/${branch}:.claude-plugin/plugin.json`], { timeout: 5000 })).stdout
+    const latest = String(JSON.parse(remoteJson).version ?? '')
+    const cur = bridgeVersion()
+    return latest && latest !== cur ? { cur, latest } : null
+  } catch { return null }
+}
+
+async function checkClaudeUpdate(): Promise<{ cur: string; latest: string } | null> {
+  try {
+    const cur = await claudeVersion()
+    if (!cur) return null
+    const res = await fetch('https://registry.npmjs.org/@anthropic-ai/claude-code/latest', { signal: AbortSignal.timeout(15_000) })
+    if (!res.ok) return null
+    const latest = ((await res.json()) as { version?: string }).version
+    return latest && latest !== cur ? { cur, latest } : null
+  } catch { return null }
+}
+
+async function sweepUpdateChecks(): Promise<void> {
+  if (loadAccess().updateChecks === false) return
+  const notified = readJsonFile<{ bridge?: string; claude?: string }>(UPDATE_NOTIFY_FILE, {})
+  const [b, c] = await Promise.all([checkBridgeUpdate(), checkClaudeUpdate()])
+  const newBridge = b && notified.bridge !== b.latest ? b : null
+  const newClaude = c && notified.claude !== c.latest ? c : null
+  if (!newBridge && !newClaude) return
+  const lines = ['🆕 <b>Update available</b>']
+  const kb = new InlineKeyboard()
+  if (newBridge) { lines.push(`🌉 Bridge <code>${escapeHtml(newBridge.cur)}</code> → <code>${escapeHtml(newBridge.latest)}</code>`); kb.text('🌉 Update bridge', 'upd:bridge') }
+  if (newClaude) { lines.push(`🧠 Claude <code>${escapeHtml(newClaude.cur)}</code> → <code>${escapeHtml(newClaude.latest)}</code>`); kb.text('🧠 Update Claude', 'upd:claude') }
+  const dests = isTopicMode() && getGroupChatId() ? [getGroupChatId()!] : loadAccess().allowFrom
+  for (const chat of dests) {
+    await bot.api.sendMessage(chat, lines.join('\n'), { parse_mode: 'HTML', reply_markup: kb, disable_notification: true }).catch(() => {})
+  }
+  writeJsonFile(UPDATE_NOTIFY_FILE, { bridge: newBridge?.latest ?? notified.bridge, claude: newClaude?.latest ?? notified.claude })
+  process.stderr.write(`daemon: update notice posted (bridge ${newBridge?.latest ?? '—'}, claude ${newClaude?.latest ?? '—'})\n`)
+}
+
 async function showUpdateDashboard(ctx: Context): Promise<void> {
   const claudeVer = await claudeVersion()
   await ctx.reply(
@@ -6831,6 +6881,8 @@ setInterval(() => void sweepDeletedTopics(), TOPIC_SWEEP_MS).unref()
 // Inject /later queue items whenever their session goes idle.
 setInterval(() => void sweepLaterQueues(), LATER_SWEEP_MS).unref()
 setInterval(() => void sweepPermStorms(), 5_000).unref()
+setTimeout(() => void sweepUpdateChecks(), 5 * 60_000).unref()        // once shortly after boot…
+setInterval(() => void sweepUpdateChecks(), 24 * 3_600_000).unref()   // …then daily
 
 // Daily digest (if scheduled) + budget tracking.
 armDigest()

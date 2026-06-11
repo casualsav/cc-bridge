@@ -65,7 +65,9 @@ function pidAlive(file: string): boolean {
   return false
 }
 
-const daemonPath = findDaemon()
+// `?? ''` keeps the type plain string for the closures below (control-flow narrowing from the
+// module-level exit guard doesn't reach into functions); the guard still exits on not-found.
+const daemonPath = findDaemon() ?? ''
 if (!daemonPath) { process.stderr.write('ensure-daemon: daemon.ts not found in plugin cache\n'); process.exit(1) }
 const daemonDir = dirname(daemonPath)
 const watchdogPath = join(daemonDir, 'watchdog.ts')

@@ -77,7 +77,7 @@ export function recommendWhisper(probe: HardwareProbe = probeHardware()): Whispe
     ? `${probe.cores} CPU cores — \`small\` balances accuracy and latency for chat (\`medium\` is ~3× slower).`
     : `${probe.cores} CPU cores — \`base\` keeps notes snappy on a small box.`
   // RAM clamp: medium peaks ~2 GB, large ~4 GB. With <3 GB total, even `small` is the ceiling.
-  if (probe.totalRamGB > 0 && probe.totalRamGB < 3 && model !== 'base' && model !== 'tiny') {
+  if (probe.totalRamGB > 0 && probe.totalRamGB < 3 && model !== 'base') {
     model = 'base'
     reason = `Only ${probe.totalRamGB} GB RAM — \`base\` to stay well clear of swapping.`
   }

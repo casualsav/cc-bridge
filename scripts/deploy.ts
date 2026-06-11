@@ -142,6 +142,14 @@ if (build.status !== 0) {
   if (freshCache) rmSync(newCache, { recursive: true, force: true })
   die(`type-check failed — checkout left untouched:\n${build.stderr || build.stdout}`)
 }
+// bun build only transpiles — it has shipped unimported identifiers before. The real typecheck
+// runs in the CHECKOUT (same files just synced; typescript + @types/bun are devDeps there).
+step('type-checking (tsc --noEmit)')
+const tsc = sh('bunx', ['tsc', '--noEmit'], REPO)
+if (tsc.status !== 0) {
+  if (freshCache) rmSync(newCache, { recursive: true, force: true })
+  die(`tsc failed — checkout left untouched:\n${(tsc.stdout || tsc.stderr).slice(0, 4000)}`)
+}
 step('type-check OK')
 
 // ---- 5. build passed: now stamp the checkout + marketplace mirror ----
