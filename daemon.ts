@@ -4104,12 +4104,13 @@ bot.command('rename', async ctx => {
 bot.command('stop', confirmStop)
 
 // Inline-button handler for permission requests + mode cycling + prompt answers.
-// A topic the USER creates (Telegram's ➕ create-topic UI) becomes a session, automatically: its
-// folder is <focused session's cwd>/<topic name> (created if missing) — name a tab "money" while
-// the main session runs in /main and it spawns in /main/money. No anchor session (or mkdir
-// failure) falls back to the old folder force-reply. Topics the bot creates don't produce updates
-// for the bot (own-message filter as belt-and-braces), so this only fires for human-made tabs.
+// A topic the USER creates (Telegram's ➕ create-topic UI) becomes a session via a two-button
+// card: 📁 <focused cwd>/<topic name> (one tap — name a tab "money" while the main session runs
+// in /projects and it spawns in /projects/money) or ✏️ Specify folder (force-reply). No anchor
+// session falls straight to the folder prompt. Topics the bot creates don't produce updates for
+// the bot (own-message filter as belt-and-braces), so this only fires for human-made tabs.
 // Non-allowlisted creators are ignored — the group policy governs.
+const topicCreatePending = new Map<number, { name: string; dir: string }>()   // threadId → the card's offer
 bot.on('message:forum_topic_created', async ctx => {
   if (!isTopicMode() || String(ctx.chat.id) !== getGroupChatId()) return
   if (ctx.from?.id === ctx.me.id) return
@@ -4120,27 +4121,17 @@ bot.on('message:forum_topic_created', async ctx => {
 
   const base = focus.activePaneId ? await paneCwd(focus.activePaneId).catch(() => null) : null
   const dirName = name.replace(/[\\/\0]/g, '-').trim()
-  let dir: string | null = base && dirName ? join(base, dirName) : null
+  const dir = base && dirName ? join(base, dirName) : null
   if (dir) {
-    let created = false
-    if (!existsSync(dir)) {
-      try { mkdirSync(dir, { recursive: true }); created = true } catch { dir = null }
-    }
-    if (dir) {
-      const sid = genSessionId()
-      setTopic(sid, { threadId: thread, cwd: dir, name, closed: false, createdAt: Date.now() })
-      // Seed the branch cache so the retitle sweep doesn't stomp the user's chosen tab name on
-      // its first pass — it only renames on an actual branch CHANGE from here on.
-      try { topicBranchCache.set(sid, (await exec('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 2000 })).stdout.trim()) }
-      catch { topicBranchCache.set(sid, '') }
-      const ok = await spawnSession(dir, '', sid)
-      if (!ok) removeTopic(sid)
-      await ctx.reply(ok
-        ? `🚀 Starting this topic's session in <code>${escapeHtml(dir)}</code>${created ? ' (📁 created it for you)' : ''} — type here to drive it once it's up.`
-        : `❌ Couldn't start a session in <code>${escapeHtml(dir)}</code>.`,
-        { parse_mode: 'HTML' }).catch(() => {})
-      return
-    }
+    topicCreatePending.set(thread, { name, dir })
+    const label = dir.length > 48 ? `…${dir.slice(-47)}` : dir
+    const sent = await ctx.reply(
+      `📂 <b>New topic “${escapeHtml(name)}”</b> — where should its Claude session run?`,
+      { parse_mode: 'HTML', reply_markup: new InlineKeyboard()
+          .text(`📁 ${label}`, `tcgo:${thread}`).row()
+          .text('✏️ Specify folder', `tcask:${thread}`) },
+    ).catch(() => null)
+    if (sent) return
   }
   const sent = await ctx.reply(
     `📂 <b>New topic “${escapeHtml(name)}”</b> — which folder should its Claude session run in?\n\nReply with a folder path (created if missing; <code>~/…</code> works).`,
@@ -4534,6 +4525,58 @@ bot.on('callback_query:data', async ctx => {
 
   // "➕ Add" on the /schedule dashboard → force-reply asking for "time message" in one line,
   // parsed (split + queued) when the reply lands. Captures the current session as the target.
+  // New-topic folder card: tcgo = spawn in the offered <cwd>/<name>; tcask = force-reply prompt.
+  const tcMatch = /^tc(go|ask):(\d+)$/.exec(data)
+  if (tcMatch) {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    await ctx.answerCallbackQuery().catch(() => {})
+    const thread = Number(tcMatch[2])
+    const chat = String(ctx.chat?.id)
+    if (getSessionByThread(thread)) {   // bound meanwhile (e.g. a typed reply won the race)
+      await ctx.editMessageText('✅ This topic already has its session.').catch(() => {})
+      return
+    }
+    const pending = topicCreatePending.get(thread)
+    topicCreatePending.delete(thread)
+    if (tcMatch[1] === 'ask' || !pending) {
+      // Spent card (daemon restarted) also lands here — the prompt still works without it.
+      await ctx.editMessageReplyMarkup().catch(() => {})
+      const sent = await bot.api.sendMessage(chat,
+        `📂 Which folder should this topic's session run in?\n\nReply with a folder path (created if missing; <code>~/…</code> works).`,
+        { parse_mode: 'HTML', message_thread_id: thread, reply_markup: { force_reply: true, input_field_placeholder: 'Folder path' } }).catch(() => null)
+      if (sent) replyTargets.set(`${chat}:${sent.message_id}`, { kind: 'topiccreate', threadId: thread, name: pending?.name ?? '' })
+      return
+    }
+    let created = false
+    if (!existsSync(pending.dir)) {
+      try { mkdirSync(pending.dir, { recursive: true }); created = true }
+      catch (e) {
+        await ctx.editMessageText(`❌ Couldn't create <code>${escapeHtml(pending.dir)}</code>: ${escapeHtml(String((e as Error)?.message ?? e))}`, { parse_mode: 'HTML' }).catch(() => {})
+        const sent = await bot.api.sendMessage(chat,
+          `📂 Reply with another folder path — <code>~/…</code> or an absolute folder you can write to.`,
+          { parse_mode: 'HTML', message_thread_id: thread, reply_markup: { force_reply: true, input_field_placeholder: 'Folder path' } }).catch(() => null)
+        if (sent) replyTargets.set(`${chat}:${sent.message_id}`, { kind: 'topiccreate', threadId: thread, name: pending.name })
+        return
+      }
+    }
+    const sid = genSessionId()
+    setTopic(sid, { threadId: thread, cwd: pending.dir, name: pending.name || basename(pending.dir), closed: false, createdAt: Date.now() })
+    // Seed the branch cache so the retitle sweep doesn't stomp the user's chosen tab name on its
+    // first pass — it only renames on an actual branch CHANGE from here on.
+    try { topicBranchCache.set(sid, (await exec('git', ['-C', pending.dir, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 2000 })).stdout.trim()) }
+    catch { topicBranchCache.set(sid, '') }
+    const ok = await spawnSession(pending.dir, '', sid)
+    if (!ok) removeTopic(sid)
+    await ctx.editMessageText(ok
+      ? `🚀 Starting this topic's session in <code>${escapeHtml(pending.dir)}</code>${created ? ' (📁 created it for you)' : ''} — type here to drive it once it's up.`
+      : `❌ Couldn't start a session in <code>${escapeHtml(pending.dir)}</code>.`,
+      { parse_mode: 'HTML' }).catch(() => {})
+    return
+  }
+
   // 🗑 on the topic-closed notice: delete the topic (removes the tab + history). The "always"
   // variant also flips topicOnEnd=delete so future ended sessions vanish without asking.
   const topicDel = /^topicdel(always)?:(\d+)$/.exec(data)
