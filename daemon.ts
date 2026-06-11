@@ -3795,16 +3795,15 @@ async function statusCardText(paneId: string | null): Promise<string> {
   } catch {}
   const branch = cwd ? await gitBranch(cwd) : null
 
-  // Head badges: session (5h) · weekly (7d) · context, then model · effort · mode. Think lives
-  // in the body — with it up top the collapsed pin preview ellipsized.
+  // Head badges: model · effort, then session (5h) · weekly (7d) · context, mode last. Think
+  // lives in the body — with it up top the collapsed pin preview ellipsized.
   const effortBadge = status?.effort ? `  ⚡ ${escapeHtml(status.effort)}` : ''
   const stats = [
     status?.h5 ? `📈 ${status.h5.pct}%` : '',
     status?.d7 ? `📅 ${status.d7.pct}%` : '',
     status?.ctxPct != null ? `💾 ${status.ctxPct}%` : '',
   ].filter(Boolean).join('  ')
-  const ident = `🧠 ${escapeHtml(model ?? '—')}${effortBadge}  ${escapeHtml(mode)}`
-  const head = stats ? `${stats}  ${ident}` : ident
+  const head = `🧠 ${escapeHtml(model ?? '—')}${effortBadge}${stats ? `  ${stats}` : ''}  ${escapeHtml(mode)}`
   const groups: string[] = []
   if (cwd) groups.push(`📁 <code>${escapeHtml(cwd)}</code>${branch ? ` · 🌿 ${escapeHtml(branch)}` : ''}`)
   if (status) {
