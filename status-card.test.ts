@@ -43,7 +43,7 @@ test('lastTodosInTranscript reads the latest TodoWrite state', () => {
 
 test('modeBadge stays short for the pin preview', () => {
   expect(modeBadge('bypassPermissions')).toBe('🛡yolo')
-  expect(modeBadge('default')).toBe('🛡default')
+  expect(modeBadge('default')).toBe('🛡ask')
 })
 
 test('pinMessageGone matches only gone-pin errors', () => {

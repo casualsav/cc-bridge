@@ -32,7 +32,7 @@ export function initStatusCard(d: StatusCardDeps): void { deps = d }
 // for the pin preview. The per-mode emojis live on in modeLabel (pickers/buttons).
 export function modeBadge(mode: CcMode): string {
   switch (mode) {
-    case 'default': return '🛡default'
+    case 'default': return '🛡ask'
     case 'acceptEdits': return '🛡edits'
     case 'plan': return '🛡plan'
     case 'auto': return '🛡auto'
@@ -162,7 +162,7 @@ export async function statusCardText(paneId: string | null): Promise<string> {
   } catch {}
   const branch = cwd ? await gitBranch(cwd) : null
 
-  // Head badges: model · effort · mode · think, then session (5h) · weekly (7d) · context. Mode
+  // Head badges: model · think · effort · mode, then session (5h) · weekly (7d) · context. Mode
   // sits in the identity cluster (emoji + short word, same grammar as "⚡ high") rather than
   // dangling as a bare emoji at the end. Think is a bare ✻ — the worded "✻ think" up top
   // ellipsized the collapsed pin preview, but one glyph fits (it also stays in the body).
@@ -175,7 +175,7 @@ export async function statusCardText(paneId: string | null): Promise<string> {
     status?.d7 ? `📅 ${status.d7.pct}%` : '',
     status?.ctxPct != null ? `💾 ${status.ctxPct}%` : '',
   ].filter(Boolean).join(' ')
-  const head = `🧠 ${escapeHtml(model ?? '—')}${effortBadge}${modeBadgeStr}${thinkBadge}${stats ? ` ${stats}` : ''}`
+  const head = `🧠 ${escapeHtml(model ?? '—')}${thinkBadge}${effortBadge}${modeBadgeStr}${stats ? ` ${stats}` : ''}`
   const groups: string[] = []
   if (cwd) groups.push(`📁 <code>${escapeHtml(cwd)}</code>${branch ? ` · 🌿 ${escapeHtml(branch)}` : ''}`)
   // The session's working plan (ROADMAP #16): latest TodoWrite state, with the in-progress step.
