@@ -4228,7 +4228,7 @@ async function statusCardText(paneId: string | null): Promise<string> {
     status?.d7 ? `📅 ${status.d7.pct}%` : '',
     status?.ctxPct != null ? `💾 ${status.ctxPct}%` : '',
   ].filter(Boolean).join(' ')
-  const head = `🧠 ${escapeHtml(model ?? '—')}${effortBadge}${modeBadgeStr}${stats ? ` • ${stats}` : ''}`
+  const head = `🧠 ${escapeHtml(model ?? '—')}${effortBadge}${modeBadgeStr}${stats ? ` ${stats}` : ''}`
   const groups: string[] = []
   if (cwd) groups.push(`📁 <code>${escapeHtml(cwd)}</code>${branch ? ` · 🌿 ${escapeHtml(branch)}` : ''}`)
   if (status) {
