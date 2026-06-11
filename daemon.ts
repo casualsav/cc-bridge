@@ -252,17 +252,15 @@ async function sendKeysPaced(paneId: string, keys: string[], gapMs = 150): Promi
 // match the TUI, the modal stays open and captures ALL keyboard input — a "frozen" pane the
 // user can only escape by detaching. So after answering, if a prompt is still up, Esc it and
 // say so. NOT used on tabbed/multi-question paths, where a remaining prompt is the next tab.
-async function verifyPromptClosed(): Promise<void> {
-  if (!focus.activePaneId || !focus.paneWatcher) return
-  const cap = await capturePane(focus.activePaneId).catch(() => '')
+async function verifyPromptClosed(paneId: string | null = focus.activePaneId): Promise<void> {
+  if (!paneId) return
+  const cap = await capturePane(paneId).catch(() => '')
   if (!cap || (!detectUserPrompt(cap) && !detectPermissionPrompt(cap))) return
-  await focus.paneWatcher.withInjection(async () => {
-    await sendKeys(focus.activePaneId!, ['Escape'])
-    await waitForSettle(focus.activePaneId!, 200, 1500)
+  await withPaneInjection(paneId, async () => {
+    await sendKeys(paneId, ['Escape'])
+    await waitForSettle(paneId, 200, 1500)
   })
-  lastRelayedPromptHash = ''
-  lastRelayedPermissionHash = ''
-  promptRelayOutstanding = false
+  resetPromptDedup(paneId)
   notifyChats('⚠️ That answer didn’t register cleanly in the session — I dismissed the prompt so the terminal wouldn’t hang. Please try again.')
 }
 
@@ -285,8 +283,19 @@ function detectCurrentMode(paneText: string): CcMode {
 // detectCurrentMode would there fall through to a false 'default' — mode ops guard on this and
 // report "another screen" instead of silently switching/mis-reporting.
 function onNormalPrompt(paneText: string): boolean {
-  const tail = paneText.split('\n').map(l => stripAnsi(l)).slice(-8).join('\n').toLowerCase()
-  return /shift\+tab to cycle|\? for shortcuts|esc to interrupt/.test(tail)
+  const lines = paneText.split('\n').map(l => stripAnsi(l))
+  const tail = lines.slice(-8).join('\n').toLowerCase()
+  if (/shift\+tab to cycle|\? for shortcuts|esc to interrupt/.test(tail)) return true
+  // The footer hint rotates with CC version/state ("← for agents", "@ for file paths", …), so all
+  // of the phrases above can be absent at a perfectly normal prompt (this bounced /mode with a
+  // false "another screen"). Accept the input box itself as proof: a "❯" prompt row directly
+  // between two box-border rows. Menus and pickers render "❯" as the cursor on an option row
+  // inside a list — question above, sibling options below — never bordered on both sides.
+  const t = lines.slice(-12)
+  for (let i = 1; i + 1 < t.length; i++) {
+    if (/^\s*❯/.test(t[i]) && /^\s*[─━╭╰└┌├╮╯|]/.test(t[i - 1]) && /^\s*[─━╭╰└┌├╮╯|]/.test(t[i + 1])) return true
+  }
+  return false
 }
 
 // ---- First-run onboarding driver ----
@@ -353,8 +362,7 @@ async function dismissUsageLimitChoice(paneId: string): Promise<void> {
   if (Date.now() - usageChoiceDismissedAt < 4000) return   // same menu, just repainting
   usageChoiceDismissedAt = Date.now()
   process.stderr.write('daemon: auto-dismissing usage-limit choice (option 1: stop and wait)\n')
-  if (focus.paneWatcher) await focus.paneWatcher.withInjection(async () => { await sendKeys(paneId, ['Enter']); await waitForSettle(paneId, 200, 3000) })
-  else await sendKeys(paneId, ['Enter'])
+  await withPaneInjection(paneId, async () => { await sendKeys(paneId, ['Enter']); await waitForSettle(paneId, 200, 3000) })
 }
 
 // Auto-confirm the /plugin "Will install:" scope menu on "Install for you (user scope)" (the
@@ -367,8 +375,7 @@ async function confirmPluginInstall(paneId: string): Promise<void> {
   if (Date.now() - pluginInstallConfirmedAt < 4000) return   // same menu, just repainting
   pluginInstallConfirmedAt = Date.now()
   process.stderr.write('daemon: auto-confirming plugin install (user scope)\n')
-  if (focus.paneWatcher) await focus.paneWatcher.withInjection(async () => { await sendKeys(paneId, ['Enter']); await waitForSettle(paneId, 200, 3000) })
-  else await sendKeys(paneId, ['Enter'])
+  await withPaneInjection(paneId, async () => { await sendKeys(paneId, ['Enter']); await waitForSettle(paneId, 200, 3000) })
   notifyChats('🧩 Installed the plugin for you (user scope).')
 }
 
@@ -975,6 +982,19 @@ function startRelayLoop(): void {
 // pane is skipped, so the two loops never double-send. No-op outside topic mode (single-focus
 // behavior is unchanged). Newly-seen panes are primed (skip their existing tail), relay from next tick.
 async function auxRelayTick(): Promise<void> {
+  // Prompt detection for non-focused panes (forum-topics mode). The focused pane's PaneWatcher
+  // feeds onPaneEvent; aux panes have no watcher, so without this a permission prompt in another
+  // topic's session sits undetected forever — the session blocks silently. Runs regardless of
+  // TRANSCRIPT_OUTBOUND: prompts are read from the pane, not the transcript.
+  if (isTopicMode()) {
+    for (const k of [...auxPromptStates.keys()]) {
+      if (!offMcpPanes.has(k) || k === focus.activePaneId) auxPromptStates.delete(k)
+    }
+    for (const pane of [...offMcpPanes]) {
+      if (pane === focus.activePaneId) continue
+      await scanAuxPanePrompts(pane).catch(() => { /* transient (tmux) — retry next tick */ })
+    }
+  }
   if (TRANSCRIPT_OUTBOUND && isTopicMode()) {
     // A transcript is resolved by cwd, so multiple panes in the SAME cwd map to the SAME file. Relay
     // each file exactly once per tick — and never a file the focused rich loop already owns — or the
@@ -1008,6 +1028,90 @@ async function auxRelayTick(): Promise<void> {
     }
   }
   setTimeout(() => void auxRelayTick(), RELAY_POLL_MS)
+}
+
+// ---- Aux-pane prompt detection (forum-topics mode) ----
+// Per-pane dedup mirroring the focused pane's lastRelayedPromptHash / lastRelayedPermissionHash /
+// promptRelayOutstanding / lastRelayedAuthUrl globals. The globals stay dedicated to the focused
+// pane (DM-mode behavior untouched); every other off-MCP pane gets a record here, pruned by
+// auxRelayTick when the pane dies or becomes focused.
+type AuxPromptState = { promptHash: string; permHash: string; authUrl: string; outstanding: boolean }
+const auxPromptStates = new Map<string, AuxPromptState>()
+
+function auxPromptStateFor(pane: string): AuxPromptState {
+  let st = auxPromptStates.get(pane)
+  if (!st) { st = { promptHash: '', permHash: '', authUrl: '', outstanding: false }; auxPromptStates.set(pane, st) }
+  return st
+}
+
+// Clear a pane's prompt dedup after its prompt was answered (or force-closed), so the next
+// menu — even an identical repaint — relays again. Focused pane → the globals; aux → its record.
+function resetPromptDedup(paneId: string | null): void {
+  if (!paneId || paneId === focus.activePaneId) {
+    lastRelayedPromptHash = ''
+    lastRelayedPermissionHash = ''
+    promptRelayOutstanding = false
+  }
+  if (paneId) {
+    const st = auxPromptStates.get(paneId)
+    if (st) { st.promptHash = ''; st.permHash = ''; st.outstanding = false }
+  }
+}
+
+// Record that a prompt was just relayed for `paneId` so repaints don't re-send it (the tabbed
+// advance relays the next question explicitly and must suppress the watcher/scanner's own pass).
+function markPromptRelayed(paneId: string, h: string): void {
+  if (paneId === focus.activePaneId) { lastRelayedPromptHash = h; promptRelayOutstanding = true; return }
+  const st = auxPromptStateFor(paneId)
+  st.promptHash = h
+  st.outstanding = true
+}
+
+// One detection pass over a non-focused pane — the same detector chain onPaneEvent runs for the
+// focused pane, minus the focused-only flows (login-method menu, onboarding driving, usage-limit
+// bookkeeping). Relays carry the origin pane so answers drive it and messages land in its topic.
+async function scanAuxPanePrompts(pane: string): Promise<void> {
+  const text = await capturePane(pane).catch(() => '')
+  if (!text) return
+  const st = auxPromptStateFor(pane)
+
+  // System stalls auto-dismiss exactly like the focused path — they'd wedge queued injections.
+  if (isUsageLimitChoice(text)) { void dismissUsageLimitChoice(pane); return }
+  if (isPluginInstallUserScope(text)) { void confirmPluginInstall(pane); return }
+
+  // Sign-in link printed as plain output (independent of menu detection).
+  const authUrl = extractAuthUrl(text)
+  if (authUrl) {
+    const h = hashText(authUrl)
+    if (h !== st.authUrl) { st.authUrl = h; void relayAuthUrlToTelegram(authUrl, pane) }
+  }
+
+  // Pre-REPL screens (theme/trust) are select menus too — never relay them as questions. Driving
+  // them stays an adoption-flow (focused) concern; here they're just filtered out.
+  if (!onboardedPanes.has(pane)) {
+    if (onNormalPrompt(text)) onboardedPanes.add(pane)
+    else if (classifyOnboarding(text)) return
+  }
+
+  const perm = detectPermissionPrompt(text)
+  if (perm) {
+    const ph = hashText(perm.question + '|' + perm.preview + '|' + perm.options.map(o => o.label).join('|'))
+    if (!st.outstanding && ph !== st.permHash) {
+      st.permHash = ph
+      st.outstanding = true
+      void relayPermissionToTelegram(perm, pane)
+    }
+    return
+  }
+
+  const prompt = detectUserPrompt(text)
+  if (!prompt) { st.outstanding = false; return }   // no menu on the pane → the last one is resolved
+  if (st.outstanding) return                        // one's already relayed & unanswered — don't re-send on a repaint
+  const h = promptHash(prompt)
+  if (h === st.promptHash) return
+  st.promptHash = h
+  st.outstanding = true
+  void relayPromptToTelegram(prompt, pane)
 }
 
 // ---- Off-MCP pane auto-discovery ----
@@ -1860,10 +1964,10 @@ async function flushPendingText(): Promise<void> {
   }
 }
 
-async function relayPromptToTelegram(prompt: PromptInfo): Promise<void> {
-  if (!focus.activePaneId) return
-  // Route to the requesting (focused) session's own topic in forum mode; DM mode → the allowlist.
-  const targets = await outboundTargetsFor(focus.activePaneId)
+async function relayPromptToTelegram(prompt: PromptInfo, paneId: string | null = focus.activePaneId): Promise<void> {
+  if (!paneId) return
+  // Route to the requesting session's own topic in forum mode; DM mode → the allowlist.
+  const targets = await outboundTargetsFor(paneId)
   if (targets.length === 0) return
 
   // The menu is detected from the PANE the instant it appears, but the message Claude wrote just
@@ -1871,14 +1975,17 @@ async function relayPromptToTelegram(prompt: PromptInfo): Promise<void> {
   // for the question, so it must arrive FIRST. Wait up to 2s for it to land (breaking the moment it
   // does, so there's no fixed penalty), then flush it before sending the menu. Permission/login
   // prompts take their own instant paths, so only these select menus ever wait — and only until the
-  // preamble shows up.
-  const cwd = await paneCwd(focus.activePaneId).catch(() => null)
-  const file = cwd ? resolveTranscript(cwd) : null
-  for (let waited = 0; file && waited < 2000; waited += 250) {
-    if (finalRepliesAfter(file, lastRelayedUuid).some(r => r.uuid && r.uuid !== lastRelayedUuid)) break
-    await sleep(250)
+  // preamble shows up. Focused pane only: the flush rides the focused relay cursor; aux panes'
+  // text is relayed by auxRelayTick on its own cadence (final replies only).
+  if (paneId === focus.activePaneId) {
+    const cwd = await paneCwd(paneId).catch(() => null)
+    const file = cwd ? resolveTranscript(cwd) : null
+    for (let waited = 0; file && waited < 2000; waited += 250) {
+      if (finalRepliesAfter(file, lastRelayedUuid).some(r => r.uuid && r.uuid !== lastRelayedUuid)) break
+      await sleep(250)
+    }
+    await flushPendingText()   // preamble text must land before the menu
   }
-  await flushPendingText()   // preamble text must land before the menu
   const text = renderPromptHtml(prompt)
 
   for (const { chat, thread } of targets) {
@@ -1892,7 +1999,7 @@ async function relayPromptToTelegram(prompt: PromptInfo): Promise<void> {
           reply_markup: multiSelectKeyboard(prompt.options, selected),
         })
         pendingMultiSelect.set(`${chat}:${sent.message_id}`, {
-          paneId: focus.activePaneId, options: prompt.options, selected,
+          paneId, options: prompt.options, selected,
         })
       } else {
         sent = await bot.api.sendMessage(chat, text, {
@@ -1905,14 +2012,14 @@ async function relayPromptToTelegram(prompt: PromptInfo): Promise<void> {
       // this" sits one further down again.
       if (prompt.freeText) {
         freeTextPrompts.set(`${chat}:${sent.message_id}`, {
-          paneId: focus.activePaneId, downCount: prompt.options.length, tabbed: prompt.tabbed, question: prompt.question,
+          paneId, downCount: prompt.options.length, tabbed: prompt.tabbed, question: prompt.question,
         })
       }
       // Register chat-dismiss for every question. If the menu carries its own "Chat about this"
       // option we select it (downCount past the options + free-text); otherwise we Esc-dismiss.
       chatPrompts.set(`${chat}:${sent.message_id}`, prompt.chat
-        ? { paneId: focus.activePaneId, downCount: prompt.options.length + 1, tabbed: prompt.tabbed, useEscape: false }
-        : { paneId: focus.activePaneId, downCount: 0, tabbed: prompt.tabbed, useEscape: true })
+        ? { paneId, downCount: prompt.options.length + 1, tabbed: prompt.tabbed, useEscape: false }
+        : { paneId, downCount: 0, tabbed: prompt.tabbed, useEscape: true })
     } catch (e) {
       process.stderr.write(`daemon: prompt relay to ${chat} failed: ${e}\n`)
     }
@@ -1932,13 +2039,13 @@ function permButtonLabel(opt: { n: number; label: string }): string {
 // Relay a permission prompt to Telegram: the question, a short preview of what's being
 // approved, and a button per option (callback pperm:<n>) that injects that choice into the
 // pane. One button per row — the labels (esp. "allow all this session") are long.
-async function relayPermissionToTelegram(perm: PermissionPrompt): Promise<void> {
-  if (!focus.activePaneId) return
-  // Route to the requesting (focused) session's own topic in forum mode; DM mode → the allowlist.
-  const targets = await outboundTargetsFor(focus.activePaneId)
+async function relayPermissionToTelegram(perm: PermissionPrompt, paneId: string | null = focus.activePaneId): Promise<void> {
+  if (!paneId) return
+  // Route to the requesting session's own topic in forum mode; DM mode → the allowlist.
+  const targets = await outboundTargetsFor(paneId)
   if (targets.length === 0) return
 
-  await flushPendingText()   // any preamble text must land before the approve/deny menu
+  if (paneId === focus.activePaneId) await flushPendingText()   // preamble must land before the approve/deny menu (focused relay cursor only)
   const parts = [`🔐 <b>${escapeHtml(perm.question)}</b>`]
   if (perm.preview) parts.push(`<blockquote>${escapeHtml(perm.preview)}</blockquote>`)
   const body = parts.join('\n')
@@ -1975,28 +2082,26 @@ function parseReviewAnswers(paneText: string): { question: string; answer: strin
 // watcher is paused (and re-baselined) across the injection, so it won't surface
 // the new screen — we read it here and either relay the next question or, once the
 // review/submit tab is reached, press Enter to submit and report the answers.
-async function handleTabbedAdvance(chat_id: string): Promise<void> {
-  if (!focus.activePaneId || !focus.paneWatcher) return
-  const text = await capturePane(focus.activePaneId)
+async function handleTabbedAdvance(chat_id: string, paneId: string | null = focus.activePaneId, thread?: number): Promise<void> {
+  if (!paneId) return
+  const text = await capturePane(paneId)
   if (isSubmitScreen(text)) {
     const answers = parseReviewAnswers(text)
-    await focus.paneWatcher.withInjection(async () => {
-      await sendKeys(focus.activePaneId!, ['Enter'])
-      await waitForSettle(focus.activePaneId!, 300, 5000)
+    await withPaneInjection(paneId, async () => {
+      await sendKeys(paneId, ['Enter'])
+      await waitForSettle(paneId, 300, 5000)
     })
-    lastRelayedPromptHash = ''
-    promptRelayOutstanding = false   // the whole tabbed prompt is done
+    resetPromptDedup(paneId)   // the whole tabbed prompt is done
     const summary = answers.length
       ? '\n\n' + answers.map(a => `• ${escapeHtml(a.question)} → <b>${escapeHtml(a.answer)}</b>`).join('\n')
       : ''
-    await bot.api.sendMessage(chat_id, `✅ <b>Answers submitted.</b>${summary}`, { parse_mode: 'HTML' }).catch(() => {})
+    await bot.api.sendMessage(chat_id, `✅ <b>Answers submitted.</b>${summary}`, { parse_mode: 'HTML', ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
     return
   }
   const next = detectUserPrompt(text)
   if (next?.tabbed) {
-    lastRelayedPromptHash = promptHash(next)
-    promptRelayOutstanding = true   // suppress repaints of this next tab; we relay it explicitly here
-    await relayPromptToTelegram(next)
+    markPromptRelayed(paneId, promptHash(next))   // suppress repaints of this next tab; we relay it explicitly here
+    await relayPromptToTelegram(next, paneId)
   }
 }
 
@@ -2020,9 +2125,9 @@ async function waitForLoginConfirmation(paneId: string, maxMs = 15_000): Promise
   return email
 }
 
-async function relayAuthUrlToTelegram(url: string): Promise<void> {
-  // Route to the requesting (focused) session's own topic in forum mode; DM mode → the allowlist.
-  const targets = await outboundTargetsFor(focus.activePaneId)
+async function relayAuthUrlToTelegram(url: string, paneId: string | null = focus.activePaneId): Promise<void> {
+  // Route to the requesting session's own topic in forum mode; DM mode → the allowlist.
+  const targets = await outboundTargetsFor(paneId)
   if (targets.length === 0) return
 
   const safe = escapeHtml(url)
@@ -4739,8 +4844,8 @@ bot.on('callback_query:data', async ctx => {
     await ctx.answerCallbackQuery({ text: `Answered ${num}` }).catch(() => {})
     await ctx.deleteMessage().catch(() => {})  // remove the permission prompt entirely once answered (toast confirms)
     await paneKeys(paneId, [num, 'Enter'], [300, 5000])
-    lastRelayedPermissionHash = ''  // allow the next permission prompt to relay
-    await verifyPromptClosed()
+    resetPromptDedup(paneId)  // allow the next permission prompt to relay
+    await verifyPromptClosed(paneId)
     return
   }
 
@@ -4760,9 +4865,9 @@ bot.on('callback_query:data', async ctx => {
     const num = promptMatch[1]
     await ctx.answerCallbackQuery({ text: `Selected ${num}` }).catch(() => {})
     await paneKeys(paneId, [num, 'Enter'], [300, 5000])
-    lastRelayedPromptHash = ''  // allow next prompt to relay
+    resetPromptDedup(paneId)  // allow next prompt to relay
     await ctx.deleteMessage().catch(() => {})  // remove the prompt entirely once answered (toast confirms)
-    await verifyPromptClosed()
+    await verifyPromptClosed(paneId)
     return
   }
 
@@ -4790,7 +4895,7 @@ bot.on('callback_query:data', async ctx => {
       await waitForSettle(paneId, 300, 5000)
     })
     await ctx.deleteMessage().catch(() => {})  // remove the answered question (next tab relays its own message)
-    await handleTabbedAdvance(String(ctx.chat?.id))
+    await handleTabbedAdvance(String(ctx.chat?.id), paneId, ctx.callbackQuery.message?.message_thread_id)
     return
   }
 
@@ -4845,7 +4950,7 @@ bot.on('callback_query:data', async ctx => {
       }
       await waitForSettle(paneId, 300, 5000)
     })
-    lastRelayedPromptHash = ''
+    resetPromptDedup(paneId)
     await ctx.deleteMessage().catch(() => {})  // remove the question; the reply below stands in for it
     await ctx.reply('💬 Chat about this — send your message below 👇').catch(() => {})
     return
@@ -4907,9 +5012,9 @@ bot.on('callback_query:data', async ctx => {
       await waitForSettle(paneId, 300, 6000)
     })
     pendingMultiSelect.delete(key)
-    lastRelayedPromptHash = ''  // allow next prompt to relay
+    resetPromptDedup(paneId)  // allow next prompt to relay
     await ctx.deleteMessage().catch(() => {})  // remove the prompt entirely once submitted (toast confirms)
-    await verifyPromptClosed()
+    await verifyPromptClosed(paneId)
     return
   }
 
@@ -5187,9 +5292,9 @@ bot.on('message:text', async ctx => {
         await sendKeys(paneId, ['Enter'])
         await waitForSettle(paneId, 300, 5000)
       })
-      lastRelayedPromptHash = ''
-      if (ft.tabbed) await handleTabbedAdvance(String(ctx.chat?.id))
-      else { await ctx.reply('✅ Sent your answer.'); await verifyPromptClosed() }
+      resetPromptDedup(paneId)
+      if (ft.tabbed) await handleTabbedAdvance(String(ctx.chat?.id), paneId, ctx.message?.message_thread_id)
+      else { await ctx.reply('✅ Sent your answer.'); await verifyPromptClosed(paneId) }
       return
     }
   }
