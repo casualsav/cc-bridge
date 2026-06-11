@@ -833,6 +833,10 @@ async function closeTopicForPane(pane: string): Promise<void> {
   for (const p of [...offMcpPanes]) {
     if (p !== pane && lastKnownPaneCwd(p) === cwd && await paneAlive(p)) return   // a sibling still lives here
   }
+  await closeTopicEntry(group, cwd, t)
+}
+
+async function closeTopicEntry(group: string, cwd: string, t: { threadId: number; name: string }): Promise<void> {
   await bot.api.sendMessage(group, '🏁 <b>Session ended</b> — topic closed. It reopens automatically if a session comes back to this project.',
     { parse_mode: 'HTML', message_thread_id: t.threadId }).catch(() => {})
   try {
@@ -840,6 +844,33 @@ async function closeTopicForPane(pane: string): Promise<void> {
     updateTopic(cwd, { closed: true })
     process.stderr.write(`daemon: closed topic "${t.name}" for ${cwd}\n`)
   } catch (e) { process.stderr.write(`daemon: closeForumTopic failed for ${cwd}: ${e}\n`) }
+}
+
+// Backstop for deaths the event path can't see: a session that exits while the daemon is down or
+// restarting leaves its topic open forever (the new process never had the pane in its registry,
+// so no death event ever fires — exactly what a deploy-window exit looks like). Sweep every OPEN
+// topic on the discovery tick and close any with no live session in its cwd. Two consecutive
+// misses (~2 ticks) before closing, so a transient tmux blip can't flap a healthy topic.
+const topicMissCounts = new Map<string, number>()
+async function reconcileTopics(panes: string[]): Promise<void> {
+  if (!isTopicMode()) return
+  const group = getGroupChatId()
+  if (!group) return
+  const liveCwds = new Set<string>()
+  for (const p of panes) {
+    const cwd = await paneCwd(p).catch(() => null)
+    if (cwd) liveCwds.add(cwd)
+  }
+  for (const { s } of orderedSessions()) {   // MCP-shim sessions hold topics too — don't close theirs
+    if (s.paneId) { const cwd = await paneCwd(s.paneId).catch(() => null); if (cwd) liveCwds.add(cwd) }
+  }
+  for (const t of listTopics()) {
+    if (t.closed || liveCwds.has(t.cwd)) { topicMissCounts.delete(t.cwd); continue }
+    const misses = (topicMissCounts.get(t.cwd) ?? 0) + 1
+    if (misses < 2) { topicMissCounts.set(t.cwd, misses); continue }
+    topicMissCounts.delete(t.cwd)
+    await closeTopicEntry(group, t.cwd, t)
+  }
 }
 
 // Keep topic titles in step with the working tree: "dir" on the default branch, "dir · branch"
@@ -1398,6 +1429,7 @@ async function discoverPanes(): Promise<void> {
     if (!offMcpPanes.has(p)) { offMcpPanes.add(p); void announceNewSession(p) }
   }
   void refreshTopicTitles(panes)                      // topic mode: retitle on git branch change
+  void reconcileTopics(panes)                         // topic mode: close topics whose sessions vanished unseen
   for (const p of panes) void ensureSessionTopic(p)   // topic mode: ensure every live session has its topic (covers the focused one + restart)
   void updateSessionPin()
 }
