@@ -38,3 +38,45 @@ Daily $ cap on top of the existing limit warnings: auto-pause sessions + ping at
 ## 8. Screenshot fallback — ✅ DONE (v0.1.71, as text-screen dump on failed delivery)
 When prompt detection can't parse a TUI screen, send a rendered image of the pane instead of
 failing silently — the escape hatch that makes full-remote trustworthy.
+
+---
+
+# Wave 2 (approved 2026-06-11)
+
+## 9. Worktree siblings
+Spawning a second session in the same repo shares one working tree — edits collide. Offer
+"spawn in a git worktree" on /new and topic-create so same-repo sessions work in parallel
+safely (worktree auto-created under e.g. `<repo>-wt/<topic>`, cleaned up on topic close).
+
+## 10. Queue for limit reset
+/queue fires on idle; the other big wait is the 5h usage window. `/queue @reset <prompt>`
+fires the moment the limit window rolls over (reset time already parsed for the status card),
+so dead hours soak up queued work.
+
+## 11. Recurring schedules
+/schedule is one-shot, /digest is a special-cased daily. Generalize: `/schedule every 09:00
+<prompt>` (cron-lite: daily/weekday/weekly) with a dashboard listing + cancel, reusing the
+scheduler store.
+
+## 12. Edited message → correction
+Editing a sent Telegram message currently does nothing. Relay the edit as a correction
+("✏️ correction to earlier message: …") into the session — matches the instinct of fixing a
+typo'd prompt in place.
+
+## 13. Permission-storm batching
+A turn raising N permission prompts costs N taps. When prompts queue up, one card with
+"✅ Allow all from this turn" (scoped to that turn, not bypass) plus per-item Deny.
+
+## 14. /health card
+Two daemons, watchdog, version-keyed caches, revival — debugging the meta-layer needs the log.
+One card: instance, version, uptime, adopted panes, queue depths, last crash, watchdog state;
+covers both accounts' bridges.
+
+## 15. TTS voice replies
+Daemon-side text→speech of outbound replies as Telegram voice notes (local Piper, same
+provisioning pattern as Whisper; zero Claude-usage cost). /settings toggle off/digest-only/all;
+long replies capped or summarized.
+
+## 16. Session todos in the pin
+Surface the session's internal todo list (TaskCreate/TodoWrite state from the transcript) in
+the per-topic status card — see what a working session is grinding through mid-turn.
