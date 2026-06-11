@@ -40,7 +40,7 @@ import {
   lastRelayedByFile, unreadNotified, unreadNotifMsgs, offMcpPanes,
   usageWarnState, voiceNudged, scheduleReplyTargets, scheduleComposeTargets,
   sessionNames, renameReplyTargets, nameReplyTargets, sessionPins, pinTextCache,
-  newSessionReplyTargets, mdReplyTargets, mdOverwritePending,
+  newSessionReplyTargets, topicCreateReplyTargets, mdReplyTargets, mdOverwritePending,
 } from './state.ts'
 import { initMirror, updateTerminalMirror, respawnTerminalMirror, abandonMirror } from './mirror.ts'
 import { parseStatusline, pinBar, type StatuslineData } from './statusline.ts'
@@ -50,7 +50,7 @@ import {
 } from './access.ts'
 import {
   setGroupChatId, getGroupChatId, isTopicMode, loadTopics,
-  getTopicByCwd, getCwdByThread, setTopic, updateTopic, listTopics,
+  getTopicByCwd, getCwdByThread, setTopic, updateTopic, removeTopic, listTopics,
 } from './topics.ts'
 import { TypingPresence } from './typing.ts'
 import { transcribe, transcribeProvider, transcribeStatus } from './voice.ts'
@@ -837,8 +837,21 @@ async function closeTopicForPane(pane: string): Promise<void> {
 }
 
 async function closeTopicEntry(group: string, cwd: string, t: { threadId: number; name: string }): Promise<void> {
-  await bot.api.sendMessage(group, '🏁 <b>Session ended</b> — topic closed. It reopens automatically if a session comes back to this project.',
-    { parse_mode: 'HTML', message_thread_id: t.threadId }).catch(() => {})
+  // Opt-in auto-delete: the tab disappears entirely (Telegram has no "hide" for bots — delete is
+  // the only way off the list, and it erases the topic's history). Default keeps close+reopen.
+  if (loadAccess().topicOnEnd === 'delete') {
+    try {
+      await bot.api.deleteForumTopic(group, t.threadId)
+      removeTopic(cwd)
+      process.stderr.write(`daemon: deleted topic "${t.name}" for ${cwd} (topicOnEnd=delete)\n`)
+    } catch (e) { process.stderr.write(`daemon: deleteForumTopic failed for ${cwd}: ${e}\n`) }
+    return
+  }
+  const kb = new InlineKeyboard()
+    .text('🗑 Delete topic', `topicdel:${t.threadId}`)
+    .text('🗑 Always delete', `topicdelalways:${t.threadId}`)
+  await bot.api.sendMessage(group, '🏁 <b>Session ended</b> — topic closed. It reopens automatically if a session comes back to this project.\n\nDelete removes the tab (and this topic’s history); Always delete does that for every ended session from now on.',
+    { parse_mode: 'HTML', message_thread_id: t.threadId, reply_markup: kb }).catch(() => {})
   try {
     await bot.api.closeForumTopic(group, t.threadId)
     updateTopic(cwd, { closed: true })
@@ -4181,7 +4194,7 @@ async function resolveNewSessionDir(input: string): Promise<string> {
   if (t === '~') return homedir()
   if (/^here$/i.test(t) || t === '.') return here()
   if (t.startsWith('~/')) return join(homedir(), t.slice(2))
-  return t
+  return t.startsWith('/') ? t : join(homedir(), t)   // bare names anchor to home, not the daemon's own cwd
 }
 
 // The working dirs of every currently-running bridge session (focused + siblings). Two sessions in
@@ -4379,6 +4392,24 @@ bot.command(['sessions', 'session'], async ctx => {   // /sessions is canonical;
 bot.command('stop', confirmStop)
 
 // Inline-button handler for permission requests + mode cycling + prompt answers.
+// A topic the USER creates (Telegram's ➕ create-topic UI) becomes a session: ask which folder it
+// should run in, then bind + spawn on the reply (below, topicCreateReplyTargets). Topics the bot
+// creates don't produce updates for the bot (own-message filter as belt-and-braces), so this only
+// fires for human-made tabs. Non-allowlisted creators are ignored — the group policy governs.
+bot.on('message:forum_topic_created', async ctx => {
+  if (!isTopicMode() || String(ctx.chat.id) !== getGroupChatId()) return
+  if (ctx.from?.id === ctx.me.id) return
+  if (!loadAccess().allowFrom.includes(String(ctx.from?.id))) return
+  const thread = ctx.message.message_thread_id
+  if (!thread || getCwdByThread(thread)) return
+  const name = ctx.message.forum_topic_created.name
+  const sent = await ctx.reply(
+    `📂 <b>New topic “${escapeHtml(name)}”</b> — which folder should its Claude session run in?\n\nReply with a folder path (created if missing; <code>~/…</code> works).`,
+    { parse_mode: 'HTML', reply_markup: { force_reply: true, input_field_placeholder: 'Folder path' } },
+  ).catch(() => null)
+  if (sent) topicCreateReplyTargets.set(`${ctx.chat.id}:${sent.message_id}`, { threadId: thread, name })
+})
+
 bot.on('callback_query:data', async ctx => {
   const data = ctx.callbackQuery.data
 
@@ -4793,6 +4824,33 @@ bot.on('callback_query:data', async ctx => {
 
   // "➕ Add" on the /schedule dashboard → force-reply asking for "time message" in one line,
   // parsed (split + queued) when the reply lands. Captures the current session as the target.
+  // 🗑 on the topic-closed notice: delete the topic (removes the tab + history). The "always"
+  // variant also flips topicOnEnd=delete so future ended sessions vanish without asking.
+  const topicDel = /^topicdel(always)?:(\d+)$/.exec(data)
+  if (topicDel) {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    const group = getGroupChatId()
+    if (!group) { await ctx.answerCallbackQuery({ text: 'Not in topic mode.' }).catch(() => {}); return }
+    if (topicDel[1]) {
+      const a = loadAccess()
+      a.topicOnEnd = 'delete'
+      saveAccess(a)
+    }
+    const thread = Number(topicDel[2])
+    try {
+      await bot.api.deleteForumTopic(group, thread)
+      const cwd = getCwdByThread(thread)
+      if (cwd) removeTopic(cwd)
+      await ctx.answerCallbackQuery({ text: topicDel[1] ? 'Deleted — auto-delete is on.' : 'Topic deleted.' }).catch(() => {})
+    } catch {
+      await ctx.answerCallbackQuery({ text: 'Couldn’t delete — the bot needs the Delete Messages admin right.' }).catch(() => {})
+    }
+    return
+  }
+
   if (data === 'sched:add') {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
@@ -5286,8 +5344,24 @@ async function handleInbound(
     const cwd = getCwdByThread(threadId)
     targetPane = cwd ? await paneForCwd(cwd) : null
     if (cwd && !targetPane) { bufferEvent(params); return }   // topic exists but its session is gone
+    if (!cwd) { void offerTopicBind(ctx, threadId); return }  // unbound (user-created) topic → set it up, never misroute to focused
   }
   emitInbound(params, targetPane)
+}
+
+// Typing in a topic with no bound folder (a user-created tab whose setup prompt was missed or
+// failed) re-opens the bind flow instead of silently driving the focused session. Throttled per
+// topic so a burst of messages asks once.
+const topicBindOffered = new Map<number, number>()
+async function offerTopicBind(ctx: Context, threadId: number): Promise<void> {
+  const last = topicBindOffered.get(threadId) ?? 0
+  if (Date.now() - last < 60_000) return
+  topicBindOffered.set(threadId, Date.now())
+  const sent = await ctx.reply(
+    `📂 <b>This topic isn’t bound to a session yet</b> — which folder should its Claude session run in?\n\nReply with a folder path (created if missing; <code>~/…</code> works).`,
+    { parse_mode: 'HTML', reply_markup: { force_reply: true, input_field_placeholder: 'Folder path' } },
+  ).catch(() => null)
+  if (sent) topicCreateReplyTargets.set(`${ctx.chat?.id}:${sent.message_id}`, { threadId, name: '' })
 }
 
 bot.on('message:text', async ctx => {
@@ -5329,6 +5403,43 @@ bot.on('message:text', async ctx => {
       nameReplyTargets.delete(replyKey)
       if (!dmCommandGate(ctx)) return
       await ctx.reply(await renamePane(paneId, text), { parse_mode: 'HTML' })
+      return
+    }
+    // Reply to a user-created topic's folder prompt → bind THAT topic to the folder and spawn its
+    // session there. Bind before spawning so discovery's ensureSessionTopic sees the mapping and
+    // doesn't create a duplicate topic for the new pane.
+    const tc = topicCreateReplyTargets.get(`${ctx.chat?.id}:${replyTo.message_id}`)
+    if (tc) {
+      topicCreateReplyTargets.delete(`${ctx.chat?.id}:${replyTo.message_id}`)
+      if (!dmCommandGate(ctx)) return
+      const desired = await resolveNewSessionDir(text)
+      const dir = await distinctSessionDir(desired)   // a folder already running a session diverts to <dir>/tg-N
+      const diverted = dir !== desired
+      let created = false
+      if (!existsSync(dir)) {
+        try { mkdirSync(dir, { recursive: true }); created = true }
+        catch (e) {
+          // Re-arm the prompt so a typo ("/claude" = filesystem root) doesn't strand the topic —
+          // the user just replies again with a writable path.
+          const again = await ctx.reply(
+            `❌ Couldn't create <code>${escapeHtml(dir)}</code>: ${escapeHtml(String((e as Error)?.message ?? e))}\n\nReply with another path — <code>~/…</code> or an absolute folder you can write to.`,
+            { parse_mode: 'HTML', reply_markup: { force_reply: true, input_field_placeholder: 'Folder path' } }).catch(() => null)
+          if (again) topicCreateReplyTargets.set(`${ctx.chat?.id}:${again.message_id}`, tc)
+          return
+        }
+      }
+      setTopic(dir, { threadId: tc.threadId, name: tc.name || basename(dir), closed: false, createdAt: Date.now() })
+      // Seed the branch cache so the retitle sweep doesn't stomp the user's chosen tab name on its
+      // first pass — it only renames on an actual branch CHANGE from here on.
+      try { topicBranchCache.set(dir, (await exec('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 2000 })).stdout.trim()) }
+      catch { topicBranchCache.set(dir, '') }
+      const ok = await spawnSession(dir)
+      if (!ok) removeTopic(dir)
+      const note = diverted ? ' (fresh subfolder — that folder already has a session)' : created ? ' (📁 created it for you)' : ''
+      await ctx.reply(ok
+        ? `🚀 Starting this topic's session in <code>${escapeHtml(dir)}</code>${note} — type here to drive it once it's up.`
+        : `❌ Couldn't start a session in <code>${escapeHtml(dir)}</code>.`,
+        { parse_mode: 'HTML' })
       return
     }
     // Reply to a "📂 New session" force-reply → resolve the folder and spawn the session.

@@ -75,6 +75,7 @@ export const nameReplyTargets = new Map<string, string>()      // `${chatId}:${m
 export const sessionPins = new Map<string, number>()
 export const pinTextCache = new Map<string, string>()   // last rendered text per chat — skip no-op edits on the 10s refresh
 export const newSessionReplyTargets = new Set<string>()   // `${chatId}:${messageId}` of folder prompts
+export const topicCreateReplyTargets = new Map<string, { threadId: number; name: string }>()   // user-created forum topics awaiting a folder reply
 
 // ---- /md: create a markdown file via force-reply ----
 // `${chatId}:${messageId}` of the "send me the contents" prompt → the file to write.
