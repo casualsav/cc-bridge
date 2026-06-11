@@ -51,7 +51,9 @@ Prefer to do it by hand? [`off-mcp/INSTALL.md`](./off-mcp/INSTALL.md) lists ever
   policy with mention-triggering. Allowlist-first by design. See
   [`ACCESS.md`](./ACCESS.md).
 - **Permission prompts** — when Claude needs approval for a tool call, you get an
-  inline-keyboard Allow/Deny right in the chat.
+  inline-keyboard Allow/Deny right in the chat. When a turn stacks up several prompts,
+  a one-tap **"⚡ Allow all this turn"** card answers the rest of that turn for you
+  (scoped to the turn, not bypass; toggle in `/settings`).
 - **Mode switching** — change permission mode from Telegram: `/plan`, `/auto`,
   `/default`, `/acceptedits`, `/bypass`, or the interactive `/mode`.
 - **Interrupt** — `/stop` sends Esc to the session, cancelling the current turn.
@@ -69,19 +71,36 @@ Prefer to do it by hand? [`off-mcp/INSTALL.md`](./off-mcp/INSTALL.md) lists ever
   the backend and (for local) the Whisper model right from `/settings`.
 - **Reasoning effort** — set Claude's thinking effort from Telegram with `/effort`
   (low · medium · high · max); the current level shows on the `/status` card.
-- **Scheduled messages** — queue a message into a session for later with `/schedule`
-  (e.g. `/schedule 12h`, `/schedule cancel`); it's pasted in when it fires.
+- **Scheduled messages** — one-shot (`/schedule 12h ping the server`) or recurring
+  (`/schedule every 09:00 …`, `every weekday 09:00`, `every mon 09:00`) in your own
+  timezone (`/schedule tz`); recurring entries re-arm after each delivery.
+- **Queue for idle & limit reset** — `/queue <prompt>` runs when the session next goes
+  idle; `/queue @reset <prompt>` holds it until the 5h usage window rolls over, so dead
+  limit hours soak up queued work.
+- **Voice replies (TTS)** — Claude's replies can arrive as voice notes too: free local
+  Piper (auto-installed with ffmpeg, 5 curated voices to pick from) or hosted OpenAI /
+  ElevenLabs. Modes off · digest-only · all (`/voice on|off`; details in `/settings`).
+  Speaks text Claude already wrote — zero extra usage.
+- **Edit to correct** — edit your most recent Telegram message and the session receives
+  it as a correction replacing the original.
 - **Multiple sessions via group topics** — bind a forum supergroup with `/bind` and
   every Claude Code session gets its own topic (tab): type in a topic to drive that
-  session, create a topic to spawn a new session in any folder. The DM drives a
-  single session.
+  session, create a topic to spawn a new session in any folder — or, when the anchor
+  folder is a git repo, in an isolated **git worktree** (`<repo>-wt/<name>` on branch
+  `tg/<name>`, auto-removed on topic close when clean) so parallel sessions on one repo
+  never collide. The DM drives a single session.
 - **Pinned status card** — a self-updating pinned message (per DM, and per topic in group
   mode) with the live model · mode · context · usage-limit metrics plus ⚙️ Settings /
   🧠 Model / 🕹️ Mode quick buttons. `/status` re-posts it at the bottom.
 - **Live activity mirror** — a single self-updating message shows what Claude is doing
   in real time (💻 terminal, 📋 todo, 📖 read, ✏️ edit, 🔍 search, 🤖 agent, ❓ clarify…),
   read straight from the transcript so it costs zero usage. On by default; choose its
-  style with `/stream` (thoughts · tools · hybrid · off).
+  style with `/stream` (thoughts · tools · hybrid · off). The pinned card also shows the
+  session's working plan (📋 done/total · current step).
+- **Self-maintenance** — `/health` shows the bridge's vitals (instance, version, uptime,
+  panes, queues, watchdog, last crash); a daily check posts a quiet "🆕 Update available"
+  card with one-tap buttons to update the bridge or Claude itself (never auto-applies;
+  `/update` does the same on demand).
 
 ## How it works
 
