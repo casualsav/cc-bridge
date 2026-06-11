@@ -297,7 +297,7 @@ export async function updateTopicPins(): Promise<void> {
     const existing = sessionPins.get(key)
     if (existing && pinTextCache.get(key) === text) continue   // unchanged → skip the edit
     if (existing) {
-      try { await deps.bot.api.editMessageText(group, existing, text, { parse_mode: 'HTML' }); pinTextCache.set(key, text); continue }
+      try { await deps.bot.api.editMessageText(group, existing, text, { parse_mode: 'HTML', reply_markup: statusKeyboard() }); pinTextCache.set(key, text); continue }
       catch (e) {
         if (pinMessageGone(e)) { sessionPins.delete(key); pinTextCache.delete(key); persistSessionPins() }
         else { pinTextCache.set(key, text); continue }   // "not modified" → already current
@@ -305,7 +305,7 @@ export async function updateTopicPins(): Promise<void> {
     }
     try {
       await clearTopicPins(group, t.threadId)   // single-pin guarantee — drop any prior/orphaned card pins first
-      const m = await deps.bot.api.sendMessage(group, text, { parse_mode: 'HTML', message_thread_id: t.threadId, disable_notification: true })
+      const m = await deps.bot.api.sendMessage(group, text, { parse_mode: 'HTML', message_thread_id: t.threadId, disable_notification: true, reply_markup: statusKeyboard() })
       await deps.bot.api.pinChatMessage(group, m.message_id, { disable_notification: true }).catch(() => {})
       sessionPins.set(key, m.message_id); pinTextCache.set(key, text); persistSessionPins()
     } catch (e) { process.stderr.write(`daemon: topic pin create failed: ${e}\n`) }

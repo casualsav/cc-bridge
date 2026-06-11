@@ -2783,7 +2783,7 @@ bot.command('status', async ctx => {
       }
       await clearTopicPins(chat, thread)   // single-pin guarantee — also drops orphaned card pins
       const text = await statusCardText(paneId)
-      const m = await bot.api.sendMessage(chat, text, { parse_mode: 'HTML', message_thread_id: thread, disable_notification: true }).catch(() => null)
+      const m = await bot.api.sendMessage(chat, text, { parse_mode: 'HTML', message_thread_id: thread, disable_notification: true, reply_markup: statusKeyboard() }).catch(() => null)
       if (m) {
         await bot.api.pinChatMessage(chat, m.message_id, { disable_notification: true }).catch(() => {})
         sessionPins.set(key, m.message_id); pinTextCache.set(key, text); persistSessionPins()
