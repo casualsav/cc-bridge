@@ -5,6 +5,7 @@ import { randomBytes } from 'node:crypto'
 import {
   readFileSync, writeFileSync, appendFileSync, mkdirSync, readdirSync, rmSync,
   statSync, renameSync, realpathSync, chmodSync, unlinkSync, existsSync, openSync, closeSync, copyFileSync,
+  accessSync, constants as fsConstants,
 } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, extname, basename, dirname, sep } from 'node:path'
@@ -4063,6 +4064,10 @@ async function applyInheritedSettings(paneId: string, inherit: InheritedSettings
 
 async function spawnSession(dir: string, extra = '', presetSessionId?: string, account: Account = MAIN_ACCOUNT): Promise<boolean> {
   try {
+    // tmux's `new-window -c` silently falls back to $HOME when it can't chdir into `dir` (e.g.
+    // another user's 700 folder) — the session then runs in the wrong place, stuck on a trust
+    // prompt for $HOME. Refuse up front instead; the caller's error reply names the folder.
+    accessSync(dir, fsConstants.R_OK | fsConstants.X_OK)
     ensureFolderTrusted(dir)   // so claude doesn't hit a trust dialog it can't answer on a new pane
     // A brand-new session (not --resume/-c) inherits the focused session's model/effort/mode.
     const inherit = !extra && focus.activePaneId
