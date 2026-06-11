@@ -21,7 +21,6 @@ export type Access = {
   textChunkLimit?: number
   chunkMode?: 'length' | 'newline'
   renderMarkdown?: boolean
-  autoContinue?: boolean
   terminalMirror?: 'tools' | 'digest' | 'off' | boolean
   sessionPin?: boolean
   topicOnEnd?: 'close' | 'delete'   // ended session's topic: close (keep history, default) or delete (tab disappears)

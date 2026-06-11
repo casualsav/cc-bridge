@@ -14,7 +14,7 @@ plugin-less pane — no manual pinning.
 Follow **[`off-mcp/INSTALL.md`](off-mcp/INSTALL.md)** step by step — it is written for *you*
 (an agent) to execute. In short:
 1. **Interview the user first** (bot token from @BotFather, their Telegram numeric ID, voice
-   transcription, render-Markdown, auto-continue) and write `~/.claude/channels/telegram/.env`
+   transcription, render-Markdown) and write `~/.claude/channels/telegram/.env`
    + `access.json` — before anything restarts.
 2. Add the marketplace + enable the plugin + add the `SessionStart` daemon hook in
    `~/.claude/settings.json`, and append `off-mcp/CLAUDE.md` to `~/.claude/CLAUDE.md`.

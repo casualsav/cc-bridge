@@ -157,7 +157,6 @@ type Config = {
   whisperDevice?: 'cpu' | 'cuda'
   groqKey?: string
   openaiKey?: string
-  autoContinue: boolean
   botUsername?: string
 }
 
@@ -196,11 +195,10 @@ async function interview(): Promise<Config> {
     { value: 'openai', label: 'openai — hosted Whisper (needs an OPENAI_API_KEY)' },
   ], 'local')
 
-  const cfg: Config = { token, telegramId, voice, autoContinue: true, botUsername }
+  const cfg: Config = { token, telegramId, voice, botUsername }
   if (voice === 'local') await pickWhisperModel(cfg)
   if (voice === 'groq') cfg.groqKey = (await ask('GROQ_API_KEY:')).trim()
   if (voice === 'openai') cfg.openaiKey = (await ask('OPENAI_API_KEY:')).trim()
-  cfg.autoContinue = await askYN('Auto-continue when a usage limit resets?', true)
   return cfg
 }
 
@@ -237,7 +235,7 @@ function writeConfig(cfg: Config): void {
   console.log(C.ok(`  ✓ ${ENV_FILE}`))
 
   const access: Record<string, unknown> = { dmPolicy: cfg.telegramId ? 'allowlist' : 'pairing',
-    allowFrom: cfg.telegramId ? [cfg.telegramId] : [], groups: {}, pending: {}, renderMarkdown: true, autoContinue: cfg.autoContinue }
+    allowFrom: cfg.telegramId ? [cfg.telegramId] : [], groups: {}, pending: {}, renderMarkdown: true }
   writeFileSync(ACCESS_FILE, JSON.stringify(access, null, 2) + '\n', { mode: 0o600 })
   console.log(C.ok(`  ✓ ${ACCESS_FILE}${cfg.telegramId ? '' : C.dim(' (pairing mode — approve your first DM after setup)')}`))
 }

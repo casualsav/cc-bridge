@@ -134,3 +134,18 @@ test('finalReplyForInjected returns the conclusion to a specific injected messag
   ])
   expect(finalReplyForInjected(f, 'please do X')).toBe('did X')
 })
+
+test('turnInProgress: an injected meta user entry (Skill instructions) is not a turn boundary', () => {
+  // A Skill call injects its instructions as a user entry with isMeta:true mid-turn. Treating it
+  // as a boundary made the turn read "not working" until the next assistant entry — which split
+  // the live mirror card in two. The anchor must stay on the real prompt.
+  const meta = { type: 'user', uuid: 'm1', isMeta: true, message: { content: 'Base directory for this skill: …' } }
+  const f = fixture([user('go', 'u1'), narr('thinking', 'a1'), tool('Skill', { command: 'graphify' }, 't1'), meta])
+  expect(turnInProgress(f)).toBe(true)
+})
+
+test('currentTurnFeed: an injected meta user entry does not reset the feed', () => {
+  const meta = { type: 'user', uuid: 'm1', isMeta: true, message: { content: 'skill instructions' } }
+  const f = fixture([user('go', 'u1'), narr('before skill', 'a1'), meta, narr('after skill', 'a2')])
+  expect(currentTurnFeed(f).map(i => i.kind === 'text' ? i.text : i.tool)).toEqual(['before skill', 'after skill'])
+})

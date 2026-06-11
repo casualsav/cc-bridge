@@ -130,8 +130,6 @@ live in the state dir, and the daemon reads them on first start.
    self-heals on the first voice note as a backstop, but provisioning at install is better: it
    makes the first note instant instead of carrying a ~1–3 min install, and the daemon can't
    `sudo apt-get install python3-venv` if `ensurepip` is missing — you can.)
-4. **Auto-continue when a usage limit resets?** (default yes.)
-
 Markdown rendering is **always on** — Claude's replies are rendered as Telegram formatting; it
 isn't a prompt.
 
@@ -154,7 +152,7 @@ OPENAI_API_KEY=<key>                        # openai only
 use pairing instead if they didn't give an ID):
 ```json
 { "dmPolicy": "allowlist", "allowFrom": ["<their-telegram-id>"], "groups": {}, "pending": {},
-  "renderMarkdown": true, "autoContinue": <true|false> }
+  "renderMarkdown": true }
 ```
 
 **If `local`: provision the engine AND download the model now — so it's fully ready before the
@@ -361,7 +359,7 @@ adoptable pane.
   from the transcript), on by default.
 - **/sessions** (list · `/sessions #` switch · `/sessions name # <label>`), **/mode** & **/model**
   pickers, **/cost**, **/context**, **/stop**, **/new**, **/terminal**.
-- **Auto-continue** when a usage limit resets (self-verifies + retries).
+- **Auto-continue** when a usage limit resets — armed per hit via a button on the limit notice (self-verifies + retries).
 
 ## Notes
 - The daemon runs **standalone** (relaunched by the SessionStart hook), so it survives closing

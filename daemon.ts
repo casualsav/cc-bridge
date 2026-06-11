@@ -1644,10 +1644,13 @@ function maybeWarnContext(pct: number | null): void {
 }
 
 // A limit is exhausted: relay it (Claude can't, being limited) and schedule the reset
-// reminder / auto-continue at the exact reset instant. Deduped on the reset minute so the
+// reminder at the exact reset instant. Deduped on the reset minute so the
 // period can't re-fire while it's still active — and so the pane-scrape and snapshot paths
-// can't double-fire across a snapshot going stale. Drives weekly auto-continue too: a 7d
+// can't double-fire across a snapshot going stale. Drives weekly resets too: a 7d
 // reset is just a `fireAt` days out, well within setTimeout's range.
+// The ⛔ message carries one "▶️ Auto-continue" button — the per-hit choice: tapped → the
+// scheduled reset is armed to type "continue" automatically; untapped → the reset ping
+// arrives with a manual Continue button instead. (Replaces the old global /autocontinue toggle.)
 function actOnLimitHit(fireAt: number, type: string, banner?: string, origin: string | null = focus.activePaneId): void {
   const key = `hit:${Math.round(fireAt / 60_000)}`
   if (key === lastActedResetKey && Date.now() < fireAt) return
@@ -1656,12 +1659,13 @@ function actOnLimitHit(fireAt: number, type: string, banner?: string, origin: st
   saveUsageNotifState()
   const chats = loadAccess().allowFrom
   if (chats.length === 0) return
-  const note = `\n\n⏰ Resets in ${formatDuration(Math.max(0, fireAt - Date.now()))}.\nI'll ping you when it resets${loadAccess().autoContinue !== false ? ' and auto-continue' : ''}.`
+  const note = `\n\n⏰ Resets in ${formatDuration(Math.max(0, fireAt - Date.now()))}.\nI'll ping you when it resets — or tap below and I'll continue automatically.`
   const head = banner ? escapeHtml(banner) : `Out of your ${escapeHtml(type)} limit.`
+  const kb = new InlineKeyboard().text('▶️ Auto-continue when it resets', 'usage:arm')
   // Route the immediate banner to the session that hit the limit (its topic in forum mode).
   void (async () => {
     for (const { chat, thread } of await outboundTargetsFor(origin)) {
-      await bot.api.sendMessage(chat, `⛔ <b>Claude hit the usage limit.</b>\n${head}${note}`, { parse_mode: 'HTML', ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
+      await bot.api.sendMessage(chat, `⛔ <b>Claude hit the usage limit.</b>\n${head}${note}`, { parse_mode: 'HTML', reply_markup: kb, ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
     }
   })()
   scheduleReset(fireAt + RESET_GRACE_MS, chats)
@@ -3231,19 +3235,19 @@ const CONTINUE_VERIFY_MS = 12_000
 const CONTINUE_RETRY_MS = 3 * 60_000
 const CONTINUE_MAX_ATTEMPTS = 5
 
-function fireResetNotification(chats: string[], attempt = 0): void {
+function fireResetNotification(chats: string[], attempt = 0, auto = false): void {
   // Account-wide limits freeze EVERY session, not just the focused one. In topic mode, also
   // continue each non-focused pane that's actually showing the frozen banner (gated on
   // detectLimited — blind injection would type "continue" into healthy sessions), reporting
   // into its own topic. First pass only: the retry attempts below re-drive the focused pane.
-  if (attempt === 0 && loadAccess().autoContinue !== false && isTopicMode()) {
+  if (attempt === 0 && auto && isTopicMode()) {
     void continueAuxLimitedPanes()
   }
-  // Auto-continue (default on): type "continue" into the session automatically. Falls back
-  // to the manual Continue button when disabled (/autocontinue off) or no live session.
-  if (loadAccess().autoContinue !== false && focus.activePaneId && focus.paneWatcher) {
+  // Auto-continue (armed per hit via the ⛔ message's button): type "continue" into the session
+  // automatically. Falls back to the manual Continue button when unarmed or no live session.
+  if (auto && focus.activePaneId && focus.paneWatcher) {
     const msg = attempt === 0
-      ? '🕛 Usage limit reset — ▶️ auto-continuing… (turn off with /autocontinue off)'
+      ? '🕛 Usage limit reset — ▶️ auto-continuing…'
       : `🔁 Still limited — retrying continue (attempt ${attempt + 1}/${CONTINUE_MAX_ATTEMPTS})…`
     for (const chat_id of chats) void bot.api.sendMessage(chat_id, msg).catch(() => {})
     void (async () => {
@@ -3270,7 +3274,7 @@ async function continueAuxLimitedPanes(): Promise<void> {
       if (!cap || !detectLimited(cap)) continue
       const ok = await pasteToPane(pane, 'continue')
       const note = ok
-        ? '🕛 Usage limit reset — ▶️ auto-continuing… (turn off with /autocontinue off)'
+        ? '🕛 Usage limit reset — ▶️ auto-continuing…'
         : '🕛 Usage limit reset (couldn’t reach this session).'
       for (const { chat, thread } of await outboundTargetsFor(pane)) {
         await bot.api.sendMessage(chat, note, thread ? { message_thread_id: thread } : {}).catch(() => {})
@@ -3305,24 +3309,35 @@ async function verifyAutoContinue(chats: string[], attempt: number, injected: bo
     for (const chat_id of chats) void bot.api.sendMessage(chat_id, '⚠️ Still limited after several tries — stopping auto-retry. Send "continue" once it lifts.').catch(() => {})
     return
   }
-  scheduleReset(Date.now() + CONTINUE_RETRY_MS, chats, attempt + 1)
+  scheduleReset(Date.now() + CONTINUE_RETRY_MS, chats, attempt + 1, true)   // a retry exists only on the armed path
 }
 
-function scheduleReset(fireAt: number, chats: string[], attempt = 0): void {
+// `auto` = the user armed auto-continue for this hit (the ⛔ message's button); persisted with
+// the schedule so a daemon restart keeps the choice, and carried through retry attempts.
+function scheduleReset(fireAt: number, chats: string[], attempt = 0, auto = false): void {
   if (resetTimer) { clearTimeout(resetTimer); resetTimer = null }
-  writeJsonFile(SCHEDULED_RESET_FILE, { fireAt, chats, attempt })
+  writeJsonFile(SCHEDULED_RESET_FILE, { fireAt, chats, attempt, auto })
   const delay = fireAt - Date.now()
-  if (delay <= 0) { fireResetNotification(chats, attempt); return }
-  resetTimer = setTimeout(() => { resetTimer = null; fireResetNotification(chats, attempt) }, delay)
+  if (delay <= 0) { fireResetNotification(chats, attempt, auto); return }
+  resetTimer = setTimeout(() => { resetTimer = null; fireResetNotification(chats, attempt, auto) }, delay)
+}
+
+// Arm auto-continue on the pending scheduled reset (the ⛔ button's action). Returns the
+// fire time when armed, or null if no reset is pending (already fired / never scheduled).
+function armScheduledReset(): number | null {
+  const data = readJsonFile<{ fireAt: number; chats: string[]; attempt?: number; auto?: boolean } | null>(SCHEDULED_RESET_FILE, null)
+  if (!data?.fireAt || !Array.isArray(data.chats) || data.fireAt <= Date.now()) return null
+  scheduleReset(data.fireAt, data.chats, data.attempt ?? 0, true)
+  return data.fireAt
 }
 
 // Re-arm a persisted reminder on daemon startup (or fire it if it just came due).
 function loadScheduledReset(): void {
-  const data = readJsonFile<{ fireAt: number; chats: string[]; attempt?: number } | null>(SCHEDULED_RESET_FILE, null)
+  const data = readJsonFile<{ fireAt: number; chats: string[]; attempt?: number; auto?: boolean } | null>(SCHEDULED_RESET_FILE, null)
   if (!data) return
   if (!data?.fireAt || !Array.isArray(data.chats)) { try { unlinkSync(SCHEDULED_RESET_FILE) } catch {}; return }
   if (data.fireAt < Date.now() - 10 * 60_000) { try { unlinkSync(SCHEDULED_RESET_FILE) } catch {}; return }  // missed long ago
-  scheduleReset(data.fireAt, data.chats, data.attempt ?? 0)
+  scheduleReset(data.fireAt, data.chats, data.attempt ?? 0, data.auto === true)
 }
 
 
@@ -3512,43 +3527,17 @@ function settingsText(): string {
   return `⚙️ <b>Settings</b>\n\n` +
     `💬 Stream — <b>${replyMode()}</b>\n` +
     `📌 Pinned message — <b>${a.sessionPin !== false ? 'on' : 'off'}</b>\n` +
-    `▶️ Auto-continue — <b>${a.autoContinue !== false ? 'on' : 'off'}</b>\n` +
     `🎙️ Voice transcription — <b>${transcribeStatus()}</b>\n\n` +
     `Tap to change:`
 }
 function settingsKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
     .text('💬 Stream', 'set:replymode').text('📌 Pin', 'set:pin').row()
-    .text('▶️ Auto-continue', 'set:autocontinue').text('🎙️ Voice transcription', 'set:voice')
+    .text('🎙️ Voice transcription', 'set:voice')
 }
 bot.command('settings', async ctx => {
   if (!dmCommandGate(ctx)) return
   await ctx.reply(settingsText(), { parse_mode: 'HTML', reply_markup: settingsKeyboard() })
-})
-
-// /autocontinue on|off toggles whether the reset reminder auto-types "continue"
-// (default on); bare /autocontinue shows the current state.
-bot.command('autocontinue', async ctx => {
-  if (!dmCommandGate(ctx)) return
-  const arg = (ctx.match ?? '').toString().trim().toLowerCase()
-  if (arg && arg !== 'on' && arg !== 'off') {
-    await ctx.reply('Usage: <code>/autocontinue on</code> | <code>off</code>', { parse_mode: 'HTML' })
-    return
-  }
-  if (arg) {
-    const access = loadAccess()
-    access.autoContinue = arg === 'on'
-    saveAccess(access)
-  }
-  const on = loadAccess().autoContinue !== false
-  await ctx.reply(
-    `▶️ Auto-continue on reset is <b>${on ? 'ON' : 'OFF'}</b>.\n` +
-    (on
-      ? 'When your usage limit resets, I\'ll automatically send "continue" into the session.'
-      : 'When your usage limit resets, I\'ll show a ▶️ Continue button for you to tap.') +
-    '\nToggle with <code>/autocontinue on</code> | <code>off</code>.',
-    { parse_mode: 'HTML' },
-  )
 })
 
 // /mcp on|off toggles MCP mode for sessions started afterward (relaunch to apply); bare shows it.
@@ -4185,7 +4174,7 @@ bot.on('callback_query:data', async ctx => {
   }
 
   // /settings panel toggles → flip the setting and re-render the panel in place.
-  const setMatch = /^set:(pin|autocontinue|replymode)$/.exec(data)
+  const setMatch = /^set:(pin|replymode)$/.exec(data)
   if (setMatch) {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
@@ -4203,9 +4192,6 @@ bot.on('callback_query:data', async ctx => {
       a.sessionPin = a.sessionPin === false                 // flip
       saveAccess(a)
       if (a.sessionPin) await updateSessionPin(); else await removeSessionPins()
-    } else if (setMatch[1] === 'autocontinue') {
-      a.autoContinue = a.autoContinue === false
-      saveAccess(a)
     }
     await ctx.editMessageText(settingsText(), { parse_mode: 'HTML', reply_markup: settingsKeyboard() }).catch(() => {})
     return
@@ -4264,6 +4250,28 @@ bot.on('callback_query:data', async ctx => {
     if (!whisperReady() && !whisperInstalling) void provisionWhisper(loadAccess().allowFrom)
     else if (whisperReady()) void prepullWhisperModel()
     await ctx.editMessageText(voiceModelText(), { parse_mode: 'HTML', reply_markup: voiceModelKeyboard() }).catch(() => {})
+    return
+  }
+
+  // "Auto-continue" button on the ⛔ limit-hit message → arm the pending scheduled reset to
+  // type "continue" automatically, drop the button, and confirm.
+  if (data === 'usage:arm') {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    const fireAt = armScheduledReset()
+    if (!fireAt) {
+      await ctx.answerCallbackQuery({ text: 'No pending reset — the limit may have already reset. Send "continue" to resume.', show_alert: true }).catch(() => {})
+      await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => {})
+      return
+    }
+    await ctx.answerCallbackQuery({ text: 'Auto-continue armed.' }).catch(() => {})
+    await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => {})
+    const thread = ctx.callbackQuery.message?.message_thread_id
+    await bot.api.sendMessage(String(ctx.chat!.id),
+      `✅ Auto-continue armed — I'll send "continue" when the limit resets (in ${formatDuration(Math.max(0, fireAt - Date.now()))}).`,
+      thread ? { message_thread_id: thread } : {}).catch(() => {})
     return
   }
 
@@ -5584,7 +5592,7 @@ void (async () => {
               { command: 'start', description: 'Welcome + everything this bot can do' },
               { command: 'stop', description: 'Interrupt the current task (Esc)' },
               { command: 'status', description: 'Re-post the status pin at the bottom' },
-              { command: 'settings', description: 'Channel settings — mirror, pin, auto-continue, MCP, voice' },
+              { command: 'settings', description: 'Channel settings — mirror, pin, MCP, voice' },
               { command: 'schedule', description: 'Schedule a message into a session (/schedule 12h · /schedule cancel)' },
               { command: 'md', description: 'Create a .md file in the working dir, then reply with its contents' },
               { command: 'resume', description: 'Resume a recent session (lists them with times)' },

@@ -9,7 +9,7 @@ import { join } from 'node:path'
 
 const PROJECTS_DIR = join(homedir(), '.claude', 'projects')
 
-type Entry = { type?: string; uuid?: string; timestamp?: string; cwd?: string; isSidechain?: boolean; message?: { content?: unknown; stop_reason?: string | null } }
+type Entry = { type?: string; uuid?: string; timestamp?: string; cwd?: string; isSidechain?: boolean; isMeta?: boolean; message?: { content?: unknown; stop_reason?: string | null } }
 
 // Text content of an entry: a bare string, or the joined `text` blocks of a content
 // array (tool_use / thinking blocks contribute nothing).
@@ -50,6 +50,16 @@ function readEntries(file: string): Entry[] {
 // the session's reply, so it must never relay. This is the single gate every text reader uses.
 function isMainAssistantText(e: Entry): boolean {
   return e.type === 'assistant' && !e.isSidechain && textOf(e.message?.content).trim() !== ''
+}
+
+// A REAL user prompt — the only thing that starts a new turn. The harness also writes user-type
+// entries with text mid-turn that aren't prompts at all: a Skill invocation injects the skill's
+// instructions as a user entry (isMeta:true, sourceToolUseID set), and local-command caveats are
+// isMeta too. Treating those as turn boundaries reset the anchor mid-turn, which finalized the
+// live mirror card and opened a second one for the same turn (the split-card bug) — so every
+// turn-anchor scan gates on this instead.
+function isRealUserText(e: Entry): boolean {
+  return e.type === 'user' && !e.isSidechain && !e.isMeta && textOf(e.message?.content).trim() !== ''
 }
 
 // Claude Code writes a synthetic assistant entry "No response requested." when a slash command
@@ -204,7 +214,7 @@ export function currentTurnActivity(file: string): Activity[] {
 
   let anchor = -1
   for (let i = entries.length - 1; i >= 0; i--) {
-    if (entries[i].type === 'user' && !entries[i].isSidechain && textOf(entries[i].message?.content).trim()) { anchor = i; break }
+    if (isRealUserText(entries[i])) { anchor = i; break }
   }
   const acts: Activity[] = []
   for (let i = anchor + 1; i < entries.length; i++) {
@@ -249,7 +259,7 @@ export function finalRepliesAfter(file: string, afterUuid: string): { uuid: stri
   const flush = () => { if (pending) { out.push(pending); pending = null } }
   for (let i = at + 1; i < entries.length; i++) {
     const e = entries[i]
-    if (e.type === 'user' && !e.isSidechain && textOf(e.message?.content).trim()) { flush(); continue }  // turn boundary
+    if (isRealUserText(e)) { flush(); continue }  // turn boundary (real prompts only — not injected skill/meta entries)
     if (isMainAssistantText(e)) { const text = textOf(e.message?.content).trim(); if (!isCommandNoise(text)) pending = { uuid: e.uuid ?? '', text } }
   }
   flush()
@@ -266,7 +276,7 @@ export function turnInProgress(file: string): boolean {
   const entries = readEntries(file)
   let start = -1
   for (let i = entries.length - 1; i >= 0; i--) {
-    if (entries[i].type === 'user' && !entries[i].isSidechain && textOf(entries[i].message?.content).trim()) { start = i; break }
+    if (isRealUserText(entries[i])) { start = i; break }
   }
   // The turn is running iff the LATEST main-thread assistant entry is still awaiting a tool
   // (stop_reason 'tool_use'). The moment the model finishes (end_turn / stop / max_tokens) the turn
@@ -298,7 +308,7 @@ export function currentTurnFeed(file: string, concluded = false): FeedItem[] {
   const entries = readEntries(file)
   let start = -1
   for (let i = entries.length - 1; i >= 0; i--) {
-    if (entries[i].type === 'user' && !entries[i].isSidechain && textOf(entries[i].message?.content).trim()) { start = i; break }
+    if (isRealUserText(entries[i])) { start = i; break }
   }
   // Locate the reply block (last main-thread assistant text block of the turn) once concluded.
   let replyEntry = -1, replyBlock = -1

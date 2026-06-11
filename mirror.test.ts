@@ -1,7 +1,7 @@
 import { test, expect } from 'bun:test'
 import {
   toolBadge, recentAssistantBlocks, renderToolsMirror, renderThoughtsMirror,
-  renderHybridMirror, renderDigestMirror,
+  renderHybridMirror, renderDigestMirror, splitThoughtParagraphs,
 } from './mirror.ts'
 import type { Activity, FeedItem } from './transcript.ts'
 
@@ -84,4 +84,22 @@ test('renderDigestMirror shows live/idle header + blocks', () => {
   expect(renderDigestMirror('', false)).toBe('🖥️ <b>Session</b> · live')
   expect(renderDigestMirror('', true)).toBe('🖥️ <b>Session</b> · idle')
   expect(renderDigestMirror('● hi there', false)).toContain('hi there')
+})
+
+test('renderThoughtsMirror counts visual paragraphs, never more than 5', () => {
+  // 4 feed items but the first has two paragraphs — the window must cap VISUAL thoughts at 5,
+  // so a 5-item feed with a multi-paragraph item can't render 6.
+  const feed: FeedItem[] = [
+    { kind: 'text', text: 'p1\n\np2' },
+    { kind: 'text', text: 'p3' }, { kind: 'text', text: 'p4' },
+    { kind: 'text', text: 'p5' }, { kind: 'text', text: 'p6' },
+  ]
+  const out = renderThoughtsMirror(feed, false)
+  expect(out).not.toContain('p1')   // oldest paragraph fell off
+  for (const p of ['p2', 'p3', 'p4', 'p5', 'p6']) expect(out).toContain(p)
+})
+
+test('splitThoughtParagraphs keeps fenced code blocks glued', () => {
+  const t = 'intro\n\n```\ncode line 1\n\ncode line 2\n```\n\noutro'
+  expect(splitThoughtParagraphs(t)).toEqual(['intro', '```\ncode line 1\n\ncode line 2\n```', 'outro'])
 })

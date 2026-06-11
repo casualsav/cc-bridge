@@ -199,12 +199,30 @@ export function renderHybridMirror(feed: FeedItem[], done: boolean): string {
   return body
 }
 
+// Split a narration block into its visual paragraphs (blank-line separated), keeping fenced
+// code blocks glued. On the card, paragraphs within one block render exactly like separate
+// thoughts (a blank line apart inside the blockquote), so the 5-thought window must count
+// PARAGRAPHS — counting feed items let a multi-paragraph block show 6+ visual thoughts.
+export function splitThoughtParagraphs(text: string): string[] {
+  const out: string[] = []
+  let cur: string[] = []
+  let inFence = false
+  const flush = () => { const p = cur.join('\n').trim(); if (p) out.push(p); cur = [] }
+  for (const line of text.split('\n')) {
+    if (/^\s*(```|~~~)/.test(line)) inFence = !inFence
+    if (!inFence && line.trim() === '') { flush(); continue }
+    cur.push(line)
+  }
+  flush()
+  return out
+}
+
 // Thoughts-only card: just Claude's narration, rendered (not raw markdown) with a blank line
 // between thoughts and no 💭 prefix.
 export function renderThoughtsMirror(feed: FeedItem[], done: boolean): string {
   const thoughts = feed
     .filter((it): it is Extract<FeedItem, { kind: 'text' }> => it.kind === 'text')
-    .map(it => it.text.trim()).filter(Boolean)
+    .flatMap(it => splitThoughtParagraphs(it.text))
     .slice(-MIRROR_THOUGHTS)   // keep only the latest few; oldest fall off as new thoughts flow in
   const rendered = thoughts.map(t => mdToTelegramHtml(t).trim()).filter(Boolean)
   let body = rendered.join('\n\n')
