@@ -16,6 +16,7 @@ export type StatuslineData = {
   d7: { pct: number; reset: string } | null
   effort: string | null   // ε:<level> from the statusline
   think: boolean          // ✻think badge present
+  model: string | null    // model display name from the statusline's identity line, e.g. "Opus 4.8"
 }
 
 const STATUS_DUR = '(\\d+h\\d+m|\\d+m\\d+s|\\d+h|\\d+m|\\d+s)'
@@ -83,6 +84,13 @@ export function parseStatusline(paneText: string): StatuslineData | null {
     d7: limit(new RegExp(`7d\\D*?(\\d+)\\s*%\\D*?${STATUS_DUR}`)),
     effort: str(/ε:\s*(\w+)/),
     think: /✻\s*think/i.test(block),
+    // The statusline renders model_name ("Opus 4.8", "Fable 5") on its identity line. Prefer a
+    // versioned match, then a capitalized one — so a lowercase path segment like …/opus-test on
+    // the same line can't impersonate the model.
+    model: (() => {
+      const all = [...block.matchAll(/\b(?:Opus|Sonnet|Haiku|Fable)\b(?:\s+v?\d[\d.]*)?/g)].map(m => m[0].trim())
+      return all.find(t => /\d/.test(t)) ?? all[0] ?? null
+    })(),
   }
   const empty = data.ctxPct == null && !data.tokens && !data.cost && !data.sessionTime && !data.h5 && !data.d7
   return empty ? null : data

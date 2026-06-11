@@ -373,6 +373,14 @@ let lastKnownModel: string | null = null
 // watcher may be null for a non-focused topic pane (no mirror to pause) — then run the key-sends
 // directly. The focused pane passes its watcher so the picker is never relayed as buttons.
 async function readCurrentModel(paneId: string, watcher: PaneWatcher | null): Promise<string | null> {
+  // The configured statusline renders the model name right in the pane — lift it from a capture
+  // first (zero key-sends; works mid-turn too). The /model picker flash below is now only the
+  // fallback for panes without a model-bearing statusline, so e.g. spawning a topic session no
+  // longer types /model into the focused pane to inherit its model.
+  try {
+    const sl = parseStatusline(await capturePane(paneId))?.model
+    if (sl) return (lastKnownModel = prettyModel(sl))
+  } catch { /* capture blip — fall through to the picker path */ }
   const run = async () => {
     // Opening /model only works when Claude is idle — mid-turn it just queues the
     // text. Skip the read while busy and fall back to the last known value.

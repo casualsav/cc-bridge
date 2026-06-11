@@ -29,6 +29,13 @@ test('parseStatusline tolerates a partial statusline (missing fields → null fi
   expect(d.think).toBe(false)
 })
 
+test('parseStatusline lifts the model from the identity line (versioned match wins, lowercase paths ignored)', () => {
+  const cap = ['output', '', 'user@host:/home/u/opus-test (main) | Opus 4.8 | ⌨NORMAL', STATUSLINE, '? for shortcuts'].join('\n')
+  expect(parseStatusline(cap)!.model).toBe('Opus 4.8')
+  expect(parseStatusline(pane('user@host:~/code | Fable 5\n' + STATUSLINE))!.model).toBe('Fable 5')
+  expect(parseStatusline(pane(STATUSLINE))!.model).toBe(null)
+})
+
 test('parseStatusline returns null when the line above the footer is the input-box border', () => {
   const noStatus = ['some content', '╭───────────────╮', '> type here'].join('\n')
   expect(parseStatusline(noStatus)).toBe(null)
