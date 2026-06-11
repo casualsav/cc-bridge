@@ -61,6 +61,7 @@ import {
   reconcileTopics, refreshTopicTitles, topicThreadFor, emitTopicTyping, outboundTargetsFor,
   stampPaneSession, topicBranchCache,
 } from './topic-runtime.ts'
+import { formatChannelBlock } from './inbound.ts'
 import { initQueue, readLater, writeLater, sweepLaterQueues, LATER_SWEEP_MS } from './queue.ts'
 import {
   initPromptRelay, relayPromptToTelegram, relayPermissionToTelegram, sweepPermStorms,
@@ -616,26 +617,6 @@ let promptRelayOutstanding = false
 // relayed messages so a Telegram reply to one is injected into the pane.
 let lastRelayedAuthUrl = ''
 
-// Build the inbound block the agent reads. It lives in the session's context, so every
-// dropped character is saved tokens — the format is as small as it can get while staying
-// unambiguous (off-mcp/CLAUDE.md documents it):
-//   <tg ID[ e][ @sender][ img="path"][ att="path"]>TEXT</tg>
-// ID (bare, positional) is the message id — the handle for `tg react . ID` (reactions are an
-// ambient affordance, decoded + paced by CLAUDE.md; no per-message flag or hint needed).
-// The chat id is GONE even in groups: the tg CLI sends its tmux pane, and `.` resolves to the
-// calling session's own chat/topic (resolveTarget). `e` = an edit replacing the user's previous
-// message. `@sender` appears only when the author isn't the paired owner. user_id / ts dropped.
-function formatChannelBlock(params: InboundParams): string {
-  const m = params.meta
-  const esc = (v: string) => v.replace(/"/g, '&quot;')
-  const a: string[] = []
-  if (m.message_id) a.push(m.message_id)
-  if (m.edited) a.push('e')
-  if (m.user && m.user_id && m.user_id !== loadAccess().allowFrom[0] && m.chat_id !== m.user_id) a.push(`@${m.user}`)
-  if (m.image_path) a.push(`img="${esc(m.image_path)}"`)
-  if (m.attachment_path) a.push(`att="${esc(m.attachment_path)}"`)
-  return `<tg${a.length ? ' ' + a.join(' ') : ''}>${params.content}</tg>`
-}
 
 // Inbound injections are serialized through one chain: two Telegram messages arriving
 // close together would otherwise drive the same pane concurrently and interleave
