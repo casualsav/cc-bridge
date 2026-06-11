@@ -329,8 +329,10 @@ let topicTypingTimer: ReturnType<typeof setInterval> | null = null
 function pingTopicTyping(key: string): void {
   const sep = key.lastIndexOf(':')
   const thread = key.slice(sep + 1)
+  // General renders typing only under its pseudo-thread id 1 — unthreaded actions are accepted
+  // by the API but never shown (verified live).
   void bot.api.sendChatAction(key.slice(0, sep), 'typing',
-    thread === 'general' ? {} : { message_thread_id: Number(thread) }, AbortSignal.timeout(1500)).catch(() => {})
+    { message_thread_id: thread === 'general' ? 1 : Number(thread) }, AbortSignal.timeout(1500)).catch(() => {})
 }
 
 export function armTopicTyping(chat: string, thread: number | 'general'): void {
@@ -355,12 +357,13 @@ export function stopTopicTyping(chat: string, thread: number | 'general'): void 
 export async function emitTopicTyping(paneId: string | null): Promise<void> {
   const t = await topicThreadFor(paneId)
   if (!t) {
-    // The General-anchored session has no topic — type in General (unthreaded) instead.
+    // The General-anchored session has no topic — type in General (pseudo-thread 1; unthreaded
+    // actions are accepted but never rendered there).
     const group = getGroupChatId()
     const anchor = getGeneralSession()
     if (!group || !anchor || !paneId || (await sessionForPane(paneId, false)) !== anchor) return
     stopTopicTyping(group, 'general')
-    await bot.api.sendChatAction(group, 'typing', {}, AbortSignal.timeout(1500)).catch(() => {})
+    await bot.api.sendChatAction(group, 'typing', { message_thread_id: 1 }, AbortSignal.timeout(1500)).catch(() => {})
     return
   }
   stopTopicTyping(t.group, t.thread)   // work observed — the relay ticks sustain typing from here
