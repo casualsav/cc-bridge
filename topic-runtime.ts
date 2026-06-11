@@ -244,8 +244,12 @@ export async function refreshTopicTitles(panes: string[]): Promise<void> {
     // branch renames and daemon restarts — only a real folder change replaces the base.
     const curBase = t.name.replace(/ · [^·]*$/, '').replace(/ #\d+$/, '')
     const norm = (s: string) => s.trim().toLowerCase().replace(/[\\/\0\s]+/g, '-')
-    const base = (norm(curBase) === folder.toLowerCase() ? curBase : folder) + (num ? ` #${num}` : '')
-    const want = branch && !['main', 'master', 'HEAD'].includes(branch) ? `${base} · ${branch}` : base
+    const stem = norm(curBase) === folder.toLowerCase() ? curBase : folder
+    const base = stem + (num ? ` #${num}` : '')
+    // A repo pulled into the topic's folder often checks out a default branch named like the
+    // topic itself — "Proj · Proj" says nothing twice. Suffix only an informative branch.
+    const want = branch && !['main', 'master', 'HEAD'].includes(branch) && norm(branch) !== norm(stem)
+      ? `${base} · ${branch}` : base
     if (want === t.name) continue
     try {
       await bot.api.editForumTopic(group, t.threadId, { name: want })
