@@ -58,7 +58,7 @@ import {
 } from './topics.ts'
 import {
   initTopicRuntime, sessionForPane, paneForSession, ensureSessionTopic, closeTopicForPane,
-  reconcileTopics, refreshTopicTitles, topicThreadFor, emitTopicTyping, outboundTargetsFor,
+  reconcileTopics, refreshTopicTitles, topicThreadFor, emitTopicTyping, armTopicTyping, stopTopicTyping, outboundTargetsFor,
   stampPaneSession, topicBranchCache,
 } from './topic-runtime.ts'
 import {
@@ -782,7 +782,10 @@ async function relayLoopTick(gen: number): Promise<void> {
       if (!isBanner(r.text)) {
         const targets = await outboundTargetsFor(paneId)
         process.stderr.write(`daemon: relaying ${r.text.length} chars (uuid ${r.uuid.slice(0, 8)}, reply) to ${targets.map(t => t.chat + (t.thread ? `#${t.thread}` : '')).join(',')}\n`)
-        for (const t of targets) await sendAgentText([t.chat], r.text, t.thread).catch(e => process.stderr.write(`daemon: relay send failed: ${e}\n`))
+        for (const t of targets) {
+          await sendAgentText([t.chat], r.text, t.thread).catch(e => process.stderr.write(`daemon: relay send failed: ${e}\n`))
+          if (t.thread != null) stopTopicTyping(t.chat, t.thread)   // reply delivered — never re-light typing over it
+        }
       }
       typingPresence.stop()   // reply delivered (or banner suppressed) → clean stop, no tail
       if (!isBanner(r.text) && paneId) void maybeShipFooter(paneId)   // opt-in ship buttons when the turn dirtied the tree
@@ -877,7 +880,10 @@ async function auxRelayTick(): Promise<void> {
           if (!r.uuid || r.uuid === (lastRelayedByFile.get(file) ?? '')) continue
           lastRelayedByFile.set(file, r.uuid)     // advance before the await so a fast tick can't double-send
           const targets = await outboundTargetsFor(pane)
-          for (const t of targets) await sendAgentText([t.chat], r.text, t.thread).catch(e => process.stderr.write(`daemon: aux relay send failed: ${e}\n`))
+          for (const t of targets) {
+            await sendAgentText([t.chat], r.text, t.thread).catch(e => process.stderr.write(`daemon: aux relay send failed: ${e}\n`))
+            if (t.thread != null) stopTopicTyping(t.chat, t.thread)   // reply delivered — never re-light typing over it
+          }
         }
       } catch { /* transient (tmux/transcript) — retry next tick */ }
     }
@@ -5382,10 +5388,12 @@ async function handleInbound(
     return
   }
 
-  // Topic mode: show typing instantly in the topic the message came from (the relay loops then
-  // sustain it). DM mode keeps the flat keep-alive. Avoids stray typing in the group's General.
+  // Topic mode: show typing instantly in the topic the message came from and LATCH it through
+  // Claude's pre-first-token thinking (the relay loops then sustain it — a bare one-shot expired
+  // after ~5s and went dark until the transcript showed work). DM mode keeps the flat keep-alive.
+  // Avoids stray typing in the group's General.
   const inThreadId = ctx.message?.message_thread_id
-  if (isTopicMode()) { if (typeof inThreadId === 'number') void bot.api.sendChatAction(chat_id, 'typing', { message_thread_id: inThreadId }).catch(() => {}) }
+  if (isTopicMode()) { if (typeof inThreadId === 'number') armTopicTyping(chat_id, inThreadId) }
   else typingPresence.arm(chat_id)
 
   // Remember the latest inbound message per route so an edit to it can be re-injected as a
