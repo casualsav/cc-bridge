@@ -3441,7 +3441,7 @@ bot.command('find', async ctx => {
 // free", complementing /schedule's "at 3pm"). Persisted so a daemon restart keeps the queue;
 // a 15s sweep injects the next item whenever a queued session sits at a normal prompt.
 const LATER_FILE = join(STATE_DIR, 'later.json')
-type LaterItem = { text: string; queuedAt: number }
+type LaterItem = { text: string; queuedAt: number; fireAt?: number }   // fireAt: hold until the 5h limit window rolls over (ROADMAP #10)
 function readLater(): Record<string, LaterItem[]> {
   const raw = readJsonFile<Record<string, unknown> | null>(LATER_FILE, null)
   if (!raw) return {}
@@ -3475,9 +3475,27 @@ bot.command(['queue', 'later'], async ctx => {   // /later kept as a hidden alia
   if (!arg) {
     const items = map[sid] ?? []
     await ctx.reply(items.length
-      ? `🗒 <b>Queued for this session</b> (runs when idle):\n${items.map((i, n) => `${n + 1}. ${escapeHtml(i.text.slice(0, 120))}`).join('\n')}\n\n<code>/queue clear</code> to empty it.`
-      : 'Queue is empty — <code>/queue &lt;prompt&gt;</code> to add a task for when this session is idle.',
+      ? `🗒 <b>Queued for this session</b> (runs when idle):\n${items.map((i, n) => `${n + 1}. ${i.fireAt ? `⏰[${formatDuration(Math.max(0, i.fireAt - Date.now()))}] ` : ''}${escapeHtml(i.text.slice(0, 120))}`).join('\n')}\n\n<code>/queue clear</code> to empty it.`
+      : 'Queue is empty — <code>/queue &lt;prompt&gt;</code> to add a task for when this session is idle; <code>/queue @reset &lt;prompt&gt;</code> to hold it for the 5h limit reset.',
       { parse_mode: 'HTML' })
+    return
+  }
+  // `@reset <prompt>` waits for the 5h usage window to roll over (the statusline's reset
+  // countdown gives the absolute time), THEN runs on the next idle — soaks up dead limit hours.
+  const resetMatch = /^@reset\s+(.+)$/is.exec(arg)
+  if (resetMatch) {
+    const st = parseStatusline(await capturePane(t.paneId).catch(() => ''))
+    const ms = st?.h5?.reset ? parseDuration(st.h5.reset) : null
+    if (ms == null) {
+      ;(map[sid] ??= []).push({ text: resetMatch[1], queuedAt: Date.now() })
+      writeLater(map)
+      await ctx.reply(`🗒 Couldn't read the 5h reset countdown — queued (#${map[sid].length}) for plain idle instead.`)
+      return
+    }
+    const fireAt = Date.now() + ms + 60_000   // +1m margin so the window has actually rolled
+    ;(map[sid] ??= []).push({ text: resetMatch[1], queuedAt: Date.now(), fireAt })
+    writeLater(map)
+    await ctx.reply(`⏰ Queued (#${map[sid].length}) for the 5h limit reset — fires in ~${formatDuration(ms)} (then waits for idle).`)
     return
   }
   ;(map[sid] ??= []).push({ text: arg, queuedAt: Date.now() })
@@ -3496,7 +3514,11 @@ async function sweepLaterQueues(): Promise<void> {
       if (!pane || !items.length) continue
       const cap = await capturePane(pane).catch(() => '')
       if (!cap || !onNormalPrompt(cap)) continue   // busy / menu up → not yet
-      const item = items.shift()!
+      // First ELIGIBLE item: @reset items hold until their window rollover; plain items
+      // behind them still run on idle (the queue isn't strictly FIFO across kinds).
+      const idx = items.findIndex(i => !i.fireAt || i.fireAt <= Date.now())
+      if (idx < 0) continue
+      const item = items.splice(idx, 1)[0]
       writeLater(map)
       const ok = pane === focus.activePaneId && focus.paneWatcher
         ? await injectText(pane, focus.paneWatcher, item.text)
@@ -6513,7 +6535,7 @@ void (async () => {
               { command: 'status', description: 'Re-post the status pin at the bottom' },
               { command: 'settings', description: 'Channel settings — mirror, pin, MCP, voice' },
               { command: 'schedule', description: 'Schedule a message into a session (/schedule 12h · /schedule cancel)' },
-              { command: 'queue', description: 'Queue a prompt for when the session is idle (/queue clear)' },
+              { command: 'queue', description: 'Queue a prompt for idle, or @reset for the 5h rollover (/queue clear)' },
               { command: 'md', description: 'Create a .md file in the working dir, then reply with its contents' },
               { command: 'resume', description: 'Resume a recent session (lists them with times)' },
               { command: 'find', description: 'Search all sessions\' conversations (/find <text>)' },

@@ -48,7 +48,7 @@ Spawning a second session in the same repo shares one working tree — edits col
 "spawn in a git worktree" on /new and topic-create so same-repo sessions work in parallel
 safely (worktree auto-created under e.g. `<repo>-wt/<topic>`, cleaned up on topic close).
 
-## 10. Queue for limit reset
+## 10. Queue for limit reset — ✅ DONE (v0.1.84)
 /queue fires on idle; the other big wait is the 5h usage window. `/queue @reset <prompt>`
 fires the moment the limit window rolls over (reset time already parsed for the status card),
 so dead hours soak up queued work.
