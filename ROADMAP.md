@@ -63,7 +63,7 @@ Editing a sent Telegram message currently does nothing. Relay the edit as a corr
 ("✏️ correction to earlier message: …") into the session — matches the instinct of fixing a
 typo'd prompt in place.
 
-## 13. Permission-storm batching
+## 13. Permission-storm batching — ✅ DONE (v0.1.87)
 A turn raising N permission prompts costs N taps. When prompts queue up, one card with
 "✅ Allow all from this turn" (scoped to that turn, not bypass) plus per-item Deny.
 

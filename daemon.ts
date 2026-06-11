@@ -2070,6 +2070,23 @@ function permButtonLabel(opt: { n: number; label: string }): string {
   return `${icon} ${short}`
 }
 
+// ---- Permission-storm batching (ROADMAP #13) ----
+// A turn that raises N permission prompts costs N taps. From the 2nd prompt of a turn, offer
+// "Allow all this turn": once armed, subsequent prompts in that turn auto-answer option 1
+// (the plain Allow) with a quiet note instead of a card. Disarmed when the pane returns to a
+// normal prompt (turn over) — see sweepPermStorms. Toggle: settings → ⚡ Batch allow (default on).
+const permStorms = new Map<string, { count: number; armed: boolean; lastQ?: string; offered?: boolean }>()
+function batchAllowEnabled(): boolean { return loadAccess().batchAllow !== false }
+async function sweepPermStorms(): Promise<void> {
+  for (const [pane, _storm] of permStorms) {
+    try {
+      if (!(await paneAlive(pane))) { permStorms.delete(pane); continue }
+      const cap = await capturePane(pane).catch(() => '')
+      if (cap && onNormalPrompt(cap) && !detectPermissionPrompt(cap)) permStorms.delete(pane)   // turn over
+    } catch { permStorms.delete(pane) }
+  }
+}
+
 // Relay a permission prompt to Telegram: the question, a short preview of what's being
 // approved, and a button per option (callback pperm:<n>) that injects that choice into the
 // pane. One button per row — the labels (esp. "allow all this session") are long.
@@ -2078,6 +2095,22 @@ async function relayPermissionToTelegram(perm: PermissionPrompt, paneId: string 
   // Route to the requesting session's own topic in forum mode; DM mode → the allowlist.
   const targets = await outboundTargetsFor(paneId)
   if (targets.length === 0) return
+
+  const storm = permStorms.get(paneId) ?? { count: 0, armed: false }
+  // A pane repaint can re-relay the SAME prompt — only a different question advances the storm.
+  if (storm.lastQ !== perm.question) { storm.count++; storm.lastQ = perm.question }
+  permStorms.set(paneId, storm)
+  if (batchAllowEnabled() && storm.armed) {
+    // Armed mid-turn → answer option 1 directly; leave a quiet breadcrumb instead of a card.
+    await paneKeys(paneId, ['1', 'Enter'], [300, 5000])
+    resetPromptDedup(paneId)
+    await verifyPromptClosed(paneId)
+    for (const { chat, thread } of targets) {
+      void bot.api.sendMessage(chat, `⚡ Auto-allowed: <i>${escapeHtml(perm.question.slice(0, 120))}</i>`,
+        { parse_mode: 'HTML', disable_notification: true, ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
+    }
+    return
+  }
 
   if (paneId === focus.activePaneId) await flushPendingText()   // preamble must land before the approve/deny menu (focused relay cursor only)
   const parts = [`🔐 <b>${escapeHtml(perm.question)}</b>`]
@@ -2091,6 +2124,12 @@ async function relayPermissionToTelegram(perm: PermissionPrompt, paneId: string 
   for (const { chat, thread } of targets) {
     try {
       await bot.api.sendMessage(chat, body, { parse_mode: 'HTML', reply_markup: kb, ...(thread ? { message_thread_id: thread } : {}) })
+      // From the storm's 2nd distinct prompt, also offer the turn-wide allow (once per turn).
+      if (batchAllowEnabled() && storm.count >= 2 && !storm.armed && !storm.offered) {
+        storm.offered = true
+        await bot.api.sendMessage(chat, '⚡ Several permission prompts this turn.',
+          { reply_markup: new InlineKeyboard().text('✅ Allow all this turn', `pstorm:${paneId}`), disable_notification: true, ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
+      }
     } catch (e) {
       process.stderr.write(`daemon: permission relay to ${chat} failed: ${e}\n`)
     }
@@ -3980,14 +4019,16 @@ function settingsText(): string {
     `🎙️ Voice transcription — <b>${transcribeStatus()}</b>\n` +
     `👤 Accounts — <b>${listAccounts().length}</b>\n` +
     `🚢 Ship buttons — <b>${a.shipButtons === true ? 'on' : 'off'}</b>\n` +
-    `🗞 Daily digest — <b>${a.digestAt ?? 'off'}</b>\n\n` +
+    `🗞 Daily digest — <b>${a.digestAt ?? 'off'}</b>\n` +
+    `⚡ Batch allow — <b>${a.batchAllow !== false ? 'on' : 'off'}</b>\n\n` +
     `Tap to change:`
 }
 function settingsKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
     .text('📌 Pin', 'set:pin').text('💬 Stream', 'set:replymode').row()
     .text('🎙️ Voice transcription', 'set:voice').text('👤 Accounts', 'acct:panel').row()
-    .text('🚢 Ship buttons', 'set:ship').text('🗞 Daily digest', 'set:digest')
+    .text('🚢 Ship buttons', 'set:ship').text('🗞 Daily digest', 'set:digest').row()
+    .text('⚡ Batch allow', 'set:batch')
 }
 bot.command('settings', async ctx => {
   if (!dmCommandGate(ctx)) return
@@ -4861,7 +4902,7 @@ bot.on('callback_query:data', async ctx => {
   }
 
   // /settings panel toggles → flip the setting and re-render the panel in place.
-  const setMatch = /^set:(pin|replymode|ship|digest|voice)$/.exec(data)
+  const setMatch = /^set:(pin|replymode|ship|digest|voice|batch)$/.exec(data)
   if (setMatch) {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
@@ -4887,6 +4928,9 @@ bot.on('callback_query:data', async ctx => {
       if (a.sessionPin) await updateSessionPin(); else await removeSessionPins()
     } else if (setMatch[1] === 'ship') {
       a.shipButtons = a.shipButtons !== true                // flip (default off)
+      saveAccess(a)
+    } else if (setMatch[1] === 'batch') {
+      a.batchAllow = a.batchAllow === false                 // flip (default on)
       saveAccess(a)
     } else if (setMatch[1] === 'digest') {
       // Set → tap turns it off; off → force-reply asks for the daily time.
@@ -5572,6 +5616,29 @@ bot.on('callback_query:data', async ctx => {
 
   // Prompt answer buttons
   // Permission-prompt answer: inject the chosen digit (Yes / allow-all / No) + Enter.
+  // "Allow all this turn" (permission-storm batching): arm the pane and answer the prompt
+  // currently on screen, if any. Disarms automatically when the turn ends.
+  const pstormMatch = /^pstorm:(%\d+)$/.exec(data)
+  if (pstormMatch) {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    const pane = pstormMatch[1]
+    const storm = permStorms.get(pane) ?? { count: 2, armed: false }
+    storm.armed = true
+    permStorms.set(pane, storm)
+    await ctx.answerCallbackQuery({ text: 'Allowing the rest of this turn.' }).catch(() => {})
+    await ctx.editMessageText('⚡ Allowing all permission prompts for the rest of this turn.').catch(() => {})
+    const cap = await capturePane(pane).catch(() => '')
+    if (cap && detectPermissionPrompt(cap)) {
+      await paneKeys(pane, ['1', 'Enter'], [300, 5000])
+      resetPromptDedup(pane)
+      await verifyPromptClosed(pane)
+    }
+    return
+  }
+
   const ppermMatch = /^pperm:(\d+)$/.exec(data)
   if (ppermMatch) {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
@@ -6576,6 +6643,7 @@ setInterval(() => void sweepDeletedTopics(), TOPIC_SWEEP_MS).unref()
 
 // Inject /later queue items whenever their session goes idle.
 setInterval(() => void sweepLaterQueues(), LATER_SWEEP_MS).unref()
+setInterval(() => void sweepPermStorms(), 5_000).unref()
 
 // Daily digest (if scheduled) + budget tracking.
 armDigest()
