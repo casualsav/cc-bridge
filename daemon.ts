@@ -4300,6 +4300,32 @@ function lastModelInTranscript(file: string): string | null {
   }
   return null
 }
+// The session's working plan: the most recent TodoWrite state in its transcript (ROADMAP #16).
+// Whole-file read matches lastModelInTranscript's pattern (the pin tick already pays it).
+type TodoState = { total: number; done: number; active: string | null }
+function lastTodosInTranscript(file: string): TodoState | null {
+  let data = ''
+  try { data = readFileSync(file, 'utf8') } catch { return null }
+  const idx = data.lastIndexOf('"name":"TodoWrite"')
+  if (idx < 0) return null
+  const start = data.lastIndexOf('\n', idx) + 1
+  const endNl = data.indexOf('\n', idx)
+  const line = data.slice(start, endNl < 0 ? data.length : endNl)
+  try {
+    const rec = JSON.parse(line) as { message?: { content?: unknown } }
+    const content = rec?.message?.content
+    type Todo = { status?: string; content?: string; activeForm?: string }
+    const block = Array.isArray(content)
+      ? (content as { type?: string; name?: string; input?: { todos?: Todo[] } }[]).find(b => b?.type === 'tool_use' && b?.name === 'TodoWrite')
+      : null
+    const todos = block?.input?.todos
+    if (!Array.isArray(todos) || todos.length === 0) return null
+    const done = todos.filter(t => t?.status === 'completed').length
+    const act = todos.find(t => t?.status === 'in_progress')
+    return { total: todos.length, done, active: act ? String(act.activeForm ?? act.content ?? '').trim() || null : null }
+  } catch { return null }
+}
+
 // Family name only — "Opus" / "Sonnet" / "Haiku" / "Fable" (no version), for the pin tagline.
 function prettyModel(id: string | null): string | null {
   if (!id) return id
@@ -4342,10 +4368,12 @@ async function statusCardText(paneId: string | null): Promise<string> {
     if (onNormalPrompt(cap)) mode = modeBadge(detectCurrentMode(cap))
     status = parseStatusline(cap)
   } catch {}
+  let todos: TodoState | null = null
   try {
     cwd = await paneCwd(paneId)
     const file = await transcriptForPane(paneId, cwd)
     model = (file && prettyModel(lastModelInTranscript(file))) || model
+    if (file) todos = lastTodosInTranscript(file)
   } catch {}
   const branch = cwd ? await gitBranch(cwd) : null
 
@@ -4364,6 +4392,10 @@ async function statusCardText(paneId: string | null): Promise<string> {
   const head = `🧠 ${escapeHtml(model ?? '—')}${effortBadge}${modeBadgeStr}${stats ? ` ${stats}` : ''}`
   const groups: string[] = []
   if (cwd) groups.push(`📁 <code>${escapeHtml(cwd)}</code>${branch ? ` · 🌿 ${escapeHtml(branch)}` : ''}`)
+  // The session's working plan (ROADMAP #16): latest TodoWrite state, with the in-progress step.
+  if (todos && todos.done < todos.total) {
+    groups.push(`📋 ${todos.done}/${todos.total}${todos.active ? ` · ${escapeHtml(todos.active.slice(0, 70))}` : ''}`)
+  }
   if (status) {
     // Usage group: the 5h/7d limit bars, then the cost/time data.
     const lim: string[] = []

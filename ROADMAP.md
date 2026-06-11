@@ -77,6 +77,6 @@ Daemon-side text→speech of outbound replies as Telegram voice notes (local Pip
 provisioning pattern as Whisper; zero Claude-usage cost). /settings toggle off/digest-only/all;
 long replies capped or summarized.
 
-## 16. Session todos in the pin
+## 16. Session todos in the pin — ✅ DONE (v0.1.89)
 Surface the session's internal todo list (TaskCreate/TodoWrite state from the transcript) in
 the per-topic status card — see what a working session is grinding through mid-turn.
