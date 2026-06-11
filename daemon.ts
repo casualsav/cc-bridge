@@ -2331,22 +2331,11 @@ async function performReset(t: CommandTarget, command: string): Promise<string> 
     : `${head}.`
 }
 
-// /new — in a session's topic it spawns a sibling session in that project; in the DM it's a
-// fresh conversation in place (same Yes/No confirm as /clear, via confirmResetSession).
+// /new — fresh conversation in place (same Yes/No confirm as /clear, via confirmResetSession).
+// In General it acts on the anchored/focused session, same as any other topic (commandTarget
+// resolves it); only a DM with no session at all gets the "start one?" offer below.
 async function confirmNewSession(ctx: Context): Promise<void> {
   if (!dmCommandGate(ctx)) return
-  // /new in GENERAL (group mode): start a new session — it gets its own topic. One-tap the
-  // focused session's folder, or specify another. (No commandTarget gate here: creating a
-  // session must work even when none is running.)
-  if (isTopicMode() && String(ctx.chat?.id) === getGroupChatId() && typeof ctx.message?.message_thread_id !== 'number') {
-    const base = focus.activePaneId ? await paneCwd(focus.activePaneId).catch(() => null) : null
-    const kb = new InlineKeyboard()
-    if (base) kb.text(`📁 ${base.length > 48 ? '…' + base.slice(-47) : base}`, 'newgo').row()
-    kb.text('✏️ Specify folder', 'newask')
-    await ctx.reply('🆕 <b>New session</b> — which folder should it run in? It gets its own topic.',
-      { parse_mode: 'HTML', reply_markup: kb })
-    return
-  }
   // DM with no running session: /new offers to START one rather than dead-ending on the
   // "no active session" guard — the daemon is alive and can spawn a fresh pane itself.
   if (ctx.chat?.type === 'private' && (!focus.activePaneId || !focus.paneWatcher)) {
@@ -2357,7 +2346,16 @@ async function confirmNewSession(ctx: Context): Promise<void> {
     await ctx.reply('🚫 <b>No active session</b> — start one?', { parse_mode: 'HTML', reply_markup: kb })
     return
   }
-  // Inside a session's topic, or DM: /new = clear THIS conversation in place, one confirm.
+  // General with nothing running at all: same idea, but the spawned session anchors to General
+  // (becomes the base session) instead of growing its own topic — see the newstartgeneral tap.
+  if (isTopicMode() && String(ctx.chat?.id) === getGroupChatId() &&
+      typeof ctx.message?.message_thread_id !== 'number' &&
+      (!focus.activePaneId || !focus.paneWatcher) && !(await generalAnchorPane())) {
+    await ctx.reply('🚫 <b>No active sessions.</b>', { parse_mode: 'HTML',
+      reply_markup: new InlineKeyboard().text('🚀 Start a new session', 'newstartgeneral') })
+    return
+  }
+  // Topic, General, or DM: /new = clear THIS conversation in place, one confirm.
   await confirmResetSession(ctx)
 }
 
@@ -3033,7 +3031,7 @@ bot.command(['bind', 'unbind'], async ctx => {
   const arg = (ctx.match ?? '').toString().trim().toLowerCase()
   const unbinding = ctx.message?.text?.startsWith('/unbind') || arg === 'off'
   if (unbinding) {
-    if (getGroupChatId() === groupId) { setGroupChatId(null); setGeneralSession(null) }
+    if (getGroupChatId() === groupId) { setGroupChatId(null); setGeneralSession(null) }   // General keeps its "Claude" name
     await ctx.reply('🔓 Unbound. This group is no longer the command center; per-session topics are off.')
     return
   }
@@ -3056,6 +3054,7 @@ bot.command(['bind', 'unbind'], async ctx => {
     const sid = await sessionForPane(focus.activePaneId)
     if (sid && !getTopicBySession(sid)) {
       setGeneralSession(sid)
+      await bot.api.editGeneralForumTopic(Number(groupId), 'Claude').catch(() => {})   // needs can_manage_topics; cosmetic, so best-effort
       anchorNote = 'Your current session is anchored to this <b>General</b> topic — it stays here. '
     }
   }
@@ -3088,6 +3087,7 @@ async function claimGeneralForFocused(): Promise<string> {
     updateTopic(sid, { closed: true })
   }
   setGeneralSession(sid)
+  await bot.api.editGeneralForumTopic(Number(group), 'Claude').catch(() => {})
   void updateSessionPin()
   const cwd = await paneCwd(focus.activePaneId).catch(() => null)
   return `📌 <b>Anchored to General:</b> the focused session${cwd ? ` (<code>${escapeHtml(cwd)}</code>)` : ''} now lives here.`
@@ -5035,6 +5035,40 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
+  // "Start a new session" on General's no-sessions card: spawn it pre-anchored to General, so it
+  // becomes the base session (discovery sees the anchor and skips topic creation — see
+  // ensureSessionTopic). Folder = last known session cwd; without one, ask (anchored newsession).
+  if (data === 'newstartgeneral') {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    if (await generalAnchorPane()) {
+      await ctx.answerCallbackQuery({ text: 'General already has a session.' }).catch(() => {})
+      return
+    }
+    const dir = lastSessionCwd()
+    if (!dir) {
+      await ctx.answerCallbackQuery().catch(() => {})
+      await ctx.editMessageReplyMarkup().catch(() => {})
+      const sent = await bot.api.sendMessage(String(ctx.chat!.id),
+        '📂 Which folder should the session run in?\n\nReply with a folder path (created if missing; <code>~/…</code> works).',
+        { parse_mode: 'HTML', reply_markup: { force_reply: true, input_field_placeholder: 'Folder path' } }).catch(() => null)
+      if (sent) replyTargets.set(`${ctx.chat?.id}:${sent.message_id}`, { kind: 'newsession', anchor: true })
+      return
+    }
+    await ctx.answerCallbackQuery({ text: 'Starting…' }).catch(() => {})
+    const sid = genSessionId()
+    setGeneralSession(sid)
+    const ok = await spawnSession(dir, '', sid)
+    if (!ok) setGeneralSession(null)
+    else void bot.api.editGeneralForumTopic(Number(getGroupChatId()), 'Claude').catch(() => {})
+    await ctx.editMessageText(ok
+      ? `🚀 Starting the base session in <code>${escapeHtml(dir)}</code> — it lives here in General.`
+      : `❌ Couldn't start a session in <code>${escapeHtml(dir)}</code>.`, { parse_mode: 'HTML' }).catch(() => {})
+    return
+  }
+
   if (data === 'newtopic:reset' || data === 'newtopic:spawn') {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
@@ -5957,9 +5991,15 @@ bot.on('message:text', async ctx => {
               return
             }
           }
-          const ok = await spawnSession(dir, '', genSessionId(), await paneAccount(focus.activePaneId))
+          // anchor (from General's no-sessions card): the spawn becomes the General base session.
+          const anchor = !!target.anchor && !(await generalAnchorPane())
+          const sid = genSessionId()
+          if (anchor) setGeneralSession(sid)
+          const ok = await spawnSession(dir, '', sid, await paneAccount(focus.activePaneId))
+          if (anchor && !ok) setGeneralSession(null)
+          if (anchor && ok) void bot.api.editGeneralForumTopic(Number(getGroupChatId()), 'Claude').catch(() => {})
           await ctx.reply(ok
-            ? `🚀 Starting a session in <code>${escapeHtml(dir)}</code>${created ? ' (📁 created it for you)' : ''} — it gets its own topic shortly.`
+            ? `🚀 Starting a session in <code>${escapeHtml(dir)}</code>${created ? ' (📁 created it for you)' : ''} — ${anchor ? 'it lives here in General.' : 'it gets its own topic shortly.'}`
             : `❌ Couldn't start a session in <code>${escapeHtml(dir)}</code>.`, { parse_mode: 'HTML' })
           return
         }
