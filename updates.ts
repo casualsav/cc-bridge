@@ -64,6 +64,12 @@ export async function claudeVersion(): Promise<string | null> {
 const UPDATE_NOTIFY_FILE = join(STATE_DIR, 'update-notify.json')
 const MP_DIR = join(homedir(), '.claude', 'plugins', 'marketplaces', 'better-claude-plugins')
 
+// True only when `latest` is strictly newer — a locally-deployed bridge can run AHEAD of the
+// marketplace remote, and `latest !== cur` would announce that as an "update" (a downgrade).
+function isNewer(latest: string, cur: string): boolean {
+  try { return Bun.semver.order(latest, cur) > 0 } catch { return latest !== cur }
+}
+
 export async function checkBridgeUpdate(): Promise<{ cur: string; latest: string } | null> {
   try {
     if (!existsSync(join(MP_DIR, '.git'))) return null
@@ -72,7 +78,7 @@ export async function checkBridgeUpdate(): Promise<{ cur: string; latest: string
     const remoteJson = (await exec('git', ['-C', MP_DIR, 'show', `origin/${branch}:.claude-plugin/plugin.json`], { timeout: 5000 })).stdout
     const latest = String(JSON.parse(remoteJson).version ?? '')
     const cur = bridgeVersion()
-    return latest && latest !== cur ? { cur, latest } : null
+    return latest && isNewer(latest, cur) ? { cur, latest } : null
   } catch { return null }
 }
 
@@ -83,7 +89,7 @@ export async function checkClaudeUpdate(): Promise<{ cur: string; latest: string
     const res = await fetch('https://registry.npmjs.org/@anthropic-ai/claude-code/latest', { signal: AbortSignal.timeout(15_000) })
     if (!res.ok) return null
     const latest = ((await res.json()) as { version?: string }).version
-    return latest && latest !== cur ? { cur, latest } : null
+    return latest && isNewer(latest, cur) ? { cur, latest } : null
   } catch { return null }
 }
 
