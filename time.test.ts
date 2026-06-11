@@ -54,3 +54,29 @@ test('fmtWhen renders a fixed UTC instant deterministically', () => {
   const ts = Date.UTC(2026, 5, 8, 1, 30, 0)
   expect(fmtWhen(ts)).toBe('Jun 8, 01:30 UTC')
 })
+
+import { nextRecurrence, recurrenceLabel } from './time.ts'
+import { test as t2, expect as e2 } from 'bun:test'
+
+t2('nextRecurrence daily lands at 09:00 LA wall clock, strictly in the future', () => {
+  const after = Date.UTC(2026, 5, 11, 17, 0)   // 10:00 PDT
+  const next = nextRecurrence({ kind: 'daily', hh: 9, mm: 0, tz: 'America/Los_Angeles' }, after)
+  e2(next).toBe(Date.UTC(2026, 5, 12, 16, 0))  // next day 09:00 PDT = 16:00 UTC
+})
+
+t2('nextRecurrence weekdays skips the weekend', () => {
+  const friAfternoon = Date.UTC(2026, 5, 12, 20, 0)   // Fri Jun 12 2026, 13:00 PDT
+  const next = nextRecurrence({ kind: 'weekdays', hh: 9, mm: 0, tz: 'America/Los_Angeles' }, friAfternoon)
+  e2(new Date(next).toUTCString()).toContain('Mon, 15 Jun 2026')
+})
+
+t2('nextRecurrence weekly picks the requested dow', () => {
+  const after = Date.UTC(2026, 5, 11, 0, 0)
+  const next = nextRecurrence({ kind: 'weekly', hh: 8, mm: 30, dow: 0, tz: 'America/Los_Angeles' }, after)
+  e2(new Date(next).toUTCString()).toContain('Sun, 14 Jun 2026')
+})
+
+t2('recurrenceLabel renders', () => {
+  e2(recurrenceLabel({ kind: 'daily', hh: 9, mm: 5, tz: 'UTC' })).toBe('daily 09:05')
+  e2(recurrenceLabel({ kind: 'weekly', hh: 7, mm: 0, dow: 5, tz: 'UTC' })).toBe('Fri 07:00')
+})

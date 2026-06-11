@@ -11,7 +11,7 @@ import { join } from 'node:path'
 import { STATE_DIR, readJsonFile, writeJsonFile } from './common.ts'
 import { escapeHtml } from './markdown.ts'
 import { paneAlive } from './pane-io.ts'
-import { fmtWhen } from './time.ts'
+import { fmtWhen, nextRecurrence, recurrenceLabel } from './time.ts'
 import type { Access, ScheduledMessage } from './types.ts'
 
 const SCHEDULED_MSGS_FILE = join(STATE_DIR, 'scheduled-messages.json')
@@ -50,9 +50,16 @@ async function fireScheduled(id: string): Promise<void> {
   const msg = scheduledMsgs.find(m => m.id === id)
   if (!msg) return
   if (Date.now() < msg.fireAt - 1000) { armScheduled(msg); return }   // capped long wait → re-arm
-  scheduledMsgs = scheduledMsgs.filter(m => m.id !== id)
-  scheduledTimers.delete(id)
-  saveScheduledMsgs()
+  if (msg.recur) {
+    // Recurring: roll to the next occurrence instead of removing (cancel is the only way out).
+    msg.fireAt = nextRecurrence(msg.recur, Date.now())
+    saveScheduledMsgs()
+    armScheduled(msg)
+  } else {
+    scheduledMsgs = scheduledMsgs.filter(m => m.id !== id)
+    scheduledTimers.delete(id)
+    saveScheduledMsgs()
+  }
   await deliverScheduled(msg)
 }
 
@@ -95,7 +102,7 @@ export function loadScheduledMsgs(): void {
 
 export function scheduledListText(): string {
   const lines = scheduledMsgs.map((m, i) =>
-    `${i + 1}. ${fmtWhen(m.fireAt)} → <b>${escapeHtml(m.sessionLabel)}</b>: ${escapeHtml(m.text.length > 40 ? m.text.slice(0, 39) + '…' : m.text)}`)
+    `${i + 1}. ${m.recur ? `🔁 ${recurrenceLabel(m.recur)} (next ${fmtWhen(m.fireAt)})` : fmtWhen(m.fireAt)} → <b>${escapeHtml(m.sessionLabel)}</b>: ${escapeHtml(m.text.length > 40 ? m.text.slice(0, 39) + '…' : m.text)}`)
   return `📅 <b>Scheduled messages</b>\n${lines.join('\n')}\n\nTap to cancel:`
 }
 

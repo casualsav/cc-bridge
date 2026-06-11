@@ -27,6 +27,7 @@ export type Access = {
   digestAt?: string       // daily all-sessions digest, local "HH:MM" (unset = off)
   budgetDaily?: number    // daily $ cap — warn at 80% and 100% of summed session cost growth (unset = off)
   topicOnEnd?: 'close' | 'delete'   // ended session's topic: close (keep history, default) or delete (tab disappears)
+  scheduleTz?: string     // IANA timezone for recurring /schedule wall-clock times (default America/Los_Angeles)
   replyMode?: 'thoughts' | 'tools' | 'hybrid' | 'off' | 'all' | 'final' | 'stream' | 'live'   // all/final/stream/live are legacy aliases
 }
 
@@ -48,4 +49,4 @@ export type Session = {
 export type PendingMultiSelect = { paneId: string; options: PromptOption[]; selected: Set<number> }
 export type FreeTextPrompt = { paneId: string; downCount: number; tabbed: boolean; question: string }
 export type ChatPrompt = { paneId: string; downCount: number; tabbed: boolean; useEscape: boolean }
-export type ScheduledMessage = { id: string; fireAt: number; chatId: string; paneId: string | null; sessionLabel: string; text: string; thread?: number }
+export type ScheduledMessage = { id: string; fireAt: number; chatId: string; paneId: string | null; sessionLabel: string; text: string; thread?: number; recur?: import('./time.ts').Recurrence }

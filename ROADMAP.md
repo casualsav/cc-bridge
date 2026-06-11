@@ -53,7 +53,7 @@ safely (worktree auto-created under e.g. `<repo>-wt/<topic>`, cleaned up on topi
 fires the moment the limit window rolls over (reset time already parsed for the status card),
 so dead hours soak up queued work.
 
-## 11. Recurring schedules
+## 11. Recurring schedules — ✅ DONE (v0.1.85)
 /schedule is one-shot, /digest is a special-cased daily. Generalize: `/schedule every 09:00
 <prompt>` (cron-lite: daily/weekday/weekly) with a dashboard listing + cancel, reusing the
 scheduler store.

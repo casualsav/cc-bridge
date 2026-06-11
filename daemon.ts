@@ -63,7 +63,7 @@ import {
 } from './topic-runtime.ts'
 import { TypingPresence } from './typing.ts'
 import { transcribe, transcribeProvider, transcribeStatus } from './voice.ts'
-import { parseDuration, formatDuration, fmtWhen, splitLeadingDuration } from './time.ts'
+import { parseDuration, formatDuration, fmtWhen, splitLeadingDuration, nextRecurrence, recurrenceLabel, type Recurrence } from './time.ts'
 import {
   initScheduler, loadScheduledMsgs, cancelScheduled, addScheduled, scheduledCount,
   scheduledListText, scheduledCancelKeyboard, scheduleDashboard, MAX_TIMEOUT,
@@ -4089,15 +4089,50 @@ async function pasteToPane(paneId: string, text: string): Promise<boolean> {
   } catch { return false }
 }
 
+const DEFAULT_TZ = 'America/Los_Angeles'
+const DOW_NAMES: Record<string, number> = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 }
+
 bot.command('schedule', async ctx => {
   if (!dmCommandGate(ctx)) return
   const arg = (ctx.match ?? '').toString().trim()
   if (!arg || /^(cancel|list|dash)/i.test(arg)) { await scheduleDashboard(ctx); return }
+  // `/schedule tz <IANA>` — the wall-clock timezone for recurring schedules.
+  const tzMatch = /^tz(?:\s+(\S+))?$/i.exec(arg)
+  if (tzMatch) {
+    const access = loadAccess()
+    if (tzMatch[1]) {
+      try { new Intl.DateTimeFormat('en-US', { timeZone: tzMatch[1] }) }
+      catch { await ctx.reply(`❌ Unknown timezone <code>${escapeHtml(tzMatch[1])}</code> — use an IANA name like <code>America/Los_Angeles</code>.`, { parse_mode: 'HTML' }); return }
+      access.scheduleTz = tzMatch[1]
+      saveAccess(access)
+    }
+    await ctx.reply(`🌐 Recurring schedules use <b>${escapeHtml(access.scheduleTz ?? DEFAULT_TZ)}</b>.\nChange with <code>/schedule tz &lt;IANA name&gt;</code>.`, { parse_mode: 'HTML' })
+    return
+  }
+  // Recurring (ROADMAP #11): `/schedule every 09:00 msg` · `every weekday 09:00 msg` ·
+  // `every monday 09:00 msg`. Fires on the configured wall clock, re-arms after each delivery.
+  const recurMatch = /^every\s+(?:(day|daily|weekday|weekdays|sun(?:day)?|mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?)\s+)?(\d{1,2}):(\d{2})\s+(.+)$/is.exec(arg)
+  if (recurMatch) {
+    const [, when, hhS, mmS, text] = recurMatch
+    const hh = Number(hhS), mm = Number(mmS)
+    if (hh > 23 || mm > 59) { await ctx.reply('Time must be HH:MM (24h).'); return }
+    const tz = loadAccess().scheduleTz ?? DEFAULT_TZ
+    const w = (when ?? 'day').toLowerCase()
+    const recur: Recurrence = w === 'day' || w === 'daily' ? { kind: 'daily', hh, mm, tz }
+      : w.startsWith('weekday') ? { kind: 'weekdays', hh, mm, tz }
+      : { kind: 'weekly', hh, mm, dow: DOW_NAMES[w.slice(0, 3)], tz }
+    const { paneId, thread } = await targetPaneOf(ctx)
+    const label = paneId ? (sessionNames.get(paneId) || await paneLabel(paneId)) : 'this session'
+    const fireAt = nextRecurrence(recur, Date.now())
+    addScheduled({ id: randomBytes(4).toString('hex'), fireAt, chatId: String(ctx.chat?.id), paneId, sessionLabel: label, text, thread, recur })
+    await ctx.reply(`🔁 Scheduled <b>${recurrenceLabel(recur)}</b> (${escapeHtml(tz)}) → <b>${escapeHtml(label)}</b>; next ${fmtWhen(fireAt)}:\n\n${escapeHtml(text)}\n\nCancel with <code>/schedule cancel</code>.`, { parse_mode: 'HTML' })
+    return
+  }
   // One-shot: `/schedule <time> <message>` queues immediately; bare `/schedule <time>` falls
   // through to the force-reply so the message can be composed in a follow-up.
   const { ms, rest: oneShotText } = splitLeadingDuration(arg)
   if (!ms) {
-    await ctx.reply('Usage: <code>/schedule 2h ping the server</code> — or <code>/schedule 12h</code> then reply with the message.\nUnits: <code>s m h d w</code> (e.g. <code>1h30m</code>). Cancel with <code>/schedule cancel</code>.', { parse_mode: 'HTML' })
+    await ctx.reply('Usage: <code>/schedule 2h ping the server</code> — or <code>/schedule 12h</code> then reply with the message.\nRecurring: <code>/schedule every 09:00 …</code> | <code>every weekday 09:00 …</code> | <code>every mon 09:00 …</code> (timezone: <code>/schedule tz</code>).\nUnits: <code>s m h d w</code> (e.g. <code>1h30m</code>). Cancel with <code>/schedule cancel</code>.', { parse_mode: 'HTML' })
     return
   }
   if (ms > MAX_TIMEOUT) { await ctx.reply('That\'s too far out — max ~24 days.'); return }
@@ -6534,7 +6569,7 @@ void (async () => {
               { command: 'stop', description: 'Interrupt the current task (Esc)' },
               { command: 'status', description: 'Re-post the status pin at the bottom' },
               { command: 'settings', description: 'Channel settings — mirror, pin, MCP, voice' },
-              { command: 'schedule', description: 'Schedule a message into a session (/schedule 12h · /schedule cancel)' },
+              { command: 'schedule', description: 'Schedule a message (/schedule 12h · every 09:00 · cancel)' },
               { command: 'queue', description: 'Queue a prompt for idle, or @reset for the 5h rollover (/queue clear)' },
               { command: 'md', description: 'Create a .md file in the working dir, then reply with its contents' },
               { command: 'resume', description: 'Resume a recent session (lists them with times)' },
