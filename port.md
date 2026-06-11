@@ -1,5 +1,14 @@
 # Port plan — full DM→group (per-topic) functionality
 
+> **✅ COMPLETE (2026-06-11, v0.1.30).** Both tracks shipped and live-verified. Track A (every
+> command/tap/relay topic-aware, incl. per-pane prompt detection for non-focused sessions) landed
+> v0.1.19–0.1.28; Track B (session-id re-key via the `@tg_session` pane stamp, per-session
+> transcripts via the `stamp-transcript.ts` SessionStart hook writing `@tg_transcript`, `/new`
+> sibling sessions with own `proj #2` topics) landed v0.1.29–0.1.30. Extras beyond this plan:
+> topic close/reopen + reconcile sweep on session end, 🗑 delete / always-delete, branch-aware
+> retitles, user-created topics spawn sessions, thread-aware scheduler. This doc is kept as the
+> design record; the original plan follows.
+
 > **Sequencing (decided 2026-06-10).** Split into two tracks. **Track A — make the group fully
 > functional with one session per project** — is being implemented now: port every command, tap, and
 > relay to be topic-aware on the **existing cwd keying** (no schema change, no transcript change).
