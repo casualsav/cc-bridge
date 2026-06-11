@@ -36,11 +36,10 @@ import type {
 import {
   focus,
   _accessFileCache, onboardedPanes, onboardingState, sessions, permissionOrigin,
-  pendingMultiSelect, freeTextPrompts, freeTextReplyTargets, chatPrompts, authUrlMessageIds,
-  lastRelayedByFile, unreadNotified, unreadNotifMsgs, offMcpPanes,
-  usageWarnState, voiceNudged, scheduleReplyTargets, scheduleComposeTargets,
-  sessionNames, renameReplyTargets, nameReplyTargets, sessionPins, pinTextCache,
-  newSessionReplyTargets, topicCreateReplyTargets, mdReplyTargets, mdOverwritePending,
+  pendingMultiSelect, freeTextPrompts, chatPrompts, replyTargets,
+  lastRelayedByFile, offMcpPanes,
+  usageWarnState, voiceNudged,
+  sessionNames, mdOverwritePending,
 } from './state.ts'
 import { initMirror, updateTerminalMirror, respawnTerminalMirror, abandonMirror } from './mirror.ts'
 import { parseStatusline, pinBar, type StatuslineData } from './statusline.ts'
@@ -541,8 +540,8 @@ function setFocus(sessionId: string | null): void {
   void updateSessionPin()
 }
 
-// Remove a session. If it was the focused one, drop focus entirely — we no longer auto-switch
-// to another session; the user picks from the session-exit menu (announceFocusedExit).
+// Remove a session. If it was the focused one, drop focus entirely — the discovery rescan
+// re-adopts a surviving bridge pane on its next tick.
 function dropSession(sessionId: string): void {
   if (!sessions.delete(sessionId)) return
   if (focus.currentSessionId === sessionId) setFocus(null)
@@ -558,15 +557,10 @@ function endSession(sessionId: string): void {
   if (wasFocused) void announceFocusedExit(s.label)
 }
 
-// The focused session just ended. Offer a switch menu over whatever's left (no auto-switch),
-// or note that nothing remains. Off-MCP and registered sessions both surface via sessionRows.
+// The focused session just ended. DM mode drives a single session, so there's no switch menu —
+// if another bridge pane is alive, the discovery rescan auto-adopts it and announces.
 async function announceFocusedExit(endedLabel: string): Promise<void> {
-  const rows = await sessionRows()
-  if (rows.length === 0) {
-    notifyChats(`🔚 Session “${endedLabel}” ended — no active sessions left.`)
-    return
-  }
-  notifyChats('🔚 Current session ended — switch sessions?', { reply_markup: sessionSwitchKeyboard(rows) })
+  notifyChats(`🔚 Session “${endedLabel}” ended.`)
 }
 
 // Route a permission decision back to the session that requested it.
@@ -611,8 +605,8 @@ let promptRelayOutstanding = false
 
 // Auth/login URLs surfaced from the pane (e.g. /login's OAuth link), so the user
 // can open them in a browser and reply with the code. `lastRelayedAuthUrl` dedups
-// the same link across watcher ticks; `authUrlMessageIds` (`${chatId}:${msgId}`)
-// marks the relayed messages so a Telegram reply to one is injected into the pane.
+// the same link across watcher ticks; an `authurl` replyTargets entry marks the
+// relayed messages so a Telegram reply to one is injected into the pane.
 let lastRelayedAuthUrl = ''
 
 // Reaction-worthy heuristic for the `↳ react?` hint. The daemon can't judge taste — it only
@@ -1476,29 +1470,35 @@ function focusOffMcpPane(paneId: string): void {
   void updateSessionPin()
 }
 
-// Announce a newly discovered sibling pane with a one-tap switch button — never steals focus.
-async function announceNewSession(paneId: string): Promise<void> {
-  const n = await sessionNumber(paneId)
+// A pane beyond the focused one appeared. Topic mode: give it its own topic now, not on first
+// reply. DM mode drives a single session — extra panes stay registered (so topic/aux bookkeeping
+// sees them) but get no switch UI; hint once per daemon run toward group mode instead.
+let dmMultiPaneHinted = false
+async function noteDiscoveredPane(paneId: string): Promise<void> {
   const cwd = await paneCwd(paneId)
-  // Snapshot a read baseline at announcement: the user has "seen up to now" (nothing yet),
-  // so anything this session says before they first switch to it relays as unread on switch.
+  // Snapshot a read baseline at discovery: the user has "seen up to now" (nothing yet), so the
+  // topic relay starts from here instead of replaying the session's backlog.
   const tfile = await transcriptForPane(paneId, cwd)
   if (tfile && !lastRelayedByFile.has(tfile)) lastRelayedByFile.set(tfile, latestFinalReply(tfile)?.uuid ?? '')
-  const who = `Session ${n ?? '?'}`
+  if (isTopicMode()) { void ensureSessionTopic(paneId); return }
+  if (dmMultiPaneHinted) return
+  dmMultiPaneHinted = true
   const where = cwd ? ` (<code>${escapeHtml(cwd)}</code>)` : ''
-  const kb = new InlineKeyboard().text(`♻️ Switch to ${who}`, `adoptpane:${paneId}`).text('✏️ Name', `namesession:${paneId}`)
-  notifyChats(`🆕 New Claude session: <b>${who}</b>${where}`, { reply_markup: kb, parse_mode: 'HTML' })
-  void ensureSessionTopic(paneId)   // topic mode: give it its own topic now, not on first reply
+  notifyChats(
+    `🆕 Another Claude session appeared${where} — this DM drives a single session, so I'm staying on the current one.\n` +
+    `To drive several sessions, bind a forum group as the command center: create a group with Topics on, add me, send /bind there.`,
+    { parse_mode: 'HTML' })
 }
 
 // Bind a daemon-spawned pane immediately rather than waiting for the next discovery tick — and do
-// it even under FORCE_PANE (which disables auto-discovery), since /new is an explicit user action.
-// Adopt it if nothing currently holds focus; otherwise announce it with a switch button (no steal).
+// it even under FORCE_PANE (which disables auto-discovery), since the spawn was an explicit user
+// action. Adopt it if nothing currently holds focus; otherwise it's a topic-mode sibling — give it
+// its topic now (no focus steal).
 function registerSpawnedPane(paneId: string): void {
   if (offMcpPanes.has(paneId)) return
   offMcpPanes.add(paneId)
   if (!focus.activePaneId) adoptPane(paneId)
-  else void announceNewSession(paneId)
+  else void noteDiscoveredPane(paneId)
 }
 
 // Keep the pane registry in sync. Adopts a pane only when nothing is driving; any additional
@@ -1527,7 +1527,7 @@ async function discoverPanes(): Promise<void> {
 
   for (const p of panes) {
     if (p === focus.activePaneId) { offMcpPanes.add(p); continue }
-    if (!offMcpPanes.has(p)) { offMcpPanes.add(p); void announceNewSession(p) }
+    if (!offMcpPanes.has(p)) { offMcpPanes.add(p); void noteDiscoveredPane(p) }
   }
   void refreshTopicTitles(panes)                      // topic mode: retitle on git branch change
   void reconcileTopics(panes)                         // topic mode: close topics whose sessions vanished unseen
@@ -2341,7 +2341,7 @@ async function relayAuthUrlToTelegram(url: string, paneId: string | null = focus
         reply_markup: { force_reply: true, input_field_placeholder: 'Authentication code' },
         ...(thread ? { message_thread_id: thread } : {}),
       })
-      authUrlMessageIds.add(`${chat}:${sent.message_id}`)
+      replyTargets.set(`${chat}:${sent.message_id}`, { kind: 'authurl' })
     } catch (e) {
       process.stderr.write(`daemon: auth-url relay to ${chat} failed: ${e}\n`)
     }
@@ -2357,7 +2357,7 @@ function startPaneWatcher(paneId: string): void {
       process.stderr.write(`daemon: pane ${paneId} died\n`)
       const entry = [...sessions.entries()].find(([, s]) => s.paneId === paneId)
       if (entry) { endSession(entry[0]); return }   // registered session: handles focus + menu
-      // Off-MCP pane: drop it; if it was the focused one, offer the switch menu (no auto-switch).
+      // Off-MCP pane: drop it; if it was the focused one, the discovery rescan re-adopts a survivor.
       const wasActive = focus.activePaneId === paneId || focus.currentSessionId === paneId
       focus.activePaneId = null; focus.paneWatcher = null
       offMcpPanes.delete(paneId)
@@ -2365,8 +2365,7 @@ function startPaneWatcher(paneId: string): void {
       if (adoptedPaneId === paneId) adoptedPaneId = null   // clear binding so the rescan re-adopts
       if (wasActive) focus.currentSessionId = null
       const label = sessionNames.get(paneId) || 'Session'
-      if (wasActive) void announceFocusedExit(label).then(() => updateSessionPin())
-      else void updateSessionPin()
+      if (wasActive) void announceFocusedExit(label)
     },
     text => typingPresence.observe(detectWorking(text)),   // live typing signal, every poll
   )
@@ -2705,17 +2704,15 @@ async function performReset(t: CommandTarget, command: string): Promise<string> 
     : `${head}.`
 }
 
-// Ask for confirmation before /new resets the session (the ➕ New button is easy
-// to hit by accident); the reset runs on the Yes tap — see the newconfirm handler.
-// /new keeps the two-way choice (launch a fresh session vs. reset in place);
-// /clear and /reset use confirmResetSession below — a plain Yes/No reset-in-place.
+// /new — in a session's topic it spawns a sibling session in that project; in the DM it's a
+// fresh conversation in place (same Yes/No confirm as /clear, via confirmResetSession).
 async function confirmNewSession(ctx: Context): Promise<void> {
   if (!dmCommandGate(ctx)) return
   const t = await commandTarget(ctx)
   if (!t) return
   // /new inside a session's topic = "a sibling session in this project": spawn straight away with
   // a fresh pre-stamped sessionId (never adopts the original's topic), and discovery gives it its
-  // own topic ("proj #2"). General/DM keep the add/reset chooser below.
+  // own topic ("proj #2").
   if (typeof t.replyThread === 'number') {
     const cwd = await paneCwd(t.paneId).catch(() => null)
     if (!cwd) { await ctx.reply('Couldn\'t read this session\'s folder.'); return }
@@ -2725,14 +2722,13 @@ async function confirmNewSession(ctx: Context): Promise<void> {
       : `❌ Couldn't start a session in <code>${escapeHtml(cwd)}</code>.`, { parse_mode: 'HTML' })
     return
   }
-  const keyboard = new InlineKeyboard()
-    .text('➕ Add new session', 'newsession')
-    .text('♻️ Reset current', 'newconfirm:yes')
-  await ctx.reply(
-    '🆕 <b>New session</b>\n\n' +
-    '• <b>Add new session</b> — start a fresh Claude in a new window (this one keeps running)\n' +
-    '• <b>Reset current</b> — clear this conversation in place',
-    { parse_mode: 'HTML', reply_markup: keyboard })
+  // General: new sessions are new topics there. DM drives a single session, so "new" means a
+  // fresh conversation in place — same confirm as /clear.
+  if (isTopicMode()) {
+    await ctx.reply('In group mode a new session = a new topic — create one with Telegram\'s ➕ topic button, or run /new inside a session\'s topic for a sibling in that project.')
+    return
+  }
+  await confirmResetSession(ctx)
 }
 
 // /clear and /reset just wipe the current conversation in place — a single Yes/No
@@ -3086,7 +3082,7 @@ function startHelpText(paired: boolean): string {
     `Drive your Claude Code sessions from Telegram.\n\n` +
     `💬 Send text, 📷 photos, 📎 files, 🎙️ voice — the reply comes straight back\n` +
     `🧠 <code>/model</code> · 🕹️ <code>/mode</code> — switch model &amp; mode\n` +
-    `🖥️ <code>/sessions</code> · 🆕 <code>/new</code> — run &amp; switch sessions\n` +
+    `🖥️ <code>/status</code> — session card · 👥 <code>/bind</code> a forum group for one topic per session\n` +
     `📡 <code>/stream</code> — live card of what Claude's doing\n` +
     `✅ Permission prompts arrive as Allow / Deny taps\n` +
     `🛑 <code>/stop</code> to interrupt · ⚙️ <code>/settings</code> for the rest\n\n` +
@@ -3137,17 +3133,39 @@ bot.command('status', async ctx => {
   if (!gated) return
   const { access, senderId } = gated
   if (access.allowFrom.includes(senderId)) {
-    // Folded into the pin: re-post the status card as the most recent message (delete the old
-    // pinned one, create + pin a fresh one at the bottom) so it lands where the user is reading,
-    // no scrolling up to the original pin.
+    // Re-post the status card as the most recent message (delete the old pinned one, create +
+    // pin a fresh one at the bottom) so it lands where the user is reading, no scrolling up.
     const chat = String(ctx.chat!.id)
+    const { paneId, thread } = await targetPaneOf(ctx)
+    if (isTopicMode() && typeof thread === 'number') {
+      // A session's topic: re-post that topic's own pin at the bottom of the thread.
+      const key = `topic:${thread}`
+      const old = sessionPins.get(key)
+      if (old) {
+        await bot.api.unpinChatMessage(chat, old).catch(() => {})
+        await bot.api.deleteMessage(chat, old).catch(() => {})
+        sessionPins.delete(key); pinTextCache.delete(key); persistSessionPins()
+      }
+      const text = await statusCardText(paneId)
+      const m = await bot.api.sendMessage(chat, text, { parse_mode: 'HTML', message_thread_id: thread, disable_notification: true }).catch(() => null)
+      if (m) {
+        await bot.api.pinChatMessage(chat, m.message_id, { disable_notification: true }).catch(() => {})
+        sessionPins.set(key, m.message_id); pinTextCache.set(key, text); persistSessionPins()
+      }
+      return
+    }
+    if (isTopicMode()) {
+      // General: a one-shot card for the focused session — General has no pin of its own.
+      await ctx.reply(await statusCardText(paneId), { parse_mode: 'HTML', reply_markup: statusKeyboard() }).catch(() => {})
+      return
+    }
     const old = sessionPins.get(chat)
     if (old) {
       await bot.api.unpinChatMessage(chat, old).catch(() => {})
       await bot.api.deleteMessage(chat, old).catch(() => {})
       sessionPins.delete(chat); pinTextCache.delete(chat); persistSessionPins()
     }
-    await createSessionPin(chat, await sessionPinText(await sessionRows()), pinKeyboard())
+    await createSessionPin(chat, await statusCardText(paneId), statusKeyboard())
     return
   }
   for (const [code, p] of Object.entries(access.pending)) {
@@ -3388,7 +3406,7 @@ bot.command(['bind', 'unbind'], async ctx => {
   await ctx.reply(
     '✅ <b>Bound this forum as the command center.</b>\n\n' +
     'Each Claude Code session will get its own topic; this <b>General</b> topic stays for global ' +
-    'commands (/sessions, /new, /settings).\n\n' +
+    'commands (/status, /settings).\n\n' +
     '⚠️ One more setup step: in @BotFather → <i>Bot Settings → Group Privacy → Turn off</i>, so I can ' +
     'see messages you type inside a session’s topic (not just commands). Then remove + re-add me to the group.\n\n' +
     '<i>Topic creation &amp; routing land in the next update.</i>',
@@ -3578,7 +3596,7 @@ bot.command('pin', async ctx => {
   await ctx.reply(
     `📌 Pinned status message is <b>${on ? 'ON' : 'OFF'}</b>.\n` +
     (on
-      ? 'It stays pinned up top with the active session · model · mode and quick buttons.'
+      ? 'It stays pinned up top with the live model · mode · context · usage metrics and quick buttons.'
       : 'No pinned status message is shown.') +
     '\nToggle with <code>/pin on</code> | <code>off</code>; <code>/pin refresh</code> re-pins a fresh one.',
     { parse_mode: 'HTML' },
@@ -3846,7 +3864,7 @@ bot.command('md', async ctx => {
     `📝 ${verb} <code>${escapeHtml(target.display)}</code> in <code>${escapeHtml(cwd)}</code>.\n\nReply to this message with the file contents.`,
     { parse_mode: 'HTML', reply_markup: { force_reply: true, input_field_placeholder: 'File contents' } },
   )
-  if (sent) mdReplyTargets.set(`${ctx.chat?.id}:${sent.message_id}`, target)
+  if (sent) replyTargets.set(`${ctx.chat?.id}:${sent.message_id}`, { kind: 'md', ...target })
 })
 
 // ---- /schedule: deferred messages into a chosen session ----
@@ -3893,7 +3911,7 @@ bot.command('schedule', async ctx => {
     `📅 Scheduling in <b>${formatDuration(ms)}</b> (${fmtWhen(fireAt)}) → <b>${escapeHtml(label)}</b>.\n\nReply to this message with what to send.`,
     { parse_mode: 'HTML', reply_markup: { force_reply: true, input_field_placeholder: 'Message to schedule' } },
   )
-  if (sent) scheduleReplyTargets.set(`${ctx.chat?.id}:${sent.message_id}`, { fireAt, paneId, sessionLabel: label, thread })
+  if (sent) replyTargets.set(`${ctx.chat?.id}:${sent.message_id}`, { kind: 'schedule', fireAt, paneId, sessionLabel: label, thread })
 })
 
 // User-set session names (paneId → label), overriding the cwd-derived default. Persisted so
@@ -3909,18 +3927,7 @@ async function renamePane(paneId: string, label: string): Promise<string> {
   const clean = label.trim().slice(0, 40)
   if (!clean) return 'Give it a name.'
   sessionNames.set(paneId, clean); persistSessionNames()
-  void updateSessionPin()
-  const n = await sessionNumber(paneId)
-  return `✅ ${n ? `Session ${n}` : 'Session'} renamed to <b>${escapeHtml(clean)}</b>`
-}
-
-// Rename session #n (1-based over sessionRows).
-async function renameSession(n: number, label: string): Promise<string> {
-  const rows = await sessionRows()
-  if (n < 1 || n > rows.length) return `No session ${n}.`
-  const row = rows[n - 1]
-  if (!row.paneId) return 'That session has no pane to name.'
-  return renamePane(row.paneId, label)
+  return `✅ Session renamed to <b>${escapeHtml(clean)}</b>`
 }
 
 // A pane's display label: a user-set name, else the last path segment of its cwd, else the
@@ -3932,39 +3939,14 @@ async function paneLabel(paneId: string): Promise<string> {
   return (cwd && cwd.split('/').filter(Boolean).pop()) || paneId
 }
 
-// The unified session list: every shim-registered session PLUS the off-MCP adopted/forced
-// pane (which lives in focus.activePaneId, not the sessions map — without this it shows as "no
-// sessions"). `shim` marks the ones switchable via setFocus.
-type SessionRow = { key: string; paneId: string | null; label: string; current: boolean; shim: boolean }
-async function sessionRows(): Promise<SessionRow[]> {
-  const rows: SessionRow[] = []
-  const panes = new Set<string>()
-  for (const { id, s } of orderedSessions()) {
-    if (s.paneId) panes.add(s.paneId)
-    const label = (s.paneId && sessionNames.get(s.paneId)) || s.label
-    rows.push({ key: id, paneId: s.paneId, label, current: id === focus.currentSessionId, shim: true })
-  }
-  const offMcp = new Set(offMcpPanes)
-  if (focus.activePaneId && !sessions.size) offMcp.add(focus.activePaneId)   // FORCE_PANE / lone adopted pane
-  for (const p of offMcp) {
-    if (panes.has(p)) continue                                   // already listed as a shim session
-    rows.push({ key: p, paneId: p, label: await paneLabel(p), current: focus.currentSessionId === p, shim: false })
-  }
-  return rows
-}
-
-// 1-based position of a session key in the list — the number users see in /session.
-async function sessionNumber(key: string): Promise<number | null> {
-  const i = (await sessionRows()).findIndex(r => r.key === key)
-  return i >= 0 ? i + 1 : null
-}
-
-// ---- Pinned "current session" indicator ----
-// A single pinned message per chat showing the focused session at a glance —
-// 💻 name • model (…) • mode (…). Pinned once and then edited in place on every switch and
-// mode change; it stays even with a single session. Pin ids are persisted so a daemon restart
-// edits the existing pin instead of pinning a new one.
+// ---- Pinned status message ----
+// One pinned card per DM chat (and per topic in forum mode) with the live session metrics —
+// model · mode · context · usage (statusCardText; deliberately no session identity). Edited in
+// place on the 10s refresh; pin ids persist so a daemon restart edits the existing pin instead
+// of pinning a new one. Keys: DM chat id, or `topic:<threadId>` in forum mode.
 const SESSION_PIN_FILE = join(STATE_DIR, 'session-pin.json')
+const sessionPins = new Map<string, number>()
+const pinTextCache = new Map<string, string>()   // last rendered text per key — skip no-op edits
 try { for (const [c, m] of Object.entries(JSON.parse(readFileSync(SESSION_PIN_FILE, 'utf8')) as Record<string, number>)) sessionPins.set(c, m) } catch {}
 function persistSessionPins(): void {
   try { writeFileSync(SESSION_PIN_FILE, JSON.stringify(Object.fromEntries(sessionPins)), { mode: 0o600 }) } catch {}
@@ -3972,7 +3954,10 @@ function persistSessionPins(): void {
 
 // Unpin + delete every pinned status message (used by /pin off).
 async function removeSessionPins(): Promise<void> {
-  for (const [chat, mid] of sessionPins) {
+  const group = getGroupChatId()
+  for (const [key, mid] of sessionPins) {
+    const chat = key.startsWith('topic:') ? group : key
+    if (!chat) continue
     await bot.api.unpinChatMessage(chat, mid).catch(() => {})
     await bot.api.deleteMessage(chat, mid).catch(() => {})
   }
@@ -4017,74 +4002,77 @@ async function gitBranch(dir: string): Promise<string | null> {
   } catch { return null }
 }
 
-// ---- statusline → pin enrichment ----
+// ---- statusline → status card enrichment ----
 // The configured Claude Code statusLine renders rich session metrics (context, tokens, cost,
 // rate-limit windows) at the bottom of the pane. The daemon already captures that pane, so rather
 // than recompute anything we lift those fields straight out of the capture and re-render them in
-// the pin's own layout. Scoped to the statusline's slot — the lines just above Claude Code's
+// the card's own layout. Scoped to the statusline's slot — the lines just above Claude Code's
 // footer hint — so we never pick up numbers from Claude's reply text higher in the pane.
 
-const PIN_RULE = '──────────────────────────'
+const CARD_RULE = '──────────────────────────'
 
-async function sessionPinText(rows: SessionRow[]): Promise<string> {
-  const cur = rows.find(r => r.current)
-  if (!cur) return '🖥️ <b>No active session</b>'
-  let mode = '—', model = lastKnownModel, cwd: string | null = null
+// Status card for any pane — usage · context · model · effort · mode up top (the collapsed
+// preview Telegram shows), rule-separated detail groups below. Deliberately NO session identity:
+// in topic mode the tab is the session, and the DM drives a single one. Rendered into the pinned
+// status message (refreshed in place) and re-posted by /status.
+async function statusCardText(paneId: string | null): Promise<string> {
+  if (!paneId) return '🖥️ <b>No active session</b>'
+  let mode = '—', cwd: string | null = null
+  let model = paneId === focus.activePaneId ? lastKnownModel : null
   let status: StatuslineData | null = null
-  if (focus.activePaneId) {
-    try {
-      const cap = await capturePane(focus.activePaneId)
-      // Strip modeLabel's leading per-mode emoji — the pin uses a single generic 🕹️.
-      if (onNormalPrompt(cap)) mode = modeLabel(detectCurrentMode(cap)).replace(/^\S+\s+/, '')
-      status = parseStatusline(cap)
-    } catch {}
-    try {
-      cwd = await paneCwd(focus.activePaneId)
-      const file = await transcriptForPane(focus.activePaneId, cwd)
-      model = (file && prettyModel(lastModelInTranscript(file))) || model
-    } catch {}
-  }
+  try {
+    const cap = await capturePane(paneId)
+    // Strip modeLabel's leading per-mode emoji — the card uses a single generic 🕹️.
+    if (onNormalPrompt(cap)) mode = modeLabel(detectCurrentMode(cap)).replace(/^\S+\s+/, '')
+    status = parseStatusline(cap)
+  } catch {}
+  try {
+    cwd = await paneCwd(paneId)
+    const file = await transcriptForPane(paneId, cwd)
+    model = (file && prettyModel(lastModelInTranscript(file))) || model
+  } catch {}
   const branch = cwd ? await gitBranch(cwd) : null
 
-  // First line is the collapsed preview Telegram shows up top — keep it identity-only. Everything
-  // below is revealed when the pin is expanded, grouped into rule-separated cards.
-  // Tagline order: session · usage · context · model · effort · mode, then the think badge. Items
-  // are separated by a double space — the emojis act as dividers (restore ` • ` to revert).
-  const usage = status?.h5 ? `  📈 ${status.h5.pct}%` : ''
-  const ctxBadge = status?.ctxPct != null ? `  💾 ${status.ctxPct}%` : ''
+  const usage = status?.h5 ? `📈 ${status.h5.pct}%  ` : ''
+  const weekly = status?.d7 ? `📅 ${status.d7.pct}%  ` : ''
+  const ctxBadge = status?.ctxPct != null ? `💾 ${status.ctxPct}%  ` : ''
   const effortBadge = status?.effort ? `  ⚡ ${escapeHtml(status.effort)}` : ''
   const thinkBadge = status?.think ? '  ✻ think' : ''
-  const head = `🖥️ <b>${escapeHtml(cur.label)}</b>${usage}${ctxBadge}  🧠 ${escapeHtml(model ?? '—')}${effortBadge}  🕹️ ${escapeHtml(mode)}${thinkBadge}`
+  const head = `${usage}${weekly}${ctxBadge}🧠 ${escapeHtml(model ?? '—')}${effortBadge}  🕹️ ${escapeHtml(mode)}${thinkBadge}`
   const groups: string[] = []
   if (cwd) groups.push(`📁 <code>${escapeHtml(cwd)}</code>${branch ? ` · 🌿 ${escapeHtml(branch)}` : ''}`)
   if (status) {
-    maybeWarnContext(status.ctxPct)
-    const usage: string[] = []
-    if (status.ctxPct != null) usage.push(`💾 Context <code>${pinBar(status.ctxPct)}</code> ${status.ctxPct}%${status.tokens ? `  ·  ${status.tokens}` : ''}`)
+    const usageLines: string[] = []
+    if (status.ctxPct != null) usageLines.push(`💾 Context <code>${pinBar(status.ctxPct)}</code> ${status.ctxPct}%${status.tokens ? `  ·  ${status.tokens}` : ''}`)
     const ct: string[] = []
     if (status.cost) ct.push(`💰 ${status.cost}`)
     if (status.sessionTime) ct.push(`⏱ ${status.sessionTime}`)
     if (status.apiTime) ct.push(`⚡ api ${status.apiTime}`)
-    if (ct.length) usage.push(ct.join('  ·  '))
-    if (usage.length) groups.push(usage.join('\n'))
+    if (ct.length) usageLines.push(ct.join('  ·  '))
+    if (usageLines.length) groups.push(usageLines.join('\n'))
     const lim: string[] = []
     if (status.h5) lim.push(`📈 5h <code>${pinBar(status.h5.pct)}</code> ${status.h5.pct}%  ↻ ${status.h5.reset}`)
     if (status.d7) lim.push(`📅 7d <code>${pinBar(status.d7.pct)}</code> ${status.d7.pct}%  ↻ ${status.d7.reset}`)
     if (lim.length) groups.push(lim.join('\n'))
   }
-  if (rows.length > 1) groups.push(`🖥️ Session ${rows.findIndex(r => r.current) + 1} of ${rows.length}`)
   groups.push(`🔗 Paired${botUsername ? ` · @${escapeHtml(botUsername)}` : ''} · connected`)
-
-  return groups.length ? `${head}\n\n${groups.join(`\n${PIN_RULE}\n`)}` : head
+  return `${head}\n\n${groups.join(`\n${CARD_RULE}\n`)}`
 }
 
-// Quick-action buttons on the pinned status message — same emojis as the pin's own fields.
-function pinKeyboard(): InlineKeyboard {
+// Quick-action buttons on the status card — same emojis as the card's own fields.
+function statusKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
-    .text('🖥️ Sessions', 'pin:sessions').text('⚙️ Settings', 'pin:settings').row()
-    .text('🧠 Model', 'pin:model').text('🕹️ Mode', 'pin:mode').row()
-    .text('💾 Context', 'pin:context').text('🗜️ Compact', 'pin:compact').row()
-    .text('💰 Cost', 'pin:cost').text('🧹 Clear', 'pin:clear')
+    .text('⚙️ Settings', 'st:settings').text('🧠 Model', 'st:model').row()
+    .text('🕹️ Mode', 'st:mode').text('💾 Context', 'st:context').row()
+    .text('🗜️ Compact', 'st:compact').text('💰 Cost', 'st:cost').row()
+    .text('🧹 Clear', 'st:clear')
+}
+
+// Context-fill heads-up poll: lift ctxPct from the focused pane's statusline and feed
+// maybeWarnContext. (This rode on the pinned-card 10s refresh before the pin was removed.)
+async function checkContextWarn(): Promise<void> {
+  if (!focus.activePaneId) return
+  try { maybeWarnContext(parseStatusline(await capturePane(focus.activePaneId))?.ctxPct ?? null) } catch {}
 }
 
 // True when an edit failed because the target message is gone (deleted) rather than a transient
@@ -4094,11 +4082,11 @@ function pinMessageGone(e: unknown): boolean {
   return /message to edit not found|message can'?t be edited|message to pin not found|MESSAGE_ID_INVALID/i.test(d)
 }
 
-// Delete every currently-pinned message in the chat. getChat only reports the topmost pinned
+// Delete every currently-pinned message in a DM chat. getChat only reports the topmost pinned
 // message, so delete that and re-fetch until none remain (bounded). deleteMessage also clears the
 // pin; if a message is too old to delete, unpin it so the loop still advances. Run right before
 // pinning a fresh card → there is only ever one pin, and creating a new one removes all old ones
-// (tracked or orphaned from a prior daemon run / a pin misfire).
+// (tracked or orphaned from a prior daemon run / a pin misfire). DM only — never sweep the group.
 async function clearAllPins(chat: string): Promise<void> {
   for (let i = 0; i < 12; i++) {
     const info = await bot.api.getChat(chat).catch(() => null)
@@ -4118,36 +4106,6 @@ async function createSessionPin(chat: string, text: string, reply_markup: Inline
   } catch (e) { process.stderr.write(`daemon: session pin create failed: ${e}\n`) }
 }
 
-// Single-session status card for a forum topic's pin — like sessionPinText but for ANY pane (it
-// captures that session's own pane), so each topic pins its own session's metrics. Informational
-// only (no quick-action buttons yet — their callbacks would need to target this topic's pane; see
-// port.md / the command port).
-async function sessionPinTextFor(paneId: string): Promise<string> {
-  let mode = '—', model = '—', cwd: string | null = null
-  let status: StatuslineData | null = null
-  try {
-    const cap = await capturePane(paneId)
-    if (onNormalPrompt(cap)) mode = modeLabel(detectCurrentMode(cap)).replace(/^\S+\s+/, '')
-    status = parseStatusline(cap)
-  } catch {}
-  try {
-    cwd = await paneCwd(paneId)
-    const file = await transcriptForPane(paneId, cwd)
-    model = (file && prettyModel(lastModelInTranscript(file))) || model
-  } catch {}
-  const branch = cwd ? await gitBranch(cwd) : null
-  const label = cwd ? (basename(cwd) || cwd) : 'session'
-  const usage = status?.h5 ? `  📈 ${status.h5.pct}%` : ''
-  const ctxBadge = status?.ctxPct != null ? `  💾 ${status.ctxPct}%` : ''
-  const effortBadge = status?.effort ? `  ⚡ ${escapeHtml(status.effort)}` : ''
-  const head = `🖥️ <b>${escapeHtml(label)}</b>${usage}${ctxBadge}  🧠 ${escapeHtml(model)}${effortBadge}  🕹️ ${escapeHtml(mode)}`
-  const lines: string[] = []
-  if (cwd) lines.push(`📁 <code>${escapeHtml(cwd)}</code>${branch ? ` · 🌿 ${escapeHtml(branch)}` : ''}`)
-  if (status?.ctxPct != null) lines.push(`💾 Context <code>${pinBar(status.ctxPct)}</code> ${status.ctxPct}%${status.tokens ? `  ·  ${status.tokens}` : ''}`)
-  if (status?.cost) lines.push(`💰 ${status.cost}`)
-  return lines.length ? `${head}\n${PIN_RULE}\n${lines.join('\n')}` : head
-}
-
 // Forum mode: one pinned status card PER topic, each tracking its own session. Keyed in sessionPins
 // as `topic:<threadId>` (distinct from DM mode's numeric chat keys, so the persisted map holds both).
 // A topic whose session isn't running keeps its existing pin untouched. No clearAllPins here — each
@@ -4159,7 +4117,7 @@ async function updateTopicPins(): Promise<void> {
     if (t.closed) continue
     const paneId = await paneForSession(t.sessionId)
     if (!paneId) continue
-    const text = await sessionPinTextFor(paneId)
+    const text = await statusCardText(paneId)
     const key = `topic:${t.threadId}`
     const existing = sessionPins.get(key)
     if (existing && pinTextCache.get(key) === text) continue   // unchanged → skip the edit
@@ -4184,9 +4142,9 @@ async function updateSessionPin(): Promise<void> {
   if (pinUpdating) return                       // serialize — capture + edit can overlap with switches
   pinUpdating = true
   try {
-    if (isTopicMode()) { await updateTopicPins(); return }   // forum mode → per-topic pins, not the DM all-sessions pin
-    const text = await sessionPinText(await sessionRows())
-    const reply_markup = pinKeyboard()
+    if (isTopicMode()) { await updateTopicPins(); return }   // forum mode → per-topic pins, not the DM pin
+    const text = await statusCardText(focus.activePaneId)
+    const reply_markup = statusKeyboard()
     const hasSession = !!(focus.activePaneId || focus.activeShim)   // off-MCP pane or MCP shim — either counts
     for (const chat of loadAccess().allowFrom) {
       const existing = sessionPins.get(chat)
@@ -4202,7 +4160,7 @@ async function updateSessionPin(): Promise<void> {
           else pinTextCache.set(chat, text)   // "not modified" → it already shows this text
         }
         if (sessionPins.has(chat)) {
-          // If the user unpinned it, re-pin on the next update (e.g. a session switch) so it returns.
+          // If the user unpinned it, re-pin on the next update (e.g. a mode change) so it returns.
           const info = await bot.api.getChat(chat).catch(() => null)
           if (info?.pinned_message?.message_id !== existing) {
             await bot.api.pinChatMessage(chat, existing, { disable_notification: true }).catch(() => {})
@@ -4213,76 +4171,6 @@ async function updateSessionPin(): Promise<void> {
       if (hasSession) await createSessionPin(chat, text, reply_markup)   // don't pin "No active session" out of nowhere
     }
   } finally { pinUpdating = false }
-}
-
-// Ping when an *unfocused* off-MCP session speaks: "💬 N messages from Session N while you
-// were away" + a switch button. One ping per session, edited in place as the count grows,
-// and deleted once you switch in (the read baseline catches up). Skips sessions with no read
-// baseline yet (not announced) so it never pings a backlog.
-async function checkCrossSessionUnread(): Promise<void> {
-  if (!TRANSCRIPT_OUTBOUND) return
-  for (const pane of offMcpPanes) {
-    if (pane === focus.activePaneId) continue
-    const cwd = await paneCwd(pane)
-    const file = await transcriptForPane(pane, cwd)
-    if (!file) continue
-    const latest = latestFinalReply(file)
-    const baseline = lastRelayedByFile.get(file)
-    if (!latest || baseline === undefined || latest.uuid === baseline) {
-      // Caught up (or never baselined) — clear the ping so a future message re-pings fresh.
-      const msgs = unreadNotifMsgs.get(file)
-      if (msgs) { for (const [chat, mid] of msgs) await bot.api.deleteMessage(chat, mid).catch(() => {}); unreadNotifMsgs.delete(file) }
-      unreadNotified.delete(file)
-      continue
-    }
-    if (unreadNotified.get(file) === latest.uuid) continue   // already pinged for this state
-    unreadNotified.set(file, latest.uuid)
-    const n = await sessionNumber(pane)
-    const count = finalRepliesAfter(file, baseline).length
-    const text = `💬 ${count} message${count > 1 ? 's' : ''} from <b>Session ${n ?? '?'}</b> while you were away`
-    const kb = new InlineKeyboard().text(`♻️ Switch to Session ${n ?? '?'}`, `adoptpane:${pane}`)
-    let msgs = unreadNotifMsgs.get(file)
-    for (const chat of loadAccess().allowFrom) {
-      const mid = msgs?.get(chat)
-      if (mid) { await bot.api.editMessageText(chat, mid, text, { parse_mode: 'HTML', reply_markup: kb }).catch(() => {}) }
-      else {
-        const m = await bot.api.sendMessage(chat, text, { parse_mode: 'HTML', reply_markup: kb }).catch(() => null)
-        if (m) { if (!msgs) { msgs = new Map(); unreadNotifMsgs.set(file, msgs) } msgs.set(chat, m.message_id) }
-      }
-    }
-  }
-}
-
-// "✅ Switched to Session N (/path)" — the cwd reads clearer than the bare folder name.
-async function switchedMsg(n: number | null, paneId: string | null): Promise<string> {
-  const path = paneId ? await paneCwd(paneId) : null
-  return `✅ Switched to <b>Session ${n ?? '?'}</b>${path ? ` (<code>${escapeHtml(path)}</code>)` : ''}`
-}
-
-// Switch focus to session #n (1-based over sessionRows). Returns the HTML confirmation, or
-// an HTML error if the number is out of range / the target can't be focused.
-async function switchSessionTo(n: number): Promise<string> {
-  const rows = await sessionRows()
-  if (n < 1 || n > rows.length) return `No session #${n}. See /session.`
-  const row = rows[n - 1]
-  if (row.current) return `Already on <b>Session ${n}</b>`
-  if (row.shim) { setFocus(row.key); return switchedMsg(n, row.paneId) }
-  if (!row.paneId || !(await paneAlive(row.paneId))) return 'That session’s pane is gone.'
-  focusOffMcpPane(row.paneId)
-  return switchedMsg(n, row.paneId)
-}
-
-// One tappable button per session for the /session listing — ★ marks the active one,
-// ▶️ the others. Tapping fires switchsession:<#>. Four per row to stay compact.
-function sessionSwitchKeyboard(rows: SessionRow[]): InlineKeyboard {
-  const kb = new InlineKeyboard()
-  rows.forEach((r, i) => {
-    kb.text(`${r.current ? '★' : '▶️'} ${i + 1}`, `switchsession:${i + 1}`)
-    if ((i + 1) % 4 === 0) kb.row()
-  })
-  kb.row().text('➕ New session', 'newsession')
-  if (rows.length > 1) kb.text('✏️ Rename', 'renamesession')
-  return kb
 }
 
 // New-session creation: spawn a plugin-less claude in a fresh tmux window; discovery then
@@ -4303,10 +4191,12 @@ async function resolveNewSessionDir(input: string): Promise<string> {
 // (own topic, own @tg_transcript) instead of the old tg-N subfolder divert — per-session
 // transcripts made same-cwd sessions safe.
 async function activeSessionCwds(): Promise<Set<string>> {
+  const panes = new Set<string>(offMcpPanes)
+  if (focus.activePaneId) panes.add(focus.activePaneId)
+  for (const { s } of orderedSessions()) if (s.paneId) panes.add(s.paneId)
   const cwds = new Set<string>()
-  for (const r of await sessionRows()) {
-    if (!r.paneId) continue
-    const c = await paneCwd(r.paneId).catch(() => null)
+  for (const p of panes) {
+    const c = await paneCwd(p).catch(() => null)
     if (c) cwds.add(c)
   }
   return cwds
@@ -4368,21 +4258,6 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string): 
   } catch (e) { process.stderr.write(`daemon: spawn session in ${dir} failed: ${e}\n`); return false }
 }
 
-// /session — list the connected sessions (★ = focused). /session # switches focus;
-// /session name # <label> renames one.
-// Render the session listing with the tappable per-session switch keyboard. Shared by the
-// /session command (no-arg) and the control-bar Sessions button.
-async function doSessionList(ctx: Context): Promise<void> {
-  const rows = await sessionRows()
-  if (rows.length === 0) { await ctx.reply('No active Claude Code session.'); return }
-  const lines = rows.map((r, i) => `${i + 1}. ${r.current ? '★ ' : ''}<b>${escapeHtml(r.label)}</b>`)
-  await ctx.reply(
-    `🖥️ <b>Sessions</b> (★ = active):\n\n${lines.join('\n')}\n\n` +
-    `Tap the number below to switch • or use <code>/session #</code>\n\n` +
-    `💡 Tip: Use <code>/rename (name)</code> to rename the current session`,
-    { parse_mode: 'HTML', reply_markup: sessionSwitchKeyboard(rows) })
-}
-
 // Friendly last-activity stamp: relative for the last day, absolute date+time beyond that.
 // NB: distinct from time.ts's fmtWhen (absolute UTC fire-time). This is "5m ago"-style for the
 // /resume session list; the two were both named fmtWhen historically, and the later declaration
@@ -4399,6 +4274,12 @@ function fmtAgo(ms: number): string {
 // activity, each tappable to relaunch via `claude --resume` in a fresh pane.
 bot.command('resume', async ctx => {
   if (!dmCommandGate(ctx)) return
+  // DM drives a single session — resuming spawns a new pane, so it only fills an empty slot.
+  // Group (topic) mode spawns freely: each resumed session gets its own topic.
+  if (!isTopicMode() && focus.activePaneId) {
+    await ctx.reply('A session is already running, and this DM drives a single session. /exit it first, or /bind a forum group to run several.')
+    return
+  }
   const recents = listRecentSessions(10)
   if (recents.length === 0) { await ctx.reply('No recent sessions found.'); return }
   const kb = new InlineKeyboard()
@@ -4456,27 +4337,6 @@ bot.command('rename', async ctx => {
   await ctx.reply(await renamePane(t.paneId, name), { parse_mode: 'HTML' })
 })
 
-bot.command(['sessions', 'session'], async ctx => {   // /sessions is canonical; /session is the alias
-  if (!dmCommandGate(ctx)) return
-  const arg = (ctx.match ?? '').toString().trim()
-  const rows = await sessionRows()
-
-  const nameMatch = arg.match(/^name\s+(\d+)\s+(.+)$/i)
-  if (nameMatch) {
-    await ctx.reply(await renameSession(Number(nameMatch[1]), nameMatch[2]), { parse_mode: 'HTML' })
-    return
-  }
-
-  const n = parseInt(arg, 10)
-  if (arg && Number.isInteger(n)) {
-    if (n < 1 || n > rows.length) { await ctx.reply(`Usage: <code>/session #</code> (1–${rows.length || 1}).`, { parse_mode: 'HTML' }); return }
-    await ctx.reply(await switchSessionTo(n), { parse_mode: 'HTML' })
-    return
-  }
-
-  await doSessionList(ctx)
-})
-
 // Interrupt the current turn by sending Esc to the pane (same as pressing Esc
 // in the TUI). withInjection pauses the watcher and re-baselines afterward so
 // the resulting pane change isn't mistaken for a new prompt/event.
@@ -4484,7 +4344,7 @@ bot.command('stop', confirmStop)
 
 // Inline-button handler for permission requests + mode cycling + prompt answers.
 // A topic the USER creates (Telegram's ➕ create-topic UI) becomes a session: ask which folder it
-// should run in, then bind + spawn on the reply (below, topicCreateReplyTargets). Topics the bot
+// should run in, then bind + spawn on the reply (below, the topiccreate replyTarget). Topics the bot
 // creates don't produce updates for the bot (own-message filter as belt-and-braces), so this only
 // fires for human-made tabs. Non-allowlisted creators are ignored — the group policy governs.
 bot.on('message:forum_topic_created', async ctx => {
@@ -4498,45 +4358,44 @@ bot.on('message:forum_topic_created', async ctx => {
     `📂 <b>New topic “${escapeHtml(name)}”</b> — which folder should its Claude session run in?\n\nReply with a folder path (created if missing; <code>~/…</code> works).`,
     { parse_mode: 'HTML', reply_markup: { force_reply: true, input_field_placeholder: 'Folder path' } },
   ).catch(() => null)
-  if (sent) topicCreateReplyTargets.set(`${ctx.chat.id}:${sent.message_id}`, { threadId: thread, name })
+  if (sent) replyTargets.set(`${ctx.chat.id}:${sent.message_id}`, { kind: 'topiccreate', threadId: thread, name })
 })
 
 bot.on('callback_query:data', async ctx => {
   const data = ctx.callbackQuery.data
 
   // Pinned-message quick actions → the same pickers as /sessions, /model, /mode, /settings.
-  if (data === 'pin:sessions' || data === 'pin:model' || data === 'pin:mode' || data === 'pin:settings') {
+  if (data === 'st:model' || data === 'st:mode' || data === 'st:settings') {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
       return
     }
     await ctx.answerCallbackQuery().catch(() => {})
-    if (data === 'pin:sessions') await doSessionList(ctx)
-    else if (data === 'pin:model') await doModelPicker(ctx)
-    else if (data === 'pin:mode') await doModePicker(ctx)
+    if (data === 'st:model') await doModelPicker(ctx)
+    else if (data === 'st:mode') await doModePicker(ctx)
     else await ctx.reply(settingsText(), { parse_mode: 'HTML', reply_markup: settingsKeyboard() })
     return
   }
 
-  // Pinned-message readouts → /context and /cost, posted at the bottom.
-  if (data === 'pin:context' || data === 'pin:cost') {
+  // Status-card readouts → /context and /cost, posted at the bottom.
+  if (data === 'st:context' || data === 'st:cost') {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
       return
     }
     await ctx.answerCallbackQuery().catch(() => {})
-    await doReadout(ctx, data === 'pin:context' ? 'context' : 'cost')
+    await doReadout(ctx, data === 'st:context' ? 'context' : 'cost')
     return
   }
 
-  // Pinned-message session actions → /compact (relay) and /clear (confirm + reset).
-  if (data === 'pin:compact' || data === 'pin:clear') {
+  // Status-card session actions → /compact (relay) and /clear (confirm + reset).
+  if (data === 'st:compact' || data === 'st:clear') {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
       return
     }
     await ctx.answerCallbackQuery().catch(() => {})
-    if (data === 'pin:clear') { await confirmNewSession(ctx); return }
+    if (data === 'st:clear') { await confirmResetSession(ctx); return }
     const t = await commandTarget(ctx)
     if (!t) return
     void relaySlashCommand(t.paneId, t.watcher, '/compact', String(ctx.chat!.id), ctx.callbackQuery.message!.message_id)
@@ -4782,21 +4641,6 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
-  // New-session confirmation (Yes/No under the "Start a new session?" prompt)
-  if (data === 'newconfirm:yes') {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
-    const t = await commandTarget(ctx)
-    if (!t) { await ctx.answerCallbackQuery().catch(() => {}); return }
-    await ctx.answerCallbackQuery({ text: 'Starting…' }).catch(() => {})
-    await ctx.editMessageText('🆕 Starting a new session…').catch(() => {})
-    const result = await performReset(t, '/new')
-    await ctx.editMessageText(result, { parse_mode: 'HTML' }).catch(() => {})
-    return
-  }
-
   // /clear + /reset confirmation: a plain Yes/No reset-in-place (no "launch new" branch).
   if (data === 'clearconfirm:yes' || data === 'clearconfirm:no') {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
@@ -4884,19 +4728,6 @@ bot.on('callback_query:data', async ctx => {
 
   // Session switch button (from the /session listing) → focus that session, confirm, and
   // refresh the listing's ★ so the keyboard stays in sync.
-  const switchMatch = /^switchsession:(\d+)$/.exec(data)
-  if (switchMatch) {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
-    const msg = await switchSessionTo(Number(switchMatch[1]))
-    await ctx.answerCallbackQuery().catch(() => {})
-    await ctx.editMessageReplyMarkup({ reply_markup: sessionSwitchKeyboard(await sessionRows()) }).catch(() => {})
-    await ctx.reply(msg, { parse_mode: 'HTML' }).catch(() => {})
-    return
-  }
-
   // "🗑 N" on the /schedule cancel list → drop that scheduled message, refresh the list.
   const schedCancelMatch = /^schedcancel:([0-9a-f]+)$/.exec(data)
   if (schedCancelMatch) {
@@ -4953,7 +4784,7 @@ bot.on('callback_query:data', async ctx => {
     const sent = await ctx.reply(
       `📅 Reply with <b>time message</b> → <b>${escapeHtml(label)}</b>.\n\nLike <code>2h ping the server</code> or <code>1h30m run the tests</code>.`,
       { parse_mode: 'HTML', reply_markup: { force_reply: true, input_field_placeholder: 'e.g. 2h ping the server' } })
-    if (sent) scheduleComposeTargets.set(`${ctx.chat?.id}:${sent.message_id}`, { paneId, sessionLabel: label, thread })
+    if (sent) replyTargets.set(`${ctx.chat?.id}:${sent.message_id}`, { kind: 'schedcompose', paneId, sessionLabel: label, thread })
     return
   }
 
@@ -4984,93 +4815,6 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
-  // "➕ New session" button → turn the sessions list in place into a folder chooser:
-  // This folder / Home / Specify. The first two spawn immediately; Specify drops a force-reply.
-  if (data === 'newsession') {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
-    await ctx.answerCallbackQuery().catch(() => {})
-    const cwd = focus.activePaneId ? await paneCwd(focus.activePaneId) : null
-    const currentLine = cwd
-      ? `Current: <code>${escapeHtml(cwd)}</code>`
-      : 'Current: <i>current session’s folder</i>'
-    const kb = new InlineKeyboard()
-      .text('📁 This folder', 'newsession:here')
-      .text('🏠 Home', 'newsession:home')
-      .text('✏️ Specify', 'newsession:specify')
-    await ctx.editMessageText(`📂 <b>New session — choose folder</b>\n\n${currentLine}`, {
-      parse_mode: 'HTML', reply_markup: kb,
-    }).catch(() => {})
-    return
-  }
-
-  // "✏️ Rename" (session list) → force-reply asking for "<#> <new name>".
-  if (data === 'renamesession') {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
-    await ctx.answerCallbackQuery().catch(() => {})
-    const sent = await ctx.reply('✏️ Reply with: <code>&lt;session #&gt; &lt;new name&gt;</code>\ne.g. <code>2 API work</code>', {
-      parse_mode: 'HTML',
-      reply_markup: { force_reply: true, input_field_placeholder: '2 New name' },
-    }).catch(() => null)
-    if (sent) renameReplyTargets.add(`${ctx.chat?.id}:${sent.message_id}`)
-    return
-  }
-
-  // "✏️ Name" (new-session announcement) → force-reply for a name; targets that pane directly.
-  const nameMatch = /^namesession:(%\d+)$/.exec(data)
-  if (nameMatch) {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
-    await ctx.answerCallbackQuery().catch(() => {})
-    const sent = await ctx.reply('✏️ Reply with a name for this session.', {
-      parse_mode: 'HTML',
-      reply_markup: { force_reply: true, input_field_placeholder: 'Session name' },
-    }).catch(() => null)
-    if (sent) nameReplyTargets.set(`${ctx.chat?.id}:${sent.message_id}`, nameMatch[1])
-    return
-  }
-
-  // Folder chooser buttons. here/home spawn straight away (editing the chooser into a
-  // confirmation); specify drops a force-reply for a typed path.
-  const nsMatch = /^newsession:(here|home|specify)$/.exec(data)
-  if (nsMatch) {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
-    await ctx.answerCallbackQuery().catch(() => {})
-    if (nsMatch[1] === 'specify') {
-      const cwd = focus.activePaneId ? await paneCwd(focus.activePaneId) : null
-      const currentLine = cwd
-        ? `Current: <code>${escapeHtml(cwd)}</code>`
-        : 'Current: <i>current session’s folder</i>'
-      const sent = await ctx.reply(`📂 <b>New session — choose folder</b>\n\n${currentLine}\n\nReply with a folder path · empty = current folder`, {
-        parse_mode: 'HTML',
-        reply_markup: { force_reply: true, input_field_placeholder: 'Folder path (empty = current folder)' },
-      }).catch(() => null)
-      if (sent) newSessionReplyTargets.add(`${ctx.chat?.id}:${sent.message_id}`)
-      await ctx.editMessageReplyMarkup().catch(() => {})   // chooser is spent — strip its buttons
-      return
-    }
-    const dir = nsMatch[1] === 'home' ? homedir() : await resolveNewSessionDir('')
-    // A folder already running a session now hosts a SIBLING (per-session transcripts) — pre-stamp
-    // a fresh id so the new pane never adopts the existing session's topic.
-    const sibling = (await activeSessionCwds()).has(dir)
-    const ok = await spawnSession(dir, '', sibling ? genSessionId() : undefined)
-    await ctx.editMessageText(ok
-      ? `🚀 Starting a new session in <code>${escapeHtml(dir)}</code>${sibling ? ' (sibling — that folder already has a session)' : ''} — it'll pop up here with a ▶️ Switch button shortly.`
-      : `❌ Couldn't start a session in <code>${escapeHtml(dir)}</code> — does that folder exist?`,
-      { parse_mode: 'HTML' }).catch(() => {})
-    return
-  }
-
   // Resume button from /resume → relaunch that session with `claude --resume` in a new pane.
   const resumeMatch = /^resume:([0-9a-fA-F-]+)$/.exec(data)
   if (resumeMatch) {
@@ -5078,36 +4822,19 @@ bot.on('callback_query:data', async ctx => {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
       return
     }
+    if (!isTopicMode() && focus.activePaneId) {
+      await ctx.answerCallbackQuery({ text: 'A session is already running.' }).catch(() => {})
+      await ctx.reply('A session is already running, and this DM drives a single session. /exit it first, or /bind a forum group to run several.').catch(() => {})
+      return
+    }
     await ctx.answerCallbackQuery().catch(() => {})
     const id = resumeMatch[1]
     const dir = findSessionCwd(id) ?? homedir()
     const ok = await spawnSession(dir, `--resume ${id}`)
     await ctx.reply(ok
-      ? `🔄 Resuming in <code>${escapeHtml(dir)}</code> — it'll pop up here with a ♻️ Switch button shortly.`
+      ? `🔄 Resuming in <code>${escapeHtml(dir)}</code> — connecting to it shortly.`
       : `❌ Couldn't resume that session in <code>${escapeHtml(dir)}</code>.`,
       { parse_mode: 'HTML' }).catch(() => {})
-    return
-  }
-
-  // "Switch to it" button under a new-session announcement → focus that pane by id.
-  const adoptMatch = /^adoptpane:(%\d+)$/.exec(data)
-  if (adoptMatch) {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
-    const paneId = adoptMatch[1]
-    if (paneId === focus.activePaneId) { await ctx.answerCallbackQuery({ text: 'Already focused.' }).catch(() => {}); return }
-    if (!(await paneAlive(paneId))) {
-      await ctx.answerCallbackQuery({ text: 'That pane is gone.' }).catch(() => {})
-      await ctx.editMessageReplyMarkup({}).catch(() => {})
-      return
-    }
-    offMcpPanes.add(paneId)
-    focusOffMcpPane(paneId)
-    await ctx.answerCallbackQuery({ text: 'Switched.' }).catch(() => {})
-    await ctx.editMessageReplyMarkup({}).catch(() => {})
-    await ctx.reply(await switchedMsg(await sessionNumber(paneId), paneId), { parse_mode: 'HTML' }).catch(() => {})
     return
   }
 
@@ -5202,8 +4929,8 @@ bot.on('callback_query:data', async ctx => {
       reply_markup: { force_reply: true, input_field_placeholder: 'Your answer' },
     }).catch(() => null)
     if (sent) {
-      freeTextReplyTargets.set(`${ctx.chat?.id}:${sent.message_id}`, {
-        paneId: fp.paneId, downCount: fp.downCount, tabbed: fp.tabbed,
+      replyTargets.set(`${ctx.chat?.id}:${sent.message_id}`, {
+        kind: 'freetext', paneId: fp.paneId, downCount: fp.downCount, tabbed: fp.tabbed,
       })
     }
     return
@@ -5453,7 +5180,7 @@ async function offerTopicBind(ctx: Context, threadId: number): Promise<void> {
     `📂 <b>This topic isn’t bound to a session yet</b> — which folder should its Claude session run in?\n\nReply with a folder path (created if missing; <code>~/…</code> works).`,
     { parse_mode: 'HTML', reply_markup: { force_reply: true, input_field_placeholder: 'Folder path' } },
   ).catch(() => null)
-  if (sent) topicCreateReplyTargets.set(`${ctx.chat?.id}:${sent.message_id}`, { threadId, name: '' })
+  if (sent) replyTargets.set(`${ctx.chat?.id}:${sent.message_id}`, { kind: 'topiccreate', threadId, name: '' })
 }
 
 bot.on('message:text', async ctx => {
@@ -5474,186 +5201,134 @@ bot.on('message:text', async ctx => {
     return
   }
 
-  // Reply to a ✏️ Type-something force-reply → type the answer into the prompt's
-  // free-text field: move the cursor down to the "Type something" option, type the
-  // text, and Enter. On a multi-question prompt this advances to the next tab, so
-  // hand off to handleTabbedAdvance; otherwise the single question resolves.
+  // Reply to a force-reply prompt we sent → look up what that reply means and finish the flow.
   const replyTo = ctx.message.reply_to_message
   if (replyTo) {
     const replyKey = `${ctx.chat?.id}:${replyTo.message_id}`
-    // Reply to a "✏️ Rename" (list) force-reply → parse "<#> <name>".
-    if (renameReplyTargets.has(replyKey)) {
-      renameReplyTargets.delete(replyKey)
+    const target = replyTargets.get(replyKey)
+    if (target) {
+      // authurl stays armed — the login input tolerates retries; everything else is one-shot.
+      if (target.kind !== 'authurl') replyTargets.delete(replyKey)
       if (!dmCommandGate(ctx)) return
-      const m = text.match(/^(\d+)\s+(.+)$/)
-      await ctx.reply(m ? await renameSession(Number(m[1]), m[2]) : 'Format: <code>&lt;#&gt; &lt;name&gt;</code>, e.g. <code>2 API work</code>', { parse_mode: 'HTML' })
-      return
-    }
-    // Reply to a "✏️ Name" (announcement) force-reply → name that specific pane.
-    if (nameReplyTargets.has(replyKey)) {
-      const paneId = nameReplyTargets.get(replyKey)!
-      nameReplyTargets.delete(replyKey)
-      if (!dmCommandGate(ctx)) return
-      await ctx.reply(await renamePane(paneId, text), { parse_mode: 'HTML' })
-      return
-    }
-    // Reply to a user-created topic's folder prompt → bind THAT topic to the folder and spawn its
-    // session there. Bind before spawning so discovery's ensureSessionTopic sees the mapping and
-    // doesn't create a duplicate topic for the new pane.
-    const tc = topicCreateReplyTargets.get(`${ctx.chat?.id}:${replyTo.message_id}`)
-    if (tc) {
-      topicCreateReplyTargets.delete(`${ctx.chat?.id}:${replyTo.message_id}`)
-      if (!dmCommandGate(ctx)) return
-      const dir = await resolveNewSessionDir(text)
-      let created = false
-      if (!existsSync(dir)) {
-        try { mkdirSync(dir, { recursive: true }); created = true }
-        catch (e) {
-          // Re-arm the prompt so a typo ("/claude" = filesystem root) doesn't strand the topic —
-          // the user just replies again with a writable path.
-          const again = await ctx.reply(
-            `❌ Couldn't create <code>${escapeHtml(dir)}</code>: ${escapeHtml(String((e as Error)?.message ?? e))}\n\nReply with another path — <code>~/…</code> or an absolute folder you can write to.`,
-            { parse_mode: 'HTML', reply_markup: { force_reply: true, input_field_placeholder: 'Folder path' } }).catch(() => null)
-          if (again) topicCreateReplyTargets.set(`${ctx.chat?.id}:${again.message_id}`, tc)
+      switch (target.kind) {
+        // Folder for a user-created topic → bind THAT topic to the folder and spawn its session
+        // there. Bind before spawning so discovery's ensureSessionTopic sees the mapping and
+        // doesn't create a duplicate topic for the new pane.
+        case 'topiccreate': {
+          const dir = await resolveNewSessionDir(text)
+          let created = false
+          if (!existsSync(dir)) {
+            try { mkdirSync(dir, { recursive: true }); created = true }
+            catch (e) {
+              // Re-arm the prompt so a typo ("/claude" = filesystem root) doesn't strand the topic —
+              // the user just replies again with a writable path.
+              const again = await ctx.reply(
+                `❌ Couldn't create <code>${escapeHtml(dir)}</code>: ${escapeHtml(String((e as Error)?.message ?? e))}\n\nReply with another path — <code>~/…</code> or an absolute folder you can write to.`,
+                { parse_mode: 'HTML', reply_markup: { force_reply: true, input_field_placeholder: 'Folder path' } }).catch(() => null)
+              if (again) replyTargets.set(`${ctx.chat?.id}:${again.message_id}`, target)
+              return
+            }
+          }
+          const sid = genSessionId()
+          setTopic(sid, { threadId: target.threadId, cwd: dir, name: target.name || basename(dir), closed: false, createdAt: Date.now() })
+          // Seed the branch cache so the retitle sweep doesn't stomp the user's chosen tab name on its
+          // first pass — it only renames on an actual branch CHANGE from here on.
+          try { topicBranchCache.set(sid, (await exec('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 2000 })).stdout.trim()) }
+          catch { topicBranchCache.set(sid, '') }
+          const ok = await spawnSession(dir, '', sid)
+          if (!ok) removeTopic(sid)
+          const note = created ? ' (📁 created it for you)' : ''
+          await ctx.reply(ok
+            ? `🚀 Starting this topic's session in <code>${escapeHtml(dir)}</code>${note} — type here to drive it once it's up.`
+            : `❌ Couldn't start a session in <code>${escapeHtml(dir)}</code>.`,
+            { parse_mode: 'HTML' })
+          return
+        }
+        // "📅 /schedule" → queue the message for its session at fireAt.
+        case 'schedule': {
+          const msg: ScheduledMessage = { id: randomBytes(4).toString('hex'), fireAt: target.fireAt, chatId: String(ctx.chat?.id), paneId: target.paneId, sessionLabel: target.sessionLabel, text, thread: target.thread }
+          addScheduled(msg)
+          await ctx.reply(`✅ Scheduled for ${fmtWhen(msg.fireAt)} → <b>${escapeHtml(msg.sessionLabel)}</b>.\nCancel with <code>/schedule cancel</code>.`, { parse_mode: 'HTML' })
+          return
+        }
+        // "➕ Add" → parse "time message" out of the one line, then queue.
+        case 'schedcompose': {
+          const { ms, rest } = splitLeadingDuration(text.trim())
+          if (!ms || !rest) {
+            await ctx.reply('Couldn\'t read that — send it as <b>time message</b>, e.g. <code>2h ping the server</code>. Try <code>/schedule</code> again.', { parse_mode: 'HTML' })
+            return
+          }
+          if (ms > MAX_TIMEOUT) { await ctx.reply('That\'s too far out — max ~24 days.'); return }
+          const fireAt = Date.now() + ms
+          addScheduled({ id: randomBytes(4).toString('hex'), fireAt, chatId: String(ctx.chat?.id), paneId: target.paneId, sessionLabel: target.sessionLabel, text: rest, thread: target.thread })
+          await ctx.reply(`✅ Scheduled in <b>${formatDuration(ms)}</b> → <b>${escapeHtml(target.sessionLabel)}</b>:\n\n${escapeHtml(rest)}\n\nCancel with <code>/schedule cancel</code>.`, { parse_mode: 'HTML' })
+          return
+        }
+        // "📝 /md" → write the file. If it already exists, stash the contents and ask for an
+        // overwrite confirmation instead of clobbering it outright.
+        case 'md': {
+          const contents = text.endsWith('\n') ? text : text + '\n'
+          if (existsSync(target.path)) {
+            const id = randomBytes(4).toString('hex')
+            mdOverwritePending.set(id, { path: target.path, display: target.display, contents })
+            const kb = new InlineKeyboard().text('✅ Overwrite', `mdoverwrite:yes:${id}`).text('✖️ Cancel', `mdoverwrite:no:${id}`)
+            await ctx.reply(`⚠️ <code>${escapeHtml(target.display)}</code> already exists. Overwrite it?`, { parse_mode: 'HTML', reply_markup: kb })
+            return
+          }
+          const res = writeMdFile(target.path, contents)
+          await ctx.reply(res.ok
+            ? `✅ Wrote <code>${escapeHtml(target.display)}</code> (${contents.length} chars).`
+            : `❌ Couldn't write <code>${escapeHtml(target.display)}</code>: ${escapeHtml(res.err)}`,
+            { parse_mode: 'HTML' })
+          return
+        }
+        // "✏️ Type something" → type the answer into the prompt's free-text field: move the cursor
+        // down to the option, type the text, and Enter. On a multi-question prompt this advances to
+        // the next tab, so hand off to handleTabbedAdvance; otherwise the single question resolves.
+        case 'freetext': {
+          // Drive the pane that raised the prompt (recorded when relayed), not whichever is focused.
+          const paneId = target.paneId
+          if (!paneId || !(await paneAlive(paneId))) {
+            await ctx.reply('No active Claude Code session with tmux.')
+            return
+          }
+          // The cursor must settle on the "Type something" option before the text is
+          // typed — otherwise the field isn't focused and the answer resolves empty
+          // (to "__other__"). Settle again after typing so Enter commits the full text.
+          await withPaneInjection(paneId, async () => {
+            await navigateDown(paneId, target.downCount)
+            await sendKeysLiteral(paneId, text)
+            await waitForSettle(paneId, 150, 2000)
+            await sendKeys(paneId, ['Enter'])
+            await waitForSettle(paneId, 300, 5000)
+          })
+          resetPromptDedup(paneId)
+          if (target.tabbed) await handleTabbedAdvance(String(ctx.chat?.id), paneId, ctx.message?.message_thread_id)
+          else { await ctx.reply('✅ Sent your answer.'); await verifyPromptClosed(paneId) }
+          return
+        }
+        // Relayed sign-in link → inject the code into the pane's login input field, not the
+        // agent's inbound queue.
+        case 'authurl': {
+          const { paneId } = await targetPaneOf(ctx)
+          if (!paneId) {
+            await ctx.reply('No active Claude Code session with tmux.')
+            return
+          }
+          const email = await withPaneInjection(paneId, async () => {
+            if (!(await sendKeysLiteral(paneId, text))) return undefined   // pane gone
+            await sendKeys(paneId, ['Enter'])
+            const found = await waitForLoginConfirmation(paneId)
+            await sendKeys(paneId, ['Enter'])                              // skip the confirmation screen
+            await waitForSettle(paneId, 300, 5000)
+            return found
+          })
+          if (email === undefined) { await ctx.reply('Could not reach the session pane.'); return }
+          await ctx.reply(email ? `✅ Successfully logged in as ${escapeHtml(email)}` : '✅ Logged in.', { parse_mode: 'HTML' })
           return
         }
       }
-      const sid = genSessionId()
-      setTopic(sid, { threadId: tc.threadId, cwd: dir, name: tc.name || basename(dir), closed: false, createdAt: Date.now() })
-      // Seed the branch cache so the retitle sweep doesn't stomp the user's chosen tab name on its
-      // first pass — it only renames on an actual branch CHANGE from here on.
-      try { topicBranchCache.set(sid, (await exec('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 2000 })).stdout.trim()) }
-      catch { topicBranchCache.set(sid, '') }
-      const ok = await spawnSession(dir, '', sid)
-      if (!ok) removeTopic(sid)
-      const note = created ? ' (📁 created it for you)' : ''
-      await ctx.reply(ok
-        ? `🚀 Starting this topic's session in <code>${escapeHtml(dir)}</code>${note} — type here to drive it once it's up.`
-        : `❌ Couldn't start a session in <code>${escapeHtml(dir)}</code>.`,
-        { parse_mode: 'HTML' })
-      return
     }
-    // Reply to a "📂 New session" force-reply → resolve the folder and spawn the session.
-    const nsKey = `${ctx.chat?.id}:${replyTo.message_id}`
-    if (newSessionReplyTargets.has(nsKey)) {
-      newSessionReplyTargets.delete(nsKey)
-      if (!dmCommandGate(ctx)) return
-      const dir = await resolveNewSessionDir(text)
-      // If the specified folder doesn't exist, create it (recursively) so a new session can start
-      // in a fresh directory — the user asked for a path, so honour it rather than erroring out.
-      let created = false
-      if (!existsSync(dir)) {
-        try { mkdirSync(dir, { recursive: true }); created = true }
-        catch (e) {
-          await ctx.reply(`❌ Couldn't create <code>${escapeHtml(dir)}</code>: ${escapeHtml(String((e as Error)?.message ?? e))}`, { parse_mode: 'HTML' })
-          return
-        }
-      }
-      // A folder already running a session hosts a SIBLING now — pre-stamp a fresh id so the new
-      // pane never adopts the existing session's topic.
-      const sibling = (await activeSessionCwds()).has(dir)
-      const ok = await spawnSession(dir, '', sibling ? genSessionId() : undefined)
-      const note = sibling ? ' (sibling — that folder already has a session)' : created ? ' (📁 created it for you)' : ''
-      await ctx.reply(ok
-        ? `🚀 Starting a new session in <code>${escapeHtml(dir)}</code>${note} — it'll pop up here with a ▶️ Switch button shortly.`
-        : `❌ Couldn't start a session in <code>${escapeHtml(dir)}</code>.`,
-        { parse_mode: 'HTML' })
-      return
-    }
-    // Reply to a "📅 /schedule" force-reply → queue the message for its session at fireAt.
-    const sched = scheduleReplyTargets.get(replyKey)
-    if (sched) {
-      scheduleReplyTargets.delete(replyKey)
-      if (!dmCommandGate(ctx)) return
-      const msg: ScheduledMessage = { id: randomBytes(4).toString('hex'), fireAt: sched.fireAt, chatId: String(ctx.chat?.id), paneId: sched.paneId, sessionLabel: sched.sessionLabel, text, thread: sched.thread }
-      addScheduled(msg)
-      await ctx.reply(`✅ Scheduled for ${fmtWhen(msg.fireAt)} → <b>${escapeHtml(msg.sessionLabel)}</b>.\nCancel with <code>/schedule cancel</code>.`, { parse_mode: 'HTML' })
-      return
-    }
-    // Reply to a "➕ Add" force-reply → parse "time message" out of the one line, then queue.
-    const compose = scheduleComposeTargets.get(replyKey)
-    if (compose) {
-      scheduleComposeTargets.delete(replyKey)
-      if (!dmCommandGate(ctx)) return
-      const { ms, rest } = splitLeadingDuration(text.trim())
-      if (!ms || !rest) {
-        await ctx.reply('Couldn\'t read that — send it as <b>time message</b>, e.g. <code>2h ping the server</code>. Try <code>/schedule</code> again.', { parse_mode: 'HTML' })
-        return
-      }
-      if (ms > MAX_TIMEOUT) { await ctx.reply('That\'s too far out — max ~24 days.'); return }
-      const fireAt = Date.now() + ms
-      addScheduled({ id: randomBytes(4).toString('hex'), fireAt, chatId: String(ctx.chat?.id), paneId: compose.paneId, sessionLabel: compose.sessionLabel, text: rest, thread: compose.thread })
-      await ctx.reply(`✅ Scheduled in <b>${formatDuration(ms)}</b> → <b>${escapeHtml(compose.sessionLabel)}</b>:\n\n${escapeHtml(rest)}\n\nCancel with <code>/schedule cancel</code>.`, { parse_mode: 'HTML' })
-      return
-    }
-    // Reply to a "📝 /md" force-reply → write the file. If it already exists, stash the contents
-    // and ask for an overwrite confirmation instead of clobbering it outright.
-    const md = mdReplyTargets.get(replyKey)
-    if (md) {
-      mdReplyTargets.delete(replyKey)
-      if (!dmCommandGate(ctx)) return
-      const contents = text.endsWith('\n') ? text : text + '\n'
-      if (existsSync(md.path)) {
-        const id = randomBytes(4).toString('hex')
-        mdOverwritePending.set(id, { path: md.path, display: md.display, contents })
-        const kb = new InlineKeyboard().text('✅ Overwrite', `mdoverwrite:yes:${id}`).text('✖️ Cancel', `mdoverwrite:no:${id}`)
-        await ctx.reply(`⚠️ <code>${escapeHtml(md.display)}</code> already exists. Overwrite it?`, { parse_mode: 'HTML', reply_markup: kb })
-        return
-      }
-      const res = writeMdFile(md.path, contents)
-      await ctx.reply(res.ok
-        ? `✅ Wrote <code>${escapeHtml(md.display)}</code> (${contents.length} chars).`
-        : `❌ Couldn't write <code>${escapeHtml(md.display)}</code>: ${escapeHtml(res.err)}`,
-        { parse_mode: 'HTML' })
-      return
-    }
-    const ft = freeTextReplyTargets.get(`${ctx.chat?.id}:${replyTo.message_id}`)
-    if (ft) {
-      freeTextReplyTargets.delete(`${ctx.chat?.id}:${replyTo.message_id}`)
-      if (!dmCommandGate(ctx)) return
-      // Drive the pane that raised the prompt (recorded when relayed), not whichever is focused.
-      const paneId = ft.paneId
-      if (!paneId || !(await paneAlive(paneId))) {
-        await ctx.reply('No active Claude Code session with tmux.')
-        return
-      }
-      // The cursor must settle on the "Type something" option before the text is
-      // typed — otherwise the field isn't focused and the answer resolves empty
-      // (to "__other__"). Settle again after typing so Enter commits the full text.
-      await withPaneInjection(paneId, async () => {
-        await navigateDown(paneId, ft.downCount)
-        await sendKeysLiteral(paneId, text)
-        await waitForSettle(paneId, 150, 2000)
-        await sendKeys(paneId, ['Enter'])
-        await waitForSettle(paneId, 300, 5000)
-      })
-      resetPromptDedup(paneId)
-      if (ft.tabbed) await handleTabbedAdvance(String(ctx.chat?.id), paneId, ctx.message?.message_thread_id)
-      else { await ctx.reply('✅ Sent your answer.'); await verifyPromptClosed(paneId) }
-      return
-    }
-  }
-
-  // Reply to a relayed sign-in link → inject the code into the pane (the login
-  // input field), not the agent's inbound queue.
-  if (replyTo && authUrlMessageIds.has(`${ctx.chat?.id}:${replyTo.message_id}`)) {
-    if (!dmCommandGate(ctx)) return
-    const { paneId } = await targetPaneOf(ctx)
-    if (!paneId) {
-      await ctx.reply('No active Claude Code session with tmux.')
-      return
-    }
-    const email = await withPaneInjection(paneId, async () => {
-      if (!(await sendKeysLiteral(paneId, text))) return undefined   // pane gone
-      await sendKeys(paneId, ['Enter'])
-      const found = await waitForLoginConfirmation(paneId)
-      await sendKeys(paneId, ['Enter'])                              // skip the confirmation screen
-      await waitForSettle(paneId, 300, 5000)
-      return found
-    })
-    if (email === undefined) { await ctx.reply('Could not reach the session pane.'); return }
-    await ctx.reply(email ? `✅ Successfully logged in as ${escapeHtml(email)}` : '✅ Logged in.', { parse_mode: 'HTML' })
-    return
   }
 
   // Relay unhandled slash commands to CC via tmux (after gate check). In topic mode the command
@@ -5677,9 +5352,9 @@ bot.on('message:text', async ctx => {
     // /exit (and /quit) closes the session. If it's the only one, confirm first (Yes/No) so the
     // user can't accidentally leave themselves with no session; otherwise exit straight away.
     if (/^\/(exit|quit)\b/i.test(text)) {
-      if ((await sessionRows()).length <= 1) {
+      if (!isTopicMode()) {   // the DM's only session — always confirm; a topic session is one of many
         const kb = new InlineKeyboard().text('✅ Yes, exit', 'exitconfirm:yes').text('✖️ No', 'exitconfirm:no')
-        await ctx.reply('⚠️ This is the only session — confirm exit?', { reply_markup: kb })
+        await ctx.reply('⚠️ This will end your session — confirm exit?', { reply_markup: kb })
         return
       }
       const label = await paneLabel(t.paneId)
@@ -5786,9 +5461,9 @@ function handleShimConnection(socket: net.Socket): void {
             } catch {}
           }
           sessions.set(sessionId, { socket, write, paneId: msg.paneId, label, subscribedAt: Date.now() })
-          const announce = (idx: number) => notifyChats(
-            `🆕 New Claude session: <b>Session ${idx}</b>${cwdPath ? ` (<code>${escapeHtml(cwdPath)}</code>)` : ''}`,
-            { reply_markup: (() => { const k = new InlineKeyboard().text(`♻️ Switch to Session ${idx}`, `switchsession:${idx}`); if (msg.paneId) k.text('✏️ Name', `namesession:${msg.paneId}`); return k })(), parse_mode: 'HTML' })
+          const announce = () => notifyChats(
+            `🆕 Another Claude session connected${cwdPath ? ` (<code>${escapeHtml(cwdPath)}</code>)` : ''} — this DM drives a single session, so I'm staying on the current one.`,
+            { parse_mode: 'HTML' })
 
           // Focus it only when nothing valid holds focus (the first/only session, or
           // a reconnect of the focused pane). Otherwise announce — never steal focus.
@@ -5797,12 +5472,12 @@ function handleShimConnection(socket: net.Socket): void {
           if (FORCE_PANE) {
             process.stderr.write(`daemon: session ${sessionId} registered (focus pinned to ${FORCE_PANE})\n`)
           } else if (adoptionHolds) {
-            announce(orderedSessions().findIndex(o => o.id === sessionId) + 1)
+            announce()
           } else if (focus.currentSessionId === null || focus.currentSessionId === sessionId || !sessions.has(focus.currentSessionId)) {
             setFocus(sessionId)
             replayBuffer()
           } else {
-            announce(orderedSessions().findIndex(o => o.id === sessionId) + 1)
+            announce()
           }
           break
         }
@@ -5964,17 +5639,12 @@ if (FORCE_PANE) {
   startPaneWatcher(FORCE_PANE)
   startRelayLoop()
   process.stderr.write(`daemon: focus pinned to ${FORCE_PANE} (TELEGRAM_FORCE_PANE)\n`)
-  // Refresh the session pin so it reflects the pinned pane immediately. Without this the pin
-  // keeps whatever stale text it last had (e.g. "No active session" from before the pane
-  // existed), since the auto-discovery path — which normally calls this — is skipped here.
-  void updateSessionPin()
 } else if (TRANSCRIPT_OUTBOUND) {
   // Off-MCP with no pinned pane: find and adopt a plugin-less work session on our own,
-  // then keep watching so a session started later (or restarted) gets picked up — siblings
-  // are announced with a switch button rather than stealing focus.
+  // then keep watching so a session started later (or restarted) gets picked up — in topic
+  // mode each extra session gets its own topic; in DM mode extra panes are noted, not driven.
   void discoverPanes()
   setInterval(() => void discoverPanes(), 30_000)
-  setInterval(() => void checkCrossSessionUnread(), 4_000)   // ping unread in unfocused sessions
   // Self-heal any bridge pane left pinned tall by a /cost grow-to-80 that was interrupted (e.g. a
   // daemon restart between grow and restore) — un-pin to automatic size so Claude stops rendering
   // into a giant pane and the statusline becomes readable again for the pin scraper. Idempotent.
@@ -5983,10 +5653,12 @@ if (FORCE_PANE) {
   })()
 }
 
-// Keep the pinned status message's live metrics fresh in EVERY mode — off-MCP pane or MCP shim
-// session — once per 10s. No-op edits are skipped and no pin is created when nothing's active, so
-// this is cheap when idle and works the same whether or not the plugin's MCP server is loaded.
+// Keep the pinned status card's live metrics fresh once per 10s. No-op edits are skipped and no
+// pin is created when nothing's active, so this is cheap when idle.
 setInterval(() => void updateSessionPin(), 10_000)
+// Context-fill warnings (50% / 75%) ride a light statusline poll of the focused pane —
+// independent of the pin so the warnings still fire with /pin off.
+setInterval(() => void checkContextWarn(), 15_000)
 
 // Sweep stale inbox attachments at startup and hourly — voice/audio temp files are already unlinked
 // right after transcription; this clears photos/documents past the retention TTL (default 24h).
@@ -6053,11 +5725,9 @@ void (async () => {
               { command: 'stop', description: 'Interrupt the current task (Esc)' },
               { command: 'status', description: 'Re-post the status pin at the bottom' },
               { command: 'settings', description: 'Channel settings — mirror, pin, auto-continue, MCP, voice' },
-              { command: 'sessions', description: 'List sessions (/sessions # switch, /sessions name # label)' },
               { command: 'schedule', description: 'Schedule a message into a session (/schedule 12h · /schedule cancel)' },
               { command: 'md', description: 'Create a .md file in the working dir, then reply with its contents' },
               { command: 'resume', description: 'Resume a recent session (lists them with times)' },
-              { command: 'new', description: 'Start a new session' },
               { command: 'restart', description: 'Exit and resume the current session (picks up config changes)' },
               { command: 'reset', description: 'Clear the current conversation in place' },
               { command: 'stream', description: 'How replies arrive: thoughts · tools · hybrid · off' },

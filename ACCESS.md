@@ -96,7 +96,8 @@ Configure outbound behavior with `/telegram:access set <key> <value>`.
 
 **`terminalMirror`** (default `"tools"`) controls the live activity mirror — one self-updating message of what Claude is doing. `"tools"` shows the tool feed (💻 terminal, 📋 todo, 📖 read, ✏️ edit…) read straight from the transcript (zero usage); `"digest"` shows Claude's recent `●` narration blocks scraped from the pane; `"off"` disables it.
 
-**`sessionPin`** (default `true`) controls the pinned status message — a self-updating pin showing the active session · model · mode with quick buttons. Toggle from Telegram with `/pin on` | `off`.
+
+**`sessionPin`** (default `true`) controls the pinned status message — a self-updating pin with the live model · mode · context · usage metrics (no session identity; the topic tab / single DM session covers that). Toggle from Telegram with `/pin on` | `off`.
 
 ## Voice transcription
 

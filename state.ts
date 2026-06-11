@@ -42,14 +42,23 @@ export const permissionOrigin = new Map<string, (msg: DaemonToShim) => void>()
 // ---- Interactive prompt state ----
 export const pendingMultiSelect = new Map<string, PendingMultiSelect>()
 export const freeTextPrompts = new Map<string, FreeTextPrompt>()
-export const freeTextReplyTargets = new Map<string, Omit<FreeTextPrompt, 'question'>>()
 export const chatPrompts = new Map<string, ChatPrompt>()
-export const authUrlMessageIds = new Set<string>()
 
-// ---- Relay / unread tracking ----
+// ---- Force-reply targets ----
+// One registry for every "reply to this message" continuation, keyed `${chatId}:${messageId}`
+// of the prompt we sent. The kind discriminates what the user's reply means; the payload is
+// whatever that flow needs to finish. (Was seven parallel per-feature maps.)
+export type ReplyTarget =
+  | ({ kind: 'freetext' } & Omit<FreeTextPrompt, 'question'>)   // type into a TUI free-text field
+  | { kind: 'authurl' }                                          // login code for a relayed sign-in link (not consumed on use — retries allowed)
+  | { kind: 'topiccreate'; threadId: number; name: string }      // folder for a user-created forum topic's session
+  | { kind: 'schedule'; fireAt: number; paneId: string | null; sessionLabel: string; thread?: number }   // message body; time already fixed
+  | { kind: 'schedcompose'; paneId: string | null; sessionLabel: string; thread?: number }               // "time message" in one line
+  | { kind: 'md'; path: string; display: string }                // contents for a /md file
+export const replyTargets = new Map<string, ReplyTarget>()
+
+// ---- Relay tracking ----
 export const lastRelayedByFile = new Map<string, string>()
-export const unreadNotified = new Map<string, string>()
-export const unreadNotifMsgs = new Map<string, Map<string, number>>()
 
 // ---- Off-MCP panes ----
 export const offMcpPanes = new Set<string>()
@@ -60,26 +69,10 @@ export const usageWarnState = new Map<string, { resetKey: string; threshold: num
 // ---- Voice ----
 export const voiceNudged = new Set<string>()
 
-// ---- Scheduled messages ----
-// The fire-time queue + timers live in scheduler.ts; only the force-reply targets (the
-// daemon's command/inbound plumbing) are shared here.
-export const scheduleReplyTargets = new Map<string, { fireAt: number; paneId: string | null; sessionLabel: string; thread?: number }>()
-// "➕ Add" on the /schedule dashboard: the reply carries BOTH the time and the message ("2h ping"),
-// so fireAt is parsed from it — unlike scheduleReplyTargets where the time is already fixed.
-export const scheduleComposeTargets = new Map<string, { paneId: string | null; sessionLabel: string; thread?: number }>()
-
-// ---- Session names / pins ----
+// ---- Session names ----
 export const sessionNames = new Map<string, string>()
-export const renameReplyTargets = new Set<string>()           // `${chatId}:${messageId}` of list "Rename" prompts
-export const nameReplyTargets = new Map<string, string>()      // `${chatId}:${messageId}` → paneId of "Name" prompts
-export const sessionPins = new Map<string, number>()
-export const pinTextCache = new Map<string, string>()   // last rendered text per chat — skip no-op edits on the 10s refresh
-export const newSessionReplyTargets = new Set<string>()   // `${chatId}:${messageId}` of folder prompts
-export const topicCreateReplyTargets = new Map<string, { threadId: number; name: string }>()   // user-created forum topics awaiting a folder reply
 
-// ---- /md: create a markdown file via force-reply ----
-// `${chatId}:${messageId}` of the "send me the contents" prompt → the file to write.
-export const mdReplyTargets = new Map<string, { path: string; display: string }>()
+// ---- /md overwrite confirmation ----
 // When the target already exists we stash the typed contents under a short id and ask for an
 // overwrite confirmation (callback data can't carry the path/body, so it carries just the id).
 export const mdOverwritePending = new Map<string, { path: string; display: string; contents: string }>()

@@ -33,7 +33,7 @@ The **outbound** spine is built. These already route to the right topic via the 
   that session (`emitInbound`, daemon ~4961). Topic whose session ended → buffered, not misrouted.
 - ✅ Agent reply text → the session's topic (`sendAgentText(..., t.thread)`, ~919/992).
 - ✅ Live activity / `/stream` card → the session's topic (v0.1.12).
-- ✅ Per-topic "typing…" (v0.1.11) and per-topic pinned status card (v0.1.14).
+- ✅ Per-topic "typing…" (v0.1.11) and per-topic pinned status card (v0.1.14; session identity dropped from the card in v0.1.32 — the tab is the session).
 - ✅ Eager per-session topic + "session started" notice on discovery (`ensureSessionTopic`).
 - ✅ `dmCommandGate` admits the bound group (v0.1.10) — commands *run* in the group.
 

@@ -61,17 +61,16 @@ Prefer to do it by hand? [`off-mcp/INSTALL.md`](./off-mcp/INSTALL.md) lists ever
   (Groq / OpenAI). Runs entirely outside Claude, so it never consumes usage. Pick
   the backend and (for local) the Whisper model right from `/settings`.
 - **Reasoning effort** — set Claude's thinking effort from Telegram with `/effort`
-  (low · medium · high · max); the current level shows in the pinned bar.
+  (low · medium · high · max); the current level shows on the `/status` card.
 - **Scheduled messages** — queue a message into a session for later with `/schedule`
   (e.g. `/schedule 12h`, `/schedule cancel`); it's pasted in when it fires.
-- **Multiple sessions** — run several Claude Code sessions and switch between them
-  from Telegram (`/sessions`). Start a new one in any folder with the **➕ New
-  session** button (This folder / Home / Specify a path).
-- **Unread replay** — switch back to a session and the messages it produced while
-  unfocused replay automatically; you also get a **💬 ping** (with a one-tap switch
-  button) the moment an unfocused session speaks.
-- **Pinned status bar** — a pinned status message shows the active session · model ·
-  mode, with 🗂️ Sessions / 🧠 Model / 🧭 Mode quick buttons.
+- **Multiple sessions via group topics** — bind a forum supergroup with `/bind` and
+  every Claude Code session gets its own topic (tab): type in a topic to drive that
+  session, create a topic to spawn a new session in any folder. The DM drives a
+  single session.
+- **Pinned status card** — a self-updating pinned message (per DM, and per topic in group
+  mode) with the live model · mode · context · usage-limit metrics plus ⚙️ Settings /
+  🧠 Model / 🕹️ Mode quick buttons. `/status` re-posts it at the bottom.
 - **Live activity mirror** — a single self-updating message shows what Claude is doing
   in real time (💻 terminal, 📋 todo, 📖 read, ✏️ edit, 🔍 search, 🤖 agent, ❓ clarify…),
   read straight from the transcript so it costs zero usage. On by default; choose its
@@ -207,8 +206,7 @@ formatted. Bot commands:
 | Command | What it does |
 | --- | --- |
 | `/start` | Welcome + full feature guide (and pairing steps if not paired) |
-| `/status` | Check your pairing state |
-| `/sessions` | List & switch sessions (`/sessions #` switch · `/sessions name # <label>` rename) |
+| `/status` | Re-post the pinned status card at the bottom; pairing state if unpaired |
 | `/resume` | List recent sessions with last-activity times; tap one to relaunch (`claude --resume`) |
 | `/mode` | Interactive permission-mode switcher (`/mode <name>` jumps straight to one) |
 | `/plan` `/auto` `/default` `/acceptedits` `/bypass` | Quick mode switch |
@@ -223,7 +221,7 @@ formatted. Bot commands:
 | `/terminal [N]` | Show recent terminal activity (N lines) |
 | `/autocontinue` | Auto-send "continue" when the usage limit resets (on/off) |
 | `/schedule` | Queue a message into a session for later (`/schedule 12h` · `/schedule cancel`) |
-| `/pin` | Toggle the pinned status message (`/pin on` \| `off`) |
+| `/pin` | Toggle the pinned status message (`/pin on` \| `off` \| `refresh`) |
 | `/settings` | Channel settings panel — live mirror, pin, auto-continue, MCP mode, voice transcription |
 | `/reply <response>` | Type a response into the session, then Enter (e.g. a `/login` code) |
 

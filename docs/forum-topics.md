@@ -41,9 +41,10 @@ churn across tmux/daemon restarts):
   (title = project dir / git branch), store the mapping, drop a status pin in the new topic.
 - **Branch / context change:** `editForumTopic` to rename the topic.
 - **Session ends** (pane gone): `closeForumTopic` — keep the history; `reopenForumTopic` if it returns.
-- **Per-topic status pin:** each topic carries its own pinned status (session · model · mode + inline
-  buttons). Reply keyboards are chat-wide so they can't be per-topic — but we already retired the
-  docked control bar, so everything is inline keyboards, which *are* per-topic. 
+- **Per-topic status pin:** each topic carries its own pinned metrics card (model · mode · context ·
+  usage — no session identity, the tab is the session). Reply keyboards are chat-wide so they can't
+  be per-topic — but we already retired the docked control bar, so everything is inline keyboards,
+  which *are* per-topic.
 
 ## Access control
 
