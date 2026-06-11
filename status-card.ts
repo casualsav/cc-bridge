@@ -236,6 +236,15 @@ export async function clearAllPins(chat: string): Promise<void> {
   }
 }
 
+// Single-pin guarantee for a topic: unpin everything in the thread before pinning a fresh card.
+// Group pins STACK and the API can't enumerate them (getChat only reports the group's topmost),
+// so a card the pin store forgot — state-file loss, a daemon run from another cache dir — would
+// otherwise stay pinned alongside the new one forever. Runs only when a new card is about to be
+// pinned; the old card's message stays in history, only its pin is cleared.
+export async function clearTopicPins(group: string, threadId: number): Promise<void> {
+  await deps.bot.api.unpinAllForumTopicMessages(group, threadId).catch(() => {})
+}
+
 export async function createSessionPin(chat: string, text: string, reply_markup: InlineKeyboard): Promise<void> {
   try {
     await clearAllPins(chat)   // single-pin guarantee: remove any prior/orphaned pins before the new one
@@ -268,6 +277,7 @@ export async function updateTopicPins(): Promise<void> {
       }
     }
     try {
+      await clearTopicPins(group, t.threadId)   // single-pin guarantee — drop any prior/orphaned card pins first
       const m = await deps.bot.api.sendMessage(group, text, { parse_mode: 'HTML', message_thread_id: t.threadId, disable_notification: true })
       await deps.bot.api.pinChatMessage(group, m.message_id, { disable_notification: true }).catch(() => {})
       sessionPins.set(key, m.message_id); pinTextCache.set(key, text); persistSessionPins()

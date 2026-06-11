@@ -75,7 +75,7 @@ import {
 import {
   initStatusCard, statusCardText, statusKeyboard, updateSessionPin, updateTopicPins,
   removeSessionPins, refreshSessionPin, sessionPins, pinTextCache, persistSessionPins,
-  clearAllPins, createSessionPin, lastModelInTranscript, prettyModel, modeBadge,
+  clearAllPins, clearTopicPins, createSessionPin, lastModelInTranscript, prettyModel, modeBadge,
 } from './status-card.ts'
 import { TypingPresence } from './typing.ts'
 import { transcribe, transcribeProvider, transcribeStatus } from './voice.ts'
@@ -2718,10 +2718,10 @@ bot.command('status', async ctx => {
       const key = `topic:${thread}`
       const old = sessionPins.get(key)
       if (old) {
-        await bot.api.unpinChatMessage(chat, old).catch(() => {})
         await bot.api.deleteMessage(chat, old).catch(() => {})
         sessionPins.delete(key); pinTextCache.delete(key); persistSessionPins()
       }
+      await clearTopicPins(chat, thread)   // single-pin guarantee — also drops orphaned card pins
       const text = await statusCardText(paneId)
       const m = await bot.api.sendMessage(chat, text, { parse_mode: 'HTML', message_thread_id: thread, disable_notification: true }).catch(() => null)
       if (m) {
