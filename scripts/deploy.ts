@@ -151,6 +151,14 @@ if (tsc.status !== 0) {
   die(`tsc failed — checkout left untouched:\n${(tsc.stdout || tsc.stderr).slice(0, 4000)}`)
 }
 step('type-check OK')
+// Unit tests gate the ship too — they're fast (<1s) and cover the extracted domains.
+step('running unit tests (bun test)')
+const tests = sh('bun', ['test'], REPO)
+if (tests.status !== 0) {
+  if (freshCache) rmSync(newCache, { recursive: true, force: true })
+  die(`tests failed — checkout left untouched:\n${(tests.stderr || tests.stdout).slice(-4000)}`)
+}
+step('tests OK')
 
 // ---- 5. build passed: now stamp the checkout + marketplace mirror ----
 patchVersion(join(REPO, PLUGIN_JSON), next)
