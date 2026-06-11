@@ -3793,27 +3793,28 @@ async function statusCardText(paneId: string | null): Promise<string> {
   } catch {}
   const branch = cwd ? await gitBranch(cwd) : null
 
-  const usage = status?.h5 ? `📈 ${status.h5.pct}%  ` : ''
-  const weekly = status?.d7 ? `📅 ${status.d7.pct}%  ` : ''
-  const ctxBadge = status?.ctxPct != null ? `💾 ${status.ctxPct}%  ` : ''
+  // Head badges: model · effort · session (5h) · weekly (7d) · context · mode · think.
   const effortBadge = status?.effort ? `  ⚡ ${escapeHtml(status.effort)}` : ''
+  const usage = status?.h5 ? `  📈 ${status.h5.pct}%` : ''
+  const weekly = status?.d7 ? `  📅 ${status.d7.pct}%` : ''
+  const ctxBadge = status?.ctxPct != null ? `  💾 ${status.ctxPct}%` : ''
   const thinkBadge = status?.think ? '  ✻ think' : ''
-  const head = `${usage}${weekly}${ctxBadge}🧠 ${escapeHtml(model ?? '—')}${effortBadge}  🕹️ ${escapeHtml(mode)}${thinkBadge}`
+  const head = `🧠 ${escapeHtml(model ?? '—')}${effortBadge}${usage}${weekly}${ctxBadge}  🕹️ ${escapeHtml(mode)}${thinkBadge}`
   const groups: string[] = []
   if (cwd) groups.push(`📁 <code>${escapeHtml(cwd)}</code>${branch ? ` · 🌿 ${escapeHtml(branch)}` : ''}`)
   if (status) {
-    const usageLines: string[] = []
-    if (status.ctxPct != null) usageLines.push(`💾 Context <code>${pinBar(status.ctxPct)}</code> ${status.ctxPct}%${status.tokens ? `  ·  ${status.tokens}` : ''}`)
+    // Usage group: the 5h/7d limit bars, then the cost/time data.
+    const lim: string[] = []
+    if (status.h5) lim.push(`📈 5h <code>${pinBar(status.h5.pct)}</code> ${status.h5.pct}%  ↻ ${status.h5.reset}`)
+    if (status.d7) lim.push(`📅 7d <code>${pinBar(status.d7.pct)}</code> ${status.d7.pct}%  ↻ ${status.d7.reset}`)
     const ct: string[] = []
     if (status.cost) ct.push(`💰 ${status.cost}`)
     if (status.sessionTime) ct.push(`⏱ ${status.sessionTime}`)
     if (status.apiTime) ct.push(`⚡ api ${status.apiTime}`)
-    if (ct.length) usageLines.push(ct.join('  ·  '))
-    if (usageLines.length) groups.push(usageLines.join('\n'))
-    const lim: string[] = []
-    if (status.h5) lim.push(`📈 5h <code>${pinBar(status.h5.pct)}</code> ${status.h5.pct}%  ↻ ${status.h5.reset}`)
-    if (status.d7) lim.push(`📅 7d <code>${pinBar(status.d7.pct)}</code> ${status.d7.pct}%  ↻ ${status.d7.reset}`)
+    if (ct.length) lim.push(ct.join('  ·  '))
     if (lim.length) groups.push(lim.join('\n'))
+    // Context group: the context bar + token data.
+    if (status.ctxPct != null) groups.push(`💾 Context <code>${pinBar(status.ctxPct)}</code> ${status.ctxPct}%${status.tokens ? `  ·  ${status.tokens}` : ''}`)
   }
   groups.push(`🔗 Paired${botUsername ? ` · @${escapeHtml(botUsername)}` : ''} · connected`)
   return `${head}\n\n${groups.join(`\n${CARD_RULE}\n`)}`
