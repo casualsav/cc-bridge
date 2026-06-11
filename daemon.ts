@@ -133,6 +133,18 @@ if (!TOKEN) {
   process.exit(1)
 }
 
+// Persist an env-only token to .env. The token can otherwise live ONLY in the process
+// environment, handed down daemon→watchdog→daemon since the first configured launch — one broken
+// link in that chain and it's gone (daemon crash-loops on boot, no copy anywhere on disk).
+// ensure-daemon's instance discovery also requires the token to be IN .env.
+try {
+  const cur = existsSync(ENV_FILE) ? readFileSync(ENV_FILE, 'utf8') : ''
+  if (!/^\s*TELEGRAM_BOT_TOKEN\s*=\s*\S/m.test(cur)) {
+    writeFileSync(ENV_FILE, `${cur.replace(/\n?$/, '\n')}TELEGRAM_BOT_TOKEN=${TOKEN}\n`, { mode: 0o600 })
+    process.stderr.write('daemon: persisted TELEGRAM_BOT_TOKEN to .env (was env-only)\n')
+  }
+} catch { /* read-only state dir — the env-only setup keeps working as before */ }
+
 // ---- Access control ----
 // The gate / pairing / allowlist logic lives in access.ts (imported above). These consts + the
 // send-path guards below stay here because they're used by the daemon's outbound/chunking paths,
