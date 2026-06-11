@@ -45,4 +45,4 @@ export type Session = {
 export type PendingMultiSelect = { paneId: string; options: PromptOption[]; selected: Set<number> }
 export type FreeTextPrompt = { paneId: string; downCount: number; tabbed: boolean; question: string }
 export type ChatPrompt = { paneId: string; downCount: number; tabbed: boolean; useEscape: boolean }
-export type ScheduledMessage = { id: string; fireAt: number; chatId: string; paneId: string | null; sessionLabel: string; text: string }
+export type ScheduledMessage = { id: string; fireAt: number; chatId: string; paneId: string | null; sessionLabel: string; text: string; thread?: number }

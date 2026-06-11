@@ -27,7 +27,7 @@ import { resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress,
 import { exec, sleep, hashText } from './proc.ts'
 import {
   capturePane, paneAlive, sendKeys, sendKeysLiteral, navigateDown, waitForSettle,
-  autoSizeWindowOf, paneCommand, paneCwd, PaneWatcher,
+  autoSizeWindowOf, paneCommand, paneCwd, lastKnownPaneCwd, PaneWatcher,
 } from './pane-io.ts'
 import type {
   PendingEntry, GroupPolicy, Access, Session,
@@ -817,6 +817,61 @@ async function ensureSessionTopic(paneId: string): Promise<void> {
   }
 }
 
+// Session ended → close its topic (history stays; ensureTopicFor reopens it if the session
+// returns). The pane is already gone, so its cwd comes from the last-known cache. Same-cwd
+// siblings share one topic — only the LAST pane out closes it. The paneAlive re-check guards
+// against a transient tmux blip mass-pruning the registry and close/reopen-flapping topics.
+async function closeTopicForPane(pane: string): Promise<void> {
+  if (!isTopicMode()) return
+  const group = getGroupChatId()
+  if (!group) return
+  if (await paneAlive(pane)) return   // transient registry miss, not a real death
+  const cwd = lastKnownPaneCwd(pane)
+  if (!cwd) return
+  const t = getTopicByCwd(cwd)
+  if (!t || t.closed) return
+  for (const p of [...offMcpPanes]) {
+    if (p !== pane && lastKnownPaneCwd(p) === cwd && await paneAlive(p)) return   // a sibling still lives here
+  }
+  await bot.api.sendMessage(group, '🏁 <b>Session ended</b> — topic closed. It reopens automatically if a session comes back to this project.',
+    { parse_mode: 'HTML', message_thread_id: t.threadId }).catch(() => {})
+  try {
+    await bot.api.closeForumTopic(group, t.threadId)
+    updateTopic(cwd, { closed: true })
+    process.stderr.write(`daemon: closed topic "${t.name}" for ${cwd}\n`)
+  } catch (e) { process.stderr.write(`daemon: closeForumTopic failed for ${cwd}: ${e}\n`) }
+}
+
+// Keep topic titles in step with the working tree: "dir" on the default branch, "dir · branch"
+// elsewhere, renamed via editForumTopic when the branch changes (checked on the slow discovery
+// tick; the per-cwd cache means one git call per project per tick and an edit only on change).
+const topicBranchCache = new Map<string, string>()
+async function refreshTopicTitles(panes: string[]): Promise<void> {
+  if (!isTopicMode()) return
+  const group = getGroupChatId()
+  if (!group) return
+  const seen = new Set<string>()
+  for (const pane of panes) {
+    const cwd = await paneCwd(pane).catch(() => null)
+    if (!cwd || seen.has(cwd)) continue
+    seen.add(cwd)
+    const t = getTopicByCwd(cwd)
+    if (!t || t.closed) continue
+    let branch = ''
+    try { branch = (await exec('git', ['-C', cwd, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 2000 })).stdout.trim() } catch { /* not a git repo */ }
+    if (topicBranchCache.get(cwd) === branch) continue
+    topicBranchCache.set(cwd, branch)
+    const base = basename(cwd) || 'session'
+    const want = branch && !['main', 'master', 'HEAD'].includes(branch) ? `${base} · ${branch}` : base
+    if (want === t.name) continue
+    try {
+      await bot.api.editForumTopic(group, t.threadId, { name: want })
+      updateTopic(cwd, { name: want })
+      process.stderr.write(`daemon: renamed topic for ${cwd} → "${want}"\n`)
+    } catch (e) { process.stderr.write(`daemon: editForumTopic failed for ${cwd}: ${e}\n`) }
+  }
+}
+
 // The existing topic thread for a pane's cwd (no creation) — for per-topic typing/pins.
 async function topicThreadFor(paneId: string | null): Promise<{ group: string; thread: number } | null> {
   if (!isTopicMode() || !paneId) return null
@@ -1075,6 +1130,11 @@ async function scanAuxPanePrompts(pane: string): Promise<void> {
   if (!text) return
   const st = auxPromptStateFor(pane)
 
+  // Limit banners can show ONLY here — an idle focused pane never renders them — so without this
+  // an aux-only limit hit would never schedule the reset ping. Dedup inside is account-global
+  // (keyed on the reset minute), so several panes showing the same banner relay/schedule once.
+  handleUsageLimit(text, pane)
+
   // System stalls auto-dismiss exactly like the focused path — they'd wedge queued injections.
   if (isUsageLimitChoice(text)) { void dismissUsageLimitChoice(pane); return }
   if (isPluginInstallUserScope(text)) { void confirmPluginInstall(pane); return }
@@ -1316,7 +1376,9 @@ async function discoverPanes(): Promise<void> {
   if (FORCE_PANE || !TRANSCRIPT_OUTBOUND) return
   const panes = await findOffMcpPanes()
   const live = new Set(panes)
-  for (const p of [...offMcpPanes]) if (!live.has(p)) offMcpPanes.delete(p)
+  for (const p of [...offMcpPanes]) {
+    if (!live.has(p)) { offMcpPanes.delete(p); void closeTopicForPane(p) }
+  }
 
   // A single `paneAlive` miss is usually a transient tmux timeout under load, not a dead pane —
   // confirm a "lost" focus with a second check before re-adopting, so a busy-tmux blip doesn't
@@ -1335,6 +1397,7 @@ async function discoverPanes(): Promise<void> {
     if (p === focus.activePaneId) { offMcpPanes.add(p); continue }
     if (!offMcpPanes.has(p)) { offMcpPanes.add(p); void announceNewSession(p) }
   }
+  void refreshTopicTitles(panes)                      // topic mode: retitle on git branch change
   for (const p of panes) void ensureSessionTopic(p)   // topic mode: ensure every live session has its topic (covers the focused one + restart)
   void updateSessionPin()
 }
@@ -1692,7 +1755,7 @@ function maybeWarnContext(pct: number | null): void {
 // period can't re-fire while it's still active — and so the pane-scrape and snapshot paths
 // can't double-fire across a snapshot going stale. Drives weekly auto-continue too: a 7d
 // reset is just a `fireAt` days out, well within setTimeout's range.
-function actOnLimitHit(fireAt: number, type: string, banner?: string): void {
+function actOnLimitHit(fireAt: number, type: string, banner?: string, origin: string | null = focus.activePaneId): void {
   const key = `hit:${Math.round(fireAt / 60_000)}`
   if (key === lastActedResetKey && Date.now() < fireAt) return
   lastActedResetKey = key
@@ -1704,7 +1767,7 @@ function actOnLimitHit(fireAt: number, type: string, banner?: string): void {
   const head = banner ? escapeHtml(banner) : `Out of your ${escapeHtml(type)} limit.`
   // Route the immediate banner to the session that hit the limit (its topic in forum mode).
   void (async () => {
-    for (const { chat, thread } of await outboundTargetsFor(focus.activePaneId)) {
+    for (const { chat, thread } of await outboundTargetsFor(origin)) {
       await bot.api.sendMessage(chat, `⛔ <b>Claude hit the usage limit.</b>\n${head}${note}`, { parse_mode: 'HTML', ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
     }
   })()
@@ -1724,7 +1787,7 @@ function checkUsageSnapshot(): void {
   }
 }
 
-function handleUsageLimit(text: string): void {
+function handleUsageLimit(text: string, origin: string | null = focus.activePaneId): void {
   // Statusline snapshot is the authoritative source — when it's fresh, checkUsageSnapshot
   // owns usage handling and this pane-scrape fallback stands down to avoid double-firing.
   if (readUsageSnapshot()) return
@@ -1768,7 +1831,7 @@ function handleUsageLimit(text: string): void {
 
     const type = limitLine.match(/(?:hit your|used 100% of your)\s+([\w-]+)\s+limit/i)?.[1]?.toLowerCase() ?? 'usage'
     const fireAt = parseResetTime(limitLine)
-    if (fireAt) { actOnLimitHit(fireAt, type, limitLine); return }
+    if (fireAt) { actOnLimitHit(fireAt, type, limitLine, origin); return }
     // No parseable reset time — relay once (deduped on the banner line), no schedule.
     const key = `hit:${limitLine}`
     if (key === lastActedResetKey && Date.now() - lastActedResetAt < RESET_RELOCK_MS) return
@@ -1776,7 +1839,7 @@ function handleUsageLimit(text: string): void {
     lastActedResetAt = Date.now()
     saveUsageNotifState()
     void (async () => {
-      for (const { chat, thread } of await outboundTargetsFor(focus.activePaneId)) {
+      for (const { chat, thread } of await outboundTargetsFor(origin)) {
         await bot.api.sendMessage(chat, `⛔ <b>Claude hit the usage limit.</b>\n${escapeHtml(limitLine)}`, { parse_mode: 'HTML', ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
       }
     })()
@@ -2165,6 +2228,7 @@ function startPaneWatcher(paneId: string): void {
       const wasActive = focus.activePaneId === paneId || focus.currentSessionId === paneId
       focus.activePaneId = null; focus.paneWatcher = null
       offMcpPanes.delete(paneId)
+      void closeTopicForPane(paneId)
       if (adoptedPaneId === paneId) adoptedPaneId = null   // clear binding so the rescan re-adopts
       if (wasActive) focus.currentSessionId = null
       const label = sessionNames.get(paneId) || 'Session'
@@ -3243,6 +3307,13 @@ const CONTINUE_RETRY_MS = 3 * 60_000
 const CONTINUE_MAX_ATTEMPTS = 5
 
 function fireResetNotification(chats: string[], attempt = 0): void {
+  // Account-wide limits freeze EVERY session, not just the focused one. In topic mode, also
+  // continue each non-focused pane that's actually showing the frozen banner (gated on
+  // detectLimited — blind injection would type "continue" into healthy sessions), reporting
+  // into its own topic. First pass only: the retry attempts below re-drive the focused pane.
+  if (attempt === 0 && loadAccess().autoContinue !== false && isTopicMode()) {
+    void continueAuxLimitedPanes()
+  }
   // Auto-continue (default on): type "continue" into the session automatically. Falls back
   // to the manual Continue button when disabled (/autocontinue off) or no live session.
   if (loadAccess().autoContinue !== false && focus.activePaneId && focus.paneWatcher) {
@@ -3260,6 +3331,36 @@ function fireResetNotification(chats: string[], attempt = 0): void {
   const keyboard = new InlineKeyboard().text('▶️ Continue', 'usage:continue')
   for (const chat_id of chats) {
     void bot.api.sendMessage(chat_id, '🕛 Usage limit reset — continue?', { reply_markup: keyboard }).catch(() => {})
+  }
+}
+
+// Continue every non-focused off-MCP pane frozen at the limit, each reporting to its own topic.
+// One delayed re-check per pane; if still frozen, leave a manual Continue button in its topic
+// (the persistent multi-attempt retry track belongs to the focused session above).
+async function continueAuxLimitedPanes(): Promise<void> {
+  for (const pane of [...offMcpPanes]) {
+    if (pane === focus.activePaneId) continue
+    try {
+      const cap = await capturePane(pane).catch(() => '')
+      if (!cap || !detectLimited(cap)) continue
+      const ok = await pasteToPane(pane, 'continue')
+      const note = ok
+        ? '🕛 Usage limit reset — ▶️ auto-continuing… (turn off with /autocontinue off)'
+        : '🕛 Usage limit reset (couldn’t reach this session).'
+      for (const { chat, thread } of await outboundTargetsFor(pane)) {
+        await bot.api.sendMessage(chat, note, thread ? { message_thread_id: thread } : {}).catch(() => {})
+      }
+      if (ok) setTimeout(() => void verifyAuxContinue(pane), CONTINUE_VERIFY_MS)
+    } catch { /* pane vanished mid-loop */ }
+  }
+}
+
+async function verifyAuxContinue(pane: string): Promise<void> {
+  const cap = await capturePane(pane).catch(() => '')
+  if (!cap || !detectLimited(cap)) return
+  const kb = new InlineKeyboard().text('▶️ Continue', 'usage:continue')
+  for (const { chat, thread } of await outboundTargetsFor(pane)) {
+    await bot.api.sendMessage(chat, '⚠️ Still limited — tap to retry once it lifts.', { reply_markup: kb, ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
   }
 }
 
@@ -3634,11 +3735,11 @@ bot.command('schedule', async ctx => {
   if (ms > MAX_TIMEOUT) { await ctx.reply('That\'s too far out — max ~24 days.'); return }
   // Target the topic's session (topic mode) or the focused one. Pin by paneId so the queued message
   // fires into the right session even after focus moves; null is allowed (scheduler falls back).
-  const { paneId } = await targetPaneOf(ctx)
+  const { paneId, thread } = await targetPaneOf(ctx)
   const label = paneId ? (sessionNames.get(paneId) || await paneLabel(paneId)) : 'this session'
   const fireAt = Date.now() + ms
   if (oneShotText) {
-    addScheduled({ id: randomBytes(4).toString('hex'), fireAt, chatId: String(ctx.chat?.id), paneId, sessionLabel: label, text: oneShotText })
+    addScheduled({ id: randomBytes(4).toString('hex'), fireAt, chatId: String(ctx.chat?.id), paneId, sessionLabel: label, text: oneShotText, thread })
     await ctx.reply(`✅ Scheduled in <b>${formatDuration(ms)}</b> → <b>${escapeHtml(label)}</b>:\n\n${escapeHtml(oneShotText)}\n\nCancel with <code>/schedule cancel</code>.`, { parse_mode: 'HTML' })
     return
   }
@@ -3646,7 +3747,7 @@ bot.command('schedule', async ctx => {
     `📅 Scheduling in <b>${formatDuration(ms)}</b> (${fmtWhen(fireAt)}) → <b>${escapeHtml(label)}</b>.\n\nReply to this message with what to send.`,
     { parse_mode: 'HTML', reply_markup: { force_reply: true, input_field_placeholder: 'Message to schedule' } },
   )
-  if (sent) scheduleReplyTargets.set(`${ctx.chat?.id}:${sent.message_id}`, { fireAt, paneId, sessionLabel: label })
+  if (sent) scheduleReplyTargets.set(`${ctx.chat?.id}:${sent.message_id}`, { fireAt, paneId, sessionLabel: label, thread })
 })
 
 // User-set session names (paneId → label), overriding the cwd-derived default. Persisted so
@@ -4377,12 +4478,16 @@ bot.on('callback_query:data', async ctx => {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
       return
     }
-    if (!focus.activePaneId || !focus.paneWatcher) {
+    // Tapped in a session's topic → continue that session; General/DM → the focused one.
+    const { paneId } = await targetPaneOf(ctx)
+    if (!paneId) {
       await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {})
       return
     }
     await ctx.answerCallbackQuery({ text: 'Continuing…' }).catch(() => {})
-    const ok = await injectText(focus.activePaneId, focus.paneWatcher, 'continue')
+    const ok = paneId === focus.activePaneId && focus.paneWatcher
+      ? await injectText(paneId, focus.paneWatcher, 'continue')
+      : await pasteToPane(paneId, 'continue')
     await ctx.editMessageText(ok ? '🕛 Usage limit reset — ▶️ continuing…' : '🕛 Usage limit reset (couldn\'t reach the session).').catch(() => {})
     return
   }
@@ -4442,10 +4547,6 @@ bot.on('callback_query:data', async ctx => {
   if (modelSet) {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
-    if (!focus.activePaneId || !focus.paneWatcher) {
-      await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {})
       return
     }
     const alias = modelSet[1]
@@ -4573,13 +4674,14 @@ bot.on('callback_query:data', async ctx => {
       await ctx.editMessageText('✖️ Exit cancelled — session kept.').catch(() => {})
       return
     }
-    if (!focus.activePaneId || !focus.paneWatcher) {
+    const { paneId } = await targetPaneOf(ctx)
+    if (!paneId) {
       await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {})
       return
     }
-    const label = await paneLabel(focus.activePaneId)
+    const label = await paneLabel(paneId)
     await ctx.answerCallbackQuery({ text: 'Exiting…' }).catch(() => {})
-    await injectSlash(focus.activePaneId, focus.paneWatcher, '/exit')
+    await injectSlash(paneId, paneId === focus.activePaneId ? focus.paneWatcher : null, '/exit')
     await ctx.editMessageText(`✅ Session <b>${escapeHtml(label)}</b> exited`, { parse_mode: 'HTML' }).catch(() => {})
     return
   }
@@ -4665,12 +4767,12 @@ bot.on('callback_query:data', async ctx => {
       return
     }
     await ctx.answerCallbackQuery().catch(() => {})
-    const { paneId } = await targetPaneOf(ctx)
+    const { paneId, thread } = await targetPaneOf(ctx)
     const label = paneId ? (sessionNames.get(paneId) || await paneLabel(paneId)) : 'this session'
     const sent = await ctx.reply(
       `📅 Reply with <b>time message</b> → <b>${escapeHtml(label)}</b>.\n\nLike <code>2h ping the server</code> or <code>1h30m run the tests</code>.`,
       { parse_mode: 'HTML', reply_markup: { force_reply: true, input_field_placeholder: 'e.g. 2h ping the server' } })
-    if (sent) scheduleComposeTargets.set(`${ctx.chat?.id}:${sent.message_id}`, { paneId, sessionLabel: label })
+    if (sent) scheduleComposeTargets.set(`${ctx.chat?.id}:${sent.message_id}`, { paneId, sessionLabel: label, thread })
     return
   }
 
@@ -5230,7 +5332,7 @@ bot.on('message:text', async ctx => {
     if (sched) {
       scheduleReplyTargets.delete(replyKey)
       if (!dmCommandGate(ctx)) return
-      const msg: ScheduledMessage = { id: randomBytes(4).toString('hex'), fireAt: sched.fireAt, chatId: String(ctx.chat?.id), paneId: sched.paneId, sessionLabel: sched.sessionLabel, text }
+      const msg: ScheduledMessage = { id: randomBytes(4).toString('hex'), fireAt: sched.fireAt, chatId: String(ctx.chat?.id), paneId: sched.paneId, sessionLabel: sched.sessionLabel, text, thread: sched.thread }
       addScheduled(msg)
       await ctx.reply(`✅ Scheduled for ${fmtWhen(msg.fireAt)} → <b>${escapeHtml(msg.sessionLabel)}</b>.\nCancel with <code>/schedule cancel</code>.`, { parse_mode: 'HTML' })
       return
@@ -5247,7 +5349,7 @@ bot.on('message:text', async ctx => {
       }
       if (ms > MAX_TIMEOUT) { await ctx.reply('That\'s too far out — max ~24 days.'); return }
       const fireAt = Date.now() + ms
-      addScheduled({ id: randomBytes(4).toString('hex'), fireAt, chatId: String(ctx.chat?.id), paneId: compose.paneId, sessionLabel: compose.sessionLabel, text: rest })
+      addScheduled({ id: randomBytes(4).toString('hex'), fireAt, chatId: String(ctx.chat?.id), paneId: compose.paneId, sessionLabel: compose.sessionLabel, text: rest, thread: compose.thread })
       await ctx.reply(`✅ Scheduled in <b>${formatDuration(ms)}</b> → <b>${escapeHtml(compose.sessionLabel)}</b>:\n\n${escapeHtml(rest)}\n\nCancel with <code>/schedule cancel</code>.`, { parse_mode: 'HTML' })
       return
     }

@@ -59,7 +59,14 @@ async function fireScheduled(id: string): Promise<void> {
 
 async function deliverScheduled(msg: ScheduledMessage): Promise<void> {
   const chats = msg.chatId ? [msg.chatId] : deps.loadAccess().allowFrom
-  const note = (t: string) => { for (const c of chats) void deps.bot.api.sendMessage(c, t, { parse_mode: 'HTML' }).catch(() => {}) }
+  // Thread the note into the topic the message was scheduled from (forum mode). If that topic
+  // is gone by fire time the threaded send fails — retry plain so the note still lands.
+  const note = (t: string) => {
+    for (const c of chats) {
+      void deps.bot.api.sendMessage(c, t, { parse_mode: 'HTML', ...(msg.thread ? { message_thread_id: msg.thread } : {}) })
+        .catch(() => msg.thread ? deps.bot.api.sendMessage(c, t, { parse_mode: 'HTML' }).catch(() => {}) : undefined)
+    }
+  }
   if (!msg.paneId || !(await paneAlive(msg.paneId))) {
     note(`⏰ Couldn't send your scheduled message — <b>${escapeHtml(msg.sessionLabel)}</b> is gone:\n\n${escapeHtml(msg.text)}`)
     return
