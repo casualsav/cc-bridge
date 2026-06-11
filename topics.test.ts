@@ -3,6 +3,7 @@ import {
   _resetForTest, isTopicMode, getGroupChatId, setGroupChatId,
   getTopicBySession, getSessionByThread, findTopicByCwd,
   setTopic, updateTopic, removeTopic, listTopics, genSessionId,
+  getGeneralSession, setGeneralSession,
   type TopicEntry,
 } from './topics.ts'
 
@@ -86,6 +87,24 @@ test('listTopics flattens the map to sessionId-tagged rows', () => {
     { sessionId: 's1', cwd: '/x', threadId: 1, name: 't1', closed: false, createdAt: 1 },
     { sessionId: 's2', cwd: '/y', threadId: 2, name: 't2', closed: false, createdAt: 1 },
   ])
+})
+
+test('a fresh store has no General anchor', () => {
+  expect(getGeneralSession()).toBe(null)
+})
+
+test('the General anchor is set, replaced, and cleared', () => {
+  setGeneralSession('aaaa')
+  expect(getGeneralSession()).toBe('aaaa')
+  setGeneralSession('bbbb')
+  expect(getGeneralSession()).toBe('bbbb')
+  setGeneralSession(null)
+  expect(getGeneralSession()).toBe(null)
+})
+
+test('a seeded store carries its General anchor', () => {
+  _resetForTest({ groupChatId: '-100', generalSessionId: 'anch', topics: {} })
+  expect(getGeneralSession()).toBe('anch')
 })
 
 test('genSessionId mints distinct ids', () => {

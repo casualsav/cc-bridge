@@ -11,7 +11,7 @@ import { escapeHtml } from './markdown.ts'
 import { loadAccess } from './access.ts'
 import {
   genSessionId, isTopicMode, getGroupChatId, getTopicBySession, findTopicByCwd,
-  setTopic, updateTopic, removeTopic, listTopics,
+  setTopic, updateTopic, removeTopic, listTopics, getGeneralSession, setGeneralSession,
 } from './topics.ts'
 import { focus, offMcpPanes, sessions } from './state.ts'
 
@@ -126,6 +126,7 @@ export async function outboundTargetsFor(paneId: string | null): Promise<Array<{
   const sid = paneId ? await sessionForPane(paneId) : null
   const cwd = paneId ? await paneCwd(paneId).catch(() => null) : null
   if (!sid || !cwd) return [{ chat: group }]
+  if (sid === getGeneralSession()) return [{ chat: group }]   // anchored to General — unthreaded, never grows a topic
   return [{ chat: group, thread: await ensureTopicFor(group, sid, cwd) }]
 }
 
@@ -141,6 +142,7 @@ export async function ensureSessionTopic(paneId: string): Promise<void> {
   const sid = await sessionForPane(paneId)
   const cwd = await paneCwd(paneId).catch(() => null)
   if (!sid || !cwd) return
+  if (sid === getGeneralSession()) return   // anchored to General — lives there, no topic
   if (getTopicBySession(sid) || topicEnsureInFlight.has(sid)) return   // already have it / creating it
   topicEnsureInFlight.add(sid)
   try {
@@ -164,9 +166,21 @@ export async function closeTopicForPane(pane: string): Promise<void> {
   if (await paneAlive(pane)) return   // transient registry miss, not a real death
   const sid = paneSessionCache.get(pane)
   if (!sid) return
+  if (sid === getGeneralSession()) { await generalAnchorLost(group) ; return }   // anchor died — no topic to close
   const t = getTopicBySession(sid)
   if (!t || t.closed) return
   await closeTopicEntry(group, sid, t)
+}
+
+// The General-anchored session ended: clear the anchor (General reverts to following focus) and
+// offer a one-tap re-anchor of whatever is focused now. Never silently inherit — the user decides.
+export async function generalAnchorLost(group: string): Promise<void> {
+  if (!getGeneralSession()) return   // already cleared (event path + reconcile backstop can both fire)
+  setGeneralSession(null)
+  const kb = new InlineKeyboard().text('📌 Claim General', 'claimgeneral')
+  await bot.api.sendMessage(group,
+    '🏁 <b>The session anchored to General ended.</b>\nGeneral now follows the focused session. Tap to anchor the current one here instead.',
+    { parse_mode: 'HTML', reply_markup: kb }).catch(() => {})
 }
 
 // A worktree session that ended cleanly leaves no reason to keep the worktree — remove it so
@@ -234,6 +248,16 @@ export async function reconcileTopics(panes: string[]): Promise<void> {
     if (misses < 2) { topicMissCounts.set(t.sessionId, misses); continue }
     topicMissCounts.delete(t.sessionId)
     await closeTopicEntry(group, t.sessionId, t)
+  }
+  // Same backstop for the General anchor: it has no topic entry, so the loop above never sees it.
+  const anchor = getGeneralSession()
+  if (anchor) {
+    if (liveSids.has(anchor)) topicMissCounts.delete(anchor)
+    else {
+      const misses = (topicMissCounts.get(anchor) ?? 0) + 1
+      if (misses < 2) topicMissCounts.set(anchor, misses)
+      else { topicMissCounts.delete(anchor); await generalAnchorLost(group) }
+    }
   }
 }
 
@@ -304,11 +328,12 @@ let topicTypingTimer: ReturnType<typeof setInterval> | null = null
 
 function pingTopicTyping(key: string): void {
   const sep = key.lastIndexOf(':')
+  const thread = key.slice(sep + 1)
   void bot.api.sendChatAction(key.slice(0, sep), 'typing',
-    { message_thread_id: Number(key.slice(sep + 1)) }, AbortSignal.timeout(1500)).catch(() => {})
+    thread === 'general' ? {} : { message_thread_id: Number(thread) }, AbortSignal.timeout(1500)).catch(() => {})
 }
 
-export function armTopicTyping(chat: string, thread: number): void {
+export function armTopicTyping(chat: string, thread: number | 'general'): void {
   topicTypingPending.set(`${chat}:${thread}`, Date.now() + TOPIC_TYPING_GRACE_MS)
   pingTopicTyping(`${chat}:${thread}`)
   if (!topicTypingTimer) topicTypingTimer = setInterval(() => {
@@ -321,7 +346,7 @@ export function armTopicTyping(chat: string, thread: number): void {
 
 // The latch's job is done for this thread: work was observed (the relay loops take over) or the
 // reply landed (any further ping would re-light typing OVER the delivered answer).
-export function stopTopicTyping(chat: string, thread: number): void {
+export function stopTopicTyping(chat: string, thread: number | 'general'): void {
   topicTypingPending.delete(`${chat}:${thread}`)
 }
 
@@ -329,7 +354,15 @@ export function stopTopicTyping(chat: string, thread: number): void {
 // after ~5s; the relay loops re-emit each tick (~1.5s) so it stays lit for the whole turn.
 export async function emitTopicTyping(paneId: string | null): Promise<void> {
   const t = await topicThreadFor(paneId)
-  if (!t) return
+  if (!t) {
+    // The General-anchored session has no topic — type in General (unthreaded) instead.
+    const group = getGroupChatId()
+    const anchor = getGeneralSession()
+    if (!group || !anchor || !paneId || (await sessionForPane(paneId, false)) !== anchor) return
+    stopTopicTyping(group, 'general')
+    await bot.api.sendChatAction(group, 'typing', {}, AbortSignal.timeout(1500)).catch(() => {})
+    return
+  }
   stopTopicTyping(t.group, t.thread)   // work observed — the relay ticks sustain typing from here
   await bot.api.sendChatAction(t.group, 'typing', { message_thread_id: t.thread }, AbortSignal.timeout(1500)).catch(() => {})
 }

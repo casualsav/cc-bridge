@@ -27,12 +27,13 @@ export type TopicEntry = {
 
 export type TopicStore = {
   groupChatId: string | null            // the forum supergroup; null = not configured → not in topic mode
+  generalSessionId: string | null      // session anchored to General (no topic of its own; outbound goes unthreaded)
   topics: Record<string, TopicEntry>    // keyed by sessionId (the @tg_session pane stamp)
 }
 
 export function genSessionId(): string { return randomBytes(4).toString('hex') }
 
-let store: TopicStore = { groupChatId: null, topics: {} }
+let store: TopicStore = { groupChatId: null, generalSessionId: null, topics: {} }
 let loaded = false
 let persist = true   // disabled by _resetForTest so unit tests never write to the real STATE_DIR
 
@@ -68,7 +69,11 @@ export function loadTopics(): TopicStore {
           ? { worktree: { repo: t.worktree.repo, path: t.worktree.path } } : {}),
       }
     }
-    store = { groupChatId: typeof raw.groupChatId === 'string' ? raw.groupChatId : null, topics }
+    store = {
+      groupChatId: typeof raw.groupChatId === 'string' ? raw.groupChatId : null,
+      generalSessionId: typeof raw.generalSessionId === 'string' ? raw.generalSessionId : null,
+      topics,
+    }
     loaded = true
     if (migrated) save()   // persist the re-keyed store so the migration runs once
     return store
@@ -87,6 +92,18 @@ export function setGroupChatId(chatId: string | null): void {
   ensureLoaded()
   if (store.groupChatId === chatId) return
   store.groupChatId = chatId
+  save()
+}
+
+// ---- General anchor ----
+// The session bound to the General topic itself (typically the session that ran /bind). It gets
+// no topic of its own: its outbound goes to the group unthreaded, and General inbound/commands
+// target it deterministically instead of following focus. Cleared when that session ends.
+export function getGeneralSession(): string | null { ensureLoaded(); return store.generalSessionId }
+export function setGeneralSession(sessionId: string | null): void {
+  ensureLoaded()
+  if (store.generalSessionId === sessionId) return
+  store.generalSessionId = sessionId
   save()
 }
 
@@ -133,8 +150,8 @@ export function listTopics(): Array<{ sessionId: string } & TopicEntry> {
 
 // Test seam: set the in-memory store directly, mark it loaded, and disable disk persistence so
 // mutators in tests don't write to the real STATE_DIR/topics.json.
-export function _resetForTest(s?: TopicStore): void {
-  store = s ?? { groupChatId: null, topics: {} }
+export function _resetForTest(s?: Partial<TopicStore>): void {
+  store = { groupChatId: null, generalSessionId: null, topics: {}, ...s }
   loaded = true
   persist = false
 }

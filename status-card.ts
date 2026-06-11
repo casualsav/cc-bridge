@@ -14,7 +14,7 @@ import { parseStatusline, pinBar, type StatuslineData } from './statusline.ts'
 import { capturePane, paneCwd } from './pane-io.ts'
 import { focus } from './state.ts'
 import { loadAccess } from './access.ts'
-import { isTopicMode, getGroupChatId, listTopics } from './topics.ts'
+import { isTopicMode, getGroupChatId, listTopics, getGeneralSession } from './topics.ts'
 import { paneForSession } from './topic-runtime.ts'
 import { detectCurrentMode, onNormalPrompt, type CcMode } from './prompt.ts'
 
@@ -262,6 +262,32 @@ export async function createSessionPin(chat: string, text: string, reply_markup:
 export async function updateTopicPins(): Promise<void> {
   const group = getGroupChatId()
   if (!group) return
+  // The General-anchored session gets a real pin in General (keyed `general`), with the quick-action
+  // keyboard — its taps resolve via targetPaneOf, which maps General back to the anchored pane.
+  const anchorSid = getGeneralSession()
+  if (anchorSid) {
+    const paneId = await paneForSession(anchorSid)
+    if (paneId) {
+      const text = await statusCardText(paneId)
+      const key = 'general'
+      const existing = sessionPins.get(key)
+      if (existing && pinTextCache.get(key) !== text) {
+        try { await deps.bot.api.editMessageText(group, existing, text, { parse_mode: 'HTML', reply_markup: statusKeyboard() }); pinTextCache.set(key, text) }
+        catch (e) {
+          if (pinMessageGone(e)) { sessionPins.delete(key); pinTextCache.delete(key); persistSessionPins() }
+          else pinTextCache.set(key, text)   // "not modified" → already current
+        }
+      }
+      if (!sessionPins.has(key)) {
+        try {
+          await deps.bot.api.unpinAllGeneralForumTopicMessages(group).catch(() => {})   // single-pin guarantee for General
+          const m = await deps.bot.api.sendMessage(group, text, { parse_mode: 'HTML', reply_markup: statusKeyboard(), disable_notification: true })
+          await deps.bot.api.pinChatMessage(group, m.message_id, { disable_notification: true }).catch(() => {})
+          sessionPins.set(key, m.message_id); pinTextCache.set(key, text); persistSessionPins()
+        } catch (e) { process.stderr.write(`daemon: general pin create failed: ${e}\n`) }
+      }
+    }
+  }
   for (const t of listTopics()) {
     if (t.closed) continue
     const paneId = await paneForSession(t.sessionId)

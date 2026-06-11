@@ -56,11 +56,12 @@ import {
 import {
   setGroupChatId, getGroupChatId, isTopicMode, loadTopics, genSessionId,
   getSessionByThread, getTopicBySession, setTopic, removeTopic, updateTopic, listTopics,
+  getGeneralSession, setGeneralSession,
 } from './topics.ts'
 import {
   initTopicRuntime, sessionForPane, paneForSession, ensureSessionTopic, closeTopicForPane,
   reconcileTopics, refreshTopicTitles, topicThreadFor, emitTopicTyping, armTopicTyping, stopTopicTyping, outboundTargetsFor,
-  stampPaneSession, topicBranchCache,
+  stampPaneSession, topicBranchCache, generalAnchorLost,
 } from './topic-runtime.ts'
 import {
   MAX_CHUNK_LIMIT, MAX_ATTACHMENT_BYTES, assertAllowedChat, resolveChatId, resolveTarget,
@@ -826,6 +827,7 @@ async function relayLoopTick(gen: number): Promise<void> {
         for (const t of targets) {
           await sendAgentText([t.chat], r.text, t.thread).catch(e => process.stderr.write(`daemon: relay send failed: ${e}\n`))
           if (t.thread != null) stopTopicTyping(t.chat, t.thread)   // reply delivered — never re-light typing over it
+          else if (isTopicMode() && t.chat === getGroupChatId()) stopTopicTyping(t.chat, 'general')   // General-anchored reply — same latch release
         }
       }
       typingPresence.stop()   // reply delivered (or banner suppressed) → clean stop, no tail
@@ -930,6 +932,7 @@ async function auxRelayTick(): Promise<void> {
           for (const t of targets) {
             await sendAgentText([t.chat], r.text, t.thread).catch(e => process.stderr.write(`daemon: aux relay send failed: ${e}\n`))
             if (t.thread != null) stopTopicTyping(t.chat, t.thread)   // reply delivered — never re-light typing over it
+          else if (isTopicMode() && t.chat === getGroupChatId()) stopTopicTyping(t.chat, 'general')   // General-anchored reply — same latch release
           }
         }
       } catch { /* transient (tmux/transcript) — retry next tick */ }
@@ -1348,7 +1351,19 @@ async function targetPaneOf(ctx: Context): Promise<{ paneId: string | null; thre
     const sid = getSessionByThread(thread)
     return { paneId: sid ? await paneForSession(sid) : null, thread }
   }
+  // General with an anchored session → that session, regardless of focus. Anchor missing or its
+  // pane dead → fall through to the focused session (the pre-anchor behavior).
+  if (isTopicMode() && String(ctx.chat?.id ?? '') === getGroupChatId()) {
+    const anchorPane = await generalAnchorPane()
+    if (anchorPane) return { paneId: anchorPane }
+  }
   return { paneId: focus.activePaneId }
+}
+
+// The General anchor's live pane, or null (no anchor / its session isn't running).
+async function generalAnchorPane(): Promise<string | null> {
+  const sid = getGeneralSession()
+  return sid ? paneForSession(sid) : null
 }
 
 // Resolve the target. On "no session" it replies with the reason (in-thread when applicable) and
@@ -1364,12 +1379,18 @@ async function commandTarget(ctx: Context): Promise<CommandTarget | null> {
     const isFocused = paneId === focus.activePaneId
     return { paneId, watcher: isFocused ? focus.paneWatcher : null, isFocused, replyThread: thread }
   }
-  // General (no thread) or DM → the focused session (today's behavior). Mirror the old guard message.
-  if (!paneId || !focus.paneWatcher) {
+  // General (anchored or focused) or DM (focused). The anchored pane may be off-focus — then it
+  // has no PaneWatcher, same as a command sent in an off-focus session's topic.
+  if (!paneId) {
     await ctx.reply('No active Claude Code session with tmux. Send a message from CC first.')
     return null
   }
-  return { paneId, watcher: focus.paneWatcher, isFocused: true }
+  const isFocused = paneId === focus.activePaneId
+  if (isFocused && !focus.paneWatcher) {
+    await ctx.reply('No active Claude Code session with tmux. Send a message from CC first.')
+    return null
+  }
+  return { paneId, watcher: isFocused ? focus.paneWatcher : null, isFocused }
 }
 
 // sendMessage extras that thread the reply into the command's topic (ctx.reply auto-threads, but the
@@ -2770,7 +2791,25 @@ bot.command('status', async ctx => {
       return
     }
     if (isTopicMode()) {
-      // General: a one-shot card for the focused session — General has no pin of its own.
+      const anchorPane = chat === getGroupChatId() ? await generalAnchorPane() : null
+      if (anchorPane) {
+        // General hosts an anchored session → re-post its real pin at the bottom, like a topic's.
+        const key = 'general'
+        const old = sessionPins.get(key)
+        if (old) {
+          await bot.api.deleteMessage(chat, old).catch(() => {})
+          sessionPins.delete(key); pinTextCache.delete(key); persistSessionPins()
+        }
+        await bot.api.unpinAllGeneralForumTopicMessages(chat).catch(() => {})   // single-pin guarantee for General
+        const text = await statusCardText(anchorPane)
+        const m = await bot.api.sendMessage(chat, text, { parse_mode: 'HTML', reply_markup: statusKeyboard(), disable_notification: true }).catch(() => null)
+        if (m) {
+          await bot.api.pinChatMessage(chat, m.message_id, { disable_notification: true }).catch(() => {})
+          sessionPins.set(key, m.message_id); pinTextCache.set(key, text); persistSessionPins()
+        }
+        return
+      }
+      // General without an anchor (or a DM): a one-shot card for the focused session.
       await ctx.reply(await statusCardText(paneId), { parse_mode: 'HTML', reply_markup: statusKeyboard() }).catch(() => {})
       return
     }
@@ -2994,7 +3033,7 @@ bot.command(['bind', 'unbind'], async ctx => {
   const arg = (ctx.match ?? '').toString().trim().toLowerCase()
   const unbinding = ctx.message?.text?.startsWith('/unbind') || arg === 'off'
   if (unbinding) {
-    if (getGroupChatId() === groupId) setGroupChatId(null)
+    if (getGroupChatId() === groupId) { setGroupChatId(null); setGeneralSession(null) }
     await ctx.reply('🔓 Unbound. This group is no longer the command center; per-session topics are off.')
     return
   }
@@ -3009,9 +3048,20 @@ bot.command(['bind', 'unbind'], async ctx => {
   access.groups[groupId] = { allowFrom: [...new Set([...existing, ...access.allowFrom])], requireMention: false }
   saveAccess(access)
   setGroupChatId(groupId)
+  // Anchor the currently focused session to General, so the session you bound from stays reachable
+  // right here — deterministically, not via focus-follows. Skip if it already has a topic (a
+  // re-bind): that session has a home, anchoring it would split its routing across two surfaces.
+  let anchorNote = ''
+  if (focus.activePaneId) {
+    const sid = await sessionForPane(focus.activePaneId)
+    if (sid && !getTopicBySession(sid)) {
+      setGeneralSession(sid)
+      anchorNote = 'Your current session is anchored to this <b>General</b> topic — it stays here. '
+    }
+  }
   await ctx.reply(
     '✅ <b>Bound this forum as the command center.</b>\n\n' +
-    'Each Claude Code session will get its own topic; this <b>General</b> topic stays for global ' +
+    `${anchorNote}Each other Claude Code session will get its own topic; General also carries global ` +
     'commands (/status, /settings).\n\n' +
     '⚠️ One more setup step: in @BotFather → <i>Bot Settings → Group Privacy → Turn off</i>, so I can ' +
     'see messages you type inside a session’s topic (not just commands). Then remove + re-add me to the group.\n\n' +
@@ -3019,6 +3069,39 @@ bot.command(['bind', 'unbind'], async ctx => {
     { parse_mode: 'HTML' })
 })
 
+
+// Anchor the focused session to General — /bind does it automatically on a fresh bind; /claim (or
+// the 📌 button on the anchor-lost notice) does it on demand. If the session already has a topic,
+// that topic closes with a pointer note: its conversation continues in General.
+async function claimGeneralForFocused(): Promise<string> {
+  const group = getGroupChatId()
+  if (!group) return '⚠️ Not in group mode — nothing to anchor.'
+  if (!focus.activePaneId) return '🚫 No focused session to anchor.'
+  const sid = await sessionForPane(focus.activePaneId)
+  if (!sid) return '🚫 Couldn’t identify the focused session.'
+  if (sid === getGeneralSession()) return '📌 This session is already anchored to General.'
+  const t = getTopicBySession(sid)
+  if (t && !t.closed) {
+    await bot.api.sendMessage(group, '📌 This session moved to <b>General</b> — replies land there from now on.',
+      { parse_mode: 'HTML', message_thread_id: t.threadId }).catch(() => {})
+    await bot.api.closeForumTopic(group, t.threadId).catch(() => {})
+    updateTopic(sid, { closed: true })
+  }
+  setGeneralSession(sid)
+  void updateSessionPin()
+  const cwd = await paneCwd(focus.activePaneId).catch(() => null)
+  return `📌 <b>Anchored to General:</b> the focused session${cwd ? ` (<code>${escapeHtml(cwd)}</code>)` : ''} now lives here.`
+}
+
+// /claim — anchor the focused session to this group's General topic.
+bot.command('claim', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  if (!isTopicMode() || String(ctx.chat?.id) !== getGroupChatId() || typeof ctx.message?.message_thread_id === 'number') {
+    await ctx.reply('Run /claim in the command-center group’s General topic — it anchors the focused session there.')
+    return
+  }
+  await ctx.reply(await claimGeneralForFocused(), { parse_mode: 'HTML' })
+})
 
 // /cost, /context relay session visibility info. (/session is the registry — below.)
 bot.command('cost', ctx => doReadout(ctx, 'cost'))
@@ -5156,6 +5239,18 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
+  // 📌 on the anchor-lost notice (or /claim): anchor the focused session to General.
+  if (data === 'claimgeneral') {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    await ctx.answerCallbackQuery().catch(() => {})
+    const note = await claimGeneralForFocused()
+    await ctx.editMessageText(note, { parse_mode: 'HTML' }).catch(() => {})
+    return
+  }
+
   // 🗑 on the topic-closed notice: delete the topic (removes the tab + history). The "always"
   // variant also flips topicOnEnd=delete so future ended sessions vanish without asking.
   const topicDel = /^topicdel(always)?:(\d+)$/.exec(data)
@@ -5538,7 +5633,11 @@ async function handleInbound(
   // after ~5s and went dark until the transcript showed work). DM mode keeps the flat keep-alive.
   // Avoids stray typing in the group's General.
   const inThreadId = ctx.message?.message_thread_id
-  if (isTopicMode()) { if (typeof inThreadId === 'number') armTopicTyping(chat_id, inThreadId) }
+  if (isTopicMode()) {
+    if (typeof inThreadId === 'number') armTopicTyping(chat_id, inThreadId)
+    // General with an anchored session: latch typing unthreaded (the anchor's replies land here).
+    else if (chat_id === getGroupChatId() && getGeneralSession()) armTopicTyping(chat_id, 'general')
+  }
   else typingPresence.arm(chat_id)
 
   // Remember the latest inbound message per route so an edit to it can be re-injected as a
@@ -5617,6 +5716,15 @@ async function handleInbound(
     targetPane = sid ? await paneForSession(sid) : null
     if (sid && !targetPane) { void reviveTopicSession(ctx, sid, params); return }   // session died → revive it and deliver (ROADMAP #2)
     if (!sid) { void offerTopicBind(ctx, threadId); return }  // unbound (user-created) topic → set it up, never misroute to focused
+  } else if (isTopicMode() && chat_id === getGroupChatId()) {
+    // General → the anchored session. Anchor set but its pane dead → clear it now (claim card)
+    // rather than waiting for the reconcile tick, then deliver to the focused session as before.
+    const anchorSid = getGeneralSession()
+    if (anchorSid) {
+      const pane = await paneForSession(anchorSid)
+      if (pane) targetPane = pane
+      else void generalAnchorLost(chat_id)
+    }
   }
   emitInbound(params, targetPane)
 }
@@ -5691,6 +5799,12 @@ bot.on('edited_message', async ctx => {
     const sid = getSessionByThread(thread)
     targetPane = sid ? await paneForSession(sid) : null
     if (!targetPane) return   // session gone — a correction isn't worth a revival
+  } else if (isTopicMode() && chat === getGroupChatId()) {
+    const sid = getGeneralSession()
+    if (sid) {
+      targetPane = await paneForSession(sid)
+      if (!targetPane) return   // anchor gone — a correction isn't worth a revival
+    }
   }
   emitInbound({
     content: text,
