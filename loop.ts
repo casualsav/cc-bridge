@@ -21,7 +21,7 @@ import { escapeHtml } from './markdown.ts'
 import { capturePane, paneCwd, paneAlive } from './pane-io.ts'
 import { focus } from './state.ts'
 import { paneForSession } from './topic-runtime.ts'
-import { onNormalPrompt } from './prompt.ts'
+import { onNormalPrompt, stripAnsi } from './prompt.ts'
 import { parseStatusline } from './statusline.ts'
 import { latestFinalReply, turnInProgress } from './transcript.ts'
 
@@ -37,25 +37,27 @@ type LoopDeps = {
 let deps: LoopDeps
 export function initLoop(d: LoopDeps): void { deps = d }
 
-export type LoopStatus = 'wizard:check' | 'wizard:max' | 'wizard:budget' | 'confirm' | 'running' | 'paused' | 'stopping'
+export type LoopStatus = 'wizard:check' | 'wizard:max' | 'wizard:budget' | 'wizard:time' | 'confirm' | 'running' | 'paused' | 'stopping'
 export type LoopRecord = {
   goal: string
   status: LoopStatus
   check?: string            // shell command, exit 0 = done; absent = LOOP_DONE self-report
   maxIter?: number          // absent = explicitly unlimited
   budget?: number           // $ ceiling; absent = explicitly unlimited
+  timeLimitMs?: number      // wall-clock ceiling from start; absent = explicitly unlimited
   iter: number              // 1-based, the iteration currently running (0 before start)
   spent: number             // $ accumulated from statusline cost deltas
   costBase?: number         // last statusline cost seen (delta/reset tracking, sweepBudget-style)
+  warnedNoCost?: boolean    // budget set but the statusline never showed a $ figure — warned once
   lastReplyUuid: string     // final reply present when the current iteration was injected
   lastReplyText?: string    // normalized previous conclusion — the no-progress guard
   injectedAt?: number
-  pausedKind?: 'noprogress' | 'stall'
+  pausedKind?: 'noprogress' | 'stall' | 'checkbroken'
   chat: string
   thread?: number
   cardMsg?: number
   startedAt: number
-  lastCheckNote?: string    // short "exit 0 / exit 1" line for the card
+  lastCheckNote?: string    // short "exit 1 — 3 tests failed" line for the card
 }
 
 const LOOPS_FILE = join(STATE_DIR, 'loops.json')
@@ -99,6 +101,15 @@ export function parseBudgetReply(text: string): { budget?: number } | null {
   const n = m ? parseFloat(m[1].replace(',', '.')) : NaN
   return Number.isFinite(n) && n > 0 ? { budget: n } : null
 }
+export function parseTimeReply(text: string): { ms?: number } | null {
+  const t = text.trim()
+  if (UNLIMITED_RE.test(t)) return {}
+  const m = /^(\d+(?:\.\d+)?)\s*(h|hrs?|hours?|m|mins?|minutes?)$/i.exec(t)
+  if (!m) return null
+  const n = parseFloat(m[1])
+  if (!Number.isFinite(n) || n <= 0) return null
+  return { ms: Math.round(n * (/^h/i.test(m[2]) ? 3_600_000 : 60_000)) }
+}
 
 // ---- Iteration prompt ----
 export function iterationPrompt(rec: Pick<LoopRecord, 'goal' | 'iter' | 'maxIter' | 'check'>): string {
@@ -117,12 +128,13 @@ export type BoundaryDecision =
   | { action: 'continue' }
 // Order: explicit stop › objective success › self-report › hard limits › no-progress guard.
 // Success outranks limits so a run that finishes ON its last iteration reads as done, not capped.
-export function decideBoundary(rec: LoopRecord, replyText: string, checkOk: boolean | null = null): BoundaryDecision {
+export function decideBoundary(rec: LoopRecord, replyText: string, checkOk: boolean | null = null, now: number = Date.now()): BoundaryDecision {
   if (rec.status === 'stopping') return { action: 'stop', kind: 'user', reason: 'stopped by user' }
   if (checkOk === true) return { action: 'stop', kind: 'done', reason: `check passed (<code>${escapeHtml(rec.check ?? '')}</code>)` }
   if (!rec.check && /^\s*LOOP_DONE\s*$/m.test(replyText)) return { action: 'stop', kind: 'done', reason: 'Claude reported the goal complete' }
   if (rec.budget !== undefined && rec.spent >= rec.budget) return { action: 'stop', kind: 'limit', reason: `budget reached ($${rec.spent.toFixed(2)} of $${rec.budget.toFixed(2)})` }
   if (rec.maxIter !== undefined && rec.iter >= rec.maxIter) return { action: 'stop', kind: 'limit', reason: `max iterations reached (${rec.maxIter})` }
+  if (rec.timeLimitMs !== undefined && now - rec.startedAt >= rec.timeLimitMs) return { action: 'stop', kind: 'limit', reason: `time limit reached (${fmtDur(rec.timeLimitMs)})` }
   if (rec.lastReplyText && norm(replyText) === rec.lastReplyText) return { action: 'pause', reason: 'no progress — the last two conclusions are identical' }
   return { action: 'continue' }
 }
@@ -134,7 +146,7 @@ function fmtDur(ms: number): string {
   return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h${m % 60 ? ` ${m % 60}m` : ''}`
 }
 function summaryLine(rec: LoopRecord): string {
-  return `✅ ${rec.check ? `<code>${escapeHtml(rec.check)}</code>` : 'self-report'} · 🔂 ${fmtLimit(rec.maxIter, false)} · 💸 ${fmtLimit(rec.budget, true)}`
+  return `✅ ${rec.check ? `<code>${escapeHtml(rec.check)}</code>` : 'self-report'} · 🔂 ${fmtLimit(rec.maxIter, false)} · 💸 ${fmtLimit(rec.budget, true)} · ⏳ ${rec.timeLimitMs === undefined ? 'unlimited' : fmtDur(rec.timeLimitMs)}`
 }
 function cardHtml(rec: LoopRecord): string {
   const goal = `🔁 <b>Loop</b>: “${escapeHtml(rec.goal.slice(0, 200))}”`
@@ -145,8 +157,10 @@ function cardHtml(rec: LoopRecord): string {
       return `${goal}\n✅ Check: ${rec.check ? `<code>${escapeHtml(rec.check)}</code>` : 'self-report'}\n\n🔂 <b>Max iterations?</b>\nReply with a number.\n<i>Reply "unlimited" to set no iteration limit.</i>`
     case 'wizard:budget':
       return `${goal}\n✅ Check: ${rec.check ? `<code>${escapeHtml(rec.check)}</code>` : 'self-report'} · 🔂 Max: ${fmtLimit(rec.maxIter, false)}\n\n💸 <b>Loop budget?</b>\nReply with a dollar amount, e.g. <code>5</code> or <code>12.50</code>.\n<i>Reply "unlimited" to set no budget limit.</i>`
+    case 'wizard:time':
+      return `${goal}\n✅ Check: ${rec.check ? `<code>${escapeHtml(rec.check)}</code>` : 'self-report'} · 🔂 Max: ${fmtLimit(rec.maxIter, false)} · 💸 ${fmtLimit(rec.budget, true)}\n\n⏳ <b>Time limit?</b>\nReply with a duration, e.g. <code>2h</code> or <code>90m</code>.\n<i>Reply "unlimited" to set no time limit.</i>`
     case 'confirm': {
-      const noHardStop = rec.maxIter === undefined && rec.budget === undefined
+      const noHardStop = rec.maxIter === undefined && rec.budget === undefined && rec.timeLimitMs === undefined
       return `${goal}\n${summaryLine(rec)}` + (noHardStop
         ? `\n\n⚠️ <b>No hard stop set</b> — this loop runs until the check passes or you stop it manually.`
         : '')
@@ -154,16 +168,21 @@ function cardHtml(rec: LoopRecord): string {
     case 'running':
     case 'stopping': {
       const soft = rec.status === 'stopping' ? '\n⏸ Stopping after this iteration…' : ''
-      return `🔁 <b>Loop running</b> — iter ${rec.iter}${rec.maxIter ? `/${rec.maxIter}` : ''} · $${rec.spent.toFixed(2)}${rec.budget !== undefined ? `/$${rec.budget.toFixed(2)}` : ''}\n` +
-        `${goal}\n✅ Last check: ${rec.lastCheckNote ?? 'not run yet'}\n🕐 Iter ${rec.iter} started ${rec.injectedAt ? fmtDur(Date.now() - rec.injectedAt) + ' ago' : 'just now'}${soft}`
+      const time = `⏱ ${fmtDur(Date.now() - rec.startedAt)}${rec.timeLimitMs !== undefined ? `/${fmtDur(rec.timeLimitMs)}` : ''}`
+      return `🔁 <b>Loop running</b> — iter ${rec.iter}${rec.maxIter ? `/${rec.maxIter}` : ''} · $${rec.spent.toFixed(2)}${rec.budget !== undefined ? `/$${rec.budget.toFixed(2)}` : ''} · ${time}\n` +
+        `${goal}\n✅ Last check: ${escapeHtml(rec.lastCheckNote ?? (rec.check ? 'not run yet' : 'self-report (LOOP_DONE)'))}${soft}`
     }
-    case 'paused':
-      return `⏸ <b>Loop paused</b> — ${rec.pausedKind === 'stall' ? 'the injected prompt never became a turn' : 'no progress between iterations'} (iter ${rec.iter}, $${rec.spent.toFixed(2)} spent)\n${goal}`
+    case 'paused': {
+      const why = rec.pausedKind === 'stall' ? 'the injected prompt never became a turn'
+        : rec.pausedKind === 'checkbroken' ? `the check command couldn't run (${escapeHtml(rec.lastCheckNote ?? '?')}) — fix it, then Resume re-evaluates`
+        : 'no progress between iterations'
+      return `⏸ <b>Loop paused</b> — ${why} (iter ${rec.iter}, $${rec.spent.toFixed(2)} spent)\n${goal}`
+    }
   }
 }
 function cardKeyboard(rec: LoopRecord, sid: string): InlineKeyboard | undefined {
   switch (rec.status) {
-    case 'wizard:check': case 'wizard:max': case 'wizard:budget':
+    case 'wizard:check': case 'wizard:max': case 'wizard:budget': case 'wizard:time':
       return new InlineKeyboard().text('✖️ Cancel', `loop:cancel:${sid}`)
     case 'confirm': {
       const anyway = rec.maxIter === undefined && rec.budget === undefined
@@ -230,6 +249,11 @@ export async function handleLoopWizardReply(sid: string, text: string): Promise<
     const p = parseBudgetReply(text)
     if (!p) { await nudgeInvalid(rec, 'a dollar amount like 5 or 12.50 (or "unlimited")'); return }
     rec.budget = p.budget
+    rec.status = 'wizard:time'
+  } else if (rec.status === 'wizard:time') {
+    const p = parseTimeReply(text)
+    if (!p) { await nudgeInvalid(rec, 'a duration like 2h or 90m (or "unlimited")'); return }
+    rec.timeLimitMs = p.ms
     rec.status = 'confirm'
   } else return
   await renderCard(sid, rec)
@@ -238,6 +262,10 @@ export async function handleLoopWizardReply(sid: string, text: string): Promise<
 async function nudgeInvalid(rec: LoopRecord, want: string): Promise<void> {
   await deps.bot.api.sendMessage(rec.chat, `🤔 Didn't catch that — reply with ${want}.`,
     { disable_notification: true, ...(rec.thread ? { message_thread_id: rec.thread } : {}) }).catch(() => {})
+}
+async function say(rec: LoopRecord, html: string, loud = false): Promise<void> {
+  await deps.bot.api.sendMessage(rec.chat, html,
+    { parse_mode: 'HTML', disable_notification: !loud, ...(rec.thread ? { message_thread_id: rec.thread } : {}) }).catch(() => {})
 }
 
 // ---- Lifecycle (wizard buttons + /loop subcommands) ----
@@ -261,6 +289,23 @@ export async function loopGo(sid: string): Promise<string> {
   if (!rec || rec.status !== 'confirm') return 'No loop waiting to start.'
   const pane = await paneFor(sid)
   if (!pane || !(await paneAlive(pane))) return 'No live session pane to run the loop in.'
+  // Pre-flight the verifier: a broken check must fail HERE, not "fail" every iteration until
+  // a cap (that's the runaway path) — and if it already passes there's nothing to loop on.
+  if (rec.check) {
+    const res = await runCheck(rec.check, await paneCwd(pane).catch(() => null))
+    rec.lastCheckNote = res.note
+    writeLoops(map)
+    if (!res.ran) {
+      const note = `🚫 The check couldn't run (${escapeHtml(res.note)}) — fix the command, then tap Start again.`
+      await say(rec, note)
+      return note
+    }
+    if (res.ok) {
+      const note = `✅ The check already passes (<code>${escapeHtml(rec.check)}</code>) — nothing to loop on. Cancel, or change the goal's check.`
+      await say(rec, note)
+      return note
+    }
+  }
   // Baseline the transcript cursor + statusline cost so iteration 1 is measured from here.
   const file = await deps.resolveTranscriptForPane(pane)
   rec.lastReplyUuid = (file ? latestFinalReply(file)?.uuid : '') ?? ''
@@ -310,6 +355,16 @@ export async function loopResume(sid: string): Promise<string> {
   if (!rec || rec.status !== 'paused') return 'No paused loop.'
   const pane = await paneFor(sid)
   if (!pane || !(await paneAlive(pane))) return 'No live session pane to resume in.'
+  if (rec.pausedKind === 'checkbroken') {
+    // The iteration already concluded — don't re-prompt. Clear the pause and let the next sweep
+    // re-evaluate the same boundary with the (hopefully fixed) check command.
+    rec.pausedKind = undefined
+    rec.status = 'running'
+    rec.injectedAt = Date.now()
+    await renderCard(sid, rec)
+    writeLoops(map)
+    return 'Resumed — re-running the check at the next sweep.'
+  }
   if (rec.pausedKind === 'noprogress') rec.iter++   // stall keeps its iteration; no-progress moves on
   rec.pausedKind = undefined
   rec.status = 'running'
@@ -347,22 +402,37 @@ async function finishLoop(sid: string, rec: LoopRecord, map: Record<string, Loop
 // ---- Sweep ----
 // Spend tracking mirrors the daily-budget sweep: statusline cost is cumulative per conversation,
 // so accumulate positive deltas and re-baseline at 0 when the cost drops (a /clear mid-loop).
-function updateSpend(rec: LoopRecord, cap: string): void {
+function updateSpend(rec: LoopRecord, cap: string): boolean {
   const cost = parseFloat((parseStatusline(cap)?.cost ?? '').replace('$', ''))
-  if (!Number.isFinite(cost)) return
-  if (rec.costBase === undefined) { rec.costBase = cost; return }   // first readable sighting baselines, never bills pre-loop spend
-  if (cost < rec.costBase) rec.costBase = 0                         // conversation reset mid-loop — the fresh session counts from its start
+  if (!Number.isFinite(cost)) return false
+  if (rec.costBase === undefined) { rec.costBase = cost; return true }   // first readable sighting baselines, never bills pre-loop spend
+  if (cost < rec.costBase) rec.costBase = 0                              // conversation reset mid-loop — the fresh session counts from its start
+  const before = rec.spent
   rec.spent += Math.max(0, cost - rec.costBase)
+  const changed = rec.spent !== before || rec.costBase !== cost
   rec.costBase = cost
+  return changed
 }
 
-async function runCheck(cmd: string, cwd: string | null): Promise<{ ok: boolean; note: string }> {
+// ran=false means the verifier itself is broken (couldn't start, not found/executable, timed
+// out) — that must never count as "the work isn't done yet", or a typo'd command silently
+// burns every iteration to its cap.
+type CheckResult = { ran: boolean; ok: boolean; note: string }
+function lastOutputLine(s: string): string {
+  const lines = stripAnsi(s).split('\n').map(l => l.trim()).filter(Boolean)
+  return (lines.at(-1) ?? '').slice(0, 80)
+}
+async function runCheck(cmd: string, cwd: string | null): Promise<CheckResult> {
   try {
     await exec('bash', ['-lc', cmd], { timeout: CHECK_TIMEOUT_MS, maxBuffer: 4_000_000, ...(cwd ? { cwd } : {}) })
-    return { ok: true, note: 'exit 0 ✓' }
+    return { ran: true, ok: true, note: 'exit 0 ✓' }
   } catch (e) {
-    const code = (e as { code?: number | string })?.code
-    return { ok: false, note: typeof code === 'number' ? `exit ${code}` : 'failed to run' }
+    const err = e as { code?: number | string; killed?: boolean; stdout?: string; stderr?: string }
+    const tail = lastOutputLine(`${err.stdout ?? ''}\n${err.stderr ?? ''}`)
+    if (err.killed) return { ran: false, ok: false, note: `timed out after ${CHECK_TIMEOUT_MS / 60_000}m` }
+    if (typeof err.code !== 'number') return { ran: false, ok: false, note: 'could not start' }
+    if (err.code === 126 || err.code === 127) return { ran: false, ok: false, note: `exit ${err.code} — ${tail || 'command not found'}` }
+    return { ran: true, ok: false, note: `exit ${err.code}${tail ? ` — ${tail}` : ''}` }
   }
 }
 
@@ -377,11 +447,12 @@ export async function sweepLoops(): Promise<void> {
       const pane = await paneFor(sid)
       if (!pane || !(await paneAlive(pane))) { await finishLoop(sid, rec, map, 'limit', 'the session pane is gone'); continue }
       const cap = await capturePane(pane).catch(() => '')
-      updateSpend(rec, cap)
-      writeLoops(map)   // spend ticks even mid-turn so the card and a restart stay honest
+      // Spend ticks even mid-turn (a restart stays honest), but the CARD only edits at iteration
+      // boundaries/state changes — it must never compete with the mirror/streaming edits mid-turn.
+      if (updateSpend(rec, cap)) writeLoops(map)
       const file = await deps.resolveTranscriptForPane(pane)
-      if (!file || turnInProgress(file)) { await renderCard(sid, rec); continue }
-      if (!cap || !onNormalPrompt(cap)) { await renderCard(sid, rec); continue }   // menu/permission card up → the relay owns the pane
+      if (!file || turnInProgress(file)) continue
+      if (!cap || !onNormalPrompt(cap)) continue   // menu/permission card up → the relay owns the pane
       const reply = latestFinalReply(file)
       if (!reply || reply.uuid === rec.lastReplyUuid) {
         // Idle but the iteration never concluded — injection may have been eaten. Pause loudly
@@ -390,15 +461,32 @@ export async function sweepLoops(): Promise<void> {
           rec.status = 'paused'; rec.pausedKind = 'stall'
           await renderCard(sid, rec)
           writeLoops(map)
+          await say(rec, '⏸ Loop paused — the injected prompt never became a turn.', true)
         }
         continue
       }
       // Iteration boundary: the injected turn ran and concluded.
+      if (rec.budget !== undefined && rec.costBase === undefined && !rec.warnedNoCost) {
+        // Budget honesty: no $ figure ever appeared on the statusline (API-less setups can hide
+        // it) — say so once instead of silently never enforcing the cap the user asked for.
+        rec.warnedNoCost = true
+        writeLoops(map)
+        await say(rec, '⚠️ Can\'t read this session\'s $ cost from the statusline — the loop <b>budget can\'t be enforced</b>. Iteration and time limits still apply.', true)
+      }
       let checkOk: boolean | null = null
       if (rec.check && rec.status !== 'stopping') {
         const res = await runCheck(rec.check, await paneCwd(pane).catch(() => null))
-        checkOk = res.ok
         rec.lastCheckNote = res.note
+        if (!res.ran) {
+          // Broken verifier ≠ failed iteration: pause without advancing the reply cursor, so a
+          // Resume after fixing the command re-evaluates THIS boundary instead of re-prompting.
+          rec.status = 'paused'; rec.pausedKind = 'checkbroken'
+          await renderCard(sid, rec)
+          writeLoops(map)
+          await say(rec, `⏸ Loop paused — the check couldn't run (${escapeHtml(res.note)}). Fix it, then Resume.`, true)
+          continue
+        }
+        checkOk = res.ok
       }
       const d = decideBoundary(rec, reply.text, checkOk)
       if (d.action === 'stop') { await finishLoop(sid, rec, map, d.kind, d.reason); continue }
@@ -408,7 +496,7 @@ export async function sweepLoops(): Promise<void> {
         rec.status = 'paused'; rec.pausedKind = 'noprogress'
         await renderCard(sid, rec)
         writeLoops(map)
-        await deps.bot.api.sendMessage(rec.chat, `⏸ Loop paused — ${d.reason}.`, { parse_mode: 'HTML', ...(rec.thread ? { message_thread_id: rec.thread } : {}) }).catch(() => {})
+        await say(rec, `⏸ Loop paused — ${d.reason}.`, true)
         continue
       }
       rec.iter++

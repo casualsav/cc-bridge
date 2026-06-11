@@ -4464,7 +4464,14 @@ bot.on('callback_query:data', async ctx => {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
       return
     }
-    const fn = { go: loopGo, cancel: loopCancel, stopsoft: loopStopSoft, stopnow: loopStopNow, resume: loopResume }[loopMatch[1]]!
+    if (loopMatch[1] === 'go') {
+      // Start pre-flights the check command (can take minutes) — answer the tap immediately and
+      // let loopGo report refusals to the chat itself, or the callback would time out.
+      await ctx.answerCallbackQuery({ text: '⏳ Starting…' }).catch(() => {})
+      void loopGo(loopMatch[2])
+      return
+    }
+    const fn = { cancel: loopCancel, stopsoft: loopStopSoft, stopnow: loopStopNow, resume: loopResume }[loopMatch[1]]!
     const note = await fn(loopMatch[2])
     await ctx.answerCallbackQuery({ text: note.replace(/<[^>]+>/g, '').slice(0, 190) }).catch(() => {})
     return

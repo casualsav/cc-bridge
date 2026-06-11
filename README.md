@@ -78,11 +78,14 @@ Prefer to do it by hand? [`off-mcp/INSTALL.md`](./off-mcp/INSTALL.md) lists ever
   idle; `/queue @reset <prompt>` holds it until the 5h usage window rolls over, so dead
   limit hours soak up queued work.
 - **Autonomous loops** — `/loop <goal>` re-runs one goal until a check command exits 0
-  (or, without one, until Claude prints `LOOP_DONE`). A 3-step wizard in one self-editing
-  card sets the check, an iteration cap, and a $ budget (`unlimited` to waive — waiving
-  both needs an explicit "Start anyway"); the card then shows live progress with
-  stop-after-iteration / stop-now buttons, and the loop pauses and pings you if two
-  iterations conclude identically or an injected prompt never becomes a turn.
+  (or, without one, until Claude prints `LOOP_DONE`). A wizard in one self-editing card
+  sets the check, an iteration cap, a $ budget, and a wall-clock limit (`unlimited` to
+  waive — waiving all caps needs an explicit "Start anyway"); the card then becomes the
+  status card (edited only at iteration boundaries, never mid-stream) with
+  stop-after-iteration / stop-now buttons. Start pre-flights the check — a command that
+  can't run is rejected up front, and one that already passes refuses to loop. Mid-run, a
+  check that stops being runnable pauses the loop (it never counts as a failed iteration),
+  as do two identical conclusions in a row or an injected prompt that never becomes a turn.
 - **Voice replies (TTS)** — Claude's replies can arrive as voice notes too: free local
   Piper (auto-installed with ffmpeg, 5 curated voices to pick from) or hosted OpenAI /
   ElevenLabs. Modes off · digest-only · all (`/voice on|off`; details in `/settings`).

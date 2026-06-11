@@ -1,6 +1,6 @@
 import { test, expect } from 'bun:test'
 import {
-  parseCheckReply, parseMaxReply, parseBudgetReply, iterationPrompt, decideBoundary,
+  parseCheckReply, parseMaxReply, parseBudgetReply, parseTimeReply, iterationPrompt, decideBoundary,
   readLoops, writeLoops, type LoopRecord,
 } from './loop.ts'
 
@@ -31,6 +31,16 @@ test('parseBudgetReply: dollars with optional $ and comma decimals', () => {
   expect(parseBudgetReply('0')).toBeNull()
   expect(parseBudgetReply('-3')).toBeNull()
   expect(parseBudgetReply('cheap')).toBeNull()
+})
+
+test('parseTimeReply: hours/minutes with unit required, unlimited keywords', () => {
+  expect(parseTimeReply('2h')).toEqual({ ms: 7_200_000 })
+  expect(parseTimeReply('90m')).toEqual({ ms: 5_400_000 })
+  expect(parseTimeReply('1.5 hours')).toEqual({ ms: 5_400_000 })
+  expect(parseTimeReply('unlimited')).toEqual({})
+  expect(parseTimeReply('45')).toBeNull()     // bare number is ambiguous — unit required
+  expect(parseTimeReply('0h')).toBeNull()
+  expect(parseTimeReply('soon')).toBeNull()
 })
 
 // ---- Iteration prompt ----
@@ -77,6 +87,12 @@ test('budget and iteration ceilings stop the loop', () => {
 
 test('unlimited (absent) limits never stop', () => {
   expect(decideBoundary(base({ spent: 9999, iter: 9999 }), 'progress')).toMatchObject({ action: 'continue' })
+})
+
+test('time limit stops at the boundary once elapsed', () => {
+  const rec = base({ timeLimitMs: 7_200_000, startedAt: 0 })
+  expect(decideBoundary(rec, 'progress', null, 7_200_001)).toMatchObject({ action: 'stop', kind: 'limit' })
+  expect(decideBoundary(rec, 'progress', null, 3_600_000)).toMatchObject({ action: 'continue' })
 })
 
 test('no-progress guard pauses on an identical conclusion (whitespace-insensitive)', () => {
