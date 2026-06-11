@@ -217,6 +217,11 @@ formatted. Bot commands:
 | `/start` | Welcome + full feature guide (and pairing steps if not paired) |
 | `/status` | Re-post the pinned status card at the bottom; pairing state if unpaired |
 | `/account` | Claude accounts — list, `add <name>`, `remove <name>` (multi-account) |
+| `/find <text>` | Search every session's conversation; tap a hit to resume |
+| `/queue <prompt>` | Per-session backlog — runs when the session goes idle (`/queue clear`) |
+| `/digest` | All-sessions digest now, or daily (`/digest 08:00` · `off`) |
+| `/budget` | Daily $ cap with 80%/100% warnings (`/budget 20` · `off`) |
+| `/rewind` | Open Claude Code's checkpoint picker as tappable buttons |
 | `/resume` | List recent sessions with last-activity times; tap one to relaunch (`claude --resume`) |
 | `/mode` | Interactive permission-mode switcher (`/mode <name>` jumps straight to one) |
 | `/plan` `/auto` `/default` `/acceptedits` `/bypass` | Quick mode switch |

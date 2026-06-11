@@ -1370,9 +1370,28 @@ function pasteInbound(paneId: string, params: InboundParams): void {
   const run = () => pasteToPane(paneId, block)
     .then(ok => ok
       ? process.stderr.write(`daemon: inbound pasted to topic pane ${paneId} chat=${params.meta.chat_id}\n`)
-      : (process.stderr.write(`daemon: topic pane ${paneId} gone — buffering\n`), bufferEvent(params)))
+      : (process.stderr.write(`daemon: topic pane ${paneId} gone — buffering\n`), bufferEvent(params), void dumpStuckPane(paneId)))
     .catch(err => process.stderr.write(`daemon: topic inbound paste failed: ${err}\n`))
   inboundInjectChain = inboundInjectChain.then(run, run)
+}
+
+// Escape hatch (ROADMAP #8): when delivery into a pane fails, show the user what the terminal
+// actually displays — usually an unrecognized TUI screen the prompt detector can't drive —
+// instead of failing silently. Throttled per pane.
+const stuckDumpAt = new Map<string, number>()
+async function dumpStuckPane(paneId: string): Promise<void> {
+  const last = stuckDumpAt.get(paneId) ?? 0
+  if (Date.now() - last < 120_000) return
+  stuckDumpAt.set(paneId, Date.now())
+  const cap = await capturePane(paneId).catch(() => '')
+  if (!cap) return
+  const tail = cleanPaneTail(cap, 25)
+  if (!tail) return
+  for (const t of await outboundTargetsFor(paneId)) {
+    await bot.api.sendMessage(t.chat,
+      `⚠️ Couldn't deliver to this session — here's its screen:\n<pre>${escapeHtml(tail)}</pre>\nAnswer it with /reply &lt;text&gt;, or /stop to interrupt.`,
+      { parse_mode: 'HTML', ...(t.thread ? { message_thread_id: t.thread } : {}) }).catch(() => {})
+  }
 }
 
 // ---- Per-topic command routing (Track A) ----
@@ -3052,6 +3071,15 @@ bot.command('effort', async ctx => {
 bot.command('new', confirmNewSession)
 bot.command(['clear', 'reset'], confirmResetSession)
 
+// /rewind relays straight to the session — Claude Code's checkpoint picker opens and the
+// existing select-prompt relay turns it into tappable buttons (ROADMAP #6).
+bot.command('rewind', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  const t = await commandTarget(ctx)
+  if (!t) return
+  void relaySlashCommand(t.paneId, t.watcher, '/rewind', String(ctx.chat!.id), ctx.message!.message_id)
+})
+
 // /compact relays straight to the session — compact the conversation to free context.
 bot.command('compact', async ctx => {
   if (!dmCommandGate(ctx)) return
@@ -3247,6 +3275,142 @@ function cleanPaneTail(raw: string, maxLines: number): string {
 
 // /terminal [N] — dump the last N lines of the terminal (default 40, capped) so you can
 // catch up on recent session activity. Read-only: just captures the pane scrollback.
+// ---- Morning digest (ROADMAP #4) ----
+// One card across every live session: state (working / waiting on you / idle), cost, last
+// activity — plus each account's limit burn. /digest renders now; /digest 08:00 schedules it
+// daily (server-local time); /digest off stops it.
+async function digestText(): Promise<string> {
+  const lines: string[] = []
+  for (const pane of [...offMcpPanes]) {
+    try {
+      if (!(await paneAlive(pane))) continue
+      const cwd = await paneCwd(pane).catch(() => null)
+      const sid = await sessionForPane(pane, false)
+      const t = sid ? getTopicBySession(sid) : null
+      const name = t?.name ?? (cwd ? (cwd.split('/').filter(Boolean).pop() ?? cwd) : pane)
+      const cap = await capturePane(pane).catch(() => '')
+      const st = cap ? parseStatusline(cap) : null
+      const file = await transcriptForPane(pane, cwd)
+      const working = file ? turnInProgress(file) : false
+      const blocked = cap ? !!(detectUserPrompt(cap) || detectPermissionPrompt(cap)) : false
+      let last = 0
+      try { if (file) last = statSync(file).mtimeMs } catch {}
+      const state = blocked ? '⛔ <b>waiting on you</b>' : working ? '⚙️ working' : '💤 idle'
+      lines.push(`• <b>${escapeHtml(name)}</b> — ${state}${st?.cost ? ` · 💰 ${st.cost}` : ''}${last ? ` · ${fmtAgo(last)}` : ''}`)
+    } catch { /* pane vanished mid-render */ }
+  }
+  const acct: string[] = []
+  for (const a of listAccounts()) {
+    const snap = readUsageSnapshot(undefined, a)
+    if (!snap) continue
+    const h5 = snap.fiveHour ? `🕒 ${Math.round(snap.fiveHour.pct)}%` : ''
+    const d7 = snap.sevenDay ? `📅 ${Math.round(snap.sevenDay.pct)}%` : ''
+    if (h5 || d7) acct.push(`👤 ${escapeHtml(a.name)} — ${[h5, d7].filter(Boolean).join(' · ')}`)
+  }
+  return `🗞 <b>Digest</b>\n\n${lines.join('\n') || 'No live sessions.'}${acct.length ? `\n\n${acct.join('\n')}` : ''}`
+}
+
+async function sendDigest(): Promise<void> {
+  const text = await digestText()
+  const dests = isTopicMode() && getGroupChatId() ? [getGroupChatId()!] : loadAccess().allowFrom
+  for (const c of dests) await bot.api.sendMessage(c, text, { parse_mode: 'HTML' }).catch(() => {})
+}
+
+let digestTimer: ReturnType<typeof setTimeout> | null = null
+function armDigest(): void {
+  if (digestTimer) { clearTimeout(digestTimer); digestTimer = null }
+  const at = loadAccess().digestAt
+  const m = at ? /^(\d{1,2}):(\d{2})$/.exec(at) : null
+  if (!m) return
+  const next = new Date()
+  next.setHours(+m[1], +m[2], 0, 0)
+  if (next.getTime() <= Date.now()) next.setDate(next.getDate() + 1)
+  digestTimer = setTimeout(() => { void sendDigest(); armDigest() }, next.getTime() - Date.now())
+  digestTimer.unref?.()
+}
+
+bot.command('digest', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  const arg = (ctx.match ?? '').toString().trim().toLowerCase()
+  const a = loadAccess()
+  if (arg === 'off') {
+    a.digestAt = undefined; saveAccess(a); armDigest()
+    await ctx.reply('🗞 Daily digest off.')
+    return
+  }
+  if (/^\d{1,2}:\d{2}$/.test(arg)) {
+    a.digestAt = arg; saveAccess(a); armDigest()
+    await ctx.reply(`🗞 Daily digest scheduled for ${arg} (server time). <code>/digest off</code> to stop.`, { parse_mode: 'HTML' })
+    return
+  }
+  if (arg) { await ctx.reply('Usage: <code>/digest</code> (now) · <code>/digest 08:00</code> (daily) · <code>/digest off</code>', { parse_mode: 'HTML' }); return }
+  await ctx.reply(await digestText(), { parse_mode: 'HTML' })
+})
+
+// ---- Budget guardrail (ROADMAP #7) ----
+// Daily $ cap, warn-only (80% and at the cap; no auto-pause — interrupting work the user asked
+// for is worse than a loud ping). Spend = today's GROWTH of each session's cumulative statusline
+// cost, so a long-lived session doesn't count yesterday's spend against today.
+const BUDGET_FILE = join(STATE_DIR, 'budget.json')
+type BudgetState = { date: string; base: Record<string, number>; cur: Record<string, number>; warned: number }
+function readBudgetState(today: string): BudgetState {
+  const st = readJsonFile<BudgetState | null>(BUDGET_FILE, null)
+  return st && st.date === today ? st : { date: today, base: {}, cur: {}, warned: 0 }
+}
+function budgetSpent(st: BudgetState): number {
+  return Object.keys(st.cur).reduce((sum, k) => sum + Math.max(0, (st.cur[k] ?? 0) - (st.base[k] ?? 0)), 0)
+}
+async function sweepBudget(): Promise<void> {
+  const cap = loadAccess().budgetDaily
+  if (!cap || cap <= 0) return
+  const today = new Date().toISOString().slice(0, 10)
+  const st = readBudgetState(today)
+  for (const pane of [...offMcpPanes]) {
+    try {
+      const sid = (await sessionForPane(pane, false)) ?? pane
+      const capText = await capturePane(pane).catch(() => '')
+      const cost = capText ? parseFloat((parseStatusline(capText)?.cost ?? '').replace('$', '')) : NaN
+      if (!Number.isFinite(cost)) continue
+      // First sighting today baselines at the current total; a RESET cost (new conversation in
+      // the pane) re-baselines at 0 so the fresh session's spend counts from its start.
+      if (st.base[sid] === undefined) st.base[sid] = cost
+      else if (cost < (st.cur[sid] ?? 0)) st.base[sid] = 0
+      st.cur[sid] = cost
+    } catch { /* pane vanished */ }
+  }
+  const spent = budgetSpent(st)
+  const pct = (spent / cap) * 100
+  const threshold = pct >= 100 ? 100 : pct >= 80 ? 80 : 0
+  if (threshold > st.warned) {
+    st.warned = threshold
+    const msg = threshold >= 100
+      ? `💸 <b>Daily budget reached</b> — $${spent.toFixed(2)} of $${cap.toFixed(2)} today. Sessions keep running; wrap up or raise it with /budget.`
+      : `💸 Daily budget at ${Math.round(pct)}% — $${spent.toFixed(2)} of $${cap.toFixed(2)}.`
+    for (const c of loadAccess().allowFrom) await bot.api.sendMessage(c, msg, { parse_mode: 'HTML' }).catch(() => {})
+  }
+  writeJsonFile(BUDGET_FILE, st)
+}
+const BUDGET_SWEEP_MS = 60_000
+
+bot.command('budget', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  const arg = (ctx.match ?? '').toString().trim().toLowerCase()
+  const a = loadAccess()
+  if (arg === 'off') { a.budgetDaily = undefined; saveAccess(a); await ctx.reply('💸 Daily budget off.'); return }
+  const n = parseFloat(arg)
+  if (arg && Number.isFinite(n) && n > 0) {
+    a.budgetDaily = n; saveAccess(a)
+    await ctx.reply(`💸 Daily budget set to $${n.toFixed(2)} — I'll warn at 80% and at the cap.`)
+    return
+  }
+  if (arg) { await ctx.reply('Usage: <code>/budget 20</code> · <code>/budget off</code> · bare shows today.', { parse_mode: 'HTML' }); return }
+  const st = readBudgetState(new Date().toISOString().slice(0, 10))
+  const spent = budgetSpent(st)
+  await ctx.reply(a.budgetDaily
+    ? `💸 Today: $${spent.toFixed(2)} of $${a.budgetDaily.toFixed(2)} (${Math.round((spent / a.budgetDaily) * 100)}%).`
+    : `💸 Today: $${spent.toFixed(2)} — no cap set (<code>/budget 20</code> to set one).`, { parse_mode: 'HTML' })
+})
+
 // ---- Cross-session search (ROADMAP #5) ----
 // /find <text> — grep every transcript (all accounts), newest first; tap a hit to resume that
 // session (reuses the /resume callback, so a live session just gets a fresh pane... or in topic
@@ -3750,8 +3914,8 @@ function voiceText(): string {
 }
 function voiceKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
-    .text('🔇 Off', 'voice:off').text('💻 Local', 'voice:local').row()
-    .text('☁️ Groq', 'voice:groq').text('☁️ OpenAI', 'voice:openai').row()
+    .text('💻 Local', 'voice:local').text('☁️ Groq', 'voice:groq').row()
+    .text('☁️ OpenAI', 'voice:openai').text('🔇 Off', 'voice:off').row()
     .text('‹ Back', 'voice:back')
 }
 // Sub-panel for the local backend: choose the Whisper model. Reached by tapping 💻 Local; the
@@ -3785,18 +3949,19 @@ function voiceModelKeyboard(): InlineKeyboard {
 function settingsText(): string {
   const a = loadAccess()
   return `⚙️ <b>Settings</b>\n\n` +
-    `💬 Stream — <b>${replyMode()}</b>\n` +
     `📌 Pinned message — <b>${a.sessionPin !== false ? 'on' : 'off'}</b>\n` +
+    `💬 Stream — <b>${replyMode()}</b>\n` +
     `🎙️ Voice transcription — <b>${transcribeStatus()}</b>\n` +
     `👤 Accounts — <b>${listAccounts().length}</b>\n` +
-    `🚢 Ship buttons — <b>${a.shipButtons === true ? 'on' : 'off'}</b>\n\n` +
+    `🚢 Ship buttons — <b>${a.shipButtons === true ? 'on' : 'off'}</b>\n` +
+    `🗞 Daily digest — <b>${a.digestAt ?? 'off'}</b>\n\n` +
     `Tap to change:`
 }
 function settingsKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
-    .text('💬 Stream', 'set:replymode').text('📌 Pin', 'set:pin').row()
+    .text('📌 Pin', 'set:pin').text('💬 Stream', 'set:replymode').row()
     .text('🎙️ Voice transcription', 'set:voice').text('👤 Accounts', 'acct:panel').row()
-    .text('🚢 Ship buttons', 'set:ship')
+    .text('🚢 Ship buttons', 'set:ship').text('🗞 Daily digest', 'set:digest')
 }
 bot.command('settings', async ctx => {
   if (!dmCommandGate(ctx)) return
@@ -4559,13 +4724,19 @@ bot.on('callback_query:data', async ctx => {
   }
 
   // /settings panel toggles → flip the setting and re-render the panel in place.
-  const setMatch = /^set:(pin|replymode|ship)$/.exec(data)
+  const setMatch = /^set:(pin|replymode|ship|digest|voice)$/.exec(data)
   if (setMatch) {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
       return
     }
     await ctx.answerCallbackQuery().catch(() => {})
+    if (setMatch[1] === 'voice') {
+      // Voice sub-panel (backend off/local/groq/openai + the local model picker) — was sent as
+      // set:voice but never handled, so the settings button silently did nothing.
+      await ctx.editMessageText(voiceText(), { parse_mode: 'HTML', reply_markup: voiceKeyboard() }).catch(() => {})
+      return
+    }
     const a = loadAccess()
     if (setMatch[1] === 'replymode') {
       const m = replyMode()
@@ -4580,6 +4751,18 @@ bot.on('callback_query:data', async ctx => {
     } else if (setMatch[1] === 'ship') {
       a.shipButtons = a.shipButtons !== true                // flip (default off)
       saveAccess(a)
+    } else if (setMatch[1] === 'digest') {
+      // Set → tap turns it off; off → force-reply asks for the daily time.
+      if (a.digestAt) {
+        a.digestAt = undefined; saveAccess(a); armDigest()
+      } else {
+        const thread = ctx.callbackQuery.message?.message_thread_id
+        const sent = await bot.api.sendMessage(String(ctx.chat!.id),
+          '🗞 What time each day should the digest arrive? Reply like <code>08:00</code> (server time).',
+          { parse_mode: 'HTML', ...(thread ? { message_thread_id: thread } : {}), reply_markup: { force_reply: true, input_field_placeholder: '08:00' } }).catch(() => null)
+        if (sent) replyTargets.set(`${ctx.chat?.id}:${sent.message_id}`, { kind: 'digesttime' })
+        return   // panel re-renders once the time lands
+      }
     }
     await ctx.editMessageText(settingsText(), { parse_mode: 'HTML', reply_markup: settingsKeyboard() }).catch(() => {})
     return
@@ -5709,6 +5892,21 @@ bot.on('message:text', async ctx => {
             { parse_mode: 'HTML' })
           return
         }
+        // Daily digest time (settings → 🗞 Digest): validate HH:MM, schedule, confirm.
+        case 'digesttime': {
+          const m = /^(\d{1,2}):(\d{2})$/.exec(text.trim())
+          if (!m || +m[1] > 23 || +m[2] > 59) {
+            const again = await ctx.reply('❌ That doesn\'t look like a time — reply like <code>08:00</code>.',
+              { parse_mode: 'HTML', reply_markup: { force_reply: true, input_field_placeholder: '08:00' } }).catch(() => null)
+            if (again) replyTargets.set(`${ctx.chat?.id}:${again.message_id}`, target)
+            return
+          }
+          const a2 = loadAccess()
+          a2.digestAt = `${m[1].padStart(2, '0')}:${m[2]}`
+          saveAccess(a2); armDigest()
+          await ctx.reply(`🗞 Daily digest scheduled for ${a2.digestAt} (server time). Turn off in /settings or with /digest off.`)
+          return
+        }
         // Folder for /new in General → spawn a session there (it creates its own topic).
         case 'newsession': {
           const dir = await resolveNewSessionDir(text)
@@ -6175,6 +6373,10 @@ setInterval(() => void sweepDeletedTopics(), TOPIC_SWEEP_MS).unref()
 // Inject /later queue items whenever their session goes idle.
 setInterval(() => void sweepLaterQueues(), LATER_SWEEP_MS).unref()
 
+// Daily digest (if scheduled) + budget tracking.
+armDigest()
+setInterval(() => void sweepBudget(), BUDGET_SWEEP_MS).unref()
+
 // ---- Bot startup loop (retry with backoff, daemon persists forever) ----
 
 void (async () => {
@@ -6207,6 +6409,9 @@ void (async () => {
               { command: 'reset', description: 'Clear the current conversation in place' },
               { command: 'stream', description: 'How replies arrive: thoughts · tools · hybrid · off' },
               { command: 'effort', description: 'Reasoning effort: low · medium · high · xhigh · max · auto' },
+              { command: 'digest', description: 'All-sessions digest now, or daily (/digest 08:00 · off)' },
+              { command: 'budget', description: 'Daily $ cap with warnings (/budget 20 · off)' },
+              { command: 'rewind', description: 'Open the checkpoint picker (undo a turn\'s changes)' },
               { command: 'cost', description: 'Show the session cost readout' },
               { command: 'context', description: 'Show the token-context usage' },
               { command: 'diff', description: 'Show the session\'s uncommitted changes' },

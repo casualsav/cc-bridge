@@ -24,6 +24,8 @@ export type Access = {
   terminalMirror?: 'tools' | 'digest' | 'off' | boolean
   sessionPin?: boolean
   shipButtons?: boolean   // post Diff/Commit/Push/PR buttons after turns that dirty the git tree (default off)
+  digestAt?: string       // daily all-sessions digest, local "HH:MM" (unset = off)
+  budgetDaily?: number    // daily $ cap — warn at 80% and 100% of summed session cost growth (unset = off)
   topicOnEnd?: 'close' | 'delete'   // ended session's topic: close (keep history, default) or delete (tab disappears)
   replyMode?: 'thoughts' | 'tools' | 'hybrid' | 'off' | 'all' | 'final' | 'stream' | 'live'   // all/final/stream/live are legacy aliases
 }

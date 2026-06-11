@@ -20,7 +20,7 @@ it respawns `claude -c` in that cwd and delivers the message, instead of "couldn
 `/queue <prompt>` — per-session backlog (/later alias) that injects when the session goes idle. "When you're
 free" to complement /schedule's "at 3pm".
 
-## 4. Morning digest
+## 4. Morning digest — ✅ DONE (v0.1.71)
 One scheduled card across all sessions: what each did, what's blocked on you, cost, limit burn.
 All the data already exists (transcripts, usage snapshots, statusline).
 
@@ -28,13 +28,13 @@ All the data already exists (transcripts, usage snapshots, statusline).
 `/find <text>` greps every transcript; tap a hit to resume that session. Solves "which chat was
 that in?" at 10+ sessions.
 
-## 6. Rewind relay
+## 6. Rewind relay — ✅ DONE (v0.1.71)
 Surface Claude Code's checkpoint/rewind as buttons ("undo last turn's edits") so a bad change
 doesn't force a terminal visit.
 
-## 7. Budget guardrail
+## 7. Budget guardrail — ✅ DONE (v0.1.71, warn-only by design)
 Daily $ cap on top of the existing limit warnings: auto-pause sessions + ping at the cap.
 
-## 8. Screenshot fallback
+## 8. Screenshot fallback — ✅ DONE (v0.1.71, as text-screen dump on failed delivery)
 When prompt detection can't parse a TUI screen, send a rendered image of the pane instead of
 failing silently — the escape hatch that makes full-remote trustworthy.

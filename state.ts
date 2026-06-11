@@ -57,6 +57,7 @@ export type ReplyTarget =
   | { kind: 'md'; path: string; display: string }                // contents for a /md file
   | { kind: 'acctname'; thread?: number }                        // name for a new Claude account (settings → Accounts → ➕)
   | { kind: 'newsession' }                                       // folder for /new in General (spawn → its own topic)
+  | { kind: 'digesttime' }                                       // daily time for the digest (settings → 🗞 Digest)
 export const replyTargets = new Map<string, ReplyTarget>()
 
 // ---- Relay tracking ----
