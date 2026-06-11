@@ -1,10 +1,20 @@
-import { chmodSync, readFileSync, readdirSync } from 'node:fs'
+import { chmodSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { Buffer } from 'node:buffer'
 
 export const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'telegram')
+
+// Tiny JSON-file persistence for the daemon's small state stores (topics, scheduled messages,
+// session names, pins, usage-notif state): silent read with a fallback, silent best-effort 0600
+// write. NOT for access/prefs — those need mtime caching + atomic temp-rename writes (access.ts).
+export function readJsonFile<T>(path: string, fallback: T): T {
+  try { return JSON.parse(readFileSync(path, 'utf8')) as T } catch { return fallback }
+}
+export function writeJsonFile(path: string, obj: unknown): void {
+  try { writeFileSync(path, JSON.stringify(obj), { mode: 0o600 }) } catch {}
+}
 export const ACCESS_FILE = join(STATE_DIR, 'access.json')
 // Mutable preferences (stream mode, pin, auto-continue, voice, …). Split out from access.json so
 // static mode can freeze the security half (allowlist) while these stay editable from /settings.

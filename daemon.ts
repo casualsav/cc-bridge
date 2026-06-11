@@ -11,7 +11,7 @@ import { join, extname, basename, dirname, sep } from 'node:path'
 import { execFileSync, spawn } from 'node:child_process'
 import net from 'node:net'
 import {
-  frame, makeLineReader, computeCodeFingerprint, tConfig,
+  frame, makeLineReader, computeCodeFingerprint, tConfig, readJsonFile, writeJsonFile,
   STATE_DIR, ACCESS_FILE, PREFS_FILE, APPROVED_DIR, ENV_FILE, INBOX_DIR,
   SOCKET_PATH, DAEMON_PID_FILE, PENDING_EVENTS_FILE,
   DAEMON_LOG_FILE, WATCHDOG_PID_FILE, HEARTBEAT_FILE,
@@ -49,8 +49,13 @@ import {
 } from './access.ts'
 import {
   setGroupChatId, getGroupChatId, isTopicMode, loadTopics, genSessionId,
-  getTopicBySession, getSessionByThread, findTopicByCwd, setTopic, updateTopic, removeTopic, listTopics,
+  getSessionByThread, setTopic, removeTopic, listTopics,
 } from './topics.ts'
+import {
+  initTopicRuntime, sessionForPane, paneForSession, ensureSessionTopic, closeTopicForPane,
+  reconcileTopics, refreshTopicTitles, topicThreadFor, emitTopicTyping, outboundTargetsFor,
+  stampPaneSession, topicBranchCache,
+} from './topic-runtime.ts'
 import { TypingPresence } from './typing.ts'
 import { transcribe, transcribeProvider, transcribeStatus } from './voice.ts'
 import { parseDuration, formatDuration, fmtWhen, splitLeadingDuration } from './time.ts'
@@ -187,6 +192,7 @@ if (!STATIC) setInterval(checkApprovals, 5000).unref()
 // ---- Bot ----
 
 const bot = new Bot(TOKEN)
+initTopicRuntime(bot)
 let botUsername = ''
 // access.ts's isMentioned needs the live bot username (set after the daemon connects).
 initAccess({ getBotUsername: () => botUsername })
@@ -786,239 +792,6 @@ async function transcriptForPane(pane: string | null, cwd: string | null): Promi
   return fb
 }
 
-// ---- Session-instance identity (Track B foundation) ----
-// Every pane gets a generated sessionId stamped as a tmux pane option, so the identity survives
-// daemon restarts (tmux holds it) and one project can host several sessions, each its own topic.
-// The cache also remembers ids for panes that have DIED — that's how close-on-end finds the topic.
-const SESSION_PANE_OPT = '@tg_session'
-const paneSessionCache = new Map<string, string>()   // paneId → sessionId (kept after pane death)
-
-// The pane's session id: cache → pane option → mint/adopt + stamp. An unstamped pane first tries
-// to adopt an existing topic entry for its cwd that no other live pane has claimed (this is the
-// lazy migration of pre-Track-B cwd-keyed entries and the tmux-restart re-attach); otherwise a
-// fresh id is minted. `stampIfMissing: false` is the read-only probe (no mint, no stamp).
-async function sessionForPane(pane: string, stampIfMissing = true): Promise<string | null> {
-  const hit = paneSessionCache.get(pane)
-  if (hit) return hit
-  try {
-    const { stdout } = await exec('tmux', ['show-options', '-pqv', '-t', pane, SESSION_PANE_OPT], { timeout: 2000 })
-    const stamped = stdout.trim()
-    if (stamped) { paneSessionCache.set(pane, stamped); return stamped }
-  } catch { return null }   // pane gone — only the cache could answer, and it didn't
-  if (!stampIfMissing) return null
-  const cwd = await paneCwd(pane).catch(() => null)
-  const cand = cwd ? findTopicByCwd(cwd) : undefined
-  const claimed = cand && [...paneSessionCache.entries()].some(([p, s]) => s === cand.sessionId && p !== pane)
-  const sid = cand && !claimed ? cand.sessionId : genSessionId()
-  try { await exec('tmux', ['set-option', '-p', '-t', pane, SESSION_PANE_OPT, sid], { timeout: 2000 }) } catch { return null }
-  paneSessionCache.set(pane, sid)
-  return sid
-}
-
-// The live pane carrying `sessionId` — cache first, then the live panes' stamps (covers a daemon
-// restart), then the entry's cwd as a last resort (a tmux restart drops pane options; only an
-// unstamped pane may be adopted that way, so a sibling's pane is never grabbed).
-async function paneForSession(sessionId: string): Promise<string | null> {
-  for (const [p, s] of paneSessionCache) {
-    if (s === sessionId) {
-      if (await paneAlive(p)) return p
-      break   // recorded pane is dead — fall through to the scans
-    }
-  }
-  for (const p of [...offMcpPanes]) {
-    if ((await sessionForPane(p, false)) === sessionId) return p
-  }
-  const t = getTopicBySession(sessionId)
-  if (t) {
-    const p = await paneForCwd(t.cwd)
-    if (p && !(await sessionForPane(p, false))) {
-      try { await exec('tmux', ['set-option', '-p', '-t', p, SESSION_PANE_OPT, sessionId], { timeout: 2000 }) } catch {}
-      paneSessionCache.set(p, sessionId)
-      return p
-    }
-  }
-  return null
-}
-
-// ---- Forum-topics outbound routing (phase 2b) ----
-// Map a session to its forum topic, creating it on first use. Returns the topic's thread id, or
-// undefined if creation failed (caller falls back to the General topic).
-async function ensureTopicFor(group: string, sessionId: string, cwd: string): Promise<number | undefined> {
-  const existing = getTopicBySession(sessionId)
-  if (existing) {
-    if (existing.closed) {
-      try { await bot.api.reopenForumTopic(group, existing.threadId); updateTopic(sessionId, { closed: false }) } catch {}
-    }
-    return existing.threadId
-  }
-  const base = basename(cwd) || 'session'
-  // Same-cwd siblings each get their own topic — disambiguate the title: "proj", "proj #2", …
-  const siblings = listTopics().filter(e => e.cwd === cwd && !e.closed && e.sessionId !== sessionId).length
-  const name = siblings > 0 ? `${base} #${siblings + 1}` : base
-  try {
-    const t = await bot.api.createForumTopic(group, name)
-    setTopic(sessionId, { threadId: t.message_thread_id, cwd, name, closed: false, createdAt: Date.now() })
-    process.stderr.write(`daemon: created topic "${name}" (thread ${t.message_thread_id}) for ${cwd} [${sessionId}]\n`)
-    return t.message_thread_id
-  } catch (e) {
-    process.stderr.write(`daemon: createForumTopic failed for ${cwd}: ${e}\n`)
-    return undefined
-  }
-}
-
-// Where a session's outbound should go. DM mode → the allowlisted DM chats (no thread). Topic mode →
-// the bound group, threaded to the session's own topic (created on first use; General if unresolvable).
-async function outboundTargetsFor(paneId: string | null): Promise<Array<{ chat: string; thread?: number }>> {
-  const dmTargets = () => loadAccess().allowFrom.map(chat => ({ chat }))
-  if (!isTopicMode()) return dmTargets()
-  const group = getGroupChatId()
-  if (!group) return dmTargets()
-  const sid = paneId ? await sessionForPane(paneId) : null
-  const cwd = paneId ? await paneCwd(paneId).catch(() => null) : null
-  if (!sid || !cwd) return [{ chat: group }]
-  return [{ chat: group, thread: await ensureTopicFor(group, sid, cwd) }]
-}
-
-// Eagerly give a freshly-discovered session its topic (don't wait for its first reply) and post a
-// "session started" notice the user can reply to — so a new session is addressable from the group
-// immediately. Idempotent + in-flight-guarded so concurrent discovery paths create exactly one topic
-// and post exactly one notice. No-op outside topic mode.
-const topicEnsureInFlight = new Set<string>()
-async function ensureSessionTopic(paneId: string): Promise<void> {
-  if (!isTopicMode()) return
-  const group = getGroupChatId()
-  if (!group) return
-  const sid = await sessionForPane(paneId)
-  const cwd = await paneCwd(paneId).catch(() => null)
-  if (!sid || !cwd) return
-  if (getTopicBySession(sid) || topicEnsureInFlight.has(sid)) return   // already have it / creating it
-  topicEnsureInFlight.add(sid)
-  try {
-    const thread = await ensureTopicFor(group, sid, cwd)
-    if (thread) await bot.api.sendMessage(group,
-      `🆕 <b>Session started</b>\n<code>${escapeHtml(cwd)}</code>\n\nType in this topic to drive this session.`,
-      { parse_mode: 'HTML', message_thread_id: thread }).catch(() => {})
-  } finally {
-    topicEnsureInFlight.delete(sid)
-  }
-}
-
-// Session ended → close its topic (history stays; ensureTopicFor reopens it if the session
-// returns). The pane is already gone, so its id comes from the session cache (entries persist
-// after death for exactly this). The paneAlive re-check guards against a transient tmux blip
-// mass-pruning the registry and close/reopen-flapping topics.
-async function closeTopicForPane(pane: string): Promise<void> {
-  if (!isTopicMode()) return
-  const group = getGroupChatId()
-  if (!group) return
-  if (await paneAlive(pane)) return   // transient registry miss, not a real death
-  const sid = paneSessionCache.get(pane)
-  if (!sid) return
-  const t = getTopicBySession(sid)
-  if (!t || t.closed) return
-  await closeTopicEntry(group, sid, t)
-}
-
-async function closeTopicEntry(group: string, sessionId: string, t: { threadId: number; cwd: string; name: string }): Promise<void> {
-  // Opt-in auto-delete: the tab disappears entirely (Telegram has no "hide" for bots — delete is
-  // the only way off the list, and it erases the topic's history). Default keeps close+reopen.
-  if (loadAccess().topicOnEnd === 'delete') {
-    try {
-      await bot.api.deleteForumTopic(group, t.threadId)
-      removeTopic(sessionId)
-      process.stderr.write(`daemon: deleted topic "${t.name}" for ${t.cwd} (topicOnEnd=delete)\n`)
-    } catch (e) { process.stderr.write(`daemon: deleteForumTopic failed for ${t.cwd}: ${e}\n`) }
-    return
-  }
-  const kb = new InlineKeyboard()
-    .text('🗑 Delete topic', `topicdel:${t.threadId}`)
-    .text('🗑 Always delete', `topicdelalways:${t.threadId}`)
-  await bot.api.sendMessage(group, '🏁 <b>Session ended</b> — topic closed. It reopens automatically if a session comes back to this project.\n\nDelete removes the tab (and this topic’s history); Always delete does that for every ended session from now on.',
-    { parse_mode: 'HTML', message_thread_id: t.threadId, reply_markup: kb }).catch(() => {})
-  try {
-    await bot.api.closeForumTopic(group, t.threadId)
-    updateTopic(sessionId, { closed: true })
-    process.stderr.write(`daemon: closed topic "${t.name}" for ${t.cwd}\n`)
-  } catch (e) { process.stderr.write(`daemon: closeForumTopic failed for ${t.cwd}: ${e}\n`) }
-}
-
-// Backstop for deaths the event path can't see: a session that exits while the daemon is down or
-// restarting leaves its topic open forever (the new process never had the pane in its registry,
-// so no death event ever fires — exactly what a deploy-window exit looks like). Sweep every OPEN
-// topic on the discovery tick and close any with no live session in its cwd. Two consecutive
-// misses (~2 ticks) before closing, so a transient tmux blip can't flap a healthy topic.
-const topicMissCounts = new Map<string, number>()
-async function reconcileTopics(panes: string[]): Promise<void> {
-  if (!isTopicMode()) return
-  const group = getGroupChatId()
-  if (!group) return
-  const liveSids = new Set<string>()
-  for (const p of panes) {
-    const sid = await sessionForPane(p)   // stamps unstamped panes as a side effect — idempotent
-    if (sid) liveSids.add(sid)
-  }
-  for (const { s } of orderedSessions()) {   // MCP-shim sessions hold topics too — don't close theirs
-    if (s.paneId) { const sid = await sessionForPane(s.paneId); if (sid) liveSids.add(sid) }
-  }
-  for (const t of listTopics()) {
-    if (t.closed || liveSids.has(t.sessionId)) { topicMissCounts.delete(t.sessionId); continue }
-    const misses = (topicMissCounts.get(t.sessionId) ?? 0) + 1
-    if (misses < 2) { topicMissCounts.set(t.sessionId, misses); continue }
-    topicMissCounts.delete(t.sessionId)
-    await closeTopicEntry(group, t.sessionId, t)
-  }
-}
-
-// Keep topic titles in step with the working tree: "dir" on the default branch, "dir · branch"
-// elsewhere, renamed via editForumTopic when the branch changes (checked on the slow discovery
-// tick; the per-cwd cache means one git call per project per tick and an edit only on change).
-const topicBranchCache = new Map<string, string>()   // sessionId → last branch we titled with
-async function refreshTopicTitles(panes: string[]): Promise<void> {
-  if (!isTopicMode()) return
-  const group = getGroupChatId()
-  if (!group) return
-  for (const pane of panes) {
-    const sid = await sessionForPane(pane, false)
-    if (!sid) continue
-    const t = getTopicBySession(sid)
-    if (!t || t.closed) continue
-    const cwd = (await paneCwd(pane).catch(() => null)) ?? t.cwd
-    let branch = ''
-    try { branch = (await exec('git', ['-C', cwd, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 2000 })).stdout.trim() } catch { /* not a git repo */ }
-    if (topicBranchCache.get(sid) === branch) continue
-    topicBranchCache.set(sid, branch)
-    const num = / #(\d+)/.exec(t.name)?.[1]   // keep a sibling's "#2" through branch renames
-    const base = (basename(cwd) || 'session') + (num ? ` #${num}` : '')
-    const want = branch && !['main', 'master', 'HEAD'].includes(branch) ? `${base} · ${branch}` : base
-    if (want === t.name) continue
-    try {
-      await bot.api.editForumTopic(group, t.threadId, { name: want })
-      updateTopic(sid, { name: want })
-      process.stderr.write(`daemon: renamed topic for ${cwd} → "${want}"\n`)
-    } catch (e) { process.stderr.write(`daemon: editForumTopic failed for ${cwd}: ${e}\n`) }
-  }
-}
-
-// The existing topic thread for a pane's session (no creation) — for per-topic typing/pins.
-async function topicThreadFor(paneId: string | null): Promise<{ group: string; thread: number } | null> {
-  if (!isTopicMode() || !paneId) return null
-  const group = getGroupChatId()
-  if (!group) return null
-  const sid = await sessionForPane(paneId, false)
-  if (!sid) return null
-  const t = getTopicBySession(sid)
-  if (!t || t.closed) return null
-  return { group, thread: t.threadId }
-}
-
-// Show "typing…" in a session's own topic while it works (topic mode). Telegram's action expires
-// after ~5s; the relay loops re-emit each tick (~1.5s) so it stays lit for the whole turn.
-async function emitTopicTyping(paneId: string | null): Promise<void> {
-  const t = await topicThreadFor(paneId)
-  if (!t) return
-  await bot.api.sendChatAction(t.group, 'typing', { message_thread_id: t.thread }, AbortSignal.timeout(1500)).catch(() => {})
-}
-
 // After injecting a message, wait for the agent's turn to settle, then read its reply
 // (the final text block of its response to that exact message) from the transcript and
 // relay it. Self-driven (not tied to the typing/idle signal, which can miss a fast
@@ -1572,17 +1345,6 @@ function pasteInbound(paneId: string, params: InboundParams): void {
   inboundInjectChain = inboundInjectChain.then(run, run)
 }
 
-// Resolve a forum topic's session to a live pane: thread id → cwd (the topic map) → the off-MCP pane
-// running in that cwd. Prefers the focused pane when it matches. Returns null if no live pane is in
-// that cwd (the session ended) — the caller buffers rather than misrouting to another session.
-async function paneForCwd(cwd: string): Promise<string | null> {
-  if (focus.activePaneId && (await paneCwd(focus.activePaneId).catch(() => null)) === cwd) return focus.activePaneId
-  for (const p of offMcpPanes) {
-    if ((await paneCwd(p).catch(() => null)) === cwd) return p
-  }
-  return null
-}
-
 // ---- Per-topic command routing (Track A) ----
 // Which session a command/tap acts on, and where its reply goes. In topic mode a command sent inside
 // a session's topic targets THAT session and replies in-thread; in General (no thread) or DM it
@@ -1783,8 +1545,8 @@ function normResetKey(descr: string): string {
 // Persist the hit + warning dedup across daemon restarts. In-memory state was the
 // cause of repeated 75% alerts during development (each restart re-armed them).
 const USAGE_NOTIF_STATE_FILE = join(STATE_DIR, 'usage-notif-state.json')
-try {
-  const s = JSON.parse(readFileSync(USAGE_NOTIF_STATE_FILE, 'utf8'))
+{
+  const s = readJsonFile<Record<string, unknown> & { warn?: Record<string, unknown> }>(USAGE_NOTIF_STATE_FILE, {})
   if (typeof s.lastActedResetKey === 'string') lastActedResetKey = s.lastActedResetKey
   if (typeof s.lastActedResetAt === 'number') lastActedResetAt = s.lastActedResetAt
   if (typeof s.ctxWarnThreshold === 'number') ctxWarnThreshold = s.ctxWarnThreshold
@@ -1797,11 +1559,9 @@ try {
       usageWarnState.set(k, { resetKey: normResetKey(e.resetKey), threshold: e.threshold, at: typeof e.at === 'number' ? e.at : 0 })
     }
   }
-} catch {}
+}
 function saveUsageNotifState(): void {
-  try {
-    writeFileSync(USAGE_NOTIF_STATE_FILE, JSON.stringify({ lastActedResetKey, lastActedResetAt, ctxWarnThreshold, warn: Object.fromEntries(usageWarnState) }), { mode: 0o600 })
-  } catch {}
+  writeJsonFile(USAGE_NOTIF_STATE_FILE, { lastActedResetKey, lastActedResetAt, ctxWarnThreshold, warn: Object.fromEntries(usageWarnState) })
 }
 
 // ── Statusline-sourced usage snapshot ────────────────────────────────────────
@@ -3549,7 +3309,7 @@ async function verifyAutoContinue(chats: string[], attempt: number, injected: bo
 
 function scheduleReset(fireAt: number, chats: string[], attempt = 0): void {
   if (resetTimer) { clearTimeout(resetTimer); resetTimer = null }
-  try { writeFileSync(SCHEDULED_RESET_FILE, JSON.stringify({ fireAt, chats, attempt }), { mode: 0o600 }) } catch {}
+  writeJsonFile(SCHEDULED_RESET_FILE, { fireAt, chats, attempt })
   const delay = fireAt - Date.now()
   if (delay <= 0) { fireResetNotification(chats, attempt); return }
   resetTimer = setTimeout(() => { resetTimer = null; fireResetNotification(chats, attempt) }, delay)
@@ -3557,8 +3317,8 @@ function scheduleReset(fireAt: number, chats: string[], attempt = 0): void {
 
 // Re-arm a persisted reminder on daemon startup (or fire it if it just came due).
 function loadScheduledReset(): void {
-  let data: { fireAt: number; chats: string[]; attempt?: number }
-  try { data = JSON.parse(readFileSync(SCHEDULED_RESET_FILE, 'utf8')) } catch { return }
+  const data = readJsonFile<{ fireAt: number; chats: string[]; attempt?: number } | null>(SCHEDULED_RESET_FILE, null)
+  if (!data) return
   if (!data?.fireAt || !Array.isArray(data.chats)) { try { unlinkSync(SCHEDULED_RESET_FILE) } catch {}; return }
   if (data.fireAt < Date.now() - 10 * 60_000) { try { unlinkSync(SCHEDULED_RESET_FILE) } catch {}; return }  // missed long ago
   scheduleReset(data.fireAt, data.chats, data.attempt ?? 0)
@@ -3917,9 +3677,9 @@ bot.command('schedule', async ctx => {
 // User-set session names (paneId → label), overriding the cwd-derived default. Persisted so
 // they survive a daemon restart (tmux pane ids are stable across one); a tmux restart re-derives.
 const SESSION_NAMES_FILE = join(STATE_DIR, 'session-names.json')
-try { for (const [k, v] of Object.entries(JSON.parse(readFileSync(SESSION_NAMES_FILE, 'utf8')) as Record<string, string>)) sessionNames.set(k, v) } catch {}
+for (const [k, v] of Object.entries(readJsonFile<Record<string, string>>(SESSION_NAMES_FILE, {}))) sessionNames.set(k, v)
 function persistSessionNames(): void {
-  try { writeFileSync(SESSION_NAMES_FILE, JSON.stringify(Object.fromEntries(sessionNames)), { mode: 0o600 }) } catch {}
+  writeJsonFile(SESSION_NAMES_FILE, Object.fromEntries(sessionNames))
 }
 
 // Name a specific pane. Returns the HTML confirmation / error.
@@ -3947,9 +3707,9 @@ async function paneLabel(paneId: string): Promise<string> {
 const SESSION_PIN_FILE = join(STATE_DIR, 'session-pin.json')
 const sessionPins = new Map<string, number>()
 const pinTextCache = new Map<string, string>()   // last rendered text per key — skip no-op edits
-try { for (const [c, m] of Object.entries(JSON.parse(readFileSync(SESSION_PIN_FILE, 'utf8')) as Record<string, number>)) sessionPins.set(c, m) } catch {}
+for (const [c, m] of Object.entries(readJsonFile<Record<string, number>>(SESSION_PIN_FILE, {}))) sessionPins.set(c, m)
 function persistSessionPins(): void {
-  try { writeFileSync(SESSION_PIN_FILE, JSON.stringify(Object.fromEntries(sessionPins)), { mode: 0o600 }) } catch {}
+  writeJsonFile(SESSION_PIN_FILE, Object.fromEntries(sessionPins))
 }
 
 // Unpin + delete every pinned status message (used by /pin off).
@@ -4249,9 +4009,7 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string): 
       try { await exec('tmux', ['set-option', '-p', '-t', newPane, BRIDGE_PANE_OPT, INSTANCE_ID], { timeout: 2000 }) } catch {}
       // Pre-bound topic (user-created tab): stamp its sessionId at birth so discovery resolves
       // the pane straight to that topic instead of minting a fresh id + duplicate topic.
-      if (presetSessionId) {
-        try { await exec('tmux', ['set-option', '-p', '-t', newPane, SESSION_PANE_OPT, presetSessionId], { timeout: 2000 }); paneSessionCache.set(newPane, presetSessionId) } catch {}
-      }
+      if (presetSessionId) await stampPaneSession(newPane, presetSessionId)
       registerSpawnedPane(newPane)   // bind/announce now (works even under FORCE_PANE)
     }
     return true

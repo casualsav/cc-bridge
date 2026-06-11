@@ -7,9 +7,8 @@
 // loader, and a single injectToPane(paneId, text) callback that hides all the daemon's
 // focus/PaneWatcher logic. Everything else here is self-contained.
 import { Bot, InlineKeyboard, type Context } from 'grammy'
-import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { STATE_DIR } from './common.ts'
+import { STATE_DIR, readJsonFile, writeJsonFile } from './common.ts'
 import { escapeHtml } from './markdown.ts'
 import { paneAlive } from './pane-io.ts'
 import { fmtWhen } from './time.ts'
@@ -32,7 +31,7 @@ const scheduledTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
 export function initScheduler(d: SchedulerDeps): void { deps = d }
 
-function saveScheduledMsgs(): void { try { writeFileSync(SCHEDULED_MSGS_FILE, JSON.stringify(scheduledMsgs), { mode: 0o600 }) } catch {} }
+function saveScheduledMsgs(): void { writeJsonFile(SCHEDULED_MSGS_FILE, scheduledMsgs) }
 
 function armScheduled(msg: ScheduledMessage): void {
   const prev = scheduledTimers.get(msg.id); if (prev) clearTimeout(prev)
@@ -88,11 +87,9 @@ export function addScheduled(msg: ScheduledMessage): void {
 export function scheduledCount(): number { return scheduledMsgs.length }
 
 export function loadScheduledMsgs(): void {
-  try {
-    const arr = JSON.parse(readFileSync(SCHEDULED_MSGS_FILE, 'utf8'))
-    if (Array.isArray(arr)) scheduledMsgs = arr.filter((m): m is ScheduledMessage =>
-      m && typeof m.id === 'string' && typeof m.fireAt === 'number' && typeof m.text === 'string')
-  } catch {}
+  const arr = readJsonFile<unknown>(SCHEDULED_MSGS_FILE, null)
+  if (Array.isArray(arr)) scheduledMsgs = arr.filter((m): m is ScheduledMessage =>
+    m && typeof m.id === 'string' && typeof m.fireAt === 'number' && typeof m.text === 'string')
   for (const m of scheduledMsgs) armScheduled(m)   // overdue ones fire ~immediately
 }
 

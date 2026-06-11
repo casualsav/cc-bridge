@@ -31,6 +31,8 @@ human and the one Claude Code restart; do everything else yourself.
 ## Layout (for working on the repo)
 - `daemon.ts` — the long-lived grammy bot + access gate + tmux pane driver + off-MCP outbound
   (the bulk of the code).
+- `topics.ts` (pure session<->topic store) + `topic-runtime.ts` (forum-topics live half: pane
+  session identity, topic lifecycle, per-topic typing, outbound routing).
 - `shim.ts` — the MCP server; used only in plugin/MCP mode (off-MCP bypasses it).
 - `transcript.ts` — off-MCP outbound: read replies + activity from Claude Code's transcript JSONL.
 - `tgctl.ts` — the `tg` actions CLI; `ensure-daemon.ts` — standalone daemon relauncher.

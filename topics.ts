@@ -9,10 +9,9 @@
 // each pane with its id as a tmux pane option, so the id survives daemon restarts and — unlike a
 // cwd key — lets one project host several sessions, each with its own topic. Each entry carries its
 // cwd as data (titles + the no-stamp fallback after a tmux restart).
-import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomBytes } from 'node:crypto'
-import { STATE_DIR } from './common.ts'
+import { STATE_DIR, readJsonFile, writeJsonFile } from './common.ts'
 
 export const TOPICS_FILE = join(STATE_DIR, 'topics.json')
 
@@ -36,8 +35,7 @@ let loaded = false
 let persist = true   // disabled by _resetForTest so unit tests never write to the real STATE_DIR
 
 function save(): void {
-  if (!persist) return
-  try { writeFileSync(TOPICS_FILE, JSON.stringify(store), { mode: 0o600 }) } catch {}
+  if (persist) writeJsonFile(TOPICS_FILE, store)
 }
 
 // Load + validate from disk (tolerant: drops malformed entries rather than throwing). Cached after
@@ -47,11 +45,11 @@ function save(): void {
 // synthesized sessionId and their old key becomes the cwd. The daemon lazily re-attaches them: the
 // first unstamped pane seen in that cwd adopts the entry's sessionId (sessionForPane).
 export function loadTopics(): TopicStore {
-  try {
-    const raw = JSON.parse(readFileSync(TOPICS_FILE, 'utf8')) as Partial<TopicStore>
+  const raw = readJsonFile<Partial<TopicStore> | null>(TOPICS_FILE, null)
+  if (raw && typeof raw === 'object') {
     const topics: Record<string, TopicEntry> = {}
     let migrated = false
-    for (const [key, e] of Object.entries(raw?.topics ?? {})) {
+    for (const [key, e] of Object.entries(raw.topics ?? {})) {
       const t = e as Partial<TopicEntry>
       if (!t || typeof t.threadId !== 'number') continue
       const isOldFormat = typeof t.cwd !== 'string'
@@ -65,11 +63,12 @@ export function loadTopics(): TopicStore {
         createdAt: typeof t.createdAt === 'number' ? t.createdAt : 0,
       }
     }
-    store = { groupChatId: typeof raw?.groupChatId === 'string' ? raw.groupChatId : null, topics }
+    store = { groupChatId: typeof raw.groupChatId === 'string' ? raw.groupChatId : null, topics }
     loaded = true
     if (migrated) save()   // persist the re-keyed store so the migration runs once
     return store
-  } catch { /* missing/corrupt → keep the empty default */ }
+  }
+  // missing/corrupt → keep the empty default
   loaded = true
   return store
 }
