@@ -3794,13 +3794,16 @@ async function statusCardText(paneId: string | null): Promise<string> {
   } catch {}
   const branch = cwd ? await gitBranch(cwd) : null
 
-  // Head badges: model · effort · mode · session (5h) · weekly (7d) · context. Think lives in
-  // the body — with it up top the collapsed pin preview ellipsized.
+  // Head badges: session (5h) · weekly (7d) · context, then model · effort · mode. Think lives
+  // in the body — with it up top the collapsed pin preview ellipsized.
   const effortBadge = status?.effort ? `  ⚡ ${escapeHtml(status.effort)}` : ''
-  const usage = status?.h5 ? `  📈 ${status.h5.pct}%` : ''
-  const weekly = status?.d7 ? `  📅 ${status.d7.pct}%` : ''
-  const ctxBadge = status?.ctxPct != null ? `  💾 ${status.ctxPct}%` : ''
-  const head = `🧠 ${escapeHtml(model ?? '—')}${effortBadge}  ${escapeHtml(mode)} •${usage}${weekly}${ctxBadge}`
+  const stats = [
+    status?.h5 ? `📈 ${status.h5.pct}%` : '',
+    status?.d7 ? `📅 ${status.d7.pct}%` : '',
+    status?.ctxPct != null ? `💾 ${status.ctxPct}%` : '',
+  ].filter(Boolean).join('  ')
+  const ident = `🧠 ${escapeHtml(model ?? '—')}${effortBadge}  ${escapeHtml(mode)}`
+  const head = stats ? `${stats}  •  ${ident}` : ident
   const groups: string[] = []
   if (cwd) groups.push(`📁 <code>${escapeHtml(cwd)}</code>${branch ? ` · 🌿 ${escapeHtml(branch)}` : ''}`)
   if (status) {
