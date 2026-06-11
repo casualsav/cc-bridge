@@ -4111,6 +4111,37 @@ bot.command('health', async ctx => {
   await ctx.reply(lines.join('\n'), { parse_mode: 'HTML' })
 })
 
+// /voice on|off — quick toggle for voice replies (TTS); bare shows status. `on` = every reply
+// speaks (mode 'all'); digest-only mode and the engine live in /settings → 🔊 Voice replies.
+bot.command('voice', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  const arg = (ctx.match ?? '').toString().trim().toLowerCase()
+  if (arg && arg !== 'on' && arg !== 'off') {
+    await ctx.reply('Usage: <code>/voice on</code> | <code>off</code>', { parse_mode: 'HTML' }); return
+  }
+  if (arg) {
+    const a = loadAccess()
+    a.tts = { mode: arg === 'on' ? 'all' : 'off', engine: a.tts?.engine ?? 'piper' }
+    saveAccess(a)
+    const thread = ctx.message?.message_thread_id
+    const extra = thread ? { message_thread_id: thread } : {}
+    if (arg === 'on' && a.tts.engine === 'piper' && !piperReady()) {
+      void bot.api.sendMessage(String(ctx.chat!.id), '⏳ Installing the Piper voice engine (~80MB)…', extra).catch(() => {})
+      void provisionPiper().then(
+        () => bot.api.sendMessage(String(ctx.chat!.id), '✅ Piper ready — replies will speak.', extra).catch(() => {}),
+        e => bot.api.sendMessage(String(ctx.chat!.id), `⚠️ Piper install failed: ${String(e).slice(0, 150)}`, extra).catch(() => {}),
+      )
+    } else if (arg === 'on' && !engineStatus(a.tts.engine).ready) {
+      void bot.api.sendMessage(String(ctx.chat!.id), `🔑 The ${a.tts.engine} engine needs its API key — add it in /settings → 🔊 Voice replies.`, extra).catch(() => {})
+    }
+  }
+  const t = loadAccess().tts
+  await ctx.reply(
+    `🔊 Voice replies are <b>${t?.mode && t.mode !== 'off' ? `${t.mode} · ${t.engine}` : 'off'}</b>.\n` +
+    'Toggle with <code>/voice on</code> | <code>off</code>; engine &amp; digest-only mode in /settings → 🔊 Voice replies.',
+    { parse_mode: 'HTML' })
+})
+
 // /mcp on|off toggles MCP mode for sessions started afterward (relaunch to apply); bare shows it.
 bot.command('mcp', async ctx => {
   if (!dmCommandGate(ctx)) return
@@ -6851,6 +6882,7 @@ void (async () => {
               { command: 'diff', description: 'Show the session\'s uncommitted changes' },
               { command: 'terminal', description: 'Dump the last N lines of the terminal (default 40)' },
               { command: 'compact', description: 'Compact the conversation to free up context' },
+              { command: 'voice', description: 'Voice replies on/off — replies arrive as voice notes too' },
               { command: 'health', description: 'Bridge vitals — instance, uptime, panes, queues, watchdog' },
               { command: 'update', description: 'Update the Telegram bridge or Claude itself' },
             ],
