@@ -3782,8 +3782,9 @@ async function statusCardText(paneId: string | null): Promise<string> {
   let status: StatuslineData | null = null
   try {
     const cap = await capturePane(paneId)
-    // Strip modeLabel's leading per-mode emoji — the card uses a single generic 🕹️.
-    if (onNormalPrompt(cap)) mode = modeLabel(detectCurrentMode(cap)).replace(/^\S+\s+/, '')
+    // Emoji only (modeLabel's leading glyph): 🏠 default · ✏️ acceptEdits · 📋 plan · 🪄 auto ·
+    // 🚨 bypass — the full name made the collapsed pin preview truncate.
+    if (onNormalPrompt(cap)) mode = modeLabel(detectCurrentMode(cap)).split(' ')[0]
     status = parseStatusline(cap)
   } catch {}
   try {
@@ -3799,7 +3800,7 @@ async function statusCardText(paneId: string | null): Promise<string> {
   const weekly = status?.d7 ? `  📅 ${status.d7.pct}%` : ''
   const ctxBadge = status?.ctxPct != null ? `  💾 ${status.ctxPct}%` : ''
   const thinkBadge = status?.think ? '  ✻ think' : ''
-  const head = `🧠 ${escapeHtml(model ?? '—')}${effortBadge}${usage}${weekly}${ctxBadge}  🕹️ ${escapeHtml(mode)}${thinkBadge}`
+  const head = `🧠 ${escapeHtml(model ?? '—')}${effortBadge}${usage}${weekly}${ctxBadge}  ${escapeHtml(mode)}${thinkBadge}`
   const groups: string[] = []
   if (cwd) groups.push(`📁 <code>${escapeHtml(cwd)}</code>${branch ? ` · 🌿 ${escapeHtml(branch)}` : ''}`)
   if (status) {
