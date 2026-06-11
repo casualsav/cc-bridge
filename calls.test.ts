@@ -2,18 +2,18 @@ import { test, expect } from 'bun:test'
 import { resolveChatId, resolveTarget, chunk, coerceReaction, assertSendable } from './calls.ts'
 import { loadAccess } from './access.ts'
 
-const OWNER = loadAccess().allowFrom[0]
+const OWNER = () => loadAccess().allowFrom[0]
 
 test('resolveChatId: explicit id passes through; `.` falls back to the sole allowlisted chat', () => {
   expect(resolveChatId('-100123')).toBe('-100123')
-  if (loadAccess().allowFrom.length === 1) expect(resolveChatId('.')).toBe(OWNER)
+  if (loadAccess().allowFrom.length === 1) expect(resolveChatId('.')).toBe(OWNER())
 })
 
 test('resolveTarget: explicit chat wins; `.` without a pane falls back like resolveChatId', async () => {
   expect(await resolveTarget({ chat_id: '-42' })).toEqual({ chat: '-42' })
   if (loadAccess().allowFrom.length === 1) {
-    expect((await resolveTarget({ chat_id: '.' })).chat).toBe(OWNER)
-    expect((await resolveTarget({})).chat).toBe(OWNER)
+    expect((await resolveTarget({ chat_id: '.' })).chat).toBe(OWNER())
+    expect((await resolveTarget({})).chat).toBe(OWNER())
   }
 })
 

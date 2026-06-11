@@ -7,9 +7,9 @@ import { join } from 'node:path'
 // ACCESS_FILE/PREFS_FILE from common.ts at module load). Dynamic import after the env assignment
 // guarantees the order. This lets gate()/saveAccess() hit real (isolated) files so we exercise the
 // true read/decide/persist path — the actual security boundary.
-const DIR = mkdtempSync(join(tmpdir(), 'bct-access-'))
-process.env.TELEGRAM_STATE_DIR = DIR
-delete process.env.TELEGRAM_ACCESS_MODE   // ensure non-static for these tests
+// The shared sandbox dir comes from test-preload.ts (bunfig [test].preload) — set before ANY
+// test file's imports load common.ts, so every suite shares one isolated state dir.
+const DIR = process.env.TELEGRAM_STATE_DIR!
 
 let A: typeof import('./access.ts')
 let state: typeof import('./state.ts')

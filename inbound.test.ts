@@ -2,19 +2,19 @@ import { test, expect } from 'bun:test'
 import { formatChannelBlock } from './inbound.ts'
 import { loadAccess } from './access.ts'
 
-const OWNER = loadAccess().allowFrom[0] ?? '1'
+const OWNER = () => loadAccess().allowFrom[0] ?? '1'
 
 // The wire contract every off-MCP session parses (off-mcp/CLAUDE.md). Owner attribution,
 // edit flag, and attachment paths are the only extras; everything else stays out.
 const msg = (meta: Record<string, string>, content = 'hello') => formatChannelBlock({ content, meta })
 
 test('plain message: bare positional id only', () => {
-  expect(msg({ chat_id: '-100', message_id: '611', user: 'owner', user_id: OWNER }))
+  expect(msg({ chat_id: '-100', message_id: '611', user: 'owner', user_id: OWNER() }))
     .toBe('<tg 611>hello</tg>')
 })
 
 test('edit flag rides as e', () => {
-  expect(msg({ chat_id: '-100', message_id: '611', edited: 'true', user: 'owner', user_id: OWNER }))
+  expect(msg({ chat_id: '-100', message_id: '611', edited: 'true', user: 'owner', user_id: OWNER() }))
     .toBe('<tg 611 e>hello</tg>')
 })
 
