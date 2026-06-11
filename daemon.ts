@@ -759,6 +759,39 @@ async function sendAgentText(chats: string[], text: string, threadId?: number): 
   }
 }
 
+// ---- Per-session transcript resolution (Track B) ----
+// The SessionStart hook (stamp-transcript.ts) writes each session's transcript path onto its pane
+// as @tg_transcript. Reading per-pane (short TTL, like paneCwd) keeps same-cwd siblings from
+// cross-talking. Panes without a stamp (pre-hook sessions, hook missing) fall back to the old
+// newest-.jsonl-in-project-dir resolution, which is correct whenever the cwd hosts one session.
+const TRANSCRIPT_PANE_OPT = '@tg_transcript'
+const TRANSCRIPT_STAMP_TTL_MS = 5_000
+const paneTranscriptCache = new Map<string, { at: number; path: string | null }>()
+async function transcriptForPane(pane: string | null, cwd: string | null): Promise<string | null> {
+  if (pane) {
+    const hit = paneTranscriptCache.get(pane)
+    let path: string | null
+    if (hit && Date.now() - hit.at < TRANSCRIPT_STAMP_TTL_MS) path = hit.path
+    else {
+      try {
+        const { stdout } = await exec('tmux', ['show-options', '-pqv', '-t', pane, TRANSCRIPT_PANE_OPT], { timeout: 2000 })
+        path = stdout.trim() || null
+      } catch { path = null }
+      paneTranscriptCache.set(pane, { at: Date.now(), path })
+    }
+    if (path && existsSync(path)) return path
+  }
+  const fb = cwd ? resolveTranscript(cwd) : null
+  if (!fb) return null
+  // Never cross-relay a sibling's transcript: if another pane has STAMPED this exact file, an
+  // unstamped (pre-hook) pane gets nothing rather than the sibling's replies. Restarting the
+  // legacy session stamps it and restores its relay.
+  for (const [p, v] of paneTranscriptCache) {
+    if (p !== pane && v.path === fb) return null
+  }
+  return fb
+}
+
 // ---- Session-instance identity (Track B foundation) ----
 // Every pane gets a generated sessionId stamped as a tmux pane option, so the identity survives
 // daemon restarts (tmux holds it) and one project can host several sessions, each its own topic.
@@ -824,7 +857,10 @@ async function ensureTopicFor(group: string, sessionId: string, cwd: string): Pr
     }
     return existing.threadId
   }
-  const name = basename(cwd) || 'session'
+  const base = basename(cwd) || 'session'
+  // Same-cwd siblings each get their own topic — disambiguate the title: "proj", "proj #2", …
+  const siblings = listTopics().filter(e => e.cwd === cwd && !e.closed && e.sessionId !== sessionId).length
+  const name = siblings > 0 ? `${base} #${siblings + 1}` : base
   try {
     const t = await bot.api.createForumTopic(group, name)
     setTopic(sessionId, { threadId: t.message_thread_id, cwd, name, closed: false, createdAt: Date.now() })
@@ -957,7 +993,8 @@ async function refreshTopicTitles(panes: string[]): Promise<void> {
     try { branch = (await exec('git', ['-C', cwd, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 2000 })).stdout.trim() } catch { /* not a git repo */ }
     if (topicBranchCache.get(sid) === branch) continue
     topicBranchCache.set(sid, branch)
-    const base = basename(cwd) || 'session'
+    const num = / #(\d+)/.exec(t.name)?.[1]   // keep a sibling's "#2" through branch renames
+    const base = (basename(cwd) || 'session') + (num ? ` #${num}` : '')
     const want = branch && !['main', 'master', 'HEAD'].includes(branch) ? `${base} · ${branch}` : base
     if (want === t.name) continue
     try {
@@ -1041,7 +1078,7 @@ async function relayLoopTick(gen: number): Promise<void> {
   relayIdleStreak = idle ? relayIdleStreak + 1 : 0
 
   const cwd = await paneCwd(paneId)
-  const file = cwd ? resolveTranscript(cwd) : null
+  const file = await transcriptForPane(paneId, cwd)
 
   // The card opens/edits/closes entirely inside updateTerminalMirror, off the transcript's turn
   // state (turnInProgress) — NOT pane idle. This bridged pane never shows the "esc to interrupt"
@@ -1092,7 +1129,7 @@ async function relayLoopTick(gen: number): Promise<void> {
 async function primeRelayCursor(): Promise<void> {
   try {
     const cwd = focus.activePaneId ? await paneCwd(focus.activePaneId) : null
-    const file = cwd ? resolveTranscript(cwd) : null
+    const file = await transcriptForPane(focus.activePaneId, cwd)
     const latest = file ? latestFinalReply(file) : null
     // If we relayed from this session before and it has spoken since (switched away and
     // back), replay the messages we missed before resuming live relay.
@@ -1147,18 +1184,17 @@ async function auxRelayTick(): Promise<void> {
     }
   }
   if (TRANSCRIPT_OUTBOUND && isTopicMode()) {
-    // A transcript is resolved by cwd, so multiple panes in the SAME cwd map to the SAME file. Relay
-    // each file exactly once per tick — and never a file the focused rich loop already owns — or the
-    // reply double-sends (once per sibling pane). (Per-session attribution for same-cwd siblings is
-    // Track B; this just stops the duplicate.)
+    // Stamped panes resolve to their own transcript, so same-cwd siblings relay independently to
+    // their own topics. Unstamped panes share the newest-file fallback — relay each file exactly
+    // once per tick, and never a file the focused rich loop already owns, or the reply double-sends.
     const fcwd = focus.activePaneId ? await paneCwd(focus.activePaneId).catch(() => null) : null
-    const focusedFile = fcwd ? resolveTranscript(fcwd) : null
+    const focusedFile = focus.activePaneId ? await transcriptForPane(focus.activePaneId, fcwd) : null
     const seenFiles = new Set<string>()
     for (const pane of [...offMcpPanes]) {
       if (pane === focus.activePaneId) continue   // the rich relay loop owns the focused pane
       try {
         const cwd = await paneCwd(pane).catch(() => null)
-        const file = cwd ? resolveTranscript(cwd) : null
+        const file = await transcriptForPane(pane, cwd)
         if (!file) continue
         if (file === focusedFile || seenFiles.has(file)) continue   // already relayed by the focused loop or a sibling
         seenFiles.add(file)
@@ -1446,7 +1482,7 @@ async function announceNewSession(paneId: string): Promise<void> {
   const cwd = await paneCwd(paneId)
   // Snapshot a read baseline at announcement: the user has "seen up to now" (nothing yet),
   // so anything this session says before they first switch to it relays as unread on switch.
-  const tfile = cwd ? resolveTranscript(cwd) : null
+  const tfile = await transcriptForPane(paneId, cwd)
   if (tfile && !lastRelayedByFile.has(tfile)) lastRelayedByFile.set(tfile, latestFinalReply(tfile)?.uuid ?? '')
   const who = `Session ${n ?? '?'}`
   const where = cwd ? ` (<code>${escapeHtml(cwd)}</code>)` : ''
@@ -2112,7 +2148,7 @@ function singleAnswerKeyboard(prompt: PromptInfo, prefix: 'prompt' | 'mq'): Inli
 async function flushPendingText(): Promise<void> {
   if (!TRANSCRIPT_OUTBOUND || !relayCursorPrimed || !focus.activePaneId) return
   const cwd = await paneCwd(focus.activePaneId)
-  const file = cwd ? resolveTranscript(cwd) : null
+  const file = await transcriptForPane(focus.activePaneId, cwd)
   if (!file) return
   const targets = await outboundTargetsFor(focus.activePaneId)
   for (const r of finalRepliesAfter(file, lastRelayedUuid)) {
@@ -2139,7 +2175,7 @@ async function relayPromptToTelegram(prompt: PromptInfo, paneId: string | null =
   // text is relayed by auxRelayTick on its own cadence (final replies only).
   if (paneId === focus.activePaneId) {
     const cwd = await paneCwd(paneId).catch(() => null)
-    const file = cwd ? resolveTranscript(cwd) : null
+    const file = await transcriptForPane(paneId, cwd)
     for (let waited = 0; file && waited < 2000; waited += 250) {
       if (finalRepliesAfter(file, lastRelayedUuid).some(r => r.uuid && r.uuid !== lastRelayedUuid)) break
       await sleep(250)
@@ -2675,7 +2711,20 @@ async function performReset(t: CommandTarget, command: string): Promise<string> 
 // /clear and /reset use confirmResetSession below — a plain Yes/No reset-in-place.
 async function confirmNewSession(ctx: Context): Promise<void> {
   if (!dmCommandGate(ctx)) return
-  if (!(await commandTarget(ctx))) return
+  const t = await commandTarget(ctx)
+  if (!t) return
+  // /new inside a session's topic = "a sibling session in this project": spawn straight away with
+  // a fresh pre-stamped sessionId (never adopts the original's topic), and discovery gives it its
+  // own topic ("proj #2"). General/DM keep the add/reset chooser below.
+  if (typeof t.replyThread === 'number') {
+    const cwd = await paneCwd(t.paneId).catch(() => null)
+    if (!cwd) { await ctx.reply('Couldn\'t read this session\'s folder.'); return }
+    const ok = await spawnSession(cwd, '', genSessionId())
+    await ctx.reply(ok
+      ? `🚀 Starting a sibling session in <code>${escapeHtml(cwd)}</code> — it gets its own topic shortly.`
+      : `❌ Couldn't start a session in <code>${escapeHtml(cwd)}</code>.`, { parse_mode: 'HTML' })
+    return
+  }
   const keyboard = new InlineKeyboard()
     .text('➕ Add new session', 'newsession')
     .text('♻️ Reset current', 'newconfirm:yes')
@@ -3212,7 +3261,7 @@ async function claudeVersion(): Promise<string | null> {
 async function activeSessionId(): Promise<string | null> {
   if (!focus.activePaneId) return null
   const cwd = await paneCwd(focus.activePaneId)
-  const file = cwd ? resolveTranscript(cwd) : null
+  const file = await transcriptForPane(focus.activePaneId, cwd)
   return file ? basename(file, '.jsonl') : null
 }
 
@@ -3991,7 +4040,7 @@ async function sessionPinText(rows: SessionRow[]): Promise<string> {
     } catch {}
     try {
       cwd = await paneCwd(focus.activePaneId)
-      const file = cwd ? resolveTranscript(cwd) : null
+      const file = await transcriptForPane(focus.activePaneId, cwd)
       model = (file && prettyModel(lastModelInTranscript(file))) || model
     } catch {}
   }
@@ -4083,7 +4132,7 @@ async function sessionPinTextFor(paneId: string): Promise<string> {
   } catch {}
   try {
     cwd = await paneCwd(paneId)
-    const file = cwd ? resolveTranscript(cwd) : null
+    const file = await transcriptForPane(paneId, cwd)
     model = (file && prettyModel(lastModelInTranscript(file))) || model
   } catch {}
   const branch = cwd ? await gitBranch(cwd) : null
@@ -4175,7 +4224,7 @@ async function checkCrossSessionUnread(): Promise<void> {
   for (const pane of offMcpPanes) {
     if (pane === focus.activePaneId) continue
     const cwd = await paneCwd(pane)
-    const file = cwd ? resolveTranscript(cwd) : null
+    const file = await transcriptForPane(pane, cwd)
     if (!file) continue
     const latest = latestFinalReply(file)
     const baseline = lastRelayedByFile.get(file)
@@ -4249,9 +4298,10 @@ async function resolveNewSessionDir(input: string): Promise<string> {
   return t.startsWith('/') ? t : join(homedir(), t)   // bare names anchor to home, not the daemon's own cwd
 }
 
-// The working dirs of every currently-running bridge session (focused + siblings). Two sessions in
-// the SAME dir share Claude Code's per-cwd project transcript, so the daemon can't tell them apart
-// and the second mirrors the first — see distinctSessionDir.
+// The working dirs of every currently-running bridge session (focused + siblings). A folder that
+// already hosts one marks a new spawn there as a SIBLING: it gets a fresh pre-stamped sessionId
+// (own topic, own @tg_transcript) instead of the old tg-N subfolder divert — per-session
+// transcripts made same-cwd sessions safe.
 async function activeSessionCwds(): Promise<Set<string>> {
   const cwds = new Set<string>()
   for (const r of await sessionRows()) {
@@ -4260,22 +4310,6 @@ async function activeSessionCwds(): Promise<Set<string>> {
     if (c) cwds.add(c)
   }
   return cwds
-}
-
-// Pick a launch dir for a new session that won't mirror an existing one. If `desired` already hosts
-// a running bridge session, carve out a fresh sibling subfolder `<desired>/tg-N` (next slot not held
-// by a live session) so the new session is a distinct Claude Code project. Otherwise return `desired`
-// unchanged. Creates the subfolder so tmux's `-c <dir>` can cd into it.
-async function distinctSessionDir(desired: string): Promise<string> {
-  const cwds = await activeSessionCwds()
-  if (!cwds.has(desired)) return desired
-  for (let n = 2; n < 100; n++) {
-    const sub = join(desired, `tg-${n}`)
-    if (cwds.has(sub)) continue            // another live session already there — keep looking
-    try { mkdirSync(sub, { recursive: true }) } catch {}
-    return sub
-  }
-  return desired   // pathological (100 live siblings) — fall back rather than loop forever
 }
 
 // Claude Code refuses to start with the skip-permissions flag in an *untrusted* folder (one with
@@ -5025,12 +5059,13 @@ bot.on('callback_query:data', async ctx => {
       await ctx.editMessageReplyMarkup().catch(() => {})   // chooser is spent — strip its buttons
       return
     }
-    const desired = nsMatch[1] === 'home' ? homedir() : await resolveNewSessionDir('')
-    const dir = await distinctSessionDir(desired)   // divert to <dir>/tg-N if `desired` already runs a session (avoids mirroring)
-    const diverted = dir !== desired
-    const ok = await spawnSession(dir)
+    const dir = nsMatch[1] === 'home' ? homedir() : await resolveNewSessionDir('')
+    // A folder already running a session now hosts a SIBLING (per-session transcripts) — pre-stamp
+    // a fresh id so the new pane never adopts the existing session's topic.
+    const sibling = (await activeSessionCwds()).has(dir)
+    const ok = await spawnSession(dir, '', sibling ? genSessionId() : undefined)
     await ctx.editMessageText(ok
-      ? `🚀 Starting a new session in <code>${escapeHtml(dir)}</code>${diverted ? ' (fresh subfolder — that folder already has a session)' : ''} — it'll pop up here with a ▶️ Switch button shortly.`
+      ? `🚀 Starting a new session in <code>${escapeHtml(dir)}</code>${sibling ? ' (sibling — that folder already has a session)' : ''} — it'll pop up here with a ▶️ Switch button shortly.`
       : `❌ Couldn't start a session in <code>${escapeHtml(dir)}</code> — does that folder exist?`,
       { parse_mode: 'HTML' }).catch(() => {})
     return
@@ -5469,9 +5504,7 @@ bot.on('message:text', async ctx => {
     if (tc) {
       topicCreateReplyTargets.delete(`${ctx.chat?.id}:${replyTo.message_id}`)
       if (!dmCommandGate(ctx)) return
-      const desired = await resolveNewSessionDir(text)
-      const dir = await distinctSessionDir(desired)   // a folder already running a session diverts to <dir>/tg-N
-      const diverted = dir !== desired
+      const dir = await resolveNewSessionDir(text)
       let created = false
       if (!existsSync(dir)) {
         try { mkdirSync(dir, { recursive: true }); created = true }
@@ -5493,7 +5526,7 @@ bot.on('message:text', async ctx => {
       catch { topicBranchCache.set(sid, '') }
       const ok = await spawnSession(dir, '', sid)
       if (!ok) removeTopic(sid)
-      const note = diverted ? ' (fresh subfolder — that folder already has a session)' : created ? ' (📁 created it for you)' : ''
+      const note = created ? ' (📁 created it for you)' : ''
       await ctx.reply(ok
         ? `🚀 Starting this topic's session in <code>${escapeHtml(dir)}</code>${note} — type here to drive it once it's up.`
         : `❌ Couldn't start a session in <code>${escapeHtml(dir)}</code>.`,
@@ -5505,11 +5538,7 @@ bot.on('message:text', async ctx => {
     if (newSessionReplyTargets.has(nsKey)) {
       newSessionReplyTargets.delete(nsKey)
       if (!dmCommandGate(ctx)) return
-      const desired = await resolveNewSessionDir(text)
-      // Divert to <desired>/tg-N if the typed folder already runs a session (avoids mirroring); this
-      // also creates the subfolder, so a diverted dir already exists below.
-      const dir = await distinctSessionDir(desired)
-      const diverted = dir !== desired
+      const dir = await resolveNewSessionDir(text)
       // If the specified folder doesn't exist, create it (recursively) so a new session can start
       // in a fresh directory — the user asked for a path, so honour it rather than erroring out.
       let created = false
@@ -5520,8 +5549,11 @@ bot.on('message:text', async ctx => {
           return
         }
       }
-      const ok = await spawnSession(dir)
-      const note = diverted ? ' (fresh subfolder — that folder already has a session)' : created ? ' (📁 created it for you)' : ''
+      // A folder already running a session hosts a SIBLING now — pre-stamp a fresh id so the new
+      // pane never adopts the existing session's topic.
+      const sibling = (await activeSessionCwds()).has(dir)
+      const ok = await spawnSession(dir, '', sibling ? genSessionId() : undefined)
+      const note = sibling ? ' (sibling — that folder already has a session)' : created ? ' (📁 created it for you)' : ''
       await ctx.reply(ok
         ? `🚀 Starting a new session in <code>${escapeHtml(dir)}</code>${note} — it'll pop up here with a ▶️ Switch button shortly.`
         : `❌ Couldn't start a session in <code>${escapeHtml(dir)}</code>.`,

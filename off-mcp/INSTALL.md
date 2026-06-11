@@ -208,7 +208,10 @@ and gets the prereq sorted. Set it up yourself, in order:
 "enabledPlugins": { "telegram@better-claude-plugins": true },
 "statusLine": { "type": "command", "command": "bash ~/.claude/statusline-command.sh" },
 "hooks": {
-  "SessionStart": [ { "hooks": [ { "type": "command", "command": "bun \"$(ls -d ~/.claude/plugins/cache/better-claude-plugins/telegram/*/ 2>/dev/null | sort -V | tail -1)ensure-daemon.ts\" >/dev/null 2>&1 || true" } ] } ]
+  "SessionStart": [ { "hooks": [
+    { "type": "command", "command": "bun \"$(ls -d ~/.claude/plugins/cache/better-claude-plugins/telegram/*/ 2>/dev/null | sort -V | tail -1)ensure-daemon.ts\" >/dev/null 2>&1 || true" },
+    { "type": "command", "command": "bun \"$(ls -d ~/.claude/plugins/cache/better-claude-plugins/telegram/*/ 2>/dev/null | sort -V | tail -1)stamp-transcript.ts\" >/dev/null 2>&1 || true" }
+  ] } ]
 }
 ```
 The hook resolves the **newest plugin-cache copy** of `ensure-daemon.ts` itself, so it works on
@@ -216,6 +219,9 @@ the very first restart with **nothing pre-written** — in pure off-MCP no shim 
 hook is the *only* thing that starts the daemon, and it can't depend on a launcher the daemon
 writes only after its first run. (The daemon still drops a `~/.claude/channels/telegram/ensure-daemon.js`
 shim on startup for older hooks; the inline glob above just removes the bootstrap dependency on it.)
+The second hook (`stamp-transcript.ts`) writes each session's transcript path onto its tmux pane
+(`@tg_transcript`) so the daemon relays per session — required for several sessions in one project
+(each gets its own forum topic).
 - **Install the bundled status line — do it yourself, inline.** It's what populates the pinned
   message's live metrics: the daemon reads the statusline rendered in the session's pane (context
   bar, tokens, cost, session/api time, and the 5h/7d rate-limit bars for Pro/Max). **Set it up
