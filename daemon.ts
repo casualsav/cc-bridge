@@ -3802,8 +3802,20 @@ function loadScheduledReset(): void {
 }
 
 
-// /pin on|off toggles the pinned status message (default on); bare /pin shows the
-// current state. Off unpins + removes any existing pin; on recreates it.
+// The /pin panel: current state + toggle/refresh buttons (same pattern as /stream).
+function pinPanelText(): string {
+  const on = loadAccess().sessionPin !== false
+  return `📌 Pinned status card — <b>${on ? 'ON' : 'OFF'}</b>\n<i>${on ? 'live model · mode · context · usage, pinned up top' : 'no pinned card'}</i>`
+}
+function pinPanelKeyboard(): InlineKeyboard {
+  const on = loadAccess().sessionPin !== false
+  const kb = new InlineKeyboard().text(on ? '🔁 Turn off' : '🔁 Turn on', 'pin:toggle')
+  if (on) kb.text('📌 Refresh', 'pin:refresh')   // re-pin recovers a client-dismissed pin
+  return kb
+}
+
+// /pin on|off toggles the pinned status message (default on); bare /pin shows the panel.
+// Off unpins + removes any existing pin; on recreates it.
 bot.command('pin', async ctx => {
   if (!dmCommandGate(ctx)) return
   const arg = (ctx.match ?? '').toString().trim().toLowerCase()
@@ -3815,10 +3827,10 @@ bot.command('pin', async ctx => {
   // API still reports as pinned, so a normal update can't bring it back).
   if (arg === 'refresh') {
     if (loadAccess().sessionPin === false) {
-      await ctx.reply('📌 Pinned status message is <b>OFF</b> — turn it on with <code>/pin on</code>.', { parse_mode: 'HTML' })
+      await ctx.reply('📌 Pinned status card is <b>OFF</b> — turn it on with <code>/pin on</code>.', { parse_mode: 'HTML' })
     } else {
       await refreshSessionPin()
-      await ctx.reply('📌 Re-pinned a fresh status message.', { parse_mode: 'HTML' })
+      await ctx.reply('📌 Re-pinned a fresh status card.', { parse_mode: 'HTML' })
     }
     return
   }
@@ -3829,15 +3841,7 @@ bot.command('pin', async ctx => {
     if (arg === 'off') await removeSessionPins()
     else await updateSessionPin()
   }
-  const on = loadAccess().sessionPin !== false
-  await ctx.reply(
-    `📌 Pinned status message is <b>${on ? 'ON' : 'OFF'}</b>.\n` +
-    (on
-      ? 'It stays pinned up top with the live model · mode · context · usage metrics and quick buttons.'
-      : 'No pinned status message is shown.') +
-    '\nToggle with <code>/pin on</code> | <code>off</code>; <code>/pin refresh</code> re-pins a fresh one.',
-    { parse_mode: 'HTML' },
-  )
+  await ctx.reply(pinPanelText(), { parse_mode: 'HTML', reply_markup: pinPanelKeyboard() })
 })
 
 // ---- /settings — one tappable panel for the live channel preferences ----
@@ -4105,7 +4109,36 @@ bot.command('health', async ctx => {
   await ctx.reply(lines.join('\n'), { parse_mode: 'HTML' })
 })
 
-// /voice on|off — quick toggle for voice replies (TTS); bare shows status. `on` = every reply
+// The /voice panel: current state + a toggle button (same pattern as /stream).
+function voicePanelText(): string {
+  const t = loadAccess().tts
+  const on = !!t?.mode && t.mode !== 'off'
+  return `🔊 Voice replies — <b>${on ? `ON · ${t!.engine}` : 'OFF'}</b>\n<i>${on ? 'every reply also speaks' : 'replies are text-only'} · engine in /settings</i>`
+}
+function voicePanelKeyboard(): InlineKeyboard {
+  const on = !!loadAccess().tts?.mode && loadAccess().tts!.mode !== 'off'
+  return new InlineKeyboard().text(on ? '🔁 Turn off' : '🔁 Turn on', 'voice:toggle')
+}
+// Flip voice replies on/off, kicking off the engine provisioning side effects (Piper download /
+// API-key nudge) that 'on' may need. Shared by /voice on|off and the panel's toggle button.
+function setVoiceMode(on: boolean, chatId: string, thread?: number): void {
+  const a = loadAccess()
+  a.tts = { ...a.tts, mode: on ? 'all' : 'off', engine: a.tts?.engine ?? 'piper' }
+  saveAccess(a)
+  if (!on) return
+  const extra = thread ? { message_thread_id: thread } : {}
+  if (a.tts.engine === 'piper' && !piperReady(a.tts.voice)) {
+    void bot.api.sendMessage(chatId, '⏳ Installing the Piper voice engine (~80MB)…', extra).catch(() => {})
+    void provisionPiper(a.tts.voice).then(
+      () => bot.api.sendMessage(chatId, '✅ Piper ready — replies will speak.', extra).catch(() => {}),
+      e => bot.api.sendMessage(chatId, `⚠️ Piper install failed: ${String(e).slice(0, 150)}`, extra).catch(() => {}),
+    )
+  } else if (!engineStatus(a.tts.engine).ready) {
+    void bot.api.sendMessage(chatId, `🔑 The ${a.tts.engine} engine needs its API key — add it in /settings → 🔊 Voice replies.`, extra).catch(() => {})
+  }
+}
+
+// /voice on|off — quick toggle for voice replies (TTS); bare shows the panel. `on` = every reply
 // speaks (mode 'all'); the engine lives in /settings → 🔊 Voice replies.
 bot.command('voice', async ctx => {
   if (!dmCommandGate(ctx)) return
@@ -4113,30 +4146,19 @@ bot.command('voice', async ctx => {
   if (arg && arg !== 'on' && arg !== 'off') {
     await ctx.reply('Usage: <code>/voice on</code> | <code>off</code>', { parse_mode: 'HTML' }); return
   }
-  if (arg) {
-    const a = loadAccess()
-    a.tts = { ...a.tts, mode: arg === 'on' ? 'all' : 'off', engine: a.tts?.engine ?? 'piper' }
-    saveAccess(a)
-    const thread = ctx.message?.message_thread_id
-    const extra = thread ? { message_thread_id: thread } : {}
-    if (arg === 'on' && a.tts.engine === 'piper' && !piperReady(a.tts.voice)) {
-      void bot.api.sendMessage(String(ctx.chat!.id), '⏳ Installing the Piper voice engine (~80MB)…', extra).catch(() => {})
-      void provisionPiper(a.tts.voice).then(
-        () => bot.api.sendMessage(String(ctx.chat!.id), '✅ Piper ready — replies will speak.', extra).catch(() => {}),
-        e => bot.api.sendMessage(String(ctx.chat!.id), `⚠️ Piper install failed: ${String(e).slice(0, 150)}`, extra).catch(() => {}),
-      )
-    } else if (arg === 'on' && !engineStatus(a.tts.engine).ready) {
-      void bot.api.sendMessage(String(ctx.chat!.id), `🔑 The ${a.tts.engine} engine needs its API key — add it in /settings → 🔊 Voice replies.`, extra).catch(() => {})
-    }
-  }
-  const t = loadAccess().tts
-  await ctx.reply(
-    `🔊 Voice replies are <b>${t?.mode && t.mode !== 'off' ? `${t.mode} · ${t.engine}` : 'off'}</b>.\n` +
-    'Toggle with <code>/voice on</code> | <code>off</code>; engine in /settings → 🔊 Voice replies.',
-    { parse_mode: 'HTML' })
+  if (arg) setVoiceMode(arg === 'on', String(ctx.chat!.id), ctx.message?.message_thread_id)
+  await ctx.reply(voicePanelText(), { parse_mode: 'HTML', reply_markup: voicePanelKeyboard() })
 })
 
-// /mcp on|off toggles MCP mode for sessions started afterward (relaunch to apply); bare shows it.
+// The /mcp panel: current state + a toggle button (same pattern as /stream).
+function mcpPanelText(): string {
+  return `🔌 MCP mode — <b>${mcpEnabled() ? 'ON' : 'OFF'}</b>\n<i>new sessions only — relaunch to apply</i>`
+}
+function mcpPanelKeyboard(): InlineKeyboard {
+  return new InlineKeyboard().text(mcpEnabled() ? '🔁 Turn off' : '🔁 Turn on', 'mcp:toggle')
+}
+
+// /mcp on|off toggles MCP mode for sessions started afterward (relaunch to apply); bare shows the panel.
 bot.command('mcp', async ctx => {
   if (!dmCommandGate(ctx)) return
   const arg = (ctx.match ?? '').toString().trim().toLowerCase()
@@ -4144,7 +4166,7 @@ bot.command('mcp', async ctx => {
     await ctx.reply('Usage: <code>/mcp on</code> | <code>off</code>', { parse_mode: 'HTML' }); return
   }
   if (arg && (arg === 'on') !== mcpEnabled()) toggleMcp()
-  await ctx.reply(`🔌 MCP mode is <b>${mcpEnabled() ? 'ON' : 'OFF'}</b> <i>(new sessions; relaunch to apply)</i>.\nToggle with <code>/mcp on</code> | <code>off</code>.`, { parse_mode: 'HTML' })
+  await ctx.reply(mcpPanelText(), { parse_mode: 'HTML', reply_markup: mcpPanelKeyboard() })
 })
 
 // The /stream panel: current mode + a one-tap cycle button. Shared by the bare command and the
@@ -4813,6 +4835,37 @@ bot.on('callback_query:data', async ctx => {
     await respawnTerminalMirror()   // re-spawn the live card below in the new style
     await ctx.answerCallbackQuery({ text: `Stream → ${streamCap(replyMode())}` }).catch(() => {})
     await ctx.editMessageText(streamText(), { parse_mode: 'HTML', reply_markup: streamKeyboard() }).catch(() => {})
+    return
+  }
+
+  // /pin · /voice · /mcp panel buttons — toggle and refresh the panel in place.
+  if (data === 'pin:toggle' || data === 'pin:refresh' || data === 'voice:toggle' || data === 'mcp:toggle') {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    if (data === 'pin:toggle') {
+      const access = loadAccess()
+      access.sessionPin = access.sessionPin === false
+      saveAccess(access)
+      if (access.sessionPin) await updateSessionPin(); else await removeSessionPins()
+      await ctx.answerCallbackQuery({ text: `Pinned card → ${access.sessionPin ? 'ON' : 'OFF'}` }).catch(() => {})
+      await ctx.editMessageText(pinPanelText(), { parse_mode: 'HTML', reply_markup: pinPanelKeyboard() }).catch(() => {})
+    } else if (data === 'pin:refresh') {
+      if (loadAccess().sessionPin === false) { await ctx.answerCallbackQuery({ text: 'Pinned card is off.' }).catch(() => {}); return }
+      await refreshSessionPin()
+      await ctx.answerCallbackQuery({ text: '📌 Re-pinned a fresh card.' }).catch(() => {})
+    } else if (data === 'voice:toggle') {
+      const t = loadAccess().tts
+      const next = !(t?.mode && t.mode !== 'off')
+      setVoiceMode(next, String(ctx.chat?.id ?? ''), ctx.callbackQuery.message?.message_thread_id)
+      await ctx.answerCallbackQuery({ text: `Voice replies → ${next ? 'ON' : 'OFF'}` }).catch(() => {})
+      await ctx.editMessageText(voicePanelText(), { parse_mode: 'HTML', reply_markup: voicePanelKeyboard() }).catch(() => {})
+    } else {
+      toggleMcp()
+      await ctx.answerCallbackQuery({ text: `MCP mode → ${mcpEnabled() ? 'ON' : 'OFF'}` }).catch(() => {})
+      await ctx.editMessageText(mcpPanelText(), { parse_mode: 'HTML', reply_markup: mcpPanelKeyboard() }).catch(() => {})
+    }
     return
   }
 
