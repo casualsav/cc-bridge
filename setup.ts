@@ -246,14 +246,34 @@ function writeConfig(cfg: Config): void {
     env.push(`TELEGRAM_TRANSCRIBE_MODEL=${cfg.whisperModel}`, `TELEGRAM_WHISPER_DEVICE=${cfg.whisperDevice}`, 'TELEGRAM_WHISPER_COMPUTE=int8')
   } else if (cfg.voice === 'groq') { env.push('TELEGRAM_TRANSCRIBE_MODEL=whisper-large-v3-turbo', `GROQ_API_KEY=${cfg.groqKey}`) }
   else if (cfg.voice === 'openai') { env.push('TELEGRAM_TRANSCRIBE_MODEL=whisper-1', `OPENAI_API_KEY=${cfg.openaiKey}`) }
+  // Re-runs must not clobber config the wizard doesn't manage (bang-shell, TTS keys, …):
+  // keep every existing key this run isn't rewriting, and back the old file up first.
+  const newKeys = new Set(env.map(l => l.split('=')[0]))
+  if (existsSync(ENV_FILE)) {
+    const preserved = readFileSync(ENV_FILE, 'utf8').split('\n')
+      .filter(l => l.trim() && !newKeys.has(l.split('=')[0]))
+    copyFileSync(ENV_FILE, ENV_FILE + '.bak')
+    env.push(...preserved)
+  }
   writeFileSync(ENV_FILE, env.join('\n') + '\n', { mode: 0o600 })
   chmodSync(ENV_FILE, 0o600)
   console.log(C.ok(`  ✓ ${ENV_FILE}`))
 
-  const access: Record<string, unknown> = { dmPolicy: cfg.telegramId ? 'allowlist' : 'pairing',
-    allowFrom: cfg.telegramId ? [cfg.telegramId] : [], groups: {}, pending: {}, renderMarkdown: true }
-  writeFileSync(ACCESS_FILE, JSON.stringify(access, null, 2) + '\n', { mode: 0o600 })
-  console.log(C.ok(`  ✓ ${ACCESS_FILE}${cfg.telegramId ? '' : C.dim(' (pairing mode — approve your first DM after setup)')}`))
+  // Same for access.json: an existing file carries pairing state, group allowlists, and chat
+  // prefs — keep it, only making sure the interviewed Telegram ID is allowed.
+  if (existsSync(ACCESS_FILE)) {
+    try {
+      const a = JSON.parse(readFileSync(ACCESS_FILE, 'utf8'))
+      if (cfg.telegramId && !(a.allowFrom ??= []).includes(cfg.telegramId)) a.allowFrom.push(cfg.telegramId)
+      writeFileSync(ACCESS_FILE, JSON.stringify(a, null, 2) + '\n', { mode: 0o600 })
+      console.log(C.ok(`  ✓ ${ACCESS_FILE} ${C.dim('(existing file kept — pairing/groups preserved)')}`))
+    } catch { console.log(C.err(`  ✗ ${ACCESS_FILE} exists but isn't valid JSON — left untouched; fix it by hand`)) }
+  } else {
+    const access: Record<string, unknown> = { dmPolicy: cfg.telegramId ? 'allowlist' : 'pairing',
+      allowFrom: cfg.telegramId ? [cfg.telegramId] : [], groups: {}, pending: {}, renderMarkdown: true }
+    writeFileSync(ACCESS_FILE, JSON.stringify(access, null, 2) + '\n', { mode: 0o600 })
+    console.log(C.ok(`  ✓ ${ACCESS_FILE}${cfg.telegramId ? '' : C.dim(' (pairing mode — approve your first DM after setup)')}`))
+  }
 
   // Extra Claude accounts → accounts.json (name → config dir). Dirs are created here; the daemon
   // seeds each one's settings.json (statusline + hooks) at startup, AFTER this script has written
@@ -283,13 +303,19 @@ function patchSettings(mode: Mode): void {
     'pocket-claude': { source: { source: 'github', repo: 'casualsav/pocket-claude' } } }
   s.enabledPlugins = { ...(s.enabledPlugins || {}), 'telegram@pocket-claude': true }
   s.statusLine = { type: 'command', command: 'bash ~/.claude/statusline-command.sh' }
-  const hookCmd = 'bun "$(ls -d ~/.claude/plugins/cache/pocket-claude/telegram/*/ 2>/dev/null | sort -V | tail -1)ensure-daemon.ts" >/dev/null 2>&1 || true'
+  // Two SessionStart hooks, same as off-mcp/INSTALL.md §2: ensure-daemon brings the bridge up,
+  // stamp-transcript writes each session's transcript path (off-MCP outbound + account routing
+  // need it — without it the daemon falls back to slower pane-based discovery).
+  const cacheGlob = '$(ls -d ~/.claude/plugins/cache/pocket-claude/telegram/*/ 2>/dev/null | sort -V | tail -1)'
   s.hooks = s.hooks || {}
   const sessionStart = (s.hooks.SessionStart ||= [])
-  const already = JSON.stringify(sessionStart).includes('ensure-daemon.ts')
-  if (!already) sessionStart.push({ hooks: [{ type: 'command', command: hookCmd }] })
+  for (const script of ['ensure-daemon.ts', 'stamp-transcript.ts']) {
+    if (!JSON.stringify(sessionStart).includes(script)) {
+      sessionStart.push({ hooks: [{ type: 'command', command: `bun "${cacheGlob}${script}" >/dev/null 2>&1 || true` }] })
+    }
+  }
   writeFileSync(SETTINGS, JSON.stringify(s, null, 2) + '\n')
-  console.log(C.ok('  ✓ settings.json (marketplace + plugin + SessionStart hook + statusline)'))
+  console.log(C.ok('  ✓ settings.json (marketplace + plugin + SessionStart hooks + statusline)'))
 
   copyFileSync(join(REPO, 'statusline-command.sh'), STATUSLINE_DEST)
   chmodSync(STATUSLINE_DEST, 0o755)
@@ -357,6 +383,7 @@ async function main(): Promise<void> {
     console.log(`  ${C.b('claude-tg')}    starts safe — permission prompts relay to Telegram; flip to full bypass on demand from /mode`)
     console.log(C.dim('  It bridges automatically (tags the pane with the @tg_bridge tmux option). Run inside tmux.'))
   }
+  console.log(C.dim('\n  Voice replies (TTS), live stream mode, budgets and more are configurable from chat: /settings.'))
   rl.close()
 }
 

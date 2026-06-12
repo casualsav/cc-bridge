@@ -93,6 +93,11 @@ Ask these one by one (don't assume defaults silently — confirm each), then wri
 files below. **You can write them now even though the plugin isn't installed yet** — they
 live in the state dir, and the daemon reads them on first start.
 
+**If either file already exists (re-install / upgrade), MERGE — never overwrite wholesale.**
+Preserve `.env` keys you didn't just collect (e.g. `TELEGRAM_BANG_SHELL`, TTS API keys) and
+keep `access.json`'s pairing/group/prefs state, only adding the interviewed Telegram ID to
+`allowFrom`. A blind rewrite here once wiped a working config.
+
 **Questions:**
 1. **Bot token** — from @BotFather. (Required.)
 2. **Your Telegram numeric user ID** — to lock the bot to you. If they don't know it,
