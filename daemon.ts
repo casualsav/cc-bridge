@@ -48,7 +48,7 @@ import {
   usageWarnState, voiceNudged,
   sessionNames, mdOverwritePending,
 } from './state.ts'
-import { initMirror, updateTerminalMirror, respawnTerminalMirror, abandonMirror } from './mirror.ts'
+import { initMirror, updateTerminalMirror, respawnTerminalMirror, abandonMirror, updateAuxMirror, dropAuxMirror, auxMirrorPanes } from './mirror.ts'
 import { parseStatusline, pinBar, type StatuslineData } from './statusline.ts'
 import {
   STATIC, initAccess, loadAccess, saveAccess, gate, dmCommandGate, isMentioned,
@@ -903,6 +903,11 @@ function startRelayLoop(): void {
 // pane is skipped, so the two loops never double-send. No-op outside topic mode (single-focus
 // behavior is unchanged). Newly-seen panes are primed (skip their existing tail), relay from next tick.
 async function auxRelayTick(): Promise<void> {
+  // Aux mirror cleanup (every tick, any mode): a pane that left the off-MCP set (died) or became
+  // the focused pane stops getting aux updates — cap its card so it never lingers un-capped.
+  for (const k of auxMirrorPanes()) {
+    if (!offMcpPanes.has(k) || k === focus.activePaneId) await dropAuxMirror(k).catch(() => {})
+  }
   // Prompt detection for non-focused panes (forum-topics mode). The focused pane's PaneWatcher
   // feeds onPaneEvent; aux panes have no watcher, so without this a permission prompt in another
   // topic's session sits undetected forever — the session blocks silently. Runs regardless of
@@ -931,12 +936,16 @@ async function auxRelayTick(): Promise<void> {
         if (!file) continue
         if (file === focusedFile || seenFiles.has(file)) continue   // already relayed by the focused loop or a sibling
         seenFiles.add(file)
+        const working = turnInProgress(file)
+        // The session's own live card in its own topic — same lifecycle as the focused card,
+        // driven by the same transcript turn signal this loop already computes.
+        await updateAuxMirror(pane, working).catch(() => {})
         if (!auxRelayPrimed.has(file)) {
           lastRelayedByFile.set(file, latestFinalReply(file)?.uuid ?? '')
           auxRelayPrimed.add(file)
           continue
         }
-        if (turnInProgress(file)) { auxConcludeTicks.delete(file); void emitTopicTyping(pane); continue }   // working → typing in its topic, relay only once the turn concludes
+        if (working) { auxConcludeTicks.delete(file); void emitTopicTyping(pane); continue }   // working → typing in its topic, relay only once the turn concludes
         // Same conclude-debounce as the focused loop: a mid-burst end_turn (auto-continue gap)
         // shouldn't ship interim narration to the topic as if the turn had ended.
         const ticks = (auxConcludeTicks.get(file) ?? 0) + 1
@@ -6786,6 +6795,7 @@ initMirror({
   retriggerTyping: () => typingPresence.retrigger(),
   resolveTranscriptForPane: async pane => transcriptForPane(pane, await paneCwd(pane)),
   outboundTargets: () => outboundTargetsFor(focus.activePaneId),   // focused session's topic in forum mode, else DM
+  auxOutboundTargets: pane => outboundTargetsFor(pane),            // a non-focused session's own topic
 })
 
 // Drive usage alerts + limit auto-continue (session + weekly) from the statusline snapshot.

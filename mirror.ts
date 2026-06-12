@@ -2,8 +2,14 @@
 //
 // One self-editing Telegram message per work burst showing what Claude is doing, so the user
 // can watch without the terminal. Extracted from daemon.ts (Phase 3b). Owns the open-card
-// tracking + throttle/idle state; the whole card lifecycle is driven by one `working` signal
-// from updateTerminalMirror().
+// tracking + throttle/idle state; each card's lifecycle is driven by one `working` signal.
+//
+// Two kinds of card share the MirrorCard machinery:
+//   focused — the rich relay loop's card (DM mode, or the focused session's topic). Persisted
+//             across daemon restarts (resume-or-cap, see the persistence block).
+//   aux     — forum-topics mode: every OTHER session gets its own card in its own topic, driven
+//             by auxRelayTick. Persisted the same way (a deploy lands mid-turn constantly in
+//             dev — without resume-or-cap every topic would collect orphan cards).
 //
 // Wired once via initMirror(): depends on the bot, the access loader, the daemon's replyMode()
 // helper (shared across the daemon, so it stays there), a live getActivePaneId getter, and a
@@ -28,15 +34,17 @@ type MirrorDeps = {
   // fallback) — so the card reads the right session even across accounts (CLAUDE_CONFIG_DIR)
   // and same-cwd siblings, instead of guessing "newest .jsonl for the cwd" here.
   resolveTranscriptForPane: (paneId: string) => Promise<string | null>
-  // Where the card should open: the focused session's topic in forum mode, else the DM chats. The
-  // daemon supplies this (outboundTargetsFor) so the mirror doesn't need to know about topics.
+  // Where the focused card should open: the focused session's topic in forum mode, else the DM
+  // chats. The daemon supplies this (outboundTargetsFor) so the mirror doesn't know about topics.
   outboundTargets: () => Promise<Array<{ chat: string; thread?: number }>>
+  // Where a specific pane's aux card should open (its own topic).
+  auxOutboundTargets: (paneId: string) => Promise<Array<{ chat: string; thread?: number }>>
 }
 
 let deps: MirrorDeps
 export function initMirror(d: MirrorDeps): void {
   deps = d
-  restorePersistedCard()
+  restorePersistedCards()
 }
 
 const MIRROR_THROTTLE_MS = 3000
@@ -46,88 +54,21 @@ const MIRROR_FINALIZE_TICKS = 3   // ~4.5s sustained idle (RELAY_POLL_MS=1500) b
 const MIRROR_FEED = 5        // hybrid: max interleaved items shown (matches tools & thoughts)
 const MIRROR_THOUGHTS = 5    // thoughts mode: max thoughts shown (oldest falls off as new flow in)
 // The status footer (verb · elapsed · tokens) is DISABLED for now — it doesn't track reliably yet
-// (verb/token scraping off the spinner line is flaky). The whole machinery (mirrorFooter,
-// fmtElapsed, the verb/token scrape in syncMirrorBody) is kept intact; flip this to re-enable it
-// once it can be made dependable. While false, composeCard renders the body only.
+// (verb/token scraping off the spinner line is flaky). The whole machinery (the footer method,
+// fmtElapsed, the verb/token scrape in syncBody) is kept intact; flip this to re-enable it
+// once it can be made dependable. While false, compose renders the body only.
 const MIRROR_FOOTER_ENABLED = false
 
-const mirrorMsgIds = new Map<string, number>()   // chat_id → the live mirror message id
-// The pane the open card belongs to. A relay-loop restart on the SAME pane (focus re-adoption mid
-// -turn) must keep the existing card rather than orphan it and open a second one — see abandonMirror.
-let mirrorPaneId: string | null = null
-// Consecutive not-working ticks. The card is finalized (one ✅ Done, then a fresh card on the next
-// turn) only after this crosses the threshold — so a single transient not-working tick can't split
-// one turn's card into two. Reset to 0 on any working tick.
-let mirrorIdleTicks = 0
-// When the current card (work burst) opened — drives the live elapsed timer in the status footer.
-let mirrorStartedAt = 0
-// The card has two update cadences. The heavy sync (pane capture + transcript read) refreshes the
-// body + the footer's verb/tokens on the throttled relay tick; a light 1s ticker re-renders the
-// footer so the elapsed timer counts up smoothly to the second between syncs. These caches carry
-// the last-synced values across ticks so the timer can re-render without re-scraping.
-let mirrorBody = ''              // last-synced card body (no footer)
-let mirrorVerb = 'Working'       // last-scraped spinner verb (held between syncs so it doesn't flicker)
-let mirrorTokens: string | null = null   // last-scraped PER-TURN token count (spinner only — never the session total)
-let mirrorLastSyncAt = 0         // last heavy sync; throttled to MIRROR_THROTTLE_MS
-// We edit the card ONLY when its CONTENT changes (body / verb / tokens) — never just because the
-// clock advanced — so the message barely flashes. The elapsed is rendered at each such edit, so it
-// steps to the current value on real activity rather than ticking every second. This key is the
-// content fingerprint (no elapsed); an unchanged key means no edit.
-let mirrorContentKey = ''
-// The last-real-user-prompt uuid of the turn the open card tracks — the "same turn?" identity
-// used to resume the card across a daemon restart (see the persistence block below).
-let mirrorAnchor: string | null = null
-
 // ---- Card persistence across daemon restarts ----
-// mirrorMsgIds used to live ONLY in process memory, so every deploy/crash mid-turn orphaned the
-// live card: frozen un-capped (never edited again), with the fresh daemon opening a new one on
-// its first working tick. With a deploy inside nearly every dev turn, each user message produced
-// one card per restart — the "stream fragments into 5-6 messages" bug. Persisting
+// Card message ids used to live ONLY in process memory, so every deploy/crash mid-turn orphaned
+// the live card: frozen un-capped (never edited again), with the fresh daemon opening a new one
+// on its first working tick. With a deploy inside nearly every dev turn, each user message
+// produced one card per restart — the "stream fragments into 5-6 messages" bug. Persisting
 // {ids, pane, turn anchor, last body} lets the next daemon RESUME editing the same card when it's
 // still the same pane + turn, and cap the orphan cleanly when it isn't.
 const MIRROR_STATE_FILE = join(STATE_DIR, 'mirror-card.json')
+const MIRROR_AUX_STATE_FILE = join(STATE_DIR, 'mirror-aux-cards.json')
 type PersistedCard = { ids: Record<string, number>; paneId: string | null; startedAt: number; anchor: string | null; body: string }
-// Restored ids await a verdict on the first tick (resume vs cap) — needs the live transcript,
-// so it can't be decided at load time.
-let pendingRestore: { anchor: string | null; body: string } | null = null
-
-function persistMirror(): void {
-  writeJsonFile(MIRROR_STATE_FILE, mirrorMsgIds.size
-    ? { ids: Object.fromEntries(mirrorMsgIds), paneId: mirrorPaneId, startedAt: mirrorStartedAt, anchor: mirrorAnchor, body: mirrorBody } satisfies PersistedCard
-    : {})
-}
-
-function restorePersistedCard(): void {
-  const saved = readJsonFile<Partial<PersistedCard>>(MIRROR_STATE_FILE, {})
-  if (!saved.ids || !Object.keys(saved.ids).length) return
-  for (const [chat, mid] of Object.entries(saved.ids)) mirrorMsgIds.set(chat, mid)
-  mirrorPaneId = saved.paneId ?? null
-  mirrorStartedAt = saved.startedAt || Date.now()
-  pendingRestore = { anchor: saved.anchor ?? null, body: saved.body ?? '' }
-}
-
-// First tick after a restart with a restored card: same pane + same turn → keep editing it (the
-// restart is invisible); anything else → cap the orphan with its last known body so it never
-// lingers un-capped, and let the normal lifecycle open a fresh card for the new turn.
-async function reconcileRestoredCard(): Promise<void> {
-  const saved = pendingRestore
-  pendingRestore = null
-  if (!saved || mirrorMsgIds.size === 0) return
-  const paneId = deps.getActivePaneId()
-  const file = paneId ? await deps.resolveTranscriptForPane(paneId).catch(() => null) : null
-  const anchor = file ? turnAnchorUuid(file) : null
-  if (paneId && paneId === mirrorPaneId && anchor && anchor === saved.anchor) {
-    mirrorAnchor = anchor
-    mirrorBody = saved.body   // contentKey + the cap fallback hold the last body until the next sync
-    mirrorContentKey = saved.body
-    process.stderr.write(`daemon: resumed live mirror card across restart (pane ${paneId})\n`)
-    return
-  }
-  const text = saved.body ? `${saved.body}\n\n✅ <b>Done</b>` : '✅ <b>Done</b>'
-  for (const [chat, mid] of mirrorMsgIds) await deps.bot.api.editMessageText(chat, mid, text, { parse_mode: 'HTML' }).catch(() => {})
-  mirrorMsgIds.clear(); resetMirrorState(); persistMirror()
-  process.stderr.write('daemon: capped orphaned mirror card from previous run\n')
-}
 
 // Compact live elapsed for the status footer: "23s" / "1m 40s" / "1h 02m".
 function fmtElapsed(ms: number): string {
@@ -136,23 +77,6 @@ function fmtElapsed(ms: number): string {
   const m = Math.floor(s / 60), sec = s % 60
   if (m < 60) return sec ? `${m}m ${sec}s` : `${m}m`
   return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`
-}
-
-// The status line pinned to the bottom of a live card: the whimsical working verb + the live
-// elapsed (counted locally, smooth to the second) + the PER-TURN token count (from Claude's spinner
-// line only — never the session total, which is what made it jump to ~270k). Verb/tokens are cached
-// between terminal syncs so they hold steady; elapsed ticks every second off mirrorStartedAt.
-function mirrorFooter(): string {
-  const elapsed = mirrorStartedAt ? fmtElapsed(Date.now() - mirrorStartedAt) : null
-  const parts = [`⏳ <i>${escapeHtml(mirrorVerb)}</i>`, elapsed, mirrorTokens].filter(Boolean)
-  return parts.length > 1 ? parts.join(' · ') : ''
-}
-
-// Reset every per-burst cache. Called whenever a card is capped/dropped so the next burst is fresh.
-function resetMirrorState(): void {
-  mirrorBody = ''; mirrorVerb = 'Working'; mirrorTokens = null
-  mirrorContentKey = ''; mirrorIdleTicks = 0; mirrorStartedAt = 0; mirrorLastSyncAt = 0
-  mirrorPaneId = null; mirrorAnchor = null
 }
 
 // Live tool-use feed. On by default ('tools') — opt out via access.json
@@ -185,8 +109,7 @@ export function recentAssistantBlocks(raw: string, max: number): string[] {
 }
 
 // Pane capture with a little scrollback, so the digest has recent blocks even as they scroll.
-async function mirrorCapture(): Promise<string> {
-  const paneId = deps.getActivePaneId()
+async function mirrorCapture(paneId: string | null): Promise<string> {
   if (!paneId) return ''
   try { return (await exec('tmux', ['capture-pane', '-p', '-t', paneId, '-S', '-120', '-J'], { timeout: 3000 })).stdout }
   catch { return '' }
@@ -295,136 +218,290 @@ export function renderThoughtsMirror(feed: FeedItem[], done: boolean): string {
   return done ? `${head}\n\n✅ <b>Done</b>` : head
 }
 
-// The HEAVY sync: rebuild the card body from the transcript (+ a pane capture for tools/digest and
-// for the spinner verb/tokens), updating mirrorBody and the cached footer pieces. Costs a tmux
-// capture + transcript read, so it runs only on the throttled relay tick — the 1s ticker re-renders
-// off these caches without re-scraping. Returns whether there's anything to show.
-async function syncMirrorBody(done: boolean): Promise<boolean> {
-  const mode = deps.replyMode()
-  if (mode === 'off') { mirrorBody = ''; return false }
-  const paneId = deps.getActivePaneId()
-  const file = paneId ? await deps.resolveTranscriptForPane(paneId) : null
+// ---- The card lifecycle (shared by the focused card and per-pane aux cards) ----
+class MirrorCard {
+  msgIds = new Map<string, number>()   // chat_id → the live mirror message id
+  // The pane the open card belongs to. A relay-loop restart on the SAME pane (focus re-adoption
+  // mid-turn) must keep the existing card rather than orphan it and open a second one — see abandon.
+  paneId: string | null = null
+  // Consecutive not-working ticks. The card is finalized (one ✅ Done, then a fresh card on the next
+  // turn) only after this crosses the threshold — so a single transient not-working tick can't split
+  // one turn's card into two. Reset to 0 on any working tick.
+  private idleTicks = 0
+  // When the current card (work burst) opened — drives the live elapsed timer in the status footer.
+  private startedAt = 0
+  // The card has two update cadences. The heavy sync (pane capture + transcript read) refreshes the
+  // body + the footer's verb/tokens on the throttled relay tick; the cached values carry across
+  // ticks so a re-render doesn't re-scrape.
+  private body = ''              // last-synced card body (no footer)
+  private verb = 'Working'       // last-scraped spinner verb (held between syncs so it doesn't flicker)
+  private tokens: string | null = null   // last-scraped PER-TURN token count (spinner only — never the session total)
+  private lastSyncAt = 0         // last heavy sync; throttled to MIRROR_THROTTLE_MS
+  // We edit the card ONLY when its CONTENT changes (body / verb / tokens) — never just because the
+  // clock advanced — so the message barely flashes. This key is the content fingerprint (no
+  // elapsed); an unchanged key means no edit.
+  private contentKey = ''
+  // The last-real-user-prompt uuid of the turn the open card tracks — the "same turn?" identity
+  // used to resume the card across a daemon restart.
+  private anchor: string | null = null
+  // Restored ids await a verdict on the first tick (resume vs cap) — needs the live transcript,
+  // so it can't be decided at load time.
+  private pendingRestore: { anchor: string | null; body: string } | null = null
 
-  const needCap = !done || (mode === 'tools' && mirrorMode() === 'digest')
-  const cap = needCap ? await mirrorCapture() : ''
-  // Refresh the footer pieces from Claude's spinner line, but only when a fresh reading exists — a
-  // tick that misses the line (it scrolls) keeps the last good verb/tokens instead of flickering,
-  // and tokens come from the spinner ONLY (the per-turn count), never the cumulative statusline.
-  if (cap) {
-    const wl = parseWorkingLine(cap)
-    if (wl?.verb) mirrorVerb = wl.verb
-    if (wl?.tokens) mirrorTokens = wl.tokens
+  constructor(private opts: {
+    resolvePane: () => string | null
+    targets: () => Promise<Array<{ chat: string; thread?: number }>>
+    persist: () => void
+    onCreated?: () => void
+  }) {}
+
+  // ---- persistence ----
+  snapshot(): PersistedCard | null {
+    return this.msgIds.size
+      ? { ids: Object.fromEntries(this.msgIds), paneId: this.paneId, startedAt: this.startedAt, anchor: this.anchor, body: this.body }
+      : null
   }
 
-  let body: string | null
-  if (mode === 'thoughts') body = renderThoughtsMirror(file ? currentTurnFeed(file, done) : [], done) || null   // `done` → drop the reply (relayed on its own)
-  else if (mode === 'hybrid') { const feed = file ? currentTurnFeed(file, done) : []; body = feed.length ? renderHybridMirror(feed, done) : null }
-  else {
-    // tools (legacy 'final')
-    if (mirrorMode() === 'off') { mirrorBody = ''; return false }
-    if (mirrorMode() === 'digest') body = cap ? renderDigestMirror(cap, done) : null
-    else { const acts = file ? currentTurnActivity(file) : []; body = acts.length ? renderToolsMirror(acts, done) : null }
+  restore(saved: Partial<PersistedCard>): void {
+    if (!saved.ids || !Object.keys(saved.ids).length) return
+    for (const [chat, mid] of Object.entries(saved.ids)) this.msgIds.set(chat, mid)
+    this.paneId = saved.paneId ?? null
+    this.startedAt = saved.startedAt || Date.now()
+    this.pendingRestore = { anchor: saved.anchor ?? null, body: saved.body ?? '' }
   }
-  if (body == null) return false
-  mirrorBody = body
-  return true
-}
 
-// The card text = cached body + the live footer (omitted when done; the body already ends in ✅ Done).
-function composeCard(done: boolean): string {
-  if (done || !mirrorBody || !MIRROR_FOOTER_ENABLED) return mirrorBody
-  const footer = mirrorFooter()
-  return footer ? `${mirrorBody}\n\n${footer}` : mirrorBody
-}
-
-// The content fingerprint that decides whether to edit: the body (the thoughts/tools), NOT the
-// footer. Claude's spinner verb rotates and its token count climbs every few seconds the whole
-// turn, so keying on them would flash the card every few seconds regardless. Keying on the body
-// means an edit fires only on a genuinely new thought/tool; the footer (verb · elapsed · tokens)
-// refreshes to the current values on those edits, so it steps with real activity.
-function contentKey(): string { return mirrorBody }
-
-// Edit the open card to `text` across every tracked chat.
-async function pushCard(text: string): Promise<void> {
-  if (!text || mirrorMsgIds.size === 0) return
-  for (const [chat, mid] of mirrorMsgIds) await deps.bot.api.editMessageText(chat, mid, text, { parse_mode: 'HTML' }).catch(() => {})
-  persistMirror()   // keep the persisted body current so a restart's cap fallback shows the latest state
-}
-
-// The card's whole lifecycle lives here, driven by one signal — `working` = turnInProgress(file)
-// from the transcript. While the turn runs we open the card once and edit it in place; the
-// instant the turn settles we cap it (✅ Done) and clear it. Idempotent.
-export async function updateTerminalMirror(working: boolean): Promise<void> {
-  if (pendingRestore) await reconcileRestoredCard()   // restart verdict first: resume the old card or cap it
-  const mode = deps.replyMode()
-  // off → never a card. tools+terminalMirror:off → no card. (Explicit off → cap now, no debounce.)
-  if (mode === 'off' || (mode === 'tools' && mirrorMode() === 'off')) { mirrorIdleTicks = 0; if (mirrorMsgIds.size) await finalizeTerminalMirror(); return }
-
-  if (!working) {
-    // Debounce the cap: only finalize after sustained idle, so a one-tick blip doesn't split the
-    // turn's card. A real turn-end stays not-working, so it still caps within a few ticks.
-    if (++mirrorIdleTicks >= MIRROR_FINALIZE_TICKS && mirrorMsgIds.size) await finalizeTerminalMirror()
-    return
-  }
-  mirrorIdleTicks = 0   // working again → reset the debounce
-  if (mirrorMsgIds.size === 0 && !mirrorStartedAt) { mirrorStartedAt = Date.now(); mirrorVerb = 'Working'; mirrorTokens = null }   // start a fresh burst
-
-  // Heavy sync is throttled (a tmux capture + transcript read). We refresh body/verb/tokens here,
-  // then edit ONLY if the content fingerprint moved — so the card tracks real activity, not the
-  // clock, and barely flashes. The elapsed in the footer steps to "now" whenever such an edit fires.
-  const now = Date.now()
-  if (now - mirrorLastSyncAt < MIRROR_THROTTLE_MS && mirrorMsgIds.size > 0) return
-  mirrorLastSyncAt = now
-  if (!(await syncMirrorBody(false))) return   // nothing to show yet (e.g. thoughts mode, no narration)
-
-  if (mirrorMsgIds.size === 0) {
-    // Open the card silently — it's the ambient mirror; the alerting message is the relayed reply.
-    mirrorContentKey = contentKey()
-    mirrorPaneId = deps.getActivePaneId()   // remember which pane this card tracks (see abandonMirror)
-    const file = mirrorPaneId ? await deps.resolveTranscriptForPane(mirrorPaneId).catch(() => null) : null
-    mirrorAnchor = file ? turnAnchorUuid(file) : null   // the turn this card belongs to (restart resume check)
-    const text = composeCard(false)
-    for (const t of await deps.outboundTargets()) {
-      const opts = { parse_mode: 'HTML' as const, disable_notification: true, ...(t.thread ? { message_thread_id: t.thread } : {}) }
-      try { const m = await deps.bot.api.sendMessage(t.chat, text, opts); mirrorMsgIds.set(t.chat, m.message_id) }
-      catch (e) { process.stderr.write(`daemon: activity mirror create failed: ${e}\n`) }
+  // First tick after a restart with a restored card: same pane + same turn → keep editing it (the
+  // restart is invisible); anything else → cap the orphan with its last known body so it never
+  // lingers un-capped, and let the normal lifecycle open a fresh card for the new turn.
+  private async reconcile(): Promise<void> {
+    const saved = this.pendingRestore
+    this.pendingRestore = null
+    if (!saved || this.msgIds.size === 0) return
+    const paneId = this.opts.resolvePane()
+    const file = paneId ? await deps.resolveTranscriptForPane(paneId).catch(() => null) : null
+    const anchor = file ? turnAnchorUuid(file) : null
+    if (paneId && paneId === this.paneId && anchor && anchor === saved.anchor) {
+      this.anchor = anchor
+      this.body = saved.body   // contentKey + the cap fallback hold the last body until the next sync
+      this.contentKey = saved.body
+      process.stderr.write(`daemon: resumed live mirror card across restart (pane ${paneId})\n`)
+      return
     }
-    persistMirror()
-    deps.retriggerTyping()   // the mirror send clears Telegram's typing state — re-assert it now
-  } else {
-    const key = contentKey()
-    if (key !== mirrorContentKey) { mirrorContentKey = key; await pushCard(composeCard(false)) }   // edit only on real change
+    await this.capWithCachedBody(saved.body)
+    process.stderr.write('daemon: capped orphaned mirror card from previous run\n')
+  }
+
+  private reset(): void {
+    this.body = ''; this.verb = 'Working'; this.tokens = null
+    this.contentKey = ''; this.idleTicks = 0; this.startedAt = 0; this.lastSyncAt = 0
+    this.paneId = null; this.anchor = null
+  }
+
+  // The status line pinned to the bottom of a live card: the whimsical working verb + the live
+  // elapsed + the PER-TURN token count (from Claude's spinner line only — never the session
+  // total, which is what made it jump to ~270k).
+  private footer(): string {
+    const elapsed = this.startedAt ? fmtElapsed(Date.now() - this.startedAt) : null
+    const parts = [`⏳ <i>${escapeHtml(this.verb)}</i>`, elapsed, this.tokens].filter(Boolean)
+    return parts.length > 1 ? parts.join(' · ') : ''
+  }
+
+  // The HEAVY sync: rebuild the card body from the transcript (+ a pane capture for digest mode and
+  // the footer's verb/tokens), updating body and the cached footer pieces. Costs a transcript read
+  // (and a tmux capture when needed), so it runs only on the throttled tick. Returns whether
+  // there's anything to show.
+  private async syncBody(done: boolean): Promise<boolean> {
+    const mode = deps.replyMode()
+    if (mode === 'off') { this.body = ''; return false }
+    const paneId = this.opts.resolvePane()
+    const file = paneId ? await deps.resolveTranscriptForPane(paneId) : null
+
+    // The capture feeds the digest body and the footer's verb/tokens scrape — with the footer
+    // disabled, thoughts/tools/hybrid don't need it at all (saves a tmux spawn per sync).
+    const needCap = (mode === 'tools' && mirrorMode() === 'digest') || (!done && MIRROR_FOOTER_ENABLED)
+    const cap = needCap ? await mirrorCapture(paneId) : ''
+    // Refresh the footer pieces from Claude's spinner line, but only when a fresh reading exists — a
+    // tick that misses the line (it scrolls) keeps the last good verb/tokens instead of flickering.
+    if (cap) {
+      const wl = parseWorkingLine(cap)
+      if (wl?.verb) this.verb = wl.verb
+      if (wl?.tokens) this.tokens = wl.tokens
+    }
+
+    let body: string | null
+    if (mode === 'thoughts') body = renderThoughtsMirror(file ? currentTurnFeed(file, done) : [], done) || null   // `done` → drop the reply (relayed on its own)
+    else if (mode === 'hybrid') { const feed = file ? currentTurnFeed(file, done) : []; body = feed.length ? renderHybridMirror(feed, done) : null }
+    else {
+      // tools (legacy 'final')
+      if (mirrorMode() === 'off') { this.body = ''; return false }
+      if (mirrorMode() === 'digest') body = cap ? renderDigestMirror(cap, done) : null
+      else { const acts = file ? currentTurnActivity(file) : []; body = acts.length ? renderToolsMirror(acts, done) : null }
+    }
+    if (body == null) return false
+    this.body = body
+    return true
+  }
+
+  // The card text = cached body + the live footer (omitted when done; the body already ends in ✅ Done).
+  private compose(done: boolean): string {
+    if (done || !this.body || !MIRROR_FOOTER_ENABLED) return this.body
+    const footer = this.footer()
+    return footer ? `${this.body}\n\n${footer}` : this.body
+  }
+
+  // Edit the open card to `text` across every tracked chat.
+  private async pushCard(text: string): Promise<void> {
+    if (!text || this.msgIds.size === 0) return
+    for (const [chat, mid] of this.msgIds) await deps.bot.api.editMessageText(chat, mid, text, { parse_mode: 'HTML' }).catch(() => {})
+    this.opts.persist()   // keep the persisted body current so a restart's cap fallback shows the latest state
+  }
+
+  // The card's whole lifecycle lives here, driven by one signal — `working` = turnInProgress(file)
+  // from the transcript. While the turn runs we open the card once and edit it in place; the
+  // instant the turn settles we cap it (✅ Done) and clear it. Idempotent.
+  async update(working: boolean): Promise<void> {
+    if (this.pendingRestore) await this.reconcile()   // restart verdict first: resume the old card or cap it
+    const mode = deps.replyMode()
+    // off → never a card. tools+terminalMirror:off → no card. (Explicit off → cap now, no debounce.)
+    if (mode === 'off' || (mode === 'tools' && mirrorMode() === 'off')) { this.idleTicks = 0; if (this.msgIds.size) await this.finalize(); return }
+
+    if (!working) {
+      // Debounce the cap: only finalize after sustained idle, so a one-tick blip doesn't split the
+      // turn's card. A real turn-end stays not-working, so it still caps within a few ticks.
+      if (++this.idleTicks >= MIRROR_FINALIZE_TICKS && this.msgIds.size) await this.finalize()
+      return
+    }
+    this.idleTicks = 0   // working again → reset the debounce
+    if (this.msgIds.size === 0 && !this.startedAt) { this.startedAt = Date.now(); this.verb = 'Working'; this.tokens = null }   // start a fresh burst
+
+    // Heavy sync is throttled (transcript read + maybe a capture). We refresh body/verb/tokens,
+    // then edit ONLY if the content fingerprint moved — so the card tracks real activity, not the
+    // clock, and barely flashes.
+    const now = Date.now()
+    if (now - this.lastSyncAt < MIRROR_THROTTLE_MS && this.msgIds.size > 0) return
+    this.lastSyncAt = now
+    if (!(await this.syncBody(false))) return   // nothing to show yet (e.g. thoughts mode, no narration)
+
+    if (this.msgIds.size === 0) {
+      // Open the card silently — it's the ambient mirror; the alerting message is the relayed reply.
+      this.contentKey = this.body
+      this.paneId = this.opts.resolvePane()   // remember which pane this card tracks (see abandon)
+      const file = this.paneId ? await deps.resolveTranscriptForPane(this.paneId).catch(() => null) : null
+      this.anchor = file ? turnAnchorUuid(file) : null   // the turn this card belongs to (restart resume check)
+      const text = this.compose(false)
+      for (const t of await this.opts.targets()) {
+        const opts = { parse_mode: 'HTML' as const, disable_notification: true, ...(t.thread ? { message_thread_id: t.thread } : {}) }
+        try { const m = await deps.bot.api.sendMessage(t.chat, text, opts); this.msgIds.set(t.chat, m.message_id) }
+        catch (e) { process.stderr.write(`daemon: activity mirror create failed: ${e}\n`) }
+      }
+      this.opts.persist()
+      this.opts.onCreated?.()
+    } else {
+      const key = this.body
+      if (key !== this.contentKey) { this.contentKey = key; await this.pushCard(this.compose(false)) }   // edit only on real change
+    }
+  }
+
+  // Freeze the open mirror on its final state and stop tracking it, so the next work burst opens
+  // a fresh message. No-op if no mirror is open.
+  async finalize(): Promise<void> {
+    if (this.msgIds.size === 0) return
+    await this.syncBody(true)
+    const text = this.body || '🖥️ <b>Session</b> · idle'
+    for (const [chat, mid] of this.msgIds) {
+      await deps.bot.api.editMessageText(chat, mid, text, { parse_mode: 'HTML' }).catch(() => {})
+    }
+    this.msgIds.clear(); this.reset(); this.opts.persist()
+  }
+
+  // Cap with the CACHED body — no re-scrape. For orphans and dead panes, where the transcript /
+  // pane may be gone (or belong to a different turn entirely).
+  async capWithCachedBody(body?: string): Promise<void> {
+    if (this.msgIds.size === 0) return
+    const b = body ?? this.body
+    const text = b ? `${b}\n\n✅ <b>Done</b>` : '✅ <b>Done</b>'
+    for (const [chat, mid] of this.msgIds) await deps.bot.api.editMessageText(chat, mid, text, { parse_mode: 'HTML' }).catch(() => {})
+    this.msgIds.clear(); this.reset(); this.opts.persist()
+  }
+
+  // Drop the open card entirely (delete, don't cap) and stop tracking it, so the next relay tick
+  // re-sends a fresh one at the BOTTOM of the chat. Used when stream mode changes mid-turn.
+  async respawn(): Promise<void> {
+    if (this.msgIds.size === 0) return
+    for (const [chat, mid] of this.msgIds) {
+      await deps.bot.api.deleteMessage(chat, mid).catch(() => {})
+    }
+    this.msgIds.clear(); this.reset(); this.opts.persist()
+  }
+
+  // Abandon tracking of any open card WITHOUT touching the Telegram messages — used when focus/
+  // relay moves to a new pane, so the stale card is simply left in place and a fresh one opens.
+  // If `focusedPaneId` matches the pane the open card already tracks, this is a relay-loop restart
+  // on the SAME session (focus re-adoption mid-turn), not a real pane switch — keep the live card so
+  // the turn doesn't get a second, duplicate card opened beneath the orphaned first one.
+  abandon(focusedPaneId?: string | null): void {
+    if (focusedPaneId != null && this.msgIds.size > 0 && focusedPaneId === this.paneId) return
+    this.msgIds.clear(); this.reset(); this.opts.persist()
   }
 }
 
-// Freeze the open mirror on its final state and stop tracking it, so the next work burst opens
-// a fresh message. No-op if no mirror is open.
-async function finalizeTerminalMirror(): Promise<void> {
-  if (mirrorMsgIds.size === 0) return
-  await syncMirrorBody(true)
-  const text = mirrorBody || '🖥️ <b>Session</b> · idle'
-  for (const [chat, mid] of mirrorMsgIds) {
-    await deps.bot.api.editMessageText(chat, mid, text, { parse_mode: 'HTML' }).catch(() => {})
-  }
-  mirrorMsgIds.clear(); resetMirrorState(); persistMirror()
+// ---- The focused card (DM mode / the focused session's topic) ----
+const focusedCard = new MirrorCard({
+  resolvePane: () => deps.getActivePaneId(),
+  targets: () => deps.outboundTargets(),
+  persist: () => writeJsonFile(MIRROR_STATE_FILE, focusedCard.snapshot() ?? {}),
+  onCreated: () => deps.retriggerTyping(),   // the mirror send clears Telegram's typing state — re-assert it
+})
+
+export async function updateTerminalMirror(working: boolean): Promise<void> { await focusedCard.update(working) }
+export async function respawnTerminalMirror(): Promise<void> { await focusedCard.respawn() }
+export function abandonMirror(focusedPaneId?: string | null): void { focusedCard.abandon(focusedPaneId) }
+
+// ---- Aux cards (forum-topics mode: one card per non-focused session, in its own topic) ----
+const auxCards = new Map<string, MirrorCard>()
+
+function persistAuxCards(): void {
+  const out: Record<string, PersistedCard> = {}
+  for (const [pane, card] of auxCards) { const s = card.snapshot(); if (s) out[pane] = s }
+  writeJsonFile(MIRROR_AUX_STATE_FILE, out)
 }
 
-// Drop the open card entirely (delete, don't cap) and stop tracking it, so the next relay tick
-// re-sends a fresh one at the BOTTOM of the chat. Used when stream mode changes mid-turn.
-export async function respawnTerminalMirror(): Promise<void> {
-  if (mirrorMsgIds.size === 0) return
-  for (const [chat, mid] of mirrorMsgIds) {
-    await deps.bot.api.deleteMessage(chat, mid).catch(() => {})
+function auxCardFor(paneId: string): MirrorCard {
+  let card = auxCards.get(paneId)
+  if (!card) {
+    card = new MirrorCard({
+      resolvePane: () => paneId,
+      targets: () => deps.auxOutboundTargets(paneId),
+      persist: persistAuxCards,
+    })
+    auxCards.set(paneId, card)
   }
-  mirrorMsgIds.clear(); resetMirrorState(); persistMirror()
+  return card
 }
 
-// Abandon tracking of any open card WITHOUT touching the Telegram messages — used when focus/
-// relay moves to a new pane, so the stale card is simply left in place and a fresh one opens.
-// If `focusedPaneId` matches the pane the open card already tracks, this is a relay-loop restart on
-// the SAME session (focus re-adoption mid-turn), not a real pane switch — keep the live card so the
-// turn doesn't get a second, duplicate card opened beneath the orphaned first one.
-export function abandonMirror(focusedPaneId?: string | null): void {
-  if (focusedPaneId != null && mirrorMsgIds.size > 0 && focusedPaneId === mirrorPaneId) return
-  mirrorMsgIds.clear(); resetMirrorState(); persistMirror()
+// Drive a non-focused pane's card from auxRelayTick (same `working` signal as its relay).
+export async function updateAuxMirror(paneId: string, working: boolean): Promise<void> {
+  await auxCardFor(paneId).update(working)
+}
+
+// The panes currently holding an aux card — for the daemon's cleanup sweep.
+export function auxMirrorPanes(): string[] { return [...auxCards.keys()] }
+
+// A pane left the aux set (died, or became the focused pane): cap its card with the cached body
+// (the pane/transcript may be gone) and stop tracking it.
+export async function dropAuxMirror(paneId: string): Promise<void> {
+  const card = auxCards.get(paneId)
+  if (!card) return
+  auxCards.delete(paneId)
+  await card.capWithCachedBody()
+  persistAuxCards()
+}
+
+function restorePersistedCards(): void {
+  focusedCard.restore(readJsonFile<Partial<PersistedCard>>(MIRROR_STATE_FILE, {}))
+  const aux = readJsonFile<Record<string, Partial<PersistedCard>>>(MIRROR_AUX_STATE_FILE, {})
+  for (const [pane, saved] of Object.entries(aux)) {
+    const card = auxCardFor(pane)
+    card.restore(saved)
+  }
 }
