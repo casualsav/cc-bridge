@@ -4317,7 +4317,7 @@ bot.command(['cron', 'schedule'], async ctx => {
     await ctx.reply(
       `🔁 Scheduled <b>${escapeHtml(recurrenceLabel(recur))}</b> (${escapeHtml(tz)}) → <b>${escapeHtml(label)}</b>\n` +
       `Next: ${fires.slice(0, 3).map(fmtWhen).join(' · ')}\n\n${escapeHtml(text)}\n\n` +
-      `${cwd ? `If the session is gone at fire time, I'll start one in <code>${escapeHtml(cwd)}</code>. ` : ''}Cancel with <code>/cron cancel</code>.`,
+      `${cwd ? `If the session is gone at fire time, I'll start one in <code>${escapeHtml(cwd)}</code>. ` : ''}<code>/cron</code> to cancel.`,
       { parse_mode: 'HTML' })
     return
   }
@@ -4338,7 +4338,7 @@ bot.command(['cron', 'schedule'], async ctx => {
     const cwd = paneId ? await paneCwd(paneId).catch(() => undefined) ?? undefined : undefined
     const fireAt = nextRecurrence(recur, Date.now())
     addScheduled({ id: randomBytes(4).toString('hex'), fireAt, chatId: String(ctx.chat?.id), paneId, sessionLabel: label, text, thread, recur, cwd })
-    await ctx.reply(`🔁 Scheduled <b>${recurrenceLabel(recur)}</b> (${escapeHtml(tz)}) → <b>${escapeHtml(label)}</b>; next ${fmtWhen(fireAt)}:\n\n${escapeHtml(text)}\n\nCancel with <code>/cron cancel</code>.`, { parse_mode: 'HTML' })
+    await ctx.reply(`🔁 Scheduled <b>${recurrenceLabel(recur)}</b> (${escapeHtml(tz)}) → <b>${escapeHtml(label)}</b>; next ${fmtWhen(fireAt)}:\n\n${escapeHtml(text)}\n\n<code>/cron</code> to cancel.`, { parse_mode: 'HTML' })
     return
   }
   // One-shot: `/schedule <time> <message>` queues immediately; bare `/schedule <time>` falls
@@ -4356,7 +4356,7 @@ bot.command(['cron', 'schedule'], async ctx => {
   const fireAt = Date.now() + ms
   if (oneShotText) {
     addScheduled({ id: randomBytes(4).toString('hex'), fireAt, chatId: String(ctx.chat?.id), paneId, sessionLabel: label, text: oneShotText, thread })
-    await ctx.reply(`✅ Scheduled in <b>${formatDuration(ms)}</b> → <b>${escapeHtml(label)}</b>:\n\n${escapeHtml(oneShotText)}\n\nCancel with <code>/cron cancel</code>.`, { parse_mode: 'HTML' })
+    await ctx.reply(`✅ Scheduled in <b>${formatDuration(ms)}</b> → <b>${escapeHtml(label)}</b>:\n\n${escapeHtml(oneShotText)}\n\n<code>/cron</code> to cancel.`, { parse_mode: 'HTML' })
     return
   }
   const sent = await ctx.reply(
@@ -6419,7 +6419,7 @@ bot.on('message:text', async ctx => {
         case 'schedule': {
           const msg: ScheduledMessage = { id: randomBytes(4).toString('hex'), fireAt: target.fireAt, chatId: String(ctx.chat?.id), paneId: target.paneId, sessionLabel: target.sessionLabel, text, thread: target.thread }
           addScheduled(msg)
-          await ctx.reply(`✅ Scheduled for ${fmtWhen(msg.fireAt)} → <b>${escapeHtml(msg.sessionLabel)}</b>.\nCancel with <code>/schedule cancel</code>.`, { parse_mode: 'HTML' })
+          await ctx.reply(`✅ Scheduled for ${fmtWhen(msg.fireAt)} → <b>${escapeHtml(msg.sessionLabel)}</b>.\n<code>/cron</code> to cancel.`, { parse_mode: 'HTML' })
           return
         }
         // "➕ Add" → parse "time message" out of the one line, then queue.
@@ -6432,7 +6432,7 @@ bot.on('message:text', async ctx => {
           if (ms > MAX_TIMEOUT) { await ctx.reply('That\'s too far out — max ~24 days.'); return }
           const fireAt = Date.now() + ms
           addScheduled({ id: randomBytes(4).toString('hex'), fireAt, chatId: String(ctx.chat?.id), paneId: target.paneId, sessionLabel: target.sessionLabel, text: rest, thread: target.thread })
-          await ctx.reply(`✅ Scheduled in <b>${formatDuration(ms)}</b> → <b>${escapeHtml(target.sessionLabel)}</b>:\n\n${escapeHtml(rest)}\n\nCancel with <code>/schedule cancel</code>.`, { parse_mode: 'HTML' })
+          await ctx.reply(`✅ Scheduled in <b>${formatDuration(ms)}</b> → <b>${escapeHtml(target.sessionLabel)}</b>:\n\n${escapeHtml(rest)}\n\n<code>/cron</code> to cancel.`, { parse_mode: 'HTML' })
           return
         }
         // "📝 /md" → write the file. If it already exists, stash the contents and ask for an
