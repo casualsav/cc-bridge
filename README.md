@@ -1,43 +1,13 @@
-# Telegram channel for Claude Code
+This plugin bridges a Telegram bot to your Claude Code session once,then gives you complete CLI control from your phone with the ability to create and manage multiple sessions instantly thanks to tmux. 
 
-Talk to a running Claude Code session from Telegram — and let Claude talk back.
-This plugin bridges a Telegram bot to your Claude Code session so you can drive
-work from your phone: send messages and files, get replies with native
-formatting, approve permission prompts with a tap, switch modes, and interrupt a
-running task.
+Send messages and files, use slash commands, voices messages, see Claude's thought process, approve permission prompts, answer questions, change settings, and more. 
 
-It ships built-in access control (pairing, allowlists, group policy), so only
-people you approve can reach your session.
+Installation: 
 
-> **Running without the MCP server (off-MCP mode):** the bridge can drive a
-> plugin-less Claude session so it doesn't pay the per-request MCP context tax —
-> inbound is typed into the pane, replies are read back from the transcript, and a
-> `tg` CLI handles file-send/react/edit. To set it up (or have a fresh Claude
-> install it), see **[`off-mcp/INSTALL.md`](./off-mcp/INSTALL.md)**.
 
----
-
-## Install
-
-**Let Claude do it.** Clone this repo, open a Claude Code session in it, and say
-*"set up the Telegram bridge."* The repo's [`CLAUDE.md`](./CLAUDE.md) tells Claude to follow
-[`off-mcp/INSTALL.md`](./off-mcp/INSTALL.md) — it interviews you for the bot token, your
-Telegram ID, and a few options, writes the config, installs the plugin + a self-healing
-daemon hook, and gets you to a working session. The only things it can't do itself are
-getting the bot token from [@BotFather](https://t.me/BotFather) and the single Claude Code
-restart.
-
-```sh
 gh repo clone casualsav/pocket-claude   # private/preview: uses your gh auth
 cd pocket-claude && claude              # then: "set up the Telegram bridge"
 ```
-
-> While the repo is private, `git clone` over HTTPS fails with `could not read Username`. Use
-> `gh repo clone` (authenticated), or an SSH remote, instead.
-
-Prefer to do it by hand? [`off-mcp/INSTALL.md`](./off-mcp/INSTALL.md) lists every step.
-
----
 
 ## Features
 
@@ -111,24 +81,6 @@ Prefer to do it by hand? [`off-mcp/INSTALL.md`](./off-mcp/INSTALL.md) lists ever
   card with one-tap buttons to update the bridge or Claude itself (never auto-applies;
   `/update` does the same on demand).
 
-## How it works
-
-```
-Telegram  ⇄  daemon.ts  ⇄  shim.ts (MCP server)  ⇄  Claude Code session
-              (grammy bot,        (the tools Claude
-               long-lived)         calls: reply, react, …)
-```
-
-- **`shim.ts`** is the MCP server your Claude session talks to. It exposes the
-  `reply`, `react`, `download_attachment`, and `edit_message` tools and forwards
-  each call to the daemon over a local socket.
-- **`daemon.ts`** is a long-lived process that owns the Telegram bot connection.
-  It outlives individual Claude sessions (and survives `/reload-plugins`),
-  enforces the access gate on every inbound message, and watches the session's
-  tmux pane to detect prompts and relay slash commands.
-- **`common.ts`** holds the shared wire protocol and state-dir paths;
-  **`markdown.ts`** holds the Markdown→Telegram-HTML converter and the
-  chunk-safe splitter.
 
 ## Requirements
 
@@ -156,57 +108,12 @@ This is a Claude Code plugin. Add it and install:
 /plugin install telegram@pocket-claude
 ```
 
-(The `marketplace add` argument is the repo path — update it if you rename the
-repo. The `@pocket-claude` suffix is the marketplace name from
-`.claude-plugin/marketplace.json` and is independent of the repo name.)
-
 ## Launch
 
-Channels are a research-preview feature, and only channels from the official
-`claude-plugins-official` marketplace are on Claude Code's approved allowlist. A
-custom channel like this one is blocked until you load it explicitly — otherwise
-you'll see `plugin:telegram@pocket-claude • not on the approved channels
-allowlist`. Launch Claude Code with the development flag (requires Claude Code
-v2.1.80+):
 
 ```bash
 claude --dangerously-load-development-channels plugin:telegram@pocket-claude
 ```
-
-That loads and activates the channel for the session (after a one-time
-confirmation prompt). To also skip per-tool permission prompts, add
-`--dangerously-skip-permissions`:
-
-```bash
-claude --dangerously-load-development-channels plugin:telegram@pocket-claude --dangerously-skip-permissions
-```
-
-Since you'll run this every session, add an alias. Either drop it in your shell
-rc by hand:
-
-```bash
-alias claude-tg='claude --dangerously-load-development-channels plugin:telegram@pocket-claude --dangerously-skip-permissions'
-```
-
-…or run the bundled one-time setup script, which appends that alias to your
-`~/.zshrc` or `~/.bashrc` (idempotently):
-
-```bash
-bash scripts/setup-alias.sh mcp
-```
-
-Then reload your shell (or `source` the rc) and launch with `claude-tg`. (For the off-MCP
-default instead, `bash scripts/setup-alias.sh` adds a `claude-tg` shell function —
-`tmux set -p @tg_bridge "${1:-1}"; claude --allow-dangerously-skip-permissions` — where the
-`@tg_bridge` tmux pane option (valued by instance slot) is the daemon's bridge marker (decoupled
-from claude's args); this starts in a normal mode (prompts relay to Telegram) with bypass switchable
-on demand from `/mode`, and `claude-tg N` routes to a second bridge. A second arg pins the
-session to another Claude **account**: `claude-tg 1 work` launches under
-`CLAUDE_CONFIG_DIR=~/.claude-work` — see `/account`.)
-
-> Note: `/plugin install` can't add the alias for you — plugins are copied to a
-> cache and don't run host-shell install scripts. The setup script above is the
-> closest one-step equivalent.
 
 ## Setup
 
@@ -231,9 +138,6 @@ All setup happens from your Claude Code session via the bundled skills.
    ```
    /telegram:configure transcribe local      # or: groq | openai | off
    ```
-
-Run `/telegram:configure` with no arguments any time for a status overview and
-the recommended next step.
 
 ## Usage
 
@@ -275,44 +179,9 @@ When a flow like `/login` prints a sign-in URL, the bot relays it as a tappable
 link; open it, then **reply to that message** with the code (or use `/reply <code>`)
 to feed it back into the session.
 
-## Configuration
-
-Access policy and delivery/UX settings live in
-`~/.claude/channels/telegram/access.json`, managed by `/telegram:access` and
-re-read live on each message. Keys include `dmPolicy`, allowlists, group policy,
-`ackReaction`, `replyToMode`, `textChunkLimit`, `chunkMode`, `renderMarkdown`, and
-`terminalMirror` (the live activity feed — `"tools"` by default, `"digest"`, or
-`"off"`). Full reference: [`ACCESS.md`](./ACCESS.md).
-
-The bot token and transcription settings live in
-`~/.claude/channels/telegram/.env` (kept `chmod 600`), managed by
-`/telegram:configure`.
-
-### Bang shell (`!cmd`) — opt-in, off by default
-
-Set `TELEGRAM_BANG_SHELL=1` in `.env` to let an inbound message that starts with `!`
-run as a **shell command on the host** (in the focused session's cwd), with stdout/stderr
-relayed back — like Claude Code's terminal `!` REPL, e.g. `!git status`. It runs directly
-in the daemon, so it works even while Claude is mid-task. **This is remote code execution
-from a chat app:** every allowlisted sender (and anyone who compromises the bot token or an
-allowlisted account) can run arbitrary commands. It stays gated by the access allowlist, but
-treat enabling it as widening trust. Leave it unset to disable (then `!`-messages are just
-normal messages to Claude).
-
 ## Upgrading
 
-The daemon is long-lived and deliberately survives Claude sessions, so installing
-new plugin code doesn't replace the *running* process on its own. To avoid stale
-behavior after an upgrade, the shim fingerprints the plugin's source on connect:
-if the running daemon started on different code, the shim restarts it
-automatically (it `SIGTERM`s the old daemon and respawns from the new code on the
-next connect). **So a normal upgrade — update the plugin, start a session — just
-works; no manual daemon kill needed.**
-
-The one exception is a **bot-token** change: the token lives in `.env`, not in the
-code, so it doesn't move the fingerprint. Apply a token change with the restart
-documented in `/telegram:configure` (restart the session, or
-`kill "$(cat ~/.claude/channels/telegram/daemon.pid)"`).
+Just run /upgrade tg to upgrade the Telegram bot. Bonus: running /upgrade claude upgrades Claude.
 
 ## Uninstalling
 
@@ -326,36 +195,6 @@ paired. The skill then prints the plugin-removal commands it can't run itself:
 /plugin uninstall telegram@pocket-claude
 /plugin marketplace remove pocket-claude
 ```
-
-Plugins are cached, so to guarantee a fresh fetch on reinstall, also clear
-`~/.claude/plugins/marketplaces/pocket-claude` and
-`~/.claude/plugins/cache/pocket-claude`, then re-add the marketplace and
-reinstall. Restart Claude Code to apply.
-
-## Security
-
-- Secrets (`.env`) are written `0600` and never echoed back in full.
-- Replies can't exfiltrate the channel's own state directory (`assertSendable`).
-- The skills will only act on requests from your **terminal session**, never
-  from an inbound Telegram message — that boundary is what stops a
-  prompt-injected message from reconfiguring access or leaking the token.
-- Default policy is `pairing`; the setup flow pushes you toward a locked-down
-  `allowlist`.
-
-## Project layout
-
-| File | Role |
-| --- | --- |
-| `shim.ts` | MCP server Claude talks to (the tools) |
-| `daemon.ts` | Long-lived Telegram bot + access gate + session control |
-| `common.ts` | Shared wire protocol and state paths |
-| `markdown.ts` | Markdown→Telegram-HTML converter + chunk-safe splitter |
-| `prompt.ts` | Pane-scrape detection of interactive prompts → Telegram buttons |
-| `transcript.ts` | Off-MCP outbound: read replies + live activity from CC's transcript JSONL |
-| `*.test.ts` | `bun test` unit suite for the parsers/formatters (markdown, transcript, prompt) |
-| `transcribe_local.py` | Local faster-whisper transcription helper |
-| `skills/` | `/telegram:configure` and `/telegram:access` skills |
-| `ACCESS.md` | Access-control and delivery-config reference |
 
 ## License
 
