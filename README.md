@@ -1,6 +1,6 @@
 Pocket Claude
 
-This plugin gives you complete CLI control from your phone with the ability to create and manage multiple sessions instantly thanks to tmux. 
+This plugin gives you complete Claude Code CLI control from your phone with the ability to create and manage multiple sessions instantly thanks to tmux. 
 
 Send messages and files, voice notes, use slash commands, see Claude's thought process as it works, approve permission prompts, answer questions, change settings, and more. 
 
