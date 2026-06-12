@@ -1,71 +1,24 @@
 This plugin bridges a Telegram bot to your Claude Code session once,then gives you complete CLI control from your phone with the ability to create and manage multiple sessions instantly thanks to tmux. 
 
-Send messages and files, use slash commands, voices messages, see Claude's thought process, approve permission prompts, answer questions, change settings, and more. 
-
-Installation: 
-
-Just point Claude Code at this repo and tell it to install. It will install any dependencies if missing and walk you through setup. Or: 
-
-gh repo clone casualsav/pocket-claude   # private/preview: uses your gh auth
-cd pocket-claude && claude              # then: "set up the telegram bridge"
-``` 
+Send messages and files, voice notes, use slash commands, see Claude's thought process as it works, approve permission prompts, answer questions, change settings, and more. 
 
 ## Requirements
 
 - [Bun](https://bun.sh) (the runtime; dependencies install on first launch).
 - A Telegram bot token from [@BotFather](https://t.me/BotFather).
 - `tmux` — required for mode switching and `/stop` (the daemon reads/controls the
-  session pane). Core messaging works without it.
-- Optional, for local voice transcription: `faster-whisper` (a venv is fine).
+  session pane). Core messaging works without it via MCP.
 
-### Platform support
+## Installation: 
 
-- **Linux** — fully supported.
-- **macOS** — fully supported (off-MCP pane discovery reads process args via `ps`
-  where there's no `/proc`).
-- **Windows** — via **[WSL2](https://learn.microsoft.com/windows/wsl/)** only; it's a
-  real Linux environment, so everything works as on Linux. Native Windows is not
-  supported (no `tmux`, which the daemon relies on to drive the session pane).
+Just point Claude Code at this repo and tell it to install it. It will install any dependencies if missing and walk you through setup. 
 
-## Install
-
-This is a Claude Code plugin. Add it and install:
-
-```
-/plugin marketplace add casualsav/pocket-claude
-/plugin install telegram@pocket-claude
-```
 
 ## Launch
 
+The installer adds the alias pocket-claude, which runs Claude with the identifier for the daemon to pick up the session. After going through the initial install, run the alias inside a tmux session, then send a message to the Telegram bot.
 
-```bash
-claude --dangerously-load-development-channels plugin:telegram@pocket-claude
-```
-
-## Setup
-
-All setup happens from your Claude Code session via the bundled skills.
-
-1. **Create a bot** with [@BotFather](https://t.me/BotFather) and copy the token.
-2. **Save the token:**
-   ```
-   /telegram:configure <token>
-   ```
-3. **Pair yourself:** DM your bot anything on Telegram. It replies with a 6-char
-   code. Approve it:
-   ```
-   /telegram:access pair <code>
-   ```
-   Now your DMs reach the session.
-4. **Lock it down** (recommended) once your allowlist is set:
-   ```
-   /telegram:access policy allowlist
-   ```
-5. **(Optional) Voice transcription:**
-   ```
-   /telegram:configure transcribe local      # or: groq | openai | off
-   ```
+For multi-session support, add the Telegram bot as admin in a Telegram group with topics enabled and send /bind in the general chat. You're all set. 
 
 ## Usage
 
@@ -100,12 +53,8 @@ formatted. Bot commands:
 | `/settings` | Channel settings panel — live mirror, pin, MCP mode, voice transcription |
 | `/reply <response>` | Type a response into the session, then Enter (e.g. a `/login` code) |
 
-Any other `/slash` command is relayed straight to Claude Code. Photos and
-documents you send are made available to Claude to read.
+Any other `/slash` command is relayed straight to Claude Code.
 
-When a flow like `/login` prints a sign-in URL, the bot relays it as a tappable
-link; open it, then **reply to that message** with the code (or use `/reply <code>`)
-to feed it back into the session.
 
 ## Upgrading
 
@@ -113,16 +62,8 @@ Just run /upgrade tg to upgrade the Telegram bot. Bonus: running /upgrade claude
 
 ## Uninstalling
 
-Run `/telegram:configure uninstall` for a guided teardown. It stops the
-long-lived daemon and (if you ask for a full reset) removes the channel state
-in `~/.claude/channels/telegram/` — the bot token, allowlist, and pairings.
-Keep that state instead if you're just reinstalling/upgrading and want to stay
-paired. The skill then prints the plugin-removal commands it can't run itself:
+Run `/telegram:configure uninstall` for a guided teardown.
 
-```
-/plugin uninstall telegram@pocket-claude
-/plugin marketplace remove pocket-claude
-```
 
 ## License
 
