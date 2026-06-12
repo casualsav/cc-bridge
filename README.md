@@ -4,6 +4,10 @@ The goal of this repo is to have full control of Claude Code through Telegram wi
 
 Send messages and files, voice notes, use slash commands, see Claude's extended thinking as it works, create and manage multiple sessions, and more, with a convenient status bar that shows your settings, 5h/weekly usage, and context window size. 
 
+<p align="center">
+  <img src="assets/telegram-demo.jpg" width="380" alt="Claude Code driven from Telegram — live thinking, pinned status card with model, usage and context">
+</p>
+
 ## Requirements
 
 - [Bun](https://bun.sh) (the runtime; dependencies install on first launch).
