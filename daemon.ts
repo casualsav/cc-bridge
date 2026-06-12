@@ -1348,7 +1348,7 @@ async function dumpStuckPane(paneId: string): Promise<void> {
   if (!tail) return
   for (const t of await outboundTargetsFor(paneId)) {
     await bot.api.sendMessage(t.chat,
-      `⚠️ Couldn't deliver to this session — here's its screen:\n<pre>${escapeHtml(tail)}</pre>\nAnswer it with /reply &lt;text&gt;, or /stop to interrupt.`,
+      `⚠️ Couldn't deliver to this session — here's its screen:\n<pre>${escapeHtml(tail)}</pre>\n/stop interrupts it.`,
       { parse_mode: 'HTML', ...(t.thread ? { message_thread_id: t.thread } : {}) }).catch(() => {})
   }
 }
@@ -4754,7 +4754,7 @@ bot.on('callback_query:data', async ctx => {
       const note = ok
         ? `🚀 Starting a <b>${escapeHtml(acct.name)}</b> session in <code>${escapeHtml(dir)}</code>` +
           `${isTopicMode() ? ' — it gets its own topic shortly' : ''}.` +
-          (accountLoggedIn(acct) ? '' : '\n🔑 First run on this account — a sign-in link will appear here; tap it, then send the code back with /reply.')
+          (accountLoggedIn(acct) ? '' : '\n🔑 First run on this account — a sign-in link will appear here; tap it, then reply to that message with your code.')
         : `❌ Couldn't start a session in <code>${escapeHtml(dir)}</code>.`
       const thread = ctx.callbackQuery.message?.message_thread_id
       await bot.api.sendMessage(String(ctx.chat!.id), note, { parse_mode: 'HTML', ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})

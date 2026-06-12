@@ -52,7 +52,6 @@ formatted. Bot commands:
 | `/schedule` | Queue a message into a session for later (`/schedule 12h` · `/schedule cancel`) |
 | `/pin` | Toggle the pinned status message (`/pin on` \| `off` \| `refresh`) |
 | `/settings` | Channel settings panel — live mirror, pin, MCP mode, voice transcription |
-| `/reply <response>` | Type a response into the session, then Enter (e.g. a `/login` code) |
 
 Any other `/slash` command is relayed straight to Claude Code.
 
