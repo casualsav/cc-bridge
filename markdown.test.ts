@@ -60,3 +60,15 @@ test('chunkHtml splits long text under the visible limit, balancing tags', () =>
     expect(c.replace(/<[^>]+>/g, '').length).toBeLessThanOrEqual(20)
   }
 })
+
+test('crossed emphasis spans are repaired into valid nesting', () => {
+  // `**bold *ital** more*` used to render `<b>bold <i>ital</b> more</i>` — crossed tags
+  // that Telegram rejects wholesale (killed the live mirror card).
+  const out = mdToTelegramHtml('**bold *ital** more*')
+  expect(out).toBe('<b>bold <i>ital</i></b><i> more</i>')
+})
+
+test('balanced output passes through byte-identical', () => {
+  expect(mdToTelegramHtml('**b** and *i* and `c`')).toBe('<b>b</b> and <i>i</i> and <code>c</code>')
+  expect(mdToTelegramHtml('*outer **inner** rest*')).toBe('<i>outer <b>inner</b> rest</i>')
+})

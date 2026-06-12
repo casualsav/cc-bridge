@@ -49,6 +49,31 @@ function inlineMd(escaped: string): string {
   return s
 }
 
+// Repair crossed/stray tags so the output is always Telegram-parseable. The sequential regex
+// passes in inlineMd can interleave emphasis spans — e.g. `**bold *ital** more*` renders as
+// `<b>bold <i>ital</b> more</i>`, which Telegram rejects wholesale ("can't parse entities"),
+// silently killing the message (this broke the live mirror card). Standard repair: a close tag
+// that isn't the innermost open span closes the spans above it first, then reopens them; a close
+// with no matching open is dropped; anything still open at the end is closed.
+function balanceHtml(html: string): string {
+  const toks = tokenize(html)
+  let out = ''
+  const open: string[] = []   // raw open-tag strings, innermost last
+  for (const tok of toks) {
+    if (tok.kind === 'open') { out += tok.raw; open.push(tok.raw) }
+    else if (tok.kind === 'close') {
+      const idx = open.map(tagNameOf).lastIndexOf(tok.tag)
+      if (idx === -1) continue
+      const reopen = open.slice(idx + 1)
+      for (let k = open.length - 1; k >= idx; k--) out += closeTagFor(open[k])
+      open.length = idx
+      for (const raw of reopen) { out += raw; open.push(raw) }
+    } else out += tok.atoms.join('')
+  }
+  for (let k = open.length - 1; k >= 0; k--) out += closeTagFor(open[k])
+  return out
+}
+
 export function mdToTelegramHtml(md: string): string {
   const lines = md.split('\n')
   const out: string[] = []
@@ -108,7 +133,7 @@ export function mdToTelegramHtml(md: string): string {
     i++
   }
   flushQuote()
-  return out.join('\n')
+  return balanceHtml(out.join('\n'))
 }
 
 // ---- chunk-safe HTML splitting ----
