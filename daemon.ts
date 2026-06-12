@@ -23,7 +23,7 @@ import {
 // replace a daemon left running stale code after a plugin upgrade.
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
-import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isSubmitScreen, stripAnsi, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
+import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isSubmitScreen, stripAnsi, paneLines, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
 import { resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnActivity, currentTurnFeed, listRecentSessions, findSessionCwd, searchTranscripts, type Activity, type FeedItem } from './transcript.ts'
 import {
   initAccounts, listAccounts, accountByName, accountForTranscript, accountForProjectsDir,
@@ -430,7 +430,7 @@ async function readCurrentModel(paneId: string, watcher: PaneWatcher | null): Pr
 // footer is the ground truth. Markers are intentionally broad — detection only
 // drives the typing indicator, which self-corrects from pane state.
 function detectWorking(paneText: string): boolean {
-  const footer = paneText.split('\n').map(l => stripAnsi(l)).slice(-8).join('\n')
+  const footer = paneLines(paneText).slice(-8).join('\n')
   if (/esc to interrupt/i.test(footer)) return true
   // Spinner glyph followed by an elapsed timer: "(12s", "(3m 56s", "(1h 2m" — any h/m/s unit.
   // (The old /\(\d+s/ missed minute-format timers, so long turns read as idle and relayed
@@ -443,7 +443,7 @@ function detectWorking(paneText: string): boolean {
 // i.e. Claude is blocked, not finished. Used to suppress the "✅ Claude finished"
 // idle notification while frozen at the limit.
 function detectLimited(paneText: string): boolean {
-  const tail = paneText.split('\n').map(l => stripAnsi(l)).slice(-10).join('\n')
+  const tail = paneLines(paneText).slice(-10).join('\n')
   // Only the actual-frozen state (100% / "hit your … limit") — NOT sub-100% warnings,
   // which persist for days at the weekly limit while Claude keeps working fine.
   return /used 100% of your [\w-]+ limit|hit your [\w-]+ limit/i.test(tail)
