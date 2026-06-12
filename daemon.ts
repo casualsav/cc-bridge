@@ -3046,6 +3046,9 @@ async function restartPaneSessionCore(pane: string, id: string): Promise<string 
     await (watcher ? watcher.withInjection(run) : run())
     if (!(await paneAlive(pane))) {
       if (!cwd) return null
+      // Seed the respawn with the mode we just OBSERVED on the pane — the per-session map can be
+      // stale for never-focused topic sessions whose dial was moved in the terminal (shift+tab).
+      if (sid) recordSessionMode(sid, mode)
       const fresh = await spawnSession(cwd, `--resume ${id}`, sid ?? undefined, account)
       if (!fresh) return null
       // The session lives in `fresh` now — drop the dead pane's registry + session mapping so
