@@ -3048,6 +3048,9 @@ async function updateClaude(chat: string): Promise<void> {
 // old build until restarted — and nothing announces that. Compare each session's transcript
 // version to the installed binary and offer a one-tap restart, once per session+binary pair.
 const staleSessionNotified = new Map<string, string>()   // paneId → installed version already flagged
+// The notice fires at most once a day, persisted across restarts — deploys bounce the daemon
+// constantly, so an in-memory stamp would re-arm it on every deploy.
+const UPDATE_NOTICE_STAMP = join(STATE_DIR, 'update-notice.json')
 async function sweepSessionVersions(): Promise<void> {
   if (loadAccess().updateChecks === false) return
   const installed = await claudeVersion()
@@ -3066,11 +3069,15 @@ async function sweepSessionVersions(): Promise<void> {
       let newer = false
       try { newer = Bun.semver.order(installed, running) > 0 } catch {}
       if (!newer) continue
-      staleSessionNotified.set(pane, installed)
       stale.push({ pane, cwd, running })
     } catch {}
   }
   if (!stale.length) return
+  // Daily cap. While capped, panes stay UNMARKED so the next allowed sweep re-collects them.
+  const lastAt = readJsonFile<{ at?: number }>(UPDATE_NOTICE_STAMP, {}).at ?? 0
+  if (Date.now() - lastAt < 24 * 3600_000) return
+  for (const s of stale) staleSessionNotified.set(s.pane, installed)
+  writeJsonFile(UPDATE_NOTICE_STAMP, { at: Date.now() })
   const n = stale.length
   const text =
     `🧠 Claude auto-updated to <b>v${escapeHtml(installed)}</b> — ${n === 1 ? 'one session is' : `${n} sessions are`} still running older builds.\n\n` +
