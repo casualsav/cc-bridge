@@ -46,7 +46,7 @@ formatted. Bot commands:
 | `/context` | Token-context usage |
 | `/stream` | Live-activity card style: `thoughts` · `tools` · `hybrid` · `off` |
 | `/diff` | The session's uncommitted changes — stat + chunked patch |
-| `/terminal [N]` | Show recent terminal activity (N lines) |
+| `/terminal` | Show recent terminal activity (40 lines) |
 | `/schedule` | Queue a message into a session for later (`/schedule 12h` · `/schedule cancel`) |
 | `/pin` | Toggle the pinned status message (`/pin on` \| `off` \| `refresh`) |
 | `/settings` | Channel settings panel — live mirror, pin, MCP mode, voice transcription |
