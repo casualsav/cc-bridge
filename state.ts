@@ -58,6 +58,7 @@ export type ReplyTarget =
   | { kind: 'acctname'; thread?: number }                        // name for a new Claude account (settings → Accounts → ➕)
   | { kind: 'newsession'; anchor?: boolean }                     // folder for /new in General (spawn → own topic; anchor → becomes the General base session)
   | { kind: 'ttskey'; engine: 'openai' | 'elevenlabs' }          // API key for a hosted TTS engine (settings → 🔊 Voice replies)
+  | { kind: 'stucktext'; paneId: string }                        // raw text typed into a wedged pane (stuck-screen dump)
 export const replyTargets = new Map<string, ReplyTarget>()
 
 // ---- Relay tracking ----

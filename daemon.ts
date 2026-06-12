@@ -1347,9 +1347,11 @@ async function dumpStuckPane(paneId: string): Promise<void> {
   const tail = cleanPaneTail(cap, 25)
   if (!tail) return
   for (const t of await outboundTargetsFor(paneId)) {
-    await bot.api.sendMessage(t.chat,
-      `⚠️ Couldn't deliver to this session — here's its screen:\n<pre>${escapeHtml(tail)}</pre>\n/stop interrupts it.`,
-      { parse_mode: 'HTML', ...(t.thread ? { message_thread_id: t.thread } : {}) }).catch(() => {})
+    const sent = await bot.api.sendMessage(t.chat,
+      `⚠️ Couldn't deliver to this session — here's its screen:\n<pre>${escapeHtml(tail)}</pre>\n💬 Reply to this message to type into it, or /stop to interrupt.`,
+      { parse_mode: 'HTML', reply_markup: { force_reply: true, input_field_placeholder: 'Typed into the terminal' },
+        ...(t.thread ? { message_thread_id: t.thread } : {}) }).catch(() => null)
+    if (sent) replyTargets.set(`${t.chat}:${sent.message_id}`, { kind: 'stucktext', paneId })
   }
 }
 
@@ -2979,6 +2981,14 @@ async function restartPaneSession(pane: string, chat: string): Promise<void> {
   const id = file ? basename(file, '.jsonl') : null
   if (!id) { await dm('⚠️ Couldn’t find this session’s id to resume — restart it manually to pick up the update.'); return }
   await dm('♻️ Restarting this session on the new Claude…')
+  if (!(await restartPaneSessionCore(pane, id))) return
+  await dm('✅ Session restarted on the new Claude — your conversation was resumed.')
+}
+
+// The message-free core of a restart-in-place: /exit, relaunch `claude --resume <id>` in the same
+// pane (same pane keeps the bridge pointed at it, same id keeps the conversation), re-apply the
+// permission mode. Shared by the single-session button and the restart-all sweep.
+async function restartPaneSessionCore(pane: string, id: string): Promise<boolean> {
   const mode = detectCurrentMode(await capturePane(pane).catch(() => ''))
   // An alt-account session must resume under its config dir — the pane's shell doesn't export
   // CLAUDE_CONFIG_DIR (the launcher env-prefixes it), so the resume line has to re-prefix.
@@ -2997,7 +3007,7 @@ async function restartPaneSession(pane: string, chat: string): Promise<void> {
   }
   await (watcher ? watcher.withInjection(run) : run())
   if (mode !== 'default') await switchToMode(pane, mode, watcher)
-  await dm('✅ Session restarted on the new Claude — your conversation was resumed.')
+  return true
 }
 
 // `/update claude` — do the whole thing, no button, no manual relaunch:
@@ -3033,6 +3043,10 @@ async function sweepSessionVersions(): Promise<void> {
   if (loadAccess().updateChecks === false) return
   const installed = await claudeVersion()
   if (!installed) return
+  // Collect every newly-stale session first, then send ONE notice — to General in topic mode,
+  // once to the DM(s) otherwise. The old per-pane send routed through each session's topic,
+  // so a binary update sprayed the same message into every open topic.
+  const stale: Array<{ pane: string; cwd: string | null; running: string }> = []
   for (const pane of [...offMcpPanes]) {
     try {
       if (staleSessionNotified.get(pane) === installed) continue
@@ -3044,14 +3058,77 @@ async function sweepSessionVersions(): Promise<void> {
       try { newer = Bun.semver.order(installed, running) > 0 } catch {}
       if (!newer) continue
       staleSessionNotified.set(pane, installed)
-      const kb = new InlineKeyboard().text('♻️ Restart session', `claudeupd:restart:${pane}`)
-      for (const { chat, thread } of await outboundTargetsFor(pane)) {
-        await bot.api.sendMessage(chat,
-          `🧠 Claude auto-updated to <b>v${escapeHtml(installed)}</b> — this session is still running <b>v${escapeHtml(running)}</b>. Restart to pick it up (the conversation resumes in place).`,
-          { parse_mode: 'HTML', reply_markup: kb, disable_notification: true, ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
-      }
+      stale.push({ pane, cwd, running })
     } catch {}
   }
+  if (!stale.length) return
+  const n = stale.length
+  const text =
+    `🧠 Claude auto-updated to <b>v${escapeHtml(installed)}</b> — ${n === 1 ? 'one session is' : `${n} sessions are`} still running older builds.\n\n` +
+    `Restarting won't lose any work (each conversation resumes in place), but wait until running tasks are complete before tapping.`
+  const kb = new InlineKeyboard().text(n === 1 ? '♻️ Restart session' : '♻️ Restart all sessions', 'claudeupd:restartall')
+  const group = isTopicMode() ? getGroupChatId() : null
+  const targets = group ? [{ chat: group }] : loadAccess().allowFrom.map(chat => ({ chat }))
+  for (const { chat } of targets) {
+    await bot.api.sendMessage(chat, text,
+      { parse_mode: 'HTML', reply_markup: kb, disable_notification: true }).catch(() => {})
+  }
+}
+
+// A restarted pane is healthy once it's back at Claude's normal prompt.
+async function paneBackUp(pane: string): Promise<boolean> {
+  if (!(await paneAlive(pane)) || (await paneCommand(pane)) !== 'claude') return false
+  const cap = await capturePane(pane).catch(() => '')
+  return !!cap && onNormalPrompt(cap)
+}
+
+// "♻️ Restart all sessions" → restart every stale pane in place (sequentially — restarts type into
+// panes, and parallel key-streams interleave), then health-check that each came back to a prompt.
+// Failures get a per-session revive button (spawn `-c` in its previous topic); full success gets ✅.
+async function restartAllStaleSessions(chat: string): Promise<void> {
+  const say = (t: string, kb?: InlineKeyboard) =>
+    bot.api.sendMessage(chat, t, { parse_mode: 'HTML', ...(kb ? { reply_markup: kb } : {}) }).catch(() => {})
+  const installed = await claudeVersion()
+  // Recompute staleness at tap time (the notice may be hours old; sessions moved or restarted since).
+  const targets: Array<{ pane: string; sid: string | null; name: string; id: string }> = []
+  for (const pane of [...offMcpPanes]) {
+    try {
+      const cwd = await paneCwd(pane).catch(() => null)
+      const file = cwd ? await transcriptForPane(pane, cwd) : null
+      const running = file ? lastVersionInTranscript(file) : null
+      if (!file || !running || !installed) continue
+      let newer = false
+      try { newer = Bun.semver.order(installed, running) > 0 } catch {}
+      if (!newer) continue
+      const sid = await sessionForPane(pane, false).catch(() => null)
+      const name = (sid ? getTopicBySession(sid)?.name : null) ?? (basename(cwd ?? '') || 'session')
+      targets.push({ pane, sid, name, id: basename(file, '.jsonl') })
+    } catch {}
+  }
+  if (!targets.length) { await say('✅ Every session is already on the current Claude — nothing to restart.'); return }
+  await say(`♻️ Restarting ${targets.length === 1 ? 'the session' : `${targets.length} sessions`} on the new Claude…`)
+  for (const t of targets) { try { await restartPaneSessionCore(t.pane, t.id) } catch {} }
+
+  // Health check: give every pane up to 90s to settle back at a prompt.
+  const pending = new Set(targets.map(t => t.pane))
+  const deadline = Date.now() + 90_000
+  while (pending.size && Date.now() < deadline) {
+    for (const pane of [...pending]) { if (await paneBackUp(pane).catch(() => false)) pending.delete(pane) }
+    if (pending.size) await sleep(3000)
+  }
+  const down = targets.filter(t => pending.has(t.pane))
+  if (!down.length) {
+    await say(`✅ All ${targets.length === 1 ? 'done — the session is' : `${targets.length} sessions are`} back up on <b>v${escapeHtml(installed ?? '?')}</b>, conversations resumed in place.`)
+    return
+  }
+  const kb = new InlineKeyboard()
+  let revivable = 0
+  for (const t of down) { if (t.sid) { kb.text(`▶️ Resume ${t.name}`, `claudeupd:revive:${t.sid}`).row(); revivable++ } }
+  const names = down.map(t => `<b>${escapeHtml(t.name)}</b>`).join(', ')
+  await say(
+    `⚠️ ${down.length} of ${targets.length} session${targets.length === 1 ? '' : 's'} didn't come back up: ${names}.` +
+    (revivable ? '\n\nTap to resume — each reopens in its previous topic with its conversation intact.' : ''),
+    revivable ? kb : undefined)
 }
 
 async function showUpdateDashboard(ctx: Context): Promise<void> {
@@ -5177,6 +5254,33 @@ bot.on('callback_query:data', async ctx => {
     await ctx.answerCallbackQuery({ text: 'Updating Claude…' }).catch(() => {})
     await ctx.editMessageReplyMarkup().catch(() => {})   // spend the dashboard buttons
     void updateClaude(String(ctx.chat?.id))
+    return
+  }
+
+  // "♻️ Restart all sessions" under the stale-binary notice: restart every stale pane, then
+  // health-check (restartAllStaleSessions reports back, with revive buttons for any that died).
+  if (data === 'claudeupd:restartall') {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) { await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {}); return }
+    await ctx.answerCallbackQuery({ text: 'Restarting…' }).catch(() => {})
+    await ctx.editMessageReplyMarkup().catch(() => {})
+    void restartAllStaleSessions(String(ctx.chat?.id))
+    return
+  }
+
+  // "▶️ Resume <name>" under a failed health check: respawn the session in its previous topic.
+  const reviveMatch = /^claudeupd:revive:([0-9a-f]+)$/.exec(data)
+  if (reviveMatch) {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) { await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {}); return }
+    const sid = reviveMatch[1]
+    const t = getTopicBySession(sid)
+    if (!t) { await ctx.answerCallbackQuery({ text: 'No topic mapping for this session — start it with /new.' }).catch(() => {}); return }
+    await ctx.answerCallbackQuery({ text: `Resuming ${t.name}…` }).catch(() => {})
+    const ok = await spawnSession(t.cwd, '-c', sid)
+    if (ok && t.closed) { try { updateTopic(sid, { closed: false }) } catch {} }
+    await bot.api.sendMessage(String(ctx.chat!.id), ok
+      ? `🚀 Resuming <b>${escapeHtml(t.name)}</b> in <code>${escapeHtml(t.cwd)}</code> — it reopens in its topic shortly.`
+      : `❌ Couldn't resume <b>${escapeHtml(t.name)}</b> in <code>${escapeHtml(t.cwd)}</code>.`,
+      { parse_mode: 'HTML' }).catch(() => {})
     return
   }
 
