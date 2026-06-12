@@ -4240,17 +4240,10 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
       ? await captureInheritedSettings(focus.activePaneId, focus.paneWatcher)
       : null
     // A resumed/continued session carries its own model/effort, but Claude Code does NOT
-    // restore the permission mode — seed it from the focused pane's mode (read live when one
-    // exists, else the last mode seen before it exited).
-    if (!inherit && /(?:^|\s)(?:--resume|-c)\b/.test(extra)) {
-      let mode = lastFocusedMode
-      if (focus.activePaneId) {
-        try {
-          const cap = await capturePane(focus.activePaneId)
-          if (onNormalPrompt(cap)) mode = detectCurrentMode(cap)
-        } catch {}
-      }
-      if (mode !== 'default') inherit = { model: null, effort: null, mode }
+    // restore the permission mode — seed it with the last mode observed on a focused pane
+    // (the 15s tracker + switchToMode keep it current while one is alive).
+    if (!inherit && /(?:^|\s)(?:--resume|-c)\b/.test(extra) && lastFocusedMode !== 'default') {
+      inherit = { model: null, effort: null, mode: lastFocusedMode }
     }
     let target: string[] = []
     if (focus.activePaneId) {
