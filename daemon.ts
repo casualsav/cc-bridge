@@ -481,8 +481,15 @@ async function switchToMode(paneId: string, target: CcMode, watcher: PaneWatcher
     }
     return null
   }
-  return watcher ? watcher.withInjection(run) : run()
+  const reached = await (watcher ? watcher.withInjection(run) : run())
+  if (reached && paneId === focus.activePaneId) lastFocusedMode = reached
+  return reached
 }
+
+// Last permission mode observed on the focused pane. Survives the pane's exit so a later
+// /resume can seed it — in DM mode the resume happens precisely when no pane is left alive
+// to read the mode from, and `claude --resume` restores the conversation but NOT the mode dial.
+let lastFocusedMode: CcMode = 'default'
 
 // Prompt detection (pane-scrape → PromptInfo) lives in ./prompt.ts.
 
@@ -4175,7 +4182,8 @@ function ensureFolderTrusted(dir: string): void {
 // Carry the previously-focused session's dials (model / effort / mode) onto a freshly spawned
 // one, so a session started from the group works like the one the user was just driving. Read
 // BEFORE the spawn (the source's state is current and can't race the new pane), applied once the
-// new pane reaches the REPL. Fresh sessions only — --resume/-c sessions carry their own settings.
+// new pane reaches the REPL. Fresh sessions inherit all three; --resume/-c sessions carry their
+// own model/effort but still inherit the MODE (Claude Code doesn't restore the mode dial).
 type InheritedSettings = { model: string | null; effort: string | null; mode: CcMode }
 
 async function captureInheritedSettings(paneId: string, watcher: PaneWatcher | null): Promise<InheritedSettings | null> {
@@ -4228,9 +4236,22 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
     accessSync(dir, fsConstants.R_OK | fsConstants.X_OK)
     ensureFolderTrusted(dir)   // so claude doesn't hit a trust dialog it can't answer on a new pane
     // A brand-new session (not --resume/-c) inherits the focused session's model/effort/mode.
-    const inherit = !extra && focus.activePaneId
+    let inherit = !extra && focus.activePaneId
       ? await captureInheritedSettings(focus.activePaneId, focus.paneWatcher)
       : null
+    // A resumed/continued session carries its own model/effort, but Claude Code does NOT
+    // restore the permission mode — seed it from the focused pane's mode (read live when one
+    // exists, else the last mode seen before it exited).
+    if (!inherit && /(?:^|\s)(?:--resume|-c)\b/.test(extra)) {
+      let mode = lastFocusedMode
+      if (focus.activePaneId) {
+        try {
+          const cap = await capturePane(focus.activePaneId)
+          if (onNormalPrompt(cap)) mode = detectCurrentMode(cap)
+        } catch {}
+      }
+      if (mode !== 'default') inherit = { model: null, effort: null, mode }
+    }
     let target: string[] = []
     if (focus.activePaneId) {
       try {
@@ -6522,6 +6543,15 @@ if (FORCE_PANE) {
 // Keep the pinned status card's live metrics fresh once per 10s. No-op edits are skipped and no
 // pin is created when nothing's active, so this is cheap when idle.
 setInterval(() => void updateSessionPin(), 10_000)
+// Remember the focused pane's permission mode (covers shift+tab changes made in the terminal,
+// which the daemon otherwise never sees) so /resume can inherit it after the pane exits.
+setInterval(() => void (async () => {
+  if (!focus.activePaneId) return
+  try {
+    const cap = await capturePane(focus.activePaneId)
+    if (onNormalPrompt(cap)) lastFocusedMode = detectCurrentMode(cap)
+  } catch {}
+})(), 15_000).unref()
 // Context-fill warnings (50% / 75%) ride a light statusline poll of the focused pane —
 // independent of the pin so the warnings still fire with /pin off.
 // Context-fill heads-up poll: lift ctxPct from the focused pane's statusline and feed
