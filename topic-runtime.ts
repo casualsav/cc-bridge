@@ -215,7 +215,7 @@ async function closeTopicEntry(group: string, sessionId: string, t: { threadId: 
   const kb = new InlineKeyboard()
     .text('🗑 Delete topic', `topicdel:${t.threadId}`)
     .text('🗑 Always delete', `topicdelalways:${t.threadId}`)
-  await bot.api.sendMessage(group, '🏁 <b>Session ended</b> — topic closed. It reopens automatically if a session comes back to this project.\n\nDelete removes the tab (and this topic’s history); Always delete does that for every ended session from now on.',
+  await bot.api.sendMessage(group, '🏁 <b>Session ended</b> — topic closed. Send a message here to revive the session (the conversation continues); it also reopens automatically if a session comes back to this project.\n\nDelete removes the tab (and this topic’s history); Always delete does that for every ended session from now on.',
     { parse_mode: 'HTML', message_thread_id: t.threadId, reply_markup: kb }).catch(() => {})
   try {
     await bot.api.closeForumTopic(group, t.threadId)
