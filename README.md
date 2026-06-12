@@ -66,4 +66,4 @@ Run `/telegram:configure uninstall` for a guided teardown.
 
 ## License
 
-Apache-2.0 — see [`LICENSE`](./LICENSE).
+MIT — see [`LICENSE`](./LICENSE).
