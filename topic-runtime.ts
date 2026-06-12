@@ -43,6 +43,20 @@ export async function stampPaneSession(pane: string, sid: string): Promise<void>
   try { await exec('tmux', ['set-option', '-p', '-t', pane, SESSION_PANE_OPT, sid], { timeout: 2000 }); paneSessionCache.set(pane, sid) } catch {}
 }
 
+// Panes undergoing a planned bounce (claude-update restart-in-place). While marked, the
+// pane-death paths (registry prune, close-on-end, reconcile) must not treat the gap between
+// /exit and the relaunch as a session death — that's what closed topics mid-update.
+const restartingPanes = new Set<string>()
+export function setPaneRestarting(pane: string, on: boolean): void {
+  if (on) restartingPanes.add(pane); else restartingPanes.delete(pane)
+}
+export function isPaneRestarting(pane: string): boolean { return restartingPanes.has(pane) }
+
+// Forget a dead pane's session mapping after its session moved to a NEW pane (restart-in-place
+// where the old pane died) — otherwise close-on-end later resolves the old pane to the still-live
+// session and closes its topic out from under it.
+export function releasePaneSession(pane: string): void { paneSessionCache.delete(pane) }
+
 // The pane's session id: cache → pane option → mint/adopt + stamp. An unstamped pane first tries
 // to adopt an existing topic entry for its cwd that no other live pane has claimed (this is the
 // lazy migration of pre-Track-B cwd-keyed entries and the tmux-restart re-attach); otherwise a
@@ -163,13 +177,31 @@ export async function closeTopicForPane(pane: string): Promise<void> {
   if (!isTopicMode()) return
   const group = getGroupChatId()
   if (!group) return
+  if (restartingPanes.has(pane)) return   // planned bounce (claude update), not a death
   if (await paneAlive(pane)) return   // transient registry miss, not a real death
   const sid = paneSessionCache.get(pane)
   if (!sid) return
+  if (await paneForSession(sid)) return   // session migrated to another pane (restart respawn) — still live
   if (sid === getGeneralSession()) { await generalAnchorLost(group) ; return }   // anchor died — no topic to close
   const t = getTopicBySession(sid)
   if (!t || t.closed) return
   await closeTopicEntry(group, sid, t)
+}
+
+// A revived/respawned session's topic reopens NOW, not on its first reply — flipping the stored
+// flag alone leaves the Telegram tab closed until outbound happens to flow (ensureTopicFor's lazy
+// reopen), which reads as "revive didn't work". Used by every revive path.
+export async function reopenSessionTopic(sessionId: string): Promise<void> {
+  if (!isTopicMode()) return
+  const group = getGroupChatId()
+  if (!group) return
+  const t = getTopicBySession(sessionId)
+  if (!t || !t.closed) return
+  try {
+    await bot.api.reopenForumTopic(group, t.threadId)
+    process.stderr.write(`daemon: reopened topic "${t.name}" for ${t.cwd}\n`)
+  } catch {}   // already open / deleted — the flag flip below still unblocks routing
+  try { updateTopic(sessionId, { closed: false }) } catch {}
 }
 
 // The General-anchored session ended: clear the anchor (General reverts to following focus) and
@@ -242,8 +274,12 @@ export async function reconcileTopics(panes: string[]): Promise<void> {
   for (const s of sessions.values()) {   // MCP-shim sessions hold topics too — don't close theirs
     if (s.paneId) { const sid = await sessionForPane(s.paneId); if (sid) liveSids.add(sid) }
   }
+  // Sessions mid-bounce (claude-update restart) are off the live-pane list but not dead —
+  // exempt their sids so a slow restart sweep can't accumulate misses and close their topics.
+  const restartingSids = new Set<string>()
+  for (const p of restartingPanes) { const s = paneSessionCache.get(p); if (s) restartingSids.add(s) }
   for (const t of listTopics()) {
-    if (t.closed || liveSids.has(t.sessionId)) { topicMissCounts.delete(t.sessionId); continue }
+    if (t.closed || liveSids.has(t.sessionId) || restartingSids.has(t.sessionId)) { topicMissCounts.delete(t.sessionId); continue }
     const misses = (topicMissCounts.get(t.sessionId) ?? 0) + 1
     if (misses < 2) { topicMissCounts.set(t.sessionId, misses); continue }
     topicMissCounts.delete(t.sessionId)

@@ -63,6 +63,7 @@ import {
   initTopicRuntime, sessionForPane, paneForSession, ensureSessionTopic, closeTopicForPane,
   reconcileTopics, refreshTopicTitles, topicThreadFor, emitTopicTyping, armTopicTyping, stopTopicTyping, outboundTargetsFor,
   stampPaneSession, topicBranchCache, generalAnchorLost,
+  setPaneRestarting, isPaneRestarting, releasePaneSession, reopenSessionTopic,
 } from './topic-runtime.ts'
 import {
   MAX_CHUNK_LIMIT, MAX_ATTACHMENT_BYTES, assertAllowedChat, resolveChatId, resolveTarget,
@@ -1294,6 +1295,7 @@ async function discoverPanes(): Promise<void> {
   const panes = await findOffMcpPanes()
   const live = new Set(panes)
   for (const p of [...offMcpPanes]) {
+    if (isPaneRestarting(p)) continue   // planned bounce (claude update) — not a death, keep it registered
     if (!live.has(p)) { offMcpPanes.delete(p); void closeTopicForPane(p) }
   }
 
@@ -3011,26 +3013,53 @@ async function restartPaneSession(pane: string, chat: string): Promise<void> {
 // The message-free core of a restart-in-place: /exit, relaunch `claude --resume <id>` in the same
 // pane (same pane keeps the bridge pointed at it, same id keeps the conversation), re-apply the
 // permission mode. Shared by the single-session button and the restart-all sweep.
-async function restartPaneSessionCore(pane: string, id: string): Promise<boolean> {
+// A daemon-SPAWNED pane is its claude process (tmux new-window runs claude directly), so /exit
+// destroys the whole pane and there is no shell to type the resume into — those sessions used to
+// die here, their topics closing as "ended". Now: the pane is flagged as mid-restart (so the
+// death-detection paths leave its topic alone), and if /exit took the pane with it the session is
+// respawned in a fresh pane with the same session stamp + `--resume` — the conversation, topic and
+// routing all survive. Returns the pane now hosting the session (the original or the respawn), or
+// null when it couldn't be brought back.
+async function restartPaneSessionCore(pane: string, id: string): Promise<string | null> {
   const mode = detectCurrentMode(await capturePane(pane).catch(() => ''))
   // An alt-account session must resume under its config dir — the pane's shell doesn't export
   // CLAUDE_CONFIG_DIR (the launcher env-prefixes it), so the resume line has to re-prefix.
   const account = await paneAccount(pane)
   const envPrefix = account.name === 'main' ? '' : `CLAUDE_CONFIG_DIR='${account.configDir.replace(/'/g, `'\\''`)}' `
+  // Captured BEFORE /exit — a pane that dies with it can't answer these anymore.
+  const cwd = await paneCwd(pane).catch(() => null)
+  const sid = await sessionForPane(pane, false).catch(() => null)
   const watcher = pane === focus.activePaneId ? focus.paneWatcher : null
-  const run = async () => {
-    await sendKeys(pane, ['/exit', 'Enter'])
-    for (let i = 0; i < 40 && (await paneCommand(pane)) === 'claude'; i++) await waitForSettle(pane, 200, 1500)
-    // Relaunch by ABSOLUTE path to the binary `claude install` manages (claudeBin), not bare
-    // `claude` — a stale npm-global claude earlier on the pane's PATH would otherwise resume the old
-    // version. `hash -r` stays as hygiene (clears any cached lookup) but the absolute path is what
-    // guarantees the resumed session runs the freshly-installed build regardless of PATH ordering.
-    await sendKeys(pane, [`hash -r; ${envPrefix}${claudeBin()} --allow-dangerously-skip-permissions --resume ${id}`, 'Enter'])
-    await waitForSettle(pane, 400, 30_000)
-  }
-  await (watcher ? watcher.withInjection(run) : run())
-  if (mode !== 'default') await switchToMode(pane, mode, watcher)
-  return true
+  setPaneRestarting(pane, true)
+  try {
+    const run = async () => {
+      await sendKeys(pane, ['/exit', 'Enter'])
+      for (let i = 0; i < 40 && (await paneCommand(pane)) === 'claude'; i++) await waitForSettle(pane, 200, 1500)
+      if (!(await paneAlive(pane))) return   // /exit closed the pane — respawn below, nothing to type into
+      // Relaunch by ABSOLUTE path to the binary `claude install` manages (claudeBin), not bare
+      // `claude` — a stale npm-global claude earlier on the pane's PATH would otherwise resume the old
+      // version. `hash -r` stays as hygiene (clears any cached lookup) but the absolute path is what
+      // guarantees the resumed session runs the freshly-installed build regardless of PATH ordering.
+      await sendKeys(pane, [`hash -r; ${envPrefix}${claudeBin()} --allow-dangerously-skip-permissions --resume ${id}`, 'Enter'])
+      await waitForSettle(pane, 400, 30_000)
+    }
+    await (watcher ? watcher.withInjection(run) : run())
+    if (!(await paneAlive(pane))) {
+      if (!cwd) return null
+      const fresh = await spawnSession(cwd, `--resume ${id}`, sid ?? undefined, account)
+      if (!fresh) return null
+      // The session lives in `fresh` now — drop the dead pane's registry + session mapping so
+      // close-on-end can't resolve it back to the (live) session and close its topic.
+      offMcpPanes.delete(pane)
+      releasePaneSession(pane)
+      if (sid) await reopenSessionTopic(sid)
+      if (pane === focus.activePaneId) adoptPane(fresh)
+      process.stderr.write(`daemon: restart: pane ${pane} died on /exit — respawned session in ${fresh} (${cwd})\n`)
+      return fresh   // mode is re-seeded by spawnSession's resume branch (sessionModes)
+    }
+    if (mode !== 'default') await switchToMode(pane, mode, watcher)
+    return pane
+  } finally { setPaneRestarting(pane, false) }
 }
 
 // `/update claude` — do the whole thing, no button, no manual relaunch:
@@ -3120,7 +3149,7 @@ async function restartAllStaleSessions(chat: string): Promise<void> {
     bot.api.sendMessage(chat, t, { parse_mode: 'HTML', ...(kb ? { reply_markup: kb } : {}) }).catch(() => {})
   const installed = await claudeVersion()
   // Recompute staleness at tap time (the notice may be hours old; sessions moved or restarted since).
-  const targets: Array<{ pane: string; sid: string | null; name: string; id: string }> = []
+  const targets: Array<{ pane: string; sid: string | null; name: string; id: string; cwd: string | null }> = []
   for (const pane of [...offMcpPanes]) {
     try {
       const cwd = await paneCwd(pane).catch(() => null)
@@ -3132,12 +3161,14 @@ async function restartAllStaleSessions(chat: string): Promise<void> {
       if (!newer) continue
       const sid = await sessionForPane(pane, false).catch(() => null)
       const name = (sid ? getTopicBySession(sid)?.name : null) ?? (basename(cwd ?? '') || 'session')
-      targets.push({ pane, sid, name, id: basename(file, '.jsonl') })
+      targets.push({ pane, sid, name, id: basename(file, '.jsonl'), cwd })
     } catch {}
   }
   if (!targets.length) { await say('✅ Every session is already on the current Claude — nothing to restart.'); return }
   await say(`♻️ Restarting ${targets.length === 1 ? 'the session' : `${targets.length} sessions`} on the new Claude…`)
-  for (const t of targets) { try { await restartPaneSessionCore(t.pane, t.id) } catch {} }
+  // A restart can move a session to a NEW pane (spawned panes die on /exit) — track the pane that
+  // hosts it now, so the health check below watches the right one.
+  for (const t of targets) { try { const now = await restartPaneSessionCore(t.pane, t.id); if (now) t.pane = now } catch {} }
 
   // Health check: give every pane up to 90s to settle back at a prompt.
   const pending = new Set(targets.map(t => t.pane))
@@ -3151,12 +3182,36 @@ async function restartAllStaleSessions(chat: string): Promise<void> {
     await say(`✅ All ${targets.length === 1 ? 'done — the session is' : `${targets.length} sessions are`} back up on <b>v${escapeHtml(installed ?? '?')}</b>, conversations resumed in place.`)
     return
   }
+  // Second chance, AUTOMATIC (no tap needed): anything whose pane is gone gets respawned from
+  // scratch in its folder — `-c` continues that cwd's latest conversation (the one that died),
+  // the preset stamp keeps its topic. A pane that's alive but not at a prompt yet just gets the
+  // second health-check window (spawning a sibling there would double the session).
+  const retried: typeof targets = []
+  const lost: typeof targets = []
+  for (const t of down) {
+    const alive = await paneAlive(t.pane).catch(() => false)
+    const fresh = !alive && t.sid && t.cwd ? await spawnSession(t.cwd, '-c', t.sid) : null
+    if (fresh) { t.pane = fresh; if (t.sid) await reopenSessionTopic(t.sid); retried.push(t) }
+    else if (alive) retried.push(t)
+    else lost.push(t)
+  }
+  const pending2 = new Set(retried.map(t => t.pane))
+  const deadline2 = Date.now() + 90_000
+  while (pending2.size && Date.now() < deadline2) {
+    for (const pane of [...pending2]) { if (await paneBackUp(pane).catch(() => false)) pending2.delete(pane) }
+    if (pending2.size) await sleep(3000)
+  }
+  const still = [...lost, ...retried.filter(t => pending2.has(t.pane))]
+  if (!still.length) {
+    await say(`✅ All ${targets.length === 1 ? 'done — the session is' : `${targets.length} sessions are`} back up on <b>v${escapeHtml(installed ?? '?')}</b> (${down.length === 1 ? 'one was' : `${down.length} were`} respawned in a fresh pane, conversations intact).`)
+    return
+  }
   const kb = new InlineKeyboard()
   let revivable = 0
-  for (const t of down) { if (t.sid) { kb.text(`▶️ Resume ${t.name}`, `claudeupd:revive:${t.sid}`).row(); revivable++ } }
-  const names = down.map(t => `<b>${escapeHtml(t.name)}</b>`).join(', ')
+  for (const t of still) { if (t.sid) { kb.text(`▶️ Resume ${t.name}`, `claudeupd:revive:${t.sid}`).row(); revivable++ } }
+  const names = still.map(t => `<b>${escapeHtml(t.name)}</b>`).join(', ')
   await say(
-    `⚠️ ${down.length} of ${targets.length} session${targets.length === 1 ? '' : 's'} didn't come back up: ${names}.` +
+    `⚠️ ${still.length} of ${targets.length} session${targets.length === 1 ? '' : 's'} didn't come back up: ${names}.` +
     (revivable ? '\n\nTap to resume — each reopens in its previous topic with its conversation intact.' : ''),
     revivable ? kb : undefined)
 }
@@ -5309,7 +5364,7 @@ bot.on('callback_query:data', async ctx => {
     if (!t) { await ctx.answerCallbackQuery({ text: 'No topic mapping for this session — start it with /new.' }).catch(() => {}); return }
     await ctx.answerCallbackQuery({ text: `Resuming ${t.name}…` }).catch(() => {})
     const ok = await spawnSession(t.cwd, '-c', sid)
-    if (ok && t.closed) { try { updateTopic(sid, { closed: false }) } catch {} }
+    if (ok) await reopenSessionTopic(sid)   // reopen the tab NOW, not on first reply
     await bot.api.sendMessage(String(ctx.chat!.id), ok
       ? `🚀 Resuming <b>${escapeHtml(t.name)}</b> in <code>${escapeHtml(t.cwd)}</code> — it reopens in its topic shortly.`
       : `❌ Couldn't resume <b>${escapeHtml(t.name)}</b> in <code>${escapeHtml(t.cwd)}</code>.`,
@@ -6119,7 +6174,7 @@ async function reviveTopicSession(ctx: Context, sid: string, params: InboundPara
       await ctx.reply(`❌ Couldn't revive the session in <code>${escapeHtml(t.cwd)}</code>.`, { parse_mode: 'HTML' }).catch(() => {})
       return
     }
-    if (t.closed) { try { updateTopic(sid, { closed: false }) } catch {} }
+    await reopenSessionTopic(sid)   // reopen the tab NOW, not on first reply
     const deadline = Date.now() + 90_000
     while (Date.now() < deadline) {
       await sleep(2000)
