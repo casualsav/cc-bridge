@@ -557,8 +557,16 @@ function respondPermission(request_id: string, behavior: 'allow' | 'deny'): void
   w?.({ t: 'permission', params: { request_id, behavior } })
 }
 
+// Chats for daemon-level notices (announcements, usage/budget warnings, provisioning updates):
+// once a forum group is bound everything lands in its General topic and the bot's DM stays
+// quiet; unbound, each allowlisted user's DM gets them.
+function noticeChats(): string[] {
+  const group = getGroupChatId()
+  return group ? [group] : loadAccess().allowFrom
+}
+
 function notifyChats(text: string, extra?: { reply_markup?: InlineKeyboard; parse_mode?: 'HTML' }): void {
-  for (const chat_id of loadAccess().allowFrom) void bot.api.sendMessage(chat_id, text, extra).catch(() => {})
+  for (const chat_id of noticeChats()) void bot.api.sendMessage(chat_id, text, extra).catch(() => {})
 }
 
 // Tracks the last prompt sent to Telegram to avoid double-relay.
@@ -1690,7 +1698,7 @@ function actOnLimitHit(fireAt: number, type: string, banner?: string, origin: st
   if (key === prev?.key && Date.now() < fireAt) return
   usageHitState.set(account.name, { key, at: Date.now() })
   saveUsageNotifState()
-  const chats = loadAccess().allowFrom
+  const chats = noticeChats()
   if (chats.length === 0) return
   const who = account.name === 'main' ? '' : ` (<b>${escapeHtml(account.name)}</b> account)`
   const note = `\n\n⏰ Resets in ${formatDuration(Math.max(0, fireAt - Date.now()))}.\n▶️ I'll continue automatically when it resets — tap below if you'd rather I didn't.`
@@ -2108,7 +2116,7 @@ async function audioInboundText(
           '🎙️ First voice note — installing the local Whisper engine (one-time, ~1–3 min). ' +
           'This note will transcribe as soon as it’s ready.').catch(() => {})
       }
-      await provisionWhisper(loadAccess().allowFrom)
+      await provisionWhisper(noticeChats())
       if (!whisperReady()) return { text: fallback, transcribed: false }   // provisionWhisper already explained why
     }
     const transcript = await transcribe(path)
@@ -3185,7 +3193,7 @@ async function sweepBudget(): Promise<void> {
     const msg = threshold >= 100
       ? `💸 <b>Daily budget reached</b> — $${spent.toFixed(2)} of $${cap.toFixed(2)} today. Sessions keep running; wrap up or raise it with /budget.`
       : `💸 Daily budget at ${Math.round(pct)}% — $${spent.toFixed(2)} of $${cap.toFixed(2)}.`
-    for (const c of loadAccess().allowFrom) await bot.api.sendMessage(c, msg, { parse_mode: 'HTML' }).catch(() => {})
+    for (const c of noticeChats()) await bot.api.sendMessage(c, msg, { parse_mode: 'HTML' }).catch(() => {})
   }
   writeJsonFile(BUDGET_FILE, st)
 }
@@ -4870,7 +4878,7 @@ bot.on('callback_query:data', async ctx => {
     // Engine missing → provision it (which also pre-pulls this model's weights). Engine already
     // there → just pre-pull the newly chosen model's weights in the background. Either way the
     // first note is instant. Both run detached so the panel refreshes immediately.
-    if (!whisperReady() && !whisperInstalling) void provisionWhisper(loadAccess().allowFrom)
+    if (!whisperReady() && !whisperInstalling) void provisionWhisper(noticeChats())
     else if (whisperReady()) void prepullWhisperModel()
     await ctx.editMessageText(voiceModelText(), { parse_mode: 'HTML', reply_markup: voiceModelKeyboard() }).catch(() => {})
     return
