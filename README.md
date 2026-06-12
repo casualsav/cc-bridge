@@ -1,4 +1,4 @@
-Pocket Claude
+## Pocket Claude
 
 This plugin gives you complete Claude Code CLI control from your phone with the ability to create and manage multiple sessions instantly thanks to tmux. 
 
