@@ -6,8 +6,7 @@ Send messages and files, voice notes, use slash commands, see Claude's thought p
 
 - [Bun](https://bun.sh) (the runtime; dependencies install on first launch).
 - A Telegram bot token from [@BotFather](https://t.me/BotFather).
-- `tmux` — required for mode switching and `/stop` (the daemon reads/controls the
-  session pane). Core messaging works without it via MCP.
+- `tmux` — required for some features. Core messaging works without it via MCP.
 
 ## Installation: 
 
@@ -18,7 +17,7 @@ Just point Claude Code at this repo and tell it to install it. It will install a
 
 The installer adds the alias pocket-claude, which runs Claude with the identifier for the daemon to pick up the session. After going through the initial install, run the alias inside a tmux session, then send a message to the Telegram bot.
 
-For multi-session support, add the Telegram bot as admin in a Telegram group with topics enabled and send /bind in the general chat. You're all set. 
+For multi-session, add the Telegram bot as an admin with full rights in a Telegram group with topics enabled and send /bind in the general chat. Every new topic you make then opens a new session and lets you specify where it runs. 
 
 ## Usage
 
