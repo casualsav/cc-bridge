@@ -20,8 +20,11 @@ const REPO = import.meta.dir
 const SETTINGS = join(homedir(), '.claude', 'settings.json')
 const GLOBAL_CLAUDE_MD = join(homedir(), '.claude', 'CLAUDE.md')
 const STATUSLINE_DEST = join(homedir(), '.claude', 'statusline-command.sh')
-const MARKER_BEGIN = '<!-- BEGIN better-claude-telegram (off-mcp convention — auto-synced by /update; edits inside are overwritten) -->'
-const MARKER_END = '<!-- END better-claude-telegram -->'
+const MARKER_BEGIN = '<!-- BEGIN pocket-claude (off-mcp convention — auto-synced by /update; edits inside are overwritten) -->'
+const MARKER_END = '<!-- END pocket-claude -->'
+// Pre-rename installs wrote these — recognized so a re-run swaps the block instead of doubling it.
+const MARKER_BEGIN_OLD = '<!-- BEGIN better-claude-telegram (off-mcp convention — auto-synced by /update; edits inside are overwritten) -->'
+const MARKER_END_OLD = '<!-- END better-claude-telegram -->'
 
 // ---- tiny UI helpers ----
 const C = { dim: (s: string) => `\x1b[2m${s}\x1b[0m`, b: (s: string) => `\x1b[1m${s}\x1b[0m`,
@@ -324,8 +327,10 @@ function patchSettings(mode: Mode): void {
   const convention = readFileSync(join(REPO, 'off-mcp', 'CLAUDE.md'), 'utf8').trim()
   const block = `${MARKER_BEGIN}\n${convention}\n${MARKER_END}\n`
   let md = existsSync(GLOBAL_CLAUDE_MD) ? readFileSync(GLOBAL_CLAUDE_MD, 'utf8') : ''
-  if (md.includes(MARKER_BEGIN) && md.includes(MARKER_END)) {
-    md = md.replace(new RegExp(`${escapeRe(MARKER_BEGIN)}[\\s\\S]*?${escapeRe(MARKER_END)}\\n?`), block)
+  const [begin, end] = md.includes(MARKER_BEGIN_OLD) && md.includes(MARKER_END_OLD)
+    ? [MARKER_BEGIN_OLD, MARKER_END_OLD] : [MARKER_BEGIN, MARKER_END]
+  if (md.includes(begin) && md.includes(end)) {
+    md = md.replace(new RegExp(`${escapeRe(begin)}[\\s\\S]*?${escapeRe(end)}\\n?`), block)
   } else { md = (md.trimEnd() + '\n\n' + block).trimStart() }
   writeFileSync(GLOBAL_CLAUDE_MD, md)
   console.log(C.ok('  ✓ ~/.claude/CLAUDE.md (off-mcp convention)'))

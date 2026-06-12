@@ -112,9 +112,13 @@ const shortVer = (sha: string) => sha.slice(0, 7)
 const GLOBAL_MD = join(HOME, '.claude', 'CLAUDE.md')
 const STATUSLINE_DEST = join(HOME, '.claude', 'statusline-command.sh')
 const STATUSLINE_SIG = 'Claude Code status line'   // header line unique to our script
-const CONV_BEGIN = '<!-- BEGIN better-claude-telegram (off-mcp convention — auto-synced by /update; edits inside are overwritten) -->'
-const CONV_END = '<!-- END better-claude-telegram -->'
-const CONV_HEADING = '# Reachable over Telegram (no MCP)'   // first line of off-mcp/CLAUDE.md (legacy, marker-less)
+const CONV_BEGIN = '<!-- BEGIN pocket-claude (off-mcp convention — auto-synced by /update; edits inside are overwritten) -->'
+const CONV_END = '<!-- END pocket-claude -->'
+// Pre-rename installs wrote these markers — matched for replacement, rewritten to the new pair.
+const CONV_BEGIN_OLD = '<!-- BEGIN better-claude-telegram (off-mcp convention — auto-synced by /update; edits inside are overwritten) -->'
+const CONV_END_OLD = '<!-- END better-claude-telegram -->'
+// First line of off-mcp/CLAUDE.md across its lifetimes (legacy, marker-less installs).
+const CONV_HEADINGS = ['# Telegram bridge (no MCP)', '# Reachable over Telegram (no MCP)']
 
 function syncInstalledCopies(): string[] {
   const notes: string[] = []
@@ -124,18 +128,21 @@ function syncInstalledCopies(): string[] {
     const wrapped = `${CONV_BEGIN}\n${template}\n${CONV_END}`
     if (existsSync(GLOBAL_MD)) {
       const cur = readFileSync(GLOBAL_MD, 'utf8')
-      const b = cur.indexOf(CONV_BEGIN), e = cur.indexOf(CONV_END)
+      // New markers preferred; old (pre-rename) markers matched and rewritten to the new pair.
+      const [begin, end] = cur.includes(CONV_BEGIN) ? [CONV_BEGIN, CONV_END] : [CONV_BEGIN_OLD, CONV_END_OLD]
+      const b = cur.indexOf(begin), e = cur.indexOf(end)
       if (b !== -1 && e !== -1 && e > b) {
         // Already marker-wrapped → swap the block in place.
-        const next = cur.slice(0, b) + wrapped + cur.slice(e + CONV_END.length)
+        const next = cur.slice(0, b) + wrapped + cur.slice(e + end.length)
         if (next !== cur) { writeFileSync(GLOBAL_MD, next); notes.push('refreshed the off-mcp convention in CLAUDE.md') }
       } else {
         // Legacy, marker-less: replace from our heading to the next top-level "# " (or EOF),
         // migrating it into markers. Our block has only the one top-level heading, so this is
         // exact. Content before/after the block is preserved.
-        const hi = cur.indexOf(CONV_HEADING)
-        if (hi !== -1) {
-          const after = cur.indexOf('\n# ', hi + CONV_HEADING.length)
+        const heading = CONV_HEADINGS.find(h => cur.includes(h))
+        const hi = heading ? cur.indexOf(heading) : -1
+        if (heading && hi !== -1) {
+          const after = cur.indexOf('\n# ', hi + heading.length)
           const tail = after === -1 ? '' : cur.slice(after + 1)
           writeFileSync(GLOBAL_MD, cur.slice(0, hi) + wrapped + (tail ? '\n\n' + tail : '\n'))
           notes.push('migrated + refreshed the off-mcp convention in CLAUDE.md')
