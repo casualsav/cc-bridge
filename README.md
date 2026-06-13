@@ -24,7 +24,7 @@ For multi-session, add the Telegram bot as an admin with full rights in a Telegr
 
 ## Usage
 
-Send text, media, and voice messages through Telegram. In multi-session mode, adding new group topics starts a new session, deleting a topic closes that session. 
+Send text, media, slash commands, and voice messages through Telegram. In multi-session mode, adding new group topics starts a new session, deleting a topic closes that session. 
 
 Bot commands:
 
