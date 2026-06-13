@@ -1,7 +1,5 @@
 ## Claude-tg
 
-Full control of Claude Code through Telegram without ever having to open the terminal. Intuitive design with every feature available in the CLI and some extras.
-
 <p align="center">
   <img src="assets/telegram-demo.jpg" width="380" alt="Claude Code driven from Telegram — live thinking, pinned status card with model, usage and context">
 </p>
