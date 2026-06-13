@@ -14,8 +14,7 @@
 
 ## Installation: 
 
-Start Claude in a tmux session, point it at this repo, and tell it to install it. It will install any dependencies if missing and walk you through setup. 
-
+Start Claude in a tmux session, drop the link to this repo and tell Claude "install this here." It will walk you through installation and download any dependencies if missing.
 
 ## Launch
 
@@ -60,7 +59,7 @@ Any other `/slash` command is relayed straight to Claude Code.
 
 ## Upgrading
 
-Just run /upgrade tg from inside the bot to upgrade. Bonus: running /upgrade claude upgrades Claude.
+Just run "/upgrade tg" from inside the bot to upgrade. Bonus: running "/upgrade claude" upgrades Claude.
 
 ## Uninstalling
 
