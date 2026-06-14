@@ -77,6 +77,15 @@ change**, then push. `bun run deploy` does this bump for you (both files); if yo
 do it yourself. End-users upgrading a same-version cache must force-refresh (see
 `off-mcp/INSTALL.md` §0.6).
 
+**Two repos — push to BOTH:** the dev/source remote (`origin` → `casualsav/claude-tg`) is NOT the
+repo end-user installs pull from. The marketplace they're linked to is a **separate** repo
+(`casualsav/claude-tg`, formerly `better-claude-telegram`). A lone `git push` to origin therefore
+strands every install on the old version even though the bump is "released." `bun run deploy --commit`
+now mirrors the commit to both automatically (see `PUBLISH_REMOTES` / `pushPublishRemotes` in
+`scripts/deploy.ts` — it ensures the `marketplace` remote and pushes there too). If you ever commit by
+hand, also run `git push marketplace HEAD:main`. Either repo is a valid install source as long as they
+stay in sync, which the dual push guarantees.
+
 **The cache needs deps, not just `.ts`.** A fresh cache copy is often only the `.ts` files — no
 `package.json`/`bun.lock`/`node_modules` — so `bun daemon.ts` floats grammy to a build that crashes
 with `EACCES … resolving 'debug'`. `ensure-daemon.ts` self-heals (writes a pinned `package.json` +
