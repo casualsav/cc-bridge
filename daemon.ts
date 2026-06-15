@@ -3239,38 +3239,53 @@ async function restartAllStaleSessions(chat: string): Promise<void> {
   // hosts it now, so the health check below watches the right one.
   for (const t of targets) { try { const now = await restartPaneSessionCore(t.pane, t.id); if (now) t.pane = now } catch {} }
 
-  // Health check: give every pane up to 90s to settle back at a prompt.
-  const pending = new Set(targets.map(t => t.pane))
-  const deadline = Date.now() + 90_000
+  // A session is "back up" if its tracked pane is at a prompt — OR if the session is live and
+  // prompt-ready in SOME pane. A restart can move a session to a new pane we lost track of, and a
+  // large/slow resume can lag the one pane we're watching; checking the SESSION (not just the pane)
+  // stops the false "didn't come back up" that made users tap Resume and double-spawn an already-live
+  // session. When a sibling pane is the live one, retarget so the next checks watch it.
+  const sessionBackUp = async (t: (typeof targets)[number]): Promise<boolean> => {
+    if (await paneBackUp(t.pane).catch(() => false)) return true
+    if (!t.sid) return false
+    const p = await paneForSession(t.sid).catch(() => null)
+    if (p && p !== t.pane && await paneBackUp(p).catch(() => false)) { t.pane = p; return true }
+    return false
+  }
+  // Health check: give every session up to 120s to settle back at a prompt (a big conversation,
+  // several resuming at once, can take well over the old 90s to repaint).
+  const pending = new Set(targets)
+  const deadline = Date.now() + 120_000
   while (pending.size && Date.now() < deadline) {
-    for (const pane of [...pending]) { if (await paneBackUp(pane).catch(() => false)) pending.delete(pane) }
+    for (const t of [...pending]) { if (await sessionBackUp(t)) pending.delete(t) }
     if (pending.size) await sleep(3000)
   }
-  const down = targets.filter(t => pending.has(t.pane))
+  const down = [...pending]
   if (!down.length) {
     await say(`✅ All ${targets.length === 1 ? 'done — the session is' : `${targets.length} sessions are`} back up on <b>v${escapeHtml(installed ?? '?')}</b>, conversations resumed in place.`)
     return
   }
-  // Second chance, AUTOMATIC (no tap needed): anything whose pane is gone gets respawned from
-  // scratch in its folder — `-c` continues that cwd's latest conversation (the one that died),
-  // the preset stamp keeps its topic. A pane that's alive but not at a prompt yet just gets the
-  // second health-check window (spawning a sibling there would double the session).
+  // Second chance, AUTOMATIC (no tap needed): if the session is already live in a pane, just adopt
+  // it — NEVER spawn a twin. Otherwise anything whose pane is gone gets respawned from scratch in its
+  // folder — `-c` continues that cwd's latest conversation (the one that died), the preset stamp keeps
+  // its topic. A pane that's alive but not at a prompt yet just gets the second health-check window.
   const retried: typeof targets = []
   const lost: typeof targets = []
   for (const t of down) {
+    const live = t.sid ? await paneForSession(t.sid).catch(() => null) : null
+    if (live) { t.pane = live; retried.push(t); continue }
     const alive = await paneAlive(t.pane).catch(() => false)
     const fresh = !alive && t.sid && t.cwd ? await spawnSession(t.cwd, '-c', t.sid) : null
     if (fresh) { t.pane = fresh; if (t.sid) await reopenSessionTopic(t.sid); retried.push(t) }
     else if (alive) retried.push(t)
     else lost.push(t)
   }
-  const pending2 = new Set(retried.map(t => t.pane))
-  const deadline2 = Date.now() + 90_000
+  const pending2 = new Set(retried)
+  const deadline2 = Date.now() + 120_000
   while (pending2.size && Date.now() < deadline2) {
-    for (const pane of [...pending2]) { if (await paneBackUp(pane).catch(() => false)) pending2.delete(pane) }
+    for (const t of [...pending2]) { if (await sessionBackUp(t)) pending2.delete(t) }
     if (pending2.size) await sleep(3000)
   }
-  const still = [...lost, ...retried.filter(t => pending2.has(t.pane))]
+  const still = [...lost, ...retried.filter(t => pending2.has(t))]
   if (!still.length) {
     await say(`✅ All ${targets.length === 1 ? 'done — the session is' : `${targets.length} sessions are`} back up on <b>v${escapeHtml(installed ?? '?')}</b> (${down.length === 1 ? 'one was' : `${down.length} were`} respawned in a fresh pane, conversations intact).`)
     return
@@ -5535,6 +5550,17 @@ bot.on('callback_query:data', async ctx => {
     const sid = reviveMatch[1]
     const t = getTopicBySession(sid)
     if (!t) { await ctx.answerCallbackQuery({ text: 'No topic mapping for this session — start it with /new.' }).catch(() => {}); return }
+    // Never spawn a twin: a too-tight health check can flag a session "down" while it's actually
+    // live (slow resume / moved pane). If a pane already carries it, just reopen its topic.
+    const livePane = await paneForSession(sid).catch(() => null)
+    if (livePane) {
+      await ctx.answerCallbackQuery({ text: `${t.name} is already running.` }).catch(() => {})
+      await reopenSessionTopic(sid)
+      await bot.api.sendMessage(String(ctx.chat!.id),
+        `✅ <b>${escapeHtml(t.name)}</b> is already running — reopened its topic.`,
+        { parse_mode: 'HTML' }).catch(() => {})
+      return
+    }
     await ctx.answerCallbackQuery({ text: `Resuming ${t.name}…` }).catch(() => {})
     const ok = await spawnSession(t.cwd, '-c', sid)
     if (ok) await reopenSessionTopic(sid)   // reopen the tab NOW, not on first reply
