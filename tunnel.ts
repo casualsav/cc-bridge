@@ -7,7 +7,9 @@
 
 import { spawn, type Subprocess, which } from 'bun'
 import { join } from 'node:path'
-import { existsSync } from 'node:fs'
+import { existsSync, chmodSync } from 'node:fs'
+import { mkdir, rm } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 
 // Exclude `api.trycloudflare.com` — cloudflared logs that (its API host) at startup BEFORE the real
 // assigned `https://<random-words>.trycloudflare.com` URL, and we must not mistake it for the tunnel.
@@ -20,16 +22,74 @@ export function parseTunnelUrl(text: string): string | null {
 }
 
 // Locate the cloudflared binary: explicit path → PATH → cached under <stateDir>/bin. Returns null if
-// absent (the daemon then logs guidance / falls back to WEBAPP_PUBLIC_URL).
-// TODO(phase1): optional checksum-pinned auto-fetch of
-// github.com/cloudflare/cloudflared/releases/download/<ver>/cloudflared-<os>-<arch> into <stateDir>/bin
-// so the zero-config promise holds without a system install.
+// absent (callers then auto-fetch via ensureCloudflared, or fall back to WEBAPP_PUBLIC_URL).
 export function findCloudflared(stateDir: string, explicit?: string): string | null {
   if (explicit && existsSync(explicit)) return explicit
   const onPath = which('cloudflared')
   if (onPath) return onPath
+  const win = join(stateDir, 'bin', 'cloudflared.exe')
+  if (existsSync(win)) return win
   const cached = join(stateDir, 'bin', 'cloudflared')
   return existsSync(cached) ? cached : null
+}
+
+// Pinned cloudflared release. Cloudflare publishes NO checksums file, so the sha256 below were computed
+// from the official release binaries and pinned here; platforms without a pin verify by --version after
+// download (HTTPS + the immutable versioned URL is the integrity floor). Bump VERSION + hashes together.
+const CF_VERSION = '2026.6.0'
+const CF_SHA256: Record<string, string> = {
+  'linux-arm64': '8482ebf1e74a2a4a1a9f1e090e17e3de08423f94100ece6789287cb26fb9480f',
+}
+// Map node platform/arch → the release asset (and whether it's a .tgz needing extraction).
+export function cfAsset(platform = process.platform, arch = process.arch): { name: string; key: string; tgz: boolean } | null {
+  const la: Record<string, string> = { x64: 'amd64', arm64: 'arm64', arm: 'arm', ia32: '386' }
+  if (platform === 'linux' && la[arch]) return { name: `cloudflared-linux-${la[arch]}`, key: `linux-${la[arch]}`, tgz: false }
+  if (platform === 'darwin' && (arch === 'x64' || arch === 'arm64'))
+    return { name: `cloudflared-darwin-${arch === 'x64' ? 'amd64' : 'arm64'}.tgz`, key: `darwin-${arch === 'x64' ? 'amd64' : 'arm64'}`, tgz: true }
+  if (platform === 'win32') return { name: 'cloudflared-windows-amd64.exe', key: 'windows-amd64', tgz: false }
+  return null
+}
+
+// Ensure a cloudflared binary exists: reuse a system/cached one, else fetch the pinned release into
+// <stateDir>/bin (checksum-verified where pinned, else --version-checked) and chmod +x. Null on failure.
+export async function ensureCloudflared(stateDir: string, log: (m: string) => void, explicit?: string): Promise<string | null> {
+  const found = findCloudflared(stateDir, explicit)
+  if (found) return found
+  const asset = cfAsset()
+  if (!asset) { log('tunnel: no cloudflared build for this platform — set WEBAPP_PUBLIC_URL'); return null }
+  const binDir = join(stateDir, 'bin')
+  const dest = join(binDir, process.platform === 'win32' ? 'cloudflared.exe' : 'cloudflared')
+  const url = `https://github.com/cloudflare/cloudflared/releases/download/${CF_VERSION}/${asset.name}`
+  try {
+    await mkdir(binDir, { recursive: true })
+    log(`tunnel: fetching cloudflared ${CF_VERSION} (${asset.name})…`)
+    const res = await fetch(url)
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const bytes = new Uint8Array(await res.arrayBuffer())
+    if (asset.tgz) {                                   // darwin ships a gzipped tar holding `cloudflared`
+      const tmp = join(binDir, 'cf.tgz')
+      await Bun.write(tmp, bytes)
+      await spawn(['tar', '-xzf', tmp, '-C', binDir, 'cloudflared']).exited
+      await rm(tmp, { force: true })
+    } else {
+      await Bun.write(dest, bytes)
+    }
+    chmodSync(dest, 0o755)
+    const want = CF_SHA256[asset.key]
+    if (want) {
+      const got = createHash('sha256').update(new Uint8Array(await Bun.file(dest).arrayBuffer())).digest('hex')
+      if (got !== want) { await rm(dest, { force: true }); throw new Error(`sha256 mismatch (got ${got})`) }
+      log(`tunnel: cloudflared ${CF_VERSION} installed (sha256 verified)`)
+    } else {
+      const v = await new Response(spawn([dest, '--version']).stdout).text()
+      if (!v.includes(CF_VERSION)) log(`tunnel: WARNING cloudflared --version unexpected: ${v.trim()}`)
+      else log(`tunnel: cloudflared ${CF_VERSION} installed (version-checked)`)
+    }
+    return dest
+  } catch (e) {
+    log(`tunnel: cloudflared fetch failed (${(e as Error).message}) — install it or set WEBAPP_PUBLIC_URL`)
+    return null
+  }
 }
 
 export interface Tunnel { url(): string | null; stop(): void }

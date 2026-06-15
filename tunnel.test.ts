@@ -1,6 +1,6 @@
 // Tests for cloudflared URL parsing + binary discovery. Run: bun test tunnel.test.ts
 import { test, expect } from 'bun:test'
-import { parseTunnelUrl, findCloudflared } from './tunnel.ts'
+import { parseTunnelUrl, findCloudflared, cfAsset } from './tunnel.ts'
 
 test('parses the trycloudflare URL out of cloudflared’s boxed banner', () => {
   const banner = [
@@ -27,4 +27,12 @@ test('findCloudflared returns null when absent and honors an explicit existing p
   expect(findCloudflared('/nonexistent-state-dir')).toBeNull()
   expect(findCloudflared('/nonexistent-state-dir', '/definitely/not/here')).toBeNull()
   expect(findCloudflared('/tmp', '/bin/sh')).toBe('/bin/sh')   // any existing file path is honored
+})
+
+test('cfAsset maps platform/arch to the right release asset', () => {
+  expect(cfAsset('linux', 'arm64')).toEqual({ name: 'cloudflared-linux-arm64', key: 'linux-arm64', tgz: false })
+  expect(cfAsset('linux', 'x64')).toEqual({ name: 'cloudflared-linux-amd64', key: 'linux-amd64', tgz: false })
+  expect(cfAsset('darwin', 'arm64')).toEqual({ name: 'cloudflared-darwin-arm64.tgz', key: 'darwin-arm64', tgz: true })
+  expect(cfAsset('win32', 'x64')).toEqual({ name: 'cloudflared-windows-amd64.exe', key: 'windows-amd64', tgz: false })
+  expect(cfAsset('freebsd', 'x64')).toBeNull()
 })
