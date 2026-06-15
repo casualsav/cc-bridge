@@ -65,6 +65,8 @@ import {
   stampPaneSession, topicBranchCache, generalAnchorLost,
   setPaneRestarting, isPaneRestarting, releasePaneSession, reopenSessionTopic,
 } from './topic-runtime.ts'
+import { startWebapp } from './webapp.ts'
+import { startTunnel, ensureCloudflared, type Tunnel } from './tunnel.ts'
 import {
   MAX_CHUNK_LIMIT, MAX_ATTACHMENT_BYTES, assertAllowedChat, resolveChatId, resolveTarget,
   assertSendable, chunk, coerceReaction,
@@ -7127,6 +7129,49 @@ setInterval(() => void sweepUpdateChecks(), 24 * 3_600_000).unref()   // …then
 // Budget tracking.
 setInterval(() => void sweepBudget(), BUDGET_SWEEP_MS).unref()
 
+// ---- Files Mini App (opt-in: TELEGRAM_WEBAPP_ENABLED=1) ----
+// webapp.ts = a localhost Bun.serve file API + static SPA; tunnel.ts = a cloudflared quick tunnel for
+// public HTTPS. Launched from a /files web_app button. initData-authed to the allowlist; whole-FS,
+// read-only browse/view/download (editing is chat-side). Off by default. See docs/files-mini-app.md.
+const WEBAPP_ENABLED = /^(1|true|yes|on)$/i.test(process.env.TELEGRAM_WEBAPP_ENABLED ?? '')
+const WEBAPP_PORT = Number(process.env.TELEGRAM_WEBAPP_PORT) || (8787 + (Number.isFinite(+INSTANCE_ID) ? Number(INSTANCE_ID) : 0))
+const WEBAPP_TUNNEL = (process.env.TELEGRAM_WEBAPP_TUNNEL ?? 'cloudflared').toLowerCase()
+const WEBAPP_PUBLIC_URL = (process.env.TELEGRAM_WEBAPP_PUBLIC_URL ?? '').replace(/\/+$/, '')
+let filesTunnel: Tunnel | null = null
+const filesPublicUrl = (): string | null => WEBAPP_PUBLIC_URL || filesTunnel?.url() || null
+const wlog = (m: string) => process.stderr.write(`daemon: ${m}\n`)
+
+async function startFilesWebapp(): Promise<void> {
+  if (!WEBAPP_ENABLED) return
+  try {
+    startWebapp({ token: TOKEN!, port: WEBAPP_PORT, staticDir: join(import.meta.dir, 'webapp'),
+      isAllowed: uid => loadAccess().allowFrom.includes(uid), log: wlog })
+  } catch (e) { wlog(`webapp: failed to start: ${e}`); return }
+  if (WEBAPP_PUBLIC_URL) { wlog(`webapp: public url ${WEBAPP_PUBLIC_URL}`); return }
+  if (WEBAPP_TUNNEL === 'cloudflared') {
+    const bin = await ensureCloudflared(STATE_DIR, wlog)
+    if (bin) filesTunnel = startTunnel({ port: WEBAPP_PORT, bin, log: wlog })
+  } else {
+    wlog(`webapp: tunnel '${WEBAPP_TUNNEL}' not built-in — set TELEGRAM_WEBAPP_PUBLIC_URL`)
+  }
+}
+void startFilesWebapp()
+
+// /files — open the Mini App at this session's folder (the web_app button carries the live tunnel URL).
+bot.command('files', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  if (!WEBAPP_ENABLED) { await ctx.reply('Files explorer is off. Enable it: set TELEGRAM_WEBAPP_ENABLED=1 in the bridge .env, then /restart the daemon.'); return }
+  const url = filesPublicUrl()
+  if (!url) { await ctx.reply('📂 Files server is starting (bringing up the tunnel) — try /files again in a few seconds.'); return }
+  const t = await commandTarget(ctx)
+  if (!t) return
+  const cwd = (await paneCwd(t.paneId).catch(() => null)) || '/'
+  const full = `${url}/?start=${encodeURIComponent(cwd)}`
+  await bot.api.sendMessage(String(ctx.chat!.id), `📂 <b>Files</b> — <code>${escapeHtml(cwd)}</code>`,
+    { parse_mode: 'HTML', reply_markup: new InlineKeyboard().webApp('📂 Open Files', full),
+      ...(t.replyThread ? { message_thread_id: t.replyThread } : {}) })
+})
+
 // ---- Bot startup loop (retry with backoff, daemon persists forever) ----
 
 void (async () => {
@@ -7155,6 +7200,7 @@ void (async () => {
               { command: 'md', description: 'Create a .md file in the working dir, then reply with its contents' },
               { command: 'resume', description: 'Resume a recent session (lists them with times)' },
               { command: 'find', description: 'Search all sessions\' conversations (/find <text>)' },
+              { command: 'files', description: 'Browse / download / edit files in this session\'s folder' },
               { command: 'account', description: 'Claude accounts — list, add, remove (multi-account)' },
               { command: 'restart', description: 'Exit and resume the current session (picks up config changes)' },
               { command: 'reset', description: 'Clear the current conversation in place' },
