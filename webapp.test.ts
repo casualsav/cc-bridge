@@ -23,6 +23,13 @@ test('accepts a correctly-signed, fresh initData and extracts the user id', () =
   expect(r.userId).toBe('42')
 })
 
+test('includes signature + query_id in the HMAC string (Bot API 8.0+ initData)', () => {
+  // Real launches carry `signature` and `query_id`; both must stay in the data-check-string.
+  const r = verifyInitData(sign({ auth_date: String(now()), query_id: 'AAH123', signature: 'ed25519-sig', user }), TOKEN)
+  expect(r.ok).toBe(true)
+  expect(r.userId).toBe('42')
+})
+
 test('rejects a tampered field (signature no longer matches)', () => {
   const good = sign({ auth_date: String(now()), user })
   const tampered = good.replace(/user=[^&]*/, `user=${encodeURIComponent(JSON.stringify({ id: 999 }))}`)

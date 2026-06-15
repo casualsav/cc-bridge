@@ -31,7 +31,9 @@ export function verifyInitData(initData: string, token: string, maxAgeSec = 3600
   const hash = params.get('hash')
   if (!hash || !/^[0-9a-f]{64}$/i.test(hash)) return { ok: false, reason: 'no/bad hash' }
   params.delete('hash')
-  params.delete('signature')   // Ed25519 third-party sig (Bot API 8.0+) is not part of the HMAC string
+  // Keep every other field (incl. `signature` and `query_id`) in the data-check-string: Telegram's
+  // HMAC `hash` is computed over ALL fields except `hash`. Excluding `signature` (a Bot API 8.0+ field)
+  // makes the string differ from what Telegram signed → 'bad signature' 401s on real launches.
   const dcs = [...params.entries()].map(([k, v]) => `${k}=${v}`).sort().join('\n')
   const secret = createHmac('sha256', 'WebAppData').update(token).digest()
   const expected = createHmac('sha256', secret).update(dcs).digest('hex')
@@ -166,7 +168,10 @@ export function startWebapp(deps: WebappDeps): ReturnType<typeof Bun.serve> {
       if (isApi) {
         const initData = extractInitData(req)
         const v = initData ? verifyInitData(initData, deps.token, deps.maxInitDataAgeSec) : { ok: false, reason: 'no initData' } as InitDataResult
-        if (!v.ok) return json({ error: 'unauthorized', reason: v.reason }, 401)
+        if (!v.ok) {
+          deps.log(`webapp: auth fail reason=${v.reason} keys=[${initData ? [...new URLSearchParams(initData).keys()].sort().join(',') : 'EMPTY'}]`)
+          return json({ error: 'unauthorized', reason: v.reason }, 401)
+        }
         if (!deps.isAllowed(v.userId!)) { deps.log(`webapp: denied user ${v.userId} (not in allowlist)`); return json({ error: 'forbidden' }, 403) }
       }
       try {
