@@ -2788,7 +2788,39 @@ function extractCostReadout(raw: string): string | null {
 // /cost (a modal) and /context (inline) are read-only readouts, but typed while Claude is
 // working they just queue — so doReadout gates on the working state and confirms before
 // interrupting; idle, it runs straight away.
-async function doReadout(ctx: Context, kind: 'cost' | 'context'): Promise<void> {
+// /usage opens a full-screen usage dashboard (5h/7d limits + resets). Injected via runReadout, the
+// rendered screen is captured and relayed here, then Esc'd out. Anchor on the `/usage` echo when
+// present; keep content lines (alnum/%), drop box-drawing/bars and the input/statusline footer.
+function extractUsageReadout(raw: string): string | null {
+  const lines = raw.split('\n').map(l => stripAnsi(l).replace(/\s+$/, ''))
+  // The dashboard is a full-screen tabbed view ("Settings Status Config Usage Stats") that overwrites
+  // the input line, so the `/usage` echo isn't in the capture — anchor on the tab header instead, which
+  // also excludes our own scrollback above it. Fall back to the Session/cost anchors.
+  let start = lines.findLastIndex(l => /Settings\s+Status\s+Config\s+Usage\s+Stats/i.test(l))
+  if (start >= 0) start++; else start = lines.findLastIndex(l => /^\s*(Session|Total cost:)/i.test(l))
+  if (start < 0) return null
+  let body = lines.slice(start)
+  // Drop the advice paragraphs / skills+subagents tables / credits / footer chrome below the limits.
+  const end = body.findIndex(l => /What's contributing|Esc to cancel|Usage credits|^\s*[dw] to (day|week)/i.test(l))
+  if (end >= 0) body = body.slice(0, end)
+  // Drop the verbose per-model token breakdown (wraps badly on a phone).
+  const mStart = body.findIndex(l => /Usage by model:/i.test(l))
+  const mEnd = mStart >= 0 ? body.findIndex((l, i) => i > mStart && /Current session/i.test(l)) : -1
+  if (mStart >= 0 && mEnd > mStart) body = [...body.slice(0, mStart), ...body.slice(mEnd)]
+  // Compress the wide "█▌                3% used" limit bars; collapse alignment padding; drop blanks.
+  body = body.flatMap(l => {
+    const used = l.match(/(\d+)%\s*used/)
+    if (used && /[█▉▊▋▌▍▎▏░▒▓▰▱]/.test(l)) {
+      const f = Math.round(Math.max(0, Math.min(100, +used[1])) / 10)
+      return ['▰'.repeat(f) + '▱'.repeat(10 - f) + ` ${used[1]}% used`]
+    }
+    const t = l.replace(/ {3,}/g, ' ').trimEnd()
+    return t.trim() ? [t] : []
+  })
+  return stripCommonIndent(body).trim() || null
+}
+
+async function doReadout(ctx: Context, kind: 'cost' | 'context' | 'usage'): Promise<void> {
   if (!dmCommandGate(ctx)) return
   const t = await commandTarget(ctx)
   if (!t) return
@@ -2803,9 +2835,9 @@ async function doReadout(ctx: Context, kind: 'cost' | 'context'): Promise<void> 
 
 // Inject the command, capture + relay its real output (chunked), then return to the prompt. Acts on
 // the target session (topic mode) or the focused one; off-focus there's no watcher to pause.
-async function runReadout(t: CommandTarget, chatId: string, kind: 'cost' | 'context'): Promise<void> {
+async function runReadout(t: CommandTarget, chatId: string, kind: 'cost' | 'context' | 'usage'): Promise<void> {
   const paneId = t.paneId
-  const cmd = kind === 'cost' ? '/cost' : '/context'
+  const cmd = kind === 'cost' ? '/cost' : kind === 'usage' ? '/usage' : '/context'
   const drive = async () => {
     // DON'T resize the window. The old grow-to-80 (resize → capture → restore) fired a SIGWINCH on a
     // pane the user may be watching, and Claude's TUI stacks its "────" section dividers down the
@@ -2826,10 +2858,10 @@ async function runReadout(t: CommandTarget, chatId: string, kind: 'cost' | 'cont
     return buf
   }
   const raw = t.isFocused && t.watcher ? await t.watcher.withInjection(drive) : await drive()
-  const out = kind === 'cost' ? extractCostReadout(raw) : extractContextReadout(raw)
+  const out = kind === 'cost' ? extractCostReadout(raw) : kind === 'usage' ? extractUsageReadout(raw) : extractContextReadout(raw)
   const extra = threadExtra(t, { parse_mode: 'HTML' })
   if (!out) { await bot.api.sendMessage(chatId, `Could not read /${kind} output.`, threadExtra(t)).catch(() => {}); return }
-  const title = kind === 'cost' ? '📊 <b>Cost</b>' : '📐 <b>Context</b>'
+  const title = kind === 'cost' ? '📊 <b>Cost</b>' : kind === 'usage' ? '📈 <b>Usage</b>' : '📐 <b>Context</b>'
   const limit = Math.max(1, Math.min(loadAccess().textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT))
   for (const c of chunkHtml(`${title}\n<pre>${escapeHtml(out)}</pre>`, limit)) {
     await bot.api.sendMessage(chatId, c, extra).catch(() => {})
@@ -3446,6 +3478,7 @@ bot.command('claim', async ctx => {
 // /cost, /context relay session visibility info. (/session is the registry — below.)
 bot.command('cost', ctx => doReadout(ctx, 'cost'))
 bot.command('context', ctx => doReadout(ctx, 'context'))
+bot.command('usage', ctx => doReadout(ctx, 'usage'))   // capture /usage's dashboard → relay here, Esc the screen (else it sticks)
 
 // Trim a captured pane tail down to its content: strip ANSI, drop the trailing
 // input-box / footer chrome and surrounding blanks, and keep the last `maxLines`.
@@ -7342,6 +7375,7 @@ void (async () => {
               { command: 'rewind', description: 'Open the checkpoint picker (undo a turn\'s changes)' },
               { command: 'cost', description: 'Show the session cost readout' },
               { command: 'context', description: 'Show the token-context usage' },
+              { command: 'usage', description: 'Show the 5h/7d usage limits' },
               { command: 'diff', description: 'Show the session\'s uncommitted changes' },
               { command: 'terminal', description: 'Dump the last N lines of the terminal (default 40)' },
               { command: 'compact', description: 'Compact the conversation to free up context' },
