@@ -27,7 +27,7 @@ export interface WebappDeps {
   // layer (no daemon internals imported); each wraps a reused daemon function. All optional —
   // missing dep ⇒ the endpoint 404s and that tab just stays empty. settings WRITES gate on canWrite.
   readSettings?: () => Promise<SettingsView> | SettingsView          // current prefs/state for the Settings tab
-  setSetting?: (key: string, value: unknown) => Promise<string | null> | string | null   // apply one change; returns an error string or null on ok
+  setSetting?: (userId: string, key: string, value: unknown) => Promise<string | null> | string | null   // apply one change (userId = toggling user, for any notice routing); returns an error string or null on ok
   readUsage?: () => Promise<UsageView> | UsageView                   // context %/cost/tokens/limits/budget for the Usage tab
   readDiff?: () => Promise<DiffView> | DiffView                      // focused session's working-tree diff (does NOT post to Telegram)
 }
@@ -190,7 +190,7 @@ async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: strin
     const body = await req.json().catch(() => null) as { key?: unknown; value?: unknown } | null
     if (!body || typeof body.key !== 'string') return json({ error: 'bad body' }, 400)
     deps.log(`webapp: setting ${body.key}=${JSON.stringify(body.value)} user=${userId}`)
-    const err = await deps.setSetting(body.key, body.value)
+    const err = await deps.setSetting(userId, body.key, body.value)
     return err ? json({ error: err }, 400) : json({ ok: true })
   }
 

@@ -730,7 +730,7 @@ async function sendAgentText(chats: string[], text: string, threadId?: number): 
     // and work in DM + topics. One raw call per chat — no chunking (no documented length cap). ANY
     // failure (older Telegram, malformed markdown, network) falls back to the HTML/chunk path so the
     // reply still lands; flag-off behavior is the HTML path unchanged.
-    if (access.richMessages) {
+    if (access.richMessages && access.renderMarkdown !== false) {
       try { await sendRichMessage(TOKEN!, chat_id, toInputRichMessage(text), { messageThreadId: threadId }); continue }
       catch (e) { process.stderr.write(`daemon: rich message send failed, falling back to HTML: ${e}\n`) }
     }
@@ -7225,10 +7225,10 @@ async function webappReadSettings(): Promise<WebappSettingsView> {
 }
 // Apply one settings change from the Mini App. Returns an error string, or null on success. Only the
 // safe pref-based toggles are writable; anything else is rejected (mode/model/effort are read-only).
-function webappSetSetting(key: string, value: unknown): string | null {
+function webappSetSetting(userId: string, key: string, value: unknown): string | null {
   const truthy = (v: unknown) => v === true || v === 'on' || v === 1 || v === '1'
   switch (key) {
-    case 'voice': setVoiceMode(truthy(value), noticeChats()[0] ?? ''); return null
+    case 'voice': setVoiceMode(truthy(value), userId); return null   // notice DMs the toggling user (not the group)
     case 'mcp': { if (truthy(value) !== mcpEnabled()) toggleMcp(); return null }
     case 'sessionPin': {
       const a = loadAccess(); a.sessionPin = truthy(value); saveAccess(a)
