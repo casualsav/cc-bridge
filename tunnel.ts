@@ -127,3 +127,28 @@ export function startTunnel(opts: {
   launch()
   return { url: () => url, stop: () => { stopped = true; try { proc?.kill() } catch {} } }
 }
+
+// ── Tailscale Funnel (alternative public-URL backend) ────────────────────────────────────────────
+// Unlike cloudflared's per-run ephemeral URL, Funnel gives a STABLE public HTTPS host
+// (https://<machine>.<tailnet>.ts.net) with no custom domain — so it can be registered as the
+// BotFather Main Mini App URL, which is what lets /files open INSIDE a group/topic (the in-group deep
+// link can only target a fixed, pre-registered URL; cloudflared's rotates, hence DM-only). The funnel
+// is established once at install (`tailscale funnel --bg <port>`, persisted by tailscaled across
+// restarts), so the daemon — running unprivileged — only READS the assigned URL here and never needs
+// root. Returns null (with a diagnostic) if Tailscale isn't up. See docs/files-mini-app.md §3.
+export async function tailscaleFunnelUrl(port: number, log: (m: string) => void): Promise<string | null> {
+  const bin = which('tailscale')
+  if (!bin) { log('tunnel: tailscale not on PATH — set TELEGRAM_WEBAPP_PUBLIC_URL to your ts.net URL, or use cloudflared'); return null }
+  const sh = async (args: string[]): Promise<string> => {
+    const p = spawn([bin, ...args], { stdout: 'pipe', stderr: 'pipe' })
+    const [out] = await Promise.all([new Response(p.stdout).text(), p.exited])
+    return out
+  }
+  let host = ''
+  try { host = String(JSON.parse(await sh(['status', '--json']))?.Self?.DNSName ?? '').replace(/\.$/, '') } catch {}
+  if (!host) { log('tunnel: tailscale is not up (no MagicDNS name) — run `tailscale up`, then restart'); return null }
+  // Best-effort: warn (don't fail) if Funnel isn't actually serving our port — the URL is still
+  // correct, the one-time `tailscale funnel --bg <port>` just hasn't been run.
+  try { if (!(await sh(['funnel', 'status'])).includes(`:${port}`)) log(`tunnel: WARNING — \`tailscale funnel\` isn't serving port ${port}; run \`tailscale funnel --bg ${port}\``) } catch {}
+  return `https://${host}`
+}

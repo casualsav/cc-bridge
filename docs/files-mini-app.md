@@ -92,8 +92,10 @@ All endpoints require valid initData; all resolve+canonicalize paths and refuse 
 ## 6. Config (opt-in; off by default)
 In `~/.claude/channels/telegram/.env` / `access.json`:
 - `WEBAPP_ENABLED=true|false` (default false — adds a network surface, so explicit opt-in).
-- `WEBAPP_TUNNEL=cloudflared|tailscale|none` (**default `cloudflared`** = zero-config quick tunnel;
-  `tailscale` = Serve/Funnel; `none` = use `WEBAPP_PUBLIC_URL`).
+- `WEBAPP_TUNNEL=cloudflared|tailscale|none` (env **default `cloudflared`** = zero-config quick tunnel,
+  but its URL rotates each run → **DM-only**; **`tailscale`** = a stable Funnel `*.ts.net` URL the daemon
+  reads from `tailscale status` (funnel set up once at install via `tailscale funnel --bg <port>`) → works
+  **in-group** and is the **recommended install pick**; `none` = use `WEBAPP_PUBLIC_URL`).
 - `WEBAPP_PUBLIC_URL=https://…` (stable domain / named tunnel; overrides cloudflared).
 - `WEBAPP_PORT=…` (localhost bind port; default e.g. 8787).
 - `WEBAPP_WRITE=true|false` (allow edits; default false → read-only explorer until enabled).
@@ -122,6 +124,13 @@ In `~/.claude/channels/telegram/.env` / `access.json`:
 1. ~~**Tunnel**: bundle `cloudflared` or require a domain?~~ **DECIDED (2026-06-15): bundled cloudflared
    quick tunnel** (zero-config, ephemeral URL injected into the button). Tailscale Serve/Funnel + a
    user-provided `WEBAPP_PUBLIC_URL` kept as documented alternatives.
+   **UPDATE (2026-06-15): install now offers three options, with Tailscale Funnel as the recommended
+   default** — `cloudflared` (zero-config but **DM-only**, since its rotating URL can't be registered as
+   the BotFather Main Mini App), **`tailscale` Funnel** (free, stable `*.ts.net`, no domain → in-group),
+   or a custom domain via `WEBAPP_PUBLIC_URL` (in-group, fully self-owned). `WEBAPP_TUNNEL=tailscale` is
+   implemented in `tunnel.ts` (`tailscaleFunnelUrl`): the unprivileged daemon only *reads* the URL; the
+   funnel is established once during install. The env-level default stays `cloudflared` so enabling the
+   webapp by hand (no Tailscale present) still works.
 2. ~~**Editing default**: in-app write vs ask-Claude?~~ **DECIDED: chat-based editing, NO in-app editor.**
    - **Small files (≤4096 chars):** bot posts the current contents in a markdown code block (Telegram's
      native tap-to-copy) + a `force_reply`; the user pastes, edits in the reply box, and sends → write.

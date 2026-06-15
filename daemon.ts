@@ -66,7 +66,7 @@ import {
   setPaneRestarting, isPaneRestarting, releasePaneSession, reopenSessionTopic,
 } from './topic-runtime.ts'
 import { startWebapp } from './webapp.ts'
-import { startTunnel, ensureCloudflared, type Tunnel } from './tunnel.ts'
+import { startTunnel, ensureCloudflared, tailscaleFunnelUrl, type Tunnel } from './tunnel.ts'
 import {
   MAX_CHUNK_LIMIT, MAX_ATTACHMENT_BYTES, assertAllowedChat, resolveChatId, resolveTarget,
   assertSendable, chunk, coerceReaction,
@@ -7168,7 +7168,8 @@ const WEBAPP_PORT = Number(process.env.TELEGRAM_WEBAPP_PORT) || (8787 + (Number.
 const WEBAPP_TUNNEL = (process.env.TELEGRAM_WEBAPP_TUNNEL ?? 'cloudflared').toLowerCase()
 const WEBAPP_PUBLIC_URL = (process.env.TELEGRAM_WEBAPP_PUBLIC_URL ?? '').replace(/\/+$/, '')
 let filesTunnel: Tunnel | null = null
-const filesPublicUrl = (): string | null => WEBAPP_PUBLIC_URL || filesTunnel?.url() || null
+let filesFixedUrl: string | null = WEBAPP_PUBLIC_URL || null   // custom domain, or a resolved tailscale-funnel URL — both stable
+const filesPublicUrl = (): string | null => filesFixedUrl || filesTunnel?.url() || null
 const wlog = (m: string) => process.stderr.write(`daemon: ${m}\n`)
 // Deep-link launch tokens for the in-topic opener (t.me/<bot>?startapp=<token>): a filesystem path
 // won't fit the 64-char startapp limit, so /files mints a short token → cwd here and the Mini App
@@ -7192,6 +7193,13 @@ async function startFilesWebapp(): Promise<void> {
       isAllowed: uid => loadAccess().allowFrom.includes(uid), log: wlog, resolveStart: resolveStartToken })
   } catch (e) { wlog(`webapp: failed to start: ${e}`); return }
   if (WEBAPP_PUBLIC_URL) { wlog(`webapp: public url ${WEBAPP_PUBLIC_URL}`); return }
+  if (WEBAPP_TUNNEL === 'tailscale') {
+    // Stable https://<host>.ts.net via Tailscale Funnel — registrable in BotFather, so /files opens
+    // in-group (cloudflared's URL rotates → DM-only). Funnel is set up once at install; we just read it.
+    const url = await tailscaleFunnelUrl(WEBAPP_PORT, wlog)
+    if (url) { filesFixedUrl = url; wlog(`webapp: tailscale funnel ${url}`) }
+    return
+  }
   if (WEBAPP_TUNNEL === 'cloudflared') {
     const bin = await ensureCloudflared(STATE_DIR, wlog)
     if (bin) filesTunnel = startTunnel({ port: WEBAPP_PORT, bin, log: wlog })

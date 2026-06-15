@@ -153,6 +153,25 @@ keep `access.json`'s pairing/group/prefs state, only adding the interviewed Tele
    Telegram (/settings → 👤 Accounts → 🚀, or `/account`) — the one-time login link relays into
    the chat, so they never need the terminal for it. Accounts can also be added later with
    `/account add <name>`.
+6. **Files Mini App?** (default off.) A built-in file explorer opened from Telegram — browse,
+   preview, and download files on the session's machine, right inside the chat. It needs a public
+   HTTPS URL to reach the local server; how that URL is obtained is the choice:
+   - **Tailscale Funnel** — *recommended; free, and opens inside group chats.* Gives a stable public
+     URL with no domain of your own, so the explorer opens in-place in your group/topic. One-time
+     setup, mostly automated below: install Tailscale, a quick browser login, flip Funnel on. Best
+     balance of zero cost and full functionality.
+   - **cloudflared quick tunnel** — *zero setup.* The daemon bundles it; nothing to install or sign
+     up for. Trade-off: its URL changes on every restart, so the explorer can only open in a private
+     **DM with the bot**, not in the group/topic. Good for single-session use, or if you're fine
+     opening files in the DM with the bot rather than in the group.
+   - **Custom domain** — *most control/privacy.* If you already own a domain, point it at the app via
+     your own reverse proxy for a stable, fully self-owned URL — nothing routed through a third-party
+     tunnel. Also opens in-group.
+   - **off** — no file explorer.
+
+   The explorer is read-only (browse / preview / download); edits are done chat-side. The Funnel and
+   custom-domain options need one extra step — registering the URL as the bot's **Main Mini App** in
+   BotFather — handled in "If the Files Mini App is enabled" below.
 
 Markdown rendering is **always on** — Claude's replies are rendered as Telegram formatting; it
 isn't a prompt.
@@ -170,6 +189,10 @@ TELEGRAM_WHISPER_COMPUTE=int8               # local only
 TELEGRAM_WHISPER_PYTHON=<venv>/bin/python   # local only — written by the provisioning step below
 GROQ_API_KEY=<key>                          # groq only
 OPENAI_API_KEY=<key>                        # openai only
+# Files Mini App — only if enabled (Q6):
+TELEGRAM_WEBAPP_ENABLED=1                    # turns the file explorer on
+TELEGRAM_WEBAPP_TUNNEL=tailscale            # tailscale = in-group · cloudflared = DM-only (default) · none = use PUBLIC_URL
+TELEGRAM_WEBAPP_PUBLIC_URL=https://files.example.com   # custom-domain option only (overrides the tunnel)
 ```
 
 **Write `~/.claude/channels/telegram/access.json`** locked to their ID (omit this file and
@@ -226,6 +249,45 @@ and gets the prereq sorted. Set it up yourself, in order:
    minutes — it's one-time and unattended, and it's the whole point: everything's ready before the
    user's first note. (Verify with a real transcription after Step 3's restart using the bundled
    helper if you want: `"$VENV/bin/python" "$(ls -d ~/.claude/plugins/cache/pocket-claude/telegram/*/ | sort -V | tail -1)transcribe_local.py" <some.oga> <model>`.)
+
+**If the Files Mini App is enabled (Q6): set up reachability now.** The webapp binds
+`127.0.0.1:<port>` where `<port>` = `8787` + the bridge instance id (so `8787` for the default
+instance, `8788` for a second one). Follow the path the user chose:
+
+- **cloudflared (DM-only):** nothing to provision — the daemon auto-fetches the `cloudflared` binary
+  and brings up the quick tunnel on first start. Just ensure `.env` has `TELEGRAM_WEBAPP_ENABLED=1`
+  (leave `TELEGRAM_WEBAPP_TUNNEL` unset / `cloudflared`). No BotFather step — `/files` opens in a
+  private DM with the bot.
+
+- **Tailscale Funnel (in-group):** a free, stable `*.ts.net` URL. In order:
+  1. **Install Tailscale** (skip if `tailscale version` already works). Linux:
+     `curl -fsSL https://tailscale.com/install.sh | sh`. macOS: `brew install tailscale` or the App
+     Store app. Windows: the official installer.
+  2. **Log in:** `sudo tailscale up --operator=$(whoami)` — it prints a `https://login.tailscale.com/…`
+     URL; **relay that to the user** to approve in any browser. This is the only login, and it does
+     **not** require installing anything on their phone. `--operator` lets later `tailscale` commands
+     run without sudo.
+  3. **Turn Funnel on for the port:** `tailscale funnel --bg <port>` (prefix `sudo` if it reports a
+     permissions error). The first time, Tailscale may print *"Funnel is not enabled on your tailnet"*
+     with a `https://login.tailscale.com/f/funnel?node=…` link — **relay that to the user** to click
+     once: it's a one-time owner toggle on a web page in the admin console, **not** a device install.
+     Then re-run. Confirm with `tailscale funnel status` (shows `https://<host>.<tailnet>.ts.net …
+     proxy http://127.0.0.1:<port>`).
+  4. **Set `.env`:** `TELEGRAM_WEBAPP_ENABLED=1` and `TELEGRAM_WEBAPP_TUNNEL=tailscale`. The daemon
+     reads the `*.ts.net` URL from `tailscale status` itself — leave `TELEGRAM_WEBAPP_PUBLIC_URL` unset.
+  5. **Register it in BotFather** (shared step below), URL = the `https://<host>.<tailnet>.ts.net`
+     from step 3.
+
+- **Custom domain (in-group):** the user fronts the local port with their own HTTPS reverse proxy
+  (nginx / Caddy / a Cloudflare *named* tunnel) → `http://127.0.0.1:<port>`. Then set `.env`:
+  `TELEGRAM_WEBAPP_ENABLED=1` and `TELEGRAM_WEBAPP_PUBLIC_URL=https://<their-domain>`. Register that
+  domain in BotFather (below).
+
+**Shared BotFather step (Funnel + custom domain only — this is what enables the in-group launch):**
+the in-group `/files` button opens the bot's **Main Mini App**, whose URL is set once in BotFather.
+Tell the user: **@BotFather → `/mybots` → pick the bot → Bot Settings → Configure Mini App →
+Edit/Enable**, and set the URL to the public URL from above. (cloudflared skips this — its URL rotates
+each restart, so it can't be registered there, which is exactly why it's DM-only.)
 
 ## 2. Install the plugin + wire the hooks/convention
 - In `~/.claude/settings.json` add the marketplace, enable the plugin, and add the
