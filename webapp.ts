@@ -23,7 +23,28 @@ export interface WebappDeps {
   canWrite?: boolean                       // enable write endpoints (TELEGRAM_WEBAPP_WRITE); default false → read-only
   trashDir?: string                        // /api/rm moves deletions here (recoverable); required when canWrite
   maxWriteBytes?: number                   // /api/write size cap (default 2 MiB)
+  // ---- Console tabs (Settings / Usage / Diff). Injected by the daemon so this stays a thin HTTP
+  // layer (no daemon internals imported); each wraps a reused daemon function. All optional —
+  // missing dep ⇒ the endpoint 404s and that tab just stays empty. settings WRITES gate on canWrite.
+  readSettings?: () => Promise<SettingsView> | SettingsView          // current prefs/state for the Settings tab
+  setSetting?: (key: string, value: unknown) => Promise<string | null> | string | null   // apply one change; returns an error string or null on ok
+  readUsage?: () => Promise<UsageView> | UsageView                   // context %/cost/tokens/limits/budget for the Usage tab
+  readDiff?: () => Promise<DiffView> | DiffView                      // focused session's working-tree diff (does NOT post to Telegram)
 }
+
+// Settings tab payload: each toggle is {value, editable} so the SPA renders the live state and only
+// shows mutation controls for the writable ones (mode/model/effort are read-only here — they drive
+// the tmux pane). `write` mirrors canWrite (server-side mutation gate).
+export interface SettingsView {
+  write: boolean
+  settings: Record<string, { value: unknown; editable: boolean; options?: string[]; label?: string }>
+}
+export interface UsageView {
+  ctxPct: number | null; tokens: string | null; cost: string | null
+  h5: { pct: number; reset: string } | null; d7: { pct: number; reset: string } | null
+  budget: { spent: number; cap: number | null } | null
+}
+export interface DiffView { clean: boolean; stat: string; diff: string; untracked: string[]; cwd: string | null; error?: string }
 
 export interface InitDataResult { ok: boolean; userId?: string; reason?: string }
 
@@ -145,6 +166,32 @@ async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: strin
   if (url.pathname === '/api/resolve') {
     const cwd = deps.resolveStart?.(url.searchParams.get('token') || '') ?? null
     return cwd ? json({ cwd }) : json({ error: 'unknown or expired token' }, 404)
+  }
+
+  // ---- Console reads (auth-gated like every /api/*; no canWrite needed) ----
+  if (url.pathname === '/api/settings') {
+    if (!deps.readSettings) return json({ error: 'unavailable' }, 404)
+    return json(await deps.readSettings())
+  }
+  if (url.pathname === '/api/usage') {
+    if (!deps.readUsage) return json({ error: 'unavailable' }, 404)
+    return json(await deps.readUsage())
+  }
+  if (url.pathname === '/api/diff') {
+    if (!deps.readDiff) return json({ error: 'unavailable' }, 404)
+    return json(await deps.readDiff())
+  }
+
+  // ---- Settings mutation (POST; gated by canWrite, same as the file writes) ----
+  if (url.pathname === '/api/settings/set') {
+    if (!deps.canWrite) return json({ error: 'read-only', reason: 'editing disabled (set TELEGRAM_WEBAPP_WRITE=1)' }, 403)
+    if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405)
+    if (!deps.setSetting) return json({ error: 'unavailable' }, 404)
+    const body = await req.json().catch(() => null) as { key?: unknown; value?: unknown } | null
+    if (!body || typeof body.key !== 'string') return json({ error: 'bad body' }, 400)
+    deps.log(`webapp: setting ${body.key}=${JSON.stringify(body.value)} user=${userId}`)
+    const err = await deps.setSetting(body.key, body.value)
+    return err ? json({ error: err }, 400) : json({ ok: true })
   }
 
   // ---- Write endpoints (POST; gated by canWrite = TELEGRAM_WEBAPP_WRITE, default off) ----

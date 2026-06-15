@@ -65,7 +65,7 @@ import {
   stampPaneSession, topicBranchCache, generalAnchorLost,
   setPaneRestarting, isPaneRestarting, releasePaneSession, reopenSessionTopic,
 } from './topic-runtime.ts'
-import { startWebapp } from './webapp.ts'
+import { startWebapp, type SettingsView as WebappSettingsView, type UsageView as WebappUsageView, type DiffView as WebappDiffView } from './webapp.ts'
 import { startTunnel, ensureCloudflared, tailscaleFunnelUrl, type Tunnel } from './tunnel.ts'
 import { sendRichMessage, toInputRichMessage } from './richmsg.ts'
 import {
@@ -7199,12 +7199,91 @@ const resolveStartToken = (tok: string): string | null => {
   return e && e.exp > Date.now() ? e.cwd : null
 }
 
+// ---- Console tabs (Settings / Usage / Diff) — deps injected into the webapp, each wrapping a reused
+// daemon function so webapp.ts stays a thin HTTP layer. Reads pull from loadAccess() + the focused
+// pane's statusline capture; mutations reuse the same toggles the /settings panels use. ----
+
+// Settings the Mini App shows + (when WEBAPP_WRITE) lets you flip. Pref-based toggles are read+write;
+// mode/model/effort drive the tmux pane (async/slower) so they're read-only here.
+async function webappReadSettings(): Promise<WebappSettingsView> {
+  const a = loadAccess()
+  const cap = focus.activePaneId ? await capturePane(focus.activePaneId).catch(() => '') : ''
+  const sl = cap ? parseStatusline(cap) : null
+  const von = !!a.tts?.mode && a.tts.mode !== 'off'
+  return {
+    write: WEBAPP_WRITE,
+    settings: {
+      voice: { value: von, editable: true, label: von ? `on · ${a.tts!.engine}` : 'off' },
+      mcp: { value: mcpEnabled(), editable: true, label: 'new sessions only' },
+      sessionPin: { value: a.sessionPin !== false, editable: true },
+      stream: { value: replyMode(), editable: true, options: [...STREAM_ORDER] },
+      mode: { value: cap ? detectCurrentMode(cap) : null, editable: false, label: 'drives the pane (chat-side)' },
+      model: { value: sl?.model ?? null, editable: false },
+      effort: { value: sl?.effort ?? null, editable: false },
+    },
+  }
+}
+// Apply one settings change from the Mini App. Returns an error string, or null on success. Only the
+// safe pref-based toggles are writable; anything else is rejected (mode/model/effort are read-only).
+function webappSetSetting(key: string, value: unknown): string | null {
+  const truthy = (v: unknown) => v === true || v === 'on' || v === 1 || v === '1'
+  switch (key) {
+    case 'voice': setVoiceMode(truthy(value), noticeChats()[0] ?? ''); return null
+    case 'mcp': { if (truthy(value) !== mcpEnabled()) toggleMcp(); return null }
+    case 'sessionPin': {
+      const a = loadAccess(); a.sessionPin = truthy(value); saveAccess(a)
+      if (a.sessionPin) void updateSessionPin(); else void removeSessionPins()
+      return null
+    }
+    case 'stream': {
+      if (!(STREAM_ORDER as readonly string[]).includes(String(value))) return 'bad stream mode'
+      const a = loadAccess(); a.replyMode = String(value) as Access['replyMode']; saveAccess(a)
+      void respawnTerminalMirror()
+      return null
+    }
+    default: return 'unknown or read-only setting'
+  }
+}
+// Usage dashboard: context %/tokens/cost + 5h/7d windows from the focused pane's statusline, plus
+// today's budget spend vs the cap (same numbers /budget and the pin show).
+async function webappReadUsage(): Promise<WebappUsageView> {
+  const cap = focus.activePaneId ? await capturePane(focus.activePaneId).catch(() => '') : ''
+  const sl = cap ? parseStatusline(cap) : null
+  const dailyCap = loadAccess().budgetDaily ?? null
+  const spent = budgetSpent(readBudgetState(new Date().toISOString().slice(0, 10)))
+  return {
+    ctxPct: sl?.ctxPct ?? null, tokens: sl?.tokens ?? null, cost: sl?.cost ?? null,
+    h5: sl?.h5 ?? null, d7: sl?.d7 ?? null,
+    budget: { spent, cap: dailyCap },
+  }
+}
+// Working-tree diff for the focused session, read (not posted) — same git logic as sendDiff()/the
+// /diff command: porcelain → clean check, --stat summary, full patch (capped), untracked names.
+const WEBAPP_DIFF_CAP = 16_000
+async function webappReadDiff(): Promise<WebappDiffView> {
+  const cwd = focus.activePaneId ? await paneCwd(focus.activePaneId).catch(() => null) : null
+  if (!cwd) return { clean: true, stat: '', diff: '', untracked: [], cwd: null, error: 'No focused session.' }
+  try {
+    const { stdout: por } = await exec('git', ['-C', cwd, 'status', '--porcelain'], { timeout: 4000 })
+    if (!por.trim()) return { clean: true, stat: '', diff: '', untracked: [], cwd }
+    const { stdout: stat } = await exec('git', ['-C', cwd, 'diff', 'HEAD', '--stat'], { timeout: 6000 }).catch(() => ({ stdout: '' }))
+    let { stdout: diff } = await exec('git', ['-C', cwd, 'diff', 'HEAD'], { timeout: 10000, maxBuffer: 32 * 1024 * 1024 }).catch(() => ({ stdout: '' }))
+    const untracked = por.split('\n').filter(l => l.startsWith('??')).map(l => l.slice(3).trim()).filter(Boolean)
+    if (diff.length > WEBAPP_DIFF_CAP) diff = diff.slice(0, WEBAPP_DIFF_CAP) + '\n… (truncated — run `git diff HEAD` for the full patch)'
+    return { clean: false, stat: stat.trim(), diff, untracked, cwd }
+  } catch (e) {
+    const msg = String((e as { stderr?: string })?.stderr ?? (e as Error)?.message ?? e)
+    return { clean: true, stat: '', diff: '', untracked: [], cwd, error: /not a git repository/i.test(msg) ? 'Not a git repository.' : msg.slice(0, 600) }
+  }
+}
+
 async function startFilesWebapp(): Promise<void> {
   if (!WEBAPP_ENABLED) return
   try {
     startWebapp({ token: TOKEN!, port: WEBAPP_PORT, staticDir: join(import.meta.dir, 'webapp'),
       isAllowed: uid => loadAccess().allowFrom.includes(uid), log: wlog, resolveStart: resolveStartToken,
-      canWrite: WEBAPP_WRITE, trashDir: WEBAPP_TRASH })
+      canWrite: WEBAPP_WRITE, trashDir: WEBAPP_TRASH,
+      readSettings: webappReadSettings, setSetting: webappSetSetting, readUsage: webappReadUsage, readDiff: webappReadDiff })
   } catch (e) { wlog(`webapp: failed to start: ${e}`); return }
   if (WEBAPP_PUBLIC_URL) { wlog(`webapp: public url ${WEBAPP_PUBLIC_URL}`); return }
   if (WEBAPP_TUNNEL === 'tailscale') {

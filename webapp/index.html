@@ -41,18 +41,56 @@
   .err.ok { background: #2e7d32; }
   button.rowbtn { background: transparent; border: none; color: var(--hint); font-size: 18px; line-height: 1; padding: 2px 8px; cursor: pointer; }
   textarea#vedit-area { margin: 0; padding: 12px; border: none; outline: none; flex: 1; width: 100%; resize: none; background: var(--bg); color: var(--text); font: 13px/1.45 ui-monospace, Menlo, Consolas, monospace; }
+  /* Tab bar */
+  .tabs { display: flex; position: sticky; top: 0; z-index: 2; background: var(--bg); border-bottom: 1px solid var(--sec); }
+  .tabs button { flex: 1; padding: 11px 4px; border: none; background: transparent; color: var(--hint); font-size: 13px; cursor: pointer; border-bottom: 2px solid transparent; }
+  .tabs button.active { color: var(--text); border-bottom-color: var(--btn); }
+  .tab { display: none; }
+  .tab.show { display: block; }
+  /* Console (Settings / Usage / Diff) */
+  .panel { padding: 12px; }
+  .card { background: var(--sec); border-radius: 10px; padding: 12px 14px; margin-bottom: 10px; }
+  .card .k { color: var(--hint); font-size: 12px; }
+  .card .v { font-size: 16px; margin-top: 2px; word-break: break-word; }
+  .setrow { display: flex; align-items: center; gap: 10px; padding: 11px 0; border-bottom: 1px solid var(--sec); }
+  .setrow:last-child { border-bottom: none; }
+  .setrow .lbl { flex: 1; }
+  .setrow .lbl .sub { color: var(--hint); font-size: 12px; }
+  .setrow .ro { color: var(--hint); font-size: 13px; }
+  .toggle { padding: 6px 12px; border: none; border-radius: 8px; background: var(--btn); color: var(--btn-text); font-size: 13px; cursor: pointer; min-width: 56px; }
+  .toggle.off { background: var(--sec); color: var(--hint); box-shadow: inset 0 0 0 1px var(--hint); }
+  select.seg { padding: 6px 8px; border-radius: 8px; border: none; background: var(--bg); color: var(--text); font-size: 13px; box-shadow: inset 0 0 0 1px var(--sec); }
+  .bar { height: 8px; border-radius: 4px; background: var(--bg); overflow: hidden; margin-top: 6px; box-shadow: inset 0 0 0 1px var(--sec); }
+  .bar > span { display: block; height: 100%; background: var(--btn); }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  pre.diff { margin: 0; padding: 12px; overflow: auto; white-space: pre; font: 12px/1.4 ui-monospace, Menlo, Consolas, monospace; }
+  pre.diff .a { color: #6abe6a; } pre.diff .d { color: #e06c75; } pre.diff .h { color: var(--link); }
+  .diffstat { padding: 10px 12px; border-bottom: 1px solid var(--sec); font: 12px/1.4 ui-monospace, monospace; color: var(--hint); white-space: pre-wrap; }
 </style>
 </head>
 <body>
-<header>
-  <div class="crumbs" id="crumbs"></div>
-  <div class="search">
-    <input id="q" placeholder="find in this folder…" inputmode="search">
-    <button id="go">Find</button>
-  </div>
-</header>
+<nav class="tabs" id="tabs">
+  <button data-tab="files" class="active">📁 Files</button>
+  <button data-tab="settings">⚙️ Settings</button>
+  <button data-tab="usage">📊 Usage</button>
+  <button data-tab="diff">📄 Diff</button>
+</nav>
 <div class="err" id="err"></div>
-<ul id="list"></ul>
+
+<div class="tab show" id="tab-files">
+  <header>
+    <div class="crumbs" id="crumbs"></div>
+    <div class="search">
+      <input id="q" placeholder="find in this folder…" inputmode="search">
+      <button id="go">Find</button>
+    </div>
+  </header>
+  <ul id="list"></ul>
+</div>
+
+<div class="tab panel" id="tab-settings"></div>
+<div class="tab panel" id="tab-usage"></div>
+<div class="tab" id="tab-diff"></div>
 
 <div id="viewer">
   <div class="vhead">
@@ -248,6 +286,108 @@ async function find() {
 }
 $("go").onclick = find;
 $("q").addEventListener("keydown", e => { if (e.key === "Enter") find(); });
+
+// ---- Tabs (Files / Settings / Usage / Diff) ----
+// Files renders on boot; the console tabs lazy-load their data the first time they're opened and
+// re-fetch on every subsequent open (cheap, always-fresh). All reuse api()/writeOp()/showErr/showOk.
+let curTab = "files";
+async function showTab(name) {
+  curTab = name;
+  document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("active", b.dataset.tab === name));
+  document.querySelectorAll(".tab").forEach(t => t.classList.toggle("show", t.id === "tab-" + name));
+  if (name === "settings") renderSettings();
+  else if (name === "usage") renderUsage();
+  else if (name === "diff") renderDiff();
+}
+document.querySelectorAll("#tabs button").forEach(b => b.onclick = () => showTab(b.dataset.tab));
+
+const esc = s => String(s == null ? "" : s).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+
+// Settings: live values + (when write enabled) toggles/selects that POST then refresh in place.
+async function renderSettings() {
+  const el = $("tab-settings");
+  let d; try { d = await api("/api/settings"); } catch { el.innerHTML = '<div class="notice">Settings unavailable.</div>'; return; }
+  const W = !!d.write;
+  const meta = {
+    voice: { name: "🔊 Voice replies", bool: true },
+    mcp: { name: "🔌 MCP mode", bool: true },
+    sessionPin: { name: "📌 Pinned card", bool: true },
+    stream: { name: "💬 Stream", bool: false },
+    mode: { name: "🛠️ Mode", bool: false },
+    model: { name: "🤖 Model", bool: false },
+    effort: { name: "⚡ Effort", bool: false },
+  };
+  el.innerHTML = "";
+  const head = document.createElement("div");
+  head.className = "card"; head.innerHTML = '<div class="k">Channel</div><div class="v">' + (W ? "Editing enabled" : "Read-only — set TELEGRAM_WEBAPP_WRITE=1 to change") + "</div>";
+  el.appendChild(head);
+  const wrap = document.createElement("div"); wrap.className = "card";
+  for (const key in meta) {
+    const m = meta[key], s = d.settings[key]; if (!s) continue;
+    const editable = W && s.editable;
+    const r = document.createElement("div"); r.className = "setrow";
+    const lbl = document.createElement("div"); lbl.className = "lbl";
+    lbl.innerHTML = '<div>' + m.name + '</div>' + (s.label ? '<div class="sub">' + esc(s.label) + '</div>' : "");
+    r.appendChild(lbl);
+    if (m.bool) {
+      const on = !!s.value;
+      const btn = document.createElement("button");
+      btn.className = "toggle" + (on ? "" : " off"); btn.textContent = on ? "On" : "Off";
+      if (editable) btn.onclick = () => setSetting(key, !on); else btn.disabled = true;
+      r.appendChild(btn);
+    } else if (s.options && editable) {
+      const sel = document.createElement("select"); sel.className = "seg";
+      for (const o of s.options) { const op = document.createElement("option"); op.value = o; op.textContent = o; if (o === s.value) op.selected = true; sel.appendChild(op); }
+      sel.onchange = () => setSetting(key, sel.value);
+      r.appendChild(sel);
+    } else {
+      const ro = document.createElement("div"); ro.className = "ro"; ro.textContent = s.value == null ? "—" : String(s.value);
+      r.appendChild(ro);
+    }
+    wrap.appendChild(r);
+  }
+  el.appendChild(wrap);
+}
+async function setSetting(key, value) {
+  const d = await writeOp("/api/settings/set", { key, value });
+  if (d) { showOk("Updated"); renderSettings(); }
+}
+
+// Usage: context-% bar, cost, tokens, 5h/7d windows, today's budget.
+async function renderUsage() {
+  const el = $("tab-usage");
+  let d; try { d = await api("/api/usage"); } catch { el.innerHTML = '<div class="notice">Usage unavailable.</div>'; return; }
+  const card = (k, v, extra) => '<div class="card"><div class="k">' + k + '</div><div class="v">' + v + "</div>" + (extra || "") + "</div>";
+  const pctBar = p => p == null ? "" : '<div class="bar"><span style="width:' + Math.max(0, Math.min(100, p)) + '%"></span></div>';
+  const lim = w => w ? '<div class="card"><div class="k">' + w.name + '</div><div class="v">' + w.pct + '% <span style="color:var(--hint);font-size:13px">· resets in ' + esc(w.reset) + "</span></div>" + pctBar(w.pct) + "</div>" : "";
+  const b = d.budget;
+  let out = "";
+  out += card("Context used", (d.ctxPct == null ? "—" : d.ctxPct + "%"), pctBar(d.ctxPct));
+  out += '<div class="grid">' + card("Cost", d.cost || "—") + card("Tokens", esc(d.tokens) || "—") + "</div>";
+  out += lim(d.h5 && { ...d.h5, name: "5-hour limit" });
+  out += lim(d.d7 && { ...d.d7, name: "7-day limit" });
+  if (b) out += card("Budget today", "$" + b.spent.toFixed(2) + (b.cap ? " of $" + b.cap.toFixed(2) : " · no cap"), b.cap ? pctBar((b.spent / b.cap) * 100) : "");
+  el.innerHTML = out || '<div class="notice">No usage data — open from a focused session.</div>';
+  if (d.ctxPct == null && !d.cost && !d.tokens && !d.h5 && !d.d7) el.innerHTML = '<div class="notice">No statusline yet — open while a session is active.</div>' + el.innerHTML;
+}
+
+// Diff: focused session's working tree — --stat header, then the colorized patch.
+async function renderDiff() {
+  const el = $("tab-diff");
+  let d; try { d = await api("/api/diff"); } catch { el.innerHTML = '<div class="notice">Diff unavailable.</div>'; return; }
+  if (d.error && d.clean) { el.innerHTML = '<div class="notice">' + esc(d.error) + "</div>"; return; }
+  if (d.clean) { el.innerHTML = '<div class="notice">✨ Working tree clean' + (d.cwd ? "<br><span style=font-size:12px>" + esc(d.cwd) + "</span>" : "") + "</div>"; return; }
+  let html = "";
+  if (d.cwd) html += '<div class="diffstat">' + esc(d.cwd) + "</div>";
+  if (d.stat) html += '<div class="diffstat">' + esc(d.stat) + "</div>";
+  if (d.untracked && d.untracked.length) html += '<div class="diffstat">🆕 untracked: ' + d.untracked.map(esc).join(", ") + "</div>";
+  const lines = (d.diff || "").split("\n").map(l => {
+    const cls = l.startsWith("+") ? "a" : l.startsWith("-") ? "d" : (l.startsWith("@@") || l.startsWith("diff ")) ? "h" : "";
+    return cls ? '<span class="' + cls + '">' + esc(l) + "</span>" : esc(l);
+  }).join("\n");
+  html += '<pre class="diff">' + lines + "</pre>";
+  el.innerHTML = html;
+}
 
 // Launched two ways: a DM web_app button (folder in ?start=) or an in-topic deep link
 // (t.me/<bot>?startapp=<token> → token in initData.start_param, exchanged via /api/resolve).
