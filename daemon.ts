@@ -4814,14 +4814,14 @@ bot.command('files', async ctx => {
     await ctx.reply(`📂 <b>Files</b> — <code>${escapeHtml(cwd)}</code>`, { parse_mode: 'HTML', reply_markup: kb }).catch(() => {})
     return
   }
-  try {
-    await bot.api.sendMessage(String(ctx.from!.id), `📂 <b>Files</b> — <code>${escapeHtml(cwd)}</code>`, { parse_mode: 'HTML', reply_markup: kb })
-    await bot.api.sendMessage(String(ctx.chat!.id), '📂 Sent the Files button to our DM — tap it there (Telegram only allows Mini-App buttons in private chats).',
-      { ...(t.replyThread ? { message_thread_id: t.replyThread } : {}) }).catch(() => {})
-  } catch {
-    await bot.api.sendMessage(String(ctx.chat!.id), '⚠️ Couldn’t DM you the Files button — message me in a private chat first (send /start in our DM), then retry /files.',
-      { ...(t.replyThread ? { message_thread_id: t.replyThread } : {}) }).catch(() => {})
-  }
+  // In a group/topic, web_app buttons are disallowed (BUTTON_TYPE_INVALID), so launch via the bot's
+  // Main Mini App deep link (a normal url button), carrying a startapp token that /api/resolve maps
+  // back to this cwd. Requires the Main Mini App configured in BotFather (URL = WEBAPP_PUBLIC_URL).
+  if (!botUsername) { await bot.api.sendMessage(String(ctx.chat!.id), '📂 Starting up — try /files again in a moment.', { ...(t.replyThread ? { message_thread_id: t.replyThread } : {}) }).catch(() => {}); return }
+  const link = `https://t.me/${botUsername}?startapp=${mintStartToken(cwd)}`
+  await bot.api.sendMessage(String(ctx.chat!.id), `📂 <b>Files</b> — <code>${escapeHtml(cwd)}</code>`,
+    { parse_mode: 'HTML', reply_markup: new InlineKeyboard().url('📂 Open Files', link),
+      ...(t.replyThread ? { message_thread_id: t.replyThread } : {}) }).catch(e => wlog(`/files send failed: ${e}`))
 })
 
 // Inline-button handler for permission requests + mode cycling + prompt answers.
@@ -7170,12 +7170,26 @@ const WEBAPP_PUBLIC_URL = (process.env.TELEGRAM_WEBAPP_PUBLIC_URL ?? '').replace
 let filesTunnel: Tunnel | null = null
 const filesPublicUrl = (): string | null => WEBAPP_PUBLIC_URL || filesTunnel?.url() || null
 const wlog = (m: string) => process.stderr.write(`daemon: ${m}\n`)
+// Deep-link launch tokens for the in-topic opener (t.me/<bot>?startapp=<token>): a filesystem path
+// won't fit the 64-char startapp limit, so /files mints a short token → cwd here and the Mini App
+// exchanges it via /api/resolve. In-memory + 1h TTL; a daemon restart expires open links (re-run /files).
+const fileStartTokens = new Map<string, { cwd: string; exp: number }>()
+function mintStartToken(cwd: string): string {
+  for (const [k, v] of fileStartTokens) if (v.exp < Date.now()) fileStartTokens.delete(k)   // cheap GC
+  const tok = randomBytes(9).toString('base64url')
+  fileStartTokens.set(tok, { cwd, exp: Date.now() + 3600_000 })
+  return tok
+}
+const resolveStartToken = (tok: string): string | null => {
+  const e = fileStartTokens.get(tok)
+  return e && e.exp > Date.now() ? e.cwd : null
+}
 
 async function startFilesWebapp(): Promise<void> {
   if (!WEBAPP_ENABLED) return
   try {
     startWebapp({ token: TOKEN!, port: WEBAPP_PORT, staticDir: join(import.meta.dir, 'webapp'),
-      isAllowed: uid => loadAccess().allowFrom.includes(uid), log: wlog })
+      isAllowed: uid => loadAccess().allowFrom.includes(uid), log: wlog, resolveStart: resolveStartToken })
   } catch (e) { wlog(`webapp: failed to start: ${e}`); return }
   if (WEBAPP_PUBLIC_URL) { wlog(`webapp: public url ${WEBAPP_PUBLIC_URL}`); return }
   if (WEBAPP_TUNNEL === 'cloudflared') {

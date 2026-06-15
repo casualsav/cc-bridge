@@ -18,6 +18,7 @@ export interface WebappDeps {
   maxInitDataAgeSec?: number               // reject initData older than this (default 3600)
   maxReadBytes?: number                    // text read cap (default 512 KiB)
   maxFind?: number                         // find result cap (default 500)
+  resolveStart?: (token: string) => string | null   // map a deep-link startapp token → starting cwd
 }
 
 export interface InitDataResult { ok: boolean; userId?: string; reason?: string }
@@ -132,6 +133,14 @@ async function handleApi(url: URL, deps: WebappDeps): Promise<Response> {
       }
     }
     return json({ root, q, matches, capped: matches.length >= maxFind })
+  }
+
+  // Deep-link launch (t.me/<bot>?startapp=<token>): the SPA gets the token as initData.start_param and
+  // exchanges it here for the session's cwd (paths don't fit the 64-char startapp limit). Tokens are
+  // minted + held by the daemon (see resolveStart); unknown/expired → 404.
+  if (url.pathname === '/api/resolve') {
+    const cwd = deps.resolveStart?.(url.searchParams.get('token') || '') ?? null
+    return cwd ? json({ cwd }) : json({ error: 'unknown or expired token' }, 404)
   }
 
   return json({ error: 'unknown endpoint' }, 404)

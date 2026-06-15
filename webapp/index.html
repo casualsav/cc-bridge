@@ -158,8 +158,17 @@ async function find() {
 $("go").onclick = find;
 $("q").addEventListener("keydown", e => { if (e.key === "Enter") find(); });
 
+// Launched two ways: a DM web_app button (folder in ?start=) or an in-topic deep link
+// (t.me/<bot>?startapp=<token> → token in initData.start_param, exchanged via /api/resolve).
+async function boot() {
+  const sp = tg && tg.initDataUnsafe && tg.initDataUnsafe.start_param;
+  if (sp) {
+    try { const r = await api("/api/resolve", { token: sp }); cur = r.cwd || "/"; } catch { return; }
+  }
+  ls(cur);
+}
 if (!INIT) $("list").innerHTML = '<div class="notice">Open this from the Telegram button — it carries the sign-in token.</div>';
-else ls(cur);
+else boot();
 </script>
 </body>
 </html>
