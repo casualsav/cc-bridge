@@ -41,10 +41,19 @@ Telegram client ──(opens web_app button URL)──▶ Mini App SPA (static H
 ```
 - **New module `webapp.ts`** — `Bun.serve` HTTP server: static bundle + `/api/*` handlers + initData
   auth. Started by the daemon only when enabled.
-- **Tunnel** (`webapp.ts` or `tunnel.ts`) — spawn/track `cloudflared tunnel --url http://127.0.0.1:<port>`,
-  parse the assigned `https://*.trycloudflare.com` URL, expose it to the daemon. Quick-tunnel URLs are
-  ephemeral, so the daemon injects the **current** URL into the `web_app` button at send time (and/or
-  `setChatMenuButton`) rather than persisting it.
+- **Tunnel — DECIDED: bundled cloudflared quick tunnel** (`webapp.ts` or `tunnel.ts`). The daemon
+  spawns/tracks `cloudflared tunnel --url http://127.0.0.1:<port>`, parses the assigned
+  `https://*.trycloudflare.com` URL, and — since quick-tunnel URLs are **ephemeral** — injects the
+  **current** URL into the `web_app` button at send time (and/or `setChatMenuButton`) rather than
+  persisting it. No Cloudflare account, domain, DNS, or inbound ports; outbound-only, TLS at CF's edge.
+  - **Binary acquisition:** prefer a system `cloudflared` if present; else auto-fetch the right
+    platform/arch build from Cloudflare's GitHub releases on first enable, **checksum-pinned**, cached
+    under the channel dir. (Air-gapped: user drops the binary in manually.)
+  - **Alternatives (documented, not default):** a user-provided stable URL via `WEBAPP_PUBLIC_URL`
+    (domain + reverse proxy, or a Cloudflare *named* tunnel); or **Tailscale** — `Serve` for a fully
+    private `*.ts.net` URL when the phone is on the tailnet (TLS terminates on the box; never public),
+    `Funnel` for a stable public URL. These trade setup for stability/privacy; cloudflared is the
+    zero-config default.
 - **Launch** — a `/files` command posts a message with an inline `web_app` button (and/or set the chat
   **menu button**) opening the SPA. The session's starting cwd is passed via the `startapp`/URL param;
   it is re-validated server-side from the topic→session→cwd mapping, never trusted from the client.
@@ -80,7 +89,8 @@ All endpoints require valid initData; all resolve+canonicalize paths and refuse 
 ## 6. Config (opt-in; off by default)
 In `~/.claude/channels/telegram/.env` / `access.json`:
 - `WEBAPP_ENABLED=true|false` (default false — adds a network surface, so explicit opt-in).
-- `WEBAPP_TUNNEL=cloudflared|none` (cloudflared = zero-config; none = use a provided URL).
+- `WEBAPP_TUNNEL=cloudflared|tailscale|none` (**default `cloudflared`** = zero-config quick tunnel;
+  `tailscale` = Serve/Funnel; `none` = use `WEBAPP_PUBLIC_URL`).
 - `WEBAPP_PUBLIC_URL=https://…` (stable domain / named tunnel; overrides cloudflared).
 - `WEBAPP_PORT=…` (localhost bind port; default e.g. 8787).
 - `WEBAPP_WRITE=true|false` (allow edits; default false → read-only explorer until enabled).
@@ -105,7 +115,9 @@ In `~/.claude/channels/telegram/.env` / `access.json`:
 - **Multi-instance**: each bridge instance needs its own port + tunnel (mirror the `@tg_bridge` instance id).
 
 ## 9. Open questions (for the human)
-1. **Tunnel**: bundle `cloudflared` (zero-config, ephemeral URL) or require a stable domain/reverse-proxy?
+1. ~~**Tunnel**: bundle `cloudflared` or require a domain?~~ **DECIDED (2026-06-15): bundled cloudflared
+   quick tunnel** (zero-config, ephemeral URL injected into the button). Tailscale Serve/Funnel + a
+   user-provided `WEBAPP_PUBLIC_URL` kept as documented alternatives.
 2. **Editing default**: direct in-app write (natural in a Mini App) vs route edits through Claude ("ask
    the session to edit")? Could offer both — a "Save" and an "Ask Claude" action.
 3. **Sensitive-path guard**: hard-block anything (`~/.ssh`, `*.env`)? The session already has access, so
