@@ -57,9 +57,10 @@ Telegram client ──(opens web_app button URL)──▶ Mini App SPA (static H
 - **Launch** — a `/files` command posts a message with an inline `web_app` button (and/or set the chat
   **menu button**) opening the SPA. The session's starting cwd is passed via the `startapp`/URL param;
   it is re-validated server-side from the topic→session→cwd mapping, never trusted from the client.
-- **Frontend** — small static SPA: file tree (left) + editor/preview (right) + search box. Editor:
-  **CodeMirror 6** (lightweight, mobile-friendly, syntax highlighting). Theme synced to Telegram via
-  `Telegram.WebApp.themeParams`. Shipped as a prebuilt bundle (no runtime build step).
+- **Frontend** — small static SPA: file tree (left) + **read-only** viewer/preview (right) + search box,
+  plus per-file actions (⬇️ Download, ✏️ Edit → hands off to the chat edit flow). Syntax-highlighted
+  viewer (e.g. highlight.js — read-only, no editor component). Theme synced to Telegram via
+  `Telegram.WebApp.themeParams`. Shipped as a prebuilt static bundle (no runtime build step).
 
 ## 4. Auth (this is a file read/write API over a public URL — treat as security-critical)
 - On launch Telegram provides `initData`, HMAC-SHA256 signed with the **bot token**. The SPA sends it
@@ -80,10 +81,12 @@ All endpoints require valid initData; all resolve+canonicalize paths and refuse 
 - `GET  /api/ls?path=…` → `{ path, parent, entries:[{name,type:"dir|file|symlink",size,mtime}] }` (dirs first).
 - `GET  /api/read?path=…` → `{ path, size, mtime, encoding, truncated, content }` for text; binary/large → metadata + `downloadUrl`.
 - `GET  /api/download?path=…` → raw bytes, `Content-Disposition: attachment`.
-- `POST /api/write` `{ path, content, expectedMtime }` → optimistic-concurrency check vs `expectedMtime`;
-  writes a `.bak` first; returns `{ mtime, size }`. 409 on mtime mismatch (file changed under you).
 - `GET  /api/find?root=…&q=…&max=…` → `{ matches:[path…] }` (name/glob match, capped; skips `.git`,
   `node_modules` by default with a toggle).
+- `POST /api/edit-request` `{ path }` → does NOT write; tells the daemon to post the chat edit prompt
+  (code block + force_reply for small files, or the file as a document for large ones). The actual
+  **write is a daemon/grammy handler**, not a web endpoint — editing is chat-based (see §9.2). A shared
+  `writeFile(path, content)` helper does `.bak` + audit-log + mtime optimistic-concurrency.
 - Out of v1 (later, guarded): `mkdir`, `rename`, `delete`.
 
 ## 6. Config (opt-in; off by default)
@@ -96,13 +99,14 @@ In `~/.claude/channels/telegram/.env` / `access.json`:
 - `WEBAPP_WRITE=true|false` (allow edits; default false → read-only explorer until enabled).
 
 ## 7. Phasing
-- **Phase 0 — inline baseline (independent, no infra):** the inline-keyboard `/files` explorer already
-  mocked (browse · preview · download · find). Ships to everyone; survives where no HTTPS endpoint exists.
+- **Phase 0 — inline baseline:** ~~inline-keyboard explorer~~ **skipped** (decided 2026-06-15). Mini App only.
 - **Phase 1 — Mini App read-only:** `webapp.ts` server + `/api/ls|read|download|find` + initData auth +
-  static SPA (tree + view/preview/download) + cloudflared option + `/files` launch button. `WEBAPP_WRITE` off.
-- **Phase 2 — editing:** `/api/write` (backup + optimistic concurrency) + CodeMirror editing + save/undo.
+  bundled cloudflared quick tunnel + static SPA (tree + view/preview/download) + `/files` launch button.
+- **Phase 2 — chat-based editing:** the "✏️ Edit" affordance → `/api/edit-request` → daemon posts the
+  edit prompt (small: code block + force_reply; large: document round-trip) → `writeFile` helper does
+  `.bak` + audit-log + mtime check. No in-app editor.
 - **Phase 3 — polish:** in-app search UX, Rich-Message chat previews, guarded `mkdir`/`rename`/`delete`,
-  stable named-tunnel docs.
+  Tailscale + stable named-tunnel docs.
 
 ## 8. Dependencies & unknowns
 - **cloudflared**: bundle the binary vs require the user to install it? Quick tunnels need no account but
@@ -118,8 +122,17 @@ In `~/.claude/channels/telegram/.env` / `access.json`:
 1. ~~**Tunnel**: bundle `cloudflared` or require a domain?~~ **DECIDED (2026-06-15): bundled cloudflared
    quick tunnel** (zero-config, ephemeral URL injected into the button). Tailscale Serve/Funnel + a
    user-provided `WEBAPP_PUBLIC_URL` kept as documented alternatives.
-2. **Editing default**: direct in-app write (natural in a Mini App) vs route edits through Claude ("ask
-   the session to edit")? Could offer both — a "Save" and an "Ask Claude" action.
-3. **Sensitive-path guard**: hard-block anything (`~/.ssh`, `*.env`)? The session already has access, so
-   default is no block + an audit log — confirm.
-4. **Baseline**: ship Phase 0 (inline explorer) now regardless, as the no-infra fallback? (Recommended.)
+2. ~~**Editing default**: in-app write vs ask-Claude?~~ **DECIDED: chat-based editing, NO in-app editor.**
+   - **Small files (≤4096 chars):** bot posts the current contents in a markdown code block (Telegram's
+     native tap-to-copy) + a `force_reply`; the user pastes, edits in the reply box, and sends → write.
+   - **Large files:** bot sends the file as a **document** with a note; the user edits it locally and
+     **sends the edited file back as an attachment** → write. (Avoids the 4096-char cap on BOTH the
+     outbound code block AND the inbound reply, which Telegram would split into multiple messages.
+     Inbound file fetch is capped ~20 MB by the Bot API — fine for text/code.) Reuses the bridge's
+     existing "user sent a file" handling.
+   - Writes go through a shared helper: write a `.bak`, audit to `daemon.log`, optimistic-concurrency on
+     mtime. The Mini App's role is browse/view/download; its "✏️ Edit" button just asks the daemon to
+     post the edit prompt into the chat — the write itself is a daemon (grammy) handler, not a web API.
+3. ~~**Sensitive-path guard**~~ **DECIDED: no hard block** (the session already has full FS access);
+   **audit-log every write** + a **soft warning** when editing `*.env` / under `~/.ssh` / obvious secrets.
+4. ~~**Baseline / Phase 0**~~ **DECIDED: skip the inline-keyboard explorer.** Mini App only.
