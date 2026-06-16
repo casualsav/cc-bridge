@@ -5054,7 +5054,7 @@ async function sweepDeletedTopics(): Promise<void> {
       process.stderr.write(`daemon: topic ${t.threadId} ("${t.name}") deleted by user → cleaning up session ${t.sessionId}\n`)
       if (pane && await paneAlive(pane)) {
         await injectSlash(pane, pane === focus.activePaneId ? focus.paneWatcher : null, '/exit')
-        await bot.api.sendMessage(group, `🗑 Topic “${escapeHtml(t.name)}” was deleted — exited its session in <code>${escapeHtml(t.cwd)}</code>.`, { parse_mode: 'HTML' }).catch(() => {})
+        await bot.api.sendMessage(group, `🗑 Topic “${escapeHtml(t.name)}” was deleted — exited its session in <code>${escapeHtml(t.cwd)}</code>.`, { parse_mode: 'HTML', disable_notification: true }).catch(() => {})
       }
     } catch { /* probe hiccup — next sweep retries */ }
   }

@@ -163,7 +163,7 @@ export async function ensureSessionTopic(paneId: string): Promise<void> {
     const thread = await ensureTopicFor(group, sid, cwd)
     if (thread) await bot.api.sendMessage(group,
       `🆕 <b>Session started</b>\n<code>${escapeHtml(cwd)}</code>\n\nType in this topic to drive this session.`,
-      { parse_mode: 'HTML', message_thread_id: thread }).catch(() => {})
+      { parse_mode: 'HTML', message_thread_id: thread, disable_notification: true }).catch(() => {})
   } finally {
     topicEnsureInFlight.delete(sid)
   }
@@ -212,7 +212,7 @@ export async function generalAnchorLost(group: string): Promise<void> {
   const kb = new InlineKeyboard().text('📌 Claim General', 'claimgeneral')
   await bot.api.sendMessage(group,
     '🏁 <b>The session anchored to General ended.</b>\nGeneral now follows the focused session. Tap to anchor the current one here instead.',
-    { parse_mode: 'HTML', reply_markup: kb }).catch(() => {})
+    { parse_mode: 'HTML', reply_markup: kb, disable_notification: true }).catch(() => {})
 }
 
 // A worktree session that ended cleanly leaves no reason to keep the worktree — remove it so
@@ -224,7 +224,7 @@ async function cleanupWorktree(group: string, t: { threadId: number; worktree?: 
     const dirty = (await exec('git', ['-C', wt.path, 'status', '--porcelain'], { timeout: 5000 })).stdout.trim()
     if (dirty) {
       await bot.api.sendMessage(group, `🌿 Worktree kept at <code>${wt.path}</code> — it has uncommitted changes.`,
-        { parse_mode: 'HTML', message_thread_id: t.threadId }).catch(() => {})
+        { parse_mode: 'HTML', message_thread_id: t.threadId, disable_notification: true }).catch(() => {})
       return
     }
     await exec('git', ['-C', wt.repo, 'worktree', 'remove', wt.path], { timeout: 10000 })
@@ -248,7 +248,7 @@ async function closeTopicEntry(group: string, sessionId: string, t: { threadId: 
     .text('🗑 Delete topic', `topicdel:${t.threadId}`)
     .text('🗑 Always delete', `topicdelalways:${t.threadId}`)
   await bot.api.sendMessage(group, '🏁 <b>Session ended</b> — topic closed. Send a message here to revive the session (the conversation continues); it also reopens automatically if a session comes back to this project.\n\nDelete removes the tab (and this topic’s history); Always delete does that for every ended session from now on.',
-    { parse_mode: 'HTML', message_thread_id: t.threadId, reply_markup: kb }).catch(() => {})
+    { parse_mode: 'HTML', message_thread_id: t.threadId, reply_markup: kb, disable_notification: true }).catch(() => {})
   try {
     await bot.api.closeForumTopic(group, t.threadId)
     updateTopic(sessionId, { closed: true })
