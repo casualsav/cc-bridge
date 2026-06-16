@@ -20,11 +20,8 @@ const REPO = import.meta.dir
 const SETTINGS = join(homedir(), '.claude', 'settings.json')
 const GLOBAL_CLAUDE_MD = join(homedir(), '.claude', 'CLAUDE.md')
 const STATUSLINE_DEST = join(homedir(), '.claude', 'statusline-command.sh')
-const MARKER_BEGIN = '<!-- BEGIN pocket-claude (off-mcp convention — auto-synced by /update; edits inside are overwritten) -->'
-const MARKER_END = '<!-- END pocket-claude -->'
-// Pre-rename installs wrote these — recognized so a re-run swaps the block instead of doubling it.
-const MARKER_BEGIN_OLD = '<!-- BEGIN better-claude-telegram (off-mcp convention — auto-synced by /update; edits inside are overwritten) -->'
-const MARKER_END_OLD = '<!-- END better-claude-telegram -->'
+const MARKER_BEGIN = '<!-- BEGIN claude-tg (off-mcp convention — auto-synced by /update; edits inside are overwritten) -->'
+const MARKER_END = '<!-- END claude-tg -->'
 
 // ---- tiny UI helpers ----
 const C = { dim: (s: string) => `\x1b[2m${s}\x1b[0m`, b: (s: string) => `\x1b[1m${s}\x1b[0m`,
@@ -303,13 +300,13 @@ function patchSettings(mode: Mode): void {
   } else mkdirSync(join(homedir(), '.claude'), { recursive: true })
 
   s.extraKnownMarketplaces = { ...(s.extraKnownMarketplaces || {}),
-    'pocket-claude': { source: { source: 'github', repo: 'casualsav/pocket-claude' } } }
-  s.enabledPlugins = { ...(s.enabledPlugins || {}), 'telegram@pocket-claude': true }
+    'claude-tg': { source: { source: 'github', repo: 'casualsav/claude-tg' } } }
+  s.enabledPlugins = { ...(s.enabledPlugins || {}), 'telegram@claude-tg': true }
   s.statusLine = { type: 'command', command: 'bash ~/.claude/statusline-command.sh' }
   // Two SessionStart hooks, same as off-mcp/INSTALL.md §2: ensure-daemon brings the bridge up,
   // stamp-transcript writes each session's transcript path (off-MCP outbound + account routing
   // need it — without it the daemon falls back to slower pane-based discovery).
-  const cacheGlob = '$(ls -d ~/.claude/plugins/cache/pocket-claude/telegram/*/ 2>/dev/null | sort -V | tail -1)'
+  const cacheGlob = '$(ls -d ~/.claude/plugins/cache/claude-tg/telegram/*/ 2>/dev/null | sort -V | tail -1)'
   s.hooks = s.hooks || {}
   const sessionStart = (s.hooks.SessionStart ||= [])
   for (const script of ['ensure-daemon.ts', 'stamp-transcript.ts']) {
@@ -327,8 +324,9 @@ function patchSettings(mode: Mode): void {
   const convention = readFileSync(join(REPO, 'off-mcp', 'CLAUDE.md'), 'utf8').trim()
   const block = `${MARKER_BEGIN}\n${convention}\n${MARKER_END}\n`
   let md = existsSync(GLOBAL_CLAUDE_MD) ? readFileSync(GLOBAL_CLAUDE_MD, 'utf8') : ''
-  const [begin, end] = md.includes(MARKER_BEGIN_OLD) && md.includes(MARKER_END_OLD)
-    ? [MARKER_BEGIN_OLD, MARKER_END_OLD] : [MARKER_BEGIN, MARKER_END]
+  // Match a prior block under ANY past name (by its signature) so a rename swaps it in place.
+  const mk = md.match(/<!-- BEGIN (\S+) \(off-mcp convention — auto-synced by \/update; edits inside are overwritten\) -->/)
+  const begin = mk?.[0] ?? MARKER_BEGIN, end = mk ? `<!-- END ${mk[1]} -->` : MARKER_END
   if (md.includes(begin) && md.includes(end)) {
     md = md.replace(new RegExp(`${escapeRe(begin)}[\\s\\S]*?${escapeRe(end)}\\n?`), block)
   } else { md = (md.trimEnd() + '\n\n' + block).trimStart() }
@@ -348,8 +346,7 @@ function patchSettings(mode: Mode): void {
       ['claude-tg', 'claude-tg()   { tmux set -p @tg_bridge "${1:-1}" 2>/dev/null; if [ -n "$2" ]; then CLAUDE_CONFIG_DIR="$HOME/.claude-$2" claude --allow-dangerously-skip-permissions; else claude --allow-dangerously-skip-permissions; fi; }'],
     ]
     const cur = existsSync(bashrc) ? readFileSync(bashrc, 'utf8') : ''
-    // Match the function form or a legacy alias. Installs that still have the old `pocket-claude`
-    // launcher get `claude-tg` added alongside it (the old name keeps working untouched).
+    // Match the function form or a legacy alias so a re-run doesn't double the launcher.
     const missing = want.filter(([n]) => !new RegExp(`(^|\\n)\\s*${n}\\s*\\(\\)|alias ${n}=`).test(cur)).map(([, a]) => a)
     if (missing.length) { appendFileSync(bashrc, `\n${missing.join('\n')}\n`); console.log(C.ok(`  ✓ launcher → ${bashrc} (claude-tg)`)) }
     else console.log(C.dim('  • claude-tg launcher already present'))
@@ -359,7 +356,7 @@ const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 // ---- main ----
 async function main(): Promise<void> {
-  console.log(C.b('\n  pocket-claude — off-MCP setup\n'))
+  console.log(C.b('\n  claude-tg — off-MCP setup\n'))
   const mode = await checkDeps()
   const cfg = await interview()
   writeConfig(cfg)
@@ -403,7 +400,7 @@ const BRIDGE_SESSION = 'claude-bridge'
 // the bridge tmux session persists across it. Best-effort: any miss degrades to manual next-steps.
 async function verifyAndLaunch(cfg: Config): Promise<boolean> {
   section('5 · Verifying + launching the bridge')
-  if (!which('claude')) { console.log(C.warn('  • the `claude` CLI isn\'t on PATH — skipping launch. Install Claude Code, then start a session with pocket-claude.')); return false }
+  if (!which('claude')) { console.log(C.warn('  • the `claude` CLI isn\'t on PATH — skipping launch. Install Claude Code, then start a session with claude-tg.')); return false }
   if (!(await askYN('  Bring the bridge up and verify now?', true))) return false
 
   // grammy must resolve for the checkout daemon to start.
@@ -429,7 +426,7 @@ async function verifyAndLaunch(cfg: Config): Promise<boolean> {
   if (tmuxHasSession(BRIDGE_SESSION)) console.log(C.dim(`  • tmux session "${BRIDGE_SESSION}" already exists — reusing it`))
   else if (run('tmux', ['new-session', '-d', '-s', BRIDGE_SESSION, 'tmux set -p @tg_bridge 1 2>/dev/null; claude --allow-dangerously-skip-permissions']).ok)
     console.log(C.ok(`  ✓ bridge session "${BRIDGE_SESSION}" started`))
-  else { console.log(C.warn('  ⚠ couldn\'t start the tmux bridge session — start one with pocket-claude after the restart.')); stopCheckoutDaemon(); return false }
+  else { console.log(C.warn('  ⚠ couldn\'t start the tmux bridge session — start one with claude-tg after the restart.')); stopCheckoutDaemon(); return false }
 
   const adopted = await waitForLog(/adopted off-MCP pane|focus pinned to/, 12_000, marker)
   console.log(adopted ? C.ok('  ✓ daemon adopted the bridge pane') : C.warn('  • daemon hasn\'t reported adopting the pane yet (it polls every few seconds — should bind shortly)'))

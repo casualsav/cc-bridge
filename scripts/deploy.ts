@@ -26,9 +26,8 @@ import { dirname, join } from 'node:path'
 const GRAMMY_PIN = '1.41.1' // keep in sync with package.json + ensure-daemon.ts
 
 const REPO = dirname(import.meta.dir) // scripts/ → repo root
-// Marketplace id: pocket-claude after the rename; old id kept as fallback until this machine migrates.
-const MKT_ID = ['pocket-claude', 'better-claude-plugins']
-  .find(n => existsSync(join(homedir(), '.claude', 'plugins', 'marketplaces', n))) ?? 'pocket-claude'
+// Marketplace id (also the plugin-cache dir name).
+const MKT_ID = 'claude-tg'
 const CACHE_BASE = join(homedir(), '.claude', 'plugins', 'cache', MKT_ID, 'telegram')
 const MKT = join(homedir(), '.claude', 'plugins', 'marketplaces', MKT_ID)
 const DAEMON_PID = join(homedir(), '.claude', 'channels', 'telegram', 'daemon.pid')

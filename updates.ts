@@ -62,10 +62,8 @@ export async function claudeVersion(): Promise<string | null> {
 // upd:claude — apply, progress, health-check, rollback all already non-agentic). Never
 // auto-applies; `updateChecks: false` pref disables.
 const UPDATE_NOTIFY_FILE = join(STATE_DIR, 'update-notify.json')
-// pocket-claude after the rename; old id kept as fallback until this machine re-adds the marketplace.
-const MP_DIR = ['pocket-claude', 'better-claude-plugins']
-  .map(n => join(homedir(), '.claude', 'plugins', 'marketplaces', n)).find(p => existsSync(p))
-  ?? join(homedir(), '.claude', 'plugins', 'marketplaces', 'pocket-claude')
+// Marketplace clone dir (also the plugin-cache dir name).
+const MP_DIR = join(homedir(), '.claude', 'plugins', 'marketplaces', 'claude-tg')
 
 // True only when `latest` is strictly newer — a locally-deployed bridge can run AHEAD of the
 // marketplace remote, and `latest !== cur` would announce that as an "update" (a downgrade).

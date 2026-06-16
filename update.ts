@@ -23,9 +23,8 @@ const ENV_FILE = join(STATE_DIR, '.env')
 const LOG_FILE = join(STATE_DIR, 'daemon.log')
 const PENDING_EVENTS = join(STATE_DIR, 'pending-events.jsonl')
 const SOCKET = join(STATE_DIR, 'daemon.sock')
-// Marketplace id: pocket-claude after the rename; old id kept as fallback until this machine migrates.
-const MKT_ID = ['pocket-claude', 'better-claude-plugins']
-  .find(n => existsSync(join(HOME, '.claude', 'plugins', 'marketplaces', n))) ?? 'pocket-claude'
+// Marketplace id (also the plugin-cache dir name).
+const MKT_ID = 'claude-tg'
 const MP = join(HOME, '.claude', 'plugins', 'marketplaces', MKT_ID)
 const CACHE_BASE = join(HOME, '.claude', 'plugins', 'cache', MKT_ID, 'telegram')
 const BACKUP_BASE = join(HOME, '.claude', 'plugins', 'cache', MKT_ID, 'telegram-backups')
@@ -112,11 +111,8 @@ const shortVer = (sha: string) => sha.slice(0, 7)
 const GLOBAL_MD = join(HOME, '.claude', 'CLAUDE.md')
 const STATUSLINE_DEST = join(HOME, '.claude', 'statusline-command.sh')
 const STATUSLINE_SIG = 'Claude Code status line'   // header line unique to our script
-const CONV_BEGIN = '<!-- BEGIN pocket-claude (off-mcp convention — auto-synced by /update; edits inside are overwritten) -->'
-const CONV_END = '<!-- END pocket-claude -->'
-// Pre-rename installs wrote these markers — matched for replacement, rewritten to the new pair.
-const CONV_BEGIN_OLD = '<!-- BEGIN better-claude-telegram (off-mcp convention — auto-synced by /update; edits inside are overwritten) -->'
-const CONV_END_OLD = '<!-- END better-claude-telegram -->'
+const CONV_BEGIN = '<!-- BEGIN claude-tg (off-mcp convention — auto-synced by /update; edits inside are overwritten) -->'
+const CONV_END = '<!-- END claude-tg -->'
 // First line of off-mcp/CLAUDE.md across its lifetimes (legacy, marker-less installs).
 const CONV_HEADINGS = ['# Telegram bridge (no MCP)', '# Reachable over Telegram (no MCP)']
 
@@ -128,8 +124,10 @@ function syncInstalledCopies(): string[] {
     const wrapped = `${CONV_BEGIN}\n${template}\n${CONV_END}`
     if (existsSync(GLOBAL_MD)) {
       const cur = readFileSync(GLOBAL_MD, 'utf8')
-      // New markers preferred; old (pre-rename) markers matched and rewritten to the new pair.
-      const [begin, end] = cur.includes(CONV_BEGIN) ? [CONV_BEGIN, CONV_END] : [CONV_BEGIN_OLD, CONV_END_OLD]
+      // Match a marker block under ANY past name (by its signature) and rewrite it to the
+      // current pair, so renaming the project never doubles the block.
+      const mk = cur.match(/<!-- BEGIN (\S+) \(off-mcp convention — auto-synced by \/update; edits inside are overwritten\) -->/)
+      const begin = mk?.[0] ?? CONV_BEGIN, end = mk ? `<!-- END ${mk[1]} -->` : CONV_END
       const b = cur.indexOf(begin), e = cur.indexOf(end)
       if (b !== -1 && e !== -1 && e > b) {
         // Already marker-wrapped → swap the block in place.

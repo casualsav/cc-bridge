@@ -5,7 +5,7 @@ used, and a suggested repo-side fix. Off-MCP mode, Linux aarch64, bun 1.3.14, Cl
 2.1.168, Python 3.12 (PEP 668 externally-managed), tmux 3.4.
 
 State dir: `~/.claude/channels/telegram/` · plugin cache:
-`~/.claude/plugins/cache/pocket-claude/telegram/0.0.6/`
+`~/.claude/plugins/cache/claude-tg/telegram/0.0.6/`
 
 ---
 

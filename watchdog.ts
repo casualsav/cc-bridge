@@ -60,9 +60,8 @@ try {
 try { writeFileSync(WATCHDOG_PID_FILE, `${process.pid}\nusr1`, { mode: 0o600 }) } catch {}
 
 // Newest plugin-cache copy of daemon.ts (version dirs sort ascending; take the last).
-// Marketplace id: pocket-claude after the rename; falls back to the old id on machines that
-// haven't re-added the marketplace yet.
-const MKT_IDS = ['pocket-claude', 'better-claude-plugins']
+// Marketplace id (also the plugin-cache dir name).
+const MKT_IDS = ['claude-tg']
 function findDaemon(): string | null {
   const cacheRoot = join(homedir(), '.claude', 'plugins', 'cache')
   const base = MKT_IDS.map(n => join(cacheRoot, n, 'telegram')).find(p => existsSync(p))

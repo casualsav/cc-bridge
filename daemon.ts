@@ -674,7 +674,7 @@ import { readdirSync, existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 const root = join(homedir(), '.claude', 'plugins', 'cache')
-const base = ['pocket-claude', 'better-claude-plugins'].map(n => join(root, n, 'telegram')).find(p => existsSync(p)) ?? join(root, 'pocket-claude', 'telegram')
+const base = join(root, 'claude-tg', 'telegram')
 let t = null
 try { const vs = readdirSync(base).filter(v => /^\\d+\\.\\d+\\.\\d+$/.test(v)).sort((a, b) => a.localeCompare(b, undefined, { numeric: true })); for (const v of vs.reverse()) { const p = join(base, v, 'ensure-daemon.ts'); if (existsSync(p)) { t = p; break } } } catch {}
 if (t) await import(t)
@@ -1136,7 +1136,7 @@ const BRIDGE_PANE_OPT = '@tg_bridge'
 // The marker's VALUE is the instance id, so multiple daemons on the SAME user/tmux server (each
 // with its own TELEGRAM_STATE_DIR + bot token) adopt only their own panes instead of fighting over
 // every marked pane. Explicit TELEGRAM_INSTANCE_ID wins; otherwise the default state dir keeps the
-// legacy id "1" (so existing `@tg_bridge=1` tags + the claude-tg launcher (briefly named pocket-claude) keep working with no
+// legacy id "1" (so existing `@tg_bridge=1` tags + the claude-tg launcher keep working with no
 // migration), and any custom state dir derives a stable id from its basename. Sanitised to a safe
 // token (the value is read back through a tab-delimited list-panes format).
 const DEFAULT_STATE_DIR = join(homedir(), '.claude', 'channels', 'telegram')
@@ -2879,7 +2879,7 @@ async function runReadout(t: CommandTarget, chatId: string, kind: 'cost' | 'cont
 // 1024-char caption limit — the parsed text, not the HTML tags, counts toward it.
 function startHelpText(paired: boolean): string {
   const guide =
-    `✦ <b>Pocket Claude</b>\n` +
+    `✦ <b>claude-tg</b>\n` +
     `Claude Code in your pocket — drive every session from Telegram.\n\n` +
     `💬 Send text, 📷 photos, 📎 files, 🎙️ voice — the reply comes straight back\n` +
     `👥 <code>/bind</code> a forum group — each session gets its own topic (📁 folder or 🌿 worktree); your main session lives in General (📌 <code>/claim</code>)\n` +
@@ -2906,9 +2906,9 @@ async function sendStartHelp(ctx: Context): Promise<void> {
   const caption = startHelpText(paired)
   // remove_keyboard clears the retired docked control bar for anyone who still has it stuck on
   // their client (its taps would otherwise leak the button label to Claude as a plain message).
-  // Lead with the Pocket Claude crab (bundled asset) — doubles as the suggested bot profile picture.
+  // Lead with the bundled crab asset — doubles as the suggested bot profile picture.
   try {
-    await ctx.replyWithPhoto(new InputFile(join(import.meta.dir, 'assets', 'pocket-claude.jpg')), { caption, parse_mode: 'HTML', reply_markup: { remove_keyboard: true } })
+    await ctx.replyWithPhoto(new InputFile(join(import.meta.dir, 'assets', 'claude-tg.jpg')), { caption, parse_mode: 'HTML', reply_markup: { remove_keyboard: true } })
   } catch {
     await ctx.reply(caption, { parse_mode: 'HTML', link_preview_options: { is_disabled: true }, reply_markup: { remove_keyboard: true } })   // asset missing (stale cache) → text only
   }

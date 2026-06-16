@@ -29,7 +29,7 @@ export async function provisionGh(): Promise<void> {
   const arch = (await exec('uname', ['-m'], { timeout: 2000 })).stdout.trim()
   const a = arch === 'aarch64' || arch === 'arm64' ? 'arm64' : 'amd64'
   const rel = await fetch('https://api.github.com/repos/cli/cli/releases/latest',
-    { headers: { 'user-agent': 'pocket-claude' } })
+    { headers: { 'user-agent': 'claude-tg' } })
   if (!rel.ok) throw new Error(`couldn't look up the latest gh release (HTTP ${rel.status})`)
   const tag = ((await rel.json()) as { tag_name?: string }).tag_name   // e.g. v2.62.0
   if (!tag) throw new Error('release lookup returned no version tag')

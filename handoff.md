@@ -1,8 +1,8 @@
-# Handoff — pocket-claude UI/streaming session (2026-06-12)
+# Handoff — claude-tg UI/streaming session (2026-06-12)
 
 ## Context
 
-Working session on **pocket-claude** (Claude Code ↔ Telegram bridge) at `/projects/pocket-claude`,
+Working session on **claude-tg** (Claude Code ↔ Telegram bridge) at `/projects/pocket-claude`,
 driven from Telegram via this very bridge (the session you're in IS a bridge session — tmux pane
 `%44`, topic "pocket-claude" #1009 in the forum group). The user iterates on the Telegram UX in
 small steps: tweak → `bun run deploy` → user eyeballs it live on their phone → commit.
