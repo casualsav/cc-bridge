@@ -1562,8 +1562,11 @@ async function recoverToPrompt(paneId: string): Promise<boolean> {
     const ed = detectEditorState(await capturePane(paneId).catch(() => ''))
     if (ed?.kind === 'pager') await sendKeys(paneId, ['q'])
     else if (ed?.kind === 'nano') { await sendKeys(paneId, ['C-x']); await waitForSettle(paneId, 150, 1000); await sendKeys(paneId, ['n']) }  // ^X then "no" → discard
-    else { await sendKeysLiteral(paneId, ':q!'); await sendKeys(paneId, ['Enter']) }   // vim (and the unknown default): quit without saving
-    await waitForSettle(paneId, 200, 1500)
+    else if (ed?.kind === 'vim') { await sendKeysLiteral(paneId, ':q!'); await sendKeys(paneId, ['Enter']) }   // quit without saving
+    // unknown screen: no editor-quit guess (":q!" into a menu is garbage) — the Esc passes above and
+    // the Ctrl-C below carry it.
+    if (ed) { await waitForSettle(paneId, 200, 1500); if (await atPrompt(paneId)) return true }
+    await sendKeys(paneId, ['Escape']); await waitForSettle(paneId, 150, 1200)         // one more, for a stray menu/modal
     if (await atPrompt(paneId)) return true
     await sendKeys(paneId, ['C-c']); await waitForSettle(paneId, 200, 1500)            // last resort
     return atPrompt(paneId)
@@ -1579,8 +1582,16 @@ async function saveEditorAndQuit(paneId: string): Promise<boolean> {
   })
 }
 
-// Inbound held back because its pane was in an editor/pager (per pane → the queued messages, FIFO),
-// plus the set of panes that already have an open "you're in an editor" card so a burst asks once.
+// A pane screen we know how to handle: the normal prompt (incl. a running task — "esc to interrupt"),
+// or any prompt/menu we already relay or auto-drive. Anything else is an UNRECOGNISED capture — the
+// inbound guard holds the message and offers a way out rather than typing blindly into it.
+function recognizedScreen(cap: string): boolean {
+  return onNormalPrompt(cap) || !!detectUserPrompt(cap) || !!detectPermissionPrompt(cap)
+    || !!detectLoginPrompt(cap) || isUsageLimitChoice(cap) || isSubmitScreen(cap) || isPluginInstallUserScope(cap)
+}
+
+// Inbound held back because its pane was on a captured screen (editor/pager or an unrecognised
+// prompt) — per pane, FIFO — plus the set of panes that already have an open card so a burst asks once.
 const editorHeld = new Map<string, InboundParams[]>()
 const editorCardPane = new Set<string>()
 async function flushEditorHeld(paneId: string): Promise<void> {
@@ -6529,25 +6540,37 @@ async function handleInbound(
       else void generalAnchorLost(chat_id)
     }
   }
-  // Editor/pager guard: if the destination pane is sitting in an external editor or pager, typing
-  // the message in would land in the wrong place (the "ctrl+g into Vim" trap). Hold it and offer a
-  // guided way out instead of mistyping. Gated on !onNormalPrompt so a misread can't block a ready
-  // Claude, and skipped while a select/permission prompt is up (those have their own relays).
+  // Captured-screen guard: if the destination pane is on a screen the bridge can't drive — an
+  // external editor/pager (the "ctrl+g into Vim" trap), or an UNRECOGNISED prompt the detectors
+  // missed (e.g. a future plan-accept variant) — typing the message in would land in the wrong
+  // place and silently strand the user. Hold it and offer a guided way out instead. recognizedScreen
+  // covers the normal prompt AND running tasks, so this never blocks a healthy session; the
+  // unrecognised case is re-confirmed after a short settle so a transient between-turns repaint
+  // doesn't trip it.
   const effPane = targetPane ?? focus.activePaneId
   if (effPane) {
-    const cap = await capturePane(effPane).catch(() => '')
-    const ed = cap && !onNormalPrompt(cap) && !detectUserPrompt(cap) && !detectPermissionPrompt(cap) ? detectEditorState(cap) : null
-    if (ed) {
-      editorHeld.set(effPane, [...(editorHeld.get(effPane) ?? []), params])
-      if (!editorCardPane.has(effPane)) {
-        editorCardPane.add(effPane)
-        const kb = new InlineKeyboard().text('🔙 Quit to Claude', `edq:${effPane}`)
-        if (ed.kind !== 'pager') kb.text('💾 Save & quit', `eds:${effPane}`)
-        kb.row().text('⌨️ Type into it anyway', `edt:${effPane}`)
-        await ctx.reply(`⌨️ This session is in <b>${escapeHtml(ed.label)}</b> — your message wasn’t typed into Claude. Quit back to Claude (then it's delivered), or type it into the editor anyway.`,
-          { parse_mode: 'HTML', reply_markup: kb }).catch(() => {})
+    let cap = await capturePane(effPane).catch(() => '')
+    if (cap && !recognizedScreen(cap)) {
+      if (!detectEditorState(cap)) {   // re-confirm a non-editor screen is really stuck, not mid-repaint
+        await sleep(450)
+        cap = await capturePane(effPane).catch(() => '')
       }
-      return
+      if (cap && !recognizedScreen(cap)) {
+        const ed = detectEditorState(cap)
+        editorHeld.set(effPane, [...(editorHeld.get(effPane) ?? []), params])
+        if (!editorCardPane.has(effPane)) {
+          editorCardPane.add(effPane)
+          const kb = new InlineKeyboard().text('🔙 Quit to Claude', `edq:${effPane}`)
+          if (ed && ed.kind !== 'pager') kb.text('💾 Save & quit', `eds:${effPane}`)
+          kb.row().text('⌨️ Type in anyway', `edt:${effPane}`)
+          const lead = ed
+            ? `⌨️ This session is in <b>${escapeHtml(ed.label)}</b> — your message wasn’t typed into Claude.`
+            : `⚠️ This session is on a screen I don’t recognise, so your message wasn’t delivered. Here’s what it shows:\n<pre>${escapeHtml(cleanPaneTail(cap, 18) || '(blank)')}</pre>`
+          await ctx.reply(`${lead}\n\nQuit back to Claude (then it's delivered), or type it in anyway.`,
+            { parse_mode: 'HTML', reply_markup: kb }).catch(() => {})
+        }
+        return
+      }
     }
   }
   // Long prompts Telegram split client-side re-merge into one injection (see deliverInbound).
@@ -7524,7 +7547,7 @@ void (async () => {
               { command: 'start', description: 'Welcome + everything this bot can do' },
               { command: 'stop', description: 'Interrupt the current task (Esc)' },
               { command: 'cancel', description: 'Clear a stuck force-reply prompt (e.g. an unanswered “name a folder”)' },
-              { command: 'back', description: 'Escape a stuck editor/pager — get the session back to the Claude prompt' },
+              { command: 'back', description: 'Escape a stuck editor/pager/screen — get the session back to the Claude prompt' },
               { command: 'status', description: 'Re-post the status pin at the bottom' },
               { command: 'settings', description: 'Channel settings — mirror, pin, MCP, voice' },
               { command: 'cron', description: 'Schedule messages (/cron 12h · every 09:00 · */30 9-17 * * 1-5 · cancel)' },
