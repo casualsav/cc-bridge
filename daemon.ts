@@ -2538,13 +2538,13 @@ async function confirmNewSession(ctx: Context): Promise<void> {
     await ctx.reply('🚫 <b>No active session</b> — start one?', { parse_mode: 'HTML', reply_markup: kb })
     return
   }
-  // General with nothing running at all: same idea, but the spawned session anchors to General
-  // (becomes the base session) instead of growing its own topic — see the newstartgeneral tap.
+  // Group/topic mode: a new SESSION is made by creating a topic now, so /new no longer spawns one
+  // here — it only clears the current conversation in place. With nothing running in General, point
+  // the user at the topic flow instead of offering a General-anchored spawn.
   if (isTopicMode() && String(ctx.chat?.id) === getGroupChatId() &&
       typeof ctx.message?.message_thread_id !== 'number' &&
       (!focus.activePaneId || !focus.paneWatcher) && !(await generalAnchorPane())) {
-    await ctx.reply('🚫 <b>No active sessions.</b>', { parse_mode: 'HTML',
-      reply_markup: new InlineKeyboard().text('🚀 Start a new session', 'newstartgeneral') })
+    await ctx.reply('🚫 <b>No active session here.</b>\n\nStart a session by creating a topic (the ➕ button) — each topic runs its own session.', { parse_mode: 'HTML' })
     return
   }
   // Topic, General, or DM: /new = clear THIS conversation in place, one confirm.
