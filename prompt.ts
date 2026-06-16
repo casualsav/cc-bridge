@@ -57,7 +57,11 @@ const RESULT_GLYPH = /^[⎿⏺●○◉└├▪▸•·◦]/
 // Footer under a single-select prompt. Anchored on the list-navigation wording
 // ("Enter to select", "↑/↓ to navigate") rather than the generic "Esc to cancel",
 // which yes/no confirmation dialogs share — those are deliberately NOT relayed.
-const SELECT_HINT = /enter to select|↑\/↓|\bto navigate\b/i
+// The plan-approval prompt ("Claude has written up a plan … Would you like to proceed?")
+// is a real single-select whose footer carries NONE of that wording — it reads
+// "shift+tab to approve with this feedback" (and a "ctrl+g to edit … ~/.claude/plans"
+// line below), so without this anchor it never relays and the user hangs on it.
+const SELECT_HINT = /enter to select|↑\/↓|\bto navigate\b|shift\+tab to approve/i
 // Footer under a multi-select prompt: options are toggled with Space, so the hint
 // reads "Space to select · …". The Space-toggle wording is what distinguishes a
 // real multi-select from a confirm dialog's "Enter to confirm".

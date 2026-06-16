@@ -26,6 +26,30 @@ test('detectUserPrompt parses a numbered select menu', () => {
   expect(p!.multiSelect).toBe(false)
 })
 
+test('detectUserPrompt relays the plan-approval prompt (shift+tab footer, no ↑↓ wording)', () => {
+  const pane = [
+    'Claude has written up a plan and is ready to execute. Would you like to proceed?',
+    '',
+    '   ❯ 1. Yes, and bypass permissions',
+    '     2. Yes, manually approve edits',
+    '     3. No, refine with Ultraplan on Claude Code on the web',
+    '     4. Tell Claude what to change',
+    '        shift+tab to approve with this feedback',
+    '',
+    '   ctrl+g to edit in  Vim  · ~/.claude/plans',
+  ].join('\n')
+  const p = detectUserPrompt(pane)
+  expect(p).not.toBeNull()
+  expect(p!.question).toContain('Would you like to proceed?')
+  expect(p!.options.map(o => o.label)).toEqual([
+    'Yes, and bypass permissions',
+    'Yes, manually approve edits',
+    'No, refine with Ultraplan on Claude Code on the web',
+    'Tell Claude what to change',
+  ])
+  expect(p!.multiSelect).toBe(false)
+})
+
 test('detectUserPrompt returns null when there is no live select footer', () => {
   expect(detectUserPrompt('just some terminal output\n❯ \n')).toBeNull()
 })
