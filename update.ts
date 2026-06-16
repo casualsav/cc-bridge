@@ -47,16 +47,34 @@ const TOKEN = process.env.TELEGRAM_BOT_TOKEN
 // ---- helpers ----
 const log = (s: string) => { try { writeFileSync(LOG_FILE, `[${new Date().toISOString()}] update: ${s}\n`, { flag: 'a' }) } catch {} }
 
-async function notify(text: string): Promise<void> {
-  log(text.replace(/\n/g, ' '))
-  if (!TOKEN || !chatId) return
+// One Bot API call (sendMessage / editMessageText). Returns the result object (carrying
+// message_id for a fresh send) or null on any failure / when there's nothing to message.
+async function tgCall(method: string, body: Record<string, unknown>): Promise<{ message_id?: number } | null> {
+  if (!TOKEN || !chatId) return null
   try {
-    await fetch(`https://api.telegram.org/bot${TOKEN}/sendMessage`, {
+    const r = await fetch(`https://api.telegram.org/bot${TOKEN}/${method}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML' }),
+      body: JSON.stringify({ chat_id: chatId, parse_mode: 'HTML', ...body }),
     })
-  } catch {}
+    return ((await r.json()) as { result?: { message_id?: number } }).result ?? null
+  } catch { return null }
+}
+
+// A SINGLE status line that edits ITSELF as the update moves through its stages
+// (checking → building → restarting) — one updating message instead of a pile of them.
+// First call sends; later calls edit it in place.
+let progressMsgId: number | null = null
+async function progress(text: string): Promise<void> {
+  log(text.replace(/\n/g, ' '))
+  if (progressMsgId == null) progressMsgId = (await tgCall('sendMessage', { text }))?.message_id ?? null
+  else await tgCall('editMessageText', { message_id: progressMsgId, text })
+}
+
+// The final outcome as its OWN message — a clean confirmation, distinct from the progress line.
+async function notify(text: string): Promise<void> {
+  log(text.replace(/\n/g, ' '))
+  await tgCall('sendMessage', { text })
 }
 
 const git = (args: string[], cwd = MP) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim()
@@ -166,7 +184,7 @@ async function main(): Promise<void> {
   if (!existsSync(join(MP, '.git'))) { await notify('❌ Update: marketplace clone not found — is the plugin installed?'); return }
 
   // 1. Fetch + compare.
-  await notify(checkOnly ? '🔍 Checking for updates…' : '🔄 Update started…')
+  await progress(checkOnly ? '🔍 Checking for updates…' : '🔄 Update started…')
   let localSha: string, remoteSha: string, branch: string
   try {
     git(['fetch', '--quiet', 'origin'])
@@ -175,11 +193,11 @@ async function main(): Promise<void> {
     remoteSha = git(['rev-parse', `origin/${branch}`])
   } catch (e) { await notify(`❌ Update: git fetch failed.\n<code>${String(e).slice(0, 300)}</code>`); return }
 
-  if (localSha === remoteSha) { await notify(`✅ Already up to date (<code>${shortVer(localSha)}</code>).`); return }
+  if (localSha === remoteSha) { await progress(`✅ Already up to date (<code>${shortVer(localSha)}</code>).`); return }
 
   const ahead = (() => { try { return git(['rev-list', '--count', `${localSha}..${remoteSha}`]) } catch { return '?' } })()
   if (checkOnly) {
-    await notify(`⬆️ Update available: <code>${shortVer(localSha)}</code> → <code>${shortVer(remoteSha)}</code> (${ahead} commit(s)).\nSend /update to apply.`)
+    await progress(`⬆️ Update available: <code>${shortVer(localSha)}</code> → <code>${shortVer(remoteSha)}</code> (${ahead} commit(s)).\nSend /update to apply.`)
     return
   }
 
@@ -191,7 +209,7 @@ async function main(): Promise<void> {
 
   const oldVer = newestSemverDir()
   const oldGitref = oldVer ? (() => { try { return readFileSync(join(CACHE_BASE, oldVer, '.gitref'), 'utf8').trim() } catch { return oldVer } })() : '(none)'
-  await notify(`⬇️ Building <b>v${newVer}</b> (<code>${shortVer(newSha)}</code>)…`)
+  await progress(`⬇️ Building <b>v${newVer}</b> (<code>${shortVer(newSha)}</code>)…`)
 
   // 3. Build into a temp dir from the clone (everything except .git / node_modules / tests), install deps.
   mkdirSync(CACHE_BASE, { recursive: true })
@@ -228,7 +246,7 @@ async function main(): Promise<void> {
   renameSync(tmp, target)
 
   // 5. Restart on the new dir and health-check.
-  await notify(`♻️ Restarting on <b>v${newVer}</b>…`)
+  await progress(`♻️ Restarting on <b>v${newVer}</b>…`)
   const offset = logSize()
   try { writeFileSync(PENDING_EVENTS, '') } catch {}   // don't replay buffered inbound across the restart
   killBridge()
@@ -245,7 +263,7 @@ async function main(): Promise<void> {
   }
 
   // 6. Rollback.
-  await notify('⚠️ New build didn’t come up — rolling back…')
+  await progress('⚠️ New build didn’t come up — rolling back…')
   killBridge()
   await sleep(1000)
   try { rmSync(target, { recursive: true, force: true }) } catch {}
