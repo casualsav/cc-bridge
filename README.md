@@ -26,36 +26,36 @@ For multi-session, add the Telegram bot as an admin with full rights in a Telegr
 
 Send text, media, slash commands, and voice messages through Telegram. In multi-session mode, adding new group topics starts a new session, deleting a topic closes that session. 
 
-Bot commands:
+These commands are added by the bridge. Everything else is Claude Code's own — see below.
 
 | Command | What it does |
 | --- | --- |
 | `/start` | Welcome + full feature guide (and pairing steps if not paired) |
-| `/status` | Re-post the pinned status card at the bottom; pairing state if unpaired |
-| `/account` | Claude accounts — list, `add <name>`, `remove <name>` (multi-account) |
-| `/find <text>` | Search every session's conversation; tap a hit to resume |
-| `/queue <prompt>` | Per-session backlog — runs when the session goes idle (`/queue clear`) |
-| `/loop <goal>` | Re-run a goal until its check passes (`status` · `stop` · `stop now` · `resume`) |
-| `/budget` | Daily $ cap with 80%/100% warnings (`/budget 20` · `off`) |
-| `/rewind` | Open Claude Code's checkpoint picker as tappable buttons |
-| `/resume` | List recent sessions with last-activity times; tap one to relaunch (`claude --resume`) |
-| `/mode` | Interactive permission-mode switcher (`/mode <name>` jumps straight to one) |
-| `/plan` `/auto` `/default` `/acceptedits` `/bypass` | Quick mode switch |
-| `/model` | Show the current model (or `/model <name>` to switch) |
-| `/effort` | Reasoning effort — picker, or `/effort low\|medium\|high\|max` |
-| `/stop` | Interrupt the current task (sends Esc) |
+| `/stop` | Interrupt the current task — sends Esc (alias `/esc`) |
+| `/cancel` | Clear a stuck force-reply prompt (e.g. an unanswered "name a folder") |
+| `/back` | Get a stuck session — an editor, a pager, or an unrecognized screen — back to the Claude prompt |
+| `/restart` | Restart & resume the session (`/restart all` for every active session) |
+| `/resume` | List recent sessions with last-activity times; tap one to relaunch |
 | `/new` | Start a fresh conversation in the session |
-| `/compact` | Compact the conversation to free up context |
-| `/cost` | Usage & cost breakdown |
-| `/context` | Token-context usage |
-| `/stream` | Live-activity card style: `thoughts` · `actions` · `off` |
-| `/diff` | The session's uncommitted changes — stat + chunked patch |
+| `/files` | Browse, download, and edit files in the session's folder (web Mini App) |
+| `/find <text>` | Search every session's conversation; tap a hit to resume |
+| `/cron <when>` | Schedule a message for later (`/cron 12h` · `every 09:00` · `cancel`; alias `/schedule`) |
+| `/queue <prompt>` | Per-session backlog — runs when the session goes idle (`/queue clear`) |
+| `/loop <goal>` | Re-run a goal until its check passes (`status` · `stop` · `resume`) |
 | `/terminal` | Show recent terminal activity (40 lines) |
-| `/schedule` | Queue a message into a session for later (`/schedule 12h` · `/schedule cancel`) |
-| `/pin` | Toggle the pinned status message (`/pin on` \| `off` \| `refresh`) |
-| `/settings` | Channel settings panel — Claude.ai accounts, Github accounts, voice transcription, and more |
+| `/md` | Create a `.md` file in the working dir, then reply with its contents |
+| `/budget` | Daily $ cap with 80%/100% warnings (`/budget 20` · `off`) |
+| `/account` | Claude accounts — list, `add <name>`, `remove <name>` (multi-account) |
+| `/status` | Re-post the pinned status card at the bottom (`/pin` toggles it) |
+| `/health` | Bridge vitals — instance, uptime, panes, queues, watchdog |
+| `/stream` | Live-activity card style: `thoughts` · `actions` · `off` |
+| `/voice` | Voice-note replies on/off |
+| `/settings` | Channel settings panel — Claude.ai accounts, GitHub accounts, voice transcription, and more |
+| `/update` | Update the bridge (`/update claude` updates Claude itself) |
 
-All other `/slash` commands are relayed straight to Claude Code.
+**Mode shortcuts:** `/mode` opens the permission-mode switcher; `/plan` `/auto` `/default` `/acceptedits` `/bypass` jump straight to one.
+
+**Everything else is Claude Code's own** — `/model`, `/effort`, `/compact`, `/context`, `/cost`, `/usage`, `/diff`, `/rewind`, and any others — relayed straight through to the session.
 
 
 ## Upgrading
