@@ -3258,7 +3258,7 @@ async function paneBackUp(pane: string): Promise<boolean> {
 // "♻️ Restart all sessions" → restart every stale pane in place (sequentially — restarts type into
 // panes, and parallel key-streams interleave), then health-check that each came back to a prompt.
 // Failures get a per-session revive button (spawn `-c` in its previous topic); full success gets ✅.
-async function restartAllStaleSessions(chat: string): Promise<void> {
+async function restartAllStaleSessions(chat: string, onlyStale = true): Promise<void> {
   const say = (t: string, kb?: InlineKeyboard) =>
     bot.api.sendMessage(chat, t, { parse_mode: 'HTML', ...(kb ? { reply_markup: kb } : {}) }).catch(() => {})
   const installed = await claudeVersion()
@@ -3268,18 +3268,22 @@ async function restartAllStaleSessions(chat: string): Promise<void> {
     try {
       const cwd = await paneCwd(pane).catch(() => null)
       const file = cwd ? await transcriptForPane(pane, cwd) : null
-      const running = file ? lastVersionInTranscript(file) : null
-      if (!file || !running || !installed) continue
-      let newer = false
-      try { newer = Bun.semver.order(installed, running) > 0 } catch {}
-      if (!newer) continue
+      if (!file) continue
+      // Stale mode only targets sessions running an older Claude than installed; "all" takes every one.
+      if (onlyStale) {
+        const running = lastVersionInTranscript(file)
+        if (!running || !installed) continue
+        let newer = false
+        try { newer = Bun.semver.order(installed, running) > 0 } catch {}
+        if (!newer) continue
+      }
       const sid = await sessionForPane(pane, false).catch(() => null)
       const name = (sid ? getTopicBySession(sid)?.name : null) ?? (basename(cwd ?? '') || 'session')
       targets.push({ pane, sid, name, id: basename(file, '.jsonl'), cwd })
     } catch {}
   }
-  if (!targets.length) { await say('✅ Every session is already on the current Claude — nothing to restart.'); return }
-  await say(`♻️ Restarting ${targets.length === 1 ? 'the session' : `${targets.length} sessions`} on the new Claude…`)
+  if (!targets.length) { await say(onlyStale ? '✅ Every session is already on the current Claude — nothing to restart.' : 'ℹ️ No active sessions to restart.'); return }
+  await say(`♻️ Restarting ${targets.length === 1 ? 'the session' : `${targets.length} sessions`}${onlyStale ? ' on the new Claude' : ''}…`)
   // A restart can move a session to a NEW pane (spawned panes die on /exit) — track the pane that
   // hosts it now, so the health check below watches the right one.
   for (const t of targets) { try { const now = await restartPaneSessionCore(t.pane, t.id); if (now) t.pane = now } catch {} }
@@ -3306,7 +3310,7 @@ async function restartAllStaleSessions(chat: string): Promise<void> {
   }
   const down = [...pending]
   if (!down.length) {
-    await say(`✅ All ${targets.length === 1 ? 'done — the session is' : `${targets.length} sessions are`} back up on <b>v${escapeHtml(installed ?? '?')}</b>, conversations resumed in place.`)
+    await say(`✅ All ${targets.length === 1 ? 'done — the session is' : `${targets.length} sessions are`} back up${onlyStale ? ` on <b>v${escapeHtml(installed ?? '?')}</b>` : ''}, conversations resumed in place.`)
     return
   }
   // Second chance, AUTOMATIC (no tap needed): if the session is already live in a pane, just adopt
@@ -3332,7 +3336,7 @@ async function restartAllStaleSessions(chat: string): Promise<void> {
   }
   const still = [...lost, ...retried.filter(t => pending2.has(t))]
   if (!still.length) {
-    await say(`✅ All ${targets.length === 1 ? 'done — the session is' : `${targets.length} sessions are`} back up on <b>v${escapeHtml(installed ?? '?')}</b> (${down.length === 1 ? 'one was' : `${down.length} were`} respawned in a fresh pane, conversations intact).`)
+    await say(`✅ All ${targets.length === 1 ? 'done — the session is' : `${targets.length} sessions are`} back up${onlyStale ? ` on <b>v${escapeHtml(installed ?? '?')}</b>` : ''} (${down.length === 1 ? 'one was' : `${down.length} were`} respawned in a fresh pane, conversations intact).`)
     return
   }
   const kb = new InlineKeyboard()
@@ -4793,6 +4797,12 @@ let ghLoginInFlight = false
 // @tg_bridge tag) is reused, so the daemon re-adopts it automatically once the new REPL comes up.
 bot.command('restart', async ctx => {
   if (!dmCommandGate(ctx)) return
+  // `/restart all` restarts every active session (each: /exit then resume in place); bare /restart
+  // restarts only the focused one. Reuses the stale-restart machinery with the staleness filter off.
+  if ((ctx.match ?? '').toString().trim().toLowerCase() === 'all') {
+    await restartAllStaleSessions(String(ctx.chat.id), false)
+    return
+  }
   const t = await commandTarget(ctx)
   if (!t) return
   const paneId = t.paneId
@@ -7367,7 +7377,7 @@ void (async () => {
               { command: 'find', description: 'Search all sessions\' conversations (/find <text>)' },
               { command: 'files', description: 'Browse / download / edit files in this session\'s folder' },
               { command: 'account', description: 'Claude accounts — list, add, remove (multi-account)' },
-              { command: 'restart', description: 'Exit and resume the current session (picks up config changes)' },
+              { command: 'restart', description: 'Restart & resume the current session — or "/restart all" for every session' },
               { command: 'reset', description: 'Clear the current conversation in place' },
               { command: 'stream', description: 'How replies arrive: thoughts · actions · off' },
               { command: 'effort', description: 'Reasoning effort: low · medium · high · xhigh · max · auto' },
