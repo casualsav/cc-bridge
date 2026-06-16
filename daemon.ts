@@ -4900,6 +4900,7 @@ bot.command('rename', async ctx => {
 // in the TUI). withInjection pauses the watcher and re-baselines afterward so
 // the resulting pane change isn't mistaken for a new prompt/event.
 bot.command('stop', confirmStop)
+bot.command('esc', confirmStop)   // alias (muscle memory — it's "Esc" in the TUI)
 
 // /files — open the Files Mini App at this session's folder (web_app button carries the live tunnel
 // URL). MUST be registered before the catch-all bot.on('message:text') below, or /files gets pasted
