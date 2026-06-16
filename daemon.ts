@@ -7229,12 +7229,23 @@ const filesPublicUrl = (): string | null => filesFixedUrl || filesTunnel?.url() 
 const wlog = (m: string) => process.stderr.write(`daemon: ${m}\n`)
 // Deep-link launch tokens for the in-topic opener (t.me/<bot>?startapp=<token>): a filesystem path
 // won't fit the 64-char startapp limit, so /files mints a short token → cwd here and the Mini App
-// exchanges it via /api/resolve. In-memory + 1h TTL; a daemon restart expires open links (re-run /files).
+// exchanges it via /api/resolve. PERSISTED to disk (24h TTL) so the link survives daemon restarts —
+// in-memory only, a deploy/restart used to expire every open /files link with an "api 404".
+const START_TOKEN_TTL_MS = 24 * 3600_000
+const START_TOKENS_FILE = join(STATE_DIR, 'file-start-tokens.json')
 const fileStartTokens = new Map<string, { cwd: string; exp: number }>()
+try {
+  const saved = JSON.parse(readFileSync(START_TOKENS_FILE, 'utf8')) as Record<string, { cwd: string; exp: number }>
+  for (const [k, v] of Object.entries(saved)) if (v?.exp > Date.now()) fileStartTokens.set(k, v)
+} catch {}
+function saveStartTokens(): void {
+  try { writeFileSync(START_TOKENS_FILE, JSON.stringify(Object.fromEntries(fileStartTokens))) } catch {}
+}
 function mintStartToken(cwd: string): string {
   for (const [k, v] of fileStartTokens) if (v.exp < Date.now()) fileStartTokens.delete(k)   // cheap GC
   const tok = randomBytes(9).toString('base64url')
-  fileStartTokens.set(tok, { cwd, exp: Date.now() + 3600_000 })
+  fileStartTokens.set(tok, { cwd, exp: Date.now() + START_TOKEN_TTL_MS })
+  saveStartTokens()
   return tok
 }
 const resolveStartToken = (tok: string): string | null => {
