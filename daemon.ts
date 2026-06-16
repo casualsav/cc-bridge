@@ -57,7 +57,7 @@ import {
 import {
   setGroupChatId, getGroupChatId, isTopicMode, loadTopics, genSessionId,
   getSessionByThread, getTopicBySession, setTopic, removeTopic, updateTopic, listTopics,
-  getGeneralSession, setGeneralSession,
+  getGeneralSession, setGeneralSession, findTopicByCwd,
 } from './topics.ts'
 import {
   initTopicRuntime, sessionForPane, paneForSession, ensureSessionTopic, closeTopicForPane,
@@ -6151,8 +6151,18 @@ bot.on('callback_query:data', async ctx => {
     const id = resumeMatch[1]
     const hit = findSessionCwd(id, allProjectsDirs())
     const dir = hit?.cwd ?? homedir()
+    // Reuse an existing topic parked for this cwd (its pane is gone) instead of letting discovery
+    // mint a fresh tg-sid: without a preset, the new pane relies on racy cwd-adoption and opens a
+    // needless second topic that it then abandons when adoption routes it back to the original.
+    // Pre-stamping makes it deterministic — the pane lands straight in the existing topic.
+    let preset: string | undefined
+    if (isTopicMode()) {
+      const cand = findTopicByCwd(dir)
+      if (cand && !(await paneForSession(cand.sessionId).catch(() => null))) preset = cand.sessionId
+    }
     // Resume under the account the session was recorded in (its projects root names it).
-    const ok = await spawnSession(dir, `--resume ${id}`, undefined, hit ? accountForProjectsDir(hit.root) : MAIN_ACCOUNT)
+    const ok = await spawnSession(dir, `--resume ${id}`, preset, hit ? accountForProjectsDir(hit.root) : MAIN_ACCOUNT)
+    if (ok && preset) await reopenSessionTopic(preset)   // reopen the tab NOW if it was closed
     await ctx.reply(ok
       ? `🔄 Resuming in <code>${escapeHtml(dir)}</code> — connecting to it shortly.`
       : `❌ Couldn't resume that session in <code>${escapeHtml(dir)}</code>.`,
