@@ -23,7 +23,7 @@ import {
 // replace a daemon left running stale code after a plugin upgrade.
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
-import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isSubmitScreen, stripAnsi, paneLines, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
+import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isSubmitScreen, detectEditorState, stripAnsi, paneLines, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
 import { resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, listRecentSessions, findSessionCwd, searchTranscripts } from './transcript.ts'
 import {
   initAccounts, listAccounts, accountByName, accountForTranscript, accountForProjectsDir,
@@ -1545,6 +1545,48 @@ async function paneKeys(paneId: string, keys: string[], settle?: [number, number
 // the callback's topic (targetPaneOf), so a tap in session B's topic drives B even if A is focused.
 async function withPaneInjection<T>(paneId: string, fn: () => Promise<T>): Promise<T> {
   return paneId === focus.activePaneId && focus.paneWatcher ? focus.paneWatcher.withInjection(fn) : fn()
+}
+
+// ---- "Back to Claude" recovery + editor/pager guard ----
+// Some TUI states capture the keyboard (an external editor, a pager, a stray modal), so inbound
+// typed into the pane lands in the wrong place and the user is stranded. recoverToPrompt escalates —
+// Esc, then the editor-/pager-specific quit, then Ctrl-C — until the pane is back at a Claude prompt.
+const atPrompt = async (paneId: string): Promise<boolean> => onNormalPrompt(await capturePane(paneId).catch(() => ''))
+async function recoverToPrompt(paneId: string): Promise<boolean> {
+  return withPaneInjection(paneId, async () => {
+    if (await atPrompt(paneId)) return true
+    for (let i = 0; i < 2; i++) {                       // leave insert/visual; dismiss a modal
+      await sendKeys(paneId, ['Escape']); await waitForSettle(paneId, 150, 1200)
+      if (await atPrompt(paneId)) return true
+    }
+    const ed = detectEditorState(await capturePane(paneId).catch(() => ''))
+    if (ed?.kind === 'pager') await sendKeys(paneId, ['q'])
+    else if (ed?.kind === 'nano') { await sendKeys(paneId, ['C-x']); await waitForSettle(paneId, 150, 1000); await sendKeys(paneId, ['n']) }  // ^X then "no" → discard
+    else { await sendKeysLiteral(paneId, ':q!'); await sendKeys(paneId, ['Enter']) }   // vim (and the unknown default): quit without saving
+    await waitForSettle(paneId, 200, 1500)
+    if (await atPrompt(paneId)) return true
+    await sendKeys(paneId, ['C-c']); await waitForSettle(paneId, 200, 1500)            // last resort
+    return atPrompt(paneId)
+  })
+}
+async function saveEditorAndQuit(paneId: string): Promise<boolean> {
+  return withPaneInjection(paneId, async () => {
+    const ed = detectEditorState(await capturePane(paneId).catch(() => ''))
+    if (ed?.kind === 'nano') { await sendKeys(paneId, ['C-o']); await waitForSettle(paneId, 150, 1000); await sendKeys(paneId, ['Enter']); await waitForSettle(paneId, 150, 1000); await sendKeys(paneId, ['C-x']) }
+    else { await sendKeys(paneId, ['Escape']); await waitForSettle(paneId, 120, 800); await sendKeysLiteral(paneId, ':wq'); await sendKeys(paneId, ['Enter']) }
+    await waitForSettle(paneId, 200, 1500)
+    return atPrompt(paneId)
+  })
+}
+
+// Inbound held back because its pane was in an editor/pager (per pane → the queued messages, FIFO),
+// plus the set of panes that already have an open "you're in an editor" card so a burst asks once.
+const editorHeld = new Map<string, InboundParams[]>()
+const editorCardPane = new Set<string>()
+async function flushEditorHeld(paneId: string): Promise<void> {
+  const held = editorHeld.get(paneId)
+  editorHeld.delete(paneId)
+  for (const p of held ?? []) emitInbound(p, paneId)
 }
 
 // With nothing to deliver to, inbound just buffers silently — the most common "it's not
@@ -4896,6 +4938,17 @@ bot.command('cancel', async ctx => {
   await ctx.reply(n ? `✖️ Cleared ${n} pending prompt${n === 1 ? '' : 's'}.` : 'Nothing pending to cancel.').catch(() => {})
 })
 
+// /back — panic button: escalate Esc → editor/pager quit → Ctrl-C until the session is back at a
+// Claude prompt. Rescues a pane stranded in Vim/a pager/a stray modal (e.g. after a ctrl+g chord).
+bot.command('back', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  const t = await commandTarget(ctx)
+  if (!t) return
+  if (await atPrompt(t.paneId)) { await ctx.reply('✅ Already at the Claude prompt.').catch(() => {}); return }
+  const ok = await recoverToPrompt(t.paneId)
+  await ctx.reply(ok ? '✅ Back at the Claude prompt.' : '⚠️ Couldn’t return it to the prompt — check the session.').catch(() => {})
+})
+
 // Inline-button handler for permission requests + mode cycling + prompt answers.
 // A topic the USER creates (Telegram's ➕ create-topic UI) becomes a session via a two-button
 // card: 📁 <focused cwd>/<topic name> (one tap — name a tab "money" while the main session runs
@@ -4998,6 +5051,27 @@ const TOPIC_SWEEP_MS = 2 * 60_000
 
 bot.on('callback_query:data', async ctx => {
   const data = ctx.callbackQuery.data
+
+  // Editor/pager guard buttons: quit (edq), save & quit (eds), or type-anyway (edt). After a quit/
+  // save the pane is back at the Claude prompt; either way the held message(s) are then delivered —
+  // to Claude after a quit, or into the editor for "type anyway".
+  if (data.startsWith('edq:') || data.startsWith('eds:') || data.startsWith('edt:')) {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) { await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {}); return }
+    const pane = data.slice(4)
+    editorCardPane.delete(pane)
+    await ctx.editMessageReplyMarkup().catch(() => {})   // drop the buttons
+    if (data.startsWith('edt:')) {
+      await ctx.answerCallbackQuery({ text: 'Typing into the editor…' }).catch(() => {})
+      await flushEditorHeld(pane)
+      return
+    }
+    const save = data.startsWith('eds:')
+    await ctx.answerCallbackQuery({ text: save ? 'Saving & quitting…' : 'Quitting to Claude…' }).catch(() => {})
+    const ok = save ? await saveEditorAndQuit(pane) : await recoverToPrompt(pane)
+    await flushEditorHeld(pane)
+    await ctx.reply(ok ? '✅ Back at the Claude prompt.' : '⚠️ Couldn’t confirm it returned to the prompt — check the session.').catch(() => {})
+    return
+  }
 
   // Pinned-message quick actions → the same pickers as /model, /effort, /mode, /settings.
   if (data === 'st:model' || data === 'st:effort' || data === 'st:mode' || data === 'st:settings') {
@@ -6455,6 +6529,27 @@ async function handleInbound(
       else void generalAnchorLost(chat_id)
     }
   }
+  // Editor/pager guard: if the destination pane is sitting in an external editor or pager, typing
+  // the message in would land in the wrong place (the "ctrl+g into Vim" trap). Hold it and offer a
+  // guided way out instead of mistyping. Gated on !onNormalPrompt so a misread can't block a ready
+  // Claude, and skipped while a select/permission prompt is up (those have their own relays).
+  const effPane = targetPane ?? focus.activePaneId
+  if (effPane) {
+    const cap = await capturePane(effPane).catch(() => '')
+    const ed = cap && !onNormalPrompt(cap) && !detectUserPrompt(cap) && !detectPermissionPrompt(cap) ? detectEditorState(cap) : null
+    if (ed) {
+      editorHeld.set(effPane, [...(editorHeld.get(effPane) ?? []), params])
+      if (!editorCardPane.has(effPane)) {
+        editorCardPane.add(effPane)
+        const kb = new InlineKeyboard().text('🔙 Quit to Claude', `edq:${effPane}`)
+        if (ed.kind !== 'pager') kb.text('💾 Save & quit', `eds:${effPane}`)
+        kb.row().text('⌨️ Type into it anyway', `edt:${effPane}`)
+        await ctx.reply(`⌨️ This session is in <b>${escapeHtml(ed.label)}</b> — your message wasn’t typed into Claude. Quit back to Claude (then it's delivered), or type it into the editor anyway.`,
+          { parse_mode: 'HTML', reply_markup: kb }).catch(() => {})
+      }
+      return
+    }
+  }
   // Long prompts Telegram split client-side re-merge into one injection (see deliverInbound).
   const mergeKey = `${chat_id}:${typeof threadId === 'number' ? threadId : 'dm'}:${from.id}`
   deliverInbound(mergeKey, params, targetPane, imagePath || attachmentPath || attach ? null : content.length)
@@ -7429,6 +7524,7 @@ void (async () => {
               { command: 'start', description: 'Welcome + everything this bot can do' },
               { command: 'stop', description: 'Interrupt the current task (Esc)' },
               { command: 'cancel', description: 'Clear a stuck force-reply prompt (e.g. an unanswered “name a folder”)' },
+              { command: 'back', description: 'Escape a stuck editor/pager — get the session back to the Claude prompt' },
               { command: 'status', description: 'Re-post the status pin at the bottom' },
               { command: 'settings', description: 'Channel settings — mirror, pin, MCP, voice' },
               { command: 'cron', description: 'Schedule messages (/cron 12h · every 09:00 · */30 9-17 * * 1-5 · cancel)' },

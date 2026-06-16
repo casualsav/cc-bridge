@@ -1,6 +1,6 @@
 // Prompt detection from pane captures — select menus vs permission dialogs. Pure functions.
 import { test, expect } from 'bun:test'
-import { stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice } from './prompt.ts'
+import { stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, detectEditorState, onNormalPrompt } from './prompt.ts'
 
 test('stripAnsi removes CSI escape sequences', () => {
   expect(stripAnsi('\x1b[1mbold\x1b[0m text')).toBe('bold text')
@@ -52,6 +52,27 @@ test('detectUserPrompt relays the plan-approval prompt (shift+tab footer, no ↑
 
 test('detectUserPrompt returns null when there is no live select footer', () => {
   expect(detectUserPrompt('just some terminal output\n❯ \n')).toBeNull()
+})
+
+test('detectEditorState recognises vim, nano, and a pager — and ignores a normal prompt', () => {
+  const vim = ['# my plan', 'do the thing', '~', '~', '~', '~', '"plan.md" 2L, 21C', '-- INSERT --'].join('\n')
+  expect(detectEditorState(vim)?.kind).toBe('vim')
+
+  const nano = [
+    '  GNU nano 7.2            plan.md',
+    'edit me',
+    '^G Get Help   ^O Write Out   ^W Where Is   ^K Cut',
+    '^X Exit       ^R Read File   ^\\ Replace    ^U Paste',
+  ].join('\n')
+  expect(detectEditorState(nano)?.kind).toBe('nano')
+
+  const pager = ['line one', 'line two', 'lines 1-2/2 (END)', ':'].join('\n')
+  expect(detectEditorState(pager)?.kind).toBe('pager')
+
+  // A normal Claude prompt (input box) must NOT read as an editor.
+  const normal = ['╭───────────╮', '❯ ', '╰───────────╯', '? for shortcuts'].join('\n')
+  expect(detectEditorState(normal)).toBeNull()
+  expect(onNormalPrompt(normal)).toBe(true)
 })
 
 test('detectPermissionPrompt parses a Yes/No confirmation', () => {

@@ -369,6 +369,37 @@ export function isPluginInstallUserScope(paneText: string): boolean {
   return region.some(l => /^\s*[>❯●]\s*install for you \(user scope\)/i.test(l))
 }
 
+// ---- External editor / pager detection ----
+// Some pane states CAPTURE the keyboard, so the bridge's normal "type the message + Enter" lands in
+// the wrong place and the user is silently stranded (e.g. the plan prompt's "ctrl+g to edit" opens
+// $EDITOR). We classify the three common captors so the daemon can offer a guided way out instead of
+// mistyping into them. Deliberately conservative — the caller also gates on !onNormalPrompt so a
+// false hit can never block a ready Claude prompt.
+export type EditorState = { kind: 'vim' | 'nano' | 'pager'; label: string }
+export function detectEditorState(paneText: string): EditorState | null {
+  const lines = paneLines(paneText)
+  if (!lines.length) return null
+  const tail = lines.slice(-8)
+  const joined = tail.join('\n')
+  const last = (lines[lines.length - 1] ?? '').trim()
+
+  // nano: its bottom two rows are ^X/^O/^G/^W/^K shortcut columns — a row with ≥2 "^<LETTER>"
+  // tokens plus at least one of the signature ones is unmistakable.
+  if (tail.some(l => (l.match(/\^[A-Z]\b/g) ?? []).length >= 2) && /\^(X|O|G|W|K)\b/.test(joined)) {
+    return { kind: 'nano', label: 'nano' }
+  }
+  // vim: an explicit mode line, or ≥3 "~" empty-line fillers down the left margin (vim's hallmark).
+  if (/^-- (INSERT|REPLACE|VISUAL|VISUAL LINE|VISUAL BLOCK)( --)?\s*$/im.test(joined)) return { kind: 'vim', label: 'Vim' }
+  if (lines.filter(l => /^~\s*$/.test(l)).length >= 3) return { kind: 'vim', label: 'Vim' }
+
+  // pager (less / man / git's pager): the bottom line is a lone ":" prompt, "(END)", a
+  // "lines i-j/k" status, or a "--More--" footer.
+  if (last === ':' || last === '(END)' || /\(END\)$/.test(last) || /--More--/.test(joined) || /\blines \d+-\d+\/\d+/.test(joined)) {
+    return { kind: 'pager', label: 'a pager' }
+  }
+  return null
+}
+
 // ---- Mode detection (moved from daemon.ts — pure pane-text parsers) ----
 
 export type CcMode = 'default' | 'acceptEdits' | 'plan' | 'auto' | 'bypassPermissions'
