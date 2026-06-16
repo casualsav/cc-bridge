@@ -4878,6 +4878,24 @@ bot.command('files', async ctx => {
       ...(t.replyThread ? { message_thread_id: t.replyThread } : {}) }).catch(e => wlog(`/files send failed: ${e}`))
 })
 
+// /cancel — escape hatch for a wedged force-reply. Telegram keeps an unanswered force_reply armed
+// (re-focusing the reply box every time the chat reopens), so a prompt the user doesn't want to
+// answer would trap them. This drops every pending force-reply target in this chat AND deletes the
+// prompt messages, which is what actually disarms the reply UI client-side.
+bot.command('cancel', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  const chat = String(ctx.chat?.id)
+  let n = 0
+  for (const key of [...replyTargets.keys()]) {
+    const idx = key.lastIndexOf(':')
+    if (key.slice(0, idx) !== chat) continue
+    const mid = Number(key.slice(idx + 1))
+    replyTargets.delete(key)
+    if (mid) { await ctx.api.deleteMessage(ctx.chat!.id, mid).catch(() => {}); n++ }
+  }
+  await ctx.reply(n ? `✖️ Cleared ${n} pending prompt${n === 1 ? '' : 's'}.` : 'Nothing pending to cancel.').catch(() => {})
+})
+
 // Inline-button handler for permission requests + mode cycling + prompt answers.
 // A topic the USER creates (Telegram's ➕ create-topic UI) becomes a session via a two-button
 // card: 📁 <focused cwd>/<topic name> (one tap — name a tab "money" while the main session runs
@@ -4914,7 +4932,7 @@ bot.on('message:forum_topic_created', async ctx => {
     if (sent) return
   }
   const sent = await ctx.reply(
-    `📂 <b>New topic “${escapeHtml(name)}”</b> — which folder should its Claude session run in?\n\nReply with a folder path (created if missing; <code>~/…</code> works).`,
+    `📂 <b>New topic “${escapeHtml(name)}”</b> — which folder should its Claude session run in?\n\nReply with a folder path (created if missing; <code>~/…</code> works), or <code>/cancel</code> to drop it.`,
     { parse_mode: 'HTML', reply_markup: { force_reply: true, input_field_placeholder: 'Folder path' } },
   ).catch(() => null)
   if (sent) replyTargets.set(`${ctx.chat.id}:${sent.message_id}`, { kind: 'topiccreate', threadId: thread, name })
@@ -6556,6 +6574,14 @@ bot.on('message:text', async ctx => {
     if (target) {
       // authurl stays armed — the login input tolerates retries; everything else is one-shot.
       if (target.kind !== 'authurl') replyTargets.delete(replyKey)
+      // Replying "cancel" (or /cancel) abandons the flow and deletes the prompt, so an unanswered
+      // force_reply can't keep re-grabbing the input every time the chat reopens.
+      if (/^\/?(cancel|nvm|nevermind|never\s?mind|skip|stop)$/i.test(text.trim())) {
+        replyTargets.delete(replyKey)
+        await ctx.api.deleteMessage(ctx.chat!.id, replyTo.message_id).catch(() => {})
+        await ctx.reply('✖️ Cancelled.').catch(() => {})
+        return
+      }
       if (!dmCommandGate(ctx)) return
       switch (target.kind) {
         // Folder for a user-created topic → bind THAT topic to the folder and spawn its session
@@ -6584,6 +6610,7 @@ bot.on('message:text', async ctx => {
           catch { topicBranchCache.set(sid, '') }
           const ok = await spawnSession(dir, '', sid)
           if (!ok) removeTopic(sid)
+          await ctx.api.deleteMessage(ctx.chat!.id, replyTo.message_id).catch(() => {})   // disarm the force-reply
           const note = created ? ' (📁 created it for you)' : ''
           await ctx.reply(ok
             ? `🚀 Starting this topic's session in <code>${escapeHtml(dir)}</code>${note} — type here to drive it once it's up.`
@@ -7378,6 +7405,7 @@ void (async () => {
             [
               { command: 'start', description: 'Welcome + everything this bot can do' },
               { command: 'stop', description: 'Interrupt the current task (Esc)' },
+              { command: 'cancel', description: 'Clear a stuck force-reply prompt (e.g. an unanswered “name a folder”)' },
               { command: 'status', description: 'Re-post the status pin at the bottom' },
               { command: 'settings', description: 'Channel settings — mirror, pin, MCP, voice' },
               { command: 'cron', description: 'Schedule messages (/cron 12h · every 09:00 · */30 9-17 * * 1-5 · cancel)' },
