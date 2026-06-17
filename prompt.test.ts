@@ -13,15 +13,38 @@ test('detectModelUnavailable extracts the offending model name', () => {
   expect(detectModelUnavailable('❯ /model opus')).toBe(null)
 })
 
-test('detectCompacting fires only on the live spinner glyph + word, not on prose', () => {
-  // The rotating spinner glyph is required: that's what distinguishes the live compaction line
-  // from prose / chat / our own status card that merely contain the word (the bug being fixed).
-  expect(detectCompacting('✻ Compacting conversation… (esc to interrupt)')).toBe(true)
-  expect(detectCompacting('\x1b[1m✳ Compacting conversation…\x1b[0m')).toBe(true)
-  // No spinner glyph → prose / chat / our own status card must NOT match.
-  expect(detectCompacting('we should run /compact later — Compacting conversation… frees context')).toBe(false)
-  expect(detectCompacting('🗜️ Compacting conversation…\n████░░░░')).toBe(false)
-  expect(detectCompacting('* Compacting the list of items…')).toBe(false)
+test('detectCompacting fires on the live footer line, not on the same word up in scrollback', () => {
+  // Live: the compaction line sits in the footer region just above the input box + statusline.
+  const live = [
+    '● Earlier output…',
+    '',
+    '✻ Compacting conversation… ████████░░░░ 64%',
+    '',
+    '───────────────────────────────',
+    '❯ ',
+    '───────────────────────────────',
+    '  user@host:/projects (main) | Opus 4.8',
+    '  ε:max | ✻think | ctx ██░ 4%/1000k | $1.00',
+    '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+  ].join('\n')
+  expect(detectCompacting(live)).toBe(true)
+
+  // Scrollback: the assistant talked ABOUT compaction, but the pane is now idle at a normal prompt.
+  // The word is far above the footer, so it must NOT count (this was the loop bug).
+  const scrollback = [
+    'Yeah, that was my bug — the detector now requires the live "Compacting conversation…" line.',
+    'So me just talking about compaction here in chat will not fire a card anymore.',
+    '',
+    'More discussion, more lines of output pushing the mention up into scrollback…',
+    'line', 'line', 'line', 'line', 'line', 'line',
+    '───────────────────────────────',
+    '❯ ',
+    '───────────────────────────────',
+    '  user@host:/projects (main) | Opus 4.8',
+    '  ε:max | ✻think | ctx ██░ 4%/1000k | $1.00',
+    '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+  ].join('\n')
+  expect(detectCompacting(scrollback)).toBe(false)
   expect(detectCompacting('just normal output')).toBe(false)
 })
 

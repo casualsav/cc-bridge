@@ -449,15 +449,31 @@ export function detectModelUnavailable(paneText: string): string | null {
   return m ? m[1].trim() : null
 }
 
-// True while a /compact is actively running. Claude Code renders a live spinner line — a rotating
-// animation glyph immediately followed by the word "Compacting" — that disappears when compaction
-// finishes. We REQUIRE that leading spinner glyph: matching the bare word "compacting" tripped on
-// assistant prose, on chat that merely discusses compaction, and on our own relayed status card
-// (none of which carry the glyph), which re-posted a card on every frame. Plain "*" is excluded
-// from the glyph set so a markdown bullet ("* Compacting …") can't stand in for the live spinner.
-const COMPACT_SPINNER = /[✶✳✻✽✺✷✸✹✢✣⣾⣽⣻⢿⡿⣟⣯⣷]\s*Compacting\b/i
+// True when the LIVE compaction line is on the pane. Claude Code renders "Compacting conversation…"
+// (with a progress bar) in the footer region — the spinner slot just above the input box — while a
+// /compact runs, and it vanishes when compaction finishes. We look ONLY at the tail (the live
+// footer), never the whole capture: the word also appears up in scrolled output — assistant prose,
+// this repo's own code/tests, our chat about the feature, our own relayed status card — and matching
+// THOSE re-posted a card on every frame (the loop bug). The footer's live spinner/box/statusline is
+// ~6-8 non-empty lines, so the compaction line lands within the last ~10. Liveness (a turn actually
+// running, vs. an idle pane whose last reply merely mentions compaction) is enforced by the caller
+// via the transcript — this position check alone can't tell a finished reply from a live spinner.
 export function detectCompacting(paneText: string): boolean {
-  return stripAnsi(paneText).split('\n').some(l => COMPACT_SPINNER.test(l))
+  const lines = stripAnsi(paneText).split('\n').filter(l => l.trim())
+  return lines.slice(-10).some(l => /compacting\b/i.test(l))
+}
+
+// The real compaction progress percentage Claude Code renders on the live line ("Compacting
+// conversation… <bar> 64%"), or null when the line carries no percentage (older CC, or a phase
+// without one). Same footer-only window as detectCompacting so a "%" elsewhere can't be misread.
+// Lets the status card mirror the genuine progress instead of a synthetic animation.
+export function compactPercent(paneText: string): number | null {
+  const lines = stripAnsi(paneText).split('\n').filter(l => l.trim()).slice(-10)
+  for (const l of lines) {
+    const m = /compacting\b[^\n]*?(\d{1,3})\s*%/i.exec(l)
+    if (m) return Math.max(0, Math.min(100, parseInt(m[1], 10)))
+  }
+  return null
 }
 
 // True when the pane is at Claude Code's normal prompt (input box visible), where reading or

@@ -23,7 +23,7 @@ import {
 // replace a daemon left running stale code after a plugin upgrade.
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
-import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, stripAnsi, paneLines, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
+import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
 import { resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, listRecentSessions, findSessionCwd, searchTranscripts } from './transcript.ts'
 import {
   initAccounts, listAccounts, accountByName, accountForTranscript, accountForProjectsDir,
@@ -1073,7 +1073,7 @@ async function scanAuxPanePrompts(pane: string): Promise<void> {
   // (keyed on the reset minute), so several panes showing the same banner relay/schedule once.
   void handleUsageLimit(text, pane)
   void handleModelUnavailable(text, pane)
-  if (detectCompacting(text)) { void startCompactionWatch(pane); return }
+  if (detectCompacting(text)) { void maybeStartCompaction(pane, text); return }
 
   // System stalls auto-dismiss exactly like the focused path — they'd wedge queued injections.
   if (isUsageLimitChoice(text)) { void dismissUsageLimitChoice(pane); return }
@@ -1963,7 +1963,7 @@ async function handleUsageLimit(text: string, origin: string | null = focus.acti
 function onPaneEvent(text: string): void {
   void handleUsageLimit(text)
   void handleModelUnavailable(text)
-  if (focus.activePaneId && detectCompacting(text)) void startCompactionWatch(focus.activePaneId)
+  if (focus.activePaneId) void maybeStartCompaction(focus.activePaneId, text)
   // Diagnostic: when TELEGRAM_DEBUG_PANE=1, append each pane frame + the prompt
   // detection result to /tmp/tg-pane-debug.log, so a missed prompt can be traced
   // against the exact rendering. Off by default; no effect on normal operation.
@@ -2231,10 +2231,32 @@ function compactBar(step: number): string {
   return '█'.repeat(filled) + '░'.repeat(width - filled)
 }
 
+// The card's progress line. Prefer Claude Code's REAL percentage (mirrored from the live pane) so
+// the bar tracks genuine progress; fall back to the synthetic cycling bar when the pane exposes no
+// percentage. `pct` is null when there's nothing to mirror.
+function compactProgress(pct: number | null, step: number): string {
+  return pct != null ? `${pinBar(pct, 12)} ${pct}%` : compactBar(step)
+}
+
+// Gate the compaction card on LIVENESS, not just screen content. detectCompacting only proves the
+// word is in the footer region; it can't tell a live spinner from an idle pane whose last reply
+// merely mentions compaction (exactly the case that looped — this very dev session keeps printing
+// "Compacting…" while we discuss the feature). The transcript is the source of truth: a card opens
+// only when a turn is actually in progress. Cheap guards first (already tracking / word absent) so
+// the transcript read only happens on a real candidate frame.
+async function maybeStartCompaction(pane: string, text: string): Promise<void> {
+  if (compactWatches.has(pane)) return
+  if (!detectCompacting(text)) return
+  const cwd = await paneCwd(pane).catch(() => null)
+  const file = await transcriptForPane(pane, cwd)
+  if (!file || !turnInProgress(file)) return   // word on screen but the session is idle → scrollback, not a live compaction
+  void startCompactionWatch(pane, text)
+}
+
 // Kick off (idempotently) the status card for a pane that just started compacting. Safe to call on
 // every pane frame: the map guard is set synchronously (no await before it), so repeated frames in
 // the same compaction never post a second card.
-async function startCompactionWatch(pane: string): Promise<void> {
+async function startCompactionWatch(pane: string, initialText = ''): Promise<void> {
   if (compactWatches.has(pane)) return
   const slot: CompactWatch = { chat: '', thread: undefined, msgId: 0, startedAt: Date.now(), step: 1, timer: setTimeout(() => {}, 0) }
   clearTimeout(slot.timer)
@@ -2243,7 +2265,7 @@ async function startCompactionWatch(pane: string): Promise<void> {
   if (!target) { compactWatches.delete(pane); return }
   slot.chat = target.chat
   slot.thread = target.thread
-  const msg = await bot.api.sendMessage(target.chat, `🗜️ Compacting conversation…\n<code>${compactBar(slot.step)}</code>`, {
+  const msg = await bot.api.sendMessage(target.chat, `🗜️ Compacting conversation…\n<code>${compactProgress(compactPercent(initialText), slot.step)}</code>`, {
     parse_mode: 'HTML',
     ...(target.thread ? { message_thread_id: target.thread } : {}),
   }).catch(() => null)
@@ -2253,10 +2275,11 @@ async function startCompactionWatch(pane: string): Promise<void> {
     const w = compactWatches.get(pane)
     if (!w) return
     const elapsed = Date.now() - w.startedAt
-    const still = detectCompacting(await capturePane(pane).catch(() => ''))
+    const cap = await capturePane(pane).catch(() => '')
+    const still = detectCompacting(cap)
     if (still && elapsed < 5 * 60_000) {
       w.step += 1
-      await bot.api.editMessageText(w.chat, w.msgId, `🗜️ Compacting conversation…\n<code>${compactBar(w.step)}</code>`, {
+      await bot.api.editMessageText(w.chat, w.msgId, `🗜️ Compacting conversation…\n<code>${compactProgress(compactPercent(cap), w.step)}</code>`, {
         parse_mode: 'HTML',
       }).catch(() => {})
       w.timer = setTimeout(() => void tick(), 2000)
