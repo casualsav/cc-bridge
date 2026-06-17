@@ -2055,6 +2055,13 @@ function promptHash(prompt: PromptInfo): string {
   return hashText(prompt.question + '|' + prompt.options.map(o => o.label).join('|'))
 }
 
+// Hash of the prompt currently on a pane (or undefined if none) — captured BEFORE answering a
+// tabbed question so handleTabbedAdvance can tell "the form advanced" from "still the same tab".
+async function currentPromptHash(paneId: string): Promise<string | undefined> {
+  const p = detectUserPrompt(await capturePane(paneId).catch(() => ''))
+  return p ? promptHash(p) : undefined
+}
+
 // lastRelayedUuid (advanced before each await, like the loop) so neither path double-sends.
 // Relay any assistant text that's landed but not yet been sent, so it arrives BEFORE a
 // prompt/permission menu we're about to push. The relay loop normally flushes text at idle,
@@ -2095,27 +2102,40 @@ function parseReviewAnswers(paneText: string): { question: string; answer: strin
 // watcher is paused (and re-baselined) across the injection, so it won't surface
 // the new screen — we read it here and either relay the next question or, once the
 // review/submit tab is reached, press Enter to submit and report the answers.
-async function handleTabbedAdvance(chat_id: string, paneId: string | null = focus.activePaneId, thread?: number): Promise<void> {
+async function handleTabbedAdvance(chat_id: string, paneId: string | null = focus.activePaneId, thread?: number, prevHash?: string): Promise<void> {
   if (!paneId) return
-  const text = await capturePane(paneId)
-  if (isSubmitScreen(text)) {
-    const answers = parseReviewAnswers(text)
-    await withPaneInjection(paneId, async () => {
-      await sendKeys(paneId, ['Enter'])
-      await waitForSettle(paneId, 300, 5000)
-    })
-    resetPromptDedup(paneId)   // the whole tabbed prompt is done
-    const summary = answers.length
-      ? '\n\n' + answers.map(a => `• ${escapeHtml(a.question)} → <b>${escapeHtml(a.answer)}</b>`).join('\n')
-      : ''
-    await bot.api.sendMessage(chat_id, `✅ <b>Answers submitted.</b>${summary}`, { parse_mode: 'HTML', ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
-    return
+  // Poll for the form to actually advance. The next tab (or the submit screen) may not have rendered
+  // at the instant the answer's Enter settled — especially on the slower free-text path. If we read
+  // the JUST-ANSWERED tab here and relay+mark it, st.outstanding blocks the scanner from ever
+  // relaying the real next tab and the form hangs. So wait until we see the submit screen or a
+  // tabbed prompt whose hash differs from the one we just answered (prevHash).
+  for (let i = 0; i < 16; i++) {
+    const text = await capturePane(paneId).catch(() => '')
+    if (isSubmitScreen(text)) {
+      const answers = parseReviewAnswers(text)
+      await withPaneInjection(paneId, async () => {
+        await sendKeys(paneId, ['Enter'])
+        await waitForSettle(paneId, 300, 5000)
+      })
+      resetPromptDedup(paneId)   // the whole tabbed prompt is done
+      const summary = answers.length
+        ? '\n\n' + answers.map(a => `• ${escapeHtml(a.question)} → <b>${escapeHtml(a.answer)}</b>`).join('\n')
+        : ''
+      await bot.api.sendMessage(chat_id, `✅ <b>Answers submitted.</b>${summary}`, { parse_mode: 'HTML', ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
+      return
+    }
+    const next = detectUserPrompt(text)
+    if (next?.tabbed && promptHash(next) !== prevHash) {
+      markPromptRelayed(paneId, promptHash(next))   // suppress repaints of this next tab; we relay it explicitly here
+      await relayPromptToTelegram(next, paneId)
+      return
+    }
+    await new Promise(r => setTimeout(r, 250))
   }
-  const next = detectUserPrompt(text)
-  if (next?.tabbed) {
-    markPromptRelayed(paneId, promptHash(next))   // suppress repaints of this next tab; we relay it explicitly here
-    await relayPromptToTelegram(next, paneId)
-  }
+  // Never observed an advance (the form wedged, or a screen we can't parse) — clear this pane's dedup
+  // so the scanner relays whatever lands, and tell the user instead of leaving the form hung.
+  resetPromptDedup(paneId)
+  await bot.api.sendMessage(chat_id, '⚠️ Couldn’t read the next question automatically — open the session to continue it.', { ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
 }
 
 // Relay a sign-in link to allowed chats and remember the message ids, so a reply
@@ -6333,13 +6353,14 @@ bot.on('callback_query:data', async ctx => {
     }
     const num = Number(mqMatch[1])
     await ctx.answerCallbackQuery({ text: `Selected ${num}` }).catch(() => {})
+    const prevHash = await currentPromptHash(paneId)   // the tab we're about to answer — to detect the advance
     await withPaneInjection(paneId, async () => {
       await navigateDown(paneId, num - 1)
       await sendKeys(paneId, ['Enter'])
       await waitForSettle(paneId, 300, 5000)
     })
     await ctx.deleteMessage().catch(() => {})  // remove the answered question (next tab relays its own message)
-    await handleTabbedAdvance(String(ctx.chat?.id), paneId, ctx.callbackQuery.message?.message_thread_id)
+    await handleTabbedAdvance(String(ctx.chat?.id), paneId, ctx.callbackQuery.message?.message_thread_id, prevHash)
     return
   }
 
@@ -6956,6 +6977,7 @@ bot.on('message:text', async ctx => {
           // The cursor must settle on the "Type something" option before the text is
           // typed — otherwise the field isn't focused and the answer resolves empty
           // (to "__other__"). Settle again after typing so Enter commits the full text.
+          const prevHash = target.tabbed ? await currentPromptHash(paneId) : undefined  // the tab we're answering
           await withPaneInjection(paneId, async () => {
             await navigateDown(paneId, target.downCount)
             await sendKeysLiteral(paneId, text)
@@ -6963,9 +6985,10 @@ bot.on('message:text', async ctx => {
             await sendKeys(paneId, ['Enter'])
             await waitForSettle(paneId, 300, 5000)
           })
-          resetPromptDedup(paneId)
-          if (target.tabbed) await handleTabbedAdvance(String(ctx.chat?.id), paneId, ctx.message?.message_thread_id)
-          else { await ctx.reply('✅ Sent your answer.'); await verifyPromptClosed(paneId) }
+          // For a tabbed form, let handleTabbedAdvance own the dedup (it marks the NEXT tab) — don't
+          // resetPromptDedup here or the scanner can relay the next tab too during the advance poll.
+          if (target.tabbed) await handleTabbedAdvance(String(ctx.chat?.id), paneId, ctx.message?.message_thread_id, prevHash)
+          else { resetPromptDedup(paneId); await ctx.reply('✅ Sent your answer.'); await verifyPromptClosed(paneId) }
           return
         }
         // Stuck-screen dump → type the reply verbatim into the wedged pane (raw keys + Enter,
