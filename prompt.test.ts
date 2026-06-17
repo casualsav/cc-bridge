@@ -13,11 +13,15 @@ test('detectModelUnavailable extracts the offending model name', () => {
   expect(detectModelUnavailable('❯ /model opus')).toBe(null)
 })
 
-test('detectCompacting fires only on the live compaction spinner', () => {
+test('detectCompacting fires only on the live spinner glyph + word, not on prose', () => {
+  // The rotating spinner glyph is required: that's what distinguishes the live compaction line
+  // from prose / chat / our own status card that merely contain the word (the bug being fixed).
   expect(detectCompacting('✻ Compacting conversation… (esc to interrupt)')).toBe(true)
-  expect(detectCompacting('\x1b[1m● Compacting...\x1b[0m')).toBe(true)
-  expect(detectCompacting('we should run /compact later to free context')).toBe(false)
-  expect(detectCompacting('🗜️ Compacting conversation\n████░░░░')).toBe(false)
+  expect(detectCompacting('\x1b[1m✳ Compacting conversation…\x1b[0m')).toBe(true)
+  // No spinner glyph → prose / chat / our own status card must NOT match.
+  expect(detectCompacting('we should run /compact later — Compacting conversation… frees context')).toBe(false)
+  expect(detectCompacting('🗜️ Compacting conversation…\n████░░░░')).toBe(false)
+  expect(detectCompacting('* Compacting the list of items…')).toBe(false)
   expect(detectCompacting('just normal output')).toBe(false)
 })
 

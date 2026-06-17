@@ -449,12 +449,15 @@ export function detectModelUnavailable(paneText: string): string | null {
   return m ? m[1].trim() : null
 }
 
-// True while a /compact is actively running. Claude Code renders a live spinner line —
-// "✻ Compacting conversation… (esc to interrupt)" — that disappears when compaction finishes.
-// Require the ellipsis or the interrupt hint on the same line so a scrollback mention of the
-// word "compacting" (or our own relayed status text) can't trip it.
+// True while a /compact is actively running. Claude Code renders a live spinner line — a rotating
+// animation glyph immediately followed by the word "Compacting" — that disappears when compaction
+// finishes. We REQUIRE that leading spinner glyph: matching the bare word "compacting" tripped on
+// assistant prose, on chat that merely discusses compaction, and on our own relayed status card
+// (none of which carry the glyph), which re-posted a card on every frame. Plain "*" is excluded
+// from the glyph set so a markdown bullet ("* Compacting …") can't stand in for the live spinner.
+const COMPACT_SPINNER = /[✶✳✻✽✺✷✸✹✢✣⣾⣽⣻⢿⡿⣟⣯⣷]\s*Compacting\b/i
 export function detectCompacting(paneText: string): boolean {
-  return /compacting\b[^\n]*(?:…|\.\.\.|esc to interrupt)/i.test(stripAnsi(paneText))
+  return stripAnsi(paneText).split('\n').some(l => COMPACT_SPINNER.test(l))
 }
 
 // True when the pane is at Claude Code's normal prompt (input box visible), where reading or
