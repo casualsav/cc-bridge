@@ -549,9 +549,9 @@ function setFocus(sessionId: string | null): void {
   const s = sessionId ? sessions.get(sessionId) ?? null : null
   focus.activeShim = s ? { socket: s.socket, write: s.write } : null
   focus.activePaneId = s?.paneId ?? null
-  lastRelayedPromptHash = ''
-  lastRelayedPermissionHash = ''
-  promptRelayOutstanding = false
+  // Don't clear prompt dedup on focus change — it's per-pane now (auxPromptStates) and must survive
+  // the aux↔focused handoff so an outstanding question isn't re-relayed. Self-heals when the pane
+  // shows no menu. Auth-URL dedup stays focused-scoped.
   lastRelayedAuthUrl = ''
   if (focus.activePaneId) { startPaneWatcher(focus.activePaneId); startRelayLoop() }
   void updateSessionPin()
@@ -599,14 +599,11 @@ function notifyChats(text: string, extra?: { reply_markup?: InlineKeyboard; pars
   for (const chat_id of noticeChats()) void bot.api.sendMessage(chat_id, text, extra).catch(() => {})
 }
 
-// Tracks the last prompt sent to Telegram to avoid double-relay.
-let lastRelayedPromptHash = ''
-let lastRelayedPermissionHash = ''
-// A select/permission prompt has been relayed and not yet answered/dismissed. While it's true we
-// never relay another menu — so a prompt whose rendering repaints (e.g. AskUserQuestion's side-by-
-// side preview, which bleeds varying text into the parsed options and shifts the hash) can't be
-// relayed two or three times. Cleared the moment the pane no longer shows a menu (answered/closed).
-let promptRelayOutstanding = false
+// Prompt-relay dedup is keyed PER PANE in auxPromptStates (see AuxPromptState) — for the focused
+// pane too, not just aux panes. It used to live in module-level globals dedicated to the focused
+// pane, but a pane flips between focused and aux on every topic interaction, and the two stores
+// didn't hand state off — so a question relayed while aux got re-relayed once the pane became
+// focused (and vice versa). One per-pane record means the dedup survives the role change.
 
 // In-flight multi-select prompts, keyed by `${chatId}:${messageId}` of the relayed
 // Telegram message. Each tap toggles an index in `selected`; Submit replays the
@@ -977,7 +974,7 @@ async function auxRelayTick(): Promise<void> {
   // TRANSCRIPT_OUTBOUND: prompts are read from the pane, not the transcript.
   if (isTopicMode()) {
     for (const k of [...auxPromptStates.keys()]) {
-      if (!offMcpPanes.has(k) || k === focus.activePaneId) auxPromptStates.delete(k)
+      if (!offMcpPanes.has(k)) auxPromptStates.delete(k)   // only drop dead panes; the focused pane KEEPS its record (onPaneEvent shares it now)
     }
     for (const pane of [...offMcpPanes]) {
       if (pane === focus.activePaneId) continue
@@ -1034,10 +1031,9 @@ async function auxRelayTick(): Promise<void> {
 }
 
 // ---- Aux-pane prompt detection (forum-topics mode) ----
-// Per-pane dedup mirroring the focused pane's lastRelayedPromptHash / lastRelayedPermissionHash /
-// promptRelayOutstanding / lastRelayedAuthUrl globals. The globals stay dedicated to the focused
-// pane (DM-mode behavior untouched); every other off-MCP pane gets a record here, pruned by
-// auxRelayTick when the pane dies or becomes focused.
+// Per-pane prompt-relay dedup for EVERY off-MCP pane, the focused one included (it's no longer
+// split into focused-only globals — that split lost state on the aux↔focused handoff and
+// double-relayed prompts). Pruned by auxRelayTick only when the pane dies.
 type AuxPromptState = { promptHash: string; permHash: string; authUrl: string; outstanding: boolean }
 const auxPromptStates = new Map<string, AuxPromptState>()
 
@@ -1048,23 +1044,17 @@ function auxPromptStateFor(pane: string): AuxPromptState {
 }
 
 // Clear a pane's prompt dedup after its prompt was answered (or force-closed), so the next
-// menu — even an identical repaint — relays again. Focused pane → the globals; aux → its record.
+// menu — even an identical repaint — relays again. One per-pane record (focused or aux); a null
+// paneId targets the focused pane.
 function resetPromptDedup(paneId: string | null): void {
-  if (!paneId || paneId === focus.activePaneId) {
-    lastRelayedPromptHash = ''
-    lastRelayedPermissionHash = ''
-    promptRelayOutstanding = false
-  }
-  if (paneId) {
-    const st = auxPromptStates.get(paneId)
-    if (st) { st.promptHash = ''; st.permHash = ''; st.outstanding = false }
-  }
+  const target = paneId ?? focus.activePaneId
+  const st = target ? auxPromptStates.get(target) : null
+  if (st) { st.promptHash = ''; st.permHash = ''; st.outstanding = false }
 }
 
 // Record that a prompt was just relayed for `paneId` so repaints don't re-send it (the tabbed
 // advance relays the next question explicitly and must suppress the watcher/scanner's own pass).
 function markPromptRelayed(paneId: string, h: string): void {
-  if (paneId === focus.activePaneId) { lastRelayedPromptHash = h; promptRelayOutstanding = true; return }
   const st = auxPromptStateFor(paneId)
   st.promptHash = h
   st.outstanding = true
@@ -1298,9 +1288,8 @@ function focusOffMcpPane(paneId: string): void {
   focus.currentSessionId = paneId
   focus.activePaneId = paneId
   focus.activeShim = null
-  lastRelayedPromptHash = ''
-  lastRelayedPermissionHash = ''
-  promptRelayOutstanding = false
+  // Prompt dedup is per-pane (auxPromptStates) and preserved across adoption so an outstanding
+  // question isn't re-relayed when this pane becomes focused; it self-heals when no menu is shown.
   lastRelayedAuthUrl = ''
   startPaneWatcher(paneId)
   startRelayLoop()
@@ -2035,24 +2024,27 @@ function onPaneEvent(text: string): void {
   // Permission prompts ("Do you want to …?") have their own footer and detector, so they
   // never collide with the select-menu path. Relay them so the user can approve/deny from
   // Telegram — the whole point of off-MCP is never needing the terminal.
+  // Dedup is the focused pane's per-pane record — the SAME store the aux scanner uses — so a
+  // question relayed while this pane was aux isn't re-sent now that it's focused (and vice versa).
+  const st = focus.activePaneId ? auxPromptStateFor(focus.activePaneId) : null
   const perm = detectPermissionPrompt(text)
   if (perm) {
     const ph = hashText(perm.question + '|' + perm.preview + '|' + perm.options.map(o => o.label).join('|'))
-    if (!promptRelayOutstanding && ph !== lastRelayedPermissionHash) {
-      lastRelayedPermissionHash = ph
-      promptRelayOutstanding = true
+    if (st && !st.outstanding && ph !== st.permHash) {
+      st.permHash = ph
+      st.outstanding = true
       void relayPermissionToTelegram(perm)
     }
     return
   }
 
   const prompt = detectUserPrompt(text)
-  if (!prompt) { promptRelayOutstanding = false; return }   // no menu on the pane → the last one is resolved
-  if (promptRelayOutstanding) return                        // one's already relayed & unanswered — don't re-send on a repaint
+  if (!prompt) { if (st) st.outstanding = false; return }   // no menu on the pane → the last one is resolved
+  if (!st || st.outstanding) return                          // one's already relayed & unanswered — don't re-send on a repaint
   const h = promptHash(prompt)
-  if (h === lastRelayedPromptHash) return
-  lastRelayedPromptHash = h
-  promptRelayOutstanding = true
+  if (h === st.promptHash) return
+  st.promptHash = h
+  st.outstanding = true
   void relayPromptToTelegram(prompt)
 }
 
@@ -4968,10 +4960,7 @@ bot.command('restart', async ctx => {
     await waitForSettle(paneId, 800, 20_000)   // new process boots back to the REPL
   }
   await (t.isFocused && t.watcher ? t.watcher.withInjection(drive) : drive())
-  // Re-baseline relay state so the resumed REPL's first prompt/reply relays cleanly.
-  lastRelayedPromptHash = ''
-  lastRelayedPermissionHash = ''
-  promptRelayOutstanding = false
+  resetPromptDedup(paneId)   // re-baseline this pane's dedup so the resumed REPL's first prompt relays cleanly
   await ctx.reply('✅ Session restarted and resumed.')
 })
 
