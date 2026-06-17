@@ -181,7 +181,10 @@ export async function statusCardText(paneId: string | null): Promise<string> {
   try {
     cwd = await paneCwd(paneId)
     const file = await deps.transcriptForPane(paneId, cwd)
-    model = (file && prettyModel(lastModelInTranscript(file))) || model
+    // Prefer the transcript's model, then the LIVE statusline model (parseStatusline already lifted
+    // it from the pane footer), then the prior value. The statusline fallback is what stops an idle,
+    // non-focused session from rendering "🧠 —" when its transcript file can't be resolved.
+    model = (file && prettyModel(lastModelInTranscript(file))) || prettyModel(status?.model ?? null) || model
     if (file) todos = lastTodosInTranscript(file)
   } catch {}
   const branch = cwd ? await gitBranch(cwd) : null
