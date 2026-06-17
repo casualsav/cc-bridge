@@ -3439,6 +3439,26 @@ bot.command(['update', 'upgrade'], async ctx => {
   await showUpdateDashboard(ctx)
 })
 
+// /handoff + /continue — bridge-native session-baton commands. The instruction text is bundled HERE
+// (not read from the user's ~/.claude/commands), so ANY install gets them without installing the slash
+// commands into their own Claude setup. They inject the prompt straight into the target session via the
+// normal inbound path (handleInbound resolves the session, arms typing, injects + submits), so Claude
+// runs the instruction exactly as if the user had typed it.
+const HANDOFF_PROMPT = `Write a handoff to handoff.md for a fresh agent with zero context: current task, progress, next steps, relevant files, and anything you learned the hard way.
+
+handoff.md is a local, ephemeral baton — never commit it. So when you write it, also make sure it's gitignored in this repo: if the working dir is inside a git repo and \`handoff.md\` isn't already ignored, append a line for it to the repo's root \`.gitignore\` (create the file if needed). Skip this silently if it's not a git repo.`
+const CONTINUE_PROMPT = `Read handoff.md and continue where the previous session left off. Follow the next steps listed there, and ask me before deviating from the plan it describes.
+
+Once you have actually completed the work the handoff describes (not merely read it — finish the next-steps first, so the baton isn't lost if this session ends early), delete handoff.md so a stale handoff doesn't linger.`
+for (const [name, prompt] of [['handoff', HANDOFF_PROMPT], ['continue', CONTINUE_PROMPT]] as const) {
+  bot.command(name, async ctx => {
+    const msgId = ctx.message?.message_id
+    const chat_id = String(ctx.chat?.id ?? '')
+    await handleInbound(ctx, prompt, undefined)
+    if (msgId != null) void bot.api.setMessageReaction(chat_id, msgId, [{ type: 'emoji', emoji: '👍' }]).catch(() => {})
+  })
+}
+
 // /bind — run once inside a forum supergroup to make it the bridge's command center: each Claude
 // Code session then gets its own topic. Bootstrap-safe: the group isn't in the access registry yet,
 // so this gates on the GLOBAL allowlist (a paired operator) rather than dmCommandGate (DM-only) or
@@ -7584,6 +7604,8 @@ void (async () => {
               { command: 'voice', description: 'Voice replies on/off — replies arrive as voice notes too' },
               { command: 'health', description: 'Bridge vitals — instance, uptime, panes, queues, watchdog' },
               { command: 'update', description: 'Update the Telegram bridge or Claude itself' },
+              { command: 'handoff', description: 'Write a session handoff (handoff.md) for a fresh agent' },
+              { command: 'continue', description: 'Resume from handoff.md where the last session left off' },
             ],
             { scope: { type: 'all_private_chats' } },
           ).catch(() => {})

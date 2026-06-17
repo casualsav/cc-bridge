@@ -52,6 +52,8 @@ These commands are added by the bridge. Everything else is Claude Code's own —
 | `/voice` | Voice-note replies on/off |
 | `/settings` | Channel settings panel — Claude.ai accounts, GitHub accounts, voice transcription, and more |
 | `/update` | Update menu with a button for each — `/update tg` updates the bridge, `/update claude` updates Claude itself |
+| `/handoff` | Write a session handoff to `handoff.md` for a fresh agent (auto-gitignored) |
+| `/continue` | Resume from `handoff.md` where the last session left off |
 
 **Mode shortcuts:** `/mode` opens the permission-mode switcher; `/plan` `/auto` `/default` `/acceptedits` `/bypass` jump straight to one.
 
