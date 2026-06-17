@@ -1,6 +1,6 @@
 // Prompt detection from pane captures — select menus vs permission dialogs. Pure functions.
 import { test, expect } from 'bun:test'
-import { stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, detectEditorState, onNormalPrompt, detectModelUnavailable, detectCompacting } from './prompt.ts'
+import { stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, detectEditorState, onNormalPrompt, detectModelUnavailable, detectCompacting, compactPercent } from './prompt.ts'
 
 test('stripAnsi removes CSI escape sequences', () => {
   expect(stripAnsi('\x1b[1mbold\x1b[0m text')).toBe('bold text')
@@ -13,29 +13,32 @@ test('detectModelUnavailable extracts the offending model name', () => {
   expect(detectModelUnavailable('❯ /model opus')).toBe(null)
 })
 
-test('detectCompacting fires on the live footer line, not on the same word up in scrollback', () => {
-  // Live: the compaction line sits in the footer region just above the input box + statusline.
+test('detectCompacting fires on Claude Code\'s real footer (bar + standalone %), not on scrollback', () => {
+  // The genuine /compact footer, mirrored from a live capture: the word, a ═/─ bar, a standalone
+  // "NN%", then the input box and the (tall) custom statusline below it.
   const live = [
-    '● Earlier output…',
+    '● Back up and healthy — running the new code.',
     '',
-    '✻ Compacting conversation… ████████░░░░ 64%',
+    '· Compacting conversation… (46s)',
+    '════════════════════════════════════════════════════════════─────',
+    '40%',
     '',
-    '───────────────────────────────',
+    '────────────────────────────────────── outreach-phase-implementation ──',
     '❯ ',
-    '───────────────────────────────',
-    '  user@host:/projects (main) | Opus 4.8',
-    '  ε:max | ✻think | ctx ██░ 4%/1000k | $1.00',
-    '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+    '───────────────────────────────────────────────────────────────────────',
+    '  user@host:/projects/websites (master) | casualsav/webagency-engine | Opus 4.8',
+    '  ε:max | ✻think | ctx ███░ 32%/1000k | ↑317.1k ↓1.0k | $154.24 | ⧗124h54m',
+    '  5h ██░ 14% ↻1h09m | 7d ██░ 12% ↻106h49m',
+    '  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents',
   ].join('\n')
   expect(detectCompacting(live)).toBe(true)
+  expect(compactPercent(live)).toBe(40)
 
-  // Scrollback: the assistant talked ABOUT compaction, but the pane is now idle at a normal prompt.
-  // The word is far above the footer, so it must NOT count (this was the loop bug).
+  // Scrollback: the assistant merely talked ABOUT compaction; no live bar / standalone % in the
+  // footer, and the pane is idle at a normal prompt. Must NOT count (this was the loop bug).
   const scrollback = [
     'Yeah, that was my bug — the detector now requires the live "Compacting conversation…" line.',
     'So me just talking about compaction here in chat will not fire a card anymore.',
-    '',
-    'More discussion, more lines of output pushing the mention up into scrollback…',
     'line', 'line', 'line', 'line', 'line', 'line',
     '───────────────────────────────',
     '❯ ',
@@ -45,6 +48,7 @@ test('detectCompacting fires on the live footer line, not on the same word up in
     '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
   ].join('\n')
   expect(detectCompacting(scrollback)).toBe(false)
+  expect(compactPercent(scrollback)).toBe(null)
   expect(detectCompacting('just normal output')).toBe(false)
 })
 

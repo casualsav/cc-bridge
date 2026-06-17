@@ -49,7 +49,7 @@ import {
   sessionNames, mdOverwritePending,
 } from './state.ts'
 import { initMirror, updateTerminalMirror, respawnTerminalMirror, abandonMirror, updateAuxMirror, dropAuxMirror, auxMirrorPanes } from './mirror.ts'
-import { parseStatusline, pinBar, type StatuslineData } from './statusline.ts'
+import { parseStatusline, type StatuslineData } from './statusline.ts'
 import {
   STATIC, initAccess, loadAccess, saveAccess, gate, dmCommandGate, isMentioned,
   pruneExpired, defaultAccess, type GateResult,
@@ -1073,7 +1073,7 @@ async function scanAuxPanePrompts(pane: string): Promise<void> {
   // (keyed on the reset minute), so several panes showing the same banner relay/schedule once.
   void handleUsageLimit(text, pane)
   void handleModelUnavailable(text, pane)
-  if (detectCompacting(text)) { void maybeStartCompaction(pane, text); return }
+  if (detectCompacting(text)) { void startCompactionWatch(pane, text); return }
 
   // System stalls auto-dismiss exactly like the focused path — they'd wedge queued injections.
   if (isUsageLimitChoice(text)) { void dismissUsageLimitChoice(pane); return }
@@ -1963,7 +1963,7 @@ async function handleUsageLimit(text: string, origin: string | null = focus.acti
 function onPaneEvent(text: string): void {
   void handleUsageLimit(text)
   void handleModelUnavailable(text)
-  if (focus.activePaneId) void maybeStartCompaction(focus.activePaneId, text)
+  if (focus.activePaneId && detectCompacting(text)) void startCompactionWatch(focus.activePaneId, text)
   // Diagnostic: when TELEGRAM_DEBUG_PANE=1, append each pane frame + the prompt
   // detection result to /tmp/tg-pane-debug.log, so a missed prompt can be traced
   // against the exact rendering. Off by default; no effect on normal operation.
@@ -2225,32 +2225,20 @@ async function handleModelUnavailable(text: string, paneId: string | null = focu
 type CompactWatch = { chat: string; thread?: number; msgId: number; startedAt: number; step: number; timer: ReturnType<typeof setTimeout> }
 const compactWatches = new Map<string, CompactWatch>()
 
-function compactBar(step: number): string {
-  const width = 12
-  const filled = step % (width + 1)
-  return '█'.repeat(filled) + '░'.repeat(width - filled)
+// The card's progress bar in Claude Code's own ═/─ style (matching the bar it draws on the pane),
+// kept short so the whole card stays one line on Telegram. `filled` is 0..WIDTH.
+const COMPACT_BAR_WIDTH = 14
+function compactBarOf(filled: number): string {
+  const f = Math.max(0, Math.min(COMPACT_BAR_WIDTH, filled))
+  return '═'.repeat(f) + '─'.repeat(COMPACT_BAR_WIDTH - f)
 }
 
 // The card's progress line. Prefer Claude Code's REAL percentage (mirrored from the live pane) so
-// the bar tracks genuine progress; fall back to the synthetic cycling bar when the pane exposes no
-// percentage. `pct` is null when there's nothing to mirror.
+// the bar tracks genuine progress; fall back to a synthetic cycling bar (same ═/─ style) when the
+// pane exposes no percentage. `pct` is null when there's nothing to mirror.
 function compactProgress(pct: number | null, step: number): string {
-  return pct != null ? `${pinBar(pct, 12)} ${pct}%` : compactBar(step)
-}
-
-// Gate the compaction card on LIVENESS, not just screen content. detectCompacting only proves the
-// word is in the footer region; it can't tell a live spinner from an idle pane whose last reply
-// merely mentions compaction (exactly the case that looped — this very dev session keeps printing
-// "Compacting…" while we discuss the feature). The transcript is the source of truth: a card opens
-// only when a turn is actually in progress. Cheap guards first (already tracking / word absent) so
-// the transcript read only happens on a real candidate frame.
-async function maybeStartCompaction(pane: string, text: string): Promise<void> {
-  if (compactWatches.has(pane)) return
-  if (!detectCompacting(text)) return
-  const cwd = await paneCwd(pane).catch(() => null)
-  const file = await transcriptForPane(pane, cwd)
-  if (!file || !turnInProgress(file)) return   // word on screen but the session is idle → scrollback, not a live compaction
-  void startCompactionWatch(pane, text)
+  if (pct != null) return `${compactBarOf(Math.round((pct / 100) * COMPACT_BAR_WIDTH))} ${pct}%`
+  return compactBarOf(step % (COMPACT_BAR_WIDTH + 1))
 }
 
 // Kick off (idempotently) the status card for a pane that just started compacting. Safe to call on

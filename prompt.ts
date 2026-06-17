@@ -458,19 +458,32 @@ export function detectModelUnavailable(paneText: string): string | null {
 // ~6-8 non-empty lines, so the compaction line lands within the last ~10. Liveness (a turn actually
 // running, vs. an idle pane whose last reply merely mentions compaction) is enforced by the caller
 // via the transcript — this position check alone can't tell a finished reply from a live spinner.
+// The live compaction footer Claude Code renders during /compact:
+//     · Compacting conversation… (46s)
+//     ═══════════════════════════════════════════════════════════════════─────
+//     40%
+// followed by the input box + the (tall) custom statusline. That whole footer is ~12-15 non-empty
+// lines, so the "Compacting" line lands well above a last-10 cut — the first attempt missed it and
+// no card fired. We scan a deeper tail AND require a LIVE progress element beside the word: the ═/━
+// progress bar, or a standalone "NN%" line. Prose, this repo's own code/tests, our chat about the
+// feature, and our own relayed card all say "compacting" but render neither on the work pane — that
+// content-only match is exactly what looped, so the bar/% requirement is what makes this robust
+// (the input-box border is single-line ─, never the double ═, so it never counts as the bar).
+const FOOTER_TAIL = 16
 export function detectCompacting(paneText: string): boolean {
-  const lines = stripAnsi(paneText).split('\n').filter(l => l.trim())
-  return lines.slice(-10).some(l => /compacting\b/i.test(l))
+  const tail = stripAnsi(paneText).split('\n').filter(l => l.trim()).slice(-FOOTER_TAIL)
+  if (!tail.some(l => /compacting\b/i.test(l))) return false
+  return tail.some(l => /[═━]{3,}/.test(l) || /^\s*\d{1,3}\s*%\s*$/.test(l))
 }
 
-// The real compaction progress percentage Claude Code renders on the live line ("Compacting
-// conversation… <bar> 64%"), or null when the line carries no percentage (older CC, or a phase
-// without one). Same footer-only window as detectCompacting so a "%" elsewhere can't be misread.
-// Lets the status card mirror the genuine progress instead of a synthetic animation.
+// Claude Code's real compaction percentage — the standalone "NN%" line in that footer — so the card
+// mirrors genuine progress instead of a synthetic animation. The statusline's own percentages
+// (ctx 32%/1000k, 5h 14%, …) are embedded mid-line, never standalone, so they can't be misread.
+// null when no percentage line is present.
 export function compactPercent(paneText: string): number | null {
-  const lines = stripAnsi(paneText).split('\n').filter(l => l.trim()).slice(-10)
-  for (const l of lines) {
-    const m = /compacting\b[^\n]*?(\d{1,3})\s*%/i.exec(l)
+  const tail = stripAnsi(paneText).split('\n').filter(l => l.trim()).slice(-FOOTER_TAIL)
+  for (const l of tail) {
+    const m = /^\s*(\d{1,3})\s*%\s*$/.exec(l)
     if (m) return Math.max(0, Math.min(100, parseInt(m[1], 10)))
   }
   return null
