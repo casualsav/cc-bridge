@@ -490,15 +490,23 @@ async function switchToMode(paneId: string, target: CcMode, watcher: PaneWatcher
     return null
   }
   const reached = await (watcher ? watcher.withInjection(run) : run())
-  if (reached && paneId === focus.activePaneId) lastFocusedMode = reached
+  if (reached && paneId === focus.activePaneId) setPreferredMode(reached)
   if (reached) void sessionForPane(paneId, false).then(sid => recordSessionMode(sid, reached)).catch(() => {})
   return reached
 }
 
-// Last permission mode observed on the focused pane. Survives the pane's exit so a later
-// /resume can seed it — in DM mode the resume happens precisely when no pane is left alive
-// to read the mode from, and `claude --resume` restores the conversation but NOT the mode dial.
-let lastFocusedMode: CcMode = 'default'
+// The user's standing permission-mode preference: the last mode they were actively in. PERSISTED
+// across daemon restarts (in-memory-only here meant every restart forgot it and booted sessions in
+// 'default'). Survives the pane's exit so a later /resume can seed it — in DM mode the resume
+// happens precisely when no pane is left alive to read the mode from, and `claude --resume`
+// restores the conversation but NOT the mode dial. Per-owner: each instance has its own STATE_DIR.
+const PREFERRED_MODE_FILE = join(STATE_DIR, 'preferred-mode.json')
+let lastFocusedMode: CcMode = readJsonFile<{ mode: CcMode }>(PREFERRED_MODE_FILE, { mode: 'default' }).mode
+function setPreferredMode(mode: CcMode): void {
+  if (mode === lastFocusedMode) return
+  lastFocusedMode = mode
+  writeJsonFile(PREFERRED_MODE_FILE, { mode })
+}
 
 // Last mode observed PER SESSION (sid → mode), persisted across restarts. A topic revival
 // (spawnSession `-c` with the topic's sid) seeds from the session's OWN last mode — the focused
@@ -4706,12 +4714,19 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
     let inherit = !extra && focus.activePaneId
       ? await captureInheritedSettings(focus.activePaneId, focus.paneWatcher)
       : null
+    // A brand-new session must still land in the user's standing mode preference even when there's
+    // no live pane to inherit from (cold start) or the capture momentarily read 'default' (source
+    // pane mid-turn / off a prompt screen). Without this, the first session after a daemon restart
+    // boots in 'default' regardless of preference.
+    if (!extra && (!inherit || inherit.mode === 'default') && lastFocusedMode !== 'default') {
+      inherit = { model: inherit?.model ?? null, effort: inherit?.effort ?? null, mode: lastFocusedMode }
+    }
     // A resumed/continued session carries its own model/effort, but Claude Code does NOT
     // restore the permission mode — seed it with the last mode observed on a focused pane
     // (the 15s tracker + switchToMode keep it current while one is alive).
     if (!inherit && /(?:^|\s)(?:--resume|-c)\b/.test(extra)) {
       // Prefer the session's OWN last-known mode (topic revivals pass its sid); fall back to the
-      // focused pane's last mode for sid-less resumes (DM /resume).
+      // persisted preferred mode for sid-less resumes (DM /resume) — now survives restarts.
       const mode = (presetSessionId ? sessionModes.get(presetSessionId) : null) ?? lastFocusedMode
       if (mode !== 'default') inherit = { model: null, effort: null, mode }
     }
@@ -7325,7 +7340,7 @@ setInterval(() => void (async () => {
     const cap = await capturePane(pane)
     if (onNormalPrompt(cap)) {
       const m = detectCurrentMode(cap)
-      lastFocusedMode = m
+      setPreferredMode(m)
       void sessionForPane(pane, false).then(sid => recordSessionMode(sid, m)).catch(() => {})
     }
   } catch {}
