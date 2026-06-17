@@ -521,6 +521,37 @@ function recordSessionMode(sid: string | null, mode: CcMode): void {
   writeJsonFile(SESSION_MODES_FILE, Object.fromEntries(sessionModes))
 }
 
+// Reasoning effort is the SAME trap as mode, worse: `claude --resume` restores the model and the
+// conversation but NOT the effort dial — a revived/restarted session silently drops to the model
+// default ("high") even though the user set "max". (Verified directly: set max → /exit → claude -c
+// → comes back "high".) Mirror the mode machinery: remember the user's standing effort preference +
+// each session's own last effort, persisted across restarts, and re-assert it on spawn/resume/restart.
+const PREFERRED_EFFORT_FILE = join(STATE_DIR, 'preferred-effort.json')
+let lastFocusedEffort: string | null = readJsonFile<{ effort: string | null }>(PREFERRED_EFFORT_FILE, { effort: null }).effort
+function setPreferredEffort(effort: string | null): void {
+  if (!effort || effort === lastFocusedEffort) return
+  lastFocusedEffort = effort
+  writeJsonFile(PREFERRED_EFFORT_FILE, { effort })
+}
+const SESSION_EFFORTS_FILE = join(STATE_DIR, 'session-efforts.json')
+const sessionEfforts = new Map<string, string>(Object.entries(readJsonFile<Record<string, string>>(SESSION_EFFORTS_FILE, {})))
+function recordSessionEffort(sid: string | null, effort: string | null): void {
+  if (!sid || !effort || sessionEfforts.get(sid) === effort) return
+  sessionEfforts.set(sid, effort)
+  while (sessionEfforts.size > 200) sessionEfforts.delete(sessionEfforts.keys().next().value!)   // oldest-first cap
+  writeJsonFile(SESSION_EFFORTS_FILE, Object.fromEntries(sessionEfforts))
+}
+
+// Inject `/effort <level>` and accept Claude Code's mid-conversation "Change effort level?" confirm
+// if it appears (a resumed session has cached history, so the switch always prompts). Used by the
+// restore paths — distinct from injectEffortChange, which relays the confirm to the user as buttons.
+async function reapplyEffort(paneId: string, effort: string | null, watcher: PaneWatcher | null): Promise<void> {
+  if (!effort || !EFFORT_LEVELS.includes(effort)) return
+  await injectSlash(paneId, watcher, `/effort ${effort}`)
+  const cap = await capturePane(paneId).catch(() => '')
+  if (cap && isEffortConfirm(cap)) { await sendKeys(paneId, ['Enter']); await waitForSettle(paneId, 200, 3000) }
+}
+
 // Prompt detection (pane-scrape → PromptInfo) lives in ./prompt.ts.
 
 // ---- Session management ----
@@ -2854,7 +2885,15 @@ async function injectEffortChange(t: CommandTarget, level: string, chat_id: stri
     await relayEffortConfirm(t, level, chat_id)
     return 'confirm'
   }
+  rememberEffort(t.paneId, level)   // applied directly (fresh session) — persist it for resume/restart
   return 'applied'
+}
+
+// Persist a just-set effort as BOTH the standing preference and this session's own last effort, so
+// every restore path (spawn / resume / restart) can put it back after Claude Code forgets it.
+function rememberEffort(paneId: string, level: string): void {
+  setPreferredEffort(level)
+  void sessionForPane(paneId, false).then(sid => recordSessionEffort(sid, level)).catch(() => {})
 }
 
 // Relay the effort-change confirmation as a Telegram message with Yes/No buttons (in the session's
@@ -3327,7 +3366,9 @@ async function restartPaneSession(pane: string, chat: string): Promise<void> {
 // routing all survive. Returns the pane now hosting the session (the original or the respawn), or
 // null when it couldn't be brought back.
 async function restartPaneSessionCore(pane: string, id: string): Promise<string | null> {
-  const mode = detectCurrentMode(await capturePane(pane).catch(() => ''))
+  const preCap = await capturePane(pane).catch(() => '')
+  const mode = detectCurrentMode(preCap)
+  const effort = parseStatusline(preCap)?.effort ?? null   // restored by NEITHER /exit nor --resume — re-apply it ourselves
   // An alt-account session must resume under its config dir — the pane's shell doesn't export
   // CLAUDE_CONFIG_DIR (the launcher env-prefixes it), so the resume line has to re-prefix.
   const account = await paneAccount(pane)
@@ -3352,9 +3393,9 @@ async function restartPaneSessionCore(pane: string, id: string): Promise<string 
     await (watcher ? watcher.withInjection(run) : run())
     if (!(await paneAlive(pane))) {
       if (!cwd) return null
-      // Seed the respawn with the mode we just OBSERVED on the pane — the per-session map can be
-      // stale for never-focused topic sessions whose dial was moved in the terminal (shift+tab).
-      if (sid) recordSessionMode(sid, mode)
+      // Seed the respawn with the mode + effort we just OBSERVED on the pane — the per-session maps
+      // can be stale for never-focused topic sessions whose dials were moved in the terminal.
+      if (sid) { recordSessionMode(sid, mode); recordSessionEffort(sid, effort) }
       const fresh = await spawnSession(cwd, `--resume ${id}`, sid ?? undefined, account)
       if (!fresh) return null
       // The session lives in `fresh` now — drop the dead pane's registry + session mapping so
@@ -3364,9 +3405,10 @@ async function restartPaneSessionCore(pane: string, id: string): Promise<string 
       if (sid) await reopenSessionTopic(sid)
       if (pane === focus.activePaneId) adoptPane(fresh)
       process.stderr.write(`daemon: restart: pane ${pane} died on /exit — respawned session in ${fresh} (${cwd})\n`)
-      return fresh   // mode is re-seeded by spawnSession's resume branch (sessionModes)
+      return fresh   // mode + effort re-seeded by spawnSession's resume branch (sessionModes/sessionEfforts)
     }
     if (mode !== 'default') await switchToMode(pane, mode, watcher)
+    await reapplyEffort(pane, effort, watcher)   // the resumed pane came back at the model default — restore the dial
     return pane
   } finally { setPaneRestarting(pane, false) }
 }
@@ -4848,21 +4890,24 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
     let inherit = !extra && focus.activePaneId
       ? await captureInheritedSettings(focus.activePaneId, focus.paneWatcher)
       : null
-    // A brand-new session must still land in the user's standing mode preference even when there's
-    // no live pane to inherit from (cold start) or the capture momentarily read 'default' (source
-    // pane mid-turn / off a prompt screen). Without this, the first session after a daemon restart
-    // boots in 'default' regardless of preference.
-    if (!extra && (!inherit || inherit.mode === 'default') && lastFocusedMode !== 'default') {
-      inherit = { model: inherit?.model ?? null, effort: inherit?.effort ?? null, mode: lastFocusedMode }
+    // A brand-new session must still land in the user's standing mode AND effort preferences even
+    // when there's no live pane to inherit from (cold start) or the capture momentarily missed them
+    // (source pane mid-turn / off a prompt screen). Claude Code restores neither for us — effort
+    // not even on --resume — so fill any gap from the persisted preference. Without this, the first
+    // session after a daemon restart boots at 'default' mode / 'high' effort regardless of preference.
+    if (!extra) {
+      const mode = inherit && inherit.mode !== 'default' ? inherit.mode : lastFocusedMode
+      const effort = inherit?.effort ?? lastFocusedEffort
+      if (mode !== 'default' || effort) inherit = { model: inherit?.model ?? null, effort, mode }
     }
-    // A resumed/continued session carries its own model/effort, but Claude Code does NOT
-    // restore the permission mode — seed it with the last mode observed on a focused pane
-    // (the 15s tracker + switchToMode keep it current while one is alive).
+    // A resumed/continued session keeps its model + conversation, but Claude Code restores NEITHER
+    // the permission mode NOR the reasoning effort — seed both. Prefer the session's OWN last-known
+    // values (topic revivals pass its sid); fall back to the persisted preferences for sid-less
+    // resumes (DM /resume). applyInheritedSettings re-asserts them once the pane reaches the REPL.
     if (!inherit && /(?:^|\s)(?:--resume|-c)\b/.test(extra)) {
-      // Prefer the session's OWN last-known mode (topic revivals pass its sid); fall back to the
-      // persisted preferred mode for sid-less resumes (DM /resume) — now survives restarts.
       const mode = (presetSessionId ? sessionModes.get(presetSessionId) : null) ?? lastFocusedMode
-      if (mode !== 'default') inherit = { model: null, effort: null, mode }
+      const effort = (presetSessionId ? sessionEfforts.get(presetSessionId) : null) ?? lastFocusedEffort
+      if (mode !== 'default' || effort) inherit = { model: null, effort, mode }
     }
     let target: string[] = []
     if (focus.activePaneId) {
@@ -5863,6 +5908,7 @@ bot.on('callback_query:data', async ctx => {
     await ctx.answerCallbackQuery({ text: yes ? 'Switching…' : 'Cancelled' }).catch(() => {})
     await paneKeys(paneId, yes ? ['1', 'Enter'] : ['Escape'], [300, 5000])
     if (yes) {
+      if (level) rememberEffort(paneId, level)   // persist for resume/restart — CC won't
       await ctx.editMessageText(`⚡ Effort switched to ${escapeHtml(effortLabel(level ?? ''))}`, { parse_mode: 'HTML' }).catch(() => {})
     } else {
       await ctx.editMessageText('⚡ Effort change cancelled — kept the current level.', { parse_mode: 'HTML' }).catch(() => {})
@@ -7474,8 +7520,10 @@ setInterval(() => void (async () => {
     const cap = await capturePane(pane)
     if (onNormalPrompt(cap)) {
       const m = detectCurrentMode(cap)
+      const eff = parseStatusline(cap)?.effort ?? null   // effort isn't restored on resume — remember it like mode
       setPreferredMode(m)
-      void sessionForPane(pane, false).then(sid => recordSessionMode(sid, m)).catch(() => {})
+      if (eff) setPreferredEffort(eff)
+      void sessionForPane(pane, false).then(sid => { recordSessionMode(sid, m); recordSessionEffort(sid, eff) }).catch(() => {})
     }
   } catch {}
 })(), 15_000).unref()
