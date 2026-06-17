@@ -2066,7 +2066,7 @@ function onPaneEvent(text: string): void {
     if (st && !st.outstanding && ph !== st.permHash) {
       st.permHash = ph
       st.outstanding = true
-      void relayPermissionToTelegram(perm)
+      void relayMenuAfterPreamble(() => relayPermissionToTelegram(perm))
     }
     return
   }
@@ -2078,7 +2078,7 @@ function onPaneEvent(text: string): void {
   if (h === st.promptHash) return
   st.promptHash = h
   st.outstanding = true
-  void relayPromptToTelegram(prompt)
+  void relayMenuAfterPreamble(() => relayPromptToTelegram(prompt))
 }
 
 // Identity of a prompt for double-relay suppression: its question plus the option
@@ -2115,6 +2115,20 @@ async function flushPendingText(): Promise<void> {
   }
 }
 
+// Relay a question/permission menu, but deliver its preamble FIRST. The assistant text Claude
+// wrote just before calling AskUserQuestion is the CONTEXT for the question, so it must arrive
+// before the buttons. We flush here — in onPaneEvent, the watcher-driven path that reliably fires
+// the moment a menu appears (it's what relays the buttons the user sees) — and AWAIT it, so the
+// preamble's send completes (sendAgentText retries past 429s) before the menu goes out.
+// Why not rely on relayLoopTick's own menu-tick flush: that loop awaits updateTerminalMirror
+// (the live card edit) every tick, which does blocking 429 retries in a busy chat — so it can be
+// stalled inside the edit when the menu appears AND gets answered, miss the flush, and then
+// finalRepliesAfter collapses the preamble into the post-answer reply (same turn — a tool_result
+// is not a turn boundary) and it's lost for good. Flushing on this path removes that race.
+async function relayMenuAfterPreamble(relay: () => unknown): Promise<void> {
+  await flushPendingText().catch(() => {})
+  await relay()
+}
 
 // Parse the multi-question review/submit tab into the chosen answers. Each is a
 // "● <question>" line followed by a "→ <answer>" line.
@@ -2613,9 +2627,10 @@ async function relaySlashCommand(
   command: string,
   chat_id: string,
   message_id: number,
+  react = true,   // /compact opts out — its live status card is the acknowledgement
 ): Promise<void> {
   await injectSlash(paneId, watcher, command)
-  void bot.api.setMessageReaction(chat_id, message_id, [
+  if (react) void bot.api.setMessageReaction(chat_id, message_id, [
     { type: 'emoji', emoji: '👍' },
   ]).catch(() => {})
 }
@@ -3336,11 +3351,12 @@ bot.command('rewind', async ctx => {
 })
 
 // /compact relays straight to the session — compact the conversation to free context.
+// No 👍 ack: the live "Compacting…" status card is the acknowledgement.
 bot.command('compact', async ctx => {
   if (!dmCommandGate(ctx)) return
   const t = await commandTarget(ctx)
   if (!t) return
-  void relaySlashCommand(t.paneId, t.watcher, '/compact', String(ctx.chat!.id), ctx.message!.message_id)
+  void relaySlashCommand(t.paneId, t.watcher, '/compact', String(ctx.chat!.id), ctx.message!.message_id, false)
 })
 
 // ---- /update: pick what to update — the bridge or Claude itself ----
