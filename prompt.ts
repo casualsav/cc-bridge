@@ -80,6 +80,21 @@ const LEADING_BOX = /^\[[ xX✔✓]\]\s*/
 // moves between question tabs with Tab/arrow keys, so the hint reads "Tab/Arrow
 // keys to navigate". A single-question prompt's hint reads "↑/↓ to navigate".
 const TABBED_HINT = /tab\/arrow/i
+// Chrome that can legitimately appear BELOW an active prompt's footer and must not be mistaken for
+// "new content" (which would mean the prompt is a scrolled-up past one). Covers: the persistent
+// statusline (identity "user@host … |", the ε: line, the 5h/7d rate-window bars), box borders, the
+// plan-approval extras ("ctrl+g to edit … plans", "shift+tab to approve/cycle"), and mode/agent
+// hints. The plan-approval prompt keeps the working statusline rendered beneath it, so without this
+// the footer reads several lines of "content" below and the prompt is wrongly dropped (never relayed).
+const BELOW_CHROME = new RegExp(
+  [
+    /ctrl\+\w to edit/, /shift\+tab to (cycle|approve)/, /for agents\b/, /for shortcuts\b/,
+    /esc to (cancel|interrupt|undo|clear)/, /\b(plan mode on|accept edits on|bypass permissions on|normal mode)\b/,
+    /^\s*ε:/, /↻/, /\b[57][hd]\b/, /@[^|]+\|/,
+    /^[\s│┃─━┌┐└┘├┤┬┴┼╭╮╰╯╶╴╵╷▔▁▂▃▄▅▆▇█]+$/,
+  ].map(r => r.source).join('|'),
+  'i',
+)
 // The two meta-options AskUserQuestion auto-appends below the real choices: a
 // free-text entry and a "chat instead" escape hatch. Matched on their exact
 // labels (a trailing period is rendered on the free-text one).
@@ -172,9 +187,17 @@ export function detectUserPrompt(paneText: string): PromptInfo | null {
     if (SELECT_HINT.test(lines[i]) || MULTI_HINT.test(lines[i])) { footerIdx = i; break }
   }
   if (footerIdx === -1) return null
-  let nonBlankBelow = 0
-  for (let i = footerIdx + 1; i < lines.length; i++) if (lines[i].trim()) nonBlankBelow++
-  if (nonBlankBelow > 1) return null
+  // A real prompt sits at the bottom; the only thing allowed below its footer is chrome — the
+  // persistent statusline (which plan-approval keeps rendered beneath it), box borders, the
+  // "ctrl+g to edit … plans" line, mode/agent hints. More than one line of actual CONTENT below
+  // means this footer belongs to a scrolled-up past prompt, not the active one.
+  let contentBelow = 0
+  for (let i = footerIdx + 1; i < lines.length; i++) {
+    const l = lines[i]
+    if (!l.trim() || BELOW_CHROME.test(l)) continue
+    contentBelow++
+  }
+  if (contentBelow > 1) return null
 
   // Walk up from the footer across the option block — option lines, their indented
   // descriptions, and the blank/divider lines between them — recording the topmost

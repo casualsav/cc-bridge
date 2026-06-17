@@ -13,6 +13,44 @@ test('detectModelUnavailable extracts the offending model name', () => {
   expect(detectModelUnavailable('❯ /model opus')).toBe(null)
 })
 
+test('detectUserPrompt relays the plan-approval prompt even with the statusline below it', () => {
+  const pane = [
+    'Claude has written up a plan and is ready to execute.',
+    'Would you like to proceed?',
+    '',
+    '❯ 1. Yes, and bypass permissions',
+    '  2. Yes, manually approve edits',
+    '  3. No, refine with Ultraplan on Claude Code on the web',
+    '  4. Tell Claude what to change',
+    '     shift+tab to approve with this feedback',
+    '',
+    '  ctrl+g to edit in Vim · ~/.claude/plans/tg-2904-example-plan.md',
+    '─────────────────────────────',
+    '  user@host:/projects/websites (master) | acct | Opus 4.8',
+    '  ε:max | ✻think | ctx ██░ 4%/1000k | $125.19 | ⧗122h',
+    '  5h █░ 4% ↻3h40m | 7d █░ 10% ↻109h20m',
+    '  ⏸ plan mode on (shift+tab to cycle) · ← for agents',
+  ].join('\n')
+  const r = detectUserPrompt(pane)
+  expect(r).not.toBeNull()
+  expect(r!.question).toMatch(/proceed/i)
+  expect(r!.options.length).toBe(4)
+})
+
+test('detectUserPrompt rejects a scrolled-up past prompt with new content below', () => {
+  const pane = [
+    'Pick one:',
+    '❯ 1. Alpha',
+    '  2. Beta',
+    'Enter to select · ↑/↓ to navigate',
+    '',
+    '● Now running the build…',
+    '⎿ compiled 42 modules',
+    'Here is the next chunk of real assistant output that came after.',
+  ].join('\n')
+  expect(detectUserPrompt(pane)).toBeNull()
+})
+
 test('isSubmitScreen matches the review/submit tab only', () => {
   expect(isSubmitScreen('  Ready to submit your answers?  ')).toBe(true)
   expect(isSubmitScreen('some other screen')).toBe(false)
