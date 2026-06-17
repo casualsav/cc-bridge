@@ -50,6 +50,10 @@ export function modeBadge(mode: CcMode): string {
 const SESSION_PIN_FILE = join(STATE_DIR, 'session-pin.json')
 export const sessionPins = new Map<string, number>()
 export const pinTextCache = new Map<string, string>()   // last rendered text per key — skip no-op edits
+// Last COMPLETE statusline parse per pane. A capture taken mid-repaint (common while Claude is
+// working) yields a null/partial statusline, which would make the pin briefly drop effort/usage/ctx.
+// We reuse the cached good parse on a degraded read so the card stays stable. Keyed by pane id.
+const lastGoodStatus = new Map<string, StatuslineData>()
 for (const [c, m] of Object.entries(readJsonFile<Record<string, number>>(SESSION_PIN_FILE, {}))) sessionPins.set(c, m)
 export function persistSessionPins(): void {
   writeJsonFile(SESSION_PIN_FILE, Object.fromEntries(sessionPins))
@@ -176,6 +180,10 @@ export async function statusCardText(paneId: string | null): Promise<string> {
     // modeLabel name made the collapsed pin preview truncate.
     if (onNormalPrompt(cap)) mode = modeBadge(detectCurrentMode(cap))
     status = parseStatusline(cap)
+    // Cache a complete parse (effort present ⇒ the statusline block rendered fully); on a degraded
+    // read (mid-repaint while working) reuse the last good one so the pin doesn't lose effort/usage.
+    if (status?.effort) lastGoodStatus.set(paneId, status)
+    else status = lastGoodStatus.get(paneId) ?? status
   } catch {}
   let todos: TodoState | null = null
   try {
