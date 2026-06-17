@@ -2480,21 +2480,22 @@ async function relaySlashCommand(
   ]).catch(() => {})
 }
 
-// /model <name> gets a confirmation MESSAGE (not just the 👍 ack) naming the model Claude Code
-// actually landed on — it normalises aliases ("opus" → "Opus 4.8"). Read back the "Set model to
-// <X>" line it prints. If instead a "Switch model?" confirm picker pops (mid-conversation), that's
-// relayed as buttons by the prompt watcher, so here we just fall back to the 👍 ack and stay quiet.
+// /model <name> gets a confirmation MESSAGE (not just the 👍 ack) naming the model the session
+// actually landed on. We read it back from the statusline (via readCurrentModel, which normalises
+// "opus" → "Opus") and only confirm once it reflects the requested family — so a mid-conversation
+// "Switch model?" confirm picker (relayed as buttons elsewhere, model not yet changed) doesn't
+// produce a false success. If it never reflects the change, fall back to the 👍 ack and stay quiet.
 async function relayModelSet(ctx: Context, paneId: string, watcher: PaneWatcher | null, arg: string): Promise<void> {
   await injectSlash(paneId, watcher, `/model ${arg}`)
+  const want = arg.trim().toLowerCase().split(/\s+/)[0]   // family token: opus / sonnet / haiku / fable
   let name: string | null = null
   for (let i = 0; i < 8 && !name; i++) {
-    await new Promise(r => setTimeout(r, 250))
-    const cap = stripAnsi(await capturePane(paneId).catch(() => ''))
-    const m = cap.match(/Set model to (.+?)(?:\s+and\b|\s+for\b|[.\n]|$)/i)
-    if (m && looksLikeModel(m[1].trim())) name = m[1].trim()
+    await new Promise(r => setTimeout(r, 300))
+    const cur = await readCurrentModel(paneId, watcher).catch(() => null)
+    if (cur && cur.toLowerCase().includes(want)) name = cur
   }
   if (name) {
-    await ctx.reply(`🧠 Model set to <b>${escapeHtml(name)}</b>`, { parse_mode: 'HTML' }).catch(() => {})
+    await ctx.reply(`✅ Model set to <b>${escapeHtml(name)}</b>`, { parse_mode: 'HTML' }).catch(() => {})
   } else {
     void bot.api.setMessageReaction(String(ctx.chat!.id), ctx.message!.message_id, [
       { type: 'emoji', emoji: '👍' },
