@@ -22,6 +22,8 @@ import { STATE_DIR, readJsonFile, writeJsonFile } from './common.ts'
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
 import { parseWorkingLine } from './statusline.ts'
 import { currentTurnFeed, turnAnchorUuid, type FeedItem } from './transcript.ts'
+import { isTopicMode } from './topics.ts'
+import { isChatFlooded } from './throttle.ts'
 import type { Access } from './types.ts'
 
 type MirrorDeps = {
@@ -48,6 +50,10 @@ export function initMirror(d: MirrorDeps): void {
 }
 
 const MIRROR_THROTTLE_MS = 3000
+// Group chats are flood-limited far tighter than DMs (~20 events/min vs ~60), and that's where every
+// session's card piles up. Sync the card less often there so it doesn't saturate the send governor's
+// budget and starve replies — it still edits only on real content change, just at a coarser floor.
+const MIRROR_THROTTLE_GROUP_MS = 8000
 const MIRROR_BLOCKS = 8        // digest mode: max ● blocks shown
 const MIRROR_FINALIZE_TICKS = 3   // ~4.5s sustained idle (RELAY_POLL_MS=1500) before capping the card
 const ACTIONS_TAIL = 3       // actions mode: how many of the newest calls stay as full detail rows
@@ -275,6 +281,7 @@ class MirrorCard {
   private verb = 'Working'       // last-scraped spinner verb (held between syncs so it doesn't flicker)
   private tokens: string | null = null   // last-scraped PER-TURN token count (spinner only — never the session total)
   private lastSyncAt = 0         // last heavy sync; throttled to MIRROR_THROTTLE_MS
+  private createCooldownUntil = 0   // after a create 429, hold off re-posting the card until this passes (stops the create-storm)
   // We edit the card ONLY when its CONTENT changes (body / verb / tokens) — never just because the
   // clock advanced — so the message barely flashes. This key is the content fingerprint (no
   // elapsed); an unchanged key means no edit.
@@ -392,7 +399,10 @@ class MirrorCard {
   // Edit the open card to `text` across every tracked chat.
   private async pushCard(text: string): Promise<void> {
     if (!text || this.msgIds.size === 0) return
-    for (const [chat, mid] of this.msgIds) await deps.bot.api.editMessageText(chat, mid, text, { parse_mode: 'HTML' }).catch(() => {})
+    for (const [chat, mid] of this.msgIds) {
+      if (isChatFlooded(chat)) continue   // skip the cosmetic live edit while the chat is in a 429 window
+      await deps.bot.api.editMessageText(chat, mid, text, { parse_mode: 'HTML' }).catch(() => {})
+    }
     this.opts.persist()   // keep the persisted body current so a restart's cap fallback shows the latest state
   }
 
@@ -418,11 +428,13 @@ class MirrorCard {
     // then edit ONLY if the content fingerprint moved — so the card tracks real activity, not the
     // clock, and barely flashes.
     const now = Date.now()
-    if (now - this.lastSyncAt < MIRROR_THROTTLE_MS && this.msgIds.size > 0) return
+    const throttleMs = isTopicMode() ? MIRROR_THROTTLE_GROUP_MS : MIRROR_THROTTLE_MS
+    if (now - this.lastSyncAt < throttleMs && this.msgIds.size > 0) return
     this.lastSyncAt = now
     if (!(await this.syncBody(false))) return   // nothing to show yet (e.g. thoughts mode, no narration)
 
     if (this.msgIds.size === 0) {
+      if (Date.now() < this.createCooldownUntil) return   // a recent create 429'd — don't hammer a fresh post every tick
       // Open the card silently — it's the ambient mirror; the alerting message is the relayed reply.
       this.contentKey = this.body
       this.paneId = this.opts.resolvePane()   // remember which pane this card tracks (see abandon)
@@ -430,9 +442,14 @@ class MirrorCard {
       this.anchor = file ? turnAnchorUuid(file) : null   // the turn this card belongs to (restart resume check)
       const text = this.compose(false)
       for (const t of await this.opts.targets()) {
+        if (isChatFlooded(t.chat)) continue   // chat is in a 429 window — skip the cosmetic card, let replies use the budget
         const opts = { parse_mode: 'HTML' as const, disable_notification: true, ...(t.thread ? { message_thread_id: t.thread } : {}) }
         try { const m = await deps.bot.api.sendMessage(t.chat, text, opts); this.msgIds.set(t.chat, m.message_id) }
-        catch (e) { process.stderr.write(`daemon: activity mirror create failed: ${e}\n`) }
+        catch (e) {
+          const ra = Number((e as { parameters?: { retry_after?: number } })?.parameters?.retry_after)
+          this.createCooldownUntil = Date.now() + (Number.isFinite(ra) ? ra * 1000 : 5000)
+          process.stderr.write(`daemon: activity mirror create failed (cooldown ${Math.round((this.createCooldownUntil - Date.now()) / 1000)}s): ${e}\n`)
+        }
       }
       this.opts.persist()
       this.opts.onCreated?.()

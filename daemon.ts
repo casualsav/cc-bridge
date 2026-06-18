@@ -72,6 +72,7 @@ import {
   MAX_CHUNK_LIMIT, MAX_ATTACHMENT_BYTES, assertAllowedChat, resolveChatId, resolveTarget,
   assertSendable, chunk, coerceReaction,
 } from './calls.ts'
+import { installSendGovernor, isChatFlooded } from './throttle.ts'
 import { initUpdates, startUpdate, bridgeVersion, claudeBin, claudeVersion, sweepUpdateChecks } from './updates.ts'
 import { formatChannelBlock } from './inbound.ts'
 import { initQueue, readLater, writeLater, sweepLaterQueues, LATER_SWEEP_MS } from './queue.ts'
@@ -185,6 +186,9 @@ if (!STATIC) setInterval(checkApprovals, 5000).unref()
 // ---- Bot ----
 
 const bot = new Bot(TOKEN)
+// Front every outbound send/edit with the per-chat flood governor so the live cards, replies, and
+// pins can't collectively exceed Telegram's ~20-events/min group limit (the 429-storm slowdown).
+installSendGovernor(bot)
 initStatusCard({
   bot, transcriptForPane, lastKnownModel: () => lastKnownModel, botUsername: () => botUsername,
   usageSnapshotForPane: async pane => readUsageSnapshot(undefined, await paneAccount(pane)),
@@ -2267,23 +2271,32 @@ async function handleModelUnavailable(text: string, paneId: string | null = focu
 // first detection, animate a progress bar while the spinner persists, then resolve it to a ✅
 // message when the spinner is gone. Compaction exposes no percentage, so the bar is a moving
 // indicator (cycling fill), not a real fraction. Keyed by pane so each session gets its own card.
-type CompactWatch = { chat: string; thread?: number; msgId: number; startedAt: number; step: number; timer: ReturnType<typeof setTimeout>; lastText: string; cooldownUntil: number }
+type CompactWatch = { chat: string; thread?: number; msgId: number; startedAt: number; lastFilled: number; timer: ReturnType<typeof setTimeout>; cooldownUntil: number }
 const compactWatches = new Map<string, CompactWatch>()
 
-// The card's progress bar in Claude Code's own ▰/▱ style (matching the bar it draws on the pane),
-// kept short so the whole card stays one line on Telegram. `filled` is 0..WIDTH.
-const COMPACT_BAR_WIDTH = 14
+// The card's progress bar in Claude Code's own ▰/▱ style (matching the bar it draws on the pane).
+// 20 cells, so each ▰ is exactly one 5% step. `filled` is 0..WIDTH.
+const COMPACT_BAR_WIDTH = 20
 function compactBarOf(filled: number): string {
   const f = Math.max(0, Math.min(COMPACT_BAR_WIDTH, filled))
   return '▰'.repeat(f) + '▱'.repeat(COMPACT_BAR_WIDTH - f)
 }
 
-// The card's progress line. Prefer Claude Code's REAL percentage (mirrored from the live ▰/▱ bar) so
-// the card tracks genuine progress; fall back to a synthetic cycling bar (same ▰/▱ style) when no
-// percentage is on the pane yet. `pct` is null when there's nothing to mirror.
-function compactProgress(pct: number | null, step: number): string {
-  if (pct != null) return `${compactBarOf(Math.round((pct / 100) * COMPACT_BAR_WIDTH))} ${pct}%`
-  return compactBarOf(step % (COMPACT_BAR_WIDTH + 1))
+// Filled-cell count for a percentage — one cell per 5%. The card keys its dedup on THIS bucket, not on
+// the rendered text, so it edits only when compaction crosses a 5% boundary: ≤20 edits across an entire
+// compaction instead of one every tick. (The old synthetic cycling bar changed every 3s even with no
+// real progress, and that stream of edits flooded the group's ~20-events/min budget — 429ing replies,
+// prompts, and alerts behind multi-second backoffs.)
+function compactCells(pct: number): number {
+  return Math.max(0, Math.min(COMPACT_BAR_WIDTH, Math.round(pct / 5)))
+}
+
+// The card's progress line, mirrored from Claude Code's REAL percentage (read off the live ▰/▱ bar).
+// null → an empty bar with no %: the start/unknown state. No synthetic animation — with no percentage
+// to show, the card holds, so it never edits without genuine progress to report.
+function compactProgress(pct: number | null): string {
+  if (pct == null) return compactBarOf(0)
+  return `${compactBarOf(compactCells(pct))} ${pct}%`
 }
 
 // One edit attempt at the card. Returns 0 on success (or on a 400 "message is not modified"/gone,
@@ -2303,8 +2316,10 @@ async function tryEditCard(chat: string, msgId: number, text: string): Promise<n
   }
 }
 
-// Card refresh cadence. Group chats throttle to ~20 message events/min, so we pace edits at 3s
-// (~20/min) to stay under the flood limit in the first place; tryEditCard's cooldown is the backstop.
+// Poll cadence: how often we re-capture the pane to read progress and detect completion. Edits are
+// gated on 5% bucket crossings (compactCells), NOT on this tick — so a fast poll costs only local
+// captures, while the throttled Telegram edit fires at most ~20 times per compaction. 3s keeps the
+// bar responsive and the ✅ prompt; tryEditCard's cooldown is the 429 backstop.
 const COMPACT_TICK_MS = 3000
 
 // Kick off (idempotently) the status card for a pane that just started compacting. Safe to call on
@@ -2312,21 +2327,22 @@ const COMPACT_TICK_MS = 3000
 // the same compaction never post a second card.
 async function startCompactionWatch(pane: string, initialText = ''): Promise<void> {
   if (compactWatches.has(pane)) return
-  const slot: CompactWatch = { chat: '', thread: undefined, msgId: 0, startedAt: Date.now(), step: 1, timer: setTimeout(() => {}, 0), lastText: '', cooldownUntil: 0 }
+  const slot: CompactWatch = { chat: '', thread: undefined, msgId: 0, startedAt: Date.now(), lastFilled: 0, timer: setTimeout(() => {}, 0), cooldownUntil: 0 }
   clearTimeout(slot.timer)
   compactWatches.set(pane, slot)   // reserve the slot before any await so a concurrent frame can't duplicate it
   const [target] = await outboundTargetsFor(pane)
   if (!target) { compactWatches.delete(pane); return }
   slot.chat = target.chat
   slot.thread = target.thread
-  const opening = `🗜️ Compacting conversation…\n<code>${compactProgress(compactPercent(initialText), slot.step)}</code>`
+  const openPct = compactPercent(initialText)
+  const opening = `🗜️ Compacting conversation…\n<code>${compactProgress(openPct)}</code>`
   const msg = await bot.api.sendMessage(target.chat, opening, {
     parse_mode: 'HTML',
     ...(target.thread ? { message_thread_id: target.thread } : {}),
   }).catch(() => null)
   if (!msg) { compactWatches.delete(pane); return }
   slot.msgId = msg.message_id
-  slot.lastText = opening
+  slot.lastFilled = openPct == null ? 0 : compactCells(openPct)
   const tick = async (): Promise<void> => {
     const w = compactWatches.get(pane)
     if (!w) return
@@ -2334,11 +2350,14 @@ async function startCompactionWatch(pane: string, initialText = ''): Promise<voi
     const cap = await capturePane(pane).catch(() => '')
     const still = detectCompacting(cap)
     if (still && elapsed < 5 * 60_000) {
-      w.step += 1
-      const text = `🗜️ Compacting conversation…\n<code>${compactProgress(compactPercent(cap), w.step)}</code>`
-      if (text !== w.lastText && Date.now() >= w.cooldownUntil) {   // skip redundant edits; honour any 429 cooldown
-        const wait = await tryEditCard(w.chat, w.msgId, text)
-        if (wait === 0) w.lastText = text
+      // Edit ONLY when compaction crosses a 5% cell boundary (and never on a null reading) — so the
+      // card reports ≤20 times across the whole run, not once per 3s tick. capturePane is local; the
+      // Telegram edit is the throttled resource, so gating it on the bucket is what tames the flood.
+      const pct = compactPercent(cap)
+      const filled = pct == null ? w.lastFilled : compactCells(pct)
+      if (filled !== w.lastFilled && Date.now() >= w.cooldownUntil && !isChatFlooded(w.chat)) {   // 5% boundary crossed; honour 429 cooldown + flood window
+        const wait = await tryEditCard(w.chat, w.msgId, `🗜️ Compacting conversation…\n<code>${compactProgress(pct)}</code>`)
+        if (wait === 0) w.lastFilled = filled
         else if (wait > 0) w.cooldownUntil = Date.now() + wait * 1000
       }
       w.timer = setTimeout(() => void tick(), COMPACT_TICK_MS)
