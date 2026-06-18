@@ -1,6 +1,7 @@
-import { test, expect } from 'bun:test'
+import { test, expect, mock } from 'bun:test'
 import { resolveChatId, resolveTarget, chunk, coerceReaction, assertSendable } from './calls.ts'
 import { loadAccess } from './access.ts'
+import * as realTopic from './topic-runtime.ts'
 
 const OWNER = () => loadAccess().allowFrom[0]
 
@@ -14,6 +15,20 @@ test('resolveTarget: explicit chat wins; `.` without a pane falls back like reso
   if (loadAccess().allowFrom.length === 1) {
     expect((await resolveTarget({ chat_id: '.' })).chat).toBe(OWNER())
     expect((await resolveTarget({})).chat).toBe(OWNER())
+  }
+})
+
+test('resolveTarget: `.` with a pane uses the relay binding (outboundTargetsFor), not the DM', async () => {
+  // Regression for the off-MCP `tg send .` → owner-DM bug: a group-bound session whose pane the
+  // relay routes to its group (no topics.json entry) must resolve `.` to that group, not allowFrom[0].
+  // Stub the relay binding the same way pane-io.test stubs proc, then restore the real module.
+  mock.module('./topic-runtime.ts', () => ({ ...realTopic, outboundTargetsFor: async () => [{ chat: '-100GROUP', thread: 7 }] }))
+  try {
+    expect(await resolveTarget({ chat_id: '.', pane: '%0' })).toEqual({ chat: '-100GROUP', thread: 7 })
+    // An explicit chat id still wins over the pane binding.
+    expect(await resolveTarget({ chat_id: '-555', pane: '%0' })).toEqual({ chat: '-555' })
+  } finally {
+    mock.module('./topic-runtime.ts', () => realTopic)
   }
 })
 

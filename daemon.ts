@@ -2499,7 +2499,7 @@ async function handleCall(
       case 'reply': {
         const { chat: chat_id, thread } = await resolveTarget(args)
         const threadOpt = thread ? { message_thread_id: thread } : {}
-        const msgText = args.text as string
+        const msgText = args.text as string | undefined   // absent for a caption-less file send
         const reply_to = args.reply_to != null ? Number(args.reply_to) : undefined
         const files = (args.files as string[] | undefined) ?? []
         const format = args.format as string | undefined
@@ -2519,7 +2519,9 @@ async function handleCall(
         // otherwise standard Markdown auto-renders to HTML unless disabled in config.
         const render = format !== 'text' && format !== 'markdownv2' && access.renderMarkdown !== false
         const parseMode = render ? 'HTML' as const : format === 'markdownv2' ? 'MarkdownV2' as const : undefined
-        const chunks = render ? chunkHtml(mdToTelegramHtml(msgText), limit) : chunk(msgText, limit, mode)
+        // Caption is optional for file sends — only chunk/send text when some is present, so a
+        // bare `tg send . <file>` doesn't run mdToTelegramHtml/chunk on undefined (md.split crash).
+        const chunks = msgText ? (render ? chunkHtml(mdToTelegramHtml(msgText), limit) : chunk(msgText, limit, mode)) : []
         const sentIds: number[] = []
 
         for (let i = 0; i < chunks.length; i++) {

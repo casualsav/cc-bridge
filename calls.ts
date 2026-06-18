@@ -7,7 +7,7 @@ import { realpathSync } from 'node:fs'
 import { join, sep } from 'node:path'
 import { STATE_DIR } from './common.ts'
 import { loadAccess } from './access.ts'
-import { topicThreadFor } from './topic-runtime.ts'
+import { outboundTargetsFor } from './topic-runtime.ts'
 
 export const MAX_CHUNK_LIMIT = 4096
 export const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
@@ -32,15 +32,20 @@ export function resolveChatId(raw: unknown): string {
 }
 
 // Pane-aware `.`: a tg-CLI call carries its tmux pane, so `.` resolves to the calling session's
-// own chat — in forum mode the bound group + that session's topic thread (so sends land in the
-// right tab), else the sole allowlisted DM. Lets inbound blocks drop the chat id entirely.
+// own chat. We resolve it through the SAME pane→chat(+thread) binding the outbound relay uses
+// (outboundTargetsFor): the bound group + that session's topic thread in forum mode, the group
+// itself for a group-anchored/topic-less session, or the sole allowlisted DM otherwise. Only when
+// the pane resolves to nothing do we fall back to allowFrom. Previously this consulted only
+// topicThreadFor, which is null unless the session has a topics.json entry — so a group-bound
+// session with no topic (e.g. General-anchored, cwd absent from topics.json) mis-resolved `.` to
+// the owner DM even though the relay was correctly routing that session's replies to its group.
 export async function resolveTarget(args: Record<string, unknown>): Promise<{ chat: string; thread?: number }> {
   const s = (args.chat_id == null ? '' : String(args.chat_id)).trim()
   if (s && s !== '.') return { chat: s }
   const pane = args.pane ? String(args.pane) : null
   if (pane) {
-    const t = await topicThreadFor(pane).catch(() => null)
-    if (t) return { chat: t.group, thread: t.thread }
+    const [target] = await outboundTargetsFor(pane).catch(() => [])
+    if (target) return target
   }
   return { chat: resolveChatId(s) }
 }
