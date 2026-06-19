@@ -1,6 +1,6 @@
 // Prompt detection from pane captures — select menus vs permission dialogs. Pure functions.
 import { test, expect } from 'bun:test'
-import { stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, detectEditorState, onNormalPrompt, detectModelUnavailable, detectCompacting, compactPercent } from './prompt.ts'
+import { stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, isResumeSessionPrompt, detectEditorState, onNormalPrompt, detectModelUnavailable, detectCompacting, compactPercent } from './prompt.ts'
 
 test('stripAnsi removes CSI escape sequences', () => {
   expect(stripAnsi('\x1b[1mbold\x1b[0m text')).toBe('bold text')
@@ -270,6 +270,38 @@ test('isUsageLimitChoice ignores a scrolled-up past menu and unrelated confirms'
   ].join('\n')
   expect(isUsageLimitChoice(scrolled)).toBe(false)
   expect(isUsageLimitChoice('Save changes?\n  1. Yes\n  2. No\n  Enter to confirm')).toBe(false)
+})
+
+test('isResumeSessionPrompt matches the live post-update resume picker on the summary default', () => {
+  const pane = [
+    '   This session is 2d 17h old and 222.2k tokens.',
+    '   Resuming the full session will consume a substantial portion of your usage limits.',
+    '',
+    '   ❯ 1. Resume from summary (recommended)',
+    '     2. Resume full session as-is',
+    '     3. Don\'t ask me again',
+    '',
+    '   Enter to confirm · Esc to cancel',
+  ].join('\n')
+  expect(isResumeSessionPrompt(pane)).toBe(true)
+})
+
+test('isResumeSessionPrompt ignores it when the cursor is on full-session, scrolled up, or a plain confirm', () => {
+  const onFull = [
+    '   ❯ 1. Resume full session as-is',
+    '     2. Resume from summary (recommended)',
+    '   Enter to confirm · Esc to cancel',
+  ].join('\n')
+  expect(isResumeSessionPrompt(onFull)).toBe(false)   // cursor moved off the summary row
+  const scrolled = [
+    '   ❯ 1. Resume from summary (recommended)',
+    '   Enter to confirm · Esc to cancel',
+    '',
+    '● back to work, output here',
+    '  and more output below',
+  ].join('\n')
+  expect(isResumeSessionPrompt(scrolled)).toBe(false)
+  expect(isResumeSessionPrompt('Save changes?\n  1. Yes\n  2. No\n  Enter to confirm')).toBe(false)
 })
 
 test('detectLoginPrompt needs the menu live at the bottom (not scrolled up)', () => {

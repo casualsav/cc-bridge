@@ -408,6 +408,39 @@ export function isPluginInstallUserScope(paneText: string): boolean {
   return region.some(l => /^\s*[>❯●]\s*install for you \(user scope\)/i.test(l))
 }
 
+// ---- Post-update "Resume session" picker (auto-confirmed, never relayed) ----
+// After a Claude Code update, resuming a large/old session pops a blocking picker BEFORE the REPL:
+//     This session is 2d 17h old and 222.2k tokens.
+//     Resuming the full session will consume a substantial portion of your usage limits. …
+//   ❯ 1. Resume from summary (recommended)
+//     2. Resume full session as-is
+//     3. Don't ask me again
+//     Enter to confirm · Esc to cancel
+// Its footer is "Enter to confirm" (not "Enter to select" / "· Tab to amend"), so neither prompt
+// detector matches it — and until it's cleared the session never reaches a prompt, so an inbound is
+// bounced as an unrecognised screen (3 bridge sessions wedged here after a Claude update). The
+// daemon auto-confirms the highlighted recommended default ("Resume from summary") with Enter, so
+// the session boots and any held message delivers. We only fire when the cursor (❯/>) actually sits
+// on the summary row, so a user who navigated to "full session as-is" in the terminal isn't
+// overridden. Shares the "Enter to confirm" footer with the usage-limit menu but is disjoint from
+// it (different anchor option), so the two never collide.
+const RESUME_SUMMARY_OPT = /resume (?:from|with) summary/i
+export function isResumeSessionPrompt(paneText: string): boolean {
+  const lines = paneLines(paneText)
+  let footerIdx = -1
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (/enter to confirm/i.test(lines[i])) { footerIdx = i; break }
+  }
+  if (footerIdx === -1) return false
+  let belowNonBlank = 0
+  for (let i = footerIdx + 1; i < lines.length; i++) if (lines[i].trim()) belowNonBlank++
+  if (belowNonBlank > 1) return false   // scrolled-up past the live picker
+  const region = lines.slice(0, footerIdx)
+  if (!region.some(l => RESUME_SUMMARY_OPT.test(l))) return false
+  // Cursor must be ON the recommended summary row, so Enter resumes from summary (not full session).
+  return region.some(l => /^\s*[>❯►▶]\s*\d+[.)]\s*resume (?:from|with) summary/i.test(l))
+}
+
 // ---- External editor / pager detection ----
 // Some pane states CAPTURE the keyboard, so the bridge's normal "type the message + Enter" lands in
 // the wrong place and the user is silently stranded (e.g. the plan prompt's "ctrl+g to edit" opens

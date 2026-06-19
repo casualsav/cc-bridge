@@ -23,7 +23,7 @@ import {
 // replace a daemon left running stale code after a plugin upgrade.
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
-import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
+import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
 import { resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, listRecentSessions, findSessionCwd, searchTranscripts } from './transcript.ts'
 import {
   initAccounts, listAccounts, accountByName, accountForTranscript, accountForProjectsDir,
@@ -359,6 +359,21 @@ async function confirmPluginInstall(paneId: string): Promise<void> {
   process.stderr.write('daemon: auto-confirming plugin install (user scope)\n')
   await withPaneInjection(paneId, async () => { await sendKeys(paneId, ['Enter']); await waitForSettle(paneId, 200, 3000) })
   notifyChats('🧩 Installed the plugin for you (user scope).')
+}
+
+// Auto-confirm the post-update "Resume session" picker on "Resume from summary" (the highlighted
+// recommended default → Enter selects it). isResumeSessionPrompt already gated on the cursor sitting
+// on the summary row, so Enter resumes from summary. Until cleared, the session never reaches a
+// prompt and inbound is bounced as an unrecognised screen — so without this a Claude update wedges
+// every bridge session that's large/old enough to trigger the picker. Deduped via a short window so
+// the picker repainting each poll doesn't fire Enter twice. Driven through the watcher so the relay
+// loop doesn't misread the keystroke as activity.
+let resumeConfirmedAt = 0
+async function confirmResumeSession(paneId: string): Promise<void> {
+  if (Date.now() - resumeConfirmedAt < 4000) return   // same picker, just repainting
+  resumeConfirmedAt = Date.now()
+  process.stderr.write('daemon: auto-confirming resume-session picker (resume from summary)\n')
+  await withPaneInjection(paneId, async () => { await sendKeys(paneId, ['Enter']); await waitForSettle(paneId, 200, 3000) })
 }
 
 // Pull the active model name out of a /model picker capture (see parseCurrentModel
@@ -1113,6 +1128,7 @@ async function scanAuxPanePrompts(pane: string): Promise<void> {
   // System stalls auto-dismiss exactly like the focused path — they'd wedge queued injections.
   if (isUsageLimitChoice(text)) { void dismissUsageLimitChoice(pane); return }
   if (isPluginInstallUserScope(text)) { void confirmPluginInstall(pane); return }
+  if (isResumeSessionPrompt(text)) { void confirmResumeSession(pane); return }
 
   // Sign-in link printed as plain output (independent of menu detection).
   const authUrl = extractAuthUrl(text)
@@ -1622,6 +1638,7 @@ async function saveEditorAndQuit(paneId: string): Promise<boolean> {
 function recognizedScreen(cap: string): boolean {
   return onNormalPrompt(cap) || !!detectUserPrompt(cap) || !!detectPermissionPrompt(cap)
     || !!detectLoginPrompt(cap) || isUsageLimitChoice(cap) || isSubmitScreen(cap) || isPluginInstallUserScope(cap)
+    || isResumeSessionPrompt(cap)
 }
 
 // Inbound held back because its pane was on a captured screen (editor/pager or an unrecognised
@@ -2035,6 +2052,11 @@ function onPaneEvent(text: string): void {
   // default) with Enter, so adding a plugin from chat or the terminal doesn't wedge on a confirmation
   // the user already decided. Deduped so a repaint of the same menu doesn't fire Enter twice.
   if (focus.activePaneId && isPluginInstallUserScope(text)) { void confirmPluginInstall(focus.activePaneId); return }
+
+  // Post-update "Resume session" picker — auto-confirm "Resume from summary" (the highlighted
+  // recommended default) with Enter, so a Claude update doesn't wedge the session before the REPL
+  // and bounce every inbound as an unrecognised screen. Deduped so a repaint doesn't fire Enter twice.
+  if (focus.activePaneId && isResumeSessionPrompt(text)) { void confirmResumeSession(focus.activePaneId); return }
 
   // /login method menu — relay the actual options as buttons. Its footer is just "Esc to cancel"
   // (no select/permission wording), so the generic detectors below miss it, and it fires for BOTH
