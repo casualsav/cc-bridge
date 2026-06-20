@@ -3467,19 +3467,28 @@ bot.command('effort', async ctx => {
   }
   if (arg) {
     if (!EFFORT_LEVELS.includes(arg)) { await ctx.reply('Usage: <code>/effort low | medium | high | xhigh | max | auto</code>  ·  <code>/effort default max</code>', { parse_mode: 'HTML' }); return }
-    const t = await commandTarget(ctx)
-    if (!t) return
-    const chat_id = String(ctx.chat!.id)
-    const result = await injectEffortChange(t, arg, chat_id)
-    // 'confirm' → a Yes/No card was relayed (the "switched" message follows on Yes). 'applied' → it
-    // took effect immediately, so confirm with a message.
-    if (result === 'applied') {
-      await ctx.reply(`⚡ Effort switched to ${escapeHtml(effortLabel(arg))}`, { parse_mode: 'HTML' })
-    }
+    await applyEffortLevel(ctx, arg)
     return
   }
   await doEffortPicker(ctx)
 })
+
+// Apply a single effort level to the command's target session, relaying CC's mid-conversation confirm
+// as a Yes/No card when it raises one ('confirm'), or acking directly when it applied ('applied').
+// Shared by `/effort <level>` and the bare per-level aliases below. Caller has already gated.
+async function applyEffortLevel(ctx: Context, level: string): Promise<void> {
+  const t = await commandTarget(ctx)
+  if (!t) return
+  const result = await injectEffortChange(t, level, String(ctx.chat!.id))
+  if (result === 'applied') await ctx.reply(`⚡ Effort switched to ${escapeHtml(effortLabel(level))}`, { parse_mode: 'HTML' })
+}
+
+// Bare per-level aliases: /max → /effort max, /high → /effort high, etc. `auto` is deliberately
+// EXCLUDED — /auto stays an alias for auto MODE (handleModeCommand above), not effort. Kept out of
+// the command menu (like /yolo) to avoid crowding it; they just work for muscle memory.
+for (const lvl of ['low', 'medium', 'high', 'xhigh', 'max'] as const) {
+  bot.command(lvl, async ctx => { if (!dmCommandGate(ctx)) return; await applyEffortLevel(ctx, lvl) })
+}
 
 // /new asks to confirm, then resets and reports the model. /clear is a hidden
 // alias for /new (kept for muscle memory; deliberately left out of the menu).
