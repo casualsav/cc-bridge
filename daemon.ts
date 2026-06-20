@@ -60,7 +60,7 @@ import {
   getGeneralSession, setGeneralSession, findTopicByCwd,
 } from './topics.ts'
 import {
-  initTopicRuntime, sessionForPane, paneForSession, ensureSessionTopic, closeTopicForPane,
+  initTopicRuntime, sessionForPane, paneForSession, ensureSessionTopic, closeTopicForPane, markTopicDeleted,
   reconcileTopics, refreshTopicTitles, topicThreadFor, emitTopicTyping, armTopicTyping, stopTopicTyping, outboundTargetsFor,
   stampPaneSession, topicBranchCache, generalAnchorLost,
   setPaneRestarting, isPaneRestarting, releasePaneSession, reopenSessionTopic,
@@ -72,7 +72,7 @@ import {
   MAX_CHUNK_LIMIT, MAX_ATTACHMENT_BYTES, assertAllowedChat, resolveChatId, resolveTarget,
   assertSendable, chunk, coerceReaction,
 } from './calls.ts'
-import { installSendGovernor, isChatFlooded } from './throttle.ts'
+import { installSendGovernor, isChatFlooded, asLowPriority } from './throttle.ts'
 import { initUpdates, startUpdate, bridgeVersion, claudeBin, claudeVersion, sweepUpdateChecks } from './updates.ts'
 import { formatChannelBlock } from './inbound.ts'
 import { initQueue, readLater, writeLater, sweepLaterQueues, LATER_SWEEP_MS } from './queue.ts'
@@ -5442,7 +5442,7 @@ bot.on('message:forum_topic_closed', async ctx => {
 // the live API; sendChatAction is NOT usable here (it returns ok:true for bogus threads).
 // 'gone' = message no longer exists; 'alive' = it does (any other error included — fail safe).
 async function probeMessageGone(group: string, messageId: number): Promise<'gone' | 'alive'> {
-  try { await bot.api.editMessageReplyMarkup(group, messageId); return 'alive' }
+  try { await asLowPriority(() => bot.api.editMessageReplyMarkup(group, messageId)); return 'alive' }
   catch (e) {
     return /message to edit not found/i.test(String((e as { description?: string })?.description ?? e)) ? 'gone' : 'alive'
   }
@@ -5461,6 +5461,7 @@ async function sweepDeletedTopics(): Promise<void> {
       const pinId = sessionPins.get(`topic:${t.threadId}`)
       if (pinId && await probeMessageGone(group, pinId) === 'alive') continue   // pin survives → topic exists
       const pane = await paneForSession(t.sessionId)
+      markTopicDeleted(t.sessionId)   // block re-creation until the pane is gone, else it races back open
       removeTopic(t.sessionId)
       sessionPins.delete(`topic:${t.threadId}`); pinTextCache.delete(`topic:${t.threadId}`); persistSessionPins()
       process.stderr.write(`daemon: topic ${t.threadId} ("${t.name}") deleted by user → cleaning up session ${t.sessionId}\n`)

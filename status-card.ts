@@ -13,6 +13,7 @@ import { escapeHtml } from './markdown.ts'
 import { parseStatusline, pinBar, type StatuslineData } from './statusline.ts'
 import { capturePane, paneCwd } from './pane-io.ts'
 import { focus } from './state.ts'
+import { asLowPriority } from './throttle.ts'
 import { loadAccess } from './access.ts'
 import { isTopicMode, getGroupChatId, listTopics, getGeneralSession, removeTopic } from './topics.ts'
 import { paneForSession } from './topic-runtime.ts'
@@ -334,6 +335,13 @@ function dropDeadTopic(sessionId: string, key: string): void {
   process.stderr.write(`daemon: dropped topic ${sessionId} — Telegram thread gone (stopped pin retries)\n`)
 }
 
+// Background topics' pins refresh at most every BG_PIN_MS; the focused session's pin refreshes every
+// tick. Without this, N live-ticking status cards (cost / time / usage countdowns all change each
+// tick) produce O(topics) group edits every 10s and saturate the shared per-chat send budget — the
+// flood that starved replies / new-topic setup / /settings during multi-session activity.
+const BG_PIN_MS = 60_000
+const lastPinRefresh = new Map<string, number>()   // pin key -> last refresh attempt (background throttle)
+
 export async function updateTopicPins(): Promise<void> {
   const group = getGroupChatId()
   if (!group) return
@@ -372,8 +380,13 @@ export async function updateTopicPins(): Promise<void> {
     if (t.closed) continue
     const paneId = await paneForSession(t.sessionId)
     if (!paneId) continue
-    const text = await statusCardText(paneId)
     const key = `topic:${t.threadId}`
+    // Throttle background topics: only the focused session's pin refreshes every tick; others at most
+    // every BG_PIN_MS, so total pin traffic stays under the group budget no matter how many topics are
+    // open. Skips the capturePane too, not just the Telegram edit. The focused pin stays live.
+    if (paneId !== focus.activePaneId && Date.now() - (lastPinRefresh.get(key) ?? 0) < BG_PIN_MS) continue
+    if (paneId !== focus.activePaneId) lastPinRefresh.set(key, Date.now())
+    const text = await statusCardText(paneId)
     const existing = sessionPins.get(key)
     if (existing && pinTextCache.get(key) === text) continue   // unchanged → skip the edit
     if (existing) {
@@ -402,7 +415,7 @@ export async function updateSessionPin(): Promise<void> {
   if (pinUpdating) return                       // serialize — capture + edit can overlap with switches
   pinUpdating = true
   try {
-    if (isTopicMode()) { await updateTopicPins(); return }   // forum mode → per-topic pins, not the DM pin
+    if (isTopicMode()) { await asLowPriority(() => updateTopicPins()); return }   // forum → per-topic pins, low-prio so they yield to user-facing sends
     const text = await statusCardText(focus.activePaneId)
     const reply_markup = statusKeyboard()
     const hasSession = !!(focus.activePaneId || focus.activeShim)   // off-MCP pane or MCP shim — either counts

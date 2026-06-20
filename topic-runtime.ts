@@ -107,7 +107,23 @@ export async function paneForSession(sessionId: string): Promise<string | null> 
 // ---- Forum-topics outbound routing (phase 2b) ----
 // Map a session to its forum topic, creating it on first use. Returns the topic's thread id, or
 // undefined if creation failed (caller falls back to the General topic).
+//
+// Sessions whose topic the user just deleted — suppress topic (re)creation until the /exit'd pane is
+// actually gone, so the delete-sweep's removeTopic + the slow /exit can't race ensureSessionTopic or
+// outbound routing into re-opening the very topic the user deleted ("deleted topic reappears"). TTL-
+// bounded; the pane dies within seconds, well inside the window, and the sid is unique + dead after.
+const deletedTopicSids = new Map<string, number>()   // sessionId -> deletedAt
+const DELETED_TOPIC_SUPPRESS_MS = 120_000
+export function markTopicDeleted(sessionId: string): void { deletedTopicSids.set(sessionId, Date.now()) }
+function topicDeletionPending(sessionId: string): boolean {
+  const at = deletedTopicSids.get(sessionId)
+  if (at == null) return false
+  if (Date.now() - at > DELETED_TOPIC_SUPPRESS_MS) { deletedTopicSids.delete(sessionId); return false }
+  return true
+}
+
 async function ensureTopicFor(group: string, sessionId: string, cwd: string): Promise<number | undefined> {
+  if (topicDeletionPending(sessionId)) return undefined   // user just deleted it — don't re-open during teardown
   const existing = getTopicBySession(sessionId)
   if (existing) {
     if (existing.closed) {
@@ -156,6 +172,7 @@ export async function ensureSessionTopic(paneId: string): Promise<void> {
   const sid = await sessionForPane(paneId)
   const cwd = await paneCwd(paneId).catch(() => null)
   if (!sid || !cwd) return
+  if (topicDeletionPending(sid)) return   // user just deleted this session's topic — don't re-open it
   if (sid === getGeneralSession()) return   // anchored to General — lives there, no topic
   if (getTopicBySession(sid) || topicEnsureInFlight.has(sid)) return   // already have it / creating it
   topicEnsureInFlight.add(sid)
