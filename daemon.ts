@@ -4228,7 +4228,7 @@ bot.command('diff', async ctx => {
 
 // /terminal [N] — dump the last N lines of the terminal (default 40, capped) so you can
 // catch up on recent session activity. Read-only: just captures the pane scrollback.
-bot.command('terminal', async ctx => {
+bot.command(['terminal', 't'], async ctx => {   // /t = hidden short alias (kept out of the command menu)
   if (!dmCommandGate(ctx)) return
   const t = await commandTarget(ctx)
   if (!t) return
