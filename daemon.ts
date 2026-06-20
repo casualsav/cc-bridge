@@ -620,7 +620,7 @@ async function reapplyEffort(paneId: string, effort: string | null, watcher: Pan
 // After a resumed session clears the post-update "Resume session" picker, Claude Code brings it back
 // at DEFAULT mode + the model-default effort — it restores neither across --resume, and the picker
 // interrupts the normal restore paths (restartPaneSessionCore can't drive the dials into the menu,
-// and applyInheritedSettings' REPL wait sits on the picker). So once the picker is resolved and the
+// and the spawn-time --effort launch flag is swallowed by the picker). So once the picker is resolved and the
 // pane reaches the REPL, re-assert the session's OWN last-known mode + effort (falling back to the
 // standing preference). Called from the resumesel tap that drives the choice.
 async function restoreResumedDials(paneId: string, watcher: PaneWatcher | null): Promise<void> {
@@ -5060,33 +5060,11 @@ async function captureInheritedSettings(paneId: string, watcher: PaneWatcher | n
   } catch { return null }
 }
 
-async function applyInheritedSettings(paneId: string, inherit: InheritedSettings): Promise<void> {
-  try {
-    // Wait for the REPL (trust is pre-recorded so boot is normally a few seconds; give up after
-    // 30 — a login screen or crash loop shouldn't get settings typed into it).
-    let ready = false
-    for (let i = 0; i < 30 && !ready; i++) {
-      await new Promise(r => setTimeout(r, 1000))
-      if (!(await paneAlive(paneId))) return
-      ready = onNormalPrompt(await capturePane(paneId).catch(() => ''))
-    }
-    if (!ready) return
-    // The spawned pane is normally unfocused (no watcher); if it DID take focus, pause its mirror.
-    const watcher = focus.activePaneId === paneId ? focus.paneWatcher : null
-    const alias = inherit.model?.split(/\s+/)[0]?.toLowerCase()
-    if (alias && MODEL_ALIASES.includes(alias)) await injectSlash(paneId, watcher, `/model ${alias}`)
-    if (inherit.effort && EFFORT_LEVELS.includes(inherit.effort)) {
-      await injectSlash(paneId, watcher, `/effort ${inherit.effort}`)
-      // A fresh session applies effort without the mid-conversation confirm; if one shows up
-      // anyway, Enter accepts it (the inherited level IS what the user wants).
-      const cap = await capturePane(paneId).catch(() => '')
-      if (cap && isEffortConfirm(cap)) await sendKeys(paneId, ['Enter'])
-    }
-    if (inherit.mode !== 'default') await switchToMode(paneId, inherit.mode, watcher)
-    process.stderr.write(`daemon: applied inherited settings to ${paneId} (${inherit.model ?? '—'} · ${inherit.effort ?? '—'} · ${inherit.mode})\n`)
-  } catch (e) { process.stderr.write(`daemon: inherit settings for ${paneId} failed: ${e}\n`) }
-}
-
+// All three dials — model, effort, AND mode — are now set declaratively via launch flags in
+// spawnSession (--model / --effort / --permission-mode), so a spawned session boots already correct
+// with NO post-boot pane-driving at all. This replaced the old type-into-a-booting-pane path, whose
+// REPL-wait + inject round-trips were the 10-20s "new topic is slow / not ready to receive" lag (and
+// they raced the user's own first keystrokes into the fresh pane).
 async function spawnSession(dir: string, extra = '', presetSessionId?: string, account: Account = MAIN_ACCOUNT): Promise<string | null> {
   try {
     // tmux's `new-window -c` silently falls back to $HOME when it can't chdir into `dir` (e.g.
@@ -5111,7 +5089,7 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
     // A resumed/continued session keeps its model + conversation, but Claude Code restores NEITHER
     // the permission mode NOR the reasoning effort — seed both. Prefer the session's OWN last-known
     // values (topic revivals pass its sid); fall back to the persisted preferences for sid-less
-    // resumes (DM /resume). applyInheritedSettings re-asserts them once the pane reaches the REPL.
+    // resumes (DM /resume). The launch flags re-assert effort; a non-bypass mode is set post-REPL.
     if (!inherit && /(?:^|\s)(?:--resume|-c)\b/.test(extra)) {
       const mode = (presetSessionId ? sessionModes.get(presetSessionId) : null) ?? lastFocusedMode
       const effort = (presetSessionId ? sessionEfforts.get(presetSessionId) : null) ?? fallbackEffort()
@@ -5131,7 +5109,22 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
     // /mode), which is unrelated to adoption. extra e.g. "--resume <id>". An alt account pins
     // the session to its config dir (tmux runs the command through sh -c, so the env prefix works).
     const envPrefix = account.name === 'main' ? '' : `CLAUDE_CONFIG_DIR='${account.configDir.replace(/'/g, `'\\''`)}' `
-    const cmd = `${envPrefix}claude --allow-dangerously-skip-permissions${extra ? ` ${extra}` : ''}`
+    // Set the inherited model + effort as LAUNCH FLAGS so the session boots already correct — no
+    // typing /model + /effort into a freshly-booting pane (that post-boot injection was the 10-20s
+    // slow-spawn lag and it raced the user's first keystrokes). Claude Code restores neither on
+    // --resume (effort not at all), so these flags are also what brings a resumed session back at the
+    // user's effort instead of dropping to the model default. Values come from controlled sets, safe
+    // to interpolate; --effort rejects 'auto' (a statusline state, not a flag level), so skip it.
+    const launchFlags: string[] = []
+    const mAlias = inherit?.model?.split(/\s+/)[0]?.toLowerCase()
+    if (mAlias && MODEL_ALIASES.includes(mAlias)) launchFlags.push(`--model ${mAlias}`)
+    if (inherit?.effort && inherit.effort !== 'auto' && EFFORT_LEVELS.includes(inherit.effort)) launchFlags.push(`--effort ${inherit.effort}`)
+    // Mode too: bypass is already the launch default (--allow-dangerously-skip-permissions), so pass
+    // --permission-mode only for a different inherited mode (plan/acceptEdits/auto). It composes
+    // cleanly with the bypass flag — the explicit mode wins the starting state, bypass stays
+    // switchable on demand — so the session boots in the right mode with no post-boot switch at all.
+    if (inherit?.mode && inherit.mode !== 'default' && inherit.mode !== 'bypassPermissions') launchFlags.push(`--permission-mode ${inherit.mode}`)
+    const cmd = `${envPrefix}claude --allow-dangerously-skip-permissions${extra ? ` ${extra}` : ''}${launchFlags.length ? ` ${launchFlags.join(' ')}` : ''}`
     const { stdout } = await exec('tmux', ['new-window', '-d', '-P', '-F', '#{pane_id}', ...target, '-c', dir, cmd], { timeout: 5000 })
     const newPane = stdout.trim()
     if (newPane) {
@@ -5140,7 +5133,6 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
       // the pane straight to that topic instead of minting a fresh id + duplicate topic.
       if (presetSessionId) await stampPaneSession(newPane, presetSessionId)
       registerSpawnedPane(newPane)   // bind/announce now (works even under FORCE_PANE)
-      if (inherit) void applyInheritedSettings(newPane, inherit)
     }
     return newPane || null
   } catch (e) { process.stderr.write(`daemon: spawn session in ${dir} failed: ${e}\n`); return null }
