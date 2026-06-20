@@ -572,14 +572,49 @@ function recordSessionEffort(sid: string | null, effort: string | null): void {
   writeJsonFile(SESSION_EFFORTS_FILE, Object.fromEntries(sessionEfforts))
 }
 
+// A user-set STANDING default effort: the cold fallback when a resumed/new session has no remembered
+// effort of its own. Distinct from lastFocusedEffort (which auto-tracks the focused pane and drifts),
+// so once set it sticks — set via `/effort default <level>`. null = unset (then fall back to the
+// auto-tracked preference). fallbackEffort() is what the restore paths use in place of a bare
+// lastFocusedEffort, so the configured default wins over the drifting one.
+const DEFAULT_EFFORT_FILE = join(STATE_DIR, 'default-effort.json')
+let defaultEffortPref: string | null = readJsonFile<{ effort: string | null }>(DEFAULT_EFFORT_FILE, { effort: null }).effort
+function setDefaultEffort(effort: string | null): void {
+  defaultEffortPref = effort
+  writeJsonFile(DEFAULT_EFFORT_FILE, { effort })
+}
+function fallbackEffort(): string | null { return defaultEffortPref ?? lastFocusedEffort }
+
 // Inject `/effort <level>` and accept Claude Code's mid-conversation "Change effort level?" confirm
 // if it appears (a resumed session has cached history, so the switch always prompts). Used by the
 // restore paths — distinct from injectEffortChange, which relays the confirm to the user as buttons.
 async function reapplyEffort(paneId: string, effort: string | null, watcher: PaneWatcher | null): Promise<void> {
   if (!effort || !EFFORT_LEVELS.includes(effort)) return
-  await injectSlash(paneId, watcher, `/effort ${effort}`)
-  const cap = await capturePane(paneId).catch(() => '')
-  if (cap && isEffortConfirm(cap)) { await sendKeys(paneId, ['Enter']); await waitForSettle(paneId, 200, 3000) }
+  const run = async () => {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await sendKeys(paneId, [`/effort ${effort}`, 'Enter'])
+      // The mid-conversation "Change effort level?" confirm can render a beat AFTER the input box
+      // settles, so a single post-settle capture raced it: the dialog appeared unanswered and the
+      // dial stayed at the model default — the reason a bulk update flipped many sessions Max→high.
+      // Poll for the confirm and accept it the moment it shows; bail early once the statusline
+      // actually reads the target effort (a fresh session applies it with no confirm at all).
+      let answered = false
+      for (let i = 0; i < 10; i++) {
+        await waitForSettle(paneId, 200, 2500)
+        const cap = await capturePane(paneId).catch(() => '')
+        if (cap && parseStatusline(cap)?.effort === effort) return   // applied (confirmed or no-confirm path)
+        if (cap && isEffortConfirm(cap)) { await sendKeys(paneId, ['Enter']); await waitForSettle(paneId, 200, 3000); answered = true; break }
+        await sleep(400)
+      }
+      // Verify the dial actually moved; if the confirm never appeared and it's still not the target,
+      // re-issue once (a slow resume can swallow the first command before the REPL is ready).
+      const cap = await capturePane(paneId).catch(() => '')
+      if (parseStatusline(cap)?.effort === effort) return
+      if (!answered) continue   // retry the whole inject
+      return                    // we answered a confirm — trust it even if the statusline hasn't repainted yet
+    }
+  }
+  await (watcher ? watcher.withInjection(run) : run())
 }
 
 // After a resumed session clears the post-update "Resume session" picker, Claude Code brings it back
@@ -598,7 +633,7 @@ async function restoreResumedDials(paneId: string, watcher: PaneWatcher | null):
   if (!ready) return
   const sid = await sessionForPane(paneId, false).catch(() => null)
   const mode = (sid ? sessionModes.get(sid) : null) ?? lastFocusedMode
-  const effort = (sid ? sessionEfforts.get(sid) : null) ?? lastFocusedEffort
+  const effort = (sid ? sessionEfforts.get(sid) : null) ?? fallbackEffort()
   if (mode !== 'default') await switchToMode(paneId, mode, watcher)
   await reapplyEffort(paneId, effort, watcher)
   process.stderr.write(`daemon: restored dials on resumed pane ${paneId} (${mode} · ${effort ?? '—'})\n`)
@@ -3395,8 +3430,20 @@ bot.command('model', async ctx => {
 bot.command('effort', async ctx => {
   if (!dmCommandGate(ctx)) return
   const arg = (ctx.match ?? '').toString().trim().toLowerCase()
+  // `/effort default [level]` sets (or shows) the STANDING default — the effort a resumed/new session
+  // falls back to when it has no remembered effort of its own. Persisted and drift-proof (unlike the
+  // auto-tracked focused-pane preference), so it's the reliable answer to "always start at max".
+  const defMatch = /^default(?:\s+(\w+))?$/.exec(arg)
+  if (defMatch) {
+    const level = defMatch[1]
+    if (!level) { await ctx.reply(`⚡ Default effort is <b>${escapeHtml(defaultEffortPref ?? '— (unset)')}</b>.\nSet it with <code>/effort default max</code>.`, { parse_mode: 'HTML' }); return }
+    if (!EFFORT_LEVELS.includes(level)) { await ctx.reply('Usage: <code>/effort default low | medium | high | xhigh | max | auto</code>', { parse_mode: 'HTML' }); return }
+    setDefaultEffort(level)
+    await ctx.reply(`⚡ Default effort set to <b>${escapeHtml(effortLabel(level))}</b> — new and resumed sessions without their own remembered level will start here.`, { parse_mode: 'HTML' })
+    return
+  }
   if (arg) {
-    if (!EFFORT_LEVELS.includes(arg)) { await ctx.reply('Usage: <code>/effort low | medium | high | xhigh | max | auto</code>', { parse_mode: 'HTML' }); return }
+    if (!EFFORT_LEVELS.includes(arg)) { await ctx.reply('Usage: <code>/effort low | medium | high | xhigh | max | auto</code>  ·  <code>/effort default max</code>', { parse_mode: 'HTML' }); return }
     const t = await commandTarget(ctx)
     if (!t) return
     const chat_id = String(ctx.chat!.id)
@@ -5026,7 +5073,7 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
     // session after a daemon restart boots at 'default' mode / 'high' effort regardless of preference.
     if (!extra) {
       const mode = inherit && inherit.mode !== 'default' ? inherit.mode : lastFocusedMode
-      const effort = inherit?.effort ?? lastFocusedEffort
+      const effort = inherit?.effort ?? fallbackEffort()
       if (mode !== 'default' || effort) inherit = { model: inherit?.model ?? null, effort, mode }
     }
     // A resumed/continued session keeps its model + conversation, but Claude Code restores NEITHER
@@ -5035,7 +5082,7 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
     // resumes (DM /resume). applyInheritedSettings re-asserts them once the pane reaches the REPL.
     if (!inherit && /(?:^|\s)(?:--resume|-c)\b/.test(extra)) {
       const mode = (presetSessionId ? sessionModes.get(presetSessionId) : null) ?? lastFocusedMode
-      const effort = (presetSessionId ? sessionEfforts.get(presetSessionId) : null) ?? lastFocusedEffort
+      const effort = (presetSessionId ? sessionEfforts.get(presetSessionId) : null) ?? fallbackEffort()
       if (mode !== 'default' || effort) inherit = { model: null, effort, mode }
     }
     let target: string[] = []
