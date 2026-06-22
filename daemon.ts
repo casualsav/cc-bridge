@@ -193,6 +193,7 @@ installSendGovernor(bot)
 initStatusCard({
   bot, transcriptForPane, lastKnownModel: () => lastKnownModel, botUsername: () => botUsername,
   usageSnapshotForPane: async pane => readUsageSnapshot(undefined, await paneAccount(pane)),
+  onTopicGone: (sid, threadId) => void handleTopicThreadGone(sid, threadId),
 })
 initUpdates({ bot })
 initPromptRelay({ bot, outboundTargetsFor, flushPendingText, transcriptForPane, lastRelayedUuid: () => lastRelayedUuid, resetPromptDedup, verifyPromptClosed, paneKeys })
@@ -5604,6 +5605,43 @@ async function probeMessageGone(group: string, messageId: number): Promise<'gone
   }
 }
 
+// Tear down a confirmed-deleted topic: suppress recreation (markTopicDeleted), drop the mapping + pin
+// bookkeeping, and exit its session if still live — the tab is gone, so its conversation has nowhere
+// to surface. Shared by the slow sweep and the fast pin-loop detector (handleTopicThreadGone).
+async function teardownDeletedTopic(group: string, t: { sessionId: string; threadId: number; cwd: string; name: string }): Promise<void> {
+  const pane = await paneForSession(t.sessionId)
+  markTopicDeleted(t.sessionId)   // block re-creation until the pane is gone, else discovery races it back open
+  removeTopic(t.sessionId)
+  sessionPins.delete(`topic:${t.threadId}`); pinTextCache.delete(`topic:${t.threadId}`); persistSessionPins()
+  process.stderr.write(`daemon: topic ${t.threadId} ("${t.name}") deleted by user → cleaning up session ${t.sessionId}\n`)
+  if (pane && await paneAlive(pane)) {
+    await exitSessionPane(pane)
+    await bot.api.sendMessage(group, `🗑 Topic “${escapeHtml(t.name)}” was deleted — exited its session in <code>${escapeHtml(t.cwd)}</code>.`, { parse_mode: 'HTML', disable_notification: true }).catch(() => {})
+  }
+}
+
+// Fast deletion path: the 10s pin loop hit "message thread not found" editing/sending a topic's card.
+// It used to just drop the entry — but a LIVE session then had its topic recreated by discovery within
+// ~30s (the pin loop beats the 2-min sweep and never exited the session → the "deleted topic keeps
+// repopulating" loop). Now it delegates here: confirm the topic's OWN service message is gone too (so
+// deleting just the pin message can't kill a session), then run the same teardown the sweep does. The
+// in-flight guard + removeTopic make it fire exactly once per deletion.
+const topicGoneInFlight = new Set<string>()
+async function handleTopicThreadGone(sessionId: string, threadId: number): Promise<void> {
+  if (!isTopicMode()) return
+  const group = getGroupChatId()
+  if (!group) return
+  if (topicGoneInFlight.has(sessionId)) return
+  topicGoneInFlight.add(sessionId)
+  try {
+    const t = getTopicBySession(sessionId)
+    if (!t) return                                                    // already torn down
+    if (await probeMessageGone(group, threadId) === 'alive') return   // topic still there — only the pin went; re-pins next cycle
+    await teardownDeletedTopic(group, { sessionId, threadId, cwd: t.cwd, name: t.name })
+  } catch { /* transient — next pin tick retries */ }
+  finally { topicGoneInFlight.delete(sessionId) }
+}
+
 // Sweep every known topic; a deleted one exits its session (if still alive) and drops the
 // mapping + pin tracking. Double-probe: the service message AND the topic's status pin must both
 // be gone, so someone deleting just the "created topic" service message can't kill a session.
@@ -5616,15 +5654,7 @@ async function sweepDeletedTopics(): Promise<void> {
       if (await probeMessageGone(group, t.threadId) === 'alive') continue
       const pinId = sessionPins.get(`topic:${t.threadId}`)
       if (pinId && await probeMessageGone(group, pinId) === 'alive') continue   // pin survives → topic exists
-      const pane = await paneForSession(t.sessionId)
-      markTopicDeleted(t.sessionId)   // block re-creation until the pane is gone, else it races back open
-      removeTopic(t.sessionId)
-      sessionPins.delete(`topic:${t.threadId}`); pinTextCache.delete(`topic:${t.threadId}`); persistSessionPins()
-      process.stderr.write(`daemon: topic ${t.threadId} ("${t.name}") deleted by user → cleaning up session ${t.sessionId}\n`)
-      if (pane && await paneAlive(pane)) {
-        await exitSessionPane(pane)
-        await bot.api.sendMessage(group, `🗑 Topic “${escapeHtml(t.name)}” was deleted — exited its session in <code>${escapeHtml(t.cwd)}</code>.`, { parse_mode: 'HTML', disable_notification: true }).catch(() => {})
-      }
+      await teardownDeletedTopic(group, t)
     } catch { /* probe hiccup — next sweep retries */ }
   }
 }

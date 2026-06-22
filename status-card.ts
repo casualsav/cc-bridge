@@ -15,7 +15,7 @@ import { capturePane, paneCwd } from './pane-io.ts'
 import { focus } from './state.ts'
 import { asLowPriority } from './throttle.ts'
 import { loadAccess } from './access.ts'
-import { isTopicMode, getGroupChatId, listTopics, getGeneralSession, removeTopic } from './topics.ts'
+import { isTopicMode, getGroupChatId, listTopics, getGeneralSession } from './topics.ts'
 import { paneForSession } from './topic-runtime.ts'
 import { detectCurrentMode, onNormalPrompt, type CcMode } from './prompt.ts'
 
@@ -28,6 +28,11 @@ type StatusCardDeps = {
   // The pane's account-level usage snapshot (usage.json, written by statusline-command.sh on
   // every draw; null when stale) — resolved in daemon (paneAccount + readUsageSnapshot).
   usageSnapshotForPane: (pane: string) => Promise<{ fiveHour?: { pct: number; resetsAt: number }; sevenDay?: { pct: number; resetsAt: number } } | null>
+  // A topic's pinned-card edit/send came back "thread not found" (the tab was likely deleted). The pin
+  // loop can't own session teardown, so it delegates: daemon confirms the topic is really gone, then
+  // exits the session + suppresses recreation. (Silently dropping the entry here let a live session's
+  // topic repopulate within ~30s — discovery recreated it before the 2-min sweep could exit it.)
+  onTopicGone: (sessionId: string, threadId: number) => void
 }
 let deps: StatusCardDeps
 export function initStatusCard(d: StatusCardDeps): void { deps = d }
@@ -325,15 +330,6 @@ export async function createSessionPin(chat: string, text: string, reply_markup:
 // as `topic:<threadId>` (distinct from DM mode's numeric chat keys, so the persisted map holds both).
 // A topic whose session isn't running keeps its existing pin untouched. No clearAllPins here — each
 // topic has its own single in-thread pin, so we never sweep the whole group's pins.
-// A forum topic whose Telegram thread is gone: forget it from the store and drop its pin bookkeeping
-// so the 10s loop stops retrying (and stops triggering 429s). Mirrors pinMessageGone's recovery.
-function dropDeadTopic(sessionId: string, key: string): void {
-  removeTopic(sessionId)
-  sessionPins.delete(key)
-  pinTextCache.delete(key)
-  persistSessionPins()
-  process.stderr.write(`daemon: dropped topic ${sessionId} — Telegram thread gone (stopped pin retries)\n`)
-}
 
 // Background topics' pins refresh at most every BG_PIN_MS; the focused session's pin refreshes every
 // tick. Without this, N live-ticking status cards (cost / time / usage countdowns all change each
@@ -392,7 +388,7 @@ export async function updateTopicPins(): Promise<void> {
     if (existing) {
       try { await deps.bot.api.editMessageText(group, existing, text, { parse_mode: 'HTML', reply_markup: statusKeyboard() }); pinTextCache.set(key, text); continue }
       catch (e) {
-        if (topicThreadGone(e)) { dropDeadTopic(t.sessionId, key); continue }   // tab deleted on Telegram → forget it, stop retrying
+        if (topicThreadGone(e)) { sessionPins.delete(key); pinTextCache.delete(key); persistSessionPins(); deps.onTopicGone(t.sessionId, t.threadId); continue }   // tab gone → drop pin tracking; daemon confirms + tears down its session
         if (pinMessageGone(e)) { sessionPins.delete(key); pinTextCache.delete(key); persistSessionPins() }
         else { if (pinNotModified(e)) pinTextCache.set(key, text); continue }   // current → cache; transient → retry next cycle
       }
@@ -403,7 +399,7 @@ export async function updateTopicPins(): Promise<void> {
       await deps.bot.api.pinChatMessage(group, m.message_id, { disable_notification: true }).catch(() => {})
       sessionPins.set(key, m.message_id); pinTextCache.set(key, text); persistSessionPins()
     } catch (e) {
-      if (topicThreadGone(e)) dropDeadTopic(t.sessionId, key)   // tab deleted on Telegram → forget it, stop retrying
+      if (topicThreadGone(e)) { sessionPins.delete(key); pinTextCache.delete(key); persistSessionPins(); deps.onTopicGone(t.sessionId, t.threadId) }   // tab gone → drop pin tracking; daemon confirms + tears down its session
       else process.stderr.write(`daemon: topic pin create failed: ${e}\n`)
     }
   }
