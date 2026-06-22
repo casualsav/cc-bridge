@@ -978,9 +978,11 @@ function replyMode(): 'thoughts' | 'actions' | 'off' {
 // rejected in supergroups/channels (TEXTDRAFT_PEER_INVALID), so it only fires for private-chat
 // targets (positive id, no thread) — i.e. non-topic mode. Best-effort + ephemeral: the draft
 // auto-expires (~30s) and the turn's reply still ships via the normal relay path, so any failure
-// here is silent. Animated on its own ~700ms timer (the 1.5s relay tick is too slow for the
-// pulse); the relay loop only opens/closes it on the turn's working→idle edges.
-const CLAUDING_TICK_MS = 700
+// here is silent. Repainted on its own 5s timer — matching the 5s elapsed granularity and slow
+// enough that Telegram propagates every update. Rapid sub-second repaints get coalesced / flood-
+// limited by Telegram (which froze the draft at 0s, then jumped to a late value); the relay loop
+// only opens/closes it on the turn's working→idle edges.
+const CLAUDING_TICK_MS = 5000
 const CLAUDING_DRAFT_ID = 0x7c1d           // stable non-zero draft id, reused across turns
 let claudingTimer: ReturnType<typeof setInterval> | null = null
 let claudingChats: number[] = []

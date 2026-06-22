@@ -18,9 +18,10 @@ export function fmtTokens(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(Math.max(0, Math.round(n)))
 }
 
-// The draft's markdown for one tick. Elapsed floors to clean 5s milestones (Telegram coalesces
-// rapid draft updates, so a per-second counter reads as jittery — 5s steps stay clean). `output`
-// is tokens generated this turn (↑), `context` the window fill. Activity lines render as bullets.
+// The draft's markdown for one tick. Elapsed floors to clean 5s milestones, matching the daemon's
+// 5s repaint cadence (Telegram coalesces rapid draft updates, so the counter steps in 5s rather
+// than per-second). `output` is tokens generated this turn (↑), `context` the window fill.
+// Activity lines render as bullets.
 export function claudingStatus(o: {
   tick: number
   elapsedSec: number
