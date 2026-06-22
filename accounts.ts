@@ -91,6 +91,22 @@ export function removeAccount(name: string): boolean {
   return true
 }
 
+// Rename a registered account — the KEY only. Its config dir, login, and transcripts stay put, so
+// nothing moves on disk and a running session isn't disturbed (the dir keeps its old ~/.claude-<old>
+// name; the registry maps name→dir explicitly, so that's purely cosmetic). main is fixed.
+export function renameAccount(oldName: string, newName: string): { ok: true; account: Account } | { ok: false; error: string } {
+  if (oldName === 'main' || newName === 'main') return { ok: false, error: '"main" is the default account and can\'t be renamed.' }
+  if (!ACCOUNT_NAME_RE.test(newName)) return { ok: false, error: 'Name must be 1–16 letters/digits/dashes.' }
+  const reg = readRegistry()
+  if (!reg[oldName]) return { ok: false, error: `Account "${oldName}" doesn't exist.` }
+  if (reg[newName]) return { ok: false, error: `Account "${newName}" already exists.` }
+  const configDir = reg[oldName]
+  const next: Record<string, string> = {}
+  for (const [k, v] of Object.entries(reg)) next[k === oldName ? newName : k] = v   // preserve order
+  try { writeFileSync(accountsFile, JSON.stringify(next, null, 2) + '\n', { mode: 0o600 }) } catch (e) { return { ok: false, error: String(e) } }
+  return { ok: true, account: { name: newName, configDir } }
+}
+
 // Carry statusLine + hooks from the main settings.json into an account's, filling only what's
 // missing (never clobbers keys the user set). Idempotent — also run for every registered account
 // at daemon startup (healAccountConfigs), which covers accounts registered before the main
@@ -119,4 +135,29 @@ export function healAccountConfigs(): void {
 // Whether an account has completed /login (credentials present in its config dir).
 export function accountLoggedIn(a: Account): boolean {
   return existsSync(join(a.configDir, '.credentials.json'))
+}
+
+// Claude Code's native permissions.defaultMode in an account's settings.json — the permission mode a
+// new or relaunched session starts in. This is what makes a mode preference survive EVERY relaunch
+// path (a `claude update`, a plain `claude`, a bridge respawn): CC reads it at startup, unlike a
+// launch flag (one launch only) or our BTab re-assertion (skipped for bypass users, and blind to
+// CC's own updater). Per account, so each owner pins its own. Returns 'default' when unset/unreadable.
+export function readDefaultMode(configDir: string): string {
+  try {
+    const s = JSON.parse(readFileSync(join(configDir, 'settings.json'), 'utf8'))
+    const m = s?.permissions?.defaultMode
+    return typeof m === 'string' && m ? m : 'default'
+  } catch { return 'default' }
+}
+
+// Merge permissions.defaultMode into the account's settings.json, preserving every other key (and the
+// file's existing perms — writeFileSync only applies `mode` on create). Creates the dir/file if absent.
+export function writeDefaultMode(configDir: string, mode: string): void {
+  const dest = join(configDir, 'settings.json')
+  let s: Record<string, unknown> = {}
+  try { s = JSON.parse(readFileSync(dest, 'utf8')) } catch {}
+  const perms = (s.permissions && typeof s.permissions === 'object') ? s.permissions as Record<string, unknown> : {}
+  s.permissions = { ...perms, defaultMode: mode }
+  mkdirSync(configDir, { recursive: true })
+  writeFileSync(dest, JSON.stringify(s, null, 2) + '\n')
 }

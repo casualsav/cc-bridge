@@ -202,12 +202,16 @@ use pairing instead if they didn't give an ID):
   "renderMarkdown": true }
 ```
 
-**If they registered extra accounts**, also write `~/.claude/channels/telegram/accounts.json`
-(name → config dir) and `mkdir -p` each dir — the daemon seeds each one's `settings.json`
-(statusline + hooks) at startup:
+**Only if the user explicitly asked for a second Claude account during the interview** — most
+installs are single-account and need **no** `accounts.json`. Do **not** write a placeholder account:
+skip this entire step unless they named one. If they did, write
+`~/.claude/channels/telegram/accounts.json` mapping **their chosen name** → config dir and
+`mkdir -p` the dir — the daemon seeds each one's `settings.json` (statusline + hooks) at startup.
+The name is the user's to pick (it's just a label):
 ```json
-{ "work": "/home/<user>/.claude-work" }
+{ "<their-chosen-name>": "/home/<user>/.claude-<their-chosen-name>" }
 ```
+They can also add accounts later from Telegram with `/account add <name>`, so when in doubt, skip this.
 
 **If `local`: provision the engine AND download the model now — so it's fully ready before the
 first note.** The daemon will self-heal on the first voice note if you skip this (it auto-installs

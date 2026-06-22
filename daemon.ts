@@ -27,8 +27,8 @@ import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detec
 import { resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, currentTurnActivity, currentTurnTokens, listRecentSessions, findSessionCwd, searchTranscripts } from './transcript.ts'
 import {
   initAccounts, listAccounts, accountByName, accountForTranscript, accountForProjectsDir,
-  allProjectsDirs, addAccount, removeAccount, accountLoggedIn, healAccountConfigs,
-  MAIN_ACCOUNT, type Account,
+  allProjectsDirs, addAccount, removeAccount, renameAccount, accountLoggedIn, healAccountConfigs,
+  MAIN_ACCOUNT, readDefaultMode, writeDefaultMode, type Account,
 } from './accounts.ts'
 import { exec, sleep, hashText } from './proc.ts'
 import { ghAccounts, ghInstalled, ghSwitch, ghLogout, runGhLogin, provisionGh, type GhAccount } from './github.ts'
@@ -4730,7 +4730,8 @@ function settingsText(): string {
     `🎙️ Voice transcription — <b>${transcribeStatus()}</b>\n` +
     `🔊 Voice replies — <b>${a.tts?.mode && a.tts.mode !== 'off' ? `${a.tts.mode} · ${a.tts.engine}` : 'off'}</b>\n` +
     `💬 Stream — <b>${replyMode()}</b>\n` +
-    `📌 Pinned message — <b>${a.sessionPin !== false ? 'on' : 'off'}</b>\n\n` +
+    `📌 Pinned message — <b>${a.sessionPin !== false ? 'on' : 'off'}</b>\n` +
+    `🧷 Preferred mode — <b>${listAccounts().length > 1 ? 'per account' : defModeLabel(MAIN_ACCOUNT.configDir)}</b>\n\n` +
     `Tap to change:`
 }
 function settingsKeyboard(): InlineKeyboard {
@@ -4738,7 +4739,41 @@ function settingsKeyboard(): InlineKeyboard {
     .text('👤 Accounts', 'acct:panel').text('🐙 GitHub', 'gh:panel').row()
     .text('⚡ Batch allow', 'set:batch').text('🚢 Ship buttons', 'set:ship').row()
     .text('🎙️ Voice transcription', 'set:voice').text('🔊 Voice replies', 'set:tts').row()
-    .text('💬 Stream', 'set:replymode').text('📌 Pin', 'set:pin')
+    .text('💬 Stream', 'set:replymode').text('📌 Pin', 'set:pin').row()
+    .text('🧷 Preferred mode', 'defmode:panel')
+}
+
+// 🧷 Preferred-mode sub-panel (settings → Preferred mode): Claude Code's permissions.defaultMode — the
+// mode each account's sessions LAUNCH in. Saved in the account's settings.json, so a user's choice
+// (bypass / auto / acceptEdits / plan / default) survives every relaunch path — `claude update`,
+// plain `claude`, a bridge respawn. Per account; multi-account owners pin each independently. /mode
+// is still the live dial — this only sets what NEW launches start in.
+function defModeLabel(configDir: string): string {
+  const m = readDefaultMode(configDir)
+  return modeLabel(((MODES as readonly string[]).includes(m) ? m : 'default') as CcMode)
+}
+function defaultModeText(): string {
+  const lines = listAccounts().map(a =>
+    `${a.name === 'main' ? '🏠' : '👤'} <b>${escapeHtml(a.name)}</b> — ${defModeLabel(a.configDir)}`)
+  return `🧷 <b>Preferred mode</b> — the permission mode new or relaunched sessions start in.\n\n` +
+    `${lines.join('\n')}\n\n` +
+    `Saved in each account's <code>settings.json</code> (<code>permissions.defaultMode</code>), so it ` +
+    `survives updates &amp; restarts. <code>/mode</code> still changes the current session live.`
+}
+function defaultModeKeyboard(): InlineKeyboard {
+  const accts = listAccounts()
+  const multi = accts.length > 1
+  const kb = new InlineKeyboard()
+  for (const a of accts) {
+    const cur = readDefaultMode(a.configDir)
+    if (multi) kb.text(`— ${a.name} —`, 'defmode:noop').row()
+    MODES.forEach((m, i) => {
+      kb.text(`${m === cur ? '● ' : ''}${modeLabel(m)}`, `defmode:set:${a.name}:${m}`)
+      if ((i + 1) % 3 === 0) kb.row()
+    })
+    kb.row()
+  }
+  return kb.text('‹ Back', 'defmode:back')
 }
 
 // Voice-replies sub-panel (ROADMAP #15): mode off/all + engine piper/openai/elevenlabs.
@@ -5279,10 +5314,11 @@ bot.command('resume', async ctx => {
 // /account — multi-account management. Bare: list the registered Claude accounts (config dirs)
 // with login + usage state. `add <name>` registers ~/.claude-<name> and seeds its settings.json
 // (statusline + hooks) so bridge sessions on it work out of the box; `remove <name>` unregisters
-// (files kept). Sessions pin to an account at launch: `claude-tg 1 <name>`.
+// (files kept); `rename <old> <new>` relabels it (config dir kept). Sessions pin to an account at
+// launch: `claude-tg 1 <name>`.
 bot.command('account', async ctx => {
   if (!dmCommandGate(ctx)) return
-  const [sub, name] = (ctx.match ?? '').toString().trim().split(/\s+/)
+  const [sub, name, name2] = (ctx.match ?? '').toString().trim().split(/\s+/)
   if (sub === 'add' && name) {
     const r = addAccount(name.toLowerCase())
     if (!r.ok) { await ctx.reply(`❌ ${r.error}`); return }
@@ -5299,7 +5335,14 @@ bot.command('account', async ctx => {
       : `❌ No registered account "${escapeHtml(name)}".`, { parse_mode: 'HTML' })
     return
   }
-  if (sub) { await ctx.reply('Usage: <code>/account</code> | <code>/account add &lt;name&gt;</code> | <code>/account remove &lt;name&gt;</code>', { parse_mode: 'HTML' }); return }
+  if (sub === 'rename' && name && name2) {
+    const r = renameAccount(name.toLowerCase(), name2.toLowerCase())
+    await ctx.reply(r.ok
+      ? `✏️ Renamed <b>${escapeHtml(name)}</b> → <b>${escapeHtml(r.account.name)}</b> (config dir unchanged: <code>${escapeHtml(r.account.configDir)}</code>).`
+      : `❌ ${r.error}`, { parse_mode: 'HTML' })
+    return
+  }
+  if (sub) { await ctx.reply('Usage: <code>/account</code> | <code>/account add &lt;name&gt;</code> | <code>/account remove &lt;name&gt;</code> | <code>/account rename &lt;old&gt; &lt;new&gt;</code>', { parse_mode: 'HTML' }); return }
   await ctx.reply(await accountsPanelText(), { parse_mode: 'HTML', reply_markup: accountsPanelKeyboard() })
 })
 
@@ -6130,6 +6173,36 @@ bot.on('callback_query:data', async ctx => {
       parse_mode: 'HTML', reply_markup: modePickerKeyboard(reached),
     }).catch(() => {})
     void updateSessionPin()
+    return
+  }
+
+  // 🧷 Preferred-mode sub-panel — open the panel, go back to settings, or no-op (account header tap)
+  if (data === 'defmode:noop') { await ctx.answerCallbackQuery().catch(() => {}); return }
+  if (data === 'defmode:panel' || data === 'defmode:back') {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {}); return
+    }
+    await ctx.answerCallbackQuery().catch(() => {})
+    const toPanel = data === 'defmode:panel'
+    await ctx.editMessageText(toPanel ? defaultModeText() : settingsText(), {
+      parse_mode: 'HTML', reply_markup: toPanel ? defaultModeKeyboard() : settingsKeyboard(),
+    }).catch(() => {})
+    return
+  }
+  // 🧷 Preferred-mode pick — persist permissions.defaultMode for the chosen account (launch-time only;
+  // does NOT touch the live session — /mode does that). Survives `claude update` and every relaunch.
+  const defSet = /^defmode:set:([a-z0-9][a-z0-9_-]{0,15}):(default|acceptEdits|plan|auto|bypassPermissions)$/i.exec(data)
+  if (defSet) {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {}); return
+    }
+    const acct = accountByName(defSet[1])
+    if (!acct) { await ctx.answerCallbackQuery({ text: 'Unknown account.' }).catch(() => {}); return }
+    const mode = defSet[2] as CcMode
+    try { writeDefaultMode(acct.configDir, mode) }
+    catch { await ctx.answerCallbackQuery({ text: 'Could not save.' }).catch(() => {}); return }
+    await ctx.answerCallbackQuery({ text: `${acct.name}: ${modeLabel(mode)} on launch` }).catch(() => {})
+    await ctx.editMessageText(defaultModeText(), { parse_mode: 'HTML', reply_markup: defaultModeKeyboard() }).catch(() => {})
     return
   }
 
