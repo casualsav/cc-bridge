@@ -74,10 +74,18 @@ async function progress(text: string): Promise<void> {
   else await tgCall('editMessageText', { message_id: progressMsgId, text })
 }
 
-// The final outcome folds INTO the single status line (edits it in place) instead of posting a
-// separate bubble — /update is ONE message that starts ♻️ and ends ✅/❌. progress() falls back to a
-// fresh send when there's no status line yet (no seed and nothing posted).
+// Terminal FAILURE/rollback outcomes fold INTO the single status line (edit it in place), so a failed
+// /update stays one message start-to-finish. progress() falls back to a fresh send when there's no
+// status line yet (no seed and nothing posted).
 async function notify(text: string): Promise<void> { await progress(text) }
+
+// The SUCCESS "finished" line is the exception: it posts as its OWN fresh message instead of folding
+// into the status line, so the in-place line stays on its last step (♻️ Restarting…) and the ✅ lands
+// as a new bubble (it pings, and survives the menu refresh) after the bridge has come back up.
+async function sendFresh(text: string): Promise<void> {
+  log(text.replace(/\n/g, ' '))
+  await tgCall('sendMessage', { text })
+}
 
 const git = (args: string[], cwd = MP) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim()
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
@@ -258,7 +266,7 @@ async function main(): Promise<void> {
   if (await waitHealthy(offset)) {
     const synced = syncInstalledCopies()
     const extra = synced.length ? `\n\nAlso ${synced.join('; ')}. Start a new session to pick up convention changes.` : ''
-    await notify(`✅ Updated <code>${shortVer(oldGitref)}</code> → <code>${shortVer(newSha)}</code> (<b>v${newVer}</b>). Reopen the chat / tap "/" to refresh the command menu.${extra}`)
+    await sendFresh(`✅ Updated <code>${shortVer(oldGitref)}</code> → <code>${shortVer(newSha)}</code> (<b>v${newVer}</b>). Reopen the chat / tap "/" to refresh the command menu.${extra}`)
     // Prune build/backups, keep the immediate predecessor as a manual fallback.
     if (preBackup) { try { rmSync(preBackup, { recursive: true, force: true }) } catch {} }
     return
