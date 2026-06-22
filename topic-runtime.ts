@@ -122,15 +122,34 @@ function topicDeletionPending(sessionId: string): boolean {
   return true
 }
 
+// Sessions whose topic the user just CLOSED — suppress the lazy-reopen below until the /exit lands and
+// the session dies, so trailing teardown outbound (a final reply, the mirror-card resume on a deploy
+// restart) can't flip the just-closed topic back open. Mirrors the delete guard above; an explicit
+// revive (reopenSessionTopic) clears it early. TTL-bounded — a clean /exit kills the session well
+// inside the window, after which a dead session emits nothing and the topic stays closed on its own.
+const closePendingSids = new Map<string, number>()   // sessionId -> closedAt
+const CLOSE_TOPIC_SUPPRESS_MS = 120_000
+export function markTopicClosePending(sessionId: string): void { closePendingSids.set(sessionId, Date.now()) }
+function topicClosePending(sessionId: string): boolean {
+  const at = closePendingSids.get(sessionId)
+  if (at == null) return false
+  if (Date.now() - at > CLOSE_TOPIC_SUPPRESS_MS) { closePendingSids.delete(sessionId); return false }
+  return true
+}
+
 async function ensureTopicFor(group: string, sessionId: string, cwd: string): Promise<number | undefined> {
   if (topicDeletionPending(sessionId)) return undefined   // user just deleted it — don't re-open during teardown
   const existing = getTopicBySession(sessionId)
   if (existing) {
     if (existing.closed) {
+      // User just closed it (→ /exit in flight): route to the closed thread WITHOUT reopening, so the
+      // teardown's trailing outbound can't flip it back open. Cleared on exit/revive.
+      if (topicClosePending(sessionId)) return existing.threadId
       try { await bot.api.reopenForumTopic(group, existing.threadId); updateTopic(sessionId, { closed: false }) } catch {}
     }
     return existing.threadId
   }
+  if (topicClosePending(sessionId)) return undefined   // a closed entry got dropped mid-teardown — don't recreate
   const base = basename(cwd) || 'session'
   // Same-cwd siblings each get their own topic — disambiguate the title: "proj", "proj #2", …
   const siblings = listTopics().filter(e => e.cwd === cwd && !e.closed && e.sessionId !== sessionId).length
@@ -210,6 +229,7 @@ export async function closeTopicForPane(pane: string): Promise<void> {
 // reopen), which reads as "revive didn't work". Used by every revive path.
 export async function reopenSessionTopic(sessionId: string): Promise<void> {
   if (!isTopicMode()) return
+  closePendingSids.delete(sessionId)   // an explicit revive overrides a pending user-close
   const group = getGroupChatId()
   if (!group) return
   const t = getTopicBySession(sessionId)

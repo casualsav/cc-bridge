@@ -60,7 +60,7 @@ import {
   getGeneralSession, setGeneralSession, findTopicByCwd,
 } from './topics.ts'
 import {
-  initTopicRuntime, sessionForPane, paneForSession, ensureSessionTopic, closeTopicForPane, markTopicDeleted,
+  initTopicRuntime, sessionForPane, paneForSession, ensureSessionTopic, closeTopicForPane, markTopicDeleted, markTopicClosePending,
   reconcileTopics, refreshTopicTitles, topicThreadFor, emitTopicTyping, armTopicTyping, stopTopicTyping, outboundTargetsFor,
   stampPaneSession, topicBranchCache, generalAnchorLost,
   setPaneRestarting, isPaneRestarting, releasePaneSession, reopenSessionTopic,
@@ -2815,6 +2815,21 @@ async function injectSlash(paneId: string, watcher: PaneWatcher | null, command:
   await (watcher ? watcher.withInjection(run) : run())
 }
 
+// Reliably exit a session's pane (used when a user closes/deletes its topic). Unlike injectSlash, the
+// Enter is split out behind a settle gate: a batched `/exit`+Enter can outrun a NON-focused topic
+// pane's TUI and leave the command typed-but-unsubmitted (the topic-pane paste→submit race), so the
+// topic gets marked closed while the session keeps running — and its next outbound reopens the tab.
+async function exitSessionPane(pane: string): Promise<void> {
+  const watcher = pane === focus.activePaneId ? focus.paneWatcher : null
+  const run = async () => {
+    await sendKeys(pane, ['/exit'])
+    await waitForSettle(pane, 200, 4000)
+    await sendKeys(pane, ['Enter'])
+    await waitForSettle(pane, 300, 5000).catch(() => {})   // the pane may vanish as the session exits
+  }
+  await (watcher ? watcher.withInjection(run) : run()).catch(() => {})
+}
+
 async function relaySlashCommand(
   paneId: string,
   watcher: PaneWatcher | null,
@@ -5566,9 +5581,10 @@ bot.on('message:forum_topic_closed', async ctx => {
   const sid = thread ? getSessionByThread(thread) : undefined
   if (!sid) return
   updateTopic(sid, { closed: true })   // record it, so a daemon-side close doesn't re-close
+  markTopicClosePending(sid)           // suppress the lazy-reopen until /exit lands — else trailing outbound flaps it open
   const pane = await paneForSession(sid)
   if (!pane || !(await paneAlive(pane))) return                           // session already gone
-  await injectSlash(pane, pane === focus.activePaneId ? focus.paneWatcher : null, '/exit')
+  await exitSessionPane(pane)                                             // settle-gated /exit (a non-focused pane drops a batched submit)
   await ctx.reply('🏁 Topic closed — exiting its session.').catch(() => {})
   process.stderr.write(`daemon: user closed topic ${thread} → exited session ${sid} (pane ${pane})\n`)
 })
@@ -5606,7 +5622,7 @@ async function sweepDeletedTopics(): Promise<void> {
       sessionPins.delete(`topic:${t.threadId}`); pinTextCache.delete(`topic:${t.threadId}`); persistSessionPins()
       process.stderr.write(`daemon: topic ${t.threadId} ("${t.name}") deleted by user → cleaning up session ${t.sessionId}\n`)
       if (pane && await paneAlive(pane)) {
-        await injectSlash(pane, pane === focus.activePaneId ? focus.paneWatcher : null, '/exit')
+        await exitSessionPane(pane)
         await bot.api.sendMessage(group, `🗑 Topic “${escapeHtml(t.name)}” was deleted — exited its session in <code>${escapeHtml(t.cwd)}</code>.`, { parse_mode: 'HTML', disable_notification: true }).catch(() => {})
       }
     } catch { /* probe hiccup — next sweep retries */ }
@@ -6499,7 +6515,7 @@ bot.on('callback_query:data', async ctx => {
     }
     const label = await paneLabel(paneId)
     await ctx.answerCallbackQuery({ text: 'Exiting…' }).catch(() => {})
-    await injectSlash(paneId, paneId === focus.activePaneId ? focus.paneWatcher : null, '/exit')
+    await exitSessionPane(paneId)
     await ctx.editMessageText(`✅ Session <b>${escapeHtml(label)}</b> exited`, { parse_mode: 'HTML' }).catch(() => {})
     return
   }
