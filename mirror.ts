@@ -25,6 +25,7 @@ import { claudingFrame } from './clauding.ts'
 import { currentTurnFeed, turnAnchorUuid, type FeedItem } from './transcript.ts'
 import { isTopicMode } from './topics.ts'
 import { isChatFlooded, asLowPriority } from './throttle.ts'
+import { scheduleEdit, scheduleDelete } from './edit-scheduler.ts'
 import type { Access } from './types.ts'
 
 type MirrorDeps = {
@@ -74,7 +75,7 @@ const MIRROR_FOOTER_ENABLED = true   // bottom-pinned live status line (scraped 
 // still the same pane + turn, and cap the orphan cleanly when it isn't.
 const MIRROR_STATE_FILE = join(STATE_DIR, 'mirror-card.json')
 const MIRROR_AUX_STATE_FILE = join(STATE_DIR, 'mirror-aux-cards.json')
-type PersistedCard = { ids: Record<string, number>; paneId: string | null; startedAt: number; anchor: string | null; body: string }
+type PersistedCard = { ids: Record<string, number>; threads?: Record<string, number>; paneId: string | null; startedAt: number; anchor: string | null; body: string }
 
 // Compact live elapsed for the status footer: "23s" / "1m 40s" / "1h 02m".
 function fmtElapsed(ms: number): string {
@@ -266,6 +267,9 @@ export function renderThoughtsMirror(feed: FeedItem[], done: boolean): string {
 // ---- The card lifecycle (shared by the focused card and per-pane aux cards) ----
 class MirrorCard {
   msgIds = new Map<string, number>()   // chat_id → the live mirror message id
+  // chat_id → the forum thread the card lives in (forum mode), so the edit scheduler can tier the
+  // card by the user's active view. Persisted alongside ids so a resumed card keeps its thread.
+  cardThread = new Map<string, number>()
   // The pane the open card belongs to. A relay-loop restart on the SAME pane (focus re-adoption
   // mid-turn) must keep the existing card rather than orphan it and open a second one — see abandon.
   paneId: string | null = null
@@ -305,13 +309,14 @@ class MirrorCard {
   // ---- persistence ----
   snapshot(): PersistedCard | null {
     return this.msgIds.size
-      ? { ids: Object.fromEntries(this.msgIds), paneId: this.paneId, startedAt: this.startedAt, anchor: this.anchor, body: this.body }
+      ? { ids: Object.fromEntries(this.msgIds), threads: Object.fromEntries(this.cardThread), paneId: this.paneId, startedAt: this.startedAt, anchor: this.anchor, body: this.body }
       : null
   }
 
   restore(saved: Partial<PersistedCard>): void {
     if (!saved.ids || !Object.keys(saved.ids).length) return
     for (const [chat, mid] of Object.entries(saved.ids)) this.msgIds.set(chat, mid)
+    if (saved.threads) for (const [chat, th] of Object.entries(saved.threads)) this.cardThread.set(chat, th)
     this.paneId = saved.paneId ?? null
     this.startedAt = saved.startedAt || Date.now()
     this.pendingRestore = { anchor: saved.anchor ?? null, body: saved.body ?? '' }
@@ -341,7 +346,7 @@ class MirrorCard {
   private reset(): void {
     this.body = ''; this.verb = 'Working'; this.tokens = null
     this.contentKey = ''; this.idleTicks = 0; this.startedAt = 0; this.lastSyncAt = 0
-    this.paneId = null; this.anchor = null
+    this.paneId = null; this.anchor = null; this.cardThread.clear()
   }
 
   // The status line pinned to the bottom of a live card: the whimsical working verb + the live
@@ -399,15 +404,21 @@ class MirrorCard {
     return footer ? `${this.body}\n\n${footer}` : this.body
   }
 
-  // Edit the open card to `text` across every tracked chat.
+  // Edit the open card to `text` across every tracked chat — via the global edit scheduler.
   private async pushCard(text: string): Promise<void> {
     if (!text || this.msgIds.size === 0) return
-    for (const [chat, mid] of this.msgIds) {
-      if (isChatFlooded(chat)) continue   // skip the cosmetic live edit while the chat is in a 429 window
-      await deps.bot.api.editMessageText(chat, mid, text, { parse_mode: 'HTML' }).catch(() => {})
-    }
-    this.footerTick++   // advance the spinner one frame per real edit (no extra edits — gated on body change)
+    this.scheduleCardEdit(text)
+    this.footerTick++   // advance the spinner one frame per content change (gated on body change upstream)
     this.opts.persist()   // keep the persisted body current so a restart's cap fallback shows the latest state
+  }
+
+  // Register the card's latest desired text with the global edit scheduler for every tracked chat.
+  // The scheduler coalesces superseded frames, paces them against the global + per-chat budget, skips
+  // flooded chats, and prioritizes the card in the view the user is currently looking at — so the
+  // mirror no longer edits raw (it used to compete with replies at equal priority for the budget).
+  private scheduleCardEdit(text: string): void {
+    for (const [chat, mid] of this.msgIds)
+      scheduleEdit({ chat, mid, thread: this.cardThread.get(chat), source: 'mirror', parseMode: 'HTML', render: () => text })
   }
 
   // The card's whole lifecycle lives here, driven by one signal — `working` = turnInProgress(file)
@@ -449,7 +460,7 @@ class MirrorCard {
       for (const t of await this.opts.targets()) {
         if (isChatFlooded(t.chat)) continue   // chat is in a 429 window — skip the cosmetic card, let replies use the budget
         const opts = { parse_mode: 'HTML' as const, disable_notification: true, ...(t.thread ? { message_thread_id: t.thread } : {}) }
-        try { const m = await deps.bot.api.sendMessage(t.chat, text, opts); this.msgIds.set(t.chat, m.message_id) }
+        try { const m = await deps.bot.api.sendMessage(t.chat, text, opts); this.msgIds.set(t.chat, m.message_id); if (t.thread != null) this.cardThread.set(t.chat, t.thread) }
         catch (e) {
           const ra = Number((e as { parameters?: { retry_after?: number } })?.parameters?.retry_after)
           this.createCooldownUntil = Date.now() + (Number.isFinite(ra) ? ra * 1000 : 5000)
@@ -474,9 +485,7 @@ class MirrorCard {
       const done = await this.doneFooter()   // "✻ Baked for 9m 59s" — Claude Code's real completion line
       text = (this.body || '').replace(/✅ <b>Done<\/b>(?: · \d+ steps?)?/, done).trim() || done   // swap the renderer's ✅ Done marker
     }
-    for (const [chat, mid] of this.msgIds) {
-      await deps.bot.api.editMessageText(chat, mid, text, { parse_mode: 'HTML' }).catch(() => {})
-    }
+    this.scheduleCardEdit(text)   // terminal ✅ Done frame — supersedes any pending edit for this card
     this.msgIds.clear(); this.reset(); this.opts.persist()
   }
 
@@ -497,7 +506,7 @@ class MirrorCard {
     if (this.msgIds.size === 0) return
     const b = body ?? this.body
     const text = b ? `${b}\n\n✅ <b>Done</b>` : '✅ <b>Done</b>'
-    for (const [chat, mid] of this.msgIds) await deps.bot.api.editMessageText(chat, mid, text, { parse_mode: 'HTML' }).catch(() => {})
+    this.scheduleCardEdit(text)
     this.msgIds.clear(); this.reset(); this.opts.persist()
   }
 
@@ -505,9 +514,7 @@ class MirrorCard {
   // re-sends a fresh one at the BOTTOM of the chat. Used when stream mode changes mid-turn.
   async respawn(): Promise<void> {
     if (this.msgIds.size === 0) return
-    for (const [chat, mid] of this.msgIds) {
-      await deps.bot.api.deleteMessage(chat, mid).catch(() => {})
-    }
+    for (const [chat, mid] of this.msgIds) scheduleDelete(chat, mid)   // paced delete; the next tick opens a fresh card
     this.msgIds.clear(); this.reset(); this.opts.persist()
   }
 
