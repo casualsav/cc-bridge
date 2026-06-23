@@ -2983,7 +2983,13 @@ async function confirmNewSession(ctx: Context): Promise<void> {
 // runs on the Yes tap — see the clearconfirm handler.
 async function confirmResetSession(ctx: Context): Promise<void> {
   if (!dmCommandGate(ctx)) return
-  if (!(await commandTarget(ctx))) return
+  const t = await commandTarget(ctx)
+  if (!t) return
+  // The Yes/No tap is opt-out (settings → 🧹 Confirm clear/new): off ⇒ clear in place immediately.
+  if (loadAccess().confirmReset === false) {
+    await ctx.reply(await performReset(t, '/clear'), { parse_mode: 'HTML' })
+    return
+  }
   const keyboard = new InlineKeyboard()
     .text('✅ Yes, clear', 'clearconfirm:yes')
     .text('✖️ No', 'clearconfirm:no')
@@ -4747,7 +4753,8 @@ function settingsText(): string {
     `🔊 Voice replies — <b>${a.tts?.mode && a.tts.mode !== 'off' ? `${a.tts.mode} · ${a.tts.engine}` : 'off'}</b>\n` +
     `💬 Stream — <b>${replyMode()}</b>\n` +
     `📌 Pinned message — <b>${a.sessionPin !== false ? 'on' : 'off'}</b>\n` +
-    `🧷 Preferred mode — <b>${listAccounts().length > 1 ? 'per account' : defModeLabel(MAIN_ACCOUNT.configDir)}</b>\n\n` +
+    `🧷 Preferred mode — <b>${listAccounts().length > 1 ? 'per account' : defModeLabel(MAIN_ACCOUNT.configDir)}</b>\n` +
+    `🧹 Confirm clear/new — <b>${a.confirmReset === false ? 'off' : 'on'}</b>\n\n` +
     `Tap to change:`
 }
 function settingsKeyboard(): InlineKeyboard {
@@ -4756,7 +4763,7 @@ function settingsKeyboard(): InlineKeyboard {
     .text('⚡ Batch allow', 'set:batch').text('🚢 Ship buttons', 'set:ship').row()
     .text('🎙️ Voice transcription', 'set:voice').text('🔊 Voice replies', 'set:tts').row()
     .text('💬 Stream', 'set:replymode').text('📌 Pin', 'set:pin').row()
-    .text('🧷 Preferred mode', 'defmode:panel')
+    .text('🧷 Preferred mode', 'defmode:panel').text('🧹 Confirm clear/new', 'set:confirmreset')
 }
 
 // 🧷 Preferred-mode sub-panel (settings → Preferred mode): Claude Code's permissions.defaultMode — the
@@ -5822,7 +5829,7 @@ bot.on('callback_query:data', async ctx => {
   }
 
   // /settings panel toggles → flip the setting and re-render the panel in place.
-  const setMatch = /^set:(pin|replymode|ship|voice|batch|tts)$/.exec(data)
+  const setMatch = /^set:(pin|replymode|ship|voice|batch|tts|confirmreset)$/.exec(data)
   if (setMatch) {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
@@ -5855,6 +5862,9 @@ bot.on('callback_query:data', async ctx => {
       saveAccess(a)
     } else if (setMatch[1] === 'batch') {
       a.batchAllow = a.batchAllow === false                 // flip (default on)
+      saveAccess(a)
+    } else if (setMatch[1] === 'confirmreset') {
+      a.confirmReset = a.confirmReset === false             // flip (default on)
       saveAccess(a)
     }
     await ctx.editMessageText(settingsText(), { parse_mode: 'HTML', reply_markup: settingsKeyboard() }).catch(() => {})

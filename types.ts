@@ -28,6 +28,7 @@ export type Access = {
   topicOnEnd?: 'close' | 'delete'   // ended session's topic: close (keep history, default) or delete (tab disappears)
   scheduleTz?: string     // IANA timezone for recurring /schedule wall-clock times (default America/Los_Angeles)
   batchAllow?: boolean    // 2+ permission prompts in one turn offer "Allow all this turn" (default on)
+  confirmReset?: boolean  // /clear & /new ask for a Yes/No tap before wiping the conversation (default on)
   tts?: { mode: 'off' | 'all'; engine: 'piper' | 'openai' | 'elevenlabs'; voice?: string }   // voice replies (ROADMAP #15); voice = piper voice id
   updateChecks?: boolean  // daily update-available notification for bridge + Claude (default on)
   claudingDraft?: boolean  // DM-only live "Clauding…" status draft (Bot API 10.1) while a turn runs (default on)
