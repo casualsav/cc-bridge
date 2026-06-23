@@ -74,6 +74,7 @@ import {
   assertSendable, chunk, coerceReaction,
 } from './calls.ts'
 import { installSendGovernor, isChatFlooded, asLowPriority } from './throttle.ts'
+import { startEditScheduler, scheduleEdit, scheduleDelete, cancelEdit, touchActiveView } from './edit-scheduler.ts'
 import { initUpdates, startUpdate, bridgeVersion, claudeBin, claudeVersion, sweepUpdateChecks } from './updates.ts'
 import { formatChannelBlock } from './inbound.ts'
 import { initQueue, readLater, writeLater, sweepLaterQueues, LATER_SWEEP_MS } from './queue.ts'
@@ -190,6 +191,10 @@ const bot = new Bot(TOKEN)
 // Front every outbound send/edit with the per-chat flood governor so the live cards, replies, and
 // pins can't collectively exceed Telegram's ~20-events/min group limit (the 429-storm slowdown).
 installSendGovernor(bot)
+// Above the governor: the global priority scheduler for recurring self-editing cards (coalescing +
+// active-view tiering + a global rate ceiling). Recurring edits register a desired state with it
+// instead of calling editMessageText directly; interactive sends still go straight through.
+startEditScheduler(bot.api)
 initStatusCard({
   bot, transcriptForPane, lastKnownModel: () => lastKnownModel, botUsername: () => botUsername,
   usageSnapshotForPane: async pane => readUsageSnapshot(undefined, await paneAccount(pane)),
@@ -4385,25 +4390,27 @@ bot.command(['terminal', 't'], async ctx => {   // /t = hidden short alias (kept
   const prev = liveTerminals.get(key)
   if (prev) {
     clearInterval(prev.interval); clearTimeout(prev.timeout); liveTerminals.delete(key)
-    await asLowPriority(() => bot.api.deleteMessage(prev.chat, prev.mid)).catch(() => {})
+    cancelEdit(prev.chat, prev.mid); scheduleDelete(prev.chat, prev.mid)
   }
 
   const sent = await bot.api.sendMessage(chat, terminalCard(first, limit), threadExtra(t, { parse_mode: 'HTML' })).catch(() => null)
   if (!sent) return
   const mid = sent.message_id
+  touchActiveView(chat, t.replyThread)   // the user just opened this card here → mark it the active view
 
-  // Self-edit every 5s — low-priority so the live tail never starves real replies of the send budget.
-  const interval = setInterval(async () => {
-    const body = await capture()
-    if (body === null) return
-    await asLowPriority(() => bot.api.editMessageText(chat, mid, terminalCard(body, limit), { parse_mode: 'HTML' })).catch(() => {})
+  // Refresh every 5s by registering the latest desired state with the edit scheduler — it coalesces,
+  // paces, and prioritizes this card against every other live card. The tmux capture runs at flush
+  // time, so frames dropped under load cost nothing; the card rides the active view (interactive tier).
+  const interval = setInterval(() => {
+    scheduleEdit({ chat, mid, thread: t.replyThread, source: 'terminal', parseMode: 'HTML',
+      render: async () => { const b = await capture(); if (b === null) throw new Error('pane unreadable'); return terminalCard(b, limit) } })
   }, TERMINAL_REFRESH_MS)
 
-  // Vanish after 30s.
-  const timeout = setTimeout(async () => {
+  // Vanish after 30s (the delete is paced through the scheduler too).
+  const timeout = setTimeout(() => {
     clearInterval(interval)
     if (liveTerminals.get(key)?.mid === mid) liveTerminals.delete(key)
-    await asLowPriority(() => bot.api.deleteMessage(chat, mid)).catch(() => {})
+    cancelEdit(chat, mid); scheduleDelete(chat, mid)
   }, TERMINAL_LIFETIME_MS)
 
   liveTerminals.set(key, { interval, timeout, chat, mid })
@@ -5722,6 +5729,8 @@ const TOPIC_SWEEP_MS = 2 * 60_000
 
 bot.on('callback_query:data', async ctx => {
   const data = ctx.callbackQuery.data
+  // A button tap is a hands-on "I'm looking here now" signal — even stronger than a typed message.
+  if (ctx.chat) touchActiveView(String(ctx.chat.id), ctx.callbackQuery.message?.message_thread_id)
 
   // Editor/pager guard buttons: quit (edq), save & quit (eds), or type-anyway (edt). After a quit/
   // save the pane is back at the Claude prompt; either way the held message(s) are then delivered —
@@ -7193,6 +7202,9 @@ async function handleInbound(
   // Remember the latest inbound message per route so an edit to it can be re-injected as a
   // correction (ROADMAP #12) — only the MOST RECENT message qualifies (typo-fix instinct).
   if (msgId != null) lastInboundMsg.set(`${chat_id}:${typeof inThreadId === 'number' ? inThreadId : 'dm'}`, msgId)
+  // An inbound message is the strongest signal of where the user is looking — mark that chat/thread
+  // the active view so the edit scheduler keeps its live cards there fresh ahead of background ones.
+  touchActiveView(String(chat_id), typeof inThreadId === 'number' ? inThreadId : undefined)
 
   // Telegram auto-pins the first message a user sends in a freshly created topic (a forum
   // behavior with no off switch). Unpin it once per topic so the status card stays the only pin.
