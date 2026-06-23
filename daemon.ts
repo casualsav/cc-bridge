@@ -2985,7 +2985,7 @@ async function confirmResetSession(ctx: Context): Promise<void> {
   if (!dmCommandGate(ctx)) return
   const t = await commandTarget(ctx)
   if (!t) return
-  // The Yes/No tap is opt-out (settings → 🧹 Confirm clear/new): off ⇒ clear in place immediately.
+  // The Yes/No tap is opt-out (settings → 🧹 Confirm /clear): off ⇒ clear in place immediately.
   if (loadAccess().confirmReset === false) {
     await ctx.reply(await performReset(t, '/clear'), { parse_mode: 'HTML' })
     return
@@ -4334,14 +4334,14 @@ bot.command('diff', async ctx => {
   await sendDiff(String(ctx.chat!.id), t.paneId, typeof t.replyThread === 'number' ? t.replyThread : undefined)
 })
 
-// /terminal [N] — dump the last N lines of the terminal (default 40, capped) so you can
+// /terminal [N] — dump the last N lines of the terminal (default 20, capped) so you can
 // catch up on recent session activity. Read-only: just captures the pane scrollback.
 bot.command(['terminal', 't'], async ctx => {   // /t = hidden short alias (kept out of the command menu)
   if (!dmCommandGate(ctx)) return
   const t = await commandTarget(ctx)
   if (!t) return
   const arg = parseInt((ctx.match ?? '').toString().trim(), 10)
-  const n = Number.isFinite(arg) ? Math.max(5, Math.min(arg, 200)) : 40
+  const n = Number.isFinite(arg) ? Math.max(5, Math.min(arg, 200)) : 20
   let raw: string
   try {
     raw = (await exec('tmux', ['capture-pane', '-p', '-t', t.paneId, '-S', `-${n + 20}`, '-J'], { timeout: 3000 })).stdout
@@ -4754,7 +4754,7 @@ function settingsText(): string {
     `💬 Stream — <b>${replyMode()}</b>\n` +
     `📌 Pinned message — <b>${a.sessionPin !== false ? 'on' : 'off'}</b>\n` +
     `🧷 Preferred mode — <b>${listAccounts().length > 1 ? 'per account' : defModeLabel(MAIN_ACCOUNT.configDir)}</b>\n` +
-    `🧹 Confirm clear/new — <b>${a.confirmReset === false ? 'off' : 'on'}</b>\n\n` +
+    `🧹 Confirm /clear — <b>${a.confirmReset === false ? 'off' : 'on'}</b>\n\n` +
     `Tap to change:`
 }
 function settingsKeyboard(): InlineKeyboard {
@@ -4763,7 +4763,7 @@ function settingsKeyboard(): InlineKeyboard {
     .text('⚡ Batch allow', 'set:batch').text('🚢 Ship buttons', 'set:ship').row()
     .text('🎙️ Voice transcription', 'set:voice').text('🔊 Voice replies', 'set:tts').row()
     .text('💬 Stream', 'set:replymode').text('📌 Pin', 'set:pin').row()
-    .text('🧷 Preferred mode', 'defmode:panel').text('🧹 Confirm clear/new', 'set:confirmreset')
+    .text('🧷 Preferred mode', 'defmode:panel').text('🧹 Confirm /clear', 'set:confirmreset')
 }
 
 // 🧷 Preferred-mode sub-panel (settings → Preferred mode): Claude Code's permissions.defaultMode — the
