@@ -4334,26 +4334,79 @@ bot.command('diff', async ctx => {
   await sendDiff(String(ctx.chat!.id), t.paneId, typeof t.replyThread === 'number' ? t.replyThread : undefined)
 })
 
-// /terminal [N] — dump the last N lines of the terminal (default 20, capped) so you can
-// catch up on recent session activity. Read-only: just captures the pane scrollback.
+// /terminal [N] — a LIVE tail of the session pane (default 20 lines, capped). It posts one
+// message, self-edits every 5s so you watch recent activity in place, then deletes itself after
+// 30s so it never clutters the chat. Read-only: each tick just re-captures the pane scrollback.
+// Re-running it in the same chat/topic replaces the previous live card (no timer pile-up).
+const TERMINAL_REFRESH_MS = 5_000
+const TERMINAL_LIFETIME_MS = 30_000
+type LiveTerminal = { interval: ReturnType<typeof setInterval>; timeout: ReturnType<typeof setTimeout>; chat: string; mid: number }
+const liveTerminals = new Map<string, LiveTerminal>()
+
+// Render the pane tail as ONE Telegram message (a live card must be a single editable message,
+// never a multi-chunk send): trim the oldest lines until it fits, hard-capping a pathological
+// mega-line by keeping its newest chars.
+function terminalCard(body: string, limit: number): string {
+  const render = (text: string, count: number) =>
+    `📺 <b>Live terminal · ${count} lines</b> <i>(refreshes 5s · clears 30s)</i>\n` +
+    `<pre><code class="language-javascript">${escapeHtml(text)}</code></pre>`
+  let lines = body.split('\n')
+  for (;;) {
+    const html = render(lines.join('\n'), lines.length)
+    if (html.length <= limit) return html
+    if (lines.length > 1) { lines = lines.slice(1); continue }
+    return render('…' + lines[0].slice(-Math.max(0, limit - 200)), 1)
+  }
+}
+
 bot.command(['terminal', 't'], async ctx => {   // /t = hidden short alias (kept out of the command menu)
   if (!dmCommandGate(ctx)) return
   const t = await commandTarget(ctx)
   if (!t) return
   const arg = parseInt((ctx.match ?? '').toString().trim(), 10)
   const n = Number.isFinite(arg) ? Math.max(5, Math.min(arg, 200)) : 20
-  let raw: string
-  try {
-    raw = (await exec('tmux', ['capture-pane', '-p', '-t', t.paneId, '-S', `-${n + 20}`, '-J'], { timeout: 3000 })).stdout
-  } catch {
-    await ctx.reply('Could not read the session pane.')
-    return
-  }
-  const body = cleanPaneTail(raw, n)
-  if (!body) { await ctx.reply('Nothing recent to show.'); return }
+  const chat = String(ctx.chat!.id)
   const limit = Math.max(1, Math.min(loadAccess().textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT))
-  const chunks = chunkHtml(`📜 <b>Recent terminal (${body.split('\n').length} lines)</b>\n<pre><code class="language-javascript">${escapeHtml(body)}</code></pre>`, limit)
-  for (const c of chunks) await bot.api.sendMessage(String(ctx.chat!.id), c, threadExtra(t, { parse_mode: 'HTML' })).catch(() => {})
+
+  // Re-capture the pane tail; null = couldn't read the pane, '' = nothing recent.
+  const capture = async (): Promise<string | null> => {
+    try {
+      const raw = (await exec('tmux', ['capture-pane', '-p', '-t', t.paneId, '-S', `-${n + 20}`, '-J'], { timeout: 3000 })).stdout
+      return cleanPaneTail(raw, n)
+    } catch { return null }
+  }
+
+  const first = await capture()
+  if (first === null) { await ctx.reply('Could not read the session pane.'); return }
+  if (!first) { await ctx.reply('Nothing recent to show.'); return }
+
+  // Replace any live card already running in this chat/topic so timers never pile up.
+  const key = `${chat}:${t.replyThread ?? ''}`
+  const prev = liveTerminals.get(key)
+  if (prev) {
+    clearInterval(prev.interval); clearTimeout(prev.timeout); liveTerminals.delete(key)
+    await asLowPriority(() => bot.api.deleteMessage(prev.chat, prev.mid)).catch(() => {})
+  }
+
+  const sent = await bot.api.sendMessage(chat, terminalCard(first, limit), threadExtra(t, { parse_mode: 'HTML' })).catch(() => null)
+  if (!sent) return
+  const mid = sent.message_id
+
+  // Self-edit every 5s — low-priority so the live tail never starves real replies of the send budget.
+  const interval = setInterval(async () => {
+    const body = await capture()
+    if (body === null) return
+    await asLowPriority(() => bot.api.editMessageText(chat, mid, terminalCard(body, limit), { parse_mode: 'HTML' })).catch(() => {})
+  }, TERMINAL_REFRESH_MS)
+
+  // Vanish after 30s.
+  const timeout = setTimeout(async () => {
+    clearInterval(interval)
+    if (liveTerminals.get(key)?.mid === mid) liveTerminals.delete(key)
+    await asLowPriority(() => bot.api.deleteMessage(chat, mid)).catch(() => {})
+  }, TERMINAL_LIFETIME_MS)
+
+  liveTerminals.set(key, { interval, timeout, chat, mid })
 })
 
 // ---- Usage-limit reset reminder ----
@@ -4754,7 +4807,7 @@ function settingsText(): string {
     `💬 Stream — <b>${replyMode()}</b>\n` +
     `📌 Pinned message — <b>${a.sessionPin !== false ? 'on' : 'off'}</b>\n` +
     `🧷 Preferred mode — <b>${listAccounts().length > 1 ? 'per account' : defModeLabel(MAIN_ACCOUNT.configDir)}</b>\n` +
-    `🧹 Confirm /clear — <b>${a.confirmReset === false ? 'off' : 'on'}</b>\n\n` +
+    `🧹 Confirm <code>/clear</code> — <b>${a.confirmReset === false ? 'off' : 'on'}</b>\n\n` +
     `Tap to change:`
 }
 function settingsKeyboard(): InlineKeyboard {
