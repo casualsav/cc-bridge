@@ -56,6 +56,12 @@ const MIRROR_THROTTLE_MS = 3000
 // session's card piles up. Sync the card less often there so it doesn't saturate the send governor's
 // budget and starve replies — it still edits only on real content change, just at a coarser floor.
 const MIRROR_THROTTLE_GROUP_MS = 8000
+// The FOCUSED session's card (the one the user is driving) refreshes faster than background topics
+// even in a group. Safe now that the edit scheduler coalesces + paces every card and replies preempt
+// via the per-chat governor — so the blanket 8s group floor (a crude flood guard from when nothing
+// coordinated) can ease to 4s for the focused card. Background/aux topics keep the 8s floor. Held
+// stable on "focused" (not active-view decay) so it stays snappy through a long turn you're watching.
+const MIRROR_THROTTLE_ACTIVE_MS = 4000
 const MIRROR_BLOCKS = 8        // digest mode: max ● blocks shown
 const MIRROR_FINALIZE_TICKS = 3   // ~4.5s sustained idle (RELAY_POLL_MS=1500) before capping the card
 const ACTIONS_TAIL = 3       // actions mode: how many of the newest calls stay as full detail rows
@@ -304,6 +310,7 @@ class MirrorCard {
     targets: () => Promise<Array<{ chat: string; thread?: number }>>
     persist: () => void
     onCreated?: () => void
+    focused?: boolean   // the focused session's card — refreshes at the snappier active cadence in group mode
   }) {}
 
   // ---- persistence ----
@@ -443,7 +450,7 @@ class MirrorCard {
     // then edit ONLY if the content fingerprint moved — so the card tracks real activity, not the
     // clock, and barely flashes.
     const now = Date.now()
-    const throttleMs = isTopicMode() ? MIRROR_THROTTLE_GROUP_MS : MIRROR_THROTTLE_MS
+    const throttleMs = !isTopicMode() ? MIRROR_THROTTLE_MS : this.opts.focused ? MIRROR_THROTTLE_ACTIVE_MS : MIRROR_THROTTLE_GROUP_MS
     if (now - this.lastSyncAt < throttleMs && this.msgIds.size > 0) return
     this.lastSyncAt = now
     const hasBody = await this.syncBody(false)
@@ -535,6 +542,7 @@ const focusedCard = new MirrorCard({
   targets: () => deps.outboundTargets(),
   persist: () => writeJsonFile(MIRROR_STATE_FILE, focusedCard.snapshot() ?? {}),
   onCreated: () => deps.retriggerTyping(),   // the mirror send clears Telegram's typing state — re-assert it
+  focused: true,                             // the user's driven session → snappier 4s cadence in group mode
 })
 
 export async function updateTerminalMirror(working: boolean): Promise<void> { await asLowPriority(() => focusedCard.update(working)) }
