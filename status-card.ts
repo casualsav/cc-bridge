@@ -14,6 +14,7 @@ import { parseStatusline, pinBar, type StatuslineData } from './statusline.ts'
 import { capturePane, paneCwd } from './pane-io.ts'
 import { focus } from './state.ts'
 import { asLowPriority } from './throttle.ts'
+import { scheduleEdit, cancelEdit } from './edit-scheduler.ts'
 import { loadAccess } from './access.ts'
 import { isTopicMode, getGroupChatId, listTopics, getGeneralSession } from './topics.ts'
 import { paneForSession } from './topic-runtime.ts'
@@ -355,12 +356,14 @@ export async function updateTopicPins(): Promise<void> {
       const key = 'general'
       const existing = sessionPins.get(key)
       if (existing && pinTextCache.get(key) !== text) {
-        try { await deps.bot.api.editMessageText(group, existing, text, { parse_mode: 'HTML', reply_markup: statusKeyboard() }); pinTextCache.set(key, text) }
-        catch (e) {
-          if (pinMessageGone(e)) { sessionPins.delete(key); pinTextCache.delete(key); persistSessionPins() }
-          else if (pinNotModified(e)) pinTextCache.set(key, text)   // already current — safe to cache
-          // else: transient (429 / network / thread-not-found) — leave cache stale so next cycle retries
-        }
+        scheduleEdit({ chat: group, mid: existing, source: 'pin', parseMode: 'HTML', extra: { reply_markup: statusKeyboard() },
+          render: () => text,
+          onSent: () => { pinTextCache.set(key, text) },
+          onError: e => {
+            if (pinMessageGone(e)) { sessionPins.delete(key); pinTextCache.delete(key); persistSessionPins(); cancelEdit(group, existing) }
+            else if (pinNotModified(e)) pinTextCache.set(key, text)   // already current — safe to cache
+            // else: transient (429 / network) — leave cache stale so next cycle retries
+          } })
       }
       if (!sessionPins.has(key)) {
         try {
@@ -386,12 +389,15 @@ export async function updateTopicPins(): Promise<void> {
     const existing = sessionPins.get(key)
     if (existing && pinTextCache.get(key) === text) continue   // unchanged → skip the edit
     if (existing) {
-      try { await deps.bot.api.editMessageText(group, existing, text, { parse_mode: 'HTML', reply_markup: statusKeyboard() }); pinTextCache.set(key, text); continue }
-      catch (e) {
-        if (topicThreadGone(e)) { sessionPins.delete(key); pinTextCache.delete(key); persistSessionPins(); deps.onTopicGone(t.sessionId, t.threadId); continue }   // tab gone → drop pin tracking; daemon confirms + tears down its session
-        if (pinMessageGone(e)) { sessionPins.delete(key); pinTextCache.delete(key); persistSessionPins() }
-        else { if (pinNotModified(e)) pinTextCache.set(key, text); continue }   // current → cache; transient → retry next cycle
-      }
+      scheduleEdit({ chat: group, mid: existing, thread: t.threadId, source: 'pin', parseMode: 'HTML', extra: { reply_markup: statusKeyboard() },
+        render: () => text,
+        onSent: () => { pinTextCache.set(key, text) },
+        onError: e => {
+          if (topicThreadGone(e)) { sessionPins.delete(key); pinTextCache.delete(key); persistSessionPins(); cancelEdit(group, existing); deps.onTopicGone(t.sessionId, t.threadId) }   // tab gone → drop tracking; daemon tears down its session
+          else if (pinMessageGone(e)) { sessionPins.delete(key); pinTextCache.delete(key); persistSessionPins(); cancelEdit(group, existing) }   // recreated on the next tick
+          else if (pinNotModified(e)) pinTextCache.set(key, text)   // current → cache; transient → next cycle retries
+        } })
+      continue
     }
     try {
       await clearTopicPins(group, t.threadId)   // single-pin guarantee — drop any prior/orphaned card pins first
@@ -419,24 +425,23 @@ export async function updateSessionPin(): Promise<void> {
       const existing = sessionPins.get(chat)
       if (existing && pinTextCache.get(chat) === text) continue   // nothing changed — skip the no-op edit
       if (existing) {
-        try {
-          await deps.bot.api.editMessageText(chat, existing, text, { parse_mode: 'HTML', reply_markup })
-          pinTextCache.set(chat, text)
-        } catch (e) {
-          // Deleted out from under us → drop the stale id and recreate below. Transient errors
-          // ("message is not modified") leave it in place — the pin is still good.
-          if (pinMessageGone(e)) { sessionPins.delete(chat); pinTextCache.delete(chat); persistSessionPins() }
-          else if (pinNotModified(e)) pinTextCache.set(chat, text)   // already current — safe to cache
-          // else: transient (429 / network) — leave cache stale so next cycle retries the edit
-        }
-        if (sessionPins.has(chat)) {
-          // If the user unpinned it, re-pin on the next update (e.g. a mode change) so it returns.
-          const info = await deps.bot.api.getChat(chat).catch(() => null)
-          if (info?.pinned_message?.message_id !== existing) {
-            await deps.bot.api.pinChatMessage(chat, existing, { disable_notification: true }).catch(() => {})
-          }
-          continue
-        }
+        scheduleEdit({ chat, mid: existing, source: 'pin', parseMode: 'HTML', extra: { reply_markup },
+          render: () => text,
+          onSent: async () => {
+            pinTextCache.set(chat, text)
+            // If the user unpinned it, re-pin so it returns (runs only when the card actually changed).
+            const info = await deps.bot.api.getChat(chat).catch(() => null)
+            if (info?.pinned_message?.message_id !== existing) {
+              await deps.bot.api.pinChatMessage(chat, existing, { disable_notification: true }).catch(() => {})
+            }
+          },
+          onError: e => {
+            // Deleted out from under us → drop the stale id; the next cycle recreates it. Transient
+            // ("message is not modified") leaves it in place — the pin is still good.
+            if (pinMessageGone(e)) { sessionPins.delete(chat); pinTextCache.delete(chat); persistSessionPins(); cancelEdit(chat, existing) }
+            else if (pinNotModified(e)) pinTextCache.set(chat, text)   // already current — safe to cache
+          } })
+        continue
       }
       if (hasSession) await createSessionPin(chat, text, reply_markup)   // don't pin "No active session" out of nowhere
     }

@@ -48,6 +48,7 @@ const P_ACTIVE = 1, P_VISIBLE = 2, P_BACKGROUND = 3
 const AGE_PROMOTE_MS = 10_000
 
 type Source = 'terminal' | 'mirror' | 'pin' | 'compact' | 'clauding' | 'loop'
+type EditExtra = Parameters<Api['editMessageText']>[3]   // editMessageText's "other" options (reply_markup, …)
 
 // ---- coalesced edit slots ----
 type EditIntent = {
@@ -57,6 +58,9 @@ type EditIntent = {
   source: Source
   render: () => string | Promise<string>   // produces the LATEST html; evaluated at flush time
   parseMode?: 'HTML' | 'Markdown'
+  extra?: EditExtra     // extra editMessageText options (e.g. reply_markup) carried with the text
+  onSent?: () => void | Promise<void>             // after a successful edit — the source refreshes its own caches
+  onError?: (e: unknown) => void | Promise<void>  // when the edit throws — the source handles gone / not-modified itself
   dirty: boolean        // a new desired state is pending a flush
   inFlight: boolean     // a flush for this slot is currently running
   enqueuedAt: number    // when it last went dirty (FIFO within a tier)
@@ -70,17 +74,20 @@ const editKey = (chat: string, mid: number) => `${chat}:${mid}`
 export function scheduleEdit(opts: {
   chat: string; mid: number; thread?: number | null; source: Source
   render: () => string | Promise<string>; parseMode?: 'HTML' | 'Markdown'
+  extra?: EditExtra; onSent?: () => void | Promise<void>; onError?: (e: unknown) => void | Promise<void>
 }): void {
   const key = editKey(opts.chat, opts.mid)
   if (deletes.has(key)) return   // message is doomed; don't bother editing it
   const it = intents.get(key)
   if (it) {
     it.render = opts.render; it.parseMode = opts.parseMode; it.thread = opts.thread
+    it.extra = opts.extra; it.onSent = opts.onSent; it.onError = opts.onError
     if (!it.dirty) { it.dirty = true; it.enqueuedAt = Date.now() }
   } else {
     intents.set(key, {
       chat: opts.chat, thread: opts.thread, mid: opts.mid, source: opts.source,
-      render: opts.render, parseMode: opts.parseMode, dirty: true, inFlight: false, enqueuedAt: Date.now(),
+      render: opts.render, parseMode: opts.parseMode, extra: opts.extra, onSent: opts.onSent, onError: opts.onError,
+      dirty: true, inFlight: false, enqueuedAt: Date.now(),
     })
   }
 }
@@ -124,13 +131,16 @@ async function flushIntent(it: EditIntent): Promise<void> {
   it.dirty = false
   try {
     const html = await it.render()
-    if (html !== it.lastText) {
-      await asLowPriority(() => api!.editMessageText(it.chat, it.mid, html, it.parseMode ? { parse_mode: it.parseMode } : {}))
-      it.lastText = html
-    }
-  } catch {
-    // render threw (a transient capture/read error) or the edit failed (message-not-modified, deleted,
-    // flooded) — drop this frame; the source re-arms on its next tick.
+    if (html === it.lastText) return   // unchanged — don't spend budget or fire callbacks
+    const other = { ...(it.parseMode ? { parse_mode: it.parseMode } : {}), ...(it.extra ?? {}) } as EditExtra
+    await asLowPriority(() => api!.editMessageText(it.chat, it.mid, html, other))
+    it.lastText = html
+    await it.onSent?.()
+  } catch (e) {
+    // render threw (a transient capture/read error) or the edit failed (not-modified, deleted, flooded).
+    // A source with its own recovery (pins: gone → drop tracking, thread-gone → tear down) handles it via
+    // onError; everyone else just drops the frame and re-arms on the next tick.
+    if (it.onError) { try { await it.onError(e) } catch { /* never let a handler break the drain */ } }
   } finally {
     it.inFlight = false
   }
