@@ -75,6 +75,7 @@ import {
   assertSendable, chunk, coerceReaction,
 } from './calls.ts'
 import { installSendGovernor, asLowPriority } from './throttle.ts'
+import { createMsgTracker } from './msg-tracker.ts'
 import { startEditScheduler, scheduleEdit, scheduleDelete, cancelEdit, touchActiveView } from './edit-scheduler.ts'
 import { initUpdates, startUpdate, bridgeVersion, claudeBin, claudeVersion, sweepUpdateChecks } from './updates.ts'
 import { formatChannelBlock } from './inbound.ts'
@@ -192,6 +193,28 @@ const bot = new Bot(TOKEN)
 // Front every outbound send/edit with the per-chat flood governor so the live cards, replies, and
 // pins can't collectively exceed Telegram's ~20-events/min group limit (the 429-storm slowdown).
 installSendGovernor(bot)
+
+// ---- "Latest message" tracker → the live mirror's re-anchor (bring a buried card back to the bottom).
+// Records the newest message id seen in each chat/thread (every outbound send result + every inbound
+// message); the mirror is "buried" once the latest id is past its card, and reanchorDue adds a 15s quiet
+// debounce so a /settings session or a burst of commands finishes before the card jumps back down. See
+// msg-tracker.ts for the advance-the-max / quiet-timer logic (the card's own edits keep the same id, so
+// they don't count as activity).
+const MIRROR_REANCHOR_QUIET_MS = 15_000
+const { note: noteMsg, reanchorDue } = createMsgTracker(MIRROR_REANCHOR_QUIET_MS)
+// Record the id of everything the bot sends (replies, panels, pins, the card itself). An edit returns
+// the SAME message_id, so the tracker's advance-the-max rule ignores it; only genuinely new messages
+// below the card mark it buried. Innermost transformer, so prev() is the real API call and res its result.
+bot.api.config.use(async (prev, method, payload, signal) => {
+  const res = await prev(method, payload, signal)
+  try {
+    const r = (res as { ok?: boolean; result?: unknown }).ok ? (res as { result?: unknown }).result : null
+    const m = r && typeof r === 'object' ? r as { message_id?: number; chat?: { id?: number | string }; message_thread_id?: number } : null
+    if (m?.message_id && m.chat?.id != null) noteMsg(String(m.chat.id), m.message_thread_id, m.message_id)
+  } catch {}
+  return res
+})
+
 // Above the governor: the global priority scheduler for recurring self-editing cards (coalescing +
 // active-view tiering + a global rate ceiling). Recurring edits register a desired state with it
 // instead of calling editMessageText directly; interactive sends still go straight through.
@@ -7269,6 +7292,7 @@ async function handleInbound(
   // Remember the latest inbound message per route so an edit to it can be re-injected as a
   // correction (ROADMAP #12) — only the MOST RECENT message qualifies (typo-fix instinct).
   if (msgId != null) lastInboundMsg.set(`${chat_id}:${typeof inThreadId === 'number' ? inThreadId : 'dm'}`, msgId)
+  if (msgId != null) noteMsg(String(chat_id), typeof inThreadId === 'number' ? inThreadId : undefined, msgId)   // feeds the mirror re-anchor (buried detection)
   // An inbound message is the strongest signal of where the user is looking — mark that chat/thread
   // the active view so the edit scheduler keeps its live cards there fresh ahead of background ones.
   touchActiveView(String(chat_id), typeof inThreadId === 'number' ? inThreadId : undefined)
@@ -8190,6 +8214,7 @@ initMirror({
   resolveTranscriptForPane: async pane => transcriptForPane(pane, await paneCwd(pane)),
   outboundTargets: () => outboundTargetsFor(focus.activePaneId),   // focused session's topic in forum mode, else DM
   auxOutboundTargets: pane => outboundTargetsFor(pane),            // a non-focused session's own topic
+  reanchorDue,                                                     // re-post the focused live card at the bottom once it's buried + the chat is quiet
 })
 
 // Drive usage alerts + limit auto-continue (session + weekly) from the statusline snapshot.

@@ -43,6 +43,10 @@ type MirrorDeps = {
   outboundTargets: () => Promise<Array<{ chat: string; thread?: number }>>
   // Where a specific pane's aux card should open (its own topic).
   auxOutboundTargets: (paneId: string) => Promise<Array<{ chat: string; thread?: number }>>
+  // Whether the focused card is "buried" — newer messages landed below it AND the chat has since gone
+  // quiet (the daemon owns the latest-message bookkeeping + the quiet debounce). When true, the card
+  // deletes itself and re-opens at the bottom so the live mirror returns to where you're looking.
+  reanchorDue?: (chat: string, thread: number | null | undefined, mirrorId: number) => boolean
 }
 
 let deps: MirrorDeps
@@ -444,6 +448,14 @@ class MirrorCard {
       return
     }
     this.idleTicks = 0   // working again → reset the debounce
+    // Re-anchor: if the FOCUSED live card has been buried under newer messages and the chat has since
+    // gone quiet (debounce owned by the daemon), drop it and re-open at the bottom so it returns to
+    // where you're looking. respawn() paced-deletes the old card; the next tick opens a fresh one.
+    if (this.opts.focused && this.msgIds.size > 0 && deps.reanchorDue) {
+      for (const [chat, mid] of this.msgIds) {
+        if (deps.reanchorDue(chat, this.cardThread.get(chat) ?? null, mid)) { await this.respawn(); return }
+      }
+    }
     if (this.msgIds.size === 0 && !this.startedAt) { this.startedAt = Date.now(); this.verb = 'Working'; this.tokens = null }   // start a fresh burst
 
     // Heavy sync is throttled (transcript read + maybe a capture). We refresh body/verb/tokens,
