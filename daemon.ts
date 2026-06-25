@@ -3447,6 +3447,17 @@ bot.use(async (ctx, next) => {
     const verb = msg.text.slice(0, ent.length)
     const lower = verb.toLowerCase()
     if (lower !== verb) (msg as { text: string }).text = lower + msg.text.slice(ent.length)
+    // "/t30" → "/t 30": Telegram bakes the digits into the command name (the message is literally the
+    // command "/t30", which no handler matches), so the no-space form silently fell through to the pane.
+    // Split the line count off the /t verb and shrink the bot_command entity to just "/t" (or "/t@bot"),
+    // so grammy routes it to the terminal handler with the count as its argument. Only "/t" + 1-4 digits
+    // matches, so "/t", "/t 30", "/terminal", and "/test…" are all untouched.
+    const tn = /^\/t(\d{1,4})(@\w+)?([\s\S]*)$/i.exec(msg.text)
+    if (tn) {
+      const head = `/t${tn[2] ?? ''}`
+      ;(msg as { text: string }).text = `${head} ${tn[1]}${tn[3] ?? ''}`
+      ;(ent as { length: number }).length = head.length
+    }
   }
   await next()
 })
