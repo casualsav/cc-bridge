@@ -80,7 +80,14 @@ Telegram client ──(opens web_app button URL)──▶ Mini App SPA (static H
 All endpoints require valid initData; all resolve+canonicalize paths and refuse escapes.
 - `GET  /api/ls?path=…` → `{ path, parent, entries:[{name,type:"dir|file|symlink",size,mtime}] }` (dirs first).
 - `GET  /api/read?path=…` → `{ path, size, mtime, encoding, truncated, content }` for text; binary/large → metadata + `downloadUrl`.
-- `GET  /api/download?path=…` → raw bytes, `Content-Disposition: attachment`.
+- `GET  /api/download?path=…&t=…` → raw bytes, `Content-Disposition: attachment` +
+  `Access-Control-Allow-Origin: https://web.telegram.org` (what `WebApp.downloadFile` needs). Authed by
+  the initData header **or** a `t` download-token; an `OPTIONS` preflight is answered for Telegram Web.
+- `POST /api/dl-token` `{ path }` → `{ token, name }`: a short-lived (2-min) capability so a **header-less**
+  fetch can pull one file. The SPA mints it (authed), then hands the tokenized URL to Telegram's native
+  saver (`downloadFile`, 8.0+ → "Save to Files") or `openLink` (external browser) — neither sends our
+  header. Always available (download is read-only); the in-row **Download** action and the viewer's ⬇️
+  both route through it, falling back to an in-page blob download in a plain browser.
 - `GET  /api/find?root=…&q=…&max=…` → `{ matches:[path…] }` (name/glob match, capped; skips `.git`,
   `node_modules` by default with a toggle).
 - `GET  /api/ls` also returns `write: <bool>` so the SPA renders edit/delete controls only when enabled.

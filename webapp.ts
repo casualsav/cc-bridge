@@ -6,7 +6,7 @@
 // default off): they overwrite to a `.bak`, move deletions to a trash dir (recoverable), and audit
 // every mutation to daemon.log. Dependencies are injected so this module stays decoupled and testable.
 
-import { createHmac, timingSafeEqual } from 'node:crypto'
+import { createHmac, timingSafeEqual, randomBytes } from 'node:crypto'
 import { readdir, stat, realpath, writeFile, copyFile, rename, mkdir, cp, rm } from 'node:fs/promises'
 import { resolve, basename, dirname, join, sep } from 'node:path'
 
@@ -76,6 +76,25 @@ export function verifyInitData(initData: string, token: string, maxAgeSec = 3600
 
 const json = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } })
+
+// ---- Download tokens. Telegram's native saver (WebApp.downloadFile, 8.0+) and the external browser
+// (openLink) fetch the file URL WITHOUT our `Authorization: tma …` header, so they can't pass the
+// initData gate. The SPA (which IS authed) mints a short-lived unguessable token via POST /api/dl-token;
+// that token in the query string is the capability for one `/api/download` fetch. TTL-based (not
+// one-time) so a client's HEAD-then-GET still resolves. In-memory only — a fresh token is cheap. ----
+const DL_TOKEN_TTL_MS = 120_000
+const dlTokens = new Map<string, { path: string; exp: number }>()
+function mintDlToken(path: string): string {
+  const now = Date.now()
+  for (const [k, v] of dlTokens) if (v.exp < now) dlTokens.delete(k)   // cheap GC
+  const tok = randomBytes(16).toString('base64url')
+  dlTokens.set(tok, { path, exp: now + DL_TOKEN_TTL_MS })
+  return tok
+}
+const dlTokenPath = (tok: string): string | null => {
+  const e = tok ? dlTokens.get(tok) : undefined
+  return e && e.exp > Date.now() ? e.path : null
+}
 
 // Whole-FS browsing is intentional (the session already has full FS access — see the design doc), so
 // there is no jail; we only canonicalize and guard against unreadable/odd paths. NUL bytes are refused.
@@ -148,12 +167,30 @@ async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: strin
   }
 
   if (url.pathname === '/api/download') {
-    const file = await canon(url.searchParams.get('path') || '')
+    // A valid `t` token (header-less native/browser download) names the file; otherwise the path param
+    // (header-authed blob fallback). The CORS + disposition headers are what Telegram's downloadFile needs.
+    const tokPath = dlTokenPath(url.searchParams.get('t') || '')
+    const file = tokPath ?? await canon(url.searchParams.get('path') || '')
     const st = await stat(file).catch(() => null)
     if (!st || !st.isFile()) return json({ error: 'not a file' }, 404)
     return new Response(Bun.file(file), {
-      headers: { 'content-disposition': `attachment; filename="${basename(file).replace(/"/g, '')}"` },
+      headers: {
+        'content-disposition': `attachment; filename="${basename(file).replace(/"/g, '')}"`,
+        'access-control-allow-origin': 'https://web.telegram.org',
+      },
     })
+  }
+
+  // Mint a short-lived download token for one file (read capability, so always on — like /api/download).
+  // The SPA calls this (authed) then hands the tokenized URL to WebApp.downloadFile / openLink, which
+  // fetch without our header. POST so the path isn't logged in access logs as a GET query.
+  if (url.pathname === '/api/dl-token') {
+    if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405)
+    const body = await req.json().catch(() => null) as { path?: unknown } | null
+    const file = await canon(String(body?.path || ''))
+    const st = await stat(file).catch(() => null)
+    if (!st || !st.isFile()) return json({ error: 'not a file' }, 404)
+    return json({ token: mintDlToken(file), name: basename(file) })
   }
 
   if (url.pathname === '/api/find') {
@@ -318,12 +355,24 @@ export function startWebapp(deps: WebappDeps): ReturnType<typeof Bun.serve> {
     hostname: '127.0.0.1',                 // localhost only; the tunnel provides public ingress
     async fetch(req) {
       const url = new URL(req.url)
+      // CORS preflight for the cross-origin download fetch Telegram Web makes via downloadFile — answered
+      // before auth (a preflight carries neither our header nor a token).
+      if (req.method === 'OPTIONS' && url.pathname === '/api/download') {
+        return new Response(null, { status: 204, headers: {
+          'access-control-allow-origin': 'https://web.telegram.org',
+          'access-control-allow-methods': 'GET',
+          'access-control-allow-headers': 'authorization',
+        } })
+      }
       const isApi = url.pathname.startsWith('/api/')
+      // A valid download token authorizes that one /api/download fetch without initData: the native saver
+      // (WebApp.downloadFile) and the external browser (openLink) fetch the URL without our header.
+      const tokenedDl = url.pathname === '/api/download' && !!dlTokenPath(url.searchParams.get('t') || '')
       let userId = ''
       // Auth gates the API only. The static SPA shell carries no data, and the initial document load
       // can't send the initData header (it lives in the URL hash, invisible to the server) — so the
       // SPA reads initData client-side and signs every /api/* call. All file access is behind the API.
-      if (isApi) {
+      if (isApi && !tokenedDl) {
         const initData = extractInitData(req)
         const v = initData ? verifyInitData(initData, deps.token, deps.maxInitDataAgeSec) : { ok: false, reason: 'no initData' } as InitDataResult
         if (!v.ok) {

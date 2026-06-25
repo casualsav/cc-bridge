@@ -176,7 +176,8 @@ function row(ico, name, meta, onclick, opts) {
   li.innerHTML = '<span class="ico"></span><span class="name"></span><span class="meta"></span>';
   li.children[0].textContent = ico; li.children[1].textContent = name; li.children[2].textContent = meta;
   li.onclick = onclick;
-  if (WRITE && opts && opts.path) {
+  // Show the ⋯ menu for every file (Download is read-only-safe) and, when WRITE, for folders too.
+  if (opts && opts.path && (opts.type === "file" || WRITE)) {
     const b = document.createElement("button");
     b.className = "rowbtn"; b.textContent = "⋯";
     b.onclick = e => { e.stopPropagation(); rowMenu(opts.path, opts.type); };
@@ -231,12 +232,21 @@ $("vsave").onclick = async () => {
 // Per-row ⋯ menu (rename / delete-to-trash); native Telegram popups when available, prompt() otherwise.
 function rowMenu(path, type) {
   const name = path.split("/").pop() || path;
+  const buttons = [];
+  if (type === "file") buttons.push({ id: "download", text: "Download" });
+  if (WRITE) { buttons.push({ id: "rename", text: "Rename" }); buttons.push({ id: "delete", type: "destructive", text: "Delete" }); }
+  if (buttons.length < 3) buttons.push({ id: "cancel", type: "cancel" });   // Telegram popups allow ≤3 buttons
   const act = id => {
-    if (id === "rename") { const nn = prompt('Rename "' + name + '" to:', name); if (nn && nn !== name) writeOp("/api/rename", { path, newName: nn }).then(d => { if (d) { showOk("Renamed"); ls(cur); } }); }
+    if (id === "download") download(path);
+    else if (id === "rename") { const nn = prompt('Rename "' + name + '" to:', name); if (nn && nn !== name) writeOp("/api/rename", { path, newName: nn }).then(d => { if (d) { showOk("Renamed"); ls(cur); } }); }
     else if (id === "delete") confirmDelete(path, name);
   };
-  if (tg && tg.showPopup) tg.showPopup({ title: name, message: "File actions", buttons: [{ id: "rename", text: "Rename" }, { id: "delete", type: "destructive", text: "Delete" }, { id: "cancel", type: "cancel" }] }, act);
-  else { const c = prompt('"' + name + '" — type R to rename, D to delete'); if (c === "R" || c === "r") act("rename"); else if (c === "D" || c === "d") act("delete"); }
+  if (tg && tg.showPopup) tg.showPopup({ title: name, message: "File actions", buttons }, act);
+  else {
+    const keys = [type === "file" ? "S to save" : null, WRITE ? "R to rename" : null, WRITE ? "D to delete" : null].filter(Boolean).join(", ");
+    const c = prompt('"' + name + '" — type ' + keys);
+    if (c === "S" || c === "s") act("download"); else if (c === "R" || c === "r") act("rename"); else if (c === "D" || c === "d") act("delete");
+  }
 }
 function confirmDelete(path, name) {
   const go = () => writeOp("/api/rm", { path }).then(d => { if (d) { showOk("Moved to trash"); ls(cur); } });
@@ -286,13 +296,43 @@ uploadInput.onchange = async () => {
   if (okN) { showOk("Uploaded " + okN + " file" + (okN === 1 ? "" : "s")); if (cur === dir) ls(dir); }
 };
 
+// Mint a short-lived download token (authed) so a header-less fetch — Telegram's native saver or the
+// external browser — can pull the file. Returns the token, or null on failure.
+async function dlToken(path) {
+  try {
+    const r = await fetch(new URL("/api/dl-token", location.origin), {
+      method: "POST", headers: { ...AUTH, "content-type": "application/json" }, body: JSON.stringify({ path }),
+    });
+    const d = await r.json().catch(() => ({}));
+    return r.ok ? d.token : null;
+  } catch { return null; }
+}
+
+// Save a file to the device. Prefer Telegram's native "Save to Files" dialog (downloadFile, Bot API
+// 8.0+); else open the tokenized URL in the external browser (it downloads via Content-Disposition);
+// else (plain browser / dev) fetch with auth and click a blob <a download>. The first two fetch the URL
+// without our header, so they go through a token; the blob path stays header-authed.
 async function download(path) {
+  const name = path.split("/").pop();
+  const canNative = tg && tg.isVersionAtLeast && tg.isVersionAtLeast("8.0") && tg.downloadFile;
+  const canOpen = tg && tg.openLink;
+  if (canNative || canOpen) {
+    const tok = await dlToken(path);
+    if (tok) {
+      const u = new URL("/api/download", location.origin);
+      u.searchParams.set("path", path); u.searchParams.set("t", tok);
+      const abs = u.toString();
+      if (canNative) { tg.downloadFile({ url: abs, file_name: name }); return; }
+      tg.openLink(abs); return;
+    }
+    // token mint failed — fall through to the blob path
+  }
   try {
     const r = await fetch(new URL("/api/download?path=" + encodeURIComponent(path), location.origin), { headers: AUTH });
     if (!r.ok) { showErr("download " + r.status); return; }
     const blob = await r.blob();
     const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob); a.download = path.split("/").pop();
+    a.href = URL.createObjectURL(blob); a.download = name;
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 5000);
   } catch { showErr("download failed"); }

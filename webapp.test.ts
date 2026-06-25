@@ -83,6 +83,48 @@ test('end-to-end: server serves ls/read for an allowlisted, signed request and 4
   } finally { server.stop(true) }
 })
 
+test('download token: authed mint → header-less serve with CORS/disposition; bare/bogus download is 401', async () => {
+  const { mkdtemp, writeFile } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const { startWebapp } = await import('./webapp.ts')
+
+  const dir = await mkdtemp(join(tmpdir(), 'webapp-dl-'))
+  const file = join(dir, 'pic.bin')
+  await writeFile(file, 'BINARYBYTES')
+  const server = startWebapp({ token: TOKEN, isAllowed: id => id === '42', log: () => {}, staticDir: dir, port: 0 })
+  const base = `http://127.0.0.1:${server.port}`
+  const auth = { Authorization: `tma ${sign({ auth_date: String(now()), user })}` }
+  try {
+    // no token + no auth → blocked at the gate
+    expect((await fetch(`${base}/api/download?path=${encodeURIComponent(file)}`)).status).toBe(401)
+
+    // mint a token (authed), then fetch the file WITHOUT any auth header — the token is the capability
+    const mint = await fetch(`${base}/api/dl-token`, { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify({ path: file }) })
+    const { token, name } = await mint.json()
+    expect(typeof token).toBe('string')
+    expect(name).toBe('pic.bin')
+
+    const dl = await fetch(`${base}/api/download?path=${encodeURIComponent(file)}&t=${token}`)
+    expect(dl.status).toBe(200)
+    expect(dl.headers.get('content-disposition')).toContain('pic.bin')
+    expect(dl.headers.get('access-control-allow-origin')).toBe('https://web.telegram.org')
+    expect(await dl.text()).toBe('BINARYBYTES')
+
+    // a bogus token is not honored → falls back to the initData gate → 401 (no header)
+    expect((await fetch(`${base}/api/download?path=${encodeURIComponent(file)}&t=deadbeef`)).status).toBe(401)
+
+    // dl-token only mints for real files
+    const bad = await fetch(`${base}/api/dl-token`, { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify({ path: dir }) })
+    expect(bad.status).toBe(404)
+
+    // CORS preflight is answered unauthenticated (Telegram Web's cross-origin download fetch)
+    const pre = await fetch(`${base}/api/download`, { method: 'OPTIONS' })
+    expect(pre.status).toBe(204)
+    expect(pre.headers.get('access-control-allow-origin')).toBe('https://web.telegram.org')
+  } finally { server.stop(true) }
+})
+
 test('serves the real SPA bundle from webapp/ at /', async () => {
   const { startWebapp } = await import('./webapp.ts')
   const { join } = await import('node:path')
