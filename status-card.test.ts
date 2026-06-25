@@ -2,7 +2,8 @@ import { test, expect } from 'bun:test'
 import { writeFileSync, mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { prettyModel, lastModelInTranscript, lastTodosInTranscript, modeBadge, pinMessageGone, statusKeyboard } from './status-card.ts'
+import { prettyModel, lastModelInTranscript, lastTodosInTranscript, modeBadge, pinMessageGone, statusKeyboard, mergeStatus } from './status-card.ts'
+import type { StatuslineData } from './statusline.ts'
 
 const tmp = mkdtempSync(join(tmpdir(), 'sc-test-'))
 
@@ -49,6 +50,33 @@ test('modeBadge stays short for the pin preview', () => {
 test('pinMessageGone matches only gone-pin errors', () => {
   expect(pinMessageGone({ description: 'Bad Request: message to edit not found' })).toBe(true)
   expect(pinMessageGone({ description: 'Bad Request: message is not modified' })).toBe(false)
+})
+
+const sl = (o: Partial<StatuslineData>): StatuslineData => ({
+  ctxPct: null, tokens: null, cost: null, sessionTime: null, apiTime: null,
+  h5: null, d7: null, effort: null, think: false, model: null, ...o,
+})
+
+test('mergeStatus: a value the fresh capture reports is never overridden by the stale cache', () => {
+  // The /clear-staleness regression: context drops to 0, but the fresh read lost effort to a
+  // mid-repaint. The old code reused the whole prior snapshot (ctxPct 85); merge keeps the fresh 0.
+  const prev = sl({ ctxPct: 85, cost: '$1.20', effort: 'high', model: 'Opus' })
+  const fresh = sl({ ctxPct: 0, cost: '$0.00', effort: null, model: 'Opus' })
+  const m = mergeStatus(fresh, prev)!
+  expect(m.ctxPct).toBe(0)          // fresh wins — not the stale 85
+  expect(m.cost).toBe('$0.00')      // fresh wins
+  expect(m.effort).toBe('high')     // missing in fresh → backfilled from prev
+})
+
+test('mergeStatus: backfills only missing fields; null fresh falls back to prev; no prev keeps fresh', () => {
+  const prev = sl({ ctxPct: 50, effort: 'high', h5: { pct: 10, reset: '2h' } })
+  const fresh = sl({ ctxPct: 42 })  // degraded read — only context survived
+  const m = mergeStatus(fresh, prev)!
+  expect(m.ctxPct).toBe(42)
+  expect(m.effort).toBe('high')
+  expect(m.h5).toEqual({ pct: 10, reset: '2h' })
+  expect(mergeStatus(null, prev)).toBe(prev)        // nothing parsed → hold last good
+  expect(mergeStatus(fresh, undefined)).toBe(fresh) // first read → use it as-is
 })
 
 test('statusKeyboard carries the st:* quick actions', () => {

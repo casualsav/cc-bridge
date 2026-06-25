@@ -38,6 +38,12 @@ function viewState(key: string): 'active' | 'warm' | 'stale' {
   const age = Date.now() - activeView.at
   return age < ACTIVE_MS ? 'active' : age < WARM_MS ? 'warm' : 'stale'
 }
+// Is the user currently looking here (active or warm)? Sources use this to keep the viewed card's
+// CONTENT fresh, not just its flush priority — e.g. a topic pin recomputes every tick while watched,
+// instead of sitting on its background refresh floor.
+export function isViewHot(chat: string, thread?: number | null): boolean {
+  return viewState(viewKey(chat, thread)) !== 'stale'
+}
 
 // ---- priority tiers (lower = flushed first) ----
 // A source's tier is computed PER FLUSH from the active view, so the same card is P_ACTIVE in the

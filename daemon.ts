@@ -90,7 +90,7 @@ import {
 import {
   initStatusCard, statusCardText, statusKeyboard, updateSessionPin, updateTopicPins,
   removeSessionPins, refreshSessionPin, sessionPins, pinTextCache, persistSessionPins,
-  clearAllPins, clearTopicPins, createSessionPin, lastModelInTranscript, lastVersionInTranscript,
+  clearAllPins, clearTopicPins, createSessionPin, invalidatePaneStatus, lastModelInTranscript, lastVersionInTranscript,
   prettyModel, modeBadge,
 } from './status-card.ts'
 import { TypingPresence } from './typing.ts'
@@ -2966,6 +2966,10 @@ async function handleModeCommand(
 async function performReset(t: CommandTarget, command: string): Promise<string> {
   await injectSlash(t.paneId, t.watcher, command)
 
+  // A reset makes context/cost jump (often to ~0); drop the pane's last-good status cache so the pin
+  // can't backfill the pre-reset numbers, and refresh it now rather than waiting for the next tick.
+  invalidatePaneStatus(t.paneId)
+  void updateSessionPin()
   const model = await readCurrentModel(t.paneId, t.watcher)
   const head = command === '/clear' ? '🧹 Conversation cleared' : '✅ New session started'
   return model

@@ -14,7 +14,7 @@ import { parseStatusline, pinBar, type StatuslineData } from './statusline.ts'
 import { capturePane, paneCwd } from './pane-io.ts'
 import { focus } from './state.ts'
 import { asLowPriority } from './throttle.ts'
-import { scheduleEdit, cancelEdit } from './edit-scheduler.ts'
+import { scheduleEdit, cancelEdit, isViewHot } from './edit-scheduler.ts'
 import { loadAccess } from './access.ts'
 import { isTopicMode, getGroupChatId, listTopics, getGeneralSession } from './topics.ts'
 import { paneForSession } from './topic-runtime.ts'
@@ -193,6 +193,30 @@ const CARD_RULE = '────────────────────�
 // preview Telegram shows), rule-separated detail groups below. Deliberately NO session identity:
 // in topic mode the tab is the session, and the DM drives a single one. Rendered into the pinned
 // status message (refreshed in place) and re-posted by /status.
+// Backfill a fresh statusline parse from the last good one, field by field — a value the fresh
+// capture reported always wins; only the fields it's MISSING are filled from the prior snapshot. A
+// mid-repaint capture can momentarily drop effort/usage; this fills those rather than blanking the
+// card, WITHOUT letting a stale ctxPct/cost survive once the capture reports a new one (the freeze
+// users saw after a /clear: old context % held for many turns whenever effort blinked out). `think`
+// is a per-read boolean, so it's always taken fresh.
+export function mergeStatus(fresh: StatuslineData | null, prev: StatuslineData | undefined): StatuslineData | null {
+  if (!fresh) return prev ?? null
+  if (!prev) return fresh
+  return {
+    ctxPct: fresh.ctxPct ?? prev.ctxPct, tokens: fresh.tokens ?? prev.tokens, cost: fresh.cost ?? prev.cost,
+    sessionTime: fresh.sessionTime ?? prev.sessionTime, apiTime: fresh.apiTime ?? prev.apiTime,
+    h5: fresh.h5 ?? prev.h5, d7: fresh.d7 ?? prev.d7,
+    effort: fresh.effort ?? prev.effort, think: fresh.think, model: fresh.model ?? prev.model,
+  }
+}
+
+// Drop a pane's cached status/mode so the next render reflects reality immediately rather than
+// backfilling from a now-wrong snapshot. Called on an explicit reset (/clear, /new): context/cost
+// legitimately jump, and we don't want the last-good caches to paper over the change for a tick.
+export function invalidatePaneStatus(paneId: string): void {
+  lastGoodStatus.delete(paneId); lastGoodMode.delete(paneId); modeDefaultStreak.delete(paneId)
+}
+
 export async function statusCardText(paneId: string | null): Promise<string> {
   if (!paneId) return '🖥️ <b>No active session</b>'
   let mode = '—', cwd: string | null = null
@@ -204,11 +228,12 @@ export async function statusCardText(paneId: string | null): Promise<string> {
     // modeLabel name made the collapsed pin preview truncate. stableMode guards against a mid-repaint
     // capture misreading bypass/plan as 'default' (see its definition).
     mode = stableMode(paneId, cap)
-    status = parseStatusline(cap)
-    // Cache a complete parse (effort present ⇒ the statusline block rendered fully); on a degraded
-    // read (mid-repaint while working) reuse the last good one so the pin doesn't lose effort/usage.
-    if (status?.effort) lastGoodStatus.set(paneId, status)
-    else status = lastGoodStatus.get(paneId) ?? status
+    // Backfill, NOT wholesale replace (see mergeStatus): a value the capture actually reported (e.g.
+    // context dropping to 0 after a reset) is never overridden by the stale cache; only the fields the
+    // fresh parse is missing get filled. Cache the merged snapshot once it's solid enough to backfill
+    // from (full statusline rendered, or at least the context/usage numbers present).
+    status = mergeStatus(parseStatusline(cap), lastGoodStatus.get(paneId))
+    if (status && (status.effort || status.ctxPct != null)) lastGoodStatus.set(paneId, status)
   } catch {}
   let todos: TodoState | null = null
   try {
@@ -398,11 +423,15 @@ export async function updateTopicPins(): Promise<void> {
     const paneId = await paneForSession(t.sessionId)
     if (!paneId) continue
     const key = `topic:${t.threadId}`
-    // Throttle background topics: only the focused session's pin refreshes every tick; others at most
-    // every BG_PIN_MS, so total pin traffic stays under the group budget no matter how many topics are
-    // open. Skips the capturePane too, not just the Telegram edit. The focused pin stays live.
-    if (paneId !== focus.activePaneId && Date.now() - (lastPinRefresh.get(key) ?? 0) < BG_PIN_MS) continue
-    if (paneId !== focus.activePaneId) lastPinRefresh.set(key, Date.now())
+    // Throttle background topics: a "hot" pin (the focused session OR the topic the user is currently
+    // looking at) refreshes every tick; others at most every BG_PIN_MS, so total pin traffic stays
+    // under the group budget no matter how many topics are open. Skips the capturePane too, not just
+    // the Telegram edit. Including the active view here is what stops a topic you're working in — but
+    // that never stole focus in group mode — from sitting on the 60s floor, where a post-reset context
+    // drop (or any live field) lingered stale for many turns.
+    const hot = paneId === focus.activePaneId || isViewHot(group, t.threadId)
+    if (!hot && Date.now() - (lastPinRefresh.get(key) ?? 0) < BG_PIN_MS) continue
+    if (!hot) lastPinRefresh.set(key, Date.now())
     const text = await statusCardText(paneId)
     const existing = sessionPins.get(key)
     if (existing && pinTextCache.get(key) === text) continue   // unchanged → skip the edit
