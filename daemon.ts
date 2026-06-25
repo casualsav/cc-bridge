@@ -3451,12 +3451,12 @@ bot.use(async (ctx, next) => {
   await next()
 })
 
-// Auto-delete the user's own bubble for a few NOISY, transient commands when the owner turned it on in
-// /settings (the bot's reply stays). Deliberately scoped — only the terminal dump and the bridge/Claude
-// update apply (NOT bare /update, which opens the dashboard you'd want to keep). We delete FIRST, before
-// next(), so it still vanishes for /update which tears down the daemon mid-handler — the handler runs on
-// from the in-memory ctx regardless. In a group this needs the bot's "Delete messages" admin right; the
-// first failure says so once per chat.
+// Always auto-delete the user's own bubble for a few NOISY, transient commands (the bot's reply stays).
+// Deliberately scoped — only the terminal dump and the bridge/Claude update apply (NOT bare /update,
+// which opens the dashboard you'd want to keep). We delete FIRST, before next(), so it still vanishes for
+// /update which tears down the daemon mid-handler — the handler runs on from the in-memory ctx regardless.
+// Only an allowlisted sender's own slash-commands qualify. In a group this needs the bot's "Delete
+// messages" admin right; the first failure says so once per chat.
 function autoDeletableCommand(text: string): boolean {
   const m = /^\/([a-z0-9_]+)(?:@\w+)?(.*)$/i.exec(text.trim())
   if (!m) return false
@@ -3469,18 +3469,16 @@ function autoDeletableCommand(text: string): boolean {
 const autoDelNoticed = new Set<string>()
 bot.use(async (ctx, next) => {
   const msg = ctx.message
-  if (msg?.text && ctx.chat && autoDeletableCommand(msg.text)) {
-    const acc = loadAccess()
-    if (acc.autoDeleteCommands === true && acc.allowFrom.includes(String(ctx.from?.id))) {
-      try { await ctx.api.deleteMessage(ctx.chat.id, msg.message_id) }
-      catch {
-        const key = String(ctx.chat.id)
-        if (ctx.chat.type !== 'private' && !autoDelNoticed.has(key)) {
-          autoDelNoticed.add(key)
-          await ctx.api.sendMessage(ctx.chat.id,
-            '🗑️ I couldn’t delete that command — give me the <b>Delete messages</b> admin permission here and auto-delete will work.',
-            { parse_mode: 'HTML', ...(msg.message_thread_id ? { message_thread_id: msg.message_thread_id } : {}) }).catch(() => {})
-        }
+  if (msg?.text && ctx.chat && autoDeletableCommand(msg.text)
+      && loadAccess().allowFrom.includes(String(ctx.from?.id))) {
+    try { await ctx.api.deleteMessage(ctx.chat.id, msg.message_id) }
+    catch {
+      const key = String(ctx.chat.id)
+      if (ctx.chat.type !== 'private' && !autoDelNoticed.has(key)) {
+        autoDelNoticed.add(key)
+        await ctx.api.sendMessage(ctx.chat.id,
+          '🗑️ I couldn’t delete that command — give me the <b>Delete messages</b> admin permission here and auto-delete will work.',
+          { parse_mode: 'HTML', ...(msg.message_thread_id ? { message_thread_id: msg.message_thread_id } : {}) }).catch(() => {})
       }
     }
   }
@@ -4872,8 +4870,7 @@ function settingsText(): string {
     `💬 Stream — <b>${replyMode()}</b>\n` +
     `📌 Pinned message — <b>${a.sessionPin !== false ? 'on' : 'off'}</b>\n` +
     `🧷 Preferred mode — <b>${listAccounts().length > 1 ? 'per account' : defModeLabel(MAIN_ACCOUNT.configDir)}</b>\n` +
-    `🧹 Confirm <code>/clear</code> — <b>${a.confirmReset === false ? 'off' : 'on'}</b>\n` +
-    `🗑️ Auto-delete <code>/t</code> · <code>/update</code> — <b>${a.autoDeleteCommands === true ? 'on' : 'off'}</b>\n\n` +
+    `🧹 Confirm <code>/clear</code> — <b>${a.confirmReset === false ? 'off' : 'on'}</b>\n\n` +
     `Tap to change:`
 }
 function settingsKeyboard(): InlineKeyboard {
@@ -4882,8 +4879,7 @@ function settingsKeyboard(): InlineKeyboard {
     .text('⚡ Batch allow', 'set:batch').text('🚢 Ship buttons', 'set:ship').row()
     .text('🎙️ Voice transcription', 'set:voice').text('🔊 Voice replies', 'set:tts').row()
     .text('💬 Stream', 'set:replymode').text('📌 Pin', 'set:pin').row()
-    .text('🧷 Preferred mode', 'defmode:panel').text('🧹 Confirm /clear', 'set:confirmreset').row()
-    .text('🗑️ Auto-delete /t·/update', 'set:autodel')
+    .text('🧷 Preferred mode', 'defmode:panel').text('🧹 Confirm /clear', 'set:confirmreset')
 }
 
 // 🧷 Preferred-mode sub-panel (settings → Preferred mode): Claude Code's permissions.defaultMode — the
@@ -5951,7 +5947,7 @@ bot.on('callback_query:data', async ctx => {
   }
 
   // /settings panel toggles → flip the setting and re-render the panel in place.
-  const setMatch = /^set:(pin|replymode|ship|voice|batch|tts|confirmreset|autodel)$/.exec(data)
+  const setMatch = /^set:(pin|replymode|ship|voice|batch|tts|confirmreset)$/.exec(data)
   if (setMatch) {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
@@ -5987,9 +5983,6 @@ bot.on('callback_query:data', async ctx => {
       saveAccess(a)
     } else if (setMatch[1] === 'confirmreset') {
       a.confirmReset = a.confirmReset === false             // flip (default on)
-      saveAccess(a)
-    } else if (setMatch[1] === 'autodel') {
-      a.autoDeleteCommands = a.autoDeleteCommands !== true  // flip (default off)
       saveAccess(a)
     }
     await ctx.editMessageText(settingsText(), { parse_mode: 'HTML', reply_markup: settingsKeyboard() }).catch(() => {})

@@ -99,7 +99,7 @@ Configure outbound behavior with `/telegram:access set <key> <value>`.
 
 **`sessionPin`** (default `true`) controls the pinned status message — a self-updating pin with the live model · mode · context · usage metrics (no session identity; the topic tab / single DM session covers that). Toggle from Telegram with `/pin on` | `off`.
 
-**`autoDeleteCommands`** (default `false`) deletes your own message for a few noisy, transient commands right after they're handled — the bot's reply stays. Deliberately scoped to **`/terminal`** · **`/t`** and **`/update tg`** · **`/update claude`** (not bare `/update`, whose dashboard you'd want to keep). Toggle it in `/settings` → 🗑️ Auto-delete. In a group/forum the bot needs the **Delete messages** admin permission; the first time it can't delete, it tells you once how to grant it.
+**Auto-deleted commands.** A few noisy, transient commands have their inbound bubble deleted automatically once handled — the bot's reply stays. This is always on (no toggle) and deliberately scoped to **`/terminal`** · **`/t`** and **`/update tg`** · **`/update claude`** (not bare `/update`, whose dashboard you'd want to keep); only your own allowlisted slash-commands are touched, never normal prompts to Claude. In a group/forum the bot needs the **Delete messages** admin permission; the first time it can't delete, it tells you once how to grant it.
 
 ## Voice transcription
 
