@@ -61,6 +61,23 @@ export const pinTextCache = new Map<string, string>()   // last rendered text pe
 // working) yields a null/partial statusline, which would make the pin briefly drop effort/usage/ctx.
 // We reuse the cached good parse on a degraded read so the card stays stable. Keyed by pane id.
 const lastGoodStatus = new Map<string, StatuslineData>()
+// Persist the last-good statusline per pane across daemon restarts. The card backfills a
+// mid-repaint / absent capture from this cache (see mergeStatus); without persistence every daemon
+// restart (a deploy, the watchdog respawn) starts COLD, so until each pane's next clean capture the
+// head loses its context %/usage and collapses to a bare "🧠 model" — which let the 📁 cwd line slide
+// up into Telegram's pinned-message banner (the "context disappears, working folder comes forward"
+// bug). Reloading the cache keeps the metrics visible through a restart. A fresh capture still wins
+// field-by-field (mergeStatus), so a reloaded value is only a stopgap until the live statusline is
+// read again — no staleness regression, and /clear's invalidatePaneStatus still drops it.
+const PANE_STATUS_FILE = join(STATE_DIR, 'pane-status.json')
+for (const [p, s] of Object.entries(readJsonFile<Record<string, StatuslineData>>(PANE_STATUS_FILE, {}))) lastGoodStatus.set(p, s)
+let paneStatusDirty = false
+function persistPaneStatus(): void {
+  if (!paneStatusDirty) return
+  paneStatusDirty = false
+  writeJsonFile(PANE_STATUS_FILE, Object.fromEntries(lastGoodStatus))
+}
+setInterval(persistPaneStatus, 15_000).unref?.()
 // Mode is scraped from the pane footer, where detectCurrentMode returns 'default' BOTH for the real
 // default mode AND when the mode line just isn't in the captured tail (a mid-repaint miss) — which
 // made a bypass session flicker to "🛡ask". stableMode trusts a non-default read immediately, requires
@@ -215,6 +232,7 @@ export function mergeStatus(fresh: StatuslineData | null, prev: StatuslineData |
 // legitimately jump, and we don't want the last-good caches to paper over the change for a tick.
 export function invalidatePaneStatus(paneId: string): void {
   lastGoodStatus.delete(paneId); lastGoodMode.delete(paneId); modeDefaultStreak.delete(paneId)
+  paneStatusDirty = true   // persist the drop too, so a restart right after /clear doesn't reload the stale snapshot
 }
 
 export async function statusCardText(paneId: string | null): Promise<string> {
@@ -233,8 +251,8 @@ export async function statusCardText(paneId: string | null): Promise<string> {
     // fresh parse is missing get filled. Cache the merged snapshot once it's solid enough to backfill
     // from (full statusline rendered, or at least the context/usage numbers present).
     status = mergeStatus(parseStatusline(cap), lastGoodStatus.get(paneId))
-    if (status && (status.effort || status.ctxPct != null)) lastGoodStatus.set(paneId, status)
-  } catch {}
+    if (status && (status.effort || status.ctxPct != null)) { lastGoodStatus.set(paneId, status); paneStatusDirty = true }
+  } catch { status = lastGoodStatus.get(paneId) ?? null }   // capture failed → reuse the last-good snapshot instead of blanking the head (which slides the 📁 folder into the pin banner)
   let todos: TodoState | null = null
   try {
     cwd = await paneCwd(paneId)
