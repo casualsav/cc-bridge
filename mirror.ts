@@ -74,7 +74,12 @@ const MIRROR_THOUGHTS = 10   // thoughts mode: max thoughts shown (oldest falls 
 // (verb/token scraping off the spinner line is flaky). The whole machinery (the footer method,
 // fmtElapsed, the verb/token scrape in syncBody) is kept intact; flip this to re-enable it
 // once it can be made dependable. While false, compose renders the body only.
-const MIRROR_FOOTER_ENABLED = true   // bottom-pinned live status line (scraped verb + elapsed + tokens) under the card
+const MIRROR_FOOTER_ENABLED = true   // master switch for the bottom-pinned live status line (scraped verb + elapsed + tokens)
+// The live "✻ <verb>…" spinner footer (the "Clauding" working indicator) is shown in DM ONLY. In a
+// group/forum the card has no rich-draft companion and the animated spinner reads as noise against the
+// plainer group formatting, so topics render the activity body alone. isTopicMode() is the whole-bridge
+// mode, which is also the kind of chat this card targets (group topic vs DM), so it's the right gate.
+const footerOn = (): boolean => MIRROR_FOOTER_ENABLED && !isTopicMode()
 
 // ---- Card persistence across daemon restarts ----
 // Card message ids used to live ONLY in process memory, so every deploy/crash mid-turn orphaned
@@ -381,7 +386,7 @@ class MirrorCard {
 
     // The capture feeds the digest body and the footer's verb/tokens scrape — with the footer
     // disabled, thoughts/actions don't need it at all (saves a tmux spawn per sync).
-    const needCap = (mode === 'actions' && mirrorMode() === 'digest') || (!done && MIRROR_FOOTER_ENABLED)
+    const needCap = (mode === 'actions' && mirrorMode() === 'digest') || (!done && footerOn())
     const cap = needCap ? await mirrorCapture(paneId) : ''
     // Refresh the footer pieces from Claude's spinner line, but only when a fresh reading exists — a
     // tick that misses the line (it scrolls) keeps the last good verb/tokens instead of flickering.
@@ -409,7 +414,7 @@ class MirrorCard {
 
   // The card text = cached body + the live footer (omitted when done; the body already ends in ✅ Done).
   private compose(done: boolean): string {
-    if (done || !MIRROR_FOOTER_ENABLED) return this.body
+    if (done || !footerOn()) return this.body
     const footer = this.footer()
     if (!this.body) return footer                       // pre-tool thinking phase → footer-only card
     return footer ? `${this.body}\n\n${footer}` : this.body
@@ -466,7 +471,7 @@ class MirrorCard {
     if (now - this.lastSyncAt < throttleMs && this.msgIds.size > 0) return
     this.lastSyncAt = now
     const hasBody = await this.syncBody(false)
-    if (!hasBody && !(MIRROR_FOOTER_ENABLED && this.startedAt)) return   // footer-only card still opens in the pre-tool thinking phase
+    if (!hasBody && !(footerOn() && this.startedAt)) return   // footer-only card still opens in the pre-tool thinking phase (DM)
 
     if (this.msgIds.size === 0) {
       if (Date.now() < this.createCooldownUntil) return   // a recent create 429'd — don't hammer a fresh post every tick
@@ -500,7 +505,7 @@ class MirrorCard {
     if (this.msgIds.size === 0) return
     await this.syncBody(true)
     let text = this.body || '🖥️ <b>Session</b> · idle'
-    if (MIRROR_FOOTER_ENABLED) {
+    if (footerOn()) {
       const done = await this.doneFooter()   // "✻ Baked for 9m 59s" — Claude Code's real completion line
       text = (this.body || '').replace(/✅ <b>Done<\/b>(?: · \d+ steps?)?/, done).trim() || done   // swap the renderer's ✅ Done marker
     }
