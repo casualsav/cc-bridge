@@ -4870,7 +4870,7 @@ function settingsText(): string {
     `💬 Stream — <b>${replyMode()}</b>\n` +
     `📌 Pinned message — <b>${a.sessionPin !== false ? 'on' : 'off'}</b>\n` +
     `🧷 Preferred mode — <b>${listAccounts().length > 1 ? 'per account' : defModeLabel(MAIN_ACCOUNT.configDir)}</b>\n` +
-    `🧹 Confirm <code>/clear</code> — <b>${a.confirmReset === false ? 'off' : 'on'}</b>\n\n` +
+    `🧹 <code>/clear</code> approval — <b>${a.confirmReset === false ? 'off' : 'on'}</b>\n\n` +
     `Tap to change:`
 }
 function settingsKeyboard(): InlineKeyboard {
@@ -4879,7 +4879,7 @@ function settingsKeyboard(): InlineKeyboard {
     .text('⚡ Batch allow', 'set:batch').text('🚢 Ship buttons', 'set:ship').row()
     .text('🎙️ Voice transcription', 'set:voice').text('🔊 Voice replies', 'set:tts').row()
     .text('💬 Stream', 'set:replymode').text('📌 Pin', 'set:pin').row()
-    .text('🧷 Preferred mode', 'defmode:panel').text('🧹 Confirm /clear', 'set:confirmreset')
+    .text('🧷 Preferred mode', 'defmode:panel').text('🧹 /clear approval', 'set:confirmreset')
 }
 
 // 🧷 Preferred-mode sub-panel (settings → Preferred mode): Claude Code's permissions.defaultMode — the
