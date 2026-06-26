@@ -235,13 +235,6 @@ export function invalidatePaneStatus(paneId: string): void {
   paneStatusDirty = true   // persist the drop too, so a restart right after /clear doesn't reload the stale snapshot
 }
 
-// The session's last-known effort level (ε:max → "max") from the cached statusline — for the
-// mirror's "💭 Thinking… · ⚡max" placeholder. null when no good statusline has been seen yet.
-export function paneEffort(paneId: string | null): string | null {
-  if (!paneId) return null
-  return lastGoodStatus.get(paneId)?.effort ?? null
-}
-
 export async function statusCardText(paneId: string | null): Promise<string> {
   if (!paneId) return '🖥️ <b>No active session</b>'
   let mode = '—', cwd: string | null = null

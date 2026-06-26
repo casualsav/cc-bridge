@@ -47,9 +47,6 @@ type MirrorDeps = {
   // quiet (the daemon owns the latest-message bookkeeping + the quiet debounce). When true, the card
   // deletes itself and re-opens at the bottom so the live mirror returns to where you're looking.
   reanchorDue?: (chat: string, thread: number | null | undefined, mirrorId: number) => boolean
-  // The session's current effort level (ε:max → "max"), read from the daemon's cached statusline,
-  // for the "💭 Thinking… · ⚡max" placeholder. null when unknown — the badge is just omitted.
-  effortForPane?: (paneId: string | null) => string | null
 }
 
 let deps: MirrorDeps
@@ -306,6 +303,7 @@ class MirrorCard {
   // placeholder (a no-tool / pure-thinking turn, whose reply relays as its own message) is DELETED
   // on conclude rather than capped — so quick Q&A turns don't leave a "Thinking → Done" stub.
   private sawRealBody = false
+  private updating = false       // serializes update() — the inbound kick can race the relay tick (double-open guard)
   private verb = 'Working'       // last-scraped spinner verb (held between syncs so it doesn't flicker)
   private tokens: string | null = null   // last-scraped PER-TURN token count (spinner only — never the session total)
   private footerTick = 0         // advances one spinner frame per real card edit (animates with activity, no extra edits)
@@ -378,17 +376,14 @@ class MirrorCard {
   // It's the reliable "your message landed, Claude is on it" signal — a real message, immune to
   // Telegram's per-chat typing competition (only one bot-typing renders per chat, so a busy parallel
   // session steals the indicator). Topic mode only: in DM the footer-only card already covers this.
-  private thinkingBody(verb: string, effort: string | null): string {
-    const badge = effort ? ` · ⚡${escapeHtml(effort)}` : ''
-    return `💭 <i>${escapeHtml(verb)}…</i>${badge}`
-  }
+  private thinkingBody(verb: string): string { return `💭 <i>${escapeHtml(verb)}…</i>` }
 
   // The live Thinking… placeholder body: the CLI's current spinner verb (tracks "Thinking",
-  // "Cogitating", … and falls back to "Thinking" when the spinner isn't on-screen) + the effort.
+  // "Cogitating", … and falls back to "Thinking" when the spinner isn't on-screen at capture time).
   private async renderThinking(paneId: string | null): Promise<string> {
     const cap = await mirrorCapture(paneId).catch(() => '')
     const wl = cap ? parseWorkingLine(cap) : null
-    return this.thinkingBody(wl?.verb || 'Thinking', deps.effortForPane?.(paneId) ?? null)
+    return this.thinkingBody(wl?.verb || 'Thinking')
   }
 
   // The status line pinned to the bottom of a live card: the whimsical working verb + the live
@@ -479,6 +474,15 @@ class MirrorCard {
   // from the transcript. While the turn runs we open the card once and edit it in place; the
   // instant the turn settles we cap it (✅ Done) and clear it. Idempotent.
   async update(working: boolean, pending = false): Promise<void> {
+    // Serialize per card. The inbound kick (kickThinkingMirror) and the relay-loop tick can both
+    // call update() for the same pane before the open's sendMessage resolves — without this they
+    // each see msgIds empty and post a card, double-firing the "💭 Thinking…" message (the loser is
+    // then orphaned, un-tracked, and lingers). Skip a concurrent call; the next tick reconciles.
+    if (this.updating) return
+    this.updating = true
+    try { await this.run(working, pending) } finally { this.updating = false }
+  }
+  private async run(working: boolean, pending = false): Promise<void> {
     if (this.pendingRestore) await this.reconcile()   // restart verdict first: resume the old card or cap it
     const mode = deps.replyMode()
     // off → never a card. actions+terminalMirror:off → no card. (Explicit off → cap now, no debounce.)

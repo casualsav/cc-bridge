@@ -92,7 +92,7 @@ import {
   initStatusCard, statusCardText, statusKeyboard, updateSessionPin, updateTopicPins,
   removeSessionPins, refreshSessionPin, sessionPins, pinTextCache, persistSessionPins,
   clearAllPins, clearTopicPins, createSessionPin, invalidatePaneStatus, lastModelInTranscript, lastVersionInTranscript,
-  prettyModel, modeBadge, paneEffort,
+  prettyModel, modeBadge,
 } from './status-card.ts'
 import { TypingPresence } from './typing.ts'
 import { transcribe, transcribeProvider, transcribeStatus } from './voice.ts'
@@ -8241,7 +8241,6 @@ initMirror({
   outboundTargets: () => outboundTargetsFor(focus.activePaneId),   // focused session's topic in forum mode, else DM
   auxOutboundTargets: pane => outboundTargetsFor(pane),            // a non-focused session's own topic
   reanchorDue,                                                     // re-post the focused live card at the bottom once it's buried + the chat is quiet
-  effortForPane: paneEffort,                                       // ⚡effort badge on the "💭 Thinking…" placeholder
 })
 
 // Drive usage alerts + limit auto-continue (session + weekly) from the statusline snapshot.
