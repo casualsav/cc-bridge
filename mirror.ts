@@ -90,7 +90,7 @@ const footerOn = (): boolean => MIRROR_FOOTER_ENABLED && !isTopicMode()
 // still the same pane + turn, and cap the orphan cleanly when it isn't.
 const MIRROR_STATE_FILE = join(STATE_DIR, 'mirror-card.json')
 const MIRROR_AUX_STATE_FILE = join(STATE_DIR, 'mirror-aux-cards.json')
-type PersistedCard = { ids: Record<string, number>; threads?: Record<string, number>; paneId: string | null; startedAt: number; anchor: string | null; body: string }
+type PersistedCard = { ids: Record<string, number>; threads?: Record<string, number>; paneId: string | null; startedAt: number; anchor: string | null; body: string; sawRealBody?: boolean }
 
 // Compact live elapsed for the status footer: "23s" / "1m 40s" / "1h 02m".
 function fmtElapsed(ms: number): string {
@@ -298,7 +298,7 @@ class MirrorCard {
   // body + the footer's verb/tokens on the throttled relay tick; the cached values carry across
   // ticks so a re-render doesn't re-scrape.
   private body = ''              // last-synced card body (no footer)
-  // Whether this card has ever shown REAL content (thoughts / tools), vs only the "💭 Thinking…"
+  // Whether this card has ever shown REAL content (thoughts / tools), vs only the "Thinking…"
   // placeholder that opens the instant a message lands. A card that never upgraded past the
   // placeholder (a no-tool / pure-thinking turn, whose reply relays as its own message) is DELETED
   // on conclude rather than capped — so quick Q&A turns don't leave a "Thinking → Done" stub.
@@ -318,7 +318,7 @@ class MirrorCard {
   private anchor: string | null = null
   // Restored ids await a verdict on the first tick (resume vs cap) — needs the live transcript,
   // so it can't be decided at load time.
-  private pendingRestore: { anchor: string | null; body: string } | null = null
+  private pendingRestore: { anchor: string | null; body: string; sawRealBody?: boolean } | null = null
 
   constructor(private opts: {
     resolvePane: () => string | null
@@ -331,7 +331,7 @@ class MirrorCard {
   // ---- persistence ----
   snapshot(): PersistedCard | null {
     return this.msgIds.size
-      ? { ids: Object.fromEntries(this.msgIds), threads: Object.fromEntries(this.cardThread), paneId: this.paneId, startedAt: this.startedAt, anchor: this.anchor, body: this.body }
+      ? { ids: Object.fromEntries(this.msgIds), threads: Object.fromEntries(this.cardThread), paneId: this.paneId, startedAt: this.startedAt, anchor: this.anchor, body: this.body, sawRealBody: this.sawRealBody }
       : null
   }
 
@@ -341,7 +341,7 @@ class MirrorCard {
     if (saved.threads) for (const [chat, th] of Object.entries(saved.threads)) this.cardThread.set(chat, th)
     this.paneId = saved.paneId ?? null
     this.startedAt = saved.startedAt || Date.now()
-    this.pendingRestore = { anchor: saved.anchor ?? null, body: saved.body ?? '' }
+    this.pendingRestore = { anchor: saved.anchor ?? null, body: saved.body ?? '', sawRealBody: saved.sawRealBody }
   }
 
   // First tick after a restart with a restored card: same pane + same turn → keep editing it (the
@@ -358,7 +358,7 @@ class MirrorCard {
       this.anchor = anchor
       this.body = saved.body   // contentKey + the cap fallback hold the last body until the next sync
       this.contentKey = saved.body
-      this.sawRealBody = !!saved.body && !saved.body.startsWith('💭')   // a resumed card that had real content must cap (not delete as a placeholder) on conclude
+      this.sawRealBody = saved.sawRealBody ?? false   // resumed card: cap (not delete) on conclude only if it had shown real content (persisted, no longer inferred from the body)
       process.stderr.write(`daemon: resumed live mirror card across restart (pane ${paneId})\n`)
       return
     }
@@ -376,7 +376,7 @@ class MirrorCard {
   // It's the reliable "your message landed, Claude is on it" signal — a real message, immune to
   // Telegram's per-chat typing competition (only one bot-typing renders per chat, so a busy parallel
   // session steals the indicator). Topic mode only: in DM the footer-only card already covers this.
-  private thinkingBody(verb: string): string { return `💭 <i>${escapeHtml(verb)}…</i>` }
+  private thinkingBody(verb: string): string { return `<i>${escapeHtml(verb)}…</i>` }
 
   // The live Thinking… placeholder body: the CLI's current spinner verb (tracks "Thinking",
   // "Cogitating", … and falls back to "Thinking" when the spinner isn't on-screen at capture time).
@@ -476,7 +476,7 @@ class MirrorCard {
   async update(working: boolean, pending = false): Promise<void> {
     // Serialize per card. The inbound kick (kickThinkingMirror) and the relay-loop tick can both
     // call update() for the same pane before the open's sendMessage resolves — without this they
-    // each see msgIds empty and post a card, double-firing the "💭 Thinking…" message (the loser is
+    // each see msgIds empty and post a card, double-firing the "Thinking…" message (the loser is
     // then orphaned, un-tracked, and lingers). Skip a concurrent call; the next tick reconciles.
     if (this.updating) return
     this.updating = true
@@ -551,7 +551,7 @@ class MirrorCard {
   async finalize(): Promise<void> {
     if (this.msgIds.size === 0) return
     if (!this.sawRealBody) {
-      // The card never upgraded past the "💭 Thinking…" placeholder — a no-tool / pure-thinking turn
+      // The card never upgraded past the "Thinking…" placeholder — a no-tool / pure-thinking turn
       // whose reply relayed as its own message. Drop the stub rather than cap it to a redundant
       // "✅ Done" sitting next to the answer.
       for (const [chat, mid] of this.msgIds) scheduleDelete(chat, mid)
