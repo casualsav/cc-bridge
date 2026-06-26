@@ -47,6 +47,9 @@ type MirrorDeps = {
   // quiet (the daemon owns the latest-message bookkeeping + the quiet debounce). When true, the card
   // deletes itself and re-opens at the bottom so the live mirror returns to where you're looking.
   reanchorDue?: (chat: string, thread: number | null | undefined, mirrorId: number) => boolean
+  // The session's current effort level (ε:max → "max"), read from the daemon's cached statusline,
+  // for the "💭 Thinking… · ⚡max" placeholder. null when unknown — the badge is just omitted.
+  effortForPane?: (paneId: string | null) => string | null
 }
 
 let deps: MirrorDeps
@@ -357,6 +360,7 @@ class MirrorCard {
       this.anchor = anchor
       this.body = saved.body   // contentKey + the cap fallback hold the last body until the next sync
       this.contentKey = saved.body
+      this.sawRealBody = !!saved.body && !saved.body.startsWith('💭')   // a resumed card that had real content must cap (not delete as a placeholder) on conclude
       process.stderr.write(`daemon: resumed live mirror card across restart (pane ${paneId})\n`)
       return
     }
@@ -374,7 +378,18 @@ class MirrorCard {
   // It's the reliable "your message landed, Claude is on it" signal — a real message, immune to
   // Telegram's per-chat typing competition (only one bot-typing renders per chat, so a busy parallel
   // session steals the indicator). Topic mode only: in DM the footer-only card already covers this.
-  private thinkingBody(): string { return '💭 <b>Thinking…</b>' }
+  private thinkingBody(verb: string, effort: string | null): string {
+    const badge = effort ? ` · ⚡${escapeHtml(effort)}` : ''
+    return `💭 <i>${escapeHtml(verb)}…</i>${badge}`
+  }
+
+  // The live Thinking… placeholder body: the CLI's current spinner verb (tracks "Thinking",
+  // "Cogitating", … and falls back to "Thinking" when the spinner isn't on-screen) + the effort.
+  private async renderThinking(paneId: string | null): Promise<string> {
+    const cap = await mirrorCapture(paneId).catch(() => '')
+    const wl = cap ? parseWorkingLine(cap) : null
+    return this.thinkingBody(wl?.verb || 'Thinking', deps.effortForPane?.(paneId) ?? null)
+  }
 
   // The status line pinned to the bottom of a live card: the whimsical working verb + the live
   // elapsed + the PER-TURN token count (from Claude's spinner line only — never the session
@@ -389,10 +404,14 @@ class MirrorCard {
   // the footer's verb/tokens), updating body and the cached footer pieces. Costs a transcript read
   // (and a tmux capture when needed), so it runs only on the throttled tick. Returns whether
   // there's anything to show.
-  private async syncBody(done: boolean): Promise<boolean> {
+  private async syncBody(done: boolean, forceThinking = false): Promise<boolean> {
     const mode = deps.replyMode()
     if (mode === 'off') { this.body = ''; return false }
     const paneId = this.opts.resolvePane()
+    // A freshly-messaged turn whose content isn't in the transcript yet: show the live Thinking…
+    // placeholder rather than reading currentTurnFeed, which would still return the PREVIOUS,
+    // concluded turn (the "idle session shows a stale, still-active card on a new message" bug).
+    if (forceThinking && !done && !footerOn()) { this.body = await this.renderThinking(paneId); return true }
     const file = paneId ? await deps.resolveTranscriptForPane(paneId) : null
 
     // The capture feeds the digest body and the footer's verb/tokens scrape — with the footer
@@ -423,7 +442,7 @@ class MirrorCard {
       // or the daemon's thinking-pending signal is set). In topic mode there's no footer to signal
       // the turn started, so fill it with the Thinking… placeholder so the card opens immediately on
       // receipt. DM keeps its footer-only card (footerOn), unchanged.
-      if (!done && !footerOn()) { this.body = this.thinkingBody(); return true }
+      if (!done && !footerOn()) { this.body = await this.renderThinking(paneId); return true }
       return false
     }
     this.body = body
@@ -459,13 +478,13 @@ class MirrorCard {
   // The card's whole lifecycle lives here, driven by one signal — `working` = turnInProgress(file)
   // from the transcript. While the turn runs we open the card once and edit it in place; the
   // instant the turn settles we cap it (✅ Done) and clear it. Idempotent.
-  async update(working: boolean): Promise<void> {
+  async update(working: boolean, pending = false): Promise<void> {
     if (this.pendingRestore) await this.reconcile()   // restart verdict first: resume the old card or cap it
     const mode = deps.replyMode()
     // off → never a card. actions+terminalMirror:off → no card. (Explicit off → cap now, no debounce.)
     if (mode === 'off' || (mode === 'actions' && mirrorMode() === 'off')) { this.idleTicks = 0; if (this.msgIds.size) await this.finalize(); return }
 
-    if (!working) {
+    if (!working && !pending) {
       // Debounce the cap: only finalize after sustained idle, so a one-tick blip doesn't split the
       // turn's card. A real turn-end stays not-working, so it still caps within a few ticks.
       if (++this.idleTicks >= MIRROR_FINALIZE_TICKS && this.msgIds.size) await this.finalize()
@@ -489,7 +508,12 @@ class MirrorCard {
     const throttleMs = !isTopicMode() ? MIRROR_THROTTLE_MS : this.opts.focused ? MIRROR_THROTTLE_ACTIVE_MS : MIRROR_THROTTLE_GROUP_MS
     if (now - this.lastSyncAt < throttleMs && this.msgIds.size > 0) return
     this.lastSyncAt = now
-    const hasBody = await this.syncBody(false)
+    // Pre-content phase (initial thinking, or a new message on an idle session whose transcript still
+    // holds the prior concluded turn): force the Thinking… placeholder over that stale/empty feed.
+    // Once real content has shown (sawRealBody) we never force it again, so a concluding turn's card
+    // doesn't flicker back to "Thinking…".
+    const forceThinking = !working && !this.sawRealBody
+    const hasBody = await this.syncBody(false, forceThinking)
     if (!hasBody && !(footerOn() && this.startedAt)) return   // footer-only card still opens in the pre-tool thinking phase (DM)
 
     if (this.msgIds.size === 0) {
@@ -589,7 +613,7 @@ const focusedCard = new MirrorCard({
   focused: true,                             // the user's driven session → snappier 4s cadence in group mode
 })
 
-export async function updateTerminalMirror(working: boolean): Promise<void> { await asLowPriority(() => focusedCard.update(working)) }
+export async function updateTerminalMirror(working: boolean, pending = false): Promise<void> { await asLowPriority(() => focusedCard.update(working, pending)) }
 export async function respawnTerminalMirror(): Promise<void> { await focusedCard.respawn() }
 export function abandonMirror(focusedPaneId?: string | null): void { focusedCard.abandon(focusedPaneId) }
 
@@ -616,8 +640,8 @@ function auxCardFor(paneId: string): MirrorCard {
 }
 
 // Drive a non-focused pane's card from auxRelayTick (same `working` signal as its relay).
-export async function updateAuxMirror(paneId: string, working: boolean): Promise<void> {
-  await asLowPriority(() => auxCardFor(paneId).update(working))
+export async function updateAuxMirror(paneId: string, working: boolean, pending = false): Promise<void> {
+  await asLowPriority(() => auxCardFor(paneId).update(working, pending))
 }
 
 // The panes currently holding an aux card — for the daemon's cleanup sweep.

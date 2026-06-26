@@ -92,7 +92,7 @@ import {
   initStatusCard, statusCardText, statusKeyboard, updateSessionPin, updateTopicPins,
   removeSessionPins, refreshSessionPin, sessionPins, pinTextCache, persistSessionPins,
   clearAllPins, clearTopicPins, createSessionPin, invalidatePaneStatus, lastModelInTranscript, lastVersionInTranscript,
-  prettyModel, modeBadge,
+  prettyModel, modeBadge, paneEffort,
 } from './status-card.ts'
 import { TypingPresence } from './typing.ts'
 import { transcribe, transcribeProvider, transcribeStatus } from './voice.ts'
@@ -1060,8 +1060,8 @@ function clearThinkingPending(pane: string | null): void { if (pane) thinkingPen
 async function kickThinkingMirror(pane: string): Promise<void> {
   if (!TRANSCRIPT_OUTBOUND) return
   thinkingPendingUntil.set(pane, Date.now() + THINKING_PENDING_MS)
-  if (pane === focus.activePaneId) await updateTerminalMirror(true).catch(() => {})
-  else if (isTopicMode()) await updateAuxMirror(pane, true).catch(() => {})
+  if (pane === focus.activePaneId) await updateTerminalMirror(false, true).catch(() => {})
+  else if (isTopicMode()) await updateAuxMirror(pane, false, true).catch(() => {})
 }
 
 async function relayLoopTick(gen: number): Promise<void> {
@@ -1085,7 +1085,7 @@ async function relayLoopTick(gen: number): Promise<void> {
   relayConcludeTicks = working ? 0 : relayConcludeTicks + 1
   if (isTopicMode()) { if (working) void emitTopicTyping(paneId) }   // topic mode → typing in the session's own topic
   else typingPresence.observe(working)   // reliable working signal — this bridged pane never shows the spinner
-  await updateTerminalMirror(working || thinkingPending(paneId)).catch(() => {})   // thinkingPending opens the card on receipt, before turnInProgress flips
+  await updateTerminalMirror(working, thinkingPending(paneId)).catch(() => {})   // pending opens/holds the Thinking… card before turnInProgress flips
 
   // DM-only "Clauding…" live draft. DISABLED by default (the indicator was unreliable): gated to
   // require an explicit claudingDraft:true opt-in (was default-on). All the machinery is kept intact
@@ -1222,7 +1222,7 @@ async function auxRelayTick(): Promise<void> {
         const working = turnInProgress(file)
         // The session's own live card in its own topic — same lifecycle as the focused card,
         // driven by the same transcript turn signal this loop already computes.
-        await updateAuxMirror(pane, working || thinkingPending(pane)).catch(() => {})   // open on receipt, before turnInProgress flips
+        await updateAuxMirror(pane, working, thinkingPending(pane)).catch(() => {})   // pending opens/holds the card before turnInProgress flips
         if (!auxRelayPrimed.has(file)) {
           // A restored (persisted) cursor survives restarts — keep it, so a reply written during
           // the restart window still relays. Only a never-seen transcript skips its existing tail.
@@ -1236,11 +1236,11 @@ async function auxRelayTick(): Promise<void> {
         const ticks = (auxConcludeTicks.get(file) ?? 0) + 1
         auxConcludeTicks.set(file, ticks)
         if (ticks < RELAY_CONCLUDE_TICKS) continue
-        clearThinkingPending(pane)   // turn concluded → drop the thinking-pending crutch so the card caps/deletes promptly
         const cursor = lastRelayedByFile.get(file) ?? ''
         for (const r of finalRepliesAfter(file, cursor)) {
           if (!r.uuid || r.uuid === (lastRelayedByFile.get(file) ?? '')) continue
           lastRelayedByFile.set(file, r.uuid)     // advance before the await so a fast tick can't double-send
+          clearThinkingPending(pane)   // a real reply relayed → drop the thinking-pending crutch so the card caps/deletes
           const targets = await outboundTargetsFor(pane)
           for (const t of targets) {
             await sendAgentText([t.chat], r.text, t.thread).catch(e => process.stderr.write(`daemon: aux relay send failed: ${e}\n`))
@@ -4465,7 +4465,7 @@ const liveTerminals = new Map<string, LiveTerminal>()
 // mega-line by keeping its newest chars.
 function terminalCard(body: string, limit: number): string {
   const render = (text: string, count: number) =>
-    `📺 <b>Live terminal · ${count} lines</b> <i>(refreshes 5s · clears 30s)</i>\n` +
+    `📺 <b>Live terminal · ${count} lines</b>\n` +
     `<pre><code class="language-javascript">${escapeHtml(text)}</code></pre>`
   let lines = body.split('\n')
   for (;;) {
@@ -8241,6 +8241,7 @@ initMirror({
   outboundTargets: () => outboundTargetsFor(focus.activePaneId),   // focused session's topic in forum mode, else DM
   auxOutboundTargets: pane => outboundTargetsFor(pane),            // a non-focused session's own topic
   reanchorDue,                                                     // re-post the focused live card at the bottom once it's buried + the chat is quiet
+  effortForPane: paneEffort,                                       // ⚡effort badge on the "💭 Thinking…" placeholder
 })
 
 // Drive usage alerts + limit auto-continue (session + weekly) from the statusline snapshot.
