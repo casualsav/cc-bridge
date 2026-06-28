@@ -23,9 +23,11 @@ export function parseTunnelUrl(text: string): string | null {
 
 // Locate the cloudflared binary: explicit path → PATH → cached under <stateDir>/bin. Returns null if
 // absent (callers then auto-fetch via ensureCloudflared, or fall back to WEBAPP_PUBLIC_URL).
-export function findCloudflared(stateDir: string, explicit?: string): string | null {
+// `lookup` is the PATH probe (real `which` by default); tests inject a stub so the result doesn't
+// depend on whether the host happens to have cloudflared installed.
+export function findCloudflared(stateDir: string, explicit?: string, lookup: (cmd: string) => string | null = which): string | null {
   if (explicit && existsSync(explicit)) return explicit
-  const onPath = which('cloudflared')
+  const onPath = lookup('cloudflared')
   if (onPath) return onPath
   const win = join(stateDir, 'bin', 'cloudflared.exe')
   if (existsSync(win)) return win

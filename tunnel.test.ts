@@ -24,9 +24,10 @@ test('still parses the real URL even if the api host appears in the same buffer'
 })
 
 test('findCloudflared returns null when absent and honors an explicit existing path', () => {
-  expect(findCloudflared('/nonexistent-state-dir')).toBeNull()
-  expect(findCloudflared('/nonexistent-state-dir', '/definitely/not/here')).toBeNull()
-  expect(findCloudflared('/tmp', '/bin/sh')).toBe('/bin/sh')   // any existing file path is honored
+  const noPath = () => null   // stub the PATH probe so the test is hermetic on hosts that have cloudflared installed
+  expect(findCloudflared('/nonexistent-state-dir', undefined, noPath)).toBeNull()
+  expect(findCloudflared('/nonexistent-state-dir', '/definitely/not/here', noPath)).toBeNull()
+  expect(findCloudflared('/tmp', '/bin/sh')).toBe('/bin/sh')   // explicit existing path wins before the PATH probe
 })
 
 test('cfAsset maps platform/arch to the right release asset', () => {
