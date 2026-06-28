@@ -16,6 +16,13 @@ import { frame, makeLineReader, SOCKET_PATH, type ShimToDaemon, type DaemonToShi
 const fromStdin = (s: string | undefined) => (s === '-' ? readFileSync(0, 'utf8') : s)
 const [, , cmd, chat_id, a, b] = process.argv
 
+// `tg doctor` — host-side install diagnostic (reads the setup directly; works even when the daemon is
+// down, which is the whole point). Handled here, before the socket path, since it talks to no daemon.
+if (cmd === 'doctor') {
+  const { runDoctor } = await import('./doctor.ts')
+  process.exit(await runDoctor())
+}
+
 // The caller's tmux pane rides along so the daemon can resolve `.` to THIS session's
 // chat — and in forum mode its own topic thread — instead of needing an explicit id.
 const pane = process.env.TMUX_PANE
@@ -28,7 +35,7 @@ switch (cmd) {
   // `tg update` / `tg update check` — the second token lands in `chat_id`.
   case 'update': name = 'update';      args = { mode: chat_id === 'check' ? 'check' : 'apply' }; break
   default:
-    process.stderr.write('usage: tgctl <send|react|edit|reply|update> ...\n')
+    process.stderr.write('usage: tgctl <send|react|edit|reply|update|doctor> ...\n')
     process.exit(2)
 }
 
