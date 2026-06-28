@@ -7487,10 +7487,12 @@ async function reviveTopicSession(ctx: Context, sid: string, params: InboundPara
   if (!t) { bufferEvent(params); return }
   revivalQueues.set(sid, [params])
   try {
-    await ctx.reply('💤 This session was down — reviving it; your message will be delivered.').catch(() => {})
+    const notice = await ctx.reply('💤 This session was down — reviving it; your message will be delivered.').catch(() => null)
     const ok = await spawnSession(t.cwd, '-c', sid)
     if (!ok) {
-      await ctx.reply(`❌ Couldn't revive the session in <code>${escapeHtml(t.cwd)}</code>.`, { parse_mode: 'HTML' }).catch(() => {})
+      const msg = `❌ Couldn't revive the session in <code>${escapeHtml(t.cwd)}</code>.`
+      if (notice) await ctx.api.editMessageText(notice.chat.id, notice.message_id, msg, { parse_mode: 'HTML' }).catch(() => {})
+      else await ctx.reply(msg, { parse_mode: 'HTML' }).catch(() => {})
       return
     }
     await reopenSessionTopic(sid)   // reopen the tab NOW, not on first reply
@@ -7503,11 +7505,19 @@ async function reviveTopicSession(ctx: Context, sid: string, params: InboundPara
       if (cap && onNormalPrompt(cap)) {
         const q = revivalQueues.get(sid) ?? []
         for (const p of q) pasteInbound(pane, p)
+        // Self-edit the "💤 down" notice into a ✅ confirmation now that the session is back at a
+        // prompt and the held message(s) have been delivered.
+        if (notice) {
+          const what = q.length > 1 ? `your ${q.length} messages were delivered` : 'your message was delivered'
+          await ctx.api.editMessageText(notice.chat.id, notice.message_id, `✅ Session back up — ${what}.`).catch(() => {})
+        }
         process.stderr.write(`daemon: revived session ${sid} in ${t.cwd} (pane ${pane}) — delivered ${q.length} queued message(s)\n`)
         return
       }
     }
-    await ctx.reply('⚠️ Session revived but didn\'t reach a prompt in time — resend your message once it settles.').catch(() => {})
+    const slow = '⚠️ Session revived but didn\'t reach a prompt in time — resend your message once it settles.'
+    if (notice) await ctx.api.editMessageText(notice.chat.id, notice.message_id, slow).catch(() => {})
+    else await ctx.reply(slow).catch(() => {})
   } finally { revivalQueues.delete(sid) }
 }
 
