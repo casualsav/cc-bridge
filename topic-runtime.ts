@@ -362,7 +362,7 @@ export async function refreshTopicTitles(panes: string[]): Promise<void> {
     const stem = norm(curBase) === folder.toLowerCase() ? curBase : folder
     const base = stem + (num ? ` #${num}` : '')
     // A repo pulled into the topic's folder often checks out a default branch named like the
-    // topic itself — "Proj · Proj" says nothing twice. Suffix only an informative branch.
+    // topic itself — "Webapp · Webapp" says nothing twice. Suffix only an informative branch.
     const want = branch && !['main', 'master', 'HEAD'].includes(branch) && norm(branch) !== norm(stem)
       ? `${base} · ${branch}` : base
     if (want === t.name) continue

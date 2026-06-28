@@ -41,15 +41,14 @@ human and the one Claude Code restart; do everything else yourself.
 - `off-mcp/INSTALL.md` (setup) + `off-mcp/CLAUDE.md` (the convention every plugin-less session reads).
 - `ACCESS.md` (access control), `TESTING.md`.
 
-**Shared repo — two users (`user` + `casualsav`).** This checkout is used by both accounts. They're
-in each other's groups, the tree is group-owned by the shared group `user` with **setgid,
-group-writable dirs (2775)**, both shells use **umask 002**, and git has
-**`core.sharedRepository=group`** — so normal file creation is already group-writable (664) and both
-can read/edit/commit/push. The ONE thing that breaks this: **never `chmod` tracked files to
-owner-only/read-only modes (600/444/464)** — the other user then can't read them and `bun run deploy`
-aborts copying the unreadable ones (this is the `assets/claude.jpg` failure that has bitten before).
-If perms ever drift, fix it in one shot: **`sudo bash scripts/fix-perms.sh`** (idempotent; needs sudo
-only to touch files the other user owns — ownership is left alone, group perms grant the access).
+**Repo perms (group-shared checkouts).** If this tree is shared by more than one account, keep it
+group-writable — **setgid, group-writable dirs (2775)**, **umask 002**, and **`git config
+core.sharedRepository=group`** — so normal file creation lands group-writable (664). The ONE thing
+that breaks this: **never `chmod` tracked files to owner-only/read-only modes (600/444/464)** —
+collaborators then can't read them and `bun run deploy` aborts copying the unreadable ones (the
+`assets/claude.jpg` failure that has bitten before). If perms ever drift, fix it in one shot:
+**`sudo bash scripts/fix-perms.sh`** (idempotent; ownership is left alone, group perms grant the
+access).
 
 **Deploy loop** (the live daemon runs from the plugin cache, not this checkout): edit `.ts` here →
 **`bun run deploy [patch|minor|major|x.y.z]`** (default `patch`) → test live → commit. The script
