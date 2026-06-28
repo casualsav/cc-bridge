@@ -11,6 +11,12 @@ import { readdirSync, statSync, openSync, existsSync, readFileSync, writeFileSyn
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { SOCKET_PATH, STATE_DIR, WATCHDOG_PID_FILE, DAEMON_LOG_FILE } from './common.ts'
+import { tokenHeldByOther, readTokenFromEnv } from './token-lock.ts'
+
+// Our bot token (read from this state dir's .env), to probe the one-daemon-per-token lock before
+// spawning. Null when unreadable → the guard is simply skipped (spawn as before).
+const TOKEN = readTokenFromEnv(STATE_DIR)
+let warnedBusy = false
 
 const CHECK_MS = 20_000
 const REAP_MS = 5_000
@@ -108,7 +114,20 @@ function spawnDaemon(): void {
 
 async function tick(): Promise<void> {
   rotateLog()
-  if (!(await socketAlive())) spawnDaemon()
+  if (await socketAlive()) return
+  // Daemon is down. Before spawning, make sure another live daemon (different state dir / HOME, same
+  // token) isn't already bridging this bot — spawning a second poller would just refuse and we'd
+  // respawn-loop it, while it minted duplicate topics. Re-checked every tick, so we take over the
+  // instant that holder dies. Skipped when the token is unreadable (TOKEN null) → spawn as before.
+  if (TOKEN) {
+    const other = await tokenHeldByOther(TOKEN, STATE_DIR)
+    if (other) {
+      if (!warnedBusy) { process.stderr.write(`watchdog: this bot is already bridged by pid ${other.pid ?? '?'} (state dir ${other.stateDir ?? '?'}) — not spawning a duplicate daemon\n`); warnedBusy = true }
+      return
+    }
+    warnedBusy = false
+  }
+  spawnDaemon()
 }
 
 process.on('SIGTERM', () => {

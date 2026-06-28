@@ -330,6 +330,10 @@ The second hook (`stamp-transcript.ts`) writes each session's transcript path on
   ```
   and ensure `settings.json` has the `"statusLine"` block shown above (command
   `bash ~/.claude/statusline-command.sh`).
+  The daemon also **self-heals** this on every startup (`healMainStatusline`): it (re)installs the
+  script from the plugin cache and adds the block when missing — so upgrades, extra accounts, and
+  additional HOMEs/profiles get the statusline (and a refreshed script) automatically. This manual
+  step just covers the very first boot, before any daemon has run.
   The script **relies on `python3`** (used to parse Claude Code's session JSON — no jq), and
   degrades to a bare `user@host:cwd` line if `python3` is missing, so confirm `python3` is on PATH.
   **Statusline policy — our layout wins unless theirs is already complete.** The pin needs all of:

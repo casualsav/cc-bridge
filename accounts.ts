@@ -132,6 +132,38 @@ export function healAccountConfigs(): void {
   }
 }
 
+// Ensure a config dir has the bridge's statusline wired up, sourcing the script from the plugin cache
+// (authoritative) instead of "copy from another settings.json" — so it works even when no settings.json
+// anywhere has the block yet (a fresh box, or a separate HOME like a hermes profile), and a stale script
+// gets refreshed to match the current pin parser. The pin's context/usage is PARSED from this statusline,
+// so without it the pin renders blank. Run at daemon startup for the daemon's OWN config dir, BEFORE
+// healAccountConfigs (which then copies the block on to alt-accounts). Conservative + idempotent: adds the
+// statusLine block only when ABSENT (never clobbers a custom one); (re)writes the script only when missing
+// or out of sync with the cache. Claude Code hot-reloads settings.json, so it lands on running sessions
+// with no restart. cacheScript defaults to the copy co-located with this module in the plugin cache.
+export function healMainStatusline(cacheScript: string = join(import.meta.dir, 'statusline-command.sh'), configDir: string = MAIN_CONFIG_DIR): void {
+  let want: Buffer
+  try { want = readFileSync(cacheScript) } catch { return }   // no cache script to source from — nothing to do
+  try { mkdirSync(configDir, { recursive: true }) } catch {}
+  const script = join(configDir, 'statusline-command.sh')
+  try {
+    let have: Buffer | null = null
+    try { have = readFileSync(script) } catch {}
+    if (!have || !have.equals(want)) {
+      writeFileSync(script, want, { mode: 0o755 })
+      process.stderr.write(`accounts: ${have ? 'refreshed' : 'installed'} statusline-command.sh in ${configDir}\n`)
+    }
+  } catch (e) { process.stderr.write(`accounts: statusline script heal failed (${configDir}): ${e}\n`) }
+  const dest = join(configDir, 'settings.json')
+  let cur: Record<string, unknown> = {}
+  try { cur = JSON.parse(readFileSync(dest, 'utf8')) } catch {}
+  if (cur.statusLine == null) {
+    cur.statusLine = { type: 'command', command: 'bash ~/.claude/statusline-command.sh' }
+    try { writeFileSync(dest, JSON.stringify(cur, null, 2) + '\n', { mode: 0o600 }); process.stderr.write(`accounts: added statusLine block to ${dest}\n`) }
+    catch (e) { process.stderr.write(`accounts: statusLine settings heal failed (${dest}): ${e}\n`) }
+  }
+}
+
 // Whether an account has completed /login (credentials present in its config dir).
 export function accountLoggedIn(a: Account): boolean {
   return existsSync(join(a.configDir, '.credentials.json'))

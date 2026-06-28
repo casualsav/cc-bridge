@@ -18,6 +18,7 @@ import {
   DAEMON_LOG_FILE, WATCHDOG_PID_FILE, HEARTBEAT_FILE,
   type ShimToDaemon, type DaemonToShim, type InboundParams,
 } from './common.ts'
+import { acquireTokenLock } from './token-lock.ts'
 
 // Code fingerprint captured at startup; sent to shims so they can detect and
 // replace a daemon left running stale code after a plugin upgrade.
@@ -27,7 +28,7 @@ import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detec
 import { resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, currentTurnActivity, currentTurnTokens, listRecentSessions, findSessionCwd, searchTranscripts } from './transcript.ts'
 import {
   initAccounts, listAccounts, accountByName, accountForTranscript, accountForProjectsDir,
-  allProjectsDirs, addAccount, removeAccount, renameAccount, accountLoggedIn, healAccountConfigs,
+  allProjectsDirs, addAccount, removeAccount, renameAccount, accountLoggedIn, healAccountConfigs, healMainStatusline,
   MAIN_ACCOUNT, readDefaultMode, writeDefaultMode, type Account,
 } from './accounts.ts'
 import { exec, sleep, hashText } from './proc.ts'
@@ -162,6 +163,23 @@ try {
   }
 } catch { /* read-only state dir — the env-only setup keeps working as before */ }
 
+// One-daemon-per-bot-token guard (see token-lock.ts). Done BEFORE any setup — webapp, intervals, the
+// watchdog cross-guard — so a refused duplicate does no outbound work and spawns nothing. The
+// per-state-dir daemon.sock only stops a second daemon in the SAME state dir; the same token in two
+// state dirs / HOMEs (multi-profile, e.g. hermes) otherwise runs two pollers fighting getUpdates
+// (perpetual 409) that each mint duplicate forum topics. Refuse + exit cleanly on a confirmed live
+// holder (our watchdog probes the same lock and won't respawn-loop us); fail open otherwise.
+{
+  const lock = await acquireTokenLock(TOKEN, STATE_DIR)
+  if (!lock.ok) {
+    process.stderr.write(
+      `daemon: this bot is already bridged by pid ${lock.holder.pid ?? '?'} (state dir ${lock.holder.stateDir ?? '?'}); ` +
+      `refusing to start a second poller for the same token — one token = one daemon.\n`,
+    )
+    process.exit(0)
+  }
+}
+
 // ---- Access control ----
 // The gate / pairing / allowlist logic lives in access.ts (imported above). These consts + the
 // send-path guards below stay here because they're used by the daemon's outbound/chunking paths,
@@ -238,6 +256,7 @@ let botUsername = ''
 // access.ts's isMentioned needs the live bot username (set after the daemon connects).
 initAccess({ getBotUsername: () => botUsername })
 initAccounts(STATE_DIR)
+healMainStatusline()   // ensure THIS HOME's statusline (script + block) from the cache — fixes a fresh/hermes HOME + refreshes a stale script
 healAccountConfigs()   // accounts registered before main settings.json had hooks get them now
 
 // ---- Typing presence ----
@@ -8466,8 +8485,10 @@ void (async () => {
       if (shuttingDown) return
       if (err instanceof Error && err.message === 'Aborted delay') return
       if (err instanceof GrammyError && err.error_code === 409) {
-        // Another process holds the token — keep retrying, don't exit.
-        process.stderr.write(`daemon: 409 Conflict (another poller holds the token), retrying in 5s\n`)
+        // We already hold the token lock, so this is NOT a second claude-tg daemon — a 409 here means
+        // an external getUpdates consumer or a webhook owns the token. Keep retrying (patient wait); if
+        // it persists, check getWebhookInfo / for another bot process bound to this token.
+        process.stderr.write(`daemon: 409 Conflict — an external poller or a webhook holds this token; retrying in 5s\n`)
         await new Promise(r => setTimeout(r, 5000))
       } else {
         networkErrors++
