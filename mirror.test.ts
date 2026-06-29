@@ -61,13 +61,14 @@ test('renderActionsMirror pluralizes a single step correctly', () => {
   expect(renderActionsMirror([t('Bash', 'ls')], true)).toContain('1 step')
 })
 
-test('renderThoughtsMirror leads with 💭, folds tools into a summary, appends Done', () => {
+test('renderThoughtsMirror wraps thoughts in a blockquote, folds tools into a summary, appends Done', () => {
   const feed: FeedItem[] = [
     { kind: 'text', text: 'thinking hard' },
     { kind: 'tool', tool: 'Bash', detail: 'ls' },
   ]
   const out = renderThoughtsMirror(feed, true)
-  expect(out.startsWith('<blockquote>💭')).toBe(true)   // thoughts render shaded in a blockquote
+  expect(out.startsWith('<blockquote>')).toBe(true)   // thoughts render shaded in a blockquote
+  expect(out).not.toContain('💭')
   expect(out).toContain('thinking hard')
   expect(out).toContain('Ran 1 shell command')   // the tool call folds into the aggregate line
   expect(out).not.toContain('Bash')

@@ -262,13 +262,13 @@ export function renderThoughtsMirror(feed: FeedItem[], done: boolean): string {
   }
   flushRun()
   // Window to the latest few blocks, then merge ADJACENT thought paragraphs into one shaded
-  // blockquote (💭 leads it) with the summary lines sitting between the quotes. The quote bar is
+  // blockquote with the summary lines sitting between the quotes. The quote bar is
   // the strongest clean, group-safe distinguisher Telegram gives — plain text / monospace both
   // read worse (monospace also wraps off-screen with no copy button under rich messages).
   const render = (win: Block[]): string => {
     const out: string[] = []
     let quote: string[] = []
-    const flushQuote = () => { if (quote.length) { out.push(`<blockquote>💭 ${quote.join('\n\n')}</blockquote>`); quote = [] } }
+    const flushQuote = () => { if (quote.length) { out.push(`<blockquote>${quote.join('\n\n')}</blockquote>`); quote = [] } }
     for (const b of win) { if (b.thought) quote.push(b.html); else { flushQuote(); out.push(b.html) } }
     flushQuote()
     return out.join('\n')
