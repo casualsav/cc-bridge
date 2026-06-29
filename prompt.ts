@@ -95,11 +95,28 @@ const BELOW_CHROME = new RegExp(
   ].map(r => r.source).join('|'),
   'i',
 )
+// Claude Code's persistent todo panel renders DIRECTLY BELOW an active prompt's footer —
+// a "N tasks (M done, K open)" header followed by ◻/✔/◼ task rows and a "… +N completed"
+// tail. It is live chrome, not a later turn's output, but the contentBelow guard counted
+// those rows as "new content" and dropped every AskUserQuestion that had a todo list open
+// (the user's inbound then bounced as an "unrecognised screen"). Anchored on the header,
+// whose "(N done" shape appears nowhere else; once seen, it and everything under it is the
+// panel. A genuinely scrolled-up past prompt always has real content ABOVE this header, so
+// that content is still counted before the loop reaches it — the veto is preserved.
+const TODO_PANEL_HEADER = /^\s*\d+ tasks?\s*\(\d+\s*done/i
+// The right-hand preview column AskUserQuestion now draws beside the option list (a box of
+// the artifact being chosen). It bleeds into option-line and description-line capture as a
+// run of ≥2 spaces then box-drawing / ✂ chars to end of line; strip it so labels read clean.
+const PREVIEW_COL = /\s{2,}[┌┐└┘├┤┬┴┼│─╭╮╰╯╶╴╵╷┄┈┊✂].*$/
 // The two meta-options AskUserQuestion auto-appends below the real choices: a
 // free-text entry and a "chat instead" escape hatch. Matched on their exact
 // labels (a trailing period is rendered on the free-text one).
 const FREE_TEXT_LABEL = /^type something\.?$/i
 const CHAT_LABEL = /^chat about this\.?$/i
+// The free-text affordance's inline hint ("Notes: press n to add notes") sits between the
+// last real option and the footer. It is chrome, not a description — without this it gets
+// glued onto the final option's description.
+const NOTES_HINT = /press \S+ to add notes/i
 // An option's wrapped description: deeper indentation than the option line itself,
 // tolerating one leading box border. The normal in-box prefix is "│ " (one space),
 // so a description needs ≥2 spaces after the optional border to qualify.
@@ -138,7 +155,7 @@ function findQuestionAbove(relevant: string[], start: number): string {
 function attachDescription(options: PromptOption[], text: string): void {
   const last = options[options.length - 1]
   if (!last) return
-  const clean = text.replace(/^[\s│]*/, '').replace(/[\s│]*$/, '').trim()
+  const clean = text.replace(PREVIEW_COL, '').replace(/^[\s│]*/, '').replace(/[\s│]*$/, '').trim()
   if (!clean) return
   last.description = last.description ? `${last.description} ${clean}` : clean
 }
@@ -153,10 +170,16 @@ function parseOptions(region: string[], re: RegExp): PromptOption[] | null {
   for (const line of region) {
     const m = line.match(re)
     if (m) {
-      options.push({ label: (m[2] ?? m[1]).replace(/\s*│\s*$/, '').trim().replace(LEADING_BOX, '').trim() })
+      options.push({ label: (m[2] ?? m[1]).replace(PREVIEW_COL, '').replace(/\s*│\s*$/, '').trim().replace(LEADING_BOX, '').trim() })
     } else if (options.length > 0) {
       if (line.trim() === '') continue          // blank gap between options
       if (BOXY_LINE.test(line)) continue        // divider / border between options
+      if (NOTES_HINT.test(line)) continue       // "press n to add notes" chrome, not a description
+      // The free-text / "Chat about this" meta-options sometimes render UNnumbered (no digit, no
+      // ink marker) — a bare indented label below the divider. Capture them as options so the
+      // meta-split sets freeText/chat, instead of letting INDENTED swallow them as a description.
+      const bare = line.replace(PREVIEW_COL, '').replace(/^[\s│]*/, '').replace(/[\s│]*$/, '').trim()
+      if (FREE_TEXT_LABEL.test(bare) || CHAT_LABEL.test(bare)) { options.push({ label: bare }); continue }
       if (INDENTED.test(line)) { attachDescription(options, line); continue }
       break                                      // a real non-option line ends the block
     }
@@ -210,6 +233,7 @@ export function detectUserPrompt(paneText: string): PromptInfo | null {
   let contentBelow = 0
   for (let i = footerIdx + 1; i < lines.length; i++) {
     const l = lines[i]
+    if (TODO_PANEL_HEADER.test(l)) break   // todo panel + everything under it is live chrome (see const)
     if (!l.trim() || BELOW_CHROME.test(l)) continue
     contentBelow++
   }

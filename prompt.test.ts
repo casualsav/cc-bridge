@@ -99,6 +99,50 @@ test('detectUserPrompt rejects a scrolled-up past prompt with new content below'
   expect(detectUserPrompt(pane)).toBeNull()
 })
 
+test('detectUserPrompt relays an AskUserQuestion with the todo panel rendered below its footer', () => {
+  // Claude Code now draws its persistent "N tasks (…)" todo panel directly beneath the prompt
+  // footer; those rows were counted as new content and the whole prompt was dropped (inbound
+  // bounced as an "unrecognised screen"). The panel must be treated as live chrome.
+  const pane = [
+    'How do you want me to surface it?',
+    '  1. Expose context',
+    '  2. Core-side store (strict)',
+    '  3. Defer it',
+    'Enter to select · ↑/↓ to navigate · n to add notes · Esc to cancel',
+    '',
+    '  9 tasks (8 done, 1 open)',
+    '  ◻ Approval memo field (contract + Core proxy) — PR',
+    '  ✔ Foundation: dashboard data hooks + pure selectors',
+    '   … +4 completed',
+  ].join('\n')
+  const p = detectUserPrompt(pane)
+  expect(p).not.toBeNull()
+  expect(p!.question).toBe('How do you want me to surface it?')
+  expect(p!.options.map(o => o.label)).toEqual(['Expose context', 'Core-side store (strict)', 'Defer it'])
+})
+
+test('detectUserPrompt strips the side-by-side preview column and picks up an unnumbered Chat-about-this', () => {
+  // The preview box drawn to the right of the option list bleeds into label/description capture,
+  // and the meta-options can render unnumbered below the divider. Labels must come out clean and
+  // the bare "Chat about this" must set chat (not glue onto the last option's description).
+  const pane = [
+    ' How do you want me to surface it?',
+    ' 1. Expose context                ┌──────────────────────────────┐',
+    '   (recommended)                  │ BrokerRequest:               │',
+    '  2. Core-side store (strict)     │   context: { ... }           │',
+    '  3. Defer it                     └──────────────────────────────┘',
+    '                                  Notes: press n to add notes',
+    '  Chat about this',
+    'Enter to select · ↑/↓ to navigate · n to add notes · Esc to cancel',
+  ].join('\n')
+  const p = detectUserPrompt(pane)
+  expect(p).not.toBeNull()
+  expect(p!.options.map(o => o.label)).toEqual(['Expose context', 'Core-side store (strict)', 'Defer it'])
+  expect(p!.options[0].description).toBe('(recommended)')
+  expect(p!.options[2].description).toBeUndefined()
+  expect(p!.chat).toBe(true)
+})
+
 test('isSubmitScreen matches the review/submit tab only', () => {
   expect(isSubmitScreen('  Ready to submit your answers?  ')).toBe(true)
   expect(isSubmitScreen('some other screen')).toBe(false)
