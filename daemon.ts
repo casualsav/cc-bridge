@@ -340,8 +340,12 @@ async function verifyPromptClosed(paneId: string | null = focus.activePaneId): P
 // footer so "theme" in ordinary output can't trigger it; trust/enter are distinctive enough alone.
 function classifyOnboarding(cap: string): 'theme' | 'trust' | 'enter' | null {
   const low = cap.toLowerCase()
-  const isSelect = /enter to select|↑\/↓|to navigate/.test(low)
+  const isSelect = /enter to select|enter to confirm|↑\/↓|to navigate/.test(low)
   if (/do you trust|trust the files|trust this folder/.test(low)) return 'trust'
+  // Onboarding theme picker. Newer Claude Code replaces the select footer with a live syntax
+  // preview, so match its distinctive prompt directly (specific enough not to fire on ordinary
+  // output); keep the older footer-gated form too.
+  if (/choose the text style|text style that looks best|to change this later, run \/theme/.test(low)) return 'theme'
   if (isSelect && /(text style|dark mode|light mode|color theme|choose .*theme)/.test(low)) return 'theme'
   if (/press enter to continue|enter to continue/.test(low)) return 'enter'
   return null
