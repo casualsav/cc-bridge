@@ -36,6 +36,10 @@ async function paneForCwd(cwd: string): Promise<string | null> {
 // The cache also remembers ids for panes that have DIED — that's how close-on-end finds the topic.
 const SESSION_PANE_OPT = '@tg_session'
 const paneSessionCache = new Map<string, string>()   // paneId → sessionId (kept after pane death)
+// In-flight mint per pane: two callers hitting the same UNSTAMPED pane concurrently would each
+// miss the cache, read an empty stamp, and mint a DISTINCT id — spawning duplicate topics (the
+// ensureSessionTopic guard is sid-keyed, so it can't dedup two different mints). Pane-keyed here.
+const sessionMintInFlight = new Map<string, Promise<string | null>>()
 
 // Stamp a pane with a known sessionId (tmux option + cache) — used when a pane is spawned for a
 // pre-bound topic, so discovery resolves it straight to that topic instead of minting a fresh id.
@@ -70,25 +74,36 @@ export async function sessionForPane(pane: string, stampIfMissing = true): Promi
     if (stamped) { paneSessionCache.set(pane, stamped); return stamped }
   } catch { return null }   // pane gone — only the cache could answer, and it didn't
   if (!stampIfMissing) return null
-  const cwd = await paneCwd(pane).catch(() => null)
-  const cand = cwd ? findTopicByCwd(cwd) : undefined
-  // Is cand's session still held by ANOTHER pane? paneSessionCache deliberately keeps entries for
-  // DEAD panes (close-on-end needs them), so a plain .some() false-positives on a stale dead holder:
-  // a fresh pane in a cwd whose only topic is closed would be denied adoption, mint a new id, and
-  // ensureTopicFor would spawn a BRAND-NEW topic instead of reviving the closed one. Count only a
-  // LIVE holder as a claim, and evict dead holders so they never block adoption again.
-  let claimed = false
-  if (cand) {
-    for (const [p, s] of [...paneSessionCache.entries()]) {
-      if (s !== cand.sessionId || p === pane) continue
-      if (await paneAlive(p)) { claimed = true; break }
-      releasePaneSession(p)   // dead holder — forget it so the closed topic can be revived
+  // Serialize minting per pane: concurrent callers share one mint+stamp instead of each minting a
+  // distinct id (which spawns duplicate topics). A late caller that missed the in-flight entry
+  // re-checks the cache inside the closure, covering the resolve→delete window.
+  const pending = sessionMintInFlight.get(pane)
+  if (pending) return pending
+  const minting = (async () => {
+    const cached = paneSessionCache.get(pane)
+    if (cached) return cached   // an in-flight mint just stamped+cached this pane
+    const cwd = await paneCwd(pane).catch(() => null)
+    const cand = cwd ? findTopicByCwd(cwd) : undefined
+    // Is cand's session still held by ANOTHER pane? paneSessionCache deliberately keeps entries for
+    // DEAD panes (close-on-end needs them), so a plain .some() false-positives on a stale dead holder:
+    // a fresh pane in a cwd whose only topic is closed would be denied adoption, mint a new id, and
+    // ensureTopicFor would spawn a BRAND-NEW topic instead of reviving the closed one. Count only a
+    // LIVE holder as a claim, and evict dead holders so they never block adoption again.
+    let claimed = false
+    if (cand) {
+      for (const [p, s] of [...paneSessionCache.entries()]) {
+        if (s !== cand.sessionId || p === pane) continue
+        if (await paneAlive(p)) { claimed = true; break }
+        releasePaneSession(p)   // dead holder — forget it so the closed topic can be revived
+      }
     }
-  }
-  const sid = cand && !claimed ? cand.sessionId : genSessionId()
-  try { await exec('tmux', ['set-option', '-p', '-t', pane, SESSION_PANE_OPT, sid], { timeout: 2000 }) } catch { return null }
-  paneSessionCache.set(pane, sid)
-  return sid
+    const sid = cand && !claimed ? cand.sessionId : genSessionId()
+    try { await exec('tmux', ['set-option', '-p', '-t', pane, SESSION_PANE_OPT, sid], { timeout: 2000 }) } catch { return null }
+    paneSessionCache.set(pane, sid)
+    return sid
+  })()
+  sessionMintInFlight.set(pane, minting)
+  try { return await minting } finally { sessionMintInFlight.delete(pane) }
 }
 
 // The live pane carrying `sessionId` — cache first, then the live panes' stamps (covers a daemon
