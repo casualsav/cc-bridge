@@ -7043,11 +7043,18 @@ bot.on('callback_query:data', async ctx => {
       return
     }
     await withPaneInjection(pane, async () => { await navigateDown(pane, idx); await sendKeys(pane, ['Enter']); await waitForSettle(pane, 300, 8000) })
-    await ctx.reply('✅ Resuming — restoring its previous mode/effort, and any message you sent meanwhile will be delivered once it\'s back.').catch(() => {})
+    const progressMsg = await ctx.reply('⏳ Resuming — restoring its previous mode/effort, and any message you sent meanwhile will be delivered once it\'s back.').catch(() => null)
     // Claude Code resumes at DEFAULT mode + the model-default effort, so re-assert the session's own
     // last-known dials once it reaches the REPL, THEN deliver anything held while the picker was up.
+    // Once it's actually back, self-edit the ⏳ notice into a ✅ confirmation.
     const watcher = pane === focus.activePaneId ? focus.paneWatcher : null
-    void (async () => { await restoreResumedDials(pane, watcher); await flushEditorHeld(pane) })()
+    void (async () => {
+      await restoreResumedDials(pane, watcher)
+      await flushEditorHeld(pane)
+      if (progressMsg && await paneAlive(pane).catch(() => false))
+        await bot.api.editMessageText(progressMsg.chat.id, progressMsg.message_id,
+          '✅ Resumed — restored its previous mode/effort. Anything you sent meanwhile has been delivered.').catch(() => {})
+    })()
     return
   }
 
