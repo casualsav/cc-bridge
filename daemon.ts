@@ -699,7 +699,11 @@ async function restoreResumedDials(paneId: string, watcher: PaneWatcher | null):
     ready = onNormalPrompt(await capturePane(paneId).catch(() => ''))
   }
   if (!ready) return
-  const sid = await sessionForPane(paneId, false).catch(() => null)
+  // Resolve WITH adoption (not the read-only probe): a freshly resumed pane may not be stamped yet
+  // when this runs (discovery hasn't ticked), and the read-only probe would return null → the
+  // session's remembered effort/mode is lost to the default. Adopting resolves it to the cwd's topic
+  // sid, so e.g. a max-effort session comes back at max instead of the standing default.
+  const sid = await sessionForPane(paneId).catch(() => null)
   const mode = (sid ? sessionModes.get(sid) : null) ?? lastFocusedMode
   const effort = (sid ? sessionEfforts.get(sid) : null) ?? fallbackEffort()
   if (mode !== 'default') await switchToMode(paneId, mode, watcher)
@@ -5464,8 +5468,13 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
     // values (topic revivals pass its sid); fall back to the persisted preferences for sid-less
     // resumes (DM /resume). The launch flags re-assert effort; a non-bypass mode is set post-REPL.
     if (!inherit && /(?:^|\s)(?:--resume|-c)\b/.test(extra)) {
-      const mode = (presetSessionId ? sessionModes.get(presetSessionId) : null) ?? lastFocusedMode
-      const effort = (presetSessionId ? sessionEfforts.get(presetSessionId) : null) ?? fallbackEffort()
+      // Prefer the session's OWN remembered dials. presetSessionId is the topic's sid when the
+      // caller knew it; otherwise fall back to the cwd's parked topic (a /resume that didn't resolve
+      // a preset still has one for this dir) so the resumed session keeps its effort/mode instead of
+      // dropping to the standing default.
+      const prefSid = presetSessionId ?? findTopicByCwd(dir)?.sessionId
+      const mode = (prefSid ? sessionModes.get(prefSid) : null) ?? lastFocusedMode
+      const effort = (prefSid ? sessionEfforts.get(prefSid) : null) ?? fallbackEffort()
       if (mode !== 'default' || effort) inherit = { model: null, effort, mode }
     }
     let target: string[] = []
