@@ -27,7 +27,7 @@ let deps: PromptRelayDeps
 export function initPromptRelay(d: PromptRelayDeps): void { deps = d }
 
 // Render a prompt as Telegram HTML: bold question, then each numbered option with
-// its description (if any) as a blockquote beneath it.
+// its description (if any) as plain italic text beneath it (no blockquote).
 export function renderPromptHtml(prompt: PromptInfo): string {
   const lines = [`❓ <b>${escapeHtml(prompt.question)}</b>`]
   if (prompt.tabbed) lines.push('<i>One of several questions — answer this one to move to the next.</i>')
@@ -35,7 +35,7 @@ export function renderPromptHtml(prompt: PromptInfo): string {
   lines.push('')
   prompt.options.forEach((opt, i) => {
     lines.push(`<b>${i + 1}.</b> ${escapeHtml(opt.label)}`)
-    if (opt.description) lines.push(`<blockquote>${escapeHtml(opt.description)}</blockquote>`)
+    if (opt.description) lines.push(`<i>${escapeHtml(opt.description)}</i>`)
   })
   // The "Type something" button only rides on the single-select keyboard; multi-select
   // shows checkboxes + Submit (no free-text button), so don't advertise it there.

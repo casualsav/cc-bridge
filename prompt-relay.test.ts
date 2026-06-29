@@ -1,14 +1,15 @@
 import { test, expect } from 'bun:test'
 import { renderPromptHtml, permButtonLabel, singleAnswerKeyboard, permStorms } from './prompt-relay.ts'
 
-test('renderPromptHtml: question bold, options numbered, descriptions quoted', () => {
+test('renderPromptHtml: question bold, options numbered, descriptions italic (not quoted)', () => {
   const html = renderPromptHtml({
     question: 'Pick one', options: [{ label: 'A' }, { label: 'B', description: 'second' }],
     multiSelect: false, tabbed: false, freeText: false, chat: false,
   } as never)
   expect(html).toContain('<b>Pick one</b>')
   expect(html).toContain('1.')
-  expect(html).toContain('<blockquote>second</blockquote>')
+  expect(html).toContain('<i>second</i>')
+  expect(html).not.toContain('<blockquote>')
 })
 
 test('permButtonLabel: icons by intent, hints stripped, capped', () => {
