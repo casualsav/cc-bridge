@@ -4526,7 +4526,7 @@ bot.command(['terminal', 't'], async ctx => {   // /t = hidden short alias (kept
   const t = await commandTarget(ctx)
   if (!t) return
   const arg = parseInt((ctx.match ?? '').toString().trim(), 10)
-  const n = Number.isFinite(arg) ? Math.max(5, Math.min(arg, 200)) : 20
+  const n = Number.isFinite(arg) ? Math.max(5, Math.min(arg, 200)) : 30
   const chat = String(ctx.chat!.id)
   const limit = Math.max(1, Math.min(loadAccess().textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT))
 
@@ -5557,7 +5557,8 @@ bot.command('resume', async ctx => {
     const who = acct.name === 'main' ? '' : ` · 👤 ${escapeHtml(acct.name)}`
     const title = s.title ? ` — <i>${escapeHtml(s.title)}</i>` : ''
     kb.text(`${i + 1}`, inTopic ? `resumehere:${s.sessionId}:${thread}` : `resume:${s.sessionId}`)
-    if ((i + 1) % 5 === 0) kb.row()
+    // Row layout: the latest session alone on row 1, then 3 per row (2-4, 5-7, 8-10).
+    if (i === 0 || (i - 1) % 3 === 2) kb.row()
     return `${i + 1}. <b>${escapeHtml(folder)}</b> · ${fmtAgo(s.mtime)}${who}${title}`
   })
   await ctx.reply(
