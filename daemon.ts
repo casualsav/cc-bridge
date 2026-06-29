@@ -5475,9 +5475,13 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
     }
     // The adopt marker is a tmux pane option set below — NOT a claude flag. We keep
     // --allow-dangerously-skip-permissions purely for the bypass-on-demand UX (switchable from
-    // /mode), which is unrelated to adoption. extra e.g. "--resume <id>". An alt account pins
-    // the session to its config dir (tmux runs the command through sh -c, so the env prefix works).
-    const envPrefix = account.name === 'main' ? '' : `CLAUDE_CONFIG_DIR='${account.configDir.replace(/'/g, `'\\''`)}' `
+    // /mode), which is unrelated to adoption. extra e.g. "--resume <id>". ALWAYS pin the session to
+    // its account's config dir — including main — so a bridge spawn runs under the SAME config the
+    // daemon lists/reads sessions from. Critical when the daemon's home differs from the launching
+    // shell's (e.g. a remapped HOME): otherwise a --resume can't find a transcript the daemon just
+    // listed, and lands a fresh session instead. On a normal install configDir == the default
+    // ~/.claude, so this is a no-op there. tmux runs the command through sh -c, so the prefix works.
+    const envPrefix = `CLAUDE_CONFIG_DIR='${account.configDir.replace(/'/g, `'\\''`)}' `
     // Set the inherited model + effort as LAUNCH FLAGS so the session boots already correct — no
     // typing /model + /effort into a freshly-booting pane (that post-boot injection was the 10-20s
     // slow-spawn lag and it raced the user's first keystrokes). Claude Code restores neither on
