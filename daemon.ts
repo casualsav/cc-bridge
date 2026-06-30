@@ -4158,7 +4158,7 @@ bot.command(['bind', 'unbind'], async ctx => {
   const arg = (ctx.match ?? '').toString().trim().toLowerCase()
   const unbinding = ctx.message?.text?.startsWith('/unbind') || arg === 'off'
   if (unbinding) {
-    if (getGroupChatId() === groupId) { setGroupChatId(null); setGeneralSession(null) }   // General keeps its "Claude" name
+    if (getGroupChatId() === groupId) { setGroupChatId(null); setGeneralSession(null) }   // leave General's topic name untouched
     await ctx.reply('🔓 Unbound. This group is no longer the command center; per-session topics are off.')
     return
   }
@@ -4181,7 +4181,6 @@ bot.command(['bind', 'unbind'], async ctx => {
     const sid = await sessionForPane(focus.activePaneId)
     if (sid && !getTopicBySession(sid)) {
       setGeneralSession(sid)
-      await bot.api.editGeneralForumTopic(Number(groupId), 'Claude').catch(() => {})   // needs can_manage_topics; cosmetic, so best-effort
       anchorNote = 'Your current session is anchored to this <b>General</b> topic — it stays here. '
     }
   }
@@ -4214,7 +4213,6 @@ async function claimGeneralForFocused(): Promise<string> {
     updateTopic(sid, { closed: true })
   }
   setGeneralSession(sid)
-  await bot.api.editGeneralForumTopic(Number(group), 'Claude').catch(() => {})
   void updateSessionPin()
   const cwd = await paneCwd(focus.activePaneId).catch(() => null)
   return `📌 <b>Anchored to General:</b> the focused session${cwd ? ` (<code>${escapeHtml(cwd)}</code>)` : ''} now lives here.`
@@ -6752,7 +6750,6 @@ bot.on('callback_query:data', async ctx => {
     setGeneralSession(sid)
     const ok = await spawnSession(dir, '', sid)
     if (!ok) setGeneralSession(null)
-    else void bot.api.editGeneralForumTopic(Number(getGroupChatId()), 'Claude').catch(() => {})
     await ctx.editMessageText(ok
       ? `🚀 Starting the base session in <code>${escapeHtml(dir)}</code> — it lives here in General.`
       : `❌ Couldn't start a session in <code>${escapeHtml(dir)}</code>.`, { parse_mode: 'HTML' }).catch(() => {})
@@ -7882,7 +7879,6 @@ bot.on('message:text', async ctx => {
           if (anchor) setGeneralSession(sid)
           const ok = await spawnSession(dir, '', sid, await paneAccount(focus.activePaneId))
           if (anchor && !ok) setGeneralSession(null)
-          if (anchor && ok) void bot.api.editGeneralForumTopic(Number(getGroupChatId()), 'Claude').catch(() => {})
           await ctx.reply(ok
             ? `🚀 Starting a session in <code>${escapeHtml(dir)}</code>${created ? ' (📁 created it for you)' : ''} — ${anchor ? 'it lives here in General.' : 'it gets its own topic shortly.'}`
             : `❌ Couldn't start a session in <code>${escapeHtml(dir)}</code>.`, { parse_mode: 'HTML' })
