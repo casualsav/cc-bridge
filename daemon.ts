@@ -5786,7 +5786,33 @@ bot.command('back', async ctx => {
 // session falls straight to the folder prompt. Topics the bot creates don't produce updates for
 // the bot (own-message filter as belt-and-braces), so this only fires for human-made tabs.
 // Non-allowlisted creators are ignored — the group policy governs.
-const topicCreatePending = new Map<number, { name: string; dir: string; repo?: string }>()   // threadId → the card's offer (repo set when a 🌿 worktree is on offer)
+const topicCreatePending = new Map<number, { name: string; dir: string; repo?: string }>()   // threadId → the card's offer (repo set when a 🌿 worktree / 🌱 branch is on offer)
+
+// The repo a folder belongs to, if any. Walks to the nearest existing ancestor first — the target
+// dir is often a not-yet-created subfolder — then asks git for its toplevel. One cheap deterministic
+// call (no agentic anything): this is what gates the 🌿 worktree / 🌱 branch offers, keyed on the
+// TARGET folder rather than whatever session happens to be focused. Non-repo → null (plain folder).
+async function repoForDir(dir: string): Promise<string | null> {
+  let d = dir
+  while (d && d !== dirname(d) && !existsSync(d)) d = dirname(d)
+  if (!existsSync(d)) return null
+  try { return (await exec('git', ['-C', d, 'rev-parse', '--show-toplevel'], { timeout: 2000 })).stdout.trim() || null }
+  catch { return null }
+}
+
+// The new-topic "where should its session run?" card. 📁 plain folder always; 🌿 worktree + 🌱
+// in-place branch only when the folder resolves into a repo (branched off its HEAD). Shared by the
+// forum-topic-created event AND the typed-folder reply, so a typed repo path gets the same offer.
+function topicCreateKeyboard(thread: number, dir: string, repo: string | null): InlineKeyboard {
+  const label = dir.length > 48 ? `…${dir.slice(-47)}` : dir
+  const kb = new InlineKeyboard().text(`📁 ${label}`, `tcgo:${thread}`).row()
+  if (repo) {
+    kb.text(`🌿 Worktree of ${basename(repo)}`, `tcwt:${thread}`).row()
+    kb.text(`🌱 New branch in ${basename(repo)}`, `tcbr:${thread}`).row()
+  }
+  kb.text('✏️ Specify folder', `tcask:${thread}`)
+  return kb
+}
 bot.on('message:forum_topic_created', async ctx => {
   if (!isTopicMode() || String(ctx.chat.id) !== getGroupChatId()) return
   if (ctx.from?.id === ctx.me.id) return
@@ -5799,18 +5825,14 @@ bot.on('message:forum_topic_created', async ctx => {
   const dirName = name.trim().toLowerCase().replace(/[\\/\0\s]+/g, '-')   // "My App" → my-app/ (unix-style folder names)
   const dir = base && dirName ? join(base, dirName) : null
   if (dir && base) {
-    // When the anchor cwd is a git repo, offer a 🌿 worktree too: same repo, isolated working
-    // tree at <repoParent>/<repo>-wt/<name> — parallel sessions on one repo without collisions.
-    let repo: string | undefined
-    try { repo = (await exec('git', ['-C', base, 'rev-parse', '--show-toplevel'], { timeout: 2000 })).stdout.trim() || undefined } catch {}
-    topicCreatePending.set(thread, { name, dir, repo })
-    const label = dir.length > 48 ? `…${dir.slice(-47)}` : dir
-    const kb = new InlineKeyboard().text(`📁 ${label}`, `tcgo:${thread}`).row()
-    if (repo) kb.text(`🌿 Worktree of ${basename(repo)}`, `tcwt:${thread}`).row()
-    kb.text('✏️ Specify folder', `tcask:${thread}`)
+    // Offer 🌿 worktree / 🌱 branch whenever the TARGET folder resolves into a repo (not just when
+    // the focused cwd is one) — branched off the repo's HEAD. repoForDir walks up from the (usually
+    // not-yet-created) <base>/<name> subfolder to its nearest existing ancestor to find the repo.
+    const repo = await repoForDir(dir)
+    topicCreatePending.set(thread, { name, dir, repo: repo ?? undefined })
     const sent = await ctx.reply(
       `📂 <b>New topic “${escapeHtml(name)}”</b> — where should its Claude session run?`,
-      { parse_mode: 'HTML', reply_markup: kb },
+      { parse_mode: 'HTML', reply_markup: topicCreateKeyboard(thread, dir, repo) },
     ).catch(() => null)
     if (sent) return
   }
@@ -6868,8 +6890,9 @@ bot.on('callback_query:data', async ctx => {
 
   // "➕ Add" on the /schedule dashboard → force-reply asking for "time message" in one line,
   // parsed (split + queued) when the reply lands. Captures the current session as the target.
-  // New-topic folder card: tcgo = spawn in the offered <cwd>/<name>; tcask = force-reply prompt.
-  const tcMatch = /^tc(go|ask|wt):(\d+)$/.exec(data)
+  // New-topic folder card: tcgo = spawn in the offered <cwd>/<name>; tcwt = worktree; tcbr =
+  // in-place branch; tcask = force-reply prompt.
+  const tcMatch = /^tc(go|ask|wt|br):(\d+)$/.exec(data)
   if (tcMatch) {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
@@ -6905,26 +6928,41 @@ bot.on('callback_query:data', async ctx => {
         return
       }
     }
-    // 🌿 Worktree: carve an isolated working tree off the anchor repo and run the session there.
-    // Branch tg/<name> from the repo's current HEAD; falls back to checking out an existing
-    // tg/<name> (e.g. a previous topic of the same name whose worktree was removed).
+    // 🌿 Worktree / 🌱 in-place branch — both fork tg/<slug> off the repo's current HEAD, falling
+    // back to checking out an existing tg/<slug> (e.g. a prior topic of the same name). Worktree
+    // carves an isolated tree at <repo>-wt/<slug> (parallel sessions, no collisions); in-place
+    // checks the branch out in the existing checkout and runs there — no second dir, but it moves
+    // that checkout's branch (so anything else live in it shifts too; that's the trade-off).
+    const slug = basename(pending.dir)
     let spawnDir = pending.dir
     let worktree: { repo: string; path: string } | undefined
+    let branchedInPlace = false
     if (tcMatch[1] === 'wt') {
       const repo = pending.repo
-      const wtName = basename(pending.dir)
       if (!repo) { await ctx.editMessageText('❌ Worktree offer expired — create the topic again.').catch(() => {}); return }
-      const wtPath = join(dirname(repo), `${basename(repo)}-wt`, wtName)
+      const wtPath = join(dirname(repo), `${basename(repo)}-wt`, slug)
       try {
         mkdirSync(dirname(wtPath), { recursive: true })
-        try { await exec('git', ['-C', repo, 'worktree', 'add', wtPath, '-b', `tg/${wtName}`], { timeout: 15000 }) }
-        catch { await exec('git', ['-C', repo, 'worktree', 'add', wtPath, `tg/${wtName}`], { timeout: 15000 }) }
+        try { await exec('git', ['-C', repo, 'worktree', 'add', wtPath, '-b', `tg/${slug}`], { timeout: 15000 }) }
+        catch { await exec('git', ['-C', repo, 'worktree', 'add', wtPath, `tg/${slug}`], { timeout: 15000 }) }
       } catch (e) {
         await ctx.editMessageText(`❌ Couldn't create the worktree: <code>${escapeHtml(String((e as Error)?.message ?? e).slice(0, 200))}</code>`, { parse_mode: 'HTML' }).catch(() => {})
         return
       }
       spawnDir = wtPath
       worktree = { repo, path: wtPath }
+    } else if (tcMatch[1] === 'br') {
+      const repo = pending.repo
+      if (!repo) { await ctx.editMessageText('❌ Branch offer expired — create the topic again.').catch(() => {}); return }
+      try {
+        try { await exec('git', ['-C', repo, 'checkout', '-b', `tg/${slug}`], { timeout: 15000 }) }
+        catch { await exec('git', ['-C', repo, 'checkout', `tg/${slug}`], { timeout: 15000 }) }
+      } catch (e) {
+        await ctx.editMessageText(`❌ Couldn't switch <code>${escapeHtml(basename(repo))}</code> to <code>tg/${escapeHtml(slug)}</code>: <code>${escapeHtml(String((e as Error)?.message ?? e).slice(0, 160))}</code>`, { parse_mode: 'HTML' }).catch(() => {})
+        return
+      }
+      spawnDir = repo
+      branchedInPlace = true
     }
     const sid = genSessionId()
     setTopic(sid, { threadId: thread, cwd: spawnDir, name: pending.name || basename(spawnDir), closed: false, createdAt: Date.now(), ...(worktree ? { worktree } : {}) })
@@ -6934,8 +6972,11 @@ bot.on('callback_query:data', async ctx => {
     catch { topicBranchCache.set(sid, '') }
     const ok = await spawnSession(spawnDir, '', sid)
     if (!ok) removeTopic(sid)
+    const detail = worktree ? ` (🌿 worktree on <code>tg/${escapeHtml(slug)}</code>)`
+      : branchedInPlace ? ` (🌱 on new branch <code>tg/${escapeHtml(slug)}</code>)`
+      : created ? ' (📁 created it for you)' : ''
     await ctx.editMessageText(ok
-      ? `🚀 Starting this topic's session in <code>${escapeHtml(spawnDir)}</code>${worktree ? ` (🌿 worktree on <code>tg/${escapeHtml(basename(spawnDir))}</code>)` : created ? ' (📁 created it for you)' : ''} — type here to drive it once it's up.`
+      ? `🚀 Starting this topic's session in <code>${escapeHtml(spawnDir)}</code>${detail} — type here to drive it once it's up.`
       : `❌ Couldn't start a session in <code>${escapeHtml(spawnDir)}</code>.`,
       { parse_mode: 'HTML' }).catch(() => {})
     return
@@ -7706,6 +7747,18 @@ bot.on('message:text', async ctx => {
         // doesn't create a duplicate topic for the new pane.
         case 'topiccreate': {
           const dir = await resolveNewSessionDir(text)
+          // Typed a folder that resolves into a repo? Offer the same 🌿/🌱 choices instead of
+          // spawning plain — the broadened trigger keys on the target folder, not what's focused.
+          const repo = await repoForDir(dir)
+          if (repo) {
+            topicCreatePending.set(target.threadId, { name: target.name, dir, repo })
+            await ctx.api.deleteMessage(ctx.chat!.id, replyTo.message_id).catch(() => {})   // disarm the force-reply
+            await ctx.reply(
+              `📂 <code>${escapeHtml(dir)}</code> is inside <code>${escapeHtml(basename(repo))}</code> — how should “${escapeHtml(target.name || basename(dir))}” run?`,
+              { parse_mode: 'HTML', reply_markup: topicCreateKeyboard(target.threadId, dir, repo) },
+            ).catch(() => {})
+            return
+          }
           let created = false
           if (!existsSync(dir)) {
             try { mkdirSync(dir, { recursive: true }); created = true }
