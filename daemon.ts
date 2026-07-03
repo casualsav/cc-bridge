@@ -5921,6 +5921,7 @@ bot.on('message:forum_topic_closed', async ctx => {
   const thread = ctx.message.message_thread_id
   const sid = thread ? getSessionByThread(thread) : undefined
   if (!sid) return
+  if (sid === getGeneralSession()) return   // the General anchor's stale topic tab — closing it must NOT exit the session (it lives in General)
   updateTopic(sid, { closed: true })   // record it, so a daemon-side close doesn't re-close
   markTopicClosePending(sid)           // suppress the lazy-reopen until /exit lands — else trailing outbound flaps it open
   const pane = await paneForSession(sid)
@@ -5949,6 +5950,16 @@ async function probeMessageGone(group: string, messageId: number): Promise<'gone
 // bookkeeping, and exit its session if still live — the tab is gone, so its conversation has nowhere
 // to surface. Shared by the slow sweep and the fast pin-loop detector (handleTopicThreadGone).
 async function teardownDeletedTopic(group: string, t: { sessionId: string; threadId: number; cwd: string; name: string }): Promise<void> {
+  // The General-anchored session lives in General, NOT in a topic — its old topic tab (left closed
+  // when it was anchored) is just a stale mapping. Deleting that orphaned tab must NOT exit the
+  // General session: drop the mapping and keep the session. (This was the "General session exits on
+  // its own" bug — cleaning up a leftover topic still bound to the anchor exited it.)
+  if (t.sessionId === getGeneralSession()) {
+    removeTopic(t.sessionId)
+    sessionPins.delete(`topic:${t.threadId}`); pinTextCache.delete(`topic:${t.threadId}`); persistSessionPins()
+    process.stderr.write(`daemon: deleted topic ${t.threadId} was the General anchor's stale tab — dropped mapping, KEPT session ${t.sessionId}\n`)
+    return
+  }
   const pane = await paneForSession(t.sessionId)
   markTopicDeleted(t.sessionId)   // block re-creation until the pane is gone, else discovery races it back open
   removeTopic(t.sessionId)
