@@ -6,7 +6,7 @@
 import { InlineKeyboard, type Bot } from 'grammy'
 import { basename } from 'node:path'
 import { exec } from './proc.ts'
-import { paneCwd, paneAlive } from './pane-io.ts'
+import { paneCwd, paneAlive, paneCommand } from './pane-io.ts'
 import { escapeHtml } from './markdown.ts'
 import { loadAccess } from './access.ts'
 import {
@@ -171,6 +171,19 @@ function topicClosePending(sessionId: string): boolean {
   return true
 }
 
+// Is a live claude session actually running in this pane? When claude exits, the pane drops back to
+// its interactive shell, but the @tg_bridge + @tg_session tmux stamps SURVIVE — so a bare bash pane
+// still looked like a live session, which is why an ended session's topic kept regenerating (and a
+// manual delete couldn't win). claude holds the pane's pty (tool subprocesses don't take the
+// foreground), so pane_current_command reads `claude`/`node` while it's alive and a shell once it's
+// gone. Unreadable (transient tmux miss) → assume live, so a blip never tears down a healthy topic.
+const DEAD_PANE_CMDS = new Set(['bash', 'zsh', 'sh', 'fish', 'dash', 'ksh', 'tcsh', 'csh', '-bash', '-zsh', '-sh', '-fish'])
+export async function paneClaudeLive(paneId: string): Promise<boolean> {
+  const cmd = (await paneCommand(paneId).catch(() => '')).trim()
+  if (!cmd) return true
+  return !DEAD_PANE_CMDS.has(cmd)
+}
+
 async function ensureTopicFor(group: string, sessionId: string, cwd: string): Promise<number | undefined> {
   if (topicDeletionPending(sessionId)) return undefined   // user just deleted it — don't re-open during teardown
   const existing = getTopicBySession(sessionId)
@@ -225,6 +238,7 @@ export async function ensureSessionTopic(paneId: string): Promise<void> {
   const sid = await sessionForPane(paneId)
   const cwd = await paneCwd(paneId).catch(() => null)
   if (!sid || !cwd) return
+  if (!(await paneClaudeLive(paneId))) return   // claude has exited (pane at a shell) — a dead session gets NO topic (stops the regenerate-after-end loop)
   if (topicDeletionPending(sid)) return   // user just deleted this session's topic — don't re-open it
   if (sid === getGeneralSession()) return   // anchored to General — lives there, no topic
   if (getTopicBySession(sid) || topicEnsureInFlight.has(sid)) return   // already have it / creating it
@@ -372,7 +386,7 @@ export async function reconcileTopics(panes: string[]): Promise<void> {
   const liveSids = new Set<string>()
   for (const p of panes) {
     const sid = await sessionForPane(p)   // stamps unstamped panes as a side effect — idempotent
-    if (sid) liveSids.add(sid)
+    if (sid && await paneClaudeLive(p)) liveSids.add(sid)   // a pane at a shell (claude exited) is NOT live → its topic closes (2-miss buffer) and won't be regenerated
   }
   for (const s of sessions.values()) {   // MCP-shim sessions hold topics too — don't close theirs
     if (s.paneId) { const sid = await sessionForPane(s.paneId); if (sid) liveSids.add(sid) }
