@@ -1237,22 +1237,10 @@ async function primeRelayCursor(): Promise<void> {
     const cwd = focus.activePaneId ? await paneCwd(focus.activePaneId) : null
     const file = await transcriptForPane(focus.activePaneId, cwd)
     const latest = file ? latestFinalReply(file) : null
-    // Legacy single-DM catch-up: on switch-back, replay the replies a session produced while you were
-    // focused elsewhere. DM-ONLY — in forum-topics mode each session relays to its OWN topic via the
-    // aux loop, so nothing is missed on a switch and this only duplicated messages into the group
-    // ("💬 N messages from this session while you were away"). Gated to non-topic mode so it's gone
-    // from group/topic chats but DM multi-session still catches up (there's no aux relay in DM mode).
-    const prev = file ? lastRelayedByFile.get(file) : undefined
-    // prev === '' is a real baseline ("seen nothing yet"), so test against undefined, not falsy.
-    if (!isTopicMode() && file && prev !== undefined && latest && prev !== latest.uuid) {
-      const unread = finalRepliesAfter(file, prev)
-      const targets = await outboundTargetsFor(focus.activePaneId)
-      if (unread.length) {
-        const header = `💬 <i>${unread.length} message${unread.length > 1 ? 's' : ''} from this session while you were away:</i>`
-        for (const t of targets) await bot.api.sendMessage(t.chat, header, { parse_mode: 'HTML', ...(t.thread ? { message_thread_id: t.thread } : {}) }).catch(() => {})
-        for (const r of unread) for (const t of targets) await sendAgentText([t.chat], r.text, t.thread).catch(() => {})
-      }
-    }
+    // (The old "💬 N messages from this session while you were away" switch-back catch-up lived here.
+    // Removed: it served retired single-DM multi-session. DM mode is now single-session, and multiple
+    // sessions are driven via the group's forum topics — each relays to its own topic independently,
+    // so nothing is ever missed on a switch and the catch-up only mis-fired into the group.)
     lastRelayedUuid = latest?.uuid ?? ''
     if (file) lastRelayedByFile.set(file, lastRelayedUuid)
   } catch { lastRelayedUuid = '' }
