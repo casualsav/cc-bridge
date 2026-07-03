@@ -29,21 +29,26 @@ function textOf(content: unknown): string {
 // 2–3× every 1.5s (turnInProgress + feed/activity + textEntriesAfter). Re-parsing it each time is
 // the daemon's biggest avoidable cost, so cache the parsed entries keyed by mtime+size: an
 // unchanged file (idle tick, or the multiple reads within one tick) returns the cached array, and
-// a grown file (Claude wrote more) re-parses. Bounded to a few files so memory can't balloon when
-// /resume briefly reads many transcripts.
+// a grown file (Claude wrote more) re-parses. Bounded so memory can't balloon, but sized to cover
+// the concurrent live sessions the daemon relays (each open topic reads its own transcript every
+// ~1.5s) — at 4 it thrashed past ~4 open topics, re-parsing multi-MB files every tick. LRU with
+// touch-on-hit, so a /resume burst that reads many cold transcripts evicts those, not the hot ones.
 const _entriesCache = new Map<string, { mtimeMs: number; size: number; entries: Entry[] }>()
-const _ENTRIES_CACHE_MAX = 4
+const _ENTRIES_CACHE_MAX = 16
 function readEntries(file: string): Entry[] {
   let st: { mtimeMs: number; size: number }
   try { st = statSync(file) } catch { _entriesCache.delete(file); return [] }
   const hit = _entriesCache.get(file)
-  if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.entries
+  if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) {
+    _entriesCache.delete(file); _entriesCache.set(file, hit)   // LRU touch: move to most-recently-used
+    return hit.entries
+  }
   let lines: string[]
   try { lines = readFileSync(file, 'utf8').split('\n') } catch { return [] }
   const entries: Entry[] = []
   for (const l of lines) { if (l.trim()) try { entries.push(JSON.parse(l)) } catch {} }
   if (_entriesCache.size >= _ENTRIES_CACHE_MAX && !_entriesCache.has(file)) {
-    _entriesCache.delete(_entriesCache.keys().next().value!)   // evict oldest (insertion order)
+    _entriesCache.delete(_entriesCache.keys().next().value!)   // evict least-recently-used (front of insertion order)
   }
   _entriesCache.set(file, { mtimeMs: st.mtimeMs, size: st.size, entries })
   return entries

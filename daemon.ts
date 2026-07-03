@@ -1297,15 +1297,35 @@ async function auxRelayTick(): Promise<void> {
     // once per tick, and never a file the focused rich loop already owns, or the reply double-sends.
     const fcwd = focus.activePaneId ? await paneCwd(focus.activePaneId).catch(() => null) : null
     const focusedFile = focus.activePaneId ? await transcriptForPane(focus.activePaneId, fcwd) : null
+    // Phase 1 — resolve every aux pane's transcript file CONCURRENTLY. paneCwd/transcriptForPane are
+    // cached tmux reads; awaiting them one pane at a time made a tick O(N panes) round-trips, and the
+    // tick only reschedules after the whole loop (below), so open-topic count stretched everyone's
+    // relay period. Resolving in parallel keeps it flat.
+    const resolved = await Promise.all([...offMcpPanes]
+      .filter(pane => pane !== focus.activePaneId)   // the rich relay loop owns the focused pane
+      .map(async pane => {
+        try {
+          const cwd = await paneCwd(pane).catch(() => null)
+          const file = await transcriptForPane(pane, cwd)
+          return file ? { pane, file } : null
+        } catch { return null }   // transient (tmux/transcript) — retry next tick
+      }))
+    // Dedup SYNCHRONOUSLY (in-memory, no await, so no interleaving can slip a duplicate through):
+    // each transcript relays exactly once per tick, never one the focused loop owns. Preserves pane
+    // iteration order, so the first pane owning a shared newest-file fallback still wins.
     const seenFiles = new Set<string>()
-    for (const pane of [...offMcpPanes]) {
-      if (pane === focus.activePaneId) continue   // the rich relay loop owns the focused pane
+    const work: { pane: string; file: string }[] = []
+    for (const r of resolved) {
+      if (!r || r.file === focusedFile || seenFiles.has(r.file)) continue
+      seenFiles.add(r.file)
+      work.push(r)
+    }
+    // Phase 2 — process each unique pane/file CONCURRENTLY. Files are deduped, so each task touches
+    // only its own file-keyed state (lastRelayedByFile/auxConcludeTicks/auxRelayPrimed) and its own
+    // pane's card — no cross-task races. Telegram sends still funnel through the global edit-scheduler,
+    // which paces them; parallelizing here only removes the per-pane serialization of the awaits.
+    await Promise.all(work.map(({ pane, file }) => (async () => {
       try {
-        const cwd = await paneCwd(pane).catch(() => null)
-        const file = await transcriptForPane(pane, cwd)
-        if (!file) continue
-        if (file === focusedFile || seenFiles.has(file)) continue   // already relayed by the focused loop or a sibling
-        seenFiles.add(file)
         const working = turnInProgress(file)
         // The session's own live card in its own topic — same lifecycle as the focused card,
         // driven by the same transcript turn signal this loop already computes.
@@ -1315,14 +1335,14 @@ async function auxRelayTick(): Promise<void> {
           // the restart window still relays. Only a never-seen transcript skips its existing tail.
           if (!lastRelayedByFile.has(file)) lastRelayedByFile.set(file, latestFinalReply(file)?.uuid ?? '')
           auxRelayPrimed.add(file)
-          continue
+          return
         }
-        if (working) { auxConcludeTicks.delete(file); void emitTopicTyping(pane); continue }   // working → typing in its topic, relay only once the turn concludes
+        if (working) { auxConcludeTicks.delete(file); void emitTopicTyping(pane); return }   // working → typing in its topic, relay only once the turn concludes
         // Same conclude-debounce as the focused loop: a mid-burst end_turn (auto-continue gap)
         // shouldn't ship interim narration to the topic as if the turn had ended.
         const ticks = (auxConcludeTicks.get(file) ?? 0) + 1
         auxConcludeTicks.set(file, ticks)
-        if (ticks < RELAY_CONCLUDE_TICKS) continue
+        if (ticks < RELAY_CONCLUDE_TICKS) return
         const cursor = lastRelayedByFile.get(file) ?? ''
         for (const r of finalRepliesAfter(file, cursor)) {
           if (!r.uuid || r.uuid === (lastRelayedByFile.get(file) ?? '')) continue
@@ -1332,7 +1352,7 @@ async function auxRelayTick(): Promise<void> {
           for (const t of targets) await deliverRelayReply(pane, t, r.text)   // self-heals a deleted topic (recreate + resend)
         }
       } catch { /* transient (tmux/transcript) — retry next tick */ }
-    }
+    })()))
   }
   setTimeout(() => void auxRelayTick(), RELAY_POLL_MS)
 }
