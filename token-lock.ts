@@ -14,8 +14,10 @@
 // daemon's held unix socket refuses connects (ECONNREFUSED) even while it's listening (confirmed via
 // `ss -xlp`), so a connect-probe would misread a live lock as stale and steal it. A second daemon for
 // the same token thus refuses; the watchdog reads the same lock before (re)spawning and backs off
-// instead of respawn-looping. FAILS OPEN — any bind problem starts as before; only a confirmed live
-// holder refuses.
+// instead of respawn-looping. Fails CLOSED on observed contention (an EADDRINUSE we can't win →
+// refuse, since two pollers on one token means perpetual 409 + duplicate topics), but OPEN on a
+// genuine bind error (e.g. an odd /tmp) where contention can't be determined — better a rare
+// duplicate than a bridge that won't boot at all.
 import net from 'node:net'
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
@@ -76,22 +78,26 @@ function bind(sock: string, owner: string, stateDir: string): Promise<'ok' | 'in
   })
 }
 
-// Try to become THE daemon for `token`. `{ ok: true }` → start (we hold the lock, OR the guard was
-// unavailable and we fail open). `{ ok: false, holder }` → a CONFIRMED live daemon already owns this
-// token; refuse. Never throws.
+// Try to become THE daemon for `token`. `{ ok: true }` → start (we hold the lock, OR the bind failed
+// in a way that can't distinguish contention and we fail open). `{ ok: false, holder }` → the token
+// is already taken (a live holder, or a rebind that stayed contended); refuse. Never throws.
 export async function acquireTokenLock(token: string, stateDir: string): Promise<{ ok: true } | { ok: false; holder: TokenLockHolder }> {
   const { sock, owner } = lockPaths(token)
   let r = await bind(sock, owner, stateDir)
   if (r === 'inuse') {
     if (alive(readOwner(owner).pid)) return { ok: false, holder: readOwner(owner) }   // live holder → refuse
-    try { unlinkSync(sock) } catch {}                                                 // stale socket file → reclaim and retry once
+    try { unlinkSync(sock) } catch {}                                                 // stale socket FILE (dead owner) → reclaim and retry once
     r = await bind(sock, owner, stateDir)
-    if (r === 'inuse' && alive(readOwner(owner).pid)) return { ok: false, holder: readOwner(owner) }
+    // Still contended after reclaiming a dead owner's socket → another daemon raced us to the lock.
+    // FAIL CLOSED: proceeding means two pollers on one token (perpetual 409) + duplicate topics, which
+    // is worse than refusing. Refuse even if the owner pid is momentarily unreadable — the observed
+    // EADDRINUSE is the authority here, not the .owner sidecar.
+    if (r === 'inuse') return { ok: false, holder: readOwner(owner) }
   }
-  // 'ok' → we hold it (owner already written). 'err' / a lost reclaim race → FAIL OPEN: start anyway
-  // (better a rare duplicate than a daemon that won't boot because /tmp is odd). Only a confirmed live
-  // holder refuses.
-  if (r !== 'ok') process.stderr.write('token-lock: could not bind the lock — starting without the duplicate guard\n')
+  // 'ok' → we hold it (owner already written). 'err' → a genuine bind failure (e.g. /tmp perms/odd)
+  // where we CAN'T tell if the token is contended → FAIL OPEN (better a rare duplicate than a daemon
+  // that won't boot). Contention (EADDRINUSE) never reaches here — it fails closed above.
+  if (r !== 'ok') process.stderr.write('token-lock: bind failed (not a live-holder conflict) — starting without the duplicate guard\n')
   return { ok: true }
 }
 

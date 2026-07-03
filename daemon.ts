@@ -76,6 +76,7 @@ import {
   assertSendable, chunk, coerceReaction,
 } from './calls.ts'
 import { installSendGovernor, asLowPriority } from './throttle.ts'
+import { planAuxRelayWork } from './relay-plan.ts'
 import { createMsgTracker } from './msg-tracker.ts'
 import { startEditScheduler, scheduleEdit, scheduleDelete, cancelEdit, touchActiveView } from './edit-scheduler.ts'
 import { initUpdates, startUpdate, bridgeVersion, claudeBin, claudeVersion, sweepUpdateChecks } from './updates.ts'
@@ -141,7 +142,14 @@ process.stderr.write = ((chunk: string | Uint8Array, ...args: unknown[]): boolea
   )
 }) as typeof process.stderr.write
 
-const TOKEN = process.env.TELEGRAM_BOT_TOKEN
+// --selftest: evaluate the whole module — every import + all the top-level init wiring below — WITHOUT
+// starting the socket/watchdog/polling, then exit 0. The self-updater runs `daemon.ts --selftest` on
+// the freshly-built code before swapping it in, to catch runtime import/eval failures that `bun build`
+// (parse + typecheck only, never executes top-level code) can't see. Runs with a dummy token so it
+// works in the build dir with no configured bot; the token lock + .env persist are skipped under it.
+const SELFTEST = process.argv.includes('--selftest')
+
+const TOKEN = process.env.TELEGRAM_BOT_TOKEN ?? (SELFTEST ? 'SELFTEST:0' : undefined)
 
 if (!TOKEN) {
   process.stderr.write(
@@ -155,7 +163,7 @@ if (!TOKEN) {
 // environment, handed down daemon→watchdog→daemon since the first configured launch — one broken
 // link in that chain and it's gone (daemon crash-loops on boot, no copy anywhere on disk).
 // ensure-daemon's instance discovery also requires the token to be IN .env.
-try {
+if (!SELFTEST) try {
   const cur = existsSync(ENV_FILE) ? readFileSync(ENV_FILE, 'utf8') : ''
   if (!/^\s*TELEGRAM_BOT_TOKEN\s*=\s*\S/m.test(cur)) {
     writeFileSync(ENV_FILE, `${cur.replace(/\n?$/, '\n')}TELEGRAM_BOT_TOKEN=${TOKEN}\n`, { mode: 0o600 })
@@ -169,7 +177,7 @@ try {
 // state dirs / HOMEs (multi-profile, e.g. hermes) otherwise runs two pollers fighting getUpdates
 // (perpetual 409) that each mint duplicate forum topics. Refuse + exit cleanly on a confirmed live
 // holder (our watchdog probes the same lock and won't respawn-loop us); fail open otherwise.
-{
+if (!SELFTEST) {
   const lock = await acquireTokenLock(TOKEN, STATE_DIR)
   if (!lock.ok) {
     process.stderr.write(
@@ -1310,16 +1318,10 @@ async function auxRelayTick(): Promise<void> {
           return file ? { pane, file } : null
         } catch { return null }   // transient (tmux/transcript) — retry next tick
       }))
-    // Dedup SYNCHRONOUSLY (in-memory, no await, so no interleaving can slip a duplicate through):
-    // each transcript relays exactly once per tick, never one the focused loop owns. Preserves pane
-    // iteration order, so the first pane owning a shared newest-file fallback still wins.
-    const seenFiles = new Set<string>()
-    const work: { pane: string; file: string }[] = []
-    for (const r of resolved) {
-      if (!r || r.file === focusedFile || seenFiles.has(r.file)) continue
-      seenFiles.add(r.file)
-      work.push(r)
-    }
+    // Dedup SYNCHRONOUSLY (no await, so no interleaving can slip a duplicate through): each transcript
+    // relays once per tick, never one the focused loop owns, first pane in order wins a shared file.
+    // Pure logic extracted to relay-plan.ts (planAuxRelayWork) so the invariant is unit-tested.
+    const work = planAuxRelayWork(resolved, focusedFile)
     // Phase 2 — process each unique pane/file CONCURRENTLY. Files are deduped, so each task touches
     // only its own file-keyed state (lastRelayedByFile/auxConcludeTicks/auxRelayPrimed) and its own
     // pane's card — no cross-task races. Telegram sends still funnel through the global edit-scheduler,
@@ -8277,6 +8279,10 @@ process.on('uncaughtException', err => process.stderr.write(`daemon: uncaught ex
 
 // ---- Main ----
 
+// --selftest boundary: the entire module graph evaluated and every init above wired without throwing.
+// That's the gate the self-updater checks — stop here, before any socket/watchdog/polling side effect.
+if (SELFTEST) { process.stderr.write('telegram daemon: selftest OK\n'); process.exit(0) }
+
 if (!(await acquireInstance())) process.exit(0)
 
 // Detect an unclean previous exit before we (re)create the heartbeat, then keep it fresh.
@@ -8593,6 +8599,7 @@ async function startFilesWebapp(): Promise<void> {
     startWebapp({ token: TOKEN!, port: WEBAPP_PORT, staticDir: join(import.meta.dir, 'webapp'),
       isAllowed: uid => loadAccess().allowFrom.includes(uid), log: wlog, resolveStart: resolveStartToken,
       canWrite: WEBAPP_WRITE, trashDir: WEBAPP_TRASH, maxUploadBytes: WEBAPP_MAX_UPLOAD_MB * 1024 * 1024,
+      protectedRoots: [STATE_DIR],   // fence writes out of a relocated state dir too (~/.claude is fenced by default)
       readSettings: webappReadSettings, setSetting: webappSetSetting, readUsage: webappReadUsage, readDiff: webappReadDiff })
   } catch (e) { wlog(`webapp: failed to start: ${e}`); return }
   if (WEBAPP_PUBLIC_URL) { wlog(`webapp: public url ${WEBAPP_PUBLIC_URL}`); return }

@@ -1,6 +1,9 @@
 # Forum-topics mode — one Telegram topic per Claude Code session
 
-**Status:** design / in progress. Goal: run the bridge in a single Telegram **forum supergroup**
+> **Status: SHIPPED.** This is now live (`topics.ts` / `topic-runtime.ts`; `/bind` a forum supergroup).
+> The text below is retained as the original design rationale — it describes the goal, not unbuilt work.
+
+**Status:** ~~design / in progress~~ shipped. Goal: run the bridge in a single Telegram **forum supergroup**
 where **each Claude Code session is its own topic** (thread), instead of multiplexing every session
 through one DM with a global "focused session".
 

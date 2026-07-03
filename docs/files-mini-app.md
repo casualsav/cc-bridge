@@ -1,6 +1,9 @@
 # Spec: Files Mini App (browse · find · edit from Telegram)
 
-Status: **proposal / plan** (branch `feat/files-mini-app`). Not yet implemented.
+> **Status: SHIPPED.** This is now live (`webapp.ts` + `webapp/`; `/files`, gated on `TELEGRAM_WEBAPP_ENABLED`).
+> The text below is retained as the original design spec — it describes the design, not unbuilt work.
+
+Status: ~~**proposal / plan** (branch `feat/files-mini-app`). Not yet implemented.~~ shipped.
 
 ## 1. Goal
 Give a paired user a real **filesystem explorer + editor** from Telegram: browse any directory

@@ -1,7 +1,7 @@
 // Tests for the Files Mini App backend auth (the security-critical part). Run: bun test webapp.test.ts
 import { test, expect } from 'bun:test'
 import { createHmac } from 'node:crypto'
-import { verifyInitData } from './webapp.ts'
+import { verifyInitData, isProtectedWrite } from './webapp.ts'
 
 const TOKEN = '123456:TEST-bot-token'
 
@@ -134,4 +134,23 @@ test('serves the real SPA bundle from webapp/ at /', async () => {
     expect(html).toContain('telegram-web-app.js')
     expect(html).toContain('id="list"')
   } finally { server.stop(true) }
+})
+
+// ---- Write deny-list: the fence that stops the webapp's write mode from mutating the bridge's own
+// control plane (~/.claude config/plugins/state + .env token) into persisted code execution. ----
+const ROOTS = ['/home/u/.claude', '/home/u/.claude/channels/telegram']   // ~/.claude floor + a state dir
+test('isProtectedWrite: the protected root itself is fenced', () => {
+  expect(isProtectedWrite('/home/u/.claude', ROOTS)).toBe(true)
+})
+test('isProtectedWrite: descendants (settings.json, plugin cache, .env) are fenced', () => {
+  expect(isProtectedWrite('/home/u/.claude/settings.json', ROOTS)).toBe(true)
+  expect(isProtectedWrite('/home/u/.claude/plugins/cache/claude-tg/telegram/0.3.32/daemon.ts', ROOTS)).toBe(true)
+  expect(isProtectedWrite('/home/u/.claude/channels/telegram/.env', ROOTS)).toBe(true)
+})
+test('isProtectedWrite: an unrelated project path is allowed', () => {
+  expect(isProtectedWrite('/home/u/proj/src/index.ts', ROOTS)).toBe(false)
+})
+test('isProtectedWrite: a SIBLING like ~/.claude-work is NOT a false positive (sep boundary)', () => {
+  expect(isProtectedWrite('/home/u/.claude-work/settings.json', ROOTS)).toBe(false)
+  expect(isProtectedWrite('/home/u/.claudexyz', ROOTS)).toBe(false)
 })

@@ -257,9 +257,18 @@ async function main(): Promise<void> {
     execSync('bun install --no-summary', { cwd: tmp, stdio: 'ignore' })
     // Type-check the new daemon before we dare run it.
     execSync('bun build daemon.ts --target=bun >/dev/null', { cwd: tmp })
+    // Behavioral gate beyond the type-check: actually EXECUTE the freshly-built module (all imports +
+    // the top-level init wiring) via --selftest, which evaluates everything then exits 0 BEFORE any
+    // socket/watchdog/polling. Catches runtime import/eval failures `bun build` (parse+typecheck only)
+    // can't. Dummy token + throwaway state dir so it needs no real config; a non-zero exit or a hang
+    // (30s cap) throws and folds into the failure path below — the bad build is never swapped in.
+    execSync('bun daemon.ts --selftest', {
+      cwd: tmp, stdio: 'ignore', timeout: 30_000,
+      env: { ...process.env, TELEGRAM_BOT_TOKEN: 'SELFTEST:0', TELEGRAM_STATE_DIR: join(tmp, '.selftest-state') },
+    })
   } catch (e) {
     try { rmSync(tmp, { recursive: true, force: true }) } catch {}
-    await notify(`❌ Update: build/type-check failed — <b>not</b> applied, still on v${oldVer ?? '?'}.\n<code>${String(e).slice(0, 400)}</code>`)
+    await notify(`❌ Update: build/self-test failed — <b>not</b> applied, still on v${oldVer ?? '?'}.\n<code>${String(e).slice(0, 400)}</code>`)
     return
   }
 

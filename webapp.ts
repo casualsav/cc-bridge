@@ -9,6 +9,7 @@
 import { createHmac, timingSafeEqual, randomBytes } from 'node:crypto'
 import { readdir, stat, realpath, writeFile, copyFile, rename, mkdir, cp, rm } from 'node:fs/promises'
 import { resolve, basename, dirname, join, sep } from 'node:path'
+import { homedir } from 'node:os'
 
 export interface WebappDeps {
   token: string                            // bot token — the HMAC key for initData validation
@@ -21,6 +22,7 @@ export interface WebappDeps {
   maxFind?: number                         // find result cap (default 500)
   resolveStart?: (token: string) => string | null   // map a deep-link startapp token → starting cwd
   canWrite?: boolean                       // enable write endpoints (TELEGRAM_WEBAPP_WRITE); default false → read-only
+  protectedRoots?: string[]                // extra dirs (beyond ~/.claude) that writes must never touch (e.g. a relocated state dir)
   trashDir?: string                        // /api/rm moves deletions here (recoverable); required when canWrite
   maxWriteBytes?: number                   // /api/write size cap (default 2 MiB)
   maxUploadBytes?: number                  // /api/upload size cap (default 50 MiB)
@@ -101,8 +103,42 @@ const dlTokenPath = (tok: string): string | null => {
 async function canon(p: string): Promise<string> {
   if (!p || p.includes('\0')) throw new Error('bad path')
   const abs = resolve(p)
-  try { return await realpath(abs) } catch { return abs }   // may not exist yet (caller stats it)
+  try { return await realpath(abs) } catch {}   // exists → fully symlink-resolved
+  // Non-existent leaf (a new file / mkdir / rename dest): realpath the deepest EXISTING ancestor and
+  // rejoin the missing tail. Without this, an intermediate symlink into a protected root (e.g.
+  // ~/proj/link → ~/.claude, then write ~/proj/link/settings.json) would slip past isProtectedWrite,
+  // which only sees the path canon() returns. Bounded walk so a pathological path can't spin.
+  const parts: string[] = []
+  let cur = abs
+  for (let i = 0; i < 64; i++) {
+    const parent = dirname(cur)
+    parts.unshift(basename(cur))
+    if (parent === cur) break                                   // reached FS root, nothing resolvable
+    try { return join(await realpath(parent), ...parts) }       // deepest existing ancestor resolved
+    catch { cur = parent }                                      // parent also missing → keep walking up
+  }
+  return abs
 }
+
+// Writes must never mutate the daemon's own control plane. Reads stay jail-free (the session already
+// has full FS access — that's a browse convenience, not a new capability), but a WRITE into the config
+// / plugin-cache / state root turns the allowlisted-but-hijacked webapp into *persisted* code
+// execution: overwrite the managed git clone, settings.json, a hook script, or the statusline the next
+// self-update or SessionStart fires, and you've escalated a file edit into daemon RCE. So every mutation
+// is fenced out of ~/.claude (config, plugins cache, marketplace clone, and the state dir + its .env
+// bot token all live under it) plus any extra roots the daemon injects (e.g. a relocated state dir).
+function protectedWriteRoots(deps: WebappDeps): string[] {
+  return [resolve(homedir(), '.claude'), ...(deps.protectedRoots ?? [])]
+    .map(r => { try { return resolve(r) } catch { return r } })
+}
+// True when `absPath` is one of, or sits inside, a protected root. `absPath` is already canon()'d
+// (realpath'd, incl. the deepest existing ancestor of a not-yet-existing leaf), so a symlink pointing
+// INTO a protected root resolves and is caught. The `root + sep` guard keeps a SIBLING like
+// ~/.claude-work from matching the ~/.claude root — only the dir itself and its descendants match.
+export function isProtectedWrite(absPath: string, roots: string[]): boolean {
+  return roots.some(root => absPath === root || absPath.startsWith(root + sep))
+}
+const protectedWriteResponse = () => json({ error: 'protected', reason: 'this path is part of the bridge’s config/runtime and is read-only' }, 403)
 
 const isProbablyBinary = (buf: Uint8Array): boolean => {
   const n = Math.min(buf.length, 8192)
@@ -257,6 +293,7 @@ async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: strin
     const file = form?.get('file')
     if (!form || !(file instanceof File)) return json({ error: 'no file' }, 400)
     const dir = await canon(String(form.get('dir') || ''))
+    if (isProtectedWrite(dir, protectedWriteRoots(deps))) return protectedWriteResponse()
     const dst = await stat(dir).catch(() => null)
     if (!dst || !dst.isDirectory()) return json({ error: 'not a directory' }, 404)
     const name = basename(file.name || 'upload')
@@ -279,9 +316,11 @@ async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: strin
     const body = await req.json().catch(() => null) as Record<string, unknown> | null
     if (!body) return json({ error: 'bad body' }, 400)
     const audit = (m: string) => deps.log(`webapp: ${m} user=${userId}`)
+    const protRoots = protectedWriteRoots(deps)
 
     if (url.pathname === '/api/write') {
       const file = await canon(String(body.path || ''))
+      if (isProtectedWrite(file, protRoots)) return protectedWriteResponse()
       const content = String(body.content ?? '')
       if (Buffer.byteLength(content, 'utf-8') > (deps.maxWriteBytes ?? 2 * 1024 * 1024)) return json({ error: 'too large' }, 413)
       const st = await stat(file).catch(() => null)
@@ -297,6 +336,7 @@ async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: strin
 
     if (url.pathname === '/api/rm') {
       const target = await canon(String(body.path || ''))
+      if (isProtectedWrite(target, protRoots)) return protectedWriteResponse()
       if (!(await stat(target).catch(() => null))) return json({ error: 'not found' }, 404)
       if (!deps.trashDir) return json({ error: 'no trash dir configured' }, 500)
       await mkdir(deps.trashDir, { recursive: true })
@@ -311,6 +351,7 @@ async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: strin
       const name = String(body.name || '')
       if (!name || name === '.' || name === '..' || /[\/\0]/.test(name)) return json({ error: 'bad name' }, 400)
       const dir = join(await canon(String(body.path || '')), name)
+      if (isProtectedWrite(dir, protRoots)) return protectedWriteResponse()
       await mkdir(dir)
       audit(`mkdir path=${dir}`)
       return json({ ok: true, path: dir })
@@ -321,6 +362,7 @@ async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: strin
       if (!newName || newName === '.' || newName === '..' || /[\/\0]/.test(newName)) return json({ error: 'bad name' }, 400)
       const src = await canon(String(body.path || ''))
       const dest = join(dirname(src), newName)
+      if (isProtectedWrite(src, protRoots) || isProtectedWrite(dest, protRoots)) return protectedWriteResponse()
       if (await stat(dest).catch(() => null)) return json({ error: 'target exists' }, 409)
       await rename(src, dest)
       audit(`rename ${src} → ${dest}`)

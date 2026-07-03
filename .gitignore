@@ -7,6 +7,9 @@ inbox/
 *.corrupt-*
 __pycache__/
 
+# machine-local fingerprint memo sidecar (common.ts writes it, keyed to local file sizes+mtimes)
+.fingerprint
+
 # graphify analysis output
 graphify-out/
 *.log
