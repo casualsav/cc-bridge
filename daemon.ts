@@ -65,7 +65,7 @@ import {
   reconcileTopics, refreshTopicTitles, topicThreadFor, emitTopicTyping, armTopicTyping, stopTopicTyping, outboundTargetsFor,
   stampPaneSession, topicBranchCache, generalAnchorLost,
   setPaneRestarting, isPaneRestarting, releasePaneSession, reopenSessionTopic,
-  retriggerTopicTyping,
+  retriggerTopicTyping, recreateDeletedTopic,
 } from './topic-runtime.ts'
 import { startWebapp, type SettingsView as WebappSettingsView, type UsageView as WebappUsageView, type DiffView as WebappDiffView } from './webapp.ts'
 import { startTunnel, ensureCloudflared, tailscaleFunnelUrl, type Tunnel } from './tunnel.ts'
@@ -887,6 +887,15 @@ if (t) await import(t)
 // relayLoopTick), so a swallowed send is a permanent loss. Wait out `retry_after` and retry,
 // capped so a persistently failing chat can't wedge the relay. Non-429 errors are terminal (log
 // and give up, as before). Returns true once the chunk is delivered.
+// Telegram rejects a send/edit to a forum topic that was deleted with 400 "message thread not
+// found". The relay's send helpers otherwise SWALLOW non-429 errors (log + return false), so a
+// deleted topic would black-hole every reply silently. Surface it as a typed throw the relay path
+// catches to recreate the topic instead (see deliverRelayReply / recreateDeletedTopic).
+class TopicThreadGoneError extends Error {}
+function isThreadGoneError(e: unknown): boolean {
+  return e instanceof GrammyError && e.error_code === 400 && /message thread not found/i.test(e.description)
+}
+
 async function sendChunkRetrying(chat_id: string, text: string, extra: Record<string, unknown>): Promise<boolean> {
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
@@ -899,6 +908,7 @@ async function sendChunkRetrying(chat_id: string, text: string, extra: Record<st
         await sleep(wait)
         continue
       }
+      if (isThreadGoneError(e)) throw new TopicThreadGoneError()   // let the relay recreate the topic
       process.stderr.write(`daemon: transcript relay send failed: ${e}\n`)
       return false
     }
@@ -933,7 +943,10 @@ async function sendAgentText(chats: string[], text: string, threadId?: number): 
     // has no fenced code block (see above).
     if (access.renderMarkdown !== false && !hasFencedCode) {
       try { await sendRichMessage(TOKEN!, chat_id, toInputRichMessage(text), { messageThreadId: threadId }); continue }
-      catch (e) { process.stderr.write(`daemon: rich message send failed, falling back to HTML: ${e}\n`) }
+      catch (e) {
+        if (isThreadGoneError(e)) throw new TopicThreadGoneError()   // dead thread — HTML fallback would hit it too; let the relay recreate
+        process.stderr.write(`daemon: rich message send failed, falling back to HTML: ${e}\n`)
+      }
     }
     await sendHtmlPath(chat_id)
   }
@@ -1111,6 +1124,31 @@ async function kickThinkingMirror(pane: string): Promise<void> {
   else if (isTopicMode()) await updateAuxMirror(pane, false, true).catch(() => {})
 }
 
+// Relay one concluded reply to a single outbound target, self-healing a deleted topic. If the send
+// hits "message thread not found" (the user deleted the topic out from under a LIVE session), drop
+// the pin bookkeeping, recreate the session's topic, and resend there — so a live session's replies
+// are never silently black-holed. Shared by the focused and aux relay loops.
+async function deliverRelayReply(paneId: string, target: { chat: string; thread?: number }, text: string): Promise<void> {
+  const releaseTyping = (thread?: number) => {
+    if (thread != null) stopTopicTyping(target.chat, thread)                                   // reply delivered — never re-light typing over it
+    else if (isTopicMode() && target.chat === getGroupChatId()) stopTopicTyping(target.chat, 'general')   // General-anchored reply — same latch release
+  }
+  try {
+    await sendAgentText([target.chat], text, target.thread)
+    releaseTyping(target.thread)
+  } catch (e) {
+    if (!(e instanceof TopicThreadGoneError) || target.thread == null) { process.stderr.write(`daemon: relay send failed: ${e}\n`); return }
+    const sid = await sessionForPane(paneId)
+    const cwd = await paneCwd(paneId).catch(() => null)
+    if (!sid || !cwd) { process.stderr.write(`daemon: relay send failed (topic gone; no session/cwd to recreate)\n`); return }
+    sessionPins.delete(`topic:${target.thread}`); pinTextCache.delete(`topic:${target.thread}`); persistSessionPins()
+    const fresh = await recreateDeletedTopic(sid, cwd, target.thread)
+    if (fresh == null) { process.stderr.write(`daemon: relay send failed (topic gone; recreate suppressed/failed)\n`); return }
+    try { await sendAgentText([target.chat], text, fresh); releaseTyping(fresh) }
+    catch (e2) { process.stderr.write(`daemon: relay resend after topic recreate failed: ${e2}\n`) }
+  }
+}
+
 async function relayLoopTick(gen: number): Promise<void> {
   if (gen !== relayLoopGen || !focus.activePaneId || !TRANSCRIPT_OUTBOUND) return
   const paneId = focus.activePaneId
@@ -1170,11 +1208,7 @@ async function relayLoopTick(gen: number): Promise<void> {
       if (!isBanner(r.text)) {
         const targets = await outboundTargetsFor(paneId)
         process.stderr.write(`daemon: relaying ${r.text.length} chars (uuid ${r.uuid.slice(0, 8)}, reply) to ${targets.map(t => t.chat + (t.thread ? `#${t.thread}` : '')).join(',')}\n`)
-        for (const t of targets) {
-          await sendAgentText([t.chat], r.text, t.thread).catch(e => process.stderr.write(`daemon: relay send failed: ${e}\n`))
-          if (t.thread != null) stopTopicTyping(t.chat, t.thread)   // reply delivered — never re-light typing over it
-          else if (isTopicMode() && t.chat === getGroupChatId()) stopTopicTyping(t.chat, 'general')   // General-anchored reply — same latch release
-        }
+        for (const t of targets) await deliverRelayReply(paneId, t, r.text)   // self-heals a deleted topic (recreate + resend)
       }
       clearThinkingPending(paneId)   // reply landed → drop the thinking-pending crutch so the card caps/deletes promptly
       typingPresence.stop()   // reply delivered (or banner suppressed) → clean stop, no tail
@@ -1289,11 +1323,7 @@ async function auxRelayTick(): Promise<void> {
           lastRelayedByFile.set(file, r.uuid)     // advance before the await so a fast tick can't double-send
           clearThinkingPending(pane)   // a real reply relayed → drop the thinking-pending crutch so the card caps/deletes
           const targets = await outboundTargetsFor(pane)
-          for (const t of targets) {
-            await sendAgentText([t.chat], r.text, t.thread).catch(e => process.stderr.write(`daemon: aux relay send failed: ${e}\n`))
-            if (t.thread != null) stopTopicTyping(t.chat, t.thread)   // reply delivered — never re-light typing over it
-          else if (isTopicMode() && t.chat === getGroupChatId()) stopTopicTyping(t.chat, 'general')   // General-anchored reply — same latch release
-          }
+          for (const t of targets) await deliverRelayReply(pane, t, r.text)   // self-heals a deleted topic (recreate + resend)
         }
       } catch { /* transient (tmux/transcript) — retry next tick */ }
     }
@@ -5906,6 +5936,7 @@ async function handleTopicThreadGone(sessionId: string, threadId: number): Promi
   try {
     const t = getTopicBySession(sessionId)
     if (!t) return                                                    // already torn down
+    if (t.threadId !== threadId) return                               // topic was recreated/rebound (deliverRelayReply) — the passed thread is stale, don't tear down the new one
     if (await probeMessageGone(group, threadId) === 'alive') return   // topic still there — only the pin went; re-pins next cycle
     await teardownDeletedTopic(group, { sessionId, threadId, cwd: t.cwd, name: t.name })
   } catch { /* transient — next pin tick retries */ }
