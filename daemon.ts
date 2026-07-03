@@ -5914,7 +5914,11 @@ bot.on('message:forum_topic_created', async ctx => {
   if (!thread || getSessionByThread(thread)) return
   const name = ctx.message.forum_topic_created.name
 
-  const base = focus.activePaneId ? await paneCwd(focus.activePaneId).catch(() => null) : null
+  // New topics land as sibling subfolders under the General (base) session's cwd — deterministic,
+  // regardless of which pane happens to be focused when the topic is created. Only when General has
+  // no live anchored session do we fall back to the focused pane (the pre-anchor behavior).
+  const basePane = (await generalAnchorPane()) ?? focus.activePaneId
+  const base = basePane ? await paneCwd(basePane).catch(() => null) : null
   const dirName = name.trim().toLowerCase().replace(/[\\/\0\s]+/g, '-')   // "My App" → my-app/ (unix-style folder names)
   const dir = base && dirName ? join(base, dirName) : null
   if (dir && base) {
