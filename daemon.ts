@@ -4120,17 +4120,24 @@ async function restartAllStaleSessions(chat: string, onlyStale = true): Promise<
     revivable ? kb : undefined)
 }
 
-async function showUpdateDashboard(ctx: Context): Promise<void> {
+function updateDashboardKeyboard(): InlineKeyboard {
+  const auto = loadAccess().autoUpdate === true
+  return new InlineKeyboard()
+    .text('🌉 Update bridge', 'upd:bridge').text('🧠 Update Claude', 'upd:claude').row()
+    .text(`${auto ? '✅' : '⭕️'} Auto-update bridge`, 'upd:auto')
+}
+async function updateDashboardText(): Promise<string> {
   const claudeVer = await claudeVersion()
-  await ctx.reply(
-    '🔄 <b>Update</b>\n\n' +
+  const auto = loadAccess().autoUpdate === true
+  return '🔄 <b>Update</b>\n\n' +
     `🌉 Telegram bridge: <b>v${escapeHtml(bridgeVersion())}</b>\n` +
     `🧠 Claude Code: <b>v${escapeHtml(claudeVer ?? '?')}</b>\n\n` +
+    `♻️ Auto-update bridge: <b>${auto ? 'on' : 'off'}</b> — ${auto ? 'new bridge versions apply automatically on the daily check (rollback-protected). Claude is never auto-applied.' : 'you get a tap-to-apply card when a new version is available.'}\n\n` +
     'What do you want to update?\n\n' +
-    '💡 Tip: <code>/update tg</code> (this bridge) · <code>/update claude</code> (Claude Code).',
-    { parse_mode: 'HTML', reply_markup: new InlineKeyboard()
-        .text('🌉 Update bridge', 'upd:bridge')
-        .text('🧠 Update Claude', 'upd:claude') })
+    '💡 Tip: <code>/update tg</code> (this bridge) · <code>/update claude</code> (Claude Code).'
+}
+async function showUpdateDashboard(ctx: Context): Promise<void> {
+  await ctx.reply(await updateDashboardText(), { parse_mode: 'HTML', reply_markup: updateDashboardKeyboard() })
 }
 
 // Kick off the bridge self-update (detached helper, with rollback) and report. Shared by the
@@ -6677,6 +6684,17 @@ bot.on('callback_query:data', async ctx => {
     await ctx.editMessageText('♻️ Updating the Telegram bridge…', { parse_mode: 'HTML' }).catch(() => {})
     const r = startUpdate(String(ctx.chat?.id), 'apply', ctx.callbackQuery.message?.message_id)
     if (!r.ok) await ctx.editMessageText(`❌ Couldn't start bridge update: ${escapeHtml(r.error ?? '')}`, { parse_mode: 'HTML' }).catch(() => {})
+    return
+  }
+
+  // /update dashboard → toggle bridge auto-update (apply new versions on the daily sweep, no tap).
+  if (data === 'upd:auto') {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) { await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {}); return }
+    const access = loadAccess()
+    access.autoUpdate = access.autoUpdate !== true
+    saveAccess(access)
+    await ctx.answerCallbackQuery({ text: `Auto-update bridge → ${access.autoUpdate ? 'ON' : 'OFF'}` }).catch(() => {})
+    await ctx.editMessageText(await updateDashboardText(), { parse_mode: 'HTML', reply_markup: updateDashboardKeyboard() }).catch(() => {})
     return
   }
 

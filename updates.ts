@@ -96,20 +96,41 @@ export async function checkClaudeUpdate(): Promise<{ cur: string; latest: string
 }
 
 export async function sweepUpdateChecks(): Promise<void> {
-  if (loadAccess().updateChecks === false) return
+  const access = loadAccess()
+  const notifyOn = access.updateChecks !== false
+  const autoOn = access.autoUpdate === true
+  if (!notifyOn && !autoOn) return               // notifications off AND auto-update off → nothing to do
   const notified = readJsonFile<{ bridge?: string; claude?: string }>(UPDATE_NOTIFY_FILE, {})
   const [b, c] = await Promise.all([checkBridgeUpdate(), checkClaudeUpdate()])
-  const newBridge = b && notified.bridge !== b.latest ? b : null
+  let newBridge = b && notified.bridge !== b.latest ? b : null
   const newClaude = c && notified.claude !== c.latest ? c : null
   if (!newBridge && !newClaude) return
-  const lines = ['🆕 <b>Update available</b>']
-  const kb = new InlineKeyboard()
-  if (newBridge) { lines.push(`🌉 Bridge <code>${escapeHtml(newBridge.cur)}</code> → <code>${escapeHtml(newBridge.latest)}</code>`); kb.text('🌉 Update bridge', 'upd:bridge') }
-  if (newClaude) { lines.push(`🧠 Claude <code>${escapeHtml(newClaude.cur)}</code> → <code>${escapeHtml(newClaude.latest)}</code>`); kb.text('🧠 Update Claude', 'upd:claude') }
-  const dests = isTopicMode() && getGroupChatId() ? [getGroupChatId()!] : loadAccess().allowFrom
-  for (const chat of dests) {
-    await deps.bot.api.sendMessage(chat, lines.join('\n'), { parse_mode: 'HTML', reply_markup: kb, disable_notification: true }).catch(() => {})
+  const dests = isTopicMode() && getGroupChatId() ? [getGroupChatId()!] : access.allowFrom
+  const record = { bridge: notified.bridge as string | undefined, claude: notified.claude as string | undefined }
+
+  // Auto-apply the BRIDGE when opted in — update.ts pulls/rebuilds/restarts with rollback and DMs
+  // its own progress → ✅/❌. Claude is NEVER auto-applied (the CLI self-updates its own binary).
+  // Record it as notified so a slow apply/restart doesn't relaunch the updater on the next sweep.
+  if (newBridge && autoOn) {
+    const chat = dests[0] ?? access.allowFrom[0]
+    if (chat) {
+      await deps.bot.api.sendMessage(chat, `♻️ <b>Auto-updating bridge</b> <code>${escapeHtml(newBridge.cur)}</code> → <code>${escapeHtml(newBridge.latest)}</code>…`, { parse_mode: 'HTML', disable_notification: true }).catch(() => {})
+      startUpdate(chat, 'apply')
+    }
+    record.bridge = newBridge.latest
+    newBridge = null                             // handled by auto-apply — don't also post a tap card for it
   }
-  writeJsonFile(UPDATE_NOTIFY_FILE, { bridge: newBridge?.latest ?? notified.bridge, claude: newClaude?.latest ?? notified.claude })
-  process.stderr.write(`daemon: update notice posted (bridge ${newBridge?.latest ?? '—'}, claude ${newClaude?.latest ?? '—'})\n`)
+
+  // Tap-to-apply card for whatever wasn't auto-applied (Claude always; the bridge only when auto is off).
+  if (notifyOn && (newBridge || newClaude)) {
+    const lines = ['🆕 <b>Update available</b>']
+    const kb = new InlineKeyboard()
+    if (newBridge) { lines.push(`🌉 Bridge <code>${escapeHtml(newBridge.cur)}</code> → <code>${escapeHtml(newBridge.latest)}</code>`); kb.text('🌉 Update bridge', 'upd:bridge'); record.bridge = newBridge.latest }
+    if (newClaude) { lines.push(`🧠 Claude <code>${escapeHtml(newClaude.cur)}</code> → <code>${escapeHtml(newClaude.latest)}</code>`); kb.text('🧠 Update Claude', 'upd:claude'); record.claude = newClaude.latest }
+    for (const chat of dests) {
+      await deps.bot.api.sendMessage(chat, lines.join('\n'), { parse_mode: 'HTML', reply_markup: kb, disable_notification: true }).catch(() => {})
+    }
+  }
+  writeJsonFile(UPDATE_NOTIFY_FILE, record)
+  process.stderr.write(`daemon: update sweep (bridge ${record.bridge ?? '—'}, claude ${record.claude ?? '—'}, auto=${autoOn})\n`)
 }
