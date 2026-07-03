@@ -3176,9 +3176,9 @@ async function confirmResetSession(ctx: Context): Promise<void> {
     return
   }
   const keyboard = new InlineKeyboard()
-    .text('✅ Yes, clear', 'clearconfirm:yes')
-    .text('✖️ No', 'clearconfirm:no')
-  await ctx.reply('♻️ Clear this conversation in place?\n\nTap to confirm:', { reply_markup: keyboard })
+    .text('🧹 Clear once', 'clearconfirm:yes')
+    .text('🔕 Always clear', 'clearconfirm:always')
+  await ctx.reply('♻️ Clear this conversation in place?\n\n“Always clear” clears now and stops asking (turns off the /clear confirmation).', { reply_markup: keyboard })
 }
 
 // ---- Shared actions (used by the slash commands) ----
@@ -6833,8 +6833,10 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
-  // /clear + /reset confirmation: a plain Yes/No reset-in-place (no "launch new" branch).
-  if (data === 'clearconfirm:yes' || data === 'clearconfirm:no') {
+  // /clear + /reset confirmation: “Clear once” resets in place; “Always clear” also turns off the
+  // confirmation so future /clear + /new clear immediately. (clearconfirm:no is kept only so a
+  // pre-upgrade message whose old “No” button is still tappable doesn't dead-tap.)
+  if (data === 'clearconfirm:yes' || data === 'clearconfirm:always' || data === 'clearconfirm:no') {
     if (!(await cbAuth(ctx))) return
     if (data === 'clearconfirm:no') {
       await ctx.answerCallbackQuery({ text: 'Kept.' }).catch(() => {})
@@ -6843,10 +6845,18 @@ bot.on('callback_query:data', async ctx => {
     }
     const t = await commandTarget(ctx)
     if (!t) { await ctx.answerCallbackQuery().catch(() => {}); return }
+    if (data === 'clearconfirm:always') {
+      const a = loadAccess()
+      a.confirmReset = false                 // stop asking on future /clear + /new
+      saveAccess(a)
+    }
     await ctx.answerCallbackQuery({ text: 'Clearing…' }).catch(() => {})
     await ctx.editMessageText('🧹 Clearing the conversation…').catch(() => {})
     const result = await performReset(t, '/clear')
-    await ctx.editMessageText(result, { parse_mode: 'HTML' }).catch(() => {})
+    const suffix = data === 'clearconfirm:always'
+      ? '\n\n🔕 Future /clear + /new won’t ask — re-enable in ⚙️ Settings → 🧹 /clear approval.'
+      : ''
+    await ctx.editMessageText(result + suffix, { parse_mode: 'HTML' }).catch(() => {})
     return
   }
 
