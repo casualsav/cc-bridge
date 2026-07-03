@@ -847,7 +847,8 @@ function enqueueInboundInject(paneId: string, watcher: PaneWatcher, params: Inbo
 // ---- Off-MCP outbound: relay the agent's reply from the transcript ----
 
 // Auto-provision off-MCP tooling so a plugin-less session works with no manual setup:
-//  - the `tg` actions CLI on PATH (send/react/edit), and
+//  - the `tg` actions CLI on PATH (send/react/edit),
+//  - a `claude-tg` launcher on PATH (works in shells that don't source .bashrc), and
 //  - a stable ensure-daemon launcher for the SessionStart hook to relaunch the daemon.
 // Re-run each startup so it tracks plugin upgrades. The ensure-daemon launcher globs the
 // cache at runtime, so it survives version bumps even while the daemon is down (post-
@@ -859,6 +860,17 @@ function provisionOffMcpTooling(): void {
     const binDir = [join(homedir(), '.bun', 'bin'), join(homedir(), '.local', 'bin')].find(d => existsSync(d))
     if (binDir) {
       writeFileSync(join(binDir, 'tg'), `#!/bin/sh\nexec bun ${tgctl} "$@"\n`, { mode: 0o755 })
+      // A `claude-tg` launcher on PATH — mirrors the .bashrc function but works in ANY shell
+      // (a fresh tmux window whose shell doesn't source .bashrc otherwise fails with "command
+      // not found"). Arg 1 = instance slot (default 1); arg 2 = Claude account name (optional).
+      // Warns if not inside tmux, since an unbridged session is the usual "no topic appeared" cause.
+      writeFileSync(join(binDir, 'claude-tg'),
+        `#!/bin/sh
+[ -z "$TMUX" ] && echo "claude-tg: not inside tmux — this session won't be bridged. Start tmux first (e.g. tmux new -s work), then rerun." >&2
+tmux set -p @tg_bridge "\${1:-1}" 2>/dev/null
+if [ -n "$2" ]; then exec env CLAUDE_CONFIG_DIR="$HOME/.claude-$2" claude --allow-dangerously-skip-permissions
+else exec claude --allow-dangerously-skip-permissions; fi
+`, { mode: 0o755 })
     }
     // Stable ensure-daemon launcher: resolves the newest cache copy at run time (so it
     // works after a version bump, and when the daemon is down). The SessionStart hook
@@ -874,7 +886,7 @@ let t = null
 try { const vs = readdirSync(base).filter(v => /^\\d+\\.\\d+\\.\\d+$/.test(v)).sort((a, b) => a.localeCompare(b, undefined, { numeric: true })); for (const v of vs.reverse()) { const p = join(base, v, 'ensure-daemon.ts'); if (existsSync(p)) { t = p; break } } } catch {}
 if (t) await import(t)
 `, { mode: 0o755 })
-    process.stderr.write(`daemon: provisioned off-mcp tooling (tg CLI${binDir ? ` → ${binDir}` : ' — no bin dir'}, ensure-daemon)\n`)
+    process.stderr.write(`daemon: provisioned off-mcp tooling (tg + claude-tg CLI${binDir ? ` → ${binDir}` : ' — no bin dir'}, ensure-daemon)\n`)
   } catch (e) { process.stderr.write(`daemon: off-mcp provision failed: ${e}\n`) }
 }
 
@@ -4228,13 +4240,13 @@ bot.command(['bind', 'unbind'], async ctx => {
 // Anchor the focused session to General — /bind does it automatically on a fresh bind; /claim (or
 // the 📌 button on the anchor-lost notice) does it on demand. If the session already has a topic,
 // that topic closes with a pointer note: its conversation continues in General.
-async function claimGeneralForFocused(): Promise<string> {
+// Anchor a specific (live) session to General, closing its own topic if it has one. Shared by the
+// /claim command (either the topic's own session, or the focused one in General) and the 📌 button.
+async function claimGeneralFor(sid: string): Promise<string> {
   const group = getGroupChatId()
   if (!group) return '⚠️ Not in group mode — nothing to anchor.'
-  if (!focus.activePaneId) return '🚫 No focused session to anchor.'
-  const sid = await sessionForPane(focus.activePaneId)
-  if (!sid) return '🚫 Couldn’t identify the focused session.'
-  if (sid === getGeneralSession()) return '📌 This session is already anchored to General.'
+  if (!sid) return '🚫 Couldn’t identify the session to anchor.'
+  if (sid === getGeneralSession()) return '📌 That session is already anchored to General.'
   const t = getTopicBySession(sid)
   if (t && !t.closed) {
     await bot.api.sendMessage(group, '📌 This session moved to <b>General</b> — replies land there from now on.',
@@ -4244,18 +4256,34 @@ async function claimGeneralForFocused(): Promise<string> {
   }
   setGeneralSession(sid)
   void updateSessionPin()
-  const cwd = await paneCwd(focus.activePaneId).catch(() => null)
-  return `📌 <b>Anchored to General:</b> the focused session${cwd ? ` (<code>${escapeHtml(cwd)}</code>)` : ''} now lives here.`
+  const pane = await paneForSession(sid)
+  const cwd = pane ? await paneCwd(pane).catch(() => null) : null
+  return `📌 <b>Anchored to General:</b> the session${cwd ? ` (<code>${escapeHtml(cwd)}</code>)` : ''} now lives here.`
 }
 
-// /claim — anchor the focused session to this group's General topic.
+// Back-compat: anchor whatever session is currently focused (used by the 📌 anchor-lost button).
+async function claimGeneralForFocused(): Promise<string> {
+  if (!focus.activePaneId) return '🚫 No focused session to anchor.'
+  return claimGeneralFor((await sessionForPane(focus.activePaneId)) ?? '')
+}
+
+// /claim — anchor a session to this group's General topic. Run it INSIDE a session's topic to anchor
+// THAT session (unambiguous — no focus guessing, which anchored the wrong session before); run it in
+// General to anchor the focused session.
 bot.command('claim', async ctx => {
   if (!dmCommandGate(ctx)) return
-  if (!isTopicMode() || String(ctx.chat?.id) !== getGroupChatId() || typeof ctx.message?.message_thread_id === 'number') {
-    await ctx.reply('Run /claim in the command-center group’s General topic — it anchors the focused session there.')
+  if (!isTopicMode() || String(ctx.chat?.id) !== getGroupChatId()) {
+    await ctx.reply('Run /claim in the command-center group — inside a session’s topic to anchor that session, or in General to anchor the focused one.')
     return
   }
-  await ctx.reply(await claimGeneralForFocused(), { parse_mode: 'HTML' })
+  const thread = ctx.message?.message_thread_id
+  if (typeof thread === 'number') {
+    const sid = getSessionByThread(thread)
+    if (!sid) { await ctx.reply('🚫 This topic isn’t bound to a live session — nothing to anchor.'); return }
+    await ctx.reply(await claimGeneralFor(sid), { parse_mode: 'HTML' })
+  } else {
+    await ctx.reply(await claimGeneralForFocused(), { parse_mode: 'HTML' })
+  }
 })
 
 // /cost, /context relay session visibility info. (/session is the registry — below.)

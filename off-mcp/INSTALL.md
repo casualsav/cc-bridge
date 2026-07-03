@@ -425,6 +425,13 @@ Claude account (`claude-tg 1 work` → `CLAUDE_CONFIG_DIR=~/.claude-work`, see `
 ```sh
 claude-tg()   { tmux set -p @tg_bridge "${1:-1}" 2>/dev/null; if [ -n "$2" ]; then CLAUDE_CONFIG_DIR="$HOME/.claude-$2" claude --allow-dangerously-skip-permissions; else claude --allow-dangerously-skip-permissions; fi; }  # safe start, bypass on demand
 ```
+The daemon also drops a **`claude-tg` executable on PATH** (in `~/.bun/bin` or `~/.local/bin`) that
+does the same thing — so `claude-tg` works even in a shell that doesn't source `~/.bashrc` (e.g. a
+fresh tmux window under some configs, where the function alone gives `command not found`). The
+shell function still shadows it in interactive shells; the executable is the fallback. Both must run
+**inside tmux** (the executable warns if `$TMUX` is unset, since an unbridged session is the usual
+"I launched it but no topic appeared" cause).
+
 Then **tell the user:** launch work sessions with **`claude-tg`**. The `@tg_bridge` pane option is
 the bridge marker; the launch flag is the autonomy choice:
 - **`claude-tg`** uses `--allow-dangerously-skip-permissions` — Claude starts in a normal mode where

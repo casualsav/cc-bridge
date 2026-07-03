@@ -10,9 +10,9 @@
 // each watchdog keeps its own daemon alive between sessions / after a crash.
 import net from 'node:net'
 import { spawn, spawnSync } from 'node:child_process'
-import { readdirSync, openSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { readdirSync, openSync, existsSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, basename } from 'node:path'
 
 const CHANNELS_DIR = join(homedir(), '.claude', 'channels')
 
@@ -67,6 +67,20 @@ const daemonPath = findDaemon() ?? ''
 if (!daemonPath) { process.stderr.write('ensure-daemon: daemon.ts not found in plugin cache\n'); process.exit(1) }
 const daemonDir = dirname(daemonPath)
 const watchdogPath = join(daemonDir, 'watchdog.ts')
+const CURRENT_VER = basename(daemonDir)   // the newest cache version — what THIS ensure-daemon runs
+
+// The cache version a live watchdog is running, read from its command line (cross-platform via ps;
+// no /proc dependency). The watchdog's argv carries its full path `…/telegram/<ver>/watchdog.ts`,
+// so the version is right there — and since a watchdog only ever spawns the daemon from its own
+// version dir, the watchdog's version is a reliable proxy for the running daemon's version too (the
+// daemon's own argv is a bare `bun daemon.ts`, with the version only in its cwd). null if unreadable.
+function watchdogVersion(pid: number): string | null {
+  try {
+    const out = spawnSync('ps', ['-p', String(pid), '-o', 'args='], { encoding: 'utf8' }).stdout ?? ''
+    const m = out.match(/\/telegram\/(\d+\.\d+\.\d+)\/watchdog\.ts/)
+    return m ? m[1] : null
+  } catch { return null }
+}
 
 // Deps live in the cache dir and are shared by all instances, so bootstrap them once. A partial
 // cache copy (no node_modules) makes `bun daemon.ts` auto-install on the fly, which floats grammy
@@ -112,6 +126,23 @@ async function ensureInstance(stateDir: string, log: number): Promise<void> {
       if (wdPid > 1) process.kill(wdPid, 0)
       else wdPid = 0
     } catch { wdPid = 0 }
+    // Upgrade guard: a live watchdog from an OLDER cache version keeps respawning the OLD daemon
+    // forever — the SIGUSR1 nudge below (and the "daemon up → do nothing" path) both leave whatever
+    // version the watchdog itself runs in place, so a marketplace upgrade would never take effect
+    // (the daemon stays on stale code even though the cache has the new build; this is the §0.6
+    // stale-cache trap at the process level). If the running watchdog isn't the newest version,
+    // tear down watchdog + daemon and let the fresh-spawn path below bring up the current build.
+    if (wdPid) {
+      const liveVer = watchdogVersion(wdPid)
+      if (liveVer && liveVer !== CURRENT_VER) {
+        try { process.kill(wdPid, 'SIGKILL') } catch {}
+        try { const dp = parseInt(readFileSync(join(stateDir, 'daemon.pid'), 'utf8'), 10); if (dp > 1) process.kill(dp, 'SIGKILL') } catch {}
+        for (const f of ['daemon.sock', 'watchdog.pid', 'daemon.pid']) { try { unlinkSync(join(stateDir, f)) } catch {} }
+        await new Promise(r => setTimeout(r, 300))   // let the socket/pid files clear before the new watchdog boots
+        wdPid = 0
+        process.stderr.write(`ensure-daemon: replaced outdated watchdog (${liveVer} → ${CURRENT_VER}) for ${stateDir}\n`)
+      }
+    }
     if (wdPid && daemonDown && !canUsr1) {
       try { process.kill(wdPid, 'SIGTERM') } catch {}
       await new Promise(r => setTimeout(r, 300))   // let it unlink its pid file so the new one boots
