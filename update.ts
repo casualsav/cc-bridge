@@ -98,6 +98,23 @@ function newestSemverDir(): string | null {
   } catch { return null }
 }
 
+// Keep the newest `keep` version dirs (the live one + a couple of manual-rollback fallbacks) and
+// delete the rest. Nothing else prunes them, so daily auto-updates otherwise accrete a full
+// node_modules copy (tens of MB) per version forever. The SEMVER filter excludes .build-*/backup
+// dirs, and numeric collation ranks per-component (0.0.10 > 0.0.9). Per-dir rmSync is best-effort:
+// a prune failure must never fail an otherwise-successful update.
+function pruneOldVersions(keep = 3): string[] {
+  const removed: string[] = []
+  try {
+    const dirs = readdirSync(CACHE_BASE).filter(d => SEMVER.test(d) && existsSync(join(CACHE_BASE, d, 'daemon.ts')))
+    dirs.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))   // ascending — newest last
+    for (const d of dirs.slice(0, Math.max(0, dirs.length - keep))) {
+      try { rmSync(join(CACHE_BASE, d), { recursive: true, force: true }); removed.push(d) } catch {}
+    }
+  } catch {}
+  return removed
+}
+
 function killBridge(): void {
   for (const pat of ['telegram/[^/]*/daemon\\.ts', 'telegram/[^/]*/watchdog\\.ts']) {
     try { execSync(`pkill -f '${pat}'`) } catch {}
@@ -269,6 +286,9 @@ async function main(): Promise<void> {
     await sendFresh(`✅ Updated <code>${shortVer(oldGitref)}</code> → <code>${shortVer(newSha)}</code> (<b>v${newVer}</b>).${extra}`)
     // Prune build/backups, keep the immediate predecessor as a manual fallback.
     if (preBackup) { try { rmSync(preBackup, { recursive: true, force: true }) } catch {} }
+    // Reap stale version dirs the update just superseded (keep newest 3 incl. the one now live).
+    const pruned = pruneOldVersions(3)
+    if (pruned.length) log(`pruned ${pruned.length} old version dir(s): ${pruned.join(', ')}`)
     return
   }
 

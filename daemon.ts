@@ -34,7 +34,7 @@ import {
 import { exec, sleep, hashText } from './proc.ts'
 import { ghAccounts, ghInstalled, ghSwitch, ghLogout, runGhLogin, provisionGh, type GhAccount } from './github.ts'
 import {
-  capturePane, paneAlive, sendKeys, sendKeysLiteral, navigateDown, waitForSettle,
+  capturePane, capturePaneCached, invalidateCapture, paneAlive, sendKeys, sendKeysLiteral, navigateDown, waitForSettle,
   autoSizeWindowOf, paneCommand, paneCwd, PaneWatcher,
 } from './pane-io.ts'
 import type {
@@ -1164,7 +1164,9 @@ async function relayLoopTick(gen: number): Promise<void> {
   if (gen !== relayLoopGen || !focus.activePaneId || !TRANSCRIPT_OUTBOUND) return
   const paneId = focus.activePaneId
   let cap = ''
-  try { cap = await capturePane(paneId) } catch { /* transient capture miss — retry next tick */ }
+  // Reuse the PaneWatcher's recent capture of this same focused pane instead of spawning our own
+  // `tmux capture-pane` every tick; injection invalidates it, so it's never stale across an inject.
+  try { cap = await capturePaneCached(paneId) } catch { /* transient capture miss — retry next tick */ }
   const idle = cap !== '' && !detectWorking(cap) && !detectLimited(cap)
   relayIdleStreak = idle ? relayIdleStreak + 1 : 0
 
@@ -1282,10 +1284,12 @@ async function auxRelayTick(): Promise<void> {
     for (const k of [...auxPromptStates.keys()]) {
       if (!offMcpPanes.has(k)) auxPromptStates.delete(k)   // only drop dead panes; the focused pane KEEPS its record (onPaneEvent shares it now)
     }
-    for (const pane of [...offMcpPanes]) {
-      if (pane === focus.activePaneId) continue
-      await scanAuxPanePrompts(pane).catch(() => { /* transient (tmux) — retry next tick */ })
-    }
+    // Scan aux panes concurrently: each does its own `tmux capture-pane`, so a sequential await made
+    // one tick take O(N panes) round-trips and the next tick only reschedules after it finishes
+    // (below). Promise.all keeps prompt-detection latency flat regardless of open-topic count.
+    await Promise.all([...offMcpPanes]
+      .filter(pane => pane !== focus.activePaneId)
+      .map(pane => scanAuxPanePrompts(pane).catch(() => { /* transient (tmux) — retry next tick */ })))
   }
   if (TRANSCRIPT_OUTBOUND && isTopicMode()) {
     // Stamped panes resolve to their own transcript, so same-cwd siblings relay independently to
@@ -6010,6 +6014,16 @@ async function sweepDeletedTopics(): Promise<void> {
 }
 const TOPIC_SWEEP_MS = 2 * 60_000
 
+// ---- Callback-query dispatch ----
+// Every callback branch first authorizes the presser against the global allowlist. This centralizes
+// the check that was copy-pasted inline in each branch: it answers the callback with "Not authorized."
+// and returns false on deny, so a branch guard is just `if (!(await cbAuth(ctx))) return`.
+async function cbAuth(ctx: Context): Promise<boolean> {
+  if (loadAccess().allowFrom.includes(String(ctx.from?.id))) return true
+  await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+  return false
+}
+
 bot.on('callback_query:data', async ctx => {
   const data = ctx.callbackQuery.data
   // A button tap is a hands-on "I'm looking here now" signal — even stronger than a typed message.
@@ -6019,7 +6033,7 @@ bot.on('callback_query:data', async ctx => {
   // save the pane is back at the Claude prompt; either way the held message(s) are then delivered —
   // to Claude after a quit, or into the editor for "type anyway".
   if (data.startsWith('edq:') || data.startsWith('eds:') || data.startsWith('edt:')) {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) { await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {}); return }
+    if (!(await cbAuth(ctx))) return
     const pane = data.slice(4)
     editorCardPane.delete(pane)
     await ctx.editMessageReplyMarkup().catch(() => {})   // drop the buttons
@@ -6038,10 +6052,7 @@ bot.on('callback_query:data', async ctx => {
 
   // Pinned-message quick actions → the same pickers as /model, /effort, /mode, /settings.
   if (data === 'st:model' || data === 'st:effort' || data === 'st:mode' || data === 'st:settings') {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
+    if (!(await cbAuth(ctx))) return
     await ctx.answerCallbackQuery().catch(() => {})
     if (data === 'st:model') await doModelPicker(ctx)
     else if (data === 'st:effort') await doEffortPicker(ctx)
@@ -6052,10 +6063,7 @@ bot.on('callback_query:data', async ctx => {
 
   // /stream panel's cycle button — flip to the next mode and refresh the panel in place.
   if (data === 'stream:cycle') {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
+    if (!(await cbAuth(ctx))) return
     const access = loadAccess()
     access.replyMode = streamNext(replyMode())
     saveAccess(access)
@@ -6068,10 +6076,7 @@ bot.on('callback_query:data', async ctx => {
   // /budget panel's set button — drop a force-reply asking for the cap; the answer refreshes
   // the panel in place (panelMsgId rides along in the reply target).
   if (data === 'budget:set') {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
+    if (!(await cbAuth(ctx))) return
     await ctx.answerCallbackQuery().catch(() => {})
     const thread = ctx.callbackQuery.message?.message_thread_id
     const sent = await ctx.reply(
@@ -6084,10 +6089,7 @@ bot.on('callback_query:data', async ctx => {
 
   // /pin · /voice · /mcp panel buttons — toggle and refresh the panel in place.
   if (data === 'pin:toggle' || data === 'pin:refresh' || data === 'voice:toggle' || data === 'mcp:toggle') {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
+    if (!(await cbAuth(ctx))) return
     if (data === 'pin:toggle') {
       const access = loadAccess()
       access.sessionPin = access.sessionPin === false
@@ -6115,10 +6117,7 @@ bot.on('callback_query:data', async ctx => {
 
   // Pinned-card kill switch — same as /pin off (recoverable with /pin on).
   if (data === 'st:pinoff') {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
+    if (!(await cbAuth(ctx))) return
     const access = loadAccess()
     access.sessionPin = false
     saveAccess(access)
@@ -6129,10 +6128,7 @@ bot.on('callback_query:data', async ctx => {
 
   // Status-card readouts → /context and /cost, posted at the bottom.
   if (data === 'st:context' || data === 'st:cost') {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
+    if (!(await cbAuth(ctx))) return
     await ctx.answerCallbackQuery().catch(() => {})
     await doReadout(ctx, data === 'st:context' ? 'context' : 'cost')
     return
@@ -6141,10 +6137,7 @@ bot.on('callback_query:data', async ctx => {
   // Status-card session action → /compact (relay). st:clear stays handled for cards sent by
   // older versions: a stale pin's 🧹 still resets rather than dead-ending.
   if (data === 'st:compact' || data === 'st:clear') {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
+    if (!(await cbAuth(ctx))) return
     await ctx.answerCallbackQuery().catch(() => {})
     if (data === 'st:clear') { await confirmResetSession(ctx); return }
     const t = await commandTarget(ctx)
@@ -6156,10 +6149,7 @@ bot.on('callback_query:data', async ctx => {
   // /loop card buttons — wizard cancel, start, and stop/resume on the live card.
   const loopMatch = /^loop:(go|cancel|stopsoft|stopnow|resume):(.+)$/.exec(data)
   if (loopMatch) {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
+    if (!(await cbAuth(ctx))) return
     if (loopMatch[1] === 'go') {
       // Start pre-flights the check command (can take minutes) — answer the tap immediately and
       // let loopGo report refusals to the chat itself, or the callback would time out.
@@ -6176,10 +6166,7 @@ bot.on('callback_query:data', async ctx => {
   // /settings panel toggles → flip the setting and re-render the panel in place.
   const setMatch = /^set:(pin|replymode|ship|voice|batch|tts|confirmreset)$/.exec(data)
   if (setMatch) {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
+    if (!(await cbAuth(ctx))) return
     await ctx.answerCallbackQuery().catch(() => {})
     if (setMatch[1] === 'voice') {
       // Voice sub-panel (backend off/local/groq/openai + the local model picker) — was sent as
@@ -6219,10 +6206,7 @@ bot.on('callback_query:data', async ctx => {
   // Accounts sub-panel (settings → 👤 Accounts, or the /account command's buttons).
   const acctMatch = /^acct:(panel|back|add|rm:([A-Za-z0-9_-]+)|launch:([A-Za-z0-9_-]+))$/.exec(data)
   if (acctMatch) {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
+    if (!(await cbAuth(ctx))) return
     if (acctMatch[1] === 'back') {
       await ctx.answerCallbackQuery().catch(() => {})
       await ctx.editMessageText(settingsText(), { parse_mode: 'HTML', reply_markup: settingsKeyboard() }).catch(() => {})
@@ -6270,10 +6254,7 @@ bot.on('callback_query:data', async ctx => {
   // GitHub sub-panel (settings → 🐙 GitHub): login (device-code relay), switch, logout.
   const ghMatch = /^gh:(panel|back|add|install|switch:(\S+)|rm:(\S+))$/.exec(data)
   if (ghMatch) {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
+    if (!(await cbAuth(ctx))) return
     if (ghMatch[1] === 'back') {
       await ctx.answerCallbackQuery().catch(() => {})
       await ctx.editMessageText(settingsText(), { parse_mode: 'HTML', reply_markup: settingsKeyboard() }).catch(() => {})
@@ -6336,10 +6317,7 @@ bot.on('callback_query:data', async ctx => {
   // Voice-replies sub-panel taps: mode/engine selection + provisioning side effects.
   const ttsMatch = /^tts:(?:mode:(off|all)|eng:(piper|openai|elevenlabs)|pv:(\d)|(back))$/.exec(data)
   if (ttsMatch) {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
+    if (!(await cbAuth(ctx))) return
     await ctx.answerCallbackQuery().catch(() => {})
     if (ttsMatch[4]) {   // back
       await ctx.editMessageText(settingsText(), { parse_mode: 'HTML', reply_markup: settingsKeyboard() }).catch(() => {})
@@ -6374,10 +6352,7 @@ bot.on('callback_query:data', async ctx => {
 
   const voiceMatch = /^voice:(off|local|groq|openai|back|panel)$/.exec(data)
   if (voiceMatch) {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
+    if (!(await cbAuth(ctx))) return
     const choice = voiceMatch[1]
     if (choice === 'back') {
       await ctx.answerCallbackQuery().catch(() => {})
@@ -6408,10 +6383,7 @@ bot.on('callback_query:data', async ctx => {
   }
   const voiceModelMatch = /^voicemodel:(tiny|base|small|medium|large-v3|large-v3-turbo)$/.exec(data)
   if (voiceModelMatch) {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
+    if (!(await cbAuth(ctx))) return
     await ctx.answerCallbackQuery().catch(() => {})
     const model = voiceModelMatch[1]
     const { gpu } = probeHardware()
@@ -6435,10 +6407,7 @@ bot.on('callback_query:data', async ctx => {
   // run as usual); Push/PR run directly in the session cwd and report the result.
   const shipMatch = /^ship:(diff|commit|push|pr)$/.exec(data)
   if (shipMatch) {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
+    if (!(await cbAuth(ctx))) return
     const { paneId } = await targetPaneOf(ctx)
     if (!paneId) { await ctx.answerCallbackQuery({ text: 'No active session.' }).catch(() => {}); return }
     const chat = String(ctx.chat!.id)
@@ -6488,10 +6457,7 @@ bot.on('callback_query:data', async ctx => {
   // reset; it still pings at reset, with a manual Continue button.
   const disarmMatch = /^usage:disarm:([A-Za-z0-9_-]+)$/.exec(data)
   if (disarmMatch) {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
+    if (!(await cbAuth(ctx))) return
     const fireAt = disarmScheduledReset(disarmMatch[1])
     await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => {})
     if (!fireAt) {
@@ -6511,10 +6477,7 @@ bot.on('callback_query:data', async ctx => {
   // Bare "usage:arm" (pre-multi-account messages) reads as main.
   const armMatch = /^usage:arm(?::([A-Za-z0-9_-]+))?$/.exec(data)
   if (armMatch) {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
+    if (!(await cbAuth(ctx))) return
     const fireAt = armScheduledReset(armMatch[1] || 'main')
     if (!fireAt) {
       await ctx.answerCallbackQuery({ text: 'No pending reset — the limit may have already reset. Send "continue" to resume.', show_alert: true }).catch(() => {})
@@ -6532,10 +6495,7 @@ bot.on('callback_query:data', async ctx => {
 
   // "Continue" button on the usage-limit reset ping → type "continue" into the session.
   if (data === 'usage:continue') {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
+    if (!(await cbAuth(ctx))) return
     // Tapped in a session's topic → continue that session; General/DM → the focused one.
     const { paneId } = await targetPaneOf(ctx)
     if (!paneId) {
@@ -6553,10 +6513,7 @@ bot.on('callback_query:data', async ctx => {
   // Mode picker — apply a tapped mode
   const modeSet = /^mode:set:(default|acceptEdits|plan|auto|bypassPermissions)$/.exec(data)
   if (modeSet) {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
+    if (!(await cbAuth(ctx))) return
     const t = await commandTarget(ctx)
     if (!t) { await ctx.answerCallbackQuery().catch(() => {}); return }
     if (!onNormalPrompt(await capturePane(t.paneId))) {
@@ -6580,9 +6537,7 @@ bot.on('callback_query:data', async ctx => {
   // 🧷 Preferred-mode sub-panel — open the panel, go back to settings, or no-op (account header tap)
   if (data === 'defmode:noop') { await ctx.answerCallbackQuery().catch(() => {}); return }
   if (data === 'defmode:panel' || data === 'defmode:back') {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {}); return
-    }
+    if (!(await cbAuth(ctx))) return
     await ctx.answerCallbackQuery().catch(() => {})
     const toPanel = data === 'defmode:panel'
     await ctx.editMessageText(toPanel ? defaultModeText() : settingsText(), {
@@ -6594,9 +6549,7 @@ bot.on('callback_query:data', async ctx => {
   // does NOT touch the live session — /mode does that). Survives `claude update` and every relaunch.
   const defSet = /^defmode:set:([a-z0-9][a-z0-9_-]{0,15}):(default|acceptEdits|plan|auto|bypassPermissions)$/i.exec(data)
   if (defSet) {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {}); return
-    }
+    if (!(await cbAuth(ctx))) return
     const acct = accountByName(defSet[1])
     if (!acct) { await ctx.answerCallbackQuery({ text: 'Unknown account.' }).catch(() => {}); return }
     const mode = defSet[2] as CcMode
@@ -6610,10 +6563,7 @@ bot.on('callback_query:data', async ctx => {
   // /cost or /context confirmed while Claude was working — interrupt (Esc), then run it.
   const readoutMatch = /^readout:(cost|context|cancel)$/.exec(data)
   if (readoutMatch) {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
+    if (!(await cbAuth(ctx))) return
     if (readoutMatch[1] === 'cancel') {
       await ctx.answerCallbackQuery().catch(() => {})
       await ctx.editMessageText('Cancelled.').catch(() => {})
@@ -6633,10 +6583,7 @@ bot.on('callback_query:data', async ctx => {
   // Model picker — apply a tapped model alias
   const modelSet = /^model:set:(fable|opus|sonnet|haiku)$/.exec(data)
   if (modelSet) {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
+    if (!(await cbAuth(ctx))) return
     const alias = modelSet[1]
     const t = await commandTarget(ctx)
     if (!t) { await ctx.answerCallbackQuery().catch(() => {}); return }
@@ -6652,7 +6599,7 @@ bot.on('callback_query:data', async ctx => {
   // Effort picker — apply a tapped effort level
   const effortSet = /^effort:set:(\w+)$/.exec(data)
   if (effortSet && EFFORT_LEVELS.includes(effortSet[1])) {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) { await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {}); return }
+    if (!(await cbAuth(ctx))) return
     const t = await commandTarget(ctx)
     if (!t) { await ctx.answerCallbackQuery().catch(() => {}); return }
     const level = effortSet[1]
@@ -6670,7 +6617,7 @@ bot.on('callback_query:data', async ctx => {
   // Effort-change confirmation (the mid-conversation "Change effort level?" modal) — Yes applies it
   // (digit 1 + Enter, mirroring the generic prompt answerer), No/Esc cancels (keeps current level).
   if (data === 'effortconfirm:yes' || data === 'effortconfirm:no') {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) { await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {}); return }
+    if (!(await cbAuth(ctx))) return
     const yes = data === 'effortconfirm:yes'
     const pend = pendingEffortConfirm
     const level = pend?.level
@@ -6691,7 +6638,7 @@ bot.on('callback_query:data', async ctx => {
 
   // /update dashboard → bridge self-update (detached helper, with rollback).
   if (data === 'upd:bridge') {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) { await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {}); return }
+    if (!(await cbAuth(ctx))) return
     await ctx.answerCallbackQuery({ text: 'Updating bridge…' }).catch(() => {})
     // The dashboard message itself becomes the single status line — hand its id to the updater so it
     // edits in place through to ✅.
@@ -6703,7 +6650,7 @@ bot.on('callback_query:data', async ctx => {
 
   // /update dashboard → toggle bridge auto-update (apply new versions on the daily sweep, no tap).
   if (data === 'upd:auto') {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) { await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {}); return }
+    if (!(await cbAuth(ctx))) return
     const access = loadAccess()
     access.autoUpdate = access.autoUpdate !== true
     saveAccess(access)
@@ -6714,7 +6661,7 @@ bot.on('callback_query:data', async ctx => {
 
   // /update dashboard → update Claude itself in the background (offers a restart button on finish).
   if (data === 'upd:claude') {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) { await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {}); return }
+    if (!(await cbAuth(ctx))) return
     await ctx.answerCallbackQuery({ text: 'Updating Claude…' }).catch(() => {})
     await ctx.editMessageReplyMarkup().catch(() => {})   // spend the dashboard buttons
     void updateClaude(String(ctx.chat?.id))
@@ -6724,7 +6671,7 @@ bot.on('callback_query:data', async ctx => {
   // "♻️ Restart all sessions" under the stale-binary notice: restart every stale pane, then
   // health-check (restartAllStaleSessions reports back, with revive buttons for any that died).
   if (data === 'claudeupd:restartall') {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) { await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {}); return }
+    if (!(await cbAuth(ctx))) return
     await ctx.answerCallbackQuery({ text: 'Restarting…' }).catch(() => {})
     await ctx.editMessageReplyMarkup().catch(() => {})
     void restartAllStaleSessions(String(ctx.chat?.id))
@@ -6734,7 +6681,7 @@ bot.on('callback_query:data', async ctx => {
   // "▶️ Resume <name>" under a failed health check: respawn the session in its previous topic.
   const reviveMatch = /^claudeupd:revive:([0-9a-f]+)$/.exec(data)
   if (reviveMatch) {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) { await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {}); return }
+    if (!(await cbAuth(ctx))) return
     const sid = reviveMatch[1]
     const t = getTopicBySession(sid)
     if (!t) { await ctx.answerCallbackQuery({ text: 'No topic mapping for this session — start it with /new.' }).catch(() => {}); return }
@@ -6762,7 +6709,7 @@ bot.on('callback_query:data', async ctx => {
   // "Restart session now" under a finished Claude update.
   const claudeRestartMatch = /^claudeupd:restart(?::(%\d+))?$/.exec(data)
   if (claudeRestartMatch) {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) { await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {}); return }
+    if (!(await cbAuth(ctx))) return
     await ctx.answerCallbackQuery({ text: 'Restarting…' }).catch(() => {})
     await ctx.editMessageReplyMarkup().catch(() => {})
     const pane = claudeRestartMatch[1]   // pane-targeted (stale-session notice) or the focused one
@@ -6774,10 +6721,7 @@ bot.on('callback_query:data', async ctx => {
   // /new in a topic → Reset this chat / New session (sibling in this project).
   // /new-in-General buttons: spawn a session (own topic) in the offered folder, or prompt for one.
   if (data === 'newgo' || data === 'newask') {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
+    if (!(await cbAuth(ctx))) return
     if (data === 'newask') {
       await ctx.answerCallbackQuery().catch(() => {})
       await ctx.editMessageReplyMarkup().catch(() => {})
@@ -6800,10 +6744,7 @@ bot.on('callback_query:data', async ctx => {
   // DM /new with no running session → "start one?" tap. The folder is the persisted last session
   // cwd (no live pane to ask); topic mode gives the new session its own topic via discovery.
   if (data === 'newstartgo') {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
+    if (!(await cbAuth(ctx))) return
     const dir = lastSessionCwd()
     if (!dir) { await ctx.answerCallbackQuery({ text: 'That folder is gone — use ✏️ Specify folder.' }).catch(() => {}); return }
     await ctx.answerCallbackQuery({ text: 'Starting…' }).catch(() => {})
@@ -6818,10 +6759,7 @@ bot.on('callback_query:data', async ctx => {
   // becomes the base session (discovery sees the anchor and skips topic creation — see
   // ensureSessionTopic). Folder = last known session cwd; without one, ask (anchored newsession).
   if (data === 'newstartgeneral') {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
+    if (!(await cbAuth(ctx))) return
     if (await generalAnchorPane()) {
       await ctx.answerCallbackQuery({ text: 'General already has a session.' }).catch(() => {})
       return
@@ -6848,10 +6786,7 @@ bot.on('callback_query:data', async ctx => {
   }
 
   if (data === 'newtopic:reset' || data === 'newtopic:spawn') {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
+    if (!(await cbAuth(ctx))) return
     const t = await commandTarget(ctx)
     if (!t) { await ctx.answerCallbackQuery().catch(() => {}); return }
     if (data === 'newtopic:reset') {
@@ -6874,10 +6809,7 @@ bot.on('callback_query:data', async ctx => {
 
   // /clear + /reset confirmation: a plain Yes/No reset-in-place (no "launch new" branch).
   if (data === 'clearconfirm:yes' || data === 'clearconfirm:no') {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
+    if (!(await cbAuth(ctx))) return
     if (data === 'clearconfirm:no') {
       await ctx.answerCallbackQuery({ text: 'Kept.' }).catch(() => {})
       await ctx.editMessageText('✖️ Cancelled — conversation kept.').catch(() => {})
@@ -6894,10 +6826,7 @@ bot.on('callback_query:data', async ctx => {
 
   // Confirm/cancel exiting the only session (see the /exit handler's only-session guard).
   if (data === 'exitconfirm:yes' || data === 'exitconfirm:no') {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
+    if (!(await cbAuth(ctx))) return
     if (data === 'exitconfirm:no') {
       await ctx.answerCallbackQuery({ text: 'Kept.' }).catch(() => {})
       await ctx.editMessageText('✖️ Exit cancelled — session kept.').catch(() => {})
@@ -6918,10 +6847,7 @@ bot.on('callback_query:data', async ctx => {
   // Confirm/cancel overwriting an existing file from /md (the typed contents are stashed by id).
   const mdOver = /^mdoverwrite:(yes|no):([0-9a-f]+)$/.exec(data)
   if (mdOver) {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
+    if (!(await cbAuth(ctx))) return
     const [, decision, id] = mdOver
     const pending = mdOverwritePending.get(id)
     mdOverwritePending.delete(id)
@@ -6947,10 +6873,7 @@ bot.on('callback_query:data', async ctx => {
   // Legacy stop confirmation — /stop now interrupts immediately, but confirm cards sent by
   // older versions may still be tapped.
   if (data === 'stopconfirm:yes') {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
+    if (!(await cbAuth(ctx))) return
     const t = await commandTarget(ctx)
     if (!t) { await ctx.answerCallbackQuery().catch(() => {}); return }
     await ctx.answerCallbackQuery({ text: 'Interrupting…' }).catch(() => {})
@@ -6963,10 +6886,7 @@ bot.on('callback_query:data', async ctx => {
   // "🗑 N" on the /schedule cancel list → drop that scheduled message, refresh the list.
   const schedCancelMatch = /^schedcancel:([0-9a-f]+)$/.exec(data)
   if (schedCancelMatch) {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
+    if (!(await cbAuth(ctx))) return
     const before = scheduledCount()
     cancelScheduled(schedCancelMatch[1])
     const existed = scheduledCount() < before
@@ -6982,10 +6902,7 @@ bot.on('callback_query:data', async ctx => {
   // in-place branch; tcask = force-reply prompt.
   const tcMatch = /^tc(go|ask|wt|br):(\d+)$/.exec(data)
   if (tcMatch) {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
+    if (!(await cbAuth(ctx))) return
     await ctx.answerCallbackQuery().catch(() => {})
     const thread = Number(tcMatch[2])
     const chat = String(ctx.chat?.id)
@@ -7072,10 +6989,7 @@ bot.on('callback_query:data', async ctx => {
 
   // 📌 on the anchor-lost notice (or /claim): anchor the focused session to General.
   if (data === 'claimgeneral') {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
+    if (!(await cbAuth(ctx))) return
     await ctx.answerCallbackQuery().catch(() => {})
     const note = await claimGeneralForFocused()
     await ctx.editMessageText(note, { parse_mode: 'HTML' }).catch(() => {})
@@ -7086,10 +7000,7 @@ bot.on('callback_query:data', async ctx => {
   // variant also flips topicOnEnd=delete so future ended sessions vanish without asking.
   const topicDel = /^topicdel(always)?:(\d+)$/.exec(data)
   if (topicDel) {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
+    if (!(await cbAuth(ctx))) return
     const group = getGroupChatId()
     if (!group) { await ctx.answerCallbackQuery({ text: 'Not in topic mode.' }).catch(() => {}); return }
     if (topicDel[1]) {
@@ -7110,10 +7021,7 @@ bot.on('callback_query:data', async ctx => {
   }
 
   if (data === 'sched:add') {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
+    if (!(await cbAuth(ctx))) return
     await ctx.answerCallbackQuery().catch(() => {})
     const { paneId, thread } = await targetPaneOf(ctx)
     const label = paneId ? (sessionNames.get(paneId) || await paneLabel(paneId)) : 'this session'
@@ -7127,10 +7035,7 @@ bot.on('callback_query:data', async ctx => {
   // Login-method choice (detectLoginPrompt / relayLoginChoice) — `login:N` drives the Nth option.
   const loginMatch = /^login:(\d+)$/.exec(data)
   if (loginMatch) {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
+    if (!(await cbAuth(ctx))) return
     await ctx.answerCallbackQuery().catch(() => {})
     const paneId = focus.activePaneId
     if (!paneId || !focus.paneWatcher) { await ctx.reply('No active session to drive.'); return }
@@ -7157,10 +7062,7 @@ bot.on('callback_query:data', async ctx => {
   // picker was up (held in editorHeld by the inbound guard).
   const resumeSelMatch = /^resumesel:(\d+):(.+)$/.exec(data)
   if (resumeSelMatch) {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
+    if (!(await cbAuth(ctx))) return
     await ctx.answerCallbackQuery().catch(() => {})
     const idx = Number(resumeSelMatch[1]) - 1
     const pane = resumeSelMatch[2]
@@ -7194,10 +7096,7 @@ bot.on('callback_query:data', async ctx => {
   // the topic if its pane is already gone.
   const resumeHereMatch = /^resumehere:([0-9a-fA-F-]+):(\d+)$/.exec(data)
   if (resumeHereMatch) {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
+    if (!(await cbAuth(ctx))) return
     await ctx.answerCallbackQuery().catch(() => {})
     const id = resumeHereMatch[1]
     const thread = Number(resumeHereMatch[2])
@@ -7224,10 +7123,7 @@ bot.on('callback_query:data', async ctx => {
 
   const resumeMatch = /^resume:([0-9a-fA-F-]+)$/.exec(data)
   if (resumeMatch) {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
+    if (!(await cbAuth(ctx))) return
     if (!isTopicMode() && focus.activePaneId) {
       await ctx.answerCallbackQuery({ text: 'A session is already running.' }).catch(() => {})
       await ctx.reply('A session is already running, and this DM drives a single session. /exit it first, or /bind a forum group to run several.').catch(() => {})
@@ -7262,10 +7158,7 @@ bot.on('callback_query:data', async ctx => {
   // currently on screen, if any. Disarms automatically when the turn ends.
   const pstormMatch = /^pstorm:(%\d+)$/.exec(data)
   if (pstormMatch) {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
+    if (!(await cbAuth(ctx))) return
     const pane = pstormMatch[1]
     const storm = permStorms.get(pane) ?? { count: 2, armed: false }
     storm.armed = true
@@ -7283,10 +7176,7 @@ bot.on('callback_query:data', async ctx => {
 
   const ppermMatch = /^pperm:(\d+)$/.exec(data)
   if (ppermMatch) {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
+    if (!(await cbAuth(ctx))) return
     const { paneId } = await targetPaneOf(ctx)
     if (!paneId) {
       await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {})
@@ -8521,6 +8411,39 @@ setTimeout(() => void sweepSessionVersions(), 3 * 60_000).unref()
 setInterval(() => void sweepSessionVersions(), 3_600_000).unref()
 setTimeout(() => void sweepUpdateChecks(), 5 * 60_000).unref()        // once shortly after boot…
 setInterval(() => void sweepUpdateChecks(), 24 * 3_600_000).unref()   // …then daily
+
+// Dead-pane state GC. The per-pane Maps (dedup/cache/alert state keyed by tmux pane id) are never
+// cleaned when a pane dies, so a long-lived daemon with session churn slowly accretes dead-pane
+// entries. Sweep periodically: any '%'-prefixed key (tmux pane-id form) not among tmux's live panes
+// is dead → forget it across every map. Non-pane keys (e.g. the '∅' null-pane sentinel) are left
+// alone. On any tmux read failure — or a suspicious empty list — we skip the sweep entirely, never
+// deleting state on uncertainty. Structural typing lets one array hold Maps of differing value types.
+// compactWatches is deliberately NOT swept: its tick() self-manages (re-checks the map, self-
+// terminates on delete) and its own deletion performs the "✅ Compacted" card teardown — a bare
+// sweep-delete would strand the "🗜️ Compacting…" card forever. Entries are short-lived + self-cleaning.
+const PANE_STATE_MAPS: { delete(k: string): boolean; keys(): IterableIterator<string> }[] = [
+  resumeRelayed, paneTranscriptCache, thinkingPendingUntil, stuckDumpAt, editorHeld,
+  modelUnavailAlerted, staleSessionNotified, shipFooterFp, auxPromptStates,
+]
+function forgetPane(paneId: string): void {
+  for (const m of PANE_STATE_MAPS) m.delete(paneId)
+  invalidateCapture(paneId)          // the shared capture cache is pane-keyed too — don't leak it
+}
+async function sweepDeadPaneState(): Promise<void> {
+  // Snapshot the keys BEFORE listing panes: a pane created (and given state) in the gap between the
+  // exec and the scan would otherwise be absent from `live` and wrongly forgotten. Reversed, the only
+  // failure is skipping a pane that died in the gap — which the next sweep catches.
+  const seen = new Set<string>()
+  for (const m of PANE_STATE_MAPS) for (const k of m.keys()) seen.add(k)
+  let live: Set<string>
+  try {
+    const { stdout } = await exec('tmux', ['list-panes', '-a', '-F', '#{pane_id}'], { timeout: 3000 })
+    live = new Set(stdout.split('\n').map(s => s.trim()).filter(Boolean))
+  } catch { return }                 // can't enumerate panes → do nothing rather than risk live state
+  if (live.size === 0) return        // empty result is far likelier a tmux hiccup than "all dead"
+  for (const k of seen) if (k.startsWith('%') && !live.has(k)) forgetPane(k)
+}
+setInterval(() => void sweepDeadPaneState(), 5 * 60_000).unref()
 
 // Budget tracking.
 setInterval(() => void sweepBudget(), BUDGET_SWEEP_MS).unref()

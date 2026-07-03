@@ -32,6 +32,10 @@ function readRegistry(): Record<string, string> {
   } catch { return {} }
 }
 
+function writeRegistry(reg: Record<string, string>): void {
+  writeFileSync(accountsFile, JSON.stringify(reg, null, 2) + '\n', { mode: 0o600 })
+}
+
 // Every account, main first. Stable order (registry insertion order) so pickers don't reshuffle.
 export function listAccounts(): Account[] {
   return [MAIN_ACCOUNT, ...Object.entries(readRegistry()).map(([name, configDir]) => ({ name, configDir }))]
@@ -77,7 +81,7 @@ export function addAccount(name: string): { ok: true; account: Account } | { ok:
   try {
     healAccountConfig(configDir)
     const reg = { ...readRegistry(), [name]: configDir }
-    writeFileSync(accountsFile, JSON.stringify(reg, null, 2) + '\n', { mode: 0o600 })
+    writeRegistry(reg)
   } catch (e) { return { ok: false, error: String(e) } }
   return { ok: true, account }
 }
@@ -87,7 +91,7 @@ export function removeAccount(name: string): boolean {
   const reg = readRegistry()
   if (!reg[name]) return false
   delete reg[name]
-  try { writeFileSync(accountsFile, JSON.stringify(reg, null, 2) + '\n', { mode: 0o600 }) } catch { return false }
+  try { writeRegistry(reg) } catch { return false }
   return true
 }
 
@@ -103,7 +107,7 @@ export function renameAccount(oldName: string, newName: string): { ok: true; acc
   const configDir = reg[oldName]
   const next: Record<string, string> = {}
   for (const [k, v] of Object.entries(reg)) next[k === oldName ? newName : k] = v   // preserve order
-  try { writeFileSync(accountsFile, JSON.stringify(next, null, 2) + '\n', { mode: 0o600 }) } catch (e) { return { ok: false, error: String(e) } }
+  try { writeRegistry(next) } catch (e) { return { ok: false, error: String(e) } }
   return { ok: true, account: { name: newName, configDir } }
 }
 

@@ -11,8 +11,7 @@
 // user-facing sends.
 import type { Bot, Transformer } from 'grammy'
 import { AsyncLocalStorage } from 'node:async_hooks'
-
-const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
+import { sleep } from './proc.ts'
 
 // Methods that create or modify a visible message — the ones that count toward the per-chat flood
 // limit, so the governor paces them. sendChatAction (typing) is exempt from the limit AND high-

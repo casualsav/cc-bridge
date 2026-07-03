@@ -1,4 +1,4 @@
-import { chmodSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { chmodSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -89,13 +89,32 @@ export function makeLineReader<T = unknown>(
 export function computeCodeFingerprint(dir: string): string {
   try {
     const files = readdirSync(dir).filter(f => f.endsWith('.ts')).sort()
+    // Cheap change-signature (name:size:mtime, no file bodies). A plugin version dir's contents never
+    // change after install, so when this matches a sidecar we wrote earlier the cached content-hash is
+    // still valid — letting a second process in the same dir (the daemon after the shim, or a restart)
+    // skip re-reading the whole 1.3MB tree on every start.
+    const sig = files.map(f => { const s = statSync(join(dir, f)); return `${f}:${s.size}:${Math.floor(s.mtimeMs)}` }).join('\n')
+    const sidecar = join(dir, '.fingerprint')   // not a .ts file, so it never feeds back into `files`
+    try {
+      const cached = JSON.parse(readFileSync(sidecar, 'utf8')) as { sig: string; fp: string }
+      if (cached.sig === sig && cached.fp) return cached.fp
+    } catch {}   // missing/torn/stale sidecar → recompute below
     const h = createHash('sha256')
     for (const f of files) {
       h.update(f); h.update('\0'); h.update(readFileSync(join(dir, f)))
     }
-    return h.digest('hex').slice(0, 16)
+    const fp = h.digest('hex').slice(0, 16)
+    // Persist via tmp+rename so a shim and daemon computing concurrently at startup can't read a torn
+    // sidecar. A write failure (read-only cache dir) is non-fatal: return the real hash, just don't
+    // cache it — never return '' here, since ''==''' would mask a genuine stale-code upgrade.
+    try {
+      const tmp = `${sidecar}.${process.pid}`
+      writeFileSync(tmp, JSON.stringify({ sig, fp }), { mode: 0o644 })
+      renameSync(tmp, sidecar)
+    } catch {}
+    return fp
   } catch {
-    return ''
+    return ''   // dir unreadable — callers treat '' as "don't restart"
   }
 }
 

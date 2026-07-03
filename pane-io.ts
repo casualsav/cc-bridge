@@ -25,6 +25,7 @@ export async function paneAlive(paneId: string): Promise<boolean> {
 export async function sendKeys(paneId: string, keys: string[]): Promise<boolean> {
   if (!(await paneAlive(paneId))) return false
   await exec('tmux', ['send-keys', '-t', paneId, ...keys], { timeout: 2000 })
+  invalidateCapture(paneId)   // pane state just changed — force the next shared read fresh
   return true
 }
 
@@ -34,6 +35,7 @@ export async function sendKeys(paneId: string, keys: string[]): Promise<boolean>
 export async function sendKeysLiteral(paneId: string, text: string): Promise<boolean> {
   if (!(await paneAlive(paneId))) return false
   await exec('tmux', ['send-keys', '-l', '-t', paneId, '--', text], { timeout: 2000 })
+  invalidateCapture(paneId)   // pane state just changed — force the next shared read fresh
   return true
 }
 
@@ -122,6 +124,24 @@ export async function paneCwd(paneId: string): Promise<string | null> {
   } catch { return null }
 }
 
+// Short-TTL shared capture of a pane's VISIBLE contents. The relay tick reads the focused pane every
+// ~1.5s while its PaneWatcher already captures it every 800ms; capturePaneCached lets the relay reuse
+// the watcher's recent capture (primed below) instead of spawning its own `tmux capture-pane`.
+// Deliberately NOT used by PaneWatcher.tick / waitForSettle, which need FRESH reads to detect change.
+// A key injection invalidates the entry (sendKeys/sendKeysLiteral/withInjection) so a stale
+// pre-injection capture can never show an already-answered prompt and drive a double-inject.
+const CAPTURE_TTL_MS = 700
+const _captureCache = new Map<string, { at: number; text: string }>()
+export function invalidateCapture(paneId: string): void { _captureCache.delete(paneId) }
+function primeCapture(paneId: string, text: string): void { _captureCache.set(paneId, { at: Date.now(), text }) }
+export async function capturePaneCached(paneId: string): Promise<string> {
+  const hit = _captureCache.get(paneId)
+  if (hit && Date.now() - hit.at < CAPTURE_TTL_MS) return hit.text
+  const text = await capturePane(paneId)
+  primeCapture(paneId, text)
+  return text
+}
+
 // PaneWatcher — ONE poll loop per active session (opus-direct Block C). Captures the pane every
 // 800ms; when the content hash changes it fires onEvent, and onPoll fires every tick (even when
 // unchanged) to drive a live working signal. All daemon coupling enters through the constructor
@@ -150,7 +170,9 @@ export class PaneWatcher {
     this.injecting = true
     try { return await fn() }
     finally {
-      try { this.lastHash = hashText(await capturePane(this.paneId)) } catch {}
+      // Re-baseline the change-detection hash AND refresh the shared cache with the post-injection
+      // state, so a reader that runs right after doesn't reuse a pre-injection capture.
+      try { const t = await capturePane(this.paneId); primeCapture(this.paneId, t); this.lastHash = hashText(t) } catch {}
       this.injecting = false
     }
   }
@@ -160,6 +182,7 @@ export class PaneWatcher {
     let text: string
     try { text = await capturePane(this.paneId) }
     catch { this.stop(); this.onDead(); return }
+    primeCapture(this.paneId, text)     // write-through: let the relay tick reuse this fresh capture
     this.onPoll?.(text)                 // every poll — a live working signal even when static
     const h = hashText(text)
     if (h === this.lastHash) return
