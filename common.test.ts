@@ -44,7 +44,7 @@ test('writeJsonFile / readJsonFile round-trip an object', () => {
   try {
     const p = join(dir, 'state.json')
     writeJsonFile(p, { x: 1, y: ['a', 'b'] })
-    expect(readJsonFile(p, null)).toEqual({ x: 1, y: ['a', 'b'] })
+    expect(readJsonFile<unknown>(p, null)).toEqual({ x: 1, y: ['a', 'b'] })
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
