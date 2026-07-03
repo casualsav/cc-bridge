@@ -286,6 +286,12 @@ export type PermissionPrompt = { question: string; preview: string; options: Per
 
 const PERM_FOOTER = /esc to cancel\s*·\s*tab to amend/i
 const PERM_QUESTION = /^(do you want to .+\?)$/i
+// A generic confirm-prompt title: any line ending in "?". PERM_QUESTION is tried first so the
+// classic "Do you want to …?" prompt is handled byte-identically; PERM_TITLE then catches the
+// other confirm shapes that share the "Esc to cancel · Tab to amend" footer + Yes/No options but
+// phrase the title differently — e.g. the dynamic-workflow prompt's "Run a dynamic workflow?".
+// The Yes/No option guard downstream keeps this generous match from firing on numbered lists.
+const PERM_TITLE = /\?$/
 const PERM_OPT = /^\s*(?:❯\s*)?(\d+)\.\s+(.+?)\s*$/
 // A dashed diff divider (skipped inside the preview); a solid ──── box rule ends it.
 const DASH_DIVIDER = /^[\s╌┄┈─—-]*$/
@@ -319,21 +325,41 @@ export function detectPermissionPrompt(paneText: string): PermissionPrompt | nul
   const labels = options.map(o => o.label.toLowerCase())
   if (!labels.some(l => l.startsWith('yes')) || !labels.some(l => l.startsWith('no'))) return null
 
-  // The "Do you want …?" question just above the options.
+  // The prompt's title/question. Two shapes exist and both must work:
+  //  • classic "Do you want to <do X>?" — the title sits DIRECTLY above the options, with any
+  //    action preview (a diff/command) above it; and
+  //  • confirm-with-body (e.g. "Run a dynamic workflow?") — the title HEADS the block with a
+  //    description/warning body BETWEEN it and the options.
+  // So don't assume the title is adjacent to the options or phrased "Do you want…": scan upward
+  // for the nearest "?"-terminated line, bounded (stop at the ● tool header / solid modal rule,
+  // or after ~16 non-blank lines) so scrollback can't supply a stray question. PERM_QUESTION is
+  // tried first to keep classic prompts byte-identical (its title is line 1 of the scan, so it
+  // matches immediately); PERM_TITLE generalises to the rest. The Yes/No option guard above is
+  // what makes this broad title match safe from false positives.
   let question = '', questionIdx = -1
-  for (let i = topOptIdx - 1; i >= 0; i--) {
-    const t = lines[i].trim()
-    if (!t) continue
+  for (let i = topOptIdx - 1, scanned = 0; i >= 0 && scanned < 16; i--) {
+    const raw = lines[i]
+    const t = raw.trim()
+    if (!t || BOXY_LINE.test(raw) || DASH_DIVIDER.test(raw)) continue   // blanks / borders don't count
+    if (SOLID_RULE.test(raw) || /^\s*●/.test(raw)) break                // modal top / tool header bounds the block
+    scanned++
     const m = t.match(PERM_QUESTION)
-    if (m) { question = m[1].trim(); questionIdx = i }
-    break
+    if (m) { question = m[1].trim(); questionIdx = i; break }
+    if (PERM_TITLE.test(t) && t.length <= 200) { question = t.replace(/^[?❓]\s*/, '').trim(); questionIdx = i; break }
   }
-  if (!question) return null
+  if (!question || questionIdx < 0) return null
 
-  // Preview: the action block above the question — clean lines up to the box's solid rule
-  // or the ● tool header, skipping dashed diff rulers. Best-effort, capped.
+  // Preview: prefer the body BETWEEN the title and the options (the confirm-with-body shape — the
+  // description + token warning under "Run a dynamic workflow?"). Fall back to the action block
+  // ABOVE the title (the classic shape — the tool diff/command). Best-effort, capped.
   const preview: string[] = []
-  for (let i = questionIdx - 1; i >= 0 && preview.length < 8; i--) {
+  for (let i = questionIdx + 1; i < topOptIdx && preview.length < 8; i++) {
+    const raw = lines[i]
+    if (DASH_DIVIDER.test(raw) || BOXY_LINE.test(raw)) continue
+    const clean = raw.replace(/^[\s│╭╮╰╯>❯]*/, '').replace(/[\s│]*$/, '').trim()
+    if (clean) preview.push(clean)
+  }
+  if (preview.length === 0) for (let i = questionIdx - 1; i >= 0 && preview.length < 8; i--) {
     const raw = lines[i]
     if (SOLID_RULE.test(raw) || /^\s*●/.test(raw)) break
     if (DASH_DIVIDER.test(raw)) continue

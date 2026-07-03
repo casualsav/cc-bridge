@@ -271,6 +271,30 @@ test('detectPermissionPrompt ignores a plain numbered list (no Yes/No shape)', (
   expect(detectPermissionPrompt(pane)).toBeNull()
 })
 
+test('detectPermissionPrompt handles a confirm prompt whose title heads a body block (dynamic-workflow shape)', () => {
+  // The title "Run a dynamic workflow?" is NOT adjacent to the options — a description +
+  // token-warning body (which itself contains a numbered "1. Review" line) sits between them.
+  const pane = [
+    '● Workflow(Adversarial pre-implementation review of the Phase-1 model design)',
+    '────────────────────────────────────────────',
+    ' Run a dynamic workflow?',
+    '  Adversarial pre-implementation review of the Phase-1 polymorphic Offering model design',
+    '  This dynamic workflow will spin up multiple subagents across the following phases:',
+    '    1. Review — 4 independent adversarial lenses on the schema/migration design',
+    '  Dynamic workflows can use a lot of tokens quickly by running many subagents in parallel.',
+    '  ❯ 1. Yes, run it',
+    '    2. View raw script',
+    '    3. No',
+    '  Esc to cancel · Tab to amend',
+    '  ctrl+g to edit script in $EDITOR',
+  ].join('\n')
+  const p = detectPermissionPrompt(pane)
+  expect(p).not.toBeNull()
+  expect(p!.question).toBe('Run a dynamic workflow?')                       // scanned past the body, not "Do you want…"
+  expect(p!.options.map(o => o.label)).toEqual(['Yes, run it', 'View raw script', 'No'])  // body "1. Review" excluded
+  expect(p!.preview).toContain('adversarial lenses')                        // body captured as the preview
+})
+
 test('detectLoginPrompt parses the login-method menu (Esc-to-cancel footer only)', () => {
   const pane = [
     '  Login',
