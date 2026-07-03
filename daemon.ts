@@ -65,7 +65,7 @@ import {
   reconcileTopics, refreshTopicTitles, topicThreadFor, emitTopicTyping, armTopicTyping, stopTopicTyping, outboundTargetsFor,
   stampPaneSession, topicBranchCache, generalAnchorLost,
   setPaneRestarting, isPaneRestarting, releasePaneSession, reopenSessionTopic,
-  retriggerTopicTyping, recreateDeletedTopic,
+  retriggerTopicTyping,
 } from './topic-runtime.ts'
 import { startWebapp, type SettingsView as WebappSettingsView, type UsageView as WebappUsageView, type DiffView as WebappDiffView } from './webapp.ts'
 import { startTunnel, ensureCloudflared, tailscaleFunnelUrl, type Tunnel } from './tunnel.ts'
@@ -1150,14 +1150,13 @@ async function deliverRelayReply(paneId: string, target: { chat: string; thread?
     releaseTyping(target.thread)
   } catch (e) {
     if (!(e instanceof TopicThreadGoneError) || target.thread == null) { process.stderr.write(`daemon: relay send failed: ${e}\n`); return }
+    // The topic was DELETED out from under a live session (send → "message thread not found").
+    // Deleting a topic is always a deliberate, conscious action, so it's permanent: tear the
+    // session down (exit it) rather than recreate the tab. teardownDeletedTopic markTopicDeleted's
+    // the sid + the liveness gate then keeps the ended pane from being re-adopted. The reply is
+    // lost with the topic — that's the point of a delete.
     const sid = await sessionForPane(paneId)
-    const cwd = await paneCwd(paneId).catch(() => null)
-    if (!sid || !cwd) { process.stderr.write(`daemon: relay send failed (topic gone; no session/cwd to recreate)\n`); return }
-    sessionPins.delete(`topic:${target.thread}`); pinTextCache.delete(`topic:${target.thread}`); persistSessionPins()
-    const fresh = await recreateDeletedTopic(sid, cwd, target.thread)
-    if (fresh == null) { process.stderr.write(`daemon: relay send failed (topic gone; recreate suppressed/failed)\n`); return }
-    try { await sendAgentText([target.chat], text, fresh); releaseTyping(fresh) }
-    catch (e2) { process.stderr.write(`daemon: relay resend after topic recreate failed: ${e2}\n`) }
+    if (sid) { process.stderr.write(`daemon: relay hit deleted topic ${target.thread} → exiting session ${sid}\n`); await handleTopicThreadGone(sid, target.thread) }
   }
 }
 
@@ -2979,7 +2978,13 @@ async function injectSlash(paneId: string, watcher: PaneWatcher | null, command:
 // Enter is split out behind a settle gate: a batched `/exit`+Enter can outrun a NON-focused topic
 // pane's TUI and leave the command typed-but-unsubmitted (the topic-pane paste→submit race), so the
 // topic gets marked closed while the session keeps running — and its next outbound reopens the tab.
-async function exitSessionPane(pane: string): Promise<void> {
+async function exitSessionPane(pane: string, reason = 'unspecified'): Promise<void> {
+  // Trace EVERY session exit with its reason + call site. A session exiting on its own has been
+  // reported (the General session, unprompted) — this makes the next occurrence diagnosable: the
+  // log shows which path typed /exit (or, if there's NO exitSessionPane log around the death, it
+  // was claude crashing on its own, not the bridge).
+  const site = (new Error().stack ?? '').split('\n').slice(2, 4).map(l => l.trim()).join(' <- ')
+  process.stderr.write(`daemon: exitSessionPane(${pane}) reason=${reason} | ${site}\n`)
   const watcher = pane === focus.activePaneId ? focus.paneWatcher : null
   const run = async () => {
     await sendKeys(pane, ['/exit'])
@@ -5920,7 +5925,7 @@ bot.on('message:forum_topic_closed', async ctx => {
   markTopicClosePending(sid)           // suppress the lazy-reopen until /exit lands — else trailing outbound flaps it open
   const pane = await paneForSession(sid)
   if (!pane || !(await paneAlive(pane))) return                           // session already gone
-  await exitSessionPane(pane)                                             // settle-gated /exit (a non-focused pane drops a batched submit)
+  await exitSessionPane(pane, 'user-closed-topic')                        // settle-gated /exit (a non-focused pane drops a batched submit)
   await ctx.reply('🏁 Topic closed — exiting its session.').catch(() => {})
   process.stderr.write(`daemon: user closed topic ${thread} → exited session ${sid} (pane ${pane})\n`)
 })
@@ -5950,7 +5955,7 @@ async function teardownDeletedTopic(group: string, t: { sessionId: string; threa
   sessionPins.delete(`topic:${t.threadId}`); pinTextCache.delete(`topic:${t.threadId}`); persistSessionPins()
   process.stderr.write(`daemon: topic ${t.threadId} ("${t.name}") deleted by user → cleaning up session ${t.sessionId}\n`)
   if (pane && await paneAlive(pane)) {
-    await exitSessionPane(pane)
+    await exitSessionPane(pane, 'topic-deleted')
     await bot.api.sendMessage(group, `🗑 Topic “${escapeHtml(t.name)}” was deleted — exited its session in <code>${escapeHtml(t.cwd)}</code>.`, { parse_mode: 'HTML', disable_notification: true }).catch(() => {})
   }
 }
@@ -5971,7 +5976,6 @@ async function handleTopicThreadGone(sessionId: string, threadId: number): Promi
   try {
     const t = getTopicBySession(sessionId)
     if (!t) return                                                    // already torn down
-    if (t.threadId !== threadId) return                               // topic was recreated/rebound (deliverRelayReply) — the passed thread is stale, don't tear down the new one
     if (await probeMessageGone(group, threadId) === 'alive') return   // topic still there — only the pin went; re-pins next cycle
     await teardownDeletedTopic(group, { sessionId, threadId, cwd: t.cwd, name: t.name })
   } catch { /* transient — next pin tick retries */ }
@@ -6896,7 +6900,7 @@ bot.on('callback_query:data', async ctx => {
     }
     const label = await paneLabel(paneId)
     await ctx.answerCallbackQuery({ text: 'Exiting…' }).catch(() => {})
-    await exitSessionPane(paneId)
+    await exitSessionPane(paneId, 'user-confirmed-exit')
     await ctx.editMessageText(`✅ Session <b>${escapeHtml(label)}</b> exited`, { parse_mode: 'HTML' }).catch(() => {})
     return
   }

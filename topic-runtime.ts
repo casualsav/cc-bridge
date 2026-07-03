@@ -253,38 +253,6 @@ export async function ensureSessionTopic(paneId: string): Promise<void> {
   }
 }
 
-// A LIVE session's topic was deleted on Telegram out from under it (a reply send returned 400
-// "message thread not found"), but the session is still running. Drop the stale mapping and create
-// a FRESH topic so its replies have somewhere to land — otherwise every reply is silently black-
-// holed forever. The deliberate "delete a topic to END its session" flow still works: that path
-// (teardownDeletedTopic) calls markTopicDeleted, and ensureTopicFor below honors that suppression,
-// so a topic the user tore down to kill the session is NOT resurrected here. Idempotent + in-flight
-// guarded so concurrent relay targets recreate exactly one topic. Returns the new threadId (or the
-// already-recreated one), or undefined if unresolvable / recreation is suppressed.
-const topicRecreateInFlight = new Set<string>()
-export async function recreateDeletedTopic(sessionId: string, cwd: string, deadThread: number): Promise<number | undefined> {
-  if (!isTopicMode()) return
-  const group = getGroupChatId()
-  if (!group) return
-  const cur = getTopicBySession(sessionId)
-  if (cur && cur.threadId !== deadThread) return cur.threadId   // a concurrent path already recreated it
-  if (topicRecreateInFlight.has(sessionId)) return
-  topicRecreateInFlight.add(sessionId)
-  try {
-    removeTopic(sessionId)   // clear the dead mapping — NOT markTopicDeleted, so ensureTopicFor may recreate
-    const thread = await ensureTopicFor(group, sessionId, cwd)
-    if (thread) {
-      await bot.api.sendMessage(group,
-        `↪️ <b>Topic recreated</b>\nThe previous topic was deleted; this session continues here.\n<code>${escapeHtml(cwd)}</code>`,
-        { parse_mode: 'HTML', message_thread_id: thread, disable_notification: true }).catch(() => {})
-      process.stderr.write(`daemon: session ${sessionId} topic (thread ${deadThread}) was deleted → recreated as ${thread}\n`)
-    }
-    return thread
-  } finally {
-    topicRecreateInFlight.delete(sessionId)
-  }
-}
-
 // Session ended → close its topic (history stays; ensureTopicFor reopens it if the session
 // returns). The pane is already gone, so its id comes from the session cache (entries persist
 // after death for exactly this). The paneAlive re-check guards against a transient tmux blip
