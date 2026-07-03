@@ -1237,11 +1237,14 @@ async function primeRelayCursor(): Promise<void> {
     const cwd = focus.activePaneId ? await paneCwd(focus.activePaneId) : null
     const file = await transcriptForPane(focus.activePaneId, cwd)
     const latest = file ? latestFinalReply(file) : null
-    // If we relayed from this session before and it has spoken since (switched away and
-    // back), replay the messages we missed before resuming live relay.
+    // Legacy single-DM catch-up: on switch-back, replay the replies a session produced while you were
+    // focused elsewhere. DM-ONLY — in forum-topics mode each session relays to its OWN topic via the
+    // aux loop, so nothing is missed on a switch and this only duplicated messages into the group
+    // ("💬 N messages from this session while you were away"). Gated to non-topic mode so it's gone
+    // from group/topic chats but DM multi-session still catches up (there's no aux relay in DM mode).
     const prev = file ? lastRelayedByFile.get(file) : undefined
     // prev === '' is a real baseline ("seen nothing yet"), so test against undefined, not falsy.
-    if (file && prev !== undefined && latest && prev !== latest.uuid) {
+    if (!isTopicMode() && file && prev !== undefined && latest && prev !== latest.uuid) {
       const unread = finalRepliesAfter(file, prev)
       const targets = await outboundTargetsFor(focus.activePaneId)
       if (unread.length) {
