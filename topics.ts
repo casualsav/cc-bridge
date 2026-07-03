@@ -29,11 +29,12 @@ export type TopicStore = {
   groupChatId: string | null            // the forum supergroup; null = not configured → not in topic mode
   generalSessionId: string | null      // session anchored to General (no topic of its own; outbound goes unthreaded)
   topics: Record<string, TopicEntry>    // keyed by sessionId (the @tg_session pane stamp)
+  dismissedSessions: Record<string, number>   // sessionId -> dismissedAt: user deleted this session's topic; suppress it (no topic, no outbound) DURABLY until the session's pane is gone. Persisted so a restart can't resurrect a deleted topic; GC'd by reconcileTopics once the session's claude is no longer live.
 }
 
 export function genSessionId(): string { return randomBytes(4).toString('hex') }
 
-let store: TopicStore = { groupChatId: null, generalSessionId: null, topics: {} }
+let store: TopicStore = { groupChatId: null, generalSessionId: null, topics: {}, dismissedSessions: {} }
 let loaded = false
 let persist = true   // disabled by _resetForTest so unit tests never write to the real STATE_DIR
 
@@ -69,10 +70,15 @@ export function loadTopics(): TopicStore {
           ? { worktree: { repo: t.worktree.repo, path: t.worktree.path } } : {}),
       }
     }
+    const dismissedSessions: Record<string, number> = {}
+    for (const [sid, at] of Object.entries(raw.dismissedSessions ?? {})) {
+      if (typeof at === 'number') dismissedSessions[sid] = at
+    }
     store = {
       groupChatId: typeof raw.groupChatId === 'string' ? raw.groupChatId : null,
       generalSessionId: typeof raw.generalSessionId === 'string' ? raw.generalSessionId : null,
       topics,
+      dismissedSessions,
     }
     loaded = true
     if (migrated) save()   // persist the re-keyed store so the migration runs once
@@ -165,10 +171,31 @@ export function listTopics(): Array<{ sessionId: string } & TopicEntry> {
   return Object.entries(store.topics).map(([sessionId, e]) => ({ sessionId, ...e }))
 }
 
+// ---- deleted-topic dismissals (durable) ----
+// A session whose topic the user DELETED is "dismissed": no topic is re-minted for it and its outbound
+// is dropped, until its pane is gone. Persisted (unlike the old 120s in-memory TTL) so a daemon restart
+// can't resurrect the tab, and unbounded by time so a session that ignores the /exit keystrokes stays
+// suppressed rather than regenerating every couple of minutes. reconcileTopics GCs entries whose claude
+// is no longer live, keeping the set to just currently-live dismissed sessions.
+export function dismissSession(sessionId: string, at: number): void {
+  ensureLoaded()
+  if (store.dismissedSessions[sessionId] != null) return
+  store.dismissedSessions[sessionId] = at
+  save()
+}
+export function isSessionDismissed(sessionId: string): boolean { ensureLoaded(); return store.dismissedSessions[sessionId] != null }
+export function undismissSession(sessionId: string): void {
+  ensureLoaded()
+  if (store.dismissedSessions[sessionId] == null) return
+  delete store.dismissedSessions[sessionId]
+  save()
+}
+export function listDismissedSessions(): string[] { ensureLoaded(); return Object.keys(store.dismissedSessions) }
+
 // Test seam: set the in-memory store directly, mark it loaded, and disable disk persistence so
 // mutators in tests don't write to the real STATE_DIR/topics.json.
 export function _resetForTest(s?: Partial<TopicStore>): void {
-  store = { groupChatId: null, generalSessionId: null, topics: {}, ...s }
+  store = { groupChatId: null, generalSessionId: null, topics: {}, dismissedSessions: {}, ...s }
   loaded = true
   persist = false
 }

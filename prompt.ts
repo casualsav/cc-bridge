@@ -566,13 +566,20 @@ export function detectModelUnavailable(paneText: string): string | null {
 // but is a DIFFERENT, non-interactive code path — NOT what /compact shows, which is why keying on it
 // never fired. The original detector keyed on a ═/━ box-bar + a STANDALONE % — also wrong: the bar is
 // ▰/▱ and the % sits on the bar line.) We require BOTH the phrase AND the ▰/▱ bar within the footer
-// tail: the parallelogram bar never appears in prose, code, or our own chat, so pairing it with the
-// phrase is what makes this robust against the content-only matches that looped before. A finished
-// compaction shows "Compacted" (no bar), so the line is gone and the card self-resolves.
+// tail. The bar CAN show up in content, though — this repo's OWN source (prompt.ts / prompt.test.ts /
+// daemon.ts) documents the exact "Compacting conversation… ▰▱…" footer, and a session that merely
+// DISPLAYED that code false-fired a "✅ Compacted" card in another topic. So we also require the footer's
+// SHAPE: the phrase line must be led by Claude Code's "· " middot bullet (a "//" comment or "'" quote
+// prefix is code, not the live footer), with the ▰/▱ bar as the immediately-following non-blank line —
+// exactly how CC renders it. A finished compaction shows "Compacted" (no bar), so the card self-resolves.
 const FOOTER_TAIL = 18
 export function detectCompacting(paneText: string): boolean {
   const tail = stripAnsi(paneText).split('\n').filter(l => l.trim()).slice(-FOOTER_TAIL)
-  return tail.some(l => /compacting conversation/i.test(l)) && tail.some(l => /[▰▱]{3,}/.test(l))
+  for (let i = 0; i < tail.length - 1; i++) {
+    if (!/^\s*·\s+compacting conversation/i.test(tail[i])) continue   // the genuine footer bullet, not code/prose that quotes the phrase
+    if (/[▰▱]{3,}/.test(tail[i + 1])) return true                      // ▰/▱ progress bar directly below the phrase
+  }
+  return false
 }
 
 // Claude Code's real compaction percentage — the NN% on the ▰/▱ bar line — so the card mirrors genuine

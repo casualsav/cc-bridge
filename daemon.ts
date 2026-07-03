@@ -65,7 +65,7 @@ import {
   reconcileTopics, refreshTopicTitles, topicThreadFor, emitTopicTyping, armTopicTyping, stopTopicTyping, outboundTargetsFor,
   stampPaneSession, topicBranchCache, generalAnchorLost,
   setPaneRestarting, isPaneRestarting, releasePaneSession, reopenSessionTopic,
-  retriggerTopicTyping,
+  retriggerTopicTyping, paneClaudeLive,
 } from './topic-runtime.ts'
 import { startWebapp, type SettingsView as WebappSettingsView, type UsageView as WebappUsageView, type DiffView as WebappDiffView } from './webapp.ts'
 import { startTunnel, ensureCloudflared, tailscaleFunnelUrl, type Tunnel } from './tunnel.ts'
@@ -5996,7 +5996,14 @@ async function teardownDeletedTopic(group: string, t: { sessionId: string; threa
   process.stderr.write(`daemon: topic ${t.threadId} ("${t.name}") deleted by user → cleaning up session ${t.sessionId}\n`)
   if (pane && await paneAlive(pane)) {
     await exitSessionPane(pane, 'topic-deleted')
-    await bot.api.sendMessage(group, `🗑 Topic “${escapeHtml(t.name)}” was deleted — exited its session in <code>${escapeHtml(t.cwd)}</code>.`, { parse_mode: 'HTML', disable_notification: true }).catch(() => {})
+    // Tell the truth: some panes ignore the /exit keystrokes (a busy or non-focused TUI). The topic
+    // stays gone regardless (the sid is dismissed durably), but the tmux session may still be running —
+    // say so instead of claiming an exit that didn't happen, so the user knows where the "stray" came from.
+    const stillLive = await paneClaudeLive(pane).catch(() => false)
+    await bot.api.sendMessage(group, stillLive
+      ? `🗑 Topic “${escapeHtml(t.name)}” deleted — it won’t reappear here. Its session in <code>${escapeHtml(t.cwd)}</code> is still running in the terminal (close it there to end it).`
+      : `🗑 Topic “${escapeHtml(t.name)}” was deleted — exited its session in <code>${escapeHtml(t.cwd)}</code>.`,
+      { parse_mode: 'HTML', disable_notification: true }).catch(() => {})
   }
 }
 

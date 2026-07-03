@@ -4,6 +4,7 @@ import {
   getTopicBySession, getSessionByThread, findTopicByCwd,
   setTopic, updateTopic, removeTopic, listTopics, genSessionId,
   getGeneralSession, setGeneralSession,
+  dismissSession, isSessionDismissed, undismissSession, listDismissedSessions,
   type TopicEntry,
 } from './topics.ts'
 
@@ -110,4 +111,25 @@ test('a seeded store carries its General anchor', () => {
 test('genSessionId mints distinct ids', () => {
   expect(genSessionId()).not.toBe(genSessionId())
   expect(genSessionId()).toMatch(/^[0-9a-f]{8}$/)
+})
+
+test('a deleted session is dismissed durably, then un-dismissed on GC/revive', () => {
+  expect(isSessionDismissed('sess1')).toBe(false)
+  dismissSession('sess1', 111)
+  expect(isSessionDismissed('sess1')).toBe(true)
+  expect(listDismissedSessions()).toEqual(['sess1'])
+  // idempotent: re-dismissing keeps the first timestamp, doesn't duplicate
+  dismissSession('sess1', 222)
+  expect(listDismissedSessions()).toEqual(['sess1'])
+  undismissSession('sess1')
+  expect(isSessionDismissed('sess1')).toBe(false)
+  expect(listDismissedSessions()).toEqual([])
+})
+
+test('a seeded store carries its dismissals (survives a restart/reload)', () => {
+  _resetForTest({ groupChatId: '-100', dismissedSessions: { ghost: 1, gone: 2 } })
+  expect(isSessionDismissed('ghost')).toBe(true)
+  expect(isSessionDismissed('gone')).toBe(true)
+  expect(isSessionDismissed('other')).toBe(false)
+  expect(listDismissedSessions().sort()).toEqual(['ghost', 'gone'])
 })

@@ -59,6 +59,20 @@ test('detectCompacting fires on Claude Code\'s real /compact footer (phrase + �
   // A FINISHED compaction shows "Compacted" (no bar) — must not count.
   expect(detectCompacting('  ⎿  Compacted (ctrl+o to see full summary)\n❯ \n  host | Opus')).toBe(false)
   expect(detectCompacting('just normal output')).toBe(false)
+
+  // REGRESSION (the false "✅ Compacted · 99s" card): a session that merely DISPLAYS this repo's own
+  // compaction source/tests has BOTH the phrase and a sample ▰/▱ bar on screen — but behind a "//"
+  // comment or "'" quote prefix, not Claude Code's "· " footer bullet. The old any-line AND fired here;
+  // the bullet + adjacency requirement must NOT.
+  const sourceOnScreen = [
+    "  // a \"· Compacting conversation…\" line above a ▰/▱ (filled/empty) progress bar that",
+    "    '· Compacting conversation…',",
+    "    '  ▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱ 10%',",
+    '──────────────────────────────',
+    '❯ ',
+    '  user@host:/projects/claude-tg (main) | Opus 4.8',
+  ].join('\n')
+  expect(detectCompacting(sourceOnScreen)).toBe(false)
 })
 
 test('detectUserPrompt relays the plan-approval prompt even with the statusline below it', () => {

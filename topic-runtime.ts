@@ -12,6 +12,7 @@ import { loadAccess } from './access.ts'
 import {
   genSessionId, isTopicMode, getGroupChatId, getTopicBySession, findTopicByCwd, cwdAmbiguous,
   setTopic, updateTopic, removeTopic, listTopics, getGeneralSession, setGeneralSession,
+  dismissSession, isSessionDismissed, undismissSession, listDismissedSessions,
 } from './topics.ts'
 import { focus, offMcpPanes, sessions } from './state.ts'
 
@@ -142,19 +143,16 @@ export async function paneForSession(sessionId: string): Promise<string | null> 
 // Map a session to its forum topic, creating it on first use. Returns the topic's thread id, or
 // undefined if creation failed (caller falls back to the General topic).
 //
-// Sessions whose topic the user just deleted — suppress topic (re)creation until the /exit'd pane is
-// actually gone, so the delete-sweep's removeTopic + the slow /exit can't race ensureSessionTopic or
-// outbound routing into re-opening the very topic the user deleted ("deleted topic reappears"). TTL-
-// bounded; the pane dies within seconds, well inside the window, and the sid is unique + dead after.
-const deletedTopicSids = new Map<string, number>()   // sessionId -> deletedAt
-const DELETED_TOPIC_SUPPRESS_MS = 120_000
-export function markTopicDeleted(sessionId: string): void { deletedTopicSids.set(sessionId, Date.now()) }
-function topicDeletionPending(sessionId: string): boolean {
-  const at = deletedTopicSids.get(sessionId)
-  if (at == null) return false
-  if (Date.now() - at > DELETED_TOPIC_SUPPRESS_MS) { deletedTopicSids.delete(sessionId); return false }
-  return true
-}
+// Sessions whose topic the user DELETED — suppress topic (re)creation AND drop their outbound, so the
+// delete-sweep's removeTopic + the slow /exit can't race ensureSessionTopic or outbound routing into
+// re-opening the very topic the user deleted ("deleted topic reappears"). This is now DURABLE (persisted
+// via dismissSession): the old guard was a 120s in-memory TTL, which died on a daemon restart and expired
+// while a pane that WON'T /exit (a session ignoring the exit keystrokes) was still alive — so the deleted
+// "/home/ubuntu" topic kept regenerating every couple of minutes and across every restart. The dismissal
+// now lives as long as the session's claude does; reconcileTopics GCs it the moment the pane is no longer
+// a live claude (a clean exit clears it within a tick; a genuinely-undead session stays suppressed).
+export function markTopicDeleted(sessionId: string): void { dismissSession(sessionId, Date.now()) }
+function topicDeletionPending(sessionId: string): boolean { return isSessionDismissed(sessionId) }
 
 // Sessions whose topic the user just CLOSED — suppress the lazy-reopen below until the /exit lands and
 // the session dies, so trailing teardown outbound (a final reply, the mirror-card resume on a deploy
@@ -223,6 +221,7 @@ export async function outboundTargetsFor(paneId: string | null): Promise<Array<{
   const cwd = paneId ? await paneCwd(paneId).catch(() => null) : null
   if (!sid || !cwd) return [{ chat: group }]
   if (sid === getGeneralSession()) return [{ chat: group }]   // anchored to General — unthreaded, never grows a topic
+  if (isSessionDismissed(sid)) return []   // user deleted this session's topic — drop its outbound entirely (no topic to route to, and it must NOT fall through to General's unthreaded chat)
   return [{ chat: group, thread: await ensureTopicFor(group, sid, cwd) }]
 }
 
@@ -359,6 +358,12 @@ export async function reconcileTopics(panes: string[]): Promise<void> {
   for (const s of sessions.values()) {   // MCP-shim sessions hold topics too — don't close theirs
     if (s.paneId) { const sid = await sessionForPane(s.paneId); if (sid) liveSids.add(sid) }
   }
+  // GC durable topic-deletion dismissals: once a dismissed session's claude is no longer live (a normal
+  // /exit landed, or the pane died), forget it — so its id can't suppress a genuinely-new session and the
+  // set stays bounded to currently-live dismissed sessions. An undead session (one that ignored the /exit)
+  // stays in liveSids and thus stays dismissed, which is exactly what keeps its deleted topic from
+  // regenerating. paneClaudeLive fails safe to "live" on a transient read, so a tmux blip can't GC it.
+  for (const sid of listDismissedSessions()) if (!liveSids.has(sid)) undismissSession(sid)
   // Sessions mid-bounce (claude-update restart) are off the live-pane list but not dead —
   // exempt their sids so a slow restart sweep can't accumulate misses and close their topics.
   const restartingSids = new Set<string>()
