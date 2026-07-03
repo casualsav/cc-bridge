@@ -3546,7 +3546,7 @@ function startHelpText(paired: boolean): string {
     `💬 Send text, 📷 photos, 📎 files, 🎙️ voice — the reply comes straight back\n` +
     `👥 <code>/bind</code> a forum group — each session gets its own topic (📁 folder or 🌿 worktree); your main session lives in General (📌 <code>/claim</code>)\n` +
     `📍 Pinned status card — Model · Effort · Mode · Compact · Context · Cost in one tap\n` +
-    `🧠 <code>/model</code> · 🕹️ <code>/mode</code> · 🎚️ <code>/effort</code> · 📡 <code>/stream</code> live activity\n` +
+    `🧠 <code>/model</code> · 🕹️ <code>/mode</code> · 🎚️ <code>/effort</code> (<code>/effort default max</code> pins it for every new/resumed session) · 📡 <code>/stream</code> live activity\n` +
     `✅ Permission taps — ⚡ or allow all this turn\n` +
     `📝 <code>/diff</code> + Commit · Push · PR buttons · 🐙 GitHub sign-in from /settings (gh installs itself)\n` +
     `🔎 <code>/find</code> any session · ⏰ <code>/queue @reset</code> · 🔁 <code>/cron</code> jobs (full cron exprs) · ⏪ <code>/rewind</code>\n` +
@@ -8705,7 +8705,7 @@ void (async () => {
               { command: 'restart', description: 'Restart & resume the current session — or "/restart all" for every session' },
               { command: 'reset', description: 'Clear the current conversation in place' },
               { command: 'stream', description: 'How replies arrive: thoughts · actions · off' },
-              { command: 'effort', description: 'Reasoning effort: low · medium · high · xhigh · max · auto' },
+              { command: 'effort', description: 'Reasoning effort — /effort <level> now, or /effort default <level> to pin it for new sessions' },
               { command: 'budget', description: 'Daily $ cap with warnings (/budget 20 · off)' },
               { command: 'rewind', description: 'Open the checkpoint picker (undo a turn\'s changes)' },
               { command: 'cost', description: 'Show the session cost readout' },
