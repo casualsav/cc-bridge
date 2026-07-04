@@ -85,10 +85,11 @@ import { initQueue, readLater, writeLater, sweepLaterQueues, LATER_SWEEP_MS } fr
 import {
   createPending, getPending, removePending, putPending, listPending, markInjected, expirePending,
   recordAgentAsk, resetHops, HOP_LIMIT,
-  resolveEndpoint, nameForSession, confineRef, sharedDir, ensureSharedDir, appendLedger, tailLedger,
-  type EndpointTopic, type PartyPending,
+  resolveEndpoint, nameForEndpoint, normalizeEndpointName, confineRef, sharedDir, ensureSharedDir, appendLedger, tailLedger,
+  type PartyEndpoint, type PartyPending,
 } from './party.ts'
 import { formatAskBlock, formatAnswerBlock } from './party-block.ts'
+import { runHermes, type HermesEndpoint, type HermesTask } from './hermes-driver.ts'
 import {
   initLoop, sweepLoops, LOOP_SWEEP_MS, startLoopWizard, handleLoopWizardReply, wizardSidFor,
   activeLoop, loopGo, loopCancel, loopStopSoft, loopStopNow, loopResume, loopStatusHtml, loopStatusKeyboard,
@@ -1803,9 +1804,40 @@ async function dumpStuckPane(paneId: string): Promise<void> {
 // answer arrives later as a fresh injected turn (yield, not block). Delivery is idle-gated: an ask to
 // a busy agent waits (sweepParty) until it sits at a normal prompt, so we never clobber a mid-turn pane.
 
-// Snapshot of live topics for pure endpoint resolution (party.ts stays grammy/tmux-free).
-function partyTopics(): EndpointTopic[] {
-  return listTopics().map(t => ({ sessionId: t.sessionId, name: t.name, closed: t.closed }))
+// ---- Hermes endpoints (party-bus P1.5): non-Claude agents driven by `hermes -z` ----
+// Configured in hermes-endpoints.json (name → profile); the daemon spawns `hermes --profile <p> -z`
+// per ask — no adapter process, since a Hermes agent is local + a subprocess. Keyed by NORMALIZED
+// name so a config-casing quirk can't slip past resolveEndpoint's matching.
+const HERMES_ENDPOINTS_FILE = join(STATE_DIR, 'hermes-endpoints.json')
+const hermesEndpoints = new Map<string, HermesEndpoint>()
+const HERMES_MAX_CONCURRENT = 8            // fork-bomb backstop; the hop guard already bounds agent↔agent asks
+const hermesInFlight = new Set<number>()   // ask ids with a live `hermes -z` child (drives roster + the cap)
+
+function loadHermesEndpoints(): void {
+  hermesEndpoints.clear()
+  const raw = readJsonFile<Record<string, Partial<HermesEndpoint>> | null>(HERMES_ENDPOINTS_FILE, null)
+  if (!raw) return
+  for (const [key, v] of Object.entries(raw)) {
+    if (!v || typeof v.profile !== 'string') continue
+    const name = normalizeEndpointName(key)
+    if (!name) continue
+    hermesEndpoints.set(name, {
+      name, profile: v.profile,
+      ...(Array.isArray(v.cmd) ? { cmd: v.cmd.filter((x): x is string => typeof x === 'string') } : {}),
+      ...(typeof v.timeout_s === 'number' ? { timeout_s: v.timeout_s } : {}),
+      ...(typeof v.cwd === 'string' ? { cwd: v.cwd } : {}),
+    })
+  }
+  if (hermesEndpoints.size) process.stderr.write(`daemon: loaded ${hermesEndpoints.size} hermes endpoint(s): ${[...hermesEndpoints.keys()].join(', ')}\n`)
+}
+loadHermesEndpoints()
+
+// All addressable party endpoints for pure resolution: topic sessions (kind claude, id = sessionId)
+// + configured hermes endpoints (kind hermes, id = name). party.ts stays grammy/tmux-free.
+function partyEndpoints(): PartyEndpoint[] {
+  const claude = listTopics().map(t => ({ id: t.sessionId, kind: 'claude' as const, name: t.name, closed: t.closed }))
+  const hermes = [...hermesEndpoints.values()].map(h => ({ id: h.name, kind: 'hermes' as const, name: h.name, closed: false }))
+  return [...claude, ...hermes]
 }
 // The room = the bound forum group. Party requires topic mode (an endpoint IS a topic's session).
 function partyRoom(): string | null { return isTopicMode() ? getGroupChatId() : null }
@@ -1860,6 +1892,63 @@ async function sweepParty(): Promise<void> {
   }
   for (const p of listPending()) {
     if (!p.injected) await tryDeliverAsk(p).catch(() => {})
+  }
+}
+
+// Deliver an answer to the ORIGINAL asker's pane. Shared by tg `answer` (a Claude endpoint answering)
+// and async hermes-run completion. Re-checks the pending still exists (a long hermes run may have
+// expired mid-flight), clears it BEFORE injecting, restores it on a failed paste (so the answer isn't
+// lost with a false-success record), and logs/cards only a REAL delivery. Returns a status string; a
+// leading '!' marks a failure the caller relays back as an error.
+async function deliverAnswerToAsker(pending: PartyPending, answerer: string, body: string, refs: string[]): Promise<string> {
+  const room = partyRoom()
+  const cur = getPending(pending.id)
+  if (!cur) return `!ask ${pending.id} is already closed (expired or answered)`
+  removePending(cur.id)
+  const askerPane = await paneForSession(cur.fromSid).catch(() => null)
+  if (!askerPane) { putPending(cur); return `!@${cur.fromName}'s session is no longer running — not delivered` }
+  // .catch(false): a rejected paste (a tmux error propagating through the inject chain) must reach the
+  // restore path below, not throw past it — the pending is already removed, so a throw would lose the answer.
+  const ok = await partyDeliver(askerPane, formatAnswerBlock(answerer, cur.id, body, refs)).catch(() => false)
+  if (!ok) { putPending(cur); return `!couldn't deliver to @${cur.fromName} (pane gone) — ask kept open` }
+  const mismatch = answerer !== cur.toName ? ` [asked @${cur.toName}]` : ''
+  if (room) appendLedger(room, { ts: Date.now(), kind: 'answer', from: answerer, to: cur.fromName, id: cur.id, text: body, refs })
+  if (room) void bot.api.sendMessage(room, `✓ <b>${escapeHtml(answerer)}</b> answered <b>${escapeHtml(cur.fromName)}</b> (ask ${cur.id})${escapeHtml(mismatch)}`, { parse_mode: 'HTML', disable_notification: true }).catch(() => {})
+  return `answered @${cur.fromName} (ask ${cur.id})`
+}
+
+// Run a hermes ask end-to-end: mark it delivered (arms the TTL from spawn), spawn `hermes -z`, and
+// route the final text (or a readable error) back to the asker via deliverAnswerToAsker. Concurrent —
+// no queue (a subprocess has no busy-pane to clobber); hermesInFlight tracks live children.
+async function runHermesAsk(pending: PartyPending, cfg: HermesEndpoint): Promise<void> {
+  const room = partyRoom()
+  markInjected(pending.id, Date.now())
+  hermesInFlight.add(pending.id)
+  try {
+    const task: HermesTask = { id: pending.id, from: pending.fromName, room: room ?? '', text: pending.text, refs: pending.refs, sharedDir: room ? sharedDir(room) : '' }
+    const result = await runHermes(cfg, task)
+    const body = result.ok ? result.text : `⚠️ @${cfg.name} couldn't complete ask ${pending.id}: ${result.error}`
+    const status = await deliverAnswerToAsker(pending, cfg.name, body, [])
+    process.stderr.write(`daemon: hermes ${cfg.name} ask ${pending.id} → ${status}\n`)
+  } catch (e) {
+    process.stderr.write(`daemon: hermes ${cfg.name} ask ${pending.id} threw: ${e}\n`)
+    await deliverAnswerToAsker(pending, cfg.name, `⚠️ @${cfg.name} errored on ask ${pending.id}: ${e instanceof Error ? e.message : String(e)}`, []).catch(() => {})
+  } finally { hermesInFlight.delete(pending.id) }
+}
+
+// Startup: a hermes ask in party.json that survived a daemon restart is orphaned — its `hermes -z`
+// child died with the daemon, so no answer will ever arrive. Expire them now + tell the asker, rather
+// than stranding it for the full 30-min TTL.
+function sweepOrphanedHermesAsks(): void {
+  const room = partyRoom()
+  for (const p of listPending()) {
+    if (p.toKind !== 'hermes') continue
+    removePending(p.id)
+    process.stderr.write(`daemon: dropped orphaned hermes ask ${p.id} → @${p.toName} (daemon restarted mid-run)\n`)
+    if (room) void bot.api.sendMessage(room, `♻️ Ask ${p.id} to <b>${escapeHtml(p.toName)}</b> was dropped — the bridge restarted mid-run.`, { parse_mode: 'HTML', disable_notification: true }).catch(() => {})
+    void paneForSession(p.fromSid).then(pane => {
+      if (pane) void partyDeliver(pane, formatAnswerBlock('system', p.id, `(ask ${p.id} to @${p.toName} dropped — the bridge restarted while it was working; re-ask if still needed)`))
+    }).catch(() => {})
   }
 }
 
@@ -3047,14 +3136,14 @@ async function handleCall(
         const pane = args.pane ? String(args.pane) : null
         const fromSid = pane ? await sessionForPane(pane) : null
         if (!fromSid) { write({ t: 'result', id, ok: false, text: '`tg ask` must run inside a bridged session' }); return }
-        const topics = partyTopics()
-        const res = resolveEndpoint(String(args.to ?? ''), topics)
+        const endpoints = partyEndpoints()
+        const res = resolveEndpoint(String(args.to ?? ''), endpoints)
         if ('error' in res) { write({ t: 'result', id, ok: false, text: res.error }); return }
-        if (res.sessionId === fromSid) { write({ t: 'result', id, ok: false, text: "can't ask yourself" }); return }
+        if (res.kind === 'claude' && res.id === fromSid) { write({ t: 'result', id, ok: false, text: "can't ask yourself" }); return }
         const askText = String(args.text ?? '').trim()
         if (!askText) { write({ t: 'result', id, ok: false, text: 'empty ask' }); return }
-        const fromName = nameForSession(fromSid, topics)
-        const toName = nameForSession(res.sessionId, topics)
+        const fromName = nameForEndpoint(fromSid, endpoints)
+        const toName = nameForEndpoint(res.id, endpoints)
         // Confine + existence-check refs — they get injected into another agent's context.
         const refs: string[] = []
         for (const r of (Array.isArray(args.refs) ? args.refs as string[] : [])) {
@@ -3063,17 +3152,32 @@ async function handleCall(
           if (!existsSync(c.path)) { write({ t: 'result', id, ok: false, text: `ref not found: ${r} — write deliverables into \`tg shared\`` }); return }
           refs.push(c.path)
         }
-        // Hop guard: pause the room if agents have bounced too many times with no human turn between.
-        const hops = recordAgentAsk()
-        if (hops > HOP_LIMIT) {
-          // Post the pause card once per episode (the first over-limit ask), not on every blocked one.
-          if (hops === HOP_LIMIT + 1) void bot.api.sendMessage(room, '⏸ Agents paused — several turns without you. Reply to continue.', { disable_notification: true }).catch(() => {})
-          write({ t: 'result', id, ok: false, text: 'paused: hop limit reached — a human reply resumes the room' }); return
+        // Hermes endpoints have no busy-pane to clobber; a fork-bomb cap gates them. Check it BEFORE the
+        // hop guard so a cap-rejected ask doesn't burn a hop (the asker retries after "retry shortly").
+        if (res.kind === 'hermes' && hermesInFlight.size >= HERMES_MAX_CONCURRENT) {
+          write({ t: 'result', id, ok: false, text: `too many Hermes tasks running (${hermesInFlight.size}) — retry shortly` }); return
         }
-        const p = createPending({ fromSid, toSid: res.sessionId, fromName, toName, text: askText, refs }, Date.now())
+        // Hop guard (loop-breaker): only claude→claude can loop — a `hermes -z` one-shot returns an answer
+        // and never asks back — so only claude targets count. This lets an agent fan out across the whole
+        // Hermes fleet without tripping the pause.
+        if (res.kind === 'claude') {
+          const hops = recordAgentAsk()
+          if (hops > HOP_LIMIT) {
+            if (hops === HOP_LIMIT + 1) void bot.api.sendMessage(room, '⏸ Agents paused — several turns without you. Reply to continue.', { disable_notification: true }).catch(() => {})
+            write({ t: 'result', id, ok: false, text: 'paused: hop limit reached — a human reply resumes the room' }); return
+          }
+        }
+        const p = createPending({ fromSid, toSid: res.id, toKind: res.kind, fromName, toName, text: askText, refs }, Date.now())
         appendLedger(room, { ts: Date.now(), kind: 'ask', from: fromName, to: toName, id: p.id, text: askText, refs })
-        void tryDeliverAsk(p)   // attempt now; sweepParty retries if the target is mid-turn
-        text = `asked @${toName} (ask ${p.id}) — async; they answer with \`tg answer ${p.id}\``
+        if (res.kind === 'hermes') {
+          const cfg = hermesEndpoints.get(res.id)!   // resolved from the same map, so it's present
+          void bot.api.sendMessage(room, `▸ <b>${escapeHtml(fromName)}</b> → <b>${escapeHtml(toName)}</b>: ${escapeHtml(askText.slice(0, 120))}${askText.length > 120 ? '…' : ''}`, { parse_mode: 'HTML', disable_notification: true }).catch(() => {})
+          void runHermesAsk(p, cfg)
+          text = `asked @${toName} (ask ${p.id}) — running; the answer arrives when it finishes`
+        } else {
+          void tryDeliverAsk(p)   // attempt now; sweepParty retries if the target is mid-turn
+          text = `asked @${toName} (ask ${p.id}) — async; they answer with \`tg answer ${p.id}\``
+        }
         break
       }
       case 'answer': {
@@ -3084,7 +3188,7 @@ async function handleCall(
         if (!p) { write({ t: 'result', id, ok: false, text: `no open ask #${args.id} (unknown or expired)` }); return }
         const pane = args.pane ? String(args.pane) : null
         const answererSid = pane ? await sessionForPane(pane) : null
-        const answerer = answererSid ? nameForSession(answererSid, partyTopics()) : p.toName
+        const answerer = answererSid ? nameForEndpoint(answererSid, partyEndpoints()) : p.toName
         const refs: string[] = []
         for (const r of (Array.isArray(args.refs) ? args.refs as string[] : [])) {
           const c = confineRef(r, sharedDir(room))
@@ -3092,27 +3196,24 @@ async function handleCall(
           if (!existsSync(c.path)) { write({ t: 'result', id, ok: false, text: `ref not found: ${r}` }); return }
           refs.push(c.path)
         }
-        removePending(askId)   // clear BEFORE injecting so no sweep/relay tick double-handles it
-        const askerPane = await paneForSession(p.fromSid).catch(() => null)
-        if (!askerPane) { putPending(p); write({ t: 'result', id, ok: false, text: `@${p.fromName}'s session is no longer running — answer not delivered` }); return }
-        const answerText = String(args.text ?? '').trim()
-        const ok = await partyDeliver(askerPane, formatAnswerBlock(answerer, askId, answerText, refs))
-        // Delivery failed (asker pane vanished mid-paste): restore the ask so the answer isn't silently
-        // lost with a false success record — the answerer can retry. Only a REAL delivery is logged/carded.
-        if (!ok) { putPending(p); write({ t: 'result', id, ok: false, text: `couldn't deliver to @${p.fromName} (pane gone) — ask kept open, retry` }); return }
-        // Any session may answer in P1 (a human/third pane can unstick an exchange); flag a mismatch so a
-        // misdirected answer is diagnosable (the injected block already shows @answerer as the sender).
-        const mismatch = answerer !== p.toName ? ` [asked @${p.toName}]` : ''
-        appendLedger(room, { ts: Date.now(), kind: 'answer', from: answerer, to: p.fromName, id: askId, text: answerText, refs })
-        void bot.api.sendMessage(room, `✓ <b>${escapeHtml(answerer)}</b> answered <b>${escapeHtml(p.fromName)}</b> (ask ${askId})${escapeHtml(mismatch)}`, { parse_mode: 'HTML', disable_notification: true }).catch(() => {})
-        text = `answered @${p.fromName} (ask ${askId})`
+        // Shared with async hermes-run completion: re-checks/clears the pending, restores on a failed
+        // delivery, logs/cards only a real delivery, and flags an answerer≠target mismatch.
+        const status = await deliverAnswerToAsker(p, answerer, String(args.text ?? '').trim(), refs)
+        if (status.startsWith('!')) { write({ t: 'result', id, ok: false, text: status.slice(1) }); return }
+        text = status
         break
       }
       case 'roster': {
         const rows: string[] = []
-        for (const t of partyTopics().filter(t => !t.closed)) {
-          const nm = nameForSession(t.sessionId, partyTopics())
-          const pane = await paneForSession(t.sessionId).catch(() => null)
+        const eps = partyEndpoints()
+        for (const e of eps.filter(e => !e.closed)) {
+          const nm = nameForEndpoint(e.id, eps)
+          if (e.kind === 'hermes') {   // no pane; busy = a `hermes -z` child in flight for it
+            const busy = [...hermesInFlight].some(pid => getPending(pid)?.toSid === e.id)
+            rows.push(`${busy ? '🟡' : '🟢'} ${nm} · hermes${busy ? ' · busy' : ''}`)
+            continue
+          }
+          const pane = await paneForSession(e.id).catch(() => null)
           if (!pane) { rows.push(`⚪ ${nm} (down)`); continue }
           const cap = await capturePane(pane).catch(() => '')
           const sl = cap ? parseStatusline(cap) : null
@@ -3129,7 +3230,7 @@ async function handleCall(
         if (!room) { write({ t: 'result', id, ok: false, text: 'party needs a forum group' }); return }
         const pane = args.pane ? String(args.pane) : null
         const fromSid = pane ? await sessionForPane(pane) : null
-        const fromName = fromSid ? nameForSession(fromSid, partyTopics()) : 'agent'
+        const fromName = fromSid ? nameForEndpoint(fromSid, partyEndpoints()) : 'agent'
         const body = String(args.text ?? '').trim()
         if (!body) { write({ t: 'result', id, ok: false, text: 'empty post' }); return }
         appendLedger(room, { ts: Date.now(), kind: 'post', from: fromName, text: body })
@@ -8618,6 +8719,7 @@ initScheduler({
 })
 loadScheduledMsgs()
 loadTopics()   // forum-topics mode: load the persisted group + session<->topic map at startup
+sweepOrphanedHermesAsks()   // party-bus P1.5: drop hermes asks whose `hermes -z` child died with a prior daemon
 
 // Wire the live activity mirror's daemon dependencies (bot, access, the shared replyMode
 // helper, the live focused-pane getter, and typing re-assert).

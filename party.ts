@@ -161,7 +161,10 @@ export function hopsExceeded(): boolean { ensureLoaded(); return store.hops > HO
 
 // ---- endpoint resolution (pure; the daemon passes a topic snapshot) ----
 
-export type EndpointTopic = { sessionId: string; name: string; closed: boolean }
+// A party endpoint resolved by name. kind 'claude' = a topic session (id = its sessionId); kind
+// 'hermes' = an adapter-driven agent (id = its endpoint name). The daemon builds this list from the
+// topic store + the configured hermes endpoints and passes it in — party.ts stays grammy/tmux-free.
+export type PartyEndpoint = { name: string; kind: 'claude' | 'hermes'; id: string; closed: boolean }
 
 // An endpoint name is a topic's display name, minus the auto-appended " · <branch>" and " #<n>"
 // sibling suffixes (mirrors topic-runtime's title base), lower-cased for case-insensitive matching.
@@ -170,27 +173,27 @@ export function normalizeEndpointName(name: string): string {
   return name.trim().replace(/^@/, '').replace(/ · [^·]*$/, '').replace(/ #\d+$/, '').trim().toLowerCase()
 }
 
-// Resolve `@name` to a single OPEN topic's sessionId, or an error message the caller relays back to
-// the asking agent (fail loudly — never silently drop). Ambiguity (two open topics share a base
-// name) and closed-only matches get distinct messages so the agent knows why.
-export function resolveEndpoint(name: string, topics: EndpointTopic[]): { sessionId: string } | { error: string } {
+// Resolve `@name` to a single OPEN endpoint of EITHER kind, or an error the caller relays back to the
+// asker (fail loudly — never silently drop). Ambiguity — two open endpoints share a base name,
+// INCLUDING across kinds (a topic "mimo" and a hermes "mimo") — is an explicit error, not a pick.
+export function resolveEndpoint(name: string, endpoints: PartyEndpoint[]): { kind: 'claude' | 'hermes'; id: string } | { error: string } {
   const want = normalizeEndpointName(name)
   if (!want) return { error: 'no endpoint name given' }
-  const open = topics.filter(t => !t.closed && normalizeEndpointName(t.name) === want)
-  if (open.length === 1) return { sessionId: open[0].sessionId }
+  const open = endpoints.filter(e => !e.closed && normalizeEndpointName(e.name) === want)
+  if (open.length === 1) return { kind: open[0].kind, id: open[0].id }
   if (open.length > 1) {
-    return { error: `endpoint "${want}" is ambiguous (${open.length} live sessions share that name) — rename a topic to disambiguate` }
+    return { error: `endpoint "${want}" is ambiguous (${open.length} live endpoints share that name) — rename one to disambiguate` }
   }
-  const closed = topics.some(t => t.closed && normalizeEndpointName(t.name) === want)
-  if (closed) return { error: `endpoint "${want}" exists but its session isn't running` }
+  const closed = endpoints.some(e => e.closed && normalizeEndpointName(e.name) === want)
+  if (closed) return { error: `endpoint "${want}" exists but isn't running` }
   return { error: `no endpoint named "${want}" — try \`tg roster\` to list them` }
 }
 
-// The endpoint name for a sessionId (for @from attribution / logs); falls back to the raw id when
-// the session has no topic entry (e.g. the General anchor).
-export function nameForSession(sid: string, topics: EndpointTopic[]): string {
-  const t = topics.find(t => t.sessionId === sid)
-  return t ? normalizeEndpointName(t.name) || sid : sid
+// The display name for an endpoint id (for @from attribution / logs); falls back to the raw id when
+// the id has no endpoint (e.g. the General anchor session, or an unregistered pane).
+export function nameForEndpoint(id: string, endpoints: PartyEndpoint[]): string {
+  const e = endpoints.find(e => e.id === id)
+  return e ? normalizeEndpointName(e.name) || id : id
 }
 
 // ---- results-by-reference: confine a ref path to the room's shared dir ----

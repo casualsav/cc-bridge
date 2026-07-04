@@ -3,8 +3,8 @@ import {
   _resetForTest, loadParty,
   createPending, getPending, removePending, putPending, listPending, markInjected, queuedFor, expirePending,
   recordAgentAsk, resetHops, currentHops, hopsExceeded, HOP_LIMIT, ASK_TTL_MS,
-  normalizeEndpointName, resolveEndpoint, nameForSession, confineRef,
-  type EndpointTopic,
+  normalizeEndpointName, resolveEndpoint, nameForEndpoint, confineRef,
+  type PartyEndpoint,
 } from './party.ts'
 
 // Pure store + resolution logic only — each test seeds via _resetForTest so nothing touches the
@@ -116,30 +116,39 @@ test('normalizeEndpointName strips @, the " · branch" and " #n" suffixes, lower
   expect(normalizeEndpointName('Executor #3 · feat/x')).toBe('executor')
 })
 
-const topics: EndpointTopic[] = [
-  { sessionId: 'a', name: 'architect', closed: false },
-  { sessionId: 'e', name: 'executor · main', closed: false },
-  { sessionId: 'r', name: 'reviewer', closed: true },
+const eps: PartyEndpoint[] = [
+  { id: 'a', kind: 'claude', name: 'architect', closed: false },
+  { id: 'e', kind: 'claude', name: 'executor · main', closed: false },
+  { id: 'r', kind: 'claude', name: 'reviewer', closed: true },
+  { id: 'mimo', kind: 'hermes', name: 'mimo', closed: false },
 ]
 
-test('resolveEndpoint maps @name to a single open session', () => {
-  expect(resolveEndpoint('@executor', topics)).toEqual({ sessionId: 'e' })
-  expect(resolveEndpoint('architect', topics)).toEqual({ sessionId: 'a' })
+test('resolveEndpoint maps @name to a single open endpoint of either kind', () => {
+  expect(resolveEndpoint('@executor', eps)).toEqual({ kind: 'claude', id: 'e' })
+  expect(resolveEndpoint('architect', eps)).toEqual({ kind: 'claude', id: 'a' })
+  expect(resolveEndpoint('@mimo', eps)).toEqual({ kind: 'hermes', id: 'mimo' })
 })
 
-test('resolveEndpoint fails loudly: unknown, closed-only, ambiguous', () => {
-  expect(resolveEndpoint('nobody', topics)).toHaveProperty('error')
-  expect((resolveEndpoint('reviewer', topics) as { error: string }).error).toMatch(/isn't running/)
-  const dup: EndpointTopic[] = [
-    { sessionId: 'e1', name: 'executor', closed: false },
-    { sessionId: 'e2', name: 'executor · dev', closed: false },
+test('resolveEndpoint fails loudly: unknown, closed-only, same-kind + cross-kind ambiguous', () => {
+  expect(resolveEndpoint('nobody', eps)).toHaveProperty('error')
+  expect((resolveEndpoint('reviewer', eps) as { error: string }).error).toMatch(/isn't running/)
+  const dup: PartyEndpoint[] = [
+    { id: 'e1', kind: 'claude', name: 'executor', closed: false },
+    { id: 'e2', kind: 'claude', name: 'executor · dev', closed: false },
   ]
   expect((resolveEndpoint('executor', dup) as { error: string }).error).toMatch(/ambiguous/)
+  // cross-kind: a topic AND a hermes endpoint both named "mimo" → ambiguous, never a silent pick
+  const cross: PartyEndpoint[] = [
+    { id: 'sess1', kind: 'claude', name: 'mimo', closed: false },
+    { id: 'mimo', kind: 'hermes', name: 'mimo', closed: false },
+  ]
+  expect((resolveEndpoint('mimo', cross) as { error: string }).error).toMatch(/ambiguous/)
 })
 
-test('nameForSession returns the normalized name, or the raw id when untopiced', () => {
-  expect(nameForSession('e', topics)).toBe('executor')
-  expect(nameForSession('ghost', topics)).toBe('ghost')
+test('nameForEndpoint returns the normalized name, or the raw id when unknown', () => {
+  expect(nameForEndpoint('e', eps)).toBe('executor')
+  expect(nameForEndpoint('mimo', eps)).toBe('mimo')
+  expect(nameForEndpoint('ghost', eps)).toBe('ghost')
 })
 
 // ---- ref confinement ----

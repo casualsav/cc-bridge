@@ -46,8 +46,7 @@ export function hermesArgv(cfg: HermesEndpoint, prompt: string): string[] {
 
 // Spawn the one-shot, buffer stdout+stderr, enforce a hard timeout with SIGTERM→grace→SIGKILL. Resolves
 // to a HermesResult and NEVER rejects — an errored run is still an "answer" so the asker never hangs.
-// `signal` lets the daemon abort (e.g. the asker's session vanished mid-run).
-export function runHermes(cfg: HermesEndpoint, task: HermesTask, signal?: AbortSignal): Promise<HermesResult> {
+export function runHermes(cfg: HermesEndpoint, task: HermesTask): Promise<HermesResult> {
   const argv = hermesArgv(cfg, renderHermesPrompt(task))
   const timeoutS = cfg.timeout_s ?? DEFAULT_HERMES_TIMEOUT_S
   return new Promise<HermesResult>(resolve => {
@@ -63,9 +62,7 @@ export function runHermes(cfg: HermesEndpoint, task: HermesTask, signal?: AbortS
     child.stderr?.on('data', d => { err += String(d) })
     const kill = () => { try { child.kill('SIGTERM') } catch {} ; setTimeout(() => { try { child.kill('SIGKILL') } catch {} }, 5000) }
     timer = setTimeout(() => { kill(); finish({ ok: false, error: `hermes timed out after ${timeoutS}s` }) }, timeoutS * 1000)
-    const onAbort = () => { kill(); finish({ ok: false, error: 'aborted (asker session gone)' }) }
-    if (signal) { if (signal.aborted) onAbort(); else signal.addEventListener('abort', onAbort, { once: true }) }
     child.on('error', e => finish({ ok: false, error: `hermes process error: ${e.message}` }))
-    child.on('close', code => { if (signal) signal.removeEventListener('abort', onAbort); finish(parseHermesResult(out, err, code)) })
+    child.on('close', code => { finish(parseHermesResult(out, err, code)) })
   })
 }
