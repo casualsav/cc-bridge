@@ -27,7 +27,9 @@ by its topic name.
   pass them by name — refs are paths, never paste large content across.
 - tg answer <ID> "one-line summary → path" [--ref path] — answer an ask you received (its
   `<tg @name ask=ID …>` block carries the ID). Reply with a pointer + summary, not the payload.
-- tg roster — who's live. · tg post "text" — say something to the humans. · tg history — recent bus events.
+- tg roster — who's live (🎭 = has its own bot avatar). · tg post "text" — say something to the humans
+  (if your endpoint has a configured avatar bot, it posts under that bot's own name/picture; otherwise
+  as `📣 <you>:` from the bridge). · tg history — recent bus events.
 
 An ask you receive may be preceded by a `<tg party-digest since …>…</tg>` block — ambient catch-up on
 bus traffic you missed while away. It's FYI only: read it for context, don't reply to it or act on it;

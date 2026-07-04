@@ -69,7 +69,8 @@ import {
 } from './topic-runtime.ts'
 import { startWebapp, type SettingsView as WebappSettingsView, type UsageView as WebappUsageView, type DiffView as WebappDiffView } from './webapp.ts'
 import { startTunnel, ensureCloudflared, tailscaleFunnelUrl, type Tunnel } from './tunnel.ts'
-import { sendRichMessage, sendRichMessageDraft, editRichMessage, toInputRichMessage } from './richmsg.ts'
+import { sendRichMessage, sendRichMessageDraft, editRichMessage, toInputRichMessage, callTelegram } from './richmsg.ts'
+import { parseAvatars, resolveAvatar, type Avatar } from './avatars.ts'
 import { claudingStatus } from './clauding.ts'
 import {
   MAX_CHUNK_LIMIT, MAX_ATTACHMENT_BYTES, assertAllowedChat, resolveChatId, resolveTarget,
@@ -1811,6 +1812,9 @@ async function dumpStuckPane(paneId: string): Promise<void> {
 // per ask — no adapter process, since a Hermes agent is local + a subprocess. Keyed by NORMALIZED
 // name so a config-casing quirk can't slip past resolveEndpoint's matching.
 const HERMES_ENDPOINTS_FILE = join(STATE_DIR, 'hermes-endpoints.json')
+// Send-only avatar tokens (party-bus P3): endpoint name → { token }. Re-read fresh per `tg post` (rare,
+// human-facing) so a newly-added avatar posts with no restart. Holds secrets → the file is user-owned 0600.
+const AVATARS_FILE = join(STATE_DIR, 'avatars.json')
 const hermesEndpoints = new Map<string, HermesEndpoint>()
 const HERMES_MAX_CONCURRENT = 8            // fork-bomb backstop; the hop guard already bounds agent↔agent asks
 const hermesInFlight = new Set<number>()   // ask ids with a live `hermes -z` child (drives roster + the cap)
@@ -3251,21 +3255,26 @@ async function handleCall(
       case 'roster': {
         const rows: string[] = []
         const eps = partyEndpoints()
+        // party-bus P3: flag endpoints backed by a send-only avatar bot (🎭) so the config is verifiable
+        // at a glance. Guarded/fresh read like the post path — a bad avatars.json just shows no flair.
+        let avatars = new Map<string, Avatar>()
+        try { avatars = parseAvatars(readJsonFile(AVATARS_FILE, null)) } catch {}
         for (const e of eps.filter(e => !e.closed)) {
           const nm = nameForEndpoint(e.id, eps)
+          const flair = resolveAvatar(nm, avatars) ? ' · 🎭' : ''
           if (e.kind === 'hermes') {   // no pane; busy = a `hermes -z` child in flight for it
             const busy = [...hermesInFlight].some(pid => getPending(pid)?.toSid === e.id)
-            rows.push(`${busy ? '🟡' : '🟢'} ${nm} · hermes${busy ? ' · busy' : ''}`)
+            rows.push(`${busy ? '🟡' : '🟢'} ${nm} · hermes${busy ? ' · busy' : ''}${flair}`)
             continue
           }
           const pane = await paneForSession(e.id).catch(() => null)
-          if (!pane) { rows.push(`⚪ ${nm} (down)`); continue }
+          if (!pane) { rows.push(`⚪ ${nm} (down)${flair}`); continue }
           const cap = await capturePane(pane).catch(() => '')
           const sl = cap ? parseStatusline(cap) : null
           const busy = cap ? !onNormalPrompt(cap) : false
           const model = sl?.model ? ` ${sl.model}` : ''
           const pct = sl?.ctxPct != null ? ` ${sl.ctxPct}%` : ''
-          rows.push(`${busy ? '🟡' : '🟢'} ${nm}${model}${pct}${busy ? ' · busy' : ''}`)
+          rows.push(`${busy ? '🟡' : '🟢'} ${nm}${model}${pct}${busy ? ' · busy' : ''}${flair}`)
         }
         text = rows.length ? rows.join('\n') : '(no live party endpoints)'
         break
@@ -3279,8 +3288,30 @@ async function handleCall(
         const body = String(args.text ?? '').trim()
         if (!body) { write({ t: 'result', id, ok: false, text: 'empty post' }); return }
         appendLedger(room, { ts: Date.now(), kind: 'post', from: fromName, text: body })
-        await bot.api.sendMessage(room, `📣 <b>${escapeHtml(fromName)}</b>: ${escapeHtml(body)}`, { parse_mode: 'HTML' })
-        text = 'posted to the room'
+        // party-bus P3: if this endpoint has a send-only avatar bot, the post goes out under that bot's
+        // own name+picture (no "📣 name:" prefix — the bot IS the identity). Fresh read = hot-reload; the
+        // whole lookup is guarded so a corrupt/unreadable avatars.json just degrades to the shared bot.
+        let avatar: Avatar | null = null
+        try { avatar = resolveAvatar(fromName, parseAvatars(readJsonFile(AVATARS_FILE, null))) } catch {}
+        const bridgePost = () => bot.api.sendMessage(room, `📣 <b>${escapeHtml(fromName)}</b>: ${escapeHtml(body)}`, { parse_mode: 'HTML' })
+        if (avatar) {
+          // Plain text (no parse_mode): with the prefix gone, HTML buys nothing and any body (with `<`/`&`)
+          // stays byte-safe. On failure (bad token / bot not in the group) DON'T lose the broadcast — fall
+          // back to the bridge bot AND surface the degradation in the result (an untailed stderr is where a
+          // misconfigured avatar goes to die).
+          try {
+            await callTelegram(avatar.token, 'sendMessage', { chat_id: room, text: body })
+            text = 'posted to the room (as your avatar)'
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e)
+            process.stderr.write(`daemon: avatar post for @${fromName} failed (${msg}); using the bridge bot\n`)
+            await bridgePost()
+            text = `posted to the room (avatar send failed, used shared bot: ${msg})`
+          }
+        } else {
+          await bridgePost()
+          text = 'posted to the room'
+        }
         break
       }
       case 'history': {
