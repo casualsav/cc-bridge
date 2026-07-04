@@ -370,7 +370,7 @@ export function currentTurnTokens(file: string): { output: number; context: numb
 // calls interleaved in transcript order — for the stream cards. Subagent output skipped.
 // `lines` is the net line delta of a file edit (+grew / −shrank; null for non-edit tools),
 // shown by the thoughts-stream tool summaries.
-export type FeedItem = { kind: 'text'; text: string } | { kind: 'tool'; tool: string; detail: string; lines?: number | null }
+export type FeedItem = { kind: 'text'; text: string } | { kind: 'tool'; tool: string; detail: string; lines?: number | null; agent?: { type: string; prompt: string } }
 
 // Net line delta of a file-mutating tool call, approximated from the tool INPUT (new vs old
 // string line counts) — no tool_result parsing needed, and close enough for a feed badge.
@@ -385,6 +385,15 @@ function editLineDelta(name: string, input: unknown): number | null {
     return net
   }
   return null
+}
+// A subagent (Task/Agent) spawn's identity for the mirror chevron: which agent type + the full prompt
+// it was handed. Carried RAW (untruncated) — the mirror caps + escapes it at render.
+function agentInfo(input: unknown): { type: string; prompt: string } | undefined {
+  if (!input || typeof input !== 'object') return undefined
+  const o = input as Record<string, unknown>
+  const type = typeof o.subagent_type === 'string' ? o.subagent_type : ''
+  const prompt = typeof o.prompt === 'string' ? o.prompt : typeof o.description === 'string' ? o.description : ''
+  return (type || prompt) ? { type, prompt } : undefined
 }
 // `concluded` = the turn has ended (pass it at card finalize, false while the turn is live). The
 // turn's REPLY — its last main-thread assistant text block — is relayed as its own message, so when
@@ -421,7 +430,7 @@ export function currentTurnFeed(file: string, concluded = false): FeedItem[] {
         if (concluded && i === replyEntry && bi === replyBlock) return   // the reply → its own message, never the card
         if (narration) out.push({ kind: 'text', text: b.text.trim() })
       } else if (b?.type === 'tool_use' && typeof b.name === 'string' && !isReactionToolUse(b)) {
-        out.push({ kind: 'tool', tool: b.name, detail: toolDetail(b.input), lines: editLineDelta(b.name, b.input) })
+        out.push({ kind: 'tool', tool: b.name, detail: toolDetail(b.input), lines: editLineDelta(b.name, b.input), ...((b.name === 'Task' || b.name === 'Agent') ? { agent: agentInfo(b.input) } : {}) })
       }
     })
   }

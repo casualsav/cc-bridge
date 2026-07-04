@@ -150,7 +150,7 @@ const TOOL_BADGE: Record<string, [string, string]> = {
   Bash: ['💻', 'terminal'], TodoWrite: ['📋', 'todo'],
   Read: ['📖', 'read'], Edit: ['✏️', 'edit'], MultiEdit: ['✏️', 'edit'], Write: ['📝', 'write'],
   Grep: ['🔍', 'search'], Glob: ['🔍', 'find'], LS: ['📂', 'list'],
-  WebFetch: ['🌐', 'fetch'], WebSearch: ['🌐', 'search'], Task: ['🤖', 'agent'],
+  WebFetch: ['🌐', 'fetch'], WebSearch: ['🌐', 'search'], Task: ['🤖', 'agent'], Agent: ['🤖', 'agent'],
   NotebookEdit: ['📓', 'notebook'],
   BashOutput: ['⚙️', 'process'], KillShell: ['⚙️', 'process'], KillBash: ['⚙️', 'process'],
   AskUserQuestion: ['❓', 'clarify'], ExitPlanMode: ['📐', 'plan'], Skill: ['📚', 'skill'],
@@ -171,6 +171,21 @@ export function toolBadge(tool: string): [string, string] {
   return ['🔧', tool]   // unregistered tool
 }
 
+// party-bus: a subagent (Task/Agent) spawn renders as its OWN line — 🤖 agent <type> — with the full
+// prompt tucked into a Telegram expandable blockquote (the chevron), so you can expand any spawn to
+// see exactly what that subagent was asked. Prompt is capped RAW then escaped (never escape-then-slice,
+// which can split an entity), staying well under the card's 3500 HTML budget; renderActions/Thoughts'
+// chunkHtml backstop closes the tag safely if many spawns ever overflow it.
+const AGENT_PROMPT_CAP = 700
+export function isAgentTool(tool: string): boolean { return tool === 'Task' || tool === 'Agent' }
+export function renderAgentLine(it: Extract<FeedItem, { kind: 'tool' }>): string {
+  const type = it.agent?.type ? ` <b>${escapeHtml(it.agent.type)}</b>` : ''
+  const raw = (it.agent?.prompt || it.detail || '').trim()
+  const p = raw.length > AGENT_PROMPT_CAP ? raw.slice(0, AGENT_PROMPT_CAP) + '…' : raw
+  const quote = p ? `\n<blockquote expandable>${escapeHtml(p)}</blockquote>` : ''
+  return `🤖 agent${type}${quote}`
+}
+
 // Actions card (the renamed tools mode): collapsed history + live tail, the TUI's own pattern.
 // Everything older than the newest ACTIONS_TAIL calls folds into renderToolRun's aggregate
 // ("Searched 14 patterns, read 9 files…" keeps counting instead of scrolling away); the newest
@@ -181,6 +196,7 @@ export function renderActionsMirror(tools: Array<Extract<FeedItem, { kind: 'tool
   const lines: string[] = [
     ...renderToolRun(tools.slice(0, split)),
     ...tools.slice(split).map(a => {
+      if (isAgentTool(a.tool)) return renderAgentLine(a)
       const [emoji, label] = toolBadge(a.tool)
       return `${emoji} ${label}${a.detail ? `: <code>${escapeHtml(a.detail)}</code>` : ''}`
     }),
@@ -217,10 +233,12 @@ export function renderToolRun(run: Array<Extract<FeedItem, { kind: 'tool' }>>): 
   let searched = 0, read = 0, ran = 0
   const other = new Map<string, number>()
   const edits = new Map<string, number>()   // file → summed net delta (repeat edits fold into one line)
+  const agents: Array<Extract<FeedItem, { kind: 'tool' }>> = []   // each subagent spawn keeps its own expandable line
   for (const it of run) {
     if (it.tool === 'Grep' || it.tool === 'Glob') searched++
     else if (it.tool === 'Read') read++
     else if (it.tool === 'Bash') ran++
+    else if (isAgentTool(it.tool)) agents.push(it)
     else if (it.tool === 'Edit' || it.tool === 'MultiEdit' || it.tool === 'Write' || it.tool === 'NotebookEdit') {
       const file = it.detail.split('/').pop() || it.detail || 'file'
       edits.set(file, (edits.get(file) ?? 0) + (it.lines ?? 0))
@@ -240,6 +258,7 @@ export function renderToolRun(run: Array<Extract<FeedItem, { kind: 'tool' }>>): 
   return [
     ...(sentence ? [`<i>${sentence[0].toUpperCase()}${sentence.slice(1)}</i>`] : []),
     ...editLines,
+    ...agents.map(renderAgentLine),
   ]
 }
 

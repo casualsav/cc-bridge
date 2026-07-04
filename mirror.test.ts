@@ -1,7 +1,7 @@
 import { test, expect } from 'bun:test'
 import {
   toolBadge, recentAssistantBlocks, renderActionsMirror, renderThoughtsMirror,
-  renderDigestMirror, splitThoughtParagraphs, renderToolRun,
+  renderDigestMirror, splitThoughtParagraphs, renderToolRun, renderAgentLine, isAgentTool,
 } from './mirror.ts'
 import type { FeedItem } from './transcript.ts'
 
@@ -55,6 +55,42 @@ test('renderActionsMirror live: collapsed history + the newest 3 as detail rows'
 test('renderActionsMirror done: whole turn collapses into the aggregate + step count', () => {
   const out = renderActionsMirror([t('Bash', 'ls'), t('Edit', '/x/a.ts', 5)], true)
   expect(out).toBe('<i>Ran 1 shell command</i>\n✏️ <code>a.ts</code> <i>+5</i>\n✅ <b>Done</b> · 2 steps')
+})
+
+// ---- subagent (Task/Agent) chevron: 🤖 agent <type> + expandable prompt blockquote ----
+const agentItem = (type: string, prompt: string): ToolItem => ({ kind: 'tool', tool: 'Task', detail: prompt.slice(0, 55), lines: null, agent: { type, prompt } })
+
+test('isAgentTool matches Task and Agent only', () => {
+  expect(isAgentTool('Task')).toBe(true)
+  expect(isAgentTool('Agent')).toBe(true)
+  expect(isAgentTool('Bash')).toBe(false)
+})
+
+test('renderToolRun gives a subagent spawn its own 🤖 line + expandable blockquote with the prompt', () => {
+  const out = renderToolRun([agentItem('explore', 'map the mirror rendering code')]).join('\n')
+  expect(out).toContain('🤖 agent <b>explore</b>')
+  expect(out).toContain('<blockquote expandable>map the mirror rendering code</blockquote>')
+})
+
+test('renderActionsMirror renders a Task in the live tail as the expandable agent line', () => {
+  const out = renderActionsMirror([agentItem('researcher', 'find the bug')], false)
+  expect(out).toContain('🤖 agent <b>researcher</b>')
+  expect(out).toContain('<blockquote expandable>find the bug</blockquote>')
+})
+
+test('renderAgentLine caps the prompt (raw slice → escape) and HTML-escapes it', () => {
+  const prompt = 'a & b '.repeat(200)                            // 1200 chars, &'s throughout, > cap
+  const line = renderAgentLine({ kind: 'tool', tool: 'Task', detail: '', lines: null, agent: { type: 'coder', prompt } })
+  expect(line.startsWith('🤖 agent <b>coder</b>\n<blockquote expandable>')).toBe(true)
+  expect(line.endsWith('</blockquote>')).toBe(true)
+  expect(line).toContain('…')                                     // capped (raw > 700)
+  expect(line).toContain('&amp;')                                 // &'s escaped
+  expect(line).not.toMatch(/&(?!amp;|lt;|gt;|quot;)/)             // no bare & survived
+})
+
+test('a subagent with no prompt still renders the agent line, no empty blockquote', () => {
+  const line = renderAgentLine({ kind: 'tool', tool: 'Task', detail: '', lines: null, agent: { type: 'writer', prompt: '' } })
+  expect(line).toBe('🤖 agent <b>writer</b>')
 })
 
 test('renderActionsMirror pluralizes a single step correctly', () => {
