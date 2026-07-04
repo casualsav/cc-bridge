@@ -1,6 +1,6 @@
 // Prompt detection from pane captures — select menus vs permission dialogs. Pure functions.
 import { test, expect } from 'bun:test'
-import { stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, isResumeSessionPrompt, detectResumeSessionPrompt, detectEditorState, onNormalPrompt, detectModelUnavailable, detectCompacting, compactPercent, permPromptToken } from './prompt.ts'
+import { stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, isResumeSessionPrompt, detectResumeSessionPrompt, detectEditorState, onNormalPrompt, detectModelUnavailable, detectCompacting, compactPercent, permPromptToken, waitingPromptSignature, isRecognizedPrompt } from './prompt.ts'
 
 test('stripAnsi removes CSI escape sequences', () => {
   expect(stripAnsi('\x1b[1mbold\x1b[0m text')).toBe('bold text')
@@ -302,6 +302,45 @@ test('permPromptToken agrees across two noisy captures of the SAME live prompt (
   expect(permPromptToken(a.question)).toBe(permPromptToken(b.question))
 })
 
+test('detectPermissionPrompt survives a todo panel rendered below the footer (regression: the silent-hang bug)', () => {
+  // The exact shape that hung a session: a live edit-permission prompt with Claude Code's todo panel
+  // rendered directly beneath its footer. The old dumb below-count treated the task rows as "content
+  // below" and vetoed the LIVE prompt → never relayed → silent hang.
+  const pane = [
+    '  1234      const x = 1',
+    'Do you want to make this edit to daemon.ts?',
+    '❯ 1. Yes',
+    '  2. Yes, allow all edits during this session (shift+tab)',
+    '  3. No',
+    '',
+    ' Esc to cancel · Tab to amend',
+    '',
+    '  4 tasks (2 done, 1 in progress, 1 open)',
+    '  ✔ P4 Part 1: permission-tap correlation',
+    '  ✔ P4 Part 2: reply addressing',
+    '  ◼ P4 ship: deploy + verify',
+    '  ◻ OWED: Fable warm review',
+  ].join('\n')
+  const p = detectPermissionPrompt(pane)
+  expect(p).not.toBeNull()
+  expect(p!.question).toBe('Do you want to make this edit to daemon.ts?')
+  expect(p!.options.map(o => o.label)).toEqual(['Yes', 'Yes, allow all edits during this session (shift+tab)', 'No'])
+})
+
+test('detectPermissionPrompt still vetoes a genuinely scrolled-up past prompt (real content below the footer)', () => {
+  const pane = [
+    'Do you want to run this command?',
+    '  1. Yes',
+    '  2. No',
+    ' Esc to cancel · Tab to amend',
+    '● Bash',            // real, non-chrome content below → this footer belongs to a PAST prompt
+    'total 48',
+    'drwxr-xr-x 3 u u',
+    '❯ ',
+  ].join('\n')
+  expect(detectPermissionPrompt(pane)).toBeNull()
+})
+
 test('detectPermissionPrompt ignores a plain numbered list (no Yes/No shape)', () => {
   const pane = [
     'Pick a number?',
@@ -424,4 +463,29 @@ test('detectLoginPrompt needs the menu live at the bottom (not scrolled up)', ()
     '  more output below the old menu',
   ].join('\n')
   expect(detectLoginPrompt(pane)).toBeNull()
+})
+
+// ---- stuck-screen watchdog helpers (party-bus) ----
+
+test('waitingPromptSignature is stable across a below-footer statusline tick, and null without a footer', () => {
+  const mk = (clock: string) => [
+    '❓ Choose a deployment target',
+    '  1. staging',
+    '  2. production',
+    ' Enter to select · Esc to cancel',
+    ' ubuntu@cloud | Opus 4.8',
+    ` ⧗${clock} | $0.42 | api 3s`,   // volatile statusline BELOW the footer
+  ].join('\n')
+  const a = waitingPromptSignature(mk('3h00m'))
+  expect(a).not.toBeNull()
+  expect(a).toBe(waitingPromptSignature(mk('3h59m')))   // the clock tick below the footer must not perturb it
+  expect(a).toContain('Choose a deployment target')
+  expect(waitingPromptSignature('some output\n❯ ')).toBeNull()             // no soliciting footer
+  expect(waitingPromptSignature('working…\n  esc to interrupt')).toBeNull() // "interrupt" ≠ waiting for input
+})
+
+test('isRecognizedPrompt is true for a known prompt so the watchdog never alerts on a relayed one', () => {
+  const perm = ['Do you want to run this command?', '  1. Yes', '  2. No', ' Esc to cancel · Tab to amend'].join('\n')
+  expect(isRecognizedPrompt(perm)).toBe(true)
+  expect(isRecognizedPrompt('plain assistant output, no prompt here')).toBe(false)
 })

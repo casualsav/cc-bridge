@@ -24,7 +24,7 @@ import { acquireTokenLock } from './token-lock.ts'
 // replace a daemon left running stale code after a plugin upgrade.
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
-import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
+import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, waitingPromptSignature, isRecognizedPrompt, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
 import { resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, currentTurnActivity, currentTurnTokens, listRecentSessions, findSessionCwd, searchTranscripts } from './transcript.ts'
 import {
   initAccounts, listAccounts, accountByName, accountForTranscript, accountForProjectsDir,
@@ -8796,6 +8796,41 @@ if (FORCE_PANE) {
 setInterval(() => void updateSessionPin(), 10_000)
 // Party line (party-bus P1): deliver queued agent↔agent asks to idle targets + expire stale ones.
 setInterval(() => void sweepParty(), LATER_SWEEP_MS).unref()
+
+// Stuck-screen watchdog (party-bus): the shared footerIsLive fix keeps KNOWN prompts relaying; this is
+// the backstop for a NOVEL screen the detectors can't parse, so a session never hangs silently (the "I
+// thought you were working but you were wedged at a prompt" class). Every 25s: any bridged pane sitting
+// at an UNRECOGNIZED input-soliciting screen (a waiting footer, no detector match, not a normal prompt)
+// whose prompt region has been unchanged for STUCK_ALERT_MS gets a ONE-TIME ping into its own topic with
+// the terminal tail so the human can answer it. Reset the instant the screen changes → it re-arms.
+const stuckWatch = new Map<string, { sig: string; since: number; alerted: boolean }>()
+const STUCK_ALERT_MS = 75_000
+async function sweepStuckPanes(): Promise<void> {
+  const panes = new Set<string>()
+  for (const t of listTopics()) { if (t.closed) continue; const p = await paneForSession(t.sessionId).catch(() => null); if (p) panes.add(p) }
+  if (focus.activePaneId) panes.add(focus.activePaneId)
+  for (const pane of panes) {
+    const cap = await capturePane(pane).catch(() => '')
+    const sig = cap ? waitingPromptSignature(cap) : null
+    // Only an UNRECOGNIZED waiting screen counts: a recognized prompt is relayed as buttons, a normal
+    // prompt is idle-ready, a working pane has no soliciting footer (and its capture keeps changing).
+    if (!sig || onNormalPrompt(cap) || isRecognizedPrompt(cap)) { stuckWatch.delete(pane); continue }
+    const prev = stuckWatch.get(pane)
+    if (!prev || prev.sig !== sig) { stuckWatch.set(pane, { sig, since: Date.now(), alerted: false }); continue }
+    if (prev.alerted || Date.now() - prev.since < STUCK_ALERT_MS) continue
+    prev.alerted = true
+    const sid = await sessionForPane(pane).catch(() => null)
+    const nm = (sid && getTopicBySession(sid)?.name) || sid || pane
+    const tail = cap.split('\n').map(l => l.replace(/\s+$/, '')).filter(l => l.trim()).slice(-16).join('\n')
+    for (const { chat, thread } of await outboundTargetsFor(pane)) {
+      void bot.api.sendMessage(chat,
+        `⚠️ <b>${escapeHtml(nm)}</b> looks stuck at a prompt the bridge can't turn into buttons — you may need to answer it in the terminal:\n<pre>${escapeHtml(tail)}</pre>`,
+        { parse_mode: 'HTML', ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
+    }
+    process.stderr.write(`daemon: stuck-screen watchdog pinged for pane ${pane} (${nm})\n`)
+  }
+}
+setInterval(() => void sweepStuckPanes(), 25_000).unref()
 // Remember the focused pane's permission mode (covers shift+tab changes made in the terminal,
 // which the daemon otherwise never sees) so /resume can inherit it after the pane exits.
 setInterval(() => void (async () => {
