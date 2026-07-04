@@ -26,7 +26,7 @@ test('buildSendPayload: message_thread_id is included only when set (topics)', (
 
 test('buildSendPayload: reply_parameters carries reply-to message id only when set', () => {
   expect(buildSendPayload('123', { markdown: 'x' }, { replyToMessageId: 99 })).toEqual({
-    chat_id: '123', rich_message: { markdown: 'x' }, reply_parameters: { message_id: 99 },
+    chat_id: '123', rich_message: { markdown: 'x' }, reply_parameters: { message_id: 99, allow_sending_without_reply: true },
   })
   expect(buildSendPayload('123', { markdown: 'x' }, {})).not.toHaveProperty('reply_parameters')
 })

@@ -208,6 +208,24 @@ export function isSubmitScreen(paneText: string): boolean {
 const FEEDBACK_SURVEY = /how is claude doing this session/i
 const QUEUED_MESSAGES = /to edit queued message/i
 
+// Is the footer at `footerIdx` the LIVE prompt's footer (≤1 line of real content below), not a
+// scrolled-up already-answered one? Only "chrome" is allowed beneath a live prompt: the persistent
+// todo panel (renders DIRECTLY below an active prompt), the statusline, box borders, mode/approve hints
+// — all skipped here. Shared by EVERY prompt detector so a todo panel or statusline can never wrongly
+// veto (and thus silently fail to relay) a live prompt — the class of bug that hangs a session mid-turn
+// with an un-relayed prompt. A genuinely scrolled-up prompt has real content ABOVE this panel/chrome,
+// counted before the loop reaches the todo header, so the veto is preserved.
+function footerIsLive(lines: string[], footerIdx: number): boolean {
+  let contentBelow = 0
+  for (let i = footerIdx + 1; i < lines.length; i++) {
+    const l = lines[i]
+    if (TODO_PANEL_HEADER.test(l)) break
+    if (!l.trim() || BELOW_CHROME.test(l)) continue
+    contentBelow++
+  }
+  return contentBelow <= 1
+}
+
 export function detectUserPrompt(paneText: string): PromptInfo | null {
   // The review/submit tab carries the same select-menu footer as a question, but
   // it's driven programmatically, not relayed — keep it out of detection entirely.
@@ -226,18 +244,9 @@ export function detectUserPrompt(paneText: string): PromptInfo | null {
     if (SELECT_HINT.test(lines[i]) || MULTI_HINT.test(lines[i])) { footerIdx = i; break }
   }
   if (footerIdx === -1) return null
-  // A real prompt sits at the bottom; the only thing allowed below its footer is chrome — the
-  // persistent statusline (which plan-approval keeps rendered beneath it), box borders, the
-  // "ctrl+g to edit … plans" line, mode/agent hints. More than one line of actual CONTENT below
-  // means this footer belongs to a scrolled-up past prompt, not the active one.
-  let contentBelow = 0
-  for (let i = footerIdx + 1; i < lines.length; i++) {
-    const l = lines[i]
-    if (TODO_PANEL_HEADER.test(l)) break   // todo panel + everything under it is live chrome (see const)
-    if (!l.trim() || BELOW_CHROME.test(l)) continue
-    contentBelow++
-  }
-  if (contentBelow > 1) return null
+  // Only chrome (statusline, the todo panel, borders, mode hints) may sit below a LIVE prompt's footer;
+  // more than one line of real content below means this footer belongs to a scrolled-up past prompt.
+  if (!footerIsLive(lines, footerIdx)) return null
 
   // Walk up from the footer across the option block — option lines, their indented
   // descriptions, and the blank/divider lines between them — recording the topmost
@@ -307,9 +316,7 @@ export function detectPermissionPrompt(paneText: string): PermissionPrompt | nul
     if (PERM_FOOTER.test(lines[i])) { footerIdx = i; break }
   }
   if (footerIdx === -1) return null
-  let belowNonBlank = 0
-  for (let i = footerIdx + 1; i < lines.length; i++) if (lines[i].trim()) belowNonBlank++
-  if (belowNonBlank > 1) return null
+  if (!footerIsLive(lines, footerIdx)) return null   // todo-panel/statusline-aware (shared) — was a dumb count that silently un-relayed the prompt when a todo panel sat below
 
   // Numbered options directly above the footer.
   const options: PermissionOption[] = []
@@ -370,6 +377,21 @@ export function detectPermissionPrompt(paneText: string): PermissionPrompt | nul
   return { question, preview: preview.join('\n').slice(0, 400), options }
 }
 
+// A short, capture-stable identity for a permission prompt (party-bus P4), so a relayed approve/deny
+// button can carry the identity of the EXACT prompt it was shown for and the daemon can re-verify the
+// pane STILL shows that prompt before injecting — a stale tap on a superseded prompt is rejected, not
+// injected blind into whatever's on screen now. Whitespace is normalized so a benign capture difference
+// (wrap / trailing space between the relay-time and tap-time captures of the SAME live prompt) still
+// hashes equal; different questions hash different. Non-crypto FNV-1a keeps this module dependency-free
+// — the token only CORRELATES (the live re-capture is the real guard), so collision-resistance isn't
+// load-bearing. 8 hex chars keeps callback_data far under Telegram's 64-byte cap.
+export function permPromptToken(question: string): string {
+  const norm = question.replace(/\s+/g, ' ').trim()
+  let h = 0x811c9dc5
+  for (let i = 0; i < norm.length; i++) { h ^= norm.charCodeAt(i); h = Math.imul(h, 0x01000193) }
+  return (h >>> 0).toString(16).padStart(8, '0')
+}
+
 // ---- /login method menu (a third shape) ----
 // Claude's "Select login method" screen carries only an "Esc to cancel" footer — NO select-menu
 // wording ("Enter to select / ↑↓") and NO permission "· Tab to amend" — so neither detector above
@@ -391,9 +413,7 @@ export function detectLoginPrompt(paneText: string): { options: PromptOption[] }
     if (/esc to cancel/i.test(lines[i])) { footerIdx = i; break }
   }
   if (footerIdx === -1) return null
-  let belowNonBlank = 0
-  for (let i = footerIdx + 1; i < lines.length; i++) if (lines[i].trim()) belowNonBlank++
-  if (belowNonBlank > 1) return null
+  if (!footerIsLive(lines, footerIdx)) return null   // todo-panel/statusline-aware liveness (shared)
 
   // The contiguous numbered options directly above the footer.
   const opts: PromptOption[] = []
@@ -425,9 +445,7 @@ export function isUsageLimitChoice(paneText: string): boolean {
     if (/enter to confirm/i.test(lines[i])) { footerIdx = i; break }
   }
   if (footerIdx === -1) return false
-  let belowNonBlank = 0
-  for (let i = footerIdx + 1; i < lines.length; i++) if (lines[i].trim()) belowNonBlank++
-  if (belowNonBlank > 1) return false   // scrolled-up past menu, not the live one
+  if (!footerIsLive(lines, footerIdx)) return false   // todo-panel/statusline-aware liveness (shared)
   return lines.slice(0, footerIdx).some(l => USAGE_CHOICE_OPT.test(l))
 }
 
@@ -450,9 +468,7 @@ export function isPluginInstallUserScope(paneText: string): boolean {
     if (/enter to select/i.test(lines[i])) { footerIdx = i; break }
   }
   if (footerIdx === -1) return false
-  let belowNonBlank = 0
-  for (let i = footerIdx + 1; i < lines.length; i++) if (lines[i].trim()) belowNonBlank++
-  if (belowNonBlank > 1) return false   // scrolled-up past the live menu
+  if (!footerIsLive(lines, footerIdx)) return false   // todo-panel/statusline-aware liveness (shared)
   const region = lines.slice(0, footerIdx)
   if (!region.some(l => PLUGIN_USER_SCOPE.test(l))) return false
   return region.some(l => /^\s*[>❯●]\s*install for you \(user scope\)/i.test(l))
@@ -482,9 +498,7 @@ export function detectResumeSessionPrompt(paneText: string): { options: PromptOp
     if (/enter to confirm/i.test(lines[i])) { footerIdx = i; break }
   }
   if (footerIdx === -1) return null
-  let belowNonBlank = 0
-  for (let i = footerIdx + 1; i < lines.length; i++) if (lines[i].trim()) belowNonBlank++
-  if (belowNonBlank > 1) return null   // scrolled-up past the live picker
+  if (!footerIsLive(lines, footerIdx)) return null   // todo-panel/statusline-aware liveness (shared)
   // Contiguous numbered options directly above the footer (a blank gap before them is fine).
   const opts: PromptOption[] = []
   for (let i = footerIdx - 1; i >= 0; i--) {
@@ -613,4 +627,30 @@ export function onNormalPrompt(paneText: string): boolean {
     if (/^\s*❯/.test(t[i]) && /^\s*[─━╭╰└┌├╮╯|]/.test(t[i - 1]) && /^\s*[─━╭╰└┌├╮╯|]/.test(t[i + 1])) return true
   }
   return false
+}
+
+// ---- stuck-screen watchdog (party-bus): a backstop for a pane wedged at a prompt no detector parses ----
+// The shared footerIsLive fix keeps KNOWN prompts relaying; this catches a genuinely novel screen so a
+// session never hangs silently. WAITING_FOOTER = the input-soliciting footer hints Claude Code prints
+// under an interactive prompt — deliberately NOT "esc to interrupt" (that's a working pane, not a prompt).
+const WAITING_FOOTER = /(esc to (?:cancel|go back)|enter to (?:select|confirm)|tab to amend|space to select|to navigate)/i
+
+// A STABLE signature of an interactive screen's prompt region — the footer + up to 12 lines above it, or
+// null when the pane shows no such footer. Everything BELOW the footer (the statusline clock, the todo
+// panel, other volatile chrome) is excluded, so a genuinely-wedged prompt keeps a CONSTANT signature even
+// as the statusline ticks — that's what lets the watchdog tell "wedged" from "working". The watchdog reads
+// non-null as "this pane is soliciting input" and the string as the stability key across sweeps.
+export function waitingPromptSignature(paneText: string): string | null {
+  const lines = paneLines(paneText)
+  let footerIdx = -1
+  for (let i = lines.length - 1; i >= 0; i--) { if (WAITING_FOOTER.test(lines[i])) { footerIdx = i; break } }
+  if (footerIdx < 0) return null
+  return lines.slice(Math.max(0, footerIdx - 12), footerIdx + 1).map(l => l.trimEnd()).join('\n')
+}
+
+// Does a KNOWN detector already recognize this screen (so the daemon relays it as buttons / auto-handles
+// it)? The watchdog fires ONLY when nothing matches — a truly unrecognized waiting screen.
+export function isRecognizedPrompt(paneText: string): boolean {
+  return !!detectPermissionPrompt(paneText) || !!detectUserPrompt(paneText) || !!detectResumeSessionPrompt(paneText)
+    || !!detectLoginPrompt(paneText) || isUsageLimitChoice(paneText) || isPluginInstallUserScope(paneText)
 }

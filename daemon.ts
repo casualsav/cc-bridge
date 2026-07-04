@@ -24,7 +24,7 @@ import { acquireTokenLock } from './token-lock.ts'
 // replace a daemon left running stale code after a plugin upgrade.
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
-import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
+import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, waitingPromptSignature, isRecognizedPrompt, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
 import { resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, currentTurnActivity, currentTurnTokens, listRecentSessions, findSessionCwd, searchTranscripts } from './transcript.ts'
 import {
   initAccounts, listAccounts, accountByName, accountForTranscript, accountForProjectsDir,
@@ -69,7 +69,8 @@ import {
 } from './topic-runtime.ts'
 import { startWebapp, type SettingsView as WebappSettingsView, type UsageView as WebappUsageView, type DiffView as WebappDiffView } from './webapp.ts'
 import { startTunnel, ensureCloudflared, tailscaleFunnelUrl, type Tunnel } from './tunnel.ts'
-import { sendRichMessage, sendRichMessageDraft, editRichMessage, toInputRichMessage } from './richmsg.ts'
+import { sendRichMessage, sendRichMessageDraft, editRichMessage, toInputRichMessage, callTelegram } from './richmsg.ts'
+import { parseAvatars, resolveAvatar, type Avatar } from './avatars.ts'
 import { claudingStatus } from './clauding.ts'
 import {
   MAX_CHUNK_LIMIT, MAX_ATTACHMENT_BYTES, assertAllowedChat, resolveChatId, resolveTarget,
@@ -82,6 +83,15 @@ import { startEditScheduler, scheduleEdit, scheduleDelete, cancelEdit, touchActi
 import { initUpdates, startUpdate, bridgeVersion, claudeBin, claudeVersion, sweepUpdateChecks } from './updates.ts'
 import { formatChannelBlock } from './inbound.ts'
 import { initQueue, readLater, writeLater, sweepLaterQueues, LATER_SWEEP_MS } from './queue.ts'
+import {
+  createPending, getPending, removePending, putPending, listPending, markInjected, expirePending,
+  recordAgentAsk, resetHops, HOP_LIMIT,
+  resolveEndpoint, nameForEndpoint, normalizeEndpointName, confineRef, sharedDir, ensureSharedDir, appendLedger, tailLedger,
+  getSeen, markSeen, digestSince, DIGEST_SCAN,
+  type PartyEndpoint, type PartyPending,
+} from './party.ts'
+import { formatAskBlock, formatAnswerBlock, formatDigestBlock, formatRosterLine } from './party-block.ts'
+import { runHermes, type HermesEndpoint, type HermesTask } from './hermes-driver.ts'
 import {
   initLoop, sweepLoops, LOOP_SWEEP_MS, startLoopWizard, handleLoopWizardReply, wizardSidFor,
   activeLoop, loopGo, loopCancel, loopStopSoft, loopStopNow, loopResume, loopStatusHtml, loopStatusKeyboard,
@@ -249,6 +259,7 @@ initStatusCard({
   bot, transcriptForPane, lastKnownModel: () => lastKnownModel, botUsername: () => botUsername,
   usageSnapshotForPane: async pane => readUsageSnapshot(undefined, await paneAccount(pane)),
   onTopicGone: (sid, threadId) => void handleTopicThreadGone(sid, threadId),
+  partyRoster: partyRosterLine,   // party-bus P2: a compact live-roster line on the pinned card
 })
 initUpdates({ bot })
 initPromptRelay({ bot, outboundTargetsFor, flushPendingText, transcriptForPane, lastRelayedUuid: () => lastRelayedUuid, resetPromptDedup, verifyPromptClosed, paneKeys })
@@ -939,22 +950,29 @@ async function sendChunkRetrying(chat_id: string, text: string, extra: Record<st
 
 // Send agent markdown to chats using the same render/chunk path as the reply tool. In forum-topics
 // mode the caller passes a threadId so the message lands in the session's own topic.
-async function sendAgentText(chats: string[], text: string, threadId?: number): Promise<void> {
+async function sendAgentText(chats: string[], text: string, threadId?: number, replyTo?: number): Promise<void> {
   const access = loadAccess()
-  // The current render/chunk path — also the fallback when rich messages are off or error out.
-  const sendHtmlPath = async (chat_id: string): Promise<void> => {
+  // The current render/chunk path — also the fallback when rich messages are off or error out. `reply`
+  // (party-bus P4 addressing) lands on the FIRST chunk only; the rest are continuations of it.
+  const sendHtmlPath = async (chat_id: string, reply?: number): Promise<void> => {
     const render = access.renderMarkdown !== false
     const limit = Math.max(1, Math.min(access.textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT))
     const chunks = render ? chunkHtml(mdToTelegramHtml(text), limit) : chunk(text, limit, access.chunkMode ?? 'length')
     const base = render ? { parse_mode: 'HTML' as const } : {}
     const extra = threadId ? { ...base, message_thread_id: threadId } : base
-    for (const c of chunks) await sendChunkRetrying(chat_id, c, extra)
+    let first = true
+    for (const c of chunks) {
+      const ex = first && reply != null ? { ...extra, reply_parameters: { message_id: reply, allow_sending_without_reply: true } } : extra
+      await sendChunkRetrying(chat_id, c, ex)
+      first = false
+    }
   }
   // Rich messages render code as RichBlockPreformatted, which (on current clients) wraps off-screen
   // and drops the copy button the classic <pre> entity had — so a reply carrying a fenced code block
   // is worse under rich. Route any such reply through the classic HTML/<pre> path to keep copy +
   // contained horizontal scroll; a code-bearing reply forgoes native tables/headings (rare to mix).
   const hasFencedCode = /(^|\n)[ \t]{0,3}```/.test(text)
+  let replyOnce = replyTo   // party-bus P4: the reply-to lands on the FIRST message actually sent, then clears
   for (const chat_id of chats) {
     // Rich messages (Bot API 10.1) render Claude's markdown natively (tables/headings/code/collapsible)
     // and work in DM + topics. One raw call per chat — no chunking (no documented length cap). ANY
@@ -962,13 +980,13 @@ async function sendAgentText(chats: string[], text: string, threadId?: number): 
     // reply still lands. On when markdown rendering is enabled (renderMarkdown !== false) AND the reply
     // has no fenced code block (see above).
     if (access.renderMarkdown !== false && !hasFencedCode) {
-      try { await sendRichMessage(TOKEN!, chat_id, toInputRichMessage(text), { messageThreadId: threadId }); continue }
+      try { await sendRichMessage(TOKEN!, chat_id, toInputRichMessage(text), { messageThreadId: threadId, ...(replyOnce != null ? { replyToMessageId: replyOnce } : {}) }); replyOnce = undefined; continue }
       catch (e) {
         if (isThreadGoneError(e)) throw new TopicThreadGoneError()   // dead thread — HTML fallback would hit it too; let the relay recreate
         process.stderr.write(`daemon: rich message send failed, falling back to HTML: ${e}\n`)
       }
     }
-    await sendHtmlPath(chat_id)
+    await sendHtmlPath(chat_id, replyOnce); replyOnce = undefined
   }
   if (access.tts?.mode === 'all') void sendTtsVoice(text, chats.map(chat => ({ chat, thread: threadId })))
 }
@@ -1153,9 +1171,18 @@ async function deliverRelayReply(paneId: string, target: { chat: string; thread?
     if (thread != null) stopTopicTyping(target.chat, thread)                                   // reply delivered — never re-light typing over it
     else if (isTopicMode() && target.chat === getGroupChatId()) stopTopicTyping(target.chat, 'general')   // General-anchored reply — same latch release
   }
+  // party-bus P4: address the reply to whoever STARTED this turn (snapshot at turn-start), but only when
+  // it disambiguates — topic/group mode AND (>1 distinct human posted this turn OR the trigger ≠ owner).
+  // Solo-owner topic churn stays clean; a solo DM (not topic mode) never threads.
+  const route = `${target.chat}:${target.thread ?? 'dm'}`
+  const trigRaw = turnTrigger.get(route)
+  const trig = trigRaw && Date.now() - trigRaw.at <= TRIGGER_TTL_MS ? trigRaw : undefined   // ignore a stale (no-reply) trigger
+  const distinct = recentSenders.get(route)?.size ?? 0
+  const replyTo = (isTopicMode() && trig && (distinct >= 2 || trig.id !== loadAccess().allowFrom[0])) ? trig.msgId : undefined
   try {
-    await sendAgentText([target.chat], text, target.thread)
+    await sendAgentText([target.chat], text, target.thread, replyTo)
     releaseTyping(target.thread)
+    turnTrigger.delete(route); recentSenders.delete(route)   // turn delivered → next turn's FIRST poster becomes the addressee
   } catch (e) {
     if (!(e instanceof TopicThreadGoneError) || target.thread == null) { process.stderr.write(`daemon: relay send failed: ${e}\n`); return }
     // The topic was DELETED out from under a live session (send → "message thread not found").
@@ -1787,6 +1814,206 @@ async function dumpStuckPane(paneId: string): Promise<void> {
       { parse_mode: 'HTML', reply_markup: { force_reply: true, input_field_placeholder: 'Typed into the terminal' },
         ...(t.thread ? { message_thread_id: t.thread } : {}) }).catch(() => null)
     if (sent) replyTargets.set(`${t.chat}:${sent.message_id}`, { kind: 'stucktext', paneId })
+  }
+}
+
+// ---- Party line (party-bus P1): agent↔agent ask/answer over the bus ----
+// P1 is Claude↔Claude: each endpoint is a topic's session, so the topic store IS the registry
+// (party.ts resolves @name → sessionId). An `ask` is async — the asking agent's turn ends and the
+// answer arrives later as a fresh injected turn (yield, not block). Delivery is idle-gated: an ask to
+// a busy agent waits (sweepParty) until it sits at a normal prompt, so we never clobber a mid-turn pane.
+
+// ---- Hermes endpoints (party-bus P1.5): non-Claude agents driven by `hermes -z` ----
+// Configured in hermes-endpoints.json (name → profile); the daemon spawns `hermes --profile <p> -z`
+// per ask — no adapter process, since a Hermes agent is local + a subprocess. Keyed by NORMALIZED
+// name so a config-casing quirk can't slip past resolveEndpoint's matching.
+const HERMES_ENDPOINTS_FILE = join(STATE_DIR, 'hermes-endpoints.json')
+// Send-only avatar tokens (party-bus P3): endpoint name → { token }. Re-read fresh per `tg post` (rare,
+// human-facing) so a newly-added avatar posts with no restart. Holds secrets → the file is user-owned 0600.
+const AVATARS_FILE = join(STATE_DIR, 'avatars.json')
+const hermesEndpoints = new Map<string, HermesEndpoint>()
+const HERMES_MAX_CONCURRENT = 8            // fork-bomb backstop; the hop guard already bounds agent↔agent asks
+const hermesInFlight = new Set<number>()   // ask ids with a live `hermes -z` child (drives roster + the cap)
+
+function loadHermesEndpoints(): void {
+  hermesEndpoints.clear()
+  const raw = readJsonFile<Record<string, Partial<HermesEndpoint>> | null>(HERMES_ENDPOINTS_FILE, null)
+  if (!raw) return
+  for (const [key, v] of Object.entries(raw)) {
+    if (!v || typeof v.profile !== 'string') continue
+    const name = normalizeEndpointName(key)
+    if (!name) continue
+    hermesEndpoints.set(name, {
+      name, profile: v.profile,
+      ...(Array.isArray(v.cmd) ? { cmd: v.cmd.filter((x): x is string => typeof x === 'string') } : {}),
+      ...(typeof v.timeout_s === 'number' ? { timeout_s: v.timeout_s } : {}),
+      ...(typeof v.cwd === 'string' ? { cwd: v.cwd } : {}),
+    })
+  }
+  if (hermesEndpoints.size) process.stderr.write(`daemon: loaded ${hermesEndpoints.size} hermes endpoint(s): ${[...hermesEndpoints.keys()].join(', ')}\n`)
+}
+loadHermesEndpoints()
+
+// All addressable party endpoints for pure resolution: topic sessions (kind claude, id = sessionId)
+// + configured hermes endpoints (kind hermes, id = name). party.ts stays grammy/tmux-free.
+function partyEndpoints(): PartyEndpoint[] {
+  const claude = listTopics().map(t => ({ id: t.sessionId, kind: 'claude' as const, name: t.name, closed: t.closed }))
+  const hermes = [...hermesEndpoints.values()].map(h => ({ id: h.name, kind: 'hermes' as const, name: h.name, closed: false }))
+  return [...claude, ...hermes]
+}
+// The room = the bound forum group. Party requires topic mode (an endpoint IS a topic's session).
+function partyRoom(): string | null { return isTopicMode() ? getGroupChatId() : null }
+
+// Compact live-roster line for the pinned status card (party-bus P2): who's on the bus, at a glance —
+// the always-on card form of `tg roster`. LIVENESS ONLY (claude endpoints resolve a pane; hermes are
+// always up); NO per-endpoint pane CAPTURE — that's `tg roster`'s job and far too heavy to run on
+// every card render. MEMOIZED (ROSTER_TTL_MS) so it stays O(endpoints) per refresh no matter how many
+// cards render it. null unless party is active AND >1 endpoint is live (no roster on a solo bus).
+let rosterCache: { at: number; line: string | null } = { at: 0, line: null }
+const ROSTER_TTL_MS = 8_000
+async function partyRosterLine(): Promise<string | null> {
+  const now = Date.now()
+  if (now - rosterCache.at < ROSTER_TTL_MS) return rosterCache.line
+  let line: string | null = null
+  try {
+    if (partyRoom()) {
+      const eps = partyEndpoints().filter(e => !e.closed)
+      const names: string[] = []   // RAW names — formatRosterLine clamps THEN escapes (never splits an entity)
+      for (const e of eps) {
+        const up = e.kind === 'hermes' ? true : !!(await paneForSession(e.id).catch(() => null))
+        if (up) names.push(nameForEndpoint(e.id, eps))
+      }
+      line = formatRosterLine(names)
+    }
+  } catch { line = rosterCache.line }
+  rosterCache = { at: now, line }
+  return line
+}
+
+// Inject a pre-formatted party block into a pane, serialized on the SAME inbound chain as human
+// messages so an ask/answer can't interleave with a human paste mid-buffer. Focused pane pauses its
+// watcher (bracket-paste); an off-focus topic pane gets a plain paste. Resolves to whether it landed.
+function partyDeliver(pane: string, block: string): Promise<boolean> {
+  const run = () => (pane === focus.activePaneId && focus.paneWatcher
+    ? injectPaste(pane, focus.paneWatcher, block)
+    : pasteToPane(pane, block))
+  const p = inboundInjectChain.then(run, run) as Promise<boolean>
+  inboundInjectChain = p.then(() => {}, () => {})
+  return p
+}
+
+// Deliver a queued ask NOW iff its target pane is live and at a normal prompt (never mid-turn). The
+// pane is re-resolved from the sessionId every time (panes churn on respawn/adopt). partyInFlight
+// guards the immediate attempt (in the `ask` handler) from racing the 15s sweep into a double-inject.
+const partyInFlight = new Set<number>()
+async function tryDeliverAsk(p: PartyPending): Promise<boolean> {
+  const cur = getPending(p.id)
+  if (!cur || cur.injected || partyInFlight.has(cur.id)) return false
+  partyInFlight.add(cur.id)   // claim BEFORE the awaits so the immediate attempt + the 15s sweep can't both proceed
+  try {
+    const pane = await paneForSession(cur.toSid).catch(() => null)
+    if (!pane) return false
+    const cap = await capturePane(pane).catch(() => '')
+    if (!cap || !onNormalPrompt(cap)) return false
+    const room = partyRoom()
+    // Digest (party-bus P2): prepend the bus activity this endpoint missed since it was last caught up,
+    // so the ask arrives WITH ambient context — pull-not-push (only ever handed over on a delivery it's
+    // already receiving, never a live push into a busy pane). Excludes this very ask (already in the
+    // ledger from creation) + the endpoint's own rows. Claude only — a hermes one-shot has no
+    // continuity to catch up, and runHermesAsk never calls this.
+    const askBlock = formatAskBlock(cur.fromName, cur.id, cur.text, cur.refs)
+    let block = askBlock
+    if (room) {
+      const since = getSeen(cur.toSid)
+      const digest = digestSince(tailLedger(room, DIGEST_SCAN), since, { excludeId: cur.id, excludeFrom: cur.toName, cap: 8 })
+      const dig = formatDigestBlock(digest, since > 0 ? fmtAgo(since) : 'recently')
+      if (dig) block = `${dig}\n${askBlock}`
+    }
+    const ok = await partyDeliver(pane, block)
+    if (ok) {
+      const now = Date.now()
+      markInjected(cur.id, now)
+      if (room) {
+        markSeen(cur.toSid, now)   // advance the watermark only on a LANDED delivery — a failed paste keeps the window open for the retry
+        void bot.api.sendMessage(room,
+          `▸ <b>${escapeHtml(cur.fromName)}</b> → <b>${escapeHtml(cur.toName)}</b>: ${escapeHtml(cur.text.slice(0, 120))}${cur.text.length > 120 ? '…' : ''}`,
+          { parse_mode: 'HTML', disable_notification: true }).catch(() => {})
+      }
+    }
+    return ok
+  } finally { partyInFlight.delete(cur.id) }
+}
+
+// 15s sweep: expire un-answered asks (tell the asker) + deliver queued asks whose target is now idle.
+async function sweepParty(): Promise<void> {
+  const room = partyRoom()
+  for (const p of expirePending(Date.now())) {
+    if (room) void bot.api.sendMessage(room,
+      `⌛ No answer from <b>${escapeHtml(p.toName)}</b> to ask ${p.id} — timed out.`,
+      { parse_mode: 'HTML', disable_notification: true }).catch(() => {})
+    const askerPane = await paneForSession(p.fromSid).catch(() => null)
+    if (askerPane) void partyDeliver(askerPane, formatAnswerBlock('system', p.id, `(no answer from @${p.toName} — timed out)`))
+    if (room) appendLedger(room, { ts: Date.now(), kind: 'expire', from: p.toName, to: p.fromName, id: p.id, text: 'timed out' })
+  }
+  for (const p of listPending()) {
+    if (!p.injected) await tryDeliverAsk(p).catch(() => {})
+  }
+}
+
+// Deliver an answer to the ORIGINAL asker's pane. Shared by tg `answer` (a Claude endpoint answering)
+// and async hermes-run completion. Re-checks the pending still exists (a long hermes run may have
+// expired mid-flight), clears it BEFORE injecting, restores it on a failed paste (so the answer isn't
+// lost with a false-success record), and logs/cards only a REAL delivery. Returns a status string; a
+// leading '!' marks a failure the caller relays back as an error.
+async function deliverAnswerToAsker(pending: PartyPending, answerer: string, body: string, refs: string[]): Promise<string> {
+  const room = partyRoom()
+  const cur = getPending(pending.id)
+  if (!cur) return `!ask ${pending.id} is already closed (expired or answered)`
+  removePending(cur.id)
+  const askerPane = await paneForSession(cur.fromSid).catch(() => null)
+  if (!askerPane) { putPending(cur); return `!@${cur.fromName}'s session is no longer running — not delivered` }
+  // .catch(false): a rejected paste (a tmux error propagating through the inject chain) must reach the
+  // restore path below, not throw past it — the pending is already removed, so a throw would lose the answer.
+  const ok = await partyDeliver(askerPane, formatAnswerBlock(answerer, cur.id, body, refs)).catch(() => false)
+  if (!ok) { putPending(cur); return `!couldn't deliver to @${cur.fromName} (pane gone) — ask kept open` }
+  const mismatch = answerer !== cur.toName ? ` [asked @${cur.toName}]` : ''
+  if (room) appendLedger(room, { ts: Date.now(), kind: 'answer', from: answerer, to: cur.fromName, id: cur.id, text: body, refs })
+  if (room) void bot.api.sendMessage(room, `✓ <b>${escapeHtml(answerer)}</b> answered <b>${escapeHtml(cur.fromName)}</b> (ask ${cur.id})${escapeHtml(mismatch)}`, { parse_mode: 'HTML', disable_notification: true }).catch(() => {})
+  return `answered @${cur.fromName} (ask ${cur.id})`
+}
+
+// Run a hermes ask end-to-end: mark it delivered (arms the TTL from spawn), spawn `hermes -z`, and
+// route the final text (or a readable error) back to the asker via deliverAnswerToAsker. Concurrent —
+// no queue (a subprocess has no busy-pane to clobber); hermesInFlight tracks live children.
+async function runHermesAsk(pending: PartyPending, cfg: HermesEndpoint): Promise<void> {
+  const room = partyRoom()
+  markInjected(pending.id, Date.now())
+  hermesInFlight.add(pending.id)
+  try {
+    const task: HermesTask = { id: pending.id, from: pending.fromName, room: room ?? '', text: pending.text, refs: pending.refs, sharedDir: room ? sharedDir(room) : '' }
+    const result = await runHermes(cfg, task)
+    const body = result.ok ? result.text : `⚠️ @${cfg.name} couldn't complete ask ${pending.id}: ${result.error}`
+    const status = await deliverAnswerToAsker(pending, cfg.name, body, [])
+    process.stderr.write(`daemon: hermes ${cfg.name} ask ${pending.id} → ${status}\n`)
+  } catch (e) {
+    process.stderr.write(`daemon: hermes ${cfg.name} ask ${pending.id} threw: ${e}\n`)
+    await deliverAnswerToAsker(pending, cfg.name, `⚠️ @${cfg.name} errored on ask ${pending.id}: ${e instanceof Error ? e.message : String(e)}`, []).catch(() => {})
+  } finally { hermesInFlight.delete(pending.id) }
+}
+
+// Startup: a hermes ask in party.json that survived a daemon restart is orphaned — its `hermes -z`
+// child died with the daemon, so no answer will ever arrive. Expire them now + tell the asker, rather
+// than stranding it for the full 30-min TTL.
+function sweepOrphanedHermesAsks(): void {
+  const room = partyRoom()
+  for (const p of listPending()) {
+    if (p.toKind !== 'hermes') continue
+    removePending(p.id)
+    process.stderr.write(`daemon: dropped orphaned hermes ask ${p.id} → @${p.toName} (daemon restarted mid-run)\n`)
+    if (room) void bot.api.sendMessage(room, `♻️ Ask ${p.id} to <b>${escapeHtml(p.toName)}</b> was dropped — the bridge restarted mid-run.`, { parse_mode: 'HTML', disable_notification: true }).catch(() => {})
+    void paneForSession(p.fromSid).then(pane => {
+      if (pane) void partyDeliver(pane, formatAnswerBlock('system', p.id, `(ask ${p.id} to @${p.toName} dropped — the bridge restarted while it was working; re-ask if still needed)`))
+    }).catch(() => {})
   }
 }
 
@@ -2965,6 +3192,158 @@ async function handleCall(
           if (typeof edited === 'object') msgId = edited.message_id
         }
         text = `edited (id: ${msgId})`
+        break
+      }
+      // ---- Party line (party-bus P1) ----
+      case 'ask': {
+        const room = partyRoom()
+        if (!room) { write({ t: 'result', id, ok: false, text: 'party needs a forum group — run /bind first' }); return }
+        const pane = args.pane ? String(args.pane) : null
+        const fromSid = pane ? await sessionForPane(pane) : null
+        if (!fromSid) { write({ t: 'result', id, ok: false, text: '`tg ask` must run inside a bridged session' }); return }
+        const endpoints = partyEndpoints()
+        const res = resolveEndpoint(String(args.to ?? ''), endpoints)
+        if ('error' in res) { write({ t: 'result', id, ok: false, text: res.error }); return }
+        if (res.kind === 'claude' && res.id === fromSid) { write({ t: 'result', id, ok: false, text: "can't ask yourself" }); return }
+        const askText = String(args.text ?? '').trim()
+        if (!askText) { write({ t: 'result', id, ok: false, text: 'empty ask' }); return }
+        const fromName = nameForEndpoint(fromSid, endpoints)
+        const toName = nameForEndpoint(res.id, endpoints)
+        // Confine + existence-check refs — they get injected into another agent's context.
+        const refs: string[] = []
+        for (const r of (Array.isArray(args.refs) ? args.refs as string[] : [])) {
+          const c = confineRef(r, sharedDir(room))
+          if ('error' in c) { write({ t: 'result', id, ok: false, text: c.error }); return }
+          if (!existsSync(c.path)) { write({ t: 'result', id, ok: false, text: `ref not found: ${r} — write deliverables into \`tg shared\`` }); return }
+          refs.push(c.path)
+        }
+        // Hermes endpoints have no busy-pane to clobber; a fork-bomb cap gates them. Check it BEFORE the
+        // hop guard so a cap-rejected ask doesn't burn a hop (the asker retries after "retry shortly").
+        if (res.kind === 'hermes' && hermesInFlight.size >= HERMES_MAX_CONCURRENT) {
+          write({ t: 'result', id, ok: false, text: `too many Hermes tasks running (${hermesInFlight.size}) — retry shortly` }); return
+        }
+        // Hop guard (loop-breaker): only claude→claude can loop — a `hermes -z` one-shot returns an answer
+        // and never asks back — so only claude targets count. This lets an agent fan out across the whole
+        // Hermes fleet without tripping the pause.
+        if (res.kind === 'claude') {
+          const hops = recordAgentAsk()
+          if (hops > HOP_LIMIT) {
+            if (hops === HOP_LIMIT + 1) void bot.api.sendMessage(room, '⏸ Agents paused — several turns without you. Reply to continue.', { disable_notification: true }).catch(() => {})
+            write({ t: 'result', id, ok: false, text: 'paused: hop limit reached — a human reply resumes the room' }); return
+          }
+        }
+        const p = createPending({ fromSid, toSid: res.id, toKind: res.kind, fromName, toName, text: askText, refs }, Date.now())
+        appendLedger(room, { ts: Date.now(), kind: 'ask', from: fromName, to: toName, id: p.id, text: askText, refs })
+        if (res.kind === 'hermes') {
+          const cfg = hermesEndpoints.get(res.id)!   // resolved from the same map, so it's present
+          void bot.api.sendMessage(room, `▸ <b>${escapeHtml(fromName)}</b> → <b>${escapeHtml(toName)}</b>: ${escapeHtml(askText.slice(0, 120))}${askText.length > 120 ? '…' : ''}`, { parse_mode: 'HTML', disable_notification: true }).catch(() => {})
+          void runHermesAsk(p, cfg)
+          text = `asked @${toName} (ask ${p.id}) — running; the answer arrives when it finishes`
+        } else {
+          void tryDeliverAsk(p)   // attempt now; sweepParty retries if the target is mid-turn
+          text = `asked @${toName} (ask ${p.id}) — async; they answer with \`tg answer ${p.id}\``
+        }
+        break
+      }
+      case 'answer': {
+        const room = partyRoom()
+        if (!room) { write({ t: 'result', id, ok: false, text: 'party needs a forum group' }); return }
+        const askId = Number(args.id)
+        const p = getPending(askId)
+        if (!p) { write({ t: 'result', id, ok: false, text: `no open ask #${args.id} (unknown or expired)` }); return }
+        const pane = args.pane ? String(args.pane) : null
+        const answererSid = pane ? await sessionForPane(pane) : null
+        const answerer = answererSid ? nameForEndpoint(answererSid, partyEndpoints()) : p.toName
+        const refs: string[] = []
+        for (const r of (Array.isArray(args.refs) ? args.refs as string[] : [])) {
+          const c = confineRef(r, sharedDir(room))
+          if ('error' in c) { write({ t: 'result', id, ok: false, text: c.error }); return }
+          if (!existsSync(c.path)) { write({ t: 'result', id, ok: false, text: `ref not found: ${r}` }); return }
+          refs.push(c.path)
+        }
+        // Shared with async hermes-run completion: re-checks/clears the pending, restores on a failed
+        // delivery, logs/cards only a real delivery, and flags an answerer≠target mismatch.
+        const status = await deliverAnswerToAsker(p, answerer, String(args.text ?? '').trim(), refs)
+        if (status.startsWith('!')) { write({ t: 'result', id, ok: false, text: status.slice(1) }); return }
+        text = status
+        break
+      }
+      case 'roster': {
+        const rows: string[] = []
+        const eps = partyEndpoints()
+        // party-bus P3: flag endpoints backed by a send-only avatar bot (🎭) so the config is verifiable
+        // at a glance. Guarded/fresh read like the post path — a bad avatars.json just shows no flair.
+        let avatars = new Map<string, Avatar>()
+        try { avatars = parseAvatars(readJsonFile(AVATARS_FILE, null)) } catch {}
+        for (const e of eps.filter(e => !e.closed)) {
+          const nm = nameForEndpoint(e.id, eps)
+          const flair = resolveAvatar(nm, avatars) ? ' · 🎭' : ''
+          if (e.kind === 'hermes') {   // no pane; busy = a `hermes -z` child in flight for it
+            const busy = [...hermesInFlight].some(pid => getPending(pid)?.toSid === e.id)
+            rows.push(`${busy ? '🟡' : '🟢'} ${nm} · hermes${busy ? ' · busy' : ''}${flair}`)
+            continue
+          }
+          const pane = await paneForSession(e.id).catch(() => null)
+          if (!pane) { rows.push(`⚪ ${nm} (down)${flair}`); continue }
+          const cap = await capturePane(pane).catch(() => '')
+          const sl = cap ? parseStatusline(cap) : null
+          const busy = cap ? !onNormalPrompt(cap) : false
+          const model = sl?.model ? ` ${sl.model}` : ''
+          const pct = sl?.ctxPct != null ? ` ${sl.ctxPct}%` : ''
+          rows.push(`${busy ? '🟡' : '🟢'} ${nm}${model}${pct}${busy ? ' · busy' : ''}${flair}`)
+        }
+        text = rows.length ? rows.join('\n') : '(no live party endpoints)'
+        break
+      }
+      case 'post': {
+        const room = partyRoom()
+        if (!room) { write({ t: 'result', id, ok: false, text: 'party needs a forum group' }); return }
+        const pane = args.pane ? String(args.pane) : null
+        const fromSid = pane ? await sessionForPane(pane) : null
+        const fromName = fromSid ? nameForEndpoint(fromSid, partyEndpoints()) : 'agent'
+        const body = String(args.text ?? '').trim()
+        if (!body) { write({ t: 'result', id, ok: false, text: 'empty post' }); return }
+        appendLedger(room, { ts: Date.now(), kind: 'post', from: fromName, text: body })
+        // party-bus P3: if this endpoint has a send-only avatar bot, the post goes out under that bot's
+        // own name+picture (no "📣 name:" prefix — the bot IS the identity). Fresh read = hot-reload; the
+        // whole lookup is guarded so a corrupt/unreadable avatars.json just degrades to the shared bot.
+        let avatar: Avatar | null = null
+        try { avatar = resolveAvatar(fromName, parseAvatars(readJsonFile(AVATARS_FILE, null))) } catch {}
+        const bridgePost = () => bot.api.sendMessage(room, `📣 <b>${escapeHtml(fromName)}</b>: ${escapeHtml(body)}`, { parse_mode: 'HTML' })
+        if (avatar) {
+          // Plain text (no parse_mode): with the prefix gone, HTML buys nothing and any body (with `<`/`&`)
+          // stays byte-safe. On failure (bad token / bot not in the group) DON'T lose the broadcast — fall
+          // back to the bridge bot AND surface the degradation in the result (an untailed stderr is where a
+          // misconfigured avatar goes to die).
+          try {
+            await callTelegram(avatar.token, 'sendMessage', { chat_id: room, text: body })
+            text = 'posted to the room (as your avatar)'
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e)
+            process.stderr.write(`daemon: avatar post for @${fromName} failed (${msg}); using the bridge bot\n`)
+            await bridgePost()
+            text = `posted to the room (avatar send failed, used shared bot: ${msg})`
+          }
+        } else {
+          await bridgePost()
+          text = 'posted to the room'
+        }
+        break
+      }
+      case 'history': {
+        const room = partyRoom()
+        if (!room) { write({ t: 'result', id, ok: false, text: 'party needs a forum group' }); return }
+        const n = Math.max(1, Math.min(Number(args.n) || 20, 100))
+        const es = tailLedger(room, n)
+        text = es.length
+          ? es.map(e => `${e.kind === 'answer' ? '✓' : e.kind === 'ask' ? '→' : e.kind === 'post' ? '📣' : e.kind === 'expire' ? '⌛' : '·'} ${e.from}${e.to ? `→${e.to}` : ''}${e.id ? ` #${e.id}` : ''}: ${e.text.slice(0, 100)}`).join('\n')
+          : '(no party history yet)'
+        break
+      }
+      case 'shared': {
+        const room = partyRoom()
+        if (!room) { write({ t: 'result', id, ok: false, text: 'party needs a forum group' }); return }
+        text = ensureSharedDir(room)
         break
       }
       default:
@@ -4196,16 +4575,13 @@ bot.command(['update', 'upgrade'], async ctx => {
 const HANDOFF_PROMPT = `Prepare a session handoff. Do these in order:
 
 1. Run the test suite; note results.
-2. Commit any completed work with a descriptive message. Do NOT
-   commit broken code — stash or note it instead.
-3. Update PLAN.md: correct every task status. Do not mark anything
-   done that lacks passing tests + a commit.
+2. Commit any completed work with a descriptive message. Do NOT commit broken code — stash or note it instead.
+3. Update PLAN.md: correct every task status. Do not mark anything done that lacks passing tests + a commit.
 4. Append today's decisions to DECISIONS.md if not already logged.
 5. Overwrite HANDOFF.md with:
    ## Session summary — [date]
    ## Current task
-   [PLAN.md task ID, status, exact next action — specific enough
-   that a fresh session can execute it without asking anything]
+   [PLAN.md task ID, status, exact next action — specific enough that a fresh session can execute it without asking anything]
    ## Files touched this session
    [file → one-line description]
    ## Verify state
@@ -4214,18 +4590,12 @@ const HANDOFF_PROMPT = `Prepare a session handoff. Do these in order:
    [verbatim errors, workarounds, env quirks]
    ## Open questions
    [anything needing a human decision]
-6. AUDIT: Compare PLAN.md against the actual repo. List every task
-   marked done that isn't fully implemented, and every planned item
-   with no task tracking it. Add findings to HANDOFF.md under
-   "## Audit findings".`
+6. AUDIT: Compare PLAN.md against the actual repo. List every task marked done that isn't fully implemented, and every planned item with no task tracking it. Add findings to HANDOFF.md under "## Audit findings".`
 const CONTINUE_PROMPT = `Resume work on this project:
 1. Read PLAN.md, DECISIONS.md, HANDOFF.md, CLAUDE.md.
-2. Run the "Verify state" commands from HANDOFF.md. Report any
-   mismatch before proceeding.
-3. List: (a) current task, (b) next 3 tasks, (c) anything in
-   "Audit findings" or "Open questions".
-4. If open questions block the current task, ask me now — otherwise
-   start the current task.`
+2. Run the "Verify state" commands from HANDOFF.md. Report any mismatch before proceeding.
+3. List: (a) current task, (b) next 3 tasks, (c) anything in "Audit findings" or "Open questions".
+4. If open questions block the current task, ask me now — otherwise start the current task.`
 const AUDIT_PROMPT = `Use a subagent to audit the repo against PLAN.md:
 - For each task marked [x]: verify the code exists and its acceptance
   criterion actually passes.
@@ -5658,6 +6028,13 @@ function fmtAgo(ms: number): string {
   if (mins < 60) return `${mins}m ago`
   if (mins < 24 * 60) return `${Math.floor(mins / 60)}h ago`
   return new Date(ms).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+}
+
+// party-bus P4: the display name for a Telegram user — @username, else their first_name, else the bare
+// numeric id. Shared by the inbound `@name` attribution and the permission-approver audit so a person
+// is named the same everywhere (a no-username human previously showed to the agent as a bare id).
+function senderDisplayName(from: { username?: string; first_name?: string; id: number }): string {
+  return from.username ?? from.first_name ?? String(from.id)
 }
 
 // /resume — list the most recent Claude Code sessions (across all projects) with their last
@@ -7243,7 +7620,7 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
-  const ppermMatch = /^pperm:(\d+)$/.exec(data)
+  const ppermMatch = /^pperm:(?:([0-9a-f]+):)?(\d+)$/.exec(data)   // optional prompt token; a legacy pperm:<num> still parses
   if (ppermMatch) {
     if (!(await cbAuth(ctx))) return
     const { paneId } = await targetPaneOf(ctx)
@@ -7251,9 +7628,29 @@ bot.on('callback_query:data', async ctx => {
       await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {})
       return
     }
-    const num = ppermMatch[1]
+    const token = ppermMatch[1]   // undefined for a legacy (pre-P4) button
+    const num = ppermMatch[2]
+    // Keep the card's question in the edited record below so it's an AUDIT ("<question> → answered 2 by
+    // X"), not a bare tombstone. `.text` is the already-rendered plain body → re-escape when re-sending.
+    const cardText = ctx.callbackQuery?.message?.text ?? ''
+    const record = (marker: string) => `${cardText ? escapeHtml(cardText) + '\n\n' : ''}${marker}`
+    // party-bus P4: correlate the tap to the EXACT prompt it was shown for. A token-bearing button is
+    // honored only if the pane STILL shows that same prompt AND still offers option `num` — so a stale
+    // tap (a 2nd human, or a prompt that already advanced) can't inject blind into whatever's on screen
+    // now. A legacy no-token button injects as before, so prompts relayed across the deploy still work.
+    if (token) {
+      const cap = await capturePane(paneId).catch(() => '')
+      const cur = cap ? detectPermissionPrompt(cap) : null
+      if (!cur || permPromptToken(cur.question) !== token || !cur.options.some(o => String(o.n) === num)) {
+        await ctx.answerCallbackQuery({ text: '⚠️ That prompt already moved on — check the current one.', show_alert: true }).catch(() => {})
+        await ctx.editMessageText(record('⚠️ <i>Superseded — already answered or replaced.</i>'), { parse_mode: 'HTML' }).catch(() => {})
+        return
+      }
+    }
     await ctx.answerCallbackQuery({ text: `Answered ${num}` }).catch(() => {})
-    await ctx.deleteMessage().catch(() => {})  // remove the permission prompt entirely once answered (toast confirms)
+    // Record WHO approved (the audit the flat allowlist lacked): keep the question + append a one-line
+    // record instead of deleting the card, so the thread keeps who-answered-which-prompt. Name chain = inbound.
+    await ctx.editMessageText(record(`✅ <b>Answered ${escapeHtml(num)}</b> · ${escapeHtml(senderDisplayName(ctx.from))}`), { parse_mode: 'HTML' }).catch(() => {})
     await paneKeys(paneId, [num, 'Enter'], [300, 5000])
     resetPromptDedup(paneId)  // allow the next permission prompt to relay
     await verifyPromptClosed(paneId)
@@ -7499,6 +7896,9 @@ async function handleInbound(
     return
   }
 
+  // A human turn resets the agent↔agent hop guard (the party loop-breaker) so a paused room resumes.
+  if (isTopicMode()) resetHops()
+
   // Topic mode: show typing instantly in the topic the message came from and LATCH it through
   // Claude's pre-first-token thinking (the relay loops then sustain it — a bare one-shot expired
   // after ~5s and went dark until the transcript showed work). DM mode keeps the flat keep-alive.
@@ -7513,7 +7913,21 @@ async function handleInbound(
 
   // Remember the latest inbound message per route so an edit to it can be re-injected as a
   // correction (ROADMAP #12) — only the MOST RECENT message qualifies (typo-fix instinct).
-  if (msgId != null) lastInboundMsg.set(`${chat_id}:${typeof inThreadId === 'number' ? inThreadId : 'dm'}`, msgId)
+  const inRoute = `${chat_id}:${typeof inThreadId === 'number' ? inThreadId : 'dm'}`
+  if (msgId != null) {
+    lastInboundMsg.set(inRoute, msgId)
+    // party-bus P4: the FIRST inbound of a turn becomes the reply's addressee (set-if-empty); track every
+    // distinct sender since the last reply so addressing kicks in only when it disambiguates (>1 human).
+    // A trigger older than the TTL is treated as absent (a prior no-reply turn), so this poster cleanly
+    // starts a fresh turn window instead of being blocked from setting it.
+    const now = Date.now(), prevTrig = turnTrigger.get(inRoute)
+    if (!prevTrig || now - prevTrig.at > TRIGGER_TTL_MS) {
+      turnTrigger.set(inRoute, { msgId, name: senderDisplayName(from), id: String(from.id), at: now })
+      recentSenders.set(inRoute, new Set())
+    }
+    let rs = recentSenders.get(inRoute); if (!rs) { rs = new Set(); recentSenders.set(inRoute, rs) }
+    rs.add(String(from.id))
+  }
   if (msgId != null) noteMsg(String(chat_id), typeof inThreadId === 'number' ? inThreadId : undefined, msgId)   // feeds the mirror re-anchor (buried detection)
   // An inbound message is the strongest signal of where the user is looking — mark that chat/thread
   // the active view so the edit scheduler keeps its live cards there fresh ahead of background ones.
@@ -7564,7 +7978,7 @@ async function handleInbound(
     meta: {
       chat_id,
       ...(msgId != null ? { message_id: String(msgId) } : {}),
-      user: from.username ?? String(from.id),
+      user: senderDisplayName(from),   // party-bus P4: @username → first_name → id (was: id when no username)
       user_id: String(from.id),
       ts: new Date((ctx.message?.date ?? 0) * 1000).toISOString(),
       ...(imagePath ? { image_path: imagePath } : {}),
@@ -7720,6 +8134,14 @@ async function offerTopicBind(ctx: Context, threadId: number): Promise<void> {
 // Edited message → correction (ROADMAP #12): editing your MOST RECENT message in a topic/DM
 // re-injects it as a correction. Older edits are ignored (decided: latest-only).
 const lastInboundMsg = new Map<string, number>()   // `${chat}:${thread|'dm'}` → last inbound message_id
+// party-bus P4 reply addressing. turnTrigger: route → the FIRST human of the in-flight turn — SET-IF-EMPTY
+// (a 2nd human posting mid-turn can't steal the addressee) and CLEARED when the reply is delivered, so the
+// reply threads to whoever STARTED the turn, snapshot at turn-start rather than read live at delivery.
+// recentSenders: route → distinct sender ids since that clear, so we address by name only when it actually
+// disambiguates (>1 human active, or a non-owner) instead of on every solo-owner reply.
+const TRIGGER_TTL_MS = 10 * 60_000   // a turn-trigger older than this is treated as ABSENT — self-heals a turn that produced no reply (its trigger would otherwise mis-address the next turn's reply)
+const turnTrigger = new Map<string, { msgId: number; name: string; id: string; at: number }>()
+const recentSenders = new Map<string, Set<string>>()
 bot.on('edited_message', async ctx => {
   const em = ctx.editedMessage
   const text = em?.text ?? em?.caption
@@ -8389,6 +8811,43 @@ if (FORCE_PANE) {
 // Keep the pinned status card's live metrics fresh once per 10s. No-op edits are skipped and no
 // pin is created when nothing's active, so this is cheap when idle.
 setInterval(() => void updateSessionPin(), 10_000)
+// Party line (party-bus P1): deliver queued agent↔agent asks to idle targets + expire stale ones.
+setInterval(() => void sweepParty(), LATER_SWEEP_MS).unref()
+
+// Stuck-screen watchdog (party-bus): the shared footerIsLive fix keeps KNOWN prompts relaying; this is
+// the backstop for a NOVEL screen the detectors can't parse, so a session never hangs silently (the "I
+// thought you were working but you were wedged at a prompt" class). Every 25s: any bridged pane sitting
+// at an UNRECOGNIZED input-soliciting screen (a waiting footer, no detector match, not a normal prompt)
+// whose prompt region has been unchanged for STUCK_ALERT_MS gets a ONE-TIME ping into its own topic with
+// the terminal tail so the human can answer it. Reset the instant the screen changes → it re-arms.
+const stuckWatch = new Map<string, { sig: string; since: number; alerted: boolean }>()
+const STUCK_ALERT_MS = 75_000
+async function sweepStuckPanes(): Promise<void> {
+  const panes = new Set<string>()
+  for (const t of listTopics()) { if (t.closed) continue; const p = await paneForSession(t.sessionId).catch(() => null); if (p) panes.add(p) }
+  if (focus.activePaneId) panes.add(focus.activePaneId)
+  for (const pane of panes) {
+    const cap = await capturePane(pane).catch(() => '')
+    const sig = cap ? waitingPromptSignature(cap) : null
+    // Only an UNRECOGNIZED waiting screen counts: a recognized prompt is relayed as buttons, a normal
+    // prompt is idle-ready, a working pane has no soliciting footer (and its capture keeps changing).
+    if (!sig || onNormalPrompt(cap) || isRecognizedPrompt(cap)) { stuckWatch.delete(pane); continue }
+    const prev = stuckWatch.get(pane)
+    if (!prev || prev.sig !== sig) { stuckWatch.set(pane, { sig, since: Date.now(), alerted: false }); continue }
+    if (prev.alerted || Date.now() - prev.since < STUCK_ALERT_MS) continue
+    prev.alerted = true
+    const sid = await sessionForPane(pane).catch(() => null)
+    const nm = (sid && getTopicBySession(sid)?.name) || sid || pane
+    const tail = cap.split('\n').map(l => l.replace(/\s+$/, '')).filter(l => l.trim()).slice(-16).join('\n')
+    for (const { chat, thread } of await outboundTargetsFor(pane)) {
+      void bot.api.sendMessage(chat,
+        `⚠️ <b>${escapeHtml(nm)}</b> looks stuck at a prompt the bridge can't turn into buttons — you may need to answer it in the terminal:\n<pre>${escapeHtml(tail)}</pre>`,
+        { parse_mode: 'HTML', ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
+    }
+    process.stderr.write(`daemon: stuck-screen watchdog pinged for pane ${pane} (${nm})\n`)
+  }
+}
+setInterval(() => void sweepStuckPanes(), 25_000).unref()
 // Remember the focused pane's permission mode (covers shift+tab changes made in the terminal,
 // which the daemon otherwise never sees) so /resume can inherit it after the pane exits.
 setInterval(() => void (async () => {
@@ -8453,6 +8912,7 @@ initScheduler({
 })
 loadScheduledMsgs()
 loadTopics()   // forum-topics mode: load the persisted group + session<->topic map at startup
+sweepOrphanedHermesAsks()   // party-bus P1.5: drop hermes asks whose `hermes -z` child died with a prior daemon
 
 // Wire the live activity mirror's daemon dependencies (bot, access, the shared replyMode
 // helper, the live focused-pane getter, and typing re-assert).

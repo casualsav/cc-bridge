@@ -11,7 +11,7 @@ import { capturePane, paneCwd, paneAlive, type PaneWatcher } from './pane-io.ts'
 import { focus, pendingMultiSelect, freeTextPrompts, chatPrompts } from './state.ts'
 import { loadAccess } from './access.ts'
 import { finalRepliesAfter } from './transcript.ts'
-import { detectPermissionPrompt, onNormalPrompt, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
+import { detectPermissionPrompt, onNormalPrompt, permPromptToken, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
 
 type PromptRelayDeps = {
   bot: Bot
@@ -209,7 +209,10 @@ export async function relayPermissionToTelegram(perm: PermissionPrompt, paneId: 
   const body = parts.join('\n')
 
   const kb = new InlineKeyboard()
-  for (const opt of perm.options) kb.text(permButtonLabel(opt), `pperm:${opt.n}`).row()
+  // party-bus P4: carry a token identifying THIS prompt, so the handler can reject a stale/second-human
+  // tap whose prompt already moved on instead of injecting it blind (see the pperm handler).
+  const tok = permPromptToken(perm.question)
+  for (const opt of perm.options) kb.text(permButtonLabel(opt), `pperm:${tok}:${opt.n}`).row()
 
   process.stderr.write(`daemon: relaying permission prompt (${perm.options.length} opts) “${perm.question}” to ${targets.map(t => t.chat + (t.thread ? `#${t.thread}` : '')).join(',')}\n`)
   for (const { chat, thread } of targets) {

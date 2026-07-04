@@ -34,6 +34,10 @@ type StatusCardDeps = {
   // exits the session + suppresses recreation. (Silently dropping the entry here let a live session's
   // topic repopulate within ~30s — discovery recreated it before the 2-min sweep could exit it.)
   onTopicGone: (sessionId: string, threadId: number) => void
+  // party-bus P2: a compact live-roster line for the bus ("🚌 exec · analysis · mimo"), or null when
+  // party isn't active / only one endpoint is live. Daemon-computed + memoized (liveness only, no pane
+  // captures) so rendering it on every card stays cheap. Optional so a fake-bot unit test can omit it.
+  partyRoster?: () => Promise<string | null>
 }
 let deps: StatusCardDeps
 export function initStatusCard(d: StatusCardDeps): void { deps = d }
@@ -313,6 +317,10 @@ export async function statusCardText(paneId: string | null): Promise<string> {
     // Context group: the context bar + token data.
     if (status.ctxPct != null) groups.push(`💾 Context <code>${pinBar(status.ctxPct)}</code> ${status.ctxPct}%${status.tokens ? `  ·  ${status.tokens}` : ''}`)
   }
+  // party-bus P2 roster line — its own group just above the pairing footer (kept OUT of the head so
+  // the collapsed pin banner still leads with the 🧠 model·context line). Already HTML-escaped + memoized.
+  const roster = deps.partyRoster ? await deps.partyRoster().catch(() => null) : null
+  if (roster) groups.push(roster)
   groups.push(`🔗 Paired${deps.botUsername() ? ` · @${escapeHtml(deps.botUsername())}` : ''} · connected`)
   return `${head}\n\n${groups.join(`\n${CARD_RULE}\n`)}`
 }
