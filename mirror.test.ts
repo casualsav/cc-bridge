@@ -2,6 +2,7 @@ import { test, expect } from 'bun:test'
 import {
   toolBadge, recentAssistantBlocks, renderActionsMirror, renderThoughtsMirror,
   renderDigestMirror, splitThoughtParagraphs, renderToolRun, renderAgentLine, isAgentTool,
+  joinRichLines, appendFooterLine,
 } from './mirror.ts'
 import type { FeedItem } from './transcript.ts'
 
@@ -43,10 +44,25 @@ test('recentAssistantBlocks keeps only the last `max` blocks', () => {
   expect(recentAssistantBlocks(raw, 2)).toEqual(['● b', '● c'])
 })
 
+// ---- rich card assembly: <br> between inline siblings, \n around self-breaking blocks ----
+test('joinRichLines separates inline siblings with <br>', () => {
+  expect(joinRichLines(['<i>a</i>', '✏️ <code>x</code>', '<i>b</i>'])).toBe('<i>a</i><br>✏️ <code>x</code><br><i>b</i>')
+})
+
+test('joinRichLines uses a bare \\n around block elements (they self-break — no doubled gap)', () => {
+  expect(joinRichLines(['<blockquote>t</blockquote>', '<i>summary</i>'])).toBe('<blockquote>t</blockquote>\n<i>summary</i>')
+  expect(joinRichLines(['<i>summary</i>', '<details><summary>x</summary>y</details>'])).toBe('<i>summary</i>\n<details><summary>x</summary>y</details>')
+})
+
+test('joinRichLines drops empty pieces and needs no separator for a single piece', () => {
+  expect(joinRichLines(['<i>only</i>', '', null, undefined])).toBe('<i>only</i>')
+  expect(joinRichLines([])).toBe('')
+})
+
 test('renderActionsMirror live: collapsed history + the newest 3 as detail rows', () => {
   const tools = Array.from({ length: 12 }, (_, i) => t('Read', `/a/f${i}.ts`))
   const out = renderActionsMirror(tools, false)
-  const lines = out.split('\n')
+  const lines = out.split('<br>')                         // rich: inline siblings break with <br>, not \n
   expect(lines[0]).toBe('<i>Read 9 files</i>')          // 12 - 3 tail = 9 aggregated
   expect(lines.length).toBe(4)                           // aggregate + 3 detail rows
   expect(lines.at(-1)).toContain('f11.ts')               // newest call stays fully detailed
@@ -54,10 +70,10 @@ test('renderActionsMirror live: collapsed history + the newest 3 as detail rows'
 
 test('renderActionsMirror done: whole turn collapses into the aggregate + step count', () => {
   const out = renderActionsMirror([t('Bash', 'ls'), t('Edit', '/x/a.ts', 5)], true)
-  expect(out).toBe('<i>Ran 1 shell command</i>\n✏️ <code>a.ts</code> <i>+5</i>\n✅ <b>Done</b> · 2 steps')
+  expect(out).toBe('<i>Ran 1 shell command</i><br>✏️ <code>a.ts</code> <i>+5</i><br>✅ <b>Done</b> · 2 steps')
 })
 
-// ---- subagent (Task/Agent) chevron: 🤖 agent <type> + expandable prompt blockquote ----
+// ---- subagent (Task/Agent) chevron: a <details> disclosure — summary "Agent - <type>" → prompt blockquote ----
 const agentItem = (type: string, prompt: string): ToolItem => ({ kind: 'tool', tool: 'Task', detail: prompt.slice(0, 55), lines: null, agent: { type, prompt } })
 
 test('isAgentTool matches Task and Agent only', () => {
@@ -66,37 +82,39 @@ test('isAgentTool matches Task and Agent only', () => {
   expect(isAgentTool('Bash')).toBe(false)
 })
 
-test('renderToolRun gives a subagent spawn its own 🤖 line + expandable blockquote with the prompt', () => {
+test('renderToolRun gives a subagent spawn its own <details> chevron with the prompt in a blockquote', () => {
   const out = renderToolRun([agentItem('explore', 'map the mirror rendering code')]).join('\n')
-  expect(out).toContain('<i>Agent - Explore</i>')
-  expect(out).toContain('<blockquote expandable>map the mirror rendering code</blockquote>')
+  expect(out).toContain('<details><summary><i>Agent - Explore</i></summary>')
+  expect(out).toContain('<blockquote>map the mirror rendering code</blockquote>')
+  expect(out.endsWith('</details>')).toBe(true)
 })
 
-test('renderActionsMirror renders a single Task as the expandable agent line', () => {
+test('renderActionsMirror renders a single Task as a <details> chevron', () => {
   const out = renderActionsMirror([agentItem('researcher', 'find the bug')], false)
-  expect(out).toContain('<i>Agent - Researcher</i>')
-  expect(out).toContain('<blockquote expandable>find the bug</blockquote>')
+  expect(out).toContain('<summary><i>Agent - Researcher</i></summary>')
+  expect(out).toContain('<blockquote>find the bug</blockquote>')
 })
 
 test('renderAgentLine caps the prompt (raw slice → escape) and HTML-escapes it', () => {
   const prompt = 'a & b '.repeat(200)                            // 1200 chars, &'s throughout, > cap
   const line = renderAgentLine({ kind: 'tool', tool: 'Task', detail: '', lines: null, agent: { type: 'coder', prompt } })
-  expect(line.startsWith('<i>Agent - Coder</i>\n<blockquote expandable>')).toBe(true)
-  expect(line.endsWith('</blockquote>')).toBe(true)
+  expect(line.startsWith('<details><summary><i>Agent - Coder</i></summary><blockquote>')).toBe(true)
+  expect(line.endsWith('</blockquote></details>')).toBe(true)
   expect(line).toContain('…')                                     // capped (raw > 700)
   expect(line).toContain('&amp;')                                 // &'s escaped
   expect(line).not.toMatch(/&(?!amp;|lt;|gt;|quot;)/)             // no bare & survived
 })
 
-test('a subagent with no prompt still renders the agent line, no empty blockquote', () => {
+test('a subagent with no prompt renders the bare agent line, no chevron/empty blockquote', () => {
   const line = renderAgentLine({ kind: 'tool', tool: 'Task', detail: '', lines: null, agent: { type: 'writer', prompt: '' } })
   expect(line).toBe('<i>Agent - Writer</i>')
 })
 
-test('renderToolRun folds several spawns into one Agent ×N line + a single chevron', () => {
+test('renderToolRun folds several spawns into one Agent ×N chevron, one blockquote each', () => {
   const out = renderToolRun([agentItem('explore', 'map the code'), agentItem('coder', 'write the fix'), agentItem('verifier', 'run the tests')]).join('\n')
-  expect(out).toContain('<i>Agent ×3</i>')
-  expect((out.match(/<blockquote expandable>/g) || []).length).toBe(1)   // ONE chevron, not three
+  expect(out).toContain('<summary><i>Agent ×3</i></summary>')
+  expect((out.match(/<details>/g) || []).length).toBe(1)                 // ONE chevron, not three
+  expect((out.match(/<blockquote>/g) || []).length).toBe(3)             // one blockquote per spawn inside it
   expect(out).toContain('<b>Explore</b>')
   expect(out).toContain('<b>Coder</b>')
   expect(out).toContain('<b>Verifier</b>')
@@ -105,8 +123,8 @@ test('renderToolRun folds several spawns into one Agent ×N line + a single chev
 test('renderActionsMirror folds concurrent spawns into one chevron, never scattered across the tail', () => {
   const tools = [agentItem('a', 'p1'), agentItem('b', 'p2'), agentItem('c', 'p3'), agentItem('d', 'p4')]
   const out = renderActionsMirror(tools, false)
-  expect(out).toContain('<i>Agent ×4</i>')
-  expect((out.match(/<blockquote expandable>/g) || []).length).toBe(1)   // all four in ONE chevron
+  expect(out).toContain('<summary><i>Agent ×4</i></summary>')
+  expect((out.match(/<details>/g) || []).length).toBe(1)                 // all four in ONE chevron
 })
 
 test('renderActionsMirror pluralizes a single step correctly', () => {
@@ -129,7 +147,14 @@ test('renderThoughtsMirror wraps thoughts in a blockquote, folds tools into a su
 
 test('renderThoughtsMirror with no narration shows the tool summary and Done', () => {
   expect(renderThoughtsMirror([{ kind: 'tool', tool: 'Bash', detail: 'x' }], true))
-    .toBe('<i>Ran 1 shell command</i>\n\n✅ <b>Done</b>')
+    .toBe('<i>Ran 1 shell command</i><br><br>✅ <b>Done</b>')   // rich: inline tail → <br><br> gap (bare \n\n would fold)
+})
+
+test('appendFooterLine gives an inline tail a <br><br> gap, a block tail one <br>', () => {
+  expect(appendFooterLine('<i>last action</i>', '✻ Working… · 5s')).toBe('<i>last action</i><br><br>✻ Working… · 5s')
+  expect(appendFooterLine('<details><summary>x</summary>y</details>', '✻ Working… · 5s')).toBe('<details><summary>x</summary>y</details><br>✻ Working… · 5s')
+  expect(appendFooterLine('', 'x')).toBe('x')
+  expect(appendFooterLine('body', '')).toBe('body')
 })
 
 test('renderToolRun aggregates search/read/bash and lists edits with line deltas', () => {

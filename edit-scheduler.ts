@@ -19,7 +19,8 @@
 // budget. Thread identity feeds attention/tiering only; introducing per-thread buckets would let N
 // topics each spend the whole budget and blow the group's limit.
 import type { Api } from 'grammy'
-import { asLowPriority, isChatFlooded } from './throttle.ts'
+import { asLowPriority, isChatFlooded, noteFlood, acquire } from './throttle.ts'
+import { editRichMessage } from './richmsg.ts'
 
 // ---- active view (what the user is looking at) ----
 // Telegram gives bots no focus/scroll signal, so we infer attention from the user's last action: an
@@ -64,6 +65,7 @@ type EditIntent = {
   source: Source
   render: () => string | Promise<string>   // produces the LATEST html; evaluated at flush time
   parseMode?: 'HTML' | 'Markdown'
+  rich?: boolean        // send as a Bot API 10.1 rich_message ({ html }) instead of parse_mode text — the live mirror uses this for <details>/<br> which classic HTML can't render
   extra?: EditExtra     // extra editMessageText options (e.g. reply_markup) carried with the text
   onSent?: () => void | Promise<void>             // after a successful edit — the source refreshes its own caches
   onError?: (e: unknown) => void | Promise<void>  // when the edit throws — the source handles gone / not-modified itself
@@ -79,20 +81,20 @@ const editKey = (chat: string, mid: number) => `${chat}:${mid}`
 // ---- source-facing API (replaces direct editMessageText / deleteMessage for recurring cards) ----
 export function scheduleEdit(opts: {
   chat: string; mid: number; thread?: number | null; source: Source
-  render: () => string | Promise<string>; parseMode?: 'HTML' | 'Markdown'
+  render: () => string | Promise<string>; parseMode?: 'HTML' | 'Markdown'; rich?: boolean
   extra?: EditExtra; onSent?: () => void | Promise<void>; onError?: (e: unknown) => void | Promise<void>
 }): void {
   const key = editKey(opts.chat, opts.mid)
   if (deletes.has(key)) return   // message is doomed; don't bother editing it
   const it = intents.get(key)
   if (it) {
-    it.render = opts.render; it.parseMode = opts.parseMode; it.thread = opts.thread
+    it.render = opts.render; it.parseMode = opts.parseMode; it.rich = opts.rich; it.thread = opts.thread
     it.extra = opts.extra; it.onSent = opts.onSent; it.onError = opts.onError
     if (!it.dirty) { it.dirty = true; it.enqueuedAt = Date.now() }
   } else {
     intents.set(key, {
       chat: opts.chat, thread: opts.thread, mid: opts.mid, source: opts.source,
-      render: opts.render, parseMode: opts.parseMode, extra: opts.extra, onSent: opts.onSent, onError: opts.onError,
+      render: opts.render, parseMode: opts.parseMode, rich: opts.rich, extra: opts.extra, onSent: opts.onSent, onError: opts.onError,
       dirty: true, inFlight: false, enqueuedAt: Date.now(),
     })
   }
@@ -129,8 +131,19 @@ function tierOf(it: EditIntent): number {
 }
 
 let api: Api | null = null
+let richToken: string | null = null   // bot token for rich_message edits (raw HTTP; grammy 1.41.1 has no method for them)
 let timer: ReturnType<typeof setInterval> | null = null
 const TICK_MS = 150
+
+// A rich edit goes out via raw callTelegram (richmsg.ts), bypassing grammy's send-governor transformer —
+// so a 429 there isn't seen by throttle.ts. Parse its retry_after and feed the flood tracker by hand so
+// the next tick backs off this chat like a governed send would.
+function noteRichFlood(chat: string, e: unknown): void {
+  const msg = e instanceof Error ? e.message : String(e)
+  if (!/\b429\b|too many requests/i.test(msg)) return
+  const m = msg.match(/retry after (\d+)/i)
+  noteFlood(chat, m ? Number(m[1]) : 3)
+}
 
 async function flushIntent(it: EditIntent): Promise<void> {
   it.inFlight = true
@@ -138,14 +151,24 @@ async function flushIntent(it: EditIntent): Promise<void> {
   try {
     const html = await it.render()
     if (html === it.lastText) return   // unchanged — don't spend budget or fire callbacks
-    const other = { ...(it.parseMode ? { parse_mode: it.parseMode } : {}), ...(it.extra ?? {}) } as EditExtra
-    await asLowPriority(() => api!.editMessageText(it.chat, it.mid, html, other))
+    if (it.rich) {
+      // Rich edit: editMessageText with rich_message ({ html }) so the mirror's <details>/<br> render
+      // natively (classic parse_mode HTML rejects both). Raw HTTP via richmsg.ts — grammy has no method,
+      // so it also skips grammy's send-governor. acquire() spends a token from the SAME per-chat bucket a
+      // governed edit would, inside asLowPriority (cosmetic → yields to replies), so rich edits can't blow
+      // a shared group chat's flood budget the way an ungoverned raw send could.
+      await asLowPriority(async () => { await acquire(it.chat, 'editMessageText'); await editRichMessage(richToken!, it.chat, it.mid, { html }) })
+    } else {
+      const other = { ...(it.parseMode ? { parse_mode: it.parseMode } : {}), ...(it.extra ?? {}) } as EditExtra
+      await asLowPriority(() => api!.editMessageText(it.chat, it.mid, html, other))
+    }
     it.lastText = html
     await it.onSent?.()
   } catch (e) {
     // render threw (a transient capture/read error) or the edit failed (not-modified, deleted, flooded).
     // A source with its own recovery (pins: gone → drop tracking, thread-gone → tear down) handles it via
     // onError; everyone else just drops the frame and re-arms on the next tick.
+    if (it.rich) noteRichFlood(it.chat, e)   // raw rich edit bypasses the governor — record its 429s manually
     if (it.onError) { try { await it.onError(e) } catch { /* never let a handler break the drain */ } }
   } finally {
     it.inFlight = false
@@ -178,8 +201,9 @@ function tick(): void {
   }
 }
 
-export function startEditScheduler(a: Api): void {
+export function startEditScheduler(a: Api, token?: string): void {
   api = a
+  if (token) richToken = token
   if (timer) return
   timer = setInterval(tick, TICK_MS)
   ;(timer as { unref?: () => void }).unref?.()

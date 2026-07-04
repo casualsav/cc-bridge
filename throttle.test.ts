@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { installSendGovernor, isChatFlooded, noteFlood } from './throttle.ts'
+import { installSendGovernor, isChatFlooded, noteFlood, acquire } from './throttle.ts'
 
 // Grab the transformer the governor installs, by handing installSendGovernor a fake bot whose
 // api.config.use just captures it. Then we can drive it directly with a fake `prev`.
@@ -39,5 +39,15 @@ test('governor lets a fresh chat burst through, then paces once the bucket empti
   expect(Date.now() - t0).toBeLessThan(500)            // full burst clears with no real pacing
   const t1 = Date.now()
   await transformer(okPrev, 'sendMessage', { chat_id: chat })   // 9th — bucket empty, must wait ~one refill
+  expect(Date.now() - t1).toBeGreaterThan(800)
+})
+
+test('acquire() shares the SAME per-chat bucket as the governor (rich edits are paced too)', async () => {
+  const chat = '999321'   // DM: burst cap 8, refill ~1100ms — a chat untouched by other tests
+  const t0 = Date.now()
+  for (let i = 0; i < 8; i++) await acquire(chat, 'editMessageText')   // drain the burst via the rich-edit path's acquire
+  expect(Date.now() - t0).toBeLessThan(500)
+  const t1 = Date.now()
+  await transformer(okPrev, 'sendMessage', { chat_id: chat })   // a GOVERNED send on the same chat now waits — one shared budget
   expect(Date.now() - t1).toBeGreaterThan(800)
 })

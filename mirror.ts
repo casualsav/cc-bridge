@@ -26,7 +26,39 @@ import { currentTurnFeed, turnAnchorUuid, type FeedItem } from './transcript.ts'
 import { isTopicMode } from './topics.ts'
 import { isChatFlooded, asLowPriority } from './throttle.ts'
 import { scheduleEdit, scheduleDelete } from './edit-scheduler.ts'
+import { sendRichMessage } from './richmsg.ts'
 import type { Access } from './types.ts'
+
+// The mirror card is a Bot API 10.1 rich_message ({ html }), not a classic parse_mode-HTML message —
+// it renders wider + cleaner (no blockquote quote-mark) and unlocks <details> chevrons. Rich collapses
+// a bare "\n" between inline siblings (markdown soft-wrap), so lines that must break need an explicit
+// <br>; block elements (<blockquote>/<details>/<pre>) self-break, so a "\n" around them is enough (and
+// avoids a doubled gap). joinRichLines applies that rule when assembling the card body from its pieces.
+// Telegram's benign "message is not modified" — the mirror re-arms every tick, so an edit that lands
+// on identical content (beyond the scheduler's own lastText guard) is nothing to log.
+function isNotModified(e: unknown): boolean {
+  return /message is not modified/i.test(e instanceof Error ? e.message : String(e))
+}
+const isRichBlock = (s: string): boolean => /^<(?:blockquote|details|pre)\b/i.test(s.trimStart())
+export function joinRichLines(pieces: Array<string | null | undefined>): string {
+  const parts = pieces.filter((p): p is string => !!p && p.length > 0)
+  let out = ''
+  for (let i = 0; i < parts.length; i++) {
+    if (i === 0) { out = parts[0]; continue }
+    out += (isRichBlock(parts[i - 1]) || isRichBlock(parts[i]) ? '\n' : '<br>') + parts[i]
+  }
+  return out
+}
+// Append a footer / marker line (the live status footer, the ✅ Done cap) so it lands on its own line
+// with a one-blank-line gap under rich. A bare "\n\n" would collapse (rich soft-wrap), folding it into
+// the last line — the bug that hid the footer. A body ending in a self-breaking block already breaks, so
+// it needs one <br> for the gap; an inline tail needs <br><br>.
+export function appendFooterLine(body: string, line: string): string {
+  if (!body) return line
+  if (!line) return body
+  const endsBlock = /<\/(?:blockquote|details|pre)>\s*$/i.test(body)
+  return `${body}${endsBlock ? '<br>' : '<br><br>'}${line}`
+}
 
 type MirrorDeps = {
   bot: Bot
@@ -70,16 +102,18 @@ const MIRROR_BLOCKS = 8        // digest mode: max ● blocks shown
 const MIRROR_FINALIZE_TICKS = 3   // ~4.5s sustained idle (RELAY_POLL_MS=1500) before capping the card
 const ACTIONS_TAIL = 3       // actions mode: how many of the newest calls stay as full detail rows
 const MIRROR_THOUGHTS = 10   // thoughts mode: max thoughts shown (oldest falls off as new flow in)
-// The status footer (verb · elapsed · tokens) is DISABLED for now — it doesn't track reliably yet
-// (verb/token scraping off the spinner line is flaky). The whole machinery (the footer method,
-// fmtElapsed, the verb/token scrape in syncBody) is kept intact; flip this to re-enable it
-// once it can be made dependable. While false, compose renders the body only.
-const MIRROR_FOOTER_ENABLED = true   // master switch for the bottom-pinned live status line (scraped verb + elapsed + tokens)
-// The live "✻ <verb>…" spinner footer (the "Clauding" working indicator) is shown in DM ONLY. In a
-// group/forum the card has no rich-draft companion and the animated spinner reads as noise against the
-// plainer group formatting, so topics render the activity body alone. isTopicMode() is the whole-bridge
-// mode, which is also the kind of chat this card targets (group topic vs DM), so it's the right gate.
-const footerOn = (): boolean => MIRROR_FOOTER_ENABLED && !isTopicMode()
+// Master switch for the bottom-pinned live status line (scraped verb · elapsed · tokens). ON. The
+// scrape is reliable in steady state: after the first sync of a burst the footer carries a real verb
+// (tokens follow once the CLI emits a count); a capture that misses the spinner line holds the last
+// good value rather than regressing, so only the opening beat of a turn shows a generic "Working…".
+// DM always shows it; topics are opt-in via terminalMirrorFooter (see footerOn).
+const MIRROR_FOOTER_ENABLED = true
+// The live "✻ <verb>…" spinner footer (the "Clauding" working indicator) is shown in DM always. In a
+// group/forum it was historically suppressed — the animated line read as noise against the plainer
+// PLAIN-HTML group formatting. Now that the card is a rich_message (wider + cleaner) the footer is
+// legible in topics too, so it's opt-in there via `terminalMirrorFooter` (default off; DM unaffected).
+// isTopicMode() is the whole-bridge mode, which is also the kind of chat this card targets.
+const footerOn = (): boolean => MIRROR_FOOTER_ENABLED && (!isTopicMode() || deps.loadAccess().terminalMirrorFooter === true)
 
 // ---- Card persistence across daemon restarts ----
 // Card message ids used to live ONLY in process memory, so every deploy/crash mid-turn orphaned
@@ -141,7 +175,10 @@ export function renderDigestMirror(raw: string, done: boolean): string {
   const header = done ? '🖥️ <b>Session</b> · idle' : '🖥️ <b>Session</b> · live'
   const blocks = recentAssistantBlocks(raw, MIRROR_BLOCKS)
   if (blocks.length === 0) return header
-  return `${header}\n\n${escapeHtml(blocks.join('\n').slice(0, 3500))}`
+  // Rich collapses a bare "\n" — turn every line break (between blocks and inside a wrapped block) into
+  // a <br> so the digest keeps its shape instead of folding into one paragraph.
+  const bodyText = escapeHtml(blocks.join('\n').slice(0, 3500)).replace(/\n/g, '<br>')
+  return `${header}\n\n${bodyText}`
 }
 
 // Per-tool emoji + human label for the live mirror. The transcript already carries the tool
@@ -171,26 +208,29 @@ export function toolBadge(tool: string): [string, string] {
   return ['🔧', tool]   // unregistered tool
 }
 
-// party-bus: a subagent (Task/Agent) spawn shows as italic "Agent - <Type>" + its full prompt in a
-// Telegram expandable blockquote (the chevron) — so you can expand any spawn to see exactly what it was
-// asked. Several launched at once FOLD to one "Agent ×N" line + a single chevron (see renderAgents) so
-// they don't crowd the card. Prompt is capped RAW then escaped (never escape-then-slice, which can split
-// an entity); the card's chunkHtml backstop closes the tag safely if a fold ever overflows the budget.
+// party-bus: a subagent (Task/Agent) spawn shows as a <details> chevron whose summary is italic
+// "Agent - <Type>" and whose body is the full prompt in a blockquote — tap the disclosure triangle to
+// see exactly what it was asked. Several launched at once FOLD to one "Agent ×N" chevron (see
+// renderAgents) so they don't crowd the card. <details> renders ONLY in rich_message (the card's
+// carrier); the chevron sits on the LEFT of the summary — a Telegram-client default, not settable.
+// Prompt is capped RAW then escaped (never escape-then-slice, which can split an entity); the card's
+// chunkHtml backstop closes the tag safely if a fold ever overflows the budget.
 const AGENT_PROMPT_CAP = 700
 export function isAgentTool(tool: string): boolean { return tool === 'Task' || tool === 'Agent' }
 const capType = (t: string): string => t ? t[0].toUpperCase() + t.slice(1) : t
-// A lone spawn: italic "Agent - <Type>" + its full prompt in an expandable blockquote.
+// A lone spawn: a chevron titled italic "Agent - <Type>" expanding to its full prompt in a blockquote.
 export function renderAgentLine(it: Extract<FeedItem, { kind: 'tool' }>): string {
   const rawType = it.agent?.type?.trim() ?? ''
   const type = rawType ? ` - ${escapeHtml(capType(rawType))}` : ''
   const raw = (it.agent?.prompt || it.detail || '').trim()
   const p = raw.length > AGENT_PROMPT_CAP ? raw.slice(0, AGENT_PROMPT_CAP) + '…' : raw
-  const quote = p ? `\n<blockquote expandable>${escapeHtml(p)}</blockquote>` : ''
-  return `<i>Agent${type}</i>${quote}`
+  const summary = `<summary><i>Agent${type}</i></summary>`
+  return p ? `<details>${summary}<blockquote>${escapeHtml(p)}</blockquote></details>` : `<i>Agent${type}</i>`
 }
-// Fold a batch of spawns: >1 collapses to a single "Agent ×N" line + ONE expandable chevron listing
-// each (Type — short snippet); a lone spawn keeps its full-prompt line above. Per-agent snippet shrinks
-// with N so the chevron stays under the card budget (chunkHtml backstop still closes it if it overflows).
+// Fold a batch of spawns: >1 collapses to a single "Agent ×N" chevron whose body lists each spawn as
+// its own blockquote (Type in bold + a short snippet); a lone spawn keeps its full-prompt chevron above.
+// Per-agent snippet shrinks with N so the chevron stays under the card budget (chunkHtml backstop still
+// closes it if it overflows).
 export function renderAgents(agents: Array<Extract<FeedItem, { kind: 'tool' }>>): string[] {
   if (agents.length <= 1) return agents.map(renderAgentLine)
   const perCap = Math.max(140, Math.min(400, Math.floor(1600 / agents.length)))
@@ -198,9 +238,9 @@ export function renderAgents(agents: Array<Extract<FeedItem, { kind: 'tool' }>>)
     const type = escapeHtml(capType(a.agent?.type?.trim() || '?'))
     const raw = (a.agent?.prompt || a.detail || '').trim()
     const snip = raw.length > perCap ? raw.slice(0, perCap) + '…' : raw
-    return `<b>${type}</b>${snip ? ` — ${escapeHtml(snip)}` : ''}`
+    return `<blockquote><b>${type}</b>${snip ? ` — ${escapeHtml(snip)}` : ''}</blockquote>`
   })
-  return [`<i>Agent ×${agents.length}</i>\n<blockquote expandable>${rows.join('\n')}</blockquote>`]
+  return [`<details><summary><i>Agent ×${agents.length}</i></summary>${rows.join('')}</details>`]
 }
 
 // Actions card (the renamed tools mode): collapsed history + live tail, the TUI's own pattern.
@@ -223,7 +263,7 @@ export function renderActionsMirror(tools: Array<Extract<FeedItem, { kind: 'tool
     ...renderAgents(agents),
   ]
   if (done) lines.push(`✅ <b>Done</b> · ${tools.length} step${tools.length === 1 ? '' : 's'}`)
-  let body = lines.join('\n')
+  let body = joinRichLines(lines)
   if (body.length > 3500) body = chunkHtml(body, 3500)[0] ?? body.slice(0, 3500)
   return body
 }
@@ -311,14 +351,14 @@ export function renderThoughtsMirror(feed: FeedItem[], done: boolean): string {
     const flushQuote = () => { if (quote.length) { out.push(`<blockquote>${quote.join('\n\n')}</blockquote>`); quote = [] } }
     for (const b of win) { if (b.thought) quote.push(b.html); else { flushQuote(); out.push(b.html) } }
     flushQuote()
-    return out.join('\n')
+    return joinRichLines(out)
   }
   let win = blocks.slice(-MIRROR_THOUGHTS)
   let body = render(win)
   while (body.length > 3500 && win.length > 1) { win = win.slice(1); body = render(win) }
   if (body.length > 3500) body = chunkHtml(body, 3500)[0] ?? body.slice(0, 3500)
   if (!body) return done ? '✅ <b>Done</b>' : ''
-  return done ? `${body}\n\n✅ <b>Done</b>` : body
+  return done ? appendFooterLine(body, '✅ <b>Done</b>') : body
 }
 
 // ---- The card lifecycle (shared by the focused card and per-pane aux cards) ----
@@ -492,7 +532,7 @@ class MirrorCard {
     if (done || !footerOn()) return this.body
     const footer = this.footer()
     if (!this.body) return footer                       // pre-tool thinking phase → footer-only card
-    return footer ? `${this.body}\n\n${footer}` : this.body
+    return appendFooterLine(this.body, footer)          // own line + gap under rich (bare \n\n would fold it into the last line)
   }
 
   // Edit the open card to `text` across every tracked chat — via the global edit scheduler.
@@ -509,7 +549,13 @@ class MirrorCard {
   // mirror no longer edits raw (it used to compete with replies at equal priority for the budget).
   private scheduleCardEdit(text: string): void {
     for (const [chat, mid] of this.msgIds)
-      scheduleEdit({ chat, mid, thread: this.cardThread.get(chat), source: 'mirror', parseMode: 'HTML', render: () => text })
+      scheduleEdit({
+        chat, mid, thread: this.cardThread.get(chat), source: 'mirror', rich: true, render: () => text,
+        // The card carries <details>/<br> that only render as a rich_message — there's no safe classic-HTML
+        // fallback (Telegram rejects both tags), so a failed rich edit just drops the frame. Log it rather
+        // than freeze silently: a persistently-failing edit (old client, malformed html) is then visible.
+        onError: (e) => { if (!isNotModified(e)) process.stderr.write(`daemon: mirror rich edit failed (chat ${chat}, msg ${mid}): ${e}\n`) },
+      })
   }
 
   // The card's whole lifecycle lives here, driven by one signal — `working` = turnInProgress(file)
@@ -565,25 +611,30 @@ class MirrorCard {
     if (this.msgIds.size === 0) {
       if (Date.now() < this.createCooldownUntil) return   // a recent create 429'd — don't hammer a fresh post every tick
       // Open the card silently — it's the ambient mirror; the alerting message is the relayed reply.
-      this.contentKey = this.body || this.compose(false)
+      this.contentKey = footerOn() ? this.compose(false) : (this.body || this.compose(false))
       this.paneId = this.opts.resolvePane()   // remember which pane this card tracks (see abandon)
       const file = this.paneId ? await deps.resolveTranscriptForPane(this.paneId).catch(() => null) : null
       this.anchor = file ? turnAnchorUuid(file) : null   // the turn this card belongs to (restart resume check)
       const text = this.compose(false)
       for (const t of await this.opts.targets()) {
         if (isChatFlooded(t.chat)) continue   // chat is in a 429 window — skip the cosmetic card, let replies use the budget
-        const opts = { parse_mode: 'HTML' as const, disable_notification: true, ...(t.thread ? { message_thread_id: t.thread } : {}) }
-        try { const m = await deps.bot.api.sendMessage(t.chat, text, opts); this.msgIds.set(t.chat, m.message_id); if (t.thread != null) this.cardThread.set(t.chat, t.thread) }
+        // Open the card as a rich_message ({ html }) — same carrier as the edits, so <details>/<br> render
+        // (classic parse_mode HTML can't). No HTML fallback: those tags would 400 on the classic path.
+        try { const m = await sendRichMessage(deps.bot.token, t.chat, { html: text }, { messageThreadId: t.thread, disableNotification: true }); this.msgIds.set(t.chat, m.message_id); if (t.thread != null) this.cardThread.set(t.chat, t.thread) }
         catch (e) {
-          const ra = Number((e as { parameters?: { retry_after?: number } })?.parameters?.retry_after)
-          this.createCooldownUntil = Date.now() + (Number.isFinite(ra) ? ra * 1000 : 5000)
+          const ra = Number((e as { parameters?: { retry_after?: number } })?.parameters?.retry_after) || Number((e instanceof Error ? e.message : '').match(/retry after (\d+)/i)?.[1])
+          this.createCooldownUntil = Date.now() + (Number.isFinite(ra) && ra > 0 ? ra * 1000 : 5000)
           process.stderr.write(`daemon: activity mirror create failed (cooldown ${Math.round((this.createCooldownUntil - Date.now()) / 1000)}s): ${e}\n`)
         }
       }
       this.opts.persist()
       this.opts.onCreated?.()
     } else {
-      const key = this.body || this.compose(false)   // bodyless thinking phase → fingerprint the footer so it ticks
+      // Fingerprint: with the footer ON, key on the WHOLE composed card (body + footer) so a change in the
+      // live verb / elapsed / tokens / spinner frame re-edits the card each throttled tick — otherwise the
+      // body-only key froze the footer on its open-time render ("Working… · 0s"). Footer off → body-only
+      // (bodyless thinking still falls back to compose so the placeholder ticks).
+      const key = footerOn() ? this.compose(false) : (this.body || this.compose(false))
       if (key !== this.contentKey) { this.contentKey = key; await this.pushCard(this.compose(false)) }   // edit only on real change
     }
   }
@@ -626,7 +677,7 @@ class MirrorCard {
   async capWithCachedBody(body?: string): Promise<void> {
     if (this.msgIds.size === 0) return
     const b = body ?? this.body
-    const text = b ? `${b}\n\n✅ <b>Done</b>` : '✅ <b>Done</b>'
+    const text = b ? appendFooterLine(b, '✅ <b>Done</b>') : '✅ <b>Done</b>'
     this.scheduleCardEdit(text)
     this.msgIds.clear(); this.reset(); this.opts.persist()
   }

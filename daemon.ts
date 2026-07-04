@@ -255,7 +255,7 @@ bot.api.config.use(async (prev, method, payload, signal) => {
 // Above the governor: the global priority scheduler for recurring self-editing cards (coalescing +
 // active-view tiering + a global rate ceiling). Recurring edits register a desired state with it
 // instead of calling editMessageText directly; interactive sends still go straight through.
-startEditScheduler(bot.api)
+startEditScheduler(bot.api, TOKEN)
 initStatusCard({
   bot, transcriptForPane, lastKnownModel: () => lastKnownModel, botUsername: () => botUsername,
   usageSnapshotForPane: async pane => readUsageSnapshot(undefined, await paneAccount(pane)),

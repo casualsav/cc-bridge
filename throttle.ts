@@ -47,7 +47,11 @@ function adjustHigh(chat: string, d: number): void {
   if (n <= 0) highWaiters.delete(chat); else highWaiters.set(chat, n)
 }
 
-async function acquire(chat: string, method: string): Promise<void> {
+// Exported so the edit-scheduler can pace its RICH edits through the SAME per-chat bucket. Rich edits go
+// out via raw fetch (richmsg.ts), bypassing the grammy transformer below — without this they'd spend no
+// tokens and could blow a shared group chat's budget (several forum-topic cards = one chat). Calling this
+// before the raw send makes rich + governed sends share one budget, exactly as if it went through grammy.
+export async function acquire(chat: string, method: string): Promise<void> {
   const low = lowPrioCtx.getStore() === true
   const { cap, refillMs } = params(chat)
   const waitStart = Date.now()
