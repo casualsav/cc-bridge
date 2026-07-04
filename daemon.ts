@@ -83,6 +83,13 @@ import { initUpdates, startUpdate, bridgeVersion, claudeBin, claudeVersion, swee
 import { formatChannelBlock } from './inbound.ts'
 import { initQueue, readLater, writeLater, sweepLaterQueues, LATER_SWEEP_MS } from './queue.ts'
 import {
+  createPending, getPending, removePending, putPending, listPending, markInjected, expirePending,
+  recordAgentAsk, resetHops, HOP_LIMIT,
+  resolveEndpoint, nameForSession, confineRef, sharedDir, ensureSharedDir, appendLedger, tailLedger,
+  type EndpointTopic, type PartyPending,
+} from './party.ts'
+import { formatAskBlock, formatAnswerBlock } from './party-block.ts'
+import {
   initLoop, sweepLoops, LOOP_SWEEP_MS, startLoopWizard, handleLoopWizardReply, wizardSidFor,
   activeLoop, loopGo, loopCancel, loopStopSoft, loopStopNow, loopResume, loopStatusHtml, loopStatusKeyboard,
 } from './loop.ts'
@@ -1790,6 +1797,72 @@ async function dumpStuckPane(paneId: string): Promise<void> {
   }
 }
 
+// ---- Party line (party-bus P1): agent↔agent ask/answer over the bus ----
+// P1 is Claude↔Claude: each endpoint is a topic's session, so the topic store IS the registry
+// (party.ts resolves @name → sessionId). An `ask` is async — the asking agent's turn ends and the
+// answer arrives later as a fresh injected turn (yield, not block). Delivery is idle-gated: an ask to
+// a busy agent waits (sweepParty) until it sits at a normal prompt, so we never clobber a mid-turn pane.
+
+// Snapshot of live topics for pure endpoint resolution (party.ts stays grammy/tmux-free).
+function partyTopics(): EndpointTopic[] {
+  return listTopics().map(t => ({ sessionId: t.sessionId, name: t.name, closed: t.closed }))
+}
+// The room = the bound forum group. Party requires topic mode (an endpoint IS a topic's session).
+function partyRoom(): string | null { return isTopicMode() ? getGroupChatId() : null }
+
+// Inject a pre-formatted party block into a pane, serialized on the SAME inbound chain as human
+// messages so an ask/answer can't interleave with a human paste mid-buffer. Focused pane pauses its
+// watcher (bracket-paste); an off-focus topic pane gets a plain paste. Resolves to whether it landed.
+function partyDeliver(pane: string, block: string): Promise<boolean> {
+  const run = () => (pane === focus.activePaneId && focus.paneWatcher
+    ? injectPaste(pane, focus.paneWatcher, block)
+    : pasteToPane(pane, block))
+  const p = inboundInjectChain.then(run, run) as Promise<boolean>
+  inboundInjectChain = p.then(() => {}, () => {})
+  return p
+}
+
+// Deliver a queued ask NOW iff its target pane is live and at a normal prompt (never mid-turn). The
+// pane is re-resolved from the sessionId every time (panes churn on respawn/adopt). partyInFlight
+// guards the immediate attempt (in the `ask` handler) from racing the 15s sweep into a double-inject.
+const partyInFlight = new Set<number>()
+async function tryDeliverAsk(p: PartyPending): Promise<boolean> {
+  const cur = getPending(p.id)
+  if (!cur || cur.injected || partyInFlight.has(cur.id)) return false
+  partyInFlight.add(cur.id)   // claim BEFORE the awaits so the immediate attempt + the 15s sweep can't both proceed
+  try {
+    const pane = await paneForSession(cur.toSid).catch(() => null)
+    if (!pane) return false
+    const cap = await capturePane(pane).catch(() => '')
+    if (!cap || !onNormalPrompt(cap)) return false
+    const ok = await partyDeliver(pane, formatAskBlock(cur.fromName, cur.id, cur.text, cur.refs))
+    if (ok) {
+      markInjected(cur.id, Date.now())
+      const room = partyRoom()
+      if (room) void bot.api.sendMessage(room,
+        `▸ <b>${escapeHtml(cur.fromName)}</b> → <b>${escapeHtml(cur.toName)}</b>: ${escapeHtml(cur.text.slice(0, 120))}${cur.text.length > 120 ? '…' : ''}`,
+        { parse_mode: 'HTML', disable_notification: true }).catch(() => {})
+    }
+    return ok
+  } finally { partyInFlight.delete(cur.id) }
+}
+
+// 15s sweep: expire un-answered asks (tell the asker) + deliver queued asks whose target is now idle.
+async function sweepParty(): Promise<void> {
+  const room = partyRoom()
+  for (const p of expirePending(Date.now())) {
+    if (room) void bot.api.sendMessage(room,
+      `⌛ No answer from <b>${escapeHtml(p.toName)}</b> to ask ${p.id} — timed out.`,
+      { parse_mode: 'HTML', disable_notification: true }).catch(() => {})
+    const askerPane = await paneForSession(p.fromSid).catch(() => null)
+    if (askerPane) void partyDeliver(askerPane, formatAnswerBlock('system', p.id, `(no answer from @${p.toName} — timed out)`))
+    if (room) appendLedger(room, { ts: Date.now(), kind: 'expire', from: p.toName, to: p.fromName, id: p.id, text: 'timed out' })
+  }
+  for (const p of listPending()) {
+    if (!p.injected) await tryDeliverAsk(p).catch(() => {})
+  }
+}
+
 // ---- Per-topic command routing (Track A) ----
 // Which session a command/tap acts on, and where its reply goes. In topic mode a command sent inside
 // a session's topic targets THAT session and replies in-thread; in General (no thread) or DM it
@@ -2965,6 +3038,119 @@ async function handleCall(
           if (typeof edited === 'object') msgId = edited.message_id
         }
         text = `edited (id: ${msgId})`
+        break
+      }
+      // ---- Party line (party-bus P1) ----
+      case 'ask': {
+        const room = partyRoom()
+        if (!room) { write({ t: 'result', id, ok: false, text: 'party needs a forum group — run /bind first' }); return }
+        const pane = args.pane ? String(args.pane) : null
+        const fromSid = pane ? await sessionForPane(pane) : null
+        if (!fromSid) { write({ t: 'result', id, ok: false, text: '`tg ask` must run inside a bridged session' }); return }
+        const topics = partyTopics()
+        const res = resolveEndpoint(String(args.to ?? ''), topics)
+        if ('error' in res) { write({ t: 'result', id, ok: false, text: res.error }); return }
+        if (res.sessionId === fromSid) { write({ t: 'result', id, ok: false, text: "can't ask yourself" }); return }
+        const askText = String(args.text ?? '').trim()
+        if (!askText) { write({ t: 'result', id, ok: false, text: 'empty ask' }); return }
+        const fromName = nameForSession(fromSid, topics)
+        const toName = nameForSession(res.sessionId, topics)
+        // Confine + existence-check refs — they get injected into another agent's context.
+        const refs: string[] = []
+        for (const r of (Array.isArray(args.refs) ? args.refs as string[] : [])) {
+          const c = confineRef(r, sharedDir(room))
+          if ('error' in c) { write({ t: 'result', id, ok: false, text: c.error }); return }
+          if (!existsSync(c.path)) { write({ t: 'result', id, ok: false, text: `ref not found: ${r} — write deliverables into \`tg shared\`` }); return }
+          refs.push(c.path)
+        }
+        // Hop guard: pause the room if agents have bounced too many times with no human turn between.
+        const hops = recordAgentAsk()
+        if (hops > HOP_LIMIT) {
+          // Post the pause card once per episode (the first over-limit ask), not on every blocked one.
+          if (hops === HOP_LIMIT + 1) void bot.api.sendMessage(room, '⏸ Agents paused — several turns without you. Reply to continue.', { disable_notification: true }).catch(() => {})
+          write({ t: 'result', id, ok: false, text: 'paused: hop limit reached — a human reply resumes the room' }); return
+        }
+        const p = createPending({ fromSid, toSid: res.sessionId, fromName, toName, text: askText, refs }, Date.now())
+        appendLedger(room, { ts: Date.now(), kind: 'ask', from: fromName, to: toName, id: p.id, text: askText, refs })
+        void tryDeliverAsk(p)   // attempt now; sweepParty retries if the target is mid-turn
+        text = `asked @${toName} (ask ${p.id}) — async; they answer with \`tg answer ${p.id}\``
+        break
+      }
+      case 'answer': {
+        const room = partyRoom()
+        if (!room) { write({ t: 'result', id, ok: false, text: 'party needs a forum group' }); return }
+        const askId = Number(args.id)
+        const p = getPending(askId)
+        if (!p) { write({ t: 'result', id, ok: false, text: `no open ask #${args.id} (unknown or expired)` }); return }
+        const pane = args.pane ? String(args.pane) : null
+        const answererSid = pane ? await sessionForPane(pane) : null
+        const answerer = answererSid ? nameForSession(answererSid, partyTopics()) : p.toName
+        const refs: string[] = []
+        for (const r of (Array.isArray(args.refs) ? args.refs as string[] : [])) {
+          const c = confineRef(r, sharedDir(room))
+          if ('error' in c) { write({ t: 'result', id, ok: false, text: c.error }); return }
+          if (!existsSync(c.path)) { write({ t: 'result', id, ok: false, text: `ref not found: ${r}` }); return }
+          refs.push(c.path)
+        }
+        removePending(askId)   // clear BEFORE injecting so no sweep/relay tick double-handles it
+        const askerPane = await paneForSession(p.fromSid).catch(() => null)
+        if (!askerPane) { putPending(p); write({ t: 'result', id, ok: false, text: `@${p.fromName}'s session is no longer running — answer not delivered` }); return }
+        const answerText = String(args.text ?? '').trim()
+        const ok = await partyDeliver(askerPane, formatAnswerBlock(answerer, askId, answerText, refs))
+        // Delivery failed (asker pane vanished mid-paste): restore the ask so the answer isn't silently
+        // lost with a false success record — the answerer can retry. Only a REAL delivery is logged/carded.
+        if (!ok) { putPending(p); write({ t: 'result', id, ok: false, text: `couldn't deliver to @${p.fromName} (pane gone) — ask kept open, retry` }); return }
+        // Any session may answer in P1 (a human/third pane can unstick an exchange); flag a mismatch so a
+        // misdirected answer is diagnosable (the injected block already shows @answerer as the sender).
+        const mismatch = answerer !== p.toName ? ` [asked @${p.toName}]` : ''
+        appendLedger(room, { ts: Date.now(), kind: 'answer', from: answerer, to: p.fromName, id: askId, text: answerText, refs })
+        void bot.api.sendMessage(room, `✓ <b>${escapeHtml(answerer)}</b> answered <b>${escapeHtml(p.fromName)}</b> (ask ${askId})${escapeHtml(mismatch)}`, { parse_mode: 'HTML', disable_notification: true }).catch(() => {})
+        text = `answered @${p.fromName} (ask ${askId})`
+        break
+      }
+      case 'roster': {
+        const rows: string[] = []
+        for (const t of partyTopics().filter(t => !t.closed)) {
+          const nm = nameForSession(t.sessionId, partyTopics())
+          const pane = await paneForSession(t.sessionId).catch(() => null)
+          if (!pane) { rows.push(`⚪ ${nm} (down)`); continue }
+          const cap = await capturePane(pane).catch(() => '')
+          const sl = cap ? parseStatusline(cap) : null
+          const busy = cap ? !onNormalPrompt(cap) : false
+          const model = sl?.model ? ` ${sl.model}` : ''
+          const pct = sl?.ctxPct != null ? ` ${sl.ctxPct}%` : ''
+          rows.push(`${busy ? '🟡' : '🟢'} ${nm}${model}${pct}${busy ? ' · busy' : ''}`)
+        }
+        text = rows.length ? rows.join('\n') : '(no live party endpoints)'
+        break
+      }
+      case 'post': {
+        const room = partyRoom()
+        if (!room) { write({ t: 'result', id, ok: false, text: 'party needs a forum group' }); return }
+        const pane = args.pane ? String(args.pane) : null
+        const fromSid = pane ? await sessionForPane(pane) : null
+        const fromName = fromSid ? nameForSession(fromSid, partyTopics()) : 'agent'
+        const body = String(args.text ?? '').trim()
+        if (!body) { write({ t: 'result', id, ok: false, text: 'empty post' }); return }
+        appendLedger(room, { ts: Date.now(), kind: 'post', from: fromName, text: body })
+        await bot.api.sendMessage(room, `📣 <b>${escapeHtml(fromName)}</b>: ${escapeHtml(body)}`, { parse_mode: 'HTML' })
+        text = 'posted to the room'
+        break
+      }
+      case 'history': {
+        const room = partyRoom()
+        if (!room) { write({ t: 'result', id, ok: false, text: 'party needs a forum group' }); return }
+        const n = Math.max(1, Math.min(Number(args.n) || 20, 100))
+        const es = tailLedger(room, n)
+        text = es.length
+          ? es.map(e => `${e.kind === 'answer' ? '✓' : e.kind === 'ask' ? '→' : e.kind === 'post' ? '📣' : e.kind === 'expire' ? '⌛' : '·'} ${e.from}${e.to ? `→${e.to}` : ''}${e.id ? ` #${e.id}` : ''}: ${e.text.slice(0, 100)}`).join('\n')
+          : '(no party history yet)'
+        break
+      }
+      case 'shared': {
+        const room = partyRoom()
+        if (!room) { write({ t: 'result', id, ok: false, text: 'party needs a forum group' }); return }
+        text = ensureSharedDir(room)
         break
       }
       default:
@@ -7473,6 +7659,9 @@ async function handleInbound(
     return
   }
 
+  // A human turn resets the agent↔agent hop guard (the party loop-breaker) so a paused room resumes.
+  if (isTopicMode()) resetHops()
+
   // Topic mode: show typing instantly in the topic the message came from and LATCH it through
   // Claude's pre-first-token thinking (the relay loops then sustain it — a bare one-shot expired
   // after ~5s and went dark until the transcript showed work). DM mode keeps the flat keep-alive.
@@ -8363,6 +8552,8 @@ if (FORCE_PANE) {
 // Keep the pinned status card's live metrics fresh once per 10s. No-op edits are skipped and no
 // pin is created when nothing's active, so this is cheap when idle.
 setInterval(() => void updateSessionPin(), 10_000)
+// Party line (party-bus P1): deliver queued agent↔agent asks to idle targets + expire stale ones.
+setInterval(() => void sweepParty(), LATER_SWEEP_MS).unref()
 // Remember the focused pane's permission mode (covers shift+tab changes made in the terminal,
 // which the daemon otherwise never sees) so /resume can inherit it after the pane exits.
 setInterval(() => void (async () => {
