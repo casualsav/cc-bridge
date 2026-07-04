@@ -4193,26 +4193,39 @@ bot.command(['update', 'upgrade'], async ctx => {
 // commands into their own Claude setup. They inject the prompt straight into the target session via the
 // normal inbound path (handleInbound resolves the session, arms typing, injects + submits), so Claude
 // runs the instruction exactly as if the user had typed it.
-const HANDOFF_PROMPT = `We're out of usable context and starting a fresh session. Write a handoff to handoff.md that lets a zero-context agent resume WITHOUT losing detail. Build it from ground truth, not from your (now-saturated) memory — read every fact below off disk NOW; do not recall it. Do these in order:
+const HANDOFF_PROMPT = `Prepare a session handoff. Do these in order:
 
-1. Record the baton (transcript). Find this session's transcript — the most recently modified \`*.jsonl\` under \`~/.claude/projects/<this-project-dir>/\` (if more than one session is live in this project, disambiguate by matching the cwd / first user message, not mtime alone) — and write its absolute path into handoff.md as \`Prior transcript: <path>\`. That file is the COMPLETE, uncompressed record of this session; it is the next agent's backstop for every point below.
-
-2. Land the work first. Run the test suite and note the exact result. Commit completed, passing work with a descriptive message. Do NOT commit broken code — stash it or note it in handoff.md instead. (Skip commits/stash silently if this isn't a git repo.)
-
-3. Quote objective state verbatim: current branch, \`git status\`, the last few \`git log\` lines, \`git diff --stat\`, the exact failing test / error string if any, and the exact next command to run.
-
-4. Reconcile the project's tracking files, if it has them: if a PLAN.md (or equivalent task list) exists, correct every task status — mark nothing done that lacks BOTH passing tests and a commit; if a DECISIONS.md exists, append today's decisions not already logged. Skip either silently if the file doesn't exist.
-
-5. Write the narrative only you have, into handoff.md, under these headings: Current task (task, goal, and the exact next action — specific enough that a fresh session executes it without asking); Plan + decisions made / options rejected and WHY; Files touched this session (file → one-line description); Verify state (exact commands + expected output); Known issues / gotchas (verbatim errors, workarounds, env quirks); Open questions (anything needing a human decision). For each nontrivial point, add a pointer — which \`file:line\` or which span of the prior transcript it lives in — so the next agent re-reads the real thing instead of trusting this summary.
-
-6. Audit. Compare the tracking files (or, if none, your plan) against the actual repo. List every task marked done that isn't fully implemented, and every planned/observed item with no task tracking it. Add findings under "## Audit findings".
-
-Keep handoff.md an index into ground truth, not a replacement for it. It's a local, ephemeral baton — never commit it; if this is a git repo and \`handoff.md\` isn't already ignored, append a line for it to the root \`.gitignore\` (create the file if needed). Skip this silently if it's not a git repo.`
-const CONTINUE_PROMPT = `Resume the previous session. Read handoff.md first (and PLAN.md / DECISIONS.md / CLAUDE.md if they exist). Then, BEFORE doing any work, reconstruct fresh ground truth: run \`git status\` / \`git log\` / \`git diff --stat\` and confirm the real repo state matches what the handoff claims — if they disagree, trust the repo and flag it to me. Run the "Verify state" commands from handoff.md and report any mismatch before proceeding.
-
-Verify gate — do not start the next step until you can concretely state: (a) the current branch, (b) the exact task and its goal, (c) the failing test or the precise reason the work is unfinished, and (d) the exact next command. If any of those is unclear from handoff.md, open the transcript recorded at \`Prior transcript:\` and mine it (grep / read the flagged spans) until you can. That transcript is the complete uncompressed record — treat it as the source of truth over any summary.
-
-Once you can state all four, list: (a) the current task, (b) the next 3 tasks, (c) anything under "Audit findings" or "Open questions". If an open question blocks the current task, ask me now — otherwise start the current task. Follow the handoff's next steps; ask me before deviating from its plan. When you have actually completed the work it describes (not merely read it — finish the next-steps first, so the baton isn't lost if this session ends early), delete handoff.md so a stale handoff doesn't linger.`
+1. Run the test suite; note results.
+2. Commit any completed work with a descriptive message. Do NOT
+   commit broken code — stash or note it instead.
+3. Update PLAN.md: correct every task status. Do not mark anything
+   done that lacks passing tests + a commit.
+4. Append today's decisions to DECISIONS.md if not already logged.
+5. Overwrite HANDOFF.md with:
+   ## Session summary — [date]
+   ## Current task
+   [PLAN.md task ID, status, exact next action — specific enough
+   that a fresh session can execute it without asking anything]
+   ## Files touched this session
+   [file → one-line description]
+   ## Verify state
+   [exact commands + expected output]
+   ## Known issues / gotchas
+   [verbatim errors, workarounds, env quirks]
+   ## Open questions
+   [anything needing a human decision]
+6. AUDIT: Compare PLAN.md against the actual repo. List every task
+   marked done that isn't fully implemented, and every planned item
+   with no task tracking it. Add findings to HANDOFF.md under
+   "## Audit findings".`
+const CONTINUE_PROMPT = `Resume work on this project:
+1. Read PLAN.md, DECISIONS.md, HANDOFF.md, CLAUDE.md.
+2. Run the "Verify state" commands from HANDOFF.md. Report any
+   mismatch before proceeding.
+3. List: (a) current task, (b) next 3 tasks, (c) anything in
+   "Audit findings" or "Open questions".
+4. If open questions block the current task, ask me now — otherwise
+   start the current task.`
 for (const [name, prompt] of [['handoff', HANDOFF_PROMPT], ['continue', CONTINUE_PROMPT]] as const) {
   bot.command(name, async ctx => {
     const msgId = ctx.message?.message_id
