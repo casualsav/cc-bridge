@@ -69,9 +69,18 @@ export function formatDigestBlock(entries: DigestEntry[], sinceLabel: string): s
 // point: escaping first and slicing after can cut an entity (`&amp;` → `&am`), which is invalid HTML
 // and makes Telegram reject the ENTIRE card edit — a silent, permanently-stale card. null for a solo
 // bus (≤1 live name) — no roster then. Names arrive RAW; this owns both the clamp and the escape.
-export function formatRosterLine(names: string[]): string | null {
-  if (names.length <= 1) return null
-  const raw = `🚌 ${names.join(' · ')}`
-  const clamped = raw.length > 72 ? raw.slice(0, 71) + '…' : raw
+// Each agent may carry a context-window % (party-bus §7): Claude panes report one, Hermes one-shots
+// don't → 🟢<70 / 🟡<90 / 🔴≥90 prefix; agents with no % render name-only. Clamp widened to 110 so
+// several agents' pcts survive (a per-agent `🟢 name 45%` cell blows the old 72 at 3+ agents).
+export type RosterAgent = { name: string; ctxPct?: number | null }
+export function formatRosterLine(agents: RosterAgent[]): string | null {
+  if (agents.length <= 1) return null
+  const cell = (a: RosterAgent) => {
+    if (a.ctxPct == null) return a.name
+    const glyph = a.ctxPct < 70 ? '🟢' : a.ctxPct < 90 ? '🟡' : '🔴'
+    return `${glyph} ${a.name} ${a.ctxPct}%`
+  }
+  const raw = `🚌 ${agents.map(cell).join(' · ')}`
+  const clamped = raw.length > 110 ? raw.slice(0, 109) + '…' : raw
   return escapeHtml(clamped)
 }

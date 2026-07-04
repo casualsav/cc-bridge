@@ -75,6 +75,10 @@ const lastGoodStatus = new Map<string, StatuslineData>()
 // read again — no staleness regression, and /clear's invalidatePaneStatus still drops it.
 const PANE_STATUS_FILE = join(STATE_DIR, 'pane-status.json')
 for (const [p, s] of Object.entries(readJsonFile<Record<string, StatuslineData>>(PANE_STATUS_FILE, {}))) lastGoodStatus.set(p, s)
+// party-bus §7 (per-agent ctx% roster): read-only view of ANY pane's last-good statusline. Every
+// topic's pane is captured by updateTopicPins (not just the focused one), so the roster reads each
+// agent's ctxPct from here — no fresh, expensive per-pane capture on every card render.
+export function paneStatus(paneId: string): StatuslineData | undefined { return lastGoodStatus.get(paneId) }
 let paneStatusDirty = false
 function persistPaneStatus(): void {
   if (!paneStatusDirty) return

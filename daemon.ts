@@ -71,6 +71,7 @@ import { startWebapp, type SettingsView as WebappSettingsView, type UsageView as
 import { startTunnel, ensureCloudflared, tailscaleFunnelUrl, type Tunnel } from './tunnel.ts'
 import { sendRichMessage, sendRichMessageDraft, editRichMessage, toInputRichMessage, callTelegram } from './richmsg.ts'
 import { parseAvatars, resolveAvatar, type Avatar } from './avatars.ts'
+import { createAvatarMsgTokens } from './avatar-msg-tokens.ts'
 import { claudingStatus } from './clauding.ts'
 import {
   MAX_CHUNK_LIMIT, MAX_ATTACHMENT_BYTES, assertAllowedChat, resolveChatId, resolveTarget,
@@ -90,7 +91,7 @@ import {
   getSeen, markSeen, digestSince, DIGEST_SCAN,
   type PartyEndpoint, type PartyPending,
 } from './party.ts'
-import { formatAskBlock, formatAnswerBlock, formatDigestBlock, formatRosterLine } from './party-block.ts'
+import { formatAskBlock, formatAnswerBlock, formatDigestBlock, formatRosterLine, type RosterAgent } from './party-block.ts'
 import { runHermes, type HermesEndpoint, type HermesTask } from './hermes-driver.ts'
 import {
   initLoop, sweepLoops, LOOP_SWEEP_MS, startLoopWizard, handleLoopWizardReply, wizardSidFor,
@@ -103,7 +104,7 @@ import {
 import {
   initStatusCard, statusCardText, statusKeyboard, updateSessionPin, updateTopicPins,
   removeSessionPins, refreshSessionPin, sessionPins, pinTextCache, persistSessionPins,
-  clearAllPins, clearTopicPins, createSessionPin, invalidatePaneStatus, lastModelInTranscript, lastVersionInTranscript,
+  clearAllPins, clearTopicPins, createSessionPin, invalidatePaneStatus, paneStatus, lastModelInTranscript, lastVersionInTranscript,
   prettyModel, modeBadge,
 } from './status-card.ts'
 import { TypingPresence } from './typing.ts'
@@ -950,7 +951,7 @@ async function sendChunkRetrying(chat_id: string, text: string, extra: Record<st
 
 // Send agent markdown to chats using the same render/chunk path as the reply tool. In forum-topics
 // mode the caller passes a threadId so the message lands in the session's own topic.
-async function sendAgentText(chats: string[], text: string, threadId?: number, replyTo?: number): Promise<void> {
+async function sendAgentText(chats: string[], text: string, threadId?: number, replyTo?: number, avatarToken?: string): Promise<void> {
   const access = loadAccess()
   // The current render/chunk path — also the fallback when rich messages are off or error out. `reply`
   // (party-bus P4 addressing) lands on the FIRST chunk only; the rest are continuations of it.
@@ -974,6 +975,19 @@ async function sendAgentText(chats: string[], text: string, threadId?: number, r
   const hasFencedCode = /(^|\n)[ \t]{0,3}```/.test(text)
   let replyOnce = replyTo   // party-bus P4: the reply-to lands on the FIRST message actually sent, then clears
   for (const chat_id of chats) {
+    // party-bus §6: route the reply under the session's OWN avatar bot when it has one AND rich is
+    // eligible; remember the sent id so a later `tg edit` re-sends via the SAME bot. ANY avatar failure
+    // → fall through to the main-bot rich/HTML path below (which keeps the deleted-topic / 429
+    // recoveries), logged so a repeatedly-failing avatar (or an accepted-but-timed-out double-post) shows.
+    if (avatarToken && access.renderMarkdown !== false && !hasFencedCode) {
+      try {
+        const m = await sendRichMessage(avatarToken, chat_id, toInputRichMessage(text), { messageThreadId: threadId, ...(replyOnce != null ? { replyToMessageId: replyOnce } : {}) })
+        avatarMsgTokens.remember(chat_id, m.message_id, avatarToken)
+        replyOnce = undefined; continue
+      } catch (e) {
+        process.stderr.write(`daemon: avatar reply send failed for chat ${chat_id}, falling back to main bot: ${e}\n`)
+      }
+    }
     // Rich messages (Bot API 10.1) render Claude's markdown natively (tables/headings/code/collapsible)
     // and work in DM + topics. One raw call per chat — no chunking (no documented length cap). ANY
     // failure (older Telegram, malformed markdown, network) falls back to the HTML/chunk path so the
@@ -1179,8 +1193,11 @@ async function deliverRelayReply(paneId: string, target: { chat: string; thread?
   const trig = trigRaw && Date.now() - trigRaw.at <= TRIGGER_TTL_MS ? trigRaw : undefined   // ignore a stale (no-reply) trigger
   const distinct = recentSenders.get(route)?.size ?? 0
   const replyTo = (isTopicMode() && trig && (distinct >= 2 || trig.id !== loadAccess().allowFrom[0])) ? trig.msgId : undefined
+  // party-bus §6: in a party topic, send the reply under the session's own avatar bot (if configured);
+  // null → the shared bridge bot, exactly as before.
+  const avatar = target.thread != null && partyRoom() === target.chat ? await avatarForPane(paneId) : null
   try {
-    await sendAgentText([target.chat], text, target.thread, replyTo)
+    await sendAgentText([target.chat], text, target.thread, replyTo, avatar?.token)
     releaseTyping(target.thread)
     turnTrigger.delete(route); recentSenders.delete(route)   // turn delivered → next turn's FIRST poster becomes the addressee
   } catch (e) {
@@ -1831,6 +1848,16 @@ const HERMES_ENDPOINTS_FILE = join(STATE_DIR, 'hermes-endpoints.json')
 // Send-only avatar tokens (party-bus P3): endpoint name → { token }. Re-read fresh per `tg post` (rare,
 // human-facing) so a newly-added avatar posts with no restart. Holds secrets → the file is user-owned 0600.
 const AVATARS_FILE = join(STATE_DIR, 'avatars.json')
+// party-bus §6 (per-topic reply avatars): which avatar bot sent a given reply, so a `tg edit` of it
+// routes through the SAME bot (a bot can only edit its own messages). Bounded LRU.
+const avatarMsgTokens = createAvatarMsgTokens()
+// The send-only avatar bot for a pane's session, or null (→ the shared bridge bot). Fresh read =
+// hot-reload; any error → null. Shared by `tg post` (P3) and per-topic reply avatars (§6).
+async function avatarForPane(paneId: string): Promise<Avatar | null> {
+  const sid = await sessionForPane(paneId).catch(() => null)
+  if (!sid) return null
+  try { return resolveAvatar(nameForEndpoint(sid, partyEndpoints()), parseAvatars(readJsonFile(AVATARS_FILE, null))) } catch { return null }
+}
 const hermesEndpoints = new Map<string, HermesEndpoint>()
 const HERMES_MAX_CONCURRENT = 8            // fork-bomb backstop; the hop guard already bounds agent↔agent asks
 const hermesInFlight = new Set<number>()   // ask ids with a live `hermes -z` child (drives roster + the cap)
@@ -1878,12 +1905,13 @@ async function partyRosterLine(): Promise<string | null> {
   try {
     if (partyRoom()) {
       const eps = partyEndpoints().filter(e => !e.closed)
-      const names: string[] = []   // RAW names — formatRosterLine clamps THEN escapes (never splits an entity)
+      const agents: RosterAgent[] = []   // RAW names — formatRosterLine clamps THEN escapes (never splits an entity)
       for (const e of eps) {
-        const up = e.kind === 'hermes' ? true : !!(await paneForSession(e.id).catch(() => null))
-        if (up) names.push(nameForEndpoint(e.id, eps))
+        if (e.kind === 'hermes') { agents.push({ name: nameForEndpoint(e.id, eps) }); continue }   // one-shot: no live ctx%
+        const pane = await paneForSession(e.id).catch(() => null)
+        if (pane) agents.push({ name: nameForEndpoint(e.id, eps), ctxPct: paneStatus(pane)?.ctxPct ?? null })
       }
-      line = formatRosterLine(names)
+      line = formatRosterLine(agents)
     }
   } catch { line = rosterCache.line }
   rosterCache = { at: now, line }
@@ -3170,6 +3198,10 @@ async function handleCall(
         const editText = editRender
           ? chunkHtml(mdToTelegramHtml(args.text as string), MAX_CHUNK_LIMIT)[0]
           : args.text as string
+        const editMid = Number(args.message_id)
+        // party-bus §6: a bot can only edit its OWN messages. If this message went out under a session's
+        // avatar bot (per-topic reply), the edit MUST use that same token or the main bot 400s; else main.
+        const editToken = avatarMsgTokens.tokenFor(editChat, editMid) ?? TOKEN!
         let msgId: number | string = args.message_id as number | string
         // Rich messages (Bot API 10.1): edit standard-Markdown text into a native rich message so
         // tables/headings/code survive the edit (DM and topics). Falls back to the HTML edit on any
@@ -3177,19 +3209,27 @@ async function handleCall(
         let richEdited = false
         if (editRender) {
           try {
-            const e = await editRichMessage(TOKEN!, editChat, Number(args.message_id), toInputRichMessage(args.text as string))
+            const e = await editRichMessage(editToken, editChat, editMid, toInputRichMessage(args.text as string))
             msgId = e.message_id
             richEdited = true
           } catch (e) { process.stderr.write(`daemon: rich edit failed, falling back to HTML: ${e}\n`) }
         }
         if (!richEdited) {
-          const edited = await bot.api.editMessageText(
-            editChat,
-            Number(args.message_id),
-            editText,
-            ...(editParseMode ? [{ parse_mode: editParseMode }] : []),
-          )
-          if (typeof edited === 'object') msgId = edited.message_id
+          if (editToken !== TOKEN!) {
+            // avatar-owned message: the HTML fallback must ALSO go through the avatar token (bot.api = main bot)
+            const edited = await callTelegram<{ message_id?: number }>(editToken, 'editMessageText', {
+              chat_id: editChat, message_id: editMid, text: editText, ...(editParseMode ? { parse_mode: editParseMode } : {}),
+            })
+            if (edited && typeof edited === 'object' && edited.message_id != null) msgId = edited.message_id
+          } else {
+            const edited = await bot.api.editMessageText(
+              editChat,
+              editMid,
+              editText,
+              ...(editParseMode ? [{ parse_mode: editParseMode }] : []),
+            )
+            if (typeof edited === 'object') msgId = edited.message_id
+          }
         }
         text = `edited (id: ${msgId})`
         break
@@ -3316,7 +3356,8 @@ async function handleCall(
           // back to the bridge bot AND surface the degradation in the result (an untailed stderr is where a
           // misconfigured avatar goes to die).
           try {
-            await callTelegram(avatar.token, 'sendMessage', { chat_id: room, text: body })
+            const m = await callTelegram<{ message_id?: number }>(avatar.token, 'sendMessage', { chat_id: room, text: body })
+            if (m?.message_id != null) avatarMsgTokens.remember(room, m.message_id, avatar.token)   // so a `tg edit` of this post routes back through the same bot (parity with reply avatars)
             text = 'posted to the room (as your avatar)'
           } catch (e) {
             const msg = e instanceof Error ? e.message : String(e)

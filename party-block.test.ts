@@ -69,17 +69,28 @@ test('formatDigestBlock neutralizes angle brackets in from/to too, not just text
 
 // ---- formatRosterLine (party-bus P2) ----
 
-test('formatRosterLine builds a 🚌 line from >1 name; null for a solo bus', () => {
-  expect(formatRosterLine(['exec', 'analysis', 'mimo'])).toBe('🚌 exec · analysis · mimo')
-  expect(formatRosterLine(['solo'])).toBeNull()
+test('formatRosterLine builds a 🚌 line from >1 agent; null for a solo bus', () => {
+  expect(formatRosterLine([{ name: 'exec' }, { name: 'analysis' }, { name: 'mimo' }])).toBe('🚌 exec · analysis · mimo')
+  expect(formatRosterLine([{ name: 'solo' }])).toBeNull()
   expect(formatRosterLine([])).toBeNull()
 })
 
-test('formatRosterLine clamps THEN escapes so a & near the 72-char limit never becomes a split entity', () => {
-  // 50 a's + 20 &'s: raw is >72 so it clamps; ~18 &'s survive the clamp and sit right at the boundary.
-  // The BUGGY order (escape first → each & becomes 5-char &amp; → slice at 71) would cut a trailing
-  // "&amp;" into "&am"; clamp-first-then-escape keeps every entity whole.
-  const out = formatRosterLine(['a'.repeat(50) + '&'.repeat(20), 'b'])!
+test('formatRosterLine renders per-agent ctx% with 🟢<70 / 🟡<90 / 🔴≥90 buckets; no % → name only', () => {
+  expect(formatRosterLine([{ name: 'A', ctxPct: 45 }, { name: 'B', ctxPct: 82 }, { name: 'C', ctxPct: 95 }]))
+    .toBe('🚌 🟢 A 45% · 🟡 B 82% · 🔴 C 95%')
+  // boundaries: <70 green, [70,90) yellow, ≥90 red
+  expect(formatRosterLine([{ name: 'a', ctxPct: 69 }, { name: 'b', ctxPct: 70 }, { name: 'c', ctxPct: 89 }, { name: 'd', ctxPct: 90 }]))
+    .toBe('🚌 🟢 a 69% · 🟡 b 70% · 🟡 c 89% · 🔴 d 90%')
+  // Hermes one-shots (no ctxPct) and an explicit null both render name-only, mixed with Claude cells
+  expect(formatRosterLine([{ name: 'Opus', ctxPct: 45 }, { name: 'hermes' }, { name: 'Sonnet', ctxPct: null }]))
+    .toBe('🚌 🟢 Opus 45% · hermes · Sonnet')
+})
+
+test('formatRosterLine clamps THEN escapes so a & near the 110-char limit never becomes a split entity', () => {
+  // 100 a's + 15 &'s: raw is >110 so it clamps; several &'s survive the clamp and sit at the boundary.
+  // The BUGGY order (escape first → each & becomes 5-char &amp; → slice) would cut a trailing "&amp;"
+  // into "&am"; clamp-first-then-escape keeps every entity whole.
+  const out = formatRosterLine([{ name: 'a'.repeat(100) + '&'.repeat(15) }, { name: 'b' }])!
   expect(out).not.toMatch(/&(?!amp;|lt;|gt;|quot;)/)   // every & in the output is a COMPLETE entity
   expect(out).toContain('&amp;')                        // the surviving &'s did escape
 })
