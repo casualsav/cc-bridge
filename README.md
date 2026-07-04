@@ -54,6 +54,7 @@ These commands are added by the bridge. Everything else is Claude Code's own —
 | `/update` | Update menu with a button for each — `/update tg` updates the bridge, `/update claude` updates Claude itself |
 | `/handoff` | Write a session handoff to `handoff.md` for a fresh agent (auto-gitignored) |
 | `/continue` | Resume from `handoff.md` where the last session left off |
+| `/audit` | Audit the repo against `PLAN.md` (subagent) and reconcile task statuses |
 
 **Mode shortcuts:** `/mode` opens the permission-mode switcher; `/plan` `/auto` `/default` `/acceptedits` `/bypass` jump straight to one.
 

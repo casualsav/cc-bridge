@@ -4226,7 +4226,14 @@ const CONTINUE_PROMPT = `Resume work on this project:
    "Audit findings" or "Open questions".
 4. If open questions block the current task, ask me now — otherwise
    start the current task.`
-for (const [name, prompt] of [['handoff', HANDOFF_PROMPT], ['continue', CONTINUE_PROMPT]] as const) {
+const AUDIT_PROMPT = `Use a subagent to audit the repo against PLAN.md:
+- For each task marked [x]: verify the code exists and its acceptance
+  criterion actually passes.
+- For each Goal item: verify a task covers it.
+- Report only gaps affecting correctness or stated requirements —
+  no style opinions.
+Then update PLAN.md statuses to match reality.`
+for (const [name, prompt] of [['handoff', HANDOFF_PROMPT], ['continue', CONTINUE_PROMPT], ['audit', AUDIT_PROMPT]] as const) {
   bot.command(name, async ctx => {
     const msgId = ctx.message?.message_id
     const chat_id = String(ctx.chat?.id ?? '')
@@ -8708,6 +8715,7 @@ void (async () => {
               { command: 'update', description: 'Update the Telegram bridge or Claude itself' },
               { command: 'handoff', description: 'Write a session handoff (handoff.md) for a fresh agent' },
               { command: 'continue', description: 'Resume from handoff.md where the last session left off' },
+              { command: 'audit', description: 'Audit the repo against PLAN.md and reconcile task statuses' },
             ],
             { scope: { type: 'all_private_chats' } },
           ).catch(() => {})
