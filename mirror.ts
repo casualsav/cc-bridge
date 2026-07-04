@@ -171,19 +171,36 @@ export function toolBadge(tool: string): [string, string] {
   return ['🔧', tool]   // unregistered tool
 }
 
-// party-bus: a subagent (Task/Agent) spawn renders as its OWN line — 🤖 agent <type> — with the full
-// prompt tucked into a Telegram expandable blockquote (the chevron), so you can expand any spawn to
-// see exactly what that subagent was asked. Prompt is capped RAW then escaped (never escape-then-slice,
-// which can split an entity), staying well under the card's 3500 HTML budget; renderActions/Thoughts'
-// chunkHtml backstop closes the tag safely if many spawns ever overflow it.
+// party-bus: a subagent (Task/Agent) spawn shows as italic "Agent - <Type>" + its full prompt in a
+// Telegram expandable blockquote (the chevron) — so you can expand any spawn to see exactly what it was
+// asked. Several launched at once FOLD to one "Agent ×N" line + a single chevron (see renderAgents) so
+// they don't crowd the card. Prompt is capped RAW then escaped (never escape-then-slice, which can split
+// an entity); the card's chunkHtml backstop closes the tag safely if a fold ever overflows the budget.
 const AGENT_PROMPT_CAP = 700
 export function isAgentTool(tool: string): boolean { return tool === 'Task' || tool === 'Agent' }
+const capType = (t: string): string => t ? t[0].toUpperCase() + t.slice(1) : t
+// A lone spawn: italic "Agent - <Type>" + its full prompt in an expandable blockquote.
 export function renderAgentLine(it: Extract<FeedItem, { kind: 'tool' }>): string {
-  const type = it.agent?.type ? ` <b>${escapeHtml(it.agent.type)}</b>` : ''
+  const rawType = it.agent?.type?.trim() ?? ''
+  const type = rawType ? ` - ${escapeHtml(capType(rawType))}` : ''
   const raw = (it.agent?.prompt || it.detail || '').trim()
   const p = raw.length > AGENT_PROMPT_CAP ? raw.slice(0, AGENT_PROMPT_CAP) + '…' : raw
   const quote = p ? `\n<blockquote expandable>${escapeHtml(p)}</blockquote>` : ''
-  return `🤖 agent${type}${quote}`
+  return `<i>Agent${type}</i>${quote}`
+}
+// Fold a batch of spawns: >1 collapses to a single "Agent ×N" line + ONE expandable chevron listing
+// each (Type — short snippet); a lone spawn keeps its full-prompt line above. Per-agent snippet shrinks
+// with N so the chevron stays under the card budget (chunkHtml backstop still closes it if it overflows).
+export function renderAgents(agents: Array<Extract<FeedItem, { kind: 'tool' }>>): string[] {
+  if (agents.length <= 1) return agents.map(renderAgentLine)
+  const perCap = Math.max(140, Math.min(400, Math.floor(1600 / agents.length)))
+  const rows = agents.map(a => {
+    const type = escapeHtml(capType(a.agent?.type?.trim() || '?'))
+    const raw = (a.agent?.prompt || a.detail || '').trim()
+    const snip = raw.length > perCap ? raw.slice(0, perCap) + '…' : raw
+    return `<b>${type}</b>${snip ? ` — ${escapeHtml(snip)}` : ''}`
+  })
+  return [`<i>Agent ×${agents.length}</i>\n<blockquote expandable>${rows.join('\n')}</blockquote>`]
 }
 
 // Actions card (the renamed tools mode): collapsed history + live tail, the TUI's own pattern.
@@ -192,14 +209,18 @@ export function renderAgentLine(it: Extract<FeedItem, { kind: 'tool' }>): string
 // few stay as full detail rows so you can watch what's running right now. At Done the whole
 // turn collapses into the aggregate — a clean endpoint summary.
 export function renderActionsMirror(tools: Array<Extract<FeedItem, { kind: 'tool' }>>, done: boolean): string {
-  const split = done ? tools.length : Math.max(0, tools.length - ACTIONS_TAIL)
+  // Subagent spawns are pulled out and folded together (renderAgents) rather than scattered across the
+  // tail — several launched at once collapse to one chevron instead of crowding the card row by row.
+  const agents = tools.filter(a => isAgentTool(a.tool))
+  const rest = tools.filter(a => !isAgentTool(a.tool))
+  const split = done ? rest.length : Math.max(0, rest.length - ACTIONS_TAIL)
   const lines: string[] = [
-    ...renderToolRun(tools.slice(0, split)),
-    ...tools.slice(split).map(a => {
-      if (isAgentTool(a.tool)) return renderAgentLine(a)
+    ...renderToolRun(rest.slice(0, split)),
+    ...rest.slice(split).map(a => {
       const [emoji, label] = toolBadge(a.tool)
       return `${emoji} ${label}${a.detail ? `: <code>${escapeHtml(a.detail)}</code>` : ''}`
     }),
+    ...renderAgents(agents),
   ]
   if (done) lines.push(`✅ <b>Done</b> · ${tools.length} step${tools.length === 1 ? '' : 's'}`)
   let body = lines.join('\n')
@@ -258,7 +279,7 @@ export function renderToolRun(run: Array<Extract<FeedItem, { kind: 'tool' }>>): 
   return [
     ...(sentence ? [`<i>${sentence[0].toUpperCase()}${sentence.slice(1)}</i>`] : []),
     ...editLines,
-    ...agents.map(renderAgentLine),
+    ...renderAgents(agents),
   ]
 }
 

@@ -68,20 +68,20 @@ test('isAgentTool matches Task and Agent only', () => {
 
 test('renderToolRun gives a subagent spawn its own 🤖 line + expandable blockquote with the prompt', () => {
   const out = renderToolRun([agentItem('explore', 'map the mirror rendering code')]).join('\n')
-  expect(out).toContain('🤖 agent <b>explore</b>')
+  expect(out).toContain('<i>Agent - Explore</i>')
   expect(out).toContain('<blockquote expandable>map the mirror rendering code</blockquote>')
 })
 
-test('renderActionsMirror renders a Task in the live tail as the expandable agent line', () => {
+test('renderActionsMirror renders a single Task as the expandable agent line', () => {
   const out = renderActionsMirror([agentItem('researcher', 'find the bug')], false)
-  expect(out).toContain('🤖 agent <b>researcher</b>')
+  expect(out).toContain('<i>Agent - Researcher</i>')
   expect(out).toContain('<blockquote expandable>find the bug</blockquote>')
 })
 
 test('renderAgentLine caps the prompt (raw slice → escape) and HTML-escapes it', () => {
   const prompt = 'a & b '.repeat(200)                            // 1200 chars, &'s throughout, > cap
   const line = renderAgentLine({ kind: 'tool', tool: 'Task', detail: '', lines: null, agent: { type: 'coder', prompt } })
-  expect(line.startsWith('🤖 agent <b>coder</b>\n<blockquote expandable>')).toBe(true)
+  expect(line.startsWith('<i>Agent - Coder</i>\n<blockquote expandable>')).toBe(true)
   expect(line.endsWith('</blockquote>')).toBe(true)
   expect(line).toContain('…')                                     // capped (raw > 700)
   expect(line).toContain('&amp;')                                 // &'s escaped
@@ -90,7 +90,23 @@ test('renderAgentLine caps the prompt (raw slice → escape) and HTML-escapes it
 
 test('a subagent with no prompt still renders the agent line, no empty blockquote', () => {
   const line = renderAgentLine({ kind: 'tool', tool: 'Task', detail: '', lines: null, agent: { type: 'writer', prompt: '' } })
-  expect(line).toBe('🤖 agent <b>writer</b>')
+  expect(line).toBe('<i>Agent - Writer</i>')
+})
+
+test('renderToolRun folds several spawns into one Agent ×N line + a single chevron', () => {
+  const out = renderToolRun([agentItem('explore', 'map the code'), agentItem('coder', 'write the fix'), agentItem('verifier', 'run the tests')]).join('\n')
+  expect(out).toContain('<i>Agent ×3</i>')
+  expect((out.match(/<blockquote expandable>/g) || []).length).toBe(1)   // ONE chevron, not three
+  expect(out).toContain('<b>Explore</b>')
+  expect(out).toContain('<b>Coder</b>')
+  expect(out).toContain('<b>Verifier</b>')
+})
+
+test('renderActionsMirror folds concurrent spawns into one chevron, never scattered across the tail', () => {
+  const tools = [agentItem('a', 'p1'), agentItem('b', 'p2'), agentItem('c', 'p3'), agentItem('d', 'p4')]
+  const out = renderActionsMirror(tools, false)
+  expect(out).toContain('<i>Agent ×4</i>')
+  expect((out.match(/<blockquote expandable>/g) || []).length).toBe(1)   // all four in ONE chevron
 })
 
 test('renderActionsMirror pluralizes a single step correctly', () => {
