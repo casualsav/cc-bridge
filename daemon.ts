@@ -86,9 +86,10 @@ import {
   createPending, getPending, removePending, putPending, listPending, markInjected, expirePending,
   recordAgentAsk, resetHops, HOP_LIMIT,
   resolveEndpoint, nameForEndpoint, normalizeEndpointName, confineRef, sharedDir, ensureSharedDir, appendLedger, tailLedger,
+  getSeen, markSeen, digestSince, DIGEST_SCAN,
   type PartyEndpoint, type PartyPending,
 } from './party.ts'
-import { formatAskBlock, formatAnswerBlock } from './party-block.ts'
+import { formatAskBlock, formatAnswerBlock, formatDigestBlock, formatRosterLine } from './party-block.ts'
 import { runHermes, type HermesEndpoint, type HermesTask } from './hermes-driver.ts'
 import {
   initLoop, sweepLoops, LOOP_SWEEP_MS, startLoopWizard, handleLoopWizardReply, wizardSidFor,
@@ -257,6 +258,7 @@ initStatusCard({
   bot, transcriptForPane, lastKnownModel: () => lastKnownModel, botUsername: () => botUsername,
   usageSnapshotForPane: async pane => readUsageSnapshot(undefined, await paneAccount(pane)),
   onTopicGone: (sid, threadId) => void handleTopicThreadGone(sid, threadId),
+  partyRoster: partyRosterLine,   // party-bus P2: a compact live-roster line on the pinned card
 })
 initUpdates({ bot })
 initPromptRelay({ bot, outboundTargetsFor, flushPendingText, transcriptForPane, lastRelayedUuid: () => lastRelayedUuid, resetPromptDedup, verifyPromptClosed, paneKeys })
@@ -1842,6 +1844,32 @@ function partyEndpoints(): PartyEndpoint[] {
 // The room = the bound forum group. Party requires topic mode (an endpoint IS a topic's session).
 function partyRoom(): string | null { return isTopicMode() ? getGroupChatId() : null }
 
+// Compact live-roster line for the pinned status card (party-bus P2): who's on the bus, at a glance —
+// the always-on card form of `tg roster`. LIVENESS ONLY (claude endpoints resolve a pane; hermes are
+// always up); NO per-endpoint pane CAPTURE — that's `tg roster`'s job and far too heavy to run on
+// every card render. MEMOIZED (ROSTER_TTL_MS) so it stays O(endpoints) per refresh no matter how many
+// cards render it. null unless party is active AND >1 endpoint is live (no roster on a solo bus).
+let rosterCache: { at: number; line: string | null } = { at: 0, line: null }
+const ROSTER_TTL_MS = 8_000
+async function partyRosterLine(): Promise<string | null> {
+  const now = Date.now()
+  if (now - rosterCache.at < ROSTER_TTL_MS) return rosterCache.line
+  let line: string | null = null
+  try {
+    if (partyRoom()) {
+      const eps = partyEndpoints().filter(e => !e.closed)
+      const names: string[] = []   // RAW names — formatRosterLine clamps THEN escapes (never splits an entity)
+      for (const e of eps) {
+        const up = e.kind === 'hermes' ? true : !!(await paneForSession(e.id).catch(() => null))
+        if (up) names.push(nameForEndpoint(e.id, eps))
+      }
+      line = formatRosterLine(names)
+    }
+  } catch { line = rosterCache.line }
+  rosterCache = { at: now, line }
+  return line
+}
+
 // Inject a pre-formatted party block into a pane, serialized on the SAME inbound chain as human
 // messages so an ask/answer can't interleave with a human paste mid-buffer. Focused pane pauses its
 // watcher (bracket-paste); an off-focus topic pane gets a plain paste. Resolves to whether it landed.
@@ -1867,13 +1895,30 @@ async function tryDeliverAsk(p: PartyPending): Promise<boolean> {
     if (!pane) return false
     const cap = await capturePane(pane).catch(() => '')
     if (!cap || !onNormalPrompt(cap)) return false
-    const ok = await partyDeliver(pane, formatAskBlock(cur.fromName, cur.id, cur.text, cur.refs))
+    const room = partyRoom()
+    // Digest (party-bus P2): prepend the bus activity this endpoint missed since it was last caught up,
+    // so the ask arrives WITH ambient context — pull-not-push (only ever handed over on a delivery it's
+    // already receiving, never a live push into a busy pane). Excludes this very ask (already in the
+    // ledger from creation) + the endpoint's own rows. Claude only — a hermes one-shot has no
+    // continuity to catch up, and runHermesAsk never calls this.
+    const askBlock = formatAskBlock(cur.fromName, cur.id, cur.text, cur.refs)
+    let block = askBlock
+    if (room) {
+      const since = getSeen(cur.toSid)
+      const digest = digestSince(tailLedger(room, DIGEST_SCAN), since, { excludeId: cur.id, excludeFrom: cur.toName, cap: 8 })
+      const dig = formatDigestBlock(digest, since > 0 ? fmtAgo(since) : 'recently')
+      if (dig) block = `${dig}\n${askBlock}`
+    }
+    const ok = await partyDeliver(pane, block)
     if (ok) {
-      markInjected(cur.id, Date.now())
-      const room = partyRoom()
-      if (room) void bot.api.sendMessage(room,
-        `▸ <b>${escapeHtml(cur.fromName)}</b> → <b>${escapeHtml(cur.toName)}</b>: ${escapeHtml(cur.text.slice(0, 120))}${cur.text.length > 120 ? '…' : ''}`,
-        { parse_mode: 'HTML', disable_notification: true }).catch(() => {})
+      const now = Date.now()
+      markInjected(cur.id, now)
+      if (room) {
+        markSeen(cur.toSid, now)   // advance the watermark only on a LANDED delivery — a failed paste keeps the window open for the retry
+        void bot.api.sendMessage(room,
+          `▸ <b>${escapeHtml(cur.fromName)}</b> → <b>${escapeHtml(cur.toName)}</b>: ${escapeHtml(cur.text.slice(0, 120))}${cur.text.length > 120 ? '…' : ''}`,
+          { parse_mode: 'HTML', disable_notification: true }).catch(() => {})
+      }
     }
     return ok
   } finally { partyInFlight.delete(cur.id) }

@@ -4,7 +4,8 @@ import {
   createPending, getPending, removePending, putPending, listPending, markInjected, queuedFor, expirePending,
   recordAgentAsk, resetHops, currentHops, hopsExceeded, HOP_LIMIT, ASK_TTL_MS,
   normalizeEndpointName, resolveEndpoint, nameForEndpoint, confineRef,
-  type PartyEndpoint,
+  getSeen, markSeen, digestSince, SEEN_TTL_MS,
+  type PartyEndpoint, type LedgerEntry,
 } from './party.ts'
 
 // Pure store + resolution logic only — each test seeds via _resetForTest so nothing touches the
@@ -175,4 +176,47 @@ test('loadParty on an empty state dir yields the empty store', () => {
   const s = loadParty()
   expect(s.seq).toBe(0)
   expect(s.hops).toBe(0)
+  expect(s.seen).toEqual({})
+})
+
+// ---- digest watermark + digestSince (party-bus P2) ----
+
+test('getSeen defaults to 0; markSeen stamps it', () => {
+  expect(getSeen('sessA')).toBe(0)
+  markSeen('sessA', 10_000)
+  expect(getSeen('sessA')).toBe(10_000)
+})
+
+test('markSeen prunes watermarks older than SEEN_TTL_MS (dead session ids never accumulate)', () => {
+  markSeen('sessA', 10_000)
+  // stamping any endpoint far enough ahead reaps the now-stale first (a churned/dead sessionId)
+  markSeen('sessB', 10_000 + SEEN_TTL_MS + 1)
+  expect(getSeen('sessA')).toBe(0)                        // pruned
+  expect(getSeen('sessB')).toBe(10_000 + SEEN_TTL_MS + 1) // kept
+})
+
+const led = (over: Partial<LedgerEntry>): LedgerEntry => ({ ts: 0, kind: 'ask', from: 'x', text: 't', ...over })
+
+test('digestSince keeps only entries strictly newer than the watermark', () => {
+  const es = [led({ ts: 100, id: 1 }), led({ ts: 200, id: 2 }), led({ ts: 300, id: 3 })]
+  expect(digestSince(es, 150, { cap: 8 }).map(e => e.id)).toEqual([2, 3])
+})
+
+test('digestSince drops the current ask (excludeId) and self-authored rows (excludeFrom), keeps answers TO me', () => {
+  const es = [
+    led({ ts: 100, id: 1, from: 'exec', to: 'me' }),                     // someone asked me — keep
+    led({ ts: 200, id: 2, from: 'me', to: 'analysis' }),                 // my own ask — drop (excludeFrom)
+    led({ ts: 300, id: 7, from: 'exec', to: 'me' }),                     // THE ask being delivered — drop (excludeId)
+    led({ ts: 400, id: 3, kind: 'answer', from: 'analysis', to: 'me' }), // answer TO me, authored by analysis — keep
+  ]
+  expect(digestSince(es, 0, { excludeId: 7, excludeFrom: 'me', cap: 8 }).map(e => e.id)).toEqual([1, 3])
+})
+
+test('digestSince caps to the newest `cap` AFTER filtering (wide-scan intent)', () => {
+  const es = Array.from({ length: 10 }, (_, i) => led({ ts: (i + 1) * 10, id: i + 1 }))
+  expect(digestSince(es, 0, { cap: 3 }).map(e => e.id)).toEqual([8, 9, 10])
+})
+
+test('digestSince with nothing newer than the watermark is empty', () => {
+  expect(digestSince([led({ ts: 100, id: 1 })], 100, { cap: 8 })).toEqual([])
 })

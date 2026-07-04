@@ -29,6 +29,10 @@ by its topic name.
   `<tg @name ask=ID …>` block carries the ID). Reply with a pointer + summary, not the payload.
 - tg roster — who's live. · tg post "text" — say something to the humans. · tg history — recent bus events.
 
+An ask you receive may be preceded by a `<tg party-digest since …>…</tg>` block — ambient catch-up on
+bus traffic you missed while away. It's FYI only: read it for context, don't reply to it or act on it;
+answer only the `<tg @you ask=ID>` that follows.
+
 Speak only when you're addressed (a `<tg @you ask=ID>` block) or to hand off — don't chime in on
 traffic not aimed at you. Deliverables go to files in `$(tg shared)`; the chat carries pointers and
 one-line summaries.

@@ -43,9 +43,12 @@ export type PartyState = {
   seq: number                             // monotonic ask-id counter
   hops: number                            // consecutive agent→agent asks since the last human message
   pending: Record<string, PartyPending>   // keyed by String(id)
+  // Per-endpoint digest watermark (party-bus P2): endpoint id → the ts we last caught it up. On the
+  // next ask delivered to that endpoint we prepend a compact "since then" digest and re-stamp this.
+  seen: Record<string, number>
 }
 
-const empty = (): PartyState => ({ seq: 0, hops: 0, pending: {} })
+const empty = (): PartyState => ({ seq: 0, hops: 0, pending: {}, seen: {} })
 let store: PartyState = empty()
 let loaded = false
 let persist = true   // disabled by _resetForTest so unit tests never write to the real STATE_DIR
@@ -74,10 +77,15 @@ export function loadParty(): PartyState {
         injected: p.injected === true,
       }
     }
+    // Sanitize the digest watermark like `pending`: keep only finite-number values (a corrupt/hand-
+    // edited party.json can't poison it). Stale keys are pruned on the next markSeen, not here.
+    const seen: Record<string, number> = {}
+    for (const [k, v] of Object.entries(raw.seen ?? {})) if (typeof v === 'number' && Number.isFinite(v)) seen[k] = v
     store = {
       seq: typeof raw.seq === 'number' ? raw.seq : 0,
       hops: typeof raw.hops === 'number' ? raw.hops : 0,
       pending,
+      seen,
     }
     loaded = true
     return store
@@ -252,6 +260,48 @@ export function tailLedger(room: string, n: number): LedgerEntry[] {
   const out: LedgerEntry[] = []
   for (const l of lines) { if (l.trim()) try { out.push(JSON.parse(l) as LedgerEntry) } catch {} }
   return out.slice(-n)
+}
+
+// ---- digest watermark + digest builder (party-bus P2) ----
+
+// How long a seen-watermark survives with no new delivery before markSeen prunes it. A Claude
+// endpoint id is a per-session sessionId that churns on every /clear or respawn, so without a bound
+// `seen` would grow forever in party.json. 7 days: far past any live session, small enough to stay tiny.
+export const SEEN_TTL_MS = 7 * 24 * 60 * 60_000
+
+// The ts an endpoint was last caught up (handed a digest); 0 = never — the caller then shows the most
+// recent activity capped by count rather than an unbounded backlog.
+export function getSeen(id: string): number { ensureLoaded(); return store.seen[id] ?? 0 }
+
+// Advance an endpoint's watermark to `now`, AND prune every watermark older than SEEN_TTL_MS (dead
+// sessions) so the map stays bounded. Persisted — the digest window must survive a daemon restart.
+export function markSeen(id: string, now: number): void {
+  ensureLoaded()
+  store.seen[id] = now
+  for (const [k, v] of Object.entries(store.seen)) if (now - v > SEEN_TTL_MS) delete store.seen[k]
+  save()
+}
+
+// Ledger rows the daemon tails and hands to digestSince. WIDE on purpose (not just `cap`): the filter
+// below drops the current ask + the endpoint's own rows, so tailing only `cap` could leave the digest
+// empty even when real catch-up exists just above them. Capping happens AFTER the filter.
+export const DIGEST_SCAN = 200
+
+// The bus events an endpoint hasn't seen yet — its digest, oldest-first. PURE over a caller-supplied
+// entry window, so it's unit-testable without any ledger file. Callers MUST pass a WIDE window
+// (`tailLedger(room, DIGEST_SCAN)`, not just `cap` rows): the cap is applied HERE, AFTER the filter,
+// so a narrow window would let the excluded/self rows starve the digest. Filters ts>sinceTs, drops the
+// current ask (excludeId) and the endpoint's OWN entries (excludeFrom — answers TO it survive, since
+// those are authored by the answerer), returns the newest `cap`.
+export function digestSince(
+  entries: LedgerEntry[], sinceTs: number,
+  opts: { excludeId?: number; excludeFrom?: string; cap: number },
+): LedgerEntry[] {
+  const kept = entries.filter(e =>
+    e.ts > sinceTs &&
+    (opts.excludeId == null || e.id !== opts.excludeId) &&
+    (opts.excludeFrom == null || e.from !== opts.excludeFrom))
+  return kept.slice(-Math.max(1, opts.cap))
 }
 
 // Test seam: mirror topics.ts — seed the in-memory store, mark loaded, disable disk persistence.
