@@ -24,7 +24,7 @@ import { acquireTokenLock } from './token-lock.ts'
 // replace a daemon left running stale code after a plugin upgrade.
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
-import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
+import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
 import { resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, currentTurnActivity, currentTurnTokens, listRecentSessions, findSessionCwd, searchTranscripts } from './transcript.ts'
 import {
   initAccounts, listAccounts, accountByName, accountForTranscript, accountForProjectsDir,
@@ -950,22 +950,29 @@ async function sendChunkRetrying(chat_id: string, text: string, extra: Record<st
 
 // Send agent markdown to chats using the same render/chunk path as the reply tool. In forum-topics
 // mode the caller passes a threadId so the message lands in the session's own topic.
-async function sendAgentText(chats: string[], text: string, threadId?: number): Promise<void> {
+async function sendAgentText(chats: string[], text: string, threadId?: number, replyTo?: number): Promise<void> {
   const access = loadAccess()
-  // The current render/chunk path — also the fallback when rich messages are off or error out.
-  const sendHtmlPath = async (chat_id: string): Promise<void> => {
+  // The current render/chunk path — also the fallback when rich messages are off or error out. `reply`
+  // (party-bus P4 addressing) lands on the FIRST chunk only; the rest are continuations of it.
+  const sendHtmlPath = async (chat_id: string, reply?: number): Promise<void> => {
     const render = access.renderMarkdown !== false
     const limit = Math.max(1, Math.min(access.textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT))
     const chunks = render ? chunkHtml(mdToTelegramHtml(text), limit) : chunk(text, limit, access.chunkMode ?? 'length')
     const base = render ? { parse_mode: 'HTML' as const } : {}
     const extra = threadId ? { ...base, message_thread_id: threadId } : base
-    for (const c of chunks) await sendChunkRetrying(chat_id, c, extra)
+    let first = true
+    for (const c of chunks) {
+      const ex = first && reply != null ? { ...extra, reply_parameters: { message_id: reply, allow_sending_without_reply: true } } : extra
+      await sendChunkRetrying(chat_id, c, ex)
+      first = false
+    }
   }
   // Rich messages render code as RichBlockPreformatted, which (on current clients) wraps off-screen
   // and drops the copy button the classic <pre> entity had — so a reply carrying a fenced code block
   // is worse under rich. Route any such reply through the classic HTML/<pre> path to keep copy +
   // contained horizontal scroll; a code-bearing reply forgoes native tables/headings (rare to mix).
   const hasFencedCode = /(^|\n)[ \t]{0,3}```/.test(text)
+  let replyOnce = replyTo   // party-bus P4: the reply-to lands on the FIRST message actually sent, then clears
   for (const chat_id of chats) {
     // Rich messages (Bot API 10.1) render Claude's markdown natively (tables/headings/code/collapsible)
     // and work in DM + topics. One raw call per chat — no chunking (no documented length cap). ANY
@@ -973,13 +980,13 @@ async function sendAgentText(chats: string[], text: string, threadId?: number): 
     // reply still lands. On when markdown rendering is enabled (renderMarkdown !== false) AND the reply
     // has no fenced code block (see above).
     if (access.renderMarkdown !== false && !hasFencedCode) {
-      try { await sendRichMessage(TOKEN!, chat_id, toInputRichMessage(text), { messageThreadId: threadId }); continue }
+      try { await sendRichMessage(TOKEN!, chat_id, toInputRichMessage(text), { messageThreadId: threadId, ...(replyOnce != null ? { replyToMessageId: replyOnce } : {}) }); replyOnce = undefined; continue }
       catch (e) {
         if (isThreadGoneError(e)) throw new TopicThreadGoneError()   // dead thread — HTML fallback would hit it too; let the relay recreate
         process.stderr.write(`daemon: rich message send failed, falling back to HTML: ${e}\n`)
       }
     }
-    await sendHtmlPath(chat_id)
+    await sendHtmlPath(chat_id, replyOnce); replyOnce = undefined
   }
   if (access.tts?.mode === 'all') void sendTtsVoice(text, chats.map(chat => ({ chat, thread: threadId })))
 }
@@ -1164,9 +1171,18 @@ async function deliverRelayReply(paneId: string, target: { chat: string; thread?
     if (thread != null) stopTopicTyping(target.chat, thread)                                   // reply delivered — never re-light typing over it
     else if (isTopicMode() && target.chat === getGroupChatId()) stopTopicTyping(target.chat, 'general')   // General-anchored reply — same latch release
   }
+  // party-bus P4: address the reply to whoever STARTED this turn (snapshot at turn-start), but only when
+  // it disambiguates — topic/group mode AND (>1 distinct human posted this turn OR the trigger ≠ owner).
+  // Solo-owner topic churn stays clean; a solo DM (not topic mode) never threads.
+  const route = `${target.chat}:${target.thread ?? 'dm'}`
+  const trigRaw = turnTrigger.get(route)
+  const trig = trigRaw && Date.now() - trigRaw.at <= TRIGGER_TTL_MS ? trigRaw : undefined   // ignore a stale (no-reply) trigger
+  const distinct = recentSenders.get(route)?.size ?? 0
+  const replyTo = (isTopicMode() && trig && (distinct >= 2 || trig.id !== loadAccess().allowFrom[0])) ? trig.msgId : undefined
   try {
-    await sendAgentText([target.chat], text, target.thread)
+    await sendAgentText([target.chat], text, target.thread, replyTo)
     releaseTyping(target.thread)
+    turnTrigger.delete(route); recentSenders.delete(route)   // turn delivered → next turn's FIRST poster becomes the addressee
   } catch (e) {
     if (!(e instanceof TopicThreadGoneError) || target.thread == null) { process.stderr.write(`daemon: relay send failed: ${e}\n`); return }
     // The topic was DELETED out from under a live session (send → "message thread not found").
@@ -5997,6 +6013,13 @@ function fmtAgo(ms: number): string {
   return new Date(ms).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
 }
 
+// party-bus P4: the display name for a Telegram user — @username, else their first_name, else the bare
+// numeric id. Shared by the inbound `@name` attribution and the permission-approver audit so a person
+// is named the same everywhere (a no-username human previously showed to the agent as a bare id).
+function senderDisplayName(from: { username?: string; first_name?: string; id: number }): string {
+  return from.username ?? from.first_name ?? String(from.id)
+}
+
 // /resume — list the most recent Claude Code sessions (across all projects) with their last
 // activity, each tappable to relaunch via `claude --resume` in a fresh pane.
 bot.command('resume', async ctx => {
@@ -7580,7 +7603,7 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
-  const ppermMatch = /^pperm:(\d+)$/.exec(data)
+  const ppermMatch = /^pperm:(?:([0-9a-f]+):)?(\d+)$/.exec(data)   // optional prompt token; a legacy pperm:<num> still parses
   if (ppermMatch) {
     if (!(await cbAuth(ctx))) return
     const { paneId } = await targetPaneOf(ctx)
@@ -7588,9 +7611,29 @@ bot.on('callback_query:data', async ctx => {
       await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {})
       return
     }
-    const num = ppermMatch[1]
+    const token = ppermMatch[1]   // undefined for a legacy (pre-P4) button
+    const num = ppermMatch[2]
+    // Keep the card's question in the edited record below so it's an AUDIT ("<question> → answered 2 by
+    // X"), not a bare tombstone. `.text` is the already-rendered plain body → re-escape when re-sending.
+    const cardText = ctx.callbackQuery?.message?.text ?? ''
+    const record = (marker: string) => `${cardText ? escapeHtml(cardText) + '\n\n' : ''}${marker}`
+    // party-bus P4: correlate the tap to the EXACT prompt it was shown for. A token-bearing button is
+    // honored only if the pane STILL shows that same prompt AND still offers option `num` — so a stale
+    // tap (a 2nd human, or a prompt that already advanced) can't inject blind into whatever's on screen
+    // now. A legacy no-token button injects as before, so prompts relayed across the deploy still work.
+    if (token) {
+      const cap = await capturePane(paneId).catch(() => '')
+      const cur = cap ? detectPermissionPrompt(cap) : null
+      if (!cur || permPromptToken(cur.question) !== token || !cur.options.some(o => String(o.n) === num)) {
+        await ctx.answerCallbackQuery({ text: '⚠️ That prompt already moved on — check the current one.', show_alert: true }).catch(() => {})
+        await ctx.editMessageText(record('⚠️ <i>Superseded — already answered or replaced.</i>'), { parse_mode: 'HTML' }).catch(() => {})
+        return
+      }
+    }
     await ctx.answerCallbackQuery({ text: `Answered ${num}` }).catch(() => {})
-    await ctx.deleteMessage().catch(() => {})  // remove the permission prompt entirely once answered (toast confirms)
+    // Record WHO approved (the audit the flat allowlist lacked): keep the question + append a one-line
+    // record instead of deleting the card, so the thread keeps who-answered-which-prompt. Name chain = inbound.
+    await ctx.editMessageText(record(`✅ <b>Answered ${escapeHtml(num)}</b> · ${escapeHtml(senderDisplayName(ctx.from))}`), { parse_mode: 'HTML' }).catch(() => {})
     await paneKeys(paneId, [num, 'Enter'], [300, 5000])
     resetPromptDedup(paneId)  // allow the next permission prompt to relay
     await verifyPromptClosed(paneId)
@@ -7853,7 +7896,21 @@ async function handleInbound(
 
   // Remember the latest inbound message per route so an edit to it can be re-injected as a
   // correction (ROADMAP #12) — only the MOST RECENT message qualifies (typo-fix instinct).
-  if (msgId != null) lastInboundMsg.set(`${chat_id}:${typeof inThreadId === 'number' ? inThreadId : 'dm'}`, msgId)
+  const inRoute = `${chat_id}:${typeof inThreadId === 'number' ? inThreadId : 'dm'}`
+  if (msgId != null) {
+    lastInboundMsg.set(inRoute, msgId)
+    // party-bus P4: the FIRST inbound of a turn becomes the reply's addressee (set-if-empty); track every
+    // distinct sender since the last reply so addressing kicks in only when it disambiguates (>1 human).
+    // A trigger older than the TTL is treated as absent (a prior no-reply turn), so this poster cleanly
+    // starts a fresh turn window instead of being blocked from setting it.
+    const now = Date.now(), prevTrig = turnTrigger.get(inRoute)
+    if (!prevTrig || now - prevTrig.at > TRIGGER_TTL_MS) {
+      turnTrigger.set(inRoute, { msgId, name: senderDisplayName(from), id: String(from.id), at: now })
+      recentSenders.set(inRoute, new Set())
+    }
+    let rs = recentSenders.get(inRoute); if (!rs) { rs = new Set(); recentSenders.set(inRoute, rs) }
+    rs.add(String(from.id))
+  }
   if (msgId != null) noteMsg(String(chat_id), typeof inThreadId === 'number' ? inThreadId : undefined, msgId)   // feeds the mirror re-anchor (buried detection)
   // An inbound message is the strongest signal of where the user is looking — mark that chat/thread
   // the active view so the edit scheduler keeps its live cards there fresh ahead of background ones.
@@ -7904,7 +7961,7 @@ async function handleInbound(
     meta: {
       chat_id,
       ...(msgId != null ? { message_id: String(msgId) } : {}),
-      user: from.username ?? String(from.id),
+      user: senderDisplayName(from),   // party-bus P4: @username → first_name → id (was: id when no username)
       user_id: String(from.id),
       ts: new Date((ctx.message?.date ?? 0) * 1000).toISOString(),
       ...(imagePath ? { image_path: imagePath } : {}),
@@ -8060,6 +8117,14 @@ async function offerTopicBind(ctx: Context, threadId: number): Promise<void> {
 // Edited message → correction (ROADMAP #12): editing your MOST RECENT message in a topic/DM
 // re-injects it as a correction. Older edits are ignored (decided: latest-only).
 const lastInboundMsg = new Map<string, number>()   // `${chat}:${thread|'dm'}` → last inbound message_id
+// party-bus P4 reply addressing. turnTrigger: route → the FIRST human of the in-flight turn — SET-IF-EMPTY
+// (a 2nd human posting mid-turn can't steal the addressee) and CLEARED when the reply is delivered, so the
+// reply threads to whoever STARTED the turn, snapshot at turn-start rather than read live at delivery.
+// recentSenders: route → distinct sender ids since that clear, so we address by name only when it actually
+// disambiguates (>1 human active, or a non-owner) instead of on every solo-owner reply.
+const TRIGGER_TTL_MS = 10 * 60_000   // a turn-trigger older than this is treated as ABSENT — self-heals a turn that produced no reply (its trigger would otherwise mis-address the next turn's reply)
+const turnTrigger = new Map<string, { msgId: number; name: string; id: string; at: number }>()
+const recentSenders = new Map<string, Set<string>>()
 bot.on('edited_message', async ctx => {
   const em = ctx.editedMessage
   const text = em?.text ?? em?.caption

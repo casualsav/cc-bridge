@@ -370,6 +370,21 @@ export function detectPermissionPrompt(paneText: string): PermissionPrompt | nul
   return { question, preview: preview.join('\n').slice(0, 400), options }
 }
 
+// A short, capture-stable identity for a permission prompt (party-bus P4), so a relayed approve/deny
+// button can carry the identity of the EXACT prompt it was shown for and the daemon can re-verify the
+// pane STILL shows that prompt before injecting — a stale tap on a superseded prompt is rejected, not
+// injected blind into whatever's on screen now. Whitespace is normalized so a benign capture difference
+// (wrap / trailing space between the relay-time and tap-time captures of the SAME live prompt) still
+// hashes equal; different questions hash different. Non-crypto FNV-1a keeps this module dependency-free
+// — the token only CORRELATES (the live re-capture is the real guard), so collision-resistance isn't
+// load-bearing. 8 hex chars keeps callback_data far under Telegram's 64-byte cap.
+export function permPromptToken(question: string): string {
+  const norm = question.replace(/\s+/g, ' ').trim()
+  let h = 0x811c9dc5
+  for (let i = 0; i < norm.length; i++) { h ^= norm.charCodeAt(i); h = Math.imul(h, 0x01000193) }
+  return (h >>> 0).toString(16).padStart(8, '0')
+}
+
 // ---- /login method menu (a third shape) ----
 // Claude's "Select login method" screen carries only an "Esc to cancel" footer — NO select-menu
 // wording ("Enter to select / ↑↓") and NO permission "· Tab to amend" — so neither detector above

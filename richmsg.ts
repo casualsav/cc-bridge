@@ -71,7 +71,9 @@ export function buildSendPayload(
     chat_id: chatId,
     rich_message: richMessage,
     ...(opts?.messageThreadId !== undefined ? { message_thread_id: opts.messageThreadId } : {}),
-    ...(opts?.replyToMessageId !== undefined ? { reply_parameters: { message_id: opts.replyToMessageId } } : {}),
+    // allow_sending_without_reply: a reply target deleted mid-turn (party-bus P4 reply addressing) must
+    // not fail the whole send — Telegram then just sends it un-threaded instead of erroring.
+    ...(opts?.replyToMessageId !== undefined ? { reply_parameters: { message_id: opts.replyToMessageId, allow_sending_without_reply: true } } : {}),
     ...(opts?.disableNotification ? { disable_notification: true } : {}),
     ...(opts?.businessConnectionId ? { business_connection_id: opts.businessConnectionId } : {}),
   }

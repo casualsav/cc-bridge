@@ -1,6 +1,6 @@
 // Prompt detection from pane captures — select menus vs permission dialogs. Pure functions.
 import { test, expect } from 'bun:test'
-import { stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, isResumeSessionPrompt, detectResumeSessionPrompt, detectEditorState, onNormalPrompt, detectModelUnavailable, detectCompacting, compactPercent } from './prompt.ts'
+import { stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, isResumeSessionPrompt, detectResumeSessionPrompt, detectEditorState, onNormalPrompt, detectModelUnavailable, detectCompacting, compactPercent, permPromptToken } from './prompt.ts'
 
 test('stripAnsi removes CSI escape sequences', () => {
   expect(stripAnsi('\x1b[1mbold\x1b[0m text')).toBe('bold text')
@@ -273,6 +273,33 @@ test('detectPermissionPrompt parses a Yes/No confirmation', () => {
   expect(p!.question).toBe('Do you want to run this command?')
   expect(p!.options.map(o => o.label)).toEqual(['Yes', "Yes, and don't ask again", 'No'])
   expect(p!.preview).toContain('Run `ls -la`?')
+})
+
+// ---- permPromptToken (party-bus P4): correlate a relayed approve/deny tap to its exact prompt ----
+
+test('permPromptToken is 8 hex, whitespace-stable, and distinct per question', () => {
+  const q = 'Do you want to run this command?'
+  expect(permPromptToken(q)).toMatch(/^[0-9a-f]{8}$/)
+  expect(permPromptToken(q)).toBe(permPromptToken('  Do you want to   run this command?  '))   // collapsed ws + trimmed → equal
+  expect(permPromptToken(q)).not.toBe(permPromptToken('Do you want to delete this file?'))
+})
+
+test('permPromptToken agrees across two noisy captures of the SAME live prompt (no false-reject)', () => {
+  // The SAME prompt captured twice with cosmetic differences — a different spinner glyph on the tool
+  // header + trailing spaces on the question line. The token must still match, else every real tap
+  // would be wrongly rejected and approvals would break.
+  const cap = (spin: string, trail: string) => [
+    `● Bash ${spin}`,
+    'Run `ls -la`?',
+    `Do you want to run this command?${trail}`,
+    '  1. Yes',
+    "  2. Yes, and don't ask again",
+    '  3. No',
+    '  Esc to cancel · Tab to amend',
+  ].join('\n')
+  const a = detectPermissionPrompt(cap('✢', ''))!
+  const b = detectPermissionPrompt(cap('✳', '   '))!
+  expect(permPromptToken(a.question)).toBe(permPromptToken(b.question))
 })
 
 test('detectPermissionPrompt ignores a plain numbered list (no Yes/No shape)', () => {
