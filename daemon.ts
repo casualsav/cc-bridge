@@ -9183,8 +9183,7 @@ void (async () => {
             crashRestart = false
             for (const chat_id of loadAccess().allowFrom) void bot.api.sendMessage(chat_id, '♻️ Daemon restarted after a crash.').catch(() => {})
           }
-          void bot.api.setMyCommands(
-            [
+          const bridgeCommands = [
               { command: 'start', description: 'Welcome + everything this bot can do' },
               { command: 'stop', description: 'Interrupt the current task (Esc)' },
               { command: 'cancel', description: 'Clear a stuck force-reply prompt (e.g. an unanswered “name a folder”)' },
@@ -9217,9 +9216,14 @@ void (async () => {
               { command: 'handoff', description: 'Write a session handoff (handoff.md) for a fresh agent' },
               { command: 'continue', description: 'Resume from handoff.md where the last session left off' },
               { command: 'audit', description: 'Audit the repo against PLAN.md and reconcile task statuses' },
-            ],
-            { scope: { type: 'all_private_chats' } },
-          ).catch(() => {})
+          ]
+          // Register the SAME menu for BOTH scopes so the "/" popup shows our commands in DMs AND in the
+          // forum group / topics. all_private_chats alone left the group menu empty — the reason the bridge
+          // bot showed no commands next to other bots (e.g. Mimo) in a shared group. Commands work per-topic
+          // (targetPaneOf routes by thread). Send-only avatar/posting bots have no update handler, so they
+          // intentionally advertise none.
+          void bot.api.setMyCommands(bridgeCommands, { scope: { type: 'all_private_chats' } }).catch(() => {})
+          void bot.api.setMyCommands(bridgeCommands, { scope: { type: 'all_group_chats' } }).catch(() => {})
         },
       })
       return  // only reached on clean bot.stop()
