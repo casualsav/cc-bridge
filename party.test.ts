@@ -27,6 +27,15 @@ test('createPending mints monotonic ids, un-injected, with a TTL from now', () =
   expect(listPending().map(p => p.id).sort()).toEqual([1, 2])
 })
 
+test('createPending defaults kinds to claude, honors an explicit hermes target', () => {
+  const a = ask()                                   // no kinds passed
+  expect(a.fromKind).toBe('claude')
+  expect(a.toKind).toBe('claude')
+  const h = createPending({ fromSid: 'c', toSid: 'mimo', fromName: 'claude-tg', toName: 'mimo', text: 't', refs: [], toKind: 'hermes' }, 1)
+  expect(h.toKind).toBe('hermes')
+  expect(h.fromKind).toBe('claude')                 // asker is still a claude pane
+})
+
 test('getPending / removePending', () => {
   const p = ask()
   expect(getPending(p.id)?.toSid).toBe('bbbb')
@@ -78,7 +87,7 @@ test('expirePending removes and returns only the aged-out asks', () => {
 
 test('a seeded store carries its pending asks (survives a reload)', () => {
   _resetForTest({ seq: 5, pending: { '5': {
-    id: 5, fromSid: 'x', toSid: 'y', fromName: 'a', toName: 'b', text: 't', refs: [],
+    id: 5, fromSid: 'x', toSid: 'y', fromKind: 'claude', toKind: 'claude', fromName: 'a', toName: 'b', text: 't', refs: [],
     createdAt: 1, expiresAt: 2, injected: true,
   } } })
   expect(getPending(5)?.injected).toBe(true)

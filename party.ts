@@ -24,8 +24,12 @@ export const ASK_TTL_MS = 30 * 60_000
 
 export type PartyPending = {
   id: number
-  fromSid: string     // asker's sessionId — pane resolved at delivery time (panes churn)
-  toSid: string       // target's sessionId
+  fromSid: string     // asker's endpoint id (a claude sessionId; panes re-resolved at delivery)
+  toSid: string       // target's endpoint id (a claude sessionId, or a hermes endpoint name)
+  // Endpoint kind for from/to. Kept ALONGSIDE fromSid/toSid (not folded into an object) so live
+  // party.json entries from before P1.5 still load — loadParty defaults a missing kind to 'claude'.
+  fromKind: 'claude' | 'hermes'
+  toKind: 'claude' | 'hermes'
   fromName: string    // asker's endpoint name — the answer's @from attribution
   toName: string      // target's endpoint name — for the queued-start notice / logs
   text: string
@@ -59,6 +63,8 @@ export function loadParty(): PartyState {
         id: p.id,
         fromSid: p.fromSid,
         toSid: p.toSid,
+        fromKind: p.fromKind === 'hermes' ? 'hermes' : 'claude',   // pre-P1.5 entries had no kind → claude
+        toKind: p.toKind === 'hermes' ? 'hermes' : 'claude',
         fromName: typeof p.fromName === 'string' ? p.fromName : '',
         toName: typeof p.toName === 'string' ? p.toName : '',
         text: typeof p.text === 'string' ? p.text : '',
@@ -87,12 +93,17 @@ function ensureLoaded(): void { if (!loaded) loadParty() }
 // Mint a pending ask (un-injected: it may have to wait for a busy target to reach a normal prompt).
 // The daemon marks it injected once actually delivered, then arms the TTL against expiresAt.
 export function createPending(
-  fields: { fromSid: string; toSid: string; fromName: string; toName: string; text: string; refs: string[] },
+  fields: { fromSid: string; toSid: string; fromName: string; toName: string; text: string; refs: string[]
+            fromKind?: 'claude' | 'hermes'; toKind?: 'claude' | 'hermes' },
   now: number,
 ): PartyPending {
   ensureLoaded()
   const id = ++store.seq
-  const p: PartyPending = { id, ...fields, createdAt: now, expiresAt: now + ASK_TTL_MS, injected: false }
+  const p: PartyPending = {
+    id, ...fields,
+    fromKind: fields.fromKind ?? 'claude', toKind: fields.toKind ?? 'claude',
+    createdAt: now, expiresAt: now + ASK_TTL_MS, injected: false,
+  }
   store.pending[String(id)] = p
   save()
   return p
