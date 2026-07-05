@@ -164,6 +164,17 @@ Notes:
   edit-scheduler, throttle) re-pointed at `ChannelAdapter` instead of `Bot`.
 - **P3 — Slack adapter** (`@slack/bolt`, Socket Mode) + `slk` ctl + daemon entry; MVP
   surface. Then **Discord adapter** (discord.js gateway) + `dsc` ctl; MVP surface.
+  **Decided 2026-07-05 (post-P2):** each new platform daemon is a NEW thin entrypoint
+  (`slack-daemon.ts`) that composes the already-neutral core modules (pane-io, transcript,
+  prompt, state, access, markdown-neutral bits…) with its adapter — daemon.ts's inbound
+  grammy handlers are NOT neutralized first. REJECTED: migrating daemon.ts's ~3.5k lines
+  of live inbound dispatchers to adapter events before building Slack — highest-risk
+  churn in the repo, and most of that handler surface is Telegram-only (panels, forum
+  topics, mini app) which Slack MVP never calls. Shared orchestration glue graduates from
+  daemon.ts into core modules incrementally, as the Slack daemon proves what is common.
+  P1/P2 status: DONE (v0.3.64–0.3.66) — outbound + 9 satellites are ChannelAdapter-only;
+  residual grammy = daemon.ts inbound glue, richmsg (TG rich messages), throttle
+  (TG governor), tagged `TG-only` gaps.
 - **P4 — packaging**: directory restructure (`core/`, `channels/<platform>/`), three
   plugin manifests, deploy.ts per-plugin targets, per-channel INSTALL docs.
 
