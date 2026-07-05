@@ -33,6 +33,7 @@ export type Access = {
   tts?: { mode: 'off' | 'all'; engine: 'piper' | 'openai' | 'elevenlabs'; voice?: string }   // voice replies (ROADMAP #15); voice = piper voice id
   updateChecks?: boolean  // daily update-available notification for bridge + Claude (default on)
   autoUpdate?: boolean    // auto-apply BRIDGE updates on the daily sweep instead of a tap-to-apply card (default off; opt-in — Claude is never auto-applied)
+  limitFailover?: boolean  // on a usage-limit hit, move the stuck session to a still-available account and resume it there instead of waiting for the reset (default off)
   claudingDraft?: boolean  // DM-only live "Clauding…" status draft (Bot API 10.1) while a turn runs (default on)
   replyMode?: 'thoughts' | 'actions' | 'off' | 'tools' | 'hybrid' | 'all' | 'final' | 'stream' | 'live'   // tools/hybrid/all/final/stream/live are legacy aliases
 }

@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
-import { Bot, GrammyError, InlineKeyboard, InputFile, type Context } from 'grammy'
-import type { ReactionTypeEmoji } from 'grammy/types'
+import { Bot, GrammyError, InlineKeyboard, InputFile, API_CONSTANTS, type Context } from 'grammy'
+import type { ReactionTypeEmoji, InlineQueryResultArticle } from 'grammy/types'
 import { randomBytes } from 'node:crypto'
 import {
   readFileSync, writeFileSync, appendFileSync, mkdirSync, readdirSync, rmSync,
@@ -8,7 +8,7 @@ import {
   accessSync, constants as fsConstants,
 } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, extname, basename, dirname, sep } from 'node:path'
+import { join, extname, basename, dirname, relative, sep } from 'node:path'
 import { execFileSync, spawn } from 'node:child_process'
 import net from 'node:net'
 import {
@@ -29,7 +29,7 @@ import { resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress,
 import {
   initAccounts, listAccounts, accountByName, accountForTranscript, accountForProjectsDir,
   allProjectsDirs, addAccount, removeAccount, renameAccount, accountLoggedIn, healAccountConfigs, healMainStatusline,
-  MAIN_ACCOUNT, readDefaultMode, writeDefaultMode, type Account,
+  MAIN_ACCOUNT, readDefaultMode, writeDefaultMode, projectsDirOf, pickFailoverAccount, type Account,
 } from './accounts.ts'
 import { exec, sleep, hashText } from './proc.ts'
 import { ghAccounts, ghInstalled, ghSwitch, ghLogout, runGhLogin, provisionGh, type GhAccount } from './github.ts'
@@ -45,6 +45,7 @@ import {
   focus,
   _accessFileCache, onboardedPanes, onboardingState, sessions, permissionOrigin,
   pendingMultiSelect, freeTextPrompts, chatPrompts, replyTargets, stuckCards,
+  promptCards, prunePromptCards,
   lastRelayedByFile, offMcpPanes,
   usageWarnState, voiceNudged,
   sessionNames, mdOverwritePending,
@@ -2436,6 +2437,44 @@ function maybeWarnContext(pct: number | null): void {
 // the ⛔ message carries one "✖️ Cancel" button — tapped, the reset ping arrives with a manual
 // Continue button instead. (Was opt-in via an "▶️ Auto-continue" button; usage:arm still works
 // for old messages.)
+// Automatic account failover (opt-in via /settings): when `hitAccount` runs out and another account
+// is still available, mirror the stuck session's transcript into that account's config dir and
+// relaunch the pane there (`--resume <id>` under the target's CLAUDE_CONFIG_DIR), so work continues
+// instead of parking until the reset. Returns the target on success, null (no-op — the caller keeps
+// the normal arm-and-wait behavior) on any miss or error.
+async function attemptLimitFailover(hitAccount: Account, origin: string | null): Promise<{ to: Account } | null> {
+  try {
+    if (loadAccess().limitFailover !== true) return null
+    // An account is available unless its OWN snapshot is fresh and a window is maxed; null/stale = ok.
+    const snapshotOk = (a: Account): boolean => {
+      const snap = readUsageSnapshot(undefined, a)
+      return !snap || [snap.fiveHour, snap.sevenDay].every(w => !w || w.pct < 100)
+    }
+    const target = pickFailoverAccount(hitAccount, snapshotOk)
+    if (!target) return null
+    // The pane to move: the origin if it's live and on the hit account, else the first live pane that is.
+    let pane: string | null = null
+    if (origin && offMcpPanes.has(origin) && (await paneAccount(origin)).name === hitAccount.name) pane = origin
+    if (!pane) for (const p of offMcpPanes) { if ((await paneAccount(p)).name === hitAccount.name) { pane = p; break } }
+    if (!pane) return null
+    // Session id + source transcript, resolved the same way restartPaneSessionCore does.
+    const cwd = await paneCwd(pane).catch(() => null)
+    const src = cwd ? await transcriptForPane(pane, cwd) : null
+    if (!src || !existsSync(src)) return null
+    const id = basename(src, '.jsonl')
+    // Mirror the transcript into the target account at the SAME relative path so --resume finds it.
+    const dest = join(projectsDirOf(target), relative(projectsDirOf(hitAccount), src))
+    mkdirSync(dirname(dest), { recursive: true })
+    copyFileSync(src, dest)
+    if (!(await restartPaneSessionCore(pane, id, target))) return null
+    process.stderr.write(`daemon: limit failover: ${hitAccount.name} → ${target.name} (pane ${pane}, session ${id})\n`)
+    return { to: target }
+  } catch (e) {
+    process.stderr.write(`daemon: limit failover failed: ${e}\n`)
+    return null
+  }
+}
+
 function actOnLimitHit(fireAt: number, type: string, banner?: string, origin: string | null = focus.activePaneId, account: Account = MAIN_ACCOUNT): void {
   const key = `hit:${Math.round(fireAt / 60_000)}`
   const prev = usageHitState.get(account.name)
@@ -2448,13 +2487,26 @@ function actOnLimitHit(fireAt: number, type: string, banner?: string, origin: st
   const note = `\n\n⏰ Resets in ${formatDuration(Math.max(0, fireAt - Date.now()))}.\n▶️ I'll continue automatically when it resets — tap below if you'd rather I didn't.`
   const head = banner ? escapeHtml(banner) : `Out of your ${escapeHtml(type)} limit.`
   const kb = new InlineKeyboard().text('✖️ Cancel auto-continue', `usage:disarm:${account.name}`)
-  // Route the immediate banner to the session that hit the limit (its topic in forum mode).
+  // Relay the hit + arm the auto-continue at the reset instant (the pre-failover behavior).
+  const fireArmed = () => {
+    // Route the immediate banner to the session that hit the limit (its topic in forum mode).
+    void (async () => {
+      for (const { chat, thread } of await outboundTargetsFor(origin)) {
+        await bot.api.sendMessage(chat, `⛔ <b>Claude hit the usage limit${who ? '</b>' + who + '<b>' : ''}.</b>\n${head}${note}`, { parse_mode: 'HTML', reply_markup: kb, ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
+      }
+    })()
+    scheduleReset(account.name, fireAt + RESET_GRACE_MS, chats, 0, true)   // armed by default; the button disarms
+  }
+  if (loadAccess().limitFailover !== true) { fireArmed(); return }
   void (async () => {
+    const failover = await attemptLimitFailover(account, origin)
+    if (!failover) { fireArmed(); return }
+    // Moved the session to a fresh account — notify only, no auto-continue (we never stopped).
     for (const { chat, thread } of await outboundTargetsFor(origin)) {
-      await bot.api.sendMessage(chat, `⛔ <b>Claude hit the usage limit${who ? '</b>' + who + '<b>' : ''}.</b>\n${head}${note}`, { parse_mode: 'HTML', reply_markup: kb, ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
+      await bot.api.sendMessage(chat, `⛔ <b>${escapeHtml(account.name)}</b> hit the ${escapeHtml(type)} limit — 🔀 switched to <b>${escapeHtml(failover.to.name)}</b>, resuming.`, { parse_mode: 'HTML', ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
     }
+    scheduleReset(account.name, fireAt + RESET_GRACE_MS, chats, 0, false)
   })()
-  scheduleReset(account.name, fireAt + RESET_GRACE_MS, chats, 0, true)   // armed by default; the button disarms
 }
 
 // Poll each account's statusline snapshot: drive warnings + limit handling off exact numbers.
@@ -4316,13 +4368,14 @@ async function restartPaneSession(pane: string, chat: string): Promise<void> {
 // respawned in a fresh pane with the same session stamp + `--resume` — the conversation, topic and
 // routing all survive. Returns the pane now hosting the session (the original or the respawn), or
 // null when it couldn't be brought back.
-async function restartPaneSessionCore(pane: string, id: string): Promise<string | null> {
+async function restartPaneSessionCore(pane: string, id: string, accountOverride?: Account): Promise<string | null> {
   const preCap = await capturePane(pane).catch(() => '')
   const mode = detectCurrentMode(preCap)
   const effort = parseStatusline(preCap)?.effort ?? null   // restored by NEITHER /exit nor --resume — re-apply it ourselves
   // An alt-account session must resume under its config dir — the pane's shell doesn't export
-  // CLAUDE_CONFIG_DIR (the launcher env-prefixes it), so the resume line has to re-prefix.
-  const account = await paneAccount(pane)
+  // CLAUDE_CONFIG_DIR (the launcher env-prefixes it), so the resume line has to re-prefix. An
+  // accountOverride relaunches the pane under a DIFFERENT account (usage-limit failover).
+  const account = accountOverride ?? await paneAccount(pane)
   const envPrefix = account.name === 'main' ? '' : `CLAUDE_CONFIG_DIR='${account.configDir.replace(/'/g, `'\\''`)}' `
   // Captured BEFORE /exit — a pane that dies with it can't answer these anymore.
   const cwd = await paneCwd(pane).catch(() => null)
@@ -5509,7 +5562,8 @@ function settingsText(): string {
     `💬 Stream — <b>${replyMode()}</b>\n` +
     `📌 Pinned message — <b>${a.sessionPin !== false ? 'on' : 'off'}</b>\n` +
     `🧷 Preferred mode — <b>${listAccounts().length > 1 ? 'per account' : defModeLabel(MAIN_ACCOUNT.configDir)}</b>\n` +
-    `🧹 <code>/clear</code> approval — <b>${a.confirmReset === false ? 'off' : 'on'}</b>\n\n` +
+    `🧹 <code>/clear</code> approval — <b>${a.confirmReset === false ? 'off' : 'on'}</b>\n` +
+    `🔀 Limit failover — <b>${a.limitFailover === true ? 'on' : 'off'}</b>\n\n` +
     `Tap to change:`
 }
 function settingsKeyboard(): InlineKeyboard {
@@ -5518,7 +5572,8 @@ function settingsKeyboard(): InlineKeyboard {
     .text('⚡ Batch allow', 'set:batch').text('🚢 Ship buttons', 'set:ship').row()
     .text('🎙️ Voice transcription', 'set:voice').text('🔊 Voice replies', 'set:tts').row()
     .text('💬 Stream', 'set:replymode').text('📌 Pin', 'set:pin').row()
-    .text('🧷 Preferred mode', 'defmode:panel').text('🧹 /clear approval', 'set:confirmreset')
+    .text('🧷 Preferred mode', 'defmode:panel').text('🧹 /clear approval', 'set:confirmreset').row()
+    .text('🔀 Limit failover', 'set:failover')
 }
 
 // 🧷 Preferred-mode sub-panel (settings → Preferred mode): Claude Code's permissions.defaultMode — the
@@ -6650,7 +6705,7 @@ bot.on('callback_query:data', async ctx => {
   }
 
   // /settings panel toggles → flip the setting and re-render the panel in place.
-  const setMatch = /^set:(pin|replymode|ship|voice|batch|tts|confirmreset)$/.exec(data)
+  const setMatch = /^set:(pin|replymode|ship|voice|batch|tts|confirmreset|failover)$/.exec(data)
   if (setMatch) {
     if (!(await cbAuth(ctx))) return
     await ctx.answerCallbackQuery().catch(() => {})
@@ -6683,6 +6738,9 @@ bot.on('callback_query:data', async ctx => {
       saveAccess(a)
     } else if (setMatch[1] === 'confirmreset') {
       a.confirmReset = a.confirmReset === false             // flip (default on)
+      saveAccess(a)
+    } else if (setMatch[1] === 'failover') {
+      a.limitFailover = a.limitFailover !== true            // flip (default off)
       saveAccess(a)
     }
     await ctx.editMessageText(settingsText(), { parse_mode: 'HTML', reply_markup: settingsKeyboard() }).catch(() => {})
@@ -8257,6 +8315,109 @@ const lastInboundMsg = new Map<string, number>()   // `${chat}:${thread|'dm'}` �
 const TRIGGER_TTL_MS = 10 * 60_000   // a turn-trigger older than this is treated as ABSENT — self-heals a turn that produced no reply (its trigger would otherwise mis-address the next turn's reply)
 const turnTrigger = new Map<string, { msgId: number; name: string; id: string; at: number }>()
 const recentSenders = new Map<string, Set<string>>()
+// Inbound reactions as control signals. On a tracked prompt card: 👍/👌 approves option 1, 👎
+// dismisses it (Esc). 👎 on any other message interrupts that chat's session (like /stop). Allowlist-
+// gated on the reactor; anonymous/channel reactions (no user) are ignored. Everything else is ignored.
+// message_reaction updates carry no message_thread_id, so a card answers via its stored paneId (topic-
+// exact), but a 👎-on-other-message resolves the pane like /stop's fallback (focused session).
+bot.on('message_reaction', async ctx => {
+  try {
+    const mr = ctx.messageReaction
+    const uid = mr.user?.id
+    if (uid == null) return   // anonymous / on-behalf-of-channel reaction — no actor to authorize
+    if (!loadAccess().allowFrom.includes(String(uid))) return
+    // ADDED emoji this update: present in new_reaction but not old_reaction (emoji type only).
+    const wasSet = new Set(mr.old_reaction.filter(r => r.type === 'emoji').map(r => (r as ReactionTypeEmoji).emoji))
+    const added = mr.new_reaction
+      .filter(r => r.type === 'emoji' && !wasSet.has((r as ReactionTypeEmoji).emoji))
+      .map(r => (r as ReactionTypeEmoji).emoji)
+    if (added.length === 0) return
+    const chatId = String(mr.chat.id)
+    const key = `${mr.chat.id}:${mr.message_id}`
+    const card = promptCards.get(key)
+    const editCard = (html: string) => bot.api.editMessageText(chatId, mr.message_id, html, { parse_mode: 'HTML' }).catch(() => {})
+
+    if (added.includes('👍') || added.includes('👌')) {
+      if (!card) return   // 👍 on a non-tracked message → ignore
+      if (!card.paneId) { promptCards.delete(key); return }
+      const paneId = card.paneId
+      if (card.kind === 'perm') {
+        // Same stale-guard as the pperm tap: the pane must still show this exact prompt.
+        const cap = await capturePane(paneId).catch(() => '')
+        const cur = cap ? detectPermissionPrompt(cap) : null
+        if (!cur || (card.token && permPromptToken(cur.question) !== card.token)) {
+          await editCard('⚠️ <i>Superseded — already answered or replaced.</i>')
+          promptCards.delete(key)
+          return
+        }
+      } else {
+        // Select card: only inject if a prompt/menu is actually on screen (no blind '1' into a live prompt).
+        const cap = await capturePane(paneId).catch(() => '')
+        if (!cap || (!detectUserPrompt(cap) && !detectPermissionPrompt(cap))) { promptCards.delete(key); return }
+      }
+      await paneKeys(paneId, ['1', 'Enter'], [300, 5000])
+      await editCard(`✅ <b>Approved via reaction</b> · ${escapeHtml(senderDisplayName(mr.user!))}`)
+      resetPromptDedup(paneId)
+      await verifyPromptClosed(paneId)
+      promptCards.delete(key)
+      return
+    }
+
+    if (added.includes('👎')) {
+      if (card) {
+        if (card.paneId) await paneKeys(card.paneId, ['Escape'], [300, 5000])
+        await editCard(`❌ <b>Dismissed via reaction</b> · ${escapeHtml(senderDisplayName(mr.user!))}`)
+        promptCards.delete(key)
+        return
+      }
+      // 👎 on any other message → interrupt this chat's session, same Esc as /stop. But a reaction
+      // carries no thread, so in a topic-mode group this can't tell WHICH topic's session was meant —
+      // resolveActivePane would hit the focused one, not the reacted topic's. Skip it there; the
+      // topic-exact card 👍/👎 above still work (they carry the pane). Private chats / non-topic groups
+      // have a single active session, so the resolve is correct.
+      if (isTopicMode() && chatId === getGroupChatId()) return
+      const pane = await resolveActivePane()
+      if (!pane) return
+      const isFocused = pane === focus.activePaneId
+      await performStop({ paneId: pane, watcher: isFocused ? focus.paneWatcher : null, isFocused })
+      await bot.api.sendMessage(chatId, '⏹ Esc').catch(() => {})
+    }
+  } catch (e) {
+    process.stderr.write(`daemon: message_reaction handler failed: ${e}\n`)
+  }
+})
+
+// Inline queries backed by transcript search (@bot <text> from any chat): each hit becomes an article
+// that pastes a session summary. Allowlist-only (inline queries have no chat context to apply dmPolicy).
+bot.on('inline_query', async ctx => {
+  try {
+    if (!loadAccess().allowFrom.includes(String(ctx.inlineQuery.from.id))) {
+      await ctx.answerInlineQuery([], { cache_time: 300, is_personal: true })
+      return
+    }
+    const q = ctx.inlineQuery.query.trim()
+    const hits = searchTranscripts(q, allProjectsDirs(), 8, 60)   // empty q matches everything → newest sessions
+    const results: InlineQueryResultArticle[] = hits.map((h, i) => {
+      const folder = h.cwd.split('/').filter(Boolean).pop() || h.cwd || '—'
+      const ago = fmtAgo(h.mtime)
+      return {
+        type: 'article',
+        id: `${i}${h.sessionId.slice(0, 12)}`,
+        title: `${folder} · ${ago}`,
+        description: h.snippet,
+        input_message_content: {
+          message_text: `<b>${escapeHtml(folder)}</b> · ${escapeHtml(ago)}\n<i>…${escapeHtml(h.snippet)}…</i>\n<code>${escapeHtml(h.sessionId)}</code>`,
+          parse_mode: 'HTML',
+        },
+      }
+    })
+    await ctx.answerInlineQuery(results, { cache_time: 5, is_personal: true })
+  } catch (e) {
+    process.stderr.write(`daemon: inline_query handler failed: ${e}\n`)
+    await ctx.answerInlineQuery([], { cache_time: 5, is_personal: true }).catch(() => {})
+  }
+})
+
 bot.on('edited_message', async ctx => {
   const em = ctx.editedMessage
   const text = em?.text ?? em?.caption
@@ -9267,6 +9428,10 @@ void (async () => {
   for (;;) {
     try {
       await bot.start({
+        // grammY's default omits message_reaction, so set allowed_updates explicitly (default set +
+        // message_reaction for the inbound-reaction control signals). inline_query is already in the
+        // default set (Feature B relies on it).
+        allowed_updates: [...API_CONSTANTS.DEFAULT_UPDATE_TYPES, 'message_reaction'],
         onStart: info => {
           networkErrors = 0
           botUsername = info.username

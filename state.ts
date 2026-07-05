@@ -53,6 +53,19 @@ export const chatPrompts = new Map<string, ChatPrompt>()
 // vs ink navigate-down). Pruned when the pane recovers or the screen changes.
 export const stuckCards = new Map<string, { paneId: string; token: string; optionKind: 'numbered' | 'ink' | null; optionCount: number }>()
 
+// ---- Prompt cards (inbound-reaction control) ----
+// One entry per relayed permission/select card, keyed `${chat}:${message_id}` (the stuckCards pattern).
+// A 👍/👎 reaction added on a card resolves its origin pane + kind so the reaction handler can answer or
+// dismiss it. Nothing else here prunes by age, and a reaction never arrives for a card older than a
+// couple hours, so bound this map on insert: drop stale entries and cap the size (oldest-first, the map
+// is insertion-ordered).
+export const promptCards = new Map<string, { paneId?: string; kind: 'perm' | 'select'; token?: string; at: number }>()
+export function prunePromptCards(): void {
+  const cutoff = Date.now() - 2 * 60 * 60 * 1000
+  for (const [k, v] of promptCards) if (v.at < cutoff) promptCards.delete(k)
+  for (const k of promptCards.keys()) { if (promptCards.size <= 300) break; promptCards.delete(k) }
+}
+
 // ---- Force-reply targets ----
 // One registry for every "reply to this message" continuation, keyed `${chatId}:${messageId}`
 // of the prompt we sent. The kind discriminates what the user's reply means; the payload is

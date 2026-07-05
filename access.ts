@@ -34,7 +34,7 @@ const PREF_KEYS = [
   'mentionPatterns', 'ackReaction', 'replyToMode', 'textChunkLimit', 'chunkMode',
   'renderMarkdown', 'terminalMirror', 'terminalMirrorFooter', 'sessionPin', 'replyMode', 'shipButtons', 'budgetDaily',
   'topicOnEnd', 'scheduleTz', 'batchAllow', 'confirmReset', 'tts', 'updateChecks', 'claudingDraft',
-  'autoUpdate',
+  'autoUpdate', 'limitFailover',
 ] as const satisfies readonly (keyof Access)[]
 
 // Parse a JSON access/prefs file into a partial; {} on missing, moved-aside + {} on corrupt.

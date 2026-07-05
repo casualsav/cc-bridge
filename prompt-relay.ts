@@ -8,7 +8,7 @@ import { Bot, InlineKeyboard } from 'grammy'
 import { escapeHtml } from './markdown.ts'
 import { sleep } from './proc.ts'
 import { capturePane, paneCwd, paneAlive, type PaneWatcher } from './pane-io.ts'
-import { focus, pendingMultiSelect, freeTextPrompts, chatPrompts, stuckCards, replyTargets } from './state.ts'
+import { focus, pendingMultiSelect, freeTextPrompts, chatPrompts, stuckCards, replyTargets, promptCards, prunePromptCards } from './state.ts'
 import { loadAccess } from './access.ts'
 import { finalRepliesAfter } from './transcript.ts'
 import { detectPermissionPrompt, onNormalPrompt, permPromptToken, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen } from './prompt.ts'
@@ -131,6 +131,9 @@ export async function relayPromptToTelegram(prompt: PromptInfo, paneId: string |
           parse_mode: 'HTML', ...extra,
           reply_markup: singleAnswerKeyboard(prompt, prompt.tabbed ? 'mq' : 'prompt'),
         })
+        // Track single-select cards (incl. plan approvals) so a 👍 reaction can approve option 1.
+        promptCards.set(`${chat}:${sent.message_id}`, { paneId, kind: 'select', at: Date.now() })
+        prunePromptCards()
       }
       // Remember the prompt so a ✏️ tap knows how to reach its free-text field: the
       // option sits `options.length` Down presses past the first one. "Chat about
@@ -264,7 +267,10 @@ export async function relayPermissionToTelegram(perm: PermissionPrompt, paneId: 
   process.stderr.write(`daemon: relaying permission prompt (${perm.options.length} opts) “${perm.question}” to ${targets.map(t => t.chat + (t.thread ? `#${t.thread}` : '')).join(',')}\n`)
   for (const { chat, thread } of targets) {
     try {
-      await deps.bot.api.sendMessage(chat, body, { parse_mode: 'HTML', reply_markup: kb, ...(thread ? { message_thread_id: thread } : {}) })
+      const sent = await deps.bot.api.sendMessage(chat, body, { parse_mode: 'HTML', reply_markup: kb, ...(thread ? { message_thread_id: thread } : {}) })
+      // Track the card so a 👍 reaction can approve option 1 (with the same token stale-guard the tap uses).
+      promptCards.set(`${chat}:${sent.message_id}`, { paneId, kind: 'perm', token: tok, at: Date.now() })
+      prunePromptCards()
       // From the storm's 2nd distinct prompt, also offer the turn-wide allow (once per turn).
       if (batchAllowEnabled() && storm.count >= 2 && !storm.armed && !storm.offered) {
         storm.offered = true

@@ -173,6 +173,20 @@ export function accountLoggedIn(a: Account): boolean {
   return existsSync(join(a.configDir, '.credentials.json'))
 }
 
+// Choose an account to fail a usage-limited session over to: the first account (main-first, stable
+// order) that isn't `exclude`, has completed /login, and whose usage isn't itself exhausted. The
+// daemon owns the usage snapshots, so it injects `snapshotOk(a)` — false only when `a`'s own limit is
+// known to be maxed (a null/stale snapshot reads as available). Returns null when nothing qualifies.
+export function pickFailoverAccount(exclude: Account, snapshotOk: (a: Account) => boolean): Account | null {
+  for (const a of listAccounts()) {
+    if (a.name === exclude.name) continue
+    if (!accountLoggedIn(a)) continue
+    if (!snapshotOk(a)) continue
+    return a
+  }
+  return null
+}
+
 // Claude Code's native permissions.defaultMode in an account's settings.json — the permission mode a
 // new or relaunched session starts in. This is what makes a mode preference survive EVERY relaunch
 // path (a `claude update`, a plain `claude`, a bridge respawn): CC reads it at startup, unlike a
