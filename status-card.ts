@@ -308,7 +308,8 @@ export async function statusCardText(paneId: string | null): Promise<string> {
   // ellipsized the collapsed pin preview, but one glyph fits (it also stays in the body).
   // Single-space packing throughout — double spacing pushed the context % off the preview.
   // Think + effort: "✻ ⚡high" — a space between the glyph and the bolt keeps them readable.
-  const effortBadge = status?.effort ? ` ⚡${escapeHtml(status.effort)}` : ''
+  // "medium" → "med": the pin preview is horizontal-space-starved.
+  const effortBadge = status?.effort ? ` ⚡${escapeHtml(status.effort === 'medium' ? 'med' : status.effort)}` : ''
   const modeBadgeStr = mode === '—' ? '' : ` ${escapeHtml(mode)}`
   const thinkBadge = status?.think ? ' ✻' : ''
   const stats = [
