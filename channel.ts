@@ -30,6 +30,9 @@ export type SendOpts = {
   forceReply?: { placeholder?: string }   // no-op where !caps.forceReply
   silent?: boolean
   raw?: boolean                            // skip markdown rendering (preformatted)
+  replyTo?: string                         // message id this send/edit replies to
+  linkPreview?: boolean                    // undefined = platform default; false = suppress; true = force-show
+  plain?: boolean                          // send as plain text — no markup rendering / parse_mode (unescaped content)
 }
 
 export interface ChannelAdapter {
@@ -51,7 +54,7 @@ export interface ChannelAdapter {
   unpin(ref: MsgRef): Promise<void>
   answerTap(tapId: string, text?: string): Promise<void>  // ack a button tap
   setCommands(cmds: { cmd: string; desc: string }[], scope: 'dm' | 'group'): Promise<void>
-  downloadAttachment(fileId: string, destDir: string): Promise<string>
+  downloadAttachment(fileId: string, destDir: string, destName?: string): Promise<string>
 
   // present iff caps.threads === 'forum' (TG) or 'thread' (Slack/Discord)
   threads?: {

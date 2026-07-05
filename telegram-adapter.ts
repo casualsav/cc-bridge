@@ -42,14 +42,17 @@ function replyMarkup(opts?: SendOpts): InlineKeyboardMarkup | ForceReply | undef
   return undefined
 }
 
-// Build the grammy `extra` for a text send/edit from neutral opts. parse_mode:'HTML' is always set
-// (P1 passthrough semantics: the text is already-rendered HTML).
+// Build the grammy `extra` for a text send/edit from neutral opts. parse_mode:'HTML' is set unless
+// opts.plain (the text carries unescaped dynamic content and must go out verbatim). linkPreview
+// undefined omits link_preview_options (platform default); false suppresses, true force-shows.
 function textExtra(opts?: SendOpts): Record<string, unknown> {
   const rm = replyMarkup(opts)
   return {
-    parse_mode: 'HTML',
+    ...(opts?.plain ? {} : { parse_mode: 'HTML' }),
     ...(opts?.threadId ? { message_thread_id: Number(opts.threadId) } : {}),
     ...(opts?.silent ? { disable_notification: true } : {}),
+    ...(opts?.replyTo ? { reply_parameters: { message_id: Number(opts.replyTo), allow_sending_without_reply: true } } : {}),
+    ...(opts?.linkPreview !== undefined ? { link_preview_options: { is_disabled: opts.linkPreview === false } } : {}),
     ...(rm ? { reply_markup: rm } : {}),
   }
 }
@@ -97,7 +100,8 @@ export class TelegramAdapter implements ChannelAdapter {
     const extra: Record<string, unknown> = {
       ...(opts?.threadId ? { message_thread_id: Number(opts.threadId) } : {}),
       ...(opts?.silent ? { disable_notification: true } : {}),
-      ...(opts?.caption ? { caption: opts.caption, parse_mode: 'HTML' } : {}),
+      ...(opts?.replyTo ? { reply_parameters: { message_id: Number(opts.replyTo), allow_sending_without_reply: true } } : {}),
+      ...(opts?.caption ? { caption: opts.caption, ...(opts?.plain ? {} : { parse_mode: 'HTML' }) } : {}),
     }
     let kind = opts?.kind ?? 'auto'
     if (kind === 'auto') kind = PHOTO_EXTS.has(extname(filePath).toLowerCase()) ? 'photo' : 'document'
@@ -108,8 +112,11 @@ export class TelegramAdapter implements ChannelAdapter {
   }
 
   async editText(ref: MsgRef, text: string, opts?: SendOpts): Promise<void> {
-    await this.bot.api.editMessageText(ref.chatId, Number(ref.messageId), text,
-      { parse_mode: 'HTML', ...(opts?.buttons ? { reply_markup: buttonsToKb(opts.buttons) } : {}) })
+    await this.bot.api.editMessageText(ref.chatId, Number(ref.messageId), text, {
+      ...(opts?.plain ? {} : { parse_mode: 'HTML' }),
+      ...(opts?.linkPreview !== undefined ? { link_preview_options: { is_disabled: opts.linkPreview === false } } : {}),
+      ...(opts?.buttons ? { reply_markup: buttonsToKb(opts.buttons) } : {}),
+    })
   }
 
   async editButtons(ref: MsgRef, buttons: Button[][] | null): Promise<void> {
@@ -147,7 +154,7 @@ export class TelegramAdapter implements ChannelAdapter {
     await this.bot.api.setMyCommands(commands, { scope: { type: scope === 'dm' ? 'all_private_chats' : 'all_group_chats' } })
   }
 
-  async downloadAttachment(fileId: string, destDir: string): Promise<string> {
+  async downloadAttachment(fileId: string, destDir: string, destName?: string): Promise<string> {
     const file = await this.bot.api.getFile(fileId)
     if (!file.file_path) throw new Error('Telegram returned no file_path')
     const url = `https://api.telegram.org/file/bot${this.bot.token}/${file.file_path}`
@@ -157,7 +164,7 @@ export class TelegramAdapter implements ChannelAdapter {
     const rawExt = file.file_path.includes('.') ? file.file_path.split('.').pop()! : 'bin'
     const ext = rawExt.replace(/[^a-zA-Z0-9]/g, '') || 'bin'
     const uniqueId = (file.file_unique_id ?? '').replace(/[^a-zA-Z0-9_-]/g, '') || 'dl'
-    const path = join(destDir, `${Date.now()}-${uniqueId}.${ext}`)
+    const path = join(destDir, destName ?? `${Date.now()}-${uniqueId}.${ext}`)
     mkdirSync(destDir, { recursive: true })
     writeFileSync(path, buf)
     return path

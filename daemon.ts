@@ -8,7 +8,7 @@ import {
   accessSync, constants as fsConstants,
 } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, extname, basename, dirname, relative, sep } from 'node:path'
+import { join, basename, dirname, relative, sep } from 'node:path'
 import { execFileSync, spawn } from 'node:child_process'
 import net from 'node:net'
 import {
@@ -364,7 +364,7 @@ async function verifyPromptClosed(paneId: string | null = focus.activePaneId): P
     await waitForSettle(paneId, 200, 1500)
   })
   resetPromptDedup(paneId)
-  notifyChats('⚠️ That answer didn’t register cleanly in the session — I dismissed the prompt so the terminal wouldn’t hang. Please try again.')
+  notifyChats('⚠️ That answer didn’t register cleanly in the session — I dismissed the prompt so the terminal wouldn’t hang. Please try again.', { plain: true })
 }
 
 // ---- First-run onboarding driver ----
@@ -411,7 +411,7 @@ function relayLoginChoice(options: PromptOption[]): void {
   options.forEach((o, i) => { kb.text(loginButtonLabel(o.label), `login:${i + 1}`).row() })
   const body = ['🔐 <b>Claude needs to log in.</b> Pick how you sign in:', '',
     ...options.map((o, i) => `<b>${i + 1}.</b> ${escapeHtml(o.label)}`)].join('\n')
-  notifyChats(body, { reply_markup: kb, parse_mode: 'HTML' })
+  notifyChats(body, { buttons: kbToButtons(kb) })
 }
 
 async function driveOnboarding(paneId: string, stage: 'theme' | 'trust' | 'enter'): Promise<void> {
@@ -463,7 +463,7 @@ async function confirmPluginInstall(paneId: string): Promise<void> {
   pluginInstallConfirmedAt = Date.now()
   process.stderr.write('daemon: auto-confirming plugin install (user scope)\n')
   await withPaneInjection(paneId, async () => { await sendKeys(paneId, ['Enter']); await waitForSettle(paneId, 200, 3000) })
-  notifyChats('🧩 Installed the plugin for you (user scope).')
+  notifyChats('🧩 Installed the plugin for you (user scope).', { plain: true })
 }
 
 // Relay the post-update "Resume session" picker as buttons (summary / full / don't-ask) so the user
@@ -792,7 +792,7 @@ function endSession(sessionId: string): void {
 // The focused session just ended. DM mode drives a single session, so there's no switch menu —
 // if another bridge pane is alive, the discovery rescan auto-adopts it and announces.
 async function announceFocusedExit(endedLabel: string): Promise<void> {
-  notifyChats(`🔚 Session “${endedLabel}” ended.`)
+  notifyChats(`🔚 Session “${endedLabel}” ended.`, { plain: true })
 }
 
 // Route a permission decision back to the session that requested it.
@@ -810,10 +810,8 @@ function noticeChats(): string[] {
   return group ? [group] : loadAccess().allowFrom
 }
 
-function notifyChats(text: string, extra?: { reply_markup?: InlineKeyboard; parse_mode?: 'HTML' }): void {
-  // P2-migrate: callers send both plain (no parse_mode) and HTML here; channel.sendText forces
-  // parse_mode:'HTML', which can't preserve the plain path byte-identically. Needs the P2 raw flag.
-  for (const chat_id of noticeChats()) void bot.api.sendMessage(chat_id, text, extra).catch(() => {})
+function notifyChats(text: string, opts?: SendOpts): void {
+  for (const chat_id of noticeChats()) void channel.sendText(chat_id, text, opts).catch(() => {})
 }
 
 // Prompt-relay dedup is keyed PER PANE in auxPromptStates (see AuxPromptState) — for the focused
@@ -935,27 +933,18 @@ function isThreadGoneError(e: unknown): boolean {
   return e instanceof GrammyError && e.error_code === 400 && /message thread not found/i.test(e.description)
 }
 
-async function sendChunkRetrying(chat_id: string, text: string, extra: Record<string, unknown>): Promise<boolean> {
-  for (let attempt = 0; attempt < 5; attempt++) {
-    try {
-      // P2-migrate: this relay path carries reply_parameters and an optional (chunkMode) plain send,
-      // neither of which the P1 SendOpts can round-trip — so it keeps its own send + 429 loop for now.
-      await bot.api.sendMessage(chat_id, text, extra)
-      return true
-    } catch (e) {
-      if (e instanceof GrammyError && e.error_code === 429) {
-        const wait = ((e.parameters?.retry_after ?? 2) + 1) * 1000   // +1s buffer past the window
-        process.stderr.write(`daemon: relay send 429, waiting ${wait}ms (attempt ${attempt + 1})\n`)
-        await sleep(wait)
-        continue
-      }
-      if (isThreadGoneError(e)) throw new TopicThreadGoneError()   // let the relay recreate the topic
-      process.stderr.write(`daemon: transcript relay send failed: ${e}\n`)
-      return false
-    }
+// Thin wrapper over channel.sendText: the 429 retry/backoff now lives in the adapter (which throws
+// after exhausting retries → caught here as a failure). A dead-thread error propagates as
+// TopicThreadGoneError so the relay recreates the topic; any other send failure is logged and swallowed.
+async function sendChunkRetrying(chat_id: string, text: string, opts: SendOpts): Promise<boolean> {
+  try {
+    await channel.sendText(chat_id, text, opts)
+    return true
+  } catch (e) {
+    if (isThreadGoneError(e)) throw new TopicThreadGoneError()   // let the relay recreate the topic
+    process.stderr.write(`daemon: transcript relay send failed: ${e}\n`)
+    return false
   }
-  process.stderr.write(`daemon: transcript relay send gave up after 429 retries (chat ${chat_id})\n`)
-  return false
 }
 
 // Send agent markdown to chats using the same render/chunk path as the reply tool. In forum-topics
@@ -968,12 +957,14 @@ async function sendAgentText(chats: string[], text: string, threadId?: number, r
     const render = access.renderMarkdown !== false
     const limit = Math.max(1, Math.min(access.textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT))
     const chunks = render ? chunkHtml(mdToTelegramHtml(text), limit) : chunk(text, limit, access.chunkMode ?? 'length')
-    const base = render ? { parse_mode: 'HTML' as const } : {}
-    const extra = threadId ? { ...base, message_thread_id: threadId } : base
+    const base: SendOpts = {
+      ...(render ? {} : { plain: true }),
+      ...(threadId != null ? { threadId: String(threadId) } : {}),
+    }
     let first = true
     for (const c of chunks) {
-      const ex = first && reply != null ? { ...extra, reply_parameters: { message_id: reply, allow_sending_without_reply: true } } : extra
-      await sendChunkRetrying(chat_id, c, ex)
+      const opts = first && reply != null ? { ...base, replyTo: String(reply) } : base
+      await sendChunkRetrying(chat_id, c, opts)
       first = false
     }
   }
@@ -1663,9 +1654,9 @@ async function announceAdopted(paneId: string): Promise<void> {
   const cap = await capturePane(paneId).catch(() => '')
   if (cap && !onNormalPrompt(cap)) {
     notifyChats('🔗 Found a Claude session on first-run setup — I\'ll walk you through it here ' +
-      '(theme, folder trust, then login). Or finish it in the terminal if you prefer.')
+      '(theme, folder trust, then login). Or finish it in the terminal if you prefer.', { plain: true })
   } else {
-    notifyChats('🔗 Connected to the Claude session.')
+    notifyChats('🔗 Connected to the Claude session.', { plain: true })
   }
 }
 
@@ -1707,8 +1698,7 @@ async function noteDiscoveredPane(paneId: string): Promise<void> {
   const where = cwd ? ` (<code>${escapeHtml(cwd)}</code>)` : ''
   notifyChats(
     `🆕 Another Claude session appeared${where} — this DM drives a single session, so I'm staying on the current one.\n` +
-    `To drive several sessions, bind a forum group as the command center: create a group with Topics on, add me, send /bind there.`,
-    { parse_mode: 'HTML' })
+    `To drive several sessions, bind a forum group as the command center: create a group with Topics on, add me, send /bind there.`)
 }
 
 // Bind a daemon-spawned pane immediately rather than waiting for the next discovery tick — and do
@@ -2119,12 +2109,6 @@ async function commandTarget(ctx: Context): Promise<CommandTarget | null> {
     return null
   }
   return { paneId, watcher: isFocused ? focus.paneWatcher : null, isFocused }
-}
-
-// sendMessage extras that thread the reply into the command's topic (ctx.reply auto-threads, but the
-// direct bot.api.sendMessage paths — chunked readouts, etc. — must carry it explicitly).
-function threadExtra(t: CommandTarget | null, base: Record<string, unknown> = {}): Record<string, unknown> {
-  return t?.replyThread ? { ...base, message_thread_id: t.replyThread } : base
 }
 
 // Paste arbitrary text into the target pane: focused → injectPaste (pause the watcher); off-focus
@@ -2885,13 +2869,12 @@ async function relayAuthUrlToTelegram(url: string, paneId: string | null = focus
 
   for (const { chat, thread } of targets) {
     try {
-      const sent = await bot.api.sendMessage(chat, text, {   // P2-migrate: link_preview_options not in SendOpts
-        parse_mode: 'HTML',
-        link_preview_options: { is_disabled: true },
-        reply_markup: { force_reply: true, input_field_placeholder: 'Authentication code' },
-        ...(thread ? { message_thread_id: thread } : {}),
+      const sent = await channel.sendText(chat, text, {
+        linkPreview: false,
+        forceReply: { placeholder: 'Authentication code' },
+        ...(thread ? { threadId: String(thread) } : {}),
       })
-      replyTargets.set(`${chat}:${sent.message_id}`, { kind: 'authurl' })
+      replyTargets.set(refKey(sent), { kind: 'authurl' })
     } catch (e) {
       process.stderr.write(`daemon: auth-url relay to ${chat} failed: ${e}\n`)
     }
@@ -2916,10 +2899,9 @@ async function handleModelUnavailable(text: string, paneId: string | null = focu
     `💬 Reply <code>/model opus</code> (or another model) to recover.`
   for (const { chat, thread } of targets) {
     try {
-      await bot.api.sendMessage(chat, msg, {   // P2-migrate: link_preview_options not in SendOpts
-        parse_mode: 'HTML',
-        link_preview_options: { is_disabled: true },
-        ...(thread ? { message_thread_id: thread } : {}),
+      await channel.sendText(chat, msg, {
+        linkPreview: false,
+        ...(thread ? { threadId: String(thread) } : {}),
       })
     } catch (e) {
       process.stderr.write(`daemon: model-unavailable alert to ${chat} failed: ${e}\n`)
@@ -3196,26 +3178,31 @@ async function handleCall(
 
         if (!richSent) for (let i = 0; i < chunks.length; i++) {
           const shouldReplyTo = reply_to != null && replyMode !== 'off' && (replyMode === 'all' || i === 0)
-          const sent = await bot.api.sendMessage(chat_id, chunks[i], {   // P2-migrate: reply_parameters + optional parse_mode not in SendOpts
-            ...(shouldReplyTo ? { reply_parameters: { message_id: reply_to } } : {}),
-            ...(parseMode ? { parse_mode: parseMode } : {}),
-            ...threadOpt,
-          })
-          sentIds.push(sent.message_id)
-        }
-
-        const PHOTO_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp'])
-        for (const f of files) {
-          const ext = extname(f).toLowerCase()
-          const input = new InputFile(f)
-          const opts = { ...(reply_to != null && replyMode !== 'off' ? { reply_parameters: { message_id: reply_to } } : {}), ...threadOpt }   // P2-migrate: reply_parameters not in sendFile opts
-          if (PHOTO_EXTS.has(ext)) {
-            const sent = await bot.api.sendPhoto(chat_id, input, opts)
+          if (parseMode === 'MarkdownV2') {
+            // TG-only: MarkdownV2 (legacy raw-passthrough format) isn't expressible through the neutral
+            // SendOpts — `plain` omits parse_mode entirely, HTML is the default. Keep the direct send.
+            const sent = await bot.api.sendMessage(chat_id, chunks[i], {
+              ...(shouldReplyTo ? { reply_parameters: { message_id: reply_to } } : {}),
+              parse_mode: 'MarkdownV2',
+              ...threadOpt,
+            })
             sentIds.push(sent.message_id)
           } else {
-            const sent = await bot.api.sendDocument(chat_id, input, opts)
-            sentIds.push(sent.message_id)
+            const ref = await channel.sendText(chat_id, chunks[i], {
+              ...(shouldReplyTo ? { replyTo: String(reply_to) } : {}),
+              ...(thread ? { threadId: String(thread) } : {}),
+              ...(parseMode ? {} : { plain: true }),
+            })
+            sentIds.push(Number(ref.messageId))
           }
+        }
+
+        for (const f of files) {
+          const ref = await channel.sendFile(chat_id, f, {
+            ...(reply_to != null && replyMode !== 'off' ? { replyTo: String(reply_to) } : {}),
+            ...(thread ? { threadId: String(thread) } : {}),
+          })
+          sentIds.push(Number(ref.messageId))
         }
         text = sentIds.length === 1 ? `sent (id: ${sentIds[0]})` : `sent ${sentIds.length} parts (ids: ${sentIds.join(', ')})`
         break
@@ -3283,7 +3270,7 @@ async function handleCall(
             })
             if (edited && typeof edited === 'object' && edited.message_id != null) msgId = edited.message_id
           } else {
-            const edited = await bot.api.editMessageText(   // P2-migrate: parse_mode may be MarkdownV2/none, not just HTML
+            const edited = await bot.api.editMessageText(   // TG-only: parse_mode may be MarkdownV2 (legacy raw format), which the neutral editText can't express
               editChat,
               editMid,
               editText,
@@ -4017,12 +4004,12 @@ async function runReadout(t: CommandTarget, chatId: string, kind: 'cost' | 'cont
   }
   const raw = t.isFocused && t.watcher ? await t.watcher.withInjection(drive) : await drive()
   const out = kind === 'cost' ? extractCostReadout(raw) : kind === 'usage' ? extractUsageReadout(raw) : extractContextReadout(raw)
-  const extra = threadExtra(t, { parse_mode: 'HTML' })
-  if (!out) { await sendChunkRetrying(chatId, `Could not read /${kind} output.`, threadExtra(t)); return }
+  const threadOpt: SendOpts = t?.replyThread ? { threadId: String(t.replyThread) } : {}
+  if (!out) { await sendChunkRetrying(chatId, `Could not read /${kind} output.`, { ...threadOpt, plain: true }); return }
   const title = kind === 'cost' ? '📊 <b>Cost</b>' : kind === 'usage' ? '📈 <b>Usage</b>' : '📐 <b>Context</b>'
   const limit = Math.max(1, Math.min(loadAccess().textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT))
   for (const c of chunkHtml(`${title}\n<pre><code class="language-javascript">${escapeHtml(out)}</code></pre>`, limit)) {
-    await sendChunkRetrying(chatId, c, extra)
+    await sendChunkRetrying(chatId, c, threadOpt)
   }
 }
 
@@ -4172,7 +4159,7 @@ bot.command('status', async ctx => {
           await channel.deleteMessage({ chatId: String(chat), messageId: String(old) }).catch(() => {})
           sessionPins.delete(key); pinTextCache.delete(key); persistSessionPins()
         }
-        await bot.api.unpinAllGeneralForumTopicMessages(chat).catch(() => {})   // P2-migrate: thread op, moves with topic-runtime. single-pin guarantee for General
+        await bot.api.unpinAllGeneralForumTopicMessages(chat).catch(() => {})   // TG-only: no neutral equivalent — General-topic single-pin guarantee
         const text = await statusCardText(anchorPane)
         const m = await channel.sendText(String(chat), text, { buttons: kbToButtons(statusKeyboard()), silent: true }).catch(() => null)
         if (m) {
@@ -4776,7 +4763,7 @@ async function claimGeneralFor(sid: string): Promise<string> {
   if (t && !t.closed) {
     await channel.sendText(String(group), '📌 This session moved to <b>General</b> — replies land there from now on.',
       { threadId: String(t.threadId) }).catch(() => {})
-    await bot.api.closeForumTopic(group, t.threadId).catch(() => {})   // P2-migrate: thread op, moves with topic-runtime
+    await channel.threads.close(String(group), String(t.threadId)).catch(() => {})
     updateTopic(sid, { closed: true })
   }
   setGeneralSession(sid)
@@ -5228,8 +5215,8 @@ async function fireResetNotification(account: string, chats: string[], attempt =
     const msg = attempt === 0
       ? `🕛 Usage limit reset${who} — ▶️ auto-continuing…`
       : `🔁 Still limited${who} — retrying continue (attempt ${attempt + 1}/${CONTINUE_MAX_ATTEMPTS})…`
-    // P2-migrate: plain send with an unescaped account name in `who` — HTML mode could mis-render it.
-    for (const chat_id of chats) void bot.api.sendMessage(chat_id, msg).catch(() => {})
+    // Plain send with an unescaped account name in `who` — HTML mode could mis-render it.
+    for (const chat_id of chats) void channel.sendText(chat_id, msg, { plain: true }).catch(() => {})
     void (async () => {
       const pane = focus.activePaneId!   // capture at inject time — focus may switch before verify fires
       const ok = await injectText(pane, focus.paneWatcher!, 'continue')
@@ -5240,7 +5227,7 @@ async function fireResetNotification(account: string, chats: string[], attempt =
   clearScheduledReset(account)
   const keyboard = new InlineKeyboard().text('▶️ Continue', 'usage:continue')
   for (const chat_id of chats) {
-    void bot.api.sendMessage(chat_id, `🕛 Usage limit reset${who} — continue?`, { reply_markup: keyboard }).catch(() => {})   // P2-migrate: plain send with unescaped account name in `who`
+    void channel.sendText(chat_id, `🕛 Usage limit reset${who} — continue?`, { plain: true, buttons: kbToButtons(keyboard) }).catch(() => {})   // plain send with unescaped account name in `who`
   }
 }
 
@@ -5696,15 +5683,15 @@ function setVoiceMode(on: boolean, chatId: string, thread?: number): void {
   a.tts = { ...a.tts, mode: on ? 'all' : 'off', engine: a.tts?.engine ?? 'piper' }
   saveAccess(a)
   if (!on) return
-  const extra = thread ? { message_thread_id: thread } : {}   // P2-migrate: plain sends (no parse_mode); one interpolates a raw error string
+  const opts: SendOpts = { plain: true, ...(thread ? { threadId: String(thread) } : {}) }   // plain sends; one interpolates a raw error string
   if (a.tts.engine === 'piper' && !piperReady(a.tts.voice)) {
-    void bot.api.sendMessage(chatId, '⏳ Installing the Piper voice engine (~80MB)…', extra).catch(() => {})
+    void channel.sendText(chatId, '⏳ Installing the Piper voice engine (~80MB)…', opts).catch(() => {})
     void provisionPiper(a.tts.voice).then(
-      () => bot.api.sendMessage(chatId, '✅ Piper ready — replies will speak.', extra).catch(() => {}),
-      e => bot.api.sendMessage(chatId, `⚠️ Piper install failed: ${String(e).slice(0, 150)}`, extra).catch(() => {}),
+      () => channel.sendText(chatId, '✅ Piper ready — replies will speak.', opts).catch(() => {}),
+      e => channel.sendText(chatId, `⚠️ Piper install failed: ${String(e).slice(0, 150)}`, opts).catch(() => {}),
     )
   } else if (!engineStatus(a.tts.engine).ready) {
-    void bot.api.sendMessage(chatId, `🔑 The ${a.tts.engine} engine needs its API key — add it in /settings → 🔊 Voice replies.`, extra).catch(() => {})
+    void channel.sendText(chatId, `🔑 The ${a.tts.engine} engine needs its API key — add it in /settings → 🔊 Voice replies.`, opts).catch(() => {})
   }
 }
 
@@ -6349,7 +6336,7 @@ bot.command('files', async ctx => {
   // back to this cwd. Requires the Main Mini App configured in BotFather (URL = WEBAPP_PUBLIC_URL).
   if (!botUsername) { await channel.sendText(String(ctx.chat!.id), '📂 Starting up — try /files again in a moment.', { ...(t.replyThread ? { threadId: String(t.replyThread) } : {}) }).catch(() => {}); return }
   const link = `https://t.me/${botUsername}?startapp=${mintStartToken(cwd)}`
-  await bot.api.sendMessage(String(ctx.chat!.id), `📂 <b>Files</b> — <code>${escapeHtml(cwd)}</code>`,   // P2-migrate: /files Mini App launch button
+  await bot.api.sendMessage(String(ctx.chat!.id), `📂 <b>Files</b> — <code>${escapeHtml(cwd)}</code>`,   // TG-only: Mini App (webApp) launch — Telegram-only surface
     { parse_mode: 'HTML', reply_markup: new InlineKeyboard().url('📂 Open Files', link),
       ...(t.replyThread ? { message_thread_id: t.replyThread } : {}) }).catch(e => wlog(`/files send failed: ${e}`))
 })
@@ -6829,8 +6816,7 @@ bot.on('callback_query:data', async ctx => {
       const status = await channel.sendText(chat, '⏳ Requesting a GitHub sign-in code…',
         { ...(thread ? { threadId: String(thread) } : {}) }).catch(() => null)
       const edit = (txt: string) => status
-        ? bot.api.editMessageText(chat, Number(status.messageId), txt,   // P2-migrate: link_preview_options not in SendOpts
-            { parse_mode: 'HTML', link_preview_options: { is_disabled: true } }).catch(() => {})
+        ? channel.editText(status, txt, { linkPreview: false }).catch(() => {})
         : Promise.resolve()
       // The flow runs minutes (until the user authorizes on github.com) — don't block the callback.
       void (async () => {
@@ -6879,13 +6865,12 @@ bot.on('callback_query:data', async ctx => {
     saveAccess(a)
     const chat = String(ctx.chat!.id)
     const thread = ctx.callbackQuery.message?.message_thread_id
-    const threadExtra2 = thread ? { message_thread_id: thread } : {}
     if (tts.mode !== 'off' && tts.engine === 'piper' && !piperReady(tts.voice)) {
       const ttsOpts: SendOpts = thread ? { threadId: String(thread) } : {}
       void channel.sendText(chat, `⏳ Installing Piper${ttsMatch[3] ? `'s ${PIPER_VOICES[Number(ttsMatch[3])].label} voice (~60MB)` : ' (~80MB)'}…`, ttsOpts).catch(() => {})
       void provisionPiper(tts.voice).then(
         () => channel.sendText(chat, '✅ Piper voice ready — replies will speak.', ttsOpts).catch(() => {}),
-        e => bot.api.sendMessage(chat, `⚠️ Piper install failed: ${escapeHtml(String(e).slice(0, 150))}`, threadExtra2).catch(() => {}),   // P2-migrate: pre-escaped text sent WITHOUT parse_mode
+        e => channel.sendText(chat, `⚠️ Piper install failed: ${escapeHtml(String(e).slice(0, 150))}`, { ...ttsOpts, plain: true }).catch(() => {}),   // pre-escaped text sent WITHOUT parse_mode
       )
     }
     if (tts.mode !== 'off' && (tts.engine === 'openai' || tts.engine === 'elevenlabs') && !engineStatus(tts.engine).ready) {
@@ -7569,7 +7554,7 @@ bot.on('callback_query:data', async ctx => {
     }
     const thread = Number(topicDel[2])
     try {
-      await bot.api.deleteForumTopic(group, thread)   // P2-migrate: thread op, moves with topic-runtime
+      await channel.threads.remove(String(group), String(thread))
       const sid = getSessionByThread(thread)
       if (sid) removeTopic(sid)
       await ctx.answerCallbackQuery({ text: topicDel[1] ? 'Deleted — auto-delete is on.' : 'Topic deleted.' }).catch(() => {})
@@ -8804,16 +8789,7 @@ bot.on('message:photo', async ctx => {
     const photos = ctx.message.photo
     const best = photos[photos.length - 1]
     try {
-      const file = await ctx.api.getFile(best.file_id)   // P2-migrate: bespoke filename scheme differs from downloadAttachment
-      if (!file.file_path) return undefined
-      const url = `https://api.telegram.org/file/bot${TOKEN}/${file.file_path}`
-      const res = await fetch(url)
-      const buf = Buffer.from(await res.arrayBuffer())
-      const ext = file.file_path.split('.').pop() ?? 'jpg'
-      const path = join(INBOX_DIR, `${Date.now()}-${best.file_unique_id}.${ext}`)
-      mkdirSync(INBOX_DIR, { recursive: true })
-      writeFileSync(path, buf)
-      return path
+      return await channel.downloadAttachment(best.file_id, INBOX_DIR)
     } catch (err) {
       process.stderr.write(`daemon: photo download failed: ${err}\n`)
       return undefined
@@ -8891,8 +8867,7 @@ function handleShimConnection(socket: net.Socket): void {
           }
           sessions.set(sessionId, { socket, write, paneId: msg.paneId, label, subscribedAt: Date.now() })
           const announce = () => notifyChats(
-            `🆕 Another Claude session connected${cwdPath ? ` (<code>${escapeHtml(cwdPath)}</code>)` : ''} — this DM drives a single session, so I'm staying on the current one.`,
-            { parse_mode: 'HTML' })
+            `🆕 Another Claude session connected${cwdPath ? ` (<code>${escapeHtml(cwdPath)}</code>)` : ''} — this DM drives a single session, so I'm staying on the current one.`)
 
           // Focus it only when nothing valid holds focus (the first/only session, or
           // a reconnect of the focused pane). Otherwise announce — never steal focus.
@@ -9482,9 +9457,9 @@ void (async () => {
           // bot showed no commands next to other bots (e.g. Mimo) in a shared group. Commands work per-topic
           // (targetPaneOf routes by thread). Send-only avatar/posting bots have no update handler, so they
           // intentionally advertise none.
-          // P2-migrate: command registration lives in the bot.start onStart loop, which moves into the adapter's start()
-          void bot.api.setMyCommands(bridgeCommands, { scope: { type: 'all_private_chats' } }).catch(() => {})
-          void bot.api.setMyCommands(bridgeCommands, { scope: { type: 'all_group_chats' } }).catch(() => {})
+          const menuCmds = bridgeCommands.map(c => ({ cmd: c.command, desc: c.description }))
+          void channel.setCommands(menuCmds, 'dm').catch(() => {})
+          void channel.setCommands(menuCmds, 'group').catch(() => {})
         },
       })
       return  // only reached on clean bot.stop()
