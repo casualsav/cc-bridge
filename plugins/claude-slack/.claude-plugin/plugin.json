@@ -1,0 +1,10 @@
+{
+  "name": "slack",
+  "description": "claude-slack — drive Claude Code from Slack. Socket Mode; inbound text/files to the session pane, replies + permission buttons back. Built-in allowlist access control.",
+  "version": "0.1.0",
+  "keywords": [
+    "slack",
+    "messaging",
+    "channel"
+  ]
+}

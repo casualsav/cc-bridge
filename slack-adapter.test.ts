@@ -1,4 +1,5 @@
 import { test, expect } from 'bun:test'
+import { SlackAdapter } from './slack-adapter.ts'
 import {
   SLACK_CAPS, reactionName, actionIdFor, buttonsToActionsBlock, stripLeadingMentions,
   normalizeMessage, normalizeAppMention, normalizeReaction,
@@ -95,4 +96,19 @@ test('reaction_removed → name in removed', () => {
 })
 test('non-message reaction item ignored', () => {
   expect(normalizeReaction({ user: 'U1', reaction: '+1', item: { type: 'file', file: 'F1' } }, false)).toBeNull()
+})
+
+// ---- openDm: user id → IM channel, cached ----
+test('openDm resolves U→D via conversations.open and caches the result', async () => {
+  let calls = 0
+  const a: any = new SlackAdapter('xapp', 'xoxb')
+  a.app = { client: { conversations: { open: async ({ users }: { users: string }) => { calls++; return { channel: { id: `D${users}` } } } } } }
+  expect(await a.openDm('U123')).toBe('DU123')
+  expect(await a.openDm('U123')).toBe('DU123')   // second call served from cache
+  expect(calls).toBe(1)
+})
+test('openDm throws when conversations.open returns no channel', async () => {
+  const a: any = new SlackAdapter('xapp', 'xoxb')
+  a.app = { client: { conversations: { open: async () => ({}) } } }
+  await expect(a.openDm('U9')).rejects.toThrow(/could not open DM/)
 })

@@ -1,4 +1,5 @@
 import { test, expect } from 'bun:test'
+import { DiscordAdapter } from './discord-adapter.ts'
 import {
   DISCORD_CAPS, customIdFor, resolveCustomId, buttonsToActionRows, attachmentKind,
   normalizeMessage, normalizeReaction, type RawMsg,
@@ -96,4 +97,14 @@ test('reaction add → glyph in added', () => {
 test('reaction remove → glyph in removed; thread carries threadId', () => {
   const r = normalizeReaction({ channelId: 'C1', messageId: '1', threadId: 'T9', userId: 'U1', emoji: '👎' }, true)
   expect(r).toMatchObject({ ref: { chatId: 'C1', messageId: '1', threadId: 'T9' }, added: [], removed: ['👎'] })
+})
+
+// ---- openDm: user snowflake → DM channel, cached ----
+test('openDm resolves a user snowflake to its DM channel and caches it', async () => {
+  let fetches = 0
+  const a: any = new DiscordAdapter('tok')
+  a.client = { users: { fetch: async (id: string) => { fetches++; return { createDM: async () => ({ id: `dm-${id}` }) } } } }
+  expect(await a.openDm('999')).toBe('dm-999')
+  expect(await a.openDm('999')).toBe('dm-999')   // second call served from cache
+  expect(fetches).toBe(1)
 })

@@ -1,0 +1,8 @@
+{
+  "name": "claude-channel-discord-daemon",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "discord.js": "14.26.4"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "name": "claude-channel-slack-daemon",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@slack/bolt": "4.7.3"
+  }
+}

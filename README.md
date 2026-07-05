@@ -61,6 +61,20 @@ These commands are added by the bridge. Everything else is Claude Code's own —
 **Everything else is Claude Code's own** — `/model`, `/effort`, `/compact`, `/context`, `/cost`, `/usage`, `/diff`, `/rewind`, and any others — relayed straight through to the session.
 
 
+## Also: Slack & Discord
+
+The same marketplace ships two sibling bridges — **[claude-slack](plugins/claude-slack/)** and
+**[claude-discord](plugins/claude-discord/)** — that drive a Claude Code session from those
+platforms with the same model: inbound text/files typed into the session's tmux pane, replies read
+from the transcript, permission prompts as tap-to-approve buttons. They're independently versioned
+plugins in the one `claude-tg` marketplace, each with its own state dir and daemon; the same
+`claude-tg` launcher (the `@tg_bridge` pane marker) drives every channel.
+
+MVP surface today: two-way chat, file send/receive, permission/reaction controls, allowlist access.
+Panels, schedulers, and voice remain Telegram-only. To set one up, point Claude at
+`plugins/claude-slack/INSTALL.md` or `plugins/claude-discord/INSTALL.md` (agent-executable, like the
+Telegram install).
+
 ## Upgrading
 
 Just run `/update tg` from inside the bot to update the bridge. Bonus: `/update claude` updates Claude itself, and bare `/update` opens a menu with a button for each.

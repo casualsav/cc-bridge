@@ -9,6 +9,18 @@
       "source": "./",
       "description": "claude-tg — drive Claude Code from Telegram. Built-in access control; manage pairing, allowlists, and policy via /telegram:access.",
       "version": "0.3.66"
+    },
+    {
+      "name": "slack",
+      "source": "./plugins/claude-slack",
+      "description": "claude-slack — drive Claude Code from Slack (Socket Mode). Inbound text/files to the session pane, replies + permission buttons back; allowlist access control.",
+      "version": "0.1.0"
+    },
+    {
+      "name": "discord",
+      "source": "./plugins/claude-discord",
+      "description": "claude-discord — drive Claude Code from Discord. Inbound text/files to the session pane, replies + permission buttons back; allowlist access control.",
+      "version": "0.1.0"
     }
   ]
 }

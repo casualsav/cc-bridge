@@ -1,0 +1,10 @@
+{
+  "name": "discord",
+  "description": "claude-discord — drive Claude Code from Discord. Gateway bot; inbound text/files to the session pane, replies + permission buttons back. Built-in allowlist access control.",
+  "version": "0.1.0",
+  "keywords": [
+    "discord",
+    "messaging",
+    "channel"
+  ]
+}
