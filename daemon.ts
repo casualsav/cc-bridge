@@ -6519,6 +6519,25 @@ bot.on('message:forum_topic_closed', async ctx => {
   process.stderr.write(`daemon: user closed topic ${thread} → exited session ${sid} (pane ${pane})\n`)
 })
 
+// User reopened a session's topic from the Telegram UI → clear the stored closed flag so pins and
+// routing resume (updateTopicPins skips closed topics, so a manually-reopened tab never got its
+// status card back — /pin refreshed every topic but that one). Mirrors the close handler above;
+// the from-bot guard keeps our own revive-path reopens (same service message) from looping back.
+// Only a topic whose session still runs a live claude flips — reopening a dead session's history
+// tab shouldn't resurrect routing to nowhere (the revive buttons own that path).
+bot.on('message:forum_topic_reopened', async ctx => {
+  if (!isTopicMode() || String(ctx.chat.id) !== getGroupChatId()) return
+  if (ctx.from?.id === ctx.me.id) return
+  if (!loadAccess().allowFrom.includes(String(ctx.from?.id))) return
+  const thread = ctx.message.message_thread_id
+  const sid = thread ? getSessionByThread(thread) : undefined
+  if (!sid) return
+  const pane = await paneForSession(sid)
+  if (!pane || !(await paneClaudeLive(pane))) return
+  await reopenSessionTopic(sid)
+  process.stderr.write(`daemon: user reopened topic ${thread} → cleared closed flag for session ${sid}\n`)
+})
+
 // ---- Deleted-topic detection ----
 // Telegram sends bots NO event when a forum topic is deleted, so an idle session whose topic the
 // user deleted would linger forever. Detect it with an INVISIBLE probe: editMessageReplyMarkup on
