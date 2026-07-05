@@ -79,6 +79,8 @@ import {
   assertSendable, chunk, coerceReaction,
 } from './calls.ts'
 import { installSendGovernor, asLowPriority } from './throttle.ts'
+import { TelegramAdapter } from './telegram-adapter.ts'
+import { refKey, type MsgRef, type Button, type SendOpts } from './channel.ts'
 import { planAuxRelayWork } from './relay-plan.ts'
 import { createMsgTracker } from './msg-tracker.ts'
 import { startEditScheduler, scheduleEdit, scheduleDelete, cancelEdit, touchActiveView } from './edit-scheduler.ts'
@@ -217,7 +219,7 @@ function checkApprovals(): void {
   if (files.length === 0) return
   for (const senderId of files) {
     const file = join(APPROVED_DIR, senderId)
-    void bot.api.sendMessage(senderId, 'Paired! Say hi to Claude.').then(
+    void channel.sendText(senderId, 'Paired! Say hi to Claude.').then(
       () => rmSync(file, { force: true }),
       err => { process.stderr.write(`daemon: failed to send approval confirm: ${err}\n`); rmSync(file, { force: true }) },
     )
@@ -232,6 +234,19 @@ const bot = new Bot(TOKEN)
 // Front every outbound send/edit with the per-chat flood governor so the live cards, replies, and
 // pins can't collectively exceed Telegram's ~20-events/min group limit (the 429-storm slowdown).
 installSendGovernor(bot)
+// The platform-neutral outbound surface (P1: a thin passthrough over the SAME governed `bot`, so the
+// flood governor + message-id transformer keep applying). daemon.ts migrates its bot.api.* sends onto
+// this; the bot.start / dispatcher loops stay on `bot` until P1's later sub-batches. See channel.ts.
+const channel = new TelegramAdapter(bot)
+// Convert an existing grammy InlineKeyboard into the neutral Button[][] the adapter takes. Only
+// text/url/callback_data buttons round-trip; web_app/login/pay buttons don't (those sites stay on
+// bot.api.* until P2). grammy imports still live in daemon.ts in P1, so building keyboards here is fine.
+function kbToButtons(kb: InlineKeyboard): Button[][] {
+  return kb.inline_keyboard.map(row => row.map(b => {
+    const btn = b as { text: string; url?: string; callback_data?: string }
+    return { text: btn.text, ...(btn.url ? { url: btn.url } : {}), ...(btn.callback_data != null ? { data: btn.callback_data } : {}) }
+  }))
+}
 
 // ---- "Latest message" tracker → the live mirror's re-anchor (bring a buried card back to the bottom).
 // Records the newest message id seen in each chat/thread (every outbound send result + every inbound
@@ -472,8 +487,8 @@ async function relayResumeChoice(paneId: string, options: PromptOption[]): Promi
   const body = ['🔄 <b>This session is resuming after a Claude update.</b> Pick how to bring it back:', '',
     ...options.map((o, i) => `<b>${i + 1}.</b> ${escapeHtml(o.label)}`)].join('\n')
   for (const t of await outboundTargetsFor(paneId)) {
-    await bot.api.sendMessage(t.chat, body,
-      { parse_mode: 'HTML', reply_markup: kb, ...(t.thread ? { message_thread_id: t.thread } : {}) }).catch(() => {})
+    await channel.sendText(String(t.chat), body,
+      { buttons: kbToButtons(kb), ...(t.thread ? { threadId: String(t.thread) } : {}) }).catch(() => {})
   }
 }
 
@@ -796,6 +811,8 @@ function noticeChats(): string[] {
 }
 
 function notifyChats(text: string, extra?: { reply_markup?: InlineKeyboard; parse_mode?: 'HTML' }): void {
+  // P2-migrate: callers send both plain (no parse_mode) and HTML here; channel.sendText forces
+  // parse_mode:'HTML', which can't preserve the plain path byte-identically. Needs the P2 raw flag.
   for (const chat_id of noticeChats()) void bot.api.sendMessage(chat_id, text, extra).catch(() => {})
 }
 
@@ -921,6 +938,8 @@ function isThreadGoneError(e: unknown): boolean {
 async function sendChunkRetrying(chat_id: string, text: string, extra: Record<string, unknown>): Promise<boolean> {
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
+      // P2-migrate: this relay path carries reply_parameters and an optional (chunkMode) plain send,
+      // neither of which the P1 SendOpts can round-trip — so it keeps its own send + 429 loop for now.
       await bot.api.sendMessage(chat_id, text, extra)
       return true
     } catch (e) {
@@ -1004,7 +1023,7 @@ async function sendTtsVoice(text: string, targets: Array<{ chat: string; thread?
   try {
     const file = await synthesize(text, engine, tts?.voice)
     for (const { chat, thread } of targets) {
-      await bot.api.sendVoice(chat, new InputFile(file), { disable_notification: true, ...(thread ? { message_thread_id: thread } : {}) })
+      await channel.sendFile(String(chat), file, { kind: 'voice', silent: true, ...(thread ? { threadId: String(thread) } : {}) })
         .catch(e => process.stderr.write(`daemon: tts send failed: ${e}\n`))
     }
     try { unlinkSync(file) } catch {}
@@ -1825,11 +1844,11 @@ async function dumpStuckPane(paneId: string): Promise<void> {
   const tail = cleanPaneTail(cap, 25)
   if (!tail) return
   for (const t of await outboundTargetsFor(paneId)) {
-    const sent = await bot.api.sendMessage(t.chat,
+    const sent = await channel.sendText(String(t.chat),
       `⚠️ Couldn't deliver to this session — here's its screen:\n<pre>${escapeHtml(tail)}</pre>\n💬 Reply to this message to type into it, or /stop to interrupt.`,
-      { parse_mode: 'HTML', reply_markup: { force_reply: true, input_field_placeholder: 'Typed into the terminal' },
-        ...(t.thread ? { message_thread_id: t.thread } : {}) }).catch(() => null)
-    if (sent) replyTargets.set(`${t.chat}:${sent.message_id}`, { kind: 'stucktext', paneId })
+      { forceReply: { placeholder: 'Typed into the terminal' },
+        ...(t.thread ? { threadId: String(t.thread) } : {}) }).catch(() => null)
+    if (sent) replyTargets.set(refKey(sent), { kind: 'stucktext', paneId })
   }
 }
 
@@ -1962,9 +1981,9 @@ async function tryDeliverAsk(p: PartyPending): Promise<boolean> {
       markInjected(cur.id, now)
       if (room) {
         markSeen(cur.toSid, now)   // advance the watermark only on a LANDED delivery — a failed paste keeps the window open for the retry
-        void bot.api.sendMessage(room,
+        void channel.sendText(String(room),
           `▸ <b>${escapeHtml(cur.fromName)}</b> → <b>${escapeHtml(cur.toName)}</b>: ${escapeHtml(cur.text.slice(0, 120))}${cur.text.length > 120 ? '…' : ''}`,
-          { parse_mode: 'HTML', disable_notification: true }).catch(() => {})
+          { silent: true }).catch(() => {})
       }
     }
     return ok
@@ -1975,9 +1994,9 @@ async function tryDeliverAsk(p: PartyPending): Promise<boolean> {
 async function sweepParty(): Promise<void> {
   const room = partyRoom()
   for (const p of expirePending(Date.now())) {
-    if (room) void bot.api.sendMessage(room,
+    if (room) void channel.sendText(String(room),
       `⌛ No answer from <b>${escapeHtml(p.toName)}</b> to ask ${p.id} — timed out.`,
-      { parse_mode: 'HTML', disable_notification: true }).catch(() => {})
+      { silent: true }).catch(() => {})
     const askerPane = await paneForSession(p.fromSid).catch(() => null)
     if (askerPane) void partyDeliver(askerPane, formatAnswerBlock('system', p.id, `(no answer from @${p.toName} — timed out)`))
     if (room) appendLedger(room, { ts: Date.now(), kind: 'expire', from: p.toName, to: p.fromName, id: p.id, text: 'timed out' })
@@ -2005,7 +2024,7 @@ async function deliverAnswerToAsker(pending: PartyPending, answerer: string, bod
   if (!ok) { putPending(cur); return `!couldn't deliver to @${cur.fromName} (pane gone) — ask kept open` }
   const mismatch = answerer !== cur.toName ? ` [asked @${cur.toName}]` : ''
   if (room) appendLedger(room, { ts: Date.now(), kind: 'answer', from: answerer, to: cur.fromName, id: cur.id, text: body, refs })
-  if (room) void bot.api.sendMessage(room, `✓ <b>${escapeHtml(answerer)}</b> answered <b>${escapeHtml(cur.fromName)}</b> (ask ${cur.id})${escapeHtml(mismatch)}`, { parse_mode: 'HTML', disable_notification: true }).catch(() => {})
+  if (room) void channel.sendText(String(room), `✓ <b>${escapeHtml(answerer)}</b> answered <b>${escapeHtml(cur.fromName)}</b> (ask ${cur.id})${escapeHtml(mismatch)}`, { silent: true }).catch(() => {})
   return `answered @${cur.fromName} (ask ${cur.id})`
 }
 
@@ -2037,7 +2056,7 @@ function sweepOrphanedHermesAsks(): void {
     if (p.toKind !== 'hermes') continue
     removePending(p.id)
     process.stderr.write(`daemon: dropped orphaned hermes ask ${p.id} → @${p.toName} (daemon restarted mid-run)\n`)
-    if (room) void bot.api.sendMessage(room, `♻️ Ask ${p.id} to <b>${escapeHtml(p.toName)}</b> was dropped — the bridge restarted mid-run.`, { parse_mode: 'HTML', disable_notification: true }).catch(() => {})
+    if (room) void channel.sendText(String(room), `♻️ Ask ${p.id} to <b>${escapeHtml(p.toName)}</b> was dropped — the bridge restarted mid-run.`, { silent: true }).catch(() => {})
     void paneForSession(p.fromSid).then(pane => {
       if (pane) void partyDeliver(pane, formatAnswerBlock('system', p.id, `(ask ${p.id} to @${p.toName} dropped — the bridge restarted while it was working; re-ask if still needed)`))
     }).catch(() => {})
@@ -2082,7 +2101,7 @@ async function commandTarget(ctx: Context): Promise<CommandTarget | null> {
   if (typeof thread === 'number') {
     // Topic mode, command sent in a session's topic.
     if (!paneId) {
-      await bot.api.sendMessage(String(ctx.chat!.id), '⚠️ This topic’s session isn’t running.', { message_thread_id: thread }).catch(() => {})
+      await channel.sendText(String(ctx.chat!.id), '⚠️ This topic’s session isn’t running.', { threadId: String(thread) }).catch(() => {})
       return null
     }
     const isFocused = paneId === focus.activePaneId
@@ -2195,11 +2214,11 @@ async function hintNoSession(params: InboundParams): Promise<void> {
   if (!chat) return
   if (Date.now() - lastNoSessionHintTs < 60_000) return
   lastNoSessionHintTs = Date.now()
-  await bot.api.sendMessage(chat,
+  await channel.sendText(String(chat),
     '🕳️ <b>No active session</b> — your message is buffered. Start one in tmux to receive it:\n' +
     '<code>claude-tg</code>   — safe start, bypass on demand from /mode\n' +
     'The daemon auto-discovers the pane (the alias tags it with the <code>@tg_bridge</code> tmux option) and replays anything buffered.',
-    { parse_mode: 'HTML' }).catch(() => {})
+    ).catch(() => {})
 }
 
 // ---- Event buffering ----
@@ -2404,7 +2423,7 @@ function maybeWarn(type: string, pct: number, resetKey: string, account: Account
   // The snapshot tracks the focused session, so route the heads-up to its topic (forum mode); DM → allowlist.
   void (async () => {
     for (const { chat, thread } of await outboundTargetsFor(focus.activePaneId)) {
-      await bot.api.sendMessage(chat, `${emoji} You've used ${threshold}% of your ${escapeHtml(type)} limit${who}`, { parse_mode: 'HTML', disable_notification: threshold < 90, ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
+      await channel.sendText(String(chat), `${emoji} You've used ${threshold}% of your ${escapeHtml(type)} limit${who}`, { silent: threshold < 90, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
     }
   })()
 }
@@ -2423,7 +2442,7 @@ function maybeWarnContext(pct: number | null): void {
   // Context fill is the focused session's — route to its topic (forum mode); DM → allowlist.
   void (async () => {
     for (const { chat, thread } of await outboundTargetsFor(focus.activePaneId)) {
-      await bot.api.sendMessage(chat, `💾 Context is ${threshold}% full — consider <code>/compact</code> or wrapping up soon.`, { parse_mode: 'HTML', ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
+      await channel.sendText(String(chat), `💾 Context is ${threshold}% full — consider <code>/compact</code> or wrapping up soon.`, { ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
     }
   })()
 }
@@ -2492,7 +2511,7 @@ function actOnLimitHit(fireAt: number, type: string, banner?: string, origin: st
     // Route the immediate banner to the session that hit the limit (its topic in forum mode).
     void (async () => {
       for (const { chat, thread } of await outboundTargetsFor(origin)) {
-        await bot.api.sendMessage(chat, `⛔ <b>Claude hit the usage limit${who ? '</b>' + who + '<b>' : ''}.</b>\n${head}${note}`, { parse_mode: 'HTML', reply_markup: kb, ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
+        await channel.sendText(String(chat), `⛔ <b>Claude hit the usage limit${who ? '</b>' + who + '<b>' : ''}.</b>\n${head}${note}`, { buttons: kbToButtons(kb), ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
       }
     })()
     scheduleReset(account.name, fireAt + RESET_GRACE_MS, chats, 0, true)   // armed by default; the button disarms
@@ -2503,7 +2522,7 @@ function actOnLimitHit(fireAt: number, type: string, banner?: string, origin: st
     if (!failover) { fireArmed(); return }
     // Moved the session to a fresh account — notify only, no auto-continue (we never stopped).
     for (const { chat, thread } of await outboundTargetsFor(origin)) {
-      await bot.api.sendMessage(chat, `⛔ <b>${escapeHtml(account.name)}</b> hit the ${escapeHtml(type)} limit — 🔀 switched to <b>${escapeHtml(failover.to.name)}</b>, resuming.`, { parse_mode: 'HTML', ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
+      await channel.sendText(String(chat), `⛔ <b>${escapeHtml(account.name)}</b> hit the ${escapeHtml(type)} limit — 🔀 switched to <b>${escapeHtml(failover.to.name)}</b>, resuming.`, { ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
     }
     scheduleReset(account.name, fireAt + RESET_GRACE_MS, chats, 0, false)
   })()
@@ -2584,7 +2603,7 @@ async function handleUsageLimit(text: string, origin: string | null = focus.acti
     saveUsageNotifState()
     void (async () => {
       for (const { chat, thread } of await outboundTargetsFor(origin)) {
-        await bot.api.sendMessage(chat, `⛔ <b>Claude hit the usage limit.</b>\n${escapeHtml(limitLine)}`, { parse_mode: 'HTML', ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
+        await channel.sendText(String(chat), `⛔ <b>Claude hit the usage limit.</b>\n${escapeHtml(limitLine)}`, { ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
       }
     })()
     return
@@ -2809,7 +2828,7 @@ async function handleTabbedAdvance(chat_id: string, paneId: string | null = focu
       const summary = answers.length
         ? '\n\n' + answers.map(a => `• ${escapeHtml(a.question)} → <b>${escapeHtml(a.answer)}</b>`).join('\n')
         : ''
-      await bot.api.sendMessage(chat_id, `✅ <b>Answers submitted.</b>${summary}`, { parse_mode: 'HTML', ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
+      await channel.sendText(String(chat_id), `✅ <b>Answers submitted.</b>${summary}`, { ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
       return
     }
     const next = detectUserPrompt(text)
@@ -2829,7 +2848,7 @@ async function handleTabbedAdvance(chat_id: string, paneId: string | null = focu
   const dbgPrompt = detectUserPrompt(dbgText)
   process.stderr.write(`tabbed-advance timeout: ${dbgPrompt ? `prompt(tabbed=${dbgPrompt.tabbed}, hashMatchesPrev=${promptHash(dbgPrompt) === prevHash})` : 'no-prompt'} submitScreen=${isSubmitScreen(dbgText)}\n`)
   resetPromptDedup(paneId)
-  await bot.api.sendMessage(chat_id, '⚠️ Couldn’t read the next question automatically — open the session to continue it.', { ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
+  await channel.sendText(String(chat_id), '⚠️ Couldn’t read the next question automatically — open the session to continue it.', { ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
 }
 
 // Relay a sign-in link to allowed chats and remember the message ids, so a reply
@@ -2866,7 +2885,7 @@ async function relayAuthUrlToTelegram(url: string, paneId: string | null = focus
 
   for (const { chat, thread } of targets) {
     try {
-      const sent = await bot.api.sendMessage(chat, text, {
+      const sent = await bot.api.sendMessage(chat, text, {   // P2-migrate: link_preview_options not in SendOpts
         parse_mode: 'HTML',
         link_preview_options: { is_disabled: true },
         reply_markup: { force_reply: true, input_field_placeholder: 'Authentication code' },
@@ -2897,7 +2916,7 @@ async function handleModelUnavailable(text: string, paneId: string | null = focu
     `💬 Reply <code>/model opus</code> (or another model) to recover.`
   for (const { chat, thread } of targets) {
     try {
-      await bot.api.sendMessage(chat, msg, {
+      await bot.api.sendMessage(chat, msg, {   // P2-migrate: link_preview_options not in SendOpts
         parse_mode: 'HTML',
         link_preview_options: { is_disabled: true },
         ...(thread ? { message_thread_id: thread } : {}),
@@ -2964,12 +2983,11 @@ async function startCompactionWatch(pane: string, initialText = ''): Promise<voi
   slot.thread = target.thread
   const openPct = compactPercent(initialText)
   const opening = `🗜️ Compacting conversation…\n<code>${compactProgress(openPct)}</code>`
-  const msg = await bot.api.sendMessage(target.chat, opening, {
-    parse_mode: 'HTML',
-    ...(target.thread ? { message_thread_id: target.thread } : {}),
+  const msg = await channel.sendText(String(target.chat), opening, {
+    ...(target.thread ? { threadId: String(target.thread) } : {}),
   }).catch(() => null)
   if (!msg) { compactWatches.delete(pane); return }
-  slot.msgId = msg.message_id
+  slot.msgId = Number(msg.messageId)
   slot.lastFilled = openPct == null ? 0 : compactCells(openPct)
   const tick = async (): Promise<void> => {
     const w = compactWatches.get(pane)
@@ -3032,19 +3050,7 @@ function startPaneWatcher(paneId: string): void {
 
 // Download a Telegram file to the local inbox, returning its path.
 async function downloadTelegramFile(file_id: string): Promise<string> {
-  const file = await bot.api.getFile(file_id)
-  if (!file.file_path) throw new Error('Telegram returned no file_path')
-  const url = `https://api.telegram.org/file/bot${TOKEN}/${file.file_path}`
-  const res = await fetch(url)
-  if (!res.ok) throw new Error(`download failed: HTTP ${res.status}`)
-  const buf = Buffer.from(await res.arrayBuffer())
-  const rawExt = file.file_path.includes('.') ? file.file_path.split('.').pop()! : 'bin'
-  const ext = rawExt.replace(/[^a-zA-Z0-9]/g, '') || 'bin'
-  const uniqueId = (file.file_unique_id ?? '').replace(/[^a-zA-Z0-9_-]/g, '') || 'dl'
-  const path = join(INBOX_DIR, `${Date.now()}-${uniqueId}.${ext}`)
-  mkdirSync(INBOX_DIR, { recursive: true })
-  writeFileSync(path, buf)
-  return path
+  return channel.downloadAttachment(file_id, INBOX_DIR)
 }
 
 // Inbox retention. Attachments the user sends (photos, documents) are downloaded into INBOX_DIR so
@@ -3077,7 +3083,7 @@ function nudgeTranscribeOff(ctx: Context): void {
   const chat_id = String(ctx.chat!.id)
   if (voiceNudged.has(chat_id)) return
   voiceNudged.add(chat_id)
-  void bot.api.sendMessage(chat_id,
+  void channel.sendText(chat_id,
     '🎙️ Voice transcription is off. To talk to Claude by voice, enable it with ' +
     '/telegram:configure transcribe in your Claude Code session.',
   ).catch(() => {})
@@ -3094,7 +3100,7 @@ async function audioInboundText(
   // A failed transcription used to degrade to the bare placeholder with no explanation —
   // the sender just saw Claude react to "(voice message)". Tell them what happened instead.
   const warnFailed = (why: string): void => {
-    void bot.api.sendMessage(String(ctx.chat!.id),
+    void channel.sendText(String(ctx.chat!.id),
       `⚠️ Couldn't transcribe that voice note — ${why}. It went through as “${fallback}”.`,
     ).catch(() => {})
   }
@@ -3113,7 +3119,7 @@ async function audioInboundText(
     if (provider === 'local' && !whisperReady()) {
       const chat_id = String(ctx.chat!.id)
       if (!whisperInstalling) {
-        void bot.api.sendMessage(chat_id,
+        void channel.sendText(chat_id,
           '🎙️ First voice note — installing the local Whisper engine (one-time, ~1–3 min). ' +
           'This note will transcribe as soon as it’s ready.').catch(() => {})
       }
@@ -3190,7 +3196,7 @@ async function handleCall(
 
         if (!richSent) for (let i = 0; i < chunks.length; i++) {
           const shouldReplyTo = reply_to != null && replyMode !== 'off' && (replyMode === 'all' || i === 0)
-          const sent = await bot.api.sendMessage(chat_id, chunks[i], {
+          const sent = await bot.api.sendMessage(chat_id, chunks[i], {   // P2-migrate: reply_parameters + optional parse_mode not in SendOpts
             ...(shouldReplyTo ? { reply_parameters: { message_id: reply_to } } : {}),
             ...(parseMode ? { parse_mode: parseMode } : {}),
             ...threadOpt,
@@ -3202,7 +3208,7 @@ async function handleCall(
         for (const f of files) {
           const ext = extname(f).toLowerCase()
           const input = new InputFile(f)
-          const opts = { ...(reply_to != null && replyMode !== 'off' ? { reply_parameters: { message_id: reply_to } } : {}), ...threadOpt }
+          const opts = { ...(reply_to != null && replyMode !== 'off' ? { reply_parameters: { message_id: reply_to } } : {}), ...threadOpt }   // P2-migrate: reply_parameters not in sendFile opts
           if (PHOTO_EXTS.has(ext)) {
             const sent = await bot.api.sendPhoto(chat_id, input, opts)
             sentIds.push(sent.message_id)
@@ -3228,7 +3234,7 @@ async function handleCall(
         const msgId = Number(args.message_id)
         const wanted = coerceReaction(args.emoji as string)
         const react = (emoji: string) =>
-          bot.api.setMessageReaction(chat, msgId, [{ type: 'emoji', emoji: emoji as ReactionTypeEmoji['emoji'] }])
+          channel.react({ chatId: String(chat), messageId: String(msgId) }, emoji)
         try {
           await react(wanted)
           text = 'reacted'
@@ -3277,7 +3283,7 @@ async function handleCall(
             })
             if (edited && typeof edited === 'object' && edited.message_id != null) msgId = edited.message_id
           } else {
-            const edited = await bot.api.editMessageText(
+            const edited = await bot.api.editMessageText(   // P2-migrate: parse_mode may be MarkdownV2/none, not just HTML
               editChat,
               editMid,
               editText,
@@ -3323,7 +3329,7 @@ async function handleCall(
         if (res.kind === 'claude') {
           const hops = recordAgentAsk()
           if (hops > HOP_LIMIT) {
-            if (hops === HOP_LIMIT + 1) void bot.api.sendMessage(room, '⏸ Agents paused — several turns without you. Reply to continue.', { disable_notification: true }).catch(() => {})
+            if (hops === HOP_LIMIT + 1) void channel.sendText(String(room), '⏸ Agents paused — several turns without you. Reply to continue.', { silent: true }).catch(() => {})
             write({ t: 'result', id, ok: false, text: 'paused: hop limit reached — a human reply resumes the room' }); return
           }
         }
@@ -3331,7 +3337,7 @@ async function handleCall(
         appendLedger(room, { ts: Date.now(), kind: 'ask', from: fromName, to: toName, id: p.id, text: askText, refs })
         if (res.kind === 'hermes') {
           const cfg = hermesEndpoints.get(res.id)!   // resolved from the same map, so it's present
-          void bot.api.sendMessage(room, `▸ <b>${escapeHtml(fromName)}</b> → <b>${escapeHtml(toName)}</b>: ${escapeHtml(askText.slice(0, 120))}${askText.length > 120 ? '…' : ''}`, { parse_mode: 'HTML', disable_notification: true }).catch(() => {})
+          void channel.sendText(String(room), `▸ <b>${escapeHtml(fromName)}</b> → <b>${escapeHtml(toName)}</b>: ${escapeHtml(askText.slice(0, 120))}${askText.length > 120 ? '…' : ''}`, { silent: true }).catch(() => {})
           void runHermesAsk(p, cfg)
           text = `asked @${toName} (ask ${p.id}) — running; the answer arrives when it finishes`
         } else {
@@ -3404,7 +3410,7 @@ async function handleCall(
         // whole lookup is guarded so a corrupt/unreadable avatars.json just degrades to the shared bot.
         let avatar: Avatar | null = null
         try { avatar = resolveAvatar(fromName, parseAvatars(readJsonFile(AVATARS_FILE, null))) } catch {}
-        const bridgePost = () => bot.api.sendMessage(room, `📣 <b>${escapeHtml(fromName)}</b>: ${escapeHtml(body)}`, { parse_mode: 'HTML' })
+        const bridgePost = () => channel.sendText(String(room), `📣 <b>${escapeHtml(fromName)}</b>: ${escapeHtml(body)}`)
         if (avatar) {
           // Plain text (no parse_mode): with the prefix gone, HTML buys nothing and any body (with `<`/`&`)
           // stays byte-safe. On failure (bad token / bot not in the group) DON'T lose the broadcast — fall
@@ -3496,9 +3502,7 @@ async function relaySlashCommand(
   react = true,   // /compact opts out — its live status card is the acknowledgement
 ): Promise<void> {
   await injectSlash(paneId, watcher, command)
-  if (react) void bot.api.setMessageReaction(chat_id, message_id, [
-    { type: 'emoji', emoji: '👍' },
-  ]).catch(() => {})
+  if (react) void channel.react({ chatId: chat_id, messageId: String(message_id) }, '👍').catch(() => {})
 }
 
 // /model <name> gets a confirmation MESSAGE (not just the 👍 ack) naming the model the session
@@ -3518,9 +3522,7 @@ async function relayModelSet(ctx: Context, paneId: string, watcher: PaneWatcher 
   if (name) {
     await ctx.reply(`✅ Model set to <b>${escapeHtml(name)}</b>`, { parse_mode: 'HTML' }).catch(() => {})
   } else {
-    void bot.api.setMessageReaction(String(ctx.chat!.id), ctx.message!.message_id, [
-      { type: 'emoji', emoji: '👍' },
-    ]).catch(() => {})
+    void channel.react({ chatId: String(ctx.chat!.id), messageId: String(ctx.message!.message_id) }, '👍').catch(() => {})
   }
 }
 
@@ -3528,9 +3530,9 @@ async function relayModelSet(ctx: Context, paneId: string, watcher: PaneWatcher 
 // Runs directly in the daemon — independent of any Claude turn — so it works even mid-task. Callers
 // must have passed the access gate; BANG_SHELL must be enabled.
 async function runBangCommand(chat_id: string, cmd: string): Promise<void> {
-  if (!cmd) { await bot.api.sendMessage(chat_id, 'Usage: <code>!&lt;shell command&gt;</code>', { parse_mode: 'HTML' }).catch(() => {}); return }
+  if (!cmd) { await channel.sendText(chat_id, 'Usage: <code>!&lt;shell command&gt;</code>').catch(() => {}); return }
   const cwd = (focus.activePaneId && await paneCwd(focus.activePaneId).catch(() => null)) || homedir()
-  void bot.api.sendChatAction(chat_id, 'typing').catch(() => {})
+  void channel.typing(chat_id).catch(() => {})
   let out = '', code = 0
   try {
     const r = await exec('bash', ['-lc', cmd], { cwd, timeout: 120_000, maxBuffer: 2_000_000 })
@@ -3547,7 +3549,7 @@ async function runBangCommand(chat_id: string, cmd: string): Promise<void> {
   // chunkHtml REQUIRES the length limit — omitting it makes cap NaN, which yields empty chunks that
   // Telegram rejects with "text must be non-empty" (every other caller passes it).
   for (const chunk of chunkHtml(body, MAX_CHUNK_LIMIT)) {
-    await bot.api.sendMessage(chat_id, chunk, { parse_mode: 'HTML' })
+    await channel.sendText(chat_id, chunk)
       .catch(e => process.stderr.write(`daemon: bang reply send failed: ${e}\n`))
   }
 }
@@ -3826,12 +3828,12 @@ async function relayEffortConfirm(t: CommandTarget, level: string, chat_id: stri
     .text(`✅ Yes, switch to ${effortLabel(level)}`, `effortconfirm:yes:${t.paneId}`)
     .text('❌ No', `effortconfirm:no:${t.paneId}`)
   try {
-    const sent = await bot.api.sendMessage(chat_id,
+    const sent = await channel.sendText(chat_id,
       `⚡ <b>Change effort level to ${escapeHtml(effortLabel(level))}?</b>\n\n` +
       '<blockquote>Your next response will be slower and use more tokens. The conversation is ' +
       'cached for the current level — switching re-reads the full history on your next message.</blockquote>',
-      threadExtra(t, { parse_mode: 'HTML', reply_markup: kb }))
-    pendingEffortConfirm.set(t.paneId, { level, chatId: chat_id, messageId: sent.message_id, thread: t.replyThread })
+      { buttons: kbToButtons(kb), ...(t.replyThread ? { threadId: String(t.replyThread) } : {}) })
+    pendingEffortConfirm.set(t.paneId, { level, chatId: chat_id, messageId: Number(sent.messageId), thread: t.replyThread })
   } catch (e) { process.stderr.write(`daemon: effort-confirm relay failed: ${e}\n`) }
 }
 
@@ -3844,8 +3846,8 @@ async function dismissPendingEffortConfirm(paneId: string): Promise<void> {
   pendingEffortConfirm.delete(paneId)
   try { await paneKeys(paneId, ['Escape'], [200, 2000]) }
   catch (e) { process.stderr.write(`daemon: effort-confirm dismiss failed: ${e}\n`) }
-  void bot.api.editMessageText(pend.chatId, pend.messageId,
-    '⚡ Effort change dismissed — kept the current level.', { parse_mode: 'HTML' }).catch(() => {})
+  void channel.editText({ chatId: String(pend.chatId), messageId: String(pend.messageId) },
+    '⚡ Effort change dismissed — kept the current level.').catch(() => {})
 }
 
 // Run /cost and relay the readout it prints.
@@ -4117,14 +4119,14 @@ bot.use(async (ctx, next) => {
   const msg = ctx.message
   if (msg?.text && ctx.chat && autoDeletableCommand(msg.text)
       && loadAccess().allowFrom.includes(String(ctx.from?.id))) {
-    try { await ctx.api.deleteMessage(ctx.chat.id, msg.message_id) }
+    try { await channel.deleteMessage({ chatId: String(ctx.chat.id), messageId: String(msg.message_id) }) }
     catch {
       const key = String(ctx.chat.id)
       if (ctx.chat.type !== 'private' && !autoDelNoticed.has(key)) {
         autoDelNoticed.add(key)
-        await ctx.api.sendMessage(ctx.chat.id,
+        await channel.sendText(String(ctx.chat.id),
           '🗑️ I couldn’t delete that command — give me the <b>Delete messages</b> admin permission here and auto-delete will work.',
-          { parse_mode: 'HTML', ...(msg.message_thread_id ? { message_thread_id: msg.message_thread_id } : {}) }).catch(() => {})
+          { ...(msg.message_thread_id ? { threadId: String(msg.message_thread_id) } : {}) }).catch(() => {})
       }
     }
   }
@@ -4148,15 +4150,15 @@ bot.command('status', async ctx => {
       const key = `topic:${thread}`
       const old = sessionPins.get(key)
       if (old) {
-        await bot.api.deleteMessage(chat, old).catch(() => {})
+        await channel.deleteMessage({ chatId: String(chat), messageId: String(old) }).catch(() => {})
         sessionPins.delete(key); pinTextCache.delete(key); persistSessionPins()
       }
       await clearTopicPins(chat, thread)   // single-pin guarantee — also drops orphaned card pins
       const text = await statusCardText(paneId)
-      const m = await bot.api.sendMessage(chat, text, { parse_mode: 'HTML', message_thread_id: thread, disable_notification: true, reply_markup: statusKeyboard() }).catch(() => null)
+      const m = await channel.sendText(String(chat), text, { threadId: String(thread), silent: true, buttons: kbToButtons(statusKeyboard()) }).catch(() => null)
       if (m) {
-        await bot.api.pinChatMessage(chat, m.message_id, { disable_notification: true }).catch(() => {})
-        sessionPins.set(key, m.message_id); pinTextCache.set(key, text); persistSessionPins()
+        await channel.pin(m).catch(() => {})
+        sessionPins.set(key, Number(m.messageId)); pinTextCache.set(key, text); persistSessionPins()
       }
       return
     }
@@ -4167,15 +4169,15 @@ bot.command('status', async ctx => {
         const key = 'general'
         const old = sessionPins.get(key)
         if (old) {
-          await bot.api.deleteMessage(chat, old).catch(() => {})
+          await channel.deleteMessage({ chatId: String(chat), messageId: String(old) }).catch(() => {})
           sessionPins.delete(key); pinTextCache.delete(key); persistSessionPins()
         }
-        await bot.api.unpinAllGeneralForumTopicMessages(chat).catch(() => {})   // single-pin guarantee for General
+        await bot.api.unpinAllGeneralForumTopicMessages(chat).catch(() => {})   // P2-migrate: thread op, moves with topic-runtime. single-pin guarantee for General
         const text = await statusCardText(anchorPane)
-        const m = await bot.api.sendMessage(chat, text, { parse_mode: 'HTML', reply_markup: statusKeyboard(), disable_notification: true }).catch(() => null)
+        const m = await channel.sendText(String(chat), text, { buttons: kbToButtons(statusKeyboard()), silent: true }).catch(() => null)
         if (m) {
-          await bot.api.pinChatMessage(chat, m.message_id, { disable_notification: true }).catch(() => {})
-          sessionPins.set(key, m.message_id); pinTextCache.set(key, text); persistSessionPins()
+          await channel.pin(m).catch(() => {})
+          sessionPins.set(key, Number(m.messageId)); pinTextCache.set(key, text); persistSessionPins()
         }
         return
       }
@@ -4185,8 +4187,8 @@ bot.command('status', async ctx => {
     }
     const old = sessionPins.get(chat)
     if (old) {
-      await bot.api.unpinChatMessage(chat, old).catch(() => {})
-      await bot.api.deleteMessage(chat, old).catch(() => {})
+      await channel.unpin({ chatId: String(chat), messageId: String(old) }).catch(() => {})
+      await channel.deleteMessage({ chatId: String(chat), messageId: String(old) }).catch(() => {})
       sessionPins.delete(chat); pinTextCache.delete(chat); persistSessionPins()
     }
     await createSessionPin(chat, await statusCardText(paneId), statusKeyboard())
@@ -4338,7 +4340,7 @@ bot.command('compact', async ctx => {
 // the watcher (and this bridge) pointed at it; keeping the session id keeps the conversation.
 async function restartFocusedSession(chat: string): Promise<void> {
   if (!focus.activePaneId || !focus.paneWatcher) {
-    await bot.api.sendMessage(chat, '⚠️ No active session to restart.', { parse_mode: 'HTML' }).catch(() => {})
+    await channel.sendText(chat, '⚠️ No active session to restart.').catch(() => {})
     return
   }
   await restartPaneSession(focus.activePaneId, chat)
@@ -4348,7 +4350,7 @@ async function restartFocusedSession(chat: string): Promise<void> {
 // same session id keeps the conversation). Re-applies the session's permission mode afterwards —
 // the resume restores the conversation but not the mode dial.
 async function restartPaneSession(pane: string, chat: string): Promise<void> {
-  const dm = (t: string) => bot.api.sendMessage(chat, t, { parse_mode: 'HTML' }).catch(() => {})
+  const dm = (t: string) => channel.sendText(chat, t).catch(() => {})
   const cwd = await paneCwd(pane).catch(() => null)
   const file = cwd ? await transcriptForPane(pane, cwd) : null
   const id = file ? basename(file, '.jsonl') : null
@@ -4445,7 +4447,7 @@ async function restartPaneSessionCore(pane: string, id: string, accountOverride?
 // leave the session on the old binary. restartFocusedSession resumes by ABSOLUTE native path, so the
 // resumed conversation lands on the freshly-installed build regardless of PATH ordering.
 async function updateClaude(chat: string): Promise<void> {
-  const dm = (t: string) => bot.api.sendMessage(chat, t, { parse_mode: 'HTML' }).catch(() => {})
+  const dm = (t: string) => channel.sendText(chat, t).catch(() => {})
   await dm('🧠 Updating Claude — installing, then resuming this session on it…')
   const before = await claudeVersion()
   try { await exec(claudeBin(), ['install'], { timeout: 300_000 }) }
@@ -4502,8 +4504,8 @@ async function sweepSessionVersions(): Promise<void> {
   const group = isTopicMode() ? getGroupChatId() : null
   const targets = group ? [{ chat: group }] : loadAccess().allowFrom.map(chat => ({ chat }))
   for (const { chat } of targets) {
-    await bot.api.sendMessage(chat, text,
-      { parse_mode: 'HTML', reply_markup: kb, disable_notification: true }).catch(() => {})
+    await channel.sendText(String(chat), text,
+      { buttons: kbToButtons(kb), silent: true }).catch(() => {})
   }
 }
 
@@ -4522,7 +4524,7 @@ async function paneBackUp(pane: string): Promise<boolean> {
 // Failures get a per-session revive button (spawn `-c` in its previous topic); full success gets ✅.
 async function restartAllStaleSessions(chat: string, onlyStale = true): Promise<void> {
   const say = (t: string, kb?: InlineKeyboard) =>
-    bot.api.sendMessage(chat, t, { parse_mode: 'HTML', ...(kb ? { reply_markup: kb } : {}) }).catch(() => {})
+    channel.sendText(chat, t, kb ? { buttons: kbToButtons(kb) } : {}).catch(() => {})
   const installed = await claudeVersion()
   // Recompute staleness at tap time (the notice may be hours old; sessions moved or restarted since).
   const targets: Array<{ pane: string; sid: string | null; name: string; id: string; cwd: string | null }> = []
@@ -4636,9 +4638,9 @@ async function showUpdateDashboard(ctx: Context): Promise<void> {
 async function runBridgeUpdate(chat: string): Promise<void> {
   // Post the ONE status bubble here and hand its id to the detached updater, so it edits this same
   // message through building → restarting → ✅ instead of a 🌉-then-♻️-then-✅ pile of messages.
-  const m = await bot.api.sendMessage(chat, '♻️ Updating the Telegram bridge…', { parse_mode: 'HTML' }).catch(() => null)
-  const r = startUpdate(chat, 'apply', m?.message_id)
-  if (!r.ok) void bot.api.sendMessage(chat, `❌ Couldn't start bridge update: ${escapeHtml(r.error ?? '')}`, { parse_mode: 'HTML' }).catch(() => {})
+  const m = await channel.sendText(chat, '♻️ Updating the Telegram bridge…').catch(() => null)
+  const r = startUpdate(chat, 'apply', m ? Number(m.messageId) : undefined)
+  if (!r.ok) void channel.sendText(chat, `❌ Couldn't start bridge update: ${escapeHtml(r.error ?? '')}`).catch(() => {})
 }
 
 // Bare /update opens the dashboard. Subcommands skip it: `tg` updates this bridge, `claude` updates
@@ -4698,7 +4700,7 @@ for (const [name, prompt] of [['handoff', HANDOFF_PROMPT], ['continue', CONTINUE
     const msgId = ctx.message?.message_id
     const chat_id = String(ctx.chat?.id ?? '')
     await handleInbound(ctx, prompt, undefined)
-    if (msgId != null) void bot.api.setMessageReaction(chat_id, msgId, [{ type: 'emoji', emoji: '👍' }]).catch(() => {})
+    if (msgId != null) void channel.react({ chatId: chat_id, messageId: String(msgId) }, '👍').catch(() => {})
   })
 }
 
@@ -4772,9 +4774,9 @@ async function claimGeneralFor(sid: string): Promise<string> {
   if (sid === getGeneralSession()) return '📌 That session is already anchored to General.'
   const t = getTopicBySession(sid)
   if (t && !t.closed) {
-    await bot.api.sendMessage(group, '📌 This session moved to <b>General</b> — replies land there from now on.',
-      { parse_mode: 'HTML', message_thread_id: t.threadId }).catch(() => {})
-    await bot.api.closeForumTopic(group, t.threadId).catch(() => {})
+    await channel.sendText(String(group), '📌 This session moved to <b>General</b> — replies land there from now on.',
+      { threadId: String(t.threadId) }).catch(() => {})
+    await bot.api.closeForumTopic(group, t.threadId).catch(() => {})   // P2-migrate: thread op, moves with topic-runtime
     updateTopic(sid, { closed: true })
   }
   setGeneralSession(sid)
@@ -4875,7 +4877,7 @@ async function sweepBudget(): Promise<void> {
     const msg = threshold >= 100
       ? `💸 <b>Daily budget reached</b> — $${spent.toFixed(2)} of $${cap.toFixed(2)} today. Sessions keep running; wrap up or raise it with /budget.`
       : `💸 Daily budget at ${Math.round(pct)}% — $${spent.toFixed(2)} of $${cap.toFixed(2)}.`
-    for (const c of noticeChats()) await bot.api.sendMessage(c, msg, { parse_mode: 'HTML' }).catch(() => {})
+    for (const c of noticeChats()) await channel.sendText(c, msg).catch(() => {})
   }
   writeJsonFile(BUDGET_FILE, st)
 }
@@ -5028,32 +5030,32 @@ async function gitDirtyStat(cwd: string): Promise<{ files: number; add: number; 
 // Untracked files are listed by name (git diff HEAD doesn't show their contents).
 const DIFF_SEND_CAP = 16_000   // chars of patch relayed before truncating (≈4–5 messages)
 async function sendDiff(chat: string, paneId: string, thread?: number): Promise<void> {
-  const extra = thread ? { message_thread_id: thread } : {}
+  const opts: SendOpts = thread ? { threadId: String(thread) } : {}
   const cwd = await paneCwd(paneId).catch(() => null)
-  if (!cwd) { await bot.api.sendMessage(chat, 'Could not read the session folder.', extra).catch(() => {}); return }
+  if (!cwd) { await channel.sendText(chat, 'Could not read the session folder.', opts).catch(() => {}); return }
   try {
     const { stdout: por } = await exec('git', ['-C', cwd, 'status', '--porcelain'], { timeout: 4000 })
-    if (!por.trim()) { await bot.api.sendMessage(chat, '✨ Working tree clean — nothing to diff.', extra).catch(() => {}); return }
+    if (!por.trim()) { await channel.sendText(chat, '✨ Working tree clean — nothing to diff.', opts).catch(() => {}); return }
     const { stdout: stat } = await exec('git', ['-C', cwd, 'diff', 'HEAD', '--stat'], { timeout: 6000 }).catch(() => ({ stdout: '' }))
     let { stdout: diff } = await exec('git', ['-C', cwd, 'diff', 'HEAD'], { timeout: 10000, maxBuffer: 32 * 1024 * 1024 }).catch(() => ({ stdout: '' }))
     const untracked = por.split('\n').filter(l => l.startsWith('??')).map(l => l.slice(3).trim()).filter(Boolean)
     let head = `📄 <b>Diff</b> — <code>${escapeHtml(cwd)}</code>`
     if (stat.trim()) head += `\n<pre>${escapeHtml(stat.trim().slice(0, 3000))}</pre>`
     if (untracked.length) head += `\n🆕 untracked: ${untracked.slice(0, 10).map(f => `<code>${escapeHtml(f)}</code>`).join(', ')}${untracked.length > 10 ? ` +${untracked.length - 10} more` : ''}`
-    await bot.api.sendMessage(chat, head, { parse_mode: 'HTML', ...extra }).catch(() => {})
+    await channel.sendText(chat, head, opts).catch(() => {})
     if (!diff.trim()) return
     const truncated = diff.length > DIFF_SEND_CAP
     if (truncated) diff = diff.slice(0, DIFF_SEND_CAP)
     const limit = Math.max(1, Math.min(loadAccess().textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT))
     for (const c of chunkHtml(`<pre><code class="language-diff">${escapeHtml(diff)}</code></pre>`, limit)) {
-      await bot.api.sendMessage(chat, c, { parse_mode: 'HTML', ...extra }).catch(() => {})
+      await channel.sendText(chat, c, opts).catch(() => {})
     }
-    if (truncated) await bot.api.sendMessage(chat, `✂️ Diff truncated (large change) — full diff: <code>git diff HEAD</code> in <code>${escapeHtml(cwd)}</code>.`, { parse_mode: 'HTML', ...extra }).catch(() => {})
+    if (truncated) await channel.sendText(chat, `✂️ Diff truncated (large change) — full diff: <code>git diff HEAD</code> in <code>${escapeHtml(cwd)}</code>.`, opts).catch(() => {})
   } catch (e) {
     const msg = String((e as { stderr?: string })?.stderr ?? (e as Error)?.message ?? e)
-    await bot.api.sendMessage(chat, /not a git repository/i.test(msg)
+    await channel.sendText(chat, /not a git repository/i.test(msg)
       ? `📂 <code>${escapeHtml(cwd)}</code> isn't a git repository — nothing to diff.`
-      : `❌ Couldn't diff: <pre>${escapeHtml(msg.slice(0, 600))}</pre>`, { parse_mode: 'HTML', ...extra }).catch(() => {})
+      : `❌ Couldn't diff: <pre>${escapeHtml(msg.slice(0, 600))}</pre>`, opts).catch(() => {})
   }
 }
 
@@ -5074,7 +5076,7 @@ async function maybeShipFooter(paneId: string): Promise<void> {
     .text('⬆️ Push', 'ship:push').text('🔀 PR', 'ship:pr')
   const note = `📝 ${s.files} file${s.files === 1 ? '' : 's'} changed  <b>+${s.add} −${s.del}</b>`
   for (const t of await outboundTargetsFor(paneId)) {
-    await bot.api.sendMessage(t.chat, note, { parse_mode: 'HTML', disable_notification: true, reply_markup: kb, ...(t.thread ? { message_thread_id: t.thread } : {}) }).catch(() => {})
+    await channel.sendText(String(t.chat), note, { buttons: kbToButtons(kb), silent: true, ...(t.thread ? { threadId: String(t.thread) } : {}) }).catch(() => {})
   }
 }
 
@@ -5140,9 +5142,9 @@ bot.command(['terminal', 't'], async ctx => {   // /t = hidden short alias (kept
     cancelEdit(prev.chat, prev.mid); scheduleDelete(prev.chat, prev.mid)
   }
 
-  const sent = await bot.api.sendMessage(chat, terminalCard(first, limit), threadExtra(t, { parse_mode: 'HTML' })).catch(() => null)
+  const sent = await channel.sendText(chat, terminalCard(first, limit), t.replyThread ? { threadId: String(t.replyThread) } : {}).catch(() => null)
   if (!sent) return
-  const mid = sent.message_id
+  const mid = Number(sent.messageId)
   touchActiveView(chat, t.replyThread)   // the user just opened this card here → mark it the active view
 
   // Refresh every 5s by registering the latest desired state with the edit scheduler — it coalesces,
@@ -5226,6 +5228,7 @@ async function fireResetNotification(account: string, chats: string[], attempt =
     const msg = attempt === 0
       ? `🕛 Usage limit reset${who} — ▶️ auto-continuing…`
       : `🔁 Still limited${who} — retrying continue (attempt ${attempt + 1}/${CONTINUE_MAX_ATTEMPTS})…`
+    // P2-migrate: plain send with an unescaped account name in `who` — HTML mode could mis-render it.
     for (const chat_id of chats) void bot.api.sendMessage(chat_id, msg).catch(() => {})
     void (async () => {
       const pane = focus.activePaneId!   // capture at inject time — focus may switch before verify fires
@@ -5237,7 +5240,7 @@ async function fireResetNotification(account: string, chats: string[], attempt =
   clearScheduledReset(account)
   const keyboard = new InlineKeyboard().text('▶️ Continue', 'usage:continue')
   for (const chat_id of chats) {
-    void bot.api.sendMessage(chat_id, `🕛 Usage limit reset${who} — continue?`, { reply_markup: keyboard }).catch(() => {})
+    void bot.api.sendMessage(chat_id, `🕛 Usage limit reset${who} — continue?`, { reply_markup: keyboard }).catch(() => {})   // P2-migrate: plain send with unescaped account name in `who`
   }
 }
 
@@ -5256,7 +5259,7 @@ async function continueAuxLimitedPanes(account: string): Promise<void> {
         ? '🕛 Usage limit reset — ▶️ auto-continuing…'
         : '🕛 Usage limit reset (couldn’t reach this session).'
       for (const { chat, thread } of await outboundTargetsFor(pane)) {
-        await bot.api.sendMessage(chat, note, thread ? { message_thread_id: thread } : {}).catch(() => {})
+        await channel.sendText(String(chat), note, thread ? { threadId: String(thread) } : {}).catch(() => {})
       }
       if (ok) setTimeout(() => void verifyAuxContinue(pane), CONTINUE_VERIFY_MS)
     } catch { /* pane vanished mid-loop */ }
@@ -5268,7 +5271,7 @@ async function verifyAuxContinue(pane: string): Promise<void> {
   if (!cap || !detectLimited(cap)) return
   const kb = new InlineKeyboard().text('▶️ Continue', 'usage:continue')
   for (const { chat, thread } of await outboundTargetsFor(pane)) {
-    await bot.api.sendMessage(chat, '⚠️ Still limited — tap to retry once it lifts.', { reply_markup: kb, ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
+    await channel.sendText(String(chat), '⚠️ Still limited — tap to retry once it lifts.', { buttons: kbToButtons(kb), ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
   }
 }
 
@@ -5280,12 +5283,12 @@ async function verifyAutoContinue(account: string, chats: string[], attempt: num
   const resumed = injected && !!cap && !detectLimited(cap)
   if (resumed) {
     clearScheduledReset(account)
-    for (const chat_id of chats) void bot.api.sendMessage(chat_id, '✅ Session resumed.').catch(() => {})
+    for (const chat_id of chats) void channel.sendText(chat_id, '✅ Session resumed.').catch(() => {})
     return
   }
   if (attempt + 1 >= CONTINUE_MAX_ATTEMPTS) {
     clearScheduledReset(account)
-    for (const chat_id of chats) void bot.api.sendMessage(chat_id, '⚠️ Still limited after several tries — stopping auto-retry. Send "continue" once it lifts.').catch(() => {})
+    for (const chat_id of chats) void channel.sendText(chat_id, '⚠️ Still limited after several tries — stopping auto-retry. Send "continue" once it lifts.').catch(() => {})
     return
   }
   scheduleReset(account, Date.now() + CONTINUE_RETRY_MS, chats, attempt + 1, true)   // a retry exists only on the armed path
@@ -5425,7 +5428,7 @@ let whisperInstalling = false
 async function provisionWhisper(chats: string[]): Promise<void> {
   if (whisperInstalling) return
   whisperInstalling = true
-  const note = (msg: string) => { for (const c of chats) void bot.api.sendMessage(c, msg, { parse_mode: 'HTML' }).catch(() => {}) }
+  const note = (msg: string) => { for (const c of chats) void channel.sendText(c, msg).catch(() => {}) }
   try {
     try {
       await exec('python3', ['-m', 'pip', 'install', '--quiet', 'faster-whisper'], { timeout: 600_000 })
@@ -5693,7 +5696,7 @@ function setVoiceMode(on: boolean, chatId: string, thread?: number): void {
   a.tts = { ...a.tts, mode: on ? 'all' : 'off', engine: a.tts?.engine ?? 'piper' }
   saveAccess(a)
   if (!on) return
-  const extra = thread ? { message_thread_id: thread } : {}
+  const extra = thread ? { message_thread_id: thread } : {}   // P2-migrate: plain sends (no parse_mode); one interpolates a raw error string
   if (a.tts.engine === 'piper' && !piperReady(a.tts.voice)) {
     void bot.api.sendMessage(chatId, '⏳ Installing the Piper voice engine (~80MB)…', extra).catch(() => {})
     void provisionPiper(a.tts.voice).then(
@@ -6344,9 +6347,9 @@ bot.command('files', async ctx => {
   // In a group/topic, web_app buttons are disallowed (BUTTON_TYPE_INVALID), so launch via the bot's
   // Main Mini App deep link (a normal url button), carrying a startapp token that /api/resolve maps
   // back to this cwd. Requires the Main Mini App configured in BotFather (URL = WEBAPP_PUBLIC_URL).
-  if (!botUsername) { await bot.api.sendMessage(String(ctx.chat!.id), '📂 Starting up — try /files again in a moment.', { ...(t.replyThread ? { message_thread_id: t.replyThread } : {}) }).catch(() => {}); return }
+  if (!botUsername) { await channel.sendText(String(ctx.chat!.id), '📂 Starting up — try /files again in a moment.', { ...(t.replyThread ? { threadId: String(t.replyThread) } : {}) }).catch(() => {}); return }
   const link = `https://t.me/${botUsername}?startapp=${mintStartToken(cwd)}`
-  await bot.api.sendMessage(String(ctx.chat!.id), `📂 <b>Files</b> — <code>${escapeHtml(cwd)}</code>`,
+  await bot.api.sendMessage(String(ctx.chat!.id), `📂 <b>Files</b> — <code>${escapeHtml(cwd)}</code>`,   // P2-migrate: /files Mini App launch button
     { parse_mode: 'HTML', reply_markup: new InlineKeyboard().url('📂 Open Files', link),
       ...(t.replyThread ? { message_thread_id: t.replyThread } : {}) }).catch(e => wlog(`/files send failed: ${e}`))
 })
@@ -6364,7 +6367,7 @@ bot.command('cancel', async ctx => {
     if (key.slice(0, idx) !== chat) continue
     const mid = Number(key.slice(idx + 1))
     replyTargets.delete(key)
-    if (mid) { await ctx.api.deleteMessage(ctx.chat!.id, mid).catch(() => {}); n++ }
+    if (mid) { await channel.deleteMessage({ chatId: String(ctx.chat!.id), messageId: String(mid) }).catch(() => {}); n++ }
   }
   await ctx.reply(n ? `✖️ Cleared ${n} pending prompt${n === 1 ? '' : 's'}.` : 'Nothing pending to cancel.').catch(() => {})
 })
@@ -6477,7 +6480,7 @@ bot.on('message:forum_topic_closed', async ctx => {
 // the live API; sendChatAction is NOT usable here (it returns ok:true for bogus threads).
 // 'gone' = message no longer exists; 'alive' = it does (any other error included — fail safe).
 async function probeMessageGone(group: string, messageId: number): Promise<'gone' | 'alive'> {
-  try { await asLowPriority(() => bot.api.editMessageReplyMarkup(group, messageId)); return 'alive' }
+  try { await asLowPriority(() => channel.editButtons({ chatId: String(group), messageId: String(messageId) }, null)); return 'alive' }
   catch (e) {
     return /message to edit not found/i.test(String((e as { description?: string })?.description ?? e)) ? 'gone' : 'alive'
   }
@@ -6508,10 +6511,10 @@ async function teardownDeletedTopic(group: string, t: { sessionId: string; threa
     // stays gone regardless (the sid is dismissed durably), but the tmux session may still be running —
     // say so instead of claiming an exit that didn't happen, so the user knows where the "stray" came from.
     const stillLive = await paneClaudeLive(pane).catch(() => false)
-    await bot.api.sendMessage(group, stillLive
+    await channel.sendText(String(group), stillLive
       ? `🗑 Topic “${escapeHtml(t.name)}” deleted — it won’t reappear here. Its session in <code>${escapeHtml(t.cwd)}</code> is still running in the terminal (close it there to end it).`
       : `🗑 Topic “${escapeHtml(t.name)}” was deleted — exited its session in <code>${escapeHtml(t.cwd)}</code>.`,
-      { parse_mode: 'HTML', disable_notification: true }).catch(() => {})
+      { silent: true }).catch(() => {})
   }
 }
 
@@ -6761,10 +6764,10 @@ bot.on('callback_query:data', async ctx => {
       // (handled via replyTargets, kind 'acctname') creates the account.
       await ctx.answerCallbackQuery().catch(() => {})
       const thread = ctx.callbackQuery.message?.message_thread_id
-      const sent = await bot.api.sendMessage(String(ctx.chat!.id),
+      const sent = await channel.sendText(String(ctx.chat!.id),
         '👤 Name the new account — short and simple, e.g. <code>work</code> (it gets its own config dir <code>~/.claude-&lt;name&gt;</code>).',
-        { parse_mode: 'HTML', ...(thread ? { message_thread_id: thread } : {}), reply_markup: { force_reply: true, input_field_placeholder: 'work' } }).catch(() => null)
-      if (sent) replyTargets.set(`${ctx.chat?.id}:${sent.message_id}`, { kind: 'acctname', thread })
+        { ...(thread ? { threadId: String(thread) } : {}), forceReply: { placeholder: 'work' } }).catch(() => null)
+      if (sent) replyTargets.set(refKey(sent), { kind: 'acctname', thread })
       return
     }
     if (acctMatch[3]) {
@@ -6782,7 +6785,7 @@ bot.on('callback_query:data', async ctx => {
           (accountLoggedIn(acct) ? '' : '\n🔑 First run on this account — a sign-in link will appear here; tap it, then reply to that message with your code.')
         : `❌ Couldn't start a session in <code>${escapeHtml(dir)}</code>.`
       const thread = ctx.callbackQuery.message?.message_thread_id
-      await bot.api.sendMessage(String(ctx.chat!.id), note, { parse_mode: 'HTML', ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
+      await channel.sendText(String(ctx.chat!.id), note, { ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
       return
     }
     if (acctMatch[2]) {
@@ -6823,10 +6826,10 @@ bot.on('callback_query:data', async ctx => {
       const chat = String(ctx.chat!.id)
       const thread = ctx.callbackQuery.message?.message_thread_id
       // One status message, edited through the stages (requesting code → code card → outcome).
-      const status = await bot.api.sendMessage(chat, '⏳ Requesting a GitHub sign-in code…',
-        { ...(thread ? { message_thread_id: thread } : {}) }).catch(() => null)
+      const status = await channel.sendText(chat, '⏳ Requesting a GitHub sign-in code…',
+        { ...(thread ? { threadId: String(thread) } : {}) }).catch(() => null)
       const edit = (txt: string) => status
-        ? bot.api.editMessageText(chat, status.message_id, txt,
+        ? bot.api.editMessageText(chat, Number(status.messageId), txt,   // P2-migrate: link_preview_options not in SendOpts
             { parse_mode: 'HTML', link_preview_options: { is_disabled: true } }).catch(() => {})
         : Promise.resolve()
       // The flow runs minutes (until the user authorizes on github.com) — don't block the callback.
@@ -6878,17 +6881,18 @@ bot.on('callback_query:data', async ctx => {
     const thread = ctx.callbackQuery.message?.message_thread_id
     const threadExtra2 = thread ? { message_thread_id: thread } : {}
     if (tts.mode !== 'off' && tts.engine === 'piper' && !piperReady(tts.voice)) {
-      void bot.api.sendMessage(chat, `⏳ Installing Piper${ttsMatch[3] ? `'s ${PIPER_VOICES[Number(ttsMatch[3])].label} voice (~60MB)` : ' (~80MB)'}…`, threadExtra2).catch(() => {})
+      const ttsOpts: SendOpts = thread ? { threadId: String(thread) } : {}
+      void channel.sendText(chat, `⏳ Installing Piper${ttsMatch[3] ? `'s ${PIPER_VOICES[Number(ttsMatch[3])].label} voice (~60MB)` : ' (~80MB)'}…`, ttsOpts).catch(() => {})
       void provisionPiper(tts.voice).then(
-        () => bot.api.sendMessage(chat, '✅ Piper voice ready — replies will speak.', threadExtra2).catch(() => {}),
-        e => bot.api.sendMessage(chat, `⚠️ Piper install failed: ${escapeHtml(String(e).slice(0, 150))}`, threadExtra2).catch(() => {}),
+        () => channel.sendText(chat, '✅ Piper voice ready — replies will speak.', ttsOpts).catch(() => {}),
+        e => bot.api.sendMessage(chat, `⚠️ Piper install failed: ${escapeHtml(String(e).slice(0, 150))}`, threadExtra2).catch(() => {}),   // P2-migrate: pre-escaped text sent WITHOUT parse_mode
       )
     }
     if (tts.mode !== 'off' && (tts.engine === 'openai' || tts.engine === 'elevenlabs') && !engineStatus(tts.engine).ready) {
-      const sent = await bot.api.sendMessage(chat,
+      const sent = await channel.sendText(chat,
         `🔑 Reply with your <b>${tts.engine === 'openai' ? 'OpenAI' : 'ElevenLabs'}</b> API key — it's stored in the bridge's .env and your message is deleted right away.`,
-        { parse_mode: 'HTML', ...threadExtra2, reply_markup: { force_reply: true, input_field_placeholder: 'API key' } }).catch(() => null)
-      if (sent) replyTargets.set(`${chat}:${sent.message_id}`, { kind: 'ttskey', engine: tts.engine })
+        { ...(thread ? { threadId: String(thread) } : {}), forceReply: { placeholder: 'API key' } }).catch(() => null)
+      if (sent) replyTargets.set(refKey(sent), { kind: 'ttskey', engine: tts.engine })
     }
     await ctx.editMessageText(ttsText(), { parse_mode: 'HTML', reply_markup: ttsKeyboard() }).catch(() => {})
     return
@@ -6956,7 +6960,7 @@ bot.on('callback_query:data', async ctx => {
     if (!paneId) { await ctx.answerCallbackQuery({ text: 'No active session.' }).catch(() => {}); return }
     const chat = String(ctx.chat!.id)
     const thread = ctx.callbackQuery.message?.message_thread_id
-    const extra = { parse_mode: 'HTML' as const, ...(thread ? { message_thread_id: thread } : {}) }
+    const shipOpts: SendOpts = thread ? { threadId: String(thread) } : {}
     const cwd = await paneCwd(paneId).catch(() => null)
     if (shipMatch[1] === 'diff') {
       await ctx.answerCallbackQuery().catch(() => {})
@@ -6969,7 +6973,7 @@ bot.on('callback_query:data', async ctx => {
       const ok = paneId === focus.activePaneId && focus.paneWatcher
         ? await injectText(paneId, focus.paneWatcher, prompt)
         : await pasteToPane(paneId, prompt)
-      if (!ok) await bot.api.sendMessage(chat, '❌ Couldn\'t reach the session to commit.', extra).catch(() => {})
+      if (!ok) await channel.sendText(chat, '❌ Couldn\'t reach the session to commit.', shipOpts).catch(() => {})
       return
     }
     if (!cwd) { await ctx.answerCallbackQuery({ text: 'Could not read the session folder.' }).catch(() => {}); return }
@@ -6978,9 +6982,9 @@ bot.on('callback_query:data', async ctx => {
       try {
         const { stderr } = await exec('git', ['-C', cwd, 'push'], { timeout: 60_000 })
         const tail = (stderr || '').trim().split('\n').slice(-2).join(' ').slice(0, 300)
-        await bot.api.sendMessage(chat, `⬆️ Pushed.${tail ? ` <i>${escapeHtml(tail)}</i>` : ''}`, extra).catch(() => {})
+        await channel.sendText(chat, `⬆️ Pushed.${tail ? ` <i>${escapeHtml(tail)}</i>` : ''}`, shipOpts).catch(() => {})
       } catch (e) {
-        await bot.api.sendMessage(chat, `❌ Push failed: <pre>${escapeHtml(String((e as { stderr?: string })?.stderr ?? (e as Error)?.message ?? e).slice(0, 800))}</pre>`, extra).catch(() => {})
+        await channel.sendText(chat, `❌ Push failed: <pre>${escapeHtml(String((e as { stderr?: string })?.stderr ?? (e as Error)?.message ?? e).slice(0, 800))}</pre>`, shipOpts).catch(() => {})
       }
       return
     }
@@ -6989,10 +6993,10 @@ bot.on('callback_query:data', async ctx => {
     try {
       const { stdout } = await exec('gh', ['pr', 'create', '--fill'], { cwd, timeout: 60_000 })
       const url = stdout.trim().split('\n').pop() ?? ''
-      await bot.api.sendMessage(chat, `🔀 PR opened: ${escapeHtml(url)}`, extra).catch(() => {})
+      await channel.sendText(chat, `🔀 PR opened: ${escapeHtml(url)}`, shipOpts).catch(() => {})
     } catch (e) {
       const msg = String((e as { stderr?: string })?.stderr ?? (e as Error)?.message ?? e).slice(0, 800)
-      await bot.api.sendMessage(chat, `❌ PR failed: <pre>${escapeHtml(msg)}</pre>`, extra).catch(() => {})
+      await channel.sendText(chat, `❌ PR failed: <pre>${escapeHtml(msg)}</pre>`, shipOpts).catch(() => {})
     }
     return
   }
@@ -7010,9 +7014,9 @@ bot.on('callback_query:data', async ctx => {
     }
     await ctx.answerCallbackQuery({ text: 'Auto-continue cancelled.' }).catch(() => {})
     const thread = ctx.callbackQuery.message?.message_thread_id
-    await bot.api.sendMessage(String(ctx.chat!.id),
+    await channel.sendText(String(ctx.chat!.id),
       `✖️ Auto-continue cancelled — I'll still ping you with a ▶️ Continue button when the limit resets (in ${formatDuration(Math.max(0, fireAt - Date.now()))}).`,
-      thread ? { message_thread_id: thread } : {}).catch(() => {})
+      thread ? { threadId: String(thread) } : {}).catch(() => {})
     return
   }
 
@@ -7031,9 +7035,9 @@ bot.on('callback_query:data', async ctx => {
     await ctx.answerCallbackQuery({ text: 'Auto-continue armed.' }).catch(() => {})
     await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => {})
     const thread = ctx.callbackQuery.message?.message_thread_id
-    await bot.api.sendMessage(String(ctx.chat!.id),
+    await channel.sendText(String(ctx.chat!.id),
       `✅ Auto-continue armed — I'll send "continue" when the limit resets (in ${formatDuration(Math.max(0, fireAt - Date.now()))}).`,
-      thread ? { message_thread_id: thread } : {}).catch(() => {})
+      thread ? { threadId: String(thread) } : {}).catch(() => {})
     return
   }
 
@@ -7236,18 +7240,18 @@ bot.on('callback_query:data', async ctx => {
     if (livePane) {
       await ctx.answerCallbackQuery({ text: `${t.name} is already running.` }).catch(() => {})
       await reopenSessionTopic(sid)
-      await bot.api.sendMessage(String(ctx.chat!.id),
+      await channel.sendText(String(ctx.chat!.id),
         `✅ <b>${escapeHtml(t.name)}</b> is already running — reopened its topic.`,
-        { parse_mode: 'HTML' }).catch(() => {})
+        ).catch(() => {})
       return
     }
     await ctx.answerCallbackQuery({ text: `Resuming ${t.name}…` }).catch(() => {})
     const ok = await spawnSession(t.cwd, '-c', sid)
     if (ok) await reopenSessionTopic(sid)   // reopen the tab NOW, not on first reply
-    await bot.api.sendMessage(String(ctx.chat!.id), ok
+    await channel.sendText(String(ctx.chat!.id), ok
       ? `🚀 Resuming <b>${escapeHtml(t.name)}</b> in <code>${escapeHtml(t.cwd)}</code> — it reopens in its topic shortly.`
       : `❌ Couldn't resume <b>${escapeHtml(t.name)}</b> in <code>${escapeHtml(t.cwd)}</code>.`,
-      { parse_mode: 'HTML' }).catch(() => {})
+      ).catch(() => {})
     return
   }
 
@@ -7270,10 +7274,10 @@ bot.on('callback_query:data', async ctx => {
     if (data === 'newask') {
       await ctx.answerCallbackQuery().catch(() => {})
       await ctx.editMessageReplyMarkup().catch(() => {})
-      const sent = await bot.api.sendMessage(String(ctx.chat!.id),
+      const sent = await channel.sendText(String(ctx.chat!.id),
         '📂 Which folder should the new session run in?\n\nReply with a folder path (created if missing; <code>~/…</code> works).',
-        { parse_mode: 'HTML', reply_markup: { force_reply: true, input_field_placeholder: 'Folder path' } }).catch(() => null)
-      if (sent) replyTargets.set(`${ctx.chat?.id}:${sent.message_id}`, { kind: 'newsession' })
+        { forceReply: { placeholder: 'Folder path' } }).catch(() => null)
+      if (sent) replyTargets.set(refKey(sent), { kind: 'newsession' })
       return
     }
     const dir = focus.activePaneId ? await paneCwd(focus.activePaneId).catch(() => null) : null
@@ -7313,10 +7317,10 @@ bot.on('callback_query:data', async ctx => {
     if (!dir) {
       await ctx.answerCallbackQuery().catch(() => {})
       await ctx.editMessageReplyMarkup().catch(() => {})
-      const sent = await bot.api.sendMessage(String(ctx.chat!.id),
+      const sent = await channel.sendText(String(ctx.chat!.id),
         '📂 Which folder should the session run in?\n\nReply with a folder path (created if missing; <code>~/…</code> works).',
-        { parse_mode: 'HTML', reply_markup: { force_reply: true, input_field_placeholder: 'Folder path' } }).catch(() => null)
-      if (sent) replyTargets.set(`${ctx.chat?.id}:${sent.message_id}`, { kind: 'newsession', anchor: true })
+        { forceReply: { placeholder: 'Folder path' } }).catch(() => null)
+      if (sent) replyTargets.set(refKey(sent), { kind: 'newsession', anchor: true })
       return
     }
     await ctx.answerCallbackQuery({ text: 'Starting…' }).catch(() => {})
@@ -7470,10 +7474,10 @@ bot.on('callback_query:data', async ctx => {
     if (tcMatch[1] === 'ask' || !pending) {
       // Spent card (daemon restarted) also lands here — the prompt still works without it.
       await ctx.editMessageReplyMarkup().catch(() => {})
-      const sent = await bot.api.sendMessage(chat,
+      const sent = await channel.sendText(String(chat),
         `📂 Which folder should this topic's session run in?\n\nReply with a folder path (created if missing; <code>~/…</code> works).`,
-        { parse_mode: 'HTML', message_thread_id: thread, reply_markup: { force_reply: true, input_field_placeholder: 'Folder path' } }).catch(() => null)
-      if (sent) replyTargets.set(`${chat}:${sent.message_id}`, { kind: 'topiccreate', threadId: thread, name: pending?.name ?? '' })
+        { threadId: String(thread), forceReply: { placeholder: 'Folder path' } }).catch(() => null)
+      if (sent) replyTargets.set(refKey(sent), { kind: 'topiccreate', threadId: thread, name: pending?.name ?? '' })
       return
     }
     let created = false
@@ -7481,10 +7485,10 @@ bot.on('callback_query:data', async ctx => {
       try { mkdirSync(pending.dir, { recursive: true }); created = true }
       catch (e) {
         await ctx.editMessageText(`❌ Couldn't create <code>${escapeHtml(pending.dir)}</code>: ${escapeHtml(String((e as Error)?.message ?? e))}`, { parse_mode: 'HTML' }).catch(() => {})
-        const sent = await bot.api.sendMessage(chat,
+        const sent = await channel.sendText(String(chat),
           `📂 Reply with another folder path — <code>~/…</code> or an absolute folder you can write to.`,
-          { parse_mode: 'HTML', message_thread_id: thread, reply_markup: { force_reply: true, input_field_placeholder: 'Folder path' } }).catch(() => null)
-        if (sent) replyTargets.set(`${chat}:${sent.message_id}`, { kind: 'topiccreate', threadId: thread, name: pending.name })
+          { threadId: String(thread), forceReply: { placeholder: 'Folder path' } }).catch(() => null)
+        if (sent) replyTargets.set(refKey(sent), { kind: 'topiccreate', threadId: thread, name: pending.name })
         return
       }
     }
@@ -7565,7 +7569,7 @@ bot.on('callback_query:data', async ctx => {
     }
     const thread = Number(topicDel[2])
     try {
-      await bot.api.deleteForumTopic(group, thread)
+      await bot.api.deleteForumTopic(group, thread)   // P2-migrate: thread op, moves with topic-runtime
       const sid = getSessionByThread(thread)
       if (sid) removeTopic(sid)
       await ctx.answerCallbackQuery({ text: topicDel[1] ? 'Deleted — auto-delete is on.' : 'Topic deleted.' }).catch(() => {})
@@ -7638,7 +7642,7 @@ bot.on('callback_query:data', async ctx => {
       await restoreResumedDials(pane, watcher)
       await flushEditorHeld(pane)
       if (progressMsg && await paneAlive(pane).catch(() => false))
-        await bot.api.editMessageText(progressMsg.chat.id, progressMsg.message_id,
+        await channel.editText({ chatId: String(progressMsg.chat.id), messageId: String(progressMsg.message_id) },
           '✅ Resumed — restored its previous mode/effort. Anything you sent meanwhile has been delivered.').catch(() => {})
     })()
     return
@@ -7661,7 +7665,7 @@ bot.on('callback_query:data', async ctx => {
     if (pane) {
       await ctx.editMessageText('🔄 Resuming that session in this topic — reconnecting…', { parse_mode: 'HTML' }).catch(() => {})
       if (!(await restartPaneSessionCore(pane, id)))
-        await bot.api.sendMessage(chat, '❌ Couldn’t resume that session here.', { message_thread_id: thread }).catch(() => {})
+        await channel.sendText(chat, '❌ Couldn’t resume that session here.', { threadId: String(thread) }).catch(() => {})
       return
     }
     // Topic's pane is gone → spawn the chosen session pinned to this topic (reopen the tab).
@@ -7786,7 +7790,7 @@ bot.on('callback_query:data', async ctx => {
       await ctx.answerCallbackQuery().catch(() => {})
       const dump = cleanPaneTail(await capturePane(pane).catch(() => ''), 60)
       for (const t of await outboundTargetsFor(pane))
-        await bot.api.sendMessage(t.chat, `<pre>${escapeHtml(dump)}</pre>`, { parse_mode: 'HTML', ...(t.thread ? { message_thread_id: t.thread } : {}) }).catch(() => {})
+        await channel.sendText(String(t.chat), `<pre>${escapeHtml(dump)}</pre>`, { ...(t.thread ? { threadId: String(t.thread) } : {}) }).catch(() => {})
       return
     }
     // Stale-tap guard: the pane must STILL show the same unrecognized screen the card was built for.
@@ -8064,7 +8068,7 @@ async function handleInbound(
     )
     if (msgId != null) {
       const emoji = permMatch[1]!.toLowerCase().startsWith('y') ? '✅' : '❌'
-      void bot.api.setMessageReaction(chat_id, msgId, [{ type: 'emoji', emoji: emoji as ReactionTypeEmoji['emoji'] }]).catch(() => {})
+      void channel.react({ chatId: chat_id, messageId: String(msgId) }, emoji).catch(() => {})
     }
     return
   }
@@ -8113,14 +8117,12 @@ async function handleInbound(
     const sweepTopic = sweepSid ? getTopicBySession(sweepSid) : undefined
     if (sweepSid && sweepTopic && !sweepTopic.firstMsgSwept) {
       updateTopic(sweepSid, { firstMsgSwept: true })
-      void bot.api.unpinChatMessage(chat_id, msgId).catch(() => {})   // no-op error if it wasn't auto-pinned
+      void channel.unpin({ chatId: chat_id, messageId: String(msgId) }).catch(() => {})   // no-op error if it wasn't auto-pinned
     }
   }
 
   if (access.ackReaction && msgId != null) {
-    void bot.api.setMessageReaction(chat_id, msgId, [
-      { type: 'emoji', emoji: access.ackReaction as ReactionTypeEmoji['emoji'] },
-    ]).catch(() => {})
+    void channel.react({ chatId: chat_id, messageId: String(msgId) }, access.ackReaction).catch(() => {})
   }
 
   // Transcription runs here, post-gate, so we never download or pay for an
@@ -8259,7 +8261,7 @@ async function reviveTopicSession(ctx: Context, sid: string, params: InboundPara
     const ok = await spawnSession(t.cwd, '-c', sid)
     if (!ok) {
       const msg = `❌ Couldn't revive the session in <code>${escapeHtml(t.cwd)}</code>.`
-      if (notice) await ctx.api.editMessageText(notice.chat.id, notice.message_id, msg, { parse_mode: 'HTML' }).catch(() => {})
+      if (notice) await channel.editText({ chatId: String(notice.chat.id), messageId: String(notice.message_id) }, msg).catch(() => {})
       else await ctx.reply(msg, { parse_mode: 'HTML' }).catch(() => {})
       return
     }
@@ -8277,14 +8279,14 @@ async function reviveTopicSession(ctx: Context, sid: string, params: InboundPara
         // prompt and the held message(s) have been delivered.
         if (notice) {
           const what = q.length > 1 ? `your ${q.length} messages were delivered` : 'your message was delivered'
-          await ctx.api.editMessageText(notice.chat.id, notice.message_id, `✅ Session back up — ${what}.`).catch(() => {})
+          await channel.editText({ chatId: String(notice.chat.id), messageId: String(notice.message_id) }, `✅ Session back up — ${what}.`).catch(() => {})
         }
         process.stderr.write(`daemon: revived session ${sid} in ${t.cwd} (pane ${pane}) — delivered ${q.length} queued message(s)\n`)
         return
       }
     }
     const slow = '⚠️ Session revived but didn\'t reach a prompt in time — resend your message once it settles.'
-    if (notice) await ctx.api.editMessageText(notice.chat.id, notice.message_id, slow).catch(() => {})
+    if (notice) await channel.editText({ chatId: String(notice.chat.id), messageId: String(notice.message_id) }, slow).catch(() => {})
     else await ctx.reply(slow).catch(() => {})
   } finally { revivalQueues.delete(sid) }
 }
@@ -8335,7 +8337,7 @@ bot.on('message_reaction', async ctx => {
     const chatId = String(mr.chat.id)
     const key = `${mr.chat.id}:${mr.message_id}`
     const card = promptCards.get(key)
-    const editCard = (html: string) => bot.api.editMessageText(chatId, mr.message_id, html, { parse_mode: 'HTML' }).catch(() => {})
+    const editCard = (html: string) => channel.editText({ chatId: String(chatId), messageId: String(mr.message_id) }, html).catch(() => {})
 
     if (added.includes('👍') || added.includes('👌')) {
       if (!card) return   // 👍 on a non-tracked message → ignore
@@ -8380,7 +8382,7 @@ bot.on('message_reaction', async ctx => {
       if (!pane) return
       const isFocused = pane === focus.activePaneId
       await performStop({ paneId: pane, watcher: isFocused ? focus.paneWatcher : null, isFocused })
-      await bot.api.sendMessage(chatId, '⏹ Esc').catch(() => {})
+      await channel.sendText(String(chatId), '⏹ Esc').catch(() => {})
     }
   } catch (e) {
     process.stderr.write(`daemon: message_reaction handler failed: ${e}\n`)
@@ -8448,7 +8450,7 @@ bot.on('edited_message', async ctx => {
       ts: new Date((em.edit_date ?? em.date) * 1000).toISOString(),
     },
   }, targetPane)
-  void bot.api.setMessageReaction(chat, em.message_id, [{ type: 'emoji', emoji: '✍' }]).catch(() => {})
+  void channel.react({ chatId: String(chat), messageId: String(em.message_id) }, '✍').catch(() => {})
 })
 
 bot.on('message:text', async ctx => {
@@ -8481,7 +8483,7 @@ bot.on('message:text', async ctx => {
       // force_reply can't keep re-grabbing the input every time the chat reopens.
       if (/^\/?(cancel|nvm|nevermind|never\s?mind|skip|stop)$/i.test(text.trim())) {
         replyTargets.delete(replyKey)
-        await ctx.api.deleteMessage(ctx.chat!.id, replyTo.message_id).catch(() => {})
+        await channel.deleteMessage({ chatId: String(ctx.chat!.id), messageId: String(replyTo.message_id) }).catch(() => {})
         await ctx.reply('✖️ Cancelled.').catch(() => {})
         return
       }
@@ -8497,7 +8499,7 @@ bot.on('message:text', async ctx => {
           const repo = await repoForDir(dir)
           if (repo) {
             topicCreatePending.set(target.threadId, { name: target.name, dir, repo })
-            await ctx.api.deleteMessage(ctx.chat!.id, replyTo.message_id).catch(() => {})   // disarm the force-reply
+            await channel.deleteMessage({ chatId: String(ctx.chat!.id), messageId: String(replyTo.message_id) }).catch(() => {})   // disarm the force-reply
             await ctx.reply(
               `📂 <code>${escapeHtml(dir)}</code> is inside <code>${escapeHtml(basename(repo))}</code> — how should “${escapeHtml(target.name || basename(dir))}” run?`,
               { parse_mode: 'HTML', reply_markup: topicCreateKeyboard(target.threadId, dir, repo) },
@@ -8525,7 +8527,7 @@ bot.on('message:text', async ctx => {
           catch { topicBranchCache.set(sid, '') }
           const ok = await spawnSession(dir, '', sid)
           if (!ok) removeTopic(sid)
-          await ctx.api.deleteMessage(ctx.chat!.id, replyTo.message_id).catch(() => {})   // disarm the force-reply
+          await channel.deleteMessage({ chatId: String(ctx.chat!.id), messageId: String(replyTo.message_id) }).catch(() => {})   // disarm the force-reply
           const note = created ? ' (📁 created it for you)' : ''
           await ctx.reply(ok
             ? `🚀 Starting this topic's session in <code>${escapeHtml(dir)}</code>${note} — type here to drive it once it's up.`
@@ -8592,7 +8594,7 @@ bot.on('message:text', async ctx => {
           await ctx.reply(a.budgetDaily
             ? `💸 Daily budget set to $${a.budgetDaily.toFixed(2)} — I'll warn at 80% and at the cap.`
             : '💸 Daily budget off.')
-          if (target.panelMsgId) await bot.api.editMessageText(Number(ctx.chat!.id), target.panelMsgId, budgetPanelText(), { parse_mode: 'HTML', reply_markup: budgetPanelKeyboard() }).catch(() => {})
+          if (target.panelMsgId) await channel.editText({ chatId: String(ctx.chat!.id), messageId: String(target.panelMsgId) }, budgetPanelText(), { buttons: kbToButtons(budgetPanelKeyboard()) }).catch(() => {})
           return
         }
         // API key for a hosted TTS engine — stored in .env, the key message deleted from chat.
@@ -8802,7 +8804,7 @@ bot.on('message:photo', async ctx => {
     const photos = ctx.message.photo
     const best = photos[photos.length - 1]
     try {
-      const file = await ctx.api.getFile(best.file_id)
+      const file = await ctx.api.getFile(best.file_id)   // P2-migrate: bespoke filename scheme differs from downloadAttachment
       if (!file.file_path) return undefined
       const url = `https://api.telegram.org/file/bot${TOKEN}/${file.file_path}`
       const res = await fetch(url)
@@ -8924,7 +8926,7 @@ function handleShimConnection(socket: net.Socket): void {
             .row()
             .text('💬 Deny & guide', `perm:guide:${request_id}`)
           for (const chat_id of access.allowFrom) {
-            void bot.api.sendMessage(chat_id, permText, { parse_mode: 'HTML', reply_markup: keyboard }).catch(e => {
+            void channel.sendText(chat_id, permText, { buttons: kbToButtons(keyboard) }).catch(e => {
               process.stderr.write(`daemon: permission_request to ${chat_id} failed: ${e}\n`)
             })
           }
@@ -9439,7 +9441,7 @@ void (async () => {
           // Announce a crash recovery once, only after we're actually connected.
           if (crashRestart) {
             crashRestart = false
-            for (const chat_id of loadAccess().allowFrom) void bot.api.sendMessage(chat_id, '♻️ Daemon restarted after a crash.').catch(() => {})
+            for (const chat_id of loadAccess().allowFrom) void channel.sendText(chat_id, '♻️ Daemon restarted after a crash.').catch(() => {})
           }
           const bridgeCommands = [
               { command: 'start', description: 'Welcome + everything this bot can do' },
@@ -9480,6 +9482,7 @@ void (async () => {
           // bot showed no commands next to other bots (e.g. Mimo) in a shared group. Commands work per-topic
           // (targetPaneOf routes by thread). Send-only avatar/posting bots have no update handler, so they
           // intentionally advertise none.
+          // P2-migrate: command registration lives in the bot.start onStart loop, which moves into the adapter's start()
           void bot.api.setMyCommands(bridgeCommands, { scope: { type: 'all_private_chats' } }).catch(() => {})
           void bot.api.setMyCommands(bridgeCommands, { scope: { type: 'all_group_chats' } }).catch(() => {})
         },
