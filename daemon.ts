@@ -25,7 +25,7 @@ import { acquireTokenLock } from './token-lock.ts'
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
 import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen } from './prompt.ts'
-import { resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, currentTurnActivity, currentTurnTokens, listRecentSessions, findSessionCwd, searchTranscripts } from './transcript.ts'
+import { resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, currentTurnActivity, currentTurnTokens, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter } from './transcript.ts'
 import {
   initAccounts, listAccounts, accountByName, accountForTranscript, accountForProjectsDir,
   allProjectsDirs, addAccount, removeAccount, renameAccount, accountLoggedIn, healAccountConfigs, healMainStatusline,
@@ -3501,6 +3501,50 @@ async function relaySlashCommand(
 ): Promise<void> {
   await injectSlash(paneId, watcher, command)
   if (react) void channel.react({ chatId: chat_id, messageId: String(message_id) }, '👍').catch(() => {})
+}
+
+// `! cmd` → the session's bash mode. Bracketed paste can never trigger the TUI's `!` prefix (the
+// paste lands as literal text), so type `!` as a real keystroke first to switch modes, THEN paste
+// the (possibly multiline) command body. Uses its own tmux buffer, not INJECT_BUFFER — a concurrent
+// inbound paste could clobber a shared buffer mid-flight.
+const BANG_BUFFER = 'tg-bang'
+async function relayBashCommand(t: CommandTarget, command: string, chat_id: string, message_id: number): Promise<void> {
+  const sentAt = Date.now()
+  const run = async () => {
+    if (!(await paneAlive(t.paneId))) return false
+    await sendKeys(t.paneId, ['!'])
+    await waitForSettle(t.paneId, 150, 1500)   // let the TUI switch to shell mode before the paste
+    await exec('tmux', ['set-buffer', '-b', BANG_BUFFER, '--', command], { timeout: 2000 })
+    await exec('tmux', ['paste-buffer', '-d', '-p', '-b', BANG_BUFFER, '-t', t.paneId], { timeout: 2000 })
+    await waitForSettle(t.paneId, 200, 4000)
+    await sendKeys(t.paneId, ['Enter'])
+    await waitForSettle(t.paneId, 300, 5000)
+    return true
+  }
+  const ok = await (t.watcher ? t.watcher.withInjection(run) : run())
+  if (!ok) {
+    await channel.sendText(chat_id, '⚠️ Couldn\'t reach the session pane.', t.replyThread ? { threadId: String(t.replyThread) } : undefined).catch(() => {})
+    return
+  }
+  void channel.react({ chatId: chat_id, messageId: String(message_id) }, '👍').catch(() => {})
+
+  const file = await transcriptForPane(t.paneId, await paneCwd(t.paneId))
+  if (!file) return
+  // Poll for the command's exit: bash-mode output lands as its own transcript entry, separate
+  // from the assistant's follow-up commentary (which the existing outbound relay already delivers).
+  for (let waited = 0; waited < 90_000; waited += 1000) {
+    await new Promise(r => setTimeout(r, 1000))
+    const result = bashResultAfter(file, sentAt)
+    if (!result) continue
+    const out = result.stdout + (result.stderr ? '\n[stderr]\n' + result.stderr : '')
+    if (!out.trim()) return   // no output — the assistant's own comment covers it
+    const truncated = out.length > 3500 ? out.slice(0, 3500) + '\n… (truncated)' : out
+    await channel.sendText(chat_id, `<pre>${escapeHtml(truncated)}</pre>`,
+      t.replyThread ? { threadId: String(t.replyThread) } : undefined).catch(() => {})
+    return
+  }
+  // Still running after 90s — say nothing; the output will still reach the session and the
+  // assistant will comment when it eventually finishes.
 }
 
 // /model <name> gets a confirmation MESSAGE (not just the 👍 ack) naming the model the session
@@ -8755,6 +8799,25 @@ bot.on('message:text', async ctx => {
       return
     }
     void relaySlashCommand(t.paneId, t.watcher, text, chat_id, msgId)
+    return
+  }
+
+  // `! cmd` → the session's bash mode. Inbound text is bracket-pasted, which can never trigger
+  // the TUI's `!` prefix (paste is literal), so relay it as real keystrokes instead. `!!`/`!!!`
+  // (exclamation-only) are excluded so they fall through as ordinary text.
+  if (/^!\s*\S/.test(text) && !text.startsWith('!!') && (ctx.chat?.type === 'private' || isTopicMode())) {
+    const result = gate(ctx)
+    if (result.action !== 'deliver') {
+      if (result.action === 'pair') {
+        const lead = result.isResend ? 'Still pending' : 'Pairing required'
+        await ctx.reply(`🔗 ${lead} — run in Claude Code:\n\n/telegram:access pair ${result.code}`)
+      }
+      return
+    }
+    const t = await commandTarget(ctx)
+    if (!t) return
+    await dismissPendingEffortConfirm(t.paneId)
+    void relayBashCommand(t, text.replace(/^!\s*/, ''), String(ctx.chat!.id), ctx.message.message_id)
     return
   }
 
