@@ -452,7 +452,22 @@ export async function updateTopicPins(): Promise<void> {
     if (paneId) {
       const text = await statusCardText(paneId)
       const key = 'general'
-      const existing = sessionPins.get(key)
+      // General's pin banner shows the chat-wide NEWEST pinned message (ordered by message id, not
+      // pin time — re-pinning an old message doesn't restore it), while each topic's banner filters
+      // to its own thread. So every topic-card pin with a higher id than the General card hijacks
+      // General's banner — the user sees some other topic's (often stale/closed) card there. When
+      // outranked, recreate the General card so it's the newest pin again: unpin + best-effort
+      // delete (Telegram refuses deletes of >48h-old bot messages — the unpin is what matters),
+      // drop the tracking so the create branch below sends a fresh card this same tick.
+      let existing = sessionPins.get(key)
+      const topTopicPin = Math.max(0, ...[...sessionPins.entries()].filter(([k]) => k.startsWith('topic:')).map(([, m]) => m))
+      if (existing && existing < topTopicPin) {
+        await deps.channel.unpin({ chatId: group, messageId: String(existing) }).catch(() => {})
+        await deps.channel.deleteMessage({ chatId: group, messageId: String(existing) }).catch(() => {})
+        cancelEdit(group, existing)
+        sessionPins.delete(key); pinTextCache.delete(key); persistSessionPins()
+        existing = undefined
+      }
       if (existing && pinTextCache.get(key) !== text) {
         scheduleEdit({ chat: group, mid: existing, source: 'pin', buttons: statusKeyboard(),
           render: () => text,
