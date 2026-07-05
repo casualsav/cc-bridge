@@ -1,7 +1,7 @@
 # claude-discord
 
-Drive a Claude Code session from **Discord**. The sibling of the Telegram bridge (`telegram@claude-tg`)
-in the same `claude-tg` marketplace: inbound text and files are typed into the session's tmux pane,
+Drive a Claude Code session from **Discord**. The sibling of the Telegram bridge (`telegram@cc-bridge`)
+in the same `cc-bridge` marketplace: inbound text and files are typed into the session's tmux pane,
 replies are read back from its transcript, and permission prompts arrive as buttons. Connects over
 the Discord **gateway** — no public URL or tunnel needed.
 
@@ -13,4 +13,4 @@ signals, allowlist access control. Panels, schedulers, and voice are Telegram-on
 Follow **[`INSTALL.md`](INSTALL.md)** — it's written for a Claude Code agent to execute: create the
 Discord app + bot (with the MESSAGE CONTENT intent), write `~/.claude/channels/discord/.env` +
 `access.json`, enable the plugin, add the SessionStart hook, restart once, then launch work sessions
-with `claude-tg`.
+with `ccb`.

@@ -18,7 +18,7 @@ const CHANNELS_DIR = join(homedir(), '.claude', 'channels')
 
 // Newest plugin-cache copy of daemon.ts (version dirs sort ascending; take the last).
 // Marketplace id (also the plugin-cache dir name).
-const MKT_IDS = ['claude-tg']
+const MKT_IDS = ['cc-bridge']
 function findDaemon(): string | null {
   const cacheRoot = join(homedir(), '.claude', 'plugins', 'cache')
   const base = MKT_IDS.map(n => join(cacheRoot, n, 'telegram')).find(p => existsSync(p))

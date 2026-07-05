@@ -64,7 +64,7 @@ export async function claudeVersion(): Promise<string | null> {
 // auto-applies; `updateChecks: false` pref disables.
 const UPDATE_NOTIFY_FILE = join(STATE_DIR, 'update-notify.json')
 // Marketplace clone dir (also the plugin-cache dir name).
-const MP_DIR = join(homedir(), '.claude', 'plugins', 'marketplaces', 'claude-tg')
+const MP_DIR = join(homedir(), '.claude', 'plugins', 'marketplaces', 'cc-bridge')
 
 // True only when `latest` is strictly newer — a locally-deployed bridge can run AHEAD of the
 // marketplace remote, and `latest !== cur` would announce that as an "update" (a downgrade).

@@ -1,4 +1,4 @@
-# claude-tg
+# cc-bridge
 
 A Claude Code ↔ Telegram bridge. Drive a Claude Code session from Telegram — send messages and
 files, get replies with native formatting, approve permission prompts with a tap, switch modes,
@@ -54,7 +54,7 @@ access).
 **`bun run deploy [patch|minor|major|x.y.z]`** (default `patch`) → test live → commit. The script
 (`scripts/deploy.ts`) does the whole ritual atomically: bumps `version` in both
 `.claude-plugin/plugin.json` and `marketplace.json`, syncs the git-tracked files into the cache
-(`~/.claude/plugins/cache/claude-tg/telegram/<ver>/`) + the marketplace mirror,
+(`~/.claude/plugins/cache/cc-bridge/telegram/<ver>/`) + the marketplace mirror,
 installs deps if missing, type-checks in the cache (`bun build daemon.ts --target=bun` — grammy
 resolves only there), then restarts the daemon (the watchdog/SessionStart hook respawns it from the
 newest cache version) and verifies it came back on the new version. The type-check runs **before**
@@ -76,7 +76,7 @@ change**, then push. `bun run deploy` does this bump for you (both files); if yo
 do it yourself. End-users upgrading a same-version cache must force-refresh (see
 `off-mcp/INSTALL.md` §0.6).
 
-**One repo — `origin` → `casualsav/claude-tg`:** this is both the source of truth and the marketplace
+**One repo — `origin` → `casualsav/cc-bridge`:** this is both the source of truth and the marketplace
 that end-user installs pull from, so a plain `git push` (which `bun run deploy --commit` runs) both
 ships the code and releases it. No mirror, no dual-push — there is no second repo in the loop.
 

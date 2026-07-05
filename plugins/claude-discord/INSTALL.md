@@ -9,9 +9,10 @@ public URL / tunnel needed.
 **Gather all configuration up front (Steps 1–2) and write it before anything restarts**, so the
 single restart in Step 4 brings everything up already configured.
 
-This is the Discord sibling of the Telegram bridge (`telegram@claude-tg`). Both share the same
-`claude-tg` marketplace and the same `@tg_bridge` tmux pane marker — one launcher drives every
-channel. Its state lives in its **own** dir, `~/.claude/channels/discord/`, isolated from the others.
+This is the Discord sibling of the Telegram bridge (`telegram@cc-bridge`). Both share the same
+`cc-bridge` marketplace and the same `ccb` launcher — a work pane carries a marker per channel
+(`@telegram`/`@slack`/`@discord`). Its state lives in its **own** dir, `~/.claude/channels/discord/`,
+isolated from the others.
 
 ## 0. Prerequisites
 - [Bun](https://bun.sh) on PATH and `tmux` (the daemon drives sessions through tmux panes).
@@ -61,12 +62,12 @@ In `~/.claude/settings.json`, add the marketplace (shared with Telegram — skip
 enable this plugin, and add the daemon-resilience hook:
 ```json
 "extraKnownMarketplaces": {
-  "claude-tg": { "source": { "source": "github", "repo": "casualsav/claude-tg" } }
+  "cc-bridge": { "source": { "source": "github", "repo": "casualsav/cc-bridge" } }
 },
-"enabledPlugins": { "discord@claude-tg": true },
+"enabledPlugins": { "discord@cc-bridge": true },
 "hooks": {
   "SessionStart": [ { "hooks": [
-    { "type": "command", "command": "bun \"$(ls -d ~/.claude/plugins/cache/claude-tg/discord/*/ 2>/dev/null | sort -V | tail -1)ensure-discord-daemon.ts\" >/dev/null 2>&1 || true" }
+    { "type": "command", "command": "bun \"$(ls -d ~/.claude/plugins/cache/cc-bridge/discord/*/ 2>/dev/null | sort -V | tail -1)ensure-discord-daemon.ts\" >/dev/null 2>&1 || true" }
   ] } ]
 }
 ```
@@ -98,10 +99,10 @@ should reply. If they aren't in `allowFrom` yet, the reply tells them exactly wh
 add it to `access.json` and they message again.
 
 ## 6. Run a session — the daemon finds it
-Launch work sessions the **same way as Telegram** — with the `claude-tg` launcher (it tags the pane
-with the `@tg_bridge` marker every channel's daemon scans for):
+Launch work sessions the **same way as Telegram** — with the `ccb` launcher (it tags the pane with
+`@discord=1`, discoverable by this channel's daemon; `ccb --pin discord` sets `@discord=pin` to prefer it):
 ```sh
-claude-tg   # inside a tmux pane
+ccb   # inside a tmux pane
 ```
 The Discord daemon auto-discovers the marked pane and binds to it. From Discord you then get:
 two-way chat with the session, file send/receive, and **permission prompts as tap-to-approve

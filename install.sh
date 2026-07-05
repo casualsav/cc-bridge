@@ -3,12 +3,12 @@
 # shell entrypoint exists only to: ensure bun is present (chicken-and-egg — can't run bun
 # setup.ts without bun), fetch/refresh the repo, then hand off to the wizard.
 #
-#   curl -fsSL https://raw.githubusercontent.com/casualsav/claude-tg/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/casualsav/cc-bridge/main/install.sh | bash
 #
 # Overridable: PC_DIR (clone location), PC_REPO (git URL).
 set -euo pipefail
 
-REPO_URL="${PC_REPO:-https://github.com/casualsav/claude-tg}"
+REPO_URL="${PC_REPO:-https://github.com/casualsav/cc-bridge}"
 DEST="${PC_DIR:-$HOME/.claude-tg}"
 
 say() { printf '\033[1m%s\033[0m\n' "$*"; }

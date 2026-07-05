@@ -144,7 +144,7 @@ test('isProtectedWrite: the protected root itself is fenced', () => {
 })
 test('isProtectedWrite: descendants (settings.json, plugin cache, .env) are fenced', () => {
   expect(isProtectedWrite('/home/u/.claude/settings.json', ROOTS)).toBe(true)
-  expect(isProtectedWrite('/home/u/.claude/plugins/cache/claude-tg/telegram/0.3.32/daemon.ts', ROOTS)).toBe(true)
+  expect(isProtectedWrite('/home/u/.claude/plugins/cache/cc-bridge/telegram/0.3.32/daemon.ts', ROOTS)).toBe(true)
   expect(isProtectedWrite('/home/u/.claude/channels/telegram/.env', ROOTS)).toBe(true)
 })
 test('isProtectedWrite: an unrelated project path is allowed', () => {

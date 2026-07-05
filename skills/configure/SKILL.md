@@ -201,7 +201,7 @@ The switch is the presence of the plugin's `.mcp.json`. Find the plugin dir (new
 under the cache) and rename:
 
 ```sh
-DIR=$(ls -d ~/.claude/plugins/cache/claude-tg/telegram/*/ | sort -V | tail -1)
+DIR=$(ls -d ~/.claude/plugins/cache/cc-bridge/telegram/*/ | sort -V | tail -1)
 # on:  mv "$DIR/mcp.json.disabled" "$DIR/.mcp.json"
 # off: mv "$DIR/.mcp.json" "$DIR/mcp.json.disabled"
 ```
@@ -284,19 +284,19 @@ it? Don't delete state unless they explicitly choose the full reset.
 4. **Remove the plugin** — this skill can't run `/plugin` commands, so print
    these for the user to run in their session:
    ```
-   /plugin uninstall telegram@claude-tg
-   /plugin marketplace remove claude-tg
+   /plugin uninstall telegram@cc-bridge
+   /plugin marketplace remove cc-bridge
    ```
    The plugin is cached, so to guarantee a fresh fetch on any reinstall, from a
    shell:
    ```
-   rm -rf ~/.claude/plugins/marketplaces/claude-tg
-   rm -rf ~/.claude/plugins/cache/claude-tg
+   rm -rf ~/.claude/plugins/marketplaces/cc-bridge
+   rm -rf ~/.claude/plugins/cache/cc-bridge
    ```
    To reinstall later:
    ```
-   /plugin marketplace add casualsav/claude-tg
-   /plugin install telegram@claude-tg
+   /plugin marketplace add casualsav/cc-bridge
+   /plugin install telegram@cc-bridge
    ```
    Restart Claude Code to apply either removal or reinstall.
 

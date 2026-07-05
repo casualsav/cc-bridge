@@ -5,7 +5,7 @@
 
 ## Decisions (settled — do not relitigate in workers)
 
-1. **One repo, three plugins.** `.claude-plugin/marketplace.json` lists `claude-tg`,
+1. **One repo, three plugins.** `.claude-plugin/marketplace.json` lists `cc-bridge`,
    `claude-slack`, `claude-discord`, independently versioned. `origin` stays the single
    source of truth and marketplace.
 2. **Per-platform daemon processes**, not one multi-adapter daemon. Each channel gets its

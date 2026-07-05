@@ -1,4 +1,4 @@
-## Claude-tg
+## cc-bridge (formerly claude-tg)
 
 <p align="center">
   <img src="assets/telegram-demo.jpg" width="380" alt="Claude Code driven from Telegram — live thinking, pinned status card with model, usage and context">
@@ -67,7 +67,7 @@ The same marketplace ships two sibling bridges — **[claude-slack](plugins/clau
 **[claude-discord](plugins/claude-discord/)** — that drive a Claude Code session from those
 platforms with the same model: inbound text/files typed into the session's tmux pane, replies read
 from the transcript, permission prompts as tap-to-approve buttons. They're independently versioned
-plugins in the one `claude-tg` marketplace, each with its own state dir and daemon; the same
+plugins in the one `cc-bridge` marketplace, each with its own state dir and daemon; the same
 `claude-tg` launcher (the `@tg_bridge` pane marker) drives every channel.
 
 MVP surface today: two-way chat, file send/receive, permission/reaction controls, allowlist access.

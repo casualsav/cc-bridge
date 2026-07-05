@@ -5,7 +5,7 @@ used, and a suggested repo-side fix. Off-MCP mode, Linux aarch64, bun 1.3.14, Cl
 2.1.168, Python 3.12 (PEP 668 externally-managed), tmux 3.4.
 
 State dir: `~/.claude/channels/telegram/` · plugin cache:
-`~/.claude/plugins/cache/claude-tg/telegram/0.0.6/`
+`~/.claude/plugins/cache/cc-bridge/telegram/0.0.6/`
 
 ---
 
@@ -13,7 +13,7 @@ State dir: `~/.claude/channels/telegram/` · plugin cache:
 **Symptom:** `git clone https://github.com/...` → `fatal: could not read Username for
 'https://github.com'`.
 **Cause:** repo is private; plain git has no credentials.
-**Fix:** `gh repo clone casualsav/claude-tg` (uses the authenticated `gh` token).
+**Fix:** `gh repo clone casualsav/cc-bridge` (uses the authenticated `gh` token).
 **Repo idea:** note the `gh` clone in the README for private/preview installs.
 
 ## 2. Stale/partial plugin cache → grammy `EACCES` (the big one)

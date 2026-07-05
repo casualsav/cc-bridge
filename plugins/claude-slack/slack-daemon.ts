@@ -19,8 +19,8 @@ import {
   SLACK_INBOX_DIR, SLACK_HEARTBEAT_FILE, loadSlackEnv,
 } from './slack-paths.ts'
 
-const BRIDGE_PANE_OPT = '@tg_bridge'   // same adopt marker as Telegram — a Claude session is a Claude session
-const PIN_PANE_OPT = '@slack_bridge'       // channel-specific pin: when set on any pane, it wins over auto-discovery
+const CHAN_PANE_OPT = '@slack'         // this channel's adopt marker: "1" discoverable, "pin" pinned-preferred
+const LEGACY_PANE_OPT = '@tg_bridge'   // legacy shared marker (value "1") — panes from pre-ccb launchers
 const INJECT_BUFFER = 'slk-inbound'
 
 function log(msg: string): void {
@@ -75,15 +75,17 @@ function loadAllow(): string[] {
 async function findBridgePanes(): Promise<{ id: string; activity: number; cwdLive: boolean; pinned: boolean }[]> {
   let out = ''
   try {
-    const { stdout } = await exec('tmux', ['list-panes', '-a', '-F', `#{pane_id}\t#{${BRIDGE_PANE_OPT}}\t#{window_activity}\t#{pane_current_path}\t#{${PIN_PANE_OPT}}`], { timeout: 3000 })
+    const { stdout } = await exec('tmux', ['list-panes', '-a', '-F', `#{pane_id}\t#{${LEGACY_PANE_OPT}}\t#{window_activity}\t#{pane_current_path}\t#{${CHAN_PANE_OPT}}`], { timeout: 3000 })
     out = stdout
   } catch { return [] }
   const panes: { id: string; activity: number; cwdLive: boolean; pinned: boolean }[] = []
   for (const line of out.split('\n')) {
     if (!line.trim()) continue
-    const [paneId, mark, activity, cwd, pin] = line.split('\t')
-    if (mark !== '1' && pin !== '1') continue   // default instance id (slot 1), or channel pin
-    panes.push({ id: paneId, activity: Number(activity) || 0, cwdLive: !!cwd && existsSync(cwd), pinned: pin === '1' })
+    const [paneId, legacy, activity, cwd, chan] = line.split('\t')
+    // Discoverable: this channel's marker is set ("1" discoverable, "pin" pinned), or the legacy
+    // shared @tg_bridge marker ("1") from a pre-ccb launcher pane.
+    if (chan !== '1' && chan !== 'pin' && legacy !== '1') continue
+    panes.push({ id: paneId, activity: Number(activity) || 0, cwdLive: !!cwd && existsSync(cwd), pinned: chan === 'pin' })
   }
   return panes
 }
@@ -147,7 +149,7 @@ async function handleMessage(m: InboundMsg): Promise<void> {
   if (m.isEdit) return   // MVP: don't re-inject edits
 
   const pane = activePane
-  if (!pane) { await channel.sendText(m.chatId, 'No bridge session is attached yet — launch one with `claude-tg`.', m.threadId ? { threadId: m.threadId } : {}).catch(() => {}); return }
+  if (!pane) { await channel.sendText(m.chatId, 'No bridge session is attached yet — launch one with `ccb`.', m.threadId ? { threadId: m.threadId } : {}).catch(() => {}); return }
   replyTarget = { chatId: m.chatId, ...(m.threadId ? { threadId: m.threadId } : {}) }
 
   // Plain-text controls: exactly "stop"/"esc" → Escape into the pane (interrupt), no inject.

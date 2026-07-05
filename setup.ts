@@ -300,13 +300,13 @@ function patchSettings(mode: Mode): void {
   } else mkdirSync(join(homedir(), '.claude'), { recursive: true })
 
   s.extraKnownMarketplaces = { ...(s.extraKnownMarketplaces || {}),
-    'claude-tg': { source: { source: 'github', repo: 'casualsav/claude-tg' } } }
-  s.enabledPlugins = { ...(s.enabledPlugins || {}), 'telegram@claude-tg': true }
+    'cc-bridge': { source: { source: 'github', repo: 'casualsav/cc-bridge' } } }
+  s.enabledPlugins = { ...(s.enabledPlugins || {}), 'telegram@cc-bridge': true }
   s.statusLine = { type: 'command', command: 'bash ~/.claude/statusline-command.sh' }
   // Two SessionStart hooks, same as off-mcp/INSTALL.md §2: ensure-daemon brings the bridge up,
   // stamp-transcript writes each session's transcript path (off-MCP outbound + account routing
   // need it — without it the daemon falls back to slower pane-based discovery).
-  const cacheGlob = '$(ls -d ~/.claude/plugins/cache/claude-tg/telegram/*/ 2>/dev/null | sort -V | tail -1)'
+  const cacheGlob = '$(ls -d ~/.claude/plugins/cache/cc-bridge/telegram/*/ 2>/dev/null | sort -V | tail -1)'
   s.hooks = s.hooks || {}
   const sessionStart = (s.hooks.SessionStart ||= [])
   for (const script of ['ensure-daemon.ts', 'stamp-transcript.ts']) {
@@ -335,21 +335,23 @@ function patchSettings(mode: Mode): void {
 
   if (mode === 'off-mcp') {
     const bashrc = join(homedir(), process.env.SHELL?.includes('zsh') ? '.zshrc' : '.bashrc')
-    // One launch FUNCTION taking an optional instance slot (default 1) and an optional account
-    // name: `claude-tg`, `claude-tg 2`, `claude-tg 1 work`. The adopt marker is `tmux set -p
-    // @tg_bridge <slot>` — a tmux PANE option, so it never touches claude's args (decoupled from
-    // the autonomy flag, immune to claude rejecting unknown flags) and the slot routes the pane to
-    // the matching bridge daemon. The account arg pins the session to an alternate config dir
-    // (~/.claude-<name>, the /account convention) via CLAUDE_CONFIG_DIR. `claude-tg` starts with
+    // The primary launch FUNCTION `ccb` (`claude-tg` kept as a back-compat alias) taking an optional
+    // instance slot (default 1) and an optional account name: `ccb`, `ccb 2`, `ccb 1 work`. The adopt
+    // marker is `tmux set -p @tg_bridge <slot>` — a tmux PANE option, so it never touches claude's
+    // args (decoupled from the autonomy flag, immune to claude rejecting unknown flags) and the slot
+    // routes the pane to the matching bridge daemon. An optional leading `--pin slack|discord` stamps
+    // that channel's pin option (`@slack`/`@discord`). The account arg pins the session to an alternate
+    // config dir (~/.claude-<name>, the /account convention) via CLAUDE_CONFIG_DIR. `ccb` starts with
     // --allow-dangerously-skip-permissions (normal start, bypass switchable on demand from /mode).
     const want: [string, string][] = [
-      ['claude-tg', 'claude-tg()   { tmux set -p @tg_bridge "${1:-1}" 2>/dev/null; if [ -n "$2" ]; then CLAUDE_CONFIG_DIR="$HOME/.claude-$2" claude --allow-dangerously-skip-permissions; else claude --allow-dangerously-skip-permissions; fi; }'],
+      ['ccb', 'ccb()         { local pin=""; if [ "$1" = "--pin" ]; then pin="$2"; shift 2; fi; tmux set -p @telegram "${1:-1}" 2>/dev/null; tmux set -p @slack "$([ "$pin" = slack ] && echo pin || echo 1)" 2>/dev/null; tmux set -p @discord "$([ "$pin" = discord ] && echo pin || echo 1)" 2>/dev/null; if [ -n "$2" ]; then CLAUDE_CONFIG_DIR="$HOME/.claude-$2" claude --allow-dangerously-skip-permissions; else claude --allow-dangerously-skip-permissions; fi; }'],
+      ['claude-tg', 'claude-tg()   { ccb "$@"; }'],
     ]
     const cur = existsSync(bashrc) ? readFileSync(bashrc, 'utf8') : ''
     // Match the function form or a legacy alias so a re-run doesn't double the launcher.
     const missing = want.filter(([n]) => !new RegExp(`(^|\\n)\\s*${n}\\s*\\(\\)|alias ${n}=`).test(cur)).map(([, a]) => a)
-    if (missing.length) { appendFileSync(bashrc, `\n${missing.join('\n')}\n`); console.log(C.ok(`  ✓ launcher → ${bashrc} (claude-tg)`)) }
-    else console.log(C.dim('  • claude-tg launcher already present'))
+    if (missing.length) { appendFileSync(bashrc, `\n${missing.join('\n')}\n`); console.log(C.ok(`  ✓ launcher → ${bashrc} (ccb)`)) }
+    else console.log(C.dim('  • ccb launcher already present'))
   }
 }
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -377,13 +379,13 @@ async function main(): Promise<void> {
   } else {
     console.log('Config is written and the plugin is wired. To finish:')
     console.log(`  1. ${C.b('Restart Claude Code once')} — the SessionStart hook brings the daemon up, fully configured.`)
-    if (mode === 'off-mcp') console.log(`  2. Launch work sessions with ${C.b('claude-tg')} inside ${C.b('tmux')} — the daemon auto-adopts the pane.`)
+    if (mode === 'off-mcp') console.log(`  2. Launch work sessions with ${C.b('ccb')} inside ${C.b('tmux')} — the daemon auto-adopts the pane.`)
     else console.log(`  2. ${C.b('MCP mode:')} the wizard left the server enabled; launch work sessions with plain ${C.b('claude')}.`)
     console.log(`  3. Message your bot — it should reply.${cfg.telegramId ? '' : ' (Approve your first DM\'s pairing code with /telegram:access pair <code>.)'}`)
   }
   if (mode === 'off-mcp') {
     console.log(`\n${C.b('Launch alias')} ${C.dim('(reload your shell or `source` the rc first):')}`)
-    console.log(`  ${C.b('claude-tg')}    starts safe — permission prompts relay to Telegram; flip to full bypass on demand from /mode`)
+    console.log(`  ${C.b('ccb')}    starts safe — permission prompts relay to Telegram; flip to full bypass on demand from /mode (${C.dim('claude-tg still works')})`)
     console.log(C.dim('  It bridges automatically (tags the pane with the @tg_bridge tmux option). Run inside tmux.'))
   }
   console.log(C.dim('\n  Voice replies (TTS), live stream mode, budgets and more are configurable from chat: /settings.'))
@@ -400,7 +402,7 @@ const BRIDGE_SESSION = 'claude-bridge'
 // the bridge tmux session persists across it. Best-effort: any miss degrades to manual next-steps.
 async function verifyAndLaunch(cfg: Config): Promise<boolean> {
   section('5 · Verifying + launching the bridge')
-  if (!which('claude')) { console.log(C.warn('  • the `claude` CLI isn\'t on PATH — skipping launch. Install Claude Code, then start a session with claude-tg.')); return false }
+  if (!which('claude')) { console.log(C.warn('  • the `claude` CLI isn\'t on PATH — skipping launch. Install Claude Code, then start a session with ccb.')); return false }
   if (!(await askYN('  Bring the bridge up and verify now?', true))) return false
 
   // grammy must resolve for the checkout daemon to start.
@@ -426,7 +428,7 @@ async function verifyAndLaunch(cfg: Config): Promise<boolean> {
   if (tmuxHasSession(BRIDGE_SESSION)) console.log(C.dim(`  • tmux session "${BRIDGE_SESSION}" already exists — reusing it`))
   else if (run('tmux', ['new-session', '-d', '-s', BRIDGE_SESSION, 'tmux set -p @tg_bridge 1 2>/dev/null; claude --allow-dangerously-skip-permissions']).ok)
     console.log(C.ok(`  ✓ bridge session "${BRIDGE_SESSION}" started`))
-  else { console.log(C.warn('  ⚠ couldn\'t start the tmux bridge session — start one with claude-tg after the restart.')); stopCheckoutDaemon(); return false }
+  else { console.log(C.warn('  ⚠ couldn\'t start the tmux bridge session — start one with ccb after the restart.')); stopCheckoutDaemon(); return false }
 
   const adopted = await waitForLog(/adopted off-MCP pane|focus pinned to/, 12_000, marker)
   console.log(adopted ? C.ok('  ✓ daemon adopted the bridge pane') : C.warn('  • daemon hasn\'t reported adopting the pane yet (it polls every few seconds — should bind shortly)'))

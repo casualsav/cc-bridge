@@ -24,7 +24,7 @@ const LOG_FILE = join(STATE_DIR, 'daemon.log')
 const PENDING_EVENTS = join(STATE_DIR, 'pending-events.jsonl')
 const SOCKET = join(STATE_DIR, 'daemon.sock')
 // Marketplace id (also the plugin-cache dir name).
-const MKT_ID = 'claude-tg'
+const MKT_ID = 'cc-bridge'
 const MP = join(HOME, '.claude', 'plugins', 'marketplaces', MKT_ID)
 const CACHE_BASE = join(HOME, '.claude', 'plugins', 'cache', MKT_ID, 'telegram')
 const BACKUP_BASE = join(HOME, '.claude', 'plugins', 'cache', MKT_ID, 'telegram-backups')

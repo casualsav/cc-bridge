@@ -873,7 +873,7 @@ function enqueueInboundInject(paneId: string, watcher: PaneWatcher, params: Inbo
 
 // Auto-provision off-MCP tooling so a plugin-less session works with no manual setup:
 //  - the `tg` actions CLI on PATH (send/react/edit),
-//  - a `claude-tg` launcher on PATH (works in shells that don't source .bashrc), and
+//  - a `ccb` launcher on PATH (plus `claude-tg` back-compat alias; works in shells that don't source .bashrc), and
 //  - a stable ensure-daemon launcher for the SessionStart hook to relaunch the daemon.
 // Re-run each startup so it tracks plugin upgrades. The ensure-daemon launcher globs the
 // cache at runtime, so it survives version bumps even while the daemon is down (post-
@@ -885,17 +885,25 @@ function provisionOffMcpTooling(): void {
     const binDir = [join(homedir(), '.bun', 'bin'), join(homedir(), '.local', 'bin')].find(d => existsSync(d))
     if (binDir) {
       writeFileSync(join(binDir, 'tg'), `#!/bin/sh\nexec bun ${tgctl} "$@"\n`, { mode: 0o755 })
-      // A `claude-tg` launcher on PATH — mirrors the .bashrc function but works in ANY shell
-      // (a fresh tmux window whose shell doesn't source .bashrc otherwise fails with "command
-      // not found"). Arg 1 = instance slot (default 1); arg 2 = Claude account name (optional).
-      // Warns if not inside tmux, since an unbridged session is the usual "no topic appeared" cause.
-      writeFileSync(join(binDir, 'claude-tg'),
-        `#!/bin/sh
-[ -z "$TMUX" ] && echo "claude-tg: not inside tmux — this session won't be bridged. Start tmux first (e.g. tmux new -s work), then rerun." >&2
-tmux set -p @tg_bridge "\${1:-1}" 2>/dev/null
+      // A `ccb` launcher on PATH (with `claude-tg` kept as a back-compat alias) — mirrors the
+      // .bashrc function but works in ANY shell (a fresh tmux window whose shell doesn't source
+      // .bashrc otherwise fails with "command not found"). Arg 1 = instance slot (default 1);
+      // arg 2 = Claude account name (optional). It stamps the per-channel adopt markers on the pane
+      // — @telegram=<slot> plus @slack=1 @discord=1 (discoverable; harmless when a channel isn't
+      // installed). An optional leading `--pin slack|discord` sets that channel's marker to "pin"
+      // (pinned-preferred) instead of "1". Warns if not inside tmux, since an unbridged session is
+      // the usual "no topic appeared" cause.
+      const ccb = `#!/bin/sh
+[ -z "$TMUX" ] && echo "ccb: not inside tmux — this session won't be bridged. Start tmux first (e.g. tmux new -s work), then rerun." >&2
+if [ "$1" = "--pin" ]; then pin="$2"; shift 2; else pin=""; fi
+tmux set -p @telegram "\${1:-1}" 2>/dev/null
+tmux set -p @slack "$([ "$pin" = slack ] && echo pin || echo 1)" 2>/dev/null
+tmux set -p @discord "$([ "$pin" = discord ] && echo pin || echo 1)" 2>/dev/null
 if [ -n "$2" ]; then exec env CLAUDE_CONFIG_DIR="$HOME/.claude-$2" claude --allow-dangerously-skip-permissions
 else exec claude --allow-dangerously-skip-permissions; fi
-`, { mode: 0o755 })
+`
+      writeFileSync(join(binDir, 'ccb'), ccb, { mode: 0o755 })
+      writeFileSync(join(binDir, 'claude-tg'), ccb, { mode: 0o755 })
     }
     // Stable ensure-daemon launcher: resolves the newest cache copy at run time (so it
     // works after a version bump, and when the daemon is down). The SessionStart hook
@@ -906,12 +914,12 @@ import { readdirSync, existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 const root = join(homedir(), '.claude', 'plugins', 'cache')
-const base = join(root, 'claude-tg', 'telegram')
+const base = join(root, 'cc-bridge', 'telegram')
 let t = null
 try { const vs = readdirSync(base).filter(v => /^\\d+\\.\\d+\\.\\d+$/.test(v)).sort((a, b) => a.localeCompare(b, undefined, { numeric: true })); for (const v of vs.reverse()) { const p = join(base, v, 'ensure-daemon.ts'); if (existsSync(p)) { t = p; break } } } catch {}
 if (t) await import(t)
 `, { mode: 0o755 })
-    process.stderr.write(`daemon: provisioned off-mcp tooling (tg + claude-tg CLI${binDir ? ` → ${binDir}` : ' — no bin dir'}, ensure-daemon)\n`)
+    process.stderr.write(`daemon: provisioned off-mcp tooling (tg + ccb/claude-tg CLI${binDir ? ` → ${binDir}` : ' — no bin dir'}, ensure-daemon)\n`)
   } catch (e) { process.stderr.write(`daemon: off-mcp provision failed: ${e}\n`) }
 }
 
@@ -1516,7 +1524,8 @@ let adoptedPaneId: string | null = null
 // version bump can reject — `--tg` did exactly that) and from autonomy mode. Daemon-spawned panes
 // set it themselves (see spawnSession); a user-launched bridge session sets it via the claude-tg
 // alias (`tmux set -p @tg_bridge <instance-id>`). A plain claude pane without it is never grabbed.
-const BRIDGE_PANE_OPT = '@tg_bridge'
+const TELEGRAM_PANE_OPT = '@telegram'  // this channel's adopt marker (value = instance id / slot)
+const BRIDGE_PANE_OPT = '@tg_bridge'   // legacy shared marker — panes launched by pre-ccb claude-tg functions
 
 // The marker's VALUE is the instance id, so multiple daemons on the SAME user/tmux server (each
 // with its own TELEGRAM_STATE_DIR + bot token) adopt only their own panes instead of fighting over
@@ -1589,15 +1598,17 @@ async function findOffMcpPanes(): Promise<string[]> {
   let out = ''
   try {
     const { stdout } = await exec('tmux',
-      ['list-panes', '-a', '-F', `#{pane_id}\t#{${BRIDGE_PANE_OPT}}\t#{pane_pid}`], { timeout: 3000 })
+      ['list-panes', '-a', '-F', `#{pane_id}\t#{${TELEGRAM_PANE_OPT}}\t#{pane_pid}\t#{${BRIDGE_PANE_OPT}}`], { timeout: 3000 })
     out = stdout
   } catch { return [] }
 
   const tagged: { paneId: string; panePid: number }[] = []
   for (const line of out.split('\n')) {
     if (!line.trim()) continue
-    const [paneId, mark, panePid] = line.split('\t')
-    if (mark !== INSTANCE_ID) continue    // not opted in for THIS instance (blank, or another daemon's)
+    const [paneId, mark, panePid, legacy] = line.split('\t')
+    // Opted in for THIS instance: the @telegram marker, or the legacy @tg_bridge marker (pre-ccb
+    // launcher panes). Both carry the slot as their value.
+    if (mark !== INSTANCE_ID && legacy !== INSTANCE_ID) continue
     if (sessions.has(paneId)) continue    // a registered (plugin/MCP) session — never adopt
     tagged.push({ paneId, panePid: Number(panePid) })
   }
@@ -1630,11 +1641,11 @@ function lastSessionCwd(): string | null {
 function adoptPane(paneId: string): void {
   offMcpPanes.add(paneId)
   // Stamp the adopt marker on the pane itself so it stays discoverable across daemon restarts and
-  // pane respawns — the discoverPanes rescan only adopts @tg_bridge-tagged panes, so a pane bound
-  // via the persisted adopted-pane file or the "Switch" button (not the claude-tg alias) would
+  // pane respawns — the discoverPanes rescan only adopts @telegram-tagged panes, so a pane bound
+  // via the persisted adopted-pane file or the "Switch" button (not the ccb launcher) would
   // otherwise get dropped on the next rescan. Self-heals those, plus sessions launched before the
   // tag convention existed. Fire-and-forget; idempotent.
-  void exec('tmux', ['set-option', '-p', '-t', paneId, BRIDGE_PANE_OPT, INSTANCE_ID], { timeout: 2000 }).catch(() => {})
+  void exec('tmux', ['set-option', '-p', '-t', paneId, TELEGRAM_PANE_OPT, INSTANCE_ID], { timeout: 2000 }).catch(() => {})
   focusOffMcpPane(paneId)
   process.stderr.write(`daemon: adopted off-MCP pane ${paneId} (auto-discovery)\n`)
   // Only announce a genuinely NEW pane. A daemon restart (frequent during dev, or on reboot)
@@ -2200,8 +2211,8 @@ async function hintNoSession(params: InboundParams): Promise<void> {
   lastNoSessionHintTs = Date.now()
   await channel.sendText(String(chat),
     '🕳️ <b>No active session</b> — your message is buffered. Start one in tmux to receive it:\n' +
-    '<code>claude-tg</code>   — safe start, bypass on demand from /mode\n' +
-    'The daemon auto-discovers the pane (the alias tags it with the <code>@tg_bridge</code> tmux option) and replays anything buffered.',
+    '<code>ccb</code>   — safe start, bypass on demand from /mode\n' +
+    'The daemon auto-discovers the pane (the launcher tags it with the <code>@telegram</code> tmux option) and replays anything buffered.',
     ).catch(() => {})
 }
 
@@ -4024,7 +4035,7 @@ async function runReadout(t: CommandTarget, chatId: string, kind: 'cost' | 'cont
 // 1024-char caption limit — the parsed text, not the HTML tags, counts toward it.
 function startHelpText(paired: boolean): string {
   const guide =
-    `✦ <b>claude-tg</b>\n` +
+    `✦ <b>cc-bridge</b>\n` +
     `Claude Code in your pocket — drive every session from Telegram.\n\n` +
     `💬 Send text, 📷 photos, 📎 files, 🎙️ voice — the reply comes straight back\n` +
     `👥 <code>/bind</code> a forum group — each session gets its own topic (📁 folder or 🌿 worktree); your main session lives in General (📌 <code>/claim</code>)\n` +
@@ -6103,7 +6114,13 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
     const { stdout } = await exec('tmux', ['new-window', '-d', '-P', '-F', '#{pane_id}', ...target, '-c', dir, cmd], { timeout: 5000 })
     const newPane = stdout.trim()
     if (newPane) {
-      try { await exec('tmux', ['set-option', '-p', '-t', newPane, BRIDGE_PANE_OPT, INSTANCE_ID], { timeout: 2000 }) } catch {}
+      // Offer the fresh pane to every channel, matching the `ccb` launcher: its slot on @telegram,
+      // plus @slack/@discord = "1" (discoverable; harmless when a channel isn't installed).
+      try {
+        await exec('tmux', ['set-option', '-p', '-t', newPane, TELEGRAM_PANE_OPT, INSTANCE_ID], { timeout: 2000 })
+        await exec('tmux', ['set-option', '-p', '-t', newPane, '@slack', '1'], { timeout: 2000 })
+        await exec('tmux', ['set-option', '-p', '-t', newPane, '@discord', '1'], { timeout: 2000 })
+      } catch {}
       // Pre-bound topic (user-created tab): stamp its sessionId at birth so discovery resolves
       // the pane straight to that topic instead of minting a fresh id + duplicate topic.
       if (presetSessionId) await stampPaneSession(newPane, presetSessionId)

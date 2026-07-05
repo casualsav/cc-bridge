@@ -1,5 +1,5 @@
 {
-  "name": "claude-tg",
+  "name": "cc-bridge",
   "owner": {
     "name": "casualsav"
   },
@@ -7,8 +7,8 @@
     {
       "name": "telegram",
       "source": "./",
-      "description": "claude-tg — drive Claude Code from Telegram. Built-in access control; manage pairing, allowlists, and policy via /telegram:access.",
-      "version": "0.3.66"
+      "description": "cc-bridge — drive Claude Code from Telegram. Built-in access control; manage pairing, allowlists, and policy via /telegram:access.",
+      "version": "0.3.67"
     },
     {
       "name": "slack",

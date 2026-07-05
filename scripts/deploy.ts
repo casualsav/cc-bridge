@@ -48,7 +48,7 @@ const GRAMMY_PIN = '1.41.1' // keep in sync with package.json + ensure-daemon.ts
 const REPO = dirname(import.meta.dir) // scripts/ → repo root
 // Marketplace id (also the plugin-cache parent dir name); the marketplace.json is SHARED by all
 // three plugins, each an entry keyed by its plugin `name`.
-const MKT_ID = 'claude-tg'
+const MKT_ID = 'cc-bridge'
 const CACHE_ROOT = join(homedir(), '.claude', 'plugins', 'cache', MKT_ID)
 const MKT = join(homedir(), '.claude', 'plugins', 'marketplaces', MKT_ID)
 // The shared marketplace manifest lives at the repo-root .claude-plugin — one file, all plugins.
@@ -70,12 +70,12 @@ function sh(cmd: string, args: string[], cwd?: string): { status: number; stdout
   return { status, stdout, stderr }
 }
 
-// `origin` (casualsav/claude-tg) is the single source of truth AND the marketplace end-user installs
+// `origin` (casualsav/cc-bridge) is the single source of truth AND the marketplace end-user installs
 // pull from — so a plain `git push` to origin both ships the code and releases it. No mirror/dual-push.
 
 // ---- per-plugin config -------------------------------------------------------------------------
 // Each plugin ships from the SAME marketplace.json but with its own version, cache dir, payload,
-// and daemon deps. `cacheName` is the dir under cache/claude-tg/<cacheName> (= the plugin `name`).
+// and daemon deps. `cacheName` is the dir under cache/cc-bridge/<cacheName> (= the plugin `name`).
 // `pluginJson` is the manifest whose version we bump alongside this plugin's marketplace entry.
 // A payload file, addressed two ways: `cacheDest` is its FLAT position in the plugin cache (where
 // the daemon imports it as a sibling — e.g. `slack-daemon.ts` and `channel.ts` side by side);
@@ -86,7 +86,7 @@ type Payload = { src: string; cacheDest: string; repoDest: string }
 type PluginCfg = {
   id: string
   mktName: string                       // this plugin's `name` in marketplace.json
-  cacheName: string                     // cache/claude-tg/<cacheName>/<ver>
+  cacheName: string                     // cache/cc-bridge/<cacheName>/<ver>
   pluginJson: string                    // repo-relative plugin.json to version-bump
   pluginDir?: string                    // repo-relative plugin dir (slack/discord); tg ships "./"
   rootFiles?: string[]                  // runtime closure materialized into pluginDir (slack/discord)

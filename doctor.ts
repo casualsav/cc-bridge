@@ -41,7 +41,7 @@ function procScan(): { configDirs: Set<string>; daemons: Daemon[]; blocked: numb
 }
 
 function newestCacheVersion(): string | null {
-  try { return readdirSync(join(homedir(), '.claude', 'plugins', 'cache', 'claude-tg', 'telegram')).filter(v => /^\d+\.\d+\.\d+$/.test(v)).sort((a, b) => a.localeCompare(b, undefined, { numeric: true })).pop() ?? null } catch { return null }
+  try { return readdirSync(join(homedir(), '.claude', 'plugins', 'cache', 'cc-bridge', 'telegram')).filter(v => /^\d+\.\d+\.\d+$/.test(v)).sort((a, b) => a.localeCompare(b, undefined, { numeric: true })).pop() ?? null } catch { return null }
 }
 
 export async function runDoctor(): Promise<number> {
