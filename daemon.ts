@@ -8763,6 +8763,12 @@ bot.on('message:text', async ctx => {
           await ctx.reply(email ? `✅ Successfully logged in as ${escapeHtml(email)}` : '✅ Logged in.', { parse_mode: 'HTML' })
           return
         }
+        // Rehydrated after a restart — the original flow is gone, so just disarm the prompt.
+        case 'orphan': {
+          await channel.deleteMessage({ chatId: String(ctx.chat!.id), messageId: String(replyTo.message_id) }).catch(() => {})
+          await ctx.reply('⌛ That prompt expired when the daemon restarted — run the command again.').catch(() => {})
+          return
+        }
       }
     }
   }

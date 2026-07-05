@@ -82,7 +82,39 @@ export type ReplyTarget =
   | { kind: 'ttskey'; engine: 'openai' | 'elevenlabs' }          // API key for a hosted TTS engine (settings → 🔊 Voice replies)
   | { kind: 'stucktext'; paneId: string }                        // raw text typed into a wedged pane (stuck-screen dump)
   | { kind: 'budget'; panelMsgId?: number }                      // daily $ cap (or 'off') from the /budget panel's set button
-export const replyTargets = new Map<string, ReplyTarget>()
+  | { kind: 'orphan' }                                           // rehydrated after a restart — enough to delete/disarm it, the original flow is gone
+//
+// Persisted across restarts: memory-only meant a wedged force-reply prompt outlived the process
+// that could disarm it — /cancel found nothing after a deploy/crash while the undeleted prompt
+// message kept re-arming the client's reply box. Only the keys are written; the payloads hold live
+// flow state that's meaningless once the daemon restarts, so every key rehydrates as 'orphan' —
+// still enough for /cancel to delete the prompt message.
+const REPLY_TARGETS_FILE = join(STATE_DIR, 'reply-targets.json')
+class PersistedReplyMap extends Map<string, ReplyTarget> {
+  private timer: ReturnType<typeof setTimeout> | null = null
+  private scheduleWrite(): void {
+    if (this.timer) return
+    this.timer = setTimeout(() => {
+      this.timer = null
+      writeJsonFile(REPLY_TARGETS_FILE, [...this.keys()])
+    }, 250)
+    this.timer.unref?.()
+  }
+  override set(key: string, value: ReplyTarget): this {
+    super.set(key, value)
+    this.scheduleWrite()
+    return this
+  }
+  override delete(key: string): boolean {
+    const had = super.delete(key)
+    if (had) this.scheduleWrite()
+    return had
+  }
+}
+export const replyTargets: Map<string, ReplyTarget> = new PersistedReplyMap()
+for (const key of readJsonFile<string[]>(REPLY_TARGETS_FILE, [])) {
+  replyTargets.set(key, { kind: 'orphan' })
+}
 
 // ---- Relay tracking ----
 // Persisted across restarts: this map used to be memory-only, so every deploy/crash re-primed
