@@ -6,19 +6,28 @@
 // The daemon wires it once via initScheduler(): the scheduler depends on the bot, the access
 // loader, and a single injectToPane(paneId, text) callback that hides all the daemon's
 // focus/PaneWatcher logic. Everything else here is self-contained.
-import { Bot, InlineKeyboard, type Context } from 'grammy'
+import { InlineKeyboard, type Context } from 'grammy'
 import { join } from 'node:path'
 import { STATE_DIR, readJsonFile, writeJsonFile } from './common.ts'
 import { escapeHtml } from './markdown.ts'
 import { paneAlive } from './pane-io.ts'
 import { fmtWhen, nextRecurrence, recurrenceLabel } from './time.ts'
 import type { Access, ScheduledMessage } from './types.ts'
+import type { ChannelAdapter, Button } from './channel.ts'
+
+// Button[][] → grammy InlineKeyboard, for scheduleDashboard's grammy-Context reply path (inbound;
+// migrates in a later batch). Outbound sends use channel.sendText's neutral `buttons` directly.
+function toKb(buttons: Button[][]): InlineKeyboard {
+  const kb = new InlineKeyboard()
+  buttons.forEach((row, i) => { if (i) kb.row(); for (const b of row) b.url ? kb.url(b.text, b.url) : kb.text(b.text, b.data ?? '') })
+  return kb
+}
 
 const SCHEDULED_MSGS_FILE = join(STATE_DIR, 'scheduled-messages.json')
 export const MAX_TIMEOUT = 2_147_483_647   // setTimeout's ceiling (~24.8 days); longer waits re-arm
 
 type SchedulerDeps = {
-  bot: Bot
+  channel: ChannelAdapter
   loadAccess: () => Access
   // Deliver `text` into a pane, returning whether it landed. The daemon implements this with
   // its own focus state: inject (with watcher pause) if the pane is focused, else plain paste.
@@ -73,8 +82,8 @@ async function deliverScheduled(msg: ScheduledMessage): Promise<void> {
   // is gone by fire time the threaded send fails — retry plain so the note still lands.
   const note = (t: string) => {
     for (const c of chats) {
-      void deps.bot.api.sendMessage(c, t, { parse_mode: 'HTML', ...(msg.thread ? { message_thread_id: msg.thread } : {}) })
-        .catch(() => msg.thread ? deps.bot.api.sendMessage(c, t, { parse_mode: 'HTML' }).catch(() => {}) : undefined)
+      void deps.channel.sendText(String(c), t, { ...(msg.thread ? { threadId: String(msg.thread) } : {}) })
+        .catch(() => msg.thread ? deps.channel.sendText(String(c), t, {}).catch(() => {}) : undefined)
     }
   }
   if (!msg.paneId || !(await paneAlive(msg.paneId))) {
@@ -121,10 +130,12 @@ export function scheduledListText(): string {
   return `📅 <b>Scheduled messages</b>\n${lines.join('\n')}\n\nTap to cancel:`
 }
 
-export function scheduledCancelKeyboard(): InlineKeyboard {
-  const kb = new InlineKeyboard()
-  scheduledMsgs.forEach((m, i) => { kb.text(`🗑 ${i + 1}`, `schedcancel:${m.id}`); if ((i + 1) % 4 === 0) kb.row() })
-  return kb
+export function scheduledCancelKeyboard(): Button[][] {
+  const rows: Button[][] = []
+  let row: Button[] = []
+  scheduledMsgs.forEach((m, i) => { row.push({ text: `🗑 ${i + 1}`, data: `schedcancel:${m.id}` }); if ((i + 1) % 4 === 0) { rows.push(row); row = [] } })
+  if (row.length) rows.push(row)
+  return rows
 }
 
 export async function scheduleDashboard(ctx: Context): Promise<void> {
@@ -133,7 +144,7 @@ export async function scheduleDashboard(ctx: Context): Promise<void> {
       { parse_mode: 'HTML', reply_markup: new InlineKeyboard().text('➕ Add', 'sched:add') })
     return
   }
-  const kb = scheduledCancelKeyboard()
+  const kb = toKb(scheduledCancelKeyboard())
   kb.row().text('➕ Add', 'sched:add')
   await ctx.reply(scheduledListText(), { parse_mode: 'HTML', reply_markup: kb })
 }

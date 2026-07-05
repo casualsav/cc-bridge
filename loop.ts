@@ -12,12 +12,12 @@
 // same message becomes the live status card and finally the run summary. Completion is the
 // daemon running the check command (objective); with no check it falls back to Claude printing
 // LOOP_DONE — self-report, deliberately the weaker signal.
-import { Bot, InlineKeyboard } from 'grammy'
 import { join } from 'node:path'
 import { unlinkSync } from 'node:fs'
 import { exec } from './proc.ts'
 import { STATE_DIR, readJsonFile, writeJsonFile } from './common.ts'
 import { escapeHtml } from './markdown.ts'
+import type { ChannelAdapter, Button } from './channel.ts'
 import { scheduleEdit } from './edit-scheduler.ts'
 import { capturePane, paneCwd, paneAlive } from './pane-io.ts'
 import { focus } from './state.ts'
@@ -27,7 +27,7 @@ import { parseStatusline } from './statusline.ts'
 import { latestFinalReply, turnInProgress } from './transcript.ts'
 
 type LoopDeps = {
-  bot: Bot
+  channel: ChannelAdapter
   // Inject (focused, watcher-paused) or paste (background pane) — the daemon picks.
   deliverToPane: (paneId: string, text: string) => Promise<boolean>
   // Esc into the pane for "stop now" (focused watcher paused only when needed).
@@ -181,20 +181,20 @@ function cardHtml(rec: LoopRecord): string {
     }
   }
 }
-function cardKeyboard(rec: LoopRecord, sid: string): InlineKeyboard | undefined {
+function cardKeyboard(rec: LoopRecord, sid: string): Button[][] | undefined {
   switch (rec.status) {
     case 'wizard:check': case 'wizard:max': case 'wizard:budget': case 'wizard:time':
-      return new InlineKeyboard().text('✖️ Cancel', `loop:cancel:${sid}`)
+      return [[{ text: '✖️ Cancel', data: `loop:cancel:${sid}` }]]
     case 'confirm': {
       const anyway = rec.maxIter === undefined && rec.budget === undefined
-      return new InlineKeyboard().text(anyway ? '▶️ Start anyway' : '▶️ Start', `loop:go:${sid}`).text('✖️ Cancel', `loop:cancel:${sid}`)
+      return [[{ text: anyway ? '▶️ Start anyway' : '▶️ Start', data: `loop:go:${sid}` }, { text: '✖️ Cancel', data: `loop:cancel:${sid}` }]]
     }
     case 'running':
-      return new InlineKeyboard().text('⏸ Stop after iter', `loop:stopsoft:${sid}`).text('⏹ Stop now', `loop:stopnow:${sid}`)
+      return [[{ text: '⏸ Stop after iter', data: `loop:stopsoft:${sid}` }, { text: '⏹ Stop now', data: `loop:stopnow:${sid}` }]]
     case 'stopping':
-      return new InlineKeyboard().text('⏹ Stop now', `loop:stopnow:${sid}`)
+      return [[{ text: '⏹ Stop now', data: `loop:stopnow:${sid}` }]]
     case 'paused':
-      return new InlineKeyboard().text('▶️ Resume', `loop:resume:${sid}`).text('⏹ Stop', `loop:stopnow:${sid}`)
+      return [[{ text: '▶️ Resume', data: `loop:resume:${sid}` }, { text: '⏹ Stop', data: `loop:stopnow:${sid}` }]]
   }
 }
 
@@ -202,14 +202,13 @@ function cardKeyboard(rec: LoopRecord, sid: string): InlineKeyboard | undefined 
 const lastCardHtml = new Map<string, string>()
 async function renderCard(sid: string, rec: LoopRecord): Promise<void> {
   const html = cardHtml(rec)
-  const kb = cardKeyboard(rec, sid)
-  const extra = { parse_mode: 'HTML' as const, ...(kb ? { reply_markup: kb } : {}) }
+  const buttons = cardKeyboard(rec, sid)
   if (rec.cardMsg) {
     if (lastCardHtml.get(sid) === html + rec.status) return
-    scheduleEdit({ chat: rec.chat, mid: rec.cardMsg, thread: rec.thread, source: 'loop', render: () => html, extra })
+    scheduleEdit({ chat: rec.chat, mid: rec.cardMsg, thread: rec.thread, source: 'loop', render: () => html, ...(buttons ? { buttons } : {}) })
   } else {
-    const sent = await deps.bot.api.sendMessage(rec.chat, html, { ...extra, ...(rec.thread ? { message_thread_id: rec.thread } : {}) }).catch(() => null)
-    if (sent) rec.cardMsg = sent.message_id
+    const sent = await deps.channel.sendText(rec.chat, html, { ...(buttons ? { buttons } : {}), ...(rec.thread ? { threadId: String(rec.thread) } : {}) }).catch(() => null)
+    if (sent) rec.cardMsg = Number(sent.messageId)
   }
   lastCardHtml.set(sid, html + rec.status)
 }
@@ -261,12 +260,12 @@ export async function handleLoopWizardReply(sid: string, text: string): Promise<
   writeLoops(map)
 }
 async function nudgeInvalid(rec: LoopRecord, want: string): Promise<void> {
-  await deps.bot.api.sendMessage(rec.chat, `🤔 Didn't catch that — reply with ${want}.`,
-    { disable_notification: true, ...(rec.thread ? { message_thread_id: rec.thread } : {}) }).catch(() => {})
+  await deps.channel.sendText(rec.chat, `🤔 Didn't catch that — reply with ${want}.`,
+    { plain: true, silent: true, ...(rec.thread ? { threadId: String(rec.thread) } : {}) }).catch(() => {})
 }
 async function say(rec: LoopRecord, html: string, loud = false): Promise<void> {
-  await deps.bot.api.sendMessage(rec.chat, html,
-    { parse_mode: 'HTML', disable_notification: !loud, ...(rec.thread ? { message_thread_id: rec.thread } : {}) }).catch(() => {})
+  await deps.channel.sendText(rec.chat, html,
+    { silent: !loud, ...(rec.thread ? { threadId: String(rec.thread) } : {}) }).catch(() => {})
 }
 
 // ---- Lifecycle (wizard buttons + /loop subcommands) ----
@@ -382,7 +381,7 @@ export function loopStatusHtml(sid: string): string {
   if (!rec) return '🔁 No loop for this session — <code>/loop &lt;goal&gt;</code> to set one up.'
   return cardHtml(rec)
 }
-export function loopStatusKeyboard(sid: string): InlineKeyboard | undefined {
+export function loopStatusKeyboard(sid: string): Button[][] | undefined {
   const rec = readLoops()[sid]
   return rec ? cardKeyboard(rec, sid) : undefined
 }
@@ -396,8 +395,8 @@ async function finishLoop(sid: string, rec: LoopRecord, map: Record<string, Loop
   const summary = `${icon} <b>Loop ${kind === 'done' ? 'finished' : 'stopped'}</b> — ${reason}\n` +
     `🔁 ${rec.iter} iteration${rec.iter === 1 ? '' : 's'} · 💸 $${rec.spent.toFixed(2)} · 🕐 ${fmtDur(Date.now() - rec.startedAt)}\n` +
     `<i>${escapeHtml(rec.goal.slice(0, 200))}</i>`
-  if (rec.cardMsg) scheduleEdit({ chat: rec.chat, mid: rec.cardMsg, thread: rec.thread, source: 'loop', parseMode: 'HTML', render: () => summary })
-  await deps.bot.api.sendMessage(rec.chat, summary, { parse_mode: 'HTML', ...(rec.thread ? { message_thread_id: rec.thread } : {}) }).catch(() => {})
+  if (rec.cardMsg) scheduleEdit({ chat: rec.chat, mid: rec.cardMsg, thread: rec.thread, source: 'loop', render: () => summary })
+  await deps.channel.sendText(rec.chat, summary, { ...(rec.thread ? { threadId: String(rec.thread) } : {}) }).catch(() => {})
 }
 
 // ---- Sweep ----

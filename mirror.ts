@@ -11,10 +11,10 @@
 //             by auxRelayTick. Persisted the same way (a deploy lands mid-turn constantly in
 //             dev — without resume-or-cap every topic would collect orphan cards).
 //
-// Wired once via initMirror(): depends on the bot, the access loader, the daemon's replyMode()
-// helper (shared across the daemon, so it stays there), a live getActivePaneId getter, and a
-// retriggerTyping callback (the mirror send clears Telegram's typing state).
-import { Bot } from 'grammy'
+// Wired once via initMirror(): depends on the bot token (the card is a rich_message, sent via the
+// raw richmsg seam — a channel-gap that isn't in the ChannelAdapter contract), the access loader, the
+// daemon's replyMode() helper (shared across the daemon, so it stays there), a live getActivePaneId
+// getter, and a retriggerTyping callback (the mirror send clears Telegram's typing state).
 import { join } from 'node:path'
 import { exec } from './proc.ts'
 import { stripAnsi } from './prompt.ts'
@@ -61,7 +61,9 @@ export function appendFooterLine(body: string, line: string): string {
 }
 
 type MirrorDeps = {
-  bot: Bot
+  // The card is a Bot API 10.1 rich_message, opened via the raw richmsg seam (sendRichMessage), which
+  // isn't in the ChannelAdapter contract — so the mirror carries the bot token, not a channel handle.
+  richToken: string
   loadAccess: () => Access
   replyMode: () => 'thoughts' | 'actions' | 'off'
   getActivePaneId: () => string | null
@@ -620,7 +622,7 @@ class MirrorCard {
         if (isChatFlooded(t.chat)) continue   // chat is in a 429 window — skip the cosmetic card, let replies use the budget
         // Open the card as a rich_message ({ html }) — same carrier as the edits, so <details>/<br> render
         // (classic parse_mode HTML can't). No HTML fallback: those tags would 400 on the classic path.
-        try { const m = await sendRichMessage(deps.bot.token, t.chat, { html: text }, { messageThreadId: t.thread, disableNotification: true }); this.msgIds.set(t.chat, m.message_id); if (t.thread != null) this.cardThread.set(t.chat, t.thread) }
+        try { const m = await sendRichMessage(deps.richToken, t.chat, { html: text }, { messageThreadId: t.thread, disableNotification: true }); this.msgIds.set(t.chat, m.message_id); if (t.thread != null) this.cardThread.set(t.chat, t.thread) }
         catch (e) {
           const ra = Number((e as { parameters?: { retry_after?: number } })?.parameters?.retry_after) || Number((e instanceof Error ? e.message : '').match(/retry after (\d+)/i)?.[1])
           this.createCooldownUntil = Date.now() + (Number.isFinite(ra) && ra > 0 ? ra * 1000 : 5000)

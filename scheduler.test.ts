@@ -22,5 +22,5 @@ test('empty list text still renders the header', () => {
 
 test('empty cancel keyboard has no buttons', () => {
   const kb = scheduledCancelKeyboard()
-  expect(kb.inline_keyboard.flat().length).toBe(0)
+  expect(kb.flat().length).toBe(0)
 })

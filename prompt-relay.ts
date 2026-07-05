@@ -4,7 +4,7 @@
 // shared state maps, and owns permission-storm batching ("Allow all this turn"). Daemon-shaped
 // pieces (the bot, outbound routing, the focused relay cursor, pane key injection) come in via
 // initPromptRelay's deps so the pure parts stay unit-testable.
-import { Bot, InlineKeyboard } from 'grammy'
+import type { ChannelAdapter, Button } from './channel.ts'
 import { escapeHtml } from './markdown.ts'
 import { sleep } from './proc.ts'
 import { capturePane, paneCwd, paneAlive, type PaneWatcher } from './pane-io.ts'
@@ -14,7 +14,7 @@ import { finalRepliesAfter } from './transcript.ts'
 import { detectPermissionPrompt, onNormalPrompt, permPromptToken, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen } from './prompt.ts'
 
 type PromptRelayDeps = {
-  bot: Bot
+  channel: ChannelAdapter
   outboundTargetsFor: (paneId: string | null) => Promise<Array<{ chat: string; thread?: number }>>
   flushPendingText: () => Promise<void>
   transcriptForPane: (pane: string | null, cwd: string | null) => Promise<string | null>
@@ -62,31 +62,35 @@ export function formatPermission(tool_name: string, description: string, input_p
 
 // Toggle keyboard for a multi-select prompt: a checkbox button per option (3 per
 // row) plus a Submit button. ☑ marks currently-selected indices.
-export function multiSelectKeyboard(options: PromptOption[], selected: Set<number>): InlineKeyboard {
-  const kb = new InlineKeyboard()
+export function multiSelectKeyboard(options: PromptOption[], selected: Set<number>): Button[][] {
+  const rows: Button[][] = []
+  let row: Button[] = []
   options.forEach((_, i) => {
-    kb.text(`${selected.has(i) ? '☑' : '☐'} ${i + 1}`, `msel:${i + 1}`)
-    if ((i + 1) % 3 === 0) kb.row()
+    row.push({ text: `${selected.has(i) ? '☑' : '☐'} ${i + 1}`, data: `msel:${i + 1}` })
+    if ((i + 1) % 3 === 0) { rows.push(row); row = [] }
   })
-  kb.row().text('✅ Submit', 'msel:submit')
-  return kb
+  if (row.length) rows.push(row)
+  rows.push([{ text: '✅ Submit', data: 'msel:submit' }])
+  return rows
 }
 
 // Numbered-option keyboard for a single-answer prompt (3 per row). `prefix` is the
 // callback namespace — `prompt` for an ordinary single-select (digit-driven) or
 // `mq` for a multi-question tab (arrow-driven). A ✏️ Type-something button is
 // appended when the prompt offers free text.
-export function singleAnswerKeyboard(prompt: PromptInfo, prefix: 'prompt' | 'mq'): InlineKeyboard {
-  const kb = new InlineKeyboard()
+export function singleAnswerKeyboard(prompt: PromptInfo, prefix: 'prompt' | 'mq'): Button[][] {
+  const rows: Button[][] = []
+  let row: Button[] = []
   prompt.options.forEach((_, i) => {
-    kb.text(String(i + 1), `${prefix}:${i + 1}`)
-    if ((i + 1) % 3 === 0) kb.row()
+    row.push({ text: String(i + 1), data: `${prefix}:${i + 1}` })
+    if ((i + 1) % 3 === 0) { rows.push(row); row = [] }
   })
-  if (prompt.freeText) kb.row().text('✏️ Type something', 'ftext')
+  if (row.length) rows.push(row)
+  if (prompt.freeText) rows.push([{ text: '✏️ Type something', data: 'ftext' }])
   // Always offer "Chat about this" — if the menu has a literal option for it we select that,
   // otherwise we Esc-dismiss the question (see the chat handler).
-  kb.row().text('💬 Chat about this', 'chat')
-  return kb
+  rows.push([{ text: '💬 Chat about this', data: 'chat' }])
+  return rows
 }
 
 export async function relayPromptToTelegram(prompt: PromptInfo, paneId: string | null = focus.activePaneId): Promise<void> {
@@ -114,38 +118,36 @@ export async function relayPromptToTelegram(prompt: PromptInfo, paneId: string |
   const text = renderPromptHtml(prompt)
 
   for (const { chat, thread } of targets) {
-    const extra = thread ? { message_thread_id: thread } : {}
+    const extra = thread ? { threadId: String(thread) } : {}
     try {
       let sent
       if (prompt.multiSelect) {
         const selected = new Set<number>()
-        sent = await deps.bot.api.sendMessage(chat, text, {
-          parse_mode: 'HTML', ...extra,
-          reply_markup: multiSelectKeyboard(prompt.options, selected),
+        sent = await deps.channel.sendText(chat, text, {
+          ...extra, buttons: multiSelectKeyboard(prompt.options, selected),
         })
-        pendingMultiSelect.set(`${chat}:${sent.message_id}`, {
+        pendingMultiSelect.set(`${chat}:${sent.messageId}`, {
           paneId, options: prompt.options, selected,
         })
       } else {
-        sent = await deps.bot.api.sendMessage(chat, text, {
-          parse_mode: 'HTML', ...extra,
-          reply_markup: singleAnswerKeyboard(prompt, prompt.tabbed ? 'mq' : 'prompt'),
+        sent = await deps.channel.sendText(chat, text, {
+          ...extra, buttons: singleAnswerKeyboard(prompt, prompt.tabbed ? 'mq' : 'prompt'),
         })
         // Track single-select cards (incl. plan approvals) so a 👍 reaction can approve option 1.
-        promptCards.set(`${chat}:${sent.message_id}`, { paneId, kind: 'select', at: Date.now() })
+        promptCards.set(`${chat}:${sent.messageId}`, { paneId, kind: 'select', at: Date.now() })
         prunePromptCards()
       }
       // Remember the prompt so a ✏️ tap knows how to reach its free-text field: the
       // option sits `options.length` Down presses past the first one. "Chat about
       // this" sits one further down again.
       if (prompt.freeText) {
-        freeTextPrompts.set(`${chat}:${sent.message_id}`, {
+        freeTextPrompts.set(`${chat}:${sent.messageId}`, {
           paneId, downCount: prompt.options.length, tabbed: prompt.tabbed, question: prompt.question,
         })
       }
       // Register chat-dismiss for every question. If the menu carries its own "Chat about this"
       // option we select it (downCount past the options + free-text); otherwise we Esc-dismiss.
-      chatPrompts.set(`${chat}:${sent.message_id}`, prompt.chat
+      chatPrompts.set(`${chat}:${sent.messageId}`, prompt.chat
         ? { paneId, downCount: prompt.options.length + 1, tabbed: prompt.tabbed, useEscape: false }
         : { paneId, downCount: 0, tabbed: prompt.tabbed, useEscape: true })
     } catch (e) {
@@ -179,14 +181,14 @@ export function renderStuckHtml(name: string, tail: string, options: PromptOptio
 // Keyboard for a stuck-screen card. `count` parsed options (one numbered row each, injected per
 // optionKind by the tap handler) followed by always-present raw-key fallbacks and a full-capture dump.
 // callback namespace `stuck:<tok>:…` — every data string stays well under Telegram's 64-byte cap.
-export function stuckKeyboard(tok: string, opts: { optionKind: 'numbered' | 'ink' | null; count: number }): InlineKeyboard {
-  const kb = new InlineKeyboard()
-  for (let i = 0; i < opts.count; i++) kb.text(`${i + 1}`, `stuck:${tok}:o${i}`).row()
-  kb.text('⏎ Enter', `stuck:${tok}:k:Enter`).text('⎋ Esc', `stuck:${tok}:k:Escape`).row()
-  kb.text('↑', `stuck:${tok}:k:Up`).text('↓', `stuck:${tok}:k:Down`).row()
-  kb.text('1', `stuck:${tok}:k:1`).text('2', `stuck:${tok}:k:2`).text('3', `stuck:${tok}:k:3`).row()
-  kb.text('📋 Full screen', `stuck:${tok}:full`)
-  return kb
+export function stuckKeyboard(tok: string, opts: { optionKind: 'numbered' | 'ink' | null; count: number }): Button[][] {
+  const rows: Button[][] = []
+  for (let i = 0; i < opts.count; i++) rows.push([{ text: `${i + 1}`, data: `stuck:${tok}:o${i}` }])
+  rows.push([{ text: '⏎ Enter', data: `stuck:${tok}:k:Enter` }, { text: '⎋ Esc', data: `stuck:${tok}:k:Escape` }])
+  rows.push([{ text: '↑', data: `stuck:${tok}:k:Up` }, { text: '↓', data: `stuck:${tok}:k:Down` }])
+  rows.push([{ text: '1', data: `stuck:${tok}:k:1` }, { text: '2', data: `stuck:${tok}:k:2` }, { text: '3', data: `stuck:${tok}:k:3` }])
+  rows.push([{ text: '📋 Full screen', data: `stuck:${tok}:full` }])
+  return rows
 }
 
 // Relay a stuck-screen card into the wedged session's own topic(s). Registers per-card state (for the
@@ -200,11 +202,11 @@ export async function relayStuckScreen(paneId: string, stuck: StuckScreen, tail:
   const kb = stuckKeyboard(tok, { optionKind: stuck.optionKind, count: stuck.options.length })
   for (const { chat, thread } of targets) {
     try {
-      const sent = await deps.bot.api.sendMessage(chat, text, {
-        parse_mode: 'HTML', reply_markup: kb, ...(quiet ? { disable_notification: true } : {}), ...(thread ? { message_thread_id: thread } : {}),
+      const sent = await deps.channel.sendText(chat, text, {
+        buttons: kb, ...(quiet ? { silent: true } : {}), ...(thread ? { threadId: String(thread) } : {}),
       })
-      stuckCards.set(`${chat}:${sent.message_id}`, { paneId, token: tok, optionKind: stuck.optionKind, optionCount: stuck.options.length })
-      replyTargets.set(`${chat}:${sent.message_id}`, { kind: 'stucktext', paneId })
+      stuckCards.set(`${chat}:${sent.messageId}`, { paneId, token: tok, optionKind: stuck.optionKind, optionCount: stuck.options.length })
+      replyTargets.set(`${chat}:${sent.messageId}`, { kind: 'stucktext', paneId })
     } catch (e) {
       process.stderr.write(`daemon: stuck-screen relay to ${chat} failed: ${e}\n`)
     }
@@ -247,8 +249,8 @@ export async function relayPermissionToTelegram(perm: PermissionPrompt, paneId: 
     deps.resetPromptDedup(paneId)
     await deps.verifyPromptClosed(paneId)
     for (const { chat, thread } of targets) {
-      void deps.bot.api.sendMessage(chat, `⚡ Auto-allowed: <i>${escapeHtml(perm.question.slice(0, 120))}</i>`,
-        { parse_mode: 'HTML', disable_notification: true, ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
+      void deps.channel.sendText(chat, `⚡ Auto-allowed: <i>${escapeHtml(perm.question.slice(0, 120))}</i>`,
+        { silent: true, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
     }
     return
   }
@@ -258,24 +260,23 @@ export async function relayPermissionToTelegram(perm: PermissionPrompt, paneId: 
   if (perm.preview) parts.push(`<blockquote>${escapeHtml(perm.preview)}</blockquote>`)
   const body = parts.join('\n')
 
-  const kb = new InlineKeyboard()
   // party-bus P4: carry a token identifying THIS prompt, so the handler can reject a stale/second-human
   // tap whose prompt already moved on instead of injecting it blind (see the pperm handler).
   const tok = permPromptToken(perm.question)
-  for (const opt of perm.options) kb.text(permButtonLabel(opt), `pperm:${tok}:${opt.n}`).row()
+  const kb: Button[][] = perm.options.map(opt => [{ text: permButtonLabel(opt), data: `pperm:${tok}:${opt.n}` }])
 
   process.stderr.write(`daemon: relaying permission prompt (${perm.options.length} opts) “${perm.question}” to ${targets.map(t => t.chat + (t.thread ? `#${t.thread}` : '')).join(',')}\n`)
   for (const { chat, thread } of targets) {
     try {
-      const sent = await deps.bot.api.sendMessage(chat, body, { parse_mode: 'HTML', reply_markup: kb, ...(thread ? { message_thread_id: thread } : {}) })
+      const sent = await deps.channel.sendText(chat, body, { buttons: kb, ...(thread ? { threadId: String(thread) } : {}) })
       // Track the card so a 👍 reaction can approve option 1 (with the same token stale-guard the tap uses).
-      promptCards.set(`${chat}:${sent.message_id}`, { paneId, kind: 'perm', token: tok, at: Date.now() })
+      promptCards.set(`${chat}:${sent.messageId}`, { paneId, kind: 'perm', token: tok, at: Date.now() })
       prunePromptCards()
       // From the storm's 2nd distinct prompt, also offer the turn-wide allow (once per turn).
       if (batchAllowEnabled() && storm.count >= 2 && !storm.armed && !storm.offered) {
         storm.offered = true
-        await deps.bot.api.sendMessage(chat, '⚡ Several permission prompts this turn.',
-          { reply_markup: new InlineKeyboard().text('✅ Allow all this turn', `pstorm:${paneId}`), disable_notification: true, ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
+        await deps.channel.sendText(chat, '⚡ Several permission prompts this turn.',
+          { plain: true, buttons: [[{ text: '✅ Allow all this turn', data: `pstorm:${paneId}` }]], silent: true, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
       }
     } catch (e) {
       process.stderr.write(`daemon: permission relay to ${chat} failed: ${e}\n`)

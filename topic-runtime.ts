@@ -3,7 +3,7 @@
 // (create / close / reopen / retitle / reconcile), per-topic typing, and outbound routing
 // (which chat+thread a session's output goes to). Extracted from daemon.ts so the DM and
 // group paths are physically separate; the daemon wires the grammy Bot in via initTopicRuntime.
-import { InlineKeyboard, type Bot } from 'grammy'
+import type { ChannelAdapter } from './channel.ts'
 import { basename } from 'node:path'
 import { exec } from './proc.ts'
 import { paneCwd, paneAlive, paneCommand } from './pane-io.ts'
@@ -16,8 +16,10 @@ import {
 } from './topics.ts'
 import { focus, offMcpPanes, sessions } from './state.ts'
 
-let bot: Bot
-export function initTopicRuntime(b: Bot): void { bot = b }
+// The bridge is in forum-topics mode whenever this module runs, so channel.threads (present iff
+// caps.threads === 'forum') is always defined — the `!` on threads.* calls reflects that invariant.
+let channel: ChannelAdapter
+export function initTopicRuntime(ch: ChannelAdapter): void { channel = ch }
 
 // Resolve a forum topic's session to a live pane: thread id → cwd (the topic map) → the off-MCP pane
 // running in that cwd. Prefers the focused pane when it matches. Returns null if no live pane is in
@@ -190,7 +192,7 @@ async function ensureTopicFor(group: string, sessionId: string, cwd: string): Pr
       // User just closed it (→ /exit in flight): route to the closed thread WITHOUT reopening, so the
       // teardown's trailing outbound can't flip it back open. Cleared on exit/revive.
       if (topicClosePending(sessionId)) return existing.threadId
-      try { await bot.api.reopenForumTopic(group, existing.threadId); updateTopic(sessionId, { closed: false }) } catch {}
+      try { await channel.threads!.reopen(group, String(existing.threadId)); updateTopic(sessionId, { closed: false }) } catch {}
     }
     return existing.threadId
   }
@@ -200,10 +202,10 @@ async function ensureTopicFor(group: string, sessionId: string, cwd: string): Pr
   const siblings = listTopics().filter(e => e.cwd === cwd && !e.closed && e.sessionId !== sessionId).length
   const name = siblings > 0 ? `${base} #${siblings + 1}` : base
   try {
-    const t = await bot.api.createForumTopic(group, name)
-    setTopic(sessionId, { threadId: t.message_thread_id, cwd, name, closed: false, createdAt: Date.now() })
-    process.stderr.write(`daemon: created topic "${name}" (thread ${t.message_thread_id}) for ${cwd} [${sessionId}]\n`)
-    return t.message_thread_id
+    const threadId = Number(await channel.threads!.create(group, name))
+    setTopic(sessionId, { threadId, cwd, name, closed: false, createdAt: Date.now() })
+    process.stderr.write(`daemon: created topic "${name}" (thread ${threadId}) for ${cwd} [${sessionId}]\n`)
+    return threadId
   } catch (e) {
     process.stderr.write(`daemon: createForumTopic failed for ${cwd}: ${e}\n`)
     return undefined
@@ -244,9 +246,9 @@ export async function ensureSessionTopic(paneId: string): Promise<void> {
   topicEnsureInFlight.add(sid)
   try {
     const thread = await ensureTopicFor(group, sid, cwd)
-    if (thread) await bot.api.sendMessage(group,
+    if (thread) await channel.sendText(group,
       `🆕 <b>Session started</b>\n<code>${escapeHtml(cwd)}</code>\n\nType in this topic to drive this session.`,
-      { parse_mode: 'HTML', message_thread_id: thread, disable_notification: true }).catch(() => {})
+      { threadId: String(thread), silent: true }).catch(() => {})
   } finally {
     topicEnsureInFlight.delete(sid)
   }
@@ -282,7 +284,7 @@ export async function reopenSessionTopic(sessionId: string): Promise<void> {
   const t = getTopicBySession(sessionId)
   if (!t || !t.closed) return
   try {
-    await bot.api.reopenForumTopic(group, t.threadId)
+    await channel.threads!.reopen(group, String(t.threadId))
     process.stderr.write(`daemon: reopened topic "${t.name}" for ${t.cwd}\n`)
   } catch {}   // already open / deleted — the flag flip below still unblocks routing
   try { updateTopic(sessionId, { closed: false }) } catch {}
@@ -293,10 +295,9 @@ export async function reopenSessionTopic(sessionId: string): Promise<void> {
 export async function generalAnchorLost(group: string): Promise<void> {
   if (!getGeneralSession()) return   // already cleared (event path + reconcile backstop can both fire)
   setGeneralSession(null)
-  const kb = new InlineKeyboard().text('📌 Claim General', 'claimgeneral')
-  await bot.api.sendMessage(group,
+  await channel.sendText(group,
     '🏁 <b>The session anchored to General ended.</b>\nGeneral now follows the focused session. Tap to anchor the current one here instead.',
-    { parse_mode: 'HTML', reply_markup: kb, disable_notification: true }).catch(() => {})
+    { buttons: [[{ text: '📌 Claim General', data: 'claimgeneral' }]], silent: true }).catch(() => {})
 }
 
 // A worktree session that ended cleanly leaves no reason to keep the worktree — remove it so
@@ -307,8 +308,8 @@ async function cleanupWorktree(group: string, t: { threadId: number; worktree?: 
   try {
     const dirty = (await exec('git', ['-C', wt.path, 'status', '--porcelain'], { timeout: 5000 })).stdout.trim()
     if (dirty) {
-      await bot.api.sendMessage(group, `🌿 Worktree kept at <code>${wt.path}</code> — it has uncommitted changes.`,
-        { parse_mode: 'HTML', message_thread_id: t.threadId, disable_notification: true }).catch(() => {})
+      await channel.sendText(group, `🌿 Worktree kept at <code>${wt.path}</code> — it has uncommitted changes.`,
+        { threadId: String(t.threadId), silent: true }).catch(() => {})
       return
     }
     await exec('git', ['-C', wt.repo, 'worktree', 'remove', wt.path], { timeout: 10000 })
@@ -322,19 +323,20 @@ async function closeTopicEntry(group: string, sessionId: string, t: { threadId: 
   // the only way off the list, and it erases the topic's history). Default keeps close+reopen.
   if (loadAccess().topicOnEnd === 'delete') {
     try {
-      await bot.api.deleteForumTopic(group, t.threadId)
+      await channel.threads!.remove(group, String(t.threadId))
       removeTopic(sessionId)
       process.stderr.write(`daemon: deleted topic "${t.name}" for ${t.cwd} (topicOnEnd=delete)\n`)
     } catch (e) { process.stderr.write(`daemon: deleteForumTopic failed for ${t.cwd}: ${e}\n`) }
     return
   }
-  const kb = new InlineKeyboard()
-    .text('🗑 Delete topic', `topicdel:${t.threadId}`)
-    .text('🗑 Always delete', `topicdelalways:${t.threadId}`)
-  await bot.api.sendMessage(group, '🏁 <b>Session ended</b> — topic closed. Send a message here to revive the session (the conversation continues); it also reopens automatically if a session comes back to this project.\n\nDelete removes the tab (and this topic’s history); Always delete does that for every ended session from now on.',
-    { parse_mode: 'HTML', message_thread_id: t.threadId, reply_markup: kb, disable_notification: true }).catch(() => {})
+  const kb = [[
+    { text: '🗑 Delete topic', data: `topicdel:${t.threadId}` },
+    { text: '🗑 Always delete', data: `topicdelalways:${t.threadId}` },
+  ]]
+  await channel.sendText(group, '🏁 <b>Session ended</b> — topic closed. Send a message here to revive the session (the conversation continues); it also reopens automatically if a session comes back to this project.\n\nDelete removes the tab (and this topic’s history); Always delete does that for every ended session from now on.',
+    { threadId: String(t.threadId), buttons: kb, silent: true }).catch(() => {})
   try {
-    await bot.api.closeForumTopic(group, t.threadId)
+    await channel.threads!.close(group, String(t.threadId))
     updateTopic(sessionId, { closed: true })
     process.stderr.write(`daemon: closed topic "${t.name}" for ${t.cwd}\n`)
   } catch (e) { process.stderr.write(`daemon: closeForumTopic failed for ${t.cwd}: ${e}\n`) }
@@ -420,7 +422,7 @@ export async function refreshTopicTitles(panes: string[]): Promise<void> {
       ? `${base} · ${branch}` : base
     if (want === t.name) continue
     try {
-      await bot.api.editForumTopic(group, t.threadId, { name: want })
+      await channel.threads!.rename(group, String(t.threadId), want)
       updateTopic(sid, { name: want })
       process.stderr.write(`daemon: renamed topic for ${cwd} → "${want}"\n`)
     } catch (e) { process.stderr.write(`daemon: editForumTopic failed for ${cwd}: ${e}\n`) }
@@ -462,8 +464,7 @@ function pingTopicTyping(key: string): void {
   const thread = key.slice(sep + 1)
   // General renders typing only under its pseudo-thread id 1 — unthreaded actions are accepted
   // by the API but never shown (verified live).
-  void bot.api.sendChatAction(key.slice(0, sep), 'typing',
-    { message_thread_id: thread === 'general' ? 1 : Number(thread) }, AbortSignal.timeout(1500)).catch(() => {})
+  void channel.typing(key.slice(0, sep), thread === 'general' ? '1' : thread).catch(() => {})
 }
 
 function ensureTopicTypingTimer(): void {

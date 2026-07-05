@@ -5,7 +5,7 @@
 // The /queue command itself stays in daemon (bot wiring); this module owns the store + sweep.
 import { join } from 'node:path'
 import { unlinkSync } from 'node:fs'
-import { Bot } from 'grammy'
+import type { ChannelAdapter } from './channel.ts'
 import { STATE_DIR, readJsonFile, writeJsonFile } from './common.ts'
 import { escapeHtml } from './markdown.ts'
 import { capturePane } from './pane-io.ts'
@@ -14,7 +14,7 @@ import { paneForSession } from './topic-runtime.ts'
 import { onNormalPrompt } from './prompt.ts'
 
 type QueueDeps = {
-  bot: Bot
+  channel: ChannelAdapter
   outboundTargetsFor: (paneId: string | null) => Promise<Array<{ chat: string; thread?: number }>>
   // Inject (focused, watcher-paused) or paste (background pane) — the daemon picks.
   deliverToPane: (paneId: string, text: string) => Promise<boolean>
@@ -65,8 +65,8 @@ export async function sweepLaterQueues(): Promise<void> {
       const ok = await deps.deliverToPane(pane, item.text)
       if (!ok) { items.splice(idx, 0, item); writeLater(map); continue }   // pane wedged — put it back at its original index, retry next sweep
       for (const tg of await deps.outboundTargetsFor(pane)) {
-        await deps.bot.api.sendMessage(tg.chat, `▶️ Queued task started: <i>${escapeHtml(item.text.slice(0, 160))}</i>`,
-          { parse_mode: 'HTML', disable_notification: true, ...(tg.thread ? { message_thread_id: tg.thread } : {}) }).catch(() => {})
+        await deps.channel.sendText(String(tg.chat), `▶️ Queued task started: <i>${escapeHtml(item.text.slice(0, 160))}</i>`,
+          { silent: true, ...(tg.thread ? { threadId: String(tg.thread) } : {}) }).catch(() => {})
       }
     } catch { /* pane vanished mid-sweep — next pass */ }
   }

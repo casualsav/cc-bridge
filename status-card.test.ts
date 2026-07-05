@@ -80,8 +80,7 @@ test('mergeStatus: backfills only missing fields; null fresh falls back to prev;
 })
 
 test('statusKeyboard carries the st:* quick actions', () => {
-  const rows = statusKeyboard().inline_keyboard
-  const datas = rows.flat().map(b => 'callback_data' in b ? b.callback_data : '')
+  const datas = statusKeyboard().flat().map(b => b.data ?? '')
   expect(datas).toContain('st:model')
   expect(datas).toContain('st:pinoff')
 })

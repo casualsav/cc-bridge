@@ -79,7 +79,7 @@ import {
   assertSendable, chunk, coerceReaction,
 } from './calls.ts'
 import { installSendGovernor, asLowPriority } from './throttle.ts'
-import { TelegramAdapter } from './telegram-adapter.ts'
+import { TelegramAdapter, buttonsToKb } from './telegram-adapter.ts'
 import { refKey, type MsgRef, type Button, type SendOpts } from './channel.ts'
 import { planAuxRelayWork } from './relay-plan.ts'
 import { createMsgTracker } from './msg-tracker.ts'
@@ -272,23 +272,23 @@ bot.api.config.use(async (prev, method, payload, signal) => {
 // Above the governor: the global priority scheduler for recurring self-editing cards (coalescing +
 // active-view tiering + a global rate ceiling). Recurring edits register a desired state with it
 // instead of calling editMessageText directly; interactive sends still go straight through.
-startEditScheduler(bot.api, TOKEN)
+startEditScheduler(channel, TOKEN)
 initStatusCard({
-  bot, transcriptForPane, lastKnownModel: () => lastKnownModel, botUsername: () => botUsername,
+  channel, bot, transcriptForPane, lastKnownModel: () => lastKnownModel, botUsername: () => botUsername,
   usageSnapshotForPane: async pane => readUsageSnapshot(undefined, await paneAccount(pane)),
   onTopicGone: (sid, threadId) => void handleTopicThreadGone(sid, threadId),
   partyRoster: partyRosterLine,   // party-bus P2: a compact live-roster line on the pinned card
 })
-initUpdates({ bot })
-initPromptRelay({ bot, outboundTargetsFor, flushPendingText, transcriptForPane, lastRelayedUuid: () => lastRelayedUuid, resetPromptDedup, verifyPromptClosed, paneKeys })
-initQueue({ bot, outboundTargetsFor, deliverToPane: (pane, text) => pane === focus.activePaneId && focus.paneWatcher ? injectText(pane, focus.paneWatcher, text) : pasteToPane(pane, text) })
+initUpdates({ channel })
+initPromptRelay({ channel, outboundTargetsFor, flushPendingText, transcriptForPane, lastRelayedUuid: () => lastRelayedUuid, resetPromptDedup, verifyPromptClosed, paneKeys })
+initQueue({ channel, outboundTargetsFor, deliverToPane: (pane, text) => pane === focus.activePaneId && focus.paneWatcher ? injectText(pane, focus.paneWatcher, text) : pasteToPane(pane, text) })
 initLoop({
-  bot,
+  channel,
   deliverToPane: (pane, text) => pane === focus.activePaneId && focus.paneWatcher ? injectText(pane, focus.paneWatcher, text) : pasteToPane(pane, text),
   paneKeys,
   resolveTranscriptForPane: async pane => transcriptForPane(pane, await paneCwd(pane)),
 })
-initTopicRuntime(bot)
+initTopicRuntime(channel)
 let botUsername = ''
 // access.ts's isMentioned needs the live bot username (set after the daemon connects).
 initAccess({ getBotUsername: () => botUsername })
@@ -308,7 +308,7 @@ healAccountConfigs()   // accounts registered before main settings.json had hook
 // stuck off (work seen → window reopens → typing resumes). The class lives in typing.ts; the
 // bot is injected here. `observe()` (from the transcript's turnInProgress) is a keep-alive layer
 // on top of the explicit arm()/stop() lifecycle, not the primary gate.
-const typingPresence = new TypingPresence(bot)
+const typingPresence = new TypingPresence(channel)
 
 // ---- Pane / tmux layer ----
 
@@ -2985,7 +2985,7 @@ async function startCompactionWatch(pane: string, initialText = ''): Promise<voi
       const filled = pct == null ? w.lastFilled : compactCells(pct)
       if (filled !== w.lastFilled) {   // 5% boundary crossed
         w.lastFilled = filled
-        scheduleEdit({ chat: w.chat, mid: w.msgId, thread: w.thread, source: 'compact', parseMode: 'HTML',
+        scheduleEdit({ chat: w.chat, mid: w.msgId, thread: w.thread, source: 'compact',
           render: () => `🗜️ Compacting conversation…\n<code>${compactProgress(pct)}</code>` })
       }
       w.timer = setTimeout(() => void tick(), COMPACT_TICK_MS)
@@ -2993,12 +2993,12 @@ async function startCompactionWatch(pane: string, initialText = ''): Promise<voi
       // An empty capture means the pane is gone (dead session), NOT a finished compaction — the
       // "no longer compacting" test would otherwise post a false ✅. Stop the watch on a neutral card.
       compactWatches.delete(pane)
-      scheduleEdit({ chat: w.chat, mid: w.msgId, thread: w.thread, source: 'compact', parseMode: 'HTML', render: () => '⚠️ Compaction interrupted (session ended)' })
+      scheduleEdit({ chat: w.chat, mid: w.msgId, thread: w.thread, source: 'compact', render: () => '⚠️ Compaction interrupted (session ended)' })
     } else {
       compactWatches.delete(pane)
       const secs = Math.round(elapsed / 1000)
       const done = `✅ Compacted${secs >= 2 ? ` · ${secs}s` : ''}`
-      scheduleEdit({ chat: w.chat, mid: w.msgId, thread: w.thread, source: 'compact', parseMode: 'HTML', render: () => done })   // scheduler lands the end state once the budget frees
+      scheduleEdit({ chat: w.chat, mid: w.msgId, thread: w.thread, source: 'compact', render: () => done })   // scheduler lands the end state once the budget frees
     }
   }
   slot.timer = setTimeout(() => void tick(), COMPACT_TICK_MS)
@@ -4142,7 +4142,7 @@ bot.command('status', async ctx => {
       }
       await clearTopicPins(chat, thread)   // single-pin guarantee — also drops orphaned card pins
       const text = await statusCardText(paneId)
-      const m = await channel.sendText(String(chat), text, { threadId: String(thread), silent: true, buttons: kbToButtons(statusKeyboard()) }).catch(() => null)
+      const m = await channel.sendText(String(chat), text, { threadId: String(thread), silent: true, buttons: statusKeyboard() }).catch(() => null)
       if (m) {
         await channel.pin(m).catch(() => {})
         sessionPins.set(key, Number(m.messageId)); pinTextCache.set(key, text); persistSessionPins()
@@ -4161,7 +4161,7 @@ bot.command('status', async ctx => {
         }
         await bot.api.unpinAllGeneralForumTopicMessages(chat).catch(() => {})   // TG-only: no neutral equivalent — General-topic single-pin guarantee
         const text = await statusCardText(anchorPane)
-        const m = await channel.sendText(String(chat), text, { buttons: kbToButtons(statusKeyboard()), silent: true }).catch(() => null)
+        const m = await channel.sendText(String(chat), text, { buttons: statusKeyboard(), silent: true }).catch(() => null)
         if (m) {
           await channel.pin(m).catch(() => {})
           sessionPins.set(key, Number(m.messageId)); pinTextCache.set(key, text); persistSessionPins()
@@ -4169,7 +4169,7 @@ bot.command('status', async ctx => {
         return
       }
       // General without an anchor (or a DM): a one-shot card for the focused session.
-      await ctx.reply(await statusCardText(paneId), { parse_mode: 'HTML', reply_markup: statusKeyboard() }).catch(() => {})
+      await ctx.reply(await statusCardText(paneId), { parse_mode: 'HTML', reply_markup: buttonsToKb(statusKeyboard()) }).catch(() => {})
       return
     }
     const old = sessionPins.get(chat)
@@ -4911,7 +4911,7 @@ bot.command('loop', async ctx => {
   const sub = arg.toLowerCase()
   if (!arg || sub === 'status') {
     const kb = loopStatusKeyboard(sid)
-    await ctx.reply(loopStatusHtml(sid), { parse_mode: 'HTML', ...(kb ? { reply_markup: kb } : {}) })
+    await ctx.reply(loopStatusHtml(sid), { parse_mode: 'HTML', ...(kb ? { reply_markup: buttonsToKb(kb) } : {}) })
     return
   }
   if (sub === 'stop now') { await ctx.reply(await loopStopNow(sid)); return }
@@ -5138,7 +5138,7 @@ bot.command(['terminal', 't'], async ctx => {   // /t = hidden short alias (kept
   // paces, and prioritizes this card against every other live card. The tmux capture runs at flush
   // time, so frames dropped under load cost nothing; the card rides the active view (interactive tier).
   const interval = setInterval(() => {
-    scheduleEdit({ chat, mid, thread: t.replyThread, source: 'terminal', parseMode: 'HTML',
+    scheduleEdit({ chat, mid, thread: t.replyThread, source: 'terminal',
       render: async () => { const b = await capture(); if (b === null) throw new Error('pane unreadable'); return terminalCard(b, limit) } })
   }, TERMINAL_REFRESH_MS)
 
@@ -7435,7 +7435,7 @@ bot.on('callback_query:data', async ctx => {
     cancelScheduled(schedCancelMatch[1])
     const existed = scheduledCount() < before
     await ctx.answerCallbackQuery({ text: existed ? 'Cancelled.' : 'Already gone.' }).catch(() => {})
-    if (scheduledCount()) await ctx.editMessageText(scheduledListText(), { parse_mode: 'HTML', reply_markup: scheduledCancelKeyboard() }).catch(() => {})
+    if (scheduledCount()) await ctx.editMessageText(scheduledListText(), { parse_mode: 'HTML', reply_markup: buttonsToKb(scheduledCancelKeyboard()) }).catch(() => {})
     else await ctx.editMessageText('📅 No scheduled messages left.').catch(() => {})
     return
   }
@@ -7948,7 +7948,7 @@ bot.on('callback_query:data', async ctx => {
       else state.selected.add(idx)
       await ctx.answerCallbackQuery().catch(() => {})
       await ctx.editMessageReplyMarkup({
-        reply_markup: multiSelectKeyboard(state.options, state.selected),
+        reply_markup: buttonsToKb(multiSelectKeyboard(state.options, state.selected)),
       }).catch(() => {})
       return
     }
@@ -9164,7 +9164,7 @@ loadScheduledReset()
 // Wire the scheduler's daemon dependencies first: inject into the focused pane (with the
 // watcher paused) when it's the active one, else plain-paste into the target pane.
 initScheduler({
-  bot,
+  channel,
   loadAccess,
   injectToPane: (paneId, text) =>
     paneId === focus.activePaneId && focus.paneWatcher
@@ -9189,7 +9189,7 @@ sweepOrphanedHermesAsks()   // party-bus P1.5: drop hermes asks whose `hermes -z
 // Wire the live activity mirror's daemon dependencies (bot, access, the shared replyMode
 // helper, the live focused-pane getter, and typing re-assert).
 initMirror({
-  bot,
+  richToken: TOKEN,
   loadAccess,
   replyMode,
   getActivePaneId: () => focus.activePaneId,

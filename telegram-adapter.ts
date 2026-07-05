@@ -22,7 +22,7 @@ export const TELEGRAM_CAPS: ChannelCaps = {
   richMessages: true, inlineQuery: true, textLimit: TG_TEXT_LIMIT,
 }
 
-function buttonsToKb(buttons: Button[][]): InlineKeyboard {
+export function buttonsToKb(buttons: Button[][]): InlineKeyboard {
   const kb = new InlineKeyboard()
   buttons.forEach((row, i) => {
     if (i > 0) kb.row()

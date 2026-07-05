@@ -18,7 +18,7 @@
 // INVARIANT: budget is per CHAT, never per thread — a forum group is one chat sharing one ~18/min
 // budget. Thread identity feeds attention/tiering only; introducing per-thread buckets would let N
 // topics each spend the whole budget and blow the group's limit.
-import type { Api } from 'grammy'
+import type { ChannelAdapter, Button, MsgRef } from './channel.ts'
 import { asLowPriority, isChatFlooded, noteFlood, acquire } from './throttle.ts'
 import { editRichMessage } from './richmsg.ts'
 
@@ -55,7 +55,6 @@ const P_ACTIVE = 1, P_VISIBLE = 2, P_BACKGROUND = 3
 const AGE_PROMOTE_MS = 10_000
 
 type Source = 'terminal' | 'mirror' | 'pin' | 'compact' | 'clauding' | 'loop'
-type EditExtra = Parameters<Api['editMessageText']>[3]   // editMessageText's "other" options (reply_markup, …)
 
 // ---- coalesced edit slots ----
 type EditIntent = {
@@ -64,9 +63,8 @@ type EditIntent = {
   mid: number
   source: Source
   render: () => string | Promise<string>   // produces the LATEST html; evaluated at flush time
-  parseMode?: 'HTML' | 'Markdown'
   rich?: boolean        // send as a Bot API 10.1 rich_message ({ html }) instead of parse_mode text — the live mirror uses this for <details>/<br> which classic HTML can't render
-  extra?: EditExtra     // extra editMessageText options (e.g. reply_markup) carried with the text
+  buttons?: Button[][]  // inline keyboard carried with the text edit (e.g. the pin's quick actions)
   onSent?: () => void | Promise<void>             // after a successful edit — the source refreshes its own caches
   onError?: (e: unknown) => void | Promise<void>  // when the edit throws — the source handles gone / not-modified itself
   dirty: boolean        // a new desired state is pending a flush
@@ -87,20 +85,20 @@ const IDLE_EVICT_MS = 60_000
 // ---- source-facing API (replaces direct editMessageText / deleteMessage for recurring cards) ----
 export function scheduleEdit(opts: {
   chat: string; mid: number; thread?: number | null; source: Source
-  render: () => string | Promise<string>; parseMode?: 'HTML' | 'Markdown'; rich?: boolean
-  extra?: EditExtra; onSent?: () => void | Promise<void>; onError?: (e: unknown) => void | Promise<void>
+  render: () => string | Promise<string>; rich?: boolean; buttons?: Button[][]
+  onSent?: () => void | Promise<void>; onError?: (e: unknown) => void | Promise<void>
 }): void {
   const key = editKey(opts.chat, opts.mid)
   if (deletes.has(key)) return   // message is doomed; don't bother editing it
   const it = intents.get(key)
   if (it) {
-    it.render = opts.render; it.parseMode = opts.parseMode; it.rich = opts.rich; it.thread = opts.thread
-    it.extra = opts.extra; it.onSent = opts.onSent; it.onError = opts.onError
+    it.render = opts.render; it.rich = opts.rich; it.thread = opts.thread
+    it.buttons = opts.buttons; it.onSent = opts.onSent; it.onError = opts.onError
     if (!it.dirty) { it.dirty = true; it.enqueuedAt = Date.now() }
   } else {
     intents.set(key, {
       chat: opts.chat, thread: opts.thread, mid: opts.mid, source: opts.source,
-      render: opts.render, parseMode: opts.parseMode, rich: opts.rich, extra: opts.extra, onSent: opts.onSent, onError: opts.onError,
+      render: opts.render, rich: opts.rich, buttons: opts.buttons, onSent: opts.onSent, onError: opts.onError,
       dirty: true, inFlight: false, enqueuedAt: Date.now(),
     })
   }
@@ -136,7 +134,7 @@ function tierOf(it: EditIntent): number {
   return tier
 }
 
-let api: Api | null = null
+let channel: ChannelAdapter | null = null
 let richToken: string | null = null   // bot token for rich_message edits (raw HTTP; grammy 1.41.1 has no method for them)
 let timer: ReturnType<typeof setInterval> | null = null
 const TICK_MS = 150
@@ -165,8 +163,8 @@ async function flushIntent(it: EditIntent): Promise<void> {
       // a shared group chat's flood budget the way an ungoverned raw send could.
       await asLowPriority(async () => { await acquire(it.chat, 'editMessageText'); await editRichMessage(richToken!, it.chat, it.mid, { html }) })
     } else {
-      const other = { ...(it.parseMode ? { parse_mode: it.parseMode } : {}), ...(it.extra ?? {}) } as EditExtra
-      await asLowPriority(() => api!.editMessageText(it.chat, it.mid, html, other))
+      const ref: MsgRef = { chatId: it.chat, messageId: String(it.mid) }
+      await asLowPriority(() => channel!.editText(ref, html, it.buttons ? { buttons: it.buttons } : undefined))
     }
     it.lastText = html
     await it.onSent?.()
@@ -182,7 +180,7 @@ async function flushIntent(it: EditIntent): Promise<void> {
 }
 
 function tick(): void {
-  if (!api) return
+  if (!channel) return
   type Work = { tier: number; enqueuedAt: number; run: () => Promise<void> }
   const work: Work[] = []
   // Snapshot is built synchronously (no await), so source timers can't mutate the maps mid-build.
@@ -196,7 +194,7 @@ function tick(): void {
     if (isChatFlooded(d.chat)) continue
     work.push({ tier: P_VISIBLE, enqueuedAt: d.enqueuedAt, run: async () => {
       deletes.delete(editKey(d.chat, d.mid))
-      await asLowPriority(() => api!.deleteMessage(d.chat, d.mid)).catch(() => {})
+      await asLowPriority(() => channel!.deleteMessage({ chatId: d.chat, messageId: String(d.mid) })).catch(() => {})
     } })
   }
   if (!work.length) return
@@ -209,8 +207,8 @@ function tick(): void {
   }
 }
 
-export function startEditScheduler(a: Api, token?: string): void {
-  api = a
+export function startEditScheduler(ch: ChannelAdapter, token?: string): void {
+  channel = ch
   if (token) richToken = token
   if (timer) return
   timer = setInterval(tick, TICK_MS)

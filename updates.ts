@@ -7,14 +7,14 @@ import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { readFileSync, existsSync, openSync, copyFileSync } from 'node:fs'
 import { spawn } from 'node:child_process'
-import { Bot, InlineKeyboard } from 'grammy'
 import { STATE_DIR, DAEMON_LOG_FILE, readJsonFile, writeJsonFile } from './common.ts'
 import { exec } from './proc.ts'
 import { escapeHtml } from './markdown.ts'
 import { loadAccess } from './access.ts'
 import { isTopicMode, getGroupChatId } from './topics.ts'
+import type { ChannelAdapter, Button } from './channel.ts'
 
-type UpdatesDeps = { bot: Bot }
+type UpdatesDeps = { channel: ChannelAdapter }
 let deps: UpdatesDeps
 export function initUpdates(d: UpdatesDeps): void { deps = d }
 
@@ -114,7 +114,7 @@ export async function sweepUpdateChecks(): Promise<void> {
   if (newBridge && autoOn) {
     const chat = dests[0] ?? access.allowFrom[0]
     if (chat) {
-      await deps.bot.api.sendMessage(chat, `♻️ <b>Auto-updating bridge</b> <code>${escapeHtml(newBridge.cur)}</code> → <code>${escapeHtml(newBridge.latest)}</code>…`, { parse_mode: 'HTML', disable_notification: true }).catch(() => {})
+      await deps.channel.sendText(String(chat), `♻️ <b>Auto-updating bridge</b> <code>${escapeHtml(newBridge.cur)}</code> → <code>${escapeHtml(newBridge.latest)}</code>…`, { silent: true }).catch(() => {})
       startUpdate(chat, 'apply')
     }
     record.bridge = newBridge.latest
@@ -124,11 +124,11 @@ export async function sweepUpdateChecks(): Promise<void> {
   // Tap-to-apply card for whatever wasn't auto-applied (Claude always; the bridge only when auto is off).
   if (notifyOn && (newBridge || newClaude)) {
     const lines = ['🆕 <b>Update available</b>']
-    const kb = new InlineKeyboard()
-    if (newBridge) { lines.push(`🌉 Bridge <code>${escapeHtml(newBridge.cur)}</code> → <code>${escapeHtml(newBridge.latest)}</code>`); kb.text('🌉 Update bridge', 'upd:bridge'); record.bridge = newBridge.latest }
-    if (newClaude) { lines.push(`🧠 Claude <code>${escapeHtml(newClaude.cur)}</code> → <code>${escapeHtml(newClaude.latest)}</code>`); kb.text('🧠 Update Claude', 'upd:claude'); record.claude = newClaude.latest }
+    const row: Button[] = []
+    if (newBridge) { lines.push(`🌉 Bridge <code>${escapeHtml(newBridge.cur)}</code> → <code>${escapeHtml(newBridge.latest)}</code>`); row.push({ text: '🌉 Update bridge', data: 'upd:bridge' }); record.bridge = newBridge.latest }
+    if (newClaude) { lines.push(`🧠 Claude <code>${escapeHtml(newClaude.cur)}</code> → <code>${escapeHtml(newClaude.latest)}</code>`); row.push({ text: '🧠 Update Claude', data: 'upd:claude' }); record.claude = newClaude.latest }
     for (const chat of dests) {
-      await deps.bot.api.sendMessage(chat, lines.join('\n'), { parse_mode: 'HTML', reply_markup: kb, disable_notification: true }).catch(() => {})
+      await deps.channel.sendText(String(chat), lines.join('\n'), { buttons: [row], silent: true }).catch(() => {})
     }
   }
   writeJsonFile(UPDATE_NOTIFY_FILE, record)

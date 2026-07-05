@@ -6,7 +6,8 @@
 // readings), so the module is unit-testable with a fake bot.
 import { join } from 'node:path'
 import { readFileSync, statSync } from 'node:fs'
-import { Bot, InlineKeyboard } from 'grammy'
+import { Bot } from 'grammy'
+import type { ChannelAdapter, Button } from './channel.ts'
 import { STATE_DIR, readJsonFile, writeJsonFile } from './common.ts'
 import { exec } from './proc.ts'
 import { escapeHtml } from './markdown.ts'
@@ -21,6 +22,9 @@ import { paneForSession } from './topic-runtime.ts'
 import { detectCurrentMode, onNormalPrompt, type CcMode } from './prompt.ts'
 
 type StatusCardDeps = {
+  channel: ChannelAdapter
+  // Kept alongside `channel` only for the pin ops the contract has no verb for (channel-gaps, tagged
+  // below): getChat's pinned_message lookup + the bulk forum/General unpins.
   bot: Bot
   // Focused-pane transcript resolution lives in daemon (per-pane tmux-option cache).
   transcriptForPane: (pane: string | null, cwd: string | null) => Promise<string | null>
@@ -114,8 +118,8 @@ export async function removeSessionPins(): Promise<void> {
   for (const [key, mid] of sessionPins) {
     const chat = key.startsWith('topic:') ? group : key
     if (!chat) continue
-    await deps.bot.api.unpinChatMessage(chat, mid).catch(() => {})
-    await deps.bot.api.deleteMessage(chat, mid).catch(() => {})
+    await deps.channel.unpin({ chatId: chat, messageId: String(mid) }).catch(() => {})
+    await deps.channel.deleteMessage({ chatId: chat, messageId: String(mid) }).catch(() => {})
   }
   sessionPins.clear(); pinTextCache.clear(); persistSessionPins()
 }
@@ -348,12 +352,13 @@ export async function statusCardText(paneId: string | null): Promise<string> {
 }
 
 // Quick-action buttons on the status card — same emojis as the card's own fields.
-export function statusKeyboard(): InlineKeyboard {
-  return new InlineKeyboard()
-    .text('🧠 Model', 'st:model').text('⚡ Effort', 'st:effort').row()
-    .text('🕹️ Mode', 'st:mode').text('🗜️ Compact', 'st:compact').row()
-    .text('💾 Context', 'st:context').text('💰 Cost', 'st:cost').row()
-    .text('⚙️ Settings', 'st:settings').text('📌 Pin off', 'st:pinoff')
+export function statusKeyboard(): Button[][] {
+  return [
+    [{ text: '🧠 Model', data: 'st:model' }, { text: '⚡ Effort', data: 'st:effort' }],
+    [{ text: '🕹️ Mode', data: 'st:mode' }, { text: '🗜️ Compact', data: 'st:compact' }],
+    [{ text: '💾 Context', data: 'st:context' }, { text: '💰 Cost', data: 'st:cost' }],
+    [{ text: '⚙️ Settings', data: 'st:settings' }, { text: '📌 Pin off', data: 'st:pinoff' }],
+  ]
 }
 
 // NB: topic cards must stay keyboard-less — Telegram renders a pinned message's first inline
@@ -392,11 +397,12 @@ export function topicThreadGone(e: unknown): boolean {
 // (tracked or orphaned from a prior daemon run / a pin misfire). DM only — never sweep the group.
 export async function clearAllPins(chat: string): Promise<void> {
   for (let i = 0; i < 12; i++) {
+    // TODO(channel-gap): getChat / pinned_message lookup — no verb in the ChannelAdapter contract.
     const info = await deps.bot.api.getChat(chat).catch(() => null)
     const pid = (info as { pinned_message?: { message_id?: number } } | null)?.pinned_message?.message_id
     if (!pid) break
-    const deleted = await deps.bot.api.deleteMessage(chat, pid).then(() => true).catch(() => false)
-    if (!deleted) { await deps.bot.api.unpinChatMessage(chat, pid).catch(() => {}); break }
+    const deleted = await deps.channel.deleteMessage({ chatId: chat, messageId: String(pid) }).then(() => true).catch(() => false)
+    if (!deleted) { await deps.channel.unpin({ chatId: chat, messageId: String(pid) }).catch(() => {}); break }
   }
 }
 
@@ -406,15 +412,16 @@ export async function clearAllPins(chat: string): Promise<void> {
 // otherwise stay pinned alongside the new one forever. Runs only when a new card is about to be
 // pinned; the old card's message stays in history, only its pin is cleared.
 export async function clearTopicPins(group: string, threadId: number): Promise<void> {
+  // TODO(channel-gap): unpinAllForumTopicMessages — bulk topic unpin, no verb in the contract.
   await deps.bot.api.unpinAllForumTopicMessages(group, threadId).catch(() => {})
 }
 
-export async function createSessionPin(chat: string, text: string, reply_markup: InlineKeyboard): Promise<void> {
+export async function createSessionPin(chat: string, text: string, buttons: Button[][]): Promise<void> {
   try {
     await clearAllPins(chat)   // single-pin guarantee: remove any prior/orphaned pins before the new one
-    const m = await deps.bot.api.sendMessage(chat, text, { parse_mode: 'HTML', reply_markup })
-    await deps.bot.api.pinChatMessage(chat, m.message_id, { disable_notification: true }).catch(() => {})
-    sessionPins.set(chat, m.message_id); pinTextCache.set(chat, text); persistSessionPins()
+    const m = await deps.channel.sendText(chat, text, { buttons })
+    await deps.channel.pin(m).catch(() => {})
+    sessionPins.set(chat, Number(m.messageId)); pinTextCache.set(chat, text); persistSessionPins()
   } catch (e) { process.stderr.write(`daemon: session pin create failed: ${e}\n`) }
 }
 
@@ -447,7 +454,7 @@ export async function updateTopicPins(): Promise<void> {
       const key = 'general'
       const existing = sessionPins.get(key)
       if (existing && pinTextCache.get(key) !== text) {
-        scheduleEdit({ chat: group, mid: existing, source: 'pin', parseMode: 'HTML', extra: { reply_markup: statusKeyboard() },
+        scheduleEdit({ chat: group, mid: existing, source: 'pin', buttons: statusKeyboard(),
           render: () => text,
           onSent: () => { pinTextCache.set(key, text) },
           onError: e => {
@@ -458,10 +465,11 @@ export async function updateTopicPins(): Promise<void> {
       }
       if (!sessionPins.has(key)) {
         try {
+          // TODO(channel-gap): unpinAllGeneralForumTopicMessages — bulk General unpin, no verb in the contract.
           await deps.bot.api.unpinAllGeneralForumTopicMessages(group).catch(() => {})   // single-pin guarantee for General
-          const m = await deps.bot.api.sendMessage(group, text, { parse_mode: 'HTML', reply_markup: statusKeyboard(), disable_notification: true })
-          await deps.bot.api.pinChatMessage(group, m.message_id, { disable_notification: true }).catch(() => {})
-          sessionPins.set(key, m.message_id); pinTextCache.set(key, text); persistSessionPins()
+          const m = await deps.channel.sendText(group, text, { buttons: statusKeyboard(), silent: true })
+          await deps.channel.pin(m).catch(() => {})
+          sessionPins.set(key, Number(m.messageId)); pinTextCache.set(key, text); persistSessionPins()
         } catch (e) { process.stderr.write(`daemon: general pin create failed: ${e}\n`) }
       }
     }
@@ -484,7 +492,7 @@ export async function updateTopicPins(): Promise<void> {
     const existing = sessionPins.get(key)
     if (existing && pinTextCache.get(key) === text) continue   // unchanged → skip the edit
     if (existing) {
-      scheduleEdit({ chat: group, mid: existing, thread: t.threadId, source: 'pin', parseMode: 'HTML', extra: { reply_markup: statusKeyboard() },
+      scheduleEdit({ chat: group, mid: existing, thread: t.threadId, source: 'pin', buttons: statusKeyboard(),
         render: () => text,
         onSent: () => { pinTextCache.set(key, text) },
         onError: e => {
@@ -496,9 +504,9 @@ export async function updateTopicPins(): Promise<void> {
     }
     try {
       await clearTopicPins(group, t.threadId)   // single-pin guarantee — drop any prior/orphaned card pins first
-      const m = await deps.bot.api.sendMessage(group, text, { parse_mode: 'HTML', message_thread_id: t.threadId, disable_notification: true, reply_markup: statusKeyboard() })
-      await deps.bot.api.pinChatMessage(group, m.message_id, { disable_notification: true }).catch(() => {})
-      sessionPins.set(key, m.message_id); pinTextCache.set(key, text); persistSessionPins()
+      const m = await deps.channel.sendText(group, text, { threadId: String(t.threadId), silent: true, buttons: statusKeyboard() })
+      await deps.channel.pin(m).catch(() => {})
+      sessionPins.set(key, Number(m.messageId)); pinTextCache.set(key, text); persistSessionPins()
     } catch (e) {
       if (topicThreadGone(e)) { sessionPins.delete(key); pinTextCache.delete(key); persistSessionPins(); deps.onTopicGone(t.sessionId, t.threadId) }   // tab gone → drop pin tracking; daemon confirms + tears down its session
       else process.stderr.write(`daemon: topic pin create failed: ${e}\n`)
@@ -514,20 +522,21 @@ export async function updateSessionPin(): Promise<void> {
   try {
     if (isTopicMode()) { await asLowPriority(() => updateTopicPins()); return }   // forum → per-topic pins, low-prio so they yield to user-facing sends
     const text = await statusCardText(focus.activePaneId)
-    const reply_markup = statusKeyboard()
+    const buttons = statusKeyboard()
     const hasSession = !!(focus.activePaneId || focus.activeShim)   // off-MCP pane or MCP shim — either counts
     for (const chat of loadAccess().allowFrom) {
       const existing = sessionPins.get(chat)
       if (existing && pinTextCache.get(chat) === text) continue   // nothing changed — skip the no-op edit
       if (existing) {
-        scheduleEdit({ chat, mid: existing, source: 'pin', parseMode: 'HTML', extra: { reply_markup },
+        scheduleEdit({ chat, mid: existing, source: 'pin', buttons,
           render: () => text,
           onSent: async () => {
             pinTextCache.set(chat, text)
             // If the user unpinned it, re-pin so it returns (runs only when the card actually changed).
+            // TODO(channel-gap): getChat / pinned_message lookup — no verb in the ChannelAdapter contract.
             const info = await deps.bot.api.getChat(chat).catch(() => null)
             if (info?.pinned_message?.message_id !== existing) {
-              await deps.bot.api.pinChatMessage(chat, existing, { disable_notification: true }).catch(() => {})
+              await deps.channel.pin({ chatId: chat, messageId: String(existing) }).catch(() => {})
             }
           },
           onError: e => {
@@ -538,7 +547,7 @@ export async function updateSessionPin(): Promise<void> {
           } })
         continue
       }
-      if (hasSession) await createSessionPin(chat, text, reply_markup)   // don't pin "No active session" out of nowhere
+      if (hasSession) await createSessionPin(chat, text, buttons)   // don't pin "No active session" out of nowhere
     }
   } finally { pinUpdating = false }
 }

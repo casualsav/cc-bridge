@@ -7,8 +7,8 @@
 // once work stops. Self-correcting by construction — the timer always runs, gated only on the
 // window, so it can never get stuck on or off.
 //
-// Extracted from daemon.ts as a standalone class; the bot is injected via the constructor.
-import { Bot } from 'grammy'
+// Extracted from daemon.ts as a standalone class; the channel adapter is injected via the constructor.
+import type { ChannelAdapter } from './channel.ts'
 
 export class TypingPresence {
   private chats = new Set<string>()             // chats that have messaged — where typing shows
@@ -20,15 +20,14 @@ export class TypingPresence {
   private static readonly START_GRACE_MS = 60_000  // startup latch cap: hold typing through Claude's pre-first-token
                                                    // "thinking" (turnInProgress can't see it yet); bounded so a
                                                    // no-reply message can't pin the indicator on
-  private static readonly SEND_TIMEOUT_MS = 1_500  // abandon a slow send so it can't pile up / stall the cadence
 
-  constructor(private bot: Bot) {}
+  constructor(private channel: ChannelAdapter) {}
 
   private active(): boolean { const n = Date.now(); return n < this.workingUntil || n < this.pendingUntil }
 
   private pingAll(): void {
     for (const chat of this.chats)
-      void this.bot.api.sendChatAction(chat, 'typing', {}, AbortSignal.timeout(TypingPresence.SEND_TIMEOUT_MS)).catch(() => {})
+      void this.channel.typing(chat).catch(() => {})
   }
   private ensureTimer(): void {
     if (!this.timer) this.timer = setInterval(() => { if (this.active()) this.pingAll() }, TypingPresence.PING_MS)

@@ -24,7 +24,7 @@ test('singleAnswerKeyboard routes answers through the given prefix', () => {
     question: 'Q', options: [{ label: 'One' }, { label: 'Two' }],
     multiSelect: false, tabbed: true, freeText: false, chat: false,
   } as never, 'mq')
-  const datas = kb.inline_keyboard.flat().map(b => 'callback_data' in b ? b.callback_data : '')
+  const datas = kb.flat().map(b => b.data ?? '')
   expect(datas).toContain('mq:1')
   expect(datas).toContain('mq:2')
 })
@@ -46,7 +46,7 @@ test('renderStuckHtml: name heading, <pre> tail, numbered options, raw-key wordi
 
 test('stuckKeyboard: one row per parsed option, fixed fallback keys + full-screen dump', () => {
   const kb = stuckKeyboard('abcd1234', { optionKind: 'numbered', count: 2 })
-  const datas = kb.inline_keyboard.flat().map(b => 'callback_data' in b ? b.callback_data : '')
+  const datas = kb.flat().map(b => b.data ?? '')
   expect(datas).toContain('stuck:abcd1234:o0')
   expect(datas).toContain('stuck:abcd1234:o1')
   expect(datas).toContain('stuck:abcd1234:k:Enter')
@@ -58,6 +58,6 @@ test('stuckKeyboard: one row per parsed option, fixed fallback keys + full-scree
 
 test('every stuck callback_data stays under Telegram’s 64-byte cap', () => {
   const kb = stuckKeyboard('deadbeef', { optionKind: 'ink', count: 8 })
-  for (const b of kb.inline_keyboard.flat())
-    if ('callback_data' in b) expect(Buffer.byteLength(b.callback_data!, 'utf8')).toBeLessThanOrEqual(64)
+  for (const b of kb.flat())
+    if (b.data) expect(Buffer.byteLength(b.data, 'utf8')).toBeLessThanOrEqual(64)
 })
