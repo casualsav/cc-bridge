@@ -3,7 +3,7 @@ import { test, expect } from 'bun:test'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnActivity, currentTurnFeed, currentTurnTokens, finalReplyForInjected } from './transcript.ts'
+import { latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnActivity, currentTurnFeed, currentTurnTokens } from './transcript.ts'
 
 function fixture(entries: object[]): string {
   const f = join(mkdtempSync(join(tmpdir(), 'tg-transcript-')), 'session.jsonl')
@@ -124,15 +124,6 @@ test('currentTurnFeed(concluded) drops a trailing-tool reply so it never folds i
   expect(currentTurnFeed(f, false).some(i => i.kind === 'text' && i.text === 'the answer')).toBe(true)
   expect(currentTurnFeed(f, true).some(i => i.kind === 'text' && i.text === 'the answer')).toBe(false)
   expect(currentTurnFeed(f, true).some(i => i.kind === 'text' && i.text === 'checking things')).toBe(true)
-})
-
-test('finalReplyForInjected returns the conclusion to a specific injected message', () => {
-  const f = fixture([
-    user('earlier', 'u0'), asst('nope', 'a0'),
-    user('please do X', 'u1'), asst('let me check', 'a1'), asst('did X', 'a2'),
-    user('next', 'u2'),
-  ])
-  expect(finalReplyForInjected(f, 'please do X')).toBe('did X')
 })
 
 test('turnInProgress: an injected meta user entry (Skill instructions) is not a turn boundary', () => {

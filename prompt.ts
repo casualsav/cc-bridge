@@ -629,6 +629,18 @@ export function onNormalPrompt(paneText: string): boolean {
   return false
 }
 
+// True while Claude Code is mid-turn. The TUI shows a spinner + "esc to interrupt" footer while
+// working and clears it when the turn ends, so the footer is the ground truth. Markers are
+// intentionally broad — detection drives the typing indicator (self-correcting from pane state) and
+// gates the stuck-screen watchdog. (Moved from daemon.ts so the stuck detector can share it.)
+export function detectWorking(paneText: string): boolean {
+  const footer = paneLines(paneText).slice(-8).join('\n')
+  if (/esc to interrupt/i.test(footer)) return true
+  // Spinner glyph followed by an elapsed timer: "(12s", "(3m 56s", "(1h 2m" — any h/m/s unit.
+  if (/[✢✳✶✻✽✺✷✸✹·●◐◓◑◒][^\n]*\(\d+\s*[hms]/.test(footer)) return true
+  return false
+}
+
 // ---- stuck-screen watchdog (party-bus): a backstop for a pane wedged at a prompt no detector parses ----
 // The shared footerIsLive fix keeps KNOWN prompts relaying; this catches a genuinely novel screen so a
 // session never hangs silently. WAITING_FOOTER = the input-soliciting footer hints Claude Code prints
@@ -653,4 +665,81 @@ export function waitingPromptSignature(paneText: string): string | null {
 export function isRecognizedPrompt(paneText: string): boolean {
   return !!detectPermissionPrompt(paneText) || !!detectUserPrompt(paneText) || !!detectResumeSessionPrompt(paneText)
     || !!detectLoginPrompt(paneText) || isUsageLimitChoice(paneText) || isPluginInstallUserScope(paneText)
+}
+
+// ---- Catch-all "stuck at an UNRECOGNIZED interactive screen" detector (party-bus v2) ----
+// v1 alerted (text-only) when a WAITING_FOOTER screen went unrecognized. This generalizes it into an
+// ACTIONABLE relay: it classifies ANY unrecognized interactive screen — a novel confirmation, an
+// arbitrary select — parses whatever options it can, and hands the daemon a stable signature + tier so
+// the sweep can card it with buttons. Pure (pane-text only); the daemon adds the time + transcript
+// gating that turns "an interactive screen" into "a WEDGED interactive screen".
+export type StuckScreen = { sig: string; tier: 'footer' | 'generic'; optionKind: 'numbered' | 'ink' | null; options: PromptOption[] }
+
+// Volatile statusline / spinner rows that must be stripped from the tail before hashing, so a
+// statusline clock tick or spinner frame can't perturb the signature (the same rows waitingPromptSignature
+// keeps BELOW its footer). Reuses the statusline-specific BELOW_CHROME wording + a full box-border row +
+// the spinner+timer footer row. Deliberately does NOT strip footer WORDING — tier + interactivity read it.
+const STUCK_CHROME = new RegExp(
+  [
+    /^\s*ε:/, /↻/, /\b[57][hd]\b/, /@[^|]+\|/,
+    /^[\s│┃─━┌┐└┘├┤┬┴┼╭╮╰╯╶╴╵╷▔▁▂▃▄▅▆▇█]+$/,
+    /[✢✳✶✻✽✺✷✸✹·●◐◓◑◒][^\n]*\(\d+\s*[hms]/,
+  ].map(r => r.source).join('|'),
+  'i',
+)
+
+// The stable, chrome-stripped tail (last `max` content lines) the stuck detector reasons + hashes over.
+function stuckTail(paneText: string, max = 20): string[] {
+  const out: string[] = []
+  for (const l of paneLines(paneText)) {
+    if (!l.trim() || BOXY_LINE.test(l) || STUCK_CHROME.test(l)) continue
+    out.push(l.trimEnd())
+  }
+  return out.slice(-max)
+}
+
+// Parse whatever option block sits nearest the bottom of `lines` (already chrome-stripped, so
+// "contiguous" = consecutive). Prefers numbered options (the common shape), falling back to ink/●○
+// markers. Returns null unless it finds ≥2 options. Caps at 8 so a runaway list can't build a giant
+// keyboard. The un-anchored twins of detectUserPrompt's footer-anchored NUMBERED_RE / INK_RE.
+export function extractGenericOptions(lines: string[]): { kind: 'numbered' | 'ink'; options: PromptOption[] } | null {
+  for (const [kind, re] of [['numbered', NUMBERED_RE], ['ink', INK_RE]] as const) {
+    let end = -1
+    for (let i = lines.length - 1; i >= 0; i--) { if (re.test(lines[i])) { end = i; break } }
+    if (end < 0) continue
+    let start = end
+    while (start - 1 >= 0 && re.test(lines[start - 1])) start--
+    const options: PromptOption[] = []
+    for (let i = start; i <= end; i++) {
+      const m = lines[i].match(re)
+      if (!m) continue
+      const label = (kind === 'numbered' ? m[2] : (m[1] ?? m[2])) ?? ''
+      options.push({ label: label.replace(PREVIEW_COL, '').replace(/\s*│\s*$/, '').trim().replace(LEADING_BOX, '').trim() })
+    }
+    if (options.length >= 2) return { kind, options: options.slice(0, 8) }
+  }
+  return null
+}
+
+// Interactive "tell" a novel screen prints even without a known footer: a "<key> to <verb>" hint.
+const STUCK_INTERACTIVE_TELL = /(esc|enter|space|tab|y\/n|↑|↓) to /i
+
+// Classify the pane as an unrecognized interactive screen, or null. Vetoed the moment a KNOWN state
+// owns the pane (idle prompt, a recognized/relayed prompt, working, compacting, an editor/pager — those
+// keep their own paths). tier 'footer' = a known input-soliciting footer wording is present (alert
+// sooner); 'generic' = no such footer, so we require a positive interactivity tell (parsed options, a
+// "<key> to …" hint, or a ❯/► selector row) — quiet thinking output must never card.
+export function detectStuckScreen(paneText: string): StuckScreen | null {
+  if (onNormalPrompt(paneText) || isRecognizedPrompt(paneText) || detectWorking(paneText)
+    || detectCompacting(paneText) || detectEditorState(paneText)) return null
+  const tail = stuckTail(paneText, 20)
+  if (tail.length === 0) return null
+  const tier: 'footer' | 'generic' = tail.some(l => WAITING_FOOTER.test(l)) ? 'footer' : 'generic'
+  const parsed = extractGenericOptions(tail)
+  // A ❯/► selector cursor sitting on a real option row (the empty input cursor "❯ " was stripped as a
+  // border above and never carries a following label, so it can't be mistaken for one).
+  const selectorRow = tail.some(l => /^\s*[❯►]\s+\S/.test(l))
+  const interactive = parsed !== null || tail.some(l => STUCK_INTERACTIVE_TELL.test(l)) || selectorRow
+  if (tier === 'generic' && !interactive) return null
+  return { sig: tail.join('\n'), tier, optionKind: parsed?.kind ?? null, options: parsed?.options ?? [] }
 }

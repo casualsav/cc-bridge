@@ -467,12 +467,15 @@ function pingTopicTyping(key: string): void {
 }
 
 function ensureTopicTypingTimer(): void {
-  if (!topicTypingTimer) topicTypingTimer = setInterval(() => {
-    for (const [key, until] of topicTypingPending) {
-      if (Date.now() > until) { topicTypingPending.delete(key); continue }
-      pingTopicTyping(key)
-    }
-  }, TOPIC_TYPING_PING_MS)
+  if (!topicTypingTimer) {
+    topicTypingTimer = setInterval(() => {
+      for (const [key, until] of topicTypingPending) {
+        if (Date.now() > until) { topicTypingPending.delete(key); continue }
+        pingTopicTyping(key)
+      }
+    }, TOPIC_TYPING_PING_MS)
+    ;(topicTypingTimer as { unref?: () => void }).unref?.()
+  }
 }
 
 export function armTopicTyping(chat: string, thread: number | 'general'): void {

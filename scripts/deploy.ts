@@ -140,7 +140,7 @@ const pkgPath = join(newCache, 'package.json')
 if (!existsSync(pkgPath)) {
   Bun.write(pkgPath, JSON.stringify({
     name: 'claude-channel-telegram-daemon', private: true, type: 'module',
-    dependencies: { grammy: GRAMMY_PIN, '@modelcontextprotocol/sdk': '^1.0.0' },
+    dependencies: { grammy: GRAMMY_PIN, '@modelcontextprotocol/sdk': '^1.0.0', zod: '~4.3.6' },
   }, null, 2) + '\n')
 }
 if (!existsSync(join(newCache, 'node_modules', 'grammy'))) {

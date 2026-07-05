@@ -5,7 +5,7 @@
 // in through initStatusCard's deps (the bot, the transcript resolver, and two mutable daemon
 // readings), so the module is unit-testable with a fake bot.
 import { join } from 'node:path'
-import { readFileSync } from 'node:fs'
+import { readFileSync, statSync } from 'node:fs'
 import { Bot, InlineKeyboard } from 'grammy'
 import { STATE_DIR, readJsonFile, writeJsonFile } from './common.ts'
 import { exec } from './proc.ts'
@@ -128,12 +128,17 @@ export async function refreshSessionPin(): Promise<void> {
   await updateSessionPin()
 }
 
-// The model the focused session last used, read from its transcript (non-intrusive, per
-// session) — falls back to deps.lastKnownModel(). The transcript stores raw ids like
-// "claude-opus-4-8"; prettyModel turns that into "Opus 4.8".
-export function lastModelInTranscript(file: string): string | null {
-  let data = ''
-  try { data = readFileSync(file, 'utf8') } catch { return null }
+type TodoState = { total: number; done: number; active: string | null }
+
+// Everything the pin extracts from a session's transcript, computed in ONE pass. The pin tick used
+// to readFileSync the (multi-MB) transcript once per extraction — model AND todos — every 10s per hot
+// topic. This caches the extracted facts keyed by (mtime,size), so an unchanged file is neither
+// re-read nor re-parsed, and a changed file is read exactly once for all three fields.
+type TranscriptFacts = { model: string | null; version: string | null; todos: TodoState | null }
+const NO_FACTS: TranscriptFacts = { model: null, version: null, todos: null }
+const factsCache = new Map<string, { mtimeMs: number; size: number; facts: TranscriptFacts }>()
+
+function extractModel(data: string): string | null {
   const matches = data.match(/"model":"([^"]+)"/g) ?? []
   for (let i = matches.length - 1; i >= 0; i--) {
     const m = matches[i].slice(9, -1)
@@ -141,20 +146,11 @@ export function lastModelInTranscript(file: string): string | null {
   }
   return null
 }
-// The Claude Code build a session is actually RUNNING, from its transcript (every entry stamps
-// it). The installed binary can be newer — the native build auto-updates underneath live sessions.
-export function lastVersionInTranscript(file: string): string | null {
-  let data = ''
-  try { data = readFileSync(file, 'utf8') } catch { return null }
+function extractVersion(data: string): string | null {
   const m = data.match(/"version":"(\d+\.\d+\.\d+[^"]*)"/g)
   return m?.length ? m[m.length - 1].slice(11, -1) : null
 }
-// The session's working plan: the most recent TodoWrite state in its transcript (ROADMAP #16).
-// Whole-file read matches lastModelInTranscript's pattern (the pin tick already pays it).
-type TodoState = { total: number; done: number; active: string | null }
-export function lastTodosInTranscript(file: string): TodoState | null {
-  let data = ''
-  try { data = readFileSync(file, 'utf8') } catch { return null }
+function extractTodos(data: string): TodoState | null {
   const idx = data.lastIndexOf('"name":"TodoWrite"')
   if (idx < 0) return null
   const start = data.lastIndexOf('\n', idx) + 1
@@ -174,6 +170,27 @@ export function lastTodosInTranscript(file: string): TodoState | null {
     return { total: todos.length, done, active: act ? String(act.activeForm ?? act.content ?? '').trim() || null : null }
   } catch { return null }
 }
+function transcriptFacts(file: string): TranscriptFacts {
+  let mtimeMs: number, size: number
+  try { const st = statSync(file); mtimeMs = st.mtimeMs; size = st.size } catch { factsCache.delete(file); return NO_FACTS }
+  const hit = factsCache.get(file)
+  if (hit && hit.mtimeMs === mtimeMs && hit.size === size) return hit.facts
+  let data = ''
+  try { data = readFileSync(file, 'utf8') } catch { return NO_FACTS }
+  const facts: TranscriptFacts = { model: extractModel(data), version: extractVersion(data), todos: extractTodos(data) }
+  factsCache.set(file, { mtimeMs, size, facts })
+  return facts
+}
+
+// The model the focused session last used, read from its transcript (non-intrusive, per
+// session) — falls back to deps.lastKnownModel(). The transcript stores raw ids like
+// "claude-opus-4-8"; prettyModel turns that into "Opus 4.8".
+export function lastModelInTranscript(file: string): string | null { return transcriptFacts(file).model }
+// The Claude Code build a session is actually RUNNING, from its transcript (every entry stamps
+// it). The installed binary can be newer — the native build auto-updates underneath live sessions.
+export function lastVersionInTranscript(file: string): string | null { return transcriptFacts(file).version }
+// The session's working plan: the most recent TodoWrite state in its transcript (ROADMAP #16).
+export function lastTodosInTranscript(file: string): TodoState | null { return transcriptFacts(file).todos }
 
 // Live countdown to a reset epoch in the statusline's own duration style ("54m" / "2h13m" /
 // "4d2h"), so the snapshot's epoch renders like the scraped field it replaces. null when the

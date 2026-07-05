@@ -24,7 +24,7 @@ import { acquireTokenLock } from './token-lock.ts'
 // replace a daemon left running stale code after a plugin upgrade.
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
-import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, waitingPromptSignature, isRecognizedPrompt, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
+import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen } from './prompt.ts'
 import { resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, currentTurnActivity, currentTurnTokens, listRecentSessions, findSessionCwd, searchTranscripts } from './transcript.ts'
 import {
   initAccounts, listAccounts, accountByName, accountForTranscript, accountForProjectsDir,
@@ -44,7 +44,7 @@ import type {
 import {
   focus,
   _accessFileCache, onboardedPanes, onboardingState, sessions, permissionOrigin,
-  pendingMultiSelect, freeTextPrompts, chatPrompts, replyTargets,
+  pendingMultiSelect, freeTextPrompts, chatPrompts, replyTargets, stuckCards,
   lastRelayedByFile, offMcpPanes,
   usageWarnState, voiceNudged,
   sessionNames, mdOverwritePending,
@@ -99,8 +99,9 @@ import {
 } from './loop.ts'
 import {
   initPromptRelay, relayPromptToTelegram, relayPermissionToTelegram, sweepPermStorms,
-  permStorms, multiSelectKeyboard, formatPermission,
+  permStorms, multiSelectKeyboard, formatPermission, relayStuckScreen, renderStuckHtml,
 } from './prompt-relay.ts'
+import { planStuckSweep, type StuckState } from './stuck-plan.ts'
 import {
   initStatusCard, statusCardText, statusKeyboard, updateSessionPin, updateTopicPins,
   removeSessionPins, refreshSessionPin, sessionPins, pinTextCache, persistSessionPins,
@@ -550,19 +551,7 @@ async function readCurrentModel(paneId: string, watcher: PaneWatcher | null): Pr
 
 // Pull the most recent block of command output from a pane capture: the last
 // contiguous run of non-empty content lines sitting above the input box / footer.
-// True while Claude Code is mid-turn. The TUI shows a spinner + "esc to
-// interrupt" footer while working and clears it when the turn ends, so the
-// footer is the ground truth. Markers are intentionally broad — detection only
-// drives the typing indicator, which self-corrects from pane state.
-function detectWorking(paneText: string): boolean {
-  const footer = paneLines(paneText).slice(-8).join('\n')
-  if (/esc to interrupt/i.test(footer)) return true
-  // Spinner glyph followed by an elapsed timer: "(12s", "(3m 56s", "(1h 2m" — any h/m/s unit.
-  // (The old /\(\d+s/ missed minute-format timers, so long turns read as idle and relayed
-  // mid-turn fragments.)
-  if (/[✢✳✶✻✽✺✷✸✹·●◐◓◑◒][^\n]*\(\d+\s*[hms]/.test(footer)) return true
-  return false
-}
+// detectWorking moved to prompt.ts (shared with the stuck-screen detector); imported above.
 
 // True when the pane is showing a usage-limit / throttle banner near the bottom —
 // i.e. Claude is blocked, not finished. Used to suppress the "✅ Claude finished"
@@ -850,7 +839,7 @@ function enqueueInboundInject(paneId: string, watcher: PaneWatcher, params: Inbo
   const block = formatChannelBlock(params)
   // If an effort-change confirmation is open and the user sent a message instead of tapping, dismiss
   // it first (= "No, go back", keeps the current level) so the message doesn't type into the modal.
-  const run = () => dismissPendingEffortConfirm()
+  const run = () => dismissPendingEffortConfirm(paneId)
     .then(() => injectPaste(paneId, watcher, block))
     .then(ok => {
       if (ok) {
@@ -1088,7 +1077,6 @@ const auxRelayPrimed = new Set<string>()
 // backlog on the first focus of a session (or after a restart).
 // Cross-session unread pings: the latest uuid we've pinged about per file, and the live
 // ping message ids (file → chat → messageId) so a follow-up edits in place and a read clears.
-let relayIdleStreak = 0
 let relayLoopGen = 0   // bump to retire the running loop when focus moves
 // Final replies relay only after the turn has read concluded for a few consecutive ticks —
 // the same debounce the mirror card's cap uses. A mid-burst end_turn (harness auto-continue:
@@ -1215,71 +1203,82 @@ async function deliverRelayReply(paneId: string, target: { chat: string; thread?
 async function relayLoopTick(gen: number): Promise<void> {
   if (gen !== relayLoopGen || !focus.activePaneId || !TRANSCRIPT_OUTBOUND) return
   const paneId = focus.activePaneId
-  let cap = ''
-  // Reuse the PaneWatcher's recent capture of this same focused pane instead of spawning our own
-  // `tmux capture-pane` every tick; injection invalidates it, so it's never stale across an inject.
-  try { cap = await capturePaneCached(paneId) } catch { /* transient capture miss — retry next tick */ }
-  const idle = cap !== '' && !detectWorking(cap) && !detectLimited(cap)
-  relayIdleStreak = idle ? relayIdleStreak + 1 : 0
+  // Error boundary (mirrors auxRelayTick): a transient failure anywhere in the tick — a rejected
+  // outboundTargetsFor, a tmux/transcript miss — must neither skip past an undelivered reply nor
+  // kill the loop. Catch, log, and always reschedule below so the relay self-heals next tick.
+  try {
+    let cap = ''
+    // Reuse the PaneWatcher's recent capture of this same focused pane instead of spawning our own
+    // `tmux capture-pane` every tick; injection invalidates it, so it's never stale across an inject.
+    try { cap = await capturePaneCached(paneId) } catch { /* transient capture miss — retry next tick */ }
+    const idle = cap !== '' && !detectWorking(cap) && !detectLimited(cap)
 
-  const cwd = await paneCwd(paneId)
-  rememberLastCwd(cwd)   // so DM /new can offer this folder after every session is gone
-  const file = await transcriptForPane(paneId, cwd)
+    const cwd = await paneCwd(paneId)
+    rememberLastCwd(cwd)   // so DM /new can offer this folder after every session is gone
+    const file = await transcriptForPane(paneId, cwd)
 
-  // The card opens/edits/closes entirely inside updateTerminalMirror, off the transcript's turn
-  // state (turnInProgress) — NOT pane idle. This bridged pane never shows the "esc to interrupt"
-  // footer, so detectWorking reads idle the whole turn; gating the card on that produced a
-  // create/finalize storm. turnInProgress is the ground truth, so the card caps exactly when the
-  // turn concludes. (relayIdleStreak/detectWorking now only feed ambient signals elsewhere.)
-  const working = file ? turnInProgress(file) : !idle
-  relayConcludeTicks = working ? 0 : relayConcludeTicks + 1
-  if (isTopicMode()) { if (working) void emitTopicTyping(paneId) }   // topic mode → typing in the session's own topic
-  else typingPresence.observe(working)   // reliable working signal — this bridged pane never shows the spinner
-  await updateTerminalMirror(working, thinkingPending(paneId)).catch(() => {})   // pending opens/holds the Thinking… card before turnInProgress flips
+    // The card opens/edits/closes entirely inside updateTerminalMirror, off the transcript's turn
+    // state (turnInProgress) — NOT pane idle. This bridged pane never shows the "esc to interrupt"
+    // footer, so detectWorking reads idle the whole turn; gating the card on that produced a
+    // create/finalize storm. turnInProgress is the ground truth, so the card caps exactly when the
+    // turn concludes. (detectWorking now only feeds ambient signals elsewhere.)
+    const working = file ? turnInProgress(file) : !idle
+    relayConcludeTicks = working ? 0 : relayConcludeTicks + 1
+    if (isTopicMode()) { if (working) void emitTopicTyping(paneId) }   // topic mode → typing in the session's own topic
+    else typingPresence.observe(working)   // reliable working signal — this bridged pane never shows the spinner
+    await updateTerminalMirror(working, thinkingPending(paneId)).catch(() => {})   // pending opens/holds the Thinking… card before turnInProgress flips
 
-  // DM-only "Clauding…" live draft. DISABLED by default (the indicator was unreliable): gated to
-  // require an explicit claudingDraft:true opt-in (was default-on). All the machinery is kept intact
-  // to revisit later. Dormant in topic mode anyway (drafts are group-rejected).
-  {
-    const acc = loadAccess()
-    const wantDraft = !!file && working && acc.claudingDraft === true
-    if (wantDraft) {
-      if (!claudingTimer) { const c = dmDraftChats(await outboundTargetsFor(paneId)); if (c.length) startClaudingDraft(file!, c) }
-    } else stopClaudingDraft()
-  }
-
-  // A select/permission/login menu sitting on the pane is a question the user must answer. Any
-  // assistant text Claude wrote just before it is the CONTEXT for that question, so flush it now —
-  // the menu was relayed from the pane the moment it appeared, but the preamble text can land in
-  // the transcript a tick later, after the menu. Without this it would only arrive once the turn
-  // finally concludes (i.e. after the question is answered). Bounded to ticks where a menu is up.
-  if (relayCursorPrimed && file && cap && (detectUserPrompt(cap) || detectPermissionPrompt(cap) || detectLoginPrompt(cap))) {
-    await flushPendingText().catch(() => {})
-  }
-
-  // Relay the turn's reply once it concludes (turnInProgress flips false). The reply is the turn's
-  // last main-thread text block — finalRepliesAfter returns exactly that, regardless of any trailing
-  // tool call (TodoWrite / `tg react` / file send) that would otherwise stamp it 'tool_use' and hide
-  // it. Gated on !working so mid-turn narration never leaks into the messages (it lives in the card,
-  // which already dropped this same reply block at finalize — so stream and final stay separate).
-  if (relayCursorPrimed && file && !working && relayConcludeTicks >= RELAY_CONCLUDE_TICKS) {
-    // Suppress Claude's own usage-limit banner echo (the ⛔ handler sends a richer one), but
-    // only a short banner-shaped block — a real reply that merely mentions a limit isn't eaten.
-    const isBanner = (t: string) => t.length < 200 && /\b(hit your|used \d+% of your) [\w-]+ limit\b/i.test(t)
-    for (const r of finalRepliesAfter(file, lastRelayedUuid)) {
-      if (!r.uuid || r.uuid === lastRelayedUuid) continue
-      lastRelayedUuid = r.uuid                 // advance before the await so a fast tick can't double-send
-      lastRelayedByFile.set(file, r.uuid)
-      if (!isBanner(r.text)) {
-        const targets = await outboundTargetsFor(paneId)
-        process.stderr.write(`daemon: relaying ${r.text.length} chars (uuid ${r.uuid.slice(0, 8)}, reply) to ${targets.map(t => t.chat + (t.thread ? `#${t.thread}` : '')).join(',')}\n`)
-        for (const t of targets) await deliverRelayReply(paneId, t, r.text)   // self-heals a deleted topic (recreate + resend)
-      }
-      clearThinkingPending(paneId)   // reply landed → drop the thinking-pending crutch so the card caps/deletes promptly
-      typingPresence.stop()   // reply delivered (or banner suppressed) → clean stop, no tail
-      if (!isBanner(r.text) && paneId) void maybeShipFooter(paneId)   // opt-in ship buttons when the turn dirtied the tree
+    // DM-only "Clauding…" live draft. DISABLED by default (the indicator was unreliable): gated to
+    // require an explicit claudingDraft:true opt-in (was default-on). All the machinery is kept intact
+    // to revisit later. Dormant in topic mode anyway (drafts are group-rejected).
+    {
+      const acc = loadAccess()
+      const wantDraft = !!file && working && acc.claudingDraft === true
+      if (wantDraft) {
+        if (!claudingTimer) { const c = dmDraftChats(await outboundTargetsFor(paneId)); if (c.length) startClaudingDraft(file!, c) }
+      } else stopClaudingDraft()
     }
-  }
+
+    // A select/permission/login menu sitting on the pane is a question the user must answer. Any
+    // assistant text Claude wrote just before it is the CONTEXT for that question, so flush it now —
+    // the menu was relayed from the pane the moment it appeared, but the preamble text can land in
+    // the transcript a tick later, after the menu. Without this it would only arrive once the turn
+    // finally concludes (i.e. after the question is answered). Bounded to ticks where a menu is up.
+    if (relayCursorPrimed && file && cap && (detectUserPrompt(cap) || detectPermissionPrompt(cap) || detectLoginPrompt(cap))) {
+      await flushPendingText().catch(() => {})
+    }
+
+    // Relay the turn's reply once it concludes (turnInProgress flips false). The reply is the turn's
+    // last main-thread text block — finalRepliesAfter returns exactly that, regardless of any trailing
+    // tool call (TodoWrite / `tg react` / file send) that would otherwise stamp it 'tool_use' and hide
+    // it. Gated on !working so mid-turn narration never leaks into the messages (it lives in the card,
+    // which already dropped this same reply block at finalize — so stream and final stay separate).
+    if (relayCursorPrimed && file && !working && relayConcludeTicks >= RELAY_CONCLUDE_TICKS) {
+      // Suppress Claude's own usage-limit banner echo (the ⛔ handler sends a richer one), but
+      // only a short banner-shaped block — a real reply that merely mentions a limit isn't eaten.
+      const isBanner = (t: string) => t.length < 200 && /\b(hit your|used \d+% of your) [\w-]+ limit\b/i.test(t)
+      for (const r of finalRepliesAfter(file, lastRelayedUuid)) {
+        if (!r.uuid || r.uuid === lastRelayedUuid) continue
+        if (!isBanner(r.text)) {
+          // Resolve delivery targets BEFORE advancing the cursor — a rejection here must not skip
+          // past an undelivered reply. On failure leave the cursor put and retry the reply next tick.
+          let targets: Awaited<ReturnType<typeof outboundTargetsFor>>
+          try { targets = await outboundTargetsFor(paneId) }
+          catch (e) { process.stderr.write(`daemon: relay target-resolve failed, retry next tick: ${e}\n`); break }
+          lastRelayedUuid = r.uuid                 // advance before the send so a fast tick can't double-send
+          lastRelayedByFile.set(file, r.uuid)
+          process.stderr.write(`daemon: relaying ${r.text.length} chars (uuid ${r.uuid.slice(0, 8)}, reply) to ${targets.map(t => t.chat + (t.thread ? `#${t.thread}` : '')).join(',')}\n`)
+          for (const t of targets) await deliverRelayReply(paneId, t, r.text)   // self-heals a deleted topic (recreate + resend)
+        } else {
+          lastRelayedUuid = r.uuid                 // banner suppressed — advance past it, nothing to send
+          lastRelayedByFile.set(file, r.uuid)
+        }
+        clearThinkingPending(paneId)   // reply landed → drop the thinking-pending crutch so the card caps/deletes promptly
+        typingPresence.stop()   // reply delivered (or banner suppressed) → clean stop, no tail
+        if (!isBanner(r.text) && paneId) void maybeShipFooter(paneId)   // opt-in ship buttons when the turn dirtied the tree
+      }
+    }
+  } catch (e) { process.stderr.write(`daemon: relay tick error, retry next tick: ${e}\n`) }
   if (gen === relayLoopGen) setTimeout(() => void relayLoopTick(gen), RELAY_POLL_MS)
 }
 
@@ -1307,7 +1306,6 @@ function startRelayLoop(): void {
   if (!TRANSCRIPT_OUTBOUND) return
   const gen = ++relayLoopGen
   relayCursorPrimed = false
-  relayIdleStreak = 0
   relayConcludeTicks = 0
   stopClaudingDraft()   // a pane switch / relay restart drops any in-flight DM status draft
   abandonMirror(focus.activePaneId)   // keep the card if this is a relay restart on the same pane; abandon only on a real pane switch
@@ -2939,6 +2937,11 @@ async function startCompactionWatch(pane: string, initialText = ''): Promise<voi
           render: () => `🗜️ Compacting conversation…\n<code>${compactProgress(pct)}</code>` })
       }
       w.timer = setTimeout(() => void tick(), COMPACT_TICK_MS)
+    } else if (cap === '') {
+      // An empty capture means the pane is gone (dead session), NOT a finished compaction — the
+      // "no longer compacting" test would otherwise post a false ✅. Stop the watch on a neutral card.
+      compactWatches.delete(pane)
+      scheduleEdit({ chat: w.chat, mid: w.msgId, thread: w.thread, source: 'compact', parseMode: 'HTML', render: () => '⚠️ Compaction interrupted (session ended)' })
     } else {
       compactWatches.delete(pane)
       const secs = Math.round(elapsed / 1000)
@@ -3737,13 +3740,15 @@ function isEffortConfirm(cap: string): boolean {
 
 // An open effort confirmation awaiting the user: tapping ✅/❌ answers it; sending any other
 // message dismisses it (= "No, go back") first, then proceeds — see dismissPendingEffortConfirm.
-let pendingEffortConfirm: { level: string; chatId: string; messageId: number; paneId: string; thread?: number } | null = null
+// Keyed by paneId so concurrent effort confirms on different panes don't clobber each other; the
+// tapped button carries its own paneId, so a Yes/No resolves the confirm for the right session.
+const pendingEffortConfirm = new Map<string, { level: string; chatId: string; messageId: number; thread?: number }>()
 
 // Inject `/effort <level>` into the target session and detect whether CC raised the mid-conversation
 // confirmation. Returns 'confirm' (a Yes/No was relayed — answer pending) or 'applied' (took effect
 // directly, e.g. a fresh session with nothing cached). Re-issuing supersedes any open confirm.
 async function injectEffortChange(t: CommandTarget, level: string, chat_id: string): Promise<'confirm' | 'applied'> {
-  await dismissPendingEffortConfirm()
+  await dismissPendingEffortConfirm(t.paneId)
   await injectSlash(t.paneId, t.watcher, `/effort ${level}`)
   const cap = await capturePane(t.paneId).catch(() => '')
   if (cap && isEffortConfirm(cap)) {
@@ -3766,26 +3771,26 @@ function rememberEffort(paneId: string, level: string): void {
 // the Yes/No tap acts on the right session.
 async function relayEffortConfirm(t: CommandTarget, level: string, chat_id: string): Promise<void> {
   const kb = new InlineKeyboard()
-    .text(`✅ Yes, switch to ${effortLabel(level)}`, 'effortconfirm:yes')
-    .text('❌ No', 'effortconfirm:no')
+    .text(`✅ Yes, switch to ${effortLabel(level)}`, `effortconfirm:yes:${t.paneId}`)
+    .text('❌ No', `effortconfirm:no:${t.paneId}`)
   try {
     const sent = await bot.api.sendMessage(chat_id,
       `⚡ <b>Change effort level to ${escapeHtml(effortLabel(level))}?</b>\n\n` +
       '<blockquote>Your next response will be slower and use more tokens. The conversation is ' +
       'cached for the current level — switching re-reads the full history on your next message.</blockquote>',
       threadExtra(t, { parse_mode: 'HTML', reply_markup: kb }))
-    pendingEffortConfirm = { level, chatId: chat_id, messageId: sent.message_id, paneId: t.paneId, thread: t.replyThread }
+    pendingEffortConfirm.set(t.paneId, { level, chatId: chat_id, messageId: sent.message_id, thread: t.replyThread })
   } catch (e) { process.stderr.write(`daemon: effort-confirm relay failed: ${e}\n`) }
 }
 
 // Dismiss an open effort confirmation by pressing Esc (= "No, go back" — keeps the current level),
 // and update the relayed message. No-op when nothing is pending. Called when the user sends another
 // message instead of tapping, or re-issues /effort.
-async function dismissPendingEffortConfirm(): Promise<void> {
-  const pend = pendingEffortConfirm
+async function dismissPendingEffortConfirm(paneId: string): Promise<void> {
+  const pend = pendingEffortConfirm.get(paneId)
   if (!pend) return
-  pendingEffortConfirm = null
-  try { await paneKeys(pend.paneId, ['Escape'], [200, 2000]) }
+  pendingEffortConfirm.delete(paneId)
+  try { await paneKeys(paneId, ['Escape'], [200, 2000]) }
   catch (e) { process.stderr.write(`daemon: effort-confirm dismiss failed: ${e}\n`) }
   void bot.api.editMessageText(pend.chatId, pend.messageId,
     '⚡ Effort change dismissed — kept the current level.', { parse_mode: 'HTML' }).catch(() => {})
@@ -4275,15 +4280,6 @@ bot.command('compact', async ctx => {
 // per-user `claude install` in the background, then — only if it actually moved the version —
 // offers a button to restart the focused session so the running conversation picks it up.
 
-
-// The focused off-MCP session's id — the newest transcript under the active pane's cwd, so we can
-// relaunch it with `claude --resume <id>` (same id → same transcript → the conversation continues).
-async function activeSessionId(): Promise<string | null> {
-  if (!focus.activePaneId) return null
-  const cwd = await paneCwd(focus.activePaneId)
-  const file = await transcriptForPane(focus.activePaneId, cwd)
-  return file ? basename(file, '.jsonl') : null
-}
 
 // Restart the focused session in place so a freshly installed Claude takes effect: /exit the
 // running claude, then relaunch `claude --resume <id>` in the SAME pane. Keeping the pane id keeps
@@ -4785,13 +4781,16 @@ function cleanPaneTail(raw: string, maxLines: number): string {
 // for is worse than a loud ping). Spend = today's GROWTH of each session's cumulative statusline
 // cost, so a long-lived session doesn't count yesterday's spend against today.
 const BUDGET_FILE = join(STATE_DIR, 'budget.json')
-type BudgetState = { date: string; base: Record<string, number>; cur: Record<string, number>; warned: number }
+// `acc` carries spend that was booked against an earlier (now re-baselined) session — a /clear
+// resets the pane's cumulative cost, so without this the pre-reset spend would vanish from the
+// daily total. Optional/defaults-0 so state persisted before this field loads clean.
+type BudgetState = { date: string; base: Record<string, number>; cur: Record<string, number>; warned: number; acc?: number }
 function readBudgetState(today: string): BudgetState {
   const st = readJsonFile<BudgetState | null>(BUDGET_FILE, null)
-  return st && st.date === today ? st : { date: today, base: {}, cur: {}, warned: 0 }
+  return st && st.date === today ? st : { date: today, base: {}, cur: {}, warned: 0, acc: 0 }
 }
 function budgetSpent(st: BudgetState): number {
-  return Object.keys(st.cur).reduce((sum, k) => sum + Math.max(0, (st.cur[k] ?? 0) - (st.base[k] ?? 0)), 0)
+  return (st.acc ?? 0) + Object.keys(st.cur).reduce((sum, k) => sum + Math.max(0, (st.cur[k] ?? 0) - (st.base[k] ?? 0)), 0)
 }
 async function sweepBudget(): Promise<void> {
   const cap = loadAccess().budgetDaily
@@ -4807,7 +4806,11 @@ async function sweepBudget(): Promise<void> {
       // First sighting today baselines at the current total; a RESET cost (new conversation in
       // the pane) re-baselines at 0 so the fresh session's spend counts from its start.
       if (st.base[sid] === undefined) st.base[sid] = cost
-      else if (cost < (st.cur[sid] ?? 0)) st.base[sid] = 0
+      else if (cost < (st.cur[sid] ?? 0)) {
+        // Bank this session's pre-reset spend before re-baselining so /clear doesn't erase it.
+        st.acc = (st.acc ?? 0) + Math.max(0, (st.cur[sid] ?? 0) - (st.base[sid] ?? 0))
+        st.base[sid] = 0
+      }
       st.cur[sid] = cost
     } catch { /* pane vanished */ }
   }
@@ -5172,8 +5175,9 @@ async function fireResetNotification(account: string, chats: string[], attempt =
       : `🔁 Still limited${who} — retrying continue (attempt ${attempt + 1}/${CONTINUE_MAX_ATTEMPTS})…`
     for (const chat_id of chats) void bot.api.sendMessage(chat_id, msg).catch(() => {})
     void (async () => {
-      const ok = await injectText(focus.activePaneId!, focus.paneWatcher!, 'continue')
-      setTimeout(() => void verifyAutoContinue(account, chats, attempt, ok), CONTINUE_VERIFY_MS)
+      const pane = focus.activePaneId!   // capture at inject time — focus may switch before verify fires
+      const ok = await injectText(pane, focus.paneWatcher!, 'continue')
+      setTimeout(() => void verifyAutoContinue(account, chats, attempt, ok, pane), CONTINUE_VERIFY_MS)
     })()
     return
   }
@@ -5218,8 +5222,8 @@ async function verifyAuxContinue(pane: string): Promise<void> {
 // After auto-continue types "continue", confirm the session actually resumed. If it's still
 // showing the frozen limit banner (the reset hadn't really landed yet), reschedule a retry a
 // few minutes out — persisted + capped — instead of giving up after one early attempt.
-async function verifyAutoContinue(account: string, chats: string[], attempt: number, injected: boolean): Promise<void> {
-  const cap = focus.activePaneId ? await capturePane(focus.activePaneId).catch(() => '') : ''
+async function verifyAutoContinue(account: string, chats: string[], attempt: number, injected: boolean, pane: string): Promise<void> {
+  const cap = pane ? await capturePane(pane).catch(() => '') : ''
   const resumed = injected && !!cap && !detectLimited(cap)
   if (resumed) {
     clearScheduledReset(account)
@@ -5931,6 +5935,11 @@ function ensureFolderTrusted(dir: string): void {
   try {
     const cfgPath = join(homedir(), '.claude.json')
     if (!existsSync(cfgPath)) return   // fresh install: claude will create it (and prompt) itself
+    // A cheap decision read first: if the folder is already trusted, do nothing (the common case).
+    if (JSON.parse(readFileSync(cfgPath, 'utf8')).projects?.[dir]?.hasTrustDialogAccepted === true) return
+    // Then re-read the file as the very last step before writing so we mutate the freshest config
+    // claude may have written since, apply ONLY the single trust key, and no-op if claude beat us to
+    // it — shrinking the read-modify-write window that could clobber a concurrent claude write.
     const cfg = JSON.parse(readFileSync(cfgPath, 'utf8'))
     cfg.projects ??= {}
     const entry = cfg.projects[dir] ?? {}
@@ -7093,14 +7102,15 @@ bot.on('callback_query:data', async ctx => {
 
   // Effort-change confirmation (the mid-conversation "Change effort level?" modal) — Yes applies it
   // (digit 1 + Enter, mirroring the generic prompt answerer), No/Esc cancels (keeps current level).
-  if (data === 'effortconfirm:yes' || data === 'effortconfirm:no') {
+  if (data.startsWith('effortconfirm:yes:') || data.startsWith('effortconfirm:no:')) {
     if (!(await cbAuth(ctx))) return
-    const yes = data === 'effortconfirm:yes'
-    const pend = pendingEffortConfirm
+    const yes = data.startsWith('effortconfirm:yes:')
+    // The button carries the pane that raised the confirm, so a Yes/No acts on the right session
+    // even with concurrent confirms open — not whichever pane happens to be focused.
+    const paneId = data.slice((yes ? 'effortconfirm:yes:' : 'effortconfirm:no:').length)
+    const pend = pendingEffortConfirm.get(paneId)
     const level = pend?.level
-    // Act on the pane that raised the confirm (recorded when relayed), not whichever is focused.
-    const paneId = pend?.paneId ?? focus.activePaneId
-    pendingEffortConfirm = null
+    pendingEffortConfirm.delete(paneId)
     if (!paneId) { await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {}); return }
     await ctx.answerCallbackQuery({ text: yes ? 'Switching…' : 'Cancelled' }).catch(() => {})
     await paneKeys(paneId, yes ? ['1', 'Enter'] : ['Escape'], [300, 5000])
@@ -7698,6 +7708,70 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
+  // Stuck-screen card tap (catch-all watchdog): `stuck:<tok>:<action>` sends a raw key into the wedged
+  // pane. Actions: `o<i>` a parsed option (numbered → its digit; ink → i navigate-downs then Enter),
+  // `k:<key>` a whitelisted raw key, `full` dumps a wider capture. A stale tap (the screen already moved
+  // on) is rejected and the card refreshed — mirrors the pperm guard.
+  const stuckMatch = /^stuck:([0-9a-f]{8}):(.+)$/.exec(data)
+  if (stuckMatch) {
+    if (!(await cbAuth(ctx))) return
+    const tok = stuckMatch[1]
+    const action = stuckMatch[2]
+    const card = stuckCards.get(`${ctx.chat?.id}:${ctx.callbackQuery?.message?.message_id}`)
+    const pane = card?.paneId ?? (await targetPaneOf(ctx)).paneId
+    if (!pane || !(await paneAlive(pane).catch(() => false))) {
+      await ctx.answerCallbackQuery({ text: 'That session’s pane is gone.' }).catch(() => {})
+      return
+    }
+    // Full-screen dump: send the wider cleaned capture in-thread, no injection.
+    if (action === 'full') {
+      await ctx.answerCallbackQuery().catch(() => {})
+      const dump = cleanPaneTail(await capturePane(pane).catch(() => ''), 60)
+      for (const t of await outboundTargetsFor(pane))
+        await bot.api.sendMessage(t.chat, `<pre>${escapeHtml(dump)}</pre>`, { parse_mode: 'HTML', ...(t.thread ? { message_thread_id: t.thread } : {}) }).catch(() => {})
+      return
+    }
+    // Stale-tap guard: the pane must STILL show the same unrecognized screen the card was built for.
+    const cap = await capturePane(pane).catch(() => '')
+    const cur = cap ? detectStuckScreen(cap) : null
+    if (!cur || permPromptToken(cur.sig) !== tok) {
+      await ctx.answerCallbackQuery({ text: '⚠️ That screen already moved on.', show_alert: true }).catch(() => {})
+      await ctx.editMessageText(renderStuckHtml(await paneDisplayName(pane), cleanPaneTail(cap, 20), cur?.options ?? []), { parse_mode: 'HTML' }).catch(() => {})
+      return
+    }
+    const oMatch = /^o(\d+)$/.exec(action)
+    const kMatch = /^k:(.+)$/.exec(action)
+    if (oMatch) {
+      const i = Number(oMatch[1])
+      await ctx.answerCallbackQuery({ text: `Sending option ${i + 1}` }).catch(() => {})
+      if (card?.optionKind === 'ink')
+        await withPaneInjection(pane, async () => { await navigateDown(pane, i); await sendKeys(pane, ['Enter']); await waitForSettle(pane, 300, 5000) })
+      else
+        await paneKeys(pane, [String(i + 1), 'Enter'], [300, 5000])
+    } else if (kMatch) {
+      const key = kMatch[1]
+      if (!['Enter', 'Escape', 'Up', 'Down', '1', '2', '3'].includes(key)) {
+        await ctx.answerCallbackQuery({ text: 'Unsupported key.' }).catch(() => {})
+        return
+      }
+      await ctx.answerCallbackQuery({ text: `Sent ${key}` }).catch(() => {})
+      await paneKeys(pane, [key], [300, 5000])
+    } else {
+      await ctx.answerCallbackQuery().catch(() => {})
+      return
+    }
+    // If the screen moved on, retire the card + re-baseline so a now-recognized prompt can relay next tick.
+    const after = await capturePane(pane).catch(() => '')
+    const still = after ? detectStuckScreen(after) : null
+    if (!still || permPromptToken(still.sig) !== tok) {
+      await ctx.editMessageText('✅ Sent — the screen moved on.').catch(() => {})
+      stuckWatch.delete(pane)
+      pruneStuckCards(pane)
+      resetPromptDedup(pane)
+    }
+    return
+  }
+
   const promptMatch = /^prompt:(\d+)$/.exec(data)
   if (promptMatch) {
     const access = loadAccess()
@@ -8209,7 +8283,7 @@ bot.on('edited_message', async ctx => {
     content: text,
     meta: {
       chat_id: chat, message_id: String(em.message_id), edited: 'true',   // → the `e` flag: this text replaces their previous message
-      user: ctx.from?.username ?? String(ctx.from?.id), user_id: String(ctx.from?.id),
+      user: senderDisplayName(ctx.from!), user_id: String(ctx.from?.id),   // @username → first_name → id, matching handleInbound
       ts: new Date((em.edit_date ?? em.date) * 1000).toISOString(),
     },
   }, targetPane)
@@ -8499,7 +8573,7 @@ bot.on('message:text', async ctx => {
     if (!t) return
     // A slash command while an effort confirmation is open: dismiss it first so the command isn't
     // typed into the modal (matches the "next message dismisses → No" behaviour for plain messages).
-    await dismissPendingEffortConfirm()
+    await dismissPendingEffortConfirm(t.paneId)
     const msgId = ctx.message.message_id
     const chat_id = String(ctx.chat!.id)
     // /exit (and /quit) closes the session. If it's the only one, confirm first (Yes/No) so the
@@ -8855,37 +8929,56 @@ setInterval(() => void updateSessionPin(), 10_000)
 // Party line (party-bus P1): deliver queued agent↔agent asks to idle targets + expire stale ones.
 setInterval(() => void sweepParty(), LATER_SWEEP_MS).unref()
 
-// Stuck-screen watchdog (party-bus): the shared footerIsLive fix keeps KNOWN prompts relaying; this is
-// the backstop for a NOVEL screen the detectors can't parse, so a session never hangs silently (the "I
-// thought you were working but you were wedged at a prompt" class). Every 25s: any bridged pane sitting
-// at an UNRECOGNIZED input-soliciting screen (a waiting footer, no detector match, not a normal prompt)
-// whose prompt region has been unchanged for STUCK_ALERT_MS gets a ONE-TIME ping into its own topic with
-// the terminal tail so the human can answer it. Reset the instant the screen changes → it re-arms.
-const stuckWatch = new Map<string, { sig: string; since: number; alerted: boolean }>()
-const STUCK_ALERT_MS = 75_000
+// Stuck-screen watchdog (party-bus v2): the actionable backstop for a pane wedged at ANY screen no
+// detector parses (a novel confirmation, an arbitrary select), so a session never hangs silently (the
+// "I thought you were working but you were wedged" class). Every 25s, over EVERY bridged pane (topics ∪
+// focused ∪ off-MCP aux — closing the DM-aux gap): detectStuckScreen + a transcript gate (a turn in
+// progress, or a transcript touched in the last 30s, means working — not wedged; a pane with NO
+// transcript yet stays eligible, since a pre-REPL wedge is a target case). planStuckSweep then times it:
+// alert (footer-tier at 75s, generic at 90s) relays an actionable card; a still-stuck screen re-nags
+// quietly once per 30min; recovery clears the timer + prunes the pane's cards.
+const stuckWatch = new Map<string, StuckState>()
+function pruneStuckCards(pane: string): void {
+  for (const [k, v] of stuckCards) if (v.paneId === pane) stuckCards.delete(k)
+}
+// A pane's display name for the card / logs (its topic name, else the session id, else the pane id).
+async function paneDisplayName(pane: string): Promise<string> {
+  const sid = await sessionForPane(pane).catch(() => null)
+  return (sid && getTopicBySession(sid)?.name) || sid || pane
+}
+// True if the pane's transcript file was written within `ms` (a proxy for "a turn is actively producing
+// output right now"), so a momentary option-ish frame mid-work can't be mistaken for a wedge.
+function transcriptFreshWithin(file: string, ms: number): boolean {
+  try { return Date.now() - statSync(file).mtimeMs < ms } catch { return false }
+}
 async function sweepStuckPanes(): Promise<void> {
   const panes = new Set<string>()
   for (const t of listTopics()) { if (t.closed) continue; const p = await paneForSession(t.sessionId).catch(() => null); if (p) panes.add(p) }
   if (focus.activePaneId) panes.add(focus.activePaneId)
+  for (const p of offMcpPanes) panes.add(p)
+  const now = Date.now()
   for (const pane of panes) {
     const cap = await capturePane(pane).catch(() => '')
-    const sig = cap ? waitingPromptSignature(cap) : null
-    // Only an UNRECOGNIZED waiting screen counts: a recognized prompt is relayed as buttons, a normal
-    // prompt is idle-ready, a working pane has no soliciting footer (and its capture keeps changing).
-    if (!sig || onNormalPrompt(cap) || isRecognizedPrompt(cap)) { stuckWatch.delete(pane); continue }
-    const prev = stuckWatch.get(pane)
-    if (!prev || prev.sig !== sig) { stuckWatch.set(pane, { sig, since: Date.now(), alerted: false }); continue }
-    if (prev.alerted || Date.now() - prev.since < STUCK_ALERT_MS) continue
-    prev.alerted = true
-    const sid = await sessionForPane(pane).catch(() => null)
-    const nm = (sid && getTopicBySession(sid)?.name) || sid || pane
-    const tail = cap.split('\n').map(l => l.replace(/\s+$/, '')).filter(l => l.trim()).slice(-16).join('\n')
-    for (const { chat, thread } of await outboundTargetsFor(pane)) {
-      void bot.api.sendMessage(chat,
-        `⚠️ <b>${escapeHtml(nm)}</b> looks stuck at a prompt the bridge can't turn into buttons — you may need to answer it in the terminal:\n<pre>${escapeHtml(tail)}</pre>`,
-        { parse_mode: 'HTML', ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
+    // The onboarding auto-driver owns a not-yet-onboarded pane while it shows a known setup screen
+    // (theme/trust/enter) — don't race it with a card. A pre-REPL wedge on an UNKNOWN screen
+    // (classifyOnboarding null) stays eligible: that's a target case.
+    if (cap && !onboardedPanes.has(pane) && classifyOnboarding(cap)) continue
+    let stuck = cap ? detectStuckScreen(cap) : null
+    if (stuck) {
+      try {
+        const cwd = await paneCwd(pane).catch(() => null)
+        const file = await transcriptForPane(pane, cwd)
+        if (file && (turnInProgress(file) || transcriptFreshWithin(file, 30_000))) stuck = null   // working, not wedged
+      } catch { /* transcript resolution blip — treat as eligible; the time gate still guards */ }
     }
-    process.stderr.write(`daemon: stuck-screen watchdog pinged for pane ${pane} (${nm})\n`)
+    const { decision, next } = planStuckSweep(stuckWatch.get(pane) ?? null, stuck?.sig ?? null, stuck?.tier ?? 'generic', now)
+    if (next) stuckWatch.set(pane, next); else stuckWatch.delete(pane)
+    if (decision.act === 'clear') { pruneStuckCards(pane); continue }
+    if ((decision.act === 'alert' || decision.act === 'renag') && stuck) {
+      const nm = await paneDisplayName(pane)
+      await relayStuckScreen(pane, stuck, cleanPaneTail(cap, 20), nm, decision.act === 'renag').catch(() => {})
+      process.stderr.write(`daemon: stuck-screen watchdog ${decision.act} for pane ${pane} (${nm})\n`)
+    }
   }
 }
 setInterval(() => void sweepStuckPanes(), 25_000).unref()
@@ -8997,7 +9090,7 @@ setInterval(() => void sweepUpdateChecks(), 24 * 3_600_000).unref()   // …then
 // sweep-delete would strand the "🗜️ Compacting…" card forever. Entries are short-lived + self-cleaning.
 const PANE_STATE_MAPS: { delete(k: string): boolean; keys(): IterableIterator<string> }[] = [
   resumeRelayed, paneTranscriptCache, thinkingPendingUntil, stuckDumpAt, editorHeld,
-  modelUnavailAlerted, staleSessionNotified, shipFooterFp, auxPromptStates,
+  modelUnavailAlerted, staleSessionNotified, shipFooterFp, auxPromptStates, stuckWatch,
 ]
 function forgetPane(paneId: string): void {
   for (const m of PANE_STATE_MAPS) m.delete(paneId)

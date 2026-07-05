@@ -52,6 +52,7 @@ export function runHermes(cfg: HermesEndpoint, task: HermesTask): Promise<Hermes
   return new Promise<HermesResult>(resolve => {
     let done = false
     let timer: ReturnType<typeof setTimeout> | undefined
+    let killTimer: ReturnType<typeof setTimeout> | undefined
     const finish = (r: HermesResult) => { if (done) return; done = true; if (timer) clearTimeout(timer); resolve(r) }
     let child: ReturnType<typeof spawn>
     try {
@@ -60,9 +61,9 @@ export function runHermes(cfg: HermesEndpoint, task: HermesTask): Promise<Hermes
     let out = '', err = ''
     child.stdout?.on('data', d => { out += String(d) })
     child.stderr?.on('data', d => { err += String(d) })
-    const kill = () => { try { child.kill('SIGTERM') } catch {} ; setTimeout(() => { try { child.kill('SIGKILL') } catch {} }, 5000) }
+    const kill = () => { try { child.kill('SIGTERM') } catch {} ; killTimer = setTimeout(() => { try { child.kill('SIGKILL') } catch {} }, 5000); killTimer.unref?.() }
     timer = setTimeout(() => { kill(); finish({ ok: false, error: `hermes timed out after ${timeoutS}s` }) }, timeoutS * 1000)
     child.on('error', e => finish({ ok: false, error: `hermes process error: ${e.message}` }))
-    child.on('close', code => { finish(parseHermesResult(out, err, code)) })
+    child.on('close', code => { if (killTimer) clearTimeout(killTimer); finish(parseHermesResult(out, err, code)) })
   })
 }

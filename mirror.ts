@@ -489,7 +489,7 @@ class MirrorCard {
     // placeholder rather than reading currentTurnFeed, which would still return the PREVIOUS,
     // concluded turn (the "idle session shows a stale, still-active card on a new message" bug).
     if (forceThinking && !done && !footerOn()) { this.body = await this.renderThinking(paneId); return true }
-    const file = paneId ? await deps.resolveTranscriptForPane(paneId) : null
+    const file = paneId ? await deps.resolveTranscriptForPane(paneId).catch(() => null) : null
 
     // The capture feeds the digest body and the footer's verb/tokens scrape — with the footer
     // disabled, thoughts/actions don't need it at all (saves a tmux spawn per sync).

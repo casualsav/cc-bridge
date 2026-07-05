@@ -1,6 +1,6 @@
 // Prompt detection from pane captures — select menus vs permission dialogs. Pure functions.
 import { test, expect } from 'bun:test'
-import { stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, isResumeSessionPrompt, detectResumeSessionPrompt, detectEditorState, onNormalPrompt, detectModelUnavailable, detectCompacting, compactPercent, permPromptToken, waitingPromptSignature, isRecognizedPrompt } from './prompt.ts'
+import { stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, isResumeSessionPrompt, detectResumeSessionPrompt, detectEditorState, onNormalPrompt, detectModelUnavailable, detectCompacting, compactPercent, permPromptToken, waitingPromptSignature, isRecognizedPrompt, detectStuckScreen, extractGenericOptions } from './prompt.ts'
 
 test('stripAnsi removes CSI escape sequences', () => {
   expect(stripAnsi('\x1b[1mbold\x1b[0m text')).toBe('bold text')
@@ -488,4 +488,80 @@ test('isRecognizedPrompt is true for a known prompt so the watchdog never alerts
   const perm = ['Do you want to run this command?', '  1. Yes', '  2. No', ' Esc to cancel · Tab to amend'].join('\n')
   expect(isRecognizedPrompt(perm)).toBe(true)
   expect(isRecognizedPrompt('plain assistant output, no prompt here')).toBe(false)
+})
+
+// ---- catch-all stuck-screen detection (party-bus v2) ----
+
+test('detectStuckScreen cards a NOVEL confirmation (plan-mode exit): generic tier + numbered options', () => {
+  const pane = [
+    '  Exit plan mode?',
+    '  ❯ 1. Yes, and auto-accept edits',
+    '    2. Yes, and manually approve edits',
+    '    3. No, keep planning',
+    '  ↑↓ to move · ⏎ to accept',                       // a footer NO known detector matches
+  ].join('\n')
+  const s = detectStuckScreen(pane)
+  expect(s).not.toBeNull()
+  expect(s!.tier).toBe('generic')
+  expect(s!.optionKind).toBe('numbered')
+  expect(s!.options.map(o => o.label)).toEqual(['Yes, and auto-accept edits', 'Yes, and manually approve edits', 'No, keep planning'])
+})
+
+test('detectStuckScreen returns null for the normal idle input box', () => {
+  const pane = ['  ────────────', '  ❯ ', '  ────────────', '   ? for shortcuts'].join('\n')
+  expect(detectStuckScreen(pane)).toBeNull()
+})
+
+test('detectStuckScreen returns null while Claude is working (spinner footer)', () => {
+  const pane = ['● Doing the thing', '  ✻ Working… (12s · esc to interrupt)'].join('\n')
+  expect(detectStuckScreen(pane)).toBeNull()
+})
+
+test('detectStuckScreen defers to every KNOWN detector (never double-cards a relayed prompt)', () => {
+  const perm = ['Do you want to run this command?', '  1. Yes', '  2. No', ' Esc to cancel · Tab to amend'].join('\n')
+  const user = ['❓ Choose a deployment target', '  1. staging', '  2. production', ' Enter to select · Esc to cancel'].join('\n')
+  const login = ['  Select login method:', '  1. Claude account with subscription', '  2. Anthropic Console account', '  Esc to cancel'].join('\n')
+  const resume = ['  This session is 2d old.', '  ❯ 1. Resume from summary (recommended)', '    2. Resume full session as-is', '    Enter to confirm · Esc to cancel'].join('\n')
+  for (const p of [perm, user, login, resume]) expect(detectStuckScreen(p)).toBeNull()
+})
+
+test('detectStuckScreen signature is stable across a below-options statusline clock tick', () => {
+  const mk = (clock: string) => [
+    '  Exit plan mode?',
+    '  ❯ 1. Yes',
+    '    2. No',
+    '  ↑↓ to move · ⏎ to accept',
+    `  ε:max | ✻think | ctx ██░░ 4%/1000k | $1.00 | ⧗${clock}`,   // volatile statusline row (stripped)
+  ].join('\n')
+  const a = detectStuckScreen(mk('3h00m'))
+  const b = detectStuckScreen(mk('3h59m'))
+  expect(a).not.toBeNull()
+  expect(a!.sig).toBe(b!.sig)
+  expect(a!.sig).toContain('Exit plan mode?')
+})
+
+test('detectStuckScreen returns null for scrolled plain output with no interactive tell', () => {
+  const pane = ['● Here is some output', '  more lines of text', '  and a summary paragraph', '  final line'].join('\n')
+  expect(detectStuckScreen(pane)).toBeNull()
+})
+
+test('detectStuckScreen reads an ink/●○ menu as optionKind "ink"', () => {
+  const pane = [
+    '  Select a branch',
+    '  ● main',
+    '  ○ develop',
+    '  ○ feature/foo',
+    '  j/k to move · enter to accept',
+  ].join('\n')
+  const s = detectStuckScreen(pane)
+  expect(s).not.toBeNull()
+  expect(s!.optionKind).toBe('ink')
+  expect(s!.options.map(o => o.label)).toEqual(['main', 'develop', 'feature/foo'])
+})
+
+test('extractGenericOptions prefers numbered, needs ≥2, and caps at 8', () => {
+  expect(extractGenericOptions(['1. one'])).toBeNull()                                  // a lone option isn't a menu
+  expect(extractGenericOptions(['plain', 'text', 'only'])).toBeNull()
+  const many = Array.from({ length: 12 }, (_, i) => `${i + 1}. opt${i + 1}`)
+  expect(extractGenericOptions(many)!.options.length).toBe(8)                            // capped
 })

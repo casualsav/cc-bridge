@@ -8,10 +8,10 @@ import { Bot, InlineKeyboard } from 'grammy'
 import { escapeHtml } from './markdown.ts'
 import { sleep } from './proc.ts'
 import { capturePane, paneCwd, paneAlive, type PaneWatcher } from './pane-io.ts'
-import { focus, pendingMultiSelect, freeTextPrompts, chatPrompts } from './state.ts'
+import { focus, pendingMultiSelect, freeTextPrompts, chatPrompts, stuckCards, replyTargets } from './state.ts'
 import { loadAccess } from './access.ts'
 import { finalRepliesAfter } from './transcript.ts'
-import { detectPermissionPrompt, onNormalPrompt, permPromptToken, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
+import { detectPermissionPrompt, onNormalPrompt, permPromptToken, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen } from './prompt.ts'
 
 type PromptRelayDeps = {
   bot: Bot
@@ -159,6 +159,53 @@ export function permButtonLabel(opt: { n: number; label: string }): string {
   const icon = low === 'yes' ? '✅' : low.startsWith('yes') ? '🔁' : low.startsWith('no') ? '❌' : '•'
   const short = bare.length > 38 ? bare.slice(0, 37) + '…' : bare
   return `${icon} ${short}`
+}
+
+// ---- Catch-all stuck-screen card (party-bus v2) ----
+// The actionable upgrade of the v1 text-only warning: when a pane wedges at a screen NO detector parses,
+// show the terminal tail + whatever options we could scrape, and offer buttons that send raw keys (or a
+// reply-to-type route). Wording is explicit that taps inject raw keystrokes into the terminal.
+export function renderStuckHtml(name: string, tail: string, options: PromptOption[]): string {
+  const lines = [`🧩 <b>${escapeHtml(name)}</b> is waiting on a screen I don't recognize:`]
+  lines.push(`<pre>${escapeHtml(tail)}</pre>`)
+  options.forEach((o, i) => lines.push(`<b>${i + 1}.</b> ${escapeHtml(o.label)}`))
+  lines.push('<i>Tap a button to send that raw key into the terminal, or reply to this message to type into it.</i>')
+  return lines.join('\n')
+}
+
+// Keyboard for a stuck-screen card. `count` parsed options (one numbered row each, injected per
+// optionKind by the tap handler) followed by always-present raw-key fallbacks and a full-capture dump.
+// callback namespace `stuck:<tok>:…` — every data string stays well under Telegram's 64-byte cap.
+export function stuckKeyboard(tok: string, opts: { optionKind: 'numbered' | 'ink' | null; count: number }): InlineKeyboard {
+  const kb = new InlineKeyboard()
+  for (let i = 0; i < opts.count; i++) kb.text(`${i + 1}`, `stuck:${tok}:o${i}`).row()
+  kb.text('⏎ Enter', `stuck:${tok}:k:Enter`).text('⎋ Esc', `stuck:${tok}:k:Escape`).row()
+  kb.text('↑', `stuck:${tok}:k:Up`).text('↓', `stuck:${tok}:k:Down`).row()
+  kb.text('1', `stuck:${tok}:k:1`).text('2', `stuck:${tok}:k:2`).text('3', `stuck:${tok}:k:3`).row()
+  kb.text('📋 Full screen', `stuck:${tok}:full`)
+  return kb
+}
+
+// Relay a stuck-screen card into the wedged session's own topic(s). Registers per-card state (for the
+// tap handler) and a stucktext reply-target (reply-to-type into the pane, reusing the existing handler).
+// `quiet` = a re-nag (no notification); still a fresh message with fresh buttons, not an edit.
+export async function relayStuckScreen(paneId: string, stuck: StuckScreen, tail: string, name: string, quiet = false): Promise<void> {
+  const targets = await deps.outboundTargetsFor(paneId)
+  if (targets.length === 0) return
+  const tok = permPromptToken(stuck.sig)
+  const text = renderStuckHtml(name, tail, stuck.options)
+  const kb = stuckKeyboard(tok, { optionKind: stuck.optionKind, count: stuck.options.length })
+  for (const { chat, thread } of targets) {
+    try {
+      const sent = await deps.bot.api.sendMessage(chat, text, {
+        parse_mode: 'HTML', reply_markup: kb, ...(quiet ? { disable_notification: true } : {}), ...(thread ? { message_thread_id: thread } : {}),
+      })
+      stuckCards.set(`${chat}:${sent.message_id}`, { paneId, token: tok, optionKind: stuck.optionKind, optionCount: stuck.options.length })
+      replyTargets.set(`${chat}:${sent.message_id}`, { kind: 'stucktext', paneId })
+    } catch (e) {
+      process.stderr.write(`daemon: stuck-screen relay to ${chat} failed: ${e}\n`)
+    }
+  }
 }
 
 // ---- Permission-storm batching (ROADMAP #13) ----

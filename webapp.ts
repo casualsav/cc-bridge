@@ -6,7 +6,7 @@
 // default off): they overwrite to a `.bak`, move deletions to a trash dir (recoverable), and audit
 // every mutation to daemon.log. Dependencies are injected so this module stays decoupled and testable.
 
-import { createHmac, timingSafeEqual, randomBytes } from 'node:crypto'
+import { createHmac, createHash, timingSafeEqual, randomBytes } from 'node:crypto'
 import { readdir, stat, realpath, writeFile, copyFile, rename, mkdir, cp, rm } from 'node:fs/promises'
 import { resolve, basename, dirname, join, sep } from 'node:path'
 import { homedir } from 'node:os'
@@ -340,9 +340,16 @@ async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: strin
       if (!(await stat(target).catch(() => null))) return json({ error: 'not found' }, 404)
       if (!deps.trashDir) return json({ error: 'no trash dir configured' }, 500)
       await mkdir(deps.trashDir, { recursive: true })
-      const dest = join(deps.trashDir, `${Date.now()}__${encodeURIComponent(target)}`)
+      // Trash entry name: `<stamp>__<hash>__<basename>`. The full path is NOT encoded into the
+      // filename — a deep path blows the 255-byte filename limit (ENAMETOOLONG). The 8-char path
+      // hash keeps same-basename deletes from colliding; the origin is preserved out-of-band in a
+      // `.origin` sidecar so a human browsing the trash dir can still tell where an entry came from.
+      const hash = createHash('sha1').update(target).digest('hex').slice(0, 8)
+      const base = (basename(target) || 'root').slice(0, 180)   // cap so stamp+hash+base stays under the limit
+      const dest = join(deps.trashDir, `${Date.now()}__${hash}__${base}`)
       try { await rename(target, dest) }
       catch { await cp(target, dest, { recursive: true }); await rm(target, { recursive: true, force: true }) }   // cross-device fallback
+      await writeFile(`${dest}.origin`, target).catch(() => {})   // record the absolute origin for manual restore/inspection
       audit(`trash path=${target} → ${dest}`)
       return json({ ok: true, trashed: dest })
     }

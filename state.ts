@@ -47,6 +47,12 @@ export const pendingMultiSelect = new Map<string, PendingMultiSelect>()
 export const freeTextPrompts = new Map<string, FreeTextPrompt>()
 export const chatPrompts = new Map<string, ChatPrompt>()
 
+// ---- Stuck-screen cards (catch-all watchdog) ----
+// One entry per relayed stuck-screen card, keyed `${chat}:${message_id}` (the freeTextPrompts/chatPrompts
+// pattern). The tap handler resolves the card's origin pane + how to inject a chosen option (numbered digit
+// vs ink navigate-down). Pruned when the pane recovers or the screen changes.
+export const stuckCards = new Map<string, { paneId: string; token: string; optionKind: 'numbered' | 'ink' | null; optionCount: number }>()
+
 // ---- Force-reply targets ----
 // One registry for every "reply to this message" continuation, keyed `${chatId}:${messageId}`
 // of the prompt we sent. The kind discriminates what the user's reply means; the payload is

@@ -93,7 +93,7 @@ function ensureDeps(log: number): void {
       name: 'claude-channel-telegram-daemon',
       private: true,
       type: 'module',
-      dependencies: { grammy: '1.41.1', '@modelcontextprotocol/sdk': '^1.0.0' },
+      dependencies: { grammy: '1.41.1', '@modelcontextprotocol/sdk': '^1.0.0', zod: '~4.3.6' },
     }, null, 2) + '\n', { mode: 0o644 })
     process.stderr.write(`ensure-daemon: wrote pinned package.json to ${daemonDir}\n`)
   }

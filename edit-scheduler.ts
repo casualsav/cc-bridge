@@ -77,6 +77,12 @@ type EditIntent = {
 const intents = new Map<string, EditIntent>()
 const deletes = new Map<string, { chat: string; mid: number; enqueuedAt: number }>()
 const editKey = (chat: string, mid: number) => `${chat}:${mid}`
+// A finalized card (its source stopped scheduling — e.g. the mirror cleared msgIds on loop-finish)
+// leaves an idle intent (dirty=false, never re-scheduled) in the map forever. Reap intents that have
+// sat idle past this window so the map can't grow unbounded. Live cards re-dirty far more often than
+// this (pins ~10s, mirror on each body change), so a still-active card is never evicted; a late
+// scheduleEdit after eviction simply re-creates the entry.
+const IDLE_EVICT_MS = 60_000
 
 // ---- source-facing API (replaces direct editMessageText / deleteMessage for recurring cards) ----
 export function scheduleEdit(opts: {
@@ -180,7 +186,9 @@ function tick(): void {
   type Work = { tier: number; enqueuedAt: number; run: () => Promise<void> }
   const work: Work[] = []
   // Snapshot is built synchronously (no await), so source timers can't mutate the maps mid-build.
+  const now = Date.now()
   for (const it of intents.values()) {
+    if (!it.dirty && !it.inFlight && now - it.enqueuedAt > IDLE_EVICT_MS) { intents.delete(editKey(it.chat, it.mid)); continue }   // reap idle finalized entries
     if (!it.dirty || it.inFlight || isChatFlooded(it.chat)) continue   // flooded → leave queued, flush when the 429 window clears
     work.push({ tier: tierOf(it), enqueuedAt: it.enqueuedAt, run: () => flushIntent(it) })
   }

@@ -63,7 +63,7 @@ export async function sweepLaterQueues(): Promise<void> {
       const item = items.splice(idx, 1)[0]
       writeLater(map)
       const ok = await deps.deliverToPane(pane, item.text)
-      if (!ok) { items.unshift(item); writeLater(map); continue }   // pane wedged — retry next sweep
+      if (!ok) { items.splice(idx, 0, item); writeLater(map); continue }   // pane wedged — put it back at its original index, retry next sweep
       for (const tg of await deps.outboundTargetsFor(pane)) {
         await deps.bot.api.sendMessage(tg.chat, `▶️ Queued task started: <i>${escapeHtml(item.text.slice(0, 160))}</i>`,
           { parse_mode: 'HTML', disable_notification: true, ...(tg.thread ? { message_thread_id: tg.thread } : {}) }).catch(() => {})
