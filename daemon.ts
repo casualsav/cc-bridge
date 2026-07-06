@@ -3519,11 +3519,25 @@ async function relayBashCommand(t: CommandTarget, command: string, chat_id: stri
     await waitForSettle(t.paneId, 200, 4000)
     await sendKeys(t.paneId, ['Enter'])
     await waitForSettle(t.paneId, 300, 5000)
+    // Verify the submit landed: bash mode still armed ("! for shell mode" footer) means the TUI
+    // swallowed the Enter — the command then idles in the input box forever, silently. Retry the
+    // Enter once; report 'unsubmitted' if it STILL didn't take so the caller warns instead.
+    const armed = async () => /!\s+for shell mode/.test(await capturePane(t.paneId).catch(() => ''))
+    if (await armed()) {
+      await sendKeys(t.paneId, ['Enter'])
+      await waitForSettle(t.paneId, 300, 5000)
+      if (await armed()) return 'unsubmitted'
+    }
     return true
   }
   const ok = await (t.watcher ? t.watcher.withInjection(run) : run())
   if (!ok) {
     await channel.sendText(chat_id, '⚠️ Couldn\'t reach the session pane.', t.replyThread ? { threadId: String(t.replyThread) } : undefined).catch(() => {})
+    return
+  }
+  if (ok === 'unsubmitted') {
+    await channel.sendText(chat_id, '⚠️ Typed the command into bash mode, but it didn\'t submit — it\'s still sitting in the input box. Send <code>!</code> again or press Enter in the terminal.',
+      t.replyThread ? { threadId: String(t.replyThread) } : undefined).catch(() => {})
     return
   }
   void channel.react({ chatId: chat_id, messageId: String(message_id) }, '👍').catch(() => {})

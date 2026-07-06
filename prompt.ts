@@ -616,15 +616,19 @@ export function compactPercent(paneText: string): number | null {
 export function onNormalPrompt(paneText: string): boolean {
   const lines = paneLines(paneText)
   const tail = lines.slice(-8).join('\n').toLowerCase()
-  if (/shift\+tab to cycle|\? for shortcuts|esc to interrupt/.test(tail)) return true
+  // "! for shell mode" replaces the usual hints while bash mode is armed — still the normal prompt
+  // (without it, a pre-typed `!` command idles into a stuck-screen false fire: the `!` prompt row
+  // fails the ❯ box check below and the reply's ● bullets then parse as ink options).
+  if (/shift\+tab to cycle|\? for shortcuts|esc to interrupt|! for shell mode/.test(tail)) return true
   // The footer hint rotates with CC version/state ("← for agents", "@ for file paths", …), so all
   // of the phrases above can be absent at a perfectly normal prompt (this bounced /mode with a
   // false "another screen"). Accept the input box itself as proof: a "❯" prompt row directly
-  // between two box-border rows. Menus and pickers render "❯" as the cursor on an option row
-  // inside a list — question above, sibling options below — never bordered on both sides.
+  // between two box-border rows (or "!" — bash mode swaps the prompt char). Menus and pickers
+  // render "❯" as the cursor on an option row inside a list — question above, sibling options
+  // below — never bordered on both sides.
   const t = lines.slice(-12)
   for (let i = 1; i + 1 < t.length; i++) {
-    if (/^\s*❯/.test(t[i]) && /^\s*[─━╭╰└┌├╮╯|]/.test(t[i - 1]) && /^\s*[─━╭╰└┌├╮╯|]/.test(t[i + 1])) return true
+    if (/^\s*[❯!]/.test(t[i]) && /^\s*[─━╭╰└┌├╮╯|]/.test(t[i - 1]) && /^\s*[─━╭╰└┌├╮╯|]/.test(t[i + 1])) return true
   }
   return false
 }

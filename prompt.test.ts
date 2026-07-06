@@ -512,6 +512,22 @@ test('detectStuckScreen returns null for the normal idle input box', () => {
   expect(detectStuckScreen(pane)).toBeNull()
 })
 
+test('detectStuckScreen returns null for a bash-mode prompt with a pre-typed command (live false-fire)', () => {
+  // Real capture shape: a reply full of ● bullets above a bash-mode input box. The ● rows parse as
+  // ink options, so the only guard is onNormalPrompt recognizing the "!" prompt row / footer.
+  const pane = [
+    '● Agent "Port atrium anti-spam alert engine" finished · 10m 21s',
+    '● Anti-spam engine landed. The worker flagged a test-count discrepancy.',
+    '  /tmp/scratchpad/archive-repos.sh',
+    '──────────────────────────────',
+    '! bash /tmp/scratchpad/archive-repos.sh',
+    '──────────────────────────────',
+    '  ! for shell mode',
+  ].join('\n')
+  expect(onNormalPrompt(pane)).toBe(true)
+  expect(detectStuckScreen(pane)).toBeNull()
+})
+
 test('detectStuckScreen returns null while Claude is working (spinner footer)', () => {
   const pane = ['● Doing the thing', '  ✻ Working… (12s · esc to interrupt)'].join('\n')
   expect(detectStuckScreen(pane)).toBeNull()
