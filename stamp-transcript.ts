@@ -13,33 +13,50 @@
 // session's cwd matches the pane's real cwd; a child running elsewhere (the observed /tmp case) is
 // refused. The interactive pane session's cwd always equals the pane's current path.
 //
+// Exception: if the project directory itself gets renamed on disk while a session is live, the
+// session's recorded cwd stays the OLD path but the pane's real cwd reports the NEW one — a
+// mismatch that isn't a hijack. On /clear or resume, this hook still fires for the same session,
+// now writing a new transcript file. We detect that case by comparing the pane's CURRENT stamp
+// against the new transcript path: same project dir (dirname) means same session lineage, so we
+// allow the re-stamp despite the cwd mismatch.
+//
 // Registered in ~/.claude/settings.json next to the ensure-daemon SessionStart hook (see
 // off-mcp/INSTALL.md) — user-level, because off-MCP work sessions are plugin-less and would
 // never see a plugin-shipped hook.
 import { execFileSync } from 'node:child_process'
 import { realpathSync } from 'node:fs'
-
-const pane = process.env.TMUX_PANE
-if (!pane) process.exit(0)
-
-let input = ''
-for await (const chunk of process.stdin) input += chunk
-let path = '', cwd = ''
-try { const j = JSON.parse(input); path = j?.transcript_path ?? ''; cwd = j?.cwd ?? '' } catch { /* malformed input → nothing to stamp */ }
-if (!path) process.exit(0)
+import { dirname } from 'node:path'
 
 // Resolve symlinks and drop any trailing slash so the comparison is canonical.
-const norm = (p: string) => { try { return realpathSync(p) } catch { return p.replace(/\/+$/, '') } }
+export const norm = (p: string) => { try { return realpathSync(p) } catch { return p.replace(/\/+$/, '') } }
 
-// Refuse to hijack the stamp from a foreign session: if this session's cwd doesn't match the
-// pane's real cwd, it's a child/headless run that merely inherited $TMUX_PANE — leave the pane's
-// stamp on its true interactive session. Only guard when we can read both sides; if the pane cwd
-// is unreadable (pane already gone) the set-option below would no-op anyway.
-if (cwd) {
-  try {
-    const paneCwd = execFileSync('tmux', ['display-message', '-p', '-t', pane, '#{pane_current_path}'], { timeout: 2000 }).toString().trim()
-    if (paneCwd && norm(paneCwd) !== norm(cwd)) process.exit(0)
-  } catch { /* can't read pane cwd → fall through and attempt the stamp (old behavior) */ }
+export function shouldStamp(args: { path: string; cwd: string; paneCwd: string | null; currentStamp: string | null; norm: (p: string) => string }): boolean {
+  const { path, cwd, paneCwd, currentStamp, norm } = args
+  if (!cwd) return true
+  if (!paneCwd) return true // pane cwd unreadable → fall through and attempt the stamp (old behavior)
+  if (norm(paneCwd) === norm(cwd)) return true
+  // cwd mismatch: allow only if the pane's current stamp is from the same project dir as the new
+  // transcript (a rename+/clear or resume moving the same session onto a new transcript file).
+  return !!currentStamp && dirname(norm(currentStamp)) === dirname(norm(path))
 }
 
-try { execFileSync('tmux', ['set-option', '-p', '-t', pane, '@tg_transcript', path], { timeout: 2000 }) } catch { /* pane gone / no tmux server */ }
+if (import.meta.main) {
+  const pane = process.env.TMUX_PANE
+  if (!pane) process.exit(0)
+
+  let input = ''
+  for await (const chunk of process.stdin) input += chunk
+  let path = '', cwd = ''
+  try { const j = JSON.parse(input); path = j?.transcript_path ?? ''; cwd = j?.cwd ?? '' } catch { /* malformed input → nothing to stamp */ }
+  if (!path) process.exit(0)
+
+  let paneCwd: string | null = null
+  try { paneCwd = execFileSync('tmux', ['display-message', '-p', '-t', pane, '#{pane_current_path}'], { timeout: 2000 }).toString().trim() } catch { /* pane gone → treat as unreadable */ }
+
+  let currentStamp: string | null = null
+  try { currentStamp = execFileSync('tmux', ['show-options', '-pqv', '-t', pane, '@tg_transcript'], { timeout: 2000 }).toString().trim() || null } catch { /* no stamp set yet */ }
+
+  if (!shouldStamp({ path, cwd, paneCwd, currentStamp, norm })) process.exit(0)
+
+  try { execFileSync('tmux', ['set-option', '-p', '-t', pane, '@tg_transcript', path], { timeout: 2000 }) } catch { /* pane gone / no tmux server */ }
+}
