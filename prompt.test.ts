@@ -1,6 +1,6 @@
 // Prompt detection from pane captures — select menus vs permission dialogs. Pure functions.
 import { test, expect } from 'bun:test'
-import { stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, isResumeSessionPrompt, detectResumeSessionPrompt, detectEditorState, onNormalPrompt, detectModelUnavailable, detectCompacting, compactPercent, permPromptToken, waitingPromptSignature, isRecognizedPrompt, detectStuckScreen, extractGenericOptions, bashModeArmed } from './prompt.ts'
+import { stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, isResumeSessionPrompt, detectResumeSessionPrompt, detectEditorState, onNormalPrompt, detectModelUnavailable, detectCompacting, compactPercent, permPromptToken, waitingPromptSignature, isRecognizedPrompt, detectStuckScreen, extractGenericOptions, bashModeArmed, detectWorking } from './prompt.ts'
 
 test('stripAnsi removes CSI escape sequences', () => {
   expect(stripAnsi('\x1b[1mbold\x1b[0m text')).toBe('bold text')
@@ -661,4 +661,44 @@ test('extractGenericOptions prefers numbered, needs ≥2, and caps at 8', () => 
   expect(extractGenericOptions(['plain', 'text', 'only'])).toBeNull()
   const many = Array.from({ length: 12 }, (_, i) => `${i + 1}. opt${i + 1}`)
   expect(extractGenericOptions(many)!.options.length).toBe(8)                            // capped
+})
+
+// Modern layout: a 4-line custom statusline + input box + hint row push the live spinner line well
+// above an 8-line tail — verified live at line 29 of a 40-line capture (~12 lines above the bottom).
+const modernLayout = (spinnerLine: string | null) => {
+  const conversation = Array.from({ length: 28 }, (_, i) => `line of conversation ${i + 1}`)
+  const footer = [
+    '',
+    '──────────────────────────────────────────────────────────── proj ──',
+    '❯ ',
+    '────────────────────────────────────────────────────────────────────────',
+    '  user@host:/projects/proj (main) | acct/proj | Opus 4.8',
+    '  ε:max | ✻think | ctx ░░░░░░░░░░ 0%/1000k | ↑0 ↓0 | $19.08 | ⧗143h20m',
+    '  5h ░░ 1% ↻4h48m | 7d ██░ 13% ↻105h28m',
+    '  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents',
+  ]
+  const lines = spinnerLine ? [...conversation, spinnerLine, ...footer] : [...conversation, ...footer]
+  return lines.join('\n')
+}
+
+test('detectWorking spots the live spinner line 12+ lines above the pane bottom (modern layout)', () => {
+  const pane = modernLayout('✻ Whirlpooling… (3m 46s · ↓ 10.1k tokens · thought for 9s)')
+  expect(detectWorking(pane)).toBe(true)
+})
+
+test('detectWorking returns false on the same layout with no spinner line (idle prompt)', () => {
+  const pane = modernLayout(null)
+  expect(detectWorking(pane)).toBe(false)
+})
+
+test('detectWorking ignores quoted/echoed spinner text that is not a live status line', () => {
+  const quoted = modernLayout('  ⎿  ✻ Whirlpooling… (3m 46s)')
+  expect(detectWorking(quoted)).toBe(false)
+  const grepped = modernLayout('29:✻ Whirlpooling… (3m 46s')
+  expect(detectWorking(grepped)).toBe(false)
+})
+
+test('detectWorking still catches the legacy "esc to interrupt" footer within the 16-line tail', () => {
+  const pane = modernLayout('  ✻ Working… (12s · esc to interrupt)')
+  expect(detectWorking(pane)).toBe(true)
 })

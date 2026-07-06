@@ -1401,6 +1401,9 @@ async function auxRelayTick(): Promise<void> {
           return
         }
         if (working) { auxConcludeTicks.delete(file); void emitTopicTyping(pane); return }   // working → typing in its topic, relay only once the turn concludes
+        // Transcript quiet but the pane spinner is live (thinking / pre-first-tool-call): sustain
+        // typing only — relay conclusion stays on the transcript signal.
+        if (detectWorking(await capturePane(pane).catch(() => ''))) void emitTopicTyping(pane)
         // Same conclude-debounce as the focused loop: a mid-burst end_turn (auto-continue gap)
         // shouldn't ship interim narration to the topic as if the turn had ended.
         const ticks = (auxConcludeTicks.get(file) ?? 0) + 1
@@ -3035,7 +3038,7 @@ function startPaneWatcher(paneId: string): void {
       const label = sessionNames.get(paneId) || 'Session'
       if (wasActive) void announceFocusedExit(label)
     },
-    text => typingPresence.observe(detectWorking(text)),   // live typing signal, every poll
+    text => { const w = detectWorking(text); if (isTopicMode()) { if (w) void emitTopicTyping(paneId) } else typingPresence.observe(w) },   // live typing signal, every poll — topic mode routes it to the session's topic (transcript signal is blind mid-thinking)
   )
   focus.paneWatcher.start()
 }

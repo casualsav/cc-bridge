@@ -674,11 +674,14 @@ export function bashModeArmed(paneText: string): boolean {
 // intentionally broad — detection drives the typing indicator (self-correcting from pane state) and
 // gates the stuck-screen watchdog. (Moved from daemon.ts so the stuck detector can share it.)
 export function detectWorking(paneText: string): boolean {
-  const footer = paneLines(paneText).slice(-8).join('\n')
-  if (/esc to interrupt/i.test(footer)) return true
-  // Spinner glyph followed by an elapsed timer: "(12s", "(3m 56s", "(1h 2m" — any h/m/s unit.
-  if (/[✢✳✶✻✽✺✷✸✹·●◐◓◑◒][^\n]*\(\d+\s*[hms]/.test(footer)) return true
-  return false
+  // 16 lines: a multi-line statusline + input box + hint rows can push the live spinner line
+  // ~12 lines above the pane bottom in the worst observed layout, past what an 8-line tail covers.
+  const tail = paneLines(paneText).slice(-16)
+  if (/esc to interrupt/i.test(tail.join('\n'))) return true
+  // Live spinner status line: glyph, verb, then an elapsed timer — "(12s", "(3m 56s", "(1h 2m" — any
+  // h/m/s unit. Anchored to line start (≤2 leading spaces) so quoted spinner text echoed elsewhere in
+  // the pane — tool-result "  ⎿  " lines, grep's "NN:" prefixes — can't false-positive.
+  return tail.some(l => /^\s{0,2}[✢✳✶✻✽✺✷✸✹·●◐◓◑◒][^\n]*?\(\d+\s*[hms]/.test(l))
 }
 
 // ---- stuck-screen watchdog (party-bus): a backstop for a pane wedged at a prompt no detector parses ----
