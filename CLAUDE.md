@@ -19,18 +19,24 @@ Follow **[`off-mcp/INSTALL.md`](off-mcp/INSTALL.md)** step by step — it is wri
 2. Add the marketplace + enable the plugin + add the `SessionStart` daemon hook in
    `~/.claude/settings.json`, and append `off-mcp/CLAUDE.md` to `~/.claude/CLAUDE.md`.
 3. Have the user restart Claude Code once → the daemon comes up fully configured.
-4. Launch a bridge session with `claude-tg` (auto-added shell function:
-   `tmux set -p @tg_bridge "${1:-1}"; claude --allow-dangerously-skip-permissions` — the `@tg_bridge`
-   tmux pane option, valued by instance slot, is the adopt marker (decoupled from claude's args);
-   bypass is switchable on demand. `claude-tg N` routes to
-   a second bridge — see multi-instance below) — the daemon finds it automatically.
+4. Launch a bridge session with `ccb` (auto-added shell function, `scripts/setup-alias.sh`;
+   `claude-tg` is a kept back-compat alias for it): `ccb [--pin slack|discord] [slot] [account]` sets
+   the per-channel tmux pane markers `@telegram`/`@slack`/`@discord` (valued by instance slot; a
+   `--pin slack|discord` flag additionally stamps that channel's pin option), optionally launches
+   under `CLAUDE_CONFIG_DIR="$HOME/.claude-<account>"`, then runs
+   `claude --allow-dangerously-skip-permissions` — bypass is switchable on demand. `ccb 2` routes to
+   a second bridge (multi-instance: `off-mcp/INSTALL.md`) — the daemon finds the pane automatically.
 
 Don't guess config values — ask. The only non-automatable bits are getting the token from the
 human and the one Claude Code restart; do everything else yourself.
 
+This repo is now a 3-channel marketplace (Telegram/Slack/Discord — see `.claude-plugin/marketplace.json`,
+`plugins/claude-slack/`, `plugins/claude-discord/`), sharing a `ChannelAdapter` contract in `channel.ts`;
+see `docs/multi-channel.md` for how the channels plug in.
+
 ## Layout (for working on the repo)
-- `daemon.ts` — the long-lived grammy bot + access gate + tmux pane driver + off-MCP outbound
-  (the bulk of the code).
+- `daemon.ts` (Telegram) / `slack-daemon.ts` / `discord-daemon.ts` — the long-lived bot + access gate
+  + tmux pane driver + off-MCP outbound, per channel (the bulk of the code).
 - `topics.ts` (pure session<->topic store) + `topic-runtime.ts` (forum-topics live half: pane
   session identity, topic lifecycle, per-topic typing, outbound routing).
 - `shim.ts` — the MCP server; used only in plugin/MCP mode (off-MCP bypasses it).
