@@ -236,6 +236,35 @@ export function detectUserPrompt(paneText: string): PromptInfo | null {
   // unmistakable phrases, so this can't suppress a genuine question.
   if (lines.some(l => FEEDBACK_SURVEY.test(l) || QUEUED_MESSAGES.test(l))) return null
 
+  // "Change effort level?" confirm dialog (/effort mid-conversation): a real decision (switch now
+  // vs go back) worth relaying, but it renders with a plain confirm footer ("Enter to confirm · Esc
+  // to cancel"), not the select-menu wording SELECT_HINT anchors on — so without this special case
+  // it falls through to the generic stuck-screen card instead of tappable buttons. Narrowly anchored
+  // on the exact question wording (not "Are you sure?" et al) so ordinary confirm dialogs stay
+  // excluded, matching this file's deliberate policy of never relaying bare Yes/No confirms.
+  const effortQIdx = lines.findIndex(l => /^\s*change effort level\?\s*$/i.test(l))
+  if (effortQIdx !== -1) {
+    // The options sit a few lines below the question, past the explanatory body — scan forward,
+    // bounded, for the first numbered line rather than assuming a fixed gap.
+    let i = effortQIdx + 1
+    while (i < lines.length && i - effortQIdx <= 10 && !NUMBERED_RE.test(lines[i])) i++
+    const optStart = i
+    while (i < lines.length && NUMBERED_RE.test(lines[i])) i++
+    const region = lines.slice(optStart, i)
+    const parsed = optStart < lines.length ? parseOptions(region, NUMBERED_RE) : null
+    if (parsed && region.some(l => /❯/.test(l))) {
+      // Only chrome/blank/the confirm footer itself may follow the options — anything else means
+      // this is a scrolled-up (already-answered) copy, not the live dialog. The persistent todo
+      // panel is live chrome too (same rule as footerIsLive): from its header on, everything below
+      // is the panel, so stop scanning there instead of counting task rows as "new content".
+      let below = lines.slice(i)
+      const todoIdx = below.findIndex(l => TODO_PANEL_HEADER.test(l))
+      if (todoIdx !== -1) below = below.slice(0, todoIdx)
+      const belowLive = below.every(l => !l.trim() || BELOW_CHROME.test(l) || /enter to confirm/i.test(l))
+      if (belowLive) return { question: 'Change effort level?', options: parsed, multiSelect: false, tabbed: false, freeText: false, chat: false }
+    }
+  }
+
   // Find the live select-menu footer: the lowest line carrying the hint, which
   // must sit at the bottom of the pane. A footer with more than one non-blank
   // line below it is scrollback (a scrolled-up past prompt), not the active one.
@@ -631,6 +660,13 @@ export function onNormalPrompt(paneText: string): boolean {
     if (/^\s*[❯!]/.test(t[i]) && /^\s*[─━╭╰└┌├╮╯|]/.test(t[i - 1]) && /^\s*[─━╭╰└┌├╮╯|]/.test(t[i + 1])) return true
   }
   return false
+}
+
+// Claude Code's bash-mode input box is armed: the footer swaps its hints for "! for shell mode"
+// while a `!` command sits in the box. Injecting ANYTHING into this state concatenates into the
+// pending bash line, so relays must refuse (daemon-side guard) until it's submitted or discarded.
+export function bashModeArmed(paneText: string): boolean {
+  return /!\s+for shell mode/i.test(paneLines(paneText).slice(-4).join('\n'))
 }
 
 // True while Claude Code is mid-turn. The TUI shows a spinner + "esc to interrupt" footer while

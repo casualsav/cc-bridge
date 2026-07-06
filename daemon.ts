@@ -24,7 +24,7 @@ import { acquireTokenLock } from './token-lock.ts'
 // replace a daemon left running stale code after a plugin upgrade.
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
-import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen } from './prompt.ts'
+import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen } from './prompt.ts'
 import { resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, currentTurnActivity, currentTurnTokens, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter } from './transcript.ts'
 import {
   initAccounts, listAccounts, accountByName, accountForTranscript, accountForProjectsDir,
@@ -1962,6 +1962,7 @@ async function tryDeliverAsk(p: PartyPending): Promise<boolean> {
     if (!pane) return false
     const cap = await capturePane(pane).catch(() => '')
     if (!cap || !onNormalPrompt(cap)) return false
+    if (bashModeArmed(cap)) return false
     const room = partyRoom()
     // Digest (party-bus P2): prepend the bus activity this endpoint missed since it was last caught up,
     // so the ask arrives WITH ambient context — pull-not-push (only ever handed over on a delivery it's
@@ -3508,8 +3509,20 @@ async function relaySlashCommand(
 // the (possibly multiline) command body. Uses its own tmux buffer, not INJECT_BUFFER — a concurrent
 // inbound paste could clobber a shared buffer mid-flight.
 const BANG_BUFFER = 'tg-bang'
+
+// A pane with an armed, non-empty bash box must not receive ANY injection (see bashModeArmed).
+// Warns once per incident with tap-to-recover buttons; callers just abort their relay.
+async function guardArmedBashBox(paneId: string, chat_id: string, thread?: number): Promise<boolean> {
+  if (!bashModeArmed(await capturePane(paneId).catch(() => ''))) return false
+  await channel.sendText(chat_id,
+    '⚠️ The session\'s input box holds an unsubmitted <code>!</code> bash command — anything sent now would corrupt it. Submit or discard it first, then resend your message.',
+    { ...(thread ? { threadId: String(thread) } : {}), buttons: [[{ text: '⏎ Submit it', data: 'bangbox:submit' }, { text: '✖️ Discard it', data: 'bangbox:discard' }]] }).catch(() => {})
+  return true
+}
+
 async function relayBashCommand(t: CommandTarget, command: string, chat_id: string, message_id: number): Promise<void> {
   const sentAt = Date.now()
+  if (await guardArmedBashBox(t.paneId, chat_id, t.replyThread)) return
   const run = async () => {
     if (!(await paneAlive(t.paneId))) return false
     await sendKeys(t.paneId, ['!'])
@@ -3623,6 +3636,7 @@ async function handleModeCommand(
     await ctx.reply('⚠️ The terminal is on another screen (settings/menu) — can’t change the mode right now.')
     return
   }
+  if (await guardArmedBashBox(t.paneId, String(ctx.chat!.id), t.replyThread)) return
 
   const reached = await switchToMode(t.paneId, target, t.watcher)
 
@@ -3705,6 +3719,7 @@ async function confirmResetSession(ctx: Context): Promise<void> {
   if (!t) return
   // The Yes/No tap is opt-out (settings → 🧹 Confirm /clear): off ⇒ clear in place immediately.
   if (loadAccess().confirmReset === false) {
+    if (await guardArmedBashBox(t.paneId, String(ctx.chat!.id), t.replyThread)) return
     await ctx.reply(await performReset(t, '/clear'), { parse_mode: 'HTML' })
     return
   }
@@ -4372,6 +4387,7 @@ bot.command('rewind', async ctx => {
   if (!dmCommandGate(ctx)) return
   const t = await commandTarget(ctx)
   if (!t) return
+  if (await guardArmedBashBox(t.paneId, String(ctx.chat!.id), t.replyThread)) return
   void relaySlashCommand(t.paneId, t.watcher, '/rewind', String(ctx.chat!.id), ctx.message!.message_id)
 })
 
@@ -4381,6 +4397,7 @@ bot.command('compact', async ctx => {
   if (!dmCommandGate(ctx)) return
   const t = await commandTarget(ctx)
   if (!t) return
+  if (await guardArmedBashBox(t.paneId, String(ctx.chat!.id), t.replyThread)) return
   void relaySlashCommand(t.paneId, t.watcher, '/compact', String(ctx.chat!.id), ctx.message!.message_id, false)
 })
 
@@ -6767,6 +6784,7 @@ bot.on('callback_query:data', async ctx => {
     if (data === 'st:clear') { await confirmResetSession(ctx); return }
     const t = await commandTarget(ctx)
     if (!t) return
+    if (await guardArmedBashBox(t.paneId, String(ctx.chat!.id), t.replyThread)) return
     void relaySlashCommand(t.paneId, t.watcher, '/compact', String(ctx.chat!.id), ctx.callbackQuery.message!.message_id)
     return
   }
@@ -7418,6 +7436,7 @@ bot.on('callback_query:data', async ctx => {
     const t = await commandTarget(ctx)
     if (!t) { await ctx.answerCallbackQuery().catch(() => {}); return }
     if (data === 'newtopic:reset') {
+      if (await guardArmedBashBox(t.paneId, String(ctx.chat!.id), t.replyThread)) { await ctx.answerCallbackQuery().catch(() => {}); return }
       await ctx.answerCallbackQuery({ text: 'Clearing…' }).catch(() => {})
       await ctx.editMessageText('🧹 Clearing the conversation…').catch(() => {})
       const result = await performReset(t, '/new')
@@ -7447,6 +7466,7 @@ bot.on('callback_query:data', async ctx => {
     }
     const t = await commandTarget(ctx)
     if (!t) { await ctx.answerCallbackQuery().catch(() => {}); return }
+    if (await guardArmedBashBox(t.paneId, String(ctx.chat!.id), t.replyThread)) { await ctx.answerCallbackQuery().catch(() => {}); return }
     if (data === 'clearconfirm:always') {
       const a = loadAccess()
       a.confirmReset = false                 // stop asking on future /clear + /new
@@ -7913,6 +7933,34 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
+  // Armed-bash-box recovery card (guardArmedBashBox): submit the pending `!` command or discard it.
+  if (data === 'bangbox:submit' || data === 'bangbox:discard') {
+    if (!(await cbAuth(ctx))) return
+    const { paneId } = await targetPaneOf(ctx)
+    if (!paneId || !(await paneAlive(paneId).catch(() => false))) {
+      await ctx.answerCallbackQuery({ text: 'That session’s pane is gone.' }).catch(() => {})
+      return
+    }
+    const cap = await capturePane(paneId).catch(() => '')
+    if (!bashModeArmed(cap)) {
+      await ctx.answerCallbackQuery({ text: 'Already resolved.' }).catch(() => {})
+      await ctx.editMessageText('✅ Bash box already cleared.').catch(() => {})
+      return
+    }
+    if (data === 'bangbox:submit') {
+      await paneKeys(paneId, ['Enter'], [300, 5000])
+    } else {
+      // C-u empties the line; only Escape OUT of bash mode when the pane isn't mid-turn — Escape
+      // during a running turn interrupts it (that's how a prior recovery attempt broke a session).
+      await paneKeys(paneId, ['C-u'], [200, 2000])
+      if (!detectWorking(await capturePane(paneId).catch(() => ''))) await paneKeys(paneId, ['Escape'], [200, 2000])
+    }
+    const done = !bashModeArmed(await capturePane(paneId).catch(() => ''))
+    await ctx.answerCallbackQuery().catch(() => {})
+    await ctx.editMessageText(done ? (data === 'bangbox:submit' ? '⏎ Submitted.' : '✖️ Discarded.') : '⚠️ Still armed — the pane may be mid-turn; try again when it settles.').catch(() => {})
+    return
+  }
+
   const promptMatch = /^prompt:(\d+)$/.exec(data)
   if (promptMatch) {
     const access = loadAccess()
@@ -8278,6 +8326,7 @@ async function handleInbound(
   // doesn't trip it.
   const effPane = targetPane ?? focus.activePaneId
   if (effPane) {
+    if (await guardArmedBashBox(effPane, chat_id, typeof inThreadId === 'number' ? inThreadId : undefined)) return
     let cap = await capturePane(effPane).catch(() => '')
     // Post-update "Resume session" picker: never type the message into the menu — relay the choice as
     // buttons (deduped) and hold the message in editorHeld; the resumesel tap flushes it once the
@@ -8824,6 +8873,7 @@ bot.on('message:text', async ctx => {
     await dismissPendingEffortConfirm(t.paneId)
     const msgId = ctx.message.message_id
     const chat_id = String(ctx.chat!.id)
+    if (await guardArmedBashBox(t.paneId, chat_id, t.replyThread)) return
     // /exit (and /quit) closes the session. If it's the only one, confirm first (Yes/No) so the
     // user can't accidentally leave themselves with no session; otherwise exit straight away.
     if (/^\/(exit|quit)\b/i.test(text)) {

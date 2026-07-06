@@ -1,6 +1,6 @@
 // Prompt detection from pane captures — select menus vs permission dialogs. Pure functions.
 import { test, expect } from 'bun:test'
-import { stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, isResumeSessionPrompt, detectResumeSessionPrompt, detectEditorState, onNormalPrompt, detectModelUnavailable, detectCompacting, compactPercent, permPromptToken, waitingPromptSignature, isRecognizedPrompt, detectStuckScreen, extractGenericOptions } from './prompt.ts'
+import { stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, isResumeSessionPrompt, detectResumeSessionPrompt, detectEditorState, onNormalPrompt, detectModelUnavailable, detectCompacting, compactPercent, permPromptToken, waitingPromptSignature, isRecognizedPrompt, detectStuckScreen, extractGenericOptions, bashModeArmed } from './prompt.ts'
 
 test('stripAnsi removes CSI escape sequences', () => {
   expect(stripAnsi('\x1b[1mbold\x1b[0m text')).toBe('bold text')
@@ -97,6 +97,62 @@ test('detectUserPrompt relays the plan-approval prompt even with the statusline 
   expect(r).not.toBeNull()
   expect(r!.question).toMatch(/proceed/i)
   expect(r!.options.length).toBe(4)
+})
+
+test('detectUserPrompt relays the "Change effort level?" confirm dialog', () => {
+  const pane = [
+    '   Change effort level?',
+    '   Your next response will be slower and use more tokens',
+    '',
+    '   This conversation is cached for the current effort level. Switching to high means the full history gets re-read on your next message.',
+    '',
+    '   ❯ 1. Yes, switch to high',
+    '     2. No, go back',
+    '  Enter to confirm · Esc to cancel',
+    '  user@host:/projects/site (master) | acct | Opus 4.8',
+    '  ε:max | ✻think | ctx ██░ 4%/1000k | $125.19 | ⧗122h',
+    '  5h █░ 4% ↻3h40m | 7d █░ 10% ↻109h20m',
+  ].join('\n')
+  const p = detectUserPrompt(pane)
+  expect(p).not.toBeNull()
+  expect(p!.options.map(o => o.label)).toEqual(['Yes, switch to high', 'No, go back'])
+  expect(p!.multiSelect).toBe(false)
+  expect(p!.tabbed).toBe(false)
+  expect(p!.freeText).toBe(false)
+  expect(p!.chat).toBe(false)
+  expect(detectStuckScreen(pane)).toBeNull()
+})
+
+test('detectUserPrompt relays the effort confirm with the todo panel rendered below it', () => {
+  // Working sessions commonly have the persistent "N tasks (…)" panel open; its rows are live
+  // chrome, not scrollback content, and must not veto the dialog (same rule as footerIsLive).
+  const pane = [
+    '   Change effort level?',
+    '   Your next response will be slower and use more tokens',
+    '',
+    '   ❯ 1. Yes, switch to high',
+    '     2. No, go back',
+    '  Enter to confirm · Esc to cancel',
+    '',
+    '  9 tasks (8 done, 1 open)',
+    '  ◻ Approval memo field (contract + Core proxy) — PR',
+    '  ✔ Foundation: dashboard data hooks + pure selectors',
+    '   … +4 completed',
+  ].join('\n')
+  const p = detectUserPrompt(pane)
+  expect(p).not.toBeNull()
+  expect(p!.options.map(o => o.label)).toEqual(['Yes, switch to high', 'No, go back'])
+})
+
+test('detectUserPrompt does NOT relay a generic Yes/No confirm dialog (no regression on the deliberate exclusion)', () => {
+  const pane = [
+    '   Are you sure?',
+    '',
+    '   ❯ 1. Yes',
+    '     2. No',
+    '  Enter to confirm · Esc to cancel',
+  ].join('\n')
+  expect(detectUserPrompt(pane)).toBeNull()
 })
 
 test('detectUserPrompt rejects a scrolled-up past prompt with new content below', () => {
@@ -526,6 +582,31 @@ test('detectStuckScreen returns null for a bash-mode prompt with a pre-typed com
   ].join('\n')
   expect(onNormalPrompt(pane)).toBe(true)
   expect(detectStuckScreen(pane)).toBeNull()
+})
+
+test('bashModeArmed detects an armed bash box and rejects normal prompts / mid-screen mentions', () => {
+  const armed = [
+    '● Anti-spam engine landed. The worker flagged a test-count discrepancy.',
+    '  /tmp/scratchpad/archive-repos.sh',
+    '──────────────────────────────',
+    '! bash /tmp/scratchpad/archive-repos.sh',
+    '──────────────────────────────',
+    '  ! for shell mode',
+  ].join('\n')
+  expect(bashModeArmed(armed)).toBe(true)
+
+  const normal = ['  ────────────', '  ❯ ', '  ────────────', '   ? for shortcuts'].join('\n')
+  expect(bashModeArmed(normal)).toBe(false)
+
+  const midScreenMention = [
+    'Type ! for shell mode to run a command directly.',
+    '● Some other output',
+    '  ────────────',
+    '  ❯ ',
+    '  ────────────',
+    '   ? for shortcuts',
+  ].join('\n')
+  expect(bashModeArmed(midScreenMention)).toBe(false)
 })
 
 test('detectStuckScreen returns null while Claude is working (spinner footer)', () => {
