@@ -208,6 +208,13 @@ export function isSubmitScreen(paneText: string): boolean {
 const FEEDBACK_SURVEY = /how is claude doing this session/i
 const QUEUED_MESSAGES = /to edit queued message/i
 
+// Is a typed command sitting queued (not yet executed) because the session is mid-turn? A reset
+// command injected while queued does NOT run — it'll fire only once the current turn ends, which
+// callers must not confuse with "already cleared".
+export function hasQueuedMessages(paneText: string): boolean {
+  return paneLines(paneText).some(l => QUEUED_MESSAGES.test(l))
+}
+
 // Is the footer at `footerIdx` the LIVE prompt's footer (≤1 line of real content below), not a
 // scrolled-up already-answered one? Only "chrome" is allowed beneath a live prompt: the persistent
 // todo panel (renders DIRECTLY below an active prompt), the statusline, box borders, mode/approve hints

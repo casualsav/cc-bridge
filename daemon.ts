@@ -24,7 +24,7 @@ import { acquireTokenLock } from './token-lock.ts'
 // replace a daemon left running stale code after a plugin upgrade.
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
-import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen } from './prompt.ts'
+import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, hasQueuedMessages, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen } from './prompt.ts'
 import { resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, currentTurnActivity, currentTurnTokens, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter } from './transcript.ts'
 import {
   initAccounts, listAccounts, accountByName, accountForTranscript, accountForProjectsDir,
@@ -3671,8 +3671,35 @@ async function handleModeCommand(
 // session is on.
 // Reset the conversation and return the confirmation text (with the active model). Acts on the
 // target session (topic mode) or the focused one.
-async function performReset(t: CommandTarget, command: string): Promise<string> {
+async function performReset(t: CommandTarget, command: string, opts?: { force?: boolean }): Promise<{ text: string; keyboard?: InlineKeyboard }> {
+  // Mid-turn pre-check: a reset typed now would only be QUEUED by Claude Code, not run — reporting
+  // "cleared" here would be a false confirmation, and the queued command then wipes the conversation
+  // the moment the turn ends (silently, with no further daemon message). Two complementary signals,
+  // since either alone has a blind spot: this bridged pane can lack the "esc to interrupt" footer, so
+  // detectWorking reads idle mid-turn (see the relayLoopTick comment above, ~line 1240); conversely
+  // turnInProgress only flips true after the first tool call, so early-turn thinking is only visible
+  // to the pane spinner.
+  if (!opts?.force) {
+    const cwd = await paneCwd(t.paneId).catch(() => null)
+    const file = await transcriptForPane(t.paneId, cwd)
+    const busy = (file ? turnInProgress(file) : false) || detectWorking(await capturePane(t.paneId))
+    if (busy) {
+      return {
+        text: `⏳ <b>Session is mid-task</b> — a typed ${escapeHtml(command)} would only be <i>queued</i> and would wipe the conversation the moment the current turn ends.`,
+        keyboard: new InlineKeyboard()
+          .text('⏳ Queue it anyway', `resetqueue:${command === '/new' ? 'new' : 'clear'}`)
+          .text('✖️ Cancel', 'resetqueue:no'),
+      }
+    }
+  }
+
   await injectSlash(t.paneId, t.watcher, command)
+
+  // The pre-check can still race a turn that starts between it and these keystrokes landing — catch
+  // that here: if the command is sitting queued (not executed), nothing was actually reset.
+  if (hasQueuedMessages(await capturePane(t.paneId))) {
+    return { text: `⏳ ${escapeHtml(command)} was <i>queued</i> — the session is mid-task, and the conversation will clear when the current turn ends. (Interrupt the task first if you don't want that.)` }
+  }
 
   // A reset makes context/cost jump (often to ~0); drop the pane's last-good status cache so the pin
   // can't backfill the pre-reset numbers, and refresh it now rather than waiting for the next tick.
@@ -3680,9 +3707,9 @@ async function performReset(t: CommandTarget, command: string): Promise<string> 
   void updateSessionPin()
   const model = await readCurrentModel(t.paneId, t.watcher)
   const head = command === '/clear' ? '🧹 Conversation cleared' : '✅ New session started'
-  return model
+  return { text: model
     ? `${head} · model: <b>${escapeHtml(model)}</b>`
-    : `${head}.`
+    : `${head}.` }
 }
 
 // /new — fresh conversation in place (same Yes/No confirm as /clear, via confirmResetSession).
@@ -3723,7 +3750,8 @@ async function confirmResetSession(ctx: Context): Promise<void> {
   // The Yes/No tap is opt-out (settings → 🧹 Confirm /clear): off ⇒ clear in place immediately.
   if (loadAccess().confirmReset === false) {
     if (await guardArmedBashBox(t.paneId, String(ctx.chat!.id), t.replyThread)) return
-    await ctx.reply(await performReset(t, '/clear'), { parse_mode: 'HTML' })
+    const r = await performReset(t, '/clear')
+    await ctx.reply(r.text, { parse_mode: 'HTML', reply_markup: r.keyboard })
     return
   }
   const keyboard = new InlineKeyboard()
@@ -7442,8 +7470,8 @@ bot.on('callback_query:data', async ctx => {
       if (await guardArmedBashBox(t.paneId, String(ctx.chat!.id), t.replyThread)) { await ctx.answerCallbackQuery().catch(() => {}); return }
       await ctx.answerCallbackQuery({ text: 'Clearing…' }).catch(() => {})
       await ctx.editMessageText('🧹 Clearing the conversation…').catch(() => {})
-      const result = await performReset(t, '/new')
-      await ctx.editMessageText(result, { parse_mode: 'HTML' }).catch(() => {})
+      const r = await performReset(t, '/new')
+      await ctx.editMessageText(r.text, { parse_mode: 'HTML', reply_markup: r.keyboard }).catch(() => {})
       return
     }
     await ctx.answerCallbackQuery({ text: 'Starting…' }).catch(() => {})
@@ -7477,11 +7505,30 @@ bot.on('callback_query:data', async ctx => {
     }
     await ctx.answerCallbackQuery({ text: 'Clearing…' }).catch(() => {})
     await ctx.editMessageText('🧹 Clearing the conversation…').catch(() => {})
-    const result = await performReset(t, '/clear')
+    const r = await performReset(t, '/clear')
     const suffix = data === 'clearconfirm:always'
       ? '\n\n🔕 Future /clear + /new won’t ask — re-enable in ⚙️ Settings → 🧹 /clear approval.'
       : ''
-    await ctx.editMessageText(result + suffix, { parse_mode: 'HTML' }).catch(() => {})
+    await ctx.editMessageText(r.text + suffix, { parse_mode: 'HTML', reply_markup: r.keyboard }).catch(() => {})
+    return
+  }
+
+  // Mid-task reset guard: "Queue it anyway" injects the reset knowing it'll queue; performReset's
+  // force skips the busy pre-check but keeps the post-inject queued detection, so the reply stays
+  // truthful either way (queued if still mid-turn, cleared if the turn ended in the meantime).
+  if (data === 'resetqueue:clear' || data === 'resetqueue:new' || data === 'resetqueue:no') {
+    if (!(await cbAuth(ctx))) return
+    if (data === 'resetqueue:no') {
+      await ctx.answerCallbackQuery({ text: 'Kept.' }).catch(() => {})
+      await ctx.editMessageText('✖️ Cancelled — conversation kept, nothing was queued.').catch(() => {})
+      return
+    }
+    const t = await commandTarget(ctx)
+    if (!t) { await ctx.answerCallbackQuery().catch(() => {}); return }
+    if (await guardArmedBashBox(t.paneId, String(ctx.chat!.id), t.replyThread)) { await ctx.answerCallbackQuery().catch(() => {}); return }
+    await ctx.answerCallbackQuery({ text: 'Queueing…' }).catch(() => {})
+    const r = await performReset(t, data === 'resetqueue:new' ? '/new' : '/clear', { force: true })
+    await ctx.editMessageText(r.text, { parse_mode: 'HTML', reply_markup: r.keyboard }).catch(() => {})
     return
   }
 
