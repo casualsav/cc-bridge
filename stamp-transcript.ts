@@ -6,6 +6,10 @@
 // names the pane the session runs in. SessionStart also fires on /clear and resume, so the stamp
 // follows the session onto its new transcript file. Outside tmux there's nothing to stamp.
 //
+// Also registered on UserPromptSubmit: SessionStart(clear) was observed leaving the stamp on the
+// pre-/clear transcript (replies silently undelivered), so every user prompt re-stamps as a
+// self-heal — the stamp is correct before the reply the daemon needs to relay exists.
+//
 // HIJACK GUARD: any process that inherits this pane's $TMUX_PANE also fires this hook — notably
 // headless `claude -p` children an agent spawns (e.g. a test harness running runs in /tmp). Those
 // would "last-write-wins" the pane's stamp onto their own throwaway transcript, and the daemon

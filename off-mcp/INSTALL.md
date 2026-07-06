@@ -308,6 +308,9 @@ each restart, so it can't be registered there, which is exactly why it's DM-only
   "SessionStart": [ { "hooks": [
     { "type": "command", "command": "bun \"$(ls -d ~/.claude/plugins/cache/cc-bridge/telegram/*/ 2>/dev/null | sort -V | tail -1)ensure-daemon.ts\" >/dev/null 2>&1 || true" },
     { "type": "command", "command": "bun \"$(ls -d ~/.claude/plugins/cache/cc-bridge/telegram/*/ 2>/dev/null | sort -V | tail -1)stamp-transcript.ts\" >/dev/null 2>&1 || true" }
+  ] } ],
+  "UserPromptSubmit": [ { "hooks": [
+    { "type": "command", "command": "bun \"$(ls -d ~/.claude/plugins/cache/cc-bridge/telegram/*/ 2>/dev/null | sort -V | tail -1)stamp-transcript.ts\" >/dev/null 2>&1 || true" }
   ] } ]
 }
 ```
@@ -318,7 +321,9 @@ writes only after its first run. (The daemon still drops a `~/.claude/channels/t
 shim on startup for older hooks; the inline glob above just removes the bootstrap dependency on it.)
 The second hook (`stamp-transcript.ts`) writes each session's transcript path onto its tmux pane
 (`@tg_transcript`) so the daemon relays per session — required for several sessions in one project
-(each gets its own forum topic).
+(each gets its own forum topic). It's registered on `UserPromptSubmit` too: `SessionStart` on
+`/clear` has been seen leaving a stale stamp (replies silently undelivered), so every prompt
+re-stamps as a self-heal before the reply the daemon relays is written.
 - **Install the bundled status line — do it yourself, inline.** It's what populates the pinned
   message's live metrics: the daemon reads the statusline rendered in the session's pane (context
   bar, tokens, cost, session/api time, and the 5h/7d rate-limit bars for Pro/Max). **Set it up

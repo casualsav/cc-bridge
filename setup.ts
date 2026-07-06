@@ -306,6 +306,9 @@ function patchSettings(mode: Mode): void {
   // Two SessionStart hooks, same as off-mcp/INSTALL.md §2: ensure-daemon brings the bridge up,
   // stamp-transcript writes each session's transcript path (off-MCP outbound + account routing
   // need it — without it the daemon falls back to slower pane-based discovery).
+  // stamp-transcript ALSO runs on UserPromptSubmit: SessionStart(clear) has been observed leaving
+  // the pane stamp on the pre-/clear transcript (replies silently undelivered), so re-stamping on
+  // every prompt self-heals a stale stamp before the reply is written.
   const cacheGlob = '$(ls -d ~/.claude/plugins/cache/cc-bridge/telegram/*/ 2>/dev/null | sort -V | tail -1)'
   s.hooks = s.hooks || {}
   const sessionStart = (s.hooks.SessionStart ||= [])
@@ -313,6 +316,10 @@ function patchSettings(mode: Mode): void {
     if (!JSON.stringify(sessionStart).includes(script)) {
       sessionStart.push({ hooks: [{ type: 'command', command: `bun "${cacheGlob}${script}" >/dev/null 2>&1 || true` }] })
     }
+  }
+  const promptSubmit = (s.hooks.UserPromptSubmit ||= [])
+  if (!JSON.stringify(promptSubmit).includes('stamp-transcript.ts')) {
+    promptSubmit.push({ hooks: [{ type: 'command', command: `bun "${cacheGlob}stamp-transcript.ts" >/dev/null 2>&1 || true` }] })
   }
   writeFileSync(SETTINGS, JSON.stringify(s, null, 2) + '\n')
   console.log(C.ok('  ✓ settings.json (marketplace + plugin + SessionStart hooks + statusline)'))
