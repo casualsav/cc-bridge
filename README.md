@@ -1,4 +1,4 @@
-## cc-bridge (formerly claude-tg)
+## cc-bridge
 
 <p align="center">
   <img src="assets/telegram-demo.jpg" width="380" alt="Claude Code driven from Telegram — live thinking, pinned status card with model, usage and context">
