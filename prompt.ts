@@ -661,8 +661,12 @@ export function onNormalPrompt(paneText: string): boolean {
   // false "another screen"). Accept the input box itself as proof: a "❯" prompt row directly
   // between two box-border rows (or "!" — bash mode swaps the prompt char). Menus and pickers
   // render "❯" as the cursor on an option row inside a list — question above, sibling options
-  // below — never bordered on both sides.
-  const t = lines.slice(-12)
+  // below — never bordered on both sides. The window must reach past everything CC stacks BELOW
+  // the input box: statusline (4 lines) + the background-agents HUD ("● main" + one row per
+  // agent) — 4 running agents pushed the ❯ box out of a 12-line window and false-fired the
+  // unrecognised-screen guard. 30 covers ~20 agents; the bordered-❯ shape is specific enough
+  // that the wider scan can't match a menu.
+  const t = lines.slice(-30)
   for (let i = 1; i + 1 < t.length; i++) {
     if (/^\s*[❯!]/.test(t[i]) && /^\s*[─━╭╰└┌├╮╯|]/.test(t[i - 1]) && /^\s*[─━╭╰└┌├╮╯|]/.test(t[i + 1])) return true
   }

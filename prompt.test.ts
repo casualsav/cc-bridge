@@ -584,6 +584,32 @@ test('detectStuckScreen returns null for a bash-mode prompt with a pre-typed com
   expect(detectStuckScreen(pane)).toBeNull()
 })
 
+test('onNormalPrompt survives the background-agents HUD below the input box (live false-fire)', () => {
+  // Real capture: 4 background agents stack a "● main" + 4 agent rows under the statusline,
+  // pushing the ❯ box past a 12-line tail; the footer shows "Waiting for N background agents"
+  // instead of "esc to interrupt". Both legs of onNormalPrompt missed → unrecognised-screen card.
+  const pane = [
+    '  Will report when it\'s live. Your hum-test feedback is still welcome meanwhile.',
+    '',
+    '✻ Waiting for 4 background agents to finish',
+    '',
+    '────────────────────────────────────────────',
+    '❯',
+    '────────────────────────────────────────────',
+    '  ubuntu@cloud:/home/ubuntu/projects/fugue/bot (master) | Fable 5',
+    '  ε:high | ✻think | ctx ██░░░░░░░░ 18%/1000k | ↑176.4k ↓705 | $374.7753 | ⧗25h45m',
+    '  5h █████░░░░░░░░░ 33% ↻2h03m | 7d █████████░░░░░ 62% ↻118h03m',
+    '  ⏵⏵ bypass permissions on · 2 shells · ← for agents',
+    '',
+    '  ● main',
+    '  ◯ engineer  Engine tunables config build      3m 11s · ↓ 53.5k tokens',
+    '  ◯ coder     MusicXML subject ingest parser    2m 54s · ↓ 46.1k tokens',
+    '  ◯ engineer  API tunables + upload route       2m 31s · ↓ 23.9k tokens',
+    '  ◯ engineer  Webapp pickers, upload, options   2m 1s · ↓ 32.3k tokens',
+  ].join('\n')
+  expect(onNormalPrompt(pane)).toBe(true)
+})
+
 test('bashModeArmed detects an armed bash box and rejects normal prompts / mid-screen mentions', () => {
   const armed = [
     '● Anti-spam engine landed. The worker flagged a test-count discrepancy.',
