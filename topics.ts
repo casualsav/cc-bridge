@@ -28,6 +28,7 @@ export type TopicEntry = {
 export type TopicStore = {
   groupChatId: string | null            // the forum supergroup; null = not configured → not in topic mode
   generalSessionId: string | null      // session anchored to General (no topic of its own; outbound goes unthreaded)
+  generalCwd: string | null            // the anchor session's cwd — lets an unstamped anchored pane (which has no topic entry to adopt) re-adopt the anchor sid by cwd after a tmux-server restart
   baseCwd: string | null                // the folder new topics nest under — the General anchor's cwd, remembered so it survives the anchor ending
   topics: Record<string, TopicEntry>    // keyed by sessionId (the @tg_session pane stamp)
   dismissedSessions: Record<string, number>   // sessionId -> dismissedAt: user deleted this session's topic; suppress it (no topic, no outbound) DURABLY until the session's pane is gone. Persisted so a restart can't resurrect a deleted topic; GC'd by reconcileTopics once the session's claude is no longer live.
@@ -35,7 +36,7 @@ export type TopicStore = {
 
 export function genSessionId(): string { return randomBytes(4).toString('hex') }
 
-let store: TopicStore = { groupChatId: null, generalSessionId: null, baseCwd: null, topics: {}, dismissedSessions: {} }
+let store: TopicStore = { groupChatId: null, generalSessionId: null, generalCwd: null, baseCwd: null, topics: {}, dismissedSessions: {} }
 let loaded = false
 let persist = true   // disabled by _resetForTest so unit tests never write to the real STATE_DIR
 
@@ -78,6 +79,7 @@ export function loadTopics(): TopicStore {
     store = {
       groupChatId: typeof raw.groupChatId === 'string' ? raw.groupChatId : null,
       generalSessionId: typeof raw.generalSessionId === 'string' ? raw.generalSessionId : null,
+      generalCwd: typeof raw.generalCwd === 'string' ? raw.generalCwd : null,
       baseCwd: typeof raw.baseCwd === 'string' ? raw.baseCwd : null,
       topics,
       dismissedSessions,
@@ -108,10 +110,16 @@ export function setGroupChatId(chatId: string | null): void {
 // no topic of its own: its outbound goes to the group unthreaded, and General inbound/commands
 // target it deterministically instead of following focus. Cleared when that session ends.
 export function getGeneralSession(): string | null { ensureLoaded(); return store.generalSessionId }
-export function setGeneralSession(sessionId: string | null): void {
+export function getGeneralCwd(): string | null { ensureLoaded(); return store.generalCwd }
+export function setGeneralSession(sessionId: string | null, cwd?: string | null): void {
   ensureLoaded()
-  if (store.generalSessionId === sessionId) return
+  const nextCwd = sessionId === null ? null : (cwd ?? null)
+  // Not `sessionId === store.generalSessionId` alone: a re-set to the same sid with a NEW cwd (a
+  // restart-in-place that moved the anchor to a fresh pane in a different dir) must still update the
+  // stored cwd, or the anchor becomes un-re-adoptable.
+  if (store.generalSessionId === sessionId && store.generalCwd === nextCwd) return
   store.generalSessionId = sessionId
+  store.generalCwd = nextCwd
   save()
 }
 
@@ -205,7 +213,7 @@ export function listDismissedSessions(): string[] { ensureLoaded(); return Objec
 // Test seam: set the in-memory store directly, mark it loaded, and disable disk persistence so
 // mutators in tests don't write to the real STATE_DIR/topics.json.
 export function _resetForTest(s?: Partial<TopicStore>): void {
-  store = { groupChatId: null, generalSessionId: null, baseCwd: null, topics: {}, dismissedSessions: {}, ...s }
+  store = { groupChatId: null, generalSessionId: null, generalCwd: null, baseCwd: null, topics: {}, dismissedSessions: {}, ...s }
   loaded = true
   persist = false
 }

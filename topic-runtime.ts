@@ -11,7 +11,7 @@ import { escapeHtml } from './markdown.ts'
 import { loadAccess } from './access.ts'
 import {
   genSessionId, isTopicMode, getGroupChatId, getTopicBySession, findTopicByCwd, cwdAmbiguous,
-  setTopic, updateTopic, removeTopic, listTopics, getGeneralSession, setGeneralSession,
+  setTopic, updateTopic, removeTopic, listTopics, getGeneralSession, getGeneralCwd, setGeneralSession,
   dismissSession, isSessionDismissed, undismissSession, listDismissedSessions,
 } from './topics.ts'
 import { focus, offMcpPanes, sessions } from './state.ts'
@@ -89,7 +89,15 @@ export async function sessionForPane(pane: string, stampIfMissing = true): Promi
     // Same-cwd siblings (Track B): if >1 OPEN topic shares this cwd, adopting "the first" can bind
     // this pane to the wrong session (after a tmux-server restart wipes every stamp) — refuse and
     // mint a fresh id instead. A lone duplicate beats silently cross-wiring two live sessions.
-    const cand = cwd && !cwdAmbiguous(cwd) ? findTopicByCwd(cwd) : undefined
+    const topicCand = cwd && !cwdAmbiguous(cwd) ? findTopicByCwd(cwd)?.sessionId : undefined
+    // The General anchor has no topic entry to adopt (it lives in General), so a stamp-wiped anchored
+    // pane can never re-adopt via findTopicByCwd — it would mint a fresh id, spawn a spurious topic,
+    // and orphan the old anchor sid. Re-adopt it by its persisted cwd, mirroring the topic path.
+    const anchorSid = getGeneralSession()
+    const anchorCand = cwd && anchorSid && getGeneralCwd() === cwd ? anchorSid : undefined
+    // Both a topic and the anchor match this cwd → ambiguous, mint fresh (same philosophy as
+    // cwdAmbiguous: a lone duplicate beats cross-wiring). Adopt only the sole matching candidate.
+    const cand = topicCand && anchorCand ? undefined : (topicCand ?? anchorCand)
     // Is cand's session still held by ANOTHER pane? paneSessionCache deliberately keeps entries for
     // DEAD panes (close-on-end needs them), so a plain .some() false-positives on a stale dead holder:
     // a fresh pane in a cwd whose only topic is closed would be denied adoption, mint a new id, and
@@ -98,12 +106,14 @@ export async function sessionForPane(pane: string, stampIfMissing = true): Promi
     let claimed = false
     if (cand) {
       for (const [p, s] of [...paneSessionCache.entries()]) {
-        if (s !== cand.sessionId || p === pane) continue
+        if (s !== cand || p === pane) continue
         if (await paneAlive(p)) { claimed = true; break }
         releasePaneSession(p)   // dead holder — forget it so the closed topic can be revived
       }
     }
-    const sid = cand && !claimed ? cand.sessionId : genSessionId()
+    const adopted = cand && !claimed ? cand : undefined
+    const sid = adopted ?? genSessionId()
+    if (adopted && adopted === anchorCand) process.stderr.write(`daemon: re-adopted pane ${pane} as the General anchor (${cwd})\n`)
     try { await exec('tmux', ['set-option', '-p', '-t', pane, SESSION_PANE_OPT, sid], { timeout: 2000 }) } catch { return null }
     paneSessionCache.set(pane, sid)
     return sid

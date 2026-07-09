@@ -1,10 +1,12 @@
 import { test, expect, beforeEach } from 'bun:test'
+import { writeFileSync } from 'node:fs'
 import {
   _resetForTest, isTopicMode, getGroupChatId, setGroupChatId,
   getTopicBySession, getSessionByThread, findTopicByCwd,
   setTopic, updateTopic, removeTopic, listTopics, genSessionId,
-  getGeneralSession, setGeneralSession, getBaseCwd, setBaseCwd,
+  getGeneralSession, getGeneralCwd, setGeneralSession, getBaseCwd, setBaseCwd,
   dismissSession, isSessionDismissed, undismissSession, listDismissedSessions,
+  loadTopics, TOPICS_FILE,
   type TopicEntry,
 } from './topics.ts'
 
@@ -106,6 +108,45 @@ test('the General anchor is set, replaced, and cleared', () => {
 test('a seeded store carries its General anchor', () => {
   _resetForTest({ groupChatId: '-100', generalSessionId: 'anch', topics: {} })
   expect(getGeneralSession()).toBe('anch')
+})
+
+test('setGeneralSession records the anchor cwd and clears it when the anchor clears', () => {
+  setGeneralSession('anch', '/projects/g')
+  expect(getGeneralSession()).toBe('anch')
+  expect(getGeneralCwd()).toBe('/projects/g')
+  setGeneralSession(null)
+  expect(getGeneralSession()).toBe(null)
+  expect(getGeneralCwd()).toBe(null)   // clearing the anchor clears its cwd
+})
+
+test('setGeneralSession with no cwd stores a null cwd', () => {
+  setGeneralSession('anch')
+  expect(getGeneralCwd()).toBe(null)
+})
+
+test('re-setting the same anchor sid with a new cwd still updates the stored cwd', () => {
+  // The subtle case: the early return must not fire when only the cwd changed (a restart-in-place
+  // moved the anchor to a fresh pane in a different dir) — else the anchor becomes un-re-adoptable.
+  setGeneralSession('anch', '/projects/old')
+  expect(getGeneralCwd()).toBe('/projects/old')
+  setGeneralSession('anch', '/projects/new')
+  expect(getGeneralSession()).toBe('anch')
+  expect(getGeneralCwd()).toBe('/projects/new')
+})
+
+test('a fresh store has no general cwd; a seeded store carries it', () => {
+  expect(getGeneralCwd()).toBe(null)
+  _resetForTest({ groupChatId: '-100', generalSessionId: 'anch', generalCwd: '/projects/g' })
+  expect(getGeneralCwd()).toBe('/projects/g')
+})
+
+test('loadTopics reads a persisted generalCwd and drops a non-string one', () => {
+  // Real disk-load validation (the sandbox STATE_DIR from test-preload). beforeEach's _resetForTest
+  // restores in-memory isolation for the next test, so this file write doesn't leak.
+  writeFileSync(TOPICS_FILE, JSON.stringify({ groupChatId: '-100', generalSessionId: 'anch', generalCwd: '/projects/g', topics: {} }))
+  expect(loadTopics().generalCwd).toBe('/projects/g')
+  writeFileSync(TOPICS_FILE, JSON.stringify({ groupChatId: '-100', generalSessionId: 'anch', generalCwd: 42, topics: {} }))
+  expect(loadTopics().generalCwd).toBe(null)
 })
 
 test('a fresh store has no base cwd', () => {

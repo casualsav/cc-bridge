@@ -60,6 +60,7 @@ import {
   setGroupChatId, getGroupChatId, isTopicMode, loadTopics, genSessionId,
   getSessionByThread, getTopicBySession, setTopic, removeTopic, updateTopic, listTopics,
   getGeneralSession, setGeneralSession, findTopicByCwd, getBaseCwd, setBaseCwd,
+  type TopicEntry,
 } from './topics.ts'
 import {
   initTopicRuntime, sessionForPane, paneForSession, ensureSessionTopic, closeTopicForPane, markTopicDeleted, markTopicClosePending,
@@ -3752,6 +3753,34 @@ async function confirmNewSession(ctx: Context): Promise<void> {
     await ctx.reply('🚫 <b>No active session here.</b>\n\nStart a session by creating a topic (the ➕ button) — each topic runs its own session.', { parse_mode: 'HTML' })
     return
   }
+  // Dead bound topic: /new starts a FRESH session in the topic's folder rather than dead-ending on
+  // commandTarget's "isn't running" warning. Nothing is destroyed (the old conversation stays on
+  // disk, resumable via /resume) and typing /new in a dead topic is explicit intent, so no confirm.
+  const thread = ctx.message?.message_thread_id
+  if (isTopicMode() && typeof thread === 'number') {
+    const sid = getSessionByThread(thread)
+    const t = sid ? getTopicBySession(sid) : undefined
+    if (sid && t && !(await paneForSession(sid))) {
+      // A boot (this branch or reviveTopicSession) is already in flight for this sid — a second
+      // bootTopicSession would overwrite its queue and double-spawn. Don't start another.
+      if (revivalQueues.has(sid)) {
+        await ctx.reply('⏳ This topic’s session is already starting up.').catch(() => {})
+        return
+      }
+      await bootTopicSession(ctx, sid, t, {
+        extra: '',
+        initialQueue: [],
+        notice: `🚀 Starting a fresh session in <code>${escapeHtml(t.cwd)}</code>…`,
+        failMsg: cwd => `❌ Couldn't start a session in <code>${escapeHtml(cwd)}</code>.`,
+        okMsg: n => n > 0
+          ? `✅ Fresh session started — ${n > 1 ? `your ${n} messages were delivered` : 'your message was delivered'}.`
+          : '✅ Fresh session started.',
+        slowMsg: '⚠️ Fresh session started but didn\'t reach a prompt in time — resend your message once it settles.',
+        logVerb: 'started fresh',
+      })
+      return
+    }
+  }
   // Topic, General, or DM: /new = clear THIS conversation in place, one confirm.
   await confirmResetSession(ctx)
 }
@@ -4867,8 +4896,8 @@ bot.command(['bind', 'unbind'], async ctx => {
   if (focus.activePaneId) {
     const sid = await sessionForPane(focus.activePaneId)
     if (sid && !getTopicBySession(sid)) {
-      setGeneralSession(sid)
       const cwd = await paneCwd(focus.activePaneId).catch(() => null)
+      setGeneralSession(sid, cwd)
       if (cwd && !getBaseCwd()) setBaseCwd(cwd)
       anchorNote = 'Your current session is anchored to this <b>General</b> topic — it stays here. '
     }
@@ -4902,10 +4931,10 @@ async function claimGeneralFor(sid: string): Promise<string> {
     await channel.threads.close(String(group), String(t.threadId)).catch(() => {})
     updateTopic(sid, { closed: true })
   }
-  setGeneralSession(sid)
-  void updateSessionPin()
   const pane = await paneForSession(sid)
   const cwd = pane ? await paneCwd(pane).catch(() => null) : null
+  setGeneralSession(sid, cwd)
+  void updateSessionPin()
   if (cwd && !getBaseCwd()) setBaseCwd(cwd)
   return `📌 <b>Anchored to General:</b> the session${cwd ? ` (<code>${escapeHtml(cwd)}</code>)` : ''} now lives here.`
 }
@@ -7638,7 +7667,7 @@ bot.on('callback_query:data', async ctx => {
     }
     await ctx.answerCallbackQuery({ text: 'Starting…' }).catch(() => {})
     const sid = genSessionId()
-    setGeneralSession(sid)
+    setGeneralSession(sid, dir)
     if (!getBaseCwd()) setBaseCwd(dir)
     const ok = await spawnSession(dir, '', sid)
     if (!ok) setGeneralSession(null)
@@ -8619,12 +8648,38 @@ async function reviveTopicSession(ctx: Context, sid: string, params: InboundPara
   if (queued) { queued.push(params); return }   // revival already booting — deliver with it
   const t = getTopicBySession(sid)
   if (!t) { bufferEvent(params); return }
-  revivalQueues.set(sid, [params])
+  await bootTopicSession(ctx, sid, t, {
+    extra: '-c',
+    initialQueue: [params],
+    notice: '💤 This session was down — reviving it; your message will be delivered.',
+    failMsg: cwd => `❌ Couldn't revive the session in <code>${escapeHtml(cwd)}</code>.`,
+    okMsg: n => `✅ Session back up — ${n > 1 ? `your ${n} messages were delivered` : 'your message was delivered'}.`,
+    slowMsg: '⚠️ Session revived but didn\'t reach a prompt in time — resend your message once it settles.',
+    logVerb: 'revived',
+  })
+}
+
+// Shared dead-topic boot: spawn a claude pane bound to `sid`'s topic (extra='-c' continues the
+// dead conversation for revival; extra='' starts fresh for /new), reopen the tab, wait ≤90s for a
+// prompt, then drain any queued inbound. `initialQueue` seeds revivalQueues so messages arriving
+// mid-boot join this boot's delivery instead of triggering a second spawn (see reviveTopicSession's
+// guard). Callers pass all user-facing strings so revival's wording stays byte-identical.
+type BootOpts = {
+  extra: string
+  initialQueue: InboundParams[]
+  notice: string
+  failMsg: (cwd: string) => string
+  okMsg: (drained: number) => string
+  slowMsg: string
+  logVerb: string
+}
+async function bootTopicSession(ctx: Context, sid: string, t: TopicEntry, o: BootOpts): Promise<void> {
+  revivalQueues.set(sid, o.initialQueue)
   try {
-    const notice = await ctx.reply('💤 This session was down — reviving it; your message will be delivered.').catch(() => null)
-    const ok = await spawnSession(t.cwd, '-c', sid)
+    const notice = await ctx.reply(o.notice, { parse_mode: 'HTML' }).catch(() => null)
+    const ok = await spawnSession(t.cwd, o.extra, sid)
     if (!ok) {
-      const msg = `❌ Couldn't revive the session in <code>${escapeHtml(t.cwd)}</code>.`
+      const msg = o.failMsg(t.cwd)
       if (notice) await channel.editText({ chatId: String(notice.chat.id), messageId: String(notice.message_id) }, msg).catch(() => {})
       else await ctx.reply(msg, { parse_mode: 'HTML' }).catch(() => {})
       return
@@ -8639,19 +8694,18 @@ async function reviveTopicSession(ctx: Context, sid: string, params: InboundPara
       if (cap && onNormalPrompt(cap)) {
         const q = revivalQueues.get(sid) ?? []
         for (const p of q) pasteInbound(pane, p)
-        // Self-edit the "💤 down" notice into a ✅ confirmation now that the session is back at a
-        // prompt and the held message(s) have been delivered.
+        // Self-edit the boot notice into a ✅ confirmation now that the session is at a prompt and
+        // any held message(s) have been delivered. The delivered-suffix only appears when messages
+        // were actually drained (revival always has ≥1; a bare /new may have none queued).
         if (notice) {
-          const what = q.length > 1 ? `your ${q.length} messages were delivered` : 'your message was delivered'
-          await channel.editText({ chatId: String(notice.chat.id), messageId: String(notice.message_id) }, `✅ Session back up — ${what}.`).catch(() => {})
+          await channel.editText({ chatId: String(notice.chat.id), messageId: String(notice.message_id) }, o.okMsg(q.length)).catch(() => {})
         }
-        process.stderr.write(`daemon: revived session ${sid} in ${t.cwd} (pane ${pane}) — delivered ${q.length} queued message(s)\n`)
+        process.stderr.write(`daemon: ${o.logVerb} session ${sid} in ${t.cwd} (pane ${pane}) — delivered ${q.length} queued message(s)\n`)
         return
       }
     }
-    const slow = '⚠️ Session revived but didn\'t reach a prompt in time — resend your message once it settles.'
-    if (notice) await channel.editText({ chatId: String(notice.chat.id), messageId: String(notice.message_id) }, slow).catch(() => {})
-    else await ctx.reply(slow).catch(() => {})
+    if (notice) await channel.editText({ chatId: String(notice.chat.id), messageId: String(notice.message_id) }, o.slowMsg).catch(() => {})
+    else await ctx.reply(o.slowMsg).catch(() => {})
   } finally { revivalQueues.delete(sid) }
 }
 
@@ -9010,7 +9064,7 @@ bot.on('message:text', async ctx => {
           // anchor (from General's no-sessions card): the spawn becomes the General base session.
           const anchor = !!target.anchor && !(await generalAnchorPane())
           const sid = genSessionId()
-          if (anchor) { setGeneralSession(sid); if (!getBaseCwd()) setBaseCwd(dir) }
+          if (anchor) { setGeneralSession(sid, dir); if (!getBaseCwd()) setBaseCwd(dir) }
           const ok = await spawnSession(dir, '', sid, await paneAccount(focus.activePaneId))
           if (anchor && !ok) setGeneralSession(null)
           await ctx.reply(ok
