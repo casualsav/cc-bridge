@@ -1921,6 +1921,10 @@ function partyRoom(): string | null { return isTopicMode() ? getGroupChatId() : 
 let rosterCache: { at: number; line: string | null } = { at: 0, line: null }
 const ROSTER_TTL_MS = 8_000
 async function partyRosterLine(): Promise<string | null> {
+  // Display toggle (☎️ Switchboard, default on): when off the roster line vanishes from the pinned
+  // card. Checked BEFORE the memo read so flipping the toggle takes effect on the very next card
+  // render, not up to ROSTER_TTL_MS later. tg ask/answer/roster + per-topic avatars are untouched.
+  if (loadAccess().switchboard === false) return null
   const now = Date.now()
   if (now - rosterCache.at < ROSTER_TTL_MS) return rosterCache.line
   let line: string | null = null
@@ -5723,6 +5727,7 @@ function settingsText(): string {
     `🧹 <code>/clear</code> approval — <b>${a.confirmReset === false ? 'off' : 'on'}</b>\n` +
     `🔀 Limit failover — <b>${a.limitFailover === true ? 'on' : 'off'}</b>\n` +
     (isTopicMode() ? `📂 Base folder — <b>${escapeHtml(baseFolderFull())}</b>\n` : '') +
+    (isTopicMode() ? `☎️ Switchboard — <b>${a.switchboard === false ? 'off' : 'on'}</b>\n` : '') +
     `\nTap to change:`
 }
 // The rich (Bot API 10.1) rendering of the same panel: a native two-column table instead of ragged
@@ -5744,6 +5749,7 @@ function settingsMarkdown(): string {
     ['🧹 /clear approval', a.confirmReset === false ? 'off' : 'on'],
     ['🔀 Limit failover', a.limitFailover === true ? 'on' : 'off'],
     ...(isTopicMode() ? [['📂 Base folder', baseRowValue()] as [string, string]] : []),
+    ...(isTopicMode() ? [['☎️ Switchboard', a.switchboard === false ? 'off' : 'on'] as [string, string]] : []),
   ]
   const help = [
     '⚡ <b>Batch allow</b> — 2+ permission prompts in one turn offer “Allow all this turn”.',
@@ -5754,6 +5760,7 @@ function settingsMarkdown(): string {
     '🧹 <b>/clear approval</b> — /clear and /new ask for a Yes/No tap first.',
     '🔀 <b>Limit failover</b> — a usage-limited account hands off to the next one.',
     ...(isTopicMode() ? ['📂 <b>Base folder</b> — new forum topics are created as subfolders of this folder.'] : []),
+    ...(isTopicMode() ? ['☎️ <b>Switchboard</b> — the live roster line on the pinned card. Sessions can still hand work to each other with <code>tg ask</code>.'] : []),
   ].join('<br>')
   return `## ⚙️ Settings\n\n` +
     `| Setting | State |\n|---|---|\n` +
@@ -5803,6 +5810,7 @@ function settingsKeyboard(): InlineKeyboard {
     ['🎙️', 'set:voice'], ['🔊', 'set:tts'], ['💬', 'set:replymode'], ['📌', 'set:pin'],
     ['🧷', 'defmode:panel'], ['🧹', 'set:confirmreset'], ['🔀', 'set:failover'],
     ...(isTopicMode() ? [['📂', 'set:base'] as [string, string]] : []),
+    ...(isTopicMode() ? [['☎️', 'set:switchboard'] as [string, string]] : []),
   ]
   const kb = new InlineKeyboard()
   buttons.forEach(([emoji, data], i) => {
@@ -6998,7 +7006,7 @@ bot.on('callback_query:data', async ctx => {
   }
 
   // /settings panel toggles → flip the setting and re-render the panel in place.
-  const setMatch = /^set:(pin|replymode|ship|voice|batch|tts|confirmreset|failover|base)$/.exec(data)
+  const setMatch = /^set:(pin|replymode|ship|voice|batch|tts|confirmreset|failover|base|switchboard)$/.exec(data)
   if (setMatch) {
     if (!(await cbAuth(ctx))) return
     await ctx.answerCallbackQuery().catch(() => {})
@@ -7048,6 +7056,11 @@ bot.on('callback_query:data', async ctx => {
     } else if (setMatch[1] === 'failover') {
       a.limitFailover = a.limitFailover !== true            // flip (default off)
       saveAccess(a)
+    } else if (setMatch[1] === 'switchboard') {
+      a.switchboard = a.switchboard === false               // flip (default on)
+      saveAccess(a)
+      rosterCache = { at: 0, line: null }   // invalidate the memo so the line (dis)appears on the next repaint, not up to ROSTER_TTL_MS later
+      await updateSessionPin()               // repaint the pinned card(s) now
     }
     await showSettings(ctx, 'edit')
     return

@@ -69,21 +69,21 @@ test('formatDigestBlock neutralizes angle brackets in from/to too, not just text
 
 // ---- formatRosterLine (party-bus P2) ----
 
-test('formatRosterLine builds a 🚌 line from >1 agent; null for a solo bus', () => {
-  expect(formatRosterLine([{ name: 'exec' }, { name: 'analysis' }, { name: 'mimo' }])).toBe('🚌 exec · analysis · mimo')
+test('formatRosterLine builds a ☎️ line from >1 agent; null for a solo bus', () => {
+  expect(formatRosterLine([{ name: 'exec' }, { name: 'analysis' }, { name: 'mimo' }])).toBe('☎️ exec · analysis · mimo')
   expect(formatRosterLine([{ name: 'solo' }])).toBeNull()
   expect(formatRosterLine([])).toBeNull()
 })
 
 test('formatRosterLine renders per-agent ctx% with 🟢<70 / 🟡<90 / 🔴≥90 buckets; no % → name only', () => {
   expect(formatRosterLine([{ name: 'A', ctxPct: 45 }, { name: 'B', ctxPct: 82 }, { name: 'C', ctxPct: 95 }]))
-    .toBe('🚌 🟢 A 45% · 🟡 B 82% · 🔴 C 95%')
+    .toBe('☎️ 🟢 A 45% · 🟡 B 82% · 🔴 C 95%')
   // boundaries: <70 green, [70,90) yellow, ≥90 red
   expect(formatRosterLine([{ name: 'a', ctxPct: 69 }, { name: 'b', ctxPct: 70 }, { name: 'c', ctxPct: 89 }, { name: 'd', ctxPct: 90 }]))
-    .toBe('🚌 🟢 a 69% · 🟡 b 70% · 🟡 c 89% · 🔴 d 90%')
+    .toBe('☎️ 🟢 a 69% · 🟡 b 70% · 🟡 c 89% · 🔴 d 90%')
   // Hermes one-shots (no ctxPct) and an explicit null both render name-only, mixed with Claude cells
   expect(formatRosterLine([{ name: 'Opus', ctxPct: 45 }, { name: 'hermes' }, { name: 'Sonnet', ctxPct: null }]))
-    .toBe('🚌 🟢 Opus 45% · hermes · Sonnet')
+    .toBe('☎️ 🟢 Opus 45% · hermes · Sonnet')
 })
 
 test('formatRosterLine clamps THEN escapes so a & near the 110-char limit never becomes a split entity', () => {
@@ -108,4 +108,7 @@ test('formatRosterLine never splits an emoji surrogate pair at the clamp boundar
   const out = formatRosterLine(agents)!
   expect(out).not.toMatch(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/)   // no lone surrogate
   expect(Buffer.from(out, 'utf8').toString('utf8')).toBe(out)   // round-trips as valid UTF-8
+  // ☎️ (U+260E + U+FE0F variation selector) is 2 code points; the prefix leads the line so the clamp
+  // never cuts it, and clampChars is code-point-based so the VS16 can never be orphaned mid-sequence.
+  expect(out.startsWith('☎️ ')).toBe(true)
 })

@@ -38,7 +38,7 @@ type StatusCardDeps = {
   // exits the session + suppresses recreation. (Silently dropping the entry here let a live session's
   // topic repopulate within ~30s — discovery recreated it before the 2-min sweep could exit it.)
   onTopicGone: (sessionId: string, threadId: number) => void
-  // party-bus P2: a compact live-roster line for the bus ("🚌 exec · analysis · mimo"), or null when
+  // party-bus P2: a compact live-roster line for the Switchboard ("☎️ exec · analysis · mimo"), or null when
   // party isn't active / only one endpoint is live. Daemon-computed + memoized (liveness only, no pane
   // captures) so rendering it on every card stays cheap. Optional so a fake-bot unit test can omit it.
   partyRoster?: () => Promise<string | null>

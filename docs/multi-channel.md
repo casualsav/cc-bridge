@@ -26,7 +26,7 @@
    renderers.
 5. **Capability-gated features.** Core never assumes a feature exists; it checks
    `channel.caps`. Telegram-only surfaces (inline queries, Mini App, rich-message drafts,
-   forum topics, avatar party-bus multi-bot) stay in the Telegram adapter or gate off
+   forum topics, avatar switchboard multi-bot) stay in the Telegram adapter or gate off
    cleanly elsewhere.
 6. **Slack/Discord ship as MVP first**: inbound text/files → pane, replies out, permission
    /prompt buttons, reactions-as-controls, core slash commands (mode/model/effort/stop/

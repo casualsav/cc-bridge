@@ -65,7 +65,7 @@ export function formatDigestBlock(entries: DigestEntry[], sinceLabel: string): s
 }
 
 // The pinned-card roster line (party-bus P2) built from the LIVE endpoint names: a compact
-// `🚌 a · b · c`, clamped to a pin-sized budget and ONLY THEN HTML-escaped. Escaping LAST is the whole
+// `☎️ a · b · c`, clamped to a pin-sized budget and ONLY THEN HTML-escaped. Escaping LAST is the whole
 // point: escaping first and slicing after can cut an entity (`&amp;` → `&am`), which is invalid HTML
 // and makes Telegram reject the ENTIRE card edit — a silent, permanently-stale card. null for a solo
 // bus (≤1 live name) — no roster then. Names arrive RAW; this owns both the clamp and the escape.
@@ -80,7 +80,7 @@ export function formatRosterLine(agents: RosterAgent[]): string | null {
     const glyph = a.ctxPct < 70 ? '🟢' : a.ctxPct < 90 ? '🟡' : '🔴'
     return `${glyph} ${a.name} ${a.ctxPct}%`
   }
-  const raw = `🚌 ${agents.map(cell).join(' · ')}`
+  const raw = `☎️ ${agents.map(cell).join(' · ')}`
   const clamped = [...raw].length > 110 ? clampChars(raw, 109) + '…' : raw
   return escapeHtml(clamped)
 }

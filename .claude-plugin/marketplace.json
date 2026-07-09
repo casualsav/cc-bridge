@@ -8,7 +8,7 @@
       "name": "telegram",
       "source": "./",
       "description": "cc-bridge — drive Claude Code from Telegram. Built-in access control; manage pairing, allowlists, and policy via /telegram:access.",
-      "version": "0.3.83"
+      "version": "0.3.84"
     },
     {
       "name": "slack",
