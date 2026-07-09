@@ -10,7 +10,7 @@ import { Bot } from 'grammy'
 import type { ChannelAdapter, Button } from './channel.ts'
 import { STATE_DIR, readJsonFile, writeJsonFile } from './common.ts'
 import { exec } from './proc.ts'
-import { escapeHtml } from './markdown.ts'
+import { escapeHtml, clampChars } from './markdown.ts'
 import { parseStatusline, pinBar, type StatuslineData } from './statusline.ts'
 import { capturePane, paneCwd } from './pane-io.ts'
 import { focus } from './state.ts'
@@ -326,7 +326,7 @@ export async function statusCardText(paneId: string | null): Promise<string> {
   if (cwd) groups.push(`📁 <code>${escapeHtml(cwd)}</code>${branch ? ` · 🌿 ${escapeHtml(branch)}` : ''}`)
   // The session's working plan (ROADMAP #16): latest TodoWrite state, with the in-progress step.
   if (todos && todos.done < todos.total) {
-    groups.push(`📋 ${todos.done}/${todos.total}${todos.active ? ` · ${escapeHtml(todos.active.slice(0, 70))}` : ''}`)
+    groups.push(`📋 ${todos.done}/${todos.total}${todos.active ? ` · ${escapeHtml(clampChars(todos.active, 70))}` : ''}`)
   }
   if (status) {
     // Usage group: the 5h/7d limit bars, then the cost/time data.

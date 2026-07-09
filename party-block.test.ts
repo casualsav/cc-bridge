@@ -94,3 +94,18 @@ test('formatRosterLine clamps THEN escapes so a & near the 110-char limit never 
   expect(out).not.toMatch(/&(?!amp;|lt;|gt;|quot;)/)   // every & in the output is a COMPLETE entity
   expect(out).toContain('&amp;')                        // the surviving &'s did escape
 })
+
+test('formatRosterLine never splits an emoji surrogate pair at the clamp boundary (regression)', () => {
+  // Live 7-agent roster (party-bus incident) whose 109-code-unit cut lands mid-🟢: the first 6
+  // cells + separators consume exactly 108 UTF-16 code units, so `raw.slice(0, 109)` takes only the
+  // high surrogate (D83D) of the 7th cell's 🟢 (U+1F7E2 = D83D DFE2), emitting a lone surrogate —
+  // invalid UTF-8 → Telegram 400s the whole sendMessage. The old `raw.slice(0, 109)` cut exactly there.
+  const agents = [
+    { name: 'perps-bot', ctxPct: 5 }, { name: 'Tradspy', ctxPct: 8 }, { name: 'fable-skills', ctxPct: 6 },
+    { name: 'Sonnet', ctxPct: 51 }, { name: 'music', ctxPct: 41 }, { name: 'cc-bridge', ctxPct: 14 },
+    { name: 'worker7', ctxPct: 99 },
+  ]
+  const out = formatRosterLine(agents)!
+  expect(out).not.toMatch(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/)   // no lone surrogate
+  expect(Buffer.from(out, 'utf8').toString('utf8')).toBe(out)   // round-trips as valid UTF-8
+})

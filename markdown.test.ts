@@ -1,9 +1,33 @@
 // Markdown → Telegram HTML and the chunk-safe splitter. Pure functions, no I/O.
 import { test, expect } from 'bun:test'
-import { escapeHtml, mdToTelegramHtml, chunkHtml } from './markdown.ts'
+import { escapeHtml, clampChars, mdToTelegramHtml, chunkHtml } from './markdown.ts'
 
 test('escapeHtml escapes & < > (and leaves quotes alone)', () => {
   expect(escapeHtml('a < b & c > d "e"')).toBe('a &lt; b &amp; c &gt; d "e"')
+})
+
+// ---- clampChars ----
+
+test('clampChars: under or at the limit returns the input unchanged', () => {
+  expect(clampChars('hello', 10)).toBe('hello')
+  expect(clampChars('hello', 5)).toBe('hello')
+})
+
+test('clampChars: over the limit cuts to max code points', () => {
+  expect(clampChars('hello world', 5)).toBe('hello')
+})
+
+test('clampChars: an emoji straddling the boundary is dropped whole, never split', () => {
+  const s = 'abc' + '🟢' + 'def'   // 🟢 is one code point, two UTF-16 code units
+  const r = clampChars(s, 4)      // boundary lands right at the emoji's code point
+  expect(r).toBe('abc🟢')
+  expect(r).not.toMatch(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/) // no lone surrogate
+  expect(Buffer.from(r, 'utf8').toString('utf8')).toBe(r)   // round-trips as valid UTF-8
+})
+
+test('clampChars: pure ASCII clamps identically to .slice', () => {
+  const s = 'the quick brown fox'
+  expect(clampChars(s, 9)).toBe(s.slice(0, 9))
 })
 
 test('inline emphasis: bold, italic, code, strikethrough', () => {

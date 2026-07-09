@@ -5696,6 +5696,18 @@ function ghSummary(): string {
   const active = ghAccountsCache.find(g => g.active) ?? ghAccountsCache[0]
   return ghAccountsCache.length > 1 ? `${active.user} +${ghAccountsCache.length - 1}` : active.user
 }
+// A base folder path is long — the plain-text panel has room for the full thing (with ~ collapsed);
+// the rich table row (baseRowValue below) does not and shows only the basename.
+function baseFolderFull(): string {
+  const cur = getBaseCwd()
+  if (!cur) return 'not set'
+  return cur.startsWith(homedir()) ? `~${cur.slice(homedir().length)}` : cur
+}
+function baseRowValue(): string {
+  const cur = getBaseCwd()
+  if (!cur) return 'not set'
+  return cur.split('/').filter(Boolean).pop() || cur
+}
 function settingsText(): string {
   const a = loadAccess()
   return `⚙️ <b>Settings</b>\n\n` +
@@ -5709,8 +5721,9 @@ function settingsText(): string {
     `📌 Pinned message — <b>${a.sessionPin !== false ? 'on' : 'off'}</b>\n` +
     `🧷 Preferred mode — <b>${listAccounts().length > 1 ? 'per account' : defModeLabel(MAIN_ACCOUNT.configDir)}</b>\n` +
     `🧹 <code>/clear</code> approval — <b>${a.confirmReset === false ? 'off' : 'on'}</b>\n` +
-    `🔀 Limit failover — <b>${a.limitFailover === true ? 'on' : 'off'}</b>\n\n` +
-    `Tap to change:`
+    `🔀 Limit failover — <b>${a.limitFailover === true ? 'on' : 'off'}</b>\n` +
+    (isTopicMode() ? `📂 Base folder — <b>${escapeHtml(baseFolderFull())}</b>\n` : '') +
+    `\nTap to change:`
 }
 // The rich (Bot API 10.1) rendering of the same panel: a native two-column table instead of ragged
 // "emoji — value" lines, plus a collapsible the HTML panel had no room for — one line per setting,
@@ -5730,6 +5743,7 @@ function settingsMarkdown(): string {
     ['🧷 Preferred mode', listAccounts().length > 1 ? 'per account' : defModeLabel(MAIN_ACCOUNT.configDir)],
     ['🧹 /clear approval', a.confirmReset === false ? 'off' : 'on'],
     ['🔀 Limit failover', a.limitFailover === true ? 'on' : 'off'],
+    ...(isTopicMode() ? [['📂 Base folder', baseRowValue()] as [string, string]] : []),
   ]
   const help = [
     '⚡ <b>Batch allow</b> — 2+ permission prompts in one turn offer “Allow all this turn”.',
@@ -5739,6 +5753,7 @@ function settingsMarkdown(): string {
     '🧷 <b>Preferred mode</b> — the permission mode NEW sessions launch in (/mode is the live dial).',
     '🧹 <b>/clear approval</b> — /clear and /new ask for a Yes/No tap first.',
     '🔀 <b>Limit failover</b> — a usage-limited account hands off to the next one.',
+    ...(isTopicMode() ? ['📂 <b>Base folder</b> — new forum topics are created as subfolders of this folder.'] : []),
   ].join('<br>')
   return `## ⚙️ Settings\n\n` +
     `| Setting | State |\n|---|---|\n` +
@@ -5779,12 +5794,22 @@ const showHtmlPanel = (ctx: Context, mode: 'send' | 'edit', html: string, keyboa
 const showSettings = (ctx: Context, mode: 'send' | 'edit'): Promise<void> =>
   showRichPanel(ctx, mode, toInputRichMessage(settingsMarkdown()), settingsText(), settingsKeyboard())
 
-// Emoji-only, 4 per row — the emoji are the labels, read off the table rows above them (same order).
+// Emoji-only, 4 per row — the emoji are the labels, read off the table rows above them (same
+// order), so this list of [emoji, callback] pairs MUST stay in lockstep with the `rows` built in
+// settingsText()/settingsMarkdown() above, including the conditional Base folder row.
 function settingsKeyboard(): InlineKeyboard {
-  return new InlineKeyboard()
-    .text('👤', 'acct:panel').text('🐙', 'gh:panel').text('⚡', 'set:batch').text('🚢', 'set:ship').row()
-    .text('🎙️', 'set:voice').text('🔊', 'set:tts').text('💬', 'set:replymode').text('📌', 'set:pin').row()
-    .text('🧷', 'defmode:panel').text('🧹', 'set:confirmreset').text('🔀', 'set:failover')
+  const buttons: Array<[string, string]> = [
+    ['👤', 'acct:panel'], ['🐙', 'gh:panel'], ['⚡', 'set:batch'], ['🚢', 'set:ship'],
+    ['🎙️', 'set:voice'], ['🔊', 'set:tts'], ['💬', 'set:replymode'], ['📌', 'set:pin'],
+    ['🧷', 'defmode:panel'], ['🧹', 'set:confirmreset'], ['🔀', 'set:failover'],
+    ...(isTopicMode() ? [['📂', 'set:base'] as [string, string]] : []),
+  ]
+  const kb = new InlineKeyboard()
+  buttons.forEach(([emoji, data], i) => {
+    kb.text(emoji, data)
+    if (i % 4 === 3 && i < buttons.length - 1) kb.row()
+  })
+  return kb
 }
 
 // 🧷 Preferred-mode sub-panel (settings → Preferred mode): Claude Code's permissions.defaultMode — the
@@ -6973,7 +6998,7 @@ bot.on('callback_query:data', async ctx => {
   }
 
   // /settings panel toggles → flip the setting and re-render the panel in place.
-  const setMatch = /^set:(pin|replymode|ship|voice|batch|tts|confirmreset|failover)$/.exec(data)
+  const setMatch = /^set:(pin|replymode|ship|voice|batch|tts|confirmreset|failover|base)$/.exec(data)
   if (setMatch) {
     if (!(await cbAuth(ctx))) return
     await ctx.answerCallbackQuery().catch(() => {})
@@ -6985,6 +7010,19 @@ bot.on('callback_query:data', async ctx => {
     }
     if (setMatch[1] === 'tts') {
       await showHtmlPanel(ctx, 'edit', ttsText(), ttsKeyboard())
+      return
+    }
+    if (setMatch[1] === 'base') {
+      // Not a toggle — drop a force-reply asking for the new folder; the answer (kind 'basedir')
+      // repaints this panel in place (panelMsgId rides along in the reply target, like 'budget').
+      const thread = ctx.callbackQuery.message?.message_thread_id
+      const cur = getBaseCwd()
+      const sent = await channel.sendText(String(ctx.chat!.id),
+        `📂 <b>Base folder</b> — new topics are created as subfolders here.\n\n` +
+        `Currently: ${cur ? `<code>${escapeHtml(cur)}</code>` : 'not set'}\n\n` +
+        `Reply with a folder path (<code>~/…</code> works). It must already exist.`,
+        { ...(thread ? { threadId: String(thread) } : {}), forceReply: { placeholder: 'Folder path' } }).catch(() => null)
+      if (sent) replyTargets.set(refKey(sent), { kind: 'basedir', panelMsgId: ctx.callbackQuery.message?.message_id })
       return
     }
     const a = loadAccess()
@@ -8908,6 +8946,26 @@ bot.on('message:text', async ctx => {
             ? `💸 Daily budget set to $${a.budgetDaily.toFixed(2)} — I'll warn at 80% and at the cap.`
             : '💸 Daily budget off.')
           if (target.panelMsgId) await channel.editText({ chatId: String(ctx.chat!.id), messageId: String(target.panelMsgId) }, budgetPanelText(), { buttons: kbToButtons(budgetPanelKeyboard()) }).catch(() => {})
+          return
+        }
+        // Folder for settings → 📂 Base folder's set button — unlike /new's "create it for me",
+        // this one must already exist (it's the root new topics fan out under, not a one-off
+        // session dir), so a miss re-arms the same force-reply instead of mkdir-ing a surprise root.
+        case 'basedir': {
+          const dir = await resolveNewSessionDir(text)
+          if (!existsSync(dir)) {
+            const again = await ctx.reply(
+              `❌ <code>${escapeHtml(dir)}</code> doesn't exist — create it first, or reply with another path.`,
+              { parse_mode: 'HTML', reply_markup: { force_reply: true, input_field_placeholder: 'Folder path' } }).catch(() => null)
+            if (again) replyTargets.set(`${ctx.chat?.id}:${again.message_id}`, target)
+            return
+          }
+          setBaseCwd(dir)
+          await ctx.reply(`📂 <b>Base folder set:</b> <code>${escapeHtml(dir)}</code>\nNew topics will be created as subfolders here.`, { parse_mode: 'HTML' })
+          if (target.panelMsgId) {
+            try { await editRichMessage(TOKEN!, String(ctx.chat!.id), target.panelMsgId, toInputRichMessage(settingsMarkdown()), settingsKeyboard()) }
+            catch { await channel.editText({ chatId: String(ctx.chat!.id), messageId: String(target.panelMsgId) }, settingsText(), { buttons: kbToButtons(settingsKeyboard()) }).catch(() => {}) }
+          }
           return
         }
         // API key for a hosted TTS engine — stored in .env, the key message deleted from chat.

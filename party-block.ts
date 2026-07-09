@@ -7,7 +7,7 @@
 // PURE string builders (no fs/tmux), so the format stays unit-tested and reviewable in isolation —
 // same rationale as inbound.ts's formatChannelBlock.
 
-import { escapeHtml } from './markdown.ts'
+import { escapeHtml, clampChars } from './markdown.ts'
 
 const esc = (v: string) => v.replace(/"/g, '&quot;')
 
@@ -81,6 +81,6 @@ export function formatRosterLine(agents: RosterAgent[]): string | null {
     return `${glyph} ${a.name} ${a.ctxPct}%`
   }
   const raw = `🚌 ${agents.map(cell).join(' · ')}`
-  const clamped = raw.length > 110 ? raw.slice(0, 109) + '…' : raw
+  const clamped = [...raw].length > 110 ? clampChars(raw, 109) + '…' : raw
   return escapeHtml(clamped)
 }

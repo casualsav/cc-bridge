@@ -82,6 +82,7 @@ export type ReplyTarget =
   | { kind: 'ttskey'; engine: 'openai' | 'elevenlabs' }          // API key for a hosted TTS engine (settings → 🔊 Voice replies)
   | { kind: 'stucktext'; paneId: string }                        // raw text typed into a wedged pane (stuck-screen dump)
   | { kind: 'budget'; panelMsgId?: number }                      // daily $ cap (or 'off') from the /budget panel's set button
+  | { kind: 'basedir'; panelMsgId?: number }                     // folder for /base's set button (settings → 📂 Base folder)
   | { kind: 'orphan' }                                           // rehydrated after a restart — enough to delete/disarm it, the original flow is gone
 //
 // Persisted across restarts: memory-only meant a wedged force-reply prompt outlived the process

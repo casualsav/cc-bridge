@@ -13,6 +13,17 @@ export function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
+// Clamp to `max` code points — never `max` UTF-16 code units. `String.slice` counts code units, so
+// a limit landing mid-surrogate-pair (e.g. inside an emoji outside the BMP) emits a lone surrogate,
+// which is invalid UTF-8; Telegram rejects the ENTIRE message rather than just mangling the tail.
+// `[...s]` iterates by code point, so slicing the array sidesteps the split. This does NOT preserve
+// grapheme clusters — a ZWJ sequence or a variation selector (VS16) can still be cut apart — it only
+// guarantees valid UTF-8, which is all the API actually demands.
+export function clampChars(s: string, max: number): string {
+  const arr = [...s]
+  return arr.length <= max ? s : arr.slice(0, max).join('')
+}
+
 function escapeAttr(s: string): string {
   return escapeHtml(s).replace(/"/g, '&quot;')
 }
