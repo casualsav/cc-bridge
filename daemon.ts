@@ -2099,16 +2099,15 @@ async function generalAnchorPane(): Promise<string | null> {
   return sid ? paneForSession(sid) : null
 }
 
-// Where a new topic's folder is created. The General anchor's cwd is the projects root; remember it
-// so a dead anchor doesn't silently re-root new topics under whatever session happens to be focused.
+// Where a new topic's folder is created: the user's configured projects root (/base). It is NOT the
+// General anchor's cwd — an anchor handover would otherwise silently re-root new topics inside
+// whatever project just claimed General. The anchor's cwd is only a pre-/base fallback.
 async function topicBaseDir(): Promise<string | null> {
+  const configured = getBaseCwd()
+  if (configured && existsSync(configured)) return configured
   const pane = await generalAnchorPane()
-  if (pane) {
-    const cwd = await paneCwd(pane).catch(() => null)
-    if (cwd) { setBaseCwd(cwd); return cwd }
-  }
-  const remembered = getBaseCwd()
-  if (remembered && existsSync(remembered)) return remembered
+  const cwd = pane ? await paneCwd(pane).catch(() => null) : null
+  if (cwd) return cwd
   return focus.activePaneId ? await paneCwd(focus.activePaneId).catch(() => null) : null
 }
 
@@ -4866,14 +4865,15 @@ bot.command(['bind', 'unbind'], async ctx => {
     if (sid && !getTopicBySession(sid)) {
       setGeneralSession(sid)
       const cwd = await paneCwd(focus.activePaneId).catch(() => null)
-      if (cwd) setBaseCwd(cwd)
+      if (cwd && !getBaseCwd()) setBaseCwd(cwd)
       anchorNote = 'Your current session is anchored to this <b>General</b> topic — it stays here. '
     }
   }
   await ctx.reply(
     '✅ <b>Bound this forum as the command center.</b>\n\n' +
     `${anchorNote}Each other Claude Code session will get its own topic; General also carries global ` +
-    'commands (/status, /settings).\n\n' +
+    'commands (/status, /settings). New topics nest under the anchored session’s folder until you ' +
+    'set one with /base.\n\n' +
     '⚠️ One more setup step: in @BotFather → <i>Bot Settings → Group Privacy → Turn off</i>, so I can ' +
     'see messages you type inside a session’s topic (not just commands). Then remove + re-add me to the group.\n\n' +
     '<i>Topic creation &amp; routing land in the next update.</i>',
@@ -4902,7 +4902,7 @@ async function claimGeneralFor(sid: string): Promise<string> {
   void updateSessionPin()
   const pane = await paneForSession(sid)
   const cwd = pane ? await paneCwd(pane).catch(() => null) : null
-  if (cwd) setBaseCwd(cwd)
+  if (cwd && !getBaseCwd()) setBaseCwd(cwd)
   return `📌 <b>Anchored to General:</b> the session${cwd ? ` (<code>${escapeHtml(cwd)}</code>)` : ''} now lives here.`
 }
 
@@ -4929,6 +4929,29 @@ bot.command('claim', async ctx => {
   } else {
     await ctx.reply(await claimGeneralForFocused(), { parse_mode: 'HTML' })
   }
+})
+
+// The folder new topics are created under (topicBaseDir's /base). Configured once and left alone by
+// anchor churn — unlike the General anchor's cwd, it doesn't silently move when a different session
+// claims General.
+bot.command('base', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  const arg = (ctx.match ?? '').toString().trim()
+  if (!arg) {
+    const cur = getBaseCwd()
+    await ctx.reply(cur
+      ? `📂 <b>Base folder:</b> <code>${escapeHtml(cur)}</code>\nNew topics are created as subfolders here.\n\nChange it with <code>/base ~/some/folder</code>.`
+      : '📂 <b>No base folder set.</b>\nNew topics are created under the General session’s folder.\n\nSet one with <code>/base ~/projects</code> — every new topic then becomes a subfolder of it.',
+      { parse_mode: 'HTML' })
+    return
+  }
+  const dir = await resolveNewSessionDir(arg)
+  if (!existsSync(dir)) {
+    await ctx.reply(`❌ <code>${escapeHtml(dir)}</code> doesn't exist — create it first, or point /base at an existing folder.`, { parse_mode: 'HTML' })
+    return
+  }
+  setBaseCwd(dir)
+  await ctx.reply(`📂 <b>Base folder set:</b> <code>${escapeHtml(dir)}</code>\nNew topics will be created as subfolders here.`, { parse_mode: 'HTML' })
 })
 
 // /cost, /context relay session visibility info. (/session is the registry — below.)
@@ -7565,7 +7588,7 @@ bot.on('callback_query:data', async ctx => {
     await ctx.answerCallbackQuery({ text: 'Starting…' }).catch(() => {})
     const sid = genSessionId()
     setGeneralSession(sid)
-    setBaseCwd(dir)
+    if (!getBaseCwd()) setBaseCwd(dir)
     const ok = await spawnSession(dir, '', sid)
     if (!ok) setGeneralSession(null)
     await ctx.editMessageText(ok
@@ -8916,7 +8939,7 @@ bot.on('message:text', async ctx => {
           // anchor (from General's no-sessions card): the spawn becomes the General base session.
           const anchor = !!target.anchor && !(await generalAnchorPane())
           const sid = genSessionId()
-          if (anchor) { setGeneralSession(sid); setBaseCwd(dir) }
+          if (anchor) { setGeneralSession(sid); if (!getBaseCwd()) setBaseCwd(dir) }
           const ok = await spawnSession(dir, '', sid, await paneAccount(focus.activePaneId))
           if (anchor && !ok) setGeneralSession(null)
           await ctx.reply(ok
@@ -9764,6 +9787,7 @@ void (async () => {
               { command: 'resume', description: 'Resume a recent session (lists them with times)' },
               { command: 'find', description: 'Search all sessions\' conversations (/find <text>)' },
               { command: 'files', description: 'Browse / download / edit files in this session\'s folder' },
+              { command: 'base', description: 'Folder new topics are created under (/base ~/projects)' },
               { command: 'account', description: 'Claude accounts — list, add, remove (multi-account)' },
               { command: 'restart', description: 'Restart & resume the current session — or "/restart all" for every session' },
               { command: 'reset', description: 'Clear the current conversation in place' },

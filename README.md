@@ -20,7 +20,7 @@ Start Claude in a tmux session, drop the link to this repo and tell Claude "inst
 
 The installer adds the alias claude-tg, which runs Claude with the identifier for the daemon to pick up the session. After going through the initial install, run the alias inside a tmux session, then send a message to the Telegram bot.
 
-For multi-session, add the Telegram bot as an admin with full rights in a Telegram group with topics enabled and send /bind in the general chat. Every new topic you make then opens a new session and lets you specify where it runs. 
+For multi-session, add the Telegram bot as an admin with full rights in a Telegram group with topics enabled and send /bind in the general chat. Every new topic you make then opens a new session and lets you specify where it runs. Set your projects root with `/base <path>` after binding — new topics nest under it.
 
 ## Usage
 
