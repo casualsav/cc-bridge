@@ -1,7 +1,7 @@
 // Tests for Bot API 10.1 rich-message payload shaping. Pure functions only — no network.
 // Run: bun test richmsg.test.ts
 import { test, expect } from 'bun:test'
-import { toInputRichMessage, buildSendPayload, buildDraftPayload, buildEditPayload } from './richmsg.ts'
+import { toInputRichMessage, htmlPanelToRich, buildSendPayload, buildDraftPayload, buildEditPayload } from './richmsg.ts'
 
 test('toInputRichMessage defaults to a markdown carrier (Claude emits markdown)', () => {
   expect(toInputRichMessage('# Hello')).toEqual({ markdown: '# Hello' })
@@ -36,6 +36,24 @@ test('buildSendPayload: disable_notification + business_connection_id only when 
     chat_id: '123', rich_message: { markdown: 'x' }, disable_notification: true, business_connection_id: 'biz',
   })
   expect(buildSendPayload('123', { markdown: 'x' }, { disableNotification: false })).not.toHaveProperty('disable_notification')
+})
+
+// The html carrier parses blocks, so a bare "\n" would collapse to a space (verified against the
+// live API) — the panels' line breaks must survive as <br>, and inline tags must NOT be touched.
+test('htmlPanelToRich rewrites line breaks to <br> and leaves inline tags alone', () => {
+  expect(htmlPanelToRich('🧷 <b>Preferred mode</b>\n<i>note</i>\n\n<code>x</code>'))
+    .toEqual({ html: '🧷 <b>Preferred mode</b><br><i>note</i><br><br><code>x</code>' })
+  expect(htmlPanelToRich('no breaks')).toEqual({ html: 'no breaks' })
+})
+
+// Rich messages accept an inline keyboard (verified against the live API), which is what lets the
+// tappable /settings panel render as a rich message instead of HTML.
+test('reply_markup rides along on send + edit, and is omitted when absent', () => {
+  const kb = { inline_keyboard: [[{ text: '⚙️', callback_data: 'st:settings' }]] }
+  expect(buildSendPayload('123', { markdown: 'x' }, { replyMarkup: kb })).toHaveProperty('reply_markup', kb)
+  expect(buildSendPayload('123', { markdown: 'x' }, {})).not.toHaveProperty('reply_markup')
+  expect(buildEditPayload('123', 7, { markdown: 'x' }, kb)).toHaveProperty('reply_markup', kb)
+  expect(buildEditPayload('123', 7, { markdown: 'x' })).not.toHaveProperty('reply_markup')
 })
 
 test('buildDraftPayload: carries chat_id, draft_id, rich_message (and optional thread)', () => {

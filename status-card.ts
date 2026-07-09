@@ -354,10 +354,8 @@ export async function statusCardText(paneId: string | null): Promise<string> {
 // Quick-action buttons on the status card — same emojis as the card's own fields.
 export function statusKeyboard(): Button[][] {
   return [
-    [{ text: '🧠 Model', data: 'st:model' }, { text: '⚡ Effort', data: 'st:effort' }],
-    [{ text: '🕹️ Mode', data: 'st:mode' }, { text: '🗜️ Compact', data: 'st:compact' }],
-    [{ text: '💾 Context', data: 'st:context' }, { text: '💰 Cost', data: 'st:cost' }],
-    [{ text: '⚙️ Settings', data: 'st:settings' }, { text: '📌 Pin off', data: 'st:pinoff' }],
+    [{ text: '🧠', data: 'st:model' }, { text: '⚡', data: 'st:effort' },
+     { text: '🕹️', data: 'st:mode' }, { text: '⚙️', data: 'st:settings' }],
   ]
 }
 

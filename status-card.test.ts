@@ -79,8 +79,9 @@ test('mergeStatus: backfills only missing fields; null fresh falls back to prev;
   expect(mergeStatus(fresh, undefined)).toBe(fresh) // first read → use it as-is
 })
 
-test('statusKeyboard carries the st:* quick actions', () => {
-  const datas = statusKeyboard().flat().map(b => b.data ?? '')
-  expect(datas).toContain('st:model')
-  expect(datas).toContain('st:pinoff')
+test('statusKeyboard carries the st:* quick actions in one row', () => {
+  const kb = statusKeyboard()
+  expect(kb).toHaveLength(1)
+  const datas = kb.flat().map(b => b.data ?? '')
+  expect(datas).toEqual(['st:model', 'st:effort', 'st:mode', 'st:settings'])
 })

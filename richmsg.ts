@@ -21,6 +21,13 @@ export function toInputRichMessage(text: string, mode: 'markdown' | 'html' = 'ma
   return mode === 'html' ? { html: text } : { markdown: text }
 }
 
+// Carry an existing HTML panel (a `\n`-separated string built for parse_mode:'HTML') over the html
+// carrier. Rich parses HTML into BLOCKS, so a bare "\n" collapses to a space — every line break must
+// become <br> or the panel renders as one run-on paragraph. Inline <b>/<i>/<code> survive as-is.
+export function htmlPanelToRich(html: string): InputRichMessage {
+  return { html: html.replace(/\n/g, '<br>') }
+}
+
 // Raw Bot API caller: POST JSON to api.telegram.org, return the parsed `result`, throw on ok:false
 // or a non-2xx. One place owns the URL/JSON shape so callers stay declarative.
 // SECURITY: the fetch URL embeds the bot token — the thrown errors below MUST stay method + Telegram's
@@ -42,12 +49,15 @@ export async function callTelegram<T = unknown>(token: string, method: string, p
 export type RichMessage = { message_id: number; [k: string]: unknown }
 
 // Options shared by sendRichMessage / buildSendPayload. replyToMessageId emits reply_parameters so
-// the rich path can honor reply-to (same chat) the way the HTML path does.
+// the rich path can honor reply-to (same chat) the way the HTML path does. replyMarkup carries an
+// inline keyboard: rich messages accept (and echo back) reply_markup exactly like sendMessage, so a
+// tappable panel — /settings — can be a rich message without giving up its buttons.
 export type SendRichOpts = {
   messageThreadId?: number
   replyToMessageId?: number
   disableNotification?: boolean
   businessConnectionId?: string
+  replyMarkup?: unknown
 }
 
 // sendRichMessage — works in DM AND in forum supergroups/channels (supports message_thread_id), so
@@ -76,6 +86,7 @@ export function buildSendPayload(
     ...(opts?.replyToMessageId !== undefined ? { reply_parameters: { message_id: opts.replyToMessageId, allow_sending_without_reply: true } } : {}),
     ...(opts?.disableNotification ? { disable_notification: true } : {}),
     ...(opts?.businessConnectionId ? { business_connection_id: opts.businessConnectionId } : {}),
+    ...(opts?.replyMarkup !== undefined ? { reply_markup: opts.replyMarkup } : {}),
   }
 }
 
@@ -115,11 +126,18 @@ export function editRichMessage(
   chatId: string | number,
   messageId: number,
   richMessage: InputRichMessage,
+  replyMarkup?: unknown,
 ): Promise<RichMessage> {
-  return callTelegram<RichMessage>(token, 'editMessageText', buildEditPayload(chatId, messageId, richMessage))
+  return callTelegram<RichMessage>(token, 'editMessageText', buildEditPayload(chatId, messageId, richMessage, replyMarkup))
 }
 
-// Exported for testing: the editMessageText (rich) wire payload (no network).
-export function buildEditPayload(chatId: string | number, messageId: number, richMessage: InputRichMessage): Record<string, unknown> {
-  return { chat_id: chatId, message_id: messageId, rich_message: richMessage }
+// Exported for testing: the editMessageText (rich) wire payload (no network). Omitting reply_markup
+// leaves an existing keyboard untouched; passing one replaces it (Telegram's usual edit semantics).
+export function buildEditPayload(chatId: string | number, messageId: number, richMessage: InputRichMessage, replyMarkup?: unknown): Record<string, unknown> {
+  return {
+    chat_id: chatId,
+    message_id: messageId,
+    rich_message: richMessage,
+    ...(replyMarkup !== undefined ? { reply_markup: replyMarkup } : {}),
+  }
 }

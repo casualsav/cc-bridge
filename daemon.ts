@@ -70,7 +70,7 @@ import {
 } from './topic-runtime.ts'
 import { startWebapp, type SettingsView as WebappSettingsView, type UsageView as WebappUsageView, type DiffView as WebappDiffView } from './webapp.ts'
 import { startTunnel, ensureCloudflared, tailscaleFunnelUrl, type Tunnel } from './tunnel.ts'
-import { sendRichMessage, sendRichMessageDraft, editRichMessage, toInputRichMessage, callTelegram } from './richmsg.ts'
+import { sendRichMessage, sendRichMessageDraft, editRichMessage, toInputRichMessage, htmlPanelToRich, callTelegram, type InputRichMessage } from './richmsg.ts'
 import { parseAvatars, resolveAvatar, type Avatar } from './avatars.ts'
 import { createAvatarMsgTokens } from './avatar-msg-tokens.ts'
 import { claudingStatus } from './clauding.ts'
@@ -5673,14 +5673,79 @@ function settingsText(): string {
     `🔀 Limit failover — <b>${a.limitFailover === true ? 'on' : 'off'}</b>\n\n` +
     `Tap to change:`
 }
+// The rich (Bot API 10.1) rendering of the same panel: a native two-column table instead of ragged
+// "emoji — value" lines, plus a collapsible the HTML panel had no room for — one line per setting,
+// hidden behind a chevron. Rich messages carry reply_markup, so the keyboard below is unchanged.
+// settingsText() above stays the fallback for any rich send/edit failure (pre-10.1 clients, errors).
+function settingsMarkdown(): string {
+  const a = loadAccess()
+  const rows: Array<[string, string]> = [
+    ['👤 Accounts', String(listAccounts().length)],
+    ['🐙 GitHub', ghSummary()],
+    ['⚡ Batch allow', a.batchAllow !== false ? 'on' : 'off'],
+    ['🚢 Ship buttons', a.shipButtons === true ? 'on' : 'off'],
+    ['🎙️ Voice transcription', transcribeStatus()],
+    ['🔊 Voice replies', a.tts?.mode && a.tts.mode !== 'off' ? `${a.tts.mode} · ${a.tts.engine}` : 'off'],
+    ['💬 Stream', replyMode()],
+    ['📌 Pinned message', a.sessionPin !== false ? 'on' : 'off'],
+    ['🧷 Preferred mode', listAccounts().length > 1 ? 'per account' : defModeLabel(MAIN_ACCOUNT.configDir)],
+    ['🧹 /clear approval', a.confirmReset === false ? 'off' : 'on'],
+    ['🔀 Limit failover', a.limitFailover === true ? 'on' : 'off'],
+  ]
+  const help = [
+    '⚡ <b>Batch allow</b> — 2+ permission prompts in one turn offer “Allow all this turn”.',
+    '🚢 <b>Ship buttons</b> — turns that dirty the git tree get Diff/Commit/Push/PR buttons.',
+    '💬 <b>Stream</b> — how much of the live activity feed reaches the chat.',
+    '📌 <b>Pinned message</b> — the status card pinned to the top of this chat.',
+    '🧷 <b>Preferred mode</b> — the permission mode NEW sessions launch in (/mode is the live dial).',
+    '🧹 <b>/clear approval</b> — /clear and /new ask for a Yes/No tap first.',
+    '🔀 <b>Limit failover</b> — a usage-limited account hands off to the next one.',
+  ].join('<br>')
+  return `## ⚙️ Settings\n\n` +
+    `| Setting | State |\n|---|---|\n` +
+    rows.map(([k, v]) => `| ${k} | **${escapeHtml(v)}** |`).join('\n') + '\n\n' +
+    `<details><summary>What these do</summary>${help}</details>\n\n` +
+    `Tap to change:`
+}
+
+// Every entry point to a settings panel — /settings, the card's ⚙️ button, a toggle flip, a
+// sub-panel and its ‹ Back — routes through here, so the rich rendering and its HTML fallback live
+// in ONE place. `edit` repaints the panel in place (a callback's own message); `send` posts a new
+// one. `html` is the classic panel text, used verbatim whenever the rich send/edit fails.
+async function showRichPanel(ctx: Context, mode: 'send' | 'edit', rich: InputRichMessage, html: string, keyboard: InlineKeyboard): Promise<void> {
+  const chat = String(ctx.chat!.id)
+  const mid = ctx.callbackQuery?.message?.message_id
+  if (mode === 'edit' && mid != null) {
+    try { await editRichMessage(TOKEN!, chat, mid, rich, keyboard); return }
+    catch (e) { process.stderr.write(`daemon: rich panel edit failed, falling back to HTML: ${e}\n`) }
+    await ctx.editMessageText(html, { parse_mode: 'HTML', reply_markup: keyboard }).catch(() => {})
+    return
+  }
+  const thread = ctx.callbackQuery?.message?.message_thread_id ?? ctx.message?.message_thread_id
+  try {
+    // Raw rich sends bypass grammy's transformer, so note the id ourselves — otherwise the live
+    // mirror card doesn't see the panel land below it and never re-anchors.
+    const m = await sendRichMessage(TOKEN!, chat, rich, { messageThreadId: thread, replyMarkup: keyboard })
+    noteMsg(chat, thread, m.message_id)
+    return
+  } catch (e) { process.stderr.write(`daemon: rich panel send failed, falling back to HTML: ${e}\n`) }
+  await ctx.reply(html, { parse_mode: 'HTML', reply_markup: keyboard }).catch(() => {})
+}
+
+// A sub-panel keeps its existing HTML copy: htmlPanelToRich carries it over the rich html carrier
+// (see richmsg.ts for why the line breaks need rewriting), and the same string is the fallback.
+const showHtmlPanel = (ctx: Context, mode: 'send' | 'edit', html: string, keyboard: InlineKeyboard): Promise<void> =>
+  showRichPanel(ctx, mode, htmlPanelToRich(html), html, keyboard)
+
+const showSettings = (ctx: Context, mode: 'send' | 'edit'): Promise<void> =>
+  showRichPanel(ctx, mode, toInputRichMessage(settingsMarkdown()), settingsText(), settingsKeyboard())
+
+// Emoji-only, 4 per row — the emoji are the labels, read off the table rows above them (same order).
 function settingsKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
-    .text('👤 Accounts', 'acct:panel').text('🐙 GitHub', 'gh:panel').row()
-    .text('⚡ Batch allow', 'set:batch').text('🚢 Ship buttons', 'set:ship').row()
-    .text('🎙️ Voice transcription', 'set:voice').text('🔊 Voice replies', 'set:tts').row()
-    .text('💬 Stream', 'set:replymode').text('📌 Pin', 'set:pin').row()
-    .text('🧷 Preferred mode', 'defmode:panel').text('🧹 /clear approval', 'set:confirmreset').row()
-    .text('🔀 Limit failover', 'set:failover')
+    .text('👤', 'acct:panel').text('🐙', 'gh:panel').text('⚡', 'set:batch').text('🚢', 'set:ship').row()
+    .text('🎙️', 'set:voice').text('🔊', 'set:tts').text('💬', 'set:replymode').text('📌', 'set:pin').row()
+    .text('🧷', 'defmode:panel').text('🧹', 'set:confirmreset').text('🔀', 'set:failover')
 }
 
 // 🧷 Preferred-mode sub-panel (settings → Preferred mode): Claude Code's permissions.defaultMode — the
@@ -5699,6 +5764,17 @@ function defaultModeText(): string {
     `${lines.join('\n')}\n\n` +
     `Saved in each account's <code>settings.json</code> (<code>permissions.defaultMode</code>), so it ` +
     `survives updates &amp; restarts. <code>/mode</code> still changes the current session live.`
+}
+// Rich rendering of the same panel: Account | Launches in as a native table, with the settings.json
+// explainer folded into a collapsible. defaultModeText() stays the fallback.
+function defaultModeMarkdown(): string {
+  const rows = listAccounts().map(a =>
+    `| ${a.name === 'main' ? '🏠' : '👤'} ${escapeHtml(a.name)} | ${defModeLabel(a.configDir)} |`)
+  return `## 🧷 Preferred mode\n\nThe permission mode new or relaunched sessions start in.\n\n` +
+    `| Account | Launches in |\n|---|---|\n${rows.join('\n')}\n\n` +
+    `<details><summary>Where this is saved</summary>` +
+    `Each account's <code>settings.json</code> (<code>permissions.defaultMode</code>), so it survives ` +
+    `updates &amp; restarts.<br><code>/mode</code> still changes the current session live.</details>`
 }
 function defaultModeKeyboard(): InlineKeyboard {
   const accts = listAccounts()
@@ -5745,7 +5821,7 @@ function ttsKeyboard(): InlineKeyboard {
 bot.command('settings', async ctx => {
   if (!dmCommandGate(ctx)) return
   void refreshGh()   // warm the 🐙 summary for the next render
-  await ctx.reply(settingsText(), { parse_mode: 'HTML', reply_markup: settingsKeyboard() })
+  await showSettings(ctx, 'send')
 })
 
 // /health — the bridge's own vitals (ROADMAP #14): instance, version, uptime, adopted panes,
@@ -6323,7 +6399,7 @@ bot.command('account', async ctx => {
     return
   }
   if (sub) { await ctx.reply('Usage: <code>/account</code> | <code>/account add &lt;name&gt;</code> | <code>/account remove &lt;name&gt;</code> | <code>/account rename &lt;old&gt; &lt;new&gt;</code>', { parse_mode: 'HTML' }); return }
-  await ctx.reply(await accountsPanelText(), { parse_mode: 'HTML', reply_markup: accountsPanelKeyboard() })
+  await showHtmlPanel(ctx, 'send', await accountsPanelText(), accountsPanelKeyboard())
 })
 
 // The accounts panel — shared by /account and the /settings → 👤 Accounts sub-panel.
@@ -6730,7 +6806,7 @@ bot.on('callback_query:data', async ctx => {
     if (data === 'st:model') await doModelPicker(ctx)
     else if (data === 'st:effort') await doEffortPicker(ctx)
     else if (data === 'st:mode') await doModePicker(ctx)
-    else await ctx.reply(settingsText(), { parse_mode: 'HTML', reply_markup: settingsKeyboard() })
+    else await showSettings(ctx, 'send')
     return
   }
 
@@ -6845,11 +6921,11 @@ bot.on('callback_query:data', async ctx => {
     if (setMatch[1] === 'voice') {
       // Voice sub-panel (backend off/local/groq/openai + the local model picker) — was sent as
       // set:voice but never handled, so the settings button silently did nothing.
-      await ctx.editMessageText(voiceText(), { parse_mode: 'HTML', reply_markup: voiceKeyboard() }).catch(() => {})
+      await showHtmlPanel(ctx, 'edit', voiceText(), voiceKeyboard())
       return
     }
     if (setMatch[1] === 'tts') {
-      await ctx.editMessageText(ttsText(), { parse_mode: 'HTML', reply_markup: ttsKeyboard() }).catch(() => {})
+      await showHtmlPanel(ctx, 'edit', ttsText(), ttsKeyboard())
       return
     }
     const a = loadAccess()
@@ -6876,7 +6952,7 @@ bot.on('callback_query:data', async ctx => {
       a.limitFailover = a.limitFailover !== true            // flip (default off)
       saveAccess(a)
     }
-    await ctx.editMessageText(settingsText(), { parse_mode: 'HTML', reply_markup: settingsKeyboard() }).catch(() => {})
+    await showSettings(ctx, 'edit')
     return
   }
 
@@ -6886,7 +6962,7 @@ bot.on('callback_query:data', async ctx => {
     if (!(await cbAuth(ctx))) return
     if (acctMatch[1] === 'back') {
       await ctx.answerCallbackQuery().catch(() => {})
-      await ctx.editMessageText(settingsText(), { parse_mode: 'HTML', reply_markup: settingsKeyboard() }).catch(() => {})
+      await showSettings(ctx, 'edit')
       return
     }
     if (acctMatch[1] === 'add') {
@@ -6924,7 +7000,7 @@ bot.on('callback_query:data', async ctx => {
     } else {
       await ctx.answerCallbackQuery().catch(() => {})
     }
-    await ctx.editMessageText(await accountsPanelText(), { parse_mode: 'HTML', reply_markup: accountsPanelKeyboard() }).catch(() => {})
+    await showHtmlPanel(ctx, 'edit', await accountsPanelText(), accountsPanelKeyboard())
     return
   }
 
@@ -6934,7 +7010,7 @@ bot.on('callback_query:data', async ctx => {
     if (!(await cbAuth(ctx))) return
     if (ghMatch[1] === 'back') {
       await ctx.answerCallbackQuery().catch(() => {})
-      await ctx.editMessageText(settingsText(), { parse_mode: 'HTML', reply_markup: settingsKeyboard() }).catch(() => {})
+      await showSettings(ctx, 'edit')
       return
     }
     if (ghMatch[1] === 'install') {
@@ -6946,7 +7022,7 @@ bot.on('callback_query:data', async ctx => {
           { parse_mode: 'HTML', reply_markup: new InlineKeyboard().text('🔁 Retry', 'gh:install').text('‹ Back', 'gh:back') }).catch(() => {})
         return
       }
-      await ctx.editMessageText(await ghPanelText(), { parse_mode: 'HTML', reply_markup: ghPanelKeyboard() }).catch(() => {})
+      await showHtmlPanel(ctx, 'edit', await ghPanelText(), ghPanelKeyboard())
       return
     }
     if (ghMatch[1] === 'add') {
@@ -6985,7 +7061,7 @@ bot.on('callback_query:data', async ctx => {
     } else {
       await ctx.answerCallbackQuery().catch(() => {})
     }
-    await ctx.editMessageText(await ghPanelText(), { parse_mode: 'HTML', reply_markup: ghPanelKeyboard() }).catch(() => {})
+    await showHtmlPanel(ctx, 'edit', await ghPanelText(), ghPanelKeyboard())
     return
   }
 
@@ -6996,7 +7072,7 @@ bot.on('callback_query:data', async ctx => {
     if (!(await cbAuth(ctx))) return
     await ctx.answerCallbackQuery().catch(() => {})
     if (ttsMatch[4]) {   // back
-      await ctx.editMessageText(settingsText(), { parse_mode: 'HTML', reply_markup: settingsKeyboard() }).catch(() => {})
+      await showSettings(ctx, 'edit')
       return
     }
     const a = loadAccess()
@@ -7022,7 +7098,7 @@ bot.on('callback_query:data', async ctx => {
         { ...(thread ? { threadId: String(thread) } : {}), forceReply: { placeholder: 'API key' } }).catch(() => null)
       if (sent) replyTargets.set(refKey(sent), { kind: 'ttskey', engine: tts.engine })
     }
-    await ctx.editMessageText(ttsText(), { parse_mode: 'HTML', reply_markup: ttsKeyboard() }).catch(() => {})
+    await showHtmlPanel(ctx, 'edit', ttsText(), ttsKeyboard())
     return
   }
 
@@ -7032,17 +7108,17 @@ bot.on('callback_query:data', async ctx => {
     const choice = voiceMatch[1]
     if (choice === 'back') {
       await ctx.answerCallbackQuery().catch(() => {})
-      await ctx.editMessageText(settingsText(), { parse_mode: 'HTML', reply_markup: settingsKeyboard() }).catch(() => {})
+      await showSettings(ctx, 'edit')
       return
     }
     if (choice === 'local') {   // open the model sub-panel; backend commits when a model is chosen
       await ctx.answerCallbackQuery().catch(() => {})
-      await ctx.editMessageText(voiceModelText(), { parse_mode: 'HTML', reply_markup: voiceModelKeyboard() }).catch(() => {})
+      await showHtmlPanel(ctx, 'edit', voiceModelText(), voiceModelKeyboard())
       return
     }
     if (choice === 'panel') {   // back from the model sub-panel to the backend panel
       await ctx.answerCallbackQuery().catch(() => {})
-      await ctx.editMessageText(voiceText(), { parse_mode: 'HTML', reply_markup: voiceKeyboard() }).catch(() => {})
+      await showHtmlPanel(ctx, 'edit', voiceText(), voiceKeyboard())
       return
     }
     // off / groq / openai — a keyed backend without its key would break voice silently,
@@ -7054,7 +7130,7 @@ bot.on('callback_query:data', async ctx => {
     }
     writeEnvVars({ TELEGRAM_TRANSCRIBE: choice })
     await ctx.answerCallbackQuery().catch(() => {})
-    await ctx.editMessageText(voiceText(), { parse_mode: 'HTML', reply_markup: voiceKeyboard() }).catch(() => {})
+    await showHtmlPanel(ctx, 'edit', voiceText(), voiceKeyboard())
     return
   }
   const voiceModelMatch = /^voicemodel:(tiny|base|small|medium|large-v3|large-v3-turbo)$/.exec(data)
@@ -7074,7 +7150,7 @@ bot.on('callback_query:data', async ctx => {
     // first note is instant. Both run detached so the panel refreshes immediately.
     if (!whisperReady() && !whisperInstalling) void provisionWhisper(noticeChats())
     else if (whisperReady()) void prepullWhisperModel()
-    await ctx.editMessageText(voiceModelText(), { parse_mode: 'HTML', reply_markup: voiceModelKeyboard() }).catch(() => {})
+    await showHtmlPanel(ctx, 'edit', voiceModelText(), voiceModelKeyboard())
     return
   }
 
@@ -7215,10 +7291,9 @@ bot.on('callback_query:data', async ctx => {
   if (data === 'defmode:panel' || data === 'defmode:back') {
     if (!(await cbAuth(ctx))) return
     await ctx.answerCallbackQuery().catch(() => {})
-    const toPanel = data === 'defmode:panel'
-    await ctx.editMessageText(toPanel ? defaultModeText() : settingsText(), {
-      parse_mode: 'HTML', reply_markup: toPanel ? defaultModeKeyboard() : settingsKeyboard(),
-    }).catch(() => {})
+    if (data === 'defmode:panel') {
+      await showRichPanel(ctx, 'edit', toInputRichMessage(defaultModeMarkdown()), defaultModeText(), defaultModeKeyboard())
+    } else await showSettings(ctx, 'edit')
     return
   }
   // 🧷 Preferred-mode pick — persist permissions.defaultMode for the chosen account (launch-time only;
@@ -7232,7 +7307,7 @@ bot.on('callback_query:data', async ctx => {
     try { writeDefaultMode(acct.configDir, mode) }
     catch { await ctx.answerCallbackQuery({ text: 'Could not save.' }).catch(() => {}); return }
     await ctx.answerCallbackQuery({ text: `${acct.name}: ${modeLabel(mode)} on launch` }).catch(() => {})
-    await ctx.editMessageText(defaultModeText(), { parse_mode: 'HTML', reply_markup: defaultModeKeyboard() }).catch(() => {})
+    await showRichPanel(ctx, 'edit', toInputRichMessage(defaultModeMarkdown()), defaultModeText(), defaultModeKeyboard())
     return
   }
 
