@@ -117,7 +117,7 @@ import { synthesize, provisionPiper, piperReady, engineStatus, PIPER_VOICES, DEF
 import { parseDuration, formatDuration, fmtWhen, splitLeadingDuration, nextRecurrence, recurrenceLabel, parseCron, nextCron, type Recurrence } from './time.ts'
 import {
   initScheduler, loadScheduledMsgs, cancelScheduled, addScheduled, scheduledCount,
-  scheduledListText, scheduledCancelKeyboard, scheduleDashboard, MAX_TIMEOUT,
+  scheduledListText, scheduledListMarkdown, scheduledCancelKeyboard, scheduleDashboard, MAX_TIMEOUT,
 } from './scheduler.ts'
 
 // Load .env ourselves. The daemon is (re)launched by the SessionStart hook and the watchdog,
@@ -5712,7 +5712,7 @@ function settingsMarkdown(): string {
 // sub-panel and its ‹ Back — routes through here, so the rich rendering and its HTML fallback live
 // in ONE place. `edit` repaints the panel in place (a callback's own message); `send` posts a new
 // one. `html` is the classic panel text, used verbatim whenever the rich send/edit fails.
-async function showRichPanel(ctx: Context, mode: 'send' | 'edit', rich: InputRichMessage, html: string, keyboard: InlineKeyboard): Promise<void> {
+async function showRichPanel(ctx: Context, mode: 'send' | 'edit', rich: InputRichMessage, html: string, keyboard?: InlineKeyboard): Promise<void> {
   const chat = String(ctx.chat!.id)
   const mid = ctx.callbackQuery?.message?.message_id
   if (mode === 'edit' && mid != null) {
@@ -5846,17 +5846,37 @@ bot.command('health', async ctx => {
     if (wpid && !Number.isNaN(wpid)) { process.kill(wpid, 0); wd = `alive (pid ${wpid})` }
   } catch {}
   lines.push(`🐶 Watchdog: ${wd}`)
+  let crash: string | undefined
   try {
     const tail = readFileSync(DAEMON_LOG_FILE, 'utf8').split('\n').slice(-400)
-    const crash = tail.reverse().find(l => /watchdog: daemon down|FATAL|Uncaught|panic/i.test(l))
+    crash = tail.reverse().find(l => /watchdog: daemon down|FATAL|Uncaught|panic/i.test(l))
     if (crash) lines.push(`💥 Last crash: <code>${escapeHtml(crash.slice(0, 160))}</code>`)
   } catch {}
+  let others: string[] = []
   try {
     const { stdout } = await exec('pgrep', ['-af', 'telegram/[0-9.]+/daemon.ts'], { timeout: 2000 })
-    const others = stdout.trim().split('\n').filter(l => l && !l.startsWith(String(process.pid)))
-    if (others.length) lines.push(`👥 Other bridge daemons: ${others.map(l => `<code>${escapeHtml(l.split(' ')[0])}</code>`).join(' ')}`)
+    others = stdout.trim().split('\n').filter(l => l && !l.startsWith(String(process.pid))).map(l => l.split(' ')[0])
+    if (others.length) lines.push(`👥 Other bridge daemons: ${others.map(p => `<code>${escapeHtml(p)}</code>`).join(' ')}`)
   } catch {}
-  await ctx.reply(lines.join('\n'), { parse_mode: 'HTML' })
+  // Rich: the scalar vitals become a Metric | Value table, and the bits that only matter when
+  // something is wrong (which panes, a crash line, rival daemons) hide behind a collapsible instead
+  // of padding the card on a healthy bridge. `lines` above stays the HTML fallback.
+  const rows: Array<[string, string]> = [
+    ['🩺 Instance', `${escapeHtml(INSTANCE_ID)} · v${escapeHtml(bridgeVersion())}`],
+    ['⏱ Uptime', `${formatDuration(Date.now() - DAEMON_STARTED)} · pid ${process.pid}`],
+    ['🖥 Panes', String(offMcpPanes.size)],
+    ['🗒 Queues', `${laterN} queued · ${scheduledCount()} scheduled · ${revivalQueues.size} reviving`],
+    ['🐶 Watchdog', escapeHtml(wd)],
+  ]
+  const detail = [
+    `<b>Panes</b><br>${paneBits.join('<br>') || 'none'}`,
+    ...(crash ? [`<b>Last crash</b><br><code>${escapeHtml(crash.slice(0, 160))}</code>`] : []),
+    ...(others.length ? [`<b>Other bridge daemons</b><br>${others.map(p => `<code>${escapeHtml(p)}</code>`).join(' ')}`] : []),
+  ].join('<br><br>')
+  const md = `## 🩺 Bridge health\n\n| Metric | Value |\n|---|---|\n` +
+    rows.map(([k, v]) => `| ${k} | ${v} |`).join('\n') +
+    `\n\n<details><summary>Details</summary>${detail}</details>`
+  await showRichPanel(ctx, 'send', toInputRichMessage(md), lines.join('\n'))
 })
 
 // The /voice panel: current state + a toggle button (same pattern as /stream).
@@ -7674,7 +7694,7 @@ bot.on('callback_query:data', async ctx => {
     cancelScheduled(schedCancelMatch[1])
     const existed = scheduledCount() < before
     await ctx.answerCallbackQuery({ text: existed ? 'Cancelled.' : 'Already gone.' }).catch(() => {})
-    if (scheduledCount()) await ctx.editMessageText(scheduledListText(), { parse_mode: 'HTML', reply_markup: buttonsToKb(scheduledCancelKeyboard()) }).catch(() => {})
+    if (scheduledCount()) await showRichPanel(ctx, 'edit', toInputRichMessage(scheduledListMarkdown()), scheduledListText(), buttonsToKb(scheduledCancelKeyboard()))
     else await ctx.editMessageText('📅 No scheduled messages left.').catch(() => {})
     return
   }
@@ -9460,6 +9480,7 @@ loadScheduledReset()
 initScheduler({
   channel,
   loadAccess,
+  showPanel: (ctx, rich, html, keyboard) => showRichPanel(ctx, 'send', rich, html, keyboard),
   injectToPane: (paneId, text) =>
     paneId === focus.activePaneId && focus.paneWatcher
       ? injectPaste(paneId, focus.paneWatcher, text)

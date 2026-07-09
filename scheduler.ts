@@ -11,6 +11,7 @@ import { join } from 'node:path'
 import { STATE_DIR, readJsonFile, writeJsonFile } from './common.ts'
 import { escapeHtml } from './markdown.ts'
 import { paneAlive } from './pane-io.ts'
+import { toInputRichMessage, type InputRichMessage } from './richmsg.ts'
 import { fmtWhen, nextRecurrence, recurrenceLabel } from './time.ts'
 import type { Access, ScheduledMessage } from './types.ts'
 import type { ChannelAdapter, Button } from './channel.ts'
@@ -36,6 +37,10 @@ type SchedulerDeps = {
   // deliver there — cron jobs outlive their sessions. Returns the new pane id, or null when the
   // spawn/delivery failed.
   reviveAndInject: (cwd: string, text: string) => Promise<string | null>
+  // Send a panel as a rich message with the classic HTML string as its fallback. The daemon owns
+  // the bot token and the fallback plumbing, so it injects this rather than scheduler.ts calling
+  // the raw rich API itself.
+  showPanel: (ctx: Context, rich: InputRichMessage, html: string, keyboard: InlineKeyboard) => Promise<void>
 }
 
 let deps: SchedulerDeps
@@ -130,6 +135,19 @@ export function scheduledListText(): string {
   return `📅 <b>Scheduled messages</b>\n${lines.join('\n')}\n\nTap to cancel:`
 }
 
+// Rich rendering of the same list: a native table, so the message no longer has to be truncated to
+// 40 chars to keep the line short — the column wraps instead. A cell can't hold a raw "|" (it would
+// split the column) or a newline (it would end the row), so both are neutralised.
+export const escapeTableCell = (s: string): string => escapeHtml(s).replace(/\|/g, '\\|').replace(/\s*\n\s*/g, ' ')
+export function scheduledListMarkdown(): string {
+  const cell = escapeTableCell
+  const rows = scheduledMsgs.map((m, i) => {
+    const when = m.recur ? `🔁 ${cell(recurrenceLabel(m.recur))} · next ${cell(fmtWhen(m.fireAt))}` : cell(fmtWhen(m.fireAt))
+    return `| ${i + 1} | ${when} | ${cell(m.sessionLabel)} | ${cell(m.text)} |`
+  })
+  return `## 📅 Scheduled messages\n\n| # | When | Session | Message |\n|---|---|---|---|\n${rows.join('\n')}\n\nTap to cancel:`
+}
+
 export function scheduledCancelKeyboard(): Button[][] {
   const rows: Button[][] = []
   let row: Button[] = []
@@ -146,5 +164,5 @@ export async function scheduleDashboard(ctx: Context): Promise<void> {
   }
   const kb = toKb(scheduledCancelKeyboard())
   kb.row().text('➕ Add', 'sched:add')
-  await ctx.reply(scheduledListText(), { parse_mode: 'HTML', reply_markup: kb })
+  await deps.showPanel(ctx, toInputRichMessage(scheduledListMarkdown()), scheduledListText(), kb)
 }
