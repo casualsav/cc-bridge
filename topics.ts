@@ -28,13 +28,14 @@ export type TopicEntry = {
 export type TopicStore = {
   groupChatId: string | null            // the forum supergroup; null = not configured → not in topic mode
   generalSessionId: string | null      // session anchored to General (no topic of its own; outbound goes unthreaded)
+  baseCwd: string | null                // the folder new topics nest under — the General anchor's cwd, remembered so it survives the anchor ending
   topics: Record<string, TopicEntry>    // keyed by sessionId (the @tg_session pane stamp)
   dismissedSessions: Record<string, number>   // sessionId -> dismissedAt: user deleted this session's topic; suppress it (no topic, no outbound) DURABLY until the session's pane is gone. Persisted so a restart can't resurrect a deleted topic; GC'd by reconcileTopics once the session's claude is no longer live.
 }
 
 export function genSessionId(): string { return randomBytes(4).toString('hex') }
 
-let store: TopicStore = { groupChatId: null, generalSessionId: null, topics: {}, dismissedSessions: {} }
+let store: TopicStore = { groupChatId: null, generalSessionId: null, baseCwd: null, topics: {}, dismissedSessions: {} }
 let loaded = false
 let persist = true   // disabled by _resetForTest so unit tests never write to the real STATE_DIR
 
@@ -77,6 +78,7 @@ export function loadTopics(): TopicStore {
     store = {
       groupChatId: typeof raw.groupChatId === 'string' ? raw.groupChatId : null,
       generalSessionId: typeof raw.generalSessionId === 'string' ? raw.generalSessionId : null,
+      baseCwd: typeof raw.baseCwd === 'string' ? raw.baseCwd : null,
       topics,
       dismissedSessions,
     }
@@ -110,6 +112,14 @@ export function setGeneralSession(sessionId: string | null): void {
   ensureLoaded()
   if (store.generalSessionId === sessionId) return
   store.generalSessionId = sessionId
+  save()
+}
+
+export function getBaseCwd(): string | null { ensureLoaded(); return store.baseCwd }
+export function setBaseCwd(cwd: string | null): void {
+  ensureLoaded()
+  if (store.baseCwd === cwd) return
+  store.baseCwd = cwd
   save()
 }
 
@@ -195,7 +205,7 @@ export function listDismissedSessions(): string[] { ensureLoaded(); return Objec
 // Test seam: set the in-memory store directly, mark it loaded, and disable disk persistence so
 // mutators in tests don't write to the real STATE_DIR/topics.json.
 export function _resetForTest(s?: Partial<TopicStore>): void {
-  store = { groupChatId: null, generalSessionId: null, topics: {}, dismissedSessions: {}, ...s }
+  store = { groupChatId: null, generalSessionId: null, baseCwd: null, topics: {}, dismissedSessions: {}, ...s }
   loaded = true
   persist = false
 }

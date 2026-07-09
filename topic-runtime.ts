@@ -11,7 +11,7 @@ import { escapeHtml } from './markdown.ts'
 import { loadAccess } from './access.ts'
 import {
   genSessionId, isTopicMode, getGroupChatId, getTopicBySession, findTopicByCwd, cwdAmbiguous,
-  setTopic, updateTopic, removeTopic, listTopics, getGeneralSession, setGeneralSession,
+  setTopic, updateTopic, removeTopic, listTopics, getGeneralSession, setGeneralSession, setBaseCwd,
   dismissSession, isSessionDismissed, undismissSession, listDismissedSessions,
 } from './topics.ts'
 import { focus, offMcpPanes, sessions } from './state.ts'
@@ -380,8 +380,14 @@ export async function reconcileTopics(panes: string[]): Promise<void> {
   // Same backstop for the General anchor: it has no topic entry, so the loop above never sees it.
   const anchor = getGeneralSession()
   if (anchor) {
-    if (liveSids.has(anchor)) topicMissCounts.delete(anchor)
-    else {
+    if (liveSids.has(anchor)) {
+      topicMissCounts.delete(anchor)
+      // Keep the new-topic base dir in step with the live anchor, so it's already remembered when
+      // the anchor dies — waiting until the next topic is created would be too late to record it.
+      const pane = await paneForSession(anchor)
+      const cwd = pane ? await paneCwd(pane).catch(() => null) : null
+      if (cwd) setBaseCwd(cwd)
+    } else {
       const misses = (topicMissCounts.get(anchor) ?? 0) + 1
       if (misses < 2) topicMissCounts.set(anchor, misses)
       else { topicMissCounts.delete(anchor); await generalAnchorLost(group) }

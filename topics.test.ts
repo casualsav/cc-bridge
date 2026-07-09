@@ -3,7 +3,7 @@ import {
   _resetForTest, isTopicMode, getGroupChatId, setGroupChatId,
   getTopicBySession, getSessionByThread, findTopicByCwd,
   setTopic, updateTopic, removeTopic, listTopics, genSessionId,
-  getGeneralSession, setGeneralSession,
+  getGeneralSession, setGeneralSession, getBaseCwd, setBaseCwd,
   dismissSession, isSessionDismissed, undismissSession, listDismissedSessions,
   type TopicEntry,
 } from './topics.ts'
@@ -106,6 +106,19 @@ test('the General anchor is set, replaced, and cleared', () => {
 test('a seeded store carries its General anchor', () => {
   _resetForTest({ groupChatId: '-100', generalSessionId: 'anch', topics: {} })
   expect(getGeneralSession()).toBe('anch')
+})
+
+test('a fresh store has no base cwd', () => {
+  expect(getBaseCwd()).toBe(null)
+})
+
+test('the base cwd is set, replaced, and cleared', () => {
+  setBaseCwd('/x')
+  expect(getBaseCwd()).toBe('/x')
+  setBaseCwd('/y')
+  expect(getBaseCwd()).toBe('/y')
+  setBaseCwd(null)
+  expect(getBaseCwd()).toBe(null)
 })
 
 test('genSessionId mints distinct ids', () => {

@@ -59,7 +59,7 @@ import {
 import {
   setGroupChatId, getGroupChatId, isTopicMode, loadTopics, genSessionId,
   getSessionByThread, getTopicBySession, setTopic, removeTopic, updateTopic, listTopics,
-  getGeneralSession, setGeneralSession, findTopicByCwd,
+  getGeneralSession, setGeneralSession, findTopicByCwd, getBaseCwd, setBaseCwd,
 } from './topics.ts'
 import {
   initTopicRuntime, sessionForPane, paneForSession, ensureSessionTopic, closeTopicForPane, markTopicDeleted, markTopicClosePending,
@@ -2097,6 +2097,19 @@ async function targetPaneOf(ctx: Context): Promise<{ paneId: string | null; thre
 async function generalAnchorPane(): Promise<string | null> {
   const sid = getGeneralSession()
   return sid ? paneForSession(sid) : null
+}
+
+// Where a new topic's folder is created. The General anchor's cwd is the projects root; remember it
+// so a dead anchor doesn't silently re-root new topics under whatever session happens to be focused.
+async function topicBaseDir(): Promise<string | null> {
+  const pane = await generalAnchorPane()
+  if (pane) {
+    const cwd = await paneCwd(pane).catch(() => null)
+    if (cwd) { setBaseCwd(cwd); return cwd }
+  }
+  const remembered = getBaseCwd()
+  if (remembered && existsSync(remembered)) return remembered
+  return focus.activePaneId ? await paneCwd(focus.activePaneId).catch(() => null) : null
 }
 
 // Resolve the target. On "no session" it replies with the reason (in-thread when applicable) and
@@ -4852,6 +4865,8 @@ bot.command(['bind', 'unbind'], async ctx => {
     const sid = await sessionForPane(focus.activePaneId)
     if (sid && !getTopicBySession(sid)) {
       setGeneralSession(sid)
+      const cwd = await paneCwd(focus.activePaneId).catch(() => null)
+      if (cwd) setBaseCwd(cwd)
       anchorNote = 'Your current session is anchored to this <b>General</b> topic — it stays here. '
     }
   }
@@ -4887,6 +4902,7 @@ async function claimGeneralFor(sid: string): Promise<string> {
   void updateSessionPin()
   const pane = await paneForSession(sid)
   const cwd = pane ? await paneCwd(pane).catch(() => null) : null
+  if (cwd) setBaseCwd(cwd)
   return `📌 <b>Anchored to General:</b> the session${cwd ? ` (<code>${escapeHtml(cwd)}</code>)` : ''} now lives here.`
 }
 
@@ -6631,11 +6647,11 @@ bot.on('message:forum_topic_created', async ctx => {
   if (!thread || getSessionByThread(thread)) return
   const name = ctx.message.forum_topic_created.name
 
-  // New topics land as sibling subfolders under the General (base) session's cwd — deterministic,
-  // regardless of which pane happens to be focused when the topic is created. Only when General has
-  // no live anchored session do we fall back to the focused pane (the pre-anchor behavior).
-  const basePane = (await generalAnchorPane()) ?? focus.activePaneId
-  const base = basePane ? await paneCwd(basePane).catch(() => null) : null
+  // New topics land as sibling subfolders under the General anchor's cwd — remembered across the
+  // anchor's session ending, so a dead anchor doesn't silently re-root new topics under whatever
+  // pane happens to be focused. Only when no anchor has EVER been set do we fall back to the
+  // focused pane (the pre-anchor behavior).
+  const base = await topicBaseDir()
   const dirName = name.trim().toLowerCase().replace(/[\\/\0\s]+/g, '-')   // "My App" → my-app/ (unix-style folder names)
   const dir = base && dirName ? join(base, dirName) : null
   if (dir && base) {
@@ -7549,6 +7565,7 @@ bot.on('callback_query:data', async ctx => {
     await ctx.answerCallbackQuery({ text: 'Starting…' }).catch(() => {})
     const sid = genSessionId()
     setGeneralSession(sid)
+    setBaseCwd(dir)
     const ok = await spawnSession(dir, '', sid)
     if (!ok) setGeneralSession(null)
     await ctx.editMessageText(ok
@@ -8899,7 +8916,7 @@ bot.on('message:text', async ctx => {
           // anchor (from General's no-sessions card): the spawn becomes the General base session.
           const anchor = !!target.anchor && !(await generalAnchorPane())
           const sid = genSessionId()
-          if (anchor) setGeneralSession(sid)
+          if (anchor) { setGeneralSession(sid); setBaseCwd(dir) }
           const ok = await spawnSession(dir, '', sid, await paneAccount(focus.activePaneId))
           if (anchor && !ok) setGeneralSession(null)
           await ctx.reply(ok
