@@ -234,6 +234,12 @@ export async function outboundTargetsFor(paneId: string | null): Promise<Array<{
   if (!sid || !cwd) return [{ chat: group }]
   if (sid === getGeneralSession()) return [{ chat: group }]   // anchored to General — unthreaded, never grows a topic
   if (isSessionDismissed(sid)) return []   // user deleted this session's topic — drop its outbound entirely (no topic to route to, and it must NOT fall through to General's unthreaded chat)
+  // A dead pane can still resolve a session here: the sticky @tg_session stamp outlives claude, and
+  // account-level pings (usage/context warns) route via focus.activePaneId, which may be such a pane
+  // — after a topic delete its dismissal is GC'd once claude is gone, so each warn re-minted the
+  // deleted topic ("ghost topic reappears every usage warn"). Never CREATE a topic for a pane with
+  // no live claude; an existing topic still routes (trailing teardown output keeps its thread).
+  if (!getTopicBySession(sid) && !(await paneClaudeLive(paneId!))) return [{ chat: group }]
   return [{ chat: group, thread: await ensureTopicFor(group, sid, cwd) }]
 }
 
