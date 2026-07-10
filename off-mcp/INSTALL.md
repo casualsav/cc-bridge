@@ -505,6 +505,18 @@ returns any logged-in account's token regardless of active). No switching, concu
    ```
    Revert anytime: re-add the gh helper line (`!$(command -v gh) auth git-credential`) and unset `useHttpPath`.
 
+## 8. (Optional) Boot-time keepalive (systemd, headless boxes)
+The daemon and its watchdog cross-guard each other, and the SessionStart hook revives both — but
+nothing fires the hook after a reboot until a Claude session opens, and if daemon AND watchdog die
+together (OOM sweep, stray pkill) the bridge stays down until the next session. On a headless box
+that gap means silently lost messages. Fix with a systemd user unit that re-runs the idempotent
+`ensure-daemon` every 60s:
+```bash
+bash off-mcp/systemd-keepalive.sh   # run from the repo checkout
+```
+It writes and enables `claude-tg-keepalive.service`, and tells you if the user needs
+`loginctl enable-linger` for start-at-boot without a login. Covers every configured instance.
+
 ## What you get, from Telegram
 - Two-way chat with the session; send/receive files; inbound voice notes transcribed.
 - **Permission prompts** relayed with tap-to-approve buttons.
