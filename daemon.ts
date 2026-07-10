@@ -1415,6 +1415,11 @@ async function auxRelayTick(): Promise<void> {
           if (!r.uuid || r.uuid === (lastRelayedByFile.get(file) ?? '')) continue
           lastRelayedByFile.set(file, r.uuid)     // advance before the await so a fast tick can't double-send
           clearThinkingPending(pane)   // a real reply relayed → drop the thinking-pending crutch so the card caps/deletes
+          // Suppress Claude's own usage-limit banner echo, like the focused loop: a limited session
+          // writes a synthetic "You've hit your session limit · resets …" assistant message for EVERY
+          // injection attempted while frozen — relaying each spammed the topic. The ⛔ handler already
+          // sends one deduped notice.
+          if (r.text.length < 200 && /\b(hit your|used \d+% of your) [\w-]+ limit\b/i.test(r.text)) continue
           const targets = await outboundTargetsFor(pane)
           for (const t of targets) await deliverRelayReply(pane, t, r.text)   // self-heals a deleted topic (recreate + resend)
         }
@@ -2947,7 +2952,7 @@ async function handleModelUnavailable(text: string, paneId: string | null = focu
 // first detection, animate a progress bar while the spinner persists, then resolve it to a ✅
 // message when the spinner is gone. Compaction exposes no percentage, so the bar is a moving
 // indicator (cycling fill), not a real fraction. Keyed by pane so each session gets its own card.
-type CompactWatch = { chat: string; thread?: number; msgId: number; startedAt: number; lastFilled: number; timer: ReturnType<typeof setTimeout> }
+type CompactWatch = { chat: string; thread?: number; msgId: number; startedAt: number; lastFilled: number; notCompacting: number; timer: ReturnType<typeof setTimeout> }
 const compactWatches = new Map<string, CompactWatch>()
 
 // The card's progress bar in Claude Code's own ▰/▱ style (matching the bar it draws on the pane).
@@ -2988,7 +2993,7 @@ const COMPACT_TICK_MS = 3000
 // the same compaction never post a second card.
 async function startCompactionWatch(pane: string, initialText = ''): Promise<void> {
   if (compactWatches.has(pane)) return
-  const slot: CompactWatch = { chat: '', thread: undefined, msgId: 0, startedAt: Date.now(), lastFilled: 0, timer: setTimeout(() => {}, 0) }
+  const slot: CompactWatch = { chat: '', thread: undefined, msgId: 0, startedAt: Date.now(), lastFilled: 0, notCompacting: 0, timer: setTimeout(() => {}, 0) }
   clearTimeout(slot.timer)
   compactWatches.set(pane, slot)   // reserve the slot before any await so a concurrent frame can't duplicate it
   const [target] = await outboundTargetsFor(pane)
@@ -3010,6 +3015,7 @@ async function startCompactionWatch(pane: string, initialText = ''): Promise<voi
     const cap = await capturePane(pane).catch(() => '')
     const still = detectCompacting(cap)
     if (still && elapsed < 5 * 60_000) {
+      w.notCompacting = 0
       // Register a new frame ONLY when compaction crosses a 5% cell boundary (never on a null reading)
       // — so the card reports ≤20 times across the whole run, not once per 3s tick. capturePane is
       // local; the scheduler paces/coalesces the Telegram edit and skips flooded chats.
@@ -3020,6 +3026,10 @@ async function startCompactionWatch(pane: string, initialText = ''): Promise<voi
         scheduleEdit({ chat: w.chat, mid: w.msgId, thread: w.thread, source: 'compact',
           render: () => `🗜️ Compacting conversation…\n<code>${compactProgress(pct)}</code>` })
       }
+      w.timer = setTimeout(() => void tick(), COMPACT_TICK_MS)
+    } else if (!still && elapsed < 5 * 60_000 && ++w.notCompacting < 2) {
+      // A single not-compacting read can be a mid-redraw capture — confirm on the next tick
+      // before declaring done, else a false ✅ ends the watch and the next frame opens a new card.
       w.timer = setTimeout(() => void tick(), COMPACT_TICK_MS)
     } else if (cap === '') {
       // An empty capture means the pane is gone (dead session), NOT a finished compaction — the

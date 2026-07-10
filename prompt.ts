@@ -619,15 +619,20 @@ export function detectModelUnavailable(paneText: string): string | null {
 // tail. The bar CAN show up in content, though — this repo's OWN source (prompt.ts / prompt.test.ts /
 // daemon.ts) documents the exact "Compacting conversation… ▰▱…" footer, and a session that merely
 // DISPLAYED that code false-fired a "✅ Compacted" card in another topic. So we also require the footer's
-// SHAPE: the phrase line must be led by Claude Code's "· " middot bullet (a "//" comment or "'" quote
-// prefix is code, not the live footer), with the ▰/▱ bar as the immediately-following non-blank line —
-// exactly how CC renders it. A finished compaction shows "Compacted" (no bar), so the card self-resolves.
+// SHAPE: the phrase line must be led by Claude Code's animated spinner glyph (a "//" comment or "'"
+// quote prefix is code, not the live footer), with the ▰/▱ bar as the immediately-following non-blank
+// line — exactly how CC renders it. The lead glyph is NOT a stable "·" bullet: it's the working
+// spinner cycling through ["·","✢","*","✶","✻","✽"] ("✳" on some terminals — sets extracted from the
+// CC binary). Matching only "·" meant detection flickered with the spinner phase, so a compaction
+// watch tick could land on an off-phase frame, read "done", post a false "✅ Compacted", and the next
+// on-phase frame opened a fresh card — one /compact spammed a dozen ✅ cards into the topic.
+// A finished compaction shows "Compacted" (no bar), so the card self-resolves.
 const FOOTER_TAIL = 18
 export function detectCompacting(paneText: string): boolean {
   const tail = stripAnsi(paneText).split('\n').filter(l => l.trim()).slice(-FOOTER_TAIL)
   for (let i = 0; i < tail.length - 1; i++) {
-    if (!/^\s*·\s+compacting conversation/i.test(tail[i])) continue   // the genuine footer bullet, not code/prose that quotes the phrase
-    if (/[▰▱]{3,}/.test(tail[i + 1])) return true                      // ▰/▱ progress bar directly below the phrase
+    if (!/^\s*[·✢✳✶✻✽*]\s+compacting conversation/i.test(tail[i])) continue   // the genuine footer spinner, not code/prose that quotes the phrase
+    if (/[▰▱]{3,}/.test(tail[i + 1])) return true                              // ▰/▱ progress bar directly below the phrase
   }
   return false
 }

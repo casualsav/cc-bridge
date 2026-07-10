@@ -34,6 +34,14 @@ test('detectCompacting fires on Claude Code\'s real /compact footer (phrase + �
   expect(detectCompacting(live)).toBe(true)
   expect(compactPercent(live)).toBe(10)             // read off the ▰/▱ bar line, not the statusline
 
+  // REGRESSION (the "12× ✅ Compacted · 5s" spam): the lead glyph is CC's ANIMATED spinner —
+  // ["·","✢","*","✶","✻","✽"] (or "✳") — not a stable "·". Matching only "·" made detection flicker
+  // with the spinner phase: an off-phase watch tick read "done", posted a false ✅, and the next
+  // on-phase frame opened a fresh card. Every spinner phase must detect.
+  for (const glyph of ['✢', '✳', '✶', '✻', '✽', '*']) {
+    expect(detectCompacting(live.replace('· Compacting', `${glyph} Compacting`))).toBe(true)
+  }
+
   // Prose that merely mentions compaction (the bare word) with NO ▰/▱ bar — must NOT fire. Matching
   // the bare word was the loop bug (our own chat, rendered on the dev pane, re-posted a card every
   // frame). The statusline's ░/█ ctx gauge is NOT the ▰/▱ bar, so it can't stand in for one.
