@@ -2515,6 +2515,38 @@ async function attemptLimitFailover(hitAccount: Account, origin: string | null):
   }
 }
 
+// Every chat/topic that should see the account's ⛔ hit card: the origin session's topic (or the
+// DM/General fallback) PLUS the topic of every other live session on the account — the limit
+// freezes them all, and the single-notice routing predates forum topics, so a user working in a
+// non-General topic never saw the hit or its Cancel button. Deduped by chat+thread (DM mode
+// collapses to the allowlist either way).
+async function limitHitTargets(origin: string | null, account: Account): Promise<Array<{ chat: string; thread?: number }>> {
+  const out = new Map<string, { chat: string; thread?: number }>()
+  const add = (ts: Array<{ chat: string; thread?: number }>) => { for (const t of ts) out.set(`${t.chat}#${t.thread ?? ''}`, t) }
+  add(await outboundTargetsFor(origin))
+  if (isTopicMode()) {
+    for (const pane of [...offMcpPanes]) {
+      if (pane === origin) continue
+      try { if ((await paneAccount(pane)).name === account.name) add(await outboundTargetsFor(pane)) } catch { /* pane vanished mid-loop */ }
+    }
+  }
+  return [...out.values()]
+}
+
+// True when the session behind `pane` was ACTIVELY WORKING when the account froze: Claude Code ends
+// such a turn with a synthetic "You've hit your … limit · resets …" assistant message, which then sits
+// as the transcript's last final reply. Idle sessions never get one — and must never receive a blind
+// "continue", which resumes whatever stale work the session last had (the pane-scrape gate this
+// replaces missed interrupted panes whose banner had redrawn away, and the focused-pane path had no
+// gate at all, so the continue landed on the healthy General session instead).
+async function paneInterruptedByLimit(pane: string): Promise<boolean> {
+  try {
+    const file = await transcriptForPane(pane, await paneCwd(pane).catch(() => null))
+    const last = file ? latestFinalReply(file) : null
+    return !!last && last.text.length < 200 && /\b(hit your|used 100% of your) [\w-]+ limit\b/i.test(last.text)
+  } catch { return false }
+}
+
 function actOnLimitHit(fireAt: number, type: string, banner?: string, origin: string | null = focus.activePaneId, account: Account = MAIN_ACCOUNT): void {
   const key = `hit:${Math.round(fireAt / 60_000)}`
   const prev = usageHitState.get(account.name)
@@ -2524,14 +2556,14 @@ function actOnLimitHit(fireAt: number, type: string, banner?: string, origin: st
   const chats = noticeChats()
   if (chats.length === 0) return
   const who = account.name === 'main' ? '' : ` (<b>${escapeHtml(account.name)}</b> account)`
-  const note = `\n\n⏰ Resets in ${formatDuration(Math.max(0, fireAt - Date.now()))}.\n▶️ I'll continue automatically when it resets — tap below if you'd rather I didn't.`
+  const note = `\n\n⏰ Resets in ${formatDuration(Math.max(0, fireAt - Date.now()))}.\n▶️ Sessions that were mid-task will continue automatically when it resets — tap below if you'd rather they didn't.`
   const head = banner ? escapeHtml(banner) : `Out of your ${escapeHtml(type)} limit.`
   const kb = new InlineKeyboard().text('✖️ Cancel auto-continue', `usage:disarm:${account.name}`)
   // Relay the hit + arm the auto-continue at the reset instant (the pre-failover behavior).
   const fireArmed = () => {
-    // Route the immediate banner to the session that hit the limit (its topic in forum mode).
+    // Route the banner to EVERY topic on the account (the limit froze them all), not just the origin's.
     void (async () => {
-      for (const { chat, thread } of await outboundTargetsFor(origin)) {
+      for (const { chat, thread } of await limitHitTargets(origin, account)) {
         await channel.sendText(String(chat), `⛔ <b>Claude hit the usage limit${who ? '</b>' + who + '<b>' : ''}.</b>\n${head}${note}`, { buttons: kbToButtons(kb), ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
       }
     })()
@@ -5398,18 +5430,20 @@ function clearScheduledReset(account: string): void {
 async function fireResetNotification(account: string, chats: string[], attempt = 0, auto = false): Promise<void> {
   const who = account === 'main' ? '' : ` (${account})`
   // Account-wide limits freeze EVERY session of that account, not just the focused one. In topic
-  // mode, also continue each non-focused pane OF THE ACCOUNT that's actually showing the frozen
-  // banner (gated on detectLimited — blind injection would type "continue" into healthy
-  // sessions), reporting into its own topic. First pass only: the retry attempts below re-drive
-  // the focused pane.
+  // mode, also continue each non-focused pane OF THE ACCOUNT that was actively working when the
+  // freeze hit (gated on paneInterruptedByLimit — blind injection would type "continue" into
+  // healthy sessions), reporting into its own topic. First pass only: the retry attempts below
+  // re-drive the focused pane.
   if (attempt === 0 && auto && isTopicMode()) {
     void continueAuxLimitedPanes(account)
   }
   // Auto-continue (armed per hit via the ⛔ message's button): type "continue" into the focused
-  // session — but only when it actually runs on the limited account. Falls back to the manual
-  // Continue button when unarmed or no live session on the account.
+  // session — but only when it runs on the limited account AND was itself interrupted mid-task.
+  // Continuing a healthy focused session resumed stale work (the General-topic pickup bug).
+  // Falls back to the manual Continue button when unarmed or no live session on the account.
   const focusedMatches = focus.activePaneId && focus.paneWatcher
     && (await paneAccount(focus.activePaneId)).name === account
+    && (attempt > 0 || await paneInterruptedByLimit(focus.activePaneId))   // retries only exist after an attempt-0 inject — don't re-gate on a tail the inject already changed
   if (auto && focusedMatches) {
     const msg = attempt === 0
       ? `🕛 Usage limit reset${who} — ▶️ auto-continuing…`
@@ -5424,22 +5458,31 @@ async function fireResetNotification(account: string, chats: string[], attempt =
     return
   }
   clearScheduledReset(account)
+  if (auto) {
+    // Armed, but the focused session wasn't mid-task at the freeze — a blind "continue" (or a
+    // Continue button aimed at it) would resume stale work. Any interrupted sessions were already
+    // continued above, each into its own topic; just close out the reset here.
+    for (const chat_id of chats) void channel.sendText(chat_id, `🕛 Usage limit reset${who}.`, { plain: true }).catch(() => {})
+    return
+  }
   const keyboard = new InlineKeyboard().text('▶️ Continue', 'usage:continue')
   for (const chat_id of chats) {
     void channel.sendText(chat_id, `🕛 Usage limit reset${who} — continue?`, { plain: true, buttons: kbToButtons(keyboard) }).catch(() => {})   // plain send with unescaped account name in `who`
   }
 }
 
-// Continue every non-focused off-MCP pane OF THIS ACCOUNT frozen at the limit, each reporting to
-// its own topic. One delayed re-check per pane; if still frozen, leave a manual Continue button in
-// its topic (the persistent multi-attempt retry track belongs to the focused session above).
+// Continue every non-focused off-MCP pane OF THIS ACCOUNT that was actively working when the
+// freeze hit, each reporting to its own topic. Gated on the transcript tail (paneInterruptedByLimit),
+// not the pane scrape: an interrupted pane's banner can redraw away long before the reset, which
+// left those sessions parked while only General got a continue. One delayed re-check per pane; if
+// still frozen, leave a manual Continue button in its topic (the persistent multi-attempt retry
+// track belongs to the focused session above).
 async function continueAuxLimitedPanes(account: string): Promise<void> {
   for (const pane of [...offMcpPanes]) {
     if (pane === focus.activePaneId) continue
     try {
       if ((await paneAccount(pane)).name !== account) continue   // another account — not limited by this reset
-      const cap = await capturePane(pane).catch(() => '')
-      if (!cap || !detectLimited(cap)) continue
+      if (!(await paneInterruptedByLimit(pane))) continue        // idle at the freeze — a "continue" would resume stale work
       const ok = await pasteToPane(pane, 'continue')
       const note = ok
         ? '🕛 Usage limit reset — ▶️ auto-continuing…'
