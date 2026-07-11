@@ -102,7 +102,10 @@ type PluginCfg = {
 // daemon AND ctl import graphs (`bun … closure`). Keep in sync if the imports change — the
 // `bun build <daemon>` cache gate below fails the deploy if a listed module is missing or an
 // unlisted one got imported.
-const CORE = ['channel.ts', 'common.ts', 'channel-ctl.ts', 'pane-io.ts', 'proc.ts', 'prompt.ts', 'transcript.ts']
+const CORE = [
+  'channel.ts', 'common.ts', 'channel-ctl.ts', 'pane-io.ts', 'proc.ts', 'prompt.ts',
+  'transcript.ts', 'codex-transcript.ts', 'agent-transcript.ts',
+]
 const SLACK_ROOT_FILES = [...CORE,
   'slack-adapter.ts', 'slack-render.ts', 'slack-daemon.ts', 'slack-paths.ts', 'slk-ctl.ts', 'ensure-slack-daemon.ts']
 const DISCORD_ROOT_FILES = [...CORE,

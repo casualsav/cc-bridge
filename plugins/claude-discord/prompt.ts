@@ -208,6 +208,13 @@ export function isSubmitScreen(paneText: string): boolean {
 const FEEDBACK_SURVEY = /how is claude doing this session/i
 const QUEUED_MESSAGES = /to edit queued message/i
 
+// Is a typed command sitting queued (not yet executed) because the session is mid-turn? A reset
+// command injected while queued does NOT run — it'll fire only once the current turn ends, which
+// callers must not confuse with "already cleared".
+export function hasQueuedMessages(paneText: string): boolean {
+  return paneLines(paneText).some(l => QUEUED_MESSAGES.test(l))
+}
+
 // Is the footer at `footerIdx` the LIVE prompt's footer (≤1 line of real content below), not a
 // scrolled-up already-answered one? Only "chrome" is allowed beneath a live prompt: the persistent
 // todo panel (renders DIRECTLY below an active prompt), the statusline, box borders, mode/approve hints
@@ -235,6 +242,35 @@ export function detectUserPrompt(paneText: string): PromptInfo | null {
   // Bail on the two working-state screens that masquerade as menus (see above). Anchored on
   // unmistakable phrases, so this can't suppress a genuine question.
   if (lines.some(l => FEEDBACK_SURVEY.test(l) || QUEUED_MESSAGES.test(l))) return null
+
+  // "Change effort level?" confirm dialog (/effort mid-conversation): a real decision (switch now
+  // vs go back) worth relaying, but it renders with a plain confirm footer ("Enter to confirm · Esc
+  // to cancel"), not the select-menu wording SELECT_HINT anchors on — so without this special case
+  // it falls through to the generic stuck-screen card instead of tappable buttons. Narrowly anchored
+  // on the exact question wording (not "Are you sure?" et al) so ordinary confirm dialogs stay
+  // excluded, matching this file's deliberate policy of never relaying bare Yes/No confirms.
+  const effortQIdx = lines.findIndex(l => /^\s*change effort level\?\s*$/i.test(l))
+  if (effortQIdx !== -1) {
+    // The options sit a few lines below the question, past the explanatory body — scan forward,
+    // bounded, for the first numbered line rather than assuming a fixed gap.
+    let i = effortQIdx + 1
+    while (i < lines.length && i - effortQIdx <= 10 && !NUMBERED_RE.test(lines[i])) i++
+    const optStart = i
+    while (i < lines.length && NUMBERED_RE.test(lines[i])) i++
+    const region = lines.slice(optStart, i)
+    const parsed = optStart < lines.length ? parseOptions(region, NUMBERED_RE) : null
+    if (parsed && region.some(l => /❯/.test(l))) {
+      // Only chrome/blank/the confirm footer itself may follow the options — anything else means
+      // this is a scrolled-up (already-answered) copy, not the live dialog. The persistent todo
+      // panel is live chrome too (same rule as footerIsLive): from its header on, everything below
+      // is the panel, so stop scanning there instead of counting task rows as "new content".
+      let below = lines.slice(i)
+      const todoIdx = below.findIndex(l => TODO_PANEL_HEADER.test(l))
+      if (todoIdx !== -1) below = below.slice(0, todoIdx)
+      const belowLive = below.every(l => !l.trim() || BELOW_CHROME.test(l) || /enter to confirm/i.test(l))
+      if (belowLive) return { question: 'Change effort level?', options: parsed, multiSelect: false, tabbed: false, freeText: false, chat: false }
+    }
+  }
 
   // Find the live select-menu footer: the lowest line carrying the hint, which
   // must sit at the bottom of the pane. A footer with more than one non-blank
@@ -583,15 +619,20 @@ export function detectModelUnavailable(paneText: string): string | null {
 // tail. The bar CAN show up in content, though — this repo's OWN source (prompt.ts / prompt.test.ts /
 // daemon.ts) documents the exact "Compacting conversation… ▰▱…" footer, and a session that merely
 // DISPLAYED that code false-fired a "✅ Compacted" card in another topic. So we also require the footer's
-// SHAPE: the phrase line must be led by Claude Code's "· " middot bullet (a "//" comment or "'" quote
-// prefix is code, not the live footer), with the ▰/▱ bar as the immediately-following non-blank line —
-// exactly how CC renders it. A finished compaction shows "Compacted" (no bar), so the card self-resolves.
+// SHAPE: the phrase line must be led by Claude Code's animated spinner glyph (a "//" comment or "'"
+// quote prefix is code, not the live footer), with the ▰/▱ bar as the immediately-following non-blank
+// line — exactly how CC renders it. The lead glyph is NOT a stable "·" bullet: it's the working
+// spinner cycling through ["·","✢","*","✶","✻","✽"] ("✳" on some terminals — sets extracted from the
+// CC binary). Matching only "·" meant detection flickered with the spinner phase, so a compaction
+// watch tick could land on an off-phase frame, read "done", post a false "✅ Compacted", and the next
+// on-phase frame opened a fresh card — one /compact spammed a dozen ✅ cards into the topic.
+// A finished compaction shows "Compacted" (no bar), so the card self-resolves.
 const FOOTER_TAIL = 18
 export function detectCompacting(paneText: string): boolean {
   const tail = stripAnsi(paneText).split('\n').filter(l => l.trim()).slice(-FOOTER_TAIL)
   for (let i = 0; i < tail.length - 1; i++) {
-    if (!/^\s*·\s+compacting conversation/i.test(tail[i])) continue   // the genuine footer bullet, not code/prose that quotes the phrase
-    if (/[▰▱]{3,}/.test(tail[i + 1])) return true                      // ▰/▱ progress bar directly below the phrase
+    if (!/^\s*[·✢✳✶✻✽*]\s+compacting conversation/i.test(tail[i])) continue   // the genuine footer spinner, not code/prose that quotes the phrase
+    if (/[▰▱]{3,}/.test(tail[i + 1])) return true                              // ▰/▱ progress bar directly below the phrase
   }
   return false
 }
@@ -616,17 +657,32 @@ export function compactPercent(paneText: string): number | null {
 export function onNormalPrompt(paneText: string): boolean {
   const lines = paneLines(paneText)
   const tail = lines.slice(-8).join('\n').toLowerCase()
-  if (/shift\+tab to cycle|\? for shortcuts|esc to interrupt/.test(tail)) return true
+  // "! for shell mode" replaces the usual hints while bash mode is armed — still the normal prompt
+  // (without it, a pre-typed `!` command idles into a stuck-screen false fire: the `!` prompt row
+  // fails the ❯ box check below and the reply's ● bullets then parse as ink options).
+  if (/shift\+tab to cycle|\? for shortcuts|esc to interrupt|! for shell mode/.test(tail)) return true
   // The footer hint rotates with CC version/state ("← for agents", "@ for file paths", …), so all
   // of the phrases above can be absent at a perfectly normal prompt (this bounced /mode with a
   // false "another screen"). Accept the input box itself as proof: a "❯" prompt row directly
-  // between two box-border rows. Menus and pickers render "❯" as the cursor on an option row
-  // inside a list — question above, sibling options below — never bordered on both sides.
-  const t = lines.slice(-12)
+  // between two box-border rows (or "!" — bash mode swaps the prompt char). Menus and pickers
+  // render "❯" as the cursor on an option row inside a list — question above, sibling options
+  // below — never bordered on both sides. The window must reach past everything CC stacks BELOW
+  // the input box: statusline (4 lines) + the background-agents HUD ("● main" + one row per
+  // agent) — 4 running agents pushed the ❯ box out of a 12-line window and false-fired the
+  // unrecognised-screen guard. 30 covers ~20 agents; the bordered-❯ shape is specific enough
+  // that the wider scan can't match a menu.
+  const t = lines.slice(-30)
   for (let i = 1; i + 1 < t.length; i++) {
-    if (/^\s*❯/.test(t[i]) && /^\s*[─━╭╰└┌├╮╯|]/.test(t[i - 1]) && /^\s*[─━╭╰└┌├╮╯|]/.test(t[i + 1])) return true
+    if (/^\s*[❯!]/.test(t[i]) && /^\s*[─━╭╰└┌├╮╯|]/.test(t[i - 1]) && /^\s*[─━╭╰└┌├╮╯|]/.test(t[i + 1])) return true
   }
   return false
+}
+
+// Claude Code's bash-mode input box is armed: the footer swaps its hints for "! for shell mode"
+// while a `!` command sits in the box. Injecting ANYTHING into this state concatenates into the
+// pending bash line, so relays must refuse (daemon-side guard) until it's submitted or discarded.
+export function bashModeArmed(paneText: string): boolean {
+  return /!\s+for shell mode/i.test(paneLines(paneText).slice(-4).join('\n'))
 }
 
 // True while Claude Code is mid-turn. The TUI shows a spinner + "esc to interrupt" footer while
@@ -634,11 +690,14 @@ export function onNormalPrompt(paneText: string): boolean {
 // intentionally broad — detection drives the typing indicator (self-correcting from pane state) and
 // gates the stuck-screen watchdog. (Moved from daemon.ts so the stuck detector can share it.)
 export function detectWorking(paneText: string): boolean {
-  const footer = paneLines(paneText).slice(-8).join('\n')
-  if (/esc to interrupt/i.test(footer)) return true
-  // Spinner glyph followed by an elapsed timer: "(12s", "(3m 56s", "(1h 2m" — any h/m/s unit.
-  if (/[✢✳✶✻✽✺✷✸✹·●◐◓◑◒][^\n]*\(\d+\s*[hms]/.test(footer)) return true
-  return false
+  // 16 lines: a multi-line statusline + input box + hint rows can push the live spinner line
+  // ~12 lines above the pane bottom in the worst observed layout, past what an 8-line tail covers.
+  const tail = paneLines(paneText).slice(-16)
+  if (/esc to interrupt/i.test(tail.join('\n'))) return true
+  // Live spinner status line: glyph, verb, then an elapsed timer — "(12s", "(3m 56s", "(1h 2m" — any
+  // h/m/s unit. Anchored to line start (≤2 leading spaces) so quoted spinner text echoed elsewhere in
+  // the pane — tool-result "  ⎿  " lines, grep's "NN:" prefixes — can't false-positive.
+  return tail.some(l => /^\s{0,2}[✢✳✶✻✽✺✷✸✹·●◐◓◑◒][^\n]*?\(\d+\s*[hms]/.test(l))
 }
 
 // ---- stuck-screen watchdog (party-bus): a backstop for a pane wedged at a prompt no detector parses ----

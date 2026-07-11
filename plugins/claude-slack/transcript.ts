@@ -272,6 +272,25 @@ export function finalRepliesAfter(file: string, afterUuid: string): { uuid: stri
   return out
 }
 
+// Bash-mode (`!` prefix) result: the transcript records the run as a user entry
+// "<bash-stdout>…</bash-stdout><bash-stderr>…</bash-stderr>" once the command exits.
+// Returns the latest such entry at/after sinceMs, or null while still running.
+export function bashResultAfter(file: string, sinceMs: number): { stdout: string; stderr: string } | null {
+  const entries = readEntries(file)
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i]
+    if (e.type !== 'user') continue
+    const content = e.message?.content
+    if (typeof content !== 'string' || !content.startsWith('<bash-stdout>')) continue
+    const ts = e.timestamp ? Date.parse(e.timestamp) : NaN
+    if (Number.isNaN(ts) || ts < sinceMs) continue
+    const m = content.match(/^<bash-stdout>([\s\S]*)<\/bash-stdout><bash-stderr>([\s\S]*)<\/bash-stderr>$/)
+    if (m) return { stdout: m[1], stderr: m[2] }
+    return { stdout: content, stderr: '' }   // format drift — surface the raw entry rather than drop it
+  }
+  return null
+}
+
 // The uuid of the entry anchoring the current turn (the last REAL user prompt). The mirror card
 // persists this as the open card's turn identity, so a daemon restart can tell "same turn —
 // resume editing the existing card" from "new turn — cap the orphan and open fresh".
