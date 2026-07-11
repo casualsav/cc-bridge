@@ -61,7 +61,7 @@ const RESULT_GLYPH = /^[⎿⏺●○◉└├▪▸•·◦]/
 // is a real single-select whose footer carries NONE of that wording — it reads
 // "shift+tab to approve with this feedback" (and a "ctrl+g to edit … ~/.claude/plans"
 // line below), so without this anchor it never relays and the user hangs on it.
-const SELECT_HINT = /enter to select|↑\/↓|\bto navigate\b|shift\+tab to approve/i
+const SELECT_HINT = /enter to select|↑\/↓|\bto navigate\b|shift\+tab to approve|press enter to confirm or esc to go back/i
 // Footer under a multi-select prompt: options are toggled with Space, so the hint
 // reads "Space to select · …". The Space-toggle wording is what distinguishes a
 // real multi-select from a confirm dialog's "Enter to confirm".
@@ -124,7 +124,7 @@ const INDENTED = /^\s*│?\s{2,}\S/
 
 // Numbered option: "1. opt" / "2) opt", tolerating the box border and cursor that
 // frame a real prompt ("│ ❯ 1. opt │"). The primary AskUserQuestion shape.
-const NUMBERED_RE = /^\s*(?:│\s*)?(?:[❯►▶]\s*)?(\d+)[.)]\s+(.+)$/
+const NUMBERED_RE = /^\s*(?:│\s*)?(?:[❯›►▶]\s*)?(\d+)[.)]\s+(.+)$/
 // Ink / inquirer ❯ ● ○ style, plus checkbox glyphs for multi-select — the marker
 // is itself the option anchor. Fallback for menus that don't number their options.
 const INK_RE = /^\s*(?:│\s*)?[❯►●◉☑▣◼✅]\s+(.+)$|^\s*(?:│\s*)?[○◯☐▢◻⬜]\s+(.+)$/
@@ -170,7 +170,12 @@ function parseOptions(region: string[], re: RegExp): PromptOption[] | null {
   for (const line of region) {
     const m = line.match(re)
     if (m) {
-      options.push({ label: (m[2] ?? m[1]).replace(PREVIEW_COL, '').replace(/\s*│\s*$/, '').trim().replace(LEADING_BOX, '').trim() })
+      const raw = (m[2] ?? m[1]).replace(PREVIEW_COL, '').replace(/\s*│\s*$/, '').trim()
+      const [label, ...inlineDescription] = raw.split(/\s{4,}/)
+      options.push({
+        label: label.replace(LEADING_BOX, '').trim(),
+        ...(inlineDescription.length ? { description: inlineDescription.join(' ').trim() } : {}),
+      })
     } else if (options.length > 0) {
       if (line.trim() === '') continue          // blank gap between options
       if (BOXY_LINE.test(line)) continue        // divider / border between options
@@ -675,6 +680,12 @@ export function onNormalPrompt(paneText: string): boolean {
   for (let i = 1; i + 1 < t.length; i++) {
     if (/^\s*[❯!]/.test(t[i]) && /^\s*[─━╭╰└┌├╮╯|]/.test(t[i - 1]) && /^\s*[─━╭╰└┌├╮╯|]/.test(t[i + 1])) return true
   }
+  // Codex uses an unbordered `›` composer and a model/mode/cwd footer. Require both so a numbered
+  // select-menu cursor (`› 1. …`) is never mistaken for a safe input box.
+  const codex = lines.slice(-16)
+  const hasCodexFooter = codex.some(l => /^\s*gpt-[\w.-]+\s+.+\s·\s.+/.test(l))
+  const hasCodexComposer = codex.some(l => /^\s*›(?!\s*\d+\.)/.test(l))
+  if (hasCodexFooter && hasCodexComposer) return true
   return false
 }
 

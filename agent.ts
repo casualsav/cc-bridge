@@ -49,3 +49,19 @@ export function codexLaunchCommand(opts: AgentLaunch, bin = process.env.CODEX_BI
 export function agentLabel(kind: AgentKind): string {
   return kind === 'codex' ? 'Codex' : 'Claude Code'
 }
+
+export function agentInterruptKeys(_kind: AgentKind): string[] {
+  return ['Escape']
+}
+
+export function agentSubmitKeys(kind: AgentKind): string[] {
+  return kind === 'codex' ? ['C-m'] : ['Enter']
+}
+
+export function agentExitKeys(kind: AgentKind): string[] {
+  return kind === 'codex' ? ['C-d'] : ['/exit', 'Enter']
+}
+
+export function agentResetCommand(kind: AgentKind, requested: '/clear' | '/new'): '/clear' | '/new' {
+  return kind === 'codex' ? '/new' : requested
+}

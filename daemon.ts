@@ -26,7 +26,10 @@ const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
 import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, hasQueuedMessages, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen } from './prompt.ts'
 import { resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, currentTurnActivity, currentTurnTokens, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, agentSessionId, agentForSession } from './agent-transcript.ts'
-import { AGENT_PANE_OPT, agentLabel, codexLaunchCommand, normalizeAgent, type AgentKind } from './agent.ts'
+import {
+  AGENT_PANE_OPT, agentExitKeys, agentInterruptKeys, agentLabel, agentResetCommand, agentSubmitKeys,
+  codexLaunchCommand, normalizeAgent, type AgentKind,
+} from './agent.ts'
 import {
   initAccounts, listAccounts, accountByName, accountForTranscript, accountForProjectsDir,
   allProjectsDirs, addAccount, removeAccount, renameAccount, accountLoggedIn, healAccountConfigs, healMainStatusline,
@@ -321,7 +324,7 @@ async function injectText(paneId: string, watcher: PaneWatcher, text: string): P
   return watcher.withInjection(async () => {
     const ok = await sendKeysLiteral(paneId, text)
     if (!ok) return false
-    await sendKeys(paneId, ['Enter'])
+    await sendKeys(paneId, agentSubmitKeys(await paneAgentKind(paneId)))
     await waitForSettle(paneId, 300, 5000)
     return true
   })
@@ -339,7 +342,7 @@ async function injectPaste(paneId: string, watcher: PaneWatcher, text: string): 
     await exec('tmux', ['set-buffer', '-b', INJECT_BUFFER, '--', text], { timeout: 2000 })
     await exec('tmux', ['paste-buffer', '-d', '-p', '-b', INJECT_BUFFER, '-t', paneId], { timeout: 2000 })
     await waitForSettle(paneId, 200, 4000)
-    await sendKeys(paneId, ['Enter'])
+    await sendKeys(paneId, agentSubmitKeys(await paneAgentKind(paneId)))
     await waitForSettle(paneId, 300, 5000)
     return true
   })
@@ -3552,7 +3555,9 @@ async function handleCall(
 // watcher may be null for a non-focused topic pane (no mirror to pause) — then send the keys directly.
 async function injectSlash(paneId: string, watcher: PaneWatcher | null, command: string): Promise<void> {
   const run = async () => {
-    await sendKeys(paneId, [command, 'Enter'])
+    await sendKeys(paneId, [command])
+    await waitForSettle(paneId, 200, 4000)
+    await sendKeys(paneId, agentSubmitKeys(await paneAgentKind(paneId)))
     await waitForSettle(paneId, 300, 30_000)
   }
   await (watcher ? watcher.withInjection(run) : run())
@@ -3571,9 +3576,12 @@ async function exitSessionPane(pane: string, reason = 'unspecified'): Promise<vo
   process.stderr.write(`daemon: exitSessionPane(${pane}) reason=${reason} | ${site}\n`)
   const watcher = pane === focus.activePaneId ? focus.paneWatcher : null
   const run = async () => {
-    await sendKeys(pane, ['/exit'])
-    await waitForSettle(pane, 200, 4000)
-    await sendKeys(pane, ['Enter'])
+    const [first, ...rest] = agentExitKeys(await paneAgentKind(pane))
+    await sendKeys(pane, [first])
+    if (rest.length) {
+      await waitForSettle(pane, 200, 4000)
+      await sendKeys(pane, rest)
+    }
     await waitForSettle(pane, 300, 5000).catch(() => {})   // the pane may vanish as the session exits
   }
   await (watcher ? watcher.withInjection(run) : run()).catch(() => {})
@@ -3757,7 +3765,7 @@ async function handleModeCommand(
 // target session (topic mode) or the focused one.
 async function performReset(t: CommandTarget, command: string, opts?: { force?: boolean }): Promise<{ text: string; keyboard?: InlineKeyboard }> {
   const agent = await paneAgentKind(t.paneId)
-  if (agent === 'codex') command = '/new'   // Codex has one fresh-chat primitive; no separate /clear
+  command = agentResetCommand(agent, command === '/new' ? '/new' : '/clear')
   // Mid-turn pre-check: a reset typed now would only be QUEUED by Claude Code, not run — reporting
   // "cleared" here would be a false confirmation, and the queued command then wipes the conversation
   // the moment the turn ends (silently, with no further daemon message). Two complementary signals,
@@ -3909,12 +3917,13 @@ async function confirmStop(ctx: Context): Promise<void> {
 // The actual interrupt — Esc into the target pane. Returns the status line for the caller to show.
 async function performStop(t: CommandTarget): Promise<string> {
   const pane = t.paneId
-  // Use the watcher's injection guard only when it owns this pane; otherwise send Esc directly.
+  const agent = await paneAgentKind(pane)
+  // Use the watcher's injection guard only when it owns this pane; otherwise send the agent's interrupt directly.
   const ok = t.isFocused && t.watcher
-    ? await t.watcher.withInjection(() => sendKeys(pane, ['Escape']))
-    : await sendKeys(pane, ['Escape'])
+    ? await t.watcher.withInjection(() => sendKeys(pane, agentInterruptKeys(agent)))
+    : await sendKeys(pane, agentInterruptKeys(agent))
   typingPresence.stop()   // interrupted turn never relays a conclusion — stop typing now
-  return ok ? '🛑 Sent interrupt (Esc) to Claude Code.' : 'Could not reach the session pane.'
+  return ok ? `🛑 Sent interrupt (Esc) to ${agentLabel(agent)}.` : 'Could not reach the session pane.'
 }
 
 // Mode picker — a button per mode (current marked ●) plus a quick-switch tip. Shared by /mode
@@ -4662,8 +4671,7 @@ async function restartPaneSessionCore(pane: string, id: string, accountOverride?
   setPaneRestarting(pane, true)
   try {
     const run = async () => {
-      if (currentAgent === 'codex') await sendKeys(pane, ['C-d'])
-      else await sendKeys(pane, ['/exit', 'Enter'])
+      await sendKeys(pane, agentExitKeys(currentAgent))
       for (let i = 0; i < 40 && await paneClaudeLive(pane); i++) await waitForSettle(pane, 200, 1500)
       if (!(await paneAlive(pane))) return   // exit closed the pane — respawn below, nothing to type into
       const resume = agent === 'codex'
@@ -4861,7 +4869,9 @@ async function restartAllStaleSessions(chat: string, onlyStale = true): Promise<
     const live = t.sid ? await paneForSession(t.sid).catch(() => null) : null
     if (live) { t.pane = live; retried.push(t); continue }
     const alive = await paneAlive(t.pane).catch(() => false)
-    const fresh = !alive && t.sid && t.cwd ? await spawnSession(t.cwd, '-c', t.sid) : null
+    const fresh = !alive && t.sid && t.cwd
+      ? await spawnSession(t.cwd, '-c', t.sid, MAIN_ACCOUNT, topicAgent(getTopicBySession(t.sid)))
+      : null
     if (fresh) { t.pane = fresh; if (t.sid) await reopenSessionTopic(t.sid); retried.push(t) }
     else if (alive) retried.push(t)
     else lost.push(t)
@@ -6265,7 +6275,7 @@ async function pasteToPane(paneId: string, text: string): Promise<boolean> {
     await exec('tmux', ['set-buffer', '-b', INJECT_BUFFER, '--', text], { timeout: 2000 })
     await exec('tmux', ['paste-buffer', '-d', '-p', '-b', INJECT_BUFFER, '-t', paneId], { timeout: 2000 })
     await waitForSettle(paneId, 200, 4000)
-    await sendKeys(paneId, ['Enter'])
+    await sendKeys(paneId, agentSubmitKeys(await paneAgentKind(paneId)))
     return true
   } catch { return false }
 }
@@ -7739,7 +7749,7 @@ bot.on('callback_query:data', async ctx => {
       return
     }
     await ctx.answerCallbackQuery({ text: `Resuming ${t.name}…` }).catch(() => {})
-    const ok = await spawnSession(t.cwd, '-c', sid)
+    const ok = await spawnSession(t.cwd, '-c', sid, MAIN_ACCOUNT, topicAgent(t))
     if (ok) await reopenSessionTopic(sid)   // reopen the tab NOW, not on first reply
     await channel.sendText(String(ctx.chat!.id), ok
       ? `🚀 Resuming <b>${escapeHtml(t.name)}</b> in <code>${escapeHtml(t.cwd)}</code> — it reopens in its topic shortly.`
@@ -7776,7 +7786,7 @@ bot.on('callback_query:data', async ctx => {
     const dir = focus.activePaneId ? await paneCwd(focus.activePaneId).catch(() => null) : null
     if (!dir) { await ctx.answerCallbackQuery({ text: 'No folder to offer — use ✏️ Specify folder.' }).catch(() => {}); return }
     await ctx.answerCallbackQuery({ text: 'Starting…' }).catch(() => {})
-    const ok = await spawnSession(dir, '', genSessionId(), await paneAccount(focus.activePaneId))
+    const ok = await spawnSession(dir, '', genSessionId(), await paneAccount(focus.activePaneId), await paneAgentKind(focus.activePaneId))
     await ctx.editMessageText(ok
       ? `🚀 Starting a session in <code>${escapeHtml(dir)}</code> — it gets its own topic shortly.`
       : `❌ Couldn't start a session in <code>${escapeHtml(dir)}</code>.`, { parse_mode: 'HTML' }).catch(() => {})
@@ -7843,7 +7853,7 @@ bot.on('callback_query:data', async ctx => {
     await ctx.answerCallbackQuery({ text: 'Starting…' }).catch(() => {})
     const cwd = await paneCwd(t.paneId).catch(() => null)
     if (!cwd) { await ctx.editMessageText('Couldn\'t read this session\'s folder.').catch(() => {}); return }
-    const ok = await spawnSession(cwd, '', genSessionId(), await paneAccount(t.paneId))   // sibling stays on this session's account
+    const ok = await spawnSession(cwd, '', genSessionId(), await paneAccount(t.paneId), await paneAgentKind(t.paneId))
     await ctx.editMessageText(ok
       ? `🚀 Starting a sibling session in <code>${escapeHtml(cwd)}</code> — it gets its own topic shortly.`
       : `❌ Couldn't start a session in <code>${escapeHtml(cwd)}</code>.`,
@@ -8392,9 +8402,17 @@ bot.on('callback_query:data', async ctx => {
       await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {})
       return
     }
-    const num = promptMatch[1]
+    const num = Number(promptMatch[1])
     await ctx.answerCallbackQuery({ text: `Selected ${num}` }).catch(() => {})
-    await paneKeys(paneId, [num, 'Enter'], [300, 5000])
+    if (await paneAgentKind(paneId) === 'codex') {
+      await withPaneInjection(paneId, async () => {
+        await navigateDown(paneId, num - 1)
+        await sendKeys(paneId, agentSubmitKeys('codex'))
+        await waitForSettle(paneId, 300, 5000)
+      })
+    } else {
+      await paneKeys(paneId, [String(num), ...agentSubmitKeys('claude')], [300, 5000])
+    }
     resetPromptDedup(paneId)  // allow next prompt to relay
     await ctx.deleteMessage().catch(() => {})  // remove the prompt entirely once answered (toast confirms)
     await verifyPromptClosed(paneId)
@@ -8422,7 +8440,7 @@ bot.on('callback_query:data', async ctx => {
     const prevHash = await currentPromptHash(paneId)   // the tab we're about to answer — to detect the advance
     await withPaneInjection(paneId, async () => {
       await navigateDown(paneId, num - 1)
-      await sendKeys(paneId, ['Enter'])
+      await sendKeys(paneId, agentSubmitKeys(await paneAgentKind(paneId)))
       await waitForSettle(paneId, 300, 5000)
     })
     await ctx.deleteMessage().catch(() => {})  // remove the answered question (next tab relays its own message)
@@ -8477,7 +8495,7 @@ bot.on('callback_query:data', async ctx => {
         await sendKeys(paneId, ['Escape'])
       } else {
         await navigateDown(paneId, cp.downCount)
-        await sendKeys(paneId, ['Enter'])
+        await sendKeys(paneId, agentSubmitKeys(await paneAgentKind(paneId)))
       }
       await waitForSettle(paneId, 300, 5000)
     })
@@ -8539,7 +8557,7 @@ bot.on('callback_query:data', async ctx => {
         await sendKeys(paneId, ['Right'])
         await waitForSettle(paneId, 250, 4000)
       }
-      await sendKeys(paneId, ['Enter'])
+      await sendKeys(paneId, agentSubmitKeys(await paneAgentKind(paneId)))
       await waitForSettle(paneId, 300, 6000)
     })
     pendingMultiSelect.delete(key)
@@ -8830,7 +8848,7 @@ async function bootTopicSession(ctx: Context, sid: string, t: TopicEntry, o: Boo
   revivalQueues.set(sid, o.initialQueue)
   try {
     const notice = await ctx.reply(o.notice, { parse_mode: 'HTML' }).catch(() => null)
-    const ok = await spawnSession(t.cwd, o.extra, sid)
+    const ok = await spawnSession(t.cwd, o.extra, sid, MAIN_ACCOUNT, topicAgent(t))
     if (!ok) {
       const msg = o.failMsg(t.cwd)
       if (notice) await channel.editText({ chatId: String(notice.chat.id), messageId: String(notice.message_id) }, msg).catch(() => {})
@@ -9218,7 +9236,7 @@ bot.on('message:text', async ctx => {
           const anchor = !!target.anchor && !(await generalAnchorPane())
           const sid = genSessionId()
           if (anchor) { setGeneralSession(sid, dir); if (!getBaseCwd()) setBaseCwd(dir) }
-          const ok = await spawnSession(dir, '', sid, await paneAccount(focus.activePaneId))
+          const ok = await spawnSession(dir, '', sid, await paneAccount(focus.activePaneId), await paneAgentKind(focus.activePaneId))
           if (anchor && !ok) setGeneralSession(null)
           await ctx.reply(ok
             ? `🚀 Starting a session in <code>${escapeHtml(dir)}</code>${created ? ' (📁 created it for you)' : ''} — ${anchor ? 'it lives here in General.' : 'it gets its own topic shortly.'}`
@@ -9261,7 +9279,7 @@ bot.on('message:text', async ctx => {
             await navigateDown(paneId, target.downCount)
             await sendKeysLiteral(paneId, text)
             await waitForSettle(paneId, 150, 2000)
-            await sendKeys(paneId, ['Enter'])
+            await sendKeys(paneId, agentSubmitKeys(await paneAgentKind(paneId)))
             await waitForSettle(paneId, 300, 5000)
           })
           // For a tabbed form, let handleTabbedAdvance own the dedup (it marks the NEXT tab) — don't
@@ -9281,7 +9299,7 @@ bot.on('message:text', async ctx => {
           await withPaneInjection(paneId, async () => {
             await sendKeysLiteral(paneId, text)
             await waitForSettle(paneId, 150, 2000)
-            await sendKeys(paneId, ['Enter'])
+            await sendKeys(paneId, agentSubmitKeys(await paneAgentKind(paneId)))
             await waitForSettle(paneId, 300, 5000)
           })
           resetPromptDedup(paneId)

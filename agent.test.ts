@@ -1,5 +1,8 @@
 import { test, expect } from 'bun:test'
-import { AGENT_PANE_OPT, agentLabel, codexLaunchCommand, normalizeAgent, shellQuote } from './agent.ts'
+import {
+  AGENT_PANE_OPT, agentExitKeys, agentInterruptKeys, agentLabel, agentResetCommand, agentSubmitKeys,
+  codexLaunchCommand, normalizeAgent, shellQuote,
+} from './agent.ts'
 
 test('legacy or unknown agent identity remains Claude', () => {
   expect(normalizeAgent(undefined)).toBe('claude')
@@ -37,4 +40,17 @@ test('Codex launch safely quotes executable and untrusted-looking values', () =>
 test('agent labels are user-facing', () => {
   expect(agentLabel('claude')).toBe('Claude Code')
   expect(agentLabel('codex')).toBe('Codex')
+})
+
+test('lifecycle controls map to each terminal CLI without changing bridge intent', () => {
+  expect(agentInterruptKeys('claude')).toEqual(['Escape'])
+  expect(agentInterruptKeys('codex')).toEqual(['Escape'])
+  expect(agentSubmitKeys('claude')).toEqual(['Enter'])
+  expect(agentSubmitKeys('codex')).toEqual(['C-m'])
+  expect(agentExitKeys('claude')).toEqual(['/exit', 'Enter'])
+  expect(agentExitKeys('codex')).toEqual(['C-d'])
+  expect(agentResetCommand('claude', '/clear')).toBe('/clear')
+  expect(agentResetCommand('claude', '/new')).toBe('/new')
+  expect(agentResetCommand('codex', '/clear')).toBe('/new')
+  expect(agentResetCommand('codex', '/new')).toBe('/new')
 })

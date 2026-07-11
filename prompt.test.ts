@@ -322,6 +322,45 @@ test('detectEditorState recognises vim, nano, and a pager — and ignores a norm
   expect(onNormalPrompt(normal)).toBe(true)
 })
 
+test('onNormalPrompt recognizes the Codex composer and rejects a Codex select menu', () => {
+  const idle = [
+    '╭───────────────────────────────────────────╮',
+    '│ >_ OpenAI Codex (v0.144.1)                │',
+    '╰───────────────────────────────────────────╯',
+    '',
+    '› Improve documentation in @filename',
+    '',
+    '  gpt-5.6-sol default · ~/projects/cc-bridge',
+  ].join('\n')
+  expect(onNormalPrompt(idle)).toBe(true)
+
+  const menu = [
+    '  Approaching rate limits',
+    '› 1. Switch to gpt-5.4-mini',
+    '  2. Keep current model',
+    '  Press enter to confirm or esc to go back',
+  ].join('\n')
+  expect(onNormalPrompt(menu)).toBe(false)
+})
+
+test('detectUserPrompt parses a Codex native numbered menu', () => {
+  const pane = [
+    '  Approaching rate limits',
+    '  Switch to gpt-5.4-mini for lower credit usage?',
+    '',
+    '› 1. Switch to gpt-5.4-mini                 Small, fast, and cost-efficient',
+    '  2. Keep current model',
+    '  3. Keep current model (never show again)',
+    '',
+    '  Press enter to confirm or esc to go back',
+  ].join('\n')
+  const prompt = detectUserPrompt(pane)
+  expect(prompt?.question).toContain('Switch to gpt-5.4-mini')
+  expect(prompt?.options.map(o => o.label)).toEqual([
+    'Switch to gpt-5.4-mini', 'Keep current model', 'Keep current model (never show again)',
+  ])
+})
+
 test('detectPermissionPrompt parses a Yes/No confirmation', () => {
   const pane = [
     '● Bash',
