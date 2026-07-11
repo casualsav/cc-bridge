@@ -38,7 +38,8 @@ type Payload = {
   content?: Content[] | string
   // response_item / function_call | local_shell_call | custom_tool_call
   name?: string
-  arguments?: string
+  arguments?: string       // function_call: JSON string
+  input?: string           // custom_tool_call: freeform code string
   call_id?: string
   action?: unknown              // local_shell_call: { command: [...] } etc.
   // event_msg / turn_started | turn_complete | turn_aborted
@@ -278,27 +279,31 @@ export function finalRepliesAfter(file: string, afterUuid: string): { uuid: stri
 
 export type Activity = { tool: string; detail: string }
 
-// A short representative detail for a tool call, from its response_item payload. Codex tool calls are
-// function_call (name + JSON-string arguments), local_shell_call (a shell command), web_search_call,
-// custom_tool_call. We surface the most useful field, capped.
+// A short representative detail for a tool call, from its response_item payload. Codex tool calls
+// come in a few shapes: local_shell_call (action.command array), web_search_call, function_call
+// (name + JSON-string `arguments`), and custom_tool_call (name + a freeform `input` string, e.g.
+// `…tools.exec_command({"cmd":"cat note.txt", …})`). We surface the most useful field, capped.
 function toolNameDetail(p: Payload): { tool: string; detail: string } {
   const cap = (s: string) => (s.length > 56 ? s.slice(0, 55) + '…' : s)
+  const clean = (s: string) => cap(s.replace(/\s+/g, ' ').trim())
   if (p.type === 'local_shell_call') {
     const cmd = (p.action as any)?.command
     const s = Array.isArray(cmd) ? cmd.join(' ') : typeof cmd === 'string' ? cmd : ''
-    return { tool: 'shell', detail: cap(s.replace(/\s+/g, ' ').trim()) }
+    return { tool: 'shell', detail: clean(s) }
   }
   if (p.type === 'web_search_call') return { tool: 'web_search', detail: '' }
-  // function_call / custom_tool_call: name + a field pulled from the JSON-string arguments.
   const tool = p.name || p.type || 'tool'
-  let detail = ''
+  // Prefer a clean field from parsed JSON `arguments`; fall back to scraping the raw `input`/args
+  // string (custom_tool_call's `input` is code, not JSON, so a key regex is the reliable path).
+  const raw = p.arguments ?? p.input ?? ''
   try {
-    const a = p.arguments ? JSON.parse(p.arguments) : {}
-    const pick = a.command ?? a.file_path ?? a.path ?? a.pattern ?? a.query ?? a.url ?? a.description ?? a.prompt
-    detail = typeof pick === 'string' ? pick : ''
-    if (Array.isArray(a.command)) detail = a.command.join(' ')
+    const a = JSON.parse(raw)
+    const pick = a.command ?? a.cmd ?? a.file_path ?? a.path ?? a.pattern ?? a.query ?? a.url ?? a.description ?? a.prompt
+    if (Array.isArray(pick)) return { tool, detail: clean(pick.join(' ')) }
+    if (typeof pick === 'string') return { tool, detail: clean(pick) }
   } catch {}
-  return { tool, detail: cap(detail.replace(/\s+/g, ' ').trim()) }
+  const m = raw.match(/"(?:cmd|command|file_path|path|query|pattern|url)"\s*:\s*"((?:[^"\\]|\\.)*)"/)
+  return { tool, detail: clean(m ? m[1] : raw) }
 }
 
 // Is this response_item a tool call? (the kinds Codex persists)

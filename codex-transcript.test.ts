@@ -22,6 +22,9 @@ const userMsg = (text: string) => ({ timestamp: 't', type: 'response_item', payl
 const asstMsg = (text: string) => ({ timestamp: 't', type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] } })
 const funcCall = (name: string, args: object) => ({ timestamp: 't', type: 'response_item', payload: { type: 'function_call', name, arguments: JSON.stringify(args), call_id: 'c1' } })
 const shellCall = (cmd: string[]) => ({ timestamp: 't', type: 'response_item', payload: { type: 'local_shell_call', action: { command: cmd } } })
+// The shape a live rollout actually uses for shell (v0.144.x): custom_tool_call named "exec" whose
+// `input` is freeform code embedding the command.
+const customExec = (cmd: string) => ({ timestamp: 't', type: 'response_item', payload: { type: 'custom_tool_call', name: 'exec', input: `const r = await tools.exec_command({"cmd":"${cmd}","workdir":"/x"})` } })
 // Shipped builds (v0.144.x) emit task_* ; newer upstream emits turn_*. Fixtures use the shipped
 // names (what live capture confirmed); an alias test below covers turn_*.
 const turnStarted = (turn_id: string) => ({ timestamp: 't', type: 'event_msg', payload: { type: 'task_started', turn_id, model_context_window: 200000 } })
@@ -94,6 +97,11 @@ test('currentTurnActivity summarises the current turn’s tool calls', () => {
     { tool: 'shell', detail: 'echo hi' },
     { tool: 'read_file', detail: '/x/y.ts' },
   ])
+})
+
+test('currentTurnActivity extracts the command from a custom_tool_call (live shell shape)', () => {
+  const f = fixture([turnStarted('T1'), customExec('cat note.txt')])
+  expect(currentTurnActivity(f)).toEqual([{ tool: 'exec', detail: 'cat note.txt' }])
 })
 
 test('currentTurnActivity only covers the latest turn', () => {
