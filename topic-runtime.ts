@@ -15,6 +15,7 @@ import {
   dismissSession, isSessionDismissed, undismissSession, listDismissedSessions,
 } from './topics.ts'
 import { focus, offMcpPanes, sessions } from './state.ts'
+import { AGENT_PANE_OPT, normalizeAgent } from './agent.ts'
 
 // The bridge is in forum-topics mode whenever this module runs, so channel.threads (present iff
 // caps.threads === 'forum') is always defined — the `!` on threads.* calls reflects that invariant.
@@ -194,7 +195,7 @@ export async function paneClaudeLive(paneId: string): Promise<boolean> {
   return !DEAD_PANE_CMDS.has(cmd)
 }
 
-async function ensureTopicFor(group: string, sessionId: string, cwd: string): Promise<number | undefined> {
+async function ensureTopicFor(group: string, sessionId: string, cwd: string, pane?: string): Promise<number | undefined> {
   if (topicDeletionPending(sessionId)) return undefined   // user just deleted it — don't re-open during teardown
   const existing = getTopicBySession(sessionId)
   if (existing) {
@@ -213,7 +214,14 @@ async function ensureTopicFor(group: string, sessionId: string, cwd: string): Pr
   const name = siblings > 0 ? `${base} #${siblings + 1}` : base
   try {
     const threadId = Number(await channel.threads!.create(group, name))
-    setTopic(sessionId, { threadId, cwd, name, closed: false, createdAt: Date.now() })
+    let agent: 'claude' | 'codex' = 'claude'
+    if (pane) {
+      try {
+        const { stdout } = await exec('tmux', ['show-options', '-pqv', '-t', pane, AGENT_PANE_OPT], { timeout: 2000 })
+        agent = normalizeAgent(stdout.trim())
+      } catch {}
+    }
+    setTopic(sessionId, { threadId, cwd, name, closed: false, createdAt: Date.now(), ...(agent === 'codex' ? { agent } : {}) })
     process.stderr.write(`daemon: created topic "${name}" (thread ${threadId}) for ${cwd} [${sessionId}]\n`)
     return threadId
   } catch (e) {
@@ -240,7 +248,7 @@ export async function outboundTargetsFor(paneId: string | null): Promise<Array<{
   // deleted topic ("ghost topic reappears every usage warn"). Never CREATE a topic for a pane with
   // no live claude; an existing topic still routes (trailing teardown output keeps its thread).
   if (!getTopicBySession(sid) && !(await paneClaudeLive(paneId!))) return [{ chat: group }]
-  return [{ chat: group, thread: await ensureTopicFor(group, sid, cwd) }]
+  return [{ chat: group, thread: await ensureTopicFor(group, sid, cwd, paneId!) }]
 }
 
 // Eagerly give a freshly-discovered session its topic (don't wait for its first reply) and post a
@@ -261,7 +269,7 @@ export async function ensureSessionTopic(paneId: string): Promise<void> {
   if (getTopicBySession(sid) || topicEnsureInFlight.has(sid)) return   // already have it / creating it
   topicEnsureInFlight.add(sid)
   try {
-    const thread = await ensureTopicFor(group, sid, cwd)
+    const thread = await ensureTopicFor(group, sid, cwd, paneId)
     if (thread) await channel.sendText(group,
       `🆕 <b>Session started</b>\n<code>${escapeHtml(cwd)}</code>\n\nType in this topic to drive this session.`,
       { threadId: String(thread), silent: true }).catch(() => {})

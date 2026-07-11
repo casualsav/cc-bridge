@@ -12,6 +12,7 @@
 import { join } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { STATE_DIR, readJsonFile, writeJsonFile } from './common.ts'
+import { normalizeAgent, type AgentKind } from './agent.ts'
 
 export const TOPICS_FILE = join(STATE_DIR, 'topics.json')
 
@@ -23,6 +24,8 @@ export type TopicEntry = {
   createdAt: number
   firstMsgSwept?: boolean   // Telegram auto-pins the first user message in a new topic; true once unpinned
   worktree?: { repo: string; path: string }   // session runs in a git worktree of `repo`; removed on close when clean
+  agent?: AgentKind        // absent on legacy stores = Claude Code
+  agentSessionId?: string  // Claude/Codex conversation UUID for exact resume
 }
 
 export type TopicStore = {
@@ -70,6 +73,8 @@ export function loadTopics(): TopicStore {
         ...(t.firstMsgSwept === true ? { firstMsgSwept: true } : {}),
         ...(t.worktree && typeof t.worktree.repo === 'string' && typeof t.worktree.path === 'string'
           ? { worktree: { repo: t.worktree.repo, path: t.worktree.path } } : {}),
+        ...(t.agent === 'codex' ? { agent: 'codex' as const } : {}),
+        ...(typeof t.agentSessionId === 'string' ? { agentSessionId: t.agentSessionId } : {}),
       }
     }
     const dismissedSessions: Record<string, number> = {}
@@ -133,6 +138,7 @@ export function setBaseCwd(cwd: string | null): void {
 
 // ---- session <-> topic map ----
 export function getTopicBySession(sessionId: string): TopicEntry | undefined { ensureLoaded(); return store.topics[sessionId] }
+export function topicAgent(entry: TopicEntry | undefined): AgentKind { return normalizeAgent(entry?.agent) }
 
 export function getSessionByThread(threadId: number): string | undefined {
   ensureLoaded()

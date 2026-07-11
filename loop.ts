@@ -24,7 +24,7 @@ import { focus } from './state.ts'
 import { paneForSession } from './topic-runtime.ts'
 import { onNormalPrompt, stripAnsi } from './prompt.ts'
 import { parseStatusline } from './statusline.ts'
-import { latestFinalReply, turnInProgress } from './transcript.ts'
+import { latestFinalReply, turnInProgress } from './agent-transcript.ts'
 
 type LoopDeps = {
   channel: ChannelAdapter

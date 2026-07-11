@@ -25,7 +25,8 @@ import { acquireTokenLock } from './token-lock.ts'
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
 import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, hasQueuedMessages, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen } from './prompt.ts'
-import { resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, currentTurnActivity, currentTurnTokens, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter } from './transcript.ts'
+import { resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, currentTurnActivity, currentTurnTokens, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, agentSessionId, agentForSession } from './agent-transcript.ts'
+import { AGENT_PANE_OPT, agentLabel, codexLaunchCommand, normalizeAgent, type AgentKind } from './agent.ts'
 import {
   initAccounts, listAccounts, accountByName, accountForTranscript, accountForProjectsDir,
   allProjectsDirs, addAccount, removeAccount, renameAccount, accountLoggedIn, healAccountConfigs, healMainStatusline,
@@ -60,7 +61,7 @@ import {
   setGroupChatId, getGroupChatId, isTopicMode, loadTopics, genSessionId,
   getSessionByThread, getTopicBySession, setTopic, removeTopic, updateTopic, listTopics,
   getGeneralSession, setGeneralSession, findTopicByCwd, getBaseCwd, setBaseCwd,
-  type TopicEntry,
+  topicAgent, type TopicEntry,
 } from './topics.ts'
 import {
   initTopicRuntime, sessionForPane, paneForSession, ensureSessionTopic, closeTopicForPane, markTopicDeleted, markTopicClosePending,
@@ -1038,6 +1039,15 @@ async function sendTtsVoice(text: string, targets: Array<{ chat: string; thread?
 const TRANSCRIPT_PANE_OPT = '@tg_transcript'
 const TRANSCRIPT_STAMP_TTL_MS = 5_000
 const paneTranscriptCache = new Map<string, { at: number; path: string | null }>()
+async function rememberPaneAgentTranscript(pane: string, path: string): Promise<void> {
+  const sid = await sessionForPane(pane, false).catch(() => null)
+  if (!sid) return
+  const kind: AgentKind = basename(path).startsWith('rollout-') ? 'codex' : 'claude'
+  const current = getTopicBySession(sid)
+  const conversation = agentSessionId(path)
+  if (current && (topicAgent(current) !== kind || current.agentSessionId !== conversation))
+    updateTopic(sid, { ...(kind === 'codex' ? { agent: kind } : {}), agentSessionId: conversation })
+}
 async function transcriptForPane(pane: string | null, cwd: string | null): Promise<string | null> {
   if (pane) {
     const hit = paneTranscriptCache.get(pane)
@@ -1050,7 +1060,7 @@ async function transcriptForPane(pane: string | null, cwd: string | null): Promi
       } catch { path = null }
       paneTranscriptCache.set(pane, { at: Date.now(), path })
     }
-    if (path && existsSync(path)) return path
+    if (path && existsSync(path)) { await rememberPaneAgentTranscript(pane, path); return path }
   }
   const fb = cwd ? resolveTranscript(cwd, allProjectsDirs()) : null
   if (!fb) return null
@@ -1060,7 +1070,22 @@ async function transcriptForPane(pane: string | null, cwd: string | null): Promi
   for (const [p, v] of paneTranscriptCache) {
     if (p !== pane && v.path === fb) return null
   }
+  if (pane) await rememberPaneAgentTranscript(pane, fb)
   return fb
+}
+
+async function paneAgentKind(pane: string | null): Promise<AgentKind> {
+  if (!pane) return 'claude'
+  const sid = await sessionForPane(pane, false).catch(() => null)
+  const stored = sid ? getTopicBySession(sid) : undefined
+  if (stored?.agent) return topicAgent(stored)
+  try {
+    const { stdout } = await exec('tmux', ['show-options', '-pqv', '-t', pane, AGENT_PANE_OPT], { timeout: 2000 })
+    if (stdout.trim()) return normalizeAgent(stdout.trim())
+  } catch {}
+  const cwd = await paneCwd(pane).catch(() => null)
+  const file = await transcriptForPane(pane, cwd)
+  return file && basename(file).startsWith('rollout-') ? 'codex' : 'claude'
 }
 
 // The account a pane's session runs under, derived from its stamped transcript path (the
@@ -3731,6 +3756,8 @@ async function handleModeCommand(
 // Reset the conversation and return the confirmation text (with the active model). Acts on the
 // target session (topic mode) or the focused one.
 async function performReset(t: CommandTarget, command: string, opts?: { force?: boolean }): Promise<{ text: string; keyboard?: InlineKeyboard }> {
+  const agent = await paneAgentKind(t.paneId)
+  if (agent === 'codex') command = '/new'   // Codex has one fresh-chat primitive; no separate /clear
   // Mid-turn pre-check: a reset typed now would only be QUEUED by Claude Code, not run — reporting
   // "cleared" here would be a false confirmation, and the queued command then wipes the conversation
   // the moment the turn ends (silently, with no further daemon message). Two complementary signals,
@@ -3764,7 +3791,7 @@ async function performReset(t: CommandTarget, command: string, opts?: { force?: 
   // can't backfill the pre-reset numbers, and refresh it now rather than waiting for the next tick.
   invalidatePaneStatus(t.paneId)
   void updateSessionPin()
-  const model = await readCurrentModel(t.paneId, t.watcher)
+  const model = agent === 'claude' ? await readCurrentModel(t.paneId, t.watcher) : null
   const head = command === '/clear' ? '🧹 Conversation cleared' : '✅ New session started'
   return { text: model
     ? `${head} · model: <b>${escapeHtml(model)}</b>`
@@ -4325,6 +4352,35 @@ bot.use(async (ctx, next) => {
 bot.command('start', sendStartHelp)
 bot.command('help', sendStartHelp)   // hidden alias (muscle memory); kept out of the command menu
 
+// Select or launch the terminal agent. Existing sessions keep their agent; in topic mode a switch
+// starts a sibling topic in the same folder, while DM mode requires the single slot to be empty.
+bot.command('agent', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  const arg = (ctx.match ?? '').toString().trim().toLowerCase()
+  const { paneId } = await targetPaneOf(ctx)
+  if (!arg) {
+    const kind = await paneAgentKind(paneId)
+    await ctx.reply(`Active terminal: <b>${agentLabel(kind)}</b>\n\nStart one with <code>/agent claude</code> or <code>/agent codex</code>.`, { parse_mode: 'HTML' })
+    return
+  }
+  if (arg !== 'claude' && arg !== 'codex') {
+    await ctx.reply('Usage: <code>/agent claude</code> or <code>/agent codex</code>', { parse_mode: 'HTML' })
+    return
+  }
+  const kind = arg as AgentKind
+  if (!isTopicMode() && focus.activePaneId) {
+    await ctx.reply('A session is already running in this DM. End it first, or /bind a forum group to run Claude and Codex side by side.')
+    return
+  }
+  const dir = (paneId ? await paneCwd(paneId).catch(() => null) : null) ?? lastSessionCwd() ?? homedir()
+  const sid = isTopicMode() ? genSessionId() : undefined
+  const ok = await spawnSession(dir, '', sid, MAIN_ACCOUNT, kind)
+  await ctx.reply(ok
+    ? `🚀 Starting <b>${agentLabel(kind)}</b> in <code>${escapeHtml(dir)}</code>${isTopicMode() ? ' — it gets its own topic shortly.' : '.'}`
+    : `❌ Couldn’t start ${agentLabel(kind)} in <code>${escapeHtml(dir)}</code>. Check the CLI path/login and daemon log.`,
+    { parse_mode: 'HTML' })
+})
+
 bot.command('status', async ctx => {
   const gated = dmCommandGate(ctx)
   if (!gated) return
@@ -4399,7 +4455,14 @@ const MODE_ALIASES: Record<string, CcMode> = {
   plan: 'plan', auto: 'auto',
   bypass: 'bypassPermissions', bypasspermissions: 'bypassPermissions', yolo: 'bypassPermissions',
 }
-bot.command('mode', ctx => {
+bot.command('mode', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  const t = await commandTarget(ctx)
+  if (!t) return
+  if (await paneAgentKind(t.paneId) === 'codex') {
+    await relaySlashCommand(t.paneId, t.watcher, '/permissions', String(ctx.chat!.id), ctx.message!.message_id)
+    return
+  }
   const arg = (ctx.match ?? '').toString().trim().toLowerCase().replace(/[-_\s]/g, '')
   const target = arg && MODE_ALIASES[arg]
   return target ? handleModeCommand(ctx, target) : doModePicker(ctx)
@@ -4421,9 +4484,16 @@ bot.command('yolo', ctx => handleModeCommand(ctx, 'bypassPermissions'))
 bot.command('model', async ctx => {
   if (!dmCommandGate(ctx)) return
   const arg = (ctx.match ?? '').toString().trim()
+  const t = await commandTarget(ctx)
+  if (!t) return
+  if (await paneAgentKind(t.paneId) === 'codex') {
+    // Codex's native picker controls model AND reasoning effort. It currently ignores direct
+    // model arguments, so preserve the full terminal feature rather than pretending an arg applied.
+    await relaySlashCommand(t.paneId, t.watcher, '/model', String(ctx.chat!.id), ctx.message!.message_id)
+    if (arg) await ctx.reply('Codex changes model and reasoning effort in its native picker above.')
+    return
+  }
   if (arg) {
-    const t = await commandTarget(ctx)
-    if (!t) return
     void relayModelSet(ctx, t.paneId, t.watcher, arg)
     return
   }
@@ -4434,6 +4504,13 @@ bot.command('model', async ctx => {
 bot.command('effort', async ctx => {
   if (!dmCommandGate(ctx)) return
   const arg = (ctx.match ?? '').toString().trim().toLowerCase()
+  const targetSession = await commandTarget(ctx)
+  if (!targetSession) return
+  if (await paneAgentKind(targetSession.paneId) === 'codex') {
+    await relaySlashCommand(targetSession.paneId, targetSession.watcher, '/model', String(ctx.chat!.id), ctx.message!.message_id)
+    if (arg) await ctx.reply('Codex configures reasoning effort together with the model in this picker.')
+    return
+  }
   // `/effort default [level]` sets (or shows) the STANDING default — the effort a resumed/new session
   // falls back to when it has no remembered effort of its own. Persisted and drift-proof (unlike the
   // auto-tracked focused-pane preference), so it's the reliable answer to "always start at max".
@@ -4506,7 +4583,8 @@ bot.command('rewind', async ctx => {
   const t = await commandTarget(ctx)
   if (!t) return
   if (await guardArmedBashBox(t.paneId, String(ctx.chat!.id), t.replyThread)) return
-  void relaySlashCommand(t.paneId, t.watcher, '/rewind', String(ctx.chat!.id), ctx.message!.message_id)
+  const command = await paneAgentKind(t.paneId) === 'codex' ? '/fork' : '/rewind'
+  void relaySlashCommand(t.paneId, t.watcher, command, String(ctx.chat!.id), ctx.message!.message_id)
 })
 
 // /compact relays straight to the session — compact the conversation to free context.
@@ -4544,11 +4622,12 @@ async function restartPaneSession(pane: string, chat: string): Promise<void> {
   const dm = (t: string) => channel.sendText(chat, t).catch(() => {})
   const cwd = await paneCwd(pane).catch(() => null)
   const file = cwd ? await transcriptForPane(pane, cwd) : null
-  const id = file ? basename(file, '.jsonl') : null
+  const id = file ? agentSessionId(file) : null
   if (!id) { await dm('⚠️ Couldn’t find this session’s id to resume — restart it manually to pick up the update.'); return }
-  await dm('♻️ Restarting this session on the new Claude…')
+  const agent = await paneAgentKind(pane)
+  await dm(`♻️ Restarting this ${agentLabel(agent)} session…`)
   if (!(await restartPaneSessionCore(pane, id))) return
-  await dm('✅ Session restarted on the new Claude — your conversation was resumed.')
+  await dm(`✅ ${agentLabel(agent)} session restarted — your conversation was resumed.`)
 }
 
 // The message-free core of a restart-in-place: /exit, relaunch `claude --resume <id>` in the same
@@ -4561,10 +4640,12 @@ async function restartPaneSession(pane: string, chat: string): Promise<void> {
 // respawned in a fresh pane with the same session stamp + `--resume` — the conversation, topic and
 // routing all survive. Returns the pane now hosting the session (the original or the respawn), or
 // null when it couldn't be brought back.
-async function restartPaneSessionCore(pane: string, id: string, accountOverride?: Account): Promise<string | null> {
+async function restartPaneSessionCore(pane: string, id: string, accountOverride?: Account, agentOverride?: AgentKind): Promise<string | null> {
+  const currentAgent = await paneAgentKind(pane)
+  const agent = agentOverride ?? currentAgent
   const preCap = await capturePane(pane).catch(() => '')
-  const mode = detectCurrentMode(preCap)
-  const effort = parseStatusline(preCap)?.effort ?? null   // restored by NEITHER /exit nor --resume — re-apply it ourselves
+  const mode = currentAgent === 'claude' ? detectCurrentMode(preCap) : 'default'
+  const effort = currentAgent === 'claude' ? parseStatusline(preCap)?.effort ?? null : null
   // An alt-account session must resume under its config dir — the pane's shell doesn't export
   // CLAUDE_CONFIG_DIR (the launcher env-prefixes it), so the resume line has to re-prefix. An
   // accountOverride relaunches the pane under a DIFFERENT account (usage-limit failover).
@@ -4581,21 +4662,23 @@ async function restartPaneSessionCore(pane: string, id: string, accountOverride?
   setPaneRestarting(pane, true)
   try {
     const run = async () => {
-      await sendKeys(pane, ['/exit', 'Enter'])
-      for (let i = 0; i < 40 && (await paneCommand(pane)) === 'claude'; i++) await waitForSettle(pane, 200, 1500)
-      if (!(await paneAlive(pane))) return   // /exit closed the pane — respawn below, nothing to type into
-      // Relaunch by ABSOLUTE path to the binary `claude install` manages (claudeBin), not bare
-      // `claude` — a stale npm-global claude earlier on the pane's PATH would otherwise resume the old
-      // version. `hash -r` stays as hygiene (clears any cached lookup) but the absolute path is what
-      // guarantees the resumed session runs the freshly-installed build regardless of PATH ordering.
-      await sendKeys(pane, [`hash -r; ${envPrefix}${claudeBin()} --allow-dangerously-skip-permissions --resume ${id}`, 'Enter'])
+      if (currentAgent === 'codex') await sendKeys(pane, ['C-d'])
+      else await sendKeys(pane, ['/exit', 'Enter'])
+      for (let i = 0; i < 40 && await paneClaudeLive(pane); i++) await waitForSettle(pane, 200, 1500)
+      if (!(await paneAlive(pane))) return   // exit closed the pane — respawn below, nothing to type into
+      const resume = agent === 'codex'
+        ? codexLaunchCommand({ kind: 'codex', resumeId: id, model: process.env.CODEX_MODEL || null, effort: process.env.CODEX_REASONING_EFFORT || null }, process.env.CODEX_BIN || 'codex')
+        : `${envPrefix}${claudeBin()} --allow-dangerously-skip-permissions --resume ${id}`
+      await sendKeys(pane, [`hash -r; ${resume}`, 'Enter'])
       await waitForSettle(pane, 400, 30_000)
+      await exec('tmux', ['set-option', '-p', '-t', pane, AGENT_PANE_OPT, agent], { timeout: 2000 }).catch(() => {})
+      if (sid) updateTopic(sid, { ...(agent === 'codex' ? { agent } : { agent: undefined }), agentSessionId: id })
     }
     await (watcher ? watcher.withInjection(run) : run())
     if (!(await paneAlive(pane))) {
       if (!cwd) return null
       // (mode + effort already persisted above, so the respawn's resume branch seeds from them.)
-      const fresh = await spawnSession(cwd, `--resume ${id}`, sid ?? undefined, account)
+      const fresh = await spawnSession(cwd, `--resume ${id}`, sid ?? undefined, account, agent)
       if (!fresh) return null
       // The session lives in `fresh` now — drop the dead pane's registry + session mapping so
       // close-on-end can't resolve it back to the (live) session and close its topic.
@@ -4621,9 +4704,9 @@ async function restartPaneSessionCore(pane: string, id: string, accountOverride?
     // If the resume popped the post-update "Resume session" picker, the pane is sitting on the menu —
     // don't drive mode/effort keystrokes into it. It's relayed as buttons; the resumesel tap restores
     // both dials once the user picks (restoreResumedDials).
-    if (isResumeSessionPrompt(await capturePane(pane).catch(() => ''))) return pane
-    if (mode !== 'default') await switchToMode(pane, mode, watcher)
-    await reapplyEffort(pane, effort, watcher)   // the resumed pane came back at the model default — restore the dial
+    if (agent === 'claude' && isResumeSessionPrompt(await capturePane(pane).catch(() => ''))) return pane
+    if (agent === 'claude' && mode !== 'default') await switchToMode(pane, mode, watcher)
+    if (agent === 'claude') await reapplyEffort(pane, effort, watcher)
     return pane
   } finally { setPaneRestarting(pane, false) }
 }
@@ -6393,15 +6476,15 @@ async function captureInheritedSettings(paneId: string, watcher: PaneWatcher | n
 // with NO post-boot pane-driving at all. This replaced the old type-into-a-booting-pane path, whose
 // REPL-wait + inject round-trips were the 10-20s "new topic is slow / not ready to receive" lag (and
 // they raced the user's own first keystrokes into the fresh pane).
-async function spawnSession(dir: string, extra = '', presetSessionId?: string, account: Account = MAIN_ACCOUNT): Promise<string | null> {
+async function spawnSession(dir: string, extra = '', presetSessionId?: string, account: Account = MAIN_ACCOUNT, agent: AgentKind = 'claude'): Promise<string | null> {
   try {
     // tmux's `new-window -c` silently falls back to $HOME when it can't chdir into `dir` (e.g.
     // another user's 700 folder) — the session then runs in the wrong place, stuck on a trust
     // prompt for $HOME. Refuse up front instead; the caller's error reply names the folder.
     accessSync(dir, fsConstants.R_OK | fsConstants.X_OK)
-    ensureFolderTrusted(dir)   // so claude doesn't hit a trust dialog it can't answer on a new pane
-    // A brand-new session (not --resume/-c) inherits the focused session's model/effort/mode.
-    let inherit = !extra && focus.activePaneId
+    if (agent === 'claude') ensureFolderTrusted(dir)   // Claude-specific trust store; Codex uses launch sandbox policy
+    // A brand-new Claude session (not --resume/-c) inherits the focused session's model/effort/mode.
+    let inherit = agent === 'claude' && !extra && focus.activePaneId
       ? await captureInheritedSettings(focus.activePaneId, focus.paneWatcher)
       : null
     // A brand-new session must still land in the user's standing mode AND effort preferences even
@@ -6409,7 +6492,7 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
     // (source pane mid-turn / off a prompt screen). Claude Code restores neither for us — effort
     // not even on --resume — so fill any gap from the persisted preference. Without this, the first
     // session after a daemon restart boots at 'default' mode / 'high' effort regardless of preference.
-    if (!extra) {
+    if (agent === 'claude' && !extra) {
       const mode = inherit && inherit.mode !== 'default' ? inherit.mode : lastFocusedMode
       const effort = inherit?.effort ?? fallbackEffort()
       if (mode !== 'default' || effort) inherit = { model: inherit?.model ?? null, effort, mode }
@@ -6418,7 +6501,7 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
     // the permission mode NOR the reasoning effort — seed both. Prefer the session's OWN last-known
     // values (topic revivals pass its sid); fall back to the persisted preferences for sid-less
     // resumes (DM /resume). The launch flags re-assert effort; a non-bypass mode is set post-REPL.
-    if (!inherit && /(?:^|\s)(?:--resume|-c)\b/.test(extra)) {
+    if (agent === 'claude' && !inherit && /(?:^|\s)(?:--resume|-c)\b/.test(extra)) {
       // Prefer the session's OWN remembered dials. presetSessionId is the topic's sid when the
       // caller knew it; otherwise fall back to the cwd's parked topic (a /resume that didn't resolve
       // a preset still has one for this dir) so the resumed session keeps its effort/mode instead of
@@ -6466,7 +6549,19 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
     // bypass's safety gate, so no prompt), and bypass stays switchable on demand. 'default' is normal
     // mode, so it needs no flag.
     if (inherit?.mode && inherit.mode !== 'default') launchFlags.push(`--permission-mode ${inherit.mode}`)
-    const cmd = `${envPrefix}claude --allow-dangerously-skip-permissions${extra ? ` ${extra}` : ''}${launchFlags.length ? ` ${launchFlags.join(' ')}` : ''}`
+    let cmd: string
+    if (agent === 'codex') {
+      const explicitResume = /(?:^|\s)--resume\s+([^\s]+)/.exec(extra)?.[1]
+      const remembered = presetSessionId ? getTopicBySession(presetSessionId)?.agentSessionId : undefined
+      cmd = `${envPrefix}${codexLaunchCommand({
+        kind: 'codex',
+        ...(explicitResume ? { resumeId: explicitResume } : remembered ? { resumeId: remembered } : extra.trim() === '-c' ? { resumeLast: true } : {}),
+        model: process.env.CODEX_MODEL || null,
+        effort: process.env.CODEX_REASONING_EFFORT || null,
+      }, process.env.CODEX_BIN || 'codex')}`
+    } else {
+      cmd = `${envPrefix}claude --allow-dangerously-skip-permissions${extra ? ` ${extra}` : ''}${launchFlags.length ? ` ${launchFlags.join(' ')}` : ''}`
+    }
     const { stdout } = await exec('tmux', ['new-window', '-d', '-P', '-F', '#{pane_id}', ...target, '-c', dir, cmd], { timeout: 5000 })
     const newPane = stdout.trim()
     if (newPane) {
@@ -6476,7 +6571,9 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
         await exec('tmux', ['set-option', '-p', '-t', newPane, TELEGRAM_PANE_OPT, INSTANCE_ID], { timeout: 2000 })
         await exec('tmux', ['set-option', '-p', '-t', newPane, '@slack', '1'], { timeout: 2000 })
         await exec('tmux', ['set-option', '-p', '-t', newPane, '@discord', '1'], { timeout: 2000 })
+        await exec('tmux', ['set-option', '-p', '-t', newPane, AGENT_PANE_OPT, agent], { timeout: 2000 })
       } catch {}
+      if (presetSessionId && agent === 'codex') updateTopic(presetSessionId, { agent: 'codex' })
       // Pre-bound topic (user-created tab): stamp its sessionId at birth so discovery resolves
       // the pane straight to that topic instead of minting a fresh id + duplicate topic.
       if (presetSessionId) await stampPaneSession(newPane, presetSessionId)
@@ -6527,7 +6624,8 @@ bot.command('resume', async ctx => {
   const lines = recents.map((s, i) => {
     const folder = s.cwd.split('/').filter(Boolean).pop() || s.cwd || '—'
     const acct = accountForProjectsDir(s.root)
-    const who = acct.name === 'main' ? '' : ` · 👤 ${escapeHtml(acct.name)}`
+    const kind = agentForSession(s.sessionId, allProjectsDirs())
+    const who = kind === 'codex' ? ' · 🤖 Codex' : acct.name === 'main' ? '' : ` · 👤 ${escapeHtml(acct.name)}`
     const title = s.title ? ` — <i>${escapeHtml(s.title)}</i>` : ''
     kb.text(`${i + 1}`, inTopic ? `resumehere:${s.sessionId}:${thread}` : `resume:${s.sessionId}`)
     // Row layout: the latest session alone on row 1, then 3 per row (2-4, 5-7, 8-10).
@@ -8081,14 +8179,15 @@ bot.on('callback_query:data', async ctx => {
     const pane = topicSid ? await paneForSession(topicSid).catch(() => null) : null
     if (pane) {
       await ctx.editMessageText('🔄 Resuming that session in this topic — reconnecting…', { parse_mode: 'HTML' }).catch(() => {})
-      if (!(await restartPaneSessionCore(pane, id)))
+      if (!(await restartPaneSessionCore(pane, id, undefined, agentForSession(id, allProjectsDirs()))))
         await channel.sendText(chat, '❌ Couldn’t resume that session here.', { threadId: String(thread) }).catch(() => {})
       return
     }
     // Topic's pane is gone → spawn the chosen session pinned to this topic (reopen the tab).
     const hit = findSessionCwd(id, allProjectsDirs())
     const dir = hit?.cwd ?? homedir()
-    const ok = await spawnSession(dir, `--resume ${id}`, topicSid, hit ? accountForProjectsDir(hit.root) : MAIN_ACCOUNT)
+    const kind = agentForSession(id, allProjectsDirs())
+    const ok = await spawnSession(dir, `--resume ${id}`, topicSid, kind === 'claude' && hit ? accountForProjectsDir(hit.root) : MAIN_ACCOUNT, kind)
     if (ok && topicSid) await reopenSessionTopic(topicSid)
     await ctx.editMessageText(ok
       ? `🔄 Resuming in <code>${escapeHtml(dir)}</code> — reconnecting…`
@@ -8109,6 +8208,7 @@ bot.on('callback_query:data', async ctx => {
     const id = resumeMatch[1]
     const hit = findSessionCwd(id, allProjectsDirs())
     const dir = hit?.cwd ?? homedir()
+    const kind = agentForSession(id, allProjectsDirs())
     // Reuse an existing topic parked for this cwd (its pane is gone) instead of letting discovery
     // mint a fresh tg-sid: without a preset, the new pane relies on racy cwd-adoption and opens a
     // needless second topic that it then abandons when adoption routes it back to the original.
@@ -8119,7 +8219,7 @@ bot.on('callback_query:data', async ctx => {
       if (cand && !(await paneForSession(cand.sessionId).catch(() => null))) preset = cand.sessionId
     }
     // Resume under the account the session was recorded in (its projects root names it).
-    const ok = await spawnSession(dir, `--resume ${id}`, preset, hit ? accountForProjectsDir(hit.root) : MAIN_ACCOUNT)
+    const ok = await spawnSession(dir, `--resume ${id}`, preset, kind === 'claude' && hit ? accountForProjectsDir(hit.root) : MAIN_ACCOUNT, kind)
     if (ok && preset) await reopenSessionTopic(preset)   // reopen the tab NOW if it was closed
     await ctx.reply(ok
       ? `🔄 Resuming in <code>${escapeHtml(dir)}</code> — connecting to it shortly.`

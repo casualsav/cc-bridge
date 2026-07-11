@@ -10,7 +10,7 @@ import { sleep } from './proc.ts'
 import { capturePane, paneCwd, paneAlive, type PaneWatcher } from './pane-io.ts'
 import { focus, pendingMultiSelect, freeTextPrompts, chatPrompts, stuckCards, replyTargets, promptCards, prunePromptCards } from './state.ts'
 import { loadAccess } from './access.ts'
-import { finalRepliesAfter } from './transcript.ts'
+import { finalRepliesAfter } from './agent-transcript.ts'
 import { detectPermissionPrompt, onNormalPrompt, permPromptToken, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen } from './prompt.ts'
 
 type PromptRelayDeps = {

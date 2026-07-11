@@ -127,7 +127,7 @@ const completeReply = (l: Line) => (l.payload?.last_agent_message ?? '').trim()
 export type RecentSession = { sessionId: string; cwd: string; mtime: number; title: string; root: string }
 
 // The conversation UUID embedded in a rollout filename: rollout-<ts>-<uuid>.jsonl → <uuid>.
-function sessionIdOf(filename: string): string {
+export function sessionIdOf(filename: string): string {
   const m = filename.match(/^rollout-.*-([0-9a-fA-F-]{36})\.jsonl$/)
   return m ? m[1] : filename.replace(/\.jsonl$/, '')
 }

@@ -2,7 +2,7 @@ import { test, expect, beforeEach } from 'bun:test'
 import { writeFileSync } from 'node:fs'
 import {
   _resetForTest, isTopicMode, getGroupChatId, setGroupChatId,
-  getTopicBySession, getSessionByThread, findTopicByCwd,
+  getTopicBySession, getSessionByThread, findTopicByCwd, topicAgent,
   setTopic, updateTopic, removeTopic, listTopics, genSessionId,
   getGeneralSession, getGeneralCwd, setGeneralSession, getBaseCwd, setBaseCwd,
   dismissSession, isSessionDismissed, undismissSession, listDismissedSessions,
@@ -45,6 +45,11 @@ test('topics are looked up by session id and reverse-looked-up by thread id', ()
   expect(getTopicBySession('missing')).toBeUndefined()
   expect(getSessionByThread(22)).toBe('bbbb')
   expect(getSessionByThread(999)).toBeUndefined()
+})
+
+test('legacy topics default to Claude while Codex identity is explicit', () => {
+  expect(topicAgent(entry(1))).toBe('claude')
+  expect(topicAgent({ ...entry(2), agent: 'codex' })).toBe('codex')
 })
 
 test('findTopicByCwd prefers an open entry over a closed one', () => {
