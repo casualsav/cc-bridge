@@ -682,7 +682,8 @@ export function onNormalPrompt(paneText: string): boolean {
   }
   // Codex uses an unbordered `›` composer and a model/mode/cwd footer. Require both so a numbered
   // select-menu cursor (`› 1. …`) is never mistaken for a safe input box.
-  const codex = lines.slice(-16)
+  const lastNonblank = lines.findLastIndex(l => l.trim().length > 0)
+  const codex = lines.slice(Math.max(0, lastNonblank - 15), lastNonblank + 1)
   const hasCodexFooter = codex.some(l => /^\s*gpt-[\w.-]+\s+.+\s·\s.+/.test(l))
   const hasCodexComposer = codex.some(l => /^\s*›(?!\s*\d+\.)/.test(l))
   if (hasCodexFooter && hasCodexComposer) return true

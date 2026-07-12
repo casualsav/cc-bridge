@@ -331,6 +331,7 @@ test('onNormalPrompt recognizes the Codex composer and rejects a Codex select me
     '› Improve documentation in @filename',
     '',
     '  gpt-5.6-sol default · ~/projects/cc-bridge',
+    ...Array(24).fill(''),
   ].join('\n')
   expect(onNormalPrompt(idle)).toBe(true)
 
