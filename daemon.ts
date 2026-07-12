@@ -2529,7 +2529,7 @@ async function attemptLimitFailover(hitAccount: Account, origin: string | null):
     const cwd = await paneCwd(pane).catch(() => null)
     const src = cwd ? await transcriptForPane(pane, cwd) : null
     if (!src || !existsSync(src)) return null
-    const id = basename(src, '.jsonl')
+    const id = agentSessionId(src)
     // Mirror the transcript into the target account at the SAME relative path so --resume finds it.
     const dest = join(projectsDirOf(target), relative(projectsDirOf(hitAccount), src))
     mkdirSync(dirname(dest), { recursive: true })
@@ -4207,6 +4207,10 @@ async function doReadout(ctx: Context, kind: 'cost' | 'context' | 'usage'): Prom
   if (!dmCommandGate(ctx)) return
   const t = await commandTarget(ctx)
   if (!t) return
+  if (await paneAgentKind(t.paneId) === 'codex') {
+    await codexReadout(ctx, t, kind)
+    return
+  }
   if (detectWorking(await capturePane(t.paneId))) {
     // Injecting into a busy session just queues the command (it never runs → nothing to read)
     // and resizing the pane mid-render leaves artifacts. Wait for a resting prompt instead.
@@ -4214,6 +4218,30 @@ async function doReadout(ctx: Context, kind: 'cost' | 'context' | 'usage'): Prom
     return
   }
   await runReadout(t, String(ctx.chat!.id), kind)
+}
+
+// Codex has no /cost, /context, or /usage slash commands (those are Claude Code's). Its usage
+// metrics live in the rollout log's token_count events, which currentTurnTokens already parses.
+// So for a Codex pane we read the live token figures from the rollout instead of typing a CC
+// command the CLI would reject. Cost and per-account usage limits aren't surfaced by the Codex
+// CLI at all — say so plainly rather than relaying a no-op.
+async function codexReadout(ctx: Context, t: CommandTarget, kind: 'cost' | 'context' | 'usage'): Promise<void> {
+  if (kind === 'cost') {
+    await ctx.reply('📊 <b>Cost</b> — the Codex CLI doesn’t report per-session cost. Track spend via your OpenAI/ChatGPT plan dashboard.', { parse_mode: 'HTML' }).catch(() => {})
+    return
+  }
+  if (kind === 'usage') {
+    await ctx.reply('📈 <b>Usage</b> — the Codex CLI doesn’t surface a usage dashboard. Plan limits reset on OpenAI’s side; in-session token usage is under <code>/context</code>.', { parse_mode: 'HTML' }).catch(() => {})
+    return
+  }
+  // /context: report the live token counts from the rollout (the current turn's latest token_count).
+  const cwd = await paneCwd(t.paneId).catch(() => null)
+  const file = cwd ? await transcriptForPane(t.paneId, cwd) : null
+  if (!file) { await ctx.reply('📐 <b>Context</b> — couldn’t find this session’s rollout to read tokens.'); return }
+  const { output, context } = currentTurnTokens(file)
+  const ctxK = context > 0 ? `${(context / 1000).toFixed(1)}k tokens this turn` : 'no token data yet this turn'
+  const outK = output > 0 ? ` · ${output} output` : ''
+  await ctx.reply(`📐 <b>Context</b> — <code>${ctxK}${outK}</code>`, { parse_mode: 'HTML' }).catch(() => {})
 }
 
 // Inject the command, capture + relay its real output (chunked), then return to the prompt. Acts on
@@ -4825,7 +4853,7 @@ async function restartAllStaleSessions(chat: string, onlyStale = true): Promise<
       }
       const sid = await sessionForPane(pane, false).catch(() => null)
       const name = (sid ? getTopicBySession(sid)?.name : null) ?? (basename(cwd ?? '') || 'session')
-      targets.push({ pane, sid, name, id: basename(file, '.jsonl'), cwd })
+      targets.push({ pane, sid, name, id: agentSessionId(file), cwd })
     } catch {}
   }
   if (!targets.length) { await say(onlyStale ? '✅ Every session is already on the current Claude — nothing to restart.' : 'ℹ️ No active sessions to restart.'); return }
@@ -6767,7 +6795,7 @@ bot.command('restart', async ctx => {
   // so the core handles both.)
   const cwd = await paneCwd(paneId).catch(() => null)
   const file = cwd ? await transcriptForPane(paneId, cwd) : null
-  const id = file ? basename(file, '.jsonl') : null
+  const id = file ? agentSessionId(file) : null
   if (!id) { await ctx.reply('⚠️ Couldn’t find this session’s id to resume — restart it manually.'); return }
   await ctx.reply('♻️ Restarting the session — <code>/exit</code> then resume…', { parse_mode: 'HTML' })
   const now = await restartPaneSessionCore(paneId, id)
