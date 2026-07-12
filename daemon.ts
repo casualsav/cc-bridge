@@ -6302,14 +6302,14 @@ function failoverChain(): FailoverHop[] {
 function failoverPanelText(): string {
   const a = loadAccess()
   const lines = failoverChain().map((h, i) => {
-    if (h.kind === 'codex') return `${i + 1}. 🤖 Codex`
+    if (h.kind === 'codex') return `${i + 1}. ✳️ Codex`
     const acct = accountByName(h.account!)
     return `${i + 1}. 👤 ${escapeHtml(h.account!)}${acct && !accountLoggedIn(acct) ? ' · ⚠️ not logged in' : ''}`
   })
   // Codex model/effort — shown only when Codex is set up; governs failover-to-Codex AND every Codex
   // session. Names the CODEX_MODEL env as the source when no in-app choice is set, so it's discoverable.
   const codexCfg = codexAvailable()
-    ? `\n\n🤖 <b>Codex</b> — model <b>${escapeHtml(loadAccess().codexModel || (process.env.CODEX_MODEL ? `${process.env.CODEX_MODEL} (env)` : 'default'))}</b> · ` +
+    ? `\n\n✳️ <b>Codex</b> — model <b>${escapeHtml(loadAccess().codexModel || (process.env.CODEX_MODEL ? `${process.env.CODEX_MODEL} (env)` : 'default'))}</b> · ` +
       `effort <b>${escapeHtml(codexLaunchEffort() ?? 'default')}</b>\n<i>Used when a session fails over to Codex (and for every Codex session).</i>`
     : ''
   return `🔀 <b>Limit failover</b> — <b>${a.limitFailover === true ? 'on' : 'off'}</b>\n\n` +
@@ -6322,11 +6322,11 @@ function failoverPanelKeyboard(): InlineKeyboard {
   kb.text(a.limitFailover === true ? '🔀 On' : '💤 Off', 'fo:toggle').row()
   for (const h of failoverChain()) {
     const key = hopKey(h)
-    kb.text('↑', `fo:up:${key}`).text('↓', `fo:down:${key}`).text(h.kind === 'codex' ? '🤖 Codex' : `👤 ${h.account}`, 'fo:noop').row()
+    kb.text('↑', `fo:up:${key}`).text('↓', `fo:down:${key}`).text(h.kind === 'codex' ? '✳️ Codex' : `👤 ${h.account}`, 'fo:noop').row()
   }
   if (codexAvailable()) {
     const m = codexLaunchModel()
-    kb.text(`🤖 Model: ${m ? codexPrettyModel(m) : 'default'}`, 'fo:cxmodel')
+    kb.text(`✳️ Model: ${m ? codexPrettyModel(m) : 'default'}`, 'fo:cxmodel')
       .text(`⚡ Effort: ${codexLaunchEffort() ?? 'default'}`, 'fo:cxeffort').row()
   }
   return kb.text('‹ Back', 'fo:back')
@@ -7602,7 +7602,7 @@ bot.on('callback_query:data', async ctx => {
       const thread = ctx.callbackQuery.message?.message_thread_id
       const cur = loadAccess().codexModel
       const sent = await channel.sendText(String(ctx.chat!.id),
-        `🤖 <b>Codex model</b> — used when a session fails over to Codex, and for every Codex session.\n\n` +
+        `✳️ <b>Codex model</b> — used when a session fails over to Codex, and for every Codex session.\n\n` +
         `Currently: ${cur ? `<code>${escapeHtml(cur)}</code>` : (process.env.CODEX_MODEL ? `<code>${escapeHtml(process.env.CODEX_MODEL)}</code> (from CODEX_MODEL)` : 'Codex default')}\n\n` +
         `Reply with a Codex model id (e.g. <code>gpt-5.6-sol</code>), or <code>default</code> to clear.`,
         { ...(thread ? { threadId: String(thread) } : {}), forceReply: { placeholder: 'Codex model id' } }).catch(() => null)
@@ -9603,7 +9603,7 @@ bot.on('message:text', async ctx => {
           }
           return
         }
-        // Codex model id from the failover panel's 🤖 Model button — takes effect on the NEXT Codex
+        // Codex model id from the failover panel's ✳️ Model button — takes effect on the NEXT Codex
         // launch/failover. "default"/"none"/empty clears it back to the CODEX_MODEL env / Codex default.
         case 'codexmodel': {
           const raw = text.trim()
@@ -9619,8 +9619,8 @@ bot.on('message:text', async ctx => {
           a.codexModel = clear ? undefined : raw
           saveAccess(a)
           await ctx.reply(clear
-            ? `🤖 <b>Codex model cleared</b> — using ${process.env.CODEX_MODEL ? `<code>${escapeHtml(process.env.CODEX_MODEL)}</code> (CODEX_MODEL env)` : 'Codex\'s default'}.`
-            : `🤖 <b>Codex model set:</b> <code>${escapeHtml(raw)}</code> — takes effect on the next Codex launch/failover.`,
+            ? `✳️ <b>Codex model cleared</b> — using ${process.env.CODEX_MODEL ? `<code>${escapeHtml(process.env.CODEX_MODEL)}</code> (CODEX_MODEL env)` : 'Codex\'s default'}.`
+            : `✳️ <b>Codex model set:</b> <code>${escapeHtml(raw)}</code> — takes effect on the next Codex launch/failover.`,
             { parse_mode: 'HTML' })
           if (target.panelMsgId) {
             await editRichMessage(TOKEN!, String(ctx.chat!.id), target.panelMsgId, htmlPanelToRich(failoverPanelText()), failoverPanelKeyboard())
