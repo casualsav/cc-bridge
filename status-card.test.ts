@@ -71,12 +71,18 @@ test('Codex model names and status head stay compact', () => {
   expect(codexPrettyModel('gpt-5.4-mini')).toBe('gpt-5.4-mini')
   expect(codexStatusHead('gpt-5.6-sol', 42, 10, 44)).toBe('🧠 Sol 🕒 10% 📅 44% 💾 42%')
   expect(codexStatusHead('gpt-5.6-terra', null, null, null)).toBe('🧠 Terra')
+  // Effort + access badges follow the model, mirroring the Claude head; "default" effort is omitted.
+  expect(codexStatusHead('gpt-5.6-sol', 42, 10, 44, 'high', 'yolo')).toBe('🧠 Sol ⚡high 🛡yolo 🕒 10% 📅 44% 💾 42%')
+  expect(codexStatusHead('gpt-5.6-sol', null, null, null, 'medium', 'auto')).toBe('🧠 Sol ⚡med 🛡auto')
+  expect(codexStatusHead('gpt-5.6-sol', null, null, null, 'default', 'read')).toBe('🧠 Sol 🛡read')
 })
 
-test('Codex status line exposes model, limits, and context percentages', () => {
-  const cap = `› Summarize recent commits\n\n  gpt-5.6-sol default · 5h 10% left · weekly 44% left · Context 12% used · ~/projects/cc-bridge\n`
-  expect(parseCodexStatusline(cap)).toEqual({ model: 'gpt-5.6-sol', h5: 10, weekly: 44, ctxUsed: 12 })
-  expect(parseCodexStatusline('gpt-5.6-luna high · ~/work')).toEqual({ model: 'gpt-5.6-luna', h5: null, weekly: null, ctxUsed: null })
+test('Codex status line exposes model, effort, access, limits, and context', () => {
+  const cap = `› Summarize recent commits\n\n  gpt-5.6-sol high · 5h 10% left · weekly 44% left · Context 12% used · Workspace · ~/projects/cc-bridge\n`
+  expect(parseCodexStatusline(cap)).toEqual({ model: 'gpt-5.6-sol', effort: 'high', access: 'auto', h5: 10, weekly: 44, ctxUsed: 12 })
+  // Read Only / Full Access map to read / yolo; a non-reasoning line leaves effort null.
+  expect(parseCodexStatusline('gpt-5.6-luna · 5h 5% left · Read Only · ~/w')?.access).toBe('read')
+  expect(parseCodexStatusline('gpt-5.6-luna high · Full Access · ~/w')).toEqual({ model: 'gpt-5.6-luna', effort: 'high', access: 'yolo', h5: null, weekly: null, ctxUsed: null })
   expect(parseCodexStatusline('❯ Claude Code')).toBe(null)
 })
 

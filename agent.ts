@@ -38,7 +38,7 @@ export function codexLaunchCommand(opts: AgentLaunch, bin = process.env.CODEX_BI
     '--no-alt-screen',
     '--ask-for-approval', approval,
     '--sandbox', sandbox,
-    '-c', shellQuote('tui.status_line=["model-with-reasoning","five-hour-limit","weekly-limit","context-used","current-dir"]'),
+    '-c', shellQuote('tui.status_line=["model-with-reasoning","five-hour-limit","weekly-limit","context-used","permissions","current-dir"]'),
   ]
   if (opts.model) flags.push('--model', token(opts.model))
   if (opts.effort && ['low', 'medium', 'high', 'xhigh'].includes(opts.effort))

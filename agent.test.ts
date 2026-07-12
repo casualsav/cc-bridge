@@ -14,7 +14,7 @@ test('legacy or unknown agent identity remains Claude', () => {
 
 test('Codex fresh launch defaults to sandboxed non-interactive approvals', () => {
   expect(codexLaunchCommand({ kind: 'codex' }, '/opt/codex')).toBe(
-    `/opt/codex --no-alt-screen --ask-for-approval never --sandbox workspace-write -c 'tui.status_line=["model-with-reasoning","five-hour-limit","weekly-limit","context-used","current-dir"]'`,
+    `/opt/codex --no-alt-screen --ask-for-approval never --sandbox workspace-write -c 'tui.status_line=["model-with-reasoning","five-hour-limit","weekly-limit","context-used","permissions","current-dir"]'`,
   )
 })
 
@@ -22,7 +22,7 @@ test('Codex resume carries session, model, and reasoning effort', () => {
   expect(codexLaunchCommand({
     kind: 'codex', resumeId: 'abc-123', model: 'gpt-5.6-sol', effort: 'high',
   }, '/opt/codex')).toBe(
-    `/opt/codex resume abc-123 --no-alt-screen --ask-for-approval never --sandbox workspace-write -c 'tui.status_line=["model-with-reasoning","five-hour-limit","weekly-limit","context-used","current-dir"]' --model gpt-5.6-sol -c 'model_reasoning_effort="high"'`,
+    `/opt/codex resume abc-123 --no-alt-screen --ask-for-approval never --sandbox workspace-write -c 'tui.status_line=["model-with-reasoning","five-hour-limit","weekly-limit","context-used","permissions","current-dir"]' --model gpt-5.6-sol -c 'model_reasoning_effort="high"'`,
   )
 })
 

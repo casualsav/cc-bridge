@@ -375,7 +375,15 @@ export function codexPrettyModel(id: string): string {
   return family ? family[0].toUpperCase() + family.slice(1).toLowerCase() : id
 }
 
-export type CodexStatuslineData = { model: string; h5: number | null; weekly: number | null; ctxUsed: number | null }
+// Access posture from Codex's `permissions` status item, mapped to the read/auto/yolo trichotomy
+// (Codex renders "Read Only"/"Workspace"/"Full Access"; a named profile or network-enabled variant
+// renders "Custom permissions" and stays null — we only badge the three clean modes).
+export type CodexAccess = 'read' | 'auto' | 'yolo'
+
+export type CodexStatuslineData = {
+  model: string; effort: string | null; access: CodexAccess | null
+  h5: number | null; weekly: number | null; ctxUsed: number | null
+}
 
 export function parseCodexStatusline(paneText: string): CodexStatuslineData | null {
   const line = paneText.split('\n').map(l => stripAnsi(l).trim()).reverse()
@@ -387,17 +395,31 @@ export function parseCodexStatusline(paneText: string): CodexStatuslineData | nu
     const n = Number(line.match(re)?.[1])
     return Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : null
   }
+  // model-with-reasoning renders "<model> <effort>"; the effort word is absent for non-reasoning models.
+  const effort = line.match(/^gpt-[\w.-]+\s+([A-Za-z]+)/)?.[1]?.toLowerCase() ?? null
+  const accessRaw = line.match(/\b(Read Only|Workspace|Full Access)\b/i)?.[1]?.toLowerCase()
+  const access: CodexAccess | null =
+    accessRaw === 'read only' ? 'read' : accessRaw === 'workspace' ? 'auto' : accessRaw === 'full access' ? 'yolo' : null
   return {
     model,
+    effort,
+    access,
     h5: pct(/\b5h\s+(\d+)%\s+left\b/i),
     weekly: pct(/\bweekly\s+(\d+)%\s+left\b/i),
     ctxUsed: pct(/\bcontext\s+(\d+)%\s+used\b/i),
   }
 }
 
-export function codexStatusHead(model: string, ctxPct: number | null, h5: number | null, weekly: number | null): string {
+// Head grammar mirrors the Claude card: 🧠 model ⚡effort 🛡mode 🕒 5h 📅 weekly 💾 ctx. Effort "default"
+// is unset → omit it; "medium" → "med" to spare the collapsed-pin preview's horizontal space.
+export function codexStatusHead(
+  model: string, ctxPct: number | null, h5: number | null, weekly: number | null,
+  effort: string | null = null, access: CodexAccess | null = null,
+): string {
+  const effortBadge = effort && effort !== 'default' ? ` ⚡${escapeHtml(effort === 'medium' ? 'med' : effort)}` : ''
+  const accessBadge = access ? ` 🛡${access}` : ''
   const stats = [h5 != null ? `🕒 ${h5}%` : '', weekly != null ? `📅 ${weekly}%` : '', ctxPct != null ? `💾 ${ctxPct}%` : ''].filter(Boolean).join(' ')
-  return `🧠 ${escapeHtml(codexPrettyModel(model))}${stats ? ` ${stats}` : ''}`
+  return `🧠 ${escapeHtml(codexPrettyModel(model))}${effortBadge}${accessBadge}${stats ? ` ${stats}` : ''}`
 }
 
 // Codex status card — the same chrome (head · cwd/branch · pairing footer) but Codex-sourced data.
@@ -436,7 +458,7 @@ async function codexStatusCardText(paneId: string): Promise<string> {
     } catch {}
   }
   const branch = cwd ? await gitBranch(cwd) : null
-  const head = codexStatusHead(model, ctxPct, nativeStatus?.h5 ?? null, nativeStatus?.weekly ?? null)
+  const head = codexStatusHead(model, ctxPct, nativeStatus?.h5 ?? null, nativeStatus?.weekly ?? null, nativeStatus?.effort ?? null, nativeStatus?.access ?? null)
   const groups: string[] = []
   if (cwd) groups.push(`📁 <code>${escapeHtml(cwd)}</code>${branch ? ` · 🌿 ${escapeHtml(branch)}` : ''}`)
   if (ctxPct != null) groups.push(`💾 Context <code>${pinBar(ctxPct)}</code> ${ctxPct}%${tokens ? `  ·  ${tokens}` : ''}`)
