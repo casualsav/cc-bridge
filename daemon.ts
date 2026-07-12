@@ -116,7 +116,7 @@ import {
   initStatusCard, statusCardText, statusKeyboard, updateSessionPin, updateTopicPins,
   removeSessionPins, refreshSessionPin, sessionPins, pinTextCache, persistSessionPins,
   clearAllPins, clearTopicPins, createSessionPin, invalidatePaneStatus, paneStatus, lastModelInTranscript, lastVersionInTranscript,
-  prettyModel, modeBadge, lastTodosInTranscript,
+  prettyModel, modeBadge, lastTodosInTranscript, codexPrettyModel,
 } from './status-card.ts'
 import { buildTakeoverBrief } from './takeover-brief.ts'
 import { CODEX_HOME } from './codex-transcript.ts'
@@ -2541,6 +2541,12 @@ function codexAvailable(): boolean {
   return existsSync(join(CODEX_HOME, 'auth.json'))
 }
 
+// The model / reasoning-effort every Codex launch uses (normal spawn AND cross-engine failover): the
+// /settings choice wins, else the CODEX_MODEL/CODEX_REASONING_EFFORT env default, else Codex's own.
+const CODEX_EFFORTS = ['', 'low', 'medium', 'high', 'xhigh'] as const   // '' = unset (Codex default)
+function codexLaunchModel(): string | null { return loadAccess().codexModel || process.env.CODEX_MODEL || null }
+function codexLaunchEffort(): string | null { return loadAccess().codexEffort || process.env.CODEX_REASONING_EFFORT || null }
+
 // Assemble the first-turn brief for a cross-engine takeover (Claude↔Codex, where `--resume` is
 // impossible — the new engine gets a synthesized prompt instead). Every input is best-effort: a
 // slow/broken git repo or an unreadable transcript degrades the brief, it never blocks the swap.
@@ -4946,7 +4952,7 @@ async function restartPaneSessionCore(pane: string, id: string | null, accountOv
         if (agent === 'claude' && cwd) ensureFolderTrusted(cwd, account)
       }
       const resume = agent === 'codex'
-        ? codexLaunchCommand({ kind: 'codex', ...(id !== null ? { resumeId: id } : {}), model: process.env.CODEX_MODEL || null, effort: process.env.CODEX_REASONING_EFFORT || null }, process.env.CODEX_BIN || 'codex')
+        ? codexLaunchCommand({ kind: 'codex', ...(id !== null ? { resumeId: id } : {}), model: codexLaunchModel(), effort: codexLaunchEffort() }, process.env.CODEX_BIN || 'codex')
         : `${envPrefix}${claudeBin()} --allow-dangerously-skip-permissions${id !== null ? ` --resume ${id}` : ''}`
       await sendKeys(pane, [`hash -r; ${resume}`, 'Enter'])
       await waitForSettle(pane, 400, 30_000)
@@ -6300,9 +6306,15 @@ function failoverPanelText(): string {
     const acct = accountByName(h.account!)
     return `${i + 1}. 👤 ${escapeHtml(h.account!)}${acct && !accountLoggedIn(acct) ? ' · ⚠️ not logged in' : ''}`
   })
+  // Codex model/effort — shown only when Codex is set up; governs failover-to-Codex AND every Codex
+  // session. Names the CODEX_MODEL env as the source when no in-app choice is set, so it's discoverable.
+  const codexCfg = codexAvailable()
+    ? `\n\n🤖 <b>Codex</b> — model <b>${escapeHtml(loadAccess().codexModel || (process.env.CODEX_MODEL ? `${process.env.CODEX_MODEL} (env)` : 'default'))}</b> · ` +
+      `effort <b>${escapeHtml(codexLaunchEffort() ?? 'default')}</b>\n<i>Used when a session fails over to Codex (and for every Codex session).</i>`
+    : ''
   return `🔀 <b>Limit failover</b> — <b>${a.limitFailover === true ? 'on' : 'off'}</b>\n\n` +
     `On a usage-limit hit, the stuck session tries these in order:\n\n${lines.join('\n')}\n\n` +
-    `Reorder with ↑/↓.`
+    `Reorder with ↑/↓.${codexCfg}`
 }
 function failoverPanelKeyboard(): InlineKeyboard {
   const a = loadAccess()
@@ -6311,6 +6323,11 @@ function failoverPanelKeyboard(): InlineKeyboard {
   for (const h of failoverChain()) {
     const key = hopKey(h)
     kb.text('↑', `fo:up:${key}`).text('↓', `fo:down:${key}`).text(h.kind === 'codex' ? '🤖 Codex' : `👤 ${h.account}`, 'fo:noop').row()
+  }
+  if (codexAvailable()) {
+    const m = codexLaunchModel()
+    kb.text(`🤖 Model: ${m ? codexPrettyModel(m) : 'default'}`, 'fo:cxmodel')
+      .text(`⚡ Effort: ${codexLaunchEffort() ?? 'default'}`, 'fo:cxeffort').row()
   }
   return kb.text('‹ Back', 'fo:back')
 }
@@ -6889,8 +6906,8 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
       cmd = `${envPrefix}${codexLaunchCommand({
         kind: 'codex',
         ...(explicitResume ? { resumeId: explicitResume } : remembered ? { resumeId: remembered } : extra.trim() === '-c' ? { resumeLast: true } : {}),
-        model: process.env.CODEX_MODEL || null,
-        effort: process.env.CODEX_REASONING_EFFORT || null,
+        model: codexLaunchModel(),
+        effort: codexLaunchEffort(),
       }, process.env.CODEX_BIN || 'codex')}`
     } else {
       cmd = `${envPrefix}claude --allow-dangerously-skip-permissions${extra ? ` ${extra}` : ''}${launchFlags.length ? ` ${launchFlags.join(' ')}` : ''}`
@@ -7575,10 +7592,24 @@ bot.on('callback_query:data', async ctx => {
   // 🔀 Limit-failover sub-panel (settings → 🔀): on/off toggle + per-hop ↑/↓ reorder. The chain is
   // only PERSISTED here, on an explicit tap — never on panel open/read, so an untouched chain keeps
   // reading as today's default order (accounts main-first, Codex last) even after accounts change.
-  const foMatch = /^fo:(toggle|back|noop|up:(.+)|down:(.+))$/.exec(data)
+  const foMatch = /^fo:(toggle|back|noop|cxmodel|cxeffort|up:(.+)|down:(.+))$/.exec(data)
   if (foMatch) {
     if (foMatch[1] === 'noop') { await ctx.answerCallbackQuery().catch(() => {}); return }
     if (!(await cbAuth(ctx))) return
+    if (foMatch[1] === 'cxmodel') {
+      // Free-text entry (Codex model ids are open-ended): drop a force-reply; the answer (kind
+      // 'codexmodel') validates + saves + repaints this panel in place, like the base-folder flow.
+      const thread = ctx.callbackQuery.message?.message_thread_id
+      const cur = loadAccess().codexModel
+      const sent = await channel.sendText(String(ctx.chat!.id),
+        `🤖 <b>Codex model</b> — used when a session fails over to Codex, and for every Codex session.\n\n` +
+        `Currently: ${cur ? `<code>${escapeHtml(cur)}</code>` : (process.env.CODEX_MODEL ? `<code>${escapeHtml(process.env.CODEX_MODEL)}</code> (from CODEX_MODEL)` : 'Codex default')}\n\n` +
+        `Reply with a Codex model id (e.g. <code>gpt-5.6-sol</code>), or <code>default</code> to clear.`,
+        { ...(thread ? { threadId: String(thread) } : {}), forceReply: { placeholder: 'Codex model id' } }).catch(() => null)
+      if (sent) replyTargets.set(refKey(sent), { kind: 'codexmodel', panelMsgId: ctx.callbackQuery.message?.message_id })
+      await ctx.answerCallbackQuery().catch(() => {})
+      return
+    }
     await ctx.answerCallbackQuery().catch(() => {})
     if (foMatch[1] === 'back') {
       await showSettings(ctx, 'edit')
@@ -7587,6 +7618,10 @@ bot.on('callback_query:data', async ctx => {
     const a = loadAccess()
     if (foMatch[1] === 'toggle') {
       a.limitFailover = a.limitFailover !== true            // flip (default off)
+      saveAccess(a)
+    } else if (foMatch[1] === 'cxeffort') {
+      const next = CODEX_EFFORTS[(CODEX_EFFORTS.indexOf((a.codexEffort ?? '') as typeof CODEX_EFFORTS[number]) + 1) % CODEX_EFFORTS.length]
+      a.codexEffort = next || undefined                     // cycle default→low→medium→high→xhigh→default
       saveAccess(a)
     } else {
       const key = foMatch[2] ?? foMatch[3]!
@@ -9565,6 +9600,31 @@ bot.on('message:text', async ctx => {
           if (target.panelMsgId) {
             try { await editRichMessage(TOKEN!, String(ctx.chat!.id), target.panelMsgId, toInputRichMessage(settingsMarkdown()), settingsKeyboard()) }
             catch { await channel.editText({ chatId: String(ctx.chat!.id), messageId: String(target.panelMsgId) }, settingsText(), { buttons: kbToButtons(settingsKeyboard()) }).catch(() => {}) }
+          }
+          return
+        }
+        // Codex model id from the failover panel's 🤖 Model button — takes effect on the NEXT Codex
+        // launch/failover. "default"/"none"/empty clears it back to the CODEX_MODEL env / Codex default.
+        case 'codexmodel': {
+          const raw = text.trim()
+          const clear = raw === '' || /^(default|none|clear|env)$/i.test(raw)
+          if (!clear && !/^[\w.:-]{1,60}$/.test(raw)) {
+            const again = await ctx.reply(
+              `❌ That doesn't look like a model id. Reply with something like <code>gpt-5.6-sol</code>, or <code>default</code> to clear.`,
+              { parse_mode: 'HTML', reply_markup: { force_reply: true, input_field_placeholder: 'Codex model id' } }).catch(() => null)
+            if (again) replyTargets.set(`${ctx.chat?.id}:${again.message_id}`, target)
+            return
+          }
+          const a = loadAccess()
+          a.codexModel = clear ? undefined : raw
+          saveAccess(a)
+          await ctx.reply(clear
+            ? `🤖 <b>Codex model cleared</b> — using ${process.env.CODEX_MODEL ? `<code>${escapeHtml(process.env.CODEX_MODEL)}</code> (CODEX_MODEL env)` : 'Codex\'s default'}.`
+            : `🤖 <b>Codex model set:</b> <code>${escapeHtml(raw)}</code> — takes effect on the next Codex launch/failover.`,
+            { parse_mode: 'HTML' })
+          if (target.panelMsgId) {
+            await editRichMessage(TOKEN!, String(ctx.chat!.id), target.panelMsgId, htmlPanelToRich(failoverPanelText()), failoverPanelKeyboard())
+              .catch(() => channel.editText({ chatId: String(ctx.chat!.id), messageId: String(target.panelMsgId) }, failoverPanelText(), { buttons: kbToButtons(failoverPanelKeyboard()) }).catch(() => {}))
           }
           return
         }
