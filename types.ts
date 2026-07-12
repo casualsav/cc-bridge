@@ -4,7 +4,7 @@
 // imported from. Pulling the pure type declarations here lets state.ts (and future domain
 // modules) reference them without dragging in the daemon's side effects.
 import type net from 'node:net'
-import type { DaemonToShim } from './common.ts'
+import type { DaemonToShim, FailoverHop } from './common.ts'
 import type { PromptOption } from './prompt.ts'
 
 export type PendingEntry = { senderId: string; chatId: string; createdAt: number; expiresAt: number; replies: number }
@@ -34,6 +34,7 @@ export type Access = {
   updateChecks?: boolean  // daily update-available notification for bridge + Claude (default on)
   autoUpdate?: boolean    // auto-apply BRIDGE updates on the daily sweep instead of a tap-to-apply card (default off; opt-in — Claude is never auto-applied)
   limitFailover?: boolean  // on a usage-limit hit, move the stuck session to a still-available account and resume it there instead of waiting for the reset (default off)
+  failoverChain?: FailoverHop[]  // user-ordered try-in-order hops for limitFailover; unset/partial = default order (accounts main-first, Codex last)
   switchboard?: boolean    // show the live Switchboard roster line on the pinned card (default on) — a display toggle only; tg ask/answer/roster keep working when off
   claudingDraft?: boolean  // DM-only live "Clauding…" status draft (Bot API 10.1) while a turn runs (default on)
   replyMode?: 'thoughts' | 'actions' | 'off' | 'tools' | 'hybrid' | 'all' | 'final' | 'stream' | 'live'   // tools/hybrid/all/final/stream/live are legacy aliases

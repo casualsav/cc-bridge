@@ -136,3 +136,7 @@ export type InboundParams = {
   content: string
   meta: Record<string, string>   // chat_id, message_id?, user, user_id, ts, image_path?, attachment_*
 }
+
+// One hop in a user-ordered failover chain (see failover-chain.ts). account = Claude account name;
+// a Codex hop has none (single Codex today, shape allows more later).
+export type FailoverHop = { kind: 'claude' | 'codex'; account?: string }

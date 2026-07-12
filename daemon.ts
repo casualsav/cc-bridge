@@ -16,9 +16,10 @@ import {
   STATE_DIR, ACCESS_FILE, PREFS_FILE, APPROVED_DIR, ENV_FILE, INBOX_DIR,
   SOCKET_PATH, DAEMON_PID_FILE, PENDING_EVENTS_FILE,
   DAEMON_LOG_FILE, WATCHDOG_PID_FILE, HEARTBEAT_FILE,
-  type ShimToDaemon, type DaemonToShim, type InboundParams,
+  type ShimToDaemon, type DaemonToShim, type InboundParams, type FailoverHop,
 } from './common.ts'
 import { acquireTokenLock } from './token-lock.ts'
+import { hopKey, resolveChain, pickNextHop, moveHop } from './failover-chain.ts'
 
 // Code fingerprint captured at startup; sent to shims so they can detect and
 // replace a daemon left running stale code after a plugin upgrade.
@@ -33,7 +34,7 @@ import {
 import {
   initAccounts, listAccounts, accountByName, accountForTranscript, accountForProjectsDir,
   allProjectsDirs, addAccount, removeAccount, renameAccount, accountLoggedIn, healAccountConfigs, healMainStatusline,
-  MAIN_ACCOUNT, readDefaultMode, writeDefaultMode, projectsDirOf, pickFailoverAccount, type Account,
+  MAIN_ACCOUNT, readDefaultMode, writeDefaultMode, projectsDirOf, type Account,
 } from './accounts.ts'
 import { exec, sleep, hashText } from './proc.ts'
 import { ghAccounts, ghInstalled, ghSwitch, ghLogout, runGhLogin, provisionGh, type GhAccount } from './github.ts'
@@ -2571,6 +2572,15 @@ async function attemptLimitFailover(hitAccount: Account, origin: string | null):
       const snap = readUsageSnapshot(undefined, a)
       return !snap || [snap.fiveHour, snap.sevenDay].every(w => !w || w.pct < 100)
     }
+    // The user-ordered try-in-order chain (failover-chain.ts): membership is every registered account
+    // + Codex (if set up) regardless of login/cap state — that's applied only here, at pick time — so
+    // an untouched chain still resolves to today's default order (accounts main-first, Codex last).
+    const chain = resolveChain(loadAccess().failoverChain ?? [], listAccounts().map(a => a.name), codexAvailable())
+    const hopAvailable = (h: FailoverHop): boolean => {
+      if (h.kind === 'codex') return codexAvailable()
+      const a = accountByName(h.account!)
+      return !!a && accountLoggedIn(a) && snapshotOk(a)
+    }
     // The pane to move for a same-engine (Claude account→account) failover: the origin if it's live,
     // on the hit account, AND actually Claude — a Codex pane always reads as the `main` account (it
     // has no config-dir concept of its own), so without the kind check a main-account Claude cap could
@@ -2586,7 +2596,9 @@ async function attemptLimitFailover(hitAccount: Account, origin: string | null):
     // independent of it, so failing over to a Claude account here does NOT exclude main.
     if (origin && await paneAgentKind(origin) === 'codex') {
       if (!offMcpPanes.has(origin)) return null
-      const target = listAccounts().find(a => accountLoggedIn(a) && snapshotOk(a)) ?? null
+      const next = pickNextHop(chain, { kind: 'codex' }, hopAvailable)
+      if (!next || next.kind !== 'claude') return null
+      const target = accountByName(next.account!)
       if (!target) return null
       const cwd = await paneCwd(origin).catch(() => null)
       if (!cwd) return null
@@ -2596,10 +2608,14 @@ async function attemptLimitFailover(hitAccount: Account, origin: string | null):
       process.stderr.write(`daemon: limit failover: codex → claude (${target.name}) (pane ${origin})\n`)
       return { to: target.name, crossEngine: true, briefDelivered: st.briefDelivered }
     }
-    const target = pickFailoverAccount(hitAccount, snapshotOk)
-    if (target) {
-      const pane = await findClaudePane()
-      if (!pane) return null
+    const current: FailoverHop = { kind: 'claude', account: hitAccount.name }
+    const next = pickNextHop(chain, current, hopAvailable)
+    if (!next) return null
+    const pane = await findClaudePane()
+    if (!pane) return null
+    if (next.kind === 'claude') {
+      const target = accountByName(next.account!)
+      if (!target) return null
       // Session id + source transcript, resolved the same way restartPaneSessionCore does.
       const cwd = await paneCwd(pane).catch(() => null)
       const src = cwd ? await transcriptForPane(pane, cwd) : null
@@ -2613,10 +2629,7 @@ async function attemptLimitFailover(hitAccount: Account, origin: string | null):
       process.stderr.write(`daemon: limit failover: ${hitAccount.name} → ${target.name} (pane ${pane}, session ${id})\n`)
       return { to: target.name, crossEngine: false, briefDelivered: true }
     }
-    // Every Claude account is spent — cross-engine to Codex, if it's actually set up.
-    if (!codexAvailable()) return null
-    const pane = await findClaudePane()
-    if (!pane) return null
+    // Every Claude account ahead of it in the chain is spent — cross-engine to Codex.
     const cwd = await paneCwd(pane).catch(() => null)
     if (!cwd) return null
     const brief = await gatherTakeoverBrief(pane, cwd, 'claude', 'codex')
@@ -6274,6 +6287,34 @@ function settingsKeyboard(): InlineKeyboard {
   return kb
 }
 
+// 🔀 Limit failover sub-panel (settings → 🔀): the try-in-order chain of hops (Claude accounts +
+// Codex) a usage-limited session moves to. Shared resolution (failover-chain.ts) with
+// attemptLimitFailover, so the panel's numbered list is exactly what a real hit would try next.
+function failoverChain(): FailoverHop[] {
+  return resolveChain(loadAccess().failoverChain ?? [], listAccounts().map(a => a.name), codexAvailable())
+}
+function failoverPanelText(): string {
+  const a = loadAccess()
+  const lines = failoverChain().map((h, i) => {
+    if (h.kind === 'codex') return `${i + 1}. 🤖 Codex`
+    const acct = accountByName(h.account!)
+    return `${i + 1}. 👤 ${escapeHtml(h.account!)}${acct && !accountLoggedIn(acct) ? ' · ⚠️ not logged in' : ''}`
+  })
+  return `🔀 <b>Limit failover</b> — <b>${a.limitFailover === true ? 'on' : 'off'}</b>\n\n` +
+    `On a usage-limit hit, the stuck session tries these in order:\n\n${lines.join('\n')}\n\n` +
+    `Reorder with ↑/↓.`
+}
+function failoverPanelKeyboard(): InlineKeyboard {
+  const a = loadAccess()
+  const kb = new InlineKeyboard()
+  kb.text(a.limitFailover === true ? '🔀 On' : '💤 Off', 'fo:toggle').row()
+  for (const h of failoverChain()) {
+    const key = hopKey(h)
+    kb.text('↑', `fo:up:${key}`).text('↓', `fo:down:${key}`).text(h.kind === 'codex' ? '🤖 Codex' : `👤 ${h.account}`, 'fo:noop').row()
+  }
+  return kb.text('‹ Back', 'fo:back')
+}
+
 // 🧷 Preferred-mode sub-panel (settings → Preferred mode): Claude Code's permissions.defaultMode — the
 // mode each account's sessions LAUNCH in. Saved in the account's settings.json, so a user's choice
 // (bypass / auto / acceptEdits / plan / default) survives every relaunch path — `claude update`,
@@ -7484,6 +7525,10 @@ bot.on('callback_query:data', async ctx => {
       await showHtmlPanel(ctx, 'edit', ttsText(), ttsKeyboard())
       return
     }
+    if (setMatch[1] === 'failover') {
+      await showHtmlPanel(ctx, 'edit', failoverPanelText(), failoverPanelKeyboard())
+      return
+    }
     if (setMatch[1] === 'base') {
       // Not a toggle — drop a force-reply asking for the new folder; the answer (kind 'basedir')
       // repaints this panel in place (panelMsgId rides along in the reply target, like 'budget').
@@ -7517,9 +7562,6 @@ bot.on('callback_query:data', async ctx => {
     } else if (setMatch[1] === 'confirmreset') {
       a.confirmReset = a.confirmReset === false             // flip (default on)
       saveAccess(a)
-    } else if (setMatch[1] === 'failover') {
-      a.limitFailover = a.limitFailover !== true            // flip (default off)
-      saveAccess(a)
     } else if (setMatch[1] === 'switchboard') {
       a.switchboard = a.switchboard === false               // flip (default on)
       saveAccess(a)
@@ -7527,6 +7569,34 @@ bot.on('callback_query:data', async ctx => {
       await updateSessionPin()               // repaint the pinned card(s) now
     }
     await showSettings(ctx, 'edit')
+    return
+  }
+
+  // 🔀 Limit-failover sub-panel (settings → 🔀): on/off toggle + per-hop ↑/↓ reorder. The chain is
+  // only PERSISTED here, on an explicit tap — never on panel open/read, so an untouched chain keeps
+  // reading as today's default order (accounts main-first, Codex last) even after accounts change.
+  const foMatch = /^fo:(toggle|back|noop|up:(.+)|down:(.+))$/.exec(data)
+  if (foMatch) {
+    if (foMatch[1] === 'noop') { await ctx.answerCallbackQuery().catch(() => {}); return }
+    if (!(await cbAuth(ctx))) return
+    await ctx.answerCallbackQuery().catch(() => {})
+    if (foMatch[1] === 'back') {
+      await showSettings(ctx, 'edit')
+      return
+    }
+    const a = loadAccess()
+    if (foMatch[1] === 'toggle') {
+      a.limitFailover = a.limitFailover !== true            // flip (default off)
+      saveAccess(a)
+    } else {
+      const key = foMatch[2] ?? foMatch[3]!
+      const resolved = resolveChain(a.failoverChain ?? [], listAccounts().map(x => x.name), codexAvailable())
+      const moved = moveHop(resolved, key, foMatch[1]!.startsWith('up:') ? 'up' : 'down')
+      // A no-op move (↑ on the first hop / ↓ on the last) returns the input unchanged (ref-equal) —
+      // don't persist then, or an untouched chain gets baked just for tapping an edge arrow.
+      if (moved !== resolved) { a.failoverChain = moved; saveAccess(a) }
+    }
+    await showHtmlPanel(ctx, 'edit', failoverPanelText(), failoverPanelKeyboard())
     return
   }
 
