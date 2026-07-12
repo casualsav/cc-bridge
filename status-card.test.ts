@@ -2,7 +2,7 @@ import { test, expect } from 'bun:test'
 import { writeFileSync, mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { prettyModel, lastModelInTranscript, lastTodosInTranscript, modeBadge, pinMessageGone, statusKeyboard, mergeStatus } from './status-card.ts'
+import { prettyModel, lastModelInTranscript, lastTodosInTranscript, modeBadge, pinMessageGone, statusKeyboard, mergeStatus, codexModelFromPane } from './status-card.ts'
 import type { StatuslineData } from './statusline.ts'
 
 const tmp = mkdtempSync(join(tmpdir(), 'sc-test-'))
@@ -45,6 +45,23 @@ test('lastTodosInTranscript reads the latest TodoWrite state', () => {
 test('modeBadge stays short for the pin preview', () => {
   expect(modeBadge('bypassPermissions')).toBe('🛡yolo')
   expect(modeBadge('default')).toBe('🛡ask')
+})
+
+test('codexModelFromPane scrapes the gpt-… id from the Codex footer line', () => {
+  const pane = [
+    '╭───────────────────────────────────────────╮',
+    '│ >_ OpenAI Codex (v0.144.1)                │',
+    '╰───────────────────────────────────────────╯',
+    '',
+    '› Improve documentation',
+    '',
+    '  gpt-5.6-sol default · ~/projects/cc-bridge',
+  ].join('\n')
+  expect(codexModelFromPane(pane)).toBe('gpt-5.6-sol')
+  // The footer alone is enough; the composer/header aren't required.
+  expect(codexModelFromPane('\n  gpt-5.4-mini high · /work\n')).toBe('gpt-5.4-mini')
+  // No Codex footer → null (a Claude pane won't false-positive).
+  expect(codexModelFromPane('❯ claude\n  Opus 4.8 · 12% context')).toBe(null)
 })
 
 test('pinMessageGone matches only gone-pin errors', () => {

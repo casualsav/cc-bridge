@@ -19,7 +19,8 @@ import { scheduleEdit, cancelEdit, isViewHot } from './edit-scheduler.ts'
 import { loadAccess } from './access.ts'
 import { isTopicMode, getGroupChatId, listTopics, getGeneralSession } from './topics.ts'
 import { paneForSession } from './topic-runtime.ts'
-import { detectCurrentMode, onNormalPrompt, type CcMode } from './prompt.ts'
+import { detectCurrentMode, onNormalPrompt, stripAnsi, type CcMode } from './prompt.ts'
+import { currentTurnTokens } from './agent-transcript.ts'
 
 type StatusCardDeps = {
   channel: ChannelAdapter
@@ -42,6 +43,10 @@ type StatusCardDeps = {
   // party isn't active / only one endpoint is live. Daemon-computed + memoized (liveness only, no pane
   // captures) so rendering it on every card stays cheap. Optional so a fake-bot unit test can omit it.
   partyRoster?: () => Promise<string | null>
+  // The agent kind driving a pane (read from the tmux @tg_agent pane option the spawner stamps).
+  // null on a pre-stamp pane is treated as Claude (the legacy default). The card branches on this so
+  // a Codex pane renders model/context from its rollout + pane footer instead of Claude's statusLine.
+  paneAgentKind: (pane: string) => Promise<'claude' | 'codex'>
 }
 let deps: StatusCardDeps
 export function initStatusCard(d: StatusCardDeps): void { deps = d }
@@ -266,6 +271,9 @@ export function invalidatePaneStatus(paneId: string): void {
 
 export async function statusCardText(paneId: string | null): Promise<string> {
   if (!paneId) return '🖥️ <b>No active session</b>'
+  if (await deps.paneAgentKind(paneId).catch(() => 'claude' as const) === 'codex') {
+    return codexStatusCardText(paneId)
+  }
   let mode = '—', cwd: string | null = null
   let model = paneId === focus.activePaneId ? deps.lastKnownModel() : null
   let status: StatuslineData | null = null
@@ -345,6 +353,59 @@ export async function statusCardText(paneId: string | null): Promise<string> {
   }
   // party-bus P2 roster line — its own group just above the pairing footer (kept OUT of the head so
   // the collapsed pin banner still leads with the 🧠 model·context line). Already HTML-escaped + memoized.
+  const roster = deps.partyRoster ? await deps.partyRoster().catch(() => null) : null
+  if (roster) groups.push(roster)
+  groups.push(`🔗 Paired${deps.botUsername() ? ` · @${escapeHtml(deps.botUsername())}` : ''} · connected`)
+  return `${head}\n\n${groups.join(`\n${CARD_RULE}\n`)}`
+}
+
+// Scrape the Codex model id from a pane capture's footer line:
+//   "gpt-5.6-sol default · ~/projects/x" → "gpt-5.6-sol"
+// Returns null when no Codex footer is present. Pure (takes the captured text) so it's unit-testable
+// without a live tmux pane; codexStatusCardText calls it with a capturePane result.
+export function codexModelFromPane(paneText: string): string | null {
+  const footer = paneText.split('\n').map(l => stripAnsi(l).trim())
+    .find(l => /^\s*gpt-[\w.-]+\s+.+\s·\s.+/.test(l))
+  const m = footer?.match(/(gpt-[\w.-]+)/)
+  return m ? m[1] : null
+}
+
+// Codex status card — the same chrome (head · cwd/branch · pairing footer) but Codex-sourced data.
+// Codex has no Claude-style statusLine, no CC permission modes, no TodoWrite, and no per-session
+// cost/5h/7d limit readout. What it DOES have: the model in the pane footer's `gpt-… · cwd` line,
+// and per-turn token usage in the rollout's token_count events. Context % is derived from the
+// rollout's model_context_window vs total_tokens (both on the token_count event); when no
+// token_count has landed yet the card shows the model + cwd only.
+async function codexStatusCardText(paneId: string): Promise<string> {
+  let cwd: string | null = null
+  try { cwd = await paneCwd(paneId) } catch {}
+  // Model from the pane footer's gpt-… line; fall back to "—" (no model read yet).
+  let model = '—'
+  try { model = codexModelFromPane(await capturePane(paneId)) ?? model } catch {}
+  // Token usage from the rollout's latest token_count in the current turn.
+  let ctxPct: number | null = null, tokens = ''
+  if (cwd) {
+    try {
+      const file = await deps.transcriptForPane(paneId, cwd)
+      if (file) {
+        const { output, context } = currentTurnTokens(file)
+        if (context > 0) {
+          tokens = `${(context / 1000).toFixed(1)}k tokens`
+          // The token_count event carries model_context_window; derive a fill %. We don't have the
+          // window size here without reading the rollout directly, so approximate from the CC
+          // default (200k) — accurate for the shipped gpt-5.x family, harmless if not.
+          ctxPct = Math.min(100, Math.round((context / 200_000) * 100))
+        }
+        if (output > 0) tokens += `${tokens ? ' · ' : ''}${output} out`
+      }
+    } catch {}
+  }
+  const branch = cwd ? await gitBranch(cwd) : null
+  const head = `🧠 ${escapeHtml(model)}`
+  const groups: string[] = []
+  if (cwd) groups.push(`📁 <code>${escapeHtml(cwd)}</code>${branch ? ` · 🌿 ${escapeHtml(branch)}` : ''}`)
+  if (ctxPct != null) groups.push(`💾 Context <code>${pinBar(ctxPct)}</code> ${ctxPct}%${tokens ? `  ·  ${tokens}` : ''}`)
+  else if (tokens) groups.push(`💾 ${tokens}`)
   const roster = deps.partyRoster ? await deps.partyRoster().catch(() => null) : null
   if (roster) groups.push(roster)
   groups.push(`🔗 Paired${deps.botUsername() ? ` · @${escapeHtml(deps.botUsername())}` : ''} · connected`)

@@ -283,6 +283,7 @@ initStatusCard({
   usageSnapshotForPane: async pane => readUsageSnapshot(undefined, await paneAccount(pane)),
   onTopicGone: (sid, threadId) => void handleTopicThreadGone(sid, threadId),
   partyRoster: partyRosterLine,   // party-bus P2: a compact live-roster line on the pinned card
+  paneAgentKind: paneAgentKind,   // Codex panes render a Codex-sourced status card (rollout tokens, pane model)
 })
 initUpdates({ channel })
 initPromptRelay({ channel, outboundTargetsFor, flushPendingText, transcriptForPane, lastRelayedUuid: () => lastRelayedUuid, resetPromptDedup, verifyPromptClosed, paneKeys })
