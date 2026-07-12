@@ -2,7 +2,7 @@ import { test, expect } from 'bun:test'
 import { writeFileSync, mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { prettyModel, lastModelInTranscript, lastTodosInTranscript, modeBadge, pinMessageGone, statusKeyboard, mergeStatus, codexModelFromPane } from './status-card.ts'
+import { prettyModel, lastModelInTranscript, lastTodosInTranscript, modeBadge, pinMessageGone, statusKeyboard, mergeStatus, codexModelFromPane, codexPrettyModel, codexStatusHead } from './status-card.ts'
 import type { StatuslineData } from './statusline.ts'
 
 const tmp = mkdtempSync(join(tmpdir(), 'sc-test-'))
@@ -62,6 +62,15 @@ test('codexModelFromPane scrapes the gpt-… id from the Codex footer line', () 
   expect(codexModelFromPane('\n  gpt-5.4-mini high · /work\n')).toBe('gpt-5.4-mini')
   // No Codex footer → null (a Claude pane won't false-positive).
   expect(codexModelFromPane('❯ claude\n  Opus 4.8 · 12% context')).toBe(null)
+})
+
+test('Codex model names and status head stay compact', () => {
+  expect(codexPrettyModel('gpt-5.6-sol')).toBe('Sol')
+  expect(codexPrettyModel('gpt-5.6-terra')).toBe('Terra')
+  expect(codexPrettyModel('gpt-5.6-luna')).toBe('Luna')
+  expect(codexPrettyModel('gpt-5.4-mini')).toBe('gpt-5.4-mini')
+  expect(codexStatusHead('gpt-5.6-sol', 42)).toBe('🧠 Sol 💾 42%')
+  expect(codexStatusHead('gpt-5.6-terra', null)).toBe('🧠 Terra')
 })
 
 test('pinMessageGone matches only gone-pin errors', () => {

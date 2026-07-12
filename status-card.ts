@@ -370,6 +370,15 @@ export function codexModelFromPane(paneText: string): string | null {
   return m ? m[1] : null
 }
 
+export function codexPrettyModel(id: string): string {
+  const family = id.match(/^gpt-[\d.]+-(sol|terra|luna)$/i)?.[1]
+  return family ? family[0].toUpperCase() + family.slice(1).toLowerCase() : id
+}
+
+export function codexStatusHead(model: string, ctxPct: number | null): string {
+  return `🧠 ${escapeHtml(codexPrettyModel(model))}${ctxPct != null ? ` 💾 ${ctxPct}%` : ''}`
+}
+
 // Codex status card — the same chrome (head · cwd/branch · pairing footer) but Codex-sourced data.
 // Codex has no Claude-style statusLine, no CC permission modes, no TodoWrite, and no per-session
 // cost/5h/7d limit readout. What it DOES have: the model in the pane footer's `gpt-… · cwd` line,
@@ -401,7 +410,7 @@ async function codexStatusCardText(paneId: string): Promise<string> {
     } catch {}
   }
   const branch = cwd ? await gitBranch(cwd) : null
-  const head = `🧠 ${escapeHtml(model)}`
+  const head = codexStatusHead(model, ctxPct)
   const groups: string[] = []
   if (cwd) groups.push(`📁 <code>${escapeHtml(cwd)}</code>${branch ? ` · 🌿 ${escapeHtml(branch)}` : ''}`)
   if (ctxPct != null) groups.push(`💾 Context <code>${pinBar(ctxPct)}</code> ${ctxPct}%${tokens ? `  ·  ${tokens}` : ''}`)
