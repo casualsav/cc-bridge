@@ -182,6 +182,11 @@ the file — the token is a credential):
 ```
 TELEGRAM_BOT_TOKEN=<token>
 TELEGRAM_TRANSCRIPT_OUTBOUND=1
+# Optional OpenAI Codex CLI support (use an absolute path when bare `codex` is shadowed):
+CODEX_BIN=/absolute/path/to/codex
+# Optional launch defaults; otherwise Codex's own config/default model is used:
+# CODEX_MODEL=gpt-5.6-sol
+# CODEX_REASONING_EFFORT=medium
 # transcription — only if not "off":
 TELEGRAM_TRANSCRIBE=<off|local|groq|openai>
 TELEGRAM_TRANSCRIBE_MODEL=<model>           # local/groq/openai

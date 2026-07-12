@@ -1,5 +1,7 @@
 ## cc-bridge
 
+Drive **Claude Code or OpenAI Codex CLI** from Telegram. Each chat/topic keeps its own terminal-agent identity, so Claude and Codex sessions can run side by side and resume with the correct CLI.
+
 <p align="center">
   <img src="assets/telegram-demo.jpg" width="380" alt="Claude Code driven from Telegram — live thinking, pinned status card with model, usage and context">
 </p>
@@ -7,6 +9,7 @@
 ## Requirements
 
 - [Claude Code](https://claude.com/claude-code) installed and logged in.
+- Optional: [OpenAI Codex CLI](https://github.com/openai/codex) installed and authenticated with ChatGPT. Set `CODEX_BIN=/absolute/path/to/codex` in the bridge `.env` if `codex` is not the correct executable on the daemon's `PATH`.
 - [Bun](https://bun.sh) (the runtime; dependencies install on first launch).
 - A Telegram bot token from [@BotFather](https://t.me/BotFather).
 - `tmux` — required for some features. Core messaging works without it via MCP.
@@ -26,11 +29,14 @@ For multi-session, add the Telegram bot as an admin with full rights in a Telegr
 
 Send text, media, slash commands, and voice messages through Telegram. In multi-session mode, adding new group topics starts a new session, deleting a topic closes that session. 
 
-These commands are added by the bridge. Everything else is Claude Code's own — see below.
+Use `/agent` to see the current terminal agent. `/agent claude` or `/agent codex` starts that CLI; in forum-topic mode they can run side by side. Existing topics remember their agent across restart and resume.
+
+These commands are added by the bridge. Everything else belongs to the active terminal CLI — see below.
 
 | Command | What it does |
 | --- | --- |
 | `/start` | Welcome + full feature guide (and pairing steps if not paired) |
+| `/agent [claude|codex]` | Show or start the terminal CLI for this chat/topic |
 | `/stop` | Interrupt the current task — sends Esc (alias `/esc`) |
 | `/cancel` | Clear a stuck force-reply prompt (e.g. an unanswered "name a folder") |
 | `/back` | Get a stuck session — an editor, a pager, or an unrecognized screen — back to the Claude prompt |
@@ -56,9 +62,9 @@ These commands are added by the bridge. Everything else is Claude Code's own —
 | `/continue` | Resume work — read `PLAN.md`/`DECISIONS.md`/`HANDOFF.md`/`CLAUDE.md`, run the Verify-state checks, then start the current task |
 | `/audit` | Audit the repo against `PLAN.md` (subagent) and reconcile task statuses |
 
-**Mode shortcuts:** `/mode` opens the permission-mode switcher; `/plan` `/auto` `/default` `/acceptedits` `/bypass` jump straight to one.
+**Mode shortcuts:** On Claude, `/mode` opens the permission-mode switcher and `/plan` `/auto` `/default` `/acceptedits` `/bypass` jump straight to one. On Codex, `/mode` opens native `/permissions`; `/model` and `/effort` open Codex's combined model/reasoning picker.
 
-**Everything else is Claude Code's own** — `/model`, `/effort`, `/compact`, `/context`, `/cost`, `/usage`, `/diff`, `/rewind`, and any others — relayed straight through to the session.
+**Everything else goes to the active CLI.** Common mappings include `/new`/`/clear` → Codex `/new`, `/rewind` → Codex `/fork`, and `/compact` → native `/compact`. Unhandled slash commands are relayed directly, so Codex commands such as `/review`, `/status`, `/usage`, `/skills`, `/mcp`, `/plugins`, `/hooks`, `/theme`, and `/experimental` remain available. Bridge `/context` reads Codex rollout tokens; Codex does not expose Claude-style dollar cost.
 
 
 ## Also: Slack & Discord
