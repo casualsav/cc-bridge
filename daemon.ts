@@ -1467,7 +1467,16 @@ async function auxRelayTick(): Promise<void> {
       } catch { /* transient (tmux/transcript) — retry next tick */ }
     })()))
   }
-  setTimeout(() => void auxRelayTick(), RELAY_POLL_MS)
+  scheduleAuxRelayTick()
+}
+
+function scheduleAuxRelayTick(delay = RELAY_POLL_MS): void {
+  setTimeout(() => {
+    void auxRelayTick().catch(e => {
+      process.stderr.write(`daemon: aux relay tick failed: ${e instanceof Error ? e.stack ?? e.message : String(e)}\n`)
+      scheduleAuxRelayTick()
+    })
+  }, delay)
 }
 
 // ---- Aux-pane prompt detection (forum-topics mode) ----
@@ -9899,7 +9908,10 @@ sweepInbox()
 setInterval(sweepInbox, 3_600_000).unref()
 
 // Forum-topics: start the parallel relay for non-focused sessions (no-op outside topic mode).
-void auxRelayTick()
+void auxRelayTick().catch(e => {
+  process.stderr.write(`daemon: initial aux relay tick failed: ${e instanceof Error ? e.stack ?? e.message : String(e)}\n`)
+  scheduleAuxRelayTick()
+})
 
 // Make the `tg` CLI + ensure-daemon launcher available to plugin-less sessions, no setup.
 provisionOffMcpTooling()
