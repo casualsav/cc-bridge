@@ -11,6 +11,7 @@ import { basename } from 'node:path'
 import { statSync } from 'node:fs'
 import * as cc from './transcript.ts'
 import * as cx from './codex-transcript.ts'
+import type { AgentKind } from './agent.ts'
 
 export type { RecentSession, Activity, FeedItem, SearchHit } from './transcript.ts'
 
@@ -49,6 +50,20 @@ export function resolveTranscript(cwd: string, roots?: string[]): string | null 
   if (!b) return a
   const mt = (f: string) => { try { return statSync(f).mtimeMs } catch { return -1 } }
   return mt(b) > mt(a) ? b : a
+}
+
+// Resolve for a known pane agent. Pane-local fallback must never use the merged newest-file
+// resolver: same-cwd Claude + Codex siblings would otherwise race, and whichever agent wrote last
+// would make both panes claim the same transcript.
+export function resolveAgentTranscript(
+  agent: AgentKind,
+  cwd: string,
+  claudeRoots?: string[],
+  codexSessionRoots: string[] = codexRoots(),
+): string | null {
+  return agent === 'codex'
+    ? cx.resolveTranscript(cwd, codexSessionRoots)
+    : cc.resolveTranscript(cwd, claudeRoots)
 }
 
 // Recent sessions across both agents, newest first, capped at `limit`.

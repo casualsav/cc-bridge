@@ -1,10 +1,10 @@
 // Agent-dispatching transcript reader — verify a file routes to the right parser by its name shape
 // (rollout-*.jsonl → Codex, <uuid>.jsonl → Claude Code), and that roots-scanning readers merge both.
 import { test, expect } from 'bun:test'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { latestFinalReply, turnInProgress, currentTurnTokens, agentSessionId } from './agent-transcript.ts'
+import { latestFinalReply, turnInProgress, currentTurnTokens, agentSessionId, resolveAgentTranscript } from './agent-transcript.ts'
 
 function write(name: string, lines: object[]): string {
   const f = join(mkdtempSync(join(tmpdir(), 'agent-tx-')), name)
@@ -54,4 +54,21 @@ test('currentTurnTokens dispatches to the Codex token reader', () => {
 test('agentSessionId normalizes both transcript filename formats', () => {
   expect(agentSessionId('/tmp/11111111-1111-1111-1111-111111111111.jsonl')).toBe('11111111-1111-1111-1111-111111111111')
   expect(agentSessionId('/tmp/rollout-2026-07-11T02-00-00-44444444-4444-4444-4444-444444444444.jsonl')).toBe('44444444-4444-4444-4444-444444444444')
+})
+
+test('known-agent resolution isolates same-cwd Claude and Codex siblings', () => {
+  const cwd = '/tmp/shared-agent-cwd'
+  const root = mkdtempSync(join(tmpdir(), 'agent-roots-'))
+  const claudeRoot = join(root, 'claude')
+  const claudeProject = join(claudeRoot, '-tmp-shared-agent-cwd')
+  const codexRoot = join(root, 'codex')
+  const codexDay = join(codexRoot, '2026', '07', '12')
+  mkdirSync(claudeProject, { recursive: true })
+  mkdirSync(codexDay, { recursive: true })
+  const claude = join(claudeProject, 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.jsonl')
+  const codex = join(codexDay, 'rollout-2026-07-12T00-00-00-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb.jsonl')
+  writeFileSync(claude, JSON.stringify({ type: 'user', uuid: 'u', message: { content: 'hi' } }) + '\n')
+  writeFileSync(codex, JSON.stringify({ type: 'session_meta', payload: { id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', cwd } }) + '\n')
+  expect(resolveAgentTranscript('claude', cwd, [claudeRoot], [codexRoot])).toBe(claude)
+  expect(resolveAgentTranscript('codex', cwd, [claudeRoot], [codexRoot])).toBe(codex)
 })

@@ -25,7 +25,7 @@ import { acquireTokenLock } from './token-lock.ts'
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
 import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, hasQueuedMessages, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen } from './prompt.ts'
-import { resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, currentTurnActivity, currentTurnTokens, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, agentSessionId, agentForSession } from './agent-transcript.ts'
+import { resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, currentTurnActivity, currentTurnTokens, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, agentSessionId, agentForSession } from './agent-transcript.ts'
 import {
   AGENT_PANE_OPT, agentExitKeys, agentInterruptKeys, agentLabel, agentResetCommand, agentSubmitKeys,
   codexLaunchCommand, normalizeAgent, type AgentKind,
@@ -1066,7 +1066,19 @@ async function transcriptForPane(pane: string | null, cwd: string | null): Promi
     }
     if (path && existsSync(path)) { await rememberPaneAgentTranscript(pane, path); return path }
   }
-  const fb = cwd ? resolveTranscript(cwd, allProjectsDirs()) : null
+  let fallbackAgent: AgentKind = 'claude'
+  if (pane) {
+    const sid = await sessionForPane(pane, false).catch(() => null)
+    const stored = sid ? getTopicBySession(sid) : undefined
+    if (stored?.agent) fallbackAgent = topicAgent(stored)
+    else {
+      try {
+        const { stdout } = await exec('tmux', ['show-options', '-pqv', '-t', pane, AGENT_PANE_OPT], { timeout: 2000 })
+        fallbackAgent = normalizeAgent(stdout.trim())
+      } catch {}
+    }
+  }
+  const fb = cwd ? resolveAgentTranscript(fallbackAgent, cwd, allProjectsDirs()) : null
   if (!fb) return null
   // Never cross-relay a sibling's transcript: if another pane has STAMPED this exact file, an
   // unstamped (pre-hook) pane gets nothing rather than the sibling's replies. Restarting the
