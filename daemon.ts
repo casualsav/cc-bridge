@@ -66,6 +66,7 @@ import {
   getGeneralSession, setGeneralSession, findTopicByCwd, getBaseCwd, setBaseCwd,
   topicAgent, type TopicEntry,
 } from './topics.ts'
+import { getTopicCreate, setTopicCreate, setTopicCreateAgent, removeTopicCreate, topicCreateAgentLabel } from './topic-create.ts'
 import {
   initTopicRuntime, sessionForPane, paneForSession, ensureSessionTopic, closeTopicForPane, markTopicDeleted, markTopicClosePending,
   reconcileTopics, refreshTopicTitles, topicThreadFor, emitTopicTyping, armTopicTyping, stopTopicTyping, outboundTargetsFor,
@@ -6964,8 +6965,6 @@ bot.command('back', async ctx => {
 // session falls straight to the folder prompt. Topics the bot creates don't produce updates for
 // the bot (own-message filter as belt-and-braces), so this only fires for human-made tabs.
 // Non-allowlisted creators are ignored — the group policy governs.
-const topicCreatePending = new Map<number, { name: string; dir: string; repo?: string }>()   // threadId → the card's offer (repo set when a 🌿 worktree / 🌱 branch is on offer)
-
 // The repo a folder belongs to, if any. Walks to the nearest existing ancestor first — the target
 // dir is often a not-yet-created subfolder — then asks git for its toplevel. One cheap deterministic
 // call (no agentic anything): this is what gates the 🌿 worktree / 🌱 branch offers, keyed on the
@@ -6981,9 +6980,14 @@ async function repoForDir(dir: string): Promise<string | null> {
 // The new-topic "where should its session run?" card. 📁 plain folder always; 🌿 worktree + 🌱
 // in-place branch only when the folder resolves into a repo (branched off its HEAD). Shared by the
 // forum-topic-created event AND the typed-folder reply, so a typed repo path gets the same offer.
-function topicCreateKeyboard(thread: number, dir: string, repo: string | null): InlineKeyboard {
-  const label = dir.length > 48 ? `…${dir.slice(-47)}` : dir
-  const kb = new InlineKeyboard().text(`📁 ${label}`, `tcgo:${thread}`).row()
+function topicCreateKeyboard(thread: number, dir: string, repo: string | null, agent: AgentKind): InlineKeyboard {
+  const kb = new InlineKeyboard()
+    .text(`${agent === 'claude' ? '●' : '○'} Claude Code`, `tcagent:claude:${thread}`)
+    .text(`${agent === 'codex' ? '●' : '○'} Codex`, `tcagent:codex:${thread}`).row()
+  if (dir) {
+    const label = dir.length > 48 ? `…${dir.slice(-47)}` : dir
+    kb.text(`📁 ${label}`, `tcgo:${thread}`).row()
+  }
   if (repo) {
     kb.text(`🌿 Worktree of ${basename(repo)}`, `tcwt:${thread}`).row()
     kb.text(`🌱 New branch in ${basename(repo)}`, `tcbr:${thread}`).row()
@@ -7004,25 +7008,14 @@ bot.on('message:forum_topic_created', async ctx => {
   // pane happens to be focused. Only when no anchor has EVER been set do we fall back to the
   // focused pane (the pre-anchor behavior).
   const base = await topicBaseDir()
-  const dirName = name.trim().toLowerCase().replace(/[\\/\0\s]+/g, '-')   // "My App" → my-app/ (unix-style folder names)
-  const dir = base && dirName ? join(base, dirName) : null
-  if (dir && base) {
-    // Offer 🌿 worktree / 🌱 branch whenever the TARGET folder resolves into a repo (not just when
-    // the focused cwd is one) — branched off the repo's HEAD. repoForDir walks up from the (usually
-    // not-yet-created) <base>/<name> subfolder to its nearest existing ancestor to find the repo.
-    const repo = await repoForDir(dir)
-    topicCreatePending.set(thread, { name, dir, repo: repo ?? undefined })
-    const sent = await ctx.reply(
-      `📂 <b>New topic “${escapeHtml(name)}”</b> — where should its Claude session run?`,
-      { parse_mode: 'HTML', reply_markup: topicCreateKeyboard(thread, dir, repo) },
-    ).catch(() => null)
-    if (sent) return
-  }
-  const sent = await ctx.reply(
-    `📂 <b>New topic “${escapeHtml(name)}”</b> — which folder should its Claude session run in?\n\nReply with a folder path (created if missing; <code>~/…</code> works), or <code>/cancel</code> to drop it.`,
-    { parse_mode: 'HTML', reply_markup: { force_reply: true, input_field_placeholder: 'Folder path' } },
+  const dirName = name.trim().toLowerCase().replace(/[\\/\0\s]+/g, '-')
+  const dir = base && dirName ? join(base, dirName) : ''
+  const repo = dir ? await repoForDir(dir) : null
+  const pending = setTopicCreate(thread, { name, dir, repo: repo ?? undefined })
+  await ctx.reply(
+    `🚀 <b>New topic “${escapeHtml(name)}”</b> — choose its agent and working folder.`,
+    { parse_mode: 'HTML', reply_markup: topicCreateKeyboard(thread, dir, repo, pending.agent) },
   ).catch(() => null)
-  if (sent) replyTargets.set(`${ctx.chat.id}:${sent.message_id}`, { kind: 'topiccreate', threadId: thread, name })
 })
 
 // User closed a session's topic from the Telegram UI → exit that session. The reverse of
@@ -8088,6 +8081,22 @@ bot.on('callback_query:data', async ctx => {
 
   // "➕ Add" on the /schedule dashboard → force-reply asking for "time message" in one line,
   // parsed (split + queued) when the reply lands. Captures the current session as the target.
+  // New-topic agent selector. This only changes the durable offer; folder/worktree buttons consume it.
+  const tcAgent = /^tcagent:(claude|codex):(\d+)$/.exec(data)
+  if (tcAgent) {
+    if (!(await cbAuth(ctx))) return
+    const agent = tcAgent[1] as AgentKind
+    const thread = Number(tcAgent[2])
+    if (!setTopicCreateAgent(thread, agent)) {
+      await ctx.answerCallbackQuery({ text: 'This topic setup expired.' }).catch(() => {})
+      return
+    }
+    const pending = getTopicCreate(thread)!
+    await ctx.answerCallbackQuery({ text: `${topicCreateAgentLabel(agent)} selected` }).catch(() => {})
+    await ctx.editMessageReplyMarkup({ reply_markup: topicCreateKeyboard(thread, pending.dir, pending.repo ?? null, agent) }).catch(() => {})
+    return
+  }
+
   // New-topic folder card: tcgo = spawn in the offered <cwd>/<name>; tcwt = worktree; tcbr =
   // in-place branch; tcask = force-reply prompt.
   const tcMatch = /^tc(go|ask|wt|br):(\d+)$/.exec(data)
@@ -8100,15 +8109,14 @@ bot.on('callback_query:data', async ctx => {
       await ctx.editMessageText('✅ This topic already has its session.').catch(() => {})
       return
     }
-    const pending = topicCreatePending.get(thread)
-    topicCreatePending.delete(thread)
+    const pending = getTopicCreate(thread)
     if (tcMatch[1] === 'ask' || !pending) {
-      // Spent card (daemon restarted) also lands here — the prompt still works without it.
+      const offer = pending ?? setTopicCreate(thread, { name: '', dir: '' })
       await ctx.editMessageReplyMarkup().catch(() => {})
       const sent = await channel.sendText(String(chat),
-        `📂 Which folder should this topic's session run in?\n\nReply with a folder path (created if missing; <code>~/…</code> works).`,
+        `📂 Which folder should this ${topicCreateAgentLabel(offer.agent)} session run in?\n\nReply with a folder path (created if missing; <code>~/…</code> works).`,
         { threadId: String(thread), forceReply: { placeholder: 'Folder path' } }).catch(() => null)
-      if (sent) replyTargets.set(refKey(sent), { kind: 'topiccreate', threadId: thread, name: pending?.name ?? '' })
+      if (sent) replyTargets.set(refKey(sent), { kind: 'topiccreate', threadId: thread, name: offer.name })
       return
     }
     let created = false
@@ -8160,13 +8168,14 @@ bot.on('callback_query:data', async ctx => {
       branchedInPlace = true
     }
     const sid = genSessionId()
-    setTopic(sid, { threadId: thread, cwd: spawnDir, name: pending.name || basename(spawnDir), closed: false, createdAt: Date.now(), ...(worktree ? { worktree } : {}) })
+    setTopic(sid, { threadId: thread, cwd: spawnDir, name: pending.name || basename(spawnDir), closed: false, createdAt: Date.now(), agent: pending.agent, ...(worktree ? { worktree } : {}) })
     // Seed the branch cache so the retitle sweep doesn't stomp the user's chosen tab name on its
     // first pass — it only renames on an actual branch CHANGE from here on.
     try { topicBranchCache.set(sid, (await exec('git', ['-C', spawnDir, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 2000 })).stdout.trim()) }
     catch { topicBranchCache.set(sid, '') }
-    const ok = await spawnSession(spawnDir, '', sid)
+    const ok = await spawnSession(spawnDir, '', sid, MAIN_ACCOUNT, pending.agent)
     if (!ok) removeTopic(sid)
+    removeTopicCreate(thread)
     const detail = worktree ? ` (🌿 worktree on <code>tg/${escapeHtml(slug)}</code>)`
       : branchedInPlace ? ` (🌱 on new branch <code>tg/${escapeHtml(slug)}</code>)`
       : created ? ' (📁 created it for you)' : ''
@@ -9178,6 +9187,7 @@ bot.on('message:text', async ctx => {
       // force_reply can't keep re-grabbing the input every time the chat reopens.
       if (/^\/?(cancel|nvm|nevermind|never\s?mind|skip|stop)$/i.test(text.trim())) {
         replyTargets.delete(replyKey)
+        if (target.kind === 'topiccreate') removeTopicCreate(target.threadId)
         await channel.deleteMessage({ chatId: String(ctx.chat!.id), messageId: String(replyTo.message_id) }).catch(() => {})
         await ctx.reply('✖️ Cancelled.').catch(() => {})
         return
@@ -9192,12 +9202,12 @@ bot.on('message:text', async ctx => {
           // Typed a folder that resolves into a repo? Offer the same 🌿/🌱 choices instead of
           // spawning plain — the broadened trigger keys on the target folder, not what's focused.
           const repo = await repoForDir(dir)
+          const offer = setTopicCreate(target.threadId, { name: target.name, dir, repo: repo ?? undefined })
           if (repo) {
-            topicCreatePending.set(target.threadId, { name: target.name, dir, repo })
             await channel.deleteMessage({ chatId: String(ctx.chat!.id), messageId: String(replyTo.message_id) }).catch(() => {})   // disarm the force-reply
             await ctx.reply(
-              `📂 <code>${escapeHtml(dir)}</code> is inside <code>${escapeHtml(basename(repo))}</code> — how should “${escapeHtml(target.name || basename(dir))}” run?`,
-              { parse_mode: 'HTML', reply_markup: topicCreateKeyboard(target.threadId, dir, repo) },
+              `📂 <code>${escapeHtml(dir)}</code> is inside <code>${escapeHtml(basename(repo))}</code> — how should this ${topicCreateAgentLabel(offer.agent)} session run?`,
+              { parse_mode: 'HTML', reply_markup: topicCreateKeyboard(target.threadId, dir, repo, offer.agent) },
             ).catch(() => {})
             return
           }
@@ -9215,13 +9225,14 @@ bot.on('message:text', async ctx => {
             }
           }
           const sid = genSessionId()
-          setTopic(sid, { threadId: target.threadId, cwd: dir, name: target.name || basename(dir), closed: false, createdAt: Date.now() })
+          setTopic(sid, { threadId: target.threadId, cwd: dir, name: target.name || basename(dir), closed: false, createdAt: Date.now(), agent: offer.agent })
           // Seed the branch cache so the retitle sweep doesn't stomp the user's chosen tab name on its
           // first pass — it only renames on an actual branch CHANGE from here on.
           try { topicBranchCache.set(sid, (await exec('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 2000 })).stdout.trim()) }
           catch { topicBranchCache.set(sid, '') }
-          const ok = await spawnSession(dir, '', sid)
+          const ok = await spawnSession(dir, '', sid, MAIN_ACCOUNT, offer.agent)
           if (!ok) removeTopic(sid)
+          removeTopicCreate(target.threadId)
           await channel.deleteMessage({ chatId: String(ctx.chat!.id), messageId: String(replyTo.message_id) }).catch(() => {})   // disarm the force-reply
           const note = created ? ' (📁 created it for you)' : ''
           await ctx.reply(ok

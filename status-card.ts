@@ -375,8 +375,29 @@ export function codexPrettyModel(id: string): string {
   return family ? family[0].toUpperCase() + family.slice(1).toLowerCase() : id
 }
 
-export function codexStatusHead(model: string, ctxPct: number | null): string {
-  return `🧠 ${escapeHtml(codexPrettyModel(model))}${ctxPct != null ? ` 💾 ${ctxPct}%` : ''}`
+export type CodexStatuslineData = { model: string; h5: number | null; weekly: number | null; ctxUsed: number | null }
+
+export function parseCodexStatusline(paneText: string): CodexStatuslineData | null {
+  const line = paneText.split('\n').map(l => stripAnsi(l).trim()).reverse()
+    .find(l => /^gpt-[\w.-]+\s+.+\s·\s.+/.test(l))
+  if (!line) return null
+  const model = line.match(/^(gpt-[\w.-]+)/)?.[1]
+  if (!model) return null
+  const pct = (re: RegExp): number | null => {
+    const n = Number(line.match(re)?.[1])
+    return Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : null
+  }
+  return {
+    model,
+    h5: pct(/\b5h\s+(\d+)%\s+left\b/i),
+    weekly: pct(/\bweekly\s+(\d+)%\s+left\b/i),
+    ctxUsed: pct(/\bcontext\s+(\d+)%\s+used\b/i),
+  }
+}
+
+export function codexStatusHead(model: string, ctxPct: number | null, h5: number | null, weekly: number | null): string {
+  const stats = [h5 != null ? `🕒 ${h5}%` : '', weekly != null ? `📅 ${weekly}%` : '', ctxPct != null ? `💾 ${ctxPct}%` : ''].filter(Boolean).join(' ')
+  return `🧠 ${escapeHtml(codexPrettyModel(model))}${stats ? ` ${stats}` : ''}`
 }
 
 // Codex status card — the same chrome (head · cwd/branch · pairing footer) but Codex-sourced data.
@@ -388,11 +409,16 @@ export function codexStatusHead(model: string, ctxPct: number | null): string {
 async function codexStatusCardText(paneId: string): Promise<string> {
   let cwd: string | null = null
   try { cwd = await paneCwd(paneId) } catch {}
-  // Model from the pane footer's gpt-… line; fall back to "—" (no model read yet).
-  let model = '—'
-  try { model = codexModelFromPane(await capturePane(paneId)) ?? model } catch {}
-  // Token usage from the rollout's latest token_count in the current turn.
-  let ctxPct: number | null = null, tokens = ''
+  // Model + limits + context from Codex's native status line (provisioned at launch).
+  let model = '—', nativeStatus: CodexStatuslineData | null = null
+  try {
+    const cap = await capturePane(paneId)
+    nativeStatus = parseCodexStatusline(cap)
+    model = nativeStatus?.model ?? codexModelFromPane(cap) ?? model
+  } catch {}
+  // Token usage from the rollout's latest token_count in the current turn. Native context-used wins;
+  // the rollout-derived percentage is only a fallback for legacy panes launched before provisioning.
+  let ctxPct: number | null = nativeStatus?.ctxUsed ?? null, tokens = ''
   if (cwd) {
     try {
       const file = await deps.transcriptForPane(paneId, cwd)
@@ -403,14 +429,14 @@ async function codexStatusCardText(paneId: string): Promise<string> {
           // The token_count event carries model_context_window; derive a fill %. We don't have the
           // window size here without reading the rollout directly, so approximate from the CC
           // default (200k) — accurate for the shipped gpt-5.x family, harmless if not.
-          ctxPct = Math.min(100, Math.round((context / 200_000) * 100))
+          if (ctxPct == null) ctxPct = Math.min(100, Math.round((context / 200_000) * 100))
         }
         if (output > 0) tokens += `${tokens ? ' · ' : ''}${output} out`
       }
     } catch {}
   }
   const branch = cwd ? await gitBranch(cwd) : null
-  const head = codexStatusHead(model, ctxPct)
+  const head = codexStatusHead(model, ctxPct, nativeStatus?.h5 ?? null, nativeStatus?.weekly ?? null)
   const groups: string[] = []
   if (cwd) groups.push(`📁 <code>${escapeHtml(cwd)}</code>${branch ? ` · 🌿 ${escapeHtml(branch)}` : ''}`)
   if (ctxPct != null) groups.push(`💾 Context <code>${pinBar(ctxPct)}</code> ${ctxPct}%${tokens ? `  ·  ${tokens}` : ''}`)

@@ -2,7 +2,7 @@ import { test, expect } from 'bun:test'
 import { writeFileSync, mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { prettyModel, lastModelInTranscript, lastTodosInTranscript, modeBadge, pinMessageGone, statusKeyboard, mergeStatus, codexModelFromPane, codexPrettyModel, codexStatusHead } from './status-card.ts'
+import { prettyModel, lastModelInTranscript, lastTodosInTranscript, modeBadge, pinMessageGone, statusKeyboard, mergeStatus, codexModelFromPane, codexPrettyModel, codexStatusHead, parseCodexStatusline } from './status-card.ts'
 import type { StatuslineData } from './statusline.ts'
 
 const tmp = mkdtempSync(join(tmpdir(), 'sc-test-'))
@@ -69,8 +69,15 @@ test('Codex model names and status head stay compact', () => {
   expect(codexPrettyModel('gpt-5.6-terra')).toBe('Terra')
   expect(codexPrettyModel('gpt-5.6-luna')).toBe('Luna')
   expect(codexPrettyModel('gpt-5.4-mini')).toBe('gpt-5.4-mini')
-  expect(codexStatusHead('gpt-5.6-sol', 42)).toBe('🧠 Sol 💾 42%')
-  expect(codexStatusHead('gpt-5.6-terra', null)).toBe('🧠 Terra')
+  expect(codexStatusHead('gpt-5.6-sol', 42, 10, 44)).toBe('🧠 Sol 🕒 10% 📅 44% 💾 42%')
+  expect(codexStatusHead('gpt-5.6-terra', null, null, null)).toBe('🧠 Terra')
+})
+
+test('Codex status line exposes model, limits, and context percentages', () => {
+  const cap = `› Summarize recent commits\n\n  gpt-5.6-sol default · 5h 10% left · weekly 44% left · Context 12% used · ~/projects/cc-bridge\n`
+  expect(parseCodexStatusline(cap)).toEqual({ model: 'gpt-5.6-sol', h5: 10, weekly: 44, ctxUsed: 12 })
+  expect(parseCodexStatusline('gpt-5.6-luna high · ~/work')).toEqual({ model: 'gpt-5.6-luna', h5: null, weekly: null, ctxUsed: null })
+  expect(parseCodexStatusline('❯ Claude Code')).toBe(null)
 })
 
 test('pinMessageGone matches only gone-pin errors', () => {
