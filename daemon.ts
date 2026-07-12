@@ -120,6 +120,7 @@ import {
 } from './status-card.ts'
 import { buildTakeoverBrief } from './takeover-brief.ts'
 import { CODEX_HOME } from './codex-transcript.ts'
+import { cachedCodexSandboxProbe } from './codex-health.ts'
 import { TypingPresence } from './typing.ts'
 import { transcribe, transcribeProvider, transcribeStatus } from './voice.ts'
 import { synthesize, provisionPiper, piperReady, engineStatus, PIPER_VOICES, DEFAULT_PIPER_VOICE, type TtsEngine } from './voice-out.ts'
@@ -2537,8 +2538,19 @@ function maybeWarnContext(pct: number | null): void {
 // Codex — that self-corrects: the capped Codex re-fires actOnLimitHit → codex-origin branch → no
 // free Claude account (all spent) → falls through to wait. Not gated on Codex's own cap because its
 // ChatGPT-plan hit shares usageHitState['main'] with claude-main and can't be cleanly disentangled.
+let lastCodexHealthError = ''
 function codexAvailable(): boolean {
-  return existsSync(join(CODEX_HOME, 'auth.json'))
+  if (!existsSync(join(CODEX_HOME, 'auth.json'))) return false
+  const health = cachedCodexSandboxProbe()
+  if (!health.ok) {
+    if (health.reason !== lastCodexHealthError) {
+      lastCodexHealthError = health.reason
+      process.stderr.write(`daemon: Codex failover unavailable: ${health.reason}\n`)
+    }
+    return false
+  }
+  lastCodexHealthError = ''
+  return true
 }
 
 // The model / reasoning-effort every Codex launch uses (normal spawn AND cross-engine failover): the
