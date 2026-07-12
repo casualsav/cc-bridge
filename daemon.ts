@@ -115,8 +115,10 @@ import {
   initStatusCard, statusCardText, statusKeyboard, updateSessionPin, updateTopicPins,
   removeSessionPins, refreshSessionPin, sessionPins, pinTextCache, persistSessionPins,
   clearAllPins, clearTopicPins, createSessionPin, invalidatePaneStatus, paneStatus, lastModelInTranscript, lastVersionInTranscript,
-  prettyModel, modeBadge,
+  prettyModel, modeBadge, lastTodosInTranscript,
 } from './status-card.ts'
+import { buildTakeoverBrief } from './takeover-brief.ts'
+import { CODEX_HOME } from './codex-transcript.ts'
 import { TypingPresence } from './typing.ts'
 import { transcribe, transcribeProvider, transcribeStatus } from './voice.ts'
 import { synthesize, provisionPiper, piperReady, engineStatus, PIPER_VOICES, DEFAULT_PIPER_VOICE, type TtsEngine } from './voice-out.ts'
@@ -2528,12 +2530,40 @@ function maybeWarnContext(pct: number | null): void {
 // the ⛔ message carries one "✖️ Cancel" button — tapped, the reset ping arrives with a manual
 // Continue button instead. (Was opt-in via an "▶️ Auto-continue" button; usage:arm still works
 // for old messages.)
-// Automatic account failover (opt-in via /settings): when `hitAccount` runs out and another account
-// is still available, mirror the stuck session's transcript into that account's config dir and
-// relaunch the pane there (`--resume <id>` under the target's CLAUDE_CONFIG_DIR), so work continues
-// instead of parking until the reset. Returns the target on success, null (no-op — the caller keeps
-// the normal arm-and-wait behavior) on any miss or error.
-async function attemptLimitFailover(hitAccount: Account, origin: string | null): Promise<{ to: Account } | null> {
+// Whether Codex is set up at all — a minimal check (its login writes CODEX_HOME/auth.json), so a
+// cross-engine failover never fires a launch into a Codex that was never signed in. NOTE: auth.json
+// persists even while Codex is itself capped, so a claude→codex hop can land on an already-capped
+// Codex — that self-corrects: the capped Codex re-fires actOnLimitHit → codex-origin branch → no
+// free Claude account (all spent) → falls through to wait. Not gated on Codex's own cap because its
+// ChatGPT-plan hit shares usageHitState['main'] with claude-main and can't be cleanly disentangled.
+function codexAvailable(): boolean {
+  return existsSync(join(CODEX_HOME, 'auth.json'))
+}
+
+// Assemble the first-turn brief for a cross-engine takeover (Claude↔Codex, where `--resume` is
+// impossible — the new engine gets a synthesized prompt instead). Every input is best-effort: a
+// slow/broken git repo or an unreadable transcript degrades the brief, it never blocks the swap.
+async function gatherTakeoverBrief(pane: string, cwd: string, fromKind: AgentKind, toKind: AgentKind): Promise<string> {
+  const src = await transcriptForPane(pane, cwd).catch(() => null)
+  const lastReply = src ? latestFinalReply(src)?.text ?? null : null
+  const todos = src ? lastTodosInTranscript(src) : null   // null for Codex transcripts (no TodoWrite)
+  const gitStat = await exec('git', ['-C', cwd, 'diff', '--stat'], { timeout: 3000 }).then(r => r.stdout, () => null)
+  const gitStatus = await exec('git', ['-C', cwd, 'status', '--short'], { timeout: 3000 }).then(r => r.stdout, () => null)
+  // fromLabel names the capped pane's own account (paneAccount resolves it); toLabel stays generic —
+  // the target Claude account is cosmetic for the brief, not worth a dedicated param on this helper.
+  const fromLabel = fromKind === 'codex' ? 'Codex' : `Claude (${(await paneAccount(pane)).name})`
+  const toLabel = toKind === 'codex' ? 'Codex' : 'Claude'
+  return buildTakeoverBrief({ fromLabel, toLabel, lastReply, todos, gitStat, gitStatus, handoffFile: null })
+}
+
+// Automatic account/engine failover (opt-in via /settings): when the capped account/engine runs
+// out, either move the stuck session to another Claude account of the same engine (lossless —
+// mirror the transcript, `--resume <id>` under the target's CLAUDE_CONFIG_DIR) or, when every
+// same-engine option is spent, take it CROSS-ENGINE (Claude↔Codex): launch the other engine fresh
+// in the same pane and hand it a synthesized takeover brief instead of `--resume`, which no
+// provider can honor for another's session. Returns the target on success, null (no-op — the
+// caller keeps the normal arm-and-wait behavior) on any miss or error.
+async function attemptLimitFailover(hitAccount: Account, origin: string | null): Promise<{ to: string; crossEngine: boolean; briefDelivered: boolean } | null> {
   try {
     if (loadAccess().limitFailover !== true) return null
     // An account is available unless its OWN snapshot is fresh and a window is maxed; null/stale = ok.
@@ -2541,25 +2571,59 @@ async function attemptLimitFailover(hitAccount: Account, origin: string | null):
       const snap = readUsageSnapshot(undefined, a)
       return !snap || [snap.fiveHour, snap.sevenDay].every(w => !w || w.pct < 100)
     }
+    // The pane to move for a same-engine (Claude account→account) failover: the origin if it's live,
+    // on the hit account, AND actually Claude — a Codex pane always reads as the `main` account (it
+    // has no config-dir concept of its own), so without the kind check a main-account Claude cap could
+    // wrongly grab a Codex pane and mis-resolve its transcript. Falls back to the first such live pane.
+    const findClaudePane = async (): Promise<string | null> => {
+      const onAccount = async (p: string) => await paneAgentKind(p) !== 'codex' && (await paneAccount(p)).name === hitAccount.name
+      if (origin && offMcpPanes.has(origin) && await onAccount(origin)) return origin
+      for (const p of offMcpPanes) if (await onAccount(p)) return p
+      return null
+    }
+    // Codex's ChatGPT-plan cap is account-wide and its pane always resolves as `main` (no per-engine
+    // account concept) — so the origin pane IS the hit session, no search loop. Claude's own quota is
+    // independent of it, so failing over to a Claude account here does NOT exclude main.
+    if (origin && await paneAgentKind(origin) === 'codex') {
+      if (!offMcpPanes.has(origin)) return null
+      const target = listAccounts().find(a => accountLoggedIn(a) && snapshotOk(a)) ?? null
+      if (!target) return null
+      const cwd = await paneCwd(origin).catch(() => null)
+      if (!cwd) return null
+      const brief = await gatherTakeoverBrief(origin, cwd, 'codex', 'claude')
+      const st = { briefDelivered: true }
+      if (!(await restartPaneSessionCore(origin, null, target, 'claude', brief, st))) return null
+      process.stderr.write(`daemon: limit failover: codex → claude (${target.name}) (pane ${origin})\n`)
+      return { to: target.name, crossEngine: true, briefDelivered: st.briefDelivered }
+    }
     const target = pickFailoverAccount(hitAccount, snapshotOk)
-    if (!target) return null
-    // The pane to move: the origin if it's live and on the hit account, else the first live pane that is.
-    let pane: string | null = null
-    if (origin && offMcpPanes.has(origin) && (await paneAccount(origin)).name === hitAccount.name) pane = origin
-    if (!pane) for (const p of offMcpPanes) { if ((await paneAccount(p)).name === hitAccount.name) { pane = p; break } }
+    if (target) {
+      const pane = await findClaudePane()
+      if (!pane) return null
+      // Session id + source transcript, resolved the same way restartPaneSessionCore does.
+      const cwd = await paneCwd(pane).catch(() => null)
+      const src = cwd ? await transcriptForPane(pane, cwd) : null
+      if (!src || !existsSync(src)) return null
+      const id = agentSessionId(src)
+      // Mirror the transcript into the target account at the SAME relative path so --resume finds it.
+      const dest = join(projectsDirOf(target), relative(projectsDirOf(hitAccount), src))
+      mkdirSync(dirname(dest), { recursive: true })
+      copyFileSync(src, dest)
+      if (!(await restartPaneSessionCore(pane, id, target))) return null
+      process.stderr.write(`daemon: limit failover: ${hitAccount.name} → ${target.name} (pane ${pane}, session ${id})\n`)
+      return { to: target.name, crossEngine: false, briefDelivered: true }
+    }
+    // Every Claude account is spent — cross-engine to Codex, if it's actually set up.
+    if (!codexAvailable()) return null
+    const pane = await findClaudePane()
     if (!pane) return null
-    // Session id + source transcript, resolved the same way restartPaneSessionCore does.
     const cwd = await paneCwd(pane).catch(() => null)
-    const src = cwd ? await transcriptForPane(pane, cwd) : null
-    if (!src || !existsSync(src)) return null
-    const id = agentSessionId(src)
-    // Mirror the transcript into the target account at the SAME relative path so --resume finds it.
-    const dest = join(projectsDirOf(target), relative(projectsDirOf(hitAccount), src))
-    mkdirSync(dirname(dest), { recursive: true })
-    copyFileSync(src, dest)
-    if (!(await restartPaneSessionCore(pane, id, target))) return null
-    process.stderr.write(`daemon: limit failover: ${hitAccount.name} → ${target.name} (pane ${pane}, session ${id})\n`)
-    return { to: target }
+    if (!cwd) return null
+    const brief = await gatherTakeoverBrief(pane, cwd, 'claude', 'codex')
+    const st = { briefDelivered: true }
+    if (!(await restartPaneSessionCore(pane, null, undefined, 'codex', brief, st))) return null
+    process.stderr.write(`daemon: limit failover: ${hitAccount.name} → codex (pane ${pane})\n`)
+    return { to: 'Codex', crossEngine: true, briefDelivered: st.briefDelivered }
   } catch (e) {
     process.stderr.write(`daemon: limit failover failed: ${e}\n`)
     return null
@@ -2624,9 +2688,17 @@ function actOnLimitHit(fireAt: number, type: string, banner?: string, origin: st
   void (async () => {
     const failover = await attemptLimitFailover(account, origin)
     if (!failover) { fireArmed(); return }
-    // Moved the session to a fresh account — notify only, no auto-continue (we never stopped).
+    // Moved the session to a fresh account/engine — notify only, no auto-continue (we never stopped).
+    // A cross-engine swap can't resume, so it types a handoff brief into the fresh session; if that
+    // brief never landed (composer never came up — e.g. a slow boot), say so rather than claim a
+    // handoff that didn't happen, and tell the user to resend.
+    const switchNote = !failover.crossEngine
+      ? `🔀 switched to <b>${escapeHtml(failover.to)}</b>, resuming.`
+      : failover.briefDelivered
+        ? `🔀 switched to <b>${escapeHtml(failover.to)}</b> (fresh session, continuing from a handoff) — resuming.`
+        : `🔀 switched to <b>${escapeHtml(failover.to)}</b>, but couldn't hand off the task automatically — please resend your request in this topic.`
     for (const { chat, thread } of await outboundTargetsFor(origin)) {
-      await channel.sendText(String(chat), `⛔ <b>${escapeHtml(account.name)}</b> hit the ${escapeHtml(type)} limit — 🔀 switched to <b>${escapeHtml(failover.to.name)}</b>, resuming.`, { ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
+      await channel.sendText(String(chat), `⛔ <b>${escapeHtml(account.name)}</b> hit the ${escapeHtml(type)} limit — ${switchNote}`, { ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
     }
     scheduleReset(account.name, fireAt + RESET_GRACE_MS, chats, 0, false)
   })()
@@ -4746,6 +4818,71 @@ async function restartPaneSession(pane: string, chat: string): Promise<void> {
   await dm(`✅ ${agentLabel(agent)} session restarted — your conversation was resumed.`)
 }
 
+// How long to wait for a freshly cross-engine-launched pane's composer (to type the takeover
+// brief) or its new transcript (to rebind the topic). Generous but bounded: a slow cold boot
+// (first-run trust prompt) still fits; a genuinely dead launch gives up rather than hanging.
+const CROSS_ENGINE_COMPOSER_TIMEOUT_MS = 20_000
+const CROSS_ENGINE_REBIND_TIMEOUT_MS = 20_000
+
+// Type the takeover brief into a freshly cross-engine-launched pane, once its composer is
+// confirmed up (onNormalPrompt — NOT just waitForSettle, which only means the screen stopped
+// redrawing, not that input is accepted yet). Bracket-pastes it (paste-buffer, like injectPaste)
+// rather than plain keystrokes: a literal multi-line send would have every embedded newline in
+// the brief submit early instead of landing as one message. One retry if the composer never came
+// up in time — a slow boot racing the first poll.
+async function typeBriefIntoPane(pane: string, agent: AgentKind, brief: string): Promise<boolean> {
+  const attempt = async (): Promise<boolean> => {
+    const deadline = Date.now() + CROSS_ENGINE_COMPOSER_TIMEOUT_MS
+    while (Date.now() < deadline) {
+      if (!(await paneAlive(pane))) return false
+      if (onNormalPrompt(await capturePane(pane).catch(() => ''))) {
+        await exec('tmux', ['set-buffer', '-b', INJECT_BUFFER, '--', brief], { timeout: 2000 }).catch(() => {})
+        await exec('tmux', ['paste-buffer', '-d', '-p', '-b', INJECT_BUFFER, '-t', pane], { timeout: 2000 }).catch(() => {})
+        await waitForSettle(pane, 200, 4000)
+        await sendKeys(pane, agentSubmitKeys(agent))
+        await waitForSettle(pane, 300, 5000)
+        return true
+      }
+      await sleep(500)
+    }
+    return false
+  }
+  return (await attempt()) || (await attempt())
+}
+
+// After a cross-engine takeover the pane is running a BRAND NEW session (no --resume possible
+// across providers), so the old sid's topic has to be rebound to the fresh session id — otherwise
+// the topic sweep sees the old sid vanish and closes the topic (a duplicate then opens on the next
+// message, breaking the one-topic design). Polls for the new engine's own transcript (newer than
+// the swap, so the dead engine's stale file can't be mistaken for it) rather than a fixed delay.
+// Resolves directly by the KNOWN target `agent` (resolveAgentTranscript), not via transcriptForPane's
+// stamp/topic-agent inference — that inference still reads the topic's OLD stored agent until this
+// very call updates it (a codex→claude swap would otherwise keep resolving the dead Codex tree, since
+// the pane's Codex session never had a live @tg_transcript stamp to unset in the first place).
+async function rebindCrossEngineSession(pane: string, cwd: string, sid: string | null, agent: AgentKind, notBeforeMs: number): Promise<void> {
+  if (!sid) return
+  const deadline = Date.now() + CROSS_ENGINE_REBIND_TIMEOUT_MS
+  while (Date.now() < deadline) {
+    const file = resolveAgentTranscript(agent, cwd, allProjectsDirs())
+    if (file) {
+      const mtimeMs = (() => { try { return statSync(file).mtimeMs } catch { return -1 } })()
+      // Never rebind onto a SIBLING's transcript: resolveAgentTranscript is newest-by-mtime, and a
+      // live same-agent pane in this cwd updates its transcript every turn — it would out-race ours
+      // and steal the topic→session mapping (replies then cross-relay to the wrong topic). If any
+      // OTHER pane has this exact file stamped, it isn't ours; keep waiting for our fresh one. Mirrors
+      // transcriptForPane's sibling guard (this function's whole point is to resolve to OUR new id).
+      let stampedElsewhere = false
+      for (const [p, v] of paneTranscriptCache) { if (p !== pane && v.path === file) { stampedElsewhere = true; break } }
+      if (mtimeMs >= notBeforeMs && !stampedElsewhere) {
+        updateTopic(sid, { ...(agent === 'codex' ? { agent } : { agent: undefined }), agentSessionId: agentSessionId(file) })
+        return
+      }
+    }
+    await sleep(500)
+  }
+  process.stderr.write(`daemon: cross-engine failover: gave up waiting for sid ${sid}'s new session id (${agent}, ${cwd})\n`)
+}
+
 // The message-free core of a restart-in-place: /exit, relaunch `claude --resume <id>` in the same
 // pane (same pane keeps the bridge pointed at it, same id keeps the conversation), re-apply the
 // permission mode. Shared by the single-session button and the restart-all sweep.
@@ -4756,7 +4893,10 @@ async function restartPaneSession(pane: string, chat: string): Promise<void> {
 // respawned in a fresh pane with the same session stamp + `--resume` — the conversation, topic and
 // routing all survive. Returns the pane now hosting the session (the original or the respawn), or
 // null when it couldn't be brought back.
-async function restartPaneSessionCore(pane: string, id: string, accountOverride?: Account, agentOverride?: AgentKind): Promise<string | null> {
+// `id: null` is a CROSS-ENGINE takeover (Claude↔Codex): `--resume` is impossible across providers,
+// so the pane gets the OTHER engine launched fresh instead, with `brief` typed in as its first turn
+// once the composer is up. The fresh launch mints its own new session id — see rebindCrossEngineSession.
+async function restartPaneSessionCore(pane: string, id: string | null, accountOverride?: Account, agentOverride?: AgentKind, brief?: string, status?: { briefDelivered: boolean }): Promise<string | null> {
   const currentAgent = await paneAgentKind(pane)
   const agent = agentOverride ?? currentAgent
   const preCap = await capturePane(pane).catch(() => '')
@@ -4775,26 +4915,51 @@ async function restartPaneSessionCore(pane: string, id: string, accountOverride?
   // defers the restore to the resumesel tap) the saved dials are accurate even for a never-focused
   // topic session whose mode/effort were last moved in the terminal.
   if (sid) { recordSessionMode(sid, mode); recordSessionEffort(sid, effort) }
+  const swapStartMs = Date.now()   // cross-engine only: lower bound for "this is the NEW engine's transcript"
   setPaneRestarting(pane, true)
   try {
     const run = async () => {
       await sendKeys(pane, agentExitKeys(currentAgent))
       for (let i = 0; i < 40 && await paneClaudeLive(pane); i++) await waitForSettle(pane, 200, 1500)
       if (!(await paneAlive(pane))) return   // exit closed the pane — respawn below, nothing to type into
+      if (id === null) {
+        // Cross-engine: unset the stamp BEFORE the new engine boots, so pane discovery restamps to
+        // ITS transcript instead of relaying the dead engine's (a stamp-guard-class bug otherwise).
+        await exec('tmux', ['set-option', '-p', '-u', '-t', pane, TRANSCRIPT_PANE_OPT], { timeout: 2000 }).catch(() => {})
+        paneTranscriptCache.delete(pane)   // the 5s TTL cache would otherwise keep serving the dead path
+        // claude with skip-permissions REFUSES to boot in an untrusted folder (it dies, no dialog —
+        // onNormalPrompt would then never come and the brief never lands). Trust it under the TARGET
+        // account first; Codex uses its launch sandbox policy, no trust store.
+        if (agent === 'claude' && cwd) ensureFolderTrusted(cwd, account)
+      }
       const resume = agent === 'codex'
-        ? codexLaunchCommand({ kind: 'codex', resumeId: id, model: process.env.CODEX_MODEL || null, effort: process.env.CODEX_REASONING_EFFORT || null }, process.env.CODEX_BIN || 'codex')
-        : `${envPrefix}${claudeBin()} --allow-dangerously-skip-permissions --resume ${id}`
+        ? codexLaunchCommand({ kind: 'codex', ...(id !== null ? { resumeId: id } : {}), model: process.env.CODEX_MODEL || null, effort: process.env.CODEX_REASONING_EFFORT || null }, process.env.CODEX_BIN || 'codex')
+        : `${envPrefix}${claudeBin()} --allow-dangerously-skip-permissions${id !== null ? ` --resume ${id}` : ''}`
       await sendKeys(pane, [`hash -r; ${resume}`, 'Enter'])
       await waitForSettle(pane, 400, 30_000)
       await exec('tmux', ['set-option', '-p', '-t', pane, AGENT_PANE_OPT, agent], { timeout: 2000 }).catch(() => {})
-      if (sid) updateTopic(sid, { ...(agent === 'codex' ? { agent } : { agent: undefined }), agentSessionId: id })
+      if (id !== null) {
+        if (sid) updateTopic(sid, { ...(agent === 'codex' ? { agent } : { agent: undefined }), agentSessionId: id })
+      } else {
+        const delivered = brief ? await typeBriefIntoPane(pane, agent, brief) : true
+        if (status) status.briefDelivered = delivered
+        if (!delivered) process.stderr.write(`daemon: cross-engine failover: brief not delivered to pane ${pane} (${agent}) — composer never came up\n`)
+        if (cwd) await rebindCrossEngineSession(pane, cwd, sid, agent, swapStartMs)
+      }
     }
     await (watcher ? watcher.withInjection(run) : run())
     if (!(await paneAlive(pane))) {
       if (!cwd) return null
       // (mode + effort already persisted above, so the respawn's resume branch seeds from them.)
-      const fresh = await spawnSession(cwd, `--resume ${id}`, sid ?? undefined, account, agent)
+      // Cross-engine (id null): presetSessionId is withheld here — spawnSession's codex branch
+      // resolves an omitted --resume from the PRESET session's own stored agentSessionId (its
+      // `remembered` fallback, for reviving a known codex topic with no explicit id in hand), and
+      // `sid` still carries the OLD (dead) engine's id at this point. Passed through, that would
+      // silently `codex resume <the-dead-claude-uuid>` instead of the fresh launch this needs.
+      // stampPaneSession below restores the pane→session mapping that passing it would have set.
+      const fresh = await spawnSession(cwd, id !== null ? `--resume ${id}` : '', id !== null ? (sid ?? undefined) : undefined, account, agent)
       if (!fresh) return null
+      if (id === null && sid) await stampPaneSession(fresh, sid)
       // The session lives in `fresh` now — drop the dead pane's registry + session mapping so
       // close-on-end can't resolve it back to the (live) session and close its topic.
       offMcpPanes.delete(pane)
@@ -4813,6 +4978,13 @@ async function restartPaneSessionCore(pane: string, id: string, accountOverride?
       setTimeout(() => setPaneRestarting(fresh, false), 30_000)   // boot window — discovery re-adopts `fresh` well within this
       if (sid) await reopenSessionTopic(sid)
       if (pane === focus.activePaneId) adoptPane(fresh)
+      if (id === null) {
+        // Same cross-engine handoff as the in-place path, just against the respawned pane.
+        const delivered = brief ? await typeBriefIntoPane(fresh, agent, brief) : true
+        if (status) status.briefDelivered = delivered
+        if (!delivered) process.stderr.write(`daemon: cross-engine failover: brief not delivered to respawned pane ${fresh} (${agent}) — composer never came up\n`)
+        await rebindCrossEngineSession(fresh, cwd, sid, agent, swapStartMs)
+      }
       process.stderr.write(`daemon: restart: pane ${pane} died on /exit — respawned session in ${fresh} (${cwd})\n`)
       return fresh   // mode + effort re-seeded by spawnSession's resume branch (sessionModes/sessionEfforts)
     }
@@ -6543,9 +6715,12 @@ async function activeSessionCwds(): Promise<Set<string>> {
 // pre-record the trust decision (equivalent to clicking "trust") so claude boots straight to the
 // REPL. Only writes when the folder isn't already trusted (the common case skips the write), and
 // uses an atomic temp+rename so a concurrent claude never reads a half-written config.
-function ensureFolderTrusted(dir: string): void {
+function ensureFolderTrusted(dir: string, account: Account = MAIN_ACCOUNT): void {
   try {
-    const cfgPath = join(homedir(), '.claude.json')
+    // main reads ~/.claude.json (HOME); an alt account relocates its config under CLAUDE_CONFIG_DIR,
+    // so its trust store is <configDir>/.claude.json. Trusting the main file wouldn't help an
+    // alt-account launch — claude with skip-permissions REFUSES to boot in an untrusted folder.
+    const cfgPath = account.name === 'main' ? join(homedir(), '.claude.json') : join(account.configDir, '.claude.json')
     if (!existsSync(cfgPath)) return   // fresh install: claude will create it (and prompt) itself
     // A cheap decision read first: if the folder is already trusted, do nothing (the common case).
     if (JSON.parse(readFileSync(cfgPath, 'utf8')).projects?.[dir]?.hasTrustDialogAccepted === true) return
@@ -6562,7 +6737,7 @@ function ensureFolderTrusted(dir: string): void {
     const tmp = `${cfgPath}.tg-${process.pid}.tmp`
     writeFileSync(tmp, JSON.stringify(cfg, null, 2))
     renameSync(tmp, cfgPath)
-    process.stderr.write(`daemon: marked ${dir} trusted in ~/.claude.json for a new session\n`)
+    process.stderr.write(`daemon: marked ${dir} trusted in ${cfgPath} for a new session\n`)
   } catch (e) { process.stderr.write(`daemon: ensureFolderTrusted(${dir}) failed: ${e}\n`) }
 }
 
@@ -6599,7 +6774,7 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
     // another user's 700 folder) — the session then runs in the wrong place, stuck on a trust
     // prompt for $HOME. Refuse up front instead; the caller's error reply names the folder.
     accessSync(dir, fsConstants.R_OK | fsConstants.X_OK)
-    if (agent === 'claude') ensureFolderTrusted(dir)   // Claude-specific trust store; Codex uses launch sandbox policy
+    if (agent === 'claude') ensureFolderTrusted(dir, account)   // Claude-specific trust store (per account); Codex uses launch sandbox policy
     // A brand-new Claude session (not --resume/-c) inherits the focused session's model/effort/mode.
     let inherit = agent === 'claude' && !extra && focus.activePaneId
       ? await captureInheritedSettings(focus.activePaneId, focus.paneWatcher)
