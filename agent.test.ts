@@ -12,9 +12,9 @@ test('legacy or unknown agent identity remains Claude', () => {
   expect(AGENT_PANE_OPT).toBe('@tg_agent')
 })
 
-test('Codex fresh launch defaults to sandboxed non-interactive approvals', () => {
+test('Codex fresh launch defaults to unrestricted host access with non-interactive approvals', () => {
   expect(codexLaunchCommand({ kind: 'codex' }, '/opt/codex')).toBe(
-    `/opt/codex --no-alt-screen --ask-for-approval never --sandbox workspace-write -c 'tui.status_line=["model-with-reasoning","five-hour-limit","weekly-limit","context-used","permissions","current-dir"]'`,
+    `CODEX_CLI_BIN=/opt/codex /opt/codex --no-alt-screen --ask-for-approval never --sandbox danger-full-access -c 'tui.status_line=["model-with-reasoning","five-hour-limit","weekly-limit","context-used","permissions","current-dir"]'`,
   )
 })
 
@@ -22,12 +22,12 @@ test('Codex resume carries session, model, and reasoning effort', () => {
   expect(codexLaunchCommand({
     kind: 'codex', resumeId: 'abc-123', model: 'gpt-5.6-sol', effort: 'high',
   }, '/opt/codex')).toBe(
-    `/opt/codex resume abc-123 --no-alt-screen --ask-for-approval never --sandbox workspace-write -c 'tui.status_line=["model-with-reasoning","five-hour-limit","weekly-limit","context-used","permissions","current-dir"]' --model gpt-5.6-sol -c 'model_reasoning_effort="high"'`,
+    `CODEX_CLI_BIN=/opt/codex /opt/codex resume abc-123 --no-alt-screen --ask-for-approval never --sandbox danger-full-access -c 'tui.status_line=["model-with-reasoning","five-hour-limit","weekly-limit","context-used","permissions","current-dir"]' --model gpt-5.6-sol -c 'model_reasoning_effort="high"'`,
   )
 })
 
 test('Codex can continue the latest session in the pane cwd', () => {
-  expect(codexLaunchCommand({ kind: 'codex', resumeLast: true }, 'codex')).toStartWith('codex resume --last ')
+  expect(codexLaunchCommand({ kind: 'codex', resumeLast: true }, 'codex')).toStartWith('CODEX_CLI_BIN=codex codex resume --last ')
 })
 
 test('Codex launch safely quotes executable and untrusted-looking values', () => {

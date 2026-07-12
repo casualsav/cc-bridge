@@ -33,7 +33,7 @@ function token(value: string): string {
 /** Build the interactive Codex command used inside a marked tmux pane. */
 export function codexLaunchCommand(opts: AgentLaunch, bin = process.env.CODEX_BIN || 'codex'): string {
   const approval = opts.approval ?? 'never'
-  const sandbox = opts.sandbox ?? 'workspace-write'
+  const sandbox = opts.sandbox ?? 'danger-full-access'
   const flags = [
     '--no-alt-screen',
     '--ask-for-approval', approval,
@@ -44,7 +44,7 @@ export function codexLaunchCommand(opts: AgentLaunch, bin = process.env.CODEX_BI
   if (opts.effort && ['low', 'medium', 'high', 'xhigh'].includes(opts.effort))
     flags.push('-c', shellQuote(`model_reasoning_effort=${JSON.stringify(opts.effort)}`))
   const prefix = opts.resumeId ? ['resume', token(opts.resumeId)] : opts.resumeLast ? ['resume', '--last'] : []
-  return [token(bin), ...prefix, ...flags].join(' ')
+  return [`CODEX_CLI_BIN=${token(bin)}`, token(bin), ...prefix, ...flags].join(' ')
 }
 
 export function agentLabel(kind: AgentKind): string {
