@@ -2631,8 +2631,64 @@ function checkUsageSnapshot(): void {
   }
 }
 
+// Codex's ChatGPT-plan usage cap: a free-standing line
+//   "■ You've hit your usage limit. ... try again at 3:14 AM."
+// (the ■ is a marker glyph, not ANSI). The reset time uses "try again at <h>:<m> <am/pm>"
+// rather than Claude's "resets <time> (UTC)". No 5h/7d distinction — it's one plan cap.
+const CODEX_USAGE_LIMIT_RE = /you'?ve hit your usage limit\b.{0,200}try again at\s+(\d{1,2}):(\d{2})\s*([ap])m/i
+export { CODEX_USAGE_LIMIT_RE }
+// Parse "try again at 3:14 AM" → epoch ms (today or tomorrow, whichever is in the future).
+export function parseCodexResetTime(line: string): number | null {
+  const m = line.match(CODEX_USAGE_LIMIT_RE)
+  if (!m) return null
+  let hour = parseInt(m[1], 10) % 12
+  if (m[3].toLowerCase() === 'p') hour += 12
+  const fire = new Date()
+  fire.setUTCHours(hour, parseInt(m[2], 10), 0, 0)
+  if (fire.getTime() <= Date.now()) fire.setUTCDate(fire.getUTCDate() + 1)
+  return fire.getTime()
+}
+
+// Detect a Codex usage-limit hit in a pane capture and feed it into the same actOnLimitHit
+// machinery Claude Code uses (deduped relay + auto-continue at the reset instant). Codex's cap
+// is account-wide (one ChatGPT plan), so we key dedup on the main account and route the ⛔ to the
+// pane's topics. The "Approaching rate limits" model-switch menu that accompanies it is a separate
+// concern (handled by the select-prompt relay, not here).
+async function handleCodexUsageLimit(text: string, origin: string, account: Account): Promise<void> {
+  const lines = stripAnsi(text).split('\n').map(l => l.replace(/\s+$/, ''))
+  // The limit line is free-standing (not inside a ● block); scan the bottom region like the CC path.
+  const hitIdx = lines.findLastIndex(l => CODEX_USAGE_LIMIT_RE.test(l))
+  if (hitIdx < 0) return
+  const limitLine = lines[hitIdx].trim()
+  try {
+    let prev = ''
+    try { if (statSync(USAGE_CAPTURE_FILE).size < 256 * 1024) prev = readFileSync(USAGE_CAPTURE_FILE, 'utf8') } catch {}
+    writeFileSync(USAGE_CAPTURE_FILE, `${prev}\n===== ${new Date().toISOString()} (codex) =====\n${stripAnsi(text)}\n`, { mode: 0o600 })
+  } catch {}
+  const fireAt = parseCodexResetTime(limitLine)
+  if (fireAt) { actOnLimitHit(fireAt, 'usage', limitLine, origin, account); return }
+  // No parseable reset time — relay once (deduped on the banner line), no schedule.
+  const key = `hit:${limitLine}`
+  const prev = usageHitState.get(account.name)
+  if (key === prev?.key && Date.now() - (prev?.at ?? 0) < RESET_RELOCK_MS) return
+  usageHitState.set(account.name, { key, at: Date.now() })
+  saveUsageNotifState()
+  void (async () => {
+    for (const { chat, thread } of await outboundTargetsFor(origin)) {
+      await channel.sendText(String(chat), `⛔ <b>Codex hit the usage limit.</b>\n${escapeHtml(limitLine)}`, { ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
+    }
+  })()
+}
+
 async function handleUsageLimit(text: string, origin: string | null = focus.activePaneId): Promise<void> {
   const account = await paneAccount(origin)
+  // Codex surfaces its ChatGPT-plan usage cap differently from Claude Code's statusline: a
+  // free-standing "■ You've hit your usage limit. ... try again at <time>." line (no "resets",
+  // no UTC suffix). Detect + parse that path before the CC-specific machinery below.
+  if (origin && await paneAgentKind(origin) === 'codex') {
+    void handleCodexUsageLimit(text, origin, account)
+    return
+  }
   // Statusline snapshot is the authoritative source — when this account's is fresh,
   // checkUsageSnapshot owns its usage handling and this pane-scrape fallback stands down.
   if (readUsageSnapshot(undefined, account)) return
