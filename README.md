@@ -9,7 +9,7 @@ Drive **Claude Code or OpenAI Codex CLI** from Telegram. Each chat/topic keeps i
 ## Requirements
 
 - [Claude Code](https://claude.com/claude-code) installed and logged in.
-- Optional: [OpenAI Codex CLI](https://github.com/openai/codex) installed and authenticated with ChatGPT. Set `CODEX_BIN=/absolute/path/to/codex` in the bridge `.env` if `codex` is not the correct executable on the daemon's `PATH`.
+- Optional: [OpenAI Codex CLI](https://github.com/openai/codex) installed and authenticated with ChatGPT. Set `CODEX_BIN=/absolute/path/to/codex` in the bridge `.env` if `codex` is not the correct executable on the daemon's `PATH`. On Linux, Codex's `workspace-write` sandbox also needs Bubblewrap and user/network namespace support; the setup wizard probes this and offers Ubuntu's official AppArmor-profile repair when needed. `tg doctor` reports CLI, login, sandbox, and failover readiness.
 - [Bun](https://bun.sh) (the runtime; dependencies install on first launch).
 - A Telegram bot token from [@BotFather](https://t.me/BotFather).
 - `tmux` — required for some features. Core messaging works without it via MCP.

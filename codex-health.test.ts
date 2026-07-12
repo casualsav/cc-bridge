@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { codexSandboxProbe } from './codex-health.ts'
+import { codexReadiness, codexSandboxProbe, ubuntuBwrapRepairCommands } from './codex-health.ts'
 
 test('Codex sandbox probe exercises user, pid, and network namespaces', () => {
   const seen: Array<{ cmd: string; args: string[] }> = []
@@ -27,4 +27,19 @@ test('Codex sandbox probe handles a missing Bubblewrap executable', () => {
   expect(result.ok).toBe(false)
   if (result.ok) throw new Error('expected an unhealthy probe')
   expect(result.reason).toContain('bubblewrap')
+})
+
+test('Codex readiness distinguishes CLI, login, sandbox, and ready', () => {
+  expect(codexReadiness({ cli: null, authenticated: false, sandbox: { ok: false, reason: 'blocked' } }).state).toBe('cli-missing')
+  expect(codexReadiness({ cli: '/opt/codex', authenticated: false, sandbox: { ok: true } }).state).toBe('login-missing')
+  expect(codexReadiness({ cli: '/opt/codex', authenticated: true, sandbox: { ok: false, reason: 'blocked' } })).toMatchObject({ state: 'sandbox-blocked', reason: 'blocked' })
+  expect(codexReadiness({ cli: '/opt/codex', authenticated: true, sandbox: { ok: true } })).toEqual({ state: 'ready', cli: '/opt/codex' })
+})
+
+test('Ubuntu repair plan installs and loads only the official Bubblewrap profile', () => {
+  expect(ubuntuBwrapRepairCommands('/usr/share/apparmor/extra-profiles/bwrap-userns-restrict')).toEqual([
+    ['sudo', 'apt-get', 'install', '-y', 'bubblewrap', 'apparmor-profiles', 'apparmor-utils'],
+    ['sudo', 'install', '-m', '0644', '/usr/share/apparmor/extra-profiles/bwrap-userns-restrict', '/etc/apparmor.d/bwrap-userns-restrict'],
+    ['sudo', 'apparmor_parser', '-r', '/etc/apparmor.d/bwrap-userns-restrict'],
+  ])
 })

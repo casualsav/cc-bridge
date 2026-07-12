@@ -1,4 +1,7 @@
 import { spawnSync } from 'node:child_process'
+import { existsSync, readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 
 export type CodexSandboxHealth = { ok: true } | { ok: false; reason: string }
 type ProbeRunner = (cmd: string, args: string[]) => { status: number | null; stderr?: string | Buffer }
@@ -28,3 +31,44 @@ export function cachedCodexSandboxProbe(now = Date.now()): CodexSandboxHealth {
 }
 
 export function resetCodexSandboxProbeCache(): void { cached = null }
+
+export type CodexReadiness =
+  | { state: 'cli-missing' }
+  | { state: 'login-missing'; cli: string }
+  | { state: 'sandbox-blocked'; cli: string; reason: string }
+  | { state: 'ready'; cli: string }
+
+export function codexReadiness(input: { cli: string | null; authenticated: boolean; sandbox: CodexSandboxHealth }): CodexReadiness {
+  if (!input.cli) return { state: 'cli-missing' }
+  if (!input.authenticated) return { state: 'login-missing', cli: input.cli }
+  if (!input.sandbox.ok) return { state: 'sandbox-blocked', cli: input.cli, reason: input.sandbox.reason }
+  return { state: 'ready', cli: input.cli }
+}
+
+function bridgeEnvValue(key: string): string | null {
+  try {
+    const stateDir = process.env.TELEGRAM_STATE_DIR || join(homedir(), '.claude', 'channels', 'telegram')
+    return readFileSync(join(stateDir, '.env'), 'utf8').match(new RegExp(`^${key}=(.+)$`, 'm'))?.[1]?.trim() || null
+  } catch { return null }
+}
+
+export function codexCliPath(): string | null {
+  const configured = process.env.CODEX_BIN || bridgeEnvValue('CODEX_BIN')
+  if (configured && existsSync(configured)) return configured
+  const found = spawnSync('sh', ['-lc', 'command -v codex'], { encoding: 'utf8', timeout: 3000 })
+  return found.status === 0 && found.stdout.trim() ? found.stdout.trim() : null
+}
+
+export function currentCodexReadiness(): CodexReadiness {
+  const cli = codexCliPath()
+  const home = process.env.CODEX_HOME || bridgeEnvValue('CODEX_HOME') || join(homedir(), '.codex')
+  return codexReadiness({ cli, authenticated: existsSync(join(home, 'auth.json')), sandbox: cachedCodexSandboxProbe() })
+}
+
+export function ubuntuBwrapRepairCommands(profileSource: string): string[][] {
+  return [
+    ['sudo', 'apt-get', 'install', '-y', 'bubblewrap', 'apparmor-profiles', 'apparmor-utils'],
+    ['sudo', 'install', '-m', '0644', profileSource, '/etc/apparmor.d/bwrap-userns-restrict'],
+    ['sudo', 'apparmor_parser', '-r', '/etc/apparmor.d/bwrap-userns-restrict'],
+  ]
+}

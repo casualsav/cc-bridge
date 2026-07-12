@@ -202,6 +202,23 @@ TELEGRAM_WEBAPP_TUNNEL=tailscale            # tailscale = in-group · cloudflare
 TELEGRAM_WEBAPP_PUBLIC_URL=https://files.example.com   # custom-domain option only (overrides the tunnel)
 ```
 
+**If Codex is enabled, verify it before allowing unattended failover.** Run `tg doctor`; it checks
+the executable, ChatGPT login, and a zero-token Bubblewrap user/PID/network namespace probe. On
+Ubuntu 24.04, a failure such as `loopback: Failed RTM_NEWADDR: Operation not permitted` means the
+official AppArmor profile is missing. Prefer rerunning `bun setup.ts` and accepting its guided repair.
+The equivalent manual repair is:
+
+```bash
+sudo apt-get install -y bubblewrap apparmor-profiles apparmor-utils
+sudo install -m 0644 /usr/share/apparmor/extra-profiles/bwrap-userns-restrict \
+  /etc/apparmor.d/bwrap-userns-restrict
+sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
+```
+
+Then run `codex login --device-auth` and `tg doctor` again. Do **not** solve this by enabling
+`danger-full-access`, privileged containers, or globally disabling AppArmor; the bridge keeps Codex
+out of the failover chain until the safe `workspace-write` probe passes.
+
 **Write `~/.claude/channels/telegram/access.json`** locked to their ID (omit this file and
 use pairing instead if they didn't give an ID):
 ```json

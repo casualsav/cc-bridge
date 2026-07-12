@@ -120,7 +120,7 @@ import {
 } from './status-card.ts'
 import { buildTakeoverBrief } from './takeover-brief.ts'
 import { CODEX_HOME } from './codex-transcript.ts'
-import { cachedCodexSandboxProbe } from './codex-health.ts'
+import { currentCodexReadiness } from './codex-health.ts'
 import { TypingPresence } from './typing.ts'
 import { transcribe, transcribeProvider, transcribeStatus } from './voice.ts'
 import { synthesize, provisionPiper, piperReady, engineStatus, PIPER_VOICES, DEFAULT_PIPER_VOICE, type TtsEngine } from './voice-out.ts'
@@ -2540,15 +2540,15 @@ function maybeWarnContext(pct: number | null): void {
 // ChatGPT-plan hit shares usageHitState['main'] with claude-main and can't be cleanly disentangled.
 let lastCodexHealthError = ''
 function codexAvailable(): boolean {
-  if (!existsSync(join(CODEX_HOME, 'auth.json'))) return false
-  const health = cachedCodexSandboxProbe()
-  if (!health.ok) {
-    if (health.reason !== lastCodexHealthError) {
-      lastCodexHealthError = health.reason
-      process.stderr.write(`daemon: Codex failover unavailable: ${health.reason}\n`)
+  const readiness = currentCodexReadiness()
+  if (readiness.state === 'sandbox-blocked') {
+    if (readiness.reason !== lastCodexHealthError) {
+      lastCodexHealthError = readiness.reason
+      process.stderr.write(`daemon: Codex failover unavailable: ${readiness.reason}\n`)
     }
     return false
   }
+  if (readiness.state !== 'ready') return false
   lastCodexHealthError = ''
   return true
 }
@@ -6320,10 +6320,15 @@ function failoverPanelText(): string {
   })
   // Codex model/effort — shown only when Codex is set up; governs failover-to-Codex AND every Codex
   // session. Names the CODEX_MODEL env as the source when no in-app choice is set, so it's discoverable.
-  const codexCfg = codexAvailable()
-    ? `\n\n✳️ <b>Codex</b> — model <b>${escapeHtml(loadAccess().codexModel || (process.env.CODEX_MODEL ? `${process.env.CODEX_MODEL} (env)` : 'default'))}</b> · ` +
+  const readiness = currentCodexReadiness()
+  const codexCfg = readiness.state === 'ready'
+    ? `\n\n✳️ <b>Codex · ✅ ready</b> — model <b>${escapeHtml(loadAccess().codexModel || (process.env.CODEX_MODEL ? `${process.env.CODEX_MODEL} (env)` : 'default'))}</b> · ` +
       `effort <b>${escapeHtml(codexLaunchEffort() ?? 'default')}</b>\n<i>Used when a session fails over to Codex (and for every Codex session).</i>`
-    : ''
+    : readiness.state === 'login-missing'
+      ? `\n\n✳️ <b>Codex · ⚠️ not logged in</b>\n<code>${escapeHtml(readiness.cli)} login</code>`
+      : readiness.state === 'sandbox-blocked'
+        ? `\n\n✳️ <b>Codex · ❌ sandbox blocked</b>\n<i>${escapeHtml(readiness.reason.slice(0, 300))}</i>`
+        : `\n\n✳️ <b>Codex · not installed/configured</b>\n<i>Install Codex and set CODEX_BIN, then sign in with ChatGPT.</i>`
   return `🔀 <b>Limit failover</b> — <b>${a.limitFailover === true ? 'on' : 'off'}</b>\n\n` +
     `On a usage-limit hit, the stuck session tries these in order:\n\n${lines.join('\n')}\n\n` +
     `Reorder with ↑/↓.${codexCfg}`
@@ -6423,7 +6428,7 @@ bot.command('settings', async ctx => {
 // /health — the bridge's own vitals (ROADMAP #14): instance, version, uptime, adopted panes,
 // queue depths, watchdog, last crash. Debugs the meta-layer from the phone instead of the log.
 const DAEMON_STARTED = Date.now()
-bot.command('health', async ctx => {
+const sendHealth = async (ctx: Context): Promise<void> => {
   if (!dmCommandGate(ctx)) return
   const lines: string[] = [`🩺 <b>Bridge health</b> — instance <code>${escapeHtml(INSTANCE_ID)}</code> · v${escapeHtml(bridgeVersion())}`]
   lines.push(`⏱ Daemon up ${formatDuration(Date.now() - DAEMON_STARTED)} (pid ${process.pid})`)
@@ -6436,6 +6441,12 @@ bot.command('health', async ctx => {
   const later = readLater()
   const laterN = Object.values(later).reduce((n, items) => n + items.length, 0)
   lines.push(`🗒 Queues: ${laterN} queued · ${scheduledCount()} scheduled · ${revivalQueues.size} reviving`)
+  const codexHealth = currentCodexReadiness()
+  const codexHealthText = codexHealth.state === 'ready' ? '✅ ready'
+    : codexHealth.state === 'login-missing' ? '⚠️ not logged in'
+    : codexHealth.state === 'sandbox-blocked' ? '❌ sandbox blocked'
+    : 'not installed/configured'
+  lines.push(`✳️ Codex: ${codexHealthText}`)
   let wd = 'not running'
   try {
     const wpid = parseInt(readFileSync(WATCHDOG_PID_FILE, 'utf8').trim(), 10)
@@ -6462,6 +6473,7 @@ bot.command('health', async ctx => {
     ['⏱ Uptime', `${formatDuration(Date.now() - DAEMON_STARTED)} · pid ${process.pid}`],
     ['🖥 Panes', String(offMcpPanes.size)],
     ['🗒 Queues', `${laterN} queued · ${scheduledCount()} scheduled · ${revivalQueues.size} reviving`],
+    ['✳️ Codex', codexHealthText],
     ['🐶 Watchdog', escapeHtml(wd)],
   ]
   const detail = [
@@ -6473,7 +6485,9 @@ bot.command('health', async ctx => {
     rows.map(([k, v]) => `| ${k} | ${v} |`).join('\n') +
     `\n\n<details><summary>Details</summary>${detail}</details>`
   await showRichPanel(ctx, 'send', toInputRichMessage(md), lines.join('\n'))
-})
+}
+bot.command('health', sendHealth)
+bot.command('doctor', sendHealth)
 
 // The /voice panel: current state + a toggle button (same pattern as /stream).
 function voicePanelText(): string {
@@ -10535,7 +10549,7 @@ void (async () => {
               { command: 'terminal', description: 'Dump the last N lines of the terminal (default 40)' },
               { command: 'compact', description: 'Compact the conversation to free up context' },
               { command: 'voice', description: 'Voice replies on/off — replies arrive as voice notes too' },
-              { command: 'health', description: 'Bridge vitals — instance, uptime, panes, queues, watchdog' },
+              { command: 'doctor', description: 'Bridge + Codex readiness — login, sandbox, failover, daemon' },
               { command: 'update', description: 'Update the Telegram bridge or Claude itself' },
               { command: 'handoff', description: 'Write a session handoff (handoff.md) for a fresh agent' },
               { command: 'continue', description: 'Resume from handoff.md where the last session left off' },

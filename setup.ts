@@ -15,6 +15,7 @@ import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { STATE_DIR, ENV_FILE, ACCESS_FILE, DAEMON_LOG_FILE, DAEMON_PID_FILE, WATCHDOG_PID_FILE } from './common.ts'
 import { probeHardware, recommendWhisper, describeHardware, WHISPER_MODELS, WHISPER_INFO, type WhisperModel } from './hardware.ts'
+import { codexCliPath, codexSandboxProbe, ubuntuBwrapRepairCommands } from './codex-health.ts'
 
 const REPO = import.meta.dir
 const SETTINGS = join(homedir(), '.claude', 'settings.json')
@@ -159,6 +160,7 @@ type Config = {
   openaiKey?: string
   accounts?: string[]
   botUsername?: string
+  prepareCodex?: boolean
 }
 
 // Validate a token against Telegram's getMe — confirms it's real and yields the bot's @username.
@@ -215,6 +217,9 @@ async function interview(): Promise<Config> {
     cfg.accounts.push(name)
     console.log(C.ok(`  ✓ ${name} → ~/.claude-${name}`))
   }
+  const codexDetected = !!codexCliPath() || existsSync(join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'auth.json')) ||
+    (existsSync(ENV_FILE) && /^(CODEX_BIN|CODEX_MODEL|CODEX_REASONING_EFFORT)=/m.test(readFileSync(ENV_FILE, 'utf8')))
+  cfg.prepareCodex = await askYN('Prepare ChatGPT/Codex as a failover target?', codexDetected)
   return cfg
 }
 
@@ -235,6 +240,56 @@ async function pickWhisperModel(cfg: Config): Promise<void> {
   const n = parseInt(a, 10)
   cfg.whisperModel = (n >= 1 && n <= WHISPER_MODELS.length ? WHISPER_MODELS[n - 1] : rec.model)
   cfg.whisperDevice = probe.gpu ? (await askYN(`  Use the GPU (cuda) for ${cfg.whisperModel}?`, true) ? 'cuda' : 'cpu') : 'cpu'
+}
+
+// ---- Codex failover readiness ----
+function setupCodexCli(): string | null {
+  const live = codexCliPath()
+  if (live) return live
+  try {
+    const p = readFileSync(ENV_FILE, 'utf8').match(/^CODEX_BIN=(.+)$/m)?.[1]?.trim()
+    return p && existsSync(p) ? p : null
+  } catch { return null }
+}
+
+async function prepareCodexFailover(cfg: Config): Promise<void> {
+  if (!cfg.prepareCodex) return
+  section('Codex failover readiness')
+  const cli = setupCodexCli()
+  if (!cli) {
+    console.log(C.warn('  ⚠ Codex CLI not found. Install Codex, set CODEX_BIN in the bridge .env, then rerun setup or `tg doctor`.'))
+    return
+  }
+  console.log(C.ok(`  ✓ Codex CLI: ${cli}`))
+
+  let sandbox = codexSandboxProbe()
+  if (!sandbox.ok) {
+    console.log(C.warn(`  ⚠ Codex workspace sandbox failed: ${sandbox.reason}`))
+    let ubuntu = false
+    try { ubuntu = /(^|\n)ID=ubuntu(\n|$)/.test(readFileSync('/etc/os-release', 'utf8')) } catch {}
+    const canRepair = platform() === 'linux' && ubuntu && which('apt-get') && hasSudo()
+    if (canRepair && await askYN('Install/load Ubuntu’s official Bubblewrap AppArmor profile now?', true)) {
+      const source = '/usr/share/apparmor/extra-profiles/bwrap-userns-restrict'
+      // Install packages first; the profile source is provided by apparmor-profiles.
+      const install = ubuntuBwrapRepairCommands(source)[0]
+      const installed = run(install[0], install.slice(1), { timeout: 300_000 })
+      if (installed.ok && existsSync(source)) {
+        const commands = ubuntuBwrapRepairCommands(source).slice(1)
+        const repaired = commands.every(c => run(c[0], c.slice(1), { timeout: 30_000 }).ok)
+        sandbox = repaired ? codexSandboxProbe() : sandbox
+      }
+      console.log(sandbox.ok ? C.ok('  ✓ Codex workspace sandbox repaired') : C.err('  ✗ Sandbox still blocked; failover will stay disabled. Run `tg doctor` for details.'))
+    } else {
+      console.log(C.warn('  • Skipping host repair; Codex failover will remain disabled until the sandbox probe passes.'))
+    }
+  } else console.log(C.ok('  ✓ Codex workspace sandbox'))
+
+  const auth = join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'auth.json')
+  if (existsSync(auth)) console.log(C.ok('  ✓ ChatGPT login'))
+  else if (await askYN('Codex is not logged in. Start ChatGPT device login now?', true)) {
+    const login = spawnSync(cli, ['login', '--device-auth'], { stdio: 'inherit' })
+    console.log(login.status === 0 && existsSync(auth) ? C.ok('  ✓ ChatGPT login complete') : C.warn(`  ⚠ Login incomplete — run ${cli} login later.`))
+  } else console.log(C.warn(`  ⚠ Not logged in — run ${cli} login before enabling failover.`))
 }
 
 // ---- config writes ----
@@ -368,6 +423,7 @@ async function main(): Promise<void> {
   console.log(C.b('\n  claude-tg — off-MCP setup\n'))
   const mode = await checkDeps()
   const cfg = await interview()
+  await prepareCodexFailover(cfg)
   writeConfig(cfg)
   patchSettings(mode)
 
