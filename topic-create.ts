@@ -1,12 +1,14 @@
 import { join } from 'node:path'
 import { STATE_DIR, readJsonFile, writeJsonFile } from './common.ts'
 import type { AgentKind } from './agent.ts'
+import { normalizeHarnessProfile, type HarnessProfile } from './harness-provider.ts'
 
 export type TopicCreateOffer = {
   name: string
   dir: string
   repo?: string
   agent: AgentKind
+  harness?: HarnessProfile
 }
 
 export const TOPIC_CREATE_FILE = join(STATE_DIR, 'topic-create-pending.json')
@@ -26,6 +28,7 @@ function load(): void {
       dir: value.dir,
       ...(typeof value.repo === 'string' ? { repo: value.repo } : {}),
       agent: value.agent === 'codex' ? 'codex' : 'claude',
+      ...(value.harness ? { harness: normalizeHarnessProfile(value.harness) } : {}),
     })
   }
 }
@@ -41,7 +44,12 @@ export function getTopicCreate(thread: number): TopicCreateOffer | undefined {
 
 export function setTopicCreate(thread: number, offer: Omit<TopicCreateOffer, 'agent'> & { agent?: AgentKind }): TopicCreateOffer {
   load()
-  const next: TopicCreateOffer = { ...offer, agent: offer.agent ?? offers.get(thread)?.agent ?? 'claude' }
+  const previous = offers.get(thread)
+  const next: TopicCreateOffer = {
+    ...offer,
+    agent: offer.agent ?? previous?.agent ?? 'claude',
+    ...(!offer.harness && previous?.harness ? { harness: previous.harness } : {}),
+  }
   offers.set(thread, next)
   save()
   return next

@@ -13,6 +13,7 @@ import { join } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { STATE_DIR, readJsonFile, writeJsonFile } from './common.ts'
 import { normalizeAgent, type AgentKind } from './agent.ts'
+import { normalizeHarnessProfile, type HarnessProfile } from './harness-provider.ts'
 
 export const TOPICS_FILE = join(STATE_DIR, 'topics.json')
 
@@ -26,6 +27,7 @@ export type TopicEntry = {
   worktree?: { repo: string; path: string }   // session runs in a git worktree of `repo`; removed on close when clean
   agent?: AgentKind        // absent on legacy stores = Claude Code
   agentSessionId?: string  // Claude/Codex conversation UUID for exact resume
+  harness?: HarnessProfile // absent = native Anthropic; only meaningful for Claude Code panes
 }
 
 export type TopicStore = {
@@ -75,6 +77,7 @@ export function loadTopics(): TopicStore {
           ? { worktree: { repo: t.worktree.repo, path: t.worktree.path } } : {}),
         ...(t.agent === 'codex' ? { agent: 'codex' as const } : {}),
         ...(typeof t.agentSessionId === 'string' ? { agentSessionId: t.agentSessionId } : {}),
+        ...(t.harness ? { harness: normalizeHarnessProfile(t.harness) } : {}),
       }
     }
     const dismissedSessions: Record<string, number> = {}

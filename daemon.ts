@@ -4,7 +4,7 @@ import type { ReactionTypeEmoji, InlineQueryResultArticle } from 'grammy/types'
 import { randomBytes } from 'node:crypto'
 import {
   readFileSync, writeFileSync, appendFileSync, mkdirSync, readdirSync, rmSync,
-  statSync, renameSync, realpathSync, chmodSync, unlinkSync, existsSync, openSync, closeSync, copyFileSync,
+  statSync, renameSync, realpathSync, readlinkSync, chmodSync, unlinkSync, existsSync, openSync, closeSync, copyFileSync,
   accessSync, constants as fsConstants,
 } from 'node:fs'
 import { homedir } from 'node:os'
@@ -29,8 +29,13 @@ import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detec
 import { resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, currentTurnActivity, currentTurnTokens, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, agentSessionId, agentForSession } from './agent-transcript.ts'
 import {
   AGENT_PANE_OPT, agentExitKeys, agentInterruptKeys, agentLabel, agentResetCommand, agentSubmitKeys,
-  codexLaunchCommand, normalizeAgent, type AgentKind,
+  codexLaunchCommand, normalizeAgent, shellQuote, type AgentKind,
 } from './agent.ts'
+import {
+  HARNESS_ENV_KEYS, HARNESS_PANE_OPT, claudeHarnessEnv, harnessLabel, normalizeHarnessProfile, normalizeProxyBaseUrl, parseHarnessSpec,
+  serializeHarnessProfile, type HarnessProfile,
+} from './harness-provider.ts'
+import { findSessionHarness, recordSessionHarness } from './session-harness.ts'
 import {
   initAccounts, listAccounts, accountByName, accountForTranscript, accountForProjectsDir,
   allProjectsDirs, addAccount, removeAccount, renameAccount, accountLoggedIn, healAccountConfigs, healMainStatusline,
@@ -140,6 +145,10 @@ try {
     if (m && process.env[m[1]] === undefined) process.env[m[1]] = m[2]
   }
 } catch {}
+// A SessionStart hook can itself run under one of our proxy-backed Claude processes. The marker is
+// process-scoped, so legitimate user-configured native Anthropic gateways remain untouched.
+if (process.env.CC_BRIDGE_HARNESS_PROXY === '1')
+  for (const key of HARNESS_ENV_KEYS) delete process.env[key]
 
 // Off-MCP outbound (experimental): instead of the agent calling the MCP reply tool,
 // the daemon reads its reply from the session transcript and relays it — lets a session
@@ -1056,6 +1065,10 @@ async function rememberPaneAgentTranscript(pane: string, path: string): Promise<
   const conversation = agentSessionId(path)
   if (current && (topicAgent(current) !== kind || current.agentSessionId !== conversation))
     updateTopic(sid, { ...(kind === 'codex' ? { agent: kind } : {}), agentSessionId: conversation })
+  if (kind === 'claude' && conversation) {
+    try { recordSessionHarness(conversation, await paneHarnessProfile(pane)) }
+    catch (error) { process.stderr.write(`daemon: could not persist harness for ${conversation}: ${error instanceof Error ? error.message : String(error)}\n`) }
+  }
 }
 async function transcriptForPane(pane: string | null, cwd: string | null): Promise<string | null> {
   if (pane) {
@@ -1108,6 +1121,150 @@ async function paneAgentKind(pane: string | null): Promise<AgentKind> {
   const file = await transcriptForPane(pane, cwd)
   return file && basename(file).startsWith('rollout-') ? 'codex' : 'claude'
 }
+
+async function paneHarnessProfile(pane: string | null): Promise<HarnessProfile> {
+  if (!pane) return { provider: 'anthropic' }
+  const sid = await sessionForPane(pane, false).catch(() => null)
+  const stored = sid ? getTopicBySession(sid)?.harness : undefined
+  if (stored) return normalizeHarnessProfile(stored)
+  try {
+    const { stdout } = await exec('tmux', ['show-options', '-pqv', '-t', pane, HARNESS_PANE_OPT], { timeout: 2000 })
+    if (stdout.trim()) return normalizeHarnessProfile(JSON.parse(stdout.trim()))
+  } catch {}
+  return { provider: 'anthropic' }
+}
+
+function harnessEnvPrefix(profile: HarnessProfile): string {
+  if (profile.provider === 'anthropic') return 'env -u CC_BRIDGE_HARNESS_PROXY '
+  const clean = HARNESS_ENV_KEYS.map(key => `-u ${key}`).join(' ')
+  const baseUrl = normalizeProxyBaseUrl(process.env.CLAUDE_CODE_PROXY_URL)
+  if (!baseUrl) throw new Error('CLAUDE_CODE_PROXY_URL must be an unauthenticated loopback HTTP URL')
+  const assignments = Object.entries(claudeHarnessEnv(profile, baseUrl))
+    .map(([key, value]) => `${key}=${shellQuote(value)}`).join(' ')
+  return `env ${clean} ${assignments} `
+}
+
+async function stampPaneHarness(pane: string, profile: HarnessProfile, sid?: string | null): Promise<void> {
+  await exec('tmux', ['set-option', '-p', '-t', pane, HARNESS_PANE_OPT, serializeHarnessProfile(profile)], { timeout: 2000 }).catch(() => {})
+  if (sid && getTopicBySession(sid)) updateTopic(sid, { harness: profile })
+}
+
+const PROXY_PID_FILE = join(STATE_DIR, 'claude-code-proxy.pid')
+
+function configuredProxyBinPath(): string | null {
+  const bin = process.env.CLAUDE_CODE_PROXY_BIN || 'claude-code-proxy'
+  const candidates = bin.includes('/') ? [bin] : (process.env.PATH || '').split(':').map(dir => join(dir, bin))
+  for (const candidate of candidates) {
+    try { if (existsSync(candidate)) return realpathSync(candidate) } catch {}
+  }
+  return null
+}
+
+function proxyProcessTrusted(): boolean {
+  try {
+    const pid = Number.parseInt(readFileSync(PROXY_PID_FILE, 'utf8').trim(), 10)
+    if (!Number.isSafeInteger(pid) || pid <= 1) return false
+    process.kill(pid, 0)
+    const procDir = `/proc/${pid}`
+    if (existsSync(procDir)) {
+      const ownUid = process.getuid?.()
+      if (ownUid !== undefined && statSync(procDir).uid !== ownUid) return false
+      const expected = configuredProxyBinPath()
+      if (!expected) return false
+      const actual = realpathSync(readlinkSync(`${procDir}/exe`))
+      if (actual !== expected) {
+        const argv = readFileSync(`${procDir}/cmdline`, 'utf8').split('\0').filter(Boolean)
+        const invokesExpectedScript = argv.some(arg => {
+          try { return existsSync(arg) && realpathSync(arg) === expected } catch { return false }
+        })
+        if (!invokesExpectedScript) return false
+      }
+    } else {
+      const ownUid = process.getuid?.()
+      const expected = configuredProxyBinPath()
+      if (ownUid === undefined || !expected) return false
+      const ps = execFileSync('ps', ['-o', 'uid=', '-o', 'command=', '-p', String(pid)], { encoding: 'utf8', timeout: 2000 }).trim()
+      const match = /^(\d+)\s+(.+)$/.exec(ps)
+      if (!match || Number(match[1]) !== ownUid) return false
+      const command = match[2]
+      const invokesExpected = command.split(/\s+/).some(arg => {
+        try { return existsSync(arg) && realpathSync(arg) === expected } catch { return false }
+      })
+      if (!invokesExpected) return false
+    }
+    return true
+  } catch { return false }
+}
+
+async function proxyLive(): Promise<boolean> {
+  if (!proxyProcessTrusted()) return false
+  const baseUrl = normalizeProxyBaseUrl(process.env.CLAUDE_CODE_PROXY_URL)
+  if (!baseUrl) return false
+  try { return (await fetch(`${baseUrl}/healthz`, { signal: AbortSignal.timeout(1500) })).ok }
+  catch { return false }
+}
+
+let proxyStartInFlight: Promise<boolean> | null = null
+async function startOwnedProxy(): Promise<boolean> {
+  if (await proxyLive()) return true
+  const baseUrl = normalizeProxyBaseUrl(process.env.CLAUDE_CODE_PROXY_URL)
+  if (!baseUrl) return false
+  const url = new URL(baseUrl)
+  const bin = process.env.CLAUDE_CODE_PROXY_BIN || 'claude-code-proxy'
+  try {
+    const child = spawn(bin, ['serve', '--no-monitor'], {
+      detached: true, stdio: 'ignore',
+      env: { ...process.env, PORT: url.port || '18765', CCP_BIND_ADDRESS: url.hostname === '[::1]' ? '::1' : url.hostname },
+    })
+    if (!child.pid) return false
+    writeFileSync(PROXY_PID_FILE, String(child.pid), { mode: 0o600 })
+    child.unref()
+    for (let i = 0; i < 20; i++) { await sleep(250); if (await proxyLive()) return true }
+    try { unlinkSync(PROXY_PID_FILE) } catch {}
+  } catch { try { unlinkSync(PROXY_PID_FILE) } catch {} }
+  return false
+}
+
+async function ensureProxyRunning(): Promise<boolean> {
+  if (await proxyLive()) return true
+  if (proxyStartInFlight) return proxyStartInFlight
+  proxyStartInFlight = startOwnedProxy()
+  try { return await proxyStartInFlight }
+  finally { proxyStartInFlight = null }
+}
+
+async function proxyProviderReady(provider: Exclude<HarnessProfile['provider'], 'anthropic'>): Promise<boolean> {
+  const bin = process.env.CLAUDE_CODE_PROXY_BIN || 'claude-code-proxy'
+  try { await exec(bin, [provider, 'auth', 'status'], { timeout: 5000 }); return true }
+  catch { return false }
+}
+
+async function waitForHarnessReady(pane: string, timeoutMs = 30_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (!(await paneAlive(pane))) return false
+    const cap = await capturePane(pane).catch(() => '')
+    if (onNormalPrompt(cap) || isResumeSessionPrompt(cap)) return true
+    await sleep(500)
+  }
+  return false
+}
+
+let proxyWatchBusy = false
+setInterval(() => {
+  if (proxyWatchBusy) return
+  void (async () => {
+    proxyWatchBusy = true
+    try {
+      for (const pane of offMcpPanes) {
+        if (await paneAgentKind(pane) === 'claude' && (await paneHarnessProfile(pane)).provider !== 'anthropic') {
+          await ensureProxyRunning()
+          break
+        }
+      }
+    } finally { proxyWatchBusy = false }
+  })()
+}, 15_000).unref?.()
 
 // The account a pane's session runs under, derived from its stamped transcript path (the
 // transcript lives under <configDir>/projects/). Unstamped panes read as main — correct for
@@ -4579,7 +4736,8 @@ bot.command('agent', async ctx => {
   const { paneId } = await targetPaneOf(ctx)
   if (!arg) {
     const kind = await paneAgentKind(paneId)
-    await ctx.reply(`Active terminal: <b>${agentLabel(kind)}</b>\n\nStart one with <code>/agent claude</code> or <code>/agent codex</code>.`, { parse_mode: 'HTML' })
+    const harness = kind === 'claude' ? `\nInference: <b>${escapeHtml(harnessLabel(await paneHarnessProfile(paneId)))}</b>` : ''
+    await ctx.reply(`Active terminal: <b>${agentLabel(kind)}</b>${harness}\n\nStart one with <code>/agent claude</code> or <code>/agent codex</code>. Inside Claude Code, use <code>/harness</code> to swap inference providers.`, { parse_mode: 'HTML' })
     return
   }
   if (arg !== 'claude' && arg !== 'codex') {
@@ -4598,6 +4756,79 @@ bot.command('agent', async ctx => {
     ? `🚀 Starting <b>${agentLabel(kind)}</b> in <code>${escapeHtml(dir)}</code>${isTopicMode() ? ' — it gets its own topic shortly.' : '.'}`
     : `❌ Couldn’t start ${agentLabel(kind)} in <code>${escapeHtml(dir)}</code>. Check the CLI path/login and daemon log.`,
     { parse_mode: 'HTML' })
+})
+
+// Keep Claude Code as the harness while swapping only its inference provider. This is intentionally
+// separate from /agent codex, which launches the standalone Codex TUI and uses Codex transcripts.
+const harnessSwitchingPanes = new Set<string>()
+bot.command('harness', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  const arg = (ctx.match ?? '').toString().trim()
+  const t = await commandTarget(ctx)
+  if (!t) return
+  if (arg && harnessSwitchingPanes.has(t.paneId)) { await ctx.reply('⏳ A harness switch is already in progress for this session.'); return }
+  if (arg) harnessSwitchingPanes.add(t.paneId)
+  try {
+  const current = await paneHarnessProfile(t.paneId)
+  if (!arg) {
+    await ctx.reply(
+      `Active harness: <b>${escapeHtml(harnessLabel(current))}</b>\n\n` +
+      `<code>/harness native</code> · <code>/harness codex [model]</code> · ` +
+      `<code>/harness kimi [model]</code> · <code>/harness grok [model]</code> · <code>/harness cursor [model]</code>`,
+      { parse_mode: 'HTML' },
+    )
+    return
+  }
+  if (await paneAgentKind(t.paneId) !== 'claude') {
+    await ctx.reply('This command swaps the model inside <b>Claude Code</b>. This topic is using standalone Codex; start a Claude session first.', { parse_mode: 'HTML' })
+    return
+  }
+  const profile = parseHarnessSpec(arg)
+  if (!profile) {
+    await ctx.reply('Usage: <code>/harness native | codex [model] | kimi [model] | grok [model] | cursor [model]</code>', { parse_mode: 'HTML' })
+    return
+  }
+  if (profile.provider !== 'anthropic') {
+    if (!(await proxyProviderReady(profile.provider))) {
+      const bin = process.env.CLAUDE_CODE_PROXY_BIN || 'claude-code-proxy'
+      const login = profile.provider === 'codex' || profile.provider === 'grok' ? 'auth device' : 'auth login'
+      await ctx.reply(
+        `❌ ${profile.provider} is not authenticated in the Claude harness proxy. Run:\n<code>${escapeHtml(bin)} ${profile.provider} ${login}</code>`,
+        { parse_mode: 'HTML' },
+      )
+      return
+    }
+    if (!(await ensureProxyRunning())) {
+      await ctx.reply('❌ The Claude harness proxy is not running. Install/configure <code>claude-code-proxy</code> or set <code>CLAUDE_CODE_PROXY_URL</code>.', { parse_mode: 'HTML' })
+      return
+    }
+  }
+  const cwd = await paneCwd(t.paneId).catch(() => null)
+  const file = await transcriptForPane(t.paneId, cwd)
+  const nativeId = file ? agentSessionId(file) : null
+  if (!nativeId) { await ctx.reply('❌ I could not resolve this Claude session id, so I left it running unchanged.'); return }
+  await ctx.reply(`🔄 Restarting this conversation on <b>${escapeHtml(harnessLabel(profile))}</b>…`, { parse_mode: 'HTML' })
+  const account = await paneAccount(t.paneId)
+  const resumed = await restartPaneSessionCore(t.paneId, nativeId, account, 'claude', undefined, undefined, profile)
+  if (!resumed) {
+    const restored = await restartPaneSessionCore(t.paneId, nativeId, account, 'claude', undefined, undefined, current)
+    if (restored) {
+      try { recordSessionHarness(nativeId, current) } catch {}
+    }
+    await ctx.reply(restored
+      ? `❌ The requested harness did not reach a usable prompt, so I restored <b>${escapeHtml(harnessLabel(current))}</b>.`
+      : '❌ The harness restart failed and automatic restoration also failed. The transcript is still preserved; use <code>/restart</code> after checking the daemon log.',
+      { parse_mode: 'HTML' })
+    return
+  }
+  try { recordSessionHarness(nativeId, profile) }
+  catch (error) {
+    process.stderr.write(`daemon: harness switched but could not persist ${nativeId}: ${error instanceof Error ? error.message : String(error)}\n`)
+    await ctx.reply(`⚠️ Inference now uses <b>${escapeHtml(harnessLabel(profile))}</b>, but its resume metadata could not be saved. Check state-directory permissions before restarting.`, { parse_mode: 'HTML' })
+    return
+  }
+  await ctx.reply(`✅ This is still the same Claude Code conversation and tool harness; inference now uses <b>${escapeHtml(harnessLabel(profile))}</b>.`, { parse_mode: 'HTML' })
+  } finally { if (arg) harnessSwitchingPanes.delete(t.paneId) }
 })
 
 bot.command('status', async ctx => {
@@ -4927,7 +5158,7 @@ async function rebindCrossEngineSession(pane: string, cwd: string, sid: string |
 // `id: null` is a CROSS-ENGINE takeover (Claude↔Codex): `--resume` is impossible across providers,
 // so the pane gets the OTHER engine launched fresh instead, with `brief` typed in as its first turn
 // once the composer is up. The fresh launch mints its own new session id — see rebindCrossEngineSession.
-async function restartPaneSessionCore(pane: string, id: string | null, accountOverride?: Account, agentOverride?: AgentKind, brief?: string, status?: { briefDelivered: boolean }): Promise<string | null> {
+async function restartPaneSessionCore(pane: string, id: string | null, accountOverride?: Account, agentOverride?: AgentKind, brief?: string, status?: { briefDelivered: boolean }, harnessOverride?: HarnessProfile): Promise<string | null> {
   const currentAgent = await paneAgentKind(pane)
   const agent = agentOverride ?? currentAgent
   const preCap = await capturePane(pane).catch(() => '')
@@ -4937,6 +5168,9 @@ async function restartPaneSessionCore(pane: string, id: string | null, accountOv
   // CLAUDE_CONFIG_DIR (the launcher env-prefixes it), so the resume line has to re-prefix. An
   // accountOverride relaunches the pane under a DIFFERENT account (usage-limit failover).
   const account = accountOverride ?? await paneAccount(pane)
+  const harness = harnessOverride ?? (id ? findSessionHarness(id) : undefined) ?? await paneHarnessProfile(pane)
+  if (agent === 'claude' && harness.provider !== 'anthropic' &&
+      (!(await proxyProviderReady(harness.provider)) || !(await ensureProxyRunning()))) return null
   const envPrefix = account.name === 'main' ? '' : `CLAUDE_CONFIG_DIR='${account.configDir.replace(/'/g, `'\\''`)}' `
   // Captured BEFORE /exit — a pane that dies with it can't answer these anymore.
   const cwd = await paneCwd(pane).catch(() => null)
@@ -4947,6 +5181,7 @@ async function restartPaneSessionCore(pane: string, id: string | null, accountOv
   // topic session whose mode/effort were last moved in the terminal.
   if (sid) { recordSessionMode(sid, mode); recordSessionEffort(sid, effort) }
   const swapStartMs = Date.now()   // cross-engine only: lower bound for "this is the NEW engine's transcript"
+  let launchVerified = harnessOverride === undefined && harness.provider === 'anthropic'
   setPaneRestarting(pane, true)
   try {
     const run = async () => {
@@ -4965,10 +5200,15 @@ async function restartPaneSessionCore(pane: string, id: string | null, accountOv
       }
       const resume = agent === 'codex'
         ? codexLaunchCommand({ kind: 'codex', ...(id !== null ? { resumeId: id } : {}), model: codexLaunchModel(), effort: codexLaunchEffort() }, process.env.CODEX_BIN || 'codex')
-        : `${envPrefix}${claudeBin()} --allow-dangerously-skip-permissions${id !== null ? ` --resume ${id}` : ''}`
+        : `${envPrefix}${harnessEnvPrefix(harness)}${claudeBin()} --allow-dangerously-skip-permissions${id !== null ? ` --resume ${id}` : ''}`
       await sendKeys(pane, [`hash -r; ${resume}`, 'Enter'])
       await waitForSettle(pane, 400, 30_000)
+      if (!launchVerified) {
+        if (!(await waitForHarnessReady(pane))) return
+        launchVerified = true
+      }
       await exec('tmux', ['set-option', '-p', '-t', pane, AGENT_PANE_OPT, agent], { timeout: 2000 }).catch(() => {})
+      if (agent === 'claude') await stampPaneHarness(pane, harness, sid)
       if (id !== null) {
         if (sid) updateTopic(sid, { ...(agent === 'codex' ? { agent } : { agent: undefined }), agentSessionId: id })
       } else {
@@ -4979,6 +5219,7 @@ async function restartPaneSessionCore(pane: string, id: string | null, accountOv
       }
     }
     await (watcher ? watcher.withInjection(run) : run())
+    if (!launchVerified && await paneAlive(pane)) return null
     if (!(await paneAlive(pane))) {
       if (!cwd) return null
       // (mode + effort already persisted above, so the respawn's resume branch seeds from them.)
@@ -4988,7 +5229,7 @@ async function restartPaneSessionCore(pane: string, id: string | null, accountOv
       // `sid` still carries the OLD (dead) engine's id at this point. Passed through, that would
       // silently `codex resume <the-dead-claude-uuid>` instead of the fresh launch this needs.
       // stampPaneSession below restores the pane→session mapping that passing it would have set.
-      const fresh = await spawnSession(cwd, id !== null ? `--resume ${id}` : '', id !== null ? (sid ?? undefined) : undefined, account, agent)
+      const fresh = await spawnSession(cwd, id !== null ? `--resume ${id}` : '', id !== null ? (sid ?? undefined) : undefined, account, agent, harness)
       if (!fresh) return null
       if (id === null && sid) await stampPaneSession(fresh, sid)
       // The session lives in `fresh` now — drop the dead pane's registry + session mapping so
@@ -5180,7 +5421,7 @@ async function restartAllStaleSessions(chat: string, onlyStale = true): Promise<
     if (live) { t.pane = live; retried.push(t); continue }
     const alive = await paneAlive(t.pane).catch(() => false)
     const fresh = !alive && t.sid && t.cwd
-      ? await spawnSession(t.cwd, '-c', t.sid, MAIN_ACCOUNT, topicAgent(getTopicBySession(t.sid)))
+      ? await spawnSession(t.cwd, `--resume ${t.id}`, t.sid, MAIN_ACCOUNT, topicAgent(getTopicBySession(t.sid)))
       : null
     if (fresh) { t.pane = fresh; if (t.sid) await reopenSessionTopic(t.sid); retried.push(t) }
     else if (alive) retried.push(t)
@@ -6852,7 +7093,7 @@ async function captureInheritedSettings(paneId: string, watcher: PaneWatcher | n
 // with NO post-boot pane-driving at all. This replaced the old type-into-a-booting-pane path, whose
 // REPL-wait + inject round-trips were the 10-20s "new topic is slow / not ready to receive" lag (and
 // they raced the user's own first keystrokes into the fresh pane).
-async function spawnSession(dir: string, extra = '', presetSessionId?: string, account: Account = MAIN_ACCOUNT, agent: AgentKind = 'claude'): Promise<string | null> {
+async function spawnSession(dir: string, extra = '', presetSessionId?: string, account: Account = MAIN_ACCOUNT, agent: AgentKind = 'claude', harnessOverride?: HarnessProfile): Promise<string | null> {
   try {
     // tmux's `new-window -c` silently falls back to $HOME when it can't chdir into `dir` (e.g.
     // another user's 700 folder) — the session then runs in the wrong place, stuck on a trust
@@ -6909,6 +7150,16 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
     const envPrefix = account.name === 'main'
       ? `HOME='${homedir().replace(/'/g, `'\\''`)}' `
       : `CLAUDE_CONFIG_DIR='${account.configDir.replace(/'/g, `'\\''`)}' `
+    const explicitClaudeResume = /(?:^|\s)--resume\s+([^\s]+)/.exec(extra)?.[1]
+    const harness: HarnessProfile = agent === 'claude'
+      ? normalizeHarnessProfile(
+          harnessOverride ??
+          (explicitClaudeResume ? findSessionHarness(explicitClaudeResume) : undefined) ??
+          (presetSessionId ? getTopicBySession(presetSessionId)?.harness : undefined),
+        )
+      : { provider: 'anthropic' }
+    if (agent === 'claude' && harness.provider !== 'anthropic' &&
+        (!(await proxyProviderReady(harness.provider)) || !(await ensureProxyRunning()))) return null
     // Set the inherited model + effort as LAUNCH FLAGS so the session boots already correct — no
     // typing /model + /effort into a freshly-booting pane (that post-boot injection was the 10-20s
     // slow-spawn lag and it raced the user's first keystrokes). Claude Code restores neither on
@@ -6936,7 +7187,7 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
         effort: codexLaunchEffort(),
       }, process.env.CODEX_BIN || 'codex')}`
     } else {
-      cmd = `${envPrefix}claude --allow-dangerously-skip-permissions${extra ? ` ${extra}` : ''}${launchFlags.length ? ` ${launchFlags.join(' ')}` : ''}`
+      cmd = `${envPrefix}${harnessEnvPrefix(harness)}claude --allow-dangerously-skip-permissions${extra ? ` ${extra}` : ''}${launchFlags.length ? ` ${launchFlags.join(' ')}` : ''}`
     }
     const { stdout } = await exec('tmux', ['new-window', '-d', '-P', '-F', '#{pane_id}', ...target, '-c', dir, cmd], { timeout: 5000 })
     const newPane = stdout.trim()
@@ -6949,6 +7200,12 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
         await exec('tmux', ['set-option', '-p', '-t', newPane, '@discord', '1'], { timeout: 2000 })
         await exec('tmux', ['set-option', '-p', '-t', newPane, AGENT_PANE_OPT, agent], { timeout: 2000 })
       } catch {}
+      const verifyHarness = agent === 'claude' && (harnessOverride !== undefined || harness.provider !== 'anthropic')
+      if (verifyHarness && !(await waitForHarnessReady(newPane))) {
+        await exec('tmux', ['kill-pane', '-t', newPane], { timeout: 2000 }).catch(() => {})
+        return null
+      }
+      if (agent === 'claude') await stampPaneHarness(newPane, harness, presetSessionId)
       if (presetSessionId && agent === 'codex') updateTopic(presetSessionId, { agent: 'codex' })
       // Pre-bound topic (user-created tab): stamp its sessionId at birth so discovery resolves
       // the pane straight to that topic instead of minting a fresh id + duplicate topic.
@@ -7270,7 +7527,8 @@ bot.on('message:forum_topic_created', async ctx => {
   const dirName = name.trim().toLowerCase().replace(/[\\/\0\s]+/g, '-')
   const dir = base && dirName ? join(base, dirName) : ''
   const repo = dir ? await repoForDir(dir) : null
-  const pending = setTopicCreate(thread, { name, dir, repo: repo ?? undefined })
+  const harness = await paneHarnessProfile(focus.activePaneId)
+  const pending = setTopicCreate(thread, { name, dir, repo: repo ?? undefined, harness })
   await ctx.reply(
     `🚀 <b>New topic “${escapeHtml(name)}”</b> — choose its agent and working folder.`,
     { parse_mode: 'HTML', reply_markup: topicCreateKeyboard(thread, dir, repo, pending.agent) },
@@ -8417,7 +8675,7 @@ bot.on('callback_query:data', async ctx => {
     }
     const pending = getTopicCreate(thread)
     if (tcMatch[1] === 'ask' || !pending) {
-      const offer = pending ?? setTopicCreate(thread, { name: '', dir: '' })
+      const offer = pending ?? setTopicCreate(thread, { name: '', dir: '', harness: await paneHarnessProfile(focus.activePaneId) })
       await ctx.editMessageReplyMarkup().catch(() => {})
       const sent = await channel.sendText(String(chat),
         `📂 Which folder should this ${topicCreateAgentLabel(offer.agent)} session run in?\n\nReply with a folder path (created if missing; <code>~/…</code> works).`,
@@ -8474,12 +8732,12 @@ bot.on('callback_query:data', async ctx => {
       branchedInPlace = true
     }
     const sid = genSessionId()
-    setTopic(sid, { threadId: thread, cwd: spawnDir, name: pending.name || basename(spawnDir), closed: false, createdAt: Date.now(), agent: pending.agent, ...(worktree ? { worktree } : {}) })
+    setTopic(sid, { threadId: thread, cwd: spawnDir, name: pending.name || basename(spawnDir), closed: false, createdAt: Date.now(), agent: pending.agent, ...(pending.harness ? { harness: pending.harness } : {}), ...(worktree ? { worktree } : {}) })
     // Seed the branch cache so the retitle sweep doesn't stomp the user's chosen tab name on its
     // first pass — it only renames on an actual branch CHANGE from here on.
     try { topicBranchCache.set(sid, (await exec('git', ['-C', spawnDir, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 2000 })).stdout.trim()) }
     catch { topicBranchCache.set(sid, '') }
-    const ok = await spawnSession(spawnDir, '', sid, MAIN_ACCOUNT, pending.agent)
+    const ok = await spawnSession(spawnDir, '', sid, MAIN_ACCOUNT, pending.agent, pending.harness)
     if (!ok) removeTopic(sid)
     removeTopicCreate(thread)
     const detail = worktree ? ` (🌿 worktree on <code>tg/${escapeHtml(slug)}</code>)`
@@ -9531,12 +9789,12 @@ bot.on('message:text', async ctx => {
             }
           }
           const sid = genSessionId()
-          setTopic(sid, { threadId: target.threadId, cwd: dir, name: target.name || basename(dir), closed: false, createdAt: Date.now(), agent: offer.agent })
+          setTopic(sid, { threadId: target.threadId, cwd: dir, name: target.name || basename(dir), closed: false, createdAt: Date.now(), agent: offer.agent, ...(offer.harness ? { harness: offer.harness } : {}) })
           // Seed the branch cache so the retitle sweep doesn't stomp the user's chosen tab name on its
           // first pass — it only renames on an actual branch CHANGE from here on.
           try { topicBranchCache.set(sid, (await exec('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 2000 })).stdout.trim()) }
           catch { topicBranchCache.set(sid, '') }
-          const ok = await spawnSession(dir, '', sid, MAIN_ACCOUNT, offer.agent)
+          const ok = await spawnSession(dir, '', sid, MAIN_ACCOUNT, offer.agent, offer.harness)
           if (!ok) removeTopic(sid)
           removeTopicCreate(target.threadId)
           await channel.deleteMessage({ chatId: String(ctx.chat!.id), messageId: String(replyTo.message_id) }).catch(() => {})   // disarm the force-reply
@@ -10536,6 +10794,7 @@ void (async () => {
               { command: 'files', description: 'Browse / download / edit files in this session\'s folder' },
               { command: 'base', description: 'Folder new topics are created under (/base ~/projects)' },
               { command: 'account', description: 'Claude accounts — list, add, remove (multi-account)' },
+              { command: 'harness', description: 'Use Anthropic, Codex, Kimi, Grok, or Cursor inside Claude Code' },
               { command: 'restart', description: 'Restart & resume the current session — or "/restart all" for every session' },
               { command: 'reset', description: 'Clear the current conversation in place' },
               { command: 'stream', description: 'How replies arrive: thoughts · actions · off' },

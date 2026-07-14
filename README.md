@@ -10,6 +10,7 @@ Drive **Claude Code or OpenAI Codex CLI** from Telegram. Each chat/topic keeps i
 
 - [Claude Code](https://claude.com/claude-code) installed and logged in.
 - Optional: [OpenAI Codex CLI](https://github.com/openai/codex) installed and authenticated with ChatGPT. Set `CODEX_BIN=/absolute/path/to/codex` in the bridge `.env` if `codex` is not the correct executable on the daemon's `PATH`. On Linux, Codex's `workspace-write` sandbox also needs Bubblewrap and user/network namespace support; the setup wizard probes this and offers Ubuntu's official AppArmor-profile repair when needed. `tg doctor` reports CLI, login, sandbox, and failover readiness.
+- Optional: [claude-code-proxy](https://github.com/raine/claude-code-proxy) to run Codex, Kimi, Grok, or Cursor **inside the Claude Code harness**. Authenticate the provider once (for example, `claude-code-proxy codex auth device`). The bridge starts the loopback proxy on demand. Override its executable or URL with `CLAUDE_CODE_PROXY_BIN` / `CLAUDE_CODE_PROXY_URL` in the bridge `.env`.
 - [Bun](https://bun.sh) (the runtime; dependencies install on first launch).
 - A Telegram bot token from [@BotFather](https://t.me/BotFather).
 - `tmux` — required for some features. Core messaging works without it via MCP.
@@ -31,12 +32,15 @@ Send text, media, slash commands, and voice messages through Telegram. In multi-
 
 Use `/agent` to see the current terminal agent. `/agent claude` or `/agent codex` starts that CLI; in forum-topic mode they can run side by side. Existing topics remember their agent across restart and resume.
 
+Use `/harness` in a Claude Code topic to keep Claude Code's TUI, tools, skills, permissions, and transcript while changing only inference. Examples: `/harness codex`, `/harness codex gpt-5.6-terra`, `/harness kimi`, `/harness grok`, `/harness cursor`, and `/harness native` to return to Anthropic. The conversation is resumed in place and the choice persists with the topic. This is distinct from `/agent codex`, which runs the standalone Codex CLI.
+
 These commands are added by the bridge. Everything else belongs to the active terminal CLI — see below.
 
 | Command | What it does |
 | --- | --- |
 | `/start` | Welcome + full feature guide (and pairing steps if not paired) |
 | `/agent [claude|codex]` | Show or start the terminal CLI for this chat/topic |
+| `/harness [provider] [model]` | Keep Claude Code but use Anthropic/native, Codex, Kimi, Grok, or Cursor inference |
 | `/stop` | Interrupt the current task — sends Esc (alias `/esc`) |
 | `/cancel` | Clear a stuck force-reply prompt (e.g. an unanswered "name a folder") |
 | `/back` | Get a stuck session — an editor, a pager, or an unrecognized screen — back to the Claude prompt |
