@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { Bot, GrammyError, InlineKeyboard, InputFile, API_CONSTANTS, type Context } from 'grammy'
 import type { ReactionTypeEmoji, InlineQueryResultArticle } from 'grammy/types'
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import {
   readFileSync, writeFileSync, appendFileSync, mkdirSync, readdirSync, rmSync,
   statSync, renameSync, realpathSync, readlinkSync, chmodSync, unlinkSync, existsSync, openSync, closeSync, copyFileSync,
@@ -33,8 +33,11 @@ import {
 } from './agent.ts'
 import {
   HARNESS_ENV_KEYS, HARNESS_PANE_OPT, claudeHarnessEnv, harnessLabel, normalizeHarnessProfile, normalizeProxyBaseUrl, parseHarnessSpec,
-  serializeHarnessProfile, type HarnessProfile,
+  serializeHarnessProfile, type BuiltinHarnessProvider, type HarnessProfile,
 } from './harness-provider.ts'
+import {
+  gatewayHarnessEnv, gatewayLaunchCommand, gatewayProbeRequest, parseGatewayDefinitions, validGatewayProbeResponse, type GatewayDefinition,
+} from './harness-gateway.ts'
 import { findSessionHarness, recordSessionHarness } from './session-harness.ts'
 import {
   initAccounts, listAccounts, accountByName, accountForTranscript, accountForProjectsDir,
@@ -1134,14 +1137,31 @@ async function paneHarnessProfile(pane: string | null): Promise<HarnessProfile> 
   return { provider: 'anthropic' }
 }
 
+const HARNESS_GATEWAYS_FILE = join(STATE_DIR, 'harness-gateways.json')
+function loadHarnessGateways(): Record<string, GatewayDefinition> {
+  return parseGatewayDefinitions(readJsonFile<unknown>(HARNESS_GATEWAYS_FILE, {}))
+}
+
 function harnessEnvPrefix(profile: HarnessProfile): string {
   if (profile.provider === 'anthropic') return 'env -u CC_BRIDGE_HARNESS_PROXY '
+  if (profile.provider === 'gateway') throw new Error('Generic gateways must use the credential-safe launcher')
   const clean = HARNESS_ENV_KEYS.map(key => `-u ${key}`).join(' ')
   const baseUrl = normalizeProxyBaseUrl(process.env.CLAUDE_CODE_PROXY_URL)
   if (!baseUrl) throw new Error('CLAUDE_CODE_PROXY_URL must be an unauthenticated loopback HTTP URL')
   const assignments = Object.entries(claudeHarnessEnv(profile, baseUrl))
     .map(([key, value]) => `${key}=${shellQuote(value)}`).join(' ')
   return `env ${clean} ${assignments} `
+}
+
+function claudeHarnessLaunch(profile: HarnessProfile, executable: string, args: string[]): string {
+  if (profile.provider === 'gateway') {
+    if (!gatewayHarnessEnv(profile, loadHarnessGateways(), process.env))
+      throw new Error(`Gateway ${profile.gateway} is missing or its credential environment variable is unset`)
+    return gatewayLaunchCommand(
+      profile, process.execPath, join(import.meta.dir, 'harness-gateway-run.ts'), executable, args,
+    )
+  }
+  return `${harnessEnvPrefix(profile)}${shellQuote(executable)} ${args.map(shellQuote).join(' ')}`.trimEnd()
 }
 
 async function stampPaneHarness(pane: string, profile: HarnessProfile, sid?: string | null): Promise<void> {
@@ -1233,10 +1253,35 @@ async function ensureProxyRunning(): Promise<boolean> {
   finally { proxyStartInFlight = null }
 }
 
-async function proxyProviderReady(provider: Exclude<HarnessProfile['provider'], 'anthropic'>): Promise<boolean> {
+async function proxyProviderReady(provider: BuiltinHarnessProvider): Promise<boolean> {
   const bin = process.env.CLAUDE_CODE_PROXY_BIN || 'claude-code-proxy'
   try { await exec(bin, [provider, 'auth', 'status'], { timeout: 5000 }); return true }
   catch { return false }
+}
+
+const gatewayProbeSuccess = new Map<string, number>()
+async function gatewayProviderReady(profile: Extract<HarnessProfile, { provider: 'gateway' }>): Promise<boolean> {
+  const request = gatewayProbeRequest(profile, loadHarnessGateways(), process.env)
+  if (!request) return false
+  const key = createHash('sha256').update(JSON.stringify(request)).digest('hex')
+  if (Date.now() - (gatewayProbeSuccess.get(key) ?? 0) < 300_000) return true
+  try {
+    const response = await fetch(request.url, {
+      method: 'POST', headers: request.headers, body: JSON.stringify(request.body),
+      signal: AbortSignal.timeout(30_000),
+    })
+    if (!response.ok) return false
+    const payload: unknown = await response.json().catch(() => null)
+    if (!validGatewayProbeResponse(payload)) return false
+    gatewayProbeSuccess.set(key, Date.now())
+    return true
+  } catch { return false }
+}
+
+async function harnessProviderReady(profile: HarnessProfile): Promise<boolean> {
+  if (profile.provider === 'anthropic') return true
+  if (profile.provider === 'gateway') return gatewayProviderReady(profile)
+  return await proxyProviderReady(profile.provider) && await ensureProxyRunning()
 }
 
 async function waitForHarnessReady(pane: string, timeoutMs = 30_000): Promise<boolean> {
@@ -1257,7 +1302,8 @@ setInterval(() => {
     proxyWatchBusy = true
     try {
       for (const pane of offMcpPanes) {
-        if (await paneAgentKind(pane) === 'claude' && (await paneHarnessProfile(pane)).provider !== 'anthropic') {
+        const profile = await paneHarnessProfile(pane)
+        if (await paneAgentKind(pane) === 'claude' && profile.provider !== 'anthropic' && profile.provider !== 'gateway') {
           await ensureProxyRunning()
           break
         }
@@ -4771,10 +4817,13 @@ bot.command('harness', async ctx => {
   try {
   const current = await paneHarnessProfile(t.paneId)
   if (!arg) {
+    const gatewayNames = Object.keys(loadHarnessGateways())
     await ctx.reply(
       `Active harness: <b>${escapeHtml(harnessLabel(current))}</b>\n\n` +
       `<code>/harness native</code> · <code>/harness codex [model]</code> · ` +
-      `<code>/harness kimi [model]</code> · <code>/harness grok [model]</code> · <code>/harness cursor [model]</code>`,
+      `<code>/harness kimi [model]</code> · <code>/harness grok [model]</code> · <code>/harness cursor [model]</code> · ` +
+      `<code>/harness gateway &lt;name&gt; [model]</code>` +
+      (gatewayNames.length ? `\n\nConfigured gateways: <code>${escapeHtml(gatewayNames.join(', '))}</code>` : '\n\nNo generic gateways configured.'),
       { parse_mode: 'HTML' },
     )
     return
@@ -4783,12 +4832,21 @@ bot.command('harness', async ctx => {
     await ctx.reply('This command swaps the model inside <b>Claude Code</b>. This topic is using standalone Codex; start a Claude session first.', { parse_mode: 'HTML' })
     return
   }
-  const profile = parseHarnessSpec(arg)
+  const gateways = loadHarnessGateways()
+  const profile = parseHarnessSpec(arg, gateways)
   if (!profile) {
-    await ctx.reply('Usage: <code>/harness native | codex [model] | kimi [model] | grok [model] | cursor [model]</code>', { parse_mode: 'HTML' })
+    await ctx.reply('Usage: <code>/harness native | codex [model] | kimi [model] | grok [model] | cursor [model] | gateway &lt;name&gt; [model]</code>', { parse_mode: 'HTML' })
     return
   }
-  if (profile.provider !== 'anthropic') {
+  if (profile.provider === 'gateway') {
+    if (!(await gatewayProviderReady(profile))) {
+      await ctx.reply(
+        `❌ Gateway <code>${escapeHtml(profile.gateway)}</code> failed its Anthropic Messages preflight. Check <code>harness-gateways.json</code>, its token environment variable, endpoint, and model.`,
+        { parse_mode: 'HTML' },
+      )
+      return
+    }
+  } else if (profile.provider !== 'anthropic') {
     if (!(await proxyProviderReady(profile.provider))) {
       const bin = process.env.CLAUDE_CODE_PROXY_BIN || 'claude-code-proxy'
       const login = profile.provider === 'codex' || profile.provider === 'grok' ? 'auth device' : 'auth login'
@@ -5169,8 +5227,7 @@ async function restartPaneSessionCore(pane: string, id: string | null, accountOv
   // accountOverride relaunches the pane under a DIFFERENT account (usage-limit failover).
   const account = accountOverride ?? await paneAccount(pane)
   const harness = harnessOverride ?? (id ? findSessionHarness(id) : undefined) ?? await paneHarnessProfile(pane)
-  if (agent === 'claude' && harness.provider !== 'anthropic' &&
-      (!(await proxyProviderReady(harness.provider)) || !(await ensureProxyRunning()))) return null
+  if (agent === 'claude' && !(await harnessProviderReady(harness))) return null
   const envPrefix = account.name === 'main' ? '' : `CLAUDE_CONFIG_DIR='${account.configDir.replace(/'/g, `'\\''`)}' `
   // Captured BEFORE /exit — a pane that dies with it can't answer these anymore.
   const cwd = await paneCwd(pane).catch(() => null)
@@ -5200,7 +5257,9 @@ async function restartPaneSessionCore(pane: string, id: string | null, accountOv
       }
       const resume = agent === 'codex'
         ? codexLaunchCommand({ kind: 'codex', ...(id !== null ? { resumeId: id } : {}), model: codexLaunchModel(), effort: codexLaunchEffort() }, process.env.CODEX_BIN || 'codex')
-        : `${envPrefix}${harnessEnvPrefix(harness)}${claudeBin()} --allow-dangerously-skip-permissions${id !== null ? ` --resume ${id}` : ''}`
+        : `${envPrefix}${claudeHarnessLaunch(harness, claudeBin(), [
+            '--allow-dangerously-skip-permissions', ...(id !== null ? ['--resume', id] : []),
+          ])}`
       await sendKeys(pane, [`hash -r; ${resume}`, 'Enter'])
       await waitForSettle(pane, 400, 30_000)
       if (!launchVerified) {
@@ -7158,8 +7217,7 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
           (presetSessionId ? getTopicBySession(presetSessionId)?.harness : undefined),
         )
       : { provider: 'anthropic' }
-    if (agent === 'claude' && harness.provider !== 'anthropic' &&
-        (!(await proxyProviderReady(harness.provider)) || !(await ensureProxyRunning()))) return null
+    if (agent === 'claude' && !(await harnessProviderReady(harness))) return null
     // Set the inherited model + effort as LAUNCH FLAGS so the session boots already correct — no
     // typing /model + /effort into a freshly-booting pane (that post-boot injection was the 10-20s
     // slow-spawn lag and it raced the user's first keystrokes). Claude Code restores neither on
@@ -7187,7 +7245,12 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
         effort: codexLaunchEffort(),
       }, process.env.CODEX_BIN || 'codex')}`
     } else {
-      cmd = `${envPrefix}${harnessEnvPrefix(harness)}claude --allow-dangerously-skip-permissions${extra ? ` ${extra}` : ''}${launchFlags.length ? ` ${launchFlags.join(' ')}` : ''}`
+      const claudeArgs = [
+        '--allow-dangerously-skip-permissions',
+        ...(extra.trim() ? extra.trim().split(/\s+/) : []),
+        ...launchFlags.flatMap(flag => flag.split(/\s+/)),
+      ]
+      cmd = `${envPrefix}${claudeHarnessLaunch(harness, 'claude', claudeArgs)}`
     }
     const { stdout } = await exec('tmux', ['new-window', '-d', '-P', '-F', '#{pane_id}', ...target, '-c', dir, cmd], { timeout: 5000 })
     const newPane = stdout.trim()
@@ -10794,7 +10857,7 @@ void (async () => {
               { command: 'files', description: 'Browse / download / edit files in this session\'s folder' },
               { command: 'base', description: 'Folder new topics are created under (/base ~/projects)' },
               { command: 'account', description: 'Claude accounts — list, add, remove (multi-account)' },
-              { command: 'harness', description: 'Use Anthropic, Codex, Kimi, Grok, or Cursor inside Claude Code' },
+              { command: 'harness', description: 'Use any configured provider inside Claude Code' },
               { command: 'restart', description: 'Restart & resume the current session — or "/restart all" for every session' },
               { command: 'reset', description: 'Clear the current conversation in place' },
               { command: 'stream', description: 'How replies arrive: thoughts · actions · off' },

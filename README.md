@@ -34,13 +34,35 @@ Use `/agent` to see the current terminal agent. `/agent claude` or `/agent codex
 
 Use `/harness` in a Claude Code topic to keep Claude Code's TUI, tools, skills, permissions, and transcript while changing only inference. Examples: `/harness codex`, `/harness codex gpt-5.6-terra`, `/harness kimi`, `/harness grok`, `/harness cursor`, and `/harness native` to return to Anthropic. The conversation is resumed in place and the choice persists with the topic. This is distinct from `/agent codex`, which runs the standalone Codex CLI.
 
+For any other Anthropic Messages-compatible provider, add a named entry to `~/.claude/channels/telegram/harness-gateways.json`, keep its secret in the bridge `.env`, then use `/harness gateway <name> [model]`. Example:
+
+```json
+{
+  "minimax": {
+    "baseUrl": "https://api.minimax.io/anthropic",
+    "auth": "x-api-key",
+    "tokenEnv": "CC_BRIDGE_GATEWAY_MINIMAX_KEY",
+    "model": "MiniMax-M3",
+    "smallModel": "MiniMax-M2.7-highspeed"
+  },
+  "local": {
+    "baseUrl": "http://127.0.0.1:11434/anthropic",
+    "auth": "none",
+    "model": "qwen3-coder",
+    "smallModel": "qwen3-coder-fast"
+  }
+}
+```
+
+Then put `CC_BRIDGE_GATEWAY_MINIMAX_KEY=...` in `~/.claude/channels/telegram/.env` and restart the bridge daemon. Authenticated gateway credentials must use the dedicated `CC_BRIDGE_GATEWAY_*` namespace. Supported auth modes are `bearer`, `x-api-key`, and `none`. Remote gateways must use HTTPS; plain HTTP is accepted only on loopback. Secrets never enter topic, pane, command-line, or conversation metadata. Generic-gateway Claude processes receive a minimal allowlisted environment rather than unrelated bridge credentials. A tiny one-token Anthropic Messages preflight verifies endpoint, authentication, model, and response shape before the running Claude session is disrupted.
+
 These commands are added by the bridge. Everything else belongs to the active terminal CLI — see below.
 
 | Command | What it does |
 | --- | --- |
 | `/start` | Welcome + full feature guide (and pairing steps if not paired) |
 | `/agent [claude|codex]` | Show or start the terminal CLI for this chat/topic |
-| `/harness [provider] [model]` | Keep Claude Code but use Anthropic/native, Codex, Kimi, Grok, or Cursor inference |
+| `/harness [provider] [model]` | Keep Claude Code but use native, a built-in subscription proxy, or any configured Anthropic-compatible gateway |
 | `/stop` | Interrupt the current task — sends Esc (alias `/esc`) |
 | `/cancel` | Clear a stuck force-reply prompt (e.g. an unanswered "name a folder") |
 | `/back` | Get a stuck session — an editor, a pager, or an unrecognized screen — back to the Claude prompt |
