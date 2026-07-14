@@ -9748,6 +9748,15 @@ async function bootTopicSession(ctx: Context, sid: string, t: TopicEntry, o: Boo
         process.stderr.write(`daemon: ${o.logVerb} session ${sid} in ${t.cwd} (pane ${pane}) — delivered ${q.length} queued message(s)\n`)
         return
       }
+      // Not at a prompt yet: if the fresh pane landed on a first-run onboarding/interstitial screen
+      // (theme/trust picker, or a version-bump "What's new … press enter to continue" takeover),
+      // dismiss it here rather than waiting the pane out — otherwise the first boot after any Claude
+      // Code update wedges for the full 90s and reports a false "didn't reach a prompt". Idempotent:
+      // driveAuxOnboarding dedups per pane+stage, so re-driving each poll can't double-fire.
+      if (cap) {
+        const stage = classifyOnboarding(cap)
+        if (stage) await driveAuxOnboarding(pane, stage).catch(() => {})
+      }
     }
     if (notice) await channel.editText({ chatId: String(notice.chat.id), messageId: String(notice.message_id) }, o.slowMsg).catch(() => {})
     else await ctx.reply(o.slowMsg).catch(() => {})
