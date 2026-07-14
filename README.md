@@ -34,7 +34,9 @@ Use `/agent` to see the current terminal agent. `/agent claude` or `/agent codex
 
 Use `/harness` in a Claude Code topic to keep Claude Code's TUI, tools, skills, permissions, and transcript while changing only inference. Examples: `/harness codex`, `/harness codex gpt-5.6-terra`, `/harness kimi`, `/harness grok`, `/harness cursor`, and `/harness native` to return to Anthropic. The conversation is resumed in place and the choice persists with the topic. This is distinct from `/agent codex`, which runs the standalone Codex CLI.
 
-For any other Anthropic Messages-compatible provider, add a named entry to `~/.claude/channels/telegram/harness-gateways.json`, keep its secret in the bridge `.env`, then use `/harness gateway <name> [model]`. Example:
+For any other Anthropic Messages-compatible provider (MiniMax, a local Ollama, etc.), add a gateway straight from Telegram — no file editing, no restart. Open `/settings` → 🔀 Limit failover → **➕ 🌐 Gateway** and reply with `name baseUrl model` (auth defaults to `x-api-key`; append `bearer` or `none` to override). For an authenticated gateway you're prompted for the API key next; it's written to `.env` and your key message is deleted from the chat. The gateway is then usable live with `/harness gateway <name> [model]` **and** becomes a reorderable hop in your failover chain — when a Claude subscription hits its usage limit, the session can fall over to it (same transcript, resumed in place, inference served by the gateway). Reorder the chain with the ↑/↓ arrows; remove a gateway with the 🗑 next to it.
+
+The store is still a plain file at `~/.claude/channels/telegram/harness-gateways.json` (read live, so hand-edits also need no restart), with secrets in the bridge `.env` under the `CC_BRIDGE_GATEWAY_*` namespace:
 
 ```json
 {
@@ -54,7 +56,7 @@ For any other Anthropic Messages-compatible provider, add a named entry to `~/.c
 }
 ```
 
-Then put `CC_BRIDGE_GATEWAY_MINIMAX_KEY=...` in `~/.claude/channels/telegram/.env` and restart the bridge daemon. Authenticated gateway credentials must use the dedicated `CC_BRIDGE_GATEWAY_*` namespace. Supported auth modes are `bearer`, `x-api-key`, and `none`. Remote gateways must use HTTPS; plain HTTP is accepted only on loopback. Secrets never enter topic, pane, command-line, or conversation metadata. Generic-gateway Claude processes receive a minimal allowlisted environment rather than unrelated bridge credentials. A tiny one-token Anthropic Messages preflight verifies endpoint, authentication, model, and response shape before the running Claude session is disrupted.
+Supported auth modes are `bearer`, `x-api-key`, and `none`. Remote gateways must use HTTPS; plain HTTP is accepted only on loopback. Secrets never enter topic, pane, command-line, or conversation metadata. Generic-gateway Claude processes receive a minimal allowlisted environment rather than unrelated bridge credentials. A tiny one-token Anthropic Messages preflight verifies endpoint, authentication, model, and response shape before the running Claude session is disrupted.
 
 These commands are added by the bridge. Everything else belongs to the active terminal CLI — see below.
 

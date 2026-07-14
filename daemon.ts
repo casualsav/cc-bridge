@@ -1141,6 +1141,40 @@ const HARNESS_GATEWAYS_FILE = join(STATE_DIR, 'harness-gateways.json')
 function loadHarnessGateways(): Record<string, GatewayDefinition> {
   return parseGatewayDefinitions(readJsonFile<unknown>(HARNESS_GATEWAYS_FILE, {}))
 }
+// A gateway secret lives in .env as CC_BRIDGE_GATEWAY_<NAME>_KEY (the launcher reads it live, so an
+// in-chat add needs no restart). The daemon-side preflight probe reads process.env, which a just-
+// added key isn't in — so overlay a live .env read (file wins) before probing/guarding.
+function gatewayTokenEnvName(name: string): string {
+  return `CC_BRIDGE_GATEWAY_${name.toUpperCase().replace(/-/g, '_')}_KEY`
+}
+function gatewayEnvLive(): Record<string, string | undefined> {
+  const env: Record<string, string | undefined> = { ...process.env }
+  try {
+    for (const line of readFileSync(ENV_FILE, 'utf8').split('\n')) {
+      const m = /^\s*(CC_BRIDGE_GATEWAY_[A-Z0-9_]+)\s*=\s*(.*?)\s*$/.exec(line)
+      if (m) env[m[1]!] = m[2]
+    }
+  } catch {}
+  return env
+}
+// Gateway definitions are stored live in harness-gateways.json; membership in the failover chain and
+// /harness both read it fresh, so add/remove take effect without a restart.
+function saveGatewayDef(name: string, def: GatewayDefinition): void {
+  writeJsonFile(HARNESS_GATEWAYS_FILE, { ...loadHarnessGateways(), [name]: def })
+}
+function removeGatewayDef(name: string): void {
+  const all = loadHarnessGateways()
+  delete all[name]
+  writeJsonFile(HARNESS_GATEWAYS_FILE, all)
+  writeEnvVars({ [gatewayTokenEnvName(name)]: null })   // scrub the secret alongside the definition
+}
+// A gateway hop is dispatchable when it's still configured and (unless auth-less) its key is present.
+function gatewayConfiguredAndKeyed(name: string): boolean {
+  const def = loadHarnessGateways()[name]
+  if (!def) return false
+  return def.auth === 'none' || !!(def.tokenEnv && gatewayEnvLive()[def.tokenEnv])
+}
+const pendingGateways = new Map<string, GatewayDefinition>()   // a spec awaiting its API-key reply
 
 function harnessEnvPrefix(profile: HarnessProfile): string {
   if (profile.provider === 'anthropic') return 'env -u CC_BRIDGE_HARNESS_PROXY '
@@ -1155,7 +1189,7 @@ function harnessEnvPrefix(profile: HarnessProfile): string {
 
 function claudeHarnessLaunch(profile: HarnessProfile, executable: string, args: string[]): string {
   if (profile.provider === 'gateway') {
-    if (!gatewayHarnessEnv(profile, loadHarnessGateways(), process.env))
+    if (!gatewayHarnessEnv(profile, loadHarnessGateways(), gatewayEnvLive()))
       throw new Error(`Gateway ${profile.gateway} is missing or its credential environment variable is unset`)
     return gatewayLaunchCommand(
       profile, process.execPath, join(import.meta.dir, 'harness-gateway-run.ts'), executable, args,
@@ -1261,7 +1295,7 @@ async function proxyProviderReady(provider: BuiltinHarnessProvider): Promise<boo
 
 const gatewayProbeSuccess = new Map<string, number>()
 async function gatewayProviderReady(profile: Extract<HarnessProfile, { provider: 'gateway' }>): Promise<boolean> {
-  const request = gatewayProbeRequest(profile, loadHarnessGateways(), process.env)
+  const request = gatewayProbeRequest(profile, loadHarnessGateways(), gatewayEnvLive())
   if (!request) return false
   const key = createHash('sha256').update(JSON.stringify(request)).digest('hex')
   if (Date.now() - (gatewayProbeSuccess.get(key) ?? 0) < 300_000) return true
@@ -2796,9 +2830,10 @@ async function attemptLimitFailover(hitAccount: Account, origin: string | null):
     // The user-ordered try-in-order chain (failover-chain.ts): membership is every registered account
     // + Codex (if set up) regardless of login/cap state — that's applied only here, at pick time — so
     // an untouched chain still resolves to today's default order (accounts main-first, Codex last).
-    const chain = resolveChain(loadAccess().failoverChain ?? [], listAccounts().map(a => a.name), codexAvailable())
+    const chain = resolveChain(loadAccess().failoverChain ?? [], listAccounts().map(a => a.name), codexAvailable(), Object.keys(loadHarnessGateways()))
     const hopAvailable = (h: FailoverHop): boolean => {
       if (h.kind === 'codex') return codexAvailable()
+      if (h.kind === 'gateway') return gatewayConfiguredAndKeyed(h.name!)
       const a = accountByName(h.account!)
       return !!a && accountLoggedIn(a) && snapshotOk(a)
     }
@@ -2834,6 +2869,21 @@ async function attemptLimitFailover(hitAccount: Account, origin: string | null):
     if (!next) return null
     const pane = await findClaudePane()
     if (!pane) return null
+    if (next.kind === 'gateway') {
+      // Gateway hop: same account + transcript, 3rd-party inference. Lossless `--resume` with the
+      // gateway harness applied — the Anthropic cap is on the subscription, gateway requests go to
+      // the configured endpoint, so no mirroring or takeover brief is needed.
+      const def = loadHarnessGateways()[next.name!]
+      if (!def) return null
+      const cwd = await paneCwd(pane).catch(() => null)
+      const src = cwd ? await transcriptForPane(pane, cwd) : null
+      if (!src || !existsSync(src)) return null
+      const id = agentSessionId(src)
+      const profile: HarnessProfile = { provider: 'gateway', gateway: next.name!, model: def.model, smallModel: def.smallModel }
+      if (!(await restartPaneSessionCore(pane, id, hitAccount, 'claude', undefined, undefined, profile))) return null
+      process.stderr.write(`daemon: limit failover: ${hitAccount.name} → gateway ${next.name} (pane ${pane}, session ${id})\n`)
+      return { to: `gateway ${next.name}`, crossEngine: false, briefDelivered: true }
+    }
     if (next.kind === 'claude') {
       const target = accountByName(next.account!)
       if (!target) return null
@@ -6609,12 +6659,13 @@ function settingsKeyboard(): InlineKeyboard {
 // Codex) a usage-limited session moves to. Shared resolution (failover-chain.ts) with
 // attemptLimitFailover, so the panel's numbered list is exactly what a real hit would try next.
 function failoverChain(): FailoverHop[] {
-  return resolveChain(loadAccess().failoverChain ?? [], listAccounts().map(a => a.name), codexAvailable())
+  return resolveChain(loadAccess().failoverChain ?? [], listAccounts().map(a => a.name), codexAvailable(), Object.keys(loadHarnessGateways()))
 }
 function failoverPanelText(): string {
   const a = loadAccess()
   const lines = failoverChain().map((h, i) => {
     if (h.kind === 'codex') return `${i + 1}. ✳️ Codex`
+    if (h.kind === 'gateway') return `${i + 1}. 🌐 ${escapeHtml(h.name!)}${gatewayConfiguredAndKeyed(h.name!) ? '' : ' · ⚠️ no key'}`
     const acct = accountByName(h.account!)
     return `${i + 1}. 👤 ${escapeHtml(h.account!)}${acct && !accountLoggedIn(acct) ? ' · ⚠️ not logged in' : ''}`
   })
@@ -6631,7 +6682,7 @@ function failoverPanelText(): string {
         : `\n\n✳️ <b>Codex · not installed/configured</b>\n<i>Install Codex and set CODEX_BIN, then sign in with ChatGPT.</i>`
   return `🔀 <b>Limit failover</b> — <b>${a.limitFailover === true ? 'on' : 'off'}</b>\n\n` +
     `On a usage-limit hit, the stuck session tries these in order:\n\n${lines.join('\n')}\n\n` +
-    `Reorder with ↑/↓.${codexCfg}`
+    `Reorder with ↑/↓. ➕ 🌐 adds a 3rd-party Anthropic-compatible API (MiniMax, etc.) as a hop — no restart.${codexCfg}`
 }
 function failoverPanelKeyboard(): InlineKeyboard {
   const a = loadAccess()
@@ -6639,14 +6690,17 @@ function failoverPanelKeyboard(): InlineKeyboard {
   kb.text(a.limitFailover === true ? '🔀 On' : '💤 Off', 'fo:toggle').row()
   for (const h of failoverChain()) {
     const key = hopKey(h)
-    kb.text('↑', `fo:up:${key}`).text('↓', `fo:down:${key}`).text(h.kind === 'codex' ? '✳️ Codex' : `👤 ${h.account}`, 'fo:noop').row()
+    const label = h.kind === 'codex' ? '✳️ Codex' : h.kind === 'gateway' ? `🌐 ${h.name}` : `👤 ${h.account}`
+    kb.text('↑', `fo:up:${key}`).text('↓', `fo:down:${key}`).text(label, 'fo:noop')
+    if (h.kind === 'gateway') kb.text('🗑', `gw:rm:${h.name}`)
+    kb.row()
   }
   if (codexAvailable()) {
     const m = codexLaunchModel()
     kb.text(`✳️ Model: ${m ? codexPrettyModel(m) : 'default'}`, 'fo:cxmodel')
       .text(`⚡ Effort: ${codexLaunchEffort() ?? 'default'}`, 'fo:cxeffort').row()
   }
-  return kb.text('‹ Back', 'fo:back')
+  return kb.text('➕ 🌐 Gateway', 'gw:add').text('‹ Back', 'fo:back')
 }
 
 // 🧷 Preferred-mode sub-panel (settings → Preferred mode): Claude Code's permissions.defaultMode — the
@@ -7972,12 +8026,41 @@ bot.on('callback_query:data', async ctx => {
       saveAccess(a)
     } else {
       const key = foMatch[2] ?? foMatch[3]!
-      const resolved = resolveChain(a.failoverChain ?? [], listAccounts().map(x => x.name), codexAvailable())
+      const resolved = resolveChain(a.failoverChain ?? [], listAccounts().map(x => x.name), codexAvailable(), Object.keys(loadHarnessGateways()))
       const moved = moveHop(resolved, key, foMatch[1]!.startsWith('up:') ? 'up' : 'down')
       // A no-op move (↑ on the first hop / ↓ on the last) returns the input unchanged (ref-equal) —
       // don't persist then, or an untouched chain gets baked just for tapping an edge arrow.
       if (moved !== resolved) { a.failoverChain = moved; saveAccess(a) }
     }
+    await showHtmlPanel(ctx, 'edit', failoverPanelText(), failoverPanelKeyboard())
+    return
+  }
+
+  // Gateway management from the failover panel: ➕ 🌐 (add, free-text spec) and 🗑 (remove).
+  const gwMatch = /^gw:(add|rm:([a-z0-9][a-z0-9_-]{0,31}))$/.exec(data)
+  if (gwMatch) {
+    if (!(await cbAuth(ctx))) return
+    if (gwMatch[1] === 'add') {
+      await ctx.answerCallbackQuery().catch(() => {})
+      const thread = ctx.callbackQuery.message?.message_thread_id
+      const sent = await channel.sendText(String(ctx.chat!.id),
+        `🌐 <b>Add a gateway</b> — reply with <code>name baseUrl model</code>:\n\n` +
+        `e.g. <code>minimax https://api.minimax.io/anthropic MiniMax-M2</code>\n\n` +
+        `The endpoint must speak the Anthropic Messages API. Auth defaults to <code>x-api-key</code> ` +
+        `(append <code>bearer</code> or <code>none</code> to override); I'll ask for the key next.`,
+        { ...(thread ? { threadId: String(thread) } : {}), forceReply: { placeholder: 'name baseUrl model' } }).catch(() => null)
+      if (sent) replyTargets.set(refKey(sent), { kind: 'gwspec', panelMsgId: ctx.callbackQuery.message?.message_id })
+      return
+    }
+    // 🗑 remove: drop the definition + its secret, and any saved chain slot referencing it.
+    const name = gwMatch[2]!
+    removeGatewayDef(name)
+    const a = loadAccess()
+    if (a.failoverChain?.some(h => h.kind === 'gateway' && h.name === name)) {
+      a.failoverChain = a.failoverChain.filter(h => !(h.kind === 'gateway' && h.name === name))
+      saveAccess(a)
+    }
+    await ctx.answerCallbackQuery({ text: `Removed gateway ${name}` }).catch(() => {})
     await showHtmlPanel(ctx, 'edit', failoverPanelText(), failoverPanelKeyboard())
     return
   }
@@ -10028,6 +10111,56 @@ bot.on('message:text', async ctx => {
             `✅ Account <b>${escapeHtml(r.account.name)}</b> registered → <code>${escapeHtml(r.account.configDir)}</code>\n\n` +
             `Tap below to start a session on it — Claude will ask you to log in once (the sign-in link relays here).`,
             { parse_mode: 'HTML', reply_markup: new InlineKeyboard().text(`🚀 Start a ${r.account.name} session`, `acct:launch:${r.account.name}`) })
+          return
+        }
+        // Gateway spec "name baseUrl model [auth]" (failover panel → ➕ 🌐). Validate via the shared
+        // parser; auth-less gateways save immediately, otherwise prompt for the key next (kind 'gwkey').
+        case 'gwspec': {
+          const [rawName, baseUrl, model, rawAuth] = text.trim().split(/\s+/)
+          const name = (rawName || '').toLowerCase()
+          const auth = rawAuth === 'bearer' ? 'bearer' : rawAuth === 'none' ? 'none' : 'x-api-key'
+          const tokenEnv = gatewayTokenEnvName(name)
+          const parsed = parseGatewayDefinitions({
+            [name]: { baseUrl, auth, ...(auth !== 'none' ? { tokenEnv } : {}), model, smallModel: model },
+          })
+          const def = parsed[name]
+          if (!def) {
+            const again = await ctx.reply(
+              `❌ Couldn't parse that. Need <code>name baseUrl model</code> — name is <code>[a-z0-9_-]</code>, ` +
+              `and baseUrl must be https (or loopback http). Try again.`,
+              { parse_mode: 'HTML', reply_markup: { force_reply: true, input_field_placeholder: 'name baseUrl model' } }).catch(() => null)
+            if (again) replyTargets.set(`${ctx.chat?.id}:${again.message_id}`, target)
+            return
+          }
+          if (auth === 'none') {
+            saveGatewayDef(name, def)
+            await ctx.reply(`✅ Gateway <b>${escapeHtml(name)}</b> added (no auth) — it's a hop in your failover chain (🔀). Use it live with <code>/harness gateway ${escapeHtml(name)}</code>.`, { parse_mode: 'HTML' })
+            return
+          }
+          pendingGateways.set(name, def)
+          const sent = await ctx.reply(
+            `🔑 Reply with the API key for <b>${escapeHtml(name)}</b>. I store it in <code>.env</code> and delete your message right after.`,
+            { parse_mode: 'HTML', reply_markup: { force_reply: true, input_field_placeholder: 'API key' } }).catch(() => null)
+          if (sent) replyTargets.set(`${ctx.chat?.id}:${sent.message_id}`, { kind: 'gwkey', name })
+          return
+        }
+        // API key for a pending gateway: write it to .env (read live at launch — no restart), persist
+        // the definition, scrub the key message, then run the one-token Anthropic preflight.
+        case 'gwkey': {
+          const def = pendingGateways.get(target.name)
+          if (!def || !def.tokenEnv) {
+            await ctx.reply('⚠️ That gateway add expired — start again from the 🔀 panel.')
+            return
+          }
+          writeEnvVars({ [def.tokenEnv]: text.trim() })
+          saveGatewayDef(target.name, def)
+          pendingGateways.delete(target.name)
+          await ctx.deleteMessage().catch(() => {})   // scrub the secret from the chat
+          const ok = await gatewayProviderReady({ provider: 'gateway', gateway: target.name, model: def.model, smallModel: def.smallModel })
+          await ctx.reply(ok
+            ? `✅ Gateway <b>${escapeHtml(target.name)}</b> added and verified — it's now a hop in your failover chain (🔀). Use it live anytime with <code>/harness gateway ${escapeHtml(target.name)}</code>.`
+            : `⚠️ Saved <b>${escapeHtml(target.name)}</b>, but its Anthropic Messages preflight failed — double-check the base URL, model id, and key, then re-add from 🔀.`,
+            { parse_mode: 'HTML' })
           return
         }
         // "✏️ Type something" → type the answer into the prompt's free-text field: move the cursor

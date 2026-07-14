@@ -4,6 +4,7 @@ import type { FailoverHop } from './common.ts'
 
 const claude = (account: string): FailoverHop => ({ kind: 'claude', account })
 const codex: FailoverHop = { kind: 'codex' }
+const gateway = (name: string): FailoverHop => ({ kind: 'gateway', name })
 
 test('resolveChain: no saved order == today\'s default order (main-first accounts, codex last)', () => {
   expect(resolveChain([], ['main', 'work'], true)).toEqual([
@@ -86,4 +87,31 @@ test('moveHop: a no-op move returns the SAME array reference (the daemon skips p
 test('resolveChain: a hop with an unknown kind (hand-edited access.json) is dropped, never dispatched', () => {
   const stored = [claude('main'), { kind: 'bogus' } as unknown as FailoverHop, codex]
   expect(resolveChain(stored, ['main'], true)).toEqual([claude('main'), codex])
+})
+
+test('hopKey: gateway hops key by name', () => {
+  expect(hopKey(gateway('minimax'))).toBe('gateway:minimax')
+})
+
+test('resolveChain: configured gateways append after accounts and codex in the default order', () => {
+  expect(resolveChain([], ['main'], true, ['minimax', 'local'])).toEqual([
+    claude('main'), codex, gateway('minimax'), gateway('local'),
+  ])
+})
+
+test('resolveChain: a stored gateway hop keeps its interleaved position; a removed gateway is dropped', () => {
+  const stored = [claude('main'), gateway('minimax'), codex, gateway('gone')]
+  expect(resolveChain(stored, ['main'], true, ['minimax'])).toEqual([
+    claude('main'), gateway('minimax'), codex,
+  ])
+})
+
+test('resolveChain: gateways drop out entirely when none are configured', () => {
+  const stored = [claude('main'), gateway('minimax')]
+  expect(resolveChain(stored, ['main'], false, [])).toEqual([claude('main')])
+})
+
+test('moveHop: reorders a gateway hop by its key', () => {
+  const chain = [claude('main'), codex, gateway('minimax')]
+  expect(moveHop(chain, 'gateway:minimax', 'up')).toEqual([claude('main'), gateway('minimax'), codex])
 })

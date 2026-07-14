@@ -84,6 +84,8 @@ export type ReplyTarget =
   | { kind: 'budget'; panelMsgId?: number }                      // daily $ cap (or 'off') from the /budget panel's set button
   | { kind: 'basedir'; panelMsgId?: number }                     // folder for /base's set button (settings → 📂 Base folder)
   | { kind: 'codexmodel'; panelMsgId?: number }                  // Codex model id from the failover panel's 🤖 Model button
+  | { kind: 'gwspec'; panelMsgId?: number }                      // "name baseUrl model" for a new gateway (failover panel → ➕ 🌐)
+  | { kind: 'gwkey'; name: string; panelMsgId?: number }         // API key for a pending gateway (def held in pendingGateways); message auto-deleted
   | { kind: 'orphan' }                                           // rehydrated after a restart — enough to delete/disarm it, the original flow is gone
 //
 // Persisted across restarts: memory-only meant a wedged force-reply prompt outlived the process
