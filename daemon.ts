@@ -1176,6 +1176,15 @@ function gatewayConfiguredAndKeyed(name: string): boolean {
 }
 const pendingGateways = new Map<string, GatewayDefinition>()   // a spec awaiting its API-key reply
 
+// Popular Anthropic-Messages-compatible providers, base URLs + current model ids pinned from each
+// provider's own Claude Code docs (2026-07). All use bearer auth (ANTHROPIC_AUTH_TOKEN). The picker
+// pre-fills these so an add is one tap + the key; model is overridable later via /harness gateway.
+const GATEWAY_PRESETS: Array<{ key: string; label: string; baseUrl: string; model: string; smallModel: string }> = [
+  { key: 'minimax', label: 'MiniMax', baseUrl: 'https://api.minimax.io/anthropic', model: 'MiniMax-M3[1m]', smallModel: 'MiniMax-M3[1m]' },
+  { key: 'deepseek', label: 'DeepSeek', baseUrl: 'https://api.deepseek.com/anthropic', model: 'deepseek-v4-pro', smallModel: 'deepseek-v4-flash' },
+  { key: 'zai', label: 'Z.ai (GLM)', baseUrl: 'https://api.z.ai/api/anthropic', model: 'glm-4.7', smallModel: 'glm-4.7' },
+]
+
 function harnessEnvPrefix(profile: HarnessProfile): string {
   if (profile.provider === 'anthropic') return 'env -u CC_BRIDGE_HARNESS_PROXY '
   if (profile.provider === 'gateway') throw new Error('Generic gateways must use the credential-safe launcher')
@@ -6682,7 +6691,7 @@ function failoverPanelText(): string {
         : `\n\n✳️ <b>Codex · not installed/configured</b>\n<i>Install Codex and set CODEX_BIN, then sign in with ChatGPT.</i>`
   return `🔀 <b>Limit failover</b> — <b>${a.limitFailover === true ? 'on' : 'off'}</b>\n\n` +
     `On a usage-limit hit, the stuck session tries these in order:\n\n${lines.join('\n')}\n\n` +
-    `Reorder with ↑/↓. ➕ 🌐 adds a 3rd-party Anthropic-compatible API (MiniMax, etc.) as a hop — no restart.${codexCfg}`
+    `Reorder with ↑/↓. ➕ 🌐 adds a 3rd-party API hop (MiniMax · DeepSeek · GLM presets, or custom) — no restart.${codexCfg}`
 }
 function failoverPanelKeyboard(): InlineKeyboard {
   const a = loadAccess()
@@ -6701,6 +6710,21 @@ function failoverPanelKeyboard(): InlineKeyboard {
       .text(`⚡ Effort: ${codexLaunchEffort() ?? 'default'}`, 'fo:cxeffort').row()
   }
   return kb.text('➕ 🌐 Gateway', 'gw:add').text('‹ Back', 'fo:back')
+}
+
+// ➕ 🌐 sub-panel: pick a popular provider (base URL + model pre-filled → straight to the key) or
+// Custom (free-text name/baseUrl/model). A provider already configured is marked so a re-tap reads
+// as "update the key", not a surprise overwrite.
+function gatewayAddPanelText(): string {
+  return `🌐 <b>Add a gateway</b>\n\nPick a provider — its base URL and a current model are pre-filled, ` +
+    `so you only enter your API key. Or choose Custom for any other Anthropic-compatible endpoint.\n\n` +
+    `<i>Model is overridable later with</i> <code>/harness gateway &lt;name&gt; &lt;model&gt;</code>.`
+}
+function gatewayAddPanelKeyboard(): InlineKeyboard {
+  const configured = loadHarnessGateways()
+  const kb = new InlineKeyboard()
+  for (const p of GATEWAY_PRESETS) kb.text(`🌐 ${p.label}${configured[p.key] ? ' ✓' : ''}`, `gw:add:${p.key}`).row()
+  return kb.text('✏️ Custom', 'gw:add:custom').text('‹ Back', 'set:failover')
 }
 
 // 🧷 Preferred-mode sub-panel (settings → Preferred mode): Claude Code's permissions.defaultMode — the
@@ -8036,24 +8060,49 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
-  // Gateway management from the failover panel: ➕ 🌐 (add, free-text spec) and 🗑 (remove).
-  const gwMatch = /^gw:(add|rm:([a-z0-9][a-z0-9_-]{0,31}))$/.exec(data)
+  // Gateway management from the failover panel: ➕ 🌐 (provider picker → preset or Custom) and 🗑.
+  const gwMatch = /^gw:(add(?::([a-z0-9][a-z0-9_-]{0,31}|custom))?|rm:([a-z0-9][a-z0-9_-]{0,31}))$/.exec(data)
   if (gwMatch) {
     if (!(await cbAuth(ctx))) return
-    if (gwMatch[1] === 'add') {
-      await ctx.answerCallbackQuery().catch(() => {})
+    if (gwMatch[1].startsWith('add')) {
+      const sub = gwMatch[2]   // undefined = open the picker; 'custom'; or a preset key
+      if (!sub) {
+        await ctx.answerCallbackQuery().catch(() => {})
+        await showHtmlPanel(ctx, 'edit', gatewayAddPanelText(), gatewayAddPanelKeyboard())
+        return
+      }
       const thread = ctx.callbackQuery.message?.message_thread_id
+      if (sub === 'custom') {
+        await ctx.answerCallbackQuery().catch(() => {})
+        const sent = await channel.sendText(String(ctx.chat!.id),
+          `🌐 <b>Custom gateway</b> — reply with <code>name baseUrl model</code>:\n\n` +
+          `e.g. <code>myprovider https://api.example.com/anthropic some-model</code>\n\n` +
+          `The endpoint must speak the Anthropic Messages API. Auth defaults to <code>x-api-key</code> ` +
+          `(append <code>bearer</code> or <code>none</code> to override); I'll ask for the key next.`,
+          { ...(thread ? { threadId: String(thread) } : {}), forceReply: { placeholder: 'name baseUrl model' } }).catch(() => null)
+        if (sent) replyTargets.set(refKey(sent), { kind: 'gwspec', panelMsgId: ctx.callbackQuery.message?.message_id })
+        return
+      }
+      // A preset: base URL + model are known, so seed the definition and go straight to the key.
+      const preset = GATEWAY_PRESETS.find(p => p.key === sub)
+      if (!preset) { await ctx.answerCallbackQuery({ text: 'Unknown provider.' }).catch(() => {}); return }
+      const parsed = parseGatewayDefinitions({
+        [preset.key]: { baseUrl: preset.baseUrl, auth: 'bearer', tokenEnv: gatewayTokenEnvName(preset.key), model: preset.model, smallModel: preset.smallModel },
+      })
+      const def = parsed[preset.key]
+      if (!def) { await ctx.answerCallbackQuery({ text: 'Preset invalid.' }).catch(() => {}); return }
+      pendingGateways.set(preset.key, def)
+      await ctx.answerCallbackQuery().catch(() => {})
       const sent = await channel.sendText(String(ctx.chat!.id),
-        `🌐 <b>Add a gateway</b> — reply with <code>name baseUrl model</code>:\n\n` +
-        `e.g. <code>minimax https://api.minimax.io/anthropic MiniMax-M2</code>\n\n` +
-        `The endpoint must speak the Anthropic Messages API. Auth defaults to <code>x-api-key</code> ` +
-        `(append <code>bearer</code> or <code>none</code> to override); I'll ask for the key next.`,
-        { ...(thread ? { threadId: String(thread) } : {}), forceReply: { placeholder: 'name baseUrl model' } }).catch(() => null)
-      if (sent) replyTargets.set(refKey(sent), { kind: 'gwspec', panelMsgId: ctx.callbackQuery.message?.message_id })
+        `🔑 <b>${escapeHtml(preset.label)}</b> — reply with your API key.\n\n` +
+        `Base URL <code>${escapeHtml(preset.baseUrl)}</code> · model <code>${escapeHtml(preset.model)}</code>. ` +
+        `I store the key in <code>.env</code> and delete your message right after.`,
+        { ...(thread ? { threadId: String(thread) } : {}), forceReply: { placeholder: 'API key' } }).catch(() => null)
+      if (sent) replyTargets.set(refKey(sent), { kind: 'gwkey', name: preset.key })
       return
     }
     // 🗑 remove: drop the definition + its secret, and any saved chain slot referencing it.
-    const name = gwMatch[2]!
+    const name = gwMatch[3]!
     removeGatewayDef(name)
     const a = loadAccess()
     if (a.failoverChain?.some(h => h.kind === 'gateway' && h.name === name)) {
