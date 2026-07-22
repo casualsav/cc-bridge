@@ -1664,7 +1664,9 @@ function startRelayLoop(): void {
 // OWN auto-spawned session, keyed by chat id — the DM analog of a forum topic keyed by thread id.
 // "Multi-pane mode" = the concurrent aux relay + per-pane prompt detection below must fire for topic
 // mode OR active DM lanes (both run several off-MCP panes at once, addressed via outboundTargetsFor).
-function dmLanesOn(): boolean { return loadAccess().dmLanes === true }
+// Tolerant of a hand-edited prefs.json where the value came through as the STRING "true" (a common
+// JSON slip) — the feature is enabled by either the boolean or that string; anything else is off.
+function dmLanesOn(): boolean { const v = loadAccess().dmLanes as unknown; return v === true || v === 'true' }
 function multiPaneMode(): boolean { return isTopicMode() || dmLanesOn() }
 
 // Forum-topics parallel relay (phase 3b). The focused pane is handled by the rich relayLoopTick
@@ -1899,6 +1901,17 @@ function resolveInstanceId(): string {
 }
 const INSTANCE_ID = resolveInstanceId()
 if (INSTANCE_ID !== '1') process.stderr.write(`daemon: bridge instance id = ${INSTANCE_ID} (state dir ${STATE_DIR})\n`)
+// Observability for the per-user DM-lanes flag — logged UNCONDITIONALLY at boot (incl. the resolved
+// prefs path), so the very failure this exists to catch (flag absent from effective prefs: a
+// corrupt/moved prefs.json, the wrong state dir, or the key shadowed in access.json) shows in the one
+// line instead of manifesting silently as "every user shares one session".
+{
+  const dmLanesRaw = (loadAccess() as { dmLanes?: unknown }).dmLanes
+  const state = dmLanesOn() ? 'ENABLED (per-user DM lanes)'
+    : (dmLanesRaw === undefined || dmLanesRaw === false) ? 'off (default)'
+    : 'IGNORED — value must be boolean true or the string "true"'
+  process.stderr.write(`daemon: dmLanes=${JSON.stringify(dmLanesRaw)} (prefs: ${PREFS_FILE}) → ${state}\n`)
+}
 
 // A `claude remote-control` instance (a local session being driven from claude.ai web/mobile)
 // presents in the process tree as `claude remote-control`, spawning a `claude.exe --print

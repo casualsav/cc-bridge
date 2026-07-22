@@ -184,7 +184,7 @@ function ensureDeps(log: number): void {
 // "check now". A watchdog whose pid file lacks the `usr1` capability marker predates that handler
 // (an unhandled SIGUSR1 would kill it) — replace it with the current build instead of signaling.
 async function ensureInstance(stateDir: string, log: number): Promise<void> {
-  const env = { ...process.env, TELEGRAM_STATE_DIR: stateDir }
+  const env = instanceEnv(stateDir)
   const daemonDown = !(await socketAlive(join(stateDir, 'daemon.sock')))
   if (existsSync(watchdogPath)) {
     const pidFile = join(stateDir, 'watchdog.pid')
@@ -239,6 +239,27 @@ async function ensureInstance(stateDir: string, log: number): Promise<void> {
 
 const dirs = instanceDirs()   // every configured (token-bearing) instance dir; all exist
 if (dirs.length === 0) process.exit(0)   // nothing configured yet → nothing to launch
+
+// `ensure-daemon` is also launched by an individual instance's updater. That updater has already
+// loaded its own .env into process.env. Propagating that environment to EVERY instance makes its
+// token win over the target instance's .env (common.ts deliberately gives real env precedence), so
+// a `/update tg` from slot 2 can make slot 1 poll with slot 2's bot token. Strip every key owned by
+// any configured bridge .env, then let the child load only the selected state's file on boot.
+const instanceEnvKeys = new Set<string>()
+for (const dir of dirs) {
+  try {
+    for (const line of readFileSync(join(dir, '.env'), 'utf8').split('\n')) {
+      const m = line.match(/^(\w+)=/)
+      if (m) instanceEnvKeys.add(m[1])
+    }
+  } catch {}
+}
+function instanceEnv(stateDir: string): NodeJS.ProcessEnv {
+  const env = { ...process.env }
+  for (const key of instanceEnvKeys) delete env[key]
+  env.TELEGRAM_STATE_DIR = stateDir
+  return env
+}
 
 reapForeignBridges()   // kill checkout-run / stale-version bridge processes before ensuring the canonical pair
 ensureDeps(openSync(join(dirs[0], 'daemon.log'), 'a'))   // deps are shared (cache dir) — bootstrap once
