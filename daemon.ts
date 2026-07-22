@@ -4876,20 +4876,21 @@ const START_COMMAND_GROUPS: Array<[title: string, lines: string[]]> = [
   ]],
 ]
 
-// Rich html carrier: a bare "\n" between inline siblings collapses to a space, so the intro/footer
-// break with <br>; <details> blocks self-break, so "\n" around them is enough (see mirror.ts).
+// Rich html carrier: a bare "\n" between inline siblings collapses to a space, so the footer
+// breaks with <br>; <details> blocks self-break, so "\n" around them is enough (see mirror.ts).
+// The intro rides the photo caption, so the rich card is just the sections (+ pairing footer).
 function startRichHtml(paired: boolean): string {
   const sections = START_COMMAND_GROUPS
     .map(([title, lines]) => `<details><summary><b>${title}</b></summary>${lines.join('<br>')}</details>`)
     .join('\n')
-  return `${START_INTRO}\n${sections}${paired ? '' : `\n${START_PAIR_FOOTER}`}`
+  return `${sections}${paired ? '' : `\n${START_PAIR_FOOTER}`}`
 }
 
 function startHelpText(paired: boolean): string {
   const sections = START_COMMAND_GROUPS
     .map(([title, lines]) => `<b>${title}</b>\n${lines.join('\n')}`)
     .join('\n\n')
-  return `${START_INTRO}\n\n${sections}${paired ? '' : `\n\n${START_PAIR_FOOTER}`}`
+  return `${sections}${paired ? '' : `\n\n${START_PAIR_FOOTER}`}`
 }
 
 async function sendStartHelp(ctx: Context): Promise<void> {
@@ -4899,14 +4900,21 @@ async function sendStartHelp(ctx: Context): Promise<void> {
   // remove_keyboard clears the retired docked control bar for anyone who still has it stuck on
   // their client (its taps would otherwise leak the button label to Claude as a plain message).
   const kb = { remove_keyboard: true as const }
+  const caption = `${START_INTRO}\n\n🖼️ Save &amp; set this image as my profile picture`
+  // Lead with the bundled crab asset — doubles as the suggested bot profile picture.
+  try {
+    await ctx.replyWithPhoto(new InputFile(join(import.meta.dir, 'assets', 'claude-tg.jpg')), { caption, parse_mode: 'HTML', reply_markup: kb })
+  } catch {
+    await ctx.reply(caption, { parse_mode: 'HTML', link_preview_options: { is_disabled: true }, reply_markup: kb }).catch(() => {})   // asset missing (stale cache) → text only
+  }
   const chat = String(ctx.chat!.id)
   const thread = ctx.message?.message_thread_id
   try {
-    const m = await sendRichMessage(TOKEN!, chat, { html: startRichHtml(paired) }, { messageThreadId: thread, replyMarkup: kb })
+    const m = await sendRichMessage(TOKEN!, chat, { html: startRichHtml(paired) }, { messageThreadId: thread })
     noteMsg(chat, thread, m.message_id)
     return
   } catch (e) { process.stderr.write(`daemon: rich /start send failed, falling back to HTML: ${e}\n`) }
-  await ctx.reply(startHelpText(paired), { parse_mode: 'HTML', link_preview_options: { is_disabled: true }, reply_markup: kb }).catch(() => {})
+  await ctx.reply(startHelpText(paired), { parse_mode: 'HTML', link_preview_options: { is_disabled: true } }).catch(() => {})
 }
 
 // Phone keyboards autocapitalize the first letter, so a typed "/context" arrives as
