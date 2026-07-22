@@ -2056,6 +2056,7 @@ async function noteDiscoveredPane(paneId: string): Promise<void> {
   const tfile = await transcriptForPane(paneId, cwd)
   if (tfile && !lastRelayedByFile.has(tfile)) lastRelayedByFile.set(tfile, latestFinalReply(tfile)?.uuid ?? '')
   if (isTopicMode()) { void ensureSessionTopic(paneId); return }
+  if (dmLanesOn()) return   // DM lanes: each pane is its OWN lane (bound by ensureDmLane, streamed by the aux relay) — never the single-slot hint or a focus steal
   // DM slot check must look at what the focused pane is RUNNING: if its agent exited (pane at a
   // shell, or gone), the new pane isn't a rival — it's the replacement. Staying "on the current
   // one" there pointed the DM at a dead pane while the /launch'd session ran undriven.
@@ -2451,6 +2452,14 @@ async function targetPaneOf(ctx: Context): Promise<{ paneId: string | null; thre
   if (isTopicMode() && String(ctx.chat?.id ?? '') === getGroupChatId()) {
     const anchorPane = await generalAnchorPane()
     if (anchorPane) return { paneId: anchorPane }
+  }
+  // DM lanes: a command (/terminal, /mode, /clear, /stop, …) targets the SENDER's own lane pane, not
+  // whichever lane happens to hold focus. Falls through to focus only when this chat has no live lane.
+  if (dmLanesOn() && !isTopicMode()) {
+    const chatId = String(ctx.chat?.id ?? '')
+    const lane = chatId ? laneForChat(chatId) : undefined
+    const pane = lane ? await paneForSession(lane.sessionId).catch(() => null) : null
+    if (pane) return { paneId: pane }
   }
   return { paneId: focus.activePaneId }
 }
@@ -7371,9 +7380,13 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
     // It MUST be HOME, not CLAUDE_CONFIG_DIR: the latter relocates .claude.json INTO the config dir
     // (a blank file), which resets onboarding/auth and forces a re-login. No-op on a normal install
     // (shell HOME == daemon home). Alt accounts still pin CLAUDE_CONFIG_DIR. tmux runs through sh -c.
-    const envPrefix = account.name === 'main'
+    // TELEGRAM_STATE_DIR pins the spawned session's `tg` CLI to THIS instance's daemon socket — without
+    // it a non-default instance's panes send through the DEFAULT (instance-1) socket, cross-wiring their
+    // file-sends/reactions to the wrong bridge (harmless no-op for the default instance itself).
+    const envPrefix = (account.name === 'main'
       ? `HOME='${homedir().replace(/'/g, `'\\''`)}' `
-      : `CLAUDE_CONFIG_DIR='${account.configDir.replace(/'/g, `'\\''`)}' `
+      : `CLAUDE_CONFIG_DIR='${account.configDir.replace(/'/g, `'\\''`)}' `)
+      + `TELEGRAM_STATE_DIR='${STATE_DIR.replace(/'/g, `'\\''`)}' `
     const explicitClaudeResume = /(?:^|\s)--resume\s+([^\s]+)/.exec(extra)?.[1]
     const harness: HarnessProfile = agent === 'claude'
       ? normalizeHarnessProfile(
