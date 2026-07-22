@@ -23,6 +23,16 @@ function textOf(content: unknown): string {
   return ''
 }
 
+// The LAST text block only — what the reply relay delivers. The bridge convention promises
+// "Reply = final text block, auto-delivered"; some models (low effort, or reasoning mapped to a
+// plain text part by a gateway harness) emit a narration block AND the reply as two text parts in
+// one message — joining them relayed the narration ("The user just said Hi. I'll reply — …").
+function lastTextOf(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) { const t = content.filter((c: any) => c?.type === 'text'); return t.length ? String(t[t.length - 1].text ?? '') : '' }
+  return ''
+}
+
 // Parse a transcript file into its entries, skipping blank/garbled lines. Shared by the
 // readers below so they all see the same view.
 // Transcripts are append-only JSONL that grow to many MB, and the relay tick reads the active one
@@ -244,7 +254,7 @@ export function latestFinalReply(file: string): { uuid: string; text: string } |
   for (let i = entries.length - 1; i >= 0; i--) {
     const e = entries[i]
     if (!isMainAssistantText(e)) continue
-    const text = textOf(e.message?.content).trim()
+    const text = lastTextOf(e.message?.content).trim()
     if (isCommandNoise(text)) continue
     return { uuid: e.uuid ?? '', text }
   }
@@ -266,7 +276,7 @@ export function finalRepliesAfter(file: string, afterUuid: string): { uuid: stri
   for (let i = at + 1; i < entries.length; i++) {
     const e = entries[i]
     if (isRealUserText(e)) { flush(); continue }  // turn boundary (real prompts only — not injected skill/meta entries)
-    if (isMainAssistantText(e)) { const text = textOf(e.message?.content).trim(); if (!isCommandNoise(text)) pending = { uuid: e.uuid ?? '', text } }
+    if (isMainAssistantText(e)) { const text = lastTextOf(e.message?.content).trim(); if (!isCommandNoise(text)) pending = { uuid: e.uuid ?? '', text } }
   }
   flush()
   return out
