@@ -4815,13 +4815,10 @@ async function runReadout(t: CommandTarget, chatId: string, kind: 'cost' | 'cont
 
 // ---- Telegram bot handlers ----
 
-// The welcome shown by /start (and the hidden /help alias): ONE Bot API 10.1 rich message — intro
-// + a <details> collapsible per command group — with the flat parse_mode-HTML rendering as the
-// fallback (any rich error). Both renderings build from START_COMMAND_GROUPS so they can't drift.
-// Pairing steps only appear when the sender isn't paired yet.
-const START_INTRO =
-  `✦ <b>cc-bridge</b> — drive your Claude Code sessions from Telegram. Send text, photos, files, ` +
-  `or voice — replies arrive with native formatting, and permission prompts become tap-to-approve buttons.`
+// The welcome shown by /start (and the hidden /help alias): the crab photo with a short caption,
+// then ONE Bot API 10.1 rich message — a <details> collapsible per command group — with the flat
+// parse_mode-HTML rendering as the fallback (any rich error). Both renderings build from
+// START_COMMAND_GROUPS so they can't drift. Pairing steps only appear when the sender isn't paired yet.
 const START_PAIR_FOOTER =
   `🔗 <b>Not paired?</b> DM me for a 6-char code, then run ` +
   `<code>/telegram:access pair &lt;code&gt;</code> in Claude Code.`
@@ -4900,7 +4897,7 @@ async function sendStartHelp(ctx: Context): Promise<void> {
   // remove_keyboard clears the retired docked control bar for anyone who still has it stuck on
   // their client (its taps would otherwise leak the button label to Claude as a plain message).
   const kb = { remove_keyboard: true as const }
-  const caption = `${START_INTRO}\n\n🖼️ Save &amp; set this image as my profile picture`
+  const caption = `Welcome to <b>cc-bridge</b>. Enjoy full CLI access via Telegram\n\n🖼️ Save &amp; set this photo as my profile picture`
   // Lead with the bundled crab asset — doubles as the suggested bot profile picture.
   try {
     await ctx.replyWithPhoto(new InputFile(join(import.meta.dir, 'assets', 'claude-tg.jpg')), { caption, parse_mode: 'HTML', reply_markup: kb })
