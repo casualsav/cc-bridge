@@ -2047,6 +2047,15 @@ async function noteDiscoveredPane(paneId: string): Promise<void> {
   const tfile = await transcriptForPane(paneId, cwd)
   if (tfile && !lastRelayedByFile.has(tfile)) lastRelayedByFile.set(tfile, latestFinalReply(tfile)?.uuid ?? '')
   if (isTopicMode()) { void ensureSessionTopic(paneId); return }
+  // DM slot check must look at what the focused pane is RUNNING: if its agent exited (pane at a
+  // shell, or gone), the new pane isn't a rival — it's the replacement. Staying "on the current
+  // one" there pointed the DM at a dead pane while the /launch'd session ran undriven.
+  const curCmd = focus.activePaneId ? await paneCommand(focus.activePaneId).catch(() => '') : ''
+  if (curCmd !== 'claude' && curCmd !== 'codex') {
+    adoptPane(paneId)
+    notifyChats(`🔁 Switched to the new Claude session${cwd ? ` in <code>${escapeHtml(cwd)}</code>` : ''} — the previous pane had no agent running.`)
+    return
+  }
   if (dmMultiPaneHinted) return
   dmMultiPaneHinted = true
   const where = cwd ? ` (<code>${escapeHtml(cwd)}</code>)` : ''
