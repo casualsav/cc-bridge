@@ -16,6 +16,7 @@ import { spawn } from 'node:child_process'
 import { STATE_DIR, ENV_FILE, ACCESS_FILE, DAEMON_LOG_FILE, DAEMON_PID_FILE, WATCHDOG_PID_FILE } from './common.ts'
 import { probeHardware, recommendWhisper, describeHardware, WHISPER_MODELS, WHISPER_INFO, type WhisperModel } from './hardware.ts'
 import { codexCliPath, codexSandboxProbe, ubuntuBwrapRepairCommands } from './codex-health.ts'
+import { CODEX_ENABLED } from './agent.ts'
 
 const REPO = import.meta.dir
 const SETTINGS = join(homedir(), '.claude', 'settings.json')
@@ -219,7 +220,7 @@ async function interview(): Promise<Config> {
   }
   const codexDetected = !!codexCliPath() || existsSync(join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'auth.json')) ||
     (existsSync(ENV_FILE) && /^(CODEX_BIN|CODEX_MODEL|CODEX_REASONING_EFFORT)=/m.test(readFileSync(ENV_FILE, 'utf8')))
-  cfg.prepareCodex = await askYN('Prepare ChatGPT/Codex as a failover target?', codexDetected)
+  cfg.prepareCodex = CODEX_ENABLED && await askYN('Prepare ChatGPT/Codex as a failover target?', codexDetected)
   return cfg
 }
 

@@ -10,6 +10,7 @@ import { STATE_DIR, ENV_FILE, DAEMON_LOG_FILE } from './common.ts'
 import { MAIN_CONFIG_DIR, listAccounts } from './accounts.ts'
 import { readTokenFromEnv, tokenLockStatus } from './token-lock.ts'
 import { currentCodexReadiness } from './codex-health.ts'
+import { CODEX_ENABLED } from './agent.ts'
 
 const settings = (dir: string): Record<string, any> | null => { try { return JSON.parse(readFileSync(join(dir, 'settings.json'), 'utf8')) } catch { return null } }
 
@@ -102,11 +103,13 @@ export async function runDoctor(): Promise<number> {
   // 5. Codex failover prerequisites. Codex is optional, so a missing CLI is informational; once the
   // user has installed/logged into it, a broken sandbox is a real failure because unattended
   // failover would otherwise replace a Claude pane with a process that cannot execute commands.
-  const codex = currentCodexReadiness()
-  if (codex.state === 'ready') ok('Codex: CLI + ChatGPT login + workspace sandbox ready for failover')
-  else if (codex.state === 'cli-missing') info('Codex: not installed/configured (optional; Claude-only bridge is healthy)')
-  else if (codex.state === 'login-missing') wn(`Codex: CLI installed but not logged in — run ${codex.cli} login`)
-  else fail(`Codex: workspace sandbox blocked — ${codex.reason}`)
+  if (CODEX_ENABLED) {
+    const codex = currentCodexReadiness()
+    if (codex.state === 'ready') ok('Codex: CLI + ChatGPT login + workspace sandbox ready for failover')
+    else if (codex.state === 'cli-missing') info('Codex: not installed/configured (optional; Claude-only bridge is healthy)')
+    else if (codex.state === 'login-missing') wn(`Codex: CLI installed but not logged in — run ${codex.cli} login`)
+    else fail(`Codex: workspace sandbox blocked — ${codex.reason}`)
+  }
 
   // 6. Version drift — running daemon vs newest cache build.
   const newest = newestCacheVersion()

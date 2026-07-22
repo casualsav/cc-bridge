@@ -4879,12 +4879,10 @@ bot.command('agent', async ctx => {
     await ctx.reply(`Active terminal: <b>${agentLabel(kind)}</b>${harness}\n\nStart one with ${starters}. Inside Claude Code, use <code>/harness</code> to swap inference providers.`, { parse_mode: 'HTML' })
     return
   }
-  if (arg === 'codex' && !CODEX_ENABLED) {
-    await ctx.reply('Codex support is disabled in this build.')
-    return
-  }
-  if (arg !== 'claude' && arg !== 'codex') {
-    await ctx.reply('Usage: <code>/agent claude</code> or <code>/agent codex</code>', { parse_mode: 'HTML' })
+  if (arg !== 'claude' && (arg !== 'codex' || !CODEX_ENABLED)) {
+    await ctx.reply(CODEX_ENABLED
+      ? 'Usage: <code>/agent claude</code> or <code>/agent codex</code>'
+      : 'Usage: <code>/agent claude</code>', { parse_mode: 'HTML' })
     return
   }
   const kind = arg as AgentKind
@@ -4917,7 +4915,7 @@ bot.command('harness', async ctx => {
     const gatewayNames = Object.keys(loadHarnessGateways())
     await ctx.reply(
       `Active harness: <b>${escapeHtml(harnessLabel(current))}</b>\n\n` +
-      `<code>/harness native</code> · <code>/harness codex [model]</code> · ` +
+      `<code>/harness native</code> · ${CODEX_ENABLED ? '<code>/harness codex [model]</code> · ' : ''}` +
       `<code>/harness kimi [model]</code> · <code>/harness grok [model]</code> · <code>/harness cursor [model]</code> · ` +
       `<code>/harness gateway &lt;name&gt; [model]</code>` +
       (gatewayNames.length ? `\n\nConfigured gateways: <code>${escapeHtml(gatewayNames.join(', '))}</code>` : '\n\nNo generic gateways configured.'),
@@ -4931,8 +4929,8 @@ bot.command('harness', async ctx => {
   }
   const gateways = loadHarnessGateways()
   const profile = parseHarnessSpec(arg, gateways)
-  if (!profile) {
-    await ctx.reply('Usage: <code>/harness native | codex [model] | kimi [model] | grok [model] | cursor [model] | gateway &lt;name&gt; [model]</code>', { parse_mode: 'HTML' })
+  if (!profile || (profile.provider === 'codex' && !CODEX_ENABLED)) {
+    await ctx.reply(`Usage: <code>/harness native | ${CODEX_ENABLED ? 'codex [model] | ' : ''}kimi [model] | grok [model] | cursor [model] | gateway &lt;name&gt; [model]</code>`, { parse_mode: 'HTML' })
     return
   }
   if (profile.provider === 'gateway') {
@@ -6858,12 +6856,11 @@ const sendHealth = async (ctx: Context): Promise<void> => {
   const laterN = Object.values(later).reduce((n, items) => n + items.length, 0)
   lines.push(`🗒 Queues: ${laterN} queued · ${scheduledCount()} scheduled · ${revivalQueues.size} reviving`)
   const codexHealth = currentCodexReadiness()
-  const codexHealthText = !CODEX_ENABLED ? '⏸ disabled'
-    : codexHealth.state === 'ready' ? '✅ ready'
+  const codexHealthText = codexHealth.state === 'ready' ? '✅ ready'
     : codexHealth.state === 'login-missing' ? '⚠️ not logged in'
     : codexHealth.state === 'sandbox-blocked' ? '❌ sandbox blocked'
     : 'not installed/configured'
-  lines.push(`✳️ Codex: ${codexHealthText}`)
+  if (CODEX_ENABLED) lines.push(`✳️ Codex: ${codexHealthText}`)
   let wd = 'not running'
   try {
     const wpid = parseInt(readFileSync(WATCHDOG_PID_FILE, 'utf8').trim(), 10)
@@ -6890,7 +6887,7 @@ const sendHealth = async (ctx: Context): Promise<void> => {
     ['⏱ Uptime', `${formatDuration(Date.now() - DAEMON_STARTED)} · pid ${process.pid}`],
     ['🖥 Panes', String(offMcpPanes.size)],
     ['🗒 Queues', `${laterN} queued · ${scheduledCount()} scheduled · ${revivalQueues.size} reviving`],
-    ['✳️ Codex', codexHealthText],
+    ...(CODEX_ENABLED ? [['✳️ Codex', codexHealthText] as [string, string]] : []),
     ['🐶 Watchdog', escapeHtml(wd)],
   ]
   const detail = [
@@ -8893,7 +8890,7 @@ bot.on('callback_query:data', async ctx => {
     const agent = tcAgent[1] as AgentKind
     const thread = Number(tcAgent[2])
     if (agent === 'codex' && !CODEX_ENABLED) {
-      await ctx.answerCallbackQuery({ text: 'Codex support is disabled in this build.' }).catch(() => {})
+      await ctx.answerCallbackQuery({ text: 'This topic setup expired.' }).catch(() => {})
       return
     }
     if (!setTopicCreateAgent(thread, agent)) {
@@ -11179,7 +11176,7 @@ void (async () => {
               { command: 'terminal', description: 'Dump the last N lines of the terminal (default 40)' },
               { command: 'compact', description: 'Compact the conversation to free up context' },
               { command: 'voice', description: 'Voice replies on/off — replies arrive as voice notes too' },
-              { command: 'doctor', description: 'Bridge + Codex readiness — login, sandbox, failover, daemon' },
+              { command: 'doctor', description: CODEX_ENABLED ? 'Bridge + Codex readiness — login, sandbox, failover, daemon' : 'Bridge readiness — login, failover, daemon' },
               { command: 'update', description: 'Update the Telegram bridge or Claude itself' },
               { command: 'handoff', description: 'Write a session handoff (handoff.md) for a fresh agent' },
               { command: 'continue', description: 'Resume from handoff.md where the last session left off' },
