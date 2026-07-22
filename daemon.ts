@@ -1601,13 +1601,25 @@ async function primeRelayCursor(): Promise<void> {
   try {
     const cwd = focus.activePaneId ? await paneCwd(focus.activePaneId) : null
     const file = await transcriptForPane(focus.activePaneId, cwd)
-    const latest = file ? latestFinalReply(file) : null
-    // (The old "💬 N messages from this session while you were away" switch-back catch-up lived here.
-    // Removed: it served retired single-DM multi-session. DM mode is now single-session, and multiple
-    // sessions are driven via the group's forum topics — each relays to its own topic independently,
-    // so nothing is ever missed on a switch and the catch-up only mis-fired into the group.)
-    lastRelayedUuid = latest?.uuid ?? ''
-    if (file) lastRelayedByFile.set(file, lastRelayedUuid)
+    // A KNOWN transcript keeps its (persisted) cursor instead of being re-primed to the tail —
+    // aux-loop parity. Priming to the tail here clobbered the restored cursor on every relay-loop
+    // (re)start, so a reply that concluded during a daemon restart / focus re-adoption window was
+    // silently skipped: the card had shown it as narration, but it never relayed as its own
+    // message. DM mode has no aux loop, so this focused-loop path was its only delivery — the
+    // "final message only ever appeared inside the live card" bug. Only a never-seen transcript
+    // skips its existing tail (finalRepliesAfter's lost-cursor guard caps any backlog to the
+    // latest reply anyway).
+    if (file && lastRelayedByFile.has(file)) {
+      lastRelayedUuid = lastRelayedByFile.get(file)!
+    } else {
+      // (The old "💬 N messages from this session while you were away" switch-back catch-up lived here.
+      // Removed: it served retired single-DM multi-session. DM mode is now single-session, and multiple
+      // sessions are driven via the group's forum topics — each relays to its own topic independently,
+      // so nothing is ever missed on a switch and the catch-up only mis-fired into the group.)
+      const latest = file ? latestFinalReply(file) : null
+      lastRelayedUuid = latest?.uuid ?? ''
+      if (file) lastRelayedByFile.set(file, lastRelayedUuid)
+    }
   } catch { lastRelayedUuid = '' }
   relayCursorPrimed = true
 }
