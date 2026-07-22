@@ -15,6 +15,7 @@ export const DM_LANES_FILE = join(STATE_DIR, 'dm-lanes.json')
 
 export type LaneEntry = {
   sessionId: string   // the session-instance id (@tg_session pane stamp) driving this lane
+  cwd?: string        // last-known working dir of the lane's pane — used to revive it (`-c` in this dir) after its pane dies, so a crash-revive keeps the folder + conversation instead of dropping to a fresh $HOME session
   createdAt: number
 }
 
@@ -37,7 +38,7 @@ export function loadLanes(): LaneStore {
     for (const [chatId, e] of Object.entries(raw.lanes ?? {})) {
       const l = e as Partial<LaneEntry>
       if (!l || typeof l.sessionId !== 'string') continue
-      lanes[chatId] = { sessionId: l.sessionId, createdAt: typeof l.createdAt === 'number' ? l.createdAt : 0 }
+      lanes[chatId] = { sessionId: l.sessionId, ...(typeof l.cwd === 'string' ? { cwd: l.cwd } : {}), createdAt: typeof l.createdAt === 'number' ? l.createdAt : 0 }
     }
   }
   store = { lanes }
@@ -58,11 +59,21 @@ export function chatForLaneSession(sessionId: string): string | undefined {
   return undefined
 }
 
-export function bindLane(chatId: string, sessionId: string, at: number): void {
+export function bindLane(chatId: string, sessionId: string, at: number, cwd?: string): void {
   ensureLoaded()
   const cur = store.lanes[chatId]
-  if (cur && cur.sessionId === sessionId) return
-  store.lanes[chatId] = { sessionId, createdAt: at }
+  if (cur && cur.sessionId === sessionId) { if (cwd && cur.cwd !== cwd) { store.lanes[chatId] = { ...cur, cwd }; save() } ; return }
+  store.lanes[chatId] = { sessionId, createdAt: at, ...(cwd ? { cwd } : {}) }
+  save()
+}
+
+// Refresh a lane's last-known cwd (its pane may cd during the session) without touching its sid, so a
+// later crash-revive lands in the folder the user was actually working in. No-op if the lane is gone.
+export function noteLaneCwd(chatId: string, cwd: string): void {
+  ensureLoaded()
+  const cur = store.lanes[chatId]
+  if (!cur || cur.cwd === cwd) return
+  store.lanes[chatId] = { ...cur, cwd }
   save()
 }
 

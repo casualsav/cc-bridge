@@ -1,7 +1,7 @@
 import { test, expect, beforeEach } from 'bun:test'
 import {
   _resetForTest, laneForChat, chatForLaneSession, bindLane, unbindLane,
-  unbindLaneBySession, listLanes,
+  unbindLaneBySession, listLanes, noteLaneCwd,
 } from './dm-lanes.ts'
 
 beforeEach(() => _resetForTest())
@@ -40,6 +40,25 @@ test('unbind by session drops every lane pointing at it', () => {
   unbindLaneBySession('sidA')
   expect(laneForChat('111')).toBeUndefined()
   expect(laneForChat('222')?.sessionId).toBe('sidB')
+})
+
+test('cwd is stored on bind and refreshed on same-session rebind (for crash-revive)', () => {
+  bindLane('111', 'sidA', 1000, '/home/u/proj')
+  expect(laneForChat('111')?.cwd).toBe('/home/u/proj')
+  // same session, new cwd (pane cd'd) → cwd updates, entry preserved
+  bindLane('111', 'sidA', 2000, '/home/u/proj/sub')
+  expect(laneForChat('111')?.cwd).toBe('/home/u/proj/sub')
+  expect(laneForChat('111')?.sessionId).toBe('sidA')
+})
+
+test('noteLaneCwd updates cwd without touching sid; no-op when lane absent or unchanged', () => {
+  bindLane('111', 'sidA', 1000, '/a')
+  noteLaneCwd('111', '/b')
+  expect(laneForChat('111')?.cwd).toBe('/b')
+  expect(laneForChat('111')?.sessionId).toBe('sidA')
+  noteLaneCwd('111', '/b')   // unchanged — no throw
+  noteLaneCwd('999', '/x')   // no lane — no-op, no throw
+  expect(laneForChat('999')).toBeUndefined()
 })
 
 test('malformed entries are dropped on load via _resetForTest seam', () => {

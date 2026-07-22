@@ -111,7 +111,7 @@ import {
   type PartyEndpoint, type PartyPending,
 } from './party.ts'
 import { formatAskBlock, formatAnswerBlock, formatDigestBlock, formatRosterLine, type RosterAgent } from './party-block.ts'
-import { laneForChat, bindLane, chatForLaneSession } from './dm-lanes.ts'
+import { laneForChat, bindLane, chatForLaneSession, noteLaneCwd } from './dm-lanes.ts'
 import { runHermes, type HermesEndpoint, type HermesTask } from './hermes-driver.ts'
 import {
   initLoop, sweepLoops, LOOP_SWEEP_MS, startLoopWizard, handleLoopWizardReply, wizardSidFor,
@@ -9763,8 +9763,8 @@ async function handleInbound(
     const lane = laneForChat(chat_id)
     if (lane) {
       const lanePane = await paneForSession(lane.sessionId).catch(() => null)
-      if (lanePane) targetPane = lanePane
-      else { void ensureDmLane(ctx, chat_id, params); return }   // lane's pane died → respawn + deliver
+      if (lanePane) { targetPane = lanePane; void paneCwd(lanePane).then(c => { if (c) noteLaneCwd(chat_id, c) }).catch(() => {}) }   // keep the lane's cwd fresh for a future crash-revive
+      else { void ensureDmLane(ctx, chat_id, params, { sid: lane.sessionId, cwd: lane.cwd }); return }   // pane died → revive in ITS OWN folder (-c), not a fresh $HOME lane
     } else {
       // First DM from this user, no lane yet. ADOPT the already-running focused session as this user's
       // lane (so the owner who launched a session keeps driving it instead of being orphaned onto a
@@ -9772,11 +9772,12 @@ async function handleInbound(
       // (no live session, or it's already claimed by an earlier user) spawn a fresh isolated lane.
       const focusSid = focus.activePaneId ? await sessionForPane(focus.activePaneId).catch(() => null) : null
       const focusCmd = focus.activePaneId ? await paneCommand(focus.activePaneId).catch(() => '') : ''
+      const focusCwd = focus.activePaneId ? await paneCwd(focus.activePaneId).catch(() => null) : null
       // dmLaneBooting.size === 0 closes the race where two users DM a fresh box at once: while ANY lane is
       // mid-spawn, `focus` may be that just-spawned, not-yet-bound pane — adopting it would merge the two
       // users. During a boot, spawn a fresh lane instead of adopting.
       if (focusSid && (focusCmd === 'claude' || focusCmd === 'codex') && !chatForLaneSession(focusSid) && dmLaneBooting.size === 0) {
-        bindLane(chat_id, focusSid, Date.now())
+        bindLane(chat_id, focusSid, Date.now(), focusCwd ?? undefined)
         targetPane = focus.activePaneId
       } else { void ensureDmLane(ctx, chat_id, params); return }
     }
@@ -9932,28 +9933,31 @@ async function reviveDmSession(ctx: Context, params: InboundParams): Promise<voi
 // duplicates. Base folder (getBaseCwd) if set, else $HOME. A crash-revive spawns fresh (new sid) and
 // rebinds — a lane's cross-restart conversation continuity is a later improvement.
 const dmLaneBooting = new Map<string, InboundParams[]>()
-async function ensureDmLane(ctx: Context, chatId: string, first: InboundParams): Promise<void> {
+async function ensureDmLane(ctx: Context, chatId: string, first: InboundParams, revive?: { sid: string; cwd?: string }): Promise<void> {
   const queued = dmLaneBooting.get(chatId)
   if (queued) { queued.push(first); return }   // a boot for this chat is already in flight — join it
   dmLaneBooting.set(chatId, [first])
   const drain = (deliver: (p: InboundParams) => void) => { for (const p of dmLaneBooting.get(chatId) ?? []) deliver(p) }
   try {
     const base = getBaseCwd()
-    const dir = base && existsSync(base) ? base : homedir()
-    const sid = genSessionId()
-    const notice = await ctx.reply('🚪 Setting up your session…', { parse_mode: 'HTML' }).catch(() => null)
+    // Revive: come back in the lane's OWN folder and `-c` its conversation (keyed by the lane's existing
+    // sid, so the binding + pane stamp stay valid). Fresh: the base folder, else $HOME.
+    const dir = revive?.cwd ?? (base && existsSync(base) ? base : homedir())
+    const sid = revive?.sid ?? genSessionId()
+    const extra = revive ? '-c' : ''
+    const notice = await ctx.reply(revive ? '💤 Reviving your session…' : '🚪 Setting up your session…', { parse_mode: 'HTML' }).catch(() => null)
     const edit = async (text: string) => {
       if (notice) await channel.editText({ chatId: String(notice.chat.id), messageId: String(notice.message_id) }, text).catch(() => {})
       else await ctx.reply(text, { parse_mode: 'HTML' }).catch(() => {})
     }
-    const pane = await spawnSession(dir, '', sid, MAIN_ACCOUNT, 'claude')
+    const pane = await spawnSession(dir, extra, sid, MAIN_ACCOUNT, 'claude')
     if (!pane) {
       drain(bufferEvent)   // keep the messages — they replay when a session next appears
-      await edit(`❌ Couldn't start your session in <code>${escapeHtml(dir)}</code> — your message is buffered.`)
+      await edit(`❌ Couldn't ${revive ? 'revive' : 'start'} your session in <code>${escapeHtml(dir)}</code> — your message is buffered.`)
       return
     }
-    bindLane(chatId, sid, Date.now())
-    process.stderr.write(`daemon: dm-lane spawned for chat ${chatId} → sid ${sid} (pane ${pane}) in ${dir}\n`)
+    bindLane(chatId, sid, Date.now(), dir)   // fresh → new binding; revive → same sid, refreshes the cwd
+    process.stderr.write(`daemon: dm-lane ${revive ? 'revived' : 'spawned'} for chat ${chatId} → sid ${sid} (pane ${pane}) in ${dir}\n`)
     const deadline = Date.now() + 90_000
     while (Date.now() < deadline) {
       await sleep(2000)
@@ -9961,7 +9965,7 @@ async function ensureDmLane(ctx: Context, chatId: string, first: InboundParams):
       if (cap && onNormalPrompt(cap)) {
         const msgs = dmLaneBooting.get(chatId) ?? []
         for (const p of msgs) emitInbound(p, pane)   // deliver to THIS lane's pane, not whichever is focused
-        await edit(`✅ Your session is ready — ${msgs.length > 1 ? `your ${msgs.length} messages were delivered` : 'your message was delivered'}.`)
+        await edit(`✅ Your session is ${revive ? 'back up' : 'ready'} — ${msgs.length > 1 ? `your ${msgs.length} messages were delivered` : 'your message was delivered'}.`)
         return
       }
       // First-run onboarding / post-update interstitials wedge a fresh pane short of the prompt.
