@@ -4880,14 +4880,14 @@ function startRichHtml(paired: boolean): string {
   const sections = START_COMMAND_GROUPS
     .map(([title, lines]) => `<details><summary><b>${title}</b></summary>${lines.join('<br>')}</details>`)
     .join('\n')
-  return `${sections}${paired ? '' : `\n${START_PAIR_FOOTER}`}`
+  return `<b>Commands:</b>\n${sections}${paired ? '' : `\n${START_PAIR_FOOTER}`}`
 }
 
 function startHelpText(paired: boolean): string {
   const sections = START_COMMAND_GROUPS
     .map(([title, lines]) => `<b>${title}</b>\n${lines.join('\n')}`)
     .join('\n\n')
-  return `${sections}${paired ? '' : `\n\n${START_PAIR_FOOTER}`}`
+  return `<b>Commands:</b>\n\n${sections}${paired ? '' : `\n\n${START_PAIR_FOOTER}`}`
 }
 
 async function sendStartHelp(ctx: Context): Promise<void> {
