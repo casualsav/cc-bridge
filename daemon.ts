@@ -10836,6 +10836,10 @@ function isBypassWarning(cap: string): boolean {
 }
 const bypassAcceptAt = new Map<string, number>()
 async function autoAcceptBypassWarning(pane: string, now: number): Promise<void> {
+  // The dialog only exists inside a running claude process. A pane that fell back to the shell
+  // can still SHOW the dialog in scrollback (❯ marker and all, with no REPL prompt below) —
+  // injecting there types "2" into bash forever. Never fire unless claude is what's running.
+  if (await paneCommand(pane).catch(() => '') !== 'claude') return
   if (now - (bypassAcceptAt.get(pane) ?? 0) < 8000) return
   bypassAcceptAt.set(pane, now)
   process.stderr.write(`daemon: auto-accepting bypass-permissions warning on pane ${pane}\n`)
