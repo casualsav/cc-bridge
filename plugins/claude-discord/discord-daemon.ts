@@ -148,7 +148,7 @@ async function handleMessage(m: InboundMsg): Promise<void> {
   if (m.isEdit) return   // MVP: don't re-inject edits
 
   const pane = activePane
-  if (!pane) { await channel.sendText(m.chatId, 'No bridge session is attached yet — launch one with `ccb`.', m.threadId ? { threadId: m.threadId } : {}).catch(() => {}); return }
+  if (!pane) { await channel.sendText(m.chatId, 'No bridge session is attached yet — launch one with `cc-bridge`.', m.threadId ? { threadId: m.threadId } : {}).catch(() => {}); return }
   replyTarget = { chatId: m.chatId, ...(m.threadId ? { threadId: m.threadId } : {}) }
 
   // Fire a single typing indicator on inject (caps.typing true — single shot, no keep-alive in MVP).

@@ -915,7 +915,7 @@ function enqueueInboundInject(paneId: string, watcher: PaneWatcher, params: Inbo
 
 // Auto-provision off-MCP tooling so a plugin-less session works with no manual setup:
 //  - the `tg` actions CLI on PATH (send/react/edit),
-//  - a `ccb` launcher on PATH (plus `claude-tg` back-compat alias; works in shells that don't source .bashrc), and
+//  - a `cc-bridge` launcher on PATH (plus `claude-tg` alias; works in shells that don't source .bashrc), and
 //  - a stable ensure-daemon launcher for the SessionStart hook to relaunch the daemon.
 // Re-run each startup so it tracks plugin upgrades. The ensure-daemon launcher globs the
 // cache at runtime, so it survives version bumps even while the daemon is down (post-
@@ -927,7 +927,7 @@ function provisionOffMcpTooling(): void {
     const binDir = [join(homedir(), '.bun', 'bin'), join(homedir(), '.local', 'bin')].find(d => existsSync(d))
     if (binDir) {
       writeFileSync(join(binDir, 'tg'), `#!/bin/sh\nexec bun ${tgctl} "$@"\n`, { mode: 0o755 })
-      // A `ccb` launcher on PATH (with `claude-tg` kept as a back-compat alias) — mirrors the
+      // A `cc-bridge` launcher on PATH (with `claude-tg` kept as an alias) — mirrors the
       // .bashrc function but works in ANY shell (a fresh tmux window whose shell doesn't source
       // .bashrc otherwise fails with "command not found"). Arg 1 = instance slot (default 1);
       // arg 2 = Claude account name (optional). It stamps the per-channel adopt markers on the pane
@@ -936,7 +936,7 @@ function provisionOffMcpTooling(): void {
       // (pinned-preferred) instead of "1". Warns if not inside tmux, since an unbridged session is
       // the usual "no topic appeared" cause.
       const ccb = `#!/bin/sh
-[ -z "$TMUX" ] && echo "ccb: not inside tmux — this session won't be bridged. Start tmux first (e.g. tmux new -s work), then rerun." >&2
+[ -z "$TMUX" ] && echo "cc-bridge: not inside tmux — this session won't be bridged. Start tmux first (e.g. tmux new -s work), then rerun." >&2
 if [ "$1" = "--pin" ]; then pin="$2"; shift 2; else pin=""; fi
 tmux set -p @telegram "\${1:-1}" 2>/dev/null
 tmux set -p @slack "$([ "$pin" = slack ] && echo pin || echo 1)" 2>/dev/null
@@ -944,8 +944,9 @@ tmux set -p @discord "$([ "$pin" = discord ] && echo pin || echo 1)" 2>/dev/null
 if [ -n "$2" ]; then exec env CLAUDE_CONFIG_DIR="$HOME/.claude-$2" claude --allow-dangerously-skip-permissions
 else exec claude --allow-dangerously-skip-permissions; fi
 `
-      writeFileSync(join(binDir, 'ccb'), ccb, { mode: 0o755 })
+      writeFileSync(join(binDir, 'cc-bridge'), ccb, { mode: 0o755 })
       writeFileSync(join(binDir, 'claude-tg'), ccb, { mode: 0o755 })
+      try { unlinkSync(join(binDir, 'ccb')) } catch {}   // retired launcher name
     }
     // Stable ensure-daemon launcher: resolves the newest cache copy at run time (so it
     // works after a version bump, and when the daemon is down). The SessionStart hook
@@ -961,7 +962,7 @@ let t = null
 try { const vs = readdirSync(base).filter(v => /^\\d+\\.\\d+\\.\\d+$/.test(v)).sort((a, b) => a.localeCompare(b, undefined, { numeric: true })); for (const v of vs.reverse()) { const p = join(base, v, 'ensure-daemon.ts'); if (existsSync(p)) { t = p; break } } } catch {}
 if (t) await import(t)
 `, { mode: 0o755 })
-    process.stderr.write(`daemon: provisioned off-mcp tooling (tg + ccb/claude-tg CLI${binDir ? ` → ${binDir}` : ' — no bin dir'}, ensure-daemon)\n`)
+    process.stderr.write(`daemon: provisioned off-mcp tooling (tg + cc-bridge/claude-tg CLI${binDir ? ` → ${binDir}` : ' — no bin dir'}, ensure-daemon)\n`)
   } catch (e) { process.stderr.write(`daemon: off-mcp provision failed: ${e}\n`) }
 }
 
@@ -2570,7 +2571,7 @@ async function hintNoSession(params: InboundParams): Promise<void> {
   lastNoSessionHintTs = Date.now()
   await channel.sendText(String(chat),
     '🕳️ <b>No active session</b> — your message is buffered. Start one in tmux to receive it:\n' +
-    '<code>ccb</code>   — safe start, bypass on demand from /mode\n' +
+    '<code>cc-bridge</code>   — safe start, bypass on demand from /mode\n' +
     'The daemon auto-discovers the pane (the launcher tags it with the <code>@telegram</code> tmux option) and replays anything buffered.',
     ).catch(() => {})
 }

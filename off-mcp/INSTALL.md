@@ -78,7 +78,7 @@ the user and let them pick:
 | --- | --- | --- |
 | Per-request cost | **Zero** — no MCP server; replies are read from the transcript | ~700 tokens of tool schemas **+** an instruction block injected on **every** request |
 | Requires | **tmux** (the daemon drives the session's pane) | nothing — works without tmux |
-| Launch with | `ccb` (off-MCP launcher; tags the pane `@telegram`; `claude-tg` alias kept) | plain `claude` |
+| Launch with | `cc-bridge` (off-MCP launcher; tags the pane `@telegram`; `claude-tg` alias kept) | plain `claude` |
 | Functions | **Full** — reply, react, edit, files, permission prompts, every command | Full (identical) |
 
 Both modes expose the exact same features (reactions, file send/receive, permission buttons,
@@ -88,7 +88,7 @@ tools. **Off-MCP is recommended** unless the user genuinely can't use tmux.
 The MCP server ships **disabled** (`mcp.json.disabled`), so off-MCP is the out-of-the-box
 default. **Record the user's choice now** — you act on it after the plugin is installed (Step 5):
 
-- **Off-MCP (default):** leave the server disabled; work sessions launch with `ccb`.
+- **Off-MCP (default):** leave the server disabled; work sessions launch with `cc-bridge`.
 - **MCP:** after the plugin is installed, **enable it** — rename `mcp.json.disabled` → `.mcp.json`
   in the plugin dir (or run `/telegram:configure mcp on`). Once enabled, the MCP server **loads
   automatically on every plain `claude` launch** — the *only* ways it won't load are starting
@@ -456,29 +456,29 @@ Off-MCP keeps the plugin's MCP server disabled, so a plain `claude` is already p
 **Off-MCP (default):** run the work session in a tmux pane, launched so the daemon recognizes it as
 a bridge session. The signature the Telegram daemon scans for is the **`@telegram` tmux pane option**
 whose **value is the instance slot** — a marker set at the tmux layer, so it never touches claude's
-args (immune to claude rejecting unknown flags, and decoupled from autonomy mode). The `ccb` launcher
+args (immune to claude rejecting unknown flags, and decoupled from autonomy mode). The `cc-bridge` launcher
 also stamps `@slack=1` and `@discord=1` so the SAME pane is discoverable by the sibling channels
 (harmless when they aren't installed). **Auto-add the launcher function that tags the pane then
 launches** — append to the user's `~/.bashrc` (or `~/.zshrc`). It takes an optional slot (default
-`1`), so `ccb` is the default bridge and `ccb 2` routes to a second one; an optional second arg pins
-the session to an alternate Claude account (`ccb 1 work` → `CLAUDE_CONFIG_DIR=~/.claude-work`, see
+`1`), so `cc-bridge` is the default bridge and `cc-bridge 2` routes to a second one; an optional second arg pins
+the session to an alternate Claude account (`cc-bridge 1 work` → `CLAUDE_CONFIG_DIR=~/.claude-work`, see
 `/account`). A leading `--pin slack|discord` sets that channel's marker to `pin` (pinned-preferred):
 ```sh
-ccb()         { local pin=""; if [ "$1" = "--pin" ]; then pin="$2"; shift 2; fi; tmux set -p @telegram "${1:-1}" 2>/dev/null; tmux set -p @slack "$([ "$pin" = slack ] && echo pin || echo 1)" 2>/dev/null; tmux set -p @discord "$([ "$pin" = discord ] && echo pin || echo 1)" 2>/dev/null; if [ -n "$2" ]; then CLAUDE_CONFIG_DIR="$HOME/.claude-$2" claude --allow-dangerously-skip-permissions; else claude --allow-dangerously-skip-permissions; fi; }  # safe start, bypass on demand
-claude-tg()   { ccb "$@"; }  # legacy alias — kept for muscle memory
+cc-bridge()         { local pin=""; if [ "$1" = "--pin" ]; then pin="$2"; shift 2; fi; tmux set -p @telegram "${1:-1}" 2>/dev/null; tmux set -p @slack "$([ "$pin" = slack ] && echo pin || echo 1)" 2>/dev/null; tmux set -p @discord "$([ "$pin" = discord ] && echo pin || echo 1)" 2>/dev/null; if [ -n "$2" ]; then CLAUDE_CONFIG_DIR="$HOME/.claude-$2" claude --allow-dangerously-skip-permissions; else claude --allow-dangerously-skip-permissions; fi; }  # safe start, bypass on demand
+claude-tg()   { cc-bridge "$@"; }  # legacy alias — kept for muscle memory
 ```
 Panes launched by the **old `claude-tg` function** (which stamped `@tg_bridge`) keep working: the
 daemon still adopts a pane whose legacy `@tg_bridge` value matches its slot. The daemon also drops
-**`ccb` + `claude-tg` executables on PATH** (in `~/.bun/bin` or `~/.local/bin`) that do the same
+**`cc-bridge` + `claude-tg` executables on PATH** (in `~/.bun/bin` or `~/.local/bin`) that do the same
 thing — so they work even in a shell that doesn't source `~/.bashrc` (e.g. a fresh tmux window under
 some configs, where the function alone gives `command not found`). The shell function still shadows
 them in interactive shells; the executable is the fallback. Both must run **inside tmux** (the
 executable warns if `$TMUX` is unset, since an unbridged session is the usual "I launched it but no
 topic appeared" cause).
 
-Then **tell the user:** launch work sessions with **`ccb`**. The `@telegram` pane option is
+Then **tell the user:** launch work sessions with **`cc-bridge`**. The `@telegram` pane option is
 the bridge marker; the launch flag is the autonomy choice:
-- **`ccb`** uses `--allow-dangerously-skip-permissions` — Claude starts in a normal mode where
+- **`cc-bridge`** uses `--allow-dangerously-skip-permissions` — Claude starts in a normal mode where
   permission prompts are **relayed to Telegram** (Yes / allow-all / No buttons), and you can switch
   **into full bypass on demand** from the `/mode` picker. The safe, fully-remote-controllable default.
 
@@ -489,19 +489,19 @@ approve remotely.
 
 That's it — the daemon **auto-discovers** the pane and binds automatically (no `TELEGRAM_FORCE_PANE`,
 no restart). Several bridge panes? It asks which to use; to pin one, set `TELEGRAM_FORCE_PANE=<pane
-id>` in `.env`. Your own MCP servers still load if you pass them (`ccb --mcp-config ~/my-mcp.json`).
+id>` in `.env`. Your own MCP servers still load if you pass them (`cc-bridge --mcp-config ~/my-mcp.json`).
 
 ## 6. Verify end to end
 From Telegram, message the session → you get its reply (read from the transcript), no MCP
 loaded. Ask it to "send me a file with `tg`" to confirm outbound actions.
 
 **If inbound never reaches the session (pin shows "No active session"):** the daemon only
-auto-adopts a pane carrying the **`@telegram` tmux pane option** (set by the `ccb` launcher; a
+auto-adopts a pane carrying the **`@telegram` tmux pane option** (set by the `cc-bridge` launcher; a
 legacy `@tg_bridge` marker from the old `claude-tg` function is honored too). A session started with
 a bare `claude` (no marker) is **not** adopted —
 check with `tmux show-options -p @telegram` in the pane, and confirm in `daemon.log` you see
 `adopted off-MCP pane …`
-or `focus pinned to …`. Fixes, in order of preference: (a) relaunch the work session with `ccb`;
+or `focus pinned to …`. Fixes, in order of preference: (a) relaunch the work session with `cc-bridge`;
 or (b) pin the existing pane explicitly — get its id with
 `tmux list-panes -a -F '#{pane_id} #{pane_current_command}'`, then set
 `TELEGRAM_FORCE_PANE=<pane id>` in `.env` and restart the daemon. (`%`-ids are valid only while
@@ -522,7 +522,7 @@ returns any logged-in account's token regardless of active). No switching, concu
 2. Install the helper to a **stable** path (NOT the version-keyed plugin cache — git points at it by
    absolute path), then enable it for github.com:
    ```bash
-   install -m 755 "$(dirname "$(command -v ccb 2>/dev/null || echo .)")/../bin/gh-multi-credential" \
+   install -m 755 "$(dirname "$(command -v cc-bridge 2>/dev/null || echo .)")/../bin/gh-multi-credential" \
      ~/.local/bin/gh-multi-credential 2>/dev/null \
      || install -m 755 bin/gh-multi-credential ~/.local/bin/gh-multi-credential   # run from the repo checkout
    git config --global credential.https://github.com.useHttpPath true
@@ -572,8 +572,8 @@ It writes and enables `claude-tg-keepalive.service`, and tells you if the user n
   - Configure it from your terminal: **`/telegram:configure work <token>`** (writes the token to
     `telegram-work/.env` and starts that bridge's daemon), then **`/telegram:access work pair <code>`**
     to approve your DM into *its* allowlist — isolated from the default bridge.
-  - Launch its work panes with **`ccb work`** (the launcher functions take the id). Each daemon
+  - Launch its work panes with **`cc-bridge work`** (the launcher functions take the id). Each daemon
     adopts only panes whose `@telegram` equals its own id, so they never cross-talk. (Inside such a
     session you can drop the id — the skills read it off the pane.) For a memorable shortcut a user
-    can add their own wrapper, e.g. `alias work-bot='ccb work'`.
+    can add their own wrapper, e.g. `alias work-bot='cc-bridge work'`.
   - `ensure-daemon` enumerates every configured instance, so all bridges come back up after a reboot.

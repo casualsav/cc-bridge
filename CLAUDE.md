@@ -19,12 +19,12 @@ Follow **[`off-mcp/INSTALL.md`](off-mcp/INSTALL.md)** step by step — it is wri
 2. Add the marketplace + enable the plugin + add the `SessionStart` daemon hook in
    `~/.claude/settings.json`, and append `off-mcp/CLAUDE.md` to `~/.claude/CLAUDE.md`.
 3. Have the user restart Claude Code once → the daemon comes up fully configured.
-4. Launch a bridge session with `ccb` (auto-added shell function, `scripts/setup-alias.sh`;
-   `claude-tg` is a kept back-compat alias for it): `ccb [--pin slack|discord] [slot] [account]` sets
+4. Launch a bridge session with `cc-bridge` (auto-added shell function, `scripts/setup-alias.sh`;
+   `claude-tg` is a kept back-compat alias for it): `cc-bridge [--pin slack|discord] [slot] [account]` sets
    the per-channel tmux pane markers `@telegram`/`@slack`/`@discord` (valued by instance slot; a
    `--pin slack|discord` flag additionally stamps that channel's pin option), optionally launches
    under `CLAUDE_CONFIG_DIR="$HOME/.claude-<account>"`, then runs
-   `claude --allow-dangerously-skip-permissions` — bypass is switchable on demand. `ccb 2` routes to
+   `claude --allow-dangerously-skip-permissions` — bypass is switchable on demand. `cc-bridge 2` routes to
    a second bridge (multi-instance: `off-mcp/INSTALL.md`) — the daemon finds the pane automatically.
 
 Don't guess config values — ask. The only non-automatable bits are getting the token from the
