@@ -1726,6 +1726,7 @@ async function auxRelayTick(): Promise<void> {
           if (r.text.length < 200 && /\b(hit your|used \d+% of your) [\w-]+ limit\b/i.test(r.text)) continue
           const targets = await outboundTargetsFor(pane)
           for (const t of targets) await deliverRelayReply(pane, t, r.text)   // self-heals a deleted topic (recreate + resend)
+          void maybeShipFooter(pane)   // opt-in ship buttons when the turn dirtied the tree — focused-loop parity
         }
       } catch { /* transient (tmux/transcript) — retry next tick */ }
     })()))
@@ -7248,6 +7249,12 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
     // another user's 700 folder) — the session then runs in the wrong place, stuck on a trust
     // prompt for $HOME. Refuse up front instead; the caller's error reply names the folder.
     accessSync(dir, fsConstants.R_OK | fsConstants.X_OK)
+    // A cold box (fresh reboot: daemon back via keepalive, tmux server never started) has no tmux
+    // server, and `new-window` can't create one — every spawn, dead-session revival included, would
+    // dead-end until someone SSHes in to run ccb. Bootstrap a detached session once, with the ccb
+    // launcher's session name + geometry so the REPL renders the same.
+    try { await exec('tmux', ['has-session'], { timeout: 2000 }) }
+    catch { await exec('tmux', ['new-session', '-d', '-s', 'claude-tg', '-x', '220', '-y', '50', '-c', dir], { timeout: 5000 }) }
     if (agent === 'claude') ensureFolderTrusted(dir, account)   // Claude-specific trust store (per account); Codex uses launch sandbox policy
     // A brand-new Claude session (not --resume/-c) inherits the focused session's model/effort/mode.
     let inherit = agent === 'claude' && !extra && focus.activePaneId
@@ -9647,6 +9654,13 @@ async function handleInbound(
   // unrecognised case is re-confirmed after a short settle so a transient between-turns repaint
   // doesn't trip it.
   const effPane = targetPane ?? focus.activePaneId
+  // DM analogue of the topic revival above: no live session → revive the last one and deliver,
+  // instead of the old buffer + "start one in tmux" hint. Off-MCP only; an MCP shim session
+  // (activeShim) still delivers through emitInbound's socket path below.
+  if (!effPane && !isTopicMode() && !focus.activeShim && TRANSCRIPT_OUTBOUND) {
+    void reviveDmSession(ctx, params)
+    return
+  }
   if (effPane) {
     if (await guardArmedBashBox(effPane, chat_id, typeof inThreadId === 'number' ? inThreadId : undefined)) return
     let cap = await capturePane(effPane).catch(() => '')
@@ -9714,6 +9728,66 @@ async function reviveTopicSession(ctx: Context, sid: string, params: InboundPara
     slowMsg: '⚠️ Session revived but didn\'t reach a prompt in time — resend your message once it settles.',
     logVerb: 'revived',
   })
+}
+
+// DM analogue of reviveTopicSession — non-topic mode drives one session and has no topic
+// bookkeeping, so revival never reached it (the "🕳️ start one in tmux" dead-end after a reboot or
+// crash). Respawn `-c` in the last session's folder (continues that cwd's most recent conversation
+// — i.e. the one that died), wait for the prompt, then deliver the message(s) that woke it.
+// Shares revivalQueues under a reserved key so messages arriving mid-boot join this boot's
+// delivery. No revival anchor (fresh install, folder gone) → the old buffer + hint path.
+const DM_REVIVAL_KEY = '@dm'
+async function reviveDmSession(ctx: Context, params: InboundParams): Promise<void> {
+  const queued = revivalQueues.get(DM_REVIVAL_KEY)
+  if (queued) { queued.push(params); return }   // revival already booting — deliver with it
+  // Seed the queue BEFORE the first await (the rescan) — a second message arriving mid-rescan must
+  // join this boot, not start a duplicate one. Every exit path below drains it.
+  revivalQueues.set(DM_REVIVAL_KEY, [params])
+  const drain = (deliver: (p: InboundParams) => void) => { for (const p of revivalQueues.get(DM_REVIVAL_KEY) ?? []) deliver(p) }
+  try {
+    // A live pane may simply not be adopted yet (the message raced the discovery sweep, e.g. right
+    // after a daemon restart) — rescan and deliver normally rather than spawning a duplicate.
+    await discoverPanes().catch(() => {})
+    if (focus.activePaneId) { drain(emitInbound); return }
+    const dir = lastSessionCwd()
+    if (!dir) { drain(bufferEvent); void hintNoSession(params); return }
+    const notice = await ctx.reply('💤 The session was down — reviving it; your message will be delivered.', { parse_mode: 'HTML' }).catch(() => null)
+    const edit = async (text: string) => {
+      if (notice) await channel.editText({ chatId: String(notice.chat.id), messageId: String(notice.message_id) }, text).catch(() => {})
+      else await ctx.reply(text, { parse_mode: 'HTML' }).catch(() => {})
+    }
+    // Revive the agent that last wrote in this folder — a Codex rollout file newest means the dead
+    // session was Codex, and `-c` maps to its resume-last launch.
+    const tf = resolveTranscript(dir, allProjectsDirs())
+    const kind: AgentKind = tf && basename(tf).startsWith('rollout-') ? 'codex' : 'claude'
+    const pane = await spawnSession(dir, '-c', undefined, MAIN_ACCOUNT, kind)
+    if (!pane) {
+      drain(bufferEvent)   // keep the messages — they replay when a session next appears
+      await edit(`❌ Couldn't revive the session in <code>${escapeHtml(dir)}</code> — your message is buffered.`)
+      return
+    }
+    const deadline = Date.now() + 90_000
+    while (Date.now() < deadline) {
+      await sleep(2000)
+      const cap = await capturePane(pane).catch(() => '')
+      if (cap && onNormalPrompt(cap)) {
+        // registerSpawnedPane adopted the pane at spawn (nothing else held focus in DM), so
+        // emitInbound drains through the normal focused inject path, watcher-paused and serialized.
+        const q = revivalQueues.get(DM_REVIVAL_KEY) ?? []
+        for (const p of q) emitInbound(p)
+        await edit(`✅ Session back up — ${q.length > 1 ? `your ${q.length} messages were delivered` : 'your message was delivered'}.`)
+        process.stderr.write(`daemon: revived DM session in ${dir} (pane ${pane}) — delivered ${q.length} queued message(s)\n`)
+        return
+      }
+      // First-run onboarding / post-update interstitials wedge a fresh pane short of the prompt —
+      // dismiss them like bootTopicSession does rather than waiting out the full 90s.
+      if (cap) {
+        const stage = classifyOnboarding(cap)
+        if (stage) await driveAuxOnboarding(pane, stage).catch(() => {})
+      }
+    }
+    await edit('⚠️ Session revived but didn\'t reach a prompt in time — resend your message once it settles.')
+  } finally { revivalQueues.delete(DM_REVIVAL_KEY) }
 }
 
 // Shared dead-topic boot: spawn a claude pane bound to `sid`'s topic (extra='-c' continues the
