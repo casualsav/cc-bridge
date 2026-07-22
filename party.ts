@@ -14,6 +14,12 @@ import { STATE_DIR, readJsonFile, writeJsonFile } from './common.ts'
 
 export const PARTY_FILE = join(STATE_DIR, 'party.json')
 
+// Kill switch (mirrors agent.ts CODEX_ENABLED): the Switchboard / party bus is DISABLED for release.
+// The code below is retained but gated off at every user-facing surface — the bus verbs, the pinned-card
+// roster line, party digests, the settings toggle, and the periodic sweep. Flip to `true` to re-enable
+// (and restore the `off-mcp/CLAUDE.md` convention section — see `docs/switchboard.disabled.md`).
+export const SWITCHBOARD_ENABLED = false
+
 // Consecutive agent→agent asks with no intervening human message before the daemon stops delivering
 // and posts "⏸ agents paused". Two bots answering each other forever is the money-fire failure mode;
 // a human message resets the count to 0. (Budget-based floor control is a later phase.)

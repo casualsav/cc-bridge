@@ -103,6 +103,7 @@ import { initUpdates, startUpdate, bridgeVersion, claudeBin, claudeVersion, swee
 import { formatChannelBlock } from './inbound.ts'
 import { initQueue, readLater, writeLater, sweepLaterQueues, LATER_SWEEP_MS } from './queue.ts'
 import {
+  SWITCHBOARD_ENABLED,
   createPending, getPending, removePending, putPending, listPending, markInjected, expirePending,
   recordAgentAsk, resetHops, HOP_LIMIT,
   resolveEndpoint, nameForEndpoint, normalizeEndpointName, confineRef, sharedDir, ensureSharedDir, appendLedger, tailLedger,
@@ -2273,7 +2274,7 @@ async function partyRosterLine(): Promise<string | null> {
   // Display toggle (☎️ Switchboard, default on): when off the roster line vanishes from the pinned
   // card. Checked BEFORE the memo read so flipping the toggle takes effect on the very next card
   // render, not up to ROSTER_TTL_MS later. tg ask/answer/roster + per-topic avatars are untouched.
-  if (loadAccess().switchboard === false) return null
+  if (!SWITCHBOARD_ENABLED || loadAccess().switchboard === false) return null
   const now = Date.now()
   if (now - rosterCache.at < ROSTER_TTL_MS) return rosterCache.line
   let line: string | null = null
@@ -3712,6 +3713,9 @@ async function audioInboundText(
 // ---- Tool call handling ----
 
 
+// Switchboard/party-bus verbs — gated off wholesale while SWITCHBOARD_ENABLED is false (see party.ts).
+const SWITCHBOARD_VERBS = new Set(['ask', 'answer', 'post', 'roster', 'history', 'shared'])
+
 async function handleCall(
   name: string,
   args: Record<string, unknown>,
@@ -3720,6 +3724,10 @@ async function handleCall(
 ): Promise<void> {
   try {
     let text: string
+    // Switchboard (party bus) is disabled behind SWITCHBOARD_ENABLED: its agent↔agent verbs are inert.
+    if (!SWITCHBOARD_ENABLED && SWITCHBOARD_VERBS.has(name)) {
+      write({ t: 'result', id, ok: false, text: 'switchboard is disabled' }); return
+    }
     switch (name) {
       case 'reply': {
         const { chat: chat_id, thread } = await resolveTarget(args)
@@ -6636,7 +6644,7 @@ function settingsText(): string {
     `🧹 <code>/clear</code> approval — <b>${a.confirmReset === false ? 'off' : 'on'}</b>\n` +
     `🔀 Limit failover — <b>${a.limitFailover === true ? 'on' : 'off'}</b>\n` +
     (isTopicMode() ? `📂 Base folder — <b>${escapeHtml(baseFolderFull())}</b>\n` : '') +
-    (isTopicMode() ? `☎️ Switchboard — <b>${a.switchboard === false ? 'off' : 'on'}</b>\n` : '') +
+    (isTopicMode() && SWITCHBOARD_ENABLED ? `☎️ Switchboard — <b>${a.switchboard === false ? 'off' : 'on'}</b>\n` : '') +
     `\nTap to change:`
 }
 // The rich (Bot API 10.1) rendering of the same panel: a native two-column table instead of ragged
@@ -6658,7 +6666,7 @@ function settingsMarkdown(): string {
     ['🧹 /clear approval', a.confirmReset === false ? 'off' : 'on'],
     ['🔀 Limit failover', a.limitFailover === true ? 'on' : 'off'],
     ...(isTopicMode() ? [['📂 Base folder', baseRowValue()] as [string, string]] : []),
-    ...(isTopicMode() ? [['☎️ Switchboard', a.switchboard === false ? 'off' : 'on'] as [string, string]] : []),
+    ...(isTopicMode() && SWITCHBOARD_ENABLED ? [['☎️ Switchboard', a.switchboard === false ? 'off' : 'on'] as [string, string]] : []),
   ]
   const help = [
     '⚡ <b>Batch allow</b> — 2+ permission prompts in one turn offer “Allow all this turn”.',
@@ -6669,7 +6677,7 @@ function settingsMarkdown(): string {
     '🧹 <b>/clear approval</b> — /clear and /new ask for a Yes/No tap first.',
     '🔀 <b>Limit failover</b> — a usage-limited account hands off to the next one.',
     ...(isTopicMode() ? ['📂 <b>Base folder</b> — new forum topics are created as subfolders of this folder.'] : []),
-    ...(isTopicMode() ? ['☎️ <b>Switchboard</b> — the live roster line on the pinned card. Sessions can still hand work to each other with <code>tg ask</code>.'] : []),
+    ...(isTopicMode() && SWITCHBOARD_ENABLED ? ['☎️ <b>Switchboard</b> — the live roster line on the pinned card. Sessions can still hand work to each other with <code>tg ask</code>.'] : []),
   ].join('<br>')
   return `## ⚙️ Settings\n\n` +
     `| Setting | State |\n|---|---|\n` +
@@ -6719,7 +6727,7 @@ function settingsKeyboard(): InlineKeyboard {
     ['🎙️', 'set:voice'], ['🔊', 'set:tts'], ['💬', 'set:replymode'], ['📌', 'set:pin'],
     ['🧷', 'defmode:panel'], ['🧹', 'set:confirmreset'], ['🔀', 'set:failover'],
     ...(isTopicMode() ? [['📂', 'set:base'] as [string, string]] : []),
-    ...(isTopicMode() ? [['☎️', 'set:switchboard'] as [string, string]] : []),
+    ...(isTopicMode() && SWITCHBOARD_ENABLED ? [['☎️', 'set:switchboard'] as [string, string]] : []),
   ]
   const kb = new InlineKeyboard()
   buttons.forEach(([emoji, data], i) => {
@@ -10826,7 +10834,7 @@ if (FORCE_PANE) {
 // pin is created when nothing's active, so this is cheap when idle.
 setInterval(() => void updateSessionPin(), 10_000)
 // Party line (party-bus P1): deliver queued agent↔agent asks to idle targets + expire stale ones.
-setInterval(() => void sweepParty(), LATER_SWEEP_MS).unref()
+if (SWITCHBOARD_ENABLED) setInterval(() => void sweepParty(), LATER_SWEEP_MS).unref()
 
 // Stuck-screen watchdog (party-bus v2): the actionable backstop for a pane wedged at ANY screen no
 // detector parses (a novel confirmation, an arbitrary select), so a session never hangs silently (the
