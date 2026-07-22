@@ -401,6 +401,7 @@ class MirrorCard {
   // Restored ids await a verdict on the first tick (resume vs cap) — needs the live transcript,
   // so it can't be decided at load time.
   private pendingRestore: { anchor: string | null; body: string; sawRealBody?: boolean } | null = null
+  private restoreRetries = 0
 
   constructor(private opts: {
     resolvePane: () => string | null
@@ -444,8 +445,12 @@ class MirrorCard {
       process.stderr.write(`daemon: resumed live mirror card across restart (pane ${paneId})\n`)
       return
     }
+    // No pane or no transcript on this tick is a cold-boot resolution blip, not a verdict — capping
+    // here orphans the card and the still-running turn then opens a duplicate beneath it (the
+    // "same thoughts message N times" bug: one dup per mid-turn deploy). Defer up to ~30s.
+    if ((!paneId || !file) && this.restoreRetries++ < 20) { this.pendingRestore = saved; return }
     await this.capWithCachedBody(saved.body)
-    process.stderr.write('daemon: capped orphaned mirror card from previous run\n')
+    process.stderr.write(`daemon: capped orphaned mirror card from previous run (pane ${paneId ?? '-'} vs ${this.paneId ?? '-'}, anchor ${anchor?.slice(0, 8) ?? '-'} vs ${saved.anchor?.slice(0, 8) ?? '-'})\n`)
   }
 
   private reset(): void {
