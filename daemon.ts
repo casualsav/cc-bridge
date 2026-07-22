@@ -10826,8 +10826,13 @@ function transcriptFreshWithin(file: string, ms: number): boolean {
 // opted into bypass by launching that way, so auto-accept: digit 2 jumps the highlight to
 // "Yes, I accept" (it opens on "No, exit"), then Enter submits after a gap (batched, the Ink
 // TUI swallows the Enter). Per-pane dedup so a slow repaint can't double-fire.
+// Must be the LIVE dialog, not its text quoted in ordinary output (a pasted transcript of this
+// screen once made the daemon type "2" into a healthy session): require the numbered option
+// lines at line start with the ❯ highlight marker on one of them, and no REPL prompt below.
 function isBypassWarning(cap: string): boolean {
-  return /bypass permissions mode/i.test(cap) && /yes, i accept/i.test(cap) && /no, exit/i.test(cap)
+  return /bypass permissions mode/i.test(cap) &&
+    /^\s*❯?\s*1\.\s*No, exit\b/mi.test(cap) && /^\s*❯?\s*2\.\s*Yes, I accept\b/mi.test(cap) &&
+    /^\s*❯\s*[12]\./m.test(cap) && !onNormalPrompt(cap)
 }
 const bypassAcceptAt = new Map<string, number>()
 async function autoAcceptBypassWarning(pane: string, now: number): Promise<void> {
