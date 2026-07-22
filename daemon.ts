@@ -4822,17 +4822,20 @@ async function runReadout(t: CommandTarget, chatId: string, kind: 'cost' | 'cont
 function startHelpText(paired: boolean): string {
   const guide =
     `✦ <b>cc-bridge</b>\n` +
-    `Claude Code in your pocket — drive every session from Telegram.\n\n` +
-    `💬 Send text, 📷 photos, 📎 files, 🎙️ voice — the reply comes straight back\n` +
-    `👥 <code>/bind</code> a forum group — each session gets its own topic (📁 folder or 🌿 worktree); your main session lives in General (📌 <code>/claim</code>)\n` +
-    `📍 Pinned status card — Model · Effort · Mode · Compact · Context · Cost in one tap\n` +
-    `🧠 <code>/model</code> · 🕹️ <code>/mode</code> · 🎚️ <code>/effort</code> (<code>/effort default max</code> pins it for every new/resumed session) · 📡 <code>/stream</code> live activity\n` +
-    `✅ Permission taps — ⚡ or allow all this turn\n` +
-    `📝 <code>/diff</code> + Commit · Push · PR buttons · 🐙 GitHub sign-in from /settings (gh installs itself)\n` +
-    `🔎 <code>/find</code> any session · ⏰ <code>/queue @reset</code> · 🔁 <code>/cron</code> jobs (full cron exprs) · ⏪ <code>/rewind</code>\n` +
-    `♾️ <code>/loop</code> a goal until its check passes · 💸 <code>/budget</code> cap · 👤 <code>/account</code>\n` +
-    `🔊 Voice replies (free local TTS) · ✏️ edit your last message to correct it\n` +
-    `🛑 <code>/stop</code> to interrupt · ⚙️ <code>/settings</code> for the rest\n\n` +
+    `Drive your Claude Code sessions from Telegram. Send text, photos, files, or voice — replies arrive with native formatting, and permission prompts become tap-to-approve buttons.\n\n` +
+    `<code>/bind</code> — forum group → one topic per session\n` +
+    `<code>/stream</code> — live activity feed: thoughts · actions · off\n` +
+    `<code>/mode</code> · <code>/model</code> · <code>/effort</code> — permissions, model, reasoning\n` +
+    `<code>/diff</code> — review changes, then Commit · Push · PR\n` +
+    `<code>/find</code> — search every session's conversation\n` +
+    `<code>/queue</code> · <code>/cron</code> · <code>/loop</code> — defer, schedule, repeat\n` +
+    `<code>/resume</code> · <code>/launch</code> — pick up a session or start fresh\n` +
+    `<code>/rewind</code> — undo a turn's changes\n` +
+    `<code>/terminal</code> — view the raw session screen\n` +
+    `<code>/voice</code> — replies as voice notes too\n` +
+    `<code>/budget</code> — daily spend cap\n` +
+    `<code>/stop</code> — interrupt the current task\n` +
+    `<code>/settings</code> — everything else\n\n` +
     `🖼️ Save &amp; set this image as my profile picture`
 
   if (paired) return guide
