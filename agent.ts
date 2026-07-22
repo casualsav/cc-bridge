@@ -14,6 +14,12 @@ export type AgentLaunch = {
 
 export const AGENT_PANE_OPT = '@tg_agent'
 
+// ── Codex kill switch ──────────────────────────────────────────────────────
+// Codex support is currently disabled — the bridge runs Claude Code only.
+// Flip to true to restore /agent codex, the new-topic Codex option, and
+// failover-to-Codex; every Codex code path is kept intact and gated on this.
+export const CODEX_ENABLED = false
+
 export function normalizeAgent(value: unknown): AgentKind {
   return typeof value === 'string' && value.toLowerCase() === 'codex' ? 'codex' : 'claude'
 }

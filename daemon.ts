@@ -29,7 +29,7 @@ import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detec
 import { resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, currentTurnActivity, currentTurnTokens, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, agentSessionId, agentForSession } from './agent-transcript.ts'
 import {
   AGENT_PANE_OPT, agentExitKeys, agentInterruptKeys, agentLabel, agentResetCommand, agentSubmitKeys,
-  codexLaunchCommand, normalizeAgent, shellQuote, type AgentKind,
+  CODEX_ENABLED, codexLaunchCommand, normalizeAgent, shellQuote, type AgentKind,
 } from './agent.ts'
 import {
   HARNESS_ENV_KEYS, HARNESS_PANE_OPT, claudeHarnessEnv, harnessLabel, normalizeHarnessProfile, normalizeProxyBaseUrl, parseHarnessSpec,
@@ -2818,6 +2818,7 @@ function maybeWarnContext(pct: number | null): void {
 // ChatGPT-plan hit shares usageHitState['main'] with claude-main and can't be cleanly disentangled.
 let lastCodexHealthError = ''
 function codexAvailable(): boolean {
+  if (!CODEX_ENABLED) return false
   const readiness = currentCodexReadiness()
   if (readiness.state === 'sandbox-blocked') {
     if (readiness.reason !== lastCodexHealthError) {
@@ -4874,7 +4875,12 @@ bot.command('agent', async ctx => {
   if (!arg) {
     const kind = await paneAgentKind(paneId)
     const harness = kind === 'claude' ? `\nInference: <b>${escapeHtml(harnessLabel(await paneHarnessProfile(paneId)))}</b>` : ''
-    await ctx.reply(`Active terminal: <b>${agentLabel(kind)}</b>${harness}\n\nStart one with <code>/agent claude</code> or <code>/agent codex</code>. Inside Claude Code, use <code>/harness</code> to swap inference providers.`, { parse_mode: 'HTML' })
+    const starters = CODEX_ENABLED ? '<code>/agent claude</code> or <code>/agent codex</code>' : '<code>/agent claude</code>'
+    await ctx.reply(`Active terminal: <b>${agentLabel(kind)}</b>${harness}\n\nStart one with ${starters}. Inside Claude Code, use <code>/harness</code> to swap inference providers.`, { parse_mode: 'HTML' })
+    return
+  }
+  if (arg === 'codex' && !CODEX_ENABLED) {
+    await ctx.reply('Codex support is disabled in this build.')
     return
   }
   if (arg !== 'claude' && arg !== 'codex') {
@@ -6713,7 +6719,7 @@ function failoverPanelText(): string {
   // Codex model/effort — shown only when Codex is set up; governs failover-to-Codex AND every Codex
   // session. Names the CODEX_MODEL env as the source when no in-app choice is set, so it's discoverable.
   const readiness = currentCodexReadiness()
-  const codexCfg = readiness.state === 'ready'
+  const codexCfg = !CODEX_ENABLED ? '' : readiness.state === 'ready'
     ? `\n\n✳️ <b>Codex · ✅ ready</b> — model <b>${escapeHtml(loadAccess().codexModel || (process.env.CODEX_MODEL ? `${process.env.CODEX_MODEL} (env)` : 'default'))}</b> · ` +
       `effort <b>${escapeHtml(codexLaunchEffort() ?? 'default')}</b>\n<i>Used when a session fails over to Codex (and for every Codex session).</i>`
     : readiness.state === 'login-missing'
@@ -6852,7 +6858,8 @@ const sendHealth = async (ctx: Context): Promise<void> => {
   const laterN = Object.values(later).reduce((n, items) => n + items.length, 0)
   lines.push(`🗒 Queues: ${laterN} queued · ${scheduledCount()} scheduled · ${revivalQueues.size} reviving`)
   const codexHealth = currentCodexReadiness()
-  const codexHealthText = codexHealth.state === 'ready' ? '✅ ready'
+  const codexHealthText = !CODEX_ENABLED ? '⏸ disabled'
+    : codexHealth.state === 'ready' ? '✅ ready'
     : codexHealth.state === 'login-missing' ? '⚠️ not logged in'
     : codexHealth.state === 'sandbox-blocked' ? '❌ sandbox blocked'
     : 'not installed/configured'
@@ -7677,6 +7684,7 @@ async function repoForDir(dir: string): Promise<string | null> {
 // forum-topic-created event AND the typed-folder reply, so a typed repo path gets the same offer.
 function topicCreateKeyboard(thread: number, dir: string, repo: string | null, agent: AgentKind): InlineKeyboard {
   const kb = new InlineKeyboard()
+  if (CODEX_ENABLED) kb
     .text(`${agent === 'claude' ? '●' : '○'} Claude Code`, `tcagent:claude:${thread}`)
     .text(`${agent === 'codex' ? '●' : '○'} Codex`, `tcagent:codex:${thread}`).row()
   if (dir) {
@@ -8884,6 +8892,10 @@ bot.on('callback_query:data', async ctx => {
     if (!(await cbAuth(ctx))) return
     const agent = tcAgent[1] as AgentKind
     const thread = Number(tcAgent[2])
+    if (agent === 'codex' && !CODEX_ENABLED) {
+      await ctx.answerCallbackQuery({ text: 'Codex support is disabled in this build.' }).catch(() => {})
+      return
+    }
     if (!setTopicCreateAgent(thread, agent)) {
       await ctx.answerCallbackQuery({ text: 'This topic setup expired.' }).catch(() => {})
       return
