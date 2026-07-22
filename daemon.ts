@@ -9257,7 +9257,15 @@ bot.on('callback_query:data', async ctx => {
       if (card?.optionKind === 'ink')
         await withPaneInjection(pane, async () => { await navigateDown(pane, i); await sendKeys(pane, ['Enter']); await waitForSettle(pane, 300, 5000) })
       else
-        await paneKeys(pane, [String(i + 1), 'Enter'], [300, 5000])
+        // Digit and Enter must be separate presses with a gap: batched in one send-keys, Ink
+        // TUIs take the digit as a selection move and swallow the Enter (same coalescing that
+        // forces navigateDown to space out its Downs) — the option gets picked but never submitted.
+        await withPaneInjection(pane, async () => {
+          await sendKeys(pane, [String(i + 1)])
+          await sleep(250)
+          await sendKeys(pane, ['Enter'])
+          await waitForSettle(pane, 300, 5000)
+        })
     } else if (kMatch) {
       const key = kMatch[1]
       if (!['Enter', 'Escape', 'Up', 'Down', '1', '2', '3'].includes(key)) {
@@ -10813,6 +10821,26 @@ async function paneDisplayName(pane: string): Promise<string> {
 function transcriptFreshWithin(file: string, ms: number): boolean {
   try { return Date.now() - statSync(file).mtimeMs < ms } catch { return false }
 }
+// The "WARNING: Claude Code running in Bypass Permissions mode" accept screen shown by a
+// `--allow-dangerously-skip-permissions` launch (every ccb start/relaunch). The user already
+// opted into bypass by launching that way, so auto-accept: digit 2 jumps the highlight to
+// "Yes, I accept" (it opens on "No, exit"), then Enter submits after a gap (batched, the Ink
+// TUI swallows the Enter). Per-pane dedup so a slow repaint can't double-fire.
+function isBypassWarning(cap: string): boolean {
+  return /bypass permissions mode/i.test(cap) && /yes, i accept/i.test(cap) && /no, exit/i.test(cap)
+}
+const bypassAcceptAt = new Map<string, number>()
+async function autoAcceptBypassWarning(pane: string, now: number): Promise<void> {
+  if (now - (bypassAcceptAt.get(pane) ?? 0) < 8000) return
+  bypassAcceptAt.set(pane, now)
+  process.stderr.write(`daemon: auto-accepting bypass-permissions warning on pane ${pane}\n`)
+  await withPaneInjection(pane, async () => {
+    await sendKeys(pane, ['2'])
+    await sleep(250)
+    await sendKeys(pane, ['Enter'])
+    await waitForSettle(pane, 300, 5000)
+  }).catch(() => {})
+}
 async function sweepStuckPanes(): Promise<void> {
   const panes = new Set<string>()
   for (const t of listTopics()) { if (t.closed) continue; const p = await paneForSession(t.sessionId).catch(() => null); if (p) panes.add(p) }
@@ -10821,6 +10849,7 @@ async function sweepStuckPanes(): Promise<void> {
   const now = Date.now()
   for (const pane of panes) {
     const cap = await capturePane(pane).catch(() => '')
+    if (cap && isBypassWarning(cap)) { await autoAcceptBypassWarning(pane, now); continue }
     // The onboarding auto-driver owns a not-yet-onboarded pane while it shows a known setup screen
     // (theme/trust/enter) — don't race it with a card. A pre-REPL wedge on an UNKNOWN screen
     // (classifyOnboarding null) stays eligible: that's a target case.
