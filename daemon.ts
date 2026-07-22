@@ -4886,10 +4886,21 @@ bot.command('agent', async ctx => {
       : 'Usage: <code>/agent claude</code>', { parse_mode: 'HTML' })
     return
   }
-  const kind = arg as AgentKind
+  await launchAgentSession(ctx, arg as AgentKind, paneId)
+})
+
+// Shared by /agent and /launch: spawn a fresh session in the target pane's folder (else the
+// last session's folder). DM mode needs the single slot free; topic mode gets a sibling topic.
+async function launchAgentSession(ctx: Context, kind: AgentKind, paneId: string | null): Promise<void> {
   if (!isTopicMode() && focus.activePaneId) {
-    await ctx.reply('A session is already running in this DM. End it first, or /bind a forum group to run Claude and Codex side by side.')
-    return
+    // Only a pane with a LIVE agent process blocks the DM slot. A tracked pane whose Claude
+    // exited (sitting at a shell, or gone entirely) is free — refusing there wedged the DM:
+    // "a session is already running" while the screen showed bash.
+    const cmd = await paneCommand(focus.activePaneId).catch(() => '')
+    if (cmd === 'claude' || cmd === 'codex') {
+      await ctx.reply('A session is already running in this DM. End it first, or /bind a forum group to run several side by side.')
+      return
+    }
   }
   const dir = (paneId ? await paneCwd(paneId).catch(() => null) : null) ?? lastSessionCwd() ?? homedir()
   const sid = isTopicMode() ? genSessionId() : undefined
@@ -4898,6 +4909,14 @@ bot.command('agent', async ctx => {
     ? `🚀 Starting <b>${agentLabel(kind)}</b> in <code>${escapeHtml(dir)}</code>${isTopicMode() ? ' — it gets its own topic shortly.' : '.'}`
     : `❌ Couldn’t start ${agentLabel(kind)} in <code>${escapeHtml(dir)}</code>. Check the CLI path/login and daemon log.`,
     { parse_mode: 'HTML' })
+}
+
+// The menu-visible "get me a session" command — what `cc-bridge` does from a terminal, minus the
+// terminal: bootstraps tmux if needed and spawns Claude Code in the last-used folder.
+bot.command('launch', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  const { paneId } = await targetPaneOf(ctx)
+  await launchAgentSession(ctx, 'claude', paneId)
 })
 
 // Keep Claude Code as the harness while swapping only its inference provider. This is intentionally
@@ -11196,6 +11215,7 @@ void (async () => {
               { command: 'queue', description: 'Queue a prompt for idle, or @reset for the 5h rollover (/queue clear)' },
               { command: 'loop', description: 'Run a goal on repeat until a check passes (/loop <goal> · status · stop)' },
               { command: 'md', description: 'Create a .md file in the working dir, then reply with its contents' },
+              { command: 'launch', description: 'Start a fresh Claude Code session (revives a dead pane)' },
               { command: 'resume', description: 'Resume a recent session (lists them with times)' },
               { command: 'find', description: 'Search all sessions\' conversations (/find <text>)' },
               { command: 'files', description: 'Browse / download / edit files in this session\'s folder' },
