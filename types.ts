@@ -22,7 +22,7 @@ export type Access = {
   chunkMode?: 'length' | 'newline'
   renderMarkdown?: boolean
   terminalMirror?: 'tools' | 'digest' | 'off' | boolean
-  terminalMirrorFooter?: boolean   // show the live "✻ <verb>… · <elapsed> · <tokens>" footer on the mirror card in TOPIC mode too (default off — DM always shows it; topics historically suppressed it as noise under plain HTML, now legible under rich messages)
+  terminalMirrorFooter?: boolean   // show the live "✻ <verb>… · <elapsed> · <tokens>" footer on the mirror card (default off everywhere — the default card opens on the "Thinking…" placeholder instead; was always-on in DM until 0.3.110)
   sessionPin?: boolean
   shipButtons?: boolean   // post Diff/Commit/Push/PR buttons after turns that dirty the git tree (default off)
   budgetDaily?: number    // daily $ cap — warn at 80% and 100% of summed session cost growth (unset = off)

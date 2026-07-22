@@ -108,14 +108,12 @@ const MIRROR_THOUGHTS = 10   // thoughts mode: max thoughts shown (oldest falls 
 // scrape is reliable in steady state: after the first sync of a burst the footer carries a real verb
 // (tokens follow once the CLI emits a count); a capture that misses the spinner line holds the last
 // good value rather than regressing, so only the opening beat of a turn shows a generic "Working…".
-// DM always shows it; topics are opt-in via terminalMirrorFooter (see footerOn).
 const MIRROR_FOOTER_ENABLED = true
-// The live "✻ <verb>…" spinner footer (the "Clauding" working indicator) is shown in DM always. In a
-// group/forum it was historically suppressed — the animated line read as noise against the plainer
-// PLAIN-HTML group formatting. Now that the card is a rich_message (wider + cleaner) the footer is
-// legible in topics too, so it's opt-in there via `terminalMirrorFooter` (default off; DM unaffected).
-// isTopicMode() is the whole-bridge mode, which is also the kind of chat this card targets.
-const footerOn = (): boolean => MIRROR_FOOTER_ENABLED && (!isTopicMode() || deps.loadAccess().terminalMirrorFooter === true)
+// The live "✻ <verb>…" spinner footer (the "Clauding" working indicator) is opt-in EVERYWHERE via
+// `terminalMirrorFooter` (default off). It used to be always-on in DM (with topics opt-in), which
+// left DM on the animated clauding line long after topics moved to the calmer "Thinking…"
+// placeholder card — DM now gets the same default treatment.
+const footerOn = (): boolean => MIRROR_FOOTER_ENABLED && deps.loadAccess().terminalMirrorFooter === true
 
 // ---- Card persistence across daemon restarts ----
 // Card message ids used to live ONLY in process memory, so every deploy/crash mid-turn orphaned
@@ -459,7 +457,7 @@ class MirrorCard {
   // The placeholder body shown from the instant a message lands until the turn produces real content.
   // It's the reliable "your message landed, Claude is on it" signal — a real message, immune to
   // Telegram's per-chat typing competition (only one bot-typing renders per chat, so a busy parallel
-  // session steals the indicator). Topic mode only: in DM the footer-only card already covers this.
+  // session steals the indicator). Skipped only with the opt-in footer, whose footer-only card covers it.
   private thinkingBody(verb: string): string { return `<i>${escapeHtml(verb)}…</i>` }
 
   // The live Thinking… placeholder body: the CLI's current spinner verb (tracks "Thinking",
@@ -518,9 +516,9 @@ class MirrorCard {
     }
     if (body == null) {
       // Bodyless phase of a live turn — this is only reached when the card should be open (working,
-      // or the daemon's thinking-pending signal is set). In topic mode there's no footer to signal
-      // the turn started, so fill it with the Thinking… placeholder so the card opens immediately on
-      // receipt. DM keeps its footer-only card (footerOn), unchanged.
+      // or the daemon's thinking-pending signal is set). By default there's no footer to signal the
+      // turn started, so fill it with the Thinking… placeholder so the card opens immediately on
+      // receipt. The opt-in footer keeps its footer-only card instead.
       if (!done && !footerOn()) { this.body = await this.renderThinking(paneId); return true }
       return false
     }
@@ -608,7 +606,7 @@ class MirrorCard {
     // doesn't flicker back to "Thinking…".
     const forceThinking = !working && !this.sawRealBody
     const hasBody = await this.syncBody(false, forceThinking)
-    if (!hasBody && !(footerOn() && this.startedAt)) return   // footer-only card still opens in the pre-tool thinking phase (DM)
+    if (!hasBody && !(footerOn() && this.startedAt)) return   // opt-in footer: footer-only card still opens in the pre-tool thinking phase
 
     if (this.msgIds.size === 0) {
       if (Date.now() < this.createCooldownUntil) return   // a recent create 429'd — don't hammer a fresh post every tick
