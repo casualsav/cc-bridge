@@ -4815,28 +4815,60 @@ async function runReadout(t: CommandTarget, chatId: string, kind: 'cost' | 'cont
 
 // ---- Telegram bot handlers ----
 
-// The single welcome + feature guide, shown by /start (and the hidden /help alias). Pairing
-// steps only appear when the sender isn't paired yet.
-// Concise welcome (the photo caption for /start), flagship features only. Kept under Telegram's
-// 1024-char caption limit — the parsed text, not the HTML tags, counts toward it.
-function startHelpText(paired: boolean): string {
-  const guide =
-    `✦ <b>cc-bridge</b>\n` +
-    `Drive your Claude Code sessions from Telegram. Send text, photos, files, or voice — replies arrive with native formatting, and permission prompts become tap-to-approve buttons.\n\n` +
-    `<code>/bind</code> — forum group → one topic per session\n` +
-    `<code>/stream</code> — live activity feed: thoughts · actions · off\n` +
-    `<code>/mode</code> · <code>/model</code> · <code>/effort</code> — permissions, model, reasoning\n` +
-    `<code>/diff</code> — review changes, then Commit · Push · PR\n` +
-    `<code>/find</code> — search every session's conversation\n` +
-    `<code>/queue</code> · <code>/cron</code> · <code>/loop</code> — defer, schedule, repeat\n` +
-    `<code>/resume</code> · <code>/launch</code> — pick up a session or start fresh\n` +
-    `<code>/rewind</code> — undo a turn's changes\n` +
-    `<code>/terminal</code> — view the raw session screen\n` +
-    `<code>/voice</code> — replies as voice notes too\n` +
-    `<code>/budget</code> — daily spend cap\n` +
-    `<code>/stop</code> — interrupt the current task\n` +
-    `<code>/settings</code> — everything else\n\n` +
+// The welcome shown by /start (and the hidden /help alias): a short photo caption (kept well
+// under Telegram's 1024-char caption limit — parsed text, not HTML tags, counts) followed by
+// the full command reference as a second message (text limit 4096). Pairing steps only appear
+// when the sender isn't paired yet.
+function startCaptionText(): string {
+  return `✦ <b>cc-bridge</b>\n` +
+    `Drive your Claude Code sessions from Telegram. Send text, photos, files, or voice — replies arrive with native formatting, and permission prompts become tap-to-approve buttons. The full command reference follows below.\n\n` +
     `🖼️ Save &amp; set this image as my profile picture`
+}
+
+function commandReferenceText(paired: boolean): string {
+  const guide =
+    `<b>Sessions</b>\n` +
+    `<code>/launch</code> — start a fresh Claude Code session\n` +
+    `<code>/resume</code> — pick up a recent session\n` +
+    `<code>/new</code> — new session · <code>/clear</code> — reset the conversation in place\n` +
+    `<code>/restart</code> — restart &amp; resume (or <code>/restart all</code>)\n` +
+    `<code>/rename</code> — rename the current session\n` +
+    `<code>/agent</code> — choose the terminal agent\n` +
+    `<code>/harness</code> — use any configured provider inside Claude Code\n` +
+    `<code>/account</code> — Claude accounts: list · add · remove\n` +
+    `<code>/handoff</code> — write handoff.md for a fresh agent · <code>/continue</code> — resume from it\n\n` +
+    `<b>Groups &amp; topics</b>\n` +
+    `<code>/bind</code> — turn a forum group into a session hub, one topic per session\n` +
+    `<code>/claim</code> — attach your main session to the General topic\n` +
+    `<code>/base</code> — folder new topics are created under\n\n` +
+    `<b>Steering</b>\n` +
+    `<code>/mode</code> — permission mode (<code>/plan</code> · <code>/auto</code> · <code>/bypass</code>)\n` +
+    `<code>/model</code> — switch model\n` +
+    `<code>/effort</code> — reasoning effort (<code>/effort default &lt;level&gt;</code> pins it)\n` +
+    `<code>/stream</code> — live activity feed: thoughts · actions · off\n` +
+    `<code>/stop</code> — interrupt the current task\n` +
+    `<code>/back</code> — escape a stuck editor or pager\n` +
+    `<code>/cancel</code> — clear a stuck force-reply prompt\n` +
+    `<code>/rewind</code> — checkpoint picker: undo a turn's changes\n` +
+    `<code>/compact</code> — compact the conversation to free up context\n\n` +
+    `<b>Inspect</b>\n` +
+    `<code>/status</code> — re-post the status pin\n` +
+    `<code>/diff</code> — uncommitted changes, with Commit · Push · PR buttons\n` +
+    `<code>/terminal</code> — dump the last N terminal lines (default 40)\n` +
+    `<code>/find</code> — search all sessions' conversations\n` +
+    `<code>/files</code> — browse · download · edit files in the session's folder\n` +
+    `<code>/cost</code> · <code>/context</code> · <code>/usage</code> — spend, tokens, limits\n` +
+    `<code>/md</code> — create a .md file in the working dir, then show it\n\n` +
+    `<b>Automation</b>\n` +
+    `<code>/queue</code> — run a prompt when idle (<code>@reset</code> = the 5h rollover)\n` +
+    `<code>/cron</code> — schedule messages (full cron expressions)\n` +
+    `<code>/loop</code> — repeat a goal until its check passes\n` +
+    `<code>/budget</code> — daily $ cap with warnings\n\n` +
+    `<b>Bridge</b>\n` +
+    `<code>/settings</code> — mirror · pin · MCP · voice · GitHub sign-in\n` +
+    `<code>/voice</code> — voice-note replies on/off\n` +
+    `<code>/doctor</code> — bridge readiness check\n` +
+    `<code>/update</code> — update the bridge or Claude itself`
 
   if (paired) return guide
   return guide +
@@ -4848,7 +4880,7 @@ async function sendStartHelp(ctx: Context): Promise<void> {
   const gated = dmCommandGate(ctx)
   if (!gated) return
   const paired = gated.access.allowFrom.includes(gated.senderId)
-  const caption = startHelpText(paired)
+  const caption = startCaptionText()
   // remove_keyboard clears the retired docked control bar for anyone who still has it stuck on
   // their client (its taps would otherwise leak the button label to Claude as a plain message).
   // Lead with the bundled crab asset — doubles as the suggested bot profile picture.
@@ -4857,6 +4889,7 @@ async function sendStartHelp(ctx: Context): Promise<void> {
   } catch {
     await ctx.reply(caption, { parse_mode: 'HTML', link_preview_options: { is_disabled: true }, reply_markup: { remove_keyboard: true } })   // asset missing (stale cache) → text only
   }
+  await ctx.reply(commandReferenceText(paired), { parse_mode: 'HTML', link_preview_options: { is_disabled: true } })
 }
 
 // Phone keyboards autocapitalize the first letter, so a typed "/context" arrives as
