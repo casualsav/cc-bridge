@@ -120,7 +120,12 @@ function pruneOldVersions(keep = 3): string[] {
 }
 
 function killBridge(): void {
-  for (const pat of ['telegram/[^/]*/daemon\\.ts', 'telegram/[^/]*/watchdog\\.ts']) {
+  // The last two patterns catch a daemon/watchdog run BY HAND from a source checkout (`cd
+  // ~/cc-bridge && bun daemon.ts`). Field failure: such a rogue survives the cache-path kills,
+  // keeps polling the bot token, and 409-fights every freshly launched cache daemon — both the
+  // update's restart AND its rollback then "fail to come up" while the user keeps talking to the
+  // untouched checkout process.
+  for (const pat of ['telegram/[^/]*/daemon\\.ts', 'telegram/[^/]*/watchdog\\.ts', 'cc-bridge/daemon\\.ts', 'cc-bridge/watchdog\\.ts']) {
     try { execSync(`pkill -f '${pat}'`) } catch {}
   }
   for (const f of [SOCKET, join(STATE_DIR, 'daemon.pid'), join(STATE_DIR, 'watchdog.pid')]) {
