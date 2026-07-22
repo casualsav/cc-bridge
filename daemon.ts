@@ -4815,81 +4815,98 @@ async function runReadout(t: CommandTarget, chatId: string, kind: 'cost' | 'cont
 
 // ---- Telegram bot handlers ----
 
-// The welcome shown by /start (and the hidden /help alias): a short photo caption (kept well
-// under Telegram's 1024-char caption limit — parsed text, not HTML tags, counts) followed by
-// the full command reference as a second message (text limit 4096). Pairing steps only appear
-// when the sender isn't paired yet.
-function startCaptionText(): string {
-  return `✦ <b>cc-bridge</b>\n` +
-    `Drive your Claude Code sessions from Telegram. Send text, photos, files, or voice — replies arrive with native formatting, and permission prompts become tap-to-approve buttons. The full command reference follows below.\n\n` +
-    `🖼️ Save &amp; set this image as my profile picture`
+// The welcome shown by /start (and the hidden /help alias): ONE Bot API 10.1 rich message — intro
+// + a <details> collapsible per command group — with the flat parse_mode-HTML rendering as the
+// fallback (any rich error). Both renderings build from START_COMMAND_GROUPS so they can't drift.
+// Pairing steps only appear when the sender isn't paired yet.
+const START_INTRO =
+  `✦ <b>cc-bridge</b> — drive your Claude Code sessions from Telegram. Send text, photos, files, ` +
+  `or voice — replies arrive with native formatting, and permission prompts become tap-to-approve buttons.`
+const START_PAIR_FOOTER =
+  `🔗 <b>Not paired?</b> DM me for a 6-char code, then run ` +
+  `<code>/telegram:access pair &lt;code&gt;</code> in Claude Code.`
+const START_COMMAND_GROUPS: Array<[title: string, lines: string[]]> = [
+  ['Sessions', [
+    `<code>/launch</code> — start a fresh Claude Code session`,
+    `<code>/resume</code> — pick up a recent session`,
+    `<code>/new</code> — new session · <code>/clear</code> — reset the conversation in place`,
+    `<code>/restart</code> — restart &amp; resume (or <code>/restart all</code>)`,
+    `<code>/rename</code> — rename the current session`,
+    `<code>/agent</code> — choose the terminal agent`,
+    `<code>/harness</code> — use any configured provider inside Claude Code`,
+    `<code>/account</code> — Claude accounts: list · add · remove`,
+    `<code>/handoff</code> — write handoff.md for a fresh agent · <code>/continue</code> — resume from it`,
+  ]],
+  ['Groups &amp; topics', [
+    `<code>/bind</code> — turn a forum group into a session hub, one topic per session`,
+    `<code>/claim</code> — attach your main session to the General topic`,
+    `<code>/base</code> — folder new topics are created under`,
+  ]],
+  ['Steering', [
+    `<code>/mode</code> — permission mode (<code>/plan</code> · <code>/auto</code> · <code>/bypass</code>)`,
+    `<code>/model</code> — switch model`,
+    `<code>/effort</code> — reasoning effort (<code>/effort default &lt;level&gt;</code> pins it)`,
+    `<code>/stream</code> — live activity feed: thoughts · actions · off`,
+    `<code>/stop</code> — interrupt the current task`,
+    `<code>/back</code> — escape a stuck editor or pager`,
+    `<code>/cancel</code> — clear a stuck force-reply prompt`,
+    `<code>/rewind</code> — checkpoint picker: undo a turn's changes`,
+    `<code>/compact</code> — compact the conversation to free up context`,
+  ]],
+  ['Inspect', [
+    `<code>/status</code> — re-post the status pin`,
+    `<code>/diff</code> — uncommitted changes, with Commit · Push · PR buttons`,
+    `<code>/terminal</code> — dump the last N terminal lines (default 40)`,
+    `<code>/find</code> — search all sessions' conversations`,
+    `<code>/files</code> — browse · download · edit files in the session's folder`,
+    `<code>/cost</code> · <code>/context</code> · <code>/usage</code> — spend, tokens, limits`,
+    `<code>/md</code> — create a .md file in the working dir, then show it`,
+  ]],
+  ['Automation', [
+    `<code>/queue</code> — run a prompt when idle (<code>@reset</code> = the 5h rollover)`,
+    `<code>/cron</code> — schedule messages (full cron expressions)`,
+    `<code>/loop</code> — repeat a goal until its check passes`,
+    `<code>/budget</code> — daily $ cap with warnings`,
+  ]],
+  ['Bridge', [
+    `<code>/settings</code> — mirror · pin · MCP · voice · GitHub sign-in`,
+    `<code>/voice</code> — voice-note replies on/off`,
+    `<code>/doctor</code> — bridge readiness check`,
+    `<code>/update</code> — update the bridge or Claude itself`,
+  ]],
+]
+
+// Rich html carrier: a bare "\n" between inline siblings collapses to a space, so the intro/footer
+// break with <br>; <details> blocks self-break, so "\n" around them is enough (see mirror.ts).
+function startRichHtml(paired: boolean): string {
+  const sections = START_COMMAND_GROUPS
+    .map(([title, lines]) => `<details><summary><b>${title}</b></summary>${lines.join('<br>')}</details>`)
+    .join('\n')
+  return `${START_INTRO}\n${sections}${paired ? '' : `\n${START_PAIR_FOOTER}`}`
 }
 
-function commandReferenceText(paired: boolean): string {
-  const guide =
-    `<b>Sessions</b>\n` +
-    `<code>/launch</code> — start a fresh Claude Code session\n` +
-    `<code>/resume</code> — pick up a recent session\n` +
-    `<code>/new</code> — new session · <code>/clear</code> — reset the conversation in place\n` +
-    `<code>/restart</code> — restart &amp; resume (or <code>/restart all</code>)\n` +
-    `<code>/rename</code> — rename the current session\n` +
-    `<code>/agent</code> — choose the terminal agent\n` +
-    `<code>/harness</code> — use any configured provider inside Claude Code\n` +
-    `<code>/account</code> — Claude accounts: list · add · remove\n` +
-    `<code>/handoff</code> — write handoff.md for a fresh agent · <code>/continue</code> — resume from it\n\n` +
-    `<b>Groups &amp; topics</b>\n` +
-    `<code>/bind</code> — turn a forum group into a session hub, one topic per session\n` +
-    `<code>/claim</code> — attach your main session to the General topic\n` +
-    `<code>/base</code> — folder new topics are created under\n\n` +
-    `<b>Steering</b>\n` +
-    `<code>/mode</code> — permission mode (<code>/plan</code> · <code>/auto</code> · <code>/bypass</code>)\n` +
-    `<code>/model</code> — switch model\n` +
-    `<code>/effort</code> — reasoning effort (<code>/effort default &lt;level&gt;</code> pins it)\n` +
-    `<code>/stream</code> — live activity feed: thoughts · actions · off\n` +
-    `<code>/stop</code> — interrupt the current task\n` +
-    `<code>/back</code> — escape a stuck editor or pager\n` +
-    `<code>/cancel</code> — clear a stuck force-reply prompt\n` +
-    `<code>/rewind</code> — checkpoint picker: undo a turn's changes\n` +
-    `<code>/compact</code> — compact the conversation to free up context\n\n` +
-    `<b>Inspect</b>\n` +
-    `<code>/status</code> — re-post the status pin\n` +
-    `<code>/diff</code> — uncommitted changes, with Commit · Push · PR buttons\n` +
-    `<code>/terminal</code> — dump the last N terminal lines (default 40)\n` +
-    `<code>/find</code> — search all sessions' conversations\n` +
-    `<code>/files</code> — browse · download · edit files in the session's folder\n` +
-    `<code>/cost</code> · <code>/context</code> · <code>/usage</code> — spend, tokens, limits\n` +
-    `<code>/md</code> — create a .md file in the working dir, then show it\n\n` +
-    `<b>Automation</b>\n` +
-    `<code>/queue</code> — run a prompt when idle (<code>@reset</code> = the 5h rollover)\n` +
-    `<code>/cron</code> — schedule messages (full cron expressions)\n` +
-    `<code>/loop</code> — repeat a goal until its check passes\n` +
-    `<code>/budget</code> — daily $ cap with warnings\n\n` +
-    `<b>Bridge</b>\n` +
-    `<code>/settings</code> — mirror · pin · MCP · voice · GitHub sign-in\n` +
-    `<code>/voice</code> — voice-note replies on/off\n` +
-    `<code>/doctor</code> — bridge readiness check\n` +
-    `<code>/update</code> — update the bridge or Claude itself`
-
-  if (paired) return guide
-  return guide +
-    `\n\n🔗 <b>Not paired?</b> DM me for a 6-char code, then run ` +
-    `<code>/telegram:access pair &lt;code&gt;</code> in Claude Code.`
+function startHelpText(paired: boolean): string {
+  const sections = START_COMMAND_GROUPS
+    .map(([title, lines]) => `<b>${title}</b>\n${lines.join('\n')}`)
+    .join('\n\n')
+  return `${START_INTRO}\n\n${sections}${paired ? '' : `\n\n${START_PAIR_FOOTER}`}`
 }
 
 async function sendStartHelp(ctx: Context): Promise<void> {
   const gated = dmCommandGate(ctx)
   if (!gated) return
   const paired = gated.access.allowFrom.includes(gated.senderId)
-  const caption = startCaptionText()
   // remove_keyboard clears the retired docked control bar for anyone who still has it stuck on
   // their client (its taps would otherwise leak the button label to Claude as a plain message).
-  // Lead with the bundled crab asset — doubles as the suggested bot profile picture.
+  const kb = { remove_keyboard: true as const }
+  const chat = String(ctx.chat!.id)
+  const thread = ctx.message?.message_thread_id
   try {
-    await ctx.replyWithPhoto(new InputFile(join(import.meta.dir, 'assets', 'claude-tg.jpg')), { caption, parse_mode: 'HTML', reply_markup: { remove_keyboard: true } })
-  } catch {
-    await ctx.reply(caption, { parse_mode: 'HTML', link_preview_options: { is_disabled: true }, reply_markup: { remove_keyboard: true } })   // asset missing (stale cache) → text only
-  }
-  await ctx.reply(commandReferenceText(paired), { parse_mode: 'HTML', link_preview_options: { is_disabled: true } })
+    const m = await sendRichMessage(TOKEN!, chat, { html: startRichHtml(paired) }, { messageThreadId: thread, replyMarkup: kb })
+    noteMsg(chat, thread, m.message_id)
+    return
+  } catch (e) { process.stderr.write(`daemon: rich /start send failed, falling back to HTML: ${e}\n`) }
+  await ctx.reply(startHelpText(paired), { parse_mode: 'HTML', link_preview_options: { is_disabled: true }, reply_markup: kb }).catch(() => {})
 }
 
 // Phone keyboards autocapitalize the first letter, so a typed "/context" arrives as
