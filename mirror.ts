@@ -495,6 +495,16 @@ class MirrorCard {
     // concluded turn (the "idle session shows a stale, still-active card on a new message" bug).
     if (forceThinking && !done && !footerOn()) { this.body = await this.renderThinking(paneId); return true }
     const file = paneId ? await deps.resolveTranscriptForPane(paneId).catch(() => null) : null
+    // Keep the card's identity (pane + turn anchor) CURRENT while the turn runs, not frozen at
+    // open: a card opened off the inbound thinking-kick captures them cold (pane unresolved,
+    // anchor still the PREVIOUS turn — the new user message isn't in the transcript yet). A
+    // restart then can never match the resume check and caps → a duplicate card per mid-turn
+    // restart. Each heavy sync persists via the caller, so the snapshot stays truthful.
+    if (!done) {
+      if (paneId && this.msgIds.size > 0 && !this.paneId) this.paneId = paneId
+      const a = file ? turnAnchorUuid(file) : null
+      if (a) this.anchor = a
+    }
 
     // The capture feeds the digest body and the footer's verb/tokens scrape — with the footer
     // disabled, thoughts/actions don't need it at all (saves a tmux spawn per sync).
