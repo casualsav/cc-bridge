@@ -111,7 +111,7 @@ import {
   type PartyEndpoint, type PartyPending,
 } from './party.ts'
 import { formatAskBlock, formatAnswerBlock, formatDigestBlock, formatRosterLine, type RosterAgent } from './party-block.ts'
-import { laneForChat, bindLane } from './dm-lanes.ts'
+import { laneForChat, bindLane, chatForLaneSession } from './dm-lanes.ts'
 import { runHermes, type HermesEndpoint, type HermesTask } from './hermes-driver.ts'
 import {
   initLoop, sweepLoops, LOOP_SWEEP_MS, startLoopWizard, handleLoopWizardReply, wizardSidFor,
@@ -1664,9 +1664,17 @@ function startRelayLoop(): void {
 // OWN auto-spawned session, keyed by chat id — the DM analog of a forum topic keyed by thread id.
 // "Multi-pane mode" = the concurrent aux relay + per-pane prompt detection below must fire for topic
 // mode OR active DM lanes (both run several off-MCP panes at once, addressed via outboundTargetsFor).
-// Tolerant of a hand-edited prefs.json where the value came through as the STRING "true" (a common
-// JSON slip) — the feature is enabled by either the boolean or that string; anything else is off.
-function dmLanesOn(): boolean { const v = loadAccess().dmLanes as unknown; return v === true || v === 'true' }
+// Per-user DM lanes: AUTO-ON when ≥2 Telegram ids are allowlisted (multi-user), OFF for a single user —
+// so single-user installs are byte-for-byte unchanged and multi-user installs isolate with zero config.
+// An explicit dmLanes:true/false (boolean or hand-edited string) overrides the heuristic either way.
+// Moot in topic mode (the lane branch is !isTopicMode()-gated) — only DM-mode installs are affected.
+function dmLanesOn(): boolean {
+  const a = loadAccess()
+  const v = a.dmLanes as unknown
+  if (v === true || v === 'true') return true
+  if (v === false || v === 'false') return false
+  return a.allowFrom.length >= 2
+}
 function multiPaneMode(): boolean { return isTopicMode() || dmLanesOn() }
 
 // Forum-topics parallel relay (phase 3b). The focused pane is handled by the rich relayLoopTick
@@ -1907,10 +1915,8 @@ if (INSTANCE_ID !== '1') process.stderr.write(`daemon: bridge instance id = ${IN
 // line instead of manifesting silently as "every user shares one session".
 {
   const dmLanesRaw = (loadAccess() as { dmLanes?: unknown }).dmLanes
-  const state = dmLanesOn() ? 'ENABLED (per-user DM lanes)'
-    : (dmLanesRaw === undefined || dmLanesRaw === false) ? 'off (default)'
-    : 'IGNORED — value must be boolean true or the string "true"'
-  process.stderr.write(`daemon: dmLanes=${JSON.stringify(dmLanesRaw)} (prefs: ${PREFS_FILE}) → ${state}\n`)
+  const n = loadAccess().allowFrom.length
+  process.stderr.write(`daemon: DM lanes ${dmLanesOn() ? 'ENABLED' : 'DISABLED'} (dmLanes=${JSON.stringify(dmLanesRaw)}, ${n} allowlisted DM id(s); auto-on at ≥2) — prefs: ${PREFS_FILE}\n`)
 }
 
 // A `claude remote-control` instance (a local session being driven from claude.ai web/mobile)
@@ -9753,13 +9759,27 @@ async function handleInbound(
       else void generalAnchorLost(chat_id)
     }
   } else if (dmLanesOn() && !isTopicMode() && TRANSCRIPT_OUTBOUND && !focus.activeShim) {
-    // Per-user DM lanes: route the sender to THEIR own lane's pane (never the shared focus), and
-    // auto-spawn a fresh isolated session the first time an allowlisted user DMs (or when their lane's
-    // pane has died). Off by default → single-user installs never enter this branch.
+    // Per-user DM lanes: route the sender to THEIR own lane's pane (never the shared focus).
     const lane = laneForChat(chat_id)
-    const lanePane = lane ? await paneForSession(lane.sessionId).catch(() => null) : null
-    if (lanePane) targetPane = lanePane
-    else { void ensureDmLane(ctx, chat_id, params); return }
+    if (lane) {
+      const lanePane = await paneForSession(lane.sessionId).catch(() => null)
+      if (lanePane) targetPane = lanePane
+      else { void ensureDmLane(ctx, chat_id, params); return }   // lane's pane died → respawn + deliver
+    } else {
+      // First DM from this user, no lane yet. ADOPT the already-running focused session as this user's
+      // lane (so the owner who launched a session keeps driving it instead of being orphaned onto a
+      // fresh one) — but only when it's a LIVE agent AND not already another user's lane. Otherwise
+      // (no live session, or it's already claimed by an earlier user) spawn a fresh isolated lane.
+      const focusSid = focus.activePaneId ? await sessionForPane(focus.activePaneId).catch(() => null) : null
+      const focusCmd = focus.activePaneId ? await paneCommand(focus.activePaneId).catch(() => '') : ''
+      // dmLaneBooting.size === 0 closes the race where two users DM a fresh box at once: while ANY lane is
+      // mid-spawn, `focus` may be that just-spawned, not-yet-bound pane — adopting it would merge the two
+      // users. During a boot, spawn a fresh lane instead of adopting.
+      if (focusSid && (focusCmd === 'claude' || focusCmd === 'codex') && !chatForLaneSession(focusSid) && dmLaneBooting.size === 0) {
+        bindLane(chat_id, focusSid, Date.now())
+        targetPane = focus.activePaneId
+      } else { void ensureDmLane(ctx, chat_id, params); return }
+    }
   }
   // Captured-screen guard: if the destination pane is on a screen the bridge can't drive — an
   // external editor/pager (the "ctrl+g into Vim" trap), or an UNRECOGNISED prompt the detectors
