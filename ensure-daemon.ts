@@ -10,7 +10,7 @@
 // each watchdog keeps its own daemon alive between sessions / after a crash.
 import net from 'node:net'
 import { spawn, spawnSync } from 'node:child_process'
-import { readdirSync, openSync, existsSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs'
+import { readdirSync, openSync, existsSync, readFileSync, readlinkSync, writeFileSync, unlinkSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, basename } from 'node:path'
 
@@ -68,6 +68,76 @@ if (!daemonPath) { process.stderr.write('ensure-daemon: daemon.ts not found in p
 const daemonDir = dirname(daemonPath)
 const watchdogPath = join(daemonDir, 'watchdog.ts')
 const CURRENT_VER = basename(daemonDir)   // the newest cache version — what THIS ensure-daemon runs
+
+// ---- Foreign-process reap ----
+// The plugin cache is the ONLY sanctioned home for a running bridge. A daemon/watchdog launched by
+// hand from a source checkout (`cd ~/cc-bridge && bun daemon.ts`) — or adopted into an external
+// supervisor by an eager installing agent — survives /update's cache-path restarts, keeps polling
+// the bot token, and 409-fights every cache daemon (field case: a Hermes-supervised checkout daemon
+// wedged /update twice). Every bridge-shaped process whose source dir is NOT the current cache
+// version dir is killed before the instances are ensured, so mingling self-heals on the next
+// SessionStart. A bridge tree is identified by `.claude-plugin/plugin.json` next to the script
+// (checkout and cache both have it; an unrelated project's daemon.ts won't) and an EXACT
+// daemon.ts/watchdog.ts basename (never slack-daemon.ts or ensure-daemon.ts). Relative script
+// paths resolve via /proc/<pid>/cwd (Linux); elsewhere such a process is left alone. Watchdogs die
+// first so a reaped daemon isn't resurrected mid-sweep.
+type BridgeProc = { pid: number; script: string; kind: 'daemon' | 'watchdog' }
+function bridgeProcesses(): BridgeProc[] {
+  let out = ''
+  try { out = spawnSync('ps', ['-A', '-o', 'pid=,args='], { encoding: 'utf8' }).stdout ?? '' } catch { return [] }
+  const found: BridgeProc[] = []
+  for (const line of out.split('\n')) {
+    const m = line.match(/^\s*(\d+)\s+(.*)$/)
+    if (!m) continue
+    const pid = Number(m[1])
+    if (pid === process.pid) continue
+    // The script must be bun's FIRST non-flag argument — `bun build daemon.ts` / `bun test …`
+    // are tooling (a kill there aborts an in-flight /update build), and `--selftest` is the
+    // updater's own gate running from a temp build dir. Neither is a live bridge.
+    const sm = m[2].match(/\bbun\b\s+(?:-\S+\s+)*(\S*(?:daemon|watchdog)\.ts)(?:\s|$)/)
+    if (!sm || /\s--selftest\b/.test(m[2])) continue
+    let script = sm[1]
+    const kind = basename(script) === 'daemon.ts' ? 'daemon' : basename(script) === 'watchdog.ts' ? 'watchdog' : null
+    if (!kind) continue
+    if (!script.startsWith('/')) {
+      try { script = join(readlinkSync(`/proc/${pid}/cwd`), script) } catch { continue }
+    }
+    found.push({ pid, script, kind })
+  }
+  return found
+}
+
+function reapForeignBridges(): void {
+  const procs = bridgeProcesses()
+  for (const kind of ['watchdog', 'daemon'] as const) {
+    for (const p of procs) {
+      if (p.kind !== kind) continue
+      const dir = dirname(p.script)
+      if (dir === daemonDir) continue                                            // the canonical build — keep
+      if (!existsSync(join(dir, '.claude-plugin', 'plugin.json'))) continue      // not a bridge tree — leave unrelated software alone
+      try {
+        process.kill(p.pid, 'SIGKILL')
+        process.stderr.write(`ensure-daemon: reaped foreign bridge ${kind} (pid ${p.pid}, ${p.script}) — the bridge runs ONLY from the plugin cache (${daemonDir})\n`)
+      } catch {}
+    }
+  }
+}
+
+// `--status`: read-only report of every bridge-shaped process — source path, version, and flags for
+// anything foreign or stale. For agents to confirm a clean single-source setup post-install.
+if (process.argv.includes('--status')) {
+  const procs = bridgeProcesses()
+  process.stdout.write(`canonical: ${daemonDir} (v${CURRENT_VER})\n`)
+  if (!procs.length) process.stdout.write('no bridge processes running\n')
+  for (const p of procs) {
+    const dir = dirname(p.script)
+    const flag = dir === daemonDir ? 'ok'
+      : existsSync(join(dir, '.claude-plugin', 'plugin.json')) ? '⚠️ FOREIGN (would be reaped)'
+      : '⚠️ unrecognized'
+    process.stdout.write(`${p.kind}\tpid ${p.pid}\t${p.script}\t${flag}\n`)
+  }
+  process.exit(0)
+}
 
 // The cache version a live watchdog is running, read from its command line (cross-platform via ps;
 // no /proc dependency). The watchdog's argv carries its full path `…/telegram/<ver>/watchdog.ts`,
@@ -170,6 +240,7 @@ async function ensureInstance(stateDir: string, log: number): Promise<void> {
 const dirs = instanceDirs()   // every configured (token-bearing) instance dir; all exist
 if (dirs.length === 0) process.exit(0)   // nothing configured yet → nothing to launch
 
+reapForeignBridges()   // kill checkout-run / stale-version bridge processes before ensuring the canonical pair
 ensureDeps(openSync(join(dirs[0], 'daemon.log'), 'a'))   // deps are shared (cache dir) — bootstrap once
 for (const dir of dirs) {
   await ensureInstance(dir, openSync(join(dir, 'daemon.log'), 'a'))   // per-instance log in its state dir

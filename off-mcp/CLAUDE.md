@@ -8,6 +8,9 @@ messages with tg react.
 
 Reply = final text block, auto-delivered. Be terse: no preamble, no recap.
 
+The daemon self-manages from the plugin cache (SessionStart hook + watchdog): never launch
+`daemon.ts` yourself, from a checkout, or under any process manager.
+
 Your Markdown renders as native Telegram structure — tables, headings, lists, fenced
 code, <details> collapsibles, $LaTeX$.
 

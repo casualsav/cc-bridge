@@ -186,6 +186,25 @@ process.stderr.write = ((chunk: string | Uint8Array, ...args: unknown[]): boolea
 // works in the build dir with no configured bot; the token lock + .env persist are skipped under it.
 const SELFTEST = process.argv.includes('--selftest')
 
+// Canonical-source guard: the sanctioned bridge runs from the PLUGIN CACHE, launched by
+// ensure-daemon (SessionStart hook / watchdog). A daemon hand-run from a source checkout — or
+// adopted into an external supervisor by an installing agent — survives /update restarts and
+// 409-fights the cache daemon for the bot token (field case: a Hermes-supervised checkout daemon).
+// When a cache install exists it owns the token: refuse to start from anywhere else unless
+// ALLOW_DEV_DAEMON=1 (deliberate dev runs). No cache install (contributor running a bare checkout)
+// → allowed, with a pointer to the sanctioned path.
+if (!SELFTEST && !import.meta.dir.startsWith(join(homedir(), '.claude', 'plugins', 'cache') + sep)) {
+  const cacheInstalled = existsSync(join(homedir(), '.claude', 'plugins', 'cache', 'cc-bridge', 'telegram'))
+  process.stderr.write(
+    `telegram daemon: running from a NON-CACHE path (${import.meta.dir}). The canonical bridge runs ` +
+    `from the plugin cache via ensure-daemon (SessionStart hook); don't launch or supervise it by hand.\n`,
+  )
+  if (cacheInstalled && process.env.ALLOW_DEV_DAEMON !== '1') {
+    process.stderr.write('telegram daemon: a plugin-cache install exists and owns this bridge — refusing to start (set ALLOW_DEV_DAEMON=1 to override for development).\n')
+    process.exit(1)
+  }
+}
+
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN ?? (SELFTEST ? 'SELFTEST:0' : undefined)
 
 if (!TOKEN) {

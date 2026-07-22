@@ -18,6 +18,15 @@ the single restart in Step 3 brings everything up already configured.
   parser/formatter unit suite (Markdown→HTML, transcript reading, prompt detection) — no
   token, network, or running daemon needed — and should report all green in well under a
   second. If Bun is missing or a test fails here, fix that before touching the user's config.
+- **⚠️ Never launch or supervise the daemon yourself.** The ONLY supported start path is the
+  `SessionStart` hook → `ensure-daemon.ts`, which runs the daemon **from the plugin cache** and
+  keeps it alive via its own watchdog. Do NOT run `bun daemon.ts` from this checkout, and do NOT
+  register the daemon in any external process manager — no systemd unit of your own, no pm2, no
+  agent-framework "managed background process" (Hermes-style). A checkout-run or
+  externally-supervised daemon survives `/update` restarts and fights the cache daemon for the bot
+  token (perpetual 409s); ensure-daemon now reaps such processes on sight, and the daemon itself
+  refuses to start from a non-cache path when a cache install exists. The checkout is for reading,
+  editing, and `bun run deploy` only.
 
 ## 0.5. Pre-flight: remove the old costly MCP version (if present)
 This bridge is the off-MCP successor to the upstream **`telegram@claude-plugins-official`**
@@ -396,6 +405,9 @@ idempotent) or `bun install` in the cache dir manually.
 **Run these checks yourself — do NOT hand the user a terminal checklist. The only thing to ask
 the user is to message the bot (last paragraph).**
 ```sh
+# one-shot health report: every bridge process, its source path, and a ⚠️ FOREIGN flag on anything
+# not running from the current cache version dir (a checkout-run daemon, a stale version, …):
+bun "$(ls -d ~/.claude/plugins/cache/cc-bridge/telegram/*/ | sort -V | tail -1)ensure-daemon.ts" --status
 pgrep -fa daemon.ts        # one daemon — note the path: it must be the NEWEST version dir
 tail -5 ~/.claude/channels/telegram/daemon.log   # want "polling as @<bot>", NOT an EACCES crash
 # running build == newest cache version (catches the stale-cache trap from §0.6):
