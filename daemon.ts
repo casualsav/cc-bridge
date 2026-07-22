@@ -11335,7 +11335,7 @@ void (async () => {
           // Announce a crash recovery once, only after we're actually connected.
           if (crashRestart) {
             crashRestart = false
-            for (const chat_id of loadAccess().allowFrom) void channel.sendText(chat_id, '♻️ Daemon restarted after a crash.').catch(() => {})
+            for (const chat_id of loadAccess().allowFrom) void channel.sendText(chat_id, '♻️ Daemon restarted').catch(() => {})
           }
           const bridgeCommands = [
               { command: 'start', description: 'Welcome + everything this bot can do' },
