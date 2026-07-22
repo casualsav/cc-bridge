@@ -10,6 +10,7 @@
 // Flow: fetch the marketplace clone → if behind, build a fresh cache dir from it (copy + deps +
 // type-check) → swap it in → restart via ensure-daemon → health-check the new daemon → on failure
 // roll back to the previous dir. Progress + result are DM'd to <chat_id>. `check` only reports.
+import net from 'node:net'
 import { execFileSync, execSync, spawn } from 'node:child_process'
 import {
   chmodSync, cpSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync,
@@ -29,7 +30,10 @@ const MP = join(HOME, '.claude', 'plugins', 'marketplaces', MKT_ID)
 const CACHE_BASE = join(HOME, '.claude', 'plugins', 'cache', MKT_ID, 'telegram')
 const BACKUP_BASE = join(HOME, '.claude', 'plugins', 'cache', MKT_ID, 'telegram-backups')
 const SEMVER = /^\d+\.\d+\.\d+$/
-const HEALTH_TIMEOUT_MS = 45_000
+// Generous: a loaded box cold-compiling daemon.ts through watchdog → daemon can overrun a short
+// window, and a false negative here triggers a rollback (and, before the stale-cache guard, a
+// permanent "already up to date" wedge).
+const HEALTH_TIMEOUT_MS = 90_000
 
 const [, , chatId, modeArg, seedMsgId] = process.argv
 const checkOnly = modeArg === 'check'
@@ -130,7 +134,21 @@ function launchBridge(dir: string): void {
   child.unref()
 }
 
-// Watch the log (from a byte offset captured before restart) for the daemon's "polling as" line.
+// The daemon binds its control socket during boot (before polling) — a live connect is direct
+// proof the daemon process is up, immune to log-offset/rotation quirks.
+function socketAlive(): Promise<boolean> {
+  return new Promise(resolve => {
+    const s = net.createConnection(SOCKET)
+    s.on('connect', () => { s.destroy(); resolve(true) })
+    s.on('error', () => resolve(false))
+    setTimeout(() => { s.destroy(); resolve(false) }, 1500)
+  })
+}
+
+// Watch for the daemon coming up: the log's "polling as" line (from a byte offset captured before
+// restart) OR a live control socket. Either alone false-negatived in the field — the log check on
+// offset/timing quirks, and both builds of an update then "fail" identically, forcing a needless
+// rollback — so accept whichever signal appears first.
 async function waitHealthy(offset: number): Promise<boolean> {
   const deadline = Date.now() + HEALTH_TIMEOUT_MS
   while (Date.now() < deadline) {
@@ -140,6 +158,7 @@ async function waitHealthy(offset: number): Promise<boolean> {
       const tail = buf.subarray(Math.min(offset, buf.length)).toString('utf8')
       if (/telegram daemon: polling as @/.test(tail)) return true
     } catch {}
+    if (await socketAlive()) return true
   }
   return false
 }
@@ -220,11 +239,28 @@ async function main(): Promise<void> {
     remoteSha = git(['rev-parse', `origin/${branch}`])
   } catch (e) { await notify(`❌ Update: git fetch failed.\n<code>${String(e).slice(0, 300)}</code>`); return }
 
-  if (localSha === remoteSha) { await progress(`✅ Already up to date (<code>${shortVer(localSha)}</code>).`); return }
+  // "Up to date" needs BOTH the clone at the remote tip AND a cache build from that same commit. A
+  // failed update resets the clone (step 2) and its rollback then deletes the new cache dir — so
+  // comparing shas alone wedged every post-rollback retry into "✅ Already up to date" forever while
+  // the daemon kept running the old build. Cache identity: the dir's .gitref when present (written
+  // by every updater build), else dir-name == clone version (a plugin-install cache has no .gitref).
+  const cacheCurrent = (() => {
+    const cur = newestSemverDir()
+    if (!cur) return false
+    let ref = ''
+    try { ref = readFileSync(join(CACHE_BASE, cur, '.gitref'), 'utf8').trim() } catch {}
+    if (ref) return ref === remoteSha
+    let cloneVer = ''
+    try { cloneVer = JSON.parse(readFileSync(join(MP, '.claude-plugin', 'plugin.json'), 'utf8')).version ?? '' } catch {}
+    return !cloneVer || cur === cloneVer
+  })()
+  if (localSha === remoteSha && cacheCurrent) { await progress(`✅ Already up to date (<code>${shortVer(localSha)}</code>).`); return }
 
   const ahead = (() => { try { return git(['rev-list', '--count', `${localSha}..${remoteSha}`]) } catch { return '?' } })()
   if (checkOnly) {
-    await progress(`⬆️ Update available: <code>${shortVer(localSha)}</code> → <code>${shortVer(remoteSha)}</code> (${ahead} commit(s)).\nSend /update to apply.`)
+    await progress(localSha === remoteSha
+      ? `⬆️ The installed build is behind the clone (<code>${shortVer(remoteSha)}</code>, a rolled-back update).\nSend /update to rebuild.`
+      : `⬆️ Update available: <code>${shortVer(localSha)}</code> → <code>${shortVer(remoteSha)}</code> (${ahead} commit(s)).\nSend /update to apply.`)
     return
   }
 
