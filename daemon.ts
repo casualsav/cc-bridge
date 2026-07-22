@@ -111,6 +111,7 @@ import {
   type PartyEndpoint, type PartyPending,
 } from './party.ts'
 import { formatAskBlock, formatAnswerBlock, formatDigestBlock, formatRosterLine, type RosterAgent } from './party-block.ts'
+import { laneForChat, bindLane } from './dm-lanes.ts'
 import { runHermes, type HermesEndpoint, type HermesTask } from './hermes-driver.ts'
 import {
   initLoop, sweepLoops, LOOP_SWEEP_MS, startLoopWizard, handleLoopWizardReply, wizardSidFor,
@@ -1659,6 +1660,13 @@ function startRelayLoop(): void {
   })
 }
 
+// Per-user DM lanes (Access.dmLanes, off by default): each allowlisted user DMing the bot drives its
+// OWN auto-spawned session, keyed by chat id — the DM analog of a forum topic keyed by thread id.
+// "Multi-pane mode" = the concurrent aux relay + per-pane prompt detection below must fire for topic
+// mode OR active DM lanes (both run several off-MCP panes at once, addressed via outboundTargetsFor).
+function dmLanesOn(): boolean { return loadAccess().dmLanes === true }
+function multiPaneMode(): boolean { return isTopicMode() || dmLanesOn() }
+
 // Forum-topics parallel relay (phase 3b). The focused pane is handled by the rich relayLoopTick
 // (mirror + typing + card). This lightweight loop covers every OTHER off-MCP pane, relaying each
 // session's concluded replies into its own topic — so sessions run in parallel without /sessions
@@ -1671,11 +1679,11 @@ async function auxRelayTick(): Promise<void> {
   for (const k of auxMirrorPanes()) {
     if (!offMcpPanes.has(k) || k === focus.activePaneId) await dropAuxMirror(k).catch(() => {})
   }
-  // Prompt detection for non-focused panes (forum-topics mode). The focused pane's PaneWatcher
-  // feeds onPaneEvent; aux panes have no watcher, so without this a permission prompt in another
-  // topic's session sits undetected forever — the session blocks silently. Runs regardless of
-  // TRANSCRIPT_OUTBOUND: prompts are read from the pane, not the transcript.
-  if (isTopicMode()) {
+  // Prompt detection for non-focused panes (forum-topics mode OR DM lanes). The focused pane's
+  // PaneWatcher feeds onPaneEvent; aux panes have no watcher, so without this a permission prompt in
+  // another topic's/lane's session sits undetected forever — the session blocks silently. Runs
+  // regardless of TRANSCRIPT_OUTBOUND: prompts are read from the pane, not the transcript.
+  if (multiPaneMode()) {
     for (const k of [...auxPromptStates.keys()]) {
       if (!offMcpPanes.has(k)) auxPromptStates.delete(k)   // only drop dead panes; the focused pane KEEPS its record (onPaneEvent shares it now)
     }
@@ -1686,7 +1694,7 @@ async function auxRelayTick(): Promise<void> {
       .filter(pane => pane !== focus.activePaneId)
       .map(pane => scanAuxPanePrompts(pane).catch(() => { /* transient (tmux) — retry next tick */ })))
   }
-  if (TRANSCRIPT_OUTBOUND && isTopicMode()) {
+  if (TRANSCRIPT_OUTBOUND && multiPaneMode()) {
     // Stamped panes resolve to their own transcript, so same-cwd siblings relay independently to
     // their own topics. Unstamped panes share the newest-file fallback — relay each file exactly
     // once per tick, and never a file the focused rich loop already owns, or the reply double-sends.
@@ -9718,6 +9726,14 @@ async function handleInbound(
       if (pane) targetPane = pane
       else void generalAnchorLost(chat_id)
     }
+  } else if (dmLanesOn() && !isTopicMode() && TRANSCRIPT_OUTBOUND && !focus.activeShim) {
+    // Per-user DM lanes: route the sender to THEIR own lane's pane (never the shared focus), and
+    // auto-spawn a fresh isolated session the first time an allowlisted user DMs (or when their lane's
+    // pane has died). Off by default → single-user installs never enter this branch.
+    const lane = laneForChat(chat_id)
+    const lanePane = lane ? await paneForSession(lane.sessionId).catch(() => null) : null
+    if (lanePane) targetPane = lanePane
+    else { void ensureDmLane(ctx, chat_id, params); return }
   }
   // Captured-screen guard: if the destination pane is on a screen the bridge can't drive — an
   // external editor/pager (the "ctrl+g into Vim" trap), or an UNRECOGNISED prompt the detectors
@@ -9861,6 +9877,56 @@ async function reviveDmSession(ctx: Context, params: InboundParams): Promise<voi
     }
     await edit('⚠️ Session revived but didn\'t reach a prompt in time — resend your message once it settles.')
   } finally { revivalQueues.delete(DM_REVIVAL_KEY) }
+}
+
+// Auto-provision a DM lane (Access.dmLanes): spawn a fresh isolated session for `chatId` — the DM
+// analog of creating a forum topic when a new session appears — bind chatId->sid, wait ≤90s for a
+// prompt, then deliver the message(s) that triggered it INTO that lane's pane (never the global
+// focus). Per-chat boot queue so a burst from the same new user joins one boot instead of spawning
+// duplicates. Base folder (getBaseCwd) if set, else $HOME. A crash-revive spawns fresh (new sid) and
+// rebinds — a lane's cross-restart conversation continuity is a later improvement.
+const dmLaneBooting = new Map<string, InboundParams[]>()
+async function ensureDmLane(ctx: Context, chatId: string, first: InboundParams): Promise<void> {
+  const queued = dmLaneBooting.get(chatId)
+  if (queued) { queued.push(first); return }   // a boot for this chat is already in flight — join it
+  dmLaneBooting.set(chatId, [first])
+  const drain = (deliver: (p: InboundParams) => void) => { for (const p of dmLaneBooting.get(chatId) ?? []) deliver(p) }
+  try {
+    const base = getBaseCwd()
+    const dir = base && existsSync(base) ? base : homedir()
+    const sid = genSessionId()
+    const notice = await ctx.reply('🚪 Setting up your session…', { parse_mode: 'HTML' }).catch(() => null)
+    const edit = async (text: string) => {
+      if (notice) await channel.editText({ chatId: String(notice.chat.id), messageId: String(notice.message_id) }, text).catch(() => {})
+      else await ctx.reply(text, { parse_mode: 'HTML' }).catch(() => {})
+    }
+    const pane = await spawnSession(dir, '', sid, MAIN_ACCOUNT, 'claude')
+    if (!pane) {
+      drain(bufferEvent)   // keep the messages — they replay when a session next appears
+      await edit(`❌ Couldn't start your session in <code>${escapeHtml(dir)}</code> — your message is buffered.`)
+      return
+    }
+    bindLane(chatId, sid, Date.now())
+    process.stderr.write(`daemon: dm-lane spawned for chat ${chatId} → sid ${sid} (pane ${pane}) in ${dir}\n`)
+    const deadline = Date.now() + 90_000
+    while (Date.now() < deadline) {
+      await sleep(2000)
+      const cap = await capturePane(pane).catch(() => '')
+      if (cap && onNormalPrompt(cap)) {
+        const msgs = dmLaneBooting.get(chatId) ?? []
+        for (const p of msgs) emitInbound(p, pane)   // deliver to THIS lane's pane, not whichever is focused
+        await edit(`✅ Your session is ready — ${msgs.length > 1 ? `your ${msgs.length} messages were delivered` : 'your message was delivered'}.`)
+        return
+      }
+      // First-run onboarding / post-update interstitials wedge a fresh pane short of the prompt.
+      if (cap) {
+        const stage = classifyOnboarding(cap)
+        if (stage) await driveAuxOnboarding(pane, stage).catch(() => {})
+      }
+    }
+    drain(bufferEvent)
+    await edit('⚠️ Your session didn\'t reach a prompt in time — resend your message once it settles.')
+  } finally { dmLaneBooting.delete(chatId) }
 }
 
 // Shared dead-topic boot: spawn a claude pane bound to `sid`'s topic (extra='-c' continues the

@@ -16,6 +16,7 @@ import {
 } from './topics.ts'
 import { focus, offMcpPanes, sessions } from './state.ts'
 import { AGENT_PANE_OPT, normalizeAgent } from './agent.ts'
+import { chatForLaneSession } from './dm-lanes.ts'
 
 // The bridge is in forum-topics mode whenever this module runs, so channel.threads (present iff
 // caps.threads === 'forum') is always defined — the `!` on threads.* calls reflects that invariant.
@@ -234,7 +235,17 @@ async function ensureTopicFor(group: string, sessionId: string, cwd: string, pan
 // the bound group, threaded to the session's own topic (created on first use; General if unresolvable).
 export async function outboundTargetsFor(paneId: string | null): Promise<Array<{ chat: string; thread?: number }>> {
   const dmTargets = () => loadAccess().allowFrom.map(chat => ({ chat }))
-  if (!isTopicMode()) return dmTargets()
+  if (!isTopicMode()) {
+    // Per-user DM lanes: a lane pane's replies address ONLY its owner chat — never fanned out to
+    // every allowlisted DM (the old broadcast + the "chat not found" spam on a hard-to-reach id).
+    // An unbound pane (no lane yet, or dmLanes off) keeps the broadcast fallback.
+    if (loadAccess().dmLanes) {
+      const sid = paneId ? await sessionForPane(paneId).catch(() => null) : null
+      const owner = sid ? chatForLaneSession(sid) : undefined
+      if (owner) return [{ chat: owner }]
+    }
+    return dmTargets()
+  }
   const group = getGroupChatId()
   if (!group) return dmTargets()
   const sid = paneId ? await sessionForPane(paneId) : null
