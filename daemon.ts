@@ -5159,7 +5159,7 @@ const START_PAIR_FOOTER =
   `<code>/telegram:access pair &lt;code&gt;</code> in Claude Code.`
 // Leads the commands message (NOT the album caption — a photo caption renders squeezed to the
 // photo width, and captions cap at 1024 chars anyway).
-const START_WELCOME = `Welcome to <b>cc-bridge</b>. Enjoy full Claude Code CLI access via Telegram\n\n🖼️ Save &amp; set one of these photos as my profile picture`
+const START_WELCOME = `Welcome to <b>cc-bridge</b>. Enjoy full Claude Code CLI access via Telegram\n\n🖼️ You can save &amp; set one of these photos as my profile picture if you'd like`
 const START_COMMAND_GROUPS: Array<[title: string, lines: string[]]> = [
   ['Sessions', [
     `<code>/launch</code> — start a fresh Claude Code session`,
