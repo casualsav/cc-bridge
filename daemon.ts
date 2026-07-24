@@ -2475,11 +2475,11 @@ async function deliverAnswerToAsker(pending: BusPending, answerer: string, body:
   const ok = await busDeliver(askerPane, formatAnswerBlock(answerer, cur.id, deliveredBody, refs)).catch(() => false)
   if (!ok) { putPending(cur); return `!couldn't deliver to @${cur.fromName} (pane gone) — ask kept open` }
   const mismatch = answerer !== cur.toName ? ` [asked @${cur.toName}]` : ''
-  // Mirror of the outbound "Messaged @X" card: surface the incoming answer on the ASKER's own surface
-  // (the chat DM / its topic) as "@answerer messaged @asker", the answer behind the chevron.
-  void notifyBusRich(cur.fromSid, `<b>@${escapeHtml(answerer)}</b> messaged <b>@${escapeHtml(cur.fromName)}</b>${late ? ' · late' : ''}`, body)
+  // Surface the incoming answer on the ASKER's OWN surface (the chat DM / its topic) as
+  // "@answerer messaged @asker", the answer behind the chevron — NOT a broadcast into General. Mirror
+  // of the outbound "Messaged @X" card. (The mismatch note, if any, rides in the header.)
+  void notifyBusRich(cur.fromSid, `<b>@${escapeHtml(answerer)}</b> messaged <b>@${escapeHtml(cur.fromName)}</b>${late ? ' · late' : ''}${escapeHtml(mismatch)}`, body)
   if (room) appendLedger(room, { ts: Date.now(), kind: 'answer', from: answerer, to: cur.fromName, id: cur.id, text: body, refs })
-  if (room) void channel.sendText(String(room), `✓ <b>${escapeHtml(answerer)}</b> answered <b>${escapeHtml(cur.fromName)}</b> (ask ${cur.id})${late ? ' · late' : ''}${escapeHtml(mismatch)}`, { silent: true }).catch(() => {})
   return `answered @${cur.fromName} (ask ${cur.id})${late ? ' (late — delivered after the timeout)' : ''}`
 }
 
