@@ -4161,6 +4161,18 @@ async function handleCall(
         const body = String(args.text ?? '').trim()
         if (!body) { write({ t: 'result', id, ok: false, text: 'empty post' }); return }
         appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'post', from: fromName, text: body })
+        // Posts are for the human(s), and the humans follow the work from their DM chat lanes when
+        // those exist — an unthreaded group send lands in the General topic, which the owner doesn't
+        // watch (learned the hard way: a shipped-phase announcement went unseen). So: lanes first,
+        // General only as the no-lane fallback. Lane sends use the bridge bot — an avatar bot is a
+        // group member and can't open the owner's DM.
+        const lanes = listDmChatSessions().map(l => l.chatId)
+        if (lanes.length) {
+          const html = `📣 <b>${escapeHtml(fromName)}</b>: ${escapeHtml(body)}`
+          for (const chat of lanes) await channel.sendText(chat, html).catch(() => {})
+          text = 'posted to the owner’s chat'
+          break
+        }
         // agent-bus P3: if this endpoint has a send-only avatar bot, the post goes out under that bot's
         // own name+picture (no "📣 name:" prefix — the bot IS the identity). Fresh read = hot-reload; the
         // whole lookup is guarded so a corrupt/unreadable avatars.json just degrades to the shared bot.
