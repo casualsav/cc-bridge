@@ -2440,14 +2440,24 @@ async function sweepBus(): Promise<void> {
   const room = busRoom()
   dropExpired(Date.now() - LATE_ANSWER_GRACE_MS)   // GC asks whose late-answer grace has fully elapsed
   for (const p of expirePending(Date.now())) {
-    // Not "abandoned": the record is kept so a late answer still lands. Say so, so a slow (not dead)
-    // agent isn't misread as gone — the exact false-negative that got a live build declared dead.
-    if (room) void channel.sendText(String(room),
-      `⌛ No answer yet from <b>${escapeHtml(p.toName)}</b> to ask ${p.id} — still waiting; a late answer will still be delivered.`,
-      { silent: true }).catch(() => {})
-    const askerPane = await paneForSession(p.fromSid).catch(() => null)
-    if (askerPane) void busDeliver(askerPane, formatAnswerBlock('system', p.id, `(no answer yet from @${p.toName} after ${Math.round(ASK_TTL_MS / 60_000)}m — still open; a late answer will be delivered if it arrives)`))
     if (room) appendLedger(room, { ts: Date.now(), kind: 'expire', from: p.toName, to: p.fromName, id: p.id, text: 'timed out' })
+    // Suppress the notice when the target has SUCCESSFULLY answered any ask from this asker since this
+    // one was created: that proves it's alive AND bus-fluent, so "still waiting" would be pure noise
+    // (the exact false alarm after kam answered 14 & 12 but left the instruct-ask 16 un-answered).
+    const provenLive = room && tailLedger(room, 200).some(e =>
+      e.kind === 'answer' && e.from === p.toName && e.to === p.fromName && e.ts >= p.createdAt)
+    if (provenLive) { process.stderr.write(`daemon: ask ${p.id} expired but @${p.toName} has since answered @${p.fromName} — suppressing timeout notice\n`); continue }
+    // Bus plumbing NEVER goes to General — the human-facing notice goes to the ASKER's OWN surface (its
+    // chat DM / topic), and the "still open" system line goes into the asker's pane (its agent context).
+    // Not "abandoned": the record is kept so a late answer still lands.
+    const askerPane = await paneForSession(p.fromSid).catch(() => null)
+    const targets = askerPane ? await outboundTargetsFor(askerPane).catch(() => []) : []
+    for (const { chat, thread } of targets) {
+      void channel.sendText(chat,
+        `⌛ No answer yet from <b>${escapeHtml(p.toName)}</b> to ask ${p.id} — still waiting; a late answer will still be delivered.`,
+        { silent: true, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
+    }
+    if (askerPane) void busDeliver(askerPane, formatAnswerBlock('system', p.id, `(no answer yet from @${p.toName} after ${Math.round(ASK_TTL_MS / 60_000)}m — still open; a late answer will be delivered if it arrives)`))
   }
   for (const p of listPending()) {
     if (!p.injected && !p.expiredAt) await tryDeliverAsk(p).catch(() => {})
