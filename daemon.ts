@@ -1884,6 +1884,7 @@ async function scanAuxPanePrompts(pane: string): Promise<void> {
 
   const prompt = detectUserPrompt(text)
   if (!prompt) { st.outstanding = false; return }   // no menu on the pane → the last one is resolved
+  if (isReservedEffortConfirm(pane, prompt)) return   // the /effort flow's own Yes/No card covers it
   if (st.outstanding) return                        // one's already relayed & unanswered — don't re-send on a repaint
   const h = promptHash(prompt)
   if (h === st.promptHash) return
@@ -3396,6 +3397,7 @@ function onPaneEvent(text: string): void {
 
   const prompt = detectUserPrompt(text)
   if (!prompt) { if (st) st.outstanding = false; return }   // no menu on the pane → the last one is resolved
+  if (isReservedEffortConfirm(focus.activePaneId, prompt)) return   // the /effort flow's own Yes/No card covers it
   if (!st || st.outstanding) return                          // one's already relayed & unanswered — don't re-send on a repaint
   const h = promptHash(prompt)
   if (h === st.promptHash) return
@@ -4786,14 +4788,25 @@ const pendingEffortConfirm = new Map<string, { level: string; chatId: string; me
 // directly, e.g. a fresh session with nothing cached). Re-issuing supersedes any open confirm.
 async function injectEffortChange(t: CommandTarget, level: string, chat_id: string): Promise<'confirm' | 'applied'> {
   await dismissPendingEffortConfirm(t.paneId)
+  // Reserve BEFORE injecting: the generic prompt relays (focused watcher + aux scanner) skip the
+  // incoming "Change effort level?" modal for a reserved pane — without this they raced the
+  // dedicated card below and the user got TWO different-looking button sets for one confirm.
+  pendingEffortConfirm.set(t.paneId, { level, chatId: chat_id, messageId: 0, thread: t.replyThread })
   await injectSlash(t.paneId, t.watcher, `/effort ${level}`)
   const cap = await capturePane(t.paneId).catch(() => '')
   if (cap && isEffortConfirm(cap)) {
     await relayEffortConfirm(t, level, chat_id)
     return 'confirm'
   }
+  pendingEffortConfirm.delete(t.paneId)   // no modal — release the reservation
   rememberEffort(t.paneId, level)   // applied directly (fresh session) — persist it for resume/restart
   return 'applied'
+}
+
+// The dedicated /effort flow above relays its own Yes/No card for CC's "Change effort level?"
+// modal. While a pane has one reserved/open, the generic prompt relays must skip that modal.
+function isReservedEffortConfirm(paneId: string | null, prompt: PromptInfo): boolean {
+  return !!paneId && pendingEffortConfirm.has(paneId) && /change effort level/i.test(prompt.question)
 }
 
 // Persist a just-set effort as BOTH the standing preference and this session's own last effort, so
