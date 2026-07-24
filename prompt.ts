@@ -220,6 +220,12 @@ export function hasQueuedMessages(paneText: string): boolean {
   return paneLines(paneText).some(l => QUEUED_MESSAGES.test(l))
 }
 
+// Is the end-of-turn feedback survey open? While it's up, pasted text is eaten by its 1/2/3/0
+// key handler instead of reaching the input box — deliverers must dismiss it (send "0") first.
+export function feedbackSurveyOpen(paneText: string): boolean {
+  return paneLines(paneText).some(l => FEEDBACK_SURVEY.test(l))
+}
+
 // Is the footer at `footerIdx` the LIVE prompt's footer (≤1 line of real content below), not a
 // scrolled-up already-answered one? Only "chrome" is allowed beneath a live prompt: the persistent
 // todo panel (renders DIRECTLY below an active prompt), the statusline, box borders, mode/approve hints

@@ -25,7 +25,7 @@ import { hopKey, resolveChain, pickNextHop, moveHop } from './failover-chain.ts'
 // replace a daemon left running stale code after a plugin upgrade.
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
-import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, hasQueuedMessages, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen } from './prompt.ts'
+import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, hasQueuedMessages, feedbackSurveyOpen, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen } from './prompt.ts'
 import { resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, currentTurnActivity, currentTurnTokens, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, agentSessionId, agentForSession } from './agent-transcript.ts'
 import {
   AGENT_PANE_OPT, agentExitKeys, agentInterruptKeys, agentLabel, agentResetCommand, agentSubmitKeys,
@@ -11786,6 +11786,16 @@ async function webappSessionFeed(sid: string): Promise<WebappSessionFeed | null>
 
 // Dashboard actions — the same controls chat grants: stop = the /stop interrupt, compact = the
 // /compact relay, send = deliver text like the queue/scheduler do. Error string or null.
+// The end-of-turn feedback survey ("How is Claude doing this session?") eats pasted keystrokes
+// with its 1/2/3/0 key handler — a delivery racing it vanishes without an error (that's how the
+// first live voice-note transcript was lost). Dismiss it before any webapp delivery.
+async function dismissFeedbackSurvey(pane: string): Promise<void> {
+  const cap = await capturePane(pane).catch(() => '')
+  if (!cap || !feedbackSurveyOpen(cap)) return
+  await sendKeys(pane, ['0'])
+  await waitForSettle(pane, 150, 2000).catch(() => {})
+}
+
 async function webappSessionAction(userId: string, sid: string, action: 'stop' | 'compact' | 'send', text?: string): Promise<string | null> {
   const pane = await paneForSession(sid).catch(() => null)
   if (!pane || !(await paneAlive(pane).catch(() => false))) return 'no live pane for this session'
@@ -11799,6 +11809,7 @@ async function webappSessionAction(userId: string, sid: string, action: 'stop' |
   const msg = (text ?? '').trim()
   if (!msg) return 'empty message'
   if (bashModeArmed(await capturePane(pane).catch(() => ''))) return 'the session has an unsubmitted ! bash command in its input box'
+  await dismissFeedbackSurvey(pane)
   const ok = watcher ? await injectText(pane, watcher, msg) : await pasteToPane(pane, msg)
   return ok ? null : 'delivery failed'
 }
@@ -11831,6 +11842,7 @@ async function webappSessionAttach(
     match = basename(path)   // the timestamped name is unique, and the feed echo carries the path
   }
   const watcher = pane === focus.activePaneId ? focus.paneWatcher : null
+  await dismissFeedbackSurvey(pane)
   const ok = watcher ? await injectText(pane, watcher, text) : await pasteToPane(pane, text)
   return ok ? { delivered: opts.voice ? text : `📎 ${safe}${caption ? ` — ${caption}` : ''}`, match } : { error: 'delivery failed' }
 }
