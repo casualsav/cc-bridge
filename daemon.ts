@@ -2446,6 +2446,9 @@ async function tryDeliverAsk(p: BusPending): Promise<boolean> {
       if (room) {
         markSeen(cur.toSid, now)   // advance the watermark only on a LANDED delivery — a failed paste keeps the window open for the retry
         void notifyAskSent(cur.fromSid, cur.toName, cur.text)
+        // Mirror the same card on the TARGET's own surface (its topic / chat DM) so the inbound ask is
+        // visible from inside the session too, not only on the asker's side.
+        void notifyBusRich(cur.toSid, `<b>@${escapeHtml(cur.fromName)}</b> messaged <b>@${escapeHtml(cur.toName)}</b>`, cur.text)
       }
     }
     return ok
