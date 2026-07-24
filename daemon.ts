@@ -5382,7 +5382,8 @@ bot.command('model', async ctx => {
 // /effort low|medium|high|max — relay to the session; bare opens a picker.
 bot.command('effort', async ctx => {
   if (!dmCommandGate(ctx)) return
-  const arg = (ctx.match ?? '').toString().trim().toLowerCase()
+  // "med" is accepted everywhere "medium" is (/effort med, /effort default med, /effort all med).
+  const arg = (ctx.match ?? '').toString().trim().toLowerCase().replace(/\bmed\b/, 'medium')
   const targetSession = await commandTarget(ctx)
   if (!targetSession) return
   if (await paneAgentKind(targetSession.paneId) === 'codex') {
