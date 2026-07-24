@@ -122,6 +122,11 @@ export function addScheduled(msg: ScheduledMessage): void {
 
 export function scheduledCount(): number { return scheduledMsgs.length }
 
+// Structured view of the schedule (Mini App automation board): id + label fields only, no timers.
+export function listScheduled(): Array<{ id: string; fireAt: number; sessionLabel: string; text: string; recurLabel: string | null }> {
+  return scheduledMsgs.map(m => ({ id: m.id, fireAt: m.fireAt, sessionLabel: m.sessionLabel, text: m.text, recurLabel: m.recur ? recurrenceLabel(m.recur) : null }))
+}
+
 export function loadScheduledMsgs(): void {
   const arr = readJsonFile<unknown>(SCHEDULED_MSGS_FILE, null)
   if (Array.isArray(arr)) scheduledMsgs = arr.filter((m): m is ScheduledMessage =>

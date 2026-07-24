@@ -37,6 +37,10 @@ export const currentTurnTokens = (file: string) => (isCodex(file) ? cx.currentTu
 export const currentTurnFeed = (file: string, concluded = false) => (isCodex(file) ? cx.currentTurnFeed(file, concluded) : cc.currentTurnFeed(file, concluded))
 export const bashResultAfter = (file: string, sinceMs: number) => (isCodex(file) ? cx.bashResultAfter(file, sinceMs) : cc.bashResultAfter(file, sinceMs))
 export const slashResultAfter = (file: string, sinceMs: number) => (isCodex(file) ? null : cc.slashResultAfter(file, sinceMs))   // CC-only: Codex logs no local command stdout
+// Codex rollouts lack the user/assistant pairing recentConversation needs — surface just the latest reply.
+export const recentConversation = (file: string, max = 12) => isCodex(file)
+  ? (r => (r ? [{ role: 'assistant' as const, text: r.text, ts: 0 }] : []))(cx.latestFinalReply(file))
+  : cc.recentConversation(file, max)
 export const agentSessionId = (file: string) => isCodex(file)
   ? cx.sessionIdOf(basename(file))
   : basename(file, '.jsonl')

@@ -323,6 +323,29 @@ export function slashResultAfter(file: string, sinceMs: number): { text: string;
   return null
 }
 
+// The last `max` conversation turns as a display feed (Mini App session drill-in): real user
+// prompts + main-thread assistant conclusions, oldest first. User text is unwrapped from the
+// bridge's `<tg …>…</tg>` inbound envelope for display; each item is clamped so a huge paste
+// can't blow up the payload.
+export type ConversationItem = { role: 'user' | 'assistant'; text: string; ts: number }
+export function recentConversation(file: string, max = 12): ConversationItem[] {
+  const entries = readEntries(file)
+  const out: ConversationItem[] = []
+  const clamp = (s: string) => (s.length > 1500 ? s.slice(0, 1500) + '…' : s)
+  for (const e of entries) {
+    const ts = e.timestamp ? Date.parse(e.timestamp) : 0
+    if (isRealUserText(e)) {
+      const raw = textOf(e.message?.content).trim()
+      const m = raw.match(/^<tg[^>]*>([\s\S]*)<\/tg>/)
+      out.push({ role: 'user', text: clamp((m ? m[1] : raw).trim()), ts })
+    } else if (isMainAssistantText(e) && e.message?.stop_reason !== 'tool_use') {
+      const text = lastTextOf(e.message?.content).trim()
+      if (!isCommandNoise(text)) out.push({ role: 'assistant', text: clamp(text), ts })
+    }
+  }
+  return out.slice(-max)
+}
+
 // The uuid of the entry anchoring the current turn (the last REAL user prompt). The mirror card
 // persists this as the open card's turn identity, so a daemon restart can tell "same turn —
 // resume editing the existing card" from "new turn — cap the orphan and open fresh".

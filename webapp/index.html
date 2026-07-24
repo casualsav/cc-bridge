@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Files</title>
+<title>cc-bridge</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
   :root {
@@ -63,21 +63,55 @@
   .bar { height: 8px; border-radius: 4px; background: var(--bg); overflow: hidden; margin-top: 6px; box-shadow: inset 0 0 0 1px var(--sec); }
   .bar > span { display: block; height: 100%; background: var(--btn); }
   .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-  pre.diff { margin: 0; padding: 12px; overflow: auto; white-space: pre; font: 12px/1.4 ui-monospace, Menlo, Consolas, monospace; }
-  pre.diff .a { color: #6abe6a; } pre.diff .d { color: #e06c75; } pre.diff .h { color: var(--link); }
-  .diffstat { padding: 10px 12px; border-bottom: 1px solid var(--sec); font: 12px/1.4 ui-monospace, monospace; color: var(--hint); white-space: pre-wrap; }
+  /* Sessions dashboard */
+  .sess { background: var(--sec); border-radius: 12px; padding: 12px 14px; margin: 0 0 10px; cursor: pointer; }
+  .sess:active { filter: brightness(1.1); }
+  .sess .top { display: flex; align-items: center; gap: 8px; }
+  .sess .nm { font-weight: 600; flex: 1; word-break: break-word; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--hint); flex: none; }
+  .dot.on { background: #4caf50; animation: pulse 1.6s ease-in-out infinite; }
+  .dot.dead { background: #e05555; }
+  @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
+  .chip { font-size: 11px; color: var(--hint); background: var(--bg); border-radius: 6px; padding: 2px 7px; white-space: nowrap; }
+  .sess .task { color: var(--hint); font-size: 13px; margin-top: 6px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; word-break: break-word; }
+  .sess .foot { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 11px; color: var(--hint); }
+  .sess .foot .bar { flex: 1; margin-top: 0; height: 5px; }
+  /* Drill-in (session detail) */
+  #drill { position: fixed; inset: 0; background: var(--bg); display: none; flex-direction: column; z-index: 5; }
+  #drill.show { display: flex; }
+  #dfeed { flex: 1; overflow-y: auto; padding: 12px; }
+  .msg { max-width: 88%; margin-bottom: 8px; padding: 8px 11px; border-radius: 12px; font-size: 14px; white-space: pre-wrap; word-break: break-word; }
+  .msg.user { background: var(--btn); color: var(--btn-text); margin-left: auto; border-bottom-right-radius: 4px; }
+  .msg.assistant { background: var(--sec); border-bottom-left-radius: 4px; }
+  .msg.activity { background: transparent; color: var(--hint); font: italic 12px/1.4 ui-monospace, monospace; padding: 2px 11px; margin-bottom: 3px; }
+  .composer { display: flex; gap: 6px; padding: 8px 10px calc(8px + env(safe-area-inset-bottom)); border-top: 1px solid var(--sec); }
+  .composer textarea { flex: 1; resize: none; border: none; border-radius: 10px; background: var(--sec); color: var(--text); padding: 9px 11px; font: 14px/1.35 inherit; max-height: 110px; }
+  .composer button { border: none; border-radius: 10px; background: var(--btn); color: var(--btn-text); padding: 0 14px; font-size: 15px; }
+  .iconbtn { background: var(--sec); border: none; border-radius: 8px; color: var(--text); padding: 7px 10px; font-size: 14px; }
+  /* Bus + automation boards */
+  .buschips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+  .evrow { display: flex; gap: 8px; padding: 8px 2px; border-bottom: 1px solid var(--sec); font-size: 13px; align-items: baseline; }
+  .evrow .who { color: var(--link); white-space: nowrap; }
+  .evrow .tx { color: var(--hint); flex: 1; word-break: break-word; }
+  .xbtn { background: transparent; border: none; color: #e05555; font-size: 16px; padding: 2px 8px; cursor: pointer; }
+  .sechead { color: var(--hint); font-size: 12px; text-transform: uppercase; letter-spacing: .4px; margin: 16px 2px 8px; }
 </style>
 </head>
 <body>
 <nav class="tabs" id="tabs">
-  <button data-tab="files" class="active">📁 Files</button>
-  <button data-tab="settings">⚙️ Settings</button>
-  <button data-tab="usage">📊 Usage</button>
-  <button data-tab="diff">📄 Diff</button>
+  <button data-tab="sessions" class="active">🖥 Sessions</button>
+  <button data-tab="bus">🚌 Bus</button>
+  <button data-tab="auto">⏱ Auto</button>
+  <button data-tab="files">📁 Files</button>
+  <button data-tab="settings">⚙️</button>
 </nav>
 <div class="err" id="err"></div>
 
-<div class="tab show" id="tab-files">
+<div class="tab show panel" id="tab-sessions"><div class="notice">Loading sessions…</div></div>
+<div class="tab panel" id="tab-bus"></div>
+<div class="tab panel" id="tab-auto"></div>
+
+<div class="tab" id="tab-files">
   <header>
     <div class="crumbs" id="crumbs"></div>
     <div class="search">
@@ -90,8 +124,21 @@
 <input type="file" id="upload-input" multiple style="display:none">
 
 <div class="tab panel" id="tab-settings"></div>
-<div class="tab panel" id="tab-usage"></div>
-<div class="tab" id="tab-diff"></div>
+
+<div id="drill">
+  <div class="vhead">
+    <button id="dback">←</button>
+    <span class="dot" id="ddot"></span>
+    <span class="name" id="dname"></span>
+    <button class="iconbtn" id="dstop" title="Interrupt">⏹</button>
+    <button class="iconbtn" id="dcompact" title="Compact">🗜</button>
+  </div>
+  <div id="dfeed"></div>
+  <div class="composer">
+    <textarea id="dtext" rows="1" placeholder="Message this session…"></textarea>
+    <button id="dsend">➤</button>
+  </div>
+</div>
 
 <div id="viewer">
   <div class="vhead">
@@ -337,17 +384,26 @@ async function find() {
 $("go").onclick = find;
 $("q").addEventListener("keydown", e => { if (e.key === "Enter") find(); });
 
-// ---- Tabs (Files / Settings / Usage / Diff) ----
-// Files renders on boot; the console tabs lazy-load their data the first time they're opened and
-// re-fetch on every subsequent open (cheap, always-fresh). All reuse api()/writeOp()/showErr/showOk.
-let curTab = "files";
+// ---- Tabs (Sessions / Bus / Auto / Files / Settings) ----
+// Sessions is the homepage. Live tabs (sessions/bus) refresh on an interval while visible; the
+// interval is torn down on every tab switch and paused when Telegram backgrounds the webview.
+let curTab = "sessions";
+let tabTimer = null;
+let filesLoaded = false;
+function setLive(fn, ms) {
+  clearInterval(tabTimer);
+  tabTimer = setInterval(() => { if (!document.hidden && !$("drill").classList.contains("show")) fn(); }, ms);
+}
 async function showTab(name) {
   curTab = name;
+  clearInterval(tabTimer);
   document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("active", b.dataset.tab === name));
   document.querySelectorAll(".tab").forEach(t => t.classList.toggle("show", t.id === "tab-" + name));
-  if (name === "settings") renderSettings();
-  else if (name === "usage") renderUsage();
-  else if (name === "diff") renderDiff();
+  if (name === "sessions") { renderSessions(); setLive(renderSessions, 4000); }
+  else if (name === "bus") { renderBus(); setLive(renderBus, 5000); }
+  else if (name === "auto") renderAuto();
+  else if (name === "files") { if (!filesLoaded) { filesLoaded = true; ls(cur); } }
+  else if (name === "settings") renderSettings();
 }
 document.querySelectorAll("#tabs button").forEach(b => b.onclick = () => showTab(b.dataset.tab));
 
@@ -403,52 +459,138 @@ async function setSetting(key, value) {
   if (d) { showOk("Updated"); renderSettings(); }
 }
 
-// Usage: context-% bar, cost, tokens, 5h/7d windows, today's budget.
-async function renderUsage() {
-  const el = $("tab-usage");
-  let d; try { d = await api("/api/usage"); } catch { el.innerHTML = '<div class="notice">Usage unavailable.</div>'; return; }
-  const card = (k, v, extra) => '<div class="card"><div class="k">' + k + '</div><div class="v">' + v + "</div>" + (extra || "") + "</div>";
-  const pctBar = p => p == null ? "" : '<div class="bar"><span style="width:' + Math.max(0, Math.min(100, p)) + '%"></span></div>';
-  const lim = w => w ? '<div class="card"><div class="k">' + w.name + '</div><div class="v">' + w.pct + '% <span style="color:var(--hint);font-size:13px">· resets in ' + esc(w.reset) + "</span></div>" + pctBar(w.pct) + "</div>" : "";
-  const b = d.budget;
-  let out = "";
-  out += card("Context used", (d.ctxPct == null ? "—" : d.ctxPct + "%"), pctBar(d.ctxPct));
-  out += '<div class="grid">' + card("Cost", d.cost || "—") + card("Tokens", esc(d.tokens) || "—") + "</div>";
-  out += lim(d.h5 && { ...d.h5, name: "5-hour limit" });
-  out += lim(d.d7 && { ...d.d7, name: "7-day limit" });
-  if (b) out += card("Budget today", "$" + b.spent.toFixed(2) + (b.cap ? " of $" + b.cap.toFixed(2) : " · no cap"), b.cap ? pctBar((b.spent / b.cap) * 100) : "");
-  el.innerHTML = out || '<div class="notice">No usage data — open from a focused session.</div>';
-  if (d.ctxPct == null && !d.cost && !d.tokens && !d.h5 && !d.d7) el.innerHTML = '<div class="notice">No statusline yet — open while a session is active.</div>' + el.innerHTML;
+// ---- Sessions dashboard (homepage): one card per session, tap → drill-in ----
+const pctBar = p => p == null ? "" : '<div class="bar"><span style="width:' + Math.max(0, Math.min(100, p)) + '%"></span></div>';
+let SESSIONS = [];
+async function renderSessions() {
+  const el = $("tab-sessions");
+  let d; try { d = await api("/api/sessions"); } catch { if (!SESSIONS.length) el.innerHTML = '<div class="notice">Sessions unavailable.</div>'; return; }
+  SESSIONS = d.sessions || [];
+  if (!SESSIONS.length) { el.innerHTML = '<div class="notice">No live sessions.</div>'; return; }
+  el.innerHTML = "";
+  for (const s of SESSIONS) {
+    const c = document.createElement("div");
+    c.className = "sess";
+    const dot = !s.alive ? "dead" : s.working ? "on" : "";
+    const chips = [];
+    if (s.model) chips.push(esc(s.model) + (s.effort ? " ⚡" + esc(s.effort === "medium" ? "med" : s.effort) : ""));
+    if (s.mode && s.mode !== "default") chips.push(esc(s.mode === "bypassPermissions" ? "bypass" : s.mode));
+    if (s.agent && s.agent !== "claude") chips.push(esc(s.agent));
+    c.innerHTML =
+      '<div class="top"><span class="dot ' + dot + '"></span><span class="nm">' + esc(s.name) + '</span>' +
+      chips.map(x => '<span class="chip">' + x + "</span>").join("") + "</div>" +
+      (s.task ? '<div class="task">' + (s.working ? "⏳ " : "💬 ") + esc(s.task) + "</div>" : "") +
+      (!s.alive ? '<div class="task">💀 no live pane</div>' : "") +
+      '<div class="foot">' +
+        (s.branch ? "<span>🌿 " + esc(s.branch) + "</span>" : "") +
+        (s.ctxPct != null ? "<span>ctx " + s.ctxPct + "%</span>" + pctBar(s.ctxPct) : "") +
+        (s.h5Pct != null ? "<span>5h " + s.h5Pct + "%</span>" : "") +
+      "</div>";
+    if (s.alive) c.onclick = () => openDrill(s.sid, s.name);
+    el.appendChild(c);
+  }
 }
 
-// Diff: focused session's working tree — --stat header, then the colorized patch.
-async function renderDiff() {
-  const el = $("tab-diff");
-  let d; try { d = await api("/api/diff"); } catch { el.innerHTML = '<div class="notice">Diff unavailable.</div>'; return; }
-  if (d.error && d.clean) { el.innerHTML = '<div class="notice">' + esc(d.error) + "</div>"; return; }
-  if (d.clean) { el.innerHTML = '<div class="notice">✨ Working tree clean' + (d.cwd ? "<br><span style=font-size:12px>" + esc(d.cwd) + "</span>" : "") + "</div>"; return; }
-  let html = "";
-  if (d.cwd) html += '<div class="diffstat">' + esc(d.cwd) + "</div>";
-  if (d.stat) html += '<div class="diffstat">' + esc(d.stat) + "</div>";
-  if (d.untracked && d.untracked.length) html += '<div class="diffstat">🆕 untracked: ' + d.untracked.map(esc).join(", ") + "</div>";
-  const lines = (d.diff || "").split("\n").map(l => {
-    const cls = l.startsWith("+") ? "a" : l.startsWith("-") ? "d" : (l.startsWith("@@") || l.startsWith("diff ")) ? "h" : "";
-    return cls ? '<span class="' + cls + '">' + esc(l) + "</span>" : esc(l);
-  }).join("\n");
-  html += '<pre class="diff">' + lines + "</pre>";
+// ---- Drill-in: conversation feed + composer + stop/compact ----
+let drillSid = null, drillTimer = null;
+function openDrill(sid, name) {
+  drillSid = sid;
+  $("dname").textContent = name;
+  $("dfeed").innerHTML = '<div class="notice">Loading…</div>';
+  $("drill").classList.add("show");
+  renderDrill();
+  clearInterval(drillTimer);
+  drillTimer = setInterval(() => { if (!document.hidden) renderDrill(); }, 3000);
+}
+function closeDrill() { $("drill").classList.remove("show"); clearInterval(drillTimer); drillSid = null; renderSessions(); }
+$("dback").onclick = closeDrill;
+async function renderDrill() {
+  if (!drillSid) return;
+  let d; try { d = await api("/api/session/feed", { sid: drillSid }); } catch { return; }
+  $("ddot").className = "dot " + (d.working ? "on" : "");
+  const feed = $("dfeed");
+  const stuck = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;   // keep pinned to bottom unless the user scrolled up
+  feed.innerHTML = d.items.length
+    ? d.items.map(i => '<div class="msg ' + i.role + '">' + esc(i.text) + "</div>").join("")
+    : '<div class="notice">No conversation yet.</div>';
+  if (stuck) feed.scrollTop = feed.scrollHeight;
+}
+async function sessionAct(action, text) {
+  const d = await writeOp("/api/session/act", { sid: drillSid, action, ...(text ? { text } : {}) });
+  return !!d;
+}
+$("dstop").onclick = async () => { if (await sessionAct("stop")) showOk("Interrupted"); };
+$("dcompact").onclick = async () => { if (await sessionAct("compact")) showOk("Compacting…"); };
+$("dsend").onclick = async () => {
+  const ta = $("dtext"), text = ta.value.trim();
+  if (!text) return;
+  ta.value = "";
+  if (await sessionAct("send", text)) { showOk("Sent"); setTimeout(renderDrill, 800); }
+  else ta.value = text;   // failed — give the draft back
+};
+
+// ---- Agent-bus board: live agents, open asks, recent events ----
+const EV_GLYPH = { ask: "→", answer: "✓", post: "📣", expire: "⌛", slash: "/", spawn: "🚀", pause: "⏸" };
+const fmtAge = s => s < 90 ? s + "s" : s < 5400 ? Math.round(s / 60) + "m" : Math.round(s / 3600) + "h";
+async function renderBus() {
+  const el = $("tab-bus");
+  let d; try { d = await api("/api/bus"); } catch { el.innerHTML = '<div class="notice">Bus unavailable.</div>'; return; }
+  if (!d.agents.length && !d.events.length) { el.innerHTML = '<div class="notice">No agent bus — bind a forum group first.</div>'; return; }
+  let html = '<div class="buschips">' + d.agents.map(a =>
+    '<span class="chip">' + (a.live ? "🟢" : "⚪") + " " + esc(a.name) + (a.kind === "hermes" ? " ✨" : "") + "</span>").join("") + "</div>";
+  if (d.pending.length) {
+    html += '<div class="sechead">Open asks</div>';
+    for (const p of d.pending) html +=
+      '<div class="evrow"><span class="who">' + esc(p.from) + "→" + esc(p.to) + " #" + p.id + "</span>" +
+      '<span class="tx">' + esc(p.text) + "</span><span>" + (p.delivered ? "" : "⏳ ") + fmtAge(p.ageSec) + "</span></div>";
+  }
+  html += '<div class="sechead">Recent</div>';
+  html += d.events.length ? d.events.map(e =>
+    '<div class="evrow"><span>' + (EV_GLYPH[e.kind] || "·") + '</span><span class="who">' + esc(e.from) + (e.to ? "→" + esc(e.to) : "") + (e.id != null ? " #" + e.id : "") + "</span>" +
+    '<span class="tx">' + esc(e.text) + "</span></div>").join("")
+    : '<div class="notice">No bus traffic yet.</div>';
   el.innerHTML = html;
 }
 
-// Launched two ways: a DM web_app button (folder in ?start=) or an in-topic deep link
-// (t.me/<bot>?startapp=<token> → token in initData.start_param, exchanged via /api/resolve).
+// ---- Automation board: cron + queued prompts + budget, each cancellable ----
+async function renderAuto() {
+  const el = $("tab-auto");
+  let d; try { d = await api("/api/auto"); } catch { el.innerHTML = '<div class="notice">Automation unavailable.</div>'; return; }
+  let html = "";
+  html += '<div class="sechead">Scheduled (/cron)</div>';
+  html += d.cron.length ? d.cron.map(m =>
+    '<div class="evrow"><span class="who">' + (m.recurLabel ? "🔁 " + esc(m.recurLabel) : new Date(m.fireAt).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })) + "</span>" +
+    '<span class="tx">' + esc(m.sessionLabel) + ": " + esc(m.text) + "</span>" +
+    '<button class="xbtn" data-kind="cron" data-id="' + esc(m.id) + '">✕</button></div>').join("")
+    : '<div class="notice">Nothing scheduled.</div>';
+  html += '<div class="sechead">Queued (/queue)</div>';
+  html += d.queue.length ? d.queue.map(q =>
+    '<div class="evrow"><span class="who">' + esc(q.session) + '</span><span class="tx">' + esc(q.text) + "</span>" +
+    '<button class="xbtn" data-kind="queue" data-id="' + esc(q.id) + '">✕</button></div>').join("")
+    : '<div class="notice">Queue is empty.</div>';
+  if (d.budget && (d.budget.cap || d.budget.spent)) {
+    html += '<div class="sechead">Budget today</div><div class="card"><div class="v">$' + d.budget.spent.toFixed(2) +
+      (d.budget.cap ? " of $" + d.budget.cap.toFixed(2) : " · no cap") + "</div>" +
+      (d.budget.cap ? pctBar((d.budget.spent / d.budget.cap) * 100) : "") + "</div>";
+  }
+  el.innerHTML = html;
+  el.querySelectorAll(".xbtn").forEach(b => b.onclick = async () => {
+    const d2 = await writeOp("/api/auto/cancel", { kind: b.dataset.kind, id: b.dataset.id });
+    if (d2) { showOk("Cancelled"); renderAuto(); }
+  });
+}
+
+// Boot: Sessions is the homepage. A deep link (?start= folder, or startapp token → /api/resolve)
+// still lands on Files at that folder — that's what the /files command promises.
 async function boot() {
   const sp = tg && tg.initDataUnsafe && tg.initDataUnsafe.start_param;
+  const qs = new URLSearchParams(location.search).get("start");
   if (sp) {
-    try { const r = await api("/api/resolve", { token: sp }); cur = r.cwd || "/"; } catch { return; }
-  }
-  ls(cur);
+    try { const r = await api("/api/resolve", { token: sp }); cur = r.cwd || "/"; filesLoaded = true; ls(cur); showTab("files"); return; } catch {}
+  } else if (qs) { filesLoaded = true; ls(cur); showTab("files"); return; }
+  showTab("sessions");
 }
-if (!INIT) $("list").innerHTML = '<div class="notice">Open this from the Telegram button — it carries the sign-in token.</div>';
+if (!INIT) $("tab-sessions").innerHTML = '<div class="notice">Open this from the Telegram button — it carries the sign-in token.</div>';
 else boot();
 </script>
 </body>

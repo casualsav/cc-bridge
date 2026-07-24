@@ -26,7 +26,7 @@ import { hopKey, resolveChain, pickNextHop, moveHop } from './failover-chain.ts'
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
 import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, hasQueuedMessages, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen } from './prompt.ts'
-import { resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, currentTurnActivity, currentTurnTokens, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, agentSessionId, agentForSession } from './agent-transcript.ts'
+import { resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, currentTurnActivity, currentTurnTokens, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, agentSessionId, agentForSession } from './agent-transcript.ts'
 import {
   AGENT_PANE_OPT, agentExitKeys, agentInterruptKeys, agentLabel, agentResetCommand, agentSubmitKeys,
   CODEX_ENABLED, codexLaunchCommand, normalizeAgent, shellQuote, type AgentKind,
@@ -84,7 +84,7 @@ import {
   setPaneRestarting, isPaneRestarting, releasePaneSession, reopenSessionTopic,
   retriggerTopicTyping, paneClaudeLive,
 } from './topic-runtime.ts'
-import { startWebapp, type SettingsView as WebappSettingsView, type UsageView as WebappUsageView, type DiffView as WebappDiffView } from './webapp.ts'
+import { startWebapp, type SettingsView as WebappSettingsView, type SessionCard as WebappSessionCard, type SessionFeed as WebappSessionFeed, type BusView as WebappBusView, type AutomationView as WebappAutomationView } from './webapp.ts'
 import { startTunnel, ensureCloudflared, tailscaleFunnelUrl, type Tunnel } from './tunnel.ts'
 import { sendRichMessage, sendRichMessageDraft, editRichMessage, toInputRichMessage, htmlPanelToRich, callTelegram, type InputRichMessage } from './richmsg.ts'
 import { parseAvatars, resolveAvatar, type Avatar } from './avatars.ts'
@@ -133,7 +133,7 @@ import { transcribe, transcribeProvider, transcribeStatus } from './voice.ts'
 import { synthesize, provisionPiper, piperReady, engineStatus, PIPER_VOICES, DEFAULT_PIPER_VOICE, type TtsEngine } from './voice-out.ts'
 import { parseDuration, formatDuration, fmtWhen, splitLeadingDuration, nextRecurrence, recurrenceLabel, parseCron, nextCron, type Recurrence } from './time.ts'
 import {
-  initScheduler, loadScheduledMsgs, cancelScheduled, addScheduled, scheduledCount,
+  initScheduler, loadScheduledMsgs, cancelScheduled, addScheduled, scheduledCount, listScheduled,
   scheduledListText, scheduledListMarkdown, scheduledCancelKeyboard, scheduleDashboard, MAX_TIMEOUT,
 } from './scheduler.ts'
 
@@ -11594,37 +11594,141 @@ function webappSetSetting(userId: string, key: string, value: unknown): string |
     default: return 'unknown or read-only setting'
   }
 }
-// Usage dashboard: context %/tokens/cost + 5h/7d windows from the focused pane's statusline, plus
-// today's budget spend vs the cap (same numbers /budget and the pin show).
-async function webappReadUsage(): Promise<WebappUsageView> {
-  const cap = focus.activePaneId ? await capturePane(focus.activePaneId).catch(() => '') : ''
-  const sl = cap ? parseStatusline(cap) : null
-  const dailyCap = loadAccess().budgetDaily ?? null
-  const spent = budgetSpent(readBudgetState(new Date().toISOString().slice(0, 10)))
+// ---- Fleet dashboard (Sessions tab) ----
+
+// Every addressable session for the dashboard: topic sessions, the General anchor, and DM chat
+// lanes (topic mode) — or just the focused pane (DM mode). {sid, name, cwd?, agent} rows; cwd
+// filled from the pane when the store doesn't know it.
+function dashboardSessionRows(): Array<{ sid: string; name: string; cwd: string; agent: string }> {
+  if (isTopicMode()) {
+    const rows = listTopics().filter(t => !t.closed).map(t => ({ sid: t.sessionId, name: t.name, cwd: t.cwd, agent: t.agent ?? 'claude' }))
+    const general = getGeneralSession()
+    if (general && !rows.some(r => r.sid === general)) rows.unshift({ sid: general, name: 'General', cwd: '', agent: 'claude' })
+    for (const { chatId, sessionId } of listDmChatSessions())
+      if (!rows.some(r => r.sid === sessionId)) rows.push({ sid: sessionId, name: `Chat (DM ${chatId})`, cwd: '', agent: 'claude' })
+    return rows
+  }
+  return []   // DM mode: filled per-call from the focused pane (no session store to enumerate)
+}
+
+// One dashboard card, read live from the pane: statusline dials + working state + a task line
+// (current activity while working, last-reply snippet while idle). Dead pane ⇒ alive:false card.
+async function webappSessionCard(row: { sid: string; name: string; cwd: string; agent: string }): Promise<WebappSessionCard> {
+  const dead: WebappSessionCard = { sid: row.sid, name: row.name, cwd: row.cwd, agent: row.agent, alive: false, working: false, task: null, model: null, effort: null, mode: null, ctxPct: null, h5Pct: null, branch: null }
+  const pane = await paneForSession(row.sid).catch(() => null)
+  if (!pane || !(await paneAlive(pane).catch(() => false))) return dead
+  const cap = await capturePane(pane).catch(() => '')
+  if (!cap) return dead
+  const sl = parseStatusline(cap)
+  const working = detectWorking(cap)
+  const cwd = row.cwd || (await paneCwd(pane).catch(() => '')) || ''
+  let task: string | null = null
+  try {
+    const file = await transcriptForPane(pane, cwd || null)
+    if (file) {
+      if (working) {
+        const acts = currentTurnActivity(file)
+        const a = acts[acts.length - 1]
+        task = a ? `${a.tool}${a.detail ? ` ${a.detail}` : ''}` : null
+      }
+      task ??= latestFinalReply(file)?.text.replace(/\s+/g, ' ').slice(0, 140) ?? null
+    }
+  } catch {}
   return {
-    ctxPct: sl?.ctxPct ?? null, tokens: sl?.tokens ?? null, cost: sl?.cost ?? null,
-    h5: sl?.h5 ?? null, d7: sl?.d7 ?? null,
-    budget: { spent, cap: dailyCap },
+    sid: row.sid, name: row.name, cwd, agent: row.agent, alive: true, working, task,
+    model: sl?.model ?? null, effort: sl?.effort ?? null, mode: cap ? detectCurrentMode(cap) : null,
+    ctxPct: sl?.ctxPct ?? null, h5Pct: sl?.h5?.pct ?? null,
+    branch: topicBranchCache.get(row.sid) || null,
   }
 }
-// Working-tree diff for the focused session, read (not posted) — same git logic as sendDiff()/the
-// /diff command: porcelain → clean check, --stat summary, full patch (capped), untracked names.
-const WEBAPP_DIFF_CAP = 16_000
-async function webappReadDiff(): Promise<WebappDiffView> {
-  const cwd = focus.activePaneId ? await paneCwd(focus.activePaneId).catch(() => null) : null
-  if (!cwd) return { clean: true, stat: '', diff: '', untracked: [], cwd: null, error: 'No focused session.' }
-  try {
-    const { stdout: por } = await exec('git', ['-C', cwd, 'status', '--porcelain'], { timeout: 4000 })
-    if (!por.trim()) return { clean: true, stat: '', diff: '', untracked: [], cwd }
-    const { stdout: stat } = await exec('git', ['-C', cwd, 'diff', 'HEAD', '--stat'], { timeout: 6000 }).catch(() => ({ stdout: '' }))
-    let { stdout: diff } = await exec('git', ['-C', cwd, 'diff', 'HEAD'], { timeout: 10000, maxBuffer: 32 * 1024 * 1024 }).catch(() => ({ stdout: '' }))
-    const untracked = por.split('\n').filter(l => l.startsWith('??')).map(l => l.slice(3).trim()).filter(Boolean)
-    if (diff.length > WEBAPP_DIFF_CAP) diff = diff.slice(0, WEBAPP_DIFF_CAP) + '\n… (truncated — run `git diff HEAD` for the full patch)'
-    return { clean: false, stat: stat.trim(), diff, untracked, cwd }
-  } catch (e) {
-    const msg = String((e as { stderr?: string })?.stderr ?? (e as Error)?.message ?? e)
-    return { clean: true, stat: '', diff: '', untracked: [], cwd, error: /not a git repository/i.test(msg) ? 'Not a git repository.' : msg.slice(0, 600) }
+
+async function webappListSessions(): Promise<WebappSessionCard[]> {
+  let rows = dashboardSessionRows()
+  if (!rows.length && focus.activePaneId) {   // DM mode: the focused session is the fleet
+    const sid = await sessionForPane(focus.activePaneId).catch(() => null)
+    if (sid) rows = [{ sid, name: 'Session', cwd: '', agent: 'claude' }]
   }
+  return Promise.all(rows.map(webappSessionCard))
+}
+
+// Drill-in feed: recent conversation (user + assistant), plus the running turn's tool activity.
+async function webappSessionFeed(sid: string): Promise<WebappSessionFeed | null> {
+  const row = dashboardSessionRows().find(r => r.sid === sid)
+    ?? (getTopicBySession(sid) ? { sid, name: getTopicBySession(sid)!.name, cwd: getTopicBySession(sid)!.cwd, agent: 'claude' } : { sid, name: 'Session', cwd: '', agent: 'claude' })
+  const pane = await paneForSession(sid).catch(() => null)
+  if (!pane) return null
+  const cwd = row.cwd || (await paneCwd(pane).catch(() => null))
+  const file = await transcriptForPane(pane, cwd)
+  if (!file) return { sid, name: row.name, working: false, items: [] }
+  const working = turnInProgress(file)
+  const items: WebappSessionFeed['items'] = recentConversation(file, 14).map(c => ({ role: c.role, text: c.text, ts: c.ts }))
+  if (working) for (const a of currentTurnActivity(file).slice(-6)) items.push({ role: 'activity', text: `${a.tool}${a.detail ? ` ${a.detail}` : ''}`, ts: 0 })
+  return { sid, name: row.name, working, items }
+}
+
+// Dashboard actions — the same controls chat grants: stop = the /stop interrupt, compact = the
+// /compact relay, send = deliver text like the queue/scheduler do. Error string or null.
+async function webappSessionAction(userId: string, sid: string, action: 'stop' | 'compact' | 'send', text?: string): Promise<string | null> {
+  const pane = await paneForSession(sid).catch(() => null)
+  if (!pane || !(await paneAlive(pane).catch(() => false))) return 'no live pane for this session'
+  const watcher = pane === focus.activePaneId ? focus.paneWatcher : null
+  if (action === 'stop') {
+    const keys = agentInterruptKeys(await paneAgentKind(pane))
+    const ok = watcher ? await watcher.withInjection(() => sendKeys(pane, keys)) : await sendKeys(pane, keys)
+    return ok ? null : 'interrupt did not reach the pane'
+  }
+  if (action === 'compact') { void relaySlashCommand(pane, watcher, '/compact', ''); return null }
+  const msg = (text ?? '').trim()
+  if (!msg) return 'empty message'
+  if (bashModeArmed(await capturePane(pane).catch(() => ''))) return 'the session has an unsubmitted ! bash command in its input box'
+  const ok = watcher ? await injectText(pane, watcher, msg) : await pasteToPane(pane, msg)
+  return ok ? null : 'delivery failed'
+}
+
+// Agent-bus board: live endpoints, open asks (queued + delivered-unanswered), recent ledger events.
+async function webappReadBus(): Promise<WebappBusView> {
+  const room = busRoom()
+  if (!room) return { agents: [], pending: [], events: [] }
+  const eps = busEndpoints().filter(e => !e.closed)
+  const agents = await Promise.all(eps.map(async e => ({
+    name: e.name, kind: e.kind,
+    live: e.kind === 'hermes' ? true : !!(await paneForSession(e.id).catch(() => null)),
+  })))
+  const now = Date.now()
+  const pending = listPending().filter(p => !p.expiredAt).map(p => ({
+    id: p.id, from: p.fromName, to: p.toName, text: p.text.slice(0, 200),
+    ageSec: Math.round((now - p.createdAt) / 1000), delivered: p.injected,
+  }))
+  const events = tailLedger(room, 40).map(e => ({ ts: e.ts, kind: e.kind, from: e.from, to: e.to, id: e.id, text: e.text.slice(0, 200) })).reverse()
+  return { agents, pending, events }
+}
+
+// Automation board: cron schedules + per-session queued prompts + the daily budget (queue item ids
+// are "<sid>:<queuedAt>" — stable across reads, resolved back on cancel).
+function webappReadAutomation(): WebappAutomationView {
+  const queue: WebappAutomationView['queue'] = []
+  for (const [sid, items] of Object.entries(readLater()))
+    for (const it of items) queue.push({ id: `${sid}:${it.queuedAt}`, session: getTopicBySession(sid)?.name ?? sid.slice(0, 8), text: it.text.slice(0, 200), queuedAt: it.queuedAt })
+  const dailyCap = loadAccess().budgetDaily ?? null
+  const spent = budgetSpent(readBudgetState(new Date().toISOString().slice(0, 10)))
+  return { cron: listScheduled(), queue, budget: { spent, cap: dailyCap } }
+}
+
+function webappAutomationCancel(userId: string, kind: 'cron' | 'queue', id: string): string | null {
+  if (kind === 'cron') {
+    if (!listScheduled().some(m => m.id === id)) return 'unknown schedule'
+    cancelScheduled(id)
+    return null
+  }
+  const at = id.lastIndexOf(':')
+  const sid = id.slice(0, at), queuedAt = Number(id.slice(at + 1))
+  const map = readLater()
+  const arr = map[sid]
+  if (!arr?.some(it => it.queuedAt === queuedAt)) return 'unknown queue item'
+  map[sid] = arr.filter(it => it.queuedAt !== queuedAt)
+  if (!map[sid].length) delete map[sid]
+  writeLater(map)
+  return null
 }
 
 async function startFilesWebapp(): Promise<void> {
@@ -11634,7 +11738,9 @@ async function startFilesWebapp(): Promise<void> {
       isAllowed: uid => loadAccess().allowFrom.includes(uid), log: wlog, resolveStart: resolveStartToken,
       canWrite: WEBAPP_WRITE, trashDir: WEBAPP_TRASH, maxUploadBytes: WEBAPP_MAX_UPLOAD_MB * 1024 * 1024,
       protectedRoots: [STATE_DIR],   // fence writes out of a relocated state dir too (~/.claude is fenced by default)
-      readSettings: webappReadSettings, setSetting: webappSetSetting, readUsage: webappReadUsage, readDiff: webappReadDiff })
+      readSettings: webappReadSettings, setSetting: webappSetSetting,
+      listSessions: webappListSessions, readSessionFeed: webappSessionFeed, sessionAction: webappSessionAction,
+      readBus: webappReadBus, readAutomation: webappReadAutomation, automationCancel: webappAutomationCancel })
   } catch (e) { wlog(`webapp: failed to start: ${e}`); return }
   if (WEBAPP_PUBLIC_URL) { wlog(`webapp: public url ${WEBAPP_PUBLIC_URL}`); return }
   if (WEBAPP_TUNNEL === 'tailscale') {

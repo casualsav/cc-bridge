@@ -154,3 +154,35 @@ test('isProtectedWrite: a SIBLING like ~/.claude-work is NOT a false positive (s
   expect(isProtectedWrite('/home/u/.claude-work/settings.json', ROOTS)).toBe(false)
   expect(isProtectedWrite('/home/u/.claudexyz', ROOTS)).toBe(false)
 })
+
+// ---- Console v2 endpoints (Sessions / Bus / Automation): routed to the injected deps, authed like
+// every /api/*, and actions validate their bodies. ----
+test('console endpoints: sessions/bus/auto reads + session act route to deps; missing dep 404s', async () => {
+  const { startWebapp } = await import('./webapp.ts')
+  const { join } = await import('node:path')
+  const acted: unknown[] = []
+  const server = startWebapp({
+    token: TOKEN, isAllowed: id => id === '42', log: () => {}, staticDir: join(import.meta.dir, 'webapp'), port: 0,
+    listSessions: () => [{ sid: 's1', name: 'money', cwd: '/x', agent: 'claude', alive: true, working: true, task: 'Bash ls', model: 'Fable', effort: 'high', mode: 'bypassPermissions', ctxPct: 12, h5Pct: 40, branch: 'main' }],
+    readBus: () => ({ agents: [{ name: 'money', kind: 'claude', live: true }], pending: [], events: [] }),
+    readAutomation: () => ({ cron: [], queue: [], budget: { spent: 1.5, cap: null } }),
+    sessionAction: (_u, sid, action, text) => { acted.push([sid, action, text]); return null },
+  })
+  const auth = { Authorization: 'tma ' + sign({ auth_date: String(now()), user }) }
+  const base = `http://127.0.0.1:${server.port}`
+  try {
+    const sess = await (await fetch(`${base}/api/sessions`, { headers: auth })).json()
+    expect(sess.sessions[0].name).toBe('money')
+    const bus = await (await fetch(`${base}/api/bus`, { headers: auth })).json()
+    expect(bus.agents[0].live).toBe(true)
+    const auto = await (await fetch(`${base}/api/auto`, { headers: auth })).json()
+    expect(auto.budget.spent).toBe(1.5)
+    const act = await fetch(`${base}/api/session/act`, { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify({ sid: 's1', action: 'send', text: 'hi' }) })
+    expect(act.status).toBe(200)
+    expect(acted).toEqual([['s1', 'send', 'hi']])
+    const bad = await fetch(`${base}/api/session/act`, { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify({ sid: 's1', action: 'reboot' }) })
+    expect(bad.status).toBe(400)
+    expect((await fetch(`${base}/api/session/feed?sid=s1`, { headers: auth })).status).toBe(404)   // dep not injected
+    expect((await fetch(`${base}/api/sessions`)).status).toBe(401)                                  // unauthed
+  } finally { server.stop(true) }
+})

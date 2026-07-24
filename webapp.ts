@@ -26,13 +26,20 @@ export interface WebappDeps {
   trashDir?: string                        // /api/rm moves deletions here (recoverable); required when canWrite
   maxWriteBytes?: number                   // /api/write size cap (default 2 MiB)
   maxUploadBytes?: number                  // /api/upload size cap (default 50 MiB)
-  // ---- Console tabs (Settings / Usage / Diff). Injected by the daemon so this stays a thin HTTP
-  // layer (no daemon internals imported); each wraps a reused daemon function. All optional —
-  // missing dep ⇒ the endpoint 404s and that tab just stays empty. settings WRITES gate on canWrite.
+  // ---- Console tabs (Sessions / Bus / Automation / Settings). Injected by the daemon so this stays
+  // a thin HTTP layer (no daemon internals imported); each wraps a reused daemon function. All
+  // optional — missing dep ⇒ the endpoint 404s and that tab just stays empty. settings WRITES gate
+  // on canWrite; session/automation ACTIONS don't — they're the same session controls (/stop,
+  // /compact, typing a message, cancelling a cron) every allowlisted chat user already has, not
+  // filesystem mutations. Every action is audited to daemon.log.
   readSettings?: () => Promise<SettingsView> | SettingsView          // current prefs/state for the Settings tab
   setSetting?: (userId: string, key: string, value: unknown) => Promise<string | null> | string | null   // apply one change (userId = toggling user, for any notice routing); returns an error string or null on ok
-  readUsage?: () => Promise<UsageView> | UsageView                   // context %/cost/tokens/limits/budget for the Usage tab
-  readDiff?: () => Promise<DiffView> | DiffView                      // focused session's working-tree diff (does NOT post to Telegram)
+  listSessions?: () => Promise<SessionCard[]> | SessionCard[]        // fleet dashboard: one card per live session
+  readSessionFeed?: (sid: string) => Promise<SessionFeed | null> | SessionFeed | null   // drill-in: recent conversation + live activity
+  sessionAction?: (userId: string, sid: string, action: SessionAct, text?: string) => Promise<string | null> | string | null   // stop/compact/send → error string or null
+  readBus?: () => Promise<BusView> | BusView                         // agent-bus board: live agents, open asks, recent events
+  readAutomation?: () => Promise<AutomationView> | AutomationView    // cron + queued prompts + budget
+  automationCancel?: (userId: string, kind: 'cron' | 'queue', id: string) => Promise<string | null> | string | null   // cancel one item → error string or null
 }
 
 // Settings tab payload: each toggle is {value, editable} so the SPA renders the live state and only
@@ -42,12 +49,29 @@ export interface SettingsView {
   write: boolean
   settings: Record<string, { value: unknown; editable: boolean; options?: string[]; label?: string }>
 }
-export interface UsageView {
-  ctxPct: number | null; tokens: string | null; cost: string | null
-  h5: { pct: number; reset: string } | null; d7: { pct: number; reset: string } | null
+// One session on the fleet dashboard. `working` and the dials read live from the pane; `task` is
+// the current activity line (working) or the last reply snippet (idle). alive=false ⇒ dead pane.
+export interface SessionCard {
+  sid: string; name: string; cwd: string; agent: string
+  alive: boolean; working: boolean; task: string | null
+  model: string | null; effort: string | null; mode: string | null
+  ctxPct: number | null; h5Pct: number | null; branch: string | null
+}
+export type SessionAct = 'stop' | 'compact' | 'send'
+export interface SessionFeed {
+  sid: string; name: string; working: boolean
+  items: Array<{ role: 'user' | 'assistant' | 'activity'; text: string; ts: number }>
+}
+export interface BusView {
+  agents: Array<{ name: string; kind: string; live: boolean }>
+  pending: Array<{ id: number; from: string; to: string; text: string; ageSec: number; delivered: boolean }>
+  events: Array<{ ts: number; kind: string; from: string; to?: string; id?: number; text: string }>
+}
+export interface AutomationView {
+  cron: Array<{ id: string; fireAt: number; sessionLabel: string; text: string; recurLabel: string | null }>
+  queue: Array<{ id: string; session: string; text: string; queuedAt: number }>
   budget: { spent: number; cap: number | null } | null
 }
-export interface DiffView { clean: boolean; stat: string; diff: string; untracked: string[]; cwd: string | null; error?: string }
 
 export interface InitDataResult { ok: boolean; userId?: string; reason?: string }
 
@@ -262,13 +286,45 @@ async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: strin
     if (!deps.readSettings) return json({ error: 'unavailable' }, 404)
     return json(await deps.readSettings())
   }
-  if (url.pathname === '/api/usage') {
-    if (!deps.readUsage) return json({ error: 'unavailable' }, 404)
-    return json(await deps.readUsage())
+  if (url.pathname === '/api/sessions') {
+    if (!deps.listSessions) return json({ error: 'unavailable' }, 404)
+    return json({ sessions: await deps.listSessions() })
   }
-  if (url.pathname === '/api/diff') {
-    if (!deps.readDiff) return json({ error: 'unavailable' }, 404)
-    return json(await deps.readDiff())
+  if (url.pathname === '/api/session/feed') {
+    if (!deps.readSessionFeed) return json({ error: 'unavailable' }, 404)
+    const feed = await deps.readSessionFeed(url.searchParams.get('sid') || '')
+    return feed ? json(feed) : json({ error: 'unknown session' }, 404)
+  }
+  if (url.pathname === '/api/bus') {
+    if (!deps.readBus) return json({ error: 'unavailable' }, 404)
+    return json(await deps.readBus())
+  }
+  if (url.pathname === '/api/auto') {
+    if (!deps.readAutomation) return json({ error: 'unavailable' }, 404)
+    return json(await deps.readAutomation())
+  }
+
+  // ---- Console actions (POST; allowlist-authed, NOT canWrite-gated — these are the same session
+  // controls chat already grants every allowlisted user, not filesystem writes). Audited. ----
+  if (url.pathname === '/api/session/act') {
+    if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405)
+    if (!deps.sessionAction) return json({ error: 'unavailable' }, 404)
+    const body = await req.json().catch(() => null) as { sid?: unknown; action?: unknown; text?: unknown } | null
+    const action = String(body?.action || '') as SessionAct
+    if (!body || typeof body.sid !== 'string' || !['stop', 'compact', 'send'].includes(action)) return json({ error: 'bad body' }, 400)
+    deps.log(`webapp: session ${action} sid=${body.sid}${action === 'send' ? ` chars=${String(body.text ?? '').length}` : ''} user=${userId}`)
+    const err = await deps.sessionAction(userId, body.sid, action, typeof body.text === 'string' ? body.text : undefined)
+    return err ? json({ error: err }, 400) : json({ ok: true })
+  }
+  if (url.pathname === '/api/auto/cancel') {
+    if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405)
+    if (!deps.automationCancel) return json({ error: 'unavailable' }, 404)
+    const body = await req.json().catch(() => null) as { kind?: unknown; id?: unknown } | null
+    const kind = String(body?.kind || '')
+    if (!body || typeof body.id !== 'string' || !['cron', 'queue'].includes(kind)) return json({ error: 'bad body' }, 400)
+    deps.log(`webapp: cancel ${kind} id=${body.id} user=${userId}`)
+    const err = await deps.automationCancel(userId, kind as 'cron' | 'queue', body.id)
+    return err ? json({ error: err }, 400) : json({ ok: true })
   }
 
   // ---- Settings mutation (POST; gated by canWrite, same as the file writes) ----
