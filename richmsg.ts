@@ -32,7 +32,7 @@ export function htmlPanelToRich(html: string): InputRichMessage {
 // or a non-2xx. One place owns the URL/JSON shape so callers stay declarative.
 // SECURITY: the fetch URL embeds the bot token — the thrown errors below MUST stay method + Telegram's
 // `description` only. Never interpolate the URL (or `res.url`) into an error: a send-only avatar token
-// (party-bus P3) surfaces its errors to the agent/room, so a URL there would leak the token.
+// (agent-bus P3) surfaces its errors to the agent/room, so a URL there would leak the token.
 export async function callTelegram<T = unknown>(token: string, method: string, payload: Record<string, unknown>): Promise<T> {
   const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
     method: 'POST',
@@ -81,7 +81,7 @@ export function buildSendPayload(
     chat_id: chatId,
     rich_message: richMessage,
     ...(opts?.messageThreadId !== undefined ? { message_thread_id: opts.messageThreadId } : {}),
-    // allow_sending_without_reply: a reply target deleted mid-turn (party-bus P4 reply addressing) must
+    // allow_sending_without_reply: a reply target deleted mid-turn (agent-bus P4 reply addressing) must
     // not fail the whole send — Telegram then just sends it un-threaded instead of erroring.
     ...(opts?.replyToMessageId !== undefined ? { reply_parameters: { message_id: opts.replyToMessageId, allow_sending_without_reply: true } } : {}),
     ...(opts?.disableNotification ? { disable_notification: true } : {}),

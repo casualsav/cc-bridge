@@ -208,7 +208,7 @@ export function toolBadge(tool: string): [string, string] {
   return ['🔧', tool]   // unregistered tool
 }
 
-// party-bus: a subagent (Task/Agent) spawn shows as a <details> chevron whose summary is italic
+// agent-bus: a subagent (Task/Agent) spawn shows as a <details> chevron whose summary is italic
 // "Agent - <Type>" and whose body is the full prompt in a blockquote — tap the disclosure triangle to
 // see exactly what it was asked. Several launched at once FOLD to one "Agent ×N" chevron (see
 // renderAgents) so they don't crowd the card. <details> renders ONLY in rich_message (the card's

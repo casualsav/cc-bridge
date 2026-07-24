@@ -5,7 +5,7 @@
 // transfer to `slk`/`dsc` unchanged. Parameterized by a small platform config {name, socketPath};
 // the two bin entries (slk-ctl.ts / dsc-ctl.ts) supply their own socket path.
 //
-// The party-line verbs (ask/answer/roster/…) and `.`-via-tmux-pane resolution are Telegram-only for
+// The agent-bus verbs (ask/answer/roster/…) and `.`-via-tmux-pane resolution are Telegram-only for
 // now: on Slack/Discord `.` resolves to the daemon's live replyTarget chat (daemon side), so the CLI
 // stays the four classic verbs.
 import net from 'node:net'

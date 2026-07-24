@@ -1,4 +1,4 @@
-// avatar-msg-tokens.ts — party-bus §6 (per-topic reply avatars).
+// avatar-msg-tokens.ts — agent-bus §6 (per-topic reply avatars).
 //
 // When a session's reply is sent under that session's OWN send-only avatar bot (not the shared bridge
 // bot), a later `tg edit` of that message must go through the SAME bot: Telegram only lets a bot

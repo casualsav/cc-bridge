@@ -39,10 +39,10 @@ type StatusCardDeps = {
   // exits the session + suppresses recreation. (Silently dropping the entry here let a live session's
   // topic repopulate within ~30s — discovery recreated it before the 2-min sweep could exit it.)
   onTopicGone: (sessionId: string, threadId: number) => void
-  // party-bus P2: a compact live-roster line for the Switchboard ("☎️ exec · analysis · mimo"), or null when
-  // party isn't active / only one endpoint is live. Daemon-computed + memoized (liveness only, no pane
+  // agent-bus P2: a compact live-roster line for the agent bus ("☎️ exec · analysis · mimo"), or null when
+  // the bus isn't active / only one endpoint is live. Daemon-computed + memoized (liveness only, no pane
   // captures) so rendering it on every card stays cheap. Optional so a fake-bot unit test can omit it.
-  partyRoster?: () => Promise<string | null>
+  busRoster?: () => Promise<string | null>
   // The agent kind driving a pane (read from the tmux @tg_agent pane option the spawner stamps).
   // null on a pre-stamp pane is treated as Claude (the legacy default). The card branches on this so
   // a Codex pane renders model/context from its rollout + pane footer instead of Claude's statusLine.
@@ -84,7 +84,7 @@ const lastGoodStatus = new Map<string, StatuslineData>()
 // read again — no staleness regression, and /clear's invalidatePaneStatus still drops it.
 const PANE_STATUS_FILE = join(STATE_DIR, 'pane-status.json')
 for (const [p, s] of Object.entries(readJsonFile<Record<string, StatuslineData>>(PANE_STATUS_FILE, {}))) lastGoodStatus.set(p, s)
-// party-bus §7 (per-agent ctx% roster): read-only view of ANY pane's last-good statusline. Every
+// agent-bus §7 (per-agent ctx% roster): read-only view of ANY pane's last-good statusline. Every
 // topic's pane is captured by updateTopicPins (not just the focused one), so the roster reads each
 // agent's ctxPct from here — no fresh, expensive per-pane capture on every card render.
 export function paneStatus(paneId: string): StatuslineData | undefined { return lastGoodStatus.get(paneId) }
@@ -351,9 +351,9 @@ export async function statusCardText(paneId: string | null): Promise<string> {
     // Context group: the context bar + token data.
     if (status.ctxPct != null) groups.push(`💾 Context <code>${pinBar(status.ctxPct)}</code> ${status.ctxPct}%${status.tokens ? `  ·  ${status.tokens}` : ''}`)
   }
-  // party-bus P2 roster line — its own group just above the pairing footer (kept OUT of the head so
+  // agent-bus P2 roster line — its own group just above the pairing footer (kept OUT of the head so
   // the collapsed pin banner still leads with the 🧠 model·context line). Already HTML-escaped + memoized.
-  const roster = deps.partyRoster ? await deps.partyRoster().catch(() => null) : null
+  const roster = deps.busRoster ? await deps.busRoster().catch(() => null) : null
   if (roster) groups.push(roster)
   groups.push(`🔗 Paired${deps.botUsername() ? ` · @${escapeHtml(deps.botUsername())}` : ''} · connected`)
   return `${head}\n\n${groups.join(`\n${CARD_RULE}\n`)}`
@@ -463,7 +463,7 @@ async function codexStatusCardText(paneId: string): Promise<string> {
   if (cwd) groups.push(`📁 <code>${escapeHtml(cwd)}</code>${branch ? ` · 🌿 ${escapeHtml(branch)}` : ''}`)
   if (ctxPct != null) groups.push(`💾 Context <code>${pinBar(ctxPct)}</code> ${ctxPct}%${tokens ? `  ·  ${tokens}` : ''}`)
   else if (tokens) groups.push(`💾 ${tokens}`)
-  const roster = deps.partyRoster ? await deps.partyRoster().catch(() => null) : null
+  const roster = deps.busRoster ? await deps.busRoster().catch(() => null) : null
   if (roster) groups.push(roster)
   groups.push(`🔗 Paired${deps.botUsername() ? ` · @${escapeHtml(deps.botUsername())}` : ''} · connected`)
   return `${head}\n\n${groups.join(`\n${CARD_RULE}\n`)}`

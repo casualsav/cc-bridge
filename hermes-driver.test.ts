@@ -2,23 +2,23 @@ import { test, expect } from 'bun:test'
 import { renderHermesPrompt, parseHermesResult, hermesArgv, runHermes, type HermesTask } from './hermes-driver.ts'
 
 const task = (over: Partial<HermesTask> = {}): HermesTask =>
-  ({ id: 1, from: 'claude-tg', room: '-100', text: 'summarize the diff', refs: [], sharedDir: '/s/party/-100/shared', ...over })
+  ({ id: 1, from: 'claude-tg', room: '-100', text: 'summarize the diff', refs: [], sharedDir: '/s/agent-bus/-100/shared', ...over })
 
 // ---- renderHermesPrompt (pure) ----
 
 test('renderHermesPrompt carries attribution, the task, and the shared-dir instruction', () => {
   const p = renderHermesPrompt(task())
-  expect(p).toContain('[party-bus task from @claude-tg]')
+  expect(p).toContain('[agent-bus task from @claude-tg]')
   expect(p).toContain('summarize the diff')
-  expect(p).toContain('/s/party/-100/shared/')
+  expect(p).toContain('/s/agent-bus/-100/shared/')
   expect(p).not.toContain('Attached files')   // no refs
 })
 
 test('renderHermesPrompt lists refs as paths when present', () => {
-  const p = renderHermesPrompt(task({ refs: ['/s/party/-100/shared/a.json', '/s/party/-100/shared/b.md'] }))
+  const p = renderHermesPrompt(task({ refs: ['/s/agent-bus/-100/shared/a.json', '/s/agent-bus/-100/shared/b.md'] }))
   expect(p).toContain('Attached files')
-  expect(p).toContain('- /s/party/-100/shared/a.json')
-  expect(p).toContain('- /s/party/-100/shared/b.md')
+  expect(p).toContain('- /s/agent-bus/-100/shared/a.json')
+  expect(p).toContain('- /s/agent-bus/-100/shared/b.md')
 })
 
 // ---- parseHermesResult (pure) ----

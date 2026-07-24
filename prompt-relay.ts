@@ -166,7 +166,7 @@ export function permButtonLabel(opt: { n: number; label: string }): string {
   return `${icon} ${short}`
 }
 
-// ---- Catch-all stuck-screen card (party-bus v2) ----
+// ---- Catch-all stuck-screen card (agent-bus v2) ----
 // The actionable upgrade of the v1 text-only warning: when a pane wedges at a screen NO detector parses,
 // show the terminal tail + whatever options we could scrape, and offer buttons that send raw keys (or a
 // reply-to-type route). Wording is explicit that taps inject raw keystrokes into the terminal.
@@ -260,7 +260,7 @@ export async function relayPermissionToTelegram(perm: PermissionPrompt, paneId: 
   if (perm.preview) parts.push(`<blockquote>${escapeHtml(perm.preview)}</blockquote>`)
   const body = parts.join('\n')
 
-  // party-bus P4: carry a token identifying THIS prompt, so the handler can reject a stale/second-human
+  // agent-bus P4: carry a token identifying THIS prompt, so the handler can reject a stale/second-human
   // tap whose prompt already moved on instead of injecting it blind (see the pperm handler).
   const tok = permPromptToken(perm.question)
   const kb: Button[][] = perm.options.map(opt => [{ text: permButtonLabel(opt), data: `pperm:${tok}:${opt.n}` }])

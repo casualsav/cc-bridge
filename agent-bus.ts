@@ -1,4 +1,4 @@
-// Party-line domain module (party-bus P1) — the pure half of the multi-agent "party line", by the
+// Agent-bus domain module (agent-bus P1) — the pure half of the multi-agent "agent bus", by the
 // same split as topics.ts (pure store) vs topic-runtime.ts (grammy/tmux wiring). No grammy or tmux
 // here, so it's unit-testable without a bot: the daemon wires the pane side (sessionForPane /
 // paneForSession / injecting the ask & answer blocks) over these lookups.
@@ -12,13 +12,14 @@ import { isAbsolute, join, resolve, sep } from 'node:path'
 import { appendFileSync, mkdirSync, readFileSync } from 'node:fs'
 import { STATE_DIR, readJsonFile, writeJsonFile } from './common.ts'
 
-export const PARTY_FILE = join(STATE_DIR, 'party.json')
+export const BUS_FILE = join(STATE_DIR, 'agent-bus.json')
 
-// Kill switch (mirrors agent.ts CODEX_ENABLED): the Switchboard / party bus is DISABLED for release.
-// The code below is retained but gated off at every user-facing surface — the bus verbs, the pinned-card
-// roster line, party digests, the settings toggle, and the periodic sweep. Flip to `true` to re-enable
-// (and restore the `off-mcp/CLAUDE.md` convention section — see `docs/switchboard.disabled.md`).
-export const SWITCHBOARD_ENABLED = false
+// Verbs gate (mirrors agent.ts CODEX_ENABLED): gates the bus verbs (ask/answer/post/roster/history/
+// shared) and the periodic delivery sweep. The bus is live backend plumbing.
+export const AGENT_BUS_ENABLED = true
+// UI gate: the pinned-card roster line and the /settings toggle row stay dark — the bus is backend
+// plumbing, not a surfaced feature. Flip to `true` to re-surface them (see docs/agent-bus.md).
+export const AGENT_BUS_PIN_UI = false
 
 // Consecutive agent→agent asks with no intervening human message before the daemon stops delivering
 // and posts "⏸ agents paused". Two bots answering each other forever is the money-fire failure mode;
@@ -28,12 +29,12 @@ export const HOP_LIMIT = 4
 // silent target never leaves the asker waiting forever. 30 min: long enough for a real task.
 export const ASK_TTL_MS = 30 * 60_000
 
-export type PartyPending = {
+export type BusPending = {
   id: number
   fromSid: string     // asker's endpoint id (a claude sessionId; panes re-resolved at delivery)
   toSid: string       // target's endpoint id (a claude sessionId, or a hermes endpoint name)
   // Endpoint kind for from/to. Kept ALONGSIDE fromSid/toSid (not folded into an object) so live
-  // party.json entries from before P1.5 still load — loadParty defaults a missing kind to 'claude'.
+  // agent-bus.json entries from before P1.5 still load — loadBus defaults a missing kind to 'claude'.
   fromKind: 'claude' | 'hermes'
   toKind: 'claude' | 'hermes'
   fromName: string    // asker's endpoint name — the answer's @from attribution
@@ -45,28 +46,28 @@ export type PartyPending = {
   injected: boolean   // false = still queued (target was busy); true = delivered, awaiting an answer
 }
 
-export type PartyState = {
+export type BusState = {
   seq: number                             // monotonic ask-id counter
   hops: number                            // consecutive agent→agent asks since the last human message
-  pending: Record<string, PartyPending>   // keyed by String(id)
-  // Per-endpoint digest watermark (party-bus P2): endpoint id → the ts we last caught it up. On the
+  pending: Record<string, BusPending>     // keyed by String(id)
+  // Per-endpoint digest watermark (agent-bus P2): endpoint id → the ts we last caught it up. On the
   // next ask delivered to that endpoint we prepend a compact "since then" digest and re-stamp this.
   seen: Record<string, number>
 }
 
-const empty = (): PartyState => ({ seq: 0, hops: 0, pending: {}, seen: {} })
-let store: PartyState = empty()
+const empty = (): BusState => ({ seq: 0, hops: 0, pending: {}, seen: {} })
+let store: BusState = empty()
 let loaded = false
 let persist = true   // disabled by _resetForTest so unit tests never write to the real STATE_DIR
 
-function save(): void { if (persist) writeJsonFile(PARTY_FILE, store) }
+function save(): void { if (persist) writeJsonFile(BUS_FILE, store) }
 
-export function loadParty(): PartyState {
-  const raw = readJsonFile<Partial<PartyState> | null>(PARTY_FILE, null)
+export function loadBus(): BusState {
+  const raw = readJsonFile<Partial<BusState> | null>(BUS_FILE, null)
   if (raw && typeof raw === 'object') {
-    const pending: Record<string, PartyPending> = {}
+    const pending: Record<string, BusPending> = {}
     for (const [id, e] of Object.entries(raw.pending ?? {})) {
-      const p = e as Partial<PartyPending>
+      const p = e as Partial<BusPending>
       if (!p || typeof p.id !== 'number' || typeof p.fromSid !== 'string' || typeof p.toSid !== 'string') continue
       pending[id] = {
         id: p.id,
@@ -84,7 +85,7 @@ export function loadParty(): PartyState {
       }
     }
     // Sanitize the digest watermark like `pending`: keep only finite-number values (a corrupt/hand-
-    // edited party.json can't poison it). Stale keys are pruned on the next markSeen, not here.
+    // edited agent-bus.json can't poison it). Stale keys are pruned on the next markSeen, not here.
     const seen: Record<string, number> = {}
     for (const [k, v] of Object.entries(raw.seen ?? {})) if (typeof v === 'number' && Number.isFinite(v)) seen[k] = v
     store = {
@@ -100,7 +101,7 @@ export function loadParty(): PartyState {
   return store
 }
 
-function ensureLoaded(): void { if (!loaded) loadParty() }
+function ensureLoaded(): void { if (!loaded) loadBus() }
 
 // ---- pending-ask registry ----
 
@@ -110,10 +111,10 @@ export function createPending(
   fields: { fromSid: string; toSid: string; fromName: string; toName: string; text: string; refs: string[]
             fromKind?: 'claude' | 'hermes'; toKind?: 'claude' | 'hermes' },
   now: number,
-): PartyPending {
+): BusPending {
   ensureLoaded()
   const id = ++store.seq
-  const p: PartyPending = {
+  const p: BusPending = {
     id, ...fields,
     fromKind: fields.fromKind ?? 'claude', toKind: fields.toKind ?? 'claude',
     createdAt: now, expiresAt: now + ASK_TTL_MS, injected: false,
@@ -123,14 +124,14 @@ export function createPending(
   return p
 }
 
-export function getPending(id: number): PartyPending | undefined { ensureLoaded(); return store.pending[String(id)] }
+export function getPending(id: number): BusPending | undefined { ensureLoaded(); return store.pending[String(id)] }
 export function removePending(id: number): void { ensureLoaded(); delete store.pending[String(id)]; save() }
-export function listPending(): PartyPending[] { ensureLoaded(); return Object.values(store.pending) }
+export function listPending(): BusPending[] { ensureLoaded(); return Object.values(store.pending) }
 
 // Re-insert a pending by its EXISTING id — restore after a failed answer delivery (the asker's pane
 // vanished between resolve and paste) so the ask stays open for a retry instead of being silently
 // lost. Keyed by p.id, so it can't collide with a freshly-minted ask.
-export function putPending(p: PartyPending): void { ensureLoaded(); store.pending[String(p.id)] = p; save() }
+export function putPending(p: BusPending): void { ensureLoaded(); store.pending[String(p.id)] = p; save() }
 
 // Mark an ask delivered AND re-arm its TTL from the delivery moment, so the answer window (ASK_TTL_MS)
 // starts when the target actually receives it — not when the ask was minted. Without this, a target
@@ -147,7 +148,7 @@ export function markInjected(id: number, now: number): void {
 // Un-injected asks for a target session — the delivery queue the daemon sweeps when that session
 // sits at a normal prompt (so an ask to a busy agent waits politely instead of clobbering its turn).
 // Oldest first (FIFO by ask id).
-export function queuedFor(toSid: string): PartyPending[] {
+export function queuedFor(toSid: string): BusPending[] {
   ensureLoaded()
   return Object.values(store.pending).filter(p => !p.injected && p.toSid === toSid).sort((a, b) => a.id - b.id)
 }
@@ -155,7 +156,7 @@ export function queuedFor(toSid: string): PartyPending[] {
 // Remove and return every pending whose TTL has passed — the daemon tells each asker "no answer".
 // Covers both injected-awaiting-answer AND still-queued (a target that never freed up), so nothing
 // lingers forever.
-export function expirePending(now: number): PartyPending[] {
+export function expirePending(now: number): BusPending[] {
   ensureLoaded()
   const expired = Object.values(store.pending).filter(p => p.expiresAt <= now)
   if (!expired.length) return []
@@ -175,10 +176,10 @@ export function hopsExceeded(): boolean { ensureLoaded(); return store.hops > HO
 
 // ---- endpoint resolution (pure; the daemon passes a topic snapshot) ----
 
-// A party endpoint resolved by name. kind 'claude' = a topic session (id = its sessionId); kind
+// A bus endpoint resolved by name. kind 'claude' = a topic session (id = its sessionId); kind
 // 'hermes' = an adapter-driven agent (id = its endpoint name). The daemon builds this list from the
-// topic store + the configured hermes endpoints and passes it in — party.ts stays grammy/tmux-free.
-export type PartyEndpoint = { name: string; kind: 'claude' | 'hermes'; id: string; closed: boolean }
+// topic store + the configured hermes endpoints and passes it in — agent-bus.ts stays grammy/tmux-free.
+export type BusEndpoint = { name: string; kind: 'claude' | 'hermes'; id: string; closed: boolean }
 
 // An endpoint name is a topic's display name, minus the auto-appended " · <branch>" and " #<n>"
 // sibling suffixes (mirrors topic-runtime's title base), lower-cased for case-insensitive matching.
@@ -190,7 +191,7 @@ export function normalizeEndpointName(name: string): string {
 // Resolve `@name` to a single OPEN endpoint of EITHER kind, or an error the caller relays back to the
 // asker (fail loudly — never silently drop). Ambiguity — two open endpoints share a base name,
 // INCLUDING across kinds (a topic "mimo" and a hermes "mimo") — is an explicit error, not a pick.
-export function resolveEndpoint(name: string, endpoints: PartyEndpoint[]): { kind: 'claude' | 'hermes'; id: string } | { error: string } {
+export function resolveEndpoint(name: string, endpoints: BusEndpoint[]): { kind: 'claude' | 'hermes'; id: string } | { error: string } {
   const want = normalizeEndpointName(name)
   if (!want) return { error: 'no endpoint name given' }
   const open = endpoints.filter(e => !e.closed && normalizeEndpointName(e.name) === want)
@@ -205,7 +206,7 @@ export function resolveEndpoint(name: string, endpoints: PartyEndpoint[]): { kin
 
 // The display name for an endpoint id (for @from attribution / logs); falls back to the raw id when
 // the id has no endpoint (e.g. the General anchor session, or an unregistered pane).
-export function nameForEndpoint(id: string, endpoints: PartyEndpoint[]): string {
+export function nameForEndpoint(id: string, endpoints: BusEndpoint[]): string {
   const e = endpoints.find(e => e.id === id)
   return e ? normalizeEndpointName(e.name) || id : id
 }
@@ -221,7 +222,7 @@ export function confineRef(ref: string, sharedDir: string): { path: string } | {
   const base = resolve(sharedDir)
   const resolved = isAbsolute(raw) ? resolve(raw) : resolve(base, raw)
   if (resolved !== base && !resolved.startsWith(base + sep)) {
-    return { error: `ref "${ref}" escapes the room's shared dir (party/<room>/shared/)` }
+    return { error: `ref "${ref}" escapes the room's shared dir (agent-bus/<room>/shared/)` }
   }
   return { path: resolved }
 }
@@ -229,7 +230,7 @@ export function confineRef(ref: string, sharedDir: string): { path: string } | {
 // ---- room paths + ledger (durable, greppable append-only log) ----
 
 // Room = the bound group chat id (P1: one room). Its dir holds the ledger + the shared workspace.
-export function roomDir(room: string): string { return join(STATE_DIR, 'party', room) }
+export function roomDir(room: string): string { return join(STATE_DIR, 'agent-bus', room) }
 export function sharedDir(room: string): string { return join(roomDir(room), 'shared') }
 // mkdir + return the room's shared workspace — deliverables live here; `tg shared` surfaces the path.
 export function ensureSharedDir(room: string): string {
@@ -268,11 +269,11 @@ export function tailLedger(room: string, n: number): LedgerEntry[] {
   return out.slice(-n)
 }
 
-// ---- digest watermark + digest builder (party-bus P2) ----
+// ---- digest watermark + digest builder (agent-bus P2) ----
 
 // How long a seen-watermark survives with no new delivery before markSeen prunes it. A Claude
 // endpoint id is a per-session sessionId that churns on every /clear or respawn, so without a bound
-// `seen` would grow forever in party.json. 7 days: far past any live session, small enough to stay tiny.
+// `seen` would grow forever in agent-bus.json. 7 days: far past any live session, small enough to stay tiny.
 export const SEEN_TTL_MS = 7 * 24 * 60 * 60_000
 
 // The ts an endpoint was last caught up (handed a digest); 0 = never — the caller then shows the most
@@ -311,7 +312,7 @@ export function digestSince(
 }
 
 // Test seam: mirror topics.ts — seed the in-memory store, mark loaded, disable disk persistence.
-export function _resetForTest(s?: Partial<PartyState>): void {
+export function _resetForTest(s?: Partial<BusState>): void {
   store = { ...empty(), ...s }
   loaded = true
   persist = false

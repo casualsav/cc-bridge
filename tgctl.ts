@@ -2,19 +2,19 @@
 // Off-MCP actions CLI. A plugin-less session has no MCP reply tool, so it takes deliberate Telegram
 // actions — send a file/photo, react, edit a status message — by talking to the daemon's unix socket
 // directly with the same {t:'call'} the shim used. (Plain text replies are relayed automatically
-// from the transcript; this is the rest.) Switchboard adds agent↔agent verbs (ask/answer/…).
+// from the transcript; this is the rest.) The agent bus adds agent↔agent verbs (ask/answer/…).
 //
 // <chat> is `.` in a DM (resolves to the sole allowlisted chat) or an explicit id in a group.
 //   tgctl send   <chat> <path> [caption|-]     send a file/photo (- reads caption from stdin)
 //   tgctl react  <chat> <message_id> <emoji>   add an emoji reaction
 //   tgctl edit   <chat> <message_id> <text|->  edit a message the bot sent (- reads stdin)
 //   tgctl reply  <chat> <text|->               send a text message (- reads stdin)
-// Switchboard (only inside a bridged session; the daemon resolves the caller from its tmux pane):
+// Agent bus (only inside a bridged session; the daemon resolves the caller from its tmux pane):
 //   tgctl ask    <name> <text|-> [--ref p]…    ask another agent (async — turn ends, answer arrives later)
 //   tgctl answer <id>   <text|-> [--ref p]…    answer an ask you received (id from its <tg …ask=N> block)
 //   tgctl post   <text|->                       broadcast to the humans in the room
 //   tgctl roster                                who's live in the room
-//   tgctl history [n]                           recent switchboard activity
+//   tgctl history [n]                           recent agent-bus activity
 //   tgctl shared                                the room's shared-workspace dir (put deliverables here)
 import net from 'node:net'
 import { readFileSync } from 'node:fs'
@@ -31,15 +31,15 @@ if (cmd === 'doctor') {
 }
 
 // The caller's tmux pane rides along so the daemon can resolve `.` to THIS session's chat — and, for
-// party verbs, WHICH endpoint the caller is (pane → topic session) — without an explicit id.
+// bus verbs, WHICH endpoint the caller is (pane → topic session) — without an explicit id.
 const pane = process.env.TMUX_PANE
 let name = '', args: Record<string, unknown> = {}
 
-// Party verbs take flag args (--ref, --await), so parse positionals + refs out of argv rather than
+// Bus verbs take flag args (--ref, --await), so parse positionals + refs out of argv rather than
 // the fixed chat/a/b slots the classic verbs use. Kept in a separate branch so classic verbs are
 // byte-for-byte unchanged.
-const PARTY = new Set(['ask', 'answer', 'post', 'roster', 'history', 'shared'])
-if (PARTY.has(cmd)) {
+const BUS = new Set(['ask', 'answer', 'post', 'roster', 'history', 'shared'])
+if (BUS.has(cmd)) {
   const rest = process.argv.slice(3)
   const refs: string[] = []
   const pos: string[] = []

@@ -26,7 +26,7 @@
    renderers.
 5. **Capability-gated features.** Core never assumes a feature exists; it checks
    `channel.caps`. Telegram-only surfaces (inline queries, Mini App, rich-message drafts,
-   forum topics, avatar switchboard multi-bot) stay in the Telegram adapter or gate off
+   forum topics, agent-bus avatar multi-bot) stay in the Telegram adapter or gate off
    cleanly elsewhere.
 6. **Slack/Discord ship as MVP first**: inbound text/files → pane, replies out, permission
    /prompt buttons, reactions-as-controls, core slash commands (mode/model/effort/stop/
@@ -35,8 +35,8 @@
 
 ## Audit summary (2026-07-05, v0.3.56 tree)
 
-- **Pure core already** (no Telegram): state, pane-io, transcript, prompt, party,
-  party-block, accounts, hermes-driver, clauding, doctor, github, msg-tracker, proc,
+- **Pure core already** (no Telegram): state, pane-io, transcript, prompt, agent-bus,
+  agent-bus-block, accounts, hermes-driver, clauding, doctor, github, msg-tracker, proc,
   relay-plan, stamp-transcript, statusline, stuck-plan, time, token-lock, tunnel, watchdog,
   voice, voice-out, hardware, queue-side pure logic.
 - **grammy-typed satellites** (become Telegram-adapter modules or get neutral cores):

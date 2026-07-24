@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { formatAskBlock, formatAnswerBlock, formatDigestBlock, formatRosterLine } from './party-block.ts'
+import { formatAskBlock, formatAnswerBlock, formatDigestBlock, formatRosterLine } from './agent-bus-block.ts'
 
 test('formatAskBlock carries @from, the ask id, and the text', () => {
   expect(formatAskBlock('architect', 7, 'scrape pricing pages'))
@@ -7,13 +7,13 @@ test('formatAskBlock carries @from, the ask id, and the text', () => {
 })
 
 test('formatAskBlock appends refs as one quoted, space-joined attribute', () => {
-  expect(formatAskBlock('architect', 7, 'go', ['party/-100/shared/a.md', 'party/-100/shared/b.json']))
-    .toBe('<tg @architect ask=7 refs="party/-100/shared/a.md party/-100/shared/b.json">go</tg>')
+  expect(formatAskBlock('architect', 7, 'go', ['agent-bus/-100/shared/a.md', 'agent-bus/-100/shared/b.json']))
+    .toBe('<tg @architect ask=7 refs="agent-bus/-100/shared/a.md agent-bus/-100/shared/b.json">go</tg>')
 })
 
 test('formatAnswerBlock echoes the ask id via re=', () => {
-  expect(formatAnswerBlock('executor', 7, 'done — 900 rows', ['party/-100/shared/x.json']))
-    .toBe('<tg @executor re=7 refs="party/-100/shared/x.json">done — 900 rows</tg>')
+  expect(formatAnswerBlock('executor', 7, 'done — 900 rows', ['agent-bus/-100/shared/x.json']))
+    .toBe('<tg @executor re=7 refs="agent-bus/-100/shared/x.json">done — 900 rows</tg>')
 })
 
 test('empty / whitespace refs are dropped, no refs attribute emitted', () => {
@@ -22,11 +22,11 @@ test('empty / whitespace refs are dropped, no refs attribute emitted', () => {
 })
 
 test('a double-quote in a ref is HTML-escaped so the attribute never breaks', () => {
-  expect(formatAskBlock('a', 1, 'hi', ['party/-100/shared/we"ird.md']))
-    .toBe('<tg @a ask=1 refs="party/-100/shared/we&quot;ird.md">hi</tg>')
+  expect(formatAskBlock('a', 1, 'hi', ['agent-bus/-100/shared/we"ird.md']))
+    .toBe('<tg @a ask=1 refs="agent-bus/-100/shared/we&quot;ird.md">hi</tg>')
 })
 
-// ---- formatDigestBlock (party-bus P2) ----
+// ---- formatDigestBlock (agent-bus P2) ----
 
 test('formatDigestBlock renders one glyphed line per entry inside a since-labelled block', () => {
   expect(formatDigestBlock([
@@ -34,7 +34,7 @@ test('formatDigestBlock renders one glyphed line per entry inside a since-labell
     { kind: 'post', from: 'mimo', text: 'bus is live' },
     { kind: 'answer', from: 'analysis', to: 'exec', id: 4, text: '900 rows' },
   ], '12m')).toBe(
-    '<tg party-digest since 12m>\n' +
+    '<tg bus-digest since 12m>\n' +
     '→ exec→analysis #4: scrape pricing\n' +
     '📣 mimo: bus is live\n' +
     '✓ analysis→exec #4: 900 rows\n' +
@@ -67,7 +67,7 @@ test('formatDigestBlock neutralizes angle brackets in from/to too, not just text
   expect(out).toContain('a‹/tg›x→b›c')            // from + to both de-tagged
 })
 
-// ---- formatRosterLine (party-bus P2) ----
+// ---- formatRosterLine (agent-bus P2) ----
 
 test('formatRosterLine builds a ☎️ line from >1 agent; null for a solo bus', () => {
   expect(formatRosterLine([{ name: 'exec' }, { name: 'analysis' }, { name: 'mimo' }])).toBe('☎️ exec · analysis · mimo')
@@ -96,7 +96,7 @@ test('formatRosterLine clamps THEN escapes so a & near the 110-char limit never 
 })
 
 test('formatRosterLine never splits an emoji surrogate pair at the clamp boundary (regression)', () => {
-  // Live 7-agent roster (party-bus incident) whose 109-code-unit cut lands mid-🟢: the first 6
+  // Live 7-agent roster (agent-bus incident) whose 109-code-unit cut lands mid-🟢: the first 6
   // cells + separators consume exactly 108 UTF-16 code units, so `raw.slice(0, 109)` takes only the
   // high surrogate (D83D) of the 7th cell's 🟢 (U+1F7E2 = D83D DFE2), emitting a lone surrogate —
   // invalid UTF-8 → Telegram 400s the whole sendMessage. The old `raw.slice(0, 109)` cut exactly there.

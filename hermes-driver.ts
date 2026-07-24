@@ -1,4 +1,4 @@
-// Hermes agent driver (party-bus P1.5) — the "inner side" of a non-Claude endpoint. A Hermes
+// Hermes agent driver (agent-bus P1.5) — the "inner side" of a non-Claude endpoint. A Hermes
 // endpoint (Nous Research Hermes Agent) is driven by spawning `hermes --profile <name> -z "<prompt>"`,
 // which runs the agent one-shot and prints ONLY the final response text to stdout (traces stripped,
 // memory + tools loaded, approvals auto-bypassed — "intended for scripts/pipes"). So the driver is a
@@ -20,7 +20,7 @@ export const DEFAULT_HERMES_TIMEOUT_S = 600
 // the task, its shared-dir ref paths (results-by-reference — the agent Reads them itself), and where to
 // write deliverables. PURE.
 export function renderHermesPrompt(task: HermesTask): string {
-  const lines = [`[party-bus task from @${task.from}]`, '', task.text]
+  const lines = [`[agent-bus task from @${task.from}]`, '', task.text]
   if (task.refs.length) lines.push('', 'Attached files (read as needed):', ...task.refs.map(r => `- ${r}`))
   lines.push('', `Write any deliverables under ${task.sharedDir}/ and mention their paths in your reply.`)
   return lines.join('\n')

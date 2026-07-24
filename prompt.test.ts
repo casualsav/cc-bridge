@@ -419,7 +419,7 @@ test('detectPermissionPrompt parses a Yes/No confirmation', () => {
   expect(p!.preview).toContain('Run `ls -la`?')
 })
 
-// ---- permPromptToken (party-bus P4): correlate a relayed approve/deny tap to its exact prompt ----
+// ---- permPromptToken (agent-bus P4): correlate a relayed approve/deny tap to its exact prompt ----
 
 test('permPromptToken is 8 hex, whitespace-stable, and distinct per question', () => {
   const q = 'Do you want to run this command?'
@@ -609,7 +609,7 @@ test('detectLoginPrompt needs the menu live at the bottom (not scrolled up)', ()
   expect(detectLoginPrompt(pane)).toBeNull()
 })
 
-// ---- stuck-screen watchdog helpers (party-bus) ----
+// ---- stuck-screen watchdog helpers (agent-bus) ----
 
 test('waitingPromptSignature is stable across a below-footer statusline tick, and null without a footer', () => {
   const mk = (clock: string) => [
@@ -634,7 +634,7 @@ test('isRecognizedPrompt is true for a known prompt so the watchdog never alerts
   expect(isRecognizedPrompt('plain assistant output, no prompt here')).toBe(false)
 })
 
-// ---- catch-all stuck-screen detection (party-bus v2) ----
+// ---- catch-all stuck-screen detection (agent-bus v2) ----
 
 test('detectStuckScreen cards a NOVEL confirmation (plan-mode exit): generic tier + numbered options', () => {
   const pane = [

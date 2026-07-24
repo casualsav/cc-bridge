@@ -1,15 +1,15 @@
 import { test, expect, beforeEach } from 'bun:test'
 import {
-  _resetForTest, loadParty,
+  _resetForTest, loadBus,
   createPending, getPending, removePending, putPending, listPending, markInjected, queuedFor, expirePending,
   recordAgentAsk, resetHops, currentHops, hopsExceeded, HOP_LIMIT, ASK_TTL_MS,
   normalizeEndpointName, resolveEndpoint, nameForEndpoint, confineRef,
   getSeen, markSeen, digestSince, SEEN_TTL_MS,
-  type PartyEndpoint, type LedgerEntry,
-} from './party.ts'
+  type BusEndpoint, type LedgerEntry,
+} from './agent-bus.ts'
 
 // Pure store + resolution logic only — each test seeds via _resetForTest so nothing touches the
-// real STATE_DIR/party.json (mirrors topics.test.ts).
+// real STATE_DIR/agent-bus.json (mirrors topics.test.ts).
 
 beforeEach(() => _resetForTest())
 
@@ -117,7 +117,7 @@ test('normalizeEndpointName strips @, the " · branch" and " #n" suffixes, lower
   expect(normalizeEndpointName('Executor #3 · feat/x')).toBe('executor')
 })
 
-const eps: PartyEndpoint[] = [
+const eps: BusEndpoint[] = [
   { id: 'a', kind: 'claude', name: 'architect', closed: false },
   { id: 'e', kind: 'claude', name: 'executor · main', closed: false },
   { id: 'r', kind: 'claude', name: 'reviewer', closed: true },
@@ -133,13 +133,13 @@ test('resolveEndpoint maps @name to a single open endpoint of either kind', () =
 test('resolveEndpoint fails loudly: unknown, closed-only, same-kind + cross-kind ambiguous', () => {
   expect(resolveEndpoint('nobody', eps)).toHaveProperty('error')
   expect((resolveEndpoint('reviewer', eps) as { error: string }).error).toMatch(/isn't running/)
-  const dup: PartyEndpoint[] = [
+  const dup: BusEndpoint[] = [
     { id: 'e1', kind: 'claude', name: 'executor', closed: false },
     { id: 'e2', kind: 'claude', name: 'executor · dev', closed: false },
   ]
   expect((resolveEndpoint('executor', dup) as { error: string }).error).toMatch(/ambiguous/)
   // cross-kind: a topic AND a hermes endpoint both named "mimo" → ambiguous, never a silent pick
-  const cross: PartyEndpoint[] = [
+  const cross: BusEndpoint[] = [
     { id: 'sess1', kind: 'claude', name: 'mimo', closed: false },
     { id: 'mimo', kind: 'hermes', name: 'mimo', closed: false },
   ]
@@ -154,7 +154,7 @@ test('nameForEndpoint returns the normalized name, or the raw id when unknown', 
 
 // ---- ref confinement ----
 
-const shared = '/state/party/-100/shared'
+const shared = '/state/agent-bus/-100/shared'
 
 test('confineRef accepts a relative ref inside the shared dir', () => {
   expect(confineRef('x.json', shared)).toEqual({ path: `${shared}/x.json` })
@@ -171,15 +171,15 @@ test('confineRef accepts an absolute ref that is itself inside the shared dir', 
   expect(confineRef(`${shared}/deep/z.json`, shared)).toEqual({ path: `${shared}/deep/z.json` })
 })
 
-test('loadParty on an empty state dir yields the empty store', () => {
+test('loadBus on an empty state dir yields the empty store', () => {
   _resetForTest()
-  const s = loadParty()
+  const s = loadBus()
   expect(s.seq).toBe(0)
   expect(s.hops).toBe(0)
   expect(s.seen).toEqual({})
 })
 
-// ---- digest watermark + digestSince (party-bus P2) ----
+// ---- digest watermark + digestSince (agent-bus P2) ----
 
 test('getSeen defaults to 0; markSeen stamps it', () => {
   expect(getSeen('sessA')).toBe(0)

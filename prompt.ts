@@ -420,7 +420,7 @@ export function detectPermissionPrompt(paneText: string): PermissionPrompt | nul
   return { question, preview: preview.join('\n').slice(0, 400), options }
 }
 
-// A short, capture-stable identity for a permission prompt (party-bus P4), so a relayed approve/deny
+// A short, capture-stable identity for a permission prompt (agent-bus P4), so a relayed approve/deny
 // button can carry the identity of the EXACT prompt it was shown for and the daemon can re-verify the
 // pane STILL shows that prompt before injecting — a stale tap on a superseded prompt is rejected, not
 // injected blind into whatever's on screen now. Whitespace is normalized so a benign capture difference
@@ -714,7 +714,7 @@ export function detectWorking(paneText: string): boolean {
   return tail.some(l => /^\s{0,2}[✢✳✶✻✽✺✷✸✹·●◐◓◑◒][^\n]*?\(\d+\s*[hms]/.test(l))
 }
 
-// ---- stuck-screen watchdog (party-bus): a backstop for a pane wedged at a prompt no detector parses ----
+// ---- stuck-screen watchdog (agent-bus): a backstop for a pane wedged at a prompt no detector parses ----
 // The shared footerIsLive fix keeps KNOWN prompts relaying; this catches a genuinely novel screen so a
 // session never hangs silently. WAITING_FOOTER = the input-soliciting footer hints Claude Code prints
 // under an interactive prompt — deliberately NOT "esc to interrupt" (that's a working pane, not a prompt).
@@ -740,7 +740,7 @@ export function isRecognizedPrompt(paneText: string): boolean {
     || !!detectLoginPrompt(paneText) || isUsageLimitChoice(paneText) || isPluginInstallUserScope(paneText)
 }
 
-// ---- Catch-all "stuck at an UNRECOGNIZED interactive screen" detector (party-bus v2) ----
+// ---- Catch-all "stuck at an UNRECOGNIZED interactive screen" detector (agent-bus v2) ----
 // v1 alerted (text-only) when a WAITING_FOOTER screen went unrecognized. This generalizes it into an
 // ACTIONABLE relay: it classifies ANY unrecognized interactive screen — a novel confirmation, an
 // arbitrary select — parses whatever options it can, and hands the daemon a stable signature + tier so
