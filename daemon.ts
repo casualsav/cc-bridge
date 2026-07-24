@@ -4252,18 +4252,17 @@ async function relaySlashCommand(
   await injectSlash(paneId, watcher, command)
   if (!echo) return
   const opts = thread ? { threadId: String(thread) } : undefined
-  // A typo'd command errors only in the TUI (never the transcript) — relay that error line.
-  const unknown = (await capturePane(paneId).catch(() => '')).match(/Unknown (?:slash )?command[^\n]*/i)
-  if (unknown) {
-    await channel.sendText(chat_id, `⚠️ ${escapeHtml(unknown[0].trim())}`, opts).catch(() => {})
-    return
-  }
   const file = await transcriptForPane(paneId, await paneCwd(paneId))
   if (!file) return
   for (let waited = 0; waited < 10_000; waited += 500) {
     await new Promise(r => setTimeout(r, 500))
-    const out = slashResultAfter(file, sentAt)?.trim()
-    if (out === undefined) continue   // nothing landed yet
+    const result = slashResultAfter(file, sentAt)
+    if (!result) continue             // nothing landed yet
+    if (result.error) {               // "Unknown command: /xyz" — a system entry, relayed verbatim
+      await channel.sendText(chat_id, `⚠️ ${escapeHtml(result.text)}`, opts).catch(() => {})
+      return
+    }
+    const out = result.text.trim()
     if (!out) return                  // ran without local output — a turn or a silent command
     const truncated = out.length > 3500 ? out.slice(0, 3500) + '\n… (truncated)' : out
     await channel.sendText(chat_id, `<pre>${escapeHtml(truncated)}</pre>`, opts).catch(() => {})

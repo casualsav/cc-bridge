@@ -183,10 +183,21 @@ test('slashResultAfter returns local command stdout at/after sinceMs, in both en
     { type: 'user', uuid: 'c0', timestamp: at(1000), message: { content: '<local-command-stdout>old output</local-command-stdout>' } },
     { type: 'user', uuid: 'c1', timestamp: at(5000), message: { content: '<local-command-stdout>Set effort level to medium</local-command-stdout>' } },
   ])
-  expect(slashResultAfter(f, 2000)).toBe('Set effort level to medium')
+  expect(slashResultAfter(f, 2000)).toEqual({ text: 'Set effort level to medium', error: false })
   expect(slashResultAfter(f, 6000)).toBe(null)   // nothing since — still waiting
   const sys = fixture([
     { type: 'system', subtype: 'local_command', uuid: 's1', timestamp: at(5000), content: '<local-command-stdout></local-command-stdout>' },
   ])
-  expect(slashResultAfter(sys, 2000)).toBe('')   // ran, but no local output
+  expect(slashResultAfter(sys, 2000)).toEqual({ text: '', error: false })   // ran, but no local output
+})
+
+test('slashResultAfter surfaces a rejected command as an error', () => {
+  const at = (ms: number) => new Date(ms).toISOString()
+  const f = fixture([
+    { type: 'system', subtype: 'informational', level: 'warning', uuid: 'e1', timestamp: at(5000), content: 'Unknown command: /xyz' },
+  ])
+  expect(slashResultAfter(f, 2000)).toEqual({ text: 'Unknown command: /xyz', error: true })
+  // An assistant merely SAYING "Unknown command" must never match (the pane-regex false positive).
+  const chat = fixture([{ type: 'assistant', uuid: 'a1', timestamp: at(5000), message: { content: [{ type: 'text', text: 'Unknown command: /xyz' }] } }])
+  expect(slashResultAfter(chat, 2000)).toBe(null)
 })
