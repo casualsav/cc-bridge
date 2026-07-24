@@ -4435,8 +4435,8 @@ async function relayBashCommand(t: CommandTarget, command: string, chat_id: stri
 // "Switch model?" confirm picker (relayed as buttons elsewhere, model not yet changed) doesn't
 // produce a false success. If it never reflects the change, fall back to the ✍ ack and stay quiet.
 async function relayModelSet(ctx: Context, paneId: string, watcher: PaneWatcher | null, arg: string): Promise<void> {
-  await injectSlash(paneId, watcher, `/model ${arg}`)
   const want = arg.trim().toLowerCase().split(/\s+/)[0]   // family token: opus / sonnet / haiku / fable
+  await injectSlash(paneId, watcher, `/model ${MODEL_ALIAS_IDS[want] ?? arg}`)
   let name: string | null = null
   for (let i = 0; i < 8 && !name; i++) {
     await new Promise(r => setTimeout(r, 300))
@@ -4713,6 +4713,11 @@ async function doModePicker(ctx: Context): Promise<void> {
 // Model picker — buttons for the common aliases plus a tip for any specific name. Shared by
 // /model (no arg) and the 🧠 Model button; the model:set:<alias> callback applies a choice.
 const MODEL_ALIASES = ['fable', 'opus', 'sonnet', 'haiku']
+// The CLI's own 'opus' alias still boots Opus 4.8 (checked on 2.1.205), but opus here should mean
+// Opus 5 — so pin the full id (verified against the live /v1/models list, 2026-07-24) everywhere
+// the bridge sends a model. Drop the pin once the CLI alias catches up.
+const MODEL_ALIAS_IDS: Record<string, string> = { opus: 'claude-opus-5' }
+const modelArgFor = (alias: string): string => MODEL_ALIAS_IDS[alias] ?? alias
 const MODEL_TIP = '💡 Tip: <code>/model &lt;name&gt;</code> to set any specific model.'
 
 function modelPickerKeyboard(): InlineKeyboard {
@@ -7716,7 +7721,7 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
     // to interpolate; --effort rejects 'auto' (a statusline state, not a flag level), so skip it.
     const launchFlags: string[] = []
     const mAlias = inherit?.model?.split(/\s+/)[0]?.toLowerCase()
-    if (mAlias && MODEL_ALIASES.includes(mAlias)) launchFlags.push(`--model ${mAlias}`)
+    if (mAlias && MODEL_ALIASES.includes(mAlias)) launchFlags.push(`--model ${modelArgFor(mAlias)}`)
     if (inherit?.effort && inherit.effort !== 'auto' && EFFORT_LEVELS.includes(inherit.effort)) launchFlags.push(`--effort ${inherit.effort}`)
     // Mode too: --allow-dangerously-skip-permissions only makes bypass AVAILABLE — on its own the
     // session boots in NORMAL mode, NOT bypass — so pass --permission-mode for every non-default
@@ -7740,7 +7745,11 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
         ...(extra.trim() ? extra.trim().split(/\s+/) : []),
         ...launchFlags.flatMap(flag => flag.split(/\s+/)),
       ]
-      cmd = `${envPrefix}${claudeHarnessLaunch(harness, 'claude', claudeArgs)}`
+      // A pinned full model id (MODEL_ALIAS_IDS) isn't in this CLI build's advisor catalog yet, so
+      // the CLI would boot with the advisor tool silently disabled — its own warning names this
+      // env var as the remedy. Scoped to pinned spawns only.
+      const pinned = launchFlags.some(f => f.startsWith('--model claude-'))
+      cmd = `${envPrefix}${pinned ? 'CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL=1 ' : ''}${claudeHarnessLaunch(harness, 'claude', claudeArgs)}`
     }
     const { stdout } = await exec('tmux', ['new-window', '-d', '-P', '-F', '#{pane_id}', ...target, '-c', dir, cmd], { timeout: 5000 })
     const newPane = stdout.trim()
@@ -8893,7 +8902,7 @@ bot.on('callback_query:data', async ctx => {
     const t = await commandTarget(ctx)
     if (!t) { await ctx.answerCallbackQuery().catch(() => {}); return }
     await ctx.answerCallbackQuery({ text: `Switching to ${alias}…` }).catch(() => {})
-    await injectSlash(t.paneId, t.watcher, `/model ${alias}`)
+    await injectSlash(t.paneId, t.watcher, `/model ${modelArgFor(alias)}`)
     const model = await readCurrentModel(t.paneId, t.watcher)
     await ctx.editMessageText(`🧠 <b>Model</b> — now ${model ? escapeHtml(model) : escapeHtml(alias)}\n\n${MODEL_TIP}`, {
       parse_mode: 'HTML', reply_markup: modelPickerKeyboard(),
