@@ -78,9 +78,35 @@ export function parseDoneLine(paneText: string): { verb: string; duration: strin
   return found
 }
 
+// The agents sidebar view breaks the footer heuristic: the subagent list ("● main / ◯ engineer …")
+// renders BELOW the footer, so the block-above-the-last-line lands on it and parses empty. Fallback:
+// anchor on the statusline's own signature — the LAST line carrying "ε:<level>" or "ctx …%" — and
+// take the contiguous non-border run around it (same 6-line cap as the footer path).
+function statuslineBlockAnywhere(paneText: string): string | null {
+  const lines = paneText.split('\n').map(l => stripAnsi(l).replace(/\s+$/, ''))
+  const isBorder = (l: string) => /^[\s─━│┃┌┐└┘├┤┬┴┼╭╮╰╯╶╴╵╷]+$/.test(l)
+  let anchor = -1
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (/ε:\s*\w+|ctx\D{0,14}\d+\s*%/.test(lines[i])) { anchor = i; break }
+  }
+  if (anchor < 0) return null
+  let top = anchor, bot = anchor
+  while (top > 0 && anchor - top < 5 && lines[top - 1].trim() && !isBorder(lines[top - 1])) top--
+  while (bot < lines.length - 1 && bot - top < 5 && lines[bot + 1].trim() && !isBorder(lines[bot + 1])) bot++
+  return lines.slice(top, bot + 1).join('\n')
+}
+
 export function parseStatusline(paneText: string): StatuslineData | null {
-  const block = statuslineBlock(paneText)
-  if (!block) return null
+  // Footer-anchored block first (the normal layout); if it's absent or parses empty (the agents
+  // view puts the subagent list where the footer heuristic looks), retry signature-anchored.
+  const fromFooter = statuslineBlock(paneText)
+  const parsed = fromFooter ? parseStatuslineBlock(fromFooter) : null
+  if (parsed) return parsed
+  const anywhere = statuslineBlockAnywhere(paneText)
+  return anywhere && anywhere !== fromFooter ? parseStatuslineBlock(anywhere) : null
+}
+
+function parseStatuslineBlock(block: string): StatuslineData | null {
   const str = (re: RegExp): string | null => { const m = block.match(re); return m?.[1] ?? null }
   const up = str(/↑\s*([\d.]+[kKmM]?)/), down = str(/↓\s*([\d.]+[kKmM]?)/)
   const costRaw = str(/\$\s*([\d.]+)/)

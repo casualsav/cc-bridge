@@ -88,3 +88,24 @@ test('pinBar clamps out-of-range percentages', () => {
   expect(pinBar(-20, 10)).toBe('░░░░░░░░░░')
   expect(pinBar(150, 10)).toBe('██████████')
 })
+
+// Agents sidebar view: the subagent list renders BELOW the footer, so the footer-anchored block
+// heuristic lands on "● main / ◯ engineer" and parses empty. The signature-anchored fallback must
+// still find the statusline higher up (the live Kam/Weather panes' shape).
+test('parseStatusline survives the agents sidebar view (statusline above, agent list at the bottom)', () => {
+  const cap = [
+    '  ubuntu@cloud:/home/ubuntu/projects/kam | Fable 5',
+    '  ε:low | ✻think | ctx ██░░░░░░░░ 20%/1000k | ↑197.0k ↓88 | $278.95 | ⧗57h41m | api 3h28m | Debug access issues | v2.1.205',
+    '  5h ███████░░░░░░░ 52% ↻1h35m | 7d ██████░░░░░░░░ 44% ↻51h35m',
+    '  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents',
+    '',
+    '  ● main',
+    '  ◯ engineer  Re-skin kam5 in Kalshi language        4m 5s · ↓ 522.7k tokens',
+  ].join('\n')
+  const d = parseStatusline(cap)!
+  expect(d).not.toBeNull()
+  expect(d.model).toBe('Fable 5')
+  expect(d.effort).toBe('low')
+  expect(d.ctxPct).toBe(20)
+  expect(d.h5).toEqual({ pct: 52, reset: '1h35m' })
+})

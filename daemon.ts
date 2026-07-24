@@ -11620,12 +11620,15 @@ async function webappSessionCard(row: { sid: string; name: string; cwd: string; 
   const cap = await capturePane(pane).catch(() => '')
   if (!cap) return dead
   const sl = parseStatusline(cap)
-  const working = detectWorking(cap)
   const cwd = row.cwd || (await paneCwd(pane).catch(() => '')) || ''
+  // Working state from the transcript when there is one (the agents sidebar view hides the pane's
+  // working footer, so detectWorking under-reports there); pane capture is the no-transcript fallback.
+  let working = detectWorking(cap)
   let task: string | null = null
   try {
     const file = await transcriptForPane(pane, cwd || null)
     if (file) {
+      working = turnInProgress(file)
       if (working) {
         const acts = currentTurnActivity(file)
         const a = acts[acts.length - 1]
