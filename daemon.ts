@@ -11718,8 +11718,9 @@ function dashboardSessionRows(): Array<{ sid: string; name: string; cwd: string;
     const rows = listTopics().filter(t => !t.closed).map(t => ({ sid: t.sessionId, name: t.name, cwd: t.cwd, agent: t.agent ?? 'claude' }))
     const general = getGeneralSession()
     if (general && !rows.some(r => r.sid === general)) rows.unshift({ sid: general, name: 'General', cwd: '', agent: 'claude' })
+    // DM chat lanes pin to the TOP of the dashboard (owner request), ahead of General and topics.
     for (const { chatId, sessionId } of listDmChatSessions())
-      if (!rows.some(r => r.sid === sessionId)) rows.push({ sid: sessionId, name: `Chat (${handleForDmChat(chatId) ?? `DM ${chatId}`})`, cwd: '', agent: 'claude' })
+      if (!rows.some(r => r.sid === sessionId)) rows.unshift({ sid: sessionId, name: `Chat (${handleForDmChat(chatId) ?? `DM ${chatId}`})`, cwd: '', agent: 'claude' })
     return rows
   }
   return []   // DM mode: filled per-call from the focused pane (no session store to enumerate)
