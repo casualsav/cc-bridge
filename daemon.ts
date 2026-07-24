@@ -72,7 +72,8 @@ import {
 import {
   setGroupChatId, getGroupChatId, isTopicMode, loadTopics, genSessionId,
   getSessionByThread, getTopicBySession, setTopic, removeTopic, updateTopic, listTopics,
-  getGeneralSession, setGeneralSession, findTopicByCwd, getBaseCwd, setBaseCwd,
+  demoteTopicToHeadless,
+  getGeneralSession, setGeneralSession, getGeneralCwd, findTopicByCwd, getBaseCwd, setBaseCwd,
   topicAgent, type TopicEntry,
   getDmChatSession, setDmChatSession, listDmChatSessions,
 } from './topics.ts'
@@ -8324,6 +8325,10 @@ async function sweepDeletedTopics(): Promise<void> {
   if (!isTopicMode()) return
   const group = getGroupChatId()
   if (!group) return
+  // The whole group may be gone, not just a topic — that demotes instead of sweeping. Never let a
+  // demotion hiccup (a failed registry write) take the per-topic pass below down with it.
+  await probeGroupAlive().catch(e => process.stderr.write(`groupGone: probe/demotion failed: ${e}\n`))
+  if (!isTopicMode()) return   // demoted mid-sweep: the per-topic probes below have nothing left to check
   for (const t of listTopics()) {
     const threadId = t.threadId
     if (threadId == null) continue   // headless session — a registry row with no Telegram topic to probe
@@ -8336,6 +8341,105 @@ async function sweepDeletedTopics(): Promise<void> {
   }
 }
 const TOPIC_SWEEP_MS = 2 * 60_000
+
+// ---- Bound group deleted → demote to DM + mini-app mode (ask 67) ----
+// Deleting the command-center group is a deliberate switch, but Telegram raises no event for it and
+// probeMessageGone deliberately reads "chat not found" as 'alive' (fail-safe for per-message
+// probes). So probe the GROUP itself on the topic sweep: getChat is the cheapest call that tells a
+// dead/inaccessible group apart from a transient API error. THREE consecutive matching failures
+// (≥4 min at TOPIC_SWEEP_MS) before demoting — one 5xx or netsplit must never dismantle a live
+// command center. A restart resets the counter and it re-converges over the next two sweeps.
+const GROUP_GONE_STRIKES = 3
+let groupGoneStrikes = 0
+let groupDemoting = false
+// null = not a group-is-gone error (transient, unknown, rate limit) and must NOT count as a strike.
+function groupGoneReason(e: unknown): 'deleted' | 'access' | null {
+  const err = e as { description?: string; error_code?: number }
+  const d = String(err?.description ?? (e as Error)?.message ?? e)
+  if (err?.error_code === 403 || /bot was kicked|kicked from|not a member of|CHAT_WRITE_FORBIDDEN/i.test(d)) return 'access'
+  if (/chat not found|group chat was deleted|group chat was deactivated/i.test(d)) return 'deleted'
+  return null
+}
+async function probeGroupAlive(): Promise<void> {
+  if (!isTopicMode() || groupDemoting) return
+  const group = getGroupChatId()
+  if (!group) return
+  let reason: 'deleted' | 'access' | null = null
+  try { await asLowPriority(() => bot.api.getChat(group)) }
+  catch (e) { reason = groupGoneReason(e) }
+  if (!reason) { groupGoneStrikes = 0; return }
+  groupGoneStrikes++
+  process.stderr.write(`groupGone: probe strike ${groupGoneStrikes}/${GROUP_GONE_STRIKES} on ${group} (${reason})\n`)
+  if (groupGoneStrikes >= GROUP_GONE_STRIKES) await demoteGroupToDm(reason)
+}
+
+// Demote: the group is gone, the SESSIONS are not. Every open topic becomes a headless row (still
+// live, still steerable from the mini app), the daemon goes unbound, and the owner gets one notice
+// offering — never performing — a mass close. Idempotent: it flips topic mode off, after which
+// probeGroupAlive no-ops until a future /bind.
+async function demoteGroupToDm(reason: 'deleted' | 'access'): Promise<void> {
+  if (groupDemoting) return
+  groupDemoting = true
+  const log = (m: string) => process.stderr.write(`groupGone: ${m}\n`)
+  try {
+    log(`group ${getGroupChatId()} is gone (${reason}) — demoting to DM + mini-app mode`)
+    const names = listTopics().filter(t => !t.closed).map(t => t.name)
+    // The General anchor has no registry row of its own, so without one it would vanish from every
+    // surface. Give it the headless 'general' identity Phase B expects — unless that name is taken.
+    const anchorSid = getGeneralSession()
+    const anchorPane = anchorSid ? await paneForSession(anchorSid).catch(() => null) : null
+    if (anchorSid && anchorPane) {
+      if (listTopics().some(t => !t.closed && t.threadId == null && t.name === 'general')) log('a headless general already exists — anchor not duplicated')
+      else if (getTopicBySession(anchorSid)) log('the anchor already has a registry row — left as is')
+      else {
+        const cwd = getGeneralCwd() ?? await paneCwd(anchorPane).catch(() => null) ?? homedir()
+        setTopic(anchorSid, { headless: true, cwd, name: 'general', closed: false, createdAt: Date.now() })
+        names.unshift('general')
+        log(`kept the General anchor as headless 'general' (${anchorSid}) in ${cwd}`)
+      }
+    }
+    if (anchorSid) setGeneralSession(null)
+    // Open rows lose their dead thread and live on; closed rows are dropped outright — their topic
+    // died with the group, and a stale closed row would probe as gone (tearing its session down)
+    // after a future /bind.
+    for (const t of listTopics()) {
+      if (t.threadId == null) continue
+      if (t.closed) { removeTopic(t.sessionId); log(`dropped closed row "${t.name}"`) }
+      else { demoteTopicToHeadless(t.sessionId); log(`demoted "${t.name}" → headless`) }
+    }
+    setGroupChatId(null)   // genuinely unbound now — Phase B routing takes over
+    // updateTopicPins returns early on a null group, so nothing will try to edit the dead chat.
+    // The keys are dropped anyway: they're message ids in a chat that no longer exists, and the
+    // General-pin ranking would compare them against a NEW group's ids after a later /bind.
+    for (const key of [...sessionPins.keys()]) {
+      if (key === 'general' || key.startsWith('topic:')) { sessionPins.delete(key); pinTextCache.delete(key) }
+    }
+    persistSessionPins()
+    void ensureChatProfile().catch(e => log(`chat profile: ${e}`))   // seed the DM lane's prerequisites
+    const n = names.length
+    const lost = reason === 'access' ? 'lost access to the group (removed or blocked)' : 'lost the group (deleted or bot removed)'
+    const text = `📴 I've ${lost} — switched to DM + mini-app mode.\n\n`
+      + (n ? `Your ${n} session${n === 1 ? '' : 's'} ${n === 1 ? 'is' : 'are'} untouched and steerable from the mini app (/files): ${names.map(x => `<b>${escapeHtml(x)}</b>`).join(' · ')}.\n\n` : '')
+      + 'Message me here to chat or orchestrate; /bind a new group anytime to get topics back.'
+    // The button carries NO session ids — rows are re-read at tap time.
+    const buttons = n ? [[{ text: `🗑 Close all ${n} session${n === 1 ? '' : 's'}`, data: 'grpgone:closeall' }]] : undefined
+    for (const chat of loadAccess().allowFrom) {
+      await channel.sendText(chat, text, { ...(buttons ? { buttons } : {}) }).catch(e => log(`notice to ${chat} failed: ${e}`))
+    }
+    log(`demotion complete — ${n} session(s) kept`)
+  } finally {
+    groupGoneStrikes = 0
+    groupDemoting = false   // topic mode is off now, so probeGroupAlive stays quiet until a re-bind
+  }
+}
+
+// Open registry rows the mass-close offer acts on, resolved at TAP time (never from button data).
+// A DM chat lane is never a topic row, but skip its sid explicitly — closing the surface the owner
+// is typing into would be the one destructive surprise here.
+function closableSessionRows(): Array<{ sessionId: string } & TopicEntry> {
+  const lanes = new Set(listDmChatSessions().map(d => d.sessionId))
+  return listTopics().filter(t => !t.closed && !lanes.has(t.sessionId))
+}
 
 // ---- Callback-query dispatch ----
 // Every callback branch first authorizes the presser against the global allowlist. This centralizes
@@ -8467,6 +8571,38 @@ bot.on('callback_query:data', async ctx => {
     if (!t) return
     if (await guardArmedBashBox(t.paneId, String(ctx.chat!.id), t.replyThread)) return
     void relaySlashCommand(t.paneId, t.watcher, '/compact', String(ctx.chat!.id))
+    return
+  }
+
+  // Group-gone demotion notice → optional mass close, two-step. Rows are resolved on every tap, so
+  // a session that ended (or started) since the notice was sent can't be acted on stale.
+  if (data === 'grpgone:closeall' || data === 'grpgone:confirm' || data === 'grpgone:keep') {
+    if (!(await cbAuth(ctx))) return
+    await ctx.answerCallbackQuery().catch(() => {})
+    if (data === 'grpgone:keep') {
+      await ctx.editMessageText('↩️ Kept — your sessions are still running, in the mini app (/files).', { parse_mode: 'HTML' }).catch(() => {})
+      return
+    }
+    const rows = closableSessionRows()
+    if (!rows.length) {
+      await ctx.editMessageText('✅ Nothing left to close — no sessions are running.', { parse_mode: 'HTML' }).catch(() => {})
+      return
+    }
+    const plural = rows.length === 1 ? '' : 's'
+    if (data === 'grpgone:closeall') {
+      await ctx.editMessageText(`⚠️ Really close ${rows.length} session${plural}? Each one gets /exit and drops off the mini app.`,
+        { parse_mode: 'HTML', reply_markup: new InlineKeyboard().text('✅ Close all', 'grpgone:confirm').text('↩️ Keep them', 'grpgone:keep') }).catch(() => {})
+      return
+    }
+    let live = 0
+    for (const t of rows) {
+      const pane = await paneForSession(t.sessionId).catch(() => null)
+      if (pane && await paneAlive(pane).catch(() => false)) { void closeSessionPane(pane, 'group-gone-close-all'); live++ }
+      if (t.threadId == null) removeTopic(t.sessionId)   // post-demotion every row is headless; the row IS the session
+    }
+    process.stderr.write(`groupGone: mass close — ${rows.length} row(s), ${live} live pane(s)\n`)
+    await ctx.editMessageText(`🗑 Closing ${rows.length} session${plural}${live ? ` (${live} still running — they exit in a moment)` : ''}.`,
+      { parse_mode: 'HTML' }).catch(() => {})
     return
   }
 

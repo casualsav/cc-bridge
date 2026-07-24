@@ -211,6 +211,18 @@ export function updateTopic(sessionId: string, patch: Partial<TopicEntry>): void
   save()
 }
 
+// The bound group was deleted (daemon demotion): the row loses its dead thread but keeps the session
+// alive and steerable from the mini app; a later /bind re-promotes it. Rebuilt rather than patched so
+// the threadId KEY goes away — updateTopic could only set it undefined, breaking the xor invariant.
+export function demoteTopicToHeadless(sessionId: string): void {
+  ensureLoaded()
+  const cur = store.topics[sessionId]
+  if (!cur || cur.headless) return
+  const { threadId, ...rest } = cur
+  store.topics[sessionId] = { ...rest, headless: true }
+  save()
+}
+
 export function removeTopic(sessionId: string): void { ensureLoaded(); delete store.topics[sessionId]; save() }
 
 export function listTopics(): Array<{ sessionId: string } & TopicEntry> {

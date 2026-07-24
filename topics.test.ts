@@ -3,7 +3,7 @@ import { writeFileSync } from 'node:fs'
 import {
   _resetForTest, isTopicMode, getGroupChatId, setGroupChatId,
   getTopicBySession, getSessionByThread, findTopicByCwd, topicAgent,
-  setTopic, updateTopic, removeTopic, listTopics, genSessionId,
+  setTopic, updateTopic, removeTopic, demoteTopicToHeadless, listTopics, genSessionId,
   getGeneralSession, getGeneralCwd, setGeneralSession, getBaseCwd, setBaseCwd,
   dismissSession, isSessionDismissed, undismissSession, listDismissedSessions,
   getDmChatSession, setDmChatSession, clearDmChatSession, chatIdForDmChatSession, listDmChatSessions,
@@ -246,6 +246,28 @@ test('getSessionByThread never resolves a headless entry', () => {
   expect(getSessionByThread(undefined as unknown as number)).toBeUndefined()
   expect(getSessionByThread(null as unknown as number)).toBeUndefined()
   expect(listTopics().map(r => r.sessionId).sort()).toEqual(['head', 'real'])   // …but it IS visible to the name-based consumers
+})
+
+test('demoteTopicToHeadless drops the thread and keeps every other field', () => {
+  _resetForTest({
+    groupChatId: '-100',
+    topics: { s1: { threadId: 11, cwd: '/projects/a', name: 'a · feat', closed: true, createdAt: 1, agent: 'codex', worktree: { repo: '/r', path: '/r-wt/a' } } },
+  })
+  demoteTopicToHeadless('s1')
+  const rows = listTopics()
+  expect(rows).toEqual([
+    { sessionId: 's1', headless: true, cwd: '/projects/a', name: 'a · feat', closed: true, createdAt: 1, agent: 'codex', worktree: { repo: '/r', path: '/r-wt/a' } },
+  ])
+  expect('threadId' in rows[0]!).toBe(false)   // the key is gone, not undefined-valued
+  expect(getSessionByThread(11)).toBeUndefined()   // the dead thread resolves to nothing
+})
+
+test('demoteTopicToHeadless is a no-op on an already-headless or missing session', () => {
+  _resetForTest({ groupChatId: '-100', topics: { head: headless('/projects/h', 'h'), real: entry(11, '/projects/a') } })
+  const before = JSON.stringify(listTopics())
+  demoteTopicToHeadless('head')
+  demoteTopicToHeadless('nope')
+  expect(JSON.stringify(listTopics())).toBe(before)
 })
 
 // ---- DM chat lane ----
