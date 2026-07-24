@@ -10929,6 +10929,51 @@ bot.on('message:text', async ctx => {
     }
   }
 
+  // `@name /cmd` — cross-session slash relay for the human driver (the owner-side twin of the
+  // bus's `tg slash`). Target-first so the payload is NEVER parsed: any slash command — built-in,
+  // custom skill, future — rides verbatim after the name, so nothing can clash with the bridge's
+  // own command namespace (no bot command is registered for this; it's plain-text syntax). A
+  // mention of the bot itself falls through to normal handling, and a name that doesn't resolve
+  // fails LOUDLY (never silently delivered as prompt text — that would be the misfire this syntax
+  // exists to prevent). Guards mirror `tg slash`: live pane, idle, no armed bash box; /exit and
+  // /quit stay per-topic (a typo'd target must never kill the wrong session).
+  const cross = /^@(\S+)\s+(\/\S[\s\S]*)$/.exec(text)
+  if (cross && (ctx.chat?.type === 'private' || isTopicMode())
+      && (!botUsername || cross[1].toLowerCase() !== botUsername.toLowerCase())) {
+    const result = gate(ctx)
+    if (result.action !== 'deliver') {
+      if (result.action === 'pair') {
+        const lead = result.isResend ? 'Still pending' : 'Pairing required'
+        await ctx.reply(`🔗 ${lead} — run in Claude Code:\n\n/telegram:access pair ${result.code}`)
+      }
+      return
+    }
+    const say = (t: string) => ctx.reply(t, { parse_mode: 'HTML' }).catch(() => {})
+    if (!isTopicMode()) { await say('⚠️ Cross-session commands need a bound forum group (sessions are addressed by topic name).'); return }
+    const command = cross[2].trim()
+    if (/^\/(exit|quit)\b/i.test(command)) { await say('⚠️ Session-ending commands don’t relay cross-session — type /exit in that session’s own topic.'); return }
+    const endpoints = busEndpoints()
+    const res = resolveEndpoint(cross[1].replace(/:$/, ''), endpoints)
+    if ('error' in res) {
+      const live = endpoints.filter(e => !e.closed && e.kind === 'claude').map(e => `@${normalizeEndpointName(e.name)}`).join(' · ')
+      await say(`⚠️ ${escapeHtml(res.error.replace(/ — try `tg roster`.*$/, ''))} — nothing was sent.${live ? `\nLive sessions: ${escapeHtml(live)}` : ''}`)
+      return
+    }
+    if (res.kind !== 'claude') { await say('⚠️ That endpoint has no CLI to command.'); return }
+    const toName = nameForEndpoint(res.id, endpoints)
+    const targetPane = await paneForSession(res.id).catch(() => null)
+    if (!targetPane || !(await paneAlive(targetPane).catch(() => false))) { await say(`⚠️ <b>@${escapeHtml(toName)}</b> has no live pane.`); return }
+    const cap = await capturePane(targetPane).catch(() => '')
+    if (!cap || !onNormalPrompt(cap)) { await say(`⏳ <b>@${escapeHtml(toName)}</b> is mid-turn — retry when it goes idle.`); return }
+    if (bashModeArmed(cap)) { await say(`⚠️ <b>@${escapeHtml(toName)}</b> has an unsubmitted ! bash command in its input box.`); return }
+    const room = busRoom()
+    if (room) appendLedger(room, { ts: Date.now(), kind: 'slash', from: 'owner', to: toName, text: command })
+    const watcher = targetPane === focus.activePaneId ? focus.paneWatcher : null
+    void relaySlashCommand(targetPane, watcher, command, String(ctx.chat!.id), true, ctx.message?.message_thread_id)
+    await say(`▶️ Sent <code>${escapeHtml(command.split(/\s/)[0])}</code> to <b>@${escapeHtml(toName)}</b> — any output echoes here.`)
+    return
+  }
+
   // Relay unhandled slash commands to CC via tmux (after gate check). In topic mode the command
   // targets the topic's session and replies in-thread; in DM it targets the focused session.
   if (text.startsWith('/') && (ctx.chat?.type === 'private' || isTopicMode())) {
