@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { Bot, GrammyError, InlineKeyboard, InputFile, API_CONSTANTS, type Context } from 'grammy'
+import { Bot, GrammyError, InlineKeyboard, InputFile, InputMediaBuilder, API_CONSTANTS, type Context } from 'grammy'
 import type { ReactionTypeEmoji, InlineQueryResultArticle } from 'grammy/types'
 import { createHash, randomBytes } from 'node:crypto'
 import {
@@ -5024,22 +5024,26 @@ async function sendStartHelp(ctx: Context): Promise<void> {
   const paired = gated.access.allowFrom.includes(gated.senderId)
   // remove_keyboard clears the retired docked control bar for anyone who still has it stuck on
   // their client (its taps would otherwise leak the button label to Claude as a plain message).
+  // Albums can't carry reply_markup, so it rides on the commands message (or the text fallbacks).
   const kb = { remove_keyboard: true as const }
-  const caption = `Welcome to <b>cc-bridge</b>. Enjoy full CLI access via Telegram\n\n🖼️ Save &amp; set this photo as my profile picture`
-  // Lead with the bundled crab asset — doubles as the suggested bot profile picture.
+  const caption = `Welcome to <b>cc-bridge</b>. Enjoy full CLI access via Telegram\n\n🖼️ Save &amp; set one of these photos as my profile picture`
+  // Lead with the bundled profile-picture candidates — an album; caption rides on the first.
   try {
-    await ctx.replyWithPhoto(new InputFile(join(import.meta.dir, 'assets', 'claude-tg.jpg')), { caption, parse_mode: 'HTML', reply_markup: kb })
+    await ctx.replyWithMediaGroup([
+      InputMediaBuilder.photo(new InputFile(join(import.meta.dir, 'assets', 'claude-tg.jpg')), { caption, parse_mode: 'HTML' }),
+      InputMediaBuilder.photo(new InputFile(join(import.meta.dir, 'assets', 'claude-spark.jpg'))),
+    ])
   } catch {
     await ctx.reply(caption, { parse_mode: 'HTML', link_preview_options: { is_disabled: true }, reply_markup: kb }).catch(() => {})   // asset missing (stale cache) → text only
   }
   const chat = String(ctx.chat!.id)
   const thread = ctx.message?.message_thread_id
   try {
-    const m = await sendRichMessage(TOKEN!, chat, { html: startRichHtml(paired) }, { messageThreadId: thread })
+    const m = await sendRichMessage(TOKEN!, chat, { html: startRichHtml(paired) }, { messageThreadId: thread, replyMarkup: kb })
     noteMsg(chat, thread, m.message_id)
     return
   } catch (e) { process.stderr.write(`daemon: rich /start send failed, falling back to HTML: ${e}\n`) }
-  await ctx.reply(startHelpText(paired), { parse_mode: 'HTML', link_preview_options: { is_disabled: true } }).catch(() => {})
+  await ctx.reply(startHelpText(paired), { parse_mode: 'HTML', link_preview_options: { is_disabled: true }, reply_markup: kb }).catch(() => {})
 }
 
 // Phone keyboards autocapitalize the first letter, so a typed "/context" arrives as
