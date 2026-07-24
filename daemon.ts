@@ -7665,7 +7665,7 @@ async function captureInheritedSettings(paneId: string, watcher: PaneWatcher | n
 // with NO post-boot pane-driving at all. This replaced the old type-into-a-booting-pane path, whose
 // REPL-wait + inject round-trips were the 10-20s "new topic is slow / not ready to receive" lag (and
 // they raced the user's own first keystrokes into the fresh pane).
-async function spawnSession(dir: string, extra = '', presetSessionId?: string, account: Account = MAIN_ACCOUNT, agent: AgentKind = 'claude', harnessOverride?: HarnessProfile, dials?: { model?: string | null; effort?: string | null }): Promise<string | null> {
+async function spawnSession(dir: string, extra = '', presetSessionId?: string, account: Account = MAIN_ACCOUNT, agent: AgentKind = 'claude', harnessOverride?: HarnessProfile, dials?: { model?: string | null; effort?: string | null; mode?: CcMode | null }): Promise<string | null> {
   try {
     // tmux's `new-window -c` silently falls back to $HOME when it can't chdir into `dir` (e.g.
     // another user's 700 folder) — the session then runs in the wrong place, stuck on a trust
@@ -7706,9 +7706,9 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
       const effort = (prefSid ? sessionEfforts.get(prefSid) : null) ?? fallbackEffort()
       if (mode !== 'default' || effort) inherit = { model: null, effort, mode }
     }
-    // Explicit dials (tg spawn): the caller's model/effort win over anything inherited.
-    if (dials?.model || dials?.effort) {
-      inherit = { model: dials.model ?? inherit?.model ?? null, effort: dials.effort ?? inherit?.effort ?? null, mode: inherit?.mode ?? lastFocusedMode }
+    // Explicit dials (tg spawn / mini-app "+"): the caller's model/effort/mode win over anything inherited.
+    if (dials?.model || dials?.effort || dials?.mode) {
+      inherit = { model: dials.model ?? inherit?.model ?? null, effort: dials.effort ?? inherit?.effort ?? null, mode: dials?.mode ?? inherit?.mode ?? lastFocusedMode }
     }
     let target: string[] = []
     if (focus.activePaneId) {
@@ -11779,7 +11779,10 @@ async function webappSessionFeed(sid: string): Promise<WebappSessionFeed | null>
   const file = await transcriptForPane(pane, cwd)
   if (!file) return { sid, name: row.name, working: false, items: [] }
   const working = turnInProgress(file)
-  const items: WebappSessionFeed['items'] = recentConversation(file, 14).map(c => ({ role: c.role, text: c.text, ts: c.ts }))
+  const items: WebappSessionFeed['items'] = recentConversation(file, 14).map(c => ({
+    role: c.role, text: c.text, ts: c.ts,
+    ...(c.img ? { img: c.img } : {}), ...(c.att ? { att: c.att } : {}), ...(c.cmd ? { cmd: true } : {}),
+  }))
   if (working) for (const a of currentTurnActivity(file).slice(-6)) items.push({ role: 'activity', text: `${a.tool}${a.detail ? ` ${a.detail}` : ''}`, ts: 0 })
   return { sid, name: row.name, working, items }
 }
@@ -11812,6 +11815,44 @@ async function webappSessionAction(userId: string, sid: string, action: 'stop' |
   await dismissFeedbackSurvey(pane)
   const ok = watcher ? await injectText(pane, watcher, msg) : await pasteToPane(pane, msg)
   return ok ? null : 'delivery failed'
+}
+
+// Mini-app "+" new session: create a topic + spawn with the chosen dials — the webapp twin of the
+// bus `tg spawn` case (same primitives: thread → setTopic → spawnSession; no first message, and
+// mode rides as an inherit so the pane boots in it).
+async function webappSessionSpawn(
+  userId: string, name: string, opts: { model?: string; effort?: string; mode?: string },
+): Promise<{ error: string } | { sid: string; name: string }> {
+  if (!isTopicMode()) return { error: 'needs a bound forum group' }
+  const topicName = name.trim().slice(0, 60)
+  if (!topicName) return { error: 'name required' }
+  const model = opts.model ? String(opts.model).toLowerCase() : null
+  if (model && !MODEL_ALIASES.includes(model)) return { error: `unknown model '${model}'` }
+  const effort = opts.effort ? String(opts.effort).toLowerCase() : null
+  if (effort && !EFFORT_LEVELS.includes(effort)) return { error: `unknown effort '${effort}'` }
+  const mode = opts.mode ? String(opts.mode) : null
+  if (mode && !['default', 'acceptEdits', 'plan', 'bypassPermissions'].includes(mode)) return { error: `unknown mode '${mode}'` }
+  const dir = join(getBaseCwd() ?? homedir(), topicName.toLowerCase().replace(/[^\w.-]+/g, '-'))
+  try { if (!existsSync(dir)) mkdirSync(dir, { recursive: true }) }
+  catch (e) { return { error: `couldn't create ${dir}: ${(e as Error)?.message ?? e}` } }
+  const group = getGroupChatId()!
+  let threadId: number
+  try { threadId = Number(await channel.threads!.create(group, topicName)) }
+  catch (e) { return { error: `couldn't create the topic: ${(e as Error)?.message ?? e}` } }
+  const sid = genSessionId()
+  setTopic(sid, { threadId, cwd: dir, name: topicName, closed: false, createdAt: Date.now() })
+  try { topicBranchCache.set(sid, (await exec('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 2000 })).stdout.trim()) }
+  catch { topicBranchCache.set(sid, '') }
+  const pane = await spawnSession(dir, '', sid, MAIN_ACCOUNT, 'claude', undefined,
+    { model, effort: effort === 'auto' ? null : effort, ...(mode ? { mode: mode as CcMode } : {}) })
+  if (!pane) {
+    removeTopic(sid)
+    void channel.threads!.remove(group, String(threadId)).catch(() => {})
+    return { error: `spawn failed in ${dir} — see daemon log` }
+  }
+  const room = busRoom()
+  if (room) appendLedger(room, { ts: Date.now(), kind: 'spawn', from: 'owner', to: topicName, text: `${dir}${model ? ` model=${model}` : ''}${effort ? ` effort=${effort}` : ''}${mode ? ` mode=${mode}` : ''}` })
+  return { sid, name: topicName }
 }
 
 // Mini-app compose-row attachments: save the uploaded blob into the inbox, then deliver — a voice
@@ -11902,7 +11943,7 @@ async function startFilesWebapp(): Promise<void> {
       protectedRoots: [STATE_DIR],   // fence writes out of a relocated state dir too (~/.claude is fenced by default)
       readSettings: webappReadSettings, setSetting: webappSetSetting,
       listSessions: webappListSessions, readSessionFeed: webappSessionFeed, sessionAction: webappSessionAction,
-      sessionAttach: webappSessionAttach,
+      sessionAttach: webappSessionAttach, sessionSpawn: webappSessionSpawn,
       readBus: webappReadBus, readAutomation: webappReadAutomation, automationCancel: webappAutomationCancel })
   } catch (e) { wlog(`webapp: failed to start: ${e}`); return }
   if (WEBAPP_PUBLIC_URL) { wlog(`webapp: public url ${WEBAPP_PUBLIC_URL}`); return }

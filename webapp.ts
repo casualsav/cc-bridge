@@ -38,6 +38,7 @@ export interface WebappDeps {
   readSessionFeed?: (sid: string) => Promise<SessionFeed | null> | SessionFeed | null   // drill-in: recent conversation + live activity
   sessionAction?: (userId: string, sid: string, action: SessionAct, text?: string) => Promise<string | null> | string | null   // stop/compact/send → error string or null
   sessionAttach?: (userId: string, sid: string, fileName: string, data: Uint8Array, opts: { caption?: string; voice?: boolean }) => Promise<{ error: string } | { delivered: string; match: string }>   // compose-row file/voice → bubble text + reconcile token
+  sessionSpawn?: (userId: string, name: string, opts: { model?: string; effort?: string; mode?: string }) => Promise<{ error: string } | { sid: string; name: string }>   // "+" new session with dials
   readBus?: () => Promise<BusView> | BusView                         // agent-bus board: live agents, open asks, recent events
   readAutomation?: () => Promise<AutomationView> | AutomationView    // cron + queued prompts + budget
   automationCancel?: (userId: string, kind: 'cron' | 'queue', id: string) => Promise<string | null> | string | null   // cancel one item → error string or null
@@ -61,7 +62,7 @@ export interface SessionCard {
 export type SessionAct = 'stop' | 'compact' | 'send'
 export interface SessionFeed {
   sid: string; name: string; working: boolean
-  items: Array<{ role: 'user' | 'assistant' | 'activity'; text: string; ts: number }>
+  items: Array<{ role: 'user' | 'assistant' | 'activity'; text: string; ts: number; img?: string; att?: string; cmd?: boolean }>
 }
 export interface BusView {
   agents: Array<{ name: string; kind: string; live: boolean }>
@@ -316,6 +317,21 @@ async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: strin
     deps.log(`webapp: session ${action} sid=${body.sid}${action === 'send' ? ` chars=${String(body.text ?? '').length}` : ''} user=${userId}`)
     const err = await deps.sessionAction(userId, body.sid, action, typeof body.text === 'string' ? body.text : undefined)
     return err ? json({ error: err }, 400) : json({ ok: true })
+  }
+  // "+" new session with dials (same auth stance as session/act — spawning a topic session is a
+  // chat-level control, not a filesystem write). Audited.
+  if (url.pathname === '/api/session/spawn') {
+    if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405)
+    if (!deps.sessionSpawn) return json({ error: 'unavailable' }, 404)
+    const body = await req.json().catch(() => null) as { name?: unknown; model?: unknown; effort?: unknown; mode?: unknown } | null
+    if (!body || typeof body.name !== 'string' || !body.name.trim()) return json({ error: 'name required' }, 400)
+    deps.log(`webapp: session spawn name=${body.name} model=${body.model ?? '-'} effort=${body.effort ?? '-'} mode=${body.mode ?? '-'} user=${userId}`)
+    const r = await deps.sessionSpawn(userId, body.name, {
+      ...(typeof body.model === 'string' && body.model ? { model: body.model } : {}),
+      ...(typeof body.effort === 'string' && body.effort ? { effort: body.effort } : {}),
+      ...(typeof body.mode === 'string' && body.mode ? { mode: body.mode } : {}),
+    })
+    return 'error' in r ? json({ error: r.error }, 400) : json(r)
   }
   // Compose-row attachment / voice note for a session (multipart: sid + file [+ caption] [+ voice=1]).
   // Same auth stance as /api/session/act (allowlist, not canWrite) — it's the chat "send a file"

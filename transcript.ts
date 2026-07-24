@@ -325,9 +325,11 @@ export function slashResultAfter(file: string, sinceMs: number): { text: string;
 
 // The last `max` conversation turns as a display feed (Mini App session drill-in): real user
 // prompts + main-thread assistant conclusions, oldest first. User text is unwrapped from the
-// bridge's `<tg …>…</tg>` inbound envelope for display; each item is clamped so a huge paste
-// can't blow up the payload.
-export type ConversationItem = { role: 'user' | 'assistant'; text: string; ts: number }
+// bridge's `<tg …>…</tg>` inbound envelope for display — img=/att= attachment paths and slash
+// commands (the `<command-name>` XML the CLI records) surface as structured fields so the client
+// can render a thumbnail / file chip / command chip instead of raw markup; each item is clamped
+// so a huge paste can't blow up the payload.
+export type ConversationItem = { role: 'user' | 'assistant'; text: string; ts: number; img?: string; att?: string; cmd?: boolean }
 export function recentConversation(file: string, max = 12): ConversationItem[] {
   const entries = readEntries(file)
   const out: ConversationItem[] = []
@@ -336,8 +338,19 @@ export function recentConversation(file: string, max = 12): ConversationItem[] {
     const ts = e.timestamp ? Date.parse(e.timestamp) : 0
     if (isRealUserText(e)) {
       const raw = textOf(e.message?.content).trim()
-      const m = raw.match(/^<tg[^>]*>([\s\S]*)<\/tg>/)
-      out.push({ role: 'user', text: clamp((m ? m[1] : raw).trim()), ts })
+      // Tolerate a few stray chars before <tg (the survey-dismiss "0" era left such entries).
+      const m = raw.match(/^[\s\S]{0,3}?<tg([^>]*)>([\s\S]*)<\/tg>/)
+      if (m) {
+        const img = /img="([^"]+)"/.exec(m[1])?.[1]
+        const att = /att="([^"]+)"/.exec(m[1])?.[1]
+        out.push({ role: 'user', text: clamp(m[2].trim()), ts, ...(img ? { img } : {}), ...(att ? { att } : {}) })
+      } else if (/^<command-name>/.test(raw)) {
+        const name = /<command-name>([^<]*)<\/command-name>/.exec(raw)?.[1]?.trim() ?? ''
+        const args = /<command-args>([\s\S]*?)<\/command-args>/.exec(raw)?.[1]?.trim() ?? ''
+        if (name) out.push({ role: 'user', text: clamp(`${name}${args ? ` ${args}` : ''}`), ts, cmd: true })
+      } else {
+        out.push({ role: 'user', text: clamp(raw), ts })
+      }
     } else if (isMainAssistantText(e) && e.message?.stop_reason !== 'tool_use') {
       const text = lastTextOf(e.message?.content).trim()
       if (!isCommandNoise(text)) out.push({ role: 'assistant', text: clamp(text), ts })
