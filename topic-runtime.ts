@@ -9,6 +9,7 @@ import { exec } from './proc.ts'
 import { paneCwd, paneAlive, paneCommand } from './pane-io.ts'
 import { escapeHtml } from './markdown.ts'
 import { loadAccess } from './access.ts'
+import { accountForTranscript } from './accounts.ts'
 import {
   genSessionId, isTopicMode, getGroupChatId, getTopicBySession, findTopicByCwd, cwdAmbiguous,
   setTopic, updateTopic, removeTopic, listTopics, getGeneralSession, getGeneralCwd, setGeneralSession,
@@ -216,13 +217,22 @@ async function ensureTopicFor(group: string, sessionId: string, cwd: string, pan
   try {
     const threadId = Number(await channel.threads!.create(group, name))
     let agent: 'claude' | 'codex' = 'claude'
+    let account: string | undefined
     if (pane) {
       try {
         const { stdout } = await exec('tmux', ['show-options', '-pqv', '-t', pane, AGENT_PANE_OPT], { timeout: 2000 })
         agent = normalizeAgent(stdout.trim())
       } catch {}
+      // Remember a non-main account so a dead-topic revival respawns on the SAME config dir
+      // (CLAUDE.md, permissions, login) instead of silently falling back to main.
+      try {
+        const { stdout } = await exec('tmux', ['show-options', '-pqv', '-t', pane, '@tg_transcript'], { timeout: 2000 })
+        const file = stdout.trim()
+        const acct = file ? accountForTranscript(file).name : 'main'
+        if (acct !== 'main') account = acct
+      } catch {}
     }
-    setTopic(sessionId, { threadId, cwd, name, closed: false, createdAt: Date.now(), ...(agent === 'codex' ? { agent } : {}) })
+    setTopic(sessionId, { threadId, cwd, name, closed: false, createdAt: Date.now(), ...(agent === 'codex' ? { agent } : {}), ...(account ? { account } : {}) })
     process.stderr.write(`daemon: created topic "${name}" (thread ${threadId}) for ${cwd} [${sessionId}]\n`)
     return threadId
   } catch (e) {

@@ -27,6 +27,7 @@ export type TopicEntry = {
   worktree?: { repo: string; path: string }   // session runs in a git worktree of `repo`; removed on close when clean
   agent?: AgentKind        // absent on legacy stores = Claude Code
   agentSessionId?: string  // Claude/Codex conversation UUID for exact resume
+  account?: string         // config-dir account name (accounts.json); absent = main — revival spawns on it
   harness?: HarnessProfile // absent = native Anthropic; only meaningful for Claude Code panes
 }
 

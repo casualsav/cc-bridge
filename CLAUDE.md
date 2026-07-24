@@ -45,6 +45,7 @@ see `docs/multi-channel.md` for how the channels plug in.
 - `prompt.ts` — detect interactive prompts (select / permission) from a pane capture.
 - `common.ts` (shared types/paths), `markdown.ts` (Markdown → Telegram HTML).
 - `off-mcp/INSTALL.md` (setup) + `off-mcp/CLAUDE.md` (the convention every plugin-less session reads).
+- `off-mcp/CHAT-GENERAL.md` + `off-mcp/chat-account/` (templates) — optional claude.ai-style chat account anchored to General.
 - `ACCESS.md` (access control), `TESTING.md`.
 
 **Repo perms (group-shared checkouts).** If this tree is shared by more than one account, keep it

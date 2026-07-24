@@ -551,6 +551,11 @@ bash off-mcp/systemd-keepalive.sh   # run from the repo checkout
 It writes and enables `claude-tg-keepalive.service`, and tells you if the user needs
 `loginctl enable-linger` for start-at-boot without a login. Covers every configured instance.
 
+## 9. (Optional) claude.ai-style chat in General
+Make the forum's General topic a conversational chat assistant (claude.ai register, web
+search, no file/shell tools) while every other topic stays a full coding session — a
+dedicated restricted account anchored to General. Follow **[`CHAT-GENERAL.md`](CHAT-GENERAL.md)**.
+
 ## What you get, from Telegram
 - Two-way chat with the session; send/receive files; inbound voice notes transcribed.
 - **Permission prompts** relayed with tap-to-approve buttons.

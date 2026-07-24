@@ -1387,6 +1387,12 @@ async function paneAccount(pane: string | null): Promise<Account> {
   return file ? accountForTranscript(file) : MAIN_ACCOUNT
 }
 
+// The account a topic's session runs on (stamped at topic creation) — revivals/resumes must spawn
+// on it, or an alt-account topic (e.g. the chat-General setup) silently comes back on main.
+function topicAccount(t: TopicEntry | undefined): Account {
+  return (t?.account ? accountByName(t.account) : null) ?? MAIN_ACCOUNT
+}
+
 // After injecting a message, wait for the agent's turn to settle, then read its reply
 // (the final text block of its response to that exact message) from the transcript and
 // relay it. Self-driven (not tied to the typing/idle signal, which can miss a fast
@@ -5706,7 +5712,7 @@ async function restartAllStaleSessions(chat: string, onlyStale = true): Promise<
     if (live) { t.pane = live; retried.push(t); continue }
     const alive = await paneAlive(t.pane).catch(() => false)
     const fresh = !alive && t.sid && t.cwd
-      ? await spawnSession(t.cwd, `--resume ${t.id}`, t.sid, MAIN_ACCOUNT, topicAgent(getTopicBySession(t.sid)))
+      ? await spawnSession(t.cwd, `--resume ${t.id}`, t.sid, topicAccount(getTopicBySession(t.sid)), topicAgent(getTopicBySession(t.sid)))
       : null
     if (fresh) { t.pane = fresh; if (t.sid) await reopenSessionTopic(t.sid); retried.push(t) }
     else if (alive) retried.push(t)
@@ -7849,7 +7855,7 @@ bot.on('message:forum_topic_created', async ctx => {
   const harness = await paneHarnessProfile(focus.activePaneId)
   const pending = setTopicCreate(thread, { name, dir, repo: repo ?? undefined, harness })
   await ctx.reply(
-    `🚀 <b>New topic “${escapeHtml(name)}”</b> — choose its agent and working folder.`,
+    `🚀 <b>New topic “${escapeHtml(name)}”</b> — choose its ${CODEX_ENABLED ? 'agent and ' : ''}working folder.`,
     { parse_mode: 'HTML', reply_markup: topicCreateKeyboard(thread, dir, repo, pending.agent) },
   ).catch(() => null)
 })
@@ -8785,7 +8791,7 @@ bot.on('callback_query:data', async ctx => {
       return
     }
     await ctx.answerCallbackQuery({ text: `Resuming ${t.name}…` }).catch(() => {})
-    const ok = await spawnSession(t.cwd, '-c', sid, MAIN_ACCOUNT, topicAgent(t))
+    const ok = await spawnSession(t.cwd, '-c', sid, topicAccount(t), topicAgent(t))
     if (ok) await reopenSessionTopic(sid)   // reopen the tab NOW, not on first reply
     await channel.sendText(String(ctx.chat!.id), ok
       ? `🚀 Resuming <b>${escapeHtml(t.name)}</b> in <code>${escapeHtml(t.cwd)}</code> — it reopens in its topic shortly.`
@@ -10055,7 +10061,7 @@ async function bootTopicSession(ctx: Context, sid: string, t: TopicEntry, o: Boo
   revivalQueues.set(sid, o.initialQueue)
   try {
     const notice = await ctx.reply(o.notice, { parse_mode: 'HTML' }).catch(() => null)
-    const ok = await spawnSession(t.cwd, o.extra, sid, MAIN_ACCOUNT, topicAgent(t))
+    const ok = await spawnSession(t.cwd, o.extra, sid, topicAccount(t), topicAgent(t))
     if (!ok) {
       const msg = o.failMsg(t.cwd)
       if (notice) await channel.editText({ chatId: String(notice.chat.id), messageId: String(notice.message_id) }, msg).catch(() => {})
