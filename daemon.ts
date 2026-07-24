@@ -2635,6 +2635,9 @@ async function saveEditorAndQuit(paneId: string): Promise<boolean> {
 function recognizedScreen(cap: string): boolean {
   return onNormalPrompt(cap) || !!detectUserPrompt(cap) || !!detectPermissionPrompt(cap)
     || !!detectLoginPrompt(cap) || isUsageLimitChoice(cap) || isSubmitScreen(cap) || isPluginInstallUserScope(cap)
+    // The sign-in URL / paste-code screen (post login-method pick): already relayed as the auth-url
+    // card, so it must not read as "stuck" — that fired a spurious unrecognised-screen card mid-login.
+    || !!extractAuthUrl(cap)
 }
 
 // Inbound held back because its pane was on a captured screen (editor/pager or an unrecognised
