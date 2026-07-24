@@ -301,6 +301,23 @@ export function bashResultAfter(file: string, sinceMs: number): { stdout: string
   return null
 }
 
+// A relayed slash command's local output: CC records it as "<local-command-stdout>…</local-command-stdout>",
+// either as a user entry (message.content) or a system/local_command entry (top-level content).
+// Returns the latest such entry at/after sinceMs — '' when the command ran without local output
+// (turn-starting commands) — or null while nothing has landed yet.
+export function slashResultAfter(file: string, sinceMs: number): string | null {
+  const entries = readEntries(file)
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i]
+    const content = e.type === 'user' ? e.message?.content : e.type === 'system' ? (e as { content?: unknown }).content : undefined
+    if (typeof content !== 'string' || !content.includes('<local-command-stdout>')) continue
+    const ts = e.timestamp ? Date.parse(e.timestamp) : NaN
+    if (Number.isNaN(ts) || ts < sinceMs) continue
+    return content.match(/<local-command-stdout>([\s\S]*?)<\/local-command-stdout>/)?.[1] ?? ''
+  }
+  return null
+}
+
 // The uuid of the entry anchoring the current turn (the last REAL user prompt). The mirror card
 // persists this as the open card's turn identity, so a daemon restart can tell "same turn —
 // resume editing the existing card" from "new turn — cap the orphan and open fresh".

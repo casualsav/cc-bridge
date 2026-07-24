@@ -26,7 +26,7 @@ import { hopKey, resolveChain, pickNextHop, moveHop } from './failover-chain.ts'
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
 import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, hasQueuedMessages, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen } from './prompt.ts'
-import { resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, currentTurnActivity, currentTurnTokens, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, agentSessionId, agentForSession } from './agent-transcript.ts'
+import { resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, currentTurnActivity, currentTurnTokens, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, agentSessionId, agentForSession } from './agent-transcript.ts'
 import {
   AGENT_PANE_OPT, agentExitKeys, agentInterruptKeys, agentLabel, agentResetCommand, agentSubmitKeys,
   CODEX_ENABLED, codexLaunchCommand, normalizeAgent, shellQuote, type AgentKind,
@@ -4236,16 +4236,39 @@ async function exitSessionPane(pane: string, reason = 'unspecified'): Promise<vo
   await (watcher ? watcher.withInjection(run) : run()).catch(() => {})
 }
 
+// `echo` (the unknown-command fallthrough only) replies with the command's own
+// <local-command-stdout> transcript output — the outcome is the acknowledgement. Commands the
+// bridge already answers (pickers, cards, dedicated confirms) leave it off so nothing
+// double-reports; a command that starts a real turn stays silent here (the reply relay covers it).
 async function relaySlashCommand(
   paneId: string,
   watcher: PaneWatcher | null,
   command: string,
   chat_id: string,
-  message_id: number,
-  react = true,   // /compact opts out — its live status card is the acknowledgement
+  echo = false,
+  thread?: number,
 ): Promise<void> {
+  const sentAt = Date.now()
   await injectSlash(paneId, watcher, command)
-  if (react) void channel.react({ chatId: chat_id, messageId: String(message_id) }, '👍').catch(() => {})
+  if (!echo) return
+  const opts = thread ? { threadId: String(thread) } : undefined
+  // A typo'd command errors only in the TUI (never the transcript) — relay that error line.
+  const unknown = (await capturePane(paneId).catch(() => '')).match(/Unknown (?:slash )?command[^\n]*/i)
+  if (unknown) {
+    await channel.sendText(chat_id, `⚠️ ${escapeHtml(unknown[0].trim())}`, opts).catch(() => {})
+    return
+  }
+  const file = await transcriptForPane(paneId, await paneCwd(paneId))
+  if (!file) return
+  for (let waited = 0; waited < 10_000; waited += 500) {
+    await new Promise(r => setTimeout(r, 500))
+    const out = slashResultAfter(file, sentAt)?.trim()
+    if (out === undefined) continue   // nothing landed yet
+    if (!out) return                  // ran without local output — a turn or a silent command
+    const truncated = out.length > 3500 ? out.slice(0, 3500) + '\n… (truncated)' : out
+    await channel.sendText(chat_id, `<pre>${escapeHtml(truncated)}</pre>`, opts).catch(() => {})
+    return
+  }
 }
 
 // `! cmd` → the session's bash mode. Bracketed paste can never trigger the TUI's `!` prefix (the
@@ -4297,7 +4320,7 @@ async function relayBashCommand(t: CommandTarget, command: string, chat_id: stri
       t.replyThread ? { threadId: String(t.replyThread) } : undefined).catch(() => {})
     return
   }
-  void channel.react({ chatId: chat_id, messageId: String(message_id) }, '👍').catch(() => {})
+  void channel.react({ chatId: chat_id, messageId: String(message_id) }, '✍').catch(() => {})
 
   const file = await transcriptForPane(t.paneId, await paneCwd(t.paneId))
   if (!file) return
@@ -4318,11 +4341,11 @@ async function relayBashCommand(t: CommandTarget, command: string, chat_id: stri
   // assistant will comment when it eventually finishes.
 }
 
-// /model <name> gets a confirmation MESSAGE (not just the 👍 ack) naming the model the session
+// /model <name> gets a confirmation MESSAGE (not just a reaction ack) naming the model the session
 // actually landed on. We read it back from the statusline (via readCurrentModel, which normalises
 // "opus" → "Opus") and only confirm once it reflects the requested family — so a mid-conversation
 // "Switch model?" confirm picker (relayed as buttons elsewhere, model not yet changed) doesn't
-// produce a false success. If it never reflects the change, fall back to the 👍 ack and stay quiet.
+// produce a false success. If it never reflects the change, fall back to the ✍ ack and stay quiet.
 async function relayModelSet(ctx: Context, paneId: string, watcher: PaneWatcher | null, arg: string): Promise<void> {
   await injectSlash(paneId, watcher, `/model ${arg}`)
   const want = arg.trim().toLowerCase().split(/\s+/)[0]   // family token: opus / sonnet / haiku / fable
@@ -4335,7 +4358,7 @@ async function relayModelSet(ctx: Context, paneId: string, watcher: PaneWatcher 
   if (name) {
     await ctx.reply(`✅ Model set to <b>${escapeHtml(name)}</b>`, { parse_mode: 'HTML' }).catch(() => {})
   } else {
-    void channel.react({ chatId: String(ctx.chat!.id), messageId: String(ctx.message!.message_id) }, '👍').catch(() => {})
+    void channel.react({ chatId: String(ctx.chat!.id), messageId: String(ctx.message!.message_id) }, '✍').catch(() => {})
   }
 }
 
@@ -5333,7 +5356,7 @@ bot.command('mode', async ctx => {
   const t = await commandTarget(ctx)
   if (!t) return
   if (await paneAgentKind(t.paneId) === 'codex') {
-    await relaySlashCommand(t.paneId, t.watcher, '/permissions', String(ctx.chat!.id), ctx.message!.message_id)
+    await relaySlashCommand(t.paneId, t.watcher, '/permissions', String(ctx.chat!.id))
     return
   }
   const arg = (ctx.match ?? '').toString().trim().toLowerCase().replace(/[-_\s]/g, '')
@@ -5362,7 +5385,7 @@ bot.command('model', async ctx => {
   if (await paneAgentKind(t.paneId) === 'codex') {
     // Codex's native picker controls model AND reasoning effort. It currently ignores direct
     // model arguments, so preserve the full terminal feature rather than pretending an arg applied.
-    await relaySlashCommand(t.paneId, t.watcher, '/model', String(ctx.chat!.id), ctx.message!.message_id)
+    await relaySlashCommand(t.paneId, t.watcher, '/model', String(ctx.chat!.id))
     if (arg) await ctx.reply('Codex changes model and reasoning effort in its native picker above.')
     return
   }
@@ -5381,7 +5404,7 @@ bot.command('effort', async ctx => {
   const targetSession = await commandTarget(ctx)
   if (!targetSession) return
   if (await paneAgentKind(targetSession.paneId) === 'codex') {
-    await relaySlashCommand(targetSession.paneId, targetSession.watcher, '/model', String(ctx.chat!.id), ctx.message!.message_id)
+    await relaySlashCommand(targetSession.paneId, targetSession.watcher, '/model', String(ctx.chat!.id))
     if (arg) await ctx.reply('Codex configures reasoning effort together with the model in this picker.')
     return
   }
@@ -5458,17 +5481,17 @@ bot.command('rewind', async ctx => {
   if (!t) return
   if (await guardArmedBashBox(t.paneId, String(ctx.chat!.id), t.replyThread)) return
   const command = await paneAgentKind(t.paneId) === 'codex' ? '/fork' : '/rewind'
-  void relaySlashCommand(t.paneId, t.watcher, command, String(ctx.chat!.id), ctx.message!.message_id)
+  void relaySlashCommand(t.paneId, t.watcher, command, String(ctx.chat!.id))
 })
 
 // /compact relays straight to the session — compact the conversation to free context.
-// No 👍 ack: the live "Compacting…" status card is the acknowledgement.
+// No echo: the live "Compacting…" status card is the acknowledgement.
 bot.command('compact', async ctx => {
   if (!dmCommandGate(ctx)) return
   const t = await commandTarget(ctx)
   if (!t) return
   if (await guardArmedBashBox(t.paneId, String(ctx.chat!.id), t.replyThread)) return
-  void relaySlashCommand(t.paneId, t.watcher, '/compact', String(ctx.chat!.id), ctx.message!.message_id, false)
+  void relaySlashCommand(t.paneId, t.watcher, '/compact', String(ctx.chat!.id))
 })
 
 // ---- /update: pick what to update — the bridge or Claude itself ----
@@ -5960,7 +5983,7 @@ for (const [name, prompt] of [['handoff', HANDOFF_PROMPT], ['continue', CONTINUE
     const msgId = ctx.message?.message_id
     const chat_id = String(ctx.chat?.id ?? '')
     await handleInbound(ctx, prompt, undefined)
-    if (msgId != null) void channel.react({ chatId: chat_id, messageId: String(msgId) }, '👍').catch(() => {})
+    if (msgId != null) void channel.react({ chatId: chat_id, messageId: String(msgId) }, '✍').catch(() => {})
   })
 }
 
@@ -8218,7 +8241,7 @@ bot.on('callback_query:data', async ctx => {
     const t = await commandTarget(ctx)
     if (!t) return
     if (await guardArmedBashBox(t.paneId, String(ctx.chat!.id), t.replyThread)) return
-    void relaySlashCommand(t.paneId, t.watcher, '/compact', String(ctx.chat!.id), ctx.callbackQuery.message!.message_id)
+    void relaySlashCommand(t.paneId, t.watcher, '/compact', String(ctx.chat!.id))
     return
   }
 
@@ -10819,7 +10842,6 @@ bot.on('message:text', async ctx => {
     // A slash command while an effort confirmation is open: dismiss it first so the command isn't
     // typed into the modal (matches the "next message dismisses → No" behaviour for plain messages).
     await dismissPendingEffortConfirm(t.paneId)
-    const msgId = ctx.message.message_id
     const chat_id = String(ctx.chat!.id)
     if (await guardArmedBashBox(t.paneId, chat_id, t.replyThread)) return
     // /exit (and /quit) closes the session. If it's the only one, confirm first (Yes/No) so the
@@ -10835,7 +10857,7 @@ bot.on('message:text', async ctx => {
       await ctx.reply(`✅ Session <b>${escapeHtml(label)}</b> exited`, { parse_mode: 'HTML' })
       return
     }
-    void relaySlashCommand(t.paneId, t.watcher, text, chat_id, msgId)
+    void relaySlashCommand(t.paneId, t.watcher, text, chat_id, true, t.replyThread)
     return
   }
 

@@ -36,6 +36,7 @@ export const currentTurnActivity = (file: string) => (isCodex(file) ? cx.current
 export const currentTurnTokens = (file: string) => (isCodex(file) ? cx.currentTurnTokens(file) : cc.currentTurnTokens(file))
 export const currentTurnFeed = (file: string, concluded = false) => (isCodex(file) ? cx.currentTurnFeed(file, concluded) : cc.currentTurnFeed(file, concluded))
 export const bashResultAfter = (file: string, sinceMs: number) => (isCodex(file) ? cx.bashResultAfter(file, sinceMs) : cc.bashResultAfter(file, sinceMs))
+export const slashResultAfter = (file: string, sinceMs: number) => (isCodex(file) ? null : cc.slashResultAfter(file, sinceMs))   // CC-only: Codex logs no local command stdout
 export const agentSessionId = (file: string) => isCodex(file)
   ? cx.sessionIdOf(basename(file))
   : basename(file, '.jsonl')

@@ -3,7 +3,7 @@ import { test, expect } from 'bun:test'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnActivity, currentTurnFeed, currentTurnTokens } from './transcript.ts'
+import { latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnActivity, currentTurnFeed, currentTurnTokens, slashResultAfter } from './transcript.ts'
 
 function fixture(entries: object[]): string {
   const f = join(mkdtempSync(join(tmpdir(), 'tg-transcript-')), 'session.jsonl')
@@ -173,4 +173,20 @@ test('multi-root: resolveTranscript picks the newest across roots; find/list car
   expect(findSessionCwd('aaa', [rootA, rootB])).toEqual({ cwd: '/projects/x', root: rootA })
   const recents = listRecentSessions(10, [rootA, rootB])
   expect(recents.map((r: { sessionId: string; root: string }) => [r.sessionId, r.root])).toEqual([['bbb', rootB], ['aaa', rootA]])
+})
+
+// slashResultAfter — a relayed slash command's <local-command-stdout>, in both shapes CC writes:
+// a user entry (message.content) and a system/local_command entry (top-level content).
+test('slashResultAfter returns local command stdout at/after sinceMs, in both entry shapes', () => {
+  const at = (ms: number) => new Date(ms).toISOString()
+  const f = fixture([
+    { type: 'user', uuid: 'c0', timestamp: at(1000), message: { content: '<local-command-stdout>old output</local-command-stdout>' } },
+    { type: 'user', uuid: 'c1', timestamp: at(5000), message: { content: '<local-command-stdout>Set effort level to medium</local-command-stdout>' } },
+  ])
+  expect(slashResultAfter(f, 2000)).toBe('Set effort level to medium')
+  expect(slashResultAfter(f, 6000)).toBe(null)   // nothing since — still waiting
+  const sys = fixture([
+    { type: 'system', subtype: 'local_command', uuid: 's1', timestamp: at(5000), content: '<local-command-stdout></local-command-stdout>' },
+  ])
+  expect(slashResultAfter(sys, 2000)).toBe('')   // ran, but no local output
 })
