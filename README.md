@@ -75,7 +75,6 @@ These commands are added by the bridge. Everything else belongs to the active te
 | `/find <text>` | Search every session's conversation; tap a hit to resume |
 | `/cron <when>` | Schedule a message for later (`/cron 12h` · `every 09:00` · `cancel`; alias `/schedule`) |
 | `/queue <prompt>` | Per-session backlog — runs when the session goes idle (`/queue clear`) |
-| `/loop <goal>` | Re-run a goal until its check passes (`status` · `stop` · `resume`) |
 | `/terminal` | Show recent terminal activity (40 lines) |
 | `/md` | Create a `.md` file in the working dir, then reply with its contents |
 | `/budget` | Daily $ cap with 80%/100% warnings (`/budget 20` · `off`) |

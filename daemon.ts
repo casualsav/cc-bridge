@@ -115,10 +115,6 @@ import { formatAskBlock, formatAnswerBlock, formatDigestBlock, formatRosterLine,
 import { laneForChat, bindLane, chatForLaneSession, noteLaneCwd } from './dm-lanes.ts'
 import { runHermes, type HermesEndpoint, type HermesTask } from './hermes-driver.ts'
 import {
-  initLoop, sweepLoops, LOOP_SWEEP_MS, startLoopWizard, handleLoopWizardReply, wizardSidFor,
-  activeLoop, loopGo, loopCancel, loopStopSoft, loopStopNow, loopResume, loopStatusHtml, loopStatusKeyboard,
-} from './loop.ts'
-import {
   initPromptRelay, relayPromptToTelegram, relayPermissionToTelegram, sweepPermStorms,
   permStorms, multiSelectKeyboard, formatPermission, relayStuckScreen, renderStuckHtml,
 } from './prompt-relay.ts'
@@ -332,12 +328,6 @@ initStatusCard({
 initUpdates({ channel })
 initPromptRelay({ channel, outboundTargetsFor, flushPendingText, transcriptForPane, lastRelayedUuid: () => lastRelayedUuid, resetPromptDedup, verifyPromptClosed, paneKeys })
 initQueue({ channel, outboundTargetsFor, deliverToPane: (pane, text) => pane === focus.activePaneId && focus.paneWatcher ? injectText(pane, focus.paneWatcher, text) : pasteToPane(pane, text) })
-initLoop({
-  channel,
-  deliverToPane: (pane, text) => pane === focus.activePaneId && focus.paneWatcher ? injectText(pane, focus.paneWatcher, text) : pasteToPane(pane, text),
-  paneKeys,
-  resolveTranscriptForPane: async pane => transcriptForPane(pane, await paneCwd(pane)),
-})
 initTopicRuntime(channel)
 let botUsername = ''
 // access.ts's isMentioned needs the live bot username (set after the daemon connects).
@@ -4991,7 +4981,6 @@ const START_COMMAND_GROUPS: Array<[title: string, lines: string[]]> = [
   ['Automation', [
     `<code>/queue</code> — run a prompt when idle (<code>@reset</code> = the 5h rollover)`,
     `<code>/cron</code> — schedule messages (full cron expressions)`,
-    `<code>/loop</code> — repeat a goal until its check passes`,
     `<code>/budget</code> — daily $ cap with warnings`,
   ]],
   ['Bridge', [
@@ -5027,7 +5016,7 @@ async function sendStartHelp(ctx: Context): Promise<void> {
   // their client (its taps would otherwise leak the button label to Claude as a plain message).
   // Albums can't carry reply_markup, so it rides on the commands message (or the text fallbacks).
   const kb = { remove_keyboard: true as const }
-  const caption = `Welcome to <b>cc-bridge</b>. Enjoy full CLI access via Telegram\n\n🖼️ Save &amp; set one of these photos as my profile picture`
+  const caption = `Welcome to <b>cc-bridge</b>. Enjoy full Claude Code CLI access via Telegram\n\n🖼️ Save &amp; set one of these photos as my profile picture`
   // Lead with the bundled profile-picture candidates — an album; caption rides on the first.
   try {
     await ctx.replyWithMediaGroup([
@@ -6208,38 +6197,6 @@ bot.command('budget', async ctx => {
   }
   if (arg) { await ctx.reply('Usage: <code>/budget 20</code> · <code>/budget off</code> · bare shows today.', { parse_mode: 'HTML' }); return }
   await ctx.reply(budgetPanelText(), { parse_mode: 'HTML', reply_markup: budgetPanelKeyboard() })
-})
-
-// ---- Autonomous loop (/loop) ----
-// /loop <goal> opens the setup wizard (check command → max iterations → budget) in one
-// self-editing card; bare /loop (or /loop status) shows the card; stop/resume control a run.
-// The engine lives in loop.ts and is driven by its own idle sweep (armed next to the queue's).
-bot.command('loop', async ctx => {
-  if (!dmCommandGate(ctx)) return
-  const t = await commandTarget(ctx)
-  if (!t) return
-  const sid = (await sessionForPane(t.paneId)) ?? 'focused'
-  const arg = (ctx.match ?? '').toString().trim()
-  const sub = arg.toLowerCase()
-  if (!arg || sub === 'status') {
-    const kb = loopStatusKeyboard(sid)
-    await ctx.reply(loopStatusHtml(sid), { parse_mode: 'HTML', ...(kb ? { reply_markup: buttonsToKb(kb) } : {}) })
-    return
-  }
-  if (sub === 'stop now') { await ctx.reply(await loopStopNow(sid)); return }
-  if (sub === 'stop' || sub === 'cancel') {
-    const rec = activeLoop(sid)
-    const reply = rec && (rec.status === 'running' || rec.status === 'paused' || rec.status === 'stopping')
-      ? await loopStopSoft(sid) : await loopCancel(sid)
-    await ctx.reply(reply, { parse_mode: 'HTML' })
-    return
-  }
-  if (sub === 'resume') { await ctx.reply(await loopResume(sid)); return }
-  if (activeLoop(sid)) {
-    await ctx.reply('🔁 A loop already exists for this session — <code>/loop status</code> · <code>/loop stop</code> first.', { parse_mode: 'HTML' })
-    return
-  }
-  await startLoopWizard(sid, arg, String(ctx.chat!.id), t.replyThread)
 })
 
 // ---- Cross-session search (ROADMAP #5) ----
@@ -8262,23 +8219,6 @@ bot.on('callback_query:data', async ctx => {
     if (!t) return
     if (await guardArmedBashBox(t.paneId, String(ctx.chat!.id), t.replyThread)) return
     void relaySlashCommand(t.paneId, t.watcher, '/compact', String(ctx.chat!.id), ctx.callbackQuery.message!.message_id)
-    return
-  }
-
-  // /loop card buttons — wizard cancel, start, and stop/resume on the live card.
-  const loopMatch = /^loop:(go|cancel|stopsoft|stopnow|resume):(.+)$/.exec(data)
-  if (loopMatch) {
-    if (!(await cbAuth(ctx))) return
-    if (loopMatch[1] === 'go') {
-      // Start pre-flights the check command (can take minutes) — answer the tap immediately and
-      // let loopGo report refusals to the chat itself, or the callback would time out.
-      await ctx.answerCallbackQuery({ text: '⏳ Starting…' }).catch(() => {})
-      void loopGo(loopMatch[2])
-      return
-    }
-    const fn = { cancel: loopCancel, stopsoft: loopStopSoft, stopnow: loopStopNow, resume: loopResume }[loopMatch[1]]!
-    const note = await fn(loopMatch[2])
-    await ctx.answerCallbackQuery({ text: note.replace(/<[^>]+>/g, '').slice(0, 190) }).catch(() => {})
     return
   }
 
@@ -10918,22 +10858,6 @@ bot.on('message:text', async ctx => {
     return
   }
 
-  // /loop wizard: while a setup card is open for this chat/topic, the next plain message
-  // answers the open field (check command → max iterations → budget) instead of going to Claude.
-  const wizSid = wizardSidFor(String(ctx.chat!.id), ctx.message.message_thread_id)
-  if (wizSid) {
-    const result = gate(ctx)
-    if (result.action !== 'deliver') {
-      if (result.action === 'pair') {
-        const lead = result.isResend ? 'Still pending' : 'Pairing required'
-        await ctx.reply(`🔗 ${lead} — run in Claude Code:\n\n/telegram:access pair ${result.code}`)
-      }
-      return
-    }
-    await handleLoopWizardReply(wizSid, text)
-    return
-  }
-
   // Bare control chord: a message that is *only* `ctrl+g` / `ctrl-g` / `ctrl g` / `^g` (whole
   // message, single letter) is sent to the session pane as that chord instead of being typed — for
   // TUI shortcuts a Telegram keyboard can't otherwise reach (e.g. the plan prompt's "ctrl+g to
@@ -11420,7 +11344,6 @@ setInterval(() => void sweepDeletedTopics(), TOPIC_SWEEP_MS).unref()
 
 // Inject /later queue items whenever their session goes idle.
 setInterval(() => void sweepLaterQueues(), LATER_SWEEP_MS).unref()
-setInterval(() => void sweepLoops(), LOOP_SWEEP_MS).unref()
 setInterval(() => void sweepPermStorms(), 5_000).unref()
 // Stale-session sweep: hourly (auto-update can land any time), first pass shortly after boot.
 setTimeout(() => void sweepSessionVersions(), 3 * 60_000).unref()
@@ -11638,7 +11561,6 @@ void (async () => {
               { command: 'settings', description: 'Channel settings — mirror, pin, MCP, voice' },
               { command: 'cron', description: 'Schedule messages (/cron 12h · every 09:00 · */30 9-17 * * 1-5 · cancel)' },
               { command: 'queue', description: 'Queue a prompt for idle, or @reset for the 5h rollover (/queue clear)' },
-              { command: 'loop', description: 'Run a goal on repeat until a check passes (/loop <goal> · status · stop)' },
               { command: 'md', description: 'Create a .md file in the working dir, then reply with its contents' },
               { command: 'launch', description: 'Start a fresh Claude Code session (revives a dead pane)' },
               { command: 'resume', description: 'Resume a recent session (lists them with times)' },
