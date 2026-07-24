@@ -2394,6 +2394,16 @@ async function notifyBusRich(surfaceSid: string, header: string, body: string): 
 const notifyAskSent = (fromSid: string, toName: string, text: string): Promise<void> =>
   notifyBusRich(fromSid, `Messaged <b>@${escapeHtml(toName)}</b>`, text)
 
+// A plain one-line bus-plumbing notice on a session's OWN surface (its chat DM / topic) — never
+// General. The text-only sibling of notifyBusRich, for short status lines with no body to collapse.
+async function notifyBusText(surfaceSid: string, text: string): Promise<void> {
+  const pane = await paneForSession(surfaceSid).catch(() => null)
+  const targets = pane ? await outboundTargetsFor(pane).catch(() => []) : []
+  for (const { chat, thread } of targets) {
+    void channel.sendText(chat, text, { silent: true, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
+  }
+}
+
 // Deliver a queued ask NOW iff its target pane is live and at a normal prompt (never mid-turn). The
 // pane is re-resolved from the sessionId every time (panes churn on respawn/adopt). busInFlight
 // guards the immediate attempt (in the `ask` handler) from racing the 15s sweep into a double-inject.
@@ -2516,12 +2526,11 @@ async function runHermesAsk(pending: BusPending, cfg: HermesEndpoint): Promise<v
 // child died with the daemon, so no answer will ever arrive. Expire them now + tell the asker, rather
 // than stranding it for the full 30-min TTL.
 function sweepOrphanedHermesAsks(): void {
-  const room = busRoom()
   for (const p of listPending()) {
     if (p.toKind !== 'hermes') continue
     removePending(p.id)
     process.stderr.write(`daemon: dropped orphaned hermes ask ${p.id} → @${p.toName} (daemon restarted mid-run)\n`)
-    if (room) void channel.sendText(String(room), `♻️ Ask ${p.id} to <b>${escapeHtml(p.toName)}</b> was dropped — the bridge restarted mid-run.`, { silent: true }).catch(() => {})
+    void notifyBusText(p.fromSid, `♻️ Ask ${p.id} to <b>${escapeHtml(p.toName)}</b> was dropped — the bridge restarted mid-run.`)   // asker's surface, never General
     void paneForSession(p.fromSid).then(pane => {
       if (pane) void busDeliver(pane, formatAnswerBlock('system', p.id, `(ask ${p.id} to @${p.toName} dropped — the bridge restarted while it was working; re-ask if still needed)`))
     }).catch(() => {})
@@ -4054,7 +4063,14 @@ async function handleCall(
         if (res.kind === 'claude') {
           const hops = recordAgentAsk()
           if (hops > HOP_LIMIT) {
-            if (hops === HOP_LIMIT + 1) void channel.sendText(String(room), '⏸ Agents paused — several turns without you. Reply to continue.', { silent: true }).catch(() => {})
+            // Orchestration state → the planner/owner conversation (the DM chat lane), never General. If
+            // there's no planner lane, fall back to the asker's own surface so it still isn't in General.
+            if (hops === HOP_LIMIT + 1) {
+              const paused = '⏸ Agents paused — several turns without you. Reply to continue.'
+              const lanes = listDmChatSessions()
+              if (lanes.length) for (const { chatId } of lanes) void channel.sendText(chatId, paused, { silent: true }).catch(() => {})
+              else void notifyBusText(fromSid, paused)
+            }
             write({ t: 'result', id, ok: false, text: 'paused: hop limit reached — a human reply resumes the room' }); return
           }
         }
