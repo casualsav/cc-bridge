@@ -4274,7 +4274,11 @@ async function handleCall(
           write({ t: 'result', id, ok: false, text: `spawn failed in ${dir} — see daemon log` }); return
         }
         const room = busRoom()
-        if (room) appendLedger(room, { ts: Date.now(), kind: 'spawn', from: nameForEndpoint(fromSid, busEndpoints()), to: topicName, text: `${dir}${model ? ` model=${model}` : ''}${effort ? ` effort=${effort}` : ''}` })
+        const fromName = nameForEndpoint(fromSid, busEndpoints())
+        if (room) appendLedger(room, { ts: Date.now(), kind: 'spawn', from: fromName, to: topicName, text: `${dir}${model ? ` model=${model}` : ''}${effort ? ` effort=${effort}` : ''}` })
+        // Visibility notice on the SPAWNER's own surface (its DM lane / topic) — one line, so the
+        // owner watching that lane sees a session was opened on his behalf.
+        void notifyBusText(fromSid, `🆕 Opened session: <b>@${escapeHtml(topicName)}</b>`)
         const firstMsg = String(args.text ?? '').trim()
         if (firstMsg) {
           void (async () => {   // wait for the REPL, then paste — same shape as the scheduler's reviveAndInject
@@ -4285,6 +4289,18 @@ async function handleCall(
             }
             if (!(await pasteToPane(newPane, firstMsg))) {
               void channel.sendText(group, `⚠️ Spawned <b>${escapeHtml(topicName)}</b>, but its first message didn't paste — send it again in its topic.`, { threadId: String(threadId) }).catch(() => {})
+              return
+            }
+            // Mirror the delivered task into the new topic: the paste lands only in the pane, so
+            // without this the owner can't see what the spawner asked the new session to do.
+            // Same chevron shape as notifyBusRich, but addressed directly (group+thread are known —
+            // no pane→target resolution on a seconds-old pane).
+            const shown = firstMsg.length > ASK_QUOTE_CAP ? firstMsg.slice(0, ASK_QUOTE_CAP) + '…' : firstMsg
+            const header = `Task from <b>@${escapeHtml(fromName)}</b>`
+            try {
+              await sendRichMessage(TOKEN!, group, { html: `<details><summary>${header}</summary>${escapeHtml(shown).replace(/\n/g, '<br>')}</details>` }, { messageThreadId: threadId, disableNotification: true })
+            } catch {
+              void channel.sendText(group, `${header}\n<blockquote expandable>${escapeHtml(shown)}</blockquote>`, { silent: true, threadId: String(threadId) }).catch(() => {})
             }
           })()
         }
