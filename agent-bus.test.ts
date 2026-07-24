@@ -1,7 +1,7 @@
 import { test, expect, beforeEach } from 'bun:test'
 import {
   _resetForTest, loadBus,
-  createPending, getPending, removePending, putPending, listPending, markInjected, queuedFor, expirePending,
+  createPending, getPending, removePending, putPending, listPending, markInjected, queuedFor, expirePending, dropExpired,
   recordAgentAsk, resetHops, currentHops, hopsExceeded, HOP_LIMIT, ASK_TTL_MS,
   normalizeEndpointName, resolveEndpoint, nameForEndpoint, confineRef,
   getSeen, markSeen, digestSince, SEEN_TTL_MS,
@@ -74,16 +74,29 @@ test('queuedFor returns only un-injected asks for a target, oldest first', () =>
   expect(queuedFor('cccc').map(p => p.id)).toEqual([c.id])
 })
 
-test('expirePending removes and returns only the aged-out asks', () => {
+test('expirePending marks (not deletes) aged-out asks so a late answer still resolves', () => {
   const fresh = ask()
   const stale = ask()
   // age `stale` out by hand
-  const s = getPending(stale.id)!
-  s.expiresAt = 500
+  getPending(stale.id)!.expiresAt = 500
   const gone = expirePending(1000)
   expect(gone.map(p => p.id)).toEqual([stale.id])
-  expect(getPending(stale.id)).toBeUndefined()
-  expect(getPending(fresh.id)?.id).toBe(fresh.id)
+  // the record is KEPT (stamped expiredAt) so `tg answer` can still deliver a late answer
+  expect(getPending(stale.id)?.expiredAt).toBe(1000)
+  expect(getPending(fresh.id)?.expiredAt).toBeUndefined()
+  // a second sweep never re-expires an already-expired ask
+  expect(expirePending(2000).map(p => p.id)).toEqual([])
+})
+
+test('expired asks are dropped from the delivery queue but GC only after the grace window', () => {
+  const q = ask()   // un-injected, so it would normally be in queuedFor
+  getPending(q.id)!.expiresAt = 500
+  expirePending(1000)                              // expiredAt = 1000
+  expect(queuedFor('bbbb')).toEqual([])            // expired → no longer offered to the target
+  expect(dropExpired(999)).toBe(0)                 // grace not elapsed → kept
+  expect(getPending(q.id)?.id).toBe(q.id)
+  expect(dropExpired(1000)).toBe(1)                // grace elapsed → GC'd
+  expect(getPending(q.id)).toBeUndefined()
 })
 
 test('a seeded store carries its pending asks (survives a reload)', () => {

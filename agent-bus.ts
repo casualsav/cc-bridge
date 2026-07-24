@@ -25,9 +25,13 @@ export const AGENT_BUS_PIN_UI = false
 // and posts "⏸ agents paused". Two bots answering each other forever is the money-fire failure mode;
 // a human message resets the count to 0. (Budget-based floor control is a later phase.)
 export const HOP_LIMIT = 4
-// A queued/awaiting ask past this age is abandoned and the asker is told "no answer" — so a dead or
-// silent target never leaves the asker waiting forever. 30 min: long enough for a real task.
-export const ASK_TTL_MS = 30 * 60_000
+// A queued/awaiting ask past this age is marked expired and the asker is told "no answer yet" — so a
+// dead or silent target never leaves the asker waiting forever. 60 min: builds routinely run long, and
+// an expired ask is no longer lost (a late `tg answer` still delivers — see expiredAt / dropExpired).
+export const ASK_TTL_MS = 60 * 60_000
+// After a timeout, the ask record is KEPT this long so a late answer can still be delivered before the
+// record is finally GC'd (dropExpired). Well past any realistic build; a truly-dead ask drops at 24h.
+export const LATE_ANSWER_GRACE_MS = 24 * 3600_000
 
 export type BusPending = {
   id: number
@@ -42,8 +46,10 @@ export type BusPending = {
   text: string
   refs: string[]      // shared-dir paths (already confined by confineRef)
   createdAt: number
-  expiresAt: number   // TTL deadline; past it → notify the asker, drop the ask
+  expiresAt: number   // TTL deadline; past it → notify the asker + mark expiredAt (record kept for a late answer)
   injected: boolean   // false = still queued (target was busy); true = delivered, awaiting an answer
+  expiredAt?: number  // set when the TTL passed; the ask is no longer delivered to the target, but a late
+                      // `tg answer` still resolves it until dropExpired() GCs it (LATE_ANSWER_GRACE_MS)
 }
 
 export type BusState = {
@@ -82,6 +88,7 @@ export function loadBus(): BusState {
         createdAt: typeof p.createdAt === 'number' ? p.createdAt : 0,
         expiresAt: typeof p.expiresAt === 'number' ? p.expiresAt : 0,
         injected: p.injected === true,
+        ...(typeof p.expiredAt === 'number' ? { expiredAt: p.expiredAt } : {}),
       }
     }
     // Sanitize the digest watermark like `pending`: keep only finite-number values (a corrupt/hand-
@@ -150,19 +157,29 @@ export function markInjected(id: number, now: number): void {
 // Oldest first (FIFO by ask id).
 export function queuedFor(toSid: string): BusPending[] {
   ensureLoaded()
-  return Object.values(store.pending).filter(p => !p.injected && p.toSid === toSid).sort((a, b) => a.id - b.id)
+  return Object.values(store.pending).filter(p => !p.injected && !p.expiredAt && p.toSid === toSid).sort((a, b) => a.id - b.id)
 }
 
-// Remove and return every pending whose TTL has passed — the daemon tells each asker "no answer".
-// Covers both injected-awaiting-answer AND still-queued (a target that never freed up), so nothing
-// lingers forever.
+// Mark (don't delete) every not-yet-expired pending whose TTL has passed and return them — the daemon
+// tells each asker "no answer yet". The record is KEPT (expiredAt stamped) so a late `tg answer` can
+// still be delivered; dropExpired() GCs it later. Covers both injected-awaiting-answer AND still-queued.
 export function expirePending(now: number): BusPending[] {
   ensureLoaded()
-  const expired = Object.values(store.pending).filter(p => p.expiresAt <= now)
+  const expired = Object.values(store.pending).filter(p => !p.expiredAt && p.expiresAt <= now)
   if (!expired.length) return []
-  for (const p of expired) delete store.pending[String(p.id)]
+  for (const p of expired) p.expiredAt = now
   save()
   return expired
+}
+
+// GC expired asks whose grace window has fully elapsed (a late answer never came). Returns how many
+// were dropped. Keeps agent-bus.json from growing without bound now that expiry no longer deletes.
+export function dropExpired(before: number): number {
+  ensureLoaded()
+  const dead = Object.values(store.pending).filter(p => p.expiredAt != null && p.expiredAt <= before)
+  for (const p of dead) delete store.pending[String(p.id)]
+  if (dead.length) save()
+  return dead.length
 }
 
 // ---- hop counter (loop guard) ----

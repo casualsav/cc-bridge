@@ -105,7 +105,7 @@ import { formatChannelBlock } from './inbound.ts'
 import { initQueue, readLater, writeLater, sweepLaterQueues, LATER_SWEEP_MS } from './queue.ts'
 import {
   AGENT_BUS_ENABLED, AGENT_BUS_PIN_UI,
-  createPending, getPending, removePending, putPending, listPending, markInjected, expirePending,
+  createPending, getPending, removePending, putPending, listPending, markInjected, expirePending, dropExpired, LATE_ANSWER_GRACE_MS, ASK_TTL_MS,
   recordAgentAsk, resetHops, HOP_LIMIT,
   resolveEndpoint, nameForEndpoint, normalizeEndpointName, confineRef, sharedDir, ensureSharedDir, appendLedger, tailLedger,
   getSeen, markSeen, digestSince, DIGEST_SCAN,
@@ -2390,7 +2390,7 @@ async function notifyAskSent(fromSid: string, toName: string, text: string): Pro
 const busInFlight = new Set<number>()
 async function tryDeliverAsk(p: BusPending): Promise<boolean> {
   const cur = getPending(p.id)
-  if (!cur || cur.injected || busInFlight.has(cur.id)) return false
+  if (!cur || cur.injected || cur.expiredAt || busInFlight.has(cur.id)) return false   // never deliver a timed-out ask to the target
   busInFlight.add(cur.id)   // claim BEFORE the awaits so the immediate attempt + the 15s sweep can't both proceed
   try {
     const pane = await paneForSession(cur.toSid).catch(() => null)
@@ -2428,16 +2428,19 @@ async function tryDeliverAsk(p: BusPending): Promise<boolean> {
 // 15s sweep: expire un-answered asks (tell the asker) + deliver queued asks whose target is now idle.
 async function sweepBus(): Promise<void> {
   const room = busRoom()
+  dropExpired(Date.now() - LATE_ANSWER_GRACE_MS)   // GC asks whose late-answer grace has fully elapsed
   for (const p of expirePending(Date.now())) {
+    // Not "abandoned": the record is kept so a late answer still lands. Say so, so a slow (not dead)
+    // agent isn't misread as gone — the exact false-negative that got a live build declared dead.
     if (room) void channel.sendText(String(room),
-      `⌛ No answer from <b>${escapeHtml(p.toName)}</b> to ask ${p.id} — timed out.`,
+      `⌛ No answer yet from <b>${escapeHtml(p.toName)}</b> to ask ${p.id} — still waiting; a late answer will still be delivered.`,
       { silent: true }).catch(() => {})
     const askerPane = await paneForSession(p.fromSid).catch(() => null)
-    if (askerPane) void busDeliver(askerPane, formatAnswerBlock('system', p.id, `(no answer from @${p.toName} — timed out)`))
+    if (askerPane) void busDeliver(askerPane, formatAnswerBlock('system', p.id, `(no answer yet from @${p.toName} after ${Math.round(ASK_TTL_MS / 60_000)}m — still open; a late answer will be delivered if it arrives)`))
     if (room) appendLedger(room, { ts: Date.now(), kind: 'expire', from: p.toName, to: p.fromName, id: p.id, text: 'timed out' })
   }
   for (const p of listPending()) {
-    if (!p.injected) await tryDeliverAsk(p).catch(() => {})
+    if (!p.injected && !p.expiredAt) await tryDeliverAsk(p).catch(() => {})
   }
 }
 
@@ -2449,18 +2452,22 @@ async function sweepBus(): Promise<void> {
 async function deliverAnswerToAsker(pending: BusPending, answerer: string, body: string, refs: string[]): Promise<string> {
   const room = busRoom()
   const cur = getPending(pending.id)
-  if (!cur) return `!ask ${pending.id} is already closed (expired or answered)`
+  if (!cur) return `!ask ${pending.id} is already closed (answered, or its 24h late-answer window elapsed)`
   removePending(cur.id)
   const askerPane = await paneForSession(cur.fromSid).catch(() => null)
   if (!askerPane) { putPending(cur); return `!@${cur.fromName}'s session is no longer running — not delivered` }
+  // A late answer (the ask had already timed out but its record was kept) still lands — flag it so the
+  // asker knows why it arrives after a "timed out" note. Prepend to the delivered body + the room card.
+  const late = cur.expiredAt != null
+  const deliveredBody = late ? `⏰ (late answer — ask ${cur.id} had timed out)\n\n${body}` : body
   // .catch(false): a rejected paste (a tmux error propagating through the inject chain) must reach the
   // restore path below, not throw past it — the pending is already removed, so a throw would lose the answer.
-  const ok = await busDeliver(askerPane, formatAnswerBlock(answerer, cur.id, body, refs)).catch(() => false)
+  const ok = await busDeliver(askerPane, formatAnswerBlock(answerer, cur.id, deliveredBody, refs)).catch(() => false)
   if (!ok) { putPending(cur); return `!couldn't deliver to @${cur.fromName} (pane gone) — ask kept open` }
   const mismatch = answerer !== cur.toName ? ` [asked @${cur.toName}]` : ''
   if (room) appendLedger(room, { ts: Date.now(), kind: 'answer', from: answerer, to: cur.fromName, id: cur.id, text: body, refs })
-  if (room) void channel.sendText(String(room), `✓ <b>${escapeHtml(answerer)}</b> answered <b>${escapeHtml(cur.fromName)}</b> (ask ${cur.id})${escapeHtml(mismatch)}`, { silent: true }).catch(() => {})
-  return `answered @${cur.fromName} (ask ${cur.id})`
+  if (room) void channel.sendText(String(room), `✓ <b>${escapeHtml(answerer)}</b> answered <b>${escapeHtml(cur.fromName)}</b> (ask ${cur.id})${late ? ' · late' : ''}${escapeHtml(mismatch)}`, { silent: true }).catch(() => {})
+  return `answered @${cur.fromName} (ask ${cur.id})${late ? ' (late — delivered after the timeout)' : ''}`
 }
 
 // Run a hermes ask end-to-end: mark it delivered (arms the TTL from spawn), spawn `hermes -z`, and
@@ -4080,13 +4087,20 @@ async function handleCall(
             continue
           }
           const pane = await paneForSession(e.id).catch(() => null)
-          if (!pane) { rows.push(`⚪ ${nm} (down)${flair}`); continue }
+          if (!pane) { rows.push(`⚪ ${nm} · down${flair}`); continue }
           const cap = await capturePane(pane).catch(() => '')
           const sl = cap ? parseStatusline(cap) : null
-          const busy = cap ? !onNormalPrompt(cap) : false
           const model = sl?.model ? ` ${sl.model}` : ''
           const pct = sl?.ctxPct != null ? ` ${sl.ctxPct}%` : ''
-          rows.push(`${busy ? '🟡' : '🟢'} ${nm}${model}${pct}${busy ? ' · busy' : ''}${flair}`)
+          // Authoritative "working" signal: an injected, un-expired bus ask targeting this endpoint means
+          // it's heads-down on that task RIGHT NOW — more reliable than a pane snapshot, which reads a
+          // between-tool-calls prompt as idle (the false negative that got a live build declared dead).
+          const onAsk = listPending().find(pp => pp.injected && !pp.expiredAt && pp.toKind === 'claude' && pp.toSid === e.id)
+          // A live pane whose capture is empty/unparseable is far likelier heads-down (a heavy build
+          // starves the capture) than cleanly idle — call that busy, not idle.
+          const busy = !!onAsk || (cap ? !onNormalPrompt(cap) : true)
+          const state = onAsk ? ` · busy · on ask ${onAsk.id}` : busy ? ' · busy' : ' · idle'
+          rows.push(`${busy ? '🟡' : '🟢'} ${nm}${model}${pct}${state}${flair}`)
         }
         text = rows.length ? rows.join('\n') : '(no live agents on the bus)'
         break
