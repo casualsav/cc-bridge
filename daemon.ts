@@ -11014,7 +11014,7 @@ bot.on('message:text', async ctx => {
     if (room) appendLedger(room, { ts: Date.now(), kind: 'slash', from: 'owner', to: toName, text: command })
     const watcher = targetPane === focus.activePaneId ? focus.paneWatcher : null
     void relaySlashCommand(targetPane, watcher, command, String(ctx.chat!.id), true, ctx.message?.message_thread_id)
-    await say(`▶️ Sent <code>${escapeHtml(command.split(/\s/)[0])}</code> to <b>@${escapeHtml(toName)}</b> — any output echoes here.`)
+    await say(`✅ Sent <code>${escapeHtml(command.split(/\s/)[0])}</code> to <b>@${escapeHtml(toName)}</b>`)
     return
   }
 
@@ -11936,6 +11936,60 @@ function webappAutomationCancel(userId: string, kind: 'cron' | 'queue', id: stri
   return null
 }
 
+// Mini-app "New schedule": the same three grammars as /cron (full cron expr · `every …` · a
+// duration), but the spec arrives as separate fields — the schedule alone in `when`, the message
+// in `text`, and an explicit session pick in `sid` (no chat-context fallback here).
+function parseWhenSpec(when: string): { fireAt: number; recur?: Recurrence } | { error: string } {
+  const tz = loadAccess().scheduleTz ?? DEFAULT_TZ
+  if (/^\S+\s+\S+\s+\S+\s+\S+\s+\S+$/.test(when) && parseCron(when)) {
+    // Same ≥5-min guard as /cron: probe the first few fires.
+    let t = Date.now()
+    const fires: number[] = []
+    for (let i = 0; i < 5; i++) { const n = nextCron(when, t, tz); if (n === null) break; fires.push(n); t = n }
+    if (fires.length === 0) return { error: 'that expression never fires (check day-of-month/month)' }
+    for (let i = 1; i < fires.length; i++)
+      if (fires[i] - fires[i - 1] < 5 * 60_000) return { error: 'that fires more often than every 5 minutes — too hot for a Claude session' }
+    return { fireAt: fires[0], recur: { kind: 'cron', expr: when, tz } }
+  }
+  const recurMatch = /^every\s+(?:(day|daily|weekday|weekdays|sun(?:day)?|mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?)\s+)?(\d{1,2}):(\d{2})$/i.exec(when)
+  if (recurMatch) {
+    const [, w0, hhS, mmS] = recurMatch
+    const hh = Number(hhS), mm = Number(mmS)
+    if (hh > 23 || mm > 59) return { error: 'time must be HH:MM (24h)' }
+    const w = (w0 ?? 'day').toLowerCase()
+    const recur: Recurrence = w === 'day' || w === 'daily' ? { kind: 'daily', hh, mm, tz }
+      : w.startsWith('weekday') ? { kind: 'weekdays', hh, mm, tz }
+      : { kind: 'weekly', hh, mm, dow: DOW_NAMES[w.slice(0, 3)], tz }
+    return { fireAt: nextRecurrence(recur, Date.now()), recur }
+  }
+  const ms = parseDuration(when)
+  if (!ms) return { error: 'unreadable schedule — use a duration (2h), every HH:MM, or a 5-field cron expr' }
+  if (ms > MAX_TIMEOUT) return { error: 'that’s too far out — max ~24 days' }
+  return { fireAt: Date.now() + ms }
+}
+
+async function webappAutomationCreate(
+  userId: string, spec: { when: string; sid: string; text: string },
+): Promise<{ error: string } | { summary: string }> {
+  const when = spec.when.trim(), text = spec.text.trim()
+  if (!when || !text) return { error: 'schedule and message required' }
+  const parsed = parseWhenSpec(when)
+  if ('error' in parsed) return { error: parsed.error }
+  const pane = spec.sid ? await paneForSession(spec.sid).catch(() => null) : null
+  if (!pane || !(await paneAlive(pane).catch(() => false))) return { error: 'pick a live session' }
+  const topic = getTopicBySession(spec.sid)
+  const label = topic?.name ?? await paneLabel(pane)
+  // cwd only for recurring jobs (the revive folder), matching the /cron branches.
+  const cwd = parsed.recur ? await paneCwd(pane).catch(() => null) ?? undefined : undefined
+  const group = getGroupChatId()
+  addScheduled({ id: randomBytes(4).toString('hex'), fireAt: parsed.fireAt, chatId: group ? String(group) : '',
+    paneId: pane, sessionLabel: label, text, ...(topic ? { thread: topic.threadId } : {}),
+    ...(parsed.recur ? { recur: parsed.recur } : {}), ...(cwd ? { cwd } : {}) })
+  return { summary: parsed.recur
+    ? `🔁 ${recurrenceLabel(parsed.recur)} → ${label}; next ${fmtWhen(parsed.fireAt)}`
+    : `${fmtWhen(parsed.fireAt)} → ${label}` }
+}
+
 async function startFilesWebapp(): Promise<void> {
   if (!WEBAPP_ENABLED) return
   try {
@@ -11946,7 +12000,8 @@ async function startFilesWebapp(): Promise<void> {
       readSettings: webappReadSettings, setSetting: webappSetSetting,
       listSessions: webappListSessions, readSessionFeed: webappSessionFeed, sessionAction: webappSessionAction,
       sessionAttach: webappSessionAttach, sessionSpawn: webappSessionSpawn,
-      readAutomation: webappReadAutomation, automationCancel: webappAutomationCancel })
+      readAutomation: webappReadAutomation, automationCancel: webappAutomationCancel,
+      automationCreate: webappAutomationCreate })
   } catch (e) { wlog(`webapp: failed to start: ${e}`); return }
   if (WEBAPP_PUBLIC_URL) { wlog(`webapp: public url ${WEBAPP_PUBLIC_URL}`); return }
   if (WEBAPP_TUNNEL === 'tailscale') {

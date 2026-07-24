@@ -166,6 +166,7 @@ test('console endpoints: sessions/auto reads + session act route to deps; missin
     listSessions: () => [{ sid: 's1', name: 'money', cwd: '/x', agent: 'claude', alive: true, working: true, task: 'Bash ls', model: 'Fable', effort: 'high', mode: 'bypassPermissions', ctxPct: 12, h5Pct: 40, branch: 'main' }],
     readAutomation: () => ({ cron: [], queue: [], budget: { spent: 1.5, cap: null } }),
     sessionAction: (_u, sid, action, text) => { acted.push([sid, action, text]); return null },
+    automationCreate: async (_u, spec) => { acted.push(['create', spec.when, spec.sid, spec.text]); return { summary: 'in 2h → money' } },
   })
   const auth = { Authorization: 'tma ' + sign({ auth_date: String(now()), user }) }
   const base = `http://127.0.0.1:${server.port}`
@@ -179,6 +180,12 @@ test('console endpoints: sessions/auto reads + session act route to deps; missin
     expect(acted).toEqual([['s1', 'send', 'hi']])
     const bad = await fetch(`${base}/api/session/act`, { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify({ sid: 's1', action: 'reboot' }) })
     expect(bad.status).toBe(400)
+    const created = await fetch(`${base}/api/auto/create`, { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify({ when: '2h', sid: 's1', text: 'ping' }) })
+    expect(created.status).toBe(200)
+    expect((await created.json()).summary).toBe('in 2h → money')
+    expect(acted).toContainEqual(['create', '2h', 's1', 'ping'])
+    const badCreate = await fetch(`${base}/api/auto/create`, { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify({ when: '2h' }) })
+    expect(badCreate.status).toBe(400)
     expect((await fetch(`${base}/api/session/feed?sid=s1`, { headers: auth })).status).toBe(404)   // dep not injected
     expect((await fetch(`${base}/api/sessions`)).status).toBe(401)                                  // unauthed
   } finally { server.stop(true) }

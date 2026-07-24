@@ -107,11 +107,12 @@
   .msg pre.code { background: rgba(0,0,0,.28); border-radius: 8px; padding: 8px 10px; overflow-x: auto; font: 12.5px/1.45 ui-monospace, Menlo, monospace; margin: 4px 0; white-space: pre; }
   /* "+" new-session row + bottom sheet */
   .newsess { border: 1px dashed var(--hint); border-radius: 12px; padding: 12px 14px; margin: 0 0 10px; color: var(--link); text-align: center; cursor: pointer; font-size: 14px; }
-  #spawn { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: none; z-index: 9; align-items: flex-end; }
-  #spawn.show { display: flex; }
+  #spawn, #sched { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: none; z-index: 9; align-items: flex-end; }
+  #spawn.show, #sched.show { display: flex; }
   .sheet { background: var(--bg); border-radius: 16px 16px 0 0; padding: 16px 16px calc(16px + env(safe-area-inset-bottom)); width: 100%; }
   .sheet .shead { font-weight: 600; font-size: 16px; margin-bottom: 12px; }
-  .sheet input { width: 100%; padding: 10px 12px; border-radius: 10px; border: none; background: var(--sec); color: var(--text); font-size: 14px; }
+  .sheet input, .sheet textarea { width: 100%; padding: 10px 12px; border-radius: 10px; border: none; background: var(--sec); color: var(--text); font-size: 14px; }
+  .sheet textarea { resize: none; font-family: inherit; }
   .seglbl { color: var(--hint); font-size: 12px; margin: 12px 0 6px; text-transform: uppercase; letter-spacing: .4px; }
   .segrow { display: flex; flex-wrap: wrap; gap: 6px; }
   .selchip { border: none; border-radius: 14px; padding: 6px 12px; background: var(--sec); color: var(--hint); font-size: 13px; cursor: pointer; }
@@ -181,6 +182,17 @@
     <div class="seglbl">Effort</div><div class="segrow" id="speffort"></div>
     <div class="seglbl">Mode</div><div class="segrow" id="spmode"></div>
     <div class="sprow"><button id="spcancel" class="cancel">Cancel</button><button id="spgo" class="create">Create</button></div>
+  </div>
+</div>
+
+<div id="sched">
+  <div class="sheet">
+    <div class="shead">New schedule</div>
+    <input id="scwhen" placeholder="2h · every 09:00 · */30 9-17 * * 1-5">
+    <div class="seglbl">Session</div><div class="segrow" id="scsess"></div>
+    <div class="seglbl">Message</div>
+    <textarea id="sctext" rows="3" placeholder="What to send when it fires"></textarea>
+    <div class="sprow"><button id="sccancel" class="cancel">Cancel</button><button id="scgo" class="create">Create</button></div>
   </div>
 </div>
 
@@ -766,6 +778,7 @@ async function renderAuto() {
     '<span class="tx">' + esc(m.sessionLabel) + ": " + esc(m.text) + "</span>" +
     '<button class="xbtn" data-kind="cron" data-id="' + esc(m.id) + '">✕</button></div>').join("")
     : '<div class="notice">Nothing scheduled.</div>';
+  html += '<div class="newsess" id="schedadd">➕ New schedule</div>';
   html += '<div class="sechead">Queued (/queue)</div>';
   html += d.queue.length ? d.queue.map(q =>
     '<div class="evrow"><span class="who">' + esc(q.session) + '</span><span class="tx">' + esc(q.text) + "</span>" +
@@ -781,7 +794,39 @@ async function renderAuto() {
     const d2 = await writeOp("/api/auto/cancel", { kind: b.dataset.kind, id: b.dataset.id });
     if (d2) { showOk("Cancelled"); renderAuto(); }
   });
+  $("schedadd").onclick = openSchedSheet;
 }
+
+// New-schedule sheet: when spec + a session pick (live panes from /api/sessions) + message.
+let schedSid = "";
+async function openSchedSheet() {
+  let live = [];
+  try { live = (await api("/api/sessions")).sessions.filter(s => s.alive); } catch {}
+  if (!live.length) { showErr("No live sessions to target"); return; }
+  if (!live.some(s => s.sid === schedSid)) schedSid = live[0].sid;
+  const row = $("scsess");
+  const paint = () => {
+    row.innerHTML = live.map(s =>
+      '<button class="selchip' + (schedSid === s.sid ? " on" : "") + '" data-v="' + esc(s.sid) + '">' + esc(s.name) + "</button>").join("");
+    row.querySelectorAll("button").forEach(b => b.onclick = () => { schedSid = b.dataset.v; paint(); });
+  };
+  paint();
+  $("sched").classList.add("show");
+  $("scwhen").focus();
+}
+$("sccancel").onclick = () => $("sched").classList.remove("show");
+$("sched").onclick = e => { if (e.target.id === "sched") $("sched").classList.remove("show"); };
+$("scgo").onclick = async () => {
+  const when = $("scwhen").value.trim(), text = $("sctext").value.trim();
+  if (!when || !text) { showErr("Schedule and message required"); return; }
+  $("scgo").disabled = true;
+  const d = await writeOp("/api/auto/create", { when, sid: schedSid, text });
+  $("scgo").disabled = false;
+  if (!d) return;   // writeOp surfaced the error
+  $("sched").classList.remove("show"); $("scwhen").value = ""; $("sctext").value = "";
+  showOk("Scheduled " + (d.summary || ""));
+  renderAuto();
+};
 
 // Boot: Sessions is the homepage. A deep link (?start= folder, or startapp token → /api/resolve)
 // still lands on Files at that folder — that's what the /files command promises.

@@ -41,6 +41,7 @@ export interface WebappDeps {
   sessionSpawn?: (userId: string, name: string, opts: { model?: string; effort?: string; mode?: string }) => Promise<{ error: string } | { sid: string; name: string }>   // "+" new session with dials
   readAutomation?: () => Promise<AutomationView> | AutomationView    // cron + queued prompts + budget
   automationCancel?: (userId: string, kind: 'cron' | 'queue', id: string) => Promise<string | null> | string | null   // cancel one item → error string or null
+  automationCreate?: (userId: string, spec: { when: string; sid: string; text: string }) => Promise<{ error: string } | { summary: string }>   // new cron from the Scheduled tab
 }
 
 // Settings tab payload: each toggle is {value, editable} so the SPA renders the live state and only
@@ -350,6 +351,17 @@ async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: strin
     deps.log(`webapp: cancel ${kind} id=${body.id} user=${userId}`)
     const err = await deps.automationCancel(userId, kind as 'cron' | 'queue', body.id)
     return err ? json({ error: err }, 400) : json({ ok: true })
+  }
+  // New schedule from the Scheduled tab (same auth stance as auto/cancel — /cron is a chat-level
+  // control every allowlisted user already has). Audited.
+  if (url.pathname === '/api/auto/create') {
+    if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405)
+    if (!deps.automationCreate) return json({ error: 'unavailable' }, 404)
+    const body = await req.json().catch(() => null) as { when?: unknown; sid?: unknown; text?: unknown } | null
+    if (!body || typeof body.when !== 'string' || typeof body.text !== 'string') return json({ error: 'bad body' }, 400)
+    deps.log(`webapp: cron create when=${body.when} sid=${typeof body.sid === 'string' ? body.sid : '-'} chars=${body.text.length} user=${userId}`)
+    const r = await deps.automationCreate(userId, { when: body.when, sid: typeof body.sid === 'string' ? body.sid : '', text: body.text })
+    return 'error' in r ? json({ error: r.error }, 400) : json(r)
   }
 
   // ---- Settings mutation (POST; gated by canWrite, same as the file writes) ----
