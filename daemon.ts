@@ -5214,7 +5214,7 @@ function startRichHtml(paired: boolean): string {
   const sections = START_COMMAND_GROUPS
     .map(([title, lines]) => `<b>${title}</b><br>${lines.join('<br>')}`)
     .join('<br><br>')
-  return `<details><summary><b>Commands</b></summary>${sections}</details>${paired ? '' : `\n${START_PAIR_FOOTER}`}`
+  return `<details><summary>Click here to view all /commands</summary>${sections}</details>${paired ? '' : `\n${START_PAIR_FOOTER}`}`
 }
 
 function startHelpText(paired: boolean): string {
@@ -5230,18 +5230,19 @@ async function sendStartHelp(ctx: Context): Promise<void> {
   const paired = gated.access.allowFrom.includes(gated.senderId)
   // remove_keyboard clears the retired docked control bar for anyone who still has it stuck on
   // their client (its taps would otherwise leak the button label to Claude as a plain message).
-  // Albums can't carry reply_markup, so it rides on the commands message (or the text fallbacks).
+  // Albums can't carry reply_markup, so it rides on the welcome text + commands messages.
   const kb = { remove_keyboard: true as const }
   const caption = `Welcome to <b>cc-bridge</b>. Enjoy full Claude Code CLI access via Telegram\n\n🖼️ Save &amp; set one of these photos as my profile picture`
-  // Lead with the bundled profile-picture candidates — an album; caption rides on the first.
+  // The bundled profile-picture candidates. The welcome text does NOT ride the album as a caption:
+  // a photo message's bubble (and its caption) is capped to the rendered photo width — squeezed
+  // narrow under a 2-up album — so the text goes out as its own full-width message (owner ask).
   try {
     await ctx.replyWithMediaGroup([
-      InputMediaBuilder.photo(new InputFile(join(import.meta.dir, 'assets', 'claude-tg.jpg')), { caption, parse_mode: 'HTML' }),
+      InputMediaBuilder.photo(new InputFile(join(import.meta.dir, 'assets', 'claude-tg.jpg'))),
       InputMediaBuilder.photo(new InputFile(join(import.meta.dir, 'assets', 'claude-spark.jpg'))),
     ])
-  } catch {
-    await ctx.reply(caption, { parse_mode: 'HTML', link_preview_options: { is_disabled: true }, reply_markup: kb }).catch(() => {})   // asset missing (stale cache) → text only
-  }
+  } catch { /* asset missing (stale cache) → the text message below still carries the welcome */ }
+  await ctx.reply(caption, { parse_mode: 'HTML', link_preview_options: { is_disabled: true }, reply_markup: kb }).catch(() => {})
   const chat = String(ctx.chat!.id)
   const thread = ctx.message?.message_thread_id
   try {
