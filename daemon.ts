@@ -4217,6 +4217,62 @@ async function handleCall(
         text = `sent ${command.split(/\s/)[0]} to @${toName} — its outcome echoes in that session's topic`
         break
       }
+      // `tg spawn <name> [--dir p] [--model fable] [--effort high] ["first message"]` — start a NEW
+      // Claude Code session in its own topic, from any bridged session (built for the DM chat agent:
+      // the owner says "start a topic called money on Fable high, tell it …" and the chat agent runs
+      // this). Reuses the user-created-tab machinery: forum topic → setTopic → spawnSession with the
+      // requested dials as launch flags; the first message is pasted once the REPL is up (background —
+      // the CLI returns as soon as the spawn lands).
+      case 'spawn': {
+        if (!isTopicMode()) { write({ t: 'result', id, ok: false, text: 'spawn needs a bound forum group — run /bind first' }); return }
+        const pane = args.pane ? String(args.pane) : null
+        const fromSid = pane ? await sessionForPane(pane) : null
+        if (!fromSid) { write({ t: 'result', id, ok: false, text: '`tg spawn` must run inside a bridged session' }); return }
+        const topicName = String(args.name ?? '').trim()
+        if (!topicName) { write({ t: 'result', id, ok: false, text: 'usage: tg spawn <name> [--dir p] [--model fable|opus|sonnet|haiku] [--effort low…max] ["first message"]' }); return }
+        const model = args.model ? String(args.model).trim().toLowerCase() : null
+        if (model && !MODEL_ALIASES.includes(model)) { write({ t: 'result', id, ok: false, text: `unknown model '${model}' — one of: ${MODEL_ALIASES.join(' | ')}` }); return }
+        const effort = args.effort ? String(args.effort).trim().toLowerCase().replace(/^med$/, 'medium') : null
+        if (effort && (effort === 'auto' || !EFFORT_LEVELS.includes(effort))) { write({ t: 'result', id, ok: false, text: `unknown effort '${effort}' — one of: low | medium | high | xhigh | max` }); return }
+        // Default home: its own folder under the /base dir (new topics are created "under" base).
+        const dir = args.dir
+          ? await resolveNewSessionDir(String(args.dir))
+          : join(getBaseCwd() ?? homedir(), topicName.toLowerCase().replace(/[^\w.-]+/g, '-'))
+        try { if (!existsSync(dir)) mkdirSync(dir, { recursive: true }) }
+        catch (e) { write({ t: 'result', id, ok: false, text: `couldn't create ${dir}: ${(e as Error)?.message ?? e}` }); return }
+        const group = getGroupChatId()!
+        let threadId: number
+        try { threadId = Number(await channel.threads!.create(group, topicName)) }
+        catch (e) { write({ t: 'result', id, ok: false, text: `couldn't create the topic: ${(e as Error)?.message ?? e}` }); return }
+        const sid = genSessionId()
+        setTopic(sid, { threadId, cwd: dir, name: topicName, closed: false, createdAt: Date.now() })
+        // Seed the branch cache so the retitle sweep doesn't stomp the chosen tab name (as topiccreate does).
+        try { topicBranchCache.set(sid, (await exec('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 2000 })).stdout.trim()) }
+        catch { topicBranchCache.set(sid, '') }
+        const newPane = await spawnSession(dir, '', sid, MAIN_ACCOUNT, 'claude', undefined, { model, effort })
+        if (!newPane) {
+          removeTopic(sid)
+          void channel.threads!.remove(group, String(threadId)).catch(() => {})
+          write({ t: 'result', id, ok: false, text: `spawn failed in ${dir} — see daemon log` }); return
+        }
+        const room = busRoom()
+        if (room) appendLedger(room, { ts: Date.now(), kind: 'spawn', from: nameForEndpoint(fromSid, busEndpoints()), to: topicName, text: `${dir}${model ? ` model=${model}` : ''}${effort ? ` effort=${effort}` : ''}` })
+        const firstMsg = String(args.text ?? '').trim()
+        if (firstMsg) {
+          void (async () => {   // wait for the REPL, then paste — same shape as the scheduler's reviveAndInject
+            for (let i = 0; i < 45; i++) {
+              await sleep(1000)
+              const cap = stripAnsi(await capturePane(newPane).catch(() => ''))
+              if (/[❯>]\s*$/m.test(cap) || /\? for shortcuts/.test(cap)) break
+            }
+            if (!(await pasteToPane(newPane, firstMsg))) {
+              void channel.sendText(group, `⚠️ Spawned <b>${escapeHtml(topicName)}</b>, but its first message didn't paste — send it again in its topic.`, { threadId: String(threadId) }).catch(() => {})
+            }
+          })()
+        }
+        text = `spawned "${topicName}" in ${dir}${model ? ` · model ${model}` : ''}${effort ? ` · effort ${effort}` : ''}${firstMsg ? ' — first message will be delivered as soon as the REPL is up' : ''}. Reach it on the bus as @${topicName}.`
+        break
+      }
       default:
         write({ t: 'result', id, ok: false, text: `unknown tool: ${name}` })
         return
@@ -7559,7 +7615,7 @@ async function captureInheritedSettings(paneId: string, watcher: PaneWatcher | n
 // with NO post-boot pane-driving at all. This replaced the old type-into-a-booting-pane path, whose
 // REPL-wait + inject round-trips were the 10-20s "new topic is slow / not ready to receive" lag (and
 // they raced the user's own first keystrokes into the fresh pane).
-async function spawnSession(dir: string, extra = '', presetSessionId?: string, account: Account = MAIN_ACCOUNT, agent: AgentKind = 'claude', harnessOverride?: HarnessProfile): Promise<string | null> {
+async function spawnSession(dir: string, extra = '', presetSessionId?: string, account: Account = MAIN_ACCOUNT, agent: AgentKind = 'claude', harnessOverride?: HarnessProfile, dials?: { model?: string | null; effort?: string | null }): Promise<string | null> {
   try {
     // tmux's `new-window -c` silently falls back to $HOME when it can't chdir into `dir` (e.g.
     // another user's 700 folder) — the session then runs in the wrong place, stuck on a trust
@@ -7599,6 +7655,10 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
       const mode = (prefSid ? sessionModes.get(prefSid) : null) ?? lastFocusedMode
       const effort = (prefSid ? sessionEfforts.get(prefSid) : null) ?? fallbackEffort()
       if (mode !== 'default' || effort) inherit = { model: null, effort, mode }
+    }
+    // Explicit dials (tg spawn): the caller's model/effort win over anything inherited.
+    if (dials?.model || dials?.effort) {
+      inherit = { model: dials.model ?? inherit?.model ?? null, effort: dials.effort ?? inherit?.effort ?? null, mode: inherit?.mode ?? lastFocusedMode }
     }
     let target: string[] = []
     if (focus.activePaneId) {

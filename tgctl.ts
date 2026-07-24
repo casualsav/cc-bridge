@@ -14,6 +14,7 @@
 //   tgctl answer <id>   <text|-> [--ref p]…    answer an ask you received (id from its <tg …ask=N> block)
 //   tgctl post   <text|->                       broadcast to the humans in the room
 //   tgctl slash  <name> </cmd>                  inject a slash command into a target session's CLI
+//   tgctl spawn  <name> [--dir p] [--model m] [--effort e] [text|-]   start a NEW session in its own topic
 //   tgctl roster                                who's live in the room
 //   tgctl history [n]                           recent agent-bus activity
 //   tgctl shared                                the room's shared-workspace dir (put deliverables here)
@@ -39,13 +40,16 @@ let name = '', args: Record<string, unknown> = {}
 // Bus verbs take flag args (--ref, --await), so parse positionals + refs out of argv rather than
 // the fixed chat/a/b slots the classic verbs use. Kept in a separate branch so classic verbs are
 // byte-for-byte unchanged.
-const BUS = new Set(['ask', 'answer', 'post', 'slash', 'roster', 'history', 'shared'])
+const BUS = new Set(['ask', 'answer', 'post', 'slash', 'spawn', 'roster', 'history', 'shared'])
 if (BUS.has(cmd)) {
   const rest = process.argv.slice(3)
   const refs: string[] = []
+  const flags: Record<string, string> = {}
   const pos: string[] = []
   for (let i = 0; i < rest.length; i++) {
+    const f = /^--(dir|model|effort)$/.exec(rest[i]!)
     if (rest[i] === '--ref') { const v = rest[++i]; if (v != null) refs.push(v) }
+    else if (f) { const v = rest[++i]; if (v != null) flags[f[1]!] = v }   // spawn's flags; harmless elsewhere
     else if (rest[i] === '--await') { /* P1 is async-only; --await is accepted and ignored */ }
     else pos.push(rest[i]!)
   }
@@ -54,6 +58,7 @@ if (BUS.has(cmd)) {
     case 'answer':  name = 'answer';  args = { pane, id: pos[0], text: fromStdin(pos[1]) ?? '', refs }; break
     case 'post':    name = 'post';    args = { pane, text: fromStdin(pos[0]) ?? '' }; break
     case 'slash':   name = 'slash';   args = { pane, to: pos[0], command: pos[1] ?? '' }; break
+    case 'spawn':   name = 'spawn';   args = { pane, name: pos[0], text: fromStdin(pos[1]) ?? '', ...flags }; break
     case 'roster':  name = 'roster';  args = { pane }; break
     case 'history': name = 'history'; args = { pane, n: pos[0] }; break
     case 'shared':  name = 'shared';  args = { pane }; break
@@ -67,7 +72,7 @@ if (BUS.has(cmd)) {
     // `tg update` / `tg update check` — the second token lands in `chat_id`.
     case 'update': name = 'update';      args = { mode: chat_id === 'check' ? 'check' : 'apply' }; break
     default:
-      process.stderr.write('usage: tgctl <send|react|edit|reply|update|ask|answer|post|slash|roster|history|shared|doctor> ...\n')
+      process.stderr.write('usage: tgctl <send|react|edit|reply|update|ask|answer|post|slash|spawn|roster|history|shared|doctor> ...\n')
       process.exit(2)
   }
 }

@@ -37,6 +37,13 @@ planner: the coding sessions execute, you direct and synthesize.
   bus events.
 - tg answer <ID> "text" — answer an ask YOU received (its `<tg @name ask=ID …>` block carries
   the ID).
+- tg spawn <name> [--dir p] [--model fable|opus|sonnet|haiku] [--effort low|medium|high|xhigh|max]
+  ["first message"] — start a NEW coding session in its own topic (defaults: a folder named after
+  it under the group's /base dir, inherited model/effort). The first message is delivered once its
+  REPL is up; from then on reach it with tg ask @name. Use this when the owner says "start a new
+  topic/session called X…".
+- tg slash @name "/compact" — run a slash command in a session's CLI (rejected while it's
+  mid-turn; /exit is owner-only).
 - An ask may be preceded by a `<tg bus-digest since …>…</tg>` block — ambient catch-up, FYI
   only; don't reply to it or act on it.
 

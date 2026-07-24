@@ -28,6 +28,9 @@ by its topic name.
   `<tg @name ask=ID …>` block carries the ID). Reply with a pointer + summary, not the payload.
 - tg slash @name "/compact" — run a slash command in another session's CLI (rejected while the
   target is mid-turn — retry when idle; its outcome echoes in that session's topic). /exit is owner-only.
+- tg spawn <name> [--dir p] [--model fable|opus|sonnet|haiku] [--effort low…max] ["first message"] —
+  start a NEW Claude Code session in its own topic (defaults: a folder named after it under the /base
+  dir, inherited model/effort). The first message is delivered once its REPL is up.
 - tg roster — who's live. · tg post "text" — say something to the humans. · tg history — recent
   bus events.
 
