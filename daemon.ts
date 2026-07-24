@@ -2368,6 +2368,22 @@ function busDeliver(pane: string, block: string): Promise<boolean> {
   return p
 }
 
+// Confirm an outgoing bus ask on the SENDER's OWN surface — the chat DM for a DM-chat lane, or the
+// sender's topic — instead of broadcasting "▸ a → b" into the group's General. Header + the whole
+// prompt in a native expandable quote (tap to expand, not a <details> chevron). outboundTargetsFor
+// resolves the sender pane to its DM/topic; a huge prompt is capped to keep the message under TG's 4096.
+const ASK_QUOTE_CAP = 3500
+async function notifyAskSent(fromSid: string, toName: string, text: string): Promise<void> {
+  const pane = await paneForSession(fromSid).catch(() => null)
+  const targets = pane ? await outboundTargetsFor(pane).catch(() => []) : []
+  if (!targets.length) return
+  const shown = text.length > ASK_QUOTE_CAP ? text.slice(0, ASK_QUOTE_CAP) + '…' : text
+  const body = `Sent message to <b>@${escapeHtml(toName)}</b>\n<blockquote expandable>${escapeHtml(shown)}</blockquote>`
+  for (const { chat, thread } of targets) {
+    void channel.sendText(chat, body, { silent: true, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
+  }
+}
+
 // Deliver a queued ask NOW iff its target pane is live and at a normal prompt (never mid-turn). The
 // pane is re-resolved from the sessionId every time (panes churn on respawn/adopt). busInFlight
 // guards the immediate attempt (in the `ask` handler) from racing the 15s sweep into a double-inject.
@@ -2402,9 +2418,7 @@ async function tryDeliverAsk(p: BusPending): Promise<boolean> {
       markInjected(cur.id, now)
       if (room) {
         markSeen(cur.toSid, now)   // advance the watermark only on a LANDED delivery — a failed paste keeps the window open for the retry
-        void channel.sendText(String(room),
-          `▸ <b>${escapeHtml(cur.fromName)}</b> → <b>${escapeHtml(cur.toName)}</b>: ${escapeHtml(cur.text.slice(0, 120))}${cur.text.length > 120 ? '…' : ''}`,
-          { silent: true }).catch(() => {})
+        void notifyAskSent(cur.fromSid, cur.toName, cur.text)
       }
     }
     return ok
@@ -4018,7 +4032,7 @@ async function handleCall(
         appendLedger(room, { ts: Date.now(), kind: 'ask', from: fromName, to: toName, id: p.id, text: askText, refs })
         if (res.kind === 'hermes') {
           const cfg = hermesEndpoints.get(res.id)!   // resolved from the same map, so it's present
-          void channel.sendText(String(room), `▸ <b>${escapeHtml(fromName)}</b> → <b>${escapeHtml(toName)}</b>: ${escapeHtml(askText.slice(0, 120))}${askText.length > 120 ? '…' : ''}`, { silent: true }).catch(() => {})
+          void notifyAskSent(fromSid, toName, askText)
           void runHermesAsk(p, cfg)
           text = `asked @${toName} (ask ${p.id}) — running; the answer arrives when it finishes`
         } else {
