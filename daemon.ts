@@ -4944,9 +4944,10 @@ async function runReadout(t: CommandTarget, chatId: string, kind: 'cost' | 'cont
 // ---- Telegram bot handlers ----
 
 // The welcome shown by /start (and the hidden /help alias): the photo album with a short caption,
-// then ONE flat parse_mode-HTML commands message (all groups visible — no collapsibles). It can't
-// ride the album caption: captions cap at 1024 chars and the list runs ~1.8k. Pairing steps only
-// appear when the sender isn't paired yet.
+// then ONE rich message — a single <details> chevron titled "Commands" holding every group flat —
+// with the parse_mode-HTML rendering as the fallback (any rich error). It can't ride the album
+// caption: captions cap at 1024 chars and the list runs ~1.8k. Pairing steps only appear when the
+// sender isn't paired yet.
 const START_PAIR_FOOTER =
   `🔗 <b>Not paired?</b> DM me for a 6-char code, then run ` +
   `<code>/telegram:access pair &lt;code&gt;</code> in Claude Code.`
@@ -5001,6 +5002,16 @@ const START_COMMAND_GROUPS: Array<[title: string, lines: string[]]> = [
   ]],
 ]
 
+// Rich html carrier: ONE collapsible for the whole list. Inside <details> a bare "\n" between
+// inline siblings collapses to a space, so all breaks are <br>; the pairing footer stays visible
+// outside the chevron ("\n" is enough there — <details> blocks self-break, see mirror.ts).
+function startRichHtml(paired: boolean): string {
+  const sections = START_COMMAND_GROUPS
+    .map(([title, lines]) => `<b>${title}</b><br>${lines.join('<br>')}`)
+    .join('<br><br>')
+  return `<details><summary><b>Commands</b></summary>${sections}</details>${paired ? '' : `\n${START_PAIR_FOOTER}`}`
+}
+
 function startHelpText(paired: boolean): string {
   const sections = START_COMMAND_GROUPS
     .map(([title, lines]) => `<b>${title}</b>\n${lines.join('\n')}`)
@@ -5026,6 +5037,13 @@ async function sendStartHelp(ctx: Context): Promise<void> {
   } catch {
     await ctx.reply(caption, { parse_mode: 'HTML', link_preview_options: { is_disabled: true }, reply_markup: kb }).catch(() => {})   // asset missing (stale cache) → text only
   }
+  const chat = String(ctx.chat!.id)
+  const thread = ctx.message?.message_thread_id
+  try {
+    const m = await sendRichMessage(TOKEN!, chat, { html: startRichHtml(paired) }, { messageThreadId: thread, replyMarkup: kb })
+    noteMsg(chat, thread, m.message_id)
+    return
+  } catch (e) { process.stderr.write(`daemon: rich /start send failed, falling back to HTML: ${e}\n`) }
   await ctx.reply(startHelpText(paired), { parse_mode: 'HTML', link_preview_options: { is_disabled: true }, reply_markup: kb }).catch(() => {})
 }
 
