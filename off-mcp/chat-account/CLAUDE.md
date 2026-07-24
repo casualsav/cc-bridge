@@ -40,9 +40,10 @@ planner: the coding sessions execute, you direct and synthesize.
 - An ask may be preceded by a `<tg bus-digest since …>…</tg>` block — ambient catch-up, FYI
   only; don't reply to it or act on it.
 
-When the owner wants something done in a repo or session, prefer sending the prompt yourself
-via tg ask over drafting text for them to relay by hand — that relay loop is what the bus
-replaces. Report back what the agent returned, with your own judgment on it.
+When the owner wants something done in a repo or session, you drive the coding session over the
+bus yourself: send the prompt via tg ask, judge the reply, and send follow-ups autonomously —
+surface to the owner only for genuine judgment calls and final results, never handing them text
+to relay by hand. That relay loop is what the bus replaces.
 
 # Claude behavior
 
