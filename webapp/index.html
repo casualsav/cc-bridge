@@ -91,7 +91,9 @@
   /* Telegram-style composer: one pill input with the paperclip/mic INSIDE it, a round send button */
   .composer { display: flex; gap: 8px; padding: 8px 10px calc(8px + env(safe-area-inset-bottom)); border-top: 1px solid var(--sec); align-items: flex-end; }
   .inputwrap { flex: 1; display: flex; align-items: flex-end; background: var(--sec); border-radius: 19px; padding: 2px 4px 2px 14px; min-height: 40px; }
-  .inputwrap textarea { flex: 1; resize: none; border: none; outline: none; background: transparent; color: var(--text); padding: 9px 0; font-size: 15px; line-height: 1.35; max-height: 110px; }
+  /* Explicit font (not `inherit`): Android WebViews don't reliably propagate an inherited font
+     into the IME composition / autofill layer, which then renders in the UA default. */
+  .inputwrap textarea { flex: 1; resize: none; border: none; outline: none; background: transparent; color: var(--text); padding: 9px 0; font: 15px/1.35 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; max-height: 110px; }
   .ghost { background: transparent; border: none; color: var(--hint); font-size: 19px; padding: 8px 7px; cursor: pointer; line-height: 1; flex: none; }
   .ghost.recing { color: #e05555; animation: pulse 1.2s ease-in-out infinite; }
   .sendbtn { width: 40px; height: 40px; border-radius: 50%; border: none; background: var(--btn); color: var(--btn-text); font-size: 17px; flex: none; display: flex; align-items: center; justify-content: center; padding: 0 2px 2px 0; }
@@ -164,7 +166,7 @@
   <div id="dfeed"></div>
   <div class="composer">
     <div class="inputwrap">
-      <textarea id="dtext" rows="1" placeholder="Message this session…"></textarea>
+      <textarea id="dtext" rows="1" placeholder="Message this session…" autocomplete="off" spellcheck="false"></textarea>
       <button id="datt" class="ghost" title="Attach a file">📎</button>
       <button id="dmic" class="ghost" title="Record a voice note">🎤</button>
     </div>
@@ -543,7 +545,7 @@ async function renderSessions() {
 // ---- Drill-in: conversation feed + composer + stop/compact ----
 let drillSid = null, drillTimer = null, lastDrill = null, optimistic = [];
 function openDrill(sid, name) {
-  drillSid = sid; lastDrill = null; optimistic = [];
+  drillSid = sid; lastDrill = null; optimistic = []; feedSig = "";
   $("dname").textContent = name;
   $("dfeed").innerHTML = '<div class="notice">Loading…</div>';
   $("drill").classList.add("show");
@@ -570,7 +572,11 @@ function bubble(i) {
   if (i.cmd) return '<div class="msg cmd">' + esc(i.text) + "</div>";
   let inner = "";
   const placeholder = /^\((?:file|photo|document|video|voice|audio)[:)]?/.test(i.text || "");
-  if (i.img) inner += '<img class="thumb" data-path="' + esc(i.img) + '" alt="photo">';
+  // Already-fetched photos render with their blob URL inline, so a repaint never collapses the
+  // bubble's height (the collapse re-broke the scroll position on every poll).
+  if (i.img) inner += thumbCache[i.img]
+    ? '<img class="thumb" src="' + esc(thumbCache[i.img]) + '" alt="photo">'
+    : '<img class="thumb" data-path="' + esc(i.img) + '" alt="photo">';
   if (i.att) inner += '<div class="attchip">📎 ' + esc(String(i.att).split("/").pop()) + "</div>";
   const t = (i.img || i.att) && placeholder ? "" : (i.text || "");
   if (t) inner += (i.img ? '<div class="cap">' : "") + (i.role === "assistant" ? md(t) : esc(t)) + (i.img ? "</div>" : "");
@@ -598,6 +604,7 @@ function hydrateThumbs() {
 // Paint the feed from the last server snapshot + any optimistic (locally-sent, not-yet-echoed)
 // bubbles. An optimistic bubble is dropped once the transcript echoes the same user text (or
 // after 2min as a safety valve, so a paraphrased echo can't leave a ghost forever).
+let feedSig = "";
 function paintFeed() {
   const feed = $("dfeed");
   const stuck = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;   // keep pinned to bottom unless the user scrolled up
@@ -607,7 +614,10 @@ function paintFeed() {
   optimistic = optimistic.filter(o => !items.some(i => i.role === "user" && (o.match ? (i.text.includes(o.match) || String(i.img || i.att || "").includes(o.match)) : i.text.trim() === o.text)) && Date.now() - o.at < 120000);
   const rows = items.map(bubble)
     .concat(optimistic.map(o => '<div class="msg user' + (o.state === "pending" ? " pending" : "") + '">' + esc(o.text) + "</div>"));
-  feed.innerHTML = rows.length ? rows.join("") : '<div class="notice">No conversation yet.</div>';
+  const html = rows.length ? rows.join("") : '<div class="notice">No conversation yet.</div>';
+  if (html === feedSig) return;   // unchanged — never disturb the scroll while the user reads back
+  feedSig = html;
+  feed.innerHTML = html;
   if (stuck) feed.scrollTop = feed.scrollHeight;
   hydrateThumbs();
 }
