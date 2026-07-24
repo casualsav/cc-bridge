@@ -84,7 +84,7 @@ import {
   setPaneRestarting, isPaneRestarting, releasePaneSession, reopenSessionTopic,
   retriggerTopicTyping, paneClaudeLive,
 } from './topic-runtime.ts'
-import { startWebapp, type SettingsView as WebappSettingsView, type SessionCard as WebappSessionCard, type SessionFeed as WebappSessionFeed, type BusView as WebappBusView, type AutomationView as WebappAutomationView } from './webapp.ts'
+import { startWebapp, type SettingsView as WebappSettingsView, type SessionCard as WebappSessionCard, type SessionFeed as WebappSessionFeed, type AutomationView as WebappAutomationView } from './webapp.ts'
 import { startTunnel, ensureCloudflared, tailscaleFunnelUrl, type Tunnel } from './tunnel.ts'
 import { sendRichMessage, sendRichMessageDraft, editRichMessage, toInputRichMessage, htmlPanelToRich, callTelegram, type InputRichMessage } from './richmsg.ts'
 import { parseAvatars, resolveAvatar, type Avatar } from './avatars.ts'
@@ -11655,9 +11655,13 @@ const resolveStartToken = (tok: string): string | null => {
 // daemon function so webapp.ts stays a thin HTTP layer. Reads pull from loadAccess() + the focused
 // pane's statusline capture; mutations reuse the same toggles the /settings panels use. ----
 
-// Settings the Mini App shows + (when WEBAPP_WRITE) lets you flip. Pref-based toggles are read+write;
-// mode/model/effort drive the tmux pane (async/slower) so they're read-only here.
+// Settings the Mini App shows + (when WEBAPP_WRITE) lets you flip. Kept at parity with the
+// /settings panel (settingsMarkdown above): pref-based toggles are read+write; rows whose editor is
+// a rich Telegram sub-panel (accounts, GitHub, TTS engine, preferred mode, failover chain, base
+// folder) show live state read-only, and mode/model/effort drive the tmux pane (async/slower) so
+// they're read-only here too.
 async function webappReadSettings(): Promise<WebappSettingsView> {
+  void refreshGh()   // warm the 🐙 summary for the next render, like the /settings command does
   const a = loadAccess()
   const cap = focus.activePaneId ? await capturePane(focus.activePaneId).catch(() => '') : ''
   const sl = cap ? parseStatusline(cap) : null
@@ -11665,10 +11669,19 @@ async function webappReadSettings(): Promise<WebappSettingsView> {
   return {
     write: WEBAPP_WRITE,
     settings: {
+      accounts: { value: listAccounts().length, editable: false, label: 'managed in /settings' },
+      github: { value: ghSummary(), editable: false },
+      batchAllow: { value: a.batchAllow !== false, editable: true, label: '2+ prompts offer "Allow all this turn"' },
+      shipButtons: { value: a.shipButtons === true, editable: true, label: 'Diff/Commit/Push/PR after dirty turns' },
+      transcribe: { value: transcribeStatus(), editable: false, label: 'engine picked in /settings' },
       voice: { value: von, editable: true, label: von ? `on · ${a.tts!.engine}` : 'off' },
-      mcp: { value: mcpEnabled(), editable: true, label: 'new sessions only' },
-      sessionPin: { value: a.sessionPin !== false, editable: true },
       stream: { value: replyMode(), editable: true, options: [...STREAM_ORDER] },
+      sessionPin: { value: a.sessionPin !== false, editable: true },
+      prefMode: { value: listAccounts().length > 1 ? 'per account' : defModeLabel(MAIN_ACCOUNT.configDir), editable: false, label: 'what NEW sessions launch in' },
+      confirmReset: { value: a.confirmReset !== false, editable: true, label: '/clear and /new ask first' },
+      limitFailover: { value: a.limitFailover === true, editable: true, label: 'chain ordered in /settings' },
+      ...(isTopicMode() ? { baseFolder: { value: baseFolderFull(), editable: false, label: 'new topics land here' } } : {}),
+      mcp: { value: mcpEnabled(), editable: true, label: 'new sessions only' },
       mode: { value: cap ? detectCurrentMode(cap) : null, editable: false, label: 'drives the pane (chat-side)' },
       model: { value: sl?.model ?? null, editable: false },
       effort: { value: sl?.effort ?? null, editable: false },
@@ -11693,6 +11706,10 @@ function webappSetSetting(userId: string, key: string, value: unknown): string |
       void respawnTerminalMirror()
       return null
     }
+    case 'batchAllow': { const a = loadAccess(); a.batchAllow = truthy(value); saveAccess(a); return null }
+    case 'shipButtons': { const a = loadAccess(); a.shipButtons = truthy(value); saveAccess(a); return null }
+    case 'confirmReset': { const a = loadAccess(); a.confirmReset = truthy(value); saveAccess(a); return null }
+    case 'limitFailover': { const a = loadAccess(); a.limitFailover = truthy(value); saveAccess(a); return null }
     default: return 'unknown or read-only setting'
   }
 }
@@ -11891,24 +11908,6 @@ async function webappSessionAttach(
   return ok ? { delivered: opts.voice ? text : `📎 ${safe}${caption ? ` — ${caption}` : ''}`, match } : { error: 'delivery failed' }
 }
 
-// Agent-bus board: live endpoints, open asks (queued + delivered-unanswered), recent ledger events.
-async function webappReadBus(): Promise<WebappBusView> {
-  const room = busRoom()
-  if (!room) return { agents: [], pending: [], events: [] }
-  const eps = busEndpoints().filter(e => !e.closed)
-  const agents = await Promise.all(eps.map(async e => ({
-    name: e.name, kind: e.kind,
-    live: e.kind === 'hermes' ? true : !!(await paneForSession(e.id).catch(() => null)),
-  })))
-  const now = Date.now()
-  const pending = listPending().filter(p => !p.expiredAt).map(p => ({
-    id: p.id, from: p.fromName, to: p.toName, text: p.text.slice(0, 200),
-    ageSec: Math.round((now - p.createdAt) / 1000), delivered: p.injected,
-  }))
-  const events = resolveLedgerNames(tailLedger(room, 40)).map(e => ({ ts: e.ts, kind: e.kind, from: e.from, to: e.to, id: e.id, text: e.text.slice(0, 200) })).reverse()
-  return { agents, pending, events }
-}
-
 // Automation board: cron schedules + per-session queued prompts + the daily budget (queue item ids
 // are "<sid>:<queuedAt>" — stable across reads, resolved back on cancel).
 function webappReadAutomation(): WebappAutomationView {
@@ -11947,7 +11946,7 @@ async function startFilesWebapp(): Promise<void> {
       readSettings: webappReadSettings, setSetting: webappSetSetting,
       listSessions: webappListSessions, readSessionFeed: webappSessionFeed, sessionAction: webappSessionAction,
       sessionAttach: webappSessionAttach, sessionSpawn: webappSessionSpawn,
-      readBus: webappReadBus, readAutomation: webappReadAutomation, automationCancel: webappAutomationCancel })
+      readAutomation: webappReadAutomation, automationCancel: webappAutomationCancel })
   } catch (e) { wlog(`webapp: failed to start: ${e}`); return }
   if (WEBAPP_PUBLIC_URL) { wlog(`webapp: public url ${WEBAPP_PUBLIC_URL}`); return }
   if (WEBAPP_TUNNEL === 'tailscale') {

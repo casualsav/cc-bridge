@@ -26,7 +26,7 @@ export interface WebappDeps {
   trashDir?: string                        // /api/rm moves deletions here (recoverable); required when canWrite
   maxWriteBytes?: number                   // /api/write size cap (default 2 MiB)
   maxUploadBytes?: number                  // /api/upload size cap (default 50 MiB)
-  // ---- Console tabs (Sessions / Bus / Automation / Settings). Injected by the daemon so this stays
+  // ---- Console tabs (Sessions / Scheduled / Settings). Injected by the daemon so this stays
   // a thin HTTP layer (no daemon internals imported); each wraps a reused daemon function. All
   // optional — missing dep ⇒ the endpoint 404s and that tab just stays empty. settings WRITES gate
   // on canWrite; session/automation ACTIONS don't — they're the same session controls (/stop,
@@ -39,7 +39,6 @@ export interface WebappDeps {
   sessionAction?: (userId: string, sid: string, action: SessionAct, text?: string) => Promise<string | null> | string | null   // stop/compact/send → error string or null
   sessionAttach?: (userId: string, sid: string, fileName: string, data: Uint8Array, opts: { caption?: string; voice?: boolean }) => Promise<{ error: string } | { delivered: string; match: string }>   // compose-row file/voice → bubble text + reconcile token
   sessionSpawn?: (userId: string, name: string, opts: { model?: string; effort?: string; mode?: string }) => Promise<{ error: string } | { sid: string; name: string }>   // "+" new session with dials
-  readBus?: () => Promise<BusView> | BusView                         // agent-bus board: live agents, open asks, recent events
   readAutomation?: () => Promise<AutomationView> | AutomationView    // cron + queued prompts + budget
   automationCancel?: (userId: string, kind: 'cron' | 'queue', id: string) => Promise<string | null> | string | null   // cancel one item → error string or null
 }
@@ -63,11 +62,6 @@ export type SessionAct = 'stop' | 'compact' | 'send'
 export interface SessionFeed {
   sid: string; name: string; working: boolean
   items: Array<{ role: 'user' | 'assistant' | 'activity'; text: string; ts: number; img?: string; att?: string; cmd?: boolean }>
-}
-export interface BusView {
-  agents: Array<{ name: string; kind: string; live: boolean }>
-  pending: Array<{ id: number; from: string; to: string; text: string; ageSec: number; delivered: boolean }>
-  events: Array<{ ts: number; kind: string; from: string; to?: string; id?: number; text: string }>
 }
 export interface AutomationView {
   cron: Array<{ id: string; fireAt: number; sessionLabel: string; text: string; recurLabel: string | null }>
@@ -296,10 +290,6 @@ async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: strin
     if (!deps.readSessionFeed) return json({ error: 'unavailable' }, 404)
     const feed = await deps.readSessionFeed(url.searchParams.get('sid') || '')
     return feed ? json(feed) : json({ error: 'unknown session' }, 404)
-  }
-  if (url.pathname === '/api/bus') {
-    if (!deps.readBus) return json({ error: 'unavailable' }, 404)
-    return json(await deps.readBus())
   }
   if (url.pathname === '/api/auto') {
     if (!deps.readAutomation) return json({ error: 'unavailable' }, 404)
