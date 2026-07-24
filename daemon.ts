@@ -10396,6 +10396,92 @@ async function ensureDmLane(ctx: Context, chatId: string, first: InboundParams, 
   } finally { dmLaneBooting.delete(chatId) }
 }
 
+// Auto-provision the `chat` profile on an upgraded DM-mode box, so the chat lane + its headless
+// 'general' peer come up without the manual CHAT-DM.md recipe. This runs at daemon STARTUP rather
+// than in the update flow on purpose: an upgrading user runs the OLD release's update.ts, so new
+// code there could never reach them, while every upgrade path ends in a boot of this build.
+// Bound boxes are left alone — they register accounts through /account add.
+const CHAT_PROFILE_NOTICE_FILE = join(STATE_DIR, 'chat-profile-notice.json')
+const CHAT_TEMPLATE_DIR = join(import.meta.dir, 'off-mcp', 'chat-account')
+const CHAT_WORKSPACE = '/srv/chat'
+async function ensureChatProfile(): Promise<void> {
+  if (isTopicMode()) return
+  const allow = loadAccess().allowFrom
+  if (!allow.length) return                                  // unpaired box — nothing to upgrade yet
+  const registered = accountByName('chat')
+  if (registered && existsSync(registered.configDir)) return   // already provisioned; never touch what's there
+  const log = (m: string) => process.stderr.write(`chatProfile: ${m}\n`)
+  const configDir = join(homedir(), '.claude-chat')
+  try { mkdirSync(configDir, { recursive: true }) }
+  catch (e) { log(`couldn't create ${configDir} (${e}) — giving up, the manual recipe still works`); return }
+  // Share the main login instead of asking for a second sign-in.
+  try {
+    const cred = join(MAIN_ACCOUNT.configDir, '.credentials.json')
+    if (!existsSync(cred)) log('no main .credentials.json — the chat account will need its own login')
+    else if (existsSync(join(configDir, '.credentials.json'))) log('credentials already present — left as is')
+    else { copyFileSync(cred, join(configDir, '.credentials.json')); chmodSync(join(configDir, '.credentials.json'), 0o600); log('copied the main login') }
+  } catch (e) { log(`credentials copy failed: ${e}`) }
+  // Onboarding keys ONLY — the main .claude.json also carries the user's whole project history.
+  try {
+    const dest = join(configDir, '.claude.json')
+    if (existsSync(dest)) log('.claude.json already present — left as is')
+    else {
+      const src = JSON.parse(readFileSync(join(MAIN_ACCOUNT.configDir, '.claude.json'), 'utf8')) as Record<string, unknown>
+      const out: Record<string, unknown> = {}
+      for (const k of ['hasCompletedOnboarding', 'lastOnboardingVersion']) if (src[k] != null) out[k] = src[k]
+      writeFileSync(dest, JSON.stringify(out, null, 2) + '\n', { mode: 0o600 })
+    }
+  } catch (e) { log(`onboarding keys skipped: ${e}`) }
+  // The chat register + the tool restrictions. A file that's already there may be deliberate.
+  for (const f of ['CLAUDE.md', 'settings.json']) {
+    try {
+      const src = join(CHAT_TEMPLATE_DIR, f)
+      if (existsSync(join(configDir, f))) { log(`${f} already present — left as is`); continue }
+      if (!existsSync(src)) { log(`template ${src} is missing from this build — skipped`); continue }
+      copyFileSync(src, join(configDir, f))
+    } catch (e) { log(`${f} copy failed: ${e}`) }
+  }
+  // Register AFTER the templates land: addAccount heals the settings.json it finds (filling only
+  // statusLine/hooks from main), whereas registering first would create one that then blocks the
+  // template copy above — leaving the chat account without its tool restrictions.
+  if (!accountByName('chat')) {
+    const r = addAccount('chat')
+    if (!r.ok) { log(`registration failed: ${r.error}`); return }
+    log(`registered chat → ${r.account.configDir}`)
+  }
+  // The workspace must sit OUTSIDE $HOME: Claude Code walks ancestor dirs for CLAUDE.md, so a chat
+  // workspace under $HOME would pull the user's engineering rules into the chat context.
+  let workspace = existsSync(CHAT_WORKSPACE)
+  if (!workspace) {
+    try { mkdirSync(CHAT_WORKSPACE, { recursive: true }); workspace = true }
+    catch { /* not ours to create — try passwordless sudo below, never an interactive prompt */ }
+  }
+  if (!workspace) {
+    try {
+      await exec('sudo', ['-n', 'mkdir', '-p', CHAT_WORKSPACE], { timeout: 5000 })
+      await exec('sudo', ['-n', 'chown', process.env.USER || basename(homedir()), CHAT_WORKSPACE], { timeout: 5000 })
+      workspace = existsSync(CHAT_WORKSPACE)
+    } catch { /* no passwordless sudo — the notice below carries the one manual command */ }
+  }
+  log(workspace ? `${CHAT_WORKSPACE} ready` : `${CHAT_WORKSPACE} needs one manual sudo — telling the owner`)
+  // One-time DM notice, once EVER per box: the marker is written only after a send actually lands,
+  // so a send failure (chat not reachable yet) retries on the next boot.
+  if (existsSync(CHAT_PROFILE_NOTICE_FILE)) return
+  const text = workspace
+    ? '✅ Upgrade complete — your DM is now a claude.ai-style chat agent, with a background @general coding session. '
+      + 'Convention: Claude Code sessions run THROUGH this chat — it orchestrates and reviews (you direct here; coding '
+      + 'sessions execute; results come back reviewed and synthesized). Your previous session keeps running and stays '
+      + 'reachable in the mini app (/files).'
+    : '🆕 This update upgrades your DM into a claude.ai-style chat agent, with a background @general coding session. '
+      + 'One manual step remains: run <code>sudo mkdir -p /srv/chat &amp;&amp; sudo chown $USER /srv/chat</code>, then '
+      + 'message me again.'
+  let sent = false
+  for (const chat of allow) {
+    try { await channel.sendText(chat, text); sent = true } catch (e) { log(`notice to ${chat} failed: ${e}`) }
+  }
+  if (sent) { try { writeFileSync(CHAT_PROFILE_NOTICE_FILE, JSON.stringify({ at: Date.now(), workspace }) + '\n') } catch (e) { log(`marker write failed: ${e}`) } }
+}
+
 // Non-null only when a DM can become a standalone chat lane: the `chat` account is registered
 // (config dir exists on disk) and a workspace dir resolves — never auto-created. The workspace is
 // whatever cwd an existing chat lane already runs in (so every lane shares one folder), else the
@@ -12176,6 +12262,9 @@ void (async () => {
             crashRestart = false
             for (const chat_id of loadAccess().allowFrom) void channel.sendText(chat_id, '♻️ Daemon restarted').catch(() => {})
           }
+          // Seamless upgrade for DM-mode boxes: create the `chat` profile the DM lane needs. Runs
+          // here (not before connect) because it may DM the owner; no-ops on every later reconnect.
+          void ensureChatProfile().catch(e => process.stderr.write(`chatProfile: provisioning failed: ${e}\n`))
           const bridgeCommands = [
               { command: 'start', description: 'Welcome + everything this bot can do' },
               { command: 'stop', description: 'Interrupt the current task (Esc)' },
