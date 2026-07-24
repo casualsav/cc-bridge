@@ -323,6 +323,11 @@ initStatusCard({
   onTopicGone: (sid, threadId) => void handleTopicThreadGone(sid, threadId),
   busRoster: busRosterLine,   // agent-bus P2: a compact live-roster line on the pinned card
   paneAgentKind: paneAgentKind,   // Codex panes render a Codex-sourced status card (rollout tokens, pane model)
+  dmChatLanes: async () => {
+    const out: Array<{ chat: string; paneId: string | null }> = []
+    for (const { chatId, sessionId } of listDmChatSessions()) out.push({ chat: chatId, paneId: await paneForSession(sessionId) })
+    return out
+  },
 })
 initUpdates({ channel })
 initPromptRelay({ channel, outboundTargetsFor, flushPendingText, transcriptForPane, lastRelayedUuid: () => lastRelayedUuid, resetPromptDedup, verifyPromptClosed, paneKeys })
@@ -5176,7 +5181,24 @@ bot.command('status', async ctx => {
         }
         return
       }
-      // General without an anchor (or a DM): a one-shot card for the focused session.
+      // A private chat with a live DM chat lane: refresh its own real pin — the DM analogue of
+      // General's anchor pin above (same delete-old → clear → send → pin → track shape, via
+      // createSessionPin's clearAllPins instead of the forum-only bulk-unpin General needs).
+      if (ctx.chat?.type === 'private') {
+        const dmChat = getDmChatSession(chat)
+        const lanePane = dmChat ? await paneForSession(dmChat.sessionId) : null
+        if (lanePane) {
+          const old = sessionPins.get(chat)
+          if (old) {
+            await channel.unpin({ chatId: chat, messageId: String(old) }).catch(() => {})
+            await channel.deleteMessage({ chatId: chat, messageId: String(old) }).catch(() => {})
+            sessionPins.delete(chat); pinTextCache.delete(chat); persistSessionPins()
+          }
+          await createSessionPin(chat, await statusCardText(lanePane), statusKeyboard())
+          return
+        }
+      }
+      // General without an anchor (or a DM with no live chat lane): a one-shot card for the focused session.
       await ctx.reply(await statusCardText(paneId), { parse_mode: 'HTML', reply_markup: buttonsToKb(statusKeyboard()) }).catch(() => {})
       return
     }

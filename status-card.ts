@@ -47,6 +47,11 @@ type StatusCardDeps = {
   // null on a pre-stamp pane is treated as Claude (the legacy default). The card branches on this so
   // a Codex pane renders model/context from its rollout + pane footer instead of Claude's statusLine.
   paneAgentKind: (pane: string) => Promise<'claude' | 'codex'>
+  // DM chat lanes (topic mode only): each allowlisted user's own auto-provisioned chat session, keyed
+  // by its DM chat id — daemon-computed from topics.ts's dmChat map + paneForSession. paneId is null
+  // for a lane whose pane has died (updateTopicPins skips those rather than pinning "No active
+  // session" unprompted). Optional so a fake-bot unit test, or a channel without the feature, can omit it.
+  dmChatLanes?: () => Promise<Array<{ chat: string; paneId: string | null }>>
 }
 let deps: StatusCardDeps
 export function initStatusCard(d: StatusCardDeps): void { deps = d }
@@ -643,6 +648,48 @@ export async function updateTopicPins(): Promise<void> {
       else process.stderr.write(`daemon: topic pin create failed: ${e}\n`)
     }
   }
+  // DM chat lanes: each allowlisted user's auto-provisioned chat session gets its own real pin in
+  // THEIR DM (never a forum topic) — same per-chat machinery as classic DM mode's loop, just one lane
+  // at a time instead of one shared focused pane. A dead/null-pane lane is skipped outright (no
+  // "No active session" pin sent unprompted into a DM the user hasn't touched yet).
+  if (deps.dmChatLanes) {
+    const buttons = statusKeyboard()
+    for (const lane of await deps.dmChatLanes()) {
+      if (!lane.paneId) continue
+      const text = await statusCardText(lane.paneId)
+      await upsertChatPin(lane.chat, text, buttons, true)
+    }
+  }
+}
+
+// Create/edit/re-pin a single chat's status card — shared by classic DM mode's per-`allowFrom`-chat
+// loop (one shared `text`/`hasSession` for the focused session) and topic mode's per-DM-chat-lane
+// loop (each lane has its own pane, so its own `text`/`hasSession`). `chat` doubles as the sessionPins
+// key — safe because a chat only ever runs ONE of these loops (classic DM mode vs. topic mode).
+async function upsertChatPin(chat: string, text: string, buttons: Button[][], hasSession: boolean): Promise<void> {
+  const existing = sessionPins.get(chat)
+  if (existing && pinTextCache.get(chat) === text) return   // nothing changed — skip the no-op edit
+  if (existing) {
+    scheduleEdit({ chat, mid: existing, source: 'pin', buttons,
+      render: () => text,
+      onSent: async () => {
+        pinTextCache.set(chat, text)
+        // If the user unpinned it, re-pin so it returns (runs only when the card actually changed).
+        // TODO(channel-gap): getChat / pinned_message lookup — no verb in the ChannelAdapter contract.
+        const info = await deps.bot.api.getChat(chat).catch(() => null)
+        if (info?.pinned_message?.message_id !== existing) {
+          await deps.channel.pin({ chatId: chat, messageId: String(existing) }).catch(() => {})
+        }
+      },
+      onError: e => {
+        // Deleted out from under us → drop the stale id; the next cycle recreates it. Transient
+        // ("message is not modified") leaves it in place — the pin is still good.
+        if (pinMessageGone(e)) { sessionPins.delete(chat); pinTextCache.delete(chat); persistSessionPins(); cancelEdit(chat, existing) }
+        else if (pinNotModified(e)) pinTextCache.set(chat, text)   // already current — safe to cache
+      } })
+    return
+  }
+  if (hasSession) await createSessionPin(chat, text, buttons)   // don't pin "No active session" out of nowhere
 }
 
 let pinUpdating = false
@@ -655,30 +702,6 @@ export async function updateSessionPin(): Promise<void> {
     const text = await statusCardText(focus.activePaneId)
     const buttons = statusKeyboard()
     const hasSession = !!(focus.activePaneId || focus.activeShim)   // off-MCP pane or MCP shim — either counts
-    for (const chat of loadAccess().allowFrom) {
-      const existing = sessionPins.get(chat)
-      if (existing && pinTextCache.get(chat) === text) continue   // nothing changed — skip the no-op edit
-      if (existing) {
-        scheduleEdit({ chat, mid: existing, source: 'pin', buttons,
-          render: () => text,
-          onSent: async () => {
-            pinTextCache.set(chat, text)
-            // If the user unpinned it, re-pin so it returns (runs only when the card actually changed).
-            // TODO(channel-gap): getChat / pinned_message lookup — no verb in the ChannelAdapter contract.
-            const info = await deps.bot.api.getChat(chat).catch(() => null)
-            if (info?.pinned_message?.message_id !== existing) {
-              await deps.channel.pin({ chatId: chat, messageId: String(existing) }).catch(() => {})
-            }
-          },
-          onError: e => {
-            // Deleted out from under us → drop the stale id; the next cycle recreates it. Transient
-            // ("message is not modified") leaves it in place — the pin is still good.
-            if (pinMessageGone(e)) { sessionPins.delete(chat); pinTextCache.delete(chat); persistSessionPins(); cancelEdit(chat, existing) }
-            else if (pinNotModified(e)) pinTextCache.set(chat, text)   // already current — safe to cache
-          } })
-        continue
-      }
-      if (hasSession) await createSessionPin(chat, text, buttons)   // don't pin "No active session" out of nowhere
-    }
+    for (const chat of loadAccess().allowFrom) await upsertChatPin(chat, text, buttons, hasSession)
   } finally { pinUpdating = false }
 }
