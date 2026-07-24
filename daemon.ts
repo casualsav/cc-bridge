@@ -5217,7 +5217,10 @@ function startRichHtml(paired: boolean): string {
   const sections = START_COMMAND_GROUPS
     .map(([title, lines]) => `<b>${title}</b><br>${lines.join('<br>')}`)
     .join('<br><br>')
-  return `${START_WELCOME}\n\n<details><summary>Click here to view all /commands</summary>${sections}</details>${paired ? '' : `\n${START_PAIR_FOOTER}`}`
+  // The welcome's own line breaks must be <br> here: in the rich carrier a bare "\n" between
+  // inline siblings collapses to a space (same rule as inside <details> above), which glued the
+  // 🖼️ line onto the welcome line. The <details> block self-breaks, so no <br> needed before it.
+  return `${START_WELCOME.replace(/\n/g, '<br>')}\n<details><summary>Click here to view all /commands</summary>${sections}</details>${paired ? '' : `\n${START_PAIR_FOOTER}`}`
 }
 
 function startHelpText(paired: boolean): string {
