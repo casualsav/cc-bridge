@@ -202,6 +202,7 @@ async function ensureTopicFor(group: string, sessionId: string, cwd: string, pan
   if (topicDeletionPending(sessionId)) return undefined   // user just deleted it — don't re-open during teardown
   const existing = getTopicBySession(sessionId)
   if (existing) {
+    if (existing.threadId == null) return undefined   // headless entry — it owns no thread to reopen or route to
     if (existing.closed) {
       // User just closed it (→ /exit in flight): route to the closed thread WITHOUT reopening, so the
       // teardown's trailing outbound can't flip it back open. Cleared on exit/revive.
@@ -266,12 +267,14 @@ export async function outboundTargetsFor(paneId: string | null): Promise<Array<{
   const dmChatOwner = chatIdForDmChatSession(sid)
   if (dmChatOwner) return [{ chat: dmChatOwner }]   // a DM chat lane — replies go to its owner's DM only, never a forum topic
   if (isSessionDismissed(sid)) return []   // user deleted this session's topic — drop its outbound entirely (no topic to route to, and it must NOT fall through to General's unthreaded chat)
+  const entry = getTopicBySession(sid)
+  if (entry?.headless) return []   // headless session — it has no topic and must never mint one; its replies surface in the mini app only, not in the group
   // A dead pane can still resolve a session here: the sticky @tg_session stamp outlives claude, and
   // account-level pings (usage/context warns) route via focus.activePaneId, which may be such a pane
   // — after a topic delete its dismissal is GC'd once claude is gone, so each warn re-minted the
   // deleted topic ("ghost topic reappears every usage warn"). Never CREATE a topic for a pane with
   // no live claude; an existing topic still routes (trailing teardown output keeps its thread).
-  if (!getTopicBySession(sid) && !(await paneClaudeLive(paneId!))) return [{ chat: group }]
+  if (!entry && !(await paneClaudeLive(paneId!))) return [{ chat: group }]
   return [{ chat: group, thread: await ensureTopicFor(group, sid, cwd, paneId!) }]
 }
 
@@ -291,7 +294,7 @@ export async function ensureSessionTopic(paneId: string): Promise<void> {
   if (topicDeletionPending(sid)) return   // user just deleted this session's topic — don't re-open it
   if (sid === getGeneralSession()) return   // anchored to General — lives there, no topic
   if (chatIdForDmChatSession(sid)) return   // a DM chat lane — lives in its owner's DM, no forum topic
-  if (getTopicBySession(sid) || topicEnsureInFlight.has(sid)) return   // already have it / creating it
+  if (getTopicBySession(sid) || topicEnsureInFlight.has(sid)) return   // already have it / creating it — this is also what keeps a headless entry (registry row, no thread) from ever minting one
   topicEnsureInFlight.add(sid)
   try {
     const thread = await ensureTopicFor(group, sid, cwd, paneId)
@@ -320,8 +323,12 @@ export async function closeTopicForPane(pane: string): Promise<void> {
   const chatOwner = chatIdForDmChatSession(sid)
   if (chatOwner) { await chatLaneLost(chatOwner); return }   // chat lane died — no topic to close
   const t = getTopicBySession(sid)
-  if (!t || t.closed) return
-  await closeTopicEntry(group, sid, t)
+  if (!t) return
+  // Headless: there is no Telegram topic to reap, so the registry row IS the whole session — drop it
+  // (closing it instead would leave a dead row that no surface can ever clean up).
+  if (t.threadId == null) { removeTopic(sid); return }
+  if (t.closed) return
+  await closeTopicEntry(group, sid, { ...t, threadId: t.threadId })
 }
 
 // A revived/respawned session's topic reopens NOW, not on its first reply — flipping the stored
@@ -333,7 +340,7 @@ export async function reopenSessionTopic(sessionId: string): Promise<void> {
   const group = getGroupChatId()
   if (!group) return
   const t = getTopicBySession(sessionId)
-  if (!t || !t.closed) return
+  if (!t || !t.closed || t.threadId == null) return   // headless: no thread to reopen, and no closed/open state to flip
   try {
     await channel.threads!.reopen(group, String(t.threadId))
     process.stderr.write(`daemon: reopened topic "${t.name}" for ${t.cwd}\n`)
@@ -434,7 +441,8 @@ export async function reconcileTopics(panes: string[]): Promise<void> {
     const misses = (topicMissCounts.get(t.sessionId) ?? 0) + 1
     if (misses < 2) { topicMissCounts.set(t.sessionId, misses); continue }
     topicMissCounts.delete(t.sessionId)
-    await closeTopicEntry(group, t.sessionId, t)
+    if (t.threadId == null) { removeTopic(t.sessionId); continue }   // headless: nothing to close in Telegram — drop the row (same as closeTopicForPane)
+    await closeTopicEntry(group, t.sessionId, { ...t, threadId: t.threadId })
   }
   // Same backstop for the General anchor: it has no topic entry, so the loop above never sees it.
   const anchor = getGeneralSession()
@@ -469,7 +477,7 @@ export async function refreshTopicTitles(panes: string[]): Promise<void> {
     const sid = await sessionForPane(pane, false)
     if (!sid) continue
     const t = getTopicBySession(sid)
-    if (!t || t.closed) continue
+    if (!t || t.closed || t.threadId == null) continue   // headless: no thread to rename
     const cwd = (await paneCwd(pane).catch(() => null)) ?? t.cwd
     let branch = ''
     try { branch = (await exec('git', ['-C', cwd, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 2000 })).stdout.trim() } catch { /* not a git repo */ }
@@ -505,7 +513,7 @@ export async function topicThreadFor(paneId: string | null): Promise<{ group: st
   const sid = await sessionForPane(paneId, false)
   if (!sid) return null
   const t = getTopicBySession(sid)
-  if (!t || t.closed) return null
+  if (!t || t.closed || t.threadId == null) return null   // headless: no thread to type in / pin to
   return { group, thread: t.threadId }
 }
 

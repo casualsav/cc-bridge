@@ -2321,6 +2321,10 @@ function busEndpoints(): BusEndpoint[] {
 }
 // The room = the bound forum group. The bus requires topic mode (an endpoint IS a topic's session).
 function busRoom(): string | null { return isTopicMode() ? getGroupChatId() : null }
+// Storage key for the ledger + the shared dir. 'dm' is the synthetic room used when no group is
+// bound (headless/DM-only fleets still get history, digests and `tg shared`) — it is NEVER a
+// sendable chat id: anything that actually posts to Telegram must go through busRoom().
+function busLedgerRoom(): string { return busRoom() ?? 'dm' }
 
 // Ledger rows written before an endpoint was nameable (e.g. the DM chat lane pre-registration)
 // carry raw session ids in from/to — resolve at render time so history/digests/boards never show
@@ -2425,7 +2429,7 @@ async function tryDeliverAsk(p: BusPending): Promise<boolean> {
     const cap = await capturePane(pane).catch(() => '')
     if (!cap || !onNormalPrompt(cap)) return false
     if (bashModeArmed(cap)) return false
-    const room = busRoom()
+    const room = busLedgerRoom()
     // Digest (agent-bus P2): prepend the bus activity this endpoint missed since it was last caught up,
     // so the ask arrives WITH ambient context — pull-not-push (only ever handed over on a delivery it's
     // already receiving, never a live push into a busy pane). Excludes this very ask (already in the
@@ -2433,23 +2437,19 @@ async function tryDeliverAsk(p: BusPending): Promise<boolean> {
     // continuity to catch up, and runHermesAsk never calls this.
     const askBlock = formatAskBlock(cur.fromName, cur.id, cur.text, cur.refs)
     let block = askBlock
-    if (room) {
-      const since = getSeen(cur.toSid)
-      const digest = digestSince(resolveLedgerNames(tailLedger(room, DIGEST_SCAN)), since, { excludeId: cur.id, excludeFrom: cur.toName, cap: 8 })
-      const dig = formatDigestBlock(digest, since > 0 ? fmtAgo(since) : 'recently')
-      if (dig) block = `${dig}\n${askBlock}`
-    }
+    const since = getSeen(cur.toSid)
+    const digest = digestSince(resolveLedgerNames(tailLedger(room, DIGEST_SCAN)), since, { excludeId: cur.id, excludeFrom: cur.toName, cap: 8 })
+    const dig = formatDigestBlock(digest, since > 0 ? fmtAgo(since) : 'recently')
+    if (dig) block = `${dig}\n${askBlock}`
     const ok = await busDeliver(pane, block)
     if (ok) {
       const now = Date.now()
       markInjected(cur.id, now)
-      if (room) {
-        markSeen(cur.toSid, now)   // advance the watermark only on a LANDED delivery — a failed paste keeps the window open for the retry
-        void notifyAskSent(cur.fromSid, cur.toName, cur.text)
-        // Mirror the same card on the TARGET's own surface (its topic / chat DM) so the inbound ask is
-        // visible from inside the session too, not only on the asker's side.
-        void notifyBusRich(cur.toSid, `<b>@${escapeHtml(cur.fromName)}</b> messaged <b>@${escapeHtml(cur.toName)}</b>`, cur.text)
-      }
+      markSeen(cur.toSid, now)   // advance the watermark only on a LANDED delivery — a failed paste keeps the window open for the retry
+      void notifyAskSent(cur.fromSid, cur.toName, cur.text)
+      // Mirror the same card on the TARGET's own surface (its topic / chat DM) so the inbound ask is
+      // visible from inside the session too, not only on the asker's side.
+      void notifyBusRich(cur.toSid, `<b>@${escapeHtml(cur.fromName)}</b> messaged <b>@${escapeHtml(cur.toName)}</b>`, cur.text)
     }
     return ok
   } finally { busInFlight.delete(cur.id) }
@@ -2457,14 +2457,14 @@ async function tryDeliverAsk(p: BusPending): Promise<boolean> {
 
 // 15s sweep: expire un-answered asks (tell the asker) + deliver queued asks whose target is now idle.
 async function sweepBus(): Promise<void> {
-  const room = busRoom()
+  const room = busLedgerRoom()
   dropExpired(Date.now() - LATE_ANSWER_GRACE_MS)   // GC asks whose late-answer grace has fully elapsed
   for (const p of expirePending(Date.now())) {
-    if (room) appendLedger(room, { ts: Date.now(), kind: 'expire', from: p.toName, to: p.fromName, id: p.id, text: 'timed out' })
+    appendLedger(room, { ts: Date.now(), kind: 'expire', from: p.toName, to: p.fromName, id: p.id, text: 'timed out' })
     // Suppress the notice when the target has SUCCESSFULLY answered any ask from this asker since this
     // one was created: that proves it's alive AND bus-fluent, so "still waiting" would be pure noise
     // (the exact false alarm after kam answered 14 & 12 but left the instruct-ask 16 un-answered).
-    const provenLive = room && tailLedger(room, 200).some(e =>
+    const provenLive = tailLedger(room, 200).some(e =>
       e.kind === 'answer' && e.from === p.toName && e.to === p.fromName && e.ts >= p.createdAt)
     if (provenLive) { process.stderr.write(`daemon: ask ${p.id} expired but @${p.toName} has since answered @${p.fromName} — suppressing timeout notice\n`); continue }
     // Bus plumbing NEVER goes to General — the human-facing notice goes to the ASKER's OWN surface (its
@@ -2490,7 +2490,7 @@ async function sweepBus(): Promise<void> {
 // lost with a false-success record), and logs/cards only a REAL delivery. Returns a status string; a
 // leading '!' marks a failure the caller relays back as an error.
 async function deliverAnswerToAsker(pending: BusPending, answerer: string, body: string, refs: string[]): Promise<string> {
-  const room = busRoom()
+  const room = busLedgerRoom()
   const cur = getPending(pending.id)
   if (!cur) return `!ask ${pending.id} is already closed (answered, or its 24h late-answer window elapsed)`
   removePending(cur.id)
@@ -2509,7 +2509,7 @@ async function deliverAnswerToAsker(pending: BusPending, answerer: string, body:
   // "@answerer messaged @asker", the answer behind the chevron — NOT a broadcast into General. Mirror
   // of the outbound "Messaged @X" card. (The mismatch note, if any, rides in the header.)
   void notifyBusRich(cur.fromSid, `<b>@${escapeHtml(answerer)}</b> messaged <b>@${escapeHtml(cur.fromName)}</b>${late ? ' · late' : ''}${escapeHtml(mismatch)}`, body)
-  if (room) appendLedger(room, { ts: Date.now(), kind: 'answer', from: answerer, to: cur.fromName, id: cur.id, text: body, refs })
+  appendLedger(room, { ts: Date.now(), kind: 'answer', from: answerer, to: cur.fromName, id: cur.id, text: body, refs })
   return `answered @${cur.fromName} (ask ${cur.id})${late ? ' (late — delivered after the timeout)' : ''}`
 }
 
@@ -2517,11 +2517,11 @@ async function deliverAnswerToAsker(pending: BusPending, answerer: string, body:
 // route the final text (or a readable error) back to the asker via deliverAnswerToAsker. Concurrent —
 // no queue (a subprocess has no busy-pane to clobber); hermesInFlight tracks live children.
 async function runHermesAsk(pending: BusPending, cfg: HermesEndpoint): Promise<void> {
-  const room = busRoom()
+  const room = busLedgerRoom()
   markInjected(pending.id, Date.now())
   hermesInFlight.add(pending.id)
   try {
-    const task: HermesTask = { id: pending.id, from: pending.fromName, room: room ?? '', text: pending.text, refs: pending.refs, sharedDir: room ? sharedDir(room) : '' }
+    const task: HermesTask = { id: pending.id, from: pending.fromName, room, text: pending.text, refs: pending.refs, sharedDir: sharedDir(room) }
     const result = await runHermes(cfg, task)
     const body = result.ok ? result.text : `⚠️ @${cfg.name} couldn't complete ask ${pending.id}: ${result.error}`
     const status = await deliverAnswerToAsker(pending, cfg.name, body, [])
@@ -4042,8 +4042,7 @@ async function handleCall(
       }
       // ---- Agent bus verbs (agent-bus P1) ----
       case 'ask': {
-        const room = busRoom()
-        if (!room) { write({ t: 'result', id, ok: false, text: 'agent bus needs a forum group — run /bind first' }); return }
+        const room = busLedgerRoom()
         const pane = args.pane ? String(args.pane) : null
         const fromSid = pane ? await sessionForPane(pane) : null
         if (!fromSid) { write({ t: 'result', id, ok: false, text: '`tg ask` must run inside a bridged session' }); return }
@@ -4099,8 +4098,7 @@ async function handleCall(
         break
       }
       case 'answer': {
-        const room = busRoom()
-        if (!room) { write({ t: 'result', id, ok: false, text: 'agent bus needs a forum group' }); return }
+        const room = busLedgerRoom()
         const askId = Number(args.id)
         const p = getPending(askId)
         if (!p) { write({ t: 'result', id, ok: false, text: `no open ask #${args.id} (unknown or expired)` }); return }
@@ -4157,20 +4155,26 @@ async function handleCall(
       }
       case 'post': {
         const room = busRoom()
-        if (!room) { write({ t: 'result', id, ok: false, text: 'agent bus needs a forum group' }); return }
         const pane = args.pane ? String(args.pane) : null
         const fromSid = pane ? await sessionForPane(pane) : null
         const fromName = fromSid ? nameForEndpoint(fromSid, busEndpoints()) : 'agent'
         const body = String(args.text ?? '').trim()
         if (!body) { write({ t: 'result', id, ok: false, text: 'empty post' }); return }
-        appendLedger(room, { ts: Date.now(), kind: 'post', from: fromName, text: body })
+        appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'post', from: fromName, text: body })
         // agent-bus P3: if this endpoint has a send-only avatar bot, the post goes out under that bot's
         // own name+picture (no "📣 name:" prefix — the bot IS the identity). Fresh read = hot-reload; the
         // whole lookup is guarded so a corrupt/unreadable avatars.json just degrades to the shared bot.
+        // Avatars are group members, so with no group bound there's nowhere for them to post: the
+        // unbound fan-out below always goes out over the bridge bot.
         let avatar: Avatar | null = null
-        try { avatar = resolveAvatar(fromName, parseAvatars(readJsonFile(AVATARS_FILE, null))) } catch {}
-        const bridgePost = () => channel.sendText(String(room), `📣 <b>${escapeHtml(fromName)}</b>: ${escapeHtml(body)}`)
-        if (avatar) {
+        if (room) { try { avatar = resolveAvatar(fromName, parseAvatars(readJsonFile(AVATARS_FILE, null))) } catch {} }
+        // No bound group → the post fans out to every allowlisted chat instead of the room.
+        const bridgePost = async (): Promise<void> => {
+          const html = `📣 <b>${escapeHtml(fromName)}</b>: ${escapeHtml(body)}`
+          if (room) { await channel.sendText(String(room), html); return }
+          for (const chat of loadAccess().allowFrom) await channel.sendText(chat, html).catch(() => {})
+        }
+        if (room && avatar) {
           // Plain text (no parse_mode): with the prefix gone, HTML buys nothing and any body (with `<`/`&`)
           // stays byte-safe. On failure (bad token / bot not in the group) DON'T lose the broadcast — fall
           // back to the bridge bot AND surface the degradation in the result (an untailed stderr is where a
@@ -4187,13 +4191,12 @@ async function handleCall(
           }
         } else {
           await bridgePost()
-          text = 'posted to the room'
+          text = room ? 'posted to the room' : 'posted to your chats'
         }
         break
       }
       case 'history': {
-        const room = busRoom()
-        if (!room) { write({ t: 'result', id, ok: false, text: 'agent bus needs a forum group' }); return }
+        const room = busLedgerRoom()
         const n = Math.max(1, Math.min(Number(args.n) || 20, 100))
         const es = resolveLedgerNames(tailLedger(room, n))
         text = es.length
@@ -4202,9 +4205,7 @@ async function handleCall(
         break
       }
       case 'shared': {
-        const room = busRoom()
-        if (!room) { write({ t: 'result', id, ok: false, text: 'agent bus needs a forum group' }); return }
-        text = ensureSharedDir(room)
+        text = ensureSharedDir(busLedgerRoom())
         break
       }
       // `tg slash <name> "/compact"` — inject a slash command into another session's CLI over the
@@ -4213,8 +4214,7 @@ async function handleCall(
       // privilege (bus agents share the host and could tmux send-keys themselves) — this is the
       // safe, guarded wrapper. Session-ending commands stay owner-only.
       case 'slash': {
-        const room = busRoom()
-        if (!room) { write({ t: 'result', id, ok: false, text: 'agent bus needs a forum group — run /bind first' }); return }
+        const room = busLedgerRoom()
         const pane = args.pane ? String(args.pane) : null
         const fromSid = pane ? await sessionForPane(pane) : null
         if (!fromSid) { write({ t: 'result', id, ok: false, text: '`tg slash` must run inside a bridged session' }); return }
@@ -4276,9 +4276,8 @@ async function handleCall(
           void channel.threads!.remove(group, String(threadId)).catch(() => {})
           write({ t: 'result', id, ok: false, text: `spawn failed in ${dir} — see daemon log` }); return
         }
-        const room = busRoom()
         const fromName = nameForEndpoint(fromSid, busEndpoints())
-        if (room) appendLedger(room, { ts: Date.now(), kind: 'spawn', from: fromName, to: topicName, text: `${dir}${model ? ` model=${model}` : ''}${effort ? ` effort=${effort}` : ''}` })
+        appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'spawn', from: fromName, to: topicName, text: `${dir}${model ? ` model=${model}` : ''}${effort ? ` effort=${effort}` : ''}` })
         // Visibility notice on the SPAWNER's own surface (its DM lane / topic) — one line, so the
         // owner watching that lane sees a session was opened on his behalf.
         void notifyBusText(fromSid, `🆕 Opened session: <b>@${escapeHtml(topicName)}</b>`)
@@ -4358,6 +4357,37 @@ async function exitSessionPane(pane: string, reason = 'unspecified'): Promise<vo
     await waitForSettle(pane, 300, 5000).catch(() => {})   // the pane may vanish as the session exits
   }
   await (watcher ? watcher.withInjection(run) : run()).catch(() => {})
+}
+
+// An explicit close (mini-app button / user closing the topic) must never leave the session running.
+// `/exit` only lands at a normal prompt, so a pane parked in a pager or a modal — the live case: the
+// `/cost` scroll view — swallows it and the session is orphaned with its registry row behind it. So
+// escalate: retry behind an Escape, then kill the pane outright. Blocks for up to ~20s, so callers
+// fire-and-forget it; pane death runs the same reactive bookkeeping (closeTopicForPane) either way.
+const CLOSE_EXIT_WAIT_MS = 8_000
+async function closeSessionPane(pane: string, reason: string): Promise<void> {
+  const died = async (): Promise<boolean> => {
+    for (let i = 0; i < CLOSE_EXIT_WAIT_MS / 500; i++) {
+      await sleep(500)
+      if (!(await paneAlive(pane).catch(() => false))) return true
+    }
+    return false
+  }
+  await exitSessionPane(pane, reason)
+  if (await died()) return
+  process.stderr.write(`daemon: closeSessionPane(${pane}) reason=${reason} — still alive after /exit; escaping and retrying\n`)
+  const watcher = pane === focus.activePaneId ? focus.paneWatcher : null
+  const esc = async () => {
+    await sendKeys(pane, agentInterruptKeys(await paneAgentKind(pane)))   // dismiss a pager/modal, or interrupt the turn
+    await waitForSettle(pane, 200, 3000).catch(() => {})
+  }
+  await (watcher ? watcher.withInjection(esc) : esc()).catch(() => {})
+  await exitSessionPane(pane, `${reason}-retry`)
+  if (await died()) return
+  // Hard stop. The transcript is already on disk, and the reactive close path treats a killed pane
+  // exactly like a clean exit — an orphaned session is the worse outcome by far.
+  process.stderr.write(`daemon: closeSessionPane(${pane}) reason=${reason} — /exit didn't take; killing the pane\n`)
+  await exec('tmux', ['kill-pane', '-t', pane], { timeout: 2000 }).catch(() => {})
 }
 
 // `echo` (the unknown-command fallthrough only) replies with the command's own
@@ -8148,9 +8178,9 @@ bot.on('message:forum_topic_closed', async ctx => {
   markTopicClosePending(sid)           // suppress the lazy-reopen until /exit lands — else trailing outbound flaps it open
   const pane = await paneForSession(sid)
   if (!pane || !(await paneAlive(pane))) return                           // session already gone
-  await exitSessionPane(pane, 'user-closed-topic')                        // settle-gated /exit (a non-focused pane drops a batched submit)
+  void closeSessionPane(pane, 'user-closed-topic')                        // settle-gated /exit, escalating to a kill; the reply below doesn't wait on it
   await ctx.reply('🏁 Topic closed — exiting its session.').catch(() => {})
-  process.stderr.write(`daemon: user closed topic ${thread} → exited session ${sid} (pane ${pane})\n`)
+  process.stderr.write(`daemon: user closed topic ${thread} → closing session ${sid} (pane ${pane})\n`)
 })
 
 // User reopened a session's topic from the Telegram UI → clear the stored closed flag so pins and
@@ -8249,11 +8279,13 @@ async function sweepDeletedTopics(): Promise<void> {
   const group = getGroupChatId()
   if (!group) return
   for (const t of listTopics()) {
+    const threadId = t.threadId
+    if (threadId == null) continue   // headless session — a registry row with no Telegram topic to probe
     try {
-      if (await probeMessageGone(group, t.threadId) === 'alive') continue
-      const pinId = sessionPins.get(`topic:${t.threadId}`)
+      if (await probeMessageGone(group, threadId) === 'alive') continue
+      const pinId = sessionPins.get(`topic:${threadId}`)
       if (pinId && await probeMessageGone(group, pinId) === 'alive') continue   // pin survives → topic exists
-      await teardownDeletedTopic(group, t)
+      await teardownDeletedTopic(group, { sessionId: t.sessionId, threadId, cwd: t.cwd, name: t.name })
     } catch { /* probe hiccup — next sweep retries */ }
   }
 }
@@ -11010,8 +11042,7 @@ bot.on('message:text', async ctx => {
     const cap = await capturePane(targetPane).catch(() => '')
     if (!cap || !onNormalPrompt(cap)) { await say(`⏳ <b>@${escapeHtml(toName)}</b> is mid-turn — retry when it goes idle.`); return }
     if (bashModeArmed(cap)) { await say(`⚠️ <b>@${escapeHtml(toName)}</b> has an unsubmitted ! bash command in its input box.`); return }
-    const room = busRoom()
-    if (room) appendLedger(room, { ts: Date.now(), kind: 'slash', from: 'owner', to: toName, text: command })
+    appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'slash', from: 'owner', to: toName, text: command })
     const watcher = targetPane === focus.activePaneId ? focus.paneWatcher : null
     void relaySlashCommand(targetPane, watcher, command, String(ctx.chat!.id), true, ctx.message?.message_thread_id)
     await say(`✅ Sent <code>${escapeHtml(command.split(/\s/)[0])}</code> to <b>@${escapeHtml(toName)}</b>`)
@@ -11819,8 +11850,25 @@ async function dismissFeedbackSurvey(pane: string): Promise<void> {
   await waitForSettle(pane, 150, 2000).catch(() => {})
 }
 
-async function webappSessionAction(userId: string, sid: string, action: 'stop' | 'compact' | 'send', text?: string): Promise<string | null> {
+async function webappSessionAction(userId: string, sid: string, action: 'stop' | 'compact' | 'send' | 'close', text?: string): Promise<string | null> {
   const pane = await paneForSession(sid).catch(() => null)
+  // Close runs BEFORE the liveness bail: ending an already-dead session must still clean up its row.
+  if (action === 'close') {
+    const topic = getTopicBySession(sid)
+    const alive = !!pane && await paneAlive(pane).catch(() => false)
+    process.stderr.write(`webapp: close sid=${sid} pane=${pane ?? '-'} headless=${topic?.threadId == null ? 1 : 0} alive=${alive ? 1 : 0}\n`)
+    if (pane && alive) {
+      // Suppress the lazy-reopen until /exit lands, but do NOT record closed:true here: the reactive
+      // closeTopicForPane must still see closed:false to actually close the Telegram tab. (The
+      // forum_topic_closed handler sets it because there the user already closed the tab himself.)
+      if (topic?.threadId != null) markTopicClosePending(sid)
+      void closeSessionPane(pane, 'webapp-close')   // escalates for up to ~20s — never hold the HTTP request open for it
+      return null
+    }
+    if (!topic && !pane) return 'unknown session'
+    if (topic && topic.threadId == null) removeTopic(sid)   // headless: the registry row IS the whole session
+    return null                                             // a dead topic session is reaped by the reconcile sweep
+  }
   if (!pane || !(await paneAlive(pane).catch(() => false))) return 'no live pane for this session'
   const watcher = pane === focus.activePaneId ? focus.paneWatcher : null
   if (action === 'stop') {
@@ -11839,11 +11887,13 @@ async function webappSessionAction(userId: string, sid: string, action: 'stop' |
 
 // Mini-app "+" new session: create a topic + spawn with the chosen dials — the webapp twin of the
 // bus `tg spawn` case (same primitives: thread → setTopic → spawnSession; no first message, and
-// mode rides as an inherit so the pane boots in it).
+// mode rides as an inherit so the pane boots in it). A headless spawn (asked for, or forced when no
+// forum group is bound) skips the topic entirely: the registry row is the whole session and the
+// mini-app is its only surface.
 async function webappSessionSpawn(
-  userId: string, name: string, opts: { model?: string; effort?: string; mode?: string },
+  userId: string, name: string, opts: { model?: string; effort?: string; mode?: string; headless?: boolean },
 ): Promise<{ error: string } | { sid: string; name: string }> {
-  if (!isTopicMode()) return { error: 'needs a bound forum group' }
+  const headless = opts.headless === true || !isTopicMode()
   const topicName = name.trim().slice(0, 60)
   if (!topicName) return { error: 'name required' }
   const model = opts.model ? String(opts.model).toLowerCase() : null
@@ -11855,6 +11905,19 @@ async function webappSessionSpawn(
   const dir = join(getBaseCwd() ?? homedir(), topicName.toLowerCase().replace(/[^\w.-]+/g, '-'))
   try { if (!existsSync(dir)) mkdirSync(dir, { recursive: true }) }
   catch (e) { return { error: `couldn't create ${dir}: ${(e as Error)?.message ?? e}` } }
+  if (headless) {
+    const sid = genSessionId()
+    // A duplicate name is tolerated, exactly as on the topic path — the bus resolves an ambiguous
+    // name when someone asks, not when the session is created.
+    setTopic(sid, { headless: true, cwd: dir, name: topicName, closed: false, createdAt: Date.now() })
+    try { topicBranchCache.set(sid, (await exec('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 2000 })).stdout.trim()) }
+    catch { topicBranchCache.set(sid, '') }
+    const pane = await spawnSession(dir, '', sid, MAIN_ACCOUNT, 'claude', undefined,
+      { model, effort: effort === 'auto' ? null : effort, ...(mode ? { mode: mode as CcMode } : {}) })
+    if (!pane) { removeTopic(sid); return { error: `spawn failed in ${dir} — see daemon log` } }
+    appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'spawn', from: 'owner', to: topicName, text: `${dir} headless${model ? ` model=${model}` : ''}${effort ? ` effort=${effort}` : ''}${mode ? ` mode=${mode}` : ''}` })
+    return { sid, name: topicName }
+  }
   const group = getGroupChatId()!
   let threadId: number
   try { threadId = Number(await channel.threads!.create(group, topicName)) }
@@ -11870,8 +11933,7 @@ async function webappSessionSpawn(
     void channel.threads!.remove(group, String(threadId)).catch(() => {})
     return { error: `spawn failed in ${dir} — see daemon log` }
   }
-  const room = busRoom()
-  if (room) appendLedger(room, { ts: Date.now(), kind: 'spawn', from: 'owner', to: topicName, text: `${dir}${model ? ` model=${model}` : ''}${effort ? ` effort=${effort}` : ''}${mode ? ` mode=${mode}` : ''}` })
+  appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'spawn', from: 'owner', to: topicName, text: `${dir}${model ? ` model=${model}` : ''}${effort ? ` effort=${effort}` : ''}${mode ? ` mode=${mode}` : ''}` })
   return { sid, name: topicName }
 }
 

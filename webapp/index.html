@@ -161,6 +161,7 @@
     <span class="name" id="dname"></span>
     <button class="ghost" id="dstop" title="Interrupt">⏹</button>
     <button class="ghost" id="dcompact" title="Compact">🗜</button>
+    <button class="ghost" id="dclose" title="Close session" style="color:#e05555">✕</button>
   </div>
   <div id="dfeed"></div>
   <div class="composer">
@@ -181,6 +182,7 @@
     <div class="seglbl">Model</div><div class="segrow" id="spmodel"></div>
     <div class="seglbl">Effort</div><div class="segrow" id="speffort"></div>
     <div class="seglbl">Mode</div><div class="segrow" id="spmode"></div>
+    <div class="seglbl">Surface</div><div class="segrow" id="spsurface"></div>
     <div class="sprow"><button id="spcancel" class="cancel">Cancel</button><button id="spgo" class="create">Create</button></div>
   </div>
 </div>
@@ -653,6 +655,11 @@ async function sessionAct(action, text) {
 }
 $("dstop").onclick = async () => { if (await sessionAct("stop")) showOk("Interrupted"); };
 $("dcompact").onclick = async () => { if (await sessionAct("compact")) showOk("Compacting…"); };
+$("dclose").onclick = async () => {
+  const name = $("dname").textContent;
+  if (!confirm('Close session "' + name + '"? This ends the Claude session.')) return;
+  if (await sessionAct("close")) { showOk("Closing…"); closeDrill(); }
+};
 $("dsend").onclick = async () => {
   const ta = $("dtext"), text = ta.value.trim();
   if (!text) return;
@@ -734,16 +741,17 @@ const SPAWN_OPTS = {
   model: ["inherit", "fable", "opus", "sonnet", "haiku"],
   effort: ["inherit", "low", "medium", "high", "xhigh", "max"],
   mode: ["default", "acceptEdits", "plan", "bypassPermissions"],
+  surface: ["topic", "headless"],
 };
 const CHIP_LABEL = { bypassPermissions: "bypass", acceptEdits: "accept edits" };
-const spawnSel = { model: "inherit", effort: "inherit", mode: "default" };
+const spawnSel = { model: "inherit", effort: "inherit", mode: "default", surface: "topic" };
 function chipRow(el, kind) {
   el.innerHTML = SPAWN_OPTS[kind].map(v =>
     '<button class="selchip' + (spawnSel[kind] === v ? " on" : "") + '" data-v="' + v + '">' + (CHIP_LABEL[v] || v) + "</button>").join("");
   el.querySelectorAll("button").forEach(b => b.onclick = () => { spawnSel[kind] = b.dataset.v; chipRow(el, kind); });
 }
 function openSpawnSheet() {
-  chipRow($("spmodel"), "model"); chipRow($("speffort"), "effort"); chipRow($("spmode"), "mode");
+  chipRow($("spmodel"), "model"); chipRow($("speffort"), "effort"); chipRow($("spmode"), "mode"); chipRow($("spsurface"), "surface");
   $("spawn").classList.add("show");
   $("spname").focus();
 }
@@ -758,13 +766,14 @@ $("spgo").onclick = async () => {
     ...(spawnSel.model !== "inherit" ? { model: spawnSel.model } : {}),
     ...(spawnSel.effort !== "inherit" ? { effort: spawnSel.effort } : {}),
     ...(spawnSel.mode !== "default" ? { mode: spawnSel.mode } : {}),
+    ...(spawnSel.surface === "headless" ? { headless: true } : {}),
   });
   $("spgo").disabled = false;
   if (!d) return;   // writeOp surfaced the error
   $("spawn").classList.remove("show"); $("spname").value = "";
   showOk("Spawned " + d.name);
   renderSessions();
-  setTimeout(() => openDrill(d.sid, d.name), 500);
+  if (d.sid) setTimeout(() => openDrill(d.sid, d.name), 500);
 };
 
 // ---- Scheduled board: cron + queued prompts + budget, each cancellable ----

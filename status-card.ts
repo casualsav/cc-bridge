@@ -612,39 +612,41 @@ export async function updateTopicPins(): Promise<void> {
   }
   for (const t of listTopics()) {
     if (t.closed) continue
+    const threadId = t.threadId
+    if (threadId == null) continue   // headless session — no topic to pin a card into (mini-app surface only)
     const paneId = await paneForSession(t.sessionId)
     if (!paneId) continue
-    const key = `topic:${t.threadId}`
+    const key = `topic:${threadId}`
     // Throttle background topics: a "hot" pin (the focused session OR the topic the user is currently
     // looking at) refreshes every tick; others at most every BG_PIN_MS, so total pin traffic stays
     // under the group budget no matter how many topics are open. Skips the capturePane too, not just
     // the Telegram edit. Including the active view here is what stops a topic you're working in — but
     // that never stole focus in group mode — from sitting on the 60s floor, where a post-reset context
     // drop (or any live field) lingered stale for many turns.
-    const hot = paneId === focus.activePaneId || isViewHot(group, t.threadId)
+    const hot = paneId === focus.activePaneId || isViewHot(group, threadId)
     if (!hot && Date.now() - (lastPinRefresh.get(key) ?? 0) < BG_PIN_MS) continue
     if (!hot) lastPinRefresh.set(key, Date.now())
     const text = await statusCardText(paneId)
     const existing = sessionPins.get(key)
     if (existing && pinTextCache.get(key) === text) continue   // unchanged → skip the edit
     if (existing) {
-      scheduleEdit({ chat: group, mid: existing, thread: t.threadId, source: 'pin', buttons: statusKeyboard(),
+      scheduleEdit({ chat: group, mid: existing, thread: threadId, source: 'pin', buttons: statusKeyboard(),
         render: () => text,
         onSent: () => { pinTextCache.set(key, text) },
         onError: e => {
-          if (topicThreadGone(e)) { sessionPins.delete(key); pinTextCache.delete(key); persistSessionPins(); cancelEdit(group, existing); deps.onTopicGone(t.sessionId, t.threadId) }   // tab gone → drop tracking; daemon tears down its session
+          if (topicThreadGone(e)) { sessionPins.delete(key); pinTextCache.delete(key); persistSessionPins(); cancelEdit(group, existing); deps.onTopicGone(t.sessionId, threadId) }   // tab gone → drop tracking; daemon tears down its session
           else if (pinMessageGone(e)) { sessionPins.delete(key); pinTextCache.delete(key); persistSessionPins(); cancelEdit(group, existing) }   // recreated on the next tick
           else if (pinNotModified(e)) pinTextCache.set(key, text)   // current → cache; transient → next cycle retries
         } })
       continue
     }
     try {
-      await clearTopicPins(group, t.threadId)   // single-pin guarantee — drop any prior/orphaned card pins first
-      const m = await deps.channel.sendText(group, text, { threadId: String(t.threadId), silent: true, buttons: statusKeyboard() })
+      await clearTopicPins(group, threadId)   // single-pin guarantee — drop any prior/orphaned card pins first
+      const m = await deps.channel.sendText(group, text, { threadId: String(threadId), silent: true, buttons: statusKeyboard() })
       await deps.channel.pin(m).catch(() => {})
       sessionPins.set(key, Number(m.messageId)); pinTextCache.set(key, text); persistSessionPins()
     } catch (e) {
-      if (topicThreadGone(e)) { sessionPins.delete(key); pinTextCache.delete(key); persistSessionPins(); deps.onTopicGone(t.sessionId, t.threadId) }   // tab gone → drop pin tracking; daemon confirms + tears down its session
+      if (topicThreadGone(e)) { sessionPins.delete(key); pinTextCache.delete(key); persistSessionPins(); deps.onTopicGone(t.sessionId, threadId) }   // tab gone → drop pin tracking; daemon confirms + tears down its session
       else process.stderr.write(`daemon: topic pin create failed: ${e}\n`)
     }
   }

@@ -17,8 +17,13 @@ import { normalizeHarnessProfile, type HarnessProfile } from './harness-provider
 
 export const TOPICS_FILE = join(STATE_DIR, 'topics.json')
 
+// Invariant: an entry has EITHER a numeric threadId or headless:true — never neither, never both.
+// A headless entry is a registry-only session (name + cwd + session id, no Telegram topic): it flows
+// through every name-based consumer (listTopics — bus roster, dashboards) while the topic runtime
+// keeps it away from every channel.threads.* call.
 export type TopicEntry = {
-  threadId: number      // Telegram message_thread_id of the forum topic
+  threadId?: number     // Telegram message_thread_id of the forum topic (absent iff headless)
+  headless?: true       // no forum topic of its own — surfaces only where listTopics does
   cwd: string           // the session's working dir (title basis; pane re-resolution fallback)
   name: string          // last title we set (project dir / git branch)
   closed: boolean       // session ended → topic closed but kept for history (reopen if it returns)
@@ -64,12 +69,15 @@ export function loadTopics(): TopicStore {
     let migrated = false
     for (const [key, e] of Object.entries(raw.topics ?? {})) {
       const t = e as Partial<TopicEntry>
-      if (!t || typeof t.threadId !== 'number') continue
+      // Keep an entry only if it satisfies the threadId-xor-headless invariant. A stored entry
+      // carrying both is illegal: the real thread wins, since dropping it would orphan a live
+      // Telegram topic. The ternary is what enforces the "never both" half.
+      if (!t || (typeof t.threadId !== 'number' && t.headless !== true)) continue
       const isOldFormat = typeof t.cwd !== 'string'
       const sessionId = isOldFormat ? genSessionId() : key
       if (isOldFormat) migrated = true
       topics[sessionId] = {
-        threadId: t.threadId,
+        ...(typeof t.threadId === 'number' ? { threadId: t.threadId } : { headless: true as const }),
         cwd: typeof t.cwd === 'string' ? t.cwd : key,
         name: typeof t.name === 'string' ? t.name : '',
         closed: t.closed === true,
@@ -153,6 +161,9 @@ export function getTopicBySession(sessionId: string): TopicEntry | undefined { e
 export function topicAgent(entry: TopicEntry | undefined): AgentKind { return normalizeAgent(entry?.agent) }
 
 export function getSessionByThread(threadId: number): string | undefined {
+  // A headless entry has no threadId key, so it reads as undefined — an untyped (JSON-derived)
+  // caller passing a nullish thread id would otherwise match it. Only a real thread id resolves.
+  if (typeof threadId !== 'number') return undefined
   ensureLoaded()
   for (const [sid, e] of Object.entries(store.topics)) if (e.threadId === threadId) return sid
   return undefined

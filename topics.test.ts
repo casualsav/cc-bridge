@@ -18,6 +18,10 @@ import {
 const entry = (threadId: number, cwd = `/projects/p${threadId}`, closed = false): TopicEntry =>
   ({ threadId, cwd, name: `t${threadId}`, closed, createdAt: 1 })
 
+// A headless entry: same row, minus the forum topic (no threadId key at all).
+const headless = (cwd: string, name: string): TopicEntry =>
+  ({ headless: true, cwd, name, closed: false, createdAt: 1 })
+
 beforeEach(() => _resetForTest())
 
 test('a fresh store is not in topic mode', () => {
@@ -91,7 +95,7 @@ test('setTopic adds, updateTopic patches, removeTopic deletes', () => {
 
 test('listTopics flattens the map to sessionId-tagged rows', () => {
   _resetForTest({ groupChatId: '-100', topics: { s1: entry(1, '/x'), s2: entry(2, '/y') } })
-  const rows = listTopics().sort((a, b) => a.threadId - b.threadId)
+  const rows = listTopics().sort((a, b) => (a.threadId ?? 0) - (b.threadId ?? 0))
   expect(rows).toEqual([
     { sessionId: 's1', cwd: '/x', threadId: 1, name: 't1', closed: false, createdAt: 1 },
     { sessionId: 's2', cwd: '/y', threadId: 2, name: 't2', closed: false, createdAt: 1 },
@@ -192,6 +196,56 @@ test('a seeded store carries its dismissals (survives a restart/reload)', () => 
   expect(isSessionDismissed('gone')).toBe(true)
   expect(isSessionDismissed('other')).toBe(false)
   expect(listDismissedSessions().sort()).toEqual(['ghost', 'gone'])
+})
+
+// ---- headless entries (registry-only sessions: name + cwd + session id, no forum topic) ----
+
+test('loadTopics keeps a headless entry and still drops one with neither threadId nor headless', () => {
+  writeFileSync(TOPICS_FILE, JSON.stringify({
+    groupChatId: '-100',
+    topics: {
+      head: { headless: true, cwd: '/projects/h', name: 'h', closed: false, createdAt: 1 },
+      threaded: { threadId: 7, cwd: '/projects/t', name: 't', closed: false, createdAt: 1 },
+      bad: { cwd: '/projects/b', name: 'b', closed: false, createdAt: 1 },
+    },
+  }))
+  const topics = loadTopics().topics
+  expect(Object.keys(topics).sort()).toEqual(['head', 'threaded'])
+  expect(topics.head).toEqual({ headless: true, cwd: '/projects/h', name: 'h', closed: false, createdAt: 1 })
+  expect('threadId' in topics.head!).toBe(false)   // absent, not undefined-valued — nothing may read it as a thread
+})
+
+test('loadTopics resolves an illegal threadId+headless entry in favour of the real thread', () => {
+  writeFileSync(TOPICS_FILE, JSON.stringify({
+    groupChatId: '-100',
+    topics: { both: { threadId: 9, headless: true, cwd: '/projects/x', name: 'x', closed: false, createdAt: 1 } },
+  }))
+  const e = loadTopics().topics.both!
+  expect(e.threadId).toBe(9)
+  expect('headless' in e).toBe(false)
+})
+
+test('a headless entry round-trips through setTopic/getTopicBySession/listTopics', () => {
+  setTopic('hhhh', headless('/projects/h', 'headless-one'))
+  const got = getTopicBySession('hhhh')!
+  expect(got.headless).toBe(true)
+  expect('threadId' in got).toBe(false)
+  expect(listTopics()).toEqual([
+    { sessionId: 'hhhh', headless: true, cwd: '/projects/h', name: 'headless-one', closed: false, createdAt: 1 },
+  ])
+})
+
+test('getSessionByThread never resolves a headless entry', () => {
+  _resetForTest({
+    groupChatId: '-100',
+    topics: { head: headless('/projects/h', 'h'), real: entry(11, '/projects/a') },
+  })
+  expect(getSessionByThread(11)).toBe('real')
+  expect(getSessionByThread(0)).toBeUndefined()
+  // An untyped (JSON-derived) caller's nullish thread id must not match the headless row's absent threadId.
+  expect(getSessionByThread(undefined as unknown as number)).toBeUndefined()
+  expect(getSessionByThread(null as unknown as number)).toBeUndefined()
+  expect(listTopics().map(r => r.sessionId).sort()).toEqual(['head', 'real'])   // …but it IS visible to the name-based consumers
 })
 
 // ---- DM chat lane ----

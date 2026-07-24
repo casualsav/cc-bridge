@@ -38,7 +38,7 @@ export interface WebappDeps {
   readSessionFeed?: (sid: string) => Promise<SessionFeed | null> | SessionFeed | null   // drill-in: recent conversation + live activity
   sessionAction?: (userId: string, sid: string, action: SessionAct, text?: string) => Promise<string | null> | string | null   // stop/compact/send → error string or null
   sessionAttach?: (userId: string, sid: string, fileName: string, data: Uint8Array, opts: { caption?: string; voice?: boolean }) => Promise<{ error: string } | { delivered: string; match: string }>   // compose-row file/voice → bubble text + reconcile token
-  sessionSpawn?: (userId: string, name: string, opts: { model?: string; effort?: string; mode?: string }) => Promise<{ error: string } | { sid: string; name: string }>   // "+" new session with dials
+  sessionSpawn?: (userId: string, name: string, opts: { model?: string; effort?: string; mode?: string; headless?: boolean }) => Promise<{ error: string } | { sid: string; name: string }>   // "+" new session with dials
   readAutomation?: () => Promise<AutomationView> | AutomationView    // cron + queued prompts + budget
   automationCancel?: (userId: string, kind: 'cron' | 'queue', id: string) => Promise<string | null> | string | null   // cancel one item → error string or null
   automationCreate?: (userId: string, spec: { when: string; sid: string; text: string }) => Promise<{ error: string } | { summary: string }>   // new cron from the Scheduled tab
@@ -59,7 +59,7 @@ export interface SessionCard {
   model: string | null; effort: string | null; mode: string | null
   ctxPct: number | null; h5Pct: number | null; branch: string | null
 }
-export type SessionAct = 'stop' | 'compact' | 'send'
+export type SessionAct = 'stop' | 'compact' | 'send' | 'close'
 export interface SessionFeed {
   sid: string; name: string; working: boolean
   items: Array<{ role: 'user' | 'assistant' | 'activity'; text: string; ts: number; img?: string; att?: string; cmd?: boolean }>
@@ -304,7 +304,7 @@ async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: strin
     if (!deps.sessionAction) return json({ error: 'unavailable' }, 404)
     const body = await req.json().catch(() => null) as { sid?: unknown; action?: unknown; text?: unknown } | null
     const action = String(body?.action || '') as SessionAct
-    if (!body || typeof body.sid !== 'string' || !['stop', 'compact', 'send'].includes(action)) return json({ error: 'bad body' }, 400)
+    if (!body || typeof body.sid !== 'string' || !['stop', 'compact', 'send', 'close'].includes(action)) return json({ error: 'bad body' }, 400)
     deps.log(`webapp: session ${action} sid=${body.sid}${action === 'send' ? ` chars=${String(body.text ?? '').length}` : ''} user=${userId}`)
     const err = await deps.sessionAction(userId, body.sid, action, typeof body.text === 'string' ? body.text : undefined)
     return err ? json({ error: err }, 400) : json({ ok: true })
@@ -314,13 +314,14 @@ async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: strin
   if (url.pathname === '/api/session/spawn') {
     if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405)
     if (!deps.sessionSpawn) return json({ error: 'unavailable' }, 404)
-    const body = await req.json().catch(() => null) as { name?: unknown; model?: unknown; effort?: unknown; mode?: unknown } | null
+    const body = await req.json().catch(() => null) as { name?: unknown; model?: unknown; effort?: unknown; mode?: unknown; headless?: unknown } | null
     if (!body || typeof body.name !== 'string' || !body.name.trim()) return json({ error: 'name required' }, 400)
-    deps.log(`webapp: session spawn name=${body.name} model=${body.model ?? '-'} effort=${body.effort ?? '-'} mode=${body.mode ?? '-'} user=${userId}`)
+    deps.log(`webapp: session spawn name=${body.name} model=${body.model ?? '-'} effort=${body.effort ?? '-'} mode=${body.mode ?? '-'} headless=${body.headless === true ? 1 : 0} user=${userId}`)
     const r = await deps.sessionSpawn(userId, body.name, {
       ...(typeof body.model === 'string' && body.model ? { model: body.model } : {}),
       ...(typeof body.effort === 'string' && body.effort ? { effort: body.effort } : {}),
       ...(typeof body.mode === 'string' && body.mode ? { mode: body.mode } : {}),
+      ...(body.headless === true ? { headless: true } : {}),
     })
     return 'error' in r ? json({ error: r.error }, 400) : json(r)
   }

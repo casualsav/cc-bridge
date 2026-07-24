@@ -167,6 +167,7 @@ test('console endpoints: sessions/auto reads + session act route to deps; missin
     readAutomation: () => ({ cron: [], queue: [], budget: { spent: 1.5, cap: null } }),
     sessionAction: (_u, sid, action, text) => { acted.push([sid, action, text]); return null },
     automationCreate: async (_u, spec) => { acted.push(['create', spec.when, spec.sid, spec.text]); return { summary: 'in 2h → money' } },
+    sessionSpawn: async (_u, name, opts) => { acted.push(['spawn', name, opts.headless === true]); return { sid: 's2', name } },
   })
   const auth = { Authorization: 'tma ' + sign({ auth_date: String(now()), user }) }
   const base = `http://127.0.0.1:${server.port}`
@@ -180,6 +181,12 @@ test('console endpoints: sessions/auto reads + session act route to deps; missin
     expect(acted).toEqual([['s1', 'send', 'hi']])
     const bad = await fetch(`${base}/api/session/act`, { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify({ sid: 's1', action: 'reboot' }) })
     expect(bad.status).toBe(400)
+    const close = await fetch(`${base}/api/session/act`, { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify({ sid: 's1', action: 'close' }) })
+    expect(close.status).toBe(200)
+    expect(acted).toContainEqual(['s1', 'close', undefined])
+    const spawn = await fetch(`${base}/api/session/spawn`, { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify({ name: 'bot', headless: true }) })
+    expect(spawn.status).toBe(200)
+    expect(acted).toContainEqual(['spawn', 'bot', true])
     const created = await fetch(`${base}/api/auto/create`, { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify({ when: '2h', sid: 's1', text: 'ping' }) })
     expect(created.status).toBe(200)
     expect((await created.json()).summary).toBe('in 2h → money')
