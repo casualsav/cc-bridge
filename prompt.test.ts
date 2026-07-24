@@ -152,6 +152,46 @@ test('detectUserPrompt relays the effort confirm with the todo panel rendered be
   expect(p!.options.map(o => o.label)).toEqual(['Yes, switch to high', 'No, go back'])
 })
 
+test('detectUserPrompt relays the "Switch to Fable 5?" model-switch consent dialog', () => {
+  const pane = [
+    '▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔',
+    '   Switch to Fable 5?',
+    '',
+    '   Fable 5 runs on usage credits — you have $100.00 in credits.',
+    '',
+    '   Learn more: https://support.claude.com/en/articles/12429409-extra-usage-for-paid-claude-plans',
+    '',
+    '     1. Continue with Fable 5',
+    '   ❯ 2. No, keep my current model',
+    '',
+    '',
+    '   Enter to confirm · Esc to cancel',
+  ].join('\n')
+  const p = detectUserPrompt(pane)
+  expect(p).not.toBeNull()
+  expect(p!.question).toBe('Switch to Fable 5?')
+  expect(p!.options.map(o => o.label)).toEqual(['Continue with Fable 5', 'No, keep my current model'])
+  expect(p!.multiSelect).toBe(false)
+  expect(p!.freeText).toBe(false)
+})
+
+test('detectUserPrompt rejects a scrolled-up "Switch to Fable 5?" dialog with new content below', () => {
+  const pane = [
+    '   Switch to Fable 5?',
+    '',
+    '   Fable 5 runs on usage credits — you have $100.00 in credits.',
+    '',
+    '     1. Continue with Fable 5',
+    '   ❯ 2. No, keep my current model',
+    '   Enter to confirm · Esc to cancel',
+    '',
+    '● Kept model as Opus 4.8',
+    '',
+    'Here is the next chunk of real assistant output that came after.',
+  ].join('\n')
+  expect(detectUserPrompt(pane)).toBeNull()
+})
+
 test('detectUserPrompt does NOT relay a generic Yes/No confirm dialog (no regression on the deliberate exclusion)', () => {
   const pane = [
     '   Are you sure?',

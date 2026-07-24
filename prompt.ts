@@ -248,18 +248,20 @@ export function detectUserPrompt(paneText: string): PromptInfo | null {
   // unmistakable phrases, so this can't suppress a genuine question.
   if (lines.some(l => FEEDBACK_SURVEY.test(l) || QUEUED_MESSAGES.test(l))) return null
 
-  // "Change effort level?" confirm dialog (/effort mid-conversation): a real decision (switch now
-  // vs go back) worth relaying, but it renders with a plain confirm footer ("Enter to confirm · Esc
-  // to cancel"), not the select-menu wording SELECT_HINT anchors on — so without this special case
-  // it falls through to the generic stuck-screen card instead of tappable buttons. Narrowly anchored
-  // on the exact question wording (not "Are you sure?" et al) so ordinary confirm dialogs stay
-  // excluded, matching this file's deliberate policy of never relaying bare Yes/No confirms.
-  const effortQIdx = lines.findIndex(l => /^\s*change effort level\?\s*$/i.test(l))
-  if (effortQIdx !== -1) {
+  // Plain-confirm dialogs that are real decisions worth relaying but render with a plain confirm
+  // footer ("Enter to confirm · Esc to cancel"), not the select-menu wording SELECT_HINT anchors
+  // on — so without this special case they fall through to the generic stuck-screen card instead
+  // of tappable buttons. Covers the two known cases: "Change effort level?" (/effort mid-conversation)
+  // and "Switch to <model>?" (model-switch consent, e.g. `/model fable` before consent is recorded).
+  // Narrowly anchored on these exact question wordings (not "Are you sure?" et al) so ordinary
+  // confirm dialogs stay excluded, matching this file's deliberate policy of never relaying bare
+  // Yes/No confirms.
+  const confirmQIdx = lines.findIndex(l => /^\s*(?:change effort level|switch to [^?]+)\?\s*$/i.test(l))
+  if (confirmQIdx !== -1) {
     // The options sit a few lines below the question, past the explanatory body — scan forward,
     // bounded, for the first numbered line rather than assuming a fixed gap.
-    let i = effortQIdx + 1
-    while (i < lines.length && i - effortQIdx <= 10 && !NUMBERED_RE.test(lines[i])) i++
+    let i = confirmQIdx + 1
+    while (i < lines.length && i - confirmQIdx <= 10 && !NUMBERED_RE.test(lines[i])) i++
     const optStart = i
     while (i < lines.length && NUMBERED_RE.test(lines[i])) i++
     const region = lines.slice(optStart, i)
@@ -273,7 +275,7 @@ export function detectUserPrompt(paneText: string): PromptInfo | null {
       const todoIdx = below.findIndex(l => TODO_PANEL_HEADER.test(l))
       if (todoIdx !== -1) below = below.slice(0, todoIdx)
       const belowLive = below.every(l => !l.trim() || BELOW_CHROME.test(l) || /enter to confirm/i.test(l))
-      if (belowLive) return { question: 'Change effort level?', options: parsed, multiSelect: false, tabbed: false, freeText: false, chat: false }
+      if (belowLive) return { question: lines[confirmQIdx].trim(), options: parsed, multiSelect: false, tabbed: false, freeText: false, chat: false }
     }
   }
 
