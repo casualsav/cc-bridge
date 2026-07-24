@@ -222,8 +222,14 @@ export function hasQueuedMessages(paneText: string): boolean {
 
 // Is the end-of-turn feedback survey open? While it's up, pasted text is eaten by its 1/2/3/0
 // key handler instead of reaching the input box — deliverers must dismiss it (send "0") first.
+// LIVE survey only: the question line immediately followed by the full options row. Matching the
+// question text alone false-positives on conversation content that merely QUOTES the survey
+// (e.g. code comments about it rendered in the viewport) — that typed a stray "0" into an open
+// input box and prefixed the next delivered message.
 export function feedbackSurveyOpen(paneText: string): boolean {
-  return paneLines(paneText).some(l => FEEDBACK_SURVEY.test(l))
+  const lines = paneLines(paneText)
+  return lines.some((l, i) => FEEDBACK_SURVEY.test(l) && !/["'`)]/.test(l.replace(/\(optional\)/, ''))
+    && /1: Bad\s+2: Fine\s+3: Good\s+0: Dismiss/i.test(lines[i + 1] ?? ''))
 }
 
 // Is the footer at `footerIdx` the LIVE prompt's footer (≤1 line of real content below), not a

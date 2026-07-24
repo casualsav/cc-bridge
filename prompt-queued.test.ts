@@ -49,3 +49,28 @@ test('detectWorking reads the spinner regardless of queue state', () => {
   expect(detectWorking(MID_TURN_EMPTY)).toBe(true)
   expect(detectWorking(IDLE)).toBe(false)
 })
+
+// feedbackSurveyOpen: the LIVE end-of-turn survey vs conversation content that merely quotes it
+// (the false positive that typed a stray "0" into an open input box — the "0<tg img=…>" incident).
+import { feedbackSurveyOpen } from './prompt.ts'
+
+const SURVEY_LIVE = `
+● How is Claude doing this session? (optional)
+  1: Bad    2: Fine   3: Good   0: Dismiss
+────────────────────────────────────────────────
+❯
+`
+
+// A code comment ABOUT the survey rendered in the viewport (split across two lines, quoted).
+const SURVEY_QUOTED = `
+●  //  • the inline end-of-turn feedback survey ("How is Claude doing this session? · 1: Bad 2: Fine
+   //    3: Good 0: Dismiss"), whose line matches the pattern
+────────────────────────────────────────────────
+❯
+`
+
+test('feedbackSurveyOpen matches only the live survey pair, not quoted mentions', () => {
+  expect(feedbackSurveyOpen(SURVEY_LIVE)).toBe(true)
+  expect(feedbackSurveyOpen(SURVEY_QUOTED)).toBe(false)
+  expect(feedbackSurveyOpen(IDLE)).toBe(false)
+})
