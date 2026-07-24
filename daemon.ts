@@ -439,8 +439,10 @@ function classifyOnboarding(cap: string): 'theme' | 'trust' | 'enter' | null {
 }
 
 // The login-method options last relayed as buttons, so a `login:N` tap maps its index back to the
-// option label (to tailor the follow-up message). Set whenever we relay the login choice.
-let lastLoginOptions: PromptOption[] = []
+// option label (to tailor the follow-up message). Keyed per pane so concurrent /login menus on
+// different sessions don't clobber each other; '∅' is the sentinel key for the no-pane/focused case.
+const NO_PANE_LOGIN_KEY = '∅'
+const lastLoginOptions = new Map<string, PromptOption[]>()
 let lastRelayedLoginHash = ''
 
 // A short, emoji-tagged button label from a login option ("Claude account with subscription •
@@ -454,14 +456,23 @@ function loginButtonLabel(label: string): string {
 }
 
 // Relay the detected login-method options as buttons (one per row), listing the full labels in the
-// body so the long descriptions aren't lost. Deduped by the caller via lastRelayedLoginHash.
-function relayLoginChoice(options: PromptOption[]): void {
-  lastLoginOptions = options
+// body so the long descriptions aren't lost. Deduped by the caller via lastRelayedLoginHash (focused
+// path) or st.loginHash (aux path). With a paneId, routes to that pane's own topic/DM lane via
+// outboundTargetsFor and tags each button with the pane so the callback drives the right session;
+// without one (legacy focused-path fallback), broadcasts via notifyChats as before.
+function relayLoginChoice(options: PromptOption[], paneId?: string | null): void {
+  lastLoginOptions.set(paneId ?? NO_PANE_LOGIN_KEY, options)
   const kb = new InlineKeyboard()
-  options.forEach((o, i) => { kb.text(loginButtonLabel(o.label), `login:${i + 1}`).row() })
+  options.forEach((o, i) => { kb.text(loginButtonLabel(o.label), paneId ? `login:${i + 1}:${paneId}` : `login:${i + 1}`).row() })
   const body = ['🔐 <b>Claude needs to log in.</b> Pick how you sign in:', '',
     ...options.map((o, i) => `<b>${i + 1}.</b> ${escapeHtml(o.label)}`)].join('\n')
-  notifyChats(body, { buttons: kbToButtons(kb) })
+  if (!paneId) { notifyChats(body, { buttons: kbToButtons(kb) }); return }
+  void (async () => {
+    for (const t of await outboundTargetsFor(paneId)) {
+      await channel.sendText(String(t.chat), body,
+        { buttons: kbToButtons(kb), ...(t.thread ? { threadId: String(t.thread) } : {}) }).catch(() => {})
+    }
+  })()
 }
 
 async function driveOnboarding(paneId: string, stage: 'theme' | 'trust' | 'enter'): Promise<void> {
@@ -1798,12 +1809,12 @@ function scheduleAuxRelayTick(delay = RELAY_POLL_MS): void {
 // Per-pane prompt-relay dedup for EVERY off-MCP pane, the focused one included (it's no longer
 // split into focused-only globals — that split lost state on the aux↔focused handoff and
 // double-relayed prompts). Pruned by auxRelayTick only when the pane dies.
-type AuxPromptState = { promptHash: string; permHash: string; authUrl: string; outstanding: boolean }
+type AuxPromptState = { promptHash: string; permHash: string; authUrl: string; outstanding: boolean; loginHash: string }
 const auxPromptStates = new Map<string, AuxPromptState>()
 
 function auxPromptStateFor(pane: string): AuxPromptState {
   let st = auxPromptStates.get(pane)
-  if (!st) { st = { promptHash: '', permHash: '', authUrl: '', outstanding: false }; auxPromptStates.set(pane, st) }
+  if (!st) { st = { promptHash: '', permHash: '', authUrl: '', outstanding: false, loginHash: '' }; auxPromptStates.set(pane, st) }
   return st
 }
 
@@ -1850,6 +1861,16 @@ async function scanAuxPanePrompts(pane: string): Promise<void> {
     const h = hashText(authUrl)
     if (h !== st.authUrl) { st.authUrl = h; void relayAuthUrlToTelegram(authUrl, pane) }
   }
+
+  // /login method menu — same relay as the focused path, but it must fire here too: it also fires
+  // for a later `/login` in an established session, which the onboarding driver below can't cover
+  // (it only runs pre-REPL). Deduped per pane so a repaint doesn't re-ask.
+  { const login = detectLoginPrompt(text)
+    if (login) {
+      const lh = hashText(login.options.map(o => o.label).join('|'))
+      if (lh !== st.loginHash) { st.loginHash = lh; relayLoginChoice(login.options, pane) }
+      return
+    } }
 
   // Pre-REPL screens (theme/trust/enter) are select menus too — never relay them as questions. A
   // spawned/resumed topic session can land here (e.g. an untrusted folder), so AUTO-ADVANCE them on
@@ -3295,7 +3316,7 @@ function onPaneEvent(text: string): void {
   const login = detectLoginPrompt(text)
   if (login) {
     const lh = hashText(login.options.map(o => o.label).join('|'))
-    if (lh !== lastRelayedLoginHash) { lastRelayedLoginHash = lh; relayLoginChoice(login.options) }
+    if (lh !== lastRelayedLoginHash) { lastRelayedLoginHash = lh; relayLoginChoice(login.options, focus.activePaneId) }
     return
   }
 
@@ -3503,7 +3524,14 @@ async function relayAuthUrlToTelegram(url: string, paneId: string | null = focus
   if (targets.length === 0) return
 
   const safe = escapeHtml(url)
-  const text =
+  // Rich carrier: the URL rides as a tappable link instead of a <pre> block the user has to copy.
+  // ForceReply survives — reply_markup is orthogonal to rich_message — so the reply-with-code flow
+  // is unchanged. Any rich failure falls back to the legacy HTML card, byte-identical to before.
+  const richHtml =
+    `🔑 <b>Sign-in link from Claude Code</b>\n\n` +
+    `<a href="${safe}">Open the sign-in page</a> to get your code, then:\n\n` +
+    `💬 <b>Reply to this message with your authentication code.</b>`
+  const legacy =
     `🔑 <b>Sign-in link from Claude Code</b>\n\n` +
     `<pre>${safe}</pre>\n` +
     `Open it in your browser to get your code, then:\n\n` +
@@ -3511,11 +3539,20 @@ async function relayAuthUrlToTelegram(url: string, paneId: string | null = focus
 
   for (const { chat, thread } of targets) {
     try {
-      const sent = await channel.sendText(chat, text, {
-        linkPreview: false,
-        forceReply: { placeholder: 'Authentication code' },
-        ...(thread ? { threadId: String(thread) } : {}),
-      })
+      let sent: MsgRef
+      try {
+        const m = await sendRichMessage(TOKEN!, chat, htmlPanelToRich(richHtml), {
+          ...(thread !== undefined ? { messageThreadId: thread } : {}),
+          replyMarkup: { force_reply: true, input_field_placeholder: 'Authentication code' },
+        })
+        sent = { chatId: String(chat), messageId: String(m.message_id) }
+      } catch {
+        sent = await channel.sendText(chat, legacy, {
+          linkPreview: false,
+          forceReply: { placeholder: 'Authentication code' },
+          ...(thread ? { threadId: String(thread) } : {}),
+        })
+      }
       replyTargets.set(refKey(sent), { kind: 'authurl' })
     } catch (e) {
       process.stderr.write(`daemon: auth-url relay to ${chat} failed: ${e}\n`)
@@ -9211,17 +9248,23 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
-  // Login-method choice (detectLoginPrompt / relayLoginChoice) — `login:N` drives the Nth option.
-  const loginMatch = /^login:(\d+)$/.exec(data)
+  // Login-method choice (detectLoginPrompt / relayLoginChoice) — `login:N` drives the Nth option,
+  // `login:N:%paneId` drives that pane specifically (an aux/lane relay tags its own pane so the tap
+  // can't accidentally drive whatever's currently focused).
+  const loginMatch = /^login:(\d+)(?::(%\S+))?$/.exec(data)
   if (loginMatch) {
     if (!(await cbAuth(ctx))) return
     await ctx.answerCallbackQuery().catch(() => {})
-    const paneId = focus.activePaneId
-    if (!paneId || !focus.paneWatcher) { await ctx.reply('No active session to drive.'); return }
+    const taggedPane = loginMatch[2]
+    const paneId = taggedPane ?? focus.activePaneId
+    if (!paneId || (!taggedPane && !focus.paneWatcher)) { await ctx.reply('No active session to drive.'); return }
     const idx = Number(loginMatch[1]) - 1
-    const optLabel = (lastLoginOptions[idx]?.label || '').toLowerCase()
+    const optLabel = (lastLoginOptions.get(taggedPane ?? NO_PANE_LOGIN_KEY)?.[idx]?.label || '').toLowerCase()
     // The menu highlights the top option, so reaching option N is N-1 Down presses, then Enter.
-    await focus.paneWatcher.withInjection(async () => { await navigateDown(paneId, idx); await sendKeys(paneId, ['Enter']); await waitForSettle(paneId, 300, 5000) })
+    // A tagged pane has no watcher (only the focused pane gets one) — drive it directly, the same
+    // no-watcher style as driveAuxOnboarding; the focused pane still goes through withInjection.
+    if (taggedPane) await withPaneInjection(taggedPane, async () => { await navigateDown(taggedPane, idx); await sendKeys(taggedPane, ['Enter']); await waitForSettle(taggedPane, 300, 5000) })
+    else await focus.paneWatcher!.withInjection(async () => { await navigateDown(paneId, idx); await sendKeys(paneId, ['Enter']); await waitForSettle(paneId, 300, 5000) })
     if (/subscription|claude account|pro\b|max\b|team|enterprise/.test(optLabel)) {
       // Subscription → an OAuth link appears and relays on its own; reply to it with the code.
       await ctx.reply('🔗 Opening the claude.ai sign-in link — I\'ll send it here. Tap it, approve, then reply to that link message with the code shown.')
