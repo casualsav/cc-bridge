@@ -13,6 +13,7 @@
 //   tgctl ask    <name> <text|-> [--ref p]…    ask another agent (async — turn ends, answer arrives later)
 //   tgctl answer <id>   <text|-> [--ref p]…    answer an ask you received (id from its <tg …ask=N> block)
 //   tgctl post   <text|->                       broadcast to the humans in the room
+//   tgctl slash  <name> </cmd>                  inject a slash command into a target session's CLI
 //   tgctl roster                                who's live in the room
 //   tgctl history [n]                           recent agent-bus activity
 //   tgctl shared                                the room's shared-workspace dir (put deliverables here)
@@ -38,7 +39,7 @@ let name = '', args: Record<string, unknown> = {}
 // Bus verbs take flag args (--ref, --await), so parse positionals + refs out of argv rather than
 // the fixed chat/a/b slots the classic verbs use. Kept in a separate branch so classic verbs are
 // byte-for-byte unchanged.
-const BUS = new Set(['ask', 'answer', 'post', 'roster', 'history', 'shared'])
+const BUS = new Set(['ask', 'answer', 'post', 'slash', 'roster', 'history', 'shared'])
 if (BUS.has(cmd)) {
   const rest = process.argv.slice(3)
   const refs: string[] = []
@@ -52,6 +53,7 @@ if (BUS.has(cmd)) {
     case 'ask':     name = 'ask';     args = { pane, to: pos[0], text: fromStdin(pos[1]) ?? '', refs }; break
     case 'answer':  name = 'answer';  args = { pane, id: pos[0], text: fromStdin(pos[1]) ?? '', refs }; break
     case 'post':    name = 'post';    args = { pane, text: fromStdin(pos[0]) ?? '' }; break
+    case 'slash':   name = 'slash';   args = { pane, to: pos[0], command: pos[1] ?? '' }; break
     case 'roster':  name = 'roster';  args = { pane }; break
     case 'history': name = 'history'; args = { pane, n: pos[0] }; break
     case 'shared':  name = 'shared';  args = { pane }; break
@@ -65,7 +67,7 @@ if (BUS.has(cmd)) {
     // `tg update` / `tg update check` — the second token lands in `chat_id`.
     case 'update': name = 'update';      args = { mode: chat_id === 'check' ? 'check' : 'apply' }; break
     default:
-      process.stderr.write('usage: tgctl <send|react|edit|reply|update|ask|answer|post|roster|history|shared|doctor> ...\n')
+      process.stderr.write('usage: tgctl <send|react|edit|reply|update|ask|answer|post|slash|roster|history|shared|doctor> ...\n')
       process.exit(2)
   }
 }

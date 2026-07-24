@@ -4186,6 +4186,37 @@ async function handleCall(
         text = ensureSharedDir(room)
         break
       }
+      // `tg slash <name> "/compact"` — inject a slash command into another session's CLI over the
+      // bus, reusing the owner-relay path (injectSlash + outcome echo into the target's topic).
+      // Guards mirror ask delivery: live pane, at a normal prompt, no armed bash box. Adds no real
+      // privilege (bus agents share the host and could tmux send-keys themselves) — this is the
+      // safe, guarded wrapper. Session-ending commands stay owner-only.
+      case 'slash': {
+        const room = busRoom()
+        if (!room) { write({ t: 'result', id, ok: false, text: 'agent bus needs a forum group — run /bind first' }); return }
+        const pane = args.pane ? String(args.pane) : null
+        const fromSid = pane ? await sessionForPane(pane) : null
+        if (!fromSid) { write({ t: 'result', id, ok: false, text: '`tg slash` must run inside a bridged session' }); return }
+        const command = String(args.command ?? '').trim()
+        if (!/^\/\S/.test(command)) { write({ t: 'result', id, ok: false, text: 'not a slash command — usage: tg slash <name> "/compact"' }); return }
+        if (/^\/(exit|quit)\b/i.test(command)) { write({ t: 'result', id, ok: false, text: 'session-ending commands are owner-only' }); return }
+        const endpoints = busEndpoints()
+        const res = resolveEndpoint(String(args.to ?? ''), endpoints)
+        if ('error' in res) { write({ t: 'result', id, ok: false, text: res.error }); return }
+        if (res.kind !== 'claude') { write({ t: 'result', id, ok: false, text: 'slash needs a live session target (a hermes endpoint has no CLI)' }); return }
+        const targetPane = await paneForSession(res.id).catch(() => null)
+        if (!targetPane || !(await paneAlive(targetPane).catch(() => false))) { write({ t: 'result', id, ok: false, text: 'target session has no live pane' }); return }
+        const cap = await capturePane(targetPane).catch(() => '')
+        if (!cap || !onNormalPrompt(cap)) { write({ t: 'result', id, ok: false, text: 'target is mid-turn — retry when it goes idle' }); return }
+        if (bashModeArmed(cap)) { write({ t: 'result', id, ok: false, text: 'target has an unsubmitted ! bash command in its input box' }); return }
+        const toName = nameForEndpoint(res.id, endpoints)
+        appendLedger(room, { ts: Date.now(), kind: 'slash', from: nameForEndpoint(fromSid, endpoints), to: toName, text: command })
+        const targets = await outboundTargetsFor(targetPane).catch(() => [])
+        const watcher = targetPane === focus.activePaneId ? focus.paneWatcher : null
+        void relaySlashCommand(targetPane, watcher, command, targets[0]?.chat ?? '', true, targets[0]?.thread ? Number(targets[0].thread) : undefined)
+        text = `sent ${command.split(/\s/)[0]} to @${toName} — its outcome echoes in that session's topic`
+        break
+      }
       default:
         write({ t: 'result', id, ok: false, text: `unknown tool: ${name}` })
         return
