@@ -6,6 +6,7 @@ import {
   setTopic, updateTopic, removeTopic, listTopics, genSessionId,
   getGeneralSession, getGeneralCwd, setGeneralSession, getBaseCwd, setBaseCwd,
   dismissSession, isSessionDismissed, undismissSession, listDismissedSessions,
+  getDmChatSession, setDmChatSession, clearDmChatSession, chatIdForDmChatSession, listDmChatSessions,
   loadTopics, TOPICS_FILE,
   type TopicEntry,
 } from './topics.ts'
@@ -191,4 +192,64 @@ test('a seeded store carries its dismissals (survives a restart/reload)', () => 
   expect(isSessionDismissed('gone')).toBe(true)
   expect(isSessionDismissed('other')).toBe(false)
   expect(listDismissedSessions().sort()).toEqual(['ghost', 'gone'])
+})
+
+// ---- DM chat lane ----
+
+test('a fresh store has no DM chat lane', () => {
+  expect(getDmChatSession('111')).toBeUndefined()
+  expect(chatIdForDmChatSession('sid1')).toBeUndefined()
+  expect(listDmChatSessions()).toEqual([])
+})
+
+test('setDmChatSession binds a chat id to a session, reverse-lookup and clear both work', () => {
+  setDmChatSession('111', 'sid1', '/srv/chat')
+  expect(getDmChatSession('111')).toEqual({ sessionId: 'sid1', cwd: '/srv/chat' })
+  expect(chatIdForDmChatSession('sid1')).toBe('111')
+  expect(chatIdForDmChatSession('missing')).toBeUndefined()
+
+  clearDmChatSession('111')
+  expect(getDmChatSession('111')).toBeUndefined()
+  expect(chatIdForDmChatSession('sid1')).toBeUndefined()
+})
+
+test('clearDmChatSession is a no-op on an unbound chat id', () => {
+  clearDmChatSession('nope')   // must not throw
+  expect(getDmChatSession('nope')).toBeUndefined()
+})
+
+test('each DM chat id gets its own independent lane (same account/workspace, distinct sessions)', () => {
+  setDmChatSession('111', 'sidA', '/srv/chat')
+  setDmChatSession('222', 'sidB', '/srv/chat')
+  expect(getDmChatSession('111')?.sessionId).toBe('sidA')
+  expect(getDmChatSession('222')?.sessionId).toBe('sidB')
+  expect(listDmChatSessions().sort((a, b) => a.chatId.localeCompare(b.chatId))).toEqual([
+    { chatId: '111', sessionId: 'sidA', cwd: '/srv/chat' },
+    { chatId: '222', sessionId: 'sidB', cwd: '/srv/chat' },
+  ])
+})
+
+test('re-setting a chat lane with a new sid/cwd overwrites the binding', () => {
+  setDmChatSession('111', 'sidA', '/srv/chat')
+  setDmChatSession('111', 'sidA2', '/srv/chat2')
+  expect(getDmChatSession('111')).toEqual({ sessionId: 'sidA2', cwd: '/srv/chat2' })
+  expect(chatIdForDmChatSession('sidA')).toBeUndefined()   // old sid no longer resolves
+})
+
+test('a seeded store carries its dmChat lanes (survives a restart/reload)', () => {
+  _resetForTest({ groupChatId: '-100', dmChat: { '111': { sessionId: 'sidA', cwd: '/srv/chat' } } })
+  expect(getDmChatSession('111')).toEqual({ sessionId: 'sidA', cwd: '/srv/chat' })
+})
+
+test('loadTopics defaults dmChat to {} for a pre-DM-chat-lane topics.json', () => {
+  writeFileSync(TOPICS_FILE, JSON.stringify({ groupChatId: '-100', topics: {} }))
+  expect(loadTopics().dmChat).toEqual({})
+})
+
+test('loadTopics drops a malformed dmChat entry', () => {
+  writeFileSync(TOPICS_FILE, JSON.stringify({
+    groupChatId: '-100', topics: {},
+    dmChat: { ok: { sessionId: 's1', cwd: '/x' }, bad: { sessionId: 's2' }, worse: 'nope' },
+  }))
+  expect(loadTopics().dmChat).toEqual({ ok: { sessionId: 's1', cwd: '/x' } })
 })

@@ -14,6 +14,7 @@ import {
   genSessionId, isTopicMode, getGroupChatId, getTopicBySession, findTopicByCwd, cwdAmbiguous,
   setTopic, updateTopic, removeTopic, listTopics, getGeneralSession, getGeneralCwd, setGeneralSession,
   dismissSession, isSessionDismissed, undismissSession, listDismissedSessions,
+  chatIdForDmChatSession, clearDmChatSession, listDmChatSessions,
 } from './topics.ts'
 import { focus, offMcpPanes, sessions } from './state.ts'
 import { AGENT_PANE_OPT, normalizeAgent } from './agent.ts'
@@ -262,6 +263,8 @@ export async function outboundTargetsFor(paneId: string | null): Promise<Array<{
   const cwd = paneId ? await paneCwd(paneId).catch(() => null) : null
   if (!sid || !cwd) return [{ chat: group }]
   if (sid === getGeneralSession()) return [{ chat: group }]   // anchored to General — unthreaded, never grows a topic
+  const dmChatOwner = chatIdForDmChatSession(sid)
+  if (dmChatOwner) return [{ chat: dmChatOwner }]   // a DM chat lane — replies go to its owner's DM only, never a forum topic
   if (isSessionDismissed(sid)) return []   // user deleted this session's topic — drop its outbound entirely (no topic to route to, and it must NOT fall through to General's unthreaded chat)
   // A dead pane can still resolve a session here: the sticky @tg_session stamp outlives claude, and
   // account-level pings (usage/context warns) route via focus.activePaneId, which may be such a pane
@@ -287,6 +290,7 @@ export async function ensureSessionTopic(paneId: string): Promise<void> {
   if (!(await paneClaudeLive(paneId))) return   // claude has exited (pane at a shell) — a dead session gets NO topic (stops the regenerate-after-end loop)
   if (topicDeletionPending(sid)) return   // user just deleted this session's topic — don't re-open it
   if (sid === getGeneralSession()) return   // anchored to General — lives there, no topic
+  if (chatIdForDmChatSession(sid)) return   // a DM chat lane — lives in its owner's DM, no forum topic
   if (getTopicBySession(sid) || topicEnsureInFlight.has(sid)) return   // already have it / creating it
   topicEnsureInFlight.add(sid)
   try {
@@ -313,6 +317,8 @@ export async function closeTopicForPane(pane: string): Promise<void> {
   if (!sid) return
   if (await paneForSession(sid)) return   // session migrated to another pane (restart respawn) — still live
   if (sid === getGeneralSession()) { await generalAnchorLost(group) ; return }   // anchor died — no topic to close
+  const chatOwner = chatIdForDmChatSession(sid)
+  if (chatOwner) { await chatLaneLost(chatOwner); return }   // chat lane died — no topic to close
   const t = getTopicBySession(sid)
   if (!t || t.closed) return
   await closeTopicEntry(group, sid, t)
@@ -343,6 +349,14 @@ export async function generalAnchorLost(group: string): Promise<void> {
   await channel.sendText(group,
     '🏁 <b>The session anchored to General ended.</b>\nGeneral now follows the focused session. Tap to anchor the current one here instead.',
     { buttons: [[{ text: '📌 Claim General', data: 'claimgeneral' }]], silent: true }).catch(() => {})
+}
+
+// A DM chat lane's session ended: drop the binding and tell its owner directly (there's no topic to
+// close — the lane lives only in that DM). Mirrors generalAnchorLost, minus the re-anchor button:
+// the lane just re-provisions itself on the owner's next message (ensureChatLane).
+async function chatLaneLost(chatId: string): Promise<void> {
+  clearDmChatSession(chatId)
+  await channel.sendText(chatId, '💤 Chat session ended — your next message starts a fresh one.').catch(() => {})
 }
 
 // A worktree session that ended cleanly leaves no reason to keep the worktree — remove it so
@@ -431,6 +445,15 @@ export async function reconcileTopics(panes: string[]): Promise<void> {
       if (misses < 2) topicMissCounts.set(anchor, misses)
       else { topicMissCounts.delete(anchor); await generalAnchorLost(group) }
     }
+  }
+  // Same backstop for DM chat lanes: they have no topic entry either, and no group to fail into —
+  // clearDmChatSession + tell the owner directly.
+  for (const { chatId, sessionId } of listDmChatSessions()) {
+    if (liveSids.has(sessionId)) { topicMissCounts.delete(sessionId); continue }
+    const misses = (topicMissCounts.get(sessionId) ?? 0) + 1
+    if (misses < 2) { topicMissCounts.set(sessionId, misses); continue }
+    topicMissCounts.delete(sessionId)
+    await chatLaneLost(chatId)
   }
 }
 

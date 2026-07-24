@@ -38,11 +38,12 @@ export type TopicStore = {
   baseCwd: string | null                // the folder new topics nest under — the General anchor's cwd, remembered so it survives the anchor ending
   topics: Record<string, TopicEntry>    // keyed by sessionId (the @tg_session pane stamp)
   dismissedSessions: Record<string, number>   // sessionId -> dismissedAt: user deleted this session's topic; suppress it (no topic, no outbound) DURABLY until the session's pane is gone. Persisted so a restart can't resurrect a deleted topic; GC'd by reconcileTopics once the session's claude is no longer live.
+  dmChat: Record<string, { sessionId: string; cwd: string }>   // DM chat id -> its dedicated "chat" session (topic mode only) — never gets a forum topic of its own; see topic-runtime.ts outboundTargetsFor
 }
 
 export function genSessionId(): string { return randomBytes(4).toString('hex') }
 
-let store: TopicStore = { groupChatId: null, generalSessionId: null, generalCwd: null, baseCwd: null, topics: {}, dismissedSessions: {} }
+let store: TopicStore = { groupChatId: null, generalSessionId: null, generalCwd: null, baseCwd: null, topics: {}, dismissedSessions: {}, dmChat: {} }
 let loaded = false
 let persist = true   // disabled by _resetForTest so unit tests never write to the real STATE_DIR
 
@@ -85,6 +86,12 @@ export function loadTopics(): TopicStore {
     for (const [sid, at] of Object.entries(raw.dismissedSessions ?? {})) {
       if (typeof at === 'number') dismissedSessions[sid] = at
     }
+    // Absent on a pre-DM-chat-lane topics.json — defaults to {} (no lanes yet).
+    const dmChat: Record<string, { sessionId: string; cwd: string }> = {}
+    for (const [chatId, e] of Object.entries(raw.dmChat ?? {})) {
+      const d = e as Partial<{ sessionId: string; cwd: string }>
+      if (d && typeof d.sessionId === 'string' && typeof d.cwd === 'string') dmChat[chatId] = { sessionId: d.sessionId, cwd: d.cwd }
+    }
     store = {
       groupChatId: typeof raw.groupChatId === 'string' ? raw.groupChatId : null,
       generalSessionId: typeof raw.generalSessionId === 'string' ? raw.generalSessionId : null,
@@ -92,6 +99,7 @@ export function loadTopics(): TopicStore {
       baseCwd: typeof raw.baseCwd === 'string' ? raw.baseCwd : null,
       topics,
       dismissedSessions,
+      dmChat,
     }
     loaded = true
     if (migrated) save()   // persist the re-keyed store so the migration runs once
@@ -220,10 +228,41 @@ export function undismissSession(sessionId: string): void {
 }
 export function listDismissedSessions(): string[] { ensureLoaded(); return Object.keys(store.dismissedSessions) }
 
+// ---- DM chat lane (topic mode) ----
+// A private DM with the bot, promoted to its own dedicated "chat" session once topic mode is on and
+// the sender is allowlisted (see dmChatEligible/ensureChatLane in daemon.ts). Keyed by DM chat id,
+// mirroring the General anchor's style — but a separate map, since a chat lane is independent of any
+// forum topic (it never gets one: topic-runtime.ts outboundTargetsFor routes its replies straight
+// back to this chat).
+export function getDmChatSession(chatId: string): { sessionId: string; cwd: string } | undefined { ensureLoaded(); return store.dmChat[chatId] }
+export function setDmChatSession(chatId: string, sessionId: string, cwd: string): void {
+  ensureLoaded()
+  const cur = store.dmChat[chatId]
+  if (cur && cur.sessionId === sessionId && cur.cwd === cwd) return
+  store.dmChat[chatId] = { sessionId, cwd }
+  save()
+}
+export function clearDmChatSession(chatId: string): void {
+  ensureLoaded()
+  if (!store.dmChat[chatId]) return
+  delete store.dmChat[chatId]
+  save()
+}
+// The inverse: which DM chat a session's replies belong to (undefined if it isn't a chat lane).
+export function chatIdForDmChatSession(sessionId: string): string | undefined {
+  ensureLoaded()
+  for (const [chatId, e] of Object.entries(store.dmChat)) if (e.sessionId === sessionId) return chatId
+  return undefined
+}
+export function listDmChatSessions(): Array<{ chatId: string; sessionId: string; cwd: string }> {
+  ensureLoaded()
+  return Object.entries(store.dmChat).map(([chatId, e]) => ({ chatId, ...e }))
+}
+
 // Test seam: set the in-memory store directly, mark it loaded, and disable disk persistence so
 // mutators in tests don't write to the real STATE_DIR/topics.json.
 export function _resetForTest(s?: Partial<TopicStore>): void {
-  store = { groupChatId: null, generalSessionId: null, generalCwd: null, baseCwd: null, topics: {}, dismissedSessions: {}, ...s }
+  store = { groupChatId: null, generalSessionId: null, generalCwd: null, baseCwd: null, topics: {}, dismissedSessions: {}, dmChat: {}, ...s }
   loaded = true
   persist = false
 }

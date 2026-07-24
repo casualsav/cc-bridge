@@ -74,6 +74,7 @@ import {
   getSessionByThread, getTopicBySession, setTopic, removeTopic, updateTopic, listTopics,
   getGeneralSession, setGeneralSession, findTopicByCwd, getBaseCwd, setBaseCwd,
   topicAgent, type TopicEntry,
+  getDmChatSession, setDmChatSession, listDmChatSessions,
 } from './topics.ts'
 import { getTopicCreate, setTopicCreate, setTopicCreateAgent, removeTopicCreate, topicCreateAgentLabel } from './topic-create.ts'
 import {
@@ -2478,6 +2479,14 @@ async function targetPaneOf(ctx: Context): Promise<{ paneId: string | null; thre
   if (isTopicMode() && String(ctx.chat?.id ?? '') === getGroupChatId()) {
     const anchorPane = await generalAnchorPane()
     if (anchorPane) return { paneId: anchorPane }
+  }
+  // DM chat lane: a private-chat command (/model, /terminal, /clear, /status, ! …) targets the
+  // sender's own chat-lane session, not whichever pane holds focus. No binding or a dead pane falls
+  // through to focus, same as today.
+  if (isTopicMode() && ctx.chat?.type === 'private') {
+    const dc = getDmChatSession(String(ctx.chat.id))
+    const pane = dc ? await paneForSession(dc.sessionId).catch(() => null) : null
+    if (pane) return { paneId: pane }
   }
   // DM lanes: a command (/terminal, /mode, /clear, /stop, …) targets the SENDER's own lane pane, not
   // whichever lane happens to hold focus. Falls through to focus only when this chat has no live lane.
@@ -5887,7 +5896,8 @@ bot.command(['bind', 'unbind'], async ctx => {
     'set one with /base.\n\n' +
     '⚠️ One more setup step: in @BotFather → <i>Bot Settings → Group Privacy → Turn off</i>, so I can ' +
     'see messages you type inside a session’s topic (not just commands). Then remove + re-add me to the group.\n\n' +
-    '<i>Topic creation &amp; routing land in the next update.</i>',
+    '<i>Topic creation &amp; routing land in the next update.</i>' +
+    (dmChatEligible() ? '\n\nYour DM with this bot is now a standalone chat agent — message it directly.' : ''),
     { parse_mode: 'HTML' })
 })
 
@@ -9823,6 +9833,18 @@ async function handleInbound(
       if (pane) targetPane = pane
       else void generalAnchorLost(chat_id)
     }
+  } else if (isTopicMode() && ctx.chat?.type === 'private') {
+    // DM chat lane: an allowlisted user's private DM becomes its own "chat"-account session once a
+    // group is bound — the DM analog of a forum topic, but it never grows one (topic-runtime.ts
+    // outboundTargetsFor routes its replies straight back to this chat).
+    const dmChat = getDmChatSession(chat_id)
+    if (dmChat) {
+      const pane = await paneForSession(dmChat.sessionId)
+      if (pane) targetPane = pane
+      else { void ensureChatLane(ctx, chat_id, params, { sid: dmChat.sessionId, cwd: dmChat.cwd }); return }   // pane died → revive in ITS OWN folder (-c)
+    } else if (dmChatEligible()) {
+      void ensureChatLane(ctx, chat_id, params); return   // first DM from this user → auto-provision
+    }
   } else if (dmLanesOn() && !isTopicMode() && TRANSCRIPT_OUTBOUND && !focus.activeShim) {
     // Per-user DM lanes: route the sender to THEIR own lane's pane (never the shared focus).
     const lane = laneForChat(chat_id)
@@ -10042,6 +10064,70 @@ async function ensureDmLane(ctx: Context, chatId: string, first: InboundParams, 
     drain(bufferEvent)
     await edit('⚠️ Your session didn\'t reach a prompt in time — resend your message once it settles.')
   } finally { dmLaneBooting.delete(chatId) }
+}
+
+// Non-null only when a DM can become a standalone chat lane: topic mode is on, the `chat` account is
+// registered (config dir exists on disk), and a workspace dir resolves — never auto-created. The
+// workspace is whatever cwd an existing chat lane already runs in (so every lane shares one folder),
+// else the documented convention `/srv/chat` if the operator has created it, else ineligible.
+function dmChatEligible(): { account: Account; dir: string } | null {
+  if (!isTopicMode()) return null
+  const account = accountByName('chat')
+  if (!account || !existsSync(account.configDir)) return null
+  const dir = listDmChatSessions()[0]?.cwd ?? (existsSync('/srv/chat') ? '/srv/chat' : null)
+  return dir ? { account, dir } : null
+}
+
+// Auto-provision a DM chat lane (topic mode, dmChatEligible): spawn a fresh session on the `chat`
+// account for `chatId` — the DM analog of ensureDmLane, but keyed in topics.ts's dmChat map (not
+// dm-lanes.ts) and never surfaced as a forum topic (topic-runtime.ts's outboundTargetsFor routes its
+// replies straight back to this chat). Per-chat boot queue, own map — deliberately NOT dmLaneBooting,
+// so a chat lane and a classic DM lane (impossible to both be active for the same chat, but keeps the
+// two features' bookkeeping independent).
+const chatLaneBooting = new Map<string, InboundParams[]>()
+async function ensureChatLane(ctx: Context, chatId: string, first: InboundParams, revive?: { sid: string; cwd: string }): Promise<void> {
+  const queued = chatLaneBooting.get(chatId)
+  if (queued) { queued.push(first); return }   // a boot for this chat is already in flight — join it
+  chatLaneBooting.set(chatId, [first])
+  const drain = (deliver: (p: InboundParams) => void) => { for (const p of chatLaneBooting.get(chatId) ?? []) deliver(p) }
+  try {
+    const account = accountByName('chat')
+    const dir = revive?.cwd ?? dmChatEligible()?.dir
+    if (!account || !dir) { drain(bufferEvent); return }   // account/workspace vanished since eligibility was checked — buffer rather than misroute
+    const sid = revive?.sid ?? genSessionId()
+    const extra = revive ? '-c' : ''
+    const notice = await ctx.reply(revive ? '💤 Reviving your chat…' : '🚪 Setting up your chat…', { parse_mode: 'HTML' }).catch(() => null)
+    const edit = async (text: string) => {
+      if (notice) await channel.editText({ chatId: String(notice.chat.id), messageId: String(notice.message_id) }, text).catch(() => {})
+      else await ctx.reply(text, { parse_mode: 'HTML' }).catch(() => {})
+    }
+    const pane = await spawnSession(dir, extra, sid, account, 'claude')
+    if (!pane) {
+      drain(bufferEvent)   // keep the messages — they replay when a session next appears
+      await edit(`❌ Couldn't ${revive ? 'revive' : 'start'} your chat in <code>${escapeHtml(dir)}</code> — your message is buffered.`)
+      return
+    }
+    setDmChatSession(chatId, sid, dir)   // fresh → new binding; revive → same sid, refreshes the cwd
+    process.stderr.write(`daemon: chat-lane ${revive ? 'revived' : 'spawned'} for chat ${chatId} → sid ${sid} (pane ${pane}) in ${dir}\n`)
+    const deadline = Date.now() + 90_000
+    while (Date.now() < deadline) {
+      await sleep(2000)
+      const cap = await capturePane(pane).catch(() => '')
+      if (cap && onNormalPrompt(cap)) {
+        const msgs = chatLaneBooting.get(chatId) ?? []
+        for (const p of msgs) emitInbound(p, pane)   // deliver to THIS lane's pane, not whichever is focused
+        await edit(`✅ Your chat is ${revive ? 'back up' : 'ready'} — ${msgs.length > 1 ? `your ${msgs.length} messages were delivered` : 'your message was delivered'}.`)
+        return
+      }
+      // First-run onboarding / post-update interstitials wedge a fresh pane short of the prompt.
+      if (cap) {
+        const stage = classifyOnboarding(cap)
+        if (stage) await driveAuxOnboarding(pane, stage).catch(() => {})
+      }
+    }
+    drain(bufferEvent)
+    await edit('⚠️ Your chat didn\'t reach a prompt in time — resend your message once it settles.')
+  } finally { chatLaneBooting.delete(chatId) }
 }
 
 // Shared dead-topic boot: spawn a claude pane bound to `sid`'s topic (extra='-c' continues the

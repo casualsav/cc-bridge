@@ -1,16 +1,20 @@
-# Chat mode for General (for an agent to execute)
+# Chat mode in your DM (for an agent to execute)
 
-Turn the forum's **General topic** into a claude.ai-quality chat assistant: warm
-conversational register, web search, restricted tools (no file edits, no shell beyond
-the `tg` CLI) — while every other topic stays a full coding session. It works by
-anchoring a dedicated Claude Code session to General (`/claim`), run on its own
-**account** (config dir) so none of the user's engineering CLAUDE.md, skills, or
-memory load into the chat context.
+Give the bot's **DM with you** a claude.ai-quality chat assistant: warm conversational
+register, web search, restricted tools (no file edits, no shell beyond the `tg` CLI) —
+while every project topic stays a full coding session. It works by running a dedicated
+Claude Code session on its own **account** (config dir) so none of the user's
+engineering CLAUDE.md, skills, or memory load into the chat context.
+
+Once a forum group is bound (`/bind`), the chat agent provisions **automatically**: an
+allowlisted user's first DM to the bot spawns their own chat session on the `chat`
+account, bound to that DM — no `/claim`, no manual anchoring. Each allowlisted user who
+DMs the bot gets their own isolated chat session (same account, same workspace, distinct
+conversations).
 
 Prerequisites: topic mode (a bound forum supergroup, `/bind`), and the off-MCP
 install completed (INSTALL.md). Bridge version ≥ the one that ships this file —
-older daemons revive dead topics on the *main* account, which silently swaps the
-chat session back to a coding persona.
+older daemons have no DM-chat-lane routing at all.
 
 ## 1. Create the `chat` account
 
@@ -67,39 +71,23 @@ Claude Code walks the cwd's **ancestor directories** for `.claude/CLAUDE.md` fil
 A chat workspace under `$HOME` (e.g. `~/chat`) therefore still pulls in
 `~/.claude/CLAUDE.md` — the user's engineering rules — on top of the chat account's
 own file. Outside `$HOME` (verified: `/context` lists only `~/.claude-chat/CLAUDE.md`),
-the chat context is clean. `/srv/chat` is the convention; any persistent dir outside
-`$HOME` works.
+the chat context is clean. `/srv/chat` is the convention the daemon looks for; any
+persistent dir outside `$HOME` works if you seed the first chat lane in it manually.
 
-## 4. Launch
+## 4. Bind a group
 
-In a tmux pane (the launcher function from `scripts/setup-alias.sh`):
+`/bind` a forum supergroup as usual (INSTALL.md's main setup) — this is what turns on
+per-user DM chat lanes. Nothing chat-specific to do here; `/bind`'s success reply
+confirms the DM chat lane is live once the `chat` account + `/srv/chat` are both present.
 
-```bash
-cd /srv/chat && cc-bridge 1 chat
-```
+## 5. Message the bot's DM
 
-First run asks the folder-trust and bypass-warning dialogs once in the terminal;
-answer them there. The daemon adopts the pane and creates a `chat` topic, stamped
-with `account: "chat"` so `/new` and message-driven revivals respawn it on the
-right account.
-
-## 5. Anchor it to General
-
-In Telegram, open the new **chat** topic and send `/claim`. General now routes to
-the chat session; its own topic closes. If the session ever dies, General reverts
-to follow-focus and offers a "📌 Claim General" button — revive with `/new` (in the
-chat topic) or `/account` → 🚀 chat, then `/claim` again.
-
-## 6. Pin the projects root — IMPORTANT
-
-```
-/base ~/projects        (or wherever new project topics should nest)
-```
-
-New-topic folders are created under `/base`. On a fresh install the first `/claim`
-seeds it from the claimed session's cwd — for a chat-General setup that would be
-`/srv/chat`, nesting every future project inside the chat workspace. Pinning `/base`
-explicitly prevents that.
+Any allowlisted user's first private message to the bot now auto-provisions their chat
+session in `/srv/chat` on the `chat` account (a "🚪 Setting up your chat…" notice, then
+the message is delivered). It's addressable only from that DM — it never grows a forum
+topic. If its pane dies, the next DM revives it in place (same conversation); if the
+daemon can't tell it's alive after two reconcile ticks, the DM gets a one-line notice
+and the following message starts a fresh chat session.
 
 ## Notes
 
@@ -109,3 +97,7 @@ explicitly prevents that.
 - Model: template sets `opus`; switch per-session with `/model`.
 - The account shares the main login (credentials copy) — usage draws from the same
   subscription; `/account` shows its 5h usage separately.
+- General's `/claim` is back to its stock behavior (anchor whatever session you like to
+  General) — it has nothing to do with the chat account anymore.
+- No group bound (topic mode off), or the `chat` account/workspace isn't set up yet:
+  DMs keep driving the focused session, exactly as without this feature.
