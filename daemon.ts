@@ -109,7 +109,7 @@ import {
   recordAgentAsk, resetHops, HOP_LIMIT,
   resolveEndpoint, nameForEndpoint, normalizeEndpointName, confineRef, sharedDir, ensureSharedDir, appendLedger, tailLedger,
   getSeen, markSeen, digestSince, DIGEST_SCAN,
-  type BusEndpoint, type BusPending,
+  type BusEndpoint, type BusPending, type LedgerEntry,
 } from './agent-bus.ts'
 import { formatAskBlock, formatAnswerBlock, formatDigestBlock, formatRosterLine, type RosterAgent } from './agent-bus-block.ts'
 import { laneForChat, bindLane, chatForLaneSession, noteLaneCwd } from './dm-lanes.ts'
@@ -2309,11 +2309,27 @@ loadHermesEndpoints()
 // + configured hermes endpoints (kind hermes, id = name). agent-bus.ts stays grammy/tmux-free.
 function busEndpoints(): BusEndpoint[] {
   const claude = listTopics().map(t => ({ id: t.sessionId, kind: 'claude' as const, name: t.name, closed: t.closed }))
+  // The DM chat lane(s) and the General anchor aren't topics but ARE bus participants — without an
+  // endpoint entry, nameForEndpoint falls back to their raw session ids in every rendered bus event
+  // ("messaged @bb1c6d35"), and they can't be addressed by name. The DM lane is "chat" (its
+  // account); the anchor is "general".
+  const dm = listDmChatSessions().map(d => ({ id: d.sessionId, kind: 'claude' as const, name: 'chat', closed: false }))
+  const gen = getGeneralSession()
+  const anchor = gen ? [{ id: gen, kind: 'claude' as const, name: 'general', closed: false }] : []
   const hermes = [...hermesEndpoints.values()].map(h => ({ id: h.name, kind: 'hermes' as const, name: h.name, closed: false }))
-  return [...claude, ...hermes]
+  return [...claude, ...dm, ...anchor, ...hermes]
 }
 // The room = the bound forum group. The bus requires topic mode (an endpoint IS a topic's session).
 function busRoom(): string | null { return isTopicMode() ? getGroupChatId() : null }
+
+// Ledger rows written before an endpoint was nameable (e.g. the DM chat lane pre-registration)
+// carry raw session ids in from/to — resolve at render time so history/digests/boards never show
+// an id the owner can't recognize. Unknown strings pass through untouched.
+function resolveLedgerNames(rows: LedgerEntry[]): LedgerEntry[] {
+  const eps = busEndpoints()
+  const fix = (s: string | undefined) => (s && eps.some(x => x.id === s)) ? nameForEndpoint(s, eps) : s
+  return rows.map(e => ({ ...e, from: fix(e.from) ?? e.from, ...(e.to ? { to: fix(e.to) } : {}) }))
+}
 
 // Compact live-roster line for the pinned status card (agent-bus P2): who's on the bus, at a glance —
 // the always-on card form of `tg roster`. LIVENESS ONLY (claude endpoints resolve a pane; hermes are
@@ -2419,7 +2435,7 @@ async function tryDeliverAsk(p: BusPending): Promise<boolean> {
     let block = askBlock
     if (room) {
       const since = getSeen(cur.toSid)
-      const digest = digestSince(tailLedger(room, DIGEST_SCAN), since, { excludeId: cur.id, excludeFrom: cur.toName, cap: 8 })
+      const digest = digestSince(resolveLedgerNames(tailLedger(room, DIGEST_SCAN)), since, { excludeId: cur.id, excludeFrom: cur.toName, cap: 8 })
       const dig = formatDigestBlock(digest, since > 0 ? fmtAgo(since) : 'recently')
       if (dig) block = `${dig}\n${askBlock}`
     }
@@ -4176,7 +4192,7 @@ async function handleCall(
         const room = busRoom()
         if (!room) { write({ t: 'result', id, ok: false, text: 'agent bus needs a forum group' }); return }
         const n = Math.max(1, Math.min(Number(args.n) || 20, 100))
-        const es = tailLedger(room, n)
+        const es = resolveLedgerNames(tailLedger(room, n))
         text = es.length
           ? es.map(e => `${e.kind === 'answer' ? '✓' : e.kind === 'ask' ? '→' : e.kind === 'post' ? '📣' : e.kind === 'expire' ? '⌛' : '·'} ${e.from}${e.to ? `→${e.to}` : ''}${e.id ? ` #${e.id}` : ''}: ${e.text.slice(0, 100)}`).join('\n')
           : '(no bus history yet)'
@@ -11663,6 +11679,21 @@ function webappSetSetting(userId: string, key: string, value: unknown): string |
 }
 // ---- Fleet dashboard (Sessions tab) ----
 
+// A DM chat lane is labeled with the user's @handle, not their numeric Telegram id (the id means
+// nothing to the owner). Resolved via getChat once per chat and cached for the daemon's lifetime;
+// until the async fetch lands (or for users with no @username), the numeric id shows as fallback.
+const tgHandleCache = new Map<string, string | null>()
+function handleForDmChat(chatId: string): string | null {
+  if (!tgHandleCache.has(chatId)) {
+    tgHandleCache.set(chatId, null)
+    void bot.api.getChat(chatId).then(c => {
+      const u = 'username' in c ? c.username : undefined
+      if (u) tgHandleCache.set(chatId, `@${u}`)
+    }).catch(() => {})
+  }
+  return tgHandleCache.get(chatId) ?? null
+}
+
 // Every addressable session for the dashboard: topic sessions, the General anchor, and DM chat
 // lanes (topic mode) — or just the focused pane (DM mode). {sid, name, cwd?, agent} rows; cwd
 // filled from the pane when the store doesn't know it.
@@ -11672,7 +11703,7 @@ function dashboardSessionRows(): Array<{ sid: string; name: string; cwd: string;
     const general = getGeneralSession()
     if (general && !rows.some(r => r.sid === general)) rows.unshift({ sid: general, name: 'General', cwd: '', agent: 'claude' })
     for (const { chatId, sessionId } of listDmChatSessions())
-      if (!rows.some(r => r.sid === sessionId)) rows.push({ sid: sessionId, name: `Chat (DM ${chatId})`, cwd: '', agent: 'claude' })
+      if (!rows.some(r => r.sid === sessionId)) rows.push({ sid: sessionId, name: `Chat (${handleForDmChat(chatId) ?? `DM ${chatId}`})`, cwd: '', agent: 'claude' })
     return rows
   }
   return []   // DM mode: filled per-call from the focused pane (no session store to enumerate)
@@ -11769,7 +11800,7 @@ async function webappReadBus(): Promise<WebappBusView> {
     id: p.id, from: p.fromName, to: p.toName, text: p.text.slice(0, 200),
     ageSec: Math.round((now - p.createdAt) / 1000), delivered: p.injected,
   }))
-  const events = tailLedger(room, 40).map(e => ({ ts: e.ts, kind: e.kind, from: e.from, to: e.to, id: e.id, text: e.text.slice(0, 200) })).reverse()
+  const events = resolveLedgerNames(tailLedger(room, 40)).map(e => ({ ts: e.ts, kind: e.kind, from: e.from, to: e.to, id: e.id, text: e.text.slice(0, 200) })).reverse()
   return { agents, pending, events }
 }
 
