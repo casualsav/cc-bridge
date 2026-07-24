@@ -5157,6 +5157,9 @@ async function runReadout(t: CommandTarget, chatId: string, kind: 'cost' | 'cont
 const START_PAIR_FOOTER =
   `🔗 <b>Not paired?</b> DM me for a 6-char code, then run ` +
   `<code>/telegram:access pair &lt;code&gt;</code> in Claude Code.`
+// Leads the commands message (NOT the album caption — a photo caption renders squeezed to the
+// photo width, and captions cap at 1024 chars anyway).
+const START_WELCOME = `Welcome to <b>cc-bridge</b>. Enjoy full Claude Code CLI access via Telegram\n\n🖼️ Save &amp; set one of these photos as my profile picture`
 const START_COMMAND_GROUPS: Array<[title: string, lines: string[]]> = [
   ['Sessions', [
     `<code>/launch</code> — start a fresh Claude Code session`,
@@ -5214,14 +5217,14 @@ function startRichHtml(paired: boolean): string {
   const sections = START_COMMAND_GROUPS
     .map(([title, lines]) => `<b>${title}</b><br>${lines.join('<br>')}`)
     .join('<br><br>')
-  return `<details><summary>Click here to view all /commands</summary>${sections}</details>${paired ? '' : `\n${START_PAIR_FOOTER}`}`
+  return `${START_WELCOME}\n\n<details><summary>Click here to view all /commands</summary>${sections}</details>${paired ? '' : `\n${START_PAIR_FOOTER}`}`
 }
 
 function startHelpText(paired: boolean): string {
   const sections = START_COMMAND_GROUPS
     .map(([title, lines]) => `<b>${title}</b>\n${lines.join('\n')}`)
     .join('\n\n')
-  return `<b>Commands:</b>\n\n${sections}${paired ? '' : `\n\n${START_PAIR_FOOTER}`}`
+  return `${START_WELCOME}\n\n<b>Commands:</b>\n\n${sections}${paired ? '' : `\n\n${START_PAIR_FOOTER}`}`
 }
 
 async function sendStartHelp(ctx: Context): Promise<void> {
@@ -5230,19 +5233,17 @@ async function sendStartHelp(ctx: Context): Promise<void> {
   const paired = gated.access.allowFrom.includes(gated.senderId)
   // remove_keyboard clears the retired docked control bar for anyone who still has it stuck on
   // their client (its taps would otherwise leak the button label to Claude as a plain message).
-  // Albums can't carry reply_markup, so it rides on the welcome text + commands messages.
+  // Albums can't carry reply_markup, so it rides on the commands message (or the text fallback).
   const kb = { remove_keyboard: true as const }
-  const caption = `Welcome to <b>cc-bridge</b>. Enjoy full Claude Code CLI access via Telegram\n\n🖼️ Save &amp; set one of these photos as my profile picture`
-  // The bundled profile-picture candidates. The welcome text does NOT ride the album as a caption:
-  // a photo message's bubble (and its caption) is capped to the rendered photo width — squeezed
-  // narrow under a 2-up album — so the text goes out as its own full-width message (owner ask).
+  // Exactly TWO messages (owner ask 58): the caption-less album, then ONE message carrying the
+  // welcome + the commands chevron (START_WELCOME leads startRichHtml/startHelpText). The welcome
+  // can't ride the album — a photo caption renders squeezed to the photo width.
   try {
     await ctx.replyWithMediaGroup([
       InputMediaBuilder.photo(new InputFile(join(import.meta.dir, 'assets', 'claude-tg.jpg'))),
       InputMediaBuilder.photo(new InputFile(join(import.meta.dir, 'assets', 'claude-spark.jpg'))),
     ])
-  } catch { /* asset missing (stale cache) → the text message below still carries the welcome */ }
-  await ctx.reply(caption, { parse_mode: 'HTML', link_preview_options: { is_disabled: true }, reply_markup: kb }).catch(() => {})
+  } catch { /* asset missing (stale cache) → the commands message below still carries the welcome */ }
   const chat = String(ctx.chat!.id)
   const thread = ctx.message?.message_thread_id
   try {
