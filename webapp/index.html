@@ -92,6 +92,7 @@
   .composer textarea { flex: 1; resize: none; border: none; border-radius: 10px; background: var(--sec); color: var(--text); padding: 9px 11px; font-size: 14px; line-height: 1.35; max-height: 110px; }
   .composer button { border: none; border-radius: 10px; background: var(--btn); color: var(--btn-text); padding: 0 14px; font-size: 15px; }
   .iconbtn { background: var(--sec); border: none; border-radius: 8px; color: var(--text); padding: 7px 10px; font-size: 14px; }
+  .iconbtn.recing { background: #c0392b; color: #fff; animation: pulse 1.2s ease-in-out infinite; }
   /* Bus + automation boards */
   .buschips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
   .evrow { display: flex; gap: 8px; padding: 8px 2px; border-bottom: 1px solid var(--sec); font-size: 13px; align-items: baseline; }
@@ -139,7 +140,10 @@
   </div>
   <div id="dfeed"></div>
   <div class="composer">
+    <button id="datt" class="iconbtn" title="Attach a file">📎</button>
+    <input id="dfile" type="file" hidden>
     <textarea id="dtext" rows="1" placeholder="Message this session…"></textarea>
+    <button id="dmic" class="iconbtn" title="Record a voice note">🎤</button>
     <button id="dsend">➤</button>
   </div>
 </div>
@@ -515,7 +519,9 @@ function paintFeed() {
   const feed = $("dfeed");
   const stuck = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;   // keep pinned to bottom unless the user scrolled up
   const items = lastDrill ? lastDrill.items : [];
-  optimistic = optimistic.filter(o => !items.some(i => i.role === "user" && i.text.trim() === o.text) && Date.now() - o.at < 120000);
+  // A plain send reconciles on exact text; an attachment/voice send on the server-issued match
+  // token (the unique inbox filename / the transcript) that the feed echo is guaranteed to carry.
+  optimistic = optimistic.filter(o => !items.some(i => i.role === "user" && (o.match ? i.text.includes(o.match) : i.text.trim() === o.text)) && Date.now() - o.at < 120000);
   const rows = items.map(i => '<div class="msg ' + i.role + '">' + esc(i.text) + "</div>")
     .concat(optimistic.map(o => '<div class="msg user' + (o.state === "pending" ? " pending" : "") + '">' + esc(o.text) + "</div>"));
   feed.innerHTML = rows.length ? rows.join("") : '<div class="notice">No conversation yet.</div>';
@@ -546,6 +552,68 @@ $("dsend").onclick = async () => {
   $("dfeed").scrollTop = $("dfeed").scrollHeight;   // sending always reveals your own message
   if (await sessionAct("send", text)) { o.state = "sent"; paintFeed(); setTimeout(renderDrill, 800); }
   else { optimistic = optimistic.filter(x => x !== o); paintFeed(); ta.value = text; }   // failed — give the draft back
+};
+
+// ---- Compose-row attachment + voice note ----
+// Upload to /api/session/attach; the composer text rides along as the file's caption. The bubble
+// paints optimistically and reconciles on the server's match token (see paintFeed).
+async function attachToSession(file, { caption = "", voice = false, label }) {
+  const o = { text: label, at: Date.now(), state: "pending", match: null };
+  optimistic.push(o); paintFeed();
+  $("dfeed").scrollTop = $("dfeed").scrollHeight;
+  let d = null;
+  try {
+    const fd = new FormData();
+    fd.append("sid", drillSid); fd.append("file", file, file.name);
+    if (caption) fd.append("caption", caption);
+    if (voice) fd.append("voice", "1");
+    const r = await fetch(new URL("/api/session/attach", location.origin), { method: "POST", headers: AUTH, body: fd });
+    d = await r.json();
+  } catch {}
+  if (!d || d.error) {
+    optimistic = optimistic.filter(x => x !== o); paintFeed();
+    showErr((d && (d.reason || d.error)) || "Upload failed");
+    return;
+  }
+  o.state = "sent"; o.match = d.match || null;
+  if (voice && d.delivered) o.text = "🎤 " + d.delivered;   // swap the "Transcribing…" stub for the transcript
+  paintFeed(); setTimeout(renderDrill, 800);
+}
+$("datt").onclick = () => { if (drillSid) $("dfile").click(); };
+$("dfile").onchange = () => {
+  const f = $("dfile").files[0]; $("dfile").value = "";
+  if (!f || !drillSid) return;
+  const ta = $("dtext"), caption = ta.value.trim(); ta.value = "";
+  attachToSession(f, { caption, label: "📎 " + f.name + (caption ? " — " + caption : "") });
+};
+// Voice: tap to record, tap again to stop-and-send. Hidden entirely where the webview has no
+// recording API (Telegram Desktop) — cheap feature-detect, per the owner's ask; a permission
+// denial on a capable webview still gets the error toast.
+let rec = null;
+if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder)) $("dmic").style.display = "none";
+$("dmic").onclick = async () => {
+  if (rec) { rec.stop(); return; }
+  if (!drillSid) return;
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+  catch { showErr("Mic unavailable — record in the Telegram chat instead"); return; }
+  const mime = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"].find(t => MediaRecorder.isTypeSupported(t)) || "";
+  const chunks = [];
+  try { rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined); }
+  catch { stream.getTracks().forEach(t => t.stop()); showErr("Recording unsupported here"); return; }
+  rec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+  rec.onstop = () => {
+    stream.getTracks().forEach(t => t.stop());
+    const type = (rec && rec.mimeType) || mime || "audio/webm";
+    rec = null;
+    $("dmic").classList.remove("recing"); $("dmic").textContent = "🎤";
+    const blob = new Blob(chunks, { type });
+    if (blob.size < 1000) { showErr("Recording too short"); return; }
+    const ext = /mp4/.test(type) ? "m4a" : /ogg/.test(type) ? "ogg" : "webm";
+    attachToSession(new File([blob], "voice-note." + ext, { type }), { voice: true, label: "🎤 Transcribing…" });
+  };
+  rec.start();
+  $("dmic").classList.add("recing"); $("dmic").textContent = "⏹";
 };
 
 // ---- Agent-bus board: live agents, open asks, recent events ----

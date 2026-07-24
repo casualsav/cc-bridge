@@ -37,6 +37,7 @@ export interface WebappDeps {
   listSessions?: () => Promise<SessionCard[]> | SessionCard[]        // fleet dashboard: one card per live session
   readSessionFeed?: (sid: string) => Promise<SessionFeed | null> | SessionFeed | null   // drill-in: recent conversation + live activity
   sessionAction?: (userId: string, sid: string, action: SessionAct, text?: string) => Promise<string | null> | string | null   // stop/compact/send → error string or null
+  sessionAttach?: (userId: string, sid: string, fileName: string, data: Uint8Array, opts: { caption?: string; voice?: boolean }) => Promise<{ error: string } | { delivered: string; match: string }>   // compose-row file/voice → bubble text + reconcile token
   readBus?: () => Promise<BusView> | BusView                         // agent-bus board: live agents, open asks, recent events
   readAutomation?: () => Promise<AutomationView> | AutomationView    // cron + queued prompts + budget
   automationCancel?: (userId: string, kind: 'cron' | 'queue', id: string) => Promise<string | null> | string | null   // cancel one item → error string or null
@@ -315,6 +316,24 @@ async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: strin
     deps.log(`webapp: session ${action} sid=${body.sid}${action === 'send' ? ` chars=${String(body.text ?? '').length}` : ''} user=${userId}`)
     const err = await deps.sessionAction(userId, body.sid, action, typeof body.text === 'string' ? body.text : undefined)
     return err ? json({ error: err }, 400) : json({ ok: true })
+  }
+  // Compose-row attachment / voice note for a session (multipart: sid + file [+ caption] [+ voice=1]).
+  // Same auth stance as /api/session/act (allowlist, not canWrite) — it's the chat "send a file"
+  // every allowlisted user already has, not a filesystem write. Audited.
+  if (url.pathname === '/api/session/attach') {
+    if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405)
+    if (!deps.sessionAttach) return json({ error: 'unavailable' }, 404)
+    const form = await req.formData().catch(() => null)
+    const file = form?.get('file')
+    const sid = String(form?.get('sid') || '')
+    if (!form || !(file instanceof File) || !sid) return json({ error: 'bad request' }, 400)
+    const max = deps.maxUploadBytes ?? 50 * 1024 * 1024
+    if (file.size > max) return json({ error: 'too large', reason: `max ${Math.floor(max / 1048576)} MiB` }, 413)
+    const voice = !!form.get('voice')
+    deps.log(`webapp: session attach sid=${sid} name=${file.name} bytes=${file.size} voice=${voice ? 1 : 0} user=${userId}`)
+    const r = await deps.sessionAttach(userId, sid, file.name || 'upload', new Uint8Array(await file.arrayBuffer()),
+      { caption: String(form.get('caption') || ''), voice })
+    return 'error' in r ? json({ error: r.error }, 400) : json(r)
   }
   if (url.pathname === '/api/auto/cancel') {
     if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405)

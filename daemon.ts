@@ -11803,6 +11803,38 @@ async function webappSessionAction(userId: string, sid: string, action: 'stop' |
   return ok ? null : 'delivery failed'
 }
 
+// Mini-app compose-row attachments: save the uploaded blob into the inbox, then deliver — a voice
+// note as its transcript (same pipeline as Telegram voice notes), any other file as an inbound
+// <tg img=|att=> block whose local path the session Reads (same contract as Telegram file sends).
+// Returns { delivered, match } on success — `delivered` is what to show in the sender's bubble,
+// `match` a token the feed echo will contain, so the client can reconcile its optimistic bubble.
+async function webappSessionAttach(
+  userId: string, sid: string, fileName: string, data: Uint8Array,
+  opts: { caption?: string; voice?: boolean },
+): Promise<{ error: string } | { delivered: string; match: string }> {
+  const pane = await paneForSession(sid).catch(() => null)
+  if (!pane || !(await paneAlive(pane).catch(() => false))) return { error: 'no live pane for this session' }
+  if (bashModeArmed(await capturePane(pane).catch(() => ''))) return { error: 'the session has an unsubmitted ! bash command in its input box' }
+  const safe = (basename(fileName || 'upload') || 'upload').replace(/[^\w.-]+/g, '_')
+  const path = join(INBOX_DIR, `${Date.now()}-${safe}`)
+  try { mkdirSync(INBOX_DIR, { recursive: true }); writeFileSync(path, data) }
+  catch (e) { return { error: `save failed: ${(e as Error)?.message ?? e}` } }
+  const caption = (opts.caption ?? '').trim()
+  let text: string, match: string
+  if (opts.voice) {
+    const t = (await transcribe(path))?.trim()
+    if (!t) return { error: 'transcription failed or is disabled (TELEGRAM_TRANSCRIBE)' }
+    text = match = t
+  } else {
+    const isImg = /\.(jpe?g|png|webp|gif|heic)$/i.test(safe)
+    text = formatChannelBlock({ content: caption || `(file: ${safe})`, meta: isImg ? { image_path: path } : { attachment_path: path } })
+    match = basename(path)   // the timestamped name is unique, and the feed echo carries the path
+  }
+  const watcher = pane === focus.activePaneId ? focus.paneWatcher : null
+  const ok = watcher ? await injectText(pane, watcher, text) : await pasteToPane(pane, text)
+  return ok ? { delivered: opts.voice ? text : `📎 ${safe}${caption ? ` — ${caption}` : ''}`, match } : { error: 'delivery failed' }
+}
+
 // Agent-bus board: live endpoints, open asks (queued + delivered-unanswered), recent ledger events.
 async function webappReadBus(): Promise<WebappBusView> {
   const room = busRoom()
@@ -11858,6 +11890,7 @@ async function startFilesWebapp(): Promise<void> {
       protectedRoots: [STATE_DIR],   // fence writes out of a relocated state dir too (~/.claude is fenced by default)
       readSettings: webappReadSettings, setSetting: webappSetSetting,
       listSessions: webappListSessions, readSessionFeed: webappSessionFeed, sessionAction: webappSessionAction,
+      sessionAttach: webappSessionAttach,
       readBus: webappReadBus, readAutomation: webappReadAutomation, automationCancel: webappAutomationCancel })
   } catch (e) { wlog(`webapp: failed to start: ${e}`); return }
   if (WEBAPP_PUBLIC_URL) { wlog(`webapp: public url ${WEBAPP_PUBLIC_URL}`); return }
