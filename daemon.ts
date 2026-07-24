@@ -2385,21 +2385,24 @@ function busDeliver(pane: string, block: string): Promise<boolean> {
 // chevron. outboundTargetsFor resolves the pane to its DM/topic; the body is capped to keep the message
 // under TG's 4096. Falls back to a classic expandable-quote HTML message if the rich send fails.
 const ASK_QUOTE_CAP = 3500
+// One bus card to one chat/thread — the shared renderer behind every bus surface (ask mirrors,
+// answer mirrors, lane-routed posts), so they all carry the same chevron format.
+async function sendBusCard(chat: string, thread: number | undefined, header: string, body: string): Promise<void> {
+  const shown = body.length > ASK_QUOTE_CAP ? body.slice(0, ASK_QUOTE_CAP) + '…' : body
+  const richHtml = `<details><summary>${header}</summary>${escapeHtml(shown).replace(/\n/g, '<br>')}</details>`
+  const fallback = `${header}\n<blockquote expandable>${escapeHtml(shown)}</blockquote>`
+  try {
+    await sendRichMessage(TOKEN!, chat, { html: richHtml }, { messageThreadId: thread, disableNotification: true })
+  } catch (e) {
+    process.stderr.write(`daemon: bus rich notify failed, falling back to HTML: ${e}\n`)
+    void channel.sendText(chat, fallback, { silent: true, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
+  }
+}
 async function notifyBusRich(surfaceSid: string, header: string, body: string): Promise<void> {
   const pane = await paneForSession(surfaceSid).catch(() => null)
   const targets = pane ? await outboundTargetsFor(pane).catch(() => []) : []
   if (!targets.length) return
-  const shown = body.length > ASK_QUOTE_CAP ? body.slice(0, ASK_QUOTE_CAP) + '…' : body
-  const richHtml = `<details><summary>${header}</summary>${escapeHtml(shown).replace(/\n/g, '<br>')}</details>`
-  const fallback = `${header}\n<blockquote expandable>${escapeHtml(shown)}</blockquote>`
-  for (const { chat, thread } of targets) {
-    try {
-      await sendRichMessage(TOKEN!, chat, { html: richHtml }, { messageThreadId: thread, disableNotification: true })
-    } catch (e) {
-      process.stderr.write(`daemon: bus rich notify failed, falling back to HTML: ${e}\n`)
-      void channel.sendText(chat, fallback, { silent: true, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
-    }
-  }
+  for (const { chat, thread } of targets) await sendBusCard(chat, thread, header, body)
 }
 // Outbound: "Messaged @kam" on the asker's surface, the prompt behind the chevron.
 const notifyAskSent = (fromSid: string, toName: string, text: string): Promise<void> =>
@@ -4168,8 +4171,9 @@ async function handleCall(
         // group member and can't open the owner's DM.
         const lanes = listDmChatSessions().map(l => l.chatId)
         if (lanes.length) {
-          const html = `📣 <b>${escapeHtml(fromName)}</b>: ${escapeHtml(body)}`
-          for (const chat of lanes) await channel.sendText(chat, html).catch(() => {})
+          // Same chevron card as every other bus surface — sent straight to the lane's chat id (not
+          // through notifyBusRich's pane resolution) so a dead lane pane can't drop a post.
+          for (const chat of lanes) await sendBusCard(chat, undefined, `📣 <b>@${escapeHtml(fromName)}</b>`, body)
           text = 'posted to the owner’s chat'
           break
         }
