@@ -2369,18 +2369,27 @@ function busDeliver(pane: string, block: string): Promise<boolean> {
 }
 
 // Confirm an outgoing bus ask on the SENDER's OWN surface — the chat DM for a DM-chat lane, or the
-// sender's topic — instead of broadcasting "▸ a → b" into the group's General. Header + the whole
-// prompt in a native expandable quote (tap to expand, not a <details> chevron). outboundTargetsFor
-// resolves the sender pane to its DM/topic; a huge prompt is capped to keep the message under TG's 4096.
+// sender's topic — instead of broadcasting "▸ a → b" into the group's General. A Bot API 10.1
+// rich_message <details> collapsible: the summary is the "Sent message to @X" header, the whole prompt
+// hides behind its tappable chevron. outboundTargetsFor resolves the sender pane to its DM/topic; a huge
+// prompt is capped to keep the message under TG's 4096. Falls back to a classic expandable-quote HTML
+// message if the rich send fails (a client/API without rich messages).
 const ASK_QUOTE_CAP = 3500
 async function notifyAskSent(fromSid: string, toName: string, text: string): Promise<void> {
   const pane = await paneForSession(fromSid).catch(() => null)
   const targets = pane ? await outboundTargetsFor(pane).catch(() => []) : []
   if (!targets.length) return
   const shown = text.length > ASK_QUOTE_CAP ? text.slice(0, ASK_QUOTE_CAP) + '…' : text
-  const body = `Sent message to <b>@${escapeHtml(toName)}</b>\n<blockquote expandable>${escapeHtml(shown)}</blockquote>`
+  const header = `Sent message to <b>@${escapeHtml(toName)}</b>`
+  const richHtml = `<details><summary>${header}</summary><blockquote>${escapeHtml(shown).replace(/\n/g, '<br>')}</blockquote></details>`
+  const fallback = `${header}\n<blockquote expandable>${escapeHtml(shown)}</blockquote>`
   for (const { chat, thread } of targets) {
-    void channel.sendText(chat, body, { silent: true, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
+    try {
+      await sendRichMessage(TOKEN!, chat, { html: richHtml }, { messageThreadId: thread, disableNotification: true })
+    } catch (e) {
+      process.stderr.write(`daemon: ask-sent rich send failed, falling back to HTML: ${e}\n`)
+      void channel.sendText(chat, fallback, { silent: true, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
+    }
   }
 }
 
