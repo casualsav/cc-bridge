@@ -43,7 +43,7 @@ export type TopicStore = {
   baseCwd: string | null                // the folder new topics nest under — the General anchor's cwd, remembered so it survives the anchor ending
   topics: Record<string, TopicEntry>    // keyed by sessionId (the @tg_session pane stamp)
   dismissedSessions: Record<string, number>   // sessionId -> dismissedAt: user deleted this session's topic; suppress it (no topic, no outbound) DURABLY until the session's pane is gone. Persisted so a restart can't resurrect a deleted topic; GC'd by reconcileTopics once the session's claude is no longer live.
-  dmChat: Record<string, { sessionId: string; cwd: string }>   // DM chat id -> its dedicated "chat" session (topic mode only) — never gets a forum topic of its own; see topic-runtime.ts outboundTargetsFor
+  dmChat: Record<string, { sessionId: string; cwd: string }>   // DM chat id -> its dedicated "chat" session (bound or unbound) — never gets a forum topic of its own; see topic-runtime.ts outboundTargetsFor
 }
 
 export function genSessionId(): string { return randomBytes(4).toString('hex') }
@@ -239,9 +239,10 @@ export function undismissSession(sessionId: string): void {
 }
 export function listDismissedSessions(): string[] { ensureLoaded(); return Object.keys(store.dismissedSessions) }
 
-// ---- DM chat lane (topic mode) ----
-// A private DM with the bot, promoted to its own dedicated "chat" session once topic mode is on and
-// the sender is allowlisted (see dmChatEligible/ensureChatLane in daemon.ts). Keyed by DM chat id,
+// ---- DM chat lane ----
+// A private DM with the bot, promoted to its own dedicated "chat" session when the chat account is
+// provisioned and the sender is allowlisted — with or without a bound group (see
+// dmChatEligible/ensureChatLane in daemon.ts). Keyed by DM chat id,
 // mirroring the General anchor's style — but a separate map, since a chat lane is independent of any
 // forum topic (it never gets one: topic-runtime.ts outboundTargetsFor routes its replies straight
 // back to this chat).

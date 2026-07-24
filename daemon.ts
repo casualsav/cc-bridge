@@ -4235,7 +4235,7 @@ async function handleCall(
         const targets = await outboundTargetsFor(targetPane).catch(() => [])
         const watcher = targetPane === focus.activePaneId ? focus.paneWatcher : null
         void relaySlashCommand(targetPane, watcher, command, targets[0]?.chat ?? '', true, targets[0]?.thread ? Number(targets[0].thread) : undefined)
-        text = `sent ${command.split(/\s/)[0]} to @${toName} — its outcome echoes in that session's topic`
+        text = `sent ${command.split(/\s/)[0]} to @${toName} — its outcome echoes on that session's surface`
         break
       }
       // `tg spawn <name> [--dir p] [--model fable] [--effort high] ["first message"]` — start a NEW
@@ -4243,9 +4243,10 @@ async function handleCall(
       // the owner says "start a topic called money on Fable high, tell it …" and the chat agent runs
       // this). Reuses the user-created-tab machinery: forum topic → setTopic → spawnSession with the
       // requested dials as launch flags; the first message is pasted once the REPL is up (background —
-      // the CLI returns as soon as the spawn lands).
+      // the CLI returns as soon as the spawn lands). Unbound, the same spawn goes headless: no topic,
+      // reachable on the bus and in the mini-app.
       case 'spawn': {
-        if (!isTopicMode()) { write({ t: 'result', id, ok: false, text: 'spawn needs a bound forum group — run /bind first' }); return }
+        const headless = !isTopicMode()   // no group bound → no topic to create; the bus + the mini-app are its surface
         const pane = args.pane ? String(args.pane) : null
         const fromSid = pane ? await sessionForPane(pane) : null
         if (!fromSid) { write({ t: 'result', id, ok: false, text: '`tg spawn` must run inside a bridged session' }); return }
@@ -4261,19 +4262,23 @@ async function handleCall(
           : join(getBaseCwd() ?? homedir(), topicName.toLowerCase().replace(/[^\w.-]+/g, '-'))
         try { if (!existsSync(dir)) mkdirSync(dir, { recursive: true }) }
         catch (e) { write({ t: 'result', id, ok: false, text: `couldn't create ${dir}: ${(e as Error)?.message ?? e}` }); return }
-        const group = getGroupChatId()!
-        let threadId: number
-        try { threadId = Number(await channel.threads!.create(group, topicName)) }
-        catch (e) { write({ t: 'result', id, ok: false, text: `couldn't create the topic: ${(e as Error)?.message ?? e}` }); return }
+        const group = headless ? null : getGroupChatId()!
+        let threadId: number | null = null
+        if (group) {
+          try { threadId = Number(await channel.threads!.create(group, topicName)) }
+          catch (e) { write({ t: 'result', id, ok: false, text: `couldn't create the topic: ${(e as Error)?.message ?? e}` }); return }
+        }
         const sid = genSessionId()
-        setTopic(sid, { threadId, cwd: dir, name: topicName, closed: false, createdAt: Date.now() })
+        setTopic(sid, threadId != null
+          ? { threadId, cwd: dir, name: topicName, closed: false, createdAt: Date.now() }
+          : { headless: true, cwd: dir, name: topicName, closed: false, createdAt: Date.now() })
         // Seed the branch cache so the retitle sweep doesn't stomp the chosen tab name (as topiccreate does).
         try { topicBranchCache.set(sid, (await exec('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 2000 })).stdout.trim()) }
         catch { topicBranchCache.set(sid, '') }
         const newPane = await spawnSession(dir, '', sid, MAIN_ACCOUNT, 'claude', undefined, { model, effort })
         if (!newPane) {
           removeTopic(sid)
-          void channel.threads!.remove(group, String(threadId)).catch(() => {})
+          if (group && threadId != null) void channel.threads!.remove(group, String(threadId)).catch(() => {})
           write({ t: 'result', id, ok: false, text: `spawn failed in ${dir} — see daemon log` }); return
         }
         const fromName = nameForEndpoint(fromSid, busEndpoints())
@@ -4290,13 +4295,16 @@ async function handleCall(
               if (/[❯>]\s*$/m.test(cap) || /\? for shortcuts/.test(cap)) break
             }
             if (!(await pasteToPane(newPane, firstMsg))) {
-              void channel.sendText(group, `⚠️ Spawned <b>${escapeHtml(topicName)}</b>, but its first message didn't paste — send it again in its topic.`, { threadId: String(threadId) }).catch(() => {})
+              if (group && threadId != null) void channel.sendText(group, `⚠️ Spawned <b>${escapeHtml(topicName)}</b>, but its first message didn't paste — send it again in its topic.`, { threadId: String(threadId) }).catch(() => {})
+              else void notifyBusText(fromSid, `⚠️ Spawned <b>@${escapeHtml(topicName)}</b>, but its first message didn't paste — send it again.`)
               return
             }
             // Mirror the delivered task into the new topic: the paste lands only in the pane, so
             // without this the owner can't see what the spawner asked the new session to do.
             // Same chevron shape as notifyBusRich, but addressed directly (group+thread are known —
-            // no pane→target resolution on a seconds-old pane).
+            // no pane→target resolution on a seconds-old pane). A headless spawn has no topic to
+            // mirror into; the spawner's own "🆕 Opened session" notice above is its only surface.
+            if (!group || threadId == null) return
             const shown = firstMsg.length > ASK_QUOTE_CAP ? firstMsg.slice(0, ASK_QUOTE_CAP) + '…' : firstMsg
             const header = `Task from <b>@${escapeHtml(fromName)}</b>`
             try {
@@ -6204,6 +6212,23 @@ bot.command(['bind', 'unbind'], async ctx => {
       if (cwd && !getBaseCwd()) setBaseCwd(cwd)
       anchorNote = 'Your current session is anchored to this <b>General</b> topic — it stays here. '
     }
+  }
+  // Promote the unbound fleet: headless rows have no Telegram surface, and now there is one. The
+  // 'general' session takes the General anchor (what a fresh bind produces anyway) unless the block
+  // above already anchored the focused session — never clobber an explicit anchor. Every other open
+  // headless row is simply dropped: the xor invariant forbids a row with neither a threadId nor the
+  // flag, and pane discovery (ensureSessionTopic) mints a real topic on the next tick, re-deriving
+  // the name from cwd/branch exactly as it does for any other discovered session. Closed rows stay.
+  for (const t of listTopics()) {
+    if (t.closed || t.threadId != null) continue
+    if (t.name === 'general' && !getGeneralSession()) {
+      setGeneralSession(t.sessionId, t.cwd)
+      removeTopic(t.sessionId)
+      process.stderr.write(`daemon: /bind promoted headless general ${t.sessionId} → the General anchor\n`)
+      continue
+    }
+    removeTopic(t.sessionId)
+    process.stderr.write(`daemon: /bind promoted headless "${t.name}" (${t.sessionId}) → discovery will give it a topic\n`)
   }
   await ctx.reply(
     '✅ <b>Bound this forum as the command center.</b>\n\n' +
@@ -10116,10 +10141,11 @@ async function handleInbound(
       if (pane) targetPane = pane
       else void generalAnchorLost(chat_id)
     }
-  } else if (isTopicMode() && ctx.chat?.type === 'private') {
-    // DM chat lane: an allowlisted user's private DM becomes its own "chat"-account session once a
-    // group is bound — the DM analog of a forum topic, but it never grows one (topic-runtime.ts
-    // outboundTargetsFor routes its replies straight back to this chat).
+  } else if (ctx.chat?.type === 'private' && (isTopicMode() || getDmChatSession(chat_id) || dmChatEligible())) {
+    // DM chat lane: an allowlisted user's private DM becomes its own "chat"-account session — the DM
+    // analog of a forum topic, but it never grows one (topic-runtime.ts outboundTargetsFor routes its
+    // replies straight back to this chat). Unbound too, where the DM is the whole surface; a DM with
+    // neither a lane nor an eligible chat account falls through to the DM-lane / focused paths below.
     const dmChat = getDmChatSession(chat_id)
     if (dmChat) {
       const pane = await paneForSession(dmChat.sessionId)
@@ -10349,16 +10375,41 @@ async function ensureDmLane(ctx: Context, chatId: string, first: InboundParams, 
   } finally { dmLaneBooting.delete(chatId) }
 }
 
-// Non-null only when a DM can become a standalone chat lane: topic mode is on, the `chat` account is
-// registered (config dir exists on disk), and a workspace dir resolves — never auto-created. The
-// workspace is whatever cwd an existing chat lane already runs in (so every lane shares one folder),
-// else the documented convention `/srv/chat` if the operator has created it, else ineligible.
+// Non-null only when a DM can become a standalone chat lane: the `chat` account is registered
+// (config dir exists on disk) and a workspace dir resolves — never auto-created. The workspace is
+// whatever cwd an existing chat lane already runs in (so every lane shares one folder), else the
+// documented convention `/srv/chat` if the operator has created it, else ineligible.
+// A bound group is NOT required: unbound, the DM is the whole surface (chat lane + a headless
+// 'general' coding session). No chat account provisioned ⇒ null ⇒ the classic focused-loop DM.
 function dmChatEligible(): { account: Account; dir: string } | null {
-  if (!isTopicMode()) return null
   const account = accountByName('chat')
   if (!account || !existsSync(account.configDir)) return null
   const dir = listDmChatSessions()[0]?.cwd ?? (existsSync('/srv/chat') ? '/srv/chat' : null)
   return dir ? { account, dir } : null
+}
+
+// The unbound DM's coding peer: with no forum group there are no topics, so the chat lane gets a
+// headless 'general' session to hand work to over the bus (`tg ask @general`). Idempotent — one OPEN
+// headless row named 'general' is all there is to ensure; /bind later promotes it to the General
+// anchor. No collision with topic mode's General anchor, which only exists while a group is bound.
+let headlessGeneralInFlight = false
+async function ensureHeadlessGeneral(): Promise<void> {
+  if (headlessGeneralInFlight) return
+  if (listTopics().some(t => !t.closed && t.threadId == null && t.name === 'general')) return
+  headlessGeneralInFlight = true
+  const sid = genSessionId()
+  try {
+    const dir = getBaseCwd() ?? homedir()   // the base dir itself, not a subfolder — this is the fleet's home session
+    setTopic(sid, { headless: true, cwd: dir, name: 'general', closed: false, createdAt: Date.now() })
+    const pane = await spawnSession(dir, '', sid, MAIN_ACCOUNT, 'claude')
+    if (!pane) {
+      removeTopic(sid)
+      process.stderr.write(`daemon: headless general spawn failed in ${dir} — see daemon log\n`)
+      return
+    }
+    appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'spawn', from: 'owner', to: 'general', text: `${dir} headless` })
+    process.stderr.write(`daemon: spawned headless general session ${sid} (pane ${pane}) in ${dir}\n`)
+  } finally { headlessGeneralInFlight = false }
 }
 
 // Auto-provision a DM chat lane (topic mode, dmChatEligible): spawn a fresh session on the `chat`
@@ -10392,6 +10443,7 @@ async function ensureChatLane(ctx: Context, chatId: string, first: InboundParams
     }
     setDmChatSession(chatId, sid, dir)   // fresh → new binding; revive → same sid, refreshes the cwd
     process.stderr.write(`daemon: chat-lane ${revive ? 'revived' : 'spawned'} for chat ${chatId} → sid ${sid} (pane ${pane}) in ${dir}\n`)
+    if (!isTopicMode()) void ensureHeadlessGeneral()   // unbound: the chat lane orchestrates, 'general' does the work (fire-and-forget — DM latency is untouched)
     const deadline = Date.now() + 90_000
     while (Date.now() < deadline) {
       await sleep(2000)
@@ -11025,9 +11077,10 @@ bot.on('message:text', async ctx => {
       return
     }
     const say = (t: string) => ctx.reply(t, { parse_mode: 'HTML' }).catch(() => {})
-    if (!isTopicMode()) { await say('⚠️ Cross-session commands need a bound forum group (sessions are addressed by topic name).'); return }
+    // No bound-group gate: unbound there are still endpoints to address (headless sessions + the
+    // chat lane). A name that doesn't resolve fails loudly below, which is the only real error here.
     const command = cross[2].trim()
-    if (/^\/(exit|quit)\b/i.test(command)) { await say('⚠️ Session-ending commands don’t relay cross-session — type /exit in that session’s own topic.'); return }
+    if (/^\/(exit|quit)\b/i.test(command)) { await say('⚠️ Session-ending commands don’t relay cross-session — end that session from its own surface.'); return }
     const endpoints = busEndpoints()
     const res = resolveEndpoint(cross[1].replace(/:$/, ''), endpoints)
     if ('error' in res) {

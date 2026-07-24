@@ -248,12 +248,24 @@ async function ensureTopicFor(group: string, sessionId: string, cwd: string, pan
 export async function outboundTargetsFor(paneId: string | null): Promise<Array<{ chat: string; thread?: number }>> {
   const dmTargets = () => loadAccess().allowFrom.map(chat => ({ chat }))
   if (!isTopicMode()) {
+    // Unbound is no longer single-session (a DM hosts its chat lane plus headless coding sessions),
+    // so route by the pane's OWN session first — the broadcast below would otherwise spray every
+    // session's replies into every allowlisted DM.
+    const sid = paneId ? await sessionForPane(paneId).catch(() => null) : null
+    if (sid) {
+      // A DM chat lane's replies belong to the one DM that owns it, same as in topic mode. This is
+      // the dmChat map — a different store from the dmLanes lookup below, so both rungs are needed.
+      const chatOwner = chatIdForDmChatSession(sid)
+      if (chatOwner) return [{ chat: chatOwner }]
+      // Headless session — same rule as the bound side: it has no chat surface of its own. It shows
+      // up in the mini app, and the owner hears about it through the chat lane's routing notices.
+      if (getTopicBySession(sid)?.headless) return []
+    }
     // Per-user DM lanes: a lane pane's replies address ONLY its owner chat — never fanned out to
     // every allowlisted DM (the old broadcast + the "chat not found" spam on a hard-to-reach id).
     // An unbound pane (no lane yet, or dmLanes off) keeps the broadcast fallback.
-    if (loadAccess().dmLanes) {
-      const sid = paneId ? await sessionForPane(paneId).catch(() => null) : null
-      const owner = sid ? chatForLaneSession(sid) : undefined
+    if (loadAccess().dmLanes && sid) {
+      const owner = chatForLaneSession(sid)
       if (owner) return [{ chat: owner }]
     }
     return dmTargets()
