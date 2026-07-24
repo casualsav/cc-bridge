@@ -10828,6 +10828,15 @@ bot.on('message:text', async ctx => {
   // Relay unhandled slash commands to CC via tmux (after gate check). In topic mode the command
   // targets the topic's session and replies in-thread; in DM it targets the focused session.
   if (text.startsWith('/') && (ctx.chat?.type === 'private' || isTopicMode())) {
+    // Telegram appends "@botname" to tapped/autocompleted commands in groups. Strip OUR suffix
+    // before relaying (CC reads "/xyz@bot" as plain text, not a command — it became a prompt);
+    // a command addressed to a DIFFERENT bot isn't ours to relay at all.
+    let cmdText = text
+    const at = /^\/(\S+?)@(\w+)([\s\S]*)$/.exec(text)
+    if (at) {
+      if (botUsername && at[2].toLowerCase() !== botUsername.toLowerCase()) return
+      cmdText = `/${at[1]}${at[3]}`
+    }
     const result = gate(ctx)
     if (result.action !== 'deliver') {
       if (result.action === 'pair') {
@@ -10845,18 +10854,18 @@ bot.on('message:text', async ctx => {
     if (await guardArmedBashBox(t.paneId, chat_id, t.replyThread)) return
     // /exit (and /quit) closes the session. If it's the only one, confirm first (Yes/No) so the
     // user can't accidentally leave themselves with no session; otherwise exit straight away.
-    if (/^\/(exit|quit)\b/i.test(text)) {
+    if (/^\/(exit|quit)\b/i.test(cmdText)) {
       if (!isTopicMode()) {   // the DM's only session — always confirm; a topic session is one of many
         const kb = new InlineKeyboard().text('✅ Yes, exit', 'exitconfirm:yes').text('✖️ No', 'exitconfirm:no')
         await ctx.reply('⚠️ This will end your session — confirm exit?', { reply_markup: kb })
         return
       }
       const label = await paneLabel(t.paneId)
-      await injectSlash(t.paneId, t.watcher, text)
+      await injectSlash(t.paneId, t.watcher, cmdText)
       await ctx.reply(`✅ Session <b>${escapeHtml(label)}</b> exited`, { parse_mode: 'HTML' })
       return
     }
-    void relaySlashCommand(t.paneId, t.watcher, text, chat_id, true, t.replyThread)
+    void relaySlashCommand(t.paneId, t.watcher, cmdText, chat_id, true, t.replyThread)
     return
   }
 
