@@ -1,14 +1,16 @@
 import { test, expect } from 'bun:test'
 import { formatAskBlock, formatAnswerBlock, formatDigestBlock, formatRosterLine } from './agent-bus-block.ts'
 
-test('formatAskBlock carries @from, the ask id, and the text', () => {
+const HINT = (id: number) => `\n↩ reply with: tg answer ${id} "<summary>"`
+
+test('formatAskBlock carries @from, the ask id, the text, and a self-describing reply hint', () => {
   expect(formatAskBlock('architect', 7, 'scrape pricing pages'))
-    .toBe('<tg @architect ask=7>scrape pricing pages</tg>')
+    .toBe(`<tg @architect ask=7>scrape pricing pages</tg>${HINT(7)}`)
 })
 
 test('formatAskBlock appends refs as one quoted, space-joined attribute', () => {
   expect(formatAskBlock('architect', 7, 'go', ['agent-bus/-100/shared/a.md', 'agent-bus/-100/shared/b.json']))
-    .toBe('<tg @architect ask=7 refs="agent-bus/-100/shared/a.md agent-bus/-100/shared/b.json">go</tg>')
+    .toBe(`<tg @architect ask=7 refs="agent-bus/-100/shared/a.md agent-bus/-100/shared/b.json">go</tg>${HINT(7)}`)
 })
 
 test('formatAnswerBlock echoes the ask id via re=', () => {
@@ -17,13 +19,13 @@ test('formatAnswerBlock echoes the ask id via re=', () => {
 })
 
 test('empty / whitespace refs are dropped, no refs attribute emitted', () => {
-  expect(formatAskBlock('a', 1, 'hi', ['', '  '])).toBe('<tg @a ask=1>hi</tg>')
-  expect(formatAskBlock('a', 1, 'hi', [])).toBe('<tg @a ask=1>hi</tg>')
+  expect(formatAskBlock('a', 1, 'hi', ['', '  '])).toBe(`<tg @a ask=1>hi</tg>${HINT(1)}`)
+  expect(formatAskBlock('a', 1, 'hi', [])).toBe(`<tg @a ask=1>hi</tg>${HINT(1)}`)
 })
 
 test('a double-quote in a ref is HTML-escaped so the attribute never breaks', () => {
   expect(formatAskBlock('a', 1, 'hi', ['agent-bus/-100/shared/we"ird.md']))
-    .toBe('<tg @a ask=1 refs="agent-bus/-100/shared/we&quot;ird.md">hi</tg>')
+    .toBe(`<tg @a ask=1 refs="agent-bus/-100/shared/we&quot;ird.md">hi</tg>${HINT(1)}`)
 })
 
 // ---- formatDigestBlock (agent-bus P2) ----

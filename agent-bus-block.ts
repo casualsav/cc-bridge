@@ -22,7 +22,10 @@ function refsAttr(refs: string[]): string {
 // name (bare — we prepend @); `askId` is the correlation handle the target answers with
 // (`tg answer <askId> …`); `refs` are shared-dir paths for it to Read.
 export function formatAskBlock(from: string, askId: number, text: string, refs: string[] = []): string {
-  return `<tg @${from} ask=${askId}${refsAttr(refs)}>${text}</tg>`
+  // One terse self-describing line after the tag: a stale/fresh session with no bus instructions in its
+  // loaded CLAUDE.md still learns the reply verb; a fluent agent just ignores it. (Outside the <tg …>
+  // tag so the inbound parse is unchanged.)
+  return `<tg @${from} ask=${askId}${refsAttr(refs)}>${text}</tg>\n↩ reply with: tg answer ${askId} "<summary>"`
 }
 
 // Block injected INTO the asker's pane when the target answers. `re` echoes the ask id so the asker
