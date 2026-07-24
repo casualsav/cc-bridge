@@ -2381,7 +2381,7 @@ async function notifyAskSent(fromSid: string, toName: string, text: string): Pro
   if (!targets.length) return
   const shown = text.length > ASK_QUOTE_CAP ? text.slice(0, ASK_QUOTE_CAP) + '…' : text
   const header = `Sent message to <b>@${escapeHtml(toName)}</b>`
-  const richHtml = `<details><summary>${header}</summary><blockquote>${escapeHtml(shown).replace(/\n/g, '<br>')}</blockquote></details>`
+  const richHtml = `<details><summary>${header}</summary>${escapeHtml(shown).replace(/\n/g, '<br>')}</details>`
   const fallback = `${header}\n<blockquote expandable>${escapeHtml(shown)}</blockquote>`
   for (const { chat, thread } of targets) {
     try {
