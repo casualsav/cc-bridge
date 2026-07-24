@@ -2368,30 +2368,31 @@ function busDeliver(pane: string, block: string): Promise<boolean> {
   return p
 }
 
-// Confirm an outgoing bus ask on the SENDER's OWN surface — the chat DM for a DM-chat lane, or the
-// sender's topic — instead of broadcasting "▸ a → b" into the group's General. A Bot API 10.1
-// rich_message <details> collapsible: the summary is the "Sent message to @X" header, the whole prompt
-// hides behind its tappable chevron. outboundTargetsFor resolves the sender pane to its DM/topic; a huge
-// prompt is capped to keep the message under TG's 4096. Falls back to a classic expandable-quote HTML
-// message if the rich send fails (a client/API without rich messages).
+// Surface a piece of bus traffic on a session's OWN surface — the chat DM for a DM-chat lane, or the
+// session's topic — instead of broadcasting into the group's General. A Bot API 10.1 rich_message
+// <details> collapsible: `header` (already-safe HTML) is the summary, `body` hides behind its tappable
+// chevron. outboundTargetsFor resolves the pane to its DM/topic; the body is capped to keep the message
+// under TG's 4096. Falls back to a classic expandable-quote HTML message if the rich send fails.
 const ASK_QUOTE_CAP = 3500
-async function notifyAskSent(fromSid: string, toName: string, text: string): Promise<void> {
-  const pane = await paneForSession(fromSid).catch(() => null)
+async function notifyBusRich(surfaceSid: string, header: string, body: string): Promise<void> {
+  const pane = await paneForSession(surfaceSid).catch(() => null)
   const targets = pane ? await outboundTargetsFor(pane).catch(() => []) : []
   if (!targets.length) return
-  const shown = text.length > ASK_QUOTE_CAP ? text.slice(0, ASK_QUOTE_CAP) + '…' : text
-  const header = `Sent message to <b>@${escapeHtml(toName)}</b>`
+  const shown = body.length > ASK_QUOTE_CAP ? body.slice(0, ASK_QUOTE_CAP) + '…' : body
   const richHtml = `<details><summary>${header}</summary>${escapeHtml(shown).replace(/\n/g, '<br>')}</details>`
   const fallback = `${header}\n<blockquote expandable>${escapeHtml(shown)}</blockquote>`
   for (const { chat, thread } of targets) {
     try {
       await sendRichMessage(TOKEN!, chat, { html: richHtml }, { messageThreadId: thread, disableNotification: true })
     } catch (e) {
-      process.stderr.write(`daemon: ask-sent rich send failed, falling back to HTML: ${e}\n`)
+      process.stderr.write(`daemon: bus rich notify failed, falling back to HTML: ${e}\n`)
       void channel.sendText(chat, fallback, { silent: true, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
     }
   }
 }
+// Outbound: "Messaged @kam" on the asker's surface, the prompt behind the chevron.
+const notifyAskSent = (fromSid: string, toName: string, text: string): Promise<void> =>
+  notifyBusRich(fromSid, `Messaged <b>@${escapeHtml(toName)}</b>`, text)
 
 // Deliver a queued ask NOW iff its target pane is live and at a normal prompt (never mid-turn). The
 // pane is re-resolved from the sessionId every time (panes churn on respawn/adopt). busInFlight
@@ -2474,6 +2475,9 @@ async function deliverAnswerToAsker(pending: BusPending, answerer: string, body:
   const ok = await busDeliver(askerPane, formatAnswerBlock(answerer, cur.id, deliveredBody, refs)).catch(() => false)
   if (!ok) { putPending(cur); return `!couldn't deliver to @${cur.fromName} (pane gone) — ask kept open` }
   const mismatch = answerer !== cur.toName ? ` [asked @${cur.toName}]` : ''
+  // Mirror of the outbound "Messaged @X" card: surface the incoming answer on the ASKER's own surface
+  // (the chat DM / its topic) as "@answerer messaged @asker", the answer behind the chevron.
+  void notifyBusRich(cur.fromSid, `<b>@${escapeHtml(answerer)}</b> messaged <b>@${escapeHtml(cur.fromName)}</b>${late ? ' · late' : ''}`, body)
   if (room) appendLedger(room, { ts: Date.now(), kind: 'answer', from: answerer, to: cur.fromName, id: cur.id, text: body, refs })
   if (room) void channel.sendText(String(room), `✓ <b>${escapeHtml(answerer)}</b> answered <b>${escapeHtml(cur.fromName)}</b> (ask ${cur.id})${late ? ' · late' : ''}${escapeHtml(mismatch)}`, { silent: true }).catch(() => {})
   return `answered @${cur.fromName} (ask ${cur.id})${late ? ' (late — delivered after the timeout)' : ''}`
