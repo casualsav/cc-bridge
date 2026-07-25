@@ -35,7 +35,7 @@ const PREF_KEYS = [
   'renderMarkdown', 'terminalMirror', 'terminalMirrorFooter', 'sessionPin', 'replyMode', 'budgetDaily',
   'topicOnEnd', 'scheduleTz', 'batchAllow', 'confirmReset', 'tts', 'updateChecks', 'claudingDraft',
   'autoUpdate', 'limitFailover', 'failoverChain', 'codexModel', 'codexEffort', 'switchboard', 'dmLanes',
-  'fileBrowser', 'spawnModel',
+  'fileBrowser', 'spawnModel', 'spawnEffort',
 ] as const satisfies readonly (keyof Access)[]
 
 // Parse a JSON access/prefs file into a partial; {} on missing, moved-aside + {} on corrupt.

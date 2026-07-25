@@ -4419,12 +4419,15 @@ async function handleCall(
         if (!topicName) { write({ t: 'result', id, ok: false, text: 'usage: tg spawn <name> [--dir p] [--model fable|opus|sonnet|haiku] [--effort low…max] ["first message"]' }); return }
         const explicitModel = args.model ? String(args.model).trim().toLowerCase() : null
         if (explicitModel && !MODEL_ALIASES.includes(explicitModel)) { write({ t: 'result', id, ok: false, text: `unknown model '${explicitModel}' — one of: ${MODEL_ALIASES.join(' | ')}` }); return }
-        // No explicit --model: fall back to the persisted /spawnmodel default (validated — a stale/bad
-        // pref is ignored silently rather than failing the spawn).
+        // No explicit --model: fall back to the persisted /settings 🐣 spawn-defaults model
+        // (validated — a stale/bad pref is ignored silently rather than failing the spawn).
         const defaultSpawnModel = loadAccess().spawnModel
         const model = explicitModel ?? (defaultSpawnModel && MODEL_ALIASES.includes(defaultSpawnModel) ? defaultSpawnModel : null)
-        const effort = args.effort ? String(args.effort).trim().toLowerCase().replace(/^med$/, 'medium') : null
-        if (effort && (effort === 'auto' || !EFFORT_LEVELS.includes(effort))) { write({ t: 'result', id, ok: false, text: `unknown effort '${effort}' — one of: low | medium | high | xhigh | max` }); return }
+        const explicitEffort = args.effort ? String(args.effort).trim().toLowerCase().replace(/^med$/, 'medium') : null
+        if (explicitEffort && (explicitEffort === 'auto' || !EFFORT_LEVELS.includes(explicitEffort))) { write({ t: 'result', id, ok: false, text: `unknown effort '${explicitEffort}' — one of: low | medium | high | xhigh | max` }); return }
+        // No explicit --effort: same /settings 🐣 fallback as the model above.
+        const defaultSpawnEffort = loadAccess().spawnEffort
+        const effort = explicitEffort ?? (defaultSpawnEffort && EFFORT_LEVELS.includes(defaultSpawnEffort) ? defaultSpawnEffort : null)
         // Default home: its own folder under the /base dir (new topics are created "under" base).
         const dir = args.dir
           ? await resolveNewSessionDir(String(args.dir))
@@ -5047,39 +5050,6 @@ async function doEffortPicker(ctx: Context): Promise<void> {
     { parse_mode: 'HTML', reply_markup: effortPickerKeyboard() },
   )
 }
-
-// /spawnmodel — persisted default MODEL for `tg spawn` (the agent-bus session launcher) when the
-// spawner passes no --model (access.ts spawnModel). Unlike /model, this never touches a live
-// pane — it's a preference read at spawn time; explicit --model still wins.
-function spawnModelPanelText(): string {
-  const m = loadAccess().spawnModel
-  return `🧠 <b>Spawn model</b> — default for <code>tg spawn</code> when no --model is given: <b>${m ? escapeHtml(m) : 'inherit'}</b>`
-}
-function spawnModelKeyboard(): InlineKeyboard {
-  const kb = new InlineKeyboard()
-  MODEL_ALIASES.forEach((m, i) => {
-    kb.text(m.charAt(0).toUpperCase() + m.slice(1), `spm:${m}`)
-    if ((i + 1) % 2 === 0) kb.row()
-  })
-  kb.text('Inherit', 'spm:off')
-  return kb
-}
-bot.command('spawnmodel', async ctx => {
-  if (!dmCommandGate(ctx)) return
-  const arg = (ctx.match ?? '').toString().trim().toLowerCase()
-  if (arg === 'off') {
-    const a = loadAccess(); a.spawnModel = undefined; saveAccess(a)
-    await ctx.reply('🧠 Spawn model cleared — <code>tg spawn</code> falls back to its own default.', { parse_mode: 'HTML' })
-    return
-  }
-  if (arg) {
-    if (!MODEL_ALIASES.includes(arg)) { await ctx.reply(`Usage: <code>/spawnmodel fable|opus|sonnet|haiku|off</code>`, { parse_mode: 'HTML' }); return }
-    const a = loadAccess(); a.spawnModel = arg; saveAccess(a)
-    await ctx.reply(`🧠 Spawn model set to <b>${escapeHtml(arg)}</b> — new <code>tg spawn</code> sessions default here unless --model overrides.`, { parse_mode: 'HTML' })
-    return
-  }
-  await ctx.reply(spawnModelPanelText(), { parse_mode: 'HTML', reply_markup: spawnModelKeyboard() })
-})
 
 // Mid-conversation, `/effort <level>` doesn't apply straight away — Claude Code shows a
 // "Change effort level?" confirmation (the new level would invalidate the cached history). That
@@ -7316,6 +7286,7 @@ function settingsText(): string {
     `🧷 Preferred mode — <b>${listAccounts().length > 1 ? 'per account' : defModeLabel(MAIN_ACCOUNT.configDir)}</b>\n` +
     `🧹 <code>/clear</code> approval — <b>${a.confirmReset === false ? 'off' : 'on'}</b>\n` +
     `🔀 Limit failover — <b>${a.limitFailover === true ? 'on' : 'off'}</b>\n` +
+    `🐣 Spawn defaults — <b>${a.spawnModel || a.spawnEffort ? `${escapeHtml(a.spawnModel ?? 'inherit')} · ${escapeHtml(a.spawnEffort ?? 'inherit')}` : 'inherit'}</b>\n` +
     (WEBAPP_ENABLED ? `🗂 File browser — <b>${a.fileBrowser === false ? 'off' : 'on'}</b>\n` : '') +
     (isTopicMode() ? `📂 Base folder — <b>${escapeHtml(baseFolderFull())}</b>\n` : '') +
     (isTopicMode() && AGENT_BUS_PIN_UI ? `☎️ Agent bus — <b>${a.switchboard === false ? 'off' : 'on'}</b>\n` : '') +
@@ -7338,6 +7309,7 @@ function settingsMarkdown(): string {
     ['🧷 Preferred mode', listAccounts().length > 1 ? 'per account' : defModeLabel(MAIN_ACCOUNT.configDir)],
     ['🧹 /clear approval', a.confirmReset === false ? 'off' : 'on'],
     ['🔀 Limit failover', a.limitFailover === true ? 'on' : 'off'],
+    ['🐣 Spawn defaults', a.spawnModel || a.spawnEffort ? `${a.spawnModel ?? 'inherit'} · ${a.spawnEffort ?? 'inherit'}` : 'inherit'],
     ...(WEBAPP_ENABLED ? [['🗂 File browser', a.fileBrowser === false ? 'off' : 'on'] as [string, string]] : []),
     ...(isTopicMode() ? [['📂 Base folder', baseRowValue()] as [string, string]] : []),
     ...(isTopicMode() && AGENT_BUS_PIN_UI ? [['☎️ Agent bus', a.switchboard === false ? 'off' : 'on'] as [string, string]] : []),
@@ -7349,6 +7321,7 @@ function settingsMarkdown(): string {
     '🧷 <b>Preferred mode</b> — the permission mode NEW sessions launch in (/mode is the live dial).',
     '🧹 <b>/clear approval</b> — /clear and /new ask for a Yes/No tap first.',
     '🔀 <b>Limit failover</b> — a usage-limited account hands off to the next one.',
+    '🐣 <b>Spawn defaults</b> — model/effort for sessions agents launch over the bus (<code>tg spawn</code>).',
     ...(WEBAPP_ENABLED ? ['🗂 <b>File browser</b> — the Files tab in the Mini App. Off removes it (and its file API) entirely; the Sessions/Scheduled/Settings tabs stay.'] : []),
     ...(isTopicMode() ? ['📂 <b>Base folder</b> — new forum topics are created as subfolders of this folder.'] : []),
     ...(isTopicMode() && AGENT_BUS_PIN_UI ? ['☎️ <b>Agent bus</b> — the live roster line on the pinned card. Sessions can still hand work to each other with <code>tg ask</code>.'] : []),
@@ -7400,6 +7373,7 @@ function settingsKeyboard(): InlineKeyboard {
     ['👤', 'acct:panel'], ['🐙', 'gh:panel'], ['⚡', 'set:batch'],
     ['🎙️', 'set:voice'], ['🔊', 'set:tts'], ['💬', 'set:replymode'], ['📌', 'set:pin'],
     ['🧷', 'defmode:panel'], ['🧹', 'set:confirmreset'], ['🔀', 'set:failover'],
+    ['🐣', 'spd:panel'],
     ...(WEBAPP_ENABLED ? [['🗂', 'set:filebrowser'] as [string, string]] : []),
     ...(isTopicMode() ? [['📂', 'set:base'] as [string, string]] : []),
     ...(isTopicMode() && AGENT_BUS_PIN_UI ? [['☎️', 'set:switchboard'] as [string, string]] : []),
@@ -7410,6 +7384,26 @@ function settingsKeyboard(): InlineKeyboard {
     if (i % 4 === 3 && i < buttons.length - 1) kb.row()
   })
   return kb
+}
+
+// 🐣 Spawn-defaults sub-panel (settings → 🐣): the model/effort agent-spawned sessions boot with
+// (`tg spawn`, the chat agent's launcher) when the spawner passes no --model/--effort. Preference
+// only — read at spawn time, never touches a live pane; explicit flags on the spawn still win.
+function spawnDefaultsText(): string {
+  const a = loadAccess()
+  return `🐣 <b>Spawn defaults</b> — sessions launched by agents (<code>tg spawn</code>)\n\n` +
+    `🧠 Model — <b>${a.spawnModel ? escapeHtml(a.spawnModel) : 'inherit'}</b>\n` +
+    `⚡ Effort — <b>${a.spawnEffort ? escapeHtml(a.spawnEffort) : 'inherit'}</b>\n\n` +
+    `<i>“inherit” falls back to the focused session's dials at spawn time. An explicit --model / --effort on the spawn always wins.</i>`
+}
+function spawnDefaultsKeyboard(): InlineKeyboard {
+  const a = loadAccess()
+  const kb = new InlineKeyboard()
+  for (const m of MODEL_ALIASES) kb.text(`${a.spawnModel === m ? '✅ ' : ''}${m}`, `spd:m:${m}`)
+  kb.row().text(`${a.spawnModel ? '' : '✅ '}🧠 Inherit model`, 'spd:m:off').row()
+  for (const e of EFFORT_LEVELS) kb.text(`${a.spawnEffort === e ? '✅ ' : ''}${e === 'medium' ? 'med' : e}`, `spd:e:${e}`)
+  kb.row().text(`${a.spawnEffort ? '' : '✅ '}⚡ Inherit effort`, 'spd:e:off').row()
+  return kb.text('‹ Back', 'spd:back')
 }
 
 // 🔀 Limit failover sub-panel (settings → 🔀): the try-in-order chain of hops (Claude accounts +
@@ -9352,16 +9346,30 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
-  // Spawn-model picker — set/clear the persisted default for `tg spawn`'s --model
-  const spmSet = /^spm:(fable|opus|sonnet|haiku|off)$/.exec(data)
-  if (spmSet) {
+  // 🐣 Spawn-defaults sub-panel — open / back (settings ⇄ panel).
+  if (data === 'spd:panel' || data === 'spd:back') {
     if (!(await cbAuth(ctx))) return
-    const choice = spmSet[1]
+    await ctx.answerCallbackQuery().catch(() => {})
+    if (data === 'spd:panel') await showHtmlPanel(ctx, 'edit', spawnDefaultsText(), spawnDefaultsKeyboard())
+    else await showSettings(ctx, 'edit')
+    return
+  }
+  // 🐣 model/effort pick — persisted; read by `tg spawn` when no explicit flag is passed.
+  const spdSet = /^spd:(m|e):([a-z]+)$/.exec(data)
+  if (spdSet) {
+    if (!(await cbAuth(ctx))) return
+    const [, kind, v] = spdSet
     const a = loadAccess()
-    a.spawnModel = choice === 'off' ? undefined : choice
+    if (kind === 'm') {
+      if (v !== 'off' && !MODEL_ALIASES.includes(v)) { await ctx.answerCallbackQuery({ text: 'Unknown model.' }).catch(() => {}); return }
+      a.spawnModel = v === 'off' ? undefined : v
+    } else {
+      if (v !== 'off' && !EFFORT_LEVELS.includes(v)) { await ctx.answerCallbackQuery({ text: 'Unknown effort.' }).catch(() => {}); return }
+      a.spawnEffort = v === 'off' ? undefined : v
+    }
     saveAccess(a)
-    await ctx.answerCallbackQuery({ text: choice === 'off' ? 'Spawn model cleared' : `Spawn model → ${choice}` }).catch(() => {})
-    await ctx.editMessageText(spawnModelPanelText(), { parse_mode: 'HTML', reply_markup: spawnModelKeyboard() }).catch(() => {})
+    await ctx.answerCallbackQuery().catch(() => {})
+    await showHtmlPanel(ctx, 'edit', spawnDefaultsText(), spawnDefaultsKeyboard())
     return
   }
 
@@ -12838,7 +12846,6 @@ void (async () => {
               { command: 'reset', description: 'Clear the current conversation in place' },
               { command: 'stream', description: 'How replies arrive: thoughts · actions · off' },
               { command: 'effort', description: 'Reasoning effort — /effort <level> now, or /effort default <level> to pin it for new sessions' },
-              { command: 'spawnmodel', description: 'Default model for agent-spawned sessions (/spawnmodel fable · off)' },
               { command: 'budget', description: 'Daily $ cap with warnings (/budget 20 · off)' },
               { command: 'rewind', description: 'Open the checkpoint picker (undo a turn\'s changes)' },
               { command: 'cost', description: 'Show the session cost readout' },
