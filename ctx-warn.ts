@@ -15,6 +15,26 @@ export const CTX_WARN_STEPS = [50, 75] as const
 // at now (null = stay quiet) and the watermark to store. A missing reading (null pct — an unreadable
 // statusline, a pane mid-repaint) is a NO-OP, not a reset: resetting would re-fire the ping on the
 // next good sample. Dropping back under the first step (a /clear or /compact) re-arms the whole ladder.
+// Whether a HELD nudge may be released to the orchestrator now. The crossing is detected by the pane
+// sweep, which may well catch a session mid-turn — but the compact-vs-clear decision depends on
+// whether the work in flight finished, `/compact` is refused mid-turn anyway, and a notice whose
+// "idle" field is stale by the time it's read is worse than one that arrives a few seconds later. So
+// the nudge waits for a normal prompt. Pure so the timing rule is pinned by tests rather than by a
+// live run: a real session cannot be driven past 50% on demand (Claude Code prunes stale tool
+// results, so tool output does not accumulate — see the ctx-nudge verification notes).
+//
+// 'drop' = nothing to tell (no orchestrator lane, or the lane IS the crossing session — telling a
+// session about itself would wake it to manage its own context, which is the loop we're avoiding).
+export function planCtxNudge(
+  held: boolean,
+  pane: { atPrompt: boolean; working: boolean; bashArmed: boolean },
+  lane: { exists: boolean; isSelf: boolean },
+): 'release' | 'hold' | 'drop' | 'none' {
+  if (!held) return 'none'
+  if (!lane.exists || lane.isSelf) return 'drop'
+  return pane.atPrompt && !pane.working && !pane.bashArmed ? 'release' : 'hold'
+}
+
 export function planContextWarn(prev: number, pct: number | null): { warn: number | null; next: number } {
   if (pct == null) return { warn: null, next: prev }
   if (pct < CTX_WARN_STEPS[0]) return { warn: null, next: 0 }

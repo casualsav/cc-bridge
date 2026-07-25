@@ -21,10 +21,24 @@ export const AGENT_BUS_ENABLED = true
 // plumbing, not a surfaced feature. Flip to `true` to re-surface them (see docs/agent-bus.md).
 export const AGENT_BUS_PIN_UI = false
 
-// Consecutive agent→agent asks with no intervening human message before the daemon stops delivering
-// and posts "⏸ agents paused". Two bots answering each other forever is the money-fire failure mode;
-// a human message resets the count to 0. (Budget-based floor control is a later phase.)
-export const HOP_LIMIT = 4
+// The loop-breaker measures CHAIN DEPTH, not volume.
+//
+// It used to count consecutive agent→agent asks since the last human message and halt at 4. That
+// fires on breadth, and breadth is the product: an orchestrator fanning out to five workers after one
+// human brief is the system working as designed, while A→B→C→D→E with nobody watching is the money
+// fire. A flat counter cannot tell them apart, so it halted the intended workflow (measured: it
+// refused a verification run mid-flight) while a wide fan-out of cheap loops would have sailed under
+// it. Depth measures oversight; a turn counter measures recent keystrokes.
+//
+// Depth is assigned, never accumulated: a session woken by a human (or by @system — a threshold
+// crossing is not an agent's reasoning) is depth 0, and an ask it sends carries depth 1. Delivery
+// stamps the target with the ask's depth, so a session's depth is always "as of its last wake" and
+// a long-lived session cannot drift into a permanent pause.
+export const DEPTH_LIMIT = 4
+// Breadth and spend INFORM, they never halt. This many agent→agent asks since the last human message
+// wakes the orchestrator with "this fan-out is unusually wide" so it can justify or stop the work —
+// deliberately generous, because the failure mode it guards is a hundred asks from one brief, not five.
+export const BREADTH_NOTICE_AT = 25
 // A queued/awaiting ask past this age is marked expired and the asker is told "no answer yet" — so a
 // dead or silent target never leaves the asker waiting forever. 60 min: builds routinely run long, and
 // an expired ask is no longer lost (a late `tg answer` still delivers — see expiredAt / dropExpired).
@@ -50,6 +64,9 @@ export type BusPending = {
   injected: boolean   // false = still queued (target was busy); true = delivered, awaiting an answer
   expiredAt?: number  // set when the TTL passed; the ask is no longer delivered to the target, but a late
                       // `tg answer` still resolves it until dropExpired() GCs it (LATE_ANSWER_GRACE_MS)
+  depth?: number      // chain depth: 1 = sent by a human-woken (or @system-woken) session. Absent on
+                      // pre-depth entries, which load as 1 — the safe reading, since an unknown chain
+                      // has at least been through one hop.
 }
 
 export type BusState = {
@@ -59,9 +76,12 @@ export type BusState = {
   // Per-endpoint digest watermark (agent-bus P2): endpoint id → the ts we last caught it up. On the
   // next ask delivered to that endpoint we prepend a compact "since then" digest and re-stamp this.
   seen: Record<string, number>
+  // Per-session chain depth (endpoint id → depth as of its last wake). Persisted so a daemon restart
+  // can't silently reset every chain to "human-supervised" — the same reason killedAt is persisted.
+  depth: Record<string, number>
 }
 
-const empty = (): BusState => ({ seq: 0, hops: 0, pending: {}, seen: {} })
+const empty = (): BusState => ({ seq: 0, hops: 0, pending: {}, seen: {}, depth: {} })
 let store: BusState = empty()
 let loaded = false
 let persist = true   // disabled by _resetForTest so unit tests never write to the real STATE_DIR
@@ -89,17 +109,21 @@ export function loadBus(): BusState {
         expiresAt: typeof p.expiresAt === 'number' ? p.expiresAt : 0,
         injected: p.injected === true,
         ...(typeof p.expiredAt === 'number' ? { expiredAt: p.expiredAt } : {}),
+        depth: typeof p.depth === 'number' ? p.depth : 1,   // pre-depth entry: assume one hop, the safe reading
       }
     }
     // Sanitize the digest watermark like `pending`: keep only finite-number values (a corrupt/hand-
     // edited agent-bus.json can't poison it). Stale keys are pruned on the next markSeen, not here.
     const seen: Record<string, number> = {}
     for (const [k, v] of Object.entries(raw.seen ?? {})) if (typeof v === 'number' && Number.isFinite(v)) seen[k] = v
+    const depth: Record<string, number> = {}
+    for (const [k, v] of Object.entries(raw.depth ?? {})) if (typeof v === 'number' && Number.isFinite(v) && v > 0) depth[k] = v
     store = {
       seq: typeof raw.seq === 'number' ? raw.seq : 0,
       hops: typeof raw.hops === 'number' ? raw.hops : 0,
       pending,
       seen,
+      depth,
     }
     loaded = true
     return store
@@ -116,7 +140,7 @@ function ensureLoaded(): void { if (!loaded) loadBus() }
 // The daemon marks it injected once actually delivered, then arms the TTL against expiresAt.
 export function createPending(
   fields: { fromSid: string; toSid: string; fromName: string; toName: string; text: string; refs: string[]
-            fromKind?: 'claude' | 'hermes'; toKind?: 'claude' | 'hermes' },
+            fromKind?: 'claude' | 'hermes'; toKind?: 'claude' | 'hermes'; depth?: number },
   now: number,
 ): BusPending {
   ensureLoaded()
@@ -241,10 +265,55 @@ export function planAskReap(
 
 // Count one agent→agent ask; returns the new consecutive count. The daemon delivers when
 // hopsExceeded() is false and pauses the room when it flips true.
+// `hops` is now the BREADTH counter: agent→agent asks since the last human message. It informs (one
+// notice at BREADTH_NOTICE_AT) and never halts — halting is depth's job.
 export function recordAgentAsk(): number { ensureLoaded(); store.hops += 1; save(); return store.hops }
 export function resetHops(): void { ensureLoaded(); if (store.hops === 0) return; store.hops = 0; save() }
 export function currentHops(): number { ensureLoaded(); return store.hops }
-export function hopsExceeded(): boolean { ensureLoaded(); return store.hops > HOP_LIMIT }
+
+// ---- chain depth (the loop-breaker) ----
+
+/** A session's depth as of its last wake. 0 = woken by a human or by @system, i.e. supervised. */
+export function sessionDepth(sid: string): number { ensureLoaded(); return store.depth[sid] ?? 0 }
+
+/** Stamp the session a delivery just woke. Assignment, never accumulation — see DEPTH_LIMIT. */
+export function setSessionDepth(sid: string, depth: number): void {
+  ensureLoaded()
+  if (depth <= 0) { if (store.depth[sid] == null) return; delete store.depth[sid]; save(); return }
+  if (store.depth[sid] === depth) return
+  store.depth[sid] = depth
+  save()
+}
+
+/** A human spoke to this session: it is supervised again, and so is anything it now dispatches. */
+export function clearSessionDepth(sid: string): void {
+  ensureLoaded()
+  if (store.depth[sid] == null) return
+  delete store.depth[sid]
+  save()
+}
+
+/** A human spoke: the whole room is supervised again. Assignment-based depth cannot accumulate, but
+ *  a session left deep by an old chain would stay deep until something woke it — this is the reset
+ *  that guarantees no session can sit permanently past the breaker. */
+export function resetAllSessionDepth(): void {
+  ensureLoaded()
+  if (!Object.keys(store.depth).length) return
+  store.depth = {}
+  save()
+}
+
+/** Forget depth for sessions that no longer exist, so the map can't grow without bound. */
+export function pruneSessionDepth(liveSids: Set<string>): void {
+  ensureLoaded()
+  let changed = false
+  for (const sid of Object.keys(store.depth)) if (!liveSids.has(sid)) { delete store.depth[sid]; changed = true }
+  if (changed) save()
+}
+
+/** The depth an ask sent BY this session would carry, and whether that exceeds the breaker. */
+export function nextAskDepth(fromSid: string): number { return sessionDepth(fromSid) + 1 }
+export function depthExceeded(depth: number): boolean { return depth > DEPTH_LIMIT }
 
 // ---- endpoint resolution (pure; the daemon passes a topic snapshot) ----
 

@@ -2,7 +2,8 @@ import { test, expect, beforeEach } from 'bun:test'
 import {
   _resetForTest, loadBus,
   createPending, getPending, removePending, putPending, listPending, markInjected, queuedFor, expirePending, dropExpired,
-  recordAgentAsk, resetHops, currentHops, hopsExceeded, HOP_LIMIT, ASK_TTL_MS,
+  recordAgentAsk, resetHops, currentHops, BREADTH_NOTICE_AT, ASK_TTL_MS,
+  sessionDepth, setSessionDepth, clearSessionDepth, resetAllSessionDepth, pruneSessionDepth, nextAskDepth, depthExceeded, DEPTH_LIMIT,
   normalizeEndpointName, resolveEndpoint, nameForEndpoint, confineRef,
   getSeen, markSeen, digestSince, SEEN_TTL_MS,
   type BusEndpoint, type LedgerEntry,
@@ -108,17 +109,72 @@ test('a seeded store carries its pending asks (survives a reload)', () => {
   expect(createPending({ fromSid: 'x', toSid: 'y', fromName: 'a', toName: 'b', text: 't', refs: [] }, 9).id).toBe(6)
 })
 
-// ---- hop counter ----
+// ---- breadth counter (informs, never halts) ----
 
-test('hop counter increments, exceeds past HOP_LIMIT, and resets', () => {
-  for (let i = 0; i < HOP_LIMIT; i++) recordAgentAsk()
-  expect(currentHops()).toBe(HOP_LIMIT)
-  expect(hopsExceeded()).toBe(false)          // exactly at the limit still delivers
-  expect(recordAgentAsk()).toBe(HOP_LIMIT + 1)
-  expect(hopsExceeded()).toBe(true)           // one past → pause
+test('breadth counter increments and resets on a human turn', () => {
+  for (let i = 0; i < 5; i++) recordAgentAsk()
+  expect(currentHops()).toBe(5)
+  expect(BREADTH_NOTICE_AT).toBeGreaterThan(5)   // five asks after one brief must not notify — that's a normal fan-out
   resetHops()
   expect(currentHops()).toBe(0)
-  expect(hopsExceeded()).toBe(false)
+})
+
+// ---- chain depth (the loop-breaker) ----
+//
+// The defect this replaces: the breaker counted asks since the last human message and halted at 4,
+// so an orchestrator fanning out to five workers after one human brief was cut off mid-workflow
+// (measured live), while a wide fan-out of cheap loops stayed under it. Depth measures oversight.
+
+test('a supervised session can fan out as wide as it likes', () => {
+  // One human-woken orchestrator dispatching 50 asks: every one is depth 1, none exceed.
+  for (let i = 0; i < 50; i++) {
+    const d = nextAskDepth('chat')
+    expect(d).toBe(1)
+    expect(depthExceeded(d)).toBe(false)
+  }
+})
+
+test('a chain halts at DEPTH_LIMIT', () => {
+  let sid = 'chat'
+  for (let hop = 1; hop <= DEPTH_LIMIT; hop++) {
+    const d = nextAskDepth(sid)
+    expect(d).toBe(hop)
+    expect(depthExceeded(d)).toBe(false)
+    sid = `worker${hop}`
+    setSessionDepth(sid, d)          // delivery stamps the target
+  }
+  const tooDeep = nextAskDepth(sid)
+  expect(tooDeep).toBe(DEPTH_LIMIT + 1)
+  expect(depthExceeded(tooDeep)).toBe(true)
+})
+
+test('depth is assigned, never accumulated — a long-lived session cannot drift into a pause', () => {
+  for (let i = 0; i < 100; i++) setSessionDepth('worker', 2)   // woken a hundred times at the same depth
+  expect(sessionDepth('worker')).toBe(2)
+  expect(depthExceeded(nextAskDepth('worker'))).toBe(false)
+})
+
+test('@system and human wakes leave a session supervised', () => {
+  setSessionDepth('chat', 3)
+  setSessionDepth('chat', 0)                 // a @system ask carries depth 0
+  expect(sessionDepth('chat')).toBe(0)
+  expect(nextAskDepth('chat')).toBe(1)
+})
+
+test('a human turn resets every chain, so nothing sits permanently past the breaker', () => {
+  setSessionDepth('a', 4); setSessionDepth('b', 9)
+  resetAllSessionDepth()
+  expect(sessionDepth('a')).toBe(0)
+  expect(sessionDepth('b')).toBe(0)
+})
+
+test('clearing one session and pruning dead ones keeps the map bounded', () => {
+  setSessionDepth('a', 2); setSessionDepth('b', 3)
+  clearSessionDepth('a')
+  expect(sessionDepth('a')).toBe(0)
+  expect(sessionDepth('b')).toBe(3)
+  pruneSessionDepth(new Set(['a']))          // 'b' is gone from the fleet
+  expect(sessionDepth('b')).toBe(0)
 })
 
 // ---- endpoint resolution ----

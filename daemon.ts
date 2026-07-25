@@ -110,7 +110,8 @@ import { initQueue, readLater, writeLater, sweepLaterQueues, LATER_SWEEP_MS } fr
 import {
   AGENT_BUS_ENABLED, AGENT_BUS_PIN_UI,
   createPending, getPending, removePending, putPending, listPending, markInjected, expirePending, dropExpired, LATE_ANSWER_GRACE_MS, ASK_TTL_MS,
-  recordAgentAsk, resetHops, HOP_LIMIT, askResultText, planAskReap, queuedFor, type AskDelivery,
+  recordAgentAsk, resetHops, currentHops, BREADTH_NOTICE_AT, askResultText, planAskReap, queuedFor, type AskDelivery,
+  setSessionDepth, resetAllSessionDepth, pruneSessionDepth, nextAskDepth, depthExceeded, DEPTH_LIMIT,
   resolveEndpoint, nameForEndpoint, normalizeEndpointName, confineRef, sharedDir, ensureSharedDir, appendLedger, tailLedger,
   getSeen, markSeen, digestSince, DIGEST_SCAN,
   type BusEndpoint, type BusPending, type LedgerEntry,
@@ -123,7 +124,7 @@ import {
   permStorms, multiSelectKeyboard, formatPermission, relayStuckScreen, renderStuckHtml,
 } from './prompt-relay.ts'
 import { planStuckSweep, planWedgeEscalation, type StuckState } from './stuck-plan.ts'
-import { planContextWarn } from './ctx-warn.ts'
+import { planContextWarn, planCtxNudge } from './ctx-warn.ts'
 import { spawnModelFlag, spawnWideContext } from './model-window.ts'
 import {
   initStatusCard, statusCardText, statusKeyboard, updateSessionPin, updateTopicPins,
@@ -2605,6 +2606,9 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
     if (ok) {
       const now = Date.now()
       markInjected(cur.id, now)
+      // The chain is one hop deeper from here: whatever this session dispatches next inherits it.
+      // A @system ask carries depth 0, so a threshold crossing leaves its target supervised.
+      setSessionDepth(cur.toSid, cur.depth ?? 1)
       markSeen(cur.toSid, now)   // advance the watermark only on a LANDED delivery — a failed paste keeps the window open for the retry
       void notifyAskSent(cur.fromSid, cur.toName, cur.text)
       // Mirror the same card on the TARGET's own surface (its topic / chat DM) so the inbound ask is
@@ -2618,6 +2622,40 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
 // Synthetic asker id for daemon-originated asks (the context nudge). Deliberately not a session id:
 // nothing resolves it to a pane, and deliverAnswerToAsker branches on it rather than trying.
 const SYSTEM_SID = '@system'
+
+// Wake the orchestrator lane with a real ask. Fleet-control signals (a paused chain, an unusually
+// wide fan-out) are ITS problem to act on, and a Telegram card in the owner's DM is not an event:
+// the lane would only notice it incidentally, which for an event-driven session means never.
+// Falls back to the asker's own surface when there's no lane to wake.
+async function wakeOrchestrator(text: string, fallbackSid: string | null): Promise<void> {
+  const lane = listDmChatSessions()[0]?.sessionId
+  if (!lane) { if (fallbackSid) void notifyBusText(fallbackSid, text.split('\n')[0]!); return }
+  const p = createPending({ fromSid: SYSTEM_SID, toSid: lane, fromName: 'system', toName: nameForEndpoint(lane, busEndpoints()), text, refs: [], depth: 0 }, Date.now())
+  appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'ask', from: 'system', to: p.toName, id: p.id, text, refs: [] })
+  await tryDeliverAsk(p).catch(() => {})
+}
+
+// The loop-breaker actually fired. Tell the lane which chain hit it, so it can either re-issue the
+// work itself (at depth 0, since a human is talking to it) or stop it.
+const notifyChainPaused = (fromName: string, toName: string, depth: number): Promise<void> => wakeOrchestrator(
+  [`⏸ Loop-breaker: blocked an ask from @${fromName} to @${toName} — it was ${depth} agent hops deep with no human or threshold in the chain (limit ${DEPTH_LIMIT}).`,
+   'That is the runaway shape: agents waking agents with nobody supervising. Either re-issue the work yourself (asks you send are supervised, because a human is talking to you) or let it stop.',
+   'Nothing else is blocked — a wide fan-out from a supervised session still runs.'].join('\n\n'), null)
+
+// Breadth + spend INFORM. One notice, at a deliberately generous ceiling.
+const notifyWideFanOut = (breadth: number): Promise<void> => wakeOrchestrator(
+  [`📡 Wide fan-out: ${breadth} agent→agent asks since the last human message.`,
+   `Live session spend right now: ${fleetSpendLine() || 'unavailable'}.`,
+   'Nothing is blocked — this is a heads-up, not a breaker. Justify it and carry on, or stop the work.'].join('\n\n'), null)
+
+// Per-session cost, scraped from the statuslines the pane sweep already reads (no extra tmux work).
+// Absolute session cost, NOT spend-since-the-last-human-message: a delta would need a baseline
+// snapshot per reset, and this is an informational line, not an accounting ledger.
+const sessionCost = new Map<string, string>()
+function fleetSpendLine(): string {
+  const rows = [...sessionCost.entries()].filter(([, c]) => c)
+  return rows.length ? rows.map(([name, c]) => `${name} ${c}`).join(' · ') : ''
+}
 
 // A bus target counts as GONE only when every signal agrees, because a false positive drops a live
 // ask: no pane resolves for its session id, no open session row claims it (a claude-update bounce or a
@@ -2642,10 +2680,14 @@ async function reapDeadAsk(p: BusPending, room: string, delivered = false): Prom
   process.stderr.write(`daemon: ask ${p.id} to @${p.toName} (${p.toSid}) reaped — ${why}\n`)
   const askerPane = await paneForSession(p.fromSid).catch(() => null)
   const own = askerPane ? await outboundTargetsFor(askerPane).catch(() => []) : []
+  // Owner fallback ONLY when nobody is left who could act. A headless sender has no surface of its
+  // own, but it has a PANE — and the system block below lands directly in its context, so also
+  // carding the owner told him about something the agent already knew. Fleet-internal by nature.
+  const cardTargets = own.length ? own : askerPane ? [] : await fleetSurfaceFor(askerPane)
   const card = delivered
     ? `❌ Ask ${p.id} to <b>${escapeHtml(p.toName)}</b> will never be answered — that session ended after receiving it. Removed from the queue.`
     : `❌ Ask ${p.id} to <b>${escapeHtml(p.toName)}</b> was never delivered — that session has ended. Removed from the queue.`
-  for (const { chat, thread } of own.length ? own : await fleetSurfaceFor(askerPane)) {
+  for (const { chat, thread } of cardTargets) {
     void channel.sendText(chat, card, { silent: true, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
   }
   const block = delivered
@@ -3252,10 +3294,14 @@ function maybeWarnContext(sid: string, pane: string | null, pct: number | null, 
 // that actually wakes a session and starts a turn there.
 async function flushCtxNudge(sid: string, pane: string, cap: string, status: StatuslineData | null): Promise<void> {
   const held = pendingCtxNudge.get(sid)
-  if (!held) return
   const lane = listDmChatSessions()[0]?.sessionId
-  if (!lane || lane === sid) { pendingCtxNudge.delete(sid); return }   // no orchestrator to tell, or it IS the orchestrator
-  if (!onNormalPrompt(cap) || detectWorking(cap) || bashModeArmed(cap)) return   // still mid-turn — hold
+  const plan = planCtxNudge(
+    !!held,
+    { atPrompt: onNormalPrompt(cap), working: detectWorking(cap), bashArmed: bashModeArmed(cap) },
+    { exists: !!lane, isSelf: lane === sid },
+  )
+  if (plan === 'none' || plan === 'hold') return          // hold: still mid-turn, try again next sweep
+  if (plan === 'drop' || !held || !lane) { pendingCtxNudge.delete(sid); return }
   pendingCtxNudge.delete(sid)
   // What it just finished, so the compact-vs-clear call can be made without a round trip. Idle, so
   // the last final reply IS the state of the work; one transcript read per nudge (rare by design).
@@ -3272,7 +3318,7 @@ async function flushCtxNudge(sid: string, pane: string, cap: string, status: Sta
     doing ? `Last turn ended with: ${doing}` : 'No last reply on record.',
     `Levers: \`tg slash ${held.label} "/compact"\` keeps the thread, \`tg slash ${held.label} "/clear"\` empties it. Answer this ask with what you did and why.`,
   ].join('\n\n')
-  const p = createPending({ fromSid: SYSTEM_SID, toSid: lane, fromName: 'system', toName: nameForEndpoint(lane, busEndpoints()), text, refs: [] }, Date.now())
+  const p = createPending({ fromSid: SYSTEM_SID, toSid: lane, fromName: 'system', toName: nameForEndpoint(lane, busEndpoints()), text, refs: [], depth: 0 }, Date.now())
   appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'ask', from: 'system', to: p.toName, id: p.id, text, refs: [] })
   process.stderr.write(`daemon: ctx nudge ask ${p.id} → @${p.toName} about ${held.label} at ${pct}%\n`)
   await tryDeliverAsk(p).catch(() => {})   // 'busy' just means the lane is mid-turn — the 15s sweep retries
@@ -4398,24 +4444,21 @@ async function handleCall(
         if (res.kind === 'hermes' && hermesInFlight.size >= HERMES_MAX_CONCURRENT) {
           write({ t: 'result', id, ok: false, text: `too many Hermes tasks running (${hermesInFlight.size}) — retry shortly` }); return
         }
-        // Hop guard (loop-breaker): only claude→claude can loop — a `hermes -z` one-shot returns an answer
-        // and never asks back — so only claude targets count. This lets an agent fan out across the whole
-        // Hermes fleet without tripping the pause.
+        // Loop-breaker: chain DEPTH, not volume. Only claude→claude can loop (a `hermes -z` one-shot
+        // answers and never asks back), so only claude targets carry depth. An orchestrator fanning
+        // out after a human brief stays at depth 1 however wide it goes; A→B→C→D→E is what halts.
+        let askDepth = 0
         if (res.kind === 'claude') {
-          const hops = recordAgentAsk()
-          if (hops > HOP_LIMIT) {
-            // Orchestration state → the planner/owner conversation (the DM chat lane), never General. If
-            // there's no planner lane, fall back to the asker's own surface so it still isn't in General.
-            if (hops === HOP_LIMIT + 1) {
-              const paused = '⏸ Agents paused — several turns without you. Reply to continue.'
-              const lanes = listDmChatSessions()
-              if (lanes.length) for (const { chatId } of lanes) void channel.sendText(chatId, paused, { silent: true }).catch(() => {})
-              else void notifyBusText(fromSid, paused)
-            }
-            write({ t: 'result', id, ok: false, text: 'paused: hop limit reached — a human reply resumes the room' }); return
+          askDepth = nextAskDepth(fromSid)
+          if (depthExceeded(askDepth)) {
+            void notifyChainPaused(fromName, toName, askDepth)
+            write({ t: 'result', id, ok: false, text: `paused: this ask is ${askDepth} agent hops deep with no human or threshold in the chain (limit ${DEPTH_LIMIT}) — @chat has been woken to unstick it; a human reply also resumes the room` }); return
           }
+          // Breadth INFORMS: one waking notice at a generous ceiling, never a refusal.
+          const breadth = recordAgentAsk()
+          if (breadth === BREADTH_NOTICE_AT) void notifyWideFanOut(breadth)
         }
-        const p = createPending({ fromSid, toSid: res.id, toKind: res.kind, fromName, toName, text: askText, refs }, Date.now())
+        const p = createPending({ fromSid, toSid: res.id, toKind: res.kind, fromName, toName, text: askText, refs, depth: askDepth }, Date.now())
         appendLedger(room, { ts: Date.now(), kind: 'ask', from: fromName, to: toName, id: p.id, text: askText, refs })
         if (res.kind === 'hermes') {
           const cfg = hermesEndpoints.get(res.id)!   // resolved from the same map, so it's present
@@ -8978,7 +9021,7 @@ function closableSessionRows(): Array<{ sessionId: string } & TopicEntry> {
 // and returns false on deny, so a branch guard is just `if (!(await cbAuth(ctx))) return`.
 async function cbAuth(ctx: Context): Promise<boolean> {
   if (loadAccess().allowFrom.includes(String(ctx.from?.id))) {
-    resetHops()   // a tap is a human turn — it must un-pause the bus like a typed message (this ran only from handleInbound before, so a room paused mid-conversation couldn't be resumed by buttons alone)
+    resetHops(); resetAllSessionDepth()   // a tap is a human turn — it must un-pause the bus like a typed message (this ran only from handleInbound before, so a room paused mid-conversation couldn't be resumed by buttons alone)
     return true
   }
   await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
@@ -10770,6 +10813,7 @@ async function handleInbound(
   // paused forever — across restarts — and had to be fixed by hand-editing state. Safe here because
   // handleInbound has already passed the access gate above, so only an allowlisted human gets here.
   resetHops()
+  resetAllSessionDepth()   // a human is present: every chain is supervised again, so nothing stays past the breaker
 
   // Topic mode: show typing instantly in the topic the message came from and LATCH it through
   // Claude's pre-first-token thinking (the relay loops then sustain it — a bare one-shot expired
@@ -11623,7 +11667,7 @@ bot.on('edited_message', async ctx => {
   // target to focus, then to activeShim, so an MCP-mode edit still lands (it used to reach the shim via
   // the same fallback, and dropping it here would have been a silent regression).
   if (!targetPane && !focus.activeShim) return
-  resetHops()   // an edit is a human turn too (post-allowlist here, same as handleInbound)
+  resetHops(); resetAllSessionDepth()   // an edit is a human turn too (post-allowlist here, same as handleInbound)
   emitInbound({
     content: text,
     meta: {
@@ -12506,7 +12550,9 @@ async function sweepStuckPanes(): Promise<void> {
       if (sid) {
         liveSids.add(sid)
         const status = parseStatusline(cap)
-        maybeWarnContext(sid, pane, status?.ctxPct ?? null, getTopicBySession(sid)?.name || sid)
+        const label = getTopicBySession(sid)?.name || sid
+        if (status?.cost) sessionCost.set(label, status.cost)
+        maybeWarnContext(sid, pane, status?.ctxPct ?? null, label)
         // Same capture: release a held nudge the moment this session is back at a prompt.
         await flushCtxNudge(sid, pane, cap, status).catch(() => {})
       }
@@ -12555,6 +12601,8 @@ async function sweepStuckPanes(): Promise<void> {
     let dropped = false
     for (const sid of [...ctxWarn.keys()]) if (!liveSids.has(sid)) { ctxWarn.delete(sid); dropped = true }
     if (dropped) saveUsageNotifState()
+    for (const sid of [...pendingCtxNudge.keys()]) if (!liveSids.has(sid)) pendingCtxNudge.delete(sid)   // died before it went idle
+    pruneSessionDepth(liveSids)   // same "never delete on uncertainty" rule: only when the sweep saw panes
   }
 }
 setInterval(() => void sweepStuckPanes(), 25_000).unref()

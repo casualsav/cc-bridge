@@ -6,7 +6,7 @@
 // focus. The planner is therefore per-session, and keyed by sid — tmux recycles pane ids, and a
 // pane-keyed map hands a fresh session the dead one's watermark.
 import { test, expect, describe } from 'bun:test'
-import { planContextWarn } from './ctx-warn.ts'
+import { planContextWarn, planCtxNudge } from './ctx-warn.ts'
 
 test('warns once at 50, then once at 75', () => {
   let prev = 0
@@ -89,5 +89,41 @@ describe('cleared session (null reading)', () => {
   test('a null sample cannot re-fire a rung that already fired', () => {
     expect(planContextWarn(50, null).warn).toBeNull()
     expect(planContextWarn(50, 55).warn).toBeNull()   // still inside the same rung
+  })
+})
+
+// The nudge must never arrive mid-turn: /compact is refused there, and the compact-vs-clear call
+// depends on whether the work in flight finished. Pinned here rather than by a live run — a session
+// cannot be driven past 50% on demand, because Claude Code prunes stale tool results, so a worker
+// doing heavy file reads sits flat at ~14% no matter how much it reads (measured on a haiku worker
+// that made three 2000-line Reads without moving). These are the exact states the pane sweep passes.
+describe('nudge release timing', () => {
+  const lane = { exists: true, isSelf: false }
+  const idle = { atPrompt: true, working: false, bashArmed: false }
+
+  test('a crossing seen mid-turn is HELD, not delivered', () => {
+    expect(planCtxNudge(true, { atPrompt: false, working: true, bashArmed: false }, lane)).toBe('hold')
+    expect(planCtxNudge(true, { atPrompt: true, working: true, bashArmed: false }, lane)).toBe('hold')
+  })
+
+  test('a wedged pane (not at a prompt, not working) is also held, never forced', () => {
+    expect(planCtxNudge(true, { atPrompt: false, working: false, bashArmed: false }, lane)).toBe('hold')
+  })
+
+  test('an armed ! bash box holds too — the operator is mid-keystroke', () => {
+    expect(planCtxNudge(true, { ...idle, bashArmed: true }, lane)).toBe('hold')
+  })
+
+  test('released only once the session is back at a normal prompt', () => {
+    expect(planCtxNudge(true, idle, lane)).toBe('release')
+  })
+
+  test('nothing held, nothing sent', () => {
+    expect(planCtxNudge(false, idle, lane)).toBe('none')
+  })
+
+  test('dropped when there is no orchestrator, or it would be told about itself', () => {
+    expect(planCtxNudge(true, idle, { exists: false, isSelf: false })).toBe('drop')
+    expect(planCtxNudge(true, idle, { exists: true, isSelf: true })).toBe('drop')
   })
 })
