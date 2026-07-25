@@ -57,8 +57,13 @@ in the working tree.
    rejected because "opened" is instant while "messaged" is delivery-confirmed, and dropping the latter
    trades a real confirmation for silence. `sendBusCard`'s chevron path is already in production to DM
    chats via `tg post` (daemon.ts ~4328), so DM rendering is confirmed, not assumed.
-4. **Bug 11** — restart orphaning pre-existing sessions. Filed in the audit with a starting hypothesis
-   (in-memory `busInFlight`/`paneSessionCache` vs persisted `agent-bus.json` pending rows). Not investigated.
+4. **Bug 11 — DIAGNOSED 2026-07-25, `ebf90cc`: `DIAGNOSIS-bug11-wedged-fleet-member.md`.** The restart
+   hypothesis is **refuted** (@ccbridge was wedged on `/compact` 9.5 h before the restart). Real chain:
+   11a a headless pane's stuck/permission cards go to `outboundTargetsFor` = `[]` → nobody told;
+   11b `tg ask` reports success on an undelivered ask; 11c nothing reconciles bus `pending` against
+   live panes; 11d a known-wedged target is re-polled for an hour instead of escalating. **Bug 12
+   confirmed and is the same missing concept** (a fleet surface for surface-less sessions) — it needs
+   11a first, and needs per-pane `ctxWarnThreshold`, not a `fleetMode()` flip. Fixes NOT applied.
 5. **D10** — the "bind a forum group" hint firing on the bridge's own auto-spawn. Not fixed.
 
 ## Deliberate non-fixes — read the audit before "finishing" these
