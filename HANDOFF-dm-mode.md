@@ -36,6 +36,32 @@ never at risk.
   no focused pane, no `spawnModel` default — no `--model` flag is pushed at all and the CLI picks its
   own model *and* its own 200k window. `spawnModelFlag(null, …)` returns `null` by design.
 
+### ✅ A RUNTIME `/model <id>[1m]` resizes the window in place — no relaunch needed
+
+Measured on CLI 2.1.205: a session launched `--model claude-opus-5` sat at `ctx 10%/200k`; after
+`/model claude-opus-5[1m]` its statusline read **`ctx 2%/1000k`** with model `claude-opus-5[1m]`. Same
+process, same conversation, no restart. **This is the cheap path for any already-running session** —
+`tg slash @<name> "/model claude-opus-5[1m]"` — and it is reversible with `/model claude-opus-5`.
+Launch flags matter only for sessions that don't exist yet.
+
+Two more facts worth keeping:
+- The **statusline is a direct window readout** (`ctx N%/200k` vs `N%/1000k`), so verifying a session's
+  window costs one read-only `tmux capture-pane` — no `/context` injection required.
+- The bare **`opus` alias boots Opus 4.8 and defaults to a 1M window**, while the pinned
+  **`claude-opus-5` defaults to 200k**. So the pin added on 2026-07-24 silently *narrowed* the window
+  for everything that used the alias. That is the real origin of today's 200k sessions.
+
+### ⚠️ The "no resolved alias" gap is not theoretical — it hit the owner's chat lane in production
+
+At 18:05:52 the owner exited his chat session; at 18:06:04 the daemon re-minted the lane
+(`chat-lane spawned for chat 837047563 → sid ecb9740a (pane %101) in /srv/chat`). Its argv:
+`claude --allow-dangerously-skip-permissions --effort high --permission-mode bypassPermissions` —
+**no `--model` at all**, so it booted at 200k. `inherit.model` was null because the pane it would have
+inherited from was the one that had just died. This is gap (1) above, and it fires on exactly the path
+that matters most (the owner's own chat lane re-minting itself). **Raise its priority** — the fix is to
+fall back to the persisted `spawnModel` / last-known model in `spawnSession` when inherit yields null,
+so a re-minted lane can't silently land at 200k. Not built here (one change per operation).
+
 ### ⚠️ `--resume` does NOT inherit the 1M window — measured, not assumed
 
 Started a session with `--model 'claude-opus-5[1m]'`, then resumed it by id. `/context` in the resumed
