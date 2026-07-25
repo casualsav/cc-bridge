@@ -96,3 +96,55 @@ newest existing version dir (carrying `node_modules`/`bun.lock`) — but when ha
 dir, also copy `package.json` + `bun.lock` and run `bun install` there so grammy pins to **1.41.1**.
 Keep the grammy version pinned in `package.json`, in `ensure-daemon.ts`'s generated manifest, and in
 `scripts/deploy.ts`'s `GRAMMY_PIN` in sync.
+
+## ⚠️ This checkout is shared by concurrent agent sessions
+
+More than one Claude Code session works in this directory at once. **Another session's uncommitted
+work is sitting in the tree next to yours, and it is not yours to move.** This is not etiquette —
+it is the rule that a `git stash -u` broke on 2026-07-25, temporarily removing ~50 uncommitted lines
+of a sibling session's in-flight fix while chasing an unrelated test discrepancy.
+
+**Explicit paths on every git verb, not just commits.** `git add file.ts`, never `git add -A`.
+
+**Never run a whole-tree operation:** `git stash`, `git reset --hard`, `git checkout .`,
+`git restore .`, `git clean`, `git add -A`, or a bare `git checkout <branch>` / `git switch`
+(switching branches rewrites the tree under everyone standing in it).
+
+- **To compare against HEAD:** `git show HEAD:file.ts > /tmp/old.ts` — never stash to "see the
+  before". That is what caused the incident.
+- **To undo your own change:** `git checkout HEAD -- path/you/own.ts`, path-scoped.
+- **If you genuinely need a clean tree:** ask the orchestrator to sequence it. Do not take one.
+- **Before a git verb, check who else is here:** `git status` — treat files you did not touch as
+  someone's live work, and leave them alone.
+
+### Recovering work that disappeared
+
+The working tree is snapshotted to hidden refs under `refs/cc-bridge/autosave/`, including
+**untracked** files. Nothing is lost as easily as it looks:
+
+```
+bun autosave.ts list                      # every snapshot, newest first
+bun autosave.ts show <ref>                # what changed in one
+bun autosave.ts restore <ref> <path>...   # write those paths back (explicit paths only)
+```
+
+Snapshots are ordinary commits, so `git show <ref>:<path>` works too. They are built in a throwaway
+index and never touch your working tree, index or stash. Retained 7 days.
+
+### The guard
+
+`scripts/session-guard.ts` is a `PreToolUse` hook that refuses the whole-tree verbs above **when
+another bridged session is live in this directory** (detected from `@tg_session` tmux pane stamps),
+after snapshotting first. It fails open — if anything about the hook errors, your command runs.
+Override for a case you are certain about: `CC_BRIDGE_ALLOW_TREE_OPS=1 <command>`.
+
+Enable it per-checkout by registering the hook in `.claude/settings.json`:
+
+```json
+{ "hooks": { "PreToolUse": [ { "matcher": "Bash",
+  "hooks": [ { "type": "command", "command": "bun scripts/session-guard.ts" } ] } ] } }
+```
+
+**Deploying:** `bun run deploy` refuses to ship from any branch but `main`, because it copies the
+**working tree** of git-tracked files into the live daemon's cache. To ship a branch deliberately you
+must name it — `bun run deploy --ship-branch <branch>` — and it warns about uncommitted payload files.

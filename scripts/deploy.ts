@@ -32,6 +32,7 @@ import { spawnSync } from 'node:child_process'
 import { existsSync, readdirSync, readFileSync, rmSync, mkdirSync, copyFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
+import { shipGate } from '../ship-gate.ts'
 
 // PLUGIN-DIR CONTENTS ARE DEPLOY-GENERATED. The shared runtime lives at the repo ROOT (channel.ts,
 // slack-daemon.ts, common.ts, channel-ctl.ts, the slk/dsc ctls, …) — that is the single source of
@@ -192,8 +193,13 @@ if (!cfg) die(`unknown --plugin "${pluginArg}" — use tg | slack | discord`)
 const commitIdx = argv.indexOf('--commit')
 const commitMsg = commitIdx >= 0 ? argv[commitIdx + 1] : null
 if (commitIdx >= 0 && !commitMsg) die('--commit needs a message: --commit "ui: …"')
+const shipIdx = argv.indexOf('--ship-branch')
+// Every flag that takes a value must exclude that value here, or it is read as the bump: the first
+// spelling of this gate had `--ship-branch tg/foo` die with `unknown bump "tg/foo"`.
 const bumpArg = argv.find((a, i) =>
-  !a.startsWith('--') && a !== commitMsg && !(pluginIdx >= 0 && i === pluginIdx + 1)) ?? 'patch'
+  !a.startsWith('--') && a !== commitMsg
+  && !(pluginIdx >= 0 && i === pluginIdx + 1)
+  && !(shipIdx >= 0 && i === shipIdx + 1)) ?? 'patch'
 
 const CACHE_BASE = join(CACHE_ROOT, cfg.cacheName)
 const DAEMON_PID = join(homedir(), '.claude', 'channels', 'telegram', 'daemon.pid')
@@ -218,6 +224,40 @@ const next = nextVersion(cur, bumpArg)
 console.log(`\n🚀 deploy [${cfg.id}] ${cur} → ${next}\n`)
 
 const payload = cfg.payload()
+
+// ---- shipping gate: main only, and say what you're shipping ----
+// A deploy syncs the WORKING TREE (syncPayloadInto copies from REPO, not from git) into the plugin
+// cache and restarts the live daemon. Nothing here previously looked at which branch that tree was
+// on, so a session working on its own branch — the normal shape once sessions get worktrees — could
+// ship unreviewed branch code over the live bridge and only find out afterwards. The failure is
+// silent and it lands on the owner's own comms channel, so the default has to be refusal.
+//
+// The escape hatch deliberately is NOT a bare --force: you must NAME the branch, and it must match
+// what you are actually on. A habitual flag is a flag people type without reading; a branch name is
+// one you have to look up, which is the whole point.
+function gitOut(args: string[]): string {
+  const r = sh('git', ['-C', REPO, ...args])
+  return r.status === 0 ? r.stdout.trim() : ''
+}
+if (!materializeOnly && !dryRun) {
+  const gate = shipGate(
+    gitOut(['rev-parse', '--abbrev-ref', 'HEAD']),
+    shipIdx >= 0 ? (argv[shipIdx + 1] ?? '') : null,
+  )
+  if (!gate.ok) die(gate.error)
+  if (gate.warn) console.log(`⚠️  ${gate.warn}\n`)
+
+  // Not a refusal — in a checkout shared by several sessions the tree is dirty most of the time, so
+  // refusing on dirt would block every legitimate deploy. But the payload is copied from the working
+  // tree, so uncommitted edits to a shipped file DO go out: name them, so that is a choice.
+  const dirty = gitOut(['status', '--porcelain', '--', ...payload.map(p => p.src)])
+    .split('\n').map(l => l.slice(3).trim()).filter(Boolean)
+  if (dirty.length) {
+    console.log(`⚠️  shipping UNCOMMITTED changes in ${dirty.length} payload file(s):`)
+    for (const f of dirty) console.log(`      ${f}`)
+    console.log('')
+  }
+}
 
 // Replace only the version string (regex, not JSON round-trip) so file formatting/escaping is kept.
 function patchVersion(path: string, to: string) {
