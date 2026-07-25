@@ -1,4 +1,40 @@
-# HANDOFF — DM-mode fork fixes (audit bugs 4–10 + bug 3), 2026-07-25
+# HANDOFF — DM-mode fork fixes, 2026-07-25
+
+## ROUND 3 (ccfleet) — bug 11 + 12 SHIPPED, tg v0.4.29, verified live
+
+Diagnosis: `DIAGNOSIS-bug11-wedged-fleet-member.md`. Restart hypothesis **refuted** — @ccbridge hung on
+`/compact` at 06:34 and was dead 9h23m before the 16:04 restart; the first stuck alert predates the
+restart by 7 min. Upstream harness hang, not ours. Our job was to NOTICE and REPORT it; four defects
+stopped us. All fixed, pushed through `560e390`, deployed as **tg v0.4.29**.
+
+| stage | sha | what |
+|---|---|---|
+| 11b | `4782992` | `tg ask` awaits `tryDeliverAsk` → `askResultText` (delivered / busy / wedged / no-session). Tripwire `ask-delivery.test.ts`. |
+| 11a | `c3ff822` | `fleetSurface()` in `dm-lanes.ts` + `noticeTargets()` in `prompt-relay.ts`; wedge card escalates ONCE per episode (`planWedgeEscalation`). Tripwire `fleet-surface.test.ts`. |
+| 12 | `b5b9024` | `ctx-warn.ts` `planContextWarn`; `ctxWarn` Map keyed by **sid**; sampling moved onto `sweepStuckPanes`' existing captures. Tripwire `ctx-warn.test.ts`. |
+| 11c/11d/D10 | `0188bf4` | `planAskReap` gated on `panesDiscovered`; `busTargetGone`; wedge card carries the blocked-ask count; the forum hint no longer fires for self-spawns. Tripwire `bus-reap.test.ts`. |
+| guard | `560e390` | `fleetSurfaceFor(pane)` returns `[]` for a **dismissed** session — group-mode regression guard. |
+
+**Live proof after deploy** (`daemon.log`, 17:23):
+- `ask 97 to @ccbridge (5838159c) reaped — target session ended, never delivered` — 3 min before it
+  would have emitted the false "still waiting" line. 95 (already expired) and 101/102 (injected) were
+  correctly left alone: no mass-fail.
+- `context warn fired threshold=75 (pct=100) for ccfleet [282cf8cf]` — a **headless, non-focused**
+  session; impossible under the old focus-only poll. Same sweep: `threshold=50 (pct=62) for bb1c6d35`.
+  Two sessions, two independent watermarks, no cross-suppression.
+- `usage-notif-state.json` now carries `ctxWarn: {282cf8cf: 75, bb1c6d35: 50}`; legacy scalar dropped.
+
+**Not proven live:** the `panesDiscovered` startup gate (discovery landed before the first sweep, so
+the window never opened). Covered by `bus-reap.test.ts`. 626 tests pass, `tsc --noEmit` clean.
+
+**Open:** ask 102 — spawned sessions get a 200k window, owner wants `[1m]`. Not started. Verify what
+`agent.ts:49`'s `token()` does to `[`/`]` first; design call (per-alias entries vs a 1M toggle in the
+spawn-defaults panel) is delegated to whoever picks it up; owner leans toggle. Also owed: what governs
+the chat/orchestrator session's launch and whether a relaunch is needed.
+
+---
+
+# ROUND 2 — DM-mode fork fixes (audit bugs 4–10 + bug 3)
 
 **OUTCOME: shipped + verified live. tg v0.4.28, pushed through `42acc4f`.** `fleetMode()` confirmed TRUE
 against live state (was false), pin ticking every ~10s, no errors. Remaining: bug 11, D10.
