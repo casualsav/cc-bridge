@@ -22,9 +22,19 @@ type PromptRelayDeps = {
   resetPromptDedup: (paneId: string | null) => void
   verifyPromptClosed: (paneId?: string | null) => Promise<void>
   paneKeys: (paneId: string, keys: string[], settle?: [number, number]) => Promise<boolean>
+  fleetSurface: () => Array<{ chat: string; thread?: number }>
 }
 let deps: PromptRelayDeps
 export function initPromptRelay(d: PromptRelayDeps): void { deps = d }
+
+// Where a BLOCKING event about `paneId` goes. Its own surface when it has one; otherwise the fleet
+// surface (bug 11a) — a headless session's outboundTargetsFor is [] by design, and the old
+// `if (targets.length === 0) return` turned "this session is stuck and needs a human" into silence.
+// Only the three blocking relays use this; ordinary reply/mirror traffic still routes pane-only.
+async function noticeTargets(paneId: string | null): Promise<Array<{ chat: string; thread?: number }>> {
+  const own = await deps.outboundTargetsFor(paneId)
+  return own.length ? own : deps.fleetSurface()
+}
 
 // Render a prompt as Telegram HTML: bold question, then each numbered option with
 // its description (if any) as plain italic text beneath it (no blockquote).
@@ -95,8 +105,9 @@ export function singleAnswerKeyboard(prompt: PromptInfo, prefix: 'prompt' | 'mq'
 
 export async function relayPromptToTelegram(prompt: PromptInfo, paneId: string | null = focus.activePaneId): Promise<void> {
   if (!paneId) return
-  // Route to the requesting session's own topic in forum mode; DM mode → the allowlist.
-  const targets = await deps.outboundTargetsFor(paneId)
+  // Route to the requesting session's own topic in forum mode; DM mode → the allowlist. A surface-less
+  // headless pane falls back to the fleet surface — a select menu blocks the session until answered.
+  const targets = await noticeTargets(paneId)
   if (targets.length === 0) return
 
   // The menu is detected from the PANE the instant it appears, but the message Claude wrote just
@@ -194,8 +205,11 @@ export function stuckKeyboard(tok: string, opts: { optionKind: 'numbered' | 'ink
 // Relay a stuck-screen card into the wedged session's own topic(s). Registers per-card state (for the
 // tap handler) and a stucktext reply-target (reply-to-type into the pane, reusing the existing handler).
 // `quiet` = a re-nag (no notification); still a fresh message with fresh buttons, not an edit.
-export async function relayStuckScreen(paneId: string, stuck: StuckScreen, tail: string, name: string, quiet = false): Promise<void> {
-  const targets = await deps.outboundTargetsFor(paneId)
+// `to` overrides the pane's own targets — the caller passes the fleet surface for a surface-less
+// headless pane (bug 11a). The override is the caller's because the escalation is throttled to once
+// per wedge episode (planWedgeEscalation), which this function has no state to decide.
+export async function relayStuckScreen(paneId: string, stuck: StuckScreen, tail: string, name: string, quiet = false, to?: Array<{ chat: string; thread?: number }>): Promise<void> {
+  const targets = to ?? await deps.outboundTargetsFor(paneId)
   if (targets.length === 0) return
   const tok = permPromptToken(stuck.sig)
   const text = renderStuckHtml(name, tail, stuck.options)
@@ -235,8 +249,9 @@ export async function sweepPermStorms(): Promise<void> {
 // pane. One button per row — the labels (esp. "allow all this session") are long.
 export async function relayPermissionToTelegram(perm: PermissionPrompt, paneId: string | null = focus.activePaneId): Promise<void> {
   if (!paneId) return
-  // Route to the requesting session's own topic in forum mode; DM mode → the allowlist.
-  const targets = await deps.outboundTargetsFor(paneId)
+  // Route to the requesting session's own topic in forum mode; DM mode → the allowlist. A surface-less
+  // headless pane falls back to the fleet surface — an unanswered permission prompt blocks it forever.
+  const targets = await noticeTargets(paneId)
   if (targets.length === 0) return
 
   const storm = permStorms.get(paneId) ?? { count: 0, armed: false }

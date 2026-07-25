@@ -115,13 +115,13 @@ import {
   type BusEndpoint, type BusPending, type LedgerEntry,
 } from './agent-bus.ts'
 import { formatAskBlock, formatAnswerBlock, formatDigestBlock, formatRosterLine, type RosterAgent } from './agent-bus-block.ts'
-import { laneForChat, bindLane, chatForLaneSession, noteLaneCwd, dmLanesOn, fleetMode, listLanes, unbindLane } from './dm-lanes.ts'
+import { laneForChat, bindLane, chatForLaneSession, noteLaneCwd, dmLanesOn, fleetMode, fleetSurface, listLanes, unbindLane } from './dm-lanes.ts'
 import { runHermes, type HermesEndpoint, type HermesTask } from './hermes-driver.ts'
 import {
   initPromptRelay, relayPromptToTelegram, relayPermissionToTelegram, sweepPermStorms,
   permStorms, multiSelectKeyboard, formatPermission, relayStuckScreen, renderStuckHtml,
 } from './prompt-relay.ts'
-import { planStuckSweep, type StuckState } from './stuck-plan.ts'
+import { planStuckSweep, planWedgeEscalation, type StuckState } from './stuck-plan.ts'
 import {
   initStatusCard, statusCardText, statusKeyboard, updateSessionPin, updateTopicPins,
   removeSessionPins, refreshSessionPin, sessionPins, pinTextCache, persistSessionPins,
@@ -329,7 +329,7 @@ initStatusCard({
   },
 })
 initUpdates({ channel })
-initPromptRelay({ channel, outboundTargetsFor, flushPendingText, transcriptForPane, lastRelayedUuid: () => lastRelayedUuid, resetPromptDedup, verifyPromptClosed, paneKeys })
+initPromptRelay({ channel, outboundTargetsFor, flushPendingText, transcriptForPane, lastRelayedUuid: () => lastRelayedUuid, resetPromptDedup, verifyPromptClosed, paneKeys, fleetSurface })
 initQueue({ channel, outboundTargetsFor, deliverToPane: (pane, text) => pane === focus.activePaneId && focus.paneWatcher ? injectText(pane, focus.paneWatcher, text) : pasteToPane(pane, text) })
 initTopicRuntime(channel)
 let botUsername = ''
@@ -10207,6 +10207,7 @@ bot.on('callback_query:data', async ctx => {
     if (!still || permPromptToken(still.sig) !== tok) {
       await ctx.editMessageText('✅ Sent — the screen moved on.').catch(() => {})
       stuckWatch.delete(pane)
+      wedgeEscalated.delete(pane)   // the wedge is over — a future one is reported again (11a)
       pruneStuckCards(pane)
       resetPromptDedup(pane)
     }
@@ -12169,6 +12170,9 @@ if (AGENT_BUS_ENABLED) setInterval(() => void sweepBus(), LATER_SWEEP_MS).unref(
 // alert (footer-tier at 75s, generic at 90s) relays an actionable card; a still-stuck screen re-nags
 // quietly once per 30min; recovery clears the timer + prunes the pane's cards.
 const stuckWatch = new Map<string, StuckState>()
+// Panes whose current wedge episode has already been escalated to the fleet surface (bug 11a) — so a
+// surface-less session is reported once, not once per alert. Cleared when the pane recovers.
+const wedgeEscalated = new Set<string>()
 function pruneStuckCards(pane: string): void {
   for (const [k, v] of stuckCards) if (v.paneId === pane) stuckCards.delete(k)
 }
@@ -12234,11 +12238,21 @@ async function sweepStuckPanes(): Promise<void> {
     }
     const { decision, next } = planStuckSweep(stuckWatch.get(pane) ?? null, stuck?.sig ?? null, stuck?.tier ?? 'generic', now)
     if (next) stuckWatch.set(pane, next); else stuckWatch.delete(pane)
+    const esc = planWedgeEscalation(wedgeEscalated.has(pane), decision)
+    if (esc.next) wedgeEscalated.add(pane); else wedgeEscalated.delete(pane)
     if (decision.act === 'clear') { pruneStuckCards(pane); continue }
     if ((decision.act === 'alert' || decision.act === 'renag') && stuck) {
+      // Bug 11a: a headless fleet member has no surface of its own, so this card used to be dropped
+      // (relayStuckScreen returned on empty targets) — @ccbridge wedged for 10h across three alerts
+      // with nobody told. Escalate to the fleet surface instead, ONCE per wedge episode so one stuck
+      // pane can't become a repeating DM. The card keeps its buttons, so the owner can drive the
+      // wedged pane (Enter/Esc/1-2-3) straight from his chat.
+      const own = await outboundTargetsFor(pane).catch(() => [])
+      if (!own.length && !esc.escalate) continue   // already reported this episode — stay quiet until it recovers
       const nm = await paneDisplayName(pane)
-      await relayStuckScreen(pane, stuck, cleanPaneTail(cap, 20), nm, decision.act === 'renag').catch(() => {})
-      process.stderr.write(`daemon: stuck-screen watchdog ${decision.act} for pane ${pane} (${nm})\n`)
+      const label = own.length ? nm : `${nm} · headless, no surface of its own`
+      await relayStuckScreen(pane, stuck, cleanPaneTail(cap, 20), label, decision.act === 'renag', own.length ? undefined : fleetSurface()).catch(() => {})
+      process.stderr.write(`daemon: stuck-screen watchdog ${decision.act} for pane ${pane} (${nm})${own.length ? '' : ' → fleet surface'}\n`)
     }
   }
 }
@@ -12356,7 +12370,7 @@ setInterval(() => void sweepUpdateChecks(), 24 * 3_600_000).unref()   // …then
 const PANE_STATE_MAPS: { delete(k: string): boolean; keys(): IterableIterator<string> }[] = [
   resumeRelayed, paneTranscriptCache, thinkingPendingUntil, stuckDumpAt, editorHeld,
   modelUnavailAlerted, staleSessionNotified, auxPromptStates, stuckWatch,
-  loginHeldPanes,   // a Set — same delete(k)/keys() shape the sweep needs
+  loginHeldPanes, wedgeEscalated,   // Sets — same delete(k)/keys() shape the sweep needs
 ]
 function forgetPane(paneId: string): void {
   for (const m of PANE_STATE_MAPS) m.delete(paneId)

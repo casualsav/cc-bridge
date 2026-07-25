@@ -37,3 +37,16 @@ export function planStuckSweep(
   if (now - prev.alertedAt >= RENAG_MS) return { decision: { act: 'renag' }, next: { ...prev, alertedAt: now } }
   return { decision: { act: 'wait' }, next: prev }
 }
+
+// Should this sweep ESCALATE the wedge to the fleet surface (bug 11a)? Only for a pane with no surface
+// of its own, and then at most once per wedge EPISODE — not once per alert. %87 produced three alerts
+// for one wedge (the screen repainted, then a daemon restart re-armed the timer), and the log holds 17
+// alerts overall; forwarding each one would replace silence with a repeating DM, which gets muted,
+// which is silence again. An episode ends only when the pane genuinely recovers — planStuckSweep's
+// 'clear', i.e. it is back at a prompt / working / on a recognized screen — and that re-arms the next
+// report. A signature change while still stuck ('arm') keeps the episode open on purpose.
+export function planWedgeEscalation(escalated: boolean, decision: StuckDecision): { escalate: boolean; next: boolean } {
+  if (decision.act === 'clear') return { escalate: false, next: false }
+  if (decision.act === 'alert' || decision.act === 'renag') return { escalate: !escalated, next: true }
+  return { escalate: false, next: escalated }
+}

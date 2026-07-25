@@ -11,7 +11,8 @@
 import { join } from 'node:path'
 import { STATE_DIR, readJsonFile, writeJsonFile } from './common.ts'
 import { loadAccess } from './access.ts'
-import { isTopicMode, listDmChatSessions, listTopics } from './topics.ts'
+import { isChatUnreachable } from './state.ts'
+import { getGroupChatId, isTopicMode, listDmChatSessions, listTopics } from './topics.ts'
 
 // Whether per-user DM lanes are active: an explicit dmLanes true/false (boolean or a hand-edited
 // "true"/"false" string) wins; unset auto-enables at ≥2 allowlisted ids (a multi-user DM box needs
@@ -50,6 +51,25 @@ export function fleetMode(): boolean {
   // A headless row IS a session, it just has no forum topic to give it away: `tg spawn` on a
   // group-less box and ensureHeadlessGeneral both produce exactly this.
   return listTopics().some(t => !t.closed && t.threadId == null)
+}
+
+// WHERE a fleet-level event goes when the session it concerns has no surface of its own. A headless
+// session's outboundTargetsFor is [] by design (it has no topic and no DM), so every relay that routes
+// through the pane's own targets DROPS a blocking event about it — that is bug 11a: @ccbridge wedged
+// for 10 hours, the watchdog detected it three times, and nobody was told. This answers the other
+// question: not "which chat owns this pane" but "who owns the fleet".
+//
+// Order mirrors the two ad-hoc fan-outs already in daemon.ts (the hop-limit pause notice and `tg post`):
+// the DM chat lanes first — that IS the orchestrator conversation — then the group as a whole (never a
+// topic: a headless session has none), then the reachable allowlist. Unreachable chats are skipped for
+// the same reason every other fan-out skips them (a never-opened DM errors "chat not found").
+// fleet-surface.test.ts pins that this is never empty for a box shape that can host a headless session.
+export function fleetSurface(): Array<{ chat: string; thread?: number }> {
+  const lanes = listDmChatSessions()
+  if (lanes.length) return lanes.map(l => ({ chat: l.chatId })).filter(t => !isChatUnreachable(t.chat))
+  const group = getGroupChatId()
+  if (group) return [{ chat: group }]
+  return loadAccess().allowFrom.filter(chat => !isChatUnreachable(chat)).map(chat => ({ chat }))
 }
 
 export const DM_LANES_FILE = join(STATE_DIR, 'dm-lanes.json')
