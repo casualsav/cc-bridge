@@ -4446,7 +4446,11 @@ async function handleCall(
         // Seed the branch cache so the retitle sweep doesn't stomp the chosen tab name (as topiccreate does).
         try { topicBranchCache.set(sid, (await exec('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 2000 })).stdout.trim()) }
         catch { topicBranchCache.set(sid, '') }
-        const newPane = await spawnSession(dir, '', sid, MAIN_ACCOUNT, 'claude', undefined, { model, effort })
+        // Headless spawns MUST run bypass: they have no topic and no DM surface, so a permission
+        // prompt has nowhere to relay — the session just wedges on the dialog until the ask expires
+        // (the 49-minute "busy" general). Bound spawns keep the inherited mode; their prompts relay
+        // as tappable cards in the topic.
+        const newPane = await spawnSession(dir, '', sid, MAIN_ACCOUNT, 'claude', undefined, { model, effort, ...(headless ? { mode: 'bypassPermissions' as CcMode } : {}) })
         if (!newPane) {
           removeTopic(sid)
           if (group && threadId != null) void channel.threads!.remove(group, String(threadId)).catch(() => {})
@@ -10943,7 +10947,9 @@ async function ensureHeadlessGeneral(): Promise<void> {
   try {
     const dir = getBaseCwd() ?? homedir()   // the base dir itself, not a subfolder — this is the fleet's home session
     setTopic(sid, { headless: true, cwd: dir, name: 'general', closed: false, createdAt: Date.now() })
-    const pane = await spawnSession(dir, '', sid, MAIN_ACCOUNT, 'claude')
+    // Bypass, always: general is headless — no surface to relay a permission prompt to, so any
+    // approval dialog would wedge it silently until the asking agent's timeout.
+    const pane = await spawnSession(dir, '', sid, MAIN_ACCOUNT, 'claude', undefined, { mode: 'bypassPermissions' })
     if (!pane) {
       removeTopic(sid)
       process.stderr.write(`daemon: headless general spawn failed in ${dir} — see daemon log\n`)
