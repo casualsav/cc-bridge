@@ -97,9 +97,12 @@ and the following message starts a fresh chat session.
 - The chat session runs its CLAUDE.md *on top of* Claude Code's own system prompt —
   a close approximation of the claude.ai register, not a byte-identical environment
   (claude.ai's artifacts/styles/memory features don't exist here).
-- Already-provisioned chat lanes don't pick up template changes: after upgrading,
-  re-copy both files from `off-mcp/chat-account/` into `~/.claude-chat/` (merge any
-  local additions to `settings.json` — the stamp hooks must survive).
+- Template upgrades: on boot the daemon auto-refreshes `~/.claude-chat/CLAUDE.md`
+  when yours is unedited (byte-identical to an earlier build's template) and notifies
+  you either way; a locally edited copy is never touched — merge manually from
+  `off-mcp/chat-account/`. `settings.json` is always manual (account seeding
+  customizes it immediately, so "unedited" can't be detected — keep the stamp hooks
+  when merging).
 - Model: template sets `opus`; switch per-session with `/model`.
 - The account shares the main login (credentials copy) — usage draws from the same
   subscription; `/account` shows its 5h usage separately.

@@ -10705,6 +10705,61 @@ async function ensureChatProfile(): Promise<void> {
   if (sent) { try { writeFileSync(CHAT_PROFILE_NOTICE_FILE, JSON.stringify({ at: Date.now(), workspace }) + '\n') } catch (e) { log(`marker write failed: ${e}`) } }
 }
 
+// Template drift healing: ship chat-account template improvements to already-provisioned boxes.
+// Overwrites ONLY a CLAUDE.md the operator never edited — byte-identical to the template of some
+// earlier build (recorded baseline, or bootstrapped by matching a cached older version's copy).
+// settings.json is deliberately out of scope: addAccount() heals statusLine/hooks into it right
+// after provisioning, so byte-identity with its template never holds there.
+const CHAT_TEMPLATE_STATE_FILE = join(STATE_DIR, 'chat-template-refresh.json')
+async function refreshChatTemplates(): Promise<void> {
+  const log = (m: string) => process.stderr.write(`chatTemplates: ${m}\n`)
+  const acct = accountByName('chat')
+  if (!acct || !existsSync(acct.configDir)) return
+  const tpl = join(CHAT_TEMPLATE_DIR, 'CLAUDE.md')
+  const live = join(acct.configDir, 'CLAUDE.md')
+  if (!existsSync(tpl) || !existsSync(live)) return
+  const h = (p: string) => createHash('sha256').update(readFileSync(p)).digest('hex')
+  type State = { baseline?: string; notified?: string }
+  let state = readJsonFile<State>(CHAT_TEMPLATE_STATE_FILE, {})
+  const tplH = h(tpl)
+  const liveH = h(live)
+  if (tplH === liveH) {
+    if (state.baseline !== tplH) writeJsonFile(CHAT_TEMPLATE_STATE_FILE, { ...state, baseline: tplH })
+    return
+  }
+  let unedited = liveH === state.baseline
+  if (!unedited) {
+    try {
+      const parent = join(import.meta.dir, '..')
+      const self = basename(import.meta.dir)
+      for (const sib of readdirSync(parent)) {
+        if (sib === self) continue
+        const sibTpl = join(parent, sib, 'off-mcp', 'chat-account', 'CLAUDE.md')
+        if (existsSync(sibTpl) && h(sibTpl) === liveH) { unedited = true; break }
+      }
+    } catch { /* treat scan failure as "no match" */ }
+  }
+  const ver = basename(import.meta.dir)
+  const notify = async (text: string) => {
+    if (state.notified === tplH) return
+    let sent = false
+    for (const chat of loadAccess().allowFrom) {
+      try { await channel.sendText(chat, text); sent = true } catch (e) { log(`notice to ${chat} failed: ${e}`) }
+    }
+    if (sent) { state = { ...state, notified: tplH }; writeJsonFile(CHAT_TEMPLATE_STATE_FILE, state) }
+  }
+  if (unedited) {
+    try { copyFileSync(tpl, live) } catch (e) { log(`refresh copy failed: ${e}`); return }
+    state = { ...state, baseline: tplH }
+    writeJsonFile(CHAT_TEMPLATE_STATE_FILE, state)
+    log(`refreshed unedited CLAUDE.md for chat account (${ver})`)
+    await notify(`♻️ New chat-agent instructions shipped with ${ver} — your unedited copy was refreshed automatically. Takes effect when a chat session next starts fresh (/clear).`)
+  } else {
+    log('chat CLAUDE.md has local edits — left alone')
+    await notify(`📝 A newer chat-agent template shipped with ${ver}, but your chat CLAUDE.md has local edits — it was left alone. Merge manually from off-mcp/chat-account/ in the plugin cache if you want the update.`)
+  }
+}
+
 // Non-null only when a DM can become a standalone chat lane: the `chat` account is registered
 // (config dir exists on disk) and a workspace dir resolves — never auto-created. The workspace is
 // whatever cwd an existing chat lane already runs in (so every lane shares one folder), else the
@@ -12515,7 +12570,7 @@ void (async () => {
           }
           // Seamless upgrade for DM-mode boxes: create the `chat` profile the DM lane needs. Runs
           // here (not before connect) because it may DM the owner; no-ops on every later reconnect.
-          void ensureChatProfile().catch(e => process.stderr.write(`chatProfile: provisioning failed: ${e}\n`))
+          void ensureChatProfile().catch(e => process.stderr.write(`chatProfile: provisioning failed: ${e}\n`)).then(() => refreshChatTemplates()).catch(e => process.stderr.write(`chatTemplates: refresh failed: ${e}\n`))
           // Lane hygiene: drop lanes whose chat left the allowlist (their outbound would 403
           // forever) and lanes whose chat has since upgraded to a chat lane (dmChat ⊕ dmLane —
           // two bindings for one DM made outbound resolve two different owner sessions).
