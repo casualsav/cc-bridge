@@ -65,7 +65,9 @@ export interface SessionFeed {
   sid: string; name: string; working: boolean
   // 'activity' = a tool run of the live turn, 'thought' = its mid-turn narration (the 💭 the
   // Telegram live card shows); both appear only while the session is working.
-  items: Array<{ role: 'user' | 'assistant' | 'activity' | 'thought'; text: string; ts: number; img?: string; att?: string; cmd?: boolean }>
+  // `clipped` = the payload clamp cut this message (display only — storage and pane delivery keep
+  // the whole thing); the client says so instead of just trailing off.
+  items: Array<{ role: 'user' | 'assistant' | 'activity' | 'thought'; text: string; ts: number; img?: string; att?: string; cmd?: boolean; clipped?: boolean }>
 }
 export interface AutomationView {
   cron: Array<{ id: string; fireAt: number; sessionLabel: string; text: string; recurLabel: string | null }>

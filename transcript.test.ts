@@ -3,7 +3,7 @@ import { test, expect, describe } from 'bun:test'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnActivity, currentTurnFeed, currentTurnTokens, slashResultAfter, legibleApiError, latestModelId } from './transcript.ts'
+import { latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnActivity, currentTurnFeed, currentTurnTokens, slashResultAfter, legibleApiError, latestModelId, recentConversation } from './transcript.ts'
 
 function fixture(entries: object[]): string {
   const f = join(mkdtempSync(join(tmpdir(), 'tg-transcript-')), 'session.jsonl')
@@ -226,4 +226,13 @@ describe('API-error replies', () => {
     expect(legibleApiError('Done — the tests pass.')).toBe('Done — the tests pass.')
     expect(legibleApiError('I hit an API Error: 500 while calling out')).toBe('I hit an API Error: 500 while calling out')
   })
+})
+
+test('recentConversation clamps a huge message for the payload and flags the cut', () => {
+  const long = 'x'.repeat(9000)
+  const f = fixture([user(`<tg 1>${long}</tg>`, 'u1'), asst('short', 'a1')])
+  const [u, a] = recentConversation(f, 5)
+  expect(u.text.length).toBe(4001)        // 4000 + the ellipsis
+  expect(u.clipped).toBe(true)
+  expect(a.clipped).toBeUndefined()       // a short message is untouched
 })

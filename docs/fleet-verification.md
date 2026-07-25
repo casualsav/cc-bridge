@@ -49,6 +49,32 @@ that. Also: a cleared pane drops its `ctx` segment entirely, so the reading is `
 - Ledger (every ask/answer/spawn/kill, and the text as SENT — useful for spotting a message the
   shell mangled): `$(tg shared)/../ledger.jsonl`.
 
+## Code that reports success while doing nothing
+
+The recurring failure here is not a crash, it's a no-op that looks like a success — three in one
+day (2026-07-25):
+
+- the sessions dashboard read the model with a **case-sensitive** whitelist regex, so every session
+  launched on a raw id (`claude-opus-5[1m]`) silently showed no model at all;
+- the mini app's chat-header buttons genuinely **had** `class="ghost"` applied, and the commit that
+  added it says "header buttons ghosted" — but `.vhead button` (class + type) outranks `.ghost`
+  (class), so the styling never took and nobody noticed for weeks;
+- a statusline reading `1000k` for a haiku worker whose every call 400'd.
+
+So: **only the rendered or measured result counts.** Read the payload, screenshot the page, diff the
+lengths — never conclude from the source that a thing works. For UI, drive the LIVE app: a headless
+Chromium against the running daemon with signed `initData` (mint it by HMAC-ing the bot token, see
+`verifyInitData` in `webapp.ts`) gives real screenshots of real session data in about a minute.
+
+## Manufacturing a wedge on purpose
+
+`tg keys` (and anything else that unblocks a stuck pane) is testable without waiting for a real
+wedge: `tg spawn` a throwaway, then `tg slash <name> "/model"` — the model picker holds the input
+box exactly like the wedges that matter. `tg slash` then refuses it ("target is mid-turn"), which is
+the negative control. Escape closes it; **never Enter** on that screen — it sets the global default
+model. Clean up with `tg kill`. A burst of Escapes walks the TUI into history recall, which is its
+own small lesson about why keystroke injection is rate-limited.
+
 ## Not verified live as of v0.4.44
 
 Unit-tested and reasoned through, but never observed firing on this box — exercise them before
@@ -59,3 +85,9 @@ trusting them in anger:
   pane sweep, so it is empty for the first sweep after a daemon restart);
 - the context nudge's **delivery** (no session reached 50% — only `planCtxNudge` is pinned);
 - the wedged-session alert routing to `@chat` instead of the owner's DM.
+
+`tg keys` came off this list on the day it shipped (v0.4.49) — gate, refusals, rate limit and the
+unwedge itself were all observed on a manufactured wedge (above). The one branch still only
+unit-tested is the **wedge-alert bypass** (`planKeyInjection` with `wedgeAlerted: true`): it needs a
+pane the watchdog has alerted on that is *also* printing "esc to interrupt", which is precisely the
+state that is hard to stage on demand.

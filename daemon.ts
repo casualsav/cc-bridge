@@ -13013,6 +13013,7 @@ async function webappSessionFeed(sid: string): Promise<WebappSessionFeed | null>
   const items: WebappSessionFeed['items'] = recentConversation(file, 14).map(c => ({
     role: c.role, text: c.text, ts: c.ts,
     ...(c.img ? { img: c.img } : {}), ...(c.att ? { att: c.att } : {}), ...(c.cmd ? { cmd: true } : {}),
+    ...(c.clipped ? { clipped: true } : {}),
   }))
   // The running turn, described by the SAME decision layer the Telegram live card uses
   // (turn-summary.ts): narration paragraphs interleaved with folded tool runs ("Searched 3

@@ -108,6 +108,17 @@
   .sendbtn { width: 40px; height: 40px; border-radius: 50%; border: none; background: var(--btn); color: var(--btn-text); font-size: 17px; flex: none; display: flex; align-items: center; justify-content: center; padding: 0 2px 2px 0; }
   /* Feed extras: command chip, attachment chip, inline photo, light markdown */
   .msg.cmd { background: transparent; color: var(--link); font: 13px/1.4 ui-monospace, Menlo, monospace; margin-left: auto; padding: 2px 11px; max-width: 88%; }
+  /* Long message: collapsed to a readable height, tapping opens it. Fading the fold makes the cut
+     legible as "there is more" rather than as a sentence that just stops. */
+  /* padding-bottom reserves the label's row so the fold never draws over a line of text. */
+  .msg.clip { position: relative; max-height: 268px; overflow: hidden; padding-bottom: 26px; }
+  .msg.clip::after { content: ""; position: absolute; left: 0; right: 0; bottom: 22px; height: 52px; background: linear-gradient(transparent, var(--sec)); pointer-events: none; }
+  .msg.user.clip::after { background: linear-gradient(transparent, var(--btn)); }
+  .msg.clip .more { position: absolute; left: 0; right: 0; bottom: 0; text-align: center; font-size: 11px; opacity: .8; padding: 4px 0 6px; background: var(--sec); }
+  .msg.user.clip .more { background: var(--btn); }
+  .msg.clip.open { max-height: none; padding-bottom: 8px; }
+  .msg.clip.open::after { display: none; }
+  .msg.clip.open .more { display: none; }
   .msg .attchip { font-size: 13px; opacity: .92; margin-bottom: 4px; }
   .msg img.thumb { max-width: 100%; min-height: 40px; border-radius: 9px; display: block; }
   .msg img.thumb + .cap { margin-top: 6px; }
@@ -231,6 +242,7 @@ const errBox = $("err");
 function showErr(m) { errBox.textContent = m; errBox.classList.add("show"); setTimeout(() => errBox.classList.remove("show"), 4000); }
 function showOk(m) { errBox.textContent = m; errBox.classList.add("show", "ok"); setTimeout(() => errBox.classList.remove("show", "ok"), 2500); }
 
+const LONG_MSG = 700;   // chars past which a feed bubble collapses behind a tap-to-expand
 let WRITE = false;   // set from /api/ls (.write) — gates all edit/delete UI; mirrors WEBAPP_WRITE on the server
 
 // POST a JSON write op with auth; surface server errors (incl. 409 edit conflicts). Returns parsed body or null.
@@ -619,7 +631,13 @@ function bubble(i) {
   if (i.att) inner += '<div class="attchip">📎 ' + esc(String(i.att).split("/").pop()) + "</div>";
   const t = (i.img || i.att) && placeholder ? "" : (i.text || "");
   if (t) inner += (i.img ? '<div class="cap">' : "") + (i.role === "assistant" ? md(t) : esc(t)) + (i.img ? "</div>" : "");
-  return inner ? '<div class="msg ' + i.role + '">' + inner + "</div>" : "";
+  if (!inner) return "";
+  // A long message collapses to a readable height with a tap to open it, rather than running past
+  // the screen. `clipped` means the payload clamp really did cut it — say so at the fold.
+  const long = t.length > LONG_MSG;
+  const note = i.clipped ? "message truncated at 4000 chars" : "";
+  return '<div class="msg ' + i.role + (long ? " clip" : "") + '"' + (long ? ' onclick="this.classList.toggle(\'open\')"' : "") + ">" + inner +
+    (long ? '<div class="more">' + (note ? esc(note) + " · " : "") + "tap to expand</div>" : "") + "</div>";
 }
 // Fetch each photo once (header-authed → blob URL) and pop it into its bubble; re-pin the scroll
 // as images change the feed height only if the user was already at the bottom.

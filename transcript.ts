@@ -356,11 +356,20 @@ export function slashResultAfter(file: string, sinceMs: number): { text: string;
 // commands (the `<command-name>` XML the CLI records) surface as structured fields so the client
 // can render a thumbnail / file chip / command chip instead of raw markup; each item is clamped
 // so a huge paste can't blow up the payload.
-export type ConversationItem = { role: 'user' | 'assistant'; text: string; ts: number; img?: string; att?: string; cmd?: boolean }
+export type ConversationItem = { role: 'user' | 'assistant'; text: string; ts: number; img?: string; att?: string; cmd?: boolean; clipped?: true }
+// Payload clamp for the drill-in feed — 14 items polled every 3s, so an unbounded paste would be
+// re-sent whole on every tick. Raised from 1500 to one Telegram message's worth: the orchestrator's
+// briefs run 2–3k and were being cut mid-sentence in the mini app. It is a DISPLAY clamp only —
+// storage (the transcript, the bus ledger) and DELIVERY into a session's pane are both untouched
+// by it, and both were measured whole. Anything it does cut is flagged `clipped` so the client can
+// say so rather than trailing off.
+const CONVO_CAP = 4000
 export function recentConversation(file: string, max = 12): ConversationItem[] {
   const entries = readEntries(file)
   const out: ConversationItem[] = []
-  const clamp = (s: string) => (s.length > 1500 ? s.slice(0, 1500) + '…' : s)
+  // Returns the item's text field(s) so a cut is reported, not just implied by a trailing ellipsis.
+  const clamp = (s: string): { text: string; clipped?: true } =>
+    s.length > CONVO_CAP ? { text: s.slice(0, CONVO_CAP) + '…', clipped: true } : { text: s }
   for (const e of entries) {
     const ts = e.timestamp ? Date.parse(e.timestamp) : 0
     if (isRealUserText(e)) {
@@ -370,17 +379,17 @@ export function recentConversation(file: string, max = 12): ConversationItem[] {
       if (m) {
         const img = /img="([^"]+)"/.exec(m[1])?.[1]
         const att = /att="([^"]+)"/.exec(m[1])?.[1]
-        out.push({ role: 'user', text: clamp(m[2].trim()), ts, ...(img ? { img } : {}), ...(att ? { att } : {}) })
+        out.push({ role: 'user', ...clamp(m[2].trim()), ts, ...(img ? { img } : {}), ...(att ? { att } : {}) })
       } else if (/^<command-name>/.test(raw)) {
         const name = /<command-name>([^<]*)<\/command-name>/.exec(raw)?.[1]?.trim() ?? ''
         const args = /<command-args>([\s\S]*?)<\/command-args>/.exec(raw)?.[1]?.trim() ?? ''
-        if (name) out.push({ role: 'user', text: clamp(`${name}${args ? ` ${args}` : ''}`), ts, cmd: true })
+        if (name) out.push({ role: 'user', ...clamp(`${name}${args ? ` ${args}` : ''}`), ts, cmd: true })
       } else {
-        out.push({ role: 'user', text: clamp(raw), ts })
+        out.push({ role: 'user', ...clamp(raw), ts })
       }
     } else if (isMainAssistantText(e) && e.message?.stop_reason !== 'tool_use') {
       const text = lastTextOf(e.message?.content).trim()
-      if (!isCommandNoise(text)) out.push({ role: 'assistant', text: clamp(text), ts })
+      if (!isCommandNoise(text)) out.push({ role: 'assistant', ...clamp(text), ts })
     }
   }
   return out.slice(-max)
