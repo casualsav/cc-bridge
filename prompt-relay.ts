@@ -22,7 +22,7 @@ type PromptRelayDeps = {
   resetPromptDedup: (paneId: string | null) => void
   verifyPromptClosed: (paneId?: string | null) => Promise<void>
   paneKeys: (paneId: string, keys: string[], settle?: [number, number]) => Promise<boolean>
-  fleetSurface: () => Array<{ chat: string; thread?: number }>
+  fleetSurface: (paneId: string | null) => Promise<Array<{ chat: string; thread?: number }>>
 }
 let deps: PromptRelayDeps
 export function initPromptRelay(d: PromptRelayDeps): void { deps = d }
@@ -33,7 +33,7 @@ export function initPromptRelay(d: PromptRelayDeps): void { deps = d }
 // Only the three blocking relays use this; ordinary reply/mirror traffic still routes pane-only.
 async function noticeTargets(paneId: string | null): Promise<Array<{ chat: string; thread?: number }>> {
   const own = await deps.outboundTargetsFor(paneId)
-  return own.length ? own : deps.fleetSurface()
+  return own.length ? own : await deps.fleetSurface(paneId)
 }
 
 // Render a prompt as Telegram HTML: bold question, then each numbered option with

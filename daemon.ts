@@ -78,6 +78,7 @@ import {
   getGeneralSession, setGeneralSession, getGeneralCwd, findTopicByCwd, getBaseCwd, setBaseCwd,
   topicAgent, type TopicEntry,
   getDmChatSession, setDmChatSession, clearDmChatSession, listDmChatSessions, chatIdForDmChatSession,
+  isSessionDismissed,
 } from './topics.ts'
 import { getTopicCreate, setTopicCreate, setTopicCreateAgent, removeTopicCreate, topicCreateAgentLabel } from './topic-create.ts'
 import {
@@ -330,7 +331,16 @@ initStatusCard({
   },
 })
 initUpdates({ channel })
-initPromptRelay({ channel, outboundTargetsFor, flushPendingText, transcriptForPane, lastRelayedUuid: () => lastRelayedUuid, resetPromptDedup, verifyPromptClosed, paneKeys, fleetSurface })
+// The fleet fallback is for panes with no surface BY NATURE (a headless session). A session whose
+// topic the user DELETED is a different thing: outboundTargetsFor returns [] there deliberately
+// (topic-runtime.ts, "must NOT fall through to General's unthreaded chat"), and re-routing its cards
+// to the group would undo that mute — a group-mode regression. Keep it silent.
+async function fleetSurfaceFor(paneId: string | null): Promise<Array<{ chat: string; thread?: number }>> {
+  const sid = paneId ? await sessionForPane(paneId, false).catch(() => null) : null
+  if (sid && isSessionDismissed(sid)) return []
+  return fleetSurface()
+}
+initPromptRelay({ channel, outboundTargetsFor, flushPendingText, transcriptForPane, lastRelayedUuid: () => lastRelayedUuid, resetPromptDedup, verifyPromptClosed, paneKeys, fleetSurface: fleetSurfaceFor })
 initQueue({ channel, outboundTargetsFor, deliverToPane: (pane, text) => pane === focus.activePaneId && focus.paneWatcher ? injectText(pane, focus.paneWatcher, text) : pasteToPane(pane, text) })
 initTopicRuntime(channel)
 let botUsername = ''
@@ -2610,7 +2620,7 @@ async function reapDeadAsk(p: BusPending, room: string): Promise<void> {
   process.stderr.write(`daemon: ask ${p.id} to @${p.toName} (${p.toSid}) reaped — target session ended, never delivered\n`)
   const askerPane = await paneForSession(p.fromSid).catch(() => null)
   const own = askerPane ? await outboundTargetsFor(askerPane).catch(() => []) : []
-  for (const { chat, thread } of own.length ? own : fleetSurface()) {
+  for (const { chat, thread } of own.length ? own : await fleetSurfaceFor(askerPane)) {
     void channel.sendText(chat,
       `❌ Ask ${p.id} to <b>${escapeHtml(p.toName)}</b> was never delivered — that session has ended. Removed from the queue.`,
       { silent: true, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
@@ -3161,7 +3171,7 @@ function maybeWarnContext(sid: string, pane: string | null, pct: number | null, 
   process.stderr.write(`daemon: context warn fired threshold=${warn} (pct=${pct}) for ${label} [${sid}]\n`)
   void (async () => {
     const own = await outboundTargetsFor(pane).catch(() => [])
-    const targets = own.length ? own : fleetSurface()
+    const targets = own.length ? own : await fleetSurfaceFor(pane)
     // Name the session when the card is NOT landing on its own surface — on the fleet surface a bare
     // "Context is 75% full" is unattributable, which is how a fleet notice becomes noise.
     const who = own.length ? 'Context is' : `<b>${escapeHtml(label)}</b>: context is`
@@ -12334,7 +12344,7 @@ async function sweepStuckPanes(): Promise<void> {
       const sid = await sessionForPane(pane, false).catch(() => null)
       const blocked = sid ? queuedFor(sid).length : 0
       const label = (own.length ? nm : `${nm} (headless fleet session)`) + (blocked ? ` — ${blocked} ask${blocked === 1 ? '' : 's'} queued and blocked` : '')
-      await relayStuckScreen(pane, stuck, cleanPaneTail(cap, 20), label, decision.act === 'renag', own.length ? undefined : fleetSurface()).catch(() => {})
+      await relayStuckScreen(pane, stuck, cleanPaneTail(cap, 20), label, decision.act === 'renag', own.length ? undefined : await fleetSurfaceFor(pane)).catch(() => {})
       process.stderr.write(`daemon: stuck-screen watchdog ${decision.act} for pane ${pane} (${nm})${own.length ? '' : ' → fleet surface'}\n`)
     }
   }
