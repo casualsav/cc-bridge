@@ -4417,8 +4417,12 @@ async function handleCall(
         if (!fromSid) { write({ t: 'result', id, ok: false, text: '`tg spawn` must run inside a bridged session' }); return }
         const topicName = String(args.name ?? '').trim()
         if (!topicName) { write({ t: 'result', id, ok: false, text: 'usage: tg spawn <name> [--dir p] [--model fable|opus|sonnet|haiku] [--effort low…max] ["first message"]' }); return }
-        const model = args.model ? String(args.model).trim().toLowerCase() : null
-        if (model && !MODEL_ALIASES.includes(model)) { write({ t: 'result', id, ok: false, text: `unknown model '${model}' — one of: ${MODEL_ALIASES.join(' | ')}` }); return }
+        const explicitModel = args.model ? String(args.model).trim().toLowerCase() : null
+        if (explicitModel && !MODEL_ALIASES.includes(explicitModel)) { write({ t: 'result', id, ok: false, text: `unknown model '${explicitModel}' — one of: ${MODEL_ALIASES.join(' | ')}` }); return }
+        // No explicit --model: fall back to the persisted /spawnmodel default (validated — a stale/bad
+        // pref is ignored silently rather than failing the spawn).
+        const defaultSpawnModel = loadAccess().spawnModel
+        const model = explicitModel ?? (defaultSpawnModel && MODEL_ALIASES.includes(defaultSpawnModel) ? defaultSpawnModel : null)
         const effort = args.effort ? String(args.effort).trim().toLowerCase().replace(/^med$/, 'medium') : null
         if (effort && (effort === 'auto' || !EFFORT_LEVELS.includes(effort))) { write({ t: 'result', id, ok: false, text: `unknown effort '${effort}' — one of: low | medium | high | xhigh | max` }); return }
         // Default home: its own folder under the /base dir (new topics are created "under" base).
@@ -5043,6 +5047,39 @@ async function doEffortPicker(ctx: Context): Promise<void> {
     { parse_mode: 'HTML', reply_markup: effortPickerKeyboard() },
   )
 }
+
+// /spawnmodel — persisted default MODEL for `tg spawn` (the agent-bus session launcher) when the
+// spawner passes no --model (access.ts spawnModel). Unlike /model, this never touches a live
+// pane — it's a preference read at spawn time; explicit --model still wins.
+function spawnModelPanelText(): string {
+  const m = loadAccess().spawnModel
+  return `🧠 <b>Spawn model</b> — default for <code>tg spawn</code> when no --model is given: <b>${m ? escapeHtml(m) : 'inherit'}</b>`
+}
+function spawnModelKeyboard(): InlineKeyboard {
+  const kb = new InlineKeyboard()
+  MODEL_ALIASES.forEach((m, i) => {
+    kb.text(m.charAt(0).toUpperCase() + m.slice(1), `spm:${m}`)
+    if ((i + 1) % 2 === 0) kb.row()
+  })
+  kb.text('Inherit', 'spm:off')
+  return kb
+}
+bot.command('spawnmodel', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  const arg = (ctx.match ?? '').toString().trim().toLowerCase()
+  if (arg === 'off') {
+    const a = loadAccess(); a.spawnModel = undefined; saveAccess(a)
+    await ctx.reply('🧠 Spawn model cleared — <code>tg spawn</code> falls back to its own default.', { parse_mode: 'HTML' })
+    return
+  }
+  if (arg) {
+    if (!MODEL_ALIASES.includes(arg)) { await ctx.reply(`Usage: <code>/spawnmodel fable|opus|sonnet|haiku|off</code>`, { parse_mode: 'HTML' }); return }
+    const a = loadAccess(); a.spawnModel = arg; saveAccess(a)
+    await ctx.reply(`🧠 Spawn model set to <b>${escapeHtml(arg)}</b> — new <code>tg spawn</code> sessions default here unless --model overrides.`, { parse_mode: 'HTML' })
+    return
+  }
+  await ctx.reply(spawnModelPanelText(), { parse_mode: 'HTML', reply_markup: spawnModelKeyboard() })
+})
 
 // Mid-conversation, `/effort <level>` doesn't apply straight away — Claude Code shows a
 // "Change effort level?" confirmation (the new level would invalidate the cached history). That
@@ -9315,6 +9352,19 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
+  // Spawn-model picker — set/clear the persisted default for `tg spawn`'s --model
+  const spmSet = /^spm:(fable|opus|sonnet|haiku|off)$/.exec(data)
+  if (spmSet) {
+    if (!(await cbAuth(ctx))) return
+    const choice = spmSet[1]
+    const a = loadAccess()
+    a.spawnModel = choice === 'off' ? undefined : choice
+    saveAccess(a)
+    await ctx.answerCallbackQuery({ text: choice === 'off' ? 'Spawn model cleared' : `Spawn model → ${choice}` }).catch(() => {})
+    await ctx.editMessageText(spawnModelPanelText(), { parse_mode: 'HTML', reply_markup: spawnModelKeyboard() }).catch(() => {})
+    return
+  }
+
   // Effort picker — apply a tapped effort level
   const effortSet = /^effort:set:(\w+)$/.exec(data)
   if (effortSet && EFFORT_LEVELS.includes(effortSet[1])) {
@@ -12788,6 +12838,7 @@ void (async () => {
               { command: 'reset', description: 'Clear the current conversation in place' },
               { command: 'stream', description: 'How replies arrive: thoughts · actions · off' },
               { command: 'effort', description: 'Reasoning effort — /effort <level> now, or /effort default <level> to pin it for new sessions' },
+              { command: 'spawnmodel', description: 'Default model for agent-spawned sessions (/spawnmodel fable · off)' },
               { command: 'budget', description: 'Daily $ cap with warnings (/budget 20 · off)' },
               { command: 'rewind', description: 'Open the checkpoint picker (undo a turn\'s changes)' },
               { command: 'cost', description: 'Show the session cost readout' },
