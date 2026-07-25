@@ -438,9 +438,12 @@ async function closeTopicEntry(group: string, sessionId: string, t: { threadId: 
 // misses (~2 ticks) before closing, so a transient tmux blip can't flap a healthy topic.
 const topicMissCounts = new Map<string, number>()
 export async function reconcileTopics(panes: string[]): Promise<void> {
-  if (!isTopicMode()) return
-  const group = getGroupChatId()
-  if (!group) return
+  // DM mode (no bound group): the store-pruning half still runs — dead groupless rows (headless
+  // general, tg-spawned sessions; all threadId==null there) otherwise linger as ghost dashboard
+  // cards forever. Only the Telegram-side operations (closing forum topics, the General-anchor
+  // backstop) need the group and are skipped without one.
+  const group = isTopicMode() ? getGroupChatId() : null
+  if (isTopicMode() && !group) return
   const liveSids = new Set<string>()
   for (const p of panes) {
     const sid = await sessionForPane(p)   // stamps unstamped panes as a side effect — idempotent
@@ -465,8 +468,10 @@ export async function reconcileTopics(panes: string[]): Promise<void> {
     if (misses < 2) { topicMissCounts.set(t.sessionId, misses); continue }
     topicMissCounts.delete(t.sessionId)
     if (t.threadId == null) { removeTopic(t.sessionId); continue }   // headless: nothing to close in Telegram — drop the row (same as closeTopicForPane)
+    if (!group) continue   // a threadId without a bound group is stale cross-mode state — leave it for /bind to reconcile
     await closeTopicEntry(group, t.sessionId, { ...t, threadId: t.threadId })
   }
+  if (!group) return
   // Same backstop for the General anchor: it has no topic entry, so the loop above never sees it.
   const anchor = getGeneralSession()
   if (anchor) {
