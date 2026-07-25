@@ -48,8 +48,29 @@ test('a DELIVERED ask is left alone even if the pane is gone', () => {
   expect(planAskReap([ask({ injected: true })], gone, true)).toEqual([])
 })
 
-test('an already-expired ask is not re-reported', () => {
-  expect(planAskReap([ask({ expiredAt: 1000 })], gone, true)).toEqual([])
+// The 11c follow-up: ask 95 sat un-reaped for 80 minutes next to ask 97, which WAS reaped. Both
+// addressed the same dead session; the only difference was that 95 had already fired its 60-minute
+// TTL notice, and the reaper skipped any row carrying expiredAt. That TTL notice says "still
+// waiting; a late answer will still be delivered" — about a session that has ENDED and never even
+// saw the ask, so a late answer is impossible. Expiry must not grant a dead letter immunity: it is
+// exactly the rows that have already told the asker something false that most need correcting.
+// Re-reporting is safe because reapDeadAsk removePending()s the row, so it cannot fire twice.
+test('11c-followup: a pending that ALREADY TTL-notified is still reaped once its target is gone', () => {
+  expect(planAskReap([ask({ id: 95, expiredAt: 1000 })], gone, true).map(p => p.id)).toEqual([95])
+})
+
+test('an expired ask whose target is still ALIVE is left alone (a late answer can still land)', () => {
+  expect(planAskReap([ask({ expiredAt: 1000 })], alive, true)).toEqual([])
+})
+
+test('11c-followup: expired and not-yet-expired dead letters to one dead session reap together', () => {
+  // The live board on 2026-07-25: 95 (expired) and 97 (not) both queued to the same ended session.
+  const picked = planAskReap([ask({ id: 95, expiredAt: 1000 }), ask({ id: 97 })], gone, true)
+  expect(picked.map(p => p.id)).toEqual([95, 97])
+})
+
+test('an expired DELIVERED ask is still left alone — expiry does not widen what may be reaped', () => {
+  expect(planAskReap([ask({ expiredAt: 1000, injected: true })], gone, true)).toEqual([])
 })
 
 // A hermes endpoint is driven by runHermesAsk, not by a tmux pane — "no live pane" says nothing at all

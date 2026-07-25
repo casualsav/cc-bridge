@@ -1,5 +1,49 @@
 # HANDOFF — DM-mode fork fixes, 2026-07-25
 
+> **Framing (owner correction, 2026-07-25 — supersedes earlier briefs).** This project is **not**
+> moving from group/forum mode to DM-only. **Both lanes stay open permanently.** Group mode is
+> first-class and is never a candidate for removal, simplification or deprecation. The DM lane was
+> merely **neglected — built thinner than the group lane and never walked end to end** — and this work
+> brings it to **parity**. Rules that follow: fix a defect in *both* lanes, never just DM; prefer one
+> correct implementation behind a shared predicate (`fleetMode()` is the model) over special-casing
+> DM; and if a fix would improve DM at any cost to group, **stop and ask** rather than trade one off
+> against the other. "The product is moving to DM anyway" is a void argument. The technical
+> conclusions of rounds 1–3 are unaffected.
+
+## ROUND 4 (ctxwin) — 1M context window for spawned sessions + bus dead-letter follow-up
+
+**Task 1 — spawned sessions booted at 200k, now 1M.** Root cause: the `[1m]` suffix was simply absent
+from the launch flags. `token()` (`agent.ts:35`) was a **red herring** — it belongs to
+`codexLaunchCommand` only, and Codex is off (`CODEX_ENABLED = false`, `agent.ts:21`). The Claude path
+is `claudeHarnessLaunch` (`daemon.ts:1285`), which `shellQuote`s every argv element, so `[`/`]` were
+never at risk.
+
+- New pure module **`model-window.ts`** (`wideContextModel`, `spawnWideContext`, `spawnModelFlag`) +
+  tripwire **`spawn-window.test.ts`** (8 tests, RED first).
+- Wired at the single launch-flag site (`daemon.ts`, `spawnSession`, formerly the bare
+  `` launchFlags.push(`--model ${modelArgFor(mAlias)}`) `` line). `modelArgFor` itself is untouched, so
+  the **live** `/model` injection path is unaffected.
+- **Design call: one toggle, not per-alias picker entries.** It composes with every current and future
+  alias, keeps `MODEL_ALIASES` at four, and doesn't leak a 1M entry into the live `/model` picker
+  (which shares that list). `access.spawnContext1m`, **opt-out** — unset/`true` = 1M, only an explicit
+  `false` disables. Toggle lives in `/settings → 🐣` as `🪟 1M context`.
+- **Applies to BOTH lanes** — every `spawnSession` launch, group topics included. No cost to group:
+  same model, bigger window.
+- **Empirically verified on CLI 2.1.205 before shipping**, via `/context` in throwaway panes:
+  `claude-opus-5` → `16.7k/200k`, `claude-opus-5[1m]` → `16.7k/1m`. Also confirmed accepted on the
+  other three aliases (`sonnet[1m]` → 967k, `haiku[1m]` → 1m, `fable[1m]` → 1m).
+- **Known remaining gap (pinned by a test, not assumed closed):** when no alias resolves — cold start,
+  no focused pane, no `spawnModel` default — no `--model` flag is pushed at all and the CLI picks its
+  own model *and* its own 200k window. `spawnModelFlag(null, …)` returns `null` by design.
+
+**Task 2 — dead-letter reap missed an expired row.** Owner's hypothesis **confirmed**: `planAskReap`
+(`agent-bus.ts`) filtered `!p.expiredAt`, so ask 95 (already TTL-notified) was immune while ask 97 to
+the same dead session was reaped. The TTL notice promises "a late answer will still be delivered" —
+false for a session that ended without ever seeing the ask, so an expired row is the one that most
+needs correcting. Dropped the `expiredAt` guard in `planAskReap` **and** in `sweepBus`'s pre-filter
+(`daemon.ts`); re-reporting can't loop because `reapDeadAsk` removes the pending row. Four new
+tripwires in `bus-reap.test.ts`, RED first (reproduced the exact live 95/97 board).
+
 ## ROUND 3 (ccfleet) — bug 11 + 12 SHIPPED, tg v0.4.29, verified live
 
 Diagnosis: `DIAGNOSIS-bug11-wedged-fleet-member.md`. Restart hypothesis **refuted** — @ccbridge hung on

@@ -221,13 +221,20 @@ export function askResultText(status: AskDelivery, toName: string, id: number): 
 //
 // Conservative twice over: an INJECTED ask is already in the target's context and a respawned session
 // can still answer it, and a hermes endpoint has no pane for liveness to mean anything about.
+//
+// `expiredAt` is deliberately NOT a skip condition. Having already fired the 60-minute TTL notice is
+// not a reason to leave a dead letter queued — that notice promises "a late answer will still be
+// delivered", which is false once the target session has ended without ever seeing the ask, so an
+// expired row is the one that most needs correcting. (Live proof: asks 95 and 97 addressed the same
+// ended session; 97 was reaped and 95 sat for 80 minutes solely because it had passed its TTL.)
+// Re-reporting can't loop: reapDeadAsk removes the pending row.
 export function planAskReap(
   pendings: BusPending[],
   isTargetGone: (p: BusPending) => boolean,
   discoveryReady: boolean,
 ): BusPending[] {
   if (!discoveryReady) return []
-  return pendings.filter(p => p.toKind === 'claude' && !p.injected && !p.expiredAt && isTargetGone(p))
+  return pendings.filter(p => p.toKind === 'claude' && !p.injected && isTargetGone(p))
 }
 
 // ---- hop counter (loop guard) ----

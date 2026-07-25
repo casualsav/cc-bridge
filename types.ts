@@ -38,6 +38,7 @@ export type Access = {
   codexEffort?: string     // Codex reasoning effort (low/medium/high/xhigh); overrides CODEX_REASONING_EFFORT env; unset = default
   spawnModel?: string      // default model for `tg spawn` (agent-bus session launch) when the spawner passes no --model; unset = spawnSession's own default
   spawnEffort?: string     // default effort for `tg spawn` when the spawner passes no --effort; unset = spawnSession's own default
+  spawnContext1m?: boolean // spawned sessions boot with the 1M context window (a `[1m]` suffix on the model id) instead of the 200k default (default ON; only an explicit false opts out)
   switchboard?: boolean    // show the live agent-bus roster line on the pinned card (default on) — a display toggle only; tg ask/answer/roster keep working when off. Field name kept for access.json compat.
   dmLanes?: boolean        // per-user DM lanes: each allowlisted user DMing the bot gets its OWN auto-spawned session, replies isolated to that user (default off; single-user installs unaffected)
   claudingDraft?: boolean  // DM-only live "Clauding…" status draft (Bot API 10.1) while a turn runs (default on)

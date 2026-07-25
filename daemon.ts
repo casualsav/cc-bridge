@@ -124,6 +124,7 @@ import {
 } from './prompt-relay.ts'
 import { planStuckSweep, planWedgeEscalation, type StuckState } from './stuck-plan.ts'
 import { planContextWarn } from './ctx-warn.ts'
+import { spawnModelFlag, spawnWideContext } from './model-window.ts'
 import {
   initStatusCard, statusCardText, statusKeyboard, updateSessionPin, updateTopicPins,
   removeSessionPins, refreshSessionPin, sessionPins, pinTextCache, persistSessionPins,
@@ -2636,7 +2637,9 @@ async function sweepBus(): Promise<void> {
   // 11c — dead letters first, so a queued ask to an ended session is reported as never delivered
   // rather than expiring an hour later as "still waiting". Liveness is probed only for the sids that
   // could actually be reaped, and only once discovery has landed (planAskReap enforces the gate too).
-  const reapable = listPending().filter(p => p.toKind === 'claude' && !p.injected && !p.expiredAt)
+  // Expired rows stay in scope on purpose — a TTL notice already told the asker a late answer would
+  // still arrive, which is false for a target that ended without ever seeing the ask (see planAskReap).
+  const reapable = listPending().filter(p => p.toKind === 'claude' && !p.injected)
   const goneSids = new Set<string>()
   if (panesDiscovered && reapable.length) {
     for (const sid of new Set(reapable.map(p => p.toSid))) if (await busTargetGone(sid)) goneSids.add(sid)
@@ -7500,8 +7503,10 @@ function spawnDefaultsText(): string {
   const a = loadAccess()
   return `🐣 <b>Spawn defaults</b> — sessions launched by agents (<code>tg spawn</code>)\n\n` +
     `🧠 Model — <b>${a.spawnModel ? escapeHtml(a.spawnModel) : 'inherit'}</b>\n` +
-    `⚡ Effort — <b>${a.spawnEffort ? escapeHtml(a.spawnEffort) : 'inherit'}</b>\n\n` +
-    `<i>“inherit” falls back to the focused session's dials at spawn time. An explicit --model / --effort on the spawn always wins.</i>`
+    `⚡ Effort — <b>${a.spawnEffort ? escapeHtml(a.spawnEffort) : 'inherit'}</b>\n` +
+    `🪟 Context — <b>${spawnWideContext(a.spawnContext1m) ? '1M' : '200k (default)'}</b>\n\n` +
+    `<i>“inherit” falls back to the focused session's dials at spawn time. An explicit --model / --effort on the spawn always wins.</i>\n` +
+    `<i>🪟 applies to every session the bridge launches — new topics included. Needs a resolved model; a spawn that inherits no model keeps the CLI default.</i>`
 }
 function spawnDefaultsKeyboard(): InlineKeyboard {
   const a = loadAccess()
@@ -7510,6 +7515,7 @@ function spawnDefaultsKeyboard(): InlineKeyboard {
   kb.row().text(`${a.spawnModel ? '' : '✅ '}🧠 Inherit model`, 'spd:m:off').row()
   for (const e of EFFORT_LEVELS) kb.text(`${a.spawnEffort === e ? '✅ ' : ''}${e === 'medium' ? 'med' : e}`, `spd:e:${e}`)
   kb.row().text(`${a.spawnEffort ? '' : '✅ '}⚡ Inherit effort`, 'spd:e:off').row()
+  kb.text(`${spawnWideContext(a.spawnContext1m) ? '✅' : '☐'} 🪟 1M context`, 'spd:w:toggle').row()
   return kb.text('‹ Back', 'spd:back')
 }
 
@@ -8167,7 +8173,16 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
     // to interpolate; --effort rejects 'auto' (a statusline state, not a flag level), so skip it.
     const launchFlags: string[] = []
     const mAlias = inherit?.model?.split(/\s+/)[0]?.toLowerCase()
-    if (mAlias && MODEL_ALIASES.includes(mAlias)) launchFlags.push(`--model ${modelArgFor(mAlias)}`)
+    // Every spawned session gets the 1M window by default — the `[1m]` model-id suffix is the only
+    // mechanism for it, and the 200k default has been killing long autonomous chains mid-task.
+    // Applies to BOTH lanes (group topics and DM/headless spawns): same launcher, same window.
+    // Only reachable when an alias resolved; a spawn with no model keeps the CLI's own default.
+    const modelFlag = spawnModelFlag(
+      mAlias && MODEL_ALIASES.includes(mAlias) ? mAlias : null,
+      MODEL_ALIAS_IDS,
+      spawnWideContext(loadAccess().spawnContext1m),
+    )
+    if (modelFlag) launchFlags.push(modelFlag)
     if (inherit?.effort && inherit.effort !== 'auto' && EFFORT_LEVELS.includes(inherit.effort)) launchFlags.push(`--effort ${inherit.effort}`)
     // Mode too: --allow-dangerously-skip-permissions only makes bypass AVAILABLE — on its own the
     // session boots in NORMAL mode, NOT bypass — so pass --permission-mode for every non-default
@@ -9462,6 +9477,17 @@ bot.on('callback_query:data', async ctx => {
     await ctx.answerCallbackQuery().catch(() => {})
     if (data === 'spd:panel') await showHtmlPanel(ctx, 'edit', spawnDefaultsText(), spawnDefaultsKeyboard())
     else await showSettings(ctx, 'edit')
+    return
+  }
+  // 🪟 1M-context toggle — read at spawn time by spawnSession's launch flags. Opt-out, so the
+  // stored value is only ever `false`; clearing it back to undefined restores the 1M default.
+  if (data === 'spd:w:toggle') {
+    if (!(await cbAuth(ctx))) return
+    const a = loadAccess()
+    a.spawnContext1m = spawnWideContext(a.spawnContext1m) ? false : undefined
+    saveAccess(a)
+    await ctx.answerCallbackQuery().catch(() => {})
+    await showHtmlPanel(ctx, 'edit', spawnDefaultsText(), spawnDefaultsKeyboard())
     return
   }
   // 🐣 model/effort pick — persisted; read by `tg spawn` when no explicit flag is passed.

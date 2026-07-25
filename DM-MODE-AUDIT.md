@@ -1,5 +1,14 @@
 # DM-mode fork audit — bug 4 onward
 
+> **Framing (owner correction, 2026-07-25).** Both lanes are permanent. Group/forum mode is **not**
+> legacy, deprecated, or being migrated away from — it is a first-class, permanently supported lane.
+> The DM lane was simply **under-built relative to the group lane** and never walked end to end; this
+> audit is about bringing it to **parity**. Where a defect exists in both lanes, fix both, and prefer
+> one correct implementation behind a shared predicate (the `fleetMode()` pattern) over special-casing
+> DM. Nothing below argues for removing or simplifying a group-mode path. The technical findings are
+> unchanged — the root cause (`isTopicMode()` used as a proxy for "more than one session") was never a
+> migration artifact; it was a real bug in a lane nobody had exercised.
+
 Read-only audit. **Nothing was edited, committed, or deployed.**
 
 **Pinned to:** HEAD `8775d1e` (tg v0.4.26) **plus the two uncommitted fix hunks** already in the working
@@ -269,9 +278,10 @@ To drive several sessions, bind a forum group as the command center: create a gr
 `claude` → `:2179` hint fires.
 
 So a fresh DM-only install, the moment it provisions its own coding peer, tells the owner that DM mode
-can only drive one session and he should go create a forum group — the exact opposite of the product
-direction, triggered by the daemon itself. Loud rather than silent, but wrong, and it is direct
-evidence that this branch was never revisited when chat lanes landed.
+can only drive one session and he should go create a forum group — advice that is simply false here
+(the daemon just proved otherwise by spawning a second session), triggered by the daemon itself.
+Binding a group stays a perfectly good choice; the defect is that the hint fires on the bridge's own
+spawn, and it is direct evidence that this branch was never revisited when chat lanes landed.
 
 ---
 
