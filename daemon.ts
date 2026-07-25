@@ -109,7 +109,7 @@ import { initQueue, readLater, writeLater, sweepLaterQueues, LATER_SWEEP_MS } fr
 import {
   AGENT_BUS_ENABLED, AGENT_BUS_PIN_UI,
   createPending, getPending, removePending, putPending, listPending, markInjected, expirePending, dropExpired, LATE_ANSWER_GRACE_MS, ASK_TTL_MS,
-  recordAgentAsk, resetHops, HOP_LIMIT,
+  recordAgentAsk, resetHops, HOP_LIMIT, askResultText, type AskDelivery,
   resolveEndpoint, nameForEndpoint, normalizeEndpointName, confineRef, sharedDir, ensureSharedDir, appendLedger, tailLedger,
   getSeen, markSeen, digestSince, DIGEST_SCAN,
   type BusEndpoint, type BusPending, type LedgerEntry,
@@ -2538,16 +2538,19 @@ async function notifyBusText(surfaceSid: string, text: string): Promise<void> {
 // pane is re-resolved from the sessionId every time (panes churn on respawn/adopt). busInFlight
 // guards the immediate attempt (in the `ask` handler) from racing the 15s sweep into a double-inject.
 const busInFlight = new Set<number>()
-async function tryDeliverAsk(p: BusPending): Promise<boolean> {
+async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
   const cur = getPending(p.id)
-  if (!cur || cur.injected || cur.expiredAt || busInFlight.has(cur.id)) return false   // never deliver a timed-out ask to the target
+  if (!cur || cur.injected || cur.expiredAt || busInFlight.has(cur.id)) return 'busy'   // never deliver a timed-out ask to the target
   busInFlight.add(cur.id)   // claim BEFORE the awaits so the immediate attempt + the 15s sweep can't both proceed
   try {
     const pane = await paneForSession(cur.toSid).catch(() => null)
-    if (!pane) return false
+    if (!pane) return 'no-session'
     const cap = await capturePane(pane).catch(() => '')
-    if (!cap || !onNormalPrompt(cap)) return false
-    if (bashModeArmed(cap)) return false
+    if (!cap) return 'no-session'
+    // Not at a prompt: 'busy' if a turn is actually running (self-clearing), 'wedged' if nothing is —
+    // the @ccbridge shape, where an unrecognized screen owns the pane and no ask will ever land (11b).
+    if (!onNormalPrompt(cap)) return detectWorking(cap) ? 'busy' : 'wedged'
+    if (bashModeArmed(cap)) return 'busy'
     const room = busLedgerRoom()
     // Digest (agent-bus P2): prepend the bus activity this endpoint missed since it was last caught up,
     // so the ask arrives WITH ambient context — pull-not-push (only ever handed over on a delivery it's
@@ -2570,7 +2573,7 @@ async function tryDeliverAsk(p: BusPending): Promise<boolean> {
       // visible from inside the session too, not only on the asker's side.
       void notifyBusRich(cur.toSid, `<b>@${escapeHtml(cur.fromName)}</b> messaged <b>@${escapeHtml(cur.toName)}</b>`, cur.text)
     }
-    return ok
+    return ok ? 'delivered' : 'busy'   // a refused paste is transient — the 15s sweep retries
   } finally { busInFlight.delete(cur.id) }
 }
 
@@ -4247,8 +4250,10 @@ async function handleCall(
           void runHermesAsk(p, cfg)
           text = `asked @${toName} (ask ${p.id}) — running; the answer arrives when it finishes`
         } else {
-          void tryDeliverAsk(p)   // attempt now; sweepBus retries if the target is mid-turn
-          text = `asked @${toName} (ask ${p.id}) — async; they answer with \`tg answer ${p.id}\``
+          // AWAITED (bug 11b): the outcome IS the answer to "did that land?". Reporting the same
+          // "asked @X — async" line for a wedged or dead target is what let two asks vanish into
+          // @ccbridge. sweepBus still retries anything not delivered here.
+          text = askResultText(await tryDeliverAsk(p).catch(() => 'busy' as const), toName, p.id)
         }
         break
       }
