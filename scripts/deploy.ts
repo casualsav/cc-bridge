@@ -13,7 +13,7 @@
 //   bun run deploy major      # 0.0.56 → 1.0.0
 //   bun run deploy 0.1.2      # set an explicit version
 //   bun run deploy --no-restart            # ship to cache but leave the running daemon alone
-//   bun run deploy --commit "msg"          # also git add -A && commit && push after a clean deploy
+//   bun run deploy --commit "msg"          # also commit (version files only) + push after a clean deploy
 //   bun run deploy --dry-run               # print the plan (files, version bump, cache path) and exit
 //
 // Multi-plugin (multi-channel.md P4): one repo, three plugins in one marketplace.json —
@@ -464,7 +464,18 @@ if (!cfg.restartTelegram) {
 // ---- 7. optional commit + push ----
 if (commitMsg) {
   step('committing + pushing')
-  const add = sh('git', ['add', '-A'], REPO); if (add.status !== 0) die(`git add failed: ${add.stderr}`)
+  // EXPLICIT PATHS, never `git add -A`. This checkout is shared by concurrent agent sessions, so a
+  // whole-tree stage sweeps whatever another session has in flight into the release commit — the
+  // same class of accident as `git stash` here (see CLAUDE.md). Stage only what a deploy itself
+  // changed: the version files, plus the materialized plugin dir for slack/discord.
+  const owned = [PLUGIN_JSON, MARKET_JSON, ...(cfg.pluginDir ? [cfg.pluginDir] : [])]
+  const add = sh('git', ['add', '--', ...owned], REPO); if (add.status !== 0) die(`git add failed: ${add.stderr}`)
+  const others = sh('git', ['status', '--porcelain'], REPO).stdout
+    .split('\n').filter(l => l.trim() && !l.startsWith('M  ') && !l.startsWith('A  ')).map(l => l.slice(3))
+  if (others.length) {
+    console.log(`  note: NOT committed (not this deploy's to stage — commit them yourself):`)
+    for (const f of others) console.log(`      ${f}`)
+  }
   const body = `${commitMsg}\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`
   const c = sh('git', ['commit', '-q', '-m', body], REPO); if (c.status !== 0) die(`git commit failed: ${c.stderr || c.stdout}`)
   const p = sh('git', ['push'], REPO); if (p.status !== 0) die(`git push failed: ${p.stderr}`)
@@ -472,4 +483,5 @@ if (commitMsg) {
 }
 
 console.log(`\n✓ deployed [${cfg.id}] ${next}${commitMsg ? ' (committed + pushed)' : ''}`)
-if (!commitMsg) console.log(`  next: git add -A && git commit -m "…(${cfg.id} v${next})" && git push`)
+// Explicit paths, never `git add -A` — this checkout is shared (CLAUDE.md).
+if (!commitMsg) console.log(`  next: git add -- .claude-plugin/ && git commit -m "…(${cfg.id} v${next})" && git push`)
