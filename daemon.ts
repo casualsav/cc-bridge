@@ -1131,8 +1131,15 @@ async function rememberPaneAgentTranscript(pane: string, path: string): Promise<
   const kind: AgentKind = basename(path).startsWith('rollout-') ? 'codex' : 'claude'
   const current = getTopicBySession(sid)
   const conversation = agentSessionId(path)
-  if (current && (topicAgent(current) !== kind || current.agentSessionId !== conversation))
+  if (current && (topicAgent(current) !== kind || current.agentSessionId !== conversation)) {
     updateTopic(sid, { ...(kind === 'codex' ? { agent: kind } : {}), agentSessionId: conversation })
+    // A NEW conversation id for a session we already knew means its context was emptied (`/clear`).
+    // Advance the bus digest watermark to now, so the next ask doesn't hand the fresh session a
+    // catch-up of everything that happened before the clear — measured at 807 chars, including the
+    // very message the clear was meant to discard. `/clear` is the one lever whose whole value is
+    // that it's total, and a digest quietly made it partial.
+    if (current.agentSessionId && conversation) markSeen(sid, Date.now())
+  }
   if (kind === 'claude' && conversation) {
     try { recordSessionHarness(conversation, await paneHarnessProfile(pane)) }
     catch (error) { process.stderr.write(`daemon: could not persist harness for ${conversation}: ${error instanceof Error ? error.message : String(error)}\n`) }
@@ -2608,6 +2615,10 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
   } finally { busInFlight.delete(cur.id) }
 }
 
+// Synthetic asker id for daemon-originated asks (the context nudge). Deliberately not a session id:
+// nothing resolves it to a pane, and deliverAnswerToAsker branches on it rather than trying.
+const SYSTEM_SID = '@system'
+
 // A bus target counts as GONE only when every signal agrees, because a false positive drops a live
 // ask: no pane resolves for its session id, no open session row claims it (a claude-update bounce or a
 // respawn briefly has no pane), and it isn't a bound DM lane (revived on the owner's next message).
@@ -2621,18 +2632,26 @@ async function busTargetGone(sid: string): Promise<boolean> {
 
 // Fail a queued ask whose target session has ended (11c): drop it, and tell the asker the truth —
 // never delivered — instead of leaving the TTL to claim an hour later that we're "still waiting".
-async function reapDeadAsk(p: BusPending, room: string): Promise<void> {
+// `delivered` distinguishes the two ways a target can strand an ask, because the asker acts on the
+// difference: undelivered means "it never saw this, re-ask elsewhere", delivered means "it read this
+// and died mid-task, the work may be half-done".
+async function reapDeadAsk(p: BusPending, room: string, delivered = false): Promise<void> {
   removePending(p.id)
-  appendLedger(room, { ts: Date.now(), kind: 'expire', from: p.toName, to: p.fromName, id: p.id, text: 'never delivered — target session ended' })
-  process.stderr.write(`daemon: ask ${p.id} to @${p.toName} (${p.toSid}) reaped — target session ended, never delivered\n`)
+  const why = delivered ? 'delivered but the target session ended before answering' : 'never delivered — target session ended'
+  appendLedger(room, { ts: Date.now(), kind: 'expire', from: p.toName, to: p.fromName, id: p.id, text: why })
+  process.stderr.write(`daemon: ask ${p.id} to @${p.toName} (${p.toSid}) reaped — ${why}\n`)
   const askerPane = await paneForSession(p.fromSid).catch(() => null)
   const own = askerPane ? await outboundTargetsFor(askerPane).catch(() => []) : []
+  const card = delivered
+    ? `❌ Ask ${p.id} to <b>${escapeHtml(p.toName)}</b> will never be answered — that session ended after receiving it. Removed from the queue.`
+    : `❌ Ask ${p.id} to <b>${escapeHtml(p.toName)}</b> was never delivered — that session has ended. Removed from the queue.`
   for (const { chat, thread } of own.length ? own : await fleetSurfaceFor(askerPane)) {
-    void channel.sendText(chat,
-      `❌ Ask ${p.id} to <b>${escapeHtml(p.toName)}</b> was never delivered — that session has ended. Removed from the queue.`,
-      { silent: true, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
+    void channel.sendText(chat, card, { silent: true, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
   }
-  if (askerPane) void busDeliver(askerPane, formatAnswerBlock('system', p.id, `(ask ${p.id} to @${p.toName} was never delivered — that session ended before it reached a prompt; it is no longer queued)`))
+  const block = delivered
+    ? `(ask ${p.id} to @${p.toName} will never be answered — that session ended after receiving it; it is no longer queued)`
+    : `(ask ${p.id} to @${p.toName} was never delivered — that session ended before it reached a prompt; it is no longer queued)`
+  if (askerPane) void busDeliver(askerPane, formatAnswerBlock('system', p.id, block))
 }
 
 // 15s sweep: reap dead letters, expire un-answered asks (tell the asker) + deliver queued asks whose
@@ -2651,6 +2670,16 @@ async function sweepBus(): Promise<void> {
     for (const sid of new Set(reapable.map(p => p.toSid))) if (await busTargetGone(sid)) goneSids.add(sid)
   }
   for (const p of planAskReap(reapable, q => goneSids.has(q.toSid), panesDiscovered)) await reapDeadAsk(p, room).catch(() => {})
+  // The other half of 11c: an ask that WAS delivered and whose target then ended (a `tg kill`, a
+  // crash) can never be answered either — but the reap above only covers undelivered ones, so this
+  // one used to sit out the full TTL and then tell the asker "still open; a late answer will be
+  // delivered if it arrives". It cannot be. Same conservative liveness probe; expired rows are left
+  // alone (their notice already went out, and a dead target can't send the late answer anyway).
+  if (panesDiscovered) {
+    for (const p of listPending().filter(q => q.toKind === 'claude' && q.injected && !q.expiredAt)) {
+      if (await busTargetGone(p.toSid).catch(() => false)) await reapDeadAsk(p, room, true).catch(() => {})
+    }
+  }
   for (const p of expirePending(Date.now())) {
     appendLedger(room, { ts: Date.now(), kind: 'expire', from: p.toName, to: p.fromName, id: p.id, text: 'timed out' })
     // Suppress the notice when the target has SUCCESSFULLY answered any ask from this asker since this
@@ -2686,6 +2715,19 @@ async function deliverAnswerToAsker(pending: BusPending, answerer: string, body:
   const cur = getPending(pending.id)
   if (!cur) return `!ask ${pending.id} is already closed (answered, or its 24h late-answer window elapsed)`
   removePending(cur.id)
+  // A @system ask (the context nudge) has no asker session to deliver back into — and must not
+  // borrow one: injecting the answer into the WORKER would wake it and grow the very context the
+  // nudge was about. The ledger entry plus the owner-facing card below are its whole audit trail.
+  if (cur.fromSid === SYSTEM_SID) {
+    appendLedger(room, { ts: Date.now(), kind: 'answer', from: answerer, to: 'system', id: cur.id, text: body, refs })
+    void (async () => {
+      for (const { chat, thread } of await fleetSurface()) {
+        await channel.sendText(chat, `🧹 <b>@${escapeHtml(answerer)}</b> handled a context nudge (ask ${cur.id}):\n<blockquote expandable>${escapeHtml(body)}</blockquote>`,
+          { silent: true, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
+      }
+    })()
+    return `logged (ask ${cur.id}) — @system has no session to deliver into; the owner got the summary`
+  }
   const askerPane = await paneForSession(cur.fromSid).catch(() => null)
   if (!askerPane) { putPending(cur); return `!@${cur.fromName}'s session is no longer running — not delivered` }
   // A late answer (the ask had already timed out but its record was kept) still lands — flag it so the
@@ -3173,11 +3215,25 @@ function maybeWarn(type: string, pct: number, resetKey: string, account: Account
 // It is now called per pane from sweepStuckPanes (which already captures every pane in the fleet, so
 // this costs no extra tmux reads), keyed by that pane's session, and routed to that session's own
 // surface — falling back to the fleet surface when it has none (a headless session; bug 11a).
+// Route the context heads-up to the orchestrator chat lane as a waking bus ask instead of a Telegram
+// card in the owner's DM. The owner asked for his fleet's context to be managed FOR him: a card in
+// his chat is a decision on his plate, while an ask wakes @chat and starts a turn there, and the
+// `tg answer` it owes back is the audit trail of what was done and why.
+// ONE-LINE REVERT: set this to false and the 💾 card goes back to the owner exactly as before.
+const CTX_NUDGE_TO_CHAT = true
+
+// A crossing seen while the session was mid-turn. Held here until that session is back at a prompt:
+// the decision depends on whether the work in flight finished, `/compact` is refused mid-turn, and a
+// notice that says "busy" by the time it's read is worse than one that arrives a few seconds later.
+// Keyed by session; a later rung overwrites an unsent earlier one (only the newest reading matters).
+const pendingCtxNudge = new Map<string, { step: number; label: string }>()
+
 function maybeWarnContext(sid: string, pane: string | null, pct: number | null, label: string): void {
   const { warn, next } = planContextWarn(ctxWarn.get(sid) ?? 0, pct)
   if ((ctxWarn.get(sid) ?? 0) !== next) { if (next === 0) ctxWarn.delete(sid); else ctxWarn.set(sid, next); saveUsageNotifState() }
   if (!warn) return
   process.stderr.write(`daemon: context warn fired threshold=${warn} (pct=${pct}) for ${label} [${sid}]\n`)
+  if (CTX_NUDGE_TO_CHAT) { pendingCtxNudge.set(sid, { step: warn, label }); return }
   void (async () => {
     const own = await outboundTargetsFor(pane).catch(() => [])
     const targets = own.length ? own : await fleetSurfaceFor(pane)
@@ -3188,6 +3244,38 @@ function maybeWarnContext(sid: string, pane: string | null, pct: number | null, 
       await channel.sendText(String(chat), `💾 ${who} ${warn}% full — consider <code>/compact</code> or wrapping up soon.`, { ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
     }
   })()
+}
+
+// Deliver a held nudge now that its session is idle. Called from the pane sweep with that pane's
+// capture already in hand, so the idle test costs no extra tmux read and the payload's state is the
+// state at DELIVERY, not at crossing. Mints a bus ask from @system to the chat lane — the only path
+// that actually wakes a session and starts a turn there.
+async function flushCtxNudge(sid: string, pane: string, cap: string, status: StatuslineData | null): Promise<void> {
+  const held = pendingCtxNudge.get(sid)
+  if (!held) return
+  const lane = listDmChatSessions()[0]?.sessionId
+  if (!lane || lane === sid) { pendingCtxNudge.delete(sid); return }   // no orchestrator to tell, or it IS the orchestrator
+  if (!onNormalPrompt(cap) || detectWorking(cap) || bashModeArmed(cap)) return   // still mid-turn — hold
+  pendingCtxNudge.delete(sid)
+  // What it just finished, so the compact-vs-clear call can be made without a round trip. Idle, so
+  // the last final reply IS the state of the work; one transcript read per nudge (rare by design).
+  let doing = ''
+  try {
+    const file = await transcriptForPane(pane, await paneCwd(pane))
+    const last = file ? latestFinalReply(file) : null
+    if (last?.text) doing = last.text.replace(/\s+/g, ' ').slice(0, 200)
+  } catch {}
+  const pct = status?.ctxPct ?? held.step
+  const win = status?.ctxWindow ? ` of ${status.ctxWindow}` : ''
+  const text = [
+    `@${held.label} has crossed ${held.step}% context (now ${pct}%${win}) and is IDLE at a prompt — decide now, before it starts another turn.`,
+    doing ? `Last turn ended with: ${doing}` : 'No last reply on record.',
+    `Levers: \`tg slash ${held.label} "/compact"\` keeps the thread, \`tg slash ${held.label} "/clear"\` empties it. Answer this ask with what you did and why.`,
+  ].join('\n\n')
+  const p = createPending({ fromSid: SYSTEM_SID, toSid: lane, fromName: 'system', toName: nameForEndpoint(lane, busEndpoints()), text, refs: [] }, Date.now())
+  appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'ask', from: 'system', to: p.toName, id: p.id, text, refs: [] })
+  process.stderr.write(`daemon: ctx nudge ask ${p.id} → @${p.toName} about ${held.label} at ${pct}%\n`)
+  await tryDeliverAsk(p).catch(() => {})   // 'busy' just means the lane is mid-turn — the 15s sweep retries
 }
 
 // A limit is exhausted: relay it (Claude can't, being limited) and schedule the reset
@@ -12417,7 +12505,10 @@ async function sweepStuckPanes(): Promise<void> {
       const sid = await sessionForPane(pane, false).catch(() => null)
       if (sid) {
         liveSids.add(sid)
-        maybeWarnContext(sid, pane, parseStatusline(cap)?.ctxPct ?? null, getTopicBySession(sid)?.name || sid)
+        const status = parseStatusline(cap)
+        maybeWarnContext(sid, pane, status?.ctxPct ?? null, getTopicBySession(sid)?.name || sid)
+        // Same capture: release a held nudge the moment this session is back at a prompt.
+        await flushCtxNudge(sid, pane, cap, status).catch(() => {})
       }
     }
     if (cap && isBypassWarning(cap)) { await autoAcceptBypassWarning(pane, now); continue }

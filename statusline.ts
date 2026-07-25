@@ -8,6 +8,7 @@ import { stripAnsi } from './prompt.ts'
 
 export type StatuslineData = {
   ctxPct: number | null
+  ctxWindow?: string | null   // the window ctxPct is a fraction of, e.g. "1000k" / "200k" (optional: pre-existing literals predate it)
   tokens: string | null
   cost: string | null
   sessionTime: string | null
@@ -115,6 +116,10 @@ function parseStatuslineBlock(block: string): StatuslineData | null {
   }
   const data: StatuslineData = {
     ctxPct: (() => { const m = block.match(/ctx\D*?(\d+)\s*%/i); return m ? parseInt(m[1], 10) : null })(),
+    // The window the percentage is OF ("1000k" / "200k"), from "ctx ██░ 4%/1000k". A fill percentage
+    // is per-session — 50% of a haiku worker's 200k is a fifth of 50% of a 1M session — so anything
+    // deciding what to do about a full session needs the denominator, not just the ratio.
+    ctxWindow: (() => { const m = block.match(/ctx\D*?\d+\s*%\s*\/\s*(\d+[km])/i); return m ? m[1].toLowerCase() : null })(),
     tokens: up || down ? `↑${up ?? '?'} ↓${down ?? '?'}` : null,
     cost: costRaw ? `$${parseFloat(costRaw).toFixed(2)}` : null,
     sessionTime: str(new RegExp(`\\$[\\d.]+[^|]*\\|\\s*\\D*?${STATUS_DUR}`)),  // first duration after cost

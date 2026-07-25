@@ -109,3 +109,12 @@ test('parseStatusline survives the agents sidebar view (statusline above, agent 
   expect(d.ctxPct).toBe(20)
   expect(d.h5).toEqual({ pct: 52, reset: '1h35m' })
 })
+
+test('ctxWindow captures the denominator the percentage is of', () => {
+  // The nudge payload must carry the window: 50% of a haiku worker's 200k is a fifth of 50% of a
+  // 1M session, and a ratio read as fleet-uniform is a wrong compact-vs-clear call.
+  const line = (ctx: string) => `  ε:max | ✻think | ${ctx} | ↑176.4k ↓705 | $374.77 | ⧗25h`
+  expect(parseStatusline(line('ctx ██░░░░░░░░ 18%/1000k'))?.ctxWindow).toBe('1000k')
+  expect(parseStatusline(line('ctx █░░░░░░░░░ 13%/200k'))?.ctxWindow).toBe('200k')
+  expect(parseStatusline(line('ctx ██░ 4%'))?.ctxWindow).toBeNull()   // older statusline, no denominator
+})

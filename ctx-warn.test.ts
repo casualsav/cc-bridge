@@ -5,7 +5,7 @@
 // first session past 50% silences every other session) and mis-attribute the warning to whoever holds
 // focus. The planner is therefore per-session, and keyed by sid — tmux recycles pane ids, and a
 // pane-keyed map hands a fresh session the dead one's watermark.
-import { test, expect } from 'bun:test'
+import { test, expect, describe } from 'bun:test'
 import { planContextWarn } from './ctx-warn.ts'
 
 test('warns once at 50, then once at 75', () => {
@@ -63,4 +63,31 @@ test('12: a fresh session on a recycled key starts un-armed', () => {
   const afterDead = planContextWarn(0, 80).next   // dead session reached 75
   expect(afterDead).toBe(75)
   expect(planContextWarn(0, 55).warn).toBe(50)    // new session, own key, own zero — warns normally
+})
+
+// A CLEARED session reports no context at all: Claude Code drops the `ctx …%/…` segment from the
+// statusline entirely, so the scrape yields null — NOT 0. That distinction is load-bearing and was
+// verified live (a /clear'd pane's footer has no ctx segment). Treating null as a reading would
+// re-arm the ladder on every unreadable sample and re-fire the nudge; treating it as a no-op means
+// the ladder re-arms on the next REAL reading below 50, which a cleared session produces as soon as
+// it does any work. Pinned here because it is exactly the class of bug that bit us elsewhere: a
+// display value standing in for state.
+describe('cleared session (null reading)', () => {
+  test('null is a no-op, never a reset — the watermark survives an unreadable sample', () => {
+    expect(planContextWarn(75, null)).toEqual({ warn: null, next: 75 })
+    expect(planContextWarn(50, null)).toEqual({ warn: null, next: 50 })
+    expect(planContextWarn(0, null)).toEqual({ warn: null, next: 0 })
+  })
+
+  test('the ladder re-arms on the first real sub-50 reading after the clear, and fires again later', () => {
+    // /clear → no ctx segment (null, no-op) → first real turn reads low → re-armed → 50 fires again.
+    expect(planContextWarn(75, null).next).toBe(75)
+    expect(planContextWarn(75, 3)).toEqual({ warn: null, next: 0 })
+    expect(planContextWarn(0, 51)).toEqual({ warn: 50, next: 50 })
+  })
+
+  test('a null sample cannot re-fire a rung that already fired', () => {
+    expect(planContextWarn(50, null).warn).toBeNull()
+    expect(planContextWarn(50, 55).warn).toBeNull()   // still inside the same rung
+  })
 })
