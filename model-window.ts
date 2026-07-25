@@ -8,6 +8,19 @@
 // tmux pane — daemon.ts owns the actual spawn.
 export const WIDE_CONTEXT_SUFFIX = '[1m]'
 
+// Not every model HAS a 1M variant, and asking for one that doesn't is fatal: the API answers
+// "400 The long context beta is not yet available for this subscription" — which reads like a
+// billing problem but is really per-MODEL — and the session is dead on arrival, its first turn
+// replaced by that error. Measured 2026-07-25 (`claude -p --model <id>`): opus[1m], sonnet[1m] and
+// claude-fable-5[1m] all answer normally; haiku[1m] 400s while plain haiku is fine. So the suffix
+// is withheld from haiku rather than the whole feature being disabled.
+const NO_WIDE_CONTEXT = /haiku/i
+
+/** Whether this model identifier can take the 1M window at all. */
+export function supportsWideContext(model: string): boolean {
+  return !NO_WIDE_CONTEXT.test(model)
+}
+
 /** Append the 1M-window suffix to a model identifier. Idempotent — never doubles the suffix. */
 export function wideContextModel(model: string): string {
   return model.endsWith(WIDE_CONTEXT_SUFFIX) ? model : `${model}${WIDE_CONTEXT_SUFFIX}`
@@ -34,5 +47,5 @@ export function spawnModelFlag(
 ): string | null {
   if (!alias) return null
   const arg = aliasIds[alias] ?? alias
-  return `--model ${wide ? wideContextModel(arg) : arg}`
+  return `--model ${wide && supportsWideContext(arg) ? wideContextModel(arg) : arg}`
 }

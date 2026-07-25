@@ -45,6 +45,18 @@ by its topic name.
   bus events.
 - `tg <verb> --help` prints that verb's usage without doing anything.
 
+**Need a throwaway session to test bus behaviour?** `tg spawn` IS the sanctioned way — there is no
+second path and you should never hand-roll one with `tmux new-window` / a bare `claude` invocation
+(those miss the pane stamps, the per-instance socket, the trust store and the launch dials, so the
+pane isn't a bridge session at all and proves nothing about real behaviour):
+
+    tg spawn probe --dir "$(tg shared)" "first task"   # --dir must already exist
+    tg kill probe                                       # ends it · tg reopen probe undoes that
+
+A one-shot `claude -p` is fine for isolating a NON-bridge question (does this model id work?), but
+run it as `env -u TMUX -u TMUX_PANE claude -p …` — inside a bridged pane it otherwise re-stamps the
+parent session's transcript.
+
 An ask you receive may be preceded by a `<tg bus-digest since …>…</tg>` block — ambient catch-up on
 bus traffic you missed while away. It's FYI only: read it for context, don't reply to it or act on it;
 answer only the `<tg @you ask=ID>` that follows.

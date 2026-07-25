@@ -89,6 +89,18 @@ function isCommandNoise(text: string): boolean {
   return /^no response requested\.?$/i.test(text.trim())
 }
 
+// An API failure is also written as a synthetic assistant entry, whose whole body is
+// "API Error: 400 …". Relayed verbatim it reads as the SESSION talking — a bare status code lands
+// in the owner's chat with no hint that the turn failed or which session it came from (a spawn that
+// asked for a context window its model doesn't have did exactly that). Label it instead of
+// dropping it: the turn really did produce nothing, and silence would be worse than a bad reply.
+export function legibleApiError(text: string): string {
+  const m = /^API Error:\s*(\d{3})?\s*(.*)$/s.exec(text.trim())
+  if (!m) return text
+  const detail = m[2]!.trim()
+  return `⚠️ **API error${m[1] ? ` ${m[1]}` : ''}** — the request was rejected, so this turn produced no reply.${detail ? `\n\n${detail}` : ''}`
+}
+
 // A resumable session: id, its working dir, last-activity time, a short title (the first real
 // user message), and the projects root it was found under (identifies its account). For the
 // /resume picker.
@@ -256,7 +268,7 @@ export function latestFinalReply(file: string): { uuid: string; text: string } |
     if (!isMainAssistantText(e)) continue
     const text = lastTextOf(e.message?.content).trim()
     if (isCommandNoise(text)) continue
-    return { uuid: e.uuid ?? '', text }
+    return { uuid: e.uuid ?? '', text: legibleApiError(text) }
   }
   return null
 }
@@ -276,7 +288,7 @@ export function finalRepliesAfter(file: string, afterUuid: string): { uuid: stri
   for (let i = at + 1; i < entries.length; i++) {
     const e = entries[i]
     if (isRealUserText(e)) { flush(); continue }  // turn boundary (real prompts only — not injected skill/meta entries)
-    if (isMainAssistantText(e)) { const text = lastTextOf(e.message?.content).trim(); if (!isCommandNoise(text)) pending = { uuid: e.uuid ?? '', text } }
+    if (isMainAssistantText(e)) { const text = lastTextOf(e.message?.content).trim(); if (!isCommandNoise(text)) pending = { uuid: e.uuid ?? '', text: legibleApiError(text) } }
   }
   flush()
   return out

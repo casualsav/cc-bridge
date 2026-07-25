@@ -1,9 +1,9 @@
 // Transcript parsing — the off-MCP outbound path. Fixtures are throwaway JSONL files.
-import { test, expect } from 'bun:test'
+import { test, expect, describe } from 'bun:test'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnActivity, currentTurnFeed, currentTurnTokens, slashResultAfter } from './transcript.ts'
+import { latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnActivity, currentTurnFeed, currentTurnTokens, slashResultAfter, legibleApiError } from './transcript.ts'
 
 function fixture(entries: object[]): string {
   const f = join(mkdtempSync(join(tmpdir(), 'tg-transcript-')), 'session.jsonl')
@@ -200,4 +200,18 @@ test('slashResultAfter surfaces a rejected command as an error', () => {
   // An assistant merely SAYING "Unknown command" must never match (the pane-regex false positive).
   const chat = fixture([{ type: 'assistant', uuid: 'a1', timestamp: at(5000), message: { content: [{ type: 'text', text: 'Unknown command: /xyz' }] } }])
   expect(slashResultAfter(chat, 2000)).toBe(null)
+})
+
+describe('API-error replies', () => {
+  test('a synthetic API error is labelled, not relayed as the session speaking', () => {
+    // The live case: a spawn asked for a 1M window its model has no variant of, and the owner's
+    // chat received the bare string below as if the new session had said it.
+    expect(legibleApiError('API Error: 400 The long context beta is not yet available for this subscription.'))
+      .toBe('⚠️ **API error 400** — the request was rejected, so this turn produced no reply.\n\nThe long context beta is not yet available for this subscription.')
+  })
+
+  test('an ordinary reply is untouched', () => {
+    expect(legibleApiError('Done — the tests pass.')).toBe('Done — the tests pass.')
+    expect(legibleApiError('I hit an API Error: 500 while calling out')).toBe('I hit an API Error: 500 while calling out')
+  })
 })
