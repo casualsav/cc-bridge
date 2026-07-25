@@ -99,12 +99,16 @@ type PluginCfg = {
 
 // Neutral core modules shared by the non-telegram daemons (multi-channel.md: "live at repo ROOT").
 // Slack/discord closures = these + the platform files + the platform's ctl entry, derived from the
-// daemon AND ctl import graphs (`bun … closure`). Keep in sync if the imports change — the
-// `bun build <daemon>` cache gate below fails the deploy if a listed module is missing or an
-// unlisted one got imported.
+// daemon AND ctl import graphs. Keep in sync if the imports change.
+//
+// The gate that actually enforces this is `plugin-closure.test.ts`, NOT the `bun build <daemon>`
+// cache gate below — this comment used to claim the build gate catches a missing module, and it does
+// not: `bun build` ERASES type-only imports. `agent-transcript.ts`'s `import type { AgentKind } from
+// './agent.ts'` therefore shipped with agent.ts absent from both plugin dirs, building and running
+// clean while `tsc --noEmit` failed. The test walks what the committed dirs really import.
 const CORE = [
   'channel.ts', 'common.ts', 'channel-ctl.ts', 'pane-io.ts', 'proc.ts', 'prompt.ts',
-  'transcript.ts', 'codex-transcript.ts', 'agent-transcript.ts',
+  'transcript.ts', 'codex-transcript.ts', 'agent-transcript.ts', 'agent.ts',
 ]
 const SLACK_ROOT_FILES = [...CORE,
   'slack-adapter.ts', 'slack-render.ts', 'slack-daemon.ts', 'slack-paths.ts', 'slk-ctl.ts', 'ensure-slack-daemon.ts']
