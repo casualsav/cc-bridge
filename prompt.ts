@@ -448,37 +448,61 @@ export function permPromptToken(question: string): string {
 }
 
 // ---- /login method menu (a third shape) ----
-// Claude's "Select login method" screen carries only an "Esc to cancel" footer — NO select-menu
+// Claude's "Select login method" screen carries at most an "Esc to cancel" footer — NO select-menu
 // wording ("Enter to select / ↑↓") and NO permission "· Tab to amend" — so neither detector above
 // matches it. It shows up at first-run onboarding AND whenever the user runs /login later. We
 // detect it on its own (a distinctive header + numbered options) and relay the actual options as
 // buttons. Selecting drives the pane; whatever the option needs next (an OAuth link, or terminal
 // typing for an API key / 3rd-party platform) is surfaced separately.
+//
+// v2.1.205 dropped the footer entirely (verified on a real fresh-config boot): the option list just
+// runs to the bottom of the pane. So the footer is an OPTIONAL anchor — when it's absent, the block's
+// own bottom-of-pane position carries the liveness the footer used to.
 const LOGIN_ANCHOR = /select login method|select login|log ?in with|how would you like to (?:log|sign) ?in|claude account with subscription|anthropic console account/i
 // Numbered option, tolerating the highlight cursor Claude draws (a leading "_", "❯", "►", "•").
 const LOGIN_OPT = /^\s*(?:│\s*)?(?:[_❯►▶•]\s*)?(\d+)[.)]\s+(.+?)\s*$/
 
 export function detectLoginPrompt(paneText: string): { options: PromptOption[] } | null {
   const lines = paneLines(paneText)
-  if (!lines.some(l => LOGIN_ANCHOR.test(l))) return null
+  const anchorIdx = lines.findIndex(l => LOGIN_ANCHOR.test(l))
+  if (anchorIdx === -1) return null
 
   // The "Esc to cancel" footer, live at the very bottom (≤1 non-blank line below).
   let footerIdx = -1
   for (let i = lines.length - 1; i >= 0; i--) {
     if (/esc to cancel/i.test(lines[i])) { footerIdx = i; break }
   }
-  if (footerIdx === -1) return null
-  if (!footerIsLive(lines, footerIdx)) return null   // todo-panel/statusline-aware liveness (shared)
-
-  // The contiguous numbered options directly above the footer.
-  const opts: PromptOption[] = []
-  for (let i = footerIdx - 1; i >= 0; i--) {
-    const m = lines[i].match(LOGIN_OPT)
-    if (m) { opts.unshift({ label: m[2].replace(/\s*│\s*$/, '').trim() }); continue }
-    if (!lines[i].trim()) { if (opts.length) break; else continue }   // blank gap is fine until options start
-    if (opts.length) break                                            // a real non-option line ends the block
+  if (footerIdx !== -1 && footerIsLive(lines, footerIdx)) {   // todo-panel/statusline-aware liveness (shared)
+    // The contiguous numbered options directly above the footer.
+    const opts: PromptOption[] = []
+    for (let i = footerIdx - 1; i >= 0; i--) {
+      const m = lines[i].match(LOGIN_OPT)
+      if (m) { opts.unshift({ label: m[2].replace(/\s*│\s*$/, '').trim() }); continue }
+      if (!lines[i].trim()) { if (opts.length) break; else continue }   // blank gap is fine until options start
+      if (opts.length) break                                            // a real non-option line ends the block
+    }
+    if (opts.length >= 2) return { options: opts }
   }
-  return opts.length >= 2 ? { options: opts } : null
+
+  // Footerless (v2.1.205+): read DOWN from the anchor instead. Only blanks may separate the
+  // "Select login method:" header from its options — prose between them means this isn't the menu,
+  // which is what keeps a scrolled-up login screen from adopting some unrelated numbered block
+  // that happens to be live further down the pane.
+  const opts: PromptOption[] = []
+  let lastOpt = -1
+  // The anchor is normally the header line, but LOGIN_ANCHOR also matches option 1's own wording —
+  // on a screen whose header scrolled off, start from the anchor line itself so it isn't dropped.
+  for (let i = LOGIN_OPT.test(lines[anchorIdx]) ? anchorIdx : anchorIdx + 1; i < lines.length; i++) {
+    const m = lines[i].match(LOGIN_OPT)
+    if (m) { opts.push({ label: m[2].replace(/\s*│\s*$/, '').trim() }); lastOpt = i; continue }
+    if (!lines[i].trim()) { if (opts.length) break; else continue }   // blank gap is fine until options start
+    break                                                             // any other line ends (or rules out) the block
+  }
+  if (opts.length < 2) return null
+  // Same liveness rule as the footer path, with the LAST OPTION standing in for the footer: only
+  // chrome (statusline, todo panel, borders) may sit below a live menu — real content below means
+  // this is a scrolled-up past screen.
+  return footerIsLive(lines, lastOpt) ? { options: opts } : null
 }
 
 // ---- Usage-limit "what do you want to do?" menu (auto-dismissed, never relayed) ----

@@ -541,6 +541,51 @@ test('detectLoginPrompt ignores an ordinary Esc-to-cancel screen', () => {
   expect(detectLoginPrompt('Pick a fruit\n  1. Apple\n  2. Banana\n  Esc to cancel')).toBeNull()
 })
 
+// v2.1.205's real fresh-config boot screen: NO footer at all — the options run to the bottom of the
+// pane, with only the blank remainder of the pane below them.
+const LOGIN_V2_1_205 = [
+  'Welcome to Claude Code v2.1.205',
+  '..........................................................',
+  '',
+  '        █████████',
+  '       ██▄█████▄██',
+  '        █████████',
+  '.......█ █   █ █..........................................',
+  '',
+  ' Claude Code can be used with your Claude subscription or billed based on API usage through your Console account.',
+  '',
+  ' Select login method:',
+  '',
+  ' ❯ 1. Claude account with subscription · Pro, Max, Team, or Enterprise',
+  '   2. Anthropic Console account · API usage billing',
+  '   3. 3rd-party platform · Amazon Bedrock, Microsoft Foundry, or Vertex AI',
+  '', '', '', '',
+].join('\n')
+
+test('detectLoginPrompt parses the footerless v2.1.205 login screen', () => {
+  const p = detectLoginPrompt(LOGIN_V2_1_205)
+  expect(p).not.toBeNull()
+  expect(p!.options).toHaveLength(3)
+  expect(p!.options[0].label).toBe('Claude account with subscription · Pro, Max, Team, or Enterprise')
+  expect(p!.options[1].label).toBe('Anthropic Console account · API usage billing')
+  expect(p!.options[2].label).toBe('3rd-party platform · Amazon Bedrock, Microsoft Foundry, or Vertex AI')
+})
+
+test('a footerless login menu survives a statusline below it but not a live screen below it', () => {
+  // Chrome (the statusline) below the last option is still the live menu — same rule the footer path uses.
+  const withStatusline = LOGIN_V2_1_205.trimEnd() + '\n\n  ε: 12.3k ↻  5h ▓▓░  user@host | ~/projects\n'
+  expect(detectLoginPrompt(withStatusline)?.options).toHaveLength(3)
+
+  // Real content below means the menu scrolled up and something else owns the screen now.
+  const scrolledUp = LOGIN_V2_1_205.trimEnd() + [
+    '',
+    '● Logged in. Back to work.',
+    '  ╭──────────────────────────────╮',
+    '  │ > try "fix the login bug"    │',
+  ].join('\n')
+  expect(detectLoginPrompt(scrolledUp)).toBeNull()
+})
+
 test('isUsageLimitChoice matches the live usage-limit menu', () => {
   const pane = [
     '   What do you want to do?',

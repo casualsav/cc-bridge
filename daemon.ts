@@ -75,7 +75,7 @@ import {
   demoteTopicToHeadless,
   getGeneralSession, setGeneralSession, getGeneralCwd, findTopicByCwd, getBaseCwd, setBaseCwd,
   topicAgent, type TopicEntry,
-  getDmChatSession, setDmChatSession, listDmChatSessions,
+  getDmChatSession, setDmChatSession, clearDmChatSession, listDmChatSessions,
 } from './topics.ts'
 import { getTopicCreate, setTopicCreate, setTopicCreateAgent, removeTopicCreate, topicCreateAgentLabel } from './topic-create.ts'
 import {
@@ -451,17 +451,25 @@ function loginButtonLabel(label: string): string {
 // path) or st.loginHash (aux path). With a paneId, routes to that pane's own topic/DM lane via
 // outboundTargetsFor and tags each button with the pane so the callback drives the right session;
 // without one (legacy focused-path fallback), broadcasts via notifyChats as before.
-function relayLoginChoice(options: PromptOption[], paneId?: string | null): void {
+// The buttons for a detected login menu, registered against the pane so a later tap resolves the
+// same option list the screen showed. Shared by the relay message below and the chat-lane boot's
+// login surface, so both wire taps to the same `login:N[:%pane]` callback.
+function loginChoiceButtons(options: PromptOption[], paneId?: string | null): Button[][] {
   lastLoginOptions.set(paneId ?? NO_PANE_LOGIN_KEY, options)
-  const kb = new InlineKeyboard()
-  options.forEach((o, i) => { kb.text(loginButtonLabel(o.label), paneId ? `login:${i + 1}:${paneId}` : `login:${i + 1}`).row() })
+  const rows: Button[][] = options.map((o, i) => [{ text: loginButtonLabel(o.label), data: paneId ? `login:${i + 1}:${paneId}` : `login:${i + 1}` }])
+  rows.push([{ text: '↩️ Cancel', data: paneId ? `logincancel:${paneId}` : 'logincancel' }])   // Escape the menu — a login prompt with no way out strands the pane
+  return rows
+}
+
+function relayLoginChoice(options: PromptOption[], paneId?: string | null): void {
+  const buttons = loginChoiceButtons(options, paneId)
   const body = ['🔐 <b>Claude needs to log in.</b> Pick how you sign in:', '',
     ...options.map((o, i) => `<b>${i + 1}.</b> ${escapeHtml(o.label)}`)].join('\n')
-  if (!paneId) { notifyChats(body, { buttons: kbToButtons(kb) }); return }
+  if (!paneId) { notifyChats(body, { buttons }); return }
   void (async () => {
     for (const t of await outboundTargetsFor(paneId)) {
       await channel.sendText(String(t.chat), body,
-        { buttons: kbToButtons(kb), ...(t.thread ? { threadId: String(t.thread) } : {}) }).catch(() => {})
+        { buttons, ...(t.thread ? { threadId: String(t.thread) } : {}) }).catch(() => {})
     }
   })()
 }
@@ -1833,6 +1841,7 @@ async function scanAuxPanePrompts(pane: string): Promise<void> {
   const text = await capturePane(pane).catch(() => '')
   if (!text) return
   const st = auxPromptStateFor(pane)
+  clearLoginHoldIfDone(pane, text)   // back at a prompt after a login → deliver what was held
 
   // Limit banners can show ONLY here — an idle focused pane never renders them — so without this
   // an aux-only limit hit would never schedule the reset ping. Dedup inside is account-global
@@ -2717,6 +2726,31 @@ async function flushEditorHeld(paneId: string): Promise<void> {
   for (const p of held ?? []) emitInbound(p, paneId)
 }
 
+// Login episodes: a pane sitting on the /login method menu is a RECOGNISED screen, so the captured-
+// screen guard lets inbound through — straight into the menu, where it's swallowed (the "daemon
+// stopped responding to my messages" report). The guard holds it in editorHeld instead and latches
+// the pane here, so the "waiting on a login" notice goes out once per episode rather than per
+// message. The latch clears — and the held messages go in — the moment a relay tick sees that pane
+// back at a normal prompt; a dead pane's latch is dropped with the rest of its per-pane state.
+const loginHeldPanes = new Set<string>()
+function clearLoginHoldIfDone(paneId: string | null, cap: string): void {
+  if (!paneId || !loginHeldPanes.has(paneId)) return
+  if (detectLoginPrompt(cap) || !onNormalPrompt(cap)) return   // still signing in / mid-screen
+  loginHeldPanes.delete(paneId)
+  process.stderr.write(`daemon: login finished on ${paneId} — delivering ${editorHeld.get(paneId)?.length ?? 0} held message(s)\n`)
+  void flushEditorHeld(paneId)
+}
+// The two relay loops only cover the focused pane (onPaneEvent) and — in topic/DM-lane mode —
+// aux panes (scanAuxPanePrompts). An unbound DM box driving a chat lane has neither, so the held
+// messages would wait forever. This sweep is the backstop: one capture per held pane, and it only
+// runs at all while a login episode is open.
+async function sweepLoginHolds(): Promise<void> {
+  for (const pane of [...loginHeldPanes]) {
+    const cap = await capturePane(pane).catch(() => '')
+    if (cap) clearLoginHoldIfDone(pane, cap)
+  }
+}
+
 // With nothing to deliver to, inbound just buffers silently — the most common "it's not
 // working". Nudge the user once (throttled) to launch a session; the daemon auto-discovers it
 // and replays the buffer. Skipped if any pane exists (it may just be momentarily unfocused).
@@ -3334,6 +3368,7 @@ async function handleUsageLimit(text: string, origin: string | null = focus.acti
 }
 
 function onPaneEvent(text: string): void {
+  clearLoginHoldIfDone(focus.activePaneId, text)   // back at a prompt after a login → deliver what was held
   void handleUsageLimit(text)
   void handleModelUnavailable(text)
   if (focus.activePaneId && detectCompacting(text)) void startCompactionWatch(focus.activePaneId, text)
@@ -5594,6 +5629,26 @@ bot.command('model', async ctx => {
   }
   await doModelPicker(ctx)
 })
+
+// /opus · /sonnet · /haiku · /fable — muscle-memory aliases for `/model <name>`. NOT registered in
+// the command menu (like /yolo): they exist so a typed alias never reaches the unknown-command slash
+// relay, which types it into the TUI — where Claude Code's palette finds no exact match, opens its
+// dropdown, and turns the Enter into "run whatever is highlighted" (the /opus → /fable misfire).
+// One handler per alias, so the model comes from the closure and never from parsing the user's text.
+for (const alias of MODEL_ALIASES) {
+  bot.command(alias, async ctx => {
+    if (!dmCommandGate(ctx)) return
+    const t = await commandTarget(ctx)
+    if (!t) return
+    if (await paneAgentKind(t.paneId) === 'codex') {
+      // Same treatment as /model: Codex sets model + effort in its own picker and ignores an arg.
+      await relaySlashCommand(t.paneId, t.watcher, '/model', String(ctx.chat!.id))
+      await ctx.reply('Codex changes model and reasoning effort in its native picker above.')
+      return
+    }
+    void relayModelSet(ctx, t.paneId, t.watcher, alias)
+  })
+}
 
 // /effort low|medium|high|max — relay to the session; bare opens a picker.
 bot.command('effort', async ctx => {
@@ -9678,6 +9733,25 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
+  // Login menu → back out. Escape closes Claude Code's method picker, leaving the pane at whatever
+  // it was on, so a wrong tap (or a login the user wants to do in the terminal) isn't a dead end.
+  const loginCancel = /^logincancel(?::(%\S+))?$/.exec(data)
+  if (loginCancel) {
+    if (!(await cbAuth(ctx))) return
+    await ctx.answerCallbackQuery().catch(() => {})
+    const taggedPane = loginCancel[1]
+    const paneId = taggedPane ?? focus.activePaneId
+    if (paneId) {
+      // A stale login message can outlive its pane (the boot notice keeps its buttons) — a tap on a
+      // dead pane must edit the message, not reject the callback.
+      if (taggedPane) await withPaneInjection(taggedPane, () => sendKeys(taggedPane, ['Escape'])).catch(() => {})
+      else if (focus.paneWatcher) await focus.paneWatcher.withInjection(() => sendKeys(paneId, ['Escape'])).catch(() => {})
+      else await sendKeys(paneId, ['Escape']).catch(() => {})
+    }
+    await ctx.editMessageText('↩️ Login cancelled.', { parse_mode: 'HTML' }).catch(() => {})
+    return
+  }
+
   // Post-update "Resume session" picker choice (detectResumeSessionPrompt / relayResumeChoice) —
   // `resumesel:N:pane` drives the Nth option on that pane. The picker opens on option 1, so reaching
   // option N is N-1 Down presses then Enter. After it settles, flush any message held while the
@@ -10365,6 +10439,21 @@ async function handleInbound(
         return
       }
     }
+    // The /login method menu is a RECOGNISED screen, so the guard below would let the text through —
+    // and typing into that menu does nothing but move the selection (the "daemon ignores my
+    // messages" symptom on a chat lane that booted unauthenticated). Hold it in the same per-pane
+    // FIFO the editor/resume screens use; a relay tick delivers it once the pane is back at a
+    // prompt. The notice is once per login episode, not per message.
+    if (cap && detectLoginPrompt(cap)) {
+      editorHeld.set(effPane, [...(editorHeld.get(effPane) ?? []), params])
+      if (!loginHeldPanes.has(effPane)) {
+        loginHeldPanes.add(effPane)
+        process.stderr.write(`daemon: ${effPane} is on the login menu — holding inbound until it's signed in\n`)
+        await ctx.reply('🔑 The session is waiting on a login — finish that first; your message is held and delivers as soon as it\'s in.',
+          { parse_mode: 'HTML' }).catch(() => {})
+      }
+      return
+    }
     if (cap && !recognizedScreen(cap)) {
       if (!detectEditorState(cap)) {   // re-confirm a non-editor screen is really stuck, not mid-repaint
         await sleep(450)
@@ -10674,9 +10763,9 @@ async function ensureChatLane(ctx: Context, chatId: string, first: InboundParams
     const sid = revive?.sid ?? genSessionId()
     const extra = revive ? '-c' : ''
     const notice = await ctx.reply(revive ? '💤 Reviving your chat…' : '🚪 Setting up your chat…', { parse_mode: 'HTML' }).catch(() => null)
-    const edit = async (text: string) => {
-      if (notice) await channel.editText({ chatId: String(notice.chat.id), messageId: String(notice.message_id) }, text).catch(() => {})
-      else await ctx.reply(text, { parse_mode: 'HTML' }).catch(() => {})
+    const edit = async (text: string, buttons?: Button[][]) => {
+      if (notice) await channel.editText({ chatId: String(notice.chat.id), messageId: String(notice.message_id) }, text, buttons ? { buttons } : undefined).catch(() => {})
+      else await ctx.reply(text, { parse_mode: 'HTML', ...(buttons ? { reply_markup: buttonsToKb(buttons) } : {}) }).catch(() => {})
     }
     const pane = await spawnSession(dir, extra, sid, account, 'claude')
     if (!pane) {
@@ -10697,6 +10786,17 @@ async function ensureChatLane(ctx: Context, chatId: string, first: InboundParams
         await edit(`✅ Your chat is ${revive ? 'back up' : 'ready'} — ${msgs.length > 1 ? `your ${msgs.length} messages were delivered` : 'your message was delivered'}.`)
         return
       }
+      // A brand-new account config dir has no login yet. Surface the method picker instead of
+      // burning the 90s: the lane STAYS bound (the session is real, it just isn't signed in) and
+      // the queued messages go to the buffer, so they replay once the next DM finds a live prompt.
+      const login = cap ? detectLoginPrompt(cap) : null
+      if (login) {
+        drain(bufferEvent)
+        await edit('🔑 Your chat account needs a login — pick a method below; your message delivers once you’re in.',
+          loginChoiceButtons(login.options, pane))
+        process.stderr.write(`daemon: chat-lane ${chatId} is at the login screen (pane ${pane}) — relayed the method picker\n`)
+        return
+      }
       // First-run onboarding / post-update interstitials wedge a fresh pane short of the prompt.
       if (cap) {
         const stage = classifyOnboarding(cap)
@@ -10704,7 +10804,12 @@ async function ensureChatLane(ctx: Context, chatId: string, first: InboundParams
       }
     }
     drain(bufferEvent)
-    await edit('⚠️ Your chat didn\'t reach a prompt in time — resend your message once it settles.')
+    // Never leave a dead binding behind: a lane that never reached a prompt (and isn't waiting on a
+    // login) would swallow every later DM into a pane that can't answer. Unbind so the next message
+    // takes the pre-upgrade path, and let a future DM re-provision from scratch.
+    clearDmChatSession(chatId)
+    process.stderr.write(`daemon: chat-lane ${chatId} never reached a prompt — unbound the lane (pane ${pane})\n`)
+    await edit('⚠️ Couldn\'t boot your chat — your DM falls back to your existing session; resend your message.')
   } finally { chatLaneBooting.delete(chatId) }
 }
 
@@ -11801,6 +11906,7 @@ async function sweepStuckPanes(): Promise<void> {
   }
 }
 setInterval(() => void sweepStuckPanes(), 25_000).unref()
+setInterval(() => { if (loginHeldPanes.size) void sweepLoginHolds() }, 5_000).unref()   // no-op unless a login episode is open
 // Remember the focused pane's permission mode (covers shift+tab changes made in the terminal,
 // which the daemon otherwise never sees) so /resume can inherit it after the pane exits.
 setInterval(() => void (async () => {
@@ -11913,6 +12019,7 @@ setInterval(() => void sweepUpdateChecks(), 24 * 3_600_000).unref()   // …then
 const PANE_STATE_MAPS: { delete(k: string): boolean; keys(): IterableIterator<string> }[] = [
   resumeRelayed, paneTranscriptCache, thinkingPendingUntil, stuckDumpAt, editorHeld,
   modelUnavailAlerted, staleSessionNotified, shipFooterFp, auxPromptStates, stuckWatch,
+  loginHeldPanes,   // a Set — same delete(k)/keys() shape the sweep needs
 ]
 function forgetPane(paneId: string): void {
   for (const m of PANE_STATE_MAPS) m.delete(paneId)

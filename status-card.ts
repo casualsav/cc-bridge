@@ -17,7 +17,7 @@ import { focus } from './state.ts'
 import { asLowPriority } from './throttle.ts'
 import { scheduleEdit, cancelEdit, isViewHot } from './edit-scheduler.ts'
 import { loadAccess } from './access.ts'
-import { isTopicMode, getGroupChatId, listTopics, getGeneralSession } from './topics.ts'
+import { isTopicMode, getGroupChatId, listTopics, getGeneralSession, getDmChatSession } from './topics.ts'
 import { paneForSession } from './topic-runtime.ts'
 import { detectCurrentMode, onNormalPrompt, stripAnsi, type CcMode } from './prompt.ts'
 import { currentTurnTokens } from './agent-transcript.ts'
@@ -701,9 +701,15 @@ export async function updateSessionPin(): Promise<void> {
   pinUpdating = true
   try {
     if (isTopicMode()) { await asLowPriority(() => updateTopicPins()); return }   // forum → per-topic pins, low-prio so they yield to user-facing sends
-    const text = await statusCardText(focus.activePaneId)
+    // Resolve the pane PER CHAT: on a lane-driven box (the DM chat lane drives its own session)
+    // `focus` can stay null forever, and a card keyed to focus alone was never created at all.
     const buttons = statusKeyboard()
-    const hasSession = !!(focus.activePaneId || focus.activeShim)   // off-MCP pane or MCP shim — either counts
-    for (const chat of loadAccess().allowFrom) await upsertChatPin(chat, text, buttons, hasSession)
+    for (const chat of loadAccess().allowFrom) {
+      const lane = getDmChatSession(chat)
+      const pane = focus.activePaneId ?? (lane ? await paneForSession(lane.sessionId).catch(() => null) : null)
+      const text = await statusCardText(pane)
+      const hasSession = !!(pane || focus.activeShim)   // off-MCP pane or MCP shim — either counts
+      await upsertChatPin(chat, text, buttons, hasSession)
+    }
   } finally { pinUpdating = false }
 }
