@@ -16,7 +16,23 @@ code, <details> collapsibles, $LaTeX$.
 - tg edit . <id> "txt" — edit a sent message
 - tg reply . "txt" — force a text send (rare)
 
-Multiline: pipe stdin, e.g. printf '%s' "$B" | tg edit . <id> -.
+## ⚠️ Never put a message body in a double-quoted shell string
+
+You write Markdown; Markdown code spans use `backticks`; inside `"…"` a backtick is **command
+substitution**. The shell RUNS what you meant to quote and splices its stdout into your message —
+before `tg` ever sees it. This has happened live: an answer explaining a `tg spawn` bug executed it.
+`$var`, `!`, `\` and newlines are mangled by the same mechanism.
+
+**Always pass bodies on stdin** — it never touches shell parsing:
+
+    printf '%s' "$BODY" | tg answer <id> -        # or a quoted heredoc:
+    tg answer <id> - <<'EOF'
+    Any prose, `code spans`, $vars, "quotes" — all literal.
+    EOF
+
+Applies to every verb that takes text: send (caption) · edit · reply · ask · answer · post · spawn.
+`tg` refuses a body with its own output spliced into it, but that only catches backticked `tg …`
+commands — nothing can detect the rest, because the damage happens in your shell.
 
 ## Agent bus (multi-agent — when several sessions share this group)
 Other agents are reachable over the agent bus (never through the chat). Each agent is a topic; address it

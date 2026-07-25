@@ -23,9 +23,34 @@
 import net from 'node:net'
 import { readFileSync } from 'node:fs'
 import { frame, makeLineReader, SOCKET_PATH, type ShimToDaemon, type DaemonToShim } from './common.ts'
+import { looksSpliced } from './spliced.ts'
 
-const fromStdin = (s: string | undefined) => (s === '-' ? readFileSync(0, 'utf8') : s)
 const [, , cmd, chat_id, a, b] = process.argv
+
+// A message body reaches us one of two ways, and only one of them is safe.
+//
+// `-` reads stdin: the text never passes through shell parsing, so it survives verbatim.
+// Anything else is an argv string the shell has ALREADY expanded — and a session writing Markdown
+// into a double-quoted body is writing `code spans` in backticks, which inside "…" is command
+// substitution: the shell RUNS the command and splices its stdout into the message. Observed live —
+// an answer explaining a `tg spawn …` bug executed it and shipped the usage text mid-sentence.
+//
+// We cannot undo that (it happened before this process existed), but the common case is a session
+// quoting a `tg …` command, and that leaves our own output as a fingerprint (see spliced.ts).
+// Refuse those loudly: a hard error the caller must fix beats relaying a mangled message they
+// believe they wrote.
+const body = (raw: string | undefined, verb: string): string | undefined => {
+  if (raw === '-') return readFileSync(0, 'utf8')
+  if (raw != null && looksSpliced(raw)) {
+    process.stderr.write(
+      `tg ${verb}: refusing — this body has tg's own output spliced into it, which means your shell\n` +
+      `ran a backticked command instead of quoting it. Inside "…", \`cmd\` EXECUTES; it does not make\n` +
+      `a code span. Pipe the body in instead — stdin never touches the shell:\n` +
+      `  printf '%s' "$BODY" | tg ${verb} <args> -\n`)
+    process.exit(2)
+  }
+  return raw
+}
 
 // Per-subcommand usage. Without it `tg spawn --help` read `--help` as the session NAME and really
 // spawned a session called "--help" (and a folder to match) — help must never be a live action.
@@ -52,13 +77,21 @@ const HELP: Record<string, string> = {
   shared:  'tg shared   print the room\'s shared-workspace dir (put deliverables there)',
   doctor:  'tg doctor   host-side install diagnostic (works with the daemon down)',
 }
+// Every verb that takes free text gets the stdin steer in its help — the shell mangles Markdown
+// bodies (see `body` above), so `-` is the documented default, not the fallback.
+const TEXT_VERBS = new Set(['send', 'edit', 'reply', 'ask', 'answer', 'post', 'spawn'])
+const STDIN_NOTE =
+  "\nBodies: pass them on stdin — printf '%s' \"$BODY\" | tg <verb> <args> -\n" +
+  'A double-quoted body is parsed by the SHELL first: `backticks` run as commands (splicing their\n' +
+  'output into your message) and $vars expand. Markdown code spans and shell quoting collide, so\n' +
+  'stdin is the only way to send prose through unaltered.\n'
 const usage = () => Object.values(HELP).map(h => `  ${h}`).join('\n')
 if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') {
-  process.stdout.write(`usage:\n${usage()}\n`)
+  process.stdout.write(`usage:\n${usage()}\n${STDIN_NOTE}`)
   process.exit(0)
 }
 if ((process.argv[3] === '--help' || process.argv[3] === '-h') && HELP[cmd]) {
-  process.stdout.write(`${HELP[cmd]}\n`)
+  process.stdout.write(`${HELP[cmd]}\n${TEXT_VERBS.has(cmd) ? STDIN_NOTE : ''}`)
   process.exit(0)
 }
 
@@ -98,11 +131,11 @@ if (BUS.has(cmd)) {
     process.exit(2)
   }
   switch (cmd) {
-    case 'ask':     name = 'ask';     args = { pane, to: pos[0], text: fromStdin(pos[1]) ?? '', refs }; break
-    case 'answer':  name = 'answer';  args = { pane, id: pos[0], text: fromStdin(pos[1]) ?? '', refs }; break
-    case 'post':    name = 'post';    args = { pane, text: fromStdin(pos[0]) ?? '' }; break
+    case 'ask':     name = 'ask';     args = { pane, to: pos[0], text: body(pos[1], 'ask') ?? '', refs }; break
+    case 'answer':  name = 'answer';  args = { pane, id: pos[0], text: body(pos[1], 'answer') ?? '', refs }; break
+    case 'post':    name = 'post';    args = { pane, text: body(pos[0], 'post') ?? '' }; break
     case 'slash':   name = 'slash';   args = { pane, to: pos[0], command: pos[1] ?? '' }; break
-    case 'spawn':   name = 'spawn';   args = { pane, name: pos[0], text: fromStdin(pos[1]) ?? '', ...flags }; break
+    case 'spawn':   name = 'spawn';   args = { pane, name: pos[0], text: body(pos[1], 'spawn') ?? '', ...flags }; break
     case 'kill':    name = 'kill';    args = { pane, name: pos[0] }; break
     case 'reopen':  name = 'reopen';  args = { pane, name: pos[0] }; break
     case 'roster':  name = 'roster';  args = { pane }; break
@@ -111,10 +144,10 @@ if (BUS.has(cmd)) {
   }
 } else {
   switch (cmd) {
-    case 'send':  name = 'reply';        args = { chat_id, pane, files: [a], ...(b != null ? { text: fromStdin(b) } : {}) }; break
+    case 'send':  name = 'reply';        args = { chat_id, pane, files: [a], ...(b != null ? { text: body(b, 'send') } : {}) }; break
     case 'react': name = 'react';        args = { chat_id, pane, message_id: a, emoji: b }; break
-    case 'edit':  name = 'edit_message'; args = { chat_id, pane, message_id: a, text: fromStdin(b) }; break
-    case 'reply': name = 'reply';        args = { chat_id, pane, text: fromStdin(a) }; break
+    case 'edit':  name = 'edit_message'; args = { chat_id, pane, message_id: a, text: body(b, 'edit') }; break
+    case 'reply': name = 'reply';        args = { chat_id, pane, text: body(a, 'reply') }; break
     // `tg update` / `tg update check` — the second token lands in `chat_id`.
     case 'update': name = 'update';      args = { mode: chat_id === 'check' ? 'check' : 'apply' }; break
     default:
