@@ -2374,6 +2374,26 @@ function loadHermesEndpoints(): void {
 }
 loadHermesEndpoints()
 
+// Reap dead namesakes: any open topic row named `name` whose pane is gone, or whose claude
+// process exited (bare-shell pane), is closed on the spot — the 30s sweep's job, done on demand,
+// so a routed op or respawn never trips over a corpse. Mid-restart panes are exempt.
+async function reapDeadEndpoints(name: string): Promise<void> {
+  const want = normalizeEndpointName(name)
+  if (!want) return
+  for (const row of listTopics()) {
+    if (row.closed || normalizeEndpointName(row.name) !== want) continue
+    const pane = await paneForSession(row.sessionId).catch(() => null)
+    if (pane && isPaneRestarting(pane)) continue
+    const dead = !pane
+      || !(await paneAlive(pane).catch(() => false))
+      || !(await paneClaudeLive(pane).catch(() => false))
+    if (dead) {
+      updateTopic(row.sessionId, { closed: true })
+      process.stderr.write(`bus: reaped dead endpoint "${row.name}" (${row.sessionId})\n`)
+    }
+  }
+}
+
 // All addressable bus endpoints for pure resolution: topic sessions (kind claude, id = sessionId)
 // + configured hermes endpoints (kind hermes, id = name). agent-bus.ts stays grammy/tmux-free.
 function busEndpoints(): BusEndpoint[] {
@@ -4153,6 +4173,7 @@ async function handleCall(
         const pane = args.pane ? String(args.pane) : null
         const fromSid = pane ? await sessionForPane(pane) : null
         if (!fromSid) { write({ t: 'result', id, ok: false, text: '`tg ask` must run inside a bridged session' }); return }
+        await reapDeadEndpoints(String(args.to ?? ''))
         const endpoints = busEndpoints()
         const res = resolveEndpoint(String(args.to ?? ''), endpoints)
         if ('error' in res) { write({ t: 'result', id, ok: false, text: res.error }); return }
@@ -4341,12 +4362,16 @@ async function handleCall(
         const command = String(args.command ?? '').trim()
         if (!/^\/\S/.test(command)) { write({ t: 'result', id, ok: false, text: 'not a slash command — usage: tg slash <name> "/compact"' }); return }
         if (/^\/(exit|quit)\b/i.test(command)) { write({ t: 'result', id, ok: false, text: 'session-ending commands are owner-only' }); return }
+        await reapDeadEndpoints(String(args.to ?? ''))
         const endpoints = busEndpoints()
         const res = resolveEndpoint(String(args.to ?? ''), endpoints)
         if ('error' in res) { write({ t: 'result', id, ok: false, text: res.error }); return }
         if (res.kind !== 'claude') { write({ t: 'result', id, ok: false, text: 'slash needs a live session target (a hermes endpoint has no CLI)' }); return }
         const targetPane = await paneForSession(res.id).catch(() => null)
-        if (!targetPane || !(await paneAlive(targetPane).catch(() => false))) { write({ t: 'result', id, ok: false, text: 'target session has no live pane' }); return }
+        if (!targetPane || !(await paneAlive(targetPane).catch(() => false))) {
+          if (!(targetPane && isPaneRestarting(targetPane))) updateTopic(res.id, { closed: true })
+          write({ t: 'result', id, ok: false, text: 'target session has no live pane' }); return
+        }
         const cap = await capturePane(targetPane).catch(() => '')
         if (!cap || !onNormalPrompt(cap)) { write({ t: 'result', id, ok: false, text: 'target is mid-turn — retry when it goes idle' }); return }
         if (bashModeArmed(cap)) { write({ t: 'result', id, ok: false, text: 'target has an unsubmitted ! bash command in its input box' }); return }
@@ -4387,6 +4412,12 @@ async function handleCall(
         if (group) {
           try { threadId = Number(await channel.threads!.create(group, topicName)) }
           catch (e) { write({ t: 'result', id, ok: false, text: `couldn't create the topic: ${(e as Error)?.message ?? e}` }); return }
+        }
+        await reapDeadEndpoints(topicName)
+        if (listTopics().some(t => !t.closed && normalizeEndpointName(t.name) === normalizeEndpointName(topicName))) {
+          write({ t: 'result', id, ok: false, text: `an endpoint named "${topicName}" is already live — pick another name, or /exit it first` })
+          if (group && threadId != null) void channel.threads!.remove(group, String(threadId)).catch(() => {})
+          return
         }
         const sid = genSessionId()
         setTopic(sid, threadId != null
@@ -11550,6 +11581,7 @@ bot.on('message:text', async ctx => {
     // chat lane). A name that doesn't resolve fails loudly below, which is the only real error here.
     const command = cross[2].trim()
     if (/^\/(exit|quit)\b/i.test(command)) { await say('⚠️ Session-ending commands don’t relay cross-session — end that session from its own surface.'); return }
+    await reapDeadEndpoints(cross[1].replace(/:$/, ''))
     const endpoints = busEndpoints()
     const res = resolveEndpoint(cross[1].replace(/:$/, ''), endpoints)
     if ('error' in res) {
@@ -11560,7 +11592,10 @@ bot.on('message:text', async ctx => {
     if (res.kind !== 'claude') { await say('⚠️ That endpoint has no CLI to command.'); return }
     const toName = nameForEndpoint(res.id, endpoints)
     const targetPane = await paneForSession(res.id).catch(() => null)
-    if (!targetPane || !(await paneAlive(targetPane).catch(() => false))) { await say(`⚠️ <b>@${escapeHtml(toName)}</b> has no live pane.`); return }
+    if (!targetPane || !(await paneAlive(targetPane).catch(() => false))) {
+      if (!(targetPane && isPaneRestarting(targetPane))) updateTopic(res.id, { closed: true })
+      await say(`⚠️ <b>@${escapeHtml(toName)}</b> has no live pane.`); return
+    }
     const cap = await capturePane(targetPane).catch(() => '')
     if (!cap || !onNormalPrompt(cap)) { await say(`⏳ <b>@${escapeHtml(toName)}</b> is mid-turn — retry when it goes idle.`); return }
     if (bashModeArmed(cap)) { await say(`⚠️ <b>@${escapeHtml(toName)}</b> has an unsubmitted ! bash command in its input box.`); return }
@@ -12313,6 +12348,10 @@ async function webappSessionCard(row: { sid: string; name: string; cwd: string; 
   const dead: WebappSessionCard = { sid: row.sid, name: row.name, cwd: row.cwd, agent: row.agent, alive: false, working: false, task: null, model: null, effort: null, mode: null, ctxPct: null, h5Pct: null, branch: null }
   const pane = await paneForSession(row.sid).catch(() => null)
   if (!pane || !(await paneAlive(pane).catch(() => false))) return dead
+  // A pane that outlived its claude (process died mid-command → pane is a bare shell) must render
+  // dead too — its transcript's last turn is frozen in-progress, so the working/task fields below
+  // would paint a corpse as "🟢 working ⏳ <last command>" forever.
+  if (!(await paneClaudeLive(pane).catch(() => false))) return dead
   const cap = await capturePane(pane).catch(() => '')
   if (!cap) return dead
   const sl = parseStatusline(cap)
