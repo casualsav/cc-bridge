@@ -1589,84 +1589,93 @@ async function deliverRelayReply(paneId: string, target: { chat: string; thread?
 }
 
 async function relayLoopTick(gen: number): Promise<void> {
-  if (gen !== relayLoopGen || !focus.activePaneId || !TRANSCRIPT_OUTBOUND) return
-  const paneId = focus.activePaneId
-  // Error boundary (mirrors auxRelayTick): a transient failure anywhere in the tick — a rejected
-  // outboundTargetsFor, a tmux/transcript miss — must neither skip past an undelivered reply nor
-  // kill the loop. Catch, log, and always reschedule below so the relay self-heals next tick.
+  if (gen !== relayLoopGen) return
+  // The reschedule lives in `finally` so a stale-generation guard aside, EVERY path out of this tick
+  // — including the "no focused pane" / "outbound disabled" early exit below — requeues the next
+  // one. Since v0.4.16 an all-headless box legitimately has empty focus for a while; an early
+  // `return` ahead of the old tail-of-function reschedule used to kill the loop for good the first
+  // time that happened.
   try {
-    let cap = ''
-    // Reuse the PaneWatcher's recent capture of this same focused pane instead of spawning our own
-    // `tmux capture-pane` every tick; injection invalidates it, so it's never stale across an inject.
-    try { cap = await capturePaneCached(paneId) } catch { /* transient capture miss — retry next tick */ }
-    const idle = cap !== '' && !detectWorking(cap) && !detectLimited(cap)
+    if (!focus.activePaneId || !TRANSCRIPT_OUTBOUND) return
+    const paneId = focus.activePaneId
+    // Error boundary (mirrors auxRelayTick): a transient failure anywhere in the tick — a rejected
+    // outboundTargetsFor, a tmux/transcript miss — must neither skip past an undelivered reply nor
+    // kill the loop. Catch, log; the reschedule below (now in `finally`) still runs regardless.
+    try {
+      let cap = ''
+      // Reuse the PaneWatcher's recent capture of this same focused pane instead of spawning our own
+      // `tmux capture-pane` every tick; injection invalidates it, so it's never stale across an inject.
+      try { cap = await capturePaneCached(paneId) } catch { /* transient capture miss — retry next tick */ }
+      const idle = cap !== '' && !detectWorking(cap) && !detectLimited(cap)
 
-    const cwd = await paneCwd(paneId)
-    rememberLastCwd(cwd)   // so DM /new can offer this folder after every session is gone
-    const file = await transcriptForPane(paneId, cwd)
+      const cwd = await paneCwd(paneId)
+      rememberLastCwd(cwd)   // so DM /new can offer this folder after every session is gone
+      const file = await transcriptForPane(paneId, cwd)
 
-    // The card opens/edits/closes entirely inside updateTerminalMirror, off the transcript's turn
-    // state (turnInProgress) — NOT pane idle. This bridged pane never shows the "esc to interrupt"
-    // footer, so detectWorking reads idle the whole turn; gating the card on that produced a
-    // create/finalize storm. turnInProgress is the ground truth, so the card caps exactly when the
-    // turn concludes. (detectWorking now only feeds ambient signals elsewhere.)
-    const working = file ? turnInProgress(file) : !idle
-    relayConcludeTicks = working ? 0 : relayConcludeTicks + 1
-    if (isTopicMode()) { if (working) void emitTopicTyping(paneId) }   // topic mode → typing in the session's own topic
-    else typingPresence.observe(working)   // reliable working signal — this bridged pane never shows the spinner
-    await updateTerminalMirror(working, thinkingPending(paneId)).catch(() => {})   // pending opens/holds the Thinking… card before turnInProgress flips
+      // The card opens/edits/closes entirely inside updateTerminalMirror, off the transcript's turn
+      // state (turnInProgress) — NOT pane idle. This bridged pane never shows the "esc to interrupt"
+      // footer, so detectWorking reads idle the whole turn; gating the card on that produced a
+      // create/finalize storm. turnInProgress is the ground truth, so the card caps exactly when the
+      // turn concludes. (detectWorking now only feeds ambient signals elsewhere.)
+      const working = file ? turnInProgress(file) : !idle
+      relayConcludeTicks = working ? 0 : relayConcludeTicks + 1
+      if (isTopicMode()) { if (working) void emitTopicTyping(paneId) }   // topic mode → typing in the session's own topic
+      else typingPresence.observe(await paneDrivesDmTyping(paneId, working))   // reliable working signal — this bridged pane never shows the spinner; gated to the pane that actually owns the DM
+      await updateTerminalMirror(working, thinkingPending(paneId)).catch(() => {})   // pending opens/holds the Thinking… card before turnInProgress flips
 
-    // DM-only "Clauding…" live draft. DISABLED by default (the indicator was unreliable): gated to
-    // require an explicit claudingDraft:true opt-in (was default-on). All the machinery is kept intact
-    // to revisit later. Dormant in topic mode anyway (drafts are group-rejected).
-    {
-      const acc = loadAccess()
-      const wantDraft = !!file && working && acc.claudingDraft === true
-      if (wantDraft) {
-        if (!claudingTimer) { const c = dmDraftChats(await outboundTargetsFor(paneId)); if (c.length) startClaudingDraft(file!, c) }
-      } else stopClaudingDraft()
-    }
-
-    // A select/permission/login menu sitting on the pane is a question the user must answer. Any
-    // assistant text Claude wrote just before it is the CONTEXT for that question, so flush it now —
-    // the menu was relayed from the pane the moment it appeared, but the preamble text can land in
-    // the transcript a tick later, after the menu. Without this it would only arrive once the turn
-    // finally concludes (i.e. after the question is answered). Bounded to ticks where a menu is up.
-    if (relayCursorPrimed && file && cap && (detectUserPrompt(cap) || detectPermissionPrompt(cap) || detectLoginPrompt(cap))) {
-      await flushPendingText().catch(() => {})
-    }
-
-    // Relay the turn's reply once it concludes (turnInProgress flips false). The reply is the turn's
-    // last main-thread text block — finalRepliesAfter returns exactly that, regardless of any trailing
-    // tool call (TodoWrite / `tg react` / file send) that would otherwise stamp it 'tool_use' and hide
-    // it. Gated on !working so mid-turn narration never leaks into the messages (it lives in the card,
-    // which already dropped this same reply block at finalize — so stream and final stay separate).
-    if (relayCursorPrimed && file && !working && relayConcludeTicks >= RELAY_CONCLUDE_TICKS) {
-      // Suppress Claude's own usage-limit banner echo (the ⛔ handler sends a richer one), but
-      // only a short banner-shaped block — a real reply that merely mentions a limit isn't eaten.
-      const isBanner = (t: string) => t.length < 200 && /\b(hit your|used \d+% of your) [\w-]+ limit\b/i.test(t)
-      for (const r of finalRepliesAfter(file, lastRelayedUuid)) {
-        if (!r.uuid || r.uuid === lastRelayedUuid) continue
-        if (!isBanner(r.text)) {
-          // Resolve delivery targets BEFORE advancing the cursor — a rejection here must not skip
-          // past an undelivered reply. On failure leave the cursor put and retry the reply next tick.
-          let targets: Awaited<ReturnType<typeof outboundTargetsFor>>
-          try { targets = await outboundTargetsFor(paneId) }
-          catch (e) { process.stderr.write(`daemon: relay target-resolve failed, retry next tick: ${e}\n`); break }
-          lastRelayedUuid = r.uuid                 // advance before the send so a fast tick can't double-send
-          lastRelayedByFile.set(file, r.uuid)
-          process.stderr.write(`daemon: relaying ${r.text.length} chars (uuid ${r.uuid.slice(0, 8)}, reply) to ${targets.map(t => t.chat + (t.thread ? `#${t.thread}` : '')).join(',')}\n`)
-          for (const t of targets) await deliverRelayReply(paneId, t, r.text)   // self-heals a deleted topic (recreate + resend)
-        } else {
-          lastRelayedUuid = r.uuid                 // banner suppressed — advance past it, nothing to send
-          lastRelayedByFile.set(file, r.uuid)
-        }
-        clearThinkingPending(paneId)   // reply landed → drop the thinking-pending crutch so the card caps/deletes promptly
-        typingPresence.stop()   // reply delivered (or banner suppressed) → clean stop, no tail
+      // DM-only "Clauding…" live draft. DISABLED by default (the indicator was unreliable): gated to
+      // require an explicit claudingDraft:true opt-in (was default-on). All the machinery is kept intact
+      // to revisit later. Dormant in topic mode anyway (drafts are group-rejected).
+      {
+        const acc = loadAccess()
+        const wantDraft = !!file && working && acc.claudingDraft === true
+        if (wantDraft) {
+          if (!claudingTimer) { const c = dmDraftChats(await outboundTargetsFor(paneId)); if (c.length) startClaudingDraft(file!, c) }
+        } else stopClaudingDraft()
       }
-    }
-  } catch (e) { process.stderr.write(`daemon: relay tick error, retry next tick: ${e}\n`) }
-  if (gen === relayLoopGen) setTimeout(() => void relayLoopTick(gen), RELAY_POLL_MS)
+
+      // A select/permission/login menu sitting on the pane is a question the user must answer. Any
+      // assistant text Claude wrote just before it is the CONTEXT for that question, so flush it now —
+      // the menu was relayed from the pane the moment it appeared, but the preamble text can land in
+      // the transcript a tick later, after the menu. Without this it would only arrive once the turn
+      // finally concludes (i.e. after the question is answered). Bounded to ticks where a menu is up.
+      if (relayCursorPrimed && file && cap && (detectUserPrompt(cap) || detectPermissionPrompt(cap) || detectLoginPrompt(cap))) {
+        await flushPendingText().catch(() => {})
+      }
+
+      // Relay the turn's reply once it concludes (turnInProgress flips false). The reply is the turn's
+      // last main-thread text block — finalRepliesAfter returns exactly that, regardless of any trailing
+      // tool call (TodoWrite / `tg react` / file send) that would otherwise stamp it 'tool_use' and hide
+      // it. Gated on !working so mid-turn narration never leaks into the messages (it lives in the card,
+      // which already dropped this same reply block at finalize — so stream and final stay separate).
+      if (relayCursorPrimed && file && !working && relayConcludeTicks >= RELAY_CONCLUDE_TICKS) {
+        // Suppress Claude's own usage-limit banner echo (the ⛔ handler sends a richer one), but
+        // only a short banner-shaped block — a real reply that merely mentions a limit isn't eaten.
+        const isBanner = (t: string) => t.length < 200 && /\b(hit your|used \d+% of your) [\w-]+ limit\b/i.test(t)
+        for (const r of finalRepliesAfter(file, lastRelayedUuid)) {
+          if (!r.uuid || r.uuid === lastRelayedUuid) continue
+          if (!isBanner(r.text)) {
+            // Resolve delivery targets BEFORE advancing the cursor — a rejection here must not skip
+            // past an undelivered reply. On failure leave the cursor put and retry the reply next tick.
+            let targets: Awaited<ReturnType<typeof outboundTargetsFor>>
+            try { targets = await outboundTargetsFor(paneId) }
+            catch (e) { process.stderr.write(`daemon: relay target-resolve failed, retry next tick: ${e}\n`); break }
+            lastRelayedUuid = r.uuid                 // advance before the send so a fast tick can't double-send
+            lastRelayedByFile.set(file, r.uuid)
+            process.stderr.write(`daemon: relaying ${r.text.length} chars (uuid ${r.uuid.slice(0, 8)}, reply) to ${targets.map(t => t.chat + (t.thread ? `#${t.thread}` : '')).join(',')}\n`)
+            for (const t of targets) await deliverRelayReply(paneId, t, r.text)   // self-heals a deleted topic (recreate + resend)
+          } else {
+            lastRelayedUuid = r.uuid                 // banner suppressed — advance past it, nothing to send
+            lastRelayedByFile.set(file, r.uuid)
+          }
+          clearThinkingPending(paneId)   // reply landed → drop the thinking-pending crutch so the card caps/deletes promptly
+          typingPresence.stop()   // reply delivered (or banner suppressed) → clean stop, no tail
+        }
+      }
+    } catch (e) { process.stderr.write(`daemon: relay tick error, retry next tick: ${e}\n`) }
+  } finally {
+    if (gen === relayLoopGen) setTimeout(() => void relayLoopTick(gen), RELAY_POLL_MS)
+  }
 }
 
 // Prime the cursor to the transcript tail that exists right now, so only NEW replies relay.
@@ -2086,7 +2095,9 @@ function adoptPane(paneId: string): void {
   // otherwise get dropped on the next rescan. Self-heals those, plus sessions launched before the
   // tag convention existed. Fire-and-forget; idempotent.
   void exec('tmux', ['set-option', '-p', '-t', paneId, TELEGRAM_PANE_OPT, INSTANCE_ID], { timeout: 2000 }).catch(() => {})
+  const prevPane = focus.activePaneId
   focusOffMcpPane(paneId)
+  if (prevPane !== paneId) typingPresence.stop()   // focus handed off to a different pane — a stale working-window must not carry over to this new adoptee
   process.stderr.write(`daemon: adopted off-MCP pane ${paneId} (auto-discovery)\n`)
   // Only announce a genuinely NEW pane. A daemon restart (frequent during dev, or on reboot)
   // re-adopts the same pane and shouldn't re-ping "Connected". Persisted so it survives the
@@ -3861,6 +3872,7 @@ function startPaneWatcher(paneId: string): void {
       // Off-MCP pane: drop it; if it was the focused one, the discovery rescan re-adopts a survivor.
       const wasActive = focus.activePaneId === paneId || focus.currentSessionId === paneId
       focus.activePaneId = null; focus.paneWatcher = null
+      typingPresence.stop()   // the pane driving typing is gone — never leave a stale indicator running
       offMcpPanes.delete(paneId)
       void closeTopicForPane(paneId)
       if (adoptedPaneId === paneId) adoptedPaneId = null   // clear binding so the rescan re-adopts
@@ -3868,7 +3880,7 @@ function startPaneWatcher(paneId: string): void {
       const label = sessionNames.get(paneId) || 'Session'
       if (wasActive) void announceFocusedExit(label)
     },
-    text => { const w = detectWorking(text); if (isTopicMode()) { if (w) void emitTopicTyping(paneId) } else typingPresence.observe(w) },   // live typing signal, every poll — topic mode routes it to the session's topic (transcript signal is blind mid-thinking)
+    async text => { const w = detectWorking(text); if (isTopicMode()) { if (w) void emitTopicTyping(paneId) } else typingPresence.observe(await paneDrivesDmTyping(paneId, w)) },   // live typing signal, every poll — topic mode routes it to the session's topic (transcript signal is blind mid-thinking); DM gated to the pane that owns it
   )
   focus.paneWatcher.start()
 }
@@ -10770,6 +10782,19 @@ async function refreshChatTemplates(): Promise<void> {
     log('chat CLAUDE.md has local edits — left alone')
     await notify(`📝 A newer chat-agent template shipped with ${ver}, but your chat CLAUDE.md has local edits — it was left alone. Merge manually from off-mcp/chat-account/ in the plugin cache if you want the update.`)
   }
+}
+
+// DM typing may only be driven by the pane whose replies actually deliver to the DM. With a chat
+// lane in play, `focus` can legitimately point at a different, busy pane while the chat lane's own
+// pane sits idle — observing that other pane's work would leave the DM's typing indicator stuck
+// forever. Cheap by construction: only resolves lane panes when the raw signal is true and a lane
+// is even possible; otherwise the raw signal passes straight through.
+async function paneDrivesDmTyping(paneId: string, working: boolean): Promise<boolean> {
+  if (!working || isTopicMode() || !dmChatEligible()) return working
+  for (const lane of listDmChatSessions()) {
+    if (await paneForSession(lane.sessionId).catch(() => null) === paneId) return true
+  }
+  return false
 }
 
 // Non-null only when a DM can become a standalone chat lane: the `chat` account is registered
