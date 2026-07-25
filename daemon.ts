@@ -76,7 +76,7 @@ import {
   demoteTopicToHeadless,
   getGeneralSession, setGeneralSession, getGeneralCwd, findTopicByCwd, getBaseCwd, setBaseCwd,
   topicAgent, type TopicEntry,
-  getDmChatSession, setDmChatSession, clearDmChatSession, listDmChatSessions,
+  getDmChatSession, setDmChatSession, clearDmChatSession, listDmChatSessions, chatIdForDmChatSession,
 } from './topics.ts'
 import { getTopicCreate, setTopicCreate, setTopicCreateAgent, removeTopicCreate, topicCreateAgentLabel } from './topic-create.ts'
 import {
@@ -114,7 +114,7 @@ import {
   type BusEndpoint, type BusPending, type LedgerEntry,
 } from './agent-bus.ts'
 import { formatAskBlock, formatAnswerBlock, formatDigestBlock, formatRosterLine, type RosterAgent } from './agent-bus-block.ts'
-import { laneForChat, bindLane, chatForLaneSession, noteLaneCwd } from './dm-lanes.ts'
+import { laneForChat, bindLane, chatForLaneSession, noteLaneCwd, dmLanesOn, listLanes, unbindLane } from './dm-lanes.ts'
 import { runHermes, type HermesEndpoint, type HermesTask } from './hermes-driver.ts'
 import {
   initPromptRelay, relayPromptToTelegram, relayPermissionToTelegram, sweepPermStorms,
@@ -1149,6 +1149,20 @@ async function transcriptForPane(pane: string | null, cwd: string | null): Promi
   for (const [p, v] of paneTranscriptCache) {
     if (p !== pane && v.path === fb) return null
   }
+  // Ownership guard for the same hole with DEAD siblings: newest-in-project-dir has no notion of
+  // which session wrote the file, so when two sessions share a cwd (e.g. a headless 'general'
+  // agent and a DM lane both in $HOME) a pane could adopt the other's transcript once its pane
+  // died — and relay a foreign conversation into this pane's chat, unlabelled. If the file's
+  // conversation id is registered to a DIFFERENT session, this pane gets nothing.
+  const owner = agentSessionId(fb)
+  if (owner) {
+    const sid = pane ? await sessionForPane(pane, false).catch(() => null) : null
+    const claimant = listTopics().find(t => t.agentSessionId === owner && t.sessionId !== sid)
+    if (claimant) {
+      process.stderr.write(`daemon: transcript ${basename(fb)} belongs to session ${claimant.sessionId} (${claimant.name}) — not relaying it for pane ${pane ?? '-'}\n`)
+      return null
+    }
+  }
   if (pane) await rememberPaneAgentTranscript(pane, fb)
   return fb
 }
@@ -1529,6 +1543,20 @@ async function kickThinkingMirror(pane: string): Promise<void> {
 // the pin bookkeeping, recreate the session's topic, and resend there — so a live session's replies
 // are never silently black-holed. Shared by the focused and aux relay loops.
 async function deliverRelayReply(paneId: string, target: { chat: string; thread?: number }, text: string): Promise<void> {
+  // Multi-session DM attribution: a reply landing in a DM (no thread) from a session that is NOT
+  // that chat's own bound lane/chat-lane gets a source line — a topic carries its session's
+  // identity structurally, a DM doesn't, so foreign output must never read as the user's current
+  // conversation. Best-effort: an attribution failure never blocks the reply.
+  if (target.thread == null && !isTopicMode()) {
+    try {
+      const sid = await sessionForPane(paneId).catch(() => null)
+      const owned = sid != null && (chatIdForDmChatSession(sid) === target.chat || chatForLaneSession(sid) === target.chat)
+      if (!owned && (listDmChatSessions().length > 0 || listLanes().length > 0)) {
+        const name = (sid ? getTopicBySession(sid)?.name : null) ?? await paneDisplayName(paneId).catch(() => paneId)
+        text = `📟 *${name}*:\n\n${text}`
+      }
+    } catch { /* attribution only */ }
+  }
   const releaseTyping = (thread?: number) => {
     if (thread != null) stopTopicTyping(target.chat, thread)                                   // reply delivered — never re-light typing over it
     else if (isTopicMode() && target.chat === getGroupChatId()) stopTopicTyping(target.chat, 'general')   // General-anchored reply — same latch release
@@ -1693,13 +1721,7 @@ function startRelayLoop(): void {
 // so single-user installs are byte-for-byte unchanged and multi-user installs isolate with zero config.
 // An explicit dmLanes:true/false (boolean or hand-edited string) overrides the heuristic either way.
 // Moot in topic mode (the lane branch is !isTopicMode()-gated) — only DM-mode installs are affected.
-function dmLanesOn(): boolean {
-  const a = loadAccess()
-  const v = a.dmLanes as unknown
-  if (v === true || v === 'true') return true
-  if (v === false || v === 'false') return false
-  return a.allowFrom.length >= 2
-}
+// (dmLanesOn itself moved to dm-lanes.ts so topic-runtime's outbound shares the same definition.)
 function multiPaneMode(): boolean { return isTopicMode() || dmLanesOn() }
 
 // Forum-topics parallel relay (phase 3b). The focused pane is handled by the rich relayLoopTick
@@ -10756,6 +10778,7 @@ async function ensureChatLane(ctx: Context, chatId: string, first: InboundParams
       return
     }
     setDmChatSession(chatId, sid, dir)   // fresh → new binding; revive → same sid, refreshes the cwd
+    unbindLane(chatId)   // dmChat ⊕ dmLane per chat: a chat that upgrades to a chat lane sheds any old DM lane, so outbound can never resolve two owners for one DM
     process.stderr.write(`daemon: chat-lane ${revive ? 'revived' : 'spawned'} for chat ${chatId} → sid ${sid} (pane ${pane}) in ${dir}\n`)
     if (!isTopicMode()) void ensureHeadlessGeneral()   // unbound: the chat lane orchestrates, 'general' does the work (fire-and-forget — DM latency is untouched)
     const deadline = Date.now() + 90_000
@@ -12493,6 +12516,18 @@ void (async () => {
           // Seamless upgrade for DM-mode boxes: create the `chat` profile the DM lane needs. Runs
           // here (not before connect) because it may DM the owner; no-ops on every later reconnect.
           void ensureChatProfile().catch(e => process.stderr.write(`chatProfile: provisioning failed: ${e}\n`))
+          // Lane hygiene: drop lanes whose chat left the allowlist (their outbound would 403
+          // forever) and lanes whose chat has since upgraded to a chat lane (dmChat ⊕ dmLane —
+          // two bindings for one DM made outbound resolve two different owner sessions).
+          try {
+            const allow = loadAccess().allowFrom
+            for (const lane of listLanes()) {
+              if (!allow.includes(lane.chatId) || getDmChatSession(lane.chatId)) {
+                process.stderr.write(`daemon: pruning stale DM lane ${lane.chatId} → ${lane.sessionId} (${!allow.includes(lane.chatId) ? 'left allowlist' : 'chat lane owns this DM'})\n`)
+                unbindLane(lane.chatId)
+              }
+            }
+          } catch (e) { process.stderr.write(`daemon: lane hygiene sweep failed: ${e}\n`) }
           const bridgeCommands = [
               { command: 'start', description: 'Welcome + everything this bot can do' },
               { command: 'stop', description: 'Interrupt the current task (Esc)' },

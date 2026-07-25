@@ -18,7 +18,7 @@ import {
 } from './topics.ts'
 import { focus, offMcpPanes, sessions, isChatUnreachable } from './state.ts'
 import { AGENT_PANE_OPT, normalizeAgent } from './agent.ts'
-import { chatForLaneSession } from './dm-lanes.ts'
+import { chatForLaneSession, dmLanesOn, listLanes } from './dm-lanes.ts'
 
 // The bridge is in forum-topics mode whenever this module runs, so channel.threads (present iff
 // caps.threads === 'forum') is always defined — the `!` on threads.* calls reflects that invariant.
@@ -265,10 +265,19 @@ export async function outboundTargetsFor(paneId: string | null): Promise<Array<{
     }
     // Per-user DM lanes: a lane pane's replies address ONLY its owner chat — never fanned out to
     // every allowlisted DM (the old broadcast + the "chat not found" spam on a hard-to-reach id).
-    // An unbound pane (no lane yet, or dmLanes off) keeps the broadcast fallback.
-    if (loadAccess().dmLanes && sid) {
+    // dmLanesOn (not the raw flag): an UNSET flag on a ≥2-user box auto-enables lanes for inbound,
+    // and reading the raw flag here skipped this rung and broadcast those lanes' replies to everyone.
+    if (dmLanesOn() && sid) {
       const owner = chatForLaneSession(sid)
       if (owner) return [{ chat: owner }]
+    }
+    // A sid-bearing pane registered to NO surface, on a box that runs per-chat surfaces (chat
+    // lanes / DM lanes / headless sessions): that's an orphan — an old repair session, a foreign
+    // adoption. Dropping beats interleaving its output unlabelled into every allowlisted DM. A
+    // classic single-session box (none of those structures) keeps the broadcast fallback.
+    if (sid && (listDmChatSessions().length > 0 || listLanes().length > 0 || listTopics().some(t => t.headless && !t.closed))) {
+      process.stderr.write(`daemon: pane ${paneId} (sid ${sid}) is registered to no chat surface — dropping its outbound (not broadcasting)\n`)
+      return []
     }
     return dmTargets()
   }

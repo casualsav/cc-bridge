@@ -10,6 +10,20 @@
 // topics.ts. The Telegram DM chat id equals the user id, so one chat id == one user == one lane.
 import { join } from 'node:path'
 import { STATE_DIR, readJsonFile, writeJsonFile } from './common.ts'
+import { loadAccess } from './access.ts'
+
+// Whether per-user DM lanes are active: an explicit dmLanes true/false (boolean or a hand-edited
+// "true"/"false" string) wins; unset auto-enables at ≥2 allowlisted ids (a multi-user DM box needs
+// per-user isolation). Lives HERE so the daemon's routing and topic-runtime's outbound share ONE
+// definition — topic-runtime used to read the raw flag by truthiness, so an unset flag on a 2-user
+// box routed inbound into lanes but broadcast the replies to everyone.
+export function dmLanesOn(): boolean {
+  const a = loadAccess()
+  const v = a.dmLanes as unknown
+  if (v === true || v === 'true') return true
+  if (v === false || v === 'false') return false
+  return a.allowFrom.length >= 2
+}
 
 export const DM_LANES_FILE = join(STATE_DIR, 'dm-lanes.json')
 
