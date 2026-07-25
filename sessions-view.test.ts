@@ -42,6 +42,11 @@ test('idle card omits chips/task lines when absent', () => {
   expect(out).not.toContain('<code>')
 })
 
+test('effort shows even when the model did not parse', () => {
+  const out = renderSessionsView([card({ model: null, effort: 'high' })], NOW)
+  expect(out).toContain('<code>⚡high</code>')
+})
+
 test('dead card shows the dead state, no chips/footer', () => {
   const c = card({ alive: false, working: false, task: null })
   const out = renderSessionsView([c], NOW)

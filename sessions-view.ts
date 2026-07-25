@@ -22,7 +22,9 @@ function renderCard(s: SessionCard): string {
   const lines = [`${dot} <b>${escapeHtml(s.name)}</b> — ${state}`]
 
   const chips: string[] = []
-  if (s.model) chips.push(escapeHtml(s.model) + (s.effort ? ' ⚡' + escapeHtml(s.effort === 'medium' ? 'med' : s.effort) : ''))
+  // Model and effort are independent: a session whose model didn't parse must still show ⚡effort.
+  const dial = [s.model ? escapeHtml(s.model) : '', s.effort ? '⚡' + escapeHtml(s.effort === 'medium' ? 'med' : s.effort) : ''].filter(Boolean).join(' ')
+  if (dial) chips.push(dial)
   if (s.mode && s.mode !== 'default') chips.push(escapeHtml(s.mode === 'bypassPermissions' ? 'bypass' : s.mode))
   if (s.agent && s.agent !== 'claude') chips.push(escapeHtml(s.agent))
   if (chips.length) lines.push(`<code>${chips.join(' · ')}</code>`)

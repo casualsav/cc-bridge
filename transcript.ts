@@ -13,7 +13,7 @@ export const DEFAULT_PROJECTS_DIR = join(homedir(), '.claude', 'projects')
 const PROJECTS_DIR = DEFAULT_PROJECTS_DIR
 
 type Usage = { input_tokens?: number; output_tokens?: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number }
-type Entry = { type?: string; uuid?: string; timestamp?: string; cwd?: string; isSidechain?: boolean; isMeta?: boolean; message?: { content?: unknown; stop_reason?: string | null; usage?: Usage } }
+type Entry = { type?: string; uuid?: string; timestamp?: string; cwd?: string; isSidechain?: boolean; isMeta?: boolean; message?: { content?: unknown; stop_reason?: string | null; usage?: Usage; model?: string } }
 
 // Text content of an entry: a bare string, or the joined `text` blocks of a content
 // array (tool_use / thinking blocks contribute nothing).
@@ -269,6 +269,21 @@ export function latestFinalReply(file: string): { uuid: string; text: string } |
     const text = lastTextOf(e.message?.content).trim()
     if (isCommandNoise(text)) continue
     return { uuid: e.uuid ?? '', text: legibleApiError(text) }
+  }
+  return null
+}
+
+// The model id the API last answered with on the main thread, e.g. "claude-opus-5" — the dashboard's
+// fallback when the pane's statusline doesn't carry a usable one (a long cwd truncates the identity
+// line right where the model sits). Sidechain entries are skipped: a haiku subagent must not make an
+// opus session read as haiku. `<synthetic>` marks an API error / slash-command echo, not a real turn.
+export function latestModelId(file: string): string | null {
+  const entries = readEntries(file)
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i]
+    if (e.type !== 'assistant' || e.isSidechain) continue
+    const model = e.message?.model
+    if (typeof model === 'string' && model && !model.startsWith('<')) return model
   }
   return null
 }

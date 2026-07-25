@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { parseStatusline, pinBar, parseWorkingLine, parseDoneLine } from './statusline.ts'
+import { parseStatusline, modelDisplayName, pinBar, parseWorkingLine, parseDoneLine } from './statusline.ts'
 
 // A realistic capture: regular output, a blank line, the statusline slot, then the footer hint.
 const STATUSLINE = 'ctx 45%  ↑1.2k ↓3.4k  $0.42 | 2h30m  api 1m30s  5h 60% ↻ 3h  7d 20% ↻ 12h  ε: high  ✻ think'
@@ -34,6 +34,27 @@ test('parseStatusline lifts the model from the identity line (versioned match wi
   expect(parseStatusline(cap)!.model).toBe('Opus 4.8')
   expect(parseStatusline(pane('user@host:~/code | Fable 5\n' + STATUSLINE))!.model).toBe('Fable 5')
   expect(parseStatusline(pane(STATUSLINE))!.model).toBe(null)
+})
+
+test('parseStatusline reads a RAW model id, not just a friendly display name', () => {
+  // Claude Code prints model.display_name, which is the launch id when the model has no alias —
+  // every session started on `claude-opus-5[1m]` showed a blank model chip on the dashboard.
+  const cap = (ident: string) => ['out', '', ident, STATUSLINE, '? for shortcuts'].join('\n')
+  expect(parseStatusline(cap('ubuntu@cloud:/home/ubuntu/projects | claude-opus-5[1m]'))!.model).toBe('Opus 5')
+  expect(parseStatusline(cap('ubuntu@cloud:~/x | Opus 5 (1M context)'))!.model).toBe('Opus 5')
+  expect(parseStatusline(cap('ubuntu@cloud:~/x | claude-haiku-4-5-20251001'))!.model).toBe('Haiku 4.5')
+  // A cwd or repo segment is never mistaken for the model — including one that ends in a model word.
+  expect(parseStatusline(cap('ubuntu@cloud:/home/u/claude-opus-5 (main) | casualsav/cc-bridge'))!.model).toBe(null)
+})
+
+test('modelDisplayName normalizes both statusline shapes and rejects non-models', () => {
+  expect(modelDisplayName('Fable 5')).toBe('Fable 5')
+  expect(modelDisplayName(' claude-sonnet-5 ')).toBe('Sonnet 5')
+  expect(modelDisplayName('claude-opus-5')).toBe('Opus 5')
+  expect(modelDisplayName('opus')).toBe('Opus')
+  expect(modelDisplayName('casualsav/cc-bridge')).toBe(null)
+  expect(modelDisplayName('/home/u/opus-test')).toBe(null)
+  expect(modelDisplayName('')).toBe(null)
 })
 
 test('parseStatusline returns null when the line above the footer is the input-box border', () => {

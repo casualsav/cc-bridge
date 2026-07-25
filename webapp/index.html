@@ -36,7 +36,12 @@
   #viewer.show { display: flex; }
   .vhead { padding: 10px 12px; border-bottom: 1px solid var(--sec); display: flex; gap: 8px; align-items: center; }
   .vhead .name { font-size: 14px; }
-  .vhead button { padding: 7px 11px; border: none; border-radius: 8px; background: var(--btn); color: var(--btn-text); }
+  /* :not(.ghost) — the chat header's buttons opt into the composer's ghost-icon treatment, and this
+     rule (a class+type selector) would otherwise outrank .ghost and paint them as solid pills. */
+  .vhead button:not(.ghost) { padding: 7px 11px; border: none; border-radius: 8px; background: var(--btn); color: var(--btn-text); }
+  /* Header ghosts carry the glyph's own color (the composer's are emoji, which don't), and they're
+     primary controls — hint grey leaves ← and ⏹ barely visible on the dark background. */
+  .vhead .ghost { color: var(--text); }
   pre { margin: 0; padding: 12px; overflow: auto; flex: 1; white-space: pre; font: 13px/1.45 ui-monospace, Menlo, Consolas, monospace; }
   .notice { padding: 24px 16px; color: var(--hint); text-align: center; }
   .err { background: #c0392b; color: #fff; padding: 8px 12px; font-size: 13px; display: none; }
@@ -89,6 +94,8 @@
   .msg.user.pending { opacity: .55; }
   .msg.assistant { background: var(--sec); border-bottom-left-radius: 4px; }
   .msg.activity { background: transparent; color: var(--hint); font: italic 12px/1.4 ui-monospace, monospace; padding: 2px 11px; margin-bottom: 3px; }
+  /* Live narration ("thoughts") — prose, so it gets the app font, not the tool feed's monospace. */
+  .msg.thought { background: transparent; color: var(--hint); font-style: italic; font-size: 13px; max-width: 100%; padding: 3px 11px; margin-bottom: 4px; }
   /* Telegram-style composer: one pill input with the paperclip/mic INSIDE it, a round send button */
   .composer { display: flex; gap: 8px; padding: 8px 10px calc(8px + env(safe-area-inset-bottom)); border-top: 1px solid var(--sec); align-items: flex-end; }
   .inputwrap { flex: 1; display: flex; align-items: flex-end; background: var(--sec); border-radius: 19px; padding: 2px 4px 2px 14px; min-height: 40px; }
@@ -552,7 +559,9 @@ async function renderSessions() {
     c.className = "sess";
     const dot = !s.alive ? "dead" : s.working ? "on" : "";
     const chips = [];
-    if (s.model) chips.push(esc(s.model) + (s.effort ? " ⚡" + esc(s.effort === "medium" ? "med" : s.effort) : ""));
+    // Model and effort are independent: a session whose model didn't parse must still show ⚡effort.
+    const dial = [s.model ? esc(s.model) : "", s.effort ? "⚡" + esc(s.effort === "medium" ? "med" : s.effort) : ""].filter(Boolean).join(" ");
+    if (dial) chips.push(dial);
     if (s.mode && s.mode !== "default") chips.push(esc(s.mode === "bypassPermissions" ? "bypass" : s.mode));
     if (s.agent && s.agent !== "claude") chips.push(esc(s.agent));
     c.innerHTML =
@@ -597,6 +606,7 @@ function md(s) {
 // thumbnail (hydrated after paint) / 📎 chip with the caption; assistant text gets light markdown.
 function bubble(i) {
   if (i.role === "activity") return '<div class="msg activity">' + esc(i.text) + "</div>";
+  if (i.role === "thought") return '<div class="msg thought">💭 ' + esc(i.text) + "</div>";
   if (i.cmd) return '<div class="msg cmd">' + esc(i.text) + "</div>";
   let inner = "";
   const placeholder = /^\((?:file|photo|document|video|voice|audio)[:)]?/.test(i.text || "");

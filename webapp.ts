@@ -63,7 +63,9 @@ export interface SessionCard {
 export type SessionAct = 'stop' | 'compact' | 'send' | 'close'
 export interface SessionFeed {
   sid: string; name: string; working: boolean
-  items: Array<{ role: 'user' | 'assistant' | 'activity'; text: string; ts: number; img?: string; att?: string; cmd?: boolean }>
+  // 'activity' = a tool run of the live turn, 'thought' = its mid-turn narration (the 💭 the
+  // Telegram live card shows); both appear only while the session is working.
+  items: Array<{ role: 'user' | 'assistant' | 'activity' | 'thought'; text: string; ts: number; img?: string; att?: string; cmd?: boolean }>
 }
 export interface AutomationView {
   cron: Array<{ id: string; fireAt: number; sessionLabel: string; text: string; recurLabel: string | null }>

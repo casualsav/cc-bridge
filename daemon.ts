@@ -27,7 +27,7 @@ const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
 import { renderSessionsView } from './sessions-view.ts'
 import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, hasQueuedMessages, feedbackSurveyOpen, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen } from './prompt.ts'
-import { resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, currentTurnActivity, currentTurnTokens, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, agentSessionId, agentForSession } from './agent-transcript.ts'
+import { resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, currentTurnActivity, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, agentSessionId, agentForSession } from './agent-transcript.ts'
 import {
   AGENT_PANE_OPT, agentExitKeys, agentInterruptKeys, agentLabel, agentResetCommand, agentSubmitKeys,
   CODEX_ENABLED, codexLaunchCommand, normalizeAgent, shellQuote, type AgentKind,
@@ -66,7 +66,7 @@ import {
   markChatReachable, isChatUnreachable, markChatUnreachableIfUndeliverable,
 } from './state.ts'
 import { initMirror, updateTerminalMirror, respawnTerminalMirror, abandonMirror, updateAuxMirror, dropAuxMirror, auxMirrorPanes } from './mirror.ts'
-import { parseStatusline, type StatuslineData } from './statusline.ts'
+import { parseStatusline, modelDisplayName, type StatuslineData } from './statusline.ts'
 import {
   STATIC, initAccess, loadAccess, saveAccess, gate, dmCommandGate, isMentioned,
   pruneExpired, defaultAccess, type GateResult,
@@ -12913,9 +12913,13 @@ async function webappSessionCard(row: { sid: string; name: string; cwd: string; 
   // working footer, so detectWorking under-reports there); pane capture is the no-transcript fallback.
   let working = detectWorking(cap)
   let task: string | null = null
+  // The statusline is the primary model source, but its identity line truncates on a long cwd —
+  // exactly the sessions whose model then read as blank. The transcript's own model id is the fallback.
+  let model = sl?.model ?? null
   try {
     const file = await transcriptForPane(pane, cwd || null)
     if (file) {
+      model ??= modelDisplayName(latestModelId(file) ?? '')
       working = turnInProgress(file)
       if (working) {
         const acts = currentTurnActivity(file)
@@ -12927,7 +12931,7 @@ async function webappSessionCard(row: { sid: string; name: string; cwd: string; 
   } catch {}
   return {
     sid: row.sid, name: row.name, cwd, agent: row.agent, alive: true, working, task,
-    model: sl?.model ?? null, effort: sl?.effort ?? null, mode: cap ? detectCurrentMode(cap) : null,
+    model, effort: sl?.effort ?? null, mode: cap ? detectCurrentMode(cap) : null,
     ctxPct: sl?.ctxPct ?? null, h5Pct: sl?.h5?.pct ?? null,
     branch: topicBranchCache.get(row.sid) || null,
   }
@@ -12942,7 +12946,8 @@ async function webappListSessions(): Promise<WebappSessionCard[]> {
   return Promise.all(rows.map(webappSessionCard))
 }
 
-// Drill-in feed: recent conversation (user + assistant), plus the running turn's tool activity.
+// Drill-in feed: recent conversation (user + assistant), plus the running turn's thoughts + activity.
+const THOUGHT_MAX = 400   // one narration block in the feed; long enough to read, short enough not to bury the tools
 async function webappSessionFeed(sid: string): Promise<WebappSessionFeed | null> {
   const row = dashboardSessionRows().find(r => r.sid === sid)
     ?? (getTopicBySession(sid) ? { sid, name: getTopicBySession(sid)!.name, cwd: getTopicBySession(sid)!.cwd, agent: 'claude' } : { sid, name: 'Session', cwd: '', agent: 'claude' })
@@ -12956,7 +12961,12 @@ async function webappSessionFeed(sid: string): Promise<WebappSessionFeed | null>
     role: c.role, text: c.text, ts: c.ts,
     ...(c.img ? { img: c.img } : {}), ...(c.att ? { att: c.att } : {}), ...(c.cmd ? { cmd: true } : {}),
   }))
-  if (working) for (const a of currentTurnActivity(file).slice(-6)) items.push({ role: 'activity', text: `${a.tool}${a.detail ? ` ${a.detail}` : ''}`, ts: 0 })
+  // The running turn, as the Telegram live card shows it: Claude's mid-turn narration (the
+  // 💭 thoughts) interleaved with its tool runs, so checking in on a session says what it is
+  // thinking, not just which file it touched last.
+  if (working) for (const it of currentTurnFeed(file).slice(-8)) items.push(it.kind === 'text'
+    ? { role: 'thought', text: it.text.length > THOUGHT_MAX ? it.text.slice(0, THOUGHT_MAX - 1) + '…' : it.text, ts: 0 }
+    : { role: 'activity', text: `${it.tool}${it.detail ? ` ${it.detail}` : ''}`, ts: 0 })
   return { sid, name: row.name, working, items }
 }
 

@@ -3,7 +3,7 @@ import { test, expect, describe } from 'bun:test'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnActivity, currentTurnFeed, currentTurnTokens, slashResultAfter, legibleApiError } from './transcript.ts'
+import { latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnActivity, currentTurnFeed, currentTurnTokens, slashResultAfter, legibleApiError, latestModelId } from './transcript.ts'
 
 function fixture(entries: object[]): string {
   const f = join(mkdtempSync(join(tmpdir(), 'tg-transcript-')), 'session.jsonl')
@@ -26,6 +26,18 @@ test('latestFinalReply returns the last assistant text block', () => {
 test('latestFinalReply skips a tool-only tail (still working)', () => {
   const f = fixture([asst('done', 'a1'), tool('Bash', { command: 'ls' }, 't1')])
   expect(latestFinalReply(f)?.text).toBe('done')
+})
+
+test('latestModelId reads the main thread only, ignoring subagents and synthetic entries', () => {
+  const withModel = (e: any, model: string) => ({ ...e, message: { ...e.message, model } })
+  const f = fixture([
+    user('hi', 'u1'),
+    withModel(asst('a', 'a1'), 'claude-opus-5'),
+    withModel(sub('subagent output', 's1'), 'claude-haiku-4-5-20251001'),   // a worker, not this session
+    withModel(asst('API Error: 500', 'a2'), '<synthetic>'),                 // an API error, not a turn
+  ])
+  expect(latestModelId(f)).toBe('claude-opus-5')
+  expect(latestModelId(fixture([user('hi', 'u1')]))).toBe(null)
 })
 
 test('finalRepliesAfter with an empty cursor returns every turn conclusion', () => {
