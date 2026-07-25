@@ -51,6 +51,13 @@ the bridge remembers per-session **mode** and **effort** (`sessionModes` / `sess
 **model**. Closing this means adding a `sessionModels` map mirroring `sessionEfforts` (writer included)
 and feeding it into the resume branch's launch flags. Deliberately not smuggled into this round.
 
+**Live proof after deploy (tg v0.4.30)** — spawned `ctxprobe` through the real `tg spawn` path:
+- `/proc/3082916` → `claude --allow-dangerously-skip-permissions --model claude-opus-5[1m] --effort low
+  --permission-mode bypassPermissions` — the suffix reaches the CLI's argv.
+- `/context` in that pane → **`30.2k/1m tokens`**, `Free space: 969.8k`, statusline `claude-opus-5[1m]`.
+  So the CLI did **not** silently ignore an unrecognised model string and fall back to 200k — the
+  failure mode that would have looked exactly like success.
+
 **Task 2 — dead-letter reap missed an expired row.** Owner's hypothesis **confirmed**: `planAskReap`
 (`agent-bus.ts`) filtered `!p.expiredAt`, so ask 95 (already TTL-notified) was immune while ask 97 to
 the same dead session was reaped. The TTL notice promises "a late answer will still be delivered" —
@@ -58,6 +65,15 @@ false for a session that ended without ever seeing the ask, so an expired row is
 needs correcting. Dropped the `expiredAt` guard in `planAskReap` **and** in `sweepBus`'s pre-filter
 (`daemon.ts`); re-reporting can't loop because `reapDeadAsk` removes the pending row. Four new
 tripwires in `bus-reap.test.ts`, RED first (reproduced the exact live 95/97 board).
+
+**The "30-minute throttle" is not real — it was this deploy.** Ask 97 reaped 17:23:44 (v0.4.29, not
+expired → passed the old guard); ask 95 reaped **17:53:58**, which is **15 s after the v0.4.30 daemon
+came up at 17:53:43** — i.e. the first 15 s sweep carrying the fix, reaping the row the `expiredAt`
+guard had been holding. The 30 m 14 s gap is the interval to the deploy, not a rate limit. Confirmed in
+code too: `sweepBus` (`daemon.ts:2647`) is a plain `for … of planAskReap(…)` over every matching row —
+no `break`, no counter, no per-pass cap — and `bus-reap.test.ts` already pins multi-row single-pass
+reaping (the mixed board returns `[1, 5]`, and 95 + 97 clear together in one call). No notice
+coalescing was added: there is nothing throttling the reap to coalesce around.
 
 ## ROUND 3 (ccfleet) — bug 11 + 12 SHIPPED, tg v0.4.29, verified live
 
