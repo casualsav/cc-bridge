@@ -3631,11 +3631,16 @@ async function relayAuthUrlToTelegram(url: string, paneId: string | null = focus
 
   const safe = escapeHtml(url)
   // Rich carrier: the URL rides as a tappable link instead of a <pre> block the user has to copy.
+  // The href must be the RAW url — the rich carrier does NOT entity-decode attribute values the way
+  // parse_mode=HTML does, so an escaped href reaches the browser with literal `&amp;` separators
+  // (every query param after the first arrives named `amp;client_id`, … — the "Missing client_id"
+  // OAuth failure on the DM server). OAuth URLs can't contain `"` `<` `>`; if one somehow does,
+  // skip the rich card entirely and let the legacy <pre> path (which escapes) carry it.
   // ForceReply survives — reply_markup is orthogonal to rich_message — so the reply-with-code flow
   // is unchanged. Any rich failure falls back to the legacy HTML card, byte-identical to before.
-  const richHtml =
+  const richHtml = /["<>]/.test(url) ? null :
     `🔑 <b>Sign-in link from Claude Code</b>\n\n` +
-    `<a href="${safe}">Open the sign-in page</a> to get your code, then:\n\n` +
+    `<a href="${url}">Open the sign-in page</a> to get your code, then:\n\n` +
     `💬 <b>Reply to this message with your authentication code.</b>`
   const legacy =
     `🔑 <b>Sign-in link from Claude Code</b>\n\n` +
@@ -3647,6 +3652,7 @@ async function relayAuthUrlToTelegram(url: string, paneId: string | null = focus
     try {
       let sent: MsgRef
       try {
+        if (!richHtml) throw new Error('url unsafe for a rich href — use the legacy card')
         const m = await sendRichMessage(TOKEN!, chat, htmlPanelToRich(richHtml), {
           ...(thread !== undefined ? { messageThreadId: thread } : {}),
           replyMarkup: { force_reply: true, input_field_placeholder: 'Authentication code' },
