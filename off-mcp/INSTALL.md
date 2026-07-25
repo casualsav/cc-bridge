@@ -107,6 +107,16 @@ Preserve `.env` keys you didn't just collect (e.g. `TELEGRAM_BANG_SHELL`, TTS AP
 keep `access.json`'s pairing/group/prefs state, only adding the interviewed Telegram ID to
 `allowFrom`. A blind rewrite here once wiped a working config.
 
+**Repairing over a LIVE install: never work from inside the state dir.** Two more rules when
+`.env` already exists and a daemon is (or was) running:
+- Keep your own cwd OUT of `~/.claude/channels/telegram` (and any `~/.claude*` dir) — edit the
+  files by absolute path from a neutral cwd like `$HOME`. A claude session that runs in the state
+  dir can get remembered as the bridge's "last workspace"; DM revival then respawns there — a
+  different project dir, so the user is silently dropped into a fresh context per message instead
+  of their real conversation. (Guarded in code since v0.4.10; don't rely on it from older builds.)
+- Leave `topics.json`, `last-cwd`, and the other state files alone unless the user explicitly
+  asked to reset them — they carry the session/topic bindings that make conversations continue.
+
 **Questions:**
 1. **Bot token** — from @BotFather. (Required.)
 2. **Your Telegram numeric user ID** — to lock the bot to you. If they don't know it,
@@ -316,16 +326,25 @@ instance, `8788` for a second one). Follow the path the user chose:
      URL; **relay that to the user** to approve in any browser. This is the only login, and it does
      **not** require installing anything on their phone. `--operator` lets later `tailscale` commands
      run without sudo.
-  3. **Turn Funnel on for the port:** `tailscale funnel --bg <port>` (prefix `sudo` if it reports a
+  3. **Preflight: tailnet TLS certs must be enabled** — `tailscale serve`/`funnel` both need them
+     and **HANG silently** when they're off (seen live 2026-07-25). Probe from a scratch dir (the
+     command writes cert files into cwd): `cd /tmp && tailscale cert "$(tailscale status --json |
+     jq -r '.Self.DNSName' | sed 's/\.$//')"` (no jq: the machine's `<host>.<tailnet>.ts.net` name
+     is on `tailscale status`). If it errors `500: … does not support getting TLS certs`, HTTPS
+     Certificates are disabled on the tailnet — a free one-click toggle, not a billing thing.
+     **Relay to the user:** open `https://login.tailscale.com/admin/dns` → *HTTPS Certificates* →
+     **Enable HTTPS** (MagicDNS, same page, must be on). Re-run the probe until a cert issues,
+     then continue.
+  4. **Turn Funnel on for the port:** `tailscale funnel --bg <port>` (prefix `sudo` if it reports a
      permissions error). The first time, Tailscale may print *"Funnel is not enabled on your tailnet"*
      with a `https://login.tailscale.com/f/funnel?node=…` link — **relay that to the user** to click
      once: it's a one-time owner toggle on a web page in the admin console, **not** a device install.
      Then re-run. Confirm with `tailscale funnel status` (shows `https://<host>.<tailnet>.ts.net …
      proxy http://127.0.0.1:<port>`).
-  4. **Set `.env`:** `TELEGRAM_WEBAPP_ENABLED=1` and `TELEGRAM_WEBAPP_TUNNEL=tailscale`. The daemon
+  5. **Set `.env`:** `TELEGRAM_WEBAPP_ENABLED=1` and `TELEGRAM_WEBAPP_TUNNEL=tailscale`. The daemon
      reads the `*.ts.net` URL from `tailscale status` itself — leave `TELEGRAM_WEBAPP_PUBLIC_URL` unset.
-  5. **Register it in BotFather** (shared step below), URL = the `https://<host>.<tailnet>.ts.net`
-     from step 3.
+  6. **Register it in BotFather** (shared step below), URL = the `https://<host>.<tailnet>.ts.net`
+     from step 4.
 
 - **Custom domain (in-group):** the user fronts the local port with their own HTTPS reverse proxy
   (nginx / Caddy / a Cloudflare *named* tunnel) → `http://127.0.0.1:<port>`. Then set `.env`:

@@ -124,3 +124,16 @@ test('statusKeyboard carries the st:* quick actions in one row', () => {
   const datas = kb.flat().map(b => b.data ?? '')
   expect(datas).toEqual(['st:model', 'st:effort', 'st:mode', 'st:settings'])
 })
+
+test('unreachable-chat marking: only Telegram undeliverable errors mark; inbound clears', async () => {
+  const { markChatUnreachableIfUndeliverable, isChatUnreachable, markChatReachable } = await import('./state.ts')
+  expect(markChatUnreachableIfUndeliverable('42', new Error('503 upstream hiccup'))).toBe(false)
+  expect(isChatUnreachable('42')).toBe(false)
+  expect(markChatUnreachableIfUndeliverable('42', new Error("403: Forbidden: bot can't initiate conversation with a user"))).toBe(true)
+  expect(isChatUnreachable('42')).toBe(true)
+  expect(markChatUnreachableIfUndeliverable('43', { description: 'Bad Request: chat not found' })).toBe(true)
+  markChatReachable('42')
+  expect(isChatUnreachable('42')).toBe(false)
+  expect(isChatUnreachable('43')).toBe(true)
+  markChatReachable('43')
+})

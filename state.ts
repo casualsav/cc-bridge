@@ -163,3 +163,23 @@ export const sessionNames = new Map<string, string>()
 // When the target already exists we stash the typed contents under a short id and ask for an
 // overwrite confirmation (callback data can't carry the path/body, so it carries just the id).
 export const mdOverwritePending = new Map<string, { path: string; display: string; contents: string }>()
+
+// ---- Unreachable DM chats ----
+// Chats Telegram refuses delivery to — an allowlisted user who has never opened the bot's DM (bots
+// can't initiate; sends 400 "chat not found"), blocked the bot, or deactivated. One failed send
+// marks the chat as pending-first-contact and ALL fan-out delivery to it (pins, notices, reply
+// broadcast) stays paused until an inbound message from it proves it reachable (markChatReachable —
+// the daemon calls it on every gated private message). In-memory by design: a restart retries each
+// chat once, not per-cycle — a two-user install with one never-seen user used to log the same
+// error every 10s pin refresh (~29k times).
+const unreachableChats = new Set<string>()
+export function markChatReachable(chat: string): void { unreachableChats.delete(chat) }
+export function isChatUnreachable(chat: string): boolean { return unreachableChats.has(chat) }
+// Telegram's wording for the whole family; chat-not-found/PEER_ID_INVALID cover never-opened DMs.
+const UNDELIVERABLE_RE = /can't initiate|bot was blocked|user is deactivated|chat not found|PEER_ID_INVALID/i
+export function markChatUnreachableIfUndeliverable(chat: string, e: unknown): boolean {
+  if (!UNDELIVERABLE_RE.test(String((e as { description?: string })?.description ?? e))) return false
+  unreachableChats.add(chat)
+  process.stderr.write(`daemon: chat ${chat} is unreachable (never messaged the bot / blocked) — delivery paused until they message\n`)
+  return true
+}

@@ -62,6 +62,7 @@ import {
   lastRelayedByFile, offMcpPanes,
   usageWarnState, voiceNudged,
   sessionNames, mdOverwritePending,
+  markChatReachable, isChatUnreachable, markChatUnreachableIfUndeliverable,
 } from './state.ts'
 import { initMirror, updateTerminalMirror, respawnTerminalMirror, abandonMirror, updateAuxMirror, dropAuxMirror, auxMirrorPanes } from './mirror.ts'
 import { parseStatusline, type StatuslineData } from './statusline.ts'
@@ -871,7 +872,10 @@ function noticeChats(): string[] {
 }
 
 function notifyChats(text: string, opts?: SendOpts): void {
-  for (const chat_id of noticeChats()) void channel.sendText(chat_id, text, opts).catch(() => {})
+  for (const chat_id of noticeChats()) {
+    if (isChatUnreachable(chat_id)) continue   // allowlisted but never messaged the bot — paused until they do
+    void channel.sendText(chat_id, text, opts).catch(e => markChatUnreachableIfUndeliverable(chat_id, e))
+  }
 }
 
 // Prompt-relay dedup is keyed PER PANE in auxPromptStates (see AuxPromptState) — for the focused
@@ -2031,14 +2035,25 @@ const ADOPTED_PANE_FILE = join(STATE_DIR, 'adopted-pane')
 // session there even after every session is gone (when no live pane can answer for a cwd).
 const LAST_CWD_FILE = join(STATE_DIR, 'last-cwd')
 let lastCwdCache: string | null = null
+
+// A session WORKSPACE must never be the bridge's own state dir or a Claude config dir. During an
+// install repair the natural cwd is ~/.claude/channels/telegram (that's where .env/access.json
+// live) — a claude session run there got remembered as "the last workspace", so after the repair
+// every DM revival respawned `-c` in the STATE DIR: a different Claude project dir, i.e. a fresh
+// context per message instead of the user's real conversation. Both the writer and the reader
+// guard, so a value already poisoned on disk is neutralized by an update alone.
+function isConfigCwd(cwd: string): boolean {
+  return cwd === STATE_DIR || cwd.startsWith(STATE_DIR + '/')
+    || /\/\.claude(-[A-Za-z0-9-]+)?(\/|$)/.test(cwd)
+}
 function rememberLastCwd(cwd: string | null): void {
-  if (!cwd || cwd === lastCwdCache) return
+  if (!cwd || cwd === lastCwdCache || isConfigCwd(cwd)) return
   lastCwdCache = cwd
   try { writeFileSync(LAST_CWD_FILE, cwd) } catch {}
 }
 function lastSessionCwd(): string | null {
   if (!lastCwdCache) { try { lastCwdCache = readFileSync(LAST_CWD_FILE, 'utf8').trim() || null } catch {} }
-  return lastCwdCache && existsSync(lastCwdCache) ? lastCwdCache : null
+  return lastCwdCache && existsSync(lastCwdCache) && !isConfigCwd(lastCwdCache) ? lastCwdCache : null
 }
 
 function adoptPane(paneId: string): void {
@@ -10199,6 +10214,9 @@ async function handleInbound(
   const from = ctx.from!
   const chat_id = String(ctx.chat!.id)
   const msgId = ctx.message?.message_id
+  // A gated private message proves this DM deliverable — resume any paused pin/notice delivery
+  // (the unreachable mark set when Telegram refused a send to a never-opened DM).
+  if (ctx.chat?.type === 'private') markChatReachable(chat_id)
 
   // Permission text-reply intercept ("yes xxxxx" / "no xxxxx")
   const permMatch = PERMISSION_REPLY_RE.exec(text)
@@ -10674,7 +10692,10 @@ async function ensureChatProfile(): Promise<void> {
 function dmChatEligible(): { account: Account; dir: string } | null {
   const account = accountByName('chat')
   if (!account || !existsSync(account.configDir)) return null
-  const dir = listDmChatSessions()[0]?.cwd ?? (existsSync('/srv/chat') ? '/srv/chat' : null)
+  // Ignore a lane cwd that points into the bridge's own state/config dirs (a poisoned binding from
+  // a mid-repair adoption — see isConfigCwd) so it can't propagate to every future lane.
+  const laneCwd = listDmChatSessions().map(l => l.cwd).find(c => c && !isConfigCwd(c))
+  const dir = laneCwd ?? (existsSync('/srv/chat') ? '/srv/chat' : null)
   return dir ? { account, dir } : null
 }
 
@@ -10716,6 +10737,9 @@ async function ensureChatLane(ctx: Context, chatId: string, first: InboundParams
   const drain = (deliver: (p: InboundParams) => void) => { for (const p of chatLaneBooting.get(chatId) ?? []) deliver(p) }
   try {
     const account = accountByName('chat')
+    // A revive cwd inside the state/config dirs is a poisoned binding (mid-repair adoption) — drop
+    // it and provision fresh in the eligible workspace rather than `-c`-continue the wrong context.
+    if (revive && isConfigCwd(revive.cwd)) revive = undefined
     const dir = revive?.cwd ?? dmChatEligible()?.dir
     if (!account || !dir) { drain(bufferEvent); return }   // account/workspace vanished since eligibility was checked — buffer rather than misroute
     const sid = revive?.sid ?? genSessionId()

@@ -16,7 +16,7 @@ import {
   dismissSession, isSessionDismissed, undismissSession, listDismissedSessions,
   chatIdForDmChatSession, clearDmChatSession, listDmChatSessions,
 } from './topics.ts'
-import { focus, offMcpPanes, sessions } from './state.ts'
+import { focus, offMcpPanes, sessions, isChatUnreachable } from './state.ts'
 import { AGENT_PANE_OPT, normalizeAgent } from './agent.ts'
 import { chatForLaneSession } from './dm-lanes.ts'
 
@@ -246,7 +246,9 @@ async function ensureTopicFor(group: string, sessionId: string, cwd: string, pan
 // Where a session's outbound should go. DM mode → the allowlisted DM chats (no thread). Topic mode →
 // the bound group, threaded to the session's own topic (created on first use; General if unresolvable).
 export async function outboundTargetsFor(paneId: string | null): Promise<Array<{ chat: string; thread?: number }>> {
-  const dmTargets = () => loadAccess().allowFrom.map(chat => ({ chat }))
+  // Skip chats marked pending-first-contact (never opened the bot DM) — otherwise every reply/
+  // mirror/transcript send in the broadcast fan-out errors "chat not found" until they message.
+  const dmTargets = () => loadAccess().allowFrom.filter(chat => !isChatUnreachable(chat)).map(chat => ({ chat }))
   if (!isTopicMode()) {
     // Unbound is no longer single-session (a DM hosts its chat lane plus headless coding sessions),
     // so route by the pane's OWN session first — the broadcast below would otherwise spray every

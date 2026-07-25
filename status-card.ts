@@ -13,7 +13,7 @@ import { exec } from './proc.ts'
 import { escapeHtml, clampChars } from './markdown.ts'
 import { parseStatusline, pinBar, type StatuslineData } from './statusline.ts'
 import { capturePane, paneCwd } from './pane-io.ts'
-import { focus } from './state.ts'
+import { focus, isChatUnreachable, markChatUnreachableIfUndeliverable } from './state.ts'
 import { asLowPriority } from './throttle.ts'
 import { scheduleEdit, cancelEdit, isViewHot } from './edit-scheduler.ts'
 import { loadAccess } from './access.ts'
@@ -543,7 +543,9 @@ export async function createSessionPin(chat: string, text: string, buttons: Butt
     const m = await deps.channel.sendText(chat, text, { buttons })
     await deps.channel.pin(m).catch(() => {})
     sessionPins.set(chat, Number(m.messageId)); pinTextCache.set(chat, text); persistSessionPins()
-  } catch (e) { process.stderr.write(`daemon: session pin create failed: ${e}\n`) }
+  } catch (e) {
+    if (!markChatUnreachableIfUndeliverable(chat, e)) process.stderr.write(`daemon: session pin create failed: ${e}\n`)
+  }
 }
 
 // Forum mode: one pinned status card PER topic, each tracking its own session. Keyed in sessionPins
@@ -657,9 +659,11 @@ export async function updateTopicPins(): Promise<void> {
   if (deps.dmChatLanes) {
     const buttons = statusKeyboard()
     for (const lane of await deps.dmChatLanes()) {
-      if (!lane.paneId) continue
-      const text = await statusCardText(lane.paneId)
-      await upsertChatPin(lane.chat, text, buttons, true)
+      if (!lane.paneId || isChatUnreachable(lane.chat)) continue
+      try {
+        const text = await statusCardText(lane.paneId)
+        await upsertChatPin(lane.chat, text, buttons, true)
+      } catch (e) { process.stderr.write(`daemon: pin cycle for lane chat ${lane.chat} failed: ${e}\n`) }
     }
   }
 }
@@ -705,11 +709,16 @@ export async function updateSessionPin(): Promise<void> {
     // `focus` can stay null forever, and a card keyed to focus alone was never created at all.
     const buttons = statusKeyboard()
     for (const chat of loadAccess().allowFrom) {
-      const lane = getDmChatSession(chat)
-      const pane = focus.activePaneId ?? (lane ? await paneForSession(lane.sessionId).catch(() => null) : null)
-      const text = await statusCardText(pane)
-      const hasSession = !!(pane || focus.activeShim)   // off-MCP pane or MCP shim — either counts
-      await upsertChatPin(chat, text, buttons, hasSession)
+      if (isChatUnreachable(chat)) continue   // paused until they message the bot (see markChatReachable)
+      // Per-chat isolation: NOTHING one chat's card does may block another allowlisted user's card
+      // (a two-user install must get the owner's pin even if the second chat errors every time).
+      try {
+        const lane = getDmChatSession(chat)
+        const pane = focus.activePaneId ?? (lane ? await paneForSession(lane.sessionId).catch(() => null) : null)
+        const text = await statusCardText(pane)
+        const hasSession = !!(pane || focus.activeShim)   // off-MCP pane or MCP shim — either counts
+        await upsertChatPin(chat, text, buttons, hasSession)
+      } catch (e) { process.stderr.write(`daemon: pin cycle for chat ${chat} failed: ${e}\n`) }
     }
   } finally { pinUpdating = false }
 }
