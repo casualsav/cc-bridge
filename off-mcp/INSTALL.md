@@ -162,9 +162,20 @@ keep `access.json`'s pairing/group/prefs state, only adding the interviewed Tele
    Telegram (/settings → 👤 Accounts → 🚀, or `/account`) — the one-time login link relays into
    the chat, so they never need the terminal for it. Accounts can also be added later with
    `/account add <name>`.
-6. **Files Mini App?** (default off.) A built-in file explorer opened from Telegram — browse,
-   preview, and download files on the session's machine, right inside the chat. It needs a public
-   HTTPS URL to reach the local server; how that URL is obtained is the choice:
+6. **File browser in the Mini App?** (recommend **read/write**.) The bridge can serve a file
+   explorer that opens right inside Telegram: browse the session machine's folders and preview or
+   download any file from your phone — and at the read/write level also upload, edit, rename, and
+   delete, so you can fix a config or drop in an asset without touching a terminal. Three levels:
+   - **Read/write file browser** — *recommended.* Browse / preview / download, plus upload, edit,
+     delete, and rename.
+   - **Read-only file browser** — browse / preview / download only; the machine can't be modified
+     from the app.
+   - **No file browser** — the file browser is fully omitted from the Mini App (no Files tab, file
+     API off). The Mini App's console tabs (Sessions / Scheduled / Settings) still ship, and the
+     browser can be turned on later from /settings → 🗂 File browser — no reinstall.
+
+   Whichever they chose, also ask how the Mini App's public HTTPS URL is obtained (the app needs
+   one to reach the local server):
    - **Tailscale Funnel** — *recommended; free, and opens inside group chats.* Gives a stable public
      URL with no domain of your own, so the explorer opens in-place in your group/topic. One-time
      setup, mostly automated below: install Tailscale, a quick browser login, flip Funnel on. Best
@@ -176,12 +187,9 @@ keep `access.json`'s pairing/group/prefs state, only adding the interviewed Tele
    - **Custom domain** — *most control/privacy.* If you already own a domain, point it at the app via
      your own reverse proxy for a stable, fully self-owned URL — nothing routed through a third-party
      tunnel. Also opens in-group.
-   - **off** — no file explorer.
 
-   When enabled the explorer is **read-write by default** — browse / preview / download, plus upload,
-   edit, delete, and rename (set `TELEGRAM_WEBAPP_WRITE=0` for read-only). The Funnel and
-   custom-domain options need one extra step — registering the URL as the bot's **Main Mini App** in
-   BotFather — handled in "If the Files Mini App is enabled" below.
+   The Funnel and custom-domain options need one extra step — registering the URL as the bot's
+   **Main Mini App** in BotFather — handled in "Files Mini App reachability" below.
 
 Markdown rendering is **always on** — Claude's replies are rendered as Telegram formatting; it
 isn't a prompt.
@@ -204,9 +212,10 @@ TELEGRAM_WHISPER_COMPUTE=int8               # local only
 TELEGRAM_WHISPER_PYTHON=<venv>/bin/python   # local only — written by the provisioning step below
 GROQ_API_KEY=<key>                          # groq only
 OPENAI_API_KEY=<key>                        # openai only
-# Files Mini App — only if enabled (Q6):
-TELEGRAM_WEBAPP_ENABLED=1                    # turns the file explorer on
-TELEGRAM_WEBAPP_WRITE=1                      # read-write by default (upload/edit/delete/rename); set 0 for read-only
+# Files Mini App (Q6) — always enabled (the console tabs ship at every level); the file-browser
+# level is what Q6 chose. "No file browser" additionally writes "fileBrowser": false to access.json.
+TELEGRAM_WEBAPP_ENABLED=1
+TELEGRAM_WEBAPP_WRITE=1                      # read/write → 1 · read-only or no file browser → 0
 TELEGRAM_WEBAPP_TUNNEL=tailscale            # tailscale = in-group · cloudflared = DM-only (default) · none = use PUBLIC_URL
 TELEGRAM_WEBAPP_PUBLIC_URL=https://files.example.com   # custom-domain option only (overrides the tunnel)
 ```
@@ -234,6 +243,8 @@ use pairing instead if they didn't give an ID):
 { "dmPolicy": "allowlist", "allowFrom": ["<their-telegram-id>"], "groups": {}, "pending": {},
   "renderMarkdown": true }
 ```
+If Q6 was **no file browser**, add `"fileBrowser": false` to this object — that's what omits the
+Files tab + file API from the Mini App (flippable later from /settings → 🗂 File browser).
 
 **Only if the user explicitly asked for a second Claude account during the interview** — most
 installs are single-account and need **no** `accounts.json`. Do **not** write a placeholder account:
@@ -287,7 +298,8 @@ and gets the prereq sorted. Set it up yourself, in order:
    user's first note. (Verify with a real transcription after Step 3's restart using the bundled
    helper if you want: `"$VENV/bin/python" "$(ls -d ~/.claude/plugins/cache/cc-bridge/telegram/*/ | sort -V | tail -1)transcribe_local.py" <some.oga> <model>`.)
 
-**If the Files Mini App is enabled (Q6): set up reachability now.** The webapp binds
+**Files Mini App reachability (Q6's URL choice): set it up now** — this step always runs, since the
+console ships at every Q6 level. The webapp binds
 `127.0.0.1:<port>` where `<port>` = `8787` + the bridge instance id (so `8787` for the default
 instance, `8788` for a second one). Follow the path the user chose:
 

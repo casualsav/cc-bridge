@@ -22,6 +22,7 @@ export interface WebappDeps {
   maxFind?: number                         // find result cap (default 500)
   resolveStart?: (token: string) => string | null   // map a deep-link startapp token → starting cwd
   canWrite?: boolean                       // enable write endpoints (TELEGRAM_WEBAPP_WRITE); default false → read-only
+  fileBrowser?: () => boolean              // live pref: file browser present in the app (default true). False = the Files tab is omitted from the served shell AND every file endpoint 403s — read live per request so the /settings toggle applies without a restart
   protectedRoots?: string[]                // extra dirs (beyond ~/.claude) that writes must never touch (e.g. a relocated state dir)
   trashDir?: string                        // /api/rm moves deletions here (recoverable); required when canWrite
   maxWriteBytes?: number                   // /api/write size cap (default 2 MiB)
@@ -184,6 +185,11 @@ async function uniquePath(p: string): Promise<string> {
   return join(dir, `${stem}-${Date.now()}${ext}`)
 }
 
+// Every endpoint that IS the file browser (gated by deps.fileBrowser). /api/download is included
+// even on its tokened path — a token minted before the toggle flipped must not outlive it.
+const FILE_API = new Set(['/api/ls', '/api/read', '/api/download', '/api/dl-token', '/api/find',
+  '/api/resolve', '/api/upload', '/api/write', '/api/rm', '/api/mkdir', '/api/rename'])
+
 // matches a simple glob (*, ?) OR a case-insensitive substring against a basename
 function makeMatcher(q: string): (name: string) => boolean {
   if (/[*?]/.test(q)) {
@@ -197,6 +203,11 @@ function makeMatcher(q: string): (name: string) => boolean {
 async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: string): Promise<Response> {
   const maxRead = deps.maxReadBytes ?? 512 * 1024
   const maxFind = deps.maxFind ?? 500
+
+  // File browser off → the whole file surface is gone, server-side too (the omitted UI is not the
+  // gate; this is). Console endpoints (sessions/scheduled/settings + session attach) stay.
+  if (FILE_API.has(url.pathname) && deps.fileBrowser?.() === false)
+    return json({ error: 'file browser disabled', reason: 'enable it in /settings → 🗂 File browser' }, 403)
 
   if (url.pathname === '/api/ls') {
     const dir = await canon(url.searchParams.get('path') || '/')
@@ -475,13 +486,22 @@ async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: strin
 }
 
 // Serve the static SPA for any non-API path (single-page app: unknown paths fall back to index.html).
+// The shell carries the file-browser flag as a <body> attribute so the Files tab can be OMITTED from
+// the DOM before first paint — the SPA needs no authed round-trip just to know its own layout.
 async function handleStatic(url: URL, deps: WebappDeps): Promise<Response> {
   const rel = decodeURIComponent(url.pathname).replace(/^\/+/, '') || 'index.html'
   if (rel.includes('..')) return new Response('forbidden', { status: 403 })
+  const serveShell = async (f: ReturnType<typeof Bun.file>) => {
+    if (deps.fileBrowser?.() === false) {
+      const html = (await f.text()).replace('<body>', '<body data-files="off">')
+      return new Response(html, { headers: { 'content-type': 'text/html;charset=utf-8' } })
+    }
+    return new Response(f)
+  }
   const candidate = join(deps.staticDir, rel)
   const f = Bun.file(candidate)
-  if (await f.exists()) return new Response(f)
-  return new Response(Bun.file(join(deps.staticDir, 'index.html')))   // SPA fallback
+  if (await f.exists()) return rel === 'index.html' ? serveShell(f) : new Response(f)
+  return serveShell(Bun.file(join(deps.staticDir, 'index.html')))   // SPA fallback
 }
 
 // initData arrives as `Authorization: tma <initData>` on API calls. (It cannot gate the initial

@@ -452,6 +452,13 @@ function setLive(fn, ms) {
   clearInterval(tabTimer);
   tabTimer = setInterval(() => { if (!document.hidden && !$("drill").classList.contains("show")) fn(); }, ms);
 }
+// File browser omitted server-side (settings → 🗂 File browser off): the served shell carries
+// data-files="off" and the Files tab is REMOVED from the DOM, not hidden. Its API 403s too.
+const FILES = document.body.dataset.files !== "off";
+if (!FILES) {
+  const fb = document.querySelector('#tabs button[data-tab="files"]'); if (fb) fb.remove();
+  const ft = $("tab-files"); if (ft) ft.remove();
+}
 async function showTab(name) {
   curTab = name;
   clearInterval(tabTimer);
@@ -484,6 +491,7 @@ async function renderSettings() {
     prefMode: { name: "🧷 Preferred mode", bool: false },
     confirmReset: { name: "🧹 /clear approval", bool: true },
     limitFailover: { name: "🔀 Limit failover", bool: true },
+    fileBrowser: { name: "🗂 File browser", bool: true },
     baseFolder: { name: "📂 Base folder", bool: false },
     mcp: { name: "🔌 MCP mode", bool: true },
     mode: { name: "🛠️ Mode", bool: false },
@@ -523,7 +531,7 @@ async function renderSettings() {
 }
 async function setSetting(key, value) {
   const d = await writeOp("/api/settings/set", { key, value });
-  if (d) { showOk("Updated"); renderSettings(); }
+  if (d) { showOk("Updated"); if (key === "fileBrowser") { location.reload(); return; } renderSettings(); }
 }
 
 // ---- Sessions dashboard (homepage): one card per session, tap → drill-in ----
@@ -838,13 +846,14 @@ $("scgo").onclick = async () => {
 };
 
 // Boot: Sessions is the homepage. A deep link (?start= folder, or startapp token → /api/resolve)
-// still lands on Files at that folder — that's what the /files command promises.
+// still lands on Files at that folder — that's what the /files command promises. With the file
+// browser omitted, deep links fall through to Sessions.
 async function boot() {
   const sp = tg && tg.initDataUnsafe && tg.initDataUnsafe.start_param;
   const qs = new URLSearchParams(location.search).get("start");
-  if (sp) {
+  if (FILES && sp) {
     try { const r = await api("/api/resolve", { token: sp }); cur = r.cwd || "/"; filesLoaded = true; ls(cur); showTab("files"); return; } catch {}
-  } else if (qs) { filesLoaded = true; ls(cur); showTab("files"); return; }
+  } else if (FILES && qs) { filesLoaded = true; ls(cur); showTab("files"); return; }
   showTab("sessions");
 }
 if (!INIT) $("tab-sessions").innerHTML = '<div class="notice">Open this from the Telegram button — it carries the sign-in token.</div>';

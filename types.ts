@@ -40,6 +40,7 @@ export type Access = {
   switchboard?: boolean    // show the live agent-bus roster line on the pinned card (default on) — a display toggle only; tg ask/answer/roster keep working when off. Field name kept for access.json compat.
   dmLanes?: boolean        // per-user DM lanes: each allowlisted user DMing the bot gets its OWN auto-spawned session, replies isolated to that user (default off; single-user installs unaffected)
   claudingDraft?: boolean  // DM-only live "Clauding…" status draft (Bot API 10.1) while a turn runs (default on)
+  fileBrowser?: boolean    // Files tab + file API in the Mini App (default on). Off = OMITTED from the served app (tab gone, file endpoints 403) — the console tabs (Sessions/Scheduled/Settings) stay. Level (read-only vs read/write) stays TELEGRAM_WEBAPP_WRITE.
   replyMode?: 'thoughts' | 'actions' | 'off' | 'tools' | 'hybrid' | 'all' | 'final' | 'stream' | 'live'   // tools/hybrid/all/final/stream/live are legacy aliases
 }
 

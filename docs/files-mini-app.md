@@ -120,6 +120,11 @@ In `~/.claude/channels/telegram/.env` / `access.json`:
   delete-to-trash / new-folder / rename / upload-from-device**; deletions go to `~/.tg-trash`
   (recoverable), overwrites keep a `.bak`, every mutation is audited to `daemon.log`.
 - `WEBAPP_MAX_UPLOAD_MB=…` (default 50) — size cap for **Upload from device…** (device → folder).
+- `access.json` `"fileBrowser": false` (pref, default on; toggle: /settings → 🗂 File browser, or the
+  app's Settings tab) — OMITS the file browser from the Mini App: the served shell drops the Files tab
+  from the DOM and every file endpoint (ls/read/download/dl-token/find/resolve/upload/write/rm/mkdir/
+  rename) 403s. The console tabs (Sessions / Scheduled / Settings) keep working. Read live per request,
+  so flipping it needs no restart; the read-only vs read/write level stays `WEBAPP_WRITE`.
 
 ## 7. Phasing
 - **Phase 0 — inline baseline:** ~~inline-keyboard explorer~~ **skipped** (decided 2026-06-15). Mini App only.

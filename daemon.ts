@@ -7171,6 +7171,7 @@ function settingsText(): string {
     `🧷 Preferred mode — <b>${listAccounts().length > 1 ? 'per account' : defModeLabel(MAIN_ACCOUNT.configDir)}</b>\n` +
     `🧹 <code>/clear</code> approval — <b>${a.confirmReset === false ? 'off' : 'on'}</b>\n` +
     `🔀 Limit failover — <b>${a.limitFailover === true ? 'on' : 'off'}</b>\n` +
+    (WEBAPP_ENABLED ? `🗂 File browser — <b>${a.fileBrowser === false ? 'off' : 'on'}</b>\n` : '') +
     (isTopicMode() ? `📂 Base folder — <b>${escapeHtml(baseFolderFull())}</b>\n` : '') +
     (isTopicMode() && AGENT_BUS_PIN_UI ? `☎️ Agent bus — <b>${a.switchboard === false ? 'off' : 'on'}</b>\n` : '') +
     `\nTap to change:`
@@ -7193,6 +7194,7 @@ function settingsMarkdown(): string {
     ['🧷 Preferred mode', listAccounts().length > 1 ? 'per account' : defModeLabel(MAIN_ACCOUNT.configDir)],
     ['🧹 /clear approval', a.confirmReset === false ? 'off' : 'on'],
     ['🔀 Limit failover', a.limitFailover === true ? 'on' : 'off'],
+    ...(WEBAPP_ENABLED ? [['🗂 File browser', a.fileBrowser === false ? 'off' : 'on'] as [string, string]] : []),
     ...(isTopicMode() ? [['📂 Base folder', baseRowValue()] as [string, string]] : []),
     ...(isTopicMode() && AGENT_BUS_PIN_UI ? [['☎️ Agent bus', a.switchboard === false ? 'off' : 'on'] as [string, string]] : []),
   ]
@@ -7204,6 +7206,7 @@ function settingsMarkdown(): string {
     '🧷 <b>Preferred mode</b> — the permission mode NEW sessions launch in (/mode is the live dial).',
     '🧹 <b>/clear approval</b> — /clear and /new ask for a Yes/No tap first.',
     '🔀 <b>Limit failover</b> — a usage-limited account hands off to the next one.',
+    ...(WEBAPP_ENABLED ? ['🗂 <b>File browser</b> — the Files tab in the Mini App. Off removes it (and its file API) entirely; the Sessions/Scheduled/Settings tabs stay.'] : []),
     ...(isTopicMode() ? ['📂 <b>Base folder</b> — new forum topics are created as subfolders of this folder.'] : []),
     ...(isTopicMode() && AGENT_BUS_PIN_UI ? ['☎️ <b>Agent bus</b> — the live roster line on the pinned card. Sessions can still hand work to each other with <code>tg ask</code>.'] : []),
   ].join('<br>')
@@ -7254,6 +7257,7 @@ function settingsKeyboard(): InlineKeyboard {
     ['👤', 'acct:panel'], ['🐙', 'gh:panel'], ['⚡', 'set:batch'], ['🚢', 'set:ship'],
     ['🎙️', 'set:voice'], ['🔊', 'set:tts'], ['💬', 'set:replymode'], ['📌', 'set:pin'],
     ['🧷', 'defmode:panel'], ['🧹', 'set:confirmreset'], ['🔀', 'set:failover'],
+    ...(WEBAPP_ENABLED ? [['🗂', 'set:filebrowser'] as [string, string]] : []),
     ...(isTopicMode() ? [['📂', 'set:base'] as [string, string]] : []),
     ...(isTopicMode() && AGENT_BUS_PIN_UI ? [['☎️', 'set:switchboard'] as [string, string]] : []),
   ]
@@ -8182,6 +8186,7 @@ bot.command('esc', confirmStop)   // alias (muscle memory — it's "Esc" in the 
 bot.command('files', async ctx => {
   if (!dmCommandGate(ctx)) return
   if (!WEBAPP_ENABLED) { await ctx.reply('Files explorer is off. Enable it: set TELEGRAM_WEBAPP_ENABLED=1 in the bridge .env, then /restart the daemon.'); return }
+  if (loadAccess().fileBrowser === false) { await ctx.reply('🗂 File browser is off — turn it on in /settings → 🗂 File browser (no restart needed).'); return }
   const url = filesPublicUrl()
   if (!url) { await ctx.reply('📂 Files server is starting (bringing up the tunnel) — try /files again in a few seconds.'); return }
   const t = await commandTarget(ctx)
@@ -8693,7 +8698,7 @@ bot.on('callback_query:data', async ctx => {
   }
 
   // /settings panel toggles → flip the setting and re-render the panel in place.
-  const setMatch = /^set:(pin|replymode|ship|voice|batch|tts|confirmreset|failover|base|switchboard)$/.exec(data)
+  const setMatch = /^set:(pin|replymode|ship|voice|batch|tts|confirmreset|failover|base|switchboard|filebrowser)$/.exec(data)
   if (setMatch) {
     if (!(await cbAuth(ctx))) return
     await ctx.answerCallbackQuery().catch(() => {})
@@ -8749,6 +8754,9 @@ bot.on('callback_query:data', async ctx => {
       saveAccess(a)
       rosterCache = { at: 0, line: null }   // invalidate the memo so the line (dis)appears on the next repaint, not up to ROSTER_TTL_MS later
       await updateSessionPin()               // repaint the pinned card(s) now
+    } else if (setMatch[1] === 'filebrowser') {
+      a.fileBrowser = a.fileBrowser === false               // flip (default on) — the webapp reads it live per request, no restart
+      saveAccess(a)
     }
     await showSettings(ctx, 'edit')
     return
@@ -12160,6 +12168,7 @@ async function webappReadSettings(): Promise<WebappSettingsView> {
       prefMode: { value: listAccounts().length > 1 ? 'per account' : defModeLabel(MAIN_ACCOUNT.configDir), editable: false, label: 'what NEW sessions launch in' },
       confirmReset: { value: a.confirmReset !== false, editable: true, label: '/clear and /new ask first' },
       limitFailover: { value: a.limitFailover === true, editable: true, label: 'chain ordered in /settings' },
+      fileBrowser: { value: a.fileBrowser !== false, editable: true, label: 'Files tab in this app (reopens on change)' },
       ...(isTopicMode() ? { baseFolder: { value: baseFolderFull(), editable: false, label: 'new topics land here' } } : {}),
       mcp: { value: mcpEnabled(), editable: true, label: 'new sessions only' },
       mode: { value: cap ? detectCurrentMode(cap) : null, editable: false, label: 'drives the pane (chat-side)' },
@@ -12190,6 +12199,7 @@ function webappSetSetting(userId: string, key: string, value: unknown): string |
     case 'shipButtons': { const a = loadAccess(); a.shipButtons = truthy(value); saveAccess(a); return null }
     case 'confirmReset': { const a = loadAccess(); a.confirmReset = truthy(value); saveAccess(a); return null }
     case 'limitFailover': { const a = loadAccess(); a.limitFailover = truthy(value); saveAccess(a); return null }
+    case 'fileBrowser': { const a = loadAccess(); a.fileBrowser = truthy(value); saveAccess(a); return null }
     default: return 'unknown or read-only setting'
   }
 }
@@ -12507,6 +12517,7 @@ async function startFilesWebapp(): Promise<void> {
     startWebapp({ token: TOKEN!, port: WEBAPP_PORT, staticDir: join(import.meta.dir, 'webapp'),
       isAllowed: uid => loadAccess().allowFrom.includes(uid), log: wlog, resolveStart: resolveStartToken,
       canWrite: WEBAPP_WRITE, trashDir: WEBAPP_TRASH, maxUploadBytes: WEBAPP_MAX_UPLOAD_MB * 1024 * 1024,
+      fileBrowser: () => loadAccess().fileBrowser !== false,   // live pref (settings → 🗂) — omits the Files tab + 403s the file API when off
       protectedRoots: [STATE_DIR],   // fence writes out of a relocated state dir too (~/.claude is fenced by default)
       readSettings: webappReadSettings, setSetting: webappSetSetting,
       listSessions: webappListSessions, readSessionFeed: webappSessionFeed, sessionAction: webappSessionAction,
