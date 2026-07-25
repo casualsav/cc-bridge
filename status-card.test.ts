@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { prettyModel, lastModelInTranscript, lastTodosInTranscript, modeBadge, pinMessageGone, statusKeyboard, mergeStatus, codexModelFromPane, codexPrettyModel, codexStatusHead, parseCodexStatusline } from './status-card.ts'
 import type { StatuslineData } from './statusline.ts'
-import { initStatusCard, updateSessionPin, paneForDmChat, sessionPins, pinTextCache } from './status-card.ts'
+import { initStatusCard, updateSessionPin, paneForDmChat, forgetChatPin, verifyPinAssignment, sessionPins, pinTextCache } from './status-card.ts'
 import { ACCESS_FILE } from './common.ts'
 import { loadAccess } from './access.ts'
 import { focus, markChatReachable, markChatUnreachableIfUndeliverable } from './state.ts'
@@ -257,4 +257,76 @@ test('markChatReachable reports the first-contact edge only once', () => {
   markChatUnreachableIfUndeliverable('555', { description: 'Bad Request: chat not found' })
   expect(markChatReachable('555')).toBe(true)    // lifted → the daemon pins this chat now
   expect(markChatReachable('555')).toBe(false)   // every later message is a no-op, no pin storm
+})
+
+// A user who DELETES the whole chat and starts a fresh one keeps the same chat id, so the persisted
+// pin id outlives the delete — and Telegram still accepts edits to a message the user's client no
+// longer has. The refresher then sees "tracked, text unchanged" and does nothing, forever: the chat
+// shows no pinned card at all. /start (a virgin chat's only entry point) drops the tracking.
+test('a chat deleted client-side gets a NEW card once its stale pin is forgotten', async () => {
+  setAllowFrom(['111111'])
+  sessionPins.clear(); pinTextCache.clear()
+  const sent: string[] = [], pinned: string[] = []
+  initStatusCard(pinDeps(sent, pinned))
+  await updateSessionPin()
+  expect(sent).toEqual(['111111'])              // the card that existed BEFORE the user wiped the chat
+  sent.length = 0; pinned.length = 0
+
+  await updateSessionPin()                      // the wiped chat still looks "already carded" — nothing sent
+  expect(sent).toEqual([])
+
+  await forgetChatPin('111111')
+  expect(sessionPins.has('111111')).toBe(false)
+  await updateSessionPin()
+  expect(sent).toEqual(['111111'])              // a card the user can actually see
+  expect(pinned).toEqual(['111111'])
+})
+
+// Detection, not prevention. The field failure edited a card successfully for 96 minutes while the
+// user's client had no record of it — getChat reported it pinned the whole time, so nothing keyed off
+// the Bot API could see it. Distance from the conversation is the one signal that still degrades.
+test('a card that has scrolled far above the conversation is re-minted, not edited forever', async () => {
+  setAllowFrom(['111111'])
+  sessionPins.clear(); pinTextCache.clear()
+  const sent: string[] = [], pinned: string[] = []
+  let newest = 101
+  const deps = pinDeps(sent, pinned) as unknown as Record<string, unknown>
+  deps.newestMsgId = () => newest
+  initStatusCard(deps as never)
+  await updateSessionPin()
+  expect(sent).toEqual(['111111'])              // card 101
+  expect(sessionPins.get('111111')).toBe(101)
+
+  newest = 141                                  // 40 messages later — at the threshold, not past it
+  await updateSessionPin()
+  expect(sent).toEqual(['111111'])              // still the same card, edited in place
+
+  newest = 160                                  // the card is now well out of reach
+  await updateSessionPin()
+  expect(sent).toEqual(['111111', '111111'])    // re-minted
+  expect(pinned).toEqual(['111111', '111111'])
+  expect(sessionPins.get('111111')).toBe(102)   // a NEW message id — the only thing that resurfaces a card
+})
+
+// The probe catches the card being unpinned out from under us. It cannot see a card the client never
+// received (getChat reports that one as healthy) — that is cardBuried's job, above.
+test('the liveness probe re-mints when Telegram disagrees about what is pinned', async () => {
+  setAllowFrom(['111111'])
+  sessionPins.clear(); pinTextCache.clear()
+  const sent: string[] = [], pinned: string[] = []
+  let livePin: number | undefined = 101
+  const deps = pinDeps(sent, pinned) as unknown as { bot: { api: { getChat: () => Promise<unknown> } } }
+  deps.bot.api.getChat = async () => (livePin === undefined ? {} : { pinned_message: { message_id: livePin } })
+  initStatusCard(deps as never)
+  await updateSessionPin()
+  expect(sessionPins.get('111111')).toBe(101)
+
+  await verifyPinAssignment()                        // Telegram agrees — nothing happens
+  expect(sessionPins.get('111111')).toBe(101)
+
+  livePin = undefined                           // the user unpinned it; edits would still succeed
+  await verifyPinAssignment()
+  expect(sessionPins.has('111111')).toBe(false) // tracking dropped → the next tick mints a fresh card
+  await updateSessionPin()
+  expect(pinned).toEqual(['111111', '111111'])
 })

@@ -10,6 +10,9 @@ export type MsgTracker = {
   note: (chat: string, thread: number | null | undefined, id: number) => void
   // True once the latest id is past the card AND the chat has been quiet for the debounce.
   reanchorDue: (chat: string, thread: number | null | undefined, mirrorId: number) => boolean
+  // Newest id seen in a chat/thread, or undefined if none yet. The pinned status card measures its
+  // own distance from this to decide it has scrolled out of reach (status-card.ts, cardBuried).
+  latest: (chat: string, thread?: number | null) => number | undefined
 }
 
 export function createMsgTracker(quietMs: number, now: () => number = Date.now): MsgTracker {
@@ -21,6 +24,9 @@ export function createMsgTracker(quietMs: number, now: () => number = Date.now):
       const k = key(chat, thread)
       const e = latest.get(k)
       if (!e || id > e.id) latest.set(k, { id, at: now() })   // only a NEW top message resets the quiet timer
+    },
+    latest(chat, thread) {
+      return latest.get(key(chat, thread))?.id
     },
     reanchorDue(chat, thread, mirrorId) {
       const e = latest.get(key(chat, thread))

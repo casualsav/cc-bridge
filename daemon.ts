@@ -130,7 +130,7 @@ import { planContextWarn, planCtxNudge } from './ctx-warn.ts'
 import { spawnModelFlag, spawnWideContext } from './model-window.ts'
 import {
   initStatusCard, statusCardText, statusKeyboard, updateSessionPin, updateTopicPins,
-  removeSessionPins, refreshSessionPin, sessionPins, pinTextCache, persistSessionPins,
+  removeSessionPins, refreshSessionPin, forgetChatPin, startPinAssignmentVerifier, sessionPins, pinTextCache, persistSessionPins,
   clearAllPins, clearTopicPins, createSessionPin, invalidatePaneStatus, paneStatus, lastModelInTranscript, lastVersionInTranscript,
   prettyModel, modeBadge, lastTodosInTranscript, codexPrettyModel,
 } from './status-card.ts'
@@ -304,7 +304,7 @@ function kbToButtons(kb: InlineKeyboard): Button[][] {
 // msg-tracker.ts for the advance-the-max / quiet-timer logic (the card's own edits keep the same id, so
 // they don't count as activity).
 const MIRROR_REANCHOR_QUIET_MS = 15_000
-const { note: noteMsg, reanchorDue } = createMsgTracker(MIRROR_REANCHOR_QUIET_MS)
+const { note: noteMsg, reanchorDue, latest: msgLatest } = createMsgTracker(MIRROR_REANCHOR_QUIET_MS)
 // Record the id of everything the bot sends (replies, panels, pins, the card itself). An edit returns
 // the SAME message_id, so the tracker's advance-the-max rule ignores it; only genuinely new messages
 // below the card mark it buried. Innermost transformer, so prev() is the real API call and res its result.
@@ -333,6 +333,7 @@ initStatusCard({
     for (const { chatId, sessionId } of listDmChatSessions()) out.push({ chat: chatId, paneId: await paneForSession(sessionId) })
     return out
   },
+  newestMsgId: chat => msgLatest(chat, null),   // pinned card measures its own distance from the conversation
 })
 initUpdates({ channel })
 // The fleet fallback is for panes with no surface BY NATURE (a headless session). A session whose
@@ -5907,7 +5908,15 @@ bot.use(async (ctx, next) => {
   await next()
 })
 
-bot.command('start', sendStartHelp)
+// /start is the one signal that a chat SURFACE is brand new: Telegram only offers the Start button
+// in a virgin chat, and a user who deletes the chat and starts over keeps the same chat id — so the
+// persisted pin id outlives the delete and the refresher edits a card the user can't see (see
+// forgetChatPin). Forget it here, after the welcome, and kick the refresher to mint a visible one.
+// /help keeps the plain handler — it isn't evidence of a fresh surface and must not churn the pin.
+bot.command('start', async ctx => {
+  await sendStartHelp(ctx)
+  if (ctx.chat?.type === 'private') { await forgetChatPin(String(ctx.chat.id)); void updateSessionPin() }
+})
 bot.command('help', sendStartHelp)   // hidden alias (muscle memory); kept out of the command menu
 
 // Select or launch the terminal agent. Existing sessions keep their agent; in topic mode a switch
@@ -11377,8 +11386,13 @@ async function refreshChatTemplates(): Promise<void> {
   const notify = async (text: string) => {
     if (state.notified === tplH) return
     let sent = false
+    // Same gate every other daemon notice uses (notifyChats): an allowlisted id that has never
+    // opened the bot's DM 400s on every send, and this loop was the one path that neither skipped it
+    // nor recorded the miss — so it re-ran the doomed send on each boot and logged it, forever.
     for (const chat of loadAccess().allowFrom) {
-      try { await channel.sendText(chat, text); sent = true } catch (e) { log(`notice to ${chat} failed: ${e}`) }
+      if (isChatUnreachable(chat)) continue
+      try { await channel.sendText(chat, text); sent = true }
+      catch (e) { if (!markChatUnreachableIfUndeliverable(chat, e)) log(`notice to ${chat} failed: ${e}`) }
     }
     if (sent) { state = { ...state, notified: tplH }; writeJsonFile(CHAT_TEMPLATE_STATE_FILE, state) }
   }
@@ -11494,6 +11508,13 @@ async function ensureChatLane(ctx: Context, chatId: string, first: InboundParams
         const msgs = chatLaneBooting.get(chatId) ?? []
         for (const p of msgs) emitInbound(p, pane)   // deliver to THIS lane's pane, not whichever is focused
         await edit(`✅ Your chat is ${revive ? 'back up' : 'ready'} — ${msgs.length > 1 ? `your ${msgs.length} messages were delivered` : 'your message was delivered'}.`)
+        // This lane's session is live NOW and the user is watching. Its card is usually a boot-tick
+        // artifact — created for every allowlisted id on the first refresher tick, long before this
+        // session existed, and thereafter only ever EDITED. An edit succeeds against a card the user
+        // never received and cannot move one that sits a hundred messages up the chat — the API
+        // reports health either way. Mint a fresh one under the conversation instead; a new message
+        // id is the only thing that puts a card back in front of the user. See forgetChatPin.
+        await forgetChatPin(chatId); void updateSessionPin()
         return
       }
       // A brand-new account config dir has no login yet. Surface the method picker instead of
@@ -12545,6 +12566,9 @@ if (FORCE_PANE) {
 // Keep the pinned status card's live metrics fresh once per 10s. No-op edits are skipped and no
 // pin is created when nothing's active, so this is cheap when idle.
 setInterval(() => void updateSessionPin(), 10_000)
+// …and independently ask Telegram what it thinks is pinned, because a successful edit is not evidence
+// the card is there (status-card.ts, verifyPinAssignment).
+startPinAssignmentVerifier()
 // ensureChatProfile bails when the allowlist is still empty (an unpaired box has nobody to provision
 // for), and its only other trigger is the bot's connect. A fresh install that PAIRS after the daemon is
 // already up therefore never provisioned the chat profile for its whole first run — no chat account, so

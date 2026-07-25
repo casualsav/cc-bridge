@@ -53,6 +53,10 @@ type StatusCardDeps = {
   // for a lane whose pane has died (updateTopicPins skips those rather than pinning "No active
   // session" unprompted). Optional so a fake-bot unit test, or a channel without the feature, can omit it.
   dmChatLanes?: () => Promise<Array<{ chat: string; paneId: string | null }>>
+  // Newest message id seen in a chat (daemon's msg-tracker, fed by every Bot API result). The card
+  // measures its own distance from this to decide it has scrolled out of reach — see cardBuried.
+  // Optional so a fake-bot unit test, or a channel with no tracker, can omit it (→ never buried).
+  newestMsgId?: (chat: string) => number | undefined
 }
 let deps: StatusCardDeps
 export function initStatusCard(d: StatusCardDeps): void { deps = d }
@@ -133,6 +137,22 @@ export async function removeSessionPins(): Promise<void> {
     await deps.channel.deleteMessage({ chatId: chat, messageId: String(mid) }).catch(() => {})
   }
   sessionPins.clear(); pinTextCache.clear(); persistSessionPins()
+}
+
+// Drop one chat's tracked pin so the next refresher tick mints a NEW card instead of editing the
+// old one. A user can delete their whole Telegram chat with the bot and start a fresh one — the
+// chat id is unchanged, so the persisted pin id survives the delete, and Telegram still accepts
+// edits to a message the user's client no longer has. The 10s refresher then happily edits an
+// invisible card forever and never creates a visible one: the "a fresh DM never pins" report that
+// outlived both id-normalization fixes. No-op when nothing is tracked, so the create paths (and
+// topic mode's lane gating) keep deciding whether a card is owed at all.
+export async function forgetChatPin(chat: string): Promise<void> {
+  const old = sessionPins.get(chat)
+  if (old === undefined) return
+  await deps.channel.unpin({ chatId: chat, messageId: String(old) }).catch(() => {})
+  await deps.channel.deleteMessage({ chatId: chat, messageId: String(old) }).catch(() => {})
+  cancelEdit(chat, old)
+  sessionPins.delete(chat); pinTextCache.delete(chat); persistSessionPins()
 }
 
 // Force a fresh pin: unpin+delete the old one, then recreate. Recovers a pin the user dismissed
@@ -685,11 +705,70 @@ export async function updateTopicPins(): Promise<void> {
   }
 }
 
+// How far the card may drift below the conversation before it is re-minted rather than edited. The
+// unit is message ids, not time: a quiet chat's card never churns, and a card only moves when there
+// is a conversation to move it under. ~40 is roughly a screen or two of scrollback — well past the
+// point where a user would still see the card, comfortably short of "re-posts during one exchange".
+const PIN_REANCHOR_GAP = 40
+function cardBuried(chat: string): boolean {
+  const pin = sessionPins.get(chat)
+  const newest = deps.newestMsgId?.(chat)
+  return pin !== undefined && newest !== undefined && newest - pin > PIN_REANCHOR_GAP
+}
+
+// Verifies the pin ASSIGNMENT — that Telegram still considers our tracked message the pinned one.
+// Named for what it checks, because "pin liveness probe" is exactly the name that would convince a
+// later reader this class is covered. It is not a delivery check, and there cannot be one:
+//
+//   A successful Bot API call proves the SERVER accepted it. It proves nothing about the client.
+//
+// That is not a caveat, it is the finding. In the field failure this card was edited successfully for
+// 96 minutes against a message the user's client had never received, and Telegram kept returning 200
+// to editMessageText for ~2.5 minutes after accepting a deleteMessage for it. getChat reported our own
+// id as pinned, correctly, the entire time — so this probe would NOT have caught that bug. What it
+// does catch is the card being UNPINNED out from under us (a user tapping unpin, another message
+// pinned on top), which otherwise recovers only if the card's text happens to change.
+//
+// cardBuried above is the detector for the undeliverable class; this is the cheap half.
+//
+// The "verified present" line is deliberate: without it a healthy pin logs NOTHING, so silence reads
+// identically to a dead one — which is how two rounds of investigation mistook a broken card for a
+// working one.
+const PIN_VERIFY_MS = 10 * 60 * 1000
+export async function verifyPinAssignment(): Promise<void> {
+  if (loadAccess().sessionPin === false) return
+  if (isTopicMode()) return   // getChat reports ONE pinned message per chat — meaningless against per-topic cards
+  for (const chat of loadAccess().allowFrom) {
+    const tracked = sessionPins.get(chat)
+    if (tracked === undefined || isChatUnreachable(chat)) continue
+    // TODO(channel-gap): getChat / pinned_message lookup — no verb in the ChannelAdapter contract.
+    const info = await deps.bot.api.getChat(chat).catch(() => null)
+    if (!info) continue   // transient API failure proves nothing — say nothing, retry next sweep
+    const live = (info as { pinned_message?: { message_id?: number } }).pinned_message?.message_id
+    if (live === tracked) { process.stderr.write(`pin: chat ${chat} verified present (message ${tracked})\n`); continue }
+    process.stderr.write(`pin: chat ${chat} tracked ${tracked} but Telegram reports ${live ?? 'nothing'} pinned — re-minting\n`)
+    await forgetChatPin(chat)   // next tick creates; re-pinning the same id can't help if it's not there
+  }
+}
+export function startPinAssignmentVerifier(): void {
+  void verifyPinAssignment()   // immediately at start: the riskiest card is one created during restart churn
+  setInterval(() => void verifyPinAssignment(), PIN_VERIFY_MS).unref?.()
+}
+
 // Create/edit/re-pin a single chat's status card — shared by classic DM mode's per-`allowFrom`-chat
 // loop (one shared `text`/`hasSession` for the focused session) and topic mode's per-DM-chat-lane
 // loop (each lane has its own pane, so its own `text`). `chat` doubles as the sessionPins
 // key — safe because a chat only ever runs ONE of these loops (classic DM mode vs. topic mode).
 async function upsertChatPin(chat: string, text: string, buttons: Button[][], paneId: string | null = null): Promise<void> {
+  // Re-mint a card that has scrolled out of reach instead of editing it in place forever. This is the
+  // only DETECTION in the file: every other recovery here keys off an edit FAILING, and the field case
+  // that motivated it never failed — a card the user's client had no record of was edited successfully
+  // for 96 minutes, with getChat cheerfully reporting it pinned the whole time. Distance from the
+  // chat's newest message is the one signal that doesn't come from the Bot API's own bookkeeping.
+  if (cardBuried(chat)) {
+    process.stderr.write(`pin: chat ${chat} card ${sessionPins.get(chat)} is >${PIN_REANCHOR_GAP} messages back — re-minting\n`)
+    await forgetChatPin(chat)
+  }
   const existing = sessionPins.get(chat)
   if (existing && pinTextCache.get(chat) === text) {
     if (unpinnedCards.has(chat)) await pinCard(chat, chat, existing)   // card exists but the pin never took — retry it
@@ -698,9 +777,17 @@ async function upsertChatPin(chat: string, text: string, buttons: Button[][], pa
   // Observability for the periodic DM pin refresher: only fires on an actual edit/create (the no-op
   // return above is silent, keeping volume low). effort/model come from the same lastGoodStatus
   // snapshot statusCardText just wrote for this pane — cheaper than threading a debug object through.
+  // What an `(edit)` line means, precisely: the Bot API returned success for editMessageText (it is
+  // emitted from the scheduler's onSent, which runs only after that call resolves — edit-scheduler.ts
+  // flushIntent). It does NOT mean the user can see the card. Telegram returned success for edits to a
+  // message that had been DELETED for two and a half minutes, and for 96 minutes to one the user's
+  // client never received. So the line carries `gap` — how far the card sits above the chat's newest
+  // message — because that is the field that actually degrades when a card goes out of reach.
   const logPin = (kind: 'edit' | 'create') => {
     const st = paneId ? lastGoodStatus.get(paneId) : undefined
-    process.stderr.write(`pin: chat ${chat} pane ${paneId} effort ${st?.effort ?? '—'} model ${st?.model ?? '—'} (${kind})\n`)
+    const newest = deps.newestMsgId?.(chat), pin = sessionPins.get(chat)
+    const gap = newest !== undefined && pin !== undefined ? ` gap ${newest - pin}` : ''
+    process.stderr.write(`pin: chat ${chat} pane ${paneId} effort ${st?.effort ?? '—'} model ${st?.model ?? '—'}${gap} (${kind})\n`)
   }
   if (existing) {
     scheduleEdit({ chat, mid: existing, source: 'pin', buttons,
