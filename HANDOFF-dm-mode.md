@@ -36,6 +36,21 @@ never at risk.
   no focused pane, no `spawnModel` default — no `--model` flag is pushed at all and the CLI picks its
   own model *and* its own 200k window. `spawnModelFlag(null, …)` returns `null` by design.
 
+### ⚠️ `--resume` does NOT inherit the 1M window — measured, not assumed
+
+Started a session with `--model 'claude-opus-5[1m]'`, then resumed it by id. `/context` in the resumed
+pane reports **`25.8k/200k`** and the statusline shows **`claude-opus`**: the CLI restores the base
+model across a resume but **drops the `[1m]` suffix**. Compounding it, `spawnSession`'s resume branch
+sets `model: null` outright, so a resumed session gets **no `--model` flag at all**.
+
+Consequence: *resuming* a session is not a way to get it onto 1M. Any session that must reach 1M has
+to be launched fresh with the suffix, or the resume path has to pass `--model <id>[1m]` explicitly.
+
+**Next item (not built — needs its own round):** the resume branch has no model to re-assert because
+the bridge remembers per-session **mode** and **effort** (`sessionModes` / `sessionEfforts`) but not
+**model**. Closing this means adding a `sessionModels` map mirroring `sessionEfforts` (writer included)
+and feeding it into the resume branch's launch flags. Deliberately not smuggled into this round.
+
 **Task 2 — dead-letter reap missed an expired row.** Owner's hypothesis **confirmed**: `planAskReap`
 (`agent-bus.ts`) filtered `!p.expiredAt`, so ask 95 (already TTL-notified) was immune while ask 97 to
 the same dead session was reaped. The TTL notice promises "a late answer will still be delivered" —
