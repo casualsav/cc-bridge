@@ -1631,7 +1631,6 @@ async function relayLoopTick(gen: number): Promise<void> {
         }
         clearThinkingPending(paneId)   // reply landed → drop the thinking-pending crutch so the card caps/deletes promptly
         typingPresence.stop()   // reply delivered (or banner suppressed) → clean stop, no tail
-        if (!isBanner(r.text) && paneId) void maybeShipFooter(paneId)   // opt-in ship buttons when the turn dirtied the tree
       }
     }
   } catch (e) { process.stderr.write(`daemon: relay tick error, retry next tick: ${e}\n`) }
@@ -1787,7 +1786,6 @@ async function auxRelayTick(): Promise<void> {
           if (r.text.length < 200 && /\b(hit your|used \d+% of your) [\w-]+ limit\b/i.test(r.text)) continue
           const targets = await outboundTargetsFor(pane)
           for (const t of targets) await deliverRelayReply(pane, t, r.text)   // self-heals a deleted topic (recreate + resend)
-          void maybeShipFooter(pane)   // opt-in ship buttons when the turn dirtied the tree — focused-loop parity
         }
       } catch { /* transient (tmux/transcript) — retry next tick */ }
     })()))
@@ -6589,23 +6587,9 @@ bot.command(['queue', 'later'], async ctx => {   // /later kept as a hidden alia
   await ctx.reply(`🗒 Queued (#${map[sid].length}) — runs when the session goes idle.`)
 })
 
-// ---- Ship the work (ROADMAP #1) ----
-// Close the "code is edited but not landed" gap from the phone. /diff is always available;
-// the post-turn footer with Commit/Push/PR buttons is opt-in (settings → 🚢 Ship buttons),
-// because agent-managed-git users land changes by just asking the session.
-
-// Dirty-tree summary for a session cwd; null = clean tree or not a git repo.
-async function gitDirtyStat(cwd: string): Promise<{ files: number; add: number; del: number } | null> {
-  try {
-    const { stdout: por } = await exec('git', ['-C', cwd, 'status', '--porcelain'], { timeout: 4000 })
-    if (!por.trim()) return null
-    const files = por.trim().split('\n').length
-    const { stdout: stat } = await exec('git', ['-C', cwd, 'diff', 'HEAD', '--shortstat'], { timeout: 4000 }).catch(() => ({ stdout: '' }))
-    const add = parseInt(/(\d+) insertion/.exec(stat)?.[1] ?? '0', 10)
-    const del = parseInt(/(\d+) deletion/.exec(stat)?.[1] ?? '0', 10)
-    return { files, add, del }
-  } catch { return null }
-}
+// ---- /diff (ROADMAP #1) ----
+// Close the "code is edited but not landed" gap from the phone: the session's uncommitted
+// changes, always available.
 
 // Send the working-tree diff: --stat summary first, then the patch in chunked <pre> blocks.
 // Untracked files are listed by name (git diff HEAD doesn't show their contents).
@@ -6640,28 +6624,7 @@ async function sendDiff(chat: string, paneId: string, thread?: number): Promise<
   }
 }
 
-// Post-turn ship footer (opt-in): when the turn left the tree dirty, one quiet line with the
-// land-it buttons. Fingerprinted per pane so an unchanged tree doesn't repost every turn.
-const shipFooterFp = new Map<string, string>()
-async function maybeShipFooter(paneId: string): Promise<void> {
-  if (loadAccess().shipButtons !== true) return
-  const cwd = await paneCwd(paneId).catch(() => null)
-  if (!cwd) return
-  const s = await gitDirtyStat(cwd)
-  if (!s) { shipFooterFp.delete(paneId); return }
-  const fp = `${cwd}:${s.files}:${s.add}:${s.del}`
-  if (shipFooterFp.get(paneId) === fp) return
-  shipFooterFp.set(paneId, fp)
-  const kb = new InlineKeyboard()
-    .text('📄 Diff', 'ship:diff').text('✅ Commit', 'ship:commit')
-    .text('⬆️ Push', 'ship:push').text('🔀 PR', 'ship:pr')
-  const note = `📝 ${s.files} file${s.files === 1 ? '' : 's'} changed  <b>+${s.add} −${s.del}</b>`
-  for (const t of await outboundTargetsFor(paneId)) {
-    await channel.sendText(String(t.chat), note, { buttons: kbToButtons(kb), silent: true, ...(t.thread ? { threadId: String(t.thread) } : {}) }).catch(() => {})
-  }
-}
-
-// /diff — the session's uncommitted changes (always available, toggle-independent).
+// /diff — the session's uncommitted changes.
 bot.command('diff', async ctx => {
   if (!dmCommandGate(ctx)) return
   const t = await commandTarget(ctx)
@@ -7163,7 +7126,6 @@ function settingsText(): string {
     `👤 Accounts — <b>${listAccounts().length}</b>\n` +
     `🐙 GitHub — <b>${escapeHtml(ghSummary())}</b>\n` +
     `⚡ Batch allow — <b>${a.batchAllow !== false ? 'on' : 'off'}</b>\n` +
-    `🚢 Ship buttons — <b>${a.shipButtons === true ? 'on' : 'off'}</b>\n` +
     `🎙️ Voice transcription — <b>${transcribeStatus()}</b>\n` +
     `🔊 Voice replies — <b>${a.tts?.mode && a.tts.mode !== 'off' ? `${a.tts.mode} · ${a.tts.engine}` : 'off'}</b>\n` +
     `💬 Stream — <b>${replyMode()}</b>\n` +
@@ -7186,7 +7148,6 @@ function settingsMarkdown(): string {
     ['👤 Accounts', String(listAccounts().length)],
     ['🐙 GitHub', ghSummary()],
     ['⚡ Batch allow', a.batchAllow !== false ? 'on' : 'off'],
-    ['🚢 Ship buttons', a.shipButtons === true ? 'on' : 'off'],
     ['🎙️ Voice transcription', transcribeStatus()],
     ['🔊 Voice replies', a.tts?.mode && a.tts.mode !== 'off' ? `${a.tts.mode} · ${a.tts.engine}` : 'off'],
     ['💬 Stream', replyMode()],
@@ -7200,7 +7161,6 @@ function settingsMarkdown(): string {
   ]
   const help = [
     '⚡ <b>Batch allow</b> — 2+ permission prompts in one turn offer “Allow all this turn”.',
-    '🚢 <b>Ship buttons</b> — turns that dirty the git tree get Diff/Commit/Push/PR buttons.',
     '💬 <b>Stream</b> — how much of the live activity feed reaches the chat.',
     '📌 <b>Pinned message</b> — the status card pinned to the top of this chat.',
     '🧷 <b>Preferred mode</b> — the permission mode NEW sessions launch in (/mode is the live dial).',
@@ -7254,7 +7214,7 @@ const showSettings = (ctx: Context, mode: 'send' | 'edit'): Promise<void> =>
 // settingsText()/settingsMarkdown() above, including the conditional Base folder row.
 function settingsKeyboard(): InlineKeyboard {
   const buttons: Array<[string, string]> = [
-    ['👤', 'acct:panel'], ['🐙', 'gh:panel'], ['⚡', 'set:batch'], ['🚢', 'set:ship'],
+    ['👤', 'acct:panel'], ['🐙', 'gh:panel'], ['⚡', 'set:batch'],
     ['🎙️', 'set:voice'], ['🔊', 'set:tts'], ['💬', 'set:replymode'], ['📌', 'set:pin'],
     ['🧷', 'defmode:panel'], ['🧹', 'set:confirmreset'], ['🔀', 'set:failover'],
     ...(WEBAPP_ENABLED ? [['🗂', 'set:filebrowser'] as [string, string]] : []),
@@ -8698,7 +8658,7 @@ bot.on('callback_query:data', async ctx => {
   }
 
   // /settings panel toggles → flip the setting and re-render the panel in place.
-  const setMatch = /^set:(pin|replymode|ship|voice|batch|tts|confirmreset|failover|base|switchboard|filebrowser)$/.exec(data)
+  const setMatch = /^set:(pin|replymode|voice|batch|tts|confirmreset|failover|base|switchboard|filebrowser)$/.exec(data)
   if (setMatch) {
     if (!(await cbAuth(ctx))) return
     await ctx.answerCallbackQuery().catch(() => {})
@@ -8740,9 +8700,6 @@ bot.on('callback_query:data', async ctx => {
       a.sessionPin = a.sessionPin === false                 // flip
       saveAccess(a)
       if (a.sessionPin) await updateSessionPin(); else await removeSessionPins()
-    } else if (setMatch[1] === 'ship') {
-      a.shipButtons = a.shipButtons !== true                // flip (default off)
-      saveAccess(a)
     } else if (setMatch[1] === 'batch') {
       a.batchAllow = a.batchAllow === false                 // flip (default on)
       saveAccess(a)
@@ -9057,57 +9014,6 @@ bot.on('callback_query:data', async ctx => {
     if (!whisperReady() && !whisperInstalling) void provisionWhisper(noticeChats())
     else if (whisperReady()) void prepullWhisperModel()
     await showHtmlPanel(ctx, 'edit', voiceModelText(), voiceModelKeyboard())
-    return
-  }
-
-  // Ship buttons (📝 footer / future entry points): Diff relays the patch; Commit asks the
-  // session's own Claude to commit (it has the context for the message, and repo hooks/convention
-  // run as usual); Push/PR run directly in the session cwd and report the result.
-  const shipMatch = /^ship:(diff|commit|push|pr)$/.exec(data)
-  if (shipMatch) {
-    if (!(await cbAuth(ctx))) return
-    const { paneId } = await targetPaneOf(ctx)
-    if (!paneId) { await ctx.answerCallbackQuery({ text: 'No active session.' }).catch(() => {}); return }
-    const chat = String(ctx.chat!.id)
-    const thread = ctx.callbackQuery.message?.message_thread_id
-    const shipOpts: SendOpts = thread ? { threadId: String(thread) } : {}
-    const cwd = await paneCwd(paneId).catch(() => null)
-    if (shipMatch[1] === 'diff') {
-      await ctx.answerCallbackQuery().catch(() => {})
-      await sendDiff(chat, paneId, thread)
-      return
-    }
-    if (shipMatch[1] === 'commit') {
-      await ctx.answerCallbackQuery({ text: 'Asking Claude to commit…' }).catch(() => {})
-      const prompt = 'Commit the current changes with an appropriate commit message. Commit only — do not push.'
-      const ok = paneId === focus.activePaneId && focus.paneWatcher
-        ? await injectText(paneId, focus.paneWatcher, prompt)
-        : await pasteToPane(paneId, prompt)
-      if (!ok) await channel.sendText(chat, '❌ Couldn\'t reach the session to commit.', shipOpts).catch(() => {})
-      return
-    }
-    if (!cwd) { await ctx.answerCallbackQuery({ text: 'Could not read the session folder.' }).catch(() => {}); return }
-    if (shipMatch[1] === 'push') {
-      await ctx.answerCallbackQuery({ text: 'Pushing…' }).catch(() => {})
-      try {
-        const { stderr } = await exec('git', ['-C', cwd, 'push'], { timeout: 60_000 })
-        const tail = (stderr || '').trim().split('\n').slice(-2).join(' ').slice(0, 300)
-        await channel.sendText(chat, `⬆️ Pushed.${tail ? ` <i>${escapeHtml(tail)}</i>` : ''}`, shipOpts).catch(() => {})
-      } catch (e) {
-        await channel.sendText(chat, `❌ Push failed: <pre>${escapeHtml(String((e as { stderr?: string })?.stderr ?? (e as Error)?.message ?? e).slice(0, 800))}</pre>`, shipOpts).catch(() => {})
-      }
-      return
-    }
-    // pr
-    await ctx.answerCallbackQuery({ text: 'Opening PR…' }).catch(() => {})
-    try {
-      const { stdout } = await exec('gh', ['pr', 'create', '--fill'], { cwd, timeout: 60_000 })
-      const url = stdout.trim().split('\n').pop() ?? ''
-      await channel.sendText(chat, `🔀 PR opened: ${escapeHtml(url)}`, shipOpts).catch(() => {})
-    } catch (e) {
-      const msg = String((e as { stderr?: string })?.stderr ?? (e as Error)?.message ?? e).slice(0, 800)
-      await channel.sendText(chat, `❌ PR failed: <pre>${escapeHtml(msg)}</pre>`, shipOpts).catch(() => {})
-    }
     return
   }
 
@@ -12072,7 +11978,7 @@ setInterval(() => void sweepUpdateChecks(), 24 * 3_600_000).unref()   // …then
 // sweep-delete would strand the "🗜️ Compacting…" card forever. Entries are short-lived + self-cleaning.
 const PANE_STATE_MAPS: { delete(k: string): boolean; keys(): IterableIterator<string> }[] = [
   resumeRelayed, paneTranscriptCache, thinkingPendingUntil, stuckDumpAt, editorHeld,
-  modelUnavailAlerted, staleSessionNotified, shipFooterFp, auxPromptStates, stuckWatch,
+  modelUnavailAlerted, staleSessionNotified, auxPromptStates, stuckWatch,
   loginHeldPanes,   // a Set — same delete(k)/keys() shape the sweep needs
 ]
 function forgetPane(paneId: string): void {
@@ -12160,7 +12066,6 @@ async function webappReadSettings(): Promise<WebappSettingsView> {
       accounts: { value: listAccounts().length, editable: false, label: 'managed in /settings' },
       github: { value: ghSummary(), editable: false },
       batchAllow: { value: a.batchAllow !== false, editable: true, label: '2+ prompts offer "Allow all this turn"' },
-      shipButtons: { value: a.shipButtons === true, editable: true, label: 'Diff/Commit/Push/PR after dirty turns' },
       transcribe: { value: transcribeStatus(), editable: false, label: 'engine picked in /settings' },
       voice: { value: von, editable: true, label: von ? `on · ${a.tts!.engine}` : 'off' },
       stream: { value: replyMode(), editable: true, options: [...STREAM_ORDER] },
@@ -12196,7 +12101,6 @@ function webappSetSetting(userId: string, key: string, value: unknown): string |
       return null
     }
     case 'batchAllow': { const a = loadAccess(); a.batchAllow = truthy(value); saveAccess(a); return null }
-    case 'shipButtons': { const a = loadAccess(); a.shipButtons = truthy(value); saveAccess(a); return null }
     case 'confirmReset': { const a = loadAccess(); a.confirmReset = truthy(value); saveAccess(a); return null }
     case 'limitFailover': { const a = loadAccess(); a.limitFailover = truthy(value); saveAccess(a); return null }
     case 'fileBrowser': { const a = loadAccess(); a.fileBrowser = truthy(value); saveAccess(a); return null }

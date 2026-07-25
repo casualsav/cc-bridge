@@ -32,7 +32,7 @@ export function defaultAccess(): Access {
 // mutable preference kept in prefs.json so /settings keeps working even under a static lockdown.
 const PREF_KEYS = [
   'mentionPatterns', 'ackReaction', 'replyToMode', 'textChunkLimit', 'chunkMode',
-  'renderMarkdown', 'terminalMirror', 'terminalMirrorFooter', 'sessionPin', 'replyMode', 'shipButtons', 'budgetDaily',
+  'renderMarkdown', 'terminalMirror', 'terminalMirrorFooter', 'sessionPin', 'replyMode', 'budgetDaily',
   'topicOnEnd', 'scheduleTz', 'batchAllow', 'confirmReset', 'tts', 'updateChecks', 'claudingDraft',
   'autoUpdate', 'limitFailover', 'failoverChain', 'codexModel', 'codexEffort', 'switchboard', 'dmLanes',
   'fileBrowser',

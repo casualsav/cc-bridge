@@ -7,10 +7,9 @@ Ordered roughly by how much terminal-avoidance each feature buys. (Discussed 202
 Close the "code is edited but not landed" gap.
 - `/diff` — always available: stat summary + chunked syntax-highlighted diff of the session's
   working tree.
-- **Ship buttons** (settings toggle, default OFF — agent-managed-git users need zero new noise):
-  after a turn that leaves the tree dirty, a small "📝 N files changed +A −D" footer with
-  `📄 Diff · ✅ Commit · ⬆️ Push · 🔀 PR` buttons. Commit asks the session's Claude to write the
-  message; Push runs `git push`; PR runs `gh pr create` and drops the link.
+- ~~**Ship buttons**~~ — REMOVED (2026-07-25, v0.4.9; owner: unused). Was a post-turn
+  "📝 N files changed" footer with Diff/Commit/Push/PR buttons behind a settings toggle.
+  `/diff` above is unaffected.
 
 ## 2. Dead-session revival — ✅ DONE (v0.1.67)
 A topic whose session died (reboot, crash, deploy window) should revive on message: typing into
