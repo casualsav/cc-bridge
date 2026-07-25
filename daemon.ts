@@ -12298,7 +12298,13 @@ function dashboardSessionRows(): Array<{ sid: string; name: string; cwd: string;
       if (!rows.some(r => r.sid === sessionId)) rows.unshift({ sid: sessionId, name: `Chat (${handleForDmChat(chatId) ?? `DM ${chatId}`})`, cwd: '', agent: 'claude' })
     return rows
   }
-  return []   // DM mode: filled per-call from the focused pane (no session store to enumerate)
+  // DM mode: same stores, no group — chat lanes pinned first, then live topic rows (which include
+  // the headless 'general' anchor and any spawned sessions). The focused pane, if it's some
+  // adopted session outside the store, is appended per-call by webappListSessions.
+  const rows = listTopics().filter(t => !t.closed).map(t => ({ sid: t.sessionId, name: t.name, cwd: t.cwd, agent: t.agent ?? 'claude' }))
+  for (const { chatId, sessionId } of listDmChatSessions())
+    if (!rows.some(r => r.sid === sessionId)) rows.unshift({ sid: sessionId, name: `Chat (${handleForDmChat(chatId) ?? `DM ${chatId}`})`, cwd: '', agent: 'claude' })
+  return rows
 }
 
 // One dashboard card, read live from the pane: statusline dials + working state + a task line
@@ -12336,10 +12342,10 @@ async function webappSessionCard(row: { sid: string; name: string; cwd: string; 
 }
 
 async function webappListSessions(): Promise<WebappSessionCard[]> {
-  let rows = dashboardSessionRows()
-  if (!rows.length && focus.activePaneId) {   // DM mode: the focused session is the fleet
+  const rows = dashboardSessionRows()
+  if (focus.activePaneId) {   // an adopted session outside the store (classic focused loop) is part of the fleet too
     const sid = await sessionForPane(focus.activePaneId).catch(() => null)
-    if (sid) rows = [{ sid, name: 'Session', cwd: '', agent: 'claude' }]
+    if (sid && !rows.some(r => r.sid === sid)) rows.push({ sid, name: 'Session', cwd: '', agent: 'claude' })
   }
   return Promise.all(rows.map(webappSessionCard))
 }
