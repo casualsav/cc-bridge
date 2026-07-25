@@ -1,5 +1,8 @@
 # HANDOFF — DM-mode fork fixes (audit bugs 4–10 + bug 3), 2026-07-25
 
+**OUTCOME: shipped + verified live. tg v0.4.28, pushed through `42acc4f`.** `fleetMode()` confirmed TRUE
+against live state (was false), pin ticking every ~10s, no errors. Remaining: bug 11, D10.
+
 > Separate file on purpose: the existing `HANDOFF.md` is an untracked 2026-07-04 design record (rich-message
 > conversion, clauding footer, `<details>`-needs-Rich, draft-streaming-dead-in-groups). It is not mine and
 > is not in git history — **do not overwrite it.** It is also directly relevant to the queued ask 99.
@@ -48,12 +51,12 @@ in the working tree.
    (`%86 %89 %53`). If the chat lane still holds focus the aux set is the two headless panes, whose
    `outboundTargetsFor` is `[]` → **expect no visible change**, which is the correct outcome. Real proof is
    the tripwire plus a deliberate focus handover.
-3. **Ask 99 (queued, not started)** — put the initial prompt in an expandable blockquote on the
-   `🆕 Opened session: @X` notice (`daemon.ts` ~4470, `notifyBusText`). **Collides with the bug-2 fix**:
-   `notifyAskSent` already renders "Messaged @X" + the same brief via `notifyBusRich`, so naively adding
-   the body to the "Opened session" line prints the brief twice back to back. Fold into one message or let
-   only one carry the body. Check `notifyBusRich`'s existing body markup and match it. Verify in DM mode.
-   Relevant prior art in `HANDOFF.md`: `<details>` renders **only** in Rich messages, never plain HTML.
+3. **Ask 99 — DONE** (v0.4.28, `db7c698`). Resolved as "keep both notices, only ONE carries the body":
+   the brief stays on `notifyAskSent`'s chevron (fires on CONFIRMED delivery), and the instant
+   `🆕 Opened session: @X` line forward-references it with "— briefing it now…". Folding them was
+   rejected because "opened" is instant while "messaged" is delivery-confirmed, and dropping the latter
+   trades a real confirmation for silence. `sendBusCard`'s chevron path is already in production to DM
+   chats via `tg post` (daemon.ts ~4328), so DM rendering is confirmed, not assumed.
 4. **Bug 11** — restart orphaning pre-existing sessions. Filed in the audit with a starting hypothesis
    (in-memory `busInFlight`/`paneSessionCache` vs persisted `agent-bus.json` pending rows). Not investigated.
 5. **D10** — the "bind a forum group" hint firing on the bridge's own auto-spawn. Not fixed.
