@@ -109,7 +109,7 @@ import { initQueue, readLater, writeLater, sweepLaterQueues, LATER_SWEEP_MS } fr
 import {
   AGENT_BUS_ENABLED, AGENT_BUS_PIN_UI,
   createPending, getPending, removePending, putPending, listPending, markInjected, expirePending, dropExpired, LATE_ANSWER_GRACE_MS, ASK_TTL_MS,
-  recordAgentAsk, resetHops, HOP_LIMIT, askResultText, type AskDelivery,
+  recordAgentAsk, resetHops, HOP_LIMIT, askResultText, planAskReap, queuedFor, type AskDelivery,
   resolveEndpoint, nameForEndpoint, normalizeEndpointName, confineRef, sharedDir, ensureSharedDir, appendLedger, tailLedger,
   getSeen, markSeen, digestSince, DIGEST_SCAN,
   type BusEndpoint, type BusPending, type LedgerEntry,
@@ -2167,7 +2167,7 @@ function focusOffMcpPane(paneId: string): void {
 // reply. DM mode drives a single session — extra panes stay registered (so topic/aux bookkeeping
 // sees them) but get no switch UI; hint once per daemon run toward group mode instead.
 let dmMultiPaneHinted = false
-async function noteDiscoveredPane(paneId: string): Promise<void> {
+async function noteDiscoveredPane(paneId: string, spawned = false): Promise<void> {
   const cwd = await paneCwd(paneId)
   // Snapshot a read baseline at discovery: the user has "seen up to now" (nothing yet), so the
   // topic relay starts from here instead of replaying the session's backlog.
@@ -2184,12 +2184,19 @@ async function noteDiscoveredPane(paneId: string): Promise<void> {
     notifyChats(`🔁 Switched to the new Claude session${cwd ? ` in <code>${escapeHtml(cwd)}</code>` : ''} — the previous pane had no agent running.`)
     return
   }
+  // D10: the daemon spawned this pane itself (a chat lane's headless `general`, a `tg spawn`) — it is
+  // not a rival session the owner needs warning about, and telling him to go bind a forum group the
+  // moment the bridge provisions its own peer is backwards from the product direction.
+  if (spawned) return
   if (dmMultiPaneHinted) return
   dmMultiPaneHinted = true
   const where = cwd ? ` (<code>${escapeHtml(cwd)}</code>)` : ''
-  notifyChats(
-    `🆕 Another Claude session appeared${where} — this DM drives a single session, so I'm staying on the current one.\n` +
-    `To drive several sessions, bind a forum group as the command center: create a group with Topics on, add me, send /bind there.`)
+  notifyChats(fleetMode()
+    // A DM box with a chat lane / headless sessions already drives a fleet; the old advice was written
+    // when a DM could only ever hold one session.
+    ? `🆕 Another Claude session appeared${where} — I'm keeping this DM on the current one. It runs alongside as part of the fleet; <code>/sessions</code> lists them.`
+    : `🆕 Another Claude session appeared${where} — this DM drives a single session, so I'm staying on the current one.\n` +
+      `To drive several sessions, bind a forum group as the command center: create a group with Topics on, add me, send /bind there.`)
 }
 
 // Bind a daemon-spawned pane immediately rather than waiting for the next discovery tick — and do
@@ -2200,15 +2207,21 @@ function registerSpawnedPane(paneId: string): void {
   if (offMcpPanes.has(paneId)) return
   offMcpPanes.add(paneId)
   if (!focus.activePaneId) adoptPane(paneId)
-  else void noteDiscoveredPane(paneId)
+  else void noteDiscoveredPane(paneId, true)   // spawned by us — no "another session appeared" hint (D10)
 }
 
 // Keep the pane registry in sync. Adopts a pane only when nothing is driving; any additional
 // pane is registered and announced (with a switch button) without taking focus. Runs at
 // startup and on a slow interval, so panes started before/after the daemon get picked up.
+// Has pane discovery completed at least one successful pass since boot? Until it has, "no live pane
+// resolves for this session" is true of EVERY session on the box, so the bus dead-letter reap (11c)
+// must not run — it would fail every open ask at once and tell every asker their target had ended.
+// Stays false in FORCE_PANE / MCP mode, where discovery never runs: no reap is the old behaviour.
+let panesDiscovered = false
 async function discoverPanes(): Promise<void> {
   if (FORCE_PANE || !TRANSCRIPT_OUTBOUND) return
   const panes = await findOffMcpPanes()
+  panesDiscovered = true
   const live = new Set(panes)
   for (const p of [...offMcpPanes]) {
     if (isPaneRestarting(p)) continue   // planned bounce (claude update) — not a death, keep it registered
@@ -2578,10 +2591,47 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
   } finally { busInFlight.delete(cur.id) }
 }
 
-// 15s sweep: expire un-answered asks (tell the asker) + deliver queued asks whose target is now idle.
+// A bus target counts as GONE only when every signal agrees, because a false positive drops a live
+// ask: no pane resolves for its session id, no open session row claims it (a claude-update bounce or a
+// respawn briefly has no pane), and it isn't a bound DM lane (revived on the owner's next message).
+async function busTargetGone(sid: string): Promise<boolean> {
+  if (await paneForSession(sid).catch(() => null)) return false
+  const t = getTopicBySession(sid)
+  if (t && !t.closed) return false
+  if (sid === getGeneralSession()) return false
+  return !chatIdForDmChatSession(sid) && !chatForLaneSession(sid)
+}
+
+// Fail a queued ask whose target session has ended (11c): drop it, and tell the asker the truth —
+// never delivered — instead of leaving the TTL to claim an hour later that we're "still waiting".
+async function reapDeadAsk(p: BusPending, room: string): Promise<void> {
+  removePending(p.id)
+  appendLedger(room, { ts: Date.now(), kind: 'expire', from: p.toName, to: p.fromName, id: p.id, text: 'never delivered — target session ended' })
+  process.stderr.write(`daemon: ask ${p.id} to @${p.toName} (${p.toSid}) reaped — target session ended, never delivered\n`)
+  const askerPane = await paneForSession(p.fromSid).catch(() => null)
+  const own = askerPane ? await outboundTargetsFor(askerPane).catch(() => []) : []
+  for (const { chat, thread } of own.length ? own : fleetSurface()) {
+    void channel.sendText(chat,
+      `❌ Ask ${p.id} to <b>${escapeHtml(p.toName)}</b> was never delivered — that session has ended. Removed from the queue.`,
+      { silent: true, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
+  }
+  if (askerPane) void busDeliver(askerPane, formatAnswerBlock('system', p.id, `(ask ${p.id} to @${p.toName} was never delivered — that session ended before it reached a prompt; it is no longer queued)`))
+}
+
+// 15s sweep: reap dead letters, expire un-answered asks (tell the asker) + deliver queued asks whose
+// target is now idle.
 async function sweepBus(): Promise<void> {
   const room = busLedgerRoom()
   dropExpired(Date.now() - LATE_ANSWER_GRACE_MS)   // GC asks whose late-answer grace has fully elapsed
+  // 11c — dead letters first, so a queued ask to an ended session is reported as never delivered
+  // rather than expiring an hour later as "still waiting". Liveness is probed only for the sids that
+  // could actually be reaped, and only once discovery has landed (planAskReap enforces the gate too).
+  const reapable = listPending().filter(p => p.toKind === 'claude' && !p.injected && !p.expiredAt)
+  const goneSids = new Set<string>()
+  if (panesDiscovered && reapable.length) {
+    for (const sid of new Set(reapable.map(p => p.toSid))) if (await busTargetGone(sid)) goneSids.add(sid)
+  }
+  for (const p of planAskReap(reapable, q => goneSids.has(q.toSid), panesDiscovered)) await reapDeadAsk(p, room).catch(() => {})
   for (const p of expirePending(Date.now())) {
     appendLedger(room, { ts: Date.now(), kind: 'expire', from: p.toName, to: p.fromName, id: p.id, text: 'timed out' })
     // Suppress the notice when the target has SUCCESSFULLY answered any ask from this asker since this
@@ -12278,7 +12328,12 @@ async function sweepStuckPanes(): Promise<void> {
       const own = await outboundTargetsFor(pane).catch(() => [])
       if (!own.length && !esc.escalate) continue   // already reported this episode — stay quiet until it recovers
       const nm = await paneDisplayName(pane)
-      const label = own.length ? nm : `${nm} · headless, no surface of its own`
+      // 11d: a queued ask to a KNOWN-wedged target used to be re-polled every 15s for an hour with no
+      // signal at all. Rather than a second notification, the fact rides this one — the card already
+      // exists, and "2 asks queued" is what makes it urgent rather than informational.
+      const sid = await sessionForPane(pane, false).catch(() => null)
+      const blocked = sid ? queuedFor(sid).length : 0
+      const label = (own.length ? nm : `${nm} (headless fleet session)`) + (blocked ? ` — ${blocked} ask${blocked === 1 ? '' : 's'} queued and blocked` : '')
       await relayStuckScreen(pane, stuck, cleanPaneTail(cap, 20), label, decision.act === 'renag', own.length ? undefined : fleetSurface()).catch(() => {})
       process.stderr.write(`daemon: stuck-screen watchdog ${decision.act} for pane ${pane} (${nm})${own.length ? '' : ' → fleet surface'}\n`)
     }

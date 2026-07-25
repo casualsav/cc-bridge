@@ -208,6 +208,28 @@ export function askResultText(status: AskDelivery, toName: string, id: number): 
   }
 }
 
+// ---- dead-letter reap (bug 11c) ----
+
+// Which queued asks are provably dead letters: never delivered, and their target session is gone. The
+// bus had no reconciler at all — a pending row outlived the topic row of the very session it addressed,
+// and the only thing that ever fired was the 60-minute TTL notice, which says "still waiting; a late
+// answer will still be delivered" about a session that ended.
+//
+// `discoveryReady` is load-bearing, not defensive: "the target has no live pane" is true for EVERY
+// session in the window between daemon boot and the first pane-discovery pass, so reaping there would
+// fail every open ask on the box at once. Nothing is reaped until discovery has landed.
+//
+// Conservative twice over: an INJECTED ask is already in the target's context and a respawned session
+// can still answer it, and a hermes endpoint has no pane for liveness to mean anything about.
+export function planAskReap(
+  pendings: BusPending[],
+  isTargetGone: (p: BusPending) => boolean,
+  discoveryReady: boolean,
+): BusPending[] {
+  if (!discoveryReady) return []
+  return pendings.filter(p => p.toKind === 'claude' && !p.injected && !p.expiredAt && isTargetGone(p))
+}
+
 // ---- hop counter (loop guard) ----
 
 // Count one agent→agent ask; returns the new consecutive count. The daemon delivers when
