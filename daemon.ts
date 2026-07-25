@@ -2584,8 +2584,10 @@ async function targetPaneOf(ctx: Context): Promise<{ paneId: string | null; thre
   }
   // DM chat lane: a private-chat command (/model, /terminal, /clear, /status, ! …) targets the
   // sender's own chat-lane session, not whichever pane holds focus. No binding or a dead pane falls
-  // through to focus, same as today.
-  if (isTopicMode() && ctx.chat?.type === 'private') {
+  // through to focus, same as today. NOT topic-gated: a group-less DM-mode box runs chat lanes too
+  // (v0.4.2 auto-provision), and gating this on topic mode left its whole command surface — and
+  // permission-card taps — pointed at the stale focused session (the /terminal split-brain).
+  if (ctx.chat?.type === 'private') {
     const dc = getDmChatSession(String(ctx.chat.id))
     const pane = dc ? await paneForSession(dc.sessionId).catch(() => null) : null
     if (pane) return { paneId: pane }
@@ -9904,7 +9906,12 @@ bot.on('callback_query:data', async ctx => {
   const ppermMatch = /^pperm:(?:([0-9a-f]+):)?(\d+)$/.exec(data)   // optional prompt token; a legacy pperm:<num> still parses
   if (ppermMatch) {
     if (!(await cbAuth(ctx))) return
-    const { paneId } = await targetPaneOf(ctx)
+    // The card remembers which pane raised its prompt — prefer that over targetPaneOf, whose
+    // chat-routing can resolve a DIFFERENT session than the one that asked (then the capture below
+    // finds no prompt and an instant tap dead-ends as "Superseded" while the real prompt starves).
+    // targetPaneOf stays as the fallback for cards sent before this daemon started (map is in-memory).
+    const cardKey = `${ctx.chat?.id}:${ctx.callbackQuery?.message?.message_id}`
+    const paneId = promptCards.get(cardKey)?.paneId ?? (await targetPaneOf(ctx)).paneId
     if (!paneId) {
       await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {})
       return
@@ -9916,25 +9923,33 @@ bot.on('callback_query:data', async ctx => {
     const cardText = ctx.callbackQuery?.message?.text ?? ''
     const record = (marker: string) => `${cardText ? escapeHtml(cardText) + '\n\n' : ''}${marker}`
     // agent-bus P4: correlate the tap to the EXACT prompt it was shown for. A token-bearing button is
-    // honored only if the pane STILL shows that same prompt AND still offers option `num` — so a stale
-    // tap (a 2nd human, or a prompt that already advanced) can't inject blind into whatever's on screen
-    // now. A legacy no-token button injects as before, so prompts relayed across the deploy still work.
+    // honored only if the pane STILL shows that same prompt AND still offers option `num`. But a stale
+    // token with a permission prompt STILL PENDING must not dead-end: rejecting the tap outright left
+    // the real prompt unanswered and the session hung (a card re-keyed between send and tap made even
+    // an instant approve "Superseded"). So: no prompt on screen, or option `num` gone → reject; a
+    // DIFFERENT prompt offering `num` → apply the tap to it, auditing the question actually answered.
+    // A legacy no-token button injects as before, so prompts relayed across the deploy still work.
+    let liveQuestion: string | null = null   // set when the tap lands on a re-keyed/replaced prompt
     if (token) {
       const cap = await capturePane(paneId).catch(() => '')
       const cur = cap ? detectPermissionPrompt(cap) : null
-      if (!cur || permPromptToken(cur.question) !== token || !cur.options.some(o => String(o.n) === num)) {
+      if (!cur || !cur.options.some(o => String(o.n) === num)) {
         await ctx.answerCallbackQuery({ text: '⚠️ That prompt already moved on — check the current one.', show_alert: true }).catch(() => {})
         await ctx.editMessageText(record('⚠️ <i>Superseded — already answered or replaced.</i>'), { parse_mode: 'HTML' }).catch(() => {})
         return
       }
+      if (permPromptToken(cur.question) !== token) liveQuestion = cur.question
     }
     await ctx.answerCallbackQuery({ text: `Answered ${num}` }).catch(() => {})
     // Record WHO approved (the audit the flat allowlist lacked): keep the question + append a one-line
     // record instead of deleting the card, so the thread keeps who-answered-which-prompt. Name chain = inbound.
-    await ctx.editMessageText(record(`✅ <b>Answered ${escapeHtml(num)}</b> · ${escapeHtml(senderDisplayName(ctx.from))}`), { parse_mode: 'HTML' }).catch(() => {})
+    await ctx.editMessageText(record(liveQuestion
+      ? `↪️ <b>Answered ${escapeHtml(num)}</b> on the current prompt — <i>${escapeHtml(liveQuestion)}</i> · ${escapeHtml(senderDisplayName(ctx.from))}`
+      : `✅ <b>Answered ${escapeHtml(num)}</b> · ${escapeHtml(senderDisplayName(ctx.from))}`), { parse_mode: 'HTML' }).catch(() => {})
     await paneKeys(paneId, [num, 'Enter'], [300, 5000])
     resetPromptDedup(paneId)  // allow the next permission prompt to relay
     await verifyPromptClosed(paneId)
+    promptCards.delete(cardKey)   // answered — a later 👍 on this card must not re-fire
     return
   }
 
@@ -10954,10 +10969,12 @@ bot.on('message_reaction', async ctx => {
       if (!card.paneId) { promptCards.delete(key); return }
       const paneId = card.paneId
       if (card.kind === 'perm') {
-        // Same stale-guard as the pperm tap: the pane must still show this exact prompt.
+        // Same stale-guard as the pperm tap: reject only when NO permission prompt (or no option 1)
+        // is on screen. A re-keyed token with a prompt still pending applies to the current prompt —
+        // dead-ending there left the prompt unanswered and the session hung.
         const cap = await capturePane(paneId).catch(() => '')
         const cur = cap ? detectPermissionPrompt(cap) : null
-        if (!cur || (card.token && permPromptToken(cur.question) !== card.token)) {
+        if (!cur || !cur.options.some(o => o.n === 1)) {
           await editCard('⚠️ <i>Superseded — already answered or replaced.</i>')
           promptCards.delete(key)
           return
