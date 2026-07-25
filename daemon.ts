@@ -115,7 +115,7 @@ import {
   type BusEndpoint, type BusPending, type LedgerEntry,
 } from './agent-bus.ts'
 import { formatAskBlock, formatAnswerBlock, formatDigestBlock, formatRosterLine, type RosterAgent } from './agent-bus-block.ts'
-import { laneForChat, bindLane, chatForLaneSession, noteLaneCwd, dmLanesOn, listLanes, unbindLane } from './dm-lanes.ts'
+import { laneForChat, bindLane, chatForLaneSession, noteLaneCwd, dmLanesOn, fleetMode, listLanes, unbindLane } from './dm-lanes.ts'
 import { runHermes, type HermesEndpoint, type HermesTask } from './hermes-driver.ts'
 import {
   initPromptRelay, relayPromptToTelegram, relayPermissionToTelegram, sweepPermStorms,
@@ -1742,7 +1742,10 @@ function startRelayLoop(): void {
 // An explicit dmLanes:true/false (boolean or hand-edited string) overrides the heuristic either way.
 // Moot in topic mode (the lane branch is !isTopicMode()-gated) — only DM-mode installs are affected.
 // (dmLanesOn itself moved to dm-lanes.ts so topic-runtime's outbound shares the same definition.)
-function multiPaneMode(): boolean { return isTopicMode() || dmLanesOn() }
+// "More than one session runs here" now lives in dm-lanes.ts as fleetMode(), enumerating every
+// mechanism rather than inferring it from a mode — see DM-MODE-AUDIT.md §C and fleet-mode.test.ts.
+// multiPaneMode() used to be `isTopicMode() || dmLanesOn()`, which silently excluded DM chat lanes
+// (defect D4: a non-focused chat lane never relayed its replies and its prompts went undetected).
 
 // Forum-topics parallel relay (phase 3b). The focused pane is handled by the rich relayLoopTick
 // (mirror + typing + card). This lightweight loop covers every OTHER off-MCP pane, relaying each
@@ -1760,7 +1763,7 @@ async function auxRelayTick(): Promise<void> {
   // PaneWatcher feeds onPaneEvent; aux panes have no watcher, so without this a permission prompt in
   // another topic's/lane's session sits undetected forever — the session blocks silently. Runs
   // regardless of TRANSCRIPT_OUTBOUND: prompts are read from the pane, not the transcript.
-  if (multiPaneMode()) {
+  if (fleetMode()) {
     for (const k of [...auxPromptStates.keys()]) {
       if (!offMcpPanes.has(k)) auxPromptStates.delete(k)   // only drop dead panes; the focused pane KEEPS its record (onPaneEvent shares it now)
     }
@@ -1771,7 +1774,7 @@ async function auxRelayTick(): Promise<void> {
       .filter(pane => pane !== focus.activePaneId)
       .map(pane => scanAuxPanePrompts(pane).catch(() => { /* transient (tmux) — retry next tick */ })))
   }
-  if (TRANSCRIPT_OUTBOUND && multiPaneMode()) {
+  if (TRANSCRIPT_OUTBOUND && fleetMode()) {
     // Stamped panes resolve to their own transcript, so same-cwd siblings relay independently to
     // their own topics. Unstamped panes share the newest-file fallback — relay each file exactly
     // once per tick, and never a file the focused rich loop already owns, or the reply double-sends.
@@ -1803,7 +1806,11 @@ async function auxRelayTick(): Promise<void> {
         const working = turnInProgress(file)
         // The session's own live card in its own topic — same lifecycle as the focused card,
         // driven by the same transcript turn signal this loop already computes.
-        await updateAuxMirror(pane, working, thinkingPending(pane)).catch(() => {})   // pending opens/holds the card before turnInProgress flips
+        // Topic-only ON PURPOSE. The aux card's targets are outboundTargetsFor(pane), so in DM mode this
+        // would start posting a live terminal mirror into the owner's private chat — an undesigned
+        // surface nobody has watched. D4 is about replies never arriving and prompts never being seen;
+        // the live mirror is a separate cosmetic feature, so it stays behind the group gate for now.
+        if (isTopicMode()) await updateAuxMirror(pane, working, thinkingPending(pane)).catch(() => {})   // pending opens/holds the card before turnInProgress flips
         if (!auxRelayPrimed.has(file)) {
           // A restored (persisted) cursor survives restarts — keep it, so a reply written during
           // the restart window still relays. Only a never-seen transcript skips its existing tail.
@@ -2670,7 +2677,7 @@ type CommandTarget = { paneId: string; watcher: PaneWatcher | null; isFocused: b
 // replying. In topic mode a thread maps thread→cwd→pane; General/DM → the focused pane. For callers
 // that tolerate "no session" (e.g. /schedule defers into a null pane).
 async function targetPaneOf(ctx: Context): Promise<{ paneId: string | null; thread?: number }> {
-  const thread = ctx.message?.message_thread_id ?? ctx.callbackQuery?.message?.message_thread_id
+  const thread = ctx.message?.message_thread_id ?? ctx.callbackQuery?.message?.message_thread_id ?? ctx.editedMessage?.message_thread_id
   if (isTopicMode() && typeof thread === 'number') {
     const sid = getSessionByThread(thread)
     return { paneId: sid ? await paneForSession(sid) : null, thread }
@@ -3259,7 +3266,7 @@ async function limitHitTargets(origin: string | null, account: Account): Promise
   const out = new Map<string, { chat: string; thread?: number }>()
   const add = (ts: Array<{ chat: string; thread?: number }>) => { for (const t of ts) out.set(`${t.chat}#${t.thread ?? ''}`, t) }
   add(await outboundTargetsFor(origin))
-  if (isTopicMode()) {
+  if (fleetMode()) {   // a DM box fleets too: a headless pane's own targets are [], so without this nobody hears the freeze
     for (const pane of [...offMcpPanes]) {
       if (pane === origin) continue
       try { if ((await paneAccount(pane)).name === account.name) add(await outboundTargetsFor(pane)) } catch { /* pane vanished mid-loop */ }
@@ -4503,11 +4510,17 @@ async function handleCall(
               return
             }
             markInjected(p.id, Date.now())   // arms the answer window from the moment it actually landed
+            // Asker-side "Messaged @X" card — parity with tryDeliverAsk's notifyAskSent (the normal
+            // ask path), which this closure otherwise bypasses entirely. Without it a spawn's first
+            // message was the ONLY ask that never confirmed on the spawner's surface. It also carries
+            // the headless/DM case: a headless session's own surface resolves to nothing
+            // (outboundTargetsFor drops headless), so this is the only bus card that can land there.
+            void notifyAskSent(fromSid, topicName, firstMsg)
             // Mirror the delivered task into the new topic: the paste lands only in the pane, so
             // without this the owner can't see what the spawner asked the new session to do.
             // Same chevron shape as notifyBusRich, but addressed directly (group+thread are known —
             // no pane→target resolution on a seconds-old pane). A headless spawn has no topic to
-            // mirror into; the spawner's own "🆕 Opened session" notice above is its only surface.
+            // mirror into — the asker-side card above is its surface.
             if (!group || threadId == null) return
             const shown = firstMsg.length > ASK_QUOTE_CAP ? firstMsg.slice(0, ASK_QUOTE_CAP) + '…' : firstMsg
             const header = `<b>@${escapeHtml(fromName)}</b> messaged <b>@${escapeHtml(topicName)}</b>`
@@ -5445,6 +5458,15 @@ async function sendStartHelp(ctx: Context): Promise<void> {
   } catch (e) { process.stderr.write(`daemon: rich /start send failed, falling back to HTML: ${e}\n`) }
   await ctx.reply(startHelpText(paired), { parse_mode: 'HTML', link_preview_options: { is_disabled: true }, reply_markup: kb }).catch(() => {})
 }
+
+// ANY private update — a slash command, a button tap, a message — proves this DM is deliverable, so it
+// clears the pending-first-contact mark that pauses pins/notices to it. It used to be cleared only by
+// handleMessage (a plain text/media message), so an owner who only ever ran /start and tapped buttons
+// left his own DM marked unreachable indefinitely — every pin and notice to it silently dropped.
+bot.use(async (ctx, next) => {
+  if (ctx.chat?.type === 'private') markChatReachable(String(ctx.chat.id))
+  await next()
+})
 
 // Phone keyboards autocapitalize the first letter, so a typed "/context" arrives as
 // "/Context" — which grammy's case-sensitive matcher misses, dropping it to the raw
@@ -6913,7 +6935,7 @@ async function fireResetNotification(account: string, chats: string[], attempt =
   // freeze hit (gated on paneInterruptedByLimit — blind injection would type "continue" into
   // healthy sessions), reporting into its own topic. First pass only: the retry attempts below
   // re-drive the focused pane.
-  if (attempt === 0 && auto && isTopicMode()) {
+  if (attempt === 0 && auto && fleetMode()) {   // non-focused DM fleet panes must resume too, else the autonomous loop stalls silently
     void continueAuxLimitedPanes(account)
   }
   // Auto-continue (armed per hit via the ⛔ message's button): type "continue" into the focused
@@ -8684,7 +8706,10 @@ function closableSessionRows(): Array<{ sessionId: string } & TopicEntry> {
 // the check that was copy-pasted inline in each branch: it answers the callback with "Not authorized."
 // and returns false on deny, so a branch guard is just `if (!(await cbAuth(ctx))) return`.
 async function cbAuth(ctx: Context): Promise<boolean> {
-  if (loadAccess().allowFrom.includes(String(ctx.from?.id))) return true
+  if (loadAccess().allowFrom.includes(String(ctx.from?.id))) {
+    resetHops()   // a tap is a human turn — it must un-pause the bus like a typed message (this ran only from handleInbound before, so a room paused mid-conversation couldn't be resumed by buttons alone)
+    return true
+  }
   await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
   return false
 }
@@ -10458,7 +10483,10 @@ async function handleInbound(
   }
 
   // A human turn resets the agent↔agent hop guard (the agent-bus loop-breaker) so a paused room resumes.
-  if (isTopicMode()) resetHops()
+  // NOT mode-gated: `hops` is PERSISTED to agent-bus.json, so a DM box that tripped the guard stayed
+  // paused forever — across restarts — and had to be fixed by hand-editing state. Safe here because
+  // handleInbound has already passed the access gate above, so only an allowlisted human gets here.
+  resetHops()
 
   // Topic mode: show typing instantly in the topic the message came from and LATCH it through
   // Claude's pre-first-token thinking (the relay loops then sustain it — a bare one-shot expired
@@ -11300,18 +11328,19 @@ bot.on('edited_message', async ctx => {
   const thread = em.message_thread_id
   const key = `${chat}:${typeof thread === 'number' ? thread : 'dm'}`
   if (lastInboundMsg.get(key) !== em.message_id) return
-  let targetPane: string | null | undefined
-  if (isTopicMode() && typeof thread === 'number') {
-    const sid = getSessionByThread(thread)
-    targetPane = sid ? await paneForSession(sid) : null
-    if (!targetPane) return   // session gone — a correction isn't worth a revival
-  } else if (isTopicMode() && chat === getGroupChatId()) {
-    const sid = getGeneralSession()
-    if (sid) {
-      targetPane = await paneForSession(sid)
-      if (!targetPane) return   // anchor gone — a correction isn't worth a revival
-    }
-  }
+  // ONE resolver for "which pane does this update drive" — targetPaneOf (topic thread / General
+  // anchor / DM chat lane / per-user DM lane). This handler used to open-code only the first two arms,
+  // so on a DM box an edited message was injected into whichever pane held FOCUS instead of the
+  // sender's own lane — a silent cross-session misdelivery, and a cross-user one under dmLanes (audit
+  // D8). A correction isn't worth reviving a dead session, so a topic/lane that resolves to no live
+  // pane drops the edit rather than falling through to focus.
+  const resolved = await targetPaneOf(ctx)
+  const targetPane = resolved.paneId
+  // No pane AND no MCP shim = nothing to correct. Keep the shim case alive: emitInbound routes a null
+  // target to focus, then to activeShim, so an MCP-mode edit still lands (it used to reach the shim via
+  // the same fallback, and dropping it here would have been a silent regression).
+  if (!targetPane && !focus.activeShim) return
+  resetHops()   // an edit is a human turn too (post-allowlist here, same as handleInbound)
   emitInbound({
     content: text,
     meta: {
@@ -12113,6 +12142,12 @@ if (FORCE_PANE) {
 // Keep the pinned status card's live metrics fresh once per 10s. No-op edits are skipped and no
 // pin is created when nothing's active, so this is cheap when idle.
 setInterval(() => void updateSessionPin(), 10_000)
+// ensureChatProfile bails when the allowlist is still empty (an unpaired box has nobody to provision
+// for), and its only other trigger is the bot's connect. A fresh install that PAIRS after the daemon is
+// already up therefore never provisioned the chat profile for its whole first run — no chat account, so
+// no chat lane, so no session bound to the DM, so no pinned card. Re-check on a slow timer: it early-
+// returns in one statSync once provisioned, so the steady-state cost is nil.
+setInterval(() => void ensureChatProfile().catch(e => process.stderr.write(`chatProfile: recheck failed: ${e}\n`)), 60_000).unref()
 // Agent bus (agent-bus P1): deliver queued agent↔agent asks to idle targets + expire stale ones.
 if (AGENT_BUS_ENABLED) setInterval(() => void sweepBus(), LATER_SWEEP_MS).unref()
 

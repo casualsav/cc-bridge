@@ -347,17 +347,21 @@ export async function ensureSessionTopic(paneId: string): Promise<void> {
 // after death for exactly this). The paneAlive re-check guards against a transient tmux blip
 // mass-pruning the registry and close/reopen-flapping topics.
 export async function closeTopicForPane(pane: string): Promise<void> {
-  if (!isTopicMode()) return
-  const group = getGroupChatId()
-  if (!group) return
   if (restartingPanes.has(pane)) return   // planned bounce (claude update), not a death
   if (await paneAlive(pane)) return   // transient registry miss, not a real death
   const sid = paneSessionCache.get(pane)
   if (!sid) return
   if (await paneForSession(sid)) return   // session migrated to another pane (restart respawn) — still live
-  if (sid === getGeneralSession()) { await generalAnchorLost(group) ; return }   // anchor died — no topic to close
+  // A dead DM chat lane is reaped in EVERY mode: it lives only in its DM, so it needs no group and no
+  // topic. This used to sit below an `isTopicMode()` return, which made the event path to chatLaneLost
+  // dead in DM mode — the one mode chat lanes exist in (audit D7).
   const chatOwner = chatIdForDmChatSession(sid)
-  if (chatOwner) { await chatLaneLost(chatOwner); return }   // chat lane died — no topic to close
+  if (chatOwner) { await chatLaneLost(chatOwner); return }
+  // Everything from here needs a bound group (forum topics / the General anchor).
+  if (!isTopicMode()) return
+  const group = getGroupChatId()
+  if (!group) return
+  if (sid === getGeneralSession()) { await generalAnchorLost(group) ; return }   // anchor died — no topic to close
   const t = getTopicBySession(sid)
   if (!t) return
   // Headless: there is no Telegram topic to reap, so the registry row IS the whole session — drop it
@@ -484,6 +488,18 @@ export async function reconcileTopics(panes: string[]): Promise<void> {
     if (!group) continue   // a threadId without a bound group is stale cross-mode state — leave it for /bind to reconcile
     await closeTopicEntry(group, t.sessionId, { ...t, threadId: t.threadId })
   }
+  // DM chat lanes FIRST — above the `!group` return below. They have no topic entry and no group to
+  // fail into, so this backstop was written for the groupless case, yet it sat BELOW that return and
+  // was therefore dead in exactly the mode it exists for (audit D7): a dead chat lane was never
+  // reaped, the owner never got the "session ended" notice, and the stale binding kept the pin
+  // rendering a corpse.
+  for (const { chatId, sessionId } of listDmChatSessions()) {
+    if (liveSids.has(sessionId)) { topicMissCounts.delete(sessionId); continue }
+    const misses = (topicMissCounts.get(sessionId) ?? 0) + 1
+    if (misses < 2) { topicMissCounts.set(sessionId, misses); continue }
+    topicMissCounts.delete(sessionId)
+    await chatLaneLost(chatId)
+  }
   if (!group) return
   // Same backstop for the General anchor: it has no topic entry, so the loop above never sees it.
   const anchor = getGeneralSession()
@@ -494,15 +510,6 @@ export async function reconcileTopics(panes: string[]): Promise<void> {
       if (misses < 2) topicMissCounts.set(anchor, misses)
       else { topicMissCounts.delete(anchor); await generalAnchorLost(group) }
     }
-  }
-  // Same backstop for DM chat lanes: they have no topic entry either, and no group to fail into —
-  // clearDmChatSession + tell the owner directly.
-  for (const { chatId, sessionId } of listDmChatSessions()) {
-    if (liveSids.has(sessionId)) { topicMissCounts.delete(sessionId); continue }
-    const misses = (topicMissCounts.get(sessionId) ?? 0) + 1
-    if (misses < 2) { topicMissCounts.set(sessionId, misses); continue }
-    topicMissCounts.delete(sessionId)
-    await chatLaneLost(chatId)
   }
 }
 

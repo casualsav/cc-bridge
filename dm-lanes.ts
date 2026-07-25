@@ -11,6 +11,7 @@
 import { join } from 'node:path'
 import { STATE_DIR, readJsonFile, writeJsonFile } from './common.ts'
 import { loadAccess } from './access.ts'
+import { isTopicMode, listDmChatSessions, listTopics } from './topics.ts'
 
 // Whether per-user DM lanes are active: an explicit dmLanes true/false (boolean or a hand-edited
 // "true"/"false" string) wins; unset auto-enables at ≥2 allowlisted ids (a multi-user DM box needs
@@ -23,6 +24,32 @@ export function dmLanesOn(): boolean {
   if (v === true || v === 'true') return true
   if (v === false || v === 'false') return false
   return a.allowFrom.length >= 2
+}
+
+// Does this box run MORE THAN ONE session concurrently? Everything that must fan out across a fleet
+// — the aux relay + aux prompt detection (daemon.ts auxRelayTick), usage-limit reporting and
+// auto-continue, non-focused typing/mirror — is gated on this, because those paths must serve every
+// pane rather than only `focus.activePaneId`.
+//
+// It lives HERE, next to dmLanesOn, for the same reason dmLanesOn moved out of daemon.ts: one
+// definition shared by the daemon and unit-testable without a bot. The history it encodes is the
+// whole point — `isTopicMode()` was long used as a PROXY for "more than one session", which was true
+// only while forum topics were the sole way to run several. Each new DM-mode way to run a second
+// session silently invalidated that proxy at every call site, and the failure is invisible because
+// degrading to single-focus IS the old, valid single-session behaviour. See DM-MODE-AUDIT.md §C.
+// Enumerate the MECHANISMS, don't infer from a mode: every way a second concurrent session can exist
+// gets its own clause, and fleet-mode.test.ts pins that list. A stale row (a session that died before
+// the reconciler reaped it) can only make this true for a while longer than necessary — the fan-out
+// paths all filter to `pane !== focus.activePaneId` and find nothing, so the cost is a no-op tick, not
+// wrong behaviour. Failing that direction is deliberate: under-reporting a fleet loses replies.
+export function fleetMode(): boolean {
+  if (isTopicMode()) return true                        // forum group: one topic per session
+  if (dmLanesOn()) return true                          // per-user DM lanes armed (>=2 allowlisted ids)
+  if (listDmChatSessions().length > 0) return true       // a DM chat lane + its headless `general` peer
+  if (listLanes().length > 0) return true                // a lane row outlived an allowlist that shrank below 2
+  // A headless row IS a session, it just has no forum topic to give it away: `tg spawn` on a
+  // group-less box and ensureHeadlessGeneral both produce exactly this.
+  return listTopics().some(t => !t.closed && t.threadId == null)
 }
 
 export const DM_LANES_FILE = join(STATE_DIR, 'dm-lanes.json')

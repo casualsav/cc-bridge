@@ -662,7 +662,7 @@ export async function updateTopicPins(): Promise<void> {
       if (!lane.paneId || isChatUnreachable(lane.chat)) continue
       try {
         const text = await statusCardText(lane.paneId)
-        await upsertChatPin(lane.chat, text, buttons, true, lane.paneId)
+        await upsertChatPin(lane.chat, text, buttons, lane.paneId)
       } catch (e) { process.stderr.write(`daemon: pin cycle for lane chat ${lane.chat} failed: ${e}\n`) }
     }
   }
@@ -670,9 +670,9 @@ export async function updateTopicPins(): Promise<void> {
 
 // Create/edit/re-pin a single chat's status card — shared by classic DM mode's per-`allowFrom`-chat
 // loop (one shared `text`/`hasSession` for the focused session) and topic mode's per-DM-chat-lane
-// loop (each lane has its own pane, so its own `text`/`hasSession`). `chat` doubles as the sessionPins
+// loop (each lane has its own pane, so its own `text`). `chat` doubles as the sessionPins
 // key — safe because a chat only ever runs ONE of these loops (classic DM mode vs. topic mode).
-async function upsertChatPin(chat: string, text: string, buttons: Button[][], hasSession: boolean, paneId: string | null = null): Promise<void> {
+async function upsertChatPin(chat: string, text: string, buttons: Button[][], paneId: string | null = null): Promise<void> {
   const existing = sessionPins.get(chat)
   if (existing && pinTextCache.get(chat) === text) return   // nothing changed — skip the no-op edit
   // Observability for the periodic DM pin refresher: only fires on an actual edit/create (the no-op
@@ -703,7 +703,26 @@ async function upsertChatPin(chat: string, text: string, buttons: Button[][], ha
       } })
     return
   }
-  if (hasSession) { await createSessionPin(chat, text, buttons); logPin('create') }   // don't pin "No active session" out of nowhere
+  // Create unconditionally — a DM's card IS the control surface (its quick-action keyboard is how the
+  // owner reaches model/effort/mode/settings), so gating it on a live pane meant a fresh DM-mode install
+  // pinned NOTHING until something happened to bind a session to this chat: no eager equivalent of topic
+  // mode's ensureSessionTopic exists here, and the chat lane is only minted on the owner's first text DM.
+  // The old "don't pin 'No active session' out of nowhere" rule was about never-opened DMs; that case is
+  // already self-limiting — the send fails once, markChatUnreachableIfUndeliverable pauses the chat, and
+  // the loop above skips it for the rest of this daemon run.
+  await createSessionPin(chat, text, buttons); logPin('create')
+}
+
+// A DM whose card never gets created used to be completely silent — the 10s loop just skipped it, and
+// two rounds of bug reports went by before anyone noticed the pin was missing rather than stale.
+// Throttled so a permanently-unreachable chat costs one line per 10 minutes, not one per tick.
+const pinSkipLogAt = new Map<string, number>()
+const PIN_SKIP_LOG_MS = 10 * 60 * 1000
+function logPinSkip(chat: string, why: string): void {
+  const now = Date.now()
+  if (now - (pinSkipLogAt.get(chat) ?? 0) < PIN_SKIP_LOG_MS) return
+  pinSkipLogAt.set(chat, now)
+  process.stderr.write(`pin: chat ${chat} skipped (${why})\n`)
 }
 
 let pinUpdating = false
@@ -717,7 +736,7 @@ export async function updateSessionPin(): Promise<void> {
     // `focus` can stay null forever, and a card keyed to focus alone was never created at all.
     const buttons = statusKeyboard()
     for (const chat of loadAccess().allowFrom) {
-      if (isChatUnreachable(chat)) continue   // paused until they message the bot (see markChatReachable)
+      if (isChatUnreachable(chat)) { logPinSkip(chat, 'chat unreachable — never opened the bot DM, or blocked'); continue }   // paused until they message the bot (see markChatReachable)
       // Per-chat isolation: NOTHING one chat's card does may block another allowlisted user's card
       // (a two-user install must get the owner's pin even if the second chat errors every time).
       try {
@@ -728,8 +747,7 @@ export async function updateSessionPin(): Promise<void> {
         // dials. Focus is only the fallback for chats with no lane (classic single-session DM).
         const pane = lane ? await paneForSession(lane.sessionId).catch(() => null) : focus.activePaneId
         const text = await statusCardText(pane)
-        const hasSession = !!(pane || focus.activeShim)   // off-MCP pane or MCP shim — either counts
-        await upsertChatPin(chat, text, buttons, hasSession, pane)
+        await upsertChatPin(chat, text, buttons, pane)
       } catch (e) { process.stderr.write(`daemon: pin cycle for chat ${chat} failed: ${e}\n`) }
     }
   } finally { pinUpdating = false }
