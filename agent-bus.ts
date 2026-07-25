@@ -11,6 +11,7 @@
 import { isAbsolute, join, resolve, sep } from 'node:path'
 import { appendFileSync, mkdirSync, readFileSync } from 'node:fs'
 import { STATE_DIR, readJsonFile, writeJsonFile } from './common.ts'
+import { loadAccess } from './access.ts'
 
 export const BUS_FILE = join(STATE_DIR, 'agent-bus.json')
 
@@ -34,7 +35,20 @@ export const AGENT_BUS_PIN_UI = false
 // crossing is not an agent's reasoning) is depth 0, and an ask it sends carries depth 1. Delivery
 // stamps the target with the ask's depth, so a session's depth is always "as of its last wake" and
 // a long-lived session cannot drift into a permanent pause.
-export const DEPTH_LIMIT = 4
+// The default is deliberately far above any real orchestration. The shape the bridge is FOR — the
+// owner talks to the chat lane, the lane drives workers — never goes past depth 1 however many rounds
+// it runs: a human message assigns the lane depth 0, an answer coming back doesn't deepen anyone, so
+// the lane's asks are depth 1 forever. Even a lane → lead → worker → verifier chain is 3. A number
+// this size can only be reached by agents waking agents with nobody watching, which is the failure
+// mode worth halting; it is not a number a working session brushes against.
+export const DEPTH_LIMIT_DEFAULT = 8
+// …and it's a preference, not a constant: `busDepthLimit` in prefs.json retunes the breaker on a live
+// box with no deploy. Floor of 2 so it can be tightened but never set to a value that would refuse the
+// first supervised ask (depth 1) and wedge the whole bus.
+export function depthLimit(): number {
+  const v = Number(loadAccess().busDepthLimit)
+  return Number.isFinite(v) && v >= 2 ? Math.floor(v) : DEPTH_LIMIT_DEFAULT
+}
 // Breadth and spend INFORM, they never halt. This many agent→agent asks since the last human message
 // wakes the orchestrator with "this fan-out is unusually wide" so it can justify or stop the work —
 // deliberately generous, because the failure mode it guards is a hundred asks from one brief, not five.
@@ -276,7 +290,7 @@ export function currentHops(): number { ensureLoaded(); return store.hops }
 /** A session's depth as of its last wake. 0 = woken by a human or by @system, i.e. supervised. */
 export function sessionDepth(sid: string): number { ensureLoaded(); return store.depth[sid] ?? 0 }
 
-/** Stamp the session a delivery just woke. Assignment, never accumulation — see DEPTH_LIMIT. */
+/** Stamp the session a delivery just woke. Assignment, never accumulation — see depthLimit. */
 export function setSessionDepth(sid: string, depth: number): void {
   ensureLoaded()
   if (depth <= 0) { if (store.depth[sid] == null) return; delete store.depth[sid]; save(); return }
@@ -313,7 +327,7 @@ export function pruneSessionDepth(liveSids: Set<string>): void {
 
 /** The depth an ask sent BY this session would carry, and whether that exceeds the breaker. */
 export function nextAskDepth(fromSid: string): number { return sessionDepth(fromSid) + 1 }
-export function depthExceeded(depth: number): boolean { return depth > DEPTH_LIMIT }
+export function depthExceeded(depth: number): boolean { return depth > depthLimit() }
 
 // ---- endpoint resolution (pure; the daemon passes a topic snapshot) ----
 

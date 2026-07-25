@@ -32,7 +32,7 @@ export function defaultAccess(): Access {
 // mutable preference kept in prefs.json so /settings keeps working even under a static lockdown.
 const PREF_KEYS = [
   'mentionPatterns', 'ackReaction', 'replyToMode', 'textChunkLimit', 'chunkMode',
-  'renderMarkdown', 'terminalMirror', 'terminalMirrorFooter', 'sessionPin', 'replyMode', 'budgetDaily',
+  'renderMarkdown', 'terminalMirror', 'terminalMirrorFooter', 'sessionPin', 'busDepthLimit', 'replyMode', 'budgetDaily',
   'topicOnEnd', 'scheduleTz', 'batchAllow', 'confirmReset', 'tts', 'updateChecks', 'claudingDraft',
   'autoUpdate', 'limitFailover', 'failoverChain', 'codexModel', 'codexEffort', 'switchboard', 'dmLanes',
   'fileBrowser', 'spawnModel', 'spawnEffort', 'spawnContext1m',
@@ -64,13 +64,24 @@ function readJsonAccessCached(path: string): Partial<Access> {
   return data
 }
 
+// Telegram ids are STRINGS everywhere in the bridge (they key maps, sets and pin stores, and every
+// id read off an update arrives as `String(ctx.chat.id)`), but access.json is written by hand and by
+// the install agent — an id typed straight from the interview lands unquoted, i.e. a JSON number.
+// The types then lie, and the mismatch is invisible until something compares the two forms: an
+// unquoted allowlist marked chat 837047563 (number) undeliverable and cleared "837047563" (string)
+// on first contact, so the DM's pinned card was skipped for the life of the daemon. Normalize on
+// read — one place, and every downstream comparison is id-shaped regardless of the file's JSON.
+const asIds = (v: unknown): string[] => Array.isArray(v) ? v.map(String) : []
+
 // Security half — dmPolicy/allowFrom/groups/pending from access.json. Baked at boot in static mode.
 function readSecurity(): Access {
   const p = readJsonAccessCached(ACCESS_FILE)
+  const groups: Access['groups'] = {}
+  for (const [gid, g] of Object.entries(p.groups ?? {})) groups[gid] = { ...g, allowFrom: asIds(g.allowFrom) }
   return {
     dmPolicy: p.dmPolicy ?? 'pairing',
-    allowFrom: p.allowFrom ?? [],
-    groups: p.groups ?? {},
+    allowFrom: asIds(p.allowFrom),
+    groups,
     pending: p.pending ?? {},
   }
 }

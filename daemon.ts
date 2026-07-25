@@ -113,7 +113,7 @@ import {
   AGENT_BUS_ENABLED, AGENT_BUS_PIN_UI,
   createPending, getPending, removePending, putPending, listPending, markInjected, expirePending, dropExpired, LATE_ANSWER_GRACE_MS, ASK_TTL_MS,
   recordAgentAsk, resetHops, currentHops, BREADTH_NOTICE_AT, askResultText, planAskReap, queuedFor, type AskDelivery,
-  setSessionDepth, resetAllSessionDepth, pruneSessionDepth, nextAskDepth, depthExceeded, DEPTH_LIMIT,
+  setSessionDepth, resetAllSessionDepth, pruneSessionDepth, nextAskDepth, depthExceeded, depthLimit,
   resolveEndpoint, nameForEndpoint, normalizeEndpointName, confineRef, sharedDir, ensureSharedDir, appendLedger, tailLedger,
   getSeen, markSeen, digestSince, DIGEST_SCAN,
   type BusEndpoint, type BusPending, type LedgerEntry,
@@ -2661,9 +2661,9 @@ async function wakeOrchestrator(text: string, fallbackSid: string | null): Promi
 // The loop-breaker actually fired. Tell the lane which chain hit it, so it can either re-issue the
 // work itself (at depth 0, since a human is talking to it) or stop it.
 const notifyChainPaused = (fromName: string, toName: string, depth: number): Promise<void> => wakeOrchestrator(
-  [`⏸ Loop-breaker: blocked an ask from @${fromName} to @${toName} — it was ${depth} agent hops deep with no human or threshold in the chain (limit ${DEPTH_LIMIT}).`,
+  [`⏸ Loop-breaker: blocked an ask from @${fromName} to @${toName} — it was ${depth} agent hops deep with no human or threshold in the chain (limit ${depthLimit()}).`,
    'That is the runaway shape: agents waking agents with nobody supervising. Either re-issue the work yourself (asks you send are supervised, because a human is talking to you) or let it stop.',
-   'Nothing else is blocked — a wide fan-out from a supervised session still runs.'].join('\n\n'), null)
+   'Nothing else is blocked — a wide fan-out from a supervised session still runs. Tell the owner it happened: any message from him resets every chain to supervised and the blocked work can be re-sent, and `busDepthLimit` in prefs.json retunes the threshold without a restart.'].join('\n\n'), null)
 
 // Breadth + spend INFORM. One notice, at a deliberately generous ceiling.
 const notifyWideFanOut = (breadth: number): Promise<void> => wakeOrchestrator(
@@ -4475,7 +4475,7 @@ async function handleCall(
           askDepth = nextAskDepth(fromSid)
           if (depthExceeded(askDepth)) {
             void notifyChainPaused(fromName, toName, askDepth)
-            write({ t: 'result', id, ok: false, text: `paused: this ask is ${askDepth} agent hops deep with no human or threshold in the chain (limit ${DEPTH_LIMIT}) — @chat has been woken to unstick it; a human reply also resumes the room` }); return
+            write({ t: 'result', id, ok: false, text: `paused: this ask is ${askDepth} agent hops deep with no human or threshold in the chain (limit ${depthLimit()}) — @chat has been woken to unstick it; a human reply also resumes the room` }); return
           }
           // Breadth INFORMS: one waking notice at a generous ceiling, never a refusal.
           const breadth = recordAgentAsk()
@@ -5836,8 +5836,13 @@ async function sendStartHelp(ctx: Context): Promise<void> {
 // clears the pending-first-contact mark that pauses pins/notices to it. It used to be cleared only by
 // handleMessage (a plain text/media message), so an owner who only ever ran /start and tapped buttons
 // left his own DM marked unreachable indefinitely — every pin and notice to it silently dropped.
+// First contact also PINS: a fresh DM-only bind has no eager card-creating event of its own (a new
+// forum topic gets one from ensureSessionTopic, which is why group mode always looked like it
+// self-pinned), so the card waited on the next 10s refresher — and on any box where the mark was
+// never lifted, forever. Kick it the moment the mark actually lifts; markChatReachable returns true
+// only on that edge, so a chatty DM doesn't re-enter the loop on every update.
 bot.use(async (ctx, next) => {
-  if (ctx.chat?.type === 'private') markChatReachable(String(ctx.chat.id))
+  if (ctx.chat?.type === 'private' && markChatReachable(String(ctx.chat.id))) void updateSessionPin()
   await next()
 })
 

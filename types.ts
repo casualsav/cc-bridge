@@ -24,6 +24,7 @@ export type Access = {
   terminalMirror?: 'tools' | 'digest' | 'off' | boolean
   terminalMirrorFooter?: boolean   // show the live "✻ <verb>… · <elapsed> · <tokens>" footer on the mirror card (default off everywhere — the default card opens on the "Thinking…" placeholder instead; was always-on in DM until 0.3.110)
   sessionPin?: boolean
+  busDepthLimit?: number   // loop-breaker: max agent→agent chain depth before an ask is refused (default DEPTH_LIMIT_DEFAULT; floor 2). Depth is oversight, not volume — see agent-bus.ts
   budgetDaily?: number    // daily $ cap — warn at 80% and 100% of summed session cost growth (unset = off)
   topicOnEnd?: 'close' | 'delete'   // ended session's topic: close (keep history, default) or delete (tab disappears)
   scheduleTz?: string     // IANA timezone for recurring /schedule wall-clock times (default America/Los_Angeles)

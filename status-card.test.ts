@@ -6,7 +6,8 @@ import { prettyModel, lastModelInTranscript, lastTodosInTranscript, modeBadge, p
 import type { StatuslineData } from './statusline.ts'
 import { initStatusCard, updateSessionPin, paneForDmChat, sessionPins, pinTextCache } from './status-card.ts'
 import { ACCESS_FILE } from './common.ts'
-import { focus } from './state.ts'
+import { loadAccess } from './access.ts'
+import { focus, markChatReachable, markChatUnreachableIfUndeliverable } from './state.ts'
 import { dmLanesOn, _resetForTest as _resetLanesForTest } from './dm-lanes.ts'
 
 const tmp = mkdtempSync(join(tmpdir(), 'sc-test-'))
@@ -215,4 +216,45 @@ test('a per-user DM lane pins its OWN session, never the shared focus', async ()
   focus.activePaneId = null
   _resetLanesForTest()
   setAllowFrom(['111111'])
+})
+
+// The fresh DM-only bind, as it actually happens: the daemon comes up BEFORE the owner has ever
+// opened the bot's DM (Telegram refuses delivery to it), the owner then sends his first message,
+// and the refresher runs again. Both allowlist spellings — a quoted id and the unquoted number an
+// install agent can leave in access.json — must end with a pinned card.
+async function freshDmBind(ownerId: string | number): Promise<{ sent: string[]; pinned: string[] }> {
+  writeFileSync(ACCESS_FILE, JSON.stringify({ dmPolicy: 'allowlist', allowFrom: [ownerId], groups: {}, pending: {} }))
+  sessionPins.clear(); pinTextCache.clear()
+  const sent: string[] = [], pinned: string[] = []
+  let opened = false
+  const deps = pinDeps(sent, pinned) as unknown as { channel: { sendText: (c: string) => Promise<unknown> } }
+  const realSend = deps.channel.sendText
+  deps.channel.sendText = async (chatId: string) => {
+    if (!opened) throw { description: 'Bad Request: chat not found' }
+    return realSend(chatId)
+  }
+  initStatusCard(deps as never)
+  await updateSessionPin()                     // daemon boot — nobody has messaged yet
+  opened = true                                // the owner opens the DM and sends his first message
+  expect(markChatReachable(String(ownerId))).toBe(true)   // …the middleware lifts the mark (and pins)
+  await updateSessionPin()
+  setAllowFrom(['111111'])
+  return { sent, pinned }
+}
+
+test('a fresh DM-only bind self-pins once the owner makes first contact', async () => {
+  expect(await freshDmBind('111111')).toEqual({ sent: ['111111'], pinned: ['111111'] })
+})
+
+test('an UNQUOTED allowlist id still self-pins (the mark is id-shaped, not JSON-shaped)', async () => {
+  // The fresh-install bug: the failed send marked the NUMBER, first contact cleared the STRING, so
+  // the chat stayed "unreachable" for the life of the daemon and its card was never created at all.
+  expect(await freshDmBind(111111)).toEqual({ sent: ['111111'], pinned: ['111111'] })
+  expect(loadAccess().allowFrom).toEqual(['111111'])   // normalized on read, whatever the file says
+})
+
+test('markChatReachable reports the first-contact edge only once', () => {
+  markChatUnreachableIfUndeliverable('555', { description: 'Bad Request: chat not found' })
+  expect(markChatReachable('555')).toBe(true)    // lifted → the daemon pins this chat now
+  expect(markChatReachable('555')).toBe(false)   // every later message is a no-op, no pin storm
 })

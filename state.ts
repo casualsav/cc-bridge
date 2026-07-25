@@ -172,14 +172,24 @@ export const mdOverwritePending = new Map<string, { path: string; display: strin
 // the daemon calls it on every gated private message). In-memory by design: a restart retries each
 // chat once, not per-cycle — a two-user install with one never-seen user used to log the same
 // error every 10s pin refresh (~29k times).
+// Every id is coerced with String() on the way in and out. The set is keyed by chat id, and the two
+// sides of that id arrive from different places: the mark comes from a failed send, whose chat came
+// from `allowFrom` (whatever JSON type the installer wrote there), while the clear comes from an
+// update, always `String(ctx.chat.id)`. An access.json with UNQUOTED ids therefore marked the number
+// 837047563 and cleared the string "837047563" — the mark never lifted, and the owner's own DM was
+// skipped by the pin loop forever, on a box where replies worked fine. Coercing here makes the set
+// id-shaped rather than JSON-shaped (loadAccess normalizes too, which fixes it at the source).
 const unreachableChats = new Set<string>()
-export function markChatReachable(chat: string): void { unreachableChats.delete(chat) }
-export function isChatUnreachable(chat: string): boolean { return unreachableChats.has(chat) }
+// Returns true when this call actually LIFTED a mark — the "first contact" edge, which callers use to
+// do the work that was paused for this chat (create its pinned card) right now instead of on the next
+// refresher tick.
+export function markChatReachable(chat: string | number): boolean { return unreachableChats.delete(String(chat)) }
+export function isChatUnreachable(chat: string | number): boolean { return unreachableChats.has(String(chat)) }
 // Telegram's wording for the whole family; chat-not-found/PEER_ID_INVALID cover never-opened DMs.
 const UNDELIVERABLE_RE = /can't initiate|bot was blocked|user is deactivated|chat not found|PEER_ID_INVALID/i
-export function markChatUnreachableIfUndeliverable(chat: string, e: unknown): boolean {
+export function markChatUnreachableIfUndeliverable(chat: string | number, e: unknown): boolean {
   if (!UNDELIVERABLE_RE.test(String((e as { description?: string })?.description ?? e))) return false
-  unreachableChats.add(chat)
+  unreachableChats.add(String(chat))
   process.stderr.write(`daemon: chat ${chat} is unreachable (never messaged the bot / blocked) — delivery paused until they message\n`)
   return true
 }

@@ -3,11 +3,13 @@ import {
   _resetForTest, loadBus,
   createPending, getPending, removePending, putPending, listPending, markInjected, queuedFor, expirePending, dropExpired,
   recordAgentAsk, resetHops, currentHops, BREADTH_NOTICE_AT, ASK_TTL_MS,
-  sessionDepth, setSessionDepth, clearSessionDepth, resetAllSessionDepth, pruneSessionDepth, nextAskDepth, depthExceeded, DEPTH_LIMIT,
+  sessionDepth, setSessionDepth, clearSessionDepth, resetAllSessionDepth, pruneSessionDepth, nextAskDepth, depthExceeded, depthLimit, DEPTH_LIMIT_DEFAULT,
   normalizeEndpointName, resolveEndpoint, nameForEndpoint, confineRef,
   getSeen, markSeen, digestSince, SEEN_TTL_MS,
   type BusEndpoint, type LedgerEntry,
 } from './agent-bus.ts'
+import { writeFileSync } from 'node:fs'
+import { PREFS_FILE } from './common.ts'
 
 // Pure store + resolution logic only — each test seeds via _resetForTest so nothing touches the
 // real STATE_DIR/agent-bus.json (mirrors topics.test.ts).
@@ -134,9 +136,9 @@ test('a supervised session can fan out as wide as it likes', () => {
   }
 })
 
-test('a chain halts at DEPTH_LIMIT', () => {
+test('a chain halts at the depth limit', () => {
   let sid = 'chat'
-  for (let hop = 1; hop <= DEPTH_LIMIT; hop++) {
+  for (let hop = 1; hop <= depthLimit(); hop++) {
     const d = nextAskDepth(sid)
     expect(d).toBe(hop)
     expect(depthExceeded(d)).toBe(false)
@@ -144,8 +146,18 @@ test('a chain halts at DEPTH_LIMIT', () => {
     setSessionDepth(sid, d)          // delivery stamps the target
   }
   const tooDeep = nextAskDepth(sid)
-  expect(tooDeep).toBe(DEPTH_LIMIT + 1)
+  expect(tooDeep).toBe(depthLimit() + 1)
   expect(depthExceeded(tooDeep)).toBe(true)
+})
+
+test('the depth limit is a preference, defaulted and floored', () => {
+  const write = (v: unknown) => writeFileSync(PREFS_FILE, JSON.stringify(v === undefined ? {} : { busDepthLimit: v }))
+  expect(depthLimit()).toBe(DEPTH_LIMIT_DEFAULT)   // no pref set
+  write(20); expect(depthLimit()).toBe(20)         // retuned live, no restart
+  write(12.7); expect(depthLimit()).toBe(12)
+  write(1); expect(depthLimit()).toBe(DEPTH_LIMIT_DEFAULT)      // below the floor — a limit of 1 would refuse
+  write('nonsense'); expect(depthLimit()).toBe(DEPTH_LIMIT_DEFAULT)  // every supervised ask, wedging the bus
+  write(undefined)
 })
 
 test('depth is assigned, never accumulated — a long-lived session cannot drift into a pause', () => {
