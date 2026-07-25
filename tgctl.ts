@@ -14,6 +14,7 @@
 //   tgctl answer <id>   <text|-> [--ref p]…    answer an ask you received (id from its <tg …ask=N> block)
 //   tgctl post   <text|->                       broadcast to the humans in the room
 //   tgctl slash  <name> </cmd>                  inject a slash command into a target session's CLI
+//   tgctl keys   <name> <key>… [--force]        send named keystrokes to a target session's pane
 //   tgctl spawn  <name> [--dir p [--create]] [--model m] [--effort e] [text|-]   start a NEW session in its own topic
 //   tgctl kill   <name>                         end a session you spawned (chat lane: any worker)
 //   tgctl reopen <name>                         bring a closed session back up, conversation intact
@@ -65,6 +66,11 @@ const HELP: Record<string, string> = {
   answer:  'tg answer <id> <text|-> [--ref path]…   answer an ask you received (id from its <tg …ask=ID> block)',
   post:    'tg post <text|->   say something to the humans in the room',
   slash:   'tg slash <name> "/compact"   run a slash command in another session\'s CLI (rejected mid-turn; /exit is owner-only)',
+  keys:    'tg keys <name> <key>… [--force]   send keystrokes to a wedged session\'s pane — the lever for a\n' +
+           '  picker or permission prompt no message can reach (tg ask queues; tg slash needs a normal prompt).\n' +
+           '  Named keys only: enter esc up down left right 1-9. Words are an `tg ask`, not a keystroke.\n' +
+           '  Refused while the target is mid-turn, unless the wedge alert has fired — or --force, which\n' +
+           '  carries esc (to interrupt it) and nothing else.',
   spawn:   'tg spawn <name> [--dir p [--create]] [--model fable|opus|sonnet|haiku] [--effort low…max] [text|-]\n' +
            '  start a NEW session in its own topic. --dir must already exist unless --create is passed;\n' +
            '  with no --dir the session gets a folder named after it under the base dir.\n' +
@@ -110,7 +116,7 @@ let name = '', args: Record<string, unknown> = {}
 // Bus verbs take flag args (--ref, --await), so parse positionals + refs out of argv rather than
 // the fixed chat/a/b slots the classic verbs use. Kept in a separate branch so classic verbs are
 // byte-for-byte unchanged.
-const BUS = new Set(['ask', 'answer', 'post', 'slash', 'spawn', 'kill', 'reopen', 'roster', 'history', 'shared'])
+const BUS = new Set(['ask', 'answer', 'post', 'slash', 'keys', 'spawn', 'kill', 'reopen', 'roster', 'history', 'shared'])
 if (BUS.has(cmd)) {
   const rest = process.argv.slice(3)
   const refs: string[] = []
@@ -121,6 +127,7 @@ if (BUS.has(cmd)) {
     if (rest[i] === '--ref') { const v = rest[++i]; if (v != null) refs.push(v) }
     else if (f) { const v = rest[++i]; if (v != null) flags[f[1]!] = v }   // spawn's flags; harmless elsewhere
     else if (rest[i] === '--create') { flags.create = true }               // spawn: allow a missing --dir
+    else if (rest[i] === '--force') { flags.force = true }                 // keys: carry esc into a working turn
     else if (rest[i] === '--await') { /* P1 is async-only; --await is accepted and ignored */ }
     else pos.push(rest[i]!)
   }
@@ -135,6 +142,8 @@ if (BUS.has(cmd)) {
     case 'answer':  name = 'answer';  args = { pane, id: pos[0], text: body(pos[1], 'answer') ?? '', refs }; break
     case 'post':    name = 'post';    args = { pane, text: body(pos[0], 'post') ?? '' }; break
     case 'slash':   name = 'slash';   args = { pane, to: pos[0], command: pos[1] ?? '' }; break
+    // Keys are argv words, never stdin: they're a fixed vocabulary, not a body.
+    case 'keys':    name = 'keys';    args = { pane, to: pos[0], keys: pos.slice(1), ...flags }; break
     case 'spawn':   name = 'spawn';   args = { pane, name: pos[0], text: body(pos[1], 'spawn') ?? '', ...flags }; break
     case 'kill':    name = 'kill';    args = { pane, name: pos[0] }; break
     case 'reopen':  name = 'reopen';  args = { pane, name: pos[0] }; break

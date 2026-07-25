@@ -50,16 +50,24 @@ export async function resolveTarget(args: Record<string, unknown>): Promise<{ ch
   return { chat: resolveChatId(s) }
 }
 
+// The state dir holds the bot token, transcripts, the access list and the bus's own bookkeeping —
+// none of which an agent should be able to hose into a chat. Two subtrees are exempt because they
+// exist to carry files across that line: `inbox/` (what the user just sent IN) and the bus's
+// shared workspaces, `agent-bus/<room>/shared/` — the folder agents are explicitly told to put
+// deliverables in, which the blanket check made unsendable (@chat hit it relaying screenshots).
+// Matched on path SEGMENTS of the realpath, so neither a sibling named `shared-x` nor a symlink
+// out of the workspace slips through.
 export function assertSendable(f: string): void {
   let real, stateReal: string
   try {
     real = realpathSync(f)
     stateReal = realpathSync(STATE_DIR)
   } catch { return }
-  const inbox = join(stateReal, 'inbox')
-  if (real.startsWith(stateReal + sep) && !real.startsWith(inbox + sep)) {
-    throw new Error(`refusing to send channel state: ${f}`)
-  }
+  if (!real.startsWith(stateReal + sep)) return
+  const rel = real.slice(stateReal.length + 1).split(sep)
+  const sendable = rel[0] === 'inbox'
+    || (rel[0] === 'agent-bus' && rel[2] === 'shared' && rel.length > 3)
+  if (!sendable) throw new Error(`refusing to send channel state: ${f}`)
 }
 
 export function chunk(text: string, limit: number, mode: 'length' | 'newline'): string[] {

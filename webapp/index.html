@@ -94,8 +94,9 @@
   .msg.user.pending { opacity: .55; }
   .msg.assistant { background: var(--sec); border-bottom-left-radius: 4px; }
   .msg.activity { background: transparent; color: var(--hint); font: italic 12px/1.4 ui-monospace, monospace; padding: 2px 11px; margin-bottom: 3px; }
-  /* Live narration ("thoughts") — prose, so it gets the app font, not the tool feed's monospace. */
-  .msg.thought { background: transparent; color: var(--hint); font-style: italic; font-size: 13px; max-width: 100%; padding: 3px 11px; margin-bottom: 4px; }
+  /* Live narration — prose, so it gets the app font, not the activity feed's monospace. The quote
+     bar is the DOM counterpart of the <blockquote> the Telegram live card renders it in. */
+  .msg.thought { background: transparent; color: var(--hint); font-size: 13.5px; max-width: 100%; padding: 1px 0 1px 10px; margin: 4px 0 6px 11px; border-left: 2px solid var(--sec); white-space: pre-wrap; }
   /* Telegram-style composer: one pill input with the paperclip/mic INSIDE it, a round send button */
   .composer { display: flex; gap: 8px; padding: 8px 10px calc(8px + env(safe-area-inset-bottom)); border-top: 1px solid var(--sec); align-items: flex-end; }
   .inputwrap { flex: 1; display: flex; align-items: flex-end; background: var(--sec); border-radius: 19px; padding: 2px 4px 2px 14px; min-height: 40px; }
@@ -606,7 +607,7 @@ function md(s) {
 // thumbnail (hydrated after paint) / 📎 chip with the caption; assistant text gets light markdown.
 function bubble(i) {
   if (i.role === "activity") return '<div class="msg activity">' + esc(i.text) + "</div>";
-  if (i.role === "thought") return '<div class="msg thought">💭 ' + esc(i.text) + "</div>";
+  if (i.role === "thought") return '<div class="msg thought">' + esc(i.text) + "</div>";
   if (i.cmd) return '<div class="msg cmd">' + esc(i.text) + "</div>";
   let inner = "";
   const placeholder = /^\((?:file|photo|document|video|voice|audio)[:)]?/.test(i.text || "");

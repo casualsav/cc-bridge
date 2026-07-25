@@ -97,7 +97,7 @@ test('renderActionsMirror renders a single Task as a <details> chevron', () => {
 
 test('renderAgentLine caps the prompt (raw slice → escape) and HTML-escapes it', () => {
   const prompt = 'a & b '.repeat(200)                            // 1200 chars, &'s throughout, > cap
-  const line = renderAgentLine({ kind: 'tool', tool: 'Task', detail: '', lines: null, agent: { type: 'coder', prompt } })
+  const line = renderAgentLine({ kind: 'agent', type: 'coder', prompt })
   expect(line.startsWith('<details><summary><i>Agent - Coder</i></summary><blockquote>')).toBe(true)
   expect(line.endsWith('</blockquote></details>')).toBe(true)
   expect(line).toContain('…')                                     // capped (raw > 700)
@@ -106,7 +106,7 @@ test('renderAgentLine caps the prompt (raw slice → escape) and HTML-escapes it
 })
 
 test('a subagent with no prompt renders the bare agent line, no chevron/empty blockquote', () => {
-  const line = renderAgentLine({ kind: 'tool', tool: 'Task', detail: '', lines: null, agent: { type: 'writer', prompt: '' } })
+  const line = renderAgentLine({ kind: 'agent', type: 'writer', prompt: '' })
   expect(line).toBe('<i>Agent - Writer</i>')
 })
 

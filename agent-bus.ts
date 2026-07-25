@@ -383,7 +383,7 @@ const ledgerFile = (room: string): string => join(roomDir(room), 'ledger.jsonl')
 
 export type LedgerEntry = {
   ts: number
-  kind: 'ask' | 'answer' | 'post' | 'pause' | 'expire' | 'slash' | 'spawn' | 'kill' | 'reopen'
+  kind: 'ask' | 'answer' | 'post' | 'pause' | 'expire' | 'slash' | 'spawn' | 'kill' | 'reopen' | 'keys'
   from: string
   to?: string
   id?: number

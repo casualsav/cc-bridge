@@ -23,6 +23,9 @@ import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
 import { parseWorkingLine, parseDoneLine } from './statusline.ts'
 import { claudingFrame } from './clauding.ts'
 import { currentTurnFeed, turnAnchorUuid, type FeedItem } from './agent-transcript.ts'
+// The shared decision layer: what a live turn is doing, as blocks. This module only adds markup.
+import { summarizeTurn, summarizeToolRun, capType, toolBadge, isAgentTool, splitThoughtParagraphs, type TurnBlock } from './turn-summary.ts'
+export { toolBadge, isAgentTool, splitThoughtParagraphs }   // re-exported: their long-standing import site is this module
 import { isTopicMode } from './topics.ts'
 import { isChatFlooded, asLowPriority } from './throttle.ts'
 import { scheduleEdit, scheduleDelete } from './edit-scheduler.ts'
@@ -181,33 +184,6 @@ export function renderDigestMirror(raw: string, done: boolean): string {
   return `${header}\n\n${bodyText}`
 }
 
-// Per-tool emoji + human label for the live mirror. The transcript already carries the tool
-// name + input, so richer rendering here is entirely free (no model calls).
-const TOOL_BADGE: Record<string, [string, string]> = {
-  Bash: ['💻', 'terminal'], TodoWrite: ['📋', 'todo'],
-  Read: ['📖', 'read'], Edit: ['✏️', 'edit'], MultiEdit: ['✏️', 'edit'], Write: ['📝', 'write'],
-  Grep: ['🔍', 'search'], Glob: ['🔍', 'find'], LS: ['📂', 'list'],
-  WebFetch: ['🌐', 'fetch'], WebSearch: ['🌐', 'search'], Task: ['🤖', 'agent'], Agent: ['🤖', 'agent'],
-  NotebookEdit: ['📓', 'notebook'],
-  BashOutput: ['⚙️', 'process'], KillShell: ['⚙️', 'process'], KillBash: ['⚙️', 'process'],
-  AskUserQuestion: ['❓', 'clarify'], ExitPlanMode: ['📐', 'plan'], Skill: ['📚', 'skill'],
-}
-export function toolBadge(tool: string): [string, string] {
-  if (TOOL_BADGE[tool]) return TOOL_BADGE[tool]
-  if (tool.startsWith('mcp__')) {
-    // mcp__server__action → keyword-match the action for browser/web MCPs, else a plug.
-    const action = (tool.split('__').pop() || tool).replace(/^browser_/, '')
-    if (/navigat|goto|open/i.test(action)) return ['🌐', action]
-    if (/screenshot|vision|snapshot|image/i.test(action)) return ['📸', action]
-    if (/click|tap|press/i.test(action)) return ['👆', action]
-    if (/type|fill|input|key/i.test(action)) return ['⌨️', action]
-    if (/scroll/i.test(action)) return ['📜', action]
-    if (/search|query|find/i.test(action)) return ['🔍', action]
-    return ['🔌', action]
-  }
-  return ['🔧', tool]   // unregistered tool
-}
-
 // agent-bus: a subagent (Task/Agent) spawn shows as a <details> chevron whose summary is italic
 // "Agent - <Type>" and whose body is the full prompt in a blockquote — tap the disclosure triangle to
 // see exactly what it was asked. Several launched at once FOLD to one "Agent ×N" chevron (see
@@ -216,14 +192,11 @@ export function toolBadge(tool: string): [string, string] {
 // Prompt is capped RAW then escaped (never escape-then-slice, which can split an entity); the card's
 // chunkHtml backstop closes the tag safely if a fold ever overflows the budget.
 const AGENT_PROMPT_CAP = 700
-export function isAgentTool(tool: string): boolean { return tool === 'Task' || tool === 'Agent' }
-const capType = (t: string): string => t ? t[0].toUpperCase() + t.slice(1) : t
+type AgentBlock = Extract<TurnBlock, { kind: 'agent' }>
 // A lone spawn: a chevron titled italic "Agent - <Type>" expanding to its full prompt in a blockquote.
-export function renderAgentLine(it: Extract<FeedItem, { kind: 'tool' }>): string {
-  const rawType = it.agent?.type?.trim() ?? ''
-  const type = rawType ? ` - ${escapeHtml(capType(rawType))}` : ''
-  const raw = (it.agent?.prompt || it.detail || '').trim()
-  const p = raw.length > AGENT_PROMPT_CAP ? raw.slice(0, AGENT_PROMPT_CAP) + '…' : raw
+export function renderAgentLine(a: AgentBlock): string {
+  const type = a.type ? ` - ${escapeHtml(capType(a.type))}` : ''
+  const p = a.prompt.length > AGENT_PROMPT_CAP ? a.prompt.slice(0, AGENT_PROMPT_CAP) + '…' : a.prompt
   const summary = `<summary><i>Agent${type}</i></summary>`
   return p ? `<details>${summary}<blockquote>${escapeHtml(p)}</blockquote></details>` : `<i>Agent${type}</i>`
 }
@@ -231,16 +204,39 @@ export function renderAgentLine(it: Extract<FeedItem, { kind: 'tool' }>): string
 // its own blockquote (Type in bold + a short snippet); a lone spawn keeps its full-prompt chevron above.
 // Per-agent snippet shrinks with N so the chevron stays under the card budget (chunkHtml backstop still
 // closes it if it overflows).
-export function renderAgents(agents: Array<Extract<FeedItem, { kind: 'tool' }>>): string[] {
+export function renderAgents(agents: AgentBlock[]): string[] {
   if (agents.length <= 1) return agents.map(renderAgentLine)
   const perCap = Math.max(140, Math.min(400, Math.floor(1600 / agents.length)))
   const rows = agents.map(a => {
-    const type = escapeHtml(capType(a.agent?.type?.trim() || '?'))
-    const raw = (a.agent?.prompt || a.detail || '').trim()
-    const snip = raw.length > perCap ? raw.slice(0, perCap) + '…' : raw
+    const type = escapeHtml(capType(a.type || '?'))
+    const snip = a.prompt.length > perCap ? a.prompt.slice(0, perCap) + '…' : a.prompt
     return `<blockquote><b>${type}</b>${snip ? ` — ${escapeHtml(snip)}` : ''}</blockquote>`
   })
   return [`<details><summary><i>Agent ×${agents.length}</i></summary>${rows.join('')}</details>`]
+}
+
+// TurnBlocks → the card's rendered lines. The blocks decide what to say (turn-summary.ts); this
+// adds only Telegram markup, and flags which lines are narration so the thoughts card can merge
+// adjacent ones into one blockquote. Consecutive agent blocks fold into a single chevron —
+// summarizeToolRun puts a run's spawns last, so a batch launched together stays contiguous.
+type RenderedLine = { thought: boolean; html: string }
+function blocksToLines(blocks: TurnBlock[]): RenderedLine[] {
+  const out: RenderedLine[] = []
+  let agents: AgentBlock[] = []
+  const flushAgents = () => {
+    for (const html of renderAgents(agents)) out.push({ thought: false, html })
+    agents = []
+  }
+  for (const b of blocks) {
+    if (b.kind === 'agent') { agents.push(b); continue }
+    if (agents.length) flushAgents()
+    const html = b.kind === 'summary' ? `<i>${escapeHtml(b.text)}</i>`
+      : b.kind === 'edit' ? `✏️ <code>${escapeHtml(b.file)}</code>${b.lines ? ` <i>${b.lines > 0 ? `+${b.lines}` : `−${-b.lines}`}</i>` : ''}`
+      : mdToTelegramHtml(b.text).trim()
+    if (html) out.push({ thought: b.kind === 'thought', html })   // a thought that renders empty would open a stray quote
+  }
+  if (agents.length) flushAgents()
+  return out
 }
 
 // Actions card (the renamed tools mode): collapsed history + live tail, the TUI's own pattern.
@@ -251,7 +247,9 @@ export function renderAgents(agents: Array<Extract<FeedItem, { kind: 'tool' }>>)
 export function renderActionsMirror(tools: Array<Extract<FeedItem, { kind: 'tool' }>>, done: boolean): string {
   // Subagent spawns are pulled out and folded together (renderAgents) rather than scattered across the
   // tail — several launched at once collapse to one chevron instead of crowding the card row by row.
-  const agents = tools.filter(a => isAgentTool(a.tool))
+  // summarizeToolRun turns the spawns into agent blocks (type + full prompt) — the same shape the
+  // thoughts card folds, so both modes describe a spawn identically.
+  const agents = summarizeToolRun(tools.filter(a => isAgentTool(a.tool))).filter((b): b is Extract<TurnBlock, { kind: 'agent' }> => b.kind === 'agent')
   const rest = tools.filter(a => !isAgentTool(a.tool))
   const split = done ? rest.length : Math.max(0, rest.length - ACTIONS_TAIL)
   const lines: string[] = [
@@ -268,79 +266,21 @@ export function renderActionsMirror(tools: Array<Extract<FeedItem, { kind: 'tool
   return body
 }
 
-// Split a narration block into its visual paragraphs (blank-line separated), keeping fenced
-// code blocks glued. On the card, paragraphs within one block render exactly like separate
-// thoughts (a blank line apart on the card), so the MIRROR_THOUGHTS window must count
-// PARAGRAPHS — counting feed items let a multi-paragraph block show 6+ visual thoughts.
-export function splitThoughtParagraphs(text: string): string[] {
-  const out: string[] = []
-  let cur: string[] = []
-  let inFence = false
-  const flush = () => { const p = cur.join('\n').trim(); if (p) out.push(p); cur = [] }
-  for (const line of text.split('\n')) {
-    if (/^\s*(```|~~~)/.test(line)) inFence = !inFence
-    if (!inFence && line.trim() === '') { flush(); continue }
-    cur.push(line)
-  }
-  flush()
-  return out
-}
-
 // A run of consecutive tool calls (between two thoughts) folded into compact summary lines:
 // one aggregate sentence ("Searched 3 patterns, read 2 files, ran 2 shell commands"), then one
 // line per file edit with its net line delta. The thoughts card shows the work narrative this
-// way without per-call noise.
+// way without per-call noise. What it says is summarizeToolRun's call; this is the markup.
 export function renderToolRun(run: Array<Extract<FeedItem, { kind: 'tool' }>>): string[] {
-  let searched = 0, read = 0, ran = 0
-  const other = new Map<string, number>()
-  const edits = new Map<string, number>()   // file → summed net delta (repeat edits fold into one line)
-  const agents: Array<Extract<FeedItem, { kind: 'tool' }>> = []   // each subagent spawn keeps its own expandable line
-  for (const it of run) {
-    if (it.tool === 'Grep' || it.tool === 'Glob') searched++
-    else if (it.tool === 'Read') read++
-    else if (it.tool === 'Bash') ran++
-    else if (isAgentTool(it.tool)) agents.push(it)
-    else if (it.tool === 'Edit' || it.tool === 'MultiEdit' || it.tool === 'Write' || it.tool === 'NotebookEdit') {
-      const file = it.detail.split('/').pop() || it.detail || 'file'
-      edits.set(file, (edits.get(file) ?? 0) + (it.lines ?? 0))
-    } else {
-      const [, label] = toolBadge(it.tool)
-      other.set(label, (other.get(label) ?? 0) + 1)
-    }
-  }
-  const editLines = [...edits].map(([file, n]) =>
-    `✏️ <code>${escapeHtml(file)}</code>${n ? ` <i>${n > 0 ? `+${n}` : `−${-n}`}</i>` : ''}`)
-  const parts: string[] = []
-  if (searched) parts.push(`searched ${searched} pattern${searched === 1 ? '' : 's'}`)
-  if (read) parts.push(`read ${read} file${read === 1 ? '' : 's'}`)
-  if (ran) parts.push(`ran ${ran} shell command${ran === 1 ? '' : 's'}`)
-  for (const [label, n] of other) parts.push(n > 1 ? `${escapeHtml(label)} ×${n}` : escapeHtml(label))
-  const sentence = parts.join(', ')
-  return [
-    ...(sentence ? [`<i>${sentence[0].toUpperCase()}${sentence.slice(1)}</i>`] : []),
-    ...editLines,
-    ...renderAgents(agents),
-  ]
+  return blocksToLines(summarizeToolRun(run)).map(l => l.html)
 }
 
 // Thoughts card: Claude's narration rendered in shaded blockquotes, with each run of tool calls
 // between thoughts folded into renderToolRun's compact summary lines.
 export function renderThoughtsMirror(feed: FeedItem[], done: boolean): string {
-  // Build the display blocks first: thought PARAGRAPHS (the visual unit — see
-  // splitThoughtParagraphs) and tool-summary lines, in feed order.
-  type Block = { thought: boolean; html: string }
-  const blocks: Block[] = []
-  let run: Array<Extract<FeedItem, { kind: 'tool' }>> = []
-  const flushRun = () => { if (run.length) { for (const html of renderToolRun(run)) blocks.push({ thought: false, html }); run = [] } }
-  for (const it of feed) {
-    if (it.kind === 'tool') { run.push(it); continue }
-    flushRun()
-    for (const p of splitThoughtParagraphs(it.text)) {
-      const html = mdToTelegramHtml(p).trim()
-      if (html) blocks.push({ thought: true, html })
-    }
-  }
-  flushRun()
+  // summarizeTurn gives the ordered blocks (thought PARAGRAPHS — the visual unit — and folded tool
+  // runs); blocksToLines gives each its markup.
+  type Block = RenderedLine
+  const blocks: Block[] = blocksToLines(summarizeTurn(feed))
   // Window to the latest few blocks, then merge ADJACENT thought paragraphs into one shaded
   // blockquote with the summary lines sitting between the quotes. The quote bar is
   // the strongest clean, group-safe distinguisher Telegram gives — plain text / monospace both

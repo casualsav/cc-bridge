@@ -47,6 +47,12 @@ by its topic name.
   normal `ask=ID` block, so finish with `tg answer <ID>` like any other ask.
 - tg slash @name "/compact" — run a slash command in another session's CLI (rejected while the
   target is mid-turn — retry when idle; its outcome echoes in that session's topic). /exit is owner-only.
+- tg keys @name <key>… [--force] — send keystrokes to a session's pane: the lever for a wedge on a
+  picker or a permission prompt, which no message can reach (an ask queues behind it, slash needs a
+  normal prompt). Named keys only — `enter esc up down left right 1-9`; there is no free-text form,
+  because words to another agent are an `tg ask`. Refused while the target is mid-turn unless its
+  wedge alert has already fired; `--force` carries `esc` (to interrupt it) and nothing else. Capped
+  at 12 keys/minute per session, logged to the ledger with your name, echoed in the target's topic.
 - tg spawn <name> [--dir p [--create]] [--model fable|opus|sonnet|haiku] [--effort low…max] ["first message"] —
   start a NEW Claude Code session in its own topic (defaults: a folder named after it under the /base
   dir, inherited model/effort). `--dir` must already exist unless you pass `--create`. The first

@@ -67,6 +67,8 @@ import {
 } from './state.ts'
 import { initMirror, updateTerminalMirror, respawnTerminalMirror, abandonMirror, updateAuxMirror, dropAuxMirror, auxMirrorPanes } from './mirror.ts'
 import { parseStatusline, modelDisplayName, type StatuslineData } from './statusline.ts'
+import { summarizeTurn, blockLine } from './turn-summary.ts'
+import { normalizeKeys, planKeyInjection, planKeyRate, KEY_NAMES } from './keys-plan.ts'
 import {
   STATIC, initAccess, loadAccess, saveAccess, gate, dmCommandGate, isMentioned,
   pruneExpired, defaultAccess, type GateResult,
@@ -4589,7 +4591,7 @@ async function handleCall(
         const n = Math.max(1, Math.min(Number(args.n) || 20, 100))
         const es = resolveLedgerNames(tailLedger(room, n))
         text = es.length
-          ? es.map(e => `${e.kind === 'answer' ? '✓' : e.kind === 'ask' ? '→' : e.kind === 'post' ? '📣' : e.kind === 'expire' ? '⌛' : '·'} ${e.from}${e.to ? `→${e.to}` : ''}${e.id ? ` #${e.id}` : ''}: ${e.text.slice(0, 100)}`).join('\n')
+          ? es.map(e => `${e.kind === 'answer' ? '✓' : e.kind === 'ask' ? '→' : e.kind === 'post' ? '📣' : e.kind === 'expire' ? '⌛' : e.kind === 'keys' ? '⌨️' : '·'} ${e.from}${e.to ? `→${e.to}` : ''}${e.id ? ` #${e.id}` : ''}: ${e.text.slice(0, 100)}`).join('\n')
           : '(no bus history yet)'
         break
       }
@@ -4629,6 +4631,54 @@ async function handleCall(
         const watcher = targetPane === focus.activePaneId ? focus.paneWatcher : null
         void relaySlashCommand(targetPane, watcher, command, targets[0]?.chat ?? '', true, targets[0]?.thread ? Number(targets[0].thread) : undefined)
         text = `sent ${command.split(/\s/)[0]} to @${toName} — its outcome echoes on that session's surface`
+        break
+      }
+      // `tg keys <name> <key>… [--force]` — inject named keystrokes into another session's pane.
+      // The lever for a wedge no message can reach: a picker or a permission prompt is holding the
+      // input box, so `tg ask` queues forever and `tg slash` refuses (it needs a normal prompt).
+      // Named keys only, and the gate is "not mid-turn" rather than "a prompt is on screen" — see
+      // keys-plan.ts for why both of those are the way round they are.
+      case 'keys': {
+        const pane = args.pane ? String(args.pane) : null
+        const fromSid = pane ? await sessionForPane(pane) : null
+        if (!fromSid) { write({ t: 'result', id, ok: false, text: '`tg keys` must run inside a bridged session' }); return }
+        const norm = normalizeKeys(Array.isArray(args.keys) ? args.keys as string[] : [])
+        if ('error' in norm) { write({ t: 'result', id, ok: false, text: norm.error }); return }
+        await reapDeadEndpoints(String(args.to ?? ''))
+        const endpoints = busEndpoints()
+        const res = resolveEndpoint(String(args.to ?? ''), endpoints)
+        if ('error' in res) { write({ t: 'result', id, ok: false, text: res.error }); return }
+        if (res.kind !== 'claude') { write({ t: 'result', id, ok: false, text: 'keys needs a live session target (a hermes endpoint has no pane)' }); return }
+        const toName = nameForEndpoint(res.id, endpoints)
+        // Same target restrictions as kill: never yourself (you'd be typing into your own pane
+        // mid-turn), never a chat lane (the owner's own surface, not a worker).
+        if (res.id === fromSid) { write({ t: 'result', id, ok: false, text: `that's the session running this command — send keys to another session` }); return }
+        if (isChatLaneSession(res.id)) { write({ t: 'result', id, ok: false, text: `@${toName} is a chat lane, the owner's own surface — owner-only` }); return }
+        const targetPane = await paneForSession(res.id).catch(() => null)
+        if (!targetPane || !(await paneAlive(targetPane).catch(() => false))) {
+          if (!(targetPane && isPaneRestarting(targetPane))) updateTopic(res.id, { closed: true })
+          write({ t: 'result', id, ok: false, text: 'target session has no live pane' }); return
+        }
+        const cap = await capturePane(targetPane).catch(() => '')
+        const gate = planKeyInjection({
+          working: !!cap && detectWorking(cap),
+          wedgeAlerted: wedgeEscalated.has(targetPane),
+          force: !!args.force,
+          keys: norm.keys,
+        })
+        if (!gate.ok) { write({ t: 'result', id, ok: false, text: gate.reason }); return }
+        const rate = planKeyRate(keySendHistory.get(targetPane) ?? [], norm.keys.length, Date.now())
+        if (!rate.ok) { write({ t: 'result', id, ok: false, text: rate.reason }); return }
+        keySendHistory.set(targetPane, rate.next)
+        const sent = norm.keys.join(' ')
+        const fromName = nameForEndpoint(fromSid, endpoints)
+        appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'keys', from: fromName, to: toName, text: sent })
+        process.stderr.write(`daemon: bus keys ${sent} → ${toName} (${targetPane}) from ${fromName}\n`)
+        await paneKeys(targetPane, norm.keys, [300, 5000])
+        // Echo on the target's own surface: a keystroke that turns out to be a mistake must be
+        // traceable to whoever sent it without reading the ledger.
+        await notifyBusText(res.id, `⌨️ ${sent} → this session's pane, sent by @${fromName}`).catch(() => {})
+        text = `sent ${sent} to @${toName}`
         break
       }
       // `tg spawn <name> [--dir p] [--model fable] [--effort high] ["first message"]` — start a NEW
@@ -12490,6 +12540,8 @@ const stuckWatch = new Map<string, StuckState>()
 // Panes whose current wedge episode has already been escalated to the fleet surface (bug 11a) — so a
 // surface-less session is reported once, not once per alert. Cleared when the pane recovers.
 const wedgeEscalated = new Set<string>()
+// `tg keys` rate limiter: target pane → recent send times (planKeyRate prunes its own window).
+const keySendHistory = new Map<string, number[]>()
 function pruneStuckCards(pane: string): void {
   for (const [k, v] of stuckCards) if (v.paneId === pane) stuckCards.delete(k)
 }
@@ -12601,7 +12653,7 @@ async function sweepStuckPanes(): Promise<void> {
           `🧱 <b>${escapeHtml(nm)}</b> is wedged — a screen is holding its pane and no ask can land.`,
           blocked ? `${blocked} ask${blocked === 1 ? '' : 's'} queued behind it.` : 'Nothing queued behind it yet.',
           `Last lines of its pane:\n${cleanPaneTail(cap, 12)}`,
-          `Levers: \`tg slash ${nm} "/clear"\` · \`tg kill ${nm}\` (then \`tg reopen ${nm}\`). The owner is not being told — this is yours.`,
+          `Levers: \`tg keys ${nm} enter\` (or esc / a digit — for a picker or permission prompt, which is the common wedge) · \`tg slash ${nm} "/clear"\` · \`tg kill ${nm}\` (then \`tg reopen ${nm}\`). The owner is not being told — this is yours.`,
         ].join('\n\n'), null).catch(() => {})
       } else {
         await relayStuckScreen(pane, stuck, cleanPaneTail(cap, 20), label, decision.act === 'renag', own.length ? undefined : await fleetSurfaceFor(pane)).catch(() => {})
@@ -12948,6 +13000,7 @@ async function webappListSessions(): Promise<WebappSessionCard[]> {
 
 // Drill-in feed: recent conversation (user + assistant), plus the running turn's thoughts + activity.
 const THOUGHT_MAX = 400   // one narration block in the feed; long enough to read, short enough not to bury the tools
+const FEED_BLOCKS = 10    // live blocks kept, matching the Telegram card's window (MIRROR_THOUGHTS)
 async function webappSessionFeed(sid: string): Promise<WebappSessionFeed | null> {
   const row = dashboardSessionRows().find(r => r.sid === sid)
     ?? (getTopicBySession(sid) ? { sid, name: getTopicBySession(sid)!.name, cwd: getTopicBySession(sid)!.cwd, agent: 'claude' } : { sid, name: 'Session', cwd: '', agent: 'claude' })
@@ -12961,12 +13014,14 @@ async function webappSessionFeed(sid: string): Promise<WebappSessionFeed | null>
     role: c.role, text: c.text, ts: c.ts,
     ...(c.img ? { img: c.img } : {}), ...(c.att ? { att: c.att } : {}), ...(c.cmd ? { cmd: true } : {}),
   }))
-  // The running turn, as the Telegram live card shows it: Claude's mid-turn narration (the
-  // 💭 thoughts) interleaved with its tool runs, so checking in on a session says what it is
-  // thinking, not just which file it touched last.
-  if (working) for (const it of currentTurnFeed(file).slice(-8)) items.push(it.kind === 'text'
-    ? { role: 'thought', text: it.text.length > THOUGHT_MAX ? it.text.slice(0, THOUGHT_MAX - 1) + '…' : it.text, ts: 0 }
-    : { role: 'activity', text: `${it.tool}${it.detail ? ` ${it.detail}` : ''}`, ts: 0 })
+  // The running turn, described by the SAME decision layer the Telegram live card uses
+  // (turn-summary.ts): narration paragraphs interleaved with folded tool runs ("Searched 3
+  // patterns, read 2 files"), so checking in on a session says what it is thinking and doing
+  // rather than listing every call. Only the markup differs — blockLine is the plain-text form.
+  if (working) for (const b of summarizeTurn(currentTurnFeed(file)).slice(-FEED_BLOCKS)) {
+    const text = blockLine(b)
+    items.push({ role: b.kind === 'thought' ? 'thought' : 'activity', text: text.length > THOUGHT_MAX ? text.slice(0, THOUGHT_MAX - 1) + '…' : text, ts: 0 })
+  }
   return { sid, name: row.name, working, items }
 }
 

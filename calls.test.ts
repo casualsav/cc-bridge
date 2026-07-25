@@ -1,4 +1,6 @@
 import { test, expect, mock } from 'bun:test'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { join, dirname } from 'node:path'
 import { resolveChatId, resolveTarget, chunk, coerceReaction, assertSendable } from './calls.ts'
 import { loadAccess } from './access.ts'
 import * as realTopic from './topic-runtime.ts'
@@ -47,4 +49,17 @@ test('coerceReaction maps off-palette emoji onto the allowed set', () => {
 
 test('assertSendable refuses channel state but allows inbox files', () => {
   expect(() => assertSendable('/etc/hostname')).not.toThrow()
+})
+
+test('assertSendable blocks the state dir, exempts inbox and the bus shared workspaces', () => {
+  const state = process.env.TELEGRAM_STATE_DIR!            // test-preload points this at a temp dir
+  const file = (...p: string[]) => { const f = join(state, ...p); mkdirSync(dirname(f), { recursive: true }); writeFileSync(f, 'x'); return f }
+  expect(() => assertSendable(file('access.json'))).toThrow(/channel state/)
+  expect(() => assertSendable(file('agent-bus', 'dm', 'ledger.jsonl'))).toThrow(/channel state/)
+  expect(() => assertSendable(file('inbox', 'photo.jpg'))).not.toThrow()
+  // The shared workspace is where agents are told to put deliverables — sendable, at any depth.
+  expect(() => assertSendable(file('agent-bus', 'dm', 'shared', 'report.md'))).not.toThrow()
+  expect(() => assertSendable(file('agent-bus', '-100123', 'shared', 'shots', 'after.png'))).not.toThrow()
+  // A sibling that merely starts with the exempt name is still state.
+  expect(() => assertSendable(file('agent-bus', 'dm', 'shared-drafts', 'x.md'))).toThrow(/channel state/)
 })
