@@ -243,6 +243,13 @@ async function ensureTopicFor(group: string, sessionId: string, cwd: string, pan
   }
 }
 
+// Rate-limits the orphan-pane drop log below — the aux relay calls outboundTargetsFor every ~1.5s
+// per reply, and an orphan pane sits in that state indefinitely, so unthrottled logging floods the
+// log file. The orphan-pane lifecycle itself (why it never gets adopted or GC'd) is a known
+// follow-up from the DM-side audit; this is just spam control on the message.
+const orphanPaneLogAt = new Map<string, number>()
+const ORPHAN_PANE_LOG_INTERVAL_MS = 10 * 60 * 1000
+
 // Where a session's outbound should go. DM mode → the allowlisted DM chats (no thread). Topic mode →
 // the bound group, threaded to the session's own topic (created on first use; General if unresolvable).
 export async function outboundTargetsFor(paneId: string | null): Promise<Array<{ chat: string; thread?: number }>> {
@@ -276,7 +283,13 @@ export async function outboundTargetsFor(paneId: string | null): Promise<Array<{
     // adoption. Dropping beats interleaving its output unlabelled into every allowlisted DM. A
     // classic single-session box (none of those structures) keeps the broadcast fallback.
     if (sid && (listDmChatSessions().length > 0 || listLanes().length > 0 || listTopics().some(t => t.headless && !t.closed))) {
-      process.stderr.write(`daemon: pane ${paneId} (sid ${sid}) is registered to no chat surface — dropping its outbound (not broadcasting)\n`)
+      const key = paneId ?? sid
+      const last = orphanPaneLogAt.get(key) ?? 0
+      const now = Date.now()
+      if (now - last >= ORPHAN_PANE_LOG_INTERVAL_MS) {
+        orphanPaneLogAt.set(key, now)
+        process.stderr.write(`daemon: pane ${paneId} (sid ${sid}) is registered to no chat surface — dropping its outbound (not broadcasting)\n`)
+      }
       return []
     }
     return dmTargets()

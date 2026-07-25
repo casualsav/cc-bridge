@@ -10922,6 +10922,7 @@ async function ensureChatLane(ctx: Context, chatId: string, first: InboundParams
       await edit(`❌ Couldn't ${revive ? 'revive' : 'start'} your chat in <code>${escapeHtml(dir)}</code> — your message is buffered.`)
       return
     }
+    invalidatePaneStatus(pane)   // a recycled/collided tmux pane id can carry a DEAD session's cached effort/model — drop it so the pin renders the fresh lane's own dials
     setDmChatSession(chatId, sid, dir)   // fresh → new binding; revive → same sid, refreshes the cwd
     unbindLane(chatId)   // dmChat ⊕ dmLane per chat: a chat that upgrades to a chat lane sheds any old DM lane, so outbound can never resolve two owners for one DM
     process.stderr.write(`daemon: chat-lane ${revive ? 'revived' : 'spawned'} for chat ${chatId} → sid ${sid} (pane ${pane}) in ${dir}\n`)

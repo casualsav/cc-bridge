@@ -662,7 +662,7 @@ export async function updateTopicPins(): Promise<void> {
       if (!lane.paneId || isChatUnreachable(lane.chat)) continue
       try {
         const text = await statusCardText(lane.paneId)
-        await upsertChatPin(lane.chat, text, buttons, true)
+        await upsertChatPin(lane.chat, text, buttons, true, lane.paneId)
       } catch (e) { process.stderr.write(`daemon: pin cycle for lane chat ${lane.chat} failed: ${e}\n`) }
     }
   }
@@ -672,14 +672,22 @@ export async function updateTopicPins(): Promise<void> {
 // loop (one shared `text`/`hasSession` for the focused session) and topic mode's per-DM-chat-lane
 // loop (each lane has its own pane, so its own `text`/`hasSession`). `chat` doubles as the sessionPins
 // key — safe because a chat only ever runs ONE of these loops (classic DM mode vs. topic mode).
-async function upsertChatPin(chat: string, text: string, buttons: Button[][], hasSession: boolean): Promise<void> {
+async function upsertChatPin(chat: string, text: string, buttons: Button[][], hasSession: boolean, paneId: string | null = null): Promise<void> {
   const existing = sessionPins.get(chat)
   if (existing && pinTextCache.get(chat) === text) return   // nothing changed — skip the no-op edit
+  // Observability for the periodic DM pin refresher: only fires on an actual edit/create (the no-op
+  // return above is silent, keeping volume low). effort/model come from the same lastGoodStatus
+  // snapshot statusCardText just wrote for this pane — cheaper than threading a debug object through.
+  const logPin = (kind: 'edit' | 'create') => {
+    const st = paneId ? lastGoodStatus.get(paneId) : undefined
+    process.stderr.write(`pin: chat ${chat} pane ${paneId} effort ${st?.effort ?? '—'} model ${st?.model ?? '—'} (${kind})\n`)
+  }
   if (existing) {
     scheduleEdit({ chat, mid: existing, source: 'pin', buttons,
       render: () => text,
       onSent: async () => {
         pinTextCache.set(chat, text)
+        logPin('edit')
         // If the user unpinned it, re-pin so it returns (runs only when the card actually changed).
         // TODO(channel-gap): getChat / pinned_message lookup — no verb in the ChannelAdapter contract.
         const info = await deps.bot.api.getChat(chat).catch(() => null)
@@ -695,7 +703,7 @@ async function upsertChatPin(chat: string, text: string, buttons: Button[][], ha
       } })
     return
   }
-  if (hasSession) await createSessionPin(chat, text, buttons)   // don't pin "No active session" out of nowhere
+  if (hasSession) { await createSessionPin(chat, text, buttons); logPin('create') }   // don't pin "No active session" out of nowhere
 }
 
 let pinUpdating = false
@@ -717,7 +725,7 @@ export async function updateSessionPin(): Promise<void> {
         const pane = focus.activePaneId ?? (lane ? await paneForSession(lane.sessionId).catch(() => null) : null)
         const text = await statusCardText(pane)
         const hasSession = !!(pane || focus.activeShim)   // off-MCP pane or MCP shim — either counts
-        await upsertChatPin(chat, text, buttons, hasSession)
+        await upsertChatPin(chat, text, buttons, hasSession, pane)
       } catch (e) { process.stderr.write(`daemon: pin cycle for chat ${chat} failed: ${e}\n`) }
     }
   } finally { pinUpdating = false }
