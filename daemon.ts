@@ -2450,6 +2450,22 @@ function busEndpoints(): BusEndpoint[] {
   const hermes = [...hermesEndpoints.values()].map(h => ({ id: h.name, kind: 'hermes' as const, name: h.name, closed: false }))
   return [...claude, ...dm, ...anchor, ...hermes]
 }
+// A DM chat lane — the orchestrator surface the owner talks to. Two roles here: a lane may close
+// sessions it didn't spawn (it manages the fleet, and inherits sessions across restarts), and a lane
+// is never itself closable over the bus (it's the owner's own conversation, not a worker).
+const isChatLaneSession = (sid: string): boolean => listDmChatSessions().some(d => d.sessionId === sid)
+
+// May `from` close/reopen `target`? Returns null when allowed, else the refusal to send back.
+// Closing is otherwise owner-only (see the `slash` case's /exit guard); this opens exactly two doors:
+// your own spawns, and anything at all if you're an orchestrator lane. Self-close is refused for
+// everyone — the caller is the session that would have to run `tg reopen`, so it has no undo.
+function sessionCloseDenial(from: string, targetSid: string, targetName: string, topic: TopicEntry | null): string | null {
+  if (targetSid === from) return `that's the session running this command — it can't close itself (no one would be left to reopen it)`
+  if (isChatLaneSession(targetSid)) return `@${targetName} is a chat lane, the owner's own surface — owner-only`
+  if (topic?.spawnedBy === from || isChatLaneSession(from)) return null
+  return `@${targetName} wasn't spawned by you — only its spawner or the chat lane can close it`
+}
+
 // The room = the bound forum group. The bus requires topic mode (an endpoint IS a topic's session).
 function busRoom(): string | null { return isTopicMode() ? getGroupChatId() : null }
 // Storage key for the ledger + the shared dir. 'dm' is the synthetic room used when no group is
@@ -4619,10 +4635,10 @@ async function handleCall(
         text = `spawned "${topicName}" in ${dir}${model ? ` · model ${model}` : ''}${effort ? ` · effort ${effort}` : ''}${firstMsg ? ' — the first message delivers as an ask once the REPL is up, and its reply comes back to you as the answer' : ''}. Reach it on the bus as @${topicName}.`
         break
       }
-      // `tg kill <name>` — end a session the CALLER spawned. Ending sessions is otherwise owner-only
-      // (see the `slash` case's /exit guard), but a session that spawned another by mistake had no way
-      // to undo it and had to ask a human. Scoped by the spawnedBy stamp setTopic writes above: your
-      // own spawns only, nothing else on the bus. Runs the same close as the mini-app's Close button.
+      // `tg kill <name>` — end a session you spawned, or (as an orchestrator chat lane) any worker
+      // on the bus. Ending sessions is otherwise owner-only, so this is deliberately UNDOable: the
+      // topic tab is CLOSED, never deleted, and the registry row survives with its cwd + conversation
+      // id so `tg reopen` can bring the same session back. Runs the mini-app Close button's path.
       case 'kill': {
         const pane = args.pane ? String(args.pane) : null
         const fromSid = pane ? await sessionForPane(pane) : null
@@ -4632,12 +4648,10 @@ async function handleCall(
         const endpoints = busEndpoints()
         const res = resolveEndpoint(target, endpoints)
         if ('error' in res) { write({ t: 'result', id, ok: false, text: res.error }); return }
-        // No entry at all (a DM lane, a hermes endpoint) fails the same test as someone else's
-        // session: both are "not yours to end", and one refusal beats leaking which it was.
         const topic = getTopicBySession(res.id)
-        if (topic?.spawnedBy !== fromSid) {
-          write({ t: 'result', id, ok: false, text: `@${target} wasn't spawned by you — ending other sessions is owner-only` }); return
-        }
+        const denial = sessionCloseDenial(fromSid, res.id, target, topic ?? null)
+        if (denial) { write({ t: 'result', id, ok: false, text: denial }); return }
+        if (!topic) { write({ t: 'result', id, ok: false, text: `@${target} has no session entry to close` }); return }
         const targetPane = await paneForSession(res.id).catch(() => null)
         const alive = !!targetPane && await paneAlive(targetPane).catch(() => false)
         if (targetPane && alive) {
@@ -4646,11 +4660,42 @@ async function handleCall(
           // a wedged session (the reason you're killing it) would hold the CLI call open.
           if (topic.threadId != null) markTopicClosePending(res.id)
           void closeSessionPane(targetPane, 'bus-kill')
-        } else if (topic.threadId == null) {
-          removeTopic(res.id)   // headless + dead: the registry row IS the whole session
         }
+        // An already-dead session is left ALONE, entry and all: dropping the row here would be the one
+        // close that `tg reopen` can't undo (the row is what remembers the folder + conversation).
         appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'kill', from: nameForEndpoint(fromSid, endpoints), to: target, text: alive ? 'exiting' : 'already dead' })
-        text = alive ? `ending @${target} — its topic closes once the pane exits` : `@${target} had no live pane; cleaned up its entry`
+        text = alive
+          ? `ending @${target} — undo with \`tg reopen ${target}\``
+          : `@${target} was already down — \`tg reopen ${target}\` brings it back`
+        break
+      }
+      // `tg reopen <name>` — the undo for `tg kill`. Relaunches the SAME session id in the SAME folder
+      // with `--resume <conversation>` (falling back to `-c`, the newest conversation in that folder,
+      // when the entry never recorded one), so the session keeps its history, its bus name and its
+      // topic tab. Same permission test as kill: if you could close it, you can bring it back.
+      case 'reopen': {
+        const pane = args.pane ? String(args.pane) : null
+        const fromSid = pane ? await sessionForPane(pane) : null
+        if (!fromSid) { write({ t: 'result', id, ok: false, text: '`tg reopen` must run inside a bridged session' }); return }
+        const target = String(args.name ?? '').trim()
+        if (!target) { write({ t: 'result', id, ok: false, text: 'usage: tg reopen <name>' }); return }
+        // resolveEndpoint deliberately refuses CLOSED endpoints ("exists but isn't running"), which is
+        // every reopen target — so match the registry directly instead.
+        const wanted = normalizeEndpointName(target)
+        const matches = listTopics().filter(t => normalizeEndpointName(t.name) === wanted)
+        if (!matches.length) { write({ t: 'result', id, ok: false, text: `no session named "${target}" to reopen — a headless session's entry is dropped when its pane dies, and only ${'`tg spawn`'} can bring that back` }); return }
+        if (matches.length > 1) { write({ t: 'result', id, ok: false, text: `"${target}" is ambiguous (${matches.length} entries share that name)` }); return }
+        const t0 = matches[0]!
+        const denial = sessionCloseDenial(fromSid, t0.sessionId, target, t0)
+        if (denial) { write({ t: 'result', id, ok: false, text: denial }); return }
+        const livePane = await paneForSession(t0.sessionId).catch(() => null)
+        if (livePane && await paneAlive(livePane).catch(() => false)) { write({ t: 'result', id, ok: false, text: `@${target} is already up` }); return }
+        const extra = t0.agentSessionId ? `--resume ${t0.agentSessionId}` : '-c'
+        const newPane = await spawnSession(t0.cwd, extra, t0.sessionId, topicAccount(t0), topicAgent(t0))
+        if (!newPane) { write({ t: 'result', id, ok: false, text: `couldn't relaunch @${target} in ${t0.cwd} — see daemon log` }); return }
+        await reopenSessionTopic(t0.sessionId)   // reopen the tab now, not on its first reply
+        appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'reopen', from: nameForEndpoint(fromSid, busEndpoints()), to: target, text: extra })
+        text = `reopening @${target} in ${t0.cwd} — ${t0.agentSessionId ? 'resuming its own conversation' : 'continuing the newest conversation in that folder'}, same topic and name. Give it ~30s to reach a prompt.`
         break
       }
       default:

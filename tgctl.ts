@@ -15,7 +15,8 @@
 //   tgctl post   <text|->                       broadcast to the humans in the room
 //   tgctl slash  <name> </cmd>                  inject a slash command into a target session's CLI
 //   tgctl spawn  <name> [--dir p [--create]] [--model m] [--effort e] [text|-]   start a NEW session in its own topic
-//   tgctl kill   <name>                         end a session YOU spawned
+//   tgctl kill   <name>                         end a session you spawned (chat lane: any worker)
+//   tgctl reopen <name>                         bring a closed session back up, conversation intact
 //   tgctl roster                                who's live in the room
 //   tgctl history [n]                           recent agent-bus activity
 //   tgctl shared                                the room's shared-workspace dir (put deliverables here)
@@ -43,7 +44,9 @@ const HELP: Record<string, string> = {
            '  start a NEW session in its own topic. --dir must already exist unless --create is passed;\n' +
            '  with no --dir the session gets a folder named after it under the base dir.\n' +
            '  The first message is delivered as an ask once its REPL is up.',
-  kill:    'tg kill <name>   end a session YOU spawned (its topic closes; other sessions stay owner-only)',
+  kill:    'tg kill <name>   end a session you spawned (a chat lane may end any worker). Undo with tg reopen',
+  reopen:  'tg reopen <name>   bring a closed session back up — same folder, same name, same topic,\n' +
+           '  resuming its own conversation where it left off',
   roster:  'tg roster   who is live on the bus',
   history: 'tg history [n]   recent agent-bus activity',
   shared:  'tg shared   print the room\'s shared-workspace dir (put deliverables there)',
@@ -74,7 +77,7 @@ let name = '', args: Record<string, unknown> = {}
 // Bus verbs take flag args (--ref, --await), so parse positionals + refs out of argv rather than
 // the fixed chat/a/b slots the classic verbs use. Kept in a separate branch so classic verbs are
 // byte-for-byte unchanged.
-const BUS = new Set(['ask', 'answer', 'post', 'slash', 'spawn', 'kill', 'roster', 'history', 'shared'])
+const BUS = new Set(['ask', 'answer', 'post', 'slash', 'spawn', 'kill', 'reopen', 'roster', 'history', 'shared'])
 if (BUS.has(cmd)) {
   const rest = process.argv.slice(3)
   const refs: string[] = []
@@ -90,7 +93,7 @@ if (BUS.has(cmd)) {
   }
   // Belt and braces behind the per-subcommand help above: a leading dash is a mistyped flag, never a
   // session name — spawning/killing one would create a folder (and a topic) named after the typo.
-  if ((cmd === 'spawn' || cmd === 'kill') && pos[0]?.startsWith('-')) {
+  if ((cmd === 'spawn' || cmd === 'kill' || cmd === 'reopen') && pos[0]?.startsWith('-')) {
     process.stderr.write(`tg ${cmd}: '${pos[0]}' is not a session name (it starts with a dash) — try 'tg ${cmd} --help'\n`)
     process.exit(2)
   }
@@ -101,6 +104,7 @@ if (BUS.has(cmd)) {
     case 'slash':   name = 'slash';   args = { pane, to: pos[0], command: pos[1] ?? '' }; break
     case 'spawn':   name = 'spawn';   args = { pane, name: pos[0], text: fromStdin(pos[1]) ?? '', ...flags }; break
     case 'kill':    name = 'kill';    args = { pane, name: pos[0] }; break
+    case 'reopen':  name = 'reopen';  args = { pane, name: pos[0] }; break
     case 'roster':  name = 'roster';  args = { pane }; break
     case 'history': name = 'history'; args = { pane, n: pos[0] }; break
     case 'shared':  name = 'shared';  args = { pane }; break

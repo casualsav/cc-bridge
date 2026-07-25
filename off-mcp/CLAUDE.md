@@ -36,7 +36,11 @@ by its topic name.
   dir, inherited model/effort). `--dir` must already exist unless you pass `--create`. The first
   message is delivered as an `ask=ID` once its REPL is up — the new session's `tg answer` comes back
   to you as the result.
-- tg kill <name> — end a session YOU spawned (only those; everything else stays owner-only).
+- tg kill <name> — end a session you spawned. The orchestrator chat lane may end ANY worker session;
+  nobody may end a chat lane or the session running the command. Reversible on purpose: the topic tab
+  closes but is never deleted.
+- tg reopen <name> — undo a kill: relaunches the same session in the same folder, resuming its own
+  conversation, keeping its bus name and topic tab. Same permission as kill.
 - tg roster — who's live. · tg post "text" — say something to the humans. · tg history — recent
   bus events.
 - `tg <verb> --help` prints that verb's usage without doing anything.
