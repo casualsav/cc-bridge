@@ -848,13 +848,23 @@ function endSession(sessionId: string): void {
   if (!s) return
   const wasFocused = focus.currentSessionId === sessionId
   dropSession(sessionId)
-  if (wasFocused) void announceFocusedExit(s.label)
+  if (wasFocused) void announceFocusedExit(s.label, sessionId)
 }
 
 // The focused session just ended. DM mode drives a single session, so there's no switch menu —
-// if another bridge pane is alive, the discovery rescan auto-adopts it and announces.
-async function announceFocusedExit(endedLabel: string): Promise<void> {
-  notifyChats(`🔚 Session “${endedLabel}” ended.`, { plain: true })
+// if another bridge pane is alive, the discovery rescan auto-adopts it and announces. Multi-user
+// DM (lanes or chat-lanes) scopes the notice to the ended session's OWN chat — broadcasting it to
+// every allowFrom chat (the old behavior) leaked another user's session label/end-of-session
+// notice to everyone else in the box. Neither resolves (classic single-session DM, where allowFrom
+// IS the intended audience) → fall back to the broadcast.
+async function announceFocusedExit(endedLabel: string, sessionId: string): Promise<void> {
+  const text = `🔚 Session “${endedLabel}” ended.`
+  const owner = chatForLaneSession(sessionId) ?? chatIdForDmChatSession(sessionId)
+  if (owner) {
+    if (!isChatUnreachable(owner)) void channel.sendText(owner, text, { plain: true }).catch(e => markChatUnreachableIfUndeliverable(owner, e))
+    return
+  }
+  notifyChats(text, { plain: true })
 }
 
 // Route a permission decision back to the session that requested it.
@@ -2202,6 +2212,16 @@ async function discoverPanes(): Promise<void> {
   // churn focus (and split the live mirror) out from under an active session.
   let haveFocus = !!focus.activePaneId && await paneAlive(focus.activePaneId)
   if (!haveFocus && focus.activePaneId) haveFocus = await paneAlive(focus.activePaneId)
+  // A pane whose claude exited (bare shell after a mid-command death) must not RETAIN focus either
+  // — it renders dead everywhere else, yet as focus it kept feeding the classic DM pin/relay/
+  // dashboard with a corpse. Drop it like a pane death (adoption below picks a live replacement if
+  // one exists). Mid-restart bounces are exempt (same rule as the registry prune above).
+  if (haveFocus && !isPaneRestarting(focus.activePaneId!) && !(await paneClaudeLive(focus.activePaneId!).catch(() => true))) {
+    haveFocus = false
+    focus.paneWatcher?.stop(); focus.paneWatcher = null
+    focus.activePaneId = null
+    typingPresence.stop()
+  }
   if (!haveFocus && panes.length) {
     // Headless sessions (e.g. the background 'general' anchor) are background-only by definition
     // and must never become the singleton focused (user-facing) session — exclude their panes
@@ -3899,7 +3919,7 @@ function startPaneWatcher(paneId: string): void {
       if (adoptedPaneId === paneId) adoptedPaneId = null   // clear binding so the rescan re-adopts
       if (wasActive) focus.currentSessionId = null
       const label = sessionNames.get(paneId) || 'Session'
-      if (wasActive) void announceFocusedExit(label)
+      if (wasActive) void sessionForPane(paneId, false).catch(() => null).then(sid => announceFocusedExit(label, sid ?? paneId))
     },
     async text => { const w = detectWorking(text); if (isTopicMode()) { if (w) void emitTopicTyping(paneId) } else typingPresence.observe(await paneDrivesDmTyping(paneId, w)) },   // live typing signal, every poll — topic mode routes it to the session's topic (transcript signal is blind mid-thinking); DM gated to the pane that owns it
   )
@@ -5504,7 +5524,20 @@ bot.command('agent', async ctx => {
 // Shared by /agent and /launch: spawn a fresh session in the target pane's folder (else the
 // last session's folder). DM mode needs the single slot free; topic mode gets a sibling topic.
 async function launchAgentSession(ctx: Context, kind: AgentKind, paneId: string | null): Promise<void> {
-  if (!isTopicMode() && focus.activePaneId) {
+  const lanesHere = dmLanesOn() && !isTopicMode()
+  const laneChatId = lanesHere ? String(ctx.chat?.id ?? '') : ''
+  if (lanesHere) {
+    // DM lanes: only the SENDER's own lane blocks a fresh launch — another user's live lane must
+    // never wedge this one (the global-focus read here was the orphan-pane bug: it blocked every
+    // sender once ANY lane was live, yet a spawn that got past it never bound to the sender's lane).
+    const lane = laneChatId ? laneForChat(laneChatId) : undefined
+    const lanePane = lane ? await paneForSession(lane.sessionId).catch(() => null) : null
+    const cmd = lanePane ? await paneCommand(lanePane).catch(() => '') : ''
+    if (cmd === 'claude' || cmd === 'codex') {
+      await ctx.reply('A session is already running in this DM. End it first, or /bind a forum group to run several side by side.')
+      return
+    }
+  } else if (!isTopicMode() && focus.activePaneId) {
     // Only a pane with a LIVE agent process blocks the DM slot. A tracked pane whose Claude
     // exited (sitting at a shell, or gone entirely) is free — refusing there wedged the DM:
     // "a session is already running" while the screen showed bash.
@@ -5515,8 +5548,13 @@ async function launchAgentSession(ctx: Context, kind: AgentKind, paneId: string 
     }
   }
   const dir = (paneId ? await paneCwd(paneId).catch(() => null) : null) ?? lastSessionCwd() ?? homedir()
-  const sid = isTopicMode() ? genSessionId() : undefined
+  const sid = isTopicMode() || lanesHere ? genSessionId() : undefined
   const ok = await spawnSession(dir, '', sid, MAIN_ACCOUNT, kind)
+  // Bind the freshly spawned pane to the sender's lane now — registerSpawnedPane (inside
+  // spawnSession) no-ops under dmLanesOn() (each lane pane is bound explicitly, never by focus
+  // adoption), so without this the pane would sit unbound until a lucky reactive adopt on the
+  // sender's NEXT message — or never, if another lane's pane still holds focus by then.
+  if (ok && lanesHere && sid) bindLane(laneChatId, sid, Date.now(), dir)
   await ctx.reply(ok
     ? `🚀 Starting <b>${agentLabel(kind)}</b> in <code>${escapeHtml(dir)}</code>${isTopicMode() ? ' — it gets its own topic shortly.' : '.'}`
     : `❌ Couldn’t start ${agentLabel(kind)} in <code>${escapeHtml(dir)}</code>. Check the CLI path/login and daemon log.`,
@@ -8069,7 +8107,17 @@ bot.command('resume', async ctx => {
   if (!dmCommandGate(ctx)) return
   // DM drives a single session — resuming spawns a new pane, so it only fills an empty slot.
   // Group (topic) mode spawns freely: each resumed session gets its own topic.
-  if (!isTopicMode() && focus.activePaneId) {
+  if (dmLanesOn() && !isTopicMode()) {
+    // DM lanes: gate on the SENDER's own lane, not whichever lane happens to hold focus — another
+    // user's live lane must never block this one from listing/resuming.
+    const chatId = String(ctx.chat?.id ?? '')
+    const lane = chatId ? laneForChat(chatId) : undefined
+    const lanePane = lane ? await paneForSession(lane.sessionId).catch(() => null) : null
+    if (lanePane) {
+      await ctx.reply('A session is already running, and this DM drives a single session. /exit it first, or /bind a forum group to run several.')
+      return
+    }
+  } else if (!isTopicMode() && focus.activePaneId) {
     await ctx.reply('A session is already running, and this DM drives a single session. /exit it first, or /bind a forum group to run several.')
     return
   }
@@ -9880,7 +9928,18 @@ bot.on('callback_query:data', async ctx => {
   const resumeMatch = /^resume:([0-9a-fA-F-]+)$/.exec(data)
   if (resumeMatch) {
     if (!(await cbAuth(ctx))) return
-    if (!isTopicMode() && focus.activePaneId) {
+    const lanesHere = dmLanesOn() && !isTopicMode()
+    const laneChatId = lanesHere ? String(ctx.chat?.id ?? '') : ''
+    const senderLane = lanesHere && laneChatId ? laneForChat(laneChatId) : undefined
+    if (lanesHere) {
+      // DM lanes: gate on the SENDER's own lane — another user's live lane must never block this one.
+      const lanePane = senderLane ? await paneForSession(senderLane.sessionId).catch(() => null) : null
+      if (lanePane) {
+        await ctx.answerCallbackQuery({ text: 'A session is already running.' }).catch(() => {})
+        await ctx.reply('A session is already running, and this DM drives a single session. /exit it first, or /bind a forum group to run several.').catch(() => {})
+        return
+      }
+    } else if (!isTopicMode() && focus.activePaneId) {
       await ctx.answerCallbackQuery({ text: 'A session is already running.' }).catch(() => {})
       await ctx.reply('A session is already running, and this DM drives a single session. /exit it first, or /bind a forum group to run several.').catch(() => {})
       return
@@ -9898,10 +9957,15 @@ bot.on('callback_query:data', async ctx => {
     if (isTopicMode()) {
       const cand = findTopicByCwd(dir)
       if (cand && !(await paneForSession(cand.sessionId).catch(() => null))) preset = cand.sessionId
+    } else if (lanesHere) {
+      // Same reason as the topic case: without a preset stamp, registerSpawnedPane's dmLanesOn()
+      // branch no-ops (never adopts/binds), leaving the resumed pane an orphan. Reuse the sender's
+      // existing lane sid when reviving a dead lane, else mint a fresh one for a brand-new lane.
+      preset = senderLane?.sessionId ?? genSessionId()
     }
     // Resume under the account the session was recorded in (its projects root names it).
     const ok = await spawnSession(dir, `--resume ${id}`, preset, kind === 'claude' && hit ? accountForProjectsDir(hit.root) : MAIN_ACCOUNT, kind)
-    if (ok && preset) await reopenSessionTopic(preset)   // reopen the tab NOW if it was closed
+    if (ok && preset) { if (isTopicMode()) await reopenSessionTopic(preset); else if (lanesHere) bindLane(laneChatId, preset, Date.now(), dir) }   // reopen the tab NOW if it was closed / rebind the lane
     await ctx.reply(ok
       ? `🔄 Resuming in <code>${escapeHtml(dir)}</code> — connecting to it shortly.`
       : `❌ Couldn't resume that session in <code>${escapeHtml(dir)}</code>.`,
@@ -11112,7 +11176,15 @@ bot.on('message_reaction', async ctx => {
       // topic-exact card 👍/👎 above still work (they carry the pane). Private chats / non-topic groups
       // have a single active session, so the resolve is correct.
       if (isTopicMode() && chatId === getGroupChatId()) return
-      const pane = await resolveActivePane()
+      // DM lanes: resolve the REACTING chat's own lane pane first — resolveActivePane's global
+      // focus would stop the wrong user's session in a multi-user DM box (same class of bug as the
+      // "already running" guards above).
+      let pane: string | null = null
+      if (dmLanesOn() && !isTopicMode()) {
+        const lane = laneForChat(chatId)
+        pane = lane ? await paneForSession(lane.sessionId).catch(() => null) : null
+      }
+      if (!pane) pane = await resolveActivePane()
       if (!pane) return
       const isFocused = pane === focus.activePaneId
       await performStop({ paneId: pane, watcher: isFocused ? focus.paneWatcher : null, isFocused })

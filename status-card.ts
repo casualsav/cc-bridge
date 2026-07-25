@@ -722,7 +722,11 @@ export async function updateSessionPin(): Promise<void> {
       // (a two-user install must get the owner's pin even if the second chat errors every time).
       try {
         const lane = getDmChatSession(chat)
-        const pane = focus.activePaneId ?? (lane ? await paneForSession(lane.sessionId).catch(() => null) : null)
+        // A lane-owning chat's pin renders ITS OWN lane pane, never the global focus — focus can
+        // legitimately sit on some other session (or a dead shell), and letting it take priority
+        // here made the 10s refresher overwrite a correct /status pin with the wrong session's
+        // dials. Focus is only the fallback for chats with no lane (classic single-session DM).
+        const pane = lane ? await paneForSession(lane.sessionId).catch(() => null) : focus.activePaneId
         const text = await statusCardText(pane)
         const hasSession = !!(pane || focus.activeShim)   // off-MCP pane or MCP shim — either counts
         await upsertChatPin(chat, text, buttons, hasSession, pane)
