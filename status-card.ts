@@ -18,6 +18,7 @@ import { asLowPriority } from './throttle.ts'
 import { scheduleEdit, cancelEdit, isViewHot } from './edit-scheduler.ts'
 import { loadAccess } from './access.ts'
 import { isTopicMode, getGroupChatId, listTopics, getGeneralSession, getDmChatSession } from './topics.ts'
+import { laneForChat, dmLanesOn } from './dm-lanes.ts'
 import { paneForSession } from './topic-runtime.ts'
 import { detectCurrentMode, onNormalPrompt, stripAnsi, type CcMode } from './prompt.ts'
 import { currentTurnTokens } from './agent-transcript.ts'
@@ -535,11 +536,26 @@ export async function clearTopicPins(group: string, threadId: number): Promise<v
   await deps.bot.api.unpinAllForumTopicMessages(group, threadId).catch(() => {})
 }
 
+// A card that was sent but that Telegram never actually pinned. `pin` fails for real reasons — a
+// group where the bot has no pin right, a transient 400 — and every call site swallowed it: the card
+// sat unpinned in the chat, and because the refresher skips a cycle whose text is unchanged (an idle
+// session renders the identical card every tick), nothing ever retried. The chat then shows NO pinned
+// message at all, indefinitely — the "the pin never populated" symptom. Remember the miss, log it, and
+// let the next cycle retry the pin before the unchanged-text shortcut.
+const unpinnedCards = new Set<string>()   // pin key (chat id or `topic:<id>`) -> sent, not pinned
+async function pinCard(key: string, chatId: string, messageId: string | number): Promise<void> {
+  try { await deps.channel.pin({ chatId, messageId: String(messageId) }); unpinnedCards.delete(key) }
+  catch (e) {
+    unpinnedCards.add(key)
+    process.stderr.write(`pin: ${key} message ${messageId} sent but NOT pinned (${e}) — will retry\n`)
+  }
+}
+
 export async function createSessionPin(chat: string, text: string, buttons: Button[][]): Promise<void> {
   try {
     await clearAllPins(chat)   // single-pin guarantee: remove any prior/orphaned pins before the new one
     const m = await deps.channel.sendText(chat, text, { buttons })
-    await deps.channel.pin(m).catch(() => {})
+    await pinCard(chat, chat, m.messageId)
     sessionPins.set(chat, Number(m.messageId)); pinTextCache.set(chat, text); persistSessionPins()
   } catch (e) {
     if (!markChatUnreachableIfUndeliverable(chat, e)) process.stderr.write(`daemon: session pin create failed: ${e}\n`)
@@ -604,7 +620,7 @@ export async function updateTopicPins(): Promise<void> {
           // TODO(channel-gap): unpinAllGeneralForumTopicMessages — bulk General unpin, no verb in the contract.
           await deps.bot.api.unpinAllGeneralForumTopicMessages(group).catch(() => {})   // single-pin guarantee for General
           const m = await deps.channel.sendText(group, text, { buttons: statusKeyboard(), silent: true })
-          await deps.channel.pin(m).catch(() => {})
+          await pinCard(key, group, m.messageId)
           sessionPins.set(key, Number(m.messageId)); pinTextCache.set(key, text); persistSessionPins()
         } catch (e) { process.stderr.write(`daemon: general pin create failed: ${e}\n`) }
       }
@@ -628,7 +644,10 @@ export async function updateTopicPins(): Promise<void> {
     if (!hot) lastPinRefresh.set(key, Date.now())
     const text = await statusCardText(paneId)
     const existing = sessionPins.get(key)
-    if (existing && pinTextCache.get(key) === text) continue   // unchanged → skip the edit
+    if (existing && pinTextCache.get(key) === text) {
+      if (unpinnedCards.has(key)) await pinCard(key, group, existing)   // card exists but the pin never took — retry it
+      continue   // unchanged → skip the edit
+    }
     if (existing) {
       scheduleEdit({ chat: group, mid: existing, thread: threadId, source: 'pin', buttons: statusKeyboard(),
         render: () => text,
@@ -643,7 +662,7 @@ export async function updateTopicPins(): Promise<void> {
     try {
       await clearTopicPins(group, threadId)   // single-pin guarantee — drop any prior/orphaned card pins first
       const m = await deps.channel.sendText(group, text, { threadId: String(threadId), silent: true, buttons: statusKeyboard() })
-      await deps.channel.pin(m).catch(() => {})
+      await pinCard(key, group, m.messageId)
       sessionPins.set(key, Number(m.messageId)); pinTextCache.set(key, text); persistSessionPins()
     } catch (e) {
       if (topicThreadGone(e)) { sessionPins.delete(key); pinTextCache.delete(key); persistSessionPins(); deps.onTopicGone(t.sessionId, threadId) }   // tab gone → drop pin tracking; daemon confirms + tears down its session
@@ -672,7 +691,10 @@ export async function updateTopicPins(): Promise<void> {
 // key — safe because a chat only ever runs ONE of these loops (classic DM mode vs. topic mode).
 async function upsertChatPin(chat: string, text: string, buttons: Button[][], paneId: string | null = null): Promise<void> {
   const existing = sessionPins.get(chat)
-  if (existing && pinTextCache.get(chat) === text) return   // nothing changed — skip the no-op edit
+  if (existing && pinTextCache.get(chat) === text) {
+    if (unpinnedCards.has(chat)) await pinCard(chat, chat, existing)   // card exists but the pin never took — retry it
+    return   // nothing changed — skip the no-op edit
+  }
   // Observability for the periodic DM pin refresher: only fires on an actual edit/create (the no-op
   // return above is silent, keeping volume low). effort/model come from the same lastGoodStatus
   // snapshot statusCardText just wrote for this pane — cheaper than threading a debug object through.
@@ -689,9 +711,7 @@ async function upsertChatPin(chat: string, text: string, buttons: Button[][], pa
         // If the user unpinned it, re-pin so it returns (runs only when the card actually changed).
         // TODO(channel-gap): getChat / pinned_message lookup — no verb in the ChannelAdapter contract.
         const info = await deps.bot.api.getChat(chat).catch(() => null)
-        if (info?.pinned_message?.message_id !== existing) {
-          await deps.channel.pin({ chatId: chat, messageId: String(existing) }).catch(() => {})
-        }
+        if (info?.pinned_message?.message_id !== existing) await pinCard(chat, chat, existing)
       },
       onError: e => {
         // Deleted out from under us → drop the stale id; the next cycle recreates it. Transient
@@ -723,6 +743,25 @@ function logPinSkip(chat: string, why: string): void {
   process.stderr.write(`pin: chat ${chat} skipped (${why})\n`)
 }
 
+// Which pane a DM chat's card renders. A lane-owning chat's pin renders ITS OWN lane pane, never
+// the global focus — focus can legitimately sit on some other session (or a dead shell), and letting
+// it take priority made the 10s refresher overwrite a correct /status pin with the wrong session's
+// dials. There are TWO kinds of lane and the pin knew only one: topics.ts's DM chat lane (the
+// auto-provisioned chat agent) and dm-lanes.ts's per-user lane, which arms itself automatically at
+// ≥2 allowlisted ids (dmLanesOn). On such a box every allowlisted user drives their own session, but
+// each pin fell back to the single shared `focus` — so a user whose lane pane isn't the focused one
+// got another session's dials, or, when nothing holds focus, a permanently blank "No active session"
+// card. That is the multi-allowlisted-id pin bug. A lane whose pane is dead resolves to null (blank
+// card) rather than falling back to focus: showing someone else's session is worse than showing none.
+// Focus stays the fallback only for a chat with no lane at all (classic single-session DM).
+export async function paneForDmChat(chat: string): Promise<string | null> {
+  const chatLane = getDmChatSession(chat)
+  if (chatLane) return paneForSession(chatLane.sessionId).catch(() => null)
+  const userLane = dmLanesOn() ? laneForChat(chat) : undefined
+  if (userLane) return paneForSession(userLane.sessionId).catch(() => null)
+  return focus.activePaneId
+}
+
 let pinUpdating = false
 export async function updateSessionPin(): Promise<void> {
   if (loadAccess().sessionPin === false) return // disabled via /pin off
@@ -738,12 +777,7 @@ export async function updateSessionPin(): Promise<void> {
       // Per-chat isolation: NOTHING one chat's card does may block another allowlisted user's card
       // (a two-user install must get the owner's pin even if the second chat errors every time).
       try {
-        const lane = getDmChatSession(chat)
-        // A lane-owning chat's pin renders ITS OWN lane pane, never the global focus — focus can
-        // legitimately sit on some other session (or a dead shell), and letting it take priority
-        // here made the 10s refresher overwrite a correct /status pin with the wrong session's
-        // dials. Focus is only the fallback for chats with no lane (classic single-session DM).
-        const pane = lane ? await paneForSession(lane.sessionId).catch(() => null) : focus.activePaneId
+        const pane = await paneForDmChat(chat)
         const text = await statusCardText(pane)
         await upsertChatPin(chat, text, buttons, pane)
       } catch (e) { process.stderr.write(`daemon: pin cycle for chat ${chat} failed: ${e}\n`) }

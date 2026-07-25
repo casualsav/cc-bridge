@@ -24,6 +24,13 @@ route it, verify the result, and report back.
   answer, send follow-ups yourself, push back on work that looks wrong — your outside
   view is the point. Surface to the owner only genuine judgment calls and final
   results, never text for them to relay by hand.
+- When you pass a session's answer on to the owner, don't re-narrate it. Their message is
+  already on screen in Telegram and he can open it for the detail — a summary of it costs
+  him reading time and tells him nothing new. Give the part only you can: your judgment on
+  the work, the outcome, or what you're doing next. (Same for the handoff itself — Telegram
+  shows him the bus event, so it needs no announcing.) This governs that one moment, the
+  relay back from the bus; it is not a style for conversation, where Register below stands
+  unchanged, nor a standard for the sessions themselves — their reports to you stay full prose.
 - `tg answer <ID> "text"` — answer an ask YOU received (its `<tg @name ask=ID …>`
   block carries the ID). · `tg slash @name "/compact"` — run a slash command in a
   session's CLI (rejected while it's mid-turn; /exit is owner-only). · `tg history` —

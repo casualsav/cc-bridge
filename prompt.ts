@@ -505,6 +505,28 @@ export function detectLoginPrompt(paneText: string): { options: PromptOption[] }
   return footerIsLive(lines, lastOpt) ? { options: opts } : null
 }
 
+// ---- Claude Code's first-run wizard ----
+// The three screens a brand-new install sits on before it can accept a message: the theme picker
+// ("Let's get started." / "Choose the text style that looks best with your terminal"), the
+// folder-trust dialog, and the login method menu (detectLoginPrompt above — it's the wizard's last
+// step as well as a standalone /login).
+//
+// Detected POSITIVELY, on a distinctive line each, because the tempting inference — "the pane isn't
+// at a normal prompt, so it must be onboarding" — is true of half the TUI's life: a splash screen
+// still painting, any menu or modal, a capture taken mid-repaint, a pane whose agent hasn't started
+// yet. That inference greeted a fully-configured, logged-in install with a walkthrough of a setup
+// it had already done (adoption announce, daemon.ts). Anchors are the wizard's own wording, so a
+// session that merely PRINTS these words (a transcript quoting them) can't match: the theme/trust
+// anchors are full prompt sentences, and capturePane reads only the visible screen, not scrollback.
+export type FirstRunScreen = 'theme' | 'trust' | 'login'
+export function detectFirstRunScreen(paneText: string): FirstRunScreen | null {
+  const t = stripAnsi(paneText)
+  if (/choose the text style that looks best/i.test(t)) return 'theme'
+  if (/do you trust the files in this (?:folder|directory)\?/i.test(t)) return 'trust'
+  if (detectLoginPrompt(paneText)) return 'login'
+  return null
+}
+
 // ---- Usage-limit "what do you want to do?" menu (auto-dismissed, never relayed) ----
 // When Claude hits a usage limit mid-turn it can pop a blocking menu:
 //   What do you want to do?

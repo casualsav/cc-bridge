@@ -4,6 +4,10 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { prettyModel, lastModelInTranscript, lastTodosInTranscript, modeBadge, pinMessageGone, statusKeyboard, mergeStatus, codexModelFromPane, codexPrettyModel, codexStatusHead, parseCodexStatusline } from './status-card.ts'
 import type { StatuslineData } from './statusline.ts'
+import { initStatusCard, updateSessionPin, paneForDmChat, sessionPins, pinTextCache } from './status-card.ts'
+import { ACCESS_FILE } from './common.ts'
+import { focus } from './state.ts'
+import { dmLanesOn, _resetForTest as _resetLanesForTest } from './dm-lanes.ts'
 
 const tmp = mkdtempSync(join(tmpdir(), 'sc-test-'))
 
@@ -136,4 +140,79 @@ test('unreachable-chat marking: only Telegram undeliverable errors mark; inbound
   expect(isChatUnreachable('42')).toBe(false)
   expect(isChatUnreachable('43')).toBe(true)
   markChatReachable('43')
+})
+
+// ---- the DM pin loop on a multi-user allowlist ----
+// Regression cover for the fresh-install report: several allowlisted ids, only one of whom has ever
+// messaged the bot, and no pinned card appeared.
+function pinDeps(sent: string[], pinned: string[], opts: { unsendable?: Set<string>; pinFails?: Set<string> } = {}) {
+  return {
+    channel: {
+      sendText: async (chatId: string) => {
+        if (opts.unsendable?.has(String(chatId))) throw { description: 'Bad Request: chat not found' }
+        sent.push(String(chatId))
+        return { chatId: String(chatId), messageId: `${100 + sent.length}` }
+      },
+      pin: async ({ chatId }: { chatId: string }) => {
+        if (opts.pinFails?.has(String(chatId))) throw { description: 'Bad Request: not enough rights to pin a message' }
+        pinned.push(String(chatId))
+      },
+      unpin: async () => {},
+      deleteMessage: async () => {},
+    },
+    bot: { api: { getChat: async () => ({}) } },
+    transcriptForPane: async () => null,
+    lastKnownModel: () => null,
+    botUsername: () => 'testbot',
+    usageSnapshotForPane: async () => null,
+    onTopicGone: () => {},
+    paneAgentKind: async () => 'claude' as const,
+  } as never
+}
+
+function setAllowFrom(ids: string[]): void {
+  writeFileSync(ACCESS_FILE, JSON.stringify({ dmPolicy: 'allowlist', allowFrom: ids, groups: {}, pending: {} }))
+}
+
+test('a chat that never messaged the bot cannot stop another allowlisted user getting a pin', async () => {
+  setAllowFrom(['222222', '333333', '111111'])   // the reachable owner LAST, behind two unknown ids
+  sessionPins.clear(); pinTextCache.clear()
+  const sent: string[] = [], pinned: string[] = []
+  initStatusCard(pinDeps(sent, pinned, { unsendable: new Set(['222222', '333333']) }))
+  await updateSessionPin()
+  expect(sent).toEqual(['111111'])
+  expect(pinned).toEqual(['111111'])
+  expect(sessionPins.get('111111')).toBe(101)
+  setAllowFrom(['111111'])
+})
+
+test('a card Telegram refused to pin is re-pinned on the next cycle, not left unpinned forever', async () => {
+  setAllowFrom(['111111'])
+  sessionPins.clear(); pinTextCache.clear()
+  const sent: string[] = [], pinned: string[] = []
+  const pinFails = new Set(['111111'])
+  initStatusCard(pinDeps(sent, pinned, { pinFails }))
+  await updateSessionPin()
+  expect(sent).toEqual(['111111'])
+  expect(pinned).toEqual([])            // sent, but the pin was refused
+  pinFails.delete('111111')             // e.g. the bot is granted the pin right
+  await updateSessionPin()              // identical card text — the no-op path must still retry the pin
+  expect(sent).toEqual(['111111'])      // no duplicate card
+  expect(pinned).toEqual(['111111'])
+  await updateSessionPin()
+  expect(pinned).toEqual(['111111'])    // and stops retrying once it took
+})
+
+test('a per-user DM lane pins its OWN session, never the shared focus', async () => {
+  setAllowFrom(['111111', '222222'])    // >=2 allowlisted ids auto-arms per-user DM lanes
+  expect(dmLanesOn()).toBe(true)
+  _resetLanesForTest({ lanes: { '222222': { sessionId: 'sid-b', createdAt: 1 } } })
+  focus.activePaneId = '%9'             // some other user's session holds focus
+  // The lane's pane can't resolve in a unit test (no tmux) — what matters is that it does NOT fall
+  // back to '%9': rendering another user's dials in this chat's pin is the bug being fixed.
+  expect(await paneForDmChat('222222')).toBe(null)
+  expect(await paneForDmChat('111111')).toBe('%9')   // no lane of their own → classic focus fallback
+  focus.activePaneId = null
+  _resetLanesForTest()
+  setAllowFrom(['111111'])
 })

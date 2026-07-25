@@ -1,6 +1,6 @@
 // Prompt detection from pane captures — select menus vs permission dialogs. Pure functions.
 import { test, expect } from 'bun:test'
-import { stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, isResumeSessionPrompt, detectResumeSessionPrompt, detectEditorState, onNormalPrompt, detectModelUnavailable, detectCompacting, compactPercent, permPromptToken, waitingPromptSignature, isRecognizedPrompt, detectStuckScreen, extractGenericOptions, bashModeArmed, detectWorking } from './prompt.ts'
+import { stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, detectFirstRunScreen, isUsageLimitChoice, isResumeSessionPrompt, detectResumeSessionPrompt, detectEditorState, onNormalPrompt, detectModelUnavailable, detectCompacting, compactPercent, permPromptToken, waitingPromptSignature, isRecognizedPrompt, detectStuckScreen, extractGenericOptions, bashModeArmed, detectWorking } from './prompt.ts'
 
 test('stripAnsi removes CSI escape sequences', () => {
   expect(stripAnsi('\x1b[1mbold\x1b[0m text')).toBe('bold text')
@@ -860,4 +860,59 @@ test('detectWorking ignores quoted/echoed spinner text that is not a live status
 test('detectWorking still catches the legacy "esc to interrupt" footer within the 16-line tail', () => {
   const pane = modernLayout('  ✻ Working… (12s · esc to interrupt)')
   expect(detectWorking(pane)).toBe(true)
+})
+
+// ---- first-run wizard (adoption announce) ----
+// The theme + login panes below are verbatim captures of a real fresh-config `claude` (v2.1.205)
+// launched in tmux with an empty CLAUDE_CONFIG_DIR — the screens the false "first-run setup" notice
+// claimed to have found.
+const THEME_SCREEN = [
+  ' Welcome to Claude Code v2.1.205',
+  '..........................................................',
+  '',
+  ' Let\'s get started.',
+  '',
+  ' Choose the text style that looks best with your terminal',
+  ' To change this later, run /theme',
+  '',
+  '   1. Auto (match terminal)',
+  ' ❯ 2. Dark mode ✔',
+  '   3. Light mode',
+].join('\n')
+
+const LOGIN_SCREEN = [
+  ' Welcome to Claude Code v2.1.205',
+  '',
+  ' Claude Code can be used with your Claude subscription or billed based on API',
+  ' usage through your Console account.',
+  ' Select login method:',
+  ' ❯ 1. Claude account with subscription · Pro, Max, Team, or Enterprise',
+  '   2. Anthropic Console account · API usage billing',
+  '   3. 3rd-party platform · Amazon Bedrock, Microsoft Foundry, or Vertex AI',
+].join('\n')
+
+test('detectFirstRunScreen matches the real theme picker, trust dialog and login menu', () => {
+  expect(detectFirstRunScreen(THEME_SCREEN)).toBe('theme')
+  expect(detectFirstRunScreen(LOGIN_SCREEN)).toBe('login')
+  expect(detectFirstRunScreen([
+    '  Do you trust the files in this folder?',
+    '  /home/ubuntu/projects/cc-bridge',
+    '  ❯ 1. Yes, proceed',
+    '    2. No, exit',
+  ].join('\n'))).toBe('trust')
+})
+
+test('detectFirstRunScreen stays null on every screen a configured session actually shows', () => {
+  // The bug: "not at a normal prompt" was read as "on first-run setup". None of these is onboarding.
+  const box = (rows: string[]) => ['╭──────────────────────╮', ...rows, '╰──────────────────────╯'].join('\n')
+  expect(detectFirstRunScreen(box(['❯ ']))).toBe(null)                               // idle prompt
+  expect(detectFirstRunScreen('✻ Whirlpooling… (12s · esc to interrupt)')).toBe(null) // mid-turn
+  expect(detectFirstRunScreen('')).toBe(null)                                         // pane not painted yet
+  expect(detectFirstRunScreen(' Welcome to Claude Code v2.1.205\n\n Tips for getting started')).toBe(null)  // splash, still painting
+  expect(detectFirstRunScreen([                                                       // an ordinary select menu
+    'Which approach?',
+    '❯ 1. Rewrite',
+    '  2. Patch',
+    'Enter to select · Esc to cancel',
+  ].join('\n'))).toBe(null)
 })

@@ -26,7 +26,7 @@ import { hopKey, resolveChain, pickNextHop, moveHop } from './failover-chain.ts'
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
 import { renderSessionsView } from './sessions-view.ts'
-import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, hasQueuedMessages, feedbackSurveyOpen, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen } from './prompt.ts'
+import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, hasQueuedMessages, feedbackSurveyOpen, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen } from './prompt.ts'
 import { resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, currentTurnActivity, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, agentSessionId, agentForSession } from './agent-transcript.ts'
 import {
   AGENT_PANE_OPT, agentExitKeys, agentInterruptKeys, agentLabel, agentResetCommand, agentSubmitKeys,
@@ -2148,18 +2148,39 @@ function adoptPane(paneId: string): void {
   if (prev !== paneId) void announceAdopted(paneId)
 }
 
-// "Connected" — but if the freshly adopted pane is sitting on Claude's first-run onboarding
-// (theme picker / login), it can't accept a chat yet, so say that instead of a misleading
-// "Connected". onNormalPrompt covers both the idle prompt and a running task; neither is
-// onboarding.
+// "Connected" — but if the freshly adopted pane is sitting on Claude's first-run wizard (theme
+// picker / folder trust / login), it can't accept a chat yet, so say that instead of a misleading
+// "Connected".
+//
+// The claim needs a POSITIVE match on one of those screens (detectFirstRunScreen). It used to be
+// inferred from `!onNormalPrompt` — but adoption routinely lands on a pane that is merely not at a
+// prompt yet: the TUI paints its splash for a second or two on launch, a capture can catch a
+// repaint, the agent may not even be up. A logged-in, fully-configured install therefore greeted the
+// owner's very first message with a walkthrough of a setup he'd already finished. Silence beats a
+// false onboarding claim, so anything undecided announces the plain "Connected".
 async function announceAdopted(paneId: string): Promise<void> {
-  const cap = await capturePane(paneId).catch(() => '')
-  if (cap && !onNormalPrompt(cap)) {
+  const setup = await settledFirstRunScreen(paneId)
+  if (setup) {
     notifyChats('🔗 Found a Claude session on first-run setup — I\'ll walk you through it here ' +
       '(theme, folder trust, then login). Or finish it in the terminal if you prefer.', { plain: true })
   } else {
     notifyChats('🔗 Connected to the Claude session.', { plain: true })
   }
+}
+
+// Sample the pane until it says something definite: a wizard screen (→ that screen) or a normal
+// prompt / running turn (→ null, it's a working session). A pane that never resolves inside the
+// window — still painting, wedged on some other screen — resolves as null: not-onboarding is the
+// safe error, since the wizard waits for input and will still be there when the user looks.
+async function settledFirstRunScreen(paneId: string): Promise<FirstRunScreen | null> {
+  for (let i = 0; i < 6; i++) {
+    const cap = await capturePane(paneId).catch(() => '')
+    const screen = cap ? detectFirstRunScreen(cap) : null
+    if (screen) return screen
+    if (cap && onNormalPrompt(cap)) return null
+    await sleep(1000)
+  }
+  return null
 }
 
 // Point the bridge at an off-MCP pane (no shim socket): drive it directly and read its
