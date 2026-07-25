@@ -4472,10 +4472,14 @@ async function handleCall(
         }
         const fromName = nameForEndpoint(fromSid, busEndpoints())
         appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'spawn', from: fromName, to: topicName, text: `${dir}${model ? ` model=${model}` : ''}${effort ? ` effort=${effort}` : ''}` })
-        // Visibility notice on the SPAWNER's own surface (its DM lane / topic) — one line, so the
-        // owner watching that lane sees a session was opened on his behalf.
-        void notifyBusText(fromSid, `🆕 Opened session: <b>@${escapeHtml(topicName)}</b>`)
         const firstMsg = String(args.text ?? '').trim()
+        // Visibility notice on the SPAWNER's own surface (its DM lane / topic). Deliberately carries NO
+        // body: when there's a first message, the brief arrives moments later in notifyAskSent's chevron
+        // card ("Messaged @X"), which fires only on a CONFIRMED delivery. Putting the brief here too
+        // would print the same text twice, back to back, on one surface — worse than not having it. So
+        // this line stays the instant "it exists" ack and forward-references the brief instead, and the
+        // pair reads as a sequence: opened now -> briefed, confirmed, with the text.
+        void notifyBusText(fromSid, `🆕 Opened session: <b>@${escapeHtml(topicName)}</b>${firstMsg ? ' — briefing it now…' : ''}`)
         if (firstMsg) {
           // The first message is a TASK, so it goes over the bus as a real ask: the new session gets
           // an id it can `tg answer`, and its result comes back to the spawner instead of surfacing
