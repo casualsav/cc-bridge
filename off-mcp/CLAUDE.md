@@ -13,8 +13,8 @@ code, <details> collapsibles, $LaTeX$.
 
 ## tg CLI (chat is always .)
 - tg send . /abs/path [caption] — file/photo
-- tg edit . <id> "txt" — edit a sent message
-- tg reply . "txt" — force a text send (rare)
+- tg edit . <id> - — edit a sent message (body on stdin, see below)
+- tg reply . - — force a text send (rare)
 
 ## ⚠️ Never put a message body in a double-quoted shell string
 
@@ -37,10 +37,10 @@ commands — nothing can detect the rest, because the damage happens in your she
 ## Agent bus (multi-agent — when several sessions share this group)
 Other agents are reachable over the agent bus (never through the chat). Each agent is a topic; address it
 by its topic name.
-- tg ask @name "task" [--ref path] — ask another agent. ASYNC: your turn ends now; their answer
+- tg ask @name - [--ref path] — ask another agent (task on stdin). ASYNC: your turn ends now; their answer
   arrives later as a fresh `<tg @name re=ID …>` block. Put any handoff files in `$(tg shared)` and
   pass them by name — refs are paths, never paste large content across.
-- tg answer <ID> "one-line summary → path" [--ref path] — answer an ask you received (its
+- tg answer <ID> - [--ref path] — answer an ask you received; one-line summary → path, on stdin (its
   `<tg @name ask=ID …>` block carries the ID). Reply with a pointer + summary, not the payload.
   **A task that arrived over the bus returns its result over the bus** — your topic is a mirror
   for the humans, never the reply channel. This includes a spawn's first message: it arrives as a
@@ -57,7 +57,7 @@ by its topic name.
   closes but is never deleted.
 - tg reopen <name> — undo a kill: relaunches the same session in the same folder, resuming its own
   conversation, keeping its bus name and topic tab. Same permission as kill.
-- tg roster — who's live. · tg post "text" — say something to the humans. · tg history — recent
+- tg roster — who's live. · tg post - — say something to the humans (stdin). · tg history — recent
   bus events.
 - `tg <verb> --help` prints that verb's usage without doing anything.
 
@@ -66,7 +66,7 @@ second path and you should never hand-roll one with `tmux new-window` / a bare `
 (those miss the pane stamps, the per-instance socket, the trust store and the launch dials, so the
 pane isn't a bridge session at all and proves nothing about real behaviour):
 
-    tg spawn probe --dir "$(tg shared)" "first task"   # --dir must already exist
+    tg spawn probe --dir "$(tg shared)" -   # --dir must already exist; first task on stdin
     tg kill probe                                       # ends it · tg reopen probe undoes that
 
 A one-shot `claude -p` is fine for isolating a NON-bridge question (does this model id work?), but

@@ -160,10 +160,17 @@ const id = String(Date.now())
 const sock = net.createConnection(SOCKET_PATH)
 const timer = setTimeout(() => { process.stderr.write('tgctl: timed out\n'); process.exit(1) }, 30_000)
 sock.on('connect', () => sock.write(frame({ t: 'call', id, name, args } satisfies ShimToDaemon)))
+// `tg shared` exists to be substituted — `--dir "$(tg shared)"` is the documented idiom — so its
+// success output must be the bare path. With the usual `ok: ` prefix that idiom silently produced
+// "ok: /path/…" and every caller either wrote to a bogus folder or had to sed the prefix off.
+// Errors keep the prefix everywhere: they are read by humans, never substituted.
+const VALUE_VERB = cmd === 'shared'
 sock.on('data', makeLineReader<DaemonToShim>(msg => {
   if (msg.t !== 'result' || msg.id !== id) return   // ignore hello/other frames
   clearTimeout(timer)
-  process.stdout.write((msg.ok ? 'ok' : 'error') + (msg.text ? `: ${msg.text}` : '') + '\n')
+  process.stdout.write(msg.ok && VALUE_VERB
+    ? `${msg.text ?? ''}\n`
+    : (msg.ok ? 'ok' : 'error') + (msg.text ? `: ${msg.text}` : '') + '\n')
   sock.destroy()
   process.exit(msg.ok ? 0 : 1)
 }))
