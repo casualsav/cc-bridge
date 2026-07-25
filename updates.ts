@@ -12,6 +12,7 @@ import { exec } from './proc.ts'
 import { escapeHtml } from './markdown.ts'
 import { loadAccess } from './access.ts'
 import { isTopicMode, getGroupChatId } from './topics.ts'
+import { listAccounts } from './accounts.ts'
 import type { ChannelAdapter, Button } from './channel.ts'
 
 type UpdatesDeps = { channel: ChannelAdapter }
@@ -95,6 +96,21 @@ export async function checkClaudeUpdate(): Promise<{ cur: string; latest: string
   } catch { return null }
 }
 
+// True when the CLI's own self-updater is failing (npm-global install, no write access to its
+// prefix) — the recorded symptom is `<configDir>/.last-update-result.json` with
+// outcome:"failed", status:"no_permissions". Not broken once the native build exists (claudeBin()
+// prefers it), since `claude install` migrated it off npm-global already.
+function selfUpdateBroken(): boolean {
+  try {
+    if (existsSync(join(homedir(), '.local', 'bin', 'claude'))) return false
+    for (const { configDir: dir } of listAccounts()) {
+      const res = readJsonFile<{ outcome?: string; status?: string } | null>(join(dir, '.last-update-result.json'), null)
+      if (res?.outcome === 'failed' && res?.status === 'no_permissions') return true
+    }
+    return false
+  } catch { return false }
+}
+
 export async function sweepUpdateChecks(): Promise<void> {
   const access = loadAccess()
   const notifyOn = access.updateChecks !== false
@@ -126,7 +142,11 @@ export async function sweepUpdateChecks(): Promise<void> {
     const lines = ['🆕 <b>Update available</b>']
     const row: Button[] = []
     if (newBridge) { lines.push(`🌉 Bridge <code>${escapeHtml(newBridge.cur)}</code> → <code>${escapeHtml(newBridge.latest)}</code>`); row.push({ text: '🌉 Update bridge', data: 'upd:bridge' }); record.bridge = newBridge.latest }
-    if (newClaude) { lines.push(`🧠 Claude <code>${escapeHtml(newClaude.cur)}</code> → <code>${escapeHtml(newClaude.latest)}</code>`); row.push({ text: '🧠 Update Claude', data: 'upd:claude' }); record.claude = newClaude.latest }
+    if (newClaude) {
+      lines.push(`🧠 Claude <code>${escapeHtml(newClaude.cur)}</code> → <code>${escapeHtml(newClaude.latest)}</code>`)
+      if (selfUpdateBroken()) lines.push('⚠️ Claude\'s own self-updater is failing (npm install, no write access) — "Update Claude" migrates to the native build, which then self-updates cleanly.')
+      row.push({ text: '🧠 Update Claude', data: 'upd:claude' }); record.claude = newClaude.latest
+    }
     for (const chat of dests) {
       await deps.channel.sendText(String(chat), lines.join('\n'), { buttons: [row], silent: true }).catch(() => {})
     }

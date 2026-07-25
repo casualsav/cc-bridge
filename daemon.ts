@@ -2191,11 +2191,23 @@ async function discoverPanes(): Promise<void> {
   let haveFocus = !!focus.activePaneId && await paneAlive(focus.activePaneId)
   if (!haveFocus && focus.activePaneId) haveFocus = await paneAlive(focus.activePaneId)
   if (!haveFocus && panes.length) {
-    // Prefer the pane we were on before (persisted by adoptPane) if it's still a live
-    // candidate, so focus survives a daemon restart instead of snapping back to panes[0].
-    let prev = ''
-    try { prev = readFileSync(ADOPTED_PANE_FILE, 'utf8').trim() } catch {}
-    adoptPane(panes.includes(prev) ? prev : panes[0])   // sets focus + adds to offMcpPanes
+    // Headless sessions (e.g. the background 'general' anchor) are background-only by definition
+    // and must never become the singleton focused (user-facing) session — exclude their panes
+    // before picking a fallback.
+    const headlessPanes = new Set<string>()
+    for (const t of listTopics()) {
+      if (!t.headless || t.closed) continue
+      const p = await paneForSession(t.sessionId).catch(() => null)
+      if (p) headlessPanes.add(p)
+    }
+    const candidates = panes.filter(p => !headlessPanes.has(p))
+    if (candidates.length) {
+      // Prefer the pane we were on before (persisted by adoptPane) if it's still a live
+      // candidate, so focus survives a daemon restart instead of snapping back to candidates[0].
+      let prev = ''
+      try { prev = readFileSync(ADOPTED_PANE_FILE, 'utf8').trim() } catch {}
+      adoptPane(candidates.includes(prev) ? prev : candidates[0])   // sets focus + adds to offMcpPanes
+    }
   }
 
   for (const p of panes) {

@@ -27,6 +27,11 @@ the single restart in Step 3 brings everything up already configured.
   token (perpetual 409s); ensure-daemon now reaps such processes on sight, and the daemon itself
   refuses to start from a non-cache path when a cache install exists. The checkout is for reading,
   editing, and `bun run deploy` only.
+- **Claude Code itself: prefer the native installer**, not an npm-global install — `claude install`
+  (or `curl -fsSL https://claude.ai/install.sh | bash`). An npm-global `claude` can't self-update
+  without root, and this bridge runs sudo-less by design. If it's already npm-global, don't fix it
+  now: the bridge detects the failing self-updater on its own and offers a one-tap migration
+  ("Update Claude" / `/update claude`), which runs `claude install` for you.
 
 ## 0.5. Pre-flight: remove the old costly MCP version (if present)
 This bridge is the off-MCP successor to the upstream **`telegram@claude-plugins-official`**
