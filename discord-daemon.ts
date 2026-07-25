@@ -67,10 +67,18 @@ async function acquireInstance(): Promise<boolean> {
 
 // ---- Access control (MVP: { allowFrom: string[] } of Discord user ids / snowflakes) ----
 function loadAllow(): string[] {
-  // .map(String): this is a RAW read of a hand-written file, so an id left unquoted arrives as a
-  // number and `includes(sender.id)` — a string — silently never matches, locking the owner out of
-  // his own bot. (Telegram's loadAccess normalizes for the same reason; see access.ts.)
-  try { const a = JSON.parse(readFileSync(DISCORD_ACCESS_FILE, 'utf8')); return Array.isArray(a?.allowFrom) ? a.allowFrom.map(String) : [] } catch { return [] }
+  // Read the ids out of the RAW text, not out of JSON.parse's output. This is a hand-written file, so
+  // an id may arrive unquoted — and a snowflake is an 18-19 digit integer, well past 2^53, so
+  // JSON.parse silently rounds it BEFORE any .map(String) can normalize it
+  // (302094804391444481 → "302094804391444500"). The comparison against the platform's string id then
+  // never matches and the owner is locked out of his own bot by an id that looks right in the file.
+  // Telegram doesn't have this problem — its ids fit in a double, so access.ts can normalize after
+  // parsing (see asIds there). Discord cannot, so the digits have to survive verbatim.
+  let raw: string
+  try { raw = readFileSync(DISCORD_ACCESS_FILE, 'utf8') } catch { return [] }
+  const arr = /"allowFrom"\s*:\s*\[([^\]]*)\]/.exec(raw)
+  if (arr) return arr[1].split(',').map(s => s.trim().replace(/^"|"$/g, '')).filter(Boolean)
+  try { const a = JSON.parse(raw); return Array.isArray(a?.allowFrom) ? a.allowFrom.map(String) : [] } catch { return [] }
 }
 
 // ---- Pane discovery (after daemon.ts findOffMcpPanes ~1588; slim — no remote-control filter) ----
