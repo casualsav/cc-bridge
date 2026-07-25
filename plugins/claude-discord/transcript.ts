@@ -13,7 +13,7 @@ export const DEFAULT_PROJECTS_DIR = join(homedir(), '.claude', 'projects')
 const PROJECTS_DIR = DEFAULT_PROJECTS_DIR
 
 type Usage = { input_tokens?: number; output_tokens?: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number }
-type Entry = { type?: string; uuid?: string; timestamp?: string; cwd?: string; isSidechain?: boolean; isMeta?: boolean; message?: { content?: unknown; stop_reason?: string | null; usage?: Usage } }
+type Entry = { type?: string; uuid?: string; timestamp?: string; cwd?: string; isSidechain?: boolean; isMeta?: boolean; message?: { content?: unknown; stop_reason?: string | null; usage?: Usage; model?: string } }
 
 // Text content of an entry: a bare string, or the joined `text` blocks of a content
 // array (tool_use / thinking blocks contribute nothing).
@@ -26,7 +26,7 @@ function textOf(content: unknown): string {
 // The LAST text block only — what the reply relay delivers. The bridge convention promises
 // "Reply = final text block, auto-delivered"; some models (low effort, or reasoning mapped to a
 // plain text part by a gateway harness) emit a narration block AND the reply as two text parts in
-// one message — joining them relayed the narration.
+// one message — joining them relayed the narration ("The user just said Hi. I'll reply — …").
 function lastTextOf(content: unknown): string {
   if (typeof content === 'string') return content
   if (Array.isArray(content)) { const t = content.filter((c: any) => c?.type === 'text'); return t.length ? String(t[t.length - 1].text ?? '') : '' }
@@ -87,6 +87,18 @@ function isRealUserText(e: Entry): boolean {
 // to Telegram instead of staying silent.
 function isCommandNoise(text: string): boolean {
   return /^no response requested\.?$/i.test(text.trim())
+}
+
+// An API failure is also written as a synthetic assistant entry, whose whole body is
+// "API Error: 400 …". Relayed verbatim it reads as the SESSION talking — a bare status code lands
+// in the owner's chat with no hint that the turn failed or which session it came from (a spawn that
+// asked for a context window its model doesn't have did exactly that). Label it instead of
+// dropping it: the turn really did produce nothing, and silence would be worse than a bad reply.
+export function legibleApiError(text: string): string {
+  const m = /^API Error:\s*(\d{3})?\s*(.*)$/s.exec(text.trim())
+  if (!m) return text
+  const detail = m[2]!.trim()
+  return `⚠️ **API error${m[1] ? ` ${m[1]}` : ''}** — the request was rejected, so this turn produced no reply.${detail ? `\n\n${detail}` : ''}`
 }
 
 // A resumable session: id, its working dir, last-activity time, a short title (the first real
@@ -256,7 +268,22 @@ export function latestFinalReply(file: string): { uuid: string; text: string } |
     if (!isMainAssistantText(e)) continue
     const text = lastTextOf(e.message?.content).trim()
     if (isCommandNoise(text)) continue
-    return { uuid: e.uuid ?? '', text }
+    return { uuid: e.uuid ?? '', text: legibleApiError(text) }
+  }
+  return null
+}
+
+// The model id the API last answered with on the main thread, e.g. "claude-opus-5" — the dashboard's
+// fallback when the pane's statusline doesn't carry a usable one (a long cwd truncates the identity
+// line right where the model sits). Sidechain entries are skipped: a haiku subagent must not make an
+// opus session read as haiku. `<synthetic>` marks an API error / slash-command echo, not a real turn.
+export function latestModelId(file: string): string | null {
+  const entries = readEntries(file)
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i]
+    if (e.type !== 'assistant' || e.isSidechain) continue
+    const model = e.message?.model
+    if (typeof model === 'string' && model && !model.startsWith('<')) return model
   }
   return null
 }
@@ -276,7 +303,7 @@ export function finalRepliesAfter(file: string, afterUuid: string): { uuid: stri
   for (let i = at + 1; i < entries.length; i++) {
     const e = entries[i]
     if (isRealUserText(e)) { flush(); continue }  // turn boundary (real prompts only — not injected skill/meta entries)
-    if (isMainAssistantText(e)) { const text = lastTextOf(e.message?.content).trim(); if (!isCommandNoise(text)) pending = { uuid: e.uuid ?? '', text } }
+    if (isMainAssistantText(e)) { const text = lastTextOf(e.message?.content).trim(); if (!isCommandNoise(text)) pending = { uuid: e.uuid ?? '', text: legibleApiError(text) } }
   }
   flush()
   return out
@@ -299,6 +326,73 @@ export function bashResultAfter(file: string, sinceMs: number): { stdout: string
     return { stdout: content, stderr: '' }   // format drift — surface the raw entry rather than drop it
   }
   return null
+}
+
+// A relayed slash command's outcome, read from the transcript. Two shapes: local output is
+// recorded as "<local-command-stdout>…</local-command-stdout>" (a user entry's message.content, or
+// a system/local_command entry's top-level content); a rejected command is a system entry whose
+// content is "Unknown command: /xyz" (error: true). Returns the latest at/after sinceMs — text ''
+// when the command ran without local output (turn-starting commands) — or null while nothing has
+// landed yet.
+export function slashResultAfter(file: string, sinceMs: number): { text: string; error: boolean } | null {
+  const entries = readEntries(file)
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i]
+    const content = e.type === 'user' ? e.message?.content : e.type === 'system' ? (e as { content?: unknown }).content : undefined
+    if (typeof content !== 'string') continue
+    const stdout = content.includes('<local-command-stdout>')
+    if (!stdout && !(e.type === 'system' && content.startsWith('Unknown command:'))) continue
+    const ts = e.timestamp ? Date.parse(e.timestamp) : NaN
+    if (Number.isNaN(ts) || ts < sinceMs) continue
+    if (!stdout) return { text: content, error: true }
+    return { text: content.match(/<local-command-stdout>([\s\S]*?)<\/local-command-stdout>/)?.[1] ?? '', error: false }
+  }
+  return null
+}
+
+// The last `max` conversation turns as a display feed (Mini App session drill-in): real user
+// prompts + main-thread assistant conclusions, oldest first. User text is unwrapped from the
+// bridge's `<tg …>…</tg>` inbound envelope for display — img=/att= attachment paths and slash
+// commands (the `<command-name>` XML the CLI records) surface as structured fields so the client
+// can render a thumbnail / file chip / command chip instead of raw markup; each item is clamped
+// so a huge paste can't blow up the payload.
+export type ConversationItem = { role: 'user' | 'assistant'; text: string; ts: number; img?: string; att?: string; cmd?: boolean; clipped?: true }
+// Payload clamp for the drill-in feed — 14 items polled every 3s, so an unbounded paste would be
+// re-sent whole on every tick. Raised from 1500 to one Telegram message's worth: the orchestrator's
+// briefs run 2–3k and were being cut mid-sentence in the mini app. It is a DISPLAY clamp only —
+// storage (the transcript, the bus ledger) and DELIVERY into a session's pane are both untouched
+// by it, and both were measured whole. Anything it does cut is flagged `clipped` so the client can
+// say so rather than trailing off.
+const CONVO_CAP = 4000
+export function recentConversation(file: string, max = 12): ConversationItem[] {
+  const entries = readEntries(file)
+  const out: ConversationItem[] = []
+  // Returns the item's text field(s) so a cut is reported, not just implied by a trailing ellipsis.
+  const clamp = (s: string): { text: string; clipped?: true } =>
+    s.length > CONVO_CAP ? { text: s.slice(0, CONVO_CAP) + '…', clipped: true } : { text: s }
+  for (const e of entries) {
+    const ts = e.timestamp ? Date.parse(e.timestamp) : 0
+    if (isRealUserText(e)) {
+      const raw = textOf(e.message?.content).trim()
+      // Tolerate a few stray chars before <tg (the survey-dismiss "0" era left such entries).
+      const m = raw.match(/^[\s\S]{0,3}?<tg([^>]*)>([\s\S]*)<\/tg>/)
+      if (m) {
+        const img = /img="([^"]+)"/.exec(m[1])?.[1]
+        const att = /att="([^"]+)"/.exec(m[1])?.[1]
+        out.push({ role: 'user', ...clamp(m[2].trim()), ts, ...(img ? { img } : {}), ...(att ? { att } : {}) })
+      } else if (/^<command-name>/.test(raw)) {
+        const name = /<command-name>([^<]*)<\/command-name>/.exec(raw)?.[1]?.trim() ?? ''
+        const args = /<command-args>([\s\S]*?)<\/command-args>/.exec(raw)?.[1]?.trim() ?? ''
+        if (name) out.push({ role: 'user', ...clamp(`${name}${args ? ` ${args}` : ''}`), ts, cmd: true })
+      } else {
+        out.push({ role: 'user', ...clamp(raw), ts })
+      }
+    } else if (isMainAssistantText(e) && e.message?.stop_reason !== 'tool_use') {
+      const text = lastTextOf(e.message?.content).trim()
+      if (!isCommandNoise(text)) out.push({ role: 'assistant', ...clamp(text), ts })
+    }
+  }
+  return out.slice(-max)
 }
 
 // The uuid of the entry anchoring the current turn (the last REAL user prompt). The mirror card

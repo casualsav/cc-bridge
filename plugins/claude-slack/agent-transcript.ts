@@ -11,6 +11,7 @@ import { basename } from 'node:path'
 import { statSync } from 'node:fs'
 import * as cc from './transcript.ts'
 import * as cx from './codex-transcript.ts'
+import type { AgentKind } from './agent.ts'
 
 export type { RecentSession, Activity, FeedItem, SearchHit } from './transcript.ts'
 
@@ -33,8 +34,14 @@ export const turnInProgress = (file: string) => (isCodex(file) ? cx.turnInProgre
 export const turnAnchorUuid = (file: string) => (isCodex(file) ? cx.turnAnchorUuid(file) : cc.turnAnchorUuid(file))
 export const currentTurnActivity = (file: string) => (isCodex(file) ? cx.currentTurnActivity(file) : cc.currentTurnActivity(file))
 export const currentTurnTokens = (file: string) => (isCodex(file) ? cx.currentTurnTokens(file) : cc.currentTurnTokens(file))
+export const latestModelId = (file: string) => (isCodex(file) ? null : cc.latestModelId(file))   // Codex rollouts don't record a per-turn model
 export const currentTurnFeed = (file: string, concluded = false) => (isCodex(file) ? cx.currentTurnFeed(file, concluded) : cc.currentTurnFeed(file, concluded))
 export const bashResultAfter = (file: string, sinceMs: number) => (isCodex(file) ? cx.bashResultAfter(file, sinceMs) : cc.bashResultAfter(file, sinceMs))
+export const slashResultAfter = (file: string, sinceMs: number) => (isCodex(file) ? null : cc.slashResultAfter(file, sinceMs))   // CC-only: Codex logs no local command stdout
+// Codex rollouts lack the user/assistant pairing recentConversation needs — surface just the latest reply.
+export const recentConversation = (file: string, max = 12) => isCodex(file)
+  ? (r => (r ? [{ role: 'assistant' as const, text: r.text, ts: 0 }] : []))(cx.latestFinalReply(file))
+  : cc.recentConversation(file, max)
 export const agentSessionId = (file: string) => isCodex(file)
   ? cx.sessionIdOf(basename(file))
   : basename(file, '.jsonl')
@@ -49,6 +56,20 @@ export function resolveTranscript(cwd: string, roots?: string[]): string | null 
   if (!b) return a
   const mt = (f: string) => { try { return statSync(f).mtimeMs } catch { return -1 } }
   return mt(b) > mt(a) ? b : a
+}
+
+// Resolve for a known pane agent. Pane-local fallback must never use the merged newest-file
+// resolver: same-cwd Claude + Codex siblings would otherwise race, and whichever agent wrote last
+// would make both panes claim the same transcript.
+export function resolveAgentTranscript(
+  agent: AgentKind,
+  cwd: string,
+  claudeRoots?: string[],
+  codexSessionRoots: string[] = codexRoots(),
+): string | null {
+  return agent === 'codex'
+    ? cx.resolveTranscript(cwd, codexSessionRoots)
+    : cc.resolveTranscript(cwd, claudeRoots)
 }
 
 // Recent sessions across both agents, newest first, capped at `limit`.

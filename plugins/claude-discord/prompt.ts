@@ -220,6 +220,18 @@ export function hasQueuedMessages(paneText: string): boolean {
   return paneLines(paneText).some(l => QUEUED_MESSAGES.test(l))
 }
 
+// Is the end-of-turn feedback survey open? While it's up, pasted text is eaten by its 1/2/3/0
+// key handler instead of reaching the input box — deliverers must dismiss it (send "0") first.
+// LIVE survey only: the question line immediately followed by the full options row. Matching the
+// question text alone false-positives on conversation content that merely QUOTES the survey
+// (e.g. code comments about it rendered in the viewport) — that typed a stray "0" into an open
+// input box and prefixed the next delivered message.
+export function feedbackSurveyOpen(paneText: string): boolean {
+  const lines = paneLines(paneText)
+  return lines.some((l, i) => FEEDBACK_SURVEY.test(l) && !/["'`)]/.test(l.replace(/\(optional\)/, ''))
+    && /1: Bad\s+2: Fine\s+3: Good\s+0: Dismiss/i.test(lines[i + 1] ?? ''))
+}
+
 // Is the footer at `footerIdx` the LIVE prompt's footer (≤1 line of real content below), not a
 // scrolled-up already-answered one? Only "chrome" is allowed beneath a live prompt: the persistent
 // todo panel (renders DIRECTLY below an active prompt), the statusline, box borders, mode/approve hints
@@ -248,18 +260,20 @@ export function detectUserPrompt(paneText: string): PromptInfo | null {
   // unmistakable phrases, so this can't suppress a genuine question.
   if (lines.some(l => FEEDBACK_SURVEY.test(l) || QUEUED_MESSAGES.test(l))) return null
 
-  // "Change effort level?" confirm dialog (/effort mid-conversation): a real decision (switch now
-  // vs go back) worth relaying, but it renders with a plain confirm footer ("Enter to confirm · Esc
-  // to cancel"), not the select-menu wording SELECT_HINT anchors on — so without this special case
-  // it falls through to the generic stuck-screen card instead of tappable buttons. Narrowly anchored
-  // on the exact question wording (not "Are you sure?" et al) so ordinary confirm dialogs stay
-  // excluded, matching this file's deliberate policy of never relaying bare Yes/No confirms.
-  const effortQIdx = lines.findIndex(l => /^\s*change effort level\?\s*$/i.test(l))
-  if (effortQIdx !== -1) {
+  // Plain-confirm dialogs that are real decisions worth relaying but render with a plain confirm
+  // footer ("Enter to confirm · Esc to cancel"), not the select-menu wording SELECT_HINT anchors
+  // on — so without this special case they fall through to the generic stuck-screen card instead
+  // of tappable buttons. Covers the two known cases: "Change effort level?" (/effort mid-conversation)
+  // and "Switch to <model>?" (model-switch consent, e.g. `/model fable` before consent is recorded).
+  // Narrowly anchored on these exact question wordings (not "Are you sure?" et al) so ordinary
+  // confirm dialogs stay excluded, matching this file's deliberate policy of never relaying bare
+  // Yes/No confirms.
+  const confirmQIdx = lines.findIndex(l => /^\s*(?:change effort level|switch to [^?]+)\?\s*$/i.test(l))
+  if (confirmQIdx !== -1) {
     // The options sit a few lines below the question, past the explanatory body — scan forward,
     // bounded, for the first numbered line rather than assuming a fixed gap.
-    let i = effortQIdx + 1
-    while (i < lines.length && i - effortQIdx <= 10 && !NUMBERED_RE.test(lines[i])) i++
+    let i = confirmQIdx + 1
+    while (i < lines.length && i - confirmQIdx <= 10 && !NUMBERED_RE.test(lines[i])) i++
     const optStart = i
     while (i < lines.length && NUMBERED_RE.test(lines[i])) i++
     const region = lines.slice(optStart, i)
@@ -273,7 +287,7 @@ export function detectUserPrompt(paneText: string): PromptInfo | null {
       const todoIdx = below.findIndex(l => TODO_PANEL_HEADER.test(l))
       if (todoIdx !== -1) below = below.slice(0, todoIdx)
       const belowLive = below.every(l => !l.trim() || BELOW_CHROME.test(l) || /enter to confirm/i.test(l))
-      if (belowLive) return { question: 'Change effort level?', options: parsed, multiSelect: false, tabbed: false, freeText: false, chat: false }
+      if (belowLive) return { question: lines[confirmQIdx].trim(), options: parsed, multiSelect: false, tabbed: false, freeText: false, chat: false }
     }
   }
 
@@ -434,37 +448,83 @@ export function permPromptToken(question: string): string {
 }
 
 // ---- /login method menu (a third shape) ----
-// Claude's "Select login method" screen carries only an "Esc to cancel" footer — NO select-menu
+// Claude's "Select login method" screen carries at most an "Esc to cancel" footer — NO select-menu
 // wording ("Enter to select / ↑↓") and NO permission "· Tab to amend" — so neither detector above
 // matches it. It shows up at first-run onboarding AND whenever the user runs /login later. We
 // detect it on its own (a distinctive header + numbered options) and relay the actual options as
 // buttons. Selecting drives the pane; whatever the option needs next (an OAuth link, or terminal
 // typing for an API key / 3rd-party platform) is surfaced separately.
+//
+// v2.1.205 dropped the footer entirely (verified on a real fresh-config boot): the option list just
+// runs to the bottom of the pane. So the footer is an OPTIONAL anchor — when it's absent, the block's
+// own bottom-of-pane position carries the liveness the footer used to.
 const LOGIN_ANCHOR = /select login method|select login|log ?in with|how would you like to (?:log|sign) ?in|claude account with subscription|anthropic console account/i
 // Numbered option, tolerating the highlight cursor Claude draws (a leading "_", "❯", "►", "•").
 const LOGIN_OPT = /^\s*(?:│\s*)?(?:[_❯►▶•]\s*)?(\d+)[.)]\s+(.+?)\s*$/
 
 export function detectLoginPrompt(paneText: string): { options: PromptOption[] } | null {
   const lines = paneLines(paneText)
-  if (!lines.some(l => LOGIN_ANCHOR.test(l))) return null
+  const anchorIdx = lines.findIndex(l => LOGIN_ANCHOR.test(l))
+  if (anchorIdx === -1) return null
 
   // The "Esc to cancel" footer, live at the very bottom (≤1 non-blank line below).
   let footerIdx = -1
   for (let i = lines.length - 1; i >= 0; i--) {
     if (/esc to cancel/i.test(lines[i])) { footerIdx = i; break }
   }
-  if (footerIdx === -1) return null
-  if (!footerIsLive(lines, footerIdx)) return null   // todo-panel/statusline-aware liveness (shared)
-
-  // The contiguous numbered options directly above the footer.
-  const opts: PromptOption[] = []
-  for (let i = footerIdx - 1; i >= 0; i--) {
-    const m = lines[i].match(LOGIN_OPT)
-    if (m) { opts.unshift({ label: m[2].replace(/\s*│\s*$/, '').trim() }); continue }
-    if (!lines[i].trim()) { if (opts.length) break; else continue }   // blank gap is fine until options start
-    if (opts.length) break                                            // a real non-option line ends the block
+  if (footerIdx !== -1 && footerIsLive(lines, footerIdx)) {   // todo-panel/statusline-aware liveness (shared)
+    // The contiguous numbered options directly above the footer.
+    const opts: PromptOption[] = []
+    for (let i = footerIdx - 1; i >= 0; i--) {
+      const m = lines[i].match(LOGIN_OPT)
+      if (m) { opts.unshift({ label: m[2].replace(/\s*│\s*$/, '').trim() }); continue }
+      if (!lines[i].trim()) { if (opts.length) break; else continue }   // blank gap is fine until options start
+      if (opts.length) break                                            // a real non-option line ends the block
+    }
+    if (opts.length >= 2) return { options: opts }
   }
-  return opts.length >= 2 ? { options: opts } : null
+
+  // Footerless (v2.1.205+): read DOWN from the anchor instead. Only blanks may separate the
+  // "Select login method:" header from its options — prose between them means this isn't the menu,
+  // which is what keeps a scrolled-up login screen from adopting some unrelated numbered block
+  // that happens to be live further down the pane.
+  const opts: PromptOption[] = []
+  let lastOpt = -1
+  // The anchor is normally the header line, but LOGIN_ANCHOR also matches option 1's own wording —
+  // on a screen whose header scrolled off, start from the anchor line itself so it isn't dropped.
+  for (let i = LOGIN_OPT.test(lines[anchorIdx]) ? anchorIdx : anchorIdx + 1; i < lines.length; i++) {
+    const m = lines[i].match(LOGIN_OPT)
+    if (m) { opts.push({ label: m[2].replace(/\s*│\s*$/, '').trim() }); lastOpt = i; continue }
+    if (!lines[i].trim()) { if (opts.length) break; else continue }   // blank gap is fine until options start
+    break                                                             // any other line ends (or rules out) the block
+  }
+  if (opts.length < 2) return null
+  // Same liveness rule as the footer path, with the LAST OPTION standing in for the footer: only
+  // chrome (statusline, todo panel, borders) may sit below a live menu — real content below means
+  // this is a scrolled-up past screen.
+  return footerIsLive(lines, lastOpt) ? { options: opts } : null
+}
+
+// ---- Claude Code's first-run wizard ----
+// The three screens a brand-new install sits on before it can accept a message: the theme picker
+// ("Let's get started." / "Choose the text style that looks best with your terminal"), the
+// folder-trust dialog, and the login method menu (detectLoginPrompt above — it's the wizard's last
+// step as well as a standalone /login).
+//
+// Detected POSITIVELY, on a distinctive line each, because the tempting inference — "the pane isn't
+// at a normal prompt, so it must be onboarding" — is true of half the TUI's life: a splash screen
+// still painting, any menu or modal, a capture taken mid-repaint, a pane whose agent hasn't started
+// yet. That inference greeted a fully-configured, logged-in install with a walkthrough of a setup
+// it had already done (adoption announce, daemon.ts). Anchors are the wizard's own wording, so a
+// session that merely PRINTS these words (a transcript quoting them) can't match: the theme/trust
+// anchors are full prompt sentences, and capturePane reads only the visible screen, not scrollback.
+export type FirstRunScreen = 'theme' | 'trust' | 'login'
+export function detectFirstRunScreen(paneText: string): FirstRunScreen | null {
+  const t = stripAnsi(paneText)
+  if (/choose the text style that looks best/i.test(t)) return 'theme'
+  if (/do you trust the files in this (?:folder|directory)\?/i.test(t)) return 'trust'
+  if (detectLoginPrompt(paneText)) return 'login'
+  return null
 }
 
 // ---- Usage-limit "what do you want to do?" menu (auto-dismissed, never relayed) ----
@@ -682,7 +742,8 @@ export function onNormalPrompt(paneText: string): boolean {
   }
   // Codex uses an unbordered `›` composer and a model/mode/cwd footer. Require both so a numbered
   // select-menu cursor (`› 1. …`) is never mistaken for a safe input box.
-  const codex = lines.slice(-16)
+  const lastNonblank = lines.findLastIndex(l => l.trim().length > 0)
+  const codex = lines.slice(Math.max(0, lastNonblank - 15), lastNonblank + 1)
   const hasCodexFooter = codex.some(l => /^\s*gpt-[\w.-]+\s+.+\s·\s.+/.test(l))
   const hasCodexComposer = codex.some(l => /^\s*›(?!\s*\d+\.)/.test(l))
   if (hasCodexFooter && hasCodexComposer) return true

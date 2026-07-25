@@ -123,3 +123,23 @@ test('isMentioned matches a configured extra pattern', () => {
 
 // best-effort cleanup
 beforeAll(() => { process.on('exit', () => { try { rmSync(DIR, { recursive: true, force: true }) } catch {} }) })
+
+test('an UNQUOTED id in access.json still passes the gate (and reads back as a string)', () => {
+  // access.json is hand-written and install-agent-written; an id transcribed straight from the
+  // owner's interview lands as a JSON number. Every id the daemon compares against comes off a
+  // Telegram update as a string, so without normalization the owner is refused by his own
+  // allowlist — and, less visibly, dropped by every id-keyed map (this is what left a fresh DM
+  // install with no pinned card at all). Normalizing on read is what makes the file's JSON types
+  // stop mattering.
+  setAccess({ dmPolicy: 'allowlist', allowFrom: [100, '200'], groups: { '-500': { requireMention: false, allowFrom: [100] } }, pending: {} })
+  expect(A.loadAccess().allowFrom).toEqual(['100', '200'])
+  expect(A.loadAccess().groups['-500']!.allowFrom).toEqual(['100'])
+  expect(A.gate(dm('100')).action).toBe('deliver')
+  expect(A.gate(group('100', '-500')).action).toBe('deliver')
+})
+
+test('a group with no allowFrom of its own keeps falling back, not locked out by normalization', () => {
+  setAccess({ dmPolicy: 'allowlist', allowFrom: ['100'], groups: { '-500': { requireMention: false } }, pending: {} })
+  expect(A.loadAccess().groups['-500']!.allowFrom).toEqual([])   // absent → empty, i.e. "no list of its own"
+  expect(A.gate(group('100', '-500')).action).toBe('deliver')    // …so the DM allowlist still decides
+})

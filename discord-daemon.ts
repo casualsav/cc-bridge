@@ -67,7 +67,10 @@ async function acquireInstance(): Promise<boolean> {
 
 // ---- Access control (MVP: { allowFrom: string[] } of Discord user ids / snowflakes) ----
 function loadAllow(): string[] {
-  try { const a = JSON.parse(readFileSync(DISCORD_ACCESS_FILE, 'utf8')); return Array.isArray(a?.allowFrom) ? a.allowFrom : [] } catch { return [] }
+  // .map(String): this is a RAW read of a hand-written file, so an id left unquoted arrives as a
+  // number and `includes(sender.id)` — a string — silently never matches, locking the owner out of
+  // his own bot. (Telegram's loadAccess normalizes for the same reason; see access.ts.)
+  try { const a = JSON.parse(readFileSync(DISCORD_ACCESS_FILE, 'utf8')); return Array.isArray(a?.allowFrom) ? a.allowFrom.map(String) : [] } catch { return [] }
 }
 
 // ---- Pane discovery (after daemon.ts findOffMcpPanes ~1588; slim — no remote-control filter) ----

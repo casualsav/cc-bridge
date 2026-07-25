@@ -320,7 +320,13 @@ function writeConfig(cfg: Config): void {
   if (existsSync(ACCESS_FILE)) {
     try {
       const a = JSON.parse(readFileSync(ACCESS_FILE, 'utf8'))
-      if (cfg.telegramId && !(a.allowFrom ??= []).includes(cfg.telegramId)) a.allowFrom.push(cfg.telegramId)
+      // Ids are strings everywhere in the bridge, but this file may have been hand-written — or
+      // written by the install agent — with them unquoted. Normalize what's already there before
+      // comparing: `includes("837047563")` is false against the number 837047563, so a re-run would
+      // append the same id a second time, and the file would stay number-shaped at rest for any raw
+      // reader. Rewriting it here leaves it id-shaped from install onward.
+      a.allowFrom = Array.isArray(a.allowFrom) ? a.allowFrom.map(String) : []
+      if (cfg.telegramId && !a.allowFrom.includes(cfg.telegramId)) a.allowFrom.push(cfg.telegramId)
       writeFileSync(ACCESS_FILE, JSON.stringify(a, null, 2) + '\n', { mode: 0o600 })
       console.log(C.ok(`  ✓ ${ACCESS_FILE} ${C.dim('(existing file kept — pairing/groups preserved)')}`))
     } catch { console.log(C.err(`  ✗ ${ACCESS_FILE} exists but isn't valid JSON — left untouched; fix it by hand`)) }

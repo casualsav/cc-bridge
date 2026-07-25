@@ -47,6 +47,11 @@ instance id (if present) before parsing the rest of the arguments.
 
 ## State shape
 
+Every id — sender, group, pending — is a **string**. Write `"837047563"`, never `837047563`: an
+unquoted id parses as a number and stops matching the string ids the daemon reads off Telegram
+updates (it once left a DM's pinned card uncreated for the life of the daemon). The daemon
+normalizes on read, so a stray number won't break it, but don't emit one.
+
 `~/.claude/channels/telegram/access.json`:
 
 ```json

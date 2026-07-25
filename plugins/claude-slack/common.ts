@@ -136,3 +136,10 @@ export type InboundParams = {
   content: string
   meta: Record<string, string>   // chat_id, message_id?, user, user_id, ts, image_path?, attachment_*
 }
+
+// One hop in a user-ordered failover chain (see failover-chain.ts). account = Claude account name;
+// a Codex hop has none (single Codex today, shape allows more later).
+// A failover-chain hop: a Claude account, the Codex engine (per-account CODEX_HOME later), or a
+// configured Anthropic-compatible gateway (3rd-party API). `account` names the Claude/Codex sub;
+// `name` names the gateway. Kept a single loose shape so existing `h.account` sites stay valid.
+export type FailoverHop = { kind: 'claude' | 'codex' | 'gateway'; account?: string; name?: string }
