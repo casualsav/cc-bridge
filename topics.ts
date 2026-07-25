@@ -33,6 +33,7 @@ export type TopicEntry = {
   agent?: AgentKind        // absent on legacy stores = Claude Code
   agentSessionId?: string  // Claude/Codex conversation UUID for exact resume
   account?: string         // config-dir account name (accounts.json); absent = main — revival spawns on it
+  spawnedBy?: string       // sessionId of the session whose `tg spawn` created this one — the only one allowed to `tg kill` it
   harness?: HarnessProfile // absent = native Anthropic; only meaningful for Claude Code panes
 }
 
@@ -87,6 +88,7 @@ export function loadTopics(): TopicStore {
           ? { worktree: { repo: t.worktree.repo, path: t.worktree.path } } : {}),
         ...(t.agent === 'codex' ? { agent: 'codex' as const } : {}),
         ...(typeof t.agentSessionId === 'string' ? { agentSessionId: t.agentSessionId } : {}),
+        ...(typeof t.spawnedBy === 'string' ? { spawnedBy: t.spawnedBy } : {}),
         ...(t.harness ? { harness: normalizeHarnessProfile(t.harness) } : {}),
       }
     }

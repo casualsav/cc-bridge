@@ -14,7 +14,8 @@
 //   tgctl answer <id>   <text|-> [--ref p]…    answer an ask you received (id from its <tg …ask=N> block)
 //   tgctl post   <text|->                       broadcast to the humans in the room
 //   tgctl slash  <name> </cmd>                  inject a slash command into a target session's CLI
-//   tgctl spawn  <name> [--dir p] [--model m] [--effort e] [text|-]   start a NEW session in its own topic
+//   tgctl spawn  <name> [--dir p [--create]] [--model m] [--effort e] [text|-]   start a NEW session in its own topic
+//   tgctl kill   <name>                         end a session YOU spawned
 //   tgctl roster                                who's live in the room
 //   tgctl history [n]                           recent agent-bus activity
 //   tgctl shared                                the room's shared-workspace dir (put deliverables here)
@@ -24,6 +25,39 @@ import { frame, makeLineReader, SOCKET_PATH, type ShimToDaemon, type DaemonToShi
 
 const fromStdin = (s: string | undefined) => (s === '-' ? readFileSync(0, 'utf8') : s)
 const [, , cmd, chat_id, a, b] = process.argv
+
+// Per-subcommand usage. Without it `tg spawn --help` read `--help` as the session NAME and really
+// spawned a session called "--help" (and a folder to match) — help must never be a live action.
+// Only argv[3] counts as the help flag, so a `--help` inside a message body still sends as text.
+const HELP: Record<string, string> = {
+  send:    'tg send <chat> <path> [caption|-]   send a file/photo (- reads the caption from stdin)',
+  react:   'tg react <chat> <message_id> <emoji>   add an emoji reaction to a message',
+  edit:    'tg edit <chat> <message_id> <text|->   edit a message the bot sent (- reads stdin)',
+  reply:   'tg reply <chat> <text|->   force a text send (plain replies relay automatically)',
+  update:  'tg update [check]   upgrade the bridge (check = report the available version only)',
+  ask:     'tg ask <name> <text|-> [--ref path]…   ask another agent; ASYNC — the answer arrives later as a <tg …re=ID> block',
+  answer:  'tg answer <id> <text|-> [--ref path]…   answer an ask you received (id from its <tg …ask=ID> block)',
+  post:    'tg post <text|->   say something to the humans in the room',
+  slash:   'tg slash <name> "/compact"   run a slash command in another session\'s CLI (rejected mid-turn; /exit is owner-only)',
+  spawn:   'tg spawn <name> [--dir p [--create]] [--model fable|opus|sonnet|haiku] [--effort low…max] [text|-]\n' +
+           '  start a NEW session in its own topic. --dir must already exist unless --create is passed;\n' +
+           '  with no --dir the session gets a folder named after it under the base dir.\n' +
+           '  The first message is delivered as an ask once its REPL is up.',
+  kill:    'tg kill <name>   end a session YOU spawned (its topic closes; other sessions stay owner-only)',
+  roster:  'tg roster   who is live on the bus',
+  history: 'tg history [n]   recent agent-bus activity',
+  shared:  'tg shared   print the room\'s shared-workspace dir (put deliverables there)',
+  doctor:  'tg doctor   host-side install diagnostic (works with the daemon down)',
+}
+const usage = () => Object.values(HELP).map(h => `  ${h}`).join('\n')
+if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') {
+  process.stdout.write(`usage:\n${usage()}\n`)
+  process.exit(0)
+}
+if ((process.argv[3] === '--help' || process.argv[3] === '-h') && HELP[cmd]) {
+  process.stdout.write(`${HELP[cmd]}\n`)
+  process.exit(0)
+}
 
 // `tg doctor` — host-side install diagnostic (reads the setup directly; works even when the daemon is
 // down, which is the whole point). Handled here, before the socket path, since it talks to no daemon.
@@ -40,18 +74,25 @@ let name = '', args: Record<string, unknown> = {}
 // Bus verbs take flag args (--ref, --await), so parse positionals + refs out of argv rather than
 // the fixed chat/a/b slots the classic verbs use. Kept in a separate branch so classic verbs are
 // byte-for-byte unchanged.
-const BUS = new Set(['ask', 'answer', 'post', 'slash', 'spawn', 'roster', 'history', 'shared'])
+const BUS = new Set(['ask', 'answer', 'post', 'slash', 'spawn', 'kill', 'roster', 'history', 'shared'])
 if (BUS.has(cmd)) {
   const rest = process.argv.slice(3)
   const refs: string[] = []
-  const flags: Record<string, string> = {}
+  const flags: Record<string, string | boolean> = {}
   const pos: string[] = []
   for (let i = 0; i < rest.length; i++) {
     const f = /^--(dir|model|effort)$/.exec(rest[i]!)
     if (rest[i] === '--ref') { const v = rest[++i]; if (v != null) refs.push(v) }
     else if (f) { const v = rest[++i]; if (v != null) flags[f[1]!] = v }   // spawn's flags; harmless elsewhere
+    else if (rest[i] === '--create') { flags.create = true }               // spawn: allow a missing --dir
     else if (rest[i] === '--await') { /* P1 is async-only; --await is accepted and ignored */ }
     else pos.push(rest[i]!)
+  }
+  // Belt and braces behind the per-subcommand help above: a leading dash is a mistyped flag, never a
+  // session name — spawning/killing one would create a folder (and a topic) named after the typo.
+  if ((cmd === 'spawn' || cmd === 'kill') && pos[0]?.startsWith('-')) {
+    process.stderr.write(`tg ${cmd}: '${pos[0]}' is not a session name (it starts with a dash) — try 'tg ${cmd} --help'\n`)
+    process.exit(2)
   }
   switch (cmd) {
     case 'ask':     name = 'ask';     args = { pane, to: pos[0], text: fromStdin(pos[1]) ?? '', refs }; break
@@ -59,6 +100,7 @@ if (BUS.has(cmd)) {
     case 'post':    name = 'post';    args = { pane, text: fromStdin(pos[0]) ?? '' }; break
     case 'slash':   name = 'slash';   args = { pane, to: pos[0], command: pos[1] ?? '' }; break
     case 'spawn':   name = 'spawn';   args = { pane, name: pos[0], text: fromStdin(pos[1]) ?? '', ...flags }; break
+    case 'kill':    name = 'kill';    args = { pane, name: pos[0] }; break
     case 'roster':  name = 'roster';  args = { pane }; break
     case 'history': name = 'history'; args = { pane, n: pos[0] }; break
     case 'shared':  name = 'shared';  args = { pane }; break
@@ -72,7 +114,7 @@ if (BUS.has(cmd)) {
     // `tg update` / `tg update check` — the second token lands in `chat_id`.
     case 'update': name = 'update';      args = { mode: chat_id === 'check' ? 'check' : 'apply' }; break
     default:
-      process.stderr.write('usage: tgctl <send|react|edit|reply|update|ask|answer|post|slash|spawn|roster|history|shared|doctor> ...\n')
+      process.stderr.write(`tgctl: unknown command '${cmd}'\nusage:\n${usage()}\n`)
       process.exit(2)
   }
 }

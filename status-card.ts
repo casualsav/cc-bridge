@@ -319,22 +319,20 @@ export async function statusCardText(paneId: string | null): Promise<string> {
     if (snap.sevenDay) status.d7 = { pct: Math.round(snap.sevenDay.pct), reset: fmtResetIn(snap.sevenDay.resetsAt) ?? status.d7?.reset ?? '—' }
   }
 
-  // Head badges: model · think · effort · mode, then session (5h) · weekly (7d) · context. Mode
+  // Head badges: model · effort · mode, then session (5h) · weekly (7d) · context. Mode
   // sits in the identity cluster (emoji + short word, same grammar as "⚡ high") rather than
-  // dangling as a bare emoji at the end. Think is a bare ✻ — the worded "✻ think" up top
-  // ellipsized the collapsed pin preview, but one glyph fits (it also stays in the body).
+  // dangling as a bare emoji at the end. Think has no head badge — the ✻ next to the model read
+  // as noise; it stays in the body's cost/time line.
   // Single-space packing throughout — double spacing pushed the context % off the preview.
-  // Think + effort: "✻ ⚡high" — a space between the glyph and the bolt keeps them readable.
   // "medium" → "med": the pin preview is horizontal-space-starved.
   const effortBadge = status?.effort ? ` ⚡${escapeHtml(status.effort === 'medium' ? 'med' : status.effort)}` : ''
   const modeBadgeStr = mode === '—' ? '' : ` ${escapeHtml(mode)}`
-  const thinkBadge = status?.think ? ' ✻' : ''
   const stats = [
     status?.h5 ? `🕒 ${status.h5.pct}%` : '',
     status?.d7 ? `📅 ${status.d7.pct}%` : '',
     status?.ctxPct != null ? `💾 ${status.ctxPct}%` : '',
   ].filter(Boolean).join(' ')
-  const head = `🧠 ${escapeHtml(model ?? '—')}${thinkBadge}${effortBadge}${modeBadgeStr}${stats ? ` ${stats}` : ''}`
+  const head = `🧠 ${escapeHtml(model ?? '—')}${effortBadge}${modeBadgeStr}${stats ? ` ${stats}` : ''}`
   const groups: string[] = []
   if (cwd) groups.push(`📁 <code>${escapeHtml(cwd)}</code>${branch ? ` · 🌿 ${escapeHtml(branch)}` : ''}`)
   // The session's working plan (ROADMAP #16): latest TodoWrite state, with the in-progress step.

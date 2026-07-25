@@ -2176,9 +2176,8 @@ function focusOffMcpPane(paneId: string): void {
 
 // A pane beyond the focused one appeared. Topic mode: give it its own topic now, not on first
 // reply. DM mode drives a single session — extra panes stay registered (so topic/aux bookkeeping
-// sees them) but get no switch UI; hint once per daemon run toward group mode instead.
-let dmMultiPaneHinted = false
-async function noteDiscoveredPane(paneId: string, spawned = false): Promise<void> {
+// sees them) but get no switch UI.
+async function noteDiscoveredPane(paneId: string): Promise<void> {
   const cwd = await paneCwd(paneId)
   // Snapshot a read baseline at discovery: the user has "seen up to now" (nothing yet), so the
   // topic relay starts from here instead of replaying the session's backlog.
@@ -2195,19 +2194,10 @@ async function noteDiscoveredPane(paneId: string, spawned = false): Promise<void
     notifyChats(`🔁 Switched to the new Claude session${cwd ? ` in <code>${escapeHtml(cwd)}</code>` : ''} — the previous pane had no agent running.`)
     return
   }
-  // D10: the daemon spawned this pane itself (a chat lane's headless `general`, a `tg spawn`) — it is
-  // not a rival session the owner needs warning about, and telling him to go bind a forum group the
-  // moment the bridge provisions its own peer is backwards from the product direction.
-  if (spawned) return
-  if (dmMultiPaneHinted) return
-  dmMultiPaneHinted = true
-  const where = cwd ? ` (<code>${escapeHtml(cwd)}</code>)` : ''
-  notifyChats(fleetMode()
-    // A DM box with a chat lane / headless sessions already drives a fleet; the old advice was written
-    // when a DM could only ever hold one session.
-    ? `🆕 Another Claude session appeared${where} — I'm keeping this DM on the current one. It runs alongside as part of the fleet; <code>/sessions</code> lists them.`
-    : `🆕 Another Claude session appeared${where} — this DM drives a single session, so I'm staying on the current one.\n` +
-      `To drive several sessions, bind a forum group as the command center: create a group with Topics on, add me, send /bind there.`)
+  // No "another Claude session appeared" hint any more. It was written when a DM could only ever
+  // drive one session; with the DM-only fleet lane and group mode both being ordinary ways to run,
+  // an extra pane is expected — the notice only ever told the owner about a state he'd chosen.
+  // The pane stays registered above; /sessions lists it.
 }
 
 // Bind a daemon-spawned pane immediately rather than waiting for the next discovery tick — and do
@@ -2218,7 +2208,7 @@ function registerSpawnedPane(paneId: string): void {
   if (offMcpPanes.has(paneId)) return
   offMcpPanes.add(paneId)
   if (!focus.activePaneId) adoptPane(paneId)
-  else void noteDiscoveredPane(paneId, true)   // spawned by us — no "another session appeared" hint (D10)
+  else void noteDiscoveredPane(paneId)   // topic-mode sibling: gets its topic, no focus steal
 }
 
 // Keep the pane registry in sync. Adopts a pane only when nothing is driving; any additional
@@ -4507,7 +4497,10 @@ async function handleCall(
         const fromSid = pane ? await sessionForPane(pane) : null
         if (!fromSid) { write({ t: 'result', id, ok: false, text: '`tg spawn` must run inside a bridged session' }); return }
         const topicName = String(args.name ?? '').trim()
-        if (!topicName) { write({ t: 'result', id, ok: false, text: 'usage: tg spawn <name> [--dir p] [--model fable|opus|sonnet|haiku] [--effort low…max] ["first message"]' }); return }
+        if (!topicName) { write({ t: 'result', id, ok: false, text: 'usage: tg spawn <name> [--dir p [--create]] [--model fable|opus|sonnet|haiku] [--effort low…max] ["first message"]' }); return }
+        // A dash-leading name is a mistyped flag (`tg spawn --help` really did spawn a "--help"
+        // session, folder and all). tgctl rejects it too; this is the daemon-side backstop.
+        if (topicName.startsWith('-')) { write({ t: 'result', id, ok: false, text: `'${topicName}' is not a session name (it starts with a dash) — try 'tg spawn --help'` }); return }
         const explicitModel = args.model ? String(args.model).trim().toLowerCase() : null
         if (explicitModel && !MODEL_ALIASES.includes(explicitModel)) { write({ t: 'result', id, ok: false, text: `unknown model '${explicitModel}' — one of: ${MODEL_ALIASES.join(' | ')}` }); return }
         // No explicit --model: fall back to the persisted /settings 🐣 spawn-defaults model
@@ -4523,6 +4516,13 @@ async function handleCall(
         const dir = args.dir
           ? await resolveNewSessionDir(String(args.dir))
           : join(getBaseCwd() ?? homedir(), topicName.toLowerCase().replace(/[^\w.-]+/g, '-'))
+        // An EXPLICIT --dir must already exist: silently creating it turned every typo into a new
+        // folder on disk. --create opts back in. The default (no --dir) folder is still created —
+        // it's derived from the name, so there's nothing to typo against.
+        if (args.dir && !existsSync(dir) && !args.create) {
+          write({ t: 'result', id, ok: false, text: `no such directory: ${dir} — create it first, or pass --create` }); return
+        }
+        if (existsSync(dir) && !statSync(dir).isDirectory()) { write({ t: 'result', id, ok: false, text: `${dir} is not a directory` }); return }
         try { if (!existsSync(dir)) mkdirSync(dir, { recursive: true }) }
         catch (e) { write({ t: 'result', id, ok: false, text: `couldn't create ${dir}: ${(e as Error)?.message ?? e}` }); return }
         const group = headless ? null : getGroupChatId()!
@@ -4538,9 +4538,10 @@ async function handleCall(
           return
         }
         const sid = genSessionId()
+        // Remember the spawner: `tg kill` lets it clean up its OWN mistakes without the owner.
         setTopic(sid, threadId != null
-          ? { threadId, cwd: dir, name: topicName, closed: false, createdAt: Date.now() }
-          : { headless: true, cwd: dir, name: topicName, closed: false, createdAt: Date.now() })
+          ? { threadId, cwd: dir, name: topicName, closed: false, createdAt: Date.now(), spawnedBy: fromSid }
+          : { headless: true, cwd: dir, name: topicName, closed: false, createdAt: Date.now(), spawnedBy: fromSid })
         // Seed the branch cache so the retitle sweep doesn't stomp the chosen tab name (as topiccreate does).
         try { topicBranchCache.set(sid, (await exec('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 2000 })).stdout.trim()) }
         catch { topicBranchCache.set(sid, '') }
@@ -4557,13 +4558,12 @@ async function handleCall(
         const fromName = nameForEndpoint(fromSid, busEndpoints())
         appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'spawn', from: fromName, to: topicName, text: `${dir}${model ? ` model=${model}` : ''}${effort ? ` effort=${effort}` : ''}` })
         const firstMsg = String(args.text ?? '').trim()
-        // Visibility notice on the SPAWNER's own surface (its DM lane / topic). Deliberately carries NO
-        // body: when there's a first message, the brief arrives moments later in notifyAskSent's chevron
-        // card ("Messaged @X"), which fires only on a CONFIRMED delivery. Putting the brief here too
-        // would print the same text twice, back to back, on one surface — worse than not having it. So
-        // this line stays the instant "it exists" ack and forward-references the brief instead, and the
-        // pair reads as a sequence: opened now -> briefed, confirmed, with the text.
-        void notifyBusText(fromSid, `🆕 Opened session: <b>@${escapeHtml(topicName)}</b>${firstMsg ? ' — briefing it now…' : ''}`)
+        // ONE notice on the SPAWNER's own surface (its DM lane / topic): "Spawned @X" with the first
+        // message behind the chevron. This used to be two messages back to back — an instant text ack
+        // here plus notifyAskSent's "Messaged @X" card on confirmed delivery — which read as clutter
+        // for one event. A delivery that then FAILS still says so below, so nothing is lost.
+        if (firstMsg) void notifyBusRich(fromSid, `Spawned <b>@${escapeHtml(topicName)}</b>`, firstMsg)
+        else void notifyBusText(fromSid, `🆕 Spawned <b>@${escapeHtml(topicName)}</b>`)
         if (firstMsg) {
           // The first message is a TASK, so it goes over the bus as a real ask: the new session gets
           // an id it can `tg answer`, and its result comes back to the spawner instead of surfacing
@@ -4598,17 +4598,13 @@ async function handleCall(
               return
             }
             markInjected(p.id, Date.now())   // arms the answer window from the moment it actually landed
-            // Asker-side "Messaged @X" card — parity with tryDeliverAsk's notifyAskSent (the normal
-            // ask path), which this closure otherwise bypasses entirely. Without it a spawn's first
-            // message was the ONLY ask that never confirmed on the spawner's surface. It also carries
-            // the headless/DM case: a headless session's own surface resolves to nothing
-            // (outboundTargetsFor drops headless), so this is the only bus card that can land there.
-            void notifyAskSent(fromSid, topicName, firstMsg)
+            // No asker-side card here (tryDeliverAsk's notifyAskSent equivalent): the "Spawned @X"
+            // chevron above already carries this exact text on the spawner's surface.
             // Mirror the delivered task into the new topic: the paste lands only in the pane, so
             // without this the owner can't see what the spawner asked the new session to do.
             // Same chevron shape as notifyBusRich, but addressed directly (group+thread are known —
             // no pane→target resolution on a seconds-old pane). A headless spawn has no topic to
-            // mirror into — the asker-side card above is its surface.
+            // mirror into — the spawner's "Spawned @X" card is its only surface.
             if (!group || threadId == null) return
             const shown = firstMsg.length > ASK_QUOTE_CAP ? firstMsg.slice(0, ASK_QUOTE_CAP) + '…' : firstMsg
             const header = `<b>@${escapeHtml(fromName)}</b> messaged <b>@${escapeHtml(topicName)}</b>`
@@ -4621,6 +4617,40 @@ async function handleCall(
           })()
         }
         text = `spawned "${topicName}" in ${dir}${model ? ` · model ${model}` : ''}${effort ? ` · effort ${effort}` : ''}${firstMsg ? ' — the first message delivers as an ask once the REPL is up, and its reply comes back to you as the answer' : ''}. Reach it on the bus as @${topicName}.`
+        break
+      }
+      // `tg kill <name>` — end a session the CALLER spawned. Ending sessions is otherwise owner-only
+      // (see the `slash` case's /exit guard), but a session that spawned another by mistake had no way
+      // to undo it and had to ask a human. Scoped by the spawnedBy stamp setTopic writes above: your
+      // own spawns only, nothing else on the bus. Runs the same close as the mini-app's Close button.
+      case 'kill': {
+        const pane = args.pane ? String(args.pane) : null
+        const fromSid = pane ? await sessionForPane(pane) : null
+        if (!fromSid) { write({ t: 'result', id, ok: false, text: '`tg kill` must run inside a bridged session' }); return }
+        const target = String(args.name ?? '').trim()
+        if (!target) { write({ t: 'result', id, ok: false, text: 'usage: tg kill <name>' }); return }
+        const endpoints = busEndpoints()
+        const res = resolveEndpoint(target, endpoints)
+        if ('error' in res) { write({ t: 'result', id, ok: false, text: res.error }); return }
+        // No entry at all (a DM lane, a hermes endpoint) fails the same test as someone else's
+        // session: both are "not yours to end", and one refusal beats leaking which it was.
+        const topic = getTopicBySession(res.id)
+        if (topic?.spawnedBy !== fromSid) {
+          write({ t: 'result', id, ok: false, text: `@${target} wasn't spawned by you — ending other sessions is owner-only` }); return
+        }
+        const targetPane = await paneForSession(res.id).catch(() => null)
+        const alive = !!targetPane && await paneAlive(targetPane).catch(() => false)
+        if (targetPane && alive) {
+          // Suppress the lazy topic reopen until /exit lands; the reactive closeTopicForPane closes
+          // the tab once the pane dies. closeSessionPane escalates for ~20s, so don't await it here —
+          // a wedged session (the reason you're killing it) would hold the CLI call open.
+          if (topic.threadId != null) markTopicClosePending(res.id)
+          void closeSessionPane(targetPane, 'bus-kill')
+        } else if (topic.threadId == null) {
+          removeTopic(res.id)   // headless + dead: the registry row IS the whole session
+        }
+        appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'kill', from: nameForEndpoint(fromSid, endpoints), to: target, text: alive ? 'exiting' : 'already dead' })
+        text = alive ? `ending @${target} — its topic closes once the pane exits` : `@${target} had no live pane; cleaned up its entry`
         break
       }
       default:

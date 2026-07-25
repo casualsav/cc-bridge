@@ -31,12 +31,15 @@ by its topic name.
   normal `ask=ID` block, so finish with `tg answer <ID>` like any other ask.
 - tg slash @name "/compact" — run a slash command in another session's CLI (rejected while the
   target is mid-turn — retry when idle; its outcome echoes in that session's topic). /exit is owner-only.
-- tg spawn <name> [--dir p] [--model fable|opus|sonnet|haiku] [--effort low…max] ["first message"] —
+- tg spawn <name> [--dir p [--create]] [--model fable|opus|sonnet|haiku] [--effort low…max] ["first message"] —
   start a NEW Claude Code session in its own topic (defaults: a folder named after it under the /base
-  dir, inherited model/effort). The first message is delivered as an `ask=ID` once its REPL is up —
-  the new session's `tg answer` comes back to you as the result.
+  dir, inherited model/effort). `--dir` must already exist unless you pass `--create`. The first
+  message is delivered as an `ask=ID` once its REPL is up — the new session's `tg answer` comes back
+  to you as the result.
+- tg kill <name> — end a session YOU spawned (only those; everything else stays owner-only).
 - tg roster — who's live. · tg post "text" — say something to the humans. · tg history — recent
   bus events.
+- `tg <verb> --help` prints that verb's usage without doing anything.
 
 An ask you receive may be preceded by a `<tg bus-digest since …>…</tg>` block — ambient catch-up on
 bus traffic you missed while away. It's FYI only: read it for context, don't reply to it or act on it;
