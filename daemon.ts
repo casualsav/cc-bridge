@@ -25,6 +25,7 @@ import { hopKey, resolveChain, pickNextHop, moveHop } from './failover-chain.ts'
 // replace a daemon left running stale code after a plugin upgrade.
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
+import { renderSessionsView } from './sessions-view.ts'
 import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, hasQueuedMessages, feedbackSurveyOpen, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen } from './prompt.ts'
 import { resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, currentTurnActivity, currentTurnTokens, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, agentSessionId, agentForSession } from './agent-transcript.ts'
 import {
@@ -6488,6 +6489,17 @@ bot.command('cost', ctx => doReadout(ctx, 'cost'))
 bot.command('context', ctx => doReadout(ctx, 'context'))
 bot.command('usage', ctx => doReadout(ctx, 'usage'))   // capture /usage's dashboard → relay here, Esc the screen (else it sticks)
 
+// /sessions — fleet dashboard mirroring the mini app's Sessions tab. Fleet-level (no focused pane
+// needed), gated like /budget and /find: works from a DM or the bound command-center group.
+function sessionsKeyboard(): InlineKeyboard {
+  return new InlineKeyboard().text('🔄 Refresh', 'sess:refresh')
+}
+bot.command('sessions', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  const cards = await webappListSessions()
+  await ctx.reply(renderSessionsView(cards), { parse_mode: 'HTML', reply_markup: sessionsKeyboard() })
+})
+
 // Trim a captured pane tail down to its content: strip ANSI, drop the trailing
 // input-box / footer chrome and surrounding blanks, and keep the last `maxLines`.
 function cleanPaneTail(raw: string, maxLines: number): string {
@@ -9258,6 +9270,16 @@ bot.on('callback_query:data', async ctx => {
     } else {
       await ctx.editMessageText('⚡ Effort change cancelled — kept the current level.', { parse_mode: 'HTML' }).catch(() => {})
     }
+    return
+  }
+
+  // /sessions dashboard → refresh in place.
+  if (data === 'sess:refresh') {
+    if (!(await cbAuth(ctx))) return
+    const cards = await webappListSessions()
+    await ctx.editMessageText(renderSessionsView(cards), { parse_mode: 'HTML', reply_markup: sessionsKeyboard() })
+      .catch(e => { if (!String(e).includes('message is not modified')) throw e })
+    await ctx.answerCallbackQuery().catch(() => {})
     return
   }
 
@@ -12626,6 +12648,7 @@ void (async () => {
               { command: 'cancel', description: 'Clear a stuck force-reply prompt (e.g. an unanswered “name a folder”)' },
               { command: 'back', description: 'Escape a stuck editor/pager/screen — get the session back to the Claude prompt' },
               { command: 'status', description: 'Re-post the status pin at the bottom' },
+              { command: 'sessions', description: 'Live sessions dashboard — model, context, state' },
               { command: 'settings', description: 'Channel settings — mirror, pin, MCP, voice' },
               { command: 'cron', description: 'Schedule messages (/cron 12h · every 09:00 · */30 9-17 * * 1-5 · cancel)' },
               { command: 'queue', description: 'Queue a prompt for idle, or @reset for the 5h rollover (/queue clear)' },
