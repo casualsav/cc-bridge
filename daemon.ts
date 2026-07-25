@@ -122,6 +122,7 @@ import {
   permStorms, multiSelectKeyboard, formatPermission, relayStuckScreen, renderStuckHtml,
 } from './prompt-relay.ts'
 import { planStuckSweep, planWedgeEscalation, type StuckState } from './stuck-plan.ts'
+import { planContextWarn } from './ctx-warn.ts'
 import {
   initStatusCard, statusCardText, statusKeyboard, updateSessionPin, updateTopicPins,
   removeSessionPins, refreshSessionPin, sessionPins, pinTextCache, persistSessionPins,
@@ -2971,9 +2972,12 @@ const RESET_RELOCK_MS = (11 * 60 + 59) * 60_000
 // Per ACCOUNT: the last limit hit acted on (dedup key + when). Per-account because two accounts
 // can be limited at once — a single slot would let their alternating polls re-fire each other.
 const usageHitState = new Map<string, { key: string; at: number }>()
-// Highest context-fill threshold (50/75) already warned for the current fill; re-armed to 0 when
-// context drops back under 50% (a /clear or /compact), so each fresh fill warns again.
-let ctxWarnThreshold = 0
+// Highest context-fill threshold (50/75) already warned for the current fill, PER SESSION — keyed by
+// sessionId, never pane id (tmux recycles pane ids, and an inherited watermark would leave a fresh
+// session unwarned until it passed a dead one's mark). Re-armed to 0 when that session's context drops
+// back under 50% (a /clear or /compact). One shared number here was half of bug 12: it made every pane
+// on a fleet box swallow the others' warnings. Pruned to live sessions by sweepStuckPanes.
+const ctxWarn = new Map<string, number>()
 // Last limit-ish line written to the near-miss diagnostic, so a static banner across
 // many pane ticks isn't logged repeatedly.
 let lastLimitDebugLine = ''
@@ -3003,7 +3007,12 @@ const USAGE_NOTIF_STATE_FILE = join(STATE_DIR, 'usage-notif-state.json')
     const e = v as { key?: unknown; at?: unknown }
     if (e && typeof e.key === 'string') usageHitState.set(k, { key: e.key, at: typeof e.at === 'number' ? e.at : 0 })
   }
-  if (typeof s.ctxWarnThreshold === 'number') ctxWarnThreshold = s.ctxWarnThreshold
+  // Per-session context watermarks (bug 12). The pre-0.4.29 single `ctxWarnThreshold` scalar is
+  // deliberately NOT migrated — it belonged to whichever pane held focus and there is no sid to
+  // attribute it to; the cost of dropping it is at most one repeat ping for that one session.
+  for (const [k, v] of Object.entries((s.ctxWarn ?? {}) as Record<string, unknown>)) {
+    if (typeof v === 'number' && Number.isFinite(v)) ctxWarn.set(k, v)
+  }
   for (const [k, v] of Object.entries(s.warn ?? {})) {
     const e = v as { resetKey?: unknown; threshold?: unknown; at?: unknown }
     if (e && typeof e.resetKey === 'string' && typeof e.threshold === 'number') {
@@ -3015,7 +3024,7 @@ const USAGE_NOTIF_STATE_FILE = join(STATE_DIR, 'usage-notif-state.json')
   }
 }
 function saveUsageNotifState(): void {
-  writeJsonFile(USAGE_NOTIF_STATE_FILE, { hits: Object.fromEntries(usageHitState), ctxWarnThreshold, warn: Object.fromEntries(usageWarnState) })
+  writeJsonFile(USAGE_NOTIF_STATE_FILE, { hits: Object.fromEntries(usageHitState), ctxWarn: Object.fromEntries(ctxWarn), warn: Object.fromEntries(usageWarnState) })
 }
 
 // ── Statusline-sourced usage snapshot ────────────────────────────────────────
@@ -3087,20 +3096,27 @@ function maybeWarn(type: string, pct: number, resetKey: string, account: Account
 }
 
 // Context-fill heads-up: one 💾 ping at 50% and again at 75% as the conversation grows. Re-arms
-// when context drops back under 50% (a /clear or /compact), so the next fill warns again. Driven
-// off the statusline ctxPct read during pin updates; persisted so a daemon restart doesn't re-fire.
-function maybeWarnContext(pct: number | null): void {
-  if (pct == null) return
-  if (pct < 50) { if (ctxWarnThreshold !== 0) { ctxWarnThreshold = 0; saveUsageNotifState() } return }
-  const threshold = pct >= 75 ? 75 : 50
-  if (threshold <= ctxWarnThreshold) return
-  ctxWarnThreshold = threshold
-  saveUsageNotifState()
-  process.stderr.write(`daemon: context warn fired threshold=${threshold} (pct=${pct})\n`)
-  // Context fill is the focused session's — route to its topic (forum mode); DM → allowlist.
+// when that session's context drops back under 50% (a /clear or /compact), so the next fill warns
+// again. Persisted so a daemon restart doesn't re-fire.
+//
+// Bug 12: this used to be fed ONLY by the focused pane and to hold ONE global threshold, so a headless
+// fleet member could never warn — one rode to 100% inside a single turn with no heads-up to anyone.
+// It is now called per pane from sweepStuckPanes (which already captures every pane in the fleet, so
+// this costs no extra tmux reads), keyed by that pane's session, and routed to that session's own
+// surface — falling back to the fleet surface when it has none (a headless session; bug 11a).
+function maybeWarnContext(sid: string, pane: string | null, pct: number | null, label: string): void {
+  const { warn, next } = planContextWarn(ctxWarn.get(sid) ?? 0, pct)
+  if ((ctxWarn.get(sid) ?? 0) !== next) { if (next === 0) ctxWarn.delete(sid); else ctxWarn.set(sid, next); saveUsageNotifState() }
+  if (!warn) return
+  process.stderr.write(`daemon: context warn fired threshold=${warn} (pct=${pct}) for ${label} [${sid}]\n`)
   void (async () => {
-    for (const { chat, thread } of await outboundTargetsFor(focus.activePaneId)) {
-      await channel.sendText(String(chat), `💾 Context is ${threshold}% full — consider <code>/compact</code> or wrapping up soon.`, { ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
+    const own = await outboundTargetsFor(pane).catch(() => [])
+    const targets = own.length ? own : fleetSurface()
+    // Name the session when the card is NOT landing on its own surface — on the fleet surface a bare
+    // "Context is 75% full" is unattributable, which is how a fleet notice becomes noise.
+    const who = own.length ? 'Context is' : `<b>${escapeHtml(label)}</b>: context is`
+    for (const { chat, thread } of targets) {
+      await channel.sendText(String(chat), `💾 ${who} ${warn}% full — consider <code>/compact</code> or wrapping up soon.`, { ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
     }
   })()
 }
@@ -12221,8 +12237,20 @@ async function sweepStuckPanes(): Promise<void> {
   if (focus.activePaneId) panes.add(focus.activePaneId)
   for (const p of offMcpPanes) panes.add(p)
   const now = Date.now()
+  const liveSids = new Set<string>()
   for (const pane of panes) {
     const cap = await capturePane(pane).catch(() => '')
+    // Context-fill sampling rides this capture (bug 12): this loop already visits every pane in the
+    // fleet, so warning per session costs no extra tmux reads — and the old focus-only poll could
+    // never see a headless one. Before the early-returns below: a pane wedged on a dialog still has a
+    // statusline, and its fill is exactly what a human needs to know about it.
+    if (cap) {
+      const sid = await sessionForPane(pane, false).catch(() => null)
+      if (sid) {
+        liveSids.add(sid)
+        maybeWarnContext(sid, pane, parseStatusline(cap)?.ctxPct ?? null, getTopicBySession(sid)?.name || sid)
+      }
+    }
     if (cap && isBypassWarning(cap)) { await autoAcceptBypassWarning(pane, now); continue }
     // The onboarding auto-driver owns a not-yet-onboarded pane while it shows a known setup screen
     // (theme/trust/enter) — don't race it with a card. A pre-REPL wedge on an UNKNOWN screen
@@ -12255,6 +12283,14 @@ async function sweepStuckPanes(): Promise<void> {
       process.stderr.write(`daemon: stuck-screen watchdog ${decision.act} for pane ${pane} (${nm})${own.length ? '' : ' → fleet surface'}\n`)
     }
   }
+  // Reap context watermarks for sessions that are no longer live, so the map stays bounded across
+  // session churn. Skipped when the sweep saw nothing (a tmux read failure) — same "never delete on
+  // uncertainty" rule as sweepDeadPaneState.
+  if (liveSids.size) {
+    let dropped = false
+    for (const sid of [...ctxWarn.keys()]) if (!liveSids.has(sid)) { ctxWarn.delete(sid); dropped = true }
+    if (dropped) saveUsageNotifState()
+  }
 }
 setInterval(() => void sweepStuckPanes(), 25_000).unref()
 setInterval(() => { if (loginHeldPanes.size) void sweepLoginHolds() }, 5_000).unref()   // no-op unless a login episode is open
@@ -12274,15 +12310,9 @@ setInterval(() => void (async () => {
     }
   } catch {}
 })(), 15_000).unref()
-// Context-fill warnings (50% / 75%) ride a light statusline poll of the focused pane —
-// independent of the pin so the warnings still fire with /pin off.
-// Context-fill heads-up poll: lift ctxPct from the focused pane's statusline and feed
-// maybeWarnContext. (This rode on the pinned-card 10s refresh before the pin was removed.)
-async function checkContextWarn(): Promise<void> {
-  if (!focus.activePaneId) return
-  try { maybeWarnContext(parseStatusline(await capturePane(focus.activePaneId))?.ctxPct ?? null) } catch {}
-}
-setInterval(() => void checkContextWarn(), 15_000)
+// Context-fill warnings (50% / 75%) used to ride their own 15s statusline poll of the FOCUSED pane —
+// which is why no headless fleet member ever warned (bug 12). They now ride sweepStuckPanes' 25s
+// sweep, which already captures every pane in the fleet; see maybeWarnContext.
 
 // Sweep stale inbox attachments at startup and hourly — voice/audio temp files are already unlinked
 // right after transcription; this clears photos/documents past the retention TTL (default 24h).
