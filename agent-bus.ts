@@ -13,7 +13,20 @@ import { appendFileSync, mkdirSync, readFileSync } from 'node:fs'
 import { STATE_DIR, readJsonFile, writeJsonFile } from './common.ts'
 import { loadAccess } from './access.ts'
 
-export const BUS_FILE = join(STATE_DIR, 'agent-bus.json')
+// Where THIS PROCESS keeps its bus state. Defaults to Telegram's state dir, so daemon.ts and every
+// existing test are unaffected; the Slack/Discord daemons call setBusStateDir() once at boot to get
+// their own agent-bus.json + ledger + shared workspace under their own channel state dir.
+//
+// A setter rather than a factory because the store is a module singleton daemon.ts reads at ~15 call
+// sites — converting it into an instance is exactly the churn multi-channel.md P3 rejected. There is
+// one daemon per process, so one bus dir per process is not a limitation.
+let busDir = STATE_DIR
+export function setBusStateDir(dir: string): void {
+  busDir = dir
+  store = empty()   // anything already read belongs to the previous dir
+  loaded = false
+}
+export function busFile(): string { return join(busDir, 'agent-bus.json') }
 
 // Verbs gate (mirrors agent.ts CODEX_ENABLED): gates the bus verbs (ask/answer/post/roster/history/
 // shared) and the periodic delivery sweep. The bus is live backend plumbing.
@@ -100,10 +113,10 @@ let store: BusState = empty()
 let loaded = false
 let persist = true   // disabled by _resetForTest so unit tests never write to the real STATE_DIR
 
-function save(): void { if (persist) writeJsonFile(BUS_FILE, store) }
+function save(): void { if (persist) writeJsonFile(busFile(), store) }
 
 export function loadBus(): BusState {
-  const raw = readJsonFile<Partial<BusState> | null>(BUS_FILE, null)
+  const raw = readJsonFile<Partial<BusState> | null>(busFile(), null)
   if (raw && typeof raw === 'object') {
     const pending: Record<string, BusPending> = {}
     for (const [id, e] of Object.entries(raw.pending ?? {})) {
@@ -385,7 +398,7 @@ export function confineRef(ref: string, sharedDir: string): { path: string } | {
 // ---- room paths + ledger (durable, greppable append-only log) ----
 
 // Room = the bound group chat id (P1: one room). Its dir holds the ledger + the shared workspace.
-export function roomDir(room: string): string { return join(STATE_DIR, 'agent-bus', room) }
+export function roomDir(room: string): string { return join(busDir, 'agent-bus', room) }
 export function sharedDir(room: string): string { return join(roomDir(room), 'shared') }
 // mkdir + return the room's shared workspace — deliverables live here; `tg shared` surfaces the path.
 export function ensureSharedDir(room: string): string {
