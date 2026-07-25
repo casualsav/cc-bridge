@@ -4340,17 +4340,39 @@ async function handleCall(
         void notifyBusText(fromSid, `🆕 Opened session: <b>@${escapeHtml(topicName)}</b>`)
         const firstMsg = String(args.text ?? '').trim()
         if (firstMsg) {
-          void (async () => {   // wait for the REPL, then paste — same shape as the scheduler's reviveAndInject
+          // The first message is a TASK, so it goes over the bus as a real ask: the new session gets
+          // an id it can `tg answer`, and its result comes back to the spawner instead of surfacing
+          // only in its own topic. Minted here (not in the closure) so the id exists for the result
+          // string below. NO hop is recorded: the ask case's hop guard is a gate that ABORTS, and by
+          // this point the pane and the folder already exist — burning a hop we can't act on would
+          // only make some later, unrelated ask fail, or trip the pause silently (its notice fires
+          // on the exact crossing turn only). Spawns stay ungated, exactly as they were when this
+          // was a raw paste. Digest/markSeen are skipped too: a session seconds old has no history.
+          const p = createPending({ fromSid, toSid: sid, fromName, toName: topicName, text: firstMsg, refs: [] }, Date.now())
+          appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'ask', from: fromName, to: topicName, id: p.id, text: firstMsg, refs: [] })
+          // Reserve the ask for THIS closure before anything can see it: the pending exists now but
+          // the pane won't be at a prompt for up to 45s, and the 15s sweep would otherwise inject it
+          // through tryDeliverAsk while the closure is still waiting — the same block, twice.
+          // tryDeliverAsk bails on a busInFlight id at entry, before its own claim, so it can't
+          // release this reservation; the finally below does, leaving the ordinary sweep/TTL
+          // lifecycle in charge of an ask the closure failed to deliver.
+          busInFlight.add(p.id)
+          void (async () => {   // wait for the REPL, then deliver — same shape as the scheduler's reviveAndInject
+           try {
             for (let i = 0; i < 45; i++) {
               await sleep(1000)
               const cap = stripAnsi(await capturePane(newPane).catch(() => ''))
               if (/[❯>]\s*$/m.test(cap) || /\? for shortcuts/.test(cap)) break
             }
-            if (!(await pasteToPane(newPane, firstMsg))) {
+            // busDeliver serializes on the same inject chain as human inbound, so the ask block can't
+            // interleave with a message the owner types into the new topic mid-boot.
+            if (!(await busDeliver(newPane, formatAskBlock(fromName, p.id, firstMsg, [])).catch(() => false))) {
+              removePending(p.id)   // never leave a ghost ask the spawner will be told timed out
               if (group && threadId != null) void channel.sendText(group, `⚠️ Spawned <b>${escapeHtml(topicName)}</b>, but its first message didn't paste — send it again in its topic.`, { threadId: String(threadId) }).catch(() => {})
               else void notifyBusText(fromSid, `⚠️ Spawned <b>@${escapeHtml(topicName)}</b>, but its first message didn't paste — send it again.`)
               return
             }
+            markInjected(p.id, Date.now())   // arms the answer window from the moment it actually landed
             // Mirror the delivered task into the new topic: the paste lands only in the pane, so
             // without this the owner can't see what the spawner asked the new session to do.
             // Same chevron shape as notifyBusRich, but addressed directly (group+thread are known —
@@ -4358,15 +4380,16 @@ async function handleCall(
             // mirror into; the spawner's own "🆕 Opened session" notice above is its only surface.
             if (!group || threadId == null) return
             const shown = firstMsg.length > ASK_QUOTE_CAP ? firstMsg.slice(0, ASK_QUOTE_CAP) + '…' : firstMsg
-            const header = `Task from <b>@${escapeHtml(fromName)}</b>`
+            const header = `<b>@${escapeHtml(fromName)}</b> messaged <b>@${escapeHtml(topicName)}</b>`
             try {
               await sendRichMessage(TOKEN!, group, { html: `<details><summary>${header}</summary>${escapeHtml(shown).replace(/\n/g, '<br>')}</details>` }, { messageThreadId: threadId, disableNotification: true })
             } catch {
               void channel.sendText(group, `${header}\n<blockquote expandable>${escapeHtml(shown)}</blockquote>`, { silent: true, threadId: String(threadId) }).catch(() => {})
             }
+           } finally { busInFlight.delete(p.id) }
           })()
         }
-        text = `spawned "${topicName}" in ${dir}${model ? ` · model ${model}` : ''}${effort ? ` · effort ${effort}` : ''}${firstMsg ? ' — first message will be delivered as soon as the REPL is up' : ''}. Reach it on the bus as @${topicName}.`
+        text = `spawned "${topicName}" in ${dir}${model ? ` · model ${model}` : ''}${effort ? ` · effort ${effort}` : ''}${firstMsg ? ' — the first message delivers as an ask once the REPL is up, and its reply comes back to you as the answer' : ''}. Reach it on the bus as @${topicName}.`
         break
       }
       default:

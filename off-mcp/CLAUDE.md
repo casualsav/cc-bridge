@@ -26,11 +26,15 @@ by its topic name.
   pass them by name — refs are paths, never paste large content across.
 - tg answer <ID> "one-line summary → path" [--ref path] — answer an ask you received (its
   `<tg @name ask=ID …>` block carries the ID). Reply with a pointer + summary, not the payload.
+  **A task that arrived over the bus returns its result over the bus** — your topic is a mirror
+  for the humans, never the reply channel. This includes a spawn's first message: it arrives as a
+  normal `ask=ID` block, so finish with `tg answer <ID>` like any other ask.
 - tg slash @name "/compact" — run a slash command in another session's CLI (rejected while the
   target is mid-turn — retry when idle; its outcome echoes in that session's topic). /exit is owner-only.
 - tg spawn <name> [--dir p] [--model fable|opus|sonnet|haiku] [--effort low…max] ["first message"] —
   start a NEW Claude Code session in its own topic (defaults: a folder named after it under the /base
-  dir, inherited model/effort). The first message is delivered once its REPL is up.
+  dir, inherited model/effort). The first message is delivered as an `ask=ID` once its REPL is up —
+  the new session's `tg answer` comes back to you as the result.
 - tg roster — who's live. · tg post "text" — say something to the humans. · tg history — recent
   bus events.
 
