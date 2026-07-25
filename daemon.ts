@@ -12590,8 +12590,23 @@ async function sweepStuckPanes(): Promise<void> {
       const sid = await sessionForPane(pane, false).catch(() => null)
       const blocked = sid ? queuedFor(sid).length : 0
       const label = (own.length ? nm : `${nm} (headless fleet session)`) + (blocked ? ` — ${blocked} ask${blocked === 1 ? '' : 's'} queued and blocked` : '')
-      await relayStuckScreen(pane, stuck, cleanPaneTail(cap, 20), label, decision.act === 'renag', own.length ? undefined : await fleetSurfaceFor(pane)).catch(() => {})
-      process.stderr.write(`daemon: stuck-screen watchdog ${decision.act} for pane ${pane} (${nm})${own.length ? '' : ' → fleet surface'}\n`)
+      // A wedged session with no surface of its own: the orchestrator lane is a better first
+      // responder than the owner. It can't be reached in-pane (that's what wedged means), but @chat
+      // can `tg slash` it, kill it or reopen it — unblocking a worker is exactly what the owner
+      // delegates. Same rule as reapDeadAsk: wake the lane when there is one, card his DM only when
+      // there isn't. The once-per-episode throttle above still applies to both paths.
+      const lane = !own.length && listDmChatSessions()[0]?.sessionId
+      if (lane) {
+        await wakeOrchestrator([
+          `🧱 <b>${escapeHtml(nm)}</b> is wedged — a screen is holding its pane and no ask can land.`,
+          blocked ? `${blocked} ask${blocked === 1 ? '' : 's'} queued behind it.` : 'Nothing queued behind it yet.',
+          `Last lines of its pane:\n${cleanPaneTail(cap, 12)}`,
+          `Levers: \`tg slash ${nm} "/clear"\` · \`tg kill ${nm}\` (then \`tg reopen ${nm}\`). The owner is not being told — this is yours.`,
+        ].join('\n\n'), null).catch(() => {})
+      } else {
+        await relayStuckScreen(pane, stuck, cleanPaneTail(cap, 20), label, decision.act === 'renag', own.length ? undefined : await fleetSurfaceFor(pane)).catch(() => {})
+      }
+      process.stderr.write(`daemon: stuck-screen watchdog ${decision.act} for pane ${pane} (${nm})${own.length ? '' : lane ? ' → @chat' : ' → fleet surface'}\n`)
     }
   }
   // Reap context watermarks for sessions that are no longer live, so the map stays bounded across

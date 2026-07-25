@@ -46,7 +46,8 @@ see `docs/multi-channel.md` for how the channels plug in.
 - `common.ts` (shared types/paths), `markdown.ts` (Markdown → Telegram HTML).
 - `off-mcp/INSTALL.md` (setup) + `off-mcp/CLAUDE.md` (the convention every plugin-less session reads).
 - `off-mcp/CHAT-DM.md` + `off-mcp/chat-account/` (templates) — optional claude.ai-style chat agent living in the bot's DM (auto-provisioned once a group is bound).
-- `ACCESS.md` (access control), `TESTING.md`.
+- `ACCESS.md` (access control), `TESTING.md`, `docs/fleet-verification.md` (how to verify bus/fleet
+  changes live — spawn-a-throwaway recipe, the traps, and what is NOT yet verified).
 
 **Repo perms (group-shared checkouts).** If this tree is shared by more than one account, keep it
 group-writable — **setgid, group-writable dirs (2775)**, **umask 002**, and **`git config
