@@ -6,7 +6,8 @@
       "WebFetch",
       "Read(//home/**)",
       "Read(//tmp/**)",
-      "Bash(tg:*)"
+      "Bash(tg:*)",
+      "Bash(ls:*)"
     ],
     "deny": [
       "Edit",

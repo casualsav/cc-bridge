@@ -1,8 +1,10 @@
 # Chat mode in your DM (for an agent to execute)
 
-Give the bot's **DM with you** a claude.ai-quality chat assistant: warm conversational
-register, web search, restricted tools (no file edits, no shell beyond the `tg` CLI) —
-while every project topic stays a full coding session. It works by running a dedicated
+Give the bot's **DM with you** a claude.ai-quality chat assistant that doubles as the
+fleet's front door: warm conversational register, web search, restricted tools (no file
+edits, no shell beyond the `tg` CLI + `ls`) — it routes coding requests to the group's
+sessions over the agent bus (spawning one when the repo has none) while every project
+topic stays a full coding session. It works by running a dedicated
 Claude Code session on its own **account** (config dir) so none of the user's
 engineering CLAUDE.md, skills, or memory load into the chat context.
 
@@ -45,16 +47,17 @@ cp off-mcp/chat-account/CLAUDE.md ~/.claude-chat/CLAUDE.md
 cp off-mcp/chat-account/settings.json ~/.claude-chat/settings.json
 ```
 
-- `CLAUDE.md` = the tg bridge conventions (chat-length variant, no "be terse") +
-  Anthropic's **published claude.ai system prompt** (docs.claude.com → Release Notes
-  → System Prompts), behavioral sections verbatim, app-product blocks dropped. To
-  refresh it against a newer published prompt, fetch
-  `https://docs.claude.com/en/release-notes/system-prompts.md`, take the newest
-  model's section, keep the behavioral blocks (`refusal_handling`, `tone_and_formatting`,
-  `user_wellbeing`, `evenhandedness`, `responding_to_mistakes_and_criticism`,
-  `knowledge_cutoff`), drop `product_information` / `anthropic_reminders`, and swap
-  app-only references (thumbs-down button, `end_conversation` tool) for neutral wording.
-- `settings.json` restricts tools: allow WebSearch / WebFetch / Read / `Bash(tg:*)`;
+- `CLAUDE.md` = the tg bridge conventions (chat-length variant, no "be terse") + the
+  chat+orchestrator identity: a short claude.ai-register distillation (prose-first
+  tone, length matching, search-when-stale) plus the routing doctrine — code/repo
+  requests are delegated to the group's coding sessions over the bus by default, with
+  `tg spawn --dir` for repos that have no live session. It deliberately does NOT
+  embed the published claude.ai system prompt's safety blocks: current models carry
+  that judgment natively, and the extra ~15K of rules both taxed the context and
+  conflicted with the orchestrator role (the old "there is no repo, don't offer to
+  implement" framing suppressed automatic routing).
+- `settings.json` restricts tools: allow WebSearch / WebFetch / Read / `Bash(tg:*)` /
+  `Bash(ls:*)` (repo discovery for auto-spawn);
   deny Edit / Write / NotebookEdit. Deny rules hold even in bypass mode; anything
   else prompts in Telegram for a tap. It also carries the SessionStart /
   UserPromptSubmit stamp hooks — **required**, or replies won't route back.
@@ -91,9 +94,12 @@ and the following message starts a fresh chat session.
 
 ## Notes
 
-- The chat session runs the published prompt as CLAUDE.md *on top of* Claude Code's
-  own system prompt — a close approximation of the claude.ai register, not a byte-
-  identical environment (claude.ai's artifacts/styles/memory features don't exist here).
+- The chat session runs its CLAUDE.md *on top of* Claude Code's own system prompt —
+  a close approximation of the claude.ai register, not a byte-identical environment
+  (claude.ai's artifacts/styles/memory features don't exist here).
+- Already-provisioned chat lanes don't pick up template changes: after upgrading,
+  re-copy both files from `off-mcp/chat-account/` into `~/.claude-chat/` (merge any
+  local additions to `settings.json` — the stamp hooks must survive).
 - Model: template sets `opus`; switch per-session with `/model`.
 - The account shares the main login (credentials copy) — usage draws from the same
   subscription; `/account` shows its 5h usage separately.
