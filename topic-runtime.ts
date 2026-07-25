@@ -13,6 +13,7 @@ import { accountForTranscript } from './accounts.ts'
 import {
   genSessionId, isTopicMode, getGroupChatId, getTopicBySession, findTopicByCwd, cwdAmbiguous,
   setTopic, updateTopic, removeTopic, listTopics, getGeneralSession, getGeneralCwd, setGeneralSession,
+  killGraceExpired,
   dismissSession, isSessionDismissed, undismissSession, listDismissedSessions,
   chatIdForDmChatSession, clearDmChatSession, listDmChatSessions,
 } from './topics.ts'
@@ -484,9 +485,21 @@ export async function reconcileTopics(panes: string[]): Promise<void> {
     const misses = (topicMissCounts.get(t.sessionId) ?? 0) + 1
     if (misses < 2) { topicMissCounts.set(t.sessionId, misses); continue }
     topicMissCounts.delete(t.sessionId)
-    if (t.threadId == null) { removeTopic(t.sessionId); continue }   // headless: nothing to close in Telegram — drop the row (same as closeTopicForPane)
+    // Headless: nothing to close in Telegram. A row killed on purpose is kept (closed, so it renders
+    // on no surface) for the undo window — `tg reopen` needs its cwd + conversation id, and dropping
+    // it here is what made the undo expire ~85s after a kill. Everything else drops as before.
+    if (t.threadId == null) {
+      if (t.killedAt && !killGraceExpired(t.killedAt)) { updateTopic(t.sessionId, { closed: true }); continue }
+      removeTopic(t.sessionId); continue
+    }
     if (!group) continue   // a threadId without a bound group is stale cross-mode state — leave it for /bind to reconcile
     await closeTopicEntry(group, t.sessionId, { ...t, threadId: t.threadId })
+  }
+  // Second pass, for the rows the loop above skips because they're already closed: retire a killed
+  // groupless row once its undo window has passed. Without this the grace would trade an expiring
+  // undo for rows that live forever. Topic-mode rows keep their closed entries as history, as before.
+  for (const t of listTopics()) {
+    if (t.threadId == null && t.killedAt && killGraceExpired(t.killedAt)) removeTopic(t.sessionId)
   }
   // DM chat lanes FIRST — above the `!group` return below. They have no topic entry and no group to
   // fail into, so this backstop was written for the groupless case, yet it sat BELOW that return and

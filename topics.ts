@@ -34,6 +34,7 @@ export type TopicEntry = {
   agentSessionId?: string  // Claude/Codex conversation UUID for exact resume
   account?: string         // config-dir account name (accounts.json); absent = main — revival spawns on it
   spawnedBy?: string       // sessionId of the session whose `tg spawn` created this one — the only one allowed to `tg kill` it
+  killedAt?: number        // deliberately ended via `tg kill` — keeps the row GC-exempt so `tg reopen` can undo it (see KILL_UNDO_GRACE_MS)
   harness?: HarnessProfile // absent = native Anthropic; only meaningful for Claude Code panes
 }
 
@@ -48,6 +49,20 @@ export type TopicStore = {
 }
 
 export function genSessionId(): string { return randomBytes(4).toString('hex') }
+
+// How long a `tg kill`ed row stays recoverable by `tg reopen`.
+//
+// A groupless row is normally GC'd ~2 discovery ticks after its pane dies, so dead sessions don't
+// linger as live-looking dashboard cards. That reasoning doesn't apply to a row someone killed on
+// PURPOSE: it carries the cwd + conversation id the undo needs, and it is marked closed — which
+// every dashboard filters out (daemon's dashboardSessionRows) — so it shows up nowhere and clutters
+// nothing. A week outlives a weekend or a usage-limit pause, which is the realistic span of an
+// "actually, bring that back", and it still expires so rows can't accumulate forever.
+export const KILL_UNDO_GRACE_MS = 7 * 24 * 60 * 60 * 1000
+
+export function killGraceExpired(killedAt: number, now: number = Date.now()): boolean {
+  return now - killedAt >= KILL_UNDO_GRACE_MS
+}
 
 let store: TopicStore = { groupChatId: null, generalSessionId: null, generalCwd: null, baseCwd: null, topics: {}, dismissedSessions: {}, dmChat: {} }
 let loaded = false
@@ -89,6 +104,7 @@ export function loadTopics(): TopicStore {
         ...(t.agent === 'codex' ? { agent: 'codex' as const } : {}),
         ...(typeof t.agentSessionId === 'string' ? { agentSessionId: t.agentSessionId } : {}),
         ...(typeof t.spawnedBy === 'string' ? { spawnedBy: t.spawnedBy } : {}),
+        ...(typeof t.killedAt === 'number' ? { killedAt: t.killedAt } : {}),
         ...(t.harness ? { harness: normalizeHarnessProfile(t.harness) } : {}),
       }
     }

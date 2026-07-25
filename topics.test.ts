@@ -1,4 +1,4 @@
-import { test, expect, beforeEach } from 'bun:test'
+import { test, expect, beforeEach, describe } from 'bun:test'
 import { writeFileSync } from 'node:fs'
 import {
   _resetForTest, isTopicMode, getGroupChatId, setGroupChatId,
@@ -8,7 +8,7 @@ import {
   dismissSession, isSessionDismissed, undismissSession, listDismissedSessions,
   getDmChatSession, setDmChatSession, clearDmChatSession, chatIdForDmChatSession, listDmChatSessions,
   loadTopics, TOPICS_FILE,
-  type TopicEntry,
+  type TopicEntry, killGraceExpired, KILL_UNDO_GRACE_MS,
 } from './topics.ts'
 
 // Reads + in-memory map logic only. Each test seeds state via _resetForTest so nothing touches the
@@ -328,4 +328,31 @@ test('loadTopics drops a malformed dmChat entry', () => {
     dmChat: { ok: { sessionId: 's1', cwd: '/x' }, bad: { sessionId: 's2' }, worse: 'nope' },
   }))
   expect(loadTopics().dmChat).toEqual({ ok: { sessionId: 's1', cwd: '/x' } })
+})
+
+// `tg kill` must be undoable. The groupless GC used to drop a killed row ~85s after the pane died
+// (two discovery misses), taking the cwd + conversation id `tg reopen` needs — so the undo the
+// wider close permission was granted on expired before anyone could use it. killedAt exempts the
+// row for a bounded window; these pin both halves of that bound.
+describe('kill undo grace', () => {
+  test('a freshly killed row is still recoverable', () => {
+    const now = Date.now()
+    expect(killGraceExpired(now, now)).toBe(false)
+    expect(killGraceExpired(now - 90_000, now)).toBe(false)          // past the ~85s GC that broke it
+    expect(killGraceExpired(now - 6 * 24 * 3600_000, now)).toBe(false)
+  })
+
+  test('the window is bounded, so killed rows cannot accumulate forever', () => {
+    const now = Date.now()
+    expect(killGraceExpired(now - KILL_UNDO_GRACE_MS, now)).toBe(true)
+    expect(killGraceExpired(now - 8 * 24 * 3600_000, now)).toBe(true)
+  })
+
+  test('killedAt survives a store round trip (the daemon may restart mid-window)', () => {
+    _resetForTest()
+    setTopic('s1', { headless: true, cwd: '/tmp/x', name: 'probe', closed: true, createdAt: 1, killedAt: 1700000000000 })
+    expect(getTopicBySession('s1')?.killedAt).toBe(1700000000000)
+    updateTopic('s1', { closed: false, killedAt: undefined })
+    expect(getTopicBySession('s1')?.killedAt).toBeUndefined()
+  })
 })

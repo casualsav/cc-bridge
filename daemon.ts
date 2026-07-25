@@ -4654,6 +4654,10 @@ async function handleCall(
         if (!topic) { write({ t: 'result', id, ok: false, text: `@${target} has no session entry to close` }); return }
         const targetPane = await paneForSession(res.id).catch(() => null)
         const alive = !!targetPane && await paneAlive(targetPane).catch(() => false)
+        // Stamp the row as deliberately killed BEFORE the pane dies: it exempts the row from the
+        // groupless GC (which otherwise dropped it ~85s later, taking `tg reopen`'s only record of
+        // the cwd + conversation with it) for KILL_UNDO_GRACE_MS.
+        updateTopic(res.id, { killedAt: Date.now() })
         if (targetPane && alive) {
           // Suppress the lazy topic reopen until /exit lands; the reactive closeTopicForPane closes
           // the tab once the pane dies. closeSessionPane escalates for ~20s, so don't await it here —
@@ -4693,6 +4697,10 @@ async function handleCall(
         const extra = t0.agentSessionId ? `--resume ${t0.agentSessionId}` : '-c'
         const newPane = await spawnSession(t0.cwd, extra, t0.sessionId, topicAccount(t0), topicAgent(t0))
         if (!newPane) { write({ t: 'result', id, ok: false, text: `couldn't relaunch @${target} in ${t0.cwd} — see daemon log` }); return }
+        // Clear the kill stamp and un-close the row. reopenSessionTopic handles the Telegram tab,
+        // but it no-ops without a group — so a groupless row would stay closed:true and the session
+        // would come back invisible to every dashboard and unaddressable on the bus.
+        updateTopic(t0.sessionId, { closed: false, killedAt: undefined })
         await reopenSessionTopic(t0.sessionId)   // reopen the tab now, not on its first reply
         appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'reopen', from: nameForEndpoint(fromSid, busEndpoints()), to: target, text: extra })
         text = `reopening @${target} in ${t0.cwd} — ${t0.agentSessionId ? 'resuming its own conversation' : 'continuing the newest conversation in that folder'}, same topic and name. Give it ~30s to reach a prompt.`
