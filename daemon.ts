@@ -14197,12 +14197,16 @@ async function webappSessionCard(row: { sid: string; name: string; cwd: string; 
     const file = await transcriptForPane(pane, cwd || null)
     if (file) {
       model ??= modelDisplayName(latestModelId(file) ?? '')
-      working = turnInProgress(file)
       // A pane sitting at a prompt while its subagents work is the case this exists for — it read
       // as a stopped session on every surface.
+      const parentTurn = turnInProgress(file)
       subagents = liveSubagents(file)
-      working ||= subagents > 0
-      if (working) {
+      working = parentTurn || subagents > 0
+      // Activity belongs to the PARENT's turn, so it is read only while that turn is running. When
+      // subagents alone are live the turn has already concluded, and its final activity would render
+      // as a task in progress that the session actually finished minutes ago — a smaller version of
+      // exactly the lie this priority exists to remove. The reply fallback below covers that case.
+      if (parentTurn) {
         const acts = currentTurnActivity(file)
         const a = acts[acts.length - 1]
         task = a ? `${a.tool}${a.detail ? ` ${a.detail}` : ''}` : null
