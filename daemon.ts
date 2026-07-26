@@ -14517,8 +14517,13 @@ async function webappAutomationCreate(
   const label = topic?.name ?? await paneLabel(pane)
   // cwd only for recurring jobs (the revive folder), matching the /cron branches.
   const cwd = parsed.recur ? await paneCwd(pane).catch(() => null) ?? undefined : undefined
+  // With no group bound (DM + mini-app mode) address the CREATOR, whose id this request is already
+  // authenticated as — leaving chatId empty makes chatNotifier fan every notice out to the whole of
+  // allowFrom (scheduler.ts). On a single-owner install that broadcast looks correct by accident; on
+  // a multi-user DM install it reports one person's schedule to everyone else. The /cron chat path
+  // has always stamped the chat it was typed in; this is the mini-app path learning the same thing.
   const group = getGroupChatId()
-  addScheduled({ id: randomBytes(4).toString('hex'), fireAt: parsed.fireAt, chatId: group ? String(group) : '',
+  addScheduled({ id: randomBytes(4).toString('hex'), fireAt: parsed.fireAt, chatId: group ? String(group) : String(userId),
     paneId: pane, sessionLabel: label, text, ...(topic ? { thread: topic.threadId } : {}),
     ...(parsed.recur ? { recur: parsed.recur } : {}), ...(cwd ? { cwd } : {}) })
   return { summary: parsed.recur
