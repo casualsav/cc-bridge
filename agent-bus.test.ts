@@ -301,3 +301,28 @@ test('digestSince caps to the newest `cap` AFTER filtering (wide-scan intent)', 
 test('digestSince with nothing newer than the watermark is empty', () => {
   expect(digestSince([led({ ts: 100, id: 1 })], 100, { cap: 8 })).toEqual([])
 })
+
+// The ⌛ that made answered asks look overdue. sweepBus suppresses the TTL Telegram notice when the
+// asker has already been answered since (provenLive) — but it appended the `expire` LEDGER row
+// unconditionally, and the digest renders ledger rows, so the ambient catch-up announced an expiry whose
+// notice had been deliberately withheld. Two surfaces disagreeing about one event, which is what got the
+// working predicate misdiagnosed three ways. The row stays (it is true history); the digest drops it.
+test('digestSince omits a suppressed event — its notice was withheld on purpose, so it is not news', () => {
+  const es = [
+    led({ ts: 100, id: 1, kind: 'ask', from: 'chat', to: 'me' }),
+    led({ ts: 200, id: 212, kind: 'expire', from: 'me', to: 'chat', suppressed: true }),
+    led({ ts: 300, id: 260, kind: 'expire', from: 'me', to: 'chat' }),   // a REAL timeout still surfaces
+  ]
+  expect(digestSince(es, 0, { cap: 8 }).map(e => e.id)).toEqual([1, 260])
+})
+
+// The control: suppression must not become a general mute. Only the flagged row goes, and only from the
+// digest — `tg history` renders the same rows and deliberately keeps suppressed ones, marked.
+test('digestSince suppression is per-entry, not per-kind or per-sender', () => {
+  const es = [
+    led({ ts: 100, id: 1, kind: 'expire', from: 'me', to: 'chat', suppressed: true }),
+    led({ ts: 200, id: 2, kind: 'expire', from: 'me', to: 'chat' }),
+    led({ ts: 300, id: 3, kind: 'answer', from: 'me', to: 'chat' }),
+  ]
+  expect(digestSince(es, 0, { cap: 8 }).map(e => e.id)).toEqual([2, 3])
+})

@@ -2755,12 +2755,19 @@ async function sweepBus(): Promise<void> {
     }
   }
   for (const p of expirePending(Date.now())) {
-    appendLedger(room, { ts: Date.now(), kind: 'expire', from: p.toName, to: p.fromName, id: p.id, text: 'timed out' })
     // Suppress the notice when the target has SUCCESSFULLY answered any ask from this asker since this
     // one was created: that proves it's alive AND bus-fluent, so "still waiting" would be pure noise
     // (the exact false alarm after kam answered 14 & 12 but left the instruct-ask 16 un-answered).
+    // Computed BEFORE the append so the flag can ride the entry — the predicate only reads `answer`
+    // rows, so the entry being in or out of the window can't change its result.
     const provenLive = tailLedger(room, 200).some(e =>
       e.kind === 'answer' && e.from === p.toName && e.to === p.fromName && e.ts >= p.createdAt)
+    // The expiry is TRUE HISTORY and is always recorded — the row really did expire. `suppressed`
+    // carries the fact that no notice went out, so `tg history` can show it marked while the ambient
+    // digest omits it. Before this, the ledger announced an expiry whose notice had been deliberately
+    // withheld, and the two surfaces disagreeing about one event read as a fired alarm — which is
+    // exactly what it was mistaken for.
+    appendLedger(room, { ts: Date.now(), kind: 'expire', from: p.toName, to: p.fromName, id: p.id, text: 'timed out', ...(provenLive ? { suppressed: true } : {}) })
     if (provenLive) { process.stderr.write(`daemon: ask ${p.id} expired but @${p.toName} has since answered @${p.fromName} — suppressing timeout notice\n`); continue }
     // Bus plumbing NEVER goes to General — the human-facing notice goes to the ASKER's OWN surface (its
     // chat DM / topic), and the "still open" system line goes into the asker's pane (its agent context).
@@ -4712,8 +4719,11 @@ async function handleCall(
         const room = busLedgerRoom()
         const n = Math.max(1, Math.min(Number(args.n) || 20, 100))
         const es = resolveLedgerNames(tailLedger(room, n))
+        // A suppressed event is KEPT here and marked, unlike in the digest. History is forensic: a
+        // reader working out why nobody was told needs to see both that the expiry happened and that
+        // the notice was withheld. Hiding it would trade a false alarm for a missing record.
         text = es.length
-          ? es.map(e => `${e.kind === 'answer' ? '✓' : e.kind === 'ask' ? '→' : e.kind === 'ack' ? 'ℹ️' : e.kind === 'post' ? '📣' : e.kind === 'expire' ? '⌛' : e.kind === 'keys' ? '⌨️' : '·'} ${e.from}${e.to ? `→${e.to}` : ''}${e.id ? ` #${e.id}` : ''}: ${e.text.slice(0, 100)}`).join('\n')
+          ? es.map(e => `${e.kind === 'answer' ? '✓' : e.kind === 'ask' ? '→' : e.kind === 'ack' ? 'ℹ️' : e.kind === 'post' ? '📣' : e.kind === 'expire' ? '⌛' : e.kind === 'keys' ? '⌨️' : '·'} ${e.from}${e.to ? `→${e.to}` : ''}${e.id ? ` #${e.id}` : ''}: ${e.text.slice(0, 100)}${e.suppressed ? ' (no notice sent — asker already answered)' : ''}`).join('\n')
           : '(no bus history yet)'
         break
       }

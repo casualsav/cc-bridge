@@ -451,6 +451,14 @@ export type LedgerEntry = {
   id?: number
   text: string
   refs?: string[]
+  // The event happened, but its user-facing notice was deliberately withheld — currently only an
+  // `expire` whose asker had already been answered since (sweepBus's provenLive). The fact belongs in
+  // history; the alert does not. Recorded HERE, at append, so every surface inherits one answer instead
+  // of re-deriving it: `tg history` shows it marked (forensics — a reader wants to know the expiry
+  // happened AND that nothing was sent), the ambient digest omits it (it reads as news, and a
+  // suppressed non-event is not news). Without this the two surfaces disagreed about whether anything
+  // had happened at all, which cost a wrong three-branch diagnosis of a working predicate.
+  suppressed?: boolean
 }
 
 // Append one bus event. Best-effort: a write failure (disk full / perms) must never break delivery,
@@ -509,6 +517,7 @@ export function digestSince(
 ): LedgerEntry[] {
   const kept = entries.filter(e =>
     e.ts > sinceTs &&
+    !e.suppressed &&                    // its notice was withheld on purpose; the digest reads as news
     (opts.excludeId == null || e.id !== opts.excludeId) &&
     (opts.excludeFrom == null || e.from !== opts.excludeFrom))
   return kept.slice(-Math.max(1, opts.cap))
