@@ -1031,7 +1031,8 @@ function dialParts(s) {
   if (dial) parts.push(dial);
   if (s.mode && s.mode !== "default") parts.push(esc(s.mode === "bypassPermissions" ? "bypass" : s.mode));
   if (s.agent && s.agent !== "claude") parts.push(esc(s.agent));
-  if (s.tier) parts.push(esc(s.tier.charAt(0).toUpperCase() + s.tier.slice(1)));
+  // No tier chip: a bare "Max"/"Pro" beside "⚡high" reads as the effort, not the plan. `s.tier` still
+  // rides the card and the Max→Pro drift alert is untouched — it was only ambiguous HERE.
   return parts;
 }
 // ---- Drill-in: conversation feed + composer + stop/compact ----
