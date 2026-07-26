@@ -779,6 +779,24 @@ export function submitLanded(paneText: string): boolean {
   return box === null || box === ''
 }
 
+// Claude Code raises TWO different dialogs when the model changes, and telling them apart is a
+// safety boundary, not a nicety — one may be answered on the user's behalf and the other may not.
+//
+//   "Switch model?"      — the CACHE confirm. Raised on every switch on a conversation with cached
+//                          history. It only discloses that the next reply re-reads the history, so
+//                          a user who picked a model in a picker has already answered it.
+//   "Switch to Fable 5?" — the CREDIT consent. A spending decision, and `detectUserPrompt` above
+//                          already relays it as tappable buttons for the user to answer themselves.
+//
+// This returns true for the first and MUST return false for the second. Both anchors are required:
+// the question wording, and the option wording. The credit dialog fails both — its question names
+// the model ("Switch to Fable 5?", not "Switch model?") and its accept option is "Continue with
+// Fable 5", never "Yes, switch to …". See the pair of tests pinning this against both literals.
+export function isModelSwitchConfirm(paneText: string): boolean {
+  const low = stripAnsi(paneText).toLowerCase()
+  return /switch model\?/.test(low) && /\byes,\s*switch to\b/.test(low)
+}
+
 // Claude Code's bash-mode input box is armed: the footer swaps its hints for "! for shell mode"
 // while a `!` command sits in the box. Injecting ANYTHING into this state concatenates into the
 // pending bash line, so relays must refuse (daemon-side guard) until it's submitted or discarded.

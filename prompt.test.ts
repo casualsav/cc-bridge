@@ -1,6 +1,6 @@
 // Prompt detection from pane captures — select menus vs permission dialogs. Pure functions.
 import { test, expect } from 'bun:test'
-import { stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, detectFirstRunScreen, isUsageLimitChoice, isResumeSessionPrompt, detectResumeSessionPrompt, detectEditorState, onNormalPrompt, detectModelUnavailable, detectCompacting, compactPercent, permPromptToken, waitingPromptSignature, isRecognizedPrompt, detectStuckScreen, extractGenericOptions, bashModeArmed, detectWorking, slashPaletteRows, slashPaletteWouldMisfire, inputBoxContent, submitLanded } from './prompt.ts'
+import { stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, detectFirstRunScreen, isUsageLimitChoice, isResumeSessionPrompt, detectResumeSessionPrompt, detectEditorState, onNormalPrompt, detectModelUnavailable, detectCompacting, compactPercent, permPromptToken, waitingPromptSignature, isRecognizedPrompt, detectStuckScreen, extractGenericOptions, bashModeArmed, detectWorking, isModelSwitchConfirm, slashPaletteRows, slashPaletteWouldMisfire, inputBoxContent, submitLanded } from './prompt.ts'
 
 test('stripAnsi removes CSI escape sequences', () => {
   expect(stripAnsi('\x1b[1mbold\x1b[0m text')).toBe('bold text')
@@ -173,6 +173,56 @@ test('detectUserPrompt relays the "Switch to Fable 5?" model-switch consent dial
   expect(p!.options.map(o => o.label)).toEqual(['Continue with Fable 5', 'No, keep my current model'])
   expect(p!.multiSelect).toBe(false)
   expect(p!.freeText).toBe(false)
+})
+
+// The safety boundary for the mini app's model picker: acceptModelSwitch answers the dialog this
+// predicate matches, so matching the WRONG one would spend the owner's credits from a phone tap.
+// Both dialogs' text is the literal captured from a live pane, and both anchors are checked against
+// both — the claim "the credit dialog fails both on purpose" is worth nothing unless it is executed.
+const CACHE_CONFIRM = [
+  '\u2594'.repeat(60),
+  '   Switch model?',
+  '   Your next response will be slower and use more tokens',
+  '',
+  '   This conversation is cached for the current model. Switching to Sonnet 5 means the full history gets re-read on your next message.',
+  '',
+  '   \u276F 1. Yes, switch to Sonnet 5',
+  '     2. No, go back',
+].join('\n')
+const CREDIT_CONSENT = [
+  '\u2594'.repeat(60),
+  '   Switch to Fable 5?',
+  '',
+  '   Fable 5 runs on usage credits \u2014 you have $100.00 in credits.',
+  '',
+  '   Learn more: https://support.claude.com/en/articles/12429409-extra-usage-for-paid-claude-plans',
+  '',
+  '     1. Continue with Fable 5',
+  '   \u276F 2. No, keep my current model',
+  '',
+  '',
+  '   Enter to confirm \u00B7 Esc to cancel',
+].join('\n')
+
+test('isModelSwitchConfirm matches the cache confirm and NEVER the credit consent', () => {
+  expect(isModelSwitchConfirm(CACHE_CONFIRM)).toBe(true)
+  // The safety-critical half. It fails on BOTH anchors independently, so neither alone is load-bearing:
+  expect(/switch model\?/.test(CREDIT_CONSENT.toLowerCase())).toBe(false)        // question wording
+  expect(/\byes,\s*switch to\b/.test(CREDIT_CONSENT.toLowerCase())).toBe(false)  // accept-option wording
+  expect(isModelSwitchConfirm(CREDIT_CONSENT)).toBe(false)
+  // ...and the credit dialog is not merely unmatched, it is RELAYED — the user answers it themselves.
+  expect(detectUserPrompt(CREDIT_CONSENT)?.question).toBe('Switch to Fable 5?')
+})
+
+test('isModelSwitchConfirm ignores every other screen that could be up when a model change lands', () => {
+  expect(isModelSwitchConfirm('')).toBe(false)
+  expect(isModelSwitchConfirm(CACHE_CONFIRM.replace('Yes, switch to Sonnet 5', 'Continue anyway'))).toBe(false)
+  expect(isModelSwitchConfirm(CACHE_CONFIRM.replace('Switch model?', 'Delete everything?'))).toBe(false)
+  // A permission request is the one that must never be auto-accepted by a dial change.
+  expect(isModelSwitchConfirm([
+    '   Bash command', '', '   rm -rf /tmp/x', '',
+    '   Do you want to proceed?', '   \u276F 1. Yes', '     2. Yes, and don\'t ask again', '     3. No, and tell Claude what to do differently',
+  ].join('\n'))).toBe(false)
 })
 
 test('detectUserPrompt rejects a scrolled-up "Switch to Fable 5?" dialog with new content below', () => {
