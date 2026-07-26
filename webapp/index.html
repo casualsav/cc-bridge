@@ -1069,6 +1069,17 @@ function growComposer() {
   // only re-pins within 60px of the bottom and the drift passes that at three lines. Same 60px
   // threshold as paintFeed on purpose: a reader who has deliberately scrolled up is left alone.
   const stuck = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;
+  // Keep the caret in view once the field is capped and scrolling internally. PRESERVE rather than
+  // command: by the time this runs the browser has already scrolled the caret into view, so its
+  // scrollTop is a correct answer worth carrying across the resize — and restoring it is what makes
+  // editing in the MIDDLE of a capped field work. Forcing the bottom unconditionally would fix
+  // typing at the end and yank the view away from the caret on every keystroke anywhere else.
+  // The one case with nothing correct to preserve is a value change that never moved the caret
+  // natively — a paste or a restored draft, where scrollTop is still 0 and the text is left
+  // top-aligned with the newest line out of sight. Caret-at-end identifies exactly that case and
+  // never fires while editing mid-field.
+  const keepTop = ta.scrollTop;
+  const caretAtEnd = ta.selectionStart === ta.selectionEnd && ta.selectionEnd === ta.value.length;
   ta.style.height = "auto";
   // A hidden element measures 0. syncComposerMode() runs once at parse time, when #drill is still
   // display:none, so without this guard the field is pinned to height:0 and never recovers — it
@@ -1076,6 +1087,7 @@ function growComposer() {
   // height on `auto` hands the resting size back to rows="1" until the view is actually shown.
   if (!ta.scrollHeight) return;
   ta.style.height = ta.scrollHeight + "px";
+  ta.scrollTop = caretAtEnd ? ta.scrollHeight : keepTop;
   if (stuck) feed.scrollTop = feed.scrollHeight;
 }
 // Every path that changes the field's value already funnels through here — typing, send, a failed
@@ -1088,6 +1100,13 @@ function syncComposerMode() {
   growComposer();
 }
 $("dtext").oninput = syncComposerMode;
+// A width change re-wraps the text, so the height measured for the old width is stale and the
+// resting scroll position no longer shows the end — measured: a 30px narrower field moved the
+// bottom 44px away without a single keystroke. Nothing else re-enters the resize on a viewport
+// change, so this is the only thing that puts it right. Height-only changes (a soft keyboard
+// appearing) do not re-wrap and are harmless; re-measuring on both is simpler than telling them
+// apart, and growComposer is idempotent.
+addEventListener("resize", growComposer);
 syncComposerMode();
 $("dmic").onclick = async () => {
   if (rec) { rec.stop(); return; }
