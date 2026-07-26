@@ -113,7 +113,7 @@ import { initQueue, readLater, writeLater, sweepLaterQueues, LATER_SWEEP_MS } fr
 import {
   AGENT_BUS_ENABLED, AGENT_BUS_PIN_UI,
   createPending, getPending, removePending, putPending, listPending, markInjected, expirePending, dropExpired, LATE_ANSWER_GRACE_MS, ASK_TTL_MS,
-  recordAgentAsk, resetHops, currentHops, BREADTH_NOTICE_AT, askResultText, planAskReap, reapNotifiesAsker, queuedFor, type AskDelivery,
+  recordAgentAsk, resetHops, currentHops, BREADTH_NOTICE_AT, askResultText, planAskReap, deliveredReapCandidates, reapNotifiesAsker, queuedFor, type AskDelivery,
   setSessionDepth, resetAllSessionDepth, pruneSessionDepth, nextAskDepth, depthExceeded, depthLimit,
   resolveEndpoint, nameForEndpoint, normalizeEndpointName, confineRef, sharedDir, ensureSharedDir, appendLedger, tailLedger,
   getSeen, markSeen, digestSince, DIGEST_SCAN,
@@ -2747,10 +2747,10 @@ async function sweepBus(): Promise<void> {
   // The other half of 11c: an ask that WAS delivered and whose target then ended (a `tg kill`, a
   // crash) can never be answered either — but the reap above only covers undelivered ones, so this
   // one used to sit out the full TTL and then tell the asker "still open; a late answer will be
-  // delivered if it arrives". It cannot be. Same conservative liveness probe; expired rows are left
-  // alone (their notice already went out, and a dead target can't send the late answer anyway).
+  // delivered if it arrives". It cannot be. Same conservative liveness probe. Expired rows are IN
+  // scope now — see deliveredReapCandidates for why excluding them stopped making sense at v0.4.57.
   if (panesDiscovered) {
-    for (const p of listPending().filter(q => q.toKind === 'claude' && q.injected && !q.expiredAt)) {
+    for (const p of deliveredReapCandidates(listPending())) {
       if (await busTargetGone(p.toSid).catch(() => false)) await reapDeadAsk(p, room).catch(() => {})
     }
   }

@@ -307,6 +307,22 @@ export function planAskReap(
 // delivered" notice, and that false promise was what 11c was actually about.
 export function reapNotifiesAsker(p: Pick<BusPending, 'injected'>): boolean { return !p.injected }
 
+// The DELIVERED half of the target-gone reap: which rows the caller should run its async liveness
+// probe over. Sibling of planAskReap, which owns the never-delivered half.
+//
+// `expiredAt` is deliberately NOT a skip condition, and it used to be. The exclusion existed to stop
+// the asker being told twice — the TTL notice had already gone out. v0.4.57 removed the only reason
+// that mattered: reapNotifiesAsker makes a delivered reap SILENT, so there is no second notice to
+// collide with, and the rows it skipped just sat in agent-bus.json until dropExpired GC'd them ~24h
+// after their TTL (four of them observed alive on 2026-07-25).
+//
+// This also settles an asymmetry: on the never-delivered path expiry explicitly does not grant
+// immunity, with a test saying so. Both halves now agree, for the same reason — it is exactly the rows
+// that have already told the asker something false that most need correcting.
+export function deliveredReapCandidates(pendings: BusPending[]): BusPending[] {
+  return pendings.filter(p => p.toKind === 'claude' && p.injected)
+}
+
 // ---- hop counter (loop guard) ----
 
 // Count one agent→agent ask; returns the new consecutive count. The daemon delivers when

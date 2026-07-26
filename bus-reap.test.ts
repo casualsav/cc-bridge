@@ -9,7 +9,7 @@
 // in that window would fail every open ask at once and tell every asker their target had ended — a
 // worse bug than the one being fixed. The reap must not run until discovery has landed.
 import { test, expect } from 'bun:test'
-import { planAskReap, reapNotifiesAsker, type BusPending } from './agent-bus.ts'
+import { planAskReap, deliveredReapCandidates, reapNotifiesAsker, type BusPending } from './agent-bus.ts'
 
 const ask = (over: Partial<BusPending> = {}): BusPending => ({
   id: 95, fromSid: 'sidChat', toSid: 'sidCcbridge', fromKind: 'claude', toKind: 'claude',
@@ -107,4 +107,40 @@ test('mixed board: only the provably-dead letters are picked', () => {
   ]
   const picked = planAskReap(board, p => p.toSid === 'dead', true)
   expect(picked.map(p => p.id)).toEqual([1, 5])
+})
+
+// ---- the DELIVERED half of the target-gone reap ----
+//
+// Four delivered+expired rows were observed alive on 2026-07-25 (102→ccfleet, 107→ctxwin, 110→killtest,
+// 113→rtrip), sitting in a gap NEITHER pass could see: planAskReap filters `!injected` so it skipped
+// them, and the delivered pass filtered `!expiredAt` so it skipped them too. Not a leak — dropExpired
+// GC'd them ~24h later — but the reason for the exclusion (don't tell the asker twice) had already been
+// deleted by v0.4.57, which made the delivered reap silent.
+test('a delivered ask that ALREADY TTL-notified is now a reap candidate', () => {
+  expect(deliveredReapCandidates([ask({ id: 102, injected: true, expiredAt: 1000 })]).map(p => p.id)).toEqual([102])
+})
+
+// THE CONTROL THAT MUST NOT MOVE. Widening the filter to include expired rows must not also widen it to
+// undelivered ones: those belong to planAskReap, whose reap NOTIFIES the asker. If this ever starts
+// returning the undelivered row, the two passes both claim it and the asker gets carded twice — which
+// is the exact double-notice the `!expiredAt` clause was originally protecting against.
+test('the delivered pass still claims only delivered rows, expired or not', () => {
+  const rows = [ask({ id: 1, injected: true }), ask({ id: 2, injected: true, expiredAt: 1000 }),
+                ask({ id: 3, injected: false }), ask({ id: 4, injected: false, expiredAt: 1000 })]
+  expect(deliveredReapCandidates(rows).map(p => p.id)).toEqual([1, 2])
+  // …and the never-delivered half still claims exactly the other two, so nothing is claimed twice and
+  // nothing falls between them. That gap is what let the four rows survive.
+  expect(planAskReap(rows, gone, true).map(p => p.id)).toEqual([3, 4])
+})
+
+// A hermes endpoint has no pane, so pane-based liveness says nothing about it — same exclusion the
+// undelivered pass makes.
+test('a delivered hermes ask is out of scope for pane liveness', () => {
+  expect(deliveredReapCandidates([ask({ toKind: 'hermes', injected: true, expiredAt: 1000 })])).toEqual([])
+})
+
+// Reaping a delivered row must stay silent, which is the whole premise of dropping the exclusion.
+test('reaping a delivered row tells the asker nothing, expired or not', () => {
+  expect(reapNotifiesAsker({ injected: true })).toBe(false)
+  expect(reapNotifiesAsker({ injected: false })).toBe(true)
 })
