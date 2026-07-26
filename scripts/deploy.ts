@@ -64,9 +64,17 @@ function step(msg: string) { console.log(`• ${msg}`) }
 // becomes a nonzero status with the spawn error surfaced as stderr, making every call site below safe
 // and every `die()` message real.
 function sh(cmd: string, args: string[], cwd?: string): { status: number; stdout: string; stderr: string } {
-  const r = spawnSync(cmd, args, { cwd, encoding: 'utf8' })
+  // 64 MiB, because the default is 1 MiB and `bun build` prints the WHOLE bundle to stdout — which
+  // crossed 1 MiB at v0.4.100 (1,064,568 bytes). spawnSync SIGTERMs a child that overruns maxBuffer,
+  // so the type-check gate below started reporting "type-check failed" while printing a complete,
+  // correct bundle and an empty stderr: a growing daemon.ts silently became an unshippable one.
+  // Bounded rather than Infinity — this box is memory-tight and a runaway command should still stop.
+  const r = spawnSync(cmd, args, { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
   const stdout = r.stdout ?? ''
-  const stderr = r.stderr ?? (r.error ? `${cmd}: ${r.error.message}` : '')
+  // Name the signal when there is one: a signal-killed child otherwise reports an empty stderr, and
+  // every die() below prefers stderr — which is how the maxBuffer kill above read as a build error.
+  const killed = r.status === null && r.signal ? `${cmd}: killed by ${r.signal}` : ''
+  const stderr = [killed, r.stderr ?? (r.error ? `${cmd}: ${r.error.message}` : '')].filter(Boolean).join('\n')
   const status = r.status ?? (r.error ? 127 : 1)   // null status ⇒ spawn failed / signal-killed ⇒ treat as failure
   return { status, stdout, stderr }
 }
