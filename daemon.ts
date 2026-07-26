@@ -27,7 +27,7 @@ const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
 import { renderSessionsView } from './sessions-view.ts'
 import { detectCurrentMode, onNormalPrompt, inputBoxContent, isModelSwitchConfirm, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType } from './prompt.ts'
-import { resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, liveSubagents, currentTurnFeed, currentTurnActivity, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
+import { resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, liveSubagents, currentTurnFeed, currentTurnActivity, concludedTurnWork, turnAnchorUuid, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
 import {
   AGENT_PANE_OPT, agentExitKeys, agentInterruptKeys, agentLabel, agentResetCommand, agentSubmitKeys,
   CODEX_ENABLED, codexLaunchCommand, normalizeAgent, shellQuote, type AgentKind,
@@ -116,6 +116,8 @@ import {
   createPending, getPending, removePending, putPending, listPending, markInjected, expirePending, dropExpired, LATE_ANSWER_GRACE_MS, ASK_TTL_MS,
   recordAgentAsk, resetHops, currentHops, BREADTH_NOTICE_AT, askResultText, planAskReap, deliveredReapCandidates, reapNotifiesAsker, queuedFor, type AskDelivery,
   foundingSilencePlan, markFoundingNudged, clearFoundingNudge, markFoundingEscalated,
+  unreportedWorkPlan, markReported, markBriefed, markUnreportedNudged, clearUnreportedNudge, markUnreportedEscalated,
+  getReportedAt, getBriefedBy, getUnreported,
   setSessionDepth, resetAllSessionDepth, pruneSessionDepth, nextAskDepth, depthExceeded, depthLimit,
   resolveEndpoint, nameForEndpoint, normalizeEndpointName, confineRef, sharedDir, ensureSharedDir, appendLedger, tailLedger,
   getSeen, markSeen, digestSince, DIGEST_SCAN,
@@ -1933,6 +1935,7 @@ async function auxRelayTick(): Promise<void> {
         // The pane's turn just concluded by this loop's own definition — exactly the moment a
         // founding ask left unanswered in it should be noticed.
         if (AGENT_BUS_ENABLED) void checkFoundingSilence(pane).catch(() => {})
+        if (AGENT_BUS_ENABLED) void checkUnreportedWork(pane).catch(() => {})
         const cursor = lastRelayedByFile.get(file) ?? ''
         for (const r of finalRepliesAfter(file, cursor)) {
           if (!r.uuid || r.uuid === (lastRelayedByFile.get(file) ?? '')) continue
@@ -2758,6 +2761,11 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
       // A @system ask carries depth 0, so a threshold crossing leaves its target supervised.
       setSessionDepth(cur.toSid, cur.depth ?? 1)
       markSeen(cur.toSid, now)   // advance the watermark only on a LANDED delivery — a failed paste keeps the window open for the retry
+      // Whoever just briefed this session is now waiting to hear back. Stamped BEFORE the ack's
+      // removePending below, because that row stops existing a few lines from here. @system is not a
+      // briefer: it has no session to report back into (see deliverAnswerToAsker), so a daemon notice
+      // must not leave the target owing an ack to a name it cannot address.
+      if (cur.fromSid !== SYSTEM_SID) markBriefed(cur.toSid, cur.fromSid, cur.fromName, now)
       void notifyAskSent(cur.fromSid, cur.toName, cur.text)
       // Mirror the same card on the TARGET's own surface (its topic / chat DM) so the inbound ask is
       // visible from inside the session too, not only on the asker's side.
@@ -2887,6 +2895,47 @@ async function checkFoundingSilence(pane: string): Promise<void> {
   const delivered = askerPane ? await busDeliver(askerPane, formatAnswerBlock('system', p.id, notice)).catch(() => false) : false
   if (!delivered) notifyChats(`⚠️ @${escapeHtml(p.toName)} was reminded about founding ask ${p.id} and still hasn\u2019t answered — the asker (@${escapeHtml(p.fromName)}) never heard back.`)
   process.stderr.write(`daemon: founding ask ${p.id} escalated to @${p.fromName} ${delivered ? '(pane)' : '(notifyChats fallback — pane gone)'}\n`)
+}
+
+// The same silence without an open ask: a session was briefed, did substantive work, and ended
+// the turn having told nobody. Runs at the same turn-conclusion point as checkFoundingSilence, and is
+// idempotent past its one action per turn — unreportedWorkPlan yields nothing for an already-nudged
+// turn inside the escalate window, or an already-escalated one, so idle ticks cost nothing.
+async function checkUnreportedWork(pane: string): Promise<void> {
+  const sid = await sessionForPane(pane).catch(() => null)
+  if (!sid) return
+  const file = await transcriptForPane(pane, await paneCwd(pane).catch(() => null)).catch(() => null)
+  if (!file) return
+  const turnKey = turnAnchorUuid(file) ?? ''
+  const plan = unreportedWorkPlan({
+    sid, turnKey,
+    work: concludedTurnWork(file),
+    reportedAt: getReportedAt(sid),
+    briefedBy: getBriefedBy(sid),
+    unreported: getUnreported(sid),
+    openAskToSid: listPending().some(p => p.toSid === sid && p.injected && !p.expiredAt),
+    now: Date.now(),
+  })
+  if (!plan) return
+  // `re=0`: there is no ask behind either of these — that is the whole point of this check — so the
+  // block carries the system attribution and no id to answer.
+  if (plan.action === 'nudge') {
+    markUnreportedNudged(sid, turnKey)
+    const reminder = `(you finished work here and nothing reached @${plan.briefer.fromName} — they only see your pane if they look. Report it with: tg ack ${plan.briefer.fromName} "<one-line summary → path>")`
+    const ok = await busDeliver(pane, formatAnswerBlock('system', 0, reminder)).catch(() => false)
+    if (!ok) clearUnreportedNudge(sid)   // didn't land — retry on the next turn-conclusion, not a real nudge yet
+    process.stderr.write(`daemon: unreported-work nudge → ${sid} (briefer @${plan.briefer.fromName}) ${ok ? 'delivered' : 'not-landed, will retry'}\n`)
+    return
+  }
+  // 'escalate': the nudge had a full minute and nothing came back — tell the briefer directly, once.
+  markUnreportedEscalated(sid)
+  const name = nameForEndpoint(sid, busEndpoints())
+  appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'escalate', from: name, to: plan.briefer.fromName, text: 'finished work without reporting it' })
+  const brieferPane = await paneForSession(plan.briefer.fromSid).catch(() => null)
+  const notice = `(@${name} finished work and hasn't reported it — nudged 60s ago, still silent. Its pane holds the result.)`
+  const delivered = brieferPane ? await busDeliver(brieferPane, formatAnswerBlock('system', 0, notice)).catch(() => false) : false
+  if (!delivered) notifyChats(`⚠️ @${escapeHtml(name)} finished work and hasn’t reported it — @${escapeHtml(plan.briefer.fromName)} never heard back. Its pane holds the result.`)
+  process.stderr.write(`daemon: unreported work by ${sid} escalated to @${plan.briefer.fromName} ${delivered ? '(pane)' : '(notifyChats fallback — pane gone)'}\n`)
 }
 
 // 15s sweep: reap dead letters, expire un-answered asks (tell the asker) + deliver queued asks whose
@@ -4737,6 +4786,7 @@ async function handleCall(
           const breadth = recordAgentAsk()
           if (breadth === BREADTH_NOTICE_AT) void notifyWideFanOut(breadth)
         }
+        markReported(fromSid)   // it spoke on the bus — whatever it owed a briefer, it is not silent
         const p = createPending({ fromSid, toSid: res.id, toKind: res.kind, fromName, toName, text: askText, refs, depth: askDepth, ...(noReply ? { noReply } : {}) }, Date.now())
         appendLedger(room, { ts: Date.now(), kind: verb, from: fromName, to: toName, id: p.id, text: askText, refs })
         if (res.kind === 'hermes') {
@@ -4765,6 +4815,7 @@ async function handleCall(
         const pane = args.pane ? String(args.pane) : null
         const answererSid = pane ? await sessionForPane(pane) : null
         const answerer = answererSid ? nameForEndpoint(answererSid, busEndpoints()) : p.toName
+        if (answererSid) markReported(answererSid)   // it spoke on the bus
         const refs: string[] = []
         for (const r of (Array.isArray(args.refs) ? args.refs as string[] : [])) {
           const c = confineRef(r, sharedDir(room))
@@ -4837,6 +4888,7 @@ async function handleCall(
         const fromName = fromSid ? nameForEndpoint(fromSid, busEndpoints()) : 'agent'
         const body = String(args.text ?? '').trim()
         if (!body) { write({ t: 'result', id, ok: false, text: 'empty post' }); return }
+        if (fromSid) markReported(fromSid)   // it spoke on the bus — a post to the humans counts too
         appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'post', from: fromName, text: body })
         // Posts are for the human(s), and the humans follow the work from their DM chat lanes when
         // those exist — an unthreaded group send lands in the General topic, which the owner doesn't

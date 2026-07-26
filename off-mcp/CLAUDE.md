@@ -51,6 +51,9 @@ by its topic name.
   **A task that arrived over the bus returns its result over the bus** — your topic is a mirror
   for the humans, never the reply channel. This includes a spawn's first message: it arrives as a
   normal `ask=ID` block, so finish with `tg answer <ID>` like any other ask.
+- **Report WITHOUT an open ask** — same `tg ack @name -`, one-line summary → path. Finished something
+  the person who briefed you would want? Their only other way to learn it is to read your pane, which
+  they won't. An ack needs no answer and closes nothing.
 - tg slash @name "/compact" — run a slash command in another session's CLI (rejected while the
   target is mid-turn — retry when idle; its outcome echoes in that session's topic). /exit is owner-only.
 - tg keys @name <key>… [--force] — send keystrokes to a session's pane: the lever for a wedge on a

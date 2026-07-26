@@ -118,9 +118,15 @@ export type BusState = {
   // Per-session chain depth (endpoint id → depth as of its last wake). Persisted so a daemon restart
   // can't silently reset every chain to "human-supervised" — the same reason killedAt is persisted.
   depth: Record<string, number>
+  // ---- unreported work ----
+  // All three are OPTIONAL in the type: agent-bus.json exists in production and was written by builds
+  // that had never heard of them, so every read must tolerate the key being absent.
+  reportedAt?: Record<string, number>   // sid → when it last sent anything outbound on the bus
+  briefedBy?: Record<string, { fromSid: string; fromName: string; at: number }>   // sid → who last briefed it
+  unreported?: Record<string, { turnKey: string; nudgedAt?: number; escalatedAt?: number }>   // sid → per-turn nudge stamps
 }
 
-const empty = (): BusState => ({ seq: 0, hops: 0, pending: {}, seen: {}, depth: {} })
+const empty = (): BusState => ({ seq: 0, hops: 0, pending: {}, seen: {}, depth: {}, reportedAt: {}, briefedBy: {}, unreported: {} })
 let store: BusState = empty()
 let loaded = false
 let persist = true   // disabled by _resetForTest so unit tests never write to the real STATE_DIR
@@ -160,12 +166,35 @@ export function loadBus(): BusState {
     for (const [k, v] of Object.entries(raw.seen ?? {})) if (typeof v === 'number' && Number.isFinite(v)) seen[k] = v
     const depth: Record<string, number> = {}
     for (const [k, v] of Object.entries(raw.depth ?? {})) if (typeof v === 'number' && Number.isFinite(v) && v > 0) depth[k] = v
+    // The P6 maps: absent in every agent-bus.json written before this build, so `?? {}` is the normal
+    // case here, not a corruption guard.
+    const reportedAt: Record<string, number> = {}
+    for (const [k, v] of Object.entries(raw.reportedAt ?? {})) if (typeof v === 'number' && Number.isFinite(v)) reportedAt[k] = v
+    const briefedBy: Record<string, { fromSid: string; fromName: string; at: number }> = {}
+    for (const [k, v] of Object.entries(raw.briefedBy ?? {})) {
+      const b = v as Partial<{ fromSid: string; fromName: string; at: number }>
+      if (!b || typeof b.fromSid !== 'string' || typeof b.at !== 'number' || !Number.isFinite(b.at)) continue
+      briefedBy[k] = { fromSid: b.fromSid, fromName: typeof b.fromName === 'string' ? b.fromName : '', at: b.at }
+    }
+    const unreported: Record<string, { turnKey: string; nudgedAt?: number; escalatedAt?: number }> = {}
+    for (const [k, v] of Object.entries(raw.unreported ?? {})) {
+      const u = v as Partial<{ turnKey: string; nudgedAt: number; escalatedAt: number }>
+      if (!u || typeof u.turnKey !== 'string') continue
+      unreported[k] = {
+        turnKey: u.turnKey,
+        ...(typeof u.nudgedAt === 'number' ? { nudgedAt: u.nudgedAt } : {}),
+        ...(typeof u.escalatedAt === 'number' ? { escalatedAt: u.escalatedAt } : {}),
+      }
+    }
     store = {
       seq: typeof raw.seq === 'number' ? raw.seq : 0,
       hops: typeof raw.hops === 'number' ? raw.hops : 0,
       pending,
       seen,
       depth,
+      reportedAt,
+      briefedBy,
+      unreported,
     }
     loaded = true
     return store
@@ -285,6 +314,106 @@ export function foundingSilencePlan(
     if (now - p.nudgedAt >= FOUNDING_ESCALATE_AFTER_MS) return { id: p.id, action: 'escalate' }
   }
   return null
+}
+
+// ---- unreported work ----
+//
+// The founding-ask machinery above only watches sessions that have an OPEN ask to answer. The same
+// silence happens without one: a session is briefed (an ask or an ack lands in its pane), it does the
+// work, and it ends the turn having told nobody — its briefer's only way to learn the result is to go
+// and read the pane, which for an event-driven session means never. This half watches the briefing
+// rather than the ask: who last spoke to this session, and has it said anything back since it finished.
+
+// Same shape and same reasoning as FOUNDING_ESCALATE_AFTER_MS: the nudge must have a real chance to be
+// acted on (the session may already be typing `tg ack`) before the briefer is told anything.
+export const UNREPORTED_ESCALATE_AFTER_MS = 60_000
+// How long a briefing keeps someone on the hook for a report. Past a day the thread is cold — whatever
+// the session is doing now is its own work, not the answer to that brief.
+export const BRIEFER_TTL_MS = 24 * 60 * 60_000
+
+function reportedMap(): Record<string, number> { ensureLoaded(); return (store.reportedAt ??= {}) }
+function briefedMap(): Record<string, { fromSid: string; fromName: string; at: number }> { ensureLoaded(); return (store.briefedBy ??= {}) }
+function unreportedMap(): Record<string, { turnKey: string; nudgedAt?: number; escalatedAt?: number }> { ensureLoaded(); return (store.unreported ??= {}) }
+
+export function getReportedAt(sid: string): number | undefined { return reportedMap()[sid] }
+export function getBriefedBy(sid: string): { fromSid: string; fromName: string; at: number } | undefined { return briefedMap()[sid] }
+export function getUnreported(sid: string): { turnKey: string; nudgedAt?: number; escalatedAt?: number } | undefined { return unreportedMap()[sid] }
+
+/** This session sent something outbound on the bus (ask / ack / answer / post) — it is not silent. */
+export function markReported(sid: string, now = Date.now()): void {
+  reportedMap()[sid] = now
+  save()
+}
+
+/** An ask or an ack was delivered INTO this session: whoever sent it is now waiting to hear back. */
+export function markBriefed(toSid: string, fromSid: string, fromName: string, now = Date.now()): void {
+  briefedMap()[toSid] = { fromSid, fromName, at: now }
+  save()
+}
+
+// Keyed by the turn, so one nudge per concluded turn: a session that keeps working (new turns) gets
+// nudged again for each substantive one, and a session sitting idle on the same turn is left alone.
+export function markUnreportedNudged(sid: string, turnKey: string, now = Date.now()): void {
+  unreportedMap()[sid] = { turnKey, nudgedAt: now }
+  save()
+}
+
+// A nudge whose paste didn't land was never seen — same role clearFoundingNudge plays: drop the stamp
+// so the next turn-conclusion retries instead of waiting out the escalate window for nothing.
+export function clearUnreportedNudge(sid: string): void {
+  const m = unreportedMap()
+  if (!m[sid]) return
+  delete m[sid]
+  save()
+}
+
+// One-shot, like the founding escalation: set and never cleared for that turn, so the briefer is told
+// exactly once however many idle turn-conclusions follow.
+export function markUnreportedEscalated(sid: string, now = Date.now()): void {
+  const cur = unreportedMap()[sid]
+  if (!cur) return
+  cur.escalatedAt = now
+  save()
+}
+
+export type UnreportedPlan = { action: 'nudge' | 'escalate'; briefer: { fromSid: string; fromName: string } } | null
+
+// Whether a session that just concluded a turn owes someone a report — at most one action per call, so
+// the caller never types twice into a pane on one conclusion. Pure: every input is passed in.
+export function unreportedWorkPlan(args: {
+  sid: string
+  turnKey: string
+  work: { count: number; mutating: boolean; lastAt: number }
+  reportedAt: number | undefined
+  briefedBy: { fromSid: string; fromName: string; at: number } | undefined
+  unreported: { turnKey: string; nudgedAt?: number; escalatedAt?: number } | undefined
+  openAskToSid: boolean
+  now: number
+}): UnreportedPlan {
+  const { turnKey, work, briefedBy, unreported, now } = args
+  if (!turnKey) return null                        // no turn to key a nudge on — a fresh/unreadable transcript, not silence
+  if (args.openAskToSid) return null                // an open ask is foundingSilencePlan's case; two nudges for one silence
+  if (!briefedBy || now - briefedBy.at > BRIEFER_TTL_MS) return null   // nobody is waiting: a human-driven session's human is watching the pane
+  const briefer = { fromSid: briefedBy.fromSid, fromName: briefedBy.fromName }
+
+  // An outstanding nudge is followed up against the NUDGE, never against the turn it was raised for.
+  // The nudge is itself typed into the pane, and an injected block is a real user prompt — so it
+  // starts a turn and moves the anchor. Keyed on the turn, the escalation could therefore never fire:
+  // by the time the window elapsed the session was always on some later turn, the "already nudged"
+  // branch never matched, and the briefer would have been told nothing, ever. The stamp is the fact
+  // that matters here, not which turn produced it.
+  if (unreported?.nudgedAt != null && unreported.escalatedAt == null) {
+    if ((args.reportedAt ?? 0) >= unreported.nudgedAt) return null   // it spoke after being nudged — settled
+    if (now - unreported.nudgedAt >= UNREPORTED_ESCALATE_AFTER_MS) return { action: 'escalate', briefer }
+    return null                                     // nudged moments ago — give it time to act on the nudge
+  }
+  if (unreported?.escalatedAt != null && unreported.turnKey === turnKey) return null   // told them once for this turn
+
+  if (work.count < 3 && !work.mutating) return null // a glance at a file or one grep is not a result anyone is waiting for
+  // Against the LAST ACTIVITY, not the turn start, on purpose — that is what catches "answered, then
+  // kept working", where a report exists but predates the result it would have to describe.
+  if ((args.reportedAt ?? 0) >= work.lastAt) return null   // it reported after finishing
+  return { action: 'nudge', briefer }
 }
 
 // Mark (don't delete) every not-yet-expired pending whose TTL has passed and return them — the daemon

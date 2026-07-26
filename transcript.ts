@@ -256,6 +256,48 @@ export function currentTurnActivity(file: string): Activity[] {
   return acts
 }
 
+// Tools whose use means the turn CHANGED something — one of these alone makes a turn substantive,
+// however few calls it took (a one-line fix is still a result somebody is waiting to hear about).
+const MUTATING_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit'])
+
+// A `tg …` Bash call: the session reporting over the bus, not work. Excluded from concludedTurnWork
+// because otherwise the act of reporting IS work — every reporting session would end its next turn
+// with fresh "unreported" activity and re-trigger the check on its own report, forever.
+function isBusReportToolUse(b: any): boolean {
+  if (b?.name !== 'Bash') return false
+  const cmd = (b?.input as { command?: unknown })?.command
+  return typeof cmd === 'string' && /^\s*tg\s/.test(cmd)
+}
+
+// What the turn anchored at the last real user message actually DID — read at turn conclusion, that
+// is the turn which just finished. Same walk as currentTurnActivity, narrowed to the three facts the
+// unreported-work check needs: how many tool calls, whether any of them changed a file, and when the
+// last one landed (epoch ms of its entry's timestamp; 0 when there is nothing left).
+export function concludedTurnWork(file: string): { count: number; mutating: boolean; lastAt: number } {
+  const entries = readEntries(file)
+  let anchor = -1
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (isRealUserText(entries[i])) { anchor = i; break }
+  }
+  let count = 0
+  let mutating = false
+  let lastAt = 0
+  for (let i = anchor + 1; i < entries.length; i++) {
+    const e = entries[i]
+    if (e.type !== 'assistant' || e.isSidechain) continue
+    const content = e.message?.content
+    if (!Array.isArray(content)) continue
+    for (const b of content as any[]) {
+      if (b?.type !== 'tool_use' || typeof b.name !== 'string' || isBusReportToolUse(b)) continue
+      count += 1
+      if (MUTATING_TOOLS.has(b.name)) mutating = true
+      const ts = Date.parse(e.timestamp ?? '')
+      lastAt = Number.isFinite(ts) ? ts : lastAt
+    }
+  }
+  return { count, mutating, lastAt }
+}
+
 // The most recent assistant `text` block in the transcript, with its entry uuid — the
 // conclusion of the latest completed turn when read at idle. It needs no anchor on a
 // specific injected message, so it relays proactive messages (status pings, a "done" after a

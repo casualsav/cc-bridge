@@ -35,6 +35,10 @@ export const liveSubagents = (file: string) => (isCodex(file) ? 0 : cc.liveSubag
 export const turnAnchorUuid = (file: string) => (isCodex(file) ? cx.turnAnchorUuid(file) : cc.turnAnchorUuid(file))
 export const currentTurnActivity = (file: string) => (isCodex(file) ? cx.currentTurnActivity(file) : cc.currentTurnActivity(file))
 export const currentTurnTokens = (file: string) => (isCodex(file) ? cx.currentTurnTokens(file) : cc.currentTurnTokens(file))
+// CC-only: a Codex rollout records tool calls in its own shape, and reading "no work" there just
+// means the unreported-work check never fires for a Codex pane — the conservative side of a check
+// whose failure mode is nudging a session that has nothing to report.
+export const concludedTurnWork = (file: string) => (isCodex(file) ? { count: 0, mutating: false, lastAt: 0 } : cc.concludedTurnWork(file))
 export const latestModelId = (file: string) => (isCodex(file) ? null : cc.latestModelId(file))   // Codex rollouts don't record a per-turn model
 export const currentTurnFeed = (file: string, concluded = false) => (isCodex(file) ? cx.currentTurnFeed(file, concluded) : cc.currentTurnFeed(file, concluded))
 export const bashResultAfter = (file: string, sinceMs: number) => (isCodex(file) ? cx.bashResultAfter(file, sinceMs) : cc.bashResultAfter(file, sinceMs))
