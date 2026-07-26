@@ -79,7 +79,12 @@
      plus a hairline rim along the top edge where light would land. Deliberately NO accent bloom —
      a glow is for the one thing you want clicked, and this is a utility bar. */
   /* 10px matches the composer's inset, so the two surfaces that bracket the screen line up. */
-  #drill .vhead { margin: 10px 10px 2px; padding: 7px var(--sp-2); border-bottom: none; border-radius: var(--r-2xl); gap: 6px;
+  /* --title-align is the ONE declaration that walks the centred title back to left-anchored, because
+     the owner asked for centred provisionally. Centring is honest here rather than approximate: the
+     bar holds exactly one 34px control on each side, so the space either side of the title is already
+     symmetric and centring within it centres against the BAR. Add a third control and that stops
+     being true — give the side slots equal fixed widths at that point. */
+  #drill .vhead { --title-align: center; margin: 10px 10px 2px; padding: 7px var(--sp-2); border-bottom: none; border-radius: var(--r-2xl); gap: 6px;
     background: var(--sec); box-shadow: inset 0 1px 0 rgba(255,255,255,.06), 0 2px 6px rgba(0,0,0,.35); }
   #drill .vhead .ghost { width: 34px; height: 34px; padding: 0; border-radius: 50%; display: flex; align-items: center; justify-content: center; }
   #drill #dback { background: var(--bg); }
@@ -87,14 +92,32 @@
   /* Two-line title: name over the session's dial line, as the reference has name over "bot". The
      status dot rides ON the name line — centred against a two-line block it would float in the
      gutter, belonging to neither line. (Its own rules stay untouched; only its context moves.) */
-  .dtitle { flex: 1; min-width: 0; line-height: var(--lh-snug); }
-  .dtitle .nmrow { display: flex; align-items: center; gap: 7px; }
-  .dtitle .name { font-size: var(--t-title); font-weight: var(--w-semi); }
+  /* The cap is for WIDE viewports and measured as such: at 390px the available space is already the
+     limit (274px against a 290px cap, so it never fires), and at 820px it binds exactly, stopping the
+     title from spanning a tablet-width bar. It is NOT what fixes the long-name case on a phone —
+     `flex: 0 1 auto` on .name below is. Stated because the two are easy to credit the wrong way round. */
+  .dtitle { flex: 1; min-width: 0; max-width: 82%; margin-inline: auto; line-height: var(--lh-snug); text-align: var(--title-align, left); }
+  .dtitle .nmrow { display: flex; align-items: center; gap: 7px; min-width: 0; justify-content: var(--title-align, flex-start); }
+  /* An inert mirror of the status dot on the trailing side. Without it the dot widens the name row on
+     one side only, so the centred NAME lands ~9px right of the centred subtitle — two lines of one
+     title block on different axes, which is precisely the "slightly off" that gets noticed without
+     being diagnosed. Cheaper and less fragile than taking the dot out of flow. */
+  .dtitle .nmrow::after { content: ""; width: 9px; flex: none; }
+  /* A long session name truncates rather than shoving the title into a control. It stays centred until
+     it fills the space, then behaves like any other overlong label. */
+  /* flex: 0 1 auto DEFEATS the generic `.name { flex: 1 }` above. Inheriting it made the name box span
+     the whole row, so `justify-content` on .nmrow was inert and the status dot sat pinned at the title
+     block's left edge, 77px from the name it labels and touching the back button — the centring looked
+     like a bug rather than a decision, and the indicator lost its referent. */
+  .dtitle .name { flex: 0 1 auto; min-width: 0; font-size: var(--t-title); font-weight: var(--w-semi); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .dtitle .sub { display: block; font-size: var(--t-meta); color: var(--hint-raised); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   /* Beats `.vhead .ghost { color: var(--text) }` on specificity — without this the one destructive
      control on the bar renders identically to the two safe ones. (The emoji ✕ carried its own red;
      an SVG inherits, so the colour had to become a rule.) */
   .vhead .ghost.icon-danger { color: #e05555; }
+  /* Nothing to interrupt on an idle session, so the stop reads as unavailable rather than armed.
+     Dimmed rather than disabled: the pane can be mid-something the transcript has not shown yet. */
+  #dstop.idle { opacity: .38; }
   pre { margin: 0; padding: var(--sp-3); overflow: auto; flex: 1; white-space: pre; font: var(--t-mono)/1.45 ui-monospace, Menlo, Consolas, monospace; }
   .notice { padding: var(--sp-5) var(--sp-4); color: var(--hint); text-align: center; }
   .err { background: #c0392b; color: #fff; padding: var(--sp-2) var(--sp-3); font-size: var(--t-sub); display: none; }
@@ -129,6 +152,18 @@
   .sess { background: var(--sec); border-radius: var(--r-md); padding: var(--sp-3) 14px; margin: 0 0 10px; cursor: pointer; }
   .sess:active { filter: brightness(1.1); }
   .sess .top { display: flex; align-items: center; gap: var(--sp-2); }
+  /* Top-right of each card, and its geometry is the safety, not its colour.
+     - A 44px box: this is the one destructive control you meet mid-scroll, so it gets a real target.
+     - NO negative LEFT margin. A symmetric one cancelled `.sess .top`'s 8px gap exactly, leaving zero
+       dead pixels between "open this session" and "end this session" — one px either side of a boundary.
+     - Negative vertical margins so an oversized target doesn't grow the row.
+     - HINT grey, not red. Red once per row reads as "three things are wrong" before "three things can be
+       closed", and `.dot.dead` uses that identical red on the SAME row to mean the opposite. The confirm
+       carries the danger; the icon needn't shout it. */
+  .cardx { background: transparent; border: none; color: var(--hint-raised); cursor: pointer; flex: none;
+    width: 44px; height: 44px; margin: -10px calc(-1 * var(--sp-2)) -10px 0; padding: 0;
+    display: flex; align-items: center; justify-content: center; }
+  .cardx svg { width: 17px; height: 17px; display: block; }
   .sess .nm { font-weight: var(--w-semi); flex: 1; word-break: break-word; }
   .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--hint); flex: none; }
   .dot.on { background: #4caf50; animation: pulse 1.6s ease-in-out infinite; }
@@ -265,13 +300,11 @@
   <div class="vhead">
     <button id="dback" class="ghost" title="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg></button>
     <div class="dtitle"><span class="nmrow"><span class="dot" id="ddot"></span><span class="name" id="dname"></span></span><span class="sub" id="dsub"></span></div>
-    <!-- Stop is a SOLID square on purpose: it's the control you reach for under time pressure, and a
-         hollow one reads as an unchecked box. Compact is arrows pressing toward a centre line
-         ("fold this together"), not a window control; they stay well clear of the line so the pair
-         doesn't silhouette as an X beside the real one. -->
-    <button class="ghost" id="dstop" title="Interrupt"><svg viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx="2.5" fill="currentColor"/></svg></button>
-    <button class="ghost" id="dcompact" title="Compact"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="8 4.5 12 8.5 16 4.5"/><line x1="4" y1="12" x2="20" y2="12"/><polyline points="8 19.5 12 15.5 16 19.5"/></svg></button>
-    <button class="ghost icon-danger" id="dclose" title="Close session"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    <!-- A filled red octagon: the drawn equivalent of 🛑, which is what it has to read as instantly.
+         Drawn rather than the emoji so it matches the paperclip and mic, holds one colour instead of
+         rendering differently per platform, and keeps this bar free of the clip-art it was cleared of.
+         It reuses .icon-danger: with the ✕ gone from here, nothing else competes for that red. -->
+    <button class="ghost icon-danger" id="dstop" title="Stop" aria-label="Stop this session"><svg viewBox="0 0 24 24"><polygon points="8.28 2.5 15.72 2.5 21.5 8.28 21.5 15.72 15.72 21.5 8.28 21.5 2.5 15.72 2.5 8.28" fill="currentColor"/></svg></button>
   </div>
   <div id="dfeed"></div>
   <div class="composer">
@@ -670,7 +703,9 @@ async function renderSessions() {
     const chips = dialParts(s);
     c.innerHTML =
       '<div class="top"><span class="dot ' + dot + '"></span><span class="nm">' + esc(s.name) + '</span>' +
-      chips.map(x => '<span class="chip">' + x + "</span>").join("") + "</div>" +
+      chips.map(x => '<span class="chip">' + x + "</span>").join("") +
+      '<button class="cardx" title="Close session" aria-label="Close session ' + esc(s.name) + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>' +
+      "</div>" +
       (s.task ? '<div class="task">' + (s.working ? "⏳ " : "💬 ") + esc(s.task) + "</div>" : "") +
       (!s.alive ? '<div class="task">💀 no live pane</div>' : "") +
       '<div class="foot">' +
@@ -679,10 +714,28 @@ async function renderSessions() {
         (s.h5Pct != null ? "<span>5h " + s.h5Pct + "%</span>" : "") +
       "</div>";
     if (s.alive) c.onclick = () => openDrill(s.sid, s.name);
+    // stopPropagation, or closing a session also opens it: the ✕ sits inside the card's own tap target.
+    const x = c.querySelector(".cardx");
+    if (x) x.onclick = e => { e.stopPropagation(); closeSessionCard(s.sid, s.name); };
     el.appendChild(c);
   }
 }
 
+// Telegram's own confirm where the webview offers it (as the file-trash path already does), the browser's
+// otherwise — never no confirm. Closing from the LIST is more exposed than closing from inside a session:
+// there you had navigated into the one you meant, here you are thumb-scrolling past several. So it asks,
+// and it names the session, to the same standard as `@name /exit` in chat.
+function askConfirm(msg) {
+  return new Promise(res => {
+    if (tg && tg.showConfirm) tg.showConfirm(msg, ok => res(!!ok));
+    else res(window.confirm(msg));
+  });
+}
+async function closeSessionCard(sid, name) {
+  if (!(await askConfirm('Close session "' + name + '"? This ends the Claude session.'))) return;
+  // Not sessionAct(): that targets the OPEN drill-in, and this ✕ names a card that may not be it.
+  if (await writeOp("/api/session/act", { sid, action: "close" })) { showOk("Closing…"); renderSessions(); }
+}
 // A session's dial — model, effort, mode, agent — as escaped fragments. Shared by the card's chips
 // and the chat header's subtitle so the two can't drift into describing the same session differently.
 function dialParts(s) {
@@ -839,6 +892,7 @@ async function renderDrill() {
   if (!drillSid) return;
   let d; try { d = await api("/api/session/feed", { sid: drillSid }); } catch { return; }
   $("ddot").className = "dot " + (d.working ? "on" : "");
+  $("dstop").classList.toggle("idle", !d.working);
   lastDrill = d;
   paintFeed();
 }
@@ -847,12 +901,9 @@ async function sessionAct(action, text) {
   return !!d;
 }
 $("dstop").onclick = async () => { if (await sessionAct("stop")) showOk("Interrupted"); };
-$("dcompact").onclick = async () => { if (await sessionAct("compact")) showOk("Compacting…"); };
-$("dclose").onclick = async () => {
-  const name = $("dname").textContent;
-  if (!confirm('Close session "' + name + '"? This ends the Claude session.')) return;
-  if (await sessionAct("close")) { showOk("Closing…"); closeDrill(); }
-};
+// Compaction is reached by typing /compact in the composer, so the button is gone. Closing moved to the
+// sessions list (see closeSessionCard) — from inside a session there is nothing left to end but the one
+// you navigated into, and the list is where you can see which of several you mean.
 $("dsend").onclick = async () => {
   const ta = $("dtext"), text = ta.value.trim();
   if (!text) return;
