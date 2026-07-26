@@ -13,7 +13,12 @@
        a monospace face reads larger. */
     --t-meta: 12px;    /* chips, feet, uppercase labels, timestamps */
     --t-sub: 14px;     /* secondary lines — task summaries, hints, small controls */
-    --t-body: 16px;    /* message text, list rows, values */
+    --t-body: 16px;    /* list rows, values, and the composer field */
+    /* The feed's message text, and its OWN step rather than a bump to --t-body, for the reason
+       --fold-h gives above: --t-body also sizes the composer textarea, whose line box sets the
+       settled 52px pill and the six-line cap. Raising it there would have quietly grown both.
+       Set on .msg so BOTH sides move together — the two must stay matched. */
+    --t-msg: 18px;
     --t-title: 20px;   /* the one title size */
     --t-mono: 13px;    /* code and the activity feed */
     /* Spacing and radius. NOTE for anyone re-running the design lint: tokenising these also makes
@@ -243,14 +248,23 @@
   #drill { position: fixed; inset: 0; background: var(--bg); display: none; flex-direction: column; z-index: 5; }
   #drill.show { display: flex; }
   #dfeed { flex: 1; overflow-y: auto; padding: var(--sp-3); }
-  .msg { max-width: 88%; margin-bottom: var(--sp-2); padding: var(--sp-2) 11px; border-radius: var(--r-md); font-size: var(--t-body); white-space: pre-wrap; word-break: break-word; display: flow-root; }
+  .msg { max-width: 88%; margin-bottom: var(--sp-2); padding: var(--sp-2) 11px; border-radius: var(--r-md); font-size: var(--t-msg); white-space: pre-wrap; word-break: break-word; display: flow-root; }
   .msg.user { background: var(--btn); color: var(--btn-text); margin-left: auto; border-bottom-right-radius: var(--r-xs); }
   .msg.user.pending { opacity: .55; }
-  .msg.assistant { background: var(--sec); border-bottom-left-radius: var(--r-xs); }
-  .msg.activity { background: transparent; color: var(--hint); font: italic var(--t-meta)/1.4 ui-monospace, monospace; padding: 2px 11px; margin-bottom: 3px; }
+  /* Session replies carry NO bubble: full content width on the page background, as the reference
+     has them. The gutter is #dfeed's own padding — "full width" means the content column, not the
+     glass. With the fill gone it is vertical rhythm that separates one reply from the next, so the
+     margin doubles; at the old 8px, unbubbled replies ran together into one wall of text. The
+     bubble now marks the USER side alone, which is what tells the two apart. */
+  .msg.assistant { background: transparent; max-width: 100%; padding: 0; border-radius: 0; margin-bottom: var(--sp-4); }
+  /* Left padding drops to 0 with the assistant's: the 11px existed to line these up with bubbled
+     text, and against an unbubbled reply it reads as an indent that means nothing. Deliberately
+     NOT scaled with --t-body — these are the demoted tool lines, and the reference keeps them
+     small and dim while the prose grows. */
+  .msg.activity { background: transparent; color: var(--hint); font: italic var(--t-meta)/1.4 ui-monospace, monospace; padding: 2px 0; margin-bottom: 3px; }
   /* Live narration — prose, so it gets the app font, not the activity feed's monospace. The quote
      bar is the DOM counterpart of the <blockquote> the Telegram live card renders it in. */
-  .msg.thought { background: transparent; color: var(--hint); font-size: var(--t-sub); max-width: 100%; padding: 1px 0 1px 10px; margin: var(--sp-1) 0 6px 11px; border-left: 2px solid var(--sec); white-space: pre-wrap; }
+  .msg.thought { background: transparent; color: var(--hint); font-size: var(--t-sub); max-width: 100%; padding: 1px 0 1px 10px; margin: var(--sp-1) 0 6px 0; border-left: 2px solid var(--sec); white-space: pre-wrap; }
   /* Telegram-style composer: ONE pill spanning the strip, with the paperclip and the round
      mic/send button living INSIDE it — the pill wraps around the mic rather than sitting beside it. */
   /* No divider rule: in the reference the capsule's own fill is what separates the composer from the
@@ -305,12 +319,15 @@
      It used to be 26px against an inherited 1.45 line-height, which the type scale's 11->12px bump
      silently pushed to 27.4 — the bar drew over the text, and nothing in CSS complains about that. */
   .msg.clip { position: relative; max-height: 268px; overflow: hidden; padding-bottom: var(--fold-h); }
-  .msg.clip::after { content: ""; position: absolute; left: 0; right: 0; bottom: calc(var(--fold-h) - 4px); height: 52px; background: linear-gradient(transparent, var(--sec)); pointer-events: none; }
+  /* The fold fades to whatever is BEHIND the text. That used to be the assistant bubble's fill;
+     now the assistant sits on the page, so the base case is --bg and the user bubble keeps its
+     own override below. Left at --sec this paints a grey band across the page background. */
+  .msg.clip::after { content: ""; position: absolute; left: 0; right: 0; bottom: calc(var(--fold-h) - 4px); height: 52px; background: linear-gradient(transparent, var(--bg)); pointer-events: none; }
   .msg.user.clip::after { background: linear-gradient(transparent, var(--btn)); }
   /* ONE line, always: `.msg.clip`'s padding-bottom reserves exactly this bar's height, so a label
      that wraps to two lines overflows the strip and draws over the text. Ellipsis rather than wrap,
      and the time leads so it is never the part that gets cut. */
-  .msg.clip .more { position: absolute; left: 0; right: 0; bottom: 0; text-align: center; font-size: var(--t-meta); line-height: 1; opacity: .8; padding: var(--sp-1) 0 6px; background: var(--sec); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .msg.clip .more { position: absolute; left: 0; right: 0; bottom: 0; text-align: center; font-size: var(--t-meta); line-height: 1; opacity: .8; padding: var(--sp-1) 0 6px; background: var(--bg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .msg.user.clip .more { background: var(--btn); }
   .msg.clip.open { max-height: none; padding-bottom: var(--sp-2); }
   .msg.clip.open::after { display: none; }
