@@ -9,7 +9,7 @@ function card(over: Partial<SessionCard> = {}): SessionCard {
   return {
     sid: 's1', name: 'my-project', cwd: '/home/u/my-project', agent: 'claude',
     alive: true, working: false, task: null,
-    model: null, effort: null, mode: null, ctxPct: null, h5Pct: null, branch: null,
+    model: null, effort: null, mode: null, ctxPct: null, h5Pct: null, branch: null, tier: null,
     ...over,
   }
 }
