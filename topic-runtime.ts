@@ -251,9 +251,19 @@ async function ensureTopicFor(group: string, sessionId: string, cwd: string, pan
 const orphanPaneLogAt = new Map<string, number>()
 const ORPHAN_PANE_LOG_INTERVAL_MS = 10 * 60 * 1000
 
-// Where a session's outbound should go. DM mode → the allowlisted DM chats (no thread). Topic mode →
-// the bound group, threaded to the session's own topic (created on first use; General if unresolvable).
-export async function outboundTargetsFor(paneId: string | null): Promise<Array<{ chat: string; thread?: number }>> {
+export type OutboundTarget = { chat: string; thread?: number }
+// 'targets' — resolved to real chat(s) (possibly empty if the broadcast list is all-unreachable).
+// 'surfaceless' — resolved to a session that DELIBERATELY has no chat surface (headless, dismissed,
+// orphaned) — its outbound must never fall back to a human chat, only the bus/mini app.
+// 'unresolved' — the pane didn't resolve to a session (or the daemon has no group bound) at all —
+// the legitimate "no pane info, use the single allowlisted chat" case.
+export type OutboundIntent = 'targets' | 'surfaceless' | 'unresolved'
+
+// Where a session's outbound should go, and WHY — the reason distinguishes "no session for this
+// pane" (safe to fall back to the sole allowlisted chat) from "this session has no chat surface on
+// purpose" (must never fall back to a chat). calls.ts's resolveTarget needs that distinction; every
+// other caller only wants the targets, via the outboundTargetsFor wrapper below.
+async function resolveOutbound(paneId: string | null): Promise<{ targets: OutboundTarget[]; reason: OutboundIntent }> {
   // Skip chats marked pending-first-contact (never opened the bot DM) — otherwise every reply/
   // mirror/transcript send in the broadcast fan-out errors "chat not found" until they message.
   const dmTargets = () => loadAccess().allowFrom.filter(chat => !isChatUnreachable(chat)).map(chat => ({ chat }))
@@ -266,10 +276,10 @@ export async function outboundTargetsFor(paneId: string | null): Promise<Array<{
       // A DM chat lane's replies belong to the one DM that owns it, same as in topic mode. This is
       // the dmChat map — a different store from the dmLanes lookup below, so both rungs are needed.
       const chatOwner = chatIdForDmChatSession(sid)
-      if (chatOwner) return [{ chat: chatOwner }]
+      if (chatOwner) return { targets: [{ chat: chatOwner }], reason: 'targets' }
       // Headless session — same rule as the bound side: it has no chat surface of its own. It shows
       // up in the mini app, and the owner hears about it through the chat lane's routing notices.
-      if (getTopicBySession(sid)?.headless) return []
+      if (getTopicBySession(sid)?.headless) return { targets: [], reason: 'surfaceless' }
     }
     // Per-user DM lanes: a lane pane's replies address ONLY its owner chat — never fanned out to
     // every allowlisted DM (the old broadcast + the "chat not found" spam on a hard-to-reach id).
@@ -277,7 +287,7 @@ export async function outboundTargetsFor(paneId: string | null): Promise<Array<{
     // and reading the raw flag here skipped this rung and broadcast those lanes' replies to everyone.
     if (dmLanesOn() && sid) {
       const owner = chatForLaneSession(sid)
-      if (owner) return [{ chat: owner }]
+      if (owner) return { targets: [{ chat: owner }], reason: 'targets' }
     }
     // A sid-bearing pane registered to NO surface, on a box that runs per-chat surfaces (chat
     // lanes / DM lanes / headless sessions): that's an orphan — an old repair session, a foreign
@@ -291,28 +301,40 @@ export async function outboundTargetsFor(paneId: string | null): Promise<Array<{
         orphanPaneLogAt.set(key, now)
         process.stderr.write(`daemon: pane ${paneId} (sid ${sid}) is registered to no chat surface — dropping its outbound (not broadcasting)\n`)
       }
-      return []
+      return { targets: [], reason: 'surfaceless' }
     }
-    return dmTargets()
+    return { targets: dmTargets(), reason: sid ? 'targets' : 'unresolved' }
   }
   const group = getGroupChatId()
-  if (!group) return dmTargets()
+  if (!group) return { targets: dmTargets(), reason: 'unresolved' }
   const sid = paneId ? await sessionForPane(paneId) : null
   const cwd = paneId ? await paneCwd(paneId).catch(() => null) : null
-  if (!sid || !cwd) return [{ chat: group }]
-  if (sid === getGeneralSession()) return [{ chat: group }]   // anchored to General — unthreaded, never grows a topic
+  if (!sid || !cwd) return { targets: [{ chat: group }], reason: sid ? 'targets' : 'unresolved' }
+  if (sid === getGeneralSession()) return { targets: [{ chat: group }], reason: 'targets' }   // anchored to General — unthreaded, never grows a topic
   const dmChatOwner = chatIdForDmChatSession(sid)
-  if (dmChatOwner) return [{ chat: dmChatOwner }]   // a DM chat lane — replies go to its owner's DM only, never a forum topic
-  if (isSessionDismissed(sid)) return []   // user deleted this session's topic — drop its outbound entirely (no topic to route to, and it must NOT fall through to General's unthreaded chat)
+  if (dmChatOwner) return { targets: [{ chat: dmChatOwner }], reason: 'targets' }   // a DM chat lane — replies go to its owner's DM only, never a forum topic
+  if (isSessionDismissed(sid)) return { targets: [], reason: 'surfaceless' }   // user deleted this session's topic — drop its outbound entirely (no topic to route to, and it must NOT fall through to General's unthreaded chat)
   const entry = getTopicBySession(sid)
-  if (entry?.headless) return []   // headless session — it has no topic and must never mint one; its replies surface in the mini app only, not in the group
+  if (entry?.headless) return { targets: [], reason: 'surfaceless' }   // headless session — it has no topic and must never mint one; its replies surface in the mini app only, not in the group
   // A dead pane can still resolve a session here: the sticky @tg_session stamp outlives claude, and
   // account-level pings (usage/context warns) route via focus.activePaneId, which may be such a pane
   // — after a topic delete its dismissal is GC'd once claude is gone, so each warn re-minted the
   // deleted topic ("ghost topic reappears every usage warn"). Never CREATE a topic for a pane with
   // no live claude; an existing topic still routes (trailing teardown output keeps its thread).
-  if (!entry && !(await paneClaudeLive(paneId!))) return [{ chat: group }]
-  return [{ chat: group, thread: await ensureTopicFor(group, sid, cwd, paneId!) }]
+  if (!entry && !(await paneClaudeLive(paneId!))) return { targets: [{ chat: group }], reason: 'targets' }
+  return { targets: [{ chat: group, thread: await ensureTopicFor(group, sid, cwd, paneId!) }], reason: 'targets' }
+}
+
+// Where a session's outbound should go. DM mode → the allowlisted DM chats (no thread). Topic mode →
+// the bound group, threaded to the session's own topic (created on first use; General if unresolvable).
+export async function outboundTargetsFor(paneId: string | null): Promise<OutboundTarget[]> {
+  return (await resolveOutbound(paneId)).targets
+}
+
+// calls.ts's `.` resolution needs the reason too — see resolveOutbound above. Same resolution work
+// as outboundTargetsFor, done once, targets and reason both returned so no caller resolves twice.
+export async function paneOutboundIntent(paneId: string | null): Promise<{ targets: OutboundTarget[]; reason: OutboundIntent }> {
+  return resolveOutbound(paneId)
 }
 
 // Eagerly give a freshly-discovered session its topic (don't wait for its first reply) and post a

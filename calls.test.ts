@@ -24,11 +24,31 @@ test('resolveTarget: `.` with a pane uses the relay binding (outboundTargetsFor)
   // Regression for the off-MCP `tg send .` → owner-DM bug: a group-bound session whose pane the
   // relay routes to its group (no topics.json entry) must resolve `.` to that group, not allowFrom[0].
   // Stub the relay binding the same way pane-io.test stubs proc, then restore the real module.
-  mock.module('./topic-runtime.ts', () => ({ ...realTopic, outboundTargetsFor: async () => [{ chat: '-100GROUP', thread: 7 }] }))
+  mock.module('./topic-runtime.ts', () => ({ ...realTopic, paneOutboundIntent: async () => ({ targets: [{ chat: '-100GROUP', thread: 7 }], reason: 'targets' }) }))
   try {
     expect(await resolveTarget({ chat_id: '.', pane: '%0' })).toEqual({ chat: '-100GROUP', thread: 7 })
     // An explicit chat id still wins over the pane binding.
     expect(await resolveTarget({ chat_id: '-555', pane: '%0' })).toEqual({ chat: '-555' })
+  } finally {
+    mock.module('./topic-runtime.ts', () => realTopic)
+  }
+})
+
+test('resolveTarget: unresolved pane (no session at all) falls back to the sole allowlisted chat', async () => {
+  mock.module('./topic-runtime.ts', () => ({ ...realTopic, paneOutboundIntent: async () => ({ targets: [], reason: 'unresolved' }) }))
+  try {
+    if (loadAccess().allowFrom.length === 1) expect((await resolveTarget({ chat_id: '.', pane: '%0' })).chat).toBe(OWNER())
+  } finally {
+    mock.module('./topic-runtime.ts', () => realTopic)
+  }
+})
+
+test('resolveTarget: surfaceless pane (headless/dismissed/orphan session) throws instead of falling back to a chat', async () => {
+  // The incident this guards: a headless scratch session's `tg reply .` must never land in the
+  // owner's DM — its only surfaces are the bus and the mini app.
+  mock.module('./topic-runtime.ts', () => ({ ...realTopic, paneOutboundIntent: async () => ({ targets: [], reason: 'surfaceless' }) }))
+  try {
+    await expect(resolveTarget({ chat_id: '.', pane: '%0' })).rejects.toThrow('this session has no chat surface — its replies reach the mini app and the bus (tg ask/answer/post), not a chat')
   } finally {
     mock.module('./topic-runtime.ts', () => realTopic)
   }
