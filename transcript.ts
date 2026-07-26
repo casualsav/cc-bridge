@@ -458,6 +458,38 @@ export function turnInProgress(file: string): boolean {
   return lastAssistant.message?.stop_reason === 'tool_use'
 }
 
+// A crashed session leaves its last agent file frozen at stop_reason 'tool_use' forever, and a
+// phantom permanent "1 subagent live" would destroy exactly the trust this feature exists to
+// create; 30 min is comfortably longer than the 10-min max Bash timeout a legitimately blocked
+// agent can sit in.
+const SUBAGENT_STALE_MS = 30 * 60_000
+
+// How many of this session's subagents are still running. Subagent turns are NOT in this
+// transcript (the isSidechain filter elsewhere in this file is a legacy of when they were) —
+// each gets its own file under `<transcript-without-.jsonl>/subagents/agent-<id>.jsonl`. This
+// applies the same predicate `turnInProgress` uses for the main thread, one directory over.
+// It is the only signal that survives a subagent blocked in a long tool call: the file stops
+// growing so mtime says nothing, no process exists because subagents run in-process, and the
+// pane's "Waiting for N background agent(s) to finish" line is inline content that scrolls out
+// of any tail window.
+export function liveSubagents(file: string): number {
+  try {
+    const dir = file.replace(/\.jsonl$/, '') + '/subagents'
+    let live = 0
+    for (const name of readdirSync(dir)) {
+      if (!/^agent-.+\.jsonl$/.test(name)) continue
+      const path = join(dir, name)
+      const st = statSync(path)
+      if (Date.now() - st.mtimeMs > SUBAGENT_STALE_MS) continue
+      // Entries in an agent's own file carry isSidechain:true, so this must NOT filter on it.
+      let lastAssistant: Entry | null = null
+      for (const e of readEntries(path)) if (e.type === 'assistant') lastAssistant = e
+      if (lastAssistant?.message?.stop_reason === 'tool_use') live++
+    }
+    return live
+  } catch { return 0 }   // no subagents dir at all — the common case, not an error
+}
+
 // Live token counts for the current turn, summed from each assistant entry's `usage`. `output` is
 // the tokens generated across the turn's assistant steps — the count Claude Code's footer shows;
 // it steps up per tool-round (the transcript records usage per completed message, not per token, so

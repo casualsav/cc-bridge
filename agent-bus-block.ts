@@ -85,13 +85,15 @@ export function formatDigestBlock(entries: DigestEntry[], sinceLabel: string): s
 // Each agent may carry a context-window % (agent-bus §7): Claude panes report one, Hermes one-shots
 // don't → 🟢<70 / 🟡<90 / 🔴≥90 prefix; agents with no % render name-only. Clamp widened to 110 so
 // several agents' pcts survive (a per-agent `🟢 name 45%` cell blows the old 72 at 3+ agents).
-export type RosterAgent = { name: string; ctxPct?: number | null }
+export type RosterAgent = { name: string; ctxPct?: number | null; subagents?: number }
 export function formatRosterLine(agents: RosterAgent[]): string | null {
   if (agents.length <= 1) return null
   const cell = (a: RosterAgent) => {
-    if (a.ctxPct == null) return a.name
+    const n = a.subagents ?? 0
+    const subs = n > 0 ? ` · ${n} subagent${n === 1 ? '' : 's'} live` : ''
+    if (a.ctxPct == null) return a.name + subs
     const glyph = a.ctxPct < 70 ? '🟢' : a.ctxPct < 90 ? '🟡' : '🔴'
-    return `${glyph} ${a.name} ${a.ctxPct}%`
+    return `${glyph} ${a.name} ${a.ctxPct}%${subs}`
   }
   const raw = `☎️ ${agents.map(cell).join(' · ')}`
   const clamped = [...raw].length > 110 ? clampChars(raw, 109) + '…' : raw

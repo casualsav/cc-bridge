@@ -31,6 +31,7 @@ function codexRoots(): string[] {
 export const latestFinalReply = (file: string) => (isCodex(file) ? cx.latestFinalReply(file) : cc.latestFinalReply(file))
 export const finalRepliesAfter = (file: string, afterUuid: string) => (isCodex(file) ? cx.finalRepliesAfter(file, afterUuid) : cc.finalRepliesAfter(file, afterUuid))
 export const turnInProgress = (file: string) => (isCodex(file) ? cx.turnInProgress(file) : cc.turnInProgress(file))
+export const liveSubagents = (file: string) => (isCodex(file) ? 0 : cc.liveSubagents(file))   // Codex rollouts have no subagent files
 export const turnAnchorUuid = (file: string) => (isCodex(file) ? cx.turnAnchorUuid(file) : cc.turnAnchorUuid(file))
 export const currentTurnActivity = (file: string) => (isCodex(file) ? cx.currentTurnActivity(file) : cc.currentTurnActivity(file))
 export const currentTurnTokens = (file: string) => (isCodex(file) ? cx.currentTurnTokens(file) : cc.currentTurnTokens(file))

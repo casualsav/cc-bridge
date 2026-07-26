@@ -117,6 +117,14 @@ test('formatRosterLine renders per-agent ctx% with 🟢<70 / 🟡<90 / 🔴≥90
     .toBe('☎️ 🟢 Opus 45% · hermes · Sonnet')
 })
 
+test('formatRosterLine appends a live-subagent count, singular at 1, and omits it at 0', () => {
+  expect(formatRosterLine([{ name: 'A', ctxPct: 45, subagents: 2 }, { name: 'B', ctxPct: 82, subagents: 1 }, { name: 'C', ctxPct: 95, subagents: 0 }]))
+    .toBe('☎️ 🟢 A 45% · 2 subagents live · 🟡 B 82% · 1 subagent live · 🔴 C 95%')
+  // an agent with no ctx% (hermes one-shot) still carries its count
+  expect(formatRosterLine([{ name: 'hermes', subagents: 3 }, { name: 'idle' }]))
+    .toBe('☎️ hermes · 3 subagents live · idle')
+})
+
 test('formatRosterLine clamps THEN escapes so a & near the 110-char limit never becomes a split entity', () => {
   // 100 a's + 15 &'s: raw is >110 so it clamps; several &'s survive the clamp and sit at the boundary.
   // The BUGGY order (escape first → each & becomes 5-char &amp; → slice) would cut a trailing "&amp;"

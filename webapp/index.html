@@ -990,7 +990,7 @@ async function renderSessions() {
       chips.map(x => '<span class="chip">' + x + "</span>").join("") +
       '<button class="cardx" title="Close session" aria-label="Close session ' + esc(s.name) + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>' +
       "</div>" +
-      (s.task ? '<div class="task">' + (s.working ? "⏳ " : "💬 ") + esc(s.task) + "</div>" : "") +
+      (s.task ? '<div class="task">' + (s.working ? "⏳ " : "💬 ") + (s.subagents > 0 ? esc(s.subagents + " subagent" + (s.subagents === 1 ? "" : "s") + " live · ") : "") + esc(s.task) + "</div>" : "") +
       (!s.alive ? '<div class="task">💀 no live pane</div>' : "") +
       '<div class="foot">' +
         (s.branch ? "<span>🌿 " + esc(s.branch) + "</span>" : "") +

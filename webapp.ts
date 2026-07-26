@@ -57,7 +57,7 @@ export interface SettingsView {
 // the current activity line (working) or the last reply snippet (idle). alive=false ⇒ dead pane.
 export interface SessionCard {
   sid: string; name: string; cwd: string; agent: string
-  alive: boolean; working: boolean; task: string | null
+  alive: boolean; working: boolean; subagents: number; task: string | null
   model: string | null; effort: string | null; mode: string | null
   ctxPct: number | null; h5Pct: number | null; branch: string | null
   tier: string | null   // 'max' / 'pro' / … from the launch-banner sample (daemon.ts paneTiers); null when never sampled
