@@ -499,7 +499,7 @@ if (commitMsg) {
     console.log(`  note: NOT committed (not this deploy's to stage — commit them yourself):`)
     for (const f of others) console.log(`      ${f}`)
   }
-  const body = `${commitMsg}\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`
+  const body = `${commitMsg}\n\nCo-Authored-By: Claude Fable 5 <noreply@anthropic.com>`
   const c = sh('git', ['commit', '-q', '-m', body], REPO); if (c.status !== 0) die(`git commit failed: ${c.stderr || c.stdout}`)
   const p = sh('git', ['push'], REPO); if (p.status !== 0) die(`git push failed: ${p.stderr}`)
   step('pushed → origin (releases to installs)')

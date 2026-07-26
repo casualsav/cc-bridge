@@ -68,7 +68,7 @@ resolves only there), then restarts the daemon (the watchdog/SessionStart hook r
 newest cache version) and verifies it came back on the new version. The type-check runs **before**
 the checkout's version files are stamped, so a failed build never dirties the working tree. Flags:
 `--no-restart` (ship to cache without touching the live daemon) and `--commit "msg"` (commit + push
-after a clean deploy). Commits end with `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`.
+after a clean deploy). Commits end with `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
 
 Doing it by hand (only if the script can't run): copy the changed `.ts` to the cache `<ver>` dir +
 the marketplace dir → `bun build daemon.ts --target=bun` to type-check → restart the daemon
