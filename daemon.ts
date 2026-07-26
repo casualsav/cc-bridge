@@ -788,15 +788,21 @@ function recordAccountTier(name: string, tier: AccountTier): void {
 // in. 10×1s is also the false-positive guard for detectAccountTier: it only runs in the seconds
 // right after a launch, before conversation text can grow a look-alike "· Claude Pro" line. Never
 // throws — a launch must never fail because the tier sample did.
-async function sampleAccountTier(paneId: string): Promise<void> {
+// `freshLaunch` gates the ACCOUNT record: only a pane the daemon itself just launched (spawn or
+// confirmed relaunch) may feed drift state. Boot re-adopts and discovery find OLD panes whose
+// screen can still hold an ancient banner — the %13 zombie (a 2.1.205 pane idle on its welcome
+// screen since the real stale-Pro day) fired a false Max→Pro alert on v0.4.92's first boot, and
+// would have re-fired on every deploy. The per-pane display record stays unconditional: for the
+// pane itself, even an old banner is a true reading.
+async function sampleAccountTier(paneId: string, freshLaunch = false): Promise<void> {
   for (let i = 0; i < 10; i++) {
     const cap = await capturePane(paneId).catch(() => '')
     const tier = cap ? detectAccountTier(cap) : null
     if (tier) {
       recordPaneTier(paneId, tier)
       const account = await paneAccount(paneId).catch(() => MAIN_ACCOUNT)
-      recordAccountTier(account.name, tier)
-      process.stderr.write(`daemon: tier[${paneId}] = ${tier} (account ${account.name})\n`)
+      if (freshLaunch) recordAccountTier(account.name, tier)
+      process.stderr.write(`daemon: tier[${paneId}] = ${tier} (account ${account.name}${freshLaunch ? '' : ', display only'})\n`)
       return
     }
     await sleep(1000)
@@ -2302,6 +2308,7 @@ async function noteDiscoveredPane(paneId: string): Promise<void> {
 function registerSpawnedPane(paneId: string): void {
   if (offMcpPanes.has(paneId)) return
   offMcpPanes.add(paneId)
+  void sampleAccountTier(paneId, true)   // daemon-spawned = fresh by construction, so it may feed drift state
   if (!focus.activePaneId) adoptPane(paneId)
   else void noteDiscoveredPane(paneId)   // topic-mode sibling: gets its topic, no focus steal
 }
@@ -6872,7 +6879,7 @@ async function relaunchAgentInPane(pane: string, agent: AgentKind, line: string)
       process.stderr.write(`daemon: relaunch[${attempt}] pane ${pane} already runs an agent — ${attempt === 0 ? 'the old one never exited, not typing' : 'attempt 0 landed late, not retyping'}\n`)
       if (attempt === 0) return false
       await waitForSettle(pane, 400, 30_000)
-      void sampleAccountTier(pane)
+      void sampleAccountTier(pane, true)
       return true
     }
     // The teardown repaints for a beat after the process group changes; a still-moving pane is one
@@ -6880,7 +6887,7 @@ async function relaunchAgentInPane(pane: string, agent: AgentKind, line: string)
     await waitForSettle(pane, 300, 8000)
     if (await agentInPane()) {
       await waitForSettle(pane, 400, 30_000)
-      if (attempt > 0) void sampleAccountTier(pane)
+      if (attempt > 0) void sampleAccountTier(pane, true)
       return attempt > 0
     }
     process.stderr.write(`daemon: relaunch[${attempt}] typing into pane ${pane} :: hash -r; ${line}\n`)
@@ -6894,7 +6901,7 @@ async function relaunchAgentInPane(pane: string, agent: AgentKind, line: string)
       if (!(await paneAlive(pane))) return false
       if ((await paneCommand(pane).catch(() => '')) === 'claude') {
         await waitForSettle(pane, 400, 30_000)
-        void sampleAccountTier(pane)
+        void sampleAccountTier(pane, true)
         return true
       }
       await sleep(1000)
