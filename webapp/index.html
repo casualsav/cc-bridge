@@ -42,6 +42,28 @@
   /* Header ghosts carry the glyph's own color (the composer's are emoji, which don't), and they're
      primary controls — hint grey leaves ← and ⏹ barely visible on the dark background. */
   .vhead .ghost { color: var(--text); }
+  /* Chat header — the drill-in ONLY (the file viewer keeps the flat bar; it isn't this screen).
+     A lifted island inset from the edges, per the reference. On a near-black canvas there is no
+     ambient light for a surface to catch, so the lift has to be manufactured: an opaque raised fill
+     plus a hairline rim along the top edge where light would land. Deliberately NO accent bloom —
+     a glow is for the one thing you want clicked, and this is a utility bar. */
+  /* 10px matches the composer's inset, so the two surfaces that bracket the screen line up. */
+  #drill .vhead { margin: 10px 10px 2px; padding: 7px 8px; border-bottom: none; border-radius: 20px; gap: 6px;
+    background: var(--sec); box-shadow: inset 0 1px 0 rgba(255,255,255,.06), 0 2px 6px rgba(0,0,0,.35); }
+  #drill .vhead .ghost { width: 34px; height: 34px; padding: 0; border-radius: 50%; display: flex; align-items: center; justify-content: center; }
+  #drill #dback { background: var(--bg); }
+  .ghost svg { width: 19px; height: 19px; display: block; }
+  /* Two-line title: name over the session's dial line, as the reference has name over "bot". The
+     status dot rides ON the name line — centred against a two-line block it would float in the
+     gutter, belonging to neither line. (Its own rules stay untouched; only its context moves.) */
+  .dtitle { flex: 1; min-width: 0; line-height: 1.25; }
+  .dtitle .nmrow { display: flex; align-items: center; gap: 7px; }
+  .dtitle .name { font-size: 16px; font-weight: 600; }
+  .dtitle .sub { display: block; font-size: 12px; color: var(--hint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* Beats `.vhead .ghost { color: var(--text) }` on specificity — without this the one destructive
+     control on the bar renders identically to the two safe ones. (The emoji ✕ carried its own red;
+     an SVG inherits, so the colour had to become a rule.) */
+  .vhead .ghost.icon-danger { color: #e05555; }
   pre { margin: 0; padding: 12px; overflow: auto; flex: 1; white-space: pre; font: 13px/1.45 ui-monospace, Menlo, Consolas, monospace; }
   .notice { padding: 24px 16px; color: var(--hint); text-align: center; }
   .err { background: #c0392b; color: #fff; padding: 8px 12px; font-size: 13px; display: none; }
@@ -98,14 +120,28 @@
      bar is the DOM counterpart of the <blockquote> the Telegram live card renders it in. */
   .msg.thought { background: transparent; color: var(--hint); font-size: 13.5px; max-width: 100%; padding: 1px 0 1px 10px; margin: 4px 0 6px 11px; border-left: 2px solid var(--sec); white-space: pre-wrap; }
   /* Telegram-style composer: one pill input with the paperclip/mic INSIDE it, a round send button */
-  .composer { display: flex; gap: 8px; padding: 8px 10px calc(8px + env(safe-area-inset-bottom)); border-top: 1px solid var(--sec); align-items: flex-end; }
-  .inputwrap { flex: 1; display: flex; align-items: flex-end; background: var(--sec); border-radius: 19px; padding: 2px 4px 2px 14px; min-height: 40px; }
+  /* No divider rule: in the reference the capsule's own fill is what separates the composer from the
+     feed. The rim belongs on the capsule, where it lights an actual edge — put it on this full-bleed
+     strip instead and it draws the very hairline the line above says the design doesn't have. */
+  .composer { display: flex; gap: 8px; padding: 8px 10px calc(8px + env(safe-area-inset-bottom)); align-items: flex-end; }
+  .inputwrap { flex: 1; display: flex; align-items: flex-end; background: var(--sec); border-radius: 20px; padding: 2px 4px 2px 14px; min-height: 40px; box-shadow: inset 0 1px 0 rgba(255,255,255,.06); }
   /* Explicit font (not `inherit`): Android WebViews don't reliably propagate an inherited font
      into the IME composition / autofill layer, which then renders in the UA default. */
   .inputwrap textarea { flex: 1; resize: none; border: none; outline: none; background: transparent; color: var(--text); padding: 9px 0; font: 15px/1.35 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; max-height: 110px; }
   .ghost { background: transparent; border: none; color: var(--hint); font-size: 19px; padding: 8px 7px; cursor: pointer; line-height: 1; flex: none; }
+  /* The capsule's controls should sit a step above its placeholder, as they do in the reference —
+     at one tone the whole capsule reads as decoration rather than two affordances beside a label. */
+  .inputwrap .ghost { color: var(--text); opacity: .72; }
   .ghost.recing { color: #e05555; animation: pulse 1.2s ease-in-out infinite; }
-  .sendbtn { width: 40px; height: 40px; border-radius: 50%; border: none; background: var(--btn); color: var(--btn-text); font-size: 17px; flex: none; display: flex; align-items: center; justify-content: center; padding: 0 2px 2px 0; }
+  .inputwrap .ghost.recing { opacity: 1; }
+  /* Reduced motion: still the two pulses, additively — the base rules and @keyframes pulse are left
+     byte-exact rather than edited, because both indicators are load-bearing and shared. Nothing is
+     lost when the animation stops: colour already carries both states (green vs grey, red vs hint). */
+  @media (prefers-reduced-motion: reduce) { .dot.on, .ghost.recing { animation: none; } }
+  .sendbtn { width: 40px; height: 40px; border-radius: 50%; border: none; background: var(--btn); color: var(--btn-text); font-size: 17px; flex: none; display: flex; align-items: center; justify-content: center; padding: 0; box-shadow: 0 1px 4px rgba(0,0,0,.35); }
+  /* The plane's bounding box is symmetric but its MASS is not: centroid (13.8, 10.2) against a box
+     centre of (12, 12), i.e. 1.8 units up and right. Nudge down-left by that, scaled 19/24. */
+  .sendbtn svg { width: 19px; height: 19px; display: block; transform: translate(-1.4px, 1.4px); }
   /* Feed extras: command chip, attachment chip, inline photo, light markdown */
   .msg.cmd { background: transparent; color: var(--link); font: 13px/1.4 ui-monospace, Menlo, monospace; margin-left: auto; padding: 2px 11px; max-width: 88%; }
   /* Long message: collapsed to a readable height, tapping opens it. Fading the fold makes the cut
@@ -175,22 +211,27 @@
 
 <div id="drill">
   <div class="vhead">
-    <button id="dback" class="ghost">←</button>
-    <span class="dot" id="ddot"></span>
-    <span class="name" id="dname"></span>
-    <button class="ghost" id="dstop" title="Interrupt">⏹</button>
-    <button class="ghost" id="dcompact" title="Compact">🗜</button>
-    <button class="ghost" id="dclose" title="Close session" style="color:#e05555">✕</button>
+    <button id="dback" class="ghost" title="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg></button>
+    <div class="dtitle"><span class="nmrow"><span class="dot" id="ddot"></span><span class="name" id="dname"></span></span><span class="sub" id="dsub"></span></div>
+    <!-- Stop is a SOLID square on purpose: it's the control you reach for under time pressure, and a
+         hollow one reads as an unchecked box. Compact is arrows pressing toward a centre line
+         ("fold this together"), not a window control; they stay well clear of the line so the pair
+         doesn't silhouette as an X beside the real one. -->
+    <button class="ghost" id="dstop" title="Interrupt"><svg viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx="2.5" fill="currentColor"/></svg></button>
+    <button class="ghost" id="dcompact" title="Compact"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="8 4.5 12 8.5 16 4.5"/><line x1="4" y1="12" x2="20" y2="12"/><polyline points="8 19.5 12 15.5 16 19.5"/></svg></button>
+    <button class="ghost icon-danger" id="dclose" title="Close session"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
   </div>
   <div id="dfeed"></div>
   <div class="composer">
     <div class="inputwrap">
       <textarea id="dtext" rows="1" placeholder="Message this session…" autocomplete="off" spellcheck="false"></textarea>
-      <button id="datt" class="ghost" title="Attach a file">📎</button>
-      <button id="dmic" class="ghost" title="Record a voice note">🎤</button>
+      <button id="datt" class="ghost" title="Attach a file"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>
+      <button id="dmic" class="ghost" title="Record a voice note"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg></button>
     </div>
     <input id="dfile" type="file" hidden>
-    <button id="dsend" class="sendbtn">➤</button>
+    <!-- Solid, not outlined: this is the loudest element on the screen, and an outline plane is the
+         quietest glyph treatment there is. Every chat app puts a filled mark on a filled button. -->
+    <button id="dsend" class="sendbtn" title="Send"><svg viewBox="0 0 24 24"><polygon points="22 2 15 22 11 13 2 9 22 2" fill="currentColor"/></svg></button>
   </div>
 </div>
 
@@ -571,12 +612,7 @@ async function renderSessions() {
     const c = document.createElement("div");
     c.className = "sess";
     const dot = !s.alive ? "dead" : s.working ? "on" : "";
-    const chips = [];
-    // Model and effort are independent: a session whose model didn't parse must still show ⚡effort.
-    const dial = [s.model ? esc(s.model) : "", s.effort ? "⚡" + esc(s.effort === "medium" ? "med" : s.effort) : ""].filter(Boolean).join(" ");
-    if (dial) chips.push(dial);
-    if (s.mode && s.mode !== "default") chips.push(esc(s.mode === "bypassPermissions" ? "bypass" : s.mode));
-    if (s.agent && s.agent !== "claude") chips.push(esc(s.agent));
+    const chips = dialParts(s);
     c.innerHTML =
       '<div class="top"><span class="dot ' + dot + '"></span><span class="nm">' + esc(s.name) + '</span>' +
       chips.map(x => '<span class="chip">' + x + "</span>").join("") + "</div>" +
@@ -592,11 +628,26 @@ async function renderSessions() {
   }
 }
 
+// A session's dial — model, effort, mode, agent — as escaped fragments. Shared by the card's chips
+// and the chat header's subtitle so the two can't drift into describing the same session differently.
+function dialParts(s) {
+  const parts = [];
+  // Model and effort are independent: a session whose model didn't parse must still show ⚡effort.
+  const dial = [s.model ? esc(s.model) : "", s.effort ? "⚡" + esc(s.effort === "medium" ? "med" : s.effort) : ""].filter(Boolean).join(" ");
+  if (dial) parts.push(dial);
+  if (s.mode && s.mode !== "default") parts.push(esc(s.mode === "bypassPermissions" ? "bypass" : s.mode));
+  if (s.agent && s.agent !== "claude") parts.push(esc(s.agent));
+  return parts;
+}
 // ---- Drill-in: conversation feed + composer + stop/compact ----
 let drillSid = null, drillTimer = null, lastDrill = null, optimistic = [];
 function openDrill(sid, name) {
   drillSid = sid; lastDrill = null; optimistic = []; feedSig = "";
   $("dname").textContent = name;
+  // Subtitle from the sessions snapshot. Deep-linked opens can arrive before it loads — an empty
+  // second line is the right degradation, so no lookup failure is worth reporting here.
+  const s = SESSIONS.find(x => x.sid === sid);
+  $("dsub").innerHTML = s ? dialParts(s).join(" · ") : "";
   $("dfeed").innerHTML = '<div class="notice">Loading…</div>';
   $("drill").classList.add("show");
   renderDrill();
@@ -746,6 +797,10 @@ $("dfile").onchange = () => {
 // recording API (Telegram Desktop) — cheap feature-detect, per the owner's ask; a permission
 // denial on a capable webview still gets the error toast.
 let rec = null;
+// The button swaps to a stop glyph while recording. Its resting icon is read back out of the markup
+// rather than repeated here, so the mic SVG lives in exactly one place.
+const MIC_HTML = $("dmic").innerHTML;
+const RECSTOP_HTML = '<svg viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx="2.5" fill="currentColor"/></svg>';
 if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder)) $("dmic").style.display = "none";
 $("dmic").onclick = async () => {
   if (rec) { rec.stop(); return; }
@@ -762,14 +817,14 @@ $("dmic").onclick = async () => {
     stream.getTracks().forEach(t => t.stop());
     const type = (rec && rec.mimeType) || mime || "audio/webm";
     rec = null;
-    $("dmic").classList.remove("recing"); $("dmic").textContent = "🎤";
+    $("dmic").classList.remove("recing"); $("dmic").innerHTML = MIC_HTML;
     const blob = new Blob(chunks, { type });
     if (blob.size < 1000) { showErr("Recording too short"); return; }
     const ext = /mp4/.test(type) ? "m4a" : /ogg/.test(type) ? "ogg" : "webm";
     attachToSession(new File([blob], "voice-note." + ext, { type }), { voice: true, label: "🎤 Transcribing…" });
   };
   rec.start();
-  $("dmic").classList.add("recing"); $("dmic").textContent = "⏹";
+  $("dmic").classList.add("recing"); $("dmic").innerHTML = RECSTOP_HTML;
 };
 
 // ---- "+" new session sheet: name + model/effort/mode dials → /api/session/spawn ----
