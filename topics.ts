@@ -178,6 +178,44 @@ export function setBaseCwd(cwd: string | null): void {
 export function getTopicBySession(sessionId: string): TopicEntry | undefined { ensureLoaded(); return store.topics[sessionId] }
 export function topicAgent(entry: TopicEntry | undefined): AgentKind { return normalizeAgent(entry?.agent) }
 
+// `tg reopen`'s target resolution. Pure and normalize-injected rather than importing
+// normalizeEndpointName (agent-bus.ts) directly: agent-bus.ts pulls in access.ts, which pulls in
+// THIS module (getGroupChatId) — importing it back here would cycle. The daemon passes its own
+// normalizeEndpointName in.
+//
+// A sessionId (or an unambiguous PREFIX of one, ≥4 chars — shorter collides too easily) always wins
+// over a name match, so a killed row stays reachable precisely even when several closed rows share
+// its display name; an ambiguous prefix is not a hit; it falls through to the name match instead. A
+// name match considers CLOSED rows only — an open row sharing the name means the session is already
+// live under it, which the caller must report as such rather than as "found" ('live-only', no `hit`:
+// there is no closed row to point back to). Several closed rows sharing a name resolve to the one
+// killed most recently; `others` carries the rest (newest-first) so the caller can offer them by sid.
+export function resolveReopenTarget(
+  rows: Array<[string, TopicEntry]>,
+  target: string,
+  normalize: (name: string) => string,
+): { hit: [string, TopicEntry] | null; reason: 'sid' | 'sid-prefix' | 'name' | 'none' | 'live-only'; others: string[] } {
+  const t = target.trim()
+  const exact = rows.find(([sid]) => sid === t)
+  if (exact) return { hit: exact, reason: 'sid', others: [] }
+  if (t.length >= 4) {
+    const prefixed = rows.filter(([sid]) => sid.startsWith(t))
+    if (prefixed.length === 1) return { hit: prefixed[0]!, reason: 'sid-prefix', others: [] }
+  }
+  const wanted = normalize(t)
+  if (wanted) {
+    const named = rows.filter(([, e]) => normalize(e.name) === wanted)
+    const closed = named.filter(([, e]) => e.closed)
+    if (closed.length) {
+      closed.sort((a, b) => (b[1].killedAt ?? 0) - (a[1].killedAt ?? 0))
+      const [hit, ...rest] = closed
+      return { hit: hit!, reason: 'name', others: rest.map(([sid]) => sid) }
+    }
+    if (named.length) return { hit: null, reason: 'live-only', others: [] }
+  }
+  return { hit: null, reason: 'none', others: [] }
+}
+
 export function getSessionByThread(threadId: number): string | undefined {
   // A headless entry has no threadId key, so it reads as undefined — an untyped (JSON-derived)
   // caller passing a nullish thread id would otherwise match it. Only a real thread id resolves.

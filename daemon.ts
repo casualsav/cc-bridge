@@ -82,7 +82,7 @@ import {
   getGeneralSession, setGeneralSession, getGeneralCwd, findTopicByCwd, getBaseCwd, setBaseCwd,
   topicAgent, type TopicEntry,
   getDmChatSession, setDmChatSession, clearDmChatSession, listDmChatSessions, chatIdForDmChatSession,
-  isSessionDismissed,
+  isSessionDismissed, resolveReopenTarget,
 } from './topics.ts'
 import { getTopicCreate, setTopicCreate, setTopicCreateAgent, removeTopicCreate, topicCreateAgentLabel } from './topic-create.ts'
 import {
@@ -5088,42 +5088,62 @@ async function handleCall(
         // An already-dead session is left ALONE, entry and all: dropping the row here would be the one
         // close that `tg reopen` can't undo (the row is what remembers the folder + conversation).
         appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'kill', from: nameForEndpoint(fromSid, endpoints), to: target, text: alive ? 'exiting' : 'already dead' })
+        // The hint is only unambiguous while this is the sole closed row under that name: with the
+        // killedAt just stamped above it IS the newest, so a bare `tg reopen <name>` picks it — but
+        // if OTHER closed rows already share the name, spell out the sid so the undo is precise.
+        const otherClosed = listTopics().filter(t => t.closed && t.sessionId !== res.id && normalizeEndpointName(t.name) === normalizeEndpointName(target))
+        const sidNote = otherClosed.length ? ` (this one specifically: \`tg reopen ${res.id.slice(0, 8)}\`)` : ''
         text = alive
-          ? `ending @${target} — undo with \`tg reopen ${target}\``
-          : `@${target} was already down — \`tg reopen ${target}\` brings it back`
+          ? `ending @${target} — undo with \`tg reopen ${target}\`${sidNote}`
+          : `@${target} was already down — \`tg reopen ${target}\` brings it back${sidNote}`
         break
       }
-      // `tg reopen <name>` — the undo for `tg kill`. Relaunches the SAME session id in the SAME folder
-      // with `--resume <conversation>` (falling back to `-c`, the newest conversation in that folder,
-      // when the entry never recorded one), so the session keeps its history, its bus name and its
-      // topic tab. Same permission test as kill: if you could close it, you can bring it back.
+      // `tg reopen <name or session id>` — the undo for `tg kill`. Relaunches the SAME session id in
+      // the SAME folder, keeping the same bus name and topic tab. A conversation resumes with
+      // `--resume`; a session that never completed a turn has nothing to resume (`claude -c` there
+      // exits 1, taking the pane and the row's name with it — see relaunchFreshSession's precedent,
+      // daemon.ts:7342-7346) so it gets a genuinely fresh launch instead. Same permission test as
+      // kill: if you could close it, you can bring it back.
       case 'reopen': {
         const pane = args.pane ? String(args.pane) : null
         const fromSid = pane ? await sessionForPane(pane) : null
         if (!fromSid) { write({ t: 'result', id, ok: false, text: '`tg reopen` must run inside a bridged session' }); return }
         const target = String(args.name ?? '').trim()
-        if (!target) { write({ t: 'result', id, ok: false, text: 'usage: tg reopen <name>' }); return }
+        if (!target) { write({ t: 'result', id, ok: false, text: 'usage: tg reopen <name or session id>' }); return }
         // resolveEndpoint deliberately refuses CLOSED endpoints ("exists but isn't running"), which is
-        // every reopen target — so match the registry directly instead.
-        const wanted = normalizeEndpointName(target)
-        const matches = listTopics().filter(t => normalizeEndpointName(t.name) === wanted)
-        if (!matches.length) { write({ t: 'result', id, ok: false, text: `no session named "${target}" to reopen — a headless session's entry is dropped when its pane dies, and only ${'`tg spawn`'} can bring that back` }); return }
-        if (matches.length > 1) { write({ t: 'result', id, ok: false, text: `"${target}" is ambiguous (${matches.length} entries share that name)` }); return }
-        const t0 = matches[0]!
-        const denial = sessionCloseDenial(fromSid, t0.sessionId, target, t0)
+        // every reopen target — so resolve against the registry directly. A sid (or an unambiguous
+        // prefix of one) wins over a name match, so a killed row stays reachable precisely even when
+        // several closed rows share its display name (see resolveReopenTarget).
+        const rows: Array<[string, TopicEntry]> = listTopics().map(({ sessionId, ...e }) => [sessionId, e])
+        const { hit, reason, others } = resolveReopenTarget(rows, target, normalizeEndpointName)
+        if (reason === 'live-only') { write({ t: 'result', id, ok: false, text: `@${target} is already live — nothing to reopen` }); return }
+        if (reason === 'none' || !hit) { write({ t: 'result', id, ok: false, text: `no session named "${target}" to reopen (a session id or its prefix works too) — a headless session's entry is dropped when its pane dies, and only ${'`tg spawn`'} can bring that back` }); return }
+        const [sid, t0] = hit
+        const sid8 = sid.slice(0, 8)
+        const denial = sessionCloseDenial(fromSid, sid, t0.name, t0)
         if (denial) { write({ t: 'result', id, ok: false, text: denial }); return }
-        const livePane = await paneForSession(t0.sessionId).catch(() => null)
-        if (livePane && await paneAlive(livePane).catch(() => false)) { write({ t: 'result', id, ok: false, text: `@${target} is already up` }); return }
-        const extra = t0.agentSessionId ? `--resume ${t0.agentSessionId}` : '-c'
-        const newPane = await spawnSession(t0.cwd, extra, t0.sessionId, topicAccount(t0), topicAgent(t0))
-        if (!newPane) { write({ t: 'result', id, ok: false, text: `couldn't relaunch @${target} in ${t0.cwd} — see daemon log` }); return }
+        if (!t0.closed) { write({ t: 'result', id, ok: false, text: `@${t0.name} (${sid8}) is already live` }); return }
+        const livePane = await paneForSession(sid).catch(() => null)
+        if (livePane && await paneAlive(livePane).catch(() => false)) { write({ t: 'result', id, ok: false, text: `@${t0.name} (${sid8}) is already up` }); return }
+        const othersNote = others.length
+          ? ` ${others.length} other closed row${others.length === 1 ? '' : 's'} share this name — reopen a specific one by sid: ${others.map(s => s.slice(0, 8)).join(', ')}.`
+          : ''
+        let newPane: string | null
+        if (!t0.agentSessionId) {
+          newPane = await spawnSession(t0.cwd, '', sid, topicAccount(t0), topicAgent(t0), undefined, { model: refreshSpawnModel(), effort: null })
+          text = `reopened @${t0.name} (${sid8}) fresh in ${t0.cwd} — the session never completed a turn, so there was nothing to resume; same name and topic.${othersNote}`
+        } else {
+          const resumeAlias = topicAgent(t0) === 'claude' ? reopenResumeModelAlias(t0.cwd, t0.agentSessionId) : null
+          newPane = await spawnSession(t0.cwd, `--resume ${t0.agentSessionId}`, sid, topicAccount(t0), topicAgent(t0), undefined, resumeAlias ? { model: resumeAlias } : undefined)
+          text = `reopening @${t0.name} (${sid8}) in ${t0.cwd} — resuming its own conversation, same topic and name. Give it ~30s to reach a prompt.${othersNote}`
+        }
+        if (!newPane) { write({ t: 'result', id, ok: false, text: `couldn't relaunch @${t0.name} (${sid8}) in ${t0.cwd} — see daemon log` }); return }
         // Clear the kill stamp and un-close the row. reopenSessionTopic handles the Telegram tab,
         // but it no-ops without a group — so a groupless row would stay closed:true and the session
         // would come back invisible to every dashboard and unaddressable on the bus.
-        updateTopic(t0.sessionId, { closed: false, killedAt: undefined })
-        await reopenSessionTopic(t0.sessionId)   // reopen the tab now, not on its first reply
-        appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'reopen', from: nameForEndpoint(fromSid, busEndpoints()), to: target, text: extra })
-        text = `reopening @${target} in ${t0.cwd} — ${t0.agentSessionId ? 'resuming its own conversation' : 'continuing the newest conversation in that folder'}, same topic and name. Give it ~30s to reach a prompt.`
+        updateTopic(sid, { closed: false, killedAt: undefined })
+        await reopenSessionTopic(sid)   // reopen the tab now, not on its first reply
+        appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'reopen', from: nameForEndpoint(fromSid, busEndpoints()), to: t0.name, text: t0.agentSessionId ? `--resume ${t0.agentSessionId}` : 'fresh' })
         break
       }
       default:
@@ -6854,6 +6874,21 @@ async function resumeModelAlias(pane: string, cwd: string | null): Promise<strin
   const file = cwd ? await transcriptForPane(pane, cwd).catch(() => null) : null
   const alias = aliasForModelId(file ? latestModelId(file) : null)
   return !alias || alias === 'haiku' ? 'opus' : alias
+}
+
+// Same transcript-truth read, for `tg reopen`: there's no live pane to have stamped @tg_transcript,
+// so the file is found directly from the row's own cwd + conversation id instead of "newest in this
+// cwd" (which could belong to a live sibling). Unlike resumeModelAlias, an unreadable transcript
+// returns null rather than guessing opus — a live pane's transcript going unreadable is unusual; a
+// killed row with nothing left running to have written since is the ordinary case here, and asserting
+// a model dial off no evidence at all would be a guess, not a re-assertion of transcript truth.
+function reopenResumeModelAlias(cwd: string, conversationId: string): string | null {
+  const file = allProjectsDirs()
+    .map(root => join(root, cwd.replace(/\//g, '-'), `${conversationId}.jsonl`))
+    .find(existsSync)
+  if (!file) return null
+  const alias = aliasForModelId(latestModelId(file))
+  return alias === 'haiku' ? 'opus' : alias
 }
 
 // Type a relaunch line into a pane whose agent has just exited, and CONFIRM it took.

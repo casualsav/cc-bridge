@@ -8,8 +8,9 @@ import {
   dismissSession, isSessionDismissed, undismissSession, listDismissedSessions,
   getDmChatSession, setDmChatSession, clearDmChatSession, chatIdForDmChatSession, listDmChatSessions,
   loadTopics, TOPICS_FILE,
-  type TopicEntry, killGraceExpired, KILL_UNDO_GRACE_MS,
+  type TopicEntry, killGraceExpired, KILL_UNDO_GRACE_MS, resolveReopenTarget,
 } from './topics.ts'
+import { normalizeEndpointName } from './agent-bus.ts'
 
 // Reads + in-memory map logic only. Each test seeds state via _resetForTest so nothing touches the
 // real STATE_DIR/topics.json. Mutators (setTopic/…) do write to disk via save(); we keep the seeded
@@ -354,5 +355,78 @@ describe('kill undo grace', () => {
     expect(getTopicBySession('s1')?.killedAt).toBe(1700000000000)
     updateTopic('s1', { closed: false, killedAt: undefined })
     expect(getTopicBySession('s1')?.killedAt).toBeUndefined()
+  })
+})
+
+// `tg reopen`'s target resolution: sid beats prefix beats name, closed rows only for a name match,
+// newest-killedAt wins a tie. Pure — no store involved, so rows are built by hand.
+describe('resolveReopenTarget', () => {
+  const row = (name: string, closed: boolean, killedAt?: number): TopicEntry =>
+    ({ threadId: 1, cwd: `/p/${name}`, name, closed, createdAt: 1, ...(killedAt !== undefined ? { killedAt } : {}) })
+
+  test('an exact sessionId match wins even over a name collision', () => {
+    const rows: Array<[string, TopicEntry]> = [
+      ['aaaa1111', row('bridge', true, 100)],
+      ['bbbb2222', row('bridge', true, 200)],
+    ]
+    expect(resolveReopenTarget(rows, 'aaaa1111', normalizeEndpointName))
+      .toEqual({ hit: ['aaaa1111', row('bridge', true, 100)], reason: 'sid', others: [] })
+  })
+
+  test('a unique sessionId prefix resolves to that row', () => {
+    const rows: Array<[string, TopicEntry]> = [
+      ['aaaa1111', row('bridge', true, 100)],
+      ['bbbb2222', row('other', true, 50)],
+    ]
+    const r = resolveReopenTarget(rows, 'aaaa', normalizeEndpointName)
+    expect(r.reason).toBe('sid-prefix')
+    expect(r.hit?.[0]).toBe('aaaa1111')
+  })
+
+  test('an ambiguous sessionId prefix is not a hit — falls through to a name match', () => {
+    const rows: Array<[string, TopicEntry]> = [
+      ['aaaa1111', row('bridge', true, 100)],
+      ['aaaa2222', row('aaaa', true, 50)],   // named exactly the shared prefix
+    ]
+    const r = resolveReopenTarget(rows, 'aaaa', normalizeEndpointName)
+    expect(r.reason).toBe('name')
+    expect(r.hit?.[0]).toBe('aaaa2222')
+  })
+
+  test('a name match against a single closed row', () => {
+    const rows: Array<[string, TopicEntry]> = [['s1', row('cc-bridge', true, 100)]]
+    expect(resolveReopenTarget(rows, 'cc-bridge', normalizeEndpointName))
+      .toEqual({ hit: ['s1', row('cc-bridge', true, 100)], reason: 'name', others: [] })
+  })
+
+  test('several closed rows sharing a name resolve to the newest killedAt; others reported newest-first', () => {
+    const rows: Array<[string, TopicEntry]> = [
+      ['old', row('cc-bridge', true, 100)],
+      ['newest', row('cc-bridge', true, 300)],
+      ['mid', row('cc-bridge', true, 200)],
+      ['nokill', row('cc-bridge', true)],   // missing killedAt sorts oldest
+    ]
+    const r = resolveReopenTarget(rows, 'cc-bridge', normalizeEndpointName)
+    expect(r.reason).toBe('name')
+    expect(r.hit?.[0]).toBe('newest')
+    expect(r.others).toEqual(['mid', 'old', 'nokill'])
+  })
+
+  test('a name matching only open rows is live-only, not a hit', () => {
+    const rows: Array<[string, TopicEntry]> = [['live', row('cc-bridge', false)]]
+    expect(resolveReopenTarget(rows, 'cc-bridge', normalizeEndpointName))
+      .toEqual({ hit: null, reason: 'live-only', others: [] })
+  })
+
+  test('an unknown target resolves to none', () => {
+    expect(resolveReopenTarget([['s1', row('cc-bridge', true, 1)]], 'nope', normalizeEndpointName))
+      .toEqual({ hit: null, reason: 'none', others: [] })
+  })
+
+  test('a 3-char target never sid-prefix-matches, even against a real prefix', () => {
+    const rows: Array<[string, TopicEntry]> = [['abcd1234', row('cc-bridge', true, 1)]]
+    const r = resolveReopenTarget(rows, 'abc', normalizeEndpointName)
+    expect(r.reason).not.toBe('sid-prefix')
+    expect(r.reason).toBe('none')   // 'abc' doesn't match the name either
   })
 })
