@@ -8700,7 +8700,14 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
     // TELEGRAM_STATE_DIR pins the spawned session's `tg` CLI to THIS instance's daemon socket — without
     // it a non-default instance's panes send through the DEFAULT (instance-1) socket, cross-wiring their
     // file-sends/reactions to the wrong bridge (harmless no-op for the default instance itself).
-    const envPrefix = (account.name === 'main'
+    // PATH: a spawned pane inherits the DAEMON's environment (systemd user session), not the login
+    // shell's — and that PATH has no ~/.local/bin, so `claude` resolved to a root-owned npm-global
+    // build instead of the native install the updater actually maintains. That build can never
+    // upgrade itself ("Auto-update failed: no write permission to npm prefix", printed in every
+    // spawned pane), so the fleet silently froze on an old client while ~/.local/bin sat current.
+    // Prepend rather than replace: the user's own bin dir wins, everything else still resolves.
+    const envPrefix = `PATH='${homedir().replace(/'/g, `'\\''`)}/.local/bin':"$PATH" `
+      + (account.name === 'main'
       ? `HOME='${homedir().replace(/'/g, `'\\''`)}' `
       : `CLAUDE_CONFIG_DIR='${account.configDir.replace(/'/g, `'\\''`)}' `)
       + `TELEGRAM_STATE_DIR='${STATE_DIR.replace(/'/g, `'\\''`)}' `
