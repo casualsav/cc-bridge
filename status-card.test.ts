@@ -4,10 +4,10 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { prettyModel, lastModelInTranscript, lastTodosInTranscript, modeBadge, pinMessageGone, statusKeyboard, mergeStatus, codexModelFromPane, codexPrettyModel, codexStatusHead, parseCodexStatusline } from './status-card.ts'
 import type { StatuslineData } from './statusline.ts'
-import { initStatusCard, updateSessionPin, paneForDmChat, forgetChatPin, verifyPinAssignment, sessionPins, pinTextCache } from './status-card.ts'
+import { initStatusCard, updateSessionPin, paneForDmChat, forgetChatPin, armChatPin, verifyPinAssignment, sessionPins, pinTextCache } from './status-card.ts'
 import { ACCESS_FILE } from './common.ts'
 import { loadAccess } from './access.ts'
-import { focus, markChatReachable, markChatUnreachableIfUndeliverable } from './state.ts'
+import { focus, markChatReachable, markChatUnreachableIfUndeliverable, isChatUnreachable } from './state.ts'
 import { dmLanesOn, _resetForTest as _resetLanesForTest } from './dm-lanes.ts'
 
 const tmp = mkdtempSync(join(tmpdir(), 'sc-test-'))
@@ -177,7 +177,7 @@ function setAllowFrom(ids: string[]): void {
 
 test('a chat that never messaged the bot cannot stop another allowlisted user getting a pin', async () => {
   setAllowFrom(['222222', '333333', '111111'])   // the reachable owner LAST, behind two unknown ids
-  sessionPins.clear(); pinTextCache.clear()
+  sessionPins.clear(); pinTextCache.clear(); armChatPin('111111')
   const sent: string[] = [], pinned: string[] = []
   initStatusCard(pinDeps(sent, pinned, { unsendable: new Set(['222222', '333333']) }))
   await updateSessionPin()
@@ -189,7 +189,7 @@ test('a chat that never messaged the bot cannot stop another allowlisted user ge
 
 test('a card Telegram refused to pin is re-pinned on the next cycle, not left unpinned forever', async () => {
   setAllowFrom(['111111'])
-  sessionPins.clear(); pinTextCache.clear()
+  sessionPins.clear(); pinTextCache.clear(); armChatPin('111111')
   const sent: string[] = [], pinned: string[] = []
   const pinFails = new Set(['111111'])
   initStatusCard(pinDeps(sent, pinned, { pinFails }))
@@ -218,10 +218,11 @@ test('a per-user DM lane pins its OWN session, never the shared focus', async ()
   setAllowFrom(['111111'])
 })
 
-// The fresh DM-only bind, as it actually happens: the daemon comes up BEFORE the owner has ever
-// opened the bot's DM (Telegram refuses delivery to it), the owner then sends his first message,
-// and the refresher runs again. Both allowlist spellings — a quoted id and the unquoted number an
-// install agent can leave in access.json — must end with a pinned card.
+// The fresh DM-only bind, as it actually happens under the minting contract: the daemon comes up
+// with NOBODY having done anything (it must mint nothing — that idle boot card is what went
+// undelivered and started this whole thread), the owner then sends his first message, and only then
+// is a card owed. Both allowlist spellings — a quoted id and the unquoted number an install agent can
+// leave in access.json — must end with a pinned card.
 async function freshDmBind(ownerId: string | number): Promise<{ sent: string[]; pinned: string[] }> {
   writeFileSync(ACCESS_FILE, JSON.stringify({ dmPolicy: 'allowlist', allowFrom: [ownerId], groups: {}, pending: {} }))
   sessionPins.clear(); pinTextCache.clear()
@@ -234,9 +235,20 @@ async function freshDmBind(ownerId: string | number): Promise<{ sent: string[]; 
     return realSend(chatId)
   }
   initStatusCard(deps as never)
-  await updateSessionPin()                     // daemon boot — nobody has messaged yet
-  opened = true                                // the owner opens the DM and sends his first message
-  expect(markChatReachable(String(ownerId))).toBe(true)   // …the middleware lifts the mark (and pins)
+
+  await updateSessionPin()                     // daemon boot, nobody present → NOTHING is minted
+  expect(sent).toEqual([])
+  expect(isChatUnreachable(ownerId)).toBe(false)
+
+  // The owner messages the bot for the first time. The daemon arms his chat, so a card is now owed —
+  // but Telegram still refuses this send, and THAT is what marks him unreachable (id-shaped).
+  armChatPin(String(ownerId))
+  await updateSessionPin()
+  expect(isChatUnreachable(ownerId)).toBe(true)
+
+  opened = true                                // his client is really there now
+  expect(markChatReachable(String(ownerId))).toBe(true)   // the middleware lifts the mark…
+  armChatPin(String(ownerId))                            // …and arms, as the daemon does on that edge
   await updateSessionPin()
   setAllowFrom(['111111'])
   return { sent, pinned }
@@ -265,7 +277,7 @@ test('markChatReachable reports the first-contact edge only once', () => {
 // shows no pinned card at all. /start (a virgin chat's only entry point) drops the tracking.
 test('a chat deleted client-side gets a NEW card once its stale pin is forgotten', async () => {
   setAllowFrom(['111111'])
-  sessionPins.clear(); pinTextCache.clear()
+  sessionPins.clear(); pinTextCache.clear(); armChatPin('111111')
   const sent: string[] = [], pinned: string[] = []
   initStatusCard(pinDeps(sent, pinned))
   await updateSessionPin()
@@ -275,44 +287,23 @@ test('a chat deleted client-side gets a NEW card once its stale pin is forgotten
   await updateSessionPin()                      // the wiped chat still looks "already carded" — nothing sent
   expect(sent).toEqual([])
 
-  await forgetChatPin('111111')
+  await forgetChatPin('111111')                 // dropping tracking alone is NOT permission to mint
   expect(sessionPins.has('111111')).toBe(false)
+  await updateSessionPin()
+  expect(sent).toEqual([])
+
+  armChatPin('111111')                          // …the /start hook: a user is demonstrably here
   await updateSessionPin()
   expect(sent).toEqual(['111111'])              // a card the user can actually see
   expect(pinned).toEqual(['111111'])
 })
 
-// Detection, not prevention. The field failure edited a card successfully for 96 minutes while the
-// user's client had no record of it — getChat reported it pinned the whole time, so nothing keyed off
-// the Bot API could see it. Distance from the conversation is the one signal that still degrades.
-test('a card that has scrolled far above the conversation is re-minted, not edited forever', async () => {
-  setAllowFrom(['111111'])
-  sessionPins.clear(); pinTextCache.clear()
-  const sent: string[] = [], pinned: string[] = []
-  let newest = 101
-  const deps = pinDeps(sent, pinned) as unknown as Record<string, unknown>
-  deps.newestMsgId = () => newest
-  initStatusCard(deps as never)
-  await updateSessionPin()
-  expect(sent).toEqual(['111111'])              // card 101
-  expect(sessionPins.get('111111')).toBe(101)
-
-  newest = 141                                  // 40 messages later — at the threshold, not past it
-  await updateSessionPin()
-  expect(sent).toEqual(['111111'])              // still the same card, edited in place
-
-  newest = 160                                  // the card is now well out of reach
-  await updateSessionPin()
-  expect(sent).toEqual(['111111', '111111'])    // re-minted
-  expect(pinned).toEqual(['111111', '111111'])
-  expect(sessionPins.get('111111')).toBe(102)   // a NEW message id — the only thing that resurfaces a card
-})
-
 // The probe catches the card being unpinned out from under us. It cannot see a card the client never
-// received (getChat reports that one as healthy) — that is cardBuried's job, above.
+// received (getChat reports that one as healthy); nothing can, which is why no card is minted with
+// nobody present in the first place.
 test('the liveness probe re-mints when Telegram disagrees about what is pinned', async () => {
   setAllowFrom(['111111'])
-  sessionPins.clear(); pinTextCache.clear()
+  sessionPins.clear(); pinTextCache.clear(); armChatPin('111111')
   const sent: string[] = [], pinned: string[] = []
   let livePin: number | undefined = 101
   const deps = pinDeps(sent, pinned) as unknown as { bot: { api: { getChat: () => Promise<unknown> } } }
@@ -326,7 +317,66 @@ test('the liveness probe re-mints when Telegram disagrees about what is pinned',
 
   livePin = undefined                           // the user unpinned it; edits would still succeed
   await verifyPinAssignment()
-  expect(sessionPins.has('111111')).toBe(false) // tracking dropped → the next tick mints a fresh card
+  expect(sessionPins.has('111111')).toBe(false) // stale tracking dropped…
+  await updateSessionPin()
+  expect(pinned).toEqual(['111111'])            // …but the probe is a SYSTEM event — it mints nothing
+
+  armChatPin('111111')                          // the user's next message
   await updateSessionPin()
   expect(pinned).toEqual(['111111', '111111'])
+})
+
+// ---- the minting contract, both directions ----
+// This is the pair that must never silently break. One direction is the bug that started this whole
+// thread (a card minted at boot into a chat nobody was looking at, which the owner's client never
+// received and which the daemon then edited successfully for 96 minutes). The other is the bug the
+// unconditional boot create was originally written to fix (a fresh DM install that pinned NOTHING).
+// Neither is allowed to come back, so they are asserted against each other.
+
+test('a fresh install with no user activity mints NOTHING, however long it idles', async () => {
+  setAllowFrom(['111111'])
+  sessionPins.clear(); pinTextCache.clear()
+  const sent: string[] = [], pinned: string[] = []
+  initStatusCard(pinDeps(sent, pinned))
+  for (let tick = 0; tick < 5; tick++) await updateSessionPin()   // ~a minute of the 10s refresher
+  expect(sent).toEqual([])
+  expect(pinned).toEqual([])
+  expect(sessionPins.has('111111')).toBe(false)
+})
+
+test('one inbound private message mints a card within a single refresher tick', async () => {
+  setAllowFrom(['111111'])
+  sessionPins.clear(); pinTextCache.clear()
+  const sent: string[] = [], pinned: string[] = []
+  initStatusCard(pinDeps(sent, pinned))
+  await updateSessionPin()
+  expect(sent).toEqual([])                      // still nobody there
+
+  armChatPin('111111')                          // handleInbound, on any gated private message
+  await updateSessionPin()                      // ONE tick — not eventually, not on the next event
+  expect(sent).toEqual(['111111'])
+  expect(pinned).toEqual(['111111'])
+
+  await updateSessionPin()
+  expect(sent).toEqual(['111111'])              // and one action mints exactly one card, not a stream
+})
+
+test('a create that Telegram refuses stays armed and retries', async () => {
+  setAllowFrom(['111111'])
+  sessionPins.clear(); pinTextCache.clear()
+  const sent: string[] = [], pinned: string[] = []
+  let down = true
+  const deps = pinDeps(sent, pinned) as unknown as { channel: { sendText: (c: string) => Promise<unknown> } }
+  const realSend = deps.channel.sendText
+  deps.channel.sendText = async (chatId: string) => {
+    if (down) throw new Error('503 upstream hiccup')   // transient, NOT an undeliverable-chat error
+    return realSend(chatId)
+  }
+  initStatusCard(deps as never)
+  armChatPin('111111')
+  await updateSessionPin()
+  expect(sent).toEqual([])                      // the send blew up — arming must not be spent on it
+  down = false
+  await updateSessionPin()
+  expect(sent).toEqual(['111111'])
 })

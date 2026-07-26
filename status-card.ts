@@ -146,6 +146,12 @@ export async function removeSessionPins(): Promise<void> {
 // invisible card forever and never creates a visible one: the "a fresh DM never pins" report that
 // outlived both id-normalization fixes. No-op when nothing is tracked, so the create paths (and
 // topic mode's lane gating) keep deciding whether a card is owed at all.
+//
+// DROPPING TRACKING IS NOT ARMING — do not add an armChatPin() here. This is called by SYSTEM events
+// (the assignment probe, the gone-message self-heal) as well as user ones, and arming here would let
+// the probe mint a card into an empty chat on a ten-minute timer: the guarantee leaking back out
+// through the mechanism added to protect it. User-present callers arm for themselves, next to their
+// own call. See the minting contract above upsertChatPin's create gate — the other half of this rule.
 export async function forgetChatPin(chat: string): Promise<void> {
   const old = sessionPins.get(chat)
   if (old === undefined) return
@@ -705,16 +711,30 @@ export async function updateTopicPins(): Promise<void> {
   }
 }
 
-// How far the card may drift below the conversation before it is re-minted rather than edited. The
-// unit is message ids, not time: a quiet chat's card never churns, and a card only moves when there
-// is a conversation to move it under. ~40 is roughly a screen or two of scrollback — well past the
-// point where a user would still see the card, comfortably short of "re-posts during one exchange".
-const PIN_REANCHOR_GAP = 40
-function cardBuried(chat: string): boolean {
-  const pin = sessionPins.get(chat)
-  const newest = deps.newestMsgId?.(chat)
-  return pin !== undefined && newest !== undefined && newest - pin > PIN_REANCHOR_GAP
-}
+// ---- when a card may be MINTED ----
+// The contract, stated exactly, because a limitation left implicit is the next investigation:
+//
+//   * A card is only ever created for a chat where a user has just done something — sent a message,
+//     run /start, had a chat lane come up, or explicitly asked for a re-mint. No card is created
+//     with nobody present. That class is not bounded or recovered, it is NOT PRODUCED.
+//   * If a card minted with the user present is nevertheless never delivered to their client, there
+//     is NO automatic recovery. Edits to it succeed forever and getChat reports it pinned, so
+//     nothing in the Bot API can see it. `/status` is the recovery, by design.
+//
+// This replaced a distance-based re-mint (a card >40 messages back was re-created). That bounded the
+// undelivered case automatically, but it also re-posted a card into a live conversation on a schedule
+// nobody asked for — and a pin is glanceable at the TOP of the chat by definition, so how buried the
+// underlying message is doesn't matter. Removing the no-user-present class outright gets the same
+// residual risk with none of the churn and less machinery.
+//
+// The lesson that produced this, worth its own line: the boot-time unconditional create existed
+// because there was NO eager path to mint a DM's card (the comment on the create still says so). The
+// eager paths now exist — /start, lane-ready, first contact. Nobody went back to retire the
+// workaround. When you fill a gap, go delete the thing that existed because the gap existed.
+const pinCreateArmed = new Set<string>()
+// Deliberately NOT persisted: after a restart a chat is unarmed until its user does something, which
+// is the entire point — a daemon boot is not evidence that anyone is there.
+export function armChatPin(chat: string): void { pinCreateArmed.add(String(chat)) }
 
 // Verifies the pin ASSIGNMENT — that Telegram still considers our tracked message the pinned one.
 // Named for what it checks, because "pin liveness probe" is exactly the name that would convince a
@@ -729,7 +749,8 @@ function cardBuried(chat: string): boolean {
 // does catch is the card being UNPINNED out from under us (a user tapping unpin, another message
 // pinned on top), which otherwise recovers only if the card's text happens to change.
 //
-// cardBuried above is the detector for the undeliverable class; this is the cheap half.
+// There is no detector for the undeliverable class — see the minting contract above. This probe is
+// the cheap half of the problem, and the only automatic half that exists.
 //
 // The "verified present" line is deliberate: without it a healthy pin logs NOTHING, so silence reads
 // identically to a dead one — which is how two rounds of investigation mistook a broken card for a
@@ -747,7 +768,9 @@ export async function verifyPinAssignment(): Promise<void> {
     const live = (info as { pinned_message?: { message_id?: number } }).pinned_message?.message_id
     if (live === tracked) { process.stderr.write(`pin: chat ${chat} verified present (message ${tracked})\n`); continue }
     process.stderr.write(`pin: chat ${chat} tracked ${tracked} but Telegram reports ${live ?? 'nothing'} pinned — re-minting\n`)
-    await forgetChatPin(chat)   // next tick creates; re-pinning the same id can't help if it's not there
+    // Clears stale tracking ONLY — this is a system event, so it deliberately does not arm a create
+    // (see forgetChatPin). The card is re-minted by the next thing the user does, not by this timer.
+    await forgetChatPin(chat)
   }
 }
 export function startPinAssignmentVerifier(): void {
@@ -765,10 +788,6 @@ async function upsertChatPin(chat: string, text: string, buttons: Button[][], pa
   // that motivated it never failed — a card the user's client had no record of was edited successfully
   // for 96 minutes, with getChat cheerfully reporting it pinned the whole time. Distance from the
   // chat's newest message is the one signal that doesn't come from the Bot API's own bookkeeping.
-  if (cardBuried(chat)) {
-    process.stderr.write(`pin: chat ${chat} card ${sessionPins.get(chat)} is >${PIN_REANCHOR_GAP} messages back — re-minting\n`)
-    await forgetChatPin(chat)
-  }
   const existing = sessionPins.get(chat)
   if (existing && pinTextCache.get(chat) === text) {
     if (unpinnedCards.has(chat)) await pinCard(chat, chat, existing)   // card exists but the pin never took — retry it
@@ -782,7 +801,10 @@ async function upsertChatPin(chat: string, text: string, buttons: Button[][], pa
   // flushIntent). It does NOT mean the user can see the card. Telegram returned success for edits to a
   // message that had been DELETED for two and a half minutes, and for 96 minutes to one the user's
   // client never received. So the line carries `gap` — how far the card sits above the chat's newest
-  // message — because that is the field that actually degrades when a card goes out of reach.
+  // message. Nothing ACTS on gap (the distance-based re-mint was removed; see the minting contract):
+  // it is kept purely as diagnostics, because it is the only number in this log that degrades as this
+  // class of failure develops, and a log that can only say "the API returned 200" is what cost two
+  // rounds of investigation. It costs one Map lookup on a line already being written.
   const logPin = (kind: 'edit' | 'create') => {
     const st = paneId ? lastGoodStatus.get(paneId) : undefined
     const newest = deps.newestMsgId?.(chat), pin = sessionPins.get(chat)
@@ -808,14 +830,16 @@ async function upsertChatPin(chat: string, text: string, buttons: Button[][], pa
       } })
     return
   }
-  // Create unconditionally — a DM's card IS the control surface (its quick-action keyboard is how the
-  // owner reaches model/effort/mode/settings), so gating it on a live pane meant a fresh DM-mode install
-  // pinned NOTHING until something happened to bind a session to this chat: no eager equivalent of topic
-  // mode's ensureSessionTopic exists here, and the chat lane is only minted on the owner's first text DM.
-  // The old "don't pin 'No active session' out of nowhere" rule was about never-opened DMs; that case is
-  // already self-limiting — the send fails once, markChatUnreachableIfUndeliverable pauses the chat, and
-  // the loop above skips it for the rest of this daemon run.
-  await createSessionPin(chat, text, buttons); logPin('create')
+  // Create ONLY for a chat a user has just touched (armChatPin — see the minting contract above). The
+  // refresher runs every 10s over every allowlisted id, so an ungated create fires at daemon boot into
+  // chats nobody is looking at; that is where the undeliverable card came from. Dropping tracking is
+  // deliberately NOT arming: the assignment probe and the gone-message self-heal are system events, not
+  // evidence of a user, so they clear stale tracking and leave the re-mint to the next thing the user
+  // does. Arming is consumed here, so one user action mints at most one card.
+  if (!pinCreateArmed.has(chat)) return
+  await createSessionPin(chat, text, buttons)
+  if (!sessionPins.has(chat)) return                 // send failed (createSessionPin swallowed it) — stay armed and retry
+  pinCreateArmed.delete(chat); logPin('create')      // one user action mints at most one card
 }
 
 // A DM whose card never gets created used to be completely silent — the 10s loop just skipped it, and

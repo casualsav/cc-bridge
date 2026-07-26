@@ -130,7 +130,7 @@ import { planContextWarn, planCtxNudge } from './ctx-warn.ts'
 import { spawnModelFlag, spawnWideContext } from './model-window.ts'
 import {
   initStatusCard, statusCardText, statusKeyboard, updateSessionPin, updateTopicPins,
-  removeSessionPins, refreshSessionPin, forgetChatPin, startPinAssignmentVerifier, sessionPins, pinTextCache, persistSessionPins,
+  removeSessionPins, refreshSessionPin, forgetChatPin, armChatPin, startPinAssignmentVerifier, sessionPins, pinTextCache, persistSessionPins,
   clearAllPins, clearTopicPins, createSessionPin, invalidatePaneStatus, paneStatus, lastModelInTranscript, lastVersionInTranscript,
   prettyModel, modeBadge, lastTodosInTranscript, codexPrettyModel,
 } from './status-card.ts'
@@ -5843,7 +5843,7 @@ async function sendStartHelp(ctx: Context): Promise<void> {
 // never lifted, forever. Kick it the moment the mark actually lifts; markChatReachable returns true
 // only on that edge, so a chatty DM doesn't re-enter the loop on every update.
 bot.use(async (ctx, next) => {
-  if (ctx.chat?.type === 'private' && markChatReachable(String(ctx.chat.id))) void updateSessionPin()
+  if (ctx.chat?.type === 'private' && markChatReachable(String(ctx.chat.id))) { armChatPin(String(ctx.chat.id)); void updateSessionPin() }
   await next()
 })
 
@@ -5915,7 +5915,7 @@ bot.use(async (ctx, next) => {
 // /help keeps the plain handler — it isn't evidence of a fresh surface and must not churn the pin.
 bot.command('start', async ctx => {
   await sendStartHelp(ctx)
-  if (ctx.chat?.type === 'private') { await forgetChatPin(String(ctx.chat.id)); void updateSessionPin() }
+  if (ctx.chat?.type === 'private') { armChatPin(String(ctx.chat.id)); await forgetChatPin(String(ctx.chat.id)); void updateSessionPin() }
 })
 bot.command('help', sendStartHelp)   // hidden alias (muscle memory); kept out of the command menu
 
@@ -10877,7 +10877,7 @@ async function handleInbound(
   const msgId = ctx.message?.message_id
   // A gated private message proves this DM deliverable — resume any paused pin/notice delivery
   // (the unreachable mark set when Telegram refused a send to a never-opened DM).
-  if (ctx.chat?.type === 'private') markChatReachable(chat_id)
+  if (ctx.chat?.type === 'private') { markChatReachable(chat_id); armChatPin(chat_id) }   // …and someone is demonstrably here, so this chat may be minted a card
 
   // Permission text-reply intercept ("yes xxxxx" / "no xxxxx")
   const permMatch = PERMISSION_REPLY_RE.exec(text)
@@ -11514,7 +11514,7 @@ async function ensureChatLane(ctx: Context, chatId: string, first: InboundParams
         // never received and cannot move one that sits a hundred messages up the chat — the API
         // reports health either way. Mint a fresh one under the conversation instead; a new message
         // id is the only thing that puts a card back in front of the user. See forgetChatPin.
-        await forgetChatPin(chatId); void updateSessionPin()
+        armChatPin(chatId); await forgetChatPin(chatId); void updateSessionPin()
         return
       }
       // A brand-new account config dir has no login yet. Surface the method picker instead of
