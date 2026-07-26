@@ -42,6 +42,12 @@
        hardcoding a grey keeps it following a custom Telegram theme.
        Deliberately NOT applied to .dot: its idle state is var(--hint) and stays byte-exact. */
     --hint-raised: var(--hint);
+    /* Stop red. Saturation taken from the stop-sign emoji, NOT sampled from the reference JPEG (whose
+       circle is duller and slightly pink) — the owner asked for the emoji's red specifically.
+       Tokenised on purpose, and note this is the OPPOSITE call from .dot.on's hardcoded green: that
+       one stays literal because a token would make the frozen indicator inheritable. Nothing here is
+       frozen, so the lint's raw-color finding is real and the token is the answer. */
+    --stop-red: #ea3323;
   }
   @supports (color: color-mix(in srgb, red 50%, blue)) {
     :root { --hint-raised: color-mix(in srgb, var(--hint) 80%, var(--text)); }
@@ -86,7 +92,13 @@
      being true — give the side slots equal fixed widths at that point. */
   #drill .vhead { --title-align: center; margin: 10px 10px 2px; padding: 7px var(--sp-2); border-bottom: none; border-radius: var(--r-2xl); gap: 6px;
     background: var(--sec); box-shadow: inset 0 1px 0 rgba(255,255,255,.06), 0 2px 6px rgba(0,0,0,.35); }
-  #drill .vhead .ghost { width: 34px; height: 34px; padding: 0; border-radius: 50%; display: flex; align-items: center; justify-content: center; }
+  /* Both side controls are the same PAINTED circle — 34px, filled — so the bar reads balanced and the
+     slots stay equal, which is what the centred title depends on. The earlier octagon was a 19px glyph
+     inside a 34px transparent slot, so it rendered visibly smaller than the back chip beside it.
+     The ::after lifts the TOUCH target to 44px without growing the paint (padding would have grown the
+     background with it), the same 44 standard the card close got. Absolute, so it changes no layout. */
+  #drill .vhead .ghost { position: relative; width: 34px; height: 34px; padding: 0; border-radius: 50%; display: flex; align-items: center; justify-content: center; }
+  #drill .vhead .ghost::after { content: ""; position: absolute; inset: -5px; border-radius: 50%; }
   #drill #dback { background: var(--bg); }
   .ghost svg { width: 19px; height: 19px; display: block; }
   /* Two-line title: name over the session's dial line, as the reference has name over "bot". The
@@ -115,9 +127,22 @@
      control on the bar renders identically to the two safe ones. (The emoji ✕ carried its own red;
      an SVG inherits, so the colour had to become a rule.) */
   .vhead .ghost.icon-danger { color: #e05555; }
+  /* A filled circle with an off-white glyph centred in it, per the reference. The BUTTON is the circle
+     (already a 34px 50%-radius box) and the glyph rides inside it — the same construction the
+     composer's recording button uses. The glyph's footprint is 30% of the diameter, from the
+     reference's square; the glyph itself is a pause, which is what the action actually is. */
+  #drill #dstop { background: var(--stop-red); color: #ececec; }
   /* Nothing to interrupt on an idle session, so the stop reads as unavailable rather than armed.
      Dimmed rather than disabled: the pane can be mid-something the transcript has not shown yet. */
   #dstop.idle { opacity: .38; }
+  /* Suppressed while recording. The composer's recorder is the SAME form — red circle, white rounded
+     square — because it is the same verb, and differentiating them by weight would be decoration that
+     teaches nothing. What decides it is the asymmetry of a mistap: this one ends a turn, that one ends
+     a voice memo. While recording, the memo is the urgent thing and the turn can wait one tap. */
+  /* #drill #dstop… because `#drill .vhead .ghost { display: flex }` is (1,2,0) and would otherwise win:
+     the first version of this rule was silently inert. Second time tonight a specificity loss hid a
+     working feature — check the cascade, not just the class. */
+  #drill #dstop.recording { display: none; }
   pre { margin: 0; padding: var(--sp-3); overflow: auto; flex: 1; white-space: pre; font: var(--t-mono)/1.45 ui-monospace, Menlo, Consolas, monospace; }
   .notice { padding: var(--sp-5) var(--sp-4); color: var(--hint); text-align: center; }
   .err { background: #c0392b; color: #fff; padding: var(--sp-2) var(--sp-3); font-size: var(--t-sub); display: none; }
@@ -202,7 +227,7 @@
      IS the recorder. It does NOT inherit the old pulse: that animated a 19px glyph, and a 40px filled
      circle dropping to .35 opacity reads as a button dying rather than a recorder running. A red fill
      behind a stop square is unambiguous on its own — the square only exists while recording. */
-  .sendbtn.recing { background: #e05555; }
+  .sendbtn.recing { background: var(--stop-red); }
   /* Reduced motion: still the two pulses, additively — the base rules and @keyframes pulse are left
      byte-exact rather than edited, because both indicators are load-bearing and shared. Nothing is
      lost when the animation stops: colour already carries both states (green vs grey, red vs hint). */
@@ -304,7 +329,12 @@
          Drawn rather than the emoji so it matches the paperclip and mic, holds one colour instead of
          rendering differently per platform, and keeps this bar free of the clip-art it was cleared of.
          It reuses .icon-danger: with the ✕ gone from here, nothing else competes for that red. -->
-    <button class="ghost icon-danger" id="dstop" title="Stop" aria-label="Stop this session"><svg viewBox="0 0 24 24"><polygon points="8.28 2.5 15.72 2.5 21.5 8.28 21.5 15.72 15.72 21.5 8.28 21.5 2.5 15.72 2.5 8.28" fill="currentColor"/></svg></button>
+    <!-- A PAUSE glyph, and the word is true: this sends a single Escape, Claude Code's own interrupt.
+         The turn halts, the session stays alive at its prompt and the conversation is intact, so the
+         header's only remaining action really is a halt rather than a terminate; terminating moved to
+         the session cards. Two bars in the square's exact bounding box (12.9 units), canonical pause
+         proportions, caps rounded to match the softness of the reference's square. -->
+    <button class="ghost" id="dstop" title="Interrupt" aria-label="Interrupt this session"><svg viewBox="0 0 24 24"><rect x="5.55" y="5.55" width="3.9" height="12.9" rx="1.7" fill="currentColor"/><rect x="14.55" y="5.55" width="3.9" height="12.9" rx="1.7" fill="currentColor"/></svg></button>
   </div>
   <div id="dfeed"></div>
   <div class="composer">
@@ -963,6 +993,8 @@ const VOICE_OK = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedi
 // to morph between, so send simply stays. Recording outranks a typed draft: you can type mid-record,
 // and swapping the recorder out from under a live recording would strand it.
 function syncComposerMode() {
+  // The header's stop hides while recording, so only one red stop-square is ever on screen.
+  $("dstop").classList.toggle("recording", !!rec);
   const showSend = !VOICE_OK || (!!$("dtext").value.trim() && !rec);
   $("dsend").style.display = showSend ? "flex" : "none";
   $("dmic").style.display = showSend ? "none" : "flex";
