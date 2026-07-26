@@ -715,6 +715,21 @@ export function compactPercent(paneText: string): number | null {
   return null
 }
 
+// The account tier ("Claude Max" / "Claude Pro" / …) only ever appears in the CLI's welcome banner,
+// which scrolls out of scrollback the moment the session does real work — so this is a one-shot
+// read taken right after launch (the daemon's sampleAccountTier), never re-derivable later. Anchored
+// on a model-name segment immediately followed by "· Claude <Tier>": a bare `Claude (Max|Pro)` match
+// would false-positive constantly in THIS project's own sessions, where "Claude Pro" is a routine
+// topic of conversation (the stale-tier-cache bug this feature exists to catch).
+export type AccountTier = 'max' | 'pro' | 'team' | 'enterprise'
+export function detectAccountTier(cap: string): AccountTier | null {
+  for (const line of paneLines(cap)) {
+    const m = /(Opus|Sonnet|Haiku|Fable)[^·│]*·\s*Claude (Max|Pro|Team|Enterprise)\b/.exec(line)
+    if (m) return m[2].toLowerCase() as AccountTier
+  }
+  return null
+}
+
 // True when the pane is at Claude Code's normal prompt (input box visible), where reading or
 // changing the mode is valid. A settings/config screen or another modal lacks this footer, so
 // detectCurrentMode would there fall through to a false 'default' — mode ops guard on this and

@@ -60,6 +60,7 @@ export interface SessionCard {
   alive: boolean; working: boolean; task: string | null
   model: string | null; effort: string | null; mode: string | null
   ctxPct: number | null; h5Pct: number | null; branch: string | null
+  tier: string | null   // 'max' / 'pro' / … from the launch-banner sample (daemon.ts paneTiers); null when never sampled
 }
 // 'model'/'effort' carry the chosen alias/level in `text` — the mini app's dial picker, applied to
 // the session's own pane by the same /model and /effort injections the chat-side pickers use.

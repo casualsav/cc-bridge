@@ -163,7 +163,7 @@ test('console endpoints: sessions/auto reads + session act route to deps; missin
   const acted: unknown[] = []
   const server = startWebapp({
     token: TOKEN, isAllowed: id => id === '42', log: () => {}, staticDir: join(import.meta.dir, 'webapp'), port: 0,
-    listSessions: () => [{ sid: 's1', name: 'money', cwd: '/x', agent: 'claude', alive: true, working: true, task: 'Bash ls', model: 'Fable', effort: 'high', mode: 'bypassPermissions', ctxPct: 12, h5Pct: 40, branch: 'main' }],
+    listSessions: () => [{ sid: 's1', name: 'money', cwd: '/x', agent: 'claude', alive: true, working: true, task: 'Bash ls', model: 'Fable', effort: 'high', mode: 'bypassPermissions', ctxPct: 12, h5Pct: 40, branch: 'main', tier: null }],
     readAutomation: () => ({ cron: [], queue: [], budget: { spent: 1.5, cap: null } }),
     sessionAction: (_u, sid, action, text) => { acted.push([sid, action, text]); return null },
     automationCreate: async (_u, spec) => { acted.push(['create', spec.when, spec.sid, spec.text]); return { summary: 'in 2h → money' } },
