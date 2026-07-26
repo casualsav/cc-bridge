@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { prettyModel, lastModelInTranscript, lastTodosInTranscript, modeBadge, pinMessageGone, statusKeyboard, mergeStatus, codexModelFromPane, codexPrettyModel, codexStatusHead, parseCodexStatusline } from './status-card.ts'
 import type { StatuslineData } from './statusline.ts'
-import { initStatusCard, updateSessionPin, paneForDmChat, forgetChatPin, armChatPin, repinIfDropped, sessionPins, pinTextCache } from './status-card.ts'
+import { initStatusCard, updateSessionPin, paneForDmChat, forgetChatPin, armChatPin, repinIfDropped, sessionPins, pinTextCache, changesPaneContext } from './status-card.ts'
 import { ACCESS_FILE } from './common.ts'
 import { loadAccess } from './access.ts'
 import { focus, markChatReachable, markChatUnreachableIfUndeliverable, isChatUnreachable } from './state.ts'
@@ -431,4 +431,39 @@ test('requirement 1: the daemon still arms on every user-present event', () => {
   expect(daemon).toContain("markChatReachable(chat_id); armChatPin(chat_id)")            // any gated private message
   expect(daemon).toMatch(/bot\.command\('start'[\s\S]{0,400}armChatPin/)               // /start
   expect(daemon).toContain("armChatPin(chatId); await forgetChatPin(chatId, 'lane-ready')") // lane-ready
+})
+
+// The /compact staleness bug: the pin held a pre-compaction context % for many turns because
+// invalidation lived at the command handlers, while the pane is written at ONE shared injection
+// site. These cases are the ones a name list assembled from the handlers would have missed —
+// /compact had a handler and still never opted in, and /resume has no handler at all in the form
+// that reaches a pane (`@name /resume`, relayed verbatim).
+test('changesPaneContext holds for every command that moves the conversation, arguments and all', () => {
+  for (const cmd of ['/clear', '/new', '/reset', '/compact', '/resume', '/rewind', '/fork']) {
+    expect(changesPaneContext(cmd)).toBe(true)
+    expect(changesPaneContext(`  ${cmd}  `)).toBe(true)          // relayed text arrives untrimmed
+    expect(changesPaneContext(cmd.toUpperCase())).toBe(true)
+  }
+  expect(changesPaneContext('/compact focus on the API design')).toBe(true)   // /compact takes free text
+  expect(changesPaneContext('/resume 0e5b1c9a')).toBe(true)
+})
+
+// The other half of a property: it must NOT fire for the commands whose whole point is that the
+// conversation survives them. Dropping the caches needlessly costs a thin render, and /model is
+// typed through the same injection site on every model switch.
+test('changesPaneContext stays out of the way of commands that keep the conversation', () => {
+  for (const cmd of ['/model claude-opus-5', '/effort max', '/context', '/cost', '/exit', '/status',
+                     '/rewrite', '/newsletter', '/compacting-is-not-a-command']) {
+    expect(changesPaneContext(cmd)).toBe(false)
+  }
+})
+
+// Structural guard: the invalidation must stay at the shared injection site. Moving it back into a
+// handler is what produced the bug, and it would pass every behavioural test above while the relayed
+// and mini-app forms of the same command silently stopped invalidating again.
+test('the pane-status invalidation lives in injectSlash, not in a command handler', () => {
+  const daemon = readFileSync(join(import.meta.dir, 'daemon.ts'), 'utf8')
+  const injectSlash = /async function injectSlash\([\s\S]*?\n}/.exec(daemon)?.[0] ?? ''
+  expect(injectSlash).toContain('changesPaneContext(command)')
+  expect(injectSlash).toContain('invalidatePaneStatus(paneId)')
 })

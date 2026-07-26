@@ -132,7 +132,7 @@ import { spawnModelFlag, spawnWideContext } from './model-window.ts'
 import {
   initStatusCard, statusCardText, statusKeyboard, updateSessionPin, updateTopicPins,
   removeSessionPins, refreshSessionPin, forgetChatPin, armChatPin, sessionPins, pinTextCache, persistSessionPins,
-  clearAllPins, clearTopicPins, createSessionPin, invalidatePaneStatus, paneStatus, lastModelInTranscript, lastVersionInTranscript,
+  clearAllPins, clearTopicPins, createSessionPin, invalidatePaneStatus, changesPaneContext, paneStatus, lastModelInTranscript, lastVersionInTranscript,
   prettyModel, modeBadge, lastTodosInTranscript, codexPrettyModel,
 } from './status-card.ts'
 import { buildTakeoverBrief } from './takeover-brief.ts'
@@ -5022,6 +5022,10 @@ async function injectSlash(paneId: string, watcher: PaneWatcher | null, command:
     await waitForSettle(paneId, 300, 30_000)
   }
   await (watcher ? watcher.withInjection(run) : run())
+  // EVERY path that types a slash command into a pane funnels through here — a local handler, a
+  // relayed `@name /cmd`, a mini-app button — which is why the invalidation belongs here and not at
+  // the handlers. See changesPaneContext for why it is a property rather than a list of names.
+  if (changesPaneContext(command)) invalidatePaneStatus(paneId)
 }
 
 // Reliably exit a session's pane (used when a user closes/deletes its topic). Unlike injectSlash, the
@@ -5309,9 +5313,10 @@ async function performReset(t: CommandTarget, command: string, opts?: { force?: 
     return { text: `⏳ ${escapeHtml(command)} was <i>queued</i> — the session is mid-task, and the conversation will clear when the current turn ends. (Interrupt the task first if you don't want that.)` }
   }
 
-  // A reset makes context/cost jump (often to ~0); drop the pane's last-good status cache so the pin
-  // can't backfill the pre-reset numbers, and refresh it now rather than waiting for the next tick.
-  invalidatePaneStatus(t.paneId)
+  // The cache drop that used to live here moved into injectSlash (above) — one site now covers the
+  // relayed and mini-app forms of the same command too. Refresh the pin now rather than waiting for
+  // the next tick. Note the drop now also fires on the queued path that returns above: that path had
+  // the same staleness bug on a delay, since nothing invalidated when the queued reset finally ran.
   void updateSessionPin()
   const model = agent === 'claude' ? await readCurrentModel(t.paneId, t.watcher) : null
   const head = command === '/clear' ? '🧹 Conversation cleared' : '✅ New session started'

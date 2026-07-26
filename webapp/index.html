@@ -143,14 +143,14 @@
      shrank the painted disc: both discs measured exactly 34.00 CSS px in the rendered PNG, so the size
      complaint was never geometry — a fully saturated shape reads larger than a low-contrast one of
      identical extent (irradiation). Matching the colours removes the illusion at its source instead of
-     compensating for it, and leaves no two numbers disagreeing on purpose.
-     VARIANT B, if he prefers it, is one rule: `.chatbtn.stop:not(.idle) { background: var(--stop-red) }`
-     — grey at rest, red only while a turn is actually running. The `.idle` class already carries that
-     state, so nothing else has to change. */
+     compensating for it, and leaves no two numbers disagreeing on purpose. Chosen over a red-while-running
+     variant, so nothing here is red and the composer's recording button has no lookalike to be confused
+     with — which is why this control no longer hides itself while a recording is in progress. */
   .chatbtn.stop { background: var(--bg); }
-  /* Nothing to interrupt on an idle session, so the stop reads as unavailable rather than armed.
-     Dimmed rather than disabled: the pane can be mid-something the transcript has not shown yet. */
-  .chatbtn.idle { opacity: .38; }
+  /* One constant appearance, by the owner's call — deliberately NOT dimmed when the session is idle.
+     The dimming said "there is nothing to interrupt", which the green-to-grey status dot beside the
+     name already says, and pressing it while idle is a harmless no-op (Escape at a prompt does
+     nothing). It was duplicating a signal to defend against a non-problem. */
   pre { margin: 0; padding: var(--sp-3); overflow: auto; flex: 1; white-space: pre; font: var(--t-mono)/1.45 ui-monospace, Menlo, Consolas, monospace; }
   .notice { padding: var(--sp-5) var(--sp-4); color: var(--hint); text-align: center; }
   .err { background: #c0392b; color: #fff; padding: var(--sp-2) var(--sp-3); font-size: var(--t-sub); display: none; }
@@ -930,7 +930,6 @@ async function renderDrill() {
   if (!drillSid) return;
   let d; try { d = await api("/api/session/feed", { sid: drillSid }); } catch { return; }
   $("ddot").className = "dot " + (d.working ? "on" : "");
-  $("dstop").classList.toggle("idle", !d.working);
   lastDrill = d;
   paintFeed();
 }

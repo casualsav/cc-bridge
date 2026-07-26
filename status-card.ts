@@ -306,6 +306,25 @@ export function invalidatePaneStatus(paneId: string): void {
   paneStatusDirty = true   // persist the drop too, so a restart right after /clear doesn't reload the stale snapshot
 }
 
+// Does typing this slash command change WHICH conversation the pane is on, or how much of it is left?
+// Those two things are all the caches above hold, so they are exactly the commands after which
+// backfilling from the caches reports the past as the present.
+//
+// Deliberately a PROPERTY, not the list of command names it happens to match today. The bug this
+// closes (/compact leaving a pre-compaction context % on the pin for many turns) existed because
+// invalidation lived at the command HANDLERS while the pane is written at one shared injection site —
+// so every context-changing command had to remember to opt in, and /compact never did. /resume is the
+// proof that a name list would have failed again: it reaches a pane only in the relayed `@name /resume`
+// form, which has no handler that could have opted in.
+//
+// /resume, /rewind and /fork open a picker first, so for those this fires at type-time rather than at
+// resolution-time. Early, but never wrong in the direction that matters: it drops a cache that is
+// about to be wrong. A dropped cache costs one thin render (the fields a mid-repaint capture misses);
+// a stale one costs a plausible wrong number for as long as the user keeps reading the card.
+export function changesPaneContext(command: string): boolean {
+  return /^\/(clear|new|reset|compact|resume|rewind|fork)\b/i.test(command.trim())
+}
+
 export async function statusCardText(paneId: string | null): Promise<string> {
   if (!paneId) return '🖥️ <b>No active session</b>'
   if (await deps.paneAgentKind(paneId).catch(() => 'claude' as const) === 'codex') {
