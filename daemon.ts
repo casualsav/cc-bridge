@@ -27,7 +27,7 @@ const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
 import { renderSessionsView } from './sessions-view.ts'
 import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, hasQueuedMessages, feedbackSurveyOpen, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen } from './prompt.ts'
-import { resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, currentTurnActivity, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, agentSessionId, agentForSession } from './agent-transcript.ts'
+import { resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, currentTurnActivity, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
 import {
   AGENT_PANE_OPT, agentExitKeys, agentInterruptKeys, agentLabel, agentResetCommand, agentSubmitKeys,
   CODEX_ENABLED, codexLaunchCommand, normalizeAgent, shellQuote, type AgentKind,
@@ -13241,19 +13241,33 @@ async function webappListSessions(): Promise<WebappSessionCard[]> {
 // Drill-in feed: recent conversation (user + assistant), plus the running turn's thoughts + activity.
 const THOUGHT_MAX = 400   // one narration block in the feed; long enough to read, short enough not to bury the tools
 const FEED_BLOCKS = 10    // live blocks kept, matching the Telegram card's window (MIRROR_THOUGHTS)
-async function webappSessionFeed(sid: string): Promise<WebappSessionFeed | null> {
+// sid → its dashboard row and transcript file. Shared by the feed and the single-message fetch so
+// they can't resolve the same session to different transcripts.
+async function webappSessionSource(sid: string): Promise<{ row: { sid: string; name: string; cwd: string; agent: string }; file: string | null } | null> {
   const row = dashboardSessionRows().find(r => r.sid === sid)
     ?? (getTopicBySession(sid) ? { sid, name: getTopicBySession(sid)!.name, cwd: getTopicBySession(sid)!.cwd, agent: 'claude' } : { sid, name: 'Session', cwd: '', agent: 'claude' })
   const pane = await paneForSession(sid).catch(() => null)
   if (!pane) return null
   const cwd = row.cwd || (await paneCwd(pane).catch(() => null))
-  const file = await transcriptForPane(pane, cwd)
+  return { row, file: await transcriptForPane(pane, cwd) }
+}
+// Full text of one feed row, for expanding a clipped bubble. Reads the transcript directly — the
+// payload clamp is a poll-cost measure, never a limit on what may be read.
+async function webappSessionMessage(sid: string, uuid: string): Promise<string | null> {
+  const src = await webappSessionSource(sid)
+  return src?.file ? conversationItemFullText(src.file, uuid) : null
+}
+async function webappSessionFeed(sid: string): Promise<WebappSessionFeed | null> {
+  const src = await webappSessionSource(sid)
+  if (!src) return null
+  const { row, file } = src
   if (!file) return { sid, name: row.name, working: false, items: [] }
   const working = turnInProgress(file)
   const items: WebappSessionFeed['items'] = recentConversation(file, 14).map(c => ({
     role: c.role, text: c.text, ts: c.ts,
     ...(c.img ? { img: c.img } : {}), ...(c.att ? { att: c.att } : {}), ...(c.cmd ? { cmd: true } : {}),
-    ...(c.clipped ? { clipped: true } : {}),
+    // uuid only where it's needed: it exists so a clipped row can be re-fetched in full.
+    ...(c.clipped ? { clipped: true, ...(c.uuid ? { uuid: c.uuid } : {}) } : {}),
   }))
   // The running turn, described by the SAME decision layer the Telegram live card uses
   // (turn-summary.ts): narration paragraphs interleaved with folded tool runs ("Searched 3
@@ -13489,7 +13503,7 @@ async function startFilesWebapp(): Promise<void> {
       fileBrowser: () => loadAccess().fileBrowser !== false,   // live pref (settings → 🗂) — omits the Files tab + 403s the file API when off
       protectedRoots: [STATE_DIR],   // fence writes out of a relocated state dir too (~/.claude is fenced by default)
       readSettings: webappReadSettings, setSetting: webappSetSetting,
-      listSessions: webappListSessions, readSessionFeed: webappSessionFeed, sessionAction: webappSessionAction,
+      listSessions: webappListSessions, readSessionFeed: webappSessionFeed, readSessionMessage: webappSessionMessage, sessionAction: webappSessionAction,
       sessionAttach: webappSessionAttach, sessionSpawn: webappSessionSpawn,
       readAutomation: webappReadAutomation, automationCancel: webappAutomationCancel,
       automationCreate: webappAutomationCreate })

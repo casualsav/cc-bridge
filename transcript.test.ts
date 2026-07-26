@@ -3,7 +3,7 @@ import { test, expect, describe } from 'bun:test'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnActivity, currentTurnFeed, currentTurnTokens, slashResultAfter, legibleApiError, latestModelId, recentConversation } from './transcript.ts'
+import { latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnActivity, currentTurnFeed, currentTurnTokens, slashResultAfter, legibleApiError, latestModelId, recentConversation, conversationItemFullText } from './transcript.ts'
 
 function fixture(entries: object[]): string {
   const f = join(mkdtempSync(join(tmpdir(), 'tg-transcript-')), 'session.jsonl')
@@ -235,4 +235,43 @@ test('recentConversation clamps a huge message for the payload and flags the cut
   expect(u.text.length).toBe(4001)        // 4000 + the ellipsis
   expect(u.clipped).toBe(true)
   expect(a.clipped).toBeUndefined()       // a short message is untouched
+  // The uuid is the handle the client expands by: a clipped row without one is unrecoverable.
+  expect(u.uuid).toBe('u1')
+})
+
+describe('conversationItemFullText — the clamp is a poll cost, not a read limit', () => {
+  test('returns the whole message, past CONVO_CAP, for a row the feed clipped', () => {
+    const long = 'y'.repeat(9000)
+    const f = fixture([user(`<tg 1>${long}</tg>`, 'u1'), asst('short', 'a1')])
+    expect(recentConversation(f, 5)[0].text.length).toBe(4001)   // what the poll sends
+    expect(conversationItemFullText(f, 'u1')).toBe(long)         // what a tap can reach
+  })
+
+  // The whole reason the two share one extraction path. If the fetch re-read the raw entry instead,
+  // expanding would reveal the bridge's own envelope markup where the collapsed bubble showed clean
+  // text — a "fix" that looks right in a diff and wrong on a phone.
+  test('unwraps the <tg …> envelope exactly as the feed does', () => {
+    const f = fixture([user('<tg 42 img="/tmp/a.png">hello there</tg>', 'u1')])
+    expect(recentConversation(f, 5)[0].text).toBe('hello there')
+    expect(conversationItemFullText(f, 'u1')).toBe('hello there')
+  })
+
+  test('a slash command reads as its command, not its raw XML', () => {
+    const f = fixture([user('<command-name>/compact</command-name><command-args>keep the plan</command-args>', 'u1')])
+    expect(conversationItemFullText(f, 'u1')).toBe('/compact keep the plan')
+  })
+
+  test('an unknown or empty uuid is null, not a guess at the nearest row', () => {
+    const f = fixture([user('<tg 1>hi</tg>', 'u1'), asst('reply', 'a1')])
+    expect(conversationItemFullText(f, 'nope')).toBeNull()
+    expect(conversationItemFullText(f, '')).toBeNull()
+  })
+
+  // A uuid that exists but isn't a feed row (a mid-turn narration entry) must not resolve: the client
+  // only ever asks about rows it was given, so anything else is a bug worth surfacing as null.
+  test('a non-feed entry does not resolve', () => {
+    const f = fixture([narr('thinking out loud', 'n1'), asst('done', 'a1')])
+    expect(conversationItemFullText(f, 'n1')).toBeNull()
+    expect(conversationItemFullText(f, 'a1')).toBe('done')
+  })
 })

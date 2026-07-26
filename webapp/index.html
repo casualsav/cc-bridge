@@ -738,20 +738,50 @@ function bubble(i) {
     // has already reserved.
     : '<img class="thumb" src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==" data-path="' + esc(i.img) + '" alt="photo">';
   if (i.att) inner += '<div class="attchip">📎 ' + esc(String(i.att).split("/").pop()) + "</div>";
-  const t = (i.img || i.att) && placeholder ? "" : (i.text || "");
+  // Once the full text has been fetched it replaces the clamped copy, and because it lives in a cache
+  // rather than in the DOM it survives the 3s repaint that would otherwise throw it away.
+  const full = i.uuid ? fullText[i.uuid] : null;
+  const t = full || ((i.img || i.att) && placeholder ? "" : (i.text || ""));
   if (t) inner += (i.img ? '<div class="cap">' : "") + (i.role === "assistant" ? md(t) : esc(t)) + (i.img ? "</div>" : "");
   if (!inner) return "";
   // A long message collapses to a readable height with a tap to open it, rather than running past
-  // the screen. `clipped` means the payload clamp really did cut it — say so at the fold.
+  // the screen. `clipped` means the payload clamp really did cut it — say so at the fold, and stop
+  // saying it once the rest has actually been fetched.
   const long = t.length > LONG_MSG;
-  const note = i.clipped ? "message truncated at 4000 chars" : "";
+  const note = i.clipped && !full ? "message truncated at 4000 chars" : "";
   // A transcript-echoed user message has demonstrably reached the session, so two ticks.
   inner += stamp(i.ts, i.role === "user" ? 2 : 0);
   // The fold also carries the time: on a collapsed bubble the floated stamp sits below the cut, and
   // the newest message being long is exactly when you want to know when it landed. No duplication —
   // `.msg.clip.open .more` is display:none, so only one of the two is ever visible.
-  return '<div class="msg ' + i.role + (long ? " clip" : "") + '"' + (long ? ' onclick="this.classList.toggle(\'open\')"' : "") + ">" + inner +
+  const openNow = i.uuid ? openMsgs.has(i.uuid) : false;
+  return '<div class="msg ' + i.role + (long ? " clip" : "") + (long && openNow ? " open" : "") + '"'
+    + (long ? ' onclick="onBubbleTap(this)"' : "")
+    + (i.uuid ? ' data-uuid="' + esc(i.uuid) + '"' : "") + ">" + inner +
     (long ? '<div class="more">' + (i.ts ? esc(hhmm(i.ts)) + " · " : "") + (note ? esc(note) + " · " : "") + "tap to expand</div>" : "") + "</div>";
+}
+// Tapping a long bubble opens it; for a CLIPPED one that also fetches the rest. Both the open state and
+// the fetched text live OUTSIDE the DOM on purpose: paintFeed replaces innerHTML whenever the feed
+// changes, so a bubble holding either in its markup would collapse and lose its fetch on the next 3s
+// poll — which would read as a broken fetch rather than a broken render.
+const fullText = {};
+const openMsgs = new Set();
+function onBubbleTap(el) {
+  el.classList.toggle("open");
+  const uuid = el.dataset.uuid;
+  if (!uuid) return;                                  // long but not clipped: everything is already here
+  if (el.classList.contains("open")) { openMsgs.add(uuid); expandFull(uuid); }
+  else openMsgs.delete(uuid);
+}
+// The clamp is a poll-cost measure, so the one unbounded read happens here, on a deliberate tap.
+async function expandFull(uuid) {
+  if (fullText[uuid] || !drillSid) return;
+  // api() raises its own error toast, so a failure leaves the bubble open on the clamped text and says
+  // why, rather than looking like the tap did nothing.
+  try {
+    const d = await api("/api/session/message", { sid: drillSid, uuid });
+    if (d && typeof d.text === "string") { fullText[uuid] = d.text; feedSig = ""; paintFeed(); }
+  } catch {}
 }
 // Short label for a bubble's time. A bare HH:MM would lie about anything not from today, so an older
 // item carries its date too rather than being quietly mis-dated.

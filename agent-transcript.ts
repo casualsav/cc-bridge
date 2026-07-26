@@ -42,6 +42,9 @@ export const slashResultAfter = (file: string, sinceMs: number) => (isCodex(file
 export const recentConversation = (file: string, max = 12) => isCodex(file)
   ? (r => (r ? [{ role: 'assistant' as const, text: r.text, ts: 0 }] : []))(cx.latestFinalReply(file))
   : cc.recentConversation(file, max)
+// A Codex rollout has no per-entry uuid to address and its single feed row is never clipped, so
+// there is nothing to expand — the fetch simply has no answer there.
+export const conversationItemFullText = (file: string, uuid: string) => isCodex(file) ? null : cc.conversationItemFullText(file, uuid)
 export const agentSessionId = (file: string) => isCodex(file)
   ? cx.sessionIdOf(basename(file))
   : basename(file, '.jsonl')

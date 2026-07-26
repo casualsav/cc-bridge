@@ -37,6 +37,7 @@ export interface WebappDeps {
   setSetting?: (userId: string, key: string, value: unknown) => Promise<string | null> | string | null   // apply one change (userId = toggling user, for any notice routing); returns an error string or null on ok
   listSessions?: () => Promise<SessionCard[]> | SessionCard[]        // fleet dashboard: one card per live session
   readSessionFeed?: (sid: string) => Promise<SessionFeed | null> | SessionFeed | null   // drill-in: recent conversation + live activity
+  readSessionMessage?: (sid: string, uuid: string) => Promise<string | null> | string | null   // ONE row's full unclamped text, for expanding a clipped bubble
   sessionAction?: (userId: string, sid: string, action: SessionAct, text?: string) => Promise<string | null> | string | null   // stop/compact/send → error string or null
   sessionAttach?: (userId: string, sid: string, fileName: string, data: Uint8Array, opts: { caption?: string; voice?: boolean }) => Promise<{ error: string } | { delivered: string; match: string }>   // compose-row file/voice → bubble text + reconcile token
   sessionSpawn?: (userId: string, name: string, opts: { model?: string; effort?: string; mode?: string; headless?: boolean }) => Promise<{ error: string } | { sid: string; name: string }>   // "+" new session with dials
@@ -66,8 +67,9 @@ export interface SessionFeed {
   // 'activity' = a tool run of the live turn, 'thought' = its mid-turn narration (the 💭 the
   // Telegram live card shows); both appear only while the session is working.
   // `clipped` = the payload clamp cut this message (display only — storage and pane delivery keep
-  // the whole thing); the client says so instead of just trailing off.
-  items: Array<{ role: 'user' | 'assistant' | 'activity' | 'thought'; text: string; ts: number; img?: string; att?: string; cmd?: boolean; clipped?: boolean }>
+  // the whole thing); the client says so instead of just trailing off, and `uuid` (present only on a
+  // clipped row) is the handle it uses to fetch the rest from /api/session/message.
+  items: Array<{ role: 'user' | 'assistant' | 'activity' | 'thought'; text: string; ts: number; uuid?: string; img?: string; att?: string; cmd?: boolean; clipped?: boolean }>
 }
 export interface AutomationView {
   cron: Array<{ id: string; fireAt: number; sessionLabel: string; text: string; recurLabel: string | null }>
@@ -306,6 +308,13 @@ async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: strin
     if (!deps.readSessionFeed) return json({ error: 'unavailable' }, 404)
     const feed = await deps.readSessionFeed(url.searchParams.get('sid') || '')
     return feed ? json(feed) : json({ error: 'unknown session' }, 404)
+  }
+  // One row's full text. A GET beside the feed rather than a bigger feed: the payload clamp is there
+  // to keep the 3s poll cheap, so the unbounded read belongs on the rare deliberate tap.
+  if (url.pathname === '/api/session/message') {
+    if (!deps.readSessionMessage) return json({ error: 'unavailable' }, 404)
+    const text = await deps.readSessionMessage(url.searchParams.get('sid') || '', url.searchParams.get('uuid') || '')
+    return text == null ? json({ error: 'unknown message' }, 404) : json({ text })
   }
   if (url.pathname === '/api/auto') {
     if (!deps.readAutomation) return json({ error: 'unavailable' }, 404)

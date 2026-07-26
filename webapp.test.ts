@@ -194,6 +194,34 @@ test('console endpoints: sessions/auto reads + session act route to deps; missin
     const badCreate = await fetch(`${base}/api/auto/create`, { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify({ when: '2h' }) })
     expect(badCreate.status).toBe(400)
     expect((await fetch(`${base}/api/session/feed?sid=s1`, { headers: auth })).status).toBe(404)   // dep not injected
+    expect((await fetch(`${base}/api/session/message?sid=s1&uuid=u1`, { headers: auth })).status).toBe(404)   // ditto
     expect((await fetch(`${base}/api/sessions`)).status).toBe(401)                                  // unauthed
+  } finally { server.stop(true) }
+})
+
+// The on-demand full-text read behind an expanded bubble. It exists so the feed's payload clamp can
+// stay small: the clamp is there to keep a 14-item poll every 3s cheap, and raising it pays that cost
+// on every tick for every item to serve the rare long one.
+test('session/message returns one row in full, 404s an unknown uuid, and is authed like the rest', async () => {
+  const { startWebapp } = await import('./webapp.ts')
+  const { join } = await import('node:path')
+  const asked: Array<[string, string]> = []
+  const huge = 'z'.repeat(9000)
+  const server = startWebapp({
+    token: TOKEN, isAllowed: id => id === '42', log: () => {}, staticDir: join(import.meta.dir, 'webapp'), port: 0,
+    readSessionMessage: (sid, uuid) => { asked.push([sid, uuid]); return uuid === 'u1' ? huge : null },
+  })
+  const auth = { Authorization: 'tma ' + sign({ auth_date: String(now()), user }) }
+  const base = `http://127.0.0.1:${server.port}`
+  try {
+    const ok = await fetch(`${base}/api/session/message?sid=s1&uuid=u1`, { headers: auth })
+    expect(ok.status).toBe(200)
+    // Past the 4000-char feed clamp: the whole point of the endpoint.
+    expect((await ok.json()).text.length).toBe(9000)
+    expect(asked).toEqual([['s1', 'u1']])
+    // A row the transcript doesn't have is a 404, not an empty string — the client must be able to tell
+    // "nothing to show" from "the fetch failed", since it leaves the bubble open either way.
+    expect((await fetch(`${base}/api/session/message?sid=s1&uuid=gone`, { headers: auth })).status).toBe(404)
+    expect((await fetch(`${base}/api/session/message?sid=s1&uuid=u1`)).status).toBe(401)
   } finally { server.stop(true) }
 })
