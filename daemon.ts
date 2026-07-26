@@ -741,6 +741,21 @@ function recordSessionEffort(sid: string | null, effort: string | null): void {
   writeJsonFile(SESSION_EFFORTS_FILE, Object.fromEntries(sessionEfforts))
 }
 
+// Model has the SAME gap mode/effort had, worse in one way: `--resume` restores the model in
+// practice (Claude Code reopens on whatever model the conversation was last set to), but the bridge
+// keeps no record of it — so it can neither re-assert the model after a kill/reopen (no live pane
+// to read it from) nor report it. Mirrors sessionEfforts exactly; stores the ALIAS ('fable' /
+// 'opus' / 'sonnet' / 'haiku'), not the display name or the pinned full id — spawnModelFlag does
+// the MODEL_ALIAS_IDS lookup at launch time.
+const SESSION_MODELS_FILE = join(STATE_DIR, 'session-models.json')
+const sessionModels = new Map<string, string>(Object.entries(readJsonFile<Record<string, string>>(SESSION_MODELS_FILE, {})))
+function recordSessionModel(sid: string | null, alias: string | null): void {
+  if (!sid || !alias || sessionModels.get(sid) === alias) return
+  sessionModels.set(sid, alias)
+  while (sessionModels.size > 200) sessionModels.delete(sessionModels.keys().next().value!)   // oldest-first cap
+  writeJsonFile(SESSION_MODELS_FILE, Object.fromEntries(sessionModels))
+}
+
 // A user-set STANDING default effort: the cold fallback when a resumed/new session has no remembered
 // effort of its own. Distinct from lastFocusedEffort (which auto-tracks the focused pane and drifts),
 // so once set it sticks — set via `/effort default <level>`. null = unset (then fall back to the
@@ -1972,7 +1987,7 @@ async function scanAuxPanePrompts(pane: string): Promise<void> {
   if (h === st.promptHash) return
   st.promptHash = h
   st.outstanding = true
-  void relayAuxMenuAfterPreamble(pane, () => relayPromptToTelegram(prompt, pane))
+  void relayAuxMenuAfterPreamble(pane, async () => relayPromptToTelegram(prompt, pane, await paneDisplayName(pane)))
 }
 
 // ---- Off-MCP pane auto-discovery ----
@@ -3899,7 +3914,7 @@ function onPaneEvent(text: string): void {
   if (h === st.promptHash) return
   st.promptHash = h
   st.outstanding = true
-  void relayMenuAfterPreamble(() => relayPromptToTelegram(prompt))
+  void relayMenuAfterPreamble(async () => relayPromptToTelegram(prompt, focus.activePaneId, focus.activePaneId ? await paneDisplayName(focus.activePaneId) : undefined))
 }
 
 // Identity of a prompt for double-relay suppression: its question plus the option
@@ -4025,7 +4040,7 @@ async function handleTabbedAdvance(chat_id: string, paneId: string | null = focu
     const next = detectUserPrompt(text)
     if (next?.tabbed && promptHash(next) !== prevHash) {
       markPromptRelayed(paneId, promptHash(next))   // suppress repaints of this next tab; we relay it explicitly here
-      await relayPromptToTelegram(next, paneId)
+      await relayPromptToTelegram(next, paneId, await paneDisplayName(paneId))
       return
     }
     await new Promise(r => setTimeout(r, 250))
@@ -4773,7 +4788,14 @@ async function handleCall(
         // its chat id is his own chat — and the same swallowing already applied to the pre-existing
         // "Unknown command" echo, so nothing here regressed.
         const slashAt = Date.now()
-        const sent = await injectSlash(targetPane, watcher, command, { guardPalette: true })
+        // Same pin every other /model path gets (MODEL_ALIAS_IDS) — without this, a bus
+        // `tg slash /model <alias>` bypasses the table and lands wherever the CLI's own alias
+        // resolves, which is the Opus 4.8 bug repeated for this one path.
+        const slashAliasMatch = /^\/model\s+(\S+)$/i.exec(command.trim())
+        const slashCommand = slashAliasMatch && MODEL_ALIASES.includes(slashAliasMatch[1].toLowerCase())
+          ? `/model ${modelArgFor(slashAliasMatch[1].toLowerCase())}`
+          : command
+        const sent = await injectSlash(targetPane, watcher, slashCommand, { guardPalette: true })
         if (!sent.ok) { text = `!${paletteRefusalText(command, sent.offered)}`; break }
         void echoSlashResult(targetPane, targets[0]?.chat ?? '', slashAt, targets[0]?.thread ? Number(targets[0].thread) : undefined)
         text = `sent ${command.split(/\s/)[0]} to @${toName} — its outcome echoes on that session's surface`
@@ -5276,6 +5298,9 @@ async function relayModelSet(ctx: Context, paneId: string, watcher: PaneWatcher 
   }
   if (name) {
     await ctx.reply(`✅ Model set to <b>${escapeHtml(name)}</b>`, { parse_mode: 'HTML' }).catch(() => {})
+    // Remember the alias the switch actually landed on — --resume restores the model in practice
+    // but the bridge has no record of it, so a reopen would otherwise boot on the CLI's own default.
+    void sessionForPane(paneId, false).then(sid => recordSessionModel(sid, want)).catch(() => {})
   } else {
     void channel.react({ chatId: String(ctx.chat!.id), messageId: String(ctx.message!.message_id) }, '✍').catch(() => {})
   }
@@ -5576,10 +5601,23 @@ async function doModePicker(ctx: Context): Promise<void> {
 const MODEL_ALIASES = ['fable', 'opus', 'sonnet', 'haiku']
 // The CLI's own 'opus' alias still boots Opus 4.8 (checked on 2.1.205), but opus here should mean
 // Opus 5 — so pin the full id (verified against the live /v1/models list, 2026-07-24) everywhere
-// the bridge sends a model. Drop the pin once the CLI alias catches up.
-const MODEL_ALIAS_IDS: Record<string, string> = { opus: 'claude-opus-5' }
+// the bridge sends a model. Drop the pin once the CLI alias catches up. All four aliases are now
+// pinned the same way — a bare alias drifts to whatever the CLI resolves it to on its own schedule,
+// which is exactly the Opus 4.8 bug repeated for fable/sonnet/haiku.
+const MODEL_ALIAS_IDS: Record<string, string> = {
+  opus: 'claude-opus-5', fable: 'claude-fable-5',
+  sonnet: 'claude-sonnet-5', haiku: 'claude-haiku-4-5-20251001',
+}
 const modelArgFor = (alias: string): string => MODEL_ALIAS_IDS[alias] ?? alias
 const MODEL_TIP = '💡 Tip: <code>/model &lt;name&gt;</code> to set any specific model.'
+
+// The terminal fallback for a spawn/reopen that would otherwise resolve to NO model at all. Leaving
+// it unresolved hands the choice to the CLI's own default — which is how a `tg reopen` came back on
+// Haiku 4.5 (and silently dropped the 1M window with it: the suffix that carries it has nowhere to
+// land with no --model flag at all, see model-window.ts). The floor exists so the bridge never
+// silently downgrades a session's model or its context window; it is not a "preferred" model, only
+// the last-resort one.
+const SPAWN_MODEL_FLOOR = 'fable'
 
 function modelPickerKeyboard(): InlineKeyboard {
   const kb = new InlineKeyboard()
@@ -8622,7 +8660,19 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
       const prefSid = presetSessionId ?? findTopicByCwd(dir)?.sessionId
       const mode = (prefSid ? sessionModes.get(prefSid) : null) ?? lastFocusedMode
       const effort = (prefSid ? sessionEfforts.get(prefSid) : null) ?? fallbackEffort()
-      if (mode !== 'default' || effort) inherit = { model: null, effort, mode }
+      // Model's fallback chain, mirroring `tg spawn`'s (~4873): the session's OWN remembered alias,
+      // then the persisted /settings 🐣 spawn-defaults model (validated — a stale/bad pref is ignored
+      // silently, same as that site), then SPAWN_MODEL_FLOOR. Unlike mode/effort this chain never
+      // bottoms out at null — a resume/reopen must always emit SOME --model, or the CLI's own default
+      // silently wins (that is how a reopen came back on Haiku 4.5, dragging the 1M window down with
+      // it: model-window.ts's suffix has no model identifier to ride on with no --model flag at all).
+      const defaultSpawnModel = loadAccess().spawnModel
+      const model = (prefSid ? sessionModels.get(prefSid) : null)
+        ?? (defaultSpawnModel && MODEL_ALIASES.includes(defaultSpawnModel) ? defaultSpawnModel : null)
+        ?? SPAWN_MODEL_FLOOR
+      // Widen the guard to include model: it now always resolves to a floor, so a resume with default
+      // mode and no effort must still seed the model instead of dropping it.
+      if (mode !== 'default' || effort || model) inherit = { model, effort, mode }
     }
     // Explicit dials (tg spawn / mini-app "+"): the caller's model/effort/mode win over anything inherited.
     if (dials?.model || dials?.effort || dials?.mode) {
@@ -9975,8 +10025,22 @@ bot.on('callback_query:data', async ctx => {
     if (!t) { await ctx.answerCallbackQuery().catch(() => {}); return }
     await ctx.answerCallbackQuery({ text: `Switching to ${alias}…` }).catch(() => {})
     await injectSlash(t.paneId, t.watcher, `/model ${modelArgFor(alias)}`)
-    const model = await readCurrentModel(t.paneId, t.watcher)
-    await ctx.editMessageText(`🧠 <b>Model</b> — now ${model ? escapeHtml(model) : escapeHtml(alias)}\n\n${MODEL_TIP}`, {
+    // Mirrors relayModelSet's fix (b42bd3f): the same "Switch model?" cache-confirm this hits parks the
+    // pane on a dialog, not on the new model — accept it, then only report success once the readback
+    // actually reflects the request. acceptModelSwitch deliberately does NOT accept the usage-credits
+    // dialog, so that case (and any other non-landing) falls through to the truthful "did not take" label.
+    await acceptModelSwitch(t.paneId, t.watcher, alias)
+    let model: string | null = null
+    for (let i = 0; i < 8; i++) {
+      await new Promise(r => setTimeout(r, 300))
+      model = await readCurrentModel(t.paneId, t.watcher).catch(() => null)
+      if (model && model.toLowerCase().includes(alias)) break
+    }
+    const landed = !!model && model.toLowerCase().includes(alias)
+    // Same reasoning as relayModelSet: remember the alias only once the readback confirms it landed.
+    if (landed) void sessionForPane(t.paneId, false).then(sid => recordSessionModel(sid, alias)).catch(() => {})
+    const label = landed ? `now ${escapeHtml(model!)}` : `did not switch — still ${model ? escapeHtml(model) : 'unknown'}`
+    await ctx.editMessageText(`🧠 <b>Model</b> — ${label}\n\n${MODEL_TIP}`, {
       parse_mode: 'HTML', reply_markup: modelPickerKeyboard(),
     }).catch(() => {})
     return
@@ -10907,7 +10971,10 @@ bot.on('callback_query:data', async ctx => {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
       return
     }
-    const { paneId } = await targetPaneOf(ctx)
+    // Same fix as pperm: above — the card remembers which pane raised its prompt; targetPaneOf's
+    // chat-routing can resolve a DIFFERENT session than the one that asked.
+    const cardKey = `${ctx.chat?.id}:${ctx.callbackQuery?.message?.message_id}`
+    const paneId = promptCards.get(cardKey)?.paneId ?? (await targetPaneOf(ctx)).paneId
     if (!paneId) {
       await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {})
       return
@@ -10940,7 +11007,10 @@ bot.on('callback_query:data', async ctx => {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
       return
     }
-    const { paneId } = await targetPaneOf(ctx)
+    // Same fix as pperm: above — mq: cards are relayed from the same select-menu path as prompt: and
+    // share its promptCards entry, so the originating pane is known and preferred over targetPaneOf.
+    const cardKey = `${ctx.chat?.id}:${ctx.callbackQuery?.message?.message_id}`
+    const paneId = promptCards.get(cardKey)?.paneId ?? (await targetPaneOf(ctx)).paneId
     if (!paneId) {
       await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {})
       return
@@ -12883,6 +12953,12 @@ if (AGENT_BUS_ENABLED) setInterval(() => void sweepBus(), LATER_SWEEP_MS).unref(
 // alert (footer-tier at 75s, generic at 90s) relays an actionable card; a still-stuck screen re-nags
 // quietly once per 30min; recovery clears the timer + prunes the pane's cards.
 const stuckWatch = new Map<string, StuckState>()
+// Parallel timer for a RECOGNIZED prompt (a select menu or permission prompt — detectStuckScreen
+// vetoes these on purpose, since they're already relayed as a Telegram card with buttons). Recognized
+// just means "a card exists somewhere"; it says nothing about whether anyone tapped it. Runs the exact
+// same pure planner as stuckWatch, keyed on the prompt's own question token instead of a stuck signature,
+// so an unanswered card ages out through the same alert/re-nag timers instead of never escalating.
+const recognizedPromptWatch = new Map<string, StuckState>()
 // Panes whose current wedge episode has already been escalated to the fleet surface (bug 11a) — so a
 // surface-less session is reported once, not once per alert. Cleared when the pane recovers.
 const wedgeEscalated = new Set<string>()
@@ -12968,10 +13044,38 @@ async function sweepStuckPanes(): Promise<void> {
         if (file && (turnInProgress(file) || transcriptFreshWithin(file, 30_000))) stuck = null   // working, not wedged
       } catch { /* transcript resolution blip — treat as eligible; the time gate still guards */ }
     }
+    // A RECOGNIZED prompt (select menu or permission prompt) is exactly what detectStuckScreen vetoes —
+    // it's already relayed as a card. But relayed-once is the whole gap: nothing re-checks whether it was
+    // ever ANSWERED. Track it on its own timer, keyed on the question so a repaint doesn't re-arm it, and
+    // only while `stuck` is null (the two are mutually exclusive by construction).
+    const recognized = !stuck && cap
+      ? (() => { const q = detectPermissionPrompt(cap)?.question ?? detectUserPrompt(cap)?.question ?? null; return q ? { sig: permPromptToken(q) } : null })()
+      : null
+    const { decision: rDecision, next: rNext } =
+      planStuckSweep(recognizedPromptWatch.get(pane) ?? null, recognized?.sig ?? null, 'generic', now)
+    if (rNext) recognizedPromptWatch.set(pane, rNext); else recognizedPromptWatch.delete(pane)
+
     const { decision, next } = planStuckSweep(stuckWatch.get(pane) ?? null, stuck?.sig ?? null, stuck?.tier ?? 'generic', now)
     if (next) stuckWatch.set(pane, next); else stuckWatch.delete(pane)
-    const esc = planWedgeEscalation(wedgeEscalated.has(pane), decision)
+    // wedgeEscalated also gates `tg keys` without --force (planKeyInjection) — a recognized-but-
+    // unanswered prompt makes the mid-turn reading just as untrustworthy as an unrecognized wedge does.
+    const escDecision = decision.act !== 'clear' ? decision : rDecision
+    const esc = planWedgeEscalation(wedgeEscalated.has(pane), escDecision)
     if (esc.next) wedgeEscalated.add(pane); else wedgeEscalated.delete(pane)
+
+    if ((rDecision.act === 'alert' || rDecision.act === 'renag') && recognized) {
+      // Bus/orchestrator alert only — a card for this prompt already exists, so never relay a second one.
+      const nm = await paneDisplayName(pane)
+      const sid = await sessionForPane(pane, false).catch(() => null)
+      const blocked = sid ? queuedFor(sid).length : 0
+      await wakeOrchestrator([
+        `❓ <b>${escapeHtml(nm)}</b> has an unanswered prompt — a card was relayed but nobody tapped it.`,
+        blocked ? `${blocked} ask${blocked === 1 ? '' : 's'} queued behind it.` : 'Nothing queued behind it yet.',
+        `Last lines of its pane:\n${cleanPaneTail(cap, 12)}`,
+        `Levers: \`tg keys ${nm} enter\` (or esc / a digit — for a picker or permission prompt) · \`tg slash ${nm} "/clear"\` · \`tg kill ${nm}\` (then \`tg reopen ${nm}\`).`,
+      ].join('\n\n'), sid).catch(() => {})
+      process.stderr.write(`daemon: recognized-prompt watchdog ${rDecision.act} for pane ${pane} (${nm})\n`)
+    }
     if (decision.act === 'clear') { pruneStuckCards(pane); continue }
     if ((decision.act === 'alert' || decision.act === 'renag') && stuck) {
       // Bug 11a: a headless fleet member has no surface of its own, so this card used to be dropped
@@ -13466,7 +13570,16 @@ async function webappSessionAction(userId: string, sid: string, action: 'stop' |
       if (!sent.ok) return paletteRefusalText(`/model ${arg}`, sent.offered)
       // Fire-and-forget: the confirm dance polls for up to ~30s and the HTTP request must not be
       // held open for it (same call as `close`). The 3s feed poll is what reports the new model.
-      void acceptModelSwitch(pane, watcher, arg)
+      // Chained off the SAME accept, not a separate poll: remember the alias only once a readback
+      // confirms it landed, same as the chat-side pickers — otherwise a declined switch would poison
+      // the resume-model store.
+      void acceptModelSwitch(pane, watcher, arg).then(async () => {
+        for (let i = 0; i < 8; i++) {
+          await new Promise(r => setTimeout(r, 300))
+          const cur = await readCurrentModel(pane, watcher).catch(() => null)
+          if (cur && cur.toLowerCase().includes(arg)) { recordSessionModel(sid, arg); return }
+        }
+      })
       return null
     }
     if (!EFFORT_LEVELS.includes(arg)) return `unknown effort — one of: ${EFFORT_LEVELS.join(' | ')}`

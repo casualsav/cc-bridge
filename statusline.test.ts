@@ -131,6 +131,33 @@ test('parseStatusline survives the agents sidebar view (statusline above, agent 
   expect(d.h5).toEqual({ pct: 52, reset: '1h35m' })
 })
 
+// Real capture (tmux -S -8) of a session running subagents: Claude Code renders the "● main /
+// ◯ <agent> … tokens" progress rows BELOW the footer. Anchoring on the pane's last non-empty line
+// instead of the footer walked onto those rows and mis-read a subagent's own ↓ token count as the
+// session's (worse than null — see statusline.ts's statuslineBlock).
+const WITH_AGENTS = [
+  '  ubuntu@cloud:/home/ubuntu/projects/cc-bridge (main) | casualsav/cc-bridge | claude-opus-5',
+  '  ε:high | ✻think | ctx ███████░░░ 69%/200k | ↑138.0k ↓3 | $85.0363 | ⧗9h36m | api 3h27m | +2123 -288 | v2.1.205',
+  '  5h █░░░░░░░░░░░░░ 8% ↻4h14m | 7d ░░░░░░░░░░░░░░ 1% ↻167h14m',
+  '  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents',
+  '',
+  '  ● main',
+  '  ◯ general-purpose  D: model plumbing audit                                  13m 8s · ↓ 183.2k tokens',
+  '  ◯ coder            B+E: wedge alert, attribution, answerability                37s · ↓ 44.1k tokens',
+].join('\n')
+
+test('parseStatusline anchors on the footer, not the pane\'s last line, when agent rows render below it', () => {
+  const d = parseStatusline(WITH_AGENTS)!
+  expect(d).not.toBeNull()
+  expect(d.model).toBe('Opus 5')
+  expect(d.ctxPct).toBe(69)
+  expect(d.effort).toBe('high')
+  expect(d.h5).toEqual({ pct: 8, reset: '4h14m' })
+  expect(d.d7).toEqual({ pct: 1, reset: '167h14m' })
+  expect(d.tokens).toBe('↑138.0k ↓3')
+  expect(d.cost).toBe('$85.04')
+})
+
 test('ctxWindow captures the denominator the percentage is of', () => {
   // The nudge payload must carry the window: 50% of a haiku worker's 200k is a fifth of 50% of a
   // 1M session, and a ratio read as fleet-uniform is a wrong compact-vs-clear call.

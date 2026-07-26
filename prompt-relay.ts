@@ -37,9 +37,12 @@ async function noticeTargets(paneId: string | null): Promise<Array<{ chat: strin
 }
 
 // Render a prompt as Telegram HTML: bold question, then each numbered option with
-// its description (if any) as plain italic text beneath it (no blockquote).
-export function renderPromptHtml(prompt: PromptInfo): string {
-  const lines = [`❓ <b>${escapeHtml(prompt.question)}</b>`]
+// its description (if any) as plain italic text beneath it (no blockquote). `name` — the
+// session's display name — is prefixed the same way renderStuckHtml prefixes its card, so a
+// prompt card is attributable at a glance in a multi-session chat; omitted when not given
+// (callers that don't have a name yet, and the existing unit test, still get the bare heading).
+export function renderPromptHtml(prompt: PromptInfo, name?: string): string {
+  const lines = [name ? `❓ <b>${escapeHtml(name)}</b>: <b>${escapeHtml(prompt.question)}</b>` : `❓ <b>${escapeHtml(prompt.question)}</b>`]
   if (prompt.tabbed) lines.push('<i>One of several questions — answer this one to move to the next.</i>')
   else if (prompt.multiSelect) lines.push('<i>Pick one or more, then tap ✅ Submit.</i>')
   lines.push('')
@@ -103,7 +106,7 @@ export function singleAnswerKeyboard(prompt: PromptInfo, prefix: 'prompt' | 'mq'
   return rows
 }
 
-export async function relayPromptToTelegram(prompt: PromptInfo, paneId: string | null = focus.activePaneId): Promise<void> {
+export async function relayPromptToTelegram(prompt: PromptInfo, paneId: string | null = focus.activePaneId, name?: string): Promise<void> {
   if (!paneId) return
   // Route to the requesting session's own topic in forum mode; DM mode → the allowlist. A surface-less
   // headless pane falls back to the fleet surface — a select menu blocks the session until answered.
@@ -126,7 +129,7 @@ export async function relayPromptToTelegram(prompt: PromptInfo, paneId: string |
     }
     await deps.flushPendingText()   // preamble text must land before the menu
   }
-  const text = renderPromptHtml(prompt)
+  const text = renderPromptHtml(prompt, name)
 
   for (const { chat, thread } of targets) {
     const extra = thread ? { threadId: String(thread) } : {}

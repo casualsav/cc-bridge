@@ -29,13 +29,22 @@ export function pinBar(pct: number, width = 10): string {
   return '█'.repeat(filled) + '░'.repeat(Math.max(0, width - filled))
 }
 
+// The footer/mode-line itself — "⏵⏵ bypass permissions on …", "plan mode on", "accept edits on",
+// "normal mode", or the plain "? for shortcuts" hint. Same phrasing prompt.ts's BELOW_CHROME
+// recognizes as chrome below a live prompt; reused here as the statusline's anchor rather than
+// "the pane's last non-empty line", because the agents sidebar view renders subagent progress rows
+// BELOW this footer — anchoring on the last non-empty line instead walks onto those rows and can
+// mis-parse a subagent's own token count as the session's (worse than returning null).
+const FOOTER_RE = /\b(plan mode on|accept edits on|bypass permissions on|normal mode)\b|shift\+tab to (cycle|approve)|for agents\b|for shortcuts\b/i
+
 // The contiguous non-empty, non-border lines directly above the pane's last footer hint — i.e.
 // the custom statusline's slot. null when there's no statusline there (the line above the footer
 // is the input-box border) or the pane is in a transient state.
 function statuslineBlock(paneText: string): string | null {
   const lines = paneText.split('\n').map(l => stripAnsi(l).replace(/\s+$/, ''))
-  let last = lines.length - 1
-  while (last >= 0 && !lines[last].trim()) last--
+  let last = -1
+  for (let i = lines.length - 1; i >= 0; i--) { if (FOOTER_RE.test(lines[i])) { last = i; break } }
+  if (last < 0) { last = lines.length - 1; while (last >= 0 && !lines[last].trim()) last-- }
   if (last < 1) return null
   const out: string[] = []
   for (let i = last - 1; i >= 0 && last - i <= 6; i--) {

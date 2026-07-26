@@ -1230,8 +1230,13 @@ const modelAlias = name => (DIAL_MODELS.find(([a]) => name && name.toLowerCase()
 let dialNow = { model: null, effort: null, defModel: null, defEffort: null };
 // Paint the pill from a feed payload (null = opening a session before the first poll answers).
 function setDial(d) {
-  dialNow = { model: (d && d.model) || null, effort: (d && d.effort) || null,
-              defModel: (d && d.defModel) || null, defEffort: (d && d.defEffort) || null };
+  // A poll that comes back empty (the statusline is masked by a confirm dialog mid-switch) must
+  // not blank a pill that already knows better — hold the last true reading. d === null is the
+  // deliberate reset when opening a session, and still clears everything.
+  dialNow = d === null
+    ? { model: null, effort: null, defModel: null, defEffort: null }
+    : { model: d.model || dialNow.model, effort: d.effort || dialNow.effort,
+        defModel: d.defModel || dialNow.defModel, defEffort: d.defEffort || dialNow.defEffort };
   // The pill says what the SESSION says, never what our list says it should be: the statusline name
   // is already normalised ("claude-haiku-4-5-20251001" → "Haiku 4.5"), it covers a model set by full
   // id from the terminal that no list here knows, and it cannot go stale — the row labels below can,
