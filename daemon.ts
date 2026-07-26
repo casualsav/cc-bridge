@@ -26,7 +26,7 @@ import { hopKey, resolveChain, pickNextHop, moveHop } from './failover-chain.ts'
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
 import { renderSessionsView } from './sessions-view.ts'
-import { detectCurrentMode, onNormalPrompt, inputBoxContent, isModelSwitchConfirm, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier } from './prompt.ts'
+import { detectCurrentMode, onNormalPrompt, inputBoxContent, isModelSwitchConfirm, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType } from './prompt.ts'
 import { resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, currentTurnActivity, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
 import {
   AGENT_PANE_OPT, agentExitKeys, agentInterruptKeys, agentLabel, agentResetCommand, agentSubmitKeys,
@@ -526,8 +526,20 @@ let usageChoiceDismissedAt = 0
 async function dismissUsageLimitChoice(paneId: string): Promise<void> {
   if (Date.now() - usageChoiceDismissedAt < 4000) return   // same menu, just repainting
   usageChoiceDismissedAt = Date.now()
-  process.stderr.write('daemon: auto-dismissing usage-limit choice (option 1: stop and wait)\n')
-  await withPaneInjection(paneId, async () => { await sendKeys(paneId, ['Enter']); await waitForSettle(paneId, 200, 3000) })
+  await withPaneInjection(paneId, async () => {
+    // Re-verify on a FRESH capture, inside the injection lock: the usage menu can be swapped for a
+    // DIFFERENT dialog (e.g. the Fable credit-consent prompt) between detection and this keystroke,
+    // and Enter must never land on whatever replaced it — that dialog is answered by the human, never
+    // auto-confirmed. See isFableCreditConsent for the one we must never pick an option on.
+    const cap = await capturePane(paneId).catch(() => '')
+    if (!isUsageLimitChoice(cap)) {
+      const shown = cap ? cap.split('\n').map(l => l.trim()).filter(Boolean).slice(-3).join(' | ') : '(empty capture)'
+      process.stderr.write(`daemon: usage-limit auto-dismiss aborted — pane no longer shows it: ${shown}\n`)
+      return
+    }
+    process.stderr.write('daemon: auto-dismissing usage-limit choice (option 1: stop and wait)\n')
+    await sendKeys(paneId, ['Enter']); await waitForSettle(paneId, 200, 3000)
+  })
 }
 
 // Auto-confirm the /plugin "Will install:" scope menu on "Install for you (user scope)" (the
@@ -2411,17 +2423,48 @@ function emitInbound(params: InboundParams, targetPane?: string | null): void {
 // meta (message_id). Normal-length messages bypass the hold entirely — no added latency.
 const SPLIT_HOLD_MS = 2500
 const SPLIT_PART_MIN = 4000
-type SplitPending = { params: InboundParams; targetPane: string | null | undefined; timer: ReturnType<typeof setTimeout>; lastPartLen: number }
+// A modal genuinely holding the pane re-arms the flush instead of typing into it — the prompt relay
+// will have already surfaced that dialog to Telegram, and the user typically answers within a few
+// minutes, never 30.
+const SPLIT_MODAL_RETRY_MS = 5_000
+const SPLIT_MODAL_RETRY_MAX = 360   // 5s × 360 = 30 minutes
+type SplitPending = { params: InboundParams; targetPane: string | null | undefined; timer: ReturnType<typeof setTimeout>; lastPartLen: number; modalRetries?: number }
 const pendingSplitMerges = new Map<string, SplitPending>()
-function flushSplitMerge(key: string): void {
+// Flush a held split-message part into the pane it was addressed to. This is USER text, so the gate
+// is the permissive paneAcceptsText — the CLI's mid-turn steering/queue feature must keep working —
+// never the strict safeToType a timer/daemon keystroke needs. Resolves once: either the text is
+// handed to emitInbound, or (a modal holds the pane) a retry is armed and it returns without typing.
+async function flushSplitMerge(key: string): Promise<void> {
   const p = pendingSplitMerges.get(key)
   if (!p) return
+  const pane = p.targetPane ?? focus.activePaneId
+  if (!pane) { clearTimeout(p.timer); pendingSplitMerges.delete(key); emitInbound(p.params, p.targetPane); return }
+  const cap = await capturePane(pane).catch(() => '')
+  const cur = pendingSplitMerges.get(key)
+  if (cur !== p) return   // superseded while the capture was in flight (merged into a newer part, or already flushed) — leave whatever replaced it alone
+  if (cap && !paneAcceptsText(cap)) {
+    const modalRetries = (p.modalRetries ?? 0) + 1
+    if (modalRetries > SPLIT_MODAL_RETRY_MAX) {
+      pendingSplitMerges.delete(key)
+      process.stderr.write(`daemon: split-merge flush gave up after 30m — pane ${pane} still shows a dialog, message NOT typed\n`)
+      for (const t of await outboundTargetsFor(pane)) {
+        await channel.sendText(String(t.chat),
+          `⚠️ Held your message too long waiting for a dialog on this session to clear — it was <b>NOT</b> typed. Please resend:\n\n${escapeHtml(p.params.content)}`,
+          { ...(t.thread ? { threadId: String(t.thread) } : {}) }).catch(() => {})
+      }
+      return
+    }
+    clearTimeout(p.timer)
+    const timer = setTimeout(() => void flushSplitMerge(key), SPLIT_MODAL_RETRY_MS)
+    pendingSplitMerges.set(key, { ...p, timer, modalRetries })
+    return
+  }
   clearTimeout(p.timer)
   pendingSplitMerges.delete(key)
   emitInbound(p.params, p.targetPane)
 }
 // partLen = length of this text part, or null for a non-mergeable message (attachment/image).
-function deliverInbound(key: string, params: InboundParams, targetPane: string | null | undefined, partLen: number | null): void {
+async function deliverInbound(key: string, params: InboundParams, targetPane: string | null | undefined, partLen: number | null): Promise<void> {
   const prev = pendingSplitMerges.get(key)
   if (prev && partLen !== null) {
     clearTimeout(prev.timer)
@@ -2429,9 +2472,9 @@ function deliverInbound(key: string, params: InboundParams, targetPane: string |
     const seam = prev.lastPartLen >= 4096 ? '' : '\n'
     params = { ...prev.params, content: prev.params.content + seam + params.content }
     process.stderr.write(`daemon: merged split message part (${partLen} chars) into ${params.meta.message_id ?? '?'}\n`)
-  } else if (prev) flushSplitMerge(key)   // non-text follow-up: deliver the held text first, in order
+  } else if (prev) await flushSplitMerge(key)   // non-text follow-up: deliver the held text first, in order
   if (partLen !== null && partLen >= SPLIT_PART_MIN) {
-    const timer = setTimeout(() => flushSplitMerge(key), SPLIT_HOLD_MS)
+    const timer = setTimeout(() => void flushSplitMerge(key), SPLIT_HOLD_MS)
     pendingSplitMerges.set(key, { params, targetPane, timer, lastPartLen: partLen })
     return
   }
@@ -5212,6 +5255,36 @@ async function injectSlash(paneId: string, watcher: PaneWatcher | null, command:
   return { ok: true }
 }
 
+// Paste arbitrary composer text with the SAME slash-palette protection injectSlash gives a
+// bot-constructed command literal. Needed only for text that reaches a pane RAW: an ordinary chat
+// message never can — formatChannelBlock wraps it in <tg …> first, so the pane's input box never
+// itself starts with "/" and the palette hazard slashPaletteWouldMisfire guards against structurally
+// can't arise. The mini-app composer is the one surface that pastes the user's literal text with no
+// such wrapper, so a message that happens to read like a command (e.g. "/mode") is exposed to the
+// exact fuzzy-match misfire injectSlash guards elsewhere. Mirrors pasteToPane/injectPaste's bracket-
+// paste mechanics (multi-line text needs paste, not send-keys — an embedded newline read as literal
+// keystrokes submits early) with injectSlash's pre-submit palette check spliced in.
+async function pasteGuarded(paneId: string, watcher: PaneWatcher | null, text: string): Promise<SlashSent> {
+  if (!text.trim().startsWith('/')) {
+    const ok = watcher ? await injectText(paneId, watcher, text) : await pasteToPane(paneId, text)
+    return ok ? { ok: true } : { ok: false, offered: [] }
+  }
+  let offered: string[] | null = null
+  const run = async () => {
+    if (!(await paneAlive(paneId))) return
+    await exec('tmux', ['set-buffer', '-b', INJECT_BUFFER, '--', text], { timeout: 2000 })
+    await exec('tmux', ['paste-buffer', '-d', '-p', '-b', INJECT_BUFFER, '-t', paneId], { timeout: 2000 })
+    await waitForSettle(paneId, 200, 4000)
+    offered = slashPaletteWouldMisfire(await capturePane(paneId).catch(() => ''), text)
+    // Leave the pane exactly as it was found, same as injectSlash's guard.
+    if (offered) { await sendKeys(paneId, ['C-u']); await waitForSettle(paneId, 200, 3000); return }
+    await sendKeys(paneId, agentSubmitKeys(await paneAgentKind(paneId)))
+    await waitForSettle(paneId, 300, 30_000)
+  }
+  await (watcher ? watcher.withInjection(run) : run())
+  return offered ? { ok: false, offered } : { ok: true }
+}
+
 // Reliably exit a session's pane (used when a user closes/deletes its topic). Unlike injectSlash, the
 // Enter is split out behind a settle gate: a batched `/exit`+Enter can outrun a NON-focused topic
 // pane's TUI and leave the command typed-but-unsubmitted (the topic-pane paste→submit race), so the
@@ -7501,6 +7574,19 @@ async function declineFableForOpus(pane: string, sid: string | null): Promise<vo
   process.stderr.write(`daemon: auto-refresh: declined the Fable credit consent in ${pane}, fell back to opus\n`)
 }
 
+// The strict gate for a TIMER/daemon keystroke about to land UNSUPERVISED: a fresh capture must
+// pass safeToType (idle prompt, no dialog, empty composer) AND the transcript must agree no turn is
+// in flight — pane text alone can lag a turn that just started. Shared by every unattended injector
+// (scheduled messages, the stale-session auto-refresh sweep) so "is it safe to type into this pane
+// right now with nobody watching" has exactly one answer.
+async function paneSafeToType(pane: string): Promise<boolean> {
+  const cap = await capturePane(pane).catch(() => '')
+  if (!cap || !safeToType(cap)) return false
+  const cwd = await paneCwd(pane).catch(() => null)
+  const file = cwd ? await transcriptForPane(pane, cwd) : null
+  return !(file && turnInProgress(file))
+}
+
 // Auto-update is on: put stale sessions on the new binary with no tap. Every pane that fails the
 // safety gate is skipped SILENTLY and retried on the next sweep — an owner mid-turn or mid-draft is
 // not a failure, it's "not now". Panes we DO attempt are marked against the installed version, so a
@@ -7511,10 +7597,13 @@ async function autoRefreshStaleSessions(panes: string[], installed: string): Pro
     try {
       if (isPaneRestarting(pane)) continue
       const cap = await capturePane(pane).catch(() => '')
-      if (!cap || !onNormalPrompt(cap) || detectWorking(cap)) continue
-      // Anything we can't read as an EMPTY composer counts as occupied: /exit discards whatever is
-      // typed there, and losing the owner's half-written message is worse than staying a build behind.
-      if (inputBoxContent(cap) !== '') continue
+      // safeToType folds in the old onNormalPrompt/!detectWorking/empty-composer check AND every other
+      // modal state (bash-mode-armed, the credit-consent dialog, a model picker, …) this narrower check
+      // used to miss entirely — an unattended refresh is exactly the class of keystroke that must never
+      // land on a dialog it never checked for. /exit discards whatever's typed, so an occupied composer
+      // still counts as "not now" — losing the owner's half-written message is worse than staying a
+      // build behind.
+      if (!cap || !safeToType(cap)) continue
       const cwd = await paneCwd(pane).catch(() => null)
       const file = cwd ? await transcriptForPane(pane, cwd) : null
       if (file && turnInProgress(file)) continue
@@ -12056,7 +12145,7 @@ async function handleInbound(
   if (effPane) void kickThinkingMirror(effPane)
   // Long prompts Telegram split client-side re-merge into one injection (see deliverInbound).
   const mergeKey = `${chat_id}:${typeof threadId === 'number' ? threadId : 'dm'}:${from.id}`
-  deliverInbound(mergeKey, params, targetPane, imagePath || attachmentPath || attach ? null : content.length)
+  await deliverInbound(mergeKey, params, targetPane, imagePath || attachmentPath || attach ? null : content.length)
 }
 
 // ---- Dead-session revival (ROADMAP #2) ----
@@ -13774,10 +13863,23 @@ initScheduler({
   channel,
   loadAccess,
   showPanel: (ctx, rich, html, keyboard) => showRichPanel(ctx, 'send', rich, html, keyboard),
-  injectToPane: (paneId, text) =>
-    paneId === focus.activePaneId && focus.paneWatcher
-      ? injectPaste(paneId, focus.paneWatcher, text)
-      : pasteToPane(paneId, text),
+  // A scheduled message is a TIMER keystroke with nobody watching — gated on paneSafeToType
+  // (the strict, unattended-typing gate) before either injection path runs. 'busy' lets the
+  // scheduler re-arm the SAME row instead of reporting a delivery failure.
+  injectToPane: async (paneId, text) => {
+    if (!(await paneSafeToType(paneId))) return 'busy'
+    // Scheduled text reaches the pane as raw literals, same as the mini-app composer — so a
+    // leading "/" takes the same palette guard. Plain text keeps the proven paste path.
+    if (text.trimStart().startsWith('/')) {
+      const watcher = paneId === focus.activePaneId ? focus.paneWatcher : null
+      const sent = await pasteGuarded(paneId, watcher, text)
+      return sent.ok ? 'ok' : 'failed'
+    }
+    const ok = paneId === focus.activePaneId && focus.paneWatcher
+      ? await injectPaste(paneId, focus.paneWatcher, text)
+      : await pasteToPane(paneId, text)
+    return ok ? 'ok' : 'failed'
+  },
   // A recurring job's session died → revive one in its folder, wait for the REPL prompt, deliver.
   reviveAndInject: async (cwd, text) => {
     const pane = await spawnSession(cwd, '', isTopicMode() ? genSessionId() : undefined)
@@ -14212,10 +14314,12 @@ async function webappSessionAction(userId: string, sid: string, action: 'stop' |
   }
   const msg = (text ?? '').trim()
   if (!msg) return 'empty message'
-  if (bashModeArmed(await capturePane(pane).catch(() => ''))) return 'the session has an unsubmitted ! bash command in its input box'
+  const cap = await capturePane(pane).catch(() => '')
+  if (bashModeArmed(cap)) return 'the session has an unsubmitted ! bash command in its input box'
+  if (!paneAcceptsText(cap)) return 'the session is showing a dialog — answer it first'
   await dismissFeedbackSurvey(pane)
-  const ok = watcher ? await injectText(pane, watcher, msg) : await pasteToPane(pane, msg)
-  return ok ? null : 'delivery failed'
+  const sent = await pasteGuarded(pane, watcher, msg)
+  return sent.ok ? null : (sent.offered.length ? paletteRefusalText(msg, sent.offered) : 'delivery failed')
 }
 
 // Mini-app "+" new session: create a topic + spawn with the chosen dials — the webapp twin of the

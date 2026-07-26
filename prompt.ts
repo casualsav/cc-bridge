@@ -1022,6 +1022,34 @@ export function slashPaletteRows(paneText: string): string[] {
   return rows
 }
 
+// ---- Injection-safety gate (agent-bus P5) ----
+// Two predicates, one composed from the other, because typed text has two different owners with
+// different safety bars:
+//   • paneAcceptsText — a HUMAN is typing. The CLI queues typed text while a turn is running (the
+//     steering feature: you can keep talking mid-turn), so a working pane must stay "acceptable" —
+//     only a genuine modal (a question, a permission ask, a picker, bash-mode-armed, …) blocks it.
+//   • safeToType — a TIMER or the DAEMON is about to type UNSUPERVISED (no human reading the screen
+//     first). Nothing may be queued or half-typed for it to land on top of, so it additionally
+//     requires the idle prompt (not mid-turn) and an EMPTY composer. This is what stopped a refresh
+//     sweep from turning "continue" into an answer to whatever dialog happened to be on screen (the
+//     Fable credit-consent menu, if it landed between the last poll and this keystroke) — the
+//     motivating incident this gate exists for.
+// Both read a capture the CALLER took; neither re-captures, so "fresh" is the caller's job (a stale
+// capture defeats the whole point). The transcript-side turnInProgress check that completes the
+// unsupervised gate lives daemon-side (pane text alone can't see it) — see daemon.ts's paneSafeToType.
+export function paneAcceptsText(cap: string): boolean {
+  return !(
+    detectUserPrompt(cap) || detectPermissionPrompt(cap) || isUsageLimitChoice(cap)
+    || isModelSwitchConfirm(cap) || detectModelPicker(cap) || detectLoginPrompt(cap)
+    || isResumeSessionPrompt(cap) || detectFirstRunScreen(cap) || feedbackSurveyOpen(cap)
+    || detectStuckScreen(cap) || bashModeArmed(cap) || detectEditorState(cap)
+  )
+}
+
+export function safeToType(cap: string): boolean {
+  return paneAcceptsText(cap) && onNormalPrompt(cap) && !detectWorking(cap) && inputBoxContent(cap) === ''
+}
+
 // Would submitting `command` run something OTHER than what was typed? Returns the offered rows when
 // so, null when it's safe to press Enter.
 //

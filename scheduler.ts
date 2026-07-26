@@ -27,12 +27,19 @@ function toKb(buttons: Button[][]): InlineKeyboard {
 const SCHEDULED_MSGS_FILE = join(STATE_DIR, 'scheduled-messages.json')
 export const MAX_TIMEOUT = 2_147_483_647   // setTimeout's ceiling (~24.8 days); longer waits re-arm
 
+// 'busy' — the daemon checked paneSafeToType (a FRESH capture) and the pane isn't safe for an
+// unattended keystroke right now (a dialog, a working turn, a non-empty composer, …). Distinct from
+// a delivery failure: fireScheduled re-arms the SAME row on 'busy' instead of removing/rolling it —
+// a gated "not now" must never lose the message the way a plain failure report would.
+type InjectOutcome = 'ok' | 'busy' | 'failed'
+
 type SchedulerDeps = {
   channel: ChannelAdapter
   loadAccess: () => Access
-  // Deliver `text` into a pane, returning whether it landed. The daemon implements this with
-  // its own focus state: inject (with watcher pause) if the pane is focused, else plain paste.
-  injectToPane: (paneId: string, text: string) => Promise<boolean>
+  // Deliver `text` into a pane. The daemon implements this with its own focus state: inject (with
+  // watcher pause) if the pane is focused, else plain paste — gated first on paneSafeToType, which
+  // is where 'busy' comes from.
+  injectToPane: (paneId: string, text: string) => Promise<InjectOutcome>
   // Recurring job whose session is gone: spawn a fresh session in `cwd`, wait for the REPL, and
   // deliver there — cron jobs outlive their sessions. Returns the new pane id, or null when the
   // spawn/delivery failed.
@@ -60,14 +67,53 @@ function armScheduled(msg: ScheduledMessage): void {
 export function cancelScheduled(id: string): void {
   const t = scheduledTimers.get(id); if (t) clearTimeout(t)
   scheduledTimers.delete(id)
+  busyRetries.delete(id)
   scheduledMsgs = scheduledMsgs.filter(m => m.id !== id)
   saveScheduledMsgs()
 }
+
+// Chats + threaded-send for a message's own notices — shared by deliverScheduled's per-attempt
+// notes and fireScheduled's give-up report, so the two can't drift onto different surfaces.
+function chatNotifier(msg: ScheduledMessage): (t: string) => void {
+  const chats = msg.chatId ? [msg.chatId] : deps.loadAccess().allowFrom
+  return (t: string) => {
+    for (const c of chats) {
+      void deps.channel.sendText(String(c), t, { ...(msg.thread ? { threadId: String(msg.thread) } : {}) })
+        .catch(() => msg.thread ? deps.channel.sendText(String(c), t, {}).catch(() => {}) : undefined)
+    }
+  }
+}
+
+// A 'busy' injectToPane outcome means the pane genuinely isn't safe to type into right now (a
+// dialog, a working turn, …) — retried on its own short timer, keyed off the message id rather than
+// the persisted row, so a restart simply forgets in-flight retries instead of mis-tracking them.
+const BUSY_RETRY_MS = 30_000
+const BUSY_RETRY_MAX = 60   // 30 minutes — long working turns are real; give-up drops a one-shot, so match the split-merge hold bound
+const busyRetries = new Map<string, number>()
 
 async function fireScheduled(id: string): Promise<void> {
   const msg = scheduledMsgs.find(m => m.id === id)
   if (!msg) return
   if (Date.now() < msg.fireAt - 1000) { armScheduled(msg); return }   // capped long wait → re-arm
+  const result = await deliverScheduled(msg)
+  if (result === 'busy') {
+    const attempts = (busyRetries.get(id) ?? 0) + 1
+    if (attempts <= BUSY_RETRY_MAX) {
+      // Row untouched — a gated "not now" must not lose the message the way removing/rolling it
+      // (the normal post-fire step below) would.
+      busyRetries.set(id, attempts)
+      scheduledTimers.set(id, setTimeout(() => void fireScheduled(id), BUSY_RETRY_MS))
+      process.stderr.write(`scheduler: pane busy for "${msg.sessionLabel}" — retry ${attempts}/${BUSY_RETRY_MAX} in 30s\n`)
+      return
+    }
+    busyRetries.delete(id)
+    process.stderr.write(`scheduler: gave up on "${msg.sessionLabel}" after ${BUSY_RETRY_MAX} busy retries — pane never cleared\n`)
+    chatNotifier(msg)(`⚠️ Gave up delivering your scheduled message to <b>${escapeHtml(msg.sessionLabel)}</b> — its pane kept showing a dialog/turn. It was NOT sent:\n\n${escapeHtml(msg.text)}`)
+    // Falls through to the normal roll/remove below — a recurring job skips to its NEXT natural
+    // occurrence rather than stacking a re-try of the one that just gave up.
+  } else {
+    busyRetries.delete(id)
+  }
   if (msg.recur) {
     // Recurring: roll to the next occurrence instead of removing (cancel is the only way out).
     msg.fireAt = nextRecurrence(msg.recur, Date.now())
@@ -78,19 +124,10 @@ async function fireScheduled(id: string): Promise<void> {
     scheduledTimers.delete(id)
     saveScheduledMsgs()
   }
-  await deliverScheduled(msg)
 }
 
-async function deliverScheduled(msg: ScheduledMessage): Promise<void> {
-  const chats = msg.chatId ? [msg.chatId] : deps.loadAccess().allowFrom
-  // Thread the note into the topic the message was scheduled from (forum mode). If that topic
-  // is gone by fire time the threaded send fails — retry plain so the note still lands.
-  const note = (t: string) => {
-    for (const c of chats) {
-      void deps.channel.sendText(String(c), t, { ...(msg.thread ? { threadId: String(msg.thread) } : {}) })
-        .catch(() => msg.thread ? deps.channel.sendText(String(c), t, {}).catch(() => {}) : undefined)
-    }
-  }
+async function deliverScheduled(msg: ScheduledMessage): Promise<InjectOutcome> {
+  const note = chatNotifier(msg)
   if (!msg.paneId || !(await paneAlive(msg.paneId))) {
     // Recurring jobs outlive sessions: revive one in the job's folder and deliver there. The new
     // pane becomes the job's target so the next fire injects directly.
@@ -101,15 +138,17 @@ async function deliverScheduled(msg: ScheduledMessage): Promise<void> {
       note(pane
         ? `📤 Sent the scheduled message to the new session:\n\n${escapeHtml(msg.text)}`
         : `⚠️ Couldn't start a session in <code>${escapeHtml(msg.cwd)}</code> — this run was skipped.`)
-      return
+      return pane ? 'ok' : 'failed'
     }
     note(`⏰ Couldn't send your scheduled message — <b>${escapeHtml(msg.sessionLabel)}</b> is gone:\n\n${escapeHtml(msg.text)}`)
-    return
+    return 'failed'
   }
-  const ok = await deps.injectToPane(msg.paneId, msg.text)
-  note(ok
+  const result = await deps.injectToPane(msg.paneId, msg.text)
+  if (result === 'busy') return 'busy'
+  note(result === 'ok'
     ? `📤 Sent your scheduled message to <b>${escapeHtml(msg.sessionLabel)}</b>:\n\n${escapeHtml(msg.text)}`
     : `⚠️ Couldn't deliver your scheduled message to <b>${escapeHtml(msg.sessionLabel)}</b>.`)
+  return result
 }
 
 // Queue a freshly-built message: persist, arm its timer, and report. Called by the daemon when
