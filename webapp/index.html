@@ -139,15 +139,18 @@
      (already a 34px 50%-radius box) and the glyph rides inside it — the same construction the
      composer's recording button uses. The glyph's footprint is 30% of the diameter, from the
      reference's square; the glyph itself is a pause, which is what the action actually is. */
-  .chatbtn.stop { background: var(--stop-red); color: #ececec; }
+  /* Same fill and glyph as the back chip, by the owner's call. It supersedes an optical correction that
+     shrank the painted disc: both discs measured exactly 34.00 CSS px in the rendered PNG, so the size
+     complaint was never geometry — a fully saturated shape reads larger than a low-contrast one of
+     identical extent (irradiation). Matching the colours removes the illusion at its source instead of
+     compensating for it, and leaves no two numbers disagreeing on purpose.
+     VARIANT B, if he prefers it, is one rule: `.chatbtn.stop:not(.idle) { background: var(--stop-red) }`
+     — grey at rest, red only while a turn is actually running. The `.idle` class already carries that
+     state, so nothing else has to change. */
+  .chatbtn.stop { background: var(--bg); }
   /* Nothing to interrupt on an idle session, so the stop reads as unavailable rather than armed.
      Dimmed rather than disabled: the pane can be mid-something the transcript has not shown yet. */
   .chatbtn.idle { opacity: .38; }
-  /* Suppressed while recording. The composer's recorder is the SAME form — red circle, white rounded
-     square — because it is the same verb, and differentiating them by weight would be decoration that
-     teaches nothing. What decides it is the asymmetry of a mistap: this one ends a turn, that one ends
-     a voice memo. While recording, the memo is the urgent thing and the turn can wait one tap. */
-  .chatbtn.recording { display: none; }
   pre { margin: 0; padding: var(--sp-3); overflow: auto; flex: 1; white-space: pre; font: var(--t-mono)/1.45 ui-monospace, Menlo, Consolas, monospace; }
   .notice { padding: var(--sp-5) var(--sp-4); color: var(--hint); text-align: center; }
   .err { background: #c0392b; color: #fff; padding: var(--sp-2) var(--sp-3); font-size: var(--t-sub); display: none; }
@@ -998,8 +1001,6 @@ const VOICE_OK = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedi
 // to morph between, so send simply stays. Recording outranks a typed draft: you can type mid-record,
 // and swapping the recorder out from under a live recording would strand it.
 function syncComposerMode() {
-  // The header's stop hides while recording, so only one red stop-square is ever on screen.
-  $("dstop").classList.toggle("recording", !!rec);
   const showSend = !VOICE_OK || (!!$("dtext").value.trim() && !rec);
   $("dsend").style.display = showSend ? "flex" : "none";
   $("dmic").style.display = showSend ? "none" : "flex";
