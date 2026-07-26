@@ -5176,6 +5176,11 @@ async function handleCall(
               return
             }
             markInjected(p.id, Date.now())   // arms the answer window from the moment it actually landed
+            // The spawner is now this session's briefer. Stamped HERE as well as in tryDeliverAsk,
+            // because a spawn's first message never goes through that function — it is delivered by
+            // this closure, so a spawned session would otherwise have no briefer at all, and the
+            // unreported-work check would stay silent for the very sessions it exists for.
+            if (fromSid !== SYSTEM_SID) markBriefed(sid, fromSid, fromName, Date.now())
             // No asker-side card here (tryDeliverAsk's notifyAskSent equivalent): the "Spawned @X"
             // chevron above already carries this exact text on the spawner's surface.
             // Mirror the delivered task into the new topic: the paste lands only in the pane, so
