@@ -73,6 +73,31 @@ export async function waitForSettle(paneId: string, pollMs: number, maxMs: numbe
   }
 }
 
+// Send submit keys and PROVE they landed, retrying once. A batched paste+Enter can outrun a pane's
+// TUI and leave the block typed-but-unsubmitted (the topic-pane paste→submit race) — and because
+// tmux happily reports success either way, that stuck delivery used to be recorded as delivered.
+// This is the ONE implementation of that dance; `landed` is the caller's because "accepted" differs
+// per surface (an emptied input box vs a disarmed bash box), and duplicating the retry instead is
+// how two defences drift apart.
+//
+// The retry has its own race: if the first submit DID take but the TUI has not repainted, the
+// capture still reads as pending and a second submit goes into a now-working pane. That is why the
+// check happens only after waitForSettle — and it is safe besides: a stray Enter on an emptied box
+// mid-turn is a no-op (observed on a live pane, it neither started a turn nor disturbed the one
+// running). Failing to retry a genuinely swallowed key is the worse error.
+export async function submitVerified(paneId: string, keys: string[], landed: (cap: string) => boolean): Promise<boolean> {
+  const took = async () => {
+    const cap = await capturePane(paneId).catch(() => '')
+    return !cap || landed(cap)   // pane unreadable: don't invent a delivery failure
+  }
+  await sendKeys(paneId, keys)
+  await waitForSettle(paneId, 300, 5000)
+  if (await took()) return true
+  await sendKeys(paneId, keys)
+  await waitForSettle(paneId, 300, 5000)
+  return took()
+}
+
 export async function windowHeightOf(paneId: string): Promise<number | null> {
   try {
     const { stdout } = await exec('tmux', ['display-message', '-p', '-t', paneId, '#{window_height}'], { timeout: 2000 })

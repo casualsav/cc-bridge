@@ -167,3 +167,80 @@ warns about uncommitted payload files, and why "commit first" matters for *track
 must **name** it: `bun run deploy --ship-branch <branch>`. There is no bare `--force`, on purpose —
 a habitual flag is one people type without reading. `--commit` stages only the version files it owns,
 never `git add -A`.
+
+## The mini app (`webapp/index.html`) — invariants that are invisible from the code
+
+One file, no build step, no framework. Everything below is a coupling that a competent session
+would break by accident, because nothing in the code says it exists and no test catches it.
+**Measure with `scripts/webapp-measure/` (read its README first) rather than reasoning about
+pixels** — its two rules, validate the instrument against a known-truth control and idle before
+reading, each caught a real bug this week.
+
+**Type: `--t-body` is not the message size.** `--t-body` (16px) sizes list rows, settings values
+**and the composer textarea**, whose line box is what `--pill-h-1` and the six-line cap are built
+on. Raising it to 18 to make messages bigger moves the one-line pill 52 → 54.3px and the cap
+147.6 → 163.8px, silently, and nothing tests the composer against a font change. That is why feed
+messages use their own `--t-msg` (18px) set on `.msg` — which also keeps both sides matched, since
+the user bubble and the session's replies must never diverge in size. Its own comment invites the
+mistake; this paragraph is the guard.
+
+**The composer capsule is derived from the mic, never the reverse.** `--pill-h-1 = --mic-d +
+2·--pill-ring` (40 + 12 = 52px). Nothing sets a pill height by hand. The ring is *also* the pill's
+right padding, so changing it moves the textarea's width too.
+
+**The corner radius derives from the ONE-LINE height, not the live height.** `border-radius:
+calc(var(--pill-h-1) / 2)`. Tie it to the current height and a six-line pill becomes a 74px
+lozenge instead of a chat field. As a bonus the radius equals `ring + mic-radius`, which puts the
+pill's right end on a semicircle concentric with the mic — that concentricity is what makes the
+ring read as even *around* the button rather than only above and below it.
+
+**The growth cap is expressed in LINES, not pixels.** `max-height: calc(var(--ta-lines) *
+var(--ta-lh) * 1em + 2 * var(--ta-pad-y))`. A pixel constant that is not a whole multiple of the
+line box puts the ceiling mid-line and shows the last line as a sliver — the exact clipping
+complaint the auto-grow exists to fix, relocated to the scroll boundary. The dead `max-height:
+110px` it replaced was 4.26 lines.
+
+**Half-pixel paint snap — and it is narrower than it sounds.** When a box is centred by *flex free
+space* and that space is odd, Blink snaps the SVG's paint origin up to the whole pixel and the
+glyph lands 0.5px down-right, at DPR 1, 2, 3 and 4 alike. `getBoundingClientRect()` reports it
+perfectly centred; only the pixels disagree. So `.sendbtn` (40px) takes a 20px glyph, not 19.
+**This does not apply to boxes positioned by padding**: `.ghost` centres the paperclip with integer
+`8px 7px` padding, so its glyph is on whole pixels at any size — the 24px `--clip-d` in a 38×40
+button is fine. The rule is about halved free space, not about icon-vs-button parity in general.
+
+**The send plane's optical nudge belongs to `#dsend` alone.** `translate(-1.5px, 1.5px)` corrects
+that glyph's mass, which sits up and right of its bounding box. It lived on `.sendbtn svg` once and
+silently displaced the mic and the record-stop square, whose artwork is already centred. Never put
+an optical correction back on a shared selector.
+
+**`growComposer()` PRESERVES `scrollTop`; it must not command one.** By the time it runs the browser
+has already scrolled the caret into view, so its scrollTop is a correct answer worth carrying across
+the height reset — and restoring it is what makes editing in the *middle* of a capped field work.
+Forcing `scrollTop = scrollHeight` unconditionally fixes typing at the end and yanks the view off
+the caret on every other keystroke. The one exception is guarded: when the caret is at the very end
+of the value there is nothing correct to preserve (a paste or a restored draft leaves it at 0, and a
+viewport re-wrap leaves it stale), so that case — and only that case — lands at the bottom.
+
+**A flex child absorbing a height change is not the same as staying pinned.** `#dfeed` is `flex: 1`,
+so `composer + feed` sums to a constant at every composer height — every static check passes. But
+`scrollTop` does not move, so each pixel the composer gains scrolls the newest message out of sight
+(87px of it at six lines), and the 3s repaint only re-pins within 60px of the bottom so it never
+recovers. `growComposer()` re-pins on that same 60px rule. Only driving it finds this.
+
+**`syncComposerMode()` runs once at parse time, while `#drill` is `display:none`.** A hidden element
+measures `scrollHeight === 0`, which pinned the field at `height: 0` forever — it rendered as a
+strip of bare padding with the placeholder spilling out below. `growComposer()` guards on a zero
+measurement and `openDrill()` calls it once the view is actually visible.
+
+**Theming ignores `prefers-color-scheme` completely.** Colours come from the `--tg-theme-*`
+properties Telegram injects, with dark fallbacks in `:root`. A light-theme check that sets the media
+feature renders the dark theme and passes without testing anything. Set the variables instead
+(`scripts/webapp-measure/themes.mjs`). Removing a bubble exposes whatever its fill was hiding: the
+collapsed-message fold faded to `--sec` *because* that was the assistant bubble's colour, and on the
+page background it painted a grey band.
+
+**Known and deliberately unfixed** — do not rediscover these as new bugs. `.chatbtn` is 34px around
+a 19px glyph, flex-centred, so the header back/interrupt icons carry the same 0.5px snap (cosmetic,
+on transparent buttons, never measured). And Feather's paperclip artwork is ~0.25px off-centre
+inside its own viewBox — that is the drawing, not our layout, and a magic-number transform for a
+quarter pixel is worse than the quarter pixel.

@@ -179,3 +179,50 @@ test('proc.exec runs a real command and returns stdout', async () => {
 test('proc.exec rejects on a failing command', async () => {
   await expect(realExec('false', [])).rejects.toBeDefined()
 })
+
+
+// ---- submitVerified: the paste→submit race defence, BOTH branches driven deterministically ----
+// A clean live run proves nothing here — the race is ~1 in 6 and timing-dependent, so "I sent
+// twenty and they all arrived" cannot tell a working fix from twenty lucky draws. These force the
+// state instead: the fake pane only "accepts" the submit when the test says it does.
+function fakePane(acceptsOnSubmitNo: number | null) {
+  let submits = 0
+  execImpl = async (_cmd, args) => {
+    if (args.includes('display-message')) return { stdout: '%1\n' }        // pane alive
+    if (args.includes('send-keys')) { submits++; return { stdout: '' } }
+    if (args.includes('capture-pane')) {
+      const landed = acceptsOnSubmitNo !== null && submits >= acceptsOnSubmitNo
+      return { stdout: landed ? 'BOX-EMPTY' : 'BOX-HOLDS-PASTE' }
+    }
+    return { stdout: '' }
+  }
+  return { submits: () => submits }
+}
+const landedPredicate = (cap: string) => cap.includes('BOX-EMPTY')
+
+test('submitVerified: first submit lands — one submit, reports success', async () => {
+  const p = fakePane(1)
+  expect(await pane.submitVerified('%1', ['Enter'], landedPredicate)).toBe(true)
+  expect(p.submits()).toBe(1)
+})
+
+test('submitVerified: first submit swallowed, RETRY lands — two submits, reports success', async () => {
+  const p = fakePane(2)
+  expect(await pane.submitVerified('%1', ['Enter'], landedPredicate)).toBe(true)
+  expect(p.submits()).toBe(2)
+})
+
+test('submitVerified: never lands — retries once, then reports FAILURE rather than success', async () => {
+  const p = fakePane(null)
+  expect(await pane.submitVerified('%1', ['Enter'], landedPredicate)).toBe(false)
+  expect(p.submits()).toBe(2)   // one retry, not an unbounded loop
+})
+
+test('submitVerified: an unreadable pane is not reported as a delivery failure', async () => {
+  execImpl = async (_cmd, args) => {
+    if (args.includes('display-message')) return { stdout: '%1\n' }
+    if (args.includes('capture-pane')) throw new Error('pane gone')
+    return { stdout: '' }
+  }
+  expect(await pane.submitVerified('%1', ['Enter'], landedPredicate)).toBe(true)
+})

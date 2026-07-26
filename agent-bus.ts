@@ -244,7 +244,7 @@ export function dropExpired(before: number): number {
 // could not tell a landed ask from one queued behind a pane that would never reach a prompt again.
 // 'busy' = mid-turn, self-clearing. 'wedged' = not at a prompt AND no turn running (the @ccbridge
 // shape — an unrecognized screen owns the pane). 'no-session' = no live pane for the target sid.
-export const ASK_DELIVERY_STATES = ['delivered', 'busy', 'wedged', 'no-session'] as const
+export const ASK_DELIVERY_STATES = ['delivered', 'busy', 'wedged', 'no-session', 'not-landed'] as const
 export type AskDelivery = (typeof ASK_DELIVERY_STATES)[number]
 
 // The `tg ask` CLI line for an outcome. Pure so ask-delivery.test.ts can pin the whole enumeration:
@@ -260,6 +260,11 @@ export function askResultText(status: AskDelivery, toName: string, id: number): 
       return `⚠️ QUEUED, NOT DELIVERED — @${toName}'s pane is not at a prompt and no turn is running (ask ${id}); it may be wedged, and nothing reaches it until it recovers`
     case 'no-session':
       return `⚠️ QUEUED, NOT DELIVERED — @${toName} has no live session right now (ask ${id}); the ask stays open in case it comes back`
+    // The paste reached the pane but the submit did not take — the block is sitting in @toName's
+    // input box, unsent. tmux reports that as a success, which is exactly how it used to be recorded
+    // as delivered; it must never read as done.
+    case 'not-landed':
+      return `⚠️ QUEUED, NOT DELIVERED — the message is sitting unsubmitted in @${toName}'s input box (ask ${id}); the submit did not take, and the sweep will retry`
   }
 }
 

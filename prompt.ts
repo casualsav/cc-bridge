@@ -750,6 +750,35 @@ export function onNormalPrompt(paneText: string): boolean {
   return false
 }
 
+// What is sitting in the session's input box, or null when no bordered input box is on screen (a
+// modal, a picker, a surface we don't parse). Same bordered-❯ shape onNormalPrompt trusts: a prompt
+// row directly between two box-border rows, which a menu cursor never is.
+//
+// Callers MUST test this for emptiness rather than looking for the text they sent: Claude Code
+// collapses a large paste into a placeholder ("[Pasted text #1 +4 lines]"), so searching the capture
+// for your own payload reports "gone" on a block that is still sitting there unsubmitted. Measured
+// against a real pane, not assumed.
+export function inputBoxContent(paneText: string): string | null {
+  const t = paneLines(paneText).slice(-30)
+  const border = /^\s*[─━╭╰└┌├╮╯|]/
+  for (let i = t.length - 2; i >= 1; i--) {
+    const m = /^\s*[❯!]\s?(.*)$/.exec(t[i])
+    if (m && border.test(t[i - 1]) && border.test(t[i + 1])) return m[1].trim()
+  }
+  return null
+}
+
+// Did a submit actually take? A paste+Enter can outrun the TUI and leave the block typed-but-
+// unsubmitted while tmux reports success — this is the check that tells those apart.
+// Deliberately conservative: anything we cannot read as "still sitting in the box" counts as
+// landed, because inventing a delivery failure is worse than missing one. Working or queued both
+// mean the input was accepted.
+export function submitLanded(paneText: string): boolean {
+  if (detectWorking(paneText) || hasQueuedMessages(paneText)) return true
+  const box = inputBoxContent(paneText)
+  return box === null || box === ''
+}
+
 // Claude Code's bash-mode input box is armed: the footer swaps its hints for "! for shell mode"
 // while a `!` command sits in the box. Injecting ANYTHING into this state concatenates into the
 // pending bash line, so relays must refuse (daemon-side guard) until it's submitted or discarded.

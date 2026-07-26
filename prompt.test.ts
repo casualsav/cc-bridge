@@ -1,6 +1,6 @@
 // Prompt detection from pane captures — select menus vs permission dialogs. Pure functions.
 import { test, expect } from 'bun:test'
-import { stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, detectFirstRunScreen, isUsageLimitChoice, isResumeSessionPrompt, detectResumeSessionPrompt, detectEditorState, onNormalPrompt, detectModelUnavailable, detectCompacting, compactPercent, permPromptToken, waitingPromptSignature, isRecognizedPrompt, detectStuckScreen, extractGenericOptions, bashModeArmed, detectWorking, slashPaletteRows, slashPaletteWouldMisfire } from './prompt.ts'
+import { stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, detectFirstRunScreen, isUsageLimitChoice, isResumeSessionPrompt, detectResumeSessionPrompt, detectEditorState, onNormalPrompt, detectModelUnavailable, detectCompacting, compactPercent, permPromptToken, waitingPromptSignature, isRecognizedPrompt, detectStuckScreen, extractGenericOptions, bashModeArmed, detectWorking, slashPaletteRows, slashPaletteWouldMisfire, inputBoxContent, submitLanded } from './prompt.ts'
 
 test('stripAnsi removes CSI escape sequences', () => {
   expect(stripAnsi('\x1b[1mbold\x1b[0m text')).toBe('bold text')
@@ -1026,4 +1026,36 @@ test('palette-lookalike scrollback does not get mistaken for an open palette', (
 
 test('a non-slash injection is never guarded', () => {
   expect(slashPaletteWouldMisfire(CAP_MODE, 'plain text')).toBeNull()
+})
+
+// ---- submit verification: fixtures captured from a REAL Claude Code pane, not hand-written ----
+// The unsubmitted one is the exact state the bus bug left behind: a pasted block sitting in the
+// input box after tmux reported the paste+Enter a success. Note the prompt char is followed by a
+// NON-BREAKING space and a large paste renders as a placeholder, not as the text that was sent —
+// both measured, and both would have broken a guessed regex.
+const CAP_UNSUBMITTED = '  Some earlier output line\n────────────────────────────────────────\n❯\xa0[Pasted text #1 +4 lines]\n────────────────────────────────────────\n  ubuntu@cloud:/srv/x | Opus 5 (1M context)\n  paste again to expand'
+const CAP_SUBMITTED = '  Some earlier output line\n────────────────────────────────────────\n❯\xa0\n────────────────────────────────────────\n  ubuntu@cloud:/srv/x | Opus 5 (1M context)\n  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents'
+const CAP_WORKING = '\n✽ Creating… (3s · thinking with high effort)\n────────────────────────────────────────\n❯\xa0\n────────────────────────────────────────\n  ubuntu@cloud:/srv/x | Opus 5'
+const CAP_MODAL = '  Quick safety check: Is this a project you created or one you trust?\n\n ❯ 1. Yes, I trust this folder\n   2. No, exit\n\n Enter to confirm · Esc to cancel'
+
+test('inputBoxContent reads a pasted block still sitting in the box', () => {
+  expect(inputBoxContent(CAP_UNSUBMITTED)).toBe('[Pasted text #1 +4 lines]')
+})
+
+test('inputBoxContent is empty once the box has been submitted', () => {
+  expect(inputBoxContent(CAP_SUBMITTED)).toBe('')
+})
+
+test('inputBoxContent is null when no bordered input box is on screen', () => {
+  expect(inputBoxContent(CAP_MODAL)).toBeNull()
+})
+
+test('submitLanded is FALSE while the block sits unsubmitted — the bus bug', () => {
+  expect(submitLanded(CAP_UNSUBMITTED)).toBe(false)
+})
+
+test('submitLanded is true on an emptied box, a working pane, and an unparsed screen', () => {
+  expect(submitLanded(CAP_SUBMITTED)).toBe(true)
+  expect(submitLanded(CAP_WORKING)).toBe(true)
+  expect(submitLanded(CAP_MODAL)).toBe(true)   // conservative: never invent a delivery failure
 })
