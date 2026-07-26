@@ -10,7 +10,7 @@
 // each watchdog keeps its own daemon alive between sessions / after a crash.
 import net from 'node:net'
 import { spawn, spawnSync } from 'node:child_process'
-import { readdirSync, openSync, existsSync, readFileSync, readlinkSync, writeFileSync, unlinkSync } from 'node:fs'
+import { readdirSync, openSync, writeSync, existsSync, readFileSync, readlinkSync, writeFileSync, unlinkSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, basename } from 'node:path'
 
@@ -107,7 +107,21 @@ function bridgeProcesses(): BridgeProc[] {
   return found
 }
 
-function reapForeignBridges(): void {
+// Narrate into daemon.log, NOT into process.stderr.
+//
+// This relauncher's own stderr has no reader. Its main invocation is the SessionStart hook, which runs it
+// as `bun … ensure-daemon.ts >/dev/null 2>&1 || true` — every diagnostic it wrote about a relaunch was
+// discarded at exactly the moment the relaunch happened, which is the one moment someone staring at a
+// dead bridge needs it. Measured 2026-07-26: 8 of its 9 diagnostics had never appeared in daemon.log in
+// the log's entire history, and the ninth only 5 times (invocations from a parent whose stderr happened
+// to be the log). It has always HELD the log fd — it just only handed it to child processes.
+//
+// Timestamp format matches daemon.ts's stderr wrapper, so the interleaved lines read as one log.
+function note(log: number, msg: string): void {
+  try { writeSync(log, `[${new Date().toISOString()}] ${msg}\n`) } catch {}
+}
+
+function reapForeignBridges(log: number): void {
   const procs = bridgeProcesses()
   for (const kind of ['watchdog', 'daemon'] as const) {
     for (const p of procs) {
@@ -117,7 +131,7 @@ function reapForeignBridges(): void {
       if (!existsSync(join(dir, '.claude-plugin', 'plugin.json'))) continue      // not a bridge tree — leave unrelated software alone
       try {
         process.kill(p.pid, 'SIGKILL')
-        process.stderr.write(`ensure-daemon: reaped foreign bridge ${kind} (pid ${p.pid}, ${p.script}) — the bridge runs ONLY from the plugin cache (${daemonDir})\n`)
+        note(log, `ensure-daemon: reaped foreign bridge ${kind} (pid ${p.pid}, ${p.script}) — the bridge runs ONLY from the plugin cache (${daemonDir})`)
       } catch {}
     }
   }
@@ -165,12 +179,12 @@ function ensureDeps(log: number): void {
       type: 'module',
       dependencies: { grammy: '1.41.1', '@modelcontextprotocol/sdk': '^1.0.0', zod: '~4.3.6' },
     }, null, 2) + '\n', { mode: 0o644 })
-    process.stderr.write(`ensure-daemon: wrote pinned package.json to ${daemonDir}\n`)
+    note(log, `ensure-daemon: wrote pinned package.json to ${daemonDir}`)
   }
   if (!existsSync(join(daemonDir, 'node_modules', 'grammy'))) {
-    process.stderr.write(`ensure-daemon: installing daemon deps in ${daemonDir}\n`)
+    note(log, `ensure-daemon: installing daemon deps in ${daemonDir}`)
     const r = spawnSync('bun', ['install', '--no-summary'], { cwd: daemonDir, stdio: ['ignore', log, log] })
-    if (r.status !== 0) process.stderr.write(`ensure-daemon: bun install exited ${r.status}\n`)
+    if (r.status !== 0) note(log, `ensure-daemon: bun install exited ${r.status}`)
   }
 }
 
@@ -210,22 +224,22 @@ async function ensureInstance(stateDir: string, log: number): Promise<void> {
         for (const f of ['daemon.sock', 'watchdog.pid', 'daemon.pid']) { try { unlinkSync(join(stateDir, f)) } catch {} }
         await new Promise(r => setTimeout(r, 300))   // let the socket/pid files clear before the new watchdog boots
         wdPid = 0
-        process.stderr.write(`ensure-daemon: replaced outdated watchdog (${liveVer} → ${CURRENT_VER}) for ${stateDir}\n`)
+        note(log, `ensure-daemon: replaced outdated watchdog (${liveVer} → ${CURRENT_VER}) for ${stateDir}`)
       }
     }
     if (wdPid && daemonDown && !canUsr1) {
       try { process.kill(wdPid, 'SIGTERM') } catch {}
       await new Promise(r => setTimeout(r, 300))   // let it unlink its pid file so the new one boots
       wdPid = 0
-      process.stderr.write(`ensure-daemon: replaced pre-usr1 watchdog for ${stateDir}\n`)
+      note(log, `ensure-daemon: replaced pre-usr1 watchdog for ${stateDir}`)
     }
     if (!wdPid) {
       const child = spawn('bun', [watchdogPath], { detached: true, stdio: ['ignore', log, log], env })
       child.unref()
-      process.stderr.write(`ensure-daemon: launched watchdog for ${stateDir} (pid ${child.pid}) — it brings up the daemon\n`)
+      note(log, `ensure-daemon: launched watchdog for ${stateDir} (pid ${child.pid}) — it brings up the daemon`)
     } else if (daemonDown) {
       try { process.kill(wdPid, 'SIGUSR1') } catch {}
-      process.stderr.write(`ensure-daemon: daemon down for ${stateDir} — nudged watchdog ${wdPid} to respawn it\n`)
+      note(log, `ensure-daemon: daemon down for ${stateDir} — nudged watchdog ${wdPid} to respawn it`)
     }
     return
   }
@@ -233,7 +247,7 @@ async function ensureInstance(stateDir: string, log: number): Promise<void> {
   if (daemonDown) {
     const child = spawn('bun', [daemonPath], { detached: true, stdio: ['ignore', log, log], env })
     child.unref()
-    process.stderr.write(`ensure-daemon: launched daemon ${daemonPath} for ${stateDir} (pid ${child.pid})\n`)
+    note(log, `ensure-daemon: launched daemon ${daemonPath} for ${stateDir} (pid ${child.pid})`)
   }
 }
 
@@ -261,8 +275,11 @@ function instanceEnv(stateDir: string): NodeJS.ProcessEnv {
   return env
 }
 
-reapForeignBridges()   // kill checkout-run / stale-version bridge processes before ensuring the canonical pair
-ensureDeps(openSync(join(dirs[0], 'daemon.log'), 'a'))   // deps are shared (cache dir) — bootstrap once
+// One log fd for this run's own narration, opened before the reap so the kills are recorded too. Same
+// file the children get; see note() for why process.stderr was the wrong destination.
+const runLog = openSync(join(dirs[0], 'daemon.log'), 'a')
+reapForeignBridges(runLog)   // kill checkout-run / stale-version bridge processes before ensuring the canonical pair
+ensureDeps(runLog)   // deps are shared (cache dir) — bootstrap once
 for (const dir of dirs) {
   await ensureInstance(dir, openSync(join(dir, 'daemon.log'), 'a'))   // per-instance log in its state dir
 }
