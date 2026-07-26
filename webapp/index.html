@@ -11,7 +11,15 @@
        the reference, where the message text measures ~17pt and the chat title ~20pt — so body moves
        UP (15 -> 16) rather than down. Mono runs a step below its neighbour: at the same nominal size
        a monospace face reads larger. */
-    --t-meta: 12px;    /* chips, feet, uppercase labels, timestamps */
+    --t-meta: 12px;    /* chips, feet, uppercase labels */
+    /* The bubble's time + delivery mark, and a REAL step in the scale rather than a one-off sprinkled
+       at the call site: the owner asked for it below --t-meta, and the answer to that is to extend the
+       scale so the next reader can see where the value comes from. It is the reference's own
+       proportion — its meta ink measures 15px of cap against the message text's 21px, so 0.714 of
+       --t-msg, which is 11.4 at our 16px. Rounded down, since the scale prefers integers.
+       Measure ink with a threshold ABOVE the bubble fill (lum 135) — a lower one measures bubble, not
+       glyph, and that mistake is what produced an earlier "0.56" and a plan to drop this to 9px. */
+    --t-stamp: 11px;
     --t-sub: 14px;     /* secondary lines — task summaries, hints, small controls */
     --t-body: 16px;    /* list rows, values, and the composer field */
     /* The feed's message text, and its OWN step rather than a bump to --t-body, for the reason
@@ -274,7 +282,11 @@
   #drill { position: fixed; inset: 0; background: var(--bg); display: none; flex-direction: column; z-index: 5; }
   #drill.show { display: flex; }
   #dfeed { flex: 1; overflow-y: auto; padding: var(--sp-3); }
-  .msg { max-width: 88%; margin-bottom: var(--sp-2); padding: var(--sp-2) 11px; border-radius: var(--r-md); font-size: var(--t-msg); white-space: pre-wrap; word-break: break-word; display: flow-root; }
+  /* ASYMMETRIC padding, and the asymmetry is the point: the bubble hugs the meta block far tighter
+     than it pads a line of text, which is what makes the time read as tucked into the corner. Pulling
+     all four sides in instead would drag the top edge onto the first line and change every bubble
+     that is already right. Only the BOTTOM moves (8 → 3). */
+  .msg { max-width: 88%; margin-bottom: var(--sp-2); padding: var(--sp-2) 11px 3px; border-radius: var(--r-md); font-size: var(--t-msg); white-space: pre-wrap; word-break: break-word; display: flow-root; }
   .msg.user { background: var(--btn); color: var(--btn-text); margin-left: auto; border-bottom-right-radius: var(--r-xs); }
   .msg.user.pending { opacity: .55; }
   /* Session replies carry NO bubble: full content width on the page background, as the reference
@@ -405,15 +417,30 @@
   /* Timestamp: floated INSIDE the bubble at bottom-right so the last line of text wraps around it,
      as the reference does, instead of reserving a row under every message. `.msg` gets flow-root so
      the float is contained and can't escape the bubble's height. */
-  .tstamp { float: right; margin: 6px 0 0 var(--sp-2); font-size: var(--t-meta); opacity: .55; white-space: nowrap; line-height: 1; }
+  /* The vertical placement is TWO ported ratios, not two nudged numbers. In the reference the meta's
+     baseline sits 0.53 of its own cap height BELOW the last text line's baseline (that drop is what
+     makes it read as tucked into a corner rather than as a short line of text), and 0.73 of its cap
+     above the bubble's inner bottom edge. Ours was 1.8 caps above the bottom — two and a half times
+     the reference's, which is the gap the owner saw. margin-top drops it onto the line's floor;
+     .msg's asymmetric bottom padding closes the rest. */
+  /* NO negative bottom margin, and this is the dropped-line case earning its own rule: in the shared
+     case the text sets the bubble's height so a negative margin here changes nothing, but when the
+     meta drops to its own line the float IS the height, and -2px took its clearance from 4.2px down
+     to 1.0 — the two cases silently disagreeing by 3px, the tighter one looking clipped. Measured on
+     both, which is the only way that shows up. */
+  .tstamp { float: right; margin: 11px 0 0 5px; font-size: var(--t-stamp); opacity: .55; white-space: nowrap; line-height: 1; }
   .msg.user .tstamp { opacity: .8; }
   /* Delivery marks, and they mean something narrower than Telegram's: one tick = the daemon accepted
      it, two = the session's OWN transcript echoed it back. Neither claims it was read.
      Height is tied to the meta's own cap height rather than written in px, so the mark and the time
      stay one size if the type step moves; the -1px is the reference's own overhang below the
      baseline, measured, not an optical nudge. */
-  .tstamp .ticks { margin-left: 4px; height: 10px; width: 11px; vertical-align: -1px; }
-  .tstamp .ticks2 { width: 17px; }
+  /* Re-derived at --t-stamp, not inherited from the 12px version: the block's height is EXACTLY the
+     meta's cap height (15/15 in the reference), its width 1.93x its height, and its bottom sits ON
+     the baseline — which is where an inline SVG sits by default, so there is no vertical-align at all
+     any more. The previous -1px came from the same bad threshold as the "0.56". */
+  .tstamp .ticks { margin-left: 5px; height: 8px; width: 10px; }
+  .tstamp .ticks2 { width: 15px; }
   /* "+" new-session row + bottom sheet */
   .newsess { border: 1px dashed var(--hint); border-radius: var(--r-md); padding: var(--sp-3) 14px; margin: 0 0 10px; color: var(--link); text-align: center; cursor: pointer; font-size: var(--t-sub); }
   #spawn, #sched { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: none; z-index: 9; align-items: flex-end; }
@@ -1112,8 +1139,13 @@ function hhmm(ts) {
 // nested glyph, which two spaced ✓ characters do not. Geometry is measured off the reference against
 // the digits beside it: the block is 1.65x as wide as tall and about 1.17x the digits' cap height,
 // so at --t-meta it lands at 17x10 and sits 1px below the baseline (also measured).
-const TICK1 = '<svg class="ticks" viewBox="0 0 11 10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1.2 5.3 L4.1 8.4 L10.3 1.6"/></svg>';
-const TICK2 = '<svg class="ticks ticks2" viewBox="0 0 17 10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1.2 5.3 L4.1 8.4 L10.3 1.6"/><path d="M6.7 5.3 L9.6 8.4 L15.8 1.6"/></svg>';
+// Re-derived for --t-stamp rather than scaled from the 12px pair: the viewBox now carries the
+// reference's own proportions, so the rendered size is a pure scale of them. Measured off the
+// reference: block width 1.93x its height, each check 0.64 of the block's width, the second check's
+// vertex offset 0.34 of it — that offset is what makes the pair read as nested rather than as two
+// ticks, so it is the number that must survive a resize. Stroke is 0.18 of the block height.
+const TICK1 = '<svg class="ticks" viewBox="0 0 10 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M0.8 4.4 L3.3 7.2 L8.8 0.8"/></svg>';
+const TICK2 = '<svg class="ticks ticks2" viewBox="0 0 15 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M0.8 4.4 L3.3 7.2 L8.8 0.8"/><path d="M5.9 4.4 L8.4 7.2 L13.9 0.8"/></svg>';
 function stamp(ts, ticks) {
   if (!ts) return "";
   return '<span class="tstamp">' + esc(hhmm(ts)) + (ticks === 2 ? TICK2 : ticks ? TICK1 : "") + "</span>";
