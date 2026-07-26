@@ -410,9 +410,20 @@ test('requirement 1: a card does not depend on a session, and an unallowlisted c
 })
 
 // The guarantee above is only as good as the daemon actually calling armChatPin, and that wiring lives
-// in daemon.ts, which has no unit-testable surface. This is a source-level guard, deliberately: it is
-// crude, but it fails loudly if someone deletes an arm point, which is precisely how "a fresh install
-// pins nothing" would come back. If a refactor moves these, update the test — do not delete it.
+// in daemon.ts, which has no unit-testable surface. So this is a source-level guard — crude on
+// purpose, and chosen knowing the cost: it will go red after a legitimate refactor that only moved
+// these calls around.
+//
+// IF YOU ARE HERE BECAUSE THIS TEST FAILED, it is asking you a question, not asking you to update a
+// string. The question is: **does every event that proves a user is present still arm this chat?**
+// There are four — an inbound private message, /start, a chat lane reaching its prompt, and the
+// first-contact edge. If your change kept all four and merely moved them, update the patterns. If it
+// removed or bypassed one, you have just reintroduced "a fresh install pins nothing": no arm means no
+// mint, the user sees no pinned card, nothing errors, and every log line stays green. That bug cost
+// two days across three sessions and was found by a human noticing, not by any diagnostic.
+//
+// Brittle-and-loud is the deliberate trade against silent-and-correct-until-it-isn't, because the
+// failure mode here is invisibility. Do not delete this test to make the red go away.
 test('requirement 1: the daemon still arms on every user-present event', () => {
   const daemon = readFileSync(join(import.meta.dir, 'daemon.ts'), 'utf8')
   const armCalls = daemon.match(/armChatPin\(/g) ?? []
