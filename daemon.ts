@@ -6664,6 +6664,18 @@ async function rebindCrossEngineSession(pane: string, cwd: string, sid: string |
   process.stderr.write(`daemon: cross-engine failover: gave up waiting for sid ${sid}'s new session id (${agent}, ${cwd})\n`)
 }
 
+// Every claude command line the daemon builds gets exactly one line in the log: where it was aimed,
+// which rule chose the model, and the command verbatim. Without it a pane that comes back on the
+// wrong model is unattributable — a running agent looks the same whoever started it, and a zero-turn
+// refresh twice returned on Opus with no way to tell our line from someone else's. Two families,
+// distinguishable afterwards from /proc too: an IN-PANE relaunch is typed into the pane's own shell
+// and runs claudeBin()'s ABSOLUTE path (its claude is a child of that shell), while spawnSession
+// opens a new window and runs the BARE name (its claude is a child of the tmux server).
+// `model` is the deciding rule plus what it resolved to, e.g. `floor(fable)`.
+function logLaunch(site: string, target: string, model: string, line: string): void {
+  process.stderr.write(`daemon: launch[${site}] target=${target} model=${model} :: ${line}\n`)
+}
+
 // The bridge alias behind a model id the API actually answered with. Exact first (the pinned ids in
 // MODEL_ALIAS_IDS), then the family token — the pins name ONE build each (haiku's is dated), while
 // the API answers with whatever build is live, so an exact-only lookup would call
@@ -6708,6 +6720,7 @@ async function relaunchAgentInPane(pane: string, agent: AgentKind, line: string)
   const agentInPane = async () => agent === 'claude' && (await paneCommand(pane).catch(() => '')) === 'claude'
   for (let attempt = 0; attempt < 2; attempt++) {
     if (await agentInPane()) {
+      process.stderr.write(`daemon: relaunch[${attempt}] pane ${pane} already runs an agent — ${attempt === 0 ? 'the old one never exited, not typing' : 'attempt 0 landed late, not retyping'}\n`)
       if (attempt === 0) return false
       await waitForSettle(pane, 400, 30_000)
       return true
@@ -6716,6 +6729,7 @@ async function relaunchAgentInPane(pane: string, agent: AgentKind, line: string)
     // whose shell hasn't taken the tty back yet.
     await waitForSettle(pane, 300, 8000)
     if (await agentInPane()) { await waitForSettle(pane, 400, 30_000); return attempt > 0 }
+    process.stderr.write(`daemon: relaunch[${attempt}] typing into pane ${pane} :: hash -r; ${line}\n`)
     if (!(await sendKeys(pane, [`hash -r; ${line}`, 'Enter']))) return false
     // Codex is left on the old settle-only path: this checks the pane's command against the agent
     // name, which is verified for claude and unproven for codex — a false failure there would be
@@ -6800,6 +6814,8 @@ async function restartPaneSessionCore(pane: string, id: string | null, accountOv
         : `${envPrefix}${resumeModelArgs.some(a => a.startsWith('claude-')) ? 'CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL=1 ' : ''}${claudeHarnessLaunch(harness, claudeBin(), [
             '--allow-dangerously-skip-permissions', ...(id !== null ? ['--resume', id] : []), ...resumeModelArgs,
           ])}`
+      logLaunch(id !== null ? 'resume-in-pane' : 'cross-engine-in-pane', pane,
+        resumeAlias ? `transcript-truth(${resumeAlias})` : 'cli-default', resume)
       if (!(await relaunchAgentInPane(pane, agent, resume))) return   // never came up — `relaunched` stays false
       relaunched = true
       if (!launchVerified) {
@@ -6830,6 +6846,8 @@ async function restartPaneSessionCore(pane: string, id: string | null, accountOv
       // stampPaneSession below restores the pane→session mapping that passing it would have set.
       // The model goes in as an explicit dial: spawnSession's own resume chain would otherwise start
       // from the remembered alias, which is exactly the stale value this function is correcting.
+      logLaunch('resume-respawn', `${pane}→new-window`,
+        resumeAlias ? `dials(${resumeAlias})` : 'cli-default', `spawnSession ${cwd} ${id !== null ? `--resume ${id}` : '(fresh)'}`)
       const fresh = await spawnSession(cwd, id !== null ? `--resume ${id}` : '', id !== null ? (sid ?? undefined) : undefined, account, agent, harness,
         resumeAlias ? { model: resumeAlias } : undefined)
       if (!fresh) return null
@@ -7205,6 +7223,7 @@ async function relaunchFreshSession(t: RestartTarget): Promise<string | 'untouch
       const envPrefix = (account.name === 'main' ? '' : `CLAUDE_CONFIG_DIR='${account.configDir.replace(/'/g, `'\\''`)}' `)
         + (flags.some(f => f.startsWith('--model claude-')) ? 'CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL=1 ' : '')
       const launch = `${envPrefix}${claudeHarnessLaunch(harness, claudeBin(), ['--allow-dangerously-skip-permissions', ...flags.flatMap(f => f.split(/\s+/))])}`
+      logLaunch('zero-turn-in-pane', t.pane, `${loadAccess().spawnModel ? 'spawn-default' : 'floor'}(${model})`, launch)
       let landed = false
       const relaunch = async () => { landed = await relaunchAgentInPane(t.pane, 'claude', launch) }
       await (watcher ? watcher.withInjection(relaunch) : relaunch())
@@ -7214,6 +7233,7 @@ async function relaunchFreshSession(t: RestartTarget): Promise<string | 'untouch
     }
     // The pane went with the agent (a daemon-spawned pane IS claude) — respawn the session in a
     // fresh one, carrying the same bookkeeping restartPaneSessionCore does on that path.
+    logLaunch('zero-turn-respawn', `${t.pane}→new-window`, `dials(${model})`, `spawnSession ${t.cwd} (fresh)`)
     const fresh = await spawnSession(t.cwd, '', t.sid ?? undefined, account, 'claude', harness, { model, effort, mode })
     if (!fresh) return null
     offMcpPanes.delete(t.pane)
@@ -8989,9 +9009,12 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
     catch { await exec('tmux', ['new-session', '-d', '-s', 'claude-tg', '-x', '220', '-y', '50', '-c', dir], { timeout: 5000 }) }
     if (agent === 'claude') ensureFolderTrusted(dir, account)   // Claude-specific trust store (per account); Codex uses launch sandbox policy
     // A brand-new Claude session (not --resume/-c) inherits the focused session's model/effort/mode.
+    // Which rule ends up choosing the model, tracked as it is decided so the launch log can name it.
+    let modelSource = 'cli-default'
     let inherit = agent === 'claude' && !extra && focus.activePaneId
       ? await captureInheritedSettings(focus.activePaneId, focus.paneWatcher)
       : null
+    if (inherit?.model) modelSource = `inherit(${focus.activePaneId})`
     // A brand-new session must still land in the user's standing mode AND effort preferences even
     // when there's no live pane to inherit from (cold start) or the capture momentarily missed them
     // (source pane mid-turn / off a prompt screen). Claude Code restores neither for us — effort
@@ -9021,9 +9044,11 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
       // silently wins (that is how a reopen came back on Haiku 4.5, dragging the 1M window down with
       // it: model-window.ts's suffix has no model identifier to ride on with no --model flag at all).
       const defaultSpawnModel = loadAccess().spawnModel
-      const model = (prefSid ? sessionModels.get(prefSid) : null)
+      const remembered = prefSid ? sessionModels.get(prefSid) : null
+      const model = remembered
         ?? (defaultSpawnModel && MODEL_ALIASES.includes(defaultSpawnModel) ? defaultSpawnModel : null)
         ?? SPAWN_MODEL_FLOOR
+      modelSource = remembered ? `remembered(${prefSid})` : model === defaultSpawnModel ? 'spawn-default' : 'floor'
       // Widen the guard to include model: it now always resolves to a floor, so a resume with default
       // mode and no effort must still seed the model instead of dropping it.
       if (mode !== 'default' || effort || model) inherit = { model, effort, mode }
@@ -9031,6 +9056,7 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
     // Explicit dials (tg spawn / mini-app "+"): the caller's model/effort/mode win over anything inherited.
     if (dials?.model || dials?.effort || dials?.mode) {
       inherit = { model: dials.model ?? inherit?.model ?? null, effort: dials.effort ?? inherit?.effort ?? null, mode: dials?.mode ?? inherit?.mode ?? lastFocusedMode }
+      if (dials.model) modelSource = 'dials'
     }
     let target: string[] = []
     if (focus.activePaneId) {
@@ -9123,6 +9149,7 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
     }
     const { stdout } = await exec('tmux', ['new-window', '-d', '-P', '-F', '#{pane_id}', ...target, '-c', dir, cmd], { timeout: 5000 })
     const newPane = stdout.trim()
+    logLaunch('spawn', newPane || 'new-window(failed)', `${modelSource}(${inherit?.model ?? '—'})`, cmd)
     if (newPane) {
       // Offer the fresh pane to every channel, matching the `ccb` launcher: its slot on @telegram,
       // plus @slack/@discord = "1" (discoverable; harmless when a channel isn't installed).
