@@ -5,7 +5,8 @@
 // nudge the SESSION first, escalate to its BRIEFER only once the nudge has had a real chance to land.
 // Every `null` below is a false positive someone would otherwise be nudged about.
 import { test, expect } from 'bun:test'
-import { unreportedWorkPlan, UNREPORTED_ESCALATE_AFTER_MS, BRIEFER_TTL_MS } from './agent-bus.ts'
+import { unreportedWorkPlan, UNREPORTED_ESCALATE_AFTER_MS, BRIEFER_TTL_MS,
+  _resetForTest, markUnreportedNudged, markReported, getUnreported } from './agent-bus.ts'
 import { concludedTurnWork } from './transcript.ts'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -78,9 +79,27 @@ test('the nudge/escalate lifecycle fires exactly twice for one turn', () => {
   expect(plan({ unreported: escalated, now: NOW + UNREPORTED_ESCALATE_AFTER_MS * 100 })).toBeNull()
 })
 
-test('a NEW turn is nudged again, even though the previous one was escalated', () => {
+// ---- the cost cap ----
+// A nudge is typed into the pane, so it costs the target a FULL TURN at its context size and model
+// rates. These pin the cap: one nudge and one escalation per silent streak, whatever the session
+// does afterwards. The streak is ended only by markReported, which deletes the stamp — so these
+// two tests and the re-arm test below are the same invariant seen from both sides.
+test('an escalated session is never nudged again, however many substantive turns follow', () => {
   const escalated = { turnKey: 'turn-1', nudgedAt: NOW - 120_000, escalatedAt: NOW - 60_000 }
-  expect(plan({ turnKey: 'turn-2', unreported: escalated })).toEqual(NUDGE)
+  expect(plan({ turnKey: 'turn-2', unreported: escalated })).toBeNull()
+  // …and still capped much later. The briefing is re-freshened relative to that later clock on
+  // purpose: with a stale one this passes off the briefer TTL instead of the cap, which is a test
+  // that cannot fail. (It did, on the first draft of this file.)
+  const later = NOW + 12 * 3_600_000
+  expect(plan({
+    turnKey: 'turn-9', unreported: escalated,
+    briefedBy: { ...BRIEFER, at: later - 60_000 }, now: later,
+  })).toBeNull()
+})
+
+test('re-arming is what ends a streak: with the stamp cleared, fresh work nudges again', () => {
+  // markReported deletes the record, so this is exactly the state a session is in after it reports.
+  expect(plan({ turnKey: 'turn-2', unreported: undefined, reportedAt: WORK.lastAt - 1 })).toEqual(NUDGE)
 })
 
 // ---- concludedTurnWork: the transcript half ----
@@ -146,4 +165,17 @@ test('a session that reports after being nudged is settled, and never escalates'
     turnKey: 'turn-2', unreported: nudged,
     reportedAt: NOW + 1_000, now: NOW + UNREPORTED_ESCALATE_AFTER_MS * 5,
   })).toBeNull()
+})
+
+// ---- the mutator half of the cap: reporting re-arms the check ----
+// The planner cannot see this — it is handed `unreported` as an argument. Without the delete in
+// markReported, a session that settled ONE nudge kept its stamp forever, the plan's "it spoke after
+// being nudged" branch matched on every later conclusion, and the check was permanently deaf to that
+// session. This is the test that fails if that delete is removed.
+test('markReported clears the stamp, so a settled session can be nudged again later', () => {
+  _resetForTest()
+  markUnreportedNudged('sidWorker', 'turn-1', NOW)
+  expect(getUnreported('sidWorker')).toBeTruthy()
+  markReported('sidWorker', NOW + 1_000)
+  expect(getUnreported('sidWorker')).toBeUndefined()
 })

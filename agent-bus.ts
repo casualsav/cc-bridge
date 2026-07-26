@@ -342,6 +342,13 @@ export function getUnreported(sid: string): { turnKey: string; nudgedAt?: number
 /** This session sent something outbound on the bus (ask / ack / answer / post) — it is not silent. */
 export function markReported(sid: string, now = Date.now()): void {
   reportedMap()[sid] = now
+  // Speaking on the bus ends the silent streak AND re-arms the check. Both halves matter, and each
+  // was a bug without this line. Leaving the stamp meant a session that settled one nudge could
+  // never be nudged again — the plan's "it spoke after being nudged" branch matched forever, and the
+  // feature quietly died for that session. And because a stamp can now only be cleared by the
+  // session actually reporting, an escalated stamp is proof of continuing silence, which is what
+  // lets the plan cap a streak at one nudge and one escalation instead of re-nudging per turn.
+  delete unreportedMap()[sid]
   save()
 }
 
@@ -407,7 +414,14 @@ export function unreportedWorkPlan(args: {
     if (now - unreported.nudgedAt >= UNREPORTED_ESCALATE_AFTER_MS) return { action: 'escalate', briefer }
     return null                                     // nudged moments ago — give it time to act on the nudge
   }
-  if (unreported?.escalatedAt != null && unreported.turnKey === turnKey) return null   // told them once for this turn
+  // THE COST CAP, and it is structural: a nudge is typed into the pane, so it costs the target a full
+  // turn at its own context size and model rates. A stamp is cleared ONLY by markReported, so an
+  // escalated stamp means the session has not spoken since — and there is nothing further to learn by
+  // paying for another turn to tell it again. One nudge and one escalation per silent streak, however
+  // many substantive turns follow; the streak ends when the session reports, which re-arms the check.
+  // Comparing turnKey here instead (as this once did) capped nothing: the nudge moves the anchor, so
+  // every later turn compared unequal and bought another nudge.
+  if (unreported?.escalatedAt != null) return null
 
   if (work.count < 3 && !work.mutating) return null // a glance at a file or one grep is not a result anyone is waiting for
   // Against the LAST ACTIVITY, not the turn start, on purpose — that is what catches "answered, then
