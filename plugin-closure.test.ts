@@ -63,6 +63,13 @@ for (const { dir, entries } of PLUGINS) {
 // This is a test rather than a deploy-time warning on purpose: a checkout shared by several sessions
 // is dirty most of the time, so a warning about untracked files would fire constantly and be tuned
 // out. Only files something actually imports can fail this, so a stray scratch file is invisible to it.
+//
+// KNOWN EDGE — a passing run here is NOT proof the payload is complete. This walks the IMPORT GRAPH,
+// so it can only see a file something imports. A new **test file** is imported by nothing, so leaving
+// one untracked fails no test and simply never ships. (`template-parity.test.ts` was exactly that case
+// and was `git add`ed by hand.) The surface is small and the discipline — explicit `git add` for every
+// new file — is the fix; a directory scan would misfire on every draft in a shared checkout. Stated
+// here because this is where someone would otherwise conclude the check is total.
 test('every module the telegram payload imports is itself tracked in git', () => {
   const tracked = new Set(
     execFileSync('git', ['ls-files', '-z'], { cwd: import.meta.dir, encoding: 'utf8' })
