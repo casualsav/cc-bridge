@@ -21,11 +21,21 @@ function refsAttr(refs: string[]): string {
 // Block injected INTO the target agent's pane when someone asks it. `from` is the asker's endpoint
 // name (bare — we prepend @); `askId` is the correlation handle the target answers with
 // (`tg answer <askId> …`); `refs` are shared-dir paths for it to Read.
-export function formatAskBlock(from: string, askId: number, text: string, refs: string[] = []): string {
+//
+// `noReply` renders a `tg ack` instead: an acknowledgment or FYI that nothing is waiting on. Two
+// things change, and BOTH are load-bearing. The attribute becomes `ack=` because the standing
+// instruction agents carry is "answer only the `<tg @you ask=ID>` block" — shipping an ack under
+// `ask=` would contradict the rule they already follow. And the footer inverts, because an ack's
+// pending row is gone the moment it lands: `tg answer` on one returns "already closed", and an agent
+// that tried would reasonably conclude the bus is broken and say so.
+export function formatAskBlock(from: string, askId: number, text: string, refs: string[] = [], noReply = false): string {
   // One terse self-describing line after the tag: a stale/fresh session with no bus instructions in its
   // loaded CLAUDE.md still learns the reply verb; a fluent agent just ignores it. (Outside the <tg …>
   // tag so the inbound parse is unchanged.)
-  return `<tg @${from} ask=${askId}${refsAttr(refs)}>${text}</tg>\n↩ reply with: tg answer ${askId} "<summary>"`
+  const footer = noReply
+    ? '(acknowledgment — no answer needed, nothing is waiting on you)'
+    : `↩ reply with: tg answer ${askId} "<summary>"`
+  return `<tg @${from} ${noReply ? 'ack' : 'ask'}=${askId}${refsAttr(refs)}>${text}</tg>\n${footer}`
 }
 
 // Block injected INTO the asker's pane when the target answers. `re` echoes the ask id so the asker
@@ -58,7 +68,7 @@ function digestText(text: string): string {
 export function formatDigestBlock(entries: DigestEntry[], sinceLabel: string): string {
   if (!entries.length) return ''
   const lines = entries.map(e => {
-    const glyph = e.kind === 'answer' ? '✓' : e.kind === 'ask' ? '→' : e.kind === 'post' ? '📣' : e.kind === 'expire' ? '⌛' : '·'
+    const glyph = e.kind === 'answer' ? '✓' : e.kind === 'ask' ? '→' : e.kind === 'ack' ? 'ℹ️' : e.kind === 'post' ? '📣' : e.kind === 'expire' ? '⌛' : '·'
     // from/to are endpoint names — de-tagged too (not just text): a topic named with a `<` would break
     // the block framing the same way raw text would.
     const who = `${deTag(e.from)}${e.to ? `→${deTag(e.to)}` : ''}${e.id != null ? ` #${e.id}` : ''}`

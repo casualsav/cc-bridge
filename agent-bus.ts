@@ -94,6 +94,10 @@ export type BusPending = {
   depth?: number      // chain depth: 1 = sent by a human-woken (or @system-woken) session. Absent on
                       // pre-depth entries, which load as 1 — the safe reading, since an unknown chain
                       // has at least been through one hop.
+  noReply?: true      // `tg ack`: an acknowledgment/FYI. The row exists ONLY to reach a busy target
+                      // through the same retry queue; delivery removes it (see tryDeliverAsk), so no
+                      // reaper and no TTL ever sees it. Nothing downstream had to learn about acks —
+                      // their rows simply stop existing at the moment they'd start being a problem.
 }
 
 export type BusState = {
@@ -167,7 +171,7 @@ function ensureLoaded(): void { if (!loaded) loadBus() }
 // The daemon marks it injected once actually delivered, then arms the TTL against expiresAt.
 export function createPending(
   fields: { fromSid: string; toSid: string; fromName: string; toName: string; text: string; refs: string[]
-            fromKind?: 'claude' | 'hermes'; toKind?: 'claude' | 'hermes'; depth?: number },
+            fromKind?: 'claude' | 'hermes'; toKind?: 'claude' | 'hermes'; depth?: number; noReply?: true },
   now: number,
 ): BusPending {
   ensureLoaded()
@@ -287,6 +291,21 @@ export function planAskReap(
   if (!discoveryReady) return []
   return pendings.filter(p => p.toKind === 'claude' && !p.injected && isTargetGone(p))
 }
+
+// Whether reaping an ask tells its ASKER anything. Only a dead letter does: never delivered means the
+// work never started, so the asker may still be waiting on something that can no longer arrive.
+//
+// A DELIVERED ask whose target then ended is reaped SILENTLY, and that asymmetry is the whole point.
+// The ordinary way a coding session's life ends is that its work finishes and someone closes it — so
+// this branch fires on the SUCCESS path, and what is still queued at that moment is overwhelmingly an
+// ack or an FYI: an ask the bus has no way to mark "no reply expected", so it stays pending forever
+// and is correct to. Carding the owner with a ❌ right after he deliberately wound a session down told
+// him something had gone wrong when nothing had — twice, on two different boxes.
+//
+// This is not a regression back into bug 11c. The 11c correction is reapDeadAsk's removePending(),
+// not the card: a reaped row can never fire the 60-minute "still waiting; a late answer will still be
+// delivered" notice, and that false promise was what 11c was actually about.
+export function reapNotifiesAsker(p: Pick<BusPending, 'injected'>): boolean { return !p.injected }
 
 // ---- hop counter (loop guard) ----
 
@@ -410,7 +429,7 @@ const ledgerFile = (room: string): string => join(roomDir(room), 'ledger.jsonl')
 
 export type LedgerEntry = {
   ts: number
-  kind: 'ask' | 'answer' | 'post' | 'pause' | 'expire' | 'slash' | 'spawn' | 'kill' | 'reopen' | 'keys'
+  kind: 'ask' | 'ack' | 'answer' | 'post' | 'pause' | 'expire' | 'slash' | 'spawn' | 'kill' | 'reopen' | 'keys'
   from: string
   to?: string
   id?: number

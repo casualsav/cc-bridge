@@ -164,6 +164,14 @@ export const sessionNames = new Map<string, string>()
 // overwrite confirmation (callback data can't carry the path/body, so it carries just the id).
 export const mdOverwritePending = new Map<string, { path: string; display: string; contents: string }>()
 
+// ---- /exit <name> confirmation ----
+// A named close can't re-resolve its target on the tap: the callback arrives on a message in the
+// CALLER's chat, so the usual context lookup would answer with the local session and end the wrong
+// one — the very mistake the confirmation exists to prevent. Callback data carries a short id and
+// the resolved session is stashed here, by session id rather than pane so the tap re-resolves a
+// pane that may have churned in between.
+export const exitNamedPending = new Map<string, { sessionId: string; name: string; cwd: string }>()
+
 // ---- Unreachable DM chats ----
 // Chats Telegram refuses delivery to — an allowlisted user who has never opened the bot's DM (bots
 // can't initiate; sends 400 "chat not found"), blocked the bot, or deactivated. One failed send

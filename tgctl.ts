@@ -11,6 +11,7 @@
 //   tgctl reply  <chat> <text|->               send a text message (- reads stdin)
 // Agent bus (only inside a bridged session; the daemon resolves the caller from its tmux pane):
 //   tgctl ask    <name> <text|-> [--ref p]…    ask another agent (async — turn ends, answer arrives later)
+//   tgctl ack    <name> <text|-> [--ref p]…    tell another agent something; no answer expected, nothing queued
 //   tgctl answer <id>   <text|-> [--ref p]…    answer an ask you received (id from its <tg …ask=N> block)
 //   tgctl post   <text|->                       broadcast to the humans in the room
 //   tgctl slash  <name> </cmd>                  inject a slash command into a target session's CLI
@@ -63,6 +64,9 @@ const HELP: Record<string, string> = {
   reply:   'tg reply <chat> <text|->   force a text send (plain replies relay automatically)',
   update:  'tg update [check]   upgrade the bridge (check = report the available version only)',
   ask:     'tg ask <name> <text|-> [--ref path]…   ask another agent; ASYNC — the answer arrives later as a <tg …re=ID> block',
+  ack:     'tg ack <name> <text|-> [--ref path]…   acknowledge / FYI another agent — delivered like an ask,\n' +
+           '  but nothing is waiting on it: no answer is expected and no open ask is left behind. Use it for\n' +
+           '  "got it", "heads-up", "standing down" — anything an `tg ask` would leave hanging until it timed out.',
   answer:  'tg answer <id> <text|-> [--ref path]…   answer an ask you received (id from its <tg …ask=ID> block)',
   post:    'tg post <text|->   say something to the humans in the room',
   slash:   'tg slash <name> "/compact"   run a slash command in another session\'s CLI (rejected mid-turn; /exit is owner-only)',
@@ -85,7 +89,7 @@ const HELP: Record<string, string> = {
 }
 // Every verb that takes free text gets the stdin steer in its help — the shell mangles Markdown
 // bodies (see `body` above), so `-` is the documented default, not the fallback.
-const TEXT_VERBS = new Set(['send', 'edit', 'reply', 'ask', 'answer', 'post', 'spawn'])
+const TEXT_VERBS = new Set(['send', 'edit', 'reply', 'ask', 'ack', 'answer', 'post', 'spawn'])
 const STDIN_NOTE =
   "\nBodies: pass them on stdin — printf '%s' \"$BODY\" | tg <verb> <args> -\n" +
   'A double-quoted body is parsed by the SHELL first: `backticks` run as commands (splicing their\n' +
@@ -116,7 +120,7 @@ let name = '', args: Record<string, unknown> = {}
 // Bus verbs take flag args (--ref, --await), so parse positionals + refs out of argv rather than
 // the fixed chat/a/b slots the classic verbs use. Kept in a separate branch so classic verbs are
 // byte-for-byte unchanged.
-const BUS = new Set(['ask', 'answer', 'post', 'slash', 'keys', 'spawn', 'kill', 'reopen', 'roster', 'history', 'shared'])
+const BUS = new Set(['ask', 'ack', 'answer', 'post', 'slash', 'keys', 'spawn', 'kill', 'reopen', 'roster', 'history', 'shared'])
 if (BUS.has(cmd)) {
   const rest = process.argv.slice(3)
   const refs: string[] = []
@@ -139,6 +143,7 @@ if (BUS.has(cmd)) {
   }
   switch (cmd) {
     case 'ask':     name = 'ask';     args = { pane, to: pos[0], text: body(pos[1], 'ask') ?? '', refs }; break
+    case 'ack':     name = 'ack';     args = { pane, to: pos[0], text: body(pos[1], 'ack') ?? '', refs }; break
     case 'answer':  name = 'answer';  args = { pane, id: pos[0], text: body(pos[1], 'answer') ?? '', refs }; break
     case 'post':    name = 'post';    args = { pane, text: body(pos[0], 'post') ?? '' }; break
     case 'slash':   name = 'slash';   args = { pane, to: pos[0], command: pos[1] ?? '' }; break

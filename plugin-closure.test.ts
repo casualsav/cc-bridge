@@ -1,5 +1,6 @@
 import { test, expect } from 'bun:test'
 import { readdirSync, readFileSync, existsSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { join } from 'node:path'
 
 // Enforces scripts/deploy.ts:36-42's invariant: each non-telegram plugin dir must be SELF-CONTAINED
@@ -45,3 +46,41 @@ for (const { dir, entries } of PLUGINS) {
     expect(missing).toEqual([])
   })
 }
+
+// ---- the telegram payload ----
+//
+// The tg plugin ships `git ls-files` of the repo root, so its closure question is different from the
+// two above: not "is this directory self-contained" but "is every module the shipped files import
+// itself TRACKED". An untracked new module is structurally invisible to the deploy — it takes the
+// file LIST from git and only the CONTENT from the working tree.
+//
+// The deploy does type-check in the cache after syncing, and that catches a missing VALUE import
+// before the daemon restarts. It does not catch a missing type-only one: `bun build` erases those.
+// That is not hypothetical here — `agent-transcript.ts`'s `import type { AgentKind } from './agent.ts'`
+// shipped with agent.ts absent, built clean, ran clean, and only `tsc --noEmit` objected. Same shape,
+// one directory over. relativeImports matches `import type` deliberately, which is what closes it.
+//
+// This is a test rather than a deploy-time warning on purpose: a checkout shared by several sessions
+// is dirty most of the time, so a warning about untracked files would fire constantly and be tuned
+// out. Only files something actually imports can fail this, so a stray scratch file is invisible to it.
+test('every module the telegram payload imports is itself tracked in git', () => {
+  const tracked = new Set(
+    execFileSync('git', ['ls-files', '-z'], { cwd: import.meta.dir, encoding: 'utf8' })
+      .split('\0').filter(Boolean))
+  // Root-level .ts only: the payload's entry points and their siblings live there, and a nested
+  // path would need resolving rather than a set lookup.
+  const rootTs = [...tracked].filter(f => f.endsWith('.ts') && !f.includes('/'))
+  expect(rootTs.length).toBeGreaterThan(20)   // guard against a vacuous pass if ls-files ever returns nothing
+
+  // Specifiers appear both ways in this tree — './model-window' alongside './common.ts' — so an
+  // extensionless one has to resolve too, or the check reports a tracked module as missing.
+  const isTracked = (spec: string) => tracked.has(spec) || tracked.has(`${spec}.ts`)
+
+  const missing: string[] = []
+  for (const file of rootTs) {
+    for (const spec of relativeImports(readFileSync(join(import.meta.dir, file), 'utf8'))) {
+      if (!isTracked(spec)) missing.push(`${file} -> ./${spec}   (untracked — git add it, or the deploy ships without it)`)
+    }
+  }
+  expect(missing).toEqual([])
+})

@@ -9,7 +9,7 @@
 // in that window would fail every open ask at once and tell every asker their target had ended — a
 // worse bug than the one being fixed. The reap must not run until discovery has landed.
 import { test, expect } from 'bun:test'
-import { planAskReap, type BusPending } from './agent-bus.ts'
+import { planAskReap, reapNotifiesAsker, type BusPending } from './agent-bus.ts'
 
 const ask = (over: Partial<BusPending> = {}): BusPending => ({
   id: 95, fromSid: 'sidChat', toSid: 'sidCcbridge', fromKind: 'claude', toKind: 'claude',
@@ -77,6 +77,24 @@ test('an expired DELIVERED ask is still left alone — expiry does not widen wha
 // about it, so pane-based liveness must never be applied to one.
 test('a hermes-kind target is out of scope for pane liveness', () => {
   expect(planAskReap([ask({ toKind: 'hermes', toSid: 'mimo' })], gone, true)).toEqual([])
+})
+
+// ---- who hears about a reap ----
+//
+// Reaping fires on the SUCCESS path: a session finishes its work and the owner closes it. Twice, on
+// two different boxes, that turned a leftover ack into "❌ Ask N to X will never be answered" in the
+// owner's Telegram AND a system block that woke his chat lane into writing a reply about it — two
+// messages for one internal queue cleanup, arriving right after he'd deliberately wound the session
+// down. The queue cleanup is what bug 11c needed; the notice was never the fix.
+
+test('a DELIVERED ask reaped after its target ended tells the asker NOTHING', () => {
+  expect(reapNotifiesAsker(ask({ injected: true }))).toBe(false)
+})
+
+// The other half is a real failure, not a clean shutdown: the target ended before ever seeing the
+// ask, so the work never started and the asker may still be waiting on it. That one still speaks.
+test('a never-delivered dead letter still notifies the asker', () => {
+  expect(reapNotifiesAsker(ask())).toBe(true)
 })
 
 test('mixed board: only the provably-dead letters are picked', () => {

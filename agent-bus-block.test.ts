@@ -28,6 +28,35 @@ test('a double-quote in a ref is HTML-escaped so the attribute never breaks', ()
     .toBe(`<tg @a ask=1 refs="agent-bus/-100/shared/we&quot;ird.md">hi</tg>${HINT(1)}`)
 })
 
+// ---- tg ack (no answer expected) ----
+//
+// An ack's pending row is removed the moment it lands, so `tg answer` on one returns "already
+// closed". An agent that tried would reasonably conclude the bus is broken and report that to the
+// owner — so the block must not invite a reply, by either of the two routes an agent reads.
+
+test('an ack must NOT carry the reply hint — answering one is an error', () => {
+  const block = formatAskBlock('chat', 42, 'shipped, standing down', [], true)
+  expect(block).not.toContain('tg answer')
+  expect(block).toBe('<tg @chat ack=42>shipped, standing down</tg>\n(acknowledgment — no answer needed, nothing is waiting on you)')
+})
+
+// The standing instruction agents carry is "answer only the <tg @you ask=ID> block". Shipping an ack
+// under ask= would contradict the rule they already follow, so the attribute itself has to differ.
+test('an ack is tagged ack=, never ask=', () => {
+  expect(formatAskBlock('chat', 42, 'fyi', [], true)).toContain('ack=42')
+  expect(formatAskBlock('chat', 42, 'fyi', [], true)).not.toContain('ask=')
+})
+
+test('refs work the same on an ack', () => {
+  expect(formatAskBlock('chat', 9, 'see this', ['agent-bus/-100/shared/n.md'], true))
+    .toBe('<tg @chat ack=9 refs="agent-bus/-100/shared/n.md">see this</tg>\n(acknowledgment — no answer needed, nothing is waiting on you)')
+})
+
+// Default-off: every existing caller passes four arguments or fewer and must be untouched.
+test('omitting the flag leaves the ask block exactly as it was', () => {
+  expect(formatAskBlock('a', 1, 'hi')).toBe(`<tg @a ask=1>hi</tg>${HINT(1)}`)
+})
+
 // ---- formatDigestBlock (agent-bus P2) ----
 
 test('formatDigestBlock renders one glyphed line per entry inside a since-labelled block', () => {

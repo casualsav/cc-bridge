@@ -62,9 +62,10 @@ import {
   promptCards, prunePromptCards,
   lastRelayedByFile, offMcpPanes,
   usageWarnState, voiceNudged,
-  sessionNames, mdOverwritePending,
+  sessionNames, mdOverwritePending, exitNamedPending,
   markChatReachable, isChatUnreachable, markChatUnreachableIfUndeliverable,
 } from './state.ts'
+import { looksLikeArgForm, exitCommandArg } from './named-command.ts'
 import { initMirror, updateTerminalMirror, respawnTerminalMirror, abandonMirror, updateAuxMirror, dropAuxMirror, auxMirrorPanes } from './mirror.ts'
 import { parseStatusline, modelDisplayName, type StatuslineData } from './statusline.ts'
 import { summarizeTurn, blockLine } from './turn-summary.ts'
@@ -112,7 +113,7 @@ import { initQueue, readLater, writeLater, sweepLaterQueues, LATER_SWEEP_MS } fr
 import {
   AGENT_BUS_ENABLED, AGENT_BUS_PIN_UI,
   createPending, getPending, removePending, putPending, listPending, markInjected, expirePending, dropExpired, LATE_ANSWER_GRACE_MS, ASK_TTL_MS,
-  recordAgentAsk, resetHops, currentHops, BREADTH_NOTICE_AT, askResultText, planAskReap, queuedFor, type AskDelivery,
+  recordAgentAsk, resetHops, currentHops, BREADTH_NOTICE_AT, askResultText, planAskReap, reapNotifiesAsker, queuedFor, type AskDelivery,
   setSessionDepth, resetAllSessionDepth, pruneSessionDepth, nextAskDepth, depthExceeded, depthLimit,
   resolveEndpoint, nameForEndpoint, normalizeEndpointName, confineRef, sharedDir, ensureSharedDir, appendLedger, tailLedger,
   getSeen, markSeen, digestSince, DIGEST_SCAN,
@@ -2620,7 +2621,7 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
     // already receiving, never a live push into a busy pane). Excludes this very ask (already in the
     // ledger from creation) + the endpoint's own rows. Claude only — a hermes one-shot has no
     // continuity to catch up, and runHermesAsk never calls this.
-    const askBlock = formatAskBlock(cur.fromName, cur.id, cur.text, cur.refs)
+    const askBlock = formatAskBlock(cur.fromName, cur.id, cur.text, cur.refs, cur.noReply)
     let block = askBlock
     const since = getSeen(cur.toSid)
     const digest = digestSince(resolveLedgerNames(tailLedger(room, DIGEST_SCAN)), since, { excludeId: cur.id, excludeFrom: cur.toName, cap: 8 })
@@ -2638,6 +2639,12 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
       // Mirror the same card on the TARGET's own surface (its topic / chat DM) so the inbound ask is
       // visible from inside the session too, not only on the asker's side.
       void notifyBusRich(cur.toSid, `<b>@${escapeHtml(cur.fromName)}</b> messaged <b>@${escapeHtml(cur.toName)}</b>`, cur.text)
+      // An ack has done its entire job the moment it lands: nothing is coming back, so the row that
+      // would otherwise sit here until a reaper or a TTL noticed it is dropped NOW. This one line is
+      // the whole `tg ack` mechanism — no hygiene path learned about acks, they just never see one.
+      // It has to live here rather than at the call site because the 15s sweep re-delivers a queued
+      // ack to a busy target through this same function, and that delivery must drop the row too.
+      if (cur.noReply) removePending(cur.id)
     }
     return ok ? 'delivered' : 'busy'   // a refused paste is transient — the 15s sweep retries
   } finally { busInFlight.delete(cur.id) }
@@ -2692,31 +2699,32 @@ async function busTargetGone(sid: string): Promise<boolean> {
   return !chatIdForDmChatSession(sid) && !chatForLaneSession(sid)
 }
 
-// Fail a queued ask whose target session has ended (11c): drop it, and tell the asker the truth —
-// never delivered — instead of leaving the TTL to claim an hour later that we're "still waiting".
-// `delivered` distinguishes the two ways a target can strand an ask, because the asker acts on the
-// difference: undelivered means "it never saw this, re-ask elsewhere", delivered means "it read this
-// and died mid-task, the work may be half-done".
-async function reapDeadAsk(p: BusPending, room: string, delivered = false): Promise<void> {
+// Fail a queued ask whose target session has ended (11c): drop it so the TTL can't claim an hour
+// later that we're "still waiting" for a session that is gone. Dropping the row is the fix; who
+// hears about it is a separate question, and reapNotifiesAsker answers it — a never-delivered ask
+// tells the asker so it can re-ask elsewhere, a delivered one is reaped in silence.
+async function reapDeadAsk(p: BusPending, room: string): Promise<void> {
   removePending(p.id)
+  const delivered = !!p.injected   // the two sweep passes below already split on exactly this
   const why = delivered ? 'delivered but the target session ended before answering' : 'never delivered — target session ended'
   appendLedger(room, { ts: Date.now(), kind: 'expire', from: p.toName, to: p.fromName, id: p.id, text: why })
   process.stderr.write(`daemon: ask ${p.id} to @${p.toName} (${p.toSid}) reaped — ${why}\n`)
+  // A delivered-then-ended ask is dropped in silence: it fires on the SUCCESS path (work done, owner
+  // closes the session), where the leftover row is an ack nobody was ever going to answer. The ledger
+  // row + stderr line above are its whole record — visible in `tg history` and the daemon log, and to
+  // nobody in Telegram. See reapNotifiesAsker for why dropping the notice doesn't reopen bug 11c.
+  if (!reapNotifiesAsker(p)) return
   const askerPane = await paneForSession(p.fromSid).catch(() => null)
   const own = askerPane ? await outboundTargetsFor(askerPane).catch(() => []) : []
   // Owner fallback ONLY when nobody is left who could act. A headless sender has no surface of its
   // own, but it has a PANE — and the system block below lands directly in its context, so also
   // carding the owner told him about something the agent already knew. Fleet-internal by nature.
   const cardTargets = own.length ? own : askerPane ? [] : await fleetSurfaceFor(askerPane)
-  const card = delivered
-    ? `❌ Ask ${p.id} to <b>${escapeHtml(p.toName)}</b> will never be answered — that session ended after receiving it. Removed from the queue.`
-    : `❌ Ask ${p.id} to <b>${escapeHtml(p.toName)}</b> was never delivered — that session has ended. Removed from the queue.`
+  const card = `❌ Ask ${p.id} to <b>${escapeHtml(p.toName)}</b> was never delivered — that session has ended. Removed from the queue.`
   for (const { chat, thread } of cardTargets) {
     void channel.sendText(chat, card, { silent: true, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
   }
-  const block = delivered
-    ? `(ask ${p.id} to @${p.toName} will never be answered — that session ended after receiving it; it is no longer queued)`
-    : `(ask ${p.id} to @${p.toName} was never delivered — that session ended before it reached a prompt; it is no longer queued)`
+  const block = `(ask ${p.id} to @${p.toName} was never delivered — that session ended before it reached a prompt; it is no longer queued)`
   if (askerPane) void busDeliver(askerPane, formatAnswerBlock('system', p.id, block))
 }
 
@@ -2743,7 +2751,7 @@ async function sweepBus(): Promise<void> {
   // alone (their notice already went out, and a dead target can't send the late answer anyway).
   if (panesDiscovered) {
     for (const p of listPending().filter(q => q.toKind === 'claude' && q.injected && !q.expiredAt)) {
-      if (await busTargetGone(p.toSid).catch(() => false)) await reapDeadAsk(p, room, true).catch(() => {})
+      if (await busTargetGone(p.toSid).catch(() => false)) await reapDeadAsk(p, room).catch(() => {})
     }
   }
   for (const p of expirePending(Date.now())) {
@@ -2933,6 +2941,65 @@ async function commandTarget(ctx: Context): Promise<CommandTarget | null> {
     return null
   }
   return { paneId, watcher: isFocused ? focus.paneWatcher : null, isFocused }
+}
+
+// Resolve a session addressed BY NAME (`@worker`) to a command target. The ONE predicate behind both
+// spellings — the plain-text `@name /cmd` relay and the argument form (`/clear @worker`) — so they
+// can never disagree about what a name means or which guards apply to it.
+//
+// Failure REPLIES and returns null. Falling back to the local session on an unresolvable name would
+// run the command on the wrong pane, which is the exact misfire the named syntax exists to prevent.
+//
+// `requireIdle: false` is for closing a session: a wedged or mid-turn session is a normal thing to
+// want to end, and demanding a prompt would refuse precisely when the lever is needed.
+async function namedTarget(ctx: Context, rawName: string, opts: { requireIdle?: boolean } = {}):
+    Promise<{ target: CommandTarget; name: string; sessionId: string } | null> {
+  const say = (t: string) => ctx.reply(t, { parse_mode: 'HTML' }).catch(() => {})
+  const wanted = rawName.replace(/^@/, '').replace(/:$/, '')
+  await reapDeadEndpoints(wanted)
+  const endpoints = busEndpoints()
+  const res = resolveEndpoint(wanted, endpoints)
+  if ('error' in res) {
+    const live = endpoints.filter(e => !e.closed && e.kind === 'claude').map(e => `@${normalizeEndpointName(e.name)}`).join(' · ')
+    await say(`⚠️ ${escapeHtml(res.error.replace(/ — try \`tg roster\`.*$/, ''))} — nothing was sent.${live ? `\nLive sessions: ${escapeHtml(live)}` : ''}`)
+    return null
+  }
+  if (res.kind !== 'claude') { await say('⚠️ That endpoint has no CLI to command.'); return null }
+  const name = nameForEndpoint(res.id, endpoints)
+  const pane = await paneForSession(res.id).catch(() => null)
+  if (!pane || !(await paneAlive(pane).catch(() => false))) {
+    if (!(pane && isPaneRestarting(pane))) updateTopic(res.id, { closed: true })
+    await say(`⚠️ <b>@${escapeHtml(name)}</b> has no live pane.`)
+    return null
+  }
+  if (opts.requireIdle !== false) {
+    const cap = await capturePane(pane).catch(() => '')
+    if (!cap || !onNormalPrompt(cap)) { await say(`⏳ <b>@${escapeHtml(name)}</b> is mid-turn — retry when it goes idle.`); return null }
+    if (bashModeArmed(cap)) { await say(`⚠️ <b>@${escapeHtml(name)}</b> has an unsubmitted ! bash command in its input box.`); return null }
+  }
+  const isFocused = pane === focus.activePaneId
+  return {
+    target: { paneId: pane, watcher: isFocused ? focus.paneWatcher : null, isFocused, replyThread: ctx.message?.message_thread_id },
+    name, sessionId: res.id,
+  }
+}
+
+// Catch the UNSUPPORTED argument spelling (`/clear @worker`) and refuse it. Returns true when it
+// replied and the caller must stop.
+//
+// This is the single most safety-critical line in the named-command work, because not wiring the
+// argument form and refusing it are opposite outcomes. `/clear @worker` unhandled reaches
+// bot.command('clear'), whose target is the CALLER's pane — so it clears the caller's conversation
+// while looking like it addressed a worker. `/restart @worker` restarts the caller. `/exit @worker`
+// ends the caller. Failing closed here is what makes one-spelling safe rather than merely tidy.
+async function refusedArgForm(ctx: Context, arg: string, verb: string): Promise<boolean> {
+  if (!looksLikeArgForm(arg)) return false
+  const name = arg.trim().split(/\s+/)[0]!.replace(/^@/, '')
+  await ctx.reply(
+    `⚠️ Target first: <code>@${escapeHtml(name)} ${escapeHtml(verb)}</code>\n\n` +
+    `<code>${escapeHtml(verb)} @${escapeHtml(name)}</code> is not a thing — it would have acted on <i>this</i> session, not @${escapeHtml(name)}. Nothing was done.`,
+    { parse_mode: 'HTML' }).catch(() => {})
+  return true
 }
 
 // Paste arbitrary text into the target pane: focused → injectPaste (pause the watcher); off-focus
@@ -4441,18 +4508,28 @@ async function handleCall(
         break
       }
       // ---- Agent bus verbs (agent-bus P1) ----
-      case 'ask': {
+      // `ask` and `ack` share this ENTIRE path on purpose — same resolution, same refs confinement,
+      // same loop-breaker and breadth guards, same busy-target retry queue. An ack differs in exactly
+      // one way: its pending row is removed the instant delivery lands (tryDeliverAsk), so no reaper
+      // and no TTL ever sees it. Giving acks their own delivery path would have been a second copy of
+      // the hard part to keep in step.
+      case 'ask': case 'ack': {
+        const noReply = name === 'ack' ? true as const : undefined
+        const verb = noReply ? 'ack' : 'ask'
         const room = busLedgerRoom()
         const pane = args.pane ? String(args.pane) : null
         const fromSid = pane ? await sessionForPane(pane) : null
-        if (!fromSid) { write({ t: 'result', id, ok: false, text: '`tg ask` must run inside a bridged session' }); return }
+        if (!fromSid) { write({ t: 'result', id, ok: false, text: `\`tg ${verb}\` must run inside a bridged session` }); return }
         await reapDeadEndpoints(String(args.to ?? ''))
         const endpoints = busEndpoints()
         const res = resolveEndpoint(String(args.to ?? ''), endpoints)
         if ('error' in res) { write({ t: 'result', id, ok: false, text: res.error }); return }
-        if (res.kind === 'claude' && res.id === fromSid) { write({ t: 'result', id, ok: false, text: "can't ask yourself" }); return }
+        if (res.kind === 'claude' && res.id === fromSid) { write({ t: 'result', id, ok: false, text: `can't ${verb} yourself` }); return }
+        // A hermes endpoint is a one-shot subprocess whose only output IS its answer. Acking one would
+        // spawn a run whose result nothing is waiting for — the cost with none of the point.
+        if (noReply && res.kind !== 'claude') { write({ t: 'result', id, ok: false, text: `@${nameForEndpoint(res.id, endpoints)} is a hermes endpoint — it only runs asks, so there is nothing to ack` }); return }
         const askText = String(args.text ?? '').trim()
-        if (!askText) { write({ t: 'result', id, ok: false, text: 'empty ask' }); return }
+        if (!askText) { write({ t: 'result', id, ok: false, text: `empty ${verb}` }); return }
         const fromName = nameForEndpoint(fromSid, endpoints)
         const toName = nameForEndpoint(res.id, endpoints)
         // Confine + existence-check refs — they get injected into another agent's context.
@@ -4482,8 +4559,8 @@ async function handleCall(
           const breadth = recordAgentAsk()
           if (breadth === BREADTH_NOTICE_AT) void notifyWideFanOut(breadth)
         }
-        const p = createPending({ fromSid, toSid: res.id, toKind: res.kind, fromName, toName, text: askText, refs, depth: askDepth }, Date.now())
-        appendLedger(room, { ts: Date.now(), kind: 'ask', from: fromName, to: toName, id: p.id, text: askText, refs })
+        const p = createPending({ fromSid, toSid: res.id, toKind: res.kind, fromName, toName, text: askText, refs, depth: askDepth, ...(noReply ? { noReply } : {}) }, Date.now())
+        appendLedger(room, { ts: Date.now(), kind: verb, from: fromName, to: toName, id: p.id, text: askText, refs })
         if (res.kind === 'hermes') {
           const cfg = hermesEndpoints.get(res.id)!   // resolved from the same map, so it's present
           void notifyAskSent(fromSid, toName, askText)
@@ -4493,7 +4570,12 @@ async function handleCall(
           // AWAITED (bug 11b): the outcome IS the answer to "did that land?". Reporting the same
           // "asked @X — async" line for a wedged or dead target is what let two asks vanish into
           // @ccbridge. sweepBus still retries anything not delivered here.
-          text = askResultText(await tryDeliverAsk(p).catch(() => 'busy' as const), toName, p.id)
+          const outcome = await tryDeliverAsk(p).catch(() => 'busy' as const)
+          text = noReply
+            ? (outcome === 'delivered'
+                ? `acked @${toName} — delivered; nothing is queued and no answer is expected`
+                : `@${toName} is busy — the ack is queued and lands when it goes idle`)
+            : askResultText(outcome, toName, p.id)
         }
         break
       }
@@ -4613,7 +4695,7 @@ async function handleCall(
         const n = Math.max(1, Math.min(Number(args.n) || 20, 100))
         const es = resolveLedgerNames(tailLedger(room, n))
         text = es.length
-          ? es.map(e => `${e.kind === 'answer' ? '✓' : e.kind === 'ask' ? '→' : e.kind === 'post' ? '📣' : e.kind === 'expire' ? '⌛' : e.kind === 'keys' ? '⌨️' : '·'} ${e.from}${e.to ? `→${e.to}` : ''}${e.id ? ` #${e.id}` : ''}: ${e.text.slice(0, 100)}`).join('\n')
+          ? es.map(e => `${e.kind === 'answer' ? '✓' : e.kind === 'ask' ? '→' : e.kind === 'ack' ? 'ℹ️' : e.kind === 'post' ? '📣' : e.kind === 'expire' ? '⌛' : e.kind === 'keys' ? '⌨️' : '·'} ${e.from}${e.to ? `→${e.to}` : ''}${e.id ? ` #${e.id}` : ''}: ${e.text.slice(0, 100)}`).join('\n')
           : '(no bus history yet)'
         break
       }
@@ -5292,6 +5374,8 @@ async function confirmNewSession(ctx: Context): Promise<void> {
 // runs on the Yes tap — see the clearconfirm handler.
 async function confirmResetSession(ctx: Context): Promise<void> {
   if (!dmCommandGate(ctx)) return
+  // To clear another session, use `@worker /clear`. The argument spelling would clear THIS one.
+  if (await refusedArgForm(ctx, (ctx.match ?? '').toString(), '/clear')) return
   const t = await commandTarget(ctx)
   if (!t) return
   // The Yes/No tap is opt-out (settings → 🧹 Confirm /clear): off ⇒ clear in place immediately.
@@ -5742,6 +5826,7 @@ const START_COMMAND_GROUPS: Array<[title: string, lines: string[]]> = [
     `<code>/resume</code> — pick up a recent session`,
     `<code>/new</code> — new session · <code>/clear</code> — reset the conversation in place`,
     `<code>/restart</code> — restart &amp; resume (or <code>/restart all</code>)`,
+    `<code>@name /clear</code> · <code>/compact</code> · <code>/restart</code> · <code>/exit</code> — act on ANOTHER session (target first)`,
     `<code>/rename</code> — rename the current session`,
     `<code>/agent</code> — choose the terminal agent`,
     `<code>/harness</code> — use any configured provider inside Claude Code`,
@@ -6322,6 +6407,7 @@ bot.command('rewind', async ctx => {
 // No echo: the live "Compacting…" status card is the acknowledgement.
 bot.command('compact', async ctx => {
   if (!dmCommandGate(ctx)) return
+  if (await refusedArgForm(ctx, (ctx.match ?? '').toString(), '/compact')) return
   const t = await commandTarget(ctx)
   if (!t) return
   if (await guardArmedBashBox(t.paneId, String(ctx.chat!.id), t.replyThread)) return
@@ -8701,15 +8787,26 @@ bot.command('restart', async ctx => {
   if (!dmCommandGate(ctx)) return
   // `/restart all` restarts every active session (each: /exit then resume in place); bare /restart
   // restarts only the focused one. Reuses the stale-restart machinery with the staleness filter off.
-  if ((ctx.match ?? '').toString().trim().toLowerCase() === 'all') {
+  const arg = (ctx.match ?? '').toString().trim()
+  if (arg.toLowerCase() === 'all') {
     await restartAllStaleSessions(String(ctx.chat.id), false)
     return
   }
+  // To restart another session, use `@worker /restart`. The argument spelling would restart THIS one.
+  if (await refusedArgForm(ctx, arg, '/restart')) return
   const t = await commandTarget(ctx)
   if (!t) return
-  const paneId = t.paneId
+  await restartTargetSession(ctx, t.paneId, null)
+})
+
+// The /restart body, shared by the local command and the target-first `@worker /restart` relay. The
+// completion claim is real: restartPaneSessionCore is AWAITED, so the ✅ only fires once it has
+// returned a live pane with the conversation resumed — the caller doesn't have to poll the roster.
+// `label` names the session when it isn't the caller's own.
+async function restartTargetSession(ctx: Context, paneId: string, label: string | null): Promise<void> {
+  const who = label ? ` <b>@${escapeHtml(label)}</b>` : ''
   if (!onNormalPrompt(await capturePane(paneId))) {
-    await ctx.reply('⚠️ The terminal is on another screen (menu/prompt) — finish or /stop that first, then /restart.')
+    await ctx.reply(`⚠️ The terminal is on another screen (menu/prompt) — finish or /stop that first, then /restart.`)
     return
   }
   // Resolve the session id to resume (same lookup restartPaneSession uses), then hand off to the
@@ -8719,17 +8816,19 @@ bot.command('restart', async ctx => {
   // runs claude DIRECTLY (no shell), so /exit destroys it; the old bare-/restart drive() assumed a
   // shell was there to catch a `claude -c` relaunch, set no guard, and had no respawn — so /restart
   // in a topic killed the session AND closed the topic. (Shell-backed bridge panes survive /exit too,
-  // so the core handles both.)
+  // so the core handles both.) Nothing extra has to be remembered for a named restart: the core
+  // carries cwd, account, agent kind, harness profile and the mode/effort dials across, and the
+  // registry row keeps the name, folder, conversation id and topic tab.
   const cwd = await paneCwd(paneId).catch(() => null)
   const file = cwd ? await transcriptForPane(paneId, cwd) : null
   const id = file ? agentSessionId(file) : null
-  if (!id) { await ctx.reply('⚠️ Couldn’t find this session’s id to resume — restart it manually.'); return }
-  await ctx.reply('♻️ Restarting the session — <code>/exit</code> then resume…', { parse_mode: 'HTML' })
+  if (!id) { await ctx.reply(`⚠️ Couldn’t find${who || ' this session'}’s id to resume — restart it manually.`, { parse_mode: 'HTML' }); return }
+  await ctx.reply(`♻️ Restarting${who} — <code>/exit</code> then resume…`, { parse_mode: 'HTML' })
   const now = await restartPaneSessionCore(paneId, id)
   if (!now) { await ctx.reply('⚠️ Restart failed — couldn’t bring the session back. Try again, or restart it manually.'); return }
   resetPromptDedup(now)   // re-baseline the (possibly respawned) pane so the resumed REPL's first prompt relays cleanly
-  await ctx.reply('✅ Session restarted and resumed.')
-})
+  await ctx.reply(label ? `✅ <b>@${escapeHtml(label)}</b> restarted and resumed.` : '✅ Session restarted and resumed.', { parse_mode: 'HTML' })
+}
 
 // /rename <name> — silent alias to rename the current (focused) session.
 bot.command('rename', async ctx => {
@@ -10096,6 +10195,50 @@ bot.on('callback_query:data', async ctx => {
     await ctx.answerCallbackQuery({ text: 'Exiting…' }).catch(() => {})
     await exitSessionPane(paneId, 'user-confirmed-exit')
     await ctx.editMessageText(`✅ Session <b>${escapeHtml(label)}</b> exited`, { parse_mode: 'HTML' }).catch(() => {})
+    return
+  }
+
+  // Confirm/cancel `/exit @name`. Runs `tg kill`'s path, not a bare /exit: the killedAt stamp keeps
+  // the registry row (and so the folder + conversation id) exempt from the groupless GC, the topic
+  // tab is closed rather than deleted, and closeSessionPane is NOT awaited — it escalates for ~20s,
+  // and a wedged session is exactly the one you're most likely ending.
+  const exitNamedCb = /^exitnamed:(yes|no):([0-9a-f]+)$/.exec(data)
+  if (exitNamedCb) {
+    if (!(await cbAuth(ctx))) return
+    const pending = exitNamedPending.get(exitNamedCb[2])
+    exitNamedPending.delete(exitNamedCb[2])
+    if (!pending) {
+      await ctx.answerCallbackQuery({ text: 'That prompt expired.' }).catch(() => {})
+      await ctx.editMessageText('⌛ That confirmation expired — run the command again.').catch(() => {})
+      return
+    }
+    if (exitNamedCb[1] === 'no') {
+      await ctx.answerCallbackQuery({ text: 'Kept.' }).catch(() => {})
+      await ctx.editMessageText(`✖️ Cancelled — <b>@${escapeHtml(pending.name)}</b> kept.`, { parse_mode: 'HTML' }).catch(() => {})
+      return
+    }
+    await ctx.answerCallbackQuery({ text: 'Ending…' }).catch(() => {})
+    const topic = getTopicBySession(pending.sessionId)
+    const pane = await paneForSession(pending.sessionId).catch(() => null)
+    const alive = !!pane && await paneAlive(pane).catch(() => false)
+    updateTopic(pending.sessionId, { killedAt: Date.now() })
+    if (pane && alive) {
+      if (topic?.threadId != null) markTopicClosePending(pending.sessionId)
+      // Not awaited — closeSessionPane escalates for ~20s, and a wedged session is the one you're
+      // most likely ending. But it DOES wait for the pane to actually die, so hanging the receipt off
+      // it turns "Ending…" into a claim: the caller learns it's gone rather than that we asked.
+      void closeSessionPane(pane, 'owner-exit-named').then(() => paneAlive(pane).catch(() => false)).then(stillUp => {
+        void ctx.editMessageText(stillUp
+          ? `⚠️ <b>@${escapeHtml(pending.name)}</b> did not exit — it may be wedged. <code>tg kill ${escapeHtml(pending.name)}</code> from a session, or close its topic.`
+          : `🚪 <b>@${escapeHtml(pending.name)}</b> ended — <code>tg reopen ${escapeHtml(pending.name)}</code> brings it back.`,
+          { parse_mode: 'HTML' }).catch(() => {})
+      }).catch(() => {})
+    }
+    appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'kill', from: 'owner', to: pending.name, text: alive ? 'exiting' : 'already dead' })
+    await ctx.editMessageText(alive
+      ? `🚪 Ending <b>@${escapeHtml(pending.name)}</b>…`   // replaced with the outcome once the pane is actually gone
+      : `💀 <b>@${escapeHtml(pending.name)}</b> was already down — <code>tg reopen ${escapeHtml(pending.name)}</code> brings it back.`,
+      { parse_mode: 'HTML' }).catch(() => {})
     return
   }
 
@@ -12147,14 +12290,40 @@ bot.on('message:text', async ctx => {
     }
   }
 
+  // `/exit <anything>` — the argument spelling, REFUSED here, ahead of the local relay. This is the
+  // single most safety-critical line in the file: unrefused, `/exit @cc-pin` reaches the relay below,
+  // which types it verbatim into the CALLER's session, where it reads as a plain `/exit` and ends the
+  // wrong one. Not wiring the argument form and refusing it are opposite outcomes.
+  //
+  // /exit is stricter than the general `@`-prefix rule (see refusedArgForm) because it has NO valid
+  // argument — so `/exit worker` is a mistake too, and refusing it can't eat a legitimate local form
+  // the way a blanket "has an argument" rule would eat `/restart all`. A genuinely bare `/exit`,
+  // whitespace and all, is untouched and still ends the session you're in.
+  //
+  // The optional `@bot` is Telegram's own suffix on a tapped command in a group; one addressed to a
+  // DIFFERENT bot returns null so it falls through to the path that already ignores other bots.
+  const exitArg = exitCommandArg(text, botUsername)
+  if (exitArg && (ctx.chat?.type === 'private' || isTopicMode())) {
+    if (gate(ctx).action !== 'deliver') return
+    const bare = exitArg.replace(/^@/, '')
+    await ctx.reply(
+      `⚠️ Target first: <code>@${escapeHtml(bare)} /exit</code>\n\n` +
+      `<code>/exit @${escapeHtml(bare)}</code> would have ended <i>this</i> session, not @${escapeHtml(bare)}. Nothing was done.`,
+      { parse_mode: 'HTML' }).catch(() => {})
+    return
+  }
+
   // `@name /cmd` — cross-session slash relay for the human driver (the owner-side twin of the
   // bus's `tg slash`). Target-first so the payload is NEVER parsed: any slash command — built-in,
   // custom skill, future — rides verbatim after the name, so nothing can clash with the bridge's
   // own command namespace (no bot command is registered for this; it's plain-text syntax). A
   // mention of the bot itself falls through to normal handling, and a name that doesn't resolve
   // fails LOUDLY (never silently delivered as prompt text — that would be the misfire this syntax
-  // exists to prevent). Guards mirror `tg slash`: live pane, idle, no armed bash box; /exit and
-  // /quit stay per-topic (a typo'd target must never kill the wrong session).
+  // exists to prevent). Guards are namedTarget's.
+  //
+  // THE one supported spelling for acting on another session. Two commands are intercepted rather
+  // than relayed, because neither is something the target's CLI can run: /exit has to go through the
+  // undoable close path, and /restart is a bridge command the CLI would just reject.
   const cross = /^@(\S+)\s+(\/\S[\s\S]*)$/.exec(text)
   if (cross && (ctx.chat?.type === 'private' || isTopicMode())
       && (!botUsername || cross[1].toLowerCase() !== botUsername.toLowerCase())) {
@@ -12168,31 +12337,45 @@ bot.on('message:text', async ctx => {
     }
     const say = (t: string) => ctx.reply(t, { parse_mode: 'HTML' }).catch(() => {})
     // No bound-group gate: unbound there are still endpoints to address (headless sessions + the
-    // chat lane). A name that doesn't resolve fails loudly below, which is the only real error here.
+    // chat lane). A name that doesn't resolve fails loudly in namedTarget, the only real error here.
     const command = cross[2].trim()
-    if (/^\/(exit|quit)\b/i.test(command)) { await say('⚠️ Session-ending commands don’t relay cross-session — end that session from its own surface.'); return }
-    await reapDeadEndpoints(cross[1].replace(/:$/, ''))
-    const endpoints = busEndpoints()
-    const res = resolveEndpoint(cross[1].replace(/:$/, ''), endpoints)
-    if ('error' in res) {
-      const live = endpoints.filter(e => !e.closed && e.kind === 'claude').map(e => `@${normalizeEndpointName(e.name)}`).join(' · ')
-      await say(`⚠️ ${escapeHtml(res.error.replace(/ — try `tg roster`.*$/, ''))} — nothing was sent.${live ? `\nLive sessions: ${escapeHtml(live)}` : ''}`)
+    const ending = /^\/(exit|quit)\b/i.test(command)
+    // Ending a session is the one case that must survive a wedged target, so it skips the idle gate.
+    const nt = await namedTarget(ctx, cross[1], ending ? { requireIdle: false } : {})
+    if (!nt) return
+    const topic = getTopicBySession(nt.sessionId)
+
+    if (ending) {
+      // NOT a relayed /exit — the `tg kill` path: the topic tab is closed rather than deleted and the
+      // registry row survives with its folder + conversation id, so `tg reopen <name>` undoes it. The
+      // confirm exists because a typo'd target must never kill the wrong session, and it answers that
+      // by showing the NAME AND FOLDER the name resolved to before anything dies.
+      if (chatIdForDmChatSession(nt.sessionId) === String(ctx.chat!.id)) {
+        await say(`⚠️ <b>@${escapeHtml(nt.name)}</b> is this chat's own session — use <code>/exit</code> on its own to end it.`); return
+      }
+      if (!topic) { await say(`⚠️ <b>@${escapeHtml(nt.name)}</b> has no session entry to close.`); return }
+      const id = randomBytes(4).toString('hex')
+      exitNamedPending.set(id, { sessionId: nt.sessionId, name: nt.name, cwd: topic.cwd })
+      const kb = new InlineKeyboard().text(`🚪 End @${nt.name}`, `exitnamed:yes:${id}`).text('✖️ No', `exitnamed:no:${id}`)
+      await ctx.reply(
+        `⚠️ End <b>@${escapeHtml(nt.name)}</b>?\n📁 <code>${escapeHtml(topic.cwd)}</code>\n\nIts conversation is kept — <code>tg reopen ${escapeHtml(nt.name)}</code> brings the same session back.`,
+        { parse_mode: 'HTML', reply_markup: kb })
       return
     }
-    if (res.kind !== 'claude') { await say('⚠️ That endpoint has no CLI to command.'); return }
-    const toName = nameForEndpoint(res.id, endpoints)
-    const targetPane = await paneForSession(res.id).catch(() => null)
-    if (!targetPane || !(await paneAlive(targetPane).catch(() => false))) {
-      if (!(targetPane && isPaneRestarting(targetPane))) updateTopic(res.id, { closed: true })
-      await say(`⚠️ <b>@${escapeHtml(toName)}</b> has no live pane.`); return
+
+    if (/^\/restart\b/i.test(command)) {
+      appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'slash', from: 'owner', to: nt.name, text: command })
+      await restartTargetSession(ctx, nt.target.paneId, nt.name)
+      return
     }
-    const cap = await capturePane(targetPane).catch(() => '')
-    if (!cap || !onNormalPrompt(cap)) { await say(`⏳ <b>@${escapeHtml(toName)}</b> is mid-turn — retry when it goes idle.`); return }
-    if (bashModeArmed(cap)) { await say(`⚠️ <b>@${escapeHtml(toName)}</b> has an unsubmitted ! bash command in its input box.`); return }
-    appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'slash', from: 'owner', to: toName, text: command })
-    const watcher = targetPane === focus.activePaneId ? focus.paneWatcher : null
-    void relaySlashCommand(targetPane, watcher, command, String(ctx.chat!.id), true, ctx.message?.message_thread_id)
-    await say(`✅ Sent <code>${escapeHtml(command.split(/\s/)[0])}</code> to <b>@${escapeHtml(toName)}</b>`)
+
+    appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'slash', from: 'owner', to: nt.name, text: command })
+    void relaySlashCommand(nt.target.paneId, nt.target.watcher, command, String(ctx.chat!.id), true, ctx.message?.message_thread_id)
+    // Folder in the receipt, not just the name. A relayed command has no confirm in front of it, so
+    // this is the only chance to notice that a typo resolved to a different live session — /clear
+    // above all, where the cost of finding out later is a wiped context.
+    const where = topic ? `\n📁 <code>${escapeHtml(topic.cwd)}</code>` : ''
+    await say(`✅ Sent <code>${escapeHtml(command.split(/\s/)[0])}</code> to <b>@${escapeHtml(nt.name)}</b>${where}`)
     return
   }
 
@@ -13371,7 +13554,7 @@ void (async () => {
               { command: 'base', description: 'Folder new topics are created under (/base ~/projects)' },
               { command: 'account', description: 'Claude accounts — list, add, remove (multi-account)' },
               { command: 'harness', description: 'Use any configured provider inside Claude Code' },
-              { command: 'restart', description: 'Restart & resume the current session — or "/restart all" for every session' },
+              { command: 'restart', description: 'Restart & resume this session — or "/restart all" for every session' },
               { command: 'reset', description: 'Clear the current conversation in place' },
               { command: 'stream', description: 'How replies arrive: thoughts · actions · off' },
               { command: 'effort', description: 'Reasoning effort — /effort <level> now, or /effort default <level> to pin it for new sessions' },

@@ -40,6 +40,12 @@ by its topic name.
 - tg ask @name - [--ref path] — ask another agent (task on stdin). ASYNC: your turn ends now; their answer
   arrives later as a fresh `<tg @name re=ID …>` block. Put any handoff files in `$(tg shared)` and
   pass them by name — refs are paths, never paste large content across.
+- tg ack @name - [--ref path] — **use this instead of `tg ask` whenever you are not asking a question.**
+  Acknowledgments, FYIs, "got it", "heads-up", "standing down", a status note mid-thread: anything the
+  other agent has no reason to reply to. It delivers exactly like an ask, but leaves no open ask
+  behind — nothing is queued, no answer is expected, and nothing times out. Sending one of these as a
+  `tg ask` leaves a row nobody will ever answer, which then reports itself as a problem an hour later.
+  It arrives at the other agent as `<tg @you ack=ID …>` — an `ack=` block is FYI; never answer one.
 - tg answer <ID> - [--ref path] — answer an ask you received; one-line summary → path, on stdin (its
   `<tg @name ask=ID …>` block carries the ID). Reply with a pointer + summary, not the payload.
   **A task that arrived over the bus returns its result over the bus** — your topic is a mirror
