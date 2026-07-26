@@ -61,9 +61,19 @@ export interface SessionCard {
   model: string | null; effort: string | null; mode: string | null
   ctxPct: number | null; h5Pct: number | null; branch: string | null
 }
-export type SessionAct = 'stop' | 'compact' | 'send' | 'close'
+// 'model'/'effort' carry the chosen alias/level in `text` — the mini app's dial picker, applied to
+// the session's own pane by the same /model and /effort injections the chat-side pickers use.
+export type SessionAct = 'stop' | 'compact' | 'send' | 'close' | 'model' | 'effort'
 export interface SessionFeed {
   sid: string; name: string; working: boolean
+  // The drill-in's own dial, carried on the poll it already runs rather than read out of a
+  // sessions-list snapshot it may never have loaded — a deep-linked open has none, and after
+  // changing model or effort the list snapshot would be stale until that tab is visited again.
+  // `cwd` is the chat header's subtitle; model/effort label the composer's picker button.
+  cwd?: string; model?: string | null; effort?: string | null
+  // The bridge's configured spawn defaults (/settings 🐣). The picker badges these — they are
+  // genuinely unset ("inherit") as often as not, and then nothing is badged.
+  defModel?: string | null; defEffort?: string | null
   // 'activity' = a tool run of the live turn, 'thought' = its mid-turn narration (the 💭 the
   // Telegram live card shows); both appear only while the session is working.
   // `clipped` = the payload clamp cut this message (display only — storage and pane delivery keep
@@ -328,8 +338,12 @@ async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: strin
     if (!deps.sessionAction) return json({ error: 'unavailable' }, 404)
     const body = await req.json().catch(() => null) as { sid?: unknown; action?: unknown; text?: unknown } | null
     const action = String(body?.action || '') as SessionAct
-    if (!body || typeof body.sid !== 'string' || !['stop', 'compact', 'send', 'close'].includes(action)) return json({ error: 'bad body' }, 400)
-    deps.log(`webapp: session ${action} sid=${body.sid}${action === 'send' ? ` chars=${String(body.text ?? '').length}` : ''} user=${userId}`)
+    if (!body || typeof body.sid !== 'string' || !['stop', 'compact', 'send', 'close', 'model', 'effort'].includes(action)) return json({ error: 'bad body' }, 400)
+    // The dial actions log their VALUE (it is short and it is the whole point of the call); send
+    // logs only a length, because its text is the user's message.
+    const detail = action === 'send' ? ` chars=${String(body.text ?? '').length}`
+      : action === 'model' || action === 'effort' ? ` to=${String(body.text ?? '')}` : ''
+    deps.log(`webapp: session ${action} sid=${body.sid}${detail} user=${userId}`)
     const err = await deps.sessionAction(userId, body.sid, action, typeof body.text === 'string' ? body.text : undefined)
     return err ? json({ error: err }, 400) : json({ ok: true })
   }

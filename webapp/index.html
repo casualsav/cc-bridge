@@ -63,6 +63,9 @@
     /* The paperclip glyph. Its own constant rather than a step off --sp-*, for the reason --fold-h
        gives above: it is a geometric size answering to the reference, not a spacing choice. */
     --clip-d: 24px;
+    /* The composer's model/effort chip. Same derivation as --clip-d and --hbtn-d: a proportion of
+       the reference measured against the mic both frames contain (56.1 : 66.7), not a chosen size. */
+    --dial-h: 34px;
     --pill-ring: 6px;
     /* The pill's height AT ONE LINE, and the name matters: the pill now grows with the textarea,
        but the corner radius must NOT follow it. Tie the radius to the live height and a six-line
@@ -305,13 +308,44 @@
      `border-radius` is half the height, so the pill's right end is a semicircle centred on exactly
      the same point as the mic (ring 3 + radius 20 = 23) — that concentricity is what makes the ring
      read as even all the way around the button rather than only above and below it. */
-  .inputwrap { flex: 1; display: flex; align-items: flex-end; background: var(--sec); border-radius: calc(var(--pill-h-1) / 2); padding: var(--pill-ring); padding-left: 14px; min-height: var(--pill-h-1); box-shadow: inset 0 1px 0 rgba(255,255,255,.06); }
+  /* padding-left drops 14 → the ring, because the capsule's first item is now the dial pill rather
+     than the text: 14px was the placeholder's inset and the pill wants the same air as the mic on the
+     other end. The text's own inset moved onto the textarea below, so the placeholder is unmoved. */
+  /* `min-width: 0` on BOTH the capsule and the field, and it takes both. The field's lets it shrink;
+     the capsule's is what stops its own automatic minimum size — computed from the textarea's
+     cols-based min-content width, which does not care that the field itself was told it may shrink —
+     from holding the capsule open past the screen. With only one of the two, a long model name on
+     the pill pushed the capsule to 508px inside a 390px strip and carried the mic off-screen. It
+     does not scroll the PAGE, because a fixed-position subtree contributes no scrollable overflow —
+     so this fails silently, with the send button simply unreachable. */
+  .inputwrap { flex: 1; min-width: 0; display: flex; align-items: flex-end; background: var(--sec); border-radius: calc(var(--pill-h-1) / 2); padding: var(--pill-ring); min-height: var(--pill-h-1); box-shadow: inset 0 1px 0 rgba(255,255,255,.06); }
+  /* The model/effort pill, styled after the reference's blue "Open" chip: text only, no icon.
+     Height is the reference's proportion against the one control both frames share — a 56.1px chip
+     beside a 66.7px mic, so 0.84 of our 40px mic. The margin is NOT a nudge: at one line the
+     reference centres this chip on the same axis as the mic (measured 46.9 vs 47.4 in a 102px crop),
+     and since `align-items: flex-end` pins it to the capsule's floor, half the difference between it
+     and the mic is exactly what puts the two back on one axis. It stays bottom-anchored when the
+     field grows, like the clip and the mic. */
+  .dialpill { flex: none; height: var(--dial-h); margin-bottom: calc((var(--mic-d) - var(--dial-h)) / 2);
+    border: none; border-radius: calc(var(--dial-h) / 2); background: var(--btn); color: var(--btn-text);
+    font-size: var(--t-sub); line-height: 1; padding: 0 12px; cursor: pointer;
+    display: flex; align-items: center; gap: 5px; max-width: 40%; }
+  /* The model name carries the weight; the effort rides beside it at the same size, unbolded — the
+     one is what you picked, the other is how hard it is being pushed. */
+  .dialpill b { font-weight: var(--w-semi); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dialpill .eff { opacity: .85; white-space: nowrap; }
   /* Explicit font (not `inherit`): Android WebViews don't reliably propagate an inherited font
      into the IME composition / autofill layer, which then renders in the UA default. */
   /* max-height is the six-line cap spelled as six line boxes plus the field's own padding, so it
      stays six lines if the type scale or line-height ever moves. box-sizing is border-box here,
      which is why the padding term belongs in the sum. */
-  .inputwrap textarea { flex: 1; resize: none; border: none; outline: none; background: transparent; color: var(--text); padding: var(--ta-pad-y) 0; font: var(--t-body)/var(--ta-lh) -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; max-height: calc(var(--ta-lines) * var(--ta-lh) * 1em + 2 * var(--ta-pad-y)); overflow-y: auto; }
+  /* `min-width: 0` is load-bearing and only became so when the dial pill joined the capsule. A flex
+     item's automatic minimum size is its intrinsic width, and a <textarea>'s is its `cols` default
+     (~20 characters) — so the field REFUSED to shrink below ~200px and the capsule overflowed the
+     screen instead, at which point the whole page scrolls sideways. Measured: a long model name blew
+     the capsule from 370 to 508px on a 390px viewport. Every other flex child here is `flex: none`,
+     so this is the only item that can give, and it has to be allowed to. */
+  .inputwrap textarea { flex: 1; min-width: 0; resize: none; border: none; outline: none; background: transparent; color: var(--text); padding: var(--ta-pad-y) 0 var(--ta-pad-y) var(--sp-2); font: var(--t-body)/var(--ta-lh) -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; max-height: calc(var(--ta-lines) * var(--ta-lh) * 1em + 2 * var(--ta-pad-y)); overflow-y: auto; }
   .ghost { background: transparent; border: none; color: var(--hint); padding: var(--sp-2) 7px; cursor: pointer; line-height: 1; flex: none; }
   /* The capsule's controls should sit a step above its placeholder, as they do in the reference —
      at one tone the whole capsule reads as decoration rather than two affordances beside a label. */
@@ -388,6 +422,55 @@
   .segrow { display: flex; flex-wrap: wrap; gap: 6px; }
   .selchip { border: none; border-radius: 14px; padding: 6px var(--sp-3); background: var(--sec); color: var(--hint-raised); font-size: var(--t-sub); cursor: pointer; }
   .selchip.on { background: var(--btn); color: var(--btn-text); }
+  /* Model/effort picker — ONE sheet that slides sideways into a second page, not two sheets. Its own
+     rules rather than .sheet's: this one animates, is edge-to-edge, and its rows are the content. */
+  #dial { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: none; z-index: 10; align-items: flex-end; }
+  #dial.show { display: flex; }
+  /* Quick, per the brief — 180ms is about as long as a sheet can take before it reads as sluggish.
+     The transform starts off-screen and the .up class is added on the next frame, so the browser has
+     a start value to animate FROM; setting display and transform in one tick animates nothing. */
+  .dialsheet { width: 100%; background: var(--bg); border-radius: var(--r-xl) var(--r-xl) 0 0;
+    padding-bottom: env(safe-area-inset-bottom); transform: translateY(100%); transition: transform .18s ease-out; overflow: hidden; }
+  #dial.up .dialsheet { transform: translateY(0); }
+  @media (prefers-reduced-motion: reduce) { .dialsheet, .dialpages { transition: none; } }
+  /* The grab handle is decoration, not a control — the sheet is dismissed by the ✕, the backdrop or
+     Back. Sized off the reference against its mic (64x5 : 66.7). */
+  .dialgrab { width: 38px; height: 3px; border-radius: 2px; background: var(--hint); opacity: .5; margin: 8px auto 0; }
+  .dialhead { display: flex; align-items: center; padding: var(--sp-3) var(--sp-4) var(--sp-2); }
+  .dialhead .t { flex: 1; text-align: center; font-size: var(--t-title); font-weight: var(--w-semi); }
+  /* The leading control is ✕ on page one and ← on page two — same slot, same size, so the title does
+     not shift as the sheet changes page. The trailing spacer is the ✕'s mirror: without it the
+     centred title would sit half a button right of the sheet's centre. */
+  .dialhead .lead, .dialhead::after { width: 30px; flex: none; }
+  .dialhead::after { content: ""; }
+  .dialhead .lead { height: 30px; padding: 3px; border: none; background: transparent; color: var(--text); cursor: pointer; display: flex; align-items: center; justify-content: center; }
+  .dialhead .lead svg { width: 24px; height: 24px; display: block; }
+  /* Two pages side by side inside a 200%-wide track; changing page slides the track. Its HEIGHT is
+     set from the live page in JS — a track that is as tall as its tallest child leaves the shorter
+     page sitting above dead space, which reads as a rendering fault rather than a short list. */
+  .dialpages { display: flex; width: 200%; transition: transform .22s ease-out, height .22s ease-out; }
+  #dial.p2 .dialpages { transform: translateX(-50%); }
+  .dialpage { width: 50%; flex: none; padding: 0 var(--sp-3) var(--sp-3); align-self: flex-start; }
+  /* One rounded card per group, rows divided by a hairline — the reference's shape. */
+  .diallist { background: var(--sec); border-radius: var(--r-md); overflow: hidden; margin-top: var(--sp-2); }
+  .dialrow { display: flex; align-items: center; gap: var(--sp-3); width: 100%; text-align: left;
+    background: transparent; border: none; border-top: 1px solid var(--bg); color: var(--text);
+    padding: 12px 14px; cursor: pointer; font-size: var(--t-body); }
+  .dialrow:first-child { border-top: none; }
+  .dialrow:active { background: var(--bg); }
+  .dialrow .nm { flex: 1; min-width: 0; }
+  .dialrow .nm .n { display: flex; align-items: center; gap: var(--sp-2); }
+  .dialrow .nm .d { font-size: var(--t-sub); color: var(--hint-raised); margin-top: 2px; }
+  /* Selected = the session's CURRENT dial (accent text + check). Default = what /settings 🐣 spawns
+     with. Deliberately two different marks: they land on the same row as often as not, and a reader
+     who only ever sees them together would take one for the other. */
+  .dialrow.on { color: var(--link); }
+  .dialrow.on .d { color: var(--link); }
+  .dialrow .tick { width: 20px; height: 20px; flex: none; color: var(--link); display: none; }
+  .dialrow.on .tick { display: block; }
+  .dialrow .badge { flex: none; font-size: var(--t-meta); font-weight: var(--w-semi); color: var(--text);
+    background: var(--bg); border-radius: 9px; padding: 2px 8px; }
+  .dialrow .chev { width: 20px; height: 20px; flex: none; color: var(--hint); }
   .sprow { display: flex; justify-content: flex-end; gap: var(--sp-2); margin-top: 18px; }
   .sprow .cancel { border: none; background: transparent; color: var(--hint); padding: 9px var(--sp-3); font-size: var(--t-sub); cursor: pointer; }
   .sprow .create { border: none; border-radius: 10px; background: var(--btn); color: var(--btn-text); padding: 9px 18px; font-size: var(--t-sub); cursor: pointer; }
@@ -443,6 +526,9 @@
   <div id="dfeed"></div>
   <div class="composer">
     <div class="inputwrap">
+      <!-- Text only, no icon and no emoji, by the owner's call: the model name is the label. It leads
+           the capsule the way the reference's blue "Open" chip does. -->
+      <button id="ddial" class="dialpill" title="Model and effort"><b id="ddialm">Model</b><span class="eff" id="ddiale"></span></button>
       <textarea id="dtext" rows="1" placeholder="Message" autocomplete="off" spellcheck="false"></textarea>
       <button id="datt" class="ghost" title="Attach a file"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>
       <!-- The round button is mic OR send, never both. The PAPERCLIP stays inside the capsule through
@@ -457,6 +543,34 @@
       <button id="dsend" class="sendbtn" title="Send"><svg viewBox="0 0 24 24"><polygon points="22 2 15 22 11 13 2 9 22 2" fill="currentColor"/></svg></button>
     </div>
     <input id="dfile" type="file" hidden>
+  </div>
+</div>
+
+<!-- Model / effort picker for the OPEN session. Two pages in one sheet: the model list, and the
+     effort list the "Effort" row slides across to. Rows are built in JS from the lists below. -->
+<div id="dial">
+  <div class="dialsheet">
+    <div class="dialgrab"></div>
+    <div class="dialpages">
+      <div class="dialpage" id="dialp1">
+        <div class="dialhead">
+          <button class="lead" id="dialx" title="Close" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+          <div class="t">Select model</div>
+        </div>
+        <div class="diallist" id="dialmodels"></div>
+        <div class="diallist"><button class="dialrow" id="dialeffort">
+          <span class="nm"><span class="n">Effort</span><span class="d" id="dialeffnow"></span></span>
+          <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+        </button></div>
+      </div>
+      <div class="dialpage" id="dialp2">
+        <div class="dialhead">
+          <button class="lead" id="dialback" title="Back" aria-label="Back to models"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg></button>
+          <div class="t">Effort</div>
+        </div>
+        <div class="diallist" id="dialefforts"></div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -873,8 +987,10 @@ async function closeSessionCard(sid, name) {
   // Not sessionAct(): that targets the OPEN drill-in, and this ✕ names a card that may not be it.
   if (await writeOp("/api/session/act", { sid, action: "close" })) { showOk("Closing…"); renderSessions(); }
 }
-// A session's dial — model, effort, mode, agent — as escaped fragments. Shared by the card's chips
-// and the chat header's subtitle so the two can't drift into describing the same session differently.
+// A session's dial — model, effort, mode, agent — as escaped fragments for the LIST card's chips.
+// It used to feed the chat header's subtitle too; that header now shows the session's cwd and its
+// model/effort moved to the composer's dial pill, which reads them live off the feed. Mode is
+// deliberately not shown in there at all — it stays a property of the fleet view.
 function dialParts(s) {
   const parts = [];
   // Model and effort are independent: a session whose model didn't parse must still show ⚡effort.
@@ -889,10 +1005,13 @@ let drillSid = null, drillTimer = null, lastDrill = null, optimistic = [];
 function openDrill(sid, name) {
   drillSid = sid; lastDrill = null; optimistic = []; feedSig = "";
   $("dname").textContent = name;
-  // Subtitle from the sessions snapshot. Deep-linked opens can arrive before it loads — an empty
-  // second line is the right degradation, so no lookup failure is worth reporting here.
+  // Subtitle is the session's cwd, and the model/effort reading that used to live here moved to the
+  // composer's dial pill (mode is gone from this screen entirely — it stays on the sessions list).
+  // Seeded from the sessions snapshot so the line isn't blank for the first poll; renderDrill takes
+  // over from the feed, which also covers the deep-linked open that has no snapshot at all.
   const s = SESSIONS.find(x => x.sid === sid);
-  $("dsub").innerHTML = s ? dialParts(s).join(" · ") : "";
+  $("dsub").textContent = s ? s.cwd || "" : "";
+  setDial(null);
   $("dfeed").innerHTML = '<div class="notice">Loading…</div>';
   $("drill").classList.add("show");
   growComposer();   // first moment the field has a measurable height; sizes it before it is seen
@@ -1030,12 +1149,101 @@ async function renderDrill() {
   if (!drillSid) return;
   let d; try { d = await api("/api/session/feed", { sid: drillSid }); } catch { return; }
   $("ddot").className = "dot " + (d.working ? "on" : "");
+  if (d.cwd) $("dsub").textContent = d.cwd;
+  setDial(d);
   lastDrill = d;
   paintFeed();
 }
 async function sessionAct(action, text) {
   const d = await writeOp("/api/session/act", { sid: drillSid, action, ...(text ? { text } : {}) });
   return !!d;
+}
+
+// ---- The composer's model/effort dial: a pill in the capsule → a two-page bottom sheet ----
+// The labels and blurbs are UI copy and live here. The ALIASES are not ours: they are daemon.ts's
+// MODEL_ALIASES and EFFORT_LEVELS, and the daemon re-validates every apply against them — so a list
+// that drifts out of date here fails loudly with the daemon's own message naming the real set,
+// rather than silently sending a dial nothing acts on.
+const DIAL_MODELS = [
+  ["fable", "Fable 5", "For your toughest challenges"],
+  ["opus", "Opus 5", "For complex tasks"],
+  ["sonnet", "Sonnet 5", "Most efficient for everyday tasks"],
+  ["haiku", "Haiku 4.5", "Fastest for quick answers"],
+];
+const DIAL_EFFORTS = [
+  ["low", "Low", "Quick replies to simple questions"],
+  ["medium", "Medium", "Light, casual tasks"],
+  ["high", "High", "Balanced for everyday work"],
+  ["xhigh", "XHigh", "Complex, detailed work"],
+  ["max", "Max", "The hardest problems. Takes longest."],
+  ["auto", "Auto", "Lets the session pick its own level per turn"],
+];
+const effLabel = lv => (DIAL_EFFORTS.find(([v]) => v === lv) || [null, lv])[1] || lv;
+// The statusline reports a display NAME ("Opus 5"); the picker works in aliases ("opus"). Match on
+// the family token — the same test the chat-side /model confirmation uses to read back a switch.
+const modelAlias = name => (DIAL_MODELS.find(([a]) => name && name.toLowerCase().includes(a)) || [null])[0];
+let dialNow = { model: null, effort: null, defModel: null, defEffort: null };
+// Paint the pill from a feed payload (null = opening a session before the first poll answers).
+function setDial(d) {
+  dialNow = { model: (d && d.model) || null, effort: (d && d.effort) || null,
+              defModel: (d && d.defModel) || null, defEffort: (d && d.defEffort) || null };
+  // The pill says what the SESSION says, never what our list says it should be: the statusline name
+  // is already normalised ("claude-haiku-4-5-20251001" → "Haiku 4.5"), it covers a model set by full
+  // id from the terminal that no list here knows, and it cannot go stale — the row labels below can,
+  // and a pill reading "Opus 5" at a session actually running something else would be a lie.
+  $("ddialm").textContent = dialNow.model || "Model";
+  $("ddiale").textContent = dialNow.effort ? effLabel(dialNow.effort) : "";
+  if ($("dial").classList.contains("show")) paintDial();
+}
+function dialRow(kind, row, cur, def) {
+  return '<button class="dialrow' + (row[0] === cur ? " on" : "") + '" data-k="' + kind + '" data-v="' + row[0] + '">' +
+    '<span class="nm"><span class="n">' + esc(row[1]) +
+      (row[0] === def ? '<span class="badge">Default</span>' : "") + "</span>" +
+      '<span class="d">' + esc(row[2]) + "</span></span>" +
+    '<svg class="tick" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>' +
+    "</button>";
+}
+// The track is as tall as the page you are ON. Left to size itself it takes the taller page's
+// height on both, which parks the shorter list above a band of dead sheet.
+function dialHeight() {
+  const live = $("dial").classList.contains("p2") ? $("dialp2") : $("dialp1");
+  document.querySelector(".dialpages").style.height = live.offsetHeight + "px";
+}
+function paintDial() {
+  $("dialmodels").innerHTML = DIAL_MODELS.map(m => dialRow("model", m, modelAlias(dialNow.model), dialNow.defModel)).join("");
+  $("dialefforts").innerHTML = DIAL_EFFORTS.map(e => dialRow("effort", e, dialNow.effort, dialNow.defEffort)).join("");
+  $("dialeffnow").textContent = dialNow.effort ? effLabel(dialNow.effort) : "not reported";
+  document.querySelectorAll("#dial .dialrow[data-k]").forEach(b => b.onclick = () => applyDial(b.dataset.k, b.dataset.v));
+  dialHeight();
+}
+$("ddial").onclick = () => {
+  if (!drillSid) return;
+  const dl = $("dial");
+  dl.classList.remove("p2");
+  // .show BEFORE painting: a display:none subtree measures 0, so dialHeight would pin the track at
+  // zero and the sheet would open empty — the same trap that once pinned the composer at height 0.
+  dl.classList.add("show");
+  paintDial();
+  requestAnimationFrame(() => dl.classList.add("up"));
+};
+function closeDial() {
+  const dl = $("dial");
+  dl.classList.remove("up");
+  setTimeout(() => dl.classList.remove("show", "p2"), 180);   // matches .dialsheet's transition
+}
+$("dialx").onclick = closeDial;
+$("dial").onclick = e => { if (e.target.id === "dial") closeDial(); };
+$("dialeffort").onclick = () => { $("dial").classList.add("p2"); dialHeight(); };
+$("dialback").onclick = () => { $("dial").classList.remove("p2"); dialHeight(); };
+async function applyDial(kind, val) {
+  const label = kind === "model" ? (DIAL_MODELS.find(([a]) => a === val) || [null, val])[1] : effLabel(val);
+  closeDial();
+  if (!(await sessionAct(kind, val))) return;   // writeOp surfaced the error
+  // Deliberately no optimistic repaint of the pill: the dial is whatever the SESSION reports, and an
+  // effort change can sit behind Claude Code's "Change effort level?" confirm for a few seconds. The
+  // toast says a switch was asked for; the 3s poll is what says it landed.
+  showOk(label + " requested…");
+  renderDrill();
 }
 $("dstop").onclick = async () => { if (await sessionAct("stop")) showOk("Interrupted"); };
 // Compaction is reached by typing /compact in the composer, so the button is gone. Closing moved to the

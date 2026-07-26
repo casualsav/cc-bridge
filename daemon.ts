@@ -13316,13 +13316,13 @@ const THOUGHT_MAX = 400   // one narration block in the feed; long enough to rea
 const FEED_BLOCKS = 10    // live blocks kept, matching the Telegram card's window (MIRROR_THOUGHTS)
 // sid → its dashboard row and transcript file. Shared by the feed and the single-message fetch so
 // they can't resolve the same session to different transcripts.
-async function webappSessionSource(sid: string): Promise<{ row: { sid: string; name: string; cwd: string; agent: string }; file: string | null } | null> {
+async function webappSessionSource(sid: string): Promise<{ row: { sid: string; name: string; cwd: string; agent: string }; pane: string; cwd: string | null; file: string | null } | null> {
   const row = dashboardSessionRows().find(r => r.sid === sid)
     ?? (getTopicBySession(sid) ? { sid, name: getTopicBySession(sid)!.name, cwd: getTopicBySession(sid)!.cwd, agent: 'claude' } : { sid, name: 'Session', cwd: '', agent: 'claude' })
   const pane = await paneForSession(sid).catch(() => null)
   if (!pane) return null
   const cwd = row.cwd || (await paneCwd(pane).catch(() => null))
-  return { row, file: await transcriptForPane(pane, cwd) }
+  return { row, pane, cwd, file: await transcriptForPane(pane, cwd) }
 }
 // Full text of one feed row, for expanding a clipped bubble. Reads the transcript directly — the
 // payload clamp is a poll-cost measure, never a limit on what may be read.
@@ -13333,8 +13333,25 @@ async function webappSessionMessage(sid: string, uuid: string): Promise<string |
 async function webappSessionFeed(sid: string): Promise<WebappSessionFeed | null> {
   const src = await webappSessionSource(sid)
   if (!src) return null
-  const { row, file } = src
-  if (!file) return { sid, name: row.name, working: false, items: [] }
+  const { row, pane, file } = src
+  // The dial the drill-in paints (header subtitle + the composer's picker button), read the same way
+  // the dashboard card reads it: statusline first, the transcript's own model id as the fallback for
+  // the sessions whose identity line is truncated by a long cwd. One capture per 3s poll, for the ONE
+  // open session — the list already captures every session at that cadence.
+  const acc = loadAccess()
+  const cap = await capturePane(pane).catch(() => '')
+  const sl = cap ? parseStatusline(cap) : null
+  const dial = {
+    // Home-abbreviated, because this is the header's one-line subtitle and it truncates from the
+    // END — `~/projects/x` keeps the leaf that identifies the session where `/home/ubuntu/projec…`
+    // loses it. Abbreviated here rather than in the client, which has no idea what $HOME is.
+    cwd: (src.cwd || '').startsWith(homedir()) ? '~' + src.cwd!.slice(homedir().length) : (src.cwd || ''),
+    model: sl?.model ?? (file ? modelDisplayName(latestModelId(file) ?? '') : null),
+    effort: sl?.effort ?? null,
+    defModel: acc.spawnModel ?? null,
+    defEffort: acc.spawnEffort ?? null,
+  }
+  if (!file) return { sid, name: row.name, working: false, ...dial, items: [] }
   const working = turnInProgress(file)
   const items: WebappSessionFeed['items'] = recentConversation(file, 14).map(c => ({
     role: c.role, text: c.text, ts: c.ts,
@@ -13350,7 +13367,7 @@ async function webappSessionFeed(sid: string): Promise<WebappSessionFeed | null>
     const text = blockLine(b)
     items.push({ role: b.kind === 'thought' ? 'thought' : 'activity', text: text.length > THOUGHT_MAX ? text.slice(0, THOUGHT_MAX - 1) + '…' : text, ts: 0 })
   }
-  return { sid, name: row.name, working, items }
+  return { sid, name: row.name, working, ...dial, items }
 }
 
 // Dashboard actions — the same controls chat grants: stop = the /stop interrupt, compact = the
@@ -13365,7 +13382,7 @@ async function dismissFeedbackSurvey(pane: string): Promise<void> {
   await waitForSettle(pane, 150, 2000).catch(() => {})
 }
 
-async function webappSessionAction(userId: string, sid: string, action: 'stop' | 'compact' | 'send' | 'close', text?: string): Promise<string | null> {
+async function webappSessionAction(userId: string, sid: string, action: 'stop' | 'compact' | 'send' | 'close' | 'model' | 'effort', text?: string): Promise<string | null> {
   const pane = await paneForSession(sid).catch(() => null)
   // Close runs BEFORE the liveness bail: ending an already-dead session must still clean up its row.
   if (action === 'close') {
@@ -13392,6 +13409,28 @@ async function webappSessionAction(userId: string, sid: string, action: 'stop' |
     return ok ? null : 'interrupt did not reach the pane'
   }
   if (action === 'compact') { void relaySlashCommand(pane, watcher, '/compact', ''); return null }
+  // The mini-app dial picker. Both go in through the SAME injections the chat-side /model and
+  // /effort pickers use, so a session can't end up in a state one surface can produce and the other
+  // can't read. The alias/level is validated against the daemon's own lists rather than trusted from
+  // the client — the app's copy of them is UI labelling, not authority.
+  if (action === 'model') {
+    const alias = (text ?? '').trim().toLowerCase()
+    if (!MODEL_ALIASES.includes(alias)) return `unknown model — one of: ${MODEL_ALIASES.join(' | ')}`
+    const sent = await injectSlash(pane, watcher, `/model ${modelArgFor(alias)}`, { guardPalette: true })
+    return sent.ok ? null : paletteRefusalText(`/model ${alias}`, sent.offered)
+  }
+  if (action === 'effort') {
+    const level = (text ?? '').trim().toLowerCase()
+    if (!EFFORT_LEVELS.includes(level)) return `unknown effort — one of: ${EFFORT_LEVELS.join(' | ')}`
+    // reapplyEffort, not injectEffortChange: mid-conversation Claude Code raises "Change effort
+    // level?", and the chat flow answers it by relaying Yes/No buttons to Telegram — which would
+    // strand a mini-app user waiting on a card in a chat they may not be looking at. The user has
+    // already made that choice by tapping the level, so accept the confirm for them.
+    // Fire-and-forget: the confirm dance polls for up to ~30s and the HTTP request must not be held
+    // open for it (same call as `close`). The 3s feed poll is what reports the new level.
+    void reapplyEffort(pane, level, watcher).then(() => rememberEffort(pane, level))
+    return null
+  }
   const msg = (text ?? '').trim()
   if (!msg) return 'empty message'
   if (bashModeArmed(await capturePane(pane).catch(() => ''))) return 'the session has an unsubmitted ! bash command in its input box'

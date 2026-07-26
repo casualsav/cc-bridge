@@ -181,6 +181,14 @@ test('console endpoints: sessions/auto reads + session act route to deps; missin
     expect(acted).toEqual([['s1', 'send', 'hi']])
     const bad = await fetch(`${base}/api/session/act`, { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify({ sid: 's1', action: 'reboot' }) })
     expect(bad.status).toBe(400)
+    // The mini-app dial: model/effort ride the same endpoint, carrying the chosen alias in `text`.
+    // The daemon validates the alias itself, so the route's job is only to let them through.
+    const dialM = await fetch(`${base}/api/session/act`, { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify({ sid: 's1', action: 'model', text: 'sonnet' }) })
+    expect(dialM.status).toBe(200)
+    expect(acted).toContainEqual(['s1', 'model', 'sonnet'])
+    const dialE = await fetch(`${base}/api/session/act`, { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify({ sid: 's1', action: 'effort', text: 'xhigh' }) })
+    expect(dialE.status).toBe(200)
+    expect(acted).toContainEqual(['s1', 'effort', 'xhigh'])
     const close = await fetch(`${base}/api/session/act`, { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify({ sid: 's1', action: 'close' }) })
     expect(close.status).toBe(200)
     expect(acted).toContainEqual(['s1', 'close', undefined])
