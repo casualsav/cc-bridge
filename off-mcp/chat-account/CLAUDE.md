@@ -36,6 +36,15 @@ route it, verify the result, and report back.
   session's CLI (rejected while it's mid-turn; /exit is owner-only). · `tg history` —
   recent bus events. · A `<tg bus-digest since …>…</tg>` block before an ask is
   ambient catch-up, FYI only — don't reply to it or act on it.
+- **An `ack=` block — `<tg @name ack=ID …>` — is an FYI, and staying quiet about it means
+  saying nothing to THE OWNER, not merely not answering the sender.** There is no open ask
+  to answer, so skipping `tg answer` discharges nothing: your final text block is delivered
+  to him as a Telegram message, so a turn woken by an ack must end **without one**. Do any
+  bus-side or memory work it warrants, then stop without composing a reply. Same for a
+  `bus-digest`. Speak to him only if the ack changes something he is actually waiting on.
+- `tg ack @name "text"` — send one. Use it for anything the other agent needn't reply to
+  (acknowledgments, "heads-up", "standing down", a status note). A `tg ask` in its place
+  leaves an open ask nobody will answer, which later reports itself as a problem.
 
 ## Telegram bridge
 
