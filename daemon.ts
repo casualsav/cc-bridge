@@ -5275,6 +5275,38 @@ async function relayModelSet(ctx: Context, paneId: string, watcher: PaneWatcher 
   }
 }
 
+// Claude Code asks "Switch model?" before changing model on a conversation with cached history —
+// that is EVERY switch on a session that has said anything, not just Fable's credit consent. And
+// NOTHING relays it: prompt.ts's confirm case anchors on "Switch to <model>?" (the credit dialog),
+// this one is worded "Switch model?", so it matches neither that nor the select-menu shape, and the
+// pane simply parks on it — invisible to `tg ask`/`tg slash`, reachable by `tg keys` alone, and
+// reported by the roster as a bare "busy" with the model and context readouts missing. Observed
+// live on 2026-07-26 against a throwaway session; a single Escape clears it.
+// Accepting it belongs HERE and not in relayModelSet: this user picked the model in a picker, and
+// the dialog only discloses that the next reply re-reads the history. The credit-consent dialog
+// ("Switch to Fable 5?" / "Continue with Fable 5" / "No, keep my current model") is a spending
+// decision, IS relayed as buttons already, and deliberately fails both anchors below.
+function isModelSwitchConfirm(cap: string): boolean {
+  const low = stripAnsi(cap).toLowerCase()
+  return /switch model\?/.test(low) && /\byes,\s*switch to\b/.test(low)
+}
+// Wait out the confirm and accept it. Mirrors reapplyEffort, including WHY it polls rather than
+// taking one post-settle capture: the dialog can render a beat after the input box settles, and a
+// single read races it. Bails early when the statusline already shows the target model — a fresh
+// session with nothing cached applies with no dialog at all.
+async function acceptModelSwitch(paneId: string, watcher: PaneWatcher | null, alias: string): Promise<void> {
+  const run = async () => {
+    for (let i = 0; i < 10; i++) {
+      await waitForSettle(paneId, 200, 2500)
+      const cap = await capturePane(paneId).catch(() => '')
+      if (cap && isModelSwitchConfirm(cap)) { await sendKeys(paneId, ['1', 'Enter']); return }
+      if (parseStatusline(cap)?.model?.toLowerCase().includes(alias)) return
+      await sleep(400)
+    }
+  }
+  await (watcher ? watcher.withInjection(run) : run())
+}
+
 // Run a `!<cmd>` shell command on the host (in the focused pane's cwd) and relay stdout/stderr back.
 // Runs directly in the daemon — independent of any Claude turn — so it works even mid-task. Callers
 // must have passed the access gate; BANG_SHELL must be enabled.
@@ -13413,22 +13445,35 @@ async function webappSessionAction(userId: string, sid: string, action: 'stop' |
   // /effort pickers use, so a session can't end up in a state one surface can produce and the other
   // can't read. The alias/level is validated against the daemon's own lists rather than trusted from
   // the client — the app's copy of them is UI labelling, not authority.
-  if (action === 'model') {
-    const alias = (text ?? '').trim().toLowerCase()
-    if (!MODEL_ALIASES.includes(alias)) return `unknown model — one of: ${MODEL_ALIASES.join(' | ')}`
-    const sent = await injectSlash(pane, watcher, `/model ${modelArgFor(alias)}`, { guardPalette: true })
-    return sent.ok ? null : paletteRefusalText(`/model ${alias}`, sent.offered)
-  }
-  if (action === 'effort') {
-    const level = (text ?? '').trim().toLowerCase()
-    if (!EFFORT_LEVELS.includes(level)) return `unknown effort — one of: ${EFFORT_LEVELS.join(' | ')}`
+  if (action === 'model' || action === 'effort') {
+    const arg = (text ?? '').trim().toLowerCase()
+    // REFUSED MID-TURN, exactly as `tg slash` refuses, and for a reason worth stating: Claude Code
+    // QUEUES a slash command typed during a turn (the input box shows "Press up to edit queued
+    // messages"). So the dial does not change now — it changes when the turn ends, minutes later,
+    // and its confirm dialog parks the pane THEN, with nothing on screen connecting it to a tap the
+    // user made long before. Observed on a throwaway session, both halves.
+    // BOTH predicates, because they answer different questions and only one of them was enough to
+    // fool a first attempt at this guard: onNormalPrompt says "no dialog is up" and stays TRUE for
+    // the whole of a running turn (which is why `tg ask` may legitimately deliver mid-turn), while
+    // detectWorking is the one that says a turn is in flight. Guarding on onNormalPrompt alone let
+    // both dials through mid-turn and left `/model haiku` sitting in the queued-messages box.
+    const cap = await capturePane(pane).catch(() => '')
+    if (!cap || !onNormalPrompt(cap) || detectWorking(cap)) return 'the session is mid-turn — try again when it goes idle'
+    if (action === 'model') {
+      if (!MODEL_ALIASES.includes(arg)) return `unknown model — one of: ${MODEL_ALIASES.join(' | ')}`
+      const sent = await injectSlash(pane, watcher, `/model ${modelArgFor(arg)}`, { guardPalette: true })
+      if (!sent.ok) return paletteRefusalText(`/model ${arg}`, sent.offered)
+      // Fire-and-forget: the confirm dance polls for up to ~30s and the HTTP request must not be
+      // held open for it (same call as `close`). The 3s feed poll is what reports the new model.
+      void acceptModelSwitch(pane, watcher, arg)
+      return null
+    }
+    if (!EFFORT_LEVELS.includes(arg)) return `unknown effort — one of: ${EFFORT_LEVELS.join(' | ')}`
     // reapplyEffort, not injectEffortChange: mid-conversation Claude Code raises "Change effort
     // level?", and the chat flow answers it by relaying Yes/No buttons to Telegram — which would
     // strand a mini-app user waiting on a card in a chat they may not be looking at. The user has
     // already made that choice by tapping the level, so accept the confirm for them.
-    // Fire-and-forget: the confirm dance polls for up to ~30s and the HTTP request must not be held
-    // open for it (same call as `close`). The 3s feed poll is what reports the new level.
-    void reapplyEffort(pane, level, watcher).then(() => rememberEffort(pane, level))
+    void reapplyEffort(pane, arg, watcher).then(() => rememberEffort(pane, arg))
     return null
   }
   const msg = (text ?? '').trim()

@@ -408,8 +408,12 @@
   .tstamp { float: right; margin: 6px 0 0 var(--sp-2); font-size: var(--t-meta); opacity: .55; white-space: nowrap; line-height: 1; }
   .msg.user .tstamp { opacity: .8; }
   /* Delivery marks, and they mean something narrower than Telegram's: one tick = the daemon accepted
-     it, two = the session's OWN transcript echoed it back. Neither claims it was read. */
-  .tstamp .ticks { margin-left: 3px; }
+     it, two = the session's OWN transcript echoed it back. Neither claims it was read.
+     Height is tied to the meta's own cap height rather than written in px, so the mark and the time
+     stay one size if the type step moves; the -1px is the reference's own overhang below the
+     baseline, measured, not an optical nudge. */
+  .tstamp .ticks { margin-left: 4px; height: 10px; width: 11px; vertical-align: -1px; }
+  .tstamp .ticks2 { width: 17px; }
   /* "+" new-session row + bottom sheet */
   .newsess { border: 1px dashed var(--hint); border-radius: var(--r-md); padding: var(--sp-3) 14px; margin: 0 0 10px; color: var(--link); text-align: center; cursor: pointer; font-size: var(--t-sub); }
   #spawn, #sched { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: none; z-index: 9; align-items: flex-end; }
@@ -1097,13 +1101,22 @@ async function expandFull(uuid) {
 // item carries its date too rather than being quietly mis-dated.
 function hhmm(ts) {
   const d = new Date(ts);
-  const hm = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  // 12-hour with AM/PM and NO leading zero ("7:48 AM"), per the reference. hour12 is forced rather
+  // than left to the locale: the format is the owner's, not the client's.
+  const hm = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: true });
   return d.toDateString() === new Date().toDateString() ? hm : d.toLocaleDateString([], { day: "numeric", month: "short" }) + " " + hm;
 }
 // ticks: 0 none · 1 accepted by the daemon · 2 echoed by the session's transcript.
+// Drawn, not the ✓ character: the reference's mark is Telegram's OVERLAPPING pair — two identical
+// checks, the second offset by about half a check's width so their strokes cross and read as one
+// nested glyph, which two spaced ✓ characters do not. Geometry is measured off the reference against
+// the digits beside it: the block is 1.65x as wide as tall and about 1.17x the digits' cap height,
+// so at --t-meta it lands at 17x10 and sits 1px below the baseline (also measured).
+const TICK1 = '<svg class="ticks" viewBox="0 0 11 10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1.2 5.3 L4.1 8.4 L10.3 1.6"/></svg>';
+const TICK2 = '<svg class="ticks ticks2" viewBox="0 0 17 10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1.2 5.3 L4.1 8.4 L10.3 1.6"/><path d="M6.7 5.3 L9.6 8.4 L15.8 1.6"/></svg>';
 function stamp(ts, ticks) {
   if (!ts) return "";
-  return '<span class="tstamp">' + esc(hhmm(ts)) + (ticks ? '<span class="ticks">' + (ticks === 2 ? "✓✓" : "✓") + "</span>" : "") + "</span>";
+  return '<span class="tstamp">' + esc(hhmm(ts)) + (ticks === 2 ? TICK2 : ticks ? TICK1 : "") + "</span>";
 }
 // Fetch each photo once (header-authed → blob URL) and pop it into its bubble; re-pin the scroll
 // as images change the feed height only if the user was already at the bottom.
