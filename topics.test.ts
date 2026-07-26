@@ -412,6 +412,21 @@ describe('resolveReopenTarget', () => {
     expect(r.others).toEqual(['mid', 'old', 'nokill'])
   })
 
+  test('an open row with killedAt set (teardown in flight) resolves by name, not live-only', () => {
+    // `tg kill` stamps killedAt immediately but closed:true lands only on the next reconcile sweep
+    // (up to ~90s) — a still-open killedAt row must resolve the same as a closed one.
+    const rows: Array<[string, TopicEntry]> = [['s1', row('cc-bridge', false, 500)]]
+    const r = resolveReopenTarget(rows, 'cc-bridge', normalizeEndpointName)
+    expect(r.reason).toBe('name')
+    expect(r.hit?.[0]).toBe('s1')
+  })
+
+  test('live-only still fires when the only name match is open AND unstamped', () => {
+    const rows: Array<[string, TopicEntry]> = [['s1', row('cc-bridge', false)]]   // open, no killedAt
+    expect(resolveReopenTarget(rows, 'cc-bridge', normalizeEndpointName))
+      .toEqual({ hit: null, reason: 'live-only', others: [] })
+  })
+
   test('a name matching only open rows is live-only, not a hit', () => {
     const rows: Array<[string, TopicEntry]> = [['live', row('cc-bridge', false)]]
     expect(resolveReopenTarget(rows, 'cc-bridge', normalizeEndpointName))

@@ -5122,9 +5122,27 @@ async function handleCall(
         const sid8 = sid.slice(0, 8)
         const denial = sessionCloseDenial(fromSid, sid, t0.name, t0)
         if (denial) { write({ t: 'result', id, ok: false, text: denial }); return }
-        if (!t0.closed) { write({ t: 'result', id, ok: false, text: `@${t0.name} (${sid8}) is already live` }); return }
-        const livePane = await paneForSession(sid).catch(() => null)
-        if (livePane && await paneAlive(livePane).catch(() => false)) { write({ t: 'result', id, ok: false, text: `@${t0.name} (${sid8}) is already up` }); return }
+        if (!t0.closed && !t0.killedAt) { write({ t: 'result', id, ok: false, text: `@${t0.name} (${sid8}) is already live` }); return }
+        if (!t0.closed && t0.killedAt) {
+          // `tg kill` stamps killedAt on the spot, but the row's own closed:true lands only on the
+          // next reconcile sweep (topic-runtime.ts:492, up to ~90s behind) — so the row can still read
+          // open here for a session whose pane is already gone. Poll the PANE, not the row, or a
+          // reopen in this window is wrongly refused as "already live".
+          const deadline = Date.now() + 30_000
+          let gone = false
+          while (Date.now() < deadline) {
+            const p = await paneForSession(sid).catch(() => null)
+            if (!p || !(await paneAlive(p).catch(() => false))) { gone = true; break }
+            await sleep(1000)
+          }
+          if (!gone) { write({ t: 'result', id, ok: false, text: `@${t0.name} (${sid8}) is still shutting down — retry in a few seconds` }); return }
+        }
+        // Skipped once killedAt is set: the wait above already confirmed the pane is gone, and
+        // re-checking here would re-refuse the very teardown window that wait just cleared.
+        if (!t0.killedAt) {
+          const livePane = await paneForSession(sid).catch(() => null)
+          if (livePane && await paneAlive(livePane).catch(() => false)) { write({ t: 'result', id, ok: false, text: `@${t0.name} (${sid8}) is already up` }); return }
+        }
         const othersNote = others.length
           ? ` ${others.length} other closed row${others.length === 1 ? '' : 's'} share this name — reopen a specific one by sid: ${others.map(s => s.slice(0, 8)).join(', ')}.`
           : ''
