@@ -28,6 +28,14 @@
        it is a geometric invariant (must be >= the bar's height, pinned at 12px glyph + 4 + 6 = 22),
        not a spacing choice. Tying it to the general scale is how it silently broke once already. */
     --fold-h: 24px;
+    /* The composer capsule is DERIVED from the mic, never the reverse: the round button keeps its
+       diameter and the pill is whatever clears it with an even ring. Ratio taken off the owner's
+       reference screenshot — a 67px button inside a 78px pill, ring 5.5/67 ≈ 0.082 of the diameter.
+       Both values integer so the button lands on whole pixels inside the pill (see the .sendbtn svg
+       note on Blink's half-pixel snap). --pill-h is the sum; nothing sets a pill height by hand. */
+    --mic-d: 40px;
+    --pill-ring: 3px;
+    --pill-h: calc(var(--mic-d) + 2 * var(--pill-ring));
     --r-xs: 4px; --r-sm: 8px; --r-md: 12px; --r-xl: 16px; --r-2xl: 20px;
     --bg: var(--tg-theme-bg-color, #17212b);
     --sec: var(--tg-theme-secondary-bg-color, #232e3c);
@@ -218,12 +226,20 @@
   /* Live narration — prose, so it gets the app font, not the activity feed's monospace. The quote
      bar is the DOM counterpart of the <blockquote> the Telegram live card renders it in. */
   .msg.thought { background: transparent; color: var(--hint); font-size: var(--t-sub); max-width: 100%; padding: 1px 0 1px 10px; margin: var(--sp-1) 0 6px 11px; border-left: 2px solid var(--sec); white-space: pre-wrap; }
-  /* Telegram-style composer: one pill input with the paperclip/mic INSIDE it, a round send button */
+  /* Telegram-style composer: ONE pill spanning the strip, with the paperclip and the round
+     mic/send button living INSIDE it — the pill wraps around the mic rather than sitting beside it. */
   /* No divider rule: in the reference the capsule's own fill is what separates the composer from the
      feed. The rim belongs on the capsule, where it lights an actual edge — put it on this full-bleed
      strip instead and it draws the very hairline the line above says the design doesn't have. */
   .composer { display: flex; gap: var(--sp-2); padding: var(--sp-2) 10px calc(var(--sp-2) + env(safe-area-inset-bottom)); align-items: flex-end; }
-  .inputwrap { flex: 1; display: flex; align-items: flex-end; background: var(--sec); border-radius: var(--r-2xl); padding: 2px var(--sp-1) 2px 14px; min-height: 40px; box-shadow: inset 0 1px 0 rgba(255,255,255,.06); }
+  /* `align-items: flex-end`, and it is load-bearing twice over. It is what keeps the mic ROUND —
+     the default `stretch` would pull a 40px button to the pill's full content height and the glyph
+     would no longer sit centred in a circle. It is also what pins both controls to the BOTTOM of
+     the pill, as the reference has them, if the textarea ever grows past one line.
+     `border-radius` is half the height, so the pill's right end is a semicircle centred on exactly
+     the same point as the mic (ring 3 + radius 20 = 23) — that concentricity is what makes the ring
+     read as even all the way around the button rather than only above and below it. */
+  .inputwrap { flex: 1; display: flex; align-items: flex-end; background: var(--sec); border-radius: calc(var(--pill-h) / 2); padding: var(--pill-ring); padding-left: 14px; min-height: var(--pill-h); box-shadow: inset 0 1px 0 rgba(255,255,255,.06); }
   /* Explicit font (not `inherit`): Android WebViews don't reliably propagate an inherited font
      into the IME composition / autofill layer, which then renders in the UA default. */
   .inputwrap textarea { flex: 1; resize: none; border: none; outline: none; background: transparent; color: var(--text); padding: 9px 0; font: var(--t-body)/1.35 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; max-height: 110px; }
@@ -240,7 +256,9 @@
      byte-exact rather than edited, because both indicators are load-bearing and shared. Nothing is
      lost when the animation stops: colour already carries both states (green vs grey, red vs hint). */
   @media (prefers-reduced-motion: reduce) { .dot.on { animation: none; } }
-  .sendbtn { width: 40px; height: 40px; border-radius: 50%; border: none; background: var(--btn); color: var(--btn-text); flex: none; display: flex; align-items: center; justify-content: center; padding: 0; box-shadow: 0 1px 4px rgba(0,0,0,.35); }
+  /* `flex: none` is the other half of keeping this button exactly itself: inside the pill it is a
+     flex item, and without it the mic would shrink when the textarea wanted the room. */
+  .sendbtn { width: var(--mic-d); height: var(--mic-d); border-radius: 50%; border: none; background: var(--btn); color: var(--btn-text); flex: none; display: flex; align-items: center; justify-content: center; padding: 0; box-shadow: 0 1px 4px rgba(0,0,0,.35); }
   /* 20px, not 19: an ODD icon in the 40px button leaves a 10.5px flex gap each side, and Blink
      snaps the SVG's paint origin up to the whole pixel — which put every glyph in here half a pixel
      down and right of centre, at DPR 1, 2, 3 and 4 alike. An even size divides exactly. */
@@ -355,15 +373,18 @@
     <div class="inputwrap">
       <textarea id="dtext" rows="1" placeholder="Message this session…" autocomplete="off" spellcheck="false"></textarea>
       <button id="datt" class="ghost" title="Attach a file"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>
+      <!-- The round button is mic OR send, never both. The PAPERCLIP stays inside the capsule through
+         both states on purpose: type-then-attach is a real workflow, and sweeping the clip away with
+         the mic the moment text appears would break it silently.
+         Both round buttons are SIBLINGS OF THE TEXTAREA, not overlaid on it: the textarea is the only
+         flex item that grows, so the buttons' width is reserved by the layout itself and text can
+         never run underneath them, however long the placeholder gets. -->
+      <button id="dmic" class="sendbtn" title="Record a voice note"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg></button>
+      <!-- Solid, not outlined: this is the loudest element on the screen, and an outline plane is the
+         quietest glyph treatment there is. Every chat app puts a filled mark on a filled button. -->
+      <button id="dsend" class="sendbtn" title="Send"><svg viewBox="0 0 24 24"><polygon points="22 2 15 22 11 13 2 9 22 2" fill="currentColor"/></svg></button>
     </div>
     <input id="dfile" type="file" hidden>
-    <!-- The round button is mic OR send, never both. The PAPERCLIP stays inside the capsule through
-         both states on purpose: type-then-attach is a real workflow, and sweeping the clip away with
-         the mic the moment text appears would break it silently. -->
-    <button id="dmic" class="sendbtn" title="Record a voice note"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg></button>
-    <!-- Solid, not outlined: this is the loudest element on the screen, and an outline plane is the
-         quietest glyph treatment there is. Every chat app puts a filled mark on a filled button. -->
-    <button id="dsend" class="sendbtn" title="Send"><svg viewBox="0 0 24 24"><polygon points="22 2 15 22 11 13 2 9 22 2" fill="currentColor"/></svg></button>
   </div>
 </div>
 
