@@ -6750,23 +6750,21 @@ bot.command('model', async ctx => {
   await doModelPicker(ctx)
 })
 
-// /opus · /sonnet · /haiku · /fable — muscle-memory aliases for `/model <name>`. NOT registered in
-// the command menu (like /yolo): they exist so a typed alias never reaches the unknown-command slash
-// relay, which types it into the TUI — where Claude Code's palette finds no exact match, opens its
-// dropdown, and turns the Enter into "run whatever is highlighted" (the /opus → /fable misfire).
-// One handler per alias, so the model comes from the closure and never from parsing the user's text.
+// /opus · /sonnet · /haiku · /fable no longer switch anything: `/model <name>` is the ONE switch
+// form, so pinning and safety logic have one place to live. A bare alias has been observed resolving
+// to different builds in different sessions, which is what makes it untrustworthy as a command.
+// These stubs stay registered — deleting them outright is not the same as removing them. An
+// unregistered /opus falls through to the unknown-command relay (see message:text below), which types
+// it into the TUI and relies on the palette guard's "no row matches exactly" predicate to abort —
+// the same fuzzy dropdown that produced the /opus → /fable misfire, and a predicate that opens right
+// back up if Claude Code ever ships a literal /opus. Answering here touches no pane at all.
 for (const alias of MODEL_ALIASES) {
   bot.command(alias, async ctx => {
     if (!dmCommandGate(ctx)) return
-    const t = await commandTarget(ctx)
-    if (!t) return
-    if (await paneAgentKind(t.paneId) === 'codex') {
-      // Same treatment as /model: Codex sets model + effort in its own picker and ignores an arg.
-      await relaySlashCommand(t.paneId, t.watcher, '/model', String(ctx.chat!.id))
-      await ctx.reply('Codex changes model and reasoning effort in its native picker above.')
-      return
-    }
-    void relayModelSet(ctx, t.paneId, t.watcher, alias)
+    await ctx.reply(
+      `<code>/${escapeHtml(alias)}</code> was removed — use <code>/model ${escapeHtml(alias)}</code>.`,
+      { parse_mode: 'HTML' },
+    )
   })
 }
 
