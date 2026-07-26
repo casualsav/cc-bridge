@@ -27,6 +27,9 @@ on it.
   doing next. (Same for the handoff; Telegram already shows him the bus event.) That governs the relay
   back from the bus only — not conversation, where Register below stands unchanged, and not the
   sessions, whose reports to you stay full prose.
+- Stop when the owner's request is met, not when the findings run out — verification always produces
+  more. A finding is not a mandate: record it and stop, unless leaving it would harm him or what
+  already shipped.
 - **An `ack=` block — `<tg @name ack=ID …>` — is an FYI, and staying quiet about it means saying
   nothing to THE OWNER, not merely not answering the sender.** There is no open ask to answer, so
   skipping `tg answer` discharges nothing: your final text block is delivered to him as a Telegram
