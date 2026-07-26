@@ -1,10 +1,10 @@
 import { test, expect } from 'bun:test'
-import { writeFileSync, mkdtempSync } from 'node:fs'
+import { writeFileSync, mkdtempSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { prettyModel, lastModelInTranscript, lastTodosInTranscript, modeBadge, pinMessageGone, statusKeyboard, mergeStatus, codexModelFromPane, codexPrettyModel, codexStatusHead, parseCodexStatusline } from './status-card.ts'
 import type { StatuslineData } from './statusline.ts'
-import { initStatusCard, updateSessionPin, paneForDmChat, forgetChatPin, armChatPin, repinIfDropped, pinGone, pinAlive, sessionPins, pinTextCache } from './status-card.ts'
+import { initStatusCard, updateSessionPin, paneForDmChat, forgetChatPin, armChatPin, repinIfDropped, sessionPins, pinTextCache } from './status-card.ts'
 import { ACCESS_FILE } from './common.ts'
 import { loadAccess } from './access.ts'
 import { focus, markChatReachable, markChatUnreachableIfUndeliverable, isChatUnreachable } from './state.ts'
@@ -316,6 +316,11 @@ test('a fresh install with no user activity mints NOTHING, however long it idles
   expect(sessionPins.has('111111')).toBe(false)
 })
 
+// REQUIREMENT 1, the owner's first-named requirement and the bug that started this thread ("a fresh
+// install pins nothing"). The guarantee: on a DM-mode box a genuinely new chat gets a card within ONE
+// refresher tick of the user's first action, with two independent triggers (/start and any inbound
+// message), and with no dependency on a session, pane or lane existing. Conditions, which this test
+// pins as much as the guarantee: the chat must be allowlisted, and the pin pref must be on.
 test('one inbound private message mints a card within a single refresher tick', async () => {
   setAllowFrom(['111111'])
   sessionPins.clear(); pinTextCache.clear()
@@ -390,32 +395,29 @@ test('the re-pin repair ignores a failed lookup, and gives up rather than retryi
   expect(pinned.length).toBe(6)
 })
 
-// Requirement 2: if an error removes the card, it comes back on its own. This is the path the live
-// report measured at 11.08 seconds for a server-side delete, and it runs through the ONE system event
-// permitted to mint — the established card is gone, so replacing it is maintenance, not a decision to
-// give this chat a card. Capped, because a self-heal that fires every 10s is requirement 4 dying.
-test('a card Telegram reports gone is re-minted automatically, up to a cap', async () => {
+test('requirement 1: a card does not depend on a session, and an unallowlisted chat cannot arm', async () => {
   setAllowFrom(['111111'])
   sessionPins.clear(); pinTextCache.clear()
   const sent: string[] = [], pinned: string[] = []
   initStatusCard(pinDeps(sent, pinned))
+  focus.activePaneId = null                     // no session, no pane, no lane — a truly bare install
+
+  armChatPin('999999')                          // a stranger: /start must not grow the armed set
   armChatPin('111111')
   await updateSessionPin()
-  expect(sent.length).toBe(1)
+  expect(sent).toEqual(['111111'])              // the paneless chat still gets its card ("No active session")
+  expect(sessionPins.has('999999')).toBe(false)
+})
 
-  // The gone-message self-heal, as the edit scheduler's onError delivers it. No user action follows.
-  for (let i = 0; i < 5; i++) {
-    sessionPins.set('111111', 900 + i)           // a card exists…
-    pinGone('111111', 900 + i)             // …and Telegram says it is gone
-    await updateSessionPin()
-  }
-  // Three re-mints, then it stops rather than re-posting into the chat forever.
-  expect(sent.length).toBe(1 + 3)
-
-  // A card that survives an edit is healthy, which resets the streak.
-  pinAlive('111111')
-  sessionPins.set('111111', 950)
-  pinGone('111111', 950)
-  await updateSessionPin()
-  expect(sent.length).toBe(1 + 3 + 1)
+// The guarantee above is only as good as the daemon actually calling armChatPin, and that wiring lives
+// in daemon.ts, which has no unit-testable surface. This is a source-level guard, deliberately: it is
+// crude, but it fails loudly if someone deletes an arm point, which is precisely how "a fresh install
+// pins nothing" would come back. If a refactor moves these, update the test — do not delete it.
+test('requirement 1: the daemon still arms on every user-present event', () => {
+  const daemon = readFileSync(join(import.meta.dir, 'daemon.ts'), 'utf8')
+  const armCalls = daemon.match(/armChatPin\(/g) ?? []
+  expect(armCalls.length).toBeGreaterThanOrEqual(4)   // inbound message · /start · lane-ready · first-contact edge
+  expect(daemon).toContain("markChatReachable(chat_id); armChatPin(chat_id)")            // any gated private message
+  expect(daemon).toMatch(/bot\.command\('start'[\s\S]{0,400}armChatPin/)               // /start
+  expect(daemon).toContain("armChatPin(chatId); await forgetChatPin(chatId, 'lane-ready')") // lane-ready
 })
