@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process'
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { snapshot, list, due, refName, REF_PREFIX } from './autosave.ts'
+import { snapshot, list, refs, prune, due, refName, REF_PREFIX, RETAIN_MS } from './autosave.ts'
 
 const git = (repo: string, args: string[]) =>
   execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
@@ -108,4 +108,35 @@ test('ref names are sortable, UTC, and namespaced away from ordinary git surface
   const r = refName(new Date(Date.UTC(2026, 6, 25, 9, 8, 7)))
   expect(r).toBe(`${REF_PREFIX}/20260725-090807`)
   expect(r.startsWith('refs/cc-bridge/')).toBe(true)   // never refs/heads — invisible to branch UX
+})
+
+test('prune drops snapshots past the age bound and keeps the rest', () => {
+  const repo = dirtyRepo()
+  const s = snapshot(repo, 'old')!
+  expect(refs(repo)).toHaveLength(1)
+  expect(prune(repo, Date.now())).toBe(0)                          // fresh — nothing to drop
+  expect(prune(repo, Date.now() + RETAIN_MS + 1000)).toBe(1)       // past the window
+  expect(refs(repo)).toEqual([])
+  expect(s.ref).toContain('refs/cc-bridge/autosave/')
+  rmSync(repo, { recursive: true, force: true })
+})
+
+test('refs() is the cheap query — one git call, no per-ref diff', () => {
+  // Regression guard on the scaling fix: prune() used to go through the counting listing, forking a
+  // `git diff` per ref on EVERY snapshot. refs() must stay free of file counts.
+  const repo = dirtyRepo()
+  snapshot(repo, 'a')
+  const r = refs(repo)
+  expect(r).toHaveLength(1)
+  expect(r[0]).not.toHaveProperty('files')
+  expect(list(repo)[0]).toHaveProperty('files')   // the human listing still has them
+  rmSync(repo, { recursive: true, force: true })
+})
+
+test('list is capped so recovery never walks thousands of refs', () => {
+  const repo = dirtyRepo()
+  snapshot(repo, 'a')
+  expect(list(repo, 0)).toEqual([])
+  expect(list(repo, 10).length).toBeLessThanOrEqual(10)
+  rmSync(repo, { recursive: true, force: true })
 })

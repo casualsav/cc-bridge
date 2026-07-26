@@ -145,6 +145,25 @@ Enable it per-checkout by registering the hook in `.claude/settings.json`:
   "hooks": [ { "type": "command", "command": "bun scripts/session-guard.ts" } ] } ] } }
 ```
 
-**Deploying:** `bun run deploy` refuses to ship from any branch but `main`, because it copies the
-**working tree** of git-tracked files into the live daemon's cache. To ship a branch deliberately you
-must name it — `bun run deploy --ship-branch <branch>` — and it warns about uncommitted payload files.
+Snapshots are pruned on two bounds, whichever binds first: **7 days** old, or more than **1000**
+refs. Either alone fails — age alone lets a hard day accumulate thousands, a count alone silently
+drops this morning's during a busy stretch.
+
+### What `bun run deploy` actually ships — everyone gets this wrong the same way
+
+It takes the file **LIST** from `git ls-files` (tracked files only) and the file **CONTENT** from
+`copyFileSync` off the **working tree**. There is no `git archive`, `git show` or `checkout-index`
+anywhere in `scripts/deploy.ts`. So:
+
+- **Untracked files never ship**, however dirty the tree is. A new file you have not `git add`ed is
+  structurally invisible to a deploy.
+- **Tracked files ship whatever is in the working tree right now**, committed or not. A sibling
+  session's uncommitted edit to a tracked file *will* go out inside your deploy.
+
+Do not reason about this as "it deploys the commit" — it does not. That asymmetry is why the deploy
+warns about uncommitted payload files, and why "commit first" matters for *tracked* files specifically.
+
+`bun run deploy` also refuses to ship from any branch but `main`. To ship a branch deliberately you
+must **name** it: `bun run deploy --ship-branch <branch>`. There is no bare `--force`, on purpose —
+a habitual flag is one people type without reading. `--commit` stages only the version files it owns,
+never `git add -A`.

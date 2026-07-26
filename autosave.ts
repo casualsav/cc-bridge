@@ -29,8 +29,13 @@ export const REF_PREFIX = 'refs/cc-bridge/autosave'
 // timer. 90s keeps the worst-case loss under two minutes of work while costing one `git` fork a
 // minute or so during a busy stretch.
 export const THROTTLE_MS = 90_000
-// Snapshots are cheap (a tree + a commit, no blobs beyond what changed) but not free forever.
+// Retention, bounded two ways (see prune). A snapshot is cheap — a tree plus a commit, sharing every
+// unchanged blob with HEAD — but refs keep objects alive, so unbounded refs mean unbounded growth.
+// 7 days outlives a weekend, which is the realistic span of "wait, where did that go".
 export const RETAIN_MS = 7 * 24 * 60 * 60 * 1000
+// …and a hard ceiling for heavy stretches: at one snapshot per 90s a full working day is ~320, so
+// 1000 covers several days of real use while keeping the ref namespace scannable.
+export const MAX_SNAPSHOTS = 1000
 
 function git(repo: string, args: string[], env?: NodeJS.ProcessEnv): string {
   return execFileSync('git', ['-C', repo, ...args], {
@@ -84,24 +89,44 @@ export function snapshot(repo: string, label = ''): Snapshot | null {
   }
 }
 
-export type SnapRow = { ref: string; sha: string; at: number; files: number }
+export type SnapRef = { ref: string; sha: string; at: number }
+export type SnapRow = SnapRef & { files: number }
 
-export function list(repo: string): SnapRow[] {
+// Every snapshot ref, newest first — ONE git call, no per-ref work. Everything that just needs to
+// know which refs exist (pruning, counting) uses this; only the human-facing listing pays for file
+// counts. Pruning through the counting version forked a `git diff` per ref on every snapshot, which
+// at one snapshot per 90s would have grown into thousands of forks a day.
+export function refs(repo: string): SnapRef[] {
   try {
     const out = git(repo, ['for-each-ref', '--sort=-refname', '--format=%(refname)\t%(objectname)\t%(committerdate:unix)', REF_PREFIX])
     return out.split('\n').filter(Boolean).map(l => {
       const [ref, sha, at] = l.split('\t')
-      let files = 0
-      try { files = git(repo, ['diff', '--name-only', `${sha}^..${sha}`]).split('\n').filter(Boolean).length } catch {}
-      return { ref, sha, at: Number(at) * 1000, files }
+      return { ref, sha, at: Number(at) * 1000 }
     })
   } catch { return [] }
 }
 
-function prune(repo: string, now = Date.now()): void {
-  for (const s of list(repo)) {
-    if (now - s.at > RETAIN_MS) try { git(repo, ['update-ref', '-d', s.ref]) } catch {}
+// Human-facing listing: adds "how many files changed", which costs a fork per row — so it is capped.
+// Someone hunting for lost work scans the last handful, not two thousand.
+export function list(repo: string, limit = 50): SnapRow[] {
+  return refs(repo).slice(0, limit).map(r => {
+    let files = 0
+    try { files = git(repo, ['diff', '--name-only', `${r.sha}^..${r.sha}`]).split('\n').filter(Boolean).length } catch {}
+    return { ...r, files }
+  })
+}
+
+// Two bounds, because either alone can fail: age alone lets a hard day of work accumulate thousands
+// of refs, and a count alone would silently drop a snapshot from this morning during a busy stretch.
+// Whichever binds first wins.
+export function prune(repo: string, now = Date.now()): number {
+  const all = refs(repo)   // newest first
+  let dropped = 0
+  for (const [i, s] of all.entries()) {
+    if (i < MAX_SNAPSHOTS && now - s.at <= RETAIN_MS) continue
+    try { git(repo, ['update-ref', '-d', s.ref]); dropped++ } catch {}
   }
+  return dropped
 }
 
 if (import.meta.main) {
