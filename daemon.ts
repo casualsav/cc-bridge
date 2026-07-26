@@ -4629,14 +4629,25 @@ async function handleCall(
           const sl = cap ? parseStatusline(cap) : null
           const model = sl?.model ? ` ${sl.model}` : ''
           const pct = sl?.ctxPct != null ? ` ${sl.ctxPct}%` : ''
-          // Authoritative "working" signal: an injected, un-expired bus ask targeting this endpoint means
-          // it's heads-down on that task RIGHT NOW — more reliable than a pane snapshot, which reads a
-          // between-tool-calls prompt as idle (the false negative that got a live build declared dead).
+          // An open ask is shown, but it no longer DECIDES busy. It used to: an injected, un-expired ask
+          // was taken as proof the target was heads-down on it, because a bare pane snapshot reads a
+          // between-tool-calls prompt as idle (the false negative that once got a live build declared
+          // dead). The failure that replaced it is a session sitting idle at a prompt with an ask it
+          // never answered — it replied in prose and never ran `tg answer`, so the pending stayed open
+          // and the roster reported "busy · on ask 242" for a session doing nothing. That blocked a real
+          // command (namedTarget's idle gate reads the pane, so the two disagreed) and it silently skews
+          // every context-hygiene decision that keys on this line.
           const onAsk = listPending().find(pp => pp.injected && !pp.expiredAt && pp.toKind === 'claude' && pp.toSid === e.id)
-          // A live pane whose capture is empty/unparseable is far likelier heads-down (a heavy build
-          // starves the capture) than cleanly idle — call that busy, not idle.
-          const busy = !!onAsk || (cap ? !onNormalPrompt(cap) : true)
-          const state = onAsk ? ` · busy · on ask ${onAsk.id}` : busy ? ' · busy' : ' · idle'
+          // The composite performReset uses for the same question, and for the same reason: either half
+          // alone has a blind spot. turnInProgress only flips true after the first tool call, so early
+          // thinking is invisible to it; a bridged pane can lack the "esc to interrupt" footer, so
+          // detectWorking reads idle mid-turn. A live pane whose capture is empty/unparseable is far
+          // likelier heads-down (a heavy build starves the capture) than cleanly idle.
+          const tfile = await transcriptForPane(pane, await paneCwd(pane).catch(() => null)).catch(() => null)
+          const busy = cap
+            ? (tfile ? turnInProgress(tfile) : false) || detectWorking(cap) || !onNormalPrompt(cap)
+            : true
+          const state = `${busy ? ' · busy' : ' · idle'}${onAsk ? ` · on ask ${onAsk.id}` : ''}`
           rows.push(`${busy ? '🟡' : '🟢'} ${nm}${model}${pct}${state}${flair}`)
         }
         text = rows.length ? rows.join('\n') : '(no live agents on the bus)'
@@ -4740,7 +4751,18 @@ async function handleCall(
         appendLedger(room, { ts: Date.now(), kind: 'slash', from: nameForEndpoint(fromSid, endpoints), to: toName, text: command })
         const targets = await outboundTargetsFor(targetPane).catch(() => [])
         const watcher = targetPane === focus.activePaneId ? focus.paneWatcher : null
-        void relaySlashCommand(targetPane, watcher, command, targets[0]?.chat ?? '', true, targets[0]?.thread ? Number(targets[0].thread) : undefined)
+        // The refusal rides THIS result rather than an outbound send. A headless/surfaceless target has
+        // no chat to send to, so `targets[0]?.chat ?? ''` silently swallowed it (sendText to '' fails
+        // into a .catch) and the caller was told "sent" for a command that never ran — measured live on
+        // 2026-07-26. So await the injection, report a refusal here where the caller is already
+        // listening, and only then fire the echo. NOT a fix to the guard, which worked: the guard
+        // refused correctly and left the pane clean. The owner's `@name /cmd` path was never affected —
+        // its chat id is his own chat — and the same swallowing already applied to the pre-existing
+        // "Unknown command" echo, so nothing here regressed.
+        const slashAt = Date.now()
+        const sent = await injectSlash(targetPane, watcher, command, { guardPalette: true })
+        if (!sent.ok) { text = `!${paletteRefusalText(command, sent.offered)}`; break }
+        void echoSlashResult(targetPane, targets[0]?.chat ?? '', slashAt, targets[0]?.thread ? Number(targets[0].thread) : undefined)
         text = `sent ${command.split(/\s/)[0]} to @${toName} — its outcome echoes on that session's surface`
         break
       }
@@ -5101,6 +5123,14 @@ async function closeSessionPane(pane: string, reason: string): Promise<void> {
   await exec('tmux', ['kill-pane', '-t', pane], { timeout: 2000 }).catch(() => {})
 }
 
+// One sentence for a refused relay, shared by the chat reply and the bus result so the two can't drift.
+// Names what it WOULD have run rather than only that it was refused: the reader's next move depends on
+// knowing the palette guessed at their command instead of rejecting it. Same standard as Target-first.
+function paletteRefusalText(command: string, offered: string[]): string {
+  return `${command.split(/\s/)[0]} isn't a command in that session — its palette would have run `
+    + `${offered[0]} instead, so nothing was sent. It offered: ${offered.join(' · ')}`
+}
+
 // `echo` (the unknown-command fallthrough only) replies with the command's own
 // <local-command-stdout> transcript output — the outcome is the acknowledgement. Commands the
 // bridge already answers (pickers, cards, dedicated confirms) leave it off so nothing
@@ -5120,15 +5150,17 @@ async function relaySlashCommand(
   // local handlers that pass a literal they own don't need it and don't get it.
   const sent = await injectSlash(paneId, watcher, command, { guardPalette: true })
   if (!sent.ok) {
-    // Name what it WOULD have run, not just that it was refused: the user's next move depends on
-    // knowing the palette guessed at their command rather than rejecting it. Same standard as the
-    // Target-first refusal.
-    await channel.sendText(chat_id,
-      `⚠️ <code>${escapeHtml(command.split(/\s/)[0])}</code> isn't a command in that session — its palette would have run <code>${escapeHtml(sent.offered[0])}</code> instead, so nothing was sent.`
-      + `\n\nIt offered: ${sent.offered.map(r => `<code>${escapeHtml(r)}</code>`).join(' · ')}`, opts).catch(() => {})
+    await channel.sendText(chat_id, `⚠️ ${escapeHtml(paletteRefusalText(command, sent.offered))}`, opts).catch(() => {})
     return
   }
   if (!echo) return
+  await echoSlashResult(paneId, chat_id, sentAt, thread)
+}
+
+// Wait for the command's own <local-command-stdout> to land in the transcript and relay it. Split out
+// so the bus's `tg slash` can fire it after reporting a refusal synchronously in its own result.
+async function echoSlashResult(paneId: string, chat_id: string, sentAt: number, thread?: number): Promise<void> {
+  const opts = thread ? { threadId: String(thread) } : undefined
   const file = await transcriptForPane(paneId, await paneCwd(paneId))
   if (!file) return
   for (let waited = 0; waited < 10_000; waited += 500) {
