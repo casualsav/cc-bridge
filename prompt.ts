@@ -874,3 +874,68 @@ export function detectStuckScreen(paneText: string): StuckScreen | null {
   if (tier === 'generic' && !interactive) return null
   return { sig: tail.join('\n'), tier, optionKind: parsed?.kind ?? null, options: parsed?.options ?? [] }
 }
+
+// ---- Slash-command palette ----
+
+// The commands Claude Code's slash palette is OFFERING, read from a capture taken while a command is
+// typed but not yet submitted. Empty when no palette is open.
+//
+// This exists because typing a slash command that isn't one does not fail: the palette opens on the
+// closest fuzzy matches, and Enter runs whatever is highlighted. Measured (2026-07-26, throwaway
+// pane, never pressing Enter): typing "/mode" offers /model first, so Enter runs /model and parks the
+// session on the model picker — a modal that queues asks behind it and has no exit from the mini app.
+// Typing "/mode plan" opens NO palette (the space closes it) and submits literally. So the hazard is a
+// bare token that fuzz-matches a real command, and arguments protect you.
+//
+// Rows are anchored to the input box rather than pattern-matched anywhere on screen: the palette sits
+// directly above the ❯ row, and ordinary transcript output can otherwise look exactly like a row.
+// Continuation lines of a long description are indented far past the command column and carry no
+// leading slash, so they fall out on their own.
+//
+// Deliberately reads TEXT, not the highlight. The highlight is carried purely as colour (measured:
+// SGR 38;5;153 on the selected row vs 246 on the others) and the daemon's capturePane runs
+// `capture-pane -p -J` with no -e, so colour never reaches this function. Worse, 153 also marks the
+// matched SUBSTRING inside unselected rows, so "which row is selected" would mean parsing a
+// theme-dependent colour and distinguishing a whole-row span from a mid-row one. Reading the offered
+// rows needs none of that and answers the only question the guard asks.
+// A palette row: two-ish spaces, the command, a run of spaces, then its description.
+const PALETTE_ROW = /^ {1,3}(\/[A-Za-z0-9:._-]+) {2,}\S/
+// A long description wraps into the description column, well right of the command column.
+const PALETTE_WRAP = /^ {10,}\S/
+export function slashPaletteRows(paneText: string): string[] {
+  const lines = paneLines(paneText)
+  let i = lines.length - 1
+  for (; i >= 0; i--) if (/^\s*[❯!]/.test(lines[i])) break
+  if (i < 2) return []
+  // ADJACENCY IS THE WHOLE GUARD AGAINST FALSE POSITIVES. An open palette is flush against the input
+  // box: exactly one border line between its last row and the ❯ row, no blank gap. Assistant prose or
+  // command output that happens to LOOK like a row is separated from the box by blank lines, so
+  // requiring the block to start immediately above the border rules it out — where a version that
+  // skipped blanks while hunting for rows would have refused a legitimate command whose pane merely
+  // had a "  /deploy   ship it" line near the bottom. Measured against a pane holding exactly that.
+  let j = i - 1
+  if (/^\s*[─━╭╰└┌├╮╯|]+\s*$/.test(lines[j])) j--
+  const rows: string[] = []
+  for (; j >= 0; j--) {
+    const m = PALETTE_ROW.exec(lines[j])
+    if (m) { rows.unshift(m[1]); continue }
+    if (PALETTE_WRAP.test(lines[j])) continue
+    break
+  }
+  return rows
+}
+
+// Would submitting `command` run something OTHER than what was typed? Returns the offered rows when
+// so, null when it's safe to press Enter.
+//
+// The predicate is "no row matches the typed command exactly", NOT "a palette is open". Palette-open
+// alone would refuse two legitimate paths: the daemon relays a bare /model to a Codex session on
+// purpose (wanting the native picker), and a human typing bare /model at a Claude session means the
+// picker too — in both the palette is open with /model offered, an exact match, and must go through.
+export function slashPaletteWouldMisfire(paneText: string, command: string): string[] | null {
+  const typed = command.trim().split(/\s+/)[0]
+  if (!typed.startsWith('/')) return null
+  const rows = slashPaletteRows(paneText)
+  if (!rows.length) return null                                   // no palette — Enter submits literally
+  return rows.some(r => r.toLowerCase() === typed.toLowerCase()) ? null : rows
+}

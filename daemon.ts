@@ -26,7 +26,7 @@ import { hopKey, resolveChain, pickNextHop, moveHop } from './failover-chain.ts'
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
 import { renderSessionsView } from './sessions-view.ts'
-import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, hasQueuedMessages, feedbackSurveyOpen, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen } from './prompt.ts'
+import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, hasQueuedMessages, feedbackSurveyOpen, slashPaletteWouldMisfire, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen } from './prompt.ts'
 import { resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, currentTurnActivity, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
 import {
   AGENT_PANE_OPT, agentExitKeys, agentInterruptKeys, agentLabel, agentResetCommand, agentSubmitKeys,
@@ -5014,18 +5014,36 @@ async function handleCall(
 // Type a slash command into the pane and wait for it to settle. Reaction-free
 // core, shared by relaySlashCommand and the session-reset commands.
 // watcher may be null for a non-focused topic pane (no mirror to pause) — then send the keys directly.
-async function injectSlash(paneId: string, watcher: PaneWatcher | null, command: string): Promise<void> {
+// `guardPalette` — for a command whose text came from a USER rather than from a call site that owns
+// the literal. Typing a slash command that isn't one does not fail: Claude Code's palette opens on the
+// closest fuzzy matches and Enter runs whatever is highlighted, so a relayed `@name /mode` runs /model
+// and parks that session on the model picker. Checked in the settle gap that already exists between
+// typing and submitting, so there's no new timing machinery — just a read of a state we already wait
+// for. See slashPaletteWouldMisfire for why the predicate is "no row matches exactly" rather than
+// "a palette is open" (bare /model legitimately opens one, at both Claude and Codex sessions).
+type SlashSent = { ok: true } | { ok: false; offered: string[] }
+async function injectSlash(paneId: string, watcher: PaneWatcher | null, command: string,
+                           opts?: { guardPalette?: boolean }): Promise<SlashSent> {
+  let offered: string[] | null = null
   const run = async () => {
     await sendKeys(paneId, [command])
     await waitForSettle(paneId, 200, 4000)
+    if (opts?.guardPalette) {
+      offered = slashPaletteWouldMisfire(await capturePane(paneId).catch(() => ''), command)
+      // Leave the pane exactly as it was found: C-u clears the typed line without pressing Enter, so
+      // nothing runs and nothing is left sitting in the input box for the next injection to corrupt.
+      if (offered) { await sendKeys(paneId, ['C-u']); await waitForSettle(paneId, 200, 3000); return }
+    }
     await sendKeys(paneId, agentSubmitKeys(await paneAgentKind(paneId)))
     await waitForSettle(paneId, 300, 30_000)
   }
   await (watcher ? watcher.withInjection(run) : run())
+  if (offered) return { ok: false, offered }
   // EVERY path that types a slash command into a pane funnels through here — a local handler, a
   // relayed `@name /cmd`, a mini-app button — which is why the invalidation belongs here and not at
   // the handlers. See changesPaneContext for why it is a property rather than a list of names.
   if (changesPaneContext(command)) invalidatePaneStatus(paneId)
+  return { ok: true }
 }
 
 // Reliably exit a session's pane (used when a user closes/deletes its topic). Unlike injectSlash, the
@@ -5096,9 +5114,21 @@ async function relaySlashCommand(
   thread?: number,
 ): Promise<void> {
   const sentAt = Date.now()
-  await injectSlash(paneId, watcher, command)
-  if (!echo) return
   const opts = thread ? { threadId: String(thread) } : undefined
+  // Every user-supplied slash command reaches a pane through here — the relayed `@name /cmd`, the bus's
+  // `tg slash`, and the unknown-command fallthrough — so this is where the palette guard is armed. The
+  // local handlers that pass a literal they own don't need it and don't get it.
+  const sent = await injectSlash(paneId, watcher, command, { guardPalette: true })
+  if (!sent.ok) {
+    // Name what it WOULD have run, not just that it was refused: the user's next move depends on
+    // knowing the palette guessed at their command rather than rejecting it. Same standard as the
+    // Target-first refusal.
+    await channel.sendText(chat_id,
+      `⚠️ <code>${escapeHtml(command.split(/\s/)[0])}</code> isn't a command in that session — its palette would have run <code>${escapeHtml(sent.offered[0])}</code> instead, so nothing was sent.`
+      + `\n\nIt offered: ${sent.offered.map(r => `<code>${escapeHtml(r)}</code>`).join(' · ')}`, opts).catch(() => {})
+    return
+  }
+  if (!echo) return
   const file = await transcriptForPane(paneId, await paneCwd(paneId))
   if (!file) return
   for (let waited = 0; waited < 10_000; waited += 500) {

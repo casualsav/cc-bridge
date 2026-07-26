@@ -1,6 +1,6 @@
 // Prompt detection from pane captures — select menus vs permission dialogs. Pure functions.
 import { test, expect } from 'bun:test'
-import { stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, detectFirstRunScreen, isUsageLimitChoice, isResumeSessionPrompt, detectResumeSessionPrompt, detectEditorState, onNormalPrompt, detectModelUnavailable, detectCompacting, compactPercent, permPromptToken, waitingPromptSignature, isRecognizedPrompt, detectStuckScreen, extractGenericOptions, bashModeArmed, detectWorking } from './prompt.ts'
+import { stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, detectFirstRunScreen, isUsageLimitChoice, isResumeSessionPrompt, detectResumeSessionPrompt, detectEditorState, onNormalPrompt, detectModelUnavailable, detectCompacting, compactPercent, permPromptToken, waitingPromptSignature, isRecognizedPrompt, detectStuckScreen, extractGenericOptions, bashModeArmed, detectWorking, slashPaletteRows, slashPaletteWouldMisfire } from './prompt.ts'
 
 test('stripAnsi removes CSI escape sequences', () => {
   expect(stripAnsi('\x1b[1mbold\x1b[0m text')).toBe('bold text')
@@ -915,4 +915,115 @@ test('detectFirstRunScreen stays null on every screen a configured session actua
     '  2. Patch',
     'Enter to select · Esc to cancel',
   ].join('\n'))).toBe(null)
+})
+
+// ---- Slash-command palette guard ----
+//
+// Every capture below is REAL — taken from a throwaway `claude` pane on 2026-07-26 by typing the
+// command and never pressing Enter, because the open dropdown is what decides what Enter would do and
+// reading it is non-destructive. Trimmed to the tail the parser reads. Hand-written fixtures would
+// have encoded what I assumed the palette looks like; two earlier versions of this measurement were
+// wrong precisely there.
+
+// THE HAZARD. `/mode` is the bridge's own command, not Claude Code's. Typed into a session it opens
+// the palette on /model, and Enter runs THAT — parking the session on the model picker, a modal that
+// queues asks behind it and has no exit at all from the mini app.
+const CAP_MODE = `
+  /model                            Set the AI model for Claude Code (currently claude-opus-5[1m])
+  /web-design-taste                 (web-design-taste) Build-time design taste for any UI work: landing pages, product/SaaS UI, dashboards, components, layouts, design systems, redesigns, or any
+                                    'make this look good / professional / polished / modern' request. Routes to a distilled corpus of real exemplars — transferable principles + normalized design to…
+  /web-design-taste                 Build-time design taste for any UI work: landing pages, product/SaaS UI, dashboards, components, layouts, design systems, redesigns, or any 'make this look good /
+                                    professional / polished / modern' request. Routes to a distilled corpus of real exemplars — transferable principles + normalized design tokens — so output is spe…
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ /mode
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────`
+// EXACT MATCH — must go through. Bare /model legitimately opens the palette with /model offered, and
+// the daemon relays exactly this to a Codex session on purpose, wanting the native picker.
+const CAP_MODEL = `
+  /model                            Set the AI model for Claude Code (currently claude-opus-5[1m])
+  /claude-api                       Reference for the Claude API / Anthropic SDK — model ids, pricing, params, streaming, tool use, MCP, agents, caching, token counting, model migration. TRIGGER —
+                                    read BEFORE opening the target file; don't skip because it "looks like a one-liner" — whenever: the prompt names Claude/Anthropic in any form (Claude, Anthropic,…
+  /loop                             Run a prompt or slash command on a recurring interval (e.g. /loop 5m /foo). Omit the interval to let the model self-pace.
+  /advisor                          Let Claude consult a stronger model at key moments
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ /model
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────`
+// An ARGUMENT closes the palette, which is why the hazard is bare tokens and arguments protect you.
+const CAP_MODEL_HAIKU = `
+                                                                                                                                                                           Ctrl+Y to paste deleted text
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ /model haiku
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────`
+// An exact match on a USER-INSTALLED SKILL, not a built-in. This is why the guard can't be a name
+// list: the palette's match set includes whatever skills this machine has.
+const CAP_LOOP = `
+  /loop                             Run a prompt or slash command on a recurring interval (e.g. /loop 5m /foo). Omit the interval to let the model self-pace.
+  /general-video                    The fallback workflow for authoring custom HyperFrames video compositions at any length or format — longer or multi-scene pieces, brand / sizzle reels, montages,
+                                    title cards, static loops, and freeform compositions. Input- and length-agnostic. If a specialized workflow clearly fits the input — a marketed product, a websit…
+  /hyperframes-cli                  HyperFrames CLI dev loop. Use when running npx hyperframes init, add, catalog, capture, lint, validate, inspect, layout, snapshot, preview, play, render, publish,
+                                    lambda, doctor, browser, info, upgrade, skills, compositions, docs, benchmark, telemetry, transcribe, tts, or remove-background, or when troubleshooting the Hype…
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ /loop
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────`
+// FALSE-POSITIVE GUARD. This pane has `  /clear   …`-shaped lines in its scrollback from earlier
+// output, and a typed command with an argument, so no palette. Refusing here would block a working
+// command; an earlier version of the parser did exactly that by skipping blank lines while hunting
+// for rows.
+const CAP_LOOKALIKE = `
+
+
+
+                                                                                                                            ✘ Auto-update failed: no write permission to npm prefix · Run claude doctor
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ /compact the API design
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────`
+// The same pane WITH a real palette open over that scrollback — the rows read must be the palette's,
+// and /compact matches exactly, so it proceeds.
+const CAP_REAL_OVER_LOOKALIKE = `
+  /compact                          Free up context by summarizing the conversation so far
+  /funnel-cro-taste                 (funnel-cro-taste) Curated taste on funnels and conversion rate optimization: page structure, CTA placement and copy, form design, checkout and booking flows, A/B
+                                    test learnings, and landing page architecture. Consult this whenever building or editing ANY page with a conversion goal — not just landing pages, but also choos…
+  /music-to-video                   Use when the user has a music track (an audio file, or a video to pull audio from) and wants a beat-synced HyperFrames video, calm to hard-hitting. The music
+                                    drives everything: one analyzer reads it once, the orchestrator lays out the frames and fills a per-frame plan, and one sub-agent builds each frame. Typography a…
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ /compact
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────`
+
+test('the palette rows are read from a real capture, descriptions and wraps and all', () => {
+  expect(slashPaletteRows(CAP_MODE)).toEqual(['/model', '/web-design-taste', '/web-design-taste'])
+  expect(slashPaletteRows(CAP_MODEL)).toEqual(['/model', '/claude-api', '/loop', '/advisor'])
+  expect(slashPaletteRows(CAP_LOOP)).toEqual(['/loop', '/general-video', '/hyperframes-cli'])
+  expect(slashPaletteRows(CAP_MODEL_HAIKU)).toEqual([])
+  expect(slashPaletteRows(CAP_LOOKALIKE)).toEqual([])
+})
+
+test('a typed command the palette would replace is refused, and it names the substitute', () => {
+  expect(slashPaletteWouldMisfire(CAP_MODE, '/mode')).toEqual(['/model', '/web-design-taste', '/web-design-taste'])
+})
+
+test('an exact match goes through, including bare /model and a user-installed skill', () => {
+  expect(slashPaletteWouldMisfire(CAP_MODEL, '/model')).toBeNull()
+  expect(slashPaletteWouldMisfire(CAP_LOOP, '/loop')).toBeNull()
+  expect(slashPaletteWouldMisfire(CAP_MODE, '/MODEL')).toBeNull()          // the TUI matches case-insensitively
+})
+
+test('no palette means nothing to guard against — Enter submits literally', () => {
+  expect(slashPaletteWouldMisfire(CAP_MODEL_HAIKU, '/model haiku')).toBeNull()
+  // An unknown command with no fuzzy twin opens no palette either; it submits and Claude Code answers
+  // "Unknown command", which relaySlashCommand already relays back. Self-reporting, so not our problem.
+  expect(slashPaletteWouldMisfire(CAP_MODEL_HAIKU, '/zzzqqq')).toBeNull()
+  expect(slashPaletteWouldMisfire(CAP_LOOKALIKE, '/compact the API design')).toBeNull()
+})
+
+test('palette-lookalike scrollback does not get mistaken for an open palette', () => {
+  // The adjacency requirement is what does this: a real palette is flush against the input box, and
+  // scrollback is separated from it by blank lines.
+  expect(slashPaletteWouldMisfire(CAP_LOOKALIKE, '/compact the API design')).toBeNull()
+  // …and when a real palette IS open over that same scrollback, the rows read are the palette's.
+  expect(slashPaletteRows(CAP_REAL_OVER_LOOKALIKE)).toEqual(['/compact', '/funnel-cro-taste', '/music-to-video'])
+  expect(slashPaletteWouldMisfire(CAP_REAL_OVER_LOOKALIKE, '/compact')).toBeNull()
+})
+
+test('a non-slash injection is never guarded', () => {
+  expect(slashPaletteWouldMisfire(CAP_MODE, 'plain text')).toBeNull()
 })
