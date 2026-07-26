@@ -73,12 +73,14 @@
   #viewer.show { display: flex; }
   .vhead { padding: 10px var(--sp-3); border-bottom: 1px solid var(--sec); display: flex; gap: var(--sp-2); align-items: center; }
   .vhead .name { font-size: var(--t-sub); }
-  /* :not(.ghost) — the chat header's buttons opt into the composer's ghost-icon treatment, and this
-     rule (a class+type selector) would otherwise outrank .ghost and paint them as solid pills. */
-  .vhead button:not(.ghost) { padding: 7px 11px; border: none; border-radius: var(--r-sm); background: var(--btn); color: var(--btn-text); }
-  /* Header ghosts carry the glyph's own color (the composer's are emoji, which don't), and they're
-     primary controls — hint grey leaves ← and ⏹ barely visible on the dark background. */
-  .vhead .ghost { color: var(--text); }
+  /* Scoped to #viewer, which is the only header these solid pills were ever for. It used to be
+     `.vhead button:not(.ghost)`, and the exclusion existed only because the rule also reached the CHAT
+     header — so it had to be told which buttons not to eat. Narrowing the rule removes the need for the
+     exclusion, and with it a base rule that outranked (0,2,1) anything a variant would naturally carry.
+     Proven, not theorised: moving the chat buttons off .ghost made them match this rule, which painted
+     the stop blue and shrank its glyph with `padding: 7px 11px`. Two over-broad base rules produced both
+     of tonight's inert-modifier bugs; this is the second one going. */
+  #viewer .vhead button { padding: 7px 11px; border: none; border-radius: var(--r-sm); background: var(--btn); color: var(--btn-text); }
   /* Chat header — the drill-in ONLY (the file viewer keeps the flat bar; it isn't this screen).
      A lifted island inset from the edges, per the reference. On a near-black canvas there is no
      ambient light for a surface to catch, so the lift has to be manufactured: an opaque raised fill
@@ -97,9 +99,19 @@
      inside a 34px transparent slot, so it rendered visibly smaller than the back chip beside it.
      The ::after lifts the TOUCH target to 44px without growing the paint (padding would have grown the
      background with it), the same 44 standard the card close got. Absolute, so it changes no layout. */
-  #drill .vhead .ghost { position: relative; width: 34px; height: 34px; padding: 0; border-radius: 50%; display: flex; align-items: center; justify-content: center; }
-  #drill .vhead .ghost::after { content: ""; position: absolute; inset: -5px; border-radius: 50%; }
-  #drill #dback { background: var(--bg); }
+  /* SELF-CONTAINED, and a single class on purpose. These buttons are deliberately NOT .ghost: the base
+     used to be `#drill .vhead .ghost` (1,2,0), which meant every variant had to out-rank an id plus two
+     descendants, and a variant written the obvious way — `#dstop.recording` (1,1,0) — silently lost and
+     did nothing. Twice tonight, counting the ✕ that lost its red to `.vhead .ghost` (0,2,0). At (0,1,0)
+     any `.chatbtn.x` variant wins by construction, and scoping is now by markup rather than by location,
+     so it cannot accidentally capture the file viewer's own .vhead buttons either. */
+  .chatbtn { position: relative; width: 34px; height: 34px; padding: 0; border: none; border-radius: 50%;
+    background: transparent; color: var(--text); cursor: pointer; flex: none;
+    display: flex; align-items: center; justify-content: center; }
+  /* Lifts the TOUCH target to 44px without growing the paint; absolute, so it changes no layout. */
+  .chatbtn::after { content: ""; position: absolute; inset: -5px; border-radius: 50%; }
+  .chatbtn svg { width: 19px; height: 19px; display: block; }
+  .chatbtn.back { background: var(--bg); }
   .ghost svg { width: 19px; height: 19px; display: block; }
   /* Two-line title: name over the session's dial line, as the reference has name over "bot". The
      status dot rides ON the name line — centred against a two-line block it would float in the
@@ -123,26 +135,19 @@
      like a bug rather than a decision, and the indicator lost its referent. */
   .dtitle .name { flex: 0 1 auto; min-width: 0; font-size: var(--t-title); font-weight: var(--w-semi); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .dtitle .sub { display: block; font-size: var(--t-meta); color: var(--hint-raised); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  /* Beats `.vhead .ghost { color: var(--text) }` on specificity — without this the one destructive
-     control on the bar renders identically to the two safe ones. (The emoji ✕ carried its own red;
-     an SVG inherits, so the colour had to become a rule.) */
-  .vhead .ghost.icon-danger { color: #e05555; }
   /* A filled circle with an off-white glyph centred in it, per the reference. The BUTTON is the circle
      (already a 34px 50%-radius box) and the glyph rides inside it — the same construction the
      composer's recording button uses. The glyph's footprint is 30% of the diameter, from the
      reference's square; the glyph itself is a pause, which is what the action actually is. */
-  #drill #dstop { background: var(--stop-red); color: #ececec; }
+  .chatbtn.stop { background: var(--stop-red); color: #ececec; }
   /* Nothing to interrupt on an idle session, so the stop reads as unavailable rather than armed.
      Dimmed rather than disabled: the pane can be mid-something the transcript has not shown yet. */
-  #dstop.idle { opacity: .38; }
+  .chatbtn.idle { opacity: .38; }
   /* Suppressed while recording. The composer's recorder is the SAME form — red circle, white rounded
      square — because it is the same verb, and differentiating them by weight would be decoration that
      teaches nothing. What decides it is the asymmetry of a mistap: this one ends a turn, that one ends
      a voice memo. While recording, the memo is the urgent thing and the turn can wait one tap. */
-  /* #drill #dstop… because `#drill .vhead .ghost { display: flex }` is (1,2,0) and would otherwise win:
-     the first version of this rule was silently inert. Second time tonight a specificity loss hid a
-     working feature — check the cascade, not just the class. */
-  #drill #dstop.recording { display: none; }
+  .chatbtn.recording { display: none; }
   pre { margin: 0; padding: var(--sp-3); overflow: auto; flex: 1; white-space: pre; font: var(--t-mono)/1.45 ui-monospace, Menlo, Consolas, monospace; }
   .notice { padding: var(--sp-5) var(--sp-4); color: var(--hint); text-align: center; }
   .err { background: #c0392b; color: #fff; padding: var(--sp-2) var(--sp-3); font-size: var(--t-sub); display: none; }
@@ -323,18 +328,18 @@
 
 <div id="drill">
   <div class="vhead">
-    <button id="dback" class="ghost" title="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg></button>
+    <button id="dback" class="chatbtn back" title="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg></button>
     <div class="dtitle"><span class="nmrow"><span class="dot" id="ddot"></span><span class="name" id="dname"></span></span><span class="sub" id="dsub"></span></div>
     <!-- A filled red octagon: the drawn equivalent of 🛑, which is what it has to read as instantly.
          Drawn rather than the emoji so it matches the paperclip and mic, holds one colour instead of
          rendering differently per platform, and keeps this bar free of the clip-art it was cleared of.
-         It reuses .icon-danger: with the ✕ gone from here, nothing else competes for that red. -->
+         With the ✕ gone from this bar, nothing else competes for that red. -->
     <!-- A PAUSE glyph, and the word is true: this sends a single Escape, Claude Code's own interrupt.
          The turn halts, the session stays alive at its prompt and the conversation is intact, so the
          header's only remaining action really is a halt rather than a terminate; terminating moved to
          the session cards. Two bars in the square's exact bounding box (12.9 units), canonical pause
          proportions, caps rounded to match the softness of the reference's square. -->
-    <button class="ghost" id="dstop" title="Interrupt" aria-label="Interrupt this session"><svg viewBox="0 0 24 24"><rect x="5.55" y="5.55" width="3.9" height="12.9" rx="1.7" fill="currentColor"/><rect x="14.55" y="5.55" width="3.9" height="12.9" rx="1.7" fill="currentColor"/></svg></button>
+    <button class="chatbtn stop" id="dstop" title="Interrupt" aria-label="Interrupt this session"><svg viewBox="0 0 24 24"><rect x="5.55" y="5.55" width="3.9" height="12.9" rx="1.7" fill="currentColor"/><rect x="14.55" y="5.55" width="3.9" height="12.9" rx="1.7" fill="currentColor"/></svg></button>
   </div>
   <div id="dfeed"></div>
   <div class="composer">
