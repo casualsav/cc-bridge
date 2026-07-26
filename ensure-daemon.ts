@@ -30,7 +30,21 @@ function findDaemon(): string | null {
   versions.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
   for (const v of versions.reverse()) {
     const p = join(base, v, 'daemon.ts')
-    if (existsSync(p)) return p
+    if (!existsSync(p)) continue
+    // A version dir whose OWN manifest disagrees with its name is an aborted clone, not a release.
+    // deploy.ts seeds a new version dir by copying the previous one (for node_modules) BEFORE it
+    // syncs the payload and stamps the manifest, so a deploy that dies in that window leaves the
+    // previous version's code sitting under a new, higher number — and "highest wins" above would
+    // launch it in preference to the real release. That is not hypothetical: on 2026-07-26 a 0.4.76
+    // holding 0.4.75's bytes was created that way and the daemon respawned into it, so "deployed"
+    // and "what a phone loads" silently diverged. Refusing here is the cheap half of the fix and
+    // would have prevented it on its own.
+    // FAILS OPEN on a missing or unreadable manifest — an older cache copy may predate it, and
+    // "launch nothing" is a worse failure than "launch something plausible".
+    let stamped: string | null = null
+    try { stamped = JSON.parse(readFileSync(join(base, v, '.claude-plugin', 'plugin.json'), 'utf8'))?.version ?? null } catch { stamped = null }
+    if (stamped && stamped !== v) continue
+    return p
   }
   return null
 }
