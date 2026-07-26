@@ -6691,6 +6691,47 @@ async function resumeModelAlias(pane: string, cwd: string | null): Promise<strin
   return !alias || alias === 'haiku' ? 'opus' : alias
 }
 
+// Type a relaunch line into a pane whose agent has just exited, and CONFIRM it took.
+// A line typed at that moment can vanish without a trace: tmux already reports the shell as the
+// pane's command while the exiting agent still owns the tty, and its final terminal reset discards
+// whatever is pending — so the line is neither echoed nor run. Observed live on 2026-07-26: a
+// resumed session's launch line never appeared in its pane, and the mode/effort keystrokes sent 30s
+// later were executed by bash ("-bash: /effort: No such file or directory"). Nothing verified the
+// relaunch, so the bridge recorded a success against a session sitting at a bare shell.
+// Hence: settle first, then verify the agent actually execs, and retry the line once before giving
+// up. `false` means the pane is at a shell with no agent — never report that as a restart.
+async function relaunchAgentInPane(pane: string, agent: AgentKind, line: string): Promise<boolean> {
+  // An agent in the pane means DON'T TYPE. On a retry it means attempt 1 landed after all, just past
+  // the deadline (slow shell, slow exec) — a second line would go into the live composer and be
+  // submitted as a prompt, the very thing this helper exists to prevent. Before the first attempt it
+  // means the old agent never left, which is not a relaunch and must not be reported as one.
+  const agentInPane = async () => agent === 'claude' && (await paneCommand(pane).catch(() => '')) === 'claude'
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (await agentInPane()) {
+      if (attempt === 0) return false
+      await waitForSettle(pane, 400, 30_000)
+      return true
+    }
+    // The teardown repaints for a beat after the process group changes; a still-moving pane is one
+    // whose shell hasn't taken the tty back yet.
+    await waitForSettle(pane, 300, 8000)
+    if (await agentInPane()) { await waitForSettle(pane, 400, 30_000); return attempt > 0 }
+    if (!(await sendKeys(pane, [`hash -r; ${line}`, 'Enter']))) return false
+    // Codex is left on the old settle-only path: this checks the pane's command against the agent
+    // name, which is verified for claude and unproven for codex — a false failure there would be
+    // worse than the race it guards.
+    if (agent !== 'claude') { await waitForSettle(pane, 400, 30_000); return true }
+    const deadline = Date.now() + 20_000   // the exec itself is instant; this only absorbs a slow shell
+    while (Date.now() < deadline) {
+      if (!(await paneAlive(pane))) return false
+      if ((await paneCommand(pane).catch(() => '')) === 'claude') { await waitForSettle(pane, 400, 30_000); return true }
+      await sleep(1000)
+    }
+    process.stderr.write(`daemon: relaunch line never took in pane ${pane}${attempt ? '' : ' — retrying once'}\n`)
+  }
+  return false
+}
+
 // The message-free core of a restart-in-place: /exit, relaunch `claude --resume <id>` in the same
 // pane (same pane keeps the bridge pointed at it, same id keeps the conversation), re-apply the
 // permission mode. Shared by the single-session button and the restart-all sweep.
@@ -6733,6 +6774,7 @@ async function restartPaneSessionCore(pane: string, id: string | null, accountOv
   // topic session whose mode/effort were last moved in the terminal.
   if (sid) { recordSessionMode(sid, mode); recordSessionEffort(sid, effort) }
   const swapStartMs = Date.now()   // cross-engine only: lower bound for "this is the NEW engine's transcript"
+  let relaunched = false           // the in-place relaunch line actually put an agent back in the pane
   let launchVerified = harnessOverride === undefined && harness.provider === 'anthropic'
   setPaneRestarting(pane, true)
   try {
@@ -6758,8 +6800,8 @@ async function restartPaneSessionCore(pane: string, id: string | null, accountOv
         : `${envPrefix}${resumeModelArgs.some(a => a.startsWith('claude-')) ? 'CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL=1 ' : ''}${claudeHarnessLaunch(harness, claudeBin(), [
             '--allow-dangerously-skip-permissions', ...(id !== null ? ['--resume', id] : []), ...resumeModelArgs,
           ])}`
-      await sendKeys(pane, [`hash -r; ${resume}`, 'Enter'])
-      await waitForSettle(pane, 400, 30_000)
+      if (!(await relaunchAgentInPane(pane, agent, resume))) return   // never came up — `relaunched` stays false
+      relaunched = true
       if (!launchVerified) {
         if (!(await waitForHarnessReady(pane))) return
         launchVerified = true
@@ -6821,6 +6863,10 @@ async function restartPaneSessionCore(pane: string, id: string | null, accountOv
       process.stderr.write(`daemon: restart: pane ${pane} died on /exit — respawned session in ${fresh} (${cwd})\n`)
       return fresh   // mode + effort re-seeded by spawnSession's resume branch (sessionModes/sessionEfforts)
     }
+    // The pane survived /exit but no agent came back into it: the session is DOWN at a shell. Say so
+    // — driving mode/effort keystrokes or recording a model here is how a dead session got reported
+    // as refreshed. Returning null hands it to the caller's health check and second chance.
+    if (!relaunched) { process.stderr.write(`daemon: restart: pane ${pane} is at a shell after the relaunch — reporting it down\n`); return null }
     if (resumeAlias && sid) recordSessionModel(sid, resumeAlias)   // the memory converges on what we just asserted
     // If the resume popped the post-update "Resume session" picker, the pane is sitting on the menu —
     // don't drive mode/effort keystrokes into it. It's relayed as buttons; the resumesel tap restores
@@ -6982,16 +7028,21 @@ async function paneBackUp(pane: string): Promise<boolean> {
 // where it means a cross-ENGINE takeover instead.
 type RestartTarget = { pane: string; sid: string | null; name: string; id: string | null; cwd: string | null }
 
-// The model a refresh must assert when it launches a session with no conversation to carry one in.
-// Same chain a resume-spawn uses — the session's own remembered alias, then the /settings 🐣 spawn
-// default (validated), then the floor — and it deliberately never bottoms out at null: a launch with
-// no --model at all hands the choice to the CLI's own default, which is how a reopen came back on
-// Haiku 4.5 and dropped the 1M window with it.
-function refreshSpawnModel(sid: string | null): string {
+// The model a refresh asserts when it launches a session with NO conversation to carry one in: the
+// /settings 🐣 spawn default (validated), else the floor. It never bottoms out at null — a launch
+// with no --model at all hands the choice to the CLI's own default, which is how a reopen came back
+// on Haiku 4.5 and dropped the 1M window with it.
+//
+// It deliberately does NOT consult sessionModels. That memory is keyed by the bridge's session id,
+// and a session with no conversation has no model history of its own — so any hit is necessarily
+// about something else. Measured on 2026-07-26: a zero-turn refresh launched Opus because the pane
+// carried a stale @tg_session stamp from a killed session in an unrelated folder, whose remembered
+// alias was opus (sessionForPane reports a stamp verbatim; nothing validates that it still names a
+// live session). A fresh launch floors at fable by design; opus is reachable from here only by
+// declining the Fable credit consent.
+function refreshSpawnModel(): string {
   const pref = loadAccess().spawnModel
-  return (sid ? sessionModels.get(sid) : null)
-    ?? (pref && MODEL_ALIASES.includes(pref) ? pref : null)
-    ?? SPAWN_MODEL_FLOOR
+  return (pref && MODEL_ALIASES.includes(pref) ? pref : null) ?? SPAWN_MODEL_FLOOR
 }
 
 // The tail every restart flow shares: health-check each session back to a prompt, give the ones that
@@ -7042,7 +7093,7 @@ async function settleRestartedSessions(
     const alive = await paneAlive(t.pane).catch(() => false)
     const fresh = !alive && t.sid && t.cwd
       ? await spawnSession(t.cwd, t.id ? `--resume ${t.id}` : '', t.sid, topicAccount(getTopicBySession(t.sid)), topicAgent(getTopicBySession(t.sid)),
-          undefined, t.id ? undefined : { model: refreshSpawnModel(t.sid) })
+          undefined, t.id ? undefined : { model: refreshSpawnModel() })
       : null
     if (fresh) { t.pane = fresh; if (t.sid) await reopenSessionTopic(t.sid); retried.push(t) }
     else if (alive) retried.push(t)
@@ -7123,17 +7174,10 @@ async function relaunchFreshSession(t: RestartTarget): Promise<string | 'untouch
   // Checked BEFORE the exit: a provider we can't launch against would leave the session exited with
   // nothing to relaunch it into.
   if (!(await harnessProviderReady(harness))) return 'untouched'
-  if (t.sid) {
-    recordSessionMode(t.sid, mode)
-    recordSessionEffort(t.sid, effort)
-    // Owner invariant: a refresh never lands a session on Haiku. Dropping the memory rather than
-    // rewriting it hands the choice back to the chain below, which floors at SPAWN_MODEL_FLOOR.
-    if (sessionModels.get(t.sid) === 'haiku') {
-      sessionModels.delete(t.sid)
-      writeJsonFile(SESSION_MODELS_FILE, Object.fromEntries(sessionModels))
-    }
-  }
-  const model = refreshSpawnModel(t.sid)
+  if (t.sid) { recordSessionMode(t.sid, mode); recordSessionEffort(t.sid, effort) }
+  // Floor chain only — see refreshSpawnModel for why a remembered alias can never be about this
+  // launch. That also retires the old "never Haiku" guard here: the floor can't produce haiku.
+  const model = refreshSpawnModel()
   setPaneRestarting(t.pane, true)
   try {
     const watcher = t.pane === focus.activePaneId ? focus.paneWatcher : null
@@ -7161,12 +7205,12 @@ async function relaunchFreshSession(t: RestartTarget): Promise<string | 'untouch
       const envPrefix = (account.name === 'main' ? '' : `CLAUDE_CONFIG_DIR='${account.configDir.replace(/'/g, `'\\''`)}' `)
         + (flags.some(f => f.startsWith('--model claude-')) ? 'CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL=1 ' : '')
       const launch = `${envPrefix}${claudeHarnessLaunch(harness, claudeBin(), ['--allow-dangerously-skip-permissions', ...flags.flatMap(f => f.split(/\s+/))])}`
-      const relaunch = async () => {
-        await sendKeys(t.pane, [`hash -r; ${launch}`, 'Enter'])
-        await waitForSettle(t.pane, 400, 30_000)
-      }
+      let landed = false
+      const relaunch = async () => { landed = await relaunchAgentInPane(t.pane, 'claude', launch) }
       await (watcher ? watcher.withInjection(relaunch) : relaunch())
-      return t.pane
+      // Typed but never took: the session IS disturbed (its agent is gone), so this is a real
+      // failure rather than an untouched skip — null keeps it in the health check.
+      return landed ? t.pane : null
     }
     // The pane went with the agent (a daemon-spawned pane IS claude) — respawn the session in a
     // fresh one, carrying the same bookkeeping restartPaneSessionCore does on that path.
@@ -10520,7 +10564,7 @@ bot.on('callback_query:data', async ctx => {
     // floor, since there is no conversation to carry one in.
     const extra = t.agentSessionId ? `--resume ${t.agentSessionId}` : ''
     const ok = await spawnSession(t.cwd, extra, sid, topicAccount(t), topicAgent(t), undefined,
-      extra ? undefined : { model: refreshSpawnModel(sid) })
+      extra ? undefined : { model: refreshSpawnModel() })
     if (ok) await reopenSessionTopic(sid)   // reopen the tab NOW, not on first reply
     await channel.sendText(String(ctx.chat!.id), ok
       ? `🚀 Resuming <b>${escapeHtml(t.name)}</b> in <code>${escapeHtml(t.cwd)}</code> — it reopens in its topic shortly.`
