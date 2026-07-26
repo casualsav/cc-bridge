@@ -247,11 +247,22 @@ if (!materializeOnly && !dryRun) {
   if (!gate.ok) die(gate.error)
   if (gate.warn) console.log(`⚠️  ${gate.warn}\n`)
 
-  // Not a refusal — in a checkout shared by several sessions the tree is dirty most of the time, so
-  // refusing on dirt would block every legitimate deploy. But the payload is copied from the working
-  // tree, so uncommitted edits to a shipped file DO go out: name them, so that is a choice.
-  const dirty = gitOut(['status', '--porcelain', '--', ...payload.map(p => p.src)])
-    .split('\n').map(l => l.slice(3).trim()).filter(Boolean)
+}
+
+// Deliberately OUTSIDE the gate above, so `--dry-run` shows it too. This is pure information, and
+// information you can only obtain by doing the irreversible thing is not a preview. A dirty-payload
+// listing is exactly what someone wants before committing to a deploy, not in the scrollback after.
+//
+// Not a refusal — in a checkout shared by several sessions the tree is dirty most of the time, so
+// refusing on dirt would block every legitimate deploy. But the payload is copied from the working
+// tree, so uncommitted edits to a shipped file DO go out: name them, so that is a choice.
+{
+  // NOT gitOut: it .trim()s the whole output, which eats the leading status space of the FIRST
+  // porcelain line (" M path" becomes "M path"), so slice(3) then shaved a character off the first
+  // filename it printed. A subtly wrong path is worse than none — it reads as correct.
+  const st = sh('git', ['-C', REPO, 'status', '--porcelain', '--', ...payload.map(p => p.src)])
+  const dirty = (st.status === 0 ? st.stdout : '')
+    .split('\n').map(l => l.slice(3).trimEnd()).filter(Boolean)   // porcelain: 2 status chars + a space, then the path
   if (dirty.length) {
     console.log(`⚠️  shipping UNCOMMITTED changes in ${dirty.length} payload file(s):`)
     for (const f of dirty) console.log(`      ${f}`)
