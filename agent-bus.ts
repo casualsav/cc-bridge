@@ -98,6 +98,14 @@ export type BusPending = {
                       // through the same retry queue; delivery removes it (see tryDeliverAsk), so no
                       // reaper and no TTL ever sees it. Nothing downstream had to learn about acks —
                       // their rows simply stop existing at the moment they'd start being a problem.
+  founding?: true     // the spawn handler's first-message ask — the only ask a session is guaranteed
+                      // to receive before it's ever seen a human turn, so a session ending its own
+                      // turn without answering it is a session that finished work nobody will hear
+                      // about. foundingSilencePlan watches only these.
+  nudgedAt?: number   // stamped when a reminder has been typed into the TARGET's pane; cleared again
+                      // if that paste didn't land, so the next turn-end retries it.
+  escalatedAt?: number // stamped once the asker has been told the target ended a turn without
+                      // answering — set once and never cleared, so escalation fires exactly once.
 }
 
 export type BusState = {
@@ -140,6 +148,9 @@ export function loadBus(): BusState {
         expiresAt: typeof p.expiresAt === 'number' ? p.expiresAt : 0,
         injected: p.injected === true,
         ...(typeof p.expiredAt === 'number' ? { expiredAt: p.expiredAt } : {}),
+        ...(p.founding === true ? { founding: true as const } : {}),
+        ...(typeof p.nudgedAt === 'number' ? { nudgedAt: p.nudgedAt } : {}),
+        ...(typeof p.escalatedAt === 'number' ? { escalatedAt: p.escalatedAt } : {}),
         depth: typeof p.depth === 'number' ? p.depth : 1,   // pre-depth entry: assume one hop, the safe reading
       }
     }
@@ -171,7 +182,8 @@ function ensureLoaded(): void { if (!loaded) loadBus() }
 // The daemon marks it injected once actually delivered, then arms the TTL against expiresAt.
 export function createPending(
   fields: { fromSid: string; toSid: string; fromName: string; toName: string; text: string; refs: string[]
-            fromKind?: 'claude' | 'hermes'; toKind?: 'claude' | 'hermes'; depth?: number; noReply?: true },
+            fromKind?: 'claude' | 'hermes'; toKind?: 'claude' | 'hermes'; depth?: number; noReply?: true
+            founding?: true },
   now: number,
 ): BusPending {
   ensureLoaded()
@@ -213,6 +225,66 @@ export function markInjected(id: number, now: number): void {
 export function queuedFor(toSid: string): BusPending[] {
   ensureLoaded()
   return Object.values(store.pending).filter(p => !p.injected && !p.expiredAt && p.toSid === toSid).sort((a, b) => a.id - b.id)
+}
+
+// ---- founding-ask silence ----
+//
+// A spawned session's first message travels as a bus ask (createPending{founding:true}) — the only
+// ask a session is guaranteed to receive before it has ever seen a human turn. Two incidents
+// (2026-07-26) showed the same session routinely ending its turn with that ask still unanswered: the
+// report sat in its own pane and the asker never heard. The daemon runs foundingSilencePlan at the
+// SAME turn-conclusion point the aux relay uses to ship a reply, so "ended a turn" means exactly what
+// it means to the relay loop it's borrowed from.
+
+// The nudge must get a real chance to be acted on (the session may already be typing `tg answer`)
+// before the asker is told anything — 60s is comfortably past a single relay-poll tick (1.5s) but
+// short enough that a genuinely silent session escalates within the same sitting.
+export const FOUNDING_ESCALATE_AFTER_MS = 60_000
+
+export function markFoundingNudged(id: number, now: number): void {
+  ensureLoaded()
+  const p = store.pending[String(id)]
+  if (!p) return
+  p.nudgedAt = now
+  save()
+}
+
+// A nudge whose paste didn't land was never actually seen — clearing the stamp lets the next
+// turn-conclusion retry it instead of silently waiting out the escalate window for nothing.
+export function clearFoundingNudge(id: number): void {
+  ensureLoaded()
+  const p = store.pending[String(id)]
+  if (!p || p.nudgedAt == null) return
+  delete p.nudgedAt
+  save()
+}
+
+// Escalation fires once and is never retried: notifyChats is the fallback if the asker's own pane
+// is gone, so the human always eventually hears even when the agent-to-agent path can't land.
+export function markFoundingEscalated(id: number, now: number): void {
+  ensureLoaded()
+  const p = store.pending[String(id)]
+  if (!p) return
+  p.escalatedAt = now
+  save()
+}
+
+// Which open, DELIVERED founding ask addressed to `toSid` needs a nudge or an escalation — at most
+// one action, so the caller never double-types into a pane on one turn-conclusion. Un-injected asks
+// are still queued (nothing has reached the target to go silent on); expired ones are the TTL sweep's
+// problem, not this one's.
+export function foundingSilencePlan(
+  pendings: BusPending[], toSid: string, now: number,
+): { id: number; action: 'nudge' | 'escalate' } | null {
+  const candidates = pendings
+    .filter(p => p.founding === true && p.toSid === toSid && p.injected && !p.expiredAt)
+    .sort((a, b) => a.id - b.id)
+  for (const p of candidates) {
+    if (p.escalatedAt != null) continue   // already escalated — nothing left to do until answered or reaped
+    if (p.nudgedAt == null) return { id: p.id, action: 'nudge' }
+    if (now - p.nudgedAt >= FOUNDING_ESCALATE_AFTER_MS) return { id: p.id, action: 'escalate' }
+  }
+  return null
 }
 
 // Mark (don't delete) every not-yet-expired pending whose TTL has passed and return them — the daemon
@@ -450,7 +522,7 @@ const ledgerFile = (room: string): string => join(roomDir(room), 'ledger.jsonl')
 
 export type LedgerEntry = {
   ts: number
-  kind: 'ask' | 'ack' | 'answer' | 'post' | 'pause' | 'expire' | 'slash' | 'spawn' | 'kill' | 'reopen' | 'keys'
+  kind: 'ask' | 'ack' | 'answer' | 'post' | 'pause' | 'expire' | 'slash' | 'spawn' | 'kill' | 'reopen' | 'keys' | 'escalate'
   from: string
   to?: string
   id?: number

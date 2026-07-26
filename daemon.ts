@@ -115,6 +115,7 @@ import {
   AGENT_BUS_ENABLED, AGENT_BUS_PIN_UI,
   createPending, getPending, removePending, putPending, listPending, markInjected, expirePending, dropExpired, LATE_ANSWER_GRACE_MS, ASK_TTL_MS,
   recordAgentAsk, resetHops, currentHops, BREADTH_NOTICE_AT, askResultText, planAskReap, deliveredReapCandidates, reapNotifiesAsker, queuedFor, type AskDelivery,
+  foundingSilencePlan, markFoundingNudged, clearFoundingNudge, markFoundingEscalated,
   setSessionDepth, resetAllSessionDepth, pruneSessionDepth, nextAskDepth, depthExceeded, depthLimit,
   resolveEndpoint, nameForEndpoint, normalizeEndpointName, confineRef, sharedDir, ensureSharedDir, appendLedger, tailLedger,
   getSeen, markSeen, digestSince, DIGEST_SCAN,
@@ -1929,6 +1930,9 @@ async function auxRelayTick(): Promise<void> {
         const ticks = (auxConcludeTicks.get(file) ?? 0) + 1
         auxConcludeTicks.set(file, ticks)
         if (ticks < RELAY_CONCLUDE_TICKS) return
+        // The pane's turn just concluded by this loop's own definition — exactly the moment a
+        // founding ask left unanswered in it should be noticed.
+        if (AGENT_BUS_ENABLED) void checkFoundingSilence(pane).catch(() => {})
         const cursor = lastRelayedByFile.get(file) ?? ''
         for (const r of finalRepliesAfter(file, cursor)) {
           if (!r.uuid || r.uuid === (lastRelayedByFile.get(file) ?? '')) continue
@@ -2829,23 +2833,58 @@ async function reapDeadAsk(p: BusPending, room: string): Promise<void> {
   const why = delivered ? 'delivered but the target session ended before answering' : 'never delivered — target session ended'
   appendLedger(room, { ts: Date.now(), kind: 'expire', from: p.toName, to: p.fromName, id: p.id, text: why })
   process.stderr.write(`daemon: ask ${p.id} to @${p.toName} (${p.toSid}) reaped — ${why}\n`)
-  // A delivered-then-ended ask is dropped in silence: it fires on the SUCCESS path (work done, owner
-  // closes the session), where the leftover row is an ack nobody was ever going to answer. The ledger
-  // row + stderr line above are its whole record — visible in `tg history` and the daemon log, and to
-  // nobody in Telegram. See reapNotifiesAsker for why dropping the notice doesn't reopen bug 11c.
-  if (!reapNotifiesAsker(p)) return
   const askerPane = await paneForSession(p.fromSid).catch(() => null)
+  // The asking AGENT hears about this NOW, regardless of the human-facing card below — the delivered
+  // half used to be dropped in total silence, and a live incident (2026-07-26) showed exactly why
+  // that's wrong for a founding ask: the "delivered but the target session ended" line above was the
+  // whole record, and the spawner sat waiting on a report that could never arrive. removePending()
+  // above makes this one-shot per ask, whichever half reaped it.
+  const shown = p.text.length > 80 ? p.text.slice(0, 80) + '…' : p.text
+  if (askerPane) void busDeliver(askerPane, formatAnswerBlock('system', p.id, `(@${p.toName} ended with your ask ${p.id} unanswered: "${shown}")`))
+  // The ❌ Telegram card stays gated as before: a delivered ask that dies mid-turn is overwhelmingly
+  // the SUCCESS path (work done, owner closes the session), and carding him about it read as an alarm
+  // about nothing — see reapNotifiesAsker. The pane block above is the actual fix; it doesn't need the
+  // human paged too.
+  if (!reapNotifiesAsker(p)) return
   const own = askerPane ? await outboundTargetsFor(askerPane).catch(() => []) : []
   // Owner fallback ONLY when nobody is left who could act. A headless sender has no surface of its
-  // own, but it has a PANE — and the system block below lands directly in its context, so also
+  // own, but it has a PANE — and the system block above lands directly in its context, so also
   // carding the owner told him about something the agent already knew. Fleet-internal by nature.
   const cardTargets = own.length ? own : askerPane ? [] : await fleetSurfaceFor(askerPane)
   const card = `❌ Ask ${p.id} to <b>${escapeHtml(p.toName)}</b> was never delivered — that session has ended. Removed from the queue.`
   for (const { chat, thread } of cardTargets) {
     void channel.sendText(chat, card, { silent: true, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
   }
-  const block = `(ask ${p.id} to @${p.toName} was never delivered — that session ended before it reached a prompt; it is no longer queued)`
-  if (askerPane) void busDeliver(askerPane, formatAnswerBlock('system', p.id, block))
+}
+
+// The other founding-ask incident: the target session is still alive but ended its turn without ever
+// running `tg answer`. Runs at the aux relay's turn-conclusion point (a pane just finished a turn),
+// so it fires at most once per real conclusion — foundingSilencePlan itself is idempotent past that
+// (an already-nudged ask inside the escalate window, or an already-escalated one, yields no action),
+// so repeat ticks on a pane that just sits idle cost nothing.
+async function checkFoundingSilence(pane: string): Promise<void> {
+  const toSid = await sessionForPane(pane).catch(() => null)
+  if (!toSid) return
+  const plan = foundingSilencePlan(listPending(), toSid, Date.now())
+  if (!plan) return
+  const p = getPending(plan.id)
+  if (!p) return
+  if (plan.action === 'nudge') {
+    markFoundingNudged(p.id, Date.now())
+    const reminder = `(your founding ask ${p.id} is still unanswered — @${p.fromName} is waiting on it; finish with: tg answer ${p.id} "<one-line summary → path>")`
+    const ok = await busDeliver(pane, formatAnswerBlock('system', p.id, reminder)).catch(() => false)
+    if (!ok) clearFoundingNudge(p.id)   // didn't land — retry on the next turn-conclusion, not a real nudge yet
+    process.stderr.write(`daemon: founding ask ${p.id} nudge → @${p.toName} ${ok ? 'delivered' : 'not-landed, will retry'}\n`)
+    return
+  }
+  // 'escalate': the nudge had a full 60s and the target still hasn't answered — tell the asker directly.
+  markFoundingEscalated(p.id, Date.now())
+  appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'escalate', from: p.toName, to: p.fromName, id: p.id, text: 'founding ask still unanswered after the nudge' })
+  const askerPane = await paneForSession(p.fromSid).catch(() => null)
+  const notice = `(@${p.toName} was reminded about founding ask ${p.id} and ended another turn without answering it)`
+  const delivered = askerPane ? await busDeliver(askerPane, formatAnswerBlock('system', p.id, notice)).catch(() => false) : false
+  if (!delivered) notifyChats(`⚠️ @${escapeHtml(p.toName)} was reminded about founding ask ${p.id} and still hasn\u2019t answered — the asker (@${escapeHtml(p.fromName)}) never heard back.`)
+  process.stderr.write(`daemon: founding ask ${p.id} escalated to @${p.fromName} ${delivered ? '(pane)' : '(notifyChats fallback — pane gone)'}\n`)
 }
 
 // 15s sweep: reap dead letters, expire un-answered asks (tell the asker) + deliver queued asks whose
@@ -5052,7 +5091,7 @@ async function handleCall(
           // only make some later, unrelated ask fail, or trip the pause silently (its notice fires
           // on the exact crossing turn only). Spawns stay ungated, exactly as they were when this
           // was a raw paste. Digest/markSeen are skipped too: a session seconds old has no history.
-          const p = createPending({ fromSid, toSid: sid, fromName, toName: topicName, text: firstMsg, refs: [] }, Date.now())
+          const p = createPending({ fromSid, toSid: sid, fromName, toName: topicName, text: firstMsg, refs: [], founding: true }, Date.now())
           appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'ask', from: fromName, to: topicName, id: p.id, text: firstMsg, refs: [] })
           // Reserve the ask for THIS closure before anything can see it: the pending exists now but
           // the pane won't be at a prompt for up to 45s, and the 15s sweep would otherwise inject it
