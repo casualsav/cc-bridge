@@ -1,6 +1,6 @@
 // Prompt detection from pane captures — select menus vs permission dialogs. Pure functions.
 import { test, expect } from 'bun:test'
-import { stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, detectFirstRunScreen, isUsageLimitChoice, isResumeSessionPrompt, detectResumeSessionPrompt, detectEditorState, onNormalPrompt, detectModelUnavailable, detectCompacting, compactPercent, permPromptToken, waitingPromptSignature, isRecognizedPrompt, detectStuckScreen, extractGenericOptions, bashModeArmed, detectWorking, isModelSwitchConfirm, slashPaletteRows, slashPaletteWouldMisfire, inputBoxContent, submitLanded } from './prompt.ts'
+import { stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, detectFirstRunScreen, isUsageLimitChoice, isResumeSessionPrompt, detectResumeSessionPrompt, detectEditorState, onNormalPrompt, detectModelUnavailable, detectCompacting, compactPercent, permPromptToken, waitingPromptSignature, isRecognizedPrompt, detectStuckScreen, extractGenericOptions, bashModeArmed, detectWorking, isModelSwitchConfirm, slashPaletteRows, slashPaletteWouldMisfire, inputBoxContent, submitLanded, detectModelPicker } from './prompt.ts'
 
 test('stripAnsi removes CSI escape sequences', () => {
   expect(stripAnsi('\x1b[1mbold\x1b[0m text')).toBe('bold text')
@@ -1045,6 +1045,65 @@ test('the palette rows are read from a real capture, descriptions and wraps and 
   expect(slashPaletteRows(CAP_LOOP)).toEqual(['/loop', '/general-video', '/hyperframes-cli'])
   expect(slashPaletteRows(CAP_MODEL_HAIKU)).toEqual([])
   expect(slashPaletteRows(CAP_LOOKALIKE)).toEqual([])
+})
+
+// ---- the /model picker ----
+// Captured verbatim from a live 2.1.220 pane (`tmux capture-pane -p -J`, the same read the daemon
+// does). Nothing here is reconstructed: the two-space gutters, the annotations, the ✔ on the active
+// row and the ❯ outside the numbering are what the TUI actually prints.
+const CAP_MODEL_PICKER = `▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   Select model
+   Switch between Claude models. Your pick becomes the default for new sessions. For other/previous model names, specify with --model.
+
+     1. Default (recommended)  Opus 5 with 1M context · Best for everyday, complex tasks
+     2. Opus (1M context)      Opus 5 with 1M context · Best for everyday, complex tasks
+   ❯ 3. Fable ✔                Fable 5 · Most capable for your hardest and longest-running tasks
+     4. Sonnet                 Sonnet 5 · Efficient for routine tasks
+     5. Haiku                  Haiku 4.5 · Fastest for quick answers
+
+   ◉ xHigh effort ←/→ to adjust
+
+   Enter to set as default · s to use this session only · Esc to cancel`
+
+test('detectModelPicker reads a real picker: rows, the highlight, and the active row', () => {
+  const p = detectModelPicker(CAP_MODEL_PICKER)
+  expect(p).not.toBeNull()
+  // Names come from the label chunk only. Row 1's DESCRIPTION says "Opus 5 with 1M context" — a
+  // parser that read the whole line would name it Opus and the bridge would pick the row whose
+  // Enter/`s` applies "Default", i.e. exactly the wrong one.
+  expect(p!.rows.map(r => r.name)).toEqual(['Default (recommended)', 'Opus (1M context)', 'Fable', 'Sonnet', 'Haiku'])
+  expect(p!.highlightedIndex).toBe(2)                       // NOT row 0 — the highlight starts on the active model
+  expect(p!.rows[2]).toEqual({ name: 'Fable', highlighted: true, current: true })
+  expect(p!.rows.filter(r => r.current).length).toBe(1)
+  // The effort control shares the screen and carries no number — it must not become a row.
+  expect(p!.rows.some(r => /effort/i.test(r.name))).toBe(false)
+})
+
+test('detectModelPicker matches ONLY the picker — never the other model screens', () => {
+  // The two dialogs whose keys mean something else entirely (and one of which may never be answered
+  // on the user's behalf): neither offers a session-only key, so neither can be steered as a picker.
+  expect(detectModelPicker(CACHE_CONFIRM)).toBeNull()
+  expect(detectModelPicker(CREDIT_CONSENT)).toBeNull()
+  // The slash palette — bare `/model` typed but not yet submitted. Its rows are commands, and
+  // pressing `s` there types a letter into the composer.
+  expect(detectModelPicker(CAP_MODEL)).toBeNull()
+  expect(detectModelPicker(CAP_MODEL_HAIKU)).toBeNull()
+  expect(detectModelPicker(CAP_MODE)).toBeNull()
+  // A plain prompt, and nothing at all.
+  expect(detectModelPicker('╭────╮\n❯ \n╰────╯\n  ? for shortcuts')).toBeNull()
+  expect(detectModelPicker('')).toBeNull()
+  // Both footer halves are required: a screen carrying only one of them is not this picker.
+  expect(detectModelPicker(CAP_MODEL_PICKER.replace('s to use this session only · ', ''))).toBeNull()
+  expect(detectModelPicker(CAP_MODEL_PICKER.replace('Enter to set as default · ', ''))).toBeNull()
+})
+
+test('detectModelPicker reports "no highlight" rather than guessing one', () => {
+  // A repaint mid-render can land a capture with no cursor row. The caller must not navigate from an
+  // assumed position, so this reads -1 instead of defaulting to 0.
+  const noCursor = CAP_MODEL_PICKER.replace('   ❯ 3. Fable ✔', '     3. Fable ✔')
+  const p = detectModelPicker(noCursor)
+  expect(p!.rows.length).toBe(5)
+  expect(p!.highlightedIndex).toBe(-1)
 })
 
 test('a typed command the palette would replace is refused, and it names the substitute', () => {

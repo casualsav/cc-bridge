@@ -26,7 +26,7 @@ import { hopKey, resolveChain, pickNextHop, moveHop } from './failover-chain.ts'
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
 import { renderSessionsView } from './sessions-view.ts'
-import { detectCurrentMode, onNormalPrompt, inputBoxContent, isModelSwitchConfirm, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, feedbackSurveyOpen, slashPaletteWouldMisfire, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen } from './prompt.ts'
+import { detectCurrentMode, onNormalPrompt, inputBoxContent, isModelSwitchConfirm, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen } from './prompt.ts'
 import { resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, currentTurnActivity, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
 import {
   AGENT_PANE_OPT, agentExitKeys, agentInterruptKeys, agentLabel, agentResetCommand, agentSubmitKeys,
@@ -4790,14 +4790,23 @@ async function handleCall(
         // its chat id is his own chat — and the same swallowing already applied to the pre-existing
         // "Unknown command" echo, so nothing here regressed.
         const slashAt = Date.now()
-        // Same pin every other /model path gets (MODEL_ALIAS_IDS) — without this, a bus
-        // `tg slash /model <alias>` bypasses the table and lands wherever the CLI's own alias
-        // resolves, which is the Opus 4.8 bug repeated for this one path.
-        const slashAliasMatch = /^\/model\s+(\S+)$/i.exec(command.trim())
-        const slashCommand = slashAliasMatch && MODEL_ALIASES.includes(slashAliasMatch[1].toLowerCase())
-          ? `/model ${modelArgFor(slashAliasMatch[1].toLowerCase())}`
-          : command
-        const sent = await injectSlash(targetPane, watcher, slashCommand, { guardPalette: true })
+        // A bus-relayed `/model <alias>` is a per-session switch like every other surface, so it goes
+        // through the picker's session-only key rather than the argument form — that form ALSO
+        // rewrites ~/.claude/settings.json, which would let one agent retarget every new session on
+        // the box. This supersedes the MODEL_ALIAS_IDS pin that used to live here: applySessionModel
+        // chooses the row by name, so there is no CLI alias left to drift. Bare `/model` (no
+        // argument) still relays through below — it opens the picker for a human and writes nothing.
+        const modelAlias = /^\/model\s+(\S+)$/i.exec(command)?.[1]?.toLowerCase()
+        if (modelAlias && MODEL_ALIASES.includes(modelAlias)) {
+          // awaitReadback:false for the same reason the mini app passes it: the confirm + readback
+          // dance runs for up to ~30s and the calling agent is blocked on this result.
+          const { error } = await applySessionModel(targetPane, watcher, modelAlias, { awaitReadback: false })
+          if (error) { text = `!${error}`; break }
+          void echoSlashResult(targetPane, targets[0]?.chat ?? '', slashAt, targets[0]?.thread ? Number(targets[0].thread) : undefined)
+          text = `sent /model to @${toName} (${modelAlias}, that session only) — its outcome echoes on that session's surface`
+          break
+        }
+        const sent = await injectSlash(targetPane, watcher, command, { guardPalette: true })
         if (!sent.ok) { text = `!${paletteRefusalText(command, sent.offered)}`; break }
         void echoSlashResult(targetPane, targets[0]?.chat ?? '', slashAt, targets[0]?.thread ? Number(targets[0].thread) : undefined)
         text = `sent ${command.split(/\s/)[0]} to @${toName} — its outcome echoes on that session's surface`
@@ -5279,30 +5288,20 @@ async function relayBashCommand(t: CommandTarget, command: string, chat_id: stri
 }
 
 // /model <name> gets a confirmation MESSAGE (not just a reaction ack) naming the model the session
-// actually landed on. We read it back from the statusline (via readCurrentModel, which normalises
-// "opus" → "Opus") and only confirm once it reflects the requested family — so a mid-conversation
-// "Switch model?" confirm picker (relayed as buttons elsewhere, model not yet changed) doesn't
-// produce a false success. If it never reflects the change, fall back to the ✍ ack and stay quiet.
+// actually landed on. applySessionModel reads it back from the statusline (via readCurrentModel,
+// which normalises "opus" → "Opus") and only reports a name once it reflects the requested family —
+// so a mid-conversation "Switch model?" confirm (relayed as buttons elsewhere, model not yet
+// changed) doesn't produce a false success. If it never reflects the change, fall back to the ✍ ack.
+// An unknown model or a picker that wouldn't cooperate is REPORTED, never retried as `/model <id>`:
+// that form changes this session and rewrites the account-wide default with it.
 async function relayModelSet(ctx: Context, paneId: string, watcher: PaneWatcher | null, arg: string): Promise<void> {
   const want = arg.trim().toLowerCase().split(/\s+/)[0]   // family token: opus / sonnet / haiku / fable
-  await injectSlash(paneId, watcher, `/model ${MODEL_ALIAS_IDS[want] ?? arg}`)
-  // The SAME cache confirm the mini app's picker hits, and this path had the same hole: it injected,
-  // polled the statusline, and on no change fell back to a ✍ ack — which reads as "didn't take" but
-  // actually left the pane PARKED on the dialog, i.e. wedged, exactly as the mini app did. The ✍ was
-  // the visible symptom of a wedge, not a graceful degradation. Accepting it here also makes the
-  // readback below meaningful: without it the loop was polling for a change that could never happen.
-  await acceptModelSwitch(paneId, watcher, want)
-  let name: string | null = null
-  for (let i = 0; i < 8 && !name; i++) {
-    await new Promise(r => setTimeout(r, 300))
-    const cur = await readCurrentModel(paneId, watcher).catch(() => null)
-    if (cur && cur.toLowerCase().includes(want)) name = cur
-  }
+  const { error, model: name } = await applySessionModel(paneId, watcher, want)
+  if (error) { await ctx.reply(`❌ ${escapeHtml(error)}`, { parse_mode: 'HTML' }).catch(() => {}); return }
   if (name) {
+    // (applySessionModel already remembered the alias against this session — it records only on a
+    // confirmed readback, which is what `name` being set means.)
     await ctx.reply(`✅ Model set to <b>${escapeHtml(name)}</b>`, { parse_mode: 'HTML' }).catch(() => {})
-    // Remember the alias the switch actually landed on — --resume restores the model in practice
-    // but the bridge has no record of it, so a reopen would otherwise boot on the CLI's own default.
-    void sessionForPane(paneId, false).then(sid => recordSessionModel(sid, want)).catch(() => {})
   } else {
     void channel.react({ chatId: String(ctx.chat!.id), messageId: String(ctx.message!.message_id) }, '✍').catch(() => {})
   }
@@ -5333,6 +5332,98 @@ async function acceptModelSwitch(paneId: string, watcher: PaneWatcher | null, al
     }
   }
   await (watcher ? watcher.withInjection(run) : run())
+}
+
+// The picker row each alias names. The row LABEL is what we match (by leading token), never the
+// index — the list's order and its annotations are the CLI's to change. 'Default' is deliberately
+// absent: it is not a model, it is "whatever settings.json says", which is the thing this whole path
+// exists to stop touching.
+const MODEL_PICKER_ROW: Record<string, string> = { opus: 'Opus', fable: 'Fable', sonnet: 'Sonnet', haiku: 'Haiku' }
+
+// Walk the picker's highlight onto `target`. Up/Down only — the row numbers are decoration, there is
+// no numeric selection and no typed filter (measured on 2.1.220). One key at a time for the reason
+// navigateDown documents: this TUI coalesces a batched run of arrows and the cursor stops short.
+// Then re-read and correct once, because a miscount here would press `s` on the wrong model.
+async function moveModelHighlight(pane: string, target: number, seen: ModelPicker): Promise<boolean> {
+  let cur: ModelPicker | null = seen
+  for (let attempt = 0; attempt < 2 && cur; attempt++) {
+    const from = cur.highlightedIndex
+    if (from === target) return true
+    if (from < 0) return false                     // no cursor on screen — never navigate from a guess
+    const key = target > from ? 'Down' : 'Up'
+    for (let i = Math.abs(target - from); i > 0; i--) { await sendKeys(pane, [key]); await sleep(140) }
+    await waitForSettle(pane, 200, 3000)
+    cur = detectModelPicker(await capturePane(pane).catch(() => ''))
+  }
+  return !!cur && cur.highlightedIndex === target
+}
+
+// Set THIS session's model, and only this session's. Every model-set surface (chat picker, /model
+// <name>, the mini-app dial) comes through here.
+//
+// The literal `/model <id>` injection this replaced was one keystroke away from correct and wrong in
+// the way that matters: Claude Code applies an argument form as the account-wide default too,
+// rewriting ~/.claude/settings.json, so tapping a model for one session silently re-aimed every new
+// session on the box. The picker's `s` ("use this session only") is the only per-session apply the
+// CLI offers, and it exists only on the bare-`/model` screen — hence the open/read/navigate dance.
+//
+// On ANY failure this Escapes out and reports. It deliberately does NOT fall back to the argument
+// form: a switch that didn't happen is a nuisance, a silent global-default rewrite is the bug.
+// `awaitReadback: false` returns as soon as the choice is committed and finishes the confirm +
+// readback in the background — for the mini app, whose HTTP request must not be held open for it.
+async function applySessionModel(
+  pane: string, watcher: PaneWatcher | null, alias: string, opts?: { awaitReadback?: boolean },
+): Promise<{ error: string | null; model: string | null }> {
+  const rowName = MODEL_PICKER_ROW[alias]
+  if (!rowName) return { error: `unknown model — one of: ${MODEL_ALIASES.join(' | ')}`, model: null }
+  // Same palette guard the argument form used: bare `/model` is exactly the token that makes the
+  // palette dangerous, so a session where it isn't an exact match must not have Enter pressed for it.
+  const sent = await injectSlash(pane, watcher, '/model', { guardPalette: true })
+  if (!sent.ok) return { error: paletteRefusalText('/model', sent.offered), model: null }
+  let error: string | null = null
+  const pick = async () => {
+    // The picker can render a beat after the input box settles — poll rather than take one read
+    // (same reason acceptModelSwitch polls).
+    let picker: ModelPicker | null = null
+    for (let i = 0; i < 10 && !picker; i++) {
+      await waitForSettle(pane, 200, 2500)
+      picker = detectModelPicker(await capturePane(pane).catch(() => ''))
+      if (!picker) await sleep(400)
+    }
+    if (!picker) { error = 'the model picker never opened — nothing was changed'; return }
+    const target = picker.rows.findIndex(r => r.name.toLowerCase().startsWith(rowName.toLowerCase()))
+    if (target < 0) { error = `this Claude build's model picker has no ${rowName} row — nothing was changed`; return }
+    if (!(await moveModelHighlight(pane, target, picker))) {
+      error = `couldn't move the picker onto ${rowName} — nothing was changed`
+      return
+    }
+    await sendKeys(pane, ['s'])   // session-only. NEVER Enter: that also writes the global default.
+    await waitForSettle(pane, 300, 5000)
+  }
+  await (watcher ? watcher.withInjection(pick) : pick())
+  if (error) {
+    const esc = async () => { await sendKeys(pane, ['Escape']); await waitForSettle(pane, 300, 4000) }
+    await (watcher ? watcher.withInjection(esc) : esc())
+    process.stderr.write(`daemon: model switch to ${alias} in pane ${pane} aborted: ${error}\n`)
+    return { error, model: null }
+  }
+  // A session with cached history still raises the "Switch model?" confirm after the pick; the Fable
+  // CREDIT consent is never answered here (that boundary is pinned in prompt.ts) and simply never
+  // lands, which the readback below reports truthfully.
+  const finish = async (): Promise<string | null> => {
+    await acceptModelSwitch(pane, watcher, alias)
+    for (let i = 0; i < 8; i++) {
+      await sleep(300)
+      const cur = await readCurrentModel(pane, watcher).catch(() => null)
+      if (cur && cur.toLowerCase().includes(alias)) {
+        void sessionForPane(pane, false).then(sid => recordSessionModel(sid, alias)).catch(() => {})
+        return cur
+      }
+    }
+    return null
+  }
+  if (opts?.awaitReadback === false) { void finish(); return { error: null, model: null } }
+  return { error: null, model: await finish() }
 }
 
 // Run a `!<cmd>` shell command on the host (in the focused pane's cwd) and relay stdout/stderr back.
@@ -5610,7 +5701,9 @@ const MODEL_ALIAS_IDS: Record<string, string> = {
   opus: 'claude-opus-5', fable: 'claude-fable-5',
   sonnet: 'claude-sonnet-5', haiku: 'claude-haiku-4-5-20251001',
 }
-const modelArgFor = (alias: string): string => MODEL_ALIAS_IDS[alias] ?? alias
+// (The alias→arg helper that lived here is gone with the last `/model <id>` injection: every
+// model-set surface now picks the row by NAME through applySessionModel. The table above still
+// pins launch-time `--model` flags and the picker's opus fallback.)
 const MODEL_TIP = '💡 Tip: <code>/model &lt;name&gt;</code> to set any specific model.'
 
 // The terminal fallback for a spawn/reopen that would otherwise resolve to NO model at all. Leaving
@@ -7275,8 +7368,10 @@ async function declineFableForOpus(pane: string, sid: string | null): Promise<vo
   const watcher = pane === focus.activePaneId ? focus.paneWatcher : null
   await sendKeys(pane, ['Escape'])
   await waitForSettle(pane, 200, 5000)
-  await injectSlash(pane, watcher, `/model ${MODEL_ALIAS_IDS.opus}`)
-  await acceptModelSwitch(pane, watcher, 'opus')
+  // Session-only, like every other bridge-driven switch — the argument form would also rewrite
+  // ~/.claude/settings.json's account-wide default, and a daemon fallback may never do that.
+  const r = await applySessionModel(pane, watcher, 'opus')
+  if (r.error) { process.stderr.write(`daemon: auto-refresh: opus fallback in ${pane} failed: ${r.error}\n`); return }
   recordSessionModel(sid, 'opus')
   process.stderr.write(`daemon: auto-refresh: declined the Fable credit consent in ${pane}, fell back to opus\n`)
 }
@@ -10412,22 +10507,13 @@ bot.on('callback_query:data', async ctx => {
     const t = await commandTarget(ctx)
     if (!t) { await ctx.answerCallbackQuery().catch(() => {}); return }
     await ctx.answerCallbackQuery({ text: `Switching to ${alias}…` }).catch(() => {})
-    await injectSlash(t.paneId, t.watcher, `/model ${modelArgFor(alias)}`)
-    // Mirrors relayModelSet's fix (b42bd3f): the same "Switch model?" cache-confirm this hits parks the
-    // pane on a dialog, not on the new model — accept it, then only report success once the readback
-    // actually reflects the request. acceptModelSwitch deliberately does NOT accept the usage-credits
-    // dialog, so that case (and any other non-landing) falls through to the truthful "did not take" label.
-    await acceptModelSwitch(t.paneId, t.watcher, alias)
-    let model: string | null = null
-    for (let i = 0; i < 8; i++) {
-      await new Promise(r => setTimeout(r, 300))
-      model = await readCurrentModel(t.paneId, t.watcher).catch(() => null)
-      if (model && model.toLowerCase().includes(alias)) break
-    }
-    const landed = !!model && model.toLowerCase().includes(alias)
-    // Same reasoning as relayModelSet: remember the alias only once the readback confirms it landed.
-    if (landed) void sessionForPane(t.paneId, false).then(sid => recordSessionModel(sid, alias)).catch(() => {})
-    const label = landed ? `now ${escapeHtml(model!)}` : `did not switch — still ${model ? escapeHtml(model) : 'unknown'}`
+    // Through the picker's session-only key, like every other model-set surface — a tap on this
+    // keyboard changes THIS session and leaves the account-wide default alone. applySessionModel
+    // handles the "Switch model?" cache confirm that parks the pane on a dialog rather than the new
+    // model, deliberately does NOT answer the usage-credits dialog, and only reports a name once the
+    // readback reflects the request; anything else falls through to the truthful label below.
+    const { error, model } = await applySessionModel(t.paneId, t.watcher, alias)
+    const label = model ? `now ${escapeHtml(model)}` : error ? escapeHtml(error) : 'did not switch'
     await ctx.editMessageText(`🧠 <b>Model</b> — ${label}\n\n${MODEL_TIP}`, {
       parse_mode: 'HTML', reply_markup: modelPickerKeyboard(),
     }).catch(() => {})
@@ -13726,6 +13812,11 @@ async function webappReadSettings(): Promise<WebappSettingsView> {
       fileBrowser: { value: a.fileBrowser !== false, editable: true, label: 'Files tab in this app (reopens on change)' },
       ...(isTopicMode() ? { baseFolder: { value: baseFolderFull(), editable: false, label: 'new topics land here' } } : {}),
       mcp: { value: mcpEnabled(), editable: true, label: 'new sessions only' },
+      // The 🐣 spawn defaults — the same prefs the /settings sub-panel writes. They belong on this
+      // tab because they are now the ONLY place a global model default is set: the per-session dials
+      // below change one session and nothing else. 'off' = unset (the spawn chain falls to its floor).
+      spawnModel: { value: a.spawnModel ?? 'off', editable: true, options: ['off', ...MODEL_ALIASES], label: 'model for new sessions' },
+      spawnEffort: { value: a.spawnEffort ?? 'off', editable: true, options: ['off', ...EFFORT_LEVELS], label: 'effort for new sessions' },
       mode: { value: cap ? detectCurrentMode(cap) : null, editable: false, label: 'drives the pane (chat-side)' },
       model: { value: sl?.model ?? null, editable: false },
       effort: { value: sl?.effort ?? null, editable: false },
@@ -13754,6 +13845,18 @@ function webappSetSetting(userId: string, key: string, value: unknown): string |
     case 'confirmReset': { const a = loadAccess(); a.confirmReset = truthy(value); saveAccess(a); return null }
     case 'limitFailover': { const a = loadAccess(); a.limitFailover = truthy(value); saveAccess(a); return null }
     case 'fileBrowser': { const a = loadAccess(); a.fileBrowser = truthy(value); saveAccess(a); return null }
+    // 🐣 spawn defaults, validated against the daemon's own lists exactly like the spd:(m|e)
+    // callbacks — the app's copy of them is UI labelling, not authority. 'off' clears the pref.
+    case 'spawnModel': {
+      const v = String(value)
+      if (v !== 'off' && !MODEL_ALIASES.includes(v)) return `unknown model — one of: off | ${MODEL_ALIASES.join(' | ')}`
+      const a = loadAccess(); a.spawnModel = v === 'off' ? undefined : v; saveAccess(a); return null
+    }
+    case 'spawnEffort': {
+      const v = String(value)
+      if (v !== 'off' && !EFFORT_LEVELS.includes(v)) return `unknown effort — one of: off | ${EFFORT_LEVELS.join(' | ')}`
+      const a = loadAccess(); a.spawnEffort = v === 'off' ? undefined : v; saveAccess(a); return null
+    }
     default: return 'unknown or read-only setting'
   }
 }
@@ -13965,21 +14068,14 @@ async function webappSessionAction(userId: string, sid: string, action: 'stop' |
     if (!cap || !onNormalPrompt(cap) || detectWorking(cap)) return 'the session is mid-turn — try again when it goes idle'
     if (action === 'model') {
       if (!MODEL_ALIASES.includes(arg)) return `unknown model — one of: ${MODEL_ALIASES.join(' | ')}`
-      const sent = await injectSlash(pane, watcher, `/model ${modelArgFor(arg)}`, { guardPalette: true })
-      if (!sent.ok) return paletteRefusalText(`/model ${arg}`, sent.offered)
-      // Fire-and-forget: the confirm dance polls for up to ~30s and the HTTP request must not be
-      // held open for it (same call as `close`). The 3s feed poll is what reports the new model.
-      // Chained off the SAME accept, not a separate poll: remember the alias only once a readback
-      // confirms it landed, same as the chat-side pickers — otherwise a declined switch would poison
-      // the resume-model store.
-      void acceptModelSwitch(pane, watcher, arg).then(async () => {
-        for (let i = 0; i < 8; i++) {
-          await new Promise(r => setTimeout(r, 300))
-          const cur = await readCurrentModel(pane, watcher).catch(() => null)
-          if (cur && cur.toLowerCase().includes(arg)) { recordSessionModel(sid, arg); return }
-        }
-      })
-      return null
+      // The picker's session-only key, same as the chat-side surfaces. The choice itself is awaited
+      // (a picker that won't open is an error worth showing the tapper), but the confirm + readback
+      // dance that follows polls for up to ~30s, and the HTTP request must not be held open for it —
+      // hence awaitReadback: false. The 3s feed poll is what reports the new model. The alias is
+      // remembered only once that readback confirms it landed, so a declined switch can't poison the
+      // resume-model store.
+      const { error } = await applySessionModel(pane, watcher, arg, { awaitReadback: false })
+      return error
     }
     if (!EFFORT_LEVELS.includes(arg)) return `unknown effort — one of: ${EFFORT_LEVELS.join(' | ')}`
     // reapplyEffort, not injectEffortChange: mid-conversation Claude Code raises "Change effort

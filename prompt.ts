@@ -797,6 +797,41 @@ export function isModelSwitchConfirm(paneText: string): boolean {
   return /switch model\?/.test(low) && /\byes,\s*switch to\b/.test(low)
 }
 
+// The `/model` PICKER — what bare `/model` (no argument) opens. Its two commit keys do very
+// different things: Enter applies the choice AND writes it to ~/.claude/settings.json as the default
+// for every new session, `s` changes only the session in front of you. A per-session dial may never
+// take the first, so the bridge has to READ this screen instead of firing keys blind:
+//   · the row numbers are decoration — there is no numeric selection and no typed filter, Up/Down
+//     is the only navigation (measured against 2.1.220);
+//   · the initial highlight is NOT reliably the first row (it sits on the active model);
+//   · labels carry annotations — "Opus (1M context)", "Default (recommended)", a "✔" on the active
+//     row — so a row is matched by its leading name token, never by index or full string.
+// The description column repeats model names ("Default (recommended)  Opus 5 with 1M context …"),
+// which is why only the label chunk before the 2+ space gutter is read as the name.
+//
+// Anchored on BOTH halves of the footer. That is what keeps it from ever matching the slash palette,
+// the "Switch model?" cache confirm, the Fable credit consent or a plain prompt — none of which
+// offer a session-only key, and one of which must never be answered for the user at all.
+export type ModelPickerRow = { name: string; highlighted: boolean; current: boolean }
+export type ModelPicker = { rows: ModelPickerRow[]; highlightedIndex: number }
+export function detectModelPicker(paneText: string): ModelPicker | null {
+  const tail = paneLines(paneText).slice(-30)
+  const joined = tail.join('\n').toLowerCase()
+  if (!/s to use this session only/.test(joined) || !/enter to set as default/.test(joined)) return null
+  const rows: ModelPickerRow[] = []
+  for (const line of tail) {
+    // The cursor sits OUTSIDE the numbered label ("❯ 3. Fable ✔"); the effort control on the same
+    // screen ("◉ xHigh effort ←/→ to adjust") carries no number and is skipped by this shape.
+    const m = /^\s*(❯\s*)?\d+\.\s+(\S.*)$/.exec(line)
+    if (!m) continue
+    const label = m[2].split(/\s{2,}/)[0].trim()
+    const name = label.replace(/[✔✓]/g, '').trim()
+    if (name) rows.push({ name, highlighted: !!m[1], current: /[✔✓]/.test(label) })
+  }
+  if (!rows.length) return null
+  return { rows, highlightedIndex: rows.findIndex(r => r.highlighted) }
+}
+
 // Claude Code's bash-mode input box is armed: the footer swaps its hints for "! for shell mode"
 // while a `!` command sits in the box. Injecting ANYTHING into this state concatenates into the
 // pending bash line, so relays must refuse (daemon-side guard) until it's submitted or discarded.
