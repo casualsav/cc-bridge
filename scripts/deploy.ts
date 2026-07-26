@@ -29,7 +29,7 @@
 // failed build never mutates your working tree.
 
 import { spawnSync } from 'node:child_process'
-import { existsSync, readdirSync, readFileSync, rmSync, mkdirSync, copyFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, rmSync, mkdirSync, copyFileSync, renameSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { shipGate } from '../ship-gate.ts'
@@ -351,8 +351,20 @@ if (freshCache) {
   const seed = versions.at(-1)
   if (seed) {
     step(`cloning cache ${seed} → ${next} (carries node_modules/bun.lock)`)
-    const r = sh('cp', ['-a', join(CACHE_BASE, seed), newCache])
-    if (r.status !== 0) die(`cloning cache dir failed: ${r.stderr}`)
+    // Clone to a TEMP path and rename into place, never straight to the version name. What is being
+    // copied is the PREVIOUS version's tree, and for as long as it sits under <next>'s name it is
+    // indistinguishable from a release — ensure-daemon's "highest version wins" will launch it. A
+    // deploy that died in this window on 2026-07-26 left 0.4.76 holding 0.4.75's bytes and the fleet
+    // respawned into it. rename(2) is atomic within a filesystem, so the version name never exists
+    // in a half-populated state, and an abort now leaves a `.cloning-<pid>` dir that neither this
+    // script's seed scan nor findDaemon will look at (both filter on /^\d+\.\d+\.\d+$/).
+    // This does NOT make the guard redundant: the renamed dir still carries the SEED's manifest
+    // until the sync below stamps it, so there remains a window the manifest check covers.
+    const tmp = `${newCache}.cloning-${process.pid}`
+    rmSync(tmp, { recursive: true, force: true })
+    const r = sh('cp', ['-a', join(CACHE_BASE, seed), tmp])
+    if (r.status !== 0) { rmSync(tmp, { recursive: true, force: true }); die(`cloning cache dir failed: ${r.stderr}`) }
+    renameSync(tmp, newCache)
   } else {
     step(`no existing cache version to clone — creating ${next} from scratch`)
     mkdirSync(newCache, { recursive: true })
