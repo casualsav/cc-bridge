@@ -129,7 +129,7 @@ import {
 } from './prompt-relay.ts'
 import { planStuckSweep, planWedgeEscalation, type StuckState } from './stuck-plan.ts'
 import { planContextWarn, planCtxNudge } from './ctx-warn.ts'
-import { spawnModelFlag, spawnWideContext } from './model-window.ts'
+import { spawnModelFlag, spawnWideContext, WIDE_CONTEXT_SUFFIX } from './model-window.ts'
 import {
   initStatusCard, statusCardText, statusKeyboard, updateSessionPin, updateTopicPins,
   removeSessionPins, refreshSessionPin, forgetChatPin, armChatPin, sessionPins, pinTextCache, persistSessionPins,
@@ -6664,6 +6664,33 @@ async function rebindCrossEngineSession(pane: string, cwd: string, sid: string |
   process.stderr.write(`daemon: cross-engine failover: gave up waiting for sid ${sid}'s new session id (${agent}, ${cwd})\n`)
 }
 
+// The bridge alias behind a model id the API actually answered with. Exact first (the pinned ids in
+// MODEL_ALIAS_IDS), then the family token — the pins name ONE build each (haiku's is dated), while
+// the API answers with whatever build is live, so an exact-only lookup would call
+// `claude-sonnet-4-5-20250929` unknown. The `[1m]` window suffix is not part of the identity.
+function aliasForModelId(modelId: string | null): string | null {
+  if (!modelId) return null
+  const bare = (modelId.endsWith(WIDE_CONTEXT_SUFFIX) ? modelId.slice(0, -WIDE_CONTEXT_SUFFIX.length) : modelId).toLowerCase()
+  return Object.keys(MODEL_ALIAS_IDS).find(a => MODEL_ALIAS_IDS[a].toLowerCase() === bare)
+    ?? MODEL_ALIASES.find(a => bare.includes(a))
+    ?? null
+}
+
+// The model a RESUME must re-assert, taken from what the API last answered with on this
+// conversation. Neither resume branch used to assert one at all: the in-pane line emitted no --model,
+// so ~/.claude/settings.json's default won (currently Fable — that silently moves a contextful
+// session onto credit rates and makes it re-read its whole history), and the respawn fell through to
+// spawnSession's REMEMBERED alias, which only tracks /model commands the bridge itself sent and goes
+// stale the moment the model is switched in the TUI. The transcript is the only record of the truth.
+// Both fallbacks land on opus: a conversation with context may never end up on Haiku, and may not
+// drop to the Fable floor either — fable is for FRESH spawns. Re-asserting fable for a conversation
+// already ON fable is preservation, not a switch, so that one passes through.
+async function resumeModelAlias(pane: string, cwd: string | null): Promise<string> {
+  const file = cwd ? await transcriptForPane(pane, cwd).catch(() => null) : null
+  const alias = aliasForModelId(file ? latestModelId(file) : null)
+  return !alias || alias === 'haiku' ? 'opus' : alias
+}
+
 // The message-free core of a restart-in-place: /exit, relaunch `claude --resume <id>` in the same
 // pane (same pane keeps the bridge pointed at it, same id keeps the conversation), re-apply the
 // permission mode. Shared by the single-session button and the restart-all sweep.
@@ -6693,6 +6720,13 @@ async function restartPaneSessionCore(pane: string, id: string | null, accountOv
   // Captured BEFORE /exit — a pane that dies with it can't answer these anymore.
   const cwd = await paneCwd(pane).catch(() => null)
   const sid = await sessionForPane(pane, false).catch(() => null)
+  // Read while the OLD transcript is still the pane's — a resume carries its conversation, so it must
+  // carry that conversation's model too. Cross-engine (id null) is a fresh launch on the other
+  // provider and takes no model from here.
+  const resumeAlias = agent === 'claude' && id !== null ? await resumeModelAlias(pane, cwd) : null
+  const resumeModelArgs = resumeAlias
+    ? spawnModelFlag(resumeAlias, MODEL_ALIAS_IDS, spawnWideContext(loadAccess().spawnContext1m))?.split(/\s+/) ?? []
+    : []
   const watcher = pane === focus.activePaneId ? focus.paneWatcher : null
   // Persist what the pane is ON right now, so if the resume pops the post-update picker (which
   // defers the restore to the resumesel tap) the saved dials are accurate even for a never-focused
@@ -6718,8 +6752,11 @@ async function restartPaneSessionCore(pane: string, id: string | null, accountOv
       }
       const resume = agent === 'codex'
         ? codexLaunchCommand({ kind: 'codex', ...(id !== null ? { resumeId: id } : {}), model: codexLaunchModel(), effort: codexLaunchEffort() }, process.env.CODEX_BIN || 'codex')
-        : `${envPrefix}${claudeHarnessLaunch(harness, claudeBin(), [
-            '--allow-dangerously-skip-permissions', ...(id !== null ? ['--resume', id] : []),
+        // The pinned ids aren't in every CLI build's advisor catalog yet, so a pinned --model boots
+        // with the advisor tool silently disabled unless this env var is set — same rule spawnSession
+        // applies, now that this line asserts a pinned model too.
+        : `${envPrefix}${resumeModelArgs.some(a => a.startsWith('claude-')) ? 'CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL=1 ' : ''}${claudeHarnessLaunch(harness, claudeBin(), [
+            '--allow-dangerously-skip-permissions', ...(id !== null ? ['--resume', id] : []), ...resumeModelArgs,
           ])}`
       await sendKeys(pane, [`hash -r; ${resume}`, 'Enter'])
       await waitForSettle(pane, 400, 30_000)
@@ -6749,8 +6786,12 @@ async function restartPaneSessionCore(pane: string, id: string | null, accountOv
       // `sid` still carries the OLD (dead) engine's id at this point. Passed through, that would
       // silently `codex resume <the-dead-claude-uuid>` instead of the fresh launch this needs.
       // stampPaneSession below restores the pane→session mapping that passing it would have set.
-      const fresh = await spawnSession(cwd, id !== null ? `--resume ${id}` : '', id !== null ? (sid ?? undefined) : undefined, account, agent, harness)
+      // The model goes in as an explicit dial: spawnSession's own resume chain would otherwise start
+      // from the remembered alias, which is exactly the stale value this function is correcting.
+      const fresh = await spawnSession(cwd, id !== null ? `--resume ${id}` : '', id !== null ? (sid ?? undefined) : undefined, account, agent, harness,
+        resumeAlias ? { model: resumeAlias } : undefined)
       if (!fresh) return null
+      if (resumeAlias && sid) recordSessionModel(sid, resumeAlias)   // the memory converges on what we just asserted
       if (id === null && sid) await stampPaneSession(fresh, sid)
       // The session lives in `fresh` now — drop the dead pane's registry + session mapping so
       // close-on-end can't resolve it back to the (live) session and close its topic.
@@ -6780,6 +6821,7 @@ async function restartPaneSessionCore(pane: string, id: string | null, accountOv
       process.stderr.write(`daemon: restart: pane ${pane} died on /exit — respawned session in ${fresh} (${cwd})\n`)
       return fresh   // mode + effort re-seeded by spawnSession's resume branch (sessionModes/sessionEfforts)
     }
+    if (resumeAlias && sid) recordSessionModel(sid, resumeAlias)   // the memory converges on what we just asserted
     // If the resume popped the post-update "Resume session" picker, the pane is sitting on the menu —
     // don't drive mode/effort keystrokes into it. It's relayed as buttons; the resumesel tap restores
     // both dials once the user picks (restoreResumedDials).
