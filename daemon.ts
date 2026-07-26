@@ -26,7 +26,7 @@ import { hopKey, resolveChain, pickNextHop, moveHop } from './failover-chain.ts'
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
 import { renderSessionsView } from './sessions-view.ts'
-import { detectCurrentMode, onNormalPrompt, isModelSwitchConfirm, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, feedbackSurveyOpen, slashPaletteWouldMisfire, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen } from './prompt.ts'
+import { detectCurrentMode, onNormalPrompt, inputBoxContent, isModelSwitchConfirm, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, feedbackSurveyOpen, slashPaletteWouldMisfire, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen } from './prompt.ts'
 import { resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, currentTurnActivity, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
 import {
   AGENT_PANE_OPT, agentExitKeys, agentInterruptKeys, agentLabel, agentResetCommand, agentSubmitKeys,
@@ -108,7 +108,7 @@ import { refKey, type MsgRef, type Button, type SendOpts } from './channel.ts'
 import { planAuxRelayWork } from './relay-plan.ts'
 import { createMsgTracker } from './msg-tracker.ts'
 import { startEditScheduler, scheduleEdit, scheduleDelete, cancelEdit, touchActiveView } from './edit-scheduler.ts'
-import { initUpdates, startUpdate, bridgeVersion, claudeBin, claudeVersion, sweepUpdateChecks } from './updates.ts'
+import { initUpdates, startUpdate, bridgeVersion, claudeBin, claudeVersion, sweepUpdateChecks, sweepClaudeInstall, installClaudeLatest } from './updates.ts'
 import { formatChannelBlock } from './inbound.ts'
 import { initQueue, readLater, writeLater, sweepLaterQueues, LATER_SWEEP_MS } from './queue.ts'
 import {
@@ -337,7 +337,9 @@ initStatusCard({
   },
   newestMsgId: chat => msgLatest(chat, null),   // pinned card measures its own distance from the conversation
 })
-initUpdates({ channel })
+// onClaudeInstalled fires the stale-session sweep the moment a new binary lands, so the rolling
+// refresh follows the install by seconds rather than waiting out its hourly tick.
+initUpdates({ channel, onClaudeInstalled: () => void sweepSessionVersions() })
 // The fleet fallback is for panes with no surface BY NATURE (a headless session). A session whose
 // topic the user DELETED is a different thing: outboundTargetsFor returns [] there deliberately
 // (topic-runtime.ts, "must NOT fall through to General's unthreaded chat"), and re-routing its cards
@@ -6800,10 +6802,14 @@ async function restartPaneSessionCore(pane: string, id: string | null, accountOv
 async function updateClaude(chat: string): Promise<void> {
   const dm = (t: string) => channel.sendText(chat, t).catch(() => {})
   await dm('🧠 Updating Claude — installing, then resuming this session on it…')
-  const before = await claudeVersion()
-  try { await exec(claudeBin(), ['install'], { timeout: 300_000 }) }
-  catch (e) { await dm(`❌ Claude install failed.\n<code>${escapeHtml(String((e as { stderr?: string })?.stderr || e).slice(0, 300))}</code>`); return }
-  const after = await claudeVersion()
+  // installClaudeLatest is the one and only install call site — `latest` is not a preference there
+  // but a correction (a bare `claude install` targets the STABLE channel, which trails `latest` here,
+  // so the "update" quietly installed an OLDER build and bounced the session onto it). Going through
+  // it also puts this tap and the background sweep behind the same in-flight guard.
+  const r = await installClaudeLatest()
+  if (r === 'busy') { await dm('⏳ An install is already running — it\'ll finish on its own, then idle sessions refresh onto it.'); return }
+  if (!r) { await dm('❌ Claude install failed — the installer\'s output is in the daemon log.'); return }
+  const { before, after } = r
   await dm(after && before && after !== before
     ? `✅ Claude installed <b>v${escapeHtml(before)}</b> → <b>v${escapeHtml(after)}</b>.`
     : `✅ Claude installed (<b>v${escapeHtml(after ?? before ?? '?')}</b>).`)
@@ -6813,39 +6819,98 @@ async function updateClaude(chat: string): Promise<void> {
 }
 
 
+// What Claude build a pane is ACTUALLY running, read off the process instead of its transcript. A
+// transcript names a version only once the session has spoken, so a spawned session that hasn't
+// answered yet is invisible to a transcript-only read — and those are exactly the sessions the
+// rolling refresh has to be able to see. The native installer puts the version in the binary's own
+// path (~/.local/share/claude/versions/<x.y.z>), so /proc/<pid>/exe IS the version.
+// `tmux show-environment` is never consulted: it reports the environment the tmux SERVER was started
+// with, not the pane's, and it has lied about precisely this before.
+// null means UNKNOWN, never "stale" — every caller treats it as a skip.
+function claudeExeVersion(pid: number): string | null {
+  try {
+    const base = basename(readlinkSync(`/proc/${pid}/exe`))
+    return /^\d+\.\d+\.\d+$/.test(base) ? base : null
+  } catch { return null }
+}
+async function childPids(pid: number): Promise<number[]> {
+  try {
+    const { stdout } = await exec('ps', ['-o', 'pid=', '--ppid', String(pid)], { timeout: 2000 })
+    return stdout.split('\n').map(l => parseInt(l.trim(), 10)).filter(n => Number.isFinite(n)).slice(0, 16)
+  } catch { return [] }
+}
+// Walk the pane's process tree for a version-named binary. A daemon-spawned pane IS claude (tmux
+// runs the launch line directly); a shell-launched one (`cc-bridge`) has it a level down, and a
+// wrapper can push it to two.
+async function paneTreeClaudeVersion(pane: string): Promise<string | null> {
+  try {
+    const { stdout } = await exec('tmux', ['display-message', '-p', '-t', pane, '#{pane_pid}'], { timeout: 2000 })
+    const root = parseInt(stdout.trim(), 10)
+    if (!Number.isFinite(root)) return null
+    let level = [root]
+    for (let depth = 0; depth < 3 && level.length; depth++) {
+      for (const pid of level) { const v = claudeExeVersion(pid); if (v) return v }
+      level = (await Promise.all(level.map(childPids))).flat().slice(0, 32)
+    }
+  } catch {}
+  return null
+}
+async function paneRunningClaudeVersion(pane: string): Promise<string | null> {
+  const fromExe = await paneTreeClaudeVersion(pane)
+  if (fromExe) return fromExe
+  // The npm-global build carries no version in its path (…/bin/claude.exe), /proc can be unreadable,
+  // and a pane may have no claude at all. What the session last WROTE is a true reading wherever it
+  // exists, so keep it as the fallback rather than declaring the pane unknown.
+  const cwd = await paneCwd(pane).catch(() => null)
+  const file = cwd ? await transcriptForPane(pane, cwd) : null
+  return file ? lastVersionInTranscript(file) : null
+}
+
 // Claude's native build auto-updates the BINARY silently while live sessions keep running the
-// old build until restarted — and nothing announces that. Compare each session's transcript
-// version to the installed binary and offer a one-tap restart, once per session+binary pair.
+// old build until restarted — and nothing announces that. Compare each session's running build
+// to the installed binary and either refresh it (auto-update on) or offer a one-tap restart.
 const staleSessionNotified = new Map<string, string>()   // paneId → installed version already flagged
 // The notice fires at most once a day, persisted across restarts — deploys bounce the daemon
 // constantly, so an in-memory stamp would re-arm it on every deploy.
 const UPDATE_NOTICE_STAMP = join(STATE_DIR, 'update-notice.json')
+// A refresh pass outlives its trigger (each session gets up to two 120s health-check windows), and
+// the sweep now has two triggers — the hourly tick and a just-finished install. Overlapping passes
+// would collect the same panes before either marked them and type two /exits into one session.
+let sweepingSessionVersions = false
 async function sweepSessionVersions(): Promise<void> {
-  if (loadAccess().updateChecks === false) return
+  if (sweepingSessionVersions) return
+  sweepingSessionVersions = true
+  try { await sweepSessionVersionsInner() } finally { sweepingSessionVersions = false }
+}
+async function sweepSessionVersionsInner(): Promise<void> {
+  const access = loadAccess()
+  const auto = access.autoUpdate === true
+  // `updateChecks: false` silences NOTICES. Auto-refresh isn't a notice — it's the action the user
+  // opted into with auto-update — so it keeps running with notifications off.
+  if (!auto && access.updateChecks === false) return
   const installed = await claudeVersion()
   if (!installed) return
-  // Collect every newly-stale session first, then send ONE notice — to General in topic mode,
-  // once to the DM(s) otherwise. The old per-pane send routed through each session's topic,
-  // so a binary update sprayed the same message into every open topic.
-  const stale: Array<{ pane: string; cwd: string | null; running: string }> = []
+  // Collect every newly-stale session first, then act once — a per-pane send routed through each
+  // session's topic, so a binary update sprayed the same message into every open topic.
+  const stale: string[] = []
   for (const pane of [...offMcpPanes]) {
     try {
       if (staleSessionNotified.get(pane) === installed) continue
-      const cwd = await paneCwd(pane).catch(() => null)
-      const file = cwd ? await transcriptForPane(pane, cwd) : null
-      const running = file ? lastVersionInTranscript(file) : null
+      if ((await paneAgentKind(pane)) !== 'claude') continue   // codex panes run their own binary on their own schedule
+      const running = await paneRunningClaudeVersion(pane)
       if (!running) continue
       let newer = false
       try { newer = Bun.semver.order(installed, running) > 0 } catch {}
       if (!newer) continue
-      stale.push({ pane, cwd, running })
+      stale.push(pane)
     } catch {}
   }
   if (!stale.length) return
+  if (auto) { await autoRefreshStaleSessions(stale, installed); return }
   // Daily cap. While capped, panes stay UNMARKED so the next allowed sweep re-collects them.
   const lastAt = readJsonFile<{ at?: number }>(UPDATE_NOTICE_STAMP, {}).at ?? 0
   if (Date.now() - lastAt < 24 * 3600_000) return
-  for (const s of stale) staleSessionNotified.set(s.pane, installed)
+  for (const p of stale) staleSessionNotified.set(p, installed)
   writeJsonFile(UPDATE_NOTICE_STAMP, { at: Date.now() })
   const n = stale.length
   const text =
@@ -6870,45 +6935,42 @@ async function paneBackUp(pane: string): Promise<boolean> {
   return !!cap && (onNormalPrompt(cap) || isResumeSessionPrompt(cap))
 }
 
-// "♻️ Restart all sessions" → restart every stale pane in place (sequentially — restarts type into
-// panes, and parallel key-streams interleave), then health-check that each came back to a prompt.
-// Failures get a per-session revive button (spawn `-c` in its previous topic); full success gets ✅.
-async function restartAllStaleSessions(chat: string, onlyStale = true): Promise<void> {
-  const say = (t: string, kb?: InlineKeyboard) =>
-    channel.sendText(chat, t, kb ? { buttons: kbToButtons(kb) } : {}).catch(() => {})
-  const installed = await claudeVersion()
-  // Recompute staleness at tap time (the notice may be hours old; sessions moved or restarted since).
-  const targets: Array<{ pane: string; sid: string | null; name: string; id: string; cwd: string | null }> = []
-  for (const pane of [...offMcpPanes]) {
-    try {
-      const cwd = await paneCwd(pane).catch(() => null)
-      const file = cwd ? await transcriptForPane(pane, cwd) : null
-      if (!file) continue
-      // Stale mode only targets sessions running an older Claude than installed; "all" takes every one.
-      if (onlyStale) {
-        const running = lastVersionInTranscript(file)
-        if (!running || !installed) continue
-        let newer = false
-        try { newer = Bun.semver.order(installed, running) > 0 } catch {}
-        if (!newer) continue
-      }
-      const sid = await sessionForPane(pane, false).catch(() => null)
-      const name = (sid ? getTopicBySession(sid)?.name : null) ?? (basename(cwd ?? '') || 'session')
-      targets.push({ pane, sid, name, id: agentSessionId(file), cwd })
-    } catch {}
-  }
-  if (!targets.length) { await say(onlyStale ? '✅ Every session is already on the current Claude — nothing to restart.' : 'ℹ️ No active sessions to restart.'); return }
-  await say(`♻️ Restarting ${targets.length === 1 ? 'the session' : `${targets.length} sessions`}${onlyStale ? ' on the new Claude' : ''}…`)
-  // A restart can move a session to a NEW pane (spawned panes die on /exit) — track the pane that
-  // hosts it now, so the health check below watches the right one.
-  for (const t of targets) { try { const now = await restartPaneSessionCore(t.pane, t.id); if (now) t.pane = now } catch {} }
+// One session under restart. `id` is the Claude conversation to resume, or null when there is
+// nothing to resume (the zero-turn refresh lane) — a null id must never reach restartPaneSessionCore,
+// where it means a cross-ENGINE takeover instead.
+type RestartTarget = { pane: string; sid: string | null; name: string; id: string | null; cwd: string | null }
 
+// The model a refresh must assert when it launches a session with no conversation to carry one in.
+// Same chain a resume-spawn uses — the session's own remembered alias, then the /settings 🐣 spawn
+// default (validated), then the floor — and it deliberately never bottoms out at null: a launch with
+// no --model at all hands the choice to the CLI's own default, which is how a reopen came back on
+// Haiku 4.5 and dropped the 1M window with it.
+function refreshSpawnModel(sid: string | null): string {
+  const pref = loadAccess().spawnModel
+  return (sid ? sessionModels.get(sid) : null)
+    ?? (pref && MODEL_ALIASES.includes(pref) ? pref : null)
+    ?? SPAWN_MODEL_FLOOR
+}
+
+// The tail every restart flow shares: health-check each session back to a prompt, give the ones that
+// missed an automatic second chance, then report. Both the tapped "restart all" and the unattended
+// rolling refresh come through here, so there is exactly ONE health-check implementation — `auto`
+// only changes the wording and keeps the summary quiet.
+async function settleRestartedSessions(
+  targets: RestartTarget[],
+  opts: { installed: string | null; onlyStale: boolean; auto: boolean },
+  say: (t: string, kb?: InlineKeyboard) => Promise<unknown>,
+): Promise<void> {
+  const { installed, onlyStale, auto } = opts
+  const allBackUp = () => auto
+    ? `♻️ Auto-refreshed ${targets.length === 1 ? 'one idle session' : `${targets.length} idle sessions`} onto <b>v${escapeHtml(installed ?? '?')}</b>.`
+    : `✅ All ${targets.length === 1 ? 'done — the session is' : `${targets.length} sessions are`} back up${onlyStale ? ` on <b>v${escapeHtml(installed ?? '?')}</b>` : ''}, conversations resumed in place.`
   // A session is "back up" if its tracked pane is at a prompt — OR if the session is live and
   // prompt-ready in SOME pane. A restart can move a session to a new pane we lost track of, and a
   // large/slow resume can lag the one pane we're watching; checking the SESSION (not just the pane)
   // stops the false "didn't come back up" that made users tap Resume and double-spawn an already-live
   // session. When a sibling pane is the live one, retarget so the next checks watch it.
-  const sessionBackUp = async (t: (typeof targets)[number]): Promise<boolean> => {
+  const sessionBackUp = async (t: RestartTarget): Promise<boolean> => {
     if (await paneBackUp(t.pane).catch(() => false)) return true
     if (!t.sid) return false
     const p = await paneForSession(t.sid).catch(() => null)
@@ -6924,22 +6986,21 @@ async function restartAllStaleSessions(chat: string, onlyStale = true): Promise<
     if (pending.size) await sleep(3000)
   }
   const down = [...pending]
-  if (!down.length) {
-    await say(`✅ All ${targets.length === 1 ? 'done — the session is' : `${targets.length} sessions are`} back up${onlyStale ? ` on <b>v${escapeHtml(installed ?? '?')}</b>` : ''}, conversations resumed in place.`)
-    return
-  }
+  if (!down.length) { await say(allBackUp()); return }
   // Second chance, AUTOMATIC (no tap needed): if the session is already live in a pane, just adopt
   // it — NEVER spawn a twin. Otherwise anything whose pane is gone gets respawned from scratch in its
-  // folder — `-c` continues that cwd's latest conversation (the one that died), the preset stamp keeps
-  // its topic. A pane that's alive but not at a prompt yet just gets the second health-check window.
-  const retried: typeof targets = []
-  const lost: typeof targets = []
+  // folder — `--resume` puts its conversation back, the preset stamp keeps its topic. A zero-turn
+  // target has no conversation to resume, so it respawns bare (see relaunchFreshSession for why `-c`
+  // is not an option there). A pane that's alive but not at a prompt yet just gets the second window.
+  const retried: RestartTarget[] = []
+  const lost: RestartTarget[] = []
   for (const t of down) {
     const live = t.sid ? await paneForSession(t.sid).catch(() => null) : null
     if (live) { t.pane = live; retried.push(t); continue }
     const alive = await paneAlive(t.pane).catch(() => false)
     const fresh = !alive && t.sid && t.cwd
-      ? await spawnSession(t.cwd, `--resume ${t.id}`, t.sid, topicAccount(getTopicBySession(t.sid)), topicAgent(getTopicBySession(t.sid)))
+      ? await spawnSession(t.cwd, t.id ? `--resume ${t.id}` : '', t.sid, topicAccount(getTopicBySession(t.sid)), topicAgent(getTopicBySession(t.sid)),
+          undefined, t.id ? undefined : { model: refreshSpawnModel(t.sid) })
       : null
     if (fresh) { t.pane = fresh; if (t.sid) await reopenSessionTopic(t.sid); retried.push(t) }
     else if (alive) retried.push(t)
@@ -6953,7 +7014,7 @@ async function restartAllStaleSessions(chat: string, onlyStale = true): Promise<
   }
   const still = [...lost, ...retried.filter(t => pending2.has(t))]
   if (!still.length) {
-    await say(`✅ All ${targets.length === 1 ? 'done — the session is' : `${targets.length} sessions are`} back up${onlyStale ? ` on <b>v${escapeHtml(installed ?? '?')}</b>` : ''} (${down.length === 1 ? 'one was' : `${down.length} were`} respawned in a fresh pane, conversations intact).`)
+    await say(auto ? allBackUp() : `✅ All ${targets.length === 1 ? 'done — the session is' : `${targets.length} sessions are`} back up${onlyStale ? ` on <b>v${escapeHtml(installed ?? '?')}</b>` : ''} (${down.length === 1 ? 'one was' : `${down.length} were`} respawned in a fresh pane, conversations intact).`)
     return
   }
   const kb = new InlineKeyboard()
@@ -6962,15 +7023,217 @@ async function restartAllStaleSessions(chat: string, onlyStale = true): Promise<
   const names = still.map(t => `<b>${escapeHtml(t.name)}</b>`).join(', ')
   await say(
     `⚠️ ${still.length} of ${targets.length} session${targets.length === 1 ? '' : 's'} didn't come back up: ${names}.` +
-    (revivable ? '\n\nTap to resume — each reopens in its previous topic with its conversation intact.' : ''),
+    // No promise about the conversation here: a zero-turn target hasn't got one, and the revive
+    // button launches it bare rather than grafting it onto the folder's newest.
+    (revivable ? '\n\nTap to resume — each reopens in its previous topic.' : ''),
     revivable ? kb : undefined)
+}
+
+// "♻️ Restart all sessions" → restart every stale pane in place (sequentially — restarts type into
+// panes, and parallel key-streams interleave), then hand off to the shared health-check tail.
+async function restartAllStaleSessions(chat: string, onlyStale = true): Promise<void> {
+  const say = (t: string, kb?: InlineKeyboard) =>
+    channel.sendText(chat, t, kb ? { buttons: kbToButtons(kb) } : {}).catch(() => {})
+  const installed = await claudeVersion()
+  // Recompute staleness at tap time (the notice may be hours old; sessions moved or restarted since).
+  const targets: RestartTarget[] = []
+  for (const pane of [...offMcpPanes]) {
+    try {
+      const cwd = await paneCwd(pane).catch(() => null)
+      const file = cwd ? await transcriptForPane(pane, cwd) : null
+      if (!file) continue
+      // Stale mode only targets sessions running an older Claude than installed; "all" takes every one.
+      if (onlyStale) {
+        const running = await paneRunningClaudeVersion(pane)
+        if (!running || !installed) continue
+        let newer = false
+        try { newer = Bun.semver.order(installed, running) > 0 } catch {}
+        if (!newer) continue
+      }
+      const sid = await sessionForPane(pane, false).catch(() => null)
+      const name = (sid ? getTopicBySession(sid)?.name : null) ?? (basename(cwd ?? '') || 'session')
+      targets.push({ pane, sid, name, id: agentSessionId(file), cwd })
+    } catch {}
+  }
+  if (!targets.length) { await say(onlyStale ? '✅ Every session is already on the current Claude — nothing to restart.' : 'ℹ️ No active sessions to restart.'); return }
+  await say(`♻️ Restarting ${targets.length === 1 ? 'the session' : `${targets.length} sessions`}${onlyStale ? ' on the new Claude' : ''}…`)
+  // A restart can move a session to a NEW pane (spawned panes die on /exit) — track the pane that
+  // hosts it now, so the health check watches the right one.
+  for (const t of targets) { try { const now = await restartPaneSessionCore(t.pane, t.id); if (now) t.pane = now } catch {} }
+  await settleRestartedSessions(targets, { installed, onlyStale, auto: false }, say)
+}
+
+// The zero-turn refresh lane. A session that has never completed a turn has NOTHING to resume, and
+// `claude -c` in that state exits 1 — taking the pane, and the session's name with it, unrecoverably.
+// So this launches a genuinely FRESH session under the same bridge session id, which is what keeps
+// the topic, its name and its routing. Deliberately not routed through restartPaneSessionCore's
+// `id: null` branch: there, null means a cross-ENGINE takeover, with its own stamp/rebind dance.
+// Returns the pane now hosting the session, null when the relaunch was ATTEMPTED and failed, or
+// 'untouched' when it declined before typing anything — the session is still up on the old build,
+// which the caller must not then report as refreshed.
+async function relaunchFreshSession(t: RestartTarget): Promise<string | 'untouched' | null> {
+  if (!t.cwd) return 'untouched'
+  const preCap = await capturePane(t.pane).catch(() => '')
+  const mode = detectCurrentMode(preCap)
+  const effort = parseStatusline(preCap)?.effort ?? null
+  const account = await paneAccount(t.pane)
+  const harness = await paneHarnessProfile(t.pane)
+  // Checked BEFORE the exit: a provider we can't launch against would leave the session exited with
+  // nothing to relaunch it into.
+  if (!(await harnessProviderReady(harness))) return 'untouched'
+  if (t.sid) {
+    recordSessionMode(t.sid, mode)
+    recordSessionEffort(t.sid, effort)
+    // Owner invariant: a refresh never lands a session on Haiku. Dropping the memory rather than
+    // rewriting it hands the choice back to the chain below, which floors at SPAWN_MODEL_FLOOR.
+    if (sessionModels.get(t.sid) === 'haiku') {
+      sessionModels.delete(t.sid)
+      writeJsonFile(SESSION_MODELS_FILE, Object.fromEntries(sessionModels))
+    }
+  }
+  const model = refreshSpawnModel(t.sid)
+  setPaneRestarting(t.pane, true)
+  try {
+    const watcher = t.pane === focus.activePaneId ? focus.paneWatcher : null
+    const run = async () => {
+      await sendKeys(t.pane, agentExitKeys('claude'))
+      for (let i = 0; i < 40 && await paneClaudeLive(t.pane); i++) await waitForSettle(t.pane, 200, 1500)
+    }
+    await (watcher ? watcher.withInjection(run) : run())
+    // A shell-backed pane (`cc-bridge` in the owner's own window) survives /exit — relaunch INTO it
+    // rather than spawning a window beside it and leaving an orphaned shell still stamped with this
+    // session. The stale transcript stamp goes first, or discovery relays the dead conversation's
+    // replies into this topic (the stamp-guard failure).
+    if (await paneAlive(t.pane)) {
+      // Nobody is watching this one, so refuse to type a launch line into an agent that never left —
+      // it would land in the composer and be submitted as a message. Next sweep tries again.
+      if ((await paneCommand(t.pane).catch(() => '')) === 'claude') return 'untouched'
+      await exec('tmux', ['set-option', '-p', '-u', '-t', t.pane, TRANSCRIPT_PANE_OPT], { timeout: 2000 }).catch(() => {})
+      paneTranscriptCache.delete(t.pane)
+      ensureFolderTrusted(t.cwd, account)
+      const flags = [
+        spawnModelFlag(model, MODEL_ALIAS_IDS, spawnWideContext(loadAccess().spawnContext1m)),
+        effort && effort !== 'auto' && EFFORT_LEVELS.includes(effort) ? `--effort ${effort}` : null,
+        mode !== 'default' ? `--permission-mode ${mode}` : null,
+      ].filter((f): f is string => !!f)
+      const envPrefix = (account.name === 'main' ? '' : `CLAUDE_CONFIG_DIR='${account.configDir.replace(/'/g, `'\\''`)}' `)
+        + (flags.some(f => f.startsWith('--model claude-')) ? 'CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL=1 ' : '')
+      const launch = `${envPrefix}${claudeHarnessLaunch(harness, claudeBin(), ['--allow-dangerously-skip-permissions', ...flags.flatMap(f => f.split(/\s+/))])}`
+      const relaunch = async () => {
+        await sendKeys(t.pane, [`hash -r; ${launch}`, 'Enter'])
+        await waitForSettle(t.pane, 400, 30_000)
+      }
+      await (watcher ? watcher.withInjection(relaunch) : relaunch())
+      return t.pane
+    }
+    // The pane went with the agent (a daemon-spawned pane IS claude) — respawn the session in a
+    // fresh one, carrying the same bookkeeping restartPaneSessionCore does on that path.
+    const fresh = await spawnSession(t.cwd, '', t.sid ?? undefined, account, 'claude', harness, { model, effort, mode })
+    if (!fresh) return null
+    offMcpPanes.delete(t.pane)
+    releasePaneSession(t.pane)
+    offMcpPanes.add(fresh)
+    setPaneRestarting(fresh, true)
+    setTimeout(() => setPaneRestarting(fresh, false), 30_000)   // boot window — discovery re-adopts `fresh` well within this
+    if (t.sid) await reopenSessionTopic(t.sid)
+    if (t.pane === focus.activePaneId) adoptPane(fresh)
+    process.stderr.write(`daemon: auto-refresh: pane ${t.pane} died on /exit — fresh session in ${fresh} (${t.cwd})\n`)
+    return fresh
+  } catch { return null }
+  finally { setPaneRestarting(t.pane, false) }
+}
+
+// The Fable CREDIT consent ("Switch to Fable 5?" / "Continue with Fable 5") — a spending decision,
+// which is why isModelSwitchConfirm is written to stay FALSE for it and detectUserPrompt relays it to
+// the human as buttons. This predicate exists only to RECOGNISE it, never to accept it.
+function isFableCreditConsent(cap: string): boolean {
+  const p = detectUserPrompt(cap)
+  return !!p && /switch to .+\?/i.test(p.question) && p.options.some(o => /continue with /i.test(o.label))
+}
+
+// A refreshed session that boots on Fable can land parked on the credit consent with nobody there to
+// answer it — an unattended refresh that wedges a session is worse than one that doesn't get Fable.
+// So on THIS path only, decline and fall back: fable → opus, and it ends there (never sonnet, never
+// haiku). A human-initiated /model still gets the dialog relayed as buttons; the decline is the
+// daemon's choice solely because the daemon, not the owner, started this.
+async function declineFableForOpus(pane: string, sid: string | null): Promise<void> {
+  const deadline = Date.now() + 90_000
+  while (Date.now() < deadline) {
+    const cap = await capturePane(pane).catch(() => '')
+    if (cap && isFableCreditConsent(cap)) break
+    if (cap && (onNormalPrompt(cap) || isResumeSessionPrompt(cap))) return   // booted clean, nothing to decline
+    await sleep(2000)
+  }
+  if (!isFableCreditConsent(await capturePane(pane).catch(() => ''))) return
+  // Escape declines. The consent is NEVER answered with its accept option — not here, not anywhere.
+  const watcher = pane === focus.activePaneId ? focus.paneWatcher : null
+  await sendKeys(pane, ['Escape'])
+  await waitForSettle(pane, 200, 5000)
+  await injectSlash(pane, watcher, `/model ${MODEL_ALIAS_IDS.opus}`)
+  await acceptModelSwitch(pane, watcher, 'opus')
+  recordSessionModel(sid, 'opus')
+  process.stderr.write(`daemon: auto-refresh: declined the Fable credit consent in ${pane}, fell back to opus\n`)
+}
+
+// Auto-update is on: put stale sessions on the new binary with no tap. Every pane that fails the
+// safety gate is skipped SILENTLY and retried on the next sweep — an owner mid-turn or mid-draft is
+// not a failure, it's "not now". Panes we DO attempt are marked against the installed version, so a
+// session that can't come back is tried once per new binary instead of every hour forever.
+async function autoRefreshStaleSessions(panes: string[], installed: string): Promise<void> {
+  const targets: RestartTarget[] = []
+  for (const pane of panes) {
+    try {
+      if (isPaneRestarting(pane)) continue
+      const cap = await capturePane(pane).catch(() => '')
+      if (!cap || !onNormalPrompt(cap) || detectWorking(cap)) continue
+      // Anything we can't read as an EMPTY composer counts as occupied: /exit discards whatever is
+      // typed there, and losing the owner's half-written message is worse than staying a build behind.
+      if (inputBoxContent(cap) !== '') continue
+      const cwd = await paneCwd(pane).catch(() => null)
+      const file = cwd ? await transcriptForPane(pane, cwd) : null
+      if (file && turnInProgress(file)) continue
+      const sid = await sessionForPane(pane, false).catch(() => null)
+      const name = (sid ? getTopicBySession(sid)?.name : null) ?? (basename(cwd ?? '') || 'session')
+      // One completed turn is the line between the two lanes: below it there is no conversation to
+      // resume, so the session is relaunched fresh instead.
+      targets.push({ pane, sid, name, cwd, id: file && latestFinalReply(file) ? agentSessionId(file) : null })
+    } catch {}
+  }
+  if (!targets.length) return
+  for (const t of targets) staleSessionNotified.set(t.pane, installed)
+  process.stderr.write(`daemon: auto-refresh ${targets.length} idle session(s) onto v${installed}\n`)
+  // Sequential across panes, for the same reason the tapped flow is: restarts type into panes, and
+  // parallel key-streams interleave.
+  // A lane can decline before it types anything (no cwd, provider not ready, the agent never left) —
+  // that session is still UP on the old build. Reporting it as refreshed would be a lie, and leaving
+  // it marked would retire it until the next binary, so an untouched pane is un-marked and dropped
+  // from the summary entirely: a silent skip, retried next sweep, exactly like a failed safety gate.
+  const attempted: RestartTarget[] = []
+  for (const t of targets) {
+    try {
+      const now = t.id ? await restartPaneSessionCore(t.pane, t.id) : await relaunchFreshSession(t)
+      if (now === 'untouched') { staleSessionNotified.delete(t.pane); continue }
+      attempted.push(t)
+      if (now) t.pane = now
+      if (!t.id && now) await declineFableForOpus(now, t.sid)
+    } catch { attempted.push(t) }   // it threw mid-restart — that session HAS been disturbed
+  }
+  if (!attempted.length) return
+  const group = isTopicMode() ? getGroupChatId() : null
+  const dests = group ? [String(group)] : loadAccess().allowFrom.map(String)
+  const say = async (text: string, kb?: InlineKeyboard): Promise<void> => {
+    for (const chat of dests) {
+      await channel.sendText(chat, text, { ...(kb ? { buttons: kbToButtons(kb) } : {}), silent: true }).catch(() => {})
+    }
+  }
+  await settleRestartedSessions(attempted, { installed, onlyStale: true, auto: true }, say)
 }
 
 function updateDashboardKeyboard(): InlineKeyboard {
   const auto = loadAccess().autoUpdate === true
   return new InlineKeyboard()
     .text('🌉 Update bridge', 'upd:bridge').text('🧠 Update Claude', 'upd:claude').row()
-    .text(`${auto ? '✅' : '⭕️'} Auto-update bridge`, 'upd:auto')
+    .text(`${auto ? '✅' : '⭕️'} Auto-update`, 'upd:auto')
 }
 async function updateDashboardText(): Promise<string> {
   const claudeVer = await claudeVersion()
@@ -6978,7 +7241,7 @@ async function updateDashboardText(): Promise<string> {
   return '🔄 <b>Update</b>\n\n' +
     `🌉 Telegram bridge: <b>v${escapeHtml(bridgeVersion())}</b>\n` +
     `🧠 Claude Code: <b>v${escapeHtml(claudeVer ?? '?')}</b>\n\n` +
-    `♻️ Auto-update bridge: <b>${auto ? 'on' : 'off'}</b> — ${auto ? 'new bridge versions apply automatically on the daily check (rollback-protected). Claude is never auto-applied.' : 'you get a tap-to-apply card when a new version is available.'}\n\n` +
+    `♻️ Auto-update: <b>${auto ? 'on' : 'off'}</b> — ${auto ? 'new bridge versions apply automatically (rollback-protected), Claude installs itself, and idle sessions refresh onto it on their own.' : 'you get a tap-to-apply card when a new version is available.'}\n\n` +
     'What do you want to update?\n\n' +
     '💡 Tip: <code>/update tg</code> (this bridge) · <code>/update claude</code> (Claude Code).'
 }
@@ -8622,6 +8885,11 @@ async function captureInheritedSettings(paneId: string, watcher: PaneWatcher | n
 // REPL-wait + inject round-trips were the 10-20s "new topic is slow / not ready to receive" lag (and
 // they raced the user's own first keystrokes into the fresh pane).
 async function spawnSession(dir: string, extra = '', presetSessionId?: string, account: Account = MAIN_ACCOUNT, agent: AgentKind = 'claude', harnessOverride?: HarnessProfile, dials?: { model?: string | null; effort?: string | null; mode?: CcMode | null }): Promise<string | null> {
+  // Spawn-time install check: a session born on a stale binary stays stale until something bounces
+  // it, and spawns are the one event that reliably happens on a box nobody is watching. Gated by
+  // sweepClaudeInstall's own 6h stamp, so all this usually costs is a JSON read, and it must never
+  // delay the spawn — hence fire-and-forget.
+  void sweepClaudeInstall()
   try {
     // tmux's `new-window -c` silently falls back to $HOME when it can't chdir into `dir` (e.g.
     // another user's 700 folder) — the session then runs in the wrong place, stuck on a trust
@@ -10160,7 +10428,7 @@ bot.on('callback_query:data', async ctx => {
     const access = loadAccess()
     access.autoUpdate = access.autoUpdate !== true
     saveAccess(access)
-    await ctx.answerCallbackQuery({ text: `Auto-update bridge → ${access.autoUpdate ? 'ON' : 'OFF'}` }).catch(() => {})
+    await ctx.answerCallbackQuery({ text: `Auto-update → ${access.autoUpdate ? 'ON' : 'OFF'}` }).catch(() => {})
     await ctx.editMessageText(await updateDashboardText(), { parse_mode: 'HTML', reply_markup: updateDashboardKeyboard() }).catch(() => {})
     return
   }
@@ -10203,7 +10471,14 @@ bot.on('callback_query:data', async ctx => {
       return
     }
     await ctx.answerCallbackQuery({ text: `Resuming ${t.name}…` }).catch(() => {})
-    const ok = await spawnSession(t.cwd, '-c', sid, topicAccount(t), topicAgent(t))
+    // Resume the session's OWN conversation, or launch a bare one — never `-c`. A session with no
+    // conversation yet (the rolling refresh can send one here) meets `claude -c` with an exit 1 that
+    // takes the pane and the session's name with it, and in a folder that HAS other conversations
+    // `-c` would silently graft this topic onto the wrong one. The bare branch asserts the model
+    // floor, since there is no conversation to carry one in.
+    const extra = t.agentSessionId ? `--resume ${t.agentSessionId}` : ''
+    const ok = await spawnSession(t.cwd, extra, sid, topicAccount(t), topicAgent(t), undefined,
+      extra ? undefined : { model: refreshSpawnModel(sid) })
     if (ok) await reopenSessionTopic(sid)   // reopen the tab NOW, not on first reply
     await channel.sendText(String(ctx.chat!.id), ok
       ? `🚀 Resuming <b>${escapeHtml(t.name)}</b> in <code>${escapeHtml(t.cwd)}</code> — it reopens in its topic shortly.`
@@ -13224,6 +13499,10 @@ setTimeout(() => void sweepSessionVersions(), 3 * 60_000).unref()
 setInterval(() => void sweepSessionVersions(), 3_600_000).unref()
 setTimeout(() => void sweepUpdateChecks(), 5 * 60_000).unref()        // once shortly after boot…
 setInterval(() => void sweepUpdateChecks(), 24 * 3_600_000).unref()   // …then daily
+// Claude auto-install (opt-in): its own 6h stamp is the real cadence — these are just the wake-ups,
+// held back at boot so an install never competes with the daemon's own start-up work.
+setTimeout(() => void sweepClaudeInstall(), 10 * 60_000).unref()
+setInterval(() => void sweepClaudeInstall(), 6 * 3_600_000).unref()
 
 // Dead-pane state GC. The per-pane Maps (dedup/cache/alert state keyed by tmux pane id) are never
 // cleaned when a pane dies, so a long-lived daemon with session churn slowly accretes dead-pane

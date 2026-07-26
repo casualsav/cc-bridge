@@ -32,7 +32,7 @@ export type Access = {
   confirmReset?: boolean  // /clear & /new ask for a Yes/No tap before wiping the conversation (default on)
   tts?: { mode: 'off' | 'all'; engine: 'piper' | 'openai' | 'elevenlabs'; voice?: string }   // voice replies (ROADMAP #15); voice = piper voice id
   updateChecks?: boolean  // daily update-available notification for bridge + Claude (default on)
-  autoUpdate?: boolean    // auto-apply BRIDGE updates on the daily sweep instead of a tap-to-apply card (default off; opt-in — Claude is never auto-applied)
+  autoUpdate?: boolean    // auto-apply updates instead of tap-to-apply cards (default off): bridge on the daily sweep, Claude via install-latest + rolling refresh of idle sessions
   limitFailover?: boolean  // on a usage-limit hit, move the stuck session to a still-available account and resume it there instead of waiting for the reset (default off)
   failoverChain?: FailoverHop[]  // user-ordered try-in-order hops for limitFailover; unset/partial = default order (accounts main-first, Codex last)
   codexModel?: string      // model every Codex launch (incl. failover) uses; overrides CODEX_MODEL env; unset = env/Codex default
