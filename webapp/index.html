@@ -29,12 +29,15 @@
        not a spacing choice. Tying it to the general scale is how it silently broke once already. */
     --fold-h: 24px;
     /* The composer capsule is DERIVED from the mic, never the reverse: the round button keeps its
-       diameter and the pill is whatever clears it with an even ring. Ratio taken off the owner's
-       reference screenshot — a 67px button inside a 78px pill, ring 5.5/67 ≈ 0.082 of the diameter.
-       Both values integer so the button lands on whole pixels inside the pill (see the .sendbtn svg
-       note on Blink's half-pixel snap). --pill-h is the sum; nothing sets a pill height by hand. */
+       diameter and the pill is whatever clears it with an even ring. --pill-h is the sum; nothing
+       sets a pill height by hand.
+       The ring is 6px by the owner's choice, not by the reference's proportion — the reference is
+       tighter (a 67px button in a 78px pill, 5.5/67 ≈ 0.082 of the diameter, which scales to ~3px
+       here) and he asked for more air around the button after seeing that version. Keep it an
+       INTEGER: it is half the pill's spare height, so an odd total would land the button on a half
+       pixel and reintroduce exactly the paint snap the .sendbtn svg note describes. */
     --mic-d: 40px;
-    --pill-ring: 3px;
+    --pill-ring: 6px;
     --pill-h: calc(var(--mic-d) + 2 * var(--pill-ring));
     --r-xs: 4px; --r-sm: 8px; --r-md: 12px; --r-xl: 16px; --r-2xl: 20px;
     --bg: var(--tg-theme-bg-color, #17212b);
@@ -371,7 +374,7 @@
   <div id="dfeed"></div>
   <div class="composer">
     <div class="inputwrap">
-      <textarea id="dtext" rows="1" placeholder="Message this session…" autocomplete="off" spellcheck="false"></textarea>
+      <textarea id="dtext" rows="1" placeholder="Message" autocomplete="off" spellcheck="false"></textarea>
       <button id="datt" class="ghost" title="Attach a file"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>
       <!-- The round button is mic OR send, never both. The PAPERCLIP stays inside the capsule through
          both states on purpose: type-then-attach is a real workflow, and sweeping the clip away with
