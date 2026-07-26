@@ -132,12 +132,15 @@
   /* The capsule's controls should sit a step above its placeholder, as they do in the reference —
      at one tone the whole capsule reads as decoration rather than two affordances beside a label. */
   .inputwrap .ghost { color: var(--text); opacity: .72; }
-  .ghost.recing { color: #e05555; animation: pulse 1.2s ease-in-out infinite; }
-  .inputwrap .ghost.recing { opacity: 1; }
+  /* Recording turns the round button itself red rather than tinting a glyph, because in this state it
+     IS the recorder. It does NOT inherit the old pulse: that animated a 19px glyph, and a 40px filled
+     circle dropping to .35 opacity reads as a button dying rather than a recorder running. A red fill
+     behind a stop square is unambiguous on its own — the square only exists while recording. */
+  .sendbtn.recing { background: #e05555; }
   /* Reduced motion: still the two pulses, additively — the base rules and @keyframes pulse are left
      byte-exact rather than edited, because both indicators are load-bearing and shared. Nothing is
      lost when the animation stops: colour already carries both states (green vs grey, red vs hint). */
-  @media (prefers-reduced-motion: reduce) { .dot.on, .ghost.recing { animation: none; } }
+  @media (prefers-reduced-motion: reduce) { .dot.on { animation: none; } }
   .sendbtn { width: 40px; height: 40px; border-radius: 50%; border: none; background: var(--btn); color: var(--btn-text); font-size: 17px; flex: none; display: flex; align-items: center; justify-content: center; padding: 0; box-shadow: 0 1px 4px rgba(0,0,0,.35); }
   /* The plane's bounding box is symmetric but its MASS is not: centroid (13.8, 10.2) against a box
      centre of (12, 12), i.e. 1.8 units up and right. Nudge down-left by that, scaled 19/24. */
@@ -226,9 +229,12 @@
     <div class="inputwrap">
       <textarea id="dtext" rows="1" placeholder="Message this session…" autocomplete="off" spellcheck="false"></textarea>
       <button id="datt" class="ghost" title="Attach a file"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>
-      <button id="dmic" class="ghost" title="Record a voice note"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg></button>
     </div>
     <input id="dfile" type="file" hidden>
+    <!-- The round button is mic OR send, never both. The PAPERCLIP stays inside the capsule through
+         both states on purpose: type-then-attach is a real workflow, and sweeping the clip away with
+         the mic the moment text appears would break it silently. -->
+    <button id="dmic" class="sendbtn" title="Record a voice note"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg></button>
     <!-- Solid, not outlined: this is the loudest element on the screen, and an outline plane is the
          quietest glyph treatment there is. Every chat app puts a filled mark on a filled button. -->
     <button id="dsend" class="sendbtn" title="Send"><svg viewBox="0 0 24 24"><polygon points="22 2 15 22 11 13 2 9 22 2" fill="currentColor"/></svg></button>
@@ -678,7 +684,10 @@ function bubble(i) {
   // bubble's height (the collapse re-broke the scroll position on every poll).
   if (i.img) inner += thumbCache[i.img]
     ? '<img class="thumb" src="' + esc(thumbCache[i.img]) + '" alt="photo">'
-    : '<img class="thumb" data-path="' + esc(i.img) + '" alt="photo">';
+    // A transparent 1x1 until hydrateThumbs swaps in the blob. Without a src, a download that FAILS
+    // (it returns early on !r.ok or a throw) leaves a broken-image box in the 40px slot min-height
+    // has already reserved.
+    : '<img class="thumb" src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==" data-path="' + esc(i.img) + '" alt="photo">';
   if (i.att) inner += '<div class="attchip">📎 ' + esc(String(i.att).split("/").pop()) + "</div>";
   const t = (i.img || i.att) && placeholder ? "" : (i.text || "");
   if (t) inner += (i.img ? '<div class="cap">' : "") + (i.role === "assistant" ? md(t) : esc(t)) + (i.img ? "</div>" : "");
@@ -750,7 +759,7 @@ $("dclose").onclick = async () => {
 $("dsend").onclick = async () => {
   const ta = $("dtext"), text = ta.value.trim();
   if (!text) return;
-  ta.value = "";
+  ta.value = ""; syncComposerMode();
   // Optimistic: the bubble shows the instant you hit send (dimmed while in flight), instead of
   // waiting for the POST + transcript echo + poll round-trip.
   const o = { text, at: Date.now(), state: "pending" };
@@ -758,7 +767,7 @@ $("dsend").onclick = async () => {
   paintFeed();
   $("dfeed").scrollTop = $("dfeed").scrollHeight;   // sending always reveals your own message
   if (await sessionAct("send", text)) { o.state = "sent"; paintFeed(); setTimeout(renderDrill, 800); }
-  else { optimistic = optimistic.filter(x => x !== o); paintFeed(); ta.value = text; }   // failed — give the draft back
+  else { optimistic = optimistic.filter(x => x !== o); paintFeed(); ta.value = text; syncComposerMode(); }   // failed — give the draft back
 };
 
 // ---- Compose-row attachment + voice note ----
@@ -790,7 +799,7 @@ $("datt").onclick = () => { if (drillSid) $("dfile").click(); };
 $("dfile").onchange = () => {
   const f = $("dfile").files[0]; $("dfile").value = "";
   if (!f || !drillSid) return;
-  const ta = $("dtext"), caption = ta.value.trim(); ta.value = "";
+  const ta = $("dtext"), caption = ta.value.trim(); ta.value = ""; syncComposerMode();
   attachToSession(f, { caption, label: "📎 " + f.name + (caption ? " — " + caption : "") });
 };
 // Voice: tap to record, tap again to stop-and-send. Hidden entirely where the webview has no
@@ -801,7 +810,17 @@ let rec = null;
 // rather than repeated here, so the mic SVG lives in exactly one place.
 const MIC_HTML = $("dmic").innerHTML;
 const RECSTOP_HTML = '<svg viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx="2.5" fill="currentColor"/></svg>';
-if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder)) $("dmic").style.display = "none";
+const VOICE_OK = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder);
+// Which of the two round buttons is showing. Where the webview has no recording API there is nothing
+// to morph between, so send simply stays. Recording outranks a typed draft: you can type mid-record,
+// and swapping the recorder out from under a live recording would strand it.
+function syncComposerMode() {
+  const showSend = !VOICE_OK || (!!$("dtext").value.trim() && !rec);
+  $("dsend").style.display = showSend ? "flex" : "none";
+  $("dmic").style.display = showSend ? "none" : "flex";
+}
+$("dtext").oninput = syncComposerMode;
+syncComposerMode();
 $("dmic").onclick = async () => {
   if (rec) { rec.stop(); return; }
   if (!drillSid) return;
@@ -817,14 +836,14 @@ $("dmic").onclick = async () => {
     stream.getTracks().forEach(t => t.stop());
     const type = (rec && rec.mimeType) || mime || "audio/webm";
     rec = null;
-    $("dmic").classList.remove("recing"); $("dmic").innerHTML = MIC_HTML;
+    $("dmic").classList.remove("recing"); $("dmic").innerHTML = MIC_HTML; syncComposerMode();
     const blob = new Blob(chunks, { type });
     if (blob.size < 1000) { showErr("Recording too short"); return; }
     const ext = /mp4/.test(type) ? "m4a" : /ogg/.test(type) ? "ogg" : "webm";
     attachToSession(new File([blob], "voice-note." + ext, { type }), { voice: true, label: "🎤 Transcribing…" });
   };
   rec.start();
-  $("dmic").classList.add("recing"); $("dmic").innerHTML = RECSTOP_HTML;
+  $("dmic").classList.add("recing"); $("dmic").innerHTML = RECSTOP_HTML; syncComposerMode();
 };
 
 // ---- "+" new session sheet: name + model/effort/mode dials → /api/session/spawn ----
