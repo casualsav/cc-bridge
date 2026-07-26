@@ -4815,10 +4815,16 @@ async function handleCall(
           // detectWorking reads idle mid-turn. A live pane whose capture is empty/unparseable is far
           // likelier heads-down (a heavy build starves the capture) than cleanly idle.
           const tfile = await transcriptForPane(pane, await paneCwd(pane).catch(() => null)).catch(() => null)
-          const busy = cap
+          // Delegated work is still work. This is the line that reported a session "idle" while its
+          // subagents edited files for an hour — twice — so the count both flips busy and says itself,
+          // because "busy" alone sends a reader looking at a pane that is genuinely sitting at a prompt.
+          const subs = tfile ? liveSubagents(tfile) : 0
+          const busy = subs > 0 || (cap
             ? (tfile ? turnInProgress(tfile) : false) || detectWorking(cap) || !onNormalPrompt(cap)
-            : true
-          const state = `${busy ? ' · busy' : ' · idle'}${onAsk ? ` · on ask ${onAsk.id}` : ''}`
+            : true)
+          const state = `${busy ? ' · busy' : ' · idle'}`
+            + `${subs > 0 ? ` · ${subs} subagent${subs === 1 ? '' : 's'} live` : ''}`
+            + `${onAsk ? ` · on ask ${onAsk.id}` : ''}`
           rows.push(`${busy ? '🟡' : '🟢'} ${nm}${model}${pct}${state}${flair}`)
         }
         text = rows.length ? rows.join('\n') : '(no live agents on the bus)'
