@@ -2960,8 +2960,14 @@ async function namedTarget(ctx: Context, rawName: string, opts: { requireIdle?: 
   const endpoints = busEndpoints()
   const res = resolveEndpoint(wanted, endpoints)
   if ('error' in res) {
-    const live = endpoints.filter(e => !e.closed && e.kind === 'claude').map(e => `@${normalizeEndpointName(e.name)}`).join(' · ')
-    await say(`⚠️ ${escapeHtml(res.error.replace(/ — try \`tg roster\`.*$/, ''))} — nothing was sent.${live ? `\nLive sessions: ${escapeHtml(live)}` : ''}`)
+    const live = endpoints.filter(e => !e.closed && e.kind === 'claude').map(e => `@${normalizeEndpointName(e.name)}`)
+    // The owner's wording for the ordinary case — a name that matches nothing. The other resolve
+    // failures (ambiguous name, registered but not running) each say something that "doesn't exist"
+    // would actively misreport, so they keep their own words and adopt only the list formatting.
+    const headline = /^no endpoint named/.test(res.error)
+      ? `Session "${escapeHtml(wanted)}" doesn't exist`
+      : escapeHtml(res.error.replace(/ — try \`tg roster\`.*$/, ''))
+    await say(`⚠️ ${headline}${live.length ? `\n\nLive sessions:\n${live.map(escapeHtml).join('\n')}` : ''}`)
     return null
   }
   if (res.kind !== 'claude') { await say('⚠️ That endpoint has no CLI to command.'); return null }
@@ -2995,9 +3001,10 @@ async function namedTarget(ctx: Context, rawName: string, opts: { requireIdle?: 
 async function refusedArgForm(ctx: Context, arg: string, verb: string): Promise<boolean> {
   if (!looksLikeArgForm(arg)) return false
   const name = arg.trim().split(/\s+/)[0]!.replace(/^@/, '')
-  await ctx.reply(
-    `⚠️ Target first: <code>@${escapeHtml(name)} ${escapeHtml(verb)}</code>\n\n` +
-    `<code>${escapeHtml(verb)} @${escapeHtml(name)}</code> is not a thing — it would have acted on <i>this</i> session, not @${escapeHtml(name)}. Nothing was done.`,
+  // One line, by the owner's call. The refusal already prevents the harm; the explanation it replaced
+  // described a counterfactual, and the reader's next action ("use the target-first form") is the same
+  // whether or not they know what the old spelling would have done. See the note at the /exit site.
+  await ctx.reply(`⚠️ Target first: <code>@${escapeHtml(name)} ${escapeHtml(verb)}</code>`,
     { parse_mode: 'HTML' }).catch(() => {})
   return true
 }
@@ -12306,9 +12313,12 @@ bot.on('message:text', async ctx => {
   if (exitArg && (ctx.chat?.type === 'private' || isTopicMode())) {
     if (gate(ctx).action !== 'deliver') return
     const bare = exitArg.replace(/^@/, '')
-    await ctx.reply(
-      `⚠️ Target first: <code>@${escapeHtml(bare)} /exit</code>\n\n` +
-      `<code>/exit @${escapeHtml(bare)}</code> would have ended <i>this</i> session, not @${escapeHtml(bare)}. Nothing was done.`,
+    // Same one-line shape as the other three, including here where the refused spelling was the
+    // dangerous one. The danger line was genuinely informative on a first encounter, but it explained
+    // a counterfactual: the refusal has already prevented it, and the corrective action is identical
+    // whether or not the reader learns what /exit @name would have done. Four verbs behaving
+    // identically is worth more than a warning about damage that can no longer happen.
+    await ctx.reply(`⚠️ Target first: <code>@${escapeHtml(bare)} /exit</code>`,
       { parse_mode: 'HTML' }).catch(() => {})
     return
   }
@@ -12371,11 +12381,11 @@ bot.on('message:text', async ctx => {
 
     appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'slash', from: 'owner', to: nt.name, text: command })
     void relaySlashCommand(nt.target.paneId, nt.target.watcher, command, String(ctx.chat!.id), true, ctx.message?.message_thread_id)
-    // Folder in the receipt, not just the name. A relayed command has no confirm in front of it, so
-    // this is the only chance to notice that a typo resolved to a different live session — /clear
-    // above all, where the cost of finding out later is a wiped context.
-    const where = topic ? `\n📁 <code>${escapeHtml(topic.cwd)}</code>` : ''
-    await say(`✅ Sent <code>${escapeHtml(command.split(/\s/)[0])}</code> to <b>@${escapeHtml(nt.name)}</b>${where}`)
+    // Name only, by the owner's call. The folder line was the after-the-fact net for a typo that
+    // resolved to a DIFFERENT live session (a relayed command has no confirm in front of it). What
+    // still catches a typo is that an unresolvable name is refused loudly and this receipt names the
+    // session it actually reached; what is no longer covered is two live sessions one edit apart.
+    await say(`✅ Sent <code>${escapeHtml(command.split(/\s/)[0])}</code> to <b>@${escapeHtml(nt.name)}</b>`)
     return
   }
 
