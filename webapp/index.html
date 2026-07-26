@@ -241,9 +241,15 @@
      lost when the animation stops: colour already carries both states (green vs grey, red vs hint). */
   @media (prefers-reduced-motion: reduce) { .dot.on { animation: none; } }
   .sendbtn { width: 40px; height: 40px; border-radius: 50%; border: none; background: var(--btn); color: var(--btn-text); flex: none; display: flex; align-items: center; justify-content: center; padding: 0; box-shadow: 0 1px 4px rgba(0,0,0,.35); }
+  /* 20px, not 19: an ODD icon in the 40px button leaves a 10.5px flex gap each side, and Blink
+     snaps the SVG's paint origin up to the whole pixel — which put every glyph in here half a pixel
+     down and right of centre, at DPR 1, 2, 3 and 4 alike. An even size divides exactly. */
+  .sendbtn svg { width: 20px; height: 20px; display: block; }
   /* The plane's bounding box is symmetric but its MASS is not: centroid (13.8, 10.2) against a box
-     centre of (12, 12), i.e. 1.8 units up and right. Nudge down-left by that, scaled 19/24. */
-  .sendbtn svg { width: 19px; height: 19px; display: block; transform: translate(-1.4px, 1.4px); }
+     centre of (12, 12), i.e. 1.8 units up and right. Nudge down-left by that, scaled 20/24. The
+     nudge is the PLANE's alone: as `.sendbtn svg` it also displaced the mic and the record-stop
+     square, whose artwork is already centred, and that is what knocked the mic's glyph off centre. */
+  #dsend svg { transform: translate(-1.5px, 1.5px); }
   /* Feed extras: command chip, attachment chip, inline photo, light markdown */
   .msg.cmd { background: transparent; color: var(--link); font: var(--t-mono)/1.4 ui-monospace, Menlo, monospace; margin-left: auto; padding: 2px 11px; max-width: 88%; }
   /* Long message: collapsed to a readable height, tapping opens it. Fading the fold makes the cut
