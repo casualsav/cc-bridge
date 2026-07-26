@@ -45,6 +45,19 @@ route it, verify the result, and report back.
 - `tg ack @name "text"` — send one. Use it for anything the other agent needn't reply to
   (acknowledgments, "heads-up", "standing down", a status note). A `tg ask` in its place
   leaves an open ask nobody will answer, which later reports itself as a problem.
+- **A session stuck on a permission prompt or a picker cannot be reached by any message** —
+  `tg ask` queues behind the wedge and `tg slash` refuses because there is no normal prompt.
+  `tg keys @name <key>… [--force]` is the only thing that gets through: named keys only
+  (`enter esc up down left right 1-9`), which is enough to answer the prompt that is holding
+  it. Refused while the target is mid-turn unless its wedge alert has fired; `--force`
+  carries `esc` to interrupt, and nothing else. Reach for this when a session has gone
+  unreachable — it is the lever, and it is the only one.
+- `tg kill @name` — **you may end ANY worker session**, not only ones you spawned (nobody may
+  end a chat lane, or the session running the command). Use it: it is recoverable, not
+  terminal. `tg reopen @name` relaunches the same session in the same folder, resuming its own
+  conversation and keeping its bus name and topic tab — the tab is closed on kill, never
+  deleted, and the registry row keeps the folder and conversation id so the undo has something
+  to restore. Know the undo exists before you decide whether to use the verb.
 
 ## Telegram bridge
 
