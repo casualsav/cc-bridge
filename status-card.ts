@@ -740,18 +740,46 @@ export async function updateTopicPins(): Promise<void> {
 const pinCreateArmed = new Set<string>()
 // Deliberately NOT persisted: after a restart a chat is unarmed until its user does something, which
 // is the entire point — a daemon boot is not evidence that anyone is there.
-export function armChatPin(chat: string): void { pinCreateArmed.add(String(chat)) }
+// Guarded on the allowlist: every caller is a private chat or a DM lane, so `chat` is a user id, and
+// a stranger spamming /start would otherwise grow this set without bound for chats that can never be
+// minted anyway (updateSessionPin only walks allowFrom).
+export function armChatPin(chat: string): void {
+  if (!loadAccess().allowFrom.includes(String(chat))) return
+  pinCreateArmed.add(String(chat))
+}
+
+// Consecutive gone-message re-mints for one chat, reset the moment an edit succeeds — a card that
+// lives long enough to be edited is healthy. Requirement 4 is "no re-minting while it is healthy",
+// and the way that requirement dies is a self-heal that fires every 10s: pinMessageGone also matches
+// "message can't be edited", so anything that makes Telegram return that persistently for a LIVE card
+// would re-mint on every text change. The old code had the same exposure and never hit it; this is a
+// cheap ceiling on the one failure mode the owner named as unacceptable, not a response to a sighting.
+const SELF_HEAL_CAP = 3
+const selfHealMints = new Map<string, number>()
 
 // The universal rule this file is built on, stated once, in the place the next person will look:
 //
-//   NO SYSTEM EVENT MAY EVER CAUSE A MINT.
+//   NO SYSTEM EVENT MAY CREATE A CARD WHERE NONE IS ESTABLISHED.
+//   A system event that detects the LOSS of an established card may replace it.
 //
-// A timer, a probe, a self-heal, a retry running out of attempts — none of them are evidence that a
-// user is there, and a card minted with nobody there is the whole bug. Every automatic mechanism here
-// is therefore allowed to CLEAR state and to SAY something, never to create. The two places that rule
-// is enforced are forgetChatPin (dropping tracking is not arming) and repinIfDropped (running out of
-// re-pin attempts does not escalate). They were written months apart in spirit and are the same rule.
+// The dangerous act was never "a system event caused a mint". It was deciding that a chat deserves a
+// FIRST card with nobody there — at boot, or on a timer, for a chat no one has touched. That is the
+// circumstance the original bug happened in. Replacing a card a chat already has is not that
+// decision: we are not choosing to give someone a card, we are maintaining one that exists.
 //
+// Note the justification deliberately does NOT run "an established card was minted while a user was
+// present, therefore replacing it is safe". That chain is broken by persistence: sessionPins is
+// written to session-pin.json, so a card established by the OLD unconditional boot-create outlives
+// this patch, and on an upgraded box EVERY tracked card is legacy-established. The rule holds anyway,
+// because it never depended on provenance — only on whether a card exists for this chat.
+//
+// Where each half is enforced:
+//   * armChatPin / the create gate in upsertChatPin — user-present events only, for a FIRST card.
+//   * repinIfDropped — running out of re-pin attempts stops and logs; it does not escalate to a mint,
+//     because the card is still established and re-pinning failing is not the card being gone.
+//   * the pinMessageGone self-heal in upsertChatPin — Telegram says the established card is GONE, so
+//     it re-arms and the next tick replaces it. Measured at 11.08s before this gate existed; that
+//     recovery is requirement 2 and must not be traded away for tidiness of rule.
 // RETIRED, do not re-add: a periodic `verifyPinAssignment` probe that compared our tracked id against
 // getChat().pinned_message every 10 minutes and logged "verified present". Live measurement retired it
 // on three counts. Its only advertised case — a user tapping unpin in a DM — is STRUCTURALLY invisible
@@ -802,6 +830,29 @@ export async function repinIfDropped(chat: string, existing: number): Promise<vo
   if (!unpinnedCards.has(chat)) process.stderr.write(`pin: chat ${chat} re-pinned message ${existing} (attempt ${n}/${REPIN_CAP}) — Telegram had ${live ?? 'nothing'} pinned\n`)
 }
 
+// The scheduler's onSent/onError bodies for a DM card, lifted out so they can be driven directly in
+// tests — those callbacks fire from the edit scheduler's own timer, and a timing-dependent test of
+// this rule is worth less than a direct one.
+
+// The card survived an edit, so it is healthy: the self-heal streak resets.
+export function pinAlive(chat: string): void { selfHealMints.delete(chat) }
+
+// Telegram says our established card is GONE. Drop the stale id AND re-arm, so the next tick replaces
+// it — the "a system event may replace an established card" half of the rule above, and the path the
+// 11.08s server-side-delete recovery runs through. Without the re-arm, tracking is dropped and nothing
+// is minted until the user happens to type: requirement 2 silently unmet.
+export function pinGone(chat: string, existing: number): void {
+  sessionPins.delete(chat); pinTextCache.delete(chat); persistSessionPins(); cancelEdit(chat, existing)
+  const n = (selfHealMints.get(chat) ?? 0) + 1
+  selfHealMints.set(chat, n)
+  if (n > SELF_HEAL_CAP) {
+    process.stderr.write(`pin: chat ${chat} lost its card ${SELF_HEAL_CAP} times without one surviving an edit — NOT re-minting again. Something is removing these; /status forces a fresh one\n`)
+    return
+  }
+  armChatPin(chat)
+  process.stderr.write(`pin: re-minting chat ${chat} — Telegram reports message ${existing} gone (self-heal ${n}/${SELF_HEAL_CAP})\n`)
+}
+
 // Create/edit/re-pin a single chat's status card — shared by classic DM mode's per-`allowFrom`-chat
 // loop (one shared `text`/`hasSession` for the focused session) and topic mode's per-DM-chat-lane
 // loop (each lane has its own pane, so its own `text`). `chat` doubles as the sessionPins
@@ -841,12 +892,16 @@ async function upsertChatPin(chat: string, text: string, buttons: Button[][], pa
       onSent: async () => {
         pinTextCache.set(chat, text)
         logPin('edit')
+        pinAlive(chat)   // it survived an edit — it is healthy, so the self-heal streak resets
         await repinIfDropped(chat, existing)
       },
       onError: e => {
-        // Deleted out from under us → drop the stale id; the next cycle recreates it. Transient
-        // ("message is not modified") leaves it in place — the pin is still good.
-        if (pinMessageGone(e)) { sessionPins.delete(chat); pinTextCache.delete(chat); persistSessionPins(); cancelEdit(chat, existing) }
+        // Telegram says our established card is GONE. Drop the stale id AND re-arm, so the next tick
+        // replaces it — this is the "system event may replace an established card" half of the rule
+        // above, and it is the path the 11.08s server-side-delete recovery runs through. Without the
+        // re-arm the tracking is dropped and nothing is minted until the user happens to type, which
+        // is requirement 2 silently unmet. Capped: see selfHealMints.
+        if (pinMessageGone(e)) pinGone(chat, existing)
         else if (pinNotModified(e)) pinTextCache.set(chat, text)   // already current — safe to cache
       } })
     return

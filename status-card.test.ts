@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { prettyModel, lastModelInTranscript, lastTodosInTranscript, modeBadge, pinMessageGone, statusKeyboard, mergeStatus, codexModelFromPane, codexPrettyModel, codexStatusHead, parseCodexStatusline } from './status-card.ts'
 import type { StatuslineData } from './statusline.ts'
-import { initStatusCard, updateSessionPin, paneForDmChat, forgetChatPin, armChatPin, repinIfDropped, sessionPins, pinTextCache } from './status-card.ts'
+import { initStatusCard, updateSessionPin, paneForDmChat, forgetChatPin, armChatPin, repinIfDropped, pinGone, pinAlive, sessionPins, pinTextCache } from './status-card.ts'
 import { ACCESS_FILE } from './common.ts'
 import { loadAccess } from './access.ts'
 import { focus, markChatReachable, markChatUnreachableIfUndeliverable, isChatUnreachable } from './state.ts'
@@ -388,4 +388,34 @@ test('the re-pin repair ignores a failed lookup, and gives up rather than retryi
   live = undefined
   await repinIfDropped('111111', 500)
   expect(pinned.length).toBe(6)
+})
+
+// Requirement 2: if an error removes the card, it comes back on its own. This is the path the live
+// report measured at 11.08 seconds for a server-side delete, and it runs through the ONE system event
+// permitted to mint — the established card is gone, so replacing it is maintenance, not a decision to
+// give this chat a card. Capped, because a self-heal that fires every 10s is requirement 4 dying.
+test('a card Telegram reports gone is re-minted automatically, up to a cap', async () => {
+  setAllowFrom(['111111'])
+  sessionPins.clear(); pinTextCache.clear()
+  const sent: string[] = [], pinned: string[] = []
+  initStatusCard(pinDeps(sent, pinned))
+  armChatPin('111111')
+  await updateSessionPin()
+  expect(sent.length).toBe(1)
+
+  // The gone-message self-heal, as the edit scheduler's onError delivers it. No user action follows.
+  for (let i = 0; i < 5; i++) {
+    sessionPins.set('111111', 900 + i)           // a card exists…
+    pinGone('111111', 900 + i)             // …and Telegram says it is gone
+    await updateSessionPin()
+  }
+  // Three re-mints, then it stops rather than re-posting into the chat forever.
+  expect(sent.length).toBe(1 + 3)
+
+  // A card that survives an edit is healthy, which resets the streak.
+  pinAlive('111111')
+  sessionPins.set('111111', 950)
+  pinGone('111111', 950)
+  await updateSessionPin()
+  expect(sent.length).toBe(1 + 3 + 1)
 })
