@@ -5144,7 +5144,7 @@ async function handleCall(
           if (livePane && await paneAlive(livePane).catch(() => false)) { write({ t: 'result', id, ok: false, text: `@${t0.name} (${sid8}) is already up` }); return }
         }
         const othersNote = others.length
-          ? ` ${others.length} other closed row${others.length === 1 ? '' : 's'} share this name — reopen a specific one by sid: ${others.map(s => s.slice(0, 8)).join(', ')}.`
+          ? ` ${others.length} other closed row${others.length === 1 ? ' shares' : 's share'} this name — reopen a specific one by sid: ${others.map(s => s.slice(0, 8)).join(', ')}.`
           : ''
         let newPane: string | null
         if (!t0.agentSessionId) {
