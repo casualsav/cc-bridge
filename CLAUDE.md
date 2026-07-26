@@ -250,6 +250,15 @@ its height from `min-height: var(--hbtn-d)`, not from padding, so the three stay
 construction. Keep `--hbtn-d − --hbtn-glyph` **even**: `.chatbtn` centres by integer padding, and
 an odd difference reintroduces the paint snap below.
 
+**Nothing in the header is conditional, and that is a retired case rather than a forgotten one.**
+The only runtime writes to it are `#dsub`'s content (`openDrill`) and `#ddot`'s class (`renderDrill`).
+`#dstop` *used* to hide itself while a recording was in progress — back when it was red and could be
+mistaken for the composer's record-stop button — and that branch was deleted when it stopped being
+red, not overlooked. Do not restore it. `#dsub` empty is a real state, not a broken one: a
+deep-linked open runs `openDrill` before the sessions snapshot lands, and the capsule holds its 48px
+and centres the single line rather than collapsing between two tall circles. That state is the only
+place `min-height` is visibly doing anything, so it is the one to render after touching the header.
+
 **The `.chatbtn` half-pixel snap was real, was measured, and is fixed** (v0.4.75) — the old note
 here called it suspected-but-unmeasured. A 19px glyph in a 34px flex-centred button read exactly
 `+0.50, +0.50` on both header buttons, on *filled* discs, not transparent ones. Integer padding
