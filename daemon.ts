@@ -130,7 +130,7 @@ import { planContextWarn, planCtxNudge } from './ctx-warn.ts'
 import { spawnModelFlag, spawnWideContext } from './model-window.ts'
 import {
   initStatusCard, statusCardText, statusKeyboard, updateSessionPin, updateTopicPins,
-  removeSessionPins, refreshSessionPin, forgetChatPin, armChatPin, startPinAssignmentVerifier, sessionPins, pinTextCache, persistSessionPins,
+  removeSessionPins, refreshSessionPin, forgetChatPin, armChatPin, sessionPins, pinTextCache, persistSessionPins,
   clearAllPins, clearTopicPins, createSessionPin, invalidatePaneStatus, paneStatus, lastModelInTranscript, lastVersionInTranscript,
   prettyModel, modeBadge, lastTodosInTranscript, codexPrettyModel,
 } from './status-card.ts'
@@ -5915,7 +5915,7 @@ bot.use(async (ctx, next) => {
 // /help keeps the plain handler — it isn't evidence of a fresh surface and must not churn the pin.
 bot.command('start', async ctx => {
   await sendStartHelp(ctx)
-  if (ctx.chat?.type === 'private') { armChatPin(String(ctx.chat.id)); await forgetChatPin(String(ctx.chat.id)); void updateSessionPin() }
+  if (ctx.chat?.type === 'private') { armChatPin(String(ctx.chat.id)); await forgetChatPin(String(ctx.chat.id), 'start'); void updateSessionPin() }
 })
 bot.command('help', sendStartHelp)   // hidden alias (muscle memory); kept out of the command menu
 
@@ -11514,7 +11514,7 @@ async function ensureChatLane(ctx: Context, chatId: string, first: InboundParams
         // never received and cannot move one that sits a hundred messages up the chat — the API
         // reports health either way. Mint a fresh one under the conversation instead; a new message
         // id is the only thing that puts a card back in front of the user. See forgetChatPin.
-        armChatPin(chatId); await forgetChatPin(chatId); void updateSessionPin()
+        armChatPin(chatId); await forgetChatPin(chatId, 'lane-ready'); void updateSessionPin()
         return
       }
       // A brand-new account config dir has no login yet. Surface the method picker instead of
@@ -12566,9 +12566,6 @@ if (FORCE_PANE) {
 // Keep the pinned status card's live metrics fresh once per 10s. No-op edits are skipped and no
 // pin is created when nothing's active, so this is cheap when idle.
 setInterval(() => void updateSessionPin(), 10_000)
-// …and independently ask Telegram what it thinks is pinned, because a successful edit is not evidence
-// the card is there (status-card.ts, verifyPinAssignment).
-startPinAssignmentVerifier()
 // ensureChatProfile bails when the allowlist is still empty (an unpaired box has nobody to provision
 // for), and its only other trigger is the bot's connect. A fresh install that PAIRS after the daemon is
 // already up therefore never provisioned the chat profile for its whole first run — no chat account, so

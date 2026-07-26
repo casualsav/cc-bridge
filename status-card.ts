@@ -53,9 +53,11 @@ type StatusCardDeps = {
   // for a lane whose pane has died (updateTopicPins skips those rather than pinning "No active
   // session" unprompted). Optional so a fake-bot unit test, or a channel without the feature, can omit it.
   dmChatLanes?: () => Promise<Array<{ chat: string; paneId: string | null }>>
-  // Newest message id seen in a chat (daemon's msg-tracker, fed by every Bot API result). The card
-  // measures its own distance from this to decide it has scrolled out of reach — see cardBuried.
-  // Optional so a fake-bot unit test, or a channel with no tracker, can omit it (→ never buried).
+  // Newest message id seen in a chat (daemon's msg-tracker, fed by every Bot API result). Diagnostics
+  // only: it produces the `gap` field on the pin log line — how far the card sits above the
+  // conversation. NOTHING acts on it (the distance-based re-mint it once drove was removed on user
+  // feedback), and nothing should: see the minting contract. Optional, so a fake-bot unit test or a
+  // channel with no tracker can omit it.
   newestMsgId?: (chat: string) => number | undefined
 }
 let deps: StatusCardDeps
@@ -152,9 +154,12 @@ export async function removeSessionPins(): Promise<void> {
 // the probe mint a card into an empty chat on a ten-minute timer: the guarantee leaking back out
 // through the mechanism added to protect it. User-present callers arm for themselves, next to their
 // own call. See the minting contract above upsertChatPin's create gate — the other half of this rule.
-export async function forgetChatPin(chat: string): Promise<void> {
+export async function forgetChatPin(chat: string, reason: string): Promise<void> {
   const old = sessionPins.get(chat)
   if (old === undefined) return
+  // The report that drove this had to INFER which hook fired, because a re-mint was indistinguishable
+  // in the log from any other create. Say which one, in the shape that was praised for being readable.
+  process.stderr.write(`pin: re-minting chat ${chat} — dropping message ${old} (${reason})\n`)
   await deps.channel.unpin({ chatId: chat, messageId: String(old) }).catch(() => {})
   await deps.channel.deleteMessage({ chatId: chat, messageId: String(old) }).catch(() => {})
   cancelEdit(chat, old)
@@ -583,6 +588,7 @@ export async function createSessionPin(chat: string, text: string, buttons: Butt
     const m = await deps.channel.sendText(chat, text, { buttons })
     await pinCard(chat, chat, m.messageId)
     sessionPins.set(chat, Number(m.messageId)); pinTextCache.set(chat, text); persistSessionPins()
+    rePinAttempts.delete(chat)   // the counter belonged to the card we just replaced
   } catch (e) {
     if (!markChatUnreachableIfUndeliverable(chat, e)) process.stderr.write(`daemon: session pin create failed: ${e}\n`)
   }
@@ -736,46 +742,64 @@ const pinCreateArmed = new Set<string>()
 // is the entire point — a daemon boot is not evidence that anyone is there.
 export function armChatPin(chat: string): void { pinCreateArmed.add(String(chat)) }
 
-// Verifies the pin ASSIGNMENT — that Telegram still considers our tracked message the pinned one.
-// Named for what it checks, because "pin liveness probe" is exactly the name that would convince a
-// later reader this class is covered. It is not a delivery check, and there cannot be one:
+// The universal rule this file is built on, stated once, in the place the next person will look:
 //
-//   A successful Bot API call proves the SERVER accepted it. It proves nothing about the client.
+//   NO SYSTEM EVENT MAY EVER CAUSE A MINT.
 //
-// That is not a caveat, it is the finding. In the field failure this card was edited successfully for
-// 96 minutes against a message the user's client had never received, and Telegram kept returning 200
-// to editMessageText for ~2.5 minutes after accepting a deleteMessage for it. getChat reported our own
-// id as pinned, correctly, the entire time — so this probe would NOT have caught that bug. What it
-// does catch is the card being UNPINNED out from under us (a user tapping unpin, another message
-// pinned on top), which otherwise recovers only if the card's text happens to change.
+// A timer, a probe, a self-heal, a retry running out of attempts — none of them are evidence that a
+// user is there, and a card minted with nobody there is the whole bug. Every automatic mechanism here
+// is therefore allowed to CLEAR state and to SAY something, never to create. The two places that rule
+// is enforced are forgetChatPin (dropping tracking is not arming) and repinIfDropped (running out of
+// re-pin attempts does not escalate). They were written months apart in spirit and are the same rule.
 //
-// There is no detector for the undeliverable class — see the minting contract above. This probe is
-// the cheap half of the problem, and the only automatic half that exists.
+// RETIRED, do not re-add: a periodic `verifyPinAssignment` probe that compared our tracked id against
+// getChat().pinned_message every 10 minutes and logged "verified present". Live measurement retired it
+// on three counts. Its only advertised case — a user tapping unpin in a DM — is STRUCTURALLY invisible
+// to getChat, which reports the bot's side of a one-sided pin and kept reporting the card pinned for
+// 15+ minutes after a user-side unpin. The one case it could see (a bot-side unpin) is repaired by
+// repinIfDropped in ~16s against the probe's 600s, so it never won. And a DM has no second admin to
+// pin something else, while topic mode skipped the probe entirely — leaving no reachable use case at all.
 //
-// The "verified present" line is deliberate: without it a healthy pin logs NOTHING, so silence reads
-// identically to a dead one — which is how two rounds of investigation mistook a broken card for a
-// working one.
-const PIN_VERIFY_MS = 10 * 60 * 1000
-export async function verifyPinAssignment(): Promise<void> {
-  if (loadAccess().sessionPin === false) return
-  if (isTopicMode()) return   // getChat reports ONE pinned message per chat — meaningless against per-topic cards
-  for (const chat of loadAccess().allowFrom) {
-    const tracked = sessionPins.get(chat)
-    if (tracked === undefined || isChatUnreachable(chat)) continue
-    // TODO(channel-gap): getChat / pinned_message lookup — no verb in the ChannelAdapter contract.
-    const info = await deps.bot.api.getChat(chat).catch(() => null)
-    if (!info) continue   // transient API failure proves nothing — say nothing, retry next sweep
-    const live = (info as { pinned_message?: { message_id?: number } }).pinned_message?.message_id
-    if (live === tracked) { process.stderr.write(`pin: chat ${chat} verified present (message ${tracked})\n`); continue }
-    process.stderr.write(`pin: chat ${chat} tracked ${tracked} but Telegram reports ${live ?? 'nothing'} pinned — re-minting\n`)
-    // Clears stale tracking ONLY — this is a system event, so it deliberately does not arm a create
-    // (see forgetChatPin). The card is re-minted by the next thing the user does, not by this timer.
-    await forgetChatPin(chat)
+// The "verified present" line was added — by me — specifically so that silence would be
+// distinguishable from health. It did the opposite: it could only ever mean that SOMETHING had
+// restored server-side agreement, possibly a silent re-pin of a message nobody can see. A green light
+// with no referent is worse than no light. That is the reason it is gone, and it is the reason not to
+// re-add it on the same reasoning that first justified it.
+
+// Telegram no longer shows our card as the pinned message, so pin it again. Runs after every real
+// edit (~10s). Three things it must not do, all three of which it did, and all three measured live:
+//
+//   * BE SILENT. `pinCard` writes to stderr only in its catch, so a successful repair left nothing
+//     in the log at all — one was caught only by an external getChat poll, 359 seconds before the
+//     (now retired) probe would have looked. A repair nobody can see is a large part of how a dead
+//     card reads healthy for 96 minutes.
+//   * TRUST A FAILED LOOKUP. `.catch(() => null)` made an UNAVAILABLE oracle indistinguishable from
+//     a missing pin — `undefined !== existing` — so any transient getChat error re-pinned blindly.
+//     Not knowing and knowing-it's-gone are different states and must stay different.
+//   * RETRY FOREVER. Re-pinning is known-ineffective for the invisible-card class: the pin verb
+//     points at a message id the client does not hold, so an uncapped retry is an uncapped no-op.
+//
+// Past the cap it STOPS and says so. It deliberately does not escalate to a re-mint — see the
+// NO SYSTEM EVENT MAY EVER CAUSE A MINT rule above. The card is replaced by the next thing the user
+// does; `/status` forces it immediately.
+const REPIN_CAP = 5
+const rePinAttempts = new Map<string, number>()
+export async function repinIfDropped(chat: string, existing: number): Promise<void> {
+  // TODO(channel-gap): getChat / pinned_message lookup — no verb in the ChannelAdapter contract.
+  const info = await deps.bot.api.getChat(chat)
+    .then(i => i as { pinned_message?: { message_id?: number } })
+    .catch(() => undefined)
+  if (info === undefined) return                    // oracle unavailable — proves nothing, so do nothing
+  const live = info.pinned_message?.message_id
+  if (live === existing) { rePinAttempts.delete(chat); return }
+  const n = (rePinAttempts.get(chat) ?? 0) + 1
+  rePinAttempts.set(chat, n)
+  if (n > REPIN_CAP) {
+    if (n === REPIN_CAP + 1) process.stderr.write(`pin: chat ${chat} message ${existing} came unpinned ${REPIN_CAP} times — GIVING UP on re-pinning it. Re-pinning cannot fix a card the recipient never received; this one is replaced the next time the user does something, or now via /status\n`)
+    return
   }
-}
-export function startPinAssignmentVerifier(): void {
-  void verifyPinAssignment()   // immediately at start: the riskiest card is one created during restart churn
-  setInterval(() => void verifyPinAssignment(), PIN_VERIFY_MS).unref?.()
+  await pinCard(chat, chat, existing)
+  if (!unpinnedCards.has(chat)) process.stderr.write(`pin: chat ${chat} re-pinned message ${existing} (attempt ${n}/${REPIN_CAP}) — Telegram had ${live ?? 'nothing'} pinned\n`)
 }
 
 // Create/edit/re-pin a single chat's status card — shared by classic DM mode's per-`allowFrom`-chat
@@ -817,10 +841,7 @@ async function upsertChatPin(chat: string, text: string, buttons: Button[][], pa
       onSent: async () => {
         pinTextCache.set(chat, text)
         logPin('edit')
-        // If the user unpinned it, re-pin so it returns (runs only when the card actually changed).
-        // TODO(channel-gap): getChat / pinned_message lookup — no verb in the ChannelAdapter contract.
-        const info = await deps.bot.api.getChat(chat).catch(() => null)
-        if (info?.pinned_message?.message_id !== existing) await pinCard(chat, chat, existing)
+        await repinIfDropped(chat, existing)
       },
       onError: e => {
         // Deleted out from under us → drop the stale id; the next cycle recreates it. Transient

@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { prettyModel, lastModelInTranscript, lastTodosInTranscript, modeBadge, pinMessageGone, statusKeyboard, mergeStatus, codexModelFromPane, codexPrettyModel, codexStatusHead, parseCodexStatusline } from './status-card.ts'
 import type { StatuslineData } from './statusline.ts'
-import { initStatusCard, updateSessionPin, paneForDmChat, forgetChatPin, armChatPin, verifyPinAssignment, sessionPins, pinTextCache } from './status-card.ts'
+import { initStatusCard, updateSessionPin, paneForDmChat, forgetChatPin, armChatPin, repinIfDropped, sessionPins, pinTextCache } from './status-card.ts'
 import { ACCESS_FILE } from './common.ts'
 import { loadAccess } from './access.ts'
 import { focus, markChatReachable, markChatUnreachableIfUndeliverable, isChatUnreachable } from './state.ts'
@@ -287,7 +287,7 @@ test('a chat deleted client-side gets a NEW card once its stale pin is forgotten
   await updateSessionPin()                      // the wiped chat still looks "already carded" — nothing sent
   expect(sent).toEqual([])
 
-  await forgetChatPin('111111')                 // dropping tracking alone is NOT permission to mint
+  await forgetChatPin('111111', 'start')                 // dropping tracking alone is NOT permission to mint
   expect(sessionPins.has('111111')).toBe(false)
   await updateSessionPin()
   expect(sent).toEqual([])
@@ -296,34 +296,6 @@ test('a chat deleted client-side gets a NEW card once its stale pin is forgotten
   await updateSessionPin()
   expect(sent).toEqual(['111111'])              // a card the user can actually see
   expect(pinned).toEqual(['111111'])
-})
-
-// The probe catches the card being unpinned out from under us. It cannot see a card the client never
-// received (getChat reports that one as healthy); nothing can, which is why no card is minted with
-// nobody present in the first place.
-test('the liveness probe re-mints when Telegram disagrees about what is pinned', async () => {
-  setAllowFrom(['111111'])
-  sessionPins.clear(); pinTextCache.clear(); armChatPin('111111')
-  const sent: string[] = [], pinned: string[] = []
-  let livePin: number | undefined = 101
-  const deps = pinDeps(sent, pinned) as unknown as { bot: { api: { getChat: () => Promise<unknown> } } }
-  deps.bot.api.getChat = async () => (livePin === undefined ? {} : { pinned_message: { message_id: livePin } })
-  initStatusCard(deps as never)
-  await updateSessionPin()
-  expect(sessionPins.get('111111')).toBe(101)
-
-  await verifyPinAssignment()                        // Telegram agrees — nothing happens
-  expect(sessionPins.get('111111')).toBe(101)
-
-  livePin = undefined                           // the user unpinned it; edits would still succeed
-  await verifyPinAssignment()
-  expect(sessionPins.has('111111')).toBe(false) // stale tracking dropped…
-  await updateSessionPin()
-  expect(pinned).toEqual(['111111'])            // …but the probe is a SYSTEM event — it mints nothing
-
-  armChatPin('111111')                          // the user's next message
-  await updateSessionPin()
-  expect(pinned).toEqual(['111111', '111111'])
 })
 
 // ---- the minting contract, both directions ----
@@ -379,4 +351,41 @@ test('a create that Telegram refuses stays armed and retries', async () => {
   down = false
   await updateSessionPin()
   expect(sent).toEqual(['111111'])
+})
+
+// The post-edit re-pin repair, measured live and found silent, credulous and uncapped. Each property
+// is asserted separately because each one alone was enough to make a dead card read healthy. Driven
+// directly rather than through a real edit: onSent fires from the edit scheduler's own timer, and a
+// timing-dependent test of a rule this load-bearing is worth less than a direct one.
+test('the re-pin repair ignores a failed lookup, and gives up rather than retrying forever', async () => {
+  const sent: string[] = [], pinned: string[] = []
+  let live: number | undefined | 'error' = undefined
+  const deps = pinDeps(sent, pinned) as unknown as { bot: { api: { getChat: () => Promise<unknown> } } }
+  deps.bot.api.getChat = async () => {
+    if (live === 'error') throw new Error('502 Bad Gateway')
+    return live === undefined ? {} : { pinned_message: { message_id: live } }
+  }
+  initStatusCard(deps as never)
+  sessionPins.clear(); pinTextCache.clear(); sessionPins.set('111111', 500)
+
+  // An oracle that merely FAILED is not evidence the pin is gone — the old code re-pinned blindly
+  // here, because `undefined !== existing`.
+  live = 'error'
+  for (let i = 0; i < 3; i++) await repinIfDropped('111111', 500)
+  expect(pinned).toEqual([])
+
+  // Genuinely unpinned → repair, but only up to the cap, then stop. Re-pinning cannot fix a card the
+  // client never received, so an uncapped retry is an uncapped no-op.
+  live = undefined
+  for (let i = 0; i < 9; i++) await repinIfDropped('111111', 500)
+  expect(pinned.length).toBe(5)                 // REPIN_CAP, not 9
+  expect(sessionPins.get('111111')).toBe(500)   // and giving up NEVER mints — no system event may
+  expect(sent).toEqual([])
+
+  // Agreement restored → the counter resets, so a later genuine drop is repaired again.
+  live = 500
+  await repinIfDropped('111111', 500)
+  live = undefined
+  await repinIfDropped('111111', 500)
+  expect(pinned.length).toBe(6)
 })
