@@ -17,10 +17,13 @@
     /* The feed's message text, and its OWN step rather than a bump to --t-body, for the reason
        --fold-h gives above: --t-body also sizes the composer textarea, whose line box sets the
        settled 52px pill and the six-line cap. Raising it there would have quietly grown both.
-       Set on .msg so BOTH sides move together — the two must stay matched. */
-    --t-msg: 18px;
+       Set on .msg so BOTH sides move together — the two must stay matched.
+       It currently COINCIDES with --t-body, by the owner's call after living with 18 at full width
+       on his own phone. That coincidence is not a reason to collapse the two: --t-body drags the
+       composer's geometry with it and this one does not, which is the whole point of the split. */
+    --t-msg: 16px;
     --t-title: 20px;   /* the one title size */
-    --t-mono: 13px;    /* code and the activity feed */
+    --t-mono: 13px;    /* code blocks, inline code, and the command chip */
     /* Spacing and radius. NOTE for anyone re-running the design lint: tokenising these also makes
        them invisible to it, because it only reads literals. flat-type-hierarchy stops firing for
        the same reason — it is NOT evidence the scale now spans its 2x threshold. It doesn't: 20/12
@@ -42,6 +45,21 @@
        INTEGER: it is half the pill's spare height, so an odd total would land the button on a half
        pixel and reintroduce exactly the paint snap the .sendbtn svg note describes. */
     --mic-d: 40px;
+    /* The chat header's three containers — two standalone circles and the name capsule between them.
+       ONE diameter, measured off the owner's reference against the only control both frames share,
+       the composer mic: its header circles are 81.0px beside a 66.7px mic, so at our 40px mic they
+       scale to 48.6. Ratios only — Telegram rescales uploads, so the file's own pixel counts and any
+       viewport inferred from them mean nothing. The two circles measured the SAME (81.0 / 80.9), so
+       there is one token rather than two. This is deliberately the largest control in the app, larger
+       than the mic; that inversion is the reference's and is intended, not a mistake to normalise.
+       --hbtn-glyph holds the glyph's share of the button roughly where it already was (19 in 34).
+       Keep their DIFFERENCE EVEN: the button centres its glyph with half of it as padding, and an odd
+       difference puts the glyph on a half pixel — see .chatbtn. */
+    --hbtn-d: 48px;
+    --hbtn-glyph: 26px;
+    /* Those three containers are one family, so their raised look is one constant rather than the
+       same two shadows written out per container. */
+    --chip-lift: inset 0 1px 0 rgba(255,255,255,.06), 0 2px 6px rgba(0,0,0,.35);
     /* The paperclip glyph. Its own constant rather than a step off --sp-*, for the reason --fold-h
        gives above: it is a geometric size answering to the reference, not a spacing choice. */
     --clip-d: 24px;
@@ -114,36 +132,43 @@
      of tonight's inert-modifier bugs; this is the second one going. */
   #viewer .vhead button { padding: 7px 11px; border: none; border-radius: var(--r-sm); background: var(--btn); color: var(--btn-text); }
   /* Chat header — the drill-in ONLY (the file viewer keeps the flat bar; it isn't this screen).
-     A lifted island inset from the edges, per the reference. On a near-black canvas there is no
-     ambient light for a surface to catch, so the lift has to be manufactured: an opaque raised fill
-     plus a hairline rim along the top edge where light would land. Deliberately NO accent bloom —
-     a glow is for the one thing you want clicked, and this is a utility bar. */
-  /* 10px matches the composer's inset, so the two surfaces that bracket the screen line up. */
+     THREE separate containers with gaps between them, per the reference: a standalone circle, the
+     name capsule, a standalone circle. The BAR paints nothing; each container carries its own lift.
+     They used to be one island with the two buttons sitting inside it. On a near-black canvas there
+     is no ambient light for a surface to catch, so the lift has to be manufactured: an opaque raised
+     fill plus a hairline rim along the top edge where light would land. Deliberately NO accent bloom
+     — a glow is for the one thing you want clicked, and these are utility controls. */
+  /* 10px matches the composer's inset, so the two surfaces that bracket the screen line up. The 6px
+     gap is the reference's own (10.6 and 9.7 image px against its 66.7px mic). */
   /* --title-align is the ONE declaration that walks the centred title back to left-anchored, because
      the owner asked for centred provisionally. Centring is honest here rather than approximate: the
-     bar holds exactly one 34px control on each side, so the space either side of the title is already
-     symmetric and centring within it centres against the BAR. Add a third control and that stops
+     row holds one identically-sized circle on each side, so the space either side of the capsule is
+     symmetric and centring within it centres against the ROW. Add a third control and that stops
      being true — give the side slots equal fixed widths at that point. */
-  #drill .vhead { --title-align: center; margin: 10px 10px 2px; padding: 7px var(--sp-2); border-bottom: none; border-radius: var(--r-2xl); gap: 6px;
-    background: var(--sec); box-shadow: inset 0 1px 0 rgba(255,255,255,.06), 0 2px 6px rgba(0,0,0,.35); }
-  /* Both side controls are the same PAINTED circle — 34px, filled — so the bar reads balanced and the
-     slots stay equal, which is what the centred title depends on. The earlier octagon was a 19px glyph
-     inside a 34px transparent slot, so it rendered visibly smaller than the back chip beside it.
-     The ::after lifts the TOUCH target to 44px without growing the paint (padding would have grown the
-     background with it), the same 44 standard the card close got. Absolute, so it changes no layout. */
-  /* SELF-CONTAINED, and a single class on purpose. These buttons are deliberately NOT .ghost: the base
-     used to be `#drill .vhead .ghost` (1,2,0), which meant every variant had to out-rank an id plus two
+  #drill .vhead { --title-align: center; margin: 10px 10px 2px; padding: 0; border-bottom: none;
+    background: transparent; gap: 6px; }
+  /* SELF-CONTAINED, and a single class on purpose. These buttons are deliberately NOT .ghost, and the
+     shared appearance deliberately does NOT live on a `#drill .vhead > *` rule: the base used to be
+     `#drill .vhead .ghost` (1,2,0), which meant every variant had to out-rank an id plus two
      descendants, and a variant written the obvious way — `#dstop.recording` (1,1,0) — silently lost and
-     did nothing. Twice tonight, counting the ✕ that lost its red to `.vhead .ghost` (0,2,0). At (0,1,0)
-     any `.chatbtn.x` variant wins by construction, and scoping is now by markup rather than by location,
+     did nothing. Twice that night, counting the ✕ that lost its red to `.vhead .ghost` (0,2,0). At (0,1,0) any
+     `.chatbtn.x` variant wins by construction, and scoping is now by markup rather than by location,
      so it cannot accidentally capture the file viewer's own .vhead buttons either. */
-  .chatbtn { position: relative; width: 34px; height: 34px; padding: 0; border: none; border-radius: 50%;
-    background: transparent; color: var(--text); cursor: pointer; flex: none;
+  /* Both circles are the same painted chip as the capsule between them — same fill, same rim — which
+     is what makes the three read as one row of containers rather than three unrelated shapes.
+     No ::after touch-target lift any more: it existed to bring a 34px button up to the 44px standard,
+     and the button now exceeds 44 on its own. */
+  .chatbtn { width: var(--hbtn-d); height: var(--hbtn-d); border: none; border-radius: 50%;
+    background: var(--sec); box-shadow: var(--chip-lift); color: var(--text); cursor: pointer; flex: none;
+    /* The PADDING is what fixes the glyph's origin — an integer, so it lands on whole pixels at any
+       button size. Centring it by halving flex free space instead is what put the 19-in-34 button's
+       glyph half a pixel down and right: 15px of free space halves to 7.5, and Blink snaps the SVG's
+       paint origin up to the whole pixel. Measured at exactly +0.50, +0.50 on both of these buttons
+       before this change — the same defect fixed on the composer mic, which CLAUDE.md had recorded
+       here as merely suspected. The flex box below then has zero free space left to halve. */
+    padding: calc((var(--hbtn-d) - var(--hbtn-glyph)) / 2);
     display: flex; align-items: center; justify-content: center; }
-  /* Lifts the TOUCH target to 44px without growing the paint; absolute, so it changes no layout. */
-  .chatbtn::after { content: ""; position: absolute; inset: -5px; border-radius: 50%; }
-  .chatbtn svg { width: 19px; height: 19px; display: block; }
-  .chatbtn.back { background: var(--bg); }
+  .chatbtn svg { width: var(--hbtn-glyph); height: var(--hbtn-glyph); display: block; }
   /* 24px, up from 19. Sized against the owner's reference rather than by eye: its paperclip carries
      34x39px of ink beside a 67px mic button, which at our 40px mic scales to 20.3 x 23.3 — a 24px
      glyph puts ours at 21.4 x 22.6, the closest of the sizes tried. `.ghost` has exactly one user
@@ -154,11 +179,17 @@
   /* Two-line title: name over the session's dial line, as the reference has name over "bot". The
      status dot rides ON the name line — centred against a two-line block it would float in the
      gutter, belonging to neither line. (Its own rules stay untouched; only its context moves.) */
-  /* The cap is for WIDE viewports and measured as such: at 390px the available space is already the
-     limit (274px against a 290px cap, so it never fires), and at 820px it binds exactly, stopping the
-     title from spanning a tablet-width bar. It is NOT what fixes the long-name case on a phone —
-     `flex: 0 1 auto` on .name below is. Stated because the two are easy to credit the wrong way round. */
-  .dtitle { flex: 1; min-width: 0; max-width: 82%; margin-inline: auto; line-height: var(--lh-snug); text-align: var(--title-align, left); }
+  /* The MIDDLE CONTAINER, now that the buttons have left it: a capsule that spans the whole gap
+     between the two circles, as the reference's does, and is exactly as TALL as they are — the
+     reference measures 81.7 against their 81.0, i.e. the same, and equal height is what makes the
+     three read as one row. Expressed as min-height + a centred column rather than a hand-tuned
+     padding, so the height follows --hbtn-d and the title block's own 40px stays nobody's constant.
+     The old `max-width: 82%; margin-inline: auto` went with the island: it capped the TEXT block
+     inside a full-width bar, and capping the capsule itself would leave dead gaps beside it. */
+  .dtitle { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center;
+    min-height: var(--hbtn-d); padding: 0 var(--sp-3); border-radius: calc(var(--hbtn-d) / 2);
+    background: var(--sec); box-shadow: var(--chip-lift);
+    line-height: var(--lh-snug); text-align: var(--title-align, left); }
   .dtitle .nmrow { display: flex; align-items: center; gap: 7px; min-width: 0; justify-content: var(--title-align, flex-start); }
   /* An inert mirror of the status dot on the trailing side. Without it the dot widens the name row on
      one side only, so the centred NAME lands ~9px right of the centred subtitle — two lines of one
@@ -173,22 +204,14 @@
      like a bug rather than a decision, and the indicator lost its referent. */
   .dtitle .name { flex: 0 1 auto; min-width: 0; font-size: var(--t-title); font-weight: var(--w-semi); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .dtitle .sub { display: block; font-size: var(--t-meta); color: var(--hint-raised); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  /* A filled circle with an off-white glyph centred in it, per the reference. The BUTTON is the circle
-     (already a 34px 50%-radius box) and the glyph rides inside it — the same construction the
-     composer's recording button uses. The glyph's footprint is 30% of the diameter, from the
-     reference's square; the glyph itself is a pause, which is what the action actually is. */
-  /* Same fill and glyph as the back chip, by the owner's call. It supersedes an optical correction that
-     shrank the painted disc: both discs measured exactly 34.00 CSS px in the rendered PNG, so the size
-     complaint was never geometry — a fully saturated shape reads larger than a low-contrast one of
-     identical extent (irradiation). Matching the colours removes the illusion at its source instead of
-     compensating for it, and leaves no two numbers disagreeing on purpose. Chosen over a red-while-running
-     variant, so nothing here is red and the composer's recording button has no lookalike to be confused
-     with — which is why this control no longer hides itself while a recording is in progress. */
-  .chatbtn.stop { background: var(--bg); }
-  /* One constant appearance, by the owner's call — deliberately NOT dimmed when the session is idle.
-     The dimming said "there is nothing to interrupt", which the green-to-grey status dot beside the
-     name already says, and pressing it while idle is a harmless no-op (Escape at a prompt does
-     nothing). It was duplicating a signal to defend against a non-problem. */
+  /* The interrupt keeps NO rule of its own: same fill and same glyph as the back chip, by the owner's
+     call, so the base rule above is the whole of it. That supersedes an optical correction that shrank
+     its painted disc — both discs measured exactly equal in the rendered PNG, so the size complaint was
+     never geometry (a fully saturated shape reads larger than a low-contrast one of identical extent).
+     Nothing here is red, so the composer's recording button has no lookalike, which is why this control
+     no longer hides itself mid-recording. And it has ONE constant appearance — deliberately not dimmed
+     while the session is idle: the green-to-grey status dot beside the name already says that, and
+     pressing it while idle is a harmless no-op. */
   pre { margin: 0; padding: var(--sp-3); overflow: auto; flex: 1; white-space: pre; font: var(--t-mono)/1.45 ui-monospace, Menlo, Consolas, monospace; }
   .notice { padding: var(--sp-5) var(--sp-4); color: var(--hint); text-align: center; }
   .err { background: #c0392b; color: #fff; padding: var(--sp-2) var(--sp-3); font-size: var(--t-sub); display: none; }
@@ -258,13 +281,17 @@
      bubble now marks the USER side alone, which is what tells the two apart. */
   .msg.assistant { background: transparent; max-width: 100%; padding: 0; border-radius: 0; margin-bottom: var(--sp-4); }
   /* Left padding drops to 0 with the assistant's: the 11px existed to line these up with bubbled
-     text, and against an unbubbled reply it reads as an indent that means nothing. Deliberately
-     NOT scaled with --t-body — these are the demoted tool lines, and the reference keeps them
-     small and dim while the prose grows. */
-  .msg.activity { background: transparent; color: var(--hint); font: italic var(--t-meta)/1.4 ui-monospace, monospace; padding: 2px 0; margin-bottom: 3px; }
-  /* Live narration — prose, so it gets the app font, not the activity feed's monospace. The quote
-     bar is the DOM counterpart of the <blockquote> the Telegram live card renders it in. */
-  .msg.thought { background: transparent; color: var(--hint); font-size: var(--t-sub); max-width: 100%; padding: 1px 0 1px 10px; margin: var(--sp-1) 0 6px 0; border-left: 2px solid var(--sec); white-space: pre-wrap; }
+     text, and against an unbubbled reply it reads as an indent that means nothing.
+     Type and colour are deliberately ABSENT: these lines carry no font, size or colour of their own,
+     so they inherit .msg's --t-msg and the page's text colour and read as the same prose as a reply.
+     They were an italic 12px monospace in --hint; the owner asked for the prose face, the prose size
+     and no dimming, which retires a demotion an earlier release kept on purpose. Nothing replaces it
+     — no rule, no gutter, no residual tint — so do not reintroduce one here. */
+  .msg.activity { background: transparent; padding: 2px 0; margin-bottom: 3px; }
+  /* The quote bar is NOT a demotion and stays: it is the DOM counterpart of the <blockquote> the
+     Telegram live card renders this same narration in, i.e. structure carried across from the other
+     surface rather than styling invented here. */
+  .msg.thought { background: transparent; max-width: 100%; padding: 1px 0 1px 10px; margin: var(--sp-1) 0 6px 0; border-left: 2px solid var(--sec); white-space: pre-wrap; }
   /* Telegram-style composer: ONE pill spanning the strip, with the paperclip and the round
      mic/send button living INSIDE it — the pill wraps around the mic rather than sitting beside it. */
   /* No divider rule: in the reference the capsule's own fill is what separates the composer from the

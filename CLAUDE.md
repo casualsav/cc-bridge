@@ -180,9 +180,11 @@ reading, each caught a real bug this week.
 **and the composer textarea**, whose line box is what `--pill-h-1` and the six-line cap are built
 on. Raising it to 18 to make messages bigger moves the one-line pill 52 → 54.3px and the cap
 147.6 → 163.8px, silently, and nothing tests the composer against a font change. That is why feed
-messages use their own `--t-msg` (18px) set on `.msg` — which also keeps both sides matched, since
+messages use their own `--t-msg` set on `.msg` — which also keeps both sides matched, since
 the user bubble and the session's replies must never diverge in size. Its own comment invites the
-mistake; this paragraph is the guard.
+mistake; this paragraph is the guard. `--t-msg` currently *equals* `--t-body` at 16px (the owner
+tried 18 on his own phone and asked for 16 back); that coincidence is not licence to collapse the
+two, since only one of them drags the composer's geometry with it.
 
 **The composer capsule is derived from the mic, never the reverse.** `--pill-h-1 = --mic-d +
 2·--pill-ring` (40 + 12 = 52px). Nothing sets a pill height by hand. The ring is *also* the pill's
@@ -239,8 +241,28 @@ feature renders the dark theme and passes without testing anything. Set the vari
 collapsed-message fold faded to `--sec` *because* that was the assistant bubble's colour, and on the
 page background it painted a grey band.
 
-**Known and deliberately unfixed** — do not rediscover these as new bugs. `.chatbtn` is 34px around
-a 19px glyph, flex-centred, so the header back/interrupt icons carry the same 0.5px snap (cosmetic,
-on transparent buttons, never measured). And Feather's paperclip artwork is ~0.25px off-centre
-inside its own viewBox — that is the drawing, not our layout, and a magic-number transform for a
-quarter pixel is worse than the quarter pixel.
+**The chat header is three containers, not a bar.** A standalone circle, the name capsule, a
+standalone circle, each carrying its own `--chip-lift`, with 6px gaps — per the owner's reference,
+where the two circles measure 81.0/80.9px and the capsule 81.7 beside a 66.7px mic, i.e. all three
+the same height and 1.21× the mic. `--hbtn-d` (48px) is that ratio applied to our 40px mic, and it
+is the app's *largest* control on purpose; do not normalise it back toward the mic. `.dtitle` takes
+its height from `min-height: var(--hbtn-d)`, not from padding, so the three stay equal by
+construction. Keep `--hbtn-d − --hbtn-glyph` **even**: `.chatbtn` centres by integer padding, and
+an odd difference reintroduces the paint snap below.
+
+**The `.chatbtn` half-pixel snap was real, was measured, and is fixed** (v0.4.75) — the old note
+here called it suspected-but-unmeasured. A 19px glyph in a 34px flex-centred button read exactly
+`+0.50, +0.50` on both header buttons, on *filled* discs, not transparent ones. Integer padding
+fixed it, and it now reads `+0.00, +0.00`. The condition is halved-odd-free-space, so a button
+sized by padding is immune at any diameter — that part of the folklore was right.
+
+**Known and deliberately unfixed** — do not rediscover this as a new bug. Feather's paperclip
+artwork is ~0.25px off-centre inside its own viewBox — that is the drawing, not our layout, and a
+magic-number transform for a quarter pixel is worse than the quarter pixel.
+
+**The tool/thought lines are prose now, by explicit instruction.** `.msg.activity` and `.msg.thought`
+carry no font, size or colour of their own; they inherit `--t-msg` and the page text colour so they
+read exactly like a reply. That retires a visual demotion (italic 12px monospace in `--hint`) an
+earlier release kept on purpose. Nothing replaces it — no rule, no gutter, no residual tint. The
+`.thought` quote bar stays because it mirrors the `<blockquote>` the Telegram live card renders the
+same narration in, not as a substitute demotion.
