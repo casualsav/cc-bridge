@@ -37,8 +37,24 @@
        INTEGER: it is half the pill's spare height, so an odd total would land the button on a half
        pixel and reintroduce exactly the paint snap the .sendbtn svg note describes. */
     --mic-d: 40px;
+    /* The paperclip glyph. Its own constant rather than a step off --sp-*, for the reason --fold-h
+       gives above: it is a geometric size answering to the reference, not a spacing choice. */
+    --clip-d: 24px;
     --pill-ring: 6px;
-    --pill-h: calc(var(--mic-d) + 2 * var(--pill-ring));
+    /* The pill's height AT ONE LINE, and the name matters: the pill now grows with the textarea,
+       but the corner radius must NOT follow it. Tie the radius to the live height and a six-line
+       pill becomes a 74px lozenge instead of a chat field. Fixed at the one-line radius, a tall
+       pill is a rounded rectangle whose bottom-right corner keeps the curve the mic sits in. */
+    --pill-h-1: calc(var(--mic-d) + 2 * var(--pill-ring));
+    /* The composer's growth cap, in LINES. Six fully visible lines, then the text scrolls inside
+       the field — measured off a real Telegram client by the owner, not chosen here. It is derived
+       from the line box rather than written as a pixel height on purpose: a pixel cap that is not
+       an exact multiple of the line box puts the ceiling mid-line, so the sixth line shows as a
+       sliver — the same clipped-glyph symptom this change exists to remove, moved to the scroll
+       boundary. The old inert `max-height: 110px` was exactly that: 4.26 lines. */
+    --ta-lines: 6;
+    --ta-lh: 1.35;
+    --ta-pad-y: 9px;
     --r-xs: 4px; --r-sm: 8px; --r-md: 12px; --r-xl: 16px; --r-2xl: 20px;
     --bg: var(--tg-theme-bg-color, #17212b);
     --sec: var(--tg-theme-secondary-bg-color, #232e3c);
@@ -123,7 +139,13 @@
   .chatbtn::after { content: ""; position: absolute; inset: -5px; border-radius: 50%; }
   .chatbtn svg { width: 19px; height: 19px; display: block; }
   .chatbtn.back { background: var(--bg); }
-  .ghost svg { width: 19px; height: 19px; display: block; }
+  /* 24px, up from 19. Sized against the owner's reference rather than by eye: its paperclip carries
+     34x39px of ink beside a 67px mic button, which at our 40px mic scales to 20.3 x 23.3 — a 24px
+     glyph puts ours at 21.4 x 22.6, the closest of the sizes tried. `.ghost` has exactly one user
+     (#datt), so this reaches nothing else. The glyph stays on whole pixels at ANY size here because
+     .ghost centres it with integer padding rather than by halving flex free space — the trap that
+     caught .sendbtn does not exist on this button. */
+  .ghost svg { width: var(--clip-d); height: var(--clip-d); display: block; }
   /* Two-line title: name over the session's dial line, as the reference has name over "bot". The
      status dot rides ON the name line — centred against a two-line block it would float in the
      gutter, belonging to neither line. (Its own rules stay untouched; only its context moves.) */
@@ -242,10 +264,13 @@
      `border-radius` is half the height, so the pill's right end is a semicircle centred on exactly
      the same point as the mic (ring 3 + radius 20 = 23) — that concentricity is what makes the ring
      read as even all the way around the button rather than only above and below it. */
-  .inputwrap { flex: 1; display: flex; align-items: flex-end; background: var(--sec); border-radius: calc(var(--pill-h) / 2); padding: var(--pill-ring); padding-left: 14px; min-height: var(--pill-h); box-shadow: inset 0 1px 0 rgba(255,255,255,.06); }
+  .inputwrap { flex: 1; display: flex; align-items: flex-end; background: var(--sec); border-radius: calc(var(--pill-h-1) / 2); padding: var(--pill-ring); padding-left: 14px; min-height: var(--pill-h-1); box-shadow: inset 0 1px 0 rgba(255,255,255,.06); }
   /* Explicit font (not `inherit`): Android WebViews don't reliably propagate an inherited font
      into the IME composition / autofill layer, which then renders in the UA default. */
-  .inputwrap textarea { flex: 1; resize: none; border: none; outline: none; background: transparent; color: var(--text); padding: 9px 0; font: var(--t-body)/1.35 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; max-height: 110px; }
+  /* max-height is the six-line cap spelled as six line boxes plus the field's own padding, so it
+     stays six lines if the type scale or line-height ever moves. box-sizing is border-box here,
+     which is why the padding term belongs in the sum. */
+  .inputwrap textarea { flex: 1; resize: none; border: none; outline: none; background: transparent; color: var(--text); padding: var(--ta-pad-y) 0; font: var(--t-body)/var(--ta-lh) -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; max-height: calc(var(--ta-lines) * var(--ta-lh) * 1em + 2 * var(--ta-pad-y)); overflow-y: auto; }
   .ghost { background: transparent; border: none; color: var(--hint); padding: var(--sp-2) 7px; cursor: pointer; line-height: 1; flex: none; }
   /* The capsule's controls should sit a step above its placeholder, as they do in the reference —
      at one tone the whole capsule reads as decoration rather than two affordances beside a label. */
@@ -826,6 +851,7 @@ function openDrill(sid, name) {
   $("dsub").innerHTML = s ? dialParts(s).join(" · ") : "";
   $("dfeed").innerHTML = '<div class="notice">Loading…</div>';
   $("drill").classList.add("show");
+  growComposer();   // first moment the field has a measurable height; sizes it before it is seen
   renderDrill();
   clearInterval(drillTimer);
   drillTimer = setInterval(() => { if (!document.hidden) renderDrill(); }, 3000);
@@ -1029,10 +1055,37 @@ const VOICE_OK = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedi
 // Which of the two round buttons is showing. Where the webview has no recording API there is nothing
 // to morph between, so send simply stays. Recording outranks a typed draft: you can type mid-record,
 // and swapping the recorder out from under a live recording would strand it.
+// Auto-grow, Telegram-style: one line at rest, a line at a time as text wraps, then the CSS
+// six-line cap takes over and the field scrolls inside itself. `height: auto` first because
+// scrollHeight only reports the content's height once the box has stopped constraining it — read
+// it against the previous height and a field that shrank would stay tall forever. The cap lives in
+// CSS (max-height), so assigning the full scrollHeight here is safe: it simply stops taking effect.
+function growComposer() {
+  const ta = $("dtext"), feed = $("dfeed");
+  // Measured BEFORE the field is resized, because growing it shrinks the feed's clientHeight.
+  // #dfeed is flex:1 so the layout absorbs the growth, but absorbing it is not the same as staying
+  // pinned: scrollTop does not move, so every pixel the composer gains scrolls the newest message
+  // out of sight — 87px of it by six lines. The 3s repaint would not rescue it either, since it
+  // only re-pins within 60px of the bottom and the drift passes that at three lines. Same 60px
+  // threshold as paintFeed on purpose: a reader who has deliberately scrolled up is left alone.
+  const stuck = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;
+  ta.style.height = "auto";
+  // A hidden element measures 0. syncComposerMode() runs once at parse time, when #drill is still
+  // display:none, so without this guard the field is pinned to height:0 and never recovers — it
+  // renders as a strip of bare padding with the placeholder spilling out below it. Leaving the
+  // height on `auto` hands the resting size back to rows="1" until the view is actually shown.
+  if (!ta.scrollHeight) return;
+  ta.style.height = ta.scrollHeight + "px";
+  if (stuck) feed.scrollTop = feed.scrollHeight;
+}
+// Every path that changes the field's value already funnels through here — typing, send, a failed
+// send handing the draft back, the attach caption, and record start/stop — so the grow and the
+// collapse-back-to-one-line both come for free rather than needing a call at each site.
 function syncComposerMode() {
   const showSend = !VOICE_OK || (!!$("dtext").value.trim() && !rec);
   $("dsend").style.display = showSend ? "flex" : "none";
   $("dmic").style.display = showSend ? "none" : "flex";
+  growComposer();
 }
 $("dtext").oninput = syncComposerMode;
 syncComposerMode();
