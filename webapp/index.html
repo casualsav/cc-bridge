@@ -288,11 +288,27 @@
      against .vhead's content box, which is what makes it track the viewport instead of a guess.
      It is --hbtn-w and not --hbtn-d in here, and that is the one thing to fix if the buttons ever stop
      being square-ish: this is the only place the row's WIDTH budget is written down. */
+  /* …and it is NOT A CAPSULE any more. The fill, the rim and the frost are gone by the owner's ask,
+     after the reference his phone actually shows him: a title line over a subtitle line, floating on
+     the transcript, no surface under either. The two CIRCLES keep theirs — he scoped the ask to the
+     pill, and they are the row's only 44px touch targets; two unlabelled glyphs over a moving
+     transcript is a different screen, not this one.
+     What the capsule was quietly doing is the whole of the rest of this change. It was the contrast
+     floor for both lines. The ceiling scrim (#drill::before) ramps to zero at the header's BOTTOM
+     edge, which puts roughly 45% of --bg behind the name and roughly 5% behind the cwd — measured,
+     not estimated. Bare, the cwd sits on whatever message happens to be passing.
+     So the floor moves onto the glyphs themselves, as --title-halo. A halo and NOT a stronger scrim,
+     for a reason already written into this file: extending that ramp down across the header paints a
+     bar over the band the transcript was just given, was tried, and was rejected by the owner. A
+     halo costs no strip at all. It resolves through --bg, so it darkens on a dark theme and lightens
+     on a light one without a second value to keep in sync.
+     `margin-inline` STAYS, and its stated reason has changed while its job has not: it was written
+     as "20% narrower than the gap it spans, so the capsule stops reading as a bar", and there is no
+     capsule to read as anything now. It is still the clearance between the title's text and two
+     touch targets, and still the one place the row's width budget is written down. */
   .dtitle { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center;
     margin-inline: calc(10% - 0.2 * var(--hbtn-w) - 1.2px);
-    min-height: var(--hbtn-d); padding: var(--h-pad) var(--sp-3); border-radius: calc(var(--hbtn-d) / 2);
-    background: var(--chip-fill); box-shadow: var(--chip-lift);
-    backdrop-filter: var(--chip-glass); -webkit-backdrop-filter: var(--chip-glass);
+    min-height: var(--hbtn-d); padding: var(--h-pad) var(--sp-3);
     line-height: var(--lh-snug); text-align: var(--title-align, left); }
   /* A wrapper that is INVISIBLE to layout until fullscreen folds the pause button in beside it.
      `display: contents` is exactly this: the box disappears and its children go on being the flex
@@ -319,6 +335,29 @@
      it was not at 16px: drop it and the two lines become one indistinguishable grey block. */
   .dtitle .name { flex: 0 1 auto; min-width: 0; font-size: var(--t-meta); line-height: var(--h-l1); font-weight: var(--w-semi); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .dtitle .sub { display: block; font-size: var(--t-stamp); line-height: var(--h-l2); color: var(--hint-raised); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* The title's contrast floor, in ONE rule over BOTH lines rather than the same declarations
+     written twice: the name and the cwd are one title in two sizes, and a treatment on one of them
+     alone reads as the other being broken.
+     A real STROKE, not a stack of shadows, and that distinction cost a measured failure to find. The
+     first version stacked eight same-colour blurs, on the reasoning that a text-shadow's alpha near
+     an 11px stroke is well under 1 so density has to come from repetition. It does — and repetition
+     also accumulates the 8-bit rounding loss of each composite, so a shadow painted in EXACTLY the
+     page's own colour still darkened the ground under it. Measured in isolation: --bg over --bg came
+     back six units darker, which rendered as a dark plate the size of the text. We had just removed
+     a capsule; this drew one back, in the sloppiest way available. The wide 10px blur was most of it
+     (one 3px shadow costs nothing, adding the 10px costs five units).
+     `paint-order: stroke fill` is what makes the stroke usable at this size: the stroke paints
+     FIRST and the fill covers its inner half, so a 3px stroke is 1.5px of ground outward and the
+     glyph's own shape is untouched — no eroded counters at 11px, checked. Two soft shadows carry the
+     falloff past the stroke's hard edge, which is what keeps it from reading as an outline.
+     --bg is what makes it theme-correct without a second value: it is whatever the page's ground is,
+     so it darkens behind light text and lightens behind dark text, and a custom Telegram theme
+     carries it along.
+     Measured worst-case, over a bright user bubble (scripts/webapp-measure/halo.py): the cwd reads
+     5.31:1 dark and 5.88:1 light against a 4.5 floor, up from 1.19 and 2.24 bare. Both halves of the
+     fix are load-bearing — with the steeper scrim but no stroke it is 3.43:1, still under. */
+  .dtitle .name, .dtitle .sub { -webkit-text-stroke: 3px var(--bg); paint-order: stroke fill;
+    text-shadow: 0 0 3px var(--bg), 0 0 6px var(--bg); }
   /* The interrupt keeps NO rule of its own: same fill and same glyph as the back chip, by the owner's
      call, so the base rule above is the whole of it. That supersedes an optical correction that shrank
      its painted disc — both discs measured exactly equal in the rendered PNG, so the size complaint was
@@ -442,8 +481,14 @@
     padding-right: var(--h-pad); }
   html.fs #drill .dtitle .tcol { flex: 1; min-width: 0; display: flex; flex-direction: column;
     justify-content: center; text-align: var(--title-align, center); }
-  /* Inside the capsule it is not a chip any more — a chip inside a chip reads as a nested surface, and
-     the capsule already carries the fill and the frost for both. */
+  /* Inside the title it is not a chip. It was written that way when the title WAS a capsule (a chip
+     inside a chip reads as a nested surface, and the capsule carried the fill and the frost for
+     both); the capsule has since gone, and the rule survives its original reason because fullscreen
+     is the one place a bare glyph is safe. The header rides up into Telegram's chrome band there,
+     where the ceiling scrim is already at full strength — so this glyph sits on flat --bg, not on a
+     passing message, and it matches the bare controls the owner's reference shows beside bare text.
+     Outside fullscreen the pause is a side chip and KEEPS its fill; that is not the same control in
+     a different state, it is the same control in a different box. */
   html.fs #drill #dstop { background: transparent; box-shadow: none; backdrop-filter: none;
     -webkit-backdrop-filter: none; width: auto; height: auto; padding: 0; flex: none; }
   html.fs #drill #dstop svg { width: 20px; height: 20px; }
@@ -456,17 +501,38 @@
      46px lower. That is the ~46px of transcript the owner asked to reclaim. */
   html.fs #dfeed { padding-top: calc(var(--safe-top) + var(--sp-3)); }
   html.fs #drill::before { height: var(--safe-top); }
+  /* THE RAMP IS STEEPER THAN IT WAS, and that is the second half of removing the title's capsule —
+     not a taste pass on the scrim. The capsule was the contrast floor for both title lines, and with
+     it gone the ramp is the only ground they have. Where it lands matters: the ramp is zero at the
+     band's BOTTOM edge, and the cwd is the band's bottom LINE, so under the old stops the cwd sat at
+     about 5% of --bg, i.e. on raw transcript. Measured over a bright user bubble it read 1.19:1 bare
+     and 1.78:1 with the halo — against a 4.5:1 floor and a 5.9:1 design contrast.
+     No glyph-level treatment closes that, and several were tried and measured before this was
+     touched: a wider blur, blurs stacked to eight, a hard 1px outline, that outline doubled. The
+     dark theme's ceiling was 1.78:1, because --hint-raised at 11px and the user bubble are close in
+     luminance and the line has no ground to be separated FROM. The ramp is the only thing that can
+     give it one. With these stops it reads 5.01:1 dark and 5.51:1 light, and the halo is still
+     load-bearing rather than decorative: take the halo off these same stops and the cwd falls to
+     3.43:1, under the floor again. Neither half is sufficient alone. scripts/webapp-measure/halo.py
+     is what says all of that, and validates itself against the flat-ground control first.
+     WHAT THIS IS NOT: the shape that was tried and rejected. That one pushed the ramp BELOW the
+     header, painting a bar across the band the transcript had just been given. This one still
+     reaches zero exactly at the header's bottom edge — never lower — so the transcript still runs
+     clear from there down. What it costs is honest and worth stating: the band above the cwd is now
+     near-solid ground, so the two side chips' glass has less passing behind it than it did. That is
+     the trade the owner's ask forces, and it is the smaller loss — an unreadable path line is a
+     defect, a chip reading slightly more solid at the top of the screen is a texture. */
   #drill::before { content: ""; position: absolute; left: 0; right: 0; top: 0; z-index: 1; pointer-events: none;
     height: calc(var(--safe-top) + 10px + var(--hbtn-d));
     background: linear-gradient(to top, transparent, var(--bg));
     background: linear-gradient(to top,
       color-mix(in srgb, var(--bg) 0%, transparent) 0%,
-      color-mix(in srgb, var(--bg) 6%, transparent) 19%,
-      color-mix(in srgb, var(--bg) 20%, transparent) 34%,
-      color-mix(in srgb, var(--bg) 44%, transparent) 47%,
-      color-mix(in srgb, var(--bg) 70%, transparent) 58%,
-      color-mix(in srgb, var(--bg) 90%, transparent) 67%,
-      var(--bg) 74%); }
+      color-mix(in srgb, var(--bg) 20%, transparent) 5%,
+      color-mix(in srgb, var(--bg) 55%, transparent) 12%,
+      color-mix(in srgb, var(--bg) 80%, transparent) 20%,
+      color-mix(in srgb, var(--bg) 92%, transparent) 30%,
+      color-mix(in srgb, var(--bg) 98%, transparent) 40%,
+      var(--bg) 50%); }
   /* A PLAIN BLOCK again, deliberately rather than by neglect. It was a flex column for exactly one
      reason — `.work`'s `margin-top: auto` needed free space to absorb, which a block has none of —
      and that row has left the scroller entirely, so the column had no remaining job. Keeping it
@@ -519,15 +585,20 @@
      than the model. It joins the unbubbled full-width column above rather than restating it, which
      is also what moves it out of the OWNER's column: `.msg.cmd` set `margin-left: auto`, so the
      CLI's own output was sitting where the owner's words go.
-     Nothing here is invented. The name line takes the tool chip's exact type (--t-sub in --hint)
-     because a command names work that was done, the same way "Read 3 files" does. The OUTPUT takes
-     the .msg.activity rule verbatim — no font, size or colour of its own, so it inherits --t-msg
-     and the page text and reads as the same prose as a reply. No chevron: a chip's `›` promises a
-     detail sheet and a command has none, so one here would be decoration that lies.
+     Nothing here is invented. BOTH lines take the .msg.activity rule verbatim — no font, size or
+     colour of their own, so they inherit --t-msg and the page text and read as the same prose as a
+     reply. No chevron: a chip's `›` promises a detail sheet and a command has none, so one here
+     would be decoration that lies.
+     The NAME line has not always said that. It carried --t-sub in --hint, on the stated grounds
+     that it "takes the tool chip's exact type, because a command names work that was done, the same
+     way 'Read 3 files' does" — and that reasoning is still right, but the thing it tracks moved.
+     The tool and thought lines became prose on the owner's instruction two releases before this
+     one, and this line stayed behind, so a rule written to MATCH them was the only place still
+     showing the demotion they had dropped. Left alone it rendered a bare grey string in the corner
+     of the screen, which is what he objected to. This is that drift closing, not a new treatment.
      Monospace is not gone from these rows, it is RESERVED: a fenced block (which is how ansi.ts
      carries a /context table across) still renders as `pre.code`. Alignment, never demotion. */
   .msg.command { background: transparent; max-width: 100%; padding: 0; border-radius: 0; margin-bottom: var(--sp-4); }
-  .msg.command .cn { font-size: var(--t-sub); color: var(--hint); }
   .msg.command .co { margin-top: 3px; }
   /* A subagent's report — the THIRD voice, and the only one that is neither the owner nor this
      session. The app had exactly two treatments and this arrives on the USER side of the transcript,
@@ -870,15 +941,18 @@
      rules rather than .sheet's: this one animates, is edge-to-edge, and its rows are the content. */
   /* #calls (a chip's call list) is the SAME sheet — it joins these lists rather than restating the
      backdrop, the slide and the reduced-motion gate, so the two cannot drift. */
-  #dial, #calls { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: none; z-index: 10; align-items: flex-end; }
-  #dial.show, #calls.show { display: flex; }
+  /* #addctx (the paperclip's Camera / Photos / Files sheet) is the THIRD member, and it joins for the
+     same reason #calls did: the backdrop, the 180ms slide, the reduced-motion gate and the head are
+     one behaviour, and a sheet that restates them is a sheet that drifts from them. */
+  #dial, #calls, #addctx { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: none; z-index: 10; align-items: flex-end; }
+  #dial.show, #calls.show, #addctx.show { display: flex; }
   /* Quick, per the brief — 180ms is about as long as a sheet can take before it reads as sluggish.
      The transform starts off-screen and the .up class is added on the next frame, so the browser has
      a start value to animate FROM; setting display and transform in one tick animates nothing. */
-  .dialsheet, .callsheet { width: 100%; background: var(--bg); border-radius: var(--r-xl) var(--r-xl) 0 0;
+  .dialsheet, .callsheet, .ctxsheet { width: 100%; background: var(--bg); border-radius: var(--r-xl) var(--r-xl) 0 0;
     padding-bottom: env(safe-area-inset-bottom); transform: translateY(100%); transition: transform .18s ease-out; overflow: hidden; }
-  #dial.up .dialsheet, #calls.up .callsheet { transform: translateY(0); }
-  @media (prefers-reduced-motion: reduce) { .dialsheet, .dialpages, .callsheet { transition: none; } }
+  #dial.up .dialsheet, #calls.up .callsheet, #addctx.up .ctxsheet { transform: translateY(0); }
+  @media (prefers-reduced-motion: reduce) { .dialsheet, .dialpages, .callsheet, .ctxsheet { transition: none; } }
   /* A FIXED height, never one that fits the rows: a sheet that sizes to its content rises a
      different distance each time it opens. Rows sit at the top; the space below stays empty. */
   .callsheet { height: 72vh; display: flex; flex-direction: column; }
@@ -932,6 +1006,30 @@
   .dialrow .badge { flex: none; font-size: var(--t-meta); font-weight: var(--w-semi); color: var(--text);
     background: var(--bg); border-radius: 9px; padding: 2px 8px; }
   .dialrow .chev { width: 20px; height: 20px; flex: none; color: var(--hint); }
+  /* The attach sheet's three choices. Sizing is the reference's, read off it rather than chosen: its
+     cards measure ~102 x 76 CSS px at a 360px viewport, which is exactly what three equal cards come
+     to inside the sheet's own --sp-4 inset with an --sp-2 gap — so the width is `flex: 1` and only
+     the HEIGHT is a number here. It is the one number in this block that could have been anything.
+     Deliberately sized to CONTENT rather than to a fixed sheet height: unlike the dial, this sheet
+     has exactly one shape and always will, so there is no second page for a fixed height to hold
+     still against.
+     The rim is --sec, which is this app's hairline everywhere else (list rows, .setrow, the file
+     viewer's head) rather than a grey invented for these cards.
+     ANTI-PATTERN, crossed knowingly: "three identical cards in a row" is a design-lint item. It is
+     aimed at a marketing feature row, where three cards are a way of avoiding a decision. Here the
+     three cards ARE the three choices, and the shape came from the owner's reference. */
+  .ctxrow { display: flex; gap: var(--sp-2); padding: 0 var(--sp-4) var(--sp-4); }
+  .ctxcard { flex: 1; min-width: 0; height: 76px; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: var(--sp-2);
+    background: transparent; border: 1px solid var(--sec); border-radius: var(--r-md);
+    color: var(--text); font-size: var(--t-sub); cursor: pointer; padding: 0 var(--sp-1); }
+  .ctxcard:active { background: var(--sec); }
+  /* 22px, and the parity rule from .chatbtn does NOT reach it: this box is centred by flex, but by
+     flex on BOTH axes with no fixed free space to halve — the card's height is fixed and its content
+     is two stacked items, so the glyph's origin is decided by the column's own layout rather than by
+     an odd remainder. Even so it is an even number, because there is no reason for it not to be. */
+  .ctxcard svg { width: 22px; height: 22px; display: block; flex: none; }
+  .ctxcard span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sprow { display: flex; justify-content: flex-end; gap: var(--sp-2); margin-top: 18px; }
   .sprow .cancel { border: none; background: transparent; color: var(--hint); padding: 9px var(--sp-3); font-size: var(--t-sub); cursor: pointer; }
   .sprow .create { border: none; border-radius: 10px; background: var(--btn); color: var(--btn-text); padding: 9px 18px; font-size: var(--t-sub); cursor: pointer; }
@@ -1005,7 +1103,23 @@
       <!-- Text only, no icon and no emoji, by the owner's call: the model name is the label. It leads
            the capsule the way the reference's blue "Open" chip does. -->
       <button id="ddial" class="dialpill" title="Model and effort"><b id="ddialm">Model</b><span class="eff" id="ddiale"></span></button>
-      <textarea id="dtext" rows="1" placeholder="Message" autocomplete="off" spellcheck="false"></textarea>
+      <!-- The IME must not draw an inline prediction in this field, and that is a DELIBERATE trade,
+           not a tidy-up: `autocorrect="off"` is what Chromium maps to Android's
+           TYPE_TEXT_FLAG_NO_SUGGESTIONS, and that flag takes autocorrect with it. The owner asked
+           for it knowing the cost, because the alternative was worse and could not be fixed.
+           WHY IT COULD NOT BE FIXED, so nobody re-opens this: the prediction rendered in a visibly
+           different face and size from the typed text, and the obvious cure — match the composer to
+           the platform's font — was already in place. The stack below resolves to the system font on
+           every platform we run on (`-apple-system` on iOS, `system-ui` → Roboto on Android), which
+           is the same face Telegram itself uses there. The gray text is drawn by the KEYBOARD, in
+           the device's own UI font at a size the keyboard picks — on a Samsung that is the
+           user-selectable One UI face, which Chromium's `system-ui` does not follow — so no
+           font-family value in this page can reach it. There is nothing to match; there is only
+           whether it draws at all.
+           `writingsuggestions` is the standardised half of the same instruction, for the engines
+           that read it. -->
+      <textarea id="dtext" rows="1" placeholder="Message" autocomplete="off" autocorrect="off"
+        writingsuggestions="false" spellcheck="false"></textarea>
       <button id="datt" class="ghost" title="Attach a file"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>
       <!-- The round button is mic OR send, never both. The PAPERCLIP stays inside the capsule through
          both states on purpose: type-then-attach is a real workflow, and sweeping the clip away with
@@ -1018,8 +1132,38 @@
          quietest glyph treatment there is. Every chat app puts a filled mark on a filled button. -->
       <button id="dsend" class="sendbtn" title="Send"><svg viewBox="0 0 24 24"><polygon points="22 2 15 22 11 13 2 9 22 2" fill="currentColor"/></svg></button>
     </div>
+    <!-- THREE inputs, because the choice IS the input: there is no API to tell one picker which
+         source to open, only three differently-declared inputs whose accept/capture the platform
+         reads. #dfile keeps its id and its job (anything, several at once) so nothing about the
+         existing staging path moves; the other two only narrow it.
+         `capture="environment"` is a HINT, and platforms treat it as one — a client that has no
+         camera intent falls back to the same picker Photos opens, which is a degraded choice rather
+         than a broken one. All three land in the same handler. -->
     <input id="dfile" type="file" multiple hidden>
+    <input id="dfcam" type="file" accept="image/*" capture="environment" hidden>
+    <input id="dfpho" type="file" accept="image/*" multiple hidden>
   </div>
+  </div>
+</div>
+
+<!-- The paperclip's sheet: where a file comes FROM, asked before the picker opens. It used to fire
+     the everything-picker straight away, which on a phone is two taps into the wrong list — the
+     gallery is the common case and the file browser is what you get.
+     Styled after the owner's reference (Claude mobile's "Add context"): ✕ in the lead slot, centred
+     title, three bordered cards with the glyph over its label. The title is OURS — "Add context" is
+     their copy for their job, and this one attaches a file to a session. -->
+<div id="addctx">
+  <div class="ctxsheet">
+    <div class="dialgrab"></div>
+    <div class="dialhead">
+      <button class="lead" id="ctxx" title="Close" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+      <div class="t">Attach</div>
+    </div>
+    <div class="ctxrow">
+      <button class="ctxcard" data-pick="dfcam"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg><span>Camera</span></button>
+      <button class="ctxcard" data-pick="dfpho"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg><span>Photos</span></button>
+      <button class="ctxcard" data-pick="dfile"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><polyline points="12 18 12 12"/><polyline points="9 15 12 12 15 15"/></svg><span>Files</span></button>
+    </div>
   </div>
 </div>
 
@@ -1814,6 +1958,13 @@ const WORK_GLYPHS = ["·", "✢", "✳", "✶", "✻", "✽"];
 // turn, so the optimistic working row would have nothing to hand over to. Deliberately NOT here:
 // /compact (real work) and every custom skill command (also real work) — see the send handler.
 const INSTANT_CMD = /^\/(clear|model|effort|status|context|cost|help|rename|config|doctor|exit|quit)\b/i;
+// "Is this a slash command?" — the SAME question slash-policy.ts's COMMAND_TOKEN answers on the
+// server, written the same way on purpose. One segment and no second slash, so `/tmp/foo is where I
+// put it` stays prose and keeps its optimistic bubble; the colon stays in the class, because
+// `/plugin:skill` is a real command and a class that dropped it would turn every plugin command
+// back into prose. It decides ONE thing here: whether the transcript will echo this as a command
+// row rather than as a user bubble, which is what makes an optimistic bubble a duplicate.
+const COMMAND_TOKEN = /^\/[a-zA-Z][\w:-]*(\s|$)/;
 let workTimer = null, workPhase = 0, workOptimisticAt = 0;
 // ---- The elapsed clock ------------------------------------------------------------------------
 // The pane's number arrives once per 3s poll and is whatever the terminal last painted, so showing
@@ -2055,8 +2206,18 @@ $("dsend").onclick = async () => {
   ta.value = ""; syncComposerMode();
   // Optimistic: the bubble shows the instant you hit send (dimmed while in flight), instead of
   // waiting for the POST + transcript echo + poll round-trip.
-  const o = { text, at: Date.now(), state: "pending" };
-  optimistic.push(o);
+  // A COMMAND gets none, and the argument is the file-send one a few lines down, verbatim: the
+  // transcript's own echo carries it, and a blue bubble beside that echo is a SECOND message that
+  // then vanishes — the app sent two things and thought better of one. Here it did not even vanish
+  // promptly. paintFeed() retires an optimistic row when the transcript echoes a matching
+  // `role: "user"` item, and a command comes back as `role: "command"`, so the match could never
+  // fire and every slash command sent from this composer sat as a blue bubble beside its own grey
+  // invocation for the full 120s safety valve. That was CLASS-WIDE; /clear was just where it showed.
+  // Nothing is lost by the silence: a command that does real work raises the working row on the very
+  // next line, and the send re-polls 800ms later either way.
+  const cmd = COMMAND_TOKEN.test(text);
+  const o = cmd ? null : { text, at: Date.now(), state: "pending" };
+  if (o) optimistic.push(o);
   // The indicator is part of "sent", not of the poll that follows — EXCEPT for the commands that
   // start no turn. A /clear answers instantly and leaves the pane at a fresh prompt, so no status
   // ever arrives to replace the optimistic row and it sat there claiming work for the full 20s.
@@ -2066,7 +2227,7 @@ $("dsend").onclick = async () => {
   if (!INSTANT_CMD.test(text)) workOptimisticAt = Date.now();
   paintFeed();
   $("dfeed").scrollTop = $("dfeed").scrollHeight;   // sending always reveals your own message
-  if (await sessionAct("send", text)) { o.state = "sent"; paintFeed(); setTimeout(renderDrill, 800); }
+  if (await sessionAct("send", text)) { if (o) o.state = "sent"; paintFeed(); setTimeout(renderDrill, 800); }
   else { optimistic = optimistic.filter(x => x !== o); workOptimisticAt = 0; paintFeed(); ta.value = text; syncComposerMode(); }   // failed — give the draft back, and take the indicator with it
 };
 
@@ -2143,25 +2304,50 @@ function renderStage() {
     thumb.appendChild(x);
     s.appendChild(thumb);
   });
-  // The name is only worth showing for ONE file — beside a row of thumbnails it is noise, and with
-  // several it cannot name them all. The count says what the row is instead.
+  // A COUNT, never a filename, and that now includes the single-file case. The name was there
+  // because one file can be named; it is still the wrong thing to say. A staged screenshot's name is
+  // "Screenshot_20260727-124620_Telegram~2.png" — 40 characters of machine string, ellipsized, in the
+  // one strip that already shows you the picture. The thumbnail says which file this is far better
+  // than its name does, so the label's only remaining job is to say how many. The name is not lost:
+  // it stays on the discard button's title/aria-label, where it was already.
   if (staged.length) {
     const nm = document.createElement("div"); nm.className = "nm";
-    nm.textContent = staged.length === 1 ? staged[0].name : staged.length + " attachments";
+    nm.textContent = staged.length + (staged.length === 1 ? " attachment" : " attachments");
     s.appendChild(nm);
   }
   // The send button has to appear for staged files with no text at all, and the field's growth is
   // measured against a feed the strip just resized — both live in here.
   syncComposerMode();
 }
-$("datt").onclick = () => { if (drillSid) $("dfile").click(); };
-$("dfile").onchange = () => {
-  const picked = [...$("dfile").files]; $("dfile").value = "";
+// The paperclip asks WHERE first. Same .show-then-.up dance as #dial and #calls, for its reason:
+// setting display and transform in one tick leaves the transition nothing to animate from.
+function closeCtx() {
+  const s = $("addctx");
+  s.classList.remove("up");
+  setTimeout(() => s.classList.remove("show"), 180);   // matches .ctxsheet's transition
+}
+$("datt").onclick = () => {
+  if (!drillSid) return;
+  const s = $("addctx");
+  s.classList.add("show");
+  requestAnimationFrame(() => s.classList.add("up"));
+};
+$("ctxx").onclick = closeCtx;
+$("addctx").onclick = e => { if (e.target.id === "addctx") closeCtx(); };
+// The sheet closes on the TAP, not on the picker returning: the picker is the platform's, it can be
+// cancelled, and a sheet still sitting behind it when it closes reads as a tap that did nothing.
+// Nothing is staged yet at this point, so there is nothing to lose by closing early.
+document.querySelectorAll("#addctx .ctxcard").forEach(b => b.onclick = () => { closeCtx(); $(b.dataset.pick).click(); });
+// ONE handler for all three inputs. Which one fired is not interesting downstream — the file is a
+// file, and Camera differs from Photos only in the list the platform opened.
+function stagePicked(input) {
+  const picked = [...input.files]; input.value = "";
   if (!picked.length || !drillSid) return;
   staged = staged.concat(picked);   // ADDS to the stage: picking twice is how you attach from two places
   renderStage();
   $("dtext").focus();   // the point of staging is that you write about it now
-};
+}
+["dfile", "dfcam", "dfpho"].forEach(id => { $(id).onchange = () => stagePicked($(id)); });
 // Voice: tap to record, tap again to stop-and-send. Hidden entirely where the webview has no
 // recording API (Telegram Desktop) — cheap feature-detect, per the owner's ask; a permission
 // denial on a capable webview still gets the error toast.

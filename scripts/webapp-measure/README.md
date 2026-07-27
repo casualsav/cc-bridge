@@ -91,6 +91,15 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   no escape codes left in it. Carries three controls — an unparsed
                                   #   row that MUST leak, a model id whose literal [1m] must survive,
                                   #   and the `!` bash chip, which must NOT have moved
+    node batch5.mjs [page] [out]  # the five-item batch of 2026-07-27, in one pass because four of
+                                  #   the five touch the same screen: the paperclip's Camera/Photos/
+                                  #   Files sheet, the composer's no-inline-predictions attributes,
+                                  #   "1 attachment", no optimistic bubble for any slash command
+                                  #   (plus the empty state after /clear), and the header losing its
+                                  #   capsule. Same page-path control: 24 checks fail pre-change
+    python3 halo.py <out>         # finishes batch5's item 5 — the title's ink-vs-surround contrast
+                                  #   at the WORST slice of each line, over a bright bubble, in both
+                                  #   themes, against the flat-ground control it validates itself on
 
 ## Known follow-up: block markdown is card-only
 
@@ -126,6 +135,27 @@ require the answer to be stable. The header and composer references survived exa
 (plateaus 27/48 and 45/143, answers stable to <1% across thresholds); the bubble reference did not,
 and the difference is that its background is BRIGHT. Any reference with a light fill is where this
 bites.
+
+**1c. Never infer WHAT you are measuring from the picture; read it from the page.** `halo.py`'s first
+version found the title's ink as "the biggest luminance excursion in the crop", which is reasonable
+until the thing you are measuring is a halo — a halo IS an extreme excursion, painted in the ground's
+own colour around the glyph. So on exactly the frames where the halo was working, the probe measured
+halo-against-bubble and reported the fix as a **regression**: the cwd came back worse with the halo on
+than off, twice, across five candidates. The cure was to take the glyph's colour from
+`getComputedStyle`, which is not a guess and is right on every frame. Two smaller versions of the same
+mistake sat behind it — the element's box was measured instead of the text's (`#dsub` is a block
+spanning the whole title, so most of its box was empty background, which reported a 1.4:1 "worst case"
+from nothing at all), and `color-mix()` results come back as `color(srgb 0.57 …)` with 0-1 channels,
+which read as 0-255 round to `(1,1,1)` and match no pixel in the image.
+
+**1d. A rendering artefact can masquerade as the effect you wanted.** The same item shipped past
+review inside this session as eight stacked `text-shadow`s in `var(--bg)` — the page's own colour, so
+by construction invisible over the page. It is not: each composite loses a little to 8-bit rounding,
+and a wide blur spreads that loss over a wide area, so the ground under the title came back **six
+units darker** and rendered as a dark plate the size of the text. On a change whose entire point was
+removing a capsule, it drew one back. What made it slip through is that in a dark theme the artefact
+*raises* the measured contrast, so the numbers improved while the design got worse. Isolate any
+treatment in a minimal page over flat ground before believing the number it produced over a busy one.
 
 **2. Idle before measuring.** `suite.mjs` reads every state twice — immediately, and again after
 ~7s (two of the app's 3s repaint cycles). A bug that only appears once input stops is invisible to

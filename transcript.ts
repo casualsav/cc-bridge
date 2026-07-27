@@ -486,6 +486,15 @@ function taskNotificationItem(raw: string, ts: number, uuid?: string): Conversat
 // polled feed (which clamps) and the on-demand full-text fetch (which doesn't), so the two can never
 // disagree about how a user message is unwrapped from its <tg …> envelope — an expansion that showed
 // raw bridge markup where the collapsed bubble showed clean text would be worse than the clamp.
+// A command whose whole effect is that the conversation is GONE. It writes no output, and the CLI
+// starts a fresh transcript for what follows — so its entry can only ever be the first row of a
+// file, and the feed it heads is empty by definition. Rendering the invocation there put a lone
+// "/clear" on an otherwise blank screen, which reads as the one thing left over from a wipe rather
+// than as a wiped session; the owner asked for the same "No conversation yet." a new session shows,
+// and dropping the row IS that, with no second empty state invented to produce it.
+// A Set rather than a `=== '/clear'`, for the reason UNGATED_MODELS is one in daemon.ts: the next
+// command with these semantics arrives under a name this file has never seen.
+const RESET_COMMANDS = new Set(['/clear'])
 // The two halves of a local command, from whichever side of the transcript they arrived on.
 // Returns null for anything that isn't one, and for an empty stdout (which is noise, not a row).
 function commandItem(raw: string, ts: number, uuid?: string): ConversationItem | null {
@@ -496,6 +505,7 @@ function commandItem(raw: string, ts: number, uuid?: string): ConversationItem |
   if (/^<command-name>/.test(raw)) {
     const name = /<command-name>([^<]*)<\/command-name>/.exec(raw)?.[1]?.trim() ?? ''
     const args = /<command-args>([\s\S]*?)<\/command-args>/.exec(raw)?.[1]?.trim() ?? ''
+    if (RESET_COMMANDS.has(name.toLowerCase())) return null
     return name ? { role: 'command', text: '', ts, uuid, name, ...(args ? { args } : {}) } : null
   }
   return null

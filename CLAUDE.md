@@ -292,7 +292,44 @@ switch delivers to the wrong session), and the object URL must be revoked on dis
 paints **no optimistic row** — the transcript's echo carries the image, and a `📎 name` stub beside
 it is a second message that then vanishes when the echo reconciles, which is exactly what it looks
 like. A *voice* note keeps its stub, because "🎤 Transcribing…" is all there is to show and it swaps
-into the transcript rather than being replaced.
+into the transcript rather than being replaced. The strip says **"1 attachment"**, never the
+filename: a screenshot's name is 40 characters of machine string ellipsized beside the picture it
+names, and the thumbnail identifies the file better than its name does. The name lives on the
+discard button's `title`/`aria-label`.
+
+**The same no-optimistic-row rule now covers SLASH COMMANDS, and finding out why is the point.**
+`paintFeed()` retires an optimistic bubble when the transcript echoes a matching `role: "user"` item.
+A command echoes as `role: "command"`, so the match could never fire and *every* slash command sent
+from the composer sat as a blue bubble beside its own grey invocation for the full 120s safety valve.
+That was class-wide; `/clear` was only where the owner saw it. The client's test for "is this a
+command" is `COMMAND_TOKEN`, written to match `slash-policy.ts`'s server-side one exactly — one
+segment, no second slash, colon allowed — so `/tmp/foo is where I put it` stays prose and keeps its
+bubble, and `/plugin:skill` does not.
+
+**`/clear` renders NOTHING in the mini-app feed.** Dropped in `transcript.ts` (`RESET_COMMANDS`), not
+in the client. Its whole effect is that the conversation is gone and the CLI opens a fresh
+transcript, so its entry can only ever be the first row of a file and the feed it heads is empty by
+definition — the existing "No conversation yet." then renders itself, with no second empty state
+invented to produce it. A lone `/clear` on a blank screen reads as debris from the wipe rather than
+as a wiped session, which is what the owner objected to.
+
+**The paperclip asks WHERE before it opens a picker** (`#addctx`: Camera / Photos / Files). Three
+differently-declared `<input type=file>`s, because that is the only lever there is — no API tells one
+picker which source to open, only `accept` and `capture`. `#dfile` keeps its id and its job (anything,
+several) so the staging path is untouched; the sheet joins `#dial`/`#calls`'s rule list rather than
+restating the backdrop, the 180ms slide and the reduced-motion gate. It closes on the **tap**, not on
+the picker returning: the picker is the platform's and can be cancelled, and a sheet still standing
+behind it reads as a tap that did nothing. Unverified on a device: whether `capture` actually reaches
+a camera intent inside Telegram's WebView.
+
+**The composer tells the IME not to draw inline predictions, and that is a trade the owner made.**
+`autocorrect="off"` is what Chromium maps to Android's `TYPE_TEXT_FLAG_NO_SUGGESTIONS`, and that flag
+takes autocorrect with it. Do not "fix" the mismatch by matching fonts instead — that was tried first
+and is impossible: the field already resolves to the platform's system font on every platform we run
+on (`-apple-system` on iOS, `system-ui` → Roboto on Android), which is the same face Telegram uses
+there. The prediction is drawn by the KEYBOARD in the device's own UI font at a size it picks — on a
+Samsung, a user-selectable face Chromium's `system-ui` does not follow — so no `font-family` value in
+the page can reach it. There is nothing to match, only whether it draws.
 
 **The working row's spacing is derived from its NEIGHBOURS, not from its own padding.** The air above
 it is the last message's 16px bottom margin plus the feed's floor gutter; the air below is the row's
@@ -309,6 +346,28 @@ feature renders the dark theme and passes without testing anything. Set the vari
 (`scripts/webapp-measure/themes.mjs`). Removing a bubble exposes whatever its fill was hiding: the
 collapsed-message fold faded to `--sec` *because* that was the assistant bubble's colour, and on the
 page background it painted a grey band.
+
+**The TITLE is no longer a capsule — two bare lines over the transcript — and the ceiling scrim is
+what replaced it.** `.dtitle` carries no fill, rim or frost (the owner's ask, off the Claude-mobile
+header). The two SIDE chips keep theirs: he scoped the ask to the pill, and they are the row's only
+44px touch targets. What the capsule was silently doing was being the **contrast floor for both title
+lines**, and the cwd is the header's bottom line while `#drill::before`'s ramp reaches zero at the
+header's bottom *edge* — so bare, it sat at ~5% of `--bg`, i.e. on raw transcript, measuring **1.19:1**
+over a bright user bubble against a 4.5 floor. Two changes buy it back and **neither is sufficient
+alone** (`scripts/webapp-measure/halo.py` says so, and validates itself on flat ground first):
+
+- The ramp is **steeper inside its own band** — still zero at the header's bottom edge, never lower,
+  so the paragraph below still holds. Alone it gets the cwd to 3.43:1, still under.
+- Both lines take a `-webkit-text-stroke` in `--bg` with **`paint-order: stroke fill`**, so the stroke
+  paints first and the fill covers its inner half: 1.5px of ground outward with the glyph shape
+  untouched, plus two soft shadows for falloff. Together: **5.31:1 dark, 5.88:1 light.**
+
+Two traps, both paid for. **Do not build this out of stacked `text-shadow`s** — eight blurs in
+`var(--bg)`, the page's own colour, still darkened the ground six units through accumulated 8-bit
+rounding and drew a dark plate the size of the text, i.e. a capsule again, by accident. And note the
+cost that is real: the band above the cwd is now near-solid, so the side chips' glass has less passing
+behind it than it did. That is the trade the ask forces. Incidentally the *old* capsule was itself
+under AA for the cwd in the light theme (3.57:1) — this fixed a defect as well as preserving one.
 
 **The chat header is three containers, not a bar.** A standalone circle, the name capsule, a
 standalone circle, each carrying its own `--chip-lift`, with 6px gaps — per the owner's reference,
@@ -364,8 +423,10 @@ entire fullscreen-offset mechanism) does not move it, and `fullscreen.mjs` measu
 regression at 0.00px of 93. And checking "a message is behind the chips" by **rect overlap cannot
 fail**: a message clipped by the scroller still reports a rect spanning the header band, so it
 passes on the in-flow layout too — hit-test with `elementsFromPoint` (`header.mjs` does). `--chip-blur`
-is the third member of the `--chip-fill`/`--chip-lift` family: without it the words behind the
-capsule read *through* the name, and a bubble's colour and motion is the point, its text is not.
+is the third member of the `--chip-fill`/`--chip-lift` family: without it the words behind a chip read
+*through* its glyph, and a bubble's colour and motion is the point, its text is not. **This family now
+describes the two SIDE buttons only** — the title capsule that used to share it is gone (see above),
+so wherever the paragraphs here say "capsule", read "chip".
 
 **The chips are a SCRIM, not a raised surface, and both halves of that were measured off Telegram's
 own chrome.** Its ✕ Close pill solves to **α 0.36 over a fill ~0.8 × the page** — a chip over two
@@ -381,11 +442,13 @@ bubble (chroma swing 23 → 8) without a `brightness()` clamp, which would cost 
 **No filter makes a transparent chip ignore a bright thing passing under it** — Telegram's own chroma
 swing is 48, twice ours; theirs merely sits where the scrim has already dissolved the content.
 
-**Do NOT push the ceiling scrim's ramp below the header.** It is transparent at the name pill's
-*bottom* edge. Ending the ramp above the pill instead makes the chips hold their colour perfectly
-(a chip whose backdrop is flat `--bg` cannot be moved) — and it paints a bar across the band the
-transcript was just given, and glass over flat ground is indistinguishable from paint. Tried,
-rejected by the owner, and `bleed.mjs` is written to the reverted shape so restoring it fails.
+**Do NOT push the ceiling scrim's ramp below the header.** It is transparent at the title's *bottom*
+edge. Ending the ramp above that instead makes the chips hold their colour perfectly (a chip whose
+backdrop is flat `--bg` cannot be moved) — and it paints a bar across the band the transcript was just
+given, and glass over flat ground is indistinguishable from paint. Tried, rejected by the owner, and
+`bleed.mjs` is written to the reverted shape so restoring it fails. **Making the ramp STEEPER inside
+that band is a different change and has been made** (see the title paragraph above): where it reaches
+zero is the invariant, how fast it climbs to it is not.
 
 **In FULLSCREEN the header rides UP into Telegram's chrome band** (`html.fs`, set by `syncSafeTop`
 from `isFullscreen` — never from the insets). That reclaims ~48px of transcript *and* fixes the
@@ -432,3 +495,10 @@ read exactly like a reply. That retires a visual demotion (italic 12px monospace
 earlier release kept on purpose. Nothing replaces it — no rule, no gutter, no residual tint. The
 `.thought` quote bar stays because it mirrors the `<blockquote>` the Telegram live card renders the
 same narration in, not as a substitute demotion.
+
+**…and so is a slash command's invocation line, which lagged two releases behind them.** `.msg.command
+.cn` kept `--t-sub` in `--hint` on the stated grounds that it "takes the tool chip's exact type",
+which was right when it was written and stopped being right the moment the tool lines above became
+prose. It rendered a bare grey string in the corner of the screen; the owner objected to exactly that.
+The rule is gone, so it inherits like everything else here. If a demotion is ever wanted back, it has
+to be wanted for these rows specifically — do not reintroduce one by copying a neighbour.

@@ -468,14 +468,38 @@ describe('a subagent report is not the owner talking', () => {
 
   test('a command with no output stays one quiet row, and an orphan output stays its own', () => {
     const items = recentConversation(fixture([
-      user('<command-name>/clear</command-name><command-args></command-args>', 'u1'),
+      user('<command-name>/rename</command-name><command-args></command-args>', 'u1'),
       user('<tg 1>hi</tg>', 'u2'),
       user('<local-command-stdout>Compacted</local-command-stdout>', 'u3'),
     ]), 9)
-    // The fold is DIRECTLY-after only: the message between them means /clear keeps its empty output
-    // and the orphan output renders on its own rather than being wrongly attributed to /clear.
+    // The fold is DIRECTLY-after only: the message between them means /rename keeps its empty output
+    // and the orphan output renders on its own rather than being wrongly attributed to it.
     expect(items.map(i => [i.role, i.name ?? '', i.text])).toEqual([
-      ['command', '/clear', ''], ['user', '', 'hi'], ['command', '', 'Compacted'],
+      ['command', '/rename', ''], ['user', '', 'hi'], ['command', '', 'Compacted'],
+    ])
+  })
+
+  // /clear is the one command that renders NOTHING. Its whole effect is that the conversation is
+  // gone, and the CLI opens a fresh transcript for what follows — so the feed it heads is empty by
+  // definition, and a lone "/clear" standing in it reads as debris from the wipe rather than as a
+  // wiped session. The mini app's own "No conversation yet." is then what shows, with no second
+  // empty state invented to produce it.
+  test('/clear is not a feed row at all', () => {
+    expect(recentConversation(fixture([
+      user('<command-name>/clear</command-name><command-args></command-args>', 'u1'),
+    ]), 9)).toEqual([])
+  })
+
+  // …and only /clear. The suppression is a named set, not "a command with no output" — every other
+  // invocation still has to name itself, including the ones that happen to print nothing.
+  test('a neighbouring command is untouched by the /clear suppression', () => {
+    const items = recentConversation(fixture([
+      user('<command-name>/clear</command-name><command-args></command-args>', 'u1'),
+      user('<command-name>/context</command-name><command-args></command-args>', 'u2'),
+      user('<local-command-stdout>Context: 42%</local-command-stdout>', 'u3'),
+    ]), 9)
+    expect(items.map(i => [i.role, i.name ?? '', i.text])).toEqual([
+      ['command', '/context', 'Context: 42%'],
     ])
   })
 
