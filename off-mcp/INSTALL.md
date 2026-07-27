@@ -353,19 +353,58 @@ rather than assuming. Follow the path the user chose:
      with a `https://login.tailscale.com/f/funnel?node=…` link — **relay that to the user** to click
      once: it's a one-time owner toggle on a web page in the admin console, **not** a device install.
      Then re-run. Confirm with `tailscale funnel status` (shows `https://<host>.<tailnet>.ts.net …
-     proxy http://127.0.0.1:<port>`).
+     proxy http://127.0.0.1:<port>`) — but read the next paragraph before believing it.
+
+     **First: is 443 free?** `ss -ltnp | grep ':443'`. If another service holds it — especially a
+     `*:443` wildcard — go to *"The funnel says it works and nothing is listening"* below **before**
+     running the funnel command. Reported live from a second box: with another proxy on a dual-stack
+     wildcard and tailscaled in **kernel TUN** mode, `tailscale funnel --bg 443` returned **exit 0**,
+     showed the entry in `funnel status`, and **bound no socket at all**.
+
+     **Never trust the funnel command's exit code, or its status output.** Both report the *config*
+     layer only. What proves a funnel is actually up is a socket and a certificate:
+     ```sh
+     ss -ltnp | grep -E ':443|:8443'     # expect a tailscaled socket on <tailnet-ip>:443
+     openssl s_client -connect <tailnet-ip>:443 -servername <host>.<tailnet>.ts.net </dev/null 2>&1 \
+       | grep -E 'depth=0|CN ='          # expect CN = <host>.<tailnet>.ts.net
+     ```
+     Mode matters, and it changes what "no socket" means: under **netstack**
+     (`--tun=userspace-networking`) tailscaled serves the tailnet in userspace and needs no kernel
+     socket on the tailnet address, so a wildcard listener on 443 need not conflict there. That last
+     clause is the other box's reasoning, not something either box has run — they only ever ran
+     kernel TUN. Check which you have:
+     ```sh
+     tailscale status --json | grep -i '"TUN"'        # true = kernel TUN
+     ps -o args= -C tailscaled | grep -o 'tun=[^ ]*'  # --tun=userspace-networking = netstack
+     ip -br addr show tailscale0                      # a real interface = kernel TUN
+     ```
   5. **Verify the public path — and know that curl from this box LIES.** On the box itself, MagicDNS
      resolves `<host>.<tailnet>.ts.net` to the machine's *private tailnet IP*, so a plain
      `curl https://<host>…` exercises the private path and fails with a TLS/internal error even when
      the public funnel is perfectly healthy. Verify the *public* path instead:
      ```sh
      dig +short @1.1.1.1 <host>.<tailnet>.ts.net        # public ingress IPs, NOT MagicDNS
-     curl -I --resolve <host>.<tailnet>.ts.net:443:<ingress-ip> https://<host>.<tailnet>.ts.net/
+     dig +short @8.8.8.8 <host>.<tailnet>.ts.net        # a SECOND resolver — see below
+     curl -sI --resolve <host>.<tailnet>.ts.net:443:<ingress-ip> https://<host>.<tailnet>.ts.net/
+     curl -s  --resolve <host>.<tailnet>.ts.net:443:<ingress-ip> https://<host>.<tailnet>.ts.net/api/sessions
      ```
-     Expect `HTTP/2 200` (the app shell). An **empty `dig` result right after setup is DNS lag, not
-     failure** — public DNS for a new funnel name can take **up to ~10 minutes**; `tailscale funnel
-     status` is the server-side truth in the meantime. No `dig` on the box, or still propagating?
-     Have the user open the URL from their phone on cellular instead.
+     **The success signature is a pair: `200` on `/` (the app shell) and `401` on `/api/*`** (the
+     door open, the API behind it locked). Either alone is ambiguous — a 200 can just as well be some
+     other service answering on that address. Repeat against **each** published ingress IP, not only
+     the first.
+
+     **Two resolvers, not one.** On the reporting box `1.1.1.1` was the resolver that had *no* record
+     while `8.8.8.8` served it fine — one public resolver agreeing with you proves nothing about the
+     rest of the internet.
+
+     An **empty `dig` result right after setup is usually DNS lag, not failure** — public DNS for a
+     new funnel name can take up to ~10 minutes. But bound that patience: **a wedged record looks
+     exactly like lag and never clears**, so if the name still doesn't resolve after ~15 minutes, or
+     if the two resolvers disagree, go to *"The name still doesn't resolve"* below. `tailscale funnel
+     status` is **not** the tiebreaker: it is config truth, not serving truth, and proves neither a
+     bound socket nor a published DNS record. No `dig` on the box? Have the user open the URL from
+     their phone **on cellular** — the point is a resolver you did not configure, not just a second
+     device.
   6. **Set `.env`:** `TELEGRAM_WEBAPP_ENABLED=1` and `TELEGRAM_WEBAPP_TUNNEL=tailscale`. The daemon
      reads the `*.ts.net` URL from `tailscale funnel status` itself — leave `TELEGRAM_WEBAPP_PUBLIC_URL`
      unset. (Setting `PUBLIC_URL` is the retrofit path for a box that already had a public URL before
@@ -374,6 +413,85 @@ rather than assuming. Follow the path the user chose:
      funnel reconfiguration.)
   7. **Register it in BotFather** (shared step below), URL = the `https://<host>.<tailnet>.ts.net`
      from step 4.
+
+  ---
+
+  **The name still doesn't resolve (after ~15 minutes).** Everything here is diagnosis: none of it is
+  automated, and the wizard deliberately makes no wedge verdict of its own — at t=0 a fresh name
+  legitimately resolves nowhere, so telling lag from a wedge needs elapsed time that a one-shot run
+  does not have. You do.
+
+  1. **Poll three resolvers, including the authority.** Do not hardcode the authoritative address;
+     discover it, because it can change:
+     ```sh
+     NAME=<host>.<tailnet>.ts.net
+     AUTH=$(dig +short "$(dig +short NS ts.net | head -1)" | head -1)
+     for i in $(seq 1 6); do
+       for R in 1.1.1.1 8.8.8.8 "$AUTH"; do
+         for T in A AAAA; do
+           S=$(dig +noall +comments "$T" "$NAME" @"$R" | sed -n 's/.*status: \([A-Z]*\).*/\1/p')
+           printf '%s %-16s %-4s %-9s %s\n' "$(date +%T)" "$R" "$T" "$S" \
+                  "$(dig +short "$T" "$NAME" @"$R" | tr '\n' ' ')"
+         done
+       done
+       sleep 20
+     done
+     ```
+  2. **The wedge signature:** `NXDOMAIN` for **A** next to `NOERROR` for **AAAA** *at the authority*.
+     That is protocol-incorrect — a name with any record should answer NODATA, not "no such name" —
+     and because NXDOMAIN denies the whole name, caching resolvers drop the AAAA with it, so there is
+     no quiet IPv6 fallback. **Nothing on your box can cause it and nothing on your box can fix it.**
+  3. **Wedge or lag?** Lag affects all resolvers roughly equally and shrinks. A wedge **diverges
+     per-resolver** — one answering, another NXDOMAIN, the authority included — and persists: the
+     reported case was still broken at **28 minutes** against a 300 s negative TTL, so it was not a
+     cache clearing on its own.
+  4. **Remedies, in the order to try them.**
+     - **Rename the node — do this first if nothing is registered in BotFather yet.**
+       `sudo tailscale set --hostname <newname>` mints a fresh name with freshly published records.
+       Live-proven cure: the new name answered A 11/11 at 1.1.1.1, 8.8.8.8 *and* the authority, and
+       served 200/401 immediately. ⚠️ **A rename changes the URL**, so anything already registered in
+       BotFather must be re-registered — which is exactly why it comes before registration.
+     - **Funnel off/on** — cheap, and it **did not help** on the reported box. Try it only because it
+       costs a minute, and **snapshot `tailscale serve status --json` first**: `tailscale funnel
+       --https=<port> off` removes the **entire serve config**, not just that port — it was watched
+       taking out a second hostname's entries.
+     - **Report it to Tailscale** with the poll table from step 1 if a *fresh* name still shows
+       NXDOMAIN-for-A at the authority. That is their bug, and the table is the evidence.
+     - (One thing that *appeared* to clear it — adding a bare `:443` funnel entry — is
+       **correlation only**: the reporters could not test causation, since proving it needs the
+       `funnel … off` that wipes the serve config. It may equally have healed on its own.)
+  5. **A URL that loads in your browser is not a URL that resolves.** Chrome defaults to
+     DNS-over-HTTPS to Google, and Google's resolvers were the ones that *had* the record — so the
+     agent's browser loaded the Mini App while the owner's phone said "name not resolved". Verify
+     with a **system** resolver: `getent hosts <name>` on a box you did not configure, or the phone
+     off Wi-Fi. Never a browser.
+
+  **The funnel says it works and nothing is listening.** `funnel --bg` exited 0, `funnel status`
+  shows the entry, and `ss -ltnp` shows only *another* daemon on `*:443` — the funnel is dead. A TLS
+  probe to the tailnet IP with the funnel's SNI returns `tlsv1 alert internal error / no peer
+  certificate`: the other proxy answering an SNI it does not host.
+
+  The fix that worked, and it is a **manual** one — never scripted, because it touches a live service
+  that is somebody's website: **scope the competing listener to a specific address** instead of the
+  wildcard, freeing the tailnet IP for tailscaled. In Caddy that is one line in the site block
+  (`bind <local-ip>`), then `caddy validate` and a **reload**, not a restart. Three landmines, each
+  of which cost the reporters time or nearly did:
+  - **On a NAT'd box the public IP is on no interface.** Binding it fails and takes the site down.
+    Bind the actual local address: `ip route get 8.8.8.8` prints `… src <local-ip>`.
+  - **That address may be a DHCP lease** — theirs was, with ~19 h left on it. Should it change, the
+    proxy would fail to bind at boot and the public site would go down with no warning (that the
+    address is a lease is measured; the boot failure is the obvious consequence, not something anyone
+    waited to watch). A reservation, a static address, or `bind {$CADDY_BIND}` removes the landmine.
+  - **Port 80 must stay publicly reachable**: auto-HTTPS uses :80 for the redirect *and* for HTTP-01
+    challenges, and scoping the bind moves that socket too. They verified the transport half — an
+    external SYN reaching the post-NAT address on :80 — but did not force a real ACME issuance, so
+    "renewal will still succeed" is reasoning, not a measurement. There is no symptom either way
+    until the certificate expires months later.
+
+  **On `:8443` — no claim, in either direction.** Every known-good registration on both boxes is a
+  **bare** portless URL; whether BotFather accepts an explicit port is untested. Do not burn an
+  evening finding out. If 443 is taken, the bind-scoping fix above is the path that has been vouched
+  for.
 
 - **Custom domain (in-group):** the user fronts the local port with their own HTTPS reverse proxy
   (nginx / Caddy / a Cloudflare *named* tunnel) → `http://127.0.0.1:<port>`. Then set `.env`:

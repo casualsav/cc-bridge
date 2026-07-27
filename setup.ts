@@ -440,6 +440,15 @@ function fallbackToCloudflared(cfg: Config, reason: string): void {
   console.log(C.dim('    To upgrade later: off-mcp/INSTALL.md → "Files Mini App reachability" has the manual Funnel steps (re-running `bun setup.ts` works too).'))
 }
 
+// Every listener on port 443, one line each, straight from `ss -ltnp`. Empty when `ss` isn't
+// installed — both callers treat that as "no information" and carry on, because these checks are
+// additive: a box without `ss` is exactly as well off as it was before they existed.
+function sockets443(): string[] {
+  if (!which('ss')) return []
+  const r = run('ss', ['-ltnp'], { timeout: 10_000 })
+  return `${r.out}`.split('\n').filter(l => /:443\s/.test(l) || /:443$/.test(l.trim()))
+}
+
 type TsStatus = { BackendState?: string; Self?: { DNSName?: string } }
 // `tailscale status --json` prints valid JSON even when it exits non-zero (logged out), so parse
 // stdout regardless of the exit status.
@@ -577,6 +586,22 @@ async function setupWebappHosting(cfg: Config): Promise<void> {
       console.log(C.warn(`  ⚠ Funnel already fronts http://127.0.0.1:${other[1]} on this machine's public 443.`))
       if (!(await askYN(`  Repoint it to the Mini App (port ${port})?`, false))) { fallbackToCloudflared(cfg, 'the existing Funnel was left in place'); return }
     }
+    // 5b · is this machine's public 443 already held by something that ISN'T tailscale? Reported
+    // from a second box: with another proxy on a `*:443` dual-stack wildcard and tailscaled in
+    // kernel-TUN mode, `funnel --bg 443` exits 0, shows the entry in `funnel status`, and binds no
+    // socket at all — every signal this wizard had said success while the funnel was dead.
+    // A PROMPT rather than a hard block: under netstack (`--tun=userspace-networking`) tailscaled
+    // needs no kernel socket on the tailnet address, so a wildcard listener there may be harmless —
+    // that is the other box's [INFERRED], not something either of us has run. Detecting the mode to
+    // decide would add machinery for a rare false positive; one honest question covers both modes.
+    const held = sockets443().filter(l => !/tailscaled/.test(l))
+    if (held.length) {
+      console.log(C.warn(`  ⚠ another service already holds this machine's port 443:`))
+      console.log(C.dim(`    ${held[0]!.trim().slice(0, 150)}`))
+      console.log(C.warn('    Depending on how tailscaled is running, the Funnel may then report success and bind'))
+      console.log(C.warn('    nothing at all. off-mcp/INSTALL.md → "Files Mini App reachability" has the fix.'))
+      if (!(await askYN('  Try the Funnel anyway?', false))) { fallbackToCloudflared(cfg, 'port 443 is held by another service'); return }
+    }
     // 6 · open it. Funnel only fronts the public ports 443/8443/10000; the plain form binds 443,
     // which is the one Telegram will accept for a Mini App URL.
     for (let attempt = 1; attempt <= 3 && !serving; attempt++) {
@@ -607,6 +632,27 @@ async function setupWebappHosting(cfg: Config): Promise<void> {
   if (!status.includes(`:${port}`)) { fallbackToCloudflared(cfg, `Funnel isn't serving port ${port}`); return }
   const url = status.match(/https:\/\/[\w.-]+\.ts\.net/)?.[0] || (dnsName ? `https://${dnsName}` : '')
   if (!url) { fallbackToCloudflared(cfg, 'the Funnel URL couldn\'t be read back'); return }
+  // …and `funnel status` is CONFIG truth, not serving truth. It reports what the serve config says,
+  // which on the reporting box stayed cheerful while nothing was listening. So ask the kernel: is
+  // there a tailscaled socket on 443? This is the deterministic catch — no DNS, no timing, no
+  // network — and it covers the already-configured branch above as well as a fresh `funnel --bg`.
+  // Skipped silently where `ss` is absent, since then there is nothing to be sure about either way.
+  //
+  // The condition is "someone ELSE owns 443 and tailscaled does not" — deliberately NOT the wider
+  // "no tailscaled socket on 443". An empty result is the shape a netstack tailscaled
+  // (`--tun=userspace-networking`) legitimately has: it serves the tailnet in userspace and needs no
+  // kernel socket, so treating absence as failure would demote a healthy funnel to cloudflared for a
+  // whole class of installs. The narrow condition is the one the field failure actually presented,
+  // and it is the one we can be sure about without the mode detection this wizard deliberately omits.
+  const bound = sockets443()
+  if (bound.length && !bound.some(l => /tailscaled/.test(l))) {
+    console.log(C.err('  ✗ the Funnel config is in place, but no tailscaled socket is listening on 443:'))
+    console.log(C.dim(`    ${bound[0]!.trim().slice(0, 150)}`))
+    fallbackToCloudflared(cfg, 'the Funnel reported success but bound no socket (another service holds 443)')
+    console.log(C.dim('    To use the Funnel instead, off-mcp/INSTALL.md → "Files Mini App reachability" has the'))
+    console.log(C.dim('    bind-scoping fix; re-run `bun setup.ts` once 443 is free.'))
+    return
+  }
   funnelUrl = url
   console.log(C.ok(`  ✓ Funnel is serving the Mini App at ${url}`))
 
@@ -614,16 +660,37 @@ async function setupWebappHosting(cfg: Config): Promise<void> {
   // on-box request tests the wrong path and fails with a TLS error even when the public funnel is
   // perfectly healthy. Resolve the name against public DNS and pin curl to that address instead.
   const host = url.replace(/^https:\/\//, '')
-  const phoneNote = '  • configured — public DNS can take up to ~10 min to appear; test it from your phone shortly.'
+  // The caveat now carries an exit. It used to have none: a box whose record never publishes reads
+  // this same sentence forever, which is exactly what happened on the reporting box.
+  const phoneNote = '  • configured — public DNS can take up to ~10 min to appear; test it from your phone shortly.\n'
+    + '    Still unreachable after ~15 min? off-mcp/INSTALL.md → "Files Mini App reachability" has the DNS diagnosis steps.'
+  const digA = (resolver: string) => run('dig', ['+short', `@${resolver}`, host], { timeout: 15_000 }).out
+    .split('\n').map(s => s.trim()).filter(s => /^\d+(\.\d+){3}$/.test(s))
   if (!which('dig')) console.log(C.dim(phoneNote))
   else {
-    // `dig +short` answers A records (plus any CNAME chain) — keep the addresses only.
-    const ips = run('dig', ['+short', '@1.1.1.1', host], { timeout: 15_000 }).out
-      .split('\n').map(s => s.trim()).filter(s => /^\d+(\.\d+){3}$/.test(s))
-    if (!ips.length) console.log(C.dim(phoneNote))
+    // TWO resolvers, because one is a single point of failure in both directions: on the reporting
+    // box 1.1.1.1 was the one answering NXDOMAIN (0/11) while 8.8.8.8 served the record 11/11. A
+    // disagreement between them is the earliest honest smell of a record wedged at the authority —
+    // reported as a smell, never as a diagnosis, because at t=0 a fresh name legitimately resolves
+    // nowhere and this wizard has no elapsed time to tell the two apart.
+    const ips = digA('1.1.1.1')
+    const alt = ips.length ? [] : digA('8.8.8.8')
+    if (!ips.length && alt.length) {
+      console.log(C.warn('  • resolvers disagree about this name (8.8.8.8 has it, 1.1.1.1 does not).'))
+      console.log(C.dim('    Usually propagation. If it persists past ~15 min, off-mcp/INSTALL.md → "Files Mini App'))
+      console.log(C.dim('    reachability" has the wedged-record diagnosis.'))
+    }
+    const use = ips.length ? ips : alt
+    if (!use.length) console.log(C.dim(phoneNote))
     else if (which('curl')) {
-      const c = run('curl', ['-sI', '--resolve', `${host}:443:${ips[0]}`, `https://${host}/`, '--max-time', '15'], { timeout: 30_000 })
-      if (/HTTP\/[12].* 200/.test(c.out)) console.log(C.ok('  ✓ the public URL answers'))
+      // The success signature is a PAIR: 200 on `/` (the app shell is public) and 401 on `/api/*`
+      // (the API behind it is not). Either alone is ambiguous — a 200 can come from whatever else is
+      // answering on that ingress path, which is precisely the failure this pair would have caught.
+      const c = run('curl', ['-sI', '--resolve', `${host}:443:${use[0]}`, `https://${host}/`, '--max-time', '15'], { timeout: 30_000 })
+      const api = run('curl', ['-s', '-o', '/dev/null', '-w', '%{http_code}', '--resolve', `${host}:443:${use[0]}`, `https://${host}/api/sessions`, '--max-time', '15'], { timeout: 30_000 })
+      const shell200 = /HTTP\/[12].* 200/.test(c.out)
+      if (shell200 && api.out.trim() === '401') console.log(C.ok('  ✓ the public URL answers: 200 on / and 401 on /api — the door is open and the API is locked'))
+      else if (shell200) console.log(C.warn(`  • / answered 200 but /api/sessions returned ${api.out.trim() || 'nothing'} — expected 401. Something else may be answering on this address.`))
       else console.log(C.warn('  • the public URL didn\'t answer 200 yet — DNS and certs can take a few minutes to propagate; test from your phone shortly.'))
     }
   }
