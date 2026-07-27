@@ -542,7 +542,12 @@ function conversationItem(e: Entry): ConversationItem | null {
   if (e.type === 'queue-operation') {
     if (e.operation !== 'enqueue') return null
     const raw = typeof e.content === 'string' ? e.content.trim() : ''
-    return raw ? { role: 'user', text: unwrapTg(raw).text, ts, uuid: uuid || `queued-${ts}` } : null
+    // The WHOLE envelope, not just its text: `img`/`att` are what make a photo render as a photo, and
+    // taking only the text here published the daemon's "(file: NAME)" placeholder as a message. That
+    // placeholder is written precisely BECAUSE the image carries the meaning, and the feed suppresses
+    // it when there is an image to show — so dropping the attribute turns a photo into the caption
+    // that exists to stand in for it.
+    return raw ? { role: 'user', ...unwrapTg(raw), ts, uuid: uuid || `queued-${ts}` } : null
   }
   if (isRealUserText(e)) {
     const raw = textOf(e.message?.content).trim()

@@ -153,10 +153,14 @@ for (const [theme, vars] of [["dark", null], ["light", LIGHT]]) {
     // Where "static" actually is: a small gap above the composer, outside the scroller.
     check(!!m.work && m.work.bottom <= m.composer.top + 0.5 && m.composer.top - m.work.bottom < 20,
       `${name}: the row sits just above the composer  (${m.work ? (m.composer.top - m.work.bottom).toFixed(1) : "-"}px gap)`);
-    // The feed's own box ends above the row, so no message can be underneath it — which is why this
-    // needs no backdrop and the feed needs no permanently reserved strip.
-    check(!!m.work && m.feed.bottom <= m.work.top + 0.5,
-      `${name}: the feed ends above the row — nothing can be occluded  (feed bottom ${m.feed.bottom.toFixed(1)} vs row top ${m.work ? m.work.top.toFixed(1) : "-"})`);
+    // No message INK under the row at rest. Re-aimed twice as the layout moved, and the reason is
+    // worth keeping: first from the feed's box to its content edge (the box became the whole screen
+    // when the dock started floating), and now from the content edge to the last message's own box.
+    // The content edge overhangs the row by design — the owner's resting position leaves ~6px between
+    // the newest message and the dock's first ink, and the 16px that message carries as its bottom
+    // MARGIN is what fills the rest. A margin cannot be occluded; only ink can.
+    check(!!m.work && !!m.last && m.last.bottom <= m.work.top + 0.5,
+      `${name}: no message ink under the row at rest  (last message bottom ${m.last ? m.last.bottom.toFixed(1) : "-"} vs row top ${m.work ? m.work.top.toFixed(1) : "-"})`);
     // The same horizontal spot it has always occupied: the feed's left gutter.
     check(!!m.glyph && near(m.glyph.left - m.feed.left, m.padLeft),
       `${name}: the row's text keeps the feed's left gutter  (${m.glyph ? (m.glyph.left - m.feed.left).toFixed(1) : "-"} vs ${m.padLeft})`);

@@ -9,9 +9,14 @@ const REPO = fileURLToPath(new URL("../..", import.meta.url)).replace(/\/$/, "")
 const PAGE = process.argv[2] || join(REPO, "webapp", "index.html");
 // A real PNG, written here so the harness needs no fixture on disk: an 8x8 blue square.
 const PHOTO = join(mkdtempSync(join(tmpdir(), "stage-")), "photo.png");
-writeFileSync(PHOTO, Buffer.from(
+const PHOTO2 = join(mkdtempSync(join(tmpdir(), "stage2-")), "second.png");
+const PNG8 = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAAG0lEQVR4nGNgYGD4z0AswKqQWMUM" +
-  "o1YMKysAAP//NxUFvzs1LcYAAAAASUVORK5CYII=", "base64"));
+  "o1YMKysAAP//NxUFvzs1LcYAAAAASUVORK5CYII=", "base64");
+writeFileSync(PHOTO, PNG8);
+// A SECOND file, because "multiple" is the claim: the owner's before/after pair is the case that
+// found the limit, and one file cannot test ordering, per-file discard, or which one gets the caption.
+writeFileSync(PHOTO2, PNG8);
 const ts=1785200000000;
 const S={sid:"abc",name:"cc",alive:true,working:false,cwd:"~/p",model:"Opus 5",effort:"high"};
 const F={...S,items:[{role:"user",text:"hi",ts}]};
@@ -70,7 +75,33 @@ const up = await p.evaluate(()=>window.__uploads);
 check(up.length===1 && up[0].name==="photo.png", `exactly one upload, of the picked file (${JSON.stringify(up)})`);
 check(up[0] && up[0].caption==="what do you make of this?", "the typed message rode along as the caption");
 check(!(await vis("#dstage .thumb")), "the strip clears after sending");
+// ONE bubble, not two. The old path pushed an optimistic "📎 photo.png — caption" row beside the
+// real echo, so a sent photo showed as two messages and one of them then vanished.
+const stub = await p.evaluate(()=>[...document.querySelectorAll("#dfeed .msg")].map(e=>e.textContent).filter(t=>t.includes("📎")||t.includes("photo.png")));
+check(stub.length===0, `no filename stub bubble beside the real one (${JSON.stringify(stub)})`);
 check((await p.evaluate(()=>document.getElementById("dtext").value))==="", "the field clears after sending");
+// MULTIPLE files — the limit the owner hit sending a before/after pair, where the second photo was
+// silently dropped by the input rather than refused.
+await p.setInputFiles("#dfile", [PHOTO, PHOTO2]);
+await p.waitForTimeout(400);
+check((await p.evaluate(()=>document.querySelectorAll("#dstage .thumb").length))===2, "two picked files stage as two thumbnails");
+check((await p.evaluate(()=>document.querySelectorAll("#dstage .x").length))===2, "each carries its OWN ✕");
+// One ✕ drops one, not the lot.
+await click("#dstage .thumb:first-child .x"); await p.waitForTimeout(300);
+const left = await p.evaluate(()=>[...document.querySelectorAll("#dstage .thumb img")].map(i=>i.alt));
+check(left.length===1 && left[0]==="second.png", `✕ drops only its own file (${JSON.stringify(left)})`);
+// Picking again ADDS rather than replaces — that is how you attach from two places.
+await p.setInputFiles("#dfile", [PHOTO]);
+await p.waitForTimeout(300);
+check((await p.evaluate(()=>document.querySelectorAll("#dstage .thumb").length))===2, "picking again adds to the stage");
+await p.evaluate(()=>{ window.__uploads.length = 0; });
+await p.fill("#dtext", "before and after");
+await click("#dsend"); await p.waitForTimeout(1200);
+const many = await p.evaluate(()=>window.__uploads.filter(u=>u.name));
+check(many.length===2, `both files upload (${many.length})`);
+check(many[0] && many[0].name==="second.png" && many[1] && many[1].name==="photo.png", `…in the order they were staged (${many.map(u=>u.name).join(", ")})`);
+check(many[0] && many[0].caption==="before and after" && many[1] && many[1].caption==="", "the caption rides with the FIRST only, like an album's");
+
 // A session switch must not carry a staged file into another session.
 await p.setInputFiles("#dfile", PHOTO).catch(()=>check(false,"no #dfile input on this page")); await p.waitForTimeout(200);
 await p.evaluate(()=>openDrill("other","Other")); await p.waitForTimeout(400);

@@ -53,6 +53,19 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   (a clipped message still REPORTS an overlapping rect, so the
                                   #   obvious check passes on the in-flow layout). Same page-path
                                   #   control: nine checks must fail on a pre-change copy
+    node bleed.mjs [page]         # FULL BLEED: the feed is the whole screen, both floating surfaces
+                                  #   reserve their space as its padding (the bottom one MEASURED via
+                                  #   --dock-h), nothing is occluded at rest, and the transcript
+                                  #   scrolls THROUGH the top strip and behind the frosted capsule —
+                                  #   hit-tested over a band, since a single-point probe lands in the
+                                  #   margin between two messages. Control: 13 checks fail pre-change
+    node scrim.mjs [page]         # the working row's scrim: INVISIBLE with nothing behind it, doing
+                                  #   its job with a message behind it. Two-sided by construction —
+                                  #   each state shot with and without `.work::before` — so neither an
+                                  #   always-invisible nor an always-painted bar can pass. Compared on
+                                  #   the background right of the row's ink: a translucent layer flips
+                                  #   the row's own glyphs from subpixel to grayscale AA, which is
+                                  #   real and is not a visible band
     node stage.mjs [page]         # composer attachments: a picked file WAITS with an ✕ instead of
                                   #   uploading, the typed text rides as its caption, ✕ and a session
                                   #   switch both discard it. Every upload is recorded, so "nothing

@@ -353,8 +353,37 @@
   .sess .foot { display: flex; align-items: center; gap: var(--sp-2); margin-top: var(--sp-2); font-size: var(--t-meta); color: var(--hint-raised); }
   .sess .foot .bar { flex: 1; margin-top: 0; height: 5px; }
   /* Drill-in (session detail) */
-  #drill { position: fixed; inset: 0; background: var(--bg); display: none; flex-direction: column; z-index: 5; padding-top: var(--safe-top); }
-  #drill.show { display: flex; }
+  /* FULL BLEED, and no padding-top any more: the transcript owns the whole screen, including the
+     strip where Telegram paints its ✕ Close and its kebab in fullscreen. The offset those need did
+     not disappear — it moved into the two things that float over the feed (.vhead's `top`, and the
+     feed's own top padding, which is where the first message comes to rest). Owning the strip is the
+     point: the chat scrolls THROUGH it rather than starting under a grey band.
+     A plain block, not a flex column: nothing is in normal flow here now except the feed. */
+  #drill { position: fixed; inset: 0; background: var(--bg); display: none; z-index: 5; }
+  #drill.show { display: block; }
+  /* The dock floats at the floor with NO fill of its own — that is what makes the area around the
+     composer scrollable transcript rather than a grey band. Only the capsule inside it is painted
+     (frosted, like the header's chips), so the message passing behind it stays visible. */
+  #ddock { position: absolute; left: 0; right: 0; bottom: 0; z-index: 2; }
+  /* The ceiling scrim. Full bleed means the transcript scrolls up into the strip where Telegram
+     paints its ✕ Close and its kebab, and a line of message text sliding under those buttons is the
+     same defect the collapsed-message fold exists to prevent — text that stops rather than text that
+     goes. So it dissolves on the way up: transparent exactly at the name pill's bottom edge, full
+     ground by the top. Same eased ramp as the fold, for the same reason (a linear one has an onset
+     the eye reads as an edge), and the same fallback shape for an engine without color-mix.
+     z-index 1 puts it over the feed and under BOTH floating surfaces, which are z-index 2 — the
+     chips must stay crisp on top of it, not be faded by it. */
+  #drill::before { content: ""; position: absolute; left: 0; right: 0; top: 0; z-index: 1; pointer-events: none;
+    height: calc(var(--safe-top) + 10px + var(--hbtn-d));
+    background: linear-gradient(to top, transparent, var(--bg));
+    background: linear-gradient(to top,
+      color-mix(in srgb, var(--bg) 0%, transparent) 0%,
+      color-mix(in srgb, var(--bg) 6%, transparent) 19%,
+      color-mix(in srgb, var(--bg) 20%, transparent) 34%,
+      color-mix(in srgb, var(--bg) 44%, transparent) 47%,
+      color-mix(in srgb, var(--bg) 70%, transparent) 58%,
+      color-mix(in srgb, var(--bg) 90%, transparent) 67%,
+      var(--bg) 74%); }
   /* A PLAIN BLOCK again, deliberately rather than by neglect. It was a flex column for exactly one
      reason — `.work`'s `margin-top: auto` needed free space to absorb, which a block has none of —
      and that row has left the scroller entirely, so the column had no remaining job. Keeping it
@@ -364,11 +393,24 @@
      a prose reply, with the fold bar painting over the remains). A block container has no shrink
      algorithm, so that entire class of defect is gone by construction instead of held off by a rule.
      scripts/webapp-measure/squash.mjs is the guard if anyone makes it flex again. */
-  /* The top padding is the floating header's whole footprint — its 10px top margin, its own height,
-     its 2px bottom margin — plus the --sp-3 every other edge gets. It is the scroller's START
-     position, not a gap in the page: the row is out of flow, so without it the first message opens
-     behind the chips instead of below them. Derived from --hbtn-d so it follows the row's height. */
-  #dfeed { flex: 1; overflow-y: auto; padding: calc(var(--hbtn-d) + 24px) var(--sp-3) var(--sp-3); }
+  /* The scroller IS the screen — inset 0, with both floating surfaces reserved as padding rather
+     than subtracted from a column. Nothing is occluded at rest and everything scrolls through them.
+     TOP: the client's own chrome (--safe-top, 0 outside fullscreen) plus the header's whole
+     footprint — 10px margin, its height, 2px margin — plus the --sp-3 every other edge gets.
+     BOTTOM: --dock-h, which is MEASURED (see the ResizeObserver) because the dock's height moves
+     with the composer growing, the working row arriving and a file staging. The fallback is one
+     resting composer, so a browser without ResizeObserver still opens on a sane reservation rather
+     than with the newest message under the field.
+     That reservation adds NO gutter of its own — the last message carries a 16px bottom margin inside
+     the scroller, which IS the gutter, and adding --sp-3 on top doubled it to 28.
+     The -10px is the owner's resting position, measured off two screenshots of the same transcript
+     (one at rest, one dragged to where he wanted it): the label's ink sat 81.5px above the screen
+     bottom and belonged 63.0, an 18.5px drop. Eight of that is --dock-h now being measured to the
+     dock's first INK rather than its box, and the remaining ten are here — so the newest message
+     rests ~6px above whatever the dock paints first, in every state, rather than 24px above an
+     invisible box edge. */
+  #dfeed { position: absolute; inset: 0; overflow-y: auto;
+    padding: calc(var(--safe-top) + var(--hbtn-d) + 24px) var(--sp-3) calc(var(--dock-h, 60px) - 10px); }
   /* ASYMMETRIC padding, and the asymmetry is the point: the bubble hugs the meta block far tighter
      than it pads a line of text, which is what makes the time read as tucked into the corner. Pulling
      all four sides in instead would drag the top edge onto the first line and change every bubble
@@ -500,18 +542,29 @@
      two to match and for the line to sit lower, so 0/4 puts both gaps at 12 — down from 15 above and
      21 below (a 7px pad and a 6px margin, now gone). Move either neighbour's padding and this pair
      has to be re-derived from it, never nudged. */
-  /* The feed's floor gutter is DOUBLED UP while the row is showing: the last message already carries
-     its own 16px bottom margin, and the feed then adds 12 more before the row starts — 28 above
-     against 12 below, which is the asymmetry the owner could see. The gutter exists to keep the last
-     message off the composer, and while the row is there the ROW is that separation, so the FEED
-     gives it back for as long as the row is up.
-     It has to come off the feed's own padding and NOT off the row (a negative margin on the host
-     reads identically at rest and is wrong in motion): `overflow` clips at the PADDING box, so a
-     12px gutter the row overhangs is 12px of scroller in which a passing message paints behind the
-     row. Taking the padding away moves the clip edge with it, which is what keeps "a sibling cannot
-     occlude anything" true while scrolling rather than only at rest. */
-  #drill.working #dfeed { padding-bottom: 0; }
-  .work { display: flex; align-items: baseline; gap: 4px; padding: 0 var(--sp-3) var(--sp-2); color: var(--hint); font-size: var(--t-meta); }
+  /* The row's air above and below is equal (the owner's ask), and with the dock floating both sides
+     are now measured against the SAME reservation: the feed's bottom padding is --dock-h plus a
+     gutter, and the row sits at the dock's top edge. There is deliberately no `.working` override on
+     that padding any more — it existed to hand back a gutter that was doubled up while the row stood
+     in the flex column, and in a floating dock the row's height is already inside --dock-h. Leaving
+     it in place zeroed the whole reservation whenever a turn was running, which put the newest
+     message 77px UNDER the composer. */
+  .work { position: relative; display: flex; align-items: baseline; gap: 4px; padding: 0 var(--sp-3) 2px; color: var(--hint); font-size: var(--t-meta); }
+  /* A scrim that is INVISIBLE until there is something behind it. Full bleed means the transcript
+     runs under this line, and a bare status line over moving message text is unreadable — but a
+     painted bar would be a grey band across the page in the state it spends most of its life in
+     (nothing behind it at all). The fill is --bg's own colour, so over the page it is literally the
+     page: no edge, no band, nothing to see. Over a passing message it is 78% of the ground plus a
+     blur, which is what makes the line readable.
+     It lives on a ::before rather than on .work so the blur applies to the BACKDROP and not to the
+     text, and the mask feathers the top and bottom edges — a hard-edged blur band cutting a line of
+     message text in half is the same "cheap line" the message fold was just rescued from.
+     `inset: -2px 0` bleeds it past the row's own box so the feather has somewhere to happen. */
+  .work::before { content: ""; position: absolute; inset: -2px 0; z-index: -1; pointer-events: none;
+    background: color-mix(in srgb, var(--bg) 78%, transparent);
+    backdrop-filter: var(--chip-blur); -webkit-backdrop-filter: var(--chip-blur);
+    -webkit-mask-image: linear-gradient(to bottom, transparent, #000 8px, #000 calc(100% - 6px), transparent);
+    mask-image: linear-gradient(to bottom, transparent, #000 8px, #000 calc(100% - 6px), transparent); }
   .work .g { width: 1.1em; flex: none; text-align: center; }
   .work .v { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .work .m { flex: none; white-space: nowrap; font-variant-numeric: tabular-nums; margin-left: 4px; }
@@ -557,7 +610,13 @@
      the pill pushed the capsule to 508px inside a 390px strip and carried the mic off-screen. It
      does not scroll the PAGE, because a fixed-position subtree contributes no scrollable overflow —
      so this fails silently, with the send button simply unreachable. */
-  .inputwrap { flex: 1; min-width: 0; display: flex; align-items: flex-end; background: var(--sec); border-radius: calc(var(--pill-h-1) / 2); padding: var(--pill-ring); min-height: var(--pill-h-1); box-shadow: inset 0 1px 0 rgba(255,255,255,.06); }
+  /* The capsule is the SAME painted surface as the header's chips — --chip-fill over --chip-blur —
+     by the owner's ask, and it is what lets the dock have no fill of its own: the transcript passes
+     behind the field, frosted, instead of behind a grey bar. The inset highlight stays; it is the
+     rim that reads as a raised surface, and translucency doesn't remove the need for it. */
+  .inputwrap { flex: 1; min-width: 0; display: flex; align-items: flex-end; background: var(--chip-fill);
+    backdrop-filter: var(--chip-blur); -webkit-backdrop-filter: var(--chip-blur);
+    border-radius: calc(var(--pill-h-1) / 2); padding: var(--pill-ring); min-height: var(--pill-h-1); box-shadow: inset 0 1px 0 rgba(255,255,255,.06); }
   /* The model/effort pill, styled after the reference's blue "Open" chip: text only, no icon.
      Height is the reference's proportion against the one control both frames share — a 56.1px chip
      beside a 66.7px mic, so 0.84 of our 40px mic. The margin is NOT a nudge: at one line the
@@ -846,6 +905,11 @@
   <!-- The working row's home: OUTSIDE the scroller, so "static" is structural rather than a position
        trick. Empty and zero-height whenever nothing is running — paintWork() creates and removes the
        row inside it, and its lifecycle is untouched by the move. -->
+  <!-- The bottom dock: the working row, the staged attachment and the composer, FLOATING over the
+       transcript rather than standing in a column beside it. Its height is whatever those three come
+       to at the moment, which is why the feed reserves it through a measured --dock-h instead of a
+       constant (see the ResizeObserver). -->
+  <div id="ddock">
   <div id="dworkhost"></div>
   <!-- A picked file waits HERE until you send it. Above the capsule rather than inside it: the
        capsule's geometry is derived from the mic down to the half pixel, and a chip in that flex row
@@ -871,7 +935,8 @@
          quietest glyph treatment there is. Every chat app puts a filled mark on a filled button. -->
       <button id="dsend" class="sendbtn" title="Send"><svg viewBox="0 0 24 24"><polygon points="22 2 15 22 11 13 2 9 22 2" fill="currentColor"/></svg></button>
     </div>
-    <input id="dfile" type="file" hidden>
+    <input id="dfile" type="file" multiple hidden>
+  </div>
   </div>
 </div>
 
@@ -1374,11 +1439,13 @@ function dialParts(s) {
 }
 // ---- Drill-in: conversation feed + composer + stop/compact ----
 let drillSid = null, drillTimer = null, lastDrill = null, optimistic = [];
-// The file picked but not yet sent, and its preview URL. Declared HERE with the rest of the drill's
-// state rather than beside the attach handlers: openDrill() clears the stage, and a deep-linked open
-// can run before the script reaches those handlers — a `let` further down would be in its temporal
-// dead zone and throw on the first render of a linked session.
-let staged = null, stagedUrl = "";
+// The files picked but not yet sent, and their preview URLs — a LIST, because one attachment per
+// message is a limit nobody asked for: the owner hit it trying to send a before/after pair, and the
+// second photo was silently dropped by the input rather than refused. Declared HERE with the rest of
+// the drill's state rather than beside the attach handlers: openDrill() clears the stage, and a
+// deep-linked open can run before the script reaches those handlers — a `let` further down would be
+// in its temporal dead zone and throw on the first render of a linked session.
+let staged = [], stagedUrls = [];
 function openDrill(sid, name) {
   drillSid = sid; lastDrill = null; optimistic = []; workOptimisticAt = 0; feedSig = "";
   // A file staged in one session must not follow you into the next: attachToSession reads drillSid at
@@ -1674,9 +1741,6 @@ function paintWork() {
   // Every teardown goes through here, /clear's silent path included: no status and no optimistic
   // window means the row goes and BOTH timers stop with it. A ticker that outlived its row would be
   // a clock counting for a turn that ended.
-  // The class rides with the row, on the SAME two paths that create and remove it, so the feed's
-  // floor gutter can never be missing while there is no row to stand in for it.
-  $("drill").classList.toggle("working", !!show);
   if (!show) { if (el) el.remove(); stopWorkGlyph(); stopWorkTick(); workClock = null; return; }
   if (st) workOptimisticAt = 0;   // the real thing arrived
   syncWorkClock(st && st.elapsed);
@@ -1846,10 +1910,27 @@ $("dsend").onclick = async () => {
   // A staged file wins the send: the text rides along as its caption, which is the same shape the
   // picker used to fire immediately. Sending with a file and no text is legal — that is the old
   // attach-and-go, just with a chance to change your mind first.
-  if (staged) {
-    const file = staged;
+  if (staged.length) {
+    const files = staged.slice();
     ta.value = ""; clearStage();   // clearStage syncs the composer, so this covers both
-    attachToSession(file, { caption: text, label: "📎 " + file.name + (text ? " — " + text : "") });
+    // One upload per file, IN ORDER and awaited: the endpoint takes a single file, and firing them
+    // concurrently would let them land in the pane interleaved — a before/after pair arriving in the
+    // wrong order is worse than a slower send. The caption rides with the FIRST, the way an album
+    // carries one caption rather than repeating itself on every frame.
+    (async () => {
+      for (const [i, file] of files.entries()) {
+        // A failed upload gives the REMAINING files and the caption back, exactly as a failed text
+        // send gives the draft back — otherwise they are simply gone and there is nothing to retry
+        // from. Stops at the first failure: pushing on would deliver a pair out of order.
+        let failed = false;
+        await attachToSession(file, { caption: i === 0 ? text : "", onFail: () => {
+          failed = true;
+          staged = files.slice(i); renderStage();
+          if (i === 0) { ta.value = text; syncComposerMode(); }
+        } });
+        if (failed) return;
+      }
+    })();
     return;
   }
   if (!text) return;
@@ -1874,9 +1955,15 @@ $("dsend").onclick = async () => {
 // ---- Compose-row attachment + voice note ----
 // Upload to /api/session/attach; the composer text rides along as the file's caption. The bubble
 // paints optimistically and reconciles on the server's match token (see paintFeed).
-async function attachToSession(file, { caption = "", voice = false, label }) {
-  const o = { text: label, at: Date.now(), state: "pending", match: null };
-  optimistic.push(o); workOptimisticAt = Date.now(); paintFeed();
+async function attachToSession(file, { caption = "", voice = false, label, onFail }) {
+  // A FILE gets no optimistic row. The transcript's own echo carries the image, and a filename stub
+  // beside it is a SECOND message that then vanishes when the echo reconciles — which is exactly
+  // what it looks like: the app sent two things and thought better of one. A voice note keeps its
+  // stub, because "🎤 Transcribing…" is the only thing there is to show until the text comes back,
+  // and it swaps into the transcript rather than being replaced by a different bubble.
+  const o = voice ? { text: label, at: Date.now(), state: "pending", match: null } : null;
+  if (o) optimistic.push(o);
+  workOptimisticAt = Date.now(); paintFeed();
   $("dfeed").scrollTop = $("dfeed").scrollHeight;
   let d = null;
   try {
@@ -1888,12 +1975,17 @@ async function attachToSession(file, { caption = "", voice = false, label }) {
     d = await r.json();
   } catch {}
   if (!d || d.error) {
-    optimistic = optimistic.filter(x => x !== o); paintFeed();
+    if (o) optimistic = optimistic.filter(x => x !== o);
+    workOptimisticAt = 0;   // nothing was sent, so nothing is working — the indicator goes with the row
+    paintFeed();
     showErr((d && (d.reason || d.error)) || "Upload failed");
+    if (onFail) onFail();   // hands the file back to the composer, the way a failed send returns the draft
     return;
   }
-  o.state = "sent"; o.match = d.match || null;
-  if (voice && d.delivered) o.text = "🎤 " + d.delivered;   // swap the "Transcribing…" stub for the transcript
+  if (o) {
+    o.state = "sent"; o.match = d.match || null;
+    if (voice && d.delivered) o.text = "🎤 " + d.delivered;   // swap the "Transcribing…" stub for the transcript
+  }
   paintFeed(); setTimeout(renderDrill, 800);
 }
 // Picking a file STAGES it; sending is what uploads it. It used to fire the upload straight out of
@@ -1902,44 +1994,53 @@ async function attachToSession(file, { caption = "", voice = false, label }) {
 // your mind. The file is held in memory until send, which also means discarding costs nothing: the
 // server never heard about it.
 function clearStage() {
-  if (stagedUrl) URL.revokeObjectURL(stagedUrl);   // the preview holds the blob alive until it is released
-  staged = null; stagedUrl = "";
+  for (const u of stagedUrls) URL.revokeObjectURL(u);   // a preview holds its blob alive until released
+  staged = []; stagedUrls = [];
   renderStage();
 }
 function renderStage() {
   const s = $("dstage");
   s.textContent = "";
-  s.classList.toggle("on", !!staged);
-  if (staged) {
+  s.classList.toggle("on", staged.length > 0);
+  for (const u of stagedUrls) URL.revokeObjectURL(u);
+  stagedUrls = [];
+  staged.forEach((file, i) => {
     const thumb = document.createElement("div"); thumb.className = "thumb";
     // An image previews; anything else gets a glyph, because a document has no picture to show and a
     // broken <img> is worse than an icon.
-    if (/^image\//.test(staged.type)) {
-      stagedUrl = URL.createObjectURL(staged);
-      const img = document.createElement("img"); img.src = stagedUrl; img.alt = staged.name;
+    if (/^image\//.test(file.type)) {
+      const url = URL.createObjectURL(file); stagedUrls.push(url);
+      const img = document.createElement("img"); img.src = url; img.alt = file.name;
       thumb.appendChild(img);
     } else {
       const doc = document.createElement("div"); doc.className = "doc"; doc.textContent = "📄";
       thumb.appendChild(doc);
     }
     const x = document.createElement("button"); x.className = "x";
-    x.title = "Discard this attachment"; x.setAttribute("aria-label", "Discard this attachment");
+    x.title = "Discard " + file.name; x.setAttribute("aria-label", "Discard " + file.name);
     x.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
-    x.onclick = clearStage;
+    // Drops THIS one and leaves the rest: with several staged, one ✕ that cleared them all would be
+    // the same defect as the single-file limit, one step along.
+    x.onclick = () => { staged.splice(i, 1); renderStage(); };
     thumb.appendChild(x);
-    const nm = document.createElement("div"); nm.className = "nm"; nm.textContent = staged.name;
-    s.append(thumb, nm);
+    s.appendChild(thumb);
+  });
+  // The name is only worth showing for ONE file — beside a row of thumbnails it is noise, and with
+  // several it cannot name them all. The count says what the row is instead.
+  if (staged.length) {
+    const nm = document.createElement("div"); nm.className = "nm";
+    nm.textContent = staged.length === 1 ? staged[0].name : staged.length + " attachments";
+    s.appendChild(nm);
   }
-  // The send button has to appear for a staged file with no text at all, and the field's growth is
+  // The send button has to appear for staged files with no text at all, and the field's growth is
   // measured against a feed the strip just resized — both live in here.
   syncComposerMode();
 }
 $("datt").onclick = () => { if (drillSid) $("dfile").click(); };
 $("dfile").onchange = () => {
-  const f = $("dfile").files[0]; $("dfile").value = "";
-  if (!f || !drillSid) return;
-  if (stagedUrl) URL.revokeObjectURL(stagedUrl);
-  staged = f; stagedUrl = "";
+  const picked = [...$("dfile").files]; $("dfile").value = "";
+  if (!picked.length || !drillSid) return;
+  staged = staged.concat(picked);   // ADDS to the stage: picking twice is how you attach from two places
   renderStage();
   $("dtext").focus();   // the point of staging is that you write about it now
 };
@@ -1997,7 +2098,7 @@ function syncComposerMode() {
   // A staged file counts as something to send, exactly as typed text does — otherwise attaching a
   // photo and sending it with no caption would need you to type a character first to make the button
   // appear at all.
-  const showSend = !VOICE_OK || ((!!$("dtext").value.trim() || !!staged) && !rec);
+  const showSend = !VOICE_OK || ((!!$("dtext").value.trim() || staged.length > 0) && !rec);
   $("dsend").style.display = showSend ? "flex" : "none";
   $("dmic").style.display = showSend ? "none" : "flex";
   growComposer();
@@ -2010,6 +2111,31 @@ $("dtext").oninput = syncComposerMode;
 // appearing) do not re-wrap and are harmless; re-measuring on both is simpler than telling them
 // apart, and growComposer is idempotent.
 addEventListener("resize", growComposer);
+// The dock floats over the feed, so the space it occupies has to be GIVEN BACK to the scroller as
+// bottom padding — a flex column used to subtract it for free. One observer rather than a call at
+// each site: the dock changes height for the composer growing, the working row arriving or leaving,
+// a file staging or being discarded, and the safe-area inset changing under a soft keyboard. A
+// per-site call would have to be right at all five, forever; measuring the box is right by
+// construction, including for reasons added later.
+// The `stuck` read comes BEFORE the write, because the write is what changes scrollHeight — read it
+// after and the answer is about the layout you just created, not the one the reader was looking at.
+const dockBox = $("ddock");
+if (window.ResizeObserver && dockBox) {
+  new ResizeObserver(() => {
+    const feed = $("dfeed");
+    const stuck = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;
+    // Measured to the dock's first INK, not to its box: the box's top 8px is the composer's padding,
+    // which paints nothing, so reserving the box rests the newest message 8px higher than it looks.
+    // Whichever of the three is showing is the one the reader sees first.
+    const row = $("dwork"), stage = $("dstage");
+    const ink = (row && row.offsetParent) ? row
+      : (stage && stage.classList.contains("on")) ? stage
+      : document.querySelector(".inputwrap");
+    const inkH = dockBox.getBoundingClientRect().bottom - ink.getBoundingClientRect().top;
+    document.documentElement.style.setProperty("--dock-h", Math.round(inkH) + "px");
+    if (stuck) feed.scrollTop = feed.scrollHeight;
+  }).observe(dockBox);
+}
 syncComposerMode();
 $("dmic").onclick = async () => {
   if (rec) { rec.stop(); return; }

@@ -272,6 +272,17 @@ describe('a message queued mid-turn is still a message', () => {
     const f = fixture([enq('<tg 42>from telegram</tg>', '2026-07-27T13:00:57.661Z')])
     expect(recentConversation(f, 5)[0].text).toBe('from telegram')
   })
+
+  // A PHOTO queued mid-turn. The envelope's img is what makes it render as a photo; the text beside
+  // it is the daemon's "(file: NAME)" stand-in, which the feed suppresses precisely because there is
+  // an image. Keep only the text and the photo becomes the words that exist to replace it — which is
+  // exactly what the owner saw when he sent a pair of screenshots while a turn was running.
+  test('it keeps the image, not just the placeholder text', () => {
+    const f = fixture([enq('<tg 42 img="/inbox/1785-shot.png">(file: shot.png)</tg>', '2026-07-27T13:00:57.661Z')])
+    const [row] = recentConversation(f, 5)
+    expect(row.img).toBe('/inbox/1785-shot.png')
+    expect(row.text).toBe('(file: shot.png)')
+  })
 })
 
 describe('conversationItemFullText — the clamp is a poll cost, not a read limit', () => {

@@ -288,7 +288,11 @@ textarea and disturb geometry derived down to the half pixel. Three things are e
 three are measured by `scripts/webapp-measure/stage.mjs` — `syncComposerMode()` must count a staged
 file as something to send (or a photo with no caption can't be sent at all), `openDrill()` must
 clear the stage (`attachToSession` reads `drillSid` at *upload* time, so a stage that survives a
-switch delivers to the wrong session), and the object URL must be revoked on discard.
+switch delivers to the wrong session), and the object URL must be revoked on discard. A file send
+paints **no optimistic row** — the transcript's echo carries the image, and a `📎 name` stub beside
+it is a second message that then vanishes when the echo reconciles, which is exactly what it looks
+like. A *voice* note keeps its stub, because "🎤 Transcribing…" is all there is to show and it swaps
+into the transcript rather than being replaced.
 
 **The working row's spacing is derived from its NEIGHBOURS, not from its own padding.** The air above
 it is the last message's 16px bottom margin plus the feed's floor gutter; the air below is the row's
@@ -329,6 +333,25 @@ a non-square box draws an ellipse whose flanks disagree with the capsule's ends.
 knowingly and the width holds the target's area. Don't take the height lower. `.dtitle`'s
 `margin-inline` is the ONE place the row's width budget is written down — it reads `--hbtn-w`, and it
 is what to fix if the buttons ever change proportion again.
+
+**The drill-in is FULL BLEED: `#dfeed` is the whole screen and everything else floats over it.**
+`#drill` is a plain block with no padding of its own; the scroller is `position: absolute; inset: 0`
+and *reserves* the two floating surfaces as its own padding instead of losing the space from a flex
+column. Top = `--safe-top` + the header's footprint. Bottom = **`--dock-h`, measured** by a
+ResizeObserver on `#ddock` (the working row + staged attachment + composer), because that height
+moves with the composer growing, the row arriving, a file staging and the keyboard's safe-area
+inset — one observer is right by construction where five call sites are right until the sixth is
+added. Two things that look correct and are not: a **gutter added on top of `--dock-h`** doubles the
+last message's own 16px margin and breaks the row's equal air; and any rule that zeroes that padding
+conditionally (there was a `#drill.working` one, correct for the old in-flow layout) puts the newest
+message **77px under the composer** the moment a turn runs. The dock paints *nothing* — only the
+capsule inside it is filled, with the header's own `--chip-fill` + `--chip-blur` — which is what
+makes the strip around the field scrollable transcript rather than a grey bar. `#drill::before` is
+the ceiling scrim: the transcript dissolves on its way up so a line of text never slides under
+Telegram's ✕ Close, transparent exactly at the name pill's bottom edge. `scripts/webapp-measure/bleed.mjs`
+measures all of it, and note its two instrument lessons — `getComputedStyle`'s second argument is the
+pseudo-element (reading a scrim without it measures the host and reports `none`), and a hit test must
+scan a **band**, since a single-point probe lands in the 16px margin between two messages.
 
 **The header FLOATS over the feed, and that is what makes the translucency mean anything.**
 `--chip-fill` has been 82% of `--sec` for a while, but the row sat in the flex column *above* the
