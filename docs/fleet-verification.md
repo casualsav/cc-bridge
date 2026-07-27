@@ -19,6 +19,51 @@ a prompt with an unanswered ask reads `🟡 busy`. Polling `tg roster` for `idle
 To ask "is this pane actually mid-turn?", capture it and look for `esc to interrupt`, or read the
 statusline — that's what the daemon does (`onNormalPrompt` / `detectWorking`).
 
+## A pane's environment is the daemon's, and tmux lies about it
+
+A spawned pane inherits the DAEMON's environment, not tmux's and not your shell's.
+`tmux show-environment` reports the tmux SERVER's env, so it can show a PATH the pane has never
+seen — it once made a fixed-looking bug look prefixed correctly while the pane ran a stale binary.
+Truth: `/proc/<pane-pid>/environ` for the env, `/proc/<pane-pid>/exe` for which binary is actually
+running (its path names the version). Never the pane's screen text.
+
+## Pane screens can be hours stale
+
+A zombie pane keeps displaying whatever it last drew — one showed its original welcome banner,
+with an account tier from hours earlier, and a screen-sampling feature fired a false drift alert
+off it on first boot. Anything reading screen content as *current* state must ask: could this pane
+be showing something from hours ago? Record account-level conclusions only from panes the daemon
+itself just launched.
+
+## Detecting live subagents — the two documented signals are dead ends
+
+Established by measuring a live and a finished subagent at the same instant:
+- Process-tree children: subagents run IN-PROCESS; the claude pid's only children are transients
+  (statusline, a Bash call). No child-pid check can see one.
+- `isSidechain: true` transcript entries: no longer written — each subagent gets its own file at
+  `<transcript-dir>/subagents/agent-<id>.jsonl`, and the `isSidechain` filters in older code match
+  nothing.
+- The "Waiting for N background agents" pane text is inline scroll, not a footer: it scrolls away
+  while still true and lingers after completion — false in both directions.
+What works: a subagent is live iff the last `type:'assistant'` entry in its own file has
+`stop_reason === 'tool_use'` (it becomes `'end_turn'` on completion) — the same predicate as the
+main thread's `turnInProgress`. Poll content, not mtime (a blocked agent's file never changes),
+with a staleness cutoff so crashed sessions don't count forever.
+
+## "Restart" cannot fix a value read once at boot
+
+Entitlement/tier caches are read into process memory at startup; a running session keeps the stale
+copy after the on-disk fix lands (observed live: a pre-fix session still gated minutes after the
+file was corrected, while a fresh spawn worked immediately). Any UX or advice for this class must
+say RESPAWN, never restart.
+
+## Test-minted identity must never reach real delivery
+
+The mini-app test harness signs initData as the real owner, so "broadcast to everyone" and
+"deliver to the creator" are indistinguishable at the owner's phone — stray test messages reached
+him before the underlying bug was even found. Assert on the persisted row or the log, and cancel
+the job before it fires.
+
 ## You cannot inflate a session's context with tool output
 
 Claude Code prunes stale tool results. A haiku worker made three separate 2000-line `Read` calls and

@@ -44,10 +44,23 @@ see `docs/multi-channel.md` for how the channels plug in.
 - `tgctl.ts` — the `tg` actions CLI; `ensure-daemon.ts` — standalone daemon relauncher.
 - `prompt.ts` — detect interactive prompts (select / permission) from a pane capture.
 - `common.ts` (shared types/paths), `markdown.ts` (Markdown → Telegram HTML).
+- `prefs.json` (beside `access.json` under the channel dir) — `/settings` preferences
+  (`spawnModel`, `spawnEffort`, `autoUpdate`); `access.json` is security-only and `loadAccess()`
+  merges both. A null in `access.json` proves nothing about spawn defaults — three agents in one
+  night read the wrong file and reported the rule unset while the daemon ran `spawnModel:'opus'`
+  throughout.
+- `topics.json` keeps session rows under its nested `topics` key, and top-level values can be
+  legitimately `null` — iterate `topics`, never the file root.
 - `off-mcp/INSTALL.md` (setup) + `off-mcp/CLAUDE.md` (the convention every plugin-less session reads).
 - `off-mcp/CHAT-DM.md` + `off-mcp/chat-account/` (templates) — optional claude.ai-style chat agent living in the bot's DM (auto-provisioned once a group is bound).
 - `ACCESS.md` (access control), `TESTING.md`, `docs/fleet-verification.md` (how to verify bus/fleet
   changes live — spawn-a-throwaway recipe, the traps, and what is NOT yet verified).
+
+**Retiring a slash command means a stub handler, never a deleted one.** An unregistered command
+falls through to the unknown-command relay, which types the literal text into the live TUI, where
+the CLI's slash palette fuzzy-matches it — probed live: `/opus` offered `/fable` as its top match,
+one palette predicate away from the switch the fleet must never make (Fable into a contextful
+session). The stub replies with guidance and touches no pane.
 
 **Repo perms (group-shared checkouts).** If this tree is shared by more than one account, keep it
 group-writable — **setgid, group-writable dirs (2775)**, **umask 002**, and **`git config
@@ -69,6 +82,12 @@ newest cache version) and verifies it came back on the new version. The type-che
 the checkout's version files are stamped, so a failed build never dirties the working tree. Flags:
 `--no-restart` (ship to cache without touching the live daemon) and `--commit "msg"` (commit + push
 after a clean deploy). Commits end with `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
+
+If a deploy ever reports a type-check failure while printing what looks like a healthy bundle,
+suspect the harness, not the code: the gate's stdout grows with the bundle, and an output-cap kill
+surfaces as a failure with empty stderr (it bit once at Node's 1 MiB default; `sh()` now names the
+killing signal). And a green `bun test` is not type-soundness — fixtures satisfy runtime while
+omitting a newly required field — so run the build gate yourself before reaching for deploy.
 
 Doing it by hand (only if the script can't run): copy the changed `.ts` to the cache `<ver>` dir +
 the marketplace dir → `bun build daemon.ts --target=bun` to type-check → restart the daemon

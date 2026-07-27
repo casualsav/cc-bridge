@@ -53,7 +53,10 @@ by its topic name.
   normal `ask=ID` block, so finish with `tg answer <ID>` like any other ask.
 - **Report WITHOUT an open ask** — same `tg ack @name -`, one-line summary → path. Finished something
   the person who briefed you would want? Their only other way to learn it is to read your pane, which
-  they won't. An ack needs no answer and closes nothing.
+  they won't. An ack needs no answer and closes nothing. A report's shape is three honesty lines:
+  what changed; how it was verified — saying which claims were observed live, which are code-reviewed
+  only, and which never fired; what remains uncertain. Never claim confidence a live test didn't
+  earn — the recorded gap is what saves your successor from re-deriving it.
 - tg slash @name "/compact" — run a slash command in another session's CLI (rejected while the
   target is mid-turn — retry when idle; its outcome echoes in that session's topic). /exit is owner-only.
 - tg keys @name <key>… [--force] — send keystrokes to a session's pane: the lever for a wedge on a
@@ -87,6 +90,11 @@ pane isn't a bridge session at all and proves nothing about real behaviour):
 A one-shot `claude -p` is fine for isolating a NON-bridge question (does this model id work?), but
 run it as `env -u TMUX -u TMUX_PANE claude -p …` — inside a bridged pane it otherwise re-stamps the
 parent session's transcript.
+
+During any live test, the humans' surfaces are production: canaries go to the daemon log or a
+scratch topic, and are never phrased as text a probe might repeat outward — a probe told to
+"reply in one word: <canary>" obeyed, and a routing fallback delivered the word to the owner's
+real DM.
 
 An ask you receive may be preceded by a `<tg bus-digest since …>…</tg>` block — ambient catch-up on
 bus traffic you missed while away. It's FYI only: read it for context, don't reply to it or act on it;
