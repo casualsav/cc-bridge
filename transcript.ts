@@ -405,7 +405,39 @@ export function slashResultAfter(file: string, sinceMs: number): { text: string;
 // commands (the `<command-name>` XML the CLI records) surface as structured fields so the client
 // can render a thumbnail / file chip / command chip instead of raw markup; each item is clamped
 // so a huge paste can't blow up the payload.
-export type ConversationItem = { role: 'user' | 'assistant'; text: string; ts: number; uuid?: string; img?: string; att?: string; cmd?: boolean; clipped?: true }
+export type ConversationItem = { role: 'user' | 'assistant' | 'agent'; text: string; ts: number; uuid?: string; img?: string; att?: string; cmd?: boolean; agent?: string; status?: string; clipped?: true }
+
+// ---- Machine payloads that arrive USER-SIDE -----------------------------------------------------
+// Several things the harness writes are user-type entries carrying no user words at all. They pass
+// isRealUserText (they are not isMeta), so before this they rendered as the OWNER's own blue bubble
+// with the raw markup showing. Censused over 400 transcripts of this box, the shapes that reach the
+// feed are: <task-notification> 265, <local-command-stdout> 38, <bash-input>/<bash-stdout> 11 each,
+// "[Request interrupted by user]" 2 — and <system-reminder> ZERO, because those ride on isMeta
+// entries and are already dropped upstream. The interruption sentence is left alone: it is readable
+// English and reads correctly as something the user did.
+const tagOf = (raw: string, tag: string) => new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`).exec(raw)?.[1] ?? ''
+// ONE pass, and only on the notification path below. A single left-to-right replace never rescans
+// what it wrote, so a body containing `&amp;lt;` decodes to the literal `&lt;` rather than to `<`.
+// Nothing else in the feed is decoded: a user who TYPES &lt;tag&gt; must keep seeing those
+// characters, and the renderer's esc() is what guarantees it.
+const ENTITY: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", '#39': "'" }
+const unescapeXml = (s: string) => s.replace(/&(amp|lt|gt|quot|apos|#39);/g, (_, k: string) => ENTITY[k] ?? _)
+
+// A finished background task (the Task tool) notifies its parent as a user entry whose whole body is
+// <task-notification>: task-id, tool-use-id, output-file, status, summary, a boilerplate note, and
+// the agent's actual report in <result>. Only the last two are for a human. The ids and the
+// output-file path are dropped rather than folded away — they are two opaque tokens and a /tmp path
+// nothing on a phone can act on.
+function taskNotificationItem(raw: string, ts: number, uuid?: string): ConversationItem {
+  const summary = unescapeXml(tagOf(raw, 'summary').trim())
+  const result = unescapeXml(tagOf(raw, 'result').trim())
+  // The summary is written as `Agent "NAME" finished`; keep the whole sentence when it isn't.
+  const agent = /^Agent "([\s\S]+)" finished/.exec(summary)?.[1] ?? summary
+  const status = tagOf(raw, 'status').trim()
+  // A notification with no report still has to render: the header line alone says an agent finished,
+  // which is the whole content of that event.
+  return { role: 'agent', text: result || summary, ts, uuid, ...(agent ? { agent } : {}), ...(status ? { status } : {}) }
+}
 // One transcript entry → its feed row, UNCLAMPED, or null if the entry isn't one. Shared by the
 // polled feed (which clamps) and the on-demand full-text fetch (which doesn't), so the two can never
 // disagree about how a user message is unwrapped from its <tg …> envelope — an expansion that showed
@@ -415,6 +447,23 @@ function conversationItem(e: Entry): ConversationItem | null {
   const uuid = e.uuid
   if (isRealUserText(e)) {
     const raw = textOf(e.message?.content).trim()
+    if (raw.startsWith('<task-notification>')) return taskNotificationItem(raw, ts, uuid)
+    // Slash-command output and `!` bash mode: the SAME defect as the notification (tags on screen in
+    // the owner's own bubble) and the same family as <command-name> below, which already renders as a
+    // command chip — so they lose the markup and join that line style rather than earning a voice of
+    // their own. Deliberately NOT entity-decoded: what the CLI wrote here is already literal.
+    if (raw.startsWith('<local-command-stdout>')) {
+      const out = tagOf(raw, 'local-command-stdout').trim()
+      return out ? { role: 'user', text: out, ts, uuid, cmd: true } : null   // the empty ones are noise
+    }
+    if (raw.startsWith('<bash-input>')) {
+      const cmd = tagOf(raw, 'bash-input').trim()
+      return cmd ? { role: 'user', text: `! ${cmd}`, ts, uuid, cmd: true } : null
+    }
+    if (raw.startsWith('<bash-stdout>')) {
+      const out = [tagOf(raw, 'bash-stdout'), tagOf(raw, 'bash-stderr')].map(s => s.trim()).filter(Boolean).join('\n')
+      return out ? { role: 'user', text: out, ts, uuid, cmd: true } : null
+    }
     // Tolerate a few stray chars before <tg (the survey-dismiss "0" era left such entries).
     const m = raw.match(/^[\s\S]{0,3}?<tg([^>]*)>([\s\S]*)<\/tg>/)
     if (m) {

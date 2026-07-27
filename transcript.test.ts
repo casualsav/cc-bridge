@@ -275,3 +275,85 @@ describe('conversationItemFullText — the clamp is a poll cost, not a read limi
     expect(conversationItemFullText(f, 'a1')).toBe('done')
   })
 })
+
+// ---- Machine payloads that arrive USER-SIDE ----------------------------------------------------
+// These are user-type entries carrying no user words. Before the parse below they rendered as the
+// OWNER's own blue bubble with the raw markup showing — a wall of XML where a report should be.
+// The notification body here is copied from a real transcript on this box, entities and all.
+const NOTIFICATION = `<task-notification>
+<task-id>ad483af346e3ed2e3</task-id>
+<tool-use-id>toolu_01V9wPXt1E5YSfnecJLLRJsJ</tool-use-id>
+<output-file>/tmp/claude-1001/-home-ubuntu-test/f4817bd4/tasks/ad483af346e3ed2e3.output</output-file>
+<status>completed</status>
+<summary>Agent "Map daemon concurrency &amp; hot loop" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>## Conclusion
+
+There is no single "main loop" — see \`auxRelayTick\`, which awaits &lt;N&gt; sessions in sequence.</result>
+</task-notification>`
+
+describe('a subagent report is not the owner talking', () => {
+  test('the notification becomes an agent card with the plumbing gone', () => {
+    const [it] = recentConversation(fixture([user(NOTIFICATION, 'u1')]), 5)
+    expect(it.role).toBe('agent')
+    expect(it.agent).toBe('Map daemon concurrency & hot loop')
+    expect(it.status).toBe('completed')
+    expect(it.text.startsWith('## Conclusion')).toBe(true)
+    // The point of the exercise, stated as its own assertion: NOTHING of the payload's machinery
+    // reaches the client. Not the ids, not the /tmp path, not the boilerplate note, no tags.
+    const whole = JSON.stringify(it)
+    for (const gone of ['task-id', 'toolu_01', 'output-file', '/tmp/claude-1001', '<note>', 'fires each time', '<result>', '<summary>'])
+      expect(whole.includes(gone)).toBe(false)
+  })
+
+  // Decoding happens ONCE and only here. `&amp;` in the summary is an ampersand; `&lt;N&gt;` in the
+  // body is a pair of angle brackets the agent typed — and a single left-to-right pass gets both
+  // right, where a second pass would turn a literal `&amp;lt;` into a tag.
+  test('entities decode exactly once', () => {
+    const [it] = recentConversation(fixture([user(NOTIFICATION, 'u1')]), 5)
+    expect(it.text.includes('awaits <N> sessions')).toBe(true)
+    const [twice] = recentConversation(fixture([user(NOTIFICATION.replace('&lt;N&gt;', '&amp;lt;N&amp;gt;'), 'u1')]), 5)
+    expect(twice.text.includes('awaits &lt;N&gt; sessions')).toBe(true)
+  })
+
+  // The decode is scoped to the parsed path, so a human who types entity text keeps it verbatim —
+  // the renderer's esc() is what shows it, and it can only do that if nothing decoded it first.
+  test('a user who types entity text is untouched by it', () => {
+    const [it] = recentConversation(fixture([user('<tg 1>use &lt;div&gt; not &amp;lt;div&amp;gt;</tg>', 'u1')]), 5)
+    expect(it.role).toBe('user')
+    expect(it.text).toBe('use &lt;div&gt; not &amp;lt;div&amp;gt;')
+  })
+
+  test('a report with no result still renders as its summary line', () => {
+    const empty = NOTIFICATION.replace(/<result>[\s\S]*<\/result>/, '<result></result>')
+    const [it] = recentConversation(fixture([user(empty, 'u1')]), 5)
+    expect(it.role).toBe('agent')
+    expect(it.text).toBe('Agent "Map daemon concurrency & hot loop" finished')
+  })
+
+  // Expanding a clipped card must not reveal the markup the collapsed one hid — the same rule the
+  // <tg …> envelope has, and the reason both paths go through conversationItem().
+  test('the full-text fetch returns the same parsed report', () => {
+    const f = fixture([user(NOTIFICATION, 'u1')])
+    expect(conversationItemFullText(f, 'u1')!.startsWith('## Conclusion')).toBe(true)
+  })
+
+  test('slash output and ! bash mode join the command-chip family', () => {
+    const items = recentConversation(fixture([
+      user('<local-command-stdout>Set model to claude-opus-4-8</local-command-stdout>', 'u1'),
+      user('<bash-input>git status</bash-input>', 'u2'),
+      user('<bash-stdout>nothing to commit</bash-stdout><bash-stderr></bash-stderr>', 'u3'),
+      user('<local-command-stdout></local-command-stdout>', 'u4'),   // empty: nothing to show
+    ]), 9)
+    expect(items.map(i => i.text)).toEqual(['Set model to claude-opus-4-8', '! git status', 'nothing to commit'])
+    expect(items.every(i => i.cmd === true && i.role === 'user')).toBe(true)
+  })
+
+  // "[Request interrupted by user]" is deliberately NOT handled: it is a readable English sentence
+  // describing something the user really did, so the owner's own bubble is where it belongs.
+  test('the interruption sentence stays an ordinary user message', () => {
+    const [it] = recentConversation(fixture([user('[Request interrupted by user]', 'u1')]), 5)
+    expect(it.role).toBe('user')
+    expect(it.cmd).toBeUndefined()
+  })
+})
