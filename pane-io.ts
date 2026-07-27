@@ -167,6 +167,81 @@ export async function capturePaneCached(paneId: string): Promise<string> {
   return text
 }
 
+// Delivery serialisation for pane writes. Lives HERE rather than in daemon.ts so the race it
+// exists to prevent can be driven against a real tmux pane by a harness that imports the very
+// same function — daemon.ts boots the bot on import, so a test there could only ever re-implement
+// this, and a re-implementation that drifts is a test that proves nothing about what ships.
+
+// ---- Delivery serialisation -------------------------------------------------------------------
+// Getting text into a pane is NOT atomic: it is a paste followed by a separate Enter, tens of
+// milliseconds to tens of seconds apart. Two deliveries overlapping in that window interleave —
+// paste A, paste B into the same input box, then A's Enter submits BOTH as one message. Observed in
+// production, on the owner's own session: an attach at 23:19:50.541 and a `send chars=24` at
+// 23:19:52.393 arrived as a single transcript entry reading `…</tg>` + the second message's text.
+//
+// `PaneWatcher.withInjection` is NOT the guard against this and never was: it sets a boolean that
+// pauses the watcher's polling, so two concurrent calls both set it, run interleaved, and the first
+// to finish clears it while the second is still injecting. The focused pane was never safer than any
+// other; it just also woke its watcher early.
+//
+// PER-PANE, not global: unrelated sessions must not queue behind one another's 30-second settles,
+// and this box runs a dozen panes. FIFO, not try-lock: ordering is part of the contract — two
+// messages from one person must arrive in the order they were sent, which is exactly the case that
+// exposed this.
+const paneDelivery = new Map<string, Promise<void>>()
+// A caller that cannot get its turn gives up rather than waiting forever. Comfortably past the
+// longest legitimate hold (pasteGuarded's slash path can sit in a 30s settle), so this fires only
+// when something is genuinely stuck.
+export const DELIVERY_WAIT_MS = 45_000
+// Overridable ONLY so the give-up path can be driven in a test in under a second instead of 45.
+// A guard that has never been seen firing is a guard nobody has checked; see
+// scripts/pane-delivery-race.ts. Nothing in the daemon writes it.
+let waitMs = DELIVERY_WAIT_MS
+export function setDeliveryWaitForTest(ms: number): void { waitMs = ms }
+// NOT REENTRANT — a promise chain cannot be. Nothing wrapped in this may call anything else wrapped
+// in it for the same pane, or the inner call waits on a tail its own caller is holding. The one
+// place that could is pasteGuarded, whose non-slash branch delegates to injectText/pasteToPane and
+// therefore deliberately does NOT wrap itself.
+export async function withPaneDelivery<T>(paneId: string, fn: () => Promise<T>, timedOut: () => T): Promise<T> {
+  const prev = paneDelivery.get(paneId) ?? Promise.resolve()
+  let release!: () => void
+  const mine = new Promise<void>(r => { release = r })
+  // THE LOAD-BEARING LINE. What goes in the map is a tail that ALWAYS RESOLVES; the caller's own
+  // rejection travels back through the value this function returns, never through the chain. Store
+  // the rejecting promise instead and one failed delivery poisons every later delivery to that pane
+  // — the lock turns a single lost message into a permanently wedged session.
+  const tail = prev.then(() => mine)
+  paneDelivery.set(paneId, tail)
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const mineTurn = await Promise.race([
+    prev.then(() => true),
+    new Promise<boolean>(r => { timer = setTimeout(() => r(false), waitMs) }),
+  ])
+  if (timer) clearTimeout(timer)
+  // NO STEALING. A timeout skips this delivery and reports failure; it never barges into a critical
+  // section, because barging mid-paste is precisely the corruption being fixed. Losing a message
+  // with a visible error beats corrupting one silently — every caller already surfaces a false.
+  if (!mineTurn) { release(); return timedOut() }
+  try { return await fn() }
+  finally {
+    release()
+    // Don't accumulate one entry per pane the daemon has ever delivered to. If someone queued behind
+    // us they have already replaced the tail, and this leaves theirs alone.
+    if (paneDelivery.get(paneId) === tail) paneDelivery.delete(paneId)
+  }
+}
+
+// The pasted payload's tmux buffer, PER PANE. It was one shared name, and deliveries to different
+// panes run concurrently by design — so pane A's set-buffer, pane B's set-buffer, pane A's
+// paste-buffer put B's message into A's session. Milliseconds wide and never reported, unlike the
+// merge above, but the same root cause and worse in kind: a message in the wrong session.
+// The queue does nothing for it, because the queue is per pane and this race is between panes.
+// The rule already existed in one place — BANG_BUFFER was split out with the note that "a concurrent
+// inbound paste could clobber a shared buffer mid-flight". This generalises it.
+// The `tg-in-` prefix is not decoration: a sanitised pane id like `%149` becomes `-149`, and tmux
+// would read a leading dash as an option.
+export const injectBuffer = (paneId: string) => `tg-in-${paneId.replace(/[^A-Za-z0-9]+/g, '-')}`
+
 // PaneWatcher — ONE poll loop per active session (opus-direct Block C). Captures the pane every
 // 800ms; when the content hash changes it fires onEvent, and onPoll fires every tick (even when
 // unchanged) to drive a live working signal. All daemon coupling enters through the constructor

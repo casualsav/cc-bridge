@@ -226,3 +226,68 @@ test('submitVerified: an unreadable pane is not reported as a delivery failure',
   }
   expect(await pane.submitVerified('%1', ['Enter'], landedPredicate)).toBe(true)
 })
+
+// ---- withPaneDelivery -------------------------------------------------------------------------
+// The lock behind the merged-message bug of 2026-07-27: getting text into a pane is a paste followed
+// by a separate Enter, and two deliveries overlapping in that window submitted as ONE message.
+// The tmux-level proof is scripts/pane-delivery-race.ts (a real pane, seen failing without this);
+// these are the ordering and failure-mode claims, which need no tmux.
+// realSleep, NOT realProc.sleep: the module mock at the top of this file makes sleep INSTANT, and a
+// namespace import is a live binding, so `realProc.sleep` is the mocked one by the time a test runs.
+// With an instant sleep the holder below never holds anything and the give-up path cannot fire —
+// the check would have passed for a reason that has nothing to do with the lock.
+
+test('withPaneDelivery: two deliveries at one pane RUN ONE AT A TIME, in order', async () => {
+  const events: string[] = []
+  const body = (tag: string, ms: number) => async () => {
+    events.push(`${tag}:start`)
+    await realSleep(ms)
+    events.push(`${tag}:end`)
+    return tag
+  }
+  // B starts while A is still inside its critical section — the production shape.
+  const a = pane.withPaneDelivery('%1', body('A', 60), () => 'timeout')
+  await realSleep(10)
+  const b = pane.withPaneDelivery('%1', body('B', 5), () => 'timeout')
+  expect(await Promise.all([a, b])).toEqual(['A', 'B'])
+  expect(events).toEqual(['A:start', 'A:end', 'B:start', 'B:end'])
+})
+
+test('withPaneDelivery: different panes are NOT serialised against each other', async () => {
+  const t0 = Date.now()
+  await Promise.all([
+    pane.withPaneDelivery('%1', async () => realSleep(60), () => undefined),
+    pane.withPaneDelivery('%2', async () => realSleep(60), () => undefined),
+  ])
+  // Serialised they would take ~120ms. A global mutex would fail exactly here.
+  expect(Date.now() - t0).toBeLessThan(110)
+})
+
+test('withPaneDelivery: a THROWING delivery releases the lock instead of poisoning the pane', async () => {
+  await expect(pane.withPaneDelivery('%9', async () => { throw new Error('boom') }, () => 'timeout')).rejects.toThrow('boom')
+  // The stored tail is always-resolved on purpose; store the rejection and this second call hangs
+  // or rejects forever, turning one lost message into a permanently wedged session.
+  expect(await pane.withPaneDelivery('%9', async () => 'landed', () => 'timeout')).toBe('landed')
+})
+
+test('withPaneDelivery: a caller that cannot get its turn GIVES UP and never steals the lock', async () => {
+  pane.setDeliveryWaitForTest(30)
+  try {
+    let holderFinished = false
+    const holder = pane.withPaneDelivery('%7', async () => { await realSleep(200); holderFinished = true; return 'held' }, () => 'timeout')
+    await realSleep(5)
+    let ran = false
+    const late = await pane.withPaneDelivery('%7', async () => { ran = true; return 'ran' }, () => 'timeout')
+    expect(late).toBe('timeout')
+    expect(ran).toBe(false)            // it skipped — it did NOT barge into the critical section
+    expect(holderFinished).toBe(false) // …and the holder was still inside it
+    expect(await holder).toBe('held')
+  } finally { pane.setDeliveryWaitForTest(pane.DELIVERY_WAIT_MS) }
+})
+
+test('injectBuffer: one buffer name PER PANE, and never one starting with a dash', () => {
+  expect(pane.injectBuffer('%149')).not.toBe(pane.injectBuffer('%150'))
+  // A sanitised `%149` is `-149`, which tmux would read as an option — hence the prefix.
+  expect(pane.injectBuffer('%149').startsWith('-')).toBe(false)
+  expect(pane.injectBuffer('main:1.0')).toMatch(/^tg-in-[A-Za-z0-9-]+$/)
+})

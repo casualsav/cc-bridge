@@ -56,6 +56,41 @@ see `docs/multi-channel.md` for how the channels plug in.
 - `ACCESS.md` (access control), `TESTING.md`, `docs/fleet-verification.md` (how to verify bus/fleet
   changes live — spawn-a-throwaway recipe, the traps, and what is NOT yet verified).
 
+**Every write of user content into a pane goes through `withPaneDelivery` (`pane-io.ts`).** Getting
+text into a pane is a paste followed by a *separate* Enter, 200ms to 30s apart, and two deliveries
+overlapping in that window interleave: paste A, paste B into the same input box, then A's Enter
+submits **both as one message**. Observed in production 2026-07-27 — an attach at 23:19:50.541 and a
+`send chars=24` at 23:19:52.393 arrived as one transcript entry reading `…</tg>` plus the second
+message's text. `PaneWatcher.withInjection` is **not** and never was the guard: it sets a boolean that
+pauses the watcher's polling, so two concurrent calls both set it and run interleaved. The focused
+pane was never safer than any other.
+
+- **Per-pane FIFO promise chain, not a global mutex.** Unrelated sessions must not queue behind one
+  another's 30-second settles; ordering *is* part of the contract, since two messages from one person
+  have to arrive in the order they were sent.
+- **The stored tail must always RESOLVE** (the chain keeps `p.catch(…)`, the caller gets the real
+  `p`). Store the rejection and one failed delivery poisons every later delivery to that pane — the
+  lock turning a single lost message into a permanently wedged session.
+- **It is NOT reentrant.** `pasteGuarded`'s non-slash branch delegates to `injectText`/`pasteToPane`
+  and therefore must not wrap itself; only its slash branch, which pastes directly, takes the lock.
+- **A caller that cannot get its turn in 45s gives up and reports failure — it never steals.** Barging
+  mid-paste is the corruption being fixed; a visible failure beats silent corruption.
+- **`injectBuffer(paneId)`, never one shared buffer name.** Deliveries to *different* panes run
+  concurrently by design, so a single `INJECT_BUFFER` let pane A's `paste-buffer` land pane B's text —
+  a message in the wrong session. The queue cannot help there: it is per-pane and that race is between
+  panes. `BANG_BUFFER` had spotted this years earlier and never generalised it.
+- **NOT covered, recorded not commissioned:** the pane *control* paths (`injectSlash`,
+  `applySessionModel`, `reapplyEffort`, the interrupt keys, `exitSessionPane`) can still interleave
+  with a delivery. They nest through `withPaneInjection` in ways that need untangling first; do not
+  read this as closing the whole class.
+
+Proof lives in `scripts/pane-delivery-race.ts` — a **real tmux pane**, because a mocked `exec` proves
+only that the code calls functions in the order the code calls them. Run it `--unlocked` and the
+merge reappears (`FIRST-MESSAGESECOND-MESSAGE`). The unit half is in `pane-io.test.ts`, and note the
+trap it carries: that file mocks `proc.ts` so `sleep` is **instant**, and a namespace import is a live
+binding — use the eagerly-captured `realSleep`, or the holder never holds and the give-up path cannot
+fire while the check still passes.
+
 **Retiring a slash command means a stub handler, never a deleted one.** An unregistered command
 falls through to the unknown-command relay, which types the literal text into the live TUI, where
 the CLI's slash palette fuzzy-matches it — probed live: `/opus` offered `/fable` as its top match,

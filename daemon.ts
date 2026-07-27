@@ -55,7 +55,7 @@ import { ghAccounts, ghInstalled, ghSwitch, ghLogout, runGhLogin, provisionGh, t
 import {
   capturePane, capturePaneCached, invalidateCapture, paneAlive, sendKeys, sendKeysLiteral, navigateDown, waitForSettle,
   autoSizeWindowOf, paneCommand, paneCwd, PaneWatcher,
-  submitVerified,
+  submitVerified, withPaneDelivery, injectBuffer,
 } from './pane-io.ts'
 import type {
   PendingEntry, GroupPolicy, Access, Session,
@@ -383,15 +383,14 @@ const typingPresence = new TypingPresence(channel)
 
 // ---- Pane / tmux layer ----
 
-
 // Type `text` into the pane's input and submit it with Enter, pausing the watcher
 // so the resulting change isn't mistaken for a new prompt/event.
 async function injectText(paneId: string, watcher: PaneWatcher, text: string): Promise<boolean> {
-  return watcher.withInjection(async () => {
+  return withPaneDelivery(paneId, () => watcher.withInjection(async () => {
     const ok = await sendKeysLiteral(paneId, text)
     if (!ok) return false
     return await submitVerified(paneId, agentSubmitKeys(await paneAgentKind(paneId)), submitLanded)
-  })
+  }), () => false)
 }
 
 // Bracket-paste `text` into the pane, then submit with Enter. Unlike injectText
@@ -399,15 +398,15 @@ async function injectText(paneId: string, watcher: PaneWatcher, text: string): P
 // bracketed paste (`paste-buffer -p`) lands multiline content — e.g. a relayed
 // Telegram message — as one block so only the trailing Enter submits. Pauses the
 // watcher so the inject + the agent's reply aren't misread as a new prompt/event.
-const INJECT_BUFFER = 'tg-inbound'
 async function injectPaste(paneId: string, watcher: PaneWatcher, text: string): Promise<boolean> {
-  return watcher.withInjection(async () => {
+  return withPaneDelivery(paneId, () => watcher.withInjection(async () => {
     if (!(await paneAlive(paneId))) return false
-    await exec('tmux', ['set-buffer', '-b', INJECT_BUFFER, '--', text], { timeout: 2000 })
-    await exec('tmux', ['paste-buffer', '-d', '-p', '-b', INJECT_BUFFER, '-t', paneId], { timeout: 2000 })
+    const buf = injectBuffer(paneId)
+    await exec('tmux', ['set-buffer', '-b', buf, '--', text], { timeout: 2000 })
+    await exec('tmux', ['paste-buffer', '-d', '-p', '-b', buf, '-t', paneId], { timeout: 2000 })
     await waitForSettle(paneId, 200, 4000)
     return await submitVerified(paneId, agentSubmitKeys(await paneAgentKind(paneId)), submitLanded)
-  })
+  }), () => false)
 }
 
 // Send keys one at a time with a gap. A batched `send-keys k1 k2 k3` can outrun the TUI
@@ -5343,6 +5342,10 @@ async function injectSlash(paneId: string, watcher: PaneWatcher | null, command:
 // paste mechanics (multi-line text needs paste, not send-keys — an embedded newline read as literal
 // keystrokes submits early) with injectSlash's pre-submit palette check spliced in.
 async function pasteGuarded(paneId: string, watcher: PaneWatcher | null, text: string): Promise<SlashSent> {
+  // NO withPaneDelivery on this branch, and that is deliberate rather than an oversight: it
+  // delegates to injectText/pasteToPane, which take the lock themselves. Wrapping here as well would
+  // have this call waiting on a tail its own caller is holding — see withPaneDelivery's note on
+  // reentrancy. The slash branch below pastes directly, so that one takes it.
   if (!text.trim().startsWith('/')) {
     const ok = watcher ? await injectText(paneId, watcher, text) : await pasteToPane(paneId, text)
     return ok ? { ok: true } : { ok: false, offered: [] }
@@ -5350,8 +5353,9 @@ async function pasteGuarded(paneId: string, watcher: PaneWatcher | null, text: s
   let offered: string[] | null = null
   const run = async () => {
     if (!(await paneAlive(paneId))) return
-    await exec('tmux', ['set-buffer', '-b', INJECT_BUFFER, '--', text], { timeout: 2000 })
-    await exec('tmux', ['paste-buffer', '-d', '-p', '-b', INJECT_BUFFER, '-t', paneId], { timeout: 2000 })
+    const buf = injectBuffer(paneId)
+    await exec('tmux', ['set-buffer', '-b', buf, '--', text], { timeout: 2000 })
+    await exec('tmux', ['paste-buffer', '-d', '-p', '-b', buf, '-t', paneId], { timeout: 2000 })
     await waitForSettle(paneId, 200, 4000)
     offered = slashPaletteWouldMisfire(await capturePane(paneId).catch(() => ''), text)
     // Leave the pane exactly as it was found, same as injectSlash's guard.
@@ -5359,7 +5363,10 @@ async function pasteGuarded(paneId: string, watcher: PaneWatcher | null, text: s
     await sendKeys(paneId, agentSubmitKeys(await paneAgentKind(paneId)))
     await waitForSettle(paneId, 300, 30_000)
   }
-  await (watcher ? watcher.withInjection(run) : run())
+  const ran = await withPaneDelivery(paneId,
+    async () => { await (watcher ? watcher.withInjection(run) : run()); return true },
+    () => false)
+  if (!ran) return { ok: false, offered: [] }
   return offered ? { ok: false, offered } : { ok: true }
 }
 
@@ -5488,8 +5495,12 @@ async function echoSlashResult(paneId: string, chat_id: string, sentAt: number, 
 
 // `! cmd` → the session's bash mode. Bracketed paste can never trigger the TUI's `!` prefix (the
 // paste lands as literal text), so type `!` as a real keystroke first to switch modes, THEN paste
-// the (possibly multiline) command body. Uses its own tmux buffer, not INJECT_BUFFER — a concurrent
-// inbound paste could clobber a shared buffer mid-flight.
+// the (possibly multiline) command body. It has always used its own tmux buffer rather than the
+// inbound one, because a concurrent inbound paste could clobber a shared buffer mid-flight — and
+// that observation, made here and nowhere else, is the one the delivery buffers were finally named
+// per-pane on (see injectBuffer). It stays a single name only because relayBashCommand now takes the
+// same per-pane delivery lock, which orders it against every other paste on that pane; give it a
+// per-pane name too if it ever gains a caller that runs outside the lock.
 const BANG_BUFFER = 'tg-bang'
 
 // A pane with an armed, non-empty bash box must not receive ANY injection (see bashModeArmed).
@@ -5517,7 +5528,15 @@ async function relayBashCommand(t: CommandTarget, command: string, chat_id: stri
     // the two race defences cannot drift apart — with the predicate this surface needs.
     return (await submitVerified(t.paneId, ['Enter'], cap => !bashModeArmed(cap))) || 'unsubmitted'
   }
-  const ok = await (t.watcher ? t.watcher.withInjection(run) : run())
+  // A `! cmd` from the chat is inbound user content going into a pane, so it queues with every other
+  // delivery — it is exactly as capable of interleaving with a relayed message as two messages are
+  // with each other, and its `!` keystroke + paste + Enter is a THREE-step critical section.
+  // guardArmedBashBox stays outside the lock on purpose: it is a read, and the only thing that can
+  // arm bash mode is this function, which is now serialised against itself.
+  // A lock timeout reports as the unreachable-pane failure. Not a perfect sentence for "the pane was
+  // busy for 45 seconds", but honest in effect and it keeps this path to two outcomes.
+  const ok = await withPaneDelivery(t.paneId,
+    () => (t.watcher ? t.watcher.withInjection(run) : run()), () => false as const)
   if (!ok) {
     await channel.sendText(chat_id, '⚠️ Couldn\'t reach the session pane.', t.replyThread ? { threadId: String(t.replyThread) } : undefined).catch(() => {})
     return
@@ -7281,12 +7300,18 @@ async function typeBriefIntoPane(pane: string, agent: AgentKind, brief: string):
     while (Date.now() < deadline) {
       if (!(await paneAlive(pane))) return false
       if (onNormalPrompt(await capturePane(pane).catch(() => ''))) {
-        await exec('tmux', ['set-buffer', '-b', INJECT_BUFFER, '--', brief], { timeout: 2000 }).catch(() => {})
-        await exec('tmux', ['paste-buffer', '-d', '-p', '-b', INJECT_BUFFER, '-t', pane], { timeout: 2000 }).catch(() => {})
-        await waitForSettle(pane, 200, 4000)
-        await sendKeys(pane, agentSubmitKeys(agent))
-        await waitForSettle(pane, 300, 5000)
-        return true
+        // The lock goes around the paste→submit window ONLY, not the poll loop above it: this
+        // function can spend CROSS_ENGINE_COMPOSER_TIMEOUT_MS waiting for a composer to come up, and
+        // holding a pane's delivery queue for that long would be a self-inflicted wedge.
+        return await withPaneDelivery(pane, async () => {
+          const buf = injectBuffer(pane)
+          await exec('tmux', ['set-buffer', '-b', buf, '--', brief], { timeout: 2000 }).catch(() => {})
+          await exec('tmux', ['paste-buffer', '-d', '-p', '-b', buf, '-t', pane], { timeout: 2000 }).catch(() => {})
+          await waitForSettle(pane, 200, 4000)
+          await sendKeys(pane, agentSubmitKeys(agent))
+          await waitForSettle(pane, 300, 5000)
+          return true
+        }, () => false)
       }
       await sleep(500)
     }
@@ -9537,15 +9562,18 @@ bot.command('md', async ctx => {
 // Paste into a pane the watcher isn't driving (a non-focused scheduled target). Mirrors
 // injectPaste minus the watcher pause — safe because no relay loop is reading this pane.
 async function pasteToPane(paneId: string, text: string): Promise<boolean> {
-  try {
-    if (!(await paneAlive(paneId))) return false
-    await exec('tmux', ['set-buffer', '-b', INJECT_BUFFER, '--', text], { timeout: 2000 })
-    await exec('tmux', ['paste-buffer', '-d', '-p', '-b', INJECT_BUFFER, '-t', paneId], { timeout: 2000 })
-    await waitForSettle(paneId, 200, 4000)
-    // Verified: false here means the block is sitting unsubmitted in the box, so every caller
-    // reports a stuck delivery instead of recording one that never woke the session.
-    return await submitVerified(paneId, agentSubmitKeys(await paneAgentKind(paneId)), submitLanded)
-  } catch { return false }
+  return withPaneDelivery(paneId, async () => {
+    try {
+      if (!(await paneAlive(paneId))) return false
+      const buf = injectBuffer(paneId)
+      await exec('tmux', ['set-buffer', '-b', buf, '--', text], { timeout: 2000 })
+      await exec('tmux', ['paste-buffer', '-d', '-p', '-b', buf, '-t', paneId], { timeout: 2000 })
+      await waitForSettle(paneId, 200, 4000)
+      // Verified: false here means the block is sitting unsubmitted in the box, so every caller
+      // reports a stuck delivery instead of recording one that never woke the session.
+      return await submitVerified(paneId, agentSubmitKeys(await paneAgentKind(paneId)), submitLanded)
+    } catch { return false }
+  }, () => false)
 }
 
 const DEFAULT_TZ = 'America/Los_Angeles'
