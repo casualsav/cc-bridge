@@ -3,7 +3,7 @@ import { test, expect, describe } from 'bun:test'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnActivity, currentTurnFeed, currentTurnTokens, slashResultAfter, legibleApiError, latestModelId, recentConversation, conversationItemFullText } from './transcript.ts'
+import { modelSwitchEvidence, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnActivity, currentTurnFeed, currentTurnTokens, slashResultAfter, legibleApiError, latestModelId, recentConversation, conversationItemFullText } from './transcript.ts'
 
 function fixture(entries: object[]): string {
   const f = join(mkdtempSync(join(tmpdir(), 'tg-transcript-')), 'session.jsonl')
@@ -439,5 +439,56 @@ describe('a subagent report is not the owner talking', () => {
     const [it] = recentConversation(fixture([user('[Request interrupted by user]', 'u1')]), 5)
     expect(it.role).toBe('user')
     expect(it.cmd).toBeUndefined()
+  })
+})
+
+// A change the owner made writes a <command-name> entry; the silent fallback observed on the chat
+// lane (fable-5 -> opus-5 mid-conversation, ordinary message, nothing in the daemon log) wrote none.
+// That difference is the whole basis of the drift guard, so it is pinned here.
+describe('modelSwitchEvidence', () => {
+  const asstM = (model: string, uuid: string) => ({ type: 'assistant', uuid, message: { stop_reason: 'end_turn', model, content: [{ type: 'text', text: 'ok' }] } })
+  const cmd = (name: string, uuid: string) => ({ type: 'user', uuid, message: { content: `<command-name>${name}</command-name><command-args></command-args>` } })
+
+  test('a switch with a /model command beside it is deliberate', () => {
+    const f = fixture([asstM('claude-fable-5', 'a1'), cmd('/model', 'u1'), asstM('claude-opus-5', 'a2')])
+    expect(modelSwitchEvidence(f)).toEqual({ answering: 'claude-opus-5', deliberate: true })
+  })
+
+  test('a switch with NO command beside it is drift — the case this exists for', () => {
+    const f = fixture([asstM('claude-fable-5', 'a1'), user('<tg 1>just checking in</tg>', 'u1'), asstM('claude-opus-5', 'a2')])
+    expect(modelSwitchEvidence(f)).toEqual({ answering: 'claude-opus-5', deliberate: false })
+  })
+
+  test('the command only counts for the switch it accompanied, not for every later one', () => {
+    // /model, a deliberate switch, then a SECOND silent switch. The second must not inherit the
+    // first's command — that would make one deliberate act launder every drift after it.
+    const f = fixture([
+      asstM('claude-fable-5', 'a1'), cmd('/model', 'u1'), asstM('claude-opus-5', 'a2'), asstM('claude-sonnet-5', 'a3'),
+    ])
+    expect(modelSwitchEvidence(f)).toEqual({ answering: 'claude-sonnet-5', deliberate: false })
+  })
+
+  // Caught live, not by reading the code: a real TUI /model, several turns on the SAME model, then a
+  // silent drift — the stale flag made the drift read as deliberate and the guard adopted it.
+  test('a /model that produced no switch does not launder a later drift', () => {
+    const f = fixture([
+      asstM('claude-haiku-4-5-20251001', 'a1'), cmd('/model', 'u1'),
+      asstM('claude-haiku-4-5-20251001', 'a2'), asstM('claude-haiku-4-5-20251001', 'a3'),
+      asstM('claude-opus-5', 'a4'),
+    ])
+    expect(modelSwitchEvidence(f)).toEqual({ answering: 'claude-opus-5', deliberate: false })
+  })
+
+  test('no switch at all reports the model it has answered on throughout', () => {
+    expect(modelSwitchEvidence(fixture([asstM('claude-fable-5', 'a1'), asstM('claude-fable-5', 'a2')])))
+      .toEqual({ answering: 'claude-fable-5', deliberate: false })
+    expect(modelSwitchEvidence(fixture([user('<tg 1>hi</tg>', 'u1')]))).toEqual({ answering: null, deliberate: false })
+  })
+
+  test('synthetic entries and subagents are not the session answering', () => {
+    const sub = { type: 'assistant', uuid: 's1', isSidechain: true, message: { stop_reason: 'end_turn', model: 'claude-haiku-4-5-20251001', content: [] } }
+    const syn = { type: 'assistant', uuid: 'y1', message: { stop_reason: 'end_turn', model: '<synthetic>', content: [] } }
+    const f = fixture([asstM('claude-fable-5', 'a1'), sub, syn, asstM('claude-fable-5', 'a2')])
+    expect(modelSwitchEvidence(f)).toEqual({ answering: 'claude-fable-5', deliberate: false })
   })
 })

@@ -28,9 +28,10 @@ import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
 import { normalizeCommandOutput } from './ansi.ts'
 import { planSlash } from './slash-policy.ts'
 import { preserveGlobalEffort, reconcileEffortScope } from './effort-scope.ts'
+import { planDrift, driftStateAfter, type DriftState } from './drift-guard.ts'
 import { renderSessionsView } from './sessions-view.ts'
 import { detectCurrentMode, onNormalPrompt, inputBoxContent, isModelSwitchConfirm, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType } from './prompt.ts'
-import { resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, liveSubagents, currentTurnFeed, currentTurnActivity, concludedTurnWork, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
+import { modelSwitchEvidence, resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, liveSubagents, currentTurnFeed, currentTurnActivity, concludedTurnWork, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
 import {
   AGENT_PANE_OPT, agentExitKeys, agentInterruptKeys, agentLabel, agentResetCommand, agentSubmitKeys,
   CODEX_ENABLED, codexLaunchCommand, normalizeAgent, shellQuote, type AgentKind,
@@ -1949,6 +1950,13 @@ async function auxRelayTick(): Promise<void> {
           return
         }
         if (working) { auxConcludeTicks.delete(file); void emitTopicTyping(pane); return }   // working → typing in its topic, relay only once the turn concludes
+        // Between turns is the only moment a re-assert can land — applySessionModel drives the
+        // model picker, which needs a resting prompt. Checked here rather than on its own timer so
+        // it rides the transcript read this loop already did.
+        {
+          const dsid = await sessionForPane(pane).catch(() => null)
+          if (dsid) await guardModelDrift(pane, dsid, file).catch(() => { /* transient — next tick */ })
+        }
         // Transcript quiet but the pane spinner is live (thinking / pre-first-tool-call): sustain
         // typing only — relay conclusion stays on the transcript signal.
         if (detectWorking(await capturePane(pane).catch(() => ''))) void emitTopicTyping(pane)
@@ -7047,6 +7055,56 @@ function aliasForModelId(modelId: string | null): string | null {
   return Object.keys(MODEL_ALIAS_IDS).find(a => MODEL_ALIAS_IDS[a].toLowerCase() === bare)
     ?? MODEL_ALIASES.find(a => bare.includes(a))
     ?? null
+}
+
+// ---- Model-drift guard -------------------------------------------------------------------------
+// A lane really did move off its model with nobody asking: fable-5 -> opus-5 at 2026-07-26T19:17:52Z,
+// mid-conversation, on an ordinary user message, with no /model anywhere and nothing in this log. It
+// answered on Opus from that turn on and never came back. This notices that and puts it back.
+//
+// The rule is a transcript FACT, not a guess about intent (drift-guard.ts): a change the owner made
+// writes a <command-name>/model</command-name> entry, and that one wrote none. A switch with a
+// command is the owner acting and the pin follows it; a switch without one is drift and is corrected.
+// The cap matters as much as the correction — the cause is unknown and every live candidate (a usage
+// limit, a credit gate, availability) is something the API would re-apply next turn, so a converging
+// pin would fight it forever. After DRIFT_CORRECTION_CAP it stops, says so once, and leaves the
+// session where the API put it.
+const driftStates = new Map<string, DriftState>()
+async function guardModelDrift(pane: string, sid: string, file: string): Promise<void> {
+  const pin = sessionModels.get(sid) ?? null
+  if (!pin) return                       // never pinned by the bridge — nothing to hold it to
+  const ev = modelSwitchEvidence(file)
+  const answering = aliasForModelId(ev.answering)
+  const state = driftStates.get(sid) ?? { corrections: 0, alerted: false }
+  const plan = planDrift({ pin, answering, deliberate: ev.deliberate, state })
+  driftStates.set(sid, driftStateAfter(plan, state))
+  if (plan.action === 'none') return
+  if (plan.action === 'adopt') {
+    recordSessionModel(sid, plan.alias)
+    process.stderr.write(`daemon: drift-guard: ${sid} switched to ${plan.alias} deliberately (${plan.reason}) — pin updated\n`)
+    return
+  }
+  const label = `<b>@${escapeHtml(nameForEndpoint(sid, busEndpoints()))}</b>`
+  if (plan.action === 'giveup') {
+    // Loud, once. Every one of these is a specimen of a root cause nobody has found, and a guard
+    // that conceded silently would hide the bug it exists to expose.
+    process.stderr.write(`daemon: drift-guard: GIVING UP on ${sid} — ${plan.reason}; leaving it on ${plan.alias}\n`)
+    for (const { chat, thread } of await fleetSurfaceFor(pane)) {
+      await channel.sendText(chat, `⚠️ ${label} keeps answering on <b>${escapeHtml(plan.alias)}</b> instead of its pinned <b>${escapeHtml(pin)}</b> — ${escapeHtml(plan.reason)}. Left it there; something outside the bridge is holding it off the pin.`,
+        { silent: true, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
+    }
+    return
+  }
+  // A correction only makes sense at a resting prompt — applySessionModel drives the picker.
+  const cap = await capturePane(pane).catch(() => '')
+  if (!cap || !onNormalPrompt(cap) || detectWorking(cap)) { driftStates.set(sid, state); return }   // retry next tick, no attempt spent
+  process.stderr.write(`daemon: drift-guard: ${sid} answered on ${answering} but is pinned to ${pin} with no /model recorded — re-asserting (attempt ${plan.attempt})\n`)
+  const watcher = pane === focus.activePaneId ? focus.paneWatcher : null
+  const { error } = await applySessionModel(pane, watcher, plan.alias, { awaitReadback: false })
+  for (const { chat, thread } of await fleetSurfaceFor(pane)) {
+    await channel.sendText(chat, `🎯 ${label} drifted to <b>${escapeHtml(answering ?? '?')}</b> with no /model recorded — re-asserted <b>${escapeHtml(plan.alias)}</b> (attempt ${plan.attempt})${error ? ` · ${escapeHtml(error)}` : ''}`,
+      { silent: true, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
+  }
 }
 
 // The model a RESUME must re-assert, taken from what the API last answered with on this

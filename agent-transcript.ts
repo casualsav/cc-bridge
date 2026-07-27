@@ -102,3 +102,7 @@ export function searchTranscripts(query: string, roots?: string[], limit = 5, ma
   merged.sort((x, y) => y.mtime - x.mtime)
   return merged.slice(0, limit)
 }
+
+// CC-only: a Codex rollout records no per-entry model, so there is nothing for the drift guard to
+// compare and it simply never fires for a Codex pane.
+export const modelSwitchEvidence = (file: string) => (isCodex(file) ? { answering: null, deliberate: false } : cc.modelSwitchEvidence(file))

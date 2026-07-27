@@ -400,6 +400,40 @@ export function slashResultAfter(file: string, sinceMs: number): { text: string;
   return null
 }
 
+// What the session is ANSWERING on, and whether the last change to that was a deliberate act.
+//
+// The distinction is a fact about the transcript, not a guess about intent: a `/model` the user ran
+// writes a <command-name> entry, and the silent fallback observed on the chat lane on 2026-07-26
+// (fable-5 -> opus-5 mid-conversation, on an ordinary message, with nothing in the daemon log)
+// wrote none. So "deliberate" means a /model command entry sits between the previous model's last
+// answer and the first answer on the new one.
+//
+// `deliberate` is false when the conversation never changed model — the caller reads that together
+// with its own pin, so a conversation that STARTED on the wrong model is drift too.
+export type ModelSwitch = { answering: string | null; deliberate: boolean }
+export function modelSwitchEvidence(file: string): ModelSwitch {
+  let answering: string | null = null
+  let deliberate = false
+  let sawModelCommand = false
+  for (const e of readEntries(file)) {
+    const raw = typeof e.content === 'string' ? e.content
+      : e.type === 'user' ? textOf(e.message?.content) : ''
+    if (/^\s*<command-name>\/model\b/.test(raw)) { sawModelCommand = true; continue }
+    if (e.type !== 'assistant' || e.isSidechain) continue
+    const model = e.message?.model
+    if (!model || model === '<synthetic>') continue
+    if (answering !== null && model !== answering) deliberate = sawModelCommand
+    answering = model
+    // Cleared after EVERY answer, not only after a switch. A /model that produced no switch — the
+    // owner re-picking the model it was already on, or a switch that had already landed — otherwise
+    // left the flag standing, and the next silent drift inherited it and read as deliberate. Caught
+    // live: a real TUI /model, several unchanged turns, then a staged drift came back "deliberate"
+    // and the guard adopted it. A deliberate switch shows up on the VERY NEXT answer or not at all.
+    sawModelCommand = false
+  }
+  return { answering, deliberate }
+}
+
 // The last `max` conversation turns as a display feed (Mini App session drill-in): real user
 // prompts + main-thread assistant conclusions, oldest first. User text is unwrapped from the
 // bridge's `<tg …>…</tg>` inbound envelope for display — img=/att= attachment paths and slash
