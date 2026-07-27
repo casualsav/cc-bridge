@@ -75,9 +75,13 @@ export function ansiToMarkdown(s: string): string {
 // A run means two or more consecutive lines in both cases: one lone piped or glyphed line is far
 // likelier to be prose. Lines inside an existing fence are left alone, being preformatted already.
 const TABLE_ROW = /^\s*\|.*\|\s*$/
-// Box Drawing + Block Elements, Geometric Shapes, and the Miscellaneous Symbols block the CLI's
-// occupancy grid draws from. Escapes rather than literals: these are invisible in a diff otherwise.
-const GLYPH = /[\u2500-\u259F\u25A0-\u25FF\u26C0-\u26FF]/g
+// Box Drawing + Block Elements, and the Miscellaneous Symbols block the CLI's occupancy grid draws
+// from. Escapes rather than literals: these are invisible in a diff otherwise.
+// Geometric Shapes (U+25A0-25FF) is deliberately NOT in here, and the omission is load-bearing now
+// that agent reports run through this too: \u25A0 \u25AA \u25B8 \u25CF are what prose uses for bullets, and two bulleted
+// lines in a row would otherwise be fenced into a code block. Nothing that needs alignment draws
+// from that range \u2014 the grid is \u26C1\u26C0\u26F6\u26DD, a directory tree is \u251C\u2500\u2514.
+const GLYPH = /[\u2500-\u259F\u26C0-\u26FF]/g
 function isPreformatted(line: string): boolean {
   if (TABLE_ROW.test(line)) return true
   const glyphs = line.match(GLYPH)?.length ?? 0

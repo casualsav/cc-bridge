@@ -37,6 +37,24 @@ The working line is parsed in \`transcript.ts\`, and it awaits &lt;N&gt; session
 // A human message that must survive VERBATIM: the entity decoding is scoped to the parsed path, and
 // this is what proves it. If it ever renders as a tag, the decode leaked.
 const TYPED = "use &lt;div&gt; not &amp;lt;div&amp;gt;";
+// A report that pasted TERMINAL OUTPUT into itself — escape codes and all. Rare (3 reports in 1974
+// on this box) and the last live ANSI leak the census found. The card renders a report as a markdown
+// document, so the codes are translated here rather than stripped: bold becomes bold, dim loses its
+// code and keeps its text, and the pasted tree keeps its columns in a fence.
+// `claude-opus-5[1m]` is the over-strip control: `[1m]` is a model id's 1-million-context suffix,
+// and the obvious strip regex would eat it and rename the model inside the report.
+const PASTED = `<task-notification>
+<task-id>b1c2d3e4f5a6b7c8</task-id>
+<status>completed</status>
+<summary>Agent "Check the deploy" finished</summary>
+<result>Ran it on \x1b[1mclaude-opus-5[1m]\x1b[22m:
+
+\x1b[2mno changes\x1b[22m under
+
+src/
+├── daemon.ts
+└── transcript.ts</result>
+</task-notification>`;
 
 // ---- Build the feed the daemon would build, through the real parser. ----
 const dir = mkdtempSync(join(tmpdir(), "agentcard-"));
@@ -46,12 +64,17 @@ writeFileSync(jsonl, [
   entry(`<tg 1>${TYPED}</tg>`, "u1"),
   entry(NOTIFICATION, "u2"),
   entry("<local-command-stdout>Set model to claude-opus-4-8</local-command-stdout>", "u3"),
+  entry(PASTED, "u4"),
 ].join("\n") + "\n");
 const items = JSON.parse(execFileSync("bun", ["-e",
   `import {recentConversation} from '${REPO}/transcript.ts'; console.log(JSON.stringify(recentConversation(${JSON.stringify(jsonl)}, 9)))`,
 ], { encoding: "utf8" }).trim());
 // The control row, appended AFTER the parse: the payload exactly as the old code passed it through.
 items.push({ role: "user", text: NOTIFICATION, ts: 1785200000000, uuid: "ctrl" });
+// ANSI CONTROL, same idea: a report body pushed in unparsed, so it still carries its escapes. The
+// leak checks below MUST see it, or their "none" on the real cards proves nothing.
+items.push({ role: "agent", agent: "ansi control", status: "completed",
+  text: "Ran it on \x1b[1mclaude-opus-5[1m]\x1b[22m", ts: 1785200000000, uuid: "ansictrl" });
 // LEAK CONTROL for the block-markdown widening: the same two constructs in an ASSISTANT reply,
 // which must still render literally. Widening md() itself would have moved this row too.
 items.push({ role: "assistant", text: "## x\n- y", ts: 1785200000000, uuid: "asst" });
@@ -96,7 +119,7 @@ for (const r of rows) console.log("   ", JSON.stringify(r.cls), "|", JSON.string
 
 const card = rows.find(r => r.cls.includes("agent"));
 const userRow = rows.find(r => r.cls.includes("user") && r.text.includes("&lt;div&gt;"));
-const cmdRow = rows.find(r => r.cls.includes("cmd"));
+const cmdRow = rows.find(r => r.cls.includes("command"));
 const control = rows.find(r => r.cls.includes("user") && r.text.includes("task-notification"));
 const seen = t => TAGS.filter(g => t.includes(g));
 
@@ -128,6 +151,23 @@ chk(card && userRow && card.bg !== userRow.bg && card.bg !== asstBg, "three dist
 chk(userRow && userRow.text.trim().startsWith(TYPED) && userRow.divs === 0,
   "a user who TYPES entity text still sees those characters, and no tag is built from them");
 chk(!!cmdRow && cmdRow.text === "Set model to claude-opus-4-8", `slash output renders as a command line (${cmdRow && JSON.stringify(cmdRow.text)})`);
+// ---- The report card's own ANSI, translated rather than stripped (see PASTED). ----
+const pasted = rows.find(r => r.cls.includes("agent") && r.headName && r.headName.includes("Check the deploy"));
+const ansiCtrl = rows.find(r => r.cls.includes("agent") && r.headName && r.headName.includes("ansi control"));
+const CSI_FRAGMENT = /\[\d+(;\d+)*m(?!\])/;
+chk(!!pasted && !/\x1b/.test(pasted.text) && !CSI_FRAGMENT.test(pasted.text),
+  `no escape codes left in a report that pasted terminal output (${pasted ? JSON.stringify(pasted.text.slice(0, 40)) : "no card"})`);
+chk(!!ansiCtrl && /\x1b/.test(ansiCtrl.text) && CSI_FRAGMENT.test(ansiCtrl.text),
+  "CONTROL (unparsed report) — the escape checks DO fire when the codes are there");
+chk(!!pasted && pasted.text.includes("claude-opus-5[1m]"), "CONTROL — the [1m] model id survives inside report text");
+const bolds = await p.evaluate(() => [...document.querySelectorAll("#dfeed .msg.agent b")].map(b => b.textContent));
+chk(bolds.includes("claude-opus-5[1m]"), `the emphasis the terminal carried is real emphasis in the card (${JSON.stringify(bolds)})`);
+// Dim has no counterpart on this surface, so it loses its code and keeps its text — and it must NOT
+// arrive as emphasis, which is what a translator that treated every SGR as bold would do.
+chk(!!pasted && pasted.text.includes("no changes") && !bolds.includes("no changes"),
+  `dim loses its code, keeps its text, and gains no emphasis (${pasted ? JSON.stringify(pasted.text.slice(0, 60)) : "no card"})`);
+chk(!!pasted && !!pasted.pre && pasted.pre.includes("├── daemon.ts") && pasted.pre.includes("└── transcript.ts"),
+  `a pasted directory tree keeps its columns in a mono block (${pasted ? JSON.stringify(pasted.pre) : "no card"})`);
 // CONTROL: this row was never parsed. It must come back dirty, or the detector above proves nothing.
 chk(control && seen(control.text).length >= 5,
   `CONTROL (unparsed row) — the checks DO see raw markup when it is there: ${control ? seen(control.text).length : 0} tags`);

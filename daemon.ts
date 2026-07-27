@@ -2931,7 +2931,16 @@ async function sweepBus(): Promise<void> {
 // expired mid-flight), clears it BEFORE injecting, restores it on a failed paste (so the answer isn't
 // lost with a false-success record), and logs/cards only a REAL delivery. Returns a status string; a
 // leading '!' marks a failure the caller relays back as an error.
-async function deliverAnswerToAsker(pending: BusPending, answerer: string, body: string, refs: string[]): Promise<string> {
+async function deliverAnswerToAsker(pending: BusPending, answerer: string, rawBody: string, refs: string[]): Promise<string> {
+  // An answer body is the same class of leak as a slash command's stdout — an agent that pastes
+  // terminal output into its answer pastes the escape codes with it — but it is STRIPPED here
+  // rather than translated, which is the opposite of what the report card does two files over.
+  // The difference is the surface, not the content: every consumer of this body is plain text.
+  // sendBusCard escapes it into a <details>, and busDeliver types it into another session's input
+  // box. Translating bold into ** would only trade one set of visible markers for another, and
+  // fencing a preformatted run would paste ``` into a pane. Same rule as the pane-capture paths:
+  // a strip is right where the destination is a screen rather than a document.
+  const body = stripAnsi(rawBody)
   const room = busLedgerRoom()
   const cur = getPending(pending.id)
   if (!cur) return `!ask ${pending.id} is already closed (answered, or its 24h late-answer window elapsed)`

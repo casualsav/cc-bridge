@@ -77,6 +77,15 @@ test('the /context occupancy grid is fenced, and its one-glyph footnotes are not
   expect(fencePreformatted(tail)).toBe('```\n' + tail + '\n```')
 })
 
+// Both cases matter because agent reports run through this too — they are prose, and prose uses
+// geometric shapes as bullets while a pasted directory tree needs its columns.
+test('geometric bullets stay prose; a directory tree is fenced', () => {
+  const bullets = '▪ first point ▪ still prose\n▪ second point ▪ also prose'
+  expect(fencePreformatted(bullets)).toBe(bullets)
+  const tree = 'src/\n├── daemon.ts\n└── transcript.ts'
+  expect(fencePreformatted(tree)).toBe('src/\n```\n├── daemon.ts\n└── transcript.ts\n```')
+})
+
 test('rows already inside a fence are left alone', () => {
   const src = '```\n| a |\n| b |\n```'
   expect(fencePreformatted(src)).toBe(src)

@@ -435,7 +435,12 @@ const unescapeXml = (s: string) => s.replace(/&(amp|lt|gt|quot|apos|#39);/g, (_,
 // nothing on a phone can act on.
 function taskNotificationItem(raw: string, ts: number, uuid?: string): ConversationItem {
   const summary = unescapeXml(tagOf(raw, 'summary').trim())
-  const result = unescapeXml(tagOf(raw, 'result').trim())
+  // Normalized for the same reason a slash command's output is: an agent that pastes terminal
+  // output into its report pastes the escape codes with it, and the card renders the report as a
+  // markdown document — so bold becomes bold and a pasted tree or grid keeps its columns. Rare (3
+  // reports in 1974 on this box) but real, and it is the same defect on a different path. The
+  // summary is left alone: the CLI generates that sentence and it has never carried an escape.
+  const result = normalizeCommandOutput(unescapeXml(tagOf(raw, 'result').trim()))
   // The summary is written as `Agent "NAME" finished`; keep the whole sentence when it isn't.
   const agent = /^Agent "([\s\S]+)" finished/.exec(summary)?.[1] ?? summary
   const status = tagOf(raw, 'status').trim()

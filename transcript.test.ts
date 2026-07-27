@@ -327,6 +327,27 @@ describe('a subagent report is not the owner talking', () => {
     expect(it.text).toBe('use &lt;div&gt; not &amp;lt;div&amp;gt;')
   })
 
+  // An agent that pastes terminal output into its report pastes the escape codes with it, and the
+  // card renders the report as a markdown document — so the report path gets the same normalizer a
+  // slash command's output does. 3 reports in 1974 on this box carried escapes, which is rare but
+  // measured. This test fails on the pre-fix path: the raw sequences came straight through.
+  test('a report that pasted terminal output arrives translated, not raw', () => {
+    const pasted = NOTIFICATION.replace(/<result>[\s\S]*<\/result>/,
+      '<result>Ran it:\n\x1b[1mSet model to Fable 5\x1b[22m\n\x1b[2mdim note\x1b[22m</result>')
+    const [it] = recentConversation(fixture([user(pasted, 'u1')]), 5)
+    expect(it.text).toBe('Ran it:\n**Set model to Fable 5**\ndim note')
+    expect(it.text.includes('\x1b')).toBe(false)
+  })
+
+  // The over-strip control, in report text this time: `[1m]` is a model id's 1-million-context
+  // suffix and must survive a path whose whole job is removing things that look exactly like it.
+  test('a report naming a [1m] model id keeps the brackets', () => {
+    const idreport = NOTIFICATION.replace(/<result>[\s\S]*<\/result>/,
+      '<result>The session runs \x1b[1mclaude-opus-5[1m]\x1b[22m, not opus[1m] plain.</result>')
+    const [it] = recentConversation(fixture([user(idreport, 'u1')]), 5)
+    expect(it.text).toBe('The session runs **claude-opus-5[1m]**, not opus[1m] plain.')
+  })
+
   test('a report with no result still renders as its summary line', () => {
     const empty = NOTIFICATION.replace(/<result>[\s\S]*<\/result>/, '<result></result>')
     const [it] = recentConversation(fixture([user(empty, 'u1')]), 5)
