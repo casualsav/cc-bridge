@@ -14291,14 +14291,20 @@ async function webappSessionFeed(sid: string): Promise<WebappSessionFeed | null>
   // A pure-text turn (no tools) has nothing a chip would add, so it stays an ordinary assistant
   // message and this whole path is inert for it — the common short reply is untouched.
   if (parts.some(p => p.t === 'chip')) {
-    // The turn's own assistant text is already in `items` from recentConversation; leaving it there
-    // as well would print the turn twice, once bubbled and once as prose. Everything after the last
-    // user row belongs to this turn, so that tail is what the turn item replaces.
+    // The turn item carries the turn's NARRATION — the paragraphs between its tool calls. Its
+    // CONCLUDING reply is not in there (currentTurnFeed omits it; the relay ships it separately),
+    // and it is the one assistant row recentConversation returns for the turn. Measured in both
+    // states: mid-turn there are ZERO trailing assistant rows, and once the turn ends there is
+    // exactly one — the reply. So the two sets are disjoint and dropping that tail never prevented
+    // a double-print; it deleted the reply outright, leaving the chat screen showing narration and
+    // chips for a turn whose answer was missing until the NEXT user message moved the anchor and
+    // brought it back. Lifted out and re-appended so the turn reads narration → chips → answer.
     let cut = items.length
     while (cut > 0 && items[cut - 1]!.role === 'assistant') cut--
-    items.length = cut
+    const concluded = items.splice(cut)
     let chips = 0
     items.push({ role: 'turn', ts: Date.now(), blocks: parts.filter(p => p.t !== 'chip' || ++chips <= FEED_BLOCKS) })
+    items.push(...concluded)
   }
   return { sid, name: row.name, working, ...dial, items }
 }
