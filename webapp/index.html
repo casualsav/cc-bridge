@@ -68,6 +68,13 @@
     /* Those three containers are one family, so their raised look is one constant rather than the
        same two shadows written out per container. */
     --chip-lift: inset 0 1px 0 rgba(255,255,255,.06), 0 2px 6px rgba(0,0,0,.35);
+    /* …and one fill, for the same reason. Slightly translucent by the owner's ask — same colour,
+       same design, just letting a little of the page through. It stays a VARIABLE rather than an
+       opacity on the containers: opacity would take the glyphs and the title text down with it,
+       which is a dimmed control, not a translucent surface. The opaque value here is also the
+       fallback — the @supports below is what makes it translucent, so an engine without
+       color-mix() renders exactly today's chip instead of nothing. */
+    --chip-fill: var(--sec);
     /* The paperclip glyph. Its own constant rather than a step off --sp-*, for the reason --fold-h
        gives above: it is a geometric size answering to the reference, not a spacing choice. */
     --clip-d: 24px;
@@ -123,7 +130,8 @@
     --safe-top: 0px;
   }
   @supports (color: color-mix(in srgb, red 50%, blue)) {
-    :root { --hint-raised: color-mix(in srgb, var(--hint) 80%, var(--text));
+    :root { --chip-fill: color-mix(in srgb, var(--sec) 82%, transparent);
+      --hint-raised: color-mix(in srgb, var(--hint) 80%, var(--text));
       --add: color-mix(in srgb, #3fb950 80%, var(--text)); --del: color-mix(in srgb, #f85149 80%, var(--text)); }
   }
   * { box-sizing: border-box; }
@@ -183,7 +191,7 @@
      No ::after touch-target lift any more: it existed to bring a 34px button up to the 44px standard,
      and the button now meets 44 on its own — which is why --hbtn-d's floor is that number. */
   .chatbtn { width: var(--hbtn-d); height: var(--hbtn-d); border: none; border-radius: 50%;
-    background: var(--sec); box-shadow: var(--chip-lift); color: var(--text); cursor: pointer; flex: none;
+    background: var(--chip-fill); box-shadow: var(--chip-lift); color: var(--text); cursor: pointer; flex: none;
     /* The PADDING is what fixes the glyph's origin — an integer, so it lands on whole pixels at any
        button size. Centring it by halving flex free space instead is what put the 19-in-34 button's
        glyph half a pixel down and right: 15px of free space halves to 7.5, and Blink snaps the SVG's
@@ -211,7 +219,7 @@
      so without it the capsule would collapse between two taller circles. */
   .dtitle { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center;
     min-height: var(--hbtn-d); padding: var(--h-pad) var(--sp-3); border-radius: calc(var(--hbtn-d) / 2);
-    background: var(--sec); box-shadow: var(--chip-lift);
+    background: var(--chip-fill); box-shadow: var(--chip-lift);
     line-height: var(--lh-snug); text-align: var(--title-align, left); }
   .dtitle .nmrow { display: flex; align-items: center; gap: 7px; min-width: 0; justify-content: var(--title-align, flex-start); }
   /* An inert mirror of the status dot on the trailing side. Without it the dot widens the name row on
@@ -1402,6 +1410,10 @@ function paintFeed() {
 // innerHTML swap every 3s — re-running the fold restoration and fighting the scroll — to animate a
 // clock. Appended after the assignment instead, and updated in place.
 const WORK_GLYPHS = ["·", "✢", "✳", "✶", "✻", "✽"];
+// The CLI's instant, local-only commands: they answer from the client's own state and start no
+// turn, so the optimistic working row would have nothing to hand over to. Deliberately NOT here:
+// /compact (real work) and every custom skill command (also real work) — see the send handler.
+const INSTANT_CMD = /^\/(clear|model|effort|status|context|cost|help|rename|config|doctor|exit|quit)\b/i;
 let workTimer = null, workPhase = 0, workOptimisticAt = 0;
 function paintWork() {
   const feed = $("dfeed");
@@ -1551,7 +1563,13 @@ $("dsend").onclick = async () => {
   // waiting for the POST + transcript echo + poll round-trip.
   const o = { text, at: Date.now(), state: "pending" };
   optimistic.push(o);
-  workOptimisticAt = Date.now();   // the indicator is part of "sent", not of the poll that follows
+  // The indicator is part of "sent", not of the poll that follows — EXCEPT for the commands that
+  // start no turn. A /clear answers instantly and leaves the pane at a fresh prompt, so no status
+  // ever arrives to replace the optimistic row and it sat there claiming work for the full 20s.
+  // An allowlist rather than "anything starting with /": /compact really does work, and so does
+  // every custom skill command, and both should keep saying so. The dial's own /model and /effort
+  // never come through here at all.
+  if (!INSTANT_CMD.test(text)) workOptimisticAt = Date.now();
   paintFeed();
   $("dfeed").scrollTop = $("dfeed").scrollHeight;   // sending always reveals your own message
   if (await sessionAct("send", text)) { o.state = "sent"; paintFeed(); setTimeout(renderDrill, 800); }

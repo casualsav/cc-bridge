@@ -21,6 +21,8 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   through the REAL SDK's receiveEvent (needs network)
     node agentcard.mjs            # the subagent report card: a fixture transcript through the real
                                   #   parser, plus an unparsed control row and a contrast control
+    node slashwork.mjs [page]     # which composer commands may open the optimistic working row.
+                                  #   Pass a pre-fix copy of the page: every silence check must FAIL
 
 ## Known follow-up: block markdown is card-only
 
