@@ -79,7 +79,11 @@ const m = await p.evaluate(() => {
     dockBg: cs(dock).backgroundColor,
     drillPadTop: cs(drill).paddingTop,
     wrapBg: cs(wrap).backgroundColor, wrapBlur: cs(wrap).backdropFilter,
-    headBlur: cs(document.querySelector("#drill .dtitle")).backdropFilter,
+    // The BACK CHIP, not the title. This read `.dtitle` when the title was a capsule and shared the
+    // chip family's fill and frost; it is two bare lines of text now and carries neither, so reading
+    // it here compared the composer's glass against `none` and failed a rule that is still true.
+    // The two side chips are what remain of that family — see CLAUDE.md.
+    headBlur: cs(document.getElementById("dback")).backdropFilter,
     // getComputedStyle's SECOND argument is the pseudo-element, and the local `cs` helper drops it —
     // reading the scrim through that helper measures #drill itself and reports "none" for a gradient
     // that is painting perfectly. Called directly for exactly that reason.
@@ -167,18 +171,62 @@ check(through.besideDock, "…and through the dock's margin, which paints nothin
 // 5. The capsule is the header's surface: translucent AND frosted.
 const alpha = s => { const n = s.match(/[\d.]+/g); return n && n.length === 4 ? parseFloat(n[3]) : 1; };
 check(alpha(m.wrapBg) < 1, `the input capsule is translucent (${m.wrapBg})`);
-check(/blur/.test(m.wrapBlur) && m.wrapBlur === m.headBlur, `…and carries the SAME blur as the name pill (${m.wrapBlur} vs ${m.headBlur})`);
+check(/blur/.test(m.wrapBlur) && m.wrapBlur === m.headBlur, `…and carries the SAME blur as the header chips (${m.wrapBlur} vs ${m.headBlur})`);
 check(alpha(m.dockBg) === 0 || m.dockBg === "rgba(0, 0, 0, 0)", `the dock itself paints nothing (${m.dockBg})`);
 
 // 6. The ceiling scrim. It dissolves the transcript on its way up so a line of text never slides
-//    under Telegram's own buttons, and it is transparent exactly at the name pill's BOTTOM edge.
-//    It was briefly extended BELOW the header so the ramp finished before the chips — which does make
-//    them hold their colour perfectly, and was reverted: it paints a bar across the band the
-//    transcript had just been given, and a chip over flat ground stops reading as glass at all. The
-//    check is written to the reverted shape on purpose, so restoring the "fix" fails here.
+//    under Telegram's own buttons.
+//
+//    This check USED to be `scrim height === the header's bottom`, written to lock out a shape that
+//    had been tried and rejected: the ramp finished ABOVE the chips, which makes them hold their
+//    colour perfectly and paints a bar across the band the transcript had just been given. That
+//    remains rejected. But the equality could not tell it apart from the OPPOSITE change — a longer
+//    tail below the header, which fades through the band exactly as before and only spends the extra
+//    length landing softly. Both move the element's height; only one of them empties the band. So the
+//    height equality is retired in favour of measuring what actually mattered all along: the rendered
+//    alpha PROFILE down the strip. Sampled over the page's own ground, which is the one backdrop
+//    whose answer is known.
+//
+//    Three claims, and the rejected shape fails the first two:
+//      - it is still FADING through the header's band (not flat, not opaque there),
+//      - it has no CLIFF — no single pixel step big enough to read as an edge,
+//      - it is back to nothing by its own floor.
+const prof = await p.evaluate(() => {
+  const drill = document.getElementById("drill");
+  const h = Math.round(parseFloat(getComputedStyle(drill, "::before").height));
+  const head = document.querySelector("#drill .vhead").getBoundingClientRect();
+  // A white probe UNDER the scrim, read through it: the scrim's own computed style is a gradient
+  // string, and parsing one tells you what was declared rather than what is painted. It has to be a
+  // child of #drill at z-index 0 — inside the scrim's own context, above the feed (also 0, earlier
+  // sibling) and below the scrim (1). Appending it to <body> instead puts it outside #drill's
+  // stacking context entirely, where the scrim never reaches it and the profile reads flat.
+  const probe = document.createElement("div");
+  probe.id = "scrimprobe";
+  probe.style.cssText = "position:absolute;left:0;right:0;top:0;height:" + h + "px;background:#fff;z-index:0";
+  drill.appendChild(probe);
+  const r = probe.getBoundingClientRect();
+  return { h, headBottom: head.bottom, rect: { x: r.x, y: r.y, width: r.width, height: r.height } };
+});
+const strip = await p.screenshot({ clip: prof.rect });
+const { execFileSync } = await import("node:child_process");
+const alphas = execFileSync("python3", ["-c", `
+import sys, io
+from PIL import Image
+im = Image.open(io.BytesIO(sys.stdin.buffer.read())).convert("RGB")
+w, h = im.size
+px = im.load()
+# White probe under a --bg scrim: the darker the row, the more opaque the scrim. Sample a column
+# clear of the chips so only the scrim is in the way.
+print(" ".join(str(px[8, y][0]) for y in range(h)))
+`], { input: strip }).toString().trim().split(/\s+/).map(Number);
+await p.evaluate(() => document.getElementById("scrimprobe")?.remove());
+const dpr = 2, atHeadBottom = alphas[Math.min(alphas.length - 1, Math.round(prof.headBottom * dpr) - 2)];
+const jumps = alphas.slice(1).map((v, i) => Math.abs(v - alphas[i]));
 check(!!m.scrim && /gradient/.test(m.scrim), `the top scrim is a gradient (${String(m.scrim).slice(0, 40)}…)`);
-check(!!m.head && near(parseFloat(m.scrimH), m.head.bottom - m.drill.top, 3),
-  `it ends at the name pill's bottom edge, not below it (${m.scrimH} vs ${m.head ? (m.head.bottom - m.drill.top).toFixed(1) : "-"}px)`);
+check(atHeadBottom > 40 && atHeadBottom < 235,
+  `it is still FADING through the header's band, neither flat nor opaque there (${atHeadBottom}/255 of the probe survives at the header's floor)`);
+check(Math.max(...jumps) <= 12, `no cliff anywhere down the ramp (biggest one-pixel step ${Math.max(...jumps)}/255)`);
+check(alphas[alphas.length - 1] > 245, `and it is back to nothing by its own floor (${alphas[alphas.length - 1]}/255)`);
 
 await p.screenshot({ path: join(OUT, "bleed.png") });
 await b.close();

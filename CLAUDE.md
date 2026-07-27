@@ -364,18 +364,29 @@ header's bottom *edge* — so bare, it sat at ~5% of `--bg`, i.e. on raw transcr
 over a bright user bubble against a 4.5 floor. Two changes buy it back and **neither is sufficient
 alone** (`scripts/webapp-measure/halo.py` says so, and validates itself on flat ground first):
 
-- The ramp is **steeper inside its own band** — still zero at the header's bottom edge, never lower,
-  so the paragraph below still holds. Alone it gets the cwd to 3.43:1, still under.
+- The ramp runs **34px BELOW the header** (`--scrim-tail`) instead of ending at its bottom edge.
+  Alone it gets the cwd to 3.75:1, still under.
 - Both lines take a `-webkit-text-stroke` in `--bg` with **`paint-order: stroke fill`**, so the stroke
   paints first and the fill covers its inner half: 1.5px of ground outward with the glyph shape
   untouched, plus two soft shadows for falloff. Together: **5.31:1 dark, 5.88:1 light.**
 
 Two traps, both paid for. **Do not build this out of stacked `text-shadow`s** — eight blurs in
 `var(--bg)`, the page's own colour, still darkened the ground six units through accumulated 8-bit
-rounding and drew a dark plate the size of the text, i.e. a capsule again, by accident. And note the
-cost that is real: the band above the cwd is now near-solid, so the side chips' glass has less passing
-behind it than it did. That is the trade the ask forces. Incidentally the *old* capsule was itself
-under AA for the cwd in the light theme (3.57:1) — this fixed a defect as well as preserving one.
+rounding and drew a dark plate the size of the text, i.e. a capsule again, by accident. **And do not
+buy the contrast with a fatter stroke instead** — swept and looked at: at 5px it grows a lumpy dark
+blob around the text over a bubble, the same capsule in a worse form. 3px is where it stops reading as
+a shape, and the ramp has to find the rest. Incidentally the *old* capsule was itself under AA for the
+cwd in the light theme (3.57:1) — this fixed a defect as well as preserving one.
+
+**The ramp's TAIL is what keeps it from reading as an edge, and the first attempt got this wrong.**
+It shipped in v0.4.155 ending at the header's bottom edge, which is also where the cwd sits — so every
+drop of opacity the cwd needed had to be spent in the ~9px between its baseline and the ramp's zero.
+That is a cliff by construction, and the owner reported it as "very harsh and sudden": the top of a
+passing bubble went flat grey and snapped back to blue. `--scrim-tail` (34px) gives the ramp somewhere
+to land. Same peak, same job, 34 more pixels to finish in — and it measures *better* (5.62:1 against
+the cliff's 5.46), which is what says the old shape was badly spent rather than merely ugly. The
+target was the owner's own screenshot of the Claude app: content dimmed hard behind the title,
+clearing smoothly well below it, no edge anywhere.
 
 **The chat header is three containers, not a bar.** A standalone circle, the name capsule, a
 standalone circle, each carrying its own `--chip-lift`, with 6px gaps — per the owner's reference,
@@ -466,13 +477,17 @@ bubble (chroma swing 23 → 8) without a `brightness()` clamp, which would cost 
 **No filter makes a transparent chip ignore a bright thing passing under it** — Telegram's own chroma
 swing is 48, twice ours; theirs merely sits where the scrim has already dissolved the content.
 
-**Do NOT push the ceiling scrim's ramp below the header.** It is transparent at the title's *bottom*
-edge. Ending the ramp above that instead makes the chips hold their colour perfectly (a chip whose
-backdrop is flat `--bg` cannot be moved) — and it paints a bar across the band the transcript was just
-given, and glass over flat ground is indistinguishable from paint. Tried, rejected by the owner, and
-`bleed.mjs` is written to the reverted shape so restoring it fails. **Making the ramp STEEPER inside
-that band is a different change and has been made** (see the title paragraph above): where it reaches
-zero is the invariant, how fast it climbs to it is not.
+**Do NOT let the ceiling scrim's ramp FINISH above the header.** That makes the chips hold their
+colour perfectly (a chip whose backdrop is flat `--bg` cannot be moved) — and it paints a bar across
+the band the transcript was just given, and glass over flat ground is indistinguishable from paint.
+Tried, rejected by the owner. **The invariant is that it keeps FADING through the header's band**, not
+where the element's bottom edge happens to be: the ramp now extends 34px *past* the header (see
+`--scrim-tail`), which is the opposite change and is what stopped it reading as a cliff.
+`bleed.mjs` used to assert `scrim height === the header's bottom`, which could not tell those two
+apart — both move the height, only one empties the band. It now measures the rendered alpha profile
+through a white probe: still fading at the header's floor, no single-pixel step over 12/255, back to
+nothing by its own floor. Parse the gradient string instead and you learn what was declared, not what
+is painted.
 
 **In FULLSCREEN the header rides UP into Telegram's chrome band** (`html.fs`, set by `syncSafeTop`
 from `isFullscreen` — never from the insets). That reclaims ~48px of transcript *and* fixes the

@@ -158,6 +158,11 @@
        mode byte-identical: the gate is `tg.isFullscreen`, not the insets — an inset that happens to
        report a notch off-fullscreen would otherwise open a gap the window manager already gave us. */
     --safe-top: 0px;
+    /* How far the ceiling scrim runs BELOW the header, so its ramp has somewhere to land softly
+       instead of hitting zero at the cwd's own baseline. Its own variable and not a literal in the
+       gradient, because the gradient's stops are percentages OF this height — the two move together
+       or the shape is not the one that was measured. See #drill::before. */
+    --scrim-tail: 34px;
   }
   @supports (color: color-mix(in srgb, red 50%, blue)) {
     /* 36%, which is TELEGRAM'S OWN number: its ✕ Close pill was solved off a screenshot where both its
@@ -522,17 +527,37 @@
      near-solid ground, so the two side chips' glass has less passing behind it than it did. That is
      the trade the owner's ask forces, and it is the smaller loss — an unreadable path line is a
      defect, a chip reading slightly more solid at the top of the screen is a texture. */
+  /* The TAIL, and it is the whole answer to "harsh and sudden". The ramp used to end at the header's
+     bottom edge, which is also where the cwd sits — so every drop of opacity the cwd needed had to be
+     spent in the ~9px between its own baseline and the ramp's zero. That is a cliff by construction,
+     and it read as one: the top of a passing bubble went flat grey and then snapped back to blue.
+     Extending the element BELOW the header buys the room to fall gently instead. Same peak, same job,
+     34 more pixels to finish in. Measured against the owner's screenshot of the Claude app, which is
+     the look he asked for: their content is dimmed hard behind the title and clears smoothly well
+     below it, with no edge anywhere.
+     THIS IS NOT THE SHAPE THAT WAS REJECTED, and the difference is worth being exact about, because
+     the two are one sentence apart. That one made the header band OPAQUE and finished the ramp above
+     the chips, so nothing passed behind the title at all. This one still fades THROUGH the header —
+     the transcript is visibly moving behind the name, which is the point of full bleed — and only
+     spends the extra length on the toe. The check that guards it is in bleed.mjs and was rewritten
+     with it: an element-height equality could not tell these two apart, so it now measures the
+     rendered alpha PROFILE (fades through the band, no cliff, zero by its own floor).
+     It also measures BETTER, which is the part that says the old shape was simply badly spent: the
+     cwd reads 5.62:1 over a bright bubble against the cliff's 5.46. */
   #drill::before { content: ""; position: absolute; left: 0; right: 0; top: 0; z-index: 1; pointer-events: none;
-    height: calc(var(--safe-top) + 10px + var(--hbtn-d));
+    height: calc(var(--safe-top) + 10px + var(--hbtn-d) + var(--scrim-tail));
     background: linear-gradient(to top, transparent, var(--bg));
     background: linear-gradient(to top,
       color-mix(in srgb, var(--bg) 0%, transparent) 0%,
-      color-mix(in srgb, var(--bg) 20%, transparent) 5%,
-      color-mix(in srgb, var(--bg) 55%, transparent) 12%,
-      color-mix(in srgb, var(--bg) 80%, transparent) 20%,
-      color-mix(in srgb, var(--bg) 92%, transparent) 30%,
-      color-mix(in srgb, var(--bg) 98%, transparent) 40%,
-      var(--bg) 50%); }
+      color-mix(in srgb, var(--bg) 4%, transparent) 10%,
+      color-mix(in srgb, var(--bg) 11%, transparent) 20%,
+      color-mix(in srgb, var(--bg) 23%, transparent) 30%,
+      color-mix(in srgb, var(--bg) 40%, transparent) 40%,
+      color-mix(in srgb, var(--bg) 60%, transparent) 46.3%,
+      color-mix(in srgb, var(--bg) 78%, transparent) 52.5%,
+      color-mix(in srgb, var(--bg) 91%, transparent) 58.8%,
+      color-mix(in srgb, var(--bg) 98%, transparent) 66.3%,
+      var(--bg) 75%); }
   /* A PLAIN BLOCK again, deliberately rather than by neglect. It was a flex column for exactly one
      reason — `.work`'s `margin-top: auto` needed free space to absorb, which a block has none of —
      and that row has left the scroller entirely, so the column had no remaining job. Keeping it
