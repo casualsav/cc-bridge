@@ -40,6 +40,9 @@ export type Access = {
   spawnModel?: string      // default model for `tg spawn` (agent-bus session launch) when the spawner passes no --model; unset = spawnSession's own default
   spawnEffort?: string     // default effort for `tg spawn` when the spawner passes no --effort; unset = spawnSession's own default
   spawnContext1m?: boolean // spawned sessions boot with the 1M context window (a `[1m]` suffix on the model id) instead of the 200k default (default ON; only an explicit false opts out)
+  spawnModelPolicy?: 'default-wins' | 'agent'  // who may choose a session's model. 'default-wins' (DEFAULT): an agent's --model / relayed /model is a REQUEST — the session takes spawnModel and the human gets a one-tap card. 'agent': the caller's model is honoured silently (pre-0.4.131 behaviour)
+  spawnAgentModels?: string[]  // aliases an agent may pick with no card under 'default-wins' (e.g. ['haiku'] for a probe fleet). A named list, never an ordering — nothing is inferred about models not in it. Default empty
+  modelCardChat?: string   // TEST OVERRIDE for where the model-request card goes: 'log' (daemon log only, no send) or '<chatId>[:<threadId>]'. Unset = fleetSurface(), which is what production uses. Exists because the card is an armed button on a real person's chat — see modelCardTargets()
   switchboard?: boolean    // show the live agent-bus roster line on the pinned card (default on) — a display toggle only; tg ask/answer/roster keep working when off. Field name kept for access.json compat.
   dmLanes?: boolean        // per-user DM lanes: each allowlisted user DMing the bot gets its OWN auto-spawned session, replies isolated to that user (default off; single-user installs unaffected)
   claudingDraft?: boolean  // DM-only live "Clauding…" status draft (Bot API 10.1) while a turn runs (default on)

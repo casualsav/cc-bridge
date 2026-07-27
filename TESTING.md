@@ -11,6 +11,36 @@ your production bot's token, its daemon will fight your real bot (HTTP 409) and
 knock the live one offline. Create a throwaway bot with
 [@BotFather](https://t.me/BotFather) and use *that* token here.
 
+## ⚠️ Never point an armed button at a real person's chat
+
+Some features send **cards with buttons** to the human surface, and a button is not a notification:
+a mis-tap does the thing. The model-request card ("an agent asked for fable — Use fable / Keep opus")
+is the one that exists today, and one accidental tap puts a session on premium rates for real.
+
+Verifying it against `fleetSurface()` — which resolves to the owner's own DM or the group — put four
+live cards in front of the owner mid-test on 2026-07-27. So the destination is overridable, and any
+test that can mint a card **must** set it:
+
+```bash
+CC_BRIDGE_MODEL_CARD_CHAT=log   # daemon log only, nothing sent, nothing armed
+# or a scratch surface:
+CC_BRIDGE_MODEL_CARD_CHAT='-1001234567890:42'    # chatId[:threadId]
+```
+
+Or, without restarting the daemon (the pref is hot-reloaded — set it, run, restore it):
+
+```json
+// ~/.claude/channels/telegram/prefs.json
+{ "modelCardChat": "log" }
+```
+
+In `log` mode the card's exact text is written to `daemon.log` as
+`model-request: [card suppressed → log] …`, so a test can still assert on what the human *would*
+have been shown. Unset is production and means `fleetSurface()`.
+
+The general rule this is an instance of: **the owner's chat is production.** Canaries go to a scratch
+topic or to the log.
+
 ## Recipe
 
 In the clean container:

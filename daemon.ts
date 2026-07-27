@@ -29,6 +29,7 @@ import { normalizeCommandOutput } from './ansi.ts'
 import { planSlash } from './slash-policy.ts'
 import { preserveGlobalEffort, reconcileEffortScope } from './effort-scope.ts'
 import { planDrift, driftStateAfter, type DriftState } from './drift-guard.ts'
+import { decideModel, upgradeNeedsConfirm, type ModelPolicy } from './spawn-model-policy.ts'
 import { renderSessionsView } from './sessions-view.ts'
 import { detectCurrentMode, onNormalPrompt, inputBoxContent, isModelSwitchConfirm, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType } from './prompt.ts'
 import { modelSwitchEvidence, resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, liveSubagents, currentTurnFeed, currentTurnActivity, concludedTurnWork, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
@@ -5003,6 +5004,26 @@ async function handleCall(
         // argument) still relays through below — it opens the picker for a human and writes nothing.
         const modelAlias = /^\/model\s+(\S+)$/i.exec(command)?.[1]?.toLowerCase()
         if (modelAlias && MODEL_ALIASES.includes(modelAlias)) {
+          // The same gate the spawn takes, and for the same money: moving a LIVE session onto a
+          // costlier model is the identical decision one turn later. Nothing is applied on a clamp —
+          // the session keeps the model it has until a human taps. (The bridge's own re-assertions —
+          // drift guard, failover, resume — never come through here: they restore a model that was
+          // already chosen rather than choosing one.)
+          const relay = decideModel({
+            requested: modelAlias, configuredDefault: configuredSpawnModel(),
+            ...modelPolicyPrefs(), humanOrigin: false, now: Date.now(),
+          })
+          if (relay.clamped) {
+            if (relay.ask) {
+              const capNow = await capturePane(targetPane).catch(() => '')
+              void askHumanForModel({
+                sid: res.id, name: toName, alias: relay.clamped, asker: nameForEndpoint(fromSid, endpoints),
+                ctxPct: (capNow ? parseStatusline(capNow)?.ctxPct : null) ?? null, at: Date.now(), live: true,
+              })
+            }
+            text = `!/model ${relay.clamped} needs a human — @${toName} keeps its current model${relay.ask ? '; asked the owner, and it switches in place if they approve' : ' (asking is snoozed right now)'}`
+            break
+          }
           // awaitReadback:false for the same reason the mini app passes it: the confirm + readback
           // dance runs for up to ~30s and the calling agent is blocked on this result.
           const { error } = await applySessionModel(targetPane, watcher, modelAlias, { awaitReadback: false })
@@ -5084,10 +5105,15 @@ async function handleCall(
         if (topicName.startsWith('-')) { write({ t: 'result', id, ok: false, text: `'${topicName}' is not a session name (it starts with a dash) — try 'tg spawn --help'` }); return }
         const explicitModel = args.model ? String(args.model).trim().toLowerCase() : null
         if (explicitModel && !MODEL_ALIASES.includes(explicitModel)) { write({ t: 'result', id, ok: false, text: `unknown model '${explicitModel}' — one of: ${MODEL_ALIASES.join(' | ')}` }); return }
-        // No explicit --model: fall back to the persisted /settings 🐣 spawn-defaults model
-        // (validated — a stale/bad pref is ignored silently rather than failing the spawn).
-        const defaultSpawnModel = loadAccess().spawnModel
-        const model = explicitModel ?? (defaultSpawnModel && MODEL_ALIASES.includes(defaultSpawnModel) ? defaultSpawnModel : null)
+        // Who chooses. No explicit --model falls back to the persisted /settings 🐣 spawn-defaults
+        // model (validated — a stale/bad pref is ignored silently rather than failing the spawn); an
+        // explicit one from an AGENT is a request, not a decision (spawn-model-policy.ts). The card
+        // is minted after the spawn succeeds, so a failed spawn never asks the human about nothing.
+        const modelChoice = decideModel({
+          requested: explicitModel, configuredDefault: configuredSpawnModel(),
+          ...modelPolicyPrefs(), humanOrigin: false, now: Date.now(),
+        })
+        const model = modelChoice.model
         const explicitEffort = args.effort ? String(args.effort).trim().toLowerCase().replace(/^med$/, 'medium') : null
         if (explicitEffort && (explicitEffort === 'auto' || !EFFORT_LEVELS.includes(explicitEffort))) { write({ t: 'result', id, ok: false, text: `unknown effort '${explicitEffort}' — one of: low | medium | high | xhigh | max` }); return }
         // No explicit --effort: same /settings 🐣 fallback as the model above.
@@ -5138,6 +5164,18 @@ async function handleCall(
         }
         const fromName = nameForEndpoint(fromSid, busEndpoints())
         appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'spawn', from: fromName, to: topicName, text: `${dir}${model ? ` model=${model}` : ''}${effort ? ` effort=${effort}` : ''}` })
+        // The session exists and is booting on the human's model. If a model was asked for and did not
+        // win, the human hears about it now — with the context the new pane has RIGHT NOW recorded on
+        // the card, because that is what a later "Use it" tap would be re-billing (see below).
+        if (modelChoice.clamped && modelChoice.ask) {
+          const cap0 = await capturePane(newPane).catch(() => '')
+          void askHumanForModel({
+            sid, name: topicName, alias: modelChoice.clamped, asker: fromName,
+            ctxPct: (cap0 ? parseStatusline(cap0)?.ctxPct : null) ?? null, at: Date.now(), live: false,
+          })
+        } else if (modelChoice.clamped) {
+          process.stderr.write(`daemon: model-request: @${fromName} asked for ${modelChoice.clamped} on ${sid} — clamped, card snoozed\n`)
+        }
         const firstMsg = String(args.text ?? '').trim()
         // ONE notice on the SPAWNER's own surface (its DM lane / topic): "Spawned @X" with the first
         // message behind the chevron. This used to be two messages back to back — an instant text ack
@@ -5205,7 +5243,7 @@ async function handleCall(
         // The no-brief case says so OUT LOUD. It used to be the silent branch — a dropped brief and a
         // deliberately briefless spawn printed the same line bar one clause, which is how two spawns
         // whose briefs never arrived read as successful for half an hour each.
-        text = `spawned "${topicName}" in ${dir}${model ? ` · model ${model}` : ''}${effort ? ` · effort ${effort}` : ''}${firstMsg
+        text = `spawned "${topicName}" in ${dir}${model ? ` · model ${model}` : ''}${modelChoice.clamped ? clampedClause(modelChoice.clamped, model, modelChoice.ask) : ''}${effort ? ` · effort ${effort}` : ''}${firstMsg
           ? ' — the first message delivers as an ask once the REPL is up, and its reply comes back to you as the answer'
           : ' — NO first message was given, so it starts idle (a heredoc needs the `-` body argument; `tg spawn --help`)'}. Reach it on the bus as @${topicName}.`
         break
@@ -6004,6 +6042,86 @@ const MODEL_TIP = '💡 Tip: <code>/model &lt;name&gt;</code> to set any specifi
 // silently downgrades a session's model or its context window; it is not a "preferred" model, only
 // the last-resort one.
 const SPAWN_MODEL_FLOOR = 'fable'
+
+// ---- Agent model requests (spawn-model-policy.ts) ----
+// An agent asking for a model is a REQUEST; the human's configured default is what runs. See the
+// module header for why, and for why there is no ranking in here. These three read the live prefs so
+// a /settings change takes effect on the next spawn with no restart.
+let modelAskQuietUntil = 0   // "don't ask for a while" — in memory on purpose: a daemon restart
+                             // reopens the asking, which errs toward telling the human, not away.
+function modelPolicyPrefs(): { policy: ModelPolicy; agentAllowed: string[]; quietUntil: number } {
+  const a = loadAccess()
+  return {
+    policy: a.spawnModelPolicy === 'agent' ? 'agent' : 'default-wins',
+    agentAllowed: Array.isArray(a.spawnAgentModels) ? a.spawnAgentModels.map(String) : [],
+    quietUntil: modelAskQuietUntil,
+  }
+}
+function configuredSpawnModel(): string | null {
+  const pref = loadAccess().spawnModel
+  return pref && MODEL_ALIASES.includes(pref) ? pref : null
+}
+// One open request per session — a second one replaces it, so an agent retrying can't stack cards.
+type ModelRequest = { sid: string; name: string; alias: string; asker: string; ctxPct: number | null; at: number; live: boolean }
+const modelRequests = new Map<string, ModelRequest>()
+
+function modelRequestButtons(r: ModelRequest, defaultModel: string | null): Button[][] {
+  return [
+    [{ text: `✅ Use ${r.alias}`, data: `smq:u:${r.sid}` }, { text: `Keep ${defaultModel ?? 'as-is'}`, data: `smq:k:${r.sid}` }],
+    [{ text: '🔕 Don\'t ask for 1h', data: 'smq:q' }],
+  ]
+}
+
+// WHERE the card goes. Production is `fleetSurface()` and that is the design — the human who pays is
+// the one who must hear about it. But a card is an ARMED BUTTON on a real person's chat, and verifying
+// this feature against the production surface put four live "Use fable" taps in front of the owner
+// mid-test, each one mis-tap away from real spend. So the destination is overridable, and the override
+// SHIPS WITH THE FEATURE because every future contributor will need it for exactly the same reason:
+//
+//   CC_BRIDGE_MODEL_CARD_CHAT=log                 → daemon log only, no Telegram send  ← use this in tests
+//   CC_BRIDGE_MODEL_CARD_CHAT=<chatId>[:<thread>] → that scratch surface instead
+//   prefs.json  "modelCardChat": same two forms, and hot-reloaded — a test can set it, run, and
+//                                restore it without restarting the daemon
+//
+// Unset (the only state a real install is ever in) = fleetSurface(). See TESTING.md.
+function modelCardTargets(): Array<{ chat: string; thread?: number }> | 'log' {
+  const raw = (process.env.CC_BRIDGE_MODEL_CARD_CHAT ?? loadAccess().modelCardChat ?? '').trim()
+  if (!raw) return fleetSurface()
+  if (raw === 'log') return 'log'
+  const [chat, thread] = raw.split(':')
+  return chat ? [{ chat, ...(thread && Number.isFinite(Number(thread)) ? { thread: Number(thread) } : {}) }] : []
+}
+
+// The card. Goes to the FLEET surface (the owner's DM lane / the group), never only to the spawner's
+// own topic and never only to the result string the calling agent reads — the whole point is that the
+// human, who is paying, is the one who hears about it.
+async function askHumanForModel(r: ModelRequest): Promise<void> {
+  modelRequests.set(r.sid, r)
+  const def = configuredSpawnModel()
+  const what = r.live
+    ? `asked to move <b>@${escapeHtml(r.name)}</b> onto <b>${escapeHtml(r.alias)}</b>.\nIt stayed where it is`
+    : `asked to start <b>@${escapeHtml(r.name)}</b> on <b>${escapeHtml(r.alias)}</b>.\nYour default for new sessions is <b>${escapeHtml(def ?? 'the CLI default')}</b>, so it started there`
+  const text = `🧠 <b>@${escapeHtml(r.asker)}</b> ${what} — a model an agent picks is a request, not a decision.`
+  const to = modelCardTargets()
+  if (to === 'log') {
+    // No send at all, and NO live buttons anywhere — the point of the test mode is that nothing is
+    // armed. The card's text is logged so a test can assert on what a human would have been shown.
+    process.stderr.write(`daemon: model-request: [card suppressed → log] ${text.replace(/<[^>]+>/g, '')}\n`)
+  } else {
+    for (const { chat, thread } of to) {
+      await channel.sendText(chat, text,
+        { silent: true, buttons: modelRequestButtons(r, def), ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
+    }
+  }
+  process.stderr.write(`daemon: model-request: @${r.asker} asked for ${r.alias} on ${r.sid} (${r.name}) — clamped, human asked\n`)
+}
+
+// The clause the CALLING AGENT gets. It is told the truth in the same breath as its success, so it
+// neither plans around a model it doesn't have nor retries in a loop (a retry is just another
+// session on the default).
+function clampedClause(clamped: string, ran: string | null, asked: boolean): string {
+  return ` (your --model ${clamped} needs a human${asked ? ' — asked the owner; if they approve, the session switches in place' : ', and asking is snoozed right now'}; running ${ran ?? 'the CLI default'})`
+}
 
 function modelPickerKeyboard(): InlineKeyboard {
   const kb = new InlineKeyboard()
@@ -8889,8 +9007,11 @@ function spawnDefaultsText(): string {
   return `🐣 <b>Spawn defaults</b> — sessions launched by agents (<code>tg spawn</code>)\n\n` +
     `🧠 Model — <b>${a.spawnModel ? escapeHtml(a.spawnModel) : 'inherit'}</b>\n` +
     `⚡ Effort — <b>${a.spawnEffort ? escapeHtml(a.spawnEffort) : 'inherit'}</b>\n` +
-    `🪟 Context — <b>${spawnWideContext(a.spawnContext1m) ? '1M' : '200k (default)'}</b>\n\n` +
-    `<i>“inherit” falls back to the focused session's dials at spawn time. An explicit --model / --effort on the spawn always wins.</i>\n` +
+    `🪟 Context — <b>${spawnWideContext(a.spawnContext1m) ? '1M' : '200k (default)'}</b>\n` +
+    `🛡 Agent asks for another model — <b>${a.spawnModelPolicy === 'agent' ? 'agents choose' : 'ask me first'}</b>` +
+    `${a.spawnAgentModels?.length ? ` <i>(no card for: ${escapeHtml(a.spawnAgentModels.join(', '))})</i>` : ''}\n\n` +
+    `<i>“inherit” falls back to the focused session's dials at spawn time.</i>\n` +
+    `<i>🛡 “ask me first” (default): an agent's <code>--model</code> is a request — the session starts on your model above and you get a one-tap card. Your own choices (this panel, the mini app) are never carded. The no-card list is a prefs.json key (<code>spawnAgentModels</code>) for test fleets.</i>\n` +
     `<i>🪟 applies to every session the bridge launches — new topics included. Needs a resolved model; a spawn that inherits no model keeps the CLI default.</i>`
 }
 function spawnDefaultsKeyboard(): InlineKeyboard {
@@ -8901,6 +9022,7 @@ function spawnDefaultsKeyboard(): InlineKeyboard {
   for (const e of EFFORT_LEVELS) kb.text(`${a.spawnEffort === e ? '✅ ' : ''}${e === 'medium' ? 'med' : e}`, `spd:e:${e}`)
   kb.row().text(`${a.spawnEffort ? '' : '✅ '}⚡ Inherit effort`, 'spd:e:off').row()
   kb.text(`${spawnWideContext(a.spawnContext1m) ? '✅' : '☐'} 🪟 1M context`, 'spd:w:toggle').row()
+  kb.text(`🛡 ${a.spawnModelPolicy === 'agent' ? 'Agents choose the model' : 'Ask me first (recommended)'}`, 'spd:p:toggle').row()
   return kb.text('‹ Back', 'spd:back')
 }
 
@@ -10292,6 +10414,76 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
+  // An agent's model request (spawn-model-policy.ts): the human's answer.
+  if (data.startsWith('smq:')) {
+    if (!(await cbAuth(ctx))) return
+    if (data === 'smq:q') {
+      modelAskQuietUntil = Date.now() + 3_600_000
+      await ctx.answerCallbackQuery({ text: 'Won\'t ask again for an hour.' }).catch(() => {})
+      await ctx.editMessageReplyMarkup().catch(() => {})
+      return
+    }
+    const [, verb, sid] = data.split(':')
+    const req = sid ? modelRequests.get(sid) : undefined
+    if (!req) { await ctx.answerCallbackQuery({ text: 'That request is no longer open.' }).catch(() => {}); await ctx.editMessageReplyMarkup().catch(() => {}); return }
+    if (verb === 'k') {
+      modelRequests.delete(sid!)
+      await ctx.answerCallbackQuery({ text: 'Left it as it is.' }).catch(() => {})
+      await ctx.editMessageText(`🧠 <b>@${escapeHtml(req.name)}</b> stays on its configured model. <i>(@${escapeHtml(req.asker)} asked for ${escapeHtml(req.alias)}.)</i>`, { parse_mode: 'HTML' }).catch(() => {})
+      return
+    }
+    const pane = await paneForSession(req.sid).catch(() => null)
+    if (!pane || !(await paneAlive(pane).catch(() => false))) {
+      modelRequests.delete(req.sid)
+      await ctx.answerCallbackQuery({ text: 'That session is gone.' }).catch(() => {})
+      await ctx.editMessageText(`🧠 <b>@${escapeHtml(req.name)}</b> has ended — nothing to switch. <i>(Spawn a fresh one on ${escapeHtml(req.alias)} if you still want it.)</i>`, { parse_mode: 'HTML' }).catch(() => {})
+      return
+    }
+    // THE LATE TAP. "Use fable" is nearly free seconds after the spawn and a different transaction
+    // hours later: the accumulated context is re-read and re-billed at the new model's rates from
+    // that turn on. Gate on GROWTH SINCE THE CARD WAS MINTED, not on the card's age — a session idle
+    // for three hours is still free to switch, one that burned 40% of its window in four minutes is
+    // not, and growth is the thing actually being re-billed. `smq:c:` is the informed second tap.
+    const capNow = await capturePane(pane).catch(() => '')
+    const ctxNow = (capNow ? parseStatusline(capNow)?.ctxPct : null) ?? null
+    let confirm = upgradeNeedsConfirm(req.ctxPct, ctxNow)
+    if (confirm && req.ctxPct == null) {
+      // A card minted before the session's first turn has no baseline to compare against: the pane is
+      // still booting on a spawn, and a never-used session prints no ctx line at all. Measured, not
+      // reasoned — without this every fresh tap hit the confirm screen. The missing number has a
+      // better answer than "assume the worst": a session that has not produced an assistant turn
+      // cannot have accumulated anything to re-read. True of a spawn and of a live session alike
+      // (including one just /cleared, whose fresh transcript is the honest answer).
+      const file = await transcriptForPane(pane, null).catch(() => null)
+      if (file && !latestFinalReply(file)) confirm = false
+    }
+    if (verb === 'u' && confirm) {
+      await ctx.answerCallbackQuery({ text: 'It has grown since — check the cost.' }).catch(() => {})
+      const grew = req.ctxPct != null && ctxNow != null
+        ? `Its context has gone ${req.ctxPct}% → ${ctxNow}% since that request`
+        : 'Its context can\'t be read right now'
+      await ctx.editMessageText(
+        `⚠️ <b>@${escapeHtml(req.name)}</b> has been working. ${grew}, and switching re-reads all of it at <b>${escapeHtml(req.alias)}</b>'s rates from the next turn — the cost this card exists to prevent, one tap later.\n\n<i>A fresh spawn on ${escapeHtml(req.alias)} is usually cheaper than moving this one.</i>`,
+        { parse_mode: 'HTML', reply_markup: new InlineKeyboard()
+          .text(`Switch anyway`, `smq:c:${req.sid}`).text('Keep as-is', `smq:k:${req.sid}`) }).catch(() => {})
+      return
+    }
+    await ctx.answerCallbackQuery({ text: `Switching to ${req.alias}…` }).catch(() => {})
+    modelRequests.delete(req.sid)
+    const watcher = pane === focus.activePaneId ? focus.paneWatcher : null
+    const { error } = await applySessionModel(pane, watcher, req.alias, { awaitReadback: false })
+    // Either way the alias becomes this session's PIN — which is also the whole mid-turn story: a
+    // refusal here leaves the pin set, and the drift guard's between-turns tick re-asserts a pin at
+    // the next resting prompt. Existing machinery, not a second timer that would have to learn the
+    // same lessons about resting prompts.
+    recordSessionModel(req.sid, req.alias)
+    await ctx.editMessageText(error
+      ? `🧠 <b>@${escapeHtml(req.name)}</b> is mid-turn — pinned to <b>${escapeHtml(req.alias)}</b>; it moves at its next resting prompt.`
+      : `✅ <b>@${escapeHtml(req.name)}</b> is on <b>${escapeHtml(req.alias)}</b>. <i>(@${escapeHtml(req.asker)} asked; you approved.)</i>`,
+      { parse_mode: 'HTML' }).catch(() => {})
+    return
+  }
+
   // Pinned-message quick actions → the same pickers as /model, /effort, /mode, /settings.
   if (data === 'st:model' || data === 'st:effort' || data === 'st:mode' || data === 'st:settings') {
     if (!(await cbAuth(ctx))) return
@@ -10944,6 +11136,17 @@ bot.on('callback_query:data', async ctx => {
     a.spawnContext1m = spawnWideContext(a.spawnContext1m) ? false : undefined
     saveAccess(a)
     await ctx.answerCallbackQuery().catch(() => {})
+    await showHtmlPanel(ctx, 'edit', spawnDefaultsText(), spawnDefaultsKeyboard())
+    return
+  }
+  // Who may choose a spawned session's model. Stored only when it is the NON-default ('agent'), so an
+  // untouched install carries no key and picks up any future change to the shipped default.
+  if (data === 'spd:p:toggle') {
+    if (!(await cbAuth(ctx))) return
+    const a = loadAccess()
+    a.spawnModelPolicy = a.spawnModelPolicy === 'agent' ? undefined : 'agent'
+    saveAccess(a)
+    await ctx.answerCallbackQuery({ text: a.spawnModelPolicy === 'agent' ? 'Agents choose the model.' : 'You get asked first.' }).catch(() => {})
     await showHtmlPanel(ctx, 'edit', spawnDefaultsText(), spawnDefaultsKeyboard())
     return
   }
@@ -14245,6 +14448,10 @@ async function webappReadSettings(): Promise<WebappSettingsView> {
       // below change one session and nothing else. 'off' = unset (the spawn chain falls to its floor).
       spawnModel: { value: a.spawnModel ?? 'off', editable: true, options: ['off', ...MODEL_ALIASES], label: 'model for new sessions' },
       spawnEffort: { value: a.spawnEffort ?? 'off', editable: true, options: ['off', ...EFFORT_LEVELS], label: 'effort for new sessions' },
+      // Who may choose a model. Editable HERE and in /settings 🐣 because it is the knob that decides
+      // whether an agent can spend on a model you didn't pick — the same reasoning that put the model
+      // default on this tab. A tap in this app is a HUMAN choosing, so it is never itself carded.
+      spawnModelPolicy: { value: a.spawnModelPolicy === 'agent' ? 'agent' : 'ask me first', editable: true, options: ['ask me first', 'agent'], label: 'when an agent asks for another model' },
       mode: { value: cap ? detectCurrentMode(cap) : null, editable: false, label: 'drives the pane (chat-side)' },
       model: { value: sl?.model ?? null, editable: false },
       effort: { value: sl?.effort ?? null, editable: false },
@@ -14284,6 +14491,13 @@ function webappSetSetting(userId: string, key: string, value: unknown): string |
       const v = String(value)
       if (v !== 'off' && !EFFORT_LEVELS.includes(v)) return `unknown effort — one of: off | ${EFFORT_LEVELS.join(' | ')}`
       const a = loadAccess(); a.spawnEffort = v === 'off' ? undefined : v; saveAccess(a); return null
+    }
+    // Only the non-default is stored, same as the /settings toggle: an untouched install keeps no key
+    // and so inherits any future change to the shipped default.
+    case 'spawnModelPolicy': {
+      const v = String(value)
+      if (v !== 'agent' && v !== 'ask me first') return 'one of: ask me first | agent'
+      const a = loadAccess(); a.spawnModelPolicy = v === 'agent' ? 'agent' : undefined; saveAccess(a); return null
     }
     default: return 'unknown or read-only setting'
   }
