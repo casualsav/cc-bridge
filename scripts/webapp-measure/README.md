@@ -33,6 +33,11 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   page on the LIVE server, real composer, real send button, real
                                   #   throwaway session. Nothing stubbed. Includes the settings.json
                                   #   byte-identity control for /model
+    node squash.mjs [page] [out]  # a collapsed long message keeps its 268px height — BOTH kinds (the
+                                  #   user-side bubble and the unbubbled prose reply) — in a feed whose
+                                  #   content wants 3× the scroller. The flex column makes every
+                                  #   overflow:hidden child shrinkable; this is the check that says so.
+                                  #   Pass a pre-fix page: every height check must FAIL there
     node deadcard.mjs [outdir]    # a killed session leaves the fleet list and a revived one comes
                                   #   back, timed on BOTH surfaces (live /api/sessions + the rendered
                                   #   tab) against a real throwaway it spawns, kills and reopens.

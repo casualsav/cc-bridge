@@ -312,6 +312,18 @@
      in the cross axis the same way it did as a block margin. Both re-measured, not assumed
      (scripts/webapp-measure/workpin.mjs). */
   #dfeed { flex: 1; overflow-y: auto; padding: var(--sp-3); display: flex; flex-direction: column; }
+  /* NOTHING IN A SCROLLER SHRINKS. This one line is what the column above costs, and it is not
+     optional: a flex item's automatic minimum size is its content — EXCEPT when it has
+     `overflow: hidden`, where the spec makes it zero. `.msg.clip` (a collapsed long message) is
+     exactly that, and flex items shrink by default, so once the transcript wanted more room than the
+     scroller had, the algorithm crushed precisely the collapsed cards — 268px down to 69px for a
+     bubble and 53px for a prose reply, measured — while every short message, whose overflow is
+     visible, kept its size. The absolutely-positioned fold bar then painted over what text was left.
+     The give-away that it is shrinkage and not the fold: a squashed feed does NOT overflow, because
+     it was crushed until it fitted. Reaching for a min-height on `.msg` instead would fix the height
+     and leave every future overflow:hidden child (a thumbnail, a code block, the next card) shrinkable
+     for the same reason. scripts/webapp-measure/squash.mjs measures both kinds and the pinning. */
+  #dfeed > * { flex-shrink: 0; }
   /* ASYMMETRIC padding, and the asymmetry is the point: the bubble hugs the meta block far tighter
      than it pads a line of text, which is what makes the time read as tucked into the corner. Pulling
      all four sides in instead would drag the top edge onto the first line and change every bubble
