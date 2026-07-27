@@ -220,7 +220,14 @@ function toolDetail(input: unknown): string {
   }
   const pick = o.command ?? o.file_path ?? o.path ?? o.pattern ?? o.url ?? o.query ?? o.description ?? o.prompt
   const s = (typeof pick === 'string' ? pick : '').replace(/\s+/g, ' ').trim()
-  return s.length > 56 ? s.slice(0, 55) + '…' : s
+  if (s.length <= 56) return s
+  // A PATH is clipped from the left, keeping its tail. Every consumer of this string wants the
+  // basename — summarizeToolRun and turnParts both take split('/').pop() of it — and clipping the
+  // head hands them a fragment of some directory instead: a 74-char path under
+  // .../agent-bus/dm/shared/ arrived as the filename "sha…". Everything else still clips its tail,
+  // where a command's or a query's first words are the informative end.
+  const isPath = typeof pick === 'string' && pick === (o.file_path ?? o.path)
+  return isPath ? '…' + s.slice(-55) : s.slice(0, 55) + '…'
 }
 
 // A `tg react …` Bash call. The reaction lands on the user's own message where they see it, so

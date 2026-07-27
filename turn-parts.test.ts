@@ -186,3 +186,24 @@ test('MultiEdit sums its edits and NotebookEdit counts its new source', () => {
     ['NotebookEdit', 2, 0],
   ])
 })
+
+// A long path is clipped from the LEFT so its basename survives. Both consumers of toolDetail —
+// summarizeToolRun (the Telegram card) and turnParts (the mini app) — take split('/').pop() of that
+// string, so head-clipping handed them a piece of a DIRECTORY as the filename. Observed live: a
+// 74-char path under .../agent-bus/dm/shared/ rendered as the file "sha…".
+test('a long file path keeps its basename, not a fragment of a parent directory', () => {
+  const long = '/home/ubuntu/.claude/channels/telegram/agent-bus/dm/shared/p8-p10-design.md'
+  expect(long.length).toBeGreaterThan(56)   // the clip has to actually engage, or this proves nothing
+  const f = fixture([user('go', 'u1'), call('Write', { file_path: long, content: 'x' }, 't1')])
+  const parts = turnParts(currentTurnFeed(f))
+  const chip = parts.find(p => p.t === 'chip') as Extract<typeof parts[number], { t: 'chip' }>
+  expect(chip.calls[0]!.target).toBe('p8-p10-design.md')
+})
+
+test('a long command still clips its TAIL — its first words are the informative end', () => {
+  const cmd = 'grep -rn "someVeryLongPatternHere" --include=*.ts . | head -40 | sort -u | uniq -c'
+  const f = fixture([user('go', 'u1'), call('Bash', { command: cmd }, 't1')])
+  const chip = turnParts(currentTurnFeed(f)).find(p => p.t === 'chip') as { t: 'chip'; calls: Array<{ target: string }> }
+  expect(chip.calls[0]!.target.startsWith('grep -rn')).toBe(true)
+  expect(chip.calls[0]!.target.endsWith('…')).toBe(true)
+})
