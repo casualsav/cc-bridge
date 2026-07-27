@@ -14263,8 +14263,12 @@ async function webappSessionFeed(sid: string): Promise<WebappSessionFeed | null>
     defModel: acc.spawnModel ?? null,
     defEffort: acc.spawnEffort ?? null,
   }
-  if (!file) return { sid, name: row.name, working: false, ...dial, items: [] }
-  const working = turnInProgress(file)
+  if (!file) return { sid, name: row.name, working: detectWorking(cap), ...dial, items: [] }
+  // The SAME composite webappListSessions uses, and for the same reason: a session orchestrating
+  // subagents sits at its own prompt with its turn concluded, so `turnInProgress` alone paints it
+  // idle for as long as the delegated work runs. The sessions list was fixed for that; this header
+  // was not, so one screen showed the dot pulsing while the other showed the session stopped.
+  const working = turnInProgress(file) || liveSubagents(file) > 0
   const items: WebappSessionFeed['items'] = recentConversation(file, 14).map(c => ({
     role: c.role, text: c.text, ts: c.ts,
     ...(c.img ? { img: c.img } : {}), ...(c.att ? { att: c.att } : {}), ...(c.cmd ? { cmd: true } : {}),
