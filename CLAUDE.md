@@ -253,6 +253,19 @@ measures `scrollHeight === 0`, which pinned the field at `height: 0` forever —
 strip of bare padding with the placeholder spilling out below. `growComposer()` guards on a zero
 measurement and `openDrill()` calls it once the view is actually visible.
 
+**The fullscreen top offset is gated on `isFullscreen`, not on the insets.** In Telegram's fullscreen
+mode the client paints its ✕ Close pill and its kebab *over* the page, so `--safe-top` (written by
+`syncSafeTop()`) pads the three top-anchored surfaces — `.tabs`, `#drill`, `#viewer` — by
+`safeAreaInset.top + contentSafeAreaInset.top`, the two halves that stack. Driving it off the insets
+alone would open a notch-sized gap in normal mode, where the client has already laid us out below its
+own chrome; the gate is what makes non-fullscreen provably byte-identical. It is `padding` on the
+surface, not a `margin` or a `top`: the strip has to be painted or content scrolls up through it, and
+it has to belong to the sticky box or the tab bar un-sticks at exactly the offset. The bottom-anchored
+sheets get nothing on purpose — the tallest is a fixed `72vh`, so its top edge is 227px on a 812px
+viewport against ~93px of chrome (measured, `scripts/webapp-measure/fullscreen.mjs`). If a sheet ever
+grows toward the top the fix is a `max-height`, not a top offset: `align-items: flex-end` overflows
+*past* a container's padding.
+
 **Theming ignores `prefers-color-scheme` completely.** Colours come from the `--tg-theme-*`
 properties Telegram injects, with dark fallbacks in `:root`. A light-theme check that sets the media
 feature renders the dark theme and passes without testing anything. Set the variables instead

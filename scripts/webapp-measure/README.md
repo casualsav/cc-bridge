@@ -17,6 +17,8 @@ somewhere and point at it) before running. Everything renders `file://` — no s
     node themes.mjs               # feed in dark AND light (see the theming trap below)
     node work.mjs <outdir>        # the live working row: both themes, reduced-motion, and the
                                   #   status-absent control (the row must NOT render without it)
+    node fullscreen.mjs           # the fullscreen top offset on every top-anchored surface, driven
+                                  #   through the REAL SDK's receiveEvent (needs network)
 
 ## Two rules, both learned the hard way
 
