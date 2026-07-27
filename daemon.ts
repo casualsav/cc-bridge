@@ -2784,7 +2784,15 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
     const askBlock = formatAskBlock(cur.fromName, cur.id, cur.text, cur.refs, cur.noReply)
     let block = askBlock
     const since = getSeen(cur.toSid)
-    const digest = digestSince(resolveLedgerNames(tailLedger(room, DIGEST_SCAN)), since, { excludeId: cur.id, excludeFrom: cur.toName, cap: 8 })
+    // No watermark means this endpoint has never taken a bus delivery — so there is nothing it can
+    // have MISSED, and a digest here is not catch-up, it is a stranger's first sight of a room it was
+    // never in. That is what a fresh spawn got: eight lines of other sessions' traffic prepended to
+    // the second thing it ever read (measured on a two-minute-old probe; the owner saw the four-hour
+    // version, and the digest's own "since recently" label is what a zero watermark renders as). The
+    // window opens at the first landed delivery (markSeen below), so the digest does its job from the
+    // second one on. A session whose watermark aged out of SEEN_TTL_MS lands here too, and silence is
+    // the better default there as well.
+    const digest = since > 0 ? digestSince(resolveLedgerNames(tailLedger(room, DIGEST_SCAN)), since, { excludeId: cur.id, excludeFrom: cur.toName, cap: 8 }) : []
     const dig = formatDigestBlock(digest, since > 0 ? fmtAgo(since) : 'recently')
     if (dig) block = `${dig}\n${askBlock}`
     const ok = await busDeliver(pane, block)
@@ -5194,7 +5202,12 @@ async function handleCall(
            } finally { busInFlight.delete(p.id) }
           })()
         }
-        text = `spawned "${topicName}" in ${dir}${model ? ` · model ${model}` : ''}${effort ? ` · effort ${effort}` : ''}${firstMsg ? ' — the first message delivers as an ask once the REPL is up, and its reply comes back to you as the answer' : ''}. Reach it on the bus as @${topicName}.`
+        // The no-brief case says so OUT LOUD. It used to be the silent branch — a dropped brief and a
+        // deliberately briefless spawn printed the same line bar one clause, which is how two spawns
+        // whose briefs never arrived read as successful for half an hour each.
+        text = `spawned "${topicName}" in ${dir}${model ? ` · model ${model}` : ''}${effort ? ` · effort ${effort}` : ''}${firstMsg
+          ? ' — the first message delivers as an ask once the REPL is up, and its reply comes back to you as the answer'
+          : ' — NO first message was given, so it starts idle (a heredoc needs the `-` body argument; `tg spawn --help`)'}. Reach it on the bus as @${topicName}.`
         break
       }
       // `tg kill <name>` — end a session you spawned, or (as an orchestrator chat lane) any worker

@@ -23,7 +23,7 @@
 //   tgctl history [n]                           recent agent-bus activity
 //   tgctl shared                                the room's shared-workspace dir (put deliverables here)
 import net from 'node:net'
-import { readFileSync } from 'node:fs'
+import { fstatSync, readFileSync } from 'node:fs'
 import { frame, makeLineReader, SOCKET_PATH, type ShimToDaemon, type DaemonToShim } from './common.ts'
 import { looksSpliced } from './spliced.ts'
 
@@ -41,8 +41,26 @@ const [, , cmd, chat_id, a, b] = process.argv
 // quoting a `tg …` command, and that leaves our own output as a fingerprint (see spliced.ts).
 // Refuse those loudly: a hard error the caller must fix beats relaying a mangled message they
 // believe they wrote.
+// Is a body waiting on stdin? A heredoc and a pipe are both FIFOs (bash spills a large heredoc to a
+// temp FILE instead), while a command run with no redirection gets a tty interactively or /dev/null —
+// a CHARACTER device — from the agent harnesses. Measured both ways on this box, and it is the whole
+// discriminator: we read fd 0 only when something was actually written to it, so a plain briefless
+// `tg spawn worker` can never block on a stdin nobody is going to close.
+const stdinHasBody = (): boolean => {
+  try { const s = fstatSync(0); return s.isFIFO() || s.isFile() } catch { return false }
+}
+
 const body = (raw: string | undefined, verb: string): string | undefined => {
   if (raw === '-') return readFileSync(0, 'utf8')
+  // A heredoc with NO `-`. The body was written, and it used to be dropped on the floor in silence:
+  //
+  //     tg spawn worker --dir /x --model opus <<'EOF'   ← the brief goes nowhere
+  //
+  // Two real spawns lost multi-paragraph briefs exactly this way on 2026-07-27 — both sessions came
+  // up briefless and sat idle until their orchestrator re-asked, and the only outward symptom was one
+  // missing clause in the ok line. `spawn`'s body is OPTIONAL, so there is nothing to refuse here;
+  // stdin itself says which case this is, so take the body the caller obviously meant.
+  if (raw == null && stdinHasBody()) return readFileSync(0, 'utf8')
   if (raw != null && looksSpliced(raw)) {
     process.stderr.write(
       `tg ${verb}: refusing — this body has tg's own output spliced into it, which means your shell\n` +
