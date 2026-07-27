@@ -25,10 +25,13 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   Pass a pre-fix copy of the page: every silence check must FAIL
     node workline.mjs [page]      # the working row's type and its clock — one line one font, never
                                   #   backward, ticker torn down with the row (same page-path control)
-    node workpin.mjs [page]       # the working row pinned bottom-left at EVERY transcript length: the
-                                  #   same two states measured in one browser, plus the guards that
-                                  #   the long state didn't move, the feed isn't bottom-aligned, and
-                                  #   no bubble shrink-wrapped (same page-path control)
+    node workpin.mjs [page]       # the working row STATIC above the composer: same viewport position
+                                  #   at the top/middle/bottom of a long transcript and at every
+                                  #   transcript length, the feed's box ending above it (so nothing
+                                  #   can be occluded), plus the guards that the feed isn't
+                                  #   bottom-aligned and no bubble shrink-wrapped. Its checks were
+                                  #   redesigned when the row left the feed — the header lists which
+                                  #   were dropped, kept, re-aimed and added (same page-path control)
     node minislash.mjs [outdir]   # slash commands typed into a mini app chat, END TO END: the shipped
                                   #   page on the LIVE server, real composer, real send button, real
                                   #   throwaway session. Nothing stubbed. Includes the settings.json

@@ -3,17 +3,34 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-// The working row is pinned to the bottom left of the feed AT EVERY TRANSCRIPT LENGTH.
+// The working row sits in a STATIC place: just above the composer, at the feed's left gutter, and it
+// does not move when the transcript is scrolled or when the transcript is a different length.
 //
-// It used to be an ordinary last-child of #dfeed, so with two messages on screen it rendered just
-// under the lowest bubble, halfway up the page, and only reached the bottom once the transcript was
-// long enough to fill the scroller. Same element, two different places, depending on nothing the
-// reader cares about.
+// REDESIGNED for that spec. It previously proved "pinned to the bottom-left of the FEED", which was
+// a real property this file established, so the replacement is spelled out rather than quietly
+// rewritten:
+//   · DROPPED "the row sits on the feed's bottom padding" — the row is no longer inside #dfeed, so
+//     the feed's padding is not what it rests on. Replaced by: a fixed gap above the COMPOSER.
+//   · DROPPED "long: the row still follows the last message, separated only by that message's own
+//     margin" — that WAS the old behaviour and is now precisely the defect: following the last
+//     message is what made it scroll away. Replaced by the scroll-invariance check.
+//   · DROPPED "short: the row is genuinely detached from the last message" — it is detached in every
+//     state by construction now, which the position checks already say.
+//   · KEPT unchanged: both fixtures, "renders in both states", "same position in both states",
+//     "short: the messages still start at the top", and all three bubble-geometry controls
+//     (right-aligned user bubble, its 88% cap, left-aligned reply) — those guard the layout change
+//     underneath this one, and none of them is about where the row lives.
+//   · KEPT but RE-AIMED: the left-gutter check now measures the GLYPH rather than the row's border
+//     box. Same claim, and it has to be: inside the feed the row's box began at the gutter, while as
+//     a sibling strip its box spans the full width and the gutter is its own padding. Measuring the
+//     box would have reported 0 and called a correct layout broken.
+//   · ADDED: identical viewport position at the top, middle and bottom of a long transcript; the
+//     feed's box ends above the row (nothing can be occluded); the last message clears the row when
+//     scrolled to the very bottom.
 //
-// Everything here is measured from getBoundingClientRect, because "the CSS says bottom" and "the
-// pixels are at the bottom" are different claims. The two states are rendered in the SAME browser
-// against the SAME page, so the comparison is not against a remembered number.
-// Pre-fix control:  node workpin.mjs old.html  — the SHORT-state checks must fail there.
+// Everything here is measured from getBoundingClientRect, because "the CSS says above the composer"
+// and "the pixels are above the composer" are different claims.
+// Pre-fix control:  node workpin.mjs old.html  — the scroll-invariance checks must FAIL there.
 
 const LIGHT = { "bg-color": "#ffffff", "secondary-bg-color": "#f1f1f1", "text-color": "#000000",
                 "hint-color": "#707579", "link-color": "#2481cc", "button-color": "#2481cc", "button-text-color": "#ffffff" };
@@ -24,13 +41,13 @@ const OUT = process.argv[3] || mkdtempSync(join(tmpdir(), "workpin-"));
 const STATUS = { verb: "Incubating", elapsed: "2m 11s", tokens: "4.7k tokens" };
 const base = { sid: "abc", name: "cc-bridge", working: true, cwd: "~/projects/cc-bridge", model: "Opus 5", effort: "high", status: STATUS };
 const ts = 1785200000000;
-// (a) a chat with one or two short messages — the state that was broken.
+// (a) a chat with one or two short messages.
 const SHORT = { ...base, items: [
   { role: "user", text: "pin the working line", ts },
   { role: "assistant", text: "On it.", ts },
 ] };
-// (b) a transcript long enough to overflow the scroller several times over — the state that was
-// already right and must stay byte-identical.
+// (b) a transcript long enough to overflow the scroller several times over — the only state that can
+// scroll at all, and therefore the only one in which "does not move when scrolled" means anything.
 const LONG = { ...base, items: Array.from({ length: 24 }, (_, i) => i % 2
   ? { role: "assistant", text: `Reply ${i}. ` + "Long enough to wrap onto a second line so the feed really overflows. ".repeat(2), ts }
   : { role: "user", text: `Question ${i}, also long enough to wrap across more than one line in the bubble.`, ts }) };
@@ -52,7 +69,7 @@ async function measure(b, feed, vars, shot) {
   }, { feed, session: SESSION });
   await p.waitForTimeout(900);   // README rule 2: idle past the first repaint and the glyph timer
   if (shot) await p.screenshot({ path: shot });
-  const m = await p.evaluate(() => {
+  const read = () => p.evaluate(() => {
     const r = el => { const b = el.getBoundingClientRect(); return { top: b.top, bottom: b.bottom, left: b.left, right: b.right, h: b.height }; };
     const feedEl = document.getElementById("dfeed");
     const work = document.getElementById("dwork");
@@ -60,13 +77,18 @@ async function measure(b, feed, vars, shot) {
     const user = msgs.find(m => m.classList.contains("user"));
     const asst = msgs.find(m => m.classList.contains("assistant"));
     return {
-      feed: r(feedEl), work: work ? r(work) : null,
+      feed: r(feedEl), work: work ? r(work) : null, composer: r(document.querySelector(".composer")),
+      // WHERE THE ROW READS, not where its box starts. The row used to sit inside the feed's padded
+      // content box, so its border box began at the gutter; as a sibling strip its box spans the full
+      // width and the gutter is its own padding. The glyph is the first ink either way, so measuring
+      // it is what makes "the same horizontal spot" the same claim before and after.
+      glyph: work && work.querySelector(".g") ? r(work.querySelector(".g")) : null,
       first: msgs.length ? r(msgs[0]) : null,
       last: msgs.length ? r(msgs[msgs.length - 1]) : null,
       user: user ? r(user) : null, asst: asst ? r(asst) : null,
-      // A flex item with an auto margin and an `auto` cross size is sized to its CONTENT. That is
-      // how a column layout silently shrink-wraps every short user bubble, so the width is measured
-      // against the cap the bubble is supposed to be filling rather than left to the eye.
+      // A flex item with an auto margin and an `auto` cross size is sized to its CONTENT. That is how
+      // a column layout silently shrink-wrapped every short user bubble once, so the width is
+      // measured against the cap the bubble is supposed to be filling rather than left to the eye.
       // getComputedStyle hands back the SPECIFIED percentage for max-width, not a used px value, so
       // the cap is resolved here against the feed's own content width.
       userMax: (() => {
@@ -76,14 +98,27 @@ async function measure(b, feed, vars, shot) {
         const mw = getComputedStyle(user).maxWidth;
         return mw.endsWith("%") ? content * parseFloat(mw) / 100 : parseFloat(mw);
       })(),
-      // The last message's OWN bottom margin — the long-state gap below is measured against this
-      // rather than against zero, because that margin is the rhythm every reply already carries.
-      lastGap: msgs.length ? parseFloat(getComputedStyle(msgs[msgs.length - 1]).marginBottom) : 0,
       overflow: feedEl.scrollHeight - feedEl.clientHeight,
+      scrollTop: feedEl.scrollTop,
       padBottom: parseFloat(getComputedStyle(feedEl).paddingBottom),
       padLeft: parseFloat(getComputedStyle(feedEl).paddingLeft),
     };
   });
+  const at = async where => {
+    await p.evaluate(w => {
+      const f = document.getElementById("dfeed");
+      f.scrollTop = w === "top" ? 0 : w === "mid" ? Math.round((f.scrollHeight - f.clientHeight) / 2) : f.scrollHeight;
+    }, where);
+    await p.waitForTimeout(250);   // let the scroll settle before reading pixels (README rule 2)
+    // The MIDDLE of a long transcript is the state that tells the two designs apart on sight: the row
+    // is on screen above the composer here, and was somewhere off in the scrollback before. Shot for
+    // that reason — the bottom-scrolled state looks identical either way and proves nothing visually.
+    if (shot && where === "mid") await p.screenshot({ path: shot.replace(/\.png$/, "-mid.png") });
+    return read();
+  };
+  const m = await read();
+  m.scroll = { top: await at("top"), mid: await at("mid"), bottom: await at("bottom") };
+  if (shot) await p.screenshot({ path: shot.replace(/\.png$/, "-scrolled.png") });
   await p.close();
   return m;
 }
@@ -95,34 +130,45 @@ for (const [theme, vars] of [["dark", null], ["light", LIGHT]]) {
   console.log(`\n--- ${theme} ---`);
   console.log("  short:", JSON.stringify(s.work), "overflow", Math.round(s.overflow));
   console.log("  long: ", JSON.stringify(l.work), "overflow", Math.round(l.overflow));
+  console.log("  long scrolled:", ["top", "mid", "bottom"].map(k => `${k}@${Math.round(l.scroll[k].scrollTop)} → bottom ${l.scroll[k].work ? l.scroll[k].work.bottom.toFixed(1) : "-"}`).join(" · "));
 
   // The fixtures have to actually BE the two states, or every check below is measuring one thing twice.
   check(s.overflow <= 0, `FIXTURE: the short transcript does not overflow (${Math.round(s.overflow)}px)`);
   check(l.overflow > 200, `FIXTURE: the long transcript overflows several screens (${Math.round(l.overflow)}px)`);
+  check(l.scroll.top.scrollTop === 0 && l.scroll.bottom.scrollTop > 200,
+    `FIXTURE: the long transcript really scrolled (${Math.round(l.scroll.top.scrollTop)} → ${Math.round(l.scroll.bottom.scrollTop)})`);
 
   check(!!s.work && !!l.work, "the row renders in both states");
-  // THE ASK, stated as one number: same place, both states.
-  check(!!s.work && !!l.work && near(s.work.bottom, l.work.bottom) && near(s.work.left, l.work.left),
-    `same position in both states  (short bottom ${s.work?.bottom.toFixed(1)} left ${s.work?.left.toFixed(1)} · long bottom ${l.work?.bottom.toFixed(1)} left ${l.work?.left.toFixed(1)})`);
-  // …and that place is the bottom left of the feed's own content box, not merely "equal to itself".
+  // THE ASK, as two numbers: same place at every scroll position, same place in both states.
+  const at = l.scroll;
+  check(!!at.top.work && !!at.mid.work && !!at.bottom.work
+    && near(at.top.work.bottom, at.mid.work.bottom) && near(at.top.work.bottom, at.bottom.work.bottom)
+    && near(at.top.glyph.left, at.bottom.glyph.left),
+    `the row does not move when the transcript is scrolled  (top ${at.top.work ? at.top.work.bottom.toFixed(1) : "-"} · mid ${at.mid.work ? at.mid.work.bottom.toFixed(1) : "-"} · bottom ${at.bottom.work ? at.bottom.work.bottom.toFixed(1) : "-"})`);
+  check(!!s.work && !!l.work && near(s.work.bottom, l.work.bottom) && near(s.glyph.left, l.glyph.left),
+    `same position in both states  (short bottom ${s.work ? s.work.bottom.toFixed(1) : "-"} left ${s.work ? s.work.left.toFixed(1) : "-"} · long bottom ${l.work ? l.work.bottom.toFixed(1) : "-"} left ${l.work ? l.work.left.toFixed(1) : "-"})`);
+
   for (const [name, m] of [["short", s], ["long", l]]) {
-    check(!!m.work && near(m.feed.bottom - m.work.bottom, m.padBottom),
-      `${name}: the row sits on the feed's bottom padding  (${m.work ? (m.feed.bottom - m.work.bottom).toFixed(1) : "-"} vs ${m.padBottom})`);
-    check(!!m.work && near(m.work.left - m.feed.left, m.padLeft),
-      `${name}: the row sits on the feed's left padding  (${m.work ? (m.work.left - m.feed.left).toFixed(1) : "-"} vs ${m.padLeft})`);
+    // Where "static" actually is: a small gap above the composer, outside the scroller.
+    check(!!m.work && m.work.bottom <= m.composer.top + 0.5 && m.composer.top - m.work.bottom < 20,
+      `${name}: the row sits just above the composer  (${m.work ? (m.composer.top - m.work.bottom).toFixed(1) : "-"}px gap)`);
+    // The feed's own box ends above the row, so no message can be underneath it — which is why this
+    // needs no backdrop and the feed needs no permanently reserved strip.
+    check(!!m.work && m.feed.bottom <= m.work.top + 0.5,
+      `${name}: the feed ends above the row — nothing can be occluded  (feed bottom ${m.feed.bottom.toFixed(1)} vs row top ${m.work ? m.work.top.toFixed(1) : "-"})`);
+    // The same horizontal spot it has always occupied: the feed's left gutter.
+    check(!!m.glyph && near(m.glyph.left - m.feed.left, m.padLeft),
+      `${name}: the row's text keeps the feed's left gutter  (${m.glyph ? (m.glyph.left - m.feed.left).toFixed(1) : "-"} vs ${m.padLeft})`);
   }
-  // The long state was already right, and the fix must not have bought the short case with it: in a
-  // full transcript the row still follows the last message immediately, with nothing pushed between.
-  check(!!l.work && !!l.last && near(l.work.top - l.last.bottom, l.lastGap, 1),
-    `long: the row still follows the last message, separated only by that message's own margin  (${l.work && l.last ? (l.work.top - l.last.bottom).toFixed(1) : "-"} vs ${l.lastGap})`);
-  // The counterpart, and the guard against "fixing" this by bottom-aligning the whole feed: a short
-  // transcript's messages still START at the top. Only the row moved.
+  // Scrolled to the very bottom is where an overlay treatment would collide with the newest message.
+  check(!!at.bottom.last && !!at.bottom.work && at.bottom.last.bottom <= at.bottom.work.top + 0.5,
+    `scrolled to the bottom, the last message still clears the row  (${at.bottom.last && at.bottom.work ? (at.bottom.work.top - at.bottom.last.bottom).toFixed(1) : "-"}px)`);
+  // The guard against "fixing" this by bottom-aligning the whole feed: a short transcript's messages
+  // still START at the top. Only the row moved.
   check(!!s.first && near(s.first.top - s.feed.top, 12, 1),
     `short: the messages still start at the top  (first message ${s.first ? (s.first.top - s.feed.top).toFixed(1) : "-"}px below the feed top)`);
-  check(!!s.work && !!s.last && s.work.top - s.last.bottom > 200,
-    `short: the row is genuinely detached from the last message  (${s.work && s.last ? (s.work.top - s.last.bottom).toFixed(0) : "-"}px of free space)`);
-  // Column layout is what pins the row, so the two bubble alignments are re-measured rather than
-  // assumed: the user's bubble stays right, the session's reply stays full-width left.
+  // The layout underneath the row changed with it, so the bubble geometry is re-measured rather than
+  // assumed: the user's bubble stays right, at its cap, and the session's reply stays left.
   check(!!s.user && near(s.user.right, s.feed.right - s.padLeft, 1),
     `short: the user bubble is still right-aligned  (${s.user ? (s.feed.right - s.user.right).toFixed(1) : "-"}px from the edge)`);
   check(!!s.user && near(s.user.right - s.user.left, s.userMax, 1),

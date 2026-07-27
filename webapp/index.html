@@ -305,35 +305,26 @@
   /* Drill-in (session detail) */
   #drill { position: fixed; inset: 0; background: var(--bg); display: none; flex-direction: column; z-index: 5; padding-top: var(--safe-top); }
   #drill.show { display: flex; }
-  /* A COLUMN, and the only thing that buys is a bottom for `.work` to reach: an auto top margin
-     needs free space to absorb, and a block container has none to give. Everything else about the
-     feed is unchanged by it — the rows were already full-width blocks capped at max-width, which is
-     exactly what a stretched flex item is, and the user bubble's `margin-left: auto` right-aligns
-     in the cross axis the same way it did as a block margin. Both re-measured, not assumed
-     (scripts/webapp-measure/workpin.mjs). */
-  #dfeed { flex: 1; overflow-y: auto; padding: var(--sp-3); display: flex; flex-direction: column; }
-  /* NOTHING IN A SCROLLER SHRINKS. This one line is what the column above costs, and it is not
-     optional: a flex item's automatic minimum size is its content — EXCEPT when it has
-     `overflow: hidden`, where the spec makes it zero. `.msg.clip` (a collapsed long message) is
-     exactly that, and flex items shrink by default, so once the transcript wanted more room than the
-     scroller had, the algorithm crushed precisely the collapsed cards — 268px down to 69px for a
-     bubble and 53px for a prose reply, measured — while every short message, whose overflow is
-     visible, kept its size. The absolutely-positioned fold bar then painted over what text was left.
-     The give-away that it is shrinkage and not the fold: a squashed feed does NOT overflow, because
-     it was crushed until it fitted. Reaching for a min-height on `.msg` instead would fix the height
-     and leave every future overflow:hidden child (a thumbnail, a code block, the next card) shrinkable
-     for the same reason. scripts/webapp-measure/squash.mjs measures both kinds and the pinning. */
-  #dfeed > * { flex-shrink: 0; }
+  /* A PLAIN BLOCK again, deliberately rather than by neglect. It was a flex column for exactly one
+     reason — `.work`'s `margin-top: auto` needed free space to absorb, which a block has none of —
+     and that row has left the scroller entirely, so the column had no remaining job. Keeping it
+     would have meant keeping `#dfeed > * { flex-shrink: 0 }` alongside it, because a flex item with
+     `overflow: hidden` has an automatic minimum size of ZERO and shrinks by default: that is what
+     crushed every collapsed long message to a sliver in 0.4.135 (268px → 69px for a bubble, 53px for
+     a prose reply, with the fold bar painting over the remains). A block container has no shrink
+     algorithm, so that entire class of defect is gone by construction instead of held off by a rule.
+     scripts/webapp-measure/squash.mjs is the guard if anyone makes it flex again. */
+  #dfeed { flex: 1; overflow-y: auto; padding: var(--sp-3); }
   /* ASYMMETRIC padding, and the asymmetry is the point: the bubble hugs the meta block far tighter
      than it pads a line of text, which is what makes the time read as tucked into the corner. Pulling
      all four sides in instead would drag the top edge onto the first line and change every bubble
      that is already right. Only the BOTTOM moves (8 → 3). */
-  /* `width: 100%` restates what a BLOCK already did, and it is here because the feed is a flex
-     column now (see #dfeed). A flex item whose cross size is `auto` and which carries an auto margin
-     is sized to its CONTENT, so `.msg.user`'s `margin-left: auto` quietly turned every short bubble
-     into a shrink-wrapped one — a change to every message in the app, bought by a fix to one status
-     row. A definite width restores the old geometry exactly: 88% wide, the auto margin taking the
-     remaining 12% and holding the bubble right. Measured both ways in workpin.mjs. */
+  /* `width: 100%` restates what a block already does, and it stays. It was added when the feed was a
+     flex column, where a cross size of `auto` plus `.msg.user`'s `margin-left: auto` shrink-wrapped
+     every short bubble; the feed is a block again, so the declaration is now belt to the block
+     layout's braces. Kept rather than removed because it is the one line that makes the 88%-cap
+     geometry independent of which layout the feed happens to use — and workpin.mjs measures that cap
+     on every run, so it is a checked restatement, not a guess. */
   .msg { width: 100%; max-width: 88%; margin-bottom: var(--sp-2); padding: var(--sp-2) 11px 3px; border-radius: var(--r-md); font-size: var(--t-msg); white-space: pre-wrap; word-break: break-word; display: flow-root; }
   .msg.user { background: var(--btn); color: var(--btn-text); margin-left: auto; border-bottom-right-radius: var(--r-xs); }
   .msg.user.pending { opacity: .55; }
@@ -428,14 +419,19 @@
      `tabular-nums` — the SAME family at the SAME size, selecting its fixed-width digits — because
      the clock now ticks every second and proportional digits would shove the token text sideways on
      every one of them. The verb is the part that ellipsizes; the numbers never truncate. */
-  /* `margin-top: auto` is the whole pin, and it is one declaration because it says two things at
-     once. With a short transcript it eats the feed's free space and drops the row onto the bottom
-     padding; with a transcript that overflows there is no free space, the auto resolves to 0, and
-     the row goes back to sitting immediately under the last message — which is where it already was
-     and where it has to stay. A `position: sticky` bottom would also pin it, and would additionally
-     drag it over the messages whenever you scrolled up to read; free space is the honest mechanism
-     here, because the ask is about where the row RESTS, not about keeping it on screen. */
-  .work { display: flex; align-items: baseline; gap: 8px; padding: 3px 0 7px; margin-top: auto; color: var(--hint); font-size: var(--t-meta); }
+  /* STATIC, and structurally so: the row lives in #dworkhost, a sibling of the scroller, so there is
+     nothing for it to scroll WITH. It used to be the feed's last child held down by `margin-top:
+     auto`, which put it in the right RESTING place and still carried it away up the page the moment
+     you scrolled back through the transcript.
+     In flow rather than overlaid, and that is the design decision worth stating: an overlay above the
+     feed would need a backdrop so text never showed through it, plus a permanently reserved strip of
+     feed padding so the newest message did not sit under it at rest — and it would still collide with
+     text mid-scroll. A sibling cannot occlude anything, needs no backdrop, and costs the feed the
+     row's own height only while a turn is actually running.
+     The 12px below matches what the feed's bottom padding used to give it, so the row's distance to
+     the composer is unchanged; the 12px sides are the feed's own gutter, which is what keeps it in
+     the same horizontal spot it has always had. */
+  .work { display: flex; align-items: baseline; gap: 8px; padding: 3px var(--sp-3) 7px; margin-bottom: var(--sp-3); color: var(--hint); font-size: var(--t-meta); }
   .work .g { width: 1.1em; flex: none; text-align: center; }
   .work .v { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .work .m { flex: none; white-space: nowrap; font-variant-numeric: tabular-nums; }
@@ -711,6 +707,10 @@
     <button class="chatbtn stop" id="dstop" title="Interrupt" aria-label="Interrupt this session"><svg viewBox="0 0 24 24"><rect x="5.55" y="5.55" width="3.9" height="12.9" rx="1.7" fill="currentColor"/><rect x="14.55" y="5.55" width="3.9" height="12.9" rx="1.7" fill="currentColor"/></svg></button>
   </div>
   <div id="dfeed"></div>
+  <!-- The working row's home: OUTSIDE the scroller, so "static" is structural rather than a position
+       trick. Empty and zero-height whenever nothing is running — paintWork() creates and removes the
+       row inside it, and its lifecycle is untouched by the move. -->
+  <div id="dworkhost"></div>
   <div class="composer">
     <div class="inputwrap">
       <!-- Text only, no icon and no emoji, by the owner's call: the model name is the label. It leads
@@ -1531,13 +1531,19 @@ function paintWork() {
     el = document.createElement("div");
     el.className = "work"; el.id = "dwork";
     el.innerHTML = '<span class="g">' + WORK_GLYPHS[workPhase] + '</span><span class="v"></span><span class="m"></span>';
-    feed.appendChild(el);
+    // Into the host BESIDE the feed, never into the feed: that is the whole of "static". Everything
+    // else here — when it appears, when it goes, the past-tense verb, both timers — is unchanged.
+    $("dworkhost").appendChild(el);
   }
   el.querySelector(".v").textContent = st ? st.verb + "…" : "Working…";
   paintWorkMeta();
   startWorkGlyph();
   startWorkTick();
-  if (stuck) feed.scrollTop = feed.scrollHeight;   // the row it just gained would otherwise push the newest message out of view
+  // The feed is a flex:1 sibling of the row's host, so a row appearing SHRINKS the scroller by its
+  // height. scrollTop doesn't move with it, which slides the newest message out of view for a reader
+  // sitting at the bottom — the same 60px re-pin that covered the row being added as a child covers
+  // the container getting shorter, and it is measured either way (workpin.mjs, squash.mjs).
+  if (stuck) feed.scrollTop = feed.scrollHeight;
 }
 function startWorkGlyph() {
   if (workTimer || matchMedia("(prefers-reduced-motion: reduce)").matches) return;

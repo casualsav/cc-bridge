@@ -84,12 +84,19 @@ const m = await p.evaluate(() => {
     clientH: feed.clientHeight,
     scrolls: feed.scrollHeight > feed.clientHeight,
     display: getComputedStyle(feed).display, dir: getComputedStyle(feed).flexDirection,
+    // Can this feed shrink its children AT ALL? That — not any particular layout — is the condition
+    // the squash needs. A block container has no shrink algorithm; a flex one does unless every
+    // child opts out. Written as the invariant rather than as "the feed is a flex column", which is
+    // what this check said while the column existed and would have had to be silently rewritten the
+    // day the column left.
+    shrinkable: /flex/.test(getComputedStyle(feed).display)
+      && [...feed.children].some(el => getComputedStyle(el).flexShrink !== "0"),
   };
 });
 
 console.log(JSON.stringify(m, null, 1));
 // The fixture has to actually reproduce the conditions, or every check below passes vacuously.
-check(m.display === "flex" && m.dir === "column", `the feed is still the flex column 0.4.123 made it (${m.display}/${m.dir})`);
+check(!m.shrinkable, `the feed cannot shrink its children (${m.display}${/flex/.test(m.display) ? "/" + m.dir : ""}) — the condition the squash needs`);
 check(m.wants > m.clientH * 2, `the fixture wants ${Math.round(m.wants)}px in a ${m.clientH}px scroller — the state in which flex shrinking happens at all`);
 check(m.clips.length === 8, `eight long messages collapsed behind a fold (${m.clips.length})`);
 // A healthy feed SCROLLS. A squashed one doesn't have to — it shrank until it fitted — so this is
