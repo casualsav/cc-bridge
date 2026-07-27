@@ -102,6 +102,7 @@ async function measure(b, feed, vars, shot) {
       scrollTop: feedEl.scrollTop,
       padBottom: parseFloat(getComputedStyle(feedEl).paddingBottom),
       padLeft: parseFloat(getComputedStyle(feedEl).paddingLeft),
+      padTop: parseFloat(getComputedStyle(feedEl).paddingTop),
     };
   });
   const at = async where => {
@@ -165,7 +166,11 @@ for (const [theme, vars] of [["dark", null], ["light", LIGHT]]) {
     `scrolled to the bottom, the last message still clears the row  (${at.bottom.last && at.bottom.work ? (at.bottom.work.top - at.bottom.last.bottom).toFixed(1) : "-"}px)`);
   // The guard against "fixing" this by bottom-aligning the whole feed: a short transcript's messages
   // still START at the top. Only the row moved.
-  check(!!s.first && near(s.first.top - s.feed.top, 12, 1),
+  // Measured against the feed's OWN top padding rather than the 12 it used to be: the chat header
+  // now floats over the scroller, so that padding is the header's footprint plus the gutter (64) and
+  // a literal here would fail on a correct page. The guard is unchanged — bottom-aligning the feed
+  // puts the first message hundreds of pixels down, not one padding down.
+  check(!!s.first && near(s.first.top - s.feed.top, s.padTop, 1),
     `short: the messages still start at the top  (first message ${s.first ? (s.first.top - s.feed.top).toFixed(1) : "-"}px below the feed top)`);
   // The layout underneath the row changed with it, so the bubble geometry is re-measured rather than
   // assumed: the user's bubble stays right, at its cap, and the session's reply stays left.

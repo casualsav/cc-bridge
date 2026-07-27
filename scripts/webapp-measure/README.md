@@ -47,6 +47,17 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   Carries a session that stays live throughout as the control, and
                                   #   asserts on the measured seconds — a pre-fix daemon fails it at
                                   #   ~33s rather than passing slowly, and shoots the 💀 card it serves
+    node header.mjs [page]        # the chat header: three containers ONE height, a name one scale
+                                  #   step above the cwd, a capsule 20% narrower than its span, and
+                                  #   chips the transcript passes BEHIND — hit-tested, not rect maths
+                                  #   (a clipped message still REPORTS an overlapping rect, so the
+                                  #   obvious check passes on the in-flow layout). Same page-path
+                                  #   control: nine checks must fail on a pre-change copy
+    node stage.mjs [page]         # composer attachments: a picked file WAITS with an ✕ instead of
+                                  #   uploading, the typed text rides as its caption, ✕ and a session
+                                  #   switch both discard it. Every upload is recorded, so "nothing
+                                  #   was sent yet" is measured rather than assumed. Same page-path
+                                  #   control: the pre-change page fires two captionless uploads
     node slashcmd.mjs [page]      # a local command: invocation folded with its output, in prose, with
                                   #   no escape codes left in it. Carries three controls — an unparsed
                                   #   row that MUST leak, a model id whose literal [1m] must survive,

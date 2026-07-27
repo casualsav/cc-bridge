@@ -58,12 +58,25 @@
        that, so the three share a height by construction. It ran the other way once, off the
        reference's mic ratio (81.0 : 66.7 → 48.6), which pinned the row at 48.
        The line boxes are px, not --lh-snug: 1.25 on the 11px sub gives 13.75, and a fractional row
-       height puts .chatbtn's integer padding back on a half pixel. 20/14 are --lh-snug rounded, so
-       the sum is 44 — under a toolbar row, and exactly the 44px touch floor it may not go below.
-       Keep --hbtn-d MINUS --hbtn-glyph EVEN (44 - 24 = 20): the button centres its glyph with half
-       the difference as padding, and an odd one lands it on a half pixel — see .chatbtn. */
-    --h-l1: 20px; --h-l2: 14px; --h-pad: 5px;
+       height puts .chatbtn's integer padding back on a half pixel.
+       The name is --t-meta now, one step above the cwd's --t-stamp, by the owner's ask for a shorter
+       row — so the first line box is 16 rather than 20, and --h-pad came down 5 → 3 on a second pass,
+       which lands the row at 36. That is BELOW the 44px touch floor this comment used to call
+       unbreakable: the owner asked for the height twice, so the floor is spent knowingly rather than
+       forgotten — and the WIDTH is what buys it back, see --hbtn-w. Height alone should not go lower.
+       Keep both button axes MINUS --hbtn-glyph EVEN (36 - 24 = 12, 44 - 24 = 20): the button centres
+       its glyph with half the difference as padding, and an odd one lands it on a half pixel — see
+       .chatbtn. That parity is why the first line box is 16 and not the 15 (12 x --lh-snug) the name's
+       own type would give. */
+    --h-l1: 16px; --h-l2: 14px; --h-pad: 3px;
     --hbtn-d: calc(var(--h-l1) + var(--h-l2) + 2 * var(--h-pad));
+    /* The circles are not circles any more — 8px wider than tall, by the owner's ask, so they read as
+       rounded controls rather than dots. Which is also what keeps the shrinking row honest: at 44 x 36
+       the touch target has the same area it had when the row was 44 square, just distributed the way a
+       thumb actually lands on a header. Paired with a radius of half the HEIGHT (a stadium), never
+       `50%` — a percentage radius on a non-square box draws an ellipse, whose flanks then disagree
+       with the capsule's own ends. */
+    --hbtn-w: calc(var(--hbtn-d) + 8px);
     --hbtn-glyph: 24px;
     /* Those three containers are one family, so their raised look is one constant rather than the
        same two shadows written out per container. */
@@ -75,6 +88,12 @@
        fallback — the @supports below is what makes it translucent, so an engine without
        color-mix() renders exactly today's chip instead of nothing. */
     --chip-fill: var(--sec);
+    /* …and one frost, for the same reason. It is what makes 82% legible: the row floats over the
+       transcript now, and unblurred the words behind the capsule read THROUGH the name — the colour
+       and motion of a passing bubble is the point, its text is not. 12px over 6 by eye against a
+       bright user bubble, where 6 still let whole words resolve. An engine without backdrop-filter
+       simply gets the translucent chip, which is the state this shipped in an hour ago. */
+    --chip-blur: blur(12px);
     /* The paperclip glyph. Its own constant rather than a step off --sp-*, for the reason --fold-h
        gives above: it is a geometric size answering to the reference, not a spacing choice. */
     --clip-d: 24px;
@@ -177,7 +196,20 @@
      row holds one identically-sized circle on each side, so the space either side of the capsule is
      symmetric and centring within it centres against the ROW. Add a third control and that stops
      being true — give the side slots equal fixed widths at that point. */
-  #drill .vhead { --title-align: center; margin: 10px 10px 2px; padding: 0; border-bottom: none;
+  /* It FLOATS over the feed, and that is what makes the translucent chips mean anything. --chip-fill
+     has been 82% of --sec for a while, but the row sat in the flex column ABOVE the scroller, so the
+     18% it let through was the page's own --bg — a translucent surface over nothing, which paints
+     exactly like a solid one. Taking it out of flow puts the transcript underneath, so a message
+     genuinely passes behind the chips as it scrolls. The feed pays for the space it no longer loses
+     to the row (see #dfeed's top padding); anything less and the first message opens under the back
+     button. z-index because #dfeed is a later sibling and would otherwise paint over it. */
+  /* `top: --safe-top` and NOT `top: 0`, which is the trap this cost a measured failure to find: an
+     absolutely positioned box's containing block is its ancestor's PADDING box, so #drill's
+     padding-top — the whole fullscreen offset mechanism — does not move it. In flow the row was
+     pushed clear of Telegram's ✕ pill for free; out of flow it has to ask for the same offset by
+     name. scripts/webapp-measure/fullscreen.mjs is what says so (drillhead moved 0.00px of 93). */
+  #drill .vhead { --title-align: center; position: absolute; top: var(--safe-top); left: 0; right: 0; z-index: 2;
+    margin: 10px 10px 2px; padding: 0; border-bottom: none;
     background: transparent; gap: 6px; }
   /* SELF-CONTAINED, and a single class on purpose. These buttons are deliberately NOT .ghost, and the
      shared appearance deliberately does NOT live on a `#drill .vhead > *` rule: the base used to be
@@ -190,15 +222,18 @@
      is what makes the three read as one row of containers rather than three unrelated shapes.
      No ::after touch-target lift any more: it existed to bring a 34px button up to the 44px standard,
      and the button now meets 44 on its own — which is why --hbtn-d's floor is that number. */
-  .chatbtn { width: var(--hbtn-d); height: var(--hbtn-d); border: none; border-radius: 50%;
+  .chatbtn { width: var(--hbtn-w); height: var(--hbtn-d); border: none; border-radius: calc(var(--hbtn-d) / 2);
     background: var(--chip-fill); box-shadow: var(--chip-lift); color: var(--text); cursor: pointer; flex: none;
+    backdrop-filter: var(--chip-blur); -webkit-backdrop-filter: var(--chip-blur);
     /* The PADDING is what fixes the glyph's origin — an integer, so it lands on whole pixels at any
        button size. Centring it by halving flex free space instead is what put the 19-in-34 button's
        glyph half a pixel down and right: 15px of free space halves to 7.5, and Blink snaps the SVG's
        paint origin up to the whole pixel. Measured at exactly +0.50, +0.50 on both of these buttons
        before this change — the same defect fixed on the composer mic, which CLAUDE.md had recorded
-       here as merely suspected. The flex box below then has zero free space left to halve. */
-    padding: calc((var(--hbtn-d) - var(--hbtn-glyph)) / 2);
+       here as merely suspected. The flex box below then has zero free space left to halve.
+       TWO axes now that the button is wider than it is tall, and both have to stay integers — which
+       is the whole reason --hbtn-w moves in even steps off --hbtn-d. */
+    padding: calc((var(--hbtn-d) - var(--hbtn-glyph)) / 2) calc((var(--hbtn-w) - var(--hbtn-glyph)) / 2);
     display: flex; align-items: center; justify-content: center; }
   .chatbtn svg { width: var(--hbtn-glyph); height: var(--hbtn-glyph); display: block; }
   /* 24px, up from 19. Sized against the owner's reference rather than by eye: its paperclip carries
@@ -217,24 +252,39 @@
      number rather than setting it, and earns its keep in one case: #dsub EMPTY, which a deep-linked
      open really renders (openDrill runs before the snapshot lands). An empty block box is 0 tall,
      so without it the capsule would collapse between two taller circles. */
+  /* …and 20% NARROWER than the gap it spans, by the owner's ask — the capsule was reaching for both
+     circles and reading as a bar. Expressed as symmetric margins rather than a width so the capsule
+     stays centred and the buttons stay pinned to the row's ends: the span is (100% - 2 x --hbtn-w -
+     2 x 6px gap), and a tenth of that off each side is a fifth off the whole. The percentage resolves
+     against .vhead's content box, which is what makes it track the viewport instead of a guess.
+     It is --hbtn-w and not --hbtn-d in here, and that is the one thing to fix if the buttons ever stop
+     being square-ish: this is the only place the row's WIDTH budget is written down. */
   .dtitle { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center;
+    margin-inline: calc(10% - 0.2 * var(--hbtn-w) - 1.2px);
     min-height: var(--hbtn-d); padding: var(--h-pad) var(--sp-3); border-radius: calc(var(--hbtn-d) / 2);
     background: var(--chip-fill); box-shadow: var(--chip-lift);
+    backdrop-filter: var(--chip-blur); -webkit-backdrop-filter: var(--chip-blur);
     line-height: var(--lh-snug); text-align: var(--title-align, left); }
   .dtitle .nmrow { display: flex; align-items: center; gap: 7px; min-width: 0; justify-content: var(--title-align, flex-start); }
-  /* An inert mirror of the status dot on the trailing side. Without it the dot widens the name row on
-     one side only, so the centred NAME lands ~9px right of the centred subtitle — two lines of one
-     title block on different axes, which is precisely the "slightly off" that gets noticed without
-     being diagnosed. Cheaper and less fragile than taking the dot out of flow. */
-  .dtitle .nmrow::after { content: ""; width: 9px; flex: none; }
+  /* The dot is PART of the centred unit, not a marginal glyph hanging off it — the owner's call, and
+     the reversal of a deliberate decision, so it is worth saying what was traded. A 9px inert mirror
+     used to sit here on the trailing side, which centred the NAME text and let the dot hang left of
+     the axis. The name then agreed with the cwd below it, and the dot+name group did not. Now the
+     group centres, the dot's spacing is symmetric with the row's own ends, and the name text sits
+     ~8px right of the cwd's centre. Both are "off" against something; the owner picked which. Do not
+     restore the mirror without asking — it looks like a missing-spacer bug and is not one. */
   /* A long session name truncates rather than shoving the title into a control. It stays centred until
      it fills the space, then behaves like any other overlong label. */
   /* flex: 0 1 auto DEFEATS the generic `.name { flex: 1 }` above. Inheriting it made the name box span
      the whole row, so `justify-content` on .nmrow was inert and the status dot sat pinned at the title
      block's left edge, 77px from the name it labels and touching the back button — the centring looked
      like a bug rather than a decision, and the indicator lost its referent. */
-  /* One step down each (title → body, meta → stamp); these two line boxes are the row's height. */
-  .dtitle .name { flex: 0 1 auto; min-width: 0; font-size: var(--t-body); line-height: var(--h-l1); font-weight: var(--w-semi); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* ONE step apart, and that is the whole rule: the name is --t-meta against the cwd's --t-stamp,
+     the closest the scale gets without collapsing them. It was --t-body (16), two steps clear, and
+     shrinking it is what lets the row come down to 40. The pair now separates by WEIGHT and colour
+     rather than by size — --w-semi against --hint-raised — so the bold is load-bearing here in a way
+     it was not at 16px: drop it and the two lines become one indistinguishable grey block. */
+  .dtitle .name { flex: 0 1 auto; min-width: 0; font-size: var(--t-meta); line-height: var(--h-l1); font-weight: var(--w-semi); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .dtitle .sub { display: block; font-size: var(--t-stamp); line-height: var(--h-l2); color: var(--hint-raised); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   /* The interrupt keeps NO rule of its own: same fill and same glyph as the back chip, by the owner's
      call, so the base rule above is the whole of it. That supersedes an optical correction that shrank
@@ -314,7 +364,11 @@
      a prose reply, with the fold bar painting over the remains). A block container has no shrink
      algorithm, so that entire class of defect is gone by construction instead of held off by a rule.
      scripts/webapp-measure/squash.mjs is the guard if anyone makes it flex again. */
-  #dfeed { flex: 1; overflow-y: auto; padding: var(--sp-3); }
+  /* The top padding is the floating header's whole footprint — its 10px top margin, its own height,
+     its 2px bottom margin — plus the --sp-3 every other edge gets. It is the scroller's START
+     position, not a gap in the page: the row is out of flow, so without it the first message opens
+     behind the chips instead of below them. Derived from --hbtn-d so it follows the row's height. */
+  #dfeed { flex: 1; overflow-y: auto; padding: calc(var(--hbtn-d) + 24px) var(--sp-3) var(--sp-3); }
   /* ASYMMETRIC padding, and the asymmetry is the point: the bubble hugs the meta block far tighter
      than it pads a line of text, which is what makes the time read as tucked into the corner. Pulling
      all four sides in instead would drag the top edge onto the first line and change every bubble
@@ -378,7 +432,9 @@
      text, which here is the card's own fill and not the page. Left at the --bg default it paints a
      band of page colour across the card, the same defect the assistant bubble left behind when its
      fill was removed. */
-  .msg.agent.clip::after { background: linear-gradient(transparent, var(--sec)); }
+     It sets the veil's TARGET only — the eased ramp itself lives once on `.msg.clip::after`, and
+     overriding `background` here instead would silently drop that easing back to a linear fade. */
+  .msg.agent.clip::after { --fold-to: var(--sec); }
   .msg.agent.clip .more { background: var(--sec); }
   /* A LINE, not a card: it drops .chip's fill, which belongs to the sessions list — a chip that
      paints a surface here reads as a nested message. Demoted by size and colour, never by weight.
@@ -428,13 +484,37 @@
      feed padding so the newest message did not sit under it at rest — and it would still collide with
      text mid-scroll. A sibling cannot occlude anything, needs no backdrop, and costs the feed the
      row's own height only while a turn is actually running.
-     The 12px below matches what the feed's bottom padding used to give it, so the row's distance to
-     the composer is unchanged; the 12px sides are the feed's own gutter, which is what keeps it in
-     the same horizontal spot it has always had. */
-  .work { display: flex; align-items: baseline; gap: 8px; padding: 3px var(--sp-3) 7px; margin-bottom: var(--sp-3); color: var(--hint); font-size: var(--t-meta); }
+     The gap below is 6, half the 12 the feed's bottom padding used to give it — the owner asked the
+     row down toward the field it belongs to. Only the BOTTOM margin moves: the 12px sides are the
+     feed's own gutter, which is what keeps the row in the same horizontal spot it has always had, and
+     the 3/7 padding is the line's own breathing room. Deliberately NOT --sp-2: this is the distance
+     between two surfaces, and it is set against the composer rather than picked off the scale. */
+  /* TWO distances, not one, which is why the container's gap is the tight one and .m buys its own
+     back: the spinner belongs to the verb it is spinning for (4px, the owner's ask — closer still and
+     it collides with the glyph box's own centred slack), while the clock and the token count are a
+     separate clause and keep the 8px they always had. There is no per-item gap in flex, so the wider
+     distance has to be a margin on the item that wants it. */
+  /* The row's own padding is NOT what the eye measures, which is why this pair looks lopsided and is
+     not: the air ABOVE the line is the feed's bottom padding (12) plus this padding-top, and the air
+     BELOW it is this padding-bottom plus the composer's own padding-top (8). The owner asked for the
+     two to match and for the line to sit lower, so 0/4 puts both gaps at 12 — down from 15 above and
+     21 below (a 7px pad and a 6px margin, now gone). Move either neighbour's padding and this pair
+     has to be re-derived from it, never nudged. */
+  /* The feed's floor gutter is DOUBLED UP while the row is showing: the last message already carries
+     its own 16px bottom margin, and the feed then adds 12 more before the row starts — 28 above
+     against 12 below, which is the asymmetry the owner could see. The gutter exists to keep the last
+     message off the composer, and while the row is there the ROW is that separation, so the FEED
+     gives it back for as long as the row is up.
+     It has to come off the feed's own padding and NOT off the row (a negative margin on the host
+     reads identically at rest and is wrong in motion): `overflow` clips at the PADDING box, so a
+     12px gutter the row overhangs is 12px of scroller in which a passing message paints behind the
+     row. Taking the padding away moves the clip edge with it, which is what keeps "a sibling cannot
+     occlude anything" true while scrolling rather than only at rest. */
+  #drill.working #dfeed { padding-bottom: 0; }
+  .work { display: flex; align-items: baseline; gap: 4px; padding: 0 var(--sp-3) var(--sp-2); color: var(--hint); font-size: var(--t-meta); }
   .work .g { width: 1.1em; flex: none; text-align: center; }
   .work .v { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .work .m { flex: none; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .work .m { flex: none; white-space: nowrap; font-variant-numeric: tabular-nums; margin-left: 4px; }
   /* Reduced motion stops the CYCLE, not the signal — the glyph rests on a single character while the
      elapsed and token counts keep climbing on the poll, which is the liveness cue that matters and
      is text, not animation. Handled in startWorkGlyph(), which never starts the timer; the resting
@@ -444,6 +524,21 @@
   /* No divider rule: in the reference the capsule's own fill is what separates the composer from the
      feed. The rim belongs on the capsule, where it lights an actual edge — put it on this full-bleed
      strip instead and it draws the very hairline the line above says the design doesn't have. */
+  /* The staged-attachment strip. It shares the composer's own 10px inset so the thumbnail's left
+     edge sits on the capsule's, and it is `display: none` when empty rather than an empty flex row —
+     an empty row still pays its padding, which would lift the composer by 10px with nothing in it.
+     The ✕ hangs OUTSIDE the thumbnail's corner (a negative offset, not a corner overlay) because a
+     44px thumb has no room to spare and the mark has to stay a 20px touch target. */
+  #dstage { display: none; align-items: center; gap: var(--sp-2); padding: var(--sp-1) 10px var(--sp-2); }
+  #dstage.on { display: flex; }
+  #dstage .thumb { position: relative; flex: none; }
+  #dstage .thumb img, #dstage .thumb .doc { width: 44px; height: 44px; border-radius: 10px; display: block;
+    object-fit: cover; background: var(--sec); font-size: 22px; line-height: 44px; text-align: center; }
+  #dstage .x { position: absolute; top: -6px; right: -6px; width: 20px; height: 20px; padding: 0; border: none;
+    border-radius: 50%; background: var(--bg); color: var(--text); box-shadow: var(--chip-lift); cursor: pointer;
+    display: flex; align-items: center; justify-content: center; }
+  #dstage .x svg { width: 12px; height: 12px; display: block; }
+  #dstage .nm { min-width: 0; font-size: var(--t-meta); color: var(--hint-raised); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .composer { display: flex; gap: var(--sp-2); padding: var(--sp-2) 10px calc(var(--sp-2) + env(safe-area-inset-bottom)); align-items: flex-end; }
   /* `align-items: flex-end`, and it is load-bearing twice over. It is what keeps the mic ROUND —
      the default `stretch` would pull a 40px button to the pill's full content height and the glyph
@@ -470,10 +565,20 @@
      and since `align-items: flex-end` pins it to the capsule's floor, half the difference between it
      and the mic is exactly what puts the two back on one axis. It stays bottom-anchored when the
      field grows, like the clip and the mic. */
+  /* The left inset is CONCENTRIC, the same rule the mic's ring answers to at the other end: the
+     capsule's left arc is centred --pill-h-1/2 in from its edge, so putting the chip's own arc centre
+     on that line — an extra (--pill-h-1 - --dial-h)/2 - --pill-ring, i.e. 3px past the ring — makes
+     the two curves share a centre and the blue end read as nested inside the grey one rather than
+     crowded against it. It holds at EVERY composer height, since both the chip and the capsule's
+     bottom corner are pinned to the same floor. The owner asked for "a little more from the left";
+     this is the amount the geometry names, rather than a nudge. */
   .dialpill { flex: none; height: var(--dial-h); margin-bottom: calc((var(--mic-d) - var(--dial-h)) / 2);
+    margin-left: calc((var(--pill-h-1) - var(--dial-h)) / 2 - var(--pill-ring));
     border: none; border-radius: calc(var(--dial-h) / 2); background: var(--btn); color: var(--btn-text);
     font-size: var(--t-sub); line-height: 1; padding: 0 12px; cursor: pointer;
-    display: flex; align-items: center; gap: 5px; max-width: 40%; }
+    /* 3px, down from 5: the two words are one label, and the tighter set is what pays for the inset
+       above without the chip eating more of the field. Not 0 — they are still two words. */
+    display: flex; align-items: center; gap: 3px; max-width: 40%; }
   /* The model name carries the weight; the effort rides beside it at the same size, unbolded — the
      one is what you picked, the other is how hard it is being pushed. */
   .dialpill b { font-weight: var(--w-semi); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -529,13 +634,44 @@
   .msg.clip { position: relative; max-height: 268px; overflow: hidden; padding-bottom: var(--fold-h); }
   /* The fold fades to whatever is BEHIND the text. That used to be the assistant bubble's fill;
      now the assistant sits on the page, so the base case is --bg and the user bubble keeps its
-     own override below. Left at --sec this paints a grey band across the page background. */
-  .msg.clip::after { content: ""; position: absolute; left: 0; right: 0; bottom: calc(var(--fold-h) - 4px); height: 52px; background: linear-gradient(transparent, var(--bg)); pointer-events: none; }
-  .msg.user.clip::after { background: linear-gradient(transparent, var(--btn)); }
+     own override below. Left at --sec this paints a grey band across the page background.
+     ONE gradient for all three grounds now, with only the target colour overridden — --fold-to is
+     what the veil resolves to, so the eased ramp below is written once instead of per variant.
+
+     TWO numbers carry the whole look, and the old pair is why it read as a cheap rule across the
+     text. (a) It has to reach FULL opacity exactly where the text is cut — `bottom: --fold-h`, the
+     line the content box ends on. It used to stop 4px short of that, so the last row of glyphs was
+     still ~90% legible when max-height sliced it horizontally and the label's opaque strip began:
+     a hard edge through the middle of a line, which is precisely the artefact. (b) The taper has to
+     be long enough to read as depth rather than as a band — 112px, about five lines of the message,
+     against the 52 it was.
+
+     And the ramp is EASED, not linear. A linear alpha ramp has a visible onset: the eye finds the
+     row where the veil starts and reads it as an edge, which is the same complaint one gradient
+     further up. The stops approximate a smoothstep, so it leaves the text imperceptibly and lands
+     on the ground firmly. color-mix carries the alpha; the plain two-stop declaration above it is
+     the fallback an engine without color-mix keeps, which is exactly today's look. */
+  .msg.clip::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 136px;
+    --fold-to: var(--bg);
+    background: linear-gradient(transparent, var(--fold-to));
+    background: linear-gradient(to bottom,
+      color-mix(in srgb, var(--fold-to) 0%, transparent) 0%,
+      color-mix(in srgb, var(--fold-to) 6%, transparent) 19%,
+      color-mix(in srgb, var(--fold-to) 20%, transparent) 34%,
+      color-mix(in srgb, var(--fold-to) 44%, transparent) 47%,
+      color-mix(in srgb, var(--fold-to) 70%, transparent) 58%,
+      color-mix(in srgb, var(--fold-to) 90%, transparent) 67%,
+      var(--fold-to) 74%);
+    pointer-events: none; }
+  .msg.user.clip::after { --fold-to: var(--btn); }
   /* ONE line, always: `.msg.clip`'s padding-bottom reserves exactly this bar's height, so a label
      that wraps to two lines overflows the strip and draws over the text. Ellipsis rather than wrap,
      and the time leads so it is never the part that gets cut. */
-  .msg.clip .more { position: absolute; left: 0; right: 0; bottom: 0; text-align: center; font-size: var(--t-meta); line-height: 1; opacity: .8; padding: var(--sp-1) 0 6px; background: var(--bg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* ABOVE the veil, and it has to say so: ::after is generated content, so it paints after every
+     child — including this label. The veil runs to the element's floor now (it is what puts a clean
+     band of ground under the last ghost of text instead of cutting it with this strip's edge), which
+     without the z-index would paint straight over the label. */
+  .msg.clip .more { position: absolute; left: 0; right: 0; bottom: 0; z-index: 1; text-align: center; font-size: var(--t-meta); line-height: 1; opacity: .8; padding: var(--sp-1) 0 6px; background: var(--bg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .msg.user.clip .more { background: var(--btn); }
   .msg.clip.open { max-height: none; padding-bottom: var(--sp-2); }
   .msg.clip.open::after { display: none; }
@@ -711,6 +847,12 @@
        trick. Empty and zero-height whenever nothing is running — paintWork() creates and removes the
        row inside it, and its lifecycle is untouched by the move. -->
   <div id="dworkhost"></div>
+  <!-- A picked file waits HERE until you send it. Above the capsule rather than inside it: the
+       capsule's geometry is derived from the mic down to the half pixel, and a chip in that flex row
+       would take its width from the textarea. A sibling strip pushes the composer down instead,
+       which the feed absorbs the same way it absorbs a growing field. Empty and zero-height with
+       nothing staged. -->
+  <div id="dstage"></div>
   <div class="composer">
     <div class="inputwrap">
       <!-- Text only, no icon and no emoji, by the owner's call: the model name is the label. It leads
@@ -1232,8 +1374,17 @@ function dialParts(s) {
 }
 // ---- Drill-in: conversation feed + composer + stop/compact ----
 let drillSid = null, drillTimer = null, lastDrill = null, optimistic = [];
+// The file picked but not yet sent, and its preview URL. Declared HERE with the rest of the drill's
+// state rather than beside the attach handlers: openDrill() clears the stage, and a deep-linked open
+// can run before the script reaches those handlers — a `let` further down would be in its temporal
+// dead zone and throw on the first render of a linked session.
+let staged = null, stagedUrl = "";
 function openDrill(sid, name) {
   drillSid = sid; lastDrill = null; optimistic = []; workOptimisticAt = 0; feedSig = "";
+  // A file staged in one session must not follow you into the next: attachToSession reads drillSid at
+  // UPLOAD time, so a stage that survived the switch would silently deliver to whichever session you
+  // opened last. Same reasoning as the optimistic rows cleared above it.
+  clearStage();
   $("dname").textContent = name;
   // Subtitle is the session's cwd, and the model/effort reading that used to live here moved to the
   // composer's dial pill (mode is gone from this screen entirely — it stays on the sessions list).
@@ -1523,6 +1674,9 @@ function paintWork() {
   // Every teardown goes through here, /clear's silent path included: no status and no optimistic
   // window means the row goes and BOTH timers stop with it. A ticker that outlived its row would be
   // a clock counting for a turn that ended.
+  // The class rides with the row, on the SAME two paths that create and remove it, so the feed's
+  // floor gutter can never be missing while there is no row to stand in for it.
+  $("drill").classList.toggle("working", !!show);
   if (!show) { if (el) el.remove(); stopWorkGlyph(); stopWorkTick(); workClock = null; return; }
   if (st) workOptimisticAt = 0;   // the real thing arrived
   syncWorkClock(st && st.elapsed);
@@ -1689,6 +1843,15 @@ $("dstop").onclick = async () => { if (await sessionAct("stop")) showOk("Interru
 // you navigated into, and the list is where you can see which of several you mean.
 $("dsend").onclick = async () => {
   const ta = $("dtext"), text = ta.value.trim();
+  // A staged file wins the send: the text rides along as its caption, which is the same shape the
+  // picker used to fire immediately. Sending with a file and no text is legal — that is the old
+  // attach-and-go, just with a chance to change your mind first.
+  if (staged) {
+    const file = staged;
+    ta.value = ""; clearStage();   // clearStage syncs the composer, so this covers both
+    attachToSession(file, { caption: text, label: "📎 " + file.name + (text ? " — " + text : "") });
+    return;
+  }
   if (!text) return;
   ta.value = ""; syncComposerMode();
   // Optimistic: the bubble shows the instant you hit send (dimmed while in flight), instead of
@@ -1733,12 +1896,52 @@ async function attachToSession(file, { caption = "", voice = false, label }) {
   if (voice && d.delivered) o.text = "🎤 " + d.delivered;   // swap the "Transcribing…" stub for the transcript
   paintFeed(); setTimeout(renderDrill, 800);
 }
+// Picking a file STAGES it; sending is what uploads it. It used to fire the upload straight out of
+// the picker with whatever was already typed as the caption, so attaching a photo and then writing
+// about it was impossible — the photo was gone before you could type, and there was no way to change
+// your mind. The file is held in memory until send, which also means discarding costs nothing: the
+// server never heard about it.
+function clearStage() {
+  if (stagedUrl) URL.revokeObjectURL(stagedUrl);   // the preview holds the blob alive until it is released
+  staged = null; stagedUrl = "";
+  renderStage();
+}
+function renderStage() {
+  const s = $("dstage");
+  s.textContent = "";
+  s.classList.toggle("on", !!staged);
+  if (staged) {
+    const thumb = document.createElement("div"); thumb.className = "thumb";
+    // An image previews; anything else gets a glyph, because a document has no picture to show and a
+    // broken <img> is worse than an icon.
+    if (/^image\//.test(staged.type)) {
+      stagedUrl = URL.createObjectURL(staged);
+      const img = document.createElement("img"); img.src = stagedUrl; img.alt = staged.name;
+      thumb.appendChild(img);
+    } else {
+      const doc = document.createElement("div"); doc.className = "doc"; doc.textContent = "📄";
+      thumb.appendChild(doc);
+    }
+    const x = document.createElement("button"); x.className = "x";
+    x.title = "Discard this attachment"; x.setAttribute("aria-label", "Discard this attachment");
+    x.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+    x.onclick = clearStage;
+    thumb.appendChild(x);
+    const nm = document.createElement("div"); nm.className = "nm"; nm.textContent = staged.name;
+    s.append(thumb, nm);
+  }
+  // The send button has to appear for a staged file with no text at all, and the field's growth is
+  // measured against a feed the strip just resized — both live in here.
+  syncComposerMode();
+}
 $("datt").onclick = () => { if (drillSid) $("dfile").click(); };
 $("dfile").onchange = () => {
   const f = $("dfile").files[0]; $("dfile").value = "";
   if (!f || !drillSid) return;
-  const ta = $("dtext"), caption = ta.value.trim(); ta.value = ""; syncComposerMode();
-  attachToSession(f, { caption, label: "📎 " + f.name + (caption ? " — " + caption : "") });
+  if (stagedUrl) URL.revokeObjectURL(stagedUrl);
+  staged = f; stagedUrl = "";
+  renderStage();
+  $("dtext").focus();   // the point of staging is that you write about it now
 };
 // Voice: tap to record, tap again to stop-and-send. Hidden entirely where the webview has no
 // recording API (Telegram Desktop) — cheap feature-detect, per the owner's ask; a permission
@@ -1791,7 +1994,10 @@ function growComposer() {
 // send handing the draft back, the attach caption, and record start/stop — so the grow and the
 // collapse-back-to-one-line both come for free rather than needing a call at each site.
 function syncComposerMode() {
-  const showSend = !VOICE_OK || (!!$("dtext").value.trim() && !rec);
+  // A staged file counts as something to send, exactly as typed text does — otherwise attaching a
+  // photo and sending it with no caption would need you to type a character first to make the button
+  // appear at all.
+  const showSend = !VOICE_OK || ((!!$("dtext").value.trim() || !!staged) && !rec);
   $("dsend").style.display = showSend ? "flex" : "none";
   $("dmic").style.display = showSend ? "none" : "flex";
   growComposer();

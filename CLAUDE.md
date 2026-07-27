@@ -207,7 +207,11 @@ two, since only one of them drags the composer's geometry with it.
 
 **The composer capsule is derived from the mic, never the reverse.** `--pill-h-1 = --mic-d +
 2·--pill-ring` (40 + 12 = 52px). Nothing sets a pill height by hand. The ring is *also* the pill's
-right padding, so changing it moves the textarea's width too.
+right padding, so changing it moves the textarea's width too. The model/effort chip's left inset
+answers to the **same concentricity** at the other end: `--pill-ring` plus
+`(--pill-h-1 − --dial-h)/2 − --pill-ring` puts its arc centre on the capsule's own, 9px in, at every
+composer height — because chip and capsule corner share a floor. It is geometry, not a nudge, so a
+"tidier" round number breaks the nesting.
 
 **The corner radius derives from the ONE-LINE height, not the live height.** `border-radius:
 calc(var(--pill-h-1) / 2)`. Tie it to the current height and a six-line pill becomes a 74px
@@ -266,6 +270,35 @@ viewport against ~93px of chrome (measured, `scripts/webapp-measure/fullscreen.m
 grows toward the top the fix is a `max-height`, not a top offset: `align-items: flex-end` overflows
 *past* a container's padding.
 
+**The collapsed-message fold is a veil to the element's FLOOR, not a band above the label.** Two
+numbers carry it and both were wrong in the way that reads as cheap: it must reach full opacity
+*above* the label (the veil runs to `bottom: 0` and hits 100% at 74% of its 136px, leaving a clean
+band of ground), and the ramp must be **eased** — a linear alpha ramp has a visible onset the eye
+reads as an edge. Stopping the veil flush with the label's strip is what sliced the last row of
+glyphs horizontally while they were still ~90% legible. The ramp is written **once** with
+`--fold-to` as the target colour (`--bg`, `--btn` for the user bubble, `--sec` for an agent card);
+overriding `background` on a variant instead silently drops the easing back to linear. And
+`.msg.clip .more` needs its `z-index: 1` — `::after` is generated content, so it paints after every
+child, and a veil that reaches the floor would otherwise cover the label it exists to reveal.
+
+**A picked file is STAGED, never sent from the picker.** `#dstage` holds it above the composer with
+a thumbnail and an ✕ until you press send, and the composer's text goes with it as the caption. It
+sits outside `.inputwrap` on purpose: a chip inside that flex row would take its width from the
+textarea and disturb geometry derived down to the half pixel. Three things are easy to miss and all
+three are measured by `scripts/webapp-measure/stage.mjs` — `syncComposerMode()` must count a staged
+file as something to send (or a photo with no caption can't be sent at all), `openDrill()` must
+clear the stage (`attachToSession` reads `drillSid` at *upload* time, so a stage that survives a
+switch delivers to the wrong session), and the object URL must be revoked on discard.
+
+**The working row's spacing is derived from its NEIGHBOURS, not from its own padding.** The air above
+it is the last message's 16px bottom margin plus the feed's floor gutter; the air below is the row's
+padding plus the composer's own 8px. Equal air means 0 above / 8 below on the row itself — numbers
+that look lopsided in isolation and are not. While the row is up the feed's gutter is doubled up
+with it, so `#drill.working #dfeed` drops it (a class toggled on the same two paths that create and
+remove the row). That compensation belongs on the **feed's padding**, never as a negative margin on
+the host: `overflow` clips at the padding box, so a gutter the row overhangs is a strip of live
+scroller in which a passing message paints behind the row — invisible at rest, wrong in motion.
+
 **Theming ignores `prefers-color-scheme` completely.** Colours come from the `--tg-theme-*`
 properties Telegram injects, with dark fallbacks in `:root`. A light-theme check that sets the media
 feature renders the dark theme and passes without testing anything. Set the variables instead
@@ -277,14 +310,46 @@ page background it painted a grey band.
 standalone circle, each carrying its own `--chip-lift`, with 6px gaps — per the owner's reference,
 where the two circles measure 81.0/80.9px and the capsule 81.7 beside a 66.7px mic, i.e. all three
 the same height. The row is derived **capsule-first**: `--hbtn-d` is `calc(--h-l1 + --h-l2 + 2 ×
---h-pad)` — the pill's own two line boxes plus padding, 44px — and the circles take that, so the
-three stay equal by construction. It ran the other way once, off the reference's mic ratio, which
-pinned the row at 48; `.dtitle`'s `min-height` now restates that number rather than setting it, and
-earns its keep in one case only (`#dsub` empty). The line boxes are px, not `--lh-snug`, because a
-fractional row height puts `.chatbtn`'s integer padding back on a half pixel — and 44 is a floor,
-not a preference: it is the touch target the button used to reach with a `::after` lift. Keep
-`--hbtn-d − --hbtn-glyph` **even** (44 − 24 = 20): `.chatbtn` centres by integer padding, and an
-odd difference reintroduces the paint snap below.
+--h-pad)` — the pill's own two line boxes plus padding, **36px** — and the buttons take that as their
+HEIGHT, so the three stay equal by construction. It ran the other way once, off the reference's mic
+ratio, which pinned the row at 48; `.dtitle`'s `min-height` now restates that number rather than
+setting it, and earns its keep in one case only (`#dsub` empty). The line boxes are px, not
+`--lh-snug`, because a fractional row height puts `.chatbtn`'s integer padding back on a half pixel.
+Keep **both** button axes minus `--hbtn-glyph` **even** (36 − 24 = 12, 44 − 24 = 20): `.chatbtn`
+centres by integer padding on each, and an odd difference reintroduces the paint snap below — that
+parity is why the name's line box is 16 and not the 15 its type would give, and why `--hbtn-w` steps
+by 8. The name is `--t-meta`, **one step** above the cwd's `--t-stamp`; that plus `--h-pad: 3` is
+what brought the row 44 → 36. The pair separates by weight and colour now, so `--w-semi` on `.name`
+is load-bearing in a way it was not at 16px.
+
+**The buttons are not round, and the 44px touch floor is what they are buying back.** `--hbtn-w` is
+`--hbtn-d + 8`, so they are 44 × 36 stadiums — radius `calc(--hbtn-d / 2)`, **never `50%`**, which on
+a non-square box draws an ellipse whose flanks disagree with the capsule's ends. This comment called
+44 an unbreakable floor twice before the owner asked for a shorter row twice; the height is spent
+knowingly and the width holds the target's area. Don't take the height lower. `.dtitle`'s
+`margin-inline` is the ONE place the row's width budget is written down — it reads `--hbtn-w`, and it
+is what to fix if the buttons ever change proportion again.
+
+**The header FLOATS over the feed, and that is what makes the translucency mean anything.**
+`--chip-fill` has been 82% of `--sec` for a while, but the row sat in the flex column *above* the
+scroller, so the 18% it let through was the page's own `--bg` — a translucent surface over nothing
+paints exactly like a solid one, which is how it got reported as solid. `#drill .vhead` is
+`position: absolute` and `#dfeed`'s top padding is the row's whole footprint (`--hbtn-d + 24`), so
+the transcript passes underneath. Two traps: the offset is **`top: var(--safe-top)`, not `top: 0`** —
+an abspos box's containing block is the ancestor's *padding* box, so `#drill`'s padding-top (the
+entire fullscreen-offset mechanism) does not move it, and `fullscreen.mjs` measured exactly that
+regression at 0.00px of 93. And checking "a message is behind the chips" by **rect overlap cannot
+fail**: a message clipped by the scroller still reports a rect spanning the header band, so it
+passes on the in-flow layout too — hit-test with `elementsFromPoint` (`header.mjs` does). `--chip-blur`
+is the third member of the `--chip-fill`/`--chip-lift` family: without it the words behind the
+capsule read *through* the name, and a bubble's colour and motion is the point, its text is not.
+
+**The title centres on the dot+name GROUP, not on the name.** The dot is part of the centred unit.
+A 9px inert `.nmrow::after` mirror used to sit on the trailing side so the *name text* centred and
+the dot hung left of the axis — that agreed the name with the cwd below it and disagreed the group
+with the row. The owner picked the other trade, so the name text now sits ~8px right of the cwd's
+centre. Both states are "off" against something; this one is chosen. Restoring the mirror looks like
+fixing a missing spacer and is a revert.
 
 **Nothing in the header is conditional, and that is a retired case rather than a forgotten one.**
 The only runtime writes to it are `#dsub`'s content (`openDrill`) and `#ddot`'s class (`renderDrill`).

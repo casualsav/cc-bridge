@@ -14,7 +14,7 @@ export const DEFAULT_PROJECTS_DIR = join(homedir(), '.claude', 'projects')
 const PROJECTS_DIR = DEFAULT_PROJECTS_DIR
 
 type Usage = { input_tokens?: number; output_tokens?: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number }
-type Entry = { type?: string; subtype?: string; content?: unknown; uuid?: string; timestamp?: string; cwd?: string; isSidechain?: boolean; isMeta?: boolean; message?: { content?: unknown; stop_reason?: string | null; usage?: Usage; model?: string } }
+type Entry = { type?: string; subtype?: string; operation?: string; content?: unknown; uuid?: string; timestamp?: string; cwd?: string; isSidechain?: boolean; isMeta?: boolean; message?: { content?: unknown; stop_reason?: string | null; usage?: Usage; model?: string } }
 
 // Text content of an entry: a bare string, or the joined `text` blocks of a content
 // array (tool_use / thinking blocks contribute nothing).
@@ -501,6 +501,17 @@ function commandItem(raw: string, ts: number, uuid?: string): ConversationItem |
   return null
 }
 
+// The bridge's own envelope around an inbound message. Tolerates a few stray chars before `<tg`
+// (the survey-dismiss "0" era left such entries). Shared by the two paths that can carry one — the
+// delivered user entry and the queued one — so the envelope is parsed in one place.
+function unwrapTg(raw: string): { text: string; img?: string; att?: string } {
+  const m = raw.match(/^[\s\S]{0,3}?<tg([^>]*)>([\s\S]*)<\/tg>/)
+  if (!m) return { text: raw }
+  const img = /img="([^"]+)"/.exec(m[1])?.[1]
+  const att = /att="([^"]+)"/.exec(m[1])?.[1]
+  return { text: m[2].trim(), ...(img ? { img } : {}), ...(att ? { att } : {}) }
+}
+
 function conversationItem(e: Entry): ConversationItem | null {
   const ts = e.timestamp ? Date.parse(e.timestamp) : 0
   const uuid = e.uuid
@@ -517,6 +528,21 @@ function conversationItem(e: Entry): ConversationItem | null {
     const unknown = /^Unknown command:\s*(\S+)/.exec(raw)
     if (unknown) return { role: 'command', text: 'Unknown command', ts, uuid, name: unknown[1] }
     return null
+  }
+  // A message typed WHILE A TURN IS RUNNING is never written as a user entry. The CLI records it as
+  // a pair of `queue-operation` rows — `enqueue` when you press send, `remove` when the turn consumes
+  // it — and writes nothing else, so a reader that looks only at user/assistant entries loses it
+  // completely. Five of the owner's messages vanished from the mini-app feed in one session that way,
+  // which reads as the app dropping what you said rather than as a missing record type. Verified in
+  // the transcript: the queued text appears in NO user entry, so rendering the enqueue cannot
+  // double up. It is the enqueue and not the remove because that is the moment the message was sent —
+  // a message the user cancels out of the queue also removes, and rendering that side would show it
+  // as sent. Those rows carry no uuid, so the timestamp keys them (expansion is by uuid; a queued
+  // message is short and never clipped).
+  if (e.type === 'queue-operation') {
+    if (e.operation !== 'enqueue') return null
+    const raw = typeof e.content === 'string' ? e.content.trim() : ''
+    return raw ? { role: 'user', text: unwrapTg(raw).text, ts, uuid: uuid || `queued-${ts}` } : null
   }
   if (isRealUserText(e)) {
     const raw = textOf(e.message?.content).trim()
@@ -538,13 +564,7 @@ function conversationItem(e: Entry): ConversationItem | null {
       const out = [tagOf(raw, 'bash-stdout'), tagOf(raw, 'bash-stderr')].map(s => s.trim()).filter(Boolean).join('\n')
       return out ? { role: 'user', text: out, ts, uuid, cmd: true } : null
     }
-    // Tolerate a few stray chars before <tg (the survey-dismiss "0" era left such entries).
-    const m = raw.match(/^[\s\S]{0,3}?<tg([^>]*)>([\s\S]*)<\/tg>/)
-    if (m) {
-      const img = /img="([^"]+)"/.exec(m[1])?.[1]
-      const att = /att="([^"]+)"/.exec(m[1])?.[1]
-      return { role: 'user', text: m[2].trim(), ts, uuid, ...(img ? { img } : {}), ...(att ? { att } : {}) }
-    }
+    if (/^[\s\S]{0,3}?<tg[^>]*>/.test(raw)) return { role: 'user', ...unwrapTg(raw), ts, uuid }
     if (/^<command-name>/.test(raw)) return commandItem(raw, ts, uuid)
     return { role: 'user', text: raw, ts, uuid }
   }

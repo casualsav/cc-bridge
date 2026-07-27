@@ -239,6 +239,41 @@ test('recentConversation clamps a huge message for the payload and flags the cut
   expect(u.uuid).toBe('u1')
 })
 
+// A message typed while a turn is running is recorded ONLY as queue-operation rows — the CLI writes
+// no user entry for it, ever. Reading just user/assistant entries silently lost every one of them,
+// which on a phone reads as the app eating what you said. The fixture is the real record shape,
+// copied from a live transcript.
+describe('a message queued mid-turn is still a message', () => {
+  const enq = (content: string, ts: string) => ({ type: 'queue-operation', operation: 'enqueue', timestamp: ts, content })
+  const rm = (content: string, ts: string) => ({ type: 'queue-operation', operation: 'remove', timestamp: ts, content })
+
+  test('the enqueue renders as a user row', () => {
+    const f = fixture([user('<tg 1>first</tg>', 'u1'), enq('typed while you were working', '2026-07-27T13:00:57.661Z')])
+    expect(recentConversation(f, 5).map(r => r.text)).toEqual(['first', 'typed while you were working'])
+  })
+
+  // The pair is enqueue-then-remove, and `remove` is the delivery receipt. Rendering both shows the
+  // message twice; rendering only `remove` would also show a message the user CANCELLED as sent.
+  test('its paired remove does not double it', () => {
+    const ts = '2026-07-27T13:00:57.661Z'
+    const f = fixture([enq('once', ts), rm('once', '2026-07-27T13:01:07.597Z')])
+    expect(recentConversation(f, 5).filter(r => r.text === 'once').length).toBe(1)
+  })
+
+  // Those rows carry no uuid — a null key would collide across every queued message in the feed.
+  test('it is keyed even though the record has no uuid', () => {
+    const f = fixture([enq('a', '2026-07-27T13:00:57.661Z'), enq('b', '2026-07-27T13:02:45.849Z')])
+    const [a, b] = recentConversation(f, 5)
+    expect(a.uuid).toBeTruthy()
+    expect(a.uuid).not.toBe(b.uuid)
+  })
+
+  test('it unwraps the <tg …> envelope like any other inbound message', () => {
+    const f = fixture([enq('<tg 42>from telegram</tg>', '2026-07-27T13:00:57.661Z')])
+    expect(recentConversation(f, 5)[0].text).toBe('from telegram')
+  })
+})
+
 describe('conversationItemFullText — the clamp is a poll cost, not a read limit', () => {
   test('returns the whole message, past CONVO_CAP, for a row the feed clipped', () => {
     const long = 'y'.repeat(9000)
