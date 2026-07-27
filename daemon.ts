@@ -14365,13 +14365,31 @@ async function webappSessionCard(row: { sid: string; name: string; cwd: string; 
   }
 }
 
+// The fleet list holds only sessions that are actually there. A row whose session is gone is dropped
+// on the spot rather than left as a 💀 card until the topic sweep reaps it — measured at ~35s of
+// corpse (the pane vanished 3s after a `tg kill`; the card outlived it by another 32s, waiting on the
+// 30s `discoverPanes` interval to close the topic).
+//
+// "Confirmed dead" is TWO independent dead readings, not one. `paneAlive` and `capturePane` fail
+// CLOSED — a tmux timeout under load reads exactly like a killed pane — which is why discoverPanes
+// already re-checks a lost focus before acting on it. So a dead card is re-read once, in full, and
+// only a second dead reading drops the row; a live re-read is served instead of the stale dead card.
+// Nothing is remembered between polls, so a session that comes back (a `/restart` bouncing its pane,
+// a `tg reopen` respawning it) is listed again by the first read that finds it live — the flicker is
+// the whole of the state.
 async function webappListSessions(): Promise<WebappSessionCard[]> {
   const rows = dashboardSessionRows()
   if (focus.activePaneId) {   // an adopted session outside the store (classic focused loop) is part of the fleet too
     const sid = await sessionForPane(focus.activePaneId).catch(() => null)
     if (sid && !rows.some(r => r.sid === sid)) rows.push({ sid, name: 'Session', cwd: '', agent: 'claude' })
   }
-  return Promise.all(rows.map(webappSessionCard))
+  const cards = await Promise.all(rows.map(webappSessionCard))
+  const confirmed = await Promise.all(cards.map(async (card, i) => {
+    if (card.alive) return card
+    const recheck = await webappSessionCard(rows[i])
+    return recheck.alive ? recheck : null
+  }))
+  return confirmed.filter((c): c is WebappSessionCard => c !== null)
 }
 
 // Drill-in feed: recent conversation (user + assistant), plus the running turn's thoughts + activity.

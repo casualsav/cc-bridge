@@ -1163,6 +1163,9 @@ async function renderSessions() {
   for (const s of SESSIONS) {
     const c = document.createElement("div");
     c.className = "sess";
+    // The dead states below no longer have a producer: /api/sessions drops a session from the list
+    // once two reads confirm it gone (webappListSessions), so a card only exists while its session
+    // does. Kept as the client's own floor, not as a state to design for.
     const dot = !s.alive ? "dead" : s.working ? "on" : "";
     const chips = dialParts(s);
     c.innerHTML =

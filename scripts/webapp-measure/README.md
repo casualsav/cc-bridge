@@ -33,6 +33,12 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   page on the LIVE server, real composer, real send button, real
                                   #   throwaway session. Nothing stubbed. Includes the settings.json
                                   #   byte-identity control for /model
+    node deadcard.mjs [outdir]    # a killed session leaves the fleet list and a revived one comes
+                                  #   back, timed on BOTH surfaces (live /api/sessions + the rendered
+                                  #   tab) against a real throwaway it spawns, kills and reopens.
+                                  #   Carries a session that stays live throughout as the control, and
+                                  #   asserts on the measured seconds — a pre-fix daemon fails it at
+                                  #   ~33s rather than passing slowly, and shoots the 💀 card it serves
     node slashcmd.mjs [page]      # a local command: invocation folded with its output, in prose, with
                                   #   no escape codes left in it. Carries three controls — an unparsed
                                   #   row that MUST leak, a model id whose literal [1m] must survive,
