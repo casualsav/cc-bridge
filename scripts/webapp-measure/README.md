@@ -25,6 +25,10 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   Pass a pre-fix copy of the page: every silence check must FAIL
     node workline.mjs [page]      # the working row's type and its clock — one line one font, never
                                   #   backward, ticker torn down with the row (same page-path control)
+    node workpin.mjs [page]       # the working row pinned bottom-left at EVERY transcript length: the
+                                  #   same two states measured in one browser, plus the guards that
+                                  #   the long state didn't move, the feed isn't bottom-aligned, and
+                                  #   no bubble shrink-wrapped (same page-path control)
     node slashcmd.mjs [page]      # a local command: invocation folded with its output, in prose, with
                                   #   no escape codes left in it. Carries three controls — an unparsed
                                   #   row that MUST leak, a model id whose literal [1m] must survive,

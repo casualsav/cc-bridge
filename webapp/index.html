@@ -305,12 +305,24 @@
   /* Drill-in (session detail) */
   #drill { position: fixed; inset: 0; background: var(--bg); display: none; flex-direction: column; z-index: 5; padding-top: var(--safe-top); }
   #drill.show { display: flex; }
-  #dfeed { flex: 1; overflow-y: auto; padding: var(--sp-3); }
+  /* A COLUMN, and the only thing that buys is a bottom for `.work` to reach: an auto top margin
+     needs free space to absorb, and a block container has none to give. Everything else about the
+     feed is unchanged by it — the rows were already full-width blocks capped at max-width, which is
+     exactly what a stretched flex item is, and the user bubble's `margin-left: auto` right-aligns
+     in the cross axis the same way it did as a block margin. Both re-measured, not assumed
+     (scripts/webapp-measure/workpin.mjs). */
+  #dfeed { flex: 1; overflow-y: auto; padding: var(--sp-3); display: flex; flex-direction: column; }
   /* ASYMMETRIC padding, and the asymmetry is the point: the bubble hugs the meta block far tighter
      than it pads a line of text, which is what makes the time read as tucked into the corner. Pulling
      all four sides in instead would drag the top edge onto the first line and change every bubble
      that is already right. Only the BOTTOM moves (8 → 3). */
-  .msg { max-width: 88%; margin-bottom: var(--sp-2); padding: var(--sp-2) 11px 3px; border-radius: var(--r-md); font-size: var(--t-msg); white-space: pre-wrap; word-break: break-word; display: flow-root; }
+  /* `width: 100%` restates what a BLOCK already did, and it is here because the feed is a flex
+     column now (see #dfeed). A flex item whose cross size is `auto` and which carries an auto margin
+     is sized to its CONTENT, so `.msg.user`'s `margin-left: auto` quietly turned every short bubble
+     into a shrink-wrapped one — a change to every message in the app, bought by a fix to one status
+     row. A definite width restores the old geometry exactly: 88% wide, the auto margin taking the
+     remaining 12% and holding the bubble right. Measured both ways in workpin.mjs. */
+  .msg { width: 100%; max-width: 88%; margin-bottom: var(--sp-2); padding: var(--sp-2) 11px 3px; border-radius: var(--r-md); font-size: var(--t-msg); white-space: pre-wrap; word-break: break-word; display: flow-root; }
   .msg.user { background: var(--btn); color: var(--btn-text); margin-left: auto; border-bottom-right-radius: var(--r-xs); }
   .msg.user.pending { opacity: .55; }
   /* Session replies carry NO bubble: full content width on the page background, as the reference
@@ -404,7 +416,14 @@
      `tabular-nums` — the SAME family at the SAME size, selecting its fixed-width digits — because
      the clock now ticks every second and proportional digits would shove the token text sideways on
      every one of them. The verb is the part that ellipsizes; the numbers never truncate. */
-  .work { display: flex; align-items: baseline; gap: 8px; padding: 3px 0 7px; color: var(--hint); font-size: var(--t-meta); }
+  /* `margin-top: auto` is the whole pin, and it is one declaration because it says two things at
+     once. With a short transcript it eats the feed's free space and drops the row onto the bottom
+     padding; with a transcript that overflows there is no free space, the auto resolves to 0, and
+     the row goes back to sitting immediately under the last message — which is where it already was
+     and where it has to stay. A `position: sticky` bottom would also pin it, and would additionally
+     drag it over the messages whenever you scrolled up to read; free space is the honest mechanism
+     here, because the ask is about where the row RESTS, not about keeping it on screen. */
+  .work { display: flex; align-items: baseline; gap: 8px; padding: 3px 0 7px; margin-top: auto; color: var(--hint); font-size: var(--t-meta); }
   .work .g { width: 1.1em; flex: none; text-align: center; }
   .work .v { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .work .m { flex: none; white-space: nowrap; font-variant-numeric: tabular-nums; }
