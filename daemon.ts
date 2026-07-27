@@ -2242,6 +2242,11 @@ function adoptPane(paneId: string): void {
 // owner's very first message with a walkthrough of a setup he'd already finished. Silence beats a
 // false onboarding claim, so anything undecided announces the plain "Connected".
 async function announceAdopted(paneId: string): Promise<void> {
+  // The fourth of the four: a restart that respawns into a fresh pane adopts it, and adoption
+  // announces. The flag covers the core AND the respawn's boot window, so a discovery sweep that
+  // re-adopts the same pane seconds later stays quiet too — it is the same planned bounce, and the
+  // restart's own message already ends with ✅.
+  if (isPaneRestarting(paneId)) return
   const setup = await settledFirstRunScreen(paneId)
   if (setup) {
     notifyChats('🔗 Found a Claude session on first-run setup — I\'ll walk you through it here ' +
@@ -4380,7 +4385,13 @@ function startPaneWatcher(paneId: string): void {
     () => {
       process.stderr.write(`daemon: pane ${paneId} died\n`)
       const entry = [...sessions.entries()].find(([, s]) => s.paneId === paneId)
-      if (entry) { endSession(entry[0]); return }   // registered session: handles focus + menu
+      // Same withholding for a registered (MCP-mode) session: drop it, but don't announce an ending
+      // that a restart is in the middle of undoing.
+      if (entry) {
+        if (isPaneRestarting(paneId)) dropSession(entry[0])   // registered session: focus handling, no notice
+        else endSession(entry[0])
+        return
+      }
       // Off-MCP pane: drop it; if it was the focused one, the discovery rescan re-adopts a survivor.
       const wasActive = focus.activePaneId === paneId || focus.currentSessionId === paneId
       focus.activePaneId = null; focus.paneWatcher = null
@@ -4390,7 +4401,13 @@ function startPaneWatcher(paneId: string): void {
       if (adoptedPaneId === paneId) adoptedPaneId = null   // clear binding so the rescan re-adopts
       if (wasActive) focus.currentSessionId = null
       const label = sessionNames.get(paneId) || 'Session'
-      if (wasActive) void sessionForPane(paneId, false).catch(() => null).then(sid => announceFocusedExit(label, sid ?? paneId))
+      // A planned bounce is not an ending. This is the DM lane's `🔚 Session "…" ended.` — the second
+      // of the four messages a /restart used to produce, and the one the owner sees, since a
+      // daemon-spawned pane IS its claude process and /exit takes the pane with it. The bookkeeping
+      // above still runs (the pane really is gone); only the announcement is withheld, because the
+      // restart's own message is already saying this in one line. The group lane's equivalent card is
+      // suppressed a few lines up: closeTopicForPane checks the same flag first thing.
+      if (wasActive && !isPaneRestarting(paneId)) void sessionForPane(paneId, false).catch(() => null).then(sid => announceFocusedExit(label, sid ?? paneId))
     },
     async text => { const w = detectWorking(text); if (isTopicMode()) { if (w) void emitTopicTyping(paneId) } else typingPresence.observe(await paneDrivesDmTyping(paneId, w)) },   // live typing signal, every poll — topic mode routes it to the session's topic (transcript signal is blind mid-thinking); DM gated to the pane that owns it
   )
@@ -7087,7 +7104,10 @@ async function relaunchAgentInPane(pane: string, agent: AgentKind, line: string)
 // `id: null` is a CROSS-ENGINE takeover (Claude↔Codex): `--resume` is impossible across providers,
 // so the pane gets the OTHER engine launched fresh instead, with `brief` typed in as its first turn
 // once the composer is up. The fresh launch mints its own new session id — see rebindCrossEngineSession.
-async function restartPaneSessionCore(pane: string, id: string | null, accountOverride?: Account, agentOverride?: AgentKind, brief?: string, status?: { briefDelivered: boolean }, harnessOverride?: HarnessProfile): Promise<string | null> {
+// `onExited` fires once the /exit has actually landed, for a caller driving a self-editing status
+// message — the gap between "typed /exit" and "resumed" is the long part, and a card that sits on
+// its first phase through it reads as stalled.
+async function restartPaneSessionCore(pane: string, id: string | null, accountOverride?: Account, agentOverride?: AgentKind, brief?: string, status?: { briefDelivered: boolean }, harnessOverride?: HarnessProfile, onExited?: () => void): Promise<string | null> {
   const currentAgent = await paneAgentKind(pane)
   const agent = agentOverride ?? currentAgent
   const preCap = await capturePane(pane).catch(() => '')
@@ -7123,6 +7143,7 @@ async function restartPaneSessionCore(pane: string, id: string | null, accountOv
     const run = async () => {
       await sendKeys(pane, agentExitKeys(currentAgent))
       for (let i = 0; i < 40 && await paneClaudeLive(pane); i++) await waitForSettle(pane, 200, 1500)
+      onExited?.()   // the agent is gone (or the pane with it) — everything after this is the resume
       if (!(await paneAlive(pane))) return   // exit closed the pane — respawn below, nothing to type into
       if (id === null) {
         // Cross-engine: unset the stamp BEFORE the new engine boots, so pane discovery restamps to
@@ -9702,6 +9723,10 @@ bot.command('restart', async ctx => {
 // `label` names the session when it isn't the caller's own.
 async function restartTargetSession(ctx: Context, paneId: string, label: string | null): Promise<void> {
   const who = label ? ` <b>@${escapeHtml(label)}</b>` : ''
+  // A restart already owns this pane — its core, or the boot window after a respawn. Say so once and
+  // touch neither the pane nor the first restart's message: two of these interleaving on one pane is
+  // how a session ends up sitting at a bare shell.
+  if (isPaneRestarting(paneId)) { await ctx.reply(`♻️ Already restarting${who} — hold on.`, { parse_mode: 'HTML' }); return }
   if (!onNormalPrompt(await capturePane(paneId))) {
     await ctx.reply(`⚠️ The terminal is on another screen (menu/prompt) — finish or /stop that first, then /restart.`)
     return
@@ -9720,11 +9745,29 @@ async function restartTargetSession(ctx: Context, paneId: string, label: string 
   const file = cwd ? await transcriptForPane(paneId, cwd) : null
   const id = file ? agentSessionId(file) : null
   if (!id) { await ctx.reply(`⚠️ Couldn’t find${who || ' this session'}’s id to resume — restart it manually.`, { parse_mode: 'HTML' }); return }
-  await ctx.reply(`♻️ Restarting${who} — <code>/exit</code> then resume…`, { parse_mode: 'HTML' })
-  const now = await restartPaneSessionCore(paneId, id)
-  if (!now) { await ctx.reply('⚠️ Restart failed — couldn’t bring the session back. Try again, or restart it manually.'); return }
+  // ONE message for the whole restart, edited through its phases. The other three a restart used to
+  // produce were never this handler's: they are the pane-death and pane-adoption announcers firing on
+  // the bounce, and they are gated on isPaneRestarting at their own call sites rather than being
+  // re-routed here — both exist to report UNPLANNED events, and this one is planned.
+  const card = await ctx.reply(`♻️ Restarting${who} — <code>/exit</code> then resume…`, { parse_mode: 'HTML' }).catch(() => null)
+  // Same shape as the revival notices: edit in place, but fall back to a fresh reply if the original
+  // send never landed. Consolidating four messages into one must not buy silence — least of all on
+  // the failure path, which is the one an edit that 400s would swallow.
+  const phase = async (text: string) => {
+    // editText renders HTML by default (the `plain` opt is what turns that off), and every phase
+    // string here is already-rendered Telegram HTML — passing a parse_mode would be both wrong and
+    // silently ignored, since SendOpts has no such field.
+    if (card) await channel.editText({ chatId: String(card.chat.id), messageId: String(card.message_id) }, text).catch(() => {})
+    else await ctx.reply(text, { parse_mode: 'HTML' }).catch(() => {})
+  }
+  const now = await restartPaneSessionCore(paneId, id, undefined, undefined, undefined, undefined, undefined,
+    () => void phase(`♻️ Restarting${who} — exited, resuming…`))
+  // The failure names its phase. "Restart failed" alone leaves the owner unable to tell a session
+  // sitting at a shell (relaunch it) from one that never exited (try again) — and the core already
+  // distinguishes them in its own log.
+  if (!now) { await phase(`⚠️ Restart failed${who} — the session didn’t come back up. Check the terminal, or try again.`); return }
   resetPromptDedup(now)   // re-baseline the (possibly respawned) pane so the resumed REPL's first prompt relays cleanly
-  await ctx.reply(label ? `✅ <b>@${escapeHtml(label)}</b> restarted and resumed.` : '✅ Session restarted and resumed.', { parse_mode: 'HTML' })
+  await phase(label ? `✅ <b>@${escapeHtml(label)}</b> restarted` : '✅ Restarted')
 }
 
 // /rename <name> — silent alias to rename the current (focused) session.
