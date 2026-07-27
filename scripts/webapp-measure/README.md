@@ -22,6 +22,15 @@ somewhere and point at it) before running. Everything renders `file://` — no s
     node agentcard.mjs            # the subagent report card: a fixture transcript through the real
                                   #   parser, plus an unparsed control row and a contrast control
 
+## Known follow-up: block markdown is card-only
+
+`mdReport()` renders headings and bullets for the **agent card body** and nothing else. Assistant
+replies still show `## x` and `- y` literally, through the narrower `md()`. That split is deliberate
+— an agent report is a structured document, a chat reply is prose — and `agentcard.mjs` carries a
+control asserting the assistant row stays literal, so a future widening of `md()` itself shows up as
+a failing check rather than as a silent restyle of every message in the app. Widening it is the
+owner's call, not a cleanup.
+
 ## Two rules, both learned the hard way
 
 **1. Validate the instrument against a known-truth control before believing it.** Three separate

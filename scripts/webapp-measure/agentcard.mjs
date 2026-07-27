@@ -27,7 +27,12 @@ const NOTIFICATION = `<task-notification>
 The working line is parsed in \`transcript.ts\`, and it awaits &lt;N&gt; sessions in sequence.
 
 - one
-- two</result>
+- two
+
+\`\`\`sh
+# not a heading
+- not a bullet
+\`\`\`</result>
 </task-notification>`;
 // A human message that must survive VERBATIM: the entity decoding is scoped to the parsed path, and
 // this is what proves it. If it ever renders as a tag, the decode leaked.
@@ -47,6 +52,9 @@ const items = JSON.parse(execFileSync("bun", ["-e",
 ], { encoding: "utf8" }).trim());
 // The control row, appended AFTER the parse: the payload exactly as the old code passed it through.
 items.push({ role: "user", text: NOTIFICATION, ts: 1785200000000, uuid: "ctrl" });
+// LEAK CONTROL for the block-markdown widening: the same two constructs in an ASSISTANT reply,
+// which must still render literally. Widening md() itself would have moved this row too.
+items.push({ role: "assistant", text: "## x\n- y", ts: 1785200000000, uuid: "asst" });
 
 const FEED = { sid: "abc", name: "cc-bridge", items };
 const SESSION = { sid: "abc", name: "cc-bridge", alive: true, cwd: "~/projects/cc-bridge" };
@@ -79,7 +87,8 @@ const rows = await p.evaluate(() => [...document.querySelectorAll("#dfeed .msg")
   headName: m.querySelector(".ah .nm") ? m.querySelector(".ah .nm").textContent : null,
   status: m.querySelector(".ah .st") ? m.querySelector(".ah .st").textContent : null,
   statusColored: m.querySelector(".ah .st.bad") != null,
-  h2: !!m.querySelector("h2"), li: m.querySelectorAll("li").length, code: !!m.querySelector("code"),
+  mh: [...m.querySelectorAll(".mh")].map(e => e.textContent), code: !!m.querySelector("code"),
+  pre: m.querySelector("pre") ? m.querySelector("pre").textContent : null,
   divs: m.querySelectorAll("div div").length,
 })));
 console.log("rows rendered:", rows.length);
@@ -96,12 +105,21 @@ chk(!!card, "the notification renders as .msg.agent, not as the owner's bubble")
 chk(card && seen(card.text).length === 0, `zero payload markup visible in the card${card ? " (found: " + JSON.stringify(seen(card.text)) + ")" : ""}`);
 chk(card && card.headName === "Agent · Parse CLI working line into feed", `header names the agent (got ${JSON.stringify(card && card.headName)})`);
 chk(card && card.status === "completed" && !card.statusColored, "status is stated, and not coloured when it is the expected one");
-// The app's md() is a deliberate SUBSET — fences, inline code, bold, italic; no headings or lists.
-// The card gets exactly what a reply gets, so `## Conclusion` stays literal here as it does there.
-// Asserted as it IS, not as one might wish: a card that rendered more than a reply would be the
-// inconsistency, and widening md() would restyle every assistant message in the app.
-chk(card && card.code, "the report goes through the same md() a reply does (inline code rendered)");
-chk(card && card.text.includes("## Conclusion"), "…and no more than a reply does — the heading stays literal (see report)");
+// The card body takes BLOCK markdown too — an agent report is a structured document. Headings lose
+// their hashes and bullets become real bullets; inline md is unchanged.
+chk(card && card.code, "inline markdown still renders in the card (code span)");
+chk(card && card.mh.length === 1 && card.mh[0] === "Conclusion" && !card.text.includes("## "),
+  `the heading renders as a heading, hashes gone (got ${card ? JSON.stringify(card.mh) : "no card"})`);
+chk(card && card.text.includes("• one") && card.text.includes("• two") && !card.text.includes("- one"),
+  "list markers render as bullets");
+// Fenced code is split out before the line rules, so a shell comment stays a shell comment.
+chk(card && card.pre && card.pre.includes("# not a heading") && card.pre.includes("- not a bullet"),
+  `inside a code fence, # and - are left alone (${card ? JSON.stringify(card.pre) : "no card"})`);
+// LEAK CONTROL: the widening is scoped to the card. An assistant reply with the same two constructs
+// must be byte-identical to today — if this row ever renders a heading, md() itself was widened.
+const asst = rows.find(r => r.cls.includes("assistant"));
+chk(asst && asst.mh.length === 0 && asst.text.includes("## x") && asst.text.includes("- y"),
+  `CONTROL — an assistant reply still renders ## and - literally (${asst ? JSON.stringify(asst.text.trim().slice(0, 12)) : "missing"})`);
 // The three voices must be three different fills. Blue for the user is today's value, unchanged.
 chk(userRow && userRow.bg === "rgb(82, 136, 193)", `a genuine user message keeps today's blue (${userRow && userRow.bg})`);
 chk(card && card.bg === "rgb(35, 46, 60)", `the card takes the raised surface (${card && card.bg})`);

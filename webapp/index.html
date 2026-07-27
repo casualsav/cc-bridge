@@ -330,6 +330,10 @@
      would be worse than no status at all. */
   .msg.agent .ah .st { flex: none; }
   .msg.agent .ah .st.bad { color: var(--del); }
+  /* A report's headings. One size step above the body and nothing else: <b> already carries the
+     weight, and the pre-wrap newline already carries the break, so a margin here would double-space
+     against it. Scoped to the card — no assistant reply renders one. */
+  .msg.agent .mh { font-size: 1.09em; }
   /* An agent report is long, so it meets the fold — and the fold fades to whatever is BEHIND the
      text, which here is the card's own fill and not the page. Left at the --bg default it paints a
      band of page colour across the card, the same defect the assistant bubble left behind when its
@@ -1191,6 +1195,21 @@ function md(s) {
   h = h.replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,!?:]|$)/g, "$1<i>$2</i>");
   return h;
 }
+// Block markdown — headings and bullets — for the AGENT CARD BODY ONLY. An agent report is a
+// structured document (that is what a delegated task returns); a chat reply is prose, and widening
+// md() itself would restyle every assistant message in the app, which is the owner's call and not
+// this change's. Same sanitizer path: md() still escapes first, so nothing new can inject markup.
+// Fenced blocks are split out BEFORE the line rules run — a `#` or `-` inside code is code, and a
+// line-level regex over md()'s finished output would have rewritten it.
+function mdReport(s) {
+  return s.split(/(```[\s\S]*?```)/).map(part => part.startsWith("```") ? md(part)
+    : md(part)
+      // The container is white-space: pre-wrap, so the source newline already breaks the line and a
+      // heading needs no block box of its own — one size step and the bold is the whole treatment.
+      .replace(/^#{1,6} +(.+)$/gm, '<b class="mh">$1</b>')
+      // The marker becomes a real bullet in place, which keeps whatever indent the agent wrote.
+      .replace(/^([ \t]*)[-*] +/gm, "$1• ")).join("");
+}
 // One feed row → bubble HTML. Slash commands render as a quiet mono chip; attachments as a photo
 // thumbnail (hydrated after paint) / 📎 chip with the caption; assistant text gets light markdown.
 function bubble(i, n) {
@@ -1221,7 +1240,8 @@ function bubble(i, n) {
   const t = full || ((i.img || i.att) && placeholder ? "" : (i.text || ""));
   // An agent's report is prose it wrote, so it goes through the same md() a reply does — the reports
   // are markdown (headings, lists, code) and escaping them showed the source instead of the document.
-  if (t) inner += (i.img ? '<div class="cap">' : "") + (i.role === "assistant" || i.role === "agent" ? md(t) : esc(t)) + (i.img ? "</div>" : "");
+  if (t) inner += (i.img ? '<div class="cap">' : "")
+    + (i.role === "agent" ? mdReport(t) : i.role === "assistant" ? md(t) : esc(t)) + (i.img ? "</div>" : "");
   if (!inner) return "";
   // A long message collapses to a readable height with a tap to open it, rather than running past
   // the screen. `clipped` means the payload clamp really did cut it — say so at the fold, and stop
