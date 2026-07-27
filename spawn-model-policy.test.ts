@@ -11,65 +11,48 @@ const ask = (over: Partial<ModelAsk> = {}): ModelAsk => ({
 })
 
 test('the incident: an agent asking for fable gets the configured default, and the human is asked', () => {
-  expect(decideModel(ask({ requested: 'fable' }))).toEqual({ model: 'opus', ask: true, clamped: 'fable', banned: false })
+  expect(decideModel(ask({ requested: 'fable' }))).toEqual({ model: 'opus', ask: true, clamped: 'fable' })
 })
 
 test('no --model at all is the ordinary spawn — the default, no card', () => {
-  expect(decideModel(ask())).toEqual({ model: 'opus', ask: false, clamped: null, banned: false })
+  expect(decideModel(ask())).toEqual({ model: 'opus', ask: false, clamped: null })
 })
 
 test('asking for exactly the default is not an override', () => {
   // A card here would fire on every well-behaved spawn, which is how a guard becomes noise.
-  expect(decideModel(ask({ requested: 'opus' }))).toEqual({ model: 'opus', ask: false, clamped: null, banned: false })
+  expect(decideModel(ask({ requested: 'opus' }))).toEqual({ model: 'opus', ask: false, clamped: null })
 })
 
-// Until 2026-07-27 every alias was clamped and carded, including cheaper ones. The owner narrowed the
-// CARD to the model the original incident was about (fable) after a probe spawn asking for haiku
-// interrupted him to approve a session that had already started. `haiku` did not become the agent's
-// call in the process — it is banned outright, one test down; `sonnet` is what "ungated" now means.
+// This test said the opposite until 2026-07-27: `haiku` was clamped UP to the opus default and the
+// owner was carded about it. He asked for the gate to fire on Fable alone — the model the incident was
+// actually about — after a probe spawn asking for haiku both billed him for opus and interrupted him to
+// approve a session that had already started. A named model outside the gate is now the agent's call.
 test('a named ungated model is the agent\'s own call — no clamp, no card', () => {
-  expect(decideModel(ask({ requested: 'sonnet' }))).toEqual({ model: 'sonnet', ask: false, clamped: null, banned: false })
-})
-
-// haiku is BANNED, not gated: clamped to the default with no card and no snooze, because there is
-// nothing for a human to decide — the owner ruled on it once, permanently. The caller is still told
-// in-band (`clamped`), which is the whole difference between this and silently lying to it.
-test('a banned model is clamped silently, and the ban outranks every opt-out', () => {
-  expect(decideModel(ask({ requested: 'haiku' }))).toEqual({ model: 'opus', ask: false, clamped: 'haiku', banned: true })
-  expect(decideModel(ask({ requested: 'haiku', policy: 'agent' }))).toMatchObject({ model: 'opus', clamped: 'haiku', banned: true })
-  expect(decideModel(ask({ requested: 'haiku', agentAllowed: ['haiku'] }))).toMatchObject({ model: 'opus', clamped: 'haiku', banned: true })
-  // …and never a card, however long the quiet window has been over.
-  expect(decideModel(ask({ requested: 'haiku', quietUntil: 0 }))).toMatchObject({ ask: false })
-})
-
-// A human picking it in their OWN picker is still their call — the ban is on what an agent may impose.
-test('the ban does not second-guess a human', () => {
-  expect(decideModel(ask({ requested: 'haiku', humanOrigin: true }))).toEqual({ model: 'haiku', ask: false, clamped: null, banned: false })
+  expect(decideModel(ask({ requested: 'haiku' }))).toEqual({ model: 'haiku', ask: false, clamped: null })
+  expect(decideModel(ask({ requested: 'sonnet' }))).toEqual({ model: 'sonnet', ask: false, clamped: null })
 })
 
 test('the gated model is still clamped and still asks', () => {
-  expect(decideModel(ask({ requested: 'fable' }))).toEqual({ model: 'opus', ask: true, clamped: 'fable', banned: false })
+  expect(decideModel(ask({ requested: 'fable' }))).toEqual({ model: 'opus', ask: true, clamped: 'fable' })
 })
 
 test('a human choosing is never clamped and never carded', () => {
-  expect(decideModel(ask({ requested: 'fable', humanOrigin: true }))).toEqual({ model: 'fable', ask: false, clamped: null, banned: false })
+  expect(decideModel(ask({ requested: 'fable', humanOrigin: true }))).toEqual({ model: 'fable', ask: false, clamped: null })
 })
 
 test('policy "agent" restores the old behaviour exactly', () => {
-  expect(decideModel(ask({ requested: 'fable', policy: 'agent' }))).toEqual({ model: 'fable', ask: false, clamped: null, banned: false })
-  expect(decideModel(ask({ policy: 'agent' }))).toEqual({ model: 'opus', ask: false, clamped: null, banned: false })
+  expect(decideModel(ask({ requested: 'fable', policy: 'agent' }))).toEqual({ model: 'fable', ask: false, clamped: null })
+  expect(decideModel(ask({ policy: 'agent' }))).toEqual({ model: 'opus', ask: false, clamped: null })
 })
 
-// The allowlist's own example used to be `['haiku']`, which the ban now overrides (see above). It still
-// does its job for any name that isn't banned — here, letting a fleet spawn sonnet under a fable default.
 test('the named allowlist lets a test fleet spawn without a card — and only for the names in it', () => {
-  expect(decideModel(ask({ requested: 'sonnet', configuredDefault: 'fable', agentAllowed: ['sonnet'] }))).toEqual({ model: 'sonnet', ask: false, clamped: null, banned: false })
-  expect(decideModel(ask({ requested: 'fable', agentAllowed: ['sonnet'] }))).toEqual({ model: 'opus', ask: true, clamped: 'fable', banned: false })
+  expect(decideModel(ask({ requested: 'haiku', agentAllowed: ['haiku'] }))).toEqual({ model: 'haiku', ask: false, clamped: null })
+  expect(decideModel(ask({ requested: 'fable', agentAllowed: ['haiku'] }))).toEqual({ model: 'opus', ask: true, clamped: 'fable' })
 })
 
 test('the quiet window silences the CARD, never the agent', () => {
   const quiet = decideModel(ask({ requested: 'fable', quietUntil: NOW + 60_000 }))
-  expect(quiet).toEqual({ model: 'opus', ask: false, clamped: 'fable', banned: false })   // clamped is what the caller is told
+  expect(quiet).toEqual({ model: 'opus', ask: false, clamped: 'fable' })   // clamped is what the caller is told
   // …and it reopens on its own.
   expect(decideModel(ask({ requested: 'fable', quietUntil: NOW - 1 }))).toMatchObject({ ask: true })
 })
@@ -78,14 +61,14 @@ test('with no configured default the agent still does not decide', () => {
   // model:null = emit no --model, exactly as an unconfigured box does today; the CLI's own default
   // applies and the human is asked about the difference.
   expect(decideModel(ask({ requested: 'fable', configuredDefault: null })))
-    .toEqual({ model: null, ask: true, clamped: 'fable', banned: false })
-  expect(decideModel(ask({ configuredDefault: null }))).toEqual({ model: null, ask: false, clamped: null, banned: false })
+    .toEqual({ model: null, ask: true, clamped: 'fable' })
+  expect(decideModel(ask({ configuredDefault: null }))).toEqual({ model: null, ask: false, clamped: null })
 })
 
 // The reason the ungated set is a NAMED LIST rather than a "gate fable only" condition: the next
 // expensive model arrives under a name this file has never seen, and it must be gated on arrival.
 test('an unknown/future model name is clamped like any other — nothing to mis-rank', () => {
-  expect(decideModel(ask({ requested: 'mythos-9' }))).toEqual({ model: 'opus', ask: true, clamped: 'mythos-9', banned: false })
+  expect(decideModel(ask({ requested: 'mythos-9' }))).toEqual({ model: 'opus', ask: true, clamped: 'mythos-9' })
 })
 
 test('the late tap: growth since the card was minted decides, not the clock', () => {
@@ -124,9 +107,11 @@ test('with no configured default the fallback is the CLI default, not a refusal'
   expect(heldSpawnModel('approved', 'fable', null)).toBe('fable')
 })
 
-// The tap codec. The ✅/❌ buttons are the only path a human actually exercises and the only one a test
-// suite can't drive (a callback_query can only originate from a real Telegram client), so the parse and
-// the mint are pinned against each other here rather than being discovered broken in front of the owner.
+// ---- the tap codec ----
+//
+// The ✅/❌ buttons are the only path a human actually exercises and the only one a test suite can't
+// drive (a callback_query can originate only from a real Telegram client), so the parse and the mint are
+// pinned against each other here rather than being discovered broken in front of the owner.
 test('a held-spawn button round-trips through its own parser', () => {
   for (const outcome of ['approved', 'denied'] as const) {
     expect(parseHoldTap(holdTapData(outcome, 'ms3p0dfn'))).toEqual({ id: 'ms3p0dfn', outcome })

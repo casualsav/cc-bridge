@@ -5050,11 +5050,7 @@ async function handleCall(
                 ctxPct: (capNow ? parseStatusline(capNow)?.ctxPct : null) ?? null, at: Date.now(), live: true,
               })
             }
-            // A banned alias gets the same in-band honesty here as on the spawn path: no card was sent,
-            // none is coming, and a retry gets the same answer — so don't say "needs a human".
-            text = relay.banned
-              ? `!/model ${relay.clamped} isn't available to sessions — @${toName} keeps its current model (standing policy; nobody was asked and a retry gets the same answer)`
-              : `!/model ${relay.clamped} needs a human — @${toName} keeps its current model${relay.ask ? '; asked the owner, and it switches in place if they approve' : ' (asking is snoozed right now)'}`
+            text = `!/model ${relay.clamped} needs a human — @${toName} keeps its current model${relay.ask ? '; asked the owner, and it switches in place if they approve' : ' (asking is snoozed right now)'}`
             break
           }
           // awaitReadback:false for the same reason the mini app passes it: the confirm + readback
@@ -5175,7 +5171,7 @@ async function handleCall(
         // no topic tab, no pane, no bus row.
         if (modelChoice.clamped && modelChoice.ask) { text = await holdSpawnForApproval(spec, modelChoice.clamped, modelChoice.model); break }
         const spawned = await launchSpawn(spec, modelChoice.model,
-          modelChoice.clamped ? clampedClause(modelChoice.clamped, modelChoice.model, false, modelChoice.banned) : '')
+          modelChoice.clamped ? clampedClause(modelChoice.clamped, modelChoice.model, false) : '')
         if (!spawned.ok) { write({ t: 'result', id, ok: false, text: spawned.text }); return }
         text = spawned.text
         break
@@ -6051,12 +6047,7 @@ async function askHumanForModel(r: ModelRequest): Promise<void> {
 // The clause the CALLING AGENT gets. It is told the truth in the same breath as its success, so it
 // neither plans around a model it doesn't have nor retries in a loop (a retry is just another
 // session on the default).
-function clampedClause(clamped: string, ran: string | null, asked: boolean, banned = false): string {
-  // A BANNED alias must not borrow the gate's wording. "Needs a human" invites the caller to wait for a
-  // tap that will never come, and to retry; the ban was decided once and no card exists to answer it.
-  // The caller is told anyway — in-band, in the same breath as its success — because the one thing
-  // worse than not getting the model you asked for is not being told which one you got.
-  if (banned) return ` (--model ${clamped} isn't available to sessions — clamped to ${ran ?? 'the CLI default'} by standing policy, so nobody was asked and a retry gets the same answer)`
+function clampedClause(clamped: string, ran: string | null, asked: boolean): string {
   return ` (your --model ${clamped} needs a human${asked ? ' — asked the owner; if they approve, the session switches in place' : ', and asking is snoozed right now'}; running ${ran ?? 'the CLI default'})`
 }
 

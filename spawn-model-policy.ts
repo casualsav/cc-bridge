@@ -18,15 +18,7 @@
 // future alias is not in the list, so it is gated — an unknown price is not a cheap price, and the one
 // mistake this module cannot afford is waving through the next thing that costs like Fable under a name
 // nobody has taught it yet. Written this way round precisely so the safe default survives new models.
-export const UNGATED_MODELS: readonly string[] = ['opus', 'sonnet']
-
-// Never a session's model, at any price, by standing owner directive that predates this module and was
-// bought with its own incident. This is NOT the gate above — the gate protects a budget and can be
-// answered with a tap; this one has no card, no snooze and no "asked the owner", because there is
-// nothing for him to decide. It sits ahead of BOTH the `agent` policy opt-out and the spawnAgentModels
-// allowlist on purpose: a preference set months ago must not quietly reinstate the thing he banned.
-// (A HUMAN choosing it in their own picker is still their call — the humanOrigin branch runs first.)
-export const BANNED_MODELS: readonly string[] = ['haiku']
+export const UNGATED_MODELS: readonly string[] = ['opus', 'sonnet', 'haiku']
 
 export type ModelPolicy = 'default-wins' | 'agent'
 
@@ -44,20 +36,14 @@ export type ModelDecision = {
   model: string | null   // the alias to launch/switch with; null = emit no --model (the CLI's own default)
   ask: boolean           // mint the card on the human surface
   clamped: string | null // the alias that was asked for and did not win — the agent is told this
-  banned: boolean        // the clamp was BANNED_MODELS, not the budget gate: no card was sent and none
-                         // will be, so the caller's clause must not promise a human is looking at it
 }
 
-const allow = (model: string | null): ModelDecision => ({ model, ask: false, clamped: null, banned: false })
+const allow = (model: string | null): ModelDecision => ({ model, ask: false, clamped: null })
 
 export function decideModel(a: ModelAsk): ModelDecision {
   const def = a.configuredDefault
   // A human choosing is the whole point of the feature — never second-guess one, and never card them.
   if (a.humanOrigin) return allow(a.requested ?? def)
-  // The standing ban, ahead of every opt-out below it — see BANNED_MODELS. Silent by construction:
-  // clamped (so the CALLER is told in-band what it actually got) and ask:false (so no human is
-  // interrupted about a decision that was made once, permanently, and not by them tonight).
-  if (a.requested && BANNED_MODELS.includes(a.requested)) return { model: def, ask: false, clamped: a.requested, banned: true }
   // The explicit opt-out, for a user who wants their orchestrator to choose. One setting, no nagging.
   if (a.policy === 'agent') return allow(a.requested ?? def)
   if (!a.requested) return allow(def)
@@ -67,8 +53,7 @@ export function decideModel(a: ModelAsk): ModelDecision {
   // The named pressure valve (test fleets spawning `--model haiku` all day). A LIST, never an
   // ordering — nothing about it can be extrapolated to a model the user did not name.
   if (a.agentAllowed.includes(a.requested)) return allow(a.requested)
-  // A model the owner has said an agent may pick is the agent's own call, silently. `haiku` is NOT one of
-// them — it is banned above, before this line is ever reached. The rule this
+  // A model the owner has said an agent may pick is the agent's own call, silently. The rule this
   // module opened with — the configured default always wins — was written from ONE incident, a
   // `--model fable` beating an opus default and costing about 5% of a weekly Fable allotment, and
   // applying it to every alias made the owner the referee of choices that cost him nothing. It also ran
@@ -77,7 +62,7 @@ export function decideModel(a: ModelAsk): ModelDecision {
   if (UNGATED_MODELS.includes(a.requested)) return allow(a.requested)
   // Clamped. The card is suppressed inside a quiet window, but the agent is told either way: silence
   // toward the human is the human's own choice, silence toward the caller is a lie about what it got.
-  return { model: def, ask: a.now >= a.quietUntil, clamped: a.requested, banned: false }
+  return { model: def, ask: a.now >= a.quietUntil, clamped: a.requested }
 }
 
 // ---- The held spawn ----
