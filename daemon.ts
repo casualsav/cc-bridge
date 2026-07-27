@@ -29,7 +29,7 @@ import { normalizeCommandOutput } from './ansi.ts'
 import { planSlash } from './slash-policy.ts'
 import { preserveGlobalEffort, reconcileEffortScope } from './effort-scope.ts'
 import { planDrift, driftStateAfter, type DriftState } from './drift-guard.ts'
-import { decideModel, upgradeNeedsConfirm, type ModelPolicy } from './spawn-model-policy.ts'
+import { decideModel, upgradeNeedsConfirm, heldSpawnModel, type ModelPolicy, type HoldOutcome } from './spawn-model-policy.ts'
 import { renderSessionsView } from './sessions-view.ts'
 import { detectCurrentMode, onNormalPrompt, inputBoxContent, isModelSwitchConfirm, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType } from './prompt.ts'
 import { modelSwitchEvidence, resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, liveSubagents, currentTurnFeed, currentTurnActivity, concludedTurnWork, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
@@ -5136,13 +5136,12 @@ async function handleCall(
         if (explicitModel && !MODEL_ALIASES.includes(explicitModel)) { write({ t: 'result', id, ok: false, text: `unknown model '${explicitModel}' — one of: ${MODEL_ALIASES.join(' | ')}` }); return }
         // Who chooses. No explicit --model falls back to the persisted /settings 🐣 spawn-defaults
         // model (validated — a stale/bad pref is ignored silently rather than failing the spawn); an
-        // explicit one from an AGENT is a request, not a decision (spawn-model-policy.ts). The card
-        // is minted after the spawn succeeds, so a failed spawn never asks the human about nothing.
+        // explicit one from an AGENT is a request only for the GATED models (spawn-model-policy.ts) —
+        // today that is Fable alone, and every other alias an agent names is its own call.
         const modelChoice = decideModel({
           requested: explicitModel, configuredDefault: configuredSpawnModel(),
           ...modelPolicyPrefs(), humanOrigin: false, now: Date.now(),
         })
-        const model = modelChoice.model
         const explicitEffort = args.effort ? String(args.effort).trim().toLowerCase().replace(/^med$/, 'medium') : null
         if (explicitEffort && (explicitEffort === 'auto' || !EFFORT_LEVELS.includes(explicitEffort))) { write({ t: 'result', id, ok: false, text: `unknown effort '${explicitEffort}' — one of: low | medium | high | xhigh | max` }); return }
         // No explicit --effort: same /settings 🐣 fallback as the model above.
@@ -5161,120 +5160,20 @@ async function handleCall(
         if (existsSync(dir) && !statSync(dir).isDirectory()) { write({ t: 'result', id, ok: false, text: `${dir} is not a directory` }); return }
         try { if (!existsSync(dir)) mkdirSync(dir, { recursive: true }) }
         catch (e) { write({ t: 'result', id, ok: false, text: `couldn't create ${dir}: ${(e as Error)?.message ?? e}` }); return }
-        const group = headless ? null : getGroupChatId()!
-        let threadId: number | null = null
-        if (group) {
-          try { threadId = Number(await channel.threads!.create(group, topicName)) }
-          catch (e) { write({ t: 'result', id, ok: false, text: `couldn't create the topic: ${(e as Error)?.message ?? e}` }); return }
-        }
-        await reapDeadEndpoints(topicName)
-        if (listTopics().some(t => !t.closed && normalizeEndpointName(t.name) === normalizeEndpointName(topicName))) {
-          write({ t: 'result', id, ok: false, text: `an endpoint named "${topicName}" is already live — pick another name, or /exit it first` })
-          if (group && threadId != null) void channel.threads!.remove(group, String(threadId)).catch(() => {})
-          return
-        }
-        const sid = genSessionId()
-        // Remember the spawner: `tg kill` lets it clean up its OWN mistakes without the owner.
-        setTopic(sid, threadId != null
-          ? { threadId, cwd: dir, name: topicName, closed: false, createdAt: Date.now(), spawnedBy: fromSid }
-          : { headless: true, cwd: dir, name: topicName, closed: false, createdAt: Date.now(), spawnedBy: fromSid })
-        // Seed the branch cache so the retitle sweep doesn't stomp the chosen tab name (as topiccreate does).
-        try { topicBranchCache.set(sid, (await exec('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 2000 })).stdout.trim()) }
-        catch { topicBranchCache.set(sid, '') }
-        // Headless spawns MUST run bypass: they have no topic and no DM surface, so a permission
-        // prompt has nowhere to relay — the session just wedges on the dialog until the ask expires
-        // (the 49-minute "busy" general). Bound spawns keep the inherited mode; their prompts relay
-        // as tappable cards in the topic.
-        const newPane = await spawnSession(dir, '', sid, MAIN_ACCOUNT, 'claude', undefined, { model, effort, ...(headless ? { mode: 'bypassPermissions' as CcMode } : {}) })
-        if (!newPane) {
-          removeTopic(sid)
-          if (group && threadId != null) void channel.threads!.remove(group, String(threadId)).catch(() => {})
-          write({ t: 'result', id, ok: false, text: `spawn failed in ${dir} — see daemon log` }); return
-        }
-        const fromName = nameForEndpoint(fromSid, busEndpoints())
-        appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'spawn', from: fromName, to: topicName, text: `${dir}${model ? ` model=${model}` : ''}${effort ? ` effort=${effort}` : ''}` })
-        // The session exists and is booting on the human's model. If a model was asked for and did not
-        // win, the human hears about it now — with the context the new pane has RIGHT NOW recorded on
-        // the card, because that is what a later "Use it" tap would be re-billing (see below).
-        if (modelChoice.clamped && modelChoice.ask) {
-          const cap0 = await capturePane(newPane).catch(() => '')
-          void askHumanForModel({
-            sid, name: topicName, alias: modelChoice.clamped, asker: fromName,
-            ctxPct: (cap0 ? parseStatusline(cap0)?.ctxPct : null) ?? null, at: Date.now(), live: false,
-          })
-        } else if (modelChoice.clamped) {
-          process.stderr.write(`daemon: model-request: @${fromName} asked for ${modelChoice.clamped} on ${sid} — clamped, card snoozed\n`)
-        }
-        const firstMsg = String(args.text ?? '').trim()
-        // ONE notice on the SPAWNER's own surface (its DM lane / topic): "Spawned @X" with the first
-        // message behind the chevron. This used to be two messages back to back — an instant text ack
-        // here plus notifyAskSent's "Messaged @X" card on confirmed delivery — which read as clutter
-        // for one event. A delivery that then FAILS still says so below, so nothing is lost.
-        if (firstMsg) void notifyBusRich(fromSid, `Spawned <b>@${escapeHtml(topicName)}</b>`, firstMsg)
-        else void notifyBusText(fromSid, `🆕 Spawned <b>@${escapeHtml(topicName)}</b>`)
-        if (firstMsg) {
-          // The first message is a TASK, so it goes over the bus as a real ask: the new session gets
-          // an id it can `tg answer`, and its result comes back to the spawner instead of surfacing
-          // only in its own topic. Minted here (not in the closure) so the id exists for the result
-          // string below. NO hop is recorded: the ask case's hop guard is a gate that ABORTS, and by
-          // this point the pane and the folder already exist — burning a hop we can't act on would
-          // only make some later, unrelated ask fail, or trip the pause silently (its notice fires
-          // on the exact crossing turn only). Spawns stay ungated, exactly as they were when this
-          // was a raw paste. Digest/markSeen are skipped too: a session seconds old has no history.
-          const p = createPending({ fromSid, toSid: sid, fromName, toName: topicName, text: firstMsg, refs: [], founding: true }, Date.now())
-          appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'ask', from: fromName, to: topicName, id: p.id, text: firstMsg, refs: [] })
-          // Reserve the ask for THIS closure before anything can see it: the pending exists now but
-          // the pane won't be at a prompt for up to 45s, and the 15s sweep would otherwise inject it
-          // through tryDeliverAsk while the closure is still waiting — the same block, twice.
-          // tryDeliverAsk bails on a busInFlight id at entry, before its own claim, so it can't
-          // release this reservation; the finally below does, leaving the ordinary sweep/TTL
-          // lifecycle in charge of an ask the closure failed to deliver.
-          busInFlight.add(p.id)
-          void (async () => {   // wait for the REPL, then deliver — same shape as the scheduler's reviveAndInject
-           try {
-            for (let i = 0; i < 45; i++) {
-              await sleep(1000)
-              const cap = stripAnsi(await capturePane(newPane).catch(() => ''))
-              if (/[❯>]\s*$/m.test(cap) || /\? for shortcuts/.test(cap)) break
-            }
-            // busDeliver serializes on the same inject chain as human inbound, so the ask block can't
-            // interleave with a message the owner types into the new topic mid-boot.
-            if (!(await busDeliver(newPane, formatAskBlock(fromName, p.id, firstMsg, [])).catch(() => false))) {
-              removePending(p.id)   // never leave a ghost ask the spawner will be told timed out
-              if (group && threadId != null) void channel.sendText(group, `⚠️ Spawned <b>${escapeHtml(topicName)}</b>, but its first message didn't paste — send it again in its topic.`, { threadId: String(threadId) }).catch(() => {})
-              else void notifyBusText(fromSid, `⚠️ Spawned <b>@${escapeHtml(topicName)}</b>, but its first message didn't paste — send it again.`)
-              return
-            }
-            markInjected(p.id, Date.now())   // arms the answer window from the moment it actually landed
-            // The spawner is now this session's briefer. Stamped HERE as well as in tryDeliverAsk,
-            // because a spawn's first message never goes through that function — it is delivered by
-            // this closure, so a spawned session would otherwise have no briefer at all, and the
-            // unreported-work check would stay silent for the very sessions it exists for.
-            if (fromSid !== SYSTEM_SID) markBriefed(sid, fromSid, fromName, Date.now())
-            // No asker-side card here (tryDeliverAsk's notifyAskSent equivalent): the "Spawned @X"
-            // chevron above already carries this exact text on the spawner's surface.
-            // Mirror the delivered task into the new topic: the paste lands only in the pane, so
-            // without this the owner can't see what the spawner asked the new session to do.
-            // Same chevron shape as notifyBusRich, but addressed directly (group+thread are known —
-            // no pane→target resolution on a seconds-old pane). A headless spawn has no topic to
-            // mirror into — the spawner's "Spawned @X" card is its only surface.
-            if (!group || threadId == null) return
-            const shown = firstMsg.length > ASK_QUOTE_CAP ? firstMsg.slice(0, ASK_QUOTE_CAP) + '…' : firstMsg
-            const header = `<b>@${escapeHtml(fromName)}</b> messaged <b>@${escapeHtml(topicName)}</b>`
-            try {
-              await sendRichMessage(TOKEN!, group, { html: `<details><summary>${header}</summary>${escapeHtml(shown).replace(/\n/g, '<br>')}</details>` }, { messageThreadId: threadId, disableNotification: true })
-            } catch {
-              void channel.sendText(group, `${header}\n<blockquote expandable>${escapeHtml(shown)}</blockquote>`, { silent: true, threadId: String(threadId) }).catch(() => {})
-            }
-           } finally { busInFlight.delete(p.id) }
-          })()
-        }
-        // The no-brief case says so OUT LOUD. It used to be the silent branch — a dropped brief and a
-        // deliberately briefless spawn printed the same line bar one clause, which is how two spawns
-        // whose briefs never arrived read as successful for half an hour each.
-        text = `spawned "${topicName}" in ${dir}${model ? ` · model ${model}` : ''}${modelChoice.clamped ? clampedClause(modelChoice.clamped, model, modelChoice.ask) : ''}${effort ? ` · effort ${effort}` : ''}${firstMsg
-          ? ' — the first message delivers as an ask once the REPL is up, and its reply comes back to you as the answer'
-          : ' — NO first message was given, so it starts idle (a heredoc needs the `-` body argument; `tg spawn --help`)'}. Reach it on the bus as @${topicName}.`
+        const spec: SpawnSpec = { fromSid, topicName, dir, effort, firstMsg: String(args.text ?? '').trim(), headless }
+        // THE GATE. A gated model does not spawn and then ask — nothing starts until the owner taps.
+        // The card used to be minted AFTER the session was already running on the default, which made
+        // it decorative: it read as control while providing none, and the only thing a tap could still
+        // do was move a live session (and re-bill its context) rather than decide what runs.
+        //
+        // Everything above this line has already been validated, so a held spawn cannot fail later on
+        // a typo'd folder the caller is no longer around to be told about. Below it, nothing exists yet:
+        // no topic tab, no pane, no bus row.
+        if (modelChoice.clamped && modelChoice.ask) { text = await holdSpawnForApproval(spec, modelChoice.clamped, modelChoice.model); break }
+        const spawned = await launchSpawn(spec, modelChoice.model,
+          modelChoice.clamped ? clampedClause(modelChoice.clamped, modelChoice.model, false) : '')
+        if (!spawned.ok) { write({ t: 'result', id, ok: false, text: spawned.text }); return }
+        text = spawned.text
         break
       }
       // `tg kill <name>` — end a session you spawned, or (as an orchestrator chat lane) any worker
@@ -6150,6 +6049,229 @@ async function askHumanForModel(r: ModelRequest): Promise<void> {
 // session on the default).
 function clampedClause(clamped: string, ran: string | null, asked: boolean): string {
   return ` (your --model ${clamped} needs a human${asked ? ' — asked the owner; if they approve, the session switches in place' : ', and asking is snoozed right now'}; running ${ran ?? 'the CLI default'})`
+}
+
+// ---- Spawning, and the gate in front of it ----
+
+// Everything a VALIDATED spawn needs, minus the model — which is the one thing a gated spawn is still
+// waiting to learn. Split out of the `tg spawn` case so the same launch runs whether the caller's
+// socket is still open (the ordinary path) or the owner taps a card twenty minutes later.
+type SpawnSpec = { fromSid: string; topicName: string; dir: string; effort: string | null; firstMsg: string; headless: boolean }
+
+// Create the topic, the session row and the pane, then hand the first message over as a founding ask.
+// Returns what the CALLER is told; it has no socket of its own, because by the time a held spawn runs
+// there is no caller left to write to.
+async function launchSpawn(spec: SpawnSpec, model: string | null, clampedNote: string): Promise<{ ok: boolean; text: string }> {
+  const { fromSid, topicName, dir, effort, firstMsg, headless } = spec
+  const group = headless ? null : getGroupChatId()!
+  let threadId: number | null = null
+  if (group) {
+    try { threadId = Number(await channel.threads!.create(group, topicName)) }
+    catch (e) { return { ok: false, text: `couldn't create the topic: ${(e as Error)?.message ?? e}` } }
+  }
+  await reapDeadEndpoints(topicName)
+  if (listTopics().some(t => !t.closed && normalizeEndpointName(t.name) === normalizeEndpointName(topicName))) {
+    if (group && threadId != null) void channel.threads!.remove(group, String(threadId)).catch(() => {})
+    return { ok: false, text: `an endpoint named "${topicName}" is already live — pick another name, or /exit it first` }
+  }
+  const sid = genSessionId()
+  // Remember the spawner: `tg kill` lets it clean up its OWN mistakes without the owner.
+  setTopic(sid, threadId != null
+    ? { threadId, cwd: dir, name: topicName, closed: false, createdAt: Date.now(), spawnedBy: fromSid }
+    : { headless: true, cwd: dir, name: topicName, closed: false, createdAt: Date.now(), spawnedBy: fromSid })
+  // Seed the branch cache so the retitle sweep doesn't stomp the chosen tab name (as topiccreate does).
+  try { topicBranchCache.set(sid, (await exec('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 2000 })).stdout.trim()) }
+  catch { topicBranchCache.set(sid, '') }
+  // Headless spawns MUST run bypass: they have no topic and no DM surface, so a permission
+  // prompt has nowhere to relay — the session just wedges on the dialog until the ask expires
+  // (the 49-minute "busy" general). Bound spawns keep the inherited mode; their prompts relay
+  // as tappable cards in the topic.
+  const newPane = await spawnSession(dir, '', sid, MAIN_ACCOUNT, 'claude', undefined, { model, effort, ...(headless ? { mode: 'bypassPermissions' as CcMode } : {}) })
+  if (!newPane) {
+    removeTopic(sid)
+    if (group && threadId != null) void channel.threads!.remove(group, String(threadId)).catch(() => {})
+    return { ok: false, text: `spawn failed in ${dir} — see daemon log` }
+  }
+  const fromName = nameForEndpoint(fromSid, busEndpoints())
+  appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'spawn', from: fromName, to: topicName, text: `${dir}${model ? ` model=${model}` : ''}${effort ? ` effort=${effort}` : ''}` })
+  // ONE notice on the SPAWNER's own surface (its DM lane / topic): "Spawned @X" with the first
+  // message behind the chevron. This used to be two messages back to back — an instant text ack
+  // here plus notifyAskSent's "Messaged @X" card on confirmed delivery — which read as clutter
+  // for one event. A delivery that then FAILS still says so below, so nothing is lost.
+  if (firstMsg) void notifyBusRich(fromSid, `Spawned <b>@${escapeHtml(topicName)}</b>`, firstMsg)
+  else void notifyBusText(fromSid, `🆕 Spawned <b>@${escapeHtml(topicName)}</b>`)
+  if (firstMsg) {
+    // The first message is a TASK, so it goes over the bus as a real ask: the new session gets
+    // an id it can `tg answer`, and its result comes back to the spawner instead of surfacing
+    // only in its own topic. Minted here (not in the closure) so the id exists for the result
+    // string below. NO hop is recorded: the ask case's hop guard is a gate that ABORTS, and by
+    // this point the pane and the folder already exist — burning a hop we can't act on would
+    // only make some later, unrelated ask fail, or trip the pause silently (its notice fires
+    // on the exact crossing turn only). Spawns stay ungated, exactly as they were when this
+    // was a raw paste. Digest/markSeen are skipped too: a session seconds old has no history.
+    const p = createPending({ fromSid, toSid: sid, fromName, toName: topicName, text: firstMsg, refs: [], founding: true }, Date.now())
+    appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'ask', from: fromName, to: topicName, id: p.id, text: firstMsg, refs: [] })
+    // Reserve the ask for THIS closure before anything can see it: the pending exists now but
+    // the pane won't be at a prompt for up to 45s, and the 15s sweep would otherwise inject it
+    // through tryDeliverAsk while the closure is still waiting — the same block, twice.
+    // tryDeliverAsk bails on a busInFlight id at entry, before its own claim, so it can't
+    // release this reservation; the finally below does, leaving the ordinary sweep/TTL
+    // lifecycle in charge of an ask the closure failed to deliver.
+    busInFlight.add(p.id)
+    void (async () => {   // wait for the REPL, then deliver — same shape as the scheduler's reviveAndInject
+     try {
+      for (let i = 0; i < 45; i++) {
+        await sleep(1000)
+        const cap = stripAnsi(await capturePane(newPane).catch(() => ''))
+        if (/[❯>]\s*$/m.test(cap) || /\? for shortcuts/.test(cap)) break
+      }
+      // busDeliver serializes on the same inject chain as human inbound, so the ask block can't
+      // interleave with a message the owner types into the new topic mid-boot.
+      if (!(await busDeliver(newPane, formatAskBlock(fromName, p.id, firstMsg, [])).catch(() => false))) {
+        removePending(p.id)   // never leave a ghost ask the spawner will be told timed out
+        if (group && threadId != null) void channel.sendText(group, `⚠️ Spawned <b>${escapeHtml(topicName)}</b>, but its first message didn't paste — send it again in its topic.`, { threadId: String(threadId) }).catch(() => {})
+        else void notifyBusText(fromSid, `⚠️ Spawned <b>@${escapeHtml(topicName)}</b>, but its first message didn't paste — send it again.`)
+        return
+      }
+      markInjected(p.id, Date.now())   // arms the answer window from the moment it actually landed
+      // The spawner is now this session's briefer. Stamped HERE as well as in tryDeliverAsk,
+      // because a spawn's first message never goes through that function — it is delivered by
+      // this closure, so a spawned session would otherwise have no briefer at all, and the
+      // unreported-work check would stay silent for the very sessions it exists for.
+      if (fromSid !== SYSTEM_SID) markBriefed(sid, fromSid, fromName, Date.now())
+      // No asker-side card here (tryDeliverAsk's notifyAskSent equivalent): the "Spawned @X"
+      // chevron above already carries this exact text on the spawner's surface.
+      // Mirror the delivered task into the new topic: the paste lands only in the pane, so
+      // without this the owner can't see what the spawner asked the new session to do.
+      // Same chevron shape as notifyBusRich, but addressed directly (group+thread are known —
+      // no pane→target resolution on a seconds-old pane). A headless spawn has no topic to
+      // mirror into — the spawner's "Spawned @X" card is its only surface.
+      if (!group || threadId == null) return
+      const shown = firstMsg.length > ASK_QUOTE_CAP ? firstMsg.slice(0, ASK_QUOTE_CAP) + '…' : firstMsg
+      const header = `<b>@${escapeHtml(fromName)}</b> messaged <b>@${escapeHtml(topicName)}</b>`
+      try {
+        await sendRichMessage(TOKEN!, group, { html: `<details><summary>${header}</summary>${escapeHtml(shown).replace(/\n/g, '<br>')}</details>` }, { messageThreadId: threadId, disableNotification: true })
+      } catch {
+        void channel.sendText(group, `${header}\n<blockquote expandable>${escapeHtml(shown)}</blockquote>`, { silent: true, threadId: String(threadId) }).catch(() => {})
+      }
+     } finally { busInFlight.delete(p.id) }
+    })()
+  }
+  // The no-brief case says so OUT LOUD. It used to be the silent branch — a dropped brief and a
+  // deliberately briefless spawn printed the same line bar one clause, which is how two spawns
+  // whose briefs never arrived read as successful for half an hour each.
+  return { ok: true, text: `spawned "${topicName}" in ${dir}${model ? ` · model ${model}` : ''}${clampedNote}${effort ? ` · effort ${effort}` : ''}${firstMsg
+    ? ' — the first message delivers as an ask once the REPL is up, and its reply comes back to you as the answer'
+    : ' — NO first message was given, so it starts idle (a heredoc needs the `-` body argument; `tg spawn --help`)'}. Reach it on the bus as @${topicName}.` }
+}
+
+// ---- Held spawns: the gate that actually holds ----
+//
+// A gated model (spawn-model-policy.ts — Fable) does not start and then ask. The spawn is parked here,
+// unstarted, until the owner answers or the window closes. The card it mints used to arrive AFTER the
+// session was already running on the default, which the owner called correctly: a prompt that races the
+// work it approves reads as control while providing none.
+//
+// DENIAL and TIMEOUT do the same thing — start on the configured default — and that is the deliberate
+// choice. An agent is blocked on this spawn; the only outcome it cannot recover from is the work never
+// happening and nobody saying so. Falling back can cost at most what the pre-gate behaviour cost (the
+// default is what used to run instantly), and it can never cost Fable, which is the whole point of the
+// gate. "Deny by default" here would mean silently discarding a colleague's task because a human was
+// asleep.
+type SpawnHold = { id: string; spec: SpawnSpec; alias: string; fallback: string | null; at: number }
+const spawnHolds = new Map<string, SpawnHold>()
+const spawnHoldTimers = new Map<string, ReturnType<typeof setTimeout>>()
+const spawnHoldsFile = (): string => join(STATE_DIR, 'spawn-holds.json')
+// How long a held spawn waits. A pref, not a constant, for the same reason busDepthLimit is one — and
+// because a live check of the timeout path is otherwise a 15-minute wait. Floor of 1 minute.
+function spawnHoldMs(): number {
+  const v = Number(loadAccess().spawnHoldMinutes)
+  return Math.max(1, Number.isFinite(v) && v > 0 ? v : 15) * 60_000
+}
+// Persisted because this box redeploys nightly and a restart inside the window would otherwise drop the
+// spawn in silence — the asking agent has already been told "held", so vanishing is the one outcome it
+// cannot recover from. The card's buttons keep working across the restart: they carry the hold id.
+function saveSpawnHolds(): void { writeJsonFile(spawnHoldsFile(), [...spawnHolds.values()]) }
+
+// Tell the SPAWNER, in both places that matter: an @system ack lands in its context (it is an agent
+// whose turn ended minutes ago — a Telegram card is not somewhere it can read), and notifyBusText puts
+// the same sentence on its own human surface. The ack is noReply, so delivery removes the row and no
+// reaper or TTL ever sees it.
+async function notifySpawner(sid: string, plain: string, html: string): Promise<void> {
+  void notifyBusText(sid, html)
+  const p = createPending({ fromSid: SYSTEM_SID, toSid: sid, fromName: 'system', toName: nameForEndpoint(sid, busEndpoints()), text: plain, refs: [], noReply: true, depth: 0 }, Date.now())
+  appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'ack', from: 'system', to: p.toName, id: p.id, text: plain })
+  await tryDeliverAsk(p).catch(() => {})
+}
+
+async function resolveSpawnHold(h: SpawnHold, outcome: HoldOutcome): Promise<{ ok: boolean; text: string }> {
+  spawnHolds.delete(h.id)
+  const timer = spawnHoldTimers.get(h.id)
+  if (timer) { clearTimeout(timer); spawnHoldTimers.delete(h.id) }
+  saveSpawnHolds()
+  const model = heldSpawnModel(outcome, h.alias, h.fallback)
+  const r = await launchSpawn(h.spec, model, '')
+  const ran = model ?? 'the CLI default'
+  const why = outcome === 'approved' ? `on ${h.alias} — you approved it`
+    : outcome === 'denied' ? `on ${ran} — the owner declined ${h.alias}`
+    : `on ${ran} — nobody answered within ${Math.round(spawnHoldMs() / 60_000)}m, so it started on your default rather than not at all`
+  process.stderr.write(`daemon: spawn-hold ${h.id} (${h.spec.topicName}, ${h.alias}) → ${outcome}, launched on ${ran}: ${r.ok ? 'ok' : r.text}\n`)
+  const line = r.ok
+    ? `🆕 Held spawn released — <b>@${escapeHtml(h.spec.topicName)}</b> started ${why}.`
+    : `⚠️ Held spawn <b>@${escapeHtml(h.spec.topicName)}</b> couldn't start: ${escapeHtml(r.text)}`
+  await notifySpawner(h.spec.fromSid, r.ok
+    ? `(your held spawn of @${h.spec.topicName} has started ${why} — ${r.text})`
+    : `(your held spawn of @${h.spec.topicName} FAILED to start: ${r.text})`, line).catch(() => {})
+  return r
+}
+
+function armSpawnHold(h: SpawnHold, ms: number): void {
+  const t = setTimeout(() => { void resolveSpawnHold(h, 'timeout').catch(() => {}) }, ms)
+  if (typeof t.unref === 'function') t.unref()
+  spawnHoldTimers.set(h.id, t)
+}
+
+// The card, and the answer the CALLING AGENT gets while it waits. Same destination override as
+// askHumanForModel (CC_BRIDGE_MODEL_CARD_CHAT / prefs modelCardChat) — a card is an armed button on a
+// real person's chat, and verifying this feature must not put live "Start on fable" taps in front of him.
+async function holdSpawnForApproval(spec: SpawnSpec, alias: string, fallback: string | null): Promise<string> {
+  const h: SpawnHold = { id: Date.now().toString(36), spec, alias, fallback, at: Date.now() }
+  spawnHolds.set(h.id, h)
+  saveSpawnHolds()
+  armSpawnHold(h, spawnHoldMs())
+  const mins = Math.round(spawnHoldMs() / 60_000)
+  const asker = nameForEndpoint(spec.fromSid, busEndpoints())
+  const text = `🧠 <b>@${escapeHtml(asker)}</b> wants to start <b>@${escapeHtml(spec.topicName)}</b> on <b>${escapeHtml(alias)}</b> — a model an agent picks is a request, not a decision.\n\n<b>Nothing has started.</b> The spawn is held until you answer; in ${mins}m with no answer it starts on <b>${escapeHtml(fallback ?? 'the CLI default')}</b>.`
+  const to = modelCardTargets()
+  if (to === 'log') {
+    process.stderr.write(`daemon: spawn-hold: [card suppressed → log] ${text.replace(/<[^>]+>/g, '').replace(/\n+/g, ' ')}\n`)
+  } else {
+    const buttons: Button[][] = [
+      [{ text: `✅ Start on ${alias}`, data: `smh:u:${h.id}` }, { text: `Start on ${fallback ?? 'the default'}`, data: `smh:k:${h.id}` }],
+      [{ text: '🔕 Don\'t ask for 1h', data: 'smq:q' }],
+    ]
+    for (const { chat, thread } of to) {
+      await channel.sendText(chat, text, { silent: true, buttons, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
+    }
+  }
+  process.stderr.write(`daemon: spawn-hold ${h.id}: @${asker} asked for ${alias} on ${spec.topicName} — HELD, owner asked (${mins}m fallback → ${fallback ?? 'CLI default'})\n`)
+  return `⏸ HELD, not started — ${alias} needs a human, so nothing is running yet. Asked the owner; on approval @${spec.topicName} starts on ${alias}, and with no answer in ${mins}m it starts on ${fallback ?? 'the CLI default'}. You'll get a system block either way; don't re-issue this spawn.`
+}
+
+// Boot: re-arm the holds this daemon was carrying when it stopped. Anything already past its window
+// resolves now (the fallback launch it would have got), the rest keep the remainder — the cards on
+// screen still work, because a button carries the hold id and nothing else.
+function restoreSpawnHolds(): void {
+  const rows = readJsonFile<SpawnHold[] | null>(spawnHoldsFile(), null)
+  if (!Array.isArray(rows) || !rows.length) return
+  for (const h of rows) {
+    if (!h || typeof h.id !== 'string' || !h.spec?.topicName) continue
+    spawnHolds.set(h.id, h)
+    const left = h.at + spawnHoldMs() - Date.now()
+    if (left <= 0) { void resolveSpawnHold(h, 'timeout').catch(() => {}) }
+    else armSpawnHold(h, left)
+  }
+  process.stderr.write(`daemon: restored ${rows.length} held spawn(s) from ${spawnHoldsFile()}\n`)
 }
 
 function modelPickerKeyboard(): InlineKeyboard {
@@ -10443,6 +10565,24 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
+  // A HELD spawn (spawn-model-policy.ts): the human's answer decides what starts. Nothing is running
+  // yet, so there is no late-tap problem to guard here — the whole `smq:` context-growth machinery
+  // below exists because that card moves a session that has been working, and this one doesn't.
+  if (data.startsWith('smh:')) {
+    if (!(await cbAuth(ctx))) return
+    const [, verb, holdId] = data.split(':')
+    const h = holdId ? spawnHolds.get(holdId) : undefined
+    if (!h) { await ctx.answerCallbackQuery({ text: 'That spawn is no longer waiting.' }).catch(() => {}); await ctx.editMessageReplyMarkup().catch(() => {}); return }
+    const approved = verb === 'u'
+    await ctx.answerCallbackQuery({ text: approved ? `Starting on ${h.alias}…` : `Starting on ${h.fallback ?? 'the default'}…` }).catch(() => {})
+    const r = await resolveSpawnHold(h, approved ? 'approved' : 'denied')
+    await ctx.editMessageText(r.ok
+      ? `${approved ? '✅' : '🧠'} <b>@${escapeHtml(h.spec.topicName)}</b> started on <b>${escapeHtml((approved ? h.alias : h.fallback) ?? 'the CLI default')}</b>. <i>(@${escapeHtml(nameForEndpoint(h.spec.fromSid, busEndpoints()))} asked for ${escapeHtml(h.alias)}.)</i>`
+      : `⚠️ <b>@${escapeHtml(h.spec.topicName)}</b> couldn't start: ${escapeHtml(r.text)}`,
+      { parse_mode: 'HTML' }).catch(() => {})
+    return
+  }
+
   // An agent's model request (spawn-model-policy.ts): the human's answer.
   if (data.startsWith('smq:')) {
     if (!(await cbAuth(ctx))) return
@@ -14328,6 +14468,7 @@ initScheduler({
 loadScheduledMsgs()
 loadTopics()   // forum-topics mode: load the persisted group + session<->topic map at startup
 sweepOrphanedHermesAsks()   // agent-bus P1.5: drop hermes asks whose `hermes -z` child died with a prior daemon
+restoreSpawnHolds()   // re-arm (or resolve) spawns parked waiting on the owner's tap when this daemon last stopped
 
 // Wire the live activity mirror's daemon dependencies (bot, access, the shared replyMode
 // helper, the live focused-pane getter, and typing re-assert).
