@@ -1,6 +1,6 @@
 // Prompt detection from pane captures — select menus vs permission dialogs. Pure functions.
 import { test, expect } from 'bun:test'
-import { stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, detectFirstRunScreen, isUsageLimitChoice, isResumeSessionPrompt, detectResumeSessionPrompt, detectEditorState, onNormalPrompt, detectModelUnavailable, detectCompacting, compactPercent, permPromptToken, waitingPromptSignature, isRecognizedPrompt, detectStuckScreen, extractGenericOptions, bashModeArmed, detectWorking, isModelSwitchConfirm, slashPaletteRows, slashPaletteWouldMisfire, inputBoxContent, submitLanded, detectModelPicker } from './prompt.ts'
+import { slashPaletteEntries, stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, detectFirstRunScreen, isUsageLimitChoice, isResumeSessionPrompt, detectResumeSessionPrompt, detectEditorState, onNormalPrompt, detectModelUnavailable, detectCompacting, compactPercent, permPromptToken, waitingPromptSignature, isRecognizedPrompt, detectStuckScreen, extractGenericOptions, bashModeArmed, detectWorking, isModelSwitchConfirm, slashPaletteRows, slashPaletteWouldMisfire, inputBoxContent, submitLanded, detectModelPicker } from './prompt.ts'
 
 test('stripAnsi removes CSI escape sequences', () => {
   expect(stripAnsi('\x1b[1mbold\x1b[0m text')).toBe('bold text')
@@ -1039,12 +1039,40 @@ const CAP_REAL_OVER_LOOKALIKE = `
 ❯ /compact
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────`
 
+// AN ALIAS ROW, captured live on 2.1.220 by typing `/cost` and never pressing Enter. `/cost` no longer
+// exists as its own command — it was merged into `/usage`, which the palette shows as `/usage (cost)`.
+// That single space before the paren broke the row pattern, the upward scan stopped there, and the
+// rows read were the two BELOW it: the guard then refused a working command and told the owner its
+// palette "would have run /doctor instead".
+const CAP_COST_ALIAS = `
+  /usage (cost)                                Show session cost, plan usage, and activity stats
+  /doctor                                      Health-check the user's Claude Code setup and fix issues: diagnose installation health — what the \`claude doctor\` terminal diagnostics cover — from local data
+                                               or leftover installs, PATH, unparseable settings files, broken or colliding agent definitions); find unused skills, MCP servers, and plugins versus their context cost and…
+  /seo-content-taste:seo-content-taste         (seo-content-taste) Owner judgment on SEO and content architecture: programmatic SEO, content clusters, internal linking, search intent, content quality bars, and
+                                               AI-content policy risk. Consult this whenever planning, writing, or structuring content meant to rank, or building site/page architecture for any property including clien…
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ /cost
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────`
+
 test('the palette rows are read from a real capture, descriptions and wraps and all', () => {
   expect(slashPaletteRows(CAP_MODE)).toEqual(['/model', '/web-design-taste', '/web-design-taste'])
   expect(slashPaletteRows(CAP_MODEL)).toEqual(['/model', '/claude-api', '/loop', '/advisor'])
   expect(slashPaletteRows(CAP_LOOP)).toEqual(['/loop', '/general-video', '/hyperframes-cli'])
   expect(slashPaletteRows(CAP_MODEL_HAIKU)).toEqual([])
   expect(slashPaletteRows(CAP_LOOKALIKE)).toEqual([])
+  // The alias row is a row: reading stops at it no longer, so all three are seen and the first is the
+  // one the palette would actually run.
+  expect(slashPaletteRows(CAP_COST_ALIAS)).toEqual(['/usage', '/doctor', '/seo-content-taste:seo-content-taste'])
+  expect(slashPaletteEntries(CAP_COST_ALIAS)[0]).toEqual({ name: '/usage', alias: '/cost' })
+})
+
+// The bug the owner hit: `/cost` in his chat produced no cost data, and the refusal it produced named
+// one command twice. Typing it is SAFE — the alias row is an exact match for what he asked for.
+test('an alias row is an exact match, not a misfire', () => {
+  expect(slashPaletteWouldMisfire(CAP_COST_ALIAS, '/cost')).toBeNull()
+  expect(slashPaletteWouldMisfire(CAP_COST_ALIAS, '/usage')).toBeNull()
+  // …and a command that genuinely isn't there still refuses, naming the row that would have run.
+  expect(slashPaletteWouldMisfire(CAP_COST_ALIAS, '/costs')).toEqual(['/usage', '/doctor', '/seo-content-taste:seo-content-taste'])
 })
 
 // ---- the /model picker ----

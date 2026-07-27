@@ -5422,8 +5422,12 @@ async function closeSessionPane(pane: string, reason: string): Promise<void> {
 // Names what it WOULD have run rather than only that it was refused: the reader's next move depends on
 // knowing the palette guessed at their command instead of rejecting it. Same standard as Target-first.
 function paletteRefusalText(command: string, offered: string[]): string {
-  return `${command.split(/\s/)[0]} isn't a command in that session — its palette would have run `
-    + `${offered[0]} instead, so nothing was sent. It offered: ${offered.join(' · ')}`
+  const head = `${command.split(/\s/)[0]} isn't a command in that session — its palette would have run `
+    + `${offered[0]} instead, so nothing was sent`
+  // With a single offer the tail repeated that same name a few words later, which read as two
+  // different commands and was reported as exactly that ("/terminal, twice, and no output"). The list
+  // earns its place only when there is something in it the sentence hasn't already said.
+  return offered.length > 1 ? `${head}. It offered: ${offered.join(' · ')}` : `${head}.`
 }
 
 // `echo` (the unknown-command fallthrough only) replies with the command's own
@@ -6579,6 +6583,7 @@ async function codexReadout(ctx: Context, t: CommandTarget, kind: 'cost' | 'cont
 async function runReadout(t: CommandTarget, chatId: string, kind: 'cost' | 'context' | 'usage'): Promise<void> {
   const paneId = t.paneId
   const cmd = kind === 'cost' ? '/cost' : kind === 'usage' ? '/usage' : '/context'
+  let refused: string[] | null = null
   const drive = async () => {
     // DON'T resize the window. The old grow-to-80 (resize → capture → restore) fired a SIGWINCH on a
     // pane the user may be watching, and Claude's TUI stacks its "────" section dividers down the
@@ -6591,6 +6596,12 @@ async function runReadout(t: CommandTarget, chatId: string, kind: 'cost' | 'cont
     // is still on a partial prefix (e.g. "/co…" highlights /compact) — how /cost used to fire /compact.
     await sendKeysLiteral(paneId, cmd)
     await waitForSettle(paneId, 200, 2000)
+    // The palette check every other injector already runs (injectSlash's guardPalette). This path
+    // typed the name blind, and that is how `/cost` — merged into `/usage` in CLI 2.1.x and surviving
+    // only as an alias — submitted whatever its session's palette happened to highlight, which on a
+    // box with different skills installed is not the same command twice running.
+    refused = slashPaletteWouldMisfire(await capturePane(paneId).catch(() => ''), cmd)
+    if (refused) { await sendKeys(paneId, ['C-u']); await waitForSettle(paneId, 200, 2000); return '' }
     await sendKeys(paneId, ['Enter'])
     await waitForSettle(paneId, 400, 6000)
     const buf = await exec('tmux', ['capture-pane', '-p', '-t', paneId, '-S', '-200', '-J'], { timeout: 3000 }).then(r => r.stdout).catch(() => '')
@@ -6599,6 +6610,8 @@ async function runReadout(t: CommandTarget, chatId: string, kind: 'cost' | 'cont
     return buf
   }
   const raw = t.isFocused && t.watcher ? await t.watcher.withInjection(drive) : await drive()
+  const threadRefusal: SendOpts = t?.replyThread ? { threadId: String(t.replyThread) } : {}
+  if (refused) { await sendChunkRetrying(chatId, `⚠️ ${escapeHtml(paletteRefusalText(cmd, refused))}`, threadRefusal); return }
   const out = kind === 'cost' ? extractCostReadout(raw) : kind === 'usage' ? extractUsageReadout(raw) : extractContextReadout(raw)
   const threadOpt: SendOpts = t?.replyThread ? { threadId: String(t.replyThread) } : {}
   if (!out) { await sendChunkRetrying(chatId, `Could not read /${kind} output.`, { ...threadOpt, plain: true }); return }

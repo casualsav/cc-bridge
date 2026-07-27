@@ -1050,11 +1050,22 @@ export function detectStuckScreen(paneText: string): StuckScreen | null {
 // matched SUBSTRING inside unselected rows, so "which row is selected" would mean parsing a
 // theme-dependent colour and distinguishing a whole-row span from a mid-row one. Reading the offered
 // rows needs none of that and answers the only question the guard asks.
-// A palette row: two-ish spaces, the command, a run of spaces, then its description.
-const PALETTE_ROW = /^ {1,3}(\/[A-Za-z0-9:._-]+) {2,}\S/
+// A palette row: two-ish spaces, the command, a run of spaces, then its description — and, when the
+// row was matched through one of the command's OWN ALIASES, that alias in parentheses right after the
+// name: `/usage (cost)` is the row `/cost` matches, since 2.1.x merged cost into usage. The single
+// space before that paren is what used to end the read — the row failed this pattern, the upward scan
+// broke on it, and every row above it was dropped along with the one the guard was looking for. So a
+// perfectly good `/cost` was refused as a misfire, and the refusal named whichever row happened to
+// survive as the thing it "would have run instead". Measured on a live 2.1.220 pane.
+const PALETTE_ROW = /^ {1,3}(\/[A-Za-z0-9:._-]+)(?: \((\/?[A-Za-z0-9:._-]+)\))? {2,}\S/
 // A long description wraps into the description column, well right of the command column.
 const PALETTE_WRAP = /^ {10,}\S/
 export function slashPaletteRows(paneText: string): string[] {
+  return slashPaletteEntries(paneText).map(e => e.name)
+}
+
+/** The same rows, keeping the alias a row was matched through — see PALETTE_ROW. */
+export function slashPaletteEntries(paneText: string): Array<{ name: string; alias?: string }> {
   const lines = paneLines(paneText)
   let i = lines.length - 1
   for (; i >= 0; i--) if (/^\s*[❯!]/.test(lines[i])) break
@@ -1067,10 +1078,10 @@ export function slashPaletteRows(paneText: string): string[] {
   // had a "  /deploy   ship it" line near the bottom. Measured against a pane holding exactly that.
   let j = i - 1
   if (/^\s*[─━╭╰└┌├╮╯|]+\s*$/.test(lines[j])) j--
-  const rows: string[] = []
+  const rows: Array<{ name: string; alias?: string }> = []
   for (; j >= 0; j--) {
     const m = PALETTE_ROW.exec(lines[j])
-    if (m) { rows.unshift(m[1]); continue }
+    if (m) { rows.unshift(m[2] ? { name: m[1]!, alias: m[2].startsWith('/') ? m[2] : `/${m[2]}` } : { name: m[1]! }); continue }
     if (PALETTE_WRAP.test(lines[j])) continue
     break
   }
@@ -1115,7 +1126,10 @@ export function safeToType(cap: string): boolean {
 export function slashPaletteWouldMisfire(paneText: string, command: string): string[] | null {
   const typed = command.trim().split(/\s+/)[0]
   if (!typed.startsWith('/')) return null
-  const rows = slashPaletteRows(paneText)
+  const rows = slashPaletteEntries(paneText)
   if (!rows.length) return null                                   // no palette — Enter submits literally
-  return rows.some(r => r.toLowerCase() === typed.toLowerCase()) ? null : rows
+  // An ALIAS row is an exact match, not a near miss: `/cost` typed against a `/usage (cost)` row runs
+  // exactly what the caller asked for, under the name the CLI has since given it.
+  const hit = rows.some(r => r.name.toLowerCase() === typed.toLowerCase() || r.alias?.toLowerCase() === typed.toLowerCase())
+  return hit ? null : rows.map(r => r.name)
 }
