@@ -512,6 +512,10 @@ export function turnInProgress(file: string): boolean {
 // create; 30 min is comfortably longer than the 10-min max Bash timeout a legitimately blocked
 // agent can sit in.
 const SUBAGENT_STALE_MS = 30 * 60_000
+// How long a null-stop_reason tail is read as a message still being written. Generous against the
+// ~8s the in-flight gaps actually measured, and far below the staleness cutoff above — the two
+// answer different questions: this one "is it mid-message", that one "did it crash mid-tool".
+const NULL_INFLIGHT_MS = 90_000
 
 // How many of this session's subagents are still running. Subagent turns are NOT in this
 // transcript (the isSidechain filter elsewhere in this file is a legacy of when they were) —
@@ -533,16 +537,24 @@ export function liveSubagents(file: string): number {
       // Entries in an agent's own file carry isSidechain:true, so this must NOT filter on it.
       let lastAssistant: Entry | null = null
       for (const e of readEntries(path)) if (e.type === 'assistant') lastAssistant = e
-      // LIVE = not yet concluded, which is NOT the same as `=== 'tool_use'`. A running agent writes
-      // its thinking and text blocks as their own assistant entries with a null stop_reason — 15 of
-      // 27 in a measured 74s run — so requiring 'tool_use' reported the agent as finished every time
-      // one of those landed last, and the count flapped 1→0→1 throughout a single continuous run.
-      // Every surface that renders it (sessions list, chat header, tg roster) blinked with it.
-      // Terminal reasons ('end_turn' and the max_tokens/stop_sequence family) mean done; null means
-      // a message still in flight, which is the most alive a subagent gets. Crash safety is the
-      // staleness cutoff above, not this predicate.
+      // Two different states read as "not concluded", and they need different tests:
+      //
+      //   'tool_use'  — awaiting a tool. Live regardless of age: an agent blocked in a ten-minute
+      //                 Bash call writes nothing, so its file goes quiet while it is very much alive.
+      //                 This is why mtime alone was rejected as the signal and still is.
+      //   null        — a message in flight. A running agent writes its thinking and text blocks as
+      //                 their own entries this way (15 of 27 in a measured 74s run), so treating it
+      //                 as concluded made the count flap 1→0→1 through one continuous run. But an
+      //                 agent whose LAST entry is null is also how ~4 in 10 finished agents end, and
+      //                 counting those live held the dot green for the full staleness window after
+      //                 the work stopped — measured at 17 minutes on a finished agent.
+      //
+      // So null is live only while the file is still being written to. An in-flight message resolves
+      // in seconds (the flap above never exceeded ~8s); minutes of silence on a null tail means the
+      // agent ended without a terminal entry, not that it is thinking hard.
       const stop = lastAssistant?.message?.stop_reason
-      if (lastAssistant && (stop === 'tool_use' || stop == null)) live++
+      const inFlight = stop == null && Date.now() - st.mtimeMs < NULL_INFLIGHT_MS
+      if (lastAssistant && (stop === 'tool_use' || inFlight)) live++
     }
     return live
   } catch { return 0 }   // no subagents dir at all — the common case, not an error

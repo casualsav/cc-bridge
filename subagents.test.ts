@@ -3,7 +3,7 @@
 import { test, expect } from 'bun:test'
 import { mkdtempSync, mkdirSync, writeFileSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
 import { liveSubagents } from './transcript.ts'
 
 // A session transcript path plus (optionally) its subagents dir. Entries in an agent's own file
@@ -44,6 +44,29 @@ test("liveSubagents does not count an agent that concluded with 'end_turn'", () 
 // message still in flight: the most alive an agent gets. This test reads 1 and returned 0 before.
 test('liveSubagents counts an agent whose last entry is still in flight (null stop_reason)', () => {
   expect(liveSubagents(session({ 'agent-abc.jsonl': null }))).toBe(1)
+})
+
+// The other half, and the one whose absence shipped a bug: ~4 in 10 finished agents ALSO end on a
+// null stop_reason, so "null means live" with no time bound held the dot green for the whole 30-min
+// staleness window after the work stopped — observed at 17 minutes on a real finished agent. An
+// in-flight message resolves in seconds; a null tail that has sat untouched for minutes is an agent
+// that ended without a terminal entry. Pair these two tests: either alone passes a broken build.
+test('liveSubagents does NOT count a null tail whose file stopped being written', () => {
+  const file = session({ 'agent-abc.jsonl': null })
+  const agent = join(dirname(file), 'session', 'subagents', 'agent-abc.jsonl')
+  const old = (Date.now() - 5 * 60_000) / 1000   // 5 min: past the in-flight window, inside staleness
+  utimesSync(agent, old, old)
+  expect(liveSubagents(file)).toBe(0)
+})
+
+// …while a genuinely blocked agent stays live no matter how quiet its file goes: it is parked on a
+// tool call, which is what 'tool_use' means and why mtime cannot be the whole signal.
+test('liveSubagents still counts an agent blocked in a long tool call, however stale its file', () => {
+  const file = session({ 'agent-abc.jsonl': 'tool_use' })
+  const agent = join(dirname(file), 'session', 'subagents', 'agent-abc.jsonl')
+  const old = (Date.now() - 10 * 60_000) / 1000
+  utimesSync(agent, old, old)
+  expect(liveSubagents(file)).toBe(1)
 })
 
 test('liveSubagents counts only the running agent when a finished one sits beside it', () => {
