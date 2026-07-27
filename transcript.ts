@@ -533,7 +533,16 @@ export function liveSubagents(file: string): number {
       // Entries in an agent's own file carry isSidechain:true, so this must NOT filter on it.
       let lastAssistant: Entry | null = null
       for (const e of readEntries(path)) if (e.type === 'assistant') lastAssistant = e
-      if (lastAssistant?.message?.stop_reason === 'tool_use') live++
+      // LIVE = not yet concluded, which is NOT the same as `=== 'tool_use'`. A running agent writes
+      // its thinking and text blocks as their own assistant entries with a null stop_reason — 15 of
+      // 27 in a measured 74s run — so requiring 'tool_use' reported the agent as finished every time
+      // one of those landed last, and the count flapped 1→0→1 throughout a single continuous run.
+      // Every surface that renders it (sessions list, chat header, tg roster) blinked with it.
+      // Terminal reasons ('end_turn' and the max_tokens/stop_sequence family) mean done; null means
+      // a message still in flight, which is the most alive a subagent gets. Crash safety is the
+      // staleness cutoff above, not this predicate.
+      const stop = lastAssistant?.message?.stop_reason
+      if (lastAssistant && (stop === 'tool_use' || stop == null)) live++
     }
     return live
   } catch { return 0 }   // no subagents dir at all — the common case, not an error
