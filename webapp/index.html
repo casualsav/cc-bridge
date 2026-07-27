@@ -115,6 +115,12 @@
        --text is, which lightens them on a dark ground and darkens them on a light one. */
     --add: #3fb950;
     --del: #f85149;
+    /* Telegram's own chrome in FULLSCREEN mode (the ✕ Close pill top-left, the chevron/kebab
+       top-right) is drawn OVER the page, so every top-anchored surface has to start below it.
+       Written by syncSafeTop() and 0px in every non-fullscreen state, which is what keeps normal
+       mode byte-identical: the gate is `tg.isFullscreen`, not the insets — an inset that happens to
+       report a notch off-fullscreen would otherwise open a gap the window manager already gave us. */
+    --safe-top: 0px;
   }
   @supports (color: color-mix(in srgb, red 50%, blue)) {
     :root { --hint-raised: color-mix(in srgb, var(--hint) 80%, var(--text));
@@ -137,7 +143,7 @@
   .ico { width: 20px; text-align: center; }
   .name { flex: 1; word-break: break-all; }
   .meta { color: var(--hint); font-size: var(--t-meta); white-space: nowrap; }
-  #viewer { position: fixed; inset: 0; background: var(--bg); display: none; flex-direction: column; }
+  #viewer { position: fixed; inset: 0; background: var(--bg); display: none; flex-direction: column; padding-top: var(--safe-top); }
   #viewer.show { display: flex; }
   .vhead { padding: 10px var(--sp-3); border-bottom: 1px solid var(--sec); display: flex; gap: var(--sp-2); align-items: center; }
   .vhead .name { font-size: var(--t-sub); }
@@ -238,7 +244,10 @@
   button.rowbtn { background: transparent; border: none; color: var(--hint); font-size: var(--t-title); line-height: 1; padding: 2px var(--sp-2); cursor: pointer; }
   textarea#vedit-area { margin: 0; padding: var(--sp-3); border: none; outline: none; flex: 1; width: 100%; resize: none; background: var(--bg); color: var(--text); font: var(--t-mono)/1.45 ui-monospace, Menlo, Consolas, monospace; }
   /* Tab bar: icon-over-label, one stroke-icon family (inherits color via currentColor) */
-  .tabs { display: flex; position: sticky; top: 0; z-index: 2; background: var(--bg); border-bottom: 1px solid var(--sec); }
+  /* padding, not margin or a `top` offset: the strip has to be PAINTED (the bar's own --bg) or the
+     page scrolls its content up through it, and it has to belong to the sticky box or the bar
+     un-sticks at exactly the offset. Same reasoning for the two fixed views below. */
+  .tabs { display: flex; position: sticky; top: 0; z-index: 2; background: var(--bg); border-bottom: 1px solid var(--sec); padding-top: var(--safe-top); }
   .tabs button { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px; padding: var(--sp-2) var(--sp-1) 7px; border: none; background: transparent; color: var(--hint); font-size: var(--t-meta); cursor: pointer; border-bottom: 2px solid transparent; }
   .tabs button svg { width: 20px; height: 20px; }
   .tabs button.active { color: var(--btn); border-bottom-color: var(--btn); }
@@ -286,7 +295,7 @@
   .sess .foot { display: flex; align-items: center; gap: var(--sp-2); margin-top: var(--sp-2); font-size: var(--t-meta); color: var(--hint-raised); }
   .sess .foot .bar { flex: 1; margin-top: 0; height: 5px; }
   /* Drill-in (session detail) */
-  #drill { position: fixed; inset: 0; background: var(--bg); display: none; flex-direction: column; z-index: 5; }
+  #drill { position: fixed; inset: 0; background: var(--bg); display: none; flex-direction: column; z-index: 5; padding-top: var(--safe-top); }
   #drill.show { display: flex; }
   #dfeed { flex: 1; overflow-y: auto; padding: var(--sp-3); }
   /* ASYMMETRIC padding, and the asymmetry is the point: the bubble hugs the meta block far tighter
@@ -714,6 +723,30 @@
 <script>
 const tg = window.Telegram && window.Telegram.WebApp;
 if (tg) { tg.ready(); tg.expand(); }
+
+// --- Fullscreen top offset (see --safe-top). ---------------------------------------------------
+// Telegram gives the offset in two halves that STACK: safeAreaInset is the device's (notch, status
+// bar) and contentSafeAreaInset is Telegram's own chrome measured INSIDE it. Read through the JS
+// accessors rather than the --tg-content-safe-area-inset-top CSS var, because a client too old for
+// Bot API 8.0 injects neither the var nor the field — undefined reads as 0 here, whereas the missing
+// var would have to be caught by a fallback in every calc() that used it.
+const CHROME_FLOOR = 56;  // what the ✕ pill needs when a client reports nothing (or too little).
+function syncSafeTop() {
+  // Not `isFullscreen === undefined -> assume normal`: on any client without fullscreen at all
+  // there is no overlay to clear, and that is the same 0 as fullscreen-off.
+  const px = tg && tg.isFullscreen
+    ? Math.max(((tg.safeAreaInset && tg.safeAreaInset.top) || 0)
+             + ((tg.contentSafeAreaInset && tg.contentSafeAreaInset.top) || 0), CHROME_FLOOR)
+    : 0;
+  document.documentElement.style.setProperty("--safe-top", px + "px");
+}
+if (tg) {
+  syncSafeTop();
+  // The insets arrive asynchronously and change independently of the fullscreen flag (rotation,
+  // a client that reports them a beat after ready()), so all three events feed the same recompute.
+  for (const e of ["fullscreenChanged", "safeAreaChanged", "contentSafeAreaChanged"])
+    try { tg.onEvent(e, syncSafeTop); } catch {}
+}
 const INIT = (tg && tg.initData) || "";
 const AUTH = { Authorization: "tma " + INIT };
 
