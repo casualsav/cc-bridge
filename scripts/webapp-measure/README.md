@@ -29,6 +29,10 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   same two states measured in one browser, plus the guards that
                                   #   the long state didn't move, the feed isn't bottom-aligned, and
                                   #   no bubble shrink-wrapped (same page-path control)
+    node minislash.mjs [outdir]   # slash commands typed into a mini app chat, END TO END: the shipped
+                                  #   page on the LIVE server, real composer, real send button, real
+                                  #   throwaway session. Nothing stubbed. Includes the settings.json
+                                  #   byte-identity control for /model
     node slashcmd.mjs [page]      # a local command: invocation folded with its output, in prose, with
                                   #   no escape codes left in it. Carries three controls — an unparsed
                                   #   row that MUST leak, a model id whose literal [1m] must survive,

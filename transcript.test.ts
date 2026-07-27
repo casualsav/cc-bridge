@@ -389,6 +389,37 @@ describe('a subagent report is not the owner talking', () => {
     expect(it).toMatchObject({ role: 'command', name: '/model', text: 'Set model to **Fable 5**', uuid: 'u2' })
   })
 
+  // Which SIDE of the transcript a command lands on is not something a reader can predict — /model
+  // is recorded user-side, /context system-side. Reading only the user side is why /context ran and
+  // rendered nothing at all in the mini app. Both fold identically.
+  test('a system-side command folds exactly like a user-side one', () => {
+    const sys = (content: string, uuid: string) => ({ type: 'system', subtype: 'local_command', uuid, content })
+    const [it, ...rest] = recentConversation(fixture([
+      sys('<command-name>/context</command-name><command-args></command-args>', 's1'),
+      sys('<local-command-stdout>29k/200k tokens (15%)</local-command-stdout>', 's2'),
+    ]), 9)
+    expect(rest).toEqual([])
+    expect(it).toMatchObject({ role: 'command', name: '/context', text: '29k/200k tokens (15%)', uuid: 's2' })
+  })
+
+  // The CLI writes its refusal as an informational entry with no command entry beside it, so before
+  // this a typed command that didn't exist vanished without a word — which reads as a broken app.
+  test('an unknown command renders as its own answer instead of vanishing', () => {
+    const [it] = recentConversation(fixture([
+      { type: 'system', subtype: 'informational', uuid: 's1', content: 'Unknown command: /nosuchcommand' },
+    ]), 9)
+    expect(it).toMatchObject({ role: 'command', name: '/nosuchcommand', text: 'Unknown command' })
+  })
+
+  // Everything else the CLI writes system-side stays out. Without this the feed would gain every
+  // informational line the harness emits, which is not what this change is for.
+  test('other system entries are still not feed rows', () => {
+    expect(recentConversation(fixture([
+      { type: 'system', subtype: 'informational', uuid: 's1', content: 'Tip: press ctrl+o for more' },
+      { type: 'system', uuid: 's2', content: 'something else entirely' },
+    ]), 9)).toEqual([])
+  })
+
   test('a command with no output stays one quiet row, and an orphan output stays its own', () => {
     const items = recentConversation(fixture([
       user('<command-name>/clear</command-name><command-args></command-args>', 'u1'),

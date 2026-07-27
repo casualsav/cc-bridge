@@ -26,6 +26,7 @@ import { hopKey, resolveChain, pickNextHop, moveHop } from './failover-chain.ts'
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
 import { normalizeCommandOutput } from './ansi.ts'
+import { planSlash } from './slash-policy.ts'
 import { renderSessionsView } from './sessions-view.ts'
 import { detectCurrentMode, onNormalPrompt, inputBoxContent, isModelSwitchConfirm, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType } from './prompt.ts'
 import { resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, liveSubagents, currentTurnFeed, currentTurnActivity, concludedTurnWork, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
@@ -14454,9 +14455,31 @@ async function webappSessionAction(userId: string, sid: string, action: 'stop' |
   }
   const msg = (text ?? '').trim()
   if (!msg) return 'empty message'
+  // A slash command typed in the composer already REACHED the CLI before this — pasteGuarded has
+  // always treated a leading slash as a command. What it had no view of is which command, so
+  // `/status` parked Claude Code's Settings screen and every later send was refused, `/model sonnet`
+  // rewrote ~/.claude/settings.json for the whole box, and `/tmp/foo is where I put it` went in as a
+  // command because it started with a slash. slash-policy.ts is that view; the refusals surface as
+  // the composer's error toast, which also hands the draft back so it can be edited.
+  const plan = planSlash(msg)
+  if (plan.kind === 'refuse') return plan.reason
+  // The dial's own path, reached by recursion so the validation, the mid-turn guard and the
+  // session-only application are the SAME code the picker uses — and so `/model sonnet` stops being
+  // the one surface on the box that changes the default for every future session.
+  if (plan.kind === 'model' || plan.kind === 'effort') return webappSessionAction(userId, sid, plan.kind, plan.arg)
+  // A raw `/exit` paste ends the pane without markTopicClosePending, which strands the Telegram tab
+  // open on a session that is gone. The close action is the one that cleans up, and it is already
+  // what the sessions list's own close button calls.
+  if (plan.kind === 'exit') return webappSessionAction(userId, sid, 'close')
   const cap = await capturePane(pane).catch(() => '')
   if (bashModeArmed(cap)) return 'the session has an unsubmitted ! bash command in its input box'
   if (!paneAcceptsText(cap)) return 'the session is showing a dialog — answer it first'
+  // COMMANDS refuse mid-turn; prose does not, and the asymmetry is the point. Delivering a message
+  // into a running turn is what the bridge is for. A command is not queued the way a message is:
+  // measured on 2.1.220, `/model sonnet` sent mid-count interrupted the turn and left a "Switch
+  // model?" dialog on the pane while the composer reported success. Both predicates, for the reason
+  // the dial's guard states — onNormalPrompt stays true for the whole of a running turn.
+  if (plan.kind === 'pass' && (!onNormalPrompt(cap) || detectWorking(cap))) return 'the session is mid-turn — try again when it goes idle'
   await dismissFeedbackSurvey(pane)
   const sent = await pasteGuarded(pane, watcher, msg)
   return sent.ok ? null : (sent.offered.length ? paletteRefusalText(msg, sent.offered) : 'delivery failed')

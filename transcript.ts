@@ -14,7 +14,7 @@ export const DEFAULT_PROJECTS_DIR = join(homedir(), '.claude', 'projects')
 const PROJECTS_DIR = DEFAULT_PROJECTS_DIR
 
 type Usage = { input_tokens?: number; output_tokens?: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number }
-type Entry = { type?: string; uuid?: string; timestamp?: string; cwd?: string; isSidechain?: boolean; isMeta?: boolean; message?: { content?: unknown; stop_reason?: string | null; usage?: Usage; model?: string } }
+type Entry = { type?: string; subtype?: string; content?: unknown; uuid?: string; timestamp?: string; cwd?: string; isSidechain?: boolean; isMeta?: boolean; message?: { content?: unknown; stop_reason?: string | null; usage?: Usage; model?: string } }
 
 // Text content of an entry: a bare string, or the joined `text` blocks of a content
 // array (tool_use / thinking blocks contribute nothing).
@@ -452,9 +452,38 @@ function taskNotificationItem(raw: string, ts: number, uuid?: string): Conversat
 // polled feed (which clamps) and the on-demand full-text fetch (which doesn't), so the two can never
 // disagree about how a user message is unwrapped from its <tg …> envelope — an expansion that showed
 // raw bridge markup where the collapsed bubble showed clean text would be worse than the clamp.
+// The two halves of a local command, from whichever side of the transcript they arrived on.
+// Returns null for anything that isn't one, and for an empty stdout (which is noise, not a row).
+function commandItem(raw: string, ts: number, uuid?: string): ConversationItem | null {
+  if (raw.startsWith('<local-command-stdout>')) {
+    const out = normalizeCommandOutput(tagOf(raw, 'local-command-stdout')).trim()
+    return out ? { role: 'command', text: out, ts, uuid } : null
+  }
+  if (/^<command-name>/.test(raw)) {
+    const name = /<command-name>([^<]*)<\/command-name>/.exec(raw)?.[1]?.trim() ?? ''
+    const args = /<command-args>([\s\S]*?)<\/command-args>/.exec(raw)?.[1]?.trim() ?? ''
+    return name ? { role: 'command', text: '', ts, uuid, name, ...(args ? { args } : {}) } : null
+  }
+  return null
+}
+
 function conversationItem(e: Entry): ConversationItem | null {
   const ts = e.timestamp ? Date.parse(e.timestamp) : 0
   const uuid = e.uuid
+  // Claude Code records a local command on EITHER side of the transcript, and nothing a reader can
+  // see decides which: /model lands on the user side, /context on the system side (199 against 233
+  // entries censused on this box). Only the user side was ever read, so about half of every
+  // command's output ran and rendered NOTHING in the mini app — /context most of all.
+  if (e.type === 'system' && typeof e.content === 'string') {
+    const raw = e.content.trim()
+    if (e.subtype === 'local_command') return commandItem(raw, ts, uuid)
+    // The CLI's own refusal, which it writes as an informational entry with no command entry beside
+    // it. Surfaced as the command's answer rather than dropped: a typed command that vanishes without
+    // a word reads as a broken app, which is exactly how it read before this.
+    const unknown = /^Unknown command:\s*(\S+)/.exec(raw)
+    if (unknown) return { role: 'command', text: 'Unknown command', ts, uuid, name: unknown[1] }
+    return null
+  }
   if (isRealUserText(e)) {
     const raw = textOf(e.message?.content).trim()
     if (raw.startsWith('<task-notification>')) return taskNotificationItem(raw, ts, uuid)
@@ -463,10 +492,7 @@ function conversationItem(e: Entry): ConversationItem | null {
     // model. foldCommands pairs it with the <command-name> entry below so the invocation and its
     // answer read as one row. Deliberately NOT entity-decoded: what the CLI wrote here is already
     // literal. It IS normalized, because it was written for a terminal — see ansi.ts.
-    if (raw.startsWith('<local-command-stdout>')) {
-      const out = normalizeCommandOutput(tagOf(raw, 'local-command-stdout')).trim()
-      return out ? { role: 'command', text: out, ts, uuid } : null   // the empty ones are noise
-    }
+    if (raw.startsWith('<local-command-stdout>')) return commandItem(raw, ts, uuid)
     // `!` bash mode keeps the command-chip line style and its monospace: a shell's output is
     // preformatted by nature, where a CLI status sentence is prose. Same reason ansi.ts fences a
     // table instead of prosing it.
@@ -485,11 +511,7 @@ function conversationItem(e: Entry): ConversationItem | null {
       const att = /att="([^"]+)"/.exec(m[1])?.[1]
       return { role: 'user', text: m[2].trim(), ts, uuid, ...(img ? { img } : {}), ...(att ? { att } : {}) }
     }
-    if (/^<command-name>/.test(raw)) {
-      const name = /<command-name>([^<]*)<\/command-name>/.exec(raw)?.[1]?.trim() ?? ''
-      const args = /<command-args>([\s\S]*?)<\/command-args>/.exec(raw)?.[1]?.trim() ?? ''
-      return name ? { role: 'command', text: '', ts, uuid, name, ...(args ? { args } : {}) } : null
-    }
+    if (/^<command-name>/.test(raw)) return commandItem(raw, ts, uuid)
     return { role: 'user', text: raw, ts, uuid }
   }
   if (isMainAssistantText(e) && e.message?.stop_reason !== 'tool_use') {
