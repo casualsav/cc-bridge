@@ -9,9 +9,9 @@
 import { createInterface } from 'node:readline'
 import { stdin, stdout } from 'node:process'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, writeFileSync, readFileSync, copyFileSync, chmodSync, appendFileSync, openSync } from 'node:fs'
-import { homedir, platform } from 'node:os'
-import { join } from 'node:path'
+import { existsSync, mkdirSync, writeFileSync, readFileSync, copyFileSync, chmodSync, appendFileSync, openSync, mkdtempSync } from 'node:fs'
+import { homedir, platform, tmpdir } from 'node:os'
+import { basename, join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { STATE_DIR, ENV_FILE, ACCESS_FILE, DAEMON_LOG_FILE, DAEMON_PID_FILE, WATCHDOG_PID_FILE } from './common.ts'
 import { probeHardware, recommendWhisper, describeHardware, WHISPER_MODELS, WHISPER_INFO, type WhisperModel } from './hardware.ts'
@@ -67,8 +67,8 @@ function which(cmd: string): boolean {
     { shell: true, stdio: 'ignore' }).status === 0
 }
 type RunResult = { ok: boolean; out: string; err: string }
-function run(cmd: string, args: string[], opts: { timeout?: number } = {}): RunResult {
-  const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: opts.timeout ?? 600_000 })
+function run(cmd: string, args: string[], opts: { timeout?: number; cwd?: string } = {}): RunResult {
+  const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: opts.timeout ?? 600_000, cwd: opts.cwd })
   return { ok: r.status === 0, out: r.stdout ?? '', err: r.stderr ?? '' }
 }
 const hasSudo = () => which('sudo') && spawnSync('sudo', ['-n', 'true'], { stdio: 'ignore' }).status === 0
@@ -162,6 +162,9 @@ type Config = {
   accounts?: string[]
   botUsername?: string
   prepareCodex?: boolean
+  fileBrowser: 'rw' | 'ro' | 'none'
+  hosting: 'funnel' | 'cloudflared' | 'domain'
+  publicUrl?: string
 }
 
 // Validate a token against Telegram's getMe — confirms it's real and yields the bot's @username.
@@ -199,7 +202,9 @@ async function interview(): Promise<Config> {
     { value: 'openai', label: 'openai — hosted Whisper (needs an OPENAI_API_KEY)' },
   ], 'local')
 
-  const cfg: Config = { token, telegramId, voice, botUsername }
+  // fileBrowser/hosting are answered further down (after the accounts loop); seeded with their
+  // recommended values here so cfg is complete from the start.
+  const cfg: Config = { token, telegramId, voice, botUsername, fileBrowser: 'rw', hosting: 'funnel' }
   if (voice === 'local') await pickWhisperModel(cfg)
   if (voice === 'groq') cfg.groqKey = (await ask('GROQ_API_KEY:')).trim()
   if (voice === 'openai') cfg.openaiKey = (await ask('OPENAI_API_KEY:')).trim()
@@ -217,6 +222,34 @@ async function interview(): Promise<Config> {
     if (cfg.accounts.includes(name)) { console.log(C.dim('  • already added')); continue }
     cfg.accounts.push(name)
     console.log(C.ok(`  ✓ ${name} → ~/.claude-${name}`))
+  }
+  // Files Mini App (INSTALL.md Q6). Two answers: what the browser may do, and where its public
+  // HTTPS URL comes from. The console tabs ship at every level.
+  console.log(C.dim('\n  The bridge ships a Mini App that opens inside Telegram: a file explorer for this machine'))
+  console.log(C.dim('  (browse, preview and download from your phone) alongside the console tabs.'))
+  cfg.fileBrowser = await askChoice<'rw' | 'ro' | 'none'>('File browser in the Mini App?', [
+    { value: 'rw', label: 'read/write — browse, preview, download, plus upload/edit/rename/delete' },
+    { value: 'ro', label: 'read-only — browse/preview/download; the machine can\'t be modified from the app' },
+    { value: 'none', label: 'no file browser — console tabs (Sessions/Scheduled/Settings) only; enable later from /settings' },
+  ], 'rw')
+  cfg.hosting = await askChoice<'funnel' | 'cloudflared' | 'domain'>('How should the Mini App get its public HTTPS URL?', [
+    { value: 'funnel', label: 'Tailscale Funnel — free stable public URL, no domain needed, opens in-group; one-time login + toggle' },
+    { value: 'cloudflared', label: 'cloudflared quick tunnel — zero setup, but the URL rotates so the app opens only in a DM with the bot' },
+    { value: 'domain', label: 'custom domain — you already run a reverse proxy to this box' },
+  ], 'funnel')
+  if (cfg.hosting === 'domain') {
+    let url = ''
+    for (let i = 0; i < 3; i++) {
+      const raw = (await ask('  Public HTTPS URL (e.g. https://files.example.com):')).trim()
+      if (raw === '') break                                     // blank, or stdin closed → fall back below
+      if (/^https:\/\/\S+$/i.test(raw)) { url = raw.replace(/\/+$/, ''); break }
+      console.log(C.warn('  that needs to be a full https:// URL — try again'))
+    }
+    if (url) cfg.publicUrl = url
+    else {
+      cfg.hosting = 'cloudflared'
+      console.log(C.warn('  • no URL given — using the cloudflared quick tunnel instead (the app opens from a DM; re-run setup to switch).'))
+    }
   }
   const codexDetected = !!codexCliPath() || existsSync(join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'auth.json')) ||
     (existsSync(ENV_FILE) && /^(CODEX_BIN|CODEX_MODEL|CODEX_REASONING_EFFORT)=/m.test(readFileSync(ENV_FILE, 'utf8')))
@@ -302,9 +335,23 @@ function writeConfig(cfg: Config): void {
     env.push(`TELEGRAM_TRANSCRIBE_MODEL=${cfg.whisperModel}`, `TELEGRAM_WHISPER_DEVICE=${cfg.whisperDevice}`, 'TELEGRAM_WHISPER_COMPUTE=int8')
   } else if (cfg.voice === 'groq') { env.push('TELEGRAM_TRANSCRIBE_MODEL=whisper-large-v3-turbo', `GROQ_API_KEY=${cfg.groqKey}`) }
   else if (cfg.voice === 'openai') { env.push('TELEGRAM_TRANSCRIBE_MODEL=whisper-1', `OPENAI_API_KEY=${cfg.openaiKey}`) }
+  // Files Mini App: always enabled (the console tabs ship at every level); WRITE is the file-browser
+  // level, and "no file browser" is access.json's fileBrowser:false below.
+  env.push('TELEGRAM_WEBAPP_ENABLED=1', `TELEGRAM_WEBAPP_WRITE=${cfg.fileBrowser === 'rw' ? 1 : 0}`)
+  if (cfg.hosting === 'funnel') {
+    // tunnel=tailscale: the daemon READS the funnel URL from `tailscale funnel status` at startup
+    // (tunnel.ts tailscaleFunnelUrl) — leave TELEGRAM_WEBAPP_PUBLIC_URL unset so the funnel stays the
+    // single source of truth. Setting PUBLIC_URL is the retrofit path for an already-live box (it
+    // short-circuits the built-in branch, daemon.ts startFilesWebapp); a fresh install must not use it.
+    env.push('TELEGRAM_WEBAPP_TUNNEL=tailscale')
+  } else if (cfg.hosting === 'cloudflared') env.push('TELEGRAM_WEBAPP_TUNNEL=cloudflared')
+  else env.push(`TELEGRAM_WEBAPP_PUBLIC_URL=${cfg.publicUrl}`)
   // Re-runs must not clobber config the wizard doesn't manage (bang-shell, TTS keys, …):
   // keep every existing key this run isn't rewriting, and back the old file up first.
   const newKeys = new Set(env.map(l => l.split('=')[0]))
+  // …except a PUBLIC_URL left by a previous custom-domain run: preserved, it would short-circuit
+  // the tunnel this run just chose.
+  if (cfg.hosting !== 'domain') newKeys.add('TELEGRAM_WEBAPP_PUBLIC_URL')
   if (existsSync(ENV_FILE)) {
     const preserved = readFileSync(ENV_FILE, 'utf8').split('\n')
       .filter(l => l.trim() && !newKeys.has(l.split('=')[0]))
@@ -327,12 +374,16 @@ function writeConfig(cfg: Config): void {
       // reader. Rewriting it here leaves it id-shaped from install onward.
       a.allowFrom = Array.isArray(a.allowFrom) ? a.allowFrom.map(String) : []
       if (cfg.telegramId && !a.allowFrom.includes(cfg.telegramId)) a.allowFrom.push(cfg.telegramId)
+      // This run's Q6 answer wins over an earlier one's: the user picked a level explicitly.
+      if (cfg.fileBrowser === 'none') a.fileBrowser = false
+      else if (a.fileBrowser === false) delete a.fileBrowser   // rw/ro → back to the daemon's default (on)
       writeFileSync(ACCESS_FILE, JSON.stringify(a, null, 2) + '\n', { mode: 0o600 })
       console.log(C.ok(`  ✓ ${ACCESS_FILE} ${C.dim('(existing file kept — pairing/groups preserved)')}`))
     } catch { console.log(C.err(`  ✗ ${ACCESS_FILE} exists but isn't valid JSON — left untouched; fix it by hand`)) }
   } else {
     const access: Record<string, unknown> = { dmPolicy: cfg.telegramId ? 'allowlist' : 'pairing',
       allowFrom: cfg.telegramId ? [cfg.telegramId] : [], groups: {}, pending: {}, renderMarkdown: true }
+    if (cfg.fileBrowser === 'none') access.fileBrowser = false   // absent = on, the daemon's default
     writeFileSync(ACCESS_FILE, JSON.stringify(access, null, 2) + '\n', { mode: 0o600 })
     console.log(C.ok(`  ✓ ${ACCESS_FILE}${cfg.telegramId ? '' : C.dim(' (pairing mode — approve your first DM after setup)')}`))
   }
@@ -349,6 +400,234 @@ function writeConfig(cfg: Config): void {
     writeFileSync(join(STATE_DIR, 'accounts.json'), JSON.stringify(reg, null, 2) + '\n', { mode: 0o600 })
     console.log(C.ok(`  ✓ ${join(STATE_DIR, 'accounts.json')} (${cfg.accounts.join(', ')})`))
   }
+}
+
+// ---- Files Mini App reachability (INSTALL.md Q6's URL choice) ----
+// The webapp binds 127.0.0.1:<port>; Telegram needs public HTTPS in front of it. Funnel and custom
+// domain give a stable URL (registrable in BotFather → /files opens in-group); cloudflared's rotates.
+let funnelUrl = ''   // resolved *.ts.net URL, for the finish section
+
+// Mirrors resolveInstanceId() + WEBAPP_PORT in daemon.ts — keep in sync with them.
+const DEFAULT_STATE_DIR = join(homedir(), '.claude', 'channels', 'telegram')
+function webappPort(): number {
+  const explicit = process.env.TELEGRAM_INSTANCE_ID
+  const id = explicit ? (explicit.replace(/[^A-Za-z0-9_-]/g, '') || '1')
+    : STATE_DIR === DEFAULT_STATE_DIR ? '1'
+    : (basename(STATE_DIR).replace(/^telegram[-_]?/, '').replace(/[^A-Za-z0-9_-]/g, '') || '1')
+  return 8787 + (Number.isFinite(+id) ? Number(id) : 0)
+}
+
+let botFatherShown = false
+function printBotFatherStep(cfg: Config, url: string): void {
+  if (botFatherShown) return
+  botFatherShown = true
+  console.log(`\n  ${C.b('Register the Mini App URL so /files opens in-group:')}`)
+  console.log(`    @BotFather → /mybots → ${cfg.botUsername ? `@${cfg.botUsername}` : 'your bot'} → Bot Settings → Configure Mini App → Edit/Enable`)
+  console.log(`    URL: ${C.b(url)}`)
+}
+
+// Every give-up path in the Funnel walk-through lands here: cloudflared always works (the daemon
+// fetches the binary itself), it just can't open in-group.
+function fallbackToCloudflared(cfg: Config, reason: string): void {
+  try {
+    const cur = readFileSync(ENV_FILE, 'utf8')
+    writeFileSync(ENV_FILE, cur.replace(/^TELEGRAM_WEBAPP_TUNNEL=.*$/m, 'TELEGRAM_WEBAPP_TUNNEL=cloudflared'), { mode: 0o600 })
+    chmodSync(ENV_FILE, 0o600)
+  } catch { console.log(C.warn(`  ⚠ couldn't rewrite ${ENV_FILE} — set TELEGRAM_WEBAPP_TUNNEL=cloudflared by hand.`)) }
+  cfg.hosting = 'cloudflared'
+  console.log(C.warn(`  • ${reason} — switching the Mini App to the cloudflared quick tunnel.`))
+  console.log(C.dim('    The app will open from a DM with the bot (/files) for now.'))
+  console.log(C.dim('    To upgrade later: off-mcp/INSTALL.md → "Files Mini App reachability" has the manual Funnel steps (re-running `bun setup.ts` works too).'))
+}
+
+type TsStatus = { BackendState?: string; Self?: { DNSName?: string } }
+// `tailscale status --json` prints valid JSON even when it exits non-zero (logged out), so parse
+// stdout regardless of the exit status.
+function tailscaleStatus(): TsStatus | null {
+  try { return JSON.parse(run('tailscale', ['status', '--json'], { timeout: 15_000 }).out) as TsStatus } catch { return null }
+}
+// Ask for the sudo password on the TTY before a piped child needs it — otherwise the prompt is
+// invisible inside the child's captured stdio and the command just sits there until it times out.
+function prewarmSudo(): void {
+  if (which('sudo') && !hasSudo()) spawnSync('sudo', ['-v'], { stdio: 'inherit' })
+}
+
+async function setupWebappHosting(cfg: Config): Promise<void> {
+  const port = webappPort()
+  if (cfg.hosting === 'cloudflared') {
+    console.log(C.dim(`\n  Mini App: the daemon fetches cloudflared and opens the tunnel on first start — nothing to install.`))
+    console.log(C.dim('  Its URL rotates each restart, so /files opens in a DM with the bot.'))
+    return
+  }
+  if (cfg.hosting === 'domain') {
+    console.log(C.dim(`\n  Mini App: your reverse proxy must target http://127.0.0.1:${port} — that's where the webapp binds.`))
+    printBotFatherStep(cfg, cfg.publicUrl!)
+    return
+  }
+
+  section('Tailscale Funnel')
+  // 0 · The whole walk-through needs a human (browser login, admin toggles) — don't touch tailscale at all without one.
+  if (_closed) {
+    console.log(C.dim('  Non-interactive run — the Funnel setup needs a browser login.'))
+    fallbackToCloudflared(cfg, 'non-interactive run')
+    return
+  }
+
+  // 1 · presence
+  if (!which('tailscale')) {
+    console.log('  Tailscale isn\'t installed here. It\'s free, and the login is one web page — nothing to install on your phone.')
+    if (!(await askYN('  Install Tailscale now?', true))) { fallbackToCloudflared(cfg, 'Tailscale not installed'); return }
+    let installed: boolean
+    if (platform() === 'darwin') installed = installPkg('tailscale')
+    else {
+      prewarmSudo()   // the official script escalates on its own; make sure its prompt is answerable
+      console.log(C.dim('  installing tailscale…'))
+      installed = run('sh', ['-c', 'curl -fsSL https://tailscale.com/install.sh | sh'], { timeout: 300_000 }).ok
+    }
+    if (!installed || !which('tailscale')) { fallbackToCloudflared(cfg, 'the Tailscale install failed'); return }
+    console.log(C.ok('  ✓ tailscale installed'))
+  } else console.log(C.ok('  ✓ tailscale present'))
+
+  // 2 · login
+  let st = tailscaleStatus()
+  if (st?.BackendState !== 'Running') {
+    console.log('  This machine isn\'t logged into a tailnet yet.')
+    prewarmSudo()
+    // `tailscale up` BLOCKS until the human approves the printed link, so it can't be awaited through
+    // run(): spawn it, scrape the link out of its output, and poll status until the backend is up.
+    // --operator lets every later tailscale command run without sudo.
+    const operator = process.env.USER || 'root'
+    const child = spawn('sudo', ['tailscale', 'up', `--operator=${operator}`], { stdio: ['ignore', 'pipe', 'pipe'] })
+    child.on('error', () => {})
+    // It stays alive while the login is pending, so a non-zero exit means it failed outright (no
+    // sudo, bad flag) — don't sit out the 5 minutes for a command that's already gone.
+    let failedExit = false
+    child.on('exit', code => { failedExit = code !== 0 && code !== null })
+    let shown = false
+    const scan = (b: Buffer | string) => {
+      const m = String(b).match(/https:\/\/login\.tailscale\.com\/\S+/)
+      if (!m || shown) return
+      shown = true
+      console.log(`\n  ${C.b('Open this link in any browser and approve this machine:')}`)
+      console.log(`  ${C.b(m[0])}`)
+      console.log(C.dim('  (It\'s a web page — there\'s nothing to install on your phone.)\n'))
+    }
+    child.stdout?.on('data', scan); child.stderr?.on('data', scan)
+    const deadline = Date.now() + 300_000
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 3000))
+      st = tailscaleStatus()
+      if (st?.BackendState === 'Running') break
+      if (failedExit) break
+    }
+    try { child.kill() } catch {}
+    if (st?.BackendState !== 'Running') {
+      console.log(C.warn('  ⚠ the login didn\'t complete within 5 minutes.'))
+      console.log(C.dim(`    Resume it later with: sudo tailscale up --operator=${operator} — then re-run \`bun setup.ts\`.`))
+      fallbackToCloudflared(cfg, 'the Tailscale login didn\'t complete'); return
+    }
+    console.log(C.ok('  ✓ logged into the tailnet'))
+  } else console.log(C.ok('  ✓ tailscale is up'))
+
+  // 3 · cert preflight. `tailscale funnel` needs tailnet HTTPS certs and HANGS silently without them,
+  // so issue one first (the command writes cert files into cwd → give it a throwaway dir).
+  const dnsName = String(st?.Self?.DNSName ?? '').replace(/\.$/, '')
+  if (dnsName) {
+    let certOk = false
+    for (let attempt = 1; attempt <= 3 && !certOk; attempt++) {
+      const r = run('tailscale', ['cert', dnsName], { timeout: 60_000, cwd: mkdtempSync(join(tmpdir(), 'cc-bridge-cert-')) })
+      if (r.ok) { certOk = true; break }
+      const out = `${r.out}${r.err}`
+      if (/does not support getting TLS certs|certs.*not.*enabled|500/i.test(out)) {
+        console.log(C.warn('  • HTTPS certificates are off for your tailnet — Funnel needs them. Free, one click:'))
+        console.log(`    open ${C.b('https://login.tailscale.com/admin/dns')} → HTTPS Certificates → ${C.b('Enable HTTPS')}`)
+        console.log(C.dim('    (MagicDNS, on the same page, has to be on too.)'))
+        if (attempt < 3) await ask('  Press Enter once enabled to retry…')
+      } else {
+        console.log(C.warn(`  • cert probe failed: ${out.trim().split('\n').pop() || 'unknown error'}`))
+        if (attempt >= 2) break   // one retry for a transient failure, then give up
+      }
+    }
+    if (!certOk) { fallbackToCloudflared(cfg, 'the tailnet HTTPS certificate couldn\'t be issued'); return }
+    console.log(C.ok('  ✓ tailnet HTTPS certificate'))
+  }
+
+  // 4 · what the public URL actually exposes. Informational — never blocks.
+  let allowFrom: string[] | null = null
+  try {
+    const a = JSON.parse(readFileSync(ACCESS_FILE, 'utf8'))
+    allowFrom = Array.isArray(a.allowFrom) ? a.allowFrom.map(String) : []
+  } catch {}
+  if (allowFrom?.length) console.log(C.ok(`  ✓ the public URL only answers these Telegram accounts: ${allowFrom.join(', ')}`))
+  else {
+    console.log(C.warn('  ⚠ The Funnel URL is public. Every API call must carry Telegram-signed identity'))
+    console.log(C.warn('    (HMAC\'d against this bot\'s own token) AND be on the allowlist — and the allowlist is'))
+    console.log(C.warn('    empty right now (pairing mode), so the app answers nobody. Safe to continue: pair your'))
+    console.log(C.warn('    first DM after setup and the app starts working.'))
+  }
+
+  // 5 · don't silently repoint a Funnel this box already uses: the plain form binds the tailnet's
+  // public 443, so a second `funnel --bg` moves it off whatever it was serving.
+  const before = run('tailscale', ['funnel', 'status'], { timeout: 30_000 })
+  let serving = `${before.out}${before.err}`.includes(`:${port}`)
+  if (serving) console.log(C.ok(`  ✓ Funnel is already configured for port ${port}`))
+  else {
+    const other = `${before.out}${before.err}`.match(/127\.0\.0\.1:(\d+)/)
+    if (other) {
+      console.log(C.warn(`  ⚠ Funnel already fronts http://127.0.0.1:${other[1]} on this machine's public 443.`))
+      if (!(await askYN(`  Repoint it to the Mini App (port ${port})?`, false))) { fallbackToCloudflared(cfg, 'the existing Funnel was left in place'); return }
+    }
+    // 6 · open it. Funnel only fronts the public ports 443/8443/10000; the plain form binds 443,
+    // which is the one Telegram will accept for a Mini App URL.
+    for (let attempt = 1; attempt <= 3 && !serving; attempt++) {
+      let r = run('tailscale', ['funnel', '--bg', String(port)], { timeout: 30_000 })
+      if (!r.ok && /permission|denied|Access/i.test(`${r.out}${r.err}`)) {
+        prewarmSudo()
+        r = run('sudo', ['tailscale', 'funnel', '--bg', String(port)], { timeout: 30_000 })
+      }
+      if (r.ok) { serving = true; break }
+      const out = `${r.out}${r.err}`
+      const link = out.match(/https:\/\/login\.tailscale\.com\/f\/\S+/)
+      if (/Funnel (is )?not enabled/i.test(out) && link) {
+        console.log(C.warn('  • Funnel isn\'t enabled on your tailnet yet — a one-time toggle in the admin console, not a device install.'))
+        console.log(`\n  ${C.b('Open this link and enable Funnel:')}`)
+        console.log(`  ${C.b(link[0])}\n`)
+        if (attempt < 3) await ask('  Press Enter after enabling to retry…')
+      } else {
+        console.log(C.err(`  ✗ ${out.trim().split('\n').pop() || 'tailscale funnel failed'}`))
+        break
+      }
+    }
+    if (!serving) { fallbackToCloudflared(cfg, 'Funnel couldn\'t be turned on'); return }
+  }
+
+  // 7 · confirm, then a best-effort public-path check (never fatal).
+  const after = run('tailscale', ['funnel', 'status'], { timeout: 30_000 })
+  const status = `${after.out}${after.err}`
+  if (!status.includes(`:${port}`)) { fallbackToCloudflared(cfg, `Funnel isn't serving port ${port}`); return }
+  const url = status.match(/https:\/\/[\w.-]+\.ts\.net/)?.[0] || (dnsName ? `https://${dnsName}` : '')
+  if (!url) { fallbackToCloudflared(cfg, 'the Funnel URL couldn\'t be read back'); return }
+  funnelUrl = url
+  console.log(C.ok(`  ✓ Funnel is serving the Mini App at ${url}`))
+
+  // Never curl the bare hostname from this box: MagicDNS resolves it to the PRIVATE tailnet IP, so an
+  // on-box request tests the wrong path and fails with a TLS error even when the public funnel is
+  // perfectly healthy. Resolve the name against public DNS and pin curl to that address instead.
+  const host = url.replace(/^https:\/\//, '')
+  const phoneNote = '  • configured — public DNS can take up to ~10 min to appear; test it from your phone shortly.'
+  if (!which('dig')) console.log(C.dim(phoneNote))
+  else {
+    // `dig +short` answers A records (plus any CNAME chain) — keep the addresses only.
+    const ips = run('dig', ['+short', '@1.1.1.1', host], { timeout: 15_000 }).out
+      .split('\n').map(s => s.trim()).filter(s => /^\d+(\.\d+){3}$/.test(s))
+    if (!ips.length) console.log(C.dim(phoneNote))
+    else if (which('curl')) {
+      const c = run('curl', ['-sI', '--resolve', `${host}:443:${ips[0]}`, `https://${host}/`, '--max-time', '15'], { timeout: 30_000 })
+      if (/HTTP\/[12].* 200/.test(c.out)) console.log(C.ok('  ✓ the public URL answers'))
+      else console.log(C.warn('  • the public URL didn\'t answer 200 yet — DNS and certs can take a few minutes to propagate; test from your phone shortly.'))
+    }
+  }
+  printBotFatherStep(cfg, url)
 }
 
 // ---- settings.json + statusline + CLAUDE.md ----
@@ -426,12 +705,19 @@ function patchSettings(mode: Mode): void {
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 // ---- main ----
+function miniAppLine(cfg: Config): string {
+  if (cfg.hosting === 'funnel' && funnelUrl) return `Mini App: ${funnelUrl} (open with /files; registered in BotFather per the step above)`
+  if (cfg.hosting === 'domain') return `Mini App: ${cfg.publicUrl}`
+  return 'Mini App: opens from a DM with the bot (/files)'
+}
+
 async function main(): Promise<void> {
   console.log(C.b('\n  claude-tg — off-MCP setup\n'))
   const mode = await checkDeps()
   const cfg = await interview()
   await prepareCodexFailover(cfg)
   writeConfig(cfg)
+  await setupWebappHosting(cfg)
   patchSettings(mode)
 
   // Local Whisper: provision the venv + pre-pull weights now (so the first note is instant).
@@ -446,12 +732,14 @@ async function main(): Promise<void> {
     console.log(`  1. ${C.b('Message your bot now')} — it should reply.${cfg.telegramId ? '' : ' (First DM returns a pairing code; approve it with /telegram:access pair <code>.)'}`)
     console.log(`  2. ${C.b('Restart Claude Code once')} to hand the daemon over to the managed SessionStart hook.`)
     console.log(C.dim(`     (Your bridge session "${BRIDGE_SESSION}" keeps running — re-adopted automatically after the restart. Attach anytime: tmux attach -t ${BRIDGE_SESSION}.)`))
+    console.log(`  ${miniAppLine(cfg)}`)
   } else {
     console.log('Config is written and the plugin is wired. To finish:')
     console.log(`  1. ${C.b('Restart Claude Code once')} — the SessionStart hook brings the daemon up, fully configured.`)
     if (mode === 'off-mcp') console.log(`  2. Launch work sessions with ${C.b('ccb')} inside ${C.b('tmux')} — the daemon auto-adopts the pane.`)
     else console.log(`  2. ${C.b('MCP mode:')} the wizard left the server enabled; launch work sessions with plain ${C.b('claude')}.`)
     console.log(`  3. Message your bot — it should reply.${cfg.telegramId ? '' : ' (Approve your first DM\'s pairing code with /telegram:access pair <code>.)'}`)
+    console.log(`  ${miniAppLine(cfg)}`)
   }
   if (mode === 'off-mcp') {
     console.log(`\n${C.b('Launch alias')} ${C.dim('(reload your shell or `source` the rc first):')}`)
