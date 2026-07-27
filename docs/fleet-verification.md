@@ -9,6 +9,11 @@ nudge. These are the traps that cost real time, none of which are obvious from t
 `tmux new-window` or a bare `claude` — it misses the pane stamps, the per-instance socket and the
 launch dials, so it isn't a bridge session and proves nothing. See `off-mcp/CLAUDE.md`.
 
+Kill it with its founding ask still open and the dead-letter reap tells you so — a system block
+typed into YOUR pane, which costs you a turn. Have the probe answer before you kill it, or accept
+the turn. That is not the nudge machinery (which is gone): a dead letter is a real event at the
+moment it happens, and an ask that can never be answered has no other way to reach its asker.
+
 For a NON-bridge question (does this model id work?) a one-shot is fine, but run it as
 `env -u TMUX -u TMUX_PANE claude -p …` or it re-stamps the parent session's transcript.
 
