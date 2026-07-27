@@ -91,6 +91,10 @@ export type BusPending = {
   injected: boolean   // false = still queued (target was busy); true = delivered, awaiting an answer
   expiredAt?: number  // set when the TTL passed; the ask is no longer delivered to the target, but a late
                       // `tg answer` still resolves it until dropExpired() GCs it (LATE_ANSWER_GRACE_MS)
+  askerResolvedAt?: number   // when the daemon decided this asker needs no further notice about this ask
+                             // (the TTL notice was withheld because the target had already answered it
+                             // since). Persisted so the decision outlives the 200-row ledger window and a
+                             // daemon restart — see askerAlreadyResolved.
   depth?: number      // chain depth: 1 = sent by a human-woken (or @system-woken) session. Absent on
                       // pre-depth entries, which load as 1 — the safe reading, since an unknown chain
                       // has at least been through one hop.
@@ -149,6 +153,7 @@ export function loadBus(): BusState {
         expiresAt: typeof p.expiresAt === 'number' ? p.expiresAt : 0,
         injected: p.injected === true,
         ...(typeof p.expiredAt === 'number' ? { expiredAt: p.expiredAt } : {}),
+        ...(typeof p.askerResolvedAt === 'number' ? { askerResolvedAt: p.askerResolvedAt } : {}),
         ...(p.founding === true ? { founding: true as const } : {}),
         depth: typeof p.depth === 'number' ? p.depth : 1,   // pre-depth entry: assume one hop, the safe reading
       }
@@ -312,6 +317,36 @@ export function dropExpired(before: number): number {
   return dead.length
 }
 
+// ---- "the asker has already been answered" (the terminal state) ----
+
+// An ask is RESOLVED FOR ITS ASKER once the target has successfully answered that asker since this ask
+// was created: the answer proves the target is alive, bus-fluent, and has spoken to the asker with this
+// ask in its context, so the asker is not sitting waiting on it. That is the ONE reading of "resolved"
+// the daemon has ever used — sweepBus's TTL path suppresses its "no answer yet" notice on exactly this
+// predicate — and it is now written once, here, so every after-the-fact notifier inherits it instead of
+// each deciding for itself. Two of them disagreeing is the whole bug: on 2026-07-27 ask 447's timeout
+// notice was correctly withheld, and then the target session was closed by hand and the session-end
+// reaper — which had never heard of any of this — woke the asker with a stale "ended unanswered".
+//
+// Both halves are load-bearing. The ledger scan is the live signal, but the caller's window is finite
+// (200 rows) and a row survives up to LATE_ANSWER_GRACE_MS, so on a busy bus the proof scrolls out and
+// the predicate silently rots back to false. `askerResolvedAt` is the durable memo: once the daemon has
+// decided this asker hears nothing more about this ask, that decision is persisted with the row and
+// survives both the window and a daemon restart.
+export function askerAlreadyResolved(p: BusPending, entries: LedgerEntry[]): boolean {
+  if (p.askerResolvedAt != null) return true
+  return entries.some(e => e.kind === 'answer' && e.from === p.toName && e.to === p.fromName && e.ts >= p.createdAt)
+}
+
+/** Record that the asker has been told nothing on purpose — see askerAlreadyResolved. Idempotent. */
+export function markAskerResolved(id: number, now: number): void {
+  ensureLoaded()
+  const p = store.pending[String(id)]
+  if (!p || p.askerResolvedAt != null) return
+  p.askerResolvedAt = now
+  save()
+}
+
 // ---- ask delivery outcome (bug 11b) ----
 
 // What actually happened to an ask the moment it was minted. The daemon used to discard this (the
@@ -386,6 +421,18 @@ export function planAskReap(
 // not the card: a reaped row can never fire the 60-minute "still waiting; a late answer will still be
 // delivered" notice, and that false promise was what 11c was actually about.
 export function reapNotifiesAsker(p: Pick<BusPending, 'injected'>): boolean { return !p.injected }
+
+// Whether the reap must stay silent in the asker's PANE — the other half of reapNotifiesAsker, which
+// only ever governed the human-facing card. The pane block is the one that fired on 2026-07-27 for an
+// ask whose timeout notice had already been withheld, waking a Fable lane to re-answer a settled
+// question. Anything the daemon says about an ask after the fact goes through this question first.
+//
+// DELIVERED asks only, and the asymmetry is deliberate. A never-delivered reap makes a different claim
+// — "the target never even received this" — which stays true and actionable whatever else that target
+// answered, because that work never started. Silencing it for symmetry would walk back bug 11c.
+export function reapNoticeSuppressed(p: BusPending, entries: LedgerEntry[]): boolean {
+  return p.injected && askerAlreadyResolved(p, entries)
+}
 
 // The DELIVERED half of the target-gone reap: which rows the caller should run its async liveness
 // probe over. Sibling of planAskReap, which owns the never-delivered half.

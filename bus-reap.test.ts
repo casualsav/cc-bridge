@@ -9,7 +9,7 @@
 // in that window would fail every open ask at once and tell every asker their target had ended — a
 // worse bug than the one being fixed. The reap must not run until discovery has landed.
 import { test, expect } from 'bun:test'
-import { planAskReap, deliveredReapCandidates, reapNotifiesAsker, type BusPending } from './agent-bus.ts'
+import { planAskReap, deliveredReapCandidates, reapNotifiesAsker, reapNoticeSuppressed, type BusPending, type LedgerEntry } from './agent-bus.ts'
 
 const ask = (over: Partial<BusPending> = {}): BusPending => ({
   id: 95, fromSid: 'sidChat', toSid: 'sidCcbridge', fromKind: 'claude', toKind: 'claude',
@@ -143,4 +143,57 @@ test('a delivered hermes ask is out of scope for pane liveness', () => {
 test('reaping a delivered row tells the asker nothing, expired or not', () => {
   expect(reapNotifiesAsker({ injected: true })).toBe(false)
   expect(reapNotifiesAsker({ injected: false })).toBe(true)
+})
+
+// ---- the stale session-end notice (ask 447, 2026-07-27) ----
+//
+// The bug the tests above could not see, because they only ever asked WHICH rows get reaped. Ask 447
+// was superseded: its work was completed and reported through two later asks, its 60-minute TTL notice
+// was correctly withheld ("no notice sent — asker already answered"), and then the owner closed that
+// session by hand. The reaper — a second, independent notifier that had never heard of the first —
+// delivered "(@bridge ended with your ask 447 unanswered)" into the asker's pane, waking a lane running
+// at Fable rates to re-answer a settled question. Both notifiers now ask reapNoticeSuppressed /
+// askerAlreadyResolved the same question.
+const answer = (over: Partial<LedgerEntry> = {}): LedgerEntry =>
+  ({ ts: 500, kind: 'answer', from: 'ccbridge', to: 'chat', id: 96, text: 'done', ...over })
+
+test('447: a delivered ask the target already answered the asker about is reaped in silence', () => {
+  const p = ask({ id: 447, injected: true, createdAt: 100, expiredAt: 400 })
+  expect(reapNoticeSuppressed(p, [answer()])).toBe(true)
+})
+
+// THE CONTROL. A genuinely-unanswered ask must still wake its asker when the session ends — that notice
+// is the 2026-07-26 fix for a spawner left waiting on a report that could never arrive.
+test('447: a genuinely-unanswered delivered ask still notifies', () => {
+  expect(reapNoticeSuppressed(ask({ id: 447, injected: true, createdAt: 100 }), [])).toBe(false)
+})
+
+// Ordering is the whole predicate: an answer that predates the ask cannot be an answer to anything the
+// asker is still waiting on. (This is the shape the live control uses — an ask minted AFTER the target's
+// last answer still fires.)
+test('447: an answer OLDER than the ask proves nothing', () => {
+  expect(reapNoticeSuppressed(ask({ id: 447, injected: true, createdAt: 900 }), [answer({ ts: 500 })])).toBe(false)
+})
+
+// …and it must be an answer from THIS target to THIS asker. A third party answering, or the target
+// answering somebody else, leaves the asker exactly as uninformed as before.
+test('447: only an answer from the target TO THIS ASKER counts', () => {
+  const p = ask({ id: 447, injected: true, createdAt: 100 })
+  expect(reapNoticeSuppressed(p, [answer({ from: 'someoneelse' })])).toBe(false)
+  expect(reapNoticeSuppressed(p, [answer({ to: 'someoneelse' })])).toBe(false)
+  expect(reapNoticeSuppressed(p, [answer({ kind: 'ask' })])).toBe(false)
+})
+
+// The asymmetry with the never-delivered half, stated as a test so it can't be "tidied" into symmetry:
+// "the target never even received this" stays true and actionable whatever else got answered.
+test('447: the never-delivered half is NEVER silenced by a later answer', () => {
+  expect(reapNoticeSuppressed(ask({ id: 447, injected: false, createdAt: 100 }), [answer()])).toBe(false)
+})
+
+// The durable half. The ledger scan is a finite window (200 rows) and a reaped row can be up to 24h old,
+// so on a busy bus the proof scrolls out — after which the live predicate alone rots back to false and
+// the stale notice returns. The flag the TTL path stamps when it suppresses is what survives that, and a
+// daemon restart with it.
+test('447: the persisted flag stands in for a proof that has scrolled out of the window', () => {
+  expect(reapNoticeSuppressed(ask({ id: 447, injected: true, createdAt: 100, askerResolvedAt: 400 }), [])).toBe(true)
 })

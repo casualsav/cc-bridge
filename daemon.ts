@@ -120,6 +120,7 @@ import {
   AGENT_BUS_ENABLED, AGENT_BUS_PIN_UI,
   createPending, getPending, removePending, putPending, listPending, markInjected, expirePending, dropExpired, LATE_ANSWER_GRACE_MS, ASK_TTL_MS,
   recordAgentAsk, resetHops, currentHops, BREADTH_NOTICE_AT, askResultText, planAskReap, deliveredReapCandidates, reapNotifiesAsker, queuedFor, type AskDelivery,
+  askerAlreadyResolved, markAskerResolved, reapNoticeSuppressed,
   unreportedWorkMarker, markReported, markBriefed,
   getReportedAt, getBriefedBy,
   setSessionDepth, resetAllSessionDepth, pruneSessionDepth, nextAskDepth, depthExceeded, depthLimit,
@@ -2876,6 +2877,11 @@ async function busTargetGone(sid: string): Promise<boolean> {
   return !chatIdForDmChatSession(sid) && !chatForLaneSession(sid)
 }
 
+// How many ledger rows the "has this asker already been answered?" scan reads. Same window the digest
+// uses, and deliberately not larger: the durable half of that question is the persisted askerResolvedAt
+// flag, not a bigger tail (see askerAlreadyResolved).
+const LEDGER_SCAN = 200
+
 // Fail a queued ask whose target session has ended (11c): drop it so the TTL can't claim an hour
 // later that we're "still waiting" for a session that is gone. Dropping the row is the fix; who
 // hears about it is a separate question, and reapNotifiesAsker answers it — a never-delivered ask
@@ -2883,9 +2889,20 @@ async function busTargetGone(sid: string): Promise<boolean> {
 async function reapDeadAsk(p: BusPending, room: string): Promise<void> {
   removePending(p.id)
   const delivered = !!p.injected   // the two sweep passes below already split on exactly this
+  // Say nothing about an ask its asker has already been answered about. This reaper fires on every way
+  // a session can end — a manual close, `tg kill`, a crash — and it used to notify unconditionally, so
+  // a row whose TTL notice had been deliberately withheld got woken back up hours later as "ended
+  // unanswered" (ask 447, 2026-07-27: the owner closed the session by hand and the asker's Fable lane
+  // burned a turn on a question that had been settled two asks earlier). See reapNoticeSuppressed for
+  // why only the delivered half is silenced.
+  const stale = reapNoticeSuppressed(p, tailLedger(room, LEDGER_SCAN))
   const why = delivered ? 'delivered but the target session ended before answering' : 'never delivered — target session ended'
-  appendLedger(room, { ts: Date.now(), kind: 'expire', from: p.toName, to: p.fromName, id: p.id, text: why })
-  process.stderr.write(`daemon: ask ${p.id} to @${p.toName} (${p.toSid}) reaped — ${why}\n`)
+  // Same contract as the suppressed TTL expiry: the reap is true history and is always recorded, and
+  // `suppressed` carries the fact that nothing was sent, so `tg history` shows it marked while the
+  // ambient digest omits it. Two surfaces, one answer.
+  appendLedger(room, { ts: Date.now(), kind: 'expire', from: p.toName, to: p.fromName, id: p.id, text: why, ...(stale ? { suppressed: true } : {}) })
+  process.stderr.write(`daemon: ask ${p.id} to @${p.toName} (${p.toSid}) reaped — ${why}${stale ? ' (no notice sent — asker already answered)' : ''}\n`)
+  if (stale) return
   const askerPane = await paneForSession(p.fromSid).catch(() => null)
   // The asking AGENT hears about this NOW, regardless of the human-facing card below — the delivered
   // half used to be dropped in total silence, and a live incident (2026-07-26) showed exactly why
@@ -2942,15 +2959,20 @@ async function sweepBus(): Promise<void> {
     // (the exact false alarm after kam answered 14 & 12 but left the instruct-ask 16 un-answered).
     // Computed BEFORE the append so the flag can ride the entry — the predicate only reads `answer`
     // rows, so the entry being in or out of the window can't change its result.
-    const provenLive = tailLedger(room, 200).some(e =>
-      e.kind === 'answer' && e.from === p.toName && e.to === p.fromName && e.ts >= p.createdAt)
+    // The predicate itself now lives in agent-bus.ts, so the session-end reaper above answers this
+    // question the same way instead of not asking it at all — which is how a suppressed timeout still
+    // produced a stale "ended unanswered" hours later.
+    const provenLive = askerAlreadyResolved(p, tailLedger(room, LEDGER_SCAN))
     // The expiry is TRUE HISTORY and is always recorded — the row really did expire. `suppressed`
     // carries the fact that no notice went out, so `tg history` can show it marked while the ambient
     // digest omits it. Before this, the ledger announced an expiry whose notice had been deliberately
     // withheld, and the two surfaces disagreeing about one event read as a fired alarm — which is
     // exactly what it was mistaken for.
     appendLedger(room, { ts: Date.now(), kind: 'expire', from: p.toName, to: p.fromName, id: p.id, text: 'timed out', ...(provenLive ? { suppressed: true } : {}) })
-    if (provenLive) { process.stderr.write(`daemon: ask ${p.id} expired but @${p.toName} has since answered @${p.fromName} — suppressing timeout notice\n`); continue }
+    // Stamp the decision on the row before moving on: the ledger proof scrolls out of the 200-row
+    // window long before the 24h late-answer grace elapses, and the reaper that runs when the target
+    // session finally ends must still know the asker was answered.
+    if (provenLive) { markAskerResolved(p.id, Date.now()); process.stderr.write(`daemon: ask ${p.id} expired but @${p.toName} has since answered @${p.fromName} — suppressing timeout notice\n`); continue }
     // Bus plumbing NEVER goes to General — the human-facing notice goes to the ASKER's OWN surface (its
     // chat DM / topic), and the "still open" system line goes into the asker's pane (its agent context).
     // Not "abandoned": the record is kept so a late answer still lands.
@@ -3045,10 +3067,17 @@ async function runHermesAsk(pending: BusPending, cfg: HermesEndpoint): Promise<v
 // child died with the daemon, so no answer will ever arrive. Expire them now + tell the asker, rather
 // than stranding it for the full 30-min TTL.
 function sweepOrphanedHermesAsks(): void {
+  const room = busLedgerRoom()
   for (const p of listPending()) {
     if (p.toKind !== 'hermes') continue
+    // The third after-the-fact notifier, and it answers the resolved question the same way as the other
+    // two: an ask whose asker that endpoint has already answered is dropped in silence. Reachable in
+    // one shape — a row whose TTL notice was suppressed, still inside its 24h late-answer grace when
+    // the daemon restarts — and "re-ask if still needed" is exactly as stale there as it was in 447.
+    const stale = askerAlreadyResolved(p, tailLedger(room, LEDGER_SCAN))
     removePending(p.id)
-    process.stderr.write(`daemon: dropped orphaned hermes ask ${p.id} → @${p.toName} (daemon restarted mid-run)\n`)
+    process.stderr.write(`daemon: dropped orphaned hermes ask ${p.id} → @${p.toName} (daemon restarted mid-run)${stale ? ' — no notice sent, asker already answered' : ''}\n`)
+    if (stale) continue
     void notifyBusText(p.fromSid, `♻️ Ask ${p.id} to <b>${escapeHtml(p.toName)}</b> was dropped — the bridge restarted mid-run.`)   // asker's surface, never General
     void paneForSession(p.fromSid).then(pane => {
       if (pane) void busDeliver(pane, formatAnswerBlock('system', p.id, `(ask ${p.id} to @${p.toName} dropped — the bridge restarted while it was working; re-ask if still needed)`))
