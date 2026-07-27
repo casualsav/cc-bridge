@@ -380,13 +380,17 @@
      the transcript and is gone when the turn ends, so it is the one thing here that should sit under
      the prose rather than in it. Do not "fix" it into --t-msg to match its neighbours.
      The glyph box is a fixed width: the six spinner characters have different advances, and letting
-     the row re-flow on every frame is a jitter you feel more than see. Numbers take the mono
-     register (they are live machine values, and tabular digits stop the elapsed time shivering as
-     it counts), and sit right so the line needs ONE separator rather than three. */
+     the row re-flow on every frame is a jitter you feel more than see.
+     ONE line in ONE type, by the owner's instruction: the time and tokens sit directly after the
+     verb rather than pinned to the far right, and they carry no face or size of their own. The mono
+     register they used to take is gone with the right-alignment that motivated it. What stays is
+     `tabular-nums` — the SAME family at the SAME size, selecting its fixed-width digits — because
+     the clock now ticks every second and proportional digits would shove the token text sideways on
+     every one of them. The verb is the part that ellipsizes; the numbers never truncate. */
   .work { display: flex; align-items: baseline; gap: 8px; padding: 3px 0 7px; color: var(--hint); font-size: var(--t-meta); }
   .work .g { width: 1.1em; flex: none; text-align: center; }
   .work .v { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .work .m { margin-left: auto; flex: none; font: var(--t-mono) ui-monospace, Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }
+  .work .m { flex: none; white-space: nowrap; font-variant-numeric: tabular-nums; }
   /* Reduced motion stops the CYCLE, not the signal — the glyph rests on a single character while the
      elapsed and token counts keep climbing on the poll, which is the liveness cue that matters and
      is text, not animation. Handled in startWorkGlyph(), which never starts the timer; the resting
@@ -1415,6 +1419,40 @@ const WORK_GLYPHS = ["·", "✢", "✳", "✶", "✻", "✽"];
 // /compact (real work) and every custom skill command (also real work) — see the send handler.
 const INSTANT_CMD = /^\/(clear|model|effort|status|context|cost|help|rename|config|doctor|exit|quit)\b/i;
 let workTimer = null, workPhase = 0, workOptimisticAt = 0;
+// ---- The elapsed clock ------------------------------------------------------------------------
+// The pane's number arrives once per 3s poll and is whatever the terminal last painted, so showing
+// it directly made the time lurch. Instead it SEEDS a local clock, and the displayed value is
+// derived from wall time — `seedSec + (now - seededAt)` — never incremented per tick. That is the
+// whole design: a throttled or frozen interval (a backgrounded tab) cannot corrupt a value nothing
+// counts, so returning to the tab paints the correct time rather than a leap, and no catch-up logic
+// is needed. The visibilitychange repaint below is freshness, not correction.
+let workClock = null;   // { seedSec, seededAt } or null when there is nothing to count
+let workTick = null;
+const ELAPSED_RE = /^(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*(?:(\d+)\s*s)?$/;
+function parseElapsed(s) {
+  const m = ELAPSED_RE.exec(String(s || "").trim());
+  if (!m || !(m[1] || m[2] || m[3])) return null;   // an unrecognised shape is shown verbatim instead
+  return (+(m[1] || 0)) * 3600 + (+(m[2] || 0)) * 60 + (+(m[3] || 0));
+}
+// The CLI's own shapes — "1h 2m" drops seconds, "3m 56s", "12s" — so the string we render can never
+// disagree in FORM with the pane string it reconciles against.
+function fmtElapsed(sec) {
+  const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60;
+  return h ? `${h}h ${m}m` : m ? `${m}m ${s}s` : `${s}s`;
+}
+const workSeconds = () => workClock ? workClock.seedSec + Math.floor((Date.now() - workClock.seededAt) / 1000) : null;
+// Reconcile a poll against the running clock: forward wins, backward is stale and ignored — the
+// pane's value is coarse and up to a poll period behind, and at 1s granularity a correction of a
+// second or two is invisible while a step BACKWARD is not. The exception is what stops max() from
+// pinning the display at a finished turn's high-water mark: a drop of more than RESEED_DROP is not
+// staleness, it is the next turn starting from zero, and that re-seeds hard.
+const RESEED_DROP = 5;
+function syncWorkClock(elapsed) {
+  const paneSec = parseElapsed(elapsed);
+  if (paneSec === null) { workClock = null; return }   // unparsed: fall back to the pane's own string
+  const now = workSeconds();
+  if (now === null || paneSec > now || now - paneSec > RESEED_DROP) workClock = { seedSec: paneSec, seededAt: Date.now() };
+}
 function paintWork() {
   const feed = $("dfeed");
   const st = lastDrill && lastDrill.status;
@@ -1422,8 +1460,12 @@ function paintWork() {
   // working. It is bounded: a send that never starts a turn must not leave a permanent lie on screen.
   const show = st || (workOptimisticAt && Date.now() - workOptimisticAt < 20000);
   let el = $("dwork");
-  if (!show) { if (el) el.remove(); stopWorkGlyph(); return; }
+  // Every teardown goes through here, /clear's silent path included: no status and no optimistic
+  // window means the row goes and BOTH timers stop with it. A ticker that outlived its row would be
+  // a clock counting for a turn that ended.
+  if (!show) { if (el) el.remove(); stopWorkGlyph(); stopWorkTick(); workClock = null; return; }
   if (st) workOptimisticAt = 0;   // the real thing arrived
+  syncWorkClock(st && st.elapsed);
   const stuck = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;
   if (!el) {
     el = document.createElement("div");
@@ -1432,8 +1474,9 @@ function paintWork() {
     feed.appendChild(el);
   }
   el.querySelector(".v").textContent = st ? st.verb + "…" : "Working…";
-  el.querySelector(".m").textContent = st ? [st.elapsed, st.tokens].filter(Boolean).join(" · ") : "";
+  paintWorkMeta();
   startWorkGlyph();
+  startWorkTick();
   if (stuck) feed.scrollTop = feed.scrollHeight;   // the row it just gained would otherwise push the newest message out of view
 }
 function startWorkGlyph() {
@@ -1446,6 +1489,29 @@ function startWorkGlyph() {
   }, 130);
 }
 function stopWorkGlyph() { if (workTimer) { clearInterval(workTimer); workTimer = null; } }
+// The time and the token count in one string, on the same line and in the same type as the verb.
+// Tokens come straight from the pane and are allowed to jump; only the time is smoothed.
+function paintWorkMeta() {
+  const el = $("dwork"); if (!el) return;
+  const st = lastDrill && lastDrill.status;
+  const sec = workSeconds();
+  // A shape parseElapsed didn't recognise is shown as the pane wrote it rather than dropped — the
+  // clock is an improvement on that string, not a precondition for showing one.
+  const time = sec === null ? (st && st.elapsed) || "" : fmtElapsed(sec);
+  el.querySelector(".m").textContent = st ? [time, st.tokens].filter(Boolean).join(" · ") : "";
+}
+// Independent of the glyph timer, which reduced motion disables: the counts are text, and the rule
+// there is that they keep climbing while the spinner rests. 1s because that is the display's own
+// granularity — the value is computed from wall time, so the interval only decides how promptly a
+// second appears, never what it says.
+function startWorkTick() {
+  if (workTick) return;
+  workTick = setInterval(() => { if (!$("dwork")) return stopWorkTick(); paintWorkMeta(); }, 1000);
+}
+function stopWorkTick() { if (workTick) { clearInterval(workTick); workTick = null; } }
+// Returning to a backgrounded tab paints immediately instead of waiting out up to a second of a
+// throttled interval. Freshness only — the value was never wrong, since nothing counts ticks.
+document.addEventListener("visibilitychange", () => { if (!document.hidden) paintWorkMeta(); });
 async function renderDrill() {
   if (!drillSid) return;
   let d; try { d = await api("/api/session/feed", { sid: drillSid }); } catch { return; }

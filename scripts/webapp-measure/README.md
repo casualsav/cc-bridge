@@ -23,6 +23,8 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   parser, plus an unparsed control row and a contrast control
     node slashwork.mjs [page]     # which composer commands may open the optimistic working row.
                                   #   Pass a pre-fix copy of the page: every silence check must FAIL
+    node workline.mjs [page]      # the working row's type and its clock — one line one font, never
+                                  #   backward, ticker torn down with the row (same page-path control)
 
 ## Known follow-up: block markdown is card-only
 
