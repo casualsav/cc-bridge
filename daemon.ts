@@ -14276,6 +14276,7 @@ async function webappSessionFeed(sid: string): Promise<WebappSessionFeed | null>
   const items: WebappSessionFeed['items'] = recentConversation(file, 14).map(c => ({
     role: c.role, text: c.text, ts: c.ts,
     ...(c.img ? { img: c.img } : {}), ...(c.att ? { att: c.att } : {}), ...(c.cmd ? { cmd: true } : {}),
+    ...(c.agent ? { agent: c.agent } : {}), ...(c.status ? { status: c.status } : {}),
     // uuid only where it's needed: it exists so a clipped row can be re-fetched in full.
     ...(c.clipped ? { clipped: true, ...(c.uuid ? { uuid: c.uuid } : {}) } : {}),
   }))

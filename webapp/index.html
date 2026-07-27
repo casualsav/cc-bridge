@@ -313,6 +313,29 @@
      A turn joins the rule rather than restating it: the same unbubbled, full-width column. */
   .msg.assistant, .msg.turn { background: transparent; max-width: 100%; padding: 0; border-radius: 0; margin-bottom: var(--sp-4); }
   .msg.turn .tp + .tp { margin-top: var(--sp-2); }
+  /* A subagent's report — the THIRD voice, and the only one that is neither the owner nor this
+     session. The app had exactly two treatments and this arrives on the USER side of the transcript,
+     so without its own it wore the owner's blue and read as his words. It takes the console's
+     existing raised surface rather than a new colour: user = filled blue, right · session = no fill,
+     full width · agent = raised card, full width. Distinct by construction, nothing invented.
+     The label is on the LEFT of the name because the name is a task title ("Parse CLI working line
+     into feed") and reads as a heading without it. --hint-raised, not --hint: this line sits on the
+     raised fill, which is exactly the case that variable exists for (--hint falls under AA there). */
+  .msg.agent { background: var(--sec); max-width: 100%; }
+  .msg.agent .ah { display: flex; gap: var(--sp-2); align-items: baseline; margin-bottom: 3px; font-size: var(--t-meta); color: var(--hint-raised); }
+  .msg.agent .ah .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+  .msg.agent .ah .lb { color: var(--hint-raised); }
+  /* The status word is stated plainly and coloured only when it is NOT the expected one — a red
+     "completed" on every card would be decoration, and a failure that looked like every success
+     would be worse than no status at all. */
+  .msg.agent .ah .st { flex: none; }
+  .msg.agent .ah .st.bad { color: var(--del); }
+  /* An agent report is long, so it meets the fold — and the fold fades to whatever is BEHIND the
+     text, which here is the card's own fill and not the page. Left at the --bg default it paints a
+     band of page colour across the card, the same defect the assistant bubble left behind when its
+     fill was removed. */
+  .msg.agent.clip::after { background: linear-gradient(transparent, var(--sec)); }
+  .msg.agent.clip .more { background: var(--sec); }
   /* A LINE, not a card: it drops .chip's fill, which belongs to the sessions list — a chip that
      paints a surface here reads as a nested message. Demoted by size and colour, never by weight.
      .cv is the exception, at full text colour: the chevron is the affordance, not decoration. */
@@ -1186,11 +1209,19 @@ function bubble(i, n) {
     // has already reserved.
     : '<img class="thumb" src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==" data-path="' + esc(i.img) + '" alt="photo">';
   if (i.att) inner += '<div class="attchip">📎 ' + esc(String(i.att).split("/").pop()) + "</div>";
+  // The card's header. The status rides at the right and is only coloured when it isn't the
+  // expected "completed" — see the rule. Both fields are the server's parse of the notification
+  // payload, so nothing here re-reads markup.
+  if (i.role === "agent") inner += '<div class="ah"><span class="nm"><span class="lb">Agent · </span>'
+    + esc(i.agent || "") + "</span>"
+    + (i.status ? '<span class="st' + (i.status === "completed" ? "" : " bad") + '">' + esc(i.status) + "</span>" : "") + "</div>";
   // Once the full text has been fetched it replaces the clamped copy, and because it lives in a cache
   // rather than in the DOM it survives the 3s repaint that would otherwise throw it away.
   const full = i.uuid ? fullText[i.uuid] : null;
   const t = full || ((i.img || i.att) && placeholder ? "" : (i.text || ""));
-  if (t) inner += (i.img ? '<div class="cap">' : "") + (i.role === "assistant" ? md(t) : esc(t)) + (i.img ? "</div>" : "");
+  // An agent's report is prose it wrote, so it goes through the same md() a reply does — the reports
+  // are markdown (headings, lists, code) and escaping them showed the source instead of the document.
+  if (t) inner += (i.img ? '<div class="cap">' : "") + (i.role === "assistant" || i.role === "agent" ? md(t) : esc(t)) + (i.img ? "</div>" : "");
   if (!inner) return "";
   // A long message collapses to a readable height with a tap to open it, rather than running past
   // the screen. `clipped` means the payload clamp really did cut it — say so at the fold, and stop

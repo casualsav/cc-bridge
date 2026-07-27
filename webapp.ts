@@ -84,9 +84,13 @@ export interface SessionFeed {
   // `clipped` = the payload clamp cut this message (display only — storage and pane delivery keep
   // the whole thing); the client says so instead of just trailing off, and `uuid` (present only on a
   // clipped row) is the handle it uses to fetch the rest from /api/session/message.
-  items: Array<{ role: 'user' | 'assistant' | 'activity' | 'thought' | 'turn'; text?: string; ts: number
+  // 'agent' = a background task (subagent) reporting back. It arrives as a machine payload on the
+  // USER side of the transcript, so without its own role it rendered as the owner's own words; it
+  // carries the agent's name and completion `status` for the card's header line, and `text` is the
+  // agent's report with the payload's plumbing already stripped.
+  items: Array<{ role: 'user' | 'assistant' | 'agent' | 'activity' | 'thought' | 'turn'; text?: string; ts: number
     blocks?: TurnPart[]
-    uuid?: string; img?: string; att?: string; cmd?: boolean; clipped?: boolean }>
+    uuid?: string; img?: string; att?: string; cmd?: boolean; agent?: string; status?: string; clipped?: boolean }>
   // The CLI's own working line ("Hyperspacing… · 1m 55s · 5.6k tokens"), lifted straight off the
   // pane. The chat card can't afford it — this screen has none of Telegram's formatting limits, so
   // the drill-in shows the same thing the terminal shows. Present ONLY while the pane is actually
