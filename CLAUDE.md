@@ -263,11 +263,15 @@ page background it painted a grey band.
 **The chat header is three containers, not a bar.** A standalone circle, the name capsule, a
 standalone circle, each carrying its own `--chip-lift`, with 6px gaps — per the owner's reference,
 where the two circles measure 81.0/80.9px and the capsule 81.7 beside a 66.7px mic, i.e. all three
-the same height and 1.21× the mic. `--hbtn-d` (48px) is that ratio applied to our 40px mic, and it
-is the app's *largest* control on purpose; do not normalise it back toward the mic. `.dtitle` takes
-its height from `min-height: var(--hbtn-d)`, not from padding, so the three stay equal by
-construction. Keep `--hbtn-d − --hbtn-glyph` **even**: `.chatbtn` centres by integer padding, and
-an odd difference reintroduces the paint snap below.
+the same height. The row is derived **capsule-first**: `--hbtn-d` is `calc(--h-l1 + --h-l2 + 2 ×
+--h-pad)` — the pill's own two line boxes plus padding, 44px — and the circles take that, so the
+three stay equal by construction. It ran the other way once, off the reference's mic ratio, which
+pinned the row at 48; `.dtitle`'s `min-height` now restates that number rather than setting it, and
+earns its keep in one case only (`#dsub` empty). The line boxes are px, not `--lh-snug`, because a
+fractional row height puts `.chatbtn`'s integer padding back on a half pixel — and 44 is a floor,
+not a preference: it is the touch target the button used to reach with a `::after` lift. Keep
+`--hbtn-d − --hbtn-glyph` **even** (44 − 24 = 20): `.chatbtn` centres by integer padding, and an
+odd difference reintroduces the paint snap below.
 
 **Nothing in the header is conditional, and that is a retired case rather than a forgotten one.**
 The only runtime writes to it are `#dsub`'s content (`openDrill`) and `#ddot`'s class (`renderDrill`).
