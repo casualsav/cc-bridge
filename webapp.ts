@@ -87,6 +87,13 @@ export interface SessionFeed {
   items: Array<{ role: 'user' | 'assistant' | 'activity' | 'thought' | 'turn'; text?: string; ts: number
     blocks?: TurnPart[]
     uuid?: string; img?: string; att?: string; cmd?: boolean; clipped?: boolean }>
+  // The CLI's own working line ("Hyperspacing… · 1m 55s · 5.6k tokens"), lifted straight off the
+  // pane. The chat card can't afford it — this screen has none of Telegram's formatting limits, so
+  // the drill-in shows the same thing the terminal shows. Present ONLY while the pane is actually
+  // working; a poll that lands between turns (or misses the line as it scrolls) omits it. The
+  // spinner glyph is not carried: it's one animation frame caught at poll time, so the client
+  // animates its own. Sub-fields are null when that build/turn didn't print them.
+  status?: { verb: string; elapsed: string | null; tokens: string | null }
 }
 export interface AutomationView {
   cron: Array<{ id: string; fireAt: number; sessionLabel: string; text: string; recurLabel: string | null }>

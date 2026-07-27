@@ -329,6 +329,24 @@
      Telegram live card renders this same narration in, i.e. structure carried across from the other
      surface rather than styling invented here. */
   .msg.thought { background: transparent; max-width: 100%; padding: 1px 0 1px 10px; margin: var(--sp-1) 0 6px 0; border-left: 2px solid var(--sec); white-space: pre-wrap; }
+  /* The CLI's own working line, surfaced because this surface has none of Telegram's limits: the
+     rotating glyph, the turn's randomised verb, its elapsed time and its token count.
+     It DOES recede to --hint, and that does not contradict the note above. Those lines are the
+     transcript — content, and prose by instruction. This one is transient status that never enters
+     the transcript and is gone when the turn ends, so it is the one thing here that should sit under
+     the prose rather than in it. Do not "fix" it into --t-msg to match its neighbours.
+     The glyph box is a fixed width: the six spinner characters have different advances, and letting
+     the row re-flow on every frame is a jitter you feel more than see. Numbers take the mono
+     register (they are live machine values, and tabular digits stop the elapsed time shivering as
+     it counts), and sit right so the line needs ONE separator rather than three. */
+  .work { display: flex; align-items: baseline; gap: 8px; padding: 3px 0 7px; color: var(--hint); font-size: var(--t-meta); }
+  .work .g { width: 1.1em; flex: none; text-align: center; }
+  .work .v { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .work .m { margin-left: auto; flex: none; font: var(--t-mono) ui-monospace, Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }
+  /* Reduced motion stops the CYCLE, not the signal — the glyph rests on a single character while the
+     elapsed and token counts keep climbing on the poll, which is the liveness cue that matters and
+     is text, not animation. Handled in startWorkGlyph(), which never starts the timer; the resting
+     glyph ships in the DOM either way. */
   /* Telegram-style composer: ONE pill spanning the strip, with the paperclip and the round
      mic/send button living INSIDE it — the pill wraps around the mic rather than sitting beside it. */
   /* No divider rule: in the reference the capsule's own fill is what separates the composer from the
@@ -1089,7 +1107,7 @@ function dialParts(s) {
 // ---- Drill-in: conversation feed + composer + stop/compact ----
 let drillSid = null, drillTimer = null, lastDrill = null, optimistic = [];
 function openDrill(sid, name) {
-  drillSid = sid; lastDrill = null; optimistic = []; feedSig = "";
+  drillSid = sid; lastDrill = null; optimistic = []; workOptimisticAt = 0; feedSig = "";
   $("dname").textContent = name;
   // Subtitle is the session's cwd, and the model/effort reading that used to live here moved to the
   // composer's dial pill (mode is gone from this screen entirely — it stays on the sessions list).
@@ -1105,7 +1123,7 @@ function openDrill(sid, name) {
   clearInterval(drillTimer);
   drillTimer = setInterval(() => { if (!document.hidden) renderDrill(); }, 3000);
 }
-function closeDrill() { $("drill").classList.remove("show"); clearInterval(drillTimer); drillSid = null; renderSessions(); }
+function closeDrill() { $("drill").classList.remove("show"); clearInterval(drillTimer); stopWorkGlyph(); drillSid = null; renderSessions(); }
 $("dback").onclick = closeDrill;
 // Minimal markdown for assistant bubbles (escape-first, so it can never inject): fenced code,
 // inline code, bold, italic. Anything fancier stays plain text.
@@ -1279,7 +1297,10 @@ function paintFeed() {
     .concat(optimistic.map(o => '<div class="msg user' + (o.state === "pending" ? " pending" : "") + '">' + esc(o.text)
       + stamp(o.at, o.state === "pending" ? 0 : 1) + "</div>"));
   const html = rows.length ? rows.join("") : '<div class="notice">No conversation yet.</div>';
-  if (html === feedSig) return;   // unchanged — never disturb the scroll while the user reads back
+  // Unchanged — never disturb the scroll while the user reads back. The working line still has to
+  // tick: during a turn the transcript rows DON'T change, so this is the branch every poll takes
+  // while the session is busy, and returning outright would freeze the clock it exists to show.
+  if (html === feedSig) return paintWork();
   feedSig = html;
   feed.innerHTML = html;
   // Before the scroll re-pin: re-opening a fold changes the feed's height. The index within the turn
@@ -1290,7 +1311,45 @@ function paintFeed() {
   }));
   if (stuck) feed.scrollTop = feed.scrollHeight;
   hydrateThumbs();
+  paintWork();
 }
+// The working line lives INSIDE the feed as its last row, but deliberately OUTSIDE `feedSig`:
+// its elapsed time changes on every poll, so folding it into the signature would force a wholesale
+// innerHTML swap every 3s — re-running the fold restoration and fighting the scroll — to animate a
+// clock. Appended after the assignment instead, and updated in place.
+const WORK_GLYPHS = ["·", "✢", "✳", "✶", "✻", "✽"];
+let workTimer = null, workPhase = 0, workOptimisticAt = 0;
+function paintWork() {
+  const feed = $("dfeed");
+  const st = lastDrill && lastDrill.status;
+  // The optimistic window covers the gap between hitting send and the first poll that sees the pane
+  // working. It is bounded: a send that never starts a turn must not leave a permanent lie on screen.
+  const show = st || (workOptimisticAt && Date.now() - workOptimisticAt < 20000);
+  let el = $("dwork");
+  if (!show) { if (el) el.remove(); stopWorkGlyph(); return; }
+  if (st) workOptimisticAt = 0;   // the real thing arrived
+  const stuck = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;
+  if (!el) {
+    el = document.createElement("div");
+    el.className = "work"; el.id = "dwork";
+    el.innerHTML = '<span class="g">' + WORK_GLYPHS[workPhase] + '</span><span class="v"></span><span class="m"></span>';
+    feed.appendChild(el);
+  }
+  el.querySelector(".v").textContent = st ? st.verb + "…" : "Working…";
+  el.querySelector(".m").textContent = st ? [st.elapsed, st.tokens].filter(Boolean).join(" · ") : "";
+  startWorkGlyph();
+  if (stuck) feed.scrollTop = feed.scrollHeight;   // the row it just gained would otherwise push the newest message out of view
+}
+function startWorkGlyph() {
+  if (workTimer || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  workTimer = setInterval(() => {
+    const g = $("dwork") && $("dwork").querySelector(".g");
+    if (!g) return stopWorkGlyph();   // the row went away between frames — never leave the timer running
+    workPhase = (workPhase + 1) % WORK_GLYPHS.length;
+    g.textContent = WORK_GLYPHS[workPhase];
+  }, 130);
+}
+function stopWorkGlyph() { if (workTimer) { clearInterval(workTimer); workTimer = null; } }
 async function renderDrill() {
   if (!drillSid) return;
   let d; try { d = await api("/api/session/feed", { sid: drillSid }); } catch { return; }
@@ -1408,10 +1467,11 @@ $("dsend").onclick = async () => {
   // waiting for the POST + transcript echo + poll round-trip.
   const o = { text, at: Date.now(), state: "pending" };
   optimistic.push(o);
+  workOptimisticAt = Date.now();   // the indicator is part of "sent", not of the poll that follows
   paintFeed();
   $("dfeed").scrollTop = $("dfeed").scrollHeight;   // sending always reveals your own message
   if (await sessionAct("send", text)) { o.state = "sent"; paintFeed(); setTimeout(renderDrill, 800); }
-  else { optimistic = optimistic.filter(x => x !== o); paintFeed(); ta.value = text; syncComposerMode(); }   // failed — give the draft back
+  else { optimistic = optimistic.filter(x => x !== o); workOptimisticAt = 0; paintFeed(); ta.value = text; syncComposerMode(); }   // failed — give the draft back, and take the indicator with it
 };
 
 // ---- Compose-row attachment + voice note ----
@@ -1419,7 +1479,7 @@ $("dsend").onclick = async () => {
 // paints optimistically and reconciles on the server's match token (see paintFeed).
 async function attachToSession(file, { caption = "", voice = false, label }) {
   const o = { text: label, at: Date.now(), state: "pending", match: null };
-  optimistic.push(o); paintFeed();
+  optimistic.push(o); workOptimisticAt = Date.now(); paintFeed();
   $("dfeed").scrollTop = $("dfeed").scrollHeight;
   let d = null;
   try {

@@ -64,6 +64,9 @@ function statuslineBlock(paneText: string): string | null {
 // (always live). Returns the LAST match in the capture — the one closest to the prompt, i.e. the
 // current turn's — or null when no spinner line is on screen (then the card shows "Working").
 const WORKING_RE = /[✶✳✻✽✺✷✸✹✢✣⣾⣽⣻⢿⡿⣟⣯⣷*]\s*([A-Za-z][A-Za-z'’-]{2,})\s*(?:…|\.\.\.)\s*\(([^)]*)\)/
+// The Telegram card's reading of the working line. prompt.ts's parseWorkingStatus reads the SAME
+// line more completely (elapsed too, line-anchored, arrow stripped) for the mini app; see the note
+// there before changing either.
 export function parseWorkingLine(paneText: string): { verb: string; tokens: string | null } | null {
   let found: { verb: string; tokens: string | null } | null = null
   for (const raw of paneText.split('\n')) {

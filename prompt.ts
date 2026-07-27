@@ -854,19 +854,74 @@ export function bashModeArmed(paneText: string): boolean {
   return /!\s+for shell mode/i.test(paneLines(paneText).slice(-4).join('\n'))
 }
 
+// The frames the working spinner cycles through, shared by every reader of that line so a frame is
+// added in one place. `*` is in Claude Code's own set (see detectCompacting) but is deliberately NOT
+// in here: this class is used by predicates that only require a duration after the glyph, where a
+// markdown bullet ("* retry (3s timeout)") would read as a live pane. parseWorkingLine adds it back
+// because it demands the verb's "…"/"(" shape on top.
+const SPINNER_GLYPHS = '✢✳✶✻✽✺✷✸✹·●◐◓◑◒'
+// 16 lines: a multi-line statusline + input box + hint rows can push the live spinner line
+// ~12 lines above the pane bottom in the worst observed layout, past what an 8-line tail covers.
+const WORKING_TAIL = 16
+// Live spinner status line: glyph, verb, then an elapsed timer — "(12s", "(3m 56s", "(1h 2m" — any
+// h/m/s unit. Anchored to line start (≤2 leading spaces) so quoted spinner text echoed elsewhere in
+// the pane — tool-result "  ⎿  " lines, grep's "NN:" prefixes — can't false-positive.
+const WORKING_TIMER_RE = new RegExp(`^\\s{0,2}[${SPINNER_GLYPHS}][^\\n]*?\\(\\d+\\s*[hms]`)
+
 // True while Claude Code is mid-turn. The TUI shows a spinner + "esc to interrupt" footer while
 // working and clears it when the turn ends, so the footer is the ground truth. Markers are
 // intentionally broad — detection drives the typing indicator (self-correcting from pane state) and
 // gates the stuck-screen watchdog. (Moved from daemon.ts so the stuck detector can share it.)
 export function detectWorking(paneText: string): boolean {
-  // 16 lines: a multi-line statusline + input box + hint rows can push the live spinner line
-  // ~12 lines above the pane bottom in the worst observed layout, past what an 8-line tail covers.
-  const tail = paneLines(paneText).slice(-16)
+  const tail = paneLines(paneText).slice(-WORKING_TAIL)
   if (/esc to interrupt/i.test(tail.join('\n'))) return true
-  // Live spinner status line: glyph, verb, then an elapsed timer — "(12s", "(3m 56s", "(1h 2m" — any
-  // h/m/s unit. Anchored to line start (≤2 leading spaces) so quoted spinner text echoed elsewhere in
-  // the pane — tool-result "  ⎿  " lines, grep's "NN:" prefixes — can't false-positive.
-  return tail.some(l => /^\s{0,2}[✢✳✶✻✽✺✷✸✹·●◐◓◑◒][^\n]*?\(\d+\s*[hms]/.test(l))
+  return tail.some(l => WORKING_TIMER_RE.test(l))
+}
+
+// The SAME line detectWorking tests for, read instead of counted: "✻ Hyperspacing… (1m 55s · ↓ 5.6k
+// tokens)". The verb is randomised per turn and stable within it; the parenthetical's fields vary in
+// order, count and presence between builds and turns, so each one is classified by its own shape
+// rather than by position.
+//
+// The sampled glyph is deliberately not returned. It is one frame of an animation caught at poll
+// time — carrying it to a client would make the glyph jump at random every few seconds.
+export type WorkingLine = { verb: string; elapsed: string | null; tokens: string | null }
+const WORKING_LINE_RE = new RegExp(`^\\s{0,2}[${SPINNER_GLYPHS}*]\\s+(\\S[^\\n]*)$`)
+// "44s", "1m 55s", "1h 2m" — a whole field, so "12.3k tokens" and "esc to interrupt" can't match.
+const ELAPSED_FIELD_RE = /^\d+\s*[hms](?:\s+\d+\s*[hms])*$/
+// NOTE: statusline.ts exports a DIFFERENT, older parser for this same CLI line, feeding the
+// Telegram live card (verb + a `↓84.4k`-shaped token string, no elapsed, unanchored). Two parsers
+// for one line will drift when the CLI changes its format; they are kept apart for now only because
+// mirror.ts's output shape is pinned by its own tests. If you touch either, consolidate onto this
+// one and let the card re-derive its shorter form — do not add a third.
+export function parseWorkingStatus(cap: string): WorkingLine | null {
+  let found: WorkingLine | null = null
+  // Last match wins — the line closest to the prompt is the current turn's.
+  for (const line of paneLines(cap).slice(-WORKING_TAIL)) found = parseOneWorkingLine(line) ?? found
+  return found
+}
+function parseOneWorkingLine(line: string): WorkingLine | null {
+  const m = WORKING_LINE_RE.exec(line)
+  if (!m) return null
+  const rest = m[1]
+  const verb = rest.split(/…|\.\.\.|\(/)[0].trim()
+  if (!verb) return null
+  let elapsed: string | null = null
+  let tokens: string | null = null
+  const paren = /\(([^)]*)\)/.exec(rest)
+  for (const raw of paren ? paren[1].split('·') : []) {
+    const field = raw.trim()
+    if (!elapsed && ELAPSED_FIELD_RE.test(field)) elapsed = field
+    // Kept in the human form the CLI printed, minus the direction arrow — the arrow reads as chrome
+    // outside a terminal. Everything else in there ("esc to interrupt", anything a future build
+    // adds) is a terminal affordance and is dropped rather than shown to a web client.
+    else if (!tokens && /\btokens?\b/i.test(field)) tokens = field.replace(/^[↑↓]\s*/, '').trim()
+  }
+  // What separates a spinner line from a list item: `*` is a spinner frame AND a markdown bullet,
+  // and prose is full of the latter. A real one always trails its verb with "…" or reports a field
+  // this parser recognises; "* retry the deploy (3s timeout)" does neither.
+  if (!/…|\.\.\./.test(rest) && !elapsed && !tokens) return null
+  return { verb, elapsed, tokens }
 }
 
 // ---- stuck-screen watchdog (agent-bus): a backstop for a pane wedged at a prompt no detector parses ----
