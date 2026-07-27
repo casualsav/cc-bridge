@@ -315,8 +315,10 @@ and gets the prereq sorted. Set it up yourself, in order:
 
 **Files Mini App reachability (Q6's URL choice): set it up now** — this step always runs, since the
 console ships at every Q6 level. The webapp binds
-`127.0.0.1:<port>` where `<port>` = `8787` + the bridge instance id (so `8787` for the default
-instance, `8788` for a second one). Follow the path the user chose:
+`127.0.0.1:<port>` where `<port>` = `8787` + the bridge instance id — and the **default instance id
+is `1`**, so a default install serves on `8788` (a second instance, id `2`, on `8789`; see
+`resolveInstanceId()` in `daemon.ts`). Confirm with `ss -ltnp | grep bun` after the daemon is up
+rather than assuming. Follow the path the user chose:
 
 - **cloudflared (DM-only):** nothing to provision — the daemon auto-fetches the `cloudflared` binary
   and brings up the quick tunnel on first start. Just ensure `.env` has `TELEGRAM_WEBAPP_ENABLED=1`
@@ -330,7 +332,11 @@ instance, `8788` for a second one). Follow the path the user chose:
   2. **Log in:** `sudo tailscale up --operator=$(whoami)` — it prints a `https://login.tailscale.com/…`
      URL; **relay that to the user** to approve in any browser. This is the only login, and it does
      **not** require installing anything on their phone. `--operator` lets later `tailscale` commands
-     run without sudo.
+     run without sudo. **The command BLOCKS until the human approves** (proven live 2026-07-27) — run
+     it backgrounded with output captured (`sudo tailscale up --operator=$(whoami) >/tmp/ts-up.log 2>&1 &`),
+     pull the URL from the log, and poll `tailscale status` until it shows logged in. Running it
+     foreground in your shell tool just hangs your turn until timeout. If the link expires before the
+     user gets to it, rerun — each run prints a fresh URL.
   3. **Preflight: tailnet TLS certs must be enabled** — `tailscale serve`/`funnel` both need them
      and **HANG silently** when they're off (seen live 2026-07-25). Probe from a scratch dir (the
      command writes cert files into cwd): `cd /tmp && tailscale cert "$(tailscale status --json |
@@ -341,14 +347,32 @@ instance, `8788` for a second one). Follow the path the user chose:
      **Enable HTTPS** (MagicDNS, same page, must be on). Re-run the probe until a cert issues,
      then continue.
   4. **Turn Funnel on for the port:** `tailscale funnel --bg <port>` (prefix `sudo` if it reports a
-     permissions error). The first time, Tailscale may print *"Funnel is not enabled on your tailnet"*
+     permissions error). Funnel can only front public ports **443, 8443 and 10000** — the plain form
+     above binds 443, which is what Telegram wants; don't try to expose the webapp port number itself.
+     The first time, Tailscale may print *"Funnel is not enabled on your tailnet"*
      with a `https://login.tailscale.com/f/funnel?node=…` link — **relay that to the user** to click
      once: it's a one-time owner toggle on a web page in the admin console, **not** a device install.
      Then re-run. Confirm with `tailscale funnel status` (shows `https://<host>.<tailnet>.ts.net …
      proxy http://127.0.0.1:<port>`).
-  5. **Set `.env`:** `TELEGRAM_WEBAPP_ENABLED=1` and `TELEGRAM_WEBAPP_TUNNEL=tailscale`. The daemon
-     reads the `*.ts.net` URL from `tailscale status` itself — leave `TELEGRAM_WEBAPP_PUBLIC_URL` unset.
-  6. **Register it in BotFather** (shared step below), URL = the `https://<host>.<tailnet>.ts.net`
+  5. **Verify the public path — and know that curl from this box LIES.** On the box itself, MagicDNS
+     resolves `<host>.<tailnet>.ts.net` to the machine's *private tailnet IP*, so a plain
+     `curl https://<host>…` exercises the private path and fails with a TLS/internal error even when
+     the public funnel is perfectly healthy. Verify the *public* path instead:
+     ```sh
+     dig +short @1.1.1.1 <host>.<tailnet>.ts.net        # public ingress IPs, NOT MagicDNS
+     curl -I --resolve <host>.<tailnet>.ts.net:443:<ingress-ip> https://<host>.<tailnet>.ts.net/
+     ```
+     Expect `HTTP/2 200` (the app shell). An **empty `dig` result right after setup is DNS lag, not
+     failure** — public DNS for a new funnel name can take **up to ~10 minutes**; `tailscale funnel
+     status` is the server-side truth in the meantime. No `dig` on the box, or still propagating?
+     Have the user open the URL from their phone on cellular instead.
+  6. **Set `.env`:** `TELEGRAM_WEBAPP_ENABLED=1` and `TELEGRAM_WEBAPP_TUNNEL=tailscale`. The daemon
+     reads the `*.ts.net` URL from `tailscale funnel status` itself — leave `TELEGRAM_WEBAPP_PUBLIC_URL`
+     unset. (Setting `PUBLIC_URL` is the retrofit path for a box that already had a public URL before
+     the funnel existed: it short-circuits the daemon's own tailscale branch entirely. On a fresh
+     install the funnel must stay the single source of truth, so the daemon re-reads it after any
+     funnel reconfiguration.)
+  7. **Register it in BotFather** (shared step below), URL = the `https://<host>.<tailnet>.ts.net`
      from step 4.
 
 - **Custom domain (in-group):** the user fronts the local port with their own HTTPS reverse proxy
