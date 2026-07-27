@@ -19,6 +19,8 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   status-absent control (the row must NOT render without it)
     node fullscreen.mjs           # the fullscreen top offset on every top-anchored surface, driven
                                   #   through the REAL SDK's receiveEvent (needs network)
+    node agentcard.mjs            # the subagent report card: a fixture transcript through the real
+                                  #   parser, plus an unparsed control row and a contrast control
 
 ## Two rules, both learned the hard way
 
