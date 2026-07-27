@@ -79,10 +79,28 @@ pane was never safer than any other.
   concurrently by design, so a single `INJECT_BUFFER` let pane A's `paste-buffer` land pane B's text —
   a message in the wrong session. The queue cannot help there: it is per-pane and that race is between
   panes. `BANG_BUFFER` had spotted this years earlier and never generalised it.
-- **NOT covered, recorded not commissioned:** the pane *control* paths (`injectSlash`,
-  `applySessionModel`, `reapplyEffort`, the interrupt keys, `exitSessionPane`) can still interleave
-  with a delivery. They nest through `withPaneInjection` in ways that need untangling first; do not
-  read this as closing the whole class.
+**The coverage rests on an enumeration, not on what turned up while wiring.** Content reaches a pane
+by exactly three mechanisms, and the ground-truth greps are `paste-buffer`, `sendKeysLiteral(`, and
+`sendKeys(` with a content string rather than a key name:
+
+| mechanism | sites | behind the lock |
+|---|---|---|
+| `paste-buffer` | 5 | **5** — `injectPaste`, `pasteGuarded` (slash), `pasteToPane`, `relayBashCommand`, `typeBriefIntoPane` |
+| `sendKeysLiteral` | 7 | 1 — `injectText` |
+| `sendKeys` w/ content | 4 | 0 |
+
+Every **message** delivery is covered. The ten that are not divide into two groups:
+
+- **Control paths, recorded not commissioned:** `injectSlash`, `applySessionModel` (`/model`),
+  `reapplyEffort` (`/effort`), `exitSessionPane`, `runReadout` (types `/cost`, `/context`, `/usage`),
+  and the TUI recovery pair `recoverToPrompt` / `saveEditorAndQuit` (`:q!`, `:wq`). They nest through
+  `withPaneInjection` in ways that need untangling first; do not read the lock as closing this class.
+- **One site that is neither, and is a finding rather than an exclusion:** the "✏️ Type something"
+  prompt-answer relay types the user's own free-text answer into an interactive prompt
+  (`navigateDown` → `sendKeysLiteral` → Enter) under `withPaneInjection`, which is the boolean, not a
+  lock. It is *partly* shielded by a different mechanism — a normal delivery refuses while a dialog is
+  up (`paneAcceptsText` / `onNormalPrompt`), which is exactly when this path runs — but that is a read
+  taken outside any lock, so it is a TOCTOU, not a guarantee.
 
 Proof lives in `scripts/pane-delivery-race.ts` — a **real tmux pane**, because a mocked `exec` proves
 only that the code calls functions in the order the code calls them. Run it `--unlocked` and the
