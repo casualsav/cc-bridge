@@ -25,6 +25,10 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   Pass a pre-fix copy of the page: every silence check must FAIL
     node workline.mjs [page]      # the working row's type and its clock — one line one font, never
                                   #   backward, ticker torn down with the row (same page-path control)
+    node slashcmd.mjs [page]      # a local command: invocation folded with its output, in prose, with
+                                  #   no escape codes left in it. Carries three controls — an unparsed
+                                  #   row that MUST leak, a model id whose literal [1m] must survive,
+                                  #   and the `!` bash chip, which must NOT have moved
 
 ## Known follow-up: block markdown is card-only
 

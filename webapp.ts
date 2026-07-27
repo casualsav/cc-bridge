@@ -88,9 +88,12 @@ export interface SessionFeed {
   // USER side of the transcript, so without its own role it rendered as the owner's own words; it
   // carries the agent's name and completion `status` for the card's header line, and `text` is the
   // agent's report with the payload's plumbing already stripped.
-  items: Array<{ role: 'user' | 'assistant' | 'agent' | 'activity' | 'thought' | 'turn'; text?: string; ts: number
+  // 'command' = a local slash command, invocation and stdout folded into one row: `name`/`args` are
+  // the invocation and `text` is its output, already ANSI-normalized (ansi.ts). Either half can be
+  // absent — /clear produces no output, and a stdout entry can arrive with no invocation recorded.
+  items: Array<{ role: 'user' | 'assistant' | 'agent' | 'activity' | 'thought' | 'turn' | 'command'; text?: string; ts: number
     blocks?: TurnPart[]
-    uuid?: string; img?: string; att?: string; cmd?: boolean; agent?: string; status?: string; clipped?: boolean }>
+    uuid?: string; img?: string; att?: string; cmd?: boolean; name?: string; args?: string; agent?: string; status?: string; clipped?: boolean }>
   // The CLI's own working line ("Hyperspacing… · 1m 55s · 5.6k tokens"), lifted straight off the
   // pane. The chat card can't afford it — this screen has none of Telegram's formatting limits, so
   // the drill-in shows the same thing the terminal shows. Present ONLY while the pane is actually

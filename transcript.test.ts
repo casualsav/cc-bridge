@@ -258,7 +258,10 @@ describe('conversationItemFullText — the clamp is a poll cost, not a read limi
 
   test('a slash command reads as its command, not its raw XML', () => {
     const f = fixture([user('<command-name>/compact</command-name><command-args>keep the plan</command-args>', 'u1')])
-    expect(conversationItemFullText(f, 'u1')).toBe('/compact keep the plan')
+    // The invocation is structure now (name + args), not text: the client renders it as its own
+    // quiet line above the output, so the row's `text` belongs to the OUTPUT alone.
+    const it = recentConversation(f, 5)[0]
+    expect(it).toMatchObject({ role: 'command', name: '/compact', args: 'keep the plan', text: '' })
   })
 
   test('an unknown or empty uuid is null, not a guess at the nearest row', () => {
@@ -338,7 +341,10 @@ describe('a subagent report is not the owner talking', () => {
     expect(conversationItemFullText(f, 'u1')!.startsWith('## Conclusion')).toBe(true)
   })
 
-  test('slash output and ! bash mode join the command-chip family', () => {
+  // The two used to share one line style. They no longer do, and the split is the point: a slash
+  // command's output is a status sentence (prose, its own voice), a shell's output is preformatted
+  // (monospace, still the command-chip family).
+  test('slash output takes the command voice; ! bash mode keeps the chip', () => {
     const items = recentConversation(fixture([
       user('<local-command-stdout>Set model to claude-opus-4-8</local-command-stdout>', 'u1'),
       user('<bash-input>git status</bash-input>', 'u2'),
@@ -346,7 +352,33 @@ describe('a subagent report is not the owner talking', () => {
       user('<local-command-stdout></local-command-stdout>', 'u4'),   // empty: nothing to show
     ]), 9)
     expect(items.map(i => i.text)).toEqual(['Set model to claude-opus-4-8', '! git status', 'nothing to commit'])
-    expect(items.every(i => i.cmd === true && i.role === 'user')).toBe(true)
+    expect(items.map(i => i.role)).toEqual(['command', 'user', 'user'])
+    expect(items.slice(1).every(i => i.cmd === true)).toBe(true)
+    expect(items[0].cmd).toBeUndefined()
+  })
+
+  test('an invocation and the output that follows it are ONE row', () => {
+    const [it, ...rest] = recentConversation(fixture([
+      user('<command-name>/model</command-name><command-args></command-args>', 'u1'),
+      user('<local-command-stdout>Set model to \x1b[1mFable 5\x1b[22m</local-command-stdout>', 'u2'),
+    ]), 9)
+    expect(rest).toEqual([])
+    // The output's uuid, not the invocation's: the output is the half long enough to clip and be
+    // re-fetched. And the escapes are gone by the time any surface sees it.
+    expect(it).toMatchObject({ role: 'command', name: '/model', text: 'Set model to **Fable 5**', uuid: 'u2' })
+  })
+
+  test('a command with no output stays one quiet row, and an orphan output stays its own', () => {
+    const items = recentConversation(fixture([
+      user('<command-name>/clear</command-name><command-args></command-args>', 'u1'),
+      user('<tg 1>hi</tg>', 'u2'),
+      user('<local-command-stdout>Compacted</local-command-stdout>', 'u3'),
+    ]), 9)
+    // The fold is DIRECTLY-after only: the message between them means /clear keeps its empty output
+    // and the orphan output renders on its own rather than being wrongly attributed to /clear.
+    expect(items.map(i => [i.role, i.name ?? '', i.text])).toEqual([
+      ['command', '/clear', ''], ['user', '', 'hi'], ['command', '', 'Compacted'],
+    ])
   })
 
   // "[Request interrupted by user]" is deliberately NOT handled: it is a readable English sentence

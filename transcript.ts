@@ -6,6 +6,7 @@
 import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { normalizeCommandOutput } from './ansi.ts'
 
 // The default (main-account) projects root. Multi-account: every reader below takes an optional
 // `roots` list so the daemon can scan each registered account's <configDir>/projects too.
@@ -405,7 +406,11 @@ export function slashResultAfter(file: string, sinceMs: number): { text: string;
 // commands (the `<command-name>` XML the CLI records) surface as structured fields so the client
 // can render a thumbnail / file chip / command chip instead of raw markup; each item is clamped
 // so a huge paste can't blow up the payload.
-export type ConversationItem = { role: 'user' | 'assistant' | 'agent'; text: string; ts: number; uuid?: string; img?: string; att?: string; cmd?: boolean; agent?: string; status?: string; clipped?: true }
+// 'command' = a local slash command: its invocation and its own stdout, as ONE row (see foldCommands).
+// `name`/`args` are the invocation; `text` is the output, already normalized (ansi.ts) — either half
+// can be absent, because a command like /clear produces no output and a stdout entry can arrive with
+// no invocation recorded on the user side.
+export type ConversationItem = { role: 'user' | 'assistant' | 'agent' | 'command'; text: string; ts: number; uuid?: string; img?: string; att?: string; cmd?: boolean; name?: string; args?: string; agent?: string; status?: string; clipped?: true }
 
 // ---- Machine payloads that arrive USER-SIDE -----------------------------------------------------
 // Several things the harness writes are user-type entries carrying no user words at all. They pass
@@ -448,14 +453,18 @@ function conversationItem(e: Entry): ConversationItem | null {
   if (isRealUserText(e)) {
     const raw = textOf(e.message?.content).trim()
     if (raw.startsWith('<task-notification>')) return taskNotificationItem(raw, ts, uuid)
-    // Slash-command output and `!` bash mode: the SAME defect as the notification (tags on screen in
-    // the owner's own bubble) and the same family as <command-name> below, which already renders as a
-    // command chip — so they lose the markup and join that line style rather than earning a voice of
-    // their own. Deliberately NOT entity-decoded: what the CLI wrote here is already literal.
+    // A slash command's own output. It gets the 'command' role — the fourth voice in the feed after
+    // user / session / agent, and the quietest, because this is the CLI talking rather than the
+    // model. foldCommands pairs it with the <command-name> entry below so the invocation and its
+    // answer read as one row. Deliberately NOT entity-decoded: what the CLI wrote here is already
+    // literal. It IS normalized, because it was written for a terminal — see ansi.ts.
     if (raw.startsWith('<local-command-stdout>')) {
-      const out = tagOf(raw, 'local-command-stdout').trim()
-      return out ? { role: 'user', text: out, ts, uuid, cmd: true } : null   // the empty ones are noise
+      const out = normalizeCommandOutput(tagOf(raw, 'local-command-stdout')).trim()
+      return out ? { role: 'command', text: out, ts, uuid } : null   // the empty ones are noise
     }
+    // `!` bash mode keeps the command-chip line style and its monospace: a shell's output is
+    // preformatted by nature, where a CLI status sentence is prose. Same reason ansi.ts fences a
+    // table instead of prosing it.
     if (raw.startsWith('<bash-input>')) {
       const cmd = tagOf(raw, 'bash-input').trim()
       return cmd ? { role: 'user', text: `! ${cmd}`, ts, uuid, cmd: true } : null
@@ -474,7 +483,7 @@ function conversationItem(e: Entry): ConversationItem | null {
     if (/^<command-name>/.test(raw)) {
       const name = /<command-name>([^<]*)<\/command-name>/.exec(raw)?.[1]?.trim() ?? ''
       const args = /<command-args>([\s\S]*?)<\/command-args>/.exec(raw)?.[1]?.trim() ?? ''
-      return name ? { role: 'user', text: `${name}${args ? ` ${args}` : ''}`, ts, uuid, cmd: true } : null
+      return name ? { role: 'command', text: '', ts, uuid, name, ...(args ? { args } : {}) } : null
     }
     return { role: 'user', text: raw, ts, uuid }
   }
@@ -491,16 +500,39 @@ function conversationItem(e: Entry): ConversationItem | null {
 // by it, and both were measured whole. Anything it does cut is flagged `clipped` so the client can
 // say so rather than trailing off.
 const CONVO_CAP = 4000
-export function recentConversation(file: string, max = 12): ConversationItem[] {
+// An invocation and the output it produced are two separate transcript entries — always, in every
+// shape the CLI writes (censused over 1053 command entries on this box, never combined). Rendered
+// as two rows they read as two unrelated events with a gap between them, so a stdout row that lands
+// DIRECTLY after its own invocation folds into it.
+//
+// Directly, and nothing looser: a command whose output is separated by something else in the
+// transcript keeps today's two rows rather than risking a wrong pairing. It also takes the OUTPUT
+// entry's uuid, because the output is the half that can be long enough to clip and be re-fetched.
+function foldCommands(items: ConversationItem[]): ConversationItem[] {
   const out: ConversationItem[] = []
+  for (const it of items) {
+    const prev = out[out.length - 1]
+    if (it.role === 'command' && !it.name && prev?.role === 'command' && prev.name && !prev.text) {
+      out[out.length - 1] = { ...prev, text: it.text, ...(it.uuid ? { uuid: it.uuid } : {}) }
+      continue
+    }
+    out.push(it)
+  }
+  return out
+}
+export function recentConversation(file: string, max = 12): ConversationItem[] {
+  const rows: ConversationItem[] = []
   for (const e of readEntries(file)) {
     const it = conversationItem(e)
-    if (!it) continue
-    // A cut is reported, not just implied by a trailing ellipsis — and the row keeps its uuid so the
-    // client can go and fetch the rest.
-    out.push(it.text.length > CONVO_CAP ? { ...it, text: it.text.slice(0, CONVO_CAP) + '…', clipped: true } : it)
+    if (it) rows.push(it)
   }
-  return out.slice(-max)
+  // Clamped AFTER the fold: clamping first would measure the invocation's empty text and then let a
+  // 40k /context body through whole.
+  // A cut is reported, not just implied by a trailing ellipsis — and the row keeps its uuid so the
+  // client can go and fetch the rest.
+  return foldCommands(rows)
+    .map(it => it.text.length > CONVO_CAP ? { ...it, text: it.text.slice(0, CONVO_CAP) + '…', clipped: true as const } : it)
+    .slice(-max)
 }
 
 // The full, unclamped text of one feed row, addressed by its transcript uuid. This is what the

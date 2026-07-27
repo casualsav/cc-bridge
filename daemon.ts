@@ -25,6 +25,7 @@ import { hopKey, resolveChain, pickNextHop, moveHop } from './failover-chain.ts'
 // replace a daemon left running stale code after a plugin upgrade.
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
+import { normalizeCommandOutput } from './ansi.ts'
 import { renderSessionsView } from './sessions-view.ts'
 import { detectCurrentMode, onNormalPrompt, inputBoxContent, isModelSwitchConfirm, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType } from './prompt.ts'
 import { resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, liveSubagents, currentTurnFeed, currentTurnActivity, concludedTurnWork, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
@@ -4956,13 +4957,13 @@ async function handleCall(
           // dance runs for up to ~30s and the calling agent is blocked on this result.
           const { error } = await applySessionModel(targetPane, watcher, modelAlias, { awaitReadback: false })
           if (error) { text = `!${error}`; break }
-          void echoSlashResult(targetPane, targets[0]?.chat ?? '', slashAt, targets[0]?.thread ? Number(targets[0].thread) : undefined)
+          void echoSlashResult(targetPane, targets[0]?.chat ?? '', slashAt, targets[0]?.thread ? Number(targets[0].thread) : undefined, command)
           text = `sent /model to @${toName} (${modelAlias}, that session only) — its outcome echoes on that session's surface`
           break
         }
         const sent = await injectSlash(targetPane, watcher, command, { guardPalette: true })
         if (!sent.ok) { text = `!${paletteRefusalText(command, sent.offered)}`; break }
-        void echoSlashResult(targetPane, targets[0]?.chat ?? '', slashAt, targets[0]?.thread ? Number(targets[0].thread) : undefined)
+        void echoSlashResult(targetPane, targets[0]?.chat ?? '', slashAt, targets[0]?.thread ? Number(targets[0].thread) : undefined, command)
         text = `sent ${command.split(/\s/)[0]} to @${toName} — its outcome echoes on that session's surface`
         break
       }
@@ -5427,12 +5428,12 @@ async function relaySlashCommand(
     return
   }
   if (!echo) return
-  await echoSlashResult(paneId, chat_id, sentAt, thread)
+  await echoSlashResult(paneId, chat_id, sentAt, thread, command)
 }
 
 // Wait for the command's own <local-command-stdout> to land in the transcript and relay it. Split out
 // so the bus's `tg slash` can fire it after reporting a refusal synchronously in its own result.
-async function echoSlashResult(paneId: string, chat_id: string, sentAt: number, thread?: number): Promise<void> {
+async function echoSlashResult(paneId: string, chat_id: string, sentAt: number, thread?: number, command?: string): Promise<void> {
   const opts = thread ? { threadId: String(thread) } : undefined
   const file = await transcriptForPane(paneId, await paneCwd(paneId))
   if (!file) return
@@ -5444,10 +5445,18 @@ async function echoSlashResult(paneId: string, chat_id: string, sentAt: number, 
       await channel.sendText(chat_id, `⚠️ ${escapeHtml(result.text)}`, opts).catch(() => {})
       return
     }
-    const out = result.text.trim()
+    // The CLI wrote this for a terminal, so it arrives with escape codes in it and, for /context,
+    // as a markdown document. Normalized once (ansi.ts) and rendered as prose, the same shape and
+    // the same normalizer the mini app's feed uses — the <pre> this replaced showed "[1mFable 5[22m"
+    // and demoted every status sentence to monospace. A table still lands in a <pre>, because
+    // normalizeCommandOutput fences it and mdToTelegramHtml renders a fence that way.
+    const out = normalizeCommandOutput(result.text).trim()
     if (!out) return                  // ran without local output — a turn or a silent command
     const truncated = out.length > 3500 ? out.slice(0, 3500) + '\n… (truncated)' : out
-    await channel.sendText(chat_id, `<pre>${escapeHtml(truncated)}</pre>`, opts).catch(() => {})
+    // The invocation leads, quiet: Telegram has no size scale, so <i> is the same demotion the
+    // mirror card's summaries already use.
+    const head = command ? `<i>${escapeHtml(command.split(/\s+/)[0])}</i>\n` : ''
+    await channel.sendText(chat_id, head + mdToTelegramHtml(truncated), opts).catch(() => {})
     return
   }
 }
@@ -14319,6 +14328,7 @@ async function webappSessionFeed(sid: string): Promise<WebappSessionFeed | null>
   const items: WebappSessionFeed['items'] = recentConversation(file, 14).map(c => ({
     role: c.role, text: c.text, ts: c.ts,
     ...(c.img ? { img: c.img } : {}), ...(c.att ? { att: c.att } : {}), ...(c.cmd ? { cmd: true } : {}),
+    ...(c.name ? { name: c.name } : {}), ...(c.args ? { args: c.args } : {}),
     ...(c.agent ? { agent: c.agent } : {}), ...(c.status ? { status: c.status } : {}),
     // uuid only where it's needed: it exists so a clipped row can be re-fetched in full.
     ...(c.clipped ? { clipped: true, ...(c.uuid ? { uuid: c.uuid } : {}) } : {}),
