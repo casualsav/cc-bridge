@@ -2,7 +2,7 @@ import { chromium } from "/home/ubuntu/projects/taste/node_modules/playwright/in
 // The five-item batch of 2026-07-27, measured in one pass because four of the five touch the same
 // screen and a shot of one is a shot of the others.
 //
-//   1  the paperclip opens a Camera / Photos / Files sheet instead of a picker
+//   1  the paperclip opens a Photos / Files sheet instead of a picker
 //   2  the composer tells the IME not to draw inline predictions
 //   3  a single staged file says "1 attachment", not its filename
 //   4  a slash command paints no optimistic bubble, and /clear paints no row at all
@@ -81,7 +81,7 @@ const css = (sel, prop) => p.evaluate(([s, k]) => { const e = document.querySele
 const shot = (name, clip) => p.screenshot({ path: join(OUT, name + ".png"), ...(clip ? { clip } : {}) });
 
 // ── 1. the attach sheet ─────────────────────────────────────────────────────────────────────────
-console.log("\n1. Camera / Photos / Files");
+console.log("\n1. Photos / Files");
 check(!(await vis("#addctx .ctxcard")), "no sheet at rest");
 await p.evaluate(() => { window.__picks.length = 0; });
 await click("#datt"); await p.waitForTimeout(400);
@@ -93,13 +93,18 @@ const cards = await p.evaluate(() => [...document.querySelectorAll("#addctx .ctx
   w: +c.getBoundingClientRect().width.toFixed(2), h: +c.getBoundingClientRect().height.toFixed(2),
   hasGlyph: !!c.querySelector("svg"),
 })));
-check(cards.length === 3, `three cards (${cards.length})`);
-check(cards.map(c => c.label).join(",") === "Camera,Photos,Files", `labelled Camera, Photos, Files (${cards.map(c => c.label).join(",")})`);
+check(cards.length === 2, `two cards (${cards.length})`);
+check(cards.map(c => c.label).join(",") === "Photos,Files", `labelled Photos, Files (${cards.map(c => c.label).join(",")})`);
+// The card that was measured on the owner's device and removed. Telegram's WebView intercepts the
+// file chooser with its own picker, which reads `accept` and ignores `capture`, so a Camera card
+// opened the photo library exactly like Photos did. This check is what stops it coming back on the
+// reasoning that `capture` is in the spec — it is, and this client does not honour it.
+check(!(await p.evaluate(() => !!document.getElementById("dfcam"))), "no camera input — `capture` is ignored by Telegram's picker, measured on-device");
 // `.every` on an empty list is true, which on the pre-change page (no cards at all) is a check that
 // cannot fail — the harness's own first rule. The length term is what makes it a claim.
-check(cards.length === 3 && cards.every(c => c.hasGlyph), "each carries its glyph above the label");
-check(cards.length === 3 && new Set(cards.map(c => c.w)).size === 1, `equal widths (${cards.map(c => c.w).join(" / ")})`);
-note(`card box ${cards[0]?.w} x ${cards[0]?.h} (reference: ~102 x 76 at a 360px viewport)`);
+check(cards.length === 2 && cards.every(c => c.hasGlyph), "each carries its glyph above the label");
+check(cards.length === 2 && new Set(cards.map(c => c.w)).size === 1, `equal widths (${cards.map(c => c.w).join(" / ")})`);
+note(`card box ${cards[0]?.w} x ${cards[0]?.h} (the reference's HEIGHT is 76; width divides the row)`);
 // The ✕ leads and the title centres on the SHEET, not on the space the ✕ leaves — that is what the
 // .dialhead::after mirror buys, and it is the reference's shape.
 const head = await p.evaluate(() => {
@@ -111,13 +116,12 @@ const head = await p.evaluate(() => {
 check(!!head && Math.abs(head.drift) < 1, `the title sits on the sheet's centre (drift ${head?.drift ?? "n/a"}px)`);
 check(!!head && head.xLeftOfTitle, "the ✕ leads, top-left");
 note(`title copy: "${head?.title}"`);
-const inputs = await p.evaluate(() => ["dfcam", "dfpho", "dfile"].map(id => {
+const inputs = await p.evaluate(() => ["dfpho", "dfile"].map(id => {
   const e = document.getElementById(id);
-  return e ? { id, accept: e.getAttribute("accept") || "", capture: e.getAttribute("capture") || "", multiple: e.multiple } : { id, missing: true };
+  return e ? { id, accept: e.getAttribute("accept") || "", multiple: e.multiple } : { id, missing: true };
 }));
-check(inputs[0].accept === "image/*" && inputs[0].capture === "environment", `Camera's input asks for the camera (${JSON.stringify(inputs[0])})`);
-check(inputs[1].accept === "image/*" && inputs[1].multiple === true, `Photos' input is images, several (${JSON.stringify(inputs[1])})`);
-check(inputs[2].accept === "" && inputs[2].multiple === true, `Files' input is anything, several (${JSON.stringify(inputs[2])})`);
+check(inputs[0].accept === "image/*" && inputs[0].multiple === true, `Photos' input is images, several (${JSON.stringify(inputs[0])})`);
+check(inputs[1].accept === "" && inputs[1].multiple === true, `Files' input is anything, several (${JSON.stringify(inputs[1])})`);
 await shot("1-sheet");
 // Each card fires ITS OWN input and closes the sheet.
 for (const c of cards) {
@@ -295,6 +299,77 @@ for (const [theme, vars] of [["dark", null], ["light", LIGHT]]) {
   await p.waitForTimeout(150);
   await shot(`5-${theme}-full`);
 }
+// ── 6. one plane ────────────────────────────────────────────────────────────────────────────────
+// Everything in the transcript has to dissolve into the ceiling scrim at the same rate. The "tap to
+// expand" bar did not: it carries `z-index: 1` so it sits above its own bubble's fold veil, and with
+// #dfeed at `z-index: auto` that 1 landed in #drill's context beside the scrim's own 1, where tree
+// order handed the label the win. It scrolled up behind the title at full strength.
+//
+// Measured as PIXELS, because nothing in the DOM says which of two equal z-indexes painted last:
+// `elementsFromPoint` reports hit order, not paint order, and would have passed on the broken page.
+// The claim is that the label's ink loses contrast under the scrim the way its neighbours do.
+console.log("\n6. the fold label is in the transcript's plane");
+// A message long enough to clip (LONG_MSG), so a real .more bar exists to measure.
+await p.evaluate(items => { window.__feed = { ...window.__feed, items }; feedSig = ""; renderDrill(); },
+  [{ role: "assistant", uuid: "big", ts: ts, text: "x ".repeat(700) }, ...CHAT]);
+await p.waitForTimeout(700);
+// Comparing the label's ink in the band against its ink lower down does NOT work, and the failed
+// version is worth keeping in view: the label's rect, once it is inside the band, also contains the
+// HEADER's glyphs painted on top of it, so the crop reported more contrast veiled than open. The
+// question is not how much ink is in that strip. It is whether the SCRIM reaches the label at all.
+//
+// So: toggle the scrim and diff. `.more` carries an opaque `background: var(--bg)`, so a label under
+// the scrim changes when the scrim goes away and a label over it does not — by construction, with no
+// colour or theme assumption. The header paints identically in both shots and cancels out of the
+// diff. A neighbouring message line at the same height is the control: it is unarguably in the
+// transcript's plane, so it fixes the scale the label has to match.
+const { execFileSync } = await import("node:child_process");
+const diffAt = async sel => {
+  const clip = await p.evaluate(s => {
+    const e = document.querySelector(s); if (!e) return null;
+    const r = e.getBoundingClientRect();
+    if (r.height < 4 || r.width < 4) return null;
+    return { x: Math.max(0, Math.round(r.x)), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) };
+  }, sel);
+  if (!clip) return null;
+  const on = await p.screenshot({ clip });
+  const off = await p.addStyleTag({ content: "#drill::before { display: none !important }" });
+  await p.waitForTimeout(120);
+  const bare = await p.screenshot({ clip });
+  await off.evaluate(e => e.remove());
+  await p.waitForTimeout(120);
+  const b64 = [on, bare].map(x => x.toString("base64")).join("\n");
+  return Number(execFileSync("python3", ["-c", `
+import base64, io, sys
+from PIL import Image
+a, b = [Image.open(io.BytesIO(base64.b64decode(l))).convert("L") for l in sys.stdin.read().split()]
+pa, pb = a.load(), b.load()
+d = [abs(pa[x, y] - pb[x, y]) for y in range(a.size[1]) for x in range(a.size[0])]
+print(round(sum(d) / len(d), 2))
+`], { input: b64 }).toString().trim());
+};
+// Scroll until the label sits inside the band the scrim covers.
+const landed = await p.evaluate(() => {
+  const feed = document.getElementById("dfeed"), head = document.querySelector("#drill .vhead");
+  const hb = head.getBoundingClientRect();
+  for (let top = 0; top < feed.scrollHeight; top += 4) {
+    feed.scrollTop = top;
+    const r = document.querySelector("#dfeed .msg.clip .more")?.getBoundingClientRect();
+    if (r && r.top >= hb.top && r.bottom <= hb.bottom) return top;
+  }
+  return -1;
+});
+check(landed >= 0, `found a scroll position with the fold label inside the header band (${landed})`);
+await p.waitForTimeout(300);
+await shot("6-fold-label-behind-header", band);
+const labelDelta = await diffAt("#dfeed .msg.clip .more");
+const peerDelta = await diffAt("#dfeed .msg.clip");
+check(peerDelta !== null && peerDelta > 2, `the CONTROL moves when the scrim does — a message in the band is veiled (${peerDelta})`);
+check(labelDelta !== null && peerDelta !== null && labelDelta > peerDelta * 0.5,
+  `…and so does the fold label, at the same rate (${labelDelta} vs the message's ${peerDelta})`);
+await p.evaluate(items => { window.__feed = { ...window.__feed, items }; feedSig = ""; renderDrill(); }, CHAT);
+await p.waitForTimeout(400);
+
 // The two line boxes, in page coordinates, so halo.py can crop exactly them out of a band shot
 // rather than guessing where the text is. dpr is what turns them into pixels.
 // …and it is the TEXT's box, via a Range over the node's contents, not the element's. #dsub is a

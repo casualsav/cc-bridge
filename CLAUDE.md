@@ -313,14 +313,22 @@ definition — the existing "No conversation yet." then renders itself, with no 
 invented to produce it. A lone `/clear` on a blank screen reads as debris from the wipe rather than
 as a wiped session, which is what the owner objected to.
 
-**The paperclip asks WHERE before it opens a picker** (`#addctx`: Camera / Photos / Files). Three
-differently-declared `<input type=file>`s, because that is the only lever there is — no API tells one
-picker which source to open, only `accept` and `capture`. `#dfile` keeps its id and its job (anything,
-several) so the staging path is untouched; the sheet joins `#dial`/`#calls`'s rule list rather than
-restating the backdrop, the 180ms slide and the reduced-motion gate. It closes on the **tap**, not on
-the picker returning: the picker is the platform's and can be cancelled, and a sheet still standing
-behind it reads as a tap that did nothing. Unverified on a device: whether `capture` actually reaches
-a camera intent inside Telegram's WebView.
+**The paperclip asks WHERE before it opens a picker** (`#addctx`: Photos / Files). Differently-declared
+`<input type=file>`s, because that is the only lever there is — no API tells one picker which source to
+open, only `accept`. `#dfile` keeps its id and its job (anything, several) so the staging path is
+untouched; the sheet joins `#dial`/`#calls`'s rule list rather than restating the backdrop, the 180ms
+slide and the reduced-motion gate. It closes on the **tap**, not on the picker returning: the picker is
+the platform's and can be cancelled, and a sheet still standing behind it reads as a tap that did
+nothing.
+
+**There is no Camera card, and `capture` is why — measured on the owner's device, not assumed.** It
+shipped in v0.4.154 as `accept="image/*" capture="environment"` and opened the photo library, exactly
+like Photos: Telegram's WebView intercepts the file chooser with its own attachment picker, which
+reads `accept` and ignores `capture`. `capture` is only ever a hint and a client may ignore it; this
+one does. A card that opens the wrong thing is worse than no card, so it went in v0.4.155, and
+`batch5.mjs` carries a check asserting `#dfcam` does not exist — its falsifying control is v0.4.154's
+own page, not the pre-sheet one. If Telegram ever honours `capture`, the card comes back and nothing
+else about the sheet has to change (the cards are `flex: 1`, so the row re-divides itself).
 
 **The composer tells the IME not to draw inline predictions, and that is a trade the owner made.**
 `autocorrect="off"` is what Chromium maps to Android's `TYPE_TEXT_FLAG_NO_SUGGESTIONS`, and that flag
@@ -411,6 +419,22 @@ Telegram's ✕ Close, transparent exactly at the name pill's bottom edge. `scrip
 measures all of it, and note its two instrument lessons — `getComputedStyle`'s second argument is the
 pseudo-element (reading a scrim without it measures the host and reports `none`), and a hit test must
 scan a **band**, since a single-point probe lands in the 16px margin between two messages.
+
+**`#dfeed` carries `z-index: 0`, and it is the only thing keeping the transcript in ONE PLANE.** It
+looks like a no-op and is not: it makes the scroller a stacking context. Without it the feed is
+`z-index: auto`, so any positioned descendant with a z-index competes directly with `#drill`'s own
+layers — and one does. `.msg.clip .more` (the "tap to expand" bar) needs `z-index: 1` to sit above its
+own bubble's fold veil, and that 1 was landing beside the ceiling scrim's 1; equal z-index resolves by
+tree order and `#dfeed` is a later child than `#drill::before`, so **the label painted over the
+scrim** and scrolled up behind the title at full strength while every message around it dissolved.
+Reported by the owner as "not in the same plane". Any future z-index inside the feed is now safely
+local; any new floating surface over it must be **above 1** (the header and dock are 2).
+Measuring this needs pixels: `elementsFromPoint` reports HIT order, not paint order, and passes on
+the broken page. `batch5.mjs` §6 toggles the scrim and diffs — `.more` has an opaque
+`background: var(--bg)`, so a label under the scrim changes when the scrim goes and one over it does
+not (0.03 on the broken page against 6.72 on the fixed one). Comparing the label's ink in the band
+against its ink lower down does NOT work: once it is inside the band its rect also contains the
+header's own glyphs, and that crop reported *more* contrast veiled than open.
 
 **The header FLOATS over the feed, and that is what makes the translucency mean anything.**
 `--chip-fill` has been 82% of `--sec` for a while, but the row sat in the flex column *above* the

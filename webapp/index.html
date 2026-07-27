@@ -558,7 +558,18 @@
      dock's first INK rather than its box, and the remaining ten are here — so the newest message
      rests ~6px above whatever the dock paints first, in every state, rather than 24px above an
      invisible box edge. */
-  #dfeed { position: absolute; inset: 0; overflow-y: auto;
+  /* `z-index: 0` is NOT decoration and NOT a no-op: it makes the scroller its own STACKING CONTEXT,
+     which is the only thing that keeps the transcript in one plane. Without it the feed is
+     `z-index: auto`, so any positioned descendant carrying a z-index competes directly with #drill's
+     own layers — and one does. `.msg.clip .more` (the "tap to expand" bar) needs `z-index: 1` to sit
+     above its own bubble's fold veil, and that 1 was landing in the SAME context as the ceiling
+     scrim's 1; equal z-index resolves by tree order, and #dfeed is a later child than #drill::before,
+     so the label painted OVER the scrim. It scrolled up behind the title still at full strength while
+     every message around it dissolved — the owner's report, and exactly the "not in the same plane"
+     it looks like. Confining that 1 to the feed's own context puts the label back above its veil and
+     the whole transcript back under the scrim. 0, not a bigger number: the feed must stay BELOW the
+     scrim's 1 and the header/dock's 2. */
+  #dfeed { position: absolute; inset: 0; overflow-y: auto; z-index: 0;
     padding: calc(var(--safe-top) + var(--hbtn-d) + 24px) var(--sp-3) calc(var(--dock-h, 60px) - 10px); }
   /* ASYMMETRIC padding, and the asymmetry is the point: the bubble hugs the meta block far tighter
      than it pads a line of text, which is what makes the time read as tucked into the corner. Pulling
@@ -1006,18 +1017,13 @@
   .dialrow .badge { flex: none; font-size: var(--t-meta); font-weight: var(--w-semi); color: var(--text);
     background: var(--bg); border-radius: 9px; padding: 2px 8px; }
   .dialrow .chev { width: 20px; height: 20px; flex: none; color: var(--hint); }
-  /* The attach sheet's three choices. Sizing is the reference's, read off it rather than chosen: its
-     cards measure ~102 x 76 CSS px at a 360px viewport, which is exactly what three equal cards come
-     to inside the sheet's own --sp-4 inset with an --sp-2 gap — so the width is `flex: 1` and only
-     the HEIGHT is a number here. It is the one number in this block that could have been anything.
+  /* The attach sheet's choices. The HEIGHT is the reference's, read off it rather than chosen: its
+     cards measure ~102 x 76 CSS px at a 360px viewport. The WIDTH is `flex: 1` and always was, which
+     is why losing the Camera card cost this rule nothing — two cards divide the same row.
      Deliberately sized to CONTENT rather than to a fixed sheet height: unlike the dial, this sheet
-     has exactly one shape and always will, so there is no second page for a fixed height to hold
-     still against.
+     has one shape, so there is no second page for a fixed height to hold still against.
      The rim is --sec, which is this app's hairline everywhere else (list rows, .setrow, the file
-     viewer's head) rather than a grey invented for these cards.
-     ANTI-PATTERN, crossed knowingly: "three identical cards in a row" is a design-lint item. It is
-     aimed at a marketing feature row, where three cards are a way of avoiding a decision. Here the
-     three cards ARE the three choices, and the shape came from the owner's reference. */
+     viewer's head) rather than a grey invented for these cards. */
   .ctxrow { display: flex; gap: var(--sp-2); padding: 0 var(--sp-4) var(--sp-4); }
   .ctxcard { flex: 1; min-width: 0; height: 76px; display: flex; flex-direction: column;
     align-items: center; justify-content: center; gap: var(--sp-2);
@@ -1132,15 +1138,18 @@
          quietest glyph treatment there is. Every chat app puts a filled mark on a filled button. -->
       <button id="dsend" class="sendbtn" title="Send"><svg viewBox="0 0 24 24"><polygon points="22 2 15 22 11 13 2 9 22 2" fill="currentColor"/></svg></button>
     </div>
-    <!-- THREE inputs, because the choice IS the input: there is no API to tell one picker which
-         source to open, only three differently-declared inputs whose accept/capture the platform
-         reads. #dfile keeps its id and its job (anything, several at once) so nothing about the
-         existing staging path moves; the other two only narrow it.
-         `capture="environment"` is a HINT, and platforms treat it as one — a client that has no
-         camera intent falls back to the same picker Photos opens, which is a degraded choice rather
-         than a broken one. All three land in the same handler. -->
+    <!-- TWO inputs, because the choice IS the input: there is no API to tell one picker which source
+         to open, only differently-declared inputs whose `accept` the platform reads. #dfile keeps its
+         id and its job (anything, several at once) so nothing about the existing staging path moves;
+         #dfpho only narrows it to images. Both land in the same handler.
+         There was a THIRD — `capture="environment"`, for a Camera card — and it is gone because it
+         was measured on the owner's device and does not work: Telegram's WebView intercepts the file
+         chooser with its own attachment picker, which reads `accept` and ignores `capture`, so the
+         Camera card opened the photo library exactly like Photos did. `capture` is only ever a hint
+         and a platform may ignore it; this one does. A card that opens the wrong thing is worse than
+         no card, so it went. If Telegram ever honours it, the card comes back — nothing else about
+         the sheet has to change. -->
     <input id="dfile" type="file" multiple hidden>
-    <input id="dfcam" type="file" accept="image/*" capture="environment" hidden>
     <input id="dfpho" type="file" accept="image/*" multiple hidden>
   </div>
   </div>
@@ -1160,7 +1169,6 @@
       <div class="t">Attach</div>
     </div>
     <div class="ctxrow">
-      <button class="ctxcard" data-pick="dfcam"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg><span>Camera</span></button>
       <button class="ctxcard" data-pick="dfpho"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg><span>Photos</span></button>
       <button class="ctxcard" data-pick="dfile"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><polyline points="12 18 12 12"/><polyline points="9 15 12 12 15 15"/></svg><span>Files</span></button>
     </div>
@@ -2347,7 +2355,7 @@ function stagePicked(input) {
   renderStage();
   $("dtext").focus();   // the point of staging is that you write about it now
 }
-["dfile", "dfcam", "dfpho"].forEach(id => { $(id).onchange = () => stagePicked($(id)); });
+["dfile", "dfpho"].forEach(id => { $(id).onchange = () => stagePicked($(id)); });
 // Voice: tap to record, tap again to stop-and-send. Hidden entirely where the webview has no
 // recording API (Telegram Desktop) — cheap feature-detect, per the owner's ask; a permission
 // denial on a capable webview still gets the error toast.
