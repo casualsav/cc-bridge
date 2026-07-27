@@ -27,6 +27,7 @@ const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
 import { normalizeCommandOutput } from './ansi.ts'
 import { planSlash } from './slash-policy.ts'
+import { preserveGlobalEffort, reconcileEffortScope } from './effort-scope.ts'
 import { renderSessionsView } from './sessions-view.ts'
 import { detectCurrentMode, onNormalPrompt, inputBoxContent, isModelSwitchConfirm, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType } from './prompt.ts'
 import { resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, liveSubagents, currentTurnFeed, currentTurnActivity, concludedTurnWork, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
@@ -842,6 +843,29 @@ function fallbackEffort(): string | null { return defaultEffortPref ?? lastFocus
 // Inject `/effort <level>` and accept Claude Code's mid-conversation "Change effort level?" confirm
 // if it appears (a resumed session has cached history, so the switch always prompts). Used by the
 // restore paths — distinct from injectEffortChange, which relays the confirm to the user as buttons.
+// Where a bridge-driven effort change parks the account's real effortLevel while the CLI overwrites
+// it. One file for the whole daemon: only one injection runs at a time (inboundInjectChain), so
+// there is never a second window open.
+const EFFORT_SCOPE_MARKER = join(STATE_DIR, 'effort-scope.json')
+// The account settings.json a pane's effort change will land in. Per-account, because a session
+// pinned to an alt profile writes THAT profile's file, not ~/.claude's.
+async function effortSettingsFor(paneId: string): Promise<string> {
+  return join((await paneAccount(paneId).catch(() => MAIN_ACCOUNT)).configDir, 'settings.json')
+}
+// Every bridge-driven effort change goes through here. Claude Code has NO session-only route for
+// effort — measured on 2.1.220, the argument form AND the bare picker's Enter both write
+// `effortLevel` into the account's settings.json, and the CLI says so in its own output. `/model`
+// has a session-only key on its picker and applySessionModel uses it; effort has no equivalent, so
+// the only way to keep a per-session change per-session is to put the file back. See effort-scope.ts
+// for the crash marker and why the write is textual.
+async function scopedEffortChange<T>(paneId: string, label: string, change: () => Promise<T>): Promise<T> {
+  const settings = await effortSettingsFor(paneId)
+  const { result, outcome } = await preserveGlobalEffort(settings, EFFORT_SCOPE_MARKER, change)
+  // Logged on every correction: each one is a specimen of the CLI writing a global default from a
+  // per-session action, and silence would make the day it stops working invisible.
+  if (outcome === 'restored') process.stderr.write(`daemon: effort-scope: ${label} in ${paneId} moved ${settings}'s effortLevel — restored\n`)
+  return result
+}
 async function reapplyEffort(paneId: string, effort: string | null, watcher: PaneWatcher | null): Promise<void> {
   if (!effort || !EFFORT_LEVELS.includes(effort)) return
   const run = async () => {
@@ -868,7 +892,7 @@ async function reapplyEffort(paneId: string, effort: string | null, watcher: Pan
       return                    // we answered a confirm — trust it even if the statusline hasn't repainted yet
     }
   }
-  await (watcher ? watcher.withInjection(run) : run())
+  await scopedEffortChange(paneId, 'reapplyEffort', () => (watcher ? watcher.withInjection(run) : run()))
 }
 
 // After a resumed session clears the post-update "Resume session" picker, Claude Code brings it back
@@ -6037,7 +6061,7 @@ async function injectEffortChange(t: CommandTarget, level: string, chat_id: stri
   // incoming "Change effort level?" modal for a reserved pane — without this they raced the
   // dedicated card below and the user got TWO different-looking button sets for one confirm.
   pendingEffortConfirm.set(t.paneId, { level, chatId: chat_id, messageId: 0, thread: t.replyThread })
-  await injectSlash(t.paneId, t.watcher, `/effort ${level}`)
+  await scopedEffortChange(t.paneId, 'injectEffortChange', () => injectSlash(t.paneId, t.watcher, `/effort ${level}`))
   const cap = await capturePane(t.paneId).catch(() => '')
   if (cap && isEffortConfirm(cap)) {
     await relayEffortConfirm(t, level, chat_id)
@@ -10902,7 +10926,9 @@ bot.on('callback_query:data', async ctx => {
     pendingEffortConfirm.delete(paneId)
     if (!paneId) { await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {}); return }
     await ctx.answerCallbackQuery({ text: yes ? 'Switching…' : 'Cancelled' }).catch(() => {})
-    await paneKeys(paneId, yes ? ['1', 'Enter'] : ['Escape'], [300, 5000])
+    // Wrapped on the YES path too: the relayed confirm means the CLI's write happens HERE, long
+    // after injectEffortChange returned, so the window this has to cover is this keystroke's.
+    await scopedEffortChange(paneId, 'effort-confirm', () => paneKeys(paneId, yes ? ['1', 'Enter'] : ['Escape'], [300, 5000]))
     if (yes) {
       if (level) rememberEffort(paneId, level)   // persist for resume/restart — CC won't
       await ctx.editMessageText(`⚡ Effort switched to ${escapeHtml(effortLabel(level ?? ''))}`, { parse_mode: 'HTML' }).catch(() => {})
@@ -13691,6 +13717,11 @@ await new Promise<void>((resolve, reject) => {
   server.listen(SOCKET_PATH, () => {
     // PID written after listen succeeds — prevents TOCTOU race with concurrent spawns.
     writeFileSync(DAEMON_PID_FILE, String(process.pid), { mode: 0o600 })
+    // A daemon that died between a bridge-driven effort change and its restore left the account's
+    // global effortLevel where the CLI put it. The marker names the file and the value; replay it
+    // once, here, before anything else can read a default that was never the user's.
+    const effortFix = reconcileEffortScope(EFFORT_SCOPE_MARKER)
+    if (effortFix) process.stderr.write(`daemon: effort-scope: restored ${effortFix.settings} effortLevel=${effortFix.effortLevel} after an interrupted change\n`)
     process.stderr.write(`telegram daemon: listening on ${SOCKET_PATH}\n`)
     resolve()
   })
