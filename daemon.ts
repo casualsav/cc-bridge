@@ -69,7 +69,7 @@ import {
 import { looksLikeArgForm, exitCommandArg } from './named-command.ts'
 import { initMirror, updateTerminalMirror, respawnTerminalMirror, abandonMirror, updateAuxMirror, dropAuxMirror, auxMirrorPanes } from './mirror.ts'
 import { parseStatusline, modelDisplayName, type StatuslineData } from './statusline.ts'
-import { summarizeTurn, blockLine } from './turn-summary.ts'
+import { turnParts } from './turn-summary.ts'
 import { normalizeKeys, planKeyInjection, planKeyRate, KEY_NAMES } from './keys-plan.ts'
 import {
   STATIC, initAccess, loadAccess, saveAccess, gate, dmCommandGate, isMentioned,
@@ -14336,13 +14336,30 @@ async function webappSessionFeed(sid: string): Promise<WebappSessionFeed | null>
     // uuid only where it's needed: it exists so a clipped row can be re-fetched in full.
     ...(c.clipped ? { clipped: true, ...(c.uuid ? { uuid: c.uuid } : {}) } : {}),
   }))
-  // The running turn, described by the SAME decision layer the Telegram live card uses
-  // (turn-summary.ts): narration paragraphs interleaved with folded tool runs ("Searched 3
-  // patterns, read 2 files"), so checking in on a session says what it is thinking and doing
-  // rather than listing every call. Only the markup differs — blockLine is the plain-text form.
-  if (working) for (const b of summarizeTurn(currentTurnFeed(file)).slice(-FEED_BLOCKS)) {
-    const text = blockLine(b)
-    items.push({ role: b.kind === 'thought' ? 'thought' : 'activity', text: text.length > THOUGHT_MAX ? text.slice(0, THOUGHT_MAX - 1) + '…' : text, ts: 0 })
+  // The turn anchored at the last user message — running OR just concluded — as ONE item: narration
+  // paragraphs and tool CHIPS in transcript order, so a turn reads as one piece of prose with its
+  // work sitting between the paragraphs instead of as a separate stream of activity rows that
+  // vanished the moment the turn ended. `turnParts` (not summarizeTurn, which the Telegram card
+  // keeps) is the shape that survives a tap: every call is still in there for the detail sheet.
+  //
+  // SCOPE, stated because it is visible: this describes the CURRENT turn only. currentTurnFeed is
+  // anchored on the last real user message, so the chips persist after the turn concludes but are
+  // replaced when the NEXT turn starts. Chips for older turns need a per-turn walk that does not
+  // exist yet — see the follow-up in p8-p10-design.md.
+  const parts = turnParts(currentTurnFeed(file))
+    .filter(p => p.t === 'chip' || p.text.trim() !== '')
+    .map(p => p.t === 'p' && p.text.length > THOUGHT_MAX ? { ...p, text: p.text.slice(0, THOUGHT_MAX - 1) + '…' } : p)
+  // A pure-text turn (no tools) has nothing a chip would add, so it stays an ordinary assistant
+  // message and this whole path is inert for it — the common short reply is untouched.
+  if (parts.some(p => p.t === 'chip')) {
+    // The turn's own assistant text is already in `items` from recentConversation; leaving it there
+    // as well would print the turn twice, once bubbled and once as prose. Everything after the last
+    // user row belongs to this turn, so that tail is what the turn item replaces.
+    let cut = items.length
+    while (cut > 0 && items[cut - 1]!.role === 'assistant') cut--
+    items.length = cut
+    let chips = 0
+    items.push({ role: 'turn', ts: Date.now(), blocks: parts.filter(p => p.t !== 'chip' || ++chips <= FEED_BLOCKS) })
   }
   return { sid, name: row.name, working, ...dial, items }
 }

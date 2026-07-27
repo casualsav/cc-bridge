@@ -10,6 +10,7 @@ import { createHmac, createHash, timingSafeEqual, randomBytes } from 'node:crypt
 import { readdir, stat, realpath, writeFile, copyFile, rename, mkdir, cp, rm } from 'node:fs/promises'
 import { resolve, basename, dirname, join, sep } from 'node:path'
 import { homedir } from 'node:os'
+import type { TurnPart } from './turn-summary.ts'
 
 export interface WebappDeps {
   token: string                            // bot token — the HMAC key for initData validation
@@ -75,12 +76,17 @@ export interface SessionFeed {
   // The bridge's configured spawn defaults (/settings 🐣). The picker badges these — they are
   // genuinely unset ("inherit") as often as not, and then nothing is badged.
   defModel?: string | null; defEffort?: string | null
-  // 'activity' = a tool run of the live turn, 'thought' = its mid-turn narration (the 💭 the
-  // Telegram live card shows); both appear only while the session is working.
+  // 'turn' = one whole assistant turn as prose paragraphs interleaved with tool CHIPS, which is what
+  // the mini app renders today: a turn reads as one column of prose with its work between the
+  // paragraphs, and each chip keeps every underlying call for the detail sheet. It carries `blocks`
+  // instead of `text`. 'activity' / 'thought' are the older per-row shape — kept in the type because
+  // the client still renders them, but the feed no longer emits them.
   // `clipped` = the payload clamp cut this message (display only — storage and pane delivery keep
   // the whole thing); the client says so instead of just trailing off, and `uuid` (present only on a
   // clipped row) is the handle it uses to fetch the rest from /api/session/message.
-  items: Array<{ role: 'user' | 'assistant' | 'activity' | 'thought'; text: string; ts: number; uuid?: string; img?: string; att?: string; cmd?: boolean; clipped?: boolean }>
+  items: Array<{ role: 'user' | 'assistant' | 'activity' | 'thought' | 'turn'; text?: string; ts: number
+    blocks?: TurnPart[]
+    uuid?: string; img?: string; att?: string; cmd?: boolean; clipped?: boolean }>
 }
 export interface AutomationView {
   cron: Array<{ id: string; fireAt: number; sessionLabel: string; text: string; recurLabel: string | null }>

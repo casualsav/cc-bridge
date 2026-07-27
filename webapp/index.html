@@ -53,18 +53,18 @@
        INTEGER: it is half the pill's spare height, so an odd total would land the button on a half
        pixel and reintroduce exactly the paint snap the .sendbtn svg note describes. */
     --mic-d: 40px;
-    /* The chat header's three containers — two standalone circles and the name capsule between them.
-       ONE diameter, measured off the owner's reference against the only control both frames share,
-       the composer mic: its header circles are 81.0px beside a 66.7px mic, so at our 40px mic they
-       scale to 48.6. Ratios only — Telegram rescales uploads, so the file's own pixel counts and any
-       viewport inferred from them mean nothing. The two circles measured the SAME (81.0 / 80.9), so
-       there is one token rather than two. This is deliberately the largest control in the app, larger
-       than the mic; that inversion is the reference's and is intended, not a mistake to normalise.
-       --hbtn-glyph holds the glyph's share of the button roughly where it already was (19 in 34).
-       Keep their DIFFERENCE EVEN: the button centres its glyph with half of it as padding, and an odd
-       difference puts the glyph on a half pixel — see .chatbtn. */
-    --hbtn-d: 48px;
-    --hbtn-glyph: 26px;
+    /* The chat header's three containers — two circles and the name capsule, ONE size, derived
+       capsule-FIRST: the pill's height is its own two line boxes plus padding and the circles take
+       that, so the three share a height by construction. It ran the other way once, off the
+       reference's mic ratio (81.0 : 66.7 → 48.6), which pinned the row at 48.
+       The line boxes are px, not --lh-snug: 1.25 on the 11px sub gives 13.75, and a fractional row
+       height puts .chatbtn's integer padding back on a half pixel. 20/14 are --lh-snug rounded, so
+       the sum is 44 — under a toolbar row, and exactly the 44px touch floor it may not go below.
+       Keep --hbtn-d MINUS --hbtn-glyph EVEN (44 - 24 = 20): the button centres its glyph with half
+       the difference as padding, and an odd one lands it on a half pixel — see .chatbtn. */
+    --h-l1: 20px; --h-l2: 14px; --h-pad: 5px;
+    --hbtn-d: calc(var(--h-l1) + var(--h-l2) + 2 * var(--h-pad));
+    --hbtn-glyph: 24px;
     /* Those three containers are one family, so their raised look is one constant rather than the
        same two shadows written out per container. */
     --chip-lift: inset 0 1px 0 rgba(255,255,255,.06), 0 2px 6px rgba(0,0,0,.35);
@@ -109,9 +109,16 @@
        one stays literal because a token would make the frozen indicator inheritable. Nothing here is
        frozen, so the lint's raw-color finding is real and the token is the answer. */
     --stop-red: #ea3323;
+    /* Added / removed lines. There is no light-theme block in this file to hold a second pair — the
+       theme arrives entirely through --tg-theme-* — so ONE pair has to clear contrast on both
+       grounds. These two are tuned for the dark one; the @supports below pulls each toward whatever
+       --text is, which lightens them on a dark ground and darkens them on a light one. */
+    --add: #3fb950;
+    --del: #f85149;
   }
   @supports (color: color-mix(in srgb, red 50%, blue)) {
-    :root { --hint-raised: color-mix(in srgb, var(--hint) 80%, var(--text)); }
+    :root { --hint-raised: color-mix(in srgb, var(--hint) 80%, var(--text));
+      --add: color-mix(in srgb, #3fb950 80%, var(--text)); --del: color-mix(in srgb, #f85149 80%, var(--text)); }
   }
   * { box-sizing: border-box; }
   body { margin: 0; font: var(--t-body)/1.45 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); }
@@ -168,7 +175,7 @@
   /* Both circles are the same painted chip as the capsule between them — same fill, same rim — which
      is what makes the three read as one row of containers rather than three unrelated shapes.
      No ::after touch-target lift any more: it existed to bring a 34px button up to the 44px standard,
-     and the button now exceeds 44 on its own. */
+     and the button now meets 44 on its own — which is why --hbtn-d's floor is that number. */
   .chatbtn { width: var(--hbtn-d); height: var(--hbtn-d); border: none; border-radius: 50%;
     background: var(--sec); box-shadow: var(--chip-lift); color: var(--text); cursor: pointer; flex: none;
     /* The PADDING is what fixes the glyph's origin — an integer, so it lands on whole pixels at any
@@ -190,15 +197,14 @@
   /* Two-line title: name over the session's dial line, as the reference has name over "bot". The
      status dot rides ON the name line — centred against a two-line block it would float in the
      gutter, belonging to neither line. (Its own rules stay untouched; only its context moves.) */
-  /* The MIDDLE CONTAINER, now that the buttons have left it: a capsule that spans the whole gap
-     between the two circles, as the reference's does, and is exactly as TALL as they are — the
-     reference measures 81.7 against their 81.0, i.e. the same, and equal height is what makes the
-     three read as one row. Expressed as min-height + a centred column rather than a hand-tuned
-     padding, so the height follows --hbtn-d and the title block's own 40px stays nobody's constant.
-     The old `max-width: 82%; margin-inline: auto` went with the island: it capped the TEXT block
-     inside a full-width bar, and capping the capsule itself would leave dead gaps beside it. */
+  /* The MIDDLE CONTAINER: a capsule spanning the gap between the two circles and exactly as tall as
+     they are — equal height is what makes the three read as one row. It is now the SOURCE of that
+     height (two line boxes + --h-pad, which --hbtn-d is calc'd from), so min-height restates the
+     number rather than setting it, and earns its keep in one case: #dsub EMPTY, which a deep-linked
+     open really renders (openDrill runs before the snapshot lands). An empty block box is 0 tall,
+     so without it the capsule would collapse between two taller circles. */
   .dtitle { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center;
-    min-height: var(--hbtn-d); padding: 0 var(--sp-3); border-radius: calc(var(--hbtn-d) / 2);
+    min-height: var(--hbtn-d); padding: var(--h-pad) var(--sp-3); border-radius: calc(var(--hbtn-d) / 2);
     background: var(--sec); box-shadow: var(--chip-lift);
     line-height: var(--lh-snug); text-align: var(--title-align, left); }
   .dtitle .nmrow { display: flex; align-items: center; gap: 7px; min-width: 0; justify-content: var(--title-align, flex-start); }
@@ -213,8 +219,9 @@
      the whole row, so `justify-content` on .nmrow was inert and the status dot sat pinned at the title
      block's left edge, 77px from the name it labels and touching the back button — the centring looked
      like a bug rather than a decision, and the indicator lost its referent. */
-  .dtitle .name { flex: 0 1 auto; min-width: 0; font-size: var(--t-title); font-weight: var(--w-semi); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .dtitle .sub { display: block; font-size: var(--t-meta); color: var(--hint-raised); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* One step down each (title → body, meta → stamp); these two line boxes are the row's height. */
+  .dtitle .name { flex: 0 1 auto; min-width: 0; font-size: var(--t-body); line-height: var(--h-l1); font-weight: var(--w-semi); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dtitle .sub { display: block; font-size: var(--t-stamp); line-height: var(--h-l2); color: var(--hint-raised); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   /* The interrupt keeps NO rule of its own: same fill and same glyph as the back chip, by the owner's
      call, so the base rule above is the whole of it. That supersedes an optical correction that shrank
      its painted disc — both discs measured exactly equal in the rendered PNG, so the size complaint was
@@ -293,8 +300,23 @@
      has them. The gutter is #dfeed's own padding — "full width" means the content column, not the
      glass. With the fill gone it is vertical rhythm that separates one reply from the next, so the
      margin doubles; at the old 8px, unbubbled replies ran together into one wall of text. The
-     bubble now marks the USER side alone, which is what tells the two apart. */
-  .msg.assistant { background: transparent; max-width: 100%; padding: 0; border-radius: 0; margin-bottom: var(--sp-4); }
+     bubble now marks the USER side alone, which is what tells the two apart.
+     A turn joins the rule rather than restating it: the same unbubbled, full-width column. */
+  .msg.assistant, .msg.turn { background: transparent; max-width: 100%; padding: 0; border-radius: 0; margin-bottom: var(--sp-4); }
+  .msg.turn .tp + .tp { margin-top: var(--sp-2); }
+  /* A LINE, not a card: it drops .chip's fill, which belongs to the sessions list — a chip that
+     paints a surface here reads as a nested message. Demoted by size and colour, never by weight.
+     .cv is the exception, at full text colour: the chevron is the affordance, not decoration. */
+  .msg.turn .chip { display: flex; align-items: center; gap: 6px; width: 100%; padding: 3px 0;
+    background: transparent; border: none; font-size: var(--t-sub); cursor: pointer; }
+  .msg.turn .chip .cl { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .msg.turn .chip .cv { margin-left: auto; color: var(--text); font-size: var(--t-body); }
+  /* Chip and sheet row share these. Colour ONLY — a tinted pill re-cards the line above uncards. */
+  .cp { color: var(--add); font-style: normal; }
+  .cm { color: var(--del); font-style: normal; }
+  /* A concluded turn folds its thinking into a native <details>: the marker is the affordance, so
+     only type is set. Open state survives the repaint in JS — see openTurns. */
+  .msg.turn summary { cursor: pointer; color: var(--hint); font-size: var(--t-sub); }
   /* Left padding drops to 0 with the assistant's: the 11px existed to line these up with bubbled
      text, and against an unbubbled reply it reads as an indent that means nothing.
      Type and colour are deliberately ABSENT: these lines carry no font, size or colour of their own,
@@ -455,15 +477,32 @@
   .selchip.on { background: var(--btn); color: var(--btn-text); }
   /* Model/effort picker — ONE sheet that slides sideways into a second page, not two sheets. Its own
      rules rather than .sheet's: this one animates, is edge-to-edge, and its rows are the content. */
-  #dial { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: none; z-index: 10; align-items: flex-end; }
-  #dial.show { display: flex; }
+  /* #calls (a chip's call list) is the SAME sheet — it joins these lists rather than restating the
+     backdrop, the slide and the reduced-motion gate, so the two cannot drift. */
+  #dial, #calls { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: none; z-index: 10; align-items: flex-end; }
+  #dial.show, #calls.show { display: flex; }
   /* Quick, per the brief — 180ms is about as long as a sheet can take before it reads as sluggish.
      The transform starts off-screen and the .up class is added on the next frame, so the browser has
      a start value to animate FROM; setting display and transform in one tick animates nothing. */
-  .dialsheet { width: 100%; background: var(--bg); border-radius: var(--r-xl) var(--r-xl) 0 0;
+  .dialsheet, .callsheet { width: 100%; background: var(--bg); border-radius: var(--r-xl) var(--r-xl) 0 0;
     padding-bottom: env(safe-area-inset-bottom); transform: translateY(100%); transition: transform .18s ease-out; overflow: hidden; }
-  #dial.up .dialsheet { transform: translateY(0); }
-  @media (prefers-reduced-motion: reduce) { .dialsheet, .dialpages { transition: none; } }
+  #dial.up .dialsheet, #calls.up .callsheet { transform: translateY(0); }
+  @media (prefers-reduced-motion: reduce) { .dialsheet, .dialpages, .callsheet { transition: none; } }
+  /* A FIXED height, never one that fits the rows: a sheet that sizes to its content rises a
+     different distance each time it opens. Rows sit at the top; the space below stays empty. */
+  .callsheet { height: 72vh; display: flex; flex-direction: column; }
+  #calllist { flex: 1; overflow-y: auto; padding: 0 var(--sp-4) var(--sp-3); }
+  /* line-height stays under the node's 19px so the NODE is the tallest item and the row's content
+     box is exactly it — the gap to the next node is then the 9px padding twice, which the connector
+     assumes. The node is 17 + 2 borders because `*` does not match a pseudo-element, so it keeps
+     content-box sizing; an ODD 19 puts its centre on 9.5, where a 1px rule sits exactly. */
+  .row { display: flex; align-items: center; gap: 10px; padding: 9px 0; position: relative; font-size: var(--t-sub); line-height: 18px; }
+  .row::before { content: ""; width: 17px; height: 17px; flex: none; border: 1px solid var(--hint); border-radius: 50%; }
+  /* ONE rule, on the PAIR: the connector exists BETWEEN nodes, so a border per row hangs a stub off
+     the first and the last. -9/18 is exactly the gap the 9px padding leaves in the gutter. */
+  .row + .row::after { content: ""; position: absolute; left: 9px; top: -9px; width: 1px; height: 18px; background: var(--sec); }
+  /* Mono is the TARGET's alone: it is the only part that is a literal string from the machine. */
+  .row .tgt { flex: 1; min-width: 0; color: var(--hint); font: var(--t-mono) ui-monospace, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* The grab handle is decoration, not a control — the sheet is dismissed by the ✕, the backdrop or
      Back. Sized off the reference against its mic (64x5 : 66.7). */
   .dialgrab { width: 38px; height: 3px; border-radius: 2px; background: var(--hint); opacity: .5; margin: 8px auto 0; }
@@ -602,6 +641,18 @@
         <div class="diallist" id="dialefforts"></div>
       </div>
     </div>
+  </div>
+</div>
+
+<!-- One chip's calls, in the dial's own chrome (grab, centred title, ✕ in the LEADING i.e. left slot). -->
+<div id="calls">
+  <div class="callsheet">
+    <div class="dialgrab"></div>
+    <div class="dialhead">
+      <button class="lead" id="callx" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+      <div class="t" id="calltitle"></div>
+    </div>
+    <div id="calllist"></div>
   </div>
 </div>
 
@@ -1068,7 +1119,8 @@ function md(s) {
 }
 // One feed row → bubble HTML. Slash commands render as a quiet mono chip; attachments as a photo
 // thumbnail (hydrated after paint) / 📎 chip with the caption; assistant text gets light markdown.
-function bubble(i) {
+function bubble(i, n) {
+  if (i.role === "turn") return turnRow(i, n);
   if (i.role === "activity") return '<div class="msg activity">' + esc(i.text) + "</div>";
   if (i.role === "thought") return '<div class="msg thought">' + esc(i.text) + "</div>";
   if (i.cmd) return '<div class="msg cmd">' + esc(i.text) + "</div>";
@@ -1105,6 +1157,45 @@ function bubble(i) {
     + (i.uuid ? ' data-uuid="' + esc(i.uuid) + '"' : "") + ">" + inner +
     (long ? '<div class="more">' + (i.ts ? esc(hhmm(i.ts)) + " · " : "") + (note ? esc(note) + " · " : "") + "tap to expand</div>" : "") + "</div>";
 }
+// One turn: prose through the same md() a reply gets, plus a one-line chip per tool group. The chip
+// carries only its coordinates — the calls stay in lastDrill, so the sheet reads live data.
+const stat = x => (x.plus ? '<i class="cp">+' + x.plus + "</i>" : "") + (x.minus ? '<i class="cm">-' + x.minus + "</i>" : "");
+function turnRow(i, n) {
+  return '<div class="msg turn"' + (i.uuid ? ' data-uuid="' + esc(i.uuid) + '"' : "") + ">"
+    + (i.blocks || []).map((b, bi) => b.t === "chip"
+      ? '<button class="chip" data-t="' + n + '" data-b="' + bi + '" onclick="openCalls(' + n + "," + bi + ')"><span class="cl">' + esc(b.label || "")
+        + "</span>" + stat(b) + '<span class="cv">›</span></button>'
+      : '<div class="tp">' + md(b.text || "") + "</div>").join("") + "</div>";
+}
+// One row per call, in the order they ran: two calls on the same target are two rows, never merged.
+function openCalls(t, b) {
+  const it = (lastDrill ? lastDrill.items : [])[t], blk = it && (it.blocks || [])[b];
+  if (!blk) return;
+  $("calltitle").textContent = blk.label || "";
+  $("calllist").innerHTML = (blk.calls || []).map(c => '<div class="row"><span>' + esc(c.verb || "")
+    + '</span><span class="tgt">' + esc(c.target || "") + "</span>" + stat(c) + "</div>").join("");
+  // .show before paint, .up next frame — #dial's shape, for its reason: setting display and
+  // transform in one tick leaves the transition nothing to animate from.
+  const s = $("calls");
+  s.classList.add("show");
+  requestAnimationFrame(() => s.classList.add("up"));
+}
+function closeCalls() {
+  const s = $("calls");
+  s.classList.remove("up");
+  setTimeout(() => s.classList.remove("show"), 180);   // matches .callsheet's transition
+}
+$("callx").onclick = closeCalls;
+$("calls").onclick = e => { if (e.target.id === "calls") closeCalls(); };
+// A <details> in a turn is a repaint casualty: paintFeed swaps innerHTML whenever the feed changes,
+// so an expanded fold slams shut on the next 3s poll and on every return from backgrounding. The
+// keys live OUTSIDE the DOM, like openMsgs, and are re-applied after the swap. `toggle` does not
+// bubble, hence the capture listener.
+const openTurns = new Set();
+$("dfeed").addEventListener("toggle", e => {
+  const k = e.target.dataset.tk;
+  if (k) e.target.open ? openTurns.add(k) : openTurns.delete(k);
+}, true);
 // Tapping a long bubble opens it; for a CLIPPED one that also fetches the rest. Both the open state and
 // the fetched text live OUTSIDE the DOM on purpose: paintFeed replaces innerHTML whenever the feed
 // changes, so a bubble holding either in its markup would collapse and lose its fetch on the next 3s
@@ -1191,6 +1282,12 @@ function paintFeed() {
   if (html === feedSig) return;   // unchanged — never disturb the scroll while the user reads back
   feedSig = html;
   feed.innerHTML = html;
+  // Before the scroll re-pin: re-opening a fold changes the feed's height. The index within the turn
+  // stands in for the block index — the wrapper's shape is the server's, so it is read off the DOM.
+  feed.querySelectorAll(".msg.turn").forEach(m => m.querySelectorAll("details").forEach((d, n) => {
+    const k = (m.dataset.uuid || "") + ":" + n;
+    d.dataset.tk = k; d.open = openTurns.has(k);
+  }));
   if (stuck) feed.scrollTop = feed.scrollHeight;
   hydrateThumbs();
 }

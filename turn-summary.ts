@@ -123,3 +123,75 @@ export function blockLine(b: TurnBlock): string {
   if (b.kind === 'edit') return `✏️ ${b.file}${b.lines ? ` ${b.lines > 0 ? `+${b.lines}` : `−${-b.lines}`}` : ''}`
   return `🤖 Agent${b.type ? ` - ${capType(b.type)}` : ''}`
 }
+
+// The mini app's turn shape: prose paragraphs and tool CHIPS interleaved in transcript order.
+// Distinct from summarizeTurn above, which folds a whole tool run into one sentence for the
+// Telegram card. Two differences that matter and are not stylistic:
+//   - chips group by tool KIND, and a chip keeps EVERY call as its own row. summarizeToolRun sums
+//     repeat edits of one file into a single line; the mini app's detail sheet must show two calls
+//     to the same file as two rows, so that fold is exactly what cannot be reused here.
+//   - a chip carries an added/removed PAIR, not a net delta.
+export type TurnCall = { verb: string; target: string; plus?: number; minus?: number }
+export type TurnPart =
+  | { t: 'p'; text: string }
+  | { t: 'chip'; kind: string; label: string; plus?: number; minus?: number; calls: TurnCall[] }
+
+// tool name → [chip kind, the row's verb]. An unlisted tool is its own verb under the generic kind.
+const CHIP_KIND: Record<string, [string, string]> = {
+  Edit: ['edit', 'Edited'], MultiEdit: ['edit', 'Edited'], Write: ['edit', 'Wrote'], NotebookEdit: ['edit', 'Edited'],
+  Read: ['read', 'Read'],
+  Grep: ['search', 'Searched'], Glob: ['search', 'Searched'],
+  Bash: ['run', 'Ran'],
+}
+function chipKind(tool: string): [string, string] {
+  if (isAgentTool(tool)) return ['agent', 'Delegated']
+  return CHIP_KIND[tool] ?? ['tool', tool]
+}
+
+function chipLabel(kind: string, calls: TurnCall[]): string {
+  const n = calls.length
+  if (kind === 'edit') return n === 1 ? 'Edited a file' : `Edited ${n} files`
+  if (kind === 'read') return n === 1 ? 'Read a file' : `Read ${n} files`
+  if (kind === 'search') return n === 1 ? 'Searched' : `Searched ${n} times`
+  if (kind === 'run') return n === 1 ? 'Ran a command' : `Ran ${n} commands`
+  if (kind === 'agent') return n === 1 ? 'Delegated a task' : `Delegated ${n} tasks`
+  const tool = calls[0].verb
+  return n === 1 ? tool : `${tool} ×${n}`
+}
+
+export function turnParts(feed: FeedItem[]): TurnPart[] {
+  const out: TurnPart[] = []
+  let chip: Extract<TurnPart, { t: 'chip' }> | null = null
+  const flush = () => {
+    if (!chip) return
+    chip.label = chipLabel(chip.kind, chip.calls)
+    if (chip.kind === 'edit') {
+      const plus = chip.calls.reduce((n, c) => n + (c.plus ?? 0), 0)
+      const minus = chip.calls.reduce((n, c) => n + (c.minus ?? 0), 0)
+      // A run with nothing measurable renders no stat at all, rather than "+0 −0".
+      if (plus + minus > 0) { chip.plus = plus; chip.minus = minus }
+    }
+    out.push(chip)
+    chip = null
+  }
+  for (const it of feed) {
+    if (it.kind !== 'tool') {
+      flush()
+      for (const p of splitThoughtParagraphs(it.text)) out.push({ t: 'p', text: p })
+      continue
+    }
+    const [kind, verb] = chipKind(it.tool)
+    const detail = it.detail || ''
+    const target = kind === 'edit' || kind === 'read' ? (detail.split('/').pop() || detail)
+      : kind === 'agent' ? (it.agent?.type?.trim() || detail)
+      : detail
+    const call: TurnCall = { verb, target: target || '—' }
+    if (it.plus !== undefined) call.plus = it.plus
+    if (it.minus !== undefined) call.minus = it.minus
+    if (chip && chip.kind !== kind) flush()
+    if (!chip) chip = { t: 'chip', kind, label: '', calls: [] }
+    chip.calls.push(call)
+  }
+  flush()
+  return out
+}

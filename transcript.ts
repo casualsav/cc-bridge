@@ -561,7 +561,7 @@ export function currentTurnTokens(file: string): { output: number; context: numb
 // calls interleaved in transcript order — for the stream cards. Subagent output skipped.
 // `lines` is the net line delta of a file edit (+grew / −shrank; null for non-edit tools),
 // shown by the thoughts-stream tool summaries.
-export type FeedItem = { kind: 'text'; text: string } | { kind: 'tool'; tool: string; detail: string; lines?: number | null; agent?: { type: string; prompt: string } }
+export type FeedItem = { kind: 'text'; text: string } | { kind: 'tool'; tool: string; detail: string; lines?: number | null; plus?: number; minus?: number; agent?: { type: string; prompt: string } }
 
 // Net line delta of a file-mutating tool call, approximated from the tool INPUT (new vs old
 // string line counts) — no tool_result parsing needed, and close enough for a feed badge.
@@ -575,6 +575,23 @@ function editLineDelta(name: string, input: unknown): number | null {
     for (const e of o!.edits as Array<Record<string, unknown>>) net += lines(e?.new_string) - lines(e?.old_string)
     return net
   }
+  return null
+}
+// Added/removed line counts for a file-mutating call, from the tool INPUT. editLineDelta's single
+// net number cannot express "+24 −0": a 24-line insertion and a 24-line rewrite of 24 lines both
+// net to different single values but say different things. Kept separate from that function because
+// the live card's badge wants the net and the mini app's chip wants the pair.
+function editLinePair(name: string, input: unknown): { plus: number; minus: number } | null {
+  const o = input as Record<string, unknown> | null
+  const lines = (s: unknown) => (typeof s === 'string' && s ? s.split('\n').length : 0)
+  if (name === 'Write') return { plus: lines(o?.content), minus: 0 }
+  if (name === 'Edit') return { plus: lines(o?.new_string), minus: lines(o?.old_string) }
+  if (name === 'MultiEdit' && Array.isArray(o?.edits)) {
+    let plus = 0, minus = 0
+    for (const e of o!.edits as Array<Record<string, unknown>>) { plus += lines(e?.new_string); minus += lines(e?.old_string) }
+    return { plus, minus }
+  }
+  if (name === 'NotebookEdit') return { plus: lines(o?.new_source), minus: 0 }
   return null
 }
 // A subagent (Task/Agent) spawn's identity for the mirror chevron: which agent type + the full prompt
@@ -621,7 +638,7 @@ export function currentTurnFeed(file: string, concluded = false): FeedItem[] {
         if (concluded && i === replyEntry && bi === replyBlock) return   // the reply → its own message, never the card
         if (narration) out.push({ kind: 'text', text: b.text.trim() })
       } else if (b?.type === 'tool_use' && typeof b.name === 'string' && !isReactionToolUse(b)) {
-        out.push({ kind: 'tool', tool: b.name, detail: toolDetail(b.input), lines: editLineDelta(b.name, b.input), ...((b.name === 'Task' || b.name === 'Agent') ? { agent: agentInfo(b.input) } : {}) })
+        out.push({ kind: 'tool', tool: b.name, detail: toolDetail(b.input), lines: editLineDelta(b.name, b.input), ...(editLinePair(b.name, b.input) ?? {}), ...((b.name === 'Task' || b.name === 'Agent') ? { agent: agentInfo(b.input) } : {}) })
       }
     })
   }
