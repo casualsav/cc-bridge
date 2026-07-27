@@ -101,11 +101,7 @@ export type BusPending = {
   founding?: true     // the spawn handler's first-message ask — the only ask a session is guaranteed
                       // to receive before it's ever seen a human turn, so a session ending its own
                       // turn without answering it is a session that finished work nobody will hear
-                      // about. foundingSilencePlan watches only these.
-  nudgedAt?: number   // stamped when a reminder has been typed into the TARGET's pane; cleared again
-                      // if that paste didn't land, so the next turn-end retries it.
-  escalatedAt?: number // stamped once the asker has been told the target ended a turn without
-                      // answering — set once and never cleared, so escalation fires exactly once.
+                      // about.
 }
 
 export type BusState = {
@@ -119,14 +115,13 @@ export type BusState = {
   // can't silently reset every chain to "human-supervised" — the same reason killedAt is persisted.
   depth: Record<string, number>
   // ---- unreported work ----
-  // All three are OPTIONAL in the type: agent-bus.json exists in production and was written by builds
+  // Both are OPTIONAL in the type: agent-bus.json exists in production and was written by builds
   // that had never heard of them, so every read must tolerate the key being absent.
   reportedAt?: Record<string, number>   // sid → when it last sent anything outbound on the bus
   briefedBy?: Record<string, { fromSid: string; fromName: string; at: number }>   // sid → who last briefed it
-  unreported?: Record<string, { turnKey: string; nudgedAt?: number; escalatedAt?: number }>   // sid → per-turn nudge stamps
 }
 
-const empty = (): BusState => ({ seq: 0, hops: 0, pending: {}, seen: {}, depth: {}, reportedAt: {}, briefedBy: {}, unreported: {} })
+const empty = (): BusState => ({ seq: 0, hops: 0, pending: {}, seen: {}, depth: {}, reportedAt: {}, briefedBy: {} })
 let store: BusState = empty()
 let loaded = false
 let persist = true   // disabled by _resetForTest so unit tests never write to the real STATE_DIR
@@ -155,8 +150,6 @@ export function loadBus(): BusState {
         injected: p.injected === true,
         ...(typeof p.expiredAt === 'number' ? { expiredAt: p.expiredAt } : {}),
         ...(p.founding === true ? { founding: true as const } : {}),
-        ...(typeof p.nudgedAt === 'number' ? { nudgedAt: p.nudgedAt } : {}),
-        ...(typeof p.escalatedAt === 'number' ? { escalatedAt: p.escalatedAt } : {}),
         depth: typeof p.depth === 'number' ? p.depth : 1,   // pre-depth entry: assume one hop, the safe reading
       }
     }
@@ -176,16 +169,6 @@ export function loadBus(): BusState {
       if (!b || typeof b.fromSid !== 'string' || typeof b.at !== 'number' || !Number.isFinite(b.at)) continue
       briefedBy[k] = { fromSid: b.fromSid, fromName: typeof b.fromName === 'string' ? b.fromName : '', at: b.at }
     }
-    const unreported: Record<string, { turnKey: string; nudgedAt?: number; escalatedAt?: number }> = {}
-    for (const [k, v] of Object.entries(raw.unreported ?? {})) {
-      const u = v as Partial<{ turnKey: string; nudgedAt: number; escalatedAt: number }>
-      if (!u || typeof u.turnKey !== 'string') continue
-      unreported[k] = {
-        turnKey: u.turnKey,
-        ...(typeof u.nudgedAt === 'number' ? { nudgedAt: u.nudgedAt } : {}),
-        ...(typeof u.escalatedAt === 'number' ? { escalatedAt: u.escalatedAt } : {}),
-      }
-    }
     store = {
       seq: typeof raw.seq === 'number' ? raw.seq : 0,
       hops: typeof raw.hops === 'number' ? raw.hops : 0,
@@ -194,7 +177,6 @@ export function loadBus(): BusState {
       depth,
       reportedAt,
       briefedBy,
-      unreported,
     }
     loaded = true
     return store
@@ -256,99 +238,28 @@ export function queuedFor(toSid: string): BusPending[] {
   return Object.values(store.pending).filter(p => !p.injected && !p.expiredAt && p.toSid === toSid).sort((a, b) => a.id - b.id)
 }
 
-// ---- founding-ask silence ----
-//
-// A spawned session's first message travels as a bus ask (createPending{founding:true}) — the only
-// ask a session is guaranteed to receive before it has ever seen a human turn. Two incidents
-// (2026-07-26) showed the same session routinely ending its turn with that ask still unanswered: the
-// report sat in its own pane and the asker never heard. The daemon runs foundingSilencePlan at the
-// SAME turn-conclusion point the aux relay uses to ship a reply, so "ended a turn" means exactly what
-// it means to the relay loop it's borrowed from.
-
-// The nudge must get a real chance to be acted on (the session may already be typing `tg answer`)
-// before the asker is told anything — 60s is comfortably past a single relay-poll tick (1.5s) but
-// short enough that a genuinely silent session escalates within the same sitting.
-export const FOUNDING_ESCALATE_AFTER_MS = 60_000
-
-export function markFoundingNudged(id: number, now: number): void {
-  ensureLoaded()
-  const p = store.pending[String(id)]
-  if (!p) return
-  p.nudgedAt = now
-  save()
-}
-
-// A nudge whose paste didn't land was never actually seen — clearing the stamp lets the next
-// turn-conclusion retry it instead of silently waiting out the escalate window for nothing.
-export function clearFoundingNudge(id: number): void {
-  ensureLoaded()
-  const p = store.pending[String(id)]
-  if (!p || p.nudgedAt == null) return
-  delete p.nudgedAt
-  save()
-}
-
-// Escalation fires once and is never retried: notifyChats is the fallback if the asker's own pane
-// is gone, so the human always eventually hears even when the agent-to-agent path can't land.
-export function markFoundingEscalated(id: number, now: number): void {
-  ensureLoaded()
-  const p = store.pending[String(id)]
-  if (!p) return
-  p.escalatedAt = now
-  save()
-}
-
-// Which open, DELIVERED founding ask addressed to `toSid` needs a nudge or an escalation — at most
-// one action, so the caller never double-types into a pane on one turn-conclusion. Un-injected asks
-// are still queued (nothing has reached the target to go silent on); expired ones are the TTL sweep's
-// problem, not this one's.
-export function foundingSilencePlan(
-  pendings: BusPending[], toSid: string, now: number,
-): { id: number; action: 'nudge' | 'escalate' } | null {
-  const candidates = pendings
-    .filter(p => p.founding === true && p.toSid === toSid && p.injected && !p.expiredAt)
-    .sort((a, b) => a.id - b.id)
-  for (const p of candidates) {
-    if (p.escalatedAt != null) continue   // already escalated — nothing left to do until answered or reaped
-    if (p.nudgedAt == null) return { id: p.id, action: 'nudge' }
-    if (now - p.nudgedAt >= FOUNDING_ESCALATE_AFTER_MS) return { id: p.id, action: 'escalate' }
-  }
-  return null
-}
-
 // ---- unreported work ----
 //
-// The founding-ask machinery above only watches sessions that have an OPEN ask to answer. The same
-// silence happens without one: a session is briefed (an ask or an ack lands in its pane), it does the
-// work, and it ends the turn having told nobody — its briefer's only way to learn the result is to go
-// and read the pane, which for an event-driven session means never. This half watches the briefing
-// rather than the ask: who last spoke to this session, and has it said anything back since it finished.
+// A session is briefed (an ask or an ack lands in its pane), it does the work, and it ends the turn
+// having told nobody — its briefer's only way to learn the result is to go and read the pane, which
+// for an event-driven session means never. This watches the briefing rather than the ask: who last
+// spoke to this session, and has it said anything back since it finished.
 
-// Same shape and same reasoning as FOUNDING_ESCALATE_AFTER_MS: the nudge must have a real chance to be
-// acted on (the session may already be typing `tg ack`) before the briefer is told anything.
-export const UNREPORTED_ESCALATE_AFTER_MS = 60_000
 // How long a briefing keeps someone on the hook for a report. Past a day the thread is cold — whatever
 // the session is doing now is its own work, not the answer to that brief.
 export const BRIEFER_TTL_MS = 24 * 60 * 60_000
 
 function reportedMap(): Record<string, number> { ensureLoaded(); return (store.reportedAt ??= {}) }
 function briefedMap(): Record<string, { fromSid: string; fromName: string; at: number }> { ensureLoaded(); return (store.briefedBy ??= {}) }
-function unreportedMap(): Record<string, { turnKey: string; nudgedAt?: number; escalatedAt?: number }> { ensureLoaded(); return (store.unreported ??= {}) }
 
 export function getReportedAt(sid: string): number | undefined { return reportedMap()[sid] }
 export function getBriefedBy(sid: string): { fromSid: string; fromName: string; at: number } | undefined { return briefedMap()[sid] }
-export function getUnreported(sid: string): { turnKey: string; nudgedAt?: number; escalatedAt?: number } | undefined { return unreportedMap()[sid] }
 
 /** This session sent something outbound on the bus (ask / ack / answer / post) — it is not silent. */
 export function markReported(sid: string, now = Date.now()): void {
+  // The timestamp, not a flag: it is what makes the marker read "silent SINCE its last report"
+  // rather than "was silent once", and it is why a session that reports clears its own marker.
   reportedMap()[sid] = now
-  // Speaking on the bus ends the silent streak AND re-arms the check. Both halves matter, and each
-  // was a bug without this line. Leaving the stamp meant a session that settled one nudge could
-  // never be nudged again — the plan's "it spoke after being nudged" branch matched forever, and the
-  // feature quietly died for that session. And because a stamp can now only be cleared by the
-  // session actually reporting, an escalated stamp is proof of continuing silence, which is what
-  // lets the plan cap a streak at one nudge and one escalation instead of re-nudging per turn.
-  delete unreportedMap()[sid]
   save()
 }
 
@@ -358,76 +269,25 @@ export function markBriefed(toSid: string, fromSid: string, fromName: string, no
   save()
 }
 
-// Keyed by the turn, so one nudge per concluded turn: a session that keeps working (new turns) gets
-// nudged again for each substantive one, and a session sitting idle on the same turn is left alone.
-export function markUnreportedNudged(sid: string, turnKey: string, now = Date.now()): void {
-  unreportedMap()[sid] = { turnKey, nudgedAt: now }
-  save()
-}
+export type UnreportedMarker = { briefer: string; since: number } | null
 
-// A nudge whose paste didn't land was never seen — same role clearFoundingNudge plays: drop the stamp
-// so the next turn-conclusion retries instead of waiting out the escalate window for nothing.
-export function clearUnreportedNudge(sid: string): void {
-  const m = unreportedMap()
-  if (!m[sid]) return
-  delete m[sid]
-  save()
-}
-
-// One-shot, like the founding escalation: set and never cleared for that turn, so the briefer is told
-// exactly once however many idle turn-conclusions follow.
-export function markUnreportedEscalated(sid: string, now = Date.now()): void {
-  const cur = unreportedMap()[sid]
-  if (!cur) return
-  cur.escalatedAt = now
-  save()
-}
-
-export type UnreportedPlan = { action: 'nudge' | 'escalate'; briefer: { fromSid: string; fromName: string } } | null
-
-// Whether a session that just concluded a turn owes someone a report — at most one action per call, so
-// the caller never types twice into a pane on one conclusion. Pure: every input is passed in.
-export function unreportedWorkPlan(args: {
-  sid: string
-  turnKey: string
+// Whether a session owes someone a report, as a render-time fact: no stamps, no state, nothing
+// written. Pure — every input is passed in — so it costs nothing until a surface asks for it.
+export function unreportedWorkMarker(args: {
   work: { count: number; mutating: boolean; lastAt: number }
   reportedAt: number | undefined
   briefedBy: { fromSid: string; fromName: string; at: number } | undefined
-  unreported: { turnKey: string; nudgedAt?: number; escalatedAt?: number } | undefined
   openAskToSid: boolean
   now: number
-}): UnreportedPlan {
-  const { turnKey, work, briefedBy, unreported, now } = args
-  if (!turnKey) return null                        // no turn to key a nudge on — a fresh/unreadable transcript, not silence
-  if (args.openAskToSid) return null                // an open ask is foundingSilencePlan's case; two nudges for one silence
+}): UnreportedMarker {
+  const { work, briefedBy, now } = args
+  if (args.openAskToSid) return null                // the row already says `· on ask N`; a second marker for the same silence says nothing new
   if (!briefedBy || now - briefedBy.at > BRIEFER_TTL_MS) return null   // nobody is waiting: a human-driven session's human is watching the pane
-  const briefer = { fromSid: briefedBy.fromSid, fromName: briefedBy.fromName }
-
-  // An outstanding nudge is followed up against the NUDGE, never against the turn it was raised for.
-  // The nudge is itself typed into the pane, and an injected block is a real user prompt — so it
-  // starts a turn and moves the anchor. Keyed on the turn, the escalation could therefore never fire:
-  // by the time the window elapsed the session was always on some later turn, the "already nudged"
-  // branch never matched, and the briefer would have been told nothing, ever. The stamp is the fact
-  // that matters here, not which turn produced it.
-  if (unreported?.nudgedAt != null && unreported.escalatedAt == null) {
-    if ((args.reportedAt ?? 0) >= unreported.nudgedAt) return null   // it spoke after being nudged — settled
-    if (now - unreported.nudgedAt >= UNREPORTED_ESCALATE_AFTER_MS) return { action: 'escalate', briefer }
-    return null                                     // nudged moments ago — give it time to act on the nudge
-  }
-  // THE COST CAP, and it is structural: a nudge is typed into the pane, so it costs the target a full
-  // turn at its own context size and model rates. A stamp is cleared ONLY by markReported, so an
-  // escalated stamp means the session has not spoken since — and there is nothing further to learn by
-  // paying for another turn to tell it again. One nudge and one escalation per silent streak, however
-  // many substantive turns follow; the streak ends when the session reports, which re-arms the check.
-  // Comparing turnKey here instead (as this once did) capped nothing: the nudge moves the anchor, so
-  // every later turn compared unequal and bought another nudge.
-  if (unreported?.escalatedAt != null) return null
-
   if (work.count < 3 && !work.mutating) return null // a glance at a file or one grep is not a result anyone is waiting for
   // Against the LAST ACTIVITY, not the turn start, on purpose — that is what catches "answered, then
   // kept working", where a report exists but predates the result it would have to describe.
   if ((args.reportedAt ?? 0) >= work.lastAt) return null   // it reported after finishing
-  return { action: 'nudge', briefer }
+  return { briefer: briefedBy.fromName, since: work.lastAt }
 }
 
 // Mark (don't delete) every not-yet-expired pending whose TTL has passed and return them — the daemon
@@ -665,6 +525,8 @@ const ledgerFile = (room: string): string => join(roomDir(room), 'ledger.jsonl')
 
 export type LedgerEntry = {
   ts: number
+  // `escalate` is history-only: nothing writes it since the injected nudges were removed, but rows
+  // carrying it sit in live ledger.jsonl files, so the type still describes real data.
   kind: 'ask' | 'ack' | 'answer' | 'post' | 'pause' | 'expire' | 'slash' | 'spawn' | 'kill' | 'reopen' | 'keys' | 'escalate'
   from: string
   to?: string
