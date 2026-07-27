@@ -50,10 +50,22 @@ Established by measuring a live and a finished subagent at the same instant:
   nothing.
 - The "Waiting for N background agents" pane text is inline scroll, not a footer: it scrolls away
   while still true and lingers after completion — false in both directions.
-What works: a subagent is live iff the last `type:'assistant'` entry in its own file has
-`stop_reason === 'tool_use'` (it becomes `'end_turn'` on completion) — the same predicate as the
-main thread's `turnInProgress`. Poll content, not mtime (a blocked agent's file never changes),
-with a staleness cutoff so crashed sessions don't count forever.
+What works: a subagent is live unless the last `type:'assistant'` entry in its own file has
+CONCLUDED — `'end_turn'` and the max_tokens/stop_sequence family. Poll content, not mtime (a blocked
+agent's file never changes), with a staleness cutoff so crashed sessions don't count forever.
+
+**Not the same predicate as the main thread's `turnInProgress`, and reading it that way is a bug
+this doc used to recommend.** A subagent file interleaves thinking and text blocks as their own
+assistant entries with a **null** `stop_reason` — 72 of 138 in one sampled agent, 15 of 27 in a
+measured 74s run — so requiring exactly `'tool_use'` answers "finished" every time one of those
+lands last, and the count flaps 1→0→1 through a single continuous run. Main-thread transcripts do
+not do this (zero nulls across ~1,300 assistant entries in three sampled sessions), which is why
+`turnInProgress` survives the same predicate and why testing the two together hides it.
+
+**And the method that missed it matters more than the predicate.** The section above was
+established by measuring a live and a finished subagent *at the same instant* — a single-instant
+comparison cannot see a signal that flaps, and every snapshot it takes looks correct. Poll the SAME
+live agent across a continuous run and watch for changes, not once.
 
 ## "Restart" cannot fix a value read once at boot
 
