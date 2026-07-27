@@ -58,6 +58,12 @@ async function tops(p) {
       tabbox: t(".tabs"), tabglyph: t(".tabs button"),
       drillhead: t("#drill .vhead"), viewerhead: t("#viewer .vhead"),
       sheet: t("#spawn .sheet"), tallsheet: t(".callsheet"),
+      // The chat header's own pill. It is translucent now, and that must be a PAINT change only —
+      // its box has to sit exactly where the offset puts it, at every fullscreen state.
+      pill: t(".dtitle"), pillh: (() => { const e = document.querySelector(".dtitle");
+        return e ? +e.getBoundingClientRect().height.toFixed(2) : null })(),
+      pillbg: (() => { const e = document.querySelector(".dtitle");
+        return e ? getComputedStyle(e).backgroundColor : null })(),
     };
   });
 }
@@ -89,7 +95,7 @@ await run("CONTROL forced-0", async p => {
   await p.evaluate(() => document.documentElement.style.setProperty("--safe-top", "0px"));
 });
 
-const cols = ["var", "tabbox", "tabglyph", "drillhead", "viewerhead", "sheet", "tallsheet"];
+const cols = ["var", "tabbox", "tabglyph", "drillhead", "viewerhead", "sheet", "tallsheet", "pill", "pillh"];
 console.log("state".padEnd(24) + cols.map(c => c.padStart(11)).join(""));
 for (const [l, r] of rows) console.log(l.padEnd(24) + cols.map(c => String(r[c]).padStart(11)).join(""));
 
@@ -104,6 +110,13 @@ chk(fs.var === NOTCH + CHROME + "px", `fullscreen offset is ${NOTCH}+${CHROME}px
 chk(old.var === FLOOR + "px", `a client reporting no insets gets the ${FLOOR}px floor (got ${old.var})`);
 for (const k of ["tabglyph", "drillhead", "viewerhead"])
   chk(fs[k] - base[k] === NOTCH + CHROME, `${k} moved down by exactly the offset (${(fs[k] - base[k]).toFixed(2)}px)`);
+// The pill rides the header, so it moves by the offset and by nothing else — same height, same
+// translucent fill, at every state. A paint change that touched geometry would show up here.
+chk(fs.pill - base.pill === NOTCH + CHROME && old.pill - base.pill === FLOOR,
+  `the header pill moves by exactly the offset (${(fs.pill - base.pill).toFixed(2)}px / ${(old.pill - base.pill).toFixed(2)}px)`);
+chk(rows.every(([, r]) => r.pillh === base.pillh), `the pill's height is identical at every state (${base.pillh}px)`);
+chk(/0\.82\)$/.test(String(base.pillbg)) && rows.every(([, r]) => r.pillbg === base.pillbg),
+  `the pill is translucent, and equally so at every state (${base.pillbg})`);
 chk(fs.tallsheet > NOTCH + CHROME && fs.sheet > NOTCH + CHROME,
   `both sheets start below the chrome unaided (tallest at ${fs.tallsheet}px vs ${NOTCH + CHROME}px of chrome)`);
 await b.close();
