@@ -89,10 +89,24 @@ await run("insets, NOT fullscreen", p => drive(p, INSETS));
 await run("FULLSCREEN 47+46", p => drive(p, [...INSETS, FS_ON]));
 await run("FULLSCREEN old client", p => drive(p, [FS_ON]));           // no insets -> the floor
 await run("fullscreen then exit", p => drive(p, [...INSETS, FS_ON, ["fullscreen_changed", { is_fullscreen: false }]]));
-// CONTROL: fullscreen, offset stomped back to 0. Must land exactly on the baseline row.
+// CONTROL: fullscreen, then every trace of it stomped back to zero. Must land exactly on the
+// baseline row — that is what says this harness can see the offset at all rather than printing the
+// same numbers whatever it drives.
+// It stomps the CLASS as well as the vars, and that is not belt-and-braces: the chat header's
+// fullscreen position is gated on `html.fs` now, so a control that only zeroed --safe-top left the
+// header riding in a chrome band whose insets it had just erased, and failed while the page was
+// behaving correctly. A control has to undo the gate the app actually uses.
 await run("CONTROL forced-0", async p => {
   await drive(p, [...INSETS, FS_ON]);
-  await p.evaluate(() => document.documentElement.style.setProperty("--safe-top", "0px"));
+  // Leave fullscreen the way the CLIENT does, then stomp the vars on top. Reaching in to remove the
+  // class by hand is not equivalent and cannot be: fullscreen also MOVES the pause button into the
+  // capsule, and only the app's own handler moves it back — a hand-stomped control left it stacked
+  // inside a flex column, made the capsule taller, and failed against a page that was correct.
+  await drive(p, [["fullscreen_changed", { is_fullscreen: false }]]);
+  await p.evaluate(() => {
+    const r = document.documentElement;
+    for (const v of ["--safe-top", "--chrome-top", "--chrome-h"]) r.style.setProperty(v, "0px");
+  });
 });
 
 const cols = ["var", "tabbox", "tabglyph", "drillhead", "viewerhead", "sheet", "tallsheet", "pill", "pillh"];
@@ -108,15 +122,29 @@ chk(same(base, notFs), "insets while NOT fullscreen change nothing");
 chk(same(base, exited), "leaving fullscreen returns every surface to the baseline");
 chk(fs.var === NOTCH + CHROME + "px", `fullscreen offset is ${NOTCH}+${CHROME}px (got ${fs.var})`);
 chk(old.var === FLOOR + "px", `a client reporting no insets gets the ${FLOOR}px floor (got ${old.var})`);
-for (const k of ["tabglyph", "drillhead", "viewerhead"])
+// The CHAT header is no longer in this list, and that is a design change rather than a regression:
+// in fullscreen it rides UP INTO the client's chrome band instead of clearing it, which is what buys
+// the transcript that row back. It is checked below against the band's centre, and headerup.mjs
+// covers the rest. The file viewer and the tab bar still clear the chrome in the old way.
+for (const k of ["tabglyph", "viewerhead"])
   chk(fs[k] - base[k] === NOTCH + CHROME, `${k} moved down by exactly the offset (${(fs[k] - base[k]).toFixed(2)}px)`);
-// The pill rides the header, so it moves by the offset and by nothing else — same height, same
-// translucent fill, at every state. A paint change that touched geometry would show up here.
-chk(fs.pill - base.pill === NOTCH + CHROME && old.pill - base.pill === FLOOR,
-  `the header pill moves by exactly the offset (${(fs.pill - base.pill).toFixed(2)}px / ${(old.pill - base.pill).toFixed(2)}px)`);
+// …and where the chat header goes instead: centred in the band the client paints its own buttons on.
+const bandMid = NOTCH + CHROME / 2;
+chk(Math.abs((fs.drillhead + base.pillh / 2) - bandMid) <= 1.5,
+  `the chat header rides INSIDE the chrome band, centred on it (${(fs.drillhead + base.pillh / 2).toFixed(2)} vs ${bandMid})`);
+// A client that reports no insets at all: the floor becomes the whole band, and the header centres in
+// THAT — which lands it exactly where it sits outside fullscreen, so the move reads as zero.
+chk(Math.abs(old.drillhead - (FLOOR - base.pillh) / 2) <= 1.5,
+  `with no insets it centres in the ${FLOOR}px floor instead (top ${old.drillhead.toFixed(2)})`);
+chk(fs.pill === fs.drillhead && old.pill === old.drillhead, "the pill rides the header in every state");
 chk(rows.every(([, r]) => r.pillh === base.pillh), `the pill's height is identical at every state (${base.pillh}px)`);
-chk(/0\.82\)$/.test(String(base.pillbg)) && rows.every(([, r]) => r.pillbg === base.pillbg),
-  `the pill is translucent, and equally so at every state (${base.pillbg})`);
+// Translucent, and the SAME at every state. Deliberately not a literal alpha any more — that read
+// `0.82` and had to be edited the day the chips were matched to Telegram's chrome, which is a check
+// tracking a value rather than an invariant. What matters is that it is see-through and that
+// fullscreen does not change how it paints.
+const alphaOf = c => { const n = String(c).match(/[\d.]+/g); return n && n.length === 4 ? parseFloat(n[3]) : 1; };
+chk(alphaOf(base.pillbg) < 1 && rows.every(([, r]) => r.pillbg === base.pillbg),
+  `the pill is translucent, and equally so at every state (alpha ${alphaOf(base.pillbg)})`);
 chk(fs.tallsheet > NOTCH + CHROME && fs.sheet > NOTCH + CHROME,
   `both sheets start below the chrome unaided (tallest at ${fs.tallsheet}px vs ${NOTCH + CHROME}px of chrome)`);
 await b.close();

@@ -59,6 +59,22 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   scrolls THROUGH the top strip and behind the frosted capsule —
                                   #   hit-tested over a band, since a single-point probe lands in the
                                   #   margin between two messages. Control: 13 checks fail pre-change
+    node headerup.mjs [page]      # FULLSCREEN ONLY: the header rides up into Telegram's own chrome
+                                  #   row, the pause folds inside the capsule, and the transcript
+                                  #   reclaims the row they vacate (~48px). Driven through the REAL
+                                  #   SDK's receiveEvent, and it measures normal mode FIRST so every
+                                  #   fullscreen claim is a delta from an untouched baseline. What it
+                                  #   cannot check: whether the client swaps its ✕ Close for a ← when
+                                  #   BackButton.show() is called, and where its buttons sit
+                                  #   horizontally — the API exposes no x-extents. Live device only
+    node chipalpha.mjs [page]     # how transparent the header chips are, and how present they stay at
+                                  #   rest — the two halves of that trade, both measured. Solves the
+                                  #   alpha exactly from a chip over two SYNTHESISED backdrops, and
+                                  #   validates itself against a declared value first. Sample windows
+                                  #   must clear the blur radius (the frost samples a neighbourhood,
+                                  #   so near the seam the backdrop is not the one you think) and the
+                                  #   chip's rounded ends (antialiasing drags the mean toward the
+                                  #   ground) — each of those cost a wrong reading here
     node scrim.mjs [page]         # the working row's scrim: INVISIBLE with nothing behind it, doing
                                   #   its job with a message behind it. Two-sided by construction —
                                   #   each state shot with and without `.work::before` — so neither an

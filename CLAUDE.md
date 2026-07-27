@@ -367,6 +367,39 @@ passes on the in-flow layout too — hit-test with `elementsFromPoint` (`header.
 is the third member of the `--chip-fill`/`--chip-lift` family: without it the words behind the
 capsule read *through* the name, and a bubble's colour and motion is the point, its text is not.
 
+**The chips are a SCRIM, not a raised surface, and both halves of that were measured off Telegram's
+own chrome.** Its ✕ Close pill solves to **α 0.36 over a fill ~0.8 × the page** — a chip over two
+backdrops gives its alpha exactly, `(C₁−C₂) = (1−a)(B₁−B₂)`. Ours was `--sec` at 0.82: lighter than
+the page, so it read as a slab beside their glass. `--chip-fill` is now **44% of `--bg` at 36%** —
+a *proportion*, never Telegram's literal `rgb(15,21,28)`, because 44% of the ground is darker than
+the ground on any theme while landing at a light grey on a light one where a dark glyph still reads.
+Matching only the alpha and tinting the fill *toward* `--text` was tried first and is the wrong
+direction — it made the mismatch worse. `--chip-glass` is a **filter list** (`blur(20px)
+saturate(0.35)`), renamed from `--chip-blur` when the saturate arrived: the blur has to do the work
+the opacity used to at 63% pass-through, and the saturate takes the colour *cast* out of a passing
+bubble (chroma swing 23 → 8) without a `brightness()` clamp, which would cost the resting colour.
+**No filter makes a transparent chip ignore a bright thing passing under it** — Telegram's own chroma
+swing is 48, twice ours; theirs merely sits where the scrim has already dissolved the content.
+
+**Do NOT push the ceiling scrim's ramp below the header.** It is transparent at the name pill's
+*bottom* edge. Ending the ramp above the pill instead makes the chips hold their colour perfectly
+(a chip whose backdrop is flat `--bg` cannot be moved) — and it paints a bar across the band the
+transcript was just given, and glass over flat ground is indistinguishable from paint. Tried,
+rejected by the owner, and `bleed.mjs` is written to the reverted shape so restoring it fails.
+
+**In FULLSCREEN the header rides UP into Telegram's chrome band** (`html.fs`, set by `syncSafeTop`
+from `isFullscreen` — never from the insets). That reclaims ~48px of transcript *and* fixes the
+colour complaint, by landing our chips where Telegram's sit. `--chrome-top` / `--chrome-h` expose the
+two inset halves separately because the header now centres *inside* the second rather than clearing
+their sum. Three things to know: the pause is a **DOM move** into `.dtitle` (the two layouts want it
+in genuinely different boxes) which is why a control that fakes "not fullscreen" by zeroing a var
+fails — only the app's handler moves it back; `.tcol` is `display: contents` outside fullscreen so
+normal mode is byte-identical; and the **horizontal insets are the one guess in the file** — the API
+exposes insets as top/bottom/left/right only, never the chrome buttons' x-extents, so `--chrome-l/r`
+came off a screenshot, which shows the client's *ink* and not its touch targets. That is what the
+pill's 10% margin absorbs. `BackButton` replaces our chip in fullscreen only (outside it, hiding ours
+leaves no way out) — **whether the client swaps its ✕ Close for a ← is unverified on a device.**
+
 **The title centres on the dot+name GROUP, not on the name.** The dot is part of the centred unit.
 A 9px inert `.nmrow::after` mirror used to sit on the trailing side so the *name text* centred and
 the dot hung left of the axis — that agreed the name with the cwd below it and disagreed the group

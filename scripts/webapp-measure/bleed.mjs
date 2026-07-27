@@ -159,8 +159,8 @@ const through = await p.evaluate(() => {
     besideDock: hit(20, dock.top + 4),                         // the dock's top edge, above the capsule
   };
 });
-check(through.topStrip, "the transcript scrolls through the top strip (Telegram's ✕ / kebab band)");
-check(through.besideHead, "…and beside the header chips");
+check(through.topStrip, "the transcript SCROLLS through the top strip — it is dissolved there by the scrim, never clipped short of it");
+check(through.besideHead, "…and through the header's own band (layout, not paint — see the scrim check below)");
 check(through.behindWrap, "…and behind the input capsule");
 check(through.besideDock, "…and through the dock's margin, which paints nothing");
 
@@ -170,10 +170,15 @@ check(alpha(m.wrapBg) < 1, `the input capsule is translucent (${m.wrapBg})`);
 check(/blur/.test(m.wrapBlur) && m.wrapBlur === m.headBlur, `…and carries the SAME blur as the name pill (${m.wrapBlur} vs ${m.headBlur})`);
 check(alpha(m.dockBg) === 0 || m.dockBg === "rgba(0, 0, 0, 0)", `the dock itself paints nothing (${m.dockBg})`);
 
-// 6. The ceiling scrim: present, and ending at the name pill's bottom edge.
+// 6. The ceiling scrim. It dissolves the transcript on its way up so a line of text never slides
+//    under Telegram's own buttons, and it is transparent exactly at the name pill's BOTTOM edge.
+//    It was briefly extended BELOW the header so the ramp finished before the chips — which does make
+//    them hold their colour perfectly, and was reverted: it paints a bar across the band the
+//    transcript had just been given, and a chip over flat ground stops reading as glass at all. The
+//    check is written to the reverted shape on purpose, so restoring the "fix" fails here.
 check(!!m.scrim && /gradient/.test(m.scrim), `the top scrim is a gradient (${String(m.scrim).slice(0, 40)}…)`);
 check(!!m.head && near(parseFloat(m.scrimH), m.head.bottom - m.drill.top, 3),
-  `it ends at the name pill's bottom edge (${m.scrimH} vs ${m.head ? (m.head.bottom - m.drill.top).toFixed(1) : "-"}px)`);
+  `it ends at the name pill's bottom edge, not below it (${m.scrimH} vs ${m.head ? (m.head.bottom - m.drill.top).toFixed(1) : "-"}px)`);
 
 await p.screenshot({ path: join(OUT, "bleed.png") });
 await b.close();

@@ -88,12 +88,23 @@
        fallback — the @supports below is what makes it translucent, so an engine without
        color-mix() renders exactly today's chip instead of nothing. */
     --chip-fill: var(--sec);
-    /* …and one frost, for the same reason. It is what makes 82% legible: the row floats over the
-       transcript now, and unblurred the words behind the capsule read THROUGH the name — the colour
-       and motion of a passing bubble is the point, its text is not. 12px over 6 by eye against a
-       bright user bubble, where 6 still let whole words resolve. An engine without backdrop-filter
-       simply gets the translucent chip, which is the state this shipped in an hour ago. */
-    --chip-blur: blur(12px);
+    /* …and one glass, for the same reason. A FILTER LIST, not just a blur, and the name changed with
+       it. The blur keeps the chip legible: the row floats over the transcript, and unblurred the words
+       behind the capsule read THROUGH the name — the colour and motion of a passing bubble is the
+       point, its text is not. It went 12 → 20 with the fill's drop to 36%: at 19% pass-through 12px
+       was enough to dissolve a glyph, at 63% it is not. 28 reads as a milky pane rather than glass.
+       The saturate() is the answer to a complaint that a passing message moves the chip's COLOUR too
+       much, and it is the honest half of that answer. Measured: a bright bubble behind the capsule
+       moves it 99 rgb units, of which 23 is chroma and 53 is luminance. Telegram's own chrome is not
+       steadier — solved off the owner's screenshot, its chroma swing is 48, TWICE ours — it simply
+       sits higher, where this file's own ceiling scrim has already dissolved whatever was behind it.
+       So there is no filter that makes a transparent chip ignore a bright thing passing under it;
+       that is what transparent means. What saturate(0.35) does is take the colour CAST out of the
+       swing (chroma 23 → 8) while leaving the motion, so the chip greys what passes rather than
+       wearing it. Deliberately NOT brightness(): clamping the luminance too costs the resting colour
+       the owner confirmed already matches Telegram's, which is the one thing not to spend.
+       An engine without backdrop-filter simply gets the translucent chip. */
+    --chip-glass: blur(20px) saturate(0.35);
     /* The paperclip glyph. Its own constant rather than a step off --sp-*, for the reason --fold-h
        gives above: it is a geometric size answering to the reference, not a spacing choice. */
     --clip-d: 24px;
@@ -149,7 +160,25 @@
     --safe-top: 0px;
   }
   @supports (color: color-mix(in srgb, red 50%, blue)) {
-    :root { --chip-fill: color-mix(in srgb, var(--sec) 82%, transparent);
+    /* 36%, which is TELEGRAM'S OWN number: its ✕ Close pill was solved off a screenshot where both its
+     chrome and our header crossed the same blue bubble — a chip over two backdrops gives its alpha
+     exactly, (C₁−C₂) = (1−a)(B₁−B₂) — and it came out 0.36 over a fill of rgb(15,21,28). Ours was
+     0.82, which is why the two read as smoked glass and painted slab side by side.
+     The FILL is a SCRIM — darker than the page — and that is the half that took two goes. Their chip
+     renders at (27,35,45) against a page of (33,45,59): about 10 units DARKER. Ours was --sec, which
+     is lighter than --bg, so it read as a raised slab beside their smoked glass however well the
+     alpha matched; tinting it toward --text (the first attempt) made that worse, not better, which is
+     what the owner saw immediately.
+     It is expressed as a PROPORTION of --bg rather than as Telegram's literal rgb(15,21,28), and that
+     is what keeps it theme-safe in both directions: 44% of the ground is darker than the ground on any
+     theme, but on a LIGHT one it lands at a light grey (0.44 × white ≈ 112, rendering ≈ 203) where a
+     dark --text glyph still reads. A literal near-black would be right on this theme and unusable on
+     that one. Solved from the measurement: rendered = a·F + (1−a)·bg, so matching their ~0.8 × bg at
+     a = 0.36 gives F ≈ 0.44 × bg.
+     scripts/webapp-measure/chipalpha.mjs measures both halves of that trade, and validates itself
+     against a declared alpha before believing either. */
+  :root { --chip-tint: color-mix(in srgb, var(--bg) 44%, #000);
+    --chip-fill: color-mix(in srgb, var(--chip-tint) 36%, transparent);
       --hint-raised: color-mix(in srgb, var(--hint) 80%, var(--text));
       --add: color-mix(in srgb, #3fb950 80%, var(--text)); --del: color-mix(in srgb, #f85149 80%, var(--text)); }
   }
@@ -224,7 +253,7 @@
      and the button now meets 44 on its own — which is why --hbtn-d's floor is that number. */
   .chatbtn { width: var(--hbtn-w); height: var(--hbtn-d); border: none; border-radius: calc(var(--hbtn-d) / 2);
     background: var(--chip-fill); box-shadow: var(--chip-lift); color: var(--text); cursor: pointer; flex: none;
-    backdrop-filter: var(--chip-blur); -webkit-backdrop-filter: var(--chip-blur);
+    backdrop-filter: var(--chip-glass); -webkit-backdrop-filter: var(--chip-glass);
     /* The PADDING is what fixes the glyph's origin — an integer, so it lands on whole pixels at any
        button size. Centring it by halving flex free space instead is what put the 19-in-34 button's
        glyph half a pixel down and right: 15px of free space halves to 7.5, and Blink snaps the SVG's
@@ -263,8 +292,12 @@
     margin-inline: calc(10% - 0.2 * var(--hbtn-w) - 1.2px);
     min-height: var(--hbtn-d); padding: var(--h-pad) var(--sp-3); border-radius: calc(var(--hbtn-d) / 2);
     background: var(--chip-fill); box-shadow: var(--chip-lift);
-    backdrop-filter: var(--chip-blur); -webkit-backdrop-filter: var(--chip-blur);
+    backdrop-filter: var(--chip-glass); -webkit-backdrop-filter: var(--chip-glass);
     line-height: var(--lh-snug); text-align: var(--title-align, left); }
+  /* A wrapper that is INVISIBLE to layout until fullscreen folds the pause button in beside it.
+     `display: contents` is exactly this: the box disappears and its children go on being the flex
+     items of .dtitle, so normal mode renders byte-for-byte what it did before the wrapper existed. */
+  .dtitle .tcol { display: contents; }
   .dtitle .nmrow { display: flex; align-items: center; gap: 7px; min-width: 0; justify-content: var(--title-align, flex-start); }
   /* The dot is PART of the centred unit, not a marginal glyph hanging off it — the owner's call, and
      the reversal of a deliberate decision, so it is worth saying what was traded. A 9px inert mirror
@@ -368,11 +401,61 @@
   /* The ceiling scrim. Full bleed means the transcript scrolls up into the strip where Telegram
      paints its ✕ Close and its kebab, and a line of message text sliding under those buttons is the
      same defect the collapsed-message fold exists to prevent — text that stops rather than text that
-     goes. So it dissolves on the way up: transparent exactly at the name pill's bottom edge, full
-     ground by the top. Same eased ramp as the fold, for the same reason (a linear one has an onset
-     the eye reads as an edge), and the same fallback shape for an engine without color-mix.
-     z-index 1 puts it over the feed and under BOTH floating surfaces, which are z-index 2 — the
-     chips must stay crisp on top of it, not be faded by it. */
+     goes. So it dissolves on the way up. Same eased ramp as the fold, for the same reason (a linear
+     one has an onset the eye reads as an edge), and the same fallback shape for an engine without
+     color-mix. z-index 1 puts it over the feed and under BOTH floating surfaces, which are z-index 2
+     — the chips must stay crisp on top of it, not be faded by it.
+     It is transparent exactly at the name pill's BOTTOM edge and reaches full ground by the top —
+     never lower. Pushing the ramp below the header was tried, because it makes the chips hold their
+     colour perfectly (a chip whose backdrop is already --bg cannot be moved by anything). It also
+     paints a bar across the band the transcript had just been given, and takes the chips' glass with
+     it, since glass over flat ground is indistinguishable from paint. Full bleed and a steady chip
+     pull against each other here, and the transcript wins: the chip's own filter is where the colour
+     problem gets solved (see --chip-glass), not by removing what is behind it. */
+  /* ── FULLSCREEN ONLY: the header rides UP into Telegram's own chrome row. ───────────────────────
+     In fullscreen the client paints its ✕/back pill and its chevron+kebab OVER the page, on a band
+     that is otherwise ours to scroll through and nobody's to stand in. Putting the title there buys
+     the transcript the whole 46px row the header used to hold, and it lands the chips where the
+     ceiling scrim is already at full strength — which is the reason Telegram's own buttons look
+     steadier than ours did while a bubble passed. The colour complaint and the space are one fix.
+     NOTHING here applies outside fullscreen: there is no such band then (the client's header is
+     above the webview, not over it), so `.fs` gates the whole block and normal mode is untouched.
+     The horizontal insets are the one guess in this file, and they are a guess because the API does
+     not expose them: safeAreaInset/contentSafeAreaInset are top/bottom/left/right only, never the
+     chrome buttons' x-extents. Measured off the owner's screenshot at a 360px viewport — ✕ Close
+     ends at 72, the chevron cluster starts at 290 — and both are LOCALISED: "Close" in German or
+     Russian is wider and would eat the left one. The native BackButton is what makes that safe, since
+     an icon-only ← does not grow with the language; --chrome-l drops to the narrower value when it
+     is up (see BACK_NATIVE), and the fallback keeps the wide clearance. */
+  html.fs #drill .vhead { top: calc(var(--chrome-top) + (var(--chrome-h) - var(--hbtn-d)) / 2);
+    left: var(--chrome-l, 72px); right: var(--chrome-r, 70px); margin: 0; }
+  /* The pause folds INSIDE the capsule, on its right, because the band is only ~218px wide and three
+     separate containers cannot live in it: 44 + 44 + gaps leaves 118px for a name and a path. One
+     container spends nothing on gaps and lets the title column keep everything the button does not. */
+  /* 10% narrower than the band it is given, 5% off each side. The measured clearance (--chrome-l/r,
+     72 and 70 on a 360px viewport) came off a screenshot, and a screenshot cannot see the client's
+     touch targets — only its ink — so the pill was landing hard against the ✕ and the kebab. This is
+     the margin for that error, and it is the right place for it: widening --chrome-l/r would move the
+     back chip too, on the one path where ours is still showing. A PERCENTAGE, so it tracks the band
+     rather than a viewport it was measured on. */
+  html.fs #drill .dtitle { flex-direction: row; align-items: center; gap: var(--sp-2); margin-inline: 5%;
+    padding-right: var(--h-pad); }
+  html.fs #drill .dtitle .tcol { flex: 1; min-width: 0; display: flex; flex-direction: column;
+    justify-content: center; text-align: var(--title-align, center); }
+  /* Inside the capsule it is not a chip any more — a chip inside a chip reads as a nested surface, and
+     the capsule already carries the fill and the frost for both. */
+  html.fs #drill #dstop { background: transparent; box-shadow: none; backdrop-filter: none;
+    -webkit-backdrop-filter: none; width: auto; height: auto; padding: 0; flex: none; }
+  html.fs #drill #dstop svg { width: 20px; height: 20px; }
+  /* Our own back chip yields to the client's ← when that is up; when it is not, it stays exactly
+     where it has always been. */
+  html.fs.native-back #drill #dback { display: none; }
+  /* …and the SPACE that buys, which is the point of the whole block: with the header inside the
+     client's own band, the feed no longer reserves a row below it. Top padding falls from
+     --safe-top + 36 + 24 to --safe-top + 12, and the scrim's ramp ends at the band's floor instead of
+     46px lower. That is the ~46px of transcript the owner asked to reclaim. */
+  html.fs #dfeed { padding-top: calc(var(--safe-top) + var(--sp-3)); }
+  html.fs #drill::before { height: var(--safe-top); }
   #drill::before { content: ""; position: absolute; left: 0; right: 0; top: 0; z-index: 1; pointer-events: none;
     height: calc(var(--safe-top) + 10px + var(--hbtn-d));
     background: linear-gradient(to top, transparent, var(--bg));
@@ -562,7 +645,7 @@
      `inset: -2px 0` bleeds it past the row's own box so the feather has somewhere to happen. */
   .work::before { content: ""; position: absolute; inset: -2px 0; z-index: -1; pointer-events: none;
     background: color-mix(in srgb, var(--bg) 78%, transparent);
-    backdrop-filter: var(--chip-blur); -webkit-backdrop-filter: var(--chip-blur);
+    backdrop-filter: var(--chip-glass); -webkit-backdrop-filter: var(--chip-glass);
     -webkit-mask-image: linear-gradient(to bottom, transparent, #000 8px, #000 calc(100% - 6px), transparent);
     mask-image: linear-gradient(to bottom, transparent, #000 8px, #000 calc(100% - 6px), transparent); }
   .work .g { width: 1.1em; flex: none; text-align: center; }
@@ -610,12 +693,12 @@
      the pill pushed the capsule to 508px inside a 390px strip and carried the mic off-screen. It
      does not scroll the PAGE, because a fixed-position subtree contributes no scrollable overflow —
      so this fails silently, with the send button simply unreachable. */
-  /* The capsule is the SAME painted surface as the header's chips — --chip-fill over --chip-blur —
+  /* The capsule is the SAME painted surface as the header's chips — --chip-fill over --chip-glass —
      by the owner's ask, and it is what lets the dock have no fill of its own: the transcript passes
      behind the field, frosted, instead of behind a grey bar. The inset highlight stays; it is the
      rim that reads as a raised surface, and translucency doesn't remove the need for it. */
   .inputwrap { flex: 1; min-width: 0; display: flex; align-items: flex-end; background: var(--chip-fill);
-    backdrop-filter: var(--chip-blur); -webkit-backdrop-filter: var(--chip-blur);
+    backdrop-filter: var(--chip-glass); -webkit-backdrop-filter: var(--chip-glass);
     border-radius: calc(var(--pill-h-1) / 2); padding: var(--pill-ring); min-height: var(--pill-h-1); box-shadow: inset 0 1px 0 rgba(255,255,255,.06); }
   /* The model/effort pill, styled after the reference's blue "Open" chip: text only, no icon.
      Height is the reference's proportion against the one control both frames share — a 56.1px chip
@@ -889,7 +972,7 @@
 <div id="drill">
   <div class="vhead">
     <button id="dback" class="chatbtn back" title="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg></button>
-    <div class="dtitle"><span class="nmrow"><span class="dot" id="ddot"></span><span class="name" id="dname"></span></span><span class="sub" id="dsub"></span></div>
+    <div class="dtitle"><div class="tcol"><span class="nmrow"><span class="dot" id="ddot"></span><span class="name" id="dname"></span></span><span class="sub" id="dsub"></span></div></div>
     <!-- A filled red octagon: the drawn equivalent of 🛑, which is what it has to read as instantly.
          Drawn rather than the emoji so it matches the paperclip and mic, holds one colour instead of
          rendering differently per platform, and keeps this bar free of the clip-art it was cleared of.
@@ -1031,11 +1114,26 @@ const CHROME_FLOOR = 56;  // what the ✕ pill needs when a client reports nothi
 function syncSafeTop() {
   // Not `isFullscreen === undefined -> assume normal`: on any client without fullscreen at all
   // there is no overlay to clear, and that is the same 0 as fullscreen-off.
-  const px = tg && tg.isFullscreen
-    ? Math.max(((tg.safeAreaInset && tg.safeAreaInset.top) || 0)
-             + ((tg.contentSafeAreaInset && tg.contentSafeAreaInset.top) || 0), CHROME_FLOOR)
-    : 0;
+  const full = !!(tg && tg.isFullscreen);
+  const device = (tg && tg.safeAreaInset && tg.safeAreaInset.top) || 0;
+  const chrome = (tg && tg.contentSafeAreaInset && tg.contentSafeAreaInset.top) || 0;
+  const px = full ? Math.max(device + chrome, CHROME_FLOOR) : 0;
   document.documentElement.style.setProperty("--safe-top", px + "px");
+  // The two halves SEPARATELY as well, because the header now rides INSIDE the second one rather
+  // than below their sum. --chrome-h falls back to the floor minus whatever the device took, so a
+  // client that reports only a total still yields a band to centre in rather than a zero-height one.
+  document.documentElement.style.setProperty("--chrome-top", (full ? device : 0) + "px");
+  document.documentElement.style.setProperty("--chrome-h", (full ? Math.max(chrome, px - device) : 0) + "px");
+  // The layout gate. A class, not a media query: `isFullscreen` is the only thing that says the
+  // client is painting its chrome OVER us, and the insets alone cannot tell that apart from a notch.
+  document.documentElement.classList.toggle("fs", full);
+  // The pause button belongs to a different BOX in each layout — inside the capsule up in the chrome
+  // band, a chip of its own on the row below — so it is moved rather than restyled into place.
+  // getElementById directly: syncSafeTop runs before `$` is declared and would hit its dead zone.
+  const head = document.querySelector("#drill .vhead");
+  const cap = head && head.querySelector(".dtitle");
+  const stop = document.getElementById("dstop");
+  if (head && cap && stop) (full ? cap : head).appendChild(stop);
 }
 if (tg) {
   syncSafeTop();
@@ -1462,13 +1560,33 @@ function openDrill(sid, name) {
   setDial(null);
   $("dfeed").innerHTML = '<div class="notice">Loading…</div>';
   $("drill").classList.add("show");
+  // Only in fullscreen: outside it the client's header is its own bar above the webview, our back
+  // chip is the only one on screen, and hiding it would leave no way out of the session.
+  if (NATIVE_BACK && tg.isFullscreen) {
+    try { tg.BackButton.show(); document.documentElement.classList.add("native-back"); } catch {}
+  }
   growComposer();   // first moment the field has a measurable height; sizes it before it is seen
   renderDrill();
   clearInterval(drillTimer);
   drillTimer = setInterval(() => { if (!document.hidden) renderDrill(); }, 3000);
 }
-function closeDrill() { $("drill").classList.remove("show"); clearInterval(drillTimer); stopWorkGlyph(); drillSid = null; renderSessions(); }
+function closeDrill() {
+  $("drill").classList.remove("show"); clearInterval(drillTimer); stopWorkGlyph(); drillSid = null;
+  if (NATIVE_BACK) { try { tg.BackButton.hide(); } catch {} }
+  document.documentElement.classList.remove("native-back");
+  renderSessions();
+}
 $("dback").onclick = closeDrill;
+// The client's OWN back arrow, which in fullscreen takes the place of its ✕ Close pill. Worth having
+// for two reasons: it is the platform's gesture rather than a lookalike, and an icon-only ← does not
+// grow with the language the way a localised "Close" does — which is what makes the header's left
+// clearance safe enough to ride up into that row at all.
+// Feature-detected rather than version-checked: the SDK warns and no-ops below Bot API 6.1, and a
+// try/catch around the first real call is the only thing that distinguishes "present" from "works".
+const NATIVE_BACK = (() => {
+  if (!tg || !tg.BackButton || typeof tg.BackButton.onClick !== "function") return false;
+  try { tg.BackButton.onClick(closeDrill); return true; } catch { return false; }
+})();
 // Minimal markdown for assistant bubbles (escape-first, so it can never inject): fenced code,
 // inline code, bold, italic. Anything fancier stays plain text.
 function md(s) {
