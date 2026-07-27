@@ -29,7 +29,7 @@ import { normalizeCommandOutput } from './ansi.ts'
 import { planSlash } from './slash-policy.ts'
 import { preserveGlobalEffort, reconcileEffortScope } from './effort-scope.ts'
 import { planDrift, driftStateAfter, type DriftState } from './drift-guard.ts'
-import { decideModel, upgradeNeedsConfirm, heldSpawnModel, type ModelPolicy, type HoldOutcome } from './spawn-model-policy.ts'
+import { decideModel, upgradeNeedsConfirm, heldSpawnModel, holdTapData, parseHoldTap, type ModelPolicy, type HoldOutcome } from './spawn-model-policy.ts'
 import { renderSessionsView } from './sessions-view.ts'
 import { detectCurrentMode, onNormalPrompt, inputBoxContent, isModelSwitchConfirm, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType } from './prompt.ts'
 import { modelSwitchEvidence, resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, liveSubagents, currentTurnFeed, currentTurnActivity, concludedTurnWork, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
@@ -5050,7 +5050,11 @@ async function handleCall(
                 ctxPct: (capNow ? parseStatusline(capNow)?.ctxPct : null) ?? null, at: Date.now(), live: true,
               })
             }
-            text = `!/model ${relay.clamped} needs a human — @${toName} keeps its current model${relay.ask ? '; asked the owner, and it switches in place if they approve' : ' (asking is snoozed right now)'}`
+            // A banned alias gets the same in-band honesty here as on the spawn path: no card was sent,
+            // none is coming, and a retry gets the same answer — so don't say "needs a human".
+            text = relay.banned
+              ? `!/model ${relay.clamped} isn't available to sessions — @${toName} keeps its current model (standing policy; nobody was asked and a retry gets the same answer)`
+              : `!/model ${relay.clamped} needs a human — @${toName} keeps its current model${relay.ask ? '; asked the owner, and it switches in place if they approve' : ' (asking is snoozed right now)'}`
             break
           }
           // awaitReadback:false for the same reason the mini app passes it: the confirm + readback
@@ -5171,7 +5175,7 @@ async function handleCall(
         // no topic tab, no pane, no bus row.
         if (modelChoice.clamped && modelChoice.ask) { text = await holdSpawnForApproval(spec, modelChoice.clamped, modelChoice.model); break }
         const spawned = await launchSpawn(spec, modelChoice.model,
-          modelChoice.clamped ? clampedClause(modelChoice.clamped, modelChoice.model, false) : '')
+          modelChoice.clamped ? clampedClause(modelChoice.clamped, modelChoice.model, false, modelChoice.banned) : '')
         if (!spawned.ok) { write({ t: 'result', id, ok: false, text: spawned.text }); return }
         text = spawned.text
         break
@@ -6047,7 +6051,12 @@ async function askHumanForModel(r: ModelRequest): Promise<void> {
 // The clause the CALLING AGENT gets. It is told the truth in the same breath as its success, so it
 // neither plans around a model it doesn't have nor retries in a loop (a retry is just another
 // session on the default).
-function clampedClause(clamped: string, ran: string | null, asked: boolean): string {
+function clampedClause(clamped: string, ran: string | null, asked: boolean, banned = false): string {
+  // A BANNED alias must not borrow the gate's wording. "Needs a human" invites the caller to wait for a
+  // tap that will never come, and to retry; the ban was decided once and no card exists to answer it.
+  // The caller is told anyway — in-band, in the same breath as its success — because the one thing
+  // worse than not getting the model you asked for is not being told which one you got.
+  if (banned) return ` (--model ${clamped} isn't available to sessions — clamped to ${ran ?? 'the CLI default'} by standing policy, so nobody was asked and a retry gets the same answer)`
   return ` (your --model ${clamped} needs a human${asked ? ' — asked the owner; if they approve, the session switches in place' : ', and asking is snoozed right now'}; running ${ran ?? 'the CLI default'})`
 }
 
@@ -6247,7 +6256,7 @@ async function holdSpawnForApproval(spec: SpawnSpec, alias: string, fallback: st
     process.stderr.write(`daemon: spawn-hold: [card suppressed → log] ${text.replace(/<[^>]+>/g, '').replace(/\n+/g, ' ')}\n`)
   } else {
     const buttons: Button[][] = [
-      [{ text: `✅ Start on ${alias}`, data: `smh:u:${h.id}` }, { text: `Start on ${fallback ?? 'the default'}`, data: `smh:k:${h.id}` }],
+      [{ text: `✅ Start on ${alias}`, data: holdTapData('approved', h.id) }, { text: `Start on ${fallback ?? 'the default'}`, data: holdTapData('denied', h.id) }],
       [{ text: '🔕 Don\'t ask for 1h', data: 'smq:q' }],
     ]
     for (const { chat, thread } of to) {
@@ -10570,12 +10579,12 @@ bot.on('callback_query:data', async ctx => {
   // below exists because that card moves a session that has been working, and this one doesn't.
   if (data.startsWith('smh:')) {
     if (!(await cbAuth(ctx))) return
-    const [, verb, holdId] = data.split(':')
-    const h = holdId ? spawnHolds.get(holdId) : undefined
+    const tap = parseHoldTap(data)
+    const h = tap ? spawnHolds.get(tap.id) : undefined
     if (!h) { await ctx.answerCallbackQuery({ text: 'That spawn is no longer waiting.' }).catch(() => {}); await ctx.editMessageReplyMarkup().catch(() => {}); return }
-    const approved = verb === 'u'
+    const approved = tap!.outcome === 'approved'
     await ctx.answerCallbackQuery({ text: approved ? `Starting on ${h.alias}…` : `Starting on ${h.fallback ?? 'the default'}…` }).catch(() => {})
-    const r = await resolveSpawnHold(h, approved ? 'approved' : 'denied')
+    const r = await resolveSpawnHold(h, tap!.outcome)
     await ctx.editMessageText(r.ok
       ? `${approved ? '✅' : '🧠'} <b>@${escapeHtml(h.spec.topicName)}</b> started on <b>${escapeHtml((approved ? h.alias : h.fallback) ?? 'the CLI default')}</b>. <i>(@${escapeHtml(nameForEndpoint(h.spec.fromSid, busEndpoints()))} asked for ${escapeHtml(h.alias)}.)</i>`
       : `⚠️ <b>@${escapeHtml(h.spec.topicName)}</b> couldn't start: ${escapeHtml(r.text)}`,
