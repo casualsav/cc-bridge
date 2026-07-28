@@ -1,9 +1,7 @@
 # cc-bridge
 
-A Claude Code ↔ Telegram bridge. Drive a Claude Code session from Telegram — send messages and
-files, get replies with native formatting, approve permission prompts with a tap, switch modes,
-watch a live activity feed, and interrupt a task. It ships built-in access control (pairing,
-allowlists, group policy).
+A Claude Code ↔ Telegram bridge: drive a session from Telegram, with built-in access control
+(pairing, allowlists, group policy).
 
 Its **off-MCP mode** runs your *work* sessions plugin-less (no per-request MCP context tax):
 inbound is typed into the session's tmux pane, replies are read back from the transcript, and a
@@ -11,36 +9,30 @@ inbound is typed into the session's tmux pane, replies are read back from the tr
 plugin-less pane — no manual pinning.
 
 ## 👉 If the user wants to install / set up / configure this
-Follow **[`off-mcp/INSTALL.md`](off-mcp/INSTALL.md)** step by step — it is written for *you*
-(an agent) to execute. In short:
-1. **Interview the user first** (bot token from @BotFather, their Telegram numeric ID, voice
-   transcription, render-Markdown) and write `~/.claude/channels/telegram/.env`
-   + `access.json` — before anything restarts.
-2. Add the marketplace + enable the plugin + add the `SessionStart` daemon hook in
-   `~/.claude/settings.json`, and append `off-mcp/CLAUDE.md` to `~/.claude/CLAUDE.md`.
-3. Have the user restart Claude Code once → the daemon comes up fully configured.
-4. Launch a bridge session with `cc-bridge` (auto-added shell function, `scripts/setup-alias.sh`;
-   `claude-tg` is a kept back-compat alias for it): `cc-bridge [--pin slack|discord] [slot] [account]` sets
-   the per-channel tmux pane markers `@telegram`/`@slack`/`@discord` (valued by instance slot; a
-   `--pin slack|discord` flag additionally stamps that channel's pin option), optionally launches
-   under `CLAUDE_CONFIG_DIR="$HOME/.claude-<account>"`, then runs
-   `claude --allow-dangerously-skip-permissions` — bypass is switchable on demand. `cc-bridge 2` routes to
-   a second bridge (multi-instance: `off-mcp/INSTALL.md`) — the daemon finds the pane automatically.
 
-Don't guess config values — ask. The only non-automatable bits are getting the token from the
-human and the one Claude Code restart; do everything else yourself.
+Follow **[`off-mcp/INSTALL.md`](off-mcp/INSTALL.md)** step by step — it is written for *you* (an
+agent) to execute and is the authority on the steps. Only two things it cannot do for you:
+**interview the user first** (bot token from @BotFather, their Telegram numeric ID, voice
+transcription, render-Markdown) *before* anything restarts, and the one Claude Code restart at the
+end. Don't guess config values — ask.
 
-This repo is now a 3-channel marketplace (Telegram/Slack/Discord — see `.claude-plugin/marketplace.json`,
-`plugins/claude-slack/`, `plugins/claude-discord/`), sharing a `ChannelAdapter` contract in `channel.ts`;
-see `docs/multi-channel.md` for how the channels plug in.
+Launching a bridge session: `cc-bridge [--pin slack|discord] [slot] [account]` (shell function from
+`scripts/setup-alias.sh`; `claude-tg` is a kept back-compat alias) stamps the per-channel tmux pane
+markers `@telegram`/`@slack`/`@discord` (valued by instance slot; `--pin` additionally stamps that
+channel's pin option), optionally launches under `CLAUDE_CONFIG_DIR="$HOME/.claude-<account>"`, then
+runs `claude --allow-dangerously-skip-permissions` — bypass is switchable on demand. `cc-bridge 2`
+routes to a second bridge (multi-instance: `off-mcp/INSTALL.md`); the daemon finds the pane itself.
+
+This repo is a 3-channel marketplace (Telegram/Slack/Discord — `.claude-plugin/marketplace.json`,
+`plugins/claude-slack/`, `plugins/claude-discord/`), sharing a `ChannelAdapter` contract in
+`channel.ts`; `docs/multi-channel.md` covers how the channels plug in.
 
 ## What belongs in this file
 
 A paragraph earns its place here only if a future session would break something without it. State
 the invariant and the trap it guards; one line on the incident or ruling where one exists. No
 narration, no correction history, nothing the code, a test, or a measure script already records —
-a measured value lives in the script that asserts it. Mini-app findings go to `webapp/CLAUDE.md`,
-not here.
+a measured value lives in the script that asserts it.
 
 **Mini-app invariants live in [`webapp/CLAUDE.md`](webapp/CLAUDE.md)** — it loads automatically
 only when you access `webapp/`, so read it yourself before touching `webapp/index.html`,
@@ -51,12 +43,12 @@ only when you access `webapp/`, so read it yourself before touching `webapp/inde
 
 - **Name the reading you took before you build on it.** An ambiguous ask gets the interpretation
   you would defend, stated in one line; ask only when the wrong pick is expensive to undo. Guessing
-  silently is the failure, and it surfaces as a finished build of the wrong thing.
+  silently is the failure — it surfaces as a finished build of the wrong thing.
 - **Write the minimum that solves the stated problem.** No speculative abstraction, no
   configurability nobody asked for, no handling for a state that cannot occur.
-- **Every changed line traces to the request.** No drive-by fixes to code you happened to read on
-  the way past — flag it instead. The shared-checkout section below governs whose files you may
-  touch; this governs which lines.
+- **Every changed line traces to the request.** No drive-by fixes to code you read on the way past
+  — flag it instead. The shared-checkout section governs whose files you may touch; this governs
+  which lines.
 - **Turn the ask into a check that can fail before you start, and watch it pass before reporting
   done.** "Make sure it works" is not one; neither is a test that would pass against the broken
   version.
@@ -66,22 +58,20 @@ only when you access `webapp/`, so read it yourself before touching `webapp/inde
   + tmux pane driver + off-MCP outbound, per channel (the bulk of the code).
 - `topics.ts` (pure session<->topic store) + `topic-runtime.ts` (forum-topics live half: pane
   session identity, topic lifecycle, per-topic typing, outbound routing).
-- `shim.ts` — the MCP server; used only in plugin/MCP mode (off-MCP bypasses it).
-- `transcript.ts` — off-MCP outbound: read replies + activity from Claude Code's transcript JSONL.
-- `tgctl.ts` — the `tg` actions CLI; `ensure-daemon.ts` — standalone daemon relauncher.
-- `prompt.ts` — detect interactive prompts (select / permission) from a pane capture.
-- `common.ts` (shared types/paths), `markdown.ts` (Markdown → Telegram HTML).
+- `transcript.ts` — off-MCP outbound: replies + activity read from the transcript JSONL. `shim.ts` —
+  the MCP server, live only in plugin/MCP mode (off-MCP bypasses it). Plus `tgctl.ts` (the `tg`
+  CLI), `prompt.ts`, `ensure-daemon.ts`, `common.ts`, `markdown.ts`.
 - `prefs.json` (beside `access.json` under the channel dir) — `/settings` preferences
   (`spawnModel`, `spawnEffort`, `autoUpdate`); `access.json` is security-only and `loadAccess()`
   merges both. A null in `access.json` proves nothing about spawn defaults — sessions keep reading
   the wrong file and reporting the rule unset while the daemon runs it.
 - `topics.json` keeps session rows under its nested `topics` key, and top-level values can be
   legitimately `null` — iterate `topics`, never the file root.
-- `off-mcp/INSTALL.md` (setup) + `off-mcp/CLAUDE.md` (the convention every plugin-less session reads).
-- `off-mcp/CHAT-DM.md` + `off-mcp/chat-account/` (templates) — optional claude.ai-style chat agent
-  living in the bot's DM (auto-provisioned once a group is bound).
-- `ACCESS.md` (access control), `TESTING.md`, `docs/fleet-verification.md` (how to verify bus/fleet
-  changes live — spawn-a-throwaway recipe, the traps, and what is NOT yet verified).
+- `off-mcp/INSTALL.md` (setup) + `off-mcp/CLAUDE.md` (the convention every plugin-less session
+  reads); `off-mcp/CHAT-DM.md` + `off-mcp/chat-account/` (templates) — optional claude.ai-style chat
+  agent living in the bot's DM (auto-provisioned once a group is bound).
+- `ACCESS.md`, `TESTING.md`, `docs/fleet-verification.md` (how to verify bus/fleet changes live —
+  spawn-a-throwaway recipe, the traps, and what is NOT yet verified).
 
 ## Pane delivery
 
@@ -113,12 +103,12 @@ greps are `paste-buffer`, `sendKeysLiteral(`, and `sendKeys(` with a content str
 | `sendKeysLiteral` | 7 | 1 — `injectText` |
 | `sendKeys` w/ content | 4 | 0 |
 
-Every **message** delivery is covered. The ten uncovered sites divide into two groups: **control
-paths, recorded not commissioned** (`injectSlash`, `applySessionModel`, `reapplyEffort`,
+Every **message** delivery is covered. The ten uncovered sites split in two: **control paths,
+recorded not commissioned** (`injectSlash`, `applySessionModel`, `reapplyEffort`,
 `exitSessionPane`, `runReadout`, the TUI recovery pair `recoverToPrompt`/`saveEditorAndQuit`) —
-they nest through `withPaneInjection` in ways that need untangling first; do not read the lock as
-closing this class. And **one open finding:** the "✏️ Type something" prompt-answer relay types the
-user's free-text answer under `withPaneInjection` (the boolean, not a lock), shielded only by
+they nest through `withPaneInjection` in ways that need untangling first, so do not read the lock
+as closing this class. And **one open finding:** the "✏️ Type something" prompt-answer relay types
+the user's free-text answer under `withPaneInjection` (the boolean, not a lock), shielded only by
 `paneAcceptsText`/`onNormalPrompt` — a read taken outside any lock, so a TOCTOU, not a guarantee.
 
 Proof lives in `scripts/pane-delivery-race.ts` — a **real tmux pane** (a mocked `exec` proves only
@@ -132,12 +122,11 @@ the CLI's slash palette fuzzy-matches it — probed live: `/opus` offered `/fabl
 one palette predicate from switching a contextful session to Fable. The stub replies with guidance
 and touches no pane.
 
-**Repo perms (group-shared checkouts).** If this tree is shared by more than one account, keep it
-group-writable — **setgid, group-writable dirs (2775)**, **umask 002**, and **`git config
-core.sharedRepository=group`** — so normal file creation lands group-writable (664). The ONE thing
-that breaks this: **never `chmod` tracked files to owner-only/read-only modes** — collaborators
-can't read them and `bun run deploy` aborts on the unreadable ones. If perms drift:
-**`sudo bash scripts/fix-perms.sh`** (idempotent; group perms grant the access).
+**Repo perms (group-shared checkouts).** Keep a shared tree group-writable — **setgid,
+group-writable dirs (2775)**, **umask 002**, **`git config core.sharedRepository=group`** — so new
+files land 664. The ONE thing that breaks this: **never `chmod` tracked files to
+owner-only/read-only modes** — collaborators can't read them and `bun run deploy` aborts on the
+unreadable ones. If perms drift: **`sudo bash scripts/fix-perms.sh`** (idempotent).
 
 ## Deploy loop
 
@@ -157,18 +146,16 @@ output-cap kill surfaces as a failure with empty stderr (`sh()` names the killin
 green `bun test` is not type-soundness — fixtures satisfy runtime while omitting a newly required
 field — so run the build gate yourself before reaching for deploy.
 
-By hand (only if the script can't run): copy the changed `.ts` to the cache `<ver>` dir + the
-marketplace dir → `bun build daemon.ts --target=bun` → restart the daemon
-(`kill "$(cat ~/.claude/channels/telegram/daemon.pid)"`; the watchdog respawns it) → test, bump the
-version, commit.
+Restarting the daemon by hand is a kill — `kill "$(cat ~/.claude/channels/telegram/daemon.pid)"`;
+the watchdog respawns it.
 
 **Releasing (so end-user installs get the change) — DON'T SKIP:** the plugin cache is **keyed by
 the version string**. Ship code without bumping `version` in **both** `.claude-plugin/plugin.json`
 and `.claude-plugin/marketplace.json` and every existing install keeps its cached old build forever
 (Claude Code sees "version already installed" and never re-copies). `bun run deploy` does the bump;
 shipping by hand, do it yourself. Same-version caches need a force-refresh (`off-mcp/INSTALL.md`
-§0.6). **One repo** — `origin` → `casualsav/cc-bridge` is both source of truth and the marketplace,
-so a plain `git push` ships and releases; there is no second repo.
+§0.6). **One repo** — `origin` → `casualsav/cc-bridge` is both source of truth and marketplace, so
+a plain `git push` ships and releases.
 
 **The cache needs deps, not just `.ts`.** A cache copy without `node_modules`/`bun.lock` floats
 grammy to a build that crashes (`EACCES … resolving 'debug'`). `ensure-daemon.ts` self-heals and
@@ -272,11 +259,6 @@ the thing most likely to be "fixed" back:
   re-anchor an OWNER's turn to "bus" and silence the reply he is waiting for. The transcript shape
   is one guard, the anchor list the second — keep both. (Accepted cost: an idle aside classes
   human, so a reply it draws pings — the cheap direction.)
-- **A `case` in tgctl's bus switch is dead code without an entry in the `BUS` set above it** —
-  `tg btw` shipped that way once; `tgctl.test.ts` pins the pair. Asides appear in later digests and
-  `tg history` as 💬.
-- The `/btw` in `checkConcludedTurnObligations`'s comment is a **different, unbuilt feature** (a
-  turn-conclusion aside to the OWNER). `tg btw` is not that caller; the note stays live.
 
 **THE BUS DIGEST CARRIES ONLY A SESSION'S OWN LANE** — the events this endpoint sent or was sent,
 since its own watermark; never the room's. Two guards: no watermark → no digest at all (a fresh
@@ -290,15 +272,15 @@ repeating a neighbour's content outward as if it were its own.
 now" — that races the answer that just closed it and cannot classify a replayed reply at all.
 **Anything unrecognised is HUMAN**: a missed ping is a message he never learns about, an extra one
 is noise he can see — same default for Codex rollouts (no envelope to read) and for any failure in
-`paneTurnIsBusAnchored`. A `tg send` inherits the class of the turn it came out of (his ruling, so
-a message and its file ping together or not at all). Worker topic tabs go quiet — chosen, not
+`paneTurnIsBusAnchored`. A `tg send` inherits the class of the turn it came out of (his ruling: a
+message and its file ping together or not at all). Worker topic tabs go quiet — chosen, not
 inherited: a worker's topic is a mirror for reading, not a channel he is addressed in. The Bot API
 never echoes `disable_notification` back, so the flag cannot be read off a sent message — evidence
 stops at the payload we build (unit-asserted) and the live classification.
 
 **Write a handoff doc before your context is cleared or you retire — `$(tg shared)/handoff-<topic>.md`
 — and carry ONLY live items in it.** Finish an item you took from a handoff and you DELETE that
-entry from the doc: no "done ✓" annotation, no history section. Completed work is already
-externalized in the repo, the commits and the report; every line still in the doc is context the
-next reader pays for, and a done-marked one costs that forever while informing nothing. A handoff
-shrinks toward empty — that is the shape of it working, not a record being lost.
+entry: no "done ✓" annotation, no history section. Completed work is already externalized in the
+repo, the commits and the report; every line still in the doc is context the next reader pays for,
+and a done-marked one costs that forever while informing nothing. A handoff shrinks toward empty —
+that is the shape of it working, not a record being lost.
