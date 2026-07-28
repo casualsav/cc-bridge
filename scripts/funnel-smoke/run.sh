@@ -286,6 +286,23 @@ if want 19; then  # 200 on / but NOT 401 on /api — something else answering on
   drive $sc "$FEED_FUNNEL"; contain_check $sc
 fi
 
+if want 20; then  # THE WEDGE, staged at the authority: 1.1.1.1 empty, 8.8.8.8 serving, and ts.net's
+                  # own nameserver answering NXDOMAIN for A while it serves AAAA. Expect the wizard to
+                  # NAME it as wedged and print the rename remedy with its URL-change warning —
+                  # instead of the "give it a few minutes" it used to print at a permanent condition.
+                  # Scenario 17 is this one's control: same divergence, healthy authority, no verdict.
+  sc=20; setup_common $sc; add_tailscale $sc; add_ss tailscaled; add_verify wedge pair
+  export TS_BACKEND_INITIAL=Running TS_CERT_MODE=ok TS_FUNNEL_INITIAL=none TS_FUNNEL_BG_MODE=ok TS_PORT=8787
+  drive $sc "$FEED_FUNNEL"; contain_check $sc
+fi
+
+if want 21; then  # two published ingress IPs, only the FIRST one healthy. A probe pinned to ips[0]
+                  # calls this a clean success; expect the second IP named as failing.
+  sc=21; setup_common $sc; add_tailscale $sc; add_ss tailscaled; add_verify both partial
+  export TS_BACKEND_INITIAL=Running TS_CERT_MODE=ok TS_FUNNEL_INITIAL=none TS_FUNNEL_BG_MODE=ok TS_PORT=8787
+  drive $sc "$FEED_FUNNEL"; contain_check $sc
+fi
+
 echo "=== done ==="
 cat "$SCRATCH/exitcodes.log"
 echo "--- breaches (empty is good) ---"; cat "$SCRATCH/BREACHES.log"

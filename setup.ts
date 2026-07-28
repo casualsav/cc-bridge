@@ -598,6 +598,10 @@ async function setupWebappHosting(cfg: Config): Promise<void> {
     if (held.length) {
       console.log(C.warn(`  ⚠ another service already holds this machine's port 443:`))
       console.log(C.dim(`    ${held[0]!.trim().slice(0, 150)}`))
+      // Named, not parsed: a dual-stack wildcard is the shape that actually bit, and `ss` prints
+      // `v6only:0` differently across versions — the reader can see it, a regex would only be brittle.
+      console.log(C.dim('    A dual-stack wildcard (`*:443` with `v6only:0`) is the shape that bit the reporting'))
+      console.log(C.dim('    box: it takes both address families at once, leaving tailscaled nothing to bind.'))
       console.log(C.warn('    Depending on how tailscaled is running, the Funnel may then report success and bind'))
       console.log(C.warn('    nothing at all. off-mcp/INSTALL.md → "Files Mini App reachability" has the fix.'))
       if (!(await askYN('  Try the Funnel anyway?', false))) { fallbackToCloudflared(cfg, 'port 443 is held by another service'); return }
@@ -666,6 +670,22 @@ async function setupWebappHosting(cfg: Config): Promise<void> {
     + '    Still unreachable after ~15 min? off-mcp/INSTALL.md → "Files Mini App reachability" has the DNS diagnosis steps.'
   const digA = (resolver: string) => run('dig', ['+short', `@${resolver}`, host], { timeout: 15_000 }).out
     .split('\n').map(s => s.trim()).filter(s => /^\d+(\.\d+){3}$/.test(s))
+  // `dig +short` cannot tell "no such name" from "no record of this type" — both come back empty —
+  // and that distinction IS the wedge signature, so read the header status instead of the answer.
+  const digStatus = (resolver: string, type: string) =>
+    run('dig', ['+noall', '+comments', type, host, `@${resolver}`], { timeout: 15_000 }).out
+      .match(/status:\s*([A-Z]+)/)?.[1] ?? ''
+  const digAAAA = (resolver: string) => run('dig', ['+short', 'AAAA', host, `@${resolver}`], { timeout: 15_000 }).out
+    .split('\n').map(s => s.trim()).filter(s => s.includes(':'))
+  // The ts.net authority, DISCOVERED rather than hardcoded — the address has changed before, and a
+  // stale constant here would silently turn the verdict below into a coin toss.
+  const authority = (): string => {
+    const ns = run('dig', ['+short', 'NS', 'ts.net'], { timeout: 15_000 }).out
+      .split('\n').map(s => s.trim()).filter(Boolean)[0]
+    if (!ns) return ''
+    return run('dig', ['+short', ns], { timeout: 15_000 }).out
+      .split('\n').map(s => s.trim()).filter(s => /^\d+(\.\d+){3}$/.test(s))[0] ?? ''
+  }
   if (!which('dig')) console.log(C.dim(phoneNote))
   else {
     // TWO resolvers, because one is a single point of failure in both directions: on the reporting
@@ -675,23 +695,67 @@ async function setupWebappHosting(cfg: Config): Promise<void> {
     // nowhere and this wizard has no elapsed time to tell the two apart.
     const ips = digA('1.1.1.1')
     const alt = ips.length ? [] : digA('8.8.8.8')
-    if (!ips.length && alt.length) {
-      console.log(C.warn('  • resolvers disagree about this name (8.8.8.8 has it, 1.1.1.1 does not).'))
-      console.log(C.dim('    Usually propagation. If it persists past ~15 min, off-mcp/INSTALL.md → "Files Mini App'))
-      console.log(C.dim('    reachability" has the wedged-record diagnosis.'))
-    }
     const use = ips.length ? ips : alt
+    // A THIRD resolver — the authority — but only once the first came back empty, so the happy path
+    // still costs exactly one lookup. It is the only resolver whose answer is a verdict rather than a
+    // cache, and it is what separates the two failures that look identical from 1.1.1.1 alone.
+    let wedged = false
+    if (!ips.length) {
+      const auth = authority()
+      // The wedge signature, and note it is decidable AT t=0 — which bare "the resolvers disagree" is
+      // not, and why this wizard still refuses to call that one. NXDOMAIN for A beside an ANSWERED
+      // AAAA at the authority is protocol-incorrect: a name holding any record must answer NODATA,
+      // not "no such name". A name that is merely still propagating never presents this shape, so
+      // unlike divergence it needs no elapsed time to judge.
+      if (auth && digStatus(auth, 'A') === 'NXDOMAIN' && digAAAA(auth).length) {
+        wedged = true
+        console.log(C.err('  ✗ this name is WEDGED at Tailscale\'s authoritative DNS — it is not propagating.'))
+        console.log(C.dim(`    ${auth} answers NXDOMAIN for A while serving AAAA. Nothing on this box caused`))
+        console.log(C.dim('    that and no amount of waiting clears it — a reported case was still broken at 28'))
+        console.log(C.dim('    minutes against a 300s negative TTL, and a funnel off/on did NOT fix it (tried,'))
+        console.log(C.dim('    measured, and it wipes your whole serve config as a bonus).'))
+        console.log(`\n  ${C.b('Rename this node — the one remedy a field report saw cure it, instantly:')}`)
+        console.log(`  ${C.b('sudo tailscale set --hostname <newname>')}`)
+        console.log(C.warn('  ⚠ a rename CHANGES this URL. Do it BEFORE registering anything in BotFather, or you'))
+        console.log(C.warn('    will have to re-register the new one. Then re-run `bun setup.ts`.'))
+        console.log(C.dim('    A fresh name showing the same thing is a Tailscale-side bug worth reporting to them.'))
+        console.log(C.dim('    Full diagnosis: off-mcp/INSTALL.md → "The name still doesn\'t resolve".'))
+      } else if (alt.length) {
+        console.log(C.warn('  • resolvers disagree about this name (8.8.8.8 has it, 1.1.1.1 does not).'))
+        console.log(C.dim('    Usually propagation. If it persists past ~15 min, off-mcp/INSTALL.md → "Files Mini App'))
+        console.log(C.dim('    reachability" has the wedged-record diagnosis.'))
+      }
+    }
     if (!use.length) console.log(C.dim(phoneNote))
     else if (which('curl')) {
       // The success signature is a PAIR: 200 on `/` (the app shell is public) and 401 on `/api/*`
       // (the API behind it is not). Either alone is ambiguous — a 200 can come from whatever else is
       // answering on that ingress path, which is precisely the failure this pair would have caught.
-      const c = run('curl', ['-sI', '--resolve', `${host}:443:${use[0]}`, `https://${host}/`, '--max-time', '15'], { timeout: 30_000 })
-      const api = run('curl', ['-s', '-o', '/dev/null', '-w', '%{http_code}', '--resolve', `${host}:443:${use[0]}`, `https://${host}/api/sessions`, '--max-time', '15'], { timeout: 30_000 })
-      const shell200 = /HTTP\/[12].* 200/.test(c.out)
-      if (shell200 && api.out.trim() === '401') console.log(C.ok('  ✓ the public URL answers: 200 on / and 401 on /api — the door is open and the API is locked'))
-      else if (shell200) console.log(C.warn(`  • / answered 200 but /api/sessions returned ${api.out.trim() || 'nothing'} — expected 401. Something else may be answering on this address.`))
-      else console.log(C.warn('  • the public URL didn\'t answer 200 yet — DNS and certs can take a few minutes to propagate; test from your phone shortly.'))
+      //
+      // …against EVERY published ingress IP, not just the first. Tailscale publishes several and they
+      // are separate paths: one of them answering proves only that one of them answers, and the
+      // clients that land on the others are exactly the ones you will never hear from.
+      const results = use.map(ip => {
+        const c = run('curl', ['-sI', '--resolve', `${host}:443:${ip}`, `https://${host}/`, '--max-time', '15'], { timeout: 30_000 })
+        const api = run('curl', ['-s', '-o', '/dev/null', '-w', '%{http_code}', '--resolve', `${host}:443:${ip}`, `https://${host}/api/sessions`, '--max-time', '15'], { timeout: 30_000 })
+        return { ip, shell200: /HTTP\/[12].* 200/.test(c.out), api: api.out.trim() }
+      })
+      const ok = results.filter(r => r.shell200 && r.api === '401')
+      if (ok.length === results.length) {
+        const where = results.length > 1 ? `all ${results.length} ingress IPs` : 'its ingress IP'
+        console.log(C.ok(`  ✓ the public URL answers on ${where}: 200 on / and 401 on /api — the door is open and the API is locked`))
+        // …but a ✓ underneath the wedge verdict would read as "never mind, it works". It does not: we
+        // reached it only via the addresses the ONE resolver that still answers handed us, which is
+        // the same reason a browser on DNS-over-HTTPS cost the reporting box an evening. The transport
+        // is fine; the name is what is broken, and for every client whose resolver asks the authority.
+        if (wedged) console.log(C.warn('    ⚠ but only via the resolver that still answers — clients asking the authority get nothing. The wedge above is still the blocker.'))
+      } else {
+        for (const r of results.filter(r => !(r.shell200 && r.api === '401'))) {
+          if (r.shell200) console.log(C.warn(`  • ${r.ip}: / answered 200 but /api/sessions returned ${r.api || 'nothing'} — expected 401. Something else may be answering on this address.`))
+          else console.log(C.warn(`  • ${r.ip}: didn't answer 200 yet — DNS and certs can take a few minutes to propagate; test from your phone shortly.`))
+        }
+        if (ok.length) console.log(C.dim(`    (${ok.length} of ${results.length} ingress IPs did answer correctly — but a URL that works from only some of them is still broken for whoever lands on the rest.)`))
+      }
     }
   }
   printBotFatherStep(cfg, url)

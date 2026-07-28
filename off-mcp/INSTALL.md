@@ -397,10 +397,14 @@ rather than assuming. Follow the path the user chose:
      while `8.8.8.8` served it fine — one public resolver agreeing with you proves nothing about the
      rest of the internet.
 
-     An **empty `dig` result right after setup is usually DNS lag, not failure** — public DNS for a
-     new funnel name can take up to ~10 minutes. But bound that patience: **a wedged record looks
-     exactly like lag and never clears**, so if the name still doesn't resolve after ~15 minutes, or
-     if the two resolvers disagree, go to *"The name still doesn't resolve"* below. `tailscale funnel
+     **An empty `dig` is not self-explanatory — it is either of two things, and they need opposite
+     responses.** *Lag* hits every resolver roughly equally and **shrinks** as you re-poll; public DNS
+     for a new funnel name can take up to ~10 minutes, and waiting is the correct response. A *wedge*
+     **diverges per-resolver** — one answering while another, the authority included, returns
+     NXDOMAIN — and **persists**: the reported case was still broken at 28 minutes against a 300 s
+     negative TTL. Waiting never fixes that one. So poll more than once and watch which way it moves:
+     shrinking and even = lag; diverging and stuck past ~15 minutes = go to *"The name still doesn't
+     resolve"* below. `tailscale funnel
      status` is **not** the tiebreaker: it is config truth, not serving truth, and proves neither a
      bound socket nor a published DNS record. No `dig` on the box? Have the user open the URL from
      their phone **on cellular** — the point is a resolver you did not configure, not just a second
@@ -416,10 +420,13 @@ rather than assuming. Follow the path the user chose:
 
   ---
 
-  **The name still doesn't resolve (after ~15 minutes).** Everything here is diagnosis: none of it is
-  automated, and the wizard deliberately makes no wedge verdict of its own — at t=0 a fresh name
-  legitimately resolves nowhere, so telling lag from a wedge needs elapsed time that a one-shot run
-  does not have. You do.
+  **The name still doesn't resolve (after ~15 minutes).** No *remedy* here is automated — the wizard
+  prints them and runs none, because a rename changes the URL and a `funnel off` wipes the serve
+  config. What the wizard does call, when `1.1.1.1` comes back empty, is the **one signature that
+  needs no elapsed time**: NXDOMAIN for A beside an answered AAAA *at the authority* is
+  protocol-incorrect, and a merely-propagating name never shows it. It deliberately does **not** call
+  the weaker "the resolvers disagree", which at t=0 is just as likely to be a half-propagated name —
+  that one it reports as a smell and leaves to you. Below is the full poll it cannot do in one shot.
 
   1. **Poll three resolvers, including the authority.** Do not hardcode the authoritative address;
      discover it, because it can change:
