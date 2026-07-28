@@ -5,14 +5,27 @@
 //
 // Everything here is pure over its inputs — the /proc scan is the one impure function and it is
 // separated out, so the state machine unit-tests without tmux, without a bus and without a box.
-import { readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 
 // ---- the process table ----
 
 // One process. `argv` is read LAZILY: building the tree needs every ppid, but only the handful of
 // pids inside a pane's own subtree ever need their command line, and a full cmdline read over ~500
 // pids on every 4s poll is the whole cost of this feature.
-export type ProcRow = { pid: number; ppid: number; argv: () => string }
+// `startedAt` is epoch ms, or 0 when it could not be read — it comes out of the SAME /proc/<pid>/stat
+// string the ppid does, so dating every process on the box costs no extra read.
+export type ProcRow = { pid: number; ppid: number; startedAt: number; argv: () => string }
+
+// /proc/<pid>/stat's `starttime` (field 22) counts clock ticks since boot, so a wall-clock date needs
+// the boot instant. Read once per table: it cannot change while the box is up.
+function bootTimeMs(): number {
+  try { return Number(/^btime (\d+)/m.exec(readFileSync('/proc/stat', 'utf8'))?.[1]) * 1000 || 0 }
+  catch { return 0 }
+}
+
+// USER_HZ, which is 100 on every Linux this runs on and is not readable from /proc. A wrong value
+// here only skews process ages, and the only comparison that uses them is minutes-to-hours wide.
+const CLK_TCK = 100
 
 // Every process on the box, parent links resolved. /proc's top level lists thread-group LEADERS
 // only, which is why claude's ~11 worker threads need no filtering here — they are not in it.
@@ -21,20 +34,24 @@ export type ProcRow = { pid: number; ppid: number; argv: () => string }
 export function readProcTable(): ProcRow[] {
   let names: string[]
   try { names = readdirSync('/proc') } catch { return [] }
+  const boot = bootTimeMs()
   const rows: ProcRow[] = []
   for (const name of names) {
     if (!/^\d+$/.test(name)) continue
     const pid = Number(name)
     let ppid = 0
+    let startedAt = 0
     try {
       // `pid (comm) state ppid …` — comm can contain spaces and parens, so split on the LAST ')'.
       // Same read as remoteControlAncestorPids in daemon.ts, for the same reason.
       const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
       const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
       ppid = Number(fields[1])
+      // fields[0] is `state`, i.e. stat field 3 — so stat field 22 (starttime) is fields[19].
+      if (boot) startedAt = Math.round(boot + Number(fields[19]) / CLK_TCK * 1000) || 0
     } catch { continue }   // exited between readdir and read
     let cached: string | null = null
-    rows.push({ pid, ppid, argv: () => {
+    rows.push({ pid, ppid, startedAt, argv: () => {
       if (cached == null) {
         try { cached = readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ').trim() } catch { cached = '' }
       }
@@ -64,6 +81,25 @@ const ENGINE = /(^|\/)(claude|codex)(\s|$)/
 
 const LABEL_MAX = 60
 
+// The tag, and the ruling behind it (owner, 2026-07-28): a child that outlived a `/clear` still counts
+// as a wait — it is a real process, and hiding it is how a wedged loop span for 81 minutes under a card
+// that read idle — but it says so. Suppressing it instead would have grayed out the deliberate case:
+// start a long job, `/clear` to free the context you no longer need, keep waiting on it.
+const PRE_CLEAR = ' (pre-clear)'
+
+// The boundary the tag is measured against — the second impure function here, and the only other one.
+// A `/clear` mints a NEW transcript JSONL, so the file's birth IS the current conversation's start
+// (measured 2026-07-28 on pane %216: transcript born 20:10:16, while the shell the mini app was calling
+// a wait had started at 19:37:50, under the conversation before it).
+//
+// `undefined` on any failure — a filesystem without birth times, a file already rotated away — and an
+// undefined boundary tags nothing. Same shape of failure as readProcTable's empty table: the addition
+// can only ever remove information from a label, never invent a state.
+export function conversationStart(file: string | null | undefined): number | undefined {
+  if (!file) return undefined
+  try { return statSync(file).birthtimeMs || undefined } catch { return undefined }
+}
+
 function childMap(procs: ProcRow[]): Map<number, ProcRow[]> {
   const kids = new Map<number, ProcRow[]>()
   for (const p of procs) {
@@ -92,25 +128,35 @@ function engineProc(procs: ProcRow[], panePid: number): number {
 // What the session is running that outlived its turn, as a label — or null when it is running
 // nothing. The label is the DEEPEST descendant's command ("gh run watch"), not the snapshot shell's
 // own argv, which wraps the real command in a page of quoting and says nothing to a reader.
-export function childWaitLabel(procs: ProcRow[], panePid: number | undefined): string | null {
+export function childWaitLabel(procs: ProcRow[], panePid: number | undefined, since?: number): string | null {
   // A pane we could not get a pid for is not a pane with no children: pid 0 is the kernel's parent
   // slot, so asking for ITS children hands back init and kthreadd. Refuse the question instead.
   if (!procs.length || !panePid) return null
   const kids = childMap(procs)
-  const shells = (kids.get(engineProc(procs, panePid)) ?? []).filter(p => SNAPSHOT_SHELL.test(p.argv()))
-  if (!shells.length) return null
+  const found = (kids.get(engineProc(procs, panePid)) ?? []).filter(p => SNAPSHOT_SHELL.test(p.argv()))
+  if (!found.length) return null
+  // A shell older than this conversation is debris a `/clear` left running. An undated one (startedAt
+  // 0) is treated as current: the tag is a claim about age, and we only make it when we measured one.
+  const preClear = (p: ProcRow) => !!since && p.startedAt > 0 && p.startedAt < since
+  // Debris never takes the headline from a job this conversation actually started — one row, one label,
+  // and the live job is the truer one. It is still the label once it is the only child, which is the
+  // whole point: the reader learns there is something stale under the pane instead of nothing at all.
+  const shells = [...found].sort((a, b) => Number(preClear(a)) - Number(preClear(b)))
   for (const shell of shells) {
+    const tag = preClear(shell) ? PRE_CLEAR : ''
     let leaf: ProcRow | null = null
     for (let p: ProcRow | undefined = shell, hop = 0; p && hop < 16; hop++) {
       const next: ProcRow | undefined = (kids.get(p.pid) ?? [])[0]
       if (!next) break
       leaf = next; p = next
     }
-    if (leaf) return leaf.argv().replace(/\s+/g, ' ').slice(0, LABEL_MAX) || 'background shell'
+    if (leaf) return (leaf.argv().replace(/\s+/g, ' ').slice(0, LABEL_MAX) || 'background shell') + tag
   }
   // A snapshot shell with no child of its own: mid-builtin, or a command that has already exited
   // while the shell tidies up. Real, and rare enough that naming it beats guessing at its argv.
-  return 'background shell'
+  // (The owner's own incident read exactly this way — between two `sleep 4` ticks of a wedged poll
+  // loop there is no child to name.) shells[0] is the freshest, so this tags only when ALL are stale.
+  return 'background shell' + (preClear(shells[0]) ? PRE_CLEAR : '')
 }
 
 // ---- signal 2: an open OUTBOUND ask ----

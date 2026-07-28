@@ -8,8 +8,10 @@ import {
   type ProcRow,
 } from './wait-state.ts'
 
-// A proc table the way /proc hands it over: flat rows, parent links, argv on demand.
-const P = (pid: number, ppid: number, argv: string): ProcRow => ({ pid, ppid, argv: () => argv })
+// A proc table the way /proc hands it over: flat rows, parent links, argv on demand. `startedAt` is
+// epoch ms; 0 is what an unreadable /proc/<pid>/stat leaves behind, and is the default here because
+// most of these tests are about the tree, not about age.
+const P = (pid: number, ppid: number, argv: string, startedAt = 0): ProcRow => ({ pid, ppid, startedAt, argv: () => argv })
 const SNAP = '/bin/bash -c source /home/u/.claude/shell-snapshots/snapshot-bash-1785263788027-28wlkc.sh 2>/dev/null || true && eval …'
 
 // ---- signal 1: children ----
@@ -51,6 +53,51 @@ test('a pane with no readable pid invents no wait', () => {
   const procs = [P(1, 0, '/sbin/init'), P(2, 0, 'kthreadd'), P(100, 1, 'claude'), P(200, 100, SNAP), P(300, 200, 'sleep 240')]
   expect(childWaitLabel(procs, undefined)).toBeNull()
   expect(childWaitLabel(procs, 0)).toBeNull()
+})
+
+// ---- the /clear boundary ----
+
+// The owner's own incident, reconstructed (2026-07-28, pane %216): a wedged `until … do sleep 4; done`
+// started at 19:37:50 survived a /clear whose transcript was born at 20:10:16, and the mini app read
+// the session — freshly cleared, nothing running — as amber "waiting: background shell".
+const CLEAR = 20_10_00_000
+const before = CLEAR - 60_000, after = CLEAR + 60_000
+
+test('a child that outlived the /clear is still a wait, and says so', () => {
+  const procs = [P(100, 1, 'claude'), P(200, 100, SNAP, before), P(300, 200, 'sleep 4', before)]
+  expect(childWaitLabel(procs, 100, CLEAR)).toBe('sleep 4 (pre-clear)')
+})
+
+// The incident's exact shape: between two ticks of the poll loop the shell has no child to name.
+test('an unnamed pre-clear shell is tagged too', () => {
+  expect(childWaitLabel([P(100, 1, 'claude'), P(200, 100, SNAP, before)], 100, CLEAR))
+    .toBe('background shell (pre-clear)')
+})
+
+test('a child of THIS conversation is untagged', () => {
+  const procs = [P(100, 1, 'claude'), P(200, 100, SNAP, after), P(300, 200, 'gh run watch 18832', after)]
+  expect(childWaitLabel(procs, 100, CLEAR)).toBe('gh run watch 18832')
+})
+
+// One row, one label — so with both under a pane the live job wins the headline, and the debris is
+// left to the case where it is the only thing running.
+test('debris never takes the headline from a job this conversation started', () => {
+  const procs = [
+    P(100, 1, 'claude'),
+    P(200, 100, SNAP, before), P(300, 200, 'sleep 4', before),
+    P(400, 100, SNAP, after), P(500, 400, 'gh run watch 18832', after),
+  ]
+  expect(childWaitLabel(procs, 100, CLEAR)).toBe('gh run watch 18832')
+})
+
+// Fail open, twice over: the tag is a claim about age and is made only where age was measured. No
+// boundary (a pane with no readable transcript) and no start time (an unreadable stat) both mean the
+// label is exactly what it was before this feature — never a state invented out of a missing read.
+test('an unmeasurable age tags nothing', () => {
+  const procs = [P(100, 1, 'claude'), P(200, 100, SNAP, before), P(300, 200, 'sleep 4', before)]
+  expect(childWaitLabel(procs, 100)).toBe('sleep 4')                       // no boundary
+  const undated = [P(100, 1, 'claude'), P(200, 100, SNAP), P(300, 200, 'sleep 4')]
+  expect(childWaitLabel(undated, 100, CLEAR)).toBe('sleep 4')              // no start time
 })
 
 // ---- signal 2: outbound asks ----

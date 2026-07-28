@@ -135,7 +135,7 @@ import {
 } from './agent-bus.ts'
 import { formatAskBlock, formatAnswerBlock, formatAsideBlock, formatDigestBlock, formatRosterLine, type RosterAgent } from './agent-bus-block.ts'
 import {
-  readProcTable, childWaitLabel, openOutboundAsk, sessionState,
+  readProcTable, childWaitLabel, conversationStart, openOutboundAsk, sessionState,
   setWaitsFile, setWait, clearWait, readWait, type ProcRow,
 } from './wait-state.ts'
 import { laneForChat, bindLane, chatForLaneSession, noteLaneCwd, dmLanesOn, fleetMode, fleetSurface, listLanes, unbindLane } from './dm-lanes.ts'
@@ -5128,7 +5128,7 @@ async function handleCall(
             working: busy,
             said: tfile ? readWait(e.id, turnAnchorUuid(tfile)) : null,
             ask: openOutboundAsk(listPending(), e.id, p => askerAlreadyResolved(p, wctx.ledger)),
-            proc: childWaitLabel(wctx.procs, wctx.panePids.get(pane)),
+            proc: childWaitLabel(wctx.procs, wctx.panePids.get(pane), conversationStart(tfile)),
             unreported: null,
           })
           const state = `${busy ? ' · busy' : ' · idle'}`
@@ -15347,7 +15347,7 @@ async function webappSessionCard(row: { sid: string; name: string; cwd: string; 
     working,
     said: tfile ? readWait(row.sid, turnAnchorUuid(tfile)) : null,
     ask: openOutboundAsk(listPending(), row.sid, p => askerAlreadyResolved(p, ctx?.ledger ?? [])),
-    proc: ctx && panePid ? childWaitLabel(ctx.procs, panePid) : null,
+    proc: ctx && panePid ? childWaitLabel(ctx.procs, panePid, conversationStart(tfile)) : null,
     unreported: marker,
   }))
   return {
