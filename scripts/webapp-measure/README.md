@@ -50,6 +50,12 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   wrong bubble, each measured. Control: 2 checks fail pre-change,
                                   #   the guards pass on BOTH pages (a guard that only starts holding
                                   #   after the change would mean the change caused what it guards)
+    node refetch.mjs <page> <lbl> # PROBE: for a CLIPPED last row of each role, what route is there
+                                  #   to its full text? Established that the assistant-only auto
+                                  #   refetch is CORRECT (it replaces the fold bar the newest-reply
+                                  #   exemption removes; user/agent keep their tap) and that the one
+                                  #   role with no route at all is `command` — latent, never fired:
+                                  #   0 of 81 command bodies on this box exceed the cap
     node pinopt.mjs <page> <lbl>  # PROBE, not a check suite: the top-pin's DOM read vs the fold's
                                   #   model read, six states side by side. Refuted the "optimistic
                                   #   bubble breaks the pin" finding and found the one state where
