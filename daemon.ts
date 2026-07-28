@@ -139,6 +139,7 @@ import {
   setWaitsFile, setWait, clearWait, readWait,
   type ProcRow, type WaitShell, type SessionState, type SessionWait,
 } from './wait-state.ts'
+import { planTemplateRefresh } from './chat-templates.ts'
 import { laneForChat, bindLane, chatForLaneSession, noteLaneCwd, dmLanesOn, fleetMode, fleetSurface, listLanes, unbindLane } from './dm-lanes.ts'
 import { runHermes, type HermesEndpoint, type HermesTask } from './hermes-driver.ts'
 import {
@@ -13308,12 +13309,10 @@ async function refreshChatClaudeMd(): Promise<void> {
   let state = readJsonFile<State>(CHAT_TEMPLATE_STATE_FILE, {})
   const tplH = h(tpl)
   const liveH = h(live)
-  if (tplH === liveH) {
-    if (state.baseline !== tplH) writeJsonFile(CHAT_TEMPLATE_STATE_FILE, { ...state, baseline: tplH })
-    return
-  }
   let unedited = liveH === state.baseline
-  if (!unedited) {
+  // Only the out-of-date case needs to ask whether the operator edited it — an identical file is
+  // nobody's edit. Guarded so this cross-version scan keeps running exactly where it always did.
+  if (!unedited && tplH !== liveH) {
     try {
       const parent = join(import.meta.dir, '..')
       const self = basename(import.meta.dir)
@@ -13326,19 +13325,49 @@ async function refreshChatClaudeMd(): Promise<void> {
   }
   const ver = basename(import.meta.dir)
   const notify = async (text: string) => {
-    if (state.notified === tplH) return
+    // Each of these outcomes was indistinguishable from the others in the log, which is the second
+    // half of the 2026-07-28 silence: the refresh could be correct, the notice could have gone to
+    // nobody, and the log said the same thing about both — nothing at all.
+    if (state.notified === tplH) { log(`notice for this template already sent — not repeating`); return }
     let sent = false
+    let reached = 0
     // Same gate every other daemon notice uses (notifyChats): an allowlisted id that has never
     // opened the bot's DM 400s on every send, and this loop was the one path that neither skipped it
     // nor recorded the miss — so it re-ran the doomed send on each boot and logged it, forever.
-    for (const chat of loadAccess().allowFrom) {
+    const allow = loadAccess().allowFrom
+    for (const chat of allow) {
       if (isChatUnreachable(chat)) continue
+      reached++
       try { await channel.sendText(chat, text); sent = true }
       catch (e) { if (!markChatUnreachableIfUndeliverable(chat, e)) log(`notice to ${chat} failed: ${e}`) }
     }
-    if (sent) { state = { ...state, notified: tplH }; writeJsonFile(CHAT_TEMPLATE_STATE_FILE, state) }
+    if (sent) {
+      state = { ...state, notified: tplH }
+      writeJsonFile(CHAT_TEMPLATE_STATE_FILE, state)
+      log(`notice sent to ${reached} chat(s)`)
+    } else {
+      // Nobody to tell. Loud, because it is the state that looks exactly like success from the
+      // outside: the file is refreshed, the operator is never told, and nothing says so.
+      log(`notice NOT sent — ${allow.length} allowlisted chat(s), ${allow.length - reached} unreachable`)
+    }
   }
-  if (unedited) {
+  const plan = planTemplateRefresh({ tplH, liveH, baseline: state.baseline, unedited })
+  if (plan.do === 'nothing') return
+  // The live file already matches the template and we did not put it there. On a box with two bridge
+  // instances sharing one chat account this is the NORMAL outcome for whichever instance boots second
+  // — it used to return here in silence, so its bot never announced the change and its log carried no
+  // trace of why (measured 2026-07-28: 54ms after the other instance did the copy). A first sighting
+  // stays quiet on purpose: provisioning wrote that file, and calling it a refresh would announce
+  // something that never happened.
+  if (plan.do === 'record') {
+    writeJsonFile(CHAT_TEMPLATE_STATE_FILE, { ...state, baseline: tplH })
+    if (!plan.announce) { log(`recorded the ${ver} template as this box's baseline (first sighting — not a refresh)`); return }
+    state = { ...state, baseline: tplH }
+    log(`chat CLAUDE.md already matches the ${ver} template — recorded, and not copied by this instance`)
+    await notify(`♻️ New chat-agent instructions shipped with ${ver} — your copy is already current. Takes effect when a chat session next starts fresh (/clear).`)
+    return
+  }
+  if (plan.do === 'copy') {
     try { copyFileSync(tpl, live) } catch (e) { log(`refresh copy failed: ${e}`); return }
     state = { ...state, baseline: tplH }
     writeJsonFile(CHAT_TEMPLATE_STATE_FILE, state)
