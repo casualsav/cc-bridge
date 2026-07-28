@@ -263,6 +263,58 @@ gates the call rather than a check inside it — a session the owner drives from
 so nothing can fire at him. Written as "classify what this concluded turn did" because /btw is the
 anticipated second caller; one caller is a shape, two is an abstraction, so generalise only then.
 
+**`tg btw` IS THE ASIDE — the one bus message that lands MID-TURN — and the gap it closes was one
+line wide.** Every other verb waits for a prompt (`tryDeliverAsk`'s `if (!onNormalPrompt(cap))`
+re-queues a working target for the 15s sweep), so a redirect arrives after the turn it meant to
+redirect: a worker finished, verified and deployed a design the owner had already changed while
+"stop, change of plans" sat queued behind it. The permissive path was never new — `flushSplitMerge`
+has always typed the OWNER's text into a working pane on `paneAcceptsText`, because "the CLI's
+mid-turn steering/queue feature must keep working". The aside is the bus finally using it.
+
+- **The gate is the whole feature, and it is stricter than the human path's.** `paneAcceptsText`
+  refuses every state where a keystroke would be eaten by a dialog but says nothing about whether
+  anyone is home, so `tryDeliverAsk`'s wedged/busy distinction is kept on top: deliver when the pane
+  is at a prompt **or** genuinely working, refuse when it is **neither** — that last state is an
+  unrecognised screen owning the pane. Collision safety is inherited, not built (`busDeliver`
+  serialises on the same `inboundInjectChain` as human pastes).
+- **`btw` is the THIRD member of `case 'ask': case 'ack':`, differing in exactly one thing.** That
+  handler's own comment already warns that giving `ack` its own delivery path "would have been a
+  second copy of the hard part to keep in step". **If an aside ever needs its own path, the design is
+  wrong.** Two exceptions are stated at their sites: no pending row (nothing to expire, nothing to
+  phantom an hour later), and **no depth** — depth measures a WORK chain and an aside dispatches none,
+  so refusing one at the limit would block the message most likely to STOP a runaway. Breadth still
+  counts it, because breadth informs and never refuses.
+- **FAST-FAIL, never a queue**, and this is the one place the verb behaves unlike its neighbours. Late
+  steering is worse than none — the superseded work is already shipped — so a blocked or wedged pane
+  returns the failure into the SENDER's own turn and lets it decide (wait, escalate to `tg ask`, tell
+  a human). Proven live: an aside into a pane holding a `/model` picker was refused and **zero** bytes
+  of it reached the session.
+- **NO `markSeen`, and this is the line most likely to be "fixed" back in by someone copying
+  `tryDeliverAsk`.** The watermark means "caught up to HERE", and it is only sound because a delivery
+  that advances it also SHOWS the digest. An aside shows none — a digest is pull-not-push and must
+  never ride a live push into a busy pane — so advancing it would silently mark as seen a stretch of
+  traffic the session was never given, and the next ask's digest would start too late. Proven live in
+  the only way that works: a later ask's digest still reached back **past** the aside and carried it.
+- **An aside appears in later digests and in `tg history` as 💬.** It is real traffic in that lane, and
+  a session catching up should learn it was told something mid-turn — especially if it missed it.
+- **It arrives in TWO different transcript shapes, and only one of them is a user entry** (measured,
+  not reasoned). Idle → a normal `type: "user"` row, ack-like. Mid-turn → **not a user row at all**:
+  the CLI enqueues it and replays it as an `attachment` of type `queued_command` (enqueue 08:47:41.292,
+  surfaced 08:47:49.909, between a tool_result and the next tool call). That is why **`btw` is
+  deliberately NOT in `BUS_ANCHOR`**: the obvious move is to add it beside `ask|ack|re`, and it would
+  mean a mid-turn aside re-anchoring an OWNER's turn to "bus" and silencing the reply he is waiting
+  for — the failure direction that module calls the worse one. The transcript shape already prevents
+  it and the anchor list is the second guard; keep both, since the shape is Claude Code's to change.
+  The accepted cost is the idle case: an aside that starts a turn is classed human, so a reply it
+  draws pings. An aside asks for no reply, so that is the cheap direction.
+- **A `case` in tgctl's bus switch is dead code without an entry in the `BUS` set above it.** `tg btw`
+  shipped that way — clean type-check, green suite, successful deploy, and `unknown command 'btw'` at
+  the first live call. `tgctl.test.ts` pins the two together.
+- **`/btw` in `checkConcludedTurnObligations`'s comment is a DIFFERENT feature sharing the name** — a
+  turn-conclusion aside to the OWNER, still unbuilt. `tg btw` is agent→agent, fires mid-turn, creates
+  no obligation, and can never reach that hook. It did not decline it; it is not that caller. The note
+  stays live, and recording it "resolved" would retire a real design sketch by accident.
+
 **THE BUS DIGEST CARRIES ONLY A SESSION'S OWN LANE.** The rule, in one sentence: a catch-up digest
 contains only the events this endpoint sent or was sent, since its own watermark — never the room's.
 It exists so a session that was busy or away learns what it missed before answering the ask in front

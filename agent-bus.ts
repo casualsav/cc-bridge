@@ -574,7 +574,9 @@ export type LedgerEntry = {
   ts: number
   // `escalate` is history-only: nothing writes it since the injected nudges were removed, but rows
   // carrying it sit in live ledger.jsonl files, so the type still describes real data.
-  kind: 'ask' | 'ack' | 'answer' | 'post' | 'pause' | 'expire' | 'slash' | 'spawn' | 'kill' | 'reopen' | 'keys' | 'escalate'
+  // `btw` is an aside (tg btw): delivered mid-turn, no id, no pending row — so it appears here and in
+  // digests as history, and nowhere in the pending registry.
+  kind: 'ask' | 'ack' | 'answer' | 'btw' | 'post' | 'pause' | 'expire' | 'slash' | 'spawn' | 'kill' | 'reopen' | 'keys' | 'escalate'
   from: string
   to?: string
   id?: number

@@ -128,7 +128,7 @@ import {
   getSeen, markSeen, digestSince, DIGEST_SCAN,
   type BusEndpoint, type BusPending, type LedgerEntry,
 } from './agent-bus.ts'
-import { formatAskBlock, formatAnswerBlock, formatDigestBlock, formatRosterLine, type RosterAgent } from './agent-bus-block.ts'
+import { formatAskBlock, formatAnswerBlock, formatAsideBlock, formatDigestBlock, formatRosterLine, type RosterAgent } from './agent-bus-block.ts'
 import { laneForChat, bindLane, chatForLaneSession, noteLaneCwd, dmLanesOn, fleetMode, fleetSurface, listLanes, unbindLane } from './dm-lanes.ts'
 import { runHermes, type HermesEndpoint, type HermesTask } from './hermes-driver.ts'
 import {
@@ -1703,9 +1703,16 @@ async function kickThinkingMirror(pane: string): Promise<void> {
 // send `tg answer` never learns that it must, so the bug becomes permanent and invisible instead of
 // loud once. We make it VISIBLE and leave the answering to the agent.
 //
-// Written as "classify what this concluded turn did" rather than as an ask-specific check, because
-// /btw is the anticipated second caller (a turn that ended without reaching the owner). One caller is
-// a shape and two is an abstraction, so it is NOT generalised yet — generalise when /btw needs it.
+// Written as "classify what this concluded turn did" rather than as an ask-specific check, because a
+// TURN-CONCLUSION ASIDE TO THE OWNER is the anticipated second caller (a turn that ended without
+// reaching him). One caller is a shape and two is an abstraction, so it is NOT generalised yet —
+// generalise when that arrives.
+//
+// It has NOT arrived, and the name is why this note nearly got retired by accident. `tg btw`, the
+// agent→agent aside, shipped and is a DIFFERENT feature that happens to share the word: it is
+// agent-to-agent, fires MID-turn rather than at a conclusion, and creates no obligation at all (no
+// pending row, no expected reply), so it can never reach this code. It did not decline the hook; it is
+// not the caller this anticipates. That caller is still unbuilt and this note is still live.
 //
 // SCOPE IS BUS-ASKS-ONLY BY CONSTRUCTION, via the anchor test that gates the call: a session the owner
 // drives directly from the mini app has no ask, so nothing here can fire at him. That is a property of
@@ -2899,6 +2906,57 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
     return ok ? 'delivered' : 'not-landed'
   } finally { busInFlight.delete(cur.id) }
 }
+
+// ---- The aside (`tg btw`) ----------------------------------------------------------------------
+// Everything else on the bus waits for a prompt: tryDeliverAsk's `if (!onNormalPrompt(cap))` re-queues
+// a mid-turn target for the 15s sweep, so a redirect arrives after the whole turn it meant to redirect.
+// That is the gap, and it is one line wide — the incident was a design pivot that sat queued while the
+// superseded design was built, verified and deployed.
+//
+// The permissive path is NOT new: flushSplitMerge already types HUMAN text into a working pane on
+// `paneAcceptsText`, because "the CLI's mid-turn steering/queue feature must keep working". An aside is
+// the bus finally using the path the owner's own messages have always taken.
+//
+// THE GATE IS THE WHOLE FEATURE, and it is deliberately stricter than flushSplitMerge's.
+// paneAcceptsText already refuses every state where a keystroke would be eaten by a dialog (permission
+// prompt, model picker, login, editor, bash-armed…) but says nothing about whether anyone is home. So
+// the wedged/busy distinction tryDeliverAsk draws is kept on top of it: deliver when the pane is at a
+// prompt OR genuinely working, refuse when it is NEITHER — that last state is an unrecognised screen
+// owning the pane, and typing into it is how text lands somewhere nobody will ever read.
+//
+// Collision safety is INHERITED, not built: busDeliver serialises on the same inboundInjectChain as
+// human pastes and lands through withPaneDelivery. No new concurrency work belongs here.
+type AsideDelivery = 'delivered' | 'not-landed' | 'blocked' | 'wedged' | 'no-session'
+async function deliverAside(toSid: string, fromName: string, text: string, refs: string[]): Promise<AsideDelivery> {
+  const pane = await paneForSession(toSid).catch(() => null)
+  if (!pane) return 'no-session'
+  const cap = await capturePane(pane).catch(() => '')
+  if (!cap) return 'no-session'
+  if (!paneAcceptsText(cap)) return 'blocked'
+  if (!onNormalPrompt(cap) && !detectWorking(cap)) return 'wedged'
+  const ok = await busDeliver(pane, formatAsideBlock(fromName, text, refs))
+  if (!ok) return 'not-landed'
+  // NO markSeen — and this is the line most likely to be "fixed" back in by someone copying
+  // tryDeliverAsk. The watermark means "this endpoint has been caught up to HERE", and it is only
+  // sound because a delivery that advances it also SHOWS the digest. An aside shows none (a digest is
+  // pull-not-push and must never ride a live push into a busy pane — tryDeliverAsk says so), so
+  // advancing it would silently mark as seen a stretch of room traffic the session was never given,
+  // and the next real ask's digest would start too late. The session would lose exactly the catch-up
+  // the mechanism exists to provide, invisibly.
+  //
+  // No markInjected/setSessionDepth/markBriefed either: there is no pending row to stamp, no chain to
+  // extend, and nobody is owed a report — an aside asks for nothing.
+  //
+  // The target's own surface still gets the card, so the humans can see it happened from inside the
+  // session's topic. That is the only side effect an aside has beyond the paste itself.
+  void notifyBusRich(toSid, `<b>@${escapeHtml(fromName)}</b> sent an aside 💬`, text)
+  return 'delivered'
+}
+const asideFailText = (o: AsideDelivery, toName: string): string =>
+  o === 'no-session' ? `@${toName} has no live pane — the aside was NOT delivered and nothing is queued`
+  : o === 'blocked' ? `@${toName} is holding a dialog (permission prompt, picker or editor) — the aside was NOT delivered and nothing is queued. Answer it or use \`tg keys\`, then resend.`
+  : o === 'wedged' ? `@${toName} is neither at a prompt nor working — an unrecognised screen owns its pane, so the aside was NOT delivered and nothing is queued`
+  : `the aside did not land in @${toName}'s pane and nothing is queued — resend it, or use \`tg ask\` if it can wait for their next prompt`
 
 // Synthetic asker id for daemon-originated asks (the context nudge). Deliberately not a session id:
 // nothing resolves it to a pane, and deliverAnswerToAsker branches on it rather than trying.
@@ -4840,9 +4898,15 @@ async function handleCall(
       // one way: its pending row is removed the instant delivery lands (tryDeliverAsk), so no reaper
       // and no TTL ever sees it. Giving acks their own delivery path would have been a second copy of
       // the hard part to keep in step.
-      case 'ask': case 'ack': {
+      // `btw` (the aside) is the THIRD member here for the same reason `ack` is the second: it differs
+      // in exactly one thing — the delivery gate — and every guard above the delivery line (caller must
+      // be a bridged session, endpoint resolution, self-send, refs confinement, breadth) is inherited
+      // by construction rather than re-checked in a copy. If an aside ever needs its own path, the
+      // design is wrong. What it does NOT inherit is called out at each site: no pending row, no depth.
+      case 'ask': case 'ack': case 'btw': {
+        const aside = name === 'btw'
         const noReply = name === 'ack' ? true as const : undefined
-        const verb = noReply ? 'ack' : 'ask'
+        const verb = aside ? 'btw' : noReply ? 'ack' : 'ask'
         const room = busLedgerRoom()
         const pane = args.pane ? String(args.pane) : null
         const fromSid = pane ? await sessionForPane(pane) : null
@@ -4855,6 +4919,9 @@ async function handleCall(
         // A hermes endpoint is a one-shot subprocess whose only output IS its answer. Acking one would
         // spawn a run whose result nothing is waiting for — the cost with none of the point.
         if (noReply && res.kind !== 'claude') { write({ t: 'result', id, ok: false, text: `@${nameForEndpoint(res.id, endpoints)} is a hermes endpoint — it only runs asks, so there is nothing to ack` }); return }
+        // Same reasoning for an aside, one step further: a hermes one-shot has no pane to interrupt and
+        // no turn to steer, so there is nothing an aside could even land in.
+        if (aside && res.kind !== 'claude') { write({ t: 'result', id, ok: false, text: `@${nameForEndpoint(res.id, endpoints)} is a hermes endpoint — it has no live pane, so there is nothing an aside can reach` }); return }
         const askText = String(args.text ?? '').trim()
         if (!askText) { write({ t: 'result', id, ok: false, text: `empty ${verb}` }); return }
         const fromName = nameForEndpoint(fromSid, endpoints)
@@ -4876,17 +4943,50 @@ async function handleCall(
         // answers and never asks back), so only claude targets carry depth. An orchestrator fanning
         // out after a human brief stays at depth 1 however wide it goes; A→B→C→D→E is what halts.
         let askDepth = 0
-        if (res.kind === 'claude') {
+        // AN ASIDE CARRIES NO DEPTH AND IS NOT SUBJECT TO THE BREAKER — a deliberate exception to
+        // "inherits the guards", and the one place this verb departs from its siblings. Depth measures
+        // a WORK chain (A asks B asks C), and an aside dispatches no work: it cannot extend a chain
+        // because nothing comes back from it. Refusing one at the limit would block the single message
+        // most likely to STOP a runaway ("you are building the wrong thing"), which is backwards.
+        // Breadth still counts it, because breadth INFORMS and never refuses, and a flood of asides is
+        // worth knowing about.
+        if (res.kind === 'claude' && !aside) {
           askDepth = nextAskDepth(fromSid)
           if (depthExceeded(askDepth)) {
             void notifyChainPaused(fromName, toName, askDepth)
             write({ t: 'result', id, ok: false, text: `paused: this ask is ${askDepth} agent hops deep with no human or threshold in the chain (limit ${depthLimit()}) — @chat has been woken to unstick it; a human reply also resumes the room` }); return
           }
-          // Breadth INFORMS: one waking notice at a generous ceiling, never a refusal.
+        }
+        // Breadth INFORMS: one waking notice at a generous ceiling, never a refusal — so an aside is
+        // counted here even though it is exempt from the breaker above.
+        if (res.kind === 'claude') {
           const breadth = recordAgentAsk()
           if (breadth === BREADTH_NOTICE_AT) void notifyWideFanOut(breadth)
         }
         markReported(fromSid)   // it spoke on the bus — whatever it owed a briefer, it is not silent
+        // An aside creates NO PENDING ROW — no id, nothing to expire, nothing for a reaper to find, and
+        // no phantom "still open" an hour later. It is history the moment it lands, so the ledger is the
+        // only record it leaves.
+        if (aside) {
+          const outcome = await deliverAside(res.id, fromName, askText, refs).catch(() => 'blocked' as const)
+          // LEDGERED ONLY ON DELIVERY, unlike ask/ack — which record at creation because their row then
+          // lives on to be retried, and a queued ask really has happened. An aside is never queued, so a
+          // refused one did not happen at all: writing it here regardless put "@x told @y to stop" in
+          // `tg history` for a message that was refused at a picker, and worse, that row is lane traffic
+          // and would ride the target's next catch-up digest — telling it about steering it never got.
+          // Caught live, not by a test. `suppressed` is not the tool for this: that flag means the event
+          // happened and its NOTICE was withheld.
+          if (outcome === 'delivered') appendLedger(room, { ts: Date.now(), kind: 'btw', from: fromName, to: toName, text: askText, refs })
+          if (outcome !== 'delivered') {
+            // FAST-FAIL into the sender's own turn, never a queue. An aside's whole value is being read
+            // while the work it steers is still running; delivered late it is worse than undelivered,
+            // because the superseded work is already finished. Deciding what to do instead — wait,
+            // escalate to `tg ask`, tell a human — is the sender's judgement, not a reaper's.
+            write({ t: 'result', id, ok: false, text: asideFailText(outcome, toName) }); return
+          }
+          text = `aside delivered to @${toName} — it surfaces between their tool calls; nothing is queued and no answer is expected`
+          break
+        }
         const p = createPending({ fromSid, toSid: res.id, toKind: res.kind, fromName, toName, text: askText, refs, depth: askDepth, ...(noReply ? { noReply } : {}) }, Date.now())
         appendLedger(room, { ts: Date.now(), kind: verb, from: fromName, to: toName, id: p.id, text: askText, refs })
         if (res.kind === 'hermes') {
@@ -5056,7 +5156,7 @@ async function handleCall(
         // reader working out why nobody was told needs to see both that the expiry happened and that
         // the notice was withheld. Hiding it would trade a false alarm for a missing record.
         text = es.length
-          ? es.map(e => `${e.kind === 'answer' ? '✓' : e.kind === 'ask' ? '→' : e.kind === 'ack' ? 'ℹ️' : e.kind === 'post' ? '📣' : e.kind === 'expire' ? '⌛' : e.kind === 'keys' ? '⌨️' : '·'} ${e.from}${e.to ? `→${e.to}` : ''}${e.id ? ` #${e.id}` : ''}: ${e.text.slice(0, 100)}${e.suppressed ? ' (no notice sent — asker already answered)' : ''}`).join('\n')
+          ? es.map(e => `${e.kind === 'answer' ? '✓' : e.kind === 'ask' ? '→' : e.kind === 'ack' ? 'ℹ️' : e.kind === 'btw' ? '💬' : e.kind === 'post' ? '📣' : e.kind === 'expire' ? '⌛' : e.kind === 'keys' ? '⌨️' : '·'} ${e.from}${e.to ? `→${e.to}` : ''}${e.id ? ` #${e.id}` : ''}: ${e.text.slice(0, 100)}${e.suppressed ? ' (no notice sent — asker already answered)' : ''}`).join('\n')
           : '(no bus history yet)'
         break
       }

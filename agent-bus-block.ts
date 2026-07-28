@@ -48,6 +48,26 @@ export function formatAnswerBlock(from: string, re: number, text: string, refs: 
   return `<tg @${from} re=${re}${refsAttr(refs)}>${text}</tg>`
 }
 
+// The ASIDE (`tg btw`) — the one block that lands while the target is MID-TURN, surfacing between its
+// tool calls. Everything else on the bus waits for a prompt, which is the gap it exists to close: a
+// redirect queued behind a long build arrives after the superseded work has been finished and shipped.
+//
+// `btw` carries NO id, and that is the design rather than an omission. An id is an invitation to
+// reply, and `tg answer` on a row that was never pending returns "already closed" — the same failure
+// the ack footer above was written to prevent.
+//
+// The footer says what will NOT happen, at the point where two rules collide — the answered-ask
+// lesson applied forward. Every fluent agent carries "a `<tg @name …>` block is answered with
+// `tg answer`", so omitting a reply verb is not enough; the footer has to contradict that rule
+// outright. Its second sentence is the part `ack` cannot express: an ack says *nothing is waiting on
+// you*, which invites deferral, while an aside's whole job is to be weighed against the work in
+// flight RIGHT NOW.
+export function formatAsideBlock(from: string, text: string, refs: string[] = []): string {
+  return `<tg @${from} btw${refsAttr(refs)}>${text}</tg>\n`
+    + '(aside — no reply, and no ask id: `tg answer` will not work and nothing is waiting on you. '
+    + 'NOT a new task: weigh it against what you are doing, then carry on, change course, or drop work it supersedes.)'
+}
+
 // ---- agent-bus digest (agent-bus P2) ----
 // One recent bus event, shaped for a digest line. Structural (not agent-bus.ts's LedgerEntry) so this
 // module stays import-free and unit-testable in isolation; a LedgerEntry passes it by shape.
@@ -72,7 +92,7 @@ function digestText(text: string): string {
 export function formatDigestBlock(entries: DigestEntry[], sinceLabel: string): string {
   if (!entries.length) return ''
   const lines = entries.map(e => {
-    const glyph = e.kind === 'answer' ? '✓' : e.kind === 'ask' ? '→' : e.kind === 'ack' ? 'ℹ️' : e.kind === 'post' ? '📣' : e.kind === 'expire' ? '⌛' : '·'
+    const glyph = e.kind === 'answer' ? '✓' : e.kind === 'ask' ? '→' : e.kind === 'ack' ? 'ℹ️' : e.kind === 'btw' ? '💬' : e.kind === 'post' ? '📣' : e.kind === 'expire' ? '⌛' : '·'
     // from/to are endpoint names — de-tagged too (not just text): a topic named with a `<` would break
     // the block framing the same way raw text would.
     const who = `${deTag(e.from)}${e.to ? `→${deTag(e.to)}` : ''}${e.id != null ? ` #${e.id}` : ''}`

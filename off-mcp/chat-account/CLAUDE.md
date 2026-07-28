@@ -156,6 +156,17 @@ proceed without asking. Everything else keeps moving without him; that autonomy 
   heads-up, standing down, a status note). A `tg ask` in its place leaves an open ask nobody will
   answer, which later reports itself as a problem. `tg answer <ID> -` answers an ask YOU received
   (ID from its `<tg @name ask=ID …>` block).
+- **`tg btw @name -` is the ASIDE, and this lane is the one that needs it.** An ask or an ack waits
+  for the target's next prompt, so a redirect sent to a session mid-build arrives after the build:
+  that is how a worker once finished, verified and deployed a design the owner had already changed.
+  An aside lands **mid-turn**, between the target's tool calls. Use it the moment a worker's premise
+  stops being true — "he changed X, if you're building the old X stop", "skip Y, already fixed" — and
+  use `tg ask` for anything you actually want answered. If the target can't take it right now it
+  **fails straight back to you** instead of queueing, because late steering is worse than none; wait,
+  escalate, or tell him, but that call is yours.
+  A `<tg @name btw …>` block you RECEIVE is an FYI with no id, so the `ack=` rule above applies to it
+  unchanged: never `tg answer` it, and a turn woken by one ends **without a final text block** — that
+  block is a Telegram message to him.
 
 ## Telegram bridge
 

@@ -66,3 +66,46 @@ test('finalRepliesAfter: a reply replayed from a cursor keeps its own anchor', (
   const replies = finalRepliesAfter(fixture(), 'a1')
   expect(replies.map(r => r.busAnchored)).toEqual([true, false])
 })
+
+// ---- The aside (`tg btw`) and the anchor ---------------------------------------------------------
+// AN ASIDE IS DELIBERATELY *NOT* A BUS ANCHOR, and this is the one decision in that feature that a
+// reasonable person would get backwards. `<tg @name btw>` looks exactly like the blocks above and the
+// obvious move is to add `btw` to BUS_ANCHOR beside ask/ack/re.
+//
+// It must not be, and the reason below is MEASURED off a live probe rather than reasoned — the two
+// delivery states record themselves in the transcript in genuinely different shapes:
+//
+//   IDLE      → a normal `type: "user"` row, exactly like an ack. It DOES set the anchor, and `btw`
+//               being absent from BUS_ANCHOR is what keeps that turn classed HUMAN, so a reply it
+//               draws pings the owner. That is the cheap failure direction and it is the chosen one:
+//               an aside asks for no reply in the first place.
+//   MID-TURN  → NOT a user row at all. The CLI enqueues it and replays it as an `attachment` of type
+//               `queued_command` (measured: enqueue 08:47:41.292, dequeued and surfaced 08:47:49.909,
+//               between the `sleep` tool_result and the next tool call). `isRealUserText` never sees
+//               it, so it cannot re-anchor the turn it interrupts.
+//
+// The design fear was that a mid-turn aside would re-anchor an OWNER's turn to "bus" and silence the
+// reply he was waiting for — the failure direction this module calls the worse one. The measurement
+// says the transcript shape already prevents it, and leaving `btw` out of BUS_ANCHOR is the second
+// guard. Both are kept: the shape is Claude Code's to change, the anchor list is ours.
+test('an aside is not a bus anchor, in either of the two shapes it arrives in', () => {
+  expect(isBusAnchored('<tg @chat btw>the owner changed the design — stop building the old one</tg>')).toBe(false)
+
+  const dir = mkdtempSync(join(tmpdir(), 'bus-aside-'))
+  const f = join(dir, 's.jsonl')
+  // The owner asks; an aside lands mid-turn in its REAL recorded shape (a queued_command attachment,
+  // not a user row); the turn then concludes with the reply he is waiting for.
+  writeFileSync(f, [
+    { type: 'user', uuid: 'u1', timestamp: '2026-07-28T00:00:00Z', message: { role: 'user', content: '<tg 42>build the spawn sheet</tg>' } },
+    { type: 'assistant', uuid: 'a0', timestamp: '2026-07-28T00:00:01Z', message: { role: 'assistant', stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 't1', name: 'Write', input: {} }] } },
+    { type: 'attachment', uuid: 'x1', timestamp: '2026-07-28T00:00:02Z', attachment: { type: 'queued_command', prompt: '<tg @chat btw>design changed — drop the old one</tg>', commandMode: 'prompt', origin: { kind: 'human' } } },
+    { type: 'assistant', uuid: 'a1', timestamp: '2026-07-28T00:00:03Z', message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: 'Dropped it and built the new one.' }] } },
+  ].map(r => JSON.stringify(r)).join('\n') + '\n')
+
+  const replies = finalRepliesAfter(f, '')
+  // ONE reply, and it is still anchored to the OWNER's message. An attachment is not a turn boundary,
+  // so the aside neither splits the turn nor re-anchors it. Make attachments count as user text and
+  // this fails — which is the point of pinning the shape.
+  expect(replies.map(r => r.text)).toEqual(['Dropped it and built the new one.'])
+  expect(replies[0].busAnchored).toBe(false)
+})

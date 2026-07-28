@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { formatAskBlock, formatAnswerBlock, formatDigestBlock, formatRosterLine } from './agent-bus-block.ts'
+import { formatAskBlock, formatAnswerBlock, formatAsideBlock, formatDigestBlock, formatRosterLine } from './agent-bus-block.ts'
 
 const HINT = (id: number) => `\n↩ reply with: tg answer ${id} "<summary>"  ·  a final text block does NOT reach the asker`
 
@@ -150,4 +150,30 @@ test('formatRosterLine never splits an emoji surrogate pair at the clamp boundar
   // ☎️ (U+260E + U+FE0F variation selector) is 2 code points; the prefix leads the line so the clamp
   // never cuts it, and clampChars is code-point-based so the VS16 can never be orphaned mid-sequence.
   expect(out.startsWith('☎️ ')).toBe(true)
+})
+
+// ---- The aside (tg btw) --------------------------------------------------------------------------
+test('formatAsideBlock: no id, and a footer that contradicts the reply rule rather than omitting it', () => {
+  const b = formatAsideBlock('chat', 'the owner changed the spawn sheet — stop building the old one')
+  expect(b.split('\n')[0]).toBe('<tg @chat btw>the owner changed the spawn sheet — stop building the old one</tg>')
+  // NO `=id` anywhere in the tag: an id invites a reply, and `tg answer` on a row that never existed
+  // reports "already closed", which reads as a broken bus.
+  expect(b).not.toMatch(/btw=/)
+  // The footer names the verb that will NOT work. Every fluent agent carries "a <tg @name …> block is
+  // answered with tg answer", so silence about it is not enough.
+  expect(b).toContain('tg answer` will not work')
+  // …and the half `ack` cannot express: weigh it against the work in flight, rather than "nothing is
+  // waiting on you", which invites deferral.
+  expect(b).toContain('weigh it against what you are doing')
+})
+
+test('formatAsideBlock: refs ride along, escaped like every other block', () => {
+  expect(formatAsideBlock('a', 'see this', ['agent-bus/-100/shared/n.md']).split('\n')[0])
+    .toBe('<tg @a btw refs="agent-bus/-100/shared/n.md">see this</tg>')
+  expect(formatAsideBlock('a', 'hi', ['', '  ']).split('\n')[0]).toBe('<tg @a btw>hi</tg>')
+})
+
+test('formatDigestBlock: an aside carries its own glyph, so catch-up shows it was told mid-turn', () => {
+  const out = formatDigestBlock([{ kind: 'btw', from: 'chat', to: 'worker', text: 'design changed' }], '5m')
+  expect(out).toContain('💬 chat→worker: design changed')
 })

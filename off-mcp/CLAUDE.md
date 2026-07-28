@@ -47,6 +47,15 @@ by its topic name.
   behind — nothing is queued, no answer is expected, and nothing times out. Sending one of these as a
   `tg ask` leaves a row nobody will ever answer, which then reports itself as a problem an hour later.
   It arrives at the other agent as `<tg @you ack=ID …>` — an `ack=` block is FYI; never answer one.
+- tg btw @name - [--ref path] — an **aside**: the only bus message that lands while the target is
+  **mid-turn**, surfacing between its tool calls instead of queueing behind the whole turn. Use it for
+  steering that stops being true if it waits: "the owner changed X — if you're building the old X,
+  stop", "skip Y, it's already fixed". No reply, no ask id, nothing queued or timed out. If the target
+  can't take it right now this **fails back to you immediately** rather than queueing — late steering
+  is worse than none, so whether to wait, escalate to `tg ask`, or tell a human stays your call.
+  It arrives as `<tg @you btw …>`; **never answer one** — there is no id and `tg answer` will refuse.
+  Receiving one: it is *not* a new task. Weigh it against what you are doing, then carry on, change
+  course, or drop work it supersedes.
 - tg answer <ID> - [--ref path] — answer an ask you received; one-line summary → path, on stdin (its
   `<tg @name ask=ID …>` block carries the ID). Reply with a pointer + summary, not the payload.
   **A task that arrived over the bus returns its result over the bus** — your topic is a mirror

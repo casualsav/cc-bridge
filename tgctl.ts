@@ -12,6 +12,7 @@
 // Agent bus (only inside a bridged session; the daemon resolves the caller from its tmux pane):
 //   tgctl ask    <name> <text|-> [--ref p]…    ask another agent (async — turn ends, answer arrives later)
 //   tgctl ack    <name> <text|-> [--ref p]…    tell another agent something; no answer expected, nothing queued
+//   tgctl btw    <name> <text|-> [--ref p]…    an ASIDE — lands MID-TURN, between the target's tool calls
 //   tgctl answer <id>   <text|-> [--ref p]…    answer an ask you received (id from its <tg …ask=N> block)
 //   tgctl post   <text|->                       broadcast to the humans in the room
 //   tgctl slash  <name> </cmd>                  inject a slash command into a target session's CLI
@@ -85,6 +86,12 @@ const HELP: Record<string, string> = {
   ack:     'tg ack <name> <text|-> [--ref path]…   acknowledge / FYI another agent — delivered like an ask,\n' +
            '  but nothing is waiting on it: no answer is expected and no open ask is left behind. Use it for\n' +
            '  "got it", "heads-up", "standing down" — anything an `tg ask` would leave hanging until it timed out.',
+  btw:     'tg btw <name> <text|-> [--ref path]…   an ASIDE — the only bus message that lands while the\n' +
+           '  target is MID-TURN, surfacing between its tool calls instead of queueing behind the whole turn.\n' +
+           '  For steering that stops being true if it waits: "the owner changed X — if you are building the old\n' +
+           '  X, stop", "skip Y, it is already fixed". No reply, no ask id, nothing queued. If the target cannot\n' +
+           '  take it right now this FAILS back to you immediately rather than queueing — late steering is worse\n' +
+           '  than none, so the decision to wait, escalate to `tg ask`, or tell a human stays yours.',
   answer:  'tg answer <id> <text|-> [--ref path]…   answer an ask you received (id from its <tg …ask=ID> block)',
   post:    'tg post <text|->   say something to the humans in the room',
   slash:   'tg slash <name> "/compact"   run a slash command in another session\'s CLI (rejected mid-turn; /exit is owner-only)',
@@ -107,7 +114,7 @@ const HELP: Record<string, string> = {
 }
 // Every verb that takes free text gets the stdin steer in its help — the shell mangles Markdown
 // bodies (see `body` above), so `-` is the documented default, not the fallback.
-const TEXT_VERBS = new Set(['send', 'edit', 'reply', 'ask', 'ack', 'answer', 'post', 'spawn'])
+const TEXT_VERBS = new Set(['send', 'edit', 'reply', 'ask', 'ack', 'btw', 'answer', 'post', 'spawn'])
 const STDIN_NOTE =
   "\nBodies: pass them on stdin — printf '%s' \"$BODY\" | tg <verb> <args> -\n" +
   'A double-quoted body is parsed by the SHELL first: `backticks` run as commands (splicing their\n' +
@@ -138,7 +145,9 @@ let name = '', args: Record<string, unknown> = {}
 // Bus verbs take flag args (--ref, --await), so parse positionals + refs out of argv rather than
 // the fixed chat/a/b slots the classic verbs use. Kept in a separate branch so classic verbs are
 // byte-for-byte unchanged.
-const BUS = new Set(['ask', 'ack', 'answer', 'post', 'slash', 'keys', 'spawn', 'kill', 'reopen', 'roster', 'history', 'shared'])
+// NOTE: this set is the real gate — a `case` added to the switch below without a name added HERE is
+// dead code that falls through to "unknown command". Cost one live probe run to find.
+const BUS = new Set(['ask', 'ack', 'btw', 'answer', 'post', 'slash', 'keys', 'spawn', 'kill', 'reopen', 'roster', 'history', 'shared'])
 if (BUS.has(cmd)) {
   const rest = process.argv.slice(3)
   const refs: string[] = []
@@ -162,6 +171,7 @@ if (BUS.has(cmd)) {
   switch (cmd) {
     case 'ask':     name = 'ask';     args = { pane, to: pos[0], text: body(pos[1], 'ask') ?? '', refs }; break
     case 'ack':     name = 'ack';     args = { pane, to: pos[0], text: body(pos[1], 'ack') ?? '', refs }; break
+    case 'btw':     name = 'btw';     args = { pane, to: pos[0], text: body(pos[1], 'btw') ?? '', refs }; break
     case 'answer':  name = 'answer';  args = { pane, id: pos[0], text: body(pos[1], 'answer') ?? '', refs }; break
     case 'post':    name = 'post';    args = { pane, text: body(pos[0], 'post') ?? '' }; break
     case 'slash':   name = 'slash';   args = { pane, to: pos[0], command: pos[1] ?? '' }; break
