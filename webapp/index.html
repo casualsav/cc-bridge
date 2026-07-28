@@ -161,11 +161,6 @@
        hardcoding a grey keeps it following a custom Telegram theme.
        Deliberately NOT applied to .dot: its idle state is var(--hint) and stays byte-exact. */
     --hint-raised: var(--hint);
-    /* The narration quote's bar, fallback arm — see the @supports block for the real value and the
-       measurement behind it. Full --hint here rather than --sec: without color-mix the choice is
-       between a bar that is louder than intended and one that is invisible, and a quote whose bar
-       cannot be seen is the bug this token exists to fix. */
-    --quote-bar: var(--hint);
     /* Stop red. Saturation taken from the stop-sign emoji, NOT sampled from the reference JPEG (whose
        circle is duller and slightly pink) — the owner asked for the emoji's red specifically.
        Tokenised on purpose, and note this is the OPPOSITE call from .dot.on's hardcoded green: that
@@ -226,11 +221,6 @@
   :root { --chip-tint: color-mix(in srgb, var(--bg) 44%, #000);
     --chip-fill: color-mix(in srgb, var(--chip-tint) 36%, transparent);
       --hint-raised: color-mix(in srgb, var(--hint) 80%, var(--text));
-    /* The narration quote's bar. A proportion of --hint toward the page, never a literal and never
-       --sec (9/255 from --bg since the header-colour pin) or --link/--btn — blue is the user bubble's
-       fill on this screen, so a blue bar would read as the owner's own voice. 45% measures 46/255
-       from the page dark, 64 light: a hairline you can see, not a rule across the screen. */
-    --quote-bar: color-mix(in srgb, var(--hint) 45%, var(--bg));
       --add: color-mix(in srgb, #3fb950 80%, var(--text)); --del: color-mix(in srgb, #f85149 80%, var(--text)); }
   }
   * { box-sizing: border-box; }
@@ -867,19 +857,27 @@
      and no dimming, which retires a demotion an earlier release kept on purpose. Nothing replaces it
      — no rule, no gutter, no residual tint — so do not reintroduce one here. */
   .msg.activity { background: transparent; padding: 2px 0; margin-bottom: 3px; }
-  /* The quote bar is NOT a demotion and stays: it is the DOM counterpart of the <blockquote> the
-     Telegram live card renders this same narration in, i.e. structure carried across from the other
-     surface rather than styling invented here.
+  /* THERE IS NO QUOTE BAR. The owner asked for it gone — "a line to the left that I don't like" —
+     and the archaeology says something a future session must not undo by being faithful to it: the
+     bar had been there since v0.4.49 and he had never really SEEN it. Rendered from the old builds
+     and sampled in pixels, v0.4.107 (the last release before narration vanished, the state he asked
+     to be returned to) drew it 17/255 from the ground beside it; the v0.4.173 revival drew the same
+     2px at 46/255, because --sec had drifted to 9/255 of --bg under the v0.4.165 header pin and the
+     bar was moved to a token that could be seen. So the revival did not ADD a line, it made an
+     invisible one visible — and what he is rejecting is the visibility, not a new decoration.
      `role: 'thought'` has had no producer since the turn-card refactor — narration reaches this
-     client inside a turn now — so this rule survives for the row and, through the shared declaration
-     below, gives the live path its bar. Two code paths, one appearance, by construction. */
+     client inside a turn — so the row rule survives for it and the shared declaration below keeps
+     the two paths one appearance. */
   .msg.thought { background: transparent; max-width: 100%; padding: 1px 0; margin: var(--sp-1) 0 6px 0; white-space: pre-wrap; }
-  /* The bar itself, written ONCE for both. --quote-bar rather than the --sec this carried until
-     v0.4.173: since the page was pinned to Telegram's header colour (v0.4.165) --sec sits 9/255 from
-     --bg dark and 14 light, so a 2px hairline in it is not on the screen at all. Measured through a
-     rendered probe, both themes — and note that a declared-colour check cannot see this, which is why
-     thoughts.mjs samples pixels. */
-  .msg.thought, .msg.turn .tq { border-left: 2px solid var(--quote-bar); padding-left: 10px; }
+  /* THE INDENT IS GONE TOO, and that was a CHOICE rather than a consequence. "The old look minus the
+     line" keeps the 10px — the state restored was line + indent + prose, and the ask named one thing
+     — so the indent shipped, was rendered beside the version without it, and the owner picked the
+     version without it off that contact sheet. So there is no shared declaration here at all: with
+     the bar and the indent both gone, narration and the reply differ in NOTHING, which thoughts.mjs
+     measures as a count of zero and keeps as the record of a price knowingly paid. Do not "restore"
+     the indent as a lost detail, and do not read the byte-identity as the bug it was in v0.4.173 —
+     that release was fixing narration that had never been marked at all; this is narration whose
+     marking he has seen and declined. `.msg.turn .tq` keeps its own margins below. */
   /* The CLI's own working line, surfaced because this surface has none of Telegram's limits: the
      rotating glyph, the turn's randomised verb, its elapsed time and its token count.
      It DOES recede to --hint, and that does not contradict the note above. Those lines are the

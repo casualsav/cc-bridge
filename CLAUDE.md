@@ -920,24 +920,50 @@ border) and the app read as having lost thoughts. Three things worth keeping:
   added to the wire, and no kind needs inferring client-side. It only *looks* lost because
   `turn-summary.ts` holds two shapes: `TurnBlock {kind:'thought'}` is the **Telegram card's**
   (`mirror.ts` tags it), and the mini app's `TurnPart` never used the word.
-- **The bar, and only the bar.** Narration keeps the reply's size, weight, style, colour and opacity
-  — prose by the owner's standing instruction, the italic-12px-mono demotion is retired and must not
-  return. The rule is **shared with `.msg.thought`** (whose role has had no producer since the
-  refactor) so the two cannot drift, and adjacent paragraphs merge into ONE quote with a chip
-  splitting the run, which is `mirror.ts`'s own rule.
-- **`--sec` was not usable as the bar and that is a trap for any revived rule.** The v0.4.165
-  header-colour pin left `--sec` **9/255** from `--bg` (14 light), so the orphaned rule's
-  `2px solid var(--sec)` is a hairline nobody can see — while passing any assertion about the
-  declared value. `--quote-bar` is `color-mix(--hint 45%, --bg)`: 46/255 dark, 64 light.
-  `thoughts.mjs` samples **pixels** for exactly this reason, and its prose guard passes on both pages
-  on purpose — a control it is not, a regression alarm it is.
+- **NARRATION IS NOT MARKED AT ALL — no bar, no indent — and both halves were chosen, not inherited.**
+  The owner ruled the bar out ("a line to the left that I don't like"). "The old look minus the line"
+  keeps the 10px indent, so that is what shipped first (v0.4.186); he was then shown it rendered
+  beside the version with the indent also gone and **picked the unmarked one off that contact sheet**
+  (v0.4.187). So neither comes back as a faithful restoration: the bar is declined, and the indent is
+  declined *separately and later*, having been built, deployed and looked at. Do not reinstate one,
+  and in particular do not reinstate one out of faithfulness to the history — because **the history
+  does not say what it looks like it says.** A
+  `border-left` was on this narration from v0.4.49 until the turn-card refactor, i.e. it *was* there
+  in the state he asked to go back to — but rendered from those builds and sampled in pixels,
+  v0.4.107 drew it **17/255** from the ground beside it while the v0.4.173 revival drew the same 2px
+  at **46/255**. The revival did not add a line; it made an invisible one visible, because `--sec`
+  had drifted to 9/255 of `--bg` under the v0.4.165 header pin and the bar was moved to a token that
+  could be seen. What he rejected is the visibility. `--quote-bar` went with the bar rather than
+  sitting orphaned — an orphaned rule here is exactly what once shipped a hairline nobody could see.
+- **Narration is still PROSE, and that guard did not change.** Same size, weight, style, colour and
+  opacity as the reply — the italic-12px-mono demotion is retired and must not return. Nothing about
+  removing the bar demotes anything: the state restored (v0.4.107) was line + indent + full prose,
+  and only the line left. The rule is **shared with `.msg.thought`** (whose role has had no producer
+  since the refactor) so the two cannot drift, and adjacent paragraphs merge into ONE quote with a
+  chip splitting the run, which is `mirror.ts`'s own rule.
+- **Byte-identical to the reply is the CHOSEN state, and the same number that was once the bug.**
+  `thoughts.mjs` counts the box properties on which narration differs from the reply: it is **zero**,
+  and it passes. v0.4.173 treated that very measurement as the defect ("the app read as having lost
+  thoughts") — same number, different situation. That release was fixing narration nobody had ever
+  marked; this is narration whose marking the owner has seen, in three renders, and declined. If the
+  count ever moves off zero someone has **re-marked** narration, which is a decision to take
+  deliberately and never a repair. There is no shared `.msg.thought, .msg.turn .tq` declaration left
+  at all — with both properties gone there was nothing to share, and an empty rule is worse than none.
+- **`thoughts.mjs` still samples PIXELS, and the reason survives the inversion.** A declared-colour
+  assertion cannot see what is painted — it passed `2px solid var(--sec)` at 9/255 when no eye could
+  find it, and it would equally pass a bar someone puts back at any value. The check now asserts that
+  **nothing is drawn** where the bar was, off the render, in both themes; a reinstated bar fails on
+  the screen rather than on the stylesheet. Its prose guard passes on both pages on purpose — a
+  control it is not, a regression alarm it is.
 
 **The tool/thought lines are prose now, by explicit instruction.** `.msg.activity` and `.msg.thought`
 carry no font, size or colour of their own; they inherit `--t-msg` and the page text colour so they
 read exactly like a reply. That retires a visual demotion (italic 12px monospace in `--hint`) an
-earlier release kept on purpose. Nothing replaces it — no rule, no gutter, no residual tint. The
-`.thought` quote bar stays because it mirrors the `<blockquote>` the Telegram live card renders the
-same narration in, not as a substitute demotion.
+earlier release kept on purpose. Nothing replaces it — no rule, no gutter, no residual tint, and
+since v0.4.186–187 no bar and no indent either: `.msg.thought` carries nothing of its own. The
+Telegram live card still renders this same narration inside a `<blockquote>`, so the two surfaces no
+longer agree on its shape — that divergence is the owner's ruling, not drift, and the mini app is the
+one he looks at.
 
 **…and so is a slash command's invocation line, which lagged two releases behind them.** `.msg.command
 .cn` kept `--t-sub` in `--hint` on the stated grounds that it "takes the tool chip's exact type",
