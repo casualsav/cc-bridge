@@ -190,6 +190,51 @@ somewhere and point at it) before running. Everything renders `file://` — no s
     python3 halo.py <out>         # finishes batch5's item 5 — the title's ink-vs-surround contrast
                                   #   at the WORST slice of each line, over a bright bubble, in both
                                   #   themes, against the flat-ground control it validates itself on
+    node tailrole.mjs [script…]   # META: does a script's answer depend on the ROLE its fixture ends
+                                  #   on? Re-runs it against a page whose every feed gains a trailing
+                                  #   short `user` row. Answered NO for nine of ten (see below).
+                                  #   newest.mjs is the positive control and must keep moving
+
+## The fixture's ending role: asked, measured, refuted
+
+Most fixtures here build a transcript as `Array.from({length: N}, (_, i) => ({ role: i % 2 ?
+"assistant" : "user", … }))`, and **with an even N that always ends on an `assistant` row**.
+`workpin.mjs` was once blind exactly there — both its fixtures ended assistant-last, which hid the
+newest message painting *under* the working pill until a user-last `PENDING` fixture was added. So:
+does any other script carry the same blind spot?
+
+**No.** `tailrole.mjs` re-ran every one against a page whose feeds all end on a freshly-sent `user`
+row: **184 checks across eight scripts, none moved.** The two number-only probes (`suite`, `pinopt`)
+were diffed by hand — `suite` identical; `pinopt`'s numbers move exactly as the fold exemption and
+top pin predict, which is its subject.
+
+**Why it is inert, which is what makes the refutation durable.** The ending role reaches a
+measurement through exactly three vectors, and two of them are gated on a *long* last row:
+
+| vector | where | fires when |
+|---|---|---|
+| the last row's bottom margin (`assistant` 16px vs `user` 8px) | — | **never any more**: `#dfeed > .msg:last-child` pins it at 20px regardless of role |
+| the newest-reply fold exemption | `renderMsg`, `newest = last && role === "assistant"` | last row past `LONG_MSG` (700 chars) |
+| the top pin for a screen-taller newest reply | `paintFeed`, `el.classList.contains("assistant") && …` | last row taller than the viewport |
+
+The margin vector — **the one that caused the workpin bug** — was structurally closed by the floor
+gutter pin, which is what retired the class rather than any fixture discipline. And every alternating
+fixture's rows run 81–250 chars, an order of magnitude under the 700-char fold threshold, so neither
+remaining vector can fire. **The only fixtures with long last rows are `newest`, `pinopt` and
+`squash` — precisely the three already built around the ending role**, `squash` with an explicit
+short `user` row last and a comment saying why. The idiom is inert because the vectors need length,
+and the fixtures that have length already drive the ending deliberately.
+
+Two scripts cannot be measured this way and are classified by construction instead — the tool reports
+them as `UNREACHED`, never as a pass, because an unreached script prints "identical" for the wrong
+reason: **`grow.mjs`** builds its rows with `innerHTML`, so no role logic runs at all (and it measures
+the composer, not the feed), and **`sessions.mjs`** never opens a drill — its `i % 2` keys a session
+card's model/effort/branch, which is a different idiom that happens to share the operator. Counting
+it among the "twelve scripts carrying the feed idiom" over-counts: there are ten.
+
+Pre-existing and untouched, found while running this: `batch5.mjs`'s "the name is unchanged: 14px /
+600" fails on **both** pages — stale since the header name moved to `--t-sub`, unrelated to any of
+the above.
 
 ## Known follow-up: block markdown is card-only
 
