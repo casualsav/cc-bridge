@@ -50,6 +50,13 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   wrong bubble, each measured. Control: 2 checks fail pre-change,
                                   #   the guards pass on BOTH pages (a guard that only starts holding
                                   #   after the change would mean the change caused what it guards)
+    node finaldot.mjs [page][out] # a FINAL message opens its first line with a 5px dot, and nothing
+                                  #   else in the feed does. Presence + the four exclusions (narration
+                                  #   above all), painted in BOTH themes, costs the reply no height,
+                                  #   the narration byte-identity count re-measured here so it can't
+                                  #   drift from thoughts.mjs, and the accepted stranding ASSERTED
+                                  #   rather than forbidden. Control: 7 fail pre-change, exclusions
+                                  #   pass on both pages
     node refetch.mjs <page> <lbl> # PROBE: for a CLIPPED last row of each role, what route is there
                                   #   to its full text? Established that the assistant-only auto
                                   #   refetch is CORRECT (it replaces the fold bar the newest-reply

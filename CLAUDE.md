@@ -956,6 +956,29 @@ border) and the app read as having lost thoughts. Three things worth keeping:
   the screen rather than on the stylesheet. Its prose guard passes on both pages on purpose — a
   control it is not, a regression alarm it is.
 
+**THE MARKING MOVED TO THE ANSWER INSTEAD — a reply's first line opens with a 5px dot** (`FINAL_DOT`,
+`.fin`, v0.4.188). It is the complement of the decision above, not a walk-back of it: narration stays
+unmarked and this is what it is now unmarked *against*. Never mirror it onto `.tq`/`.tp`.
+
+- **Which rows get it is not a judgement call.** `role: "assistant"` **is** the set of turn-concluding
+  replies, because `transcript.ts` admits an assistant entry only when `stop_reason !== 'tool_use'`
+  and narration always carries that reason. Censused over 60 transcripts: 716 narration entries
+  excluded against 246 `end_turn` + 2 `null`, and `recentConversation` returns exactly 248 assistant
+  rows — the counts match to the row. So scrollback replies carry the dot too, correctly: each was
+  the final message of its own turn. The 2 `null` entries are interrupted turns, 0.8%.
+- **It is an inline CHILD of the reply's run, never a property of `.msg.assistant`** — that is what
+  keeps `thoughts.mjs`'s narration count at zero. Any treatment applied to the ROW (a weight, a
+  colour, a padding) moves one of those seven values and fails the narration decision by
+  construction. `finaldot.mjs` re-measures that count so the two units cannot drift apart in silence.
+- **The stranding is ACCEPTED, disclosed and asserted — not a bug to fix.** A first word too long to
+  sit beside the dot wraps under it, leaving the dot alone on its line (15px). It was measured, put
+  on the contact sheet, and chosen with that on the table. `finaldot.mjs` asserts the behaviour, so a
+  no-wrap wrapper "fixing" it FAILS — because that would quietly ship a different design from the one
+  picked. Three alternatives were rendered and rejected by eye: a spark, an "ANSWER" label (the only
+  one that added height, +22px, and repeated a word down the whole scrollback) and a semibold
+  `::first-line` lede (whose bold ends wherever the wrap falls). A checkmark was never offered — the
+  app already draws ticks for delivery state, so it would read as a receipt.
+
 **The tool/thought lines are prose now, by explicit instruction.** `.msg.activity` and `.msg.thought`
 carry no font, size or colour of their own; they inherit `--t-msg` and the page text colour so they
 read exactly like a reply. That retires a visual demotion (italic 12px monospace in `--hint`) an

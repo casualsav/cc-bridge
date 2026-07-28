@@ -767,6 +767,20 @@
      bubble now marks the USER side alone, which is what tells the two apart.
      A turn joins the rule rather than restating it: the same unbubbled, full-width column. */
   .msg.assistant, .msg.turn { background: transparent; max-width: 100%; padding: 0; border-radius: 0; margin-bottom: var(--sp-4); }
+  /* THE FINAL-MESSAGE DOT. A reply is the turn's answer and says so with a 5px mark on its first
+     line; narration, which is unmarked by the owner's ruling, is what it distinguishes it FROM — so
+     this is the complement of that decision and must never be mirrored onto `.tq`/`.tp`.
+     It is an inline CHILD of the reply's own run, never a property of `.msg.assistant`: the run is
+     what wraps and reflows, and touching the row's font or box would move the seven values
+     thoughts.mjs holds at zero between narration and reply, failing the narration decision by
+     construction. Which rows get it is not a client-side guess — `role: "assistant"` IS the set of
+     turn-concluding replies, because transcript.ts admits an assistant entry only when its
+     stop_reason is not `tool_use`; narration always carries that reason. Censused: 716 narration
+     entries excluded against 248 admitted, matching recentConversation's row count exactly. So
+     scrollback replies carry the dot too, correctly — each was the final message of its own turn.
+     The 7px is the gap the owner chose off the render (5 + 7 = a 12px first-line indent), not a
+     token: --sp-2 would make it 13 and this is a value picked by eye at that size. */
+  .fin { display: inline-block; vertical-align: 0.12em; margin-right: 7px; color: var(--hint); }
   .msg.turn .tp + .tp { margin-top: var(--sp-2); }
   /* NARRATION — the paragraphs a turn emits between its tool calls — is quoted, and that is the one
      thing separating it from the answer. It had no marking at all between the turn-card refactor and
@@ -2238,6 +2252,7 @@ function bubble(i, n, all) {
   // An agent's report is prose it wrote, so it goes through the same md() a reply does — the reports
   // are markdown (headings, lists, code) and escaping them showed the source instead of the document.
   if (t) inner += (i.img ? '<div class="cap">' : "")
+    + (i.role === "assistant" ? FINAL_DOT : "")
     + (i.role === "agent" ? mdReport(t) : i.role === "assistant" ? md(t) : esc(t)) + (i.img ? "</div>" : "");
   if (!inner) return "";
   // A long message collapses to a readable height with a tap to open it, rather than running past
@@ -2370,6 +2385,14 @@ function hhmm(ts) {
 // ticks, so it is the number that must survive a resize. Stroke is 0.18 of the block height.
 const TICK1 = '<svg class="ticks" viewBox="0 0 10 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M0.8 4.4 L3.3 7.2 L8.8 0.8"/></svg>';
 const TICK2 = '<svg class="ticks ticks2" viewBox="0 0 15 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M0.8 4.4 L3.3 7.2 L8.8 0.8"/><path d="M5.9 4.4 L8.4 7.2 L13.9 0.8"/></svg>';
+// The final-message mark: a reply's first line opens with it, and nothing else in the feed does.
+// Drawn rather than an emoji — the same reason the ticks above are drawn — and `aria-hidden`, since
+// it is a visual restatement of what the row already is and a screen reader gains nothing by it.
+// KNOWN AND ACCEPTED, not to be quietly designed away: when a reply's first word is too long to fit
+// beside the dot, the dot is left alone on the line and the word wraps under it (~15px). It was
+// measured, disclosed on the contact sheet, and chosen with that on the table. A no-wrap wrapper
+// around dot+first-word would "fix" it by changing which design was picked.
+const FINAL_DOT = '<svg class="fin" width="5" height="5" viewBox="0 0 5 5" aria-hidden="true"><circle cx="2.5" cy="2.5" r="2.5" fill="currentColor"/></svg>';
 function stamp(ts, ticks) {
   if (!ts) return "";
   return '<span class="tstamp">' + esc(hhmm(ts)) + (ticks === 2 ? TICK2 : ticks ? TICK1 : "") + "</span>";
