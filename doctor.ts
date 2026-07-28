@@ -11,6 +11,7 @@ import { MAIN_CONFIG_DIR, listAccounts } from './accounts.ts'
 import { readTokenFromEnv, tokenLockStatus } from './token-lock.ts'
 import { currentCodexReadiness } from './codex-health.ts'
 import { CODEX_ENABLED } from './agent.ts'
+import { IMPORT_LINE, MAP_FILE, hasMapImport } from './chat-map.ts'
 
 const settings = (dir: string): Record<string, any> | null => { try { return JSON.parse(readFileSync(join(dir, 'settings.json'), 'utf8')) } catch { return null } }
 
@@ -111,7 +112,20 @@ export async function runDoctor(): Promise<number> {
     else fail(`Codex: workspace sandbox blocked — ${codex.reason}`)
   }
 
-  // 6. Version drift — running daemon vs newest cache build.
+  // 6. Chat-lane orientation. A refusable behaviour needs a way to see it was refused: with
+  // chatMapAutowire off and no import line, the map sits on disk loading into nothing — everything
+  // green, nobody oriented. That is the one state this check exists for; the rest is context.
+  const chat = listAccounts().find(a => a.name === 'chat')
+  if (chat && existsSync(chat.configDir)) {
+    const mapPath = join(chat.configDir, MAP_FILE)
+    let claudeMd = ''
+    try { claudeMd = readFileSync(join(chat.configDir, 'CLAUDE.md'), 'utf8') } catch {}
+    if (!existsSync(mapPath)) info(`chat lane: no ${MAP_FILE} yet (this build ships none, or the daemon has not booted since one shipped)`)
+    else if (hasMapImport(claudeMd)) ok(`chat lane loads ${MAP_FILE} (product orientation)`)
+    else wn(`${MAP_FILE} is installed but ${join(chat.configDir, 'CLAUDE.md')} does not import it — the map is INERT. Add a line reading "${IMPORT_LINE}" near the top, or unset chatMapAutowire in prefs.json to let the daemon add it`)
+  }
+
+  // 7. Version drift — running daemon vs newest cache build.
   const newest = newestCacheVersion()
   const mine = scan.daemons.find(d => d.stateDir === STATE_DIR) ?? scan.daemons[0]
   if (newest && mine?.version && mine.version !== newest) wn(`daemon is running ${mine.version} but ${newest} is in the cache — restart to pick it up`)

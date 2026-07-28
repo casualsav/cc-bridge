@@ -51,6 +51,11 @@ import {
   MAIN_ACCOUNT, readDefaultMode, writeDefaultMode, projectsDirOf, type Account,
 } from './accounts.ts'
 import { exec, sleep, hashText } from './proc.ts'
+import {
+  ageLabel, isStale, listBriefRecords, loadBriefRecord, parseBriefJson, renderBrief, saveBriefRecord,
+  scoutPrompt, validateBrief, SCHEMA_VERSION as BRIEF_SCHEMA_VERSION, type BriefRecord,
+} from './repo-brief.ts'
+import { autowireMapImport, shipProductMap } from './chat-map.ts'
 import { ghAccounts, ghInstalled, ghSwitch, ghLogout, runGhLogin, provisionGh, type GhAccount } from './github.ts'
 import {
   capturePane, capturePaneCached, invalidateCapture, paneAlive, sendKeys, sendKeysLiteral, navigateDown, waitForSettle,
@@ -5206,6 +5211,55 @@ async function handleCall(
       }
       case 'shared': {
         text = ensureSharedDir(busLedgerRoom())
+        break
+      }
+      // `tg repo <path>` — the routing brief for a work repo. Cached briefs answer instantly; a repo
+      // nobody has scouted is discovered in the background and the brief arrives as a system ack.
+      //
+      // It is NOT in AGENT_BUS_VERBS: this is a lookup about a directory, not agent-to-agent
+      // messaging, and a session should be able to ask what a repo is with the bus off. The COLD
+      // path borrows the bus only as a delivery van, the same way a held spawn's outcome does.
+      //
+      // Async by construction: tgctl gives up on the socket after 30s and a scout takes ~15-30s on a
+      // small repo and longer on a large one. Blocking here would turn every cold lookup into a
+      // timeout that still charged for the discovery.
+      case 'repo': {
+        const pane = args.pane ? String(args.pane) : null
+        if (args.list) {
+          const rows = listBriefRecords(STATE_DIR)
+          text = rows.length
+            ? rows.map(r => `${basename(r.path)}${r.brief.aka ? ` (${r.brief.aka})` : ''} — ${r.path} — ${r.brief.what.slice(0, 80)} (${ageLabel(Date.now() - r.generatedAt)}${r.stale ? ', flagged stale' : ''})`).join('\n')
+            : '(no repo briefs yet — `tg repo /abs/path` scouts one)'
+          break
+        }
+        const raw = String(args.path ?? '').trim()
+        if (!raw) { write({ t: 'result', id, ok: false, text: 'usage: tg repo <path> [--refresh] [--stale "why"] | tg repo --list' }); return }
+        let real: string
+        try { real = realpathSync(raw) } catch { write({ t: 'result', id, ok: false, text: `no such path: ${raw}` }); return }
+        try { if (!statSync(real).isDirectory()) throw new Error('not a directory') }
+        catch { write({ t: 'result', id, ok: false, text: `not a directory: ${real}` }); return }
+        const rec = loadBriefRecord(STATE_DIR, real)
+        // `--stale` is the loop back from the party with ground truth: a worker IN the repo sees a
+        // wrong brief long before the orchestrator can. It flags; it never edits. A hand-edited brief
+        // would be overwritten by the next refresh, so the verb is the only durable way to say it.
+        if (args.stale != null) {
+          if (!rec) { write({ t: 'result', id, ok: false, text: `no brief for ${real} yet — nothing to flag` }); return }
+          saveBriefRecord(STATE_DIR, { ...rec, stale: String(args.stale).slice(0, 140) })
+          text = `flagged stale — the next \`tg repo ${real}\` re-scouts`
+          break
+        }
+        const head = await gitHeadOf(real)
+        if (rec && !args.refresh && !isStale(rec, head, Date.now())) {
+          text = renderBrief(rec.brief, { path: real, age: ageLabel(Date.now() - rec.generatedAt), violations: rec.violations })
+          break
+        }
+        const sid = pane ? await sessionForPane(pane).catch(() => null) : null
+        const why = !rec ? 'no brief yet' : args.refresh ? 'refresh requested' : rec.stale ? `flagged stale: ${rec.stale}` : 'stale (HEAD moved and the brief is over a fortnight old)'
+        text = startScout(real, sid) === 'running'
+          ? `🔎 already scouting ${real} — the brief arrives as an ack`
+          : `🔎 ${real}: ${why} — scouting now (~1 min). ` + (sid
+            ? 'It arrives as an ack; say a line to whoever is waiting so the pause is not read as a hang.'
+            : 'Not a bridged session, so nothing can be delivered to you — run `tg repo` again in a minute to read it.')
         break
       }
       // `tg slash <name> "/compact"` — inject a slash command into another session's CLI over the
@@ -13181,6 +13235,7 @@ async function ensureChatProfile(): Promise<void> {
       copyFileSync(src, join(configDir, f))
     } catch (e) { log(`${f} copy failed: ${e}`) }
   }
+  applyProductMap(configDir)
   // Register AFTER the templates land: addAccount heals the settings.json it finds (filling only
   // statusLine/hooks from main), whereas registering first would create one that then blocks the
   // template copy above — leaving the chat account without its tool restrictions.
@@ -13228,7 +13283,7 @@ async function ensureChatProfile(): Promise<void> {
 // settings.json is deliberately out of scope: addAccount() heals statusLine/hooks into it right
 // after provisioning, so byte-identity with its template never holds there.
 const CHAT_TEMPLATE_STATE_FILE = join(STATE_DIR, 'chat-template-refresh.json')
-async function refreshChatTemplates(): Promise<void> {
+async function refreshChatClaudeMd(): Promise<void> {
   const log = (m: string) => process.stderr.write(`chatTemplates: ${m}\n`)
   const acct = accountByName('chat')
   if (!acct || !existsSync(acct.configDir)) return
@@ -13280,6 +13335,154 @@ async function refreshChatTemplates(): Promise<void> {
     log('chat CLAUDE.md has local edits — left alone')
     await notify(`📝 A newer chat-agent template shipped with ${ver}, but your chat CLAUDE.md has local edits — it was left alone. Merge manually from off-mcp/chat-account/ in the plugin cache if you want the update.`)
   }
+}
+
+// ORDER IS LOad-BEARING: the CLAUDE.md refresh runs FIRST, the map second. Autowire writes to that
+// same CLAUDE.md, and a write of ours lands on the refresh's byte-identity check as though the
+// OPERATOR had edited the file — which would pin every unedited box to an old template forever and
+// tell it, every boot, that it had local edits it never made. Two mechanisms, one file: whichever
+// runs first defines what "unedited" means, and only the operator's edits may.
+async function refreshChatTemplates(): Promise<void> {
+  await refreshChatClaudeMd()
+  const acct = accountByName('chat')
+  if (acct && existsSync(acct.configDir)) applyProductMap(acct.configDir)
+}
+
+// ---- the product map: ship it, and make sure something loads it ----
+
+// The map is PRODUCT-owned — it describes a product the operator did not write — so unlike the
+// CLAUDE.md above there is no local edit to preserve and no hash baseline to keep: it is overwritten
+// whenever it differs. That is also what keeps it from becoming the write-back magnet the repo's own
+// CLAUDE.md had to be rescued from: a file a release replaces cannot accumulate.
+//
+// The import line is the other half, and the one that touches an operator-owned file. Without it the
+// map ships to exactly the boxes whose operators edited their CLAUDE.md (so the refresh above leaves
+// it alone) and is imported by none of them — loaded nowhere, and indistinguishable from working.
+// So it is on by default and refusable: `chatMapAutowire: false` in prefs.json pins CLAUDE.md and
+// the operator adds the line themselves.
+function chatMapAutowireOn(): boolean { return loadAccess().chatMapAutowire !== false }
+function applyProductMap(configDir: string): void {
+  const log = (m: string) => process.stderr.write(`productMap: ${m}\n`)
+  // 'absent' = this build carries the mechanism and no map. Nothing ships and, because
+  // autowireMapImport refuses to wire a map that is not there, nothing is written either.
+  const shipped = shipProductMap(CHAT_TEMPLATE_DIR, configDir)
+  if (shipped === 'absent') return
+  const wired = autowireMapImport(configDir, chatMapAutowireOn())
+  if (shipped === 'copied') log(`refreshed ${configDir}/PRODUCT-MAP.md`)
+  if (wired === 'inserted') log(`wired @PRODUCT-MAP.md into ${configDir}/CLAUDE.md (chatMapAutowire; set it false in prefs.json to pin that file)`)
+  if (wired === 'refused') log(`chatMapAutowire is off and ${configDir}/CLAUDE.md has no @PRODUCT-MAP.md — the map is INERT until you add that line`)
+}
+
+// ---- work-repo discovery: the scout ----
+
+// Its own config dir, seeded like the chat account's: shared credentials, onboarding keys, and no
+// CLAUDE.md of its own. Reusing the chat account's dir would load the chat register AND the product
+// map into a scout that needs neither. The repo's own CLAUDE.md still loads, via the cwd walk —
+// which is correct, and the one place where reading a repo's rules is exactly the job.
+const SCOUT_CONFIG_DIR = join(homedir(), '.claude-scout')
+const SCOUT_SETTINGS_FILE = join(SCOUT_CONFIG_DIR, 'scout-settings.json')
+const SCOUT_SETTINGS = {
+  permissions: {
+    allow: ['Read', 'Grep', 'Glob', 'Bash(git log:*)', 'Bash(git remote:*)', 'Bash(git status:*)', 'Bash(ls:*)', 'Bash(rg:*)', 'Bash(wc:*)', 'Bash(find:*)'],
+    deny: ['Edit', 'Write', 'NotebookEdit', 'WebFetch', 'WebSearch'],
+  },
+}
+function ensureScoutProfile(): boolean {
+  const log = (m: string) => process.stderr.write(`scout: ${m}\n`)
+  try { mkdirSync(SCOUT_CONFIG_DIR, { recursive: true }) } catch (e) { log(`cannot create ${SCOUT_CONFIG_DIR}: ${e}`); return false }
+  try {
+    const cred = join(MAIN_ACCOUNT.configDir, '.credentials.json')
+    const dst = join(SCOUT_CONFIG_DIR, '.credentials.json')
+    if (!existsSync(dst) && existsSync(cred)) { copyFileSync(cred, dst); chmodSync(dst, 0o600) }
+  } catch (e) { log(`credentials copy failed: ${e}`) }
+  try {
+    const dst = join(SCOUT_CONFIG_DIR, '.claude.json')
+    if (!existsSync(dst)) {
+      // Onboarding keys ONLY — the main .claude.json also carries the user's whole project history.
+      const src = JSON.parse(readFileSync(join(MAIN_ACCOUNT.configDir, '.claude.json'), 'utf8')) as Record<string, unknown>
+      const out: Record<string, unknown> = {}
+      for (const k of ['hasCompletedOnboarding', 'lastOnboardingVersion']) if (src[k] != null) out[k] = src[k]
+      writeFileSync(dst, JSON.stringify(out, null, 2) + '\n', { mode: 0o600 })
+    }
+  } catch (e) { log(`onboarding keys skipped: ${e}`) }
+  try { writeFileSync(SCOUT_SETTINGS_FILE, JSON.stringify(SCOUT_SETTINGS, null, 2) + '\n', { mode: 0o600 }) }
+  catch (e) { log(`settings write failed: ${e}`); return false }
+  return existsSync(join(SCOUT_CONFIG_DIR, '.credentials.json'))
+}
+
+async function gitHeadOf(dir: string): Promise<string | null> {
+  try { return (await exec('git', ['rev-parse', 'HEAD'], { cwd: dir, timeout: 5000 })).stdout.trim() || null } catch { return null }
+}
+
+type ScoutRun = { rec: BriefRecord; violations: string[] }
+// One `claude -p` in the repo, read-only. `env -u TMUX -u TMUX_PANE` is not optional: a `claude -p`
+// launched with a bridged pane's env re-stamps that pane's transcript, which would hand the scout's
+// output to the bridge as if the parent session had said it.
+async function scoutRepo(real: string): Promise<ScoutRun> {
+  if (!ensureScoutProfile()) throw new Error('no scout profile (is the main account logged in?)')
+  const env = { ...process.env, CLAUDE_CONFIG_DIR: SCOUT_CONFIG_DIR, PATH: `${join(homedir(), '.local', 'bin')}:${process.env.PATH ?? ''}` }
+  delete env.TMUX; delete env.TMUX_PANE
+  const run = async (prompt: string) => {
+    const { stdout } = await exec('claude',
+      ['-p', '--model', 'sonnet', '--max-turns', '30', '--settings', SCOUT_SETTINGS_FILE, '--output-format', 'json', prompt],
+      { cwd: real, env, timeout: 300_000, maxBuffer: 16 * 1024 * 1024 })
+    return JSON.parse(stdout) as { result?: string; total_cost_usd?: number }
+  }
+  let out = await run(scoutPrompt())
+  let v = validateBrief(parseBriefJson(String(out.result ?? '')))
+  let cost = out.total_cost_usd ?? 0
+  // One retry, with what was wrong appended. Never a third: routing is not blocked on discovery, and
+  // a thin brief stored now beats a perfect one that never arrives.
+  if (!v.usable) {
+    const out2 = await run(`${scoutPrompt()}\n\nYour previous reply could not be used: it was missing 'what' or 'surfaces', or was not a JSON object. Return ONLY the \`\`\`json fence.`)
+    const v2 = validateBrief(parseBriefJson(String(out2.result ?? '')))
+    cost += out2.total_cost_usd ?? 0
+    if (v2.usable) { v = v2; out = out2 }
+  }
+  if (!v.usable) throw new Error('the scout did not return a usable brief (no what/surfaces after a retry)')
+  return {
+    violations: v.violations,
+    rec: {
+      path: real, brief: v.brief, generatedAt: Date.now(), gitHead: await gitHeadOf(real),
+      violations: v.violations.length, schemaVersion: BRIEF_SCHEMA_VERSION, costUsd: Number(cost.toFixed(4)),
+    },
+  }
+}
+
+// Tell the requesting session, in its own context, that its brief is ready. An @system ack: it needs
+// no answer, leaves no open ask to time out, and the chat lane's own rules already say a turn woken
+// by an ack does its bus-side work and ends without a Telegram message to the owner.
+async function notifyScoutResult(sid: string, plain: string): Promise<void> {
+  const p = createPending({ fromSid: SYSTEM_SID, toSid: sid, fromName: 'system', toName: nameForEndpoint(sid, busEndpoints()), text: plain, refs: [], noReply: true, depth: 0 }, Date.now())
+  appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'ack', from: 'system', to: p.toName, id: p.id, text: `repo brief: ${p.toName}` })
+  await tryDeliverAsk(p).catch(() => {})
+}
+
+// One scout per repo at a time: two sessions asking about the same repo in the same minute must not
+// pay for two discoveries. The second caller is told a scout is already running and gets the brief
+// the moment it lands, the same way the first does.
+const scoutsRunning = new Map<string, Promise<void>>()
+function startScout(real: string, sid: string | null): 'started' | 'running' {
+  const waiting = scoutsRunning.get(real)
+  if (waiting) { if (sid) void waiting.then(() => { /* the running scout notifies its own requester */ }); return 'running' }
+  const p = runScout(real, sid).finally(() => scoutsRunning.delete(real))
+  scoutsRunning.set(real, p)
+  return 'started'
+}
+async function runScout(real: string, sid: string | null): Promise<void> {
+  const t0 = Date.now()
+  let note: string
+  try {
+    const { rec, violations } = await scoutRepo(real)
+    saveBriefRecord(STATE_DIR, rec)
+    process.stderr.write(`scout: ${real} in ${Math.round((Date.now() - t0) / 1000)}s, $${rec.costUsd ?? '?'}, ${violations.length} schema violation(s) corrected\n`)
+    if (violations.length) process.stderr.write(`scout: ${real} violations — ${violations.join(' | ')}\n`)
+    note = `(repo brief ready — \`tg repo ${real}\`)\n\n${renderBrief(rec.brief, { path: real, age: 'just now', violations: violations.length })}`
+  } catch (e) {
+    process.stderr.write(`scout: ${real} FAILED after ${Math.round((Date.now() - t0) / 1000)}s: ${e}\n`)
+    note = `(repo scout failed for ${real}: ${e}. Route from what you know, or retry with \`tg repo ${real} --refresh\`.)`
+  }
+  if (sid) await notifyScoutResult(sid, note).catch(() => {})
 }
 
 // DM typing may only be driven by the pane whose replies actually deliver to the DM. With a chat

@@ -110,6 +110,11 @@ const HELP: Record<string, string> = {
   wait:    'tg wait <reason|-> | --clear   say what you are blocked on, so the roster shows it instead of\n' +
            '  reading you as idle: "CI run 18832", "@taste to answer". One line. It clears itself when your\n' +
            '  next turn starts, so you never have to remember to unset it.',
+  repo:    'tg repo <path> [--refresh] [--stale "why"] | tg repo --list\n' +
+           '  the routing brief for a work repo: what it IS, which directory a request means, what proves\n' +
+           '  work there, what makes a task not routine. Cached per box — a repo already scouted answers\n' +
+           '  instantly; a new one is discovered in the background (~1 min) and arrives as an ack.\n' +
+           '  --stale "why" flags a brief you found wrong while working in that repo; never hand-edit one.',
   roster:  'tg roster   who is live on the bus',
   history: 'tg history [n]   recent agent-bus activity',
   shared:  'tg shared   print the room\'s shared-workspace dir (put deliverables there)',
@@ -150,19 +155,23 @@ let name = '', args: Record<string, unknown> = {}
 // byte-for-byte unchanged.
 // NOTE: this set is the real gate — a `case` added to the switch below without a name added HERE is
 // dead code that falls through to "unknown command". Cost one live probe run to find.
-const BUS = new Set(['ask', 'ack', 'btw', 'answer', 'post', 'slash', 'keys', 'spawn', 'kill', 'reopen', 'roster', 'history', 'shared', 'wait'])
+// `repo` is not agent-to-agent messaging, but it takes flags, and this branch is the flag-parsing
+// one — same reason `wait` is here while the daemon deliberately keeps it out of AGENT_BUS_VERBS.
+const BUS = new Set(['ask', 'ack', 'btw', 'answer', 'post', 'slash', 'keys', 'spawn', 'kill', 'reopen', 'roster', 'history', 'shared', 'wait', 'repo'])
 if (BUS.has(cmd)) {
   const rest = process.argv.slice(3)
   const refs: string[] = []
   const flags: Record<string, string | boolean> = {}
   const pos: string[] = []
   for (let i = 0; i < rest.length; i++) {
-    const f = /^--(dir|model|effort)$/.exec(rest[i]!)
+    const f = /^--(dir|model|effort|stale)$/.exec(rest[i]!)
     if (rest[i] === '--ref') { const v = rest[++i]; if (v != null) refs.push(v) }
     else if (f) { const v = rest[++i]; if (v != null) flags[f[1]!] = v }   // spawn's flags; harmless elsewhere
     else if (rest[i] === '--create') { flags.create = true }               // spawn: allow a missing --dir
     else if (rest[i] === '--force') { flags.force = true }                 // keys: carry esc into a working turn
     else if (rest[i] === '--clear') { flags.clear = true }                 // wait: drop the declaration early
+    else if (rest[i] === '--refresh') { flags.refresh = true }             // repo: re-scout even if the brief is fresh
+    else if (rest[i] === '--list') { flags.list = true }                   // repo: what this box already knows
     else if (rest[i] === '--await') { /* P1 is async-only; --await is accepted and ignored */ }
     else pos.push(rest[i]!)
   }
@@ -187,6 +196,7 @@ if (BUS.has(cmd)) {
     // A reason short enough to read on a card is an argv string, so `-` stays available but is not
     // the documented shape here (nothing in a wait reason wants Markdown).
     case 'wait':    name = 'wait';    args = { pane, text: flags.clear ? '' : body(pos[0], 'wait') ?? '', ...flags }; break
+    case 'repo':    name = 'repo';    args = { pane, path: pos[0], ...flags }; break
     case 'roster':  name = 'roster';  args = { pane }; break
     case 'history': name = 'history'; args = { pane, n: pos[0] }; break
     case 'shared':  name = 'shared';  args = { pane }; break
@@ -213,7 +223,9 @@ sock.on('connect', () => sock.write(frame({ t: 'call', id, name, args } satisfie
 // success output must be the bare path. With the usual `ok: ` prefix that idiom silently produced
 // "ok: /path/…" and every caller either wrote to a bogus folder or had to sed the prefix off.
 // Errors keep the prefix everywhere: they are read by humans, never substituted.
-const VALUE_VERB = cmd === 'shared'
+// `tg repo` joins it for the same reason: its success output IS the brief, and an `ok: ` glued to the
+// front of a multi-line document is noise in the one place the output is meant to be read verbatim.
+const VALUE_VERB = cmd === 'shared' || cmd === 'repo'
 sock.on('data', makeLineReader<DaemonToShim>(msg => {
   if (msg.t !== 'result' || msg.id !== id) return   // ignore hello/other frames
   clearTimeout(timer)

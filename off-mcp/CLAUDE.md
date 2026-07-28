@@ -85,6 +85,11 @@ by its topic name.
   closes but is never deleted.
 - tg reopen <name> — undo a kill: relaunches the same session in the same folder, resuming its own
   conversation, keeping its bus name and topic tab. Same permission as kill.
+- tg repo <path> — the routing brief for a work repo: what it IS, which directory a request means,
+  what proves work there, what makes a task not routine. Cached per box; a repo nobody has scouted
+  yet is discovered in the background (~1 min) and arrives as an ack. Found a brief wrong while
+  working in that repo? `tg repo <path> --stale "why"` — you are the one who can see it, and the
+  next lookup re-scouts. Never hand-edit a brief: a refresh overwrites it.
 - tg roster — who's live. · tg post - — say something to the humans (stdin). · tg history — recent
   bus events.
 - `tg <verb> --help` prints that verb's usage without doing anything.
