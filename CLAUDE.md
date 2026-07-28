@@ -496,9 +496,22 @@ inset — one observer is right by construction where five call sites are right 
 added. Two things that look correct and are not: a **gutter added on top of `--dock-h`** doubles the
 last message's own 16px margin and breaks the row's equal air; and any rule that zeroes that padding
 conditionally (there was a `#drill.working` one, correct for the old in-flow layout) puts the newest
-message **77px under the composer** the moment a turn runs. The dock paints *nothing* — only the
-capsule inside it is filled, with the header's own `--chip-fill` + `--chip-blur` — which is what
-makes the strip around the field scrollable transcript rather than a grey bar. `#drill::before` is
+message **77px under the composer** the moment a turn runs. The dock paints a **scrim, not a fill**,
+and the difference is the whole design: `#ddock::before` is `--bg`'s *own colour* at 45% plus the
+chip glass, so over the page — which is what is behind that strip nearly all of the time — it is
+literally the page and there is no bar to see, while a message passing under it loses **42% of its
+excursion** and reads as a bubble moving under glass. That replaced "the dock paints nothing" on the
+owner's ask off Telegram's composer ("a bit darker, and as messages pass beneath it a subtle
+shading"); the capsule inside it is still separately filled with the header's `--chip-fill` +
+`--chip-glass`. Two numbers move **together or not at all**: the working row's own band was 78% and
+is now 60% *on top of* the dock's 45%, which composites back to the same 78% (`1 − 0.55 × 0.40`) —
+measured at 2.74:1 against the pre-change page's 2.75:1 for that line over a bright bubble. Raise the
+dock's fill without lowering `.work::before`'s and the band behind the status line darkens into a
+visible stripe. `.work::before` also **lost its own `backdrop-filter`**: the dock's already frosts
+everything behind that row, and a second one only compounds the radius.
+`scripts/webapp-measure/dockscrim.mjs` measures all four claims, and `bleed.mjs`'s "the dock paints
+nothing" check was **re-aimed rather than deleted** — it read `#ddock`'s `background-color`, which is
+still `rgba(0,0,0,0)` and always will be, so it could not have seen this change at all. `#drill::before` is
 the ceiling scrim: the transcript dissolves on its way up so a line of text never slides under
 Telegram's ✕ Close, transparent exactly at the name pill's bottom edge. `scripts/webapp-measure/bleed.mjs`
 measures all of it, and note its two instrument lessons — `getComputedStyle`'s second argument is the

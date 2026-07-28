@@ -97,6 +97,14 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   "1 attachment", no optimistic bubble for any slash command
                                   #   (plus the empty state after /clear), and the header losing its
                                   #   capsule. Same page-path control: 24 checks fail pre-change
+    node dockscrim.mjs [page]     # the dock is a SCRIM: invisible over the page, taking ~40% of a
+                                  #   passing message's excursion, with the working line's own band
+                                  #   left exactly where it was (45% + 60% composites to the old
+                                  #   78%). Plus the row's 4px box gap over the capsule. Same
+                                  #   page-path control: the shading and the gap fail pre-change
+                                  #   while the invisibility and the line's contrast pass on both —
+                                  #   which is the claim, since this had to ADD shading to the strip
+                                  #   without moving the line's ground
     node newest.mjs [page] [out]  # the NEWEST reply is not folded, and folds again once something
                                   #   lands under it. Plus the two things that follow from taking the
                                   #   fold bar away: the payload-clipped rest is fetched untapped

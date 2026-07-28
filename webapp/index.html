@@ -438,10 +438,26 @@
      A plain block, not a flex column: nothing is in normal flow here now except the feed. */
   #drill { position: fixed; inset: 0; background: var(--bg); display: none; z-index: 5; }
   #drill.show { display: block; }
-  /* The dock floats at the floor with NO fill of its own — that is what makes the area around the
-     composer scrollable transcript rather than a grey band. Only the capsule inside it is painted
-     (frosted, like the header's chips), so the message passing behind it stays visible. */
+  /* The dock floats at the floor and paints a SCRIM — not a fill. The strip around the composer is
+     still scrollable transcript, and that is still the point; what changed is that the transcript
+     dissolves on its way under the field instead of running at full strength beside it. The owner's
+     ask, off Telegram's own composer: "it's a bit darker, and as the messages pass beneath it there
+     is a subtle shading". Both halves are the same mechanism.
+     The fill is --bg's OWN colour, so over the page — which is what is behind this strip nearly all
+     of the time — it is literally the page: no band, no edge, nothing to see. Only content passing
+     under it is dimmed, and only by 34% (measured; see dockscrim.mjs), which is what keeps a bubble
+     reading as a bubble moving under glass rather than as a grey bar. The top edge is masked into a
+     14px ramp for the reason every other scrim here is: a hard-edged veil across a line of message
+     text is the cheap line the message fold exists to prevent.
+     It is a ::before rather than a background on #ddock so the blur applies to the BACKDROP and not
+     to the row, the capsule or their text; `z-index: -1` keeps it behind all three, and #ddock's own
+     `z-index: 2` is the stacking context that keeps that -1 from competing with the ceiling scrim. */
   #ddock { position: absolute; left: 0; right: 0; bottom: 0; z-index: 2; }
+  #ddock::before { content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
+    background: color-mix(in srgb, var(--bg) 45%, transparent);
+    backdrop-filter: var(--chip-glass); -webkit-backdrop-filter: var(--chip-glass);
+    -webkit-mask-image: linear-gradient(to bottom, transparent, #000 14px);
+    mask-image: linear-gradient(to bottom, transparent, #000 14px); }
   /* The ceiling scrim. Full bleed means the transcript scrolls up into the strip where Telegram
      paints its ✕ Close and its kebab, and a line of message text sliding under those buttons is the
      same defect the collapsed-message fold exists to prevent — text that stops rather than text that
@@ -744,15 +760,21 @@
      runs under this line, and a bare status line over moving message text is unreadable — but a
      painted bar would be a grey band across the page in the state it spends most of its life in
      (nothing behind it at all). The fill is --bg's own colour, so over the page it is literally the
-     page: no edge, no band, nothing to see. Over a passing message it is 78% of the ground plus a
-     blur, which is what makes the line readable.
-     It lives on a ::before rather than on .work so the blur applies to the BACKDROP and not to the
-     text, and the mask feathers the top and bottom edges — a hard-edged blur band cutting a line of
-     message text in half is the same "cheap line" the message fold was just rescued from.
+     page: no edge, no band, nothing to see. Over a passing message it is what makes the line
+     readable.
+     It is the SECOND of two now, and its number was re-derived rather than left alone: the dock
+     itself lays down 45%, so 60% here composites to 1 − 0.55 × 0.40 = 78% — the exact density this
+     line was accepted at, preserved while the strip around it gained its own shading. Keep the two
+     in step or this reads as a stripe: raising the dock's fill without lowering this one darkens
+     the band behind the line, which is a change nobody asked for.
+     The blur left with it. The dock's scrim already frosts everything behind this row, and a second
+     backdrop-filter stacked on the first only compounds the radius.
+     It lives on a ::before rather than on .work so the fill sits behind the TEXT rather than tinting
+     it, and the mask feathers the top and bottom edges — a hard-edged band cutting a line of message
+     text in half is the same "cheap line" the message fold was just rescued from.
      `inset: -2px 0` bleeds it past the row's own box so the feather has somewhere to happen. */
   .work::before { content: ""; position: absolute; inset: -2px 0; z-index: -1; pointer-events: none;
-    background: color-mix(in srgb, var(--bg) 78%, transparent);
-    backdrop-filter: var(--chip-glass); -webkit-backdrop-filter: var(--chip-glass);
+    background: color-mix(in srgb, var(--bg) 60%, transparent);
     -webkit-mask-image: linear-gradient(to bottom, transparent, #000 8px, #000 calc(100% - 6px), transparent);
     mask-image: linear-gradient(to bottom, transparent, #000 8px, #000 calc(100% - 6px), transparent); }
   .work .g { width: 1.1em; flex: none; text-align: center; }
@@ -782,7 +804,13 @@
     display: flex; align-items: center; justify-content: center; }
   #dstage .x svg { width: 12px; height: 12px; display: block; }
   #dstage .nm { min-width: 0; font-size: var(--t-meta); color: var(--hint-raised); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .composer { display: flex; gap: var(--sp-2); padding: var(--sp-2) 10px calc(var(--sp-2) + env(safe-area-inset-bottom)); align-items: flex-end; }
+  /* padding-top is --sp-1, not --sp-2, and it is the ONE number that sets how far the working line
+     sits above the field: the row's own box gives 2, this gives the rest, so the pair reads 6px
+     instead of 10 (the owner's "bring it down closer, minimal padding between them"). Nothing else
+     moves — the dock is bottom-anchored, so a shorter top padding lowers the row rather than lifting
+     the capsule, and --dock-h is measured to the dock's first INK, so the feed's reservation follows
+     by itself in the state where there is no row at all. */
+  .composer { display: flex; gap: var(--sp-2); padding: var(--sp-1) 10px calc(var(--sp-2) + env(safe-area-inset-bottom)); align-items: flex-end; }
   /* `align-items: flex-end`, and it is load-bearing twice over. It is what keeps the mic ROUND —
      the default `stretch` would pull a 40px button to the pill's full content height and the glyph
      would no longer sit centred in a circle. It is also what pins both controls to the BOTTOM of

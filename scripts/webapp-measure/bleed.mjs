@@ -77,6 +77,10 @@ const m = await p.evaluate(() => {
     })(),
     dockVar: cs(document.documentElement).getPropertyValue("--dock-h").trim(),
     dockBg: cs(dock).backgroundColor,
+    // The dock's SCRIM, which is a different claim from the dock's own box — read off the
+    // pseudo-element, the same trap the ceiling scrim's read carries a few lines below.
+    dockScrimBg: getComputedStyle(dock, "::before").backgroundColor,
+    dockScrimBlur: getComputedStyle(dock, "::before").backdropFilter,
     drillPadTop: cs(drill).paddingTop,
     wrapBg: cs(wrap).backgroundColor, wrapBlur: cs(wrap).backdropFilter,
     // The BACK CHIP, not the title. This read `.dtitle` when the title was a capsule and shared the
@@ -166,13 +170,22 @@ const through = await p.evaluate(() => {
 check(through.topStrip, "the transcript SCROLLS through the top strip — it is dissolved there by the scrim, never clipped short of it");
 check(through.besideHead, "…and through the header's own band (layout, not paint — see the scrim check below)");
 check(through.behindWrap, "…and behind the input capsule");
-check(through.besideDock, "…and through the dock's margin, which paints nothing");
+// LAYOUT, not paint: the dock's margin now carries a scrim, so the transcript is dimmed there rather
+// than untouched. That it is still THERE — reachable, not clipped short of the strip — is what this
+// hit test says, and how much of it survives is dockscrim.mjs's job.
+check(through.besideDock, "…and through the dock's margin, where the dock's scrim dissolves it rather than clipping it");
 
 // 5. The capsule is the header's surface: translucent AND frosted.
 const alpha = s => { const n = s.match(/[\d.]+/g); return n && n.length === 4 ? parseFloat(n[3]) : 1; };
 check(alpha(m.wrapBg) < 1, `the input capsule is translucent (${m.wrapBg})`);
 check(/blur/.test(m.wrapBlur) && m.wrapBlur === m.headBlur, `…and carries the SAME blur as the header chips (${m.wrapBlur} vs ${m.headBlur})`);
-check(alpha(m.dockBg) === 0 || m.dockBg === "rgba(0, 0, 0, 0)", `the dock itself paints nothing (${m.dockBg})`);
+// The dock's own BOX still carries no fill, and that is not pedantry: the scrim has to sit on the
+// ::before or it tints the working row, the capsule and their text instead of the backdrop behind
+// them. What the box must not have and what the scrim must have are two halves of one claim, so
+// neither is checked alone — the old single check read only the box and could not see a scrim at all.
+check(alpha(m.dockBg) === 0 || m.dockBg === "rgba(0, 0, 0, 0)", `the dock's own box paints nothing (${m.dockBg})`);
+check(alpha(m.dockScrimBg) > 0 && alpha(m.dockScrimBg) < 1, `…and its SCRIM is translucent, on the pseudo-element (${m.dockScrimBg})`);
+check(/blur/.test(m.dockScrimBlur), `…and frosts what passes under it (${m.dockScrimBlur})`);
 
 // 6. The ceiling scrim. It dissolves the transcript on its way up so a line of text never slides
 //    under Telegram's own buttons.
