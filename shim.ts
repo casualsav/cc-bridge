@@ -9,10 +9,10 @@ import { spawn } from 'node:child_process'
 import { openSync, closeSync, statSync, renameSync, mkdirSync, readFileSync } from 'node:fs'
 import net from 'node:net'
 import { join } from 'node:path'
-import { frame, makeLineReader, computeCodeFingerprint, STATE_DIR, SOCKET_PATH, DAEMON_PID_FILE, type ShimToDaemon, type DaemonToShim } from './common.ts'
+import { frame, makeLineReader, computeCodeFingerprint, STATE_DIR, SOCKET_PATH, DAEMON_PID_FILE, type ShimToDaemon, type DaemonToShim, buildVersion, staleDaemonVerdict } from './common.ts'
 
-// Our view of the on-disk code. If a connected daemon reports a different
-// fingerprint, it's running pre-upgrade code and we replace it (once).
+// Our view of the on-disk code. A different fingerprint on the daemon means different code — it
+// does NOT mean the daemon is behind, which is what the build version decides (staleDaemonVerdict).
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 let daemonReplaceTried = false
 
@@ -140,15 +140,26 @@ function tryConnect(): Promise<boolean> {
 
 function handleDaemonMsg(msg: DaemonToShim): void {
   switch (msg.t) {
-    case 'hello':
-      // Stale daemon (pre-upgrade code, or one too old to report a fingerprint)?
-      // Replace it once; the socket close triggers a reconnect that respawns it.
-      if (!daemonReplaceTried && msg.version !== CODE_FINGERPRINT && CODE_FINGERPRINT !== '') {
-        daemonReplaceTried = true
+    case 'hello': {
+      // The daemon is running different code. Replace it ONLY if this build is strictly newer —
+      // see staleDaemonVerdict. A mismatch alone used to be enough, which is how a shim from a
+      // stale cache killed a newer, live daemon (2026-07-28).
+      if (daemonReplaceTried || msg.version === CODE_FINGERPRINT || CODE_FINGERPRINT === '') break
+      daemonReplaceTried = true   // one decision per shim process, whichever way it goes
+      const mine = buildVersion()
+      const verdict = staleDaemonVerdict(mine, msg.build)
+      if (verdict === 'replace') {
         replaceStaleDaemon()
-        sock?.destroy()
+        sock?.destroy()   // the close triggers a reconnect, which respawns the daemon on THIS build
+      } else {
+        // Loudly, and staying connected: this shim keeps working against the daemon that is there.
+        process.stderr.write(`shim: daemon runs different code (build ${msg.build ?? 'unreported'}), `
+          + `this shim is ${mine ?? 'unversioned'} — ${verdict === 'same-build'
+            ? 'same version, so this is a hand-copied file, not an upgrade'
+            : 'not newer'}; standing down, leaving it running\n`)
       }
       break   // subscribe sent on connect already
+    }
     case 'detached':
       process.stderr.write('shim: detached by newer subscriber\n')
       break

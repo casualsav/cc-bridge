@@ -6,6 +6,47 @@ import type { Buffer } from 'node:buffer'
 
 export const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'telegram')
 
+// ---- which build am I, and am I newer? ----
+
+// This build's plugin version, read from the `.claude-plugin/plugin.json` that ships beside every
+// cached build. null when there is none — a dev checkout run straight from the repo, which is
+// exactly the case that must never be treated as "newest".
+export function buildVersion(dir = import.meta.dir): string | null {
+  try {
+    const v = JSON.parse(readFileSync(join(dir, '.claude-plugin', 'plugin.json'), 'utf8')).version
+    return typeof v === 'string' && /^\d+\.\d+\.\d+$/.test(v) ? v : null
+  } catch { return null }
+}
+
+function cmpBuild(a: string, b: string): number {
+  const pa = a.split('.').map(Number), pb = b.split('.').map(Number)
+  for (let i = 0; i < 3; i++) if (pa[i]! !== pb[i]!) return pa[i]! - pb[i]!
+  return 0
+}
+
+export type StaleVerdict = 'replace' | 'stand-down' | 'same-build'
+
+// A shim has found a daemon running DIFFERENT code. Who gives way?
+//
+// This used to be "different ⇒ replace it", with no direction in it at all: on 2026-07-28 a probe
+// launched from a stale 0.4.99 cache killed the live 0.4.198 daemon and the reconnect storm spammed
+// the owner's DM. The fingerprint cannot answer the question — it is a hash — so the ORDERABLE
+// build version does, and only a strictly newer shim may replace anything.
+//
+// The two asymmetries are the whole design, and both are deliberate:
+//   · a daemon that reports NO build predates this field, so it really is older → replace. That is
+//     the original upgrade path and the only reason this mechanism exists.
+//   · a shim that cannot name its OWN build (a repo checkout) stands down. "I don't know what I am"
+//     must never license killing something that is working.
+// Equal builds with different fingerprints mean a hand-copied file, not an upgrade: say so, change
+// nothing. Killing there is how a same-version cache refresh turns into a downgrade fight.
+export function staleDaemonVerdict(mine: string | null, theirs: string | null | undefined): StaleVerdict {
+  if (theirs == null) return mine == null ? 'stand-down' : 'replace'
+  if (mine == null) return 'stand-down'
+  const c = cmpBuild(mine, theirs)
+  return c > 0 ? 'replace' : c < 0 ? 'stand-down' : 'same-build'
+}
+
 // Tiny JSON-file persistence for the daemon's small state stores (topics, scheduled messages,
 // session names, pins, usage-notif state): silent read with a fallback, silent best-effort 0600
 // write. NOT for access/prefs — those need mtime caching + atomic temp-rename writes (access.ts).
@@ -126,7 +167,11 @@ export type ShimToDaemon =
       request_id: string; tool_name: string; description: string; input_preview: string } }
 
 export type DaemonToShim =
-  | { t: 'hello'; version?: string }   // version = daemon's code fingerprint
+  // `version` is the daemon's code FINGERPRINT — a hash, so it answers "same code?" and nothing
+  // else. `build` is the plugin version (x.y.z) and is what makes the answer ORDERABLE; it is
+  // optional because a daemon older than this field predates the ordering entirely, and a shim must
+  // read its absence as "older", never as "unknown, assume I win".
+  | { t: 'hello'; version?: string; build?: string }
   | { t: 'detached' }                    // a newer shim subscribed; stop expecting events
   | { t: 'inbound'; params: InboundParams }
   | { t: 'permission'; params: { request_id: string; behavior: 'allow' | 'deny' } }

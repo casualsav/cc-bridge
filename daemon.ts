@@ -12,7 +12,7 @@ import { join, basename, dirname, relative, sep } from 'node:path'
 import { execFileSync, spawn } from 'node:child_process'
 import net from 'node:net'
 import {
-  frame, makeLineReader, computeCodeFingerprint, tConfig, readJsonFile, writeJsonFile,
+  frame, makeLineReader, computeCodeFingerprint, buildVersion, tConfig, readJsonFile, writeJsonFile,
   STATE_DIR, ACCESS_FILE, PREFS_FILE, APPROVED_DIR, ENV_FILE, INBOX_DIR,
   SOCKET_PATH, DAEMON_PID_FILE, PENDING_EVENTS_FILE,
   DAEMON_LOG_FILE, WATCHDOG_PID_FILE, HEARTBEAT_FILE,
@@ -14302,7 +14302,7 @@ bot.catch(err => {
 
 function handleShimConnection(socket: net.Socket): void {
   const write = (msg: DaemonToShim): void => { socket.write(frame(msg)) }
-  write({ t: 'hello', version: CODE_FINGERPRINT })
+  write({ t: 'hello', version: CODE_FINGERPRINT, build: buildVersion() ?? undefined })
 
   const reader = makeLineReader<ShimToDaemon>(
     async msg => {
