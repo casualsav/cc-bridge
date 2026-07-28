@@ -34,7 +34,11 @@ export function formatAskBlock(from: string, askId: number, text: string, refs: 
   // tag so the inbound parse is unchanged.)
   const footer = noReply
     ? '(acknowledgment — no answer needed, nothing is waiting on you)'
-    : `↩ reply with: tg answer ${askId} "<summary>"`
+    // The second clause exists because the instruction alone was not enough: a session followed the
+    // global "Reply = final text block, auto-delivered" rule, which is TRUE on the owner's lane and
+    // false here, and its answer sat in its pane reaching nobody. Saying what will NOT happen
+    // contradicts that rule at the exact point the two collide.
+    : `↩ reply with: tg answer ${askId} "<summary>"  ·  a final text block does NOT reach the asker`
   return `<tg @${from} ${noReply ? 'ack' : 'ask'}=${askId}${refsAttr(refs)}>${text}</tg>\n${footer}`
 }
 

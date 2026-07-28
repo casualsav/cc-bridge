@@ -1690,6 +1690,56 @@ async function kickThinkingMirror(pane: string): Promise<void> {
 // hits "message thread not found" (the user deleted the topic out from under a LIVE session), drop
 // the pin bookkeeping, recreate the session's topic, and resend there — so a live session's replies
 // are never silently black-holed. Shared by the focused and aux relay loops.
+// ---- The answered-ask contract -----------------------------------------------------------------
+// A session given a bus ask must answer it with `tg answer <id>`. Tonight one wrote its answer as its
+// final text block and ran no tg command at all — following "Reply = final text block, auto-delivered",
+// which is TRUE on the owner's lane and false here. Two correct rules colliding with no signal about
+// which lane you are on. The plan sat rendered in its pane and reached nobody; the only existing
+// signal is the reaper's, which waits for the session to END or the ask to time out at 60 minutes.
+//
+// NOT AUTO-DELIVERED, and this is the load-bearing decision: shipping the final block as the answer
+// would send a status line as a deliverable, race a genuine late `tg answer`, and rob a session that
+// meant to keep working. Above all it makes the contract UNLEARNABLE — a session that never has to
+// send `tg answer` never learns that it must, so the bug becomes permanent and invisible instead of
+// loud once. We make it VISIBLE and leave the answering to the agent.
+//
+// Written as "classify what this concluded turn did" rather than as an ask-specific check, because
+// /btw is the anticipated second caller (a turn that ended without reaching the owner). One caller is
+// a shape and two is an abstraction, so it is NOT generalised yet — generalise when /btw needs it.
+//
+// SCOPE IS BUS-ASKS-ONLY BY CONSTRUCTION, via the anchor test that gates the call: a session the owner
+// drives directly from the mini app has no ask, so nothing here can fire at him. That is a property of
+// where this is called from, not a check inside it.
+const nudgedAsks = new Set<number>()   // one nudge per ask, ever. In-memory: a daemon restart may
+                                       // re-nudge once, which is far cheaper than a persisted flag.
+const ANSWER_GRACE_MS = 20_000         // a `tg answer` sent in the same turn lands well inside this
+async function checkConcludedTurnObligations(pane: string): Promise<void> {
+  const sid = await sessionForPane(pane).catch(() => null)
+  if (!sid) return
+  const open = listPending().filter(p => p.toSid === sid && p.injected && !p.expiredAt && !nudgedAsks.has(p.id))
+  if (!open.length) return
+  // The grace exists so a correct answer NEVER raises a false alarm — the negative case is the one
+  // that decides whether this is shippable at all. Re-read the pending list after it: `tg answer`
+  // removes the row, so anything still here genuinely went unanswered.
+  await sleep(ANSWER_GRACE_MS)
+  for (const p of listPending().filter(q => open.some(o => o.id === q.id) && !q.expiredAt)) {
+    if (nudgedAsks.has(p.id)) continue
+    nudgedAsks.add(p.id)
+    // NOTHING GOES TO THE ASKER — the owner's ruling on the economics, and it reversed a design I had
+    // recommended and he had approved. Flagging the asker spends an orchestrator's turn, at whatever
+    // that lane costs, to relay something the session itself is the one able to act on. The nudge is
+    // better spent on the session. The 60-minute expiry notice stays as the unchanged backstop, so
+    // nothing is lost that was there before — only the seconds-not-an-hour improvement, deliberately.
+    // The nudge costs that session a whole turn, which is why it fires once per ask and never on a
+    // loop — and is SKIPPED outright if the session has already started working again, where an
+    // injection would interleave with new work rather than prompt the old one.
+    const cap = await capturePane(pane).catch(() => '')
+    if (cap && onNormalPrompt(cap) && !detectWorking(cap)) {
+      void busDeliver(pane, `<tg @system note=${p.id}>Ask ${p.id} from @${p.fromName} is still open — a final text block does not reach the asker. Send it with: tg answer ${p.id} "<summary>"</tg>`)
+    }
+    process.stderr.write(`daemon: ask ${p.id} to @${p.toName} concluded a turn unanswered — session nudged\n`)
+  }
+}
 // `silent` rides in from the reply's own anchor (finalRepliesAfter → busAnchored): a turn another
 // agent started answers back without pinging the owner's phone, a turn HE started still does.
 // Was this pane's CURRENT turn started by another agent? The same anchor test the relay uses, read
@@ -1825,6 +1875,7 @@ async function relayLoopTick(gen: number): Promise<void> {
             lastRelayedByFile.set(file, r.uuid)
             process.stderr.write(`daemon: relaying ${r.text.length} chars (uuid ${r.uuid.slice(0, 8)}, reply) to ${targets.map(t => t.chat + (t.thread ? `#${t.thread}` : '')).join(',')}\n`)
             for (const t of targets) await deliverRelayReply(paneId, t, r.text, r.busAnchored)   // self-heals a deleted topic (recreate + resend)
+            if (r.busAnchored) void checkConcludedTurnObligations(paneId).catch(() => {})   // did this turn do what its ask required?
           } else {
             lastRelayedUuid = r.uuid                 // banner suppressed — advance past it, nothing to send
             lastRelayedByFile.set(file, r.uuid)
@@ -1996,6 +2047,7 @@ async function auxRelayTick(): Promise<void> {
           if (r.text.length < 200 && /\b(hit your|used \d+% of your) [\w-]+ limit\b/i.test(r.text)) continue
           const targets = await outboundTargetsFor(pane)
           for (const t of targets) await deliverRelayReply(pane, t, r.text, r.busAnchored)   // self-heals a deleted topic (recreate + resend)
+          if (r.busAnchored) void checkConcludedTurnObligations(pane).catch(() => {})   // did this turn do what its ask required?
         }
       } catch { /* transient (tmux/transcript) — retry next tick */ }
     })()))

@@ -1,7 +1,7 @@
 import { test, expect } from 'bun:test'
 import { formatAskBlock, formatAnswerBlock, formatDigestBlock, formatRosterLine } from './agent-bus-block.ts'
 
-const HINT = (id: number) => `\n↩ reply with: tg answer ${id} "<summary>"`
+const HINT = (id: number) => `\n↩ reply with: tg answer ${id} "<summary>"  ·  a final text block does NOT reach the asker`
 
 test('formatAskBlock carries @from, the ask id, the text, and a self-describing reply hint', () => {
   expect(formatAskBlock('architect', 7, 'scrape pricing pages'))

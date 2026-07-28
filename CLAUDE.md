@@ -240,6 +240,29 @@ must **name** it: `bun run deploy --ship-branch <branch>`. There is no bare `--f
 a habitual flag is one people type without reading. `--commit` stages only the version files it owns,
 never `git add -A`.
 
+**A BUS ASK IS ANSWERED WITH `tg answer`, AND A FINAL TEXT BLOCK IS NOT AN ANSWER.** A session wrote a
+full plan as its final text block, ran no tg command, and it reached nobody — it had followed
+"Reply = final text block, auto-delivered", which is TRUE on the owner's lane and false on the bus.
+Two correct rules colliding with no signal about which lane you are on; the instruction was already
+present and correct in the ask envelope. So the envelope now says what will NOT happen, at the exact
+point of collision: `a final text block does NOT reach the asker`.
+
+**Auto-delivery was considered and RULED OUT, and the fourth reason is the one to keep:** it would
+ship a status line as a deliverable, race a genuine late `tg answer`, and rob a session that meant to
+keep working — but above all **it makes the contract unlearnable, so the bug becomes permanent and
+invisible instead of loud once.** Never add it.
+
+What ships instead is detection: `checkConcludedTurnObligations` runs when a bus-anchored turn
+concludes, waits a grace so a same-turn `tg answer` is never raced, and if the ask is still open
+nudges THE SESSION once — ever. Three properties are deliberate. **Nothing goes to the asker**: the
+owner reversed that half of the design on economics — flagging an orchestrator spends its turn to
+relay what the session itself can act on — and the 60-minute expiry notice stays as the unchanged
+backstop. **The nudge costs the session a turn**, which is why it is once per ask and skipped outright
+if the session is working again. **Scope is bus-asks-only by construction**, from the anchor test that
+gates the call rather than a check inside it — a session the owner drives from the mini app has no ask,
+so nothing can fire at him. Written as "classify what this concluded turn did" because /btw is the
+anticipated second caller; one caller is a shape, two is an abstraction, so generalise only then.
+
 **THE BUS DIGEST CARRIES ONLY A SESSION'S OWN LANE.** The rule, in one sentence: a catch-up digest
 contains only the events this endpoint sent or was sent, since its own watermark — never the room's.
 It exists so a session that was busy or away learns what it missed before answering the ask in front
