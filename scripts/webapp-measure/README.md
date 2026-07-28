@@ -97,6 +97,13 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   "1 attachment", no optimistic bubble for any slash command
                                   #   (plus the empty state after /clear), and the header losing its
                                   #   capsule. Same page-path control: 24 checks fail pre-change
+    node newest.mjs [page] [out]  # the NEWEST reply is not folded, and folds again once something
+                                  #   lands under it. Plus the two things that follow from taking the
+                                  #   fold bar away: the payload-clipped rest is fetched untapped
+                                  #   (recorded, so "once" is measured), and a screen-taller reply
+                                  #   lands on its FIRST line rather than its last — in fullscreen
+                                  #   too, where the scrim and the feed's padding swap over. Same
+                                  #   page-path control: 7 checks fail pre-change
     python3 halo.py <out>         # finishes batch5's item 5 — the title's ink-vs-surround contrast
                                   #   at the WORST slice of each line, over a bright bubble, in both
                                   #   themes, against the flat-ground control it validates itself on

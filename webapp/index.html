@@ -1792,7 +1792,7 @@ function mdReport(s) {
 // One feed row → bubble HTML. A local command renders as its invocation over its output; `!` bash
 // rows as a quiet mono chip; attachments as a photo thumbnail (hydrated after paint) / 📎 chip with
 // the caption; assistant text gets light markdown.
-function bubble(i, n) {
+function bubble(i, n, all) {
   if (i.role === "turn") return turnRow(i, n);
   if (i.role === "activity") return '<div class="msg activity">' + esc(i.text) + "</div>";
   if (i.role === "thought") return '<div class="msg thought">' + esc(i.text) + "</div>";
@@ -1831,7 +1831,17 @@ function bubble(i, n) {
   // A long message collapses to a readable height with a tap to open it, rather than running past
   // the screen. `clipped` means the payload clamp really did cut it — say so at the fold, and stop
   // saying it once the rest has actually been fetched.
-  const long = t.length > LONG_MSG;
+  // …EXCEPT the newest reply, which is never folded: the one message you should never have to tap to
+  // read is the one you are waiting for. `assistant` only — a user bubble keeps its fold whatever its
+  // position (you wrote it), and an agent card is a delegated REPORT rather than the answer to the
+  // message you just sent, so it keeps its fold too. And this one folds like any other the moment
+  // something lands under it, which is exactly the owner's ask. `all` is the items array map() hands
+  // in, so "newest" is the TRANSCRIPT's last row rather than the last row on screen: an optimistic
+  // user bubble paints after it, and reading the DOM would re-fold the reply for the two seconds
+  // before the echo arrives and then again when it lands. The PAYLOAD-clipped case is reached from paintFeed, which fetches the rest —
+  // without the fold there is no tap left to do it.
+  const newest = !!all && n === all.length - 1 && i.role === "assistant";
+  const long = t.length > LONG_MSG && !newest;
   const note = i.clipped && !full ? "message truncated at 4000 chars" : "";
   // A transcript-echoed user message has demonstrably reached the session, so two ticks.
   inner += stamp(i.ts, i.role === "user" ? 2 : 0);
@@ -1889,6 +1899,9 @@ $("dfeed").addEventListener("toggle", e => {
 // poll — which would read as a broken fetch rather than a broken render.
 const fullText = {};
 const openMsgs = new Set();
+// uuids whose full text paintFeed fetched by itself, for the unfolded newest reply. Separate from
+// fullText because it must also remember the reads that FAILED — that is the whole point of it.
+const autoFull = new Set();
 function onBubbleTap(el) {
   el.classList.toggle("open");
   const uuid = el.dataset.uuid;
@@ -1962,6 +1975,16 @@ function paintFeed() {
   // A plain send reconciles on exact text; an attachment/voice send on the server-issued match
   // token (the unique inbox filename / the transcript) that the feed echo is guaranteed to carry.
   optimistic = optimistic.filter(o => !items.some(i => i.role === "user" && (o.match ? (i.text.includes(o.match) || String(i.img || i.att || "").includes(o.match)) : i.text.trim() === o.text)) && Date.now() - o.at < 120000);
+  // The newest reply renders unfolded (see bubble()), and a PAYLOAD-clipped one would then show its
+  // first 4000 chars with no fold bar left to fetch the rest — so the fetch the tap used to make
+  // happens here. Once per uuid and never retried: api() raises its own toast, so a read that keeps
+  // failing would raise one every 3s. It is also the cheap half of the poll — the snapshot already
+  // carries 4000 chars of this same message on every tick.
+  const last = items[items.length - 1];
+  if (last && last.role === "assistant" && last.clipped && last.uuid && !autoFull.has(last.uuid)) {
+    autoFull.add(last.uuid);
+    expandFull(last.uuid);
+  }
   const rows = items.map(bubble)
     .concat(optimistic.map(o => '<div class="msg user' + (o.state === "pending" ? " pending" : "") + '">' + esc(o.text)
       + stamp(o.at, o.state === "pending" ? 0 : 1) + "</div>"));
@@ -1978,7 +2001,26 @@ function paintFeed() {
     const k = (m.dataset.uuid || "") + ":" + n;
     d.dataset.tk = k; d.open = openTurns.has(k);
   }));
-  if (stuck) feed.scrollTop = feed.scrollHeight;
+  // Pinning to the BOTTOM is right for a message that fits and wrong for the one this change just
+  // unfolded: a reply taller than the screen then lands you on its last line, and you scroll up to
+  // find its first — which is worse than the fold, since the fold at least showed the beginning. So
+  // a newest reply that overflows is pinned by its TOP instead. The landing line is the ceiling
+  // scrim's own floor, read off the element rather than restated: above that the scrim is still
+  // ramping, so the line you were sent to read would be the one being dissolved. Measured from the
+  // rects, not offsetTop — offsetTop is relative to the offsetParent's PADDING edge, and this
+  // scroller's padding is the header's whole footprint, so the two disagree by 60px.
+  if (stuck) {
+    const el = feed.lastElementChild;
+    // Whichever is LOWER: the scrim's floor, or the feed's own resting content top. They swap over in
+    // fullscreen, where the header rides up into the client's chrome and the scrim shortens to the
+    // inset — so this is the one expression that lands the line clear of both surfaces in both modes.
+    const land = Math.max(parseFloat(getComputedStyle($("drill"), "::before").height) || 0,
+                          parseFloat(getComputedStyle(feed).paddingTop) || 0);
+    const tall = el && el.classList.contains("assistant") && el.getBoundingClientRect().height > feed.clientHeight - land;
+    feed.scrollTop = tall
+      ? feed.scrollTop + el.getBoundingClientRect().top - feed.getBoundingClientRect().top - land
+      : feed.scrollHeight;
+  }
   hydrateThumbs();
   paintWork();
 }

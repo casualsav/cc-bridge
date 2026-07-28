@@ -334,6 +334,27 @@ overriding `background` on a variant instead silently drops the easing back to l
 `.msg.clip .more` needs its `z-index: 1` — `::after` is generated content, so it paints after every
 child, and a veil that reaches the floor would otherwise cover the label it exists to reveal.
 
+**…and the NEWEST reply is exempt from all of it, which pulls in two things that are not the fold.**
+The one message you should never have to tap to read is the one you were waiting for, so a trailing
+`role: "assistant"` row renders unfolded however long it is — and folds again the moment anything
+lands under it (the owner's ask, both halves). `assistant` only: a user bubble keeps its fold
+wherever it sits, and an agent card is a delegated report rather than the answer. **"Newest" is the
+transcript's last item, not the last row on screen** — an optimistic user bubble paints after it, and
+reading the DOM would re-fold the reply for the two seconds before the echo lands and then again when
+it does. The two consequences: the fold bar was also the only control that could fetch a
+**payload-clipped** message's rest (the snapshot clamps at 4000 chars), so `paintFeed` now does that
+read itself — once per uuid and never retried, since `api()` toasts its own failures and a poll would
+raise one every 3s; and pinning the feed's **bottom**, correct for a message that fits, lands you on
+the last line of one that does not, which is worse than the fold it replaced — so a screen-taller
+newest reply is pinned by its TOP, at `max(the ceiling scrim's height, the feed's padding-top)`,
+whichever is lower on screen. Those two swap over in fullscreen, and above that line the scrim is
+still ramping, i.e. the line you were sent to read would be the one dissolving. Measured from the
+**rects**, never `offsetTop` — that is relative to the offsetParent's *padding* edge, and this
+scroller's padding is the header's whole footprint, so the two disagree by 60px.
+`scripts/webapp-measure/newest.mjs` measures all of it (7 checks fail on the pre-change page), and
+note the fixture coupling it created: `squash.mjs` needs a short row **last** or its eighth long card
+is the unfolded one and the count fails for a reason that has nothing to do with the squash.
+
 **A picked file is STAGED, never sent from the picker.** `#dstage` holds it above the composer with
 a thumbnail and an ✕ until you press send, and the composer's text goes with it as the caption. It
 sits outside `.inputwrap` on purpose: a chip inside that flex row would take its width from the
