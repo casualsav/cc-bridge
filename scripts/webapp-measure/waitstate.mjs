@@ -111,7 +111,9 @@ async function measure(page, label, sink) {
   state(proc.task?.startsWith("⏸️ waiting: gh run watch"), `an inferred wait names the command it is running (${JSON.stringify(proc.task)})`);
   state(!said.task?.includes("Reading the transcript"), "and REPLACES the last-reply snippet, which predates the wait");
   state(unrep.task?.startsWith("📤 unreported → @lead"), `unreported names who is waiting on the report (${JSON.stringify(unrep.task)})`);
-  guard(idle.task?.startsWith("💬 "), `an idle card keeps its last reply (${JSON.stringify(idle.task?.slice(0, 24))})`);
+  // A STATE check since the ✅ swap: the baseline prints 💬 here, so this fails there — which is
+  // what "idle now means done, not merely quiet" is worth as a claim.
+  state(idle.task?.startsWith("✅ "), `an idle card marks its last reply DONE (${JSON.stringify(idle.task?.slice(0, 24))})`);
   guard(work.task?.startsWith("⏳ "), "and a working card keeps its activity line");
 
   // ---- 2. Stillness ----------------------------------------------------------------------------

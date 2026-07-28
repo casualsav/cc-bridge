@@ -2111,7 +2111,11 @@ async function renderSessions() {
       // other row (seen in the rendered contact sheet, not reasoned about).
       s.state === "waiting" && s.wait ? "⏸️ waiting: " + esc(s.wait.label)
       : s.state === "unreported" ? "📤 unreported" + (s.unreported ? " → @" + esc(s.unreported.briefer) : "")
-      : s.task ? (s.working ? "⏳ " : "💬 ") + (s.subagents > 0 ? esc(s.subagents + " subagent" + (s.subagents === 1 ? "" : "s") + " live · ") : "") + esc(s.task)
+      // ✅, not 💬, on the last-reply line: by the time this branch is reached the state is `idle`,
+      // which since the fourth state landed means "at a prompt with nothing pending" — done, not
+      // merely quiet. The owner's call. (The 💬 in `/sessions`, the Telegram text view, is a
+      // different surface and still says 💬.)
+      : s.task ? (s.working ? "⏳ " : "✅ ") + (s.subagents > 0 ? esc(s.subagents + " subagent" + (s.subagents === 1 ? "" : "s") + " live · ") : "") + esc(s.task)
       : "";
     c.innerHTML =
       // title, because the name ellipsizes: a long one is still readable on a long press, and the
