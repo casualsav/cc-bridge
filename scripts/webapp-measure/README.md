@@ -36,6 +36,25 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   page on the LIVE server, real composer, real send button, real
                                   #   throwaway session. Nothing stubbed. Includes the settings.json
                                   #   byte-identity control for /model
+    node miniclear.mjs [outdir]   # the 🧹 /clear approval setting honoured by the MINI APP: same
+                                  #   end-to-end stance as minislash, plus a stubbed showConfirm that
+                                  #   records the question and answers it, so cancel and confirm are
+                                  #   both driven. The cancel is proven AT THE PANE — the feed lags a
+                                  #   clear by seconds and reports a transcript that is already gone.
+                                  #   Flips prefs.json's confirmReset and restores the box's own value.
+                                  #   Control is TEMPORAL (daemon-side change): 5 checks fail pre-fix
+    node ghostecho.mjs [page]     # an optimistic bubble must recognise its own CLIPPED echo. Over
+                                  #   CONVO_CAP the echo comes back shorter than what you typed, so
+                                  #   exact-text reconciliation can never match and the feed showed
+                                  #   the message TWICE for 120s. Three guards against retiring the
+                                  #   wrong bubble, each measured. Control: 2 checks fail pre-change,
+                                  #   the guards pass on BOTH pages (a guard that only starts holding
+                                  #   after the change would mean the change caused what it guards)
+    node pinopt.mjs <page> <lbl>  # PROBE, not a check suite: the top-pin's DOM read vs the fold's
+                                  #   model read, six states side by side. Refuted the "optimistic
+                                  #   bubble breaks the pin" finding and found the one state where
+                                  #   the two really diverge — a ghost bubble from the 4000-char
+                                  #   payload clamp. Absolute page path; prints numbers, exits 0
     node squash.mjs [page] [out]  # a collapsed long message keeps its 268px height — BOTH kinds (the
                                   #   user-side bubble and the unbubbled prose reply) — in a feed whose
                                   #   content wants 3× the scroller. The flex column makes every

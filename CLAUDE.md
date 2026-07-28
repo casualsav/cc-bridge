@@ -396,12 +396,78 @@ command" is `COMMAND_TOKEN`, written to match `slash-policy.ts`'s server-side on
 segment, no second slash, colon allowed — so `/tmp/foo is where I put it` stays prose and keeps its
 bubble, and `/plugin:skill` does not.
 
+**An optimistic bubble retires on its own echo, and over `CONVO_CAP` THERE IS NO EXACT ECHO TO WAIT
+FOR.** The feed's payload clamp (`transcript.ts`, 4000 + its own `'…'`) cuts every long row, so a
+message past it comes back shorter than what was typed and `i.text.trim() === o.text` could never
+match. The bubble then outlived its echo for the whole 120s valve and the feed showed the message
+**twice** — measured at 5280 chars, and guaranteed rather than rare above the cap, on a surface whose
+clamp comment notes the orchestrator's briefs run 2–3k. The clamp had been **saying so all along**:
+`clipped: true` is on the wire for exactly this (the map at `transcript.ts:633` is role-agnostic, so
+user rows carry it, verified live at 4001 chars against 4819 sent), and the client was the half
+throwing it away. `echoes()` is that read. Three guards, each blocking a different wrong retirement,
+so do not collapse them:
+
+- **`i.clipped` is the licence to compare prefixes at all.** Without it a short message retires a
+  longer pending one it merely begins with — "hello" against a pending "hello world".
+- **The prefix is `i.text.slice(0, -1)`**, because the clamp appends its own `'…'`. Compare against
+  `i.text` itself and NOTHING ever matches: that ellipsis is where the naive version of this fix
+  dies, silently, looking correct.
+- **`o.text.length > pre.length`** — a bubble no longer than what survived cannot be the message that
+  was cut.
+
+**No `4000` is written in the client.** `clipped` already means "the server's cap", and a copy of
+`CONVO_CAP` here would be a second one free to drift. Accepted residual: two DIFFERENT messages
+sharing the whole surviving prefix retire each other — at that length they are the same document, and
+exact-match carries the same exposure already for one message sent twice. A server-issued match token
+(what attachments and voice notes use via `o.match`) is not available here: that works because the
+inbox FILENAME appears in the echoed text, and a pane-typed message has no such token.
+
+**The lost top-pin downstream was a SYMPTOM, and fixing this fixed it with the pin untouched.** While
+the ghost stood, `feed.lastElementChild` was the ghost rather than the reply, so a screen-taller reply
+landed on its last line. That is the whole of the pin's involvement — see the paragraph on the newest
+reply for why `lastElementChild` is the *precise* answer to the pin's question and not a sloppy proxy
+for the fold's `items[all.length - 1]`. Swapping the pin to the model read was proposed, measured, and
+refused: it scrolls the message you just sent 2579px off an 812px viewport for the whole window
+(`scripts/webapp-measure/pinopt.mjs`, states C and C2). `ghostecho.mjs` measures the retirement, and
+its guards pass on BOTH pages on purpose — a guard that only starts holding after the change would
+mean the change had caused what it guards against.
+
 **`/clear` renders NOTHING in the mini-app feed.** Dropped in `transcript.ts` (`RESET_COMMANDS`), not
 in the client. Its whole effect is that the conversation is gone and the CLI opens a fresh
 transcript, so its entry can only ever be the first row of a file and the feed it heads is empty by
 definition — the existing "No conversation yet." then renders itself, with no second empty state
 invented to produce it. A lone `/clear` on a blank screen reads as debris from the wipe rather than
 as a wiped session, which is what the owner objected to.
+
+**…and it asks first, on the DAEMON's authority, because `confirmReset` is ONE setting for every
+surface.** The 🧹 /clear approval setting was read in exactly one place — `confirmResetSession`, the
+Telegram chat's own `/clear` — so a composer `/clear` went through `planSlash` straight to the pane
+and reset a box that had asked to be asked (measured: setting on, `POST send "/clear"` → `{ok:true}`,
+feed 2 items → 0). `webappSessionAction` now carries the gate, and three things about where and how:
+
+- **After every existing refusal, before `dismissFeedbackSurvey`.** The ask fires only when the clear
+  would truly land, so a mid-turn `/clear` still gets its plain "mid-turn" reason instead of a dialog
+  that ends in one. And the setting is read *there*, never trusted from the client — a client holding
+  a stale copy of it cannot fail this open.
+- **`{ confirm }` is a 200, not the error channel.** It means the daemon did NOTHING and is asking;
+  routed through the 400 that carries every other refusal it would surface as the composer's red
+  toast rather than a dialog. The client raises the app's existing `askConfirm()` (Telegram's native
+  confirm, the browser's otherwise — already what closing a session and trashing a file use) and
+  re-POSTs the identical send with `confirmed: true`. Declining returns false into the same branch a
+  failed send takes, which is what hands the draft back.
+- **`sendToSession` captures `drillSid` ONCE**, because it awaits a dialog: re-reading it afterwards
+  is the bug `attachToSession` already documents, delivering to whichever session you switched to.
+
+`/reset` is in the gate's set and unreachable through it — slash-policy refuses it as a bridge
+command first — which is deliberate, so the day that refusal changes the confirmation is already
+there. `scripts/webapp-measure/miniclear.mjs` drives all of it; its control is TEMPORAL (the change
+is daemon-side, so there is no pre-change page to pass in) and note what the pre-fix run proves about
+the instrument: the FEED's "transcript untouched" check **passes on the broken build**, because a
+`/clear` rotates the transcript file and the session→file mapping lags a few seconds. Only the pane
+knows. No design work is owed here: an "Always clear" button (the chat card's second option, which
+turns the setting off from the dialog) was considered and left out — the app already carries that
+toggle in Settings, and a confirm dialog that also mutates configuration is plumbing in the wrong
+place. If it comes back it comes back as its own change.
 
 **The paperclip asks WHERE before it opens a picker** (`#addctx`: Photos / Files). Differently-declared
 `<input type=file>`s, because that is the only lever there is — no API tells one picker which source to

@@ -2395,6 +2395,35 @@ function hydrateThumbs() {
     el.src = thumbCache[path];
   });
 }
+// Does this transcript item echo that optimistic bubble — i.e. has the thing you sent come back?
+//
+// Exact text was the whole test, and it CANNOT hold for a long message: the feed's payload clamp cuts
+// every row past its cap (`transcript.ts`, CONVO_CAP) and the echo arrives shorter than what you
+// typed. Over that length the bubble was a ghost by construction — it outlived its own echo for the
+// full 120s valve, so the feed showed your message TWICE, and while it stood there the next reply
+// lost its top-pin (`feed.lastElementChild` is the ghost, not the reply). Measured at 5280 chars.
+// The clamp has always SAID so — `clipped: true` rides on the wire for exactly this — and the client
+// was the half throwing it away.
+function echoes(i, o) {
+  if (i.role !== "user") return false;
+  if (o.match) return i.text.includes(o.match) || String(i.img || i.att || "").includes(o.match);
+  if (i.text.trim() === o.text) return true;
+  // Below here the server has told us it CUT this row, which is the only licence to compare prefixes.
+  // Without that flag a genuinely short message retires a longer pending one it merely begins with
+  // ("hello" against a pending "hello world").
+  if (!i.clipped) return false;
+  // The clamp appends its OWN '…' (`it.text.slice(0, CONVO_CAP) + '…'`), so the surviving prefix is
+  // the row minus that one character. Comparing against `i.text` itself matches nothing at all — the
+  // ellipsis is where the naive version of this fix dies, silently, looking correct.
+  const pre = i.text.slice(0, -1).trim();
+  // Length is the third guard and it is not redundant: a bubble no longer than what survived cannot
+  // be the message that was cut. No 4000 is written here — `clipped` already means "the server's cap",
+  // and a constant copied from transcript.ts would be a second one, free to drift from the first.
+  // Residual, accepted knowingly: two DIFFERENT messages sharing the whole surviving prefix retire
+  // each other. At that length they are the same document, and exact-match already carries the same
+  // exposure for the same message sent twice.
+  return pre.length > 0 && o.text.length > pre.length && o.text.startsWith(pre);
+}
 // Paint the feed from the last server snapshot + any optimistic (locally-sent, not-yet-echoed)
 // bubbles. An optimistic bubble is dropped once the transcript echoes the same user text (or
 // after 2min as a safety valve, so a paraphrased echo can't leave a ghost forever).
@@ -2405,7 +2434,7 @@ function paintFeed() {
   const items = lastDrill ? lastDrill.items : [];
   // A plain send reconciles on exact text; an attachment/voice send on the server-issued match
   // token (the unique inbox filename / the transcript) that the feed echo is guaranteed to carry.
-  optimistic = optimistic.filter(o => !items.some(i => i.role === "user" && (o.match ? (i.text.includes(o.match) || String(i.img || i.att || "").includes(o.match)) : i.text.trim() === o.text)) && Date.now() - o.at < 120000);
+  optimistic = optimistic.filter(o => !items.some(i => echoes(i, o)) && Date.now() - o.at < 120000);
   // The newest reply renders unfolded (see bubble()), and a PAYLOAD-clipped one would then show its
   // first 4000 chars with no fold bar left to fetch the rest — so the fetch the tap used to make
   // happens here. Once per uuid and never retried: api() raises its own toast, so a read that keeps
@@ -2581,6 +2610,23 @@ async function renderDrill() {
 }
 async function sessionAct(action, text) {
   const d = await writeOp("/api/session/act", { sid: drillSid, action, ...(text ? { text } : {}) });
+  return !!d;
+}
+// The composer's own send, which is the one action the daemon may answer with a QUESTION instead of
+// a result: a /clear under the 🧹 /clear approval setting comes back as { confirm } with the pane
+// untouched. One setting, every surface — the daemon reads it, so this can't disagree with the chat.
+// askConfirm is the app's existing confirm (Telegram's native one, the browser's otherwise), already
+// what closing a session and trashing a file use. Declining returns false and takes the same path a
+// failed send does, which hands the draft back.
+// The sid is captured ONCE: this awaits a dialog, and re-reading drillSid afterwards is the bug that
+// sends a staged file to whichever session you switched to (see attachToSession).
+async function sendToSession(text) {
+  const sid = drillSid;
+  let d = await writeOp("/api/session/act", { sid, action: "send", text });
+  if (d && d.confirm) {
+    if (!(await askConfirm(d.confirm))) return false;
+    d = await writeOp("/api/session/act", { sid, action: "send", text, confirmed: true });
+  }
   return !!d;
 }
 
@@ -2768,8 +2814,8 @@ $("dsend").onclick = async () => {
   if (!INSTANT_CMD.test(text)) workOptimisticAt = Date.now();
   paintFeed();
   $("dfeed").scrollTop = $("dfeed").scrollHeight;   // sending always reveals your own message
-  if (await sessionAct("send", text)) { if (o) o.state = "sent"; paintFeed(); setTimeout(renderDrill, 800); }
-  else { optimistic = optimistic.filter(x => x !== o); workOptimisticAt = 0; paintFeed(); ta.value = text; syncComposerMode(); }   // failed — give the draft back, and take the indicator with it
+  if (await sendToSession(text)) { if (o) o.state = "sent"; paintFeed(); setTimeout(renderDrill, 800); }
+  else { optimistic = optimistic.filter(x => x !== o); workOptimisticAt = 0; paintFeed(); ta.value = text; syncComposerMode(); }   // failed, or a confirm declined — give the draft back, and take the indicator with it
 };
 
 // ---- Compose-row attachment + voice note ----

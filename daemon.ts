@@ -14998,7 +14998,19 @@ async function dismissFeedbackSurvey(pane: string): Promise<void> {
   await waitForSettle(pane, 150, 2000).catch(() => {})
 }
 
-async function webappSessionAction(userId: string, sid: string, action: 'stop' | 'compact' | 'send' | 'close' | 'model' | 'effort', text?: string): Promise<string | null> {
+// The commands that wipe a conversation, and the ONE setting that gates them. `confirmReset` was
+// honoured only by the chat's own /clear (confirmResetSession) — a mini-app composer sent `/clear`
+// straight to the pane through planSlash, so a box that asked in Telegram reset without asking in
+// the app. Measured, not reasoned: with the setting on, POST send "/clear" answered {ok:true} and
+// took the feed 2 items → 0. `/reset` is here for the day slash-policy stops refusing it as a
+// bridge command; today the composer never gets this far with it.
+const WEBAPP_RESET_COMMANDS = new Set(['/clear', '/reset'])
+
+// `{ confirm }` is not an error and does not share the error channel: it means the daemon did
+// NOTHING and is asking. The client raises its own confirm and re-sends with confirmed: true.
+type WebappActionResult = string | { confirm: string } | null
+
+async function webappSessionAction(userId: string, sid: string, action: 'stop' | 'compact' | 'send' | 'close' | 'model' | 'effort', text?: string, opts?: { confirmed?: boolean }): Promise<WebappActionResult> {
   const pane = await paneForSession(sid).catch(() => null)
   // Close runs BEFORE the liveness bail: ending an already-dead session must still clean up its row.
   if (action === 'close') {
@@ -15089,6 +15101,15 @@ async function webappSessionAction(userId: string, sid: string, action: 'stop' |
   // model?" dialog on the pane while the composer reported success. Both predicates, for the reason
   // the dial's guard states — onNormalPrompt stays true for the whole of a running turn.
   if (plan.kind === 'pass' && (!onNormalPrompt(cap) || detectWorking(cap))) return 'the session is mid-turn — try again when it goes idle'
+  // The wipe confirmation, and it sits AFTER every refusal above on purpose: the ask fires only
+  // when the clear would truly land, so a mid-turn /clear still gets its plain "mid-turn" reason
+  // rather than a dialog that ends in one. The setting is read HERE rather than trusted from the
+  // client — a client holding a stale copy of it cannot fail this open.
+  if (plan.kind === 'pass' && opts?.confirmed !== true
+      && WEBAPP_RESET_COMMANDS.has(plan.command.split(/\s+/)[0].toLowerCase())
+      && loadAccess().confirmReset !== false) {
+    return { confirm: 'Clear this conversation? The session keeps running — the transcript above is gone.' }
+  }
   await dismissFeedbackSurvey(pane)
   const sent = await pasteGuarded(pane, watcher, msg)
   return sent.ok ? null : (sent.offered.length ? paletteRefusalText(msg, sent.offered) : 'delivery failed')

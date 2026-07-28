@@ -39,7 +39,9 @@ export interface WebappDeps {
   listSessions?: () => Promise<SessionCard[]> | SessionCard[]        // fleet dashboard: one card per live session
   readSessionFeed?: (sid: string) => Promise<SessionFeed | null> | SessionFeed | null   // drill-in: recent conversation + live activity
   readSessionMessage?: (sid: string, uuid: string) => Promise<string | null> | string | null   // ONE row's full unclamped text, for expanding a clipped bubble
-  sessionAction?: (userId: string, sid: string, action: SessionAct, text?: string) => Promise<string | null> | string | null   // stop/compact/send → error string or null
+  // stop/compact/send → error string, or null on success, or `{ confirm }` when the action needs the
+  // user's yes first (a /clear under the 🧹 /clear approval setting) — nothing was done in that case.
+  sessionAction?: (userId: string, sid: string, action: SessionAct, text?: string, opts?: { confirmed?: boolean }) => Promise<string | { confirm: string } | null> | string | { confirm: string } | null
   sessionAttach?: (userId: string, sid: string, fileName: string, data: Uint8Array, opts: { caption?: string; voice?: boolean }) => Promise<{ error: string } | { delivered: string; match: string }>   // compose-row file/voice → bubble text + reconcile token
   sessionSpawn?: (userId: string, name: string, opts: { model?: string; effort?: string; mode?: string; headless?: boolean }) => Promise<{ error: string } | { sid: string; name: string }>   // "+" new session with dials
   readAutomation?: () => Promise<AutomationView> | AutomationView    // cron + queued prompts + budget
@@ -363,7 +365,7 @@ async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: strin
   if (url.pathname === '/api/session/act') {
     if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405)
     if (!deps.sessionAction) return json({ error: 'unavailable' }, 404)
-    const body = await req.json().catch(() => null) as { sid?: unknown; action?: unknown; text?: unknown } | null
+    const body = await req.json().catch(() => null) as { sid?: unknown; action?: unknown; text?: unknown; confirmed?: unknown } | null
     const action = String(body?.action || '') as SessionAct
     if (!body || typeof body.sid !== 'string' || !['stop', 'compact', 'send', 'close', 'model', 'effort'].includes(action)) return json({ error: 'bad body' }, 400)
     // The dial actions log their VALUE (it is short and it is the whole point of the call); send
@@ -371,8 +373,12 @@ async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: strin
     const detail = action === 'send' ? ` chars=${String(body.text ?? '').length}`
       : action === 'model' || action === 'effort' ? ` to=${String(body.text ?? '')}` : ''
     deps.log(`webapp: session ${action} sid=${body.sid}${detail} user=${userId}`)
-    const err = await deps.sessionAction(userId, body.sid, action, typeof body.text === 'string' ? body.text : undefined)
-    return err ? json({ error: err }, 400) : json({ ok: true })
+    const r = await deps.sessionAction(userId, body.sid, action, typeof body.text === 'string' ? body.text : undefined,
+      body.confirmed === true ? { confirmed: true } : undefined)
+    // A confirm is a 200 with nothing done — it is a question, not a failure, and routing it through
+    // the 400/error channel would surface it as the composer's red toast instead of a dialog.
+    if (r && typeof r === 'object') return json({ confirm: r.confirm })
+    return r ? json({ error: r }, 400) : json({ ok: true })
   }
   // "+" new session with dials (same auth stance as session/act — spawning a topic session is a
   // chat-level control, not a filesystem write). Audited.

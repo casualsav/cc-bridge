@@ -165,7 +165,11 @@ test('console endpoints: sessions/auto reads + session act route to deps; missin
     token: TOKEN, isAllowed: id => id === '42', log: () => {}, staticDir: join(import.meta.dir, 'webapp'), port: 0,
     listSessions: () => [{ sid: 's1', name: 'money', cwd: '/x', agent: 'claude', alive: true, working: true, subagents: 0, task: 'Bash ls', model: 'Fable', effort: 'high', mode: 'bypassPermissions', ctxPct: 12, h5Pct: 40, branch: 'main', tier: null }],
     readAutomation: () => ({ cron: [], queue: [], budget: { spent: 1.5, cap: null } }),
-    sessionAction: (_u, sid, action, text) => { acted.push([sid, action, text]); return null },
+    // The confirm branch: an unconfirmed /clear is answered with a question, a confirmed one runs.
+    sessionAction: (_u, sid, action, text, opts) => {
+      acted.push([sid, action, text, ...(opts?.confirmed ? ['confirmed'] : [])])
+      return text === '/clear' && !opts?.confirmed ? { confirm: 'Clear this conversation?' } : null
+    },
     automationCreate: async (_u, spec) => { acted.push(['create', spec.when, spec.sid, spec.text]); return { summary: 'in 2h → money' } },
     sessionSpawn: async (_u, name, opts) => { acted.push(['spawn', name, opts.headless === true]); return { sid: 's2', name } },
   })
@@ -179,6 +183,15 @@ test('console endpoints: sessions/auto reads + session act route to deps; missin
     const act = await fetch(`${base}/api/session/act`, { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify({ sid: 's1', action: 'send', text: 'hi' }) })
     expect(act.status).toBe(200)
     expect(acted).toEqual([['s1', 'send', 'hi']])
+    // A confirm rides back as a 200 carrying the question — NOT the 400/error channel, which the
+    // composer paints as a red toast. The second POST carries the yes and is the one that acts.
+    const ask = await fetch(`${base}/api/session/act`, { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify({ sid: 's1', action: 'send', text: '/clear' }) })
+    expect(ask.status).toBe(200)
+    expect(await ask.json()).toEqual({ confirm: 'Clear this conversation?' })
+    const yes = await fetch(`${base}/api/session/act`, { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify({ sid: 's1', action: 'send', text: '/clear', confirmed: true }) })
+    expect(yes.status).toBe(200)
+    expect(await yes.json()).toEqual({ ok: true })
+    expect(acted).toContainEqual(['s1', 'send', '/clear', 'confirmed'])
     const bad = await fetch(`${base}/api/session/act`, { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify({ sid: 's1', action: 'reboot' }) })
     expect(bad.status).toBe(400)
     // The mini-app dial: model/effort ride the same endpoint, carrying the chosen alias in `text`.
