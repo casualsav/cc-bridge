@@ -120,6 +120,7 @@ check(reclaimed >= 40, `~${reclaimed.toFixed(0)}px of transcript reclaimed`);
 // title on half-veiled transcript, which the deleted glyph stroke was covering for) and would be
 // false for any shape that lands the ramp below the band, including the right one. What matters is
 // the profile: solid where the title sits, still falling below it, gone by its own floor.
+let scrimSolid = 0;
 const alphas = await (async () => {
   const rect = await fsPage.evaluate(() => {
     const drill = document.getElementById("drill");
@@ -131,9 +132,15 @@ const alphas = await (async () => {
     probe.style.cssText = "position:absolute;left:0;right:0;top:0;height:" + h + "px;background:#fff;z-index:0";
     drill.appendChild(probe);
     const r = probe.getBoundingClientRect();
-    return { x: r.x, y: r.y, width: r.width, height: r.height };
+    // Where the solid part ends, resolved from the SAME custom property the gradient is built on
+    // rather than restated here, so the check cannot drift from the CSS.
+    const m = document.createElement("div");
+    m.style.cssText = "position:absolute;height:var(--scrim-solid);visibility:hidden";
+    drill.appendChild(m); const solid = m.getBoundingClientRect().height; m.remove();
+    return { x: r.x, y: r.y, width: r.width, height: r.height, solid };
   });
-  const strip = await fsPage.screenshot({ clip: rect });
+  scrimSolid = rect.solid;
+  const strip = await fsPage.screenshot({ clip: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } });
   const { execFileSync } = await import("node:child_process");
   const out = execFileSync("python3", ["-c", `
 import sys, io
@@ -146,10 +153,18 @@ print(" ".join(str(px[8, y][0]) for y in range(im.size[1])))
   return out;   // deviceScaleFactor is 1 here, so index === CSS px
 })();
 const atBandFloor = alphas[Math.min(alphas.length - 1, NOTCH + CHROME - 1)];
+const atSolid = alphas[Math.max(0, Math.round(scrimSolid) - 4)];
 const jumps = alphas.slice(1).map((v, i) => Math.abs(v - alphas[i]));
 check(parseFloat(fs.scrimH) > NOTCH + CHROME,
   `the scrim runs BELOW the band so its ramp has somewhere to land (${fs.scrimH} against ${NOTCH + CHROME}px of chrome)`);
-check(atBandFloor < 60, `…and it is still at full strength where the title sits (${atBandFloor}/255 of the probe survives at the band's floor)`);
+// The invariant is not a number, it is a RELATIONSHIP, and stating it that way is what makes the two
+// modes one shape: the solid part ends at the NAME's own floor, here exactly as in normal mode. The
+// check it replaces asked whether the scrim was at full strength at the BAND's floor, which was true
+// of the old fullscreen shape (solid all the way down to --safe-top) and false of the right one — it
+// failed the fix rather than the defect.
+check(near(scrimSolid, fs.name.bottom, 1.5), `the solid part ends at the NAME's floor, the same relationship normal mode has (${scrimSolid.toFixed(1)} vs ${fs.name.bottom.toFixed(1)})`);
+check(atSolid < 40, `…and is at full strength there (${atSolid}/255 of the probe survives just above it)`);
+check(atBandFloor > 40 && atBandFloor < 235, `…with the fade already running by the band's floor (${atBandFloor}/255)`);
 // SMOOTHNESS, scale-free — the absolute 12/255 this replaces was really measuring the ramp's
 // LENGTH, and the owner has now shortened it twice ("one line of text distance beneath the name/cwd
 // is all that's needed"). The same total drop over a third of the distance is three times as steep

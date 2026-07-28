@@ -464,11 +464,19 @@ the fourth. What was NOT changed, because it was measured first: the text bubble
 the stamp's ink **4.2px** above the bubble's floor against Telegram's **6.3px** — already tighter
 than the reference the ask came from.
 
-**The page takes the client's HEADER colour, and it is a TRIAL in its own commit.** `--bg` reads
-`--tg-theme-header-bg-color` first (a Bot API 7.0 theme param), falling back to `--tg-theme-bg-color`
-— so the mini app reads as one surface with the Telegram bar above it instead of a lighter panel
-bolted underneath (measured off the owner's screenshot: their bar `#1D2733` against our page
-`#212D3B`). Every veil, scrim and fill in the file is a `color-mix` of `--bg`, so the one token
+**The page is PINNED to Telegram's own chrome colour, and it is a TRIAL in its own commit.**
+`--bg` reads `--tg-theme-header-bg-color` first (a Bot API 7.0 theme param) — but that param is *not*
+the colour the client paints: it reported `#252D3A` on the owner's device while the bar above the
+webview measured **`#1D2733`**, sampled off two of his screenshots where the status bar and the
+✕ Claude Code row are the same flat value to the unit. No variable carries the real one, so
+`pinChromeColour()` sets `--bg` to the sampled hex — his instruction, "settle it by sampling the
+exact hex colour number". It is gated on the **resolved page being dark**, read from a rendered probe
+rather than from `tg.colorScheme`: the flag is only as good as the client that sets it, while the
+probe answers the question actually being asked. A light theme keeps its own colours, where the
+mismatch has not been measured and a dark constant would be a disaster rather than a mismatch. It
+re-runs on `themeChanged` — and any FIXTURE that injects theme variables has to call it too, or a
+page that loaded dark keeps its pinned `--bg` under black type and the probe reports "no ink found"
+for a theme that renders correctly on a device. Every veil, scrim and fill in the file is a `color-mix` of `--bg`, so the one token
 carries all of them; `scripts/webapp-measure/headercolor.mjs` asserts exactly that, through an absurd
 probe colour, plus the fallback control (a client without the param renders byte-identically). **The
 known risk, and why it is revertable on its own:** `--sec` is every raised surface here — agent

@@ -271,7 +271,11 @@ const inks = {};
 for (const [theme, vars] of [["dark", null], ["light", LIGHT]]) {
   await p.evaluate(v => { const r = document.documentElement;
     if (v) for (const [k, val] of Object.entries(v)) r.style.setProperty(k, val);
-    else for (const k of [...r.style].filter(k => k.startsWith("--tg-theme"))) r.style.removeProperty(k); }, vars);
+    else for (const k of [...r.style].filter(k => k.startsWith("--tg-theme"))) r.style.removeProperty(k);
+    // …and re-run the chrome pin, which is what the CLIENT does through `themeChanged`. Without it a
+    // page that loaded dark keeps its pinned --bg while the type turns black: dark ground, dark text,
+    // and halo.py reports "no ink found" for a theme that renders correctly on a device.
+    pinChromeColour(); }, vars);
   await p.waitForTimeout(250);
   // The ink colour halo.py measures AGAINST, read from the page per theme rather than restated in
   // the probe. Inferring ink from "the biggest excursion in the crop" is what a first version did,
@@ -314,8 +318,12 @@ for (const [theme, vars] of [["dark", null], ["light", LIGHT]]) {
 // The claim is that the label's ink loses contrast under the scrim the way its neighbours do.
 console.log("\n6. the fold label is in the transcript's plane");
 // A message long enough to clip (LONG_MSG), so a real .more bar exists to measure.
+// A USER bubble, and that is what makes the diff mean anything: an unbubbled assistant row is
+// transparent, so over the page the scrim is invisible by construction (both are --bg) and the only
+// thing that can move is a few rows of glyph — it measured 0.72 against a threshold of 2 and failed
+// a page that was working. The bright fill is the signal; the label over it carries --btn.
 await p.evaluate(items => { window.__feed = { ...window.__feed, items }; feedSig = ""; renderDrill(); },
-  [{ role: "assistant", uuid: "big", ts: ts, text: "x ".repeat(700) }, ...CHAT]);
+  [{ role: "user", uuid: "big", ts: ts, text: "x ".repeat(700) }, ...CHAT]);
 await p.waitForTimeout(700);
 // Comparing the label's ink in the band against its ink lower down does NOT work, and the failed
 // version is worth keeping in view: the label's rect, once it is inside the band, also contains the
@@ -333,7 +341,17 @@ const diffAt = async sel => {
     const e = document.querySelector(s); if (!e) return null;
     const r = e.getBoundingClientRect();
     if (r.height < 4 || r.width < 4) return null;
-    return { x: Math.max(0, Math.round(r.x)), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) };
+    // Clipped to the SCRIM's own extent, not to the whole element. The control is a 268px collapsed
+    // bubble and the scrim reaches its top 66px, so averaging the diff over the entire element
+    // divides the signal by four — which is exactly how this control failed when the scrim was
+    // shortened (0.72 against a threshold of 2) while doing its job perfectly inside the band.
+    // …and clamped to the VIEWPORT at the top, which the element's own rect is not: a collapsed
+    // bubble scrolled until its fold label reaches the band has its top a couple of hundred pixels
+    // above the screen, so an unclamped crop is mostly off-screen and averages whatever survives.
+    const scrim = parseFloat(getComputedStyle(document.getElementById("drill"), "::before").height) || r.bottom;
+    const y0 = Math.max(0, r.y), y1 = Math.min(r.bottom, scrim);
+    if (y1 - y0 < 4) return null;
+    return { x: Math.max(0, Math.round(r.x)), y: Math.round(y0), width: Math.round(r.width), height: Math.round(y1 - y0) };
   }, sel);
   if (!clip) return null;
   const on = await p.screenshot({ clip });

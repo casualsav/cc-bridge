@@ -179,7 +179,14 @@
        fullscreen height was scaled as if the stops ran from the top, so its solid part covered the
        band's first quarter and the title sat on half-veiled transcript. headerup.mjs measures the
        profile now instead of the height, which is what caught it. */
-    --scrim-solid: calc(var(--safe-top) + 10px + var(--h-pad) + var(--h-l1));
+    /* Where the header's box begins, which normal mode gets from --safe-top plus .vhead's own 10px
+       margin. It exists as a token because TWO rules need it and they were drifting apart: .vhead's
+       `top` and the scrim's solid length. In fullscreen the header rides up into the client's chrome
+       band and only this moves — the scrim then follows for free, which is what the first fullscreen
+       shape failed to do (it took --safe-top, the band's FLOOR, so its solid part ended ~22px below
+       the name and the fade landed a line and a half too low on screen). */
+    --head-top: calc(var(--safe-top) + 10px);
+    --scrim-solid: calc(var(--head-top) + var(--h-pad) + var(--h-l1));
     --scrim-ramp: calc(var(--h-l2) + var(--t-msg) * 1.45);
   }
   @supports (color: color-mix(in srgb, red 50%, blue)) {
@@ -260,8 +267,8 @@
      padding-top — the whole fullscreen offset mechanism — does not move it. In flow the row was
      pushed clear of Telegram's ✕ pill for free; out of flow it has to ask for the same offset by
      name. scripts/webapp-measure/fullscreen.mjs is what says so (drillhead moved 0.00px of 93). */
-  #drill .vhead { --title-align: center; position: absolute; top: var(--safe-top); left: 0; right: 0; z-index: 2;
-    margin: 10px 10px 2px; padding: 0; border-bottom: none;
+  #drill .vhead { --title-align: center; position: absolute; top: var(--head-top); left: 0; right: 0; z-index: 2;
+    margin: 0 10px 2px; padding: 0; border-bottom: none;
     background: transparent; gap: 6px; }
   /* SELF-CONTAINED, and a single class on purpose. These buttons are deliberately NOT .ghost, and the
      shared appearance deliberately does NOT live on a `#drill .vhead > *` rule: the base used to be
@@ -495,8 +502,14 @@
      Russian is wider and would eat the left one. The native BackButton is what makes that safe, since
      an icon-only ← does not grow with the language; --chrome-l drops to the narrower value when it
      is up (see BACK_NATIVE), and the fallback keeps the wide clearance. */
-  html.fs #drill .vhead { top: calc(var(--chrome-top) + (var(--chrome-h) - var(--hbtn-d)) / 2);
-    left: var(--chrome-l, 72px); right: var(--chrome-r, 70px); margin: 0; }
+  /* ONE number moves the header up into the client's band, and the ceiling scrim rides along with it
+     because both read --head-top. The scrim used to take --safe-top here — the band's FLOOR — which
+     put its solid part ~22px below the name and the whole fade a line and a half lower on screen
+     than in normal mode. The owner: "in full screen mode the top gradient is much lower than it
+     should be… it should have the same one line of text measurement of where it begins under the
+     CWD." Now it does, by construction rather than by a second set of numbers. */
+  html.fs { --head-top: calc(var(--chrome-top) + (var(--chrome-h) - var(--hbtn-d)) / 2); }
+  html.fs #drill .vhead { left: var(--chrome-l, 72px); right: var(--chrome-r, 70px); margin: 0; }
   /* The pause folds INSIDE the capsule, on its right, because the band is only ~218px wide and three
      separate containers cannot live in it: 44 + 44 + gaps leaves 118px for a name and a path. One
      container spends nothing on gaps and lets the title column keep everything the button does not. */
@@ -535,7 +548,7 @@
      which put the ramp's zero AT the band's floor and left the title on half-veiled transcript; the
      deleted glyph stroke was what made that survivable, so this is the fullscreen half of removing
      it. Nothing else here changes: the ::before rule above reads both lengths. */
-  html.fs { --scrim-solid: var(--safe-top); }
+
   /* THE RAMP IS STEEPER THAN IT WAS, and that is the second half of removing the title's capsule —
      not a taste pass on the scrim. The capsule was the contrast floor for both title lines, and with
      it gone the ramp is the only ground they have. Where it lands matters: the ramp is zero at the
@@ -1419,12 +1432,37 @@ function syncSafeTop() {
   const stop = document.getElementById("dstop");
   if (head && cap && stop) (full ? cap : head).appendChild(stop);
 }
+// Telegram's own chrome colour is NOT in themeParams, and that is the whole reason this constant
+// exists. `header_bg_color` reports #252D3A on the owner's client while the bar it actually paints
+// measures #1D2733 — sampled off his screenshots, where the status bar and the ✕ Claude Code row are
+// the same flat value to the unit. No variable carries it, so the page is pinned to the sampled hex:
+// his instruction, "settle it by sampling the exact hex colour number".
+// Gated on the resolved theme being DARK, and read from a rendered probe rather than from
+// tg.colorScheme: the flag is only as good as the client that sets it, while the probe answers the
+// question actually being asked — is the page we are about to override a dark one. A light theme
+// keeps its own colours, where this mismatch has not been measured and a dark constant would be a
+// disaster rather than a mismatch.
+const TG_CHROME_DARK = "#1D2733";
+function pinChromeColour() {
+  const root = document.documentElement;
+  root.style.removeProperty("--bg");   // ask the theme first, or this reads its own last answer
+  const probe = document.createElement("div");
+  probe.style.cssText = "position:absolute;width:0;height:0;background:var(--bg)";
+  document.body.appendChild(probe);
+  const [r, g, b] = (getComputedStyle(probe).backgroundColor.match(/\d+/g) || [255, 255, 255]).map(Number);
+  probe.remove();
+  if ((0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 < 0.5) root.style.setProperty("--bg", TG_CHROME_DARK);
+}
+pinChromeColour();
 if (tg) {
   syncSafeTop();
   // The insets arrive asynchronously and change independently of the fullscreen flag (rotation,
   // a client that reports them a beat after ready()), so all three events feed the same recompute.
   for (const e of ["fullscreenChanged", "safeAreaChanged", "contentSafeAreaChanged"])
     try { tg.onEvent(e, syncSafeTop); } catch {}
+  // A theme switch re-runs the pin, both directions: into dark it applies, out of it the removeProperty
+  // at the top hands the page back to the theme.
+  try { tg.onEvent("themeChanged", pinChromeColour); } catch {}
 }
 const INIT = (tg && tg.initData) || "";
 const AUTH = { Authorization: "tma " + INIT };

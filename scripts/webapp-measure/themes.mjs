@@ -18,7 +18,10 @@ for (const [name, vars] of [["dark",null],["light",LIGHT]]) {
   await p.goto("file:///home/ubuntu/projects/cc-bridge/webapp/index.html",{waitUntil:"domcontentloaded"});
   await p.waitForTimeout(300);
   if (vars) await p.evaluate(v=>{ for (const [k,val] of Object.entries(v))
-    document.documentElement.style.setProperty("--tg-theme-"+k, val); }, vars);
+    document.documentElement.style.setProperty("--tg-theme-"+k, val);
+    // The client fires `themeChanged` after a switch and the page re-runs its chrome pin on it; a
+    // fixture that only sets the variables leaves a dark-pinned --bg under light type.
+    pinChromeColour(); }, vars);
   await p.evaluate(items=>{ window.api = async path => path.includes("feed") ? { working:false, items } : {};
     openDrill("fake-sid","session"); }, ITEMS);
   await p.waitForTimeout(600);

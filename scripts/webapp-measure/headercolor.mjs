@@ -11,8 +11,8 @@ import { join } from "node:path";
 //   node headercolor.mjs [page]
 //
 // Two controls, because a colour test passes trivially in both directions:
-//   · the FALLBACK: with no header_bg_color injected (an older client), the page must land on
-//     exactly the colour it had before — this change must be invisible there, not merely close;
+//   · the LIGHT theme, which must be left entirely alone — the pin is a dark constant and applying
+//     it to a light client would be a disaster rather than a mismatch;
 //   · the COLLISION: --sec is every raised surface here (agent cards, dividers). It is reported
 //     against the new --bg rather than asserted, because whether they are too close is the owner's
 //     eye and not a threshold — but a run that flattens them should say so out loud.
@@ -73,25 +73,42 @@ async function open(headerColour) {
   return out;
 }
 
-// ---- the fallback control FIRST: no header colour, nothing may move ----------------------------
+// ---- the PIN: a dark theme lands on the sampled hex, whatever the client reported ---------------
+// header_bg_color is not Telegram's chrome colour — it reported #252D3A on the owner's client while
+// the bar measured #1D2733 — so the page is pinned to the sampled value on any dark theme. Both
+// frames below inject a DARK theme, so both must land there regardless of what they were told.
+const CHROME = [29, 39, 51];
 const plain = await open(null);
-check(near(rgb(plain.body), rgb(CHAT)), `without header_bg_color the page is the chat colour, unchanged (${plain.body})`);
+check(near(rgb(plain.body), CHROME), `a dark theme is pinned to the sampled chrome colour with no header param at all (${plain.body})`);
 
 // ---- with it, every derived surface follows -----------------------------------------------------
 const themed = await open(HEADER);
-const want = rgb(HEADER);
+const want = CHROME;
 console.log(`   --bg ${themed.bg} · body ${themed.body} · strip ${themed.strip} · pill ${themed.pill}`);
-check(near(rgb(themed.body), want), `the page takes the header colour (${themed.body})`);
+check(near(rgb(themed.body), CHROME), `…and with one, which the client reported wrong (${themed.body} against its ${HEADER})`);
 // A color-mix renders as `color(srgb …)` with 0-1 channels — scaled here, never compared raw, which
 // is halo.py's lesson about the same syntax.
 const mix = s => { const n = (s.match(/color\(srgb ([\d.]+) ([\d.]+) ([\d.]+)/) || []).slice(1).map(Number); return n.length === 3 ? n.map(v => Math.round(v * 255)) : rgb(s) };
 check(near(mix(themed.strip), want, 3), `the composer strip's veil is mixed from it (${themed.strip})`);
 check(near(mix(themed.pill), want, 3), `the working pill's fill is mixed from it (${themed.pill})`);
-check(themed.ceiling.includes("80, 20, 120") || near(mix(themed.ceiling), want, 3), `the ceiling scrim's ramp is mixed from it (${themed.ceiling.slice(0, 60)}…)`);
-check(themed.fold.includes("80, 20, 120") || near(mix(themed.fold), want, 3), `the collapsed-message fold fades to it (${themed.fold.slice(0, 60)}…)`);
+check(themed.ceiling.includes("29, 39, 51") || near(mix(themed.ceiling), want, 3), `the ceiling scrim's ramp is mixed from it (${themed.ceiling.slice(0, 60)}…)`);
+check(themed.fold.includes("29, 39, 51") || near(mix(themed.fold), want, 3), `the collapsed-message fold fades to it (${themed.fold.slice(0, 60)}…)`);
 // The chips are 44% of --bg by design, so this asserts the PROPORTION rather than the colour: a chip
 // that stopped following would read as the old page's 44%, which is a different hue entirely.
 check(near(mix(themed.chip), want.map(v => Math.round(v * 0.44)), 3), `the header chips are tinted from it, at their own 44% (${themed.chip})`);
+
+// ---- the LIGHT control: the pin must not touch it ------------------------------------------------
+const light = await b.newPage({ viewport: { width: 375, height: 812 }, deviceScaleFactor: 2 });
+await light.goto("file://" + PAGE, { waitUntil: "domcontentloaded" });
+await light.evaluate(() => {
+  for (const [k, v] of Object.entries({ "bg-color": "#ffffff", "secondary-bg-color": "#f1f1f1",
+    "text-color": "#000000", "hint-color": "#707579", "button-color": "#2481cc", "button-text-color": "#ffffff" }))
+    document.documentElement.style.setProperty("--tg-theme-" + k, v);
+});
+await light.evaluate(() => pinChromeColour());
+const lightBg = await light.evaluate(() => getComputedStyle(document.body).backgroundColor);
+await light.close();
+check(near(rgb(lightBg), [255, 255, 255]), `a LIGHT theme is left alone — the pin is a dark constant (${lightBg})`);
 
 // ---- the collision report, on the REAL colours rather than the synthetic probe -------------------
 // The purple above is chosen to make a wrong answer obvious; it says nothing about whether raised
