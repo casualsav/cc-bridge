@@ -127,7 +127,17 @@
     --ta-lh: 1.35;
     --ta-pad-y: 9px;
     --r-xs: 4px; --r-sm: 8px; --r-md: 12px; --r-xl: 16px; --r-2xl: 20px;
-    --bg: var(--tg-theme-bg-color, #17212b);
+    /* The page takes the client's HEADER colour, not its chat background — the owner's trial, so the
+       mini app reads as one surface with the Telegram bar above it instead of a lighter panel bolted
+       under it (measured off his screenshot: their bar #1D2733 against our page #212D3B). Every
+       gradient, veil and scrim in this file is a color-mix of --bg, so this one token carries all of
+       them; nothing else needs to move.
+       The fallback CHAIN is what makes it safe to try: `header_bg_color` is a Bot API 7.0 theme
+       param, so a client that does not send it lands on exactly the colour this page has always
+       used. What it cannot cover is a theme whose header happens to equal its secondary_bg_color —
+       --sec is what every raised surface here is (agent cards, settings cards, dividers), and it
+       would flatten into the page. That is a look-and-see, which is why this is its own commit. */
+    --bg: var(--tg-theme-header-bg-color, var(--tg-theme-bg-color, #17212b));
     --sec: var(--tg-theme-secondary-bg-color, #232e3c);
     --text: var(--tg-theme-text-color, #f5f5f5);
     --hint: var(--tg-theme-hint-color, #7d8b99);

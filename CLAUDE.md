@@ -464,6 +464,20 @@ the fourth. What was NOT changed, because it was measured first: the text bubble
 the stamp's ink **4.2px** above the bubble's floor against Telegram's **6.3px** — already tighter
 than the reference the ask came from.
 
+**The page takes the client's HEADER colour, and it is a TRIAL in its own commit.** `--bg` reads
+`--tg-theme-header-bg-color` first (a Bot API 7.0 theme param), falling back to `--tg-theme-bg-color`
+— so the mini app reads as one surface with the Telegram bar above it instead of a lighter panel
+bolted underneath (measured off the owner's screenshot: their bar `#1D2733` against our page
+`#212D3B`). Every veil, scrim and fill in the file is a `color-mix` of `--bg`, so the one token
+carries all of them; `scripts/webapp-measure/headercolor.mjs` asserts exactly that, through an absurd
+probe colour, plus the fallback control (a client without the param renders byte-identically). **The
+known risk, and why it is revertable on its own:** `--sec` is every raised surface here — agent
+cards, settings cards, dividers — and on a theme whose header colour is close to its
+`secondary_bg_color` they flatten into the page. With the fallback secondary against the owner's own
+measured header the two sit **9 channel units apart**, which the harness prints as a warning rather
+than a failure: how close is too close is his eye, and his client's real secondary is not knowable
+from here.
+
 **Theming ignores `prefers-color-scheme` completely.** Colours come from the `--tg-theme-*`
 properties Telegram injects, with dark fallbacks in `:root`. A light-theme check that sets the media
 feature renders the dark theme and passes without testing anything. Set the variables instead

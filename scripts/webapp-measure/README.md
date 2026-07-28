@@ -97,6 +97,14 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   "1 attachment", no optimistic bubble for any slash command
                                   #   (plus the empty state after /clear), and the header losing its
                                   #   capsule. Same page-path control: 24 checks fail pre-change
+    node headercolor.mjs [page]   # the page takes the client's HEADER colour (a trial), and it has to
+                                  #   reach EVERYTHING — the ceiling scrim, the composer strip, the
+                                  #   working pill, the fold's veil and the chips' 44% tint are each
+                                  #   asserted to be mixed from it, through a deliberately absurd
+                                  #   probe colour so a literal left behind is obvious. Controls: the
+                                  #   fallback (no header_bg_color → the page is byte-identical), and
+                                  #   a REPORT of how far raised surfaces (--sec) end up from the new
+                                  #   page colour, which is what decides whether the trial survives
     node dockscrim.mjs [page]     # the dock is a SCRIM: invisible over the page, taking ~40% of a
                                   #   passing message's excursion, with the working line's own band
                                   #   left exactly where it was (45% + 60% composites to the old
