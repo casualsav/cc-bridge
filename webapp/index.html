@@ -240,7 +240,15 @@
   .ico { width: 20px; text-align: center; }
   .name { flex: 1; word-break: break-all; }
   .meta { color: var(--hint); font-size: var(--t-meta); white-space: nowrap; }
-  #viewer { position: fixed; inset: 0; background: var(--bg); display: none; flex-direction: column; padding-top: var(--safe-top); }
+  /* z-index 6 is LOAD-BEARING, and its absence was not a latent trap but a live defect: with no
+     z-index this box painted in step 8 (positioned, auto) while every surface it must cover paints
+     in step 9 — .tabs (2), .newfab (3), #drill (5). Being last in the body cannot save it, because a
+     positive z-index outranks `auto` at any source position. .tabs is the reachable half: a
+     body-level sticky nav that showTab() never hides, so it overpainted this header — and captured
+     the taps — on EVERY file opened from the Files tab, leaving no reachable back or close button.
+     6 rather than 5: a tie with #drill resolves by tree order, which is the source-order dependence
+     being fixed, not a statement of it. Above #drill, below the sheets (9). scripts/webapp-measure/viewerz.mjs. */
+  #viewer { position: fixed; inset: 0; background: var(--bg); display: none; flex-direction: column; padding-top: var(--safe-top); z-index: 6; }
   #viewer.show { display: flex; }
   .vhead { padding: 10px var(--sp-3); border-bottom: 1px solid var(--sec); display: flex; gap: var(--sp-2); align-items: center; }
   .vhead .name { font-size: var(--t-sub); }
@@ -1236,8 +1244,10 @@
      - It is STATIC MARKUP, a sibling of the tab, and is never built by renderSessions(). That list is
        wiped and rebuilt on a 4s poll; a control re-created under the thumb loses the tap that lands in
        the swap. showTab() toggles .show, so it also cannot outlive its own screen.
-     - z-index 3 clears the list and the sticky tab bar (2) and stays UNDER #drill/#viewer (5, opaque,
-       so an open session covers it), the sheets (9/10) and the toast (11). An error outranks a
+     - z-index 3 clears the list and the sticky tab bar (2) and stays UNDER #drill (5) and #viewer (6),
+       both opaque, so an open session or file covers it. This line read "#drill/#viewer (5)" while
+       #viewer carried no z-index at all and the pill therefore painted OVER it; #viewer's own rule
+       carries the finding. Also under the sheets (9/10) and the toast (11). An error outranks a
        launcher: .err.float spans the width at the bottom and covers this while it is up, on purpose.
      - The radius is half the HEIGHT, never 50% — a percentage radius on a non-square box draws an
        ellipse whose flanks disagree with the ends.

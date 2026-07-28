@@ -658,9 +658,10 @@ Four couplings that are invisible from the code:
 - **`#tab-sessions`'s bottom padding IS the pill's licence to float** — `--fab-h` plus a gutter either
   side, so the last card can always be scrolled clear of it. Without it the pill permanently covers
   the last card's ✕, which is the failure the whole design has to avoid.
-- **z-index 3**: over the list and the sticky tab bar (2), under `#drill`/`#viewer` (5, opaque, so an
-  open session hides it), the sheets (9/10) and `.err.float` (11). The toast covering it is correct —
-  an error outranks a launcher.
+- **z-index 3**: over the list and the sticky tab bar (2), under `#drill` (5) and `#viewer` (6) —
+  both opaque, so an open session or file hides it — the sheets (9/10) and `.err.float` (11). The
+  toast covering it is correct — an error outranks a launcher. (This line said "`#drill`/`#viewer`
+  (5)" while `#viewer` had no z-index at all; see the ladder paragraph below.)
 - **No shadow, no entrance motion.** This file separates surfaces by fill and inset rings, and the
   list repaints every 4s so any reveal would replay every four seconds, forever.
 
@@ -886,6 +887,34 @@ the broken page. `batch5.mjs` §6 toggles the scrim and diffs — `.more` has an
 not (0.03 on the broken page against 6.72 on the fixed one). Comparing the label's ink in the band
 against its ink lower down does NOT work: once it is inside the band its rect also contains the
 header's own glyphs, and that crop reported *more* contrast veiled than open.
+
+**A FULL-SCREEN surface with no `z-index` is not "top by source order" — it is at the BOTTOM of the
+ladder.** `#viewer` was `position: fixed; inset: 0`, opaque, last in `<body>`, and carried no
+`z-index` at all, which reads as "nothing to declare, it is last so it wins". The opposite: it
+painted in step 8 (positioned, `z-index: auto`) while everything it must cover paints in step 9 —
+`.tabs` (2), `.newfab` (3), `#drill` (5). **A positive z-index outranks `auto` at any source
+position**, so being last in the document could never save it. It is `6` now: above `#drill`, below
+the sheets (9). Deliberately not `5` — a tie resolves by tree order, which is the source-order
+dependence being fixed rather than a statement of intent. Three things to keep:
+
+- **The reachable half was `.tabs`, and the framing is what hid it.** This was filed as a latent trap
+  about `#drill`, and the drill pairing genuinely is unreachable (nothing routes to `openFile()` from
+  a chat, and `showTab()` hides `.newfab` off the Sessions tab). But `.tabs` is a **body-level sticky
+  nav that `showTab()` never hides**, and its 58px band sits exactly on `.vhead` — so **every** file
+  opened from the Files tab had its own header overpainted and its taps captured, leaving no
+  reachable back or close button. Measured, both themes, against served bytes byte-identical to the
+  checkout. The lesson is not about z-index: an "unreachable pairing" was asserted for the two
+  surfaces someone thought to name, and the ladder had a third member nobody enumerated.
+- **The hypothesis was the exact inverse of the truth, and it read as obviously right.** "`#viewer`
+  paints over `#drill` by source order" — in fact showing the viewer over an open drill changed the
+  screen by **0.00**. A guess about paint order is worth nothing without a render.
+- **Hit test and pixel diff answer different halves and neither substitutes.** `elementsFromPoint`
+  says where a *tap* lands, a diff says what you can *see*. Here they agreed and were both wrong, and
+  the fix had to satisfy both. `scripts/webapp-measure/viewerz.mjs` runs both (13 checks fail on the
+  pre-change page). Its one instrument trap: the clean reference for "the viewer on top" must be
+  taken with a **forced** `z-index`, because the unforced viewer is the thing under test — using it
+  as its own reference hides the defect, which is how the tab-bar overlap first surfaced as a
+  1.64-unit impurity in a control that should have read 0.
 
 **The header FLOATS over the feed, and that is what makes the translucency mean anything.**
 `--chip-fill` has been 82% of `--sec` for a while, but the row sat in the flex column *above* the
