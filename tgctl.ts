@@ -18,7 +18,7 @@
 //   tgctl slash  <name> </cmd>                  inject a slash command into a target session's CLI
 //   tgctl keys   <name> <key>… [--force]        send named keystrokes to a target session's pane
 //   tgctl spawn  <name> [--dir p [--create]] [--model m] [--effort e] [text|-]   start a NEW session in its own topic
-//   tgctl kill   <name>                         end a session you spawned (chat lane: any worker)
+//   tgctl kill   <name> [--force]               end a session you spawned (chat lane: any worker)
 //   tgctl reopen <name>                         bring a closed session back up, conversation intact
 //   tgctl roster                                who's live in the room
 //   tgctl history [n]                           recent agent-bus activity
@@ -104,7 +104,9 @@ const HELP: Record<string, string> = {
            '  start a NEW session in its own topic. --dir must already exist unless --create is passed;\n' +
            '  with no --dir the session gets a folder named after it under the base dir.\n' +
            '  The first message is delivered as an ask once its REPL is up.',
-  kill:    'tg kill <name>   end a session you spawned (a chat lane may end any worker). Undo with tg reopen',
+  kill:    'tg kill <name> [--force]   end a session you spawned (a chat lane may end any worker). Undo with tg reopen.\n' +
+           '  A session with background shells still running refuses once and names them — killing it kills them.\n' +
+           '  --force closes anyway; that second, explicit call is how a script says it meant it.',
   reopen:  'tg reopen <name>   bring a closed session back up — same folder, same name, same topic,\n' +
            '  resuming its own conversation where it left off',
   wait:    'tg wait <reason|-> | --clear   say what you are blocked on, so the roster shows it instead of\n' +
@@ -191,7 +193,7 @@ if (BUS.has(cmd)) {
     // Keys are argv words, never stdin: they're a fixed vocabulary, not a body.
     case 'keys':    name = 'keys';    args = { pane, to: pos[0], keys: pos.slice(1), ...flags }; break
     case 'spawn':   name = 'spawn';   args = { pane, name: pos[0], text: body(pos[1], 'spawn') ?? '', ...flags }; break
-    case 'kill':    name = 'kill';    args = { pane, name: pos[0] }; break
+    case 'kill':    name = 'kill';    args = { pane, name: pos[0], ...flags }; break   // --force: close past the background-shell warning
     case 'reopen':  name = 'reopen';  args = { pane, name: pos[0] }; break
     // A reason short enough to read on a card is an argv string, so `-` stays available but is not
     // the documented shape here (nothing in a wait reason wants Markdown).

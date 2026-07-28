@@ -2152,7 +2152,15 @@ function askConfirm(msg) {
 async function closeSessionCard(sid, name) {
   if (!(await askConfirm('Close session "' + name + '"? This ends the Claude session.'))) return;
   // Not sessionAct(): that targets the OPEN drill-in, and this ✕ names a card that may not be it.
-  if (await writeOp("/api/session/act", { sid, action: "close" })) { showOk("Closing…"); renderSessions(); }
+  let d = await writeOp("/api/session/act", { sid, action: "close" });
+  // A SECOND question, and only when the daemon has one: closing kills the session's background
+  // shells with it (measured), so it names them before the fact. The two dialogs ask different
+  // things — this session? then this work? — and a pane with nothing running never sees the second.
+  if (d && d.confirm) {
+    if (!(await askConfirm(d.confirm))) return;
+    d = await writeOp("/api/session/act", { sid, action: "close", confirmed: true });
+  }
+  if (d) { showOk("Closing…"); renderSessions(); }
 }
 // A session's dial — model, effort, mode, agent — as escaped fragments for the LIST card's chips.
 // It used to feed the chat header's subtitle too; that header now shows the session's cwd and its

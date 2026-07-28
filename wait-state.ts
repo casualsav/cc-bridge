@@ -125,38 +125,70 @@ function engineProc(procs: ProcRow[], panePid: number): number {
   return panePid
 }
 
-// What the session is running that outlived its turn, as a label — or null when it is running
-// nothing. The label is the DEEPEST descendant's command ("gh run watch"), not the snapshot shell's
-// own argv, which wraps the real command in a page of quoting and says nothing to a reader.
-export function childWaitLabel(procs: ProcRow[], panePid: number | undefined, since?: number): string | null {
+// One background shell under a pane. `label` already carries the (pre-clear) tag — one formatter, so
+// the roster, the mini app and the kill warning cannot word the same shell differently. `named` says
+// the label is a real command rather than the generic fallback; `preClear` survives the formatting
+// because a caller listing several shells may want to treat debris differently from live work.
+export type WaitShell = { label: string; preClear: boolean; named: boolean }
+
+// Every background shell under the pane's engine, in the order a reader should meet them: work this
+// conversation started first, debris last. The list is what the kill paths warn with; childWaitLabel
+// is its headline.
+export function childWaitShells(procs: ProcRow[], panePid: number | undefined, since?: number): WaitShell[] {
   // A pane we could not get a pid for is not a pane with no children: pid 0 is the kernel's parent
   // slot, so asking for ITS children hands back init and kthreadd. Refuse the question instead.
-  if (!procs.length || !panePid) return null
+  if (!procs.length || !panePid) return []
   const kids = childMap(procs)
   const found = (kids.get(engineProc(procs, panePid)) ?? []).filter(p => SNAPSHOT_SHELL.test(p.argv()))
-  if (!found.length) return null
   // A shell older than this conversation is debris a `/clear` left running. An undated one (startedAt
   // 0) is treated as current: the tag is a claim about age, and we only make it when we measured one.
   const preClear = (p: ProcRow) => !!since && p.startedAt > 0 && p.startedAt < since
   // Debris never takes the headline from a job this conversation actually started — one row, one label,
   // and the live job is the truer one. It is still the label once it is the only child, which is the
   // whole point: the reader learns there is something stale under the pane instead of nothing at all.
-  const shells = [...found].sort((a, b) => Number(preClear(a)) - Number(preClear(b)))
-  for (const shell of shells) {
-    const tag = preClear(shell) ? PRE_CLEAR : ''
+  return [...found].sort((a, b) => Number(preClear(a)) - Number(preClear(b))).map(shell => {
+    // The DEEPEST descendant's command ("gh run watch"), not the snapshot shell's own argv, which wraps
+    // the real command in a page of quoting and says nothing to a reader.
     let leaf: ProcRow | null = null
     for (let p: ProcRow | undefined = shell, hop = 0; p && hop < 16; hop++) {
       const next: ProcRow | undefined = (kids.get(p.pid) ?? [])[0]
       if (!next) break
       leaf = next; p = next
     }
-    if (leaf) return (leaf.argv().replace(/\s+/g, ' ').slice(0, LABEL_MAX) || 'background shell') + tag
-  }
-  // A snapshot shell with no child of its own: mid-builtin, or a command that has already exited
-  // while the shell tidies up. Real, and rare enough that naming it beats guessing at its argv.
-  // (The owner's own incident read exactly this way — between two `sleep 4` ticks of a wedged poll
-  // loop there is no child to name.) shells[0] is the freshest, so this tags only when ALL are stale.
-  return 'background shell' + (preClear(shells[0]) ? PRE_CLEAR : '')
+    // A snapshot shell with no child of its own: mid-builtin, or a command that has already exited
+    // while the shell tidies up. Real, and rare enough that naming it beats guessing at its argv.
+    // (The owner's own incident read exactly this way — between two `sleep 4` ticks of a wedged poll
+    // loop there is no child to name.)
+    const named = leaf ? leaf.argv().replace(/\s+/g, ' ').slice(0, LABEL_MAX) : ''
+    const tag = preClear(shell) ? PRE_CLEAR : ''
+    return { label: (named || 'background shell') + tag, preClear: preClear(shell), named: !!named }
+  })
+}
+
+// Names at most this many shells; a session mid-fan-out can hold a dozen and the sentence still has to
+// fit a dialog. What is dropped is COUNTED in the text — a silent truncation would read as the whole
+// list, and this sentence is the last thing a reader sees before losing the work it describes.
+const SURVIVORS_NAMED = 4
+
+// "2 background shells will be killed: gh run watch 18832, sleep 4 (pre-clear)" — what both kill paths
+// say before they act. Measured 2026-07-28: ending a session KILLS its children rather than orphaning
+// them, so this is a warning about work about to be lost. The (pre-clear) tags ride along on purpose:
+// they are what tells work worth keeping from debris worth losing.
+export function survivorWarning(shells: WaitShell[]): string {
+  const named = shells.slice(0, SURVIVORS_NAMED).map(s => s.label)
+  const rest = shells.length - named.length
+  return `${shells.length} background shell${shells.length === 1 ? '' : 's'} will be killed: `
+    + named.join(', ') + (rest > 0 ? `, +${rest} more` : '')
+}
+
+// What the session is running that outlived its turn, as a label — or null when it is running
+// nothing.
+export function childWaitLabel(procs: ProcRow[], panePid: number | undefined, since?: number): string | null {
+  const shells = childWaitShells(procs, panePid, since)
+  // A NAMED shell wins the headline over an unnamed one ahead of it: "gh run watch 18832" says more
+  // than "background shell", and a shell caught between two ticks of its loop has nothing to say.
+  // Order still decides between two named ones, so live work outranks debris.
+  return (shells.find(s => s.named) ?? shells[0])?.label ?? null
 }
 
 // ---- signal 2: an open OUTBOUND ask ----

@@ -3,9 +3,9 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  childWaitLabel, openOutboundAsk, sessionState,
+  childWaitLabel, childWaitShells, survivorWarning, openOutboundAsk, sessionState,
   setWaitsFile, setWait, clearWait, readWait, WAIT_TTL_MS,
-  type ProcRow,
+  type ProcRow, type WaitShell,
 } from './wait-state.ts'
 
 // A proc table the way /proc hands it over: flat rows, parent links, argv on demand. `startedAt` is
@@ -98,6 +98,48 @@ test('an unmeasurable age tags nothing', () => {
   expect(childWaitLabel(procs, 100)).toBe('sleep 4')                       // no boundary
   const undated = [P(100, 1, 'claude'), P(200, 100, SNAP), P(300, 200, 'sleep 4')]
   expect(childWaitLabel(undated, 100, CLEAR)).toBe('sleep 4')              // no start time
+})
+
+// ---- the list the kill paths warn with ----
+
+test('every shell is listed, live work first, debris tagged in place', () => {
+  const procs = [
+    P(100, 1, 'claude'),
+    P(200, 100, SNAP, before), P(300, 200, 'sleep 4', before),
+    P(400, 100, SNAP, after), P(500, 400, 'gh run watch 18832', after),
+  ]
+  expect(childWaitShells(procs, 100, CLEAR)).toEqual([
+    { label: 'gh run watch 18832', preClear: false, named: true },
+    { label: 'sleep 4 (pre-clear)', preClear: true, named: true },
+  ])
+})
+
+test('a pane with nothing running lists nothing — the case that must not warn', () => {
+  expect(childWaitShells([P(100, 1, 'claude')], 100, CLEAR)).toEqual([])
+  expect(childWaitShells([], 100, CLEAR)).toEqual([])
+  expect(childWaitShells([P(100, 1, 'claude'), P(200, 100, SNAP)], undefined, CLEAR)).toEqual([])
+})
+
+// The headline and the list answer different questions: the list is every shell in reading order,
+// the headline is the one worth a single line. An unnamed shell first in order does not win it.
+test('the headline prefers a named shell; the list keeps its order', () => {
+  const procs = [
+    P(100, 1, 'claude'),
+    P(200, 100, SNAP, after),                                    // no child — mid-tick, nothing to name
+    P(400, 100, SNAP, after), P(500, 400, 'gh run watch', after),
+  ]
+  expect(childWaitShells(procs, 100, CLEAR).map(s => s.label)).toEqual(['background shell', 'gh run watch'])
+  expect(childWaitLabel(procs, 100, CLEAR)).toBe('gh run watch')
+})
+
+// The sentence a reader gets before losing the work it names, so it counts what it does not name.
+test('the kill warning counts, pluralises, and never truncates silently', () => {
+  const shell = (label: string): WaitShell => ({ label, preClear: false, named: true })
+  expect(survivorWarning([shell('sleep 600')])).toBe('1 background shell will be killed: sleep 600')
+  expect(survivorWarning([shell('gh run watch'), { label: 'sleep 4 (pre-clear)', preClear: true, named: true }]))
+    .toBe('2 background shells will be killed: gh run watch, sleep 4 (pre-clear)')
+  expect(survivorWarning(['a', 'b', 'c', 'd', 'e', 'f'].map(shell)))
+    .toBe('6 background shells will be killed: a, b, c, d, +2 more')
 })
 
 // ---- signal 2: outbound asks ----

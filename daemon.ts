@@ -135,8 +135,8 @@ import {
 } from './agent-bus.ts'
 import { formatAskBlock, formatAnswerBlock, formatAsideBlock, formatDigestBlock, formatRosterLine, type RosterAgent } from './agent-bus-block.ts'
 import {
-  readProcTable, childWaitLabel, conversationStart, openOutboundAsk, sessionState,
-  setWaitsFile, setWait, clearWait, readWait, type ProcRow,
+  readProcTable, childWaitLabel, childWaitShells, survivorWarning, conversationStart, openOutboundAsk, sessionState,
+  setWaitsFile, setWait, clearWait, readWait, type ProcRow, type WaitShell,
 } from './wait-state.ts'
 import { laneForChat, bindLane, chatForLaneSession, noteLaneCwd, dmLanesOn, fleetMode, fleetSurface, listLanes, unbindLane } from './dm-lanes.ts'
 import { runHermes, type HermesEndpoint, type HermesTask } from './hermes-driver.ts'
@@ -5471,6 +5471,18 @@ async function handleCall(
         if (!topic) { write({ t: 'result', id, ok: false, text: `@${target} has no session entry to close` }); return }
         const targetPane = await paneForSession(res.id).catch(() => null)
         const alive = !!targetPane && await paneAlive(targetPane).catch(() => false)
+        // Name what dies before it dies. This sits BEFORE the killedAt stamp on purpose: a refused
+        // kill must leave no trace, or the row is marked deliberately-killed by a call that killed
+        // nothing. The agent-side contract is a second, explicit invocation — `--force` — rather than
+        // a prompt, because the caller here is as often an agent as a human and a question has
+        // nowhere to be answered in a one-shot CLI call.
+        if (targetPane && alive && !args.force) {
+          const shells = await paneSurvivors(targetPane)
+          if (shells.length) {
+            write({ t: 'result', id, ok: false, text: `${survivorWarning(shells)}\nre-run as \`tg kill ${target} --force\` to close anyway` })
+            return
+          }
+        }
         // Stamp the row as deliberately killed BEFORE the pane dies: it exempts the row from the
         // groupless GC (which otherwise dropped it ~85s later, taking `tg reopen`'s only record of
         // the cwd + conversation with it) for KILL_UNDO_GRACE_MS.
@@ -15282,6 +15294,26 @@ async function waitContext(): Promise<WaitCtx> {
   return { procs: readProcTable(), panePids, ledger: tailLedger(busLedgerRoom(), LEDGER_SCAN) }
 }
 
+// The background shells a close would take with it — the two kill paths (`tg kill`, the mini app's ✕)
+// ask this before they act. Measured 2026-07-28: ending a session KILLS its children rather than
+// orphaning them (a probe died with three sleeps running and all three went with it), so this warning
+// is about work that is *about to be lost*, not about debris that would linger.
+//
+// It reads /proc on its own rather than through waitContext: a close is a tap, not the 4s roster loop,
+// and the reading has to be of THIS instant. Any failure yields an empty list, so a close whose
+// warning cannot be computed behaves exactly as it did before — the guard never becomes the reason a
+// session can't be ended.
+async function paneSurvivors(pane: string): Promise<WaitShell[]> {
+  try {
+    const { stdout } = await exec('tmux', ['display-message', '-p', '-t', pane, '#{pane_pid}'], { timeout: 3000 })
+    const pid = Number(stdout.trim())
+    if (!pid) return []
+    const tfile = await transcriptForPane(pane, await paneCwd(pane).catch(() => null)).catch(() => null)
+    return childWaitShells(readProcTable(), pid, conversationStart(tfile))
+  } catch { return [] }
+}
+
+
 // One dashboard card, read live from the pane: statusline dials + working state + a task line
 // (current activity while working, last-reply snippet while idle). Dead pane ⇒ alive:false card.
 async function webappSessionCard(row: { sid: string; name: string; cwd: string; agent: string }, ctx?: WaitCtx): Promise<WebappSessionCard> {
@@ -15511,6 +15543,12 @@ async function webappSessionAction(userId: string, sid: string, action: 'stop' |
     const alive = !!pane && await paneAlive(pane).catch(() => false)
     process.stderr.write(`webapp: close sid=${sid} pane=${pane ?? '-'} headless=${topic?.threadId == null ? 1 : 0} alive=${alive ? 1 : 0}\n`)
     if (pane && alive) {
+      // The same warning `tg kill` gives, asked as a question because this surface has somewhere to
+      // ask it. Only when there is something to lose — a clean pane closes on the tap it always did.
+      if (!opts?.confirmed) {
+        const shells = await paneSurvivors(pane)
+        if (shells.length) return { confirm: `${survivorWarning(shells)} — close anyway?` }
+      }
       // Suppress the lazy-reopen until /exit lands, but do NOT record closed:true here: the reactive
       // closeTopicForPane must still see closed:false to actually close the Telegram tab. (The
       // forum_topic_closed handler sets it because there the user already closed the tab himself.)
@@ -15584,7 +15622,9 @@ async function webappSessionAction(userId: string, sid: string, action: 'stop' |
   // A raw `/exit` paste ends the pane without markTopicClosePending, which strands the Telegram tab
   // open on a session that is gone. The close action is the one that cleans up, and it is already
   // what the sessions list's own close button calls.
-  if (plan.kind === 'exit') return webappSessionAction(userId, sid, 'close')
+  // `opts` rides along: without it the composer's own confirm answer never reaches the close branch,
+  // so an /exit into a session with a background shell would re-ask its question forever.
+  if (plan.kind === 'exit') return webappSessionAction(userId, sid, 'close', undefined, opts)
   const cap = await capturePane(pane).catch(() => '')
   if (bashModeArmed(cap)) return 'the session has an unsubmitted ! bash command in its input box'
   if (!paneAcceptsText(cap)) return 'the session is showing a dialog — answer it first'
