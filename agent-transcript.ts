@@ -29,7 +29,12 @@ function codexRoots(): string[] {
 
 // ── file-arg readers: dispatch on the file's own format ──
 export const latestFinalReply = (file: string) => (isCodex(file) ? cx.latestFinalReply(file) : cc.latestFinalReply(file))
-export const finalRepliesAfter = (file: string, afterUuid: string) => (isCodex(file) ? cx.finalRepliesAfter(file, afterUuid) : cc.finalRepliesAfter(file, afterUuid))
+// `busAnchored` decides whether a relayed reply pings the owner. Codex rollouts carry no `<tg …>`
+// envelope to read it from, so they answer FALSE — loud, today's behaviour. A stated default, not an
+// inference: the two failure directions are not symmetric, and a missed ping is a message he never
+// learns about while an extra one is noise he can see.
+export const finalRepliesAfter = (file: string, afterUuid: string): { uuid: string; text: string; busAnchored: boolean }[] =>
+  (isCodex(file) ? cx.finalRepliesAfter(file, afterUuid).map(r => ({ ...r, busAnchored: false })) : cc.finalRepliesAfter(file, afterUuid))
 export const turnInProgress = (file: string) => (isCodex(file) ? cx.turnInProgress(file) : cc.turnInProgress(file))
 export const liveSubagents = (file: string) => (isCodex(file) ? 0 : cc.liveSubagents(file))   // Codex rollouts have no subagent files
 export const turnAnchorUuid = (file: string) => (isCodex(file) ? cx.turnAnchorUuid(file) : cc.turnAnchorUuid(file))

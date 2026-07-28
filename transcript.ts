@@ -342,21 +342,46 @@ export function latestModelId(file: string): string | null {
 // message) that appears AFTER the entry with `afterUuid` — used to replay what a session
 // said while it was unfocused. Oldest first. If `afterUuid` is gone (compaction/rotation)
 // we return just the latest, so a lost cursor never dumps the whole backlog.
-export function finalRepliesAfter(file: string, afterUuid: string): { uuid: string; text: string }[] {
+// WHO STARTED THIS TURN — a human or another agent. The bridge's envelope answers it in the message
+// itself: the agent bus writes `<tg @name ask=…|ack=…|re=…>` (agent-bus-block.ts) while an inbound
+// human message writes `<tg 123>` with the Telegram message id. So the character after `@` is the
+// whole test, and it is a property of the anchoring entry rather than of any live state.
+// Deliberately NOT "does this session have an open ask right now": that races the answer which just
+// closed it, and it cannot classify a reply being replayed from a cursor minutes later at all.
+// Anything unrecognised counts as HUMAN. This gates whether a reply pings the owner's phone, and the
+// failure directions are not symmetric — a missed ping is a message he never learns about, an extra
+// one is noise he can see.
+const BUS_ANCHOR = /^[\s\S]{0,3}?<tg\s+@[\w.-]+\s+(?:ask|ack|re)=/
+export function isBusAnchored(raw: unknown): boolean {
+  return typeof raw === 'string' && BUS_ANCHOR.test(raw.trim())
+}
+
+export function finalRepliesAfter(file: string, afterUuid: string): { uuid: string; text: string; busAnchored: boolean }[] {
   const entries = readEntries(file)
   const at = afterUuid ? entries.findIndex(e => e.uuid === afterUuid) : -1
-  if (afterUuid && at < 0) { const latest = latestFinalReply(file); return latest ? [latest] : [] }
+  if (afterUuid && at < 0) { const latest = latestFinalReply(file); return latest ? [{ ...latest, busAnchored: latestBusAnchored(entries) }] : [] }
 
-  const out: { uuid: string; text: string }[] = []
-  let pending: { uuid: string; text: string } | null = null
+  const out: { uuid: string; text: string; busAnchored: boolean }[] = []
+  let pending: { uuid: string; text: string; busAnchored: boolean } | null = null
   const flush = () => { if (pending) { out.push(pending); pending = null } }
+  // The anchor carried forward from the last real user entry SEEN IN THIS SCAN. Starting from the
+  // cursor means the first turn's own anchor may sit before it, so seed from the entries behind us
+  // rather than defaulting — a reply replayed after a restart would otherwise be classed human and
+  // ping for a bus conversation, which is the exact noise this exists to stop.
+  let anchorIsBus = latestBusAnchored(entries.slice(0, at + 1))
   for (let i = at + 1; i < entries.length; i++) {
     const e = entries[i]
-    if (isRealUserText(e)) { flush(); continue }  // turn boundary (real prompts only — not injected skill/meta entries)
-    if (isMainAssistantText(e)) { const text = lastTextOf(e.message?.content).trim(); if (!isCommandNoise(text)) pending = { uuid: e.uuid ?? '', text: legibleApiError(text) } }
+    if (isRealUserText(e)) { flush(); anchorIsBus = isBusAnchored(e.message?.content); continue }  // turn boundary (real prompts only — not injected skill/meta entries)
+    if (isMainAssistantText(e)) { const text = lastTextOf(e.message?.content).trim(); if (!isCommandNoise(text)) pending = { uuid: e.uuid ?? '', text: legibleApiError(text), busAnchored: anchorIsBus } }
   }
   flush()
   return out
+}
+
+// The most recent real user entry's kind, for the two paths that need an anchor without a scan.
+function latestBusAnchored(entries: Entry[]): boolean {
+  for (let i = entries.length - 1; i >= 0; i--) if (isRealUserText(entries[i])) return isBusAnchored(entries[i].message?.content)
+  return false
 }
 
 // Bash-mode (`!` prefix) result: the transcript records the run as a user entry

@@ -240,6 +240,33 @@ must **name** it: `bun run deploy --ship-branch <branch>`. There is no bare `--f
 a habitual flag is one people type without reading. `--commit` stages only the version files it owns,
 never `git add -A`.
 
+**WHICH REPLIES PING THE OWNER'S PHONE — and the named suspect was innocent.** The complaint was that
+agent-bus traffic notifies him; the bus mirror cards (`sendBusCard`, daemon.ts) have sent
+`disableNotification: true` since before it was raised. The ping came from `sendAgentText`, the relay
+that delivers a SESSION'S REPLY into a chat, which carried no silent flag at all — so a worker
+answering me over the bus ended my turn and pinged him for a conversation he is not in. Fix the
+reporting, not the mechanism, is the lesson this repo keeps re-learning.
+
+- **The classifier is the ANCHOR, read from the transcript** (`isBusAnchored`, `finalRepliesAfter`'s
+  `busAnchored`). The bridge's own envelope answers "who started this turn": the bus writes
+  `<tg @name ask=…|ack=…|re=…>`, an inbound human message writes `<tg 123>`. Deliberately NOT "does
+  this session have an open ask right now" — that races the answer which just closed it and cannot
+  classify a reply replayed from a cursor minutes later at all.
+- **Anything unrecognised is HUMAN, and the asymmetry is the reason.** A missed ping is a message he
+  never learns about; an extra one is noise he can see. Same default for Codex rollouts, which carry
+  no envelope to read (`agent-transcript.ts` states it rather than inferring it), and same for any
+  failure inside `paneTurnIsBusAnchored`.
+- **A `tg send` inherits the class of the turn it came out of**, so a message and the file beside it
+  ping together or not at all — the owner's ruling on the one ambiguity that could have split them.
+- **Worker topic tabs go quiet**, because almost every turn there is bus-anchored. That was the
+  biggest behavioural change in the unit and it was chosen, not inherited: a worker's topic is a
+  mirror for reading, not a channel he is addressed in.
+- **What CANNOT be proved from here, and do not let a later change claim otherwise:** Telegram's Bot
+  API does not echo `disable_notification` back on a `sendMessage` response, so there is no way to
+  read the flag off a sent message. The evidence stops at the payload we build (unit-asserted, both
+  directions) and the classification of real traffic (live). Whether his phone stays quiet also sits
+  behind per-chat mute settings and client focus modes, which are downstream of anything here.
+
 ## The mini app (`webapp/index.html`) — invariants that are invisible from the code
 
 One file, no build step, no framework. Everything below is a coupling that a competent session

@@ -1158,7 +1158,11 @@ async function sendChunkRetrying(chat_id: string, text: string, opts: SendOpts):
 
 // Send agent markdown to chats using the same render/chunk path as the reply tool. In forum-topics
 // mode the caller passes a threadId so the message lands in the session's own topic.
-async function sendAgentText(chats: string[], text: string, threadId?: number, replyTo?: number, avatarToken?: string): Promise<void> {
+// `silent` = this reply answers ANOTHER AGENT, not the owner. The bus mirror cards were silent from
+// the start; this relay never was, so every worker answer that ended one of my turns pinged his phone
+// for a conversation he is not in. That was the actual source of the noise, not the cards it was
+// blamed on. Human-anchored replies stay loud and that is the half nobody notices until it breaks.
+async function sendAgentText(chats: string[], text: string, threadId?: number, replyTo?: number, avatarToken?: string, silent = false): Promise<void> {
   const access = loadAccess()
   // The current render/chunk path — also the fallback when rich messages are off or error out. `reply`
   // (agent-bus P4 addressing) lands on the FIRST chunk only; the rest are continuations of it.
@@ -1169,6 +1173,7 @@ async function sendAgentText(chats: string[], text: string, threadId?: number, r
     const base: SendOpts = {
       ...(render ? {} : { plain: true }),
       ...(threadId != null ? { threadId: String(threadId) } : {}),
+      ...(silent ? { silent: true } : {}),
     }
     let first = true
     for (const c of chunks) {
@@ -1190,7 +1195,7 @@ async function sendAgentText(chats: string[], text: string, threadId?: number, r
     // recoveries), logged so a repeatedly-failing avatar (or an accepted-but-timed-out double-post) shows.
     if (avatarToken && access.renderMarkdown !== false && !hasFencedCode) {
       try {
-        const m = await sendRichMessage(avatarToken, chat_id, toInputRichMessage(text), { messageThreadId: threadId, ...(replyOnce != null ? { replyToMessageId: replyOnce } : {}) })
+        const m = await sendRichMessage(avatarToken, chat_id, toInputRichMessage(text), { messageThreadId: threadId, ...(silent ? { disableNotification: true } : {}), ...(replyOnce != null ? { replyToMessageId: replyOnce } : {}) })
         avatarMsgTokens.remember(chat_id, m.message_id, avatarToken)
         replyOnce = undefined; continue
       } catch (e) {
@@ -1203,7 +1208,7 @@ async function sendAgentText(chats: string[], text: string, threadId?: number, r
     // reply still lands. On when markdown rendering is enabled (renderMarkdown !== false) AND the reply
     // has no fenced code block (see above).
     if (access.renderMarkdown !== false && !hasFencedCode) {
-      try { await sendRichMessage(TOKEN!, chat_id, toInputRichMessage(text), { messageThreadId: threadId, ...(replyOnce != null ? { replyToMessageId: replyOnce } : {}) }); replyOnce = undefined; continue }
+      try { await sendRichMessage(TOKEN!, chat_id, toInputRichMessage(text), { messageThreadId: threadId, ...(silent ? { disableNotification: true } : {}), ...(replyOnce != null ? { replyToMessageId: replyOnce } : {}) }); replyOnce = undefined; continue }
       catch (e) {
         if (isThreadGoneError(e)) throw new TopicThreadGoneError()   // dead thread — HTML fallback would hit it too; let the relay recreate
         process.stderr.write(`daemon: rich message send failed, falling back to HTML: ${e}\n`)
@@ -1685,7 +1690,20 @@ async function kickThinkingMirror(pane: string): Promise<void> {
 // hits "message thread not found" (the user deleted the topic out from under a LIVE session), drop
 // the pin bookkeeping, recreate the session's topic, and resend there — so a live session's replies
 // are never silently black-holed. Shared by the focused and aux relay loops.
-async function deliverRelayReply(paneId: string, target: { chat: string; thread?: number }, text: string): Promise<void> {
+// `silent` rides in from the reply's own anchor (finalRepliesAfter → busAnchored): a turn another
+// agent started answers back without pinging the owner's phone, a turn HE started still does.
+// Was this pane's CURRENT turn started by another agent? The same anchor test the relay uses, read
+// on demand for the paths that send outside the relay (`tg send`, `tg reply`). Falls back to LOUD on
+// any failure — an unreadable transcript must not silence a reply the owner is waiting for.
+async function paneTurnIsBusAnchored(pane: string | null): Promise<boolean> {
+  if (!pane) return false
+  const cwd = await paneCwd(pane).catch(() => null)
+  const file = await transcriptForPane(pane, cwd).catch(() => null)
+  if (!file) return false
+  const last = finalRepliesAfter(file, '').slice(-1)[0]
+  return last?.busAnchored === true
+}
+async function deliverRelayReply(paneId: string, target: { chat: string; thread?: number }, text: string, silent = false): Promise<void> {
   // Multi-session DM attribution: a reply landing in a DM (no thread) from a session that is NOT
   // that chat's own bound lane/chat-lane gets a source line — a topic carries its session's
   // identity structurally, a DM doesn't, so foreign output must never read as the user's current
@@ -1716,7 +1734,7 @@ async function deliverRelayReply(paneId: string, target: { chat: string; thread?
   // null → the shared bridge bot, exactly as before.
   const avatar = target.thread != null && busRoom() === target.chat ? await avatarForPane(paneId) : null
   try {
-    await sendAgentText([target.chat], text, target.thread, replyTo, avatar?.token)
+    await sendAgentText([target.chat], text, target.thread, replyTo, avatar?.token, silent)
     releaseTyping(target.thread)
     turnTrigger.delete(route); recentSenders.delete(route)   // turn delivered → next turn's FIRST poster becomes the addressee
   } catch (e) {
@@ -1806,7 +1824,7 @@ async function relayLoopTick(gen: number): Promise<void> {
             lastRelayedUuid = r.uuid                 // advance before the send so a fast tick can't double-send
             lastRelayedByFile.set(file, r.uuid)
             process.stderr.write(`daemon: relaying ${r.text.length} chars (uuid ${r.uuid.slice(0, 8)}, reply) to ${targets.map(t => t.chat + (t.thread ? `#${t.thread}` : '')).join(',')}\n`)
-            for (const t of targets) await deliverRelayReply(paneId, t, r.text)   // self-heals a deleted topic (recreate + resend)
+            for (const t of targets) await deliverRelayReply(paneId, t, r.text, r.busAnchored)   // self-heals a deleted topic (recreate + resend)
           } else {
             lastRelayedUuid = r.uuid                 // banner suppressed — advance past it, nothing to send
             lastRelayedByFile.set(file, r.uuid)
@@ -1977,7 +1995,7 @@ async function auxRelayTick(): Promise<void> {
           // sends one deduped notice.
           if (r.text.length < 200 && /\b(hit your|used \d+% of your) [\w-]+ limit\b/i.test(r.text)) continue
           const targets = await outboundTargetsFor(pane)
-          for (const t of targets) await deliverRelayReply(pane, t, r.text)   // self-heals a deleted topic (recreate + resend)
+          for (const t of targets) await deliverRelayReply(pane, t, r.text, r.busAnchored)   // self-heals a deleted topic (recreate + resend)
         }
       } catch { /* transient (tmux/transcript) — retry next tick */ }
     })()))
@@ -4151,7 +4169,7 @@ async function flushPendingText(): Promise<void> {
     lastRelayedUuid = r.uuid
     lastRelayedByFile.set(file, r.uuid)
     if (/\b(hit your|used \d+% of your) [\w-]+ limit\b/i.test(r.text)) continue   // daemon sends its own ⛔
-    for (const t of targets) await sendAgentText([t.chat], r.text, t.thread).catch(e => process.stderr.write(`daemon: prompt pre-flush send failed: ${e}\n`))
+    for (const t of targets) await sendAgentText([t.chat], r.text, t.thread, undefined, undefined, r.busAnchored).catch(e => process.stderr.write(`daemon: prompt pre-flush send failed: ${e}\n`))
   }
 }
 
@@ -4188,7 +4206,7 @@ async function flushPendingTextFor(pane: string): Promise<boolean> {
     if (!r.uuid || r.uuid === (lastRelayedByFile.get(file) ?? '')) continue
     lastRelayedByFile.set(file, r.uuid)   // advance before the await so the conclude-relay can't double-send
     if (/\b(hit your|used \d+% of your) [\w-]+ limit\b/i.test(r.text)) continue   // daemon sends its own ⛔
-    for (const t of targets) await sendAgentText([t.chat], r.text, t.thread).catch(e => process.stderr.write(`daemon: aux prompt pre-flush send failed: ${e}\n`))
+    for (const t of targets) await sendAgentText([t.chat], r.text, t.thread, undefined, undefined, r.busAnchored).catch(e => process.stderr.write(`daemon: aux prompt pre-flush send failed: ${e}\n`))
     sent = true
   }
   return sent
@@ -4621,6 +4639,10 @@ async function handleCall(
         }
 
         const access = loadAccess()
+        // A `tg send` rides the CLASS of the turn it came out of, so a message and the file beside it
+        // ping together or not at all — the owner's ruling on the one ambiguity that could have split
+        // them. Read off the same anchor the relay uses, from this pane's own transcript.
+        const quiet = await paneTurnIsBusAnchored(args.pane ? String(args.pane) : null).catch(() => false)
         const limit = Math.max(1, Math.min(access.textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT))
         const mode = access.chunkMode ?? 'length'
         const replyMode = access.replyToMode ?? 'first'
@@ -4665,6 +4687,7 @@ async function handleCall(
               ...(shouldReplyTo ? { replyTo: String(reply_to) } : {}),
               ...(thread ? { threadId: String(thread) } : {}),
               ...(parseMode ? {} : { plain: true }),
+              ...(quiet ? { silent: true } : {}),
             })
             sentIds.push(Number(ref.messageId))
           }
@@ -4674,6 +4697,7 @@ async function handleCall(
           const ref = await channel.sendFile(chat_id, f, {
             ...(reply_to != null && replyMode !== 'off' ? { replyTo: String(reply_to) } : {}),
             ...(thread ? { threadId: String(thread) } : {}),
+            ...(quiet ? { silent: true } : {}),
           })
           sentIds.push(Number(ref.messageId))
         }
