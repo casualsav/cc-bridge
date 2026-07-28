@@ -1,0 +1,131 @@
+import { test, expect, beforeEach } from 'bun:test'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import {
+  childWaitLabel, openOutboundAsk, sessionState,
+  setWaitsFile, setWait, clearWait, readWait, WAIT_TTL_MS,
+  type ProcRow,
+} from './wait-state.ts'
+
+// A proc table the way /proc hands it over: flat rows, parent links, argv on demand.
+const P = (pid: number, ppid: number, argv: string): ProcRow => ({ pid, ppid, argv: () => argv })
+const SNAP = '/bin/bash -c source /home/u/.claude/shell-snapshots/snapshot-bash-1785263788027-28wlkc.sh 2>/dev/null || true && eval …'
+
+// ---- signal 1: children ----
+
+test('a live background shell is a wait, labelled with the command it is running', () => {
+  const procs = [P(100, 1, 'claude --model x'), P(200, 100, SNAP), P(300, 200, 'gh run watch 18832')]
+  expect(childWaitLabel(procs, 100)).toBe('gh run watch 18832')
+})
+
+// The measured MCP case (scripts/wait-signal-probe.ts, %217 on 2026-07-28): an stdio MCP server is a
+// direct child of claude and lives as long as the session does. A child COUNT would pin every
+// MCP-mode session at "waiting" forever — this is the assertion that says the filter, not the count.
+test('an stdio MCP server child is NOT a wait', () => {
+  const procs = [
+    P(100, 1, 'claude --mcp-config /tmp/mcp.json'),
+    P(200, 100, 'bun run --cwd /home/u/.claude/plugins/cache/cc-bridge/telegram/0.4.99 --shell=bun --silent start'),
+    P(300, 200, '/usr/local/bin/bun shim.ts'),
+  ]
+  expect(childWaitLabel(procs, 100)).toBeNull()
+})
+
+// Measured: one box's pane_pid is claude itself, another's is a bash with claude beneath it.
+test('the engine is found under a pane whose pane_pid is a shell', () => {
+  const procs = [P(50, 1, '-bash'), P(100, 50, 'claude --model x'), P(200, 100, SNAP), P(300, 200, 'sleep 240')]
+  expect(childWaitLabel(procs, 50)).toBe('sleep 240')
+})
+
+test('a snapshot shell with no child of its own still reads as a wait', () => {
+  expect(childWaitLabel([P(100, 1, 'claude'), P(200, 100, SNAP)], 100)).toBe('background shell')
+})
+
+test('an unreadable /proc invents no wait', () => {
+  expect(childWaitLabel([], 100)).toBeNull()
+})
+
+// pid 0 is the kernel's parent slot: its "children" are init and kthreadd, so a pane whose pid we
+// could not read must refuse the question rather than ask it about process 0.
+test('a pane with no readable pid invents no wait', () => {
+  const procs = [P(1, 0, '/sbin/init'), P(2, 0, 'kthreadd'), P(100, 1, 'claude'), P(200, 100, SNAP), P(300, 200, 'sleep 240')]
+  expect(childWaitLabel(procs, undefined)).toBeNull()
+  expect(childWaitLabel(procs, 0)).toBeNull()
+})
+
+// ---- signal 2: outbound asks ----
+
+const ask = (o: Partial<Parameters<typeof openOutboundAsk<any>>[0][number]> = {}) =>
+  ({ id: 1, fromSid: 'me', fromKind: 'claude', toName: 'taste', ...o }) as any
+
+test('an open outbound ask is a wait; an answered, expired, ack or inbound one is not', () => {
+  const never = () => false
+  expect(openOutboundAsk([ask()], 'me', never)).toEqual({ id: 1, toName: 'taste' })
+  expect(openOutboundAsk([ask({ expiredAt: 1 })], 'me', never)).toBeNull()
+  expect(openOutboundAsk([ask({ noReply: true })], 'me', never)).toBeNull()
+  expect(openOutboundAsk([ask({ fromSid: 'someone-else' })], 'me', never)).toBeNull()
+  expect(openOutboundAsk([ask({ fromKind: 'hermes' })], 'me', never)).toBeNull()
+})
+
+// The recorded incident: the target replied in prose and never ran `tg answer`, so the pending stayed
+// open. Without this bound the ASKER reads "waiting" for as long as the row survives.
+test('a prose-answered ask stops being a wait once the asker is resolved', () => {
+  expect(openOutboundAsk([ask()], 'me', () => true)).toBeNull()
+})
+
+test('with two open asks the oldest is the label', () => {
+  expect(openOutboundAsk([ask({ id: 7, toName: 'b' }), ask({ id: 3, toName: 'a' })], 'me', () => false))
+    .toEqual({ id: 3, toName: 'a' })
+})
+
+// ---- signal 3: the declaration ----
+
+beforeEach(() => setWaitsFile(join(mkdtempSync(join(tmpdir(), 'waits-')), 'waits.json')))
+
+test('a declaration survives while its turn anchor is current and clears on the next turn', () => {
+  setWait('s1', 'CI run 18832', 'uuid-a')
+  expect(readWait('s1', 'uuid-a')).toBe('CI run 18832')
+  expect(readWait('s1', 'uuid-b')).toBeNull()          // a new turn started → cleared
+  expect(readWait('s1', 'uuid-a')).toBeNull()          // and the GC-on-read really deleted it
+})
+
+test('a declaration on a session that never takes another turn ages out', () => {
+  setWait('s1', 'CI run', 'uuid-a', 1_000)
+  expect(readWait('s1', 'uuid-a', 1_000 + WAIT_TTL_MS - 1)).toBe('CI run')
+  expect(readWait('s1', 'uuid-a', 1_000 + WAIT_TTL_MS + 1)).toBeNull()
+})
+
+test('tg wait --clear drops it', () => {
+  setWait('s1', 'CI run', null)
+  clearWait('s1')
+  expect(readWait('s1', null)).toBeNull()
+})
+
+// ---- the state machine ----
+
+const S = (o: Partial<Parameters<typeof sessionState>[0]>) =>
+  sessionState({ working: false, said: null, ask: null, proc: null, unreported: null, ...o })
+
+test('a busy pane beats every wait signal — the ask is a fact about it, not its state', () => {
+  expect(S({ working: true, said: 'CI', ask: { id: 5, toName: 'taste' }, proc: 'sleep 240' }))
+    .toEqual({ state: 'working', wait: null })
+})
+
+test('label precedence inside waiting is said > ask > proc', () => {
+  expect(S({ said: 'CI run 18832', ask: { id: 5, toName: 'taste' }, proc: 'sleep 240' }))
+    .toEqual({ state: 'waiting', wait: { why: 'said', label: 'CI run 18832' } })
+  expect(S({ ask: { id: 5, toName: 'taste' }, proc: 'sleep 240' }))
+    .toEqual({ state: 'waiting', wait: { why: 'ask', label: '@taste (ask 5)' } })
+  expect(S({ proc: 'sleep 240' }))
+    .toEqual({ state: 'waiting', wait: { why: 'proc', label: 'sleep 240' } })
+})
+
+test('waiting outranks unreported, and unreported outranks idle', () => {
+  expect(S({ proc: 'sleep 240', unreported: { briefer: 'lead', since: 1 } }).state).toBe('waiting')
+  expect(S({ unreported: { briefer: 'lead', since: 1 } }).state).toBe('unreported')
+})
+
+// The whole point of the feature: idle now means at prompt with nothing pending.
+test('nothing pending is idle', () => {
+  expect(S({})).toEqual({ state: 'idle', wait: null })
+})

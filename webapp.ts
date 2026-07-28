@@ -61,9 +61,20 @@ export interface SettingsView {
 }
 // One session on the fleet dashboard. `working` and the dials read live from the pane; `task` is
 // the current activity line (working) or the last reply snippet (idle). alive=false ⇒ dead pane.
+// `state` is what the card renders: `working` is the pane, `waiting` is blocked on something outside
+// this session, `unreported` is work finished and told to nobody, and `idle` — the point of the whole
+// thing — now means at a prompt with NOTHING pending. `working` (the boolean) is kept beside it
+// untouched: the drill-in header and the chip logic read it, and it answers a narrower question.
+// `wait` carries the reason a waiting card shows; it is null in every other state.
 export interface SessionCard {
   sid: string; name: string; cwd: string; agent: string
   alive: boolean; working: boolean; subagents: number; task: string | null
+  state: 'working' | 'waiting' | 'unreported' | 'idle'
+  // Two nullable fields rather than one shared "detail", because each means exactly one thing: `wait`
+  // is populated only while waiting, `unreported` only while unreported. A single overloaded field
+  // would need `state` read alongside it to be interpretable at all.
+  wait: { why: 'said' | 'ask' | 'proc'; label: string } | null
+  unreported: { briefer: string } | null
   model: string | null; effort: string | null; mode: string | null
   ctxPct: number | null; h5Pct: number | null; branch: string | null
   tier: string | null   // 'max' / 'pro' / … from the launch-banner sample (daemon.ts paneTiers); null when never sampled

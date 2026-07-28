@@ -8,7 +8,7 @@ const NOW = new Date('2026-07-25T12:34:56Z')
 function card(over: Partial<SessionCard> = {}): SessionCard {
   return {
     sid: 's1', name: 'my-project', cwd: '/home/u/my-project', agent: 'claude',
-    alive: true, working: false, subagents: 0, task: null,
+    alive: true, working: false, subagents: 0, task: null, state: 'idle', wait: null, unreported: null,
     model: null, effort: null, mode: null, ctxPct: null, h5Pct: null, branch: null, tier: null,
     ...over,
   }

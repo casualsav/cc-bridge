@@ -32,7 +32,7 @@ import { planDrift, driftStateAfter, type DriftState } from './drift-guard.ts'
 import { decideModel, upgradeNeedsConfirm, heldSpawnModel, holdTapData, parseHoldTap, type ModelPolicy, type HoldOutcome } from './spawn-model-policy.ts'
 import { renderSessionsView } from './sessions-view.ts'
 import { detectCurrentMode, onNormalPrompt, inputBoxContent, isModelSwitchConfirm, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType } from './prompt.ts'
-import { modelSwitchEvidence, resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, liveSubagents, currentTurnFeed, currentTurnActivity, concludedTurnWork, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
+import { modelSwitchEvidence, resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, turnAnchorUuid, liveSubagents, currentTurnFeed, currentTurnActivity, concludedTurnWork, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
 import {
   AGENT_PANE_OPT, agentExitKeys, agentInterruptKeys, agentLabel, agentResetCommand, agentSubmitKeys,
   CODEX_ENABLED, codexLaunchCommand, normalizeAgent, shellQuote, type AgentKind,
@@ -129,6 +129,10 @@ import {
   type BusEndpoint, type BusPending, type LedgerEntry,
 } from './agent-bus.ts'
 import { formatAskBlock, formatAnswerBlock, formatAsideBlock, formatDigestBlock, formatRosterLine, type RosterAgent } from './agent-bus-block.ts'
+import {
+  readProcTable, childWaitLabel, openOutboundAsk, sessionState,
+  setWaitsFile, setWait, clearWait, readWait, type ProcRow,
+} from './wait-state.ts'
 import { laneForChat, bindLane, chatForLaneSession, noteLaneCwd, dmLanesOn, fleetMode, fleetSurface, listLanes, unbindLane } from './dm-lanes.ts'
 import { runHermes, type HermesEndpoint, type HermesTask } from './hermes-driver.ts'
 import {
@@ -364,6 +368,7 @@ let botUsername = ''
 // access.ts's isMentioned needs the live bot username (set after the daemon connects).
 initAccess({ getBotUsername: () => botUsername })
 initAccounts(STATE_DIR)
+setWaitsFile(join(STATE_DIR, 'waits.json'))   // `tg wait` declarations; security-free, so neither access.json nor prefs.json
 healMainStatusline()   // ensure THIS HOME's statusline (script + block) from the cache — fixes a fresh/hermes HOME + refreshes a stale script
 healAccountConfigs()   // accounts registered before main settings.json had hooks get them now
 
@@ -5030,9 +5035,31 @@ async function handleCall(
         text = status
         break
       }
+      // `tg wait "CI run 18832"` — the session says what it is blocked on, so the roster stops
+      // reading it as idle. Deliberately the cheapest verb here: one socket round-trip, no pane
+      // write, no ledger entry, no notice to anyone. It is a LABEL, not an event — which is also
+      // why it is NOT in AGENT_BUS_VERBS: a session can say what it is waiting on with the bus off.
+      case 'wait': {
+        const pane = args.pane ? String(args.pane) : null
+        const sid = pane ? await sessionForPane(pane).catch(() => null) : null
+        if (!sid) { write({ t: 'result', id, ok: false, text: 'tg wait works only inside a bridged session' }); return }
+        if (args.clear) { clearWait(sid); text = 'wait cleared'; break }
+        const reason = String(args.text ?? '').replace(/\s+/g, ' ').trim().slice(0, 120)
+        if (!reason) { write({ t: 'result', id, ok: false, text: 'empty reason — say what you are waiting on, or pass --clear' }); return }
+        // The anchor is this turn's own user message: the declaration lives exactly as long as the
+        // turn that made it is the latest one. Without a transcript there is no anchor to key on, so
+        // the row falls back to its TTL alone — a declaration that still expires, just later.
+        const tfile = await transcriptForPane(pane!, await paneCwd(pane!).catch(() => null)).catch(() => null)
+        setWait(sid, reason, tfile ? turnAnchorUuid(tfile) : null)
+        text = `waiting: ${reason}`
+        break
+      }
       case 'roster': {
         const rows: string[] = []
         const eps = busEndpoints()
+        // One process table / pane-pid map / ledger tail for the whole roster, same as the mini app's
+        // poll — the scan is per READ, never per agent.
+        const wctx = await waitContext()
         // agent-bus P3: flag endpoints backed by a send-only avatar bot (🎭) so the config is verifiable
         // at a glance. Guarded/fresh read like the post path — a bad avatars.json just shows no flair.
         let avatars = new Map<string, Avatar>()
@@ -5083,8 +5110,19 @@ async function handleCall(
             openAskToSid: !!onAsk,
             now: Date.now(),
           }) : null
+          // The third state (wait-state.ts). Only the LABEL is taken here: this line's busy/idle
+          // emoji, its subagent count and its unreported suffix already exist and are unchanged, so
+          // a waiting agent reads "idle · waiting: gh run watch" rather than silently as done.
+          const { wait } = sessionState({
+            working: busy,
+            said: tfile ? readWait(e.id, turnAnchorUuid(tfile)) : null,
+            ask: openOutboundAsk(listPending(), e.id, p => askerAlreadyResolved(p, wctx.ledger)),
+            proc: childWaitLabel(wctx.procs, wctx.panePids.get(pane)),
+            unreported: null,
+          })
           const state = `${busy ? ' · busy' : ' · idle'}`
             + `${subs > 0 ? ` · ${subs} subagent${subs === 1 ? '' : 's'} live` : ''}`
+            + `${wait ? ` · waiting: ${wait.label}` : ''}`
             + `${onAsk ? ` · on ask ${onAsk.id}` : ''}`
             + `${marker ? ` · unreported ${fmtAgo(marker.since)} → @${marker.briefer}` : ''}`
           rows.push(`${busy ? '🟡' : '🟢'} ${nm}${model}${pct}${state}${flair}`)
@@ -14996,10 +15034,26 @@ function dashboardSessionRows(): Array<{ sid: string; name: string; cwd: string;
   return rows
 }
 
+// The wait signals cost ONE process table, ONE tmux pane→pid map and ONE ledger tail per POLL —
+// never per card. A /proc scan is ~500 pids and the fleet is a dozen sessions, so doing this inside
+// webappSessionCard would multiply the whole cost of the feature by the size of the fleet.
+type WaitCtx = { procs: ProcRow[]; panePids: Map<string, number>; ledger: LedgerEntry[] }
+async function waitContext(): Promise<WaitCtx> {
+  const panePids = new Map<string, number>()
+  try {
+    const { stdout } = await exec('tmux', ['list-panes', '-a', '-F', '#{pane_id}\t#{pane_pid}'], { timeout: 3000 })
+    for (const line of stdout.split('\n')) {
+      const [id, pid] = line.split('\t')
+      if (id && pid) panePids.set(id, Number(pid))
+    }
+  } catch {}
+  return { procs: readProcTable(), panePids, ledger: tailLedger(busLedgerRoom(), LEDGER_SCAN) }
+}
+
 // One dashboard card, read live from the pane: statusline dials + working state + a task line
 // (current activity while working, last-reply snippet while idle). Dead pane ⇒ alive:false card.
-async function webappSessionCard(row: { sid: string; name: string; cwd: string; agent: string }): Promise<WebappSessionCard> {
-  const dead: WebappSessionCard = { sid: row.sid, name: row.name, cwd: row.cwd, agent: row.agent, alive: false, working: false, subagents: 0, task: null, model: null, effort: null, mode: null, ctxPct: null, h5Pct: null, branch: null, tier: null }
+async function webappSessionCard(row: { sid: string; name: string; cwd: string; agent: string }, ctx?: WaitCtx): Promise<WebappSessionCard> {
+  const dead: WebappSessionCard = { sid: row.sid, name: row.name, cwd: row.cwd, agent: row.agent, alive: false, working: false, subagents: 0, task: null, model: null, effort: null, mode: null, ctxPct: null, h5Pct: null, branch: null, tier: null, state: 'idle', wait: null, unreported: null }
   const pane = await paneForSession(row.sid).catch(() => null)
   if (!pane || !(await paneAlive(pane).catch(() => false))) return dead
   // A pane that outlived its claude (process died mid-command → pane is a bare shell) must render
@@ -15018,6 +15072,11 @@ async function webappSessionCard(row: { sid: string; name: string; cwd: string; 
   // The statusline is the primary model source, but its identity line truncates on a long cwd —
   // exactly the sessions whose model then read as blank. The transcript's own model id is the fallback.
   let model = sl?.model ?? null
+  // The roster's third state (wait-state.ts). `unreported` and the wait signals are read below, once
+  // the transcript is in hand — everything here needs an anchor, a turn or a briefing to mean anything.
+  let state: WebappSessionCard['state'] = 'idle'
+  let wait: WebappSessionCard['wait'] = null
+  let tfile: string | null = null
   try {
     const file = await transcriptForPane(pane, cwd || null)
     if (file) {
@@ -15037,10 +15096,31 @@ async function webappSessionCard(row: { sid: string; name: string; cwd: string; 
         task = a ? `${a.tool}${a.detail ? ` ${a.detail}` : ''}` : null
       }
       task ??= latestFinalReply(file)?.text.replace(/\s+/g, ' ').slice(0, 140) ?? null
+      tfile = file
     }
   } catch {}
+  // Outside the try on purpose: a session with no readable transcript still has a pane, and a pane
+  // that reads working must render working. Only the transcript-fed signals go quiet without a file.
+  const panePid = ctx?.panePids.get(pane)
+  // The same marker `tg roster` prints. Its own gate suppresses it while an INBOUND ask is open, so
+  // it can never contradict the row that already says why this session is silent.
+  const marker = tfile ? unreportedWorkMarker({
+    work: concludedTurnWork(tfile),
+    reportedAt: getReportedAt(row.sid),
+    briefedBy: getBriefedBy(row.sid),
+    openAskToSid: listPending().some(p => p.injected && !p.expiredAt && p.toKind === 'claude' && p.toSid === row.sid),
+    now: Date.now(),
+  }) : null
+  ;({ state, wait } = sessionState({
+    working,
+    said: tfile ? readWait(row.sid, turnAnchorUuid(tfile)) : null,
+    ask: openOutboundAsk(listPending(), row.sid, p => askerAlreadyResolved(p, ctx?.ledger ?? [])),
+    proc: ctx && panePid ? childWaitLabel(ctx.procs, panePid) : null,
+    unreported: marker,
+  }))
   return {
-    sid: row.sid, name: row.name, cwd, agent: row.agent, alive: true, working, subagents, task,
+    sid: row.sid, name: row.name, cwd, agent: row.agent, alive: true, working, subagents, task, state, wait,
+    unreported: state === 'unreported' && marker ? { briefer: marker.briefer } : null,
     model, effort: sl?.effort ?? null, mode: cap ? detectCurrentMode(cap) : null,
     ctxPct: sl?.ctxPct ?? null, h5Pct: sl?.h5?.pct ?? null,
     branch: topicBranchCache.get(row.sid) || null, tier: paneTiers.get(pane) ?? null,
@@ -15065,10 +15145,11 @@ async function webappListSessions(): Promise<WebappSessionCard[]> {
     const sid = await sessionForPane(focus.activePaneId).catch(() => null)
     if (sid && !rows.some(r => r.sid === sid)) rows.push({ sid, name: 'Session', cwd: '', agent: 'claude' })
   }
-  const cards = await Promise.all(rows.map(webappSessionCard))
+  const ctx = await waitContext()
+  const cards = await Promise.all(rows.map(r => webappSessionCard(r, ctx)))
   const confirmed = await Promise.all(cards.map(async (card, i) => {
     if (card.alive) return card
-    const recheck = await webappSessionCard(rows[i])
+    const recheck = await webappSessionCard(rows[i], ctx)
     return recheck.alive ? recheck : null
   }))
   return confirmed.filter((c): c is WebappSessionCard => c !== null)

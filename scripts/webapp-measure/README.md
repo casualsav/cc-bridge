@@ -163,6 +163,16 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   across a 4s poll (the list is rebuilt; the pill must not be),
                                   #   and diffs every card's text against HEAD's page on one fixture —
                                   #   a guard that passes on BOTH, which is what "shape only" means
+    node waitstate.mjs [page] [out] # the roster's FOURTH state: working · waiting · unreported · idle,
+                                  #   where idle finally means "nothing pending". Runs HEAD's page as
+                                  #   its own control in the same process, and splits its checks in
+                                  #   two: STATE checks (the amber dot sampled from the render, its
+                                  #   stillness, the ⏸️/📤 labels replacing the snippet, the one-line
+                                  #   height) must FAIL there — the harness fails if any passes — and
+                                  #   GUARDS (the idle and working cards, the other colour distances)
+                                  #   must hold on both. Dots are scrolled into view before sampling:
+                                  #   a clip outside the image throws, and a control that throws
+                                  #   reports nothing
     node thoughts.mjs [page] [out] # a turn's NARRATION is quoted and its answer is not. Three kinds of
                                   #   claim, three instruments: the marking is structural and fails
                                   #   wholesale on a pre-change page; the ABSENCE of a demotion (same

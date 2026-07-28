@@ -107,6 +107,9 @@ const HELP: Record<string, string> = {
   kill:    'tg kill <name>   end a session you spawned (a chat lane may end any worker). Undo with tg reopen',
   reopen:  'tg reopen <name>   bring a closed session back up — same folder, same name, same topic,\n' +
            '  resuming its own conversation where it left off',
+  wait:    'tg wait <reason|-> | --clear   say what you are blocked on, so the roster shows it instead of\n' +
+           '  reading you as idle: "CI run 18832", "@taste to answer". One line. It clears itself when your\n' +
+           '  next turn starts, so you never have to remember to unset it.',
   roster:  'tg roster   who is live on the bus',
   history: 'tg history [n]   recent agent-bus activity',
   shared:  'tg shared   print the room\'s shared-workspace dir (put deliverables there)',
@@ -147,7 +150,7 @@ let name = '', args: Record<string, unknown> = {}
 // byte-for-byte unchanged.
 // NOTE: this set is the real gate — a `case` added to the switch below without a name added HERE is
 // dead code that falls through to "unknown command". Cost one live probe run to find.
-const BUS = new Set(['ask', 'ack', 'btw', 'answer', 'post', 'slash', 'keys', 'spawn', 'kill', 'reopen', 'roster', 'history', 'shared'])
+const BUS = new Set(['ask', 'ack', 'btw', 'answer', 'post', 'slash', 'keys', 'spawn', 'kill', 'reopen', 'roster', 'history', 'shared', 'wait'])
 if (BUS.has(cmd)) {
   const rest = process.argv.slice(3)
   const refs: string[] = []
@@ -159,6 +162,7 @@ if (BUS.has(cmd)) {
     else if (f) { const v = rest[++i]; if (v != null) flags[f[1]!] = v }   // spawn's flags; harmless elsewhere
     else if (rest[i] === '--create') { flags.create = true }               // spawn: allow a missing --dir
     else if (rest[i] === '--force') { flags.force = true }                 // keys: carry esc into a working turn
+    else if (rest[i] === '--clear') { flags.clear = true }                 // wait: drop the declaration early
     else if (rest[i] === '--await') { /* P1 is async-only; --await is accepted and ignored */ }
     else pos.push(rest[i]!)
   }
@@ -180,6 +184,9 @@ if (BUS.has(cmd)) {
     case 'spawn':   name = 'spawn';   args = { pane, name: pos[0], text: body(pos[1], 'spawn') ?? '', ...flags }; break
     case 'kill':    name = 'kill';    args = { pane, name: pos[0] }; break
     case 'reopen':  name = 'reopen';  args = { pane, name: pos[0] }; break
+    // A reason short enough to read on a card is an argv string, so `-` stays available but is not
+    // the documented shape here (nothing in a wait reason wants Markdown).
+    case 'wait':    name = 'wait';    args = { pane, text: flags.clear ? '' : body(pos[0], 'wait') ?? '', ...flags }; break
     case 'roster':  name = 'roster';  args = { pane }; break
     case 'history': name = 'history'; args = { pane, n: pos[0] }; break
     case 'shared':  name = 'shared';  args = { pane }; break

@@ -531,6 +531,13 @@
      off the axis that header was measured onto. */
   .sess .dot { width: 11px; height: 11px; }
   .dot.on { background: #4caf50; animation: pulse 1.6s ease-in-out infinite; }
+  /* Blocked on something outside the session, and deliberately NOT animated: the pulse is what says
+     "moving", so a second animated state would leave two of the four reading as live. The stillness
+     IS the distinction from .on — colour alone would make a paused session look like a working one
+     glimpsed mid-fade. Literal like its neighbours (see .dot.on's note): a token would make a frozen
+     indicator inheritable. Amber built from .dot.dead's construction, not Material's #ffc107, which
+     next to that softened red reads as a different palette arriving. */
+  .dot.wait { background: #e0a33e; }
   .dot.dead { background: #e05555; }
   @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
   .chip { font-size: var(--t-meta); color: var(--hint); background: var(--bg); border-radius: 6px; padding: 2px 7px; white-space: nowrap; }
@@ -2092,8 +2099,20 @@ async function renderSessions() {
     // The dead states below no longer have a producer: /api/sessions drops a session from the list
     // once two reads confirm it gone (webappListSessions), so a card only exists while its session
     // does. Kept as the client's own floor, not as a state to design for.
-    const dot = !s.alive ? "dead" : s.working ? "on" : "";
+    const dot = !s.alive ? "dead" : s.working ? "on" : s.state === "waiting" ? "wait" : "";
     const chips = dialParts(s);
+    // The task line is ONE line and the card's height is reflow, so a state that has something to say
+    // says it INSTEAD of the last-reply snippet, never underneath it. For a waiting card the reason is
+    // the more useful of the two by definition — the snippet is from before it started waiting.
+    // `unreported` gets no dot colour (three is what a 11px disc can carry) and lives here alone.
+    const line =
+      // U+FE0F on the pause glyph is load-bearing: without it U+23F8 resolves to TEXT presentation
+      // and paints as two hairline bars that read as a broken character beside the emoji on every
+      // other row (seen in the rendered contact sheet, not reasoned about).
+      s.state === "waiting" && s.wait ? "⏸️ waiting: " + esc(s.wait.label)
+      : s.state === "unreported" ? "📤 unreported" + (s.unreported ? " → @" + esc(s.unreported.briefer) : "")
+      : s.task ? (s.working ? "⏳ " : "💬 ") + (s.subagents > 0 ? esc(s.subagents + " subagent" + (s.subagents === 1 ? "" : "s") + " live · ") : "") + esc(s.task)
+      : "";
     c.innerHTML =
       // title, because the name ellipsizes: a long one is still readable on a long press, and the
       // chat header carries it in full the moment the card is opened.
@@ -2101,7 +2120,7 @@ async function renderSessions() {
       chips.map(x => '<span class="chip">' + x + "</span>").join("") +
       '<button class="cardx" title="Close session" aria-label="Close session ' + esc(s.name) + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>' +
       "</div>" +
-      (s.task ? '<div class="task">' + (s.working ? "⏳ " : "💬 ") + (s.subagents > 0 ? esc(s.subagents + " subagent" + (s.subagents === 1 ? "" : "s") + " live · ") : "") + esc(s.task) + "</div>" : "") +
+      (line ? '<div class="task">' + line + "</div>" : "") +
       (!s.alive ? '<div class="task">💀 no live pane</div>' : "") +
       '<div class="foot">' +
         (s.branch ? "<span>🌿 " + esc(s.branch) + "</span>" : "") +
