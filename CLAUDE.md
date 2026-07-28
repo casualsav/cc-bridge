@@ -281,3 +281,10 @@ a message and its file ping together or not at all). Worker topic tabs go quiet 
 inherited: a worker's topic is a mirror for reading, not a channel he is addressed in. The Bot API
 never echoes `disable_notification` back, so the flag cannot be read off a sent message — evidence
 stops at the payload we build (unit-asserted) and the live classification.
+
+**Write a handoff doc before your context is cleared or you retire — `$(tg shared)/handoff-<topic>.md`
+— and carry ONLY live items in it.** Finish an item you took from a handoff and you DELETE that
+entry from the doc: no "done ✓" annotation, no history section. Completed work is already
+externalized in the repo, the commits and the report; every line still in the doc is context the
+next reader pays for, and a done-marked one costs that forever while informing nothing. A handoff
+shrinks toward empty — that is the shape of it working, not a record being lost.
