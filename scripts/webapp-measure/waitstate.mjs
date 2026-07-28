@@ -16,15 +16,15 @@ import { chromium } from "/home/ubuntu/projects/taste/node_modules/playwright/in
 //   The TASK LINE is a replacement, not an addition — a waiting card shows its reason INSTEAD of the
 //   last-reply snippet (which is from before it started waiting), and must not grow the card.
 //
-// The CONTROL runs against HEAD's copy of the page, rendered from git, and the harness FAILS if a
+// The CONTROL runs against the pinned pre-feature copy of the page, rendered from git, and the harness FAILS if a
 // check the feature is supposed to introduce passes there: a check that is already green without the
 // feature is measuring nothing. It runs here rather than behind a flag, so it cannot be skipped.
 //
 // Not every check can be a control, and pretending otherwise is its own bug. Each one below declares
-// which it is: STATE checks must fail on HEAD (they are the feature); GUARDS are expected to pass on
+// which it is: STATE checks must fail on the baseline (they are the feature); GUARDS are expected to pass on
 // both pages (they say the change did NOT disturb the idle card, the working card or the geometry) —
 // the same split sessions.mjs draws between its controls and its contents diff. A guard that starts
-// failing is a regression; a state check that passes on HEAD is a check that cannot fail.
+// failing is a regression; a state check that passes on the baseline is a check that cannot fail.
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -34,8 +34,13 @@ import { fileURLToPath } from "node:url";
 const REPO = fileURLToPath(new URL("../..", import.meta.url)).replace(/\/$/, "");
 const PAGE = process.argv[2] || join(REPO, "webapp", "index.html");
 const OUT = process.argv[3] || null;
-const BASE = join(mkdtempSync(join(tmpdir(), "wait-")), "head.html");
-writeFileSync(BASE, execFileSync("git", ["show", "HEAD:webapp/index.html"], { cwd: REPO, maxBuffer: 32e6 }));
+// The control is PINNED to the last commit without this feature — never HEAD. A HEAD-relative
+// control is a control only until the work is committed, and then it silently becomes a copy of the
+// page under test: every state check passes on both, and the script reports "measuring nothing"
+// forever. That happened here within the hour, which is why the commit is written down.
+const BASELINE = process.env.WAITSTATE_BASELINE || "dd2767f";
+const BASE = join(mkdtempSync(join(tmpdir(), "wait-")), "baseline.html");
+writeFileSync(BASE, execFileSync("git", ["show", `${BASELINE}:webapp/index.html`], { cwd: REPO, maxBuffer: 32e6 }));
 
 // One card per state, plus the dead card the list can still produce. `task` is present on EVERY row
 // on purpose: it is what a waiting or unreported card must be shown to replace rather than append to.
@@ -81,7 +86,7 @@ const open = async path => {
 // Every claim, run against one page. `sink(kind, ok, label)` decides what a result MEANS — on the
 // page under test everything must pass; on the control only the guards may.
 async function measure(page, label, sink) {
-  const state = (ok, l) => sink("state", ok, `${label}: ${l}`);   // the feature — must FAIL on HEAD
+  const state = (ok, l) => sink("state", ok, `${label}: ${l}`);   // the feature — must FAIL on the baseline
   const guard = (ok, l) => sink("guard", ok, `${label}: ${l}`);   // unchanged behaviour — passes on both
 
   const rows = await page.evaluate(() => [...document.querySelectorAll(".sess")].map(c => {
@@ -143,7 +148,7 @@ async function measure(page, label, sink) {
   const px = { work: await ink(work), wait: await ink(said), idle: await ink(idle), dead: await ink(dead) };
   const far = (a, b) => Math.max(...a.map((v, i) => Math.abs(v - b[i])));
   // The state claim is that the waiting dot is AMBER — a specific painted colour. "Different from
-  // the working dot" is true of the grey HEAD paints there, so distinctness alone cannot be the test.
+  // the working dot" is true of the grey the baseline paints there, so distinctness alone cannot be the test.
   state(far(px.wait, [224, 163, 62]) <= 6, `the waiting dot paints amber — ${px.wait} vs 224,163,62`);
   // Waiting-vs-idle is the whole point and is 0/255 without the feature, so it is a state check;
   // the other two pairs are far apart on any build and only say the new colour did not collide.
@@ -156,7 +161,7 @@ async function measure(page, label, sink) {
   // ---- 4. It costs the card no height ----------------------------------------------------------
   // Against the SHORT idle card: a wait label is one line and a last-reply snippet is two, so
   // measuring against the long card would report the prose, not the state.
-  // State checks, not guards: on HEAD these cards print the long snippet and stand 20px taller, so
+  // State checks, not guards: on the baseline these cards print the long snippet and stand 20px taller, so
   // "one line, no taller than any other one-line card" is a thing the feature makes true.
   state(Math.abs(said.height - short.height) < 0.5, `a waiting card is the height of an idle card with the same-length line (${said.height} vs ${short.height})`);
   state(Math.abs(unrep.height - short.height) < 0.5, `and so is an unreported one (${unrep.height} vs ${short.height})`);
@@ -167,12 +172,12 @@ await measure(p, "page", (_kind, ok, l) => check(ok, l));
 if (OUT) await p.screenshot({ path: join(OUT, "waitstate-cards.png"), fullPage: true });
 
 // ---- The control -------------------------------------------------------------------------------
-// HEAD's page has no fourth state: it paints the idle dot, prints the stale snippet, and knows
+// The baseline page has no fourth state: it paints the idle dot, prints the stale snippet, and knows
 // nothing about a wait label. Every STATE check must fail here; the guards are expected to pass, and
 // a guard that fails is a regression this change made to the cards it was not supposed to touch.
 const control = [];
 const c = await open(BASE);
-await measure(c, "control(HEAD)", (kind, ok, l) => { control.push({ kind, ok, l }); console.log(`${ok ? "pass" : "fail"}  ${l}`); });
+await measure(c, "control(baseline)", (kind, ok, l) => { control.push({ kind, ok, l }); console.log(`${ok ? "pass" : "fail"}  ${l}`); });
 const vacuous = control.filter(f => f.kind === "state" && f.ok);
 const brokenGuards = control.filter(f => f.kind === "guard" && !f.ok);
 const states = control.filter(f => f.kind === "state");
