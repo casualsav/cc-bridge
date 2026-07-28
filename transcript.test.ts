@@ -122,6 +122,25 @@ test('currentTurnFeed interleaves narration + tools, dropping the conclusion tex
   ])
 })
 
+// The models put a turn's reasoning in `thinking` blocks rather than in text blocks between the
+// tools, so a turn that reads as pure narration on screen can hold ZERO text blocks. This pins the
+// branch that reads them — note that Claude Code currently persists `thinking: ""` (signature only),
+// so the branch is inert against real transcripts and this fixture is the only place it runs.
+const think = (text: string, uuid: string) => ({ type: 'assistant', uuid, message: { stop_reason: 'tool_use', content: [{ type: 'thinking', thinking: text }] } })
+test('currentTurnFeed carries thinking blocks as narration', () => {
+  const f = fixture([user('q', 'u1'), think('weighing two options', 'a1'), tool('Read', { file_path: '/x' }, 't1'), asst('done', 'a2')])
+  expect(currentTurnFeed(f)).toEqual([
+    { kind: 'text', text: 'weighing two options' },
+    { kind: 'tool', tool: 'Read', detail: '/x', lines: null },
+  ])
+})
+
+test('currentTurnFeed: a redacted thinking block carries no text and is skipped', () => {
+  const redacted = { type: 'assistant', uuid: 'a1', message: { stop_reason: 'tool_use', content: [{ type: 'redacted_thinking', data: 'AAAA' }] } }
+  const f = fixture([user('q', 'u1'), redacted, tool('Read', { file_path: '/x' }, 't1')])
+  expect(currentTurnFeed(f).filter(i => i.kind === 'text')).toEqual([])
+})
+
 test('currentTurnFeed(concluded) drops a trailing-tool reply so it never folds into the card', () => {
   // The reply ('the answer') has a 'tool_use' stop_reason because a TodoWrite follows it. Live
   // (concluded=false) it shows as a thought; once concluded it's the relayed reply, so the card

@@ -134,9 +134,13 @@ const rest = await p.evaluate(async () => {
 });
 check(rest.bottom.last <= rest.bottom.ink + 0.5, `scrolled to the floor, the newest message clears the dock's ink (${rest.bottom.last.toFixed(1)} vs ${rest.bottom.ink.toFixed(1)})`);
 // The owner's resting position, measured off two screenshots of the same transcript: the newest
-// message rests ~6px above whatever the dock paints first. It was 24px above an invisible box edge.
-check(near(rest.bottom.ink - rest.bottom.last, 6, 2),
-  `…and rests ~6px above it (${(rest.bottom.ink - rest.bottom.last).toFixed(1)}px)`);
+// message rested ~6px above whatever the dock paints first (it was 24px above an invisible box edge).
+// NOW 10, and the change is his: the 6 was the clearance a REPLY got, while a user bubble — every
+// freshly sent message — carried 8px of margin against the same -10 reservation and landed 2px UNDER
+// the working pill. The floor gutter is pinned at 20 rather than per-role (see #dfeed > .msg:last-
+// child), which fixes the bubble and moves this number with it; he asked for the extra air.
+check(near(rest.bottom.ink - rest.bottom.last, 10, 2),
+  `…and rests ~10px above it (${(rest.bottom.ink - rest.bottom.last).toFixed(1)}px)`);
 check(rest.top.first >= rest.top.head - 0.5, `scrolled to the top, the first message clears the header (${rest.top.first.toFixed(1)} vs ${rest.top.head.toFixed(1)})`);
 
 // 4. …but everything scrolls THROUGH both bands. Hit-tested, not rect maths.

@@ -358,12 +358,14 @@
      the whole row, so `justify-content` on .nmrow was inert and the status dot sat pinned at the title
      block's left edge, 77px from the name it labels and touching the back button — the centring looked
      like a bug rather than a decision, and the indicator lost its referent. */
-  /* ONE step apart, and that is the whole rule: the name is --t-meta against the cwd's --t-stamp,
-     the closest the scale gets without collapsing them. It was --t-body (16), two steps clear, and
-     shrinking it is what lets the row come down to 40. The pair now separates by WEIGHT and colour
-     rather than by size — --w-semi against --hint-raised — so the bold is load-bearing here in a way
-     it was not at 16px: drop it and the two lines become one indistinguishable grey block. */
-  .dtitle .name { flex: 0 1 auto; min-width: 0; font-size: var(--t-meta); line-height: var(--h-l1); font-weight: var(--w-semi); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* --t-sub against the cwd's --t-stamp, two steps of the scale apart. It was --t-meta (one step,
+     12px) while the row was being brought down 44 -> 36, and went back up on the owner's ask for a
+     bigger session name — but only the TYPE moved: --h-l1 stays 16, so --hbtn-d, --hbtn-w, their
+     even-parity rule, --scrim-solid and the row's own height are all untouched and the row does not
+     grow back. 14px in a 16px line box leaves ~0.2px of half-leading, which the ink clears (measured:
+     header.mjs checks the glyphs against the box, since this rule also carries overflow: hidden).
+     The pair still separates by WEIGHT and colour as well as size — --w-semi against --hint-raised. */
+  .dtitle .name { flex: 0 1 auto; min-width: 0; font-size: var(--t-sub); line-height: var(--h-l1); font-weight: var(--w-semi); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .dtitle .sub { display: block; font-size: var(--t-stamp); line-height: var(--h-l2); color: var(--hint-raised); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   /* The title's contrast floor, in ONE rule over BOTH lines rather than the same declarations
      written twice: the name and the cwd are one title in two sizes, and a treatment on one of them
@@ -405,6 +407,27 @@
   .err { background: #c0392b; color: #fff; padding: var(--sp-2) var(--sp-3); font-size: var(--t-sub); display: none; }
   .err.show { display: block; }
   .err.ok { background: #2e7d32; }
+  /* FLOATING, and it stays in the body to do it. The element is declared before #drill, which is
+     `position: fixed; inset: 0` with an opaque --bg at z-index 5, so in the page flow every toast
+     raised from the chat view painted underneath the transcript — hit-tested, `msg user` topmost at
+     the box's own centre — which is why two different refusals for /new and /cost read to the owner
+     as nothing happening. It was never about slash commands: upload failures, the mic's errors and
+     every showOk went the same way.
+     Re-hosting it INSIDE #drill was the first fix and was wrong in a way worth recording: z-index is
+     resolved within a stacking context, and #drill is one at z 5 — so no value on a child of it can
+     ever beat a root-level sheet at 9 (#spawn, #sched) or 10 (#dial, #calls, #addctx). It fixed the
+     chat view and left a dial failure invisible behind that sheet's backdrop. From the body at 11 the
+     one rule clears every overlay there is, and there is no element to move.
+     `fixed` also has to mean the viewport here, which is the other reason not to live inside a sheet:
+     the sheets animate on `transform`, and a transformed ancestor becomes the containing block for a
+     fixed child. Corners because it no longer spans the screen. */
+  .err.float { position: fixed; left: var(--sp-3); right: var(--sp-3); z-index: 11;
+    bottom: calc(var(--sp-2) + env(safe-area-inset-bottom)); border-radius: var(--r-sm); }
+  /* In the chat view it rides the dock — everything that raises one in there is a composer action,
+     so the answer belongs beside the thing that asked, and --dock-h carries it up with a grown
+     composer or a staged file. Nowhere else has a dock, and reading --dock-h there would lift the
+     toast 60px off the bottom for a surface that isn't on screen. */
+  .err.float.docked { bottom: calc(var(--dock-h, 60px) + var(--sp-2)); }
   button.rowbtn { background: transparent; border: none; color: var(--hint); font-size: var(--t-title); line-height: 1; padding: 2px var(--sp-2); cursor: pointer; }
   textarea#vedit-area { margin: 0; padding: var(--sp-3); border: none; outline: none; flex: 1; width: 100%; resize: none; background: var(--bg); color: var(--text); font: var(--t-mono)/1.45 ui-monospace, Menlo, Consolas, monospace; }
   /* Tab bar: icon-over-label, one stroke-icon family (inherits color via currentColor) */
@@ -662,6 +685,22 @@
      geometry independent of which layout the feed happens to use — and workpin.mjs measures that cap
      on every run, so it is a checked restatement, not a guess. */
   .msg { width: 100%; max-width: 88%; margin-bottom: var(--sp-2); padding: var(--sp-2) 11px 3px; border-radius: var(--r-md); font-size: var(--t-msg); white-space: pre-wrap; word-break: break-word; display: flow-root; }
+  /* The FLOOR gutter, and it has to be one number rather than "whatever the last row's margin is".
+     #dfeed's bottom padding is --dock-h MINUS 10, on the stated reasoning that the last message's own
+     margin is the gutter — but that margin is 8 on a bubble and 16 on a reply, so the subtraction only
+     balanced for a reply. The newest row being a USER bubble is not an edge case: it is every freshly
+     sent message, for the whole time the turn takes to answer, and it landed 2px UNDER the working
+     pill (measured -1.9). Pinning the floor here fixes the working row and the resting composer at
+     once, and leaves the -10 — the owner's measured resting position — alone.
+     20 and not --sp-4, because the clearance is this number MINUS that 10: --sp-4 alone restores the
+     6px a reply used to get, and the owner asked for more than that ("have the message just a little
+     bit higher... bring the verb indicator down"). At 20 the row's air is 10 above and 6 below (2 on
+     #dworkhost plus the composer's own --sp-1), i.e. the pill sits nearer the field than the
+     transcript — which is the direction he asked for and which the older equal-air rule, written when
+     both were 6, cannot also have. The cost he authorised: with no turn running the newest message
+     rests 10px above the capsule rather than the 6 he measured off a screenshot. The two gutters are
+     one number and cannot part company without a state class, which is not worth 4px. */
+  #dfeed > .msg:last-child { margin-bottom: 20px; }
   .msg.user { background: var(--btn); color: var(--btn-text); margin-left: auto; border-bottom-right-radius: var(--r-xs); }
   .msg.user.pending { opacity: .55; }
   /* Session replies carry NO bubble: full content width on the page background, as the reference
@@ -805,6 +844,11 @@
      column (23px) while the pill's box keeps the feed's 12px gutter. The row's text used to sit at
      12, aligned with the gutter and 11px left of every message; the pill fixes both at once, and
      workpin.mjs now measures the two claims separately. */
+  /* Do NOT try to buy the row air above with a padding-top here — it is inert, and inertly plausible.
+     --dock-h is measured to the dock's first INK, i.e. to the row's own top, so this box growing
+     upward moves the dock's top edge and the row's top by the same amount and the row lands exactly
+     where it did. The row's air ABOVE is the feed's floor gutter (see #dfeed > .msg:last-child); only
+     the air BELOW is set here, and it is 2 + the composer's own --sp-1 (4), i.e. 6. */
   #dworkhost { padding: 0 var(--sp-3) 2px; }
   .work { display: inline-flex; align-items: baseline; gap: 4px; padding: 3px 11px;
     border-radius: 999px; background: color-mix(in srgb, var(--bg) 78%, transparent);
@@ -1469,8 +1513,24 @@ const AUTH = { Authorization: "tma " + INIT };
 
 const $ = id => document.getElementById(id);
 const errBox = $("err");
-function showErr(m) { errBox.textContent = m; errBox.classList.add("show"); setTimeout(() => errBox.classList.remove("show"), 4000); }
-function showOk(m) { errBox.textContent = m; errBox.classList.add("show", "ok"); setTimeout(() => errBox.classList.remove("show", "ok"), 2500); }
+// One toast, one element, two layouts. In the page flow it is painted over by anything opaque above
+// it — the chat view, and every bottom sheet — so whenever one of those is up it floats instead (see
+// .err.float). The banner is kept for the bare tabs view because that surface already worked and a
+// box that floats everywhere covers the nav on the home screen for four seconds.
+// EVERY overlay is listed, not just the chat: a toast behind a sheet is the same invisible error,
+// and the dial raises one by calling closeDial() and then sessionAct() — the backdrop is still
+// painting through its 180ms transition when the failure arrives.
+const OVERLAYS = ["dial", "calls", "addctx", "spawn", "sched", "viewer"];
+function floatToast() {
+  const drilled = $("drill").classList.contains("show");
+  const sheet = OVERLAYS.some(id => { const e = $(id); return e && e.classList.contains("show"); });
+  errBox.classList.toggle("float", drilled || sheet);
+  // The dock is the chat view's own, so only that view anchors to it. A sheet open over the tabs
+  // sits on a screen with no dock at all.
+  errBox.classList.toggle("docked", drilled);
+}
+function showErr(m) { floatToast(); errBox.textContent = m; errBox.classList.add("show"); setTimeout(() => errBox.classList.remove("show"), 4000); }
+function showOk(m) { floatToast(); errBox.textContent = m; errBox.classList.add("show", "ok"); setTimeout(() => errBox.classList.remove("show", "ok"), 2500); }
 
 const LONG_MSG = 700;   // chars past which a feed bubble collapses behind a tap-to-expand
 let WRITE = false;   // set from /api/ls (.write) — gates all edit/delete UI; mirrors WEBAPP_WRITE on the server

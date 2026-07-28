@@ -1,9 +1,10 @@
 import { chromium } from "/home/ubuntu/projects/taste/node_modules/playwright/index.mjs";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-// The chat header: three containers ONE height, a name one step above the cwd, a capsule 20%
+// The chat header: three containers ONE height, a name two steps above the cwd, a capsule 20%
 // narrower than the span it bridges, chips the transcript passes BEHIND, and a title centred on the
 // dot+name group rather than on the name alone.
 //
@@ -79,9 +80,46 @@ check(m.cap.h === 36, `row height 36, was 44 (got ${m.cap.h})`);
 check(m.back.w > m.back.h && m.back.w === m.back.h + 8, `buttons wider than tall (${m.back.w} x ${m.back.h})`);
 check(near(m.backRadius, m.back.h / 2), `stadium radius, not an ellipse (${m.backRadius} vs ${m.back.h / 2})`);
 
-// 2. Type — one step apart, bold kept.
-check(m.nameFont === 12 && m.subFont === 11, `name 12 / cwd 11, one scale step apart (got ${m.nameFont} / ${m.subFont})`);
+// 2. Type — two steps apart, bold kept, and the taller type still fits the line box it did not grow.
+check(m.nameFont === 14 && m.subFont === 11, `name 14 / cwd 11, two scale steps apart (got ${m.nameFont} / ${m.subFont})`);
 check(m.nameWeight === "600", `name keeps --w-semi (got ${m.nameWeight})`);
+// A guard, not a regression check: it passes on the pre-change page too (12px cleared 16px trivially).
+// It exists because raising the type WITHOUT raising --h-l1 is what keeps the row at 36, and the cost
+// of that trade is paid here — this rule carries overflow: hidden, so ink past the box is SLICED.
+// In PIXELS, because the box's own rect agrees with the CSS by construction and canvas metrics
+// disagreed with the paint by a whole CSS pixel. Carries its own falsifying control: at 22px the ink
+// must reach both edges, or the probe is measuring nothing.
+const inkRows = async () => {
+  const box = await p.evaluate(() => {
+    const r = document.getElementById("dname").getBoundingClientRect();
+    return { x: r.x, y: r.y, width: r.width, height: r.height };
+  });
+  const shot = await p.screenshot({ clip: box });
+  const rows = execFileSync("python3", ["-c", `
+import sys, io
+from PIL import Image
+im = Image.open(io.BytesIO(sys.stdin.buffer.read())).convert("RGB")
+w, h = im.size
+px = im.load()
+# The name is near-white --text over the scrim's solid part, which is flat --bg at this line.
+print(" ".join(str(sum(1 for x in range(w) if 0.2126*px[x,y][0] + 0.7152*px[x,y][1] + 0.0722*px[x,y][2] > 110)) for y in range(h)))
+`], { input: shot }).toString().trim().split(/\s+/).map(Number);
+  const first = rows.findIndex(v => v > 0);
+  return { n: rows.length, first, last: rows.length - 1 - [...rows].reverse().findIndex(v => v > 0) };
+};
+// Descenders on purpose — "cc-bridge" alone would clear a box its 'g' does not.
+await p.evaluate(() => { document.getElementById("dname").textContent = "cc-bridge gjpqy"; });
+await p.waitForTimeout(120);
+const ink = await inkRows();
+check(ink.first > 0 && ink.last < ink.n - 1,
+  `name ink clears its line box, unclipped (rows ${ink.first}..${ink.last} of ${ink.n})`);
+await p.evaluate(() => { document.getElementById("dname").style.fontSize = "22px"; });
+await p.waitForTimeout(120);
+const over = await inkRows();
+check(over.first === 0 && over.last === over.n - 1,
+  `control: 22px type DOES hit both edges (rows ${over.first}..${over.last} of ${over.n})`);
+await p.evaluate(() => { const n = document.getElementById("dname"); n.style.fontSize = ""; n.textContent = "cc-bridge"; });
+await p.waitForTimeout(120);
 
 // 3. Width — the capsule is 20% narrower than the span between the circles.
 const span = m.headW - m.back.w - m.stop.w - 2 * m.gap;

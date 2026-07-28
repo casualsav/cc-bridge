@@ -765,8 +765,9 @@ export function currentTurnTokens(file: string): { output: number; context: numb
   return { output, context }
 }
 
-// The current turn's chronological feed of what Claude said and did — text narration and tool
-// calls interleaved in transcript order — for the stream cards. Subagent output skipped.
+// The current turn's chronological feed of what Claude said and did — narration (text AND thinking
+// blocks) and tool calls interleaved in transcript order — for the stream cards. Subagent output
+// skipped.
 // `lines` is the net line delta of a file edit (+grew / −shrank; null for non-edit tools),
 // shown by the thoughts-stream tool summaries.
 export type FeedItem = { kind: 'text'; text: string } | { kind: 'tool'; tool: string; detail: string; lines?: number | null; plus?: number; minus?: number; agent?: { type: string; prompt: string } }
@@ -845,6 +846,23 @@ export function currentTurnFeed(file: string, concluded = false): FeedItem[] {
       if (b?.type === 'text' && typeof b.text === 'string' && b.text.trim()) {
         if (concluded && i === replyEntry && bi === replyBlock) return   // the reply → its own message, never the card
         if (narration) out.push({ kind: 'text', text: b.text.trim() })
+      // THINKING is narration too, and this branch is INERT — Claude Code writes these blocks as
+      // `{type, thinking, signature}` with **thinking: ""**, the signature persisted and the text
+      // not. Measured across 1545 transcripts, every model and every version since 2026-06-28: 100%
+      // empty, no regression, nothing on disk to show. The branch stays because it is the correct
+      // reading of the block and turns itself on the day the CLI persists one; it is not a fix.
+      //
+      // It is also NOT the answer to "why are there no thoughts in the mini app" — an earlier
+      // version of this comment said the models had stopped emitting mid-turn prose and that was
+      // wrong, generalised from a single session that happened to hold one text block. Counted
+      // properly, sibling sessions carry 65, 37, 10 and 8. The narration is there and this function
+      // returns it; what changed is downstream rendering (see webapp.ts's own note on the turn-card
+      // refactor). Do not come back here looking for it.
+      //
+      // Same gate as text — mid-turn only, since the pre-answer block is superseded by the answer it
+      // introduces — and `redacted_thinking` falls through, having no readable string.
+      } else if (b?.type === 'thinking' && typeof b.thinking === 'string' && b.thinking.trim()) {
+        if (narration) out.push({ kind: 'text', text: b.thinking.trim() })
       } else if (b?.type === 'tool_use' && typeof b.name === 'string' && !isReactionToolUse(b)) {
         out.push({ kind: 'tool', tool: b.name, detail: toolDetail(b.input), lines: editLineDelta(b.name, b.input), ...(editLinePair(b.name, b.input) ?? {}), ...((b.name === 'Task' || b.name === 'Agent') ? { agent: agentInfo(b.input) } : {}) })
       }

@@ -430,9 +430,23 @@ Samsung, a user-selectable face Chromium's `system-ui` does not follow — so no
 the page can reach it. There is nothing to match, only whether it draws.
 
 **The working row's spacing is derived from its NEIGHBOURS, not from its own padding.** The air above
-it is the last message's 16px bottom margin plus the feed's floor gutter; the air below is the row's
-padding plus the composer's own 8px. Equal air means 0 above / 8 below on the row itself — numbers
-that look lopsided in isolation and are not. While the row is up the feed's gutter is doubled up
+it is the feed's floor gutter — the last message's bottom margin *minus* the 10px `#dfeed`'s
+reservation subtracts; the air below is `#dworkhost`'s 2px plus the composer's own `--sp-1` (4), i.e.
+6. Numbers that look lopsided in isolation and are not. **A padding-top on `#dworkhost` is inert** and
+inertly plausible: `--dock-h` is measured to the dock's first *ink*, so that box growing upward moves
+the dock's top edge and the row's top by the same amount.
+
+**…and that floor gutter has to be ONE number, because the reservation's −10 was derived against a
+reply.** `.msg` carries an 8px bottom margin and `.msg.assistant` overrides it to 16, so "the last
+message's own margin is the gutter" balanced for a reply (6px of clearance) and went **2px negative
+for a user bubble** — the newest message painted *under* the working pill. Not a corner case: that is
+every freshly sent message, for the whole length of the turn it is waiting on, which is how the owner
+found it. `#dfeed > .msg:last-child` pins the floor at **20px** (10px of clearance), so the pill now
+sits nearer the field than the transcript — the direction he asked for, and one the older *equal* air
+rule cannot also express, since equal was 6/6. Every clearance check in `workpin.mjs` passed at 5.9px
+throughout, because **both** its fixtures ended on an `assistant` row; the `PENDING` fixture and its
+"the last row really is a user bubble" guard are what close that, and they fail at −2.5 on the
+pre-change page. While the row is up the feed's gutter is doubled up
 with it, so `#drill.working #dfeed` drops it (a class toggled on the same two paths that create and
 remove the row). That compensation belongs on the **feed's padding**, never as a negative margin on
 the host: `overflow` clips at the padding box, so a gutter the row overhangs is a strip of live
@@ -565,8 +579,13 @@ setting it, and earns its keep in one case only (`#dsub` empty). The line boxes 
 Keep **both** button axes minus `--hbtn-glyph` **even** (36 − 24 = 12, 44 − 24 = 20): `.chatbtn`
 centres by integer padding on each, and an odd difference reintroduces the paint snap below — that
 parity is why the name's line box is 16 and not the 15 its type would give, and why `--hbtn-w` steps
-by 8. The name is `--t-meta`, **one step** above the cwd's `--t-stamp`; that plus `--h-pad: 3` is
-what brought the row 44 → 36. The pair separates by weight and colour now, so `--w-semi` on `.name`
+by 8. The name is `--t-sub`, **two steps** above the cwd's `--t-stamp` — it was `--t-meta` while the
+row was being brought 44 → 36 (that plus `--h-pad: 3` is what bought the 8px), and went back up on the
+owner's ask for a bigger session name. **Only the type moved**: `--h-l1` stays 16, so the row does not
+grow back and nothing derived from it shifts. The cost of that trade is that the rule carries
+`overflow: hidden`, so ink past the line box is *sliced* — `header.mjs` measures it **in pixels** (3
+device rows of clearance at DPR 2, with a 22px control that must hit both edges); canvas text metrics
+disagreed with the paint by a whole CSS pixel and reported it flush. The pair separates by weight and colour now, so `--w-semi` on `.name`
 is load-bearing in a way it was not at 16px.
 
 **The buttons are not round, and the 44px touch floor is what they are buying back.** `--hbtn-w` is

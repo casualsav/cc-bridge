@@ -51,6 +51,13 @@ const SHORT = { ...base, items: [
 const LONG = { ...base, items: Array.from({ length: 24 }, (_, i) => i % 2
   ? { role: "assistant", text: `Reply ${i}. ` + "Long enough to wrap onto a second line so the feed really overflows. ".repeat(2), ts }
   : { role: "user", text: `Question ${i}, also long enough to wrap across more than one line in the bubble.`, ts }) };
+// (c) THE PENDING CASE, and the one both fixtures above were blind to: they end on an `assistant`
+// row, which carries a 16px bottom margin, while a user bubble carries 8. The feed's floor
+// reservation subtracts 10 from --dock-h on the stated grounds that the last message's own margin is
+// the gutter — so with a bubble last the arithmetic went 2px NEGATIVE and the newest message sat
+// under the pill. That is not a corner: it is every freshly sent message, for the whole length of
+// the turn it is waiting on. Measured at -1.9 before the floor gutter was pinned.
+const PENDING = { ...base, items: [...LONG.items, { role: "user", text: "and one more thing, sent while the turn is still running", ts }] };
 const SESSION = { sid: "abc", name: "cc-bridge", alive: true, working: true, cwd: "~/projects/cc-bridge", model: "Opus 5", effort: "high" };
 
 let bad = 0;
@@ -85,6 +92,8 @@ async function measure(b, feed, vars, shot) {
       glyph: work && work.querySelector(".g") ? r(work.querySelector(".g")) : null,
       first: msgs.length ? r(msgs[0]) : null,
       last: msgs.length ? r(msgs[msgs.length - 1]) : null,
+      lastIsUser: msgs.length ? msgs[msgs.length - 1].classList.contains("user") : false,
+      inputTop: document.querySelector("#drill .inputwrap").getBoundingClientRect().top,
       user: user ? r(user) : null, asst: asst ? r(asst) : null,
       // A flex item with an auto margin and an `auto` cross size is sized to its CONTENT. That is how
       // a column layout silently shrink-wrapped every short user bubble once, so the width is
@@ -128,6 +137,7 @@ const b = await chromium.launch();
 for (const [theme, vars] of [["dark", null], ["light", LIGHT]]) {
   const s = await measure(b, SHORT, vars, join(OUT, `workpin-short-${theme}.png`));
   const l = await measure(b, LONG, vars, join(OUT, `workpin-long-${theme}.png`));
+  const pend = await measure(b, PENDING, vars, join(OUT, `workpin-pending-${theme}.png`));
   console.log(`\n--- ${theme} ---`);
   console.log("  short:", JSON.stringify(s.work), "overflow", Math.round(s.overflow));
   console.log("  long: ", JSON.stringify(l.work), "overflow", Math.round(l.overflow));
@@ -176,6 +186,25 @@ for (const [theme, vars] of [["dark", null], ["light", LIGHT]]) {
   // Scrolled to the very bottom is where an overlay treatment would collide with the newest message.
   check(!!at.bottom.last && !!at.bottom.work && at.bottom.last.bottom <= at.bottom.work.top + 0.5,
     `scrolled to the bottom, the last message still clears the row  (${at.bottom.last && at.bottom.work ? (at.bottom.work.top - at.bottom.last.bottom).toFixed(1) : "-"}px)`);
+  // THE PENDING CASE. Its fixture check is not ceremony: without it this block silently re-measures
+  // the reply case, which is exactly how the bug survived — every other clearance check here passed
+  // at 5.9px while a freshly sent bubble was 1.9px under the pill.
+  const pb = pend.scroll.bottom;
+  check(pb.lastIsUser, `FIXTURE: the pending transcript really ends on a USER bubble (${pb.lastIsUser})`);
+  check(!!pb.last && !!pb.work && pb.last.bottom <= pb.work.top + 0.5,
+    `pending: a freshly sent bubble clears the row  (${pb.last && pb.work ? (pb.work.top - pb.last.bottom).toFixed(1) : "-"}px)`);
+  // One floor gutter, not one per role — the two must agree, or the reservation is being paid by
+  // whichever margin the last row happens to carry.
+  check(!!pb.work && !!at.bottom.work && near(pb.work.top - pb.last.bottom, at.bottom.work.top - at.bottom.last.bottom, 1),
+    `pending: …by the SAME distance a reply does  (${(pb.work.top - pb.last.bottom).toFixed(1)} vs ${(at.bottom.work.top - at.bottom.last.bottom).toFixed(1)})`);
+  // The DIRECTION the owner asked for, which supersedes the older equal-air rule and cannot coexist
+  // with it: "bring the verb indicator down a little bit more... if not, have the message a little
+  // bit higher". Both, here — the air above the row (the floor gutter, 10) is now larger than the air
+  // below it (#dworkhost's 2 plus the composer's own --sp-1, 6), so the pill sits nearer the field
+  // than the transcript. Equal air was 6/6 and was what put a bubble under the pill.
+  const above = pb.work.top - pb.last.bottom, below = pb.inputTop - pb.work.bottom;
+  check(above > below && above - below < 8,
+    `pending: the row sits nearer the field than the transcript  (${above.toFixed(1)} above / ${below.toFixed(1)} below)`);
   // The guard against "fixing" this by bottom-aligning the whole feed: a short transcript's messages
   // still START at the top. Only the row moved.
   // Measured against the feed's OWN top padding rather than the 12 it used to be: the chat header
