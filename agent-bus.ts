@@ -640,15 +640,23 @@ export const DIGEST_SCAN = 200
 // so a narrow window would let the excluded/self rows starve the digest. Filters ts>sinceTs, drops the
 // current ask (excludeId) and the endpoint's OWN entries (excludeFrom — answers TO it survive, since
 // those are authored by the answerer), returns the newest `cap`.
+// `involving` SCOPES the digest to one endpoint's own lane: kept rows are the ones this endpoint
+// sent or was sent. Without it the digest was room-wide — every session's traffic — and a fresh
+// @peptides spawn's SECOND message arrived carrying two cc-bridge↔chat rows it had no business
+// reading. That is not catch-up, it is another lane's conversation pasted into a stranger's context,
+// and the failure to fear is a session repeating it outward as if it were its own.
+// A `post` (addressed to the humans, no `to`) drops out of every scoped digest by construction, and
+// that is correct rather than collateral: it is the definitional cross-lane broadcast.
 export function digestSince(
   entries: LedgerEntry[], sinceTs: number,
-  opts: { excludeId?: number; excludeFrom?: string; cap: number },
+  opts: { excludeId?: number; excludeFrom?: string; involving?: string; cap: number },
 ): LedgerEntry[] {
   const kept = entries.filter(e =>
     e.ts > sinceTs &&
     !e.suppressed &&                    // its notice was withheld on purpose; the digest reads as news
     (opts.excludeId == null || e.id !== opts.excludeId) &&
-    (opts.excludeFrom == null || e.from !== opts.excludeFrom))
+    (opts.excludeFrom == null || e.from !== opts.excludeFrom) &&
+    (opts.involving == null || e.from === opts.involving || e.to === opts.involving))
   return kept.slice(-Math.max(1, opts.cap))
 }
 

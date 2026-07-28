@@ -2811,7 +2811,10 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
     // window opens at the first landed delivery (markSeen below), so the digest does its job from the
     // second one on. A session whose watermark aged out of SEEN_TTL_MS lands here too, and silence is
     // the better default there as well.
-    const digest = since > 0 ? digestSince(resolveLedgerNames(tailLedger(room, DIGEST_SCAN)), since, { excludeId: cur.id, excludeFrom: cur.toName, cap: 8 }) : []
+    // SCOPED TO THIS ENDPOINT'S OWN LANE (`involving`). Room-wide was the bug the owner caught: a
+    // one-minute-old @peptides spawn's second message carried two cc-bridge↔chat rows — another
+    // lane's conversation, in a context that had no way to know it was not its own.
+    const digest = since > 0 ? digestSince(resolveLedgerNames(tailLedger(room, DIGEST_SCAN)), since, { excludeId: cur.id, excludeFrom: cur.toName, involving: cur.toName, cap: 8 }) : []
     const dig = formatDigestBlock(digest, since > 0 ? fmtAgo(since) : 'recently')
     if (dig) block = `${dig}\n${askBlock}`
     const ok = await busDeliver(pane, block)

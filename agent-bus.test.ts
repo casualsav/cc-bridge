@@ -293,6 +293,28 @@ test('digestSince drops the current ask (excludeId) and self-authored rows (excl
   expect(digestSince(es, 0, { excludeId: 7, excludeFrom: 'me', cap: 8 }).map(e => e.id)).toEqual([1, 3])
 })
 
+test('digestSince: `involving` scopes the digest to ONE endpoint\'s lane', () => {
+  // The bug the owner caught: a one-minute-old @peptides spawn's second message arrived carrying two
+  // cc-bridge↔chat rows. The digest was room-wide, so every other lane's conversation qualified as
+  // this session's "catch-up" — another lane's content pasted into a stranger's context.
+  const es = [
+    led({ ts: 100, id: 1, from: 'chat', to: 'me' }),                        // sent TO me — keep
+    led({ ts: 200, id: 2, from: 'cc-bridge', to: 'chat' }),                 // ANOTHER LANE — drop
+    led({ ts: 300, id: 3, kind: 'answer', from: 'chat', to: 'cc-bridge' }), // ANOTHER LANE — drop
+    led({ ts: 400, id: 4, kind: 'answer', from: 'helper', to: 'me' }),      // answer TO me — keep
+    led({ ts: 500, id: 5, kind: 'post', from: 'cc-bridge' }),               // to the humans, no `to` — drop
+  ]
+  expect(digestSince(es, 0, { involving: 'me', cap: 8 }).map(e => e.id)).toEqual([1, 4])
+  // …and without it the old room-wide behaviour is intact, which is what every other caller relies on.
+  expect(digestSince(es, 0, { cap: 8 }).map(e => e.id)).toEqual([1, 2, 3, 4, 5])
+})
+
+test('digestSince: a scoped digest can be EMPTY, which is the fresh-lane answer', () => {
+  // A session nobody has addressed since its watermark gets nothing — not a room summary.
+  const es = [led({ ts: 100, id: 1, from: 'cc-bridge', to: 'chat' }), led({ ts: 200, id: 2, from: 'chat', to: 'cc-bridge' })]
+  expect(digestSince(es, 0, { involving: 'peptides', cap: 8 })).toEqual([])
+})
+
 test('digestSince caps to the newest `cap` AFTER filtering (wide-scan intent)', () => {
   const es = Array.from({ length: 10 }, (_, i) => led({ ts: (i + 1) * 10, id: i + 1 }))
   expect(digestSince(es, 0, { cap: 3 }).map(e => e.id)).toEqual([8, 9, 10])
