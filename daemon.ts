@@ -14319,22 +14319,25 @@ function handleShimConnection(socket: net.Socket): void {
             } catch {}
           }
           sessions.set(sessionId, { socket, write, paneId: msg.paneId, label, subscribedAt: Date.now() })
-          const announce = () => notifyChats(
-            `🆕 Another Claude session connected${cwdPath ? ` (<code>${escapeHtml(cwdPath)}</code>)` : ''} — this DM drives a single session, so I'm staying on the current one.`)
 
-          // Focus it only when nothing valid holds focus (the first/only session, or
-          // a reconnect of the focused pane). Otherwise announce — never steal focus.
-          // A pinned pane (FORCE_PANE) holds focus regardless.
+          // Focus it only when nothing valid holds focus (the first/only session, or a reconnect of
+          // the focused pane) — never steal focus. A pinned pane (FORCE_PANE) holds focus regardless.
+          //
+          // A subscribe that does NOT take focus is a LOG LINE, not a message. It used to announce
+          // itself to the chat ("🆕 Another Claude session connected … this DM drives a single
+          // session, so I'm staying on the current one") — copy from when a DM did drive exactly one
+          // session. DM mode is multi-lane now, so the sentence was false and the notice had no job;
+          // retired on the owner's instruction (2026-07-28). Do not reintroduce it: a shim that
+          // reconnects (a daemon restart closes every socket) re-subscribes, so this path fires
+          // repeatedly for sessions the user already knows about.
           const adoptionHolds = adoptedPaneId !== null && focus.activePaneId === adoptedPaneId
           if (FORCE_PANE) {
             process.stderr.write(`daemon: session ${sessionId} registered (focus pinned to ${FORCE_PANE})\n`)
-          } else if (adoptionHolds) {
-            announce()
-          } else if (focus.currentSessionId === null || focus.currentSessionId === sessionId || !sessions.has(focus.currentSessionId)) {
+          } else if (!adoptionHolds && (focus.currentSessionId === null || focus.currentSessionId === sessionId || !sessions.has(focus.currentSessionId))) {
             setFocus(sessionId)
             replayBuffer()
           } else {
-            announce()
+            process.stderr.write(`daemon: session ${sessionId} registered (focus stays on ${focus.currentSessionId ?? adoptedPaneId})\n`)
           }
           break
         }
