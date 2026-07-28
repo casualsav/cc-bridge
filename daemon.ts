@@ -136,7 +136,8 @@ import {
 import { formatAskBlock, formatAnswerBlock, formatAsideBlock, formatDigestBlock, formatRosterLine, type RosterAgent } from './agent-bus-block.ts'
 import {
   readProcTable, childWaitLabel, childWaitShells, survivorWarning, conversationStart, openOutboundAsk, sessionState,
-  setWaitsFile, setWait, clearWait, readWait, type ProcRow, type WaitShell,
+  setWaitsFile, setWait, clearWait, readWait,
+  type ProcRow, type WaitShell, type SessionState, type SessionWait,
 } from './wait-state.ts'
 import { laneForChat, bindLane, chatForLaneSession, noteLaneCwd, dmLanesOn, fleetMode, fleetSurface, listLanes, unbindLane } from './dm-lanes.ts'
 import { runHermes, type HermesEndpoint, type HermesTask } from './hermes-driver.ts'
@@ -15294,6 +15295,37 @@ async function waitContext(): Promise<WaitCtx> {
   return { procs: readProcTable(), panePids, ledger: tailLedger(busLedgerRoom(), LEDGER_SCAN) }
 }
 
+// The four-state read for ONE session (wait-state.ts), shared by the dashboard card and the drill-in
+// header. It exists as a function because those two surfaces disagreed once already: the card learned
+// `waiting` and the header it opens onto kept rendering green-or-grey off the working boolean, so an
+// amber card opened to a grey dot. Two copies of this composite is how that comes back.
+//
+// `marker` rides out with the state because the card needs the briefer's name for its own row, and
+// recomputing it there would mean reading the transcript's concluded work twice.
+function readSessionState(sid: string, tfile: string | null, working: boolean, panePid: number | undefined, ctx?: WaitCtx): {
+  state: SessionState; wait: SessionWait | null; marker: ReturnType<typeof unreportedWorkMarker>
+} {
+  // The same marker `tg roster` prints. Its own gate suppresses it while an INBOUND ask is open, so
+  // it can never contradict the row that already says why this session is silent.
+  const marker = tfile ? unreportedWorkMarker({
+    work: concludedTurnWork(tfile),
+    reportedAt: getReportedAt(sid),
+    briefedBy: getBriefedBy(sid),
+    openAskToSid: listPending().some(p => p.injected && !p.expiredAt && p.toKind === 'claude' && p.toSid === sid),
+    now: Date.now(),
+  }) : null
+  return {
+    ...sessionState({
+      working,
+      said: tfile ? readWait(sid, turnAnchorUuid(tfile)) : null,
+      ask: openOutboundAsk(listPending(), sid, p => askerAlreadyResolved(p, ctx?.ledger ?? [])),
+      proc: ctx && panePid ? childWaitLabel(ctx.procs, panePid, conversationStart(tfile)) : null,
+      unreported: marker,
+    }),
+    marker,
+  }
+}
+
 // The background shells a close would take with it — the two kill paths (`tg kill`, the mini app's ✕)
 // ask this before they act. Measured 2026-07-28: ending a session KILLS its children rather than
 // orphaning them (a probe died with three sleeps running and all three went with it), so this warning
@@ -15366,22 +15398,9 @@ async function webappSessionCard(row: { sid: string; name: string; cwd: string; 
   // Outside the try on purpose: a session with no readable transcript still has a pane, and a pane
   // that reads working must render working. Only the transcript-fed signals go quiet without a file.
   const panePid = ctx?.panePids.get(pane)
-  // The same marker `tg roster` prints. Its own gate suppresses it while an INBOUND ask is open, so
-  // it can never contradict the row that already says why this session is silent.
-  const marker = tfile ? unreportedWorkMarker({
-    work: concludedTurnWork(tfile),
-    reportedAt: getReportedAt(row.sid),
-    briefedBy: getBriefedBy(row.sid),
-    openAskToSid: listPending().some(p => p.injected && !p.expiredAt && p.toKind === 'claude' && p.toSid === row.sid),
-    now: Date.now(),
-  }) : null
-  ;({ state, wait } = sessionState({
-    working,
-    said: tfile ? readWait(row.sid, turnAnchorUuid(tfile)) : null,
-    ask: openOutboundAsk(listPending(), row.sid, p => askerAlreadyResolved(p, ctx?.ledger ?? [])),
-    proc: ctx && panePid ? childWaitLabel(ctx.procs, panePid, conversationStart(tfile)) : null,
-    unreported: marker,
-  }))
+  const read = readSessionState(row.sid, tfile, working, panePid, ctx)
+  const marker = read.marker
+  ;({ state, wait } = read)
   return {
     sid: row.sid, name: row.name, cwd, agent: row.agent, alive: true, working, subagents, task, state, wait,
     unreported: state === 'unreported' && marker ? { briefer: marker.briefer } : null,
@@ -15508,7 +15527,13 @@ async function webappSessionFeed(sid: string): Promise<WebappSessionFeed | null>
     items.push({ role: 'turn', ts: Date.now(), blocks: parts.filter(p => p.t !== 'chip' || ++chips <= FEED_BLOCKS) })
     items.push(...concluded)
   }
-  return { sid, name: row.name, working, ...dial, items, ...(status ? { status } : {}) }
+  // The header dot's state, read the SAME way the card reads it (readSessionState) so a card and the
+  // screen it opens onto cannot disagree. It costs one waitContext — a /proc scan and a tmux
+  // list-panes — on the 3s poll of the ONE session a human is looking at, which is why it is taken
+  // here rather than folded into the fleet poll the list already runs.
+  const ctx = await waitContext()
+  const { state } = readSessionState(sid, file, working, ctx.panePids.get(pane), ctx)
+  return { sid, name: row.name, working, state, ...dial, items, ...(status ? { status } : {}) }
 }
 
 // Dashboard actions — the same controls chat grants: stop = the /stop interrupt, compact = the

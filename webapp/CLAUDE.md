@@ -271,10 +271,13 @@ give it.
   snippet would — which is right on its own terms: the snippet predates the wait. **`⏸️` carries
   U+FE0F and needs it**: bare U+23F8 resolves to text presentation and paints as two hairline bars
   that read as a broken character beside the emoji on every other row (seen in the contact sheet).
-- **The drill-in header dot (`#ddot`) knows nothing about `waiting`** — it renders green-or-grey off
-  `SessionFeed.working`, so a card showing amber opens onto a grey header dot. Deliberate scope, not
-  an oversight: the feed payload would have to carry the state too, and the drill-in already has the
-  working row. If it ever gets the colour, it gets the colour only — the header is two bare lines.
+- **The drill-in header dot (`#ddot`) renders the card's three colours off `SessionFeed.state`** —
+  green pulsing, amber still, grey — in the card's own precedence (`working` first, then `waiting`).
+  It got **the colour only**: the header is two bare lines and nothing in it is conditional. The
+  state is computed by the same `readSessionState` the card uses, which is the point — the two
+  disagreed for a release (an amber card opened onto a grey dot) because each read the composite
+  itself. A `state`-less payload (an older daemon, or the pre-transcript one) falls back to the
+  working boolean, so the dot degrades to what it was rather than to grey.
 
 - **`#newfab` is static markup, a SIBLING of `#tab-sessions`, toggled by `showTab()`.** The list is
   wiped and rebuilt by a 4s poll — a control re-created under the thumb loses the tap. Building it

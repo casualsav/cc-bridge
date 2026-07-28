@@ -16,6 +16,12 @@ function truncate(s: string, max: number): string {
   return s.length > max ? s.slice(0, max - 1) + '…' : s
 }
 
+// "2 subagents live · " — a prefix on the task line, empty when none are. It rides INSIDE that line
+// rather than taking one of its own because the card is a fixed shape on both surfaces.
+function subagents(s: SessionCard): string {
+  return s.subagents > 0 ? `${s.subagents} subagent${s.subagents === 1 ? '' : 's'} live · ` : ''
+}
+
 function renderCard(s: SessionCard): string {
   // Four states, three colours — the mini app's own mismatch (webapp/CLAUDE.md): `unreported` takes
   // no colour of its own and says itself in the task line instead. 🟡 is the amber dot's stand-in;
@@ -39,7 +45,12 @@ function renderCard(s: SessionCard): string {
   const line =
     s.state === 'waiting' && s.wait ? `⏸️ waiting: ${escapeHtml(truncate(s.wait.label, TASK_MAX))}`
     : s.state === 'unreported' ? `📤 unreported${s.unreported ? ` → @${escapeHtml(s.unreported.briefer)}` : ''}`
-    : s.task ? `${s.state === 'working' ? '⏳' : '✅'} ${escapeHtml(truncate(s.task, TASK_MAX))}`
+    // Delegated work is still work, and this view was the last surface not saying so: a session whose
+    // subagents are editing files sits at its own prompt, so without the count it reads as one line of
+    // stale reply text. Same words and same position as the mini app's card (webapp/index.html
+    // renderSessions) and the bus roster — a count that reads differently on three surfaces is worse
+    // than one that reads nowhere.
+    : s.task ? `${s.state === 'working' ? '⏳' : '✅'} ${subagents(s)}${escapeHtml(truncate(s.task, TASK_MAX))}`
     : ''
   if (line) lines.push(line)
 

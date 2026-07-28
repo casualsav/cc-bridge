@@ -51,6 +51,33 @@ test('waiting card: amber dot, the state word, and the reason INSTEAD of the las
   expect(out).not.toContain('an older reply')
 })
 
+// The parity the mini app's card and the bus roster already had: a session orchestrating subagents sits
+// at its own prompt, so without this the line is a stale reply snippet on a session that is busy.
+test('live subagents are counted on the task line, in the mini app\'s own words', () => {
+  const c = card({ working: true, state: 'working', subagents: 2, task: 'editing wait-state.ts' })
+  expect(renderSessionsView([c], NOW)).toContain('⏳ 2 subagents live · editing wait-state.ts')
+  const one = card({ working: true, state: 'working', subagents: 1, task: 'editing wait-state.ts' })
+  expect(renderSessionsView([one], NOW)).toContain('⏳ 1 subagent live · editing wait-state.ts')
+})
+
+// A session at a prompt with delegated work still running: the parent's turn concluded, so the count
+// is the ONLY thing on the row that says the session is not done.
+test('the count rides an idle-looking card too, and none at all adds nothing', () => {
+  expect(renderSessionsView([card({ subagents: 3, task: 'handed off to the workers' })], NOW))
+    .toContain('✅ 3 subagents live · handed off to the workers')
+  expect(renderSessionsView([card({ subagents: 0, task: 'done' })], NOW)).toContain('✅ done')
+  expect(renderSessionsView([card({ subagents: 0, task: 'done' })], NOW)).not.toContain('subagent')
+})
+
+// It is a prefix on the task line, never a line of its own — and a state with something to say still
+// REPLACES that line, so a waiting card shows its reason and no count.
+test('a waiting card keeps its reason, with no count grafted on', () => {
+  const c = card({ state: 'waiting', wait: { why: 'proc', label: 'sleep 900' }, subagents: 2, task: 'older' })
+  const out = renderSessionsView([c], NOW)
+  expect(out).toContain('⏸️ waiting: sleep 900')
+  expect(out).not.toContain('subagent')
+})
+
 test('the pause glyph carries U+FE0F', () => {
   const c = card({ state: 'waiting', wait: { why: 'ask', label: '@bridge (ask 10)' } })
   expect(renderSessionsView([c], NOW)).toContain('⏸️')

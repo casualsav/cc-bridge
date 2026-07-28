@@ -84,6 +84,10 @@ export interface SessionCard {
 export type SessionAct = 'stop' | 'compact' | 'send' | 'close' | 'model' | 'effort'
 export interface SessionFeed {
   sid: string; name: string; working: boolean
+  // The SAME four states the card renders, so the header dot a card opens onto cannot contradict the
+  // card. `working` stays beside it untouched — it answers the narrower question the working row and
+  // the composer's chip logic ask. Optional only for the payload built before a transcript is found.
+  state?: SessionCard['state']
   // The drill-in's own dial, carried on the poll it already runs rather than read out of a
   // sessions-list snapshot it may never have loaded — a deep-linked open has none, and after
   // changing model or effort the list snapshot would be stale until that tab is visited again.

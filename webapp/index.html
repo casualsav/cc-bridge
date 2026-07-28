@@ -2664,7 +2664,11 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) pain
 async function renderDrill() {
   if (!drillSid) return;
   let d; try { d = await api("/api/session/feed", { sid: drillSid }); } catch { return; }
-  $("ddot").className = "dot " + (d.working ? "on" : "");
+    // The card's own three dot colours, on the header it opens onto: green pulsing (working), amber
+  // still (waiting), grey (everything else). It reads `state` where the payload carries it and falls
+  // back to the working boolean where it does not — an older daemon, or the pre-transcript payload.
+  // The COLOUR only, deliberately: the header is two bare lines and nothing else here is conditional.
+  $("ddot").className = "dot " + (d.working ? "on" : d.state === "waiting" ? "wait" : "");
   if (d.cwd) $("dsub").textContent = d.cwd;
   setDial(d);
   lastDrill = d;
