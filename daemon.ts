@@ -2326,7 +2326,13 @@ function lastSessionCwd(): string | null {
   return lastCwdCache && existsSync(lastCwdCache) && !isConfigCwd(lastCwdCache) ? lastCwdCache : null
 }
 
-function adoptPane(paneId: string): void {
+// `why` is not decoration — it is the answer to "was discovery running?", and the log line is where
+// anyone asks it. This used to say "(auto-discovery)" for every caller, including a pane the daemon
+// had just SPAWNED, which on 2026-07-28 read as proof that discovery was alive on an instance where
+// it was disabled and cost twenty minutes of a hunt. One string, two provenances, in the exact line
+// you go to. Every call site names its own.
+type AdoptWhy = 'auto-discovery' | 'spawn' | 'pane-restart'
+function adoptPane(paneId: string, why: AdoptWhy): void {
   offMcpPanes.add(paneId)
   // Stamp the adopt marker on the pane itself so it stays discoverable across daemon restarts and
   // pane respawns — the discoverPanes rescan only adopts @telegram-tagged panes, so a pane bound
@@ -2338,7 +2344,7 @@ function adoptPane(paneId: string): void {
   const prevPane = focus.activePaneId
   focusOffMcpPane(paneId)
   if (prevPane !== paneId) typingPresence.stop()   // focus handed off to a different pane — a stale working-window must not carry over to this new adoptee
-  process.stderr.write(`daemon: adopted off-MCP pane ${paneId} (auto-discovery)\n`)
+  process.stderr.write(`daemon: adopted off-MCP pane ${paneId} (${why})\n`)
   // Only announce a genuinely NEW pane. A daemon restart (frequent during dev, or on reboot)
   // re-adopts the same pane and shouldn't re-ping "Connected". Persisted so it survives the
   // restart; the next work burst's status message is enough of a signal anyway.
@@ -2413,7 +2419,7 @@ function focusOffMcpPane(paneId: string): void {
 // A pane beyond the focused one appeared. Topic mode: give it its own topic now, not on first
 // reply. Outside topic mode, extra panes stay registered (so topic/aux bookkeeping sees them) but
 // get no switch UI.
-async function noteDiscoveredPane(paneId: string): Promise<void> {
+async function noteDiscoveredPane(paneId: string, why: AdoptWhy): Promise<void> {
   void sampleAccountTier(paneId)   // discovery-tick siblings never pass adoptPane/registerSpawnedPane — this is their only sample point
   const cwd = await paneCwd(paneId)
   // Snapshot a read baseline at discovery: the user has "seen up to now" (nothing yet), so the
@@ -2427,7 +2433,7 @@ async function noteDiscoveredPane(paneId: string): Promise<void> {
   // one" there pointed the DM at a dead pane while the /launch'd session ran undriven.
   const curCmd = focus.activePaneId ? await paneCommand(focus.activePaneId).catch(() => '') : ''
   if (curCmd !== 'claude' && curCmd !== 'codex') {
-    adoptPane(paneId)
+    adoptPane(paneId, why)
     notifyChats(`🔁 Switched to the new Claude session${cwd ? ` in <code>${escapeHtml(cwd)}</code>` : ''} — the previous pane had no agent running.`)
     return
   }
@@ -2445,8 +2451,8 @@ function registerSpawnedPane(paneId: string): void {
   if (offMcpPanes.has(paneId)) return
   offMcpPanes.add(paneId)
   void sampleAccountTier(paneId, true)   // daemon-spawned = fresh by construction, so it may feed drift state
-  if (!focus.activePaneId) adoptPane(paneId)
-  else void noteDiscoveredPane(paneId)   // topic-mode sibling: gets its topic, no focus steal
+  if (!focus.activePaneId) adoptPane(paneId, 'spawn')
+  else void noteDiscoveredPane(paneId, 'spawn')   // topic-mode sibling: gets its topic, no focus steal
 }
 
 // Keep the pane registry in sync. Adopts a pane only when nothing is driving; any additional
@@ -2498,13 +2504,13 @@ async function discoverPanes(): Promise<void> {
       // candidate, so focus survives a daemon restart instead of snapping back to candidates[0].
       let prev = ''
       try { prev = readFileSync(ADOPTED_PANE_FILE, 'utf8').trim() } catch {}
-      adoptPane(candidates.includes(prev) ? prev : candidates[0])   // sets focus + adds to offMcpPanes
+      adoptPane(candidates.includes(prev) ? prev : candidates[0], 'auto-discovery')   // sets focus + adds to offMcpPanes
     }
   }
 
   for (const p of panes) {
     if (p === focus.activePaneId) { offMcpPanes.add(p); continue }
-    if (!offMcpPanes.has(p)) { offMcpPanes.add(p); void noteDiscoveredPane(p) }
+    if (!offMcpPanes.has(p)) { offMcpPanes.add(p); void noteDiscoveredPane(p, 'auto-discovery') }
   }
   void refreshTopicTitles(panes)                      // topic mode: retitle on git branch change
   void reconcileTopics(panes)                         // topic mode: close topics whose sessions vanished unseen
@@ -7860,7 +7866,7 @@ async function restartPaneSessionCore(pane: string, id: string | null, accountOv
       setPaneRestarting(fresh, true)
       setTimeout(() => setPaneRestarting(fresh, false), 30_000)   // boot window — discovery re-adopts `fresh` well within this
       if (sid) await reopenSessionTopic(sid)
-      if (pane === focus.activePaneId) adoptPane(fresh)
+      if (pane === focus.activePaneId) adoptPane(fresh, 'pane-restart')
       if (id === null) {
         // Same cross-engine handoff as the in-place path, just against the respawned pane.
         const delivered = brief ? await typeBriefIntoPane(fresh, agent, brief) : true
@@ -8232,7 +8238,7 @@ async function relaunchFreshSession(t: RestartTarget): Promise<string | 'untouch
     setPaneRestarting(fresh, true)
     setTimeout(() => setPaneRestarting(fresh, false), 30_000)   // boot window — discovery re-adopts `fresh` well within this
     if (t.sid) await reopenSessionTopic(t.sid)
-    if (t.pane === focus.activePaneId) adoptPane(fresh)
+    if (t.pane === focus.activePaneId) adoptPane(fresh, 'pane-restart')
     process.stderr.write(`daemon: auto-refresh: pane ${t.pane} died on /exit — fresh session in ${fresh} (${t.cwd})\n`)
     return fresh
   } catch { return null }
@@ -14527,6 +14533,19 @@ if (FORCE_PANE) {
   void (async () => {
     for (const p of await findOffMcpPanes()) await autoSizeWindowOf(p).catch(() => {})
   })()
+} else {
+  // Discovery is OFF, and it used to be off in perfect silence. That is a legitimate state — a
+  // plugin/MCP install drives its sessions over the socket and never wants it — but it is also
+  // indistinguishable, from every surface, from a bridge that is simply broken: `tg roster` reports
+  // every endpoint "down", the mini app lists nothing, and no transcript ever relays. It cost a full
+  // debugging session on 2026-07-28, on an instance whose .env was hand-written without the key.
+  // So the state announces itself, loudly, once, at the only moment anyone is reading: boot.
+  process.stderr.write(
+    `daemon: ⚠ OFF-MCP PANE DISCOVERY IS OFF — TELEGRAM_TRANSCRIPT_OUTBOUND is not "1" `
+    + `(read from the environment and ${join(STATE_DIR, '.env')}).\n`
+    + `daemon:   Correct for a plugin/MCP install, where sessions register over the socket instead.\n`
+    + `daemon:   For an off-MCP bridge it means NO pane is ever discovered: every session reads "down", `
+    + `/api/sessions is empty, and nothing relays from transcripts. Add TELEGRAM_TRANSCRIPT_OUTBOUND=1 to that .env.\n`)
 }
 
 // Keep the pinned status card's live metrics fresh once per 10s. No-op edits are skipped and no

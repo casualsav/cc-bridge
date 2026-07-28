@@ -65,7 +65,15 @@ Strip the leading instance id (if present) before parsing the rest of the argume
 
 ### No args — status and guidance
 
-Read both state files and give the user a complete picture:
+**First, backfill anything the `.env` is missing** — a status check should repair a silent gap, not
+just describe it. Run `bun scripts/env-backfill.ts <channel-dir>` (dry; add `--write` to apply) from
+the plugin dir. It only ADDS absent keys and never touches a value that is already there. The one
+that matters is `TELEGRAM_TRANSCRIPT_OUTBOUND`: a `.env` written by hand can omit it, and then the
+daemon runs with pane discovery off — every session reads "down", the mini app lists none, nothing
+relays, and no error is printed anywhere. The script refuses to write that key on a box wired for
+MCP mode, where its absence is correct. Report whatever it added.
+
+Then read both state files and give the user a complete picture:
 
 1. **Token** — check `~/.claude/channels/telegram/.env` for
    `TELEGRAM_BOT_TOKEN`. Show set/not-set; if set, show first 10 chars masked
