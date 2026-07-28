@@ -13420,7 +13420,7 @@ type ScoutRun = { rec: BriefRecord; violations: string[] }
 // output to the bridge as if the parent session had said it.
 async function scoutRepo(real: string): Promise<ScoutRun> {
   if (!ensureScoutProfile()) throw new Error('no scout profile (is the main account logged in?)')
-  const env = { ...process.env, CLAUDE_CONFIG_DIR: SCOUT_CONFIG_DIR, PATH: `${join(homedir(), '.local', 'bin')}:${process.env.PATH ?? ''}` }
+  const env: NodeJS.ProcessEnv = { ...process.env, CLAUDE_CONFIG_DIR: SCOUT_CONFIG_DIR, PATH: `${join(homedir(), '.local', 'bin')}:${process.env.PATH ?? ''}` }
   delete env.TMUX; delete env.TMUX_PANE
   const run = async (prompt: string) => {
     const { stdout } = await exec('claude',
