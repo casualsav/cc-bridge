@@ -6922,6 +6922,7 @@ async function sendStartHelp(ctx: Context): Promise<void> {
     await ctx.replyWithMediaGroup([
       InputMediaBuilder.photo(new InputFile(join(import.meta.dir, 'assets', 'claude-tg.jpg'))),
       InputMediaBuilder.photo(new InputFile(join(import.meta.dir, 'assets', 'claude-spark.jpg'))),
+      InputMediaBuilder.photo(new InputFile(join(import.meta.dir, 'assets', 'claude-orange.png'))),
     ])
   } catch { /* asset missing (stale cache) → the commands message below still carries the welcome */ }
   const chat = String(ctx.chat!.id)
