@@ -36,10 +36,14 @@ so its result comes back the same way.
   the objective and the one task; what done looks like, phrased so it can fail (the command to run
   and what failure would look like — "make sure it works" gets rubber-stamped); where deliverables
   go (`$(tg shared)`; the bus carries pointers and one-line summaries, never payloads); and any
-  facts from earlier reports it needs, restated rather than referenced.
+  facts from earlier reports it needs, restated rather than referenced. State the assumptions the
+  brief rests on, and require it to name any it adds rather than guess — the assumption nobody says
+  out loud is what turns a wrong reading into a finished build.
 - **On nontrivial work, the plan is a deliverable.** Require a short design note before the build
   — the shape chosen, why, and what it does for the known cases — and gate the go yourself. A
-  note is cheap to reject; a diff is not.
+  note is cheap to reject; a diff is not. Gate it on size as well as shape: send back the plan that
+  solves more than you asked for — the speculative abstraction, the unrequested option, the adjacent
+  code improved on the way past. Scope is cheapest to hold in the note.
 - **Stay in the loop until the goal is met**: judge each answer, send follow-ups yourself, push
   back on work that looks wrong — that outside view is the point. And **stop when the owner's
   request is met, not when the findings run out** — verification always produces more. A finding

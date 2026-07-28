@@ -47,6 +47,20 @@ only when you access `webapp/`, so read it yourself before touching `webapp/inde
 `scripts/webapp-measure/`, or the `webapp*` endpoints in `daemon.ts` / the feed half of
 `transcript.ts`.
 
+## How work is scoped here
+
+- **Name the reading you took before you build on it.** An ambiguous ask gets the interpretation
+  you would defend, stated in one line; ask only when the wrong pick is expensive to undo. Guessing
+  silently is the failure, and it surfaces as a finished build of the wrong thing.
+- **Write the minimum that solves the stated problem.** No speculative abstraction, no
+  configurability nobody asked for, no handling for a state that cannot occur.
+- **Every changed line traces to the request.** No drive-by fixes to code you happened to read on
+  the way past — flag it instead. The shared-checkout section below governs whose files you may
+  touch; this governs which lines.
+- **Turn the ask into a check that can fail before you start, and watch it pass before reporting
+  done.** "Make sure it works" is not one; neither is a test that would pass against the broken
+  version.
+
 ## Layout (for working on the repo)
 - `daemon.ts` (Telegram) / `slack-daemon.ts` / `discord-daemon.ts` — the long-lived bot + access gate
   + tmux pane driver + off-MCP outbound, per channel (the bulk of the code).
