@@ -981,8 +981,8 @@ function endSession(sessionId: string): void {
   if (wasFocused) void announceFocusedExit(s.label, sessionId)
 }
 
-// The focused session just ended. DM mode drives a single session, so there's no switch menu —
-// if another bridge pane is alive, the discovery rescan auto-adopts it and announces. Multi-user
+// The focused session just ended. There's no switch menu — if another bridge pane is alive, the
+// discovery rescan auto-adopts it and announces. Multi-user
 // DM (lanes or chat-lanes) scopes the notice to the ended session's OWN chat — broadcasting it to
 // every allowFrom chat (the old behavior) leaked another user's session label/end-of-session
 // notice to everyone else in the box. Neither resolves (classic single-session DM, where allowFrom
@@ -1921,9 +1921,9 @@ async function primeRelayCursor(): Promise<void> {
       lastRelayedUuid = lastRelayedByFile.get(file)!
     } else {
       // (The old "💬 N messages from this session while you were away" switch-back catch-up lived here.
-      // Removed: it served retired single-DM multi-session. DM mode is now single-session, and multiple
-      // sessions are driven via the group's forum topics — each relays to its own topic independently,
-      // so nothing is ever missed on a switch and the catch-up only mis-fired into the group.)
+      // Removed: it served retired single-DM multi-session. Sessions that run side by side each relay
+      // to their own topic (group) or lane (DM) independently, so nothing is ever missed on a switch
+      // and the catch-up only mis-fired into the group.)
       const latest = file ? latestFinalReply(file) : null
       lastRelayedUuid = latest?.uuid ?? ''
       if (file) lastRelayedByFile.set(file, lastRelayedUuid)
@@ -2411,8 +2411,8 @@ function focusOffMcpPane(paneId: string): void {
 }
 
 // A pane beyond the focused one appeared. Topic mode: give it its own topic now, not on first
-// reply. DM mode drives a single session — extra panes stay registered (so topic/aux bookkeeping
-// sees them) but get no switch UI.
+// reply. Outside topic mode, extra panes stay registered (so topic/aux bookkeeping sees them) but
+// get no switch UI.
 async function noteDiscoveredPane(paneId: string): Promise<void> {
   void sampleAccountTier(paneId)   // discovery-tick siblings never pass adoptPane/registerSpawnedPane — this is their only sample point
   const cwd = await paneCwd(paneId)
@@ -7094,7 +7094,9 @@ async function launchAgentSession(ctx: Context, kind: AgentKind, paneId: string 
     const lanePane = lane ? await paneForSession(lane.sessionId).catch(() => null) : null
     const cmd = lanePane ? await paneCommand(lanePane).catch(() => '') : ''
     if (cmd === 'claude' || cmd === 'codex') {
-      await ctx.reply('A session is already running in this DM. End it first, or /bind a forum group to run several side by side.')
+      // The sentence is accurate in both branches; only the /bind suggestion is retired HERE —
+      // in the lanes branch you are already running several side by side.
+      await ctx.reply('A session is already running in this lane. End it first.')
       return
     }
   } else if (!isTopicMode() && focus.activePaneId) {
@@ -10216,7 +10218,7 @@ function senderDisplayName(from: { username?: string; first_name?: string; id: n
 // activity, each tappable to relaunch via `claude --resume` in a fresh pane.
 bot.command('resume', async ctx => {
   if (!dmCommandGate(ctx)) return
-  // DM drives a single session — resuming spawns a new pane, so it only fills an empty slot.
+  // Resuming spawns a new pane, so in a DM it only fills an empty slot.
   // Group (topic) mode spawns freely: each resumed session gets its own topic.
   if (dmLanesOn() && !isTopicMode()) {
     // DM lanes: gate on the SENDER's own lane, not whichever lane happens to hold focus — another
@@ -10225,7 +10227,10 @@ bot.command('resume', async ctx => {
     const lane = chatId ? laneForChat(chatId) : undefined
     const lanePane = lane ? await paneForSession(lane.sessionId).catch(() => null) : null
     if (lanePane) {
-      await ctx.reply('A session is already running, and this DM drives a single session. /exit it first, or /bind a forum group to run several.')
+      // Lanes branch: the gate is the SENDER's own lane, so the refusal is about THIS lane. The
+      // "this DM drives a single session" claim the non-lane sibling below still carries would be
+      // false here — other lanes are running by construction — and so would its /bind suggestion.
+      await ctx.reply('A session is already running in this lane. /exit it first.')
       return
     }
   } else if (!isTopicMode() && focus.activePaneId) {
@@ -12279,8 +12284,10 @@ bot.on('callback_query:data', async ctx => {
       // DM lanes: gate on the SENDER's own lane — another user's live lane must never block this one.
       const lanePane = senderLane ? await paneForSession(senderLane.sessionId).catch(() => null) : null
       if (lanePane) {
+        // Same retirement as /resume's lanes branch above: this refusal is about the sender's own
+        // lane, so it must not claim the DM runs one session or suggest /bind to run several.
         await ctx.answerCallbackQuery({ text: 'A session is already running.' }).catch(() => {})
-        await ctx.reply('A session is already running, and this DM drives a single session. /exit it first, or /bind a forum group to run several.').catch(() => {})
+        await ctx.reply('A session is already running in this lane. /exit it first.').catch(() => {})
         return
       }
     } else if (!isTopicMode() && focus.activePaneId) {
@@ -13010,8 +13017,8 @@ async function reviveTopicSession(ctx: Context, sid: string, params: InboundPara
   })
 }
 
-// DM analogue of reviveTopicSession — non-topic mode drives one session and has no topic
-// bookkeeping, so revival never reached it (the "🕳️ start one in tmux" dead-end after a reboot or
+// DM analogue of reviveTopicSession — non-topic mode has no topic bookkeeping,
+// so revival never reached it (the "🕳️ start one in tmux" dead-end after a reboot or
 // crash). Respawn `-c` in the last session's folder (continues that cwd's most recent conversation
 // — i.e. the one that died), wait for the prompt, then deliver the message(s) that woke it.
 // Shares revivalQueues under a reserved key so messages arriving mid-boot join this boot's

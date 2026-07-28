@@ -279,7 +279,8 @@ const CARD_RULE = '────────────────────�
 
 // Status card for any pane — usage · context · model · effort · mode up top (the collapsed
 // preview Telegram shows), rule-separated detail groups below. Deliberately NO session identity:
-// in topic mode the tab is the session, and the DM drives a single one. Rendered into the pinned
+// in topic mode the tab is the session, and a pinned card belongs to the chat it is pinned in — the
+// owner re-ruled it a non-issue on 2026-07-28, so this is a decision, not an omission. Rendered into the pinned
 // status message (refreshed in place) and re-posted by /status.
 // Backfill a fresh statusline parse from the last good one, field by field — a value the fresh
 // capture reported always wins; only the fields it's MISSING are filled from the prior snapshot. A
