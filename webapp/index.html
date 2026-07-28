@@ -1249,12 +1249,42 @@
   #tab-sessions { padding-bottom: calc(var(--fab-h) + 2 * var(--sp-4) + env(safe-area-inset-bottom)); }
   #spawn, #sched { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: none; z-index: 9; align-items: flex-end; }
   #spawn.show, #sched.show { display: flex; }
-  .sheet { background: var(--bg); border-radius: var(--r-xl) var(--r-xl) 0 0; padding: var(--sp-4) var(--sp-4) calc(var(--sp-4) + env(safe-area-inset-bottom)); width: 100%; }
+  /* It SLIDES, like #dial / #calls / #addctx — see their block below for the mechanism and the
+     reason it is one behaviour rather than four. This sheet is the one that never joined; it appeared
+     instantly while every other sheet in the app rose. The transform lives here and the `.up` class
+     arrives on the next frame (openSheet/closeSheet), which is what gives the browser a value to
+     animate from. Its z-index stays 9, under the dial family's 10 — that ladder is deliberate. */
+  .sheet { background: var(--bg); border-radius: var(--r-xl) var(--r-xl) 0 0; padding: var(--sp-4) var(--sp-4) calc(var(--sp-4) + env(safe-area-inset-bottom)); width: 100%;
+    transform: translateY(100%); transition: transform .18s ease-out; }
+  /* The name field sits under the dials now, so it takes the SAME gap the cards take from each other
+     — one token, not a number, so a spacing change moves all of them together. */
+  #spawn #spname { display: block; margin-top: var(--sp-2); }
+  /* The clip box for the hosted dial's 200%-wide page track, and it has to be its own element: the
+     overlay clips at .dialsheet, which has no horizontal padding, while .sheet does — so clipping
+     there leaves the off-screen page showing through the 16px padding strip at the left edge. This
+     box's content width is exactly one page, so the other one has nowhere to show. */
+  .dialtrack { overflow: hidden; }
+  #spawn.up .sheet, #sched.up .sheet { transform: translateY(0); }
   .sheet .shead { font-weight: var(--w-semi); font-size: var(--t-title); margin-bottom: var(--sp-3); }
-  .sheet input, .sheet textarea { width: 100%; padding: 10px var(--sp-3); border-radius: 10px; border: none; background: var(--sec); color: var(--text); font-size: var(--t-sub); }
+  /* --t-body, and this one is a BUG FIX wearing a design change: iOS Safari zooms the whole page when
+     a field under 16px takes focus, and the sheet's 14px field did exactly that. */
+  .sheet input, .sheet textarea { width: 100%; padding: var(--sp-3); border-radius: var(--r-md); border: none; background: var(--sec); color: var(--text); font-size: var(--t-body); }
   .sheet textarea { resize: none; font-family: inherit; }
+  /* The focus ring is OURS now, and until v0.4.174 there was none: no rule in this file touched this
+     field's focus, so `outline-style` resolved to the UA's `auto` and every platform painted its own —
+     amber on the owner's Android WebView, a white/near-black double ring in headless Chromium off the
+     same bytes. That difference is the proof it was never coming from the page.
+     --btn, not --link: the ruling that "blue reads as the owner's voice" is about the FEED, where --btn
+     is the user bubble's fill. Nothing here is a bubble, and --btn is already this sheet's own
+     affirmative colour — every selected chip and the Create button — so the ring speaks in the voice of
+     the control it belongs to. :focus, not :focus-visible: a text field is a typing target and the ring
+     has to show for touch. Scoped to .sheet, so the composer's deliberate `outline: none` is untouched.
+     Chromium traces border-radius with an outline, so it follows the field. */
+  .sheet input:focus, .sheet textarea:focus { outline: 2px solid var(--btn); outline-offset: 0; }
   .seglbl { color: var(--hint); font-size: var(--t-meta); margin: var(--sp-3) 0 6px; text-transform: uppercase; letter-spacing: .4px; }
   .segrow { display: flex; flex-wrap: wrap; gap: 6px; }
+  /* The schedule sheet's session picker. The spawn sheet used to render its four dials with these
+     too; it hosts the composer's dial now, so this is the one caller left. */
   .selchip { border: none; border-radius: 14px; padding: 6px var(--sp-3); background: var(--sec); color: var(--hint-raised); font-size: var(--t-sub); cursor: pointer; }
   .selchip.on { background: var(--btn); color: var(--btn-text); }
   /* Model/effort picker — ONE sheet that slides sideways into a second page, not two sheets. Its own
@@ -1272,7 +1302,7 @@
   .dialsheet, .callsheet, .ctxsheet { width: 100%; background: var(--bg); border-radius: var(--r-xl) var(--r-xl) 0 0;
     padding-bottom: env(safe-area-inset-bottom); transform: translateY(100%); transition: transform .18s ease-out; overflow: hidden; }
   #dial.up .dialsheet, #calls.up .callsheet, #addctx.up .ctxsheet { transform: translateY(0); }
-  @media (prefers-reduced-motion: reduce) { .dialsheet, .dialpages, .callsheet, .ctxsheet { transition: none; } }
+  @media (prefers-reduced-motion: reduce) { .dialsheet, .dialpages, .callsheet, .ctxsheet, .sheet { transition: none; } }
   /* A FIXED height, never one that fits the rows: a sheet that sizes to its content rises a
      different distance each time it opens. Rows sit at the top; the space below stays empty. */
   .callsheet { height: 72vh; display: flex; flex-direction: column; }
@@ -1304,7 +1334,11 @@
      set from the live page in JS — a track that is as tall as its tallest child leaves the shorter
      page sitting above dead space, which reads as a rendering fault rather than a short list. */
   .dialpages { display: flex; width: 200%; transition: transform .22s ease-out, height .22s ease-out; }
-  #dial.p2 .dialpages { transform: translateX(-50%); }
+  /* Both hosts: the overlay and the new-session sheet slide the same track the same way. */
+  #dial.p2 .dialpages, #spawn.p2 .dialpages { transform: translateX(-50%); }
+  /* The sheet hosts the dial with no chrome of its own: page 1 needs no head (the sheet's title is
+     the head) and the track loses the overlay's side padding, since .sheet already has --sp-4. */
+  #spawn .dialpage { padding: 0; }
   .dialpage { width: 50%; flex: none; padding: 0 var(--sp-3) var(--sp-3); align-self: flex-start; }
   /* One rounded card per group, rows divided by a hairline — the reference's shape. */
   .diallist { background: var(--sec); border-radius: var(--r-md); overflow: hidden; margin-top: var(--sp-2); }
@@ -1345,9 +1379,17 @@
      an odd remainder. Even so it is an even number, because there is no reason for it not to be. */
   .ctxcard svg { width: 22px; height: 22px; display: block; flex: none; }
   .ctxcard span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Both actions take the new-session pill's language (v0.4.171): --fab-h tall, radius half the
+     height, --t-body. That is also what buys back the 44px touch target a 9px-padded button did not
+     have — this row is the one place in the app where a mis-tap costs you a session.
+     Cancel is the UNSELECTED chip's pair (--sec / --hint-raised) rather than a bare text link, so the
+     row reads as one family with the chips above it and the dismissal is still visibly the quiet one. */
   .sprow { display: flex; justify-content: flex-end; gap: var(--sp-2); margin-top: 18px; }
-  .sprow .cancel { border: none; background: transparent; color: var(--hint); padding: 9px var(--sp-3); font-size: var(--t-sub); cursor: pointer; }
-  .sprow .create { border: none; border-radius: 10px; background: var(--btn); color: var(--btn-text); padding: 9px 18px; font-size: var(--t-sub); cursor: pointer; }
+  .sprow .cancel, .sprow .create { border: none; height: var(--fab-h); border-radius: calc(var(--fab-h) / 2);
+    padding: 0 20px; font-family: inherit; font-size: var(--t-body); font-weight: var(--w-semi); cursor: pointer; }
+  .sprow .cancel { background: var(--sec); color: var(--hint-raised); }
+  .sprow .create { background: var(--btn); color: var(--btn-text); }
+  .sprow .cancel:active, .sprow .create:active { filter: brightness(1.1); }
   /* Scheduled board */
   .evrow { display: flex; gap: var(--sp-2); padding: var(--sp-2) 2px; border-bottom: 1px solid var(--sec); font-size: var(--t-sub); align-items: baseline; }
   .evrow .who { color: var(--link); white-space: nowrap; }
@@ -1505,7 +1547,7 @@
       <div class="dialpage" id="dialp2">
         <div class="dialhead">
           <button class="lead" id="dialback" title="Back" aria-label="Back to models"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg></button>
-          <div class="t">Effort</div>
+          <div class="t" id="dialdetailt">Effort</div>
         </div>
         <div class="diallist" id="dialefforts"></div>
       </div>
@@ -1528,11 +1570,54 @@
 <div id="spawn">
   <div class="sheet">
     <div class="shead">New session</div>
-    <input id="spname" placeholder="Name (topic + folder under the base dir)">
-    <div class="seglbl">Model</div><div class="segrow" id="spmodel"></div>
-    <div class="seglbl">Effort</div><div class="segrow" id="speffort"></div>
-    <div class="seglbl">Mode</div><div class="segrow" id="spmode"></div>
-    <div class="seglbl">Surface</div><div class="segrow" id="spsurface"></div>
+    <!-- The composer's model dial, hosted here rather than rebuilt: same .dialpages track, same
+         .diallist / .dialrow markup, same dialRow() builder, same DIAL_MODELS/DIAL_EFFORTS tables.
+         Page 1 carries no .dialhead — the sheet's own "New session" title is the head. -->
+    <div class="dialtrack"><div class="dialpages">
+      <div class="dialpage" id="spp1">
+        <!-- THREE drill rows, one card each — not one card with dividers. The dial's own idiom would
+             allow either, and the deciding fact is the rhythm the owner set two tweaks ago: he asked
+             for the gap between these rows to EQUAL the gap between cards. Rows sharing a card sit 0px
+             apart, which would undo that. Three cards keep one gap everywhere, including down to the
+             name field, and keep the equality assertion meaningful instead of vacuous. -->
+        <div class="diallist">
+          <button class="dialrow" data-drill="model">
+            <span class="nm"><span class="n">Model</span><span class="d" id="spmodelnow"></span></span>
+            <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+          </button>
+        </div>
+        <div class="diallist">
+          <button class="dialrow" data-drill="effort">
+            <span class="nm"><span class="n">Effort</span><span class="d" id="speffnow"></span></span>
+            <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+          </button>
+        </div>
+        <!-- Mode is its OWN card, not a second row in Effort's. Measured before changing: rows inside
+             one .diallist sit 0px apart (their divider is a border inside the row's own box) while two
+             cards sit --sp-2 apart, so Effort→Mode read as 0 against 8 above it. One row per card is
+             what makes the two gaps equal, and it takes the spacing from .diallist's own margin rather
+             than from a number written here — spacing changes keep them equal by construction. -->
+        <div class="diallist">
+          <button class="dialrow" data-drill="mode">
+            <span class="nm"><span class="n">Mode</span><span class="d" id="spmodenow"></span></span>
+            <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="dialpage" id="spp2">
+        <div class="dialhead">
+          <button class="lead" id="spback" title="Back" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg></button>
+          <div class="t" id="spdetailt"></div>
+        </div>
+        <div class="diallist" id="spdetail"></div>
+      </div>
+    </div></div>
+    <!-- BELOW the dials, by the owner's ask, and its top gap is the same --sp-2 the cards take from
+         each other — see #spawn #spname. The name becomes a topic name AND a folder (lowercased and
+         slugged daemon-side), so the keyboard's sentence-case and its autocorrect both work against a
+         short identifier; `none` is the modern keyword, `off` a legacy alias for it. -->
+    <input id="spname" placeholder="Name (topic + folder under the base dir)"
+           autocapitalize="none" autocorrect="off" autocomplete="off" spellcheck="false">
     <div class="sprow"><button id="spcancel" class="cancel">Cancel</button><button id="spgo" class="create">Create</button></div>
   </div>
 </div>
@@ -2550,17 +2635,53 @@ function dialRow(kind, row, cur, def) {
 }
 // The track is as tall as the page you are ON. Left to size itself it takes the taller page's
 // height on both, which parks the shorter list above a band of dead sheet.
-function dialHeight() {
-  const live = $("dial").classList.contains("p2") ? $("dialp2") : $("dialp1");
-  document.querySelector(".dialpages").style.height = live.offsetHeight + "px";
+// The dial is ONE component with TWO hosts: the composer's overlay (#dial, applying to a live
+// session) and the new-session sheet (#spawn, collecting what to spawn with). Everything below takes
+// a host rather than addressing #dial by id — the row builder, the page track's height, and the
+// detail page — so the two cannot drift: there is one dialRow(), one .dialrow rule, and one
+// DIAL_MODELS/DIAL_EFFORTS table behind both. A copy would have been the easy version and would have
+// diverged the first time either side was touched.
+// A host is { root, list, detail, detailTitle, cur(kind), def(kind), pick(kind, value) }.
+function dialHeight(host) {
+  const root = $(host.root);
+  const live = root.classList.contains("p2") ? $(host.p2) : $(host.p1);
+  // getBoundingClientRect, not offsetHeight: offsetHeight is an INTEGER, so a page whose true height
+  // is 425.45 pinned the track at 425 and clipped the last half-pixel — visible in the sheet as the
+  // gap under the last card measuring 7.55 where every other gap is 8.
+  root.querySelector(".dialpages").style.height = live.getBoundingClientRect().height + "px";
+}
+// The detail page is GENERIC — it was hard-wired to efforts, which is why a second drill row could
+// not exist. It is repainted for whichever row you tapped, so Effort and Mode share one page and the
+// overlay keeps working unchanged with the single row it has.
+const DIAL_LISTS = { model: () => DIAL_MODELS, effort: () => DIAL_EFFORTS, mode: () => DIAL_MODES };
+const DIAL_TITLE = { model: "Model", effort: "Effort", mode: "Mode" };
+function paintDetail(host, kind) {
+  host.detailKind = kind;
+  $(host.detailTitle).textContent = DIAL_TITLE[kind];
+  $(host.detail).innerHTML = host.rows(kind).map(r => dialRow(kind, r, host.cur(kind), host.def(kind))).join("");
+  bindDialRows(host);
+  dialHeight(host);
+}
+function bindDialRows(host) {
+  $(host.root).querySelectorAll(".dialrow[data-k]").forEach(b => b.onclick = () => host.pick(b.dataset.k, b.dataset.v));
 }
 function paintDial() {
-  $("dialmodels").innerHTML = DIAL_MODELS.map(m => dialRow("model", m, modelAlias(dialNow.model), dialNow.defModel)).join("");
-  $("dialefforts").innerHTML = DIAL_EFFORTS.map(e => dialRow("effort", e, dialNow.effort, dialNow.defEffort)).join("");
+  const host = DIAL_HOST;
+  $("dialmodels").innerHTML = host.rows("model").map(m => dialRow("model", m, host.cur("model"), host.def("model"))).join("");
+  host.detailKind = "effort";
+  $("dialefforts").innerHTML = host.rows("effort").map(e => dialRow("effort", e, host.cur("effort"), host.def("effort"))).join("");
   $("dialeffnow").textContent = dialNow.effort ? effLabel(dialNow.effort) : "not reported";
-  document.querySelectorAll("#dial .dialrow[data-k]").forEach(b => b.onclick = () => applyDial(b.dataset.k, b.dataset.v));
-  dialHeight();
+  bindDialRows(host);
+  dialHeight(host);
 }
+const DIAL_HOST = {
+  root: "dial", p1: "dialp1", p2: "dialp2", detail: "dialefforts", detailTitle: "dialdetailt",
+  detailKind: "effort",
+  cur: k => k === "model" ? modelAlias(dialNow.model) : dialNow.effort,
+  def: k => k === "model" ? dialNow.defModel : dialNow.defEffort,
+  rows: k => DIAL_LISTS[k](),          // no Default row here: this host acts on a LIVE session
+  pick: (k, v) => applyDial(k, v),
+};
 $("ddial").onclick = () => {
   if (!drillSid) return;
   const dl = $("dial");
@@ -2887,40 +3008,127 @@ $("dmic").onclick = async () => {
 };
 
 // ---- "+" new session sheet: name + model/effort/mode dials → /api/session/spawn ----
-const SPAWN_OPTS = {
-  model: ["inherit", "fable", "opus", "sonnet", "haiku"],
-  effort: ["inherit", "low", "medium", "high", "xhigh", "max"],
-  mode: ["default", "acceptEdits", "plan", "bypassPermissions"],
-  surface: ["topic", "headless"],
+// The MODE list, in the dial's own [value, name, description] shape. "Ask" rather than "default":
+// with the Default row above it, one word for two meanings is exactly what the sheet must not do.
+const DIAL_MODES = [
+  ["default", "Ask", "Asks before it edits or runs anything"],
+  ["acceptEdits", "Accept edits", "Applies file edits without asking"],
+  ["plan", "Plan", "Researches and proposes; changes nothing"],
+  ["bypassPermissions", "Bypass", "No prompts at all"],
+];
+// "" means FOLLOW the configured default, resolved daemon-side at spawn time; a concrete alias is a
+// pin. There is no SPAWN_OPTS table any more: the sheet reads DIAL_MODELS / DIAL_EFFORTS /
+// DIAL_MODES, so the two hosts cannot disagree about which options exist.
+// No surface here either — every session created from this sheet gets a topic, by the owner's
+// ruling. `headless` remains an API-only option for the throwaways agents spawn over the bus.
+const spawnSel = { model: "", effort: "", mode: "" };
+// What each Default row resolves to, read once per sheet open. A DISPLAY of the setting, never a
+// promise: resolution happens daemon-side when Create is pressed, so a /settings change while the
+// sheet sits open leaves the description stale by seconds and the spawn correct.
+let spawnDefaults = { model: "", effort: "", mode: "" };
+// EXACTLY the overlay's presentation: concrete rows only, and the configured default marked with the
+// dial's own Default badge. A synthetic "Default — follows Settings" row shipped in v0.4.177 and the
+// owner rejected it; the badge does its original job here, on the option it names.
+//
+// THE SEMANTICS THAT PRESENTATION FORCES, and this is a decision rather than a detail. spawnSel[k]
+// stays "" for "follow whatever is configured", and the badged row is what "" DISPLAYS as — so
+// leaving the sheet alone and tapping the badged row are the SAME state and both send nothing. The
+// alternative (a tap pins the value) would mean the badged row silently freezes today's default into
+// a session created tomorrow, which is exactly the spawn-time resolution this sheet exists to keep.
+// The cost, stated: there is no way to pin "opus, and I mean opus specifically" while opus is also
+// the configured default. Nothing is lost by it — a pin that matches the default is the default —
+// but it is a real asymmetry and it belongs in the record rather than in a reader's surprise.
+const SPAWN_HOST = {
+  root: "spawn", p1: "spp1", p2: "spp2", detail: "spdetail", detailTitle: "spdetailt",
+  detailKind: "effort",
+  // "" (follow) DISPLAYS as the configured default, so the tick and the badge land on one row.
+  cur: k => spawnSel[k] || spawnDefaults[k],
+  def: k => spawnDefaults[k],
+  rows: k => DIAL_LISTS[k](),
+  pick: (k, v) => {
+    // Picking the configured default IS "follow it" — see above.
+    spawnSel[k] = v === spawnDefaults[k] ? "" : v;
+    if ($("spawn").classList.contains("p2")) $("spawn").classList.remove("p2");   // a pick closes the detail page
+    paintSpawn();
+  },
 };
-const CHIP_LABEL = { bypassPermissions: "bypass", acceptEdits: "accept edits" };
-const spawnSel = { model: "inherit", effort: "inherit", mode: "default", surface: "topic" };
-function chipRow(el, kind) {
-  el.innerHTML = SPAWN_OPTS[kind].map(v =>
-    '<button class="selchip' + (spawnSel[kind] === v ? " on" : "") + '" data-v="' + v + '">' + (CHIP_LABEL[v] || v) + "</button>").join("");
-  el.querySelectorAll("button").forEach(b => b.onclick = () => { spawnSel[kind] = b.dataset.v; chipRow(el, kind); });
+// A raw alias rendered as the dial renders it — /api/settings answers "opus"/"high", and the sheet
+// must not be the one surface in the app that says "opus" where every other says "Opus 5". prefMode
+// already answers with a label, so it falls through unchanged.
+const dialLabel = (kind, v) => (DIAL_LISTS[kind]().find(([a]) => a === v) || [null, v])[1];
+// The drill row's inline value: the chosen option's name, or the configured default's when nothing is
+// chosen. "not set" only where the box has configured nothing — the honest reading of an empty list
+// with no badge in it.
+const spawnLabel = k => {
+  const v = SPAWN_HOST.cur(k);
+  return v ? dialLabel(k, v) : "not set";
+};
+function paintSpawn() {
+  // Model is a drill row like the other two now; its list lives on the detail page, where the Default
+  // badge and the tick already are. The row shows the RESOLVED name — "Opus 5", not "Default" — for
+  // the same reason Effort shows "High": the row's job is to say what this session will get.
+  $("spmodelnow").textContent = spawnLabel("model");
+  $("speffnow").textContent = spawnLabel("effort");
+  $("spmodenow").textContent = spawnLabel("mode");
+  bindDialRows(SPAWN_HOST);
+  $("spawn").querySelectorAll("[data-drill]").forEach(b => b.onclick = () => {
+    paintDetail(SPAWN_HOST, b.dataset.drill);
+    $("spawn").classList.add("p2");
+    dialHeight(SPAWN_HOST);
+  });
+  dialHeight(SPAWN_HOST);
 }
-function openSpawnSheet() {
-  chipRow($("spmodel"), "model"); chipRow($("speffort"), "effort"); chipRow($("spmode"), "mode"); chipRow($("spsurface"), "surface");
+// .show before paint, .up on the next frame — the shape #dial and #calls use, for their reason:
+// setting display and transform in one tick animates nothing.
+function openSheet(id) {
+  const s = $(id);
+  s.classList.add("show");
+  requestAnimationFrame(() => s.classList.add("up"));
+}
+function closeSheet(id) {
+  const s = $(id);
+  s.classList.remove("up");
+  setTimeout(() => s.classList.remove("show", "p2"), 180);   // matches .sheet's transition
+}
+async function openSpawnSheet() {
+  // .show BEFORE painting, for the dial's own reason: a display:none subtree measures 0, so
+  // dialHeight would pin the track at zero and the sheet would open empty.
+  $("spawn").classList.remove("p2");
   $("spawn").classList.add("show");
+  paintSpawn();
+  requestAnimationFrame(() => $("spawn").classList.add("up"));
   $("spname").focus();
+  // After the sheet is up, not before: one GET must never hold the sheet closed, and a failure here
+  // costs the descriptions and nothing else.
+  try {
+    const d = await api("/api/settings");
+    const val = k => { const v = d.settings?.[k]?.value; return v && v !== "off" ? String(v) : ""; };
+    // prefMode's `value` is a LABEL with an emoji in it ("🚨 Bypass"); `raw` is the mode itself, which
+    // is what a row can be matched against.
+    spawnDefaults = { model: val("spawnModel"), effort: val("spawnEffort"), mode: d.settings?.prefMode?.raw || "" };
+    paintSpawn();
+  } catch { /* the rows read a bare "Follows Settings" — the spawn still resolves daemon-side */ }
 }
-$("spcancel").onclick = () => $("spawn").classList.remove("show");
-$("spawn").onclick = e => { if (e.target.id === "spawn") $("spawn").classList.remove("show"); };
+$("spback").onclick = () => { $("spawn").classList.remove("p2"); dialHeight(SPAWN_HOST); };
+$("spcancel").onclick = () => closeSheet("spawn");
+$("spawn").onclick = e => { if (e.target.id === "spawn") closeSheet("spawn"); };
 $("spgo").onclick = async () => {
   const name = $("spname").value.trim();
   if (!name) { showErr("Name required"); return; }
   $("spgo").disabled = true;
   const d = await writeOp("/api/session/spawn", {
     name,
-    ...(spawnSel.model !== "inherit" ? { model: spawnSel.model } : {}),
-    ...(spawnSel.effort !== "inherit" ? { effort: spawnSel.effort } : {}),
-    ...(spawnSel.mode !== "default" ? { mode: spawnSel.mode } : {}),
-    ...(spawnSel.surface === "headless" ? { headless: true } : {}),
+    // A named value ships; the Default row ships NOTHING and the daemon resolves it at spawn time.
+    // `mode: "default"` is a named value like any other — the daemon treats an explicitly named mode
+    // as one to enforce, which is what makes the "Ask" row mean what it says on a box whose account
+    // default is bypass.
+    ...(spawnSel.model ? { model: spawnSel.model } : {}),
+    ...(spawnSel.effort ? { effort: spawnSel.effort } : {}),
+    ...(spawnSel.mode ? { mode: spawnSel.mode } : {}),
   });
   $("spgo").disabled = false;
   if (!d) return;   // writeOp surfaced the error
-  $("spawn").classList.remove("show"); $("spname").value = "";
+  closeSheet("spawn"); $("spname").value = "";
   showOk("Spawned " + d.name);
   renderSessions();
   if (d.sid) setTimeout(() => openDrill(d.sid, d.name), 500);
@@ -2970,11 +3178,11 @@ async function openSchedSheet() {
     row.querySelectorAll("button").forEach(b => b.onclick = () => { schedSid = b.dataset.v; paint(); });
   };
   paint();
-  $("sched").classList.add("show");
+  openSheet("sched");
   $("scwhen").focus();
 }
-$("sccancel").onclick = () => $("sched").classList.remove("show");
-$("sched").onclick = e => { if (e.target.id === "sched") $("sched").classList.remove("show"); };
+$("sccancel").onclick = () => closeSheet("sched");
+$("sched").onclick = e => { if (e.target.id === "sched") closeSheet("sched"); };
 $("scgo").onclick = async () => {
   const when = $("scwhen").value.trim(), text = $("sctext").value.trim();
   if (!when || !text) { showErr("Schedule and message required"); return; }
@@ -2982,7 +3190,7 @@ $("scgo").onclick = async () => {
   const d = await writeOp("/api/auto/create", { when, sid: schedSid, text });
   $("scgo").disabled = false;
   if (!d) return;   // writeOp surfaced the error
-  $("sched").classList.remove("show"); $("scwhen").value = ""; $("sctext").value = "";
+  closeSheet("sched"); $("scwhen").value = ""; $("sctext").value = "";
   showOk("Scheduled " + (d.summary || ""));
   renderAuto();
 };

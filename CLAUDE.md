@@ -545,6 +545,64 @@ what a control cannot do at all here: the layering checks would pass vacuously o
 pill, so they carry their own falsifiers — the hit test re-run at `z-index: -1`, the relief
 re-measured with the reserved padding stripped.
 
+**The new-session sheet HOSTS the composer's model dial — one component, two hosts.** The sheet's
+centre is not a lookalike: `dialRow()`, `.diallist`/`.dialrow` and the `DIAL_MODELS`/`DIAL_EFFORTS`
+tables serve both, and `paintDial`/`dialHeight`/the detail page take a **host** rather than addressing
+`#dial` by id. `SPAWN_OPTS.model`/`effort` are gone, so the two surfaces cannot disagree about which
+models exist. Three things a future change will trip over:
+
+- **The detail page is GENERIC.** It was hard-wired to efforts, which is why a second drill row could
+  not exist; it is repainted for whichever row was tapped, so Effort and Mode share one page.
+- **A hosted track needs its own clip box** (`.dialtrack`). The overlay clips at `.dialsheet`, which
+  has no horizontal padding — `.sheet` does, so clipping there leaves the off-screen page showing
+  through the 16px padding strip at the left edge.
+- **There is NO synthetic "Default" row.** One shipped in v0.4.177 and the owner rejected it: the
+  overlay's presentation carries over unchanged — concrete options only, with its own `Default` badge
+  on the configured one, which also comes preselected. Mode is the only genuinely new list and it
+  adopts that same behaviour (badge + preselection from 🧷 Preferred mode, read as `prefMode.raw` —
+  `value` is a label with an emoji in it, and reads "per account" on a multi-account box while the
+  spawn always uses main's).
+- **That presentation forces a semantic, and it is a decision:** `spawnSel[k] === ""` means *follow
+  what is configured*, and the badged row is what `""` displays as — so leaving the sheet alone and
+  TAPPING the badged row are the same state, and both send nothing. Picking the badged row cannot pin
+  it. The alternative would freeze today's default into a session created tomorrow, which is the
+  spawn-time resolution this sheet exists to keep. The cost: you cannot pin "opus, specifically" while
+  opus is also the default — a pin that matches the default is the default. v0.4.177's build did pin
+  it (`model: "opus"` on the wire from a tap), which is the check `spawnsheet.mjs` now carries.
+- **Surface left the sheet** by the owner's ruling — every session created there gets a topic. The
+  API still accepts `headless: true` for the throwaways agents spawn over the bus, so the guard is
+  inverted: the UI must offer nothing while the endpoint keeps it.
+
+**The sheet's "default" rows resolve DAEMON-SIDE, and the label was the smaller half of that fix.** The sheet's `inherit` chip omitted model/effort from the payload, and `spawnSession`'s
+new-session branch then read the model off **whatever tmux pane was focused** and the effort off
+`default-effort.json` — never the `/settings` 🐣 spawn defaults, which `tg spawn` had honoured all
+along. A box configured for opus/high could spawn from the mini app on neither. `webappSessionSpawn`
+now applies that same fallback chain, so:
+
+- **Resolution is at spawn time**, not sheet-open time — a `/settings` change between opening the
+  sheet and pressing Create is honoured. The chip's badge (`default · opus`) is read from one
+  `/api/settings` GET when the sheet opens: a display of the setting, never a promise. With nothing
+  configured the chip is bare and the behaviour is byte-for-byte the old one.
+- **MODE resolves the same way, and needed one more thing.** Its floor was the same bug: with no dial
+  the mode came off whatever pane was FOCUSED (measured — a mini-app spawn came up
+  `bypassPermissions`). It now resolves the account's own `permissions.defaultMode` — what the chat
+  panel's 🧷 Preferred mode writes and the Settings tab reports read-only. **And an explicitly named
+  mode carries `--permission-mode` even when it is `default`**: `spawnSession` omitted the flag on the
+  premise that default *is* the CLI's normal mode, true only where the account has not configured
+  otherwise — this box configures bypass, so "Ask" without the flag launched in bypass. Only an
+  explicit pick opts in (`dials.modeExplicit`), so every inherited mode keeps the old rule.
+- **A focus ring you did not write is not absent, it is the UA's.** No rule touched `#spname`'s focus,
+  so `outline-style` resolved to `auto` and every platform painted its own — amber on the owner's
+  Android WebView, a white/near-black double ring in headless Chromium **off the identical bytes**.
+  That difference is the proof the colour was never in the page, and it is why `spawnsheet.mjs`
+  samples pixels: a computed-style assertion passes on the broken page. The ring is `--btn`, and the
+  "blue reads as the owner's voice" ruling does not reach here — that is about the FEED, where `--btn`
+  is the user bubble's fill. In this sheet `--btn` is already every selected chip and the Create
+  button.
+- The sheet finally **joins the `#dial`/`#calls`/`#addctx` family** (backdrop, 180ms slide,
+  reduced-motion gate) instead of appearing instantly, and that takes `#sched` with it — they share
+  `.sheet`, and two sheets opening differently is the drift that rule exists to prevent.
+
 **Theming ignores `prefers-color-scheme` completely.** Colours come from the `--tg-theme-*`
 properties Telegram injects, with dark fallbacks in `:root`. A light-theme check that sets the media
 feature renders the dark theme and passes without testing anything. Set the variables instead

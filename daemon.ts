@@ -9785,7 +9785,7 @@ async function captureInheritedSettings(paneId: string, watcher: PaneWatcher | n
 // with NO post-boot pane-driving at all. This replaced the old type-into-a-booting-pane path, whose
 // REPL-wait + inject round-trips were the 10-20s "new topic is slow / not ready to receive" lag (and
 // they raced the user's own first keystrokes into the fresh pane).
-async function spawnSession(dir: string, extra = '', presetSessionId?: string, account: Account = MAIN_ACCOUNT, agent: AgentKind = 'claude', harnessOverride?: HarnessProfile, dials?: { model?: string | null; effort?: string | null; mode?: CcMode | null }): Promise<string | null> {
+async function spawnSession(dir: string, extra = '', presetSessionId?: string, account: Account = MAIN_ACCOUNT, agent: AgentKind = 'claude', harnessOverride?: HarnessProfile, dials?: { model?: string | null; effort?: string | null; mode?: CcMode | null; modeExplicit?: boolean }): Promise<string | null> {
   // Spawn-time install check: a session born on a stale binary stays stale until something bounces
   // it, and spawns are the one event that reliably happens on a box nobody is watching. Gated by
   // sweepClaudeInstall's own 6h stamp, so all this usually costs is a JSON read, and it must never
@@ -9919,7 +9919,12 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
     // inherited mode, bypass INCLUDED. It composes cleanly with the dangerous flag (which satisfies
     // bypass's safety gate, so no prompt), and bypass stays switchable on demand. 'default' is normal
     // mode, so it needs no flag.
-    if (inherit?.mode && inherit.mode !== 'default') launchFlags.push(`--permission-mode ${inherit.mode}`)
+    // ...and 'default' DOES need the flag when the user named it. The premise above — that default is
+    // the CLI's normal mode — holds only where the account has not configured otherwise in its own
+    // settings.json (`permissions.defaultMode`), which this box does: without the flag, a mini-app
+    // spawn whose sheet said "Ask" launched in the account's bypassPermissions. Only an explicitly
+    // named mode opts in, so every inherited or implied mode keeps the old rule byte-for-byte.
+    if (inherit?.mode && (inherit.mode !== 'default' || dials?.modeExplicit)) launchFlags.push(`--permission-mode ${inherit.mode}`)
     let cmd: string
     if (agent === 'codex') {
       const explicitResume = /(?:^|\s)--resume\s+([^\s]+)/.exec(extra)?.[1]
@@ -14703,7 +14708,11 @@ async function webappReadSettings(): Promise<WebappSettingsView> {
       voice: { value: von, editable: true, label: von ? `on · ${a.tts!.engine}` : 'off' },
       stream: { value: replyMode(), editable: true, options: [...STREAM_ORDER] },
       sessionPin: { value: a.sessionPin !== false, editable: true },
-      prefMode: { value: listAccounts().length > 1 ? 'per account' : defModeLabel(MAIN_ACCOUNT.configDir), editable: false, label: 'what NEW sessions launch in' },
+      // `raw` rides alongside the label for the mini app's new-session sheet, which has to MATCH this
+      // against a mode row rather than print it — the label carries an emoji and its own wording.
+      // Always main's: that is the account webappSessionSpawn spawns on, even where the label above
+      // says 'per account'.
+      prefMode: { value: listAccounts().length > 1 ? 'per account' : defModeLabel(MAIN_ACCOUNT.configDir), raw: readDefaultMode(MAIN_ACCOUNT.configDir), editable: false, label: 'what NEW sessions launch in' },
       confirmReset: { value: a.confirmReset !== false, editable: true, label: '/clear and /new ask first' },
       limitFailover: { value: a.limitFailover === true, editable: true, label: 'chain ordered in /settings' },
       fileBrowser: { value: a.fileBrowser !== false, editable: true, label: 'Files tab in this app (reopens on change)' },
@@ -15096,12 +15105,35 @@ async function webappSessionSpawn(
   const headless = opts.headless === true || !isTopicMode()
   const topicName = name.trim().slice(0, 60)
   if (!topicName) return { error: 'name required' }
-  const model = opts.model ? String(opts.model).toLowerCase() : null
-  if (model && !MODEL_ALIASES.includes(model)) return { error: `unknown model '${model}'` }
-  const effort = opts.effort ? String(opts.effort).toLowerCase() : null
-  if (effort && !EFFORT_LEVELS.includes(effort)) return { error: `unknown effort '${effort}'` }
-  const mode = opts.mode ? String(opts.mode) : null
-  if (mode && !['default', 'acceptEdits', 'plan', 'bypassPermissions'].includes(mode)) return { error: `unknown mode '${mode}'` }
+  const asked = opts.model ? String(opts.model).toLowerCase() : null
+  if (asked && !MODEL_ALIASES.includes(asked)) return { error: `unknown model '${asked}'` }
+  const askedEffort = opts.effort ? String(opts.effort).toLowerCase() : null
+  if (askedEffort && !EFFORT_LEVELS.includes(askedEffort)) return { error: `unknown effort '${askedEffort}'` }
+  // No explicit dial = the sheet's "default" chip, and it resolves HERE, at spawn time, from the
+  // /settings 🐣 spawn defaults — the same fallback `tg spawn` has always used (~5140). Omitting the
+  // field used to fall through to spawnSession's inherit branch, which reads the model off whatever
+  // tmux pane happened to be FOCUSED and the effort off default-effort.json; so a box configured for
+  // opus/high could spawn from the mini app on neither, which is the bug behind the relabel. A stale
+  // or bad pref is ignored silently rather than failing the spawn, exactly as at that site, and with
+  // nothing configured this is byte-for-byte the old behaviour.
+  const model = asked ?? configuredSpawnModel()
+  const spawnEffortPref = loadAccess().spawnEffort
+  const effort = askedEffort ?? (spawnEffortPref && EFFORT_LEVELS.includes(spawnEffortPref) ? spawnEffortPref : null)
+  const askedMode = opts.mode ? String(opts.mode) : null
+  if (askedMode && !['default', 'acceptEdits', 'plan', 'bypassPermissions'].includes(askedMode)) return { error: `unknown mode '${askedMode}'` }
+  // Same treatment as model/effort above, and the same bug being closed: with no mode dial,
+  // spawnSession took the mode off whatever pane was FOCUSED, so the sheet could say one thing and
+  // the session start in another (measured: a mini-app spawn came up bypassPermissions off the
+  // focused pane). The configured value is Claude Code's own `permissions.defaultMode` for this
+  // account — what the chat panel's 🧷 Preferred mode writes and what the webapp Settings tab
+  // reports read-only — so "Default" in the sheet follows the same entity both surfaces already name.
+  const configuredMode = readDefaultMode(MAIN_ACCOUNT.configDir)
+  const mode = askedMode ?? ((MODES as readonly string[]).includes(configuredMode) ? configuredMode : 'default')
+  // Whether the USER named this mode, which is not the same question as which mode it is. spawnSession
+  // omits `--permission-mode` for 'default' on the premise that default IS the CLI's normal mode — true
+  // only where the account has not configured otherwise. This box configures bypassPermissions, so a
+  // user who picks "Ask" and gets no flag lands in bypass. An explicitly named mode carries the flag.
+  const modeExplicit = askedMode != null
   const dir = join(getBaseCwd() ?? homedir(), topicName.toLowerCase().replace(/[^\w.-]+/g, '-'))
   try { if (!existsSync(dir)) mkdirSync(dir, { recursive: true }) }
   catch (e) { return { error: `couldn't create ${dir}: ${(e as Error)?.message ?? e}` } }
@@ -15113,7 +15145,7 @@ async function webappSessionSpawn(
     try { topicBranchCache.set(sid, (await exec('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 2000 })).stdout.trim()) }
     catch { topicBranchCache.set(sid, '') }
     const pane = await spawnSession(dir, '', sid, MAIN_ACCOUNT, 'claude', undefined,
-      { model, effort: effort === 'auto' ? null : effort, ...(mode ? { mode: mode as CcMode } : {}) })
+      { model, effort: effort === 'auto' ? null : effort, mode: mode as CcMode, modeExplicit })
     if (!pane) { removeTopic(sid); return { error: `spawn failed in ${dir} — see daemon log` } }
     appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'spawn', from: 'owner', to: topicName, text: `${dir} headless${model ? ` model=${model}` : ''}${effort ? ` effort=${effort}` : ''}${mode ? ` mode=${mode}` : ''}` })
     return { sid, name: topicName }
@@ -15127,7 +15159,7 @@ async function webappSessionSpawn(
   try { topicBranchCache.set(sid, (await exec('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 2000 })).stdout.trim()) }
   catch { topicBranchCache.set(sid, '') }
   const pane = await spawnSession(dir, '', sid, MAIN_ACCOUNT, 'claude', undefined,
-    { model, effort: effort === 'auto' ? null : effort, ...(mode ? { mode: mode as CcMode } : {}) })
+    { model, effort: effort === 'auto' ? null : effort, mode: mode as CcMode, modeExplicit })
   if (!pane) {
     removeTopic(sid)
     void channel.threads!.remove(group, String(threadId)).catch(() => {})

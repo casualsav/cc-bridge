@@ -142,6 +142,19 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   declared-colour check and cannot be seen. Fixtures: a payload
                                   #   captured from the LIVE daemon, plus a synthetic one for the
                                   #   merge/split rule a single capture cannot hold
+    node spawnsheet.mjs [page] [out] # the new-session sheet, which HOSTS the composer's dial: its
+                                  #   headline check is CONGRUENCY — both hosts opened in one page and
+                                  #   a row from each compared, DOM shape and computed values, so the
+                                  #   shared-component claim is falsifiable rather than promised.
+                                  #   Plus the focus ring measured in PIXELS (a
+                                  #   computed-style check passes on the broken page — `outline-style`
+                                  #   was the UA's `auto`, which each platform paints in its own
+                                  #   colour), lowercase entry, the "default"/"ask" relabel with its
+                                  #   badge, the pill actions, and the sheet joining the slide-up
+                                  #   family. Carries an options-unchanged guard — every row's data-v
+                                  #   compared byte for byte with HEAD's page — which passes on BOTH
+                                  #   and is what says a relabel dropped nothing. Control: 21 checks
+                                  #   fail on the pre-change page
     python3 halo.py <out>         # finishes batch5's item 5 — the title's ink-vs-surround contrast
                                   #   at the WORST slice of each line, over a bright bubble, in both
                                   #   themes, against the flat-ground control it validates itself on
