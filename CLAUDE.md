@@ -500,6 +500,51 @@ measured header the two sit **9 channel units apart**, which the harness prints 
 than a failure: how close is too close is his eye, and his client's real secondary is not knowable
 from here.
 
+**The Sessions list's new-session control is a floating PILL, and it lives outside the list on
+purpose.** Card geometry came off the owner's Claude-mobile reference, measured rather than eyeballed
+(720px at ~2×: radius 21, padding 16/13.5, an 8px gap). Two rounds, and the second is the one to
+read, because it reversed part of the first:
+
+- **There is no icon tile.** v0.4.170 built the reference's rounded-square tile and gave it a job by
+  promoting the status dot into it; the owner rejected it on device — the bare dot beside the name
+  was more functional than a plate around it. The dot is back in the title line, no container, at
+  **11px** (one fifth up from 9), and scoped **`.sess .dot`**: the chat header's `#ddot` shares that
+  class and its title centres on the dot+name GROUP, so a global bump walks the name off the axis
+  that header was measured onto.
+- **Boxiness is a RATIO, not a mood.** The reference's corner is 21 on a 63.5px card (0.33); ours was
+  20 on 128 (0.16), which is why a 20px radius read as a slab. The fix moves both terms: `--r-3xl`
+  (26 — the one radius here **derived** rather than taken off the 4px ramp) and the height down to
+  **116** by reflowing only. The name takes **one line and ellipsizes** (the reference's own
+  behaviour; wrapping beside the chips is what made a long name a 165px card, and the full name lives
+  on `title`), padding is back to 12/14, the ✕'s negative margins are −12 so its 44px target stops
+  making the title row taller than the 20px line box, and a card's `.chip` loses its **fill** —
+  scoped, since the identically-named chip in a turn row is a real control with a sheet behind it.
+  Chip padding goes with the fill, and that is not cosmetic: 2px on a 12px chip made the chip the
+  tallest thing in the row.
+- Contents are untouched throughout; the one type move is the name `--t-body → --t-sub`.
+
+Four couplings that are invisible from the code:
+
+- **`#newfab` is static markup, a SIBLING of `#tab-sessions`, and `showTab()` toggles it.** The list
+  is wiped and rebuilt by a 4s poll; a control re-created under the thumb loses the tap that lands in
+  the swap. Building it inside `renderSessions()` looks natural and is the bug.
+- **`#tab-sessions`'s bottom padding IS the pill's licence to float** — `--fab-h` plus a gutter either
+  side, so the last card can always be scrolled clear of it. Without it the pill permanently covers
+  the last card's ✕, which is the failure the whole design has to avoid.
+- **z-index 3**: over the list and the sticky tab bar (2), under `#drill`/`#viewer` (5, opaque, so an
+  open session hides it), the sheets (9/10) and `.err.float` (11). The toast covering it is correct —
+  an error outranks a launcher.
+- **No shadow, no entrance motion.** This file separates surfaces by fill and inset rings, and the
+  list repaints every 4s so any reveal would replay every four seconds, forever.
+
+`scripts/webapp-measure/sessions.mjs` measures all of it, and it carries **three control pages, one
+per round** — 0.4.169 (pre-restyle, 36 failures), 0.4.170 (the tiled build, 19) and 0.4.171 (before
+the density pass, 12). No single one can falsify all three rounds: against 0.4.169 the "no tile"
+checks pass vacuously, and against 0.4.170 the radius checks pass for the wrong reason. Note also
+what a control cannot do at all here: the layering checks would pass vacuously on any page with no
+pill, so they carry their own falsifiers — the hit test re-run at `z-index: -1`, the relief
+re-measured with the reserved padding stripped.
+
 **Theming ignores `prefers-color-scheme` completely.** Colours come from the `--tg-theme-*`
 properties Telegram injects, with dark fallbacks in `:root`. A light-theme check that sets the media
 feature renders the dark theme and passes without testing anything. Set the variables instead
@@ -737,6 +782,31 @@ sized by padding is immune at any diameter — that part of the folklore was rig
 **Known and deliberately unfixed** — do not rediscover this as a new bug. Feather's paperclip
 artwork is ~0.25px off-centre inside its own viewBox — that is the drawing, not our layout, and a
 magic-number transform for a quarter pixel is worse than the quarter pixel.
+
+**A turn's NARRATION is quoted; its answer is not — and the kind was never lost, only discarded.**
+What users call "thoughts" is mid-turn narration: ordinary text blocks between tool calls. (Real
+`thinking` blocks are a dead end — Claude Code persists them with `thinking: ""`, 100% of 1545
+transcripts, every model; `transcript.ts`'s comment carries the measurement. Do not build on them.)
+The mini app rendered narration and reply through one branch of `turnRow()` after the turn-card
+refactor, so the two measured **byte-identical** on the live page (16px/400/normal/`--text`/no
+border) and the app read as having lost thoughts. Three things worth keeping:
+
+- **Every `t: 'p'` inside a turn item IS narration, by construction** — `webappSessionFeed` lifts the
+  concluding reply out of the turn and re-appends it as its own `assistant` row. Nothing needed to be
+  added to the wire, and no kind needs inferring client-side. It only *looks* lost because
+  `turn-summary.ts` holds two shapes: `TurnBlock {kind:'thought'}` is the **Telegram card's**
+  (`mirror.ts` tags it), and the mini app's `TurnPart` never used the word.
+- **The bar, and only the bar.** Narration keeps the reply's size, weight, style, colour and opacity
+  — prose by the owner's standing instruction, the italic-12px-mono demotion is retired and must not
+  return. The rule is **shared with `.msg.thought`** (whose role has had no producer since the
+  refactor) so the two cannot drift, and adjacent paragraphs merge into ONE quote with a chip
+  splitting the run, which is `mirror.ts`'s own rule.
+- **`--sec` was not usable as the bar and that is a trap for any revived rule.** The v0.4.165
+  header-colour pin left `--sec` **9/255** from `--bg` (14 light), so the orphaned rule's
+  `2px solid var(--sec)` is a hairline nobody can see — while passing any assertion about the
+  declared value. `--quote-bar` is `color-mix(--hint 45%, --bg)`: 46/255 dark, 64 light.
+  `thoughts.mjs` samples **pixels** for exactly this reason, and its prose guard passes on both pages
+  on purpose — a control it is not, a regression alarm it is.
 
 **The tool/thought lines are prose now, by explicit instruction.** `.msg.activity` and `.msg.thought`
 carry no font, size or colour of their own; they inherit `--t-msg` and the page text colour so they

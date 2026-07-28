@@ -120,6 +120,28 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   lands on its FIRST line rather than its last — in fullscreen
                                   #   too, where the scrim and the feed's padding swap over. Same
                                   #   page-path control: 7 checks fail pre-change
+    node sessions.mjs [page] [out] # the Sessions page: the reference's card geometry (radius, padding,
+                                  #   the icon tile, the type step) and the new-session PILL that
+                                  #   floats over the list. The geometry half fails wholesale on a
+                                  #   pre-change page; the layering half cannot — that page has no
+                                  #   pill, so "it paints above the list" would pass vacuously — and
+                                  #   carries its own falsifying controls instead: the same hit test
+                                  #   re-run at z-index -1, and the relief re-measured with the list's
+                                  #   reserved padding stripped. Also holds the pill's node identity
+                                  #   across a 4s poll (the list is rebuilt; the pill must not be),
+                                  #   and diffs every card's text against HEAD's page on one fixture —
+                                  #   a guard that passes on BOTH, which is what "shape only" means
+    node thoughts.mjs [page] [out] # a turn's NARRATION is quoted and its answer is not. Three kinds of
+                                  #   claim, three instruments: the marking is structural and fails
+                                  #   wholesale on a pre-change page; the ABSENCE of a demotion (same
+                                  #   size/weight/style/colour/opacity as the reply, per the standing
+                                  #   prose ruling) passes on BOTH by design and is a guard, not a
+                                  #   control; and the bar is measured in PIXELS off a screenshot in
+                                  #   both themes, because the rule this revives declared `var(--sec)`
+                                  #   — 9/255 from the pinned page colour, i.e. a bar that passes any
+                                  #   declared-colour check and cannot be seen. Fixtures: a payload
+                                  #   captured from the LIVE daemon, plus a synthetic one for the
+                                  #   merge/split rule a single capture cannot hold
     python3 halo.py <out>         # finishes batch5's item 5 — the title's ink-vs-surround contrast
                                   #   at the WORST slice of each line, over a bright bubble, in both
                                   #   themes, against the flat-ground control it validates itself on

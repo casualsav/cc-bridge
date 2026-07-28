@@ -80,7 +80,10 @@ export interface SessionFeed {
   // the mini app renders today: a turn reads as one column of prose with its work between the
   // paragraphs, and each chip keeps every underlying call for the detail sheet. It carries `blocks`
   // instead of `text`. 'activity' / 'thought' are the older per-row shape — kept in the type because
-  // the client still renders them, but the feed no longer emits them.
+  // the client still renders them, but the feed no longer emits them. That is about the ROLES only,
+  // not about the content: a turn's narration is alive and still shipped, as the `t: 'p'` parts of
+  // `blocks` (the client quotes them; `.msg.thought`'s bar and theirs are one shared rule). This
+  // sentence read as "narration is gone" for two releases and cost a regression hunt.
   // `clipped` = the payload clamp cut this message (display only — storage and pane delivery keep
   // the whole thing); the client says so instead of just trailing off, and `uuid` (present only on a
   // clipped row) is the handle it uses to fetch the rest from /api/session/message.
