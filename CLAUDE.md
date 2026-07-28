@@ -240,6 +240,17 @@ must **name** it: `bun run deploy --ship-branch <branch>`. There is no bare `--f
 a habitual flag is one people type without reading. `--commit` stages only the version files it owns,
 never `git add -A`.
 
+**THE BUS DIGEST CARRIES ONLY A SESSION'S OWN LANE.** The rule, in one sentence: a catch-up digest
+contains only the events this endpoint sent or was sent, since its own watermark — never the room's.
+It exists so a session that was busy or away learns what it missed before answering the ask in front
+of it; it is not a room summary. Two guards, and only one of them was ever there: no watermark means
+no digest at all (a fresh spawn has nothing to catch up on), and `digestSince`'s `involving` scopes
+the rest. The second is what was missing — a one-minute-old @peptides spawn's second message arrived
+carrying two cc-bridge↔chat rows, another lane's conversation in a context with no way to know it was
+not its own. A `post` has no `to` and so never appears in a scoped digest, which is right: it is the
+definitional cross-lane broadcast. The failure to fear is not the noise, it is a session repeating a
+neighbour's content outward as if it were its own.
+
 **WHICH REPLIES PING THE OWNER'S PHONE — and the named suspect was innocent.** The complaint was that
 agent-bus traffic notifies him; the bus mirror cards (`sendBusCard`, daemon.ts) have sent
 `disableNotification: true` since before it was raised. The ping came from `sendAgentText`, the relay
