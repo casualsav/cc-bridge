@@ -355,6 +355,22 @@ scroller's padding is the header's whole footprint, so the two disagree by 60px.
 note the fixture coupling it created: `squash.mjs` needs a short row **last** or its eighth long card
 is the unfolded one and the count fails for a reason that has nothing to do with the squash.
 
+**An ALBUM is ONE message, and the wire format grew an extra `img=` rather than a new concept.**
+Telegram delivers several photos picked in one go as N separate updates sharing a `media_group_id`,
+milliseconds apart, with the caption on exactly one of them — not always the first. Delivered as they
+arrive that is N messages in the session, which is not what the sender did. `bufferPhotoAlbum` holds
+them on that id behind a **900ms debounce** (every arrival pushes it out, so a slow group still lands
+whole and a single photo — which carries no `media_group_id` — never waits at all), and the flush
+calls `handleInbound` once. Buffering happens BEFORE the access gate on purpose and is safe: the gate
+runs at flush, so an unauthorized album costs one map entry. `meta.image_paths` (newline-joined,
+**set only above one path**) makes `formatChannelBlock` repeat the attribute —
+`<tg 42 img="/in/a.jpg" img="/in/b.jpg">caption</tg>` — so a lone photo still produces the block it
+always did, which is what `inbound.test.ts` pins. `unwrapTg` reads them ALL back for the mini app
+(`img` stays the first, `imgs` carries the set) and the feed stacks them 2px apart with only the ends
+of the stack rounded. **Photos only**: documents and videos can carry a `media_group_id` too, and
+they keep the one-per-message behaviour because `att=` is a single path and their sizes make the
+download window a different problem. That is a stated exclusion, not an oversight.
+
 **A picked file is STAGED, never sent from the picker.** `#dstage` holds it above the composer with
 a thumbnail and an ✕ until you press send, and the composer's text goes with it as the caption. It
 sits outside `.inputwrap` on purpose: a chip inside that flex row would take its width from the
@@ -422,6 +438,32 @@ remove the row). That compensation belongs on the **feed's padding**, never as a
 the host: `overflow` clips at the padding box, so a gutter the row overhangs is a strip of live
 scroller in which a passing message paints behind the row — invisible at rest, wrong in motion.
 
+**…and the row is a PILL now, which moves where its two horizontal numbers live.** Full-bleed shading
+was right while the row was the only thing between the transcript and the field; once the strip below
+gained its own scrim, a second full-width veil on top of it read as a stripe across the screen and the
+owner asked for "just a pill around itself". So `.work` shrink-wraps and carries the fill, and
+the 12px gutter moved to **`#dworkhost`**, because a padding on a shrink-wrapped row is its own inner
+air and would have started the pill at x=0. Its inner padding is the **bubble's own 11px**, which
+lands the line's text on the message column (23px) while the pill's box keeps the gutter: two claims
+where there was one, and `workpin.mjs` now checks them separately — its old single "the row's text
+keeps the feed's left gutter" was satisfied by text sitting 11px left of every message beside it.
+`.work::before` is gone with the mask it carried: a pill's edge is *meant* to be an edge, and the
+feathering existed to stop a full-width band from reading as a rule across the page.
+
+**A photo FILLS its bubble.** Telegram's own treatment, measured off the owner's reference at 1.75
+image px per CSS px: the picture meets the bubble's edges with no frame, and its caption's ink sits
+11.4px below it. Ours framed it in 11px of blue. The 11px is cancelled by **negative margins on the
+image**, never by a smaller padding on `.msg` — the text case keeps every number it was tuned with,
+including the stamp's two ported ratios. With no caption the picture bleeds through the bottom too
+and the **time rides on it** in a scrim pill (`.msg.imgonly`, set by the renderer, since `t` is
+already the caption after the placeholder strip): left in the flow it was a 25px strip of blue under
+the photo carrying nothing but a clock, which is what the "large padding" complaint was actually
+about. The image-only radius is **`inherit`**, never a literal — a user bubble's bottom-right corner
+is `--r-xs` and the other three `--r-md`, so any hand-written value agrees on three and disagrees on
+the fourth. What was NOT changed, because it was measured first: the text bubble's bottom. Ours puts
+the stamp's ink **4.2px** above the bubble's floor against Telegram's **6.3px** — already tighter
+than the reference the ask came from.
+
 **Theming ignores `prefers-color-scheme` completely.** Colours come from the `--tg-theme-*`
 properties Telegram injects, with dark fallbacks in `:root`. A light-theme check that sets the media
 feature renders the dark theme and passes without testing anything. Set the variables instead
@@ -438,26 +480,53 @@ header's bottom *edge* — so bare, it sat at ~5% of `--bg`, i.e. on raw transcr
 over a bright user bubble against a 4.5 floor. Two changes buy it back and **neither is sufficient
 alone** (`scripts/webapp-measure/halo.py` says so, and validates itself on flat ground first):
 
-- The ramp runs **34px BELOW the header** (`--scrim-tail`) instead of ending at its bottom edge.
-  Alone it gets the cwd to 3.75:1, still under.
-- Both lines take a `-webkit-text-stroke` in `--bg` with **`paint-order: stroke fill`**, so the stroke
-  paints first and the fill covers its inner half: 1.5px of ground outward with the glyph shape
-  untouched, plus two soft shadows for falloff. Together: **5.31:1 dark, 5.88:1 light.**
+**The glyph treatment that first bought this back is GONE, and the scrim's shape is what replaced
+it** — the owner, on v0.4.159: "it has a border that doesn't look premium at all". He was looking at
+a `-webkit-text-stroke` in `--bg` around every letter of both lines, and it existed only because the
+cwd had no ground: the ramp held full `--bg` for its top 20px, so the path line sat mid-ramp at ~72%.
+Now the peak reaches **down to the cwd** (measured off his Claude-app reference, whose ground is flat
+its own page colour across the whole title and only starts clearing a few px above the path line),
+which puts the cwd's ground at ~92% and gets **5.21:1 dark, 5.72:1 light with no treatment at all** —
+within a tenth of the 5.31/5.88 the stroke was buying, for none of the border. Do not put a glyph-level rule back without first
+checking what the ramp gives that line; every version of it was a symptom of a scrim that stopped too
+high. And the two traps that shaped it stay on the record, because they are about *drawing ground
+around text* in general: stacked `text-shadow`s in the page's own colour still darken it six units
+through 8-bit rounding and paint a plate the size of the text (a capsule, by accident, in the change
+that removed one), and buying contrast with a fatter stroke grows a lumpy blob over a bubble at 5px.
 
-Two traps, both paid for. **Do not build this out of stacked `text-shadow`s** — eight blurs in
-`var(--bg)`, the page's own colour, still darkened the ground six units through accumulated 8-bit
-rounding and drew a dark plate the size of the text, i.e. a capsule again, by accident. **And do not
-buy the contrast with a fatter stroke instead** — swept and looked at: at 5px it grows a lumpy dark
-blob around the text over a bubble, the same capsule in a worse form. 3px is where it stops reading as
-a shape, and the ramp has to find the rest. Incidentally the *old* capsule was itself under AA for the
-cwd in the light theme (3.57:1) — this fixed a defect as well as preserving one.
+**The scrim is TWO LENGTHS, not percentages of one height, and that is what lets one shape serve both
+layouts.** `--scrim-solid` reaches down to the **NAME's floor**; `--scrim-ramp` is everything below
+it — the cwd's own line box plus one line of message text — and the element's total, **66.2px**, is
+the alignment the owner called perfect. Four corrections got there and the last one moved only the
+SPLIT: "it should start very light and taper until it reaches just below the name of the session,
+where it becomes basically solid". Ending the solid part at the *cwd's* floor instead made the whole
+drop happen inside one line box and read as harsh; starting the fade a line higher gives the same
+drop 60% more runway (measured: biggest step 13/255 → 7, mean 5.1 → 3.9). The earlier two: one
+`--h-l1` down, three pixels *above* the cwd ("begins too early"), and solid a line *below* the cwd
+with a 68px tail, which veiled two whole lines of transcript.
+**The stop list is not a generic ease, and that is what makes the split safe.** Through the cwd's own
+line box — the ramp's first 38% — the curve barely moves (100 → 94%), because that line's entire
+legibility is the ground under it and it measured **3.75:1** the last time it sat mid-ramp. It reads
+**5.34:1 dark / 5.78:1 light** over a bright bubble against 5.53/5.88 on flat page colour, i.e. the
+fade costs it two tenths. Everything below the cwd is free, and that is where the fade actually
+happens.
+A short ramp is **steeper by arithmetic**, and the check that guards it had to become scale-free
+rather than be relaxed: `bleed.mjs` and `headerup.mjs` asserted "no one-pixel step over 12/255",
+which was really measuring the ramp's LENGTH — the same drop over a third of the distance is three
+times as steep per pixel while being no less smooth. They now require no step over **3× the ramp's
+own mean**, which is what a cliff actually is: one step out of line with its neighbours. Fullscreen moves the **split**, not the shape: `html.fs` sets `--scrim-solid: var(--safe-top)` so
+the solid part covers the client's whole chrome band and the same ramp lands below it. Percentages
+could not express that, and the attempt to keep them shipped two bugs inside an hour — the fullscreen
+height was scaled as if the stops ran from the top (its solid part covered the band's first quarter),
+and the normal-mode fractions were re-derived from the *pre-rescale* geometry, which moved 91% from
+y=40.7 to y=33 and dropped the cwd to 3.76:1. Both were caught by measurement, neither by reading.
 
 **The ramp's TAIL is what keeps it from reading as an edge, and the first attempt got this wrong.**
 It shipped in v0.4.155 ending at the header's bottom edge, which is also where the cwd sits — so every
 drop of opacity the cwd needed had to be spent in the ~9px between its baseline and the ramp's zero.
 That is a cliff by construction, and the owner reported it as "very harsh and sudden": the top of a
-passing bubble went flat grey and snapped back to blue. `--scrim-tail` (34px) gives the ramp somewhere
-to land. Same peak, same job, 34 more pixels to finish in — and it measures *better* (5.62:1 against
+passing bubble went flat grey and snapped back to blue. A tail — 34px then, `--scrim-ramp`'s 68 now —
+gives the ramp somewhere to land. Same peak, same job, 34 more pixels to finish in — and it measures *better* (5.62:1 against
 the cliff's 5.46), which is what says the old shape was badly spent rather than merely ugly. The
 target was the owner's own screenshot of the Claude app: content dimmed hard behind the title,
 clearing smoothly well below it, no edge anywhere.
@@ -496,22 +565,35 @@ inset — one observer is right by construction where five call sites are right 
 added. Two things that look correct and are not: a **gutter added on top of `--dock-h`** doubles the
 last message's own 16px margin and breaks the row's equal air; and any rule that zeroes that padding
 conditionally (there was a `#drill.working` one, correct for the old in-flow layout) puts the newest
-message **77px under the composer** the moment a turn runs. The dock paints a **scrim, not a fill**,
-and the difference is the whole design: `#ddock::before` is `--bg`'s *own colour* at 45% plus the
-chip glass, so over the page — which is what is behind that strip nearly all of the time — it is
-literally the page and there is no bar to see, while a message passing under it loses **42% of its
-excursion** and reads as a bubble moving under glass. That replaced "the dock paints nothing" on the
-owner's ask off Telegram's composer ("a bit darker, and as messages pass beneath it a subtle
-shading"); the capsule inside it is still separately filled with the header's `--chip-fill` +
-`--chip-glass`. Two numbers move **together or not at all**: the working row's own band was 78% and
-is now 60% *on top of* the dock's 45%, which composites back to the same 78% (`1 − 0.55 × 0.40`) —
-measured at 2.74:1 against the pre-change page's 2.75:1 for that line over a bright bubble. Raise the
-dock's fill without lowering `.work::before`'s and the band behind the status line darkens into a
-visible stripe. `.work::before` also **lost its own `backdrop-filter`**: the dock's already frosts
-everything behind that row, and a second one only compounds the radius.
-`scripts/webapp-measure/dockscrim.mjs` measures all four claims, and `bleed.mjs`'s "the dock paints
-nothing" check was **re-aimed rather than deleted** — it read `#ddock`'s `background-color`, which is
-still `rgba(0,0,0,0)` and always will be, so it could not have seen this change at all. `#drill::before` is
+message **77px under the composer** the moment a turn runs. The dock's own box still paints nothing;
+what carries the strip is **`.composer::before`**, and every number on it was set by the owner in
+two corrections worth keeping together, because each one was a version that shipped:
+
+- **Where it starts.** `inset: var(--sp-1) 0 0` is the composer's padding-top, i.e. exactly the
+  **capsule's top edge** — "the gradient on the bottom shouldn't start until just at the top of the
+  text input bubble". It first went out on `#ddock::before` covering the dock's whole height, which
+  veiled the working row's band too and put the pill in a shaded strip instead of on the transcript.
+- **How strong.** `--bg`'s *own colour* at **22%**, so over the page it is literally the page and
+  there is no bar to see, while a message passing under keeps **78% of its own excursion** — "super
+  subtle, barely noticeable, and text in messages should still be readable as it passes under". It
+  went out at 45%.
+- **No `backdrop-filter`, and that is the point rather than an omission.** The blur is what made the
+  text under it unreadable. This is the one surface in the file where a frost is wrong: everything
+  else carrying `--chip-glass` has its own text to win over what passes behind it, and nothing is
+  written on this strip. `bleed.mjs`'s check is inverted to say so.
+
+The working row is a **pill** that holds its own ground **alone** — `--bg` at 78% plus the chip
+glass, which is what the old full-width band carried. It briefly ran at 60% on the arithmetic that
+the dock's 45% sat underneath and the two composited back to 78%; that was true for exactly one
+release, and moving the strip's scrim down to the capsule left the pill over raw transcript and cost
+the line **3.20:1 → 2.62:1** over a bright bubble. If the strip's scrim ever reaches back up here,
+that number comes down again by the same rule. `scripts/webapp-measure/dockscrim.mjs` measures all of
+it, sampling **two different grounds** (the pill's interior and the strip below the capsule) with a
+`park` argument naming which surface the fixture puts a bubble behind — one scroll position cannot
+serve both, and parking on the row while measuring the strip reported a confident 0% for a scrim that
+was working. `bleed.mjs`'s "the dock paints nothing" check was **re-aimed rather than deleted** — it
+read `#ddock`'s `background-color`, which is still `rgba(0,0,0,0)` and always will be, so it could
+not have seen any of this. `#drill::before` is
 the ceiling scrim: the transcript dissolves on its way up so a line of text never slides under
 Telegram's ✕ Close, transparent exactly at the name pill's bottom edge. `scripts/webapp-measure/bleed.mjs`
 measures all of it, and note its two instrument lessons — `getComputedStyle`'s second argument is the
@@ -569,7 +651,7 @@ colour perfectly (a chip whose backdrop is flat `--bg` cannot be moved) — and 
 the band the transcript was just given, and glass over flat ground is indistinguishable from paint.
 Tried, rejected by the owner. **The invariant is that it keeps FADING through the header's band**, not
 where the element's bottom edge happens to be: the ramp now extends 34px *past* the header (see
-`--scrim-tail`), which is the opposite change and is what stopped it reading as a cliff.
+`--scrim-ramp`), which is the opposite change and is what stopped it reading as a cliff.
 `bleed.mjs` used to assert `scrim height === the header's bottom`, which could not tell those two
 apart — both move the height, only one empties the band. It now measures the rendered alpha profile
 through a white probe: still fading at the header's floor, no single-pixel step over 12/255, back to

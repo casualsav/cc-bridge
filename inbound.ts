@@ -22,7 +22,12 @@ export function formatChannelBlock(params: InboundParams): string {
   if (m.message_id) a.push(m.message_id)
   if (m.edited) a.push('e')
   if (m.user && m.user_id && m.user_id !== loadAccess().allowFrom[0] && m.chat_id !== m.user_id) a.push(`@${m.user}`)
-  if (m.image_path) a.push(`img="${esc(m.image_path)}"`)
+  // An album repeats the attribute, one per picture, in the order they were sent:
+  //   <tg 42 img="/inbox/a.jpg" img="/inbox/b.jpg">caption</tg>
+  // `image_paths` is set only when there is more than one; a single photo still carries plain
+  // `image_path` and produces exactly the block it always did, which is what keeps this additive.
+  if (m.image_paths) for (const p of m.image_paths.split('\n')) a.push(`img="${esc(p)}"`)
+  else if (m.image_path) a.push(`img="${esc(m.image_path)}"`)
   if (m.attachment_path) a.push(`att="${esc(m.attachment_path)}"`)
   return `<tg${a.length ? ' ' + a.join(' ') : ''}>${params.content}</tg>`
 }

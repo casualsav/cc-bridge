@@ -87,8 +87,6 @@ const read = () => p.evaluate(() => {
   });
   return {
     rows: msgs.map(row),
-    // Second argument or this reads the HOST and reports `none` — bleed.mjs's lesson.
-    scrim: parseFloat(getComputedStyle(document.getElementById("drill"), "::before").height) || 0,
     padTop: parseFloat(getComputedStyle(feed).paddingTop) || 0,
     clientH: feed.clientHeight,
     fetches: window.__fetches.slice(),
@@ -126,15 +124,15 @@ await p.screenshot({ path: join(OUT, "tall-landing.png") });
 check(clipped.h > m.clientH, `the fixture reply is ${clipped.h.toFixed(0)}px in a ${m.clientH}px scroller — the state this is about`);
 // Its top sits at the ceiling scrim's floor: below the ramp, so the line is not the one dissolving,
 // and NOT off the bottom of the screen, which is where a bottom-pin would have left it.
-check(Math.abs(clipped.top - Math.max(m.scrim, m.padTop)) <= 2, `it lands on its first line, at the scrim's ${m.scrim.toFixed(0)}px floor (top ${clipped.top.toFixed(1)}px)`);
+check(Math.abs(clipped.top - m.padTop) <= 2, `it lands on its first line, at the feed's own ${m.padTop.toFixed(0)}px content top (top ${clipped.top.toFixed(1)}px)`);
 check(clipped.bottom > 0, `…rather than on its last (its bottom is ${clipped.bottom.toFixed(0)}px past the scroller's, i.e. still below the fold)`);
 
 // FULLSCREEN, and be exact about what this is: it sets `html.fs` and an inset by hand, which the
 // app's own handler would do alongside a DOM move of the pause button. That fake is worthless for
-// the header's layout and adequate here — the two numbers the landing reads are pure CSS, and they
-// SWAP in this mode (the scrim shortens to the inset, the feed's top padding grows past it). What
-// it proves is that the line never lands under a surface, which is the invariant; where the pause
-// button sits is headerup.mjs's job, driven through the real SDK.
+// the header's layout and adequate here — the number the landing reads is pure CSS, and it GROWS in
+// this mode (the feed reserves the client's chrome band). What it proves is that the line lands on
+// the reserved footprint in both layouts; where the pause button sits is headerup.mjs's job, driven
+// through the real SDK.
 await p.evaluate(() => {
   document.documentElement.classList.add("fs");
   document.documentElement.style.setProperty("--safe-top", "93px");
@@ -150,8 +148,8 @@ await p.waitForTimeout(400);
 const fs = await read();
 await p.screenshot({ path: join(OUT, "tall-landing-fs.png") });
 const fsRow = fs.rows[fs.rows.length - 1];
-check(fs.padTop > fs.scrim, `in fullscreen the two swap — feed padding ${fs.padTop.toFixed(0)}px now past the ${fs.scrim.toFixed(0)}px scrim`);
-check(Math.abs(fsRow.top - Math.max(fs.scrim, fs.padTop)) <= 2, `…and the reply still lands clear of both surfaces (top ${fsRow.top.toFixed(1)}px)`);
+check(fs.padTop > m.padTop, `in fullscreen the feed reserves more — ${fs.padTop.toFixed(0)}px against ${m.padTop.toFixed(0)}px`);
+check(Math.abs(fsRow.top - fs.padTop) <= 2, `…and the reply still lands on it (top ${fsRow.top.toFixed(1)}px)`);
 await p.evaluate(() => {
   document.documentElement.classList.remove("fs");
   document.documentElement.style.removeProperty("--safe-top");

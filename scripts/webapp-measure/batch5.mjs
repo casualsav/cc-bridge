@@ -236,10 +236,12 @@ check(txt.nSize === "12px" && txt.nWeight === "600", `the name is unchanged: ${t
 check(txt.uSize === "11px", `the cwd is unchanged: ${txt.uSize}`);
 check(txt.dot === "9px", `the status indicator is untouched (${txt.dot})`);
 const bare = s => !s || /^0px \/ none$/.test(s);
-check(!bare(txt.nShadow) && !bare(txt.uShadow), `both lines carry the halo (${txt.nShadow})`);
-// Two identical "none"s are equal, which is a check that cannot fail. Both terms, so the pre-change
-// page — where neither line carries anything — fails it.
-check(!bare(txt.nShadow) && txt.nShadow === txt.uShadow, "…the SAME halo — one title in two sizes, never two treatments");
+// INVERTED at v0.4.160, and the inversion is the item: the halo is gone on the owner's call ("it has
+// a border that doesn't look premium at all"), and the scrim's peak reaching past the cwd is what
+// replaced it. Both terms, so a page that strokes one line and not the other still fails — which is
+// also why the old "…the SAME halo" partner check is not merely negated but deleted: two identical
+// `none`s are equal by construction, and that is a check that cannot fail.
+check(bare(txt.nShadow) && bare(txt.uShadow), `neither title line carries a glyph treatment — the ramp is their ground now (${txt.nShadow})`);
 
 // The worst case, per the orchestrator: light theme, transcript scrolled so a bright bubble sits
 // directly behind BOTH lines. Hit-tested, never rect-overlapped: a message clipped by the scroller
@@ -288,11 +290,13 @@ for (const [theme, vars] of [["dark", null], ["light", LIGHT]]) {
   check(at >= 0, `${theme}: found a scroll position with a bubble behind both lines (${at})`);
   await p.waitForTimeout(200);
   await shot(`5-${theme}-bubble`, band);
-  // …and the same frame with the halo switched off, which is the control that says the halo is
-  // doing work the steeper scrim does not do on its own. BOTH halves come off: the stroke is the
-  // dense part and the shadows are its falloff, so killing only one measures a third treatment
-  // that does not ship.
-  const off = await p.addStyleTag({ content: "#dname, #dsub { text-shadow: none !important; -webkit-text-stroke: 0 !important }" });
+  // …and the same frame with the SCRIM switched off. This variant used to kill the halo, which was
+  // the control that said the halo did work the scrim could not — and once the halo went (v0.4.160,
+  // the owner: "a border that doesn't look premium") that shot became byte-identical to the one
+  // above, i.e. a row that always agrees. Killing the ramp instead asks the question that is now
+  // live: the title has no treatment of its own, so if the ramp is not what makes it legible,
+  // nothing is. It must FAIL AA here — halo.py grades this row inverted.
+  const off = await p.addStyleTag({ content: "#drill::before { display: none !important }" });
   await p.waitForTimeout(150);
   await shot(`5-${theme}-bubble-nohalo`, band);
   await off.evaluate(e => e.remove());

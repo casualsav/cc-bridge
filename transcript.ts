@@ -444,7 +444,7 @@ export function modelSwitchEvidence(file: string): ModelSwitch {
 // `name`/`args` are the invocation; `text` is the output, already normalized (ansi.ts) — either half
 // can be absent, because a command like /clear produces no output and a stdout entry can arrive with
 // no invocation recorded on the user side.
-export type ConversationItem = { role: 'user' | 'assistant' | 'agent' | 'command'; text: string; ts: number; uuid?: string; img?: string; att?: string; cmd?: boolean; name?: string; args?: string; agent?: string; status?: string; clipped?: true }
+export type ConversationItem = { role: 'user' | 'assistant' | 'agent' | 'command'; text: string; ts: number; uuid?: string; img?: string; imgs?: string[]; att?: string; cmd?: boolean; name?: string; args?: string; agent?: string; status?: string; clipped?: true }
 
 // ---- Machine payloads that arrive USER-SIDE -----------------------------------------------------
 // Several things the harness writes are user-type entries carrying no user words at all. They pass
@@ -514,12 +514,15 @@ function commandItem(raw: string, ts: number, uuid?: string): ConversationItem |
 // The bridge's own envelope around an inbound message. Tolerates a few stray chars before `<tg`
 // (the survey-dismiss "0" era left such entries). Shared by the two paths that can carry one — the
 // delivered user entry and the queued one — so the envelope is parsed in one place.
-function unwrapTg(raw: string): { text: string; img?: string; att?: string } {
+function unwrapTg(raw: string): { text: string; img?: string; imgs?: string[]; att?: string } {
   const m = raw.match(/^[\s\S]{0,3}?<tg([^>]*)>([\s\S]*)<\/tg>/)
   if (!m) return { text: raw }
-  const img = /img="([^"]+)"/.exec(m[1])?.[1]
+  // ALL of them: an album repeats `img=`, and a reader that takes the first shows one picture for a
+  // message that carried four. `img` stays as the first so every existing consumer is untouched.
+  const imgs = [...m[1].matchAll(/img="([^"]+)"/g)].map(x => x[1]!)
   const att = /att="([^"]+)"/.exec(m[1])?.[1]
-  return { text: m[2].trim(), ...(img ? { img } : {}), ...(att ? { att } : {}) }
+  return { text: m[2].trim(), ...(imgs.length ? { img: imgs[0] } : {}),
+    ...(imgs.length > 1 ? { imgs } : {}), ...(att ? { att } : {}) }
 }
 
 function conversationItem(e: Entry): ConversationItem | null {

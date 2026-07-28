@@ -12492,6 +12492,10 @@ async function handleInbound(
   downloadImage: (() => Promise<string | undefined>) | undefined,
   attachment?: AttachmentMeta,
   transcribeAudio?: () => Promise<{ text: string; transcribed: boolean }>,
+  // An ALBUM's already-downloaded paths, in the order they were sent. `downloadImage` still returns
+  // the first, so `image_path` keeps meaning what it always did for every consumer that reads it —
+  // this only adds the rest.
+  albumPaths?: string[],
 ): Promise<void> {
   const result = gate(ctx)
   if (result.action === 'drop') return
@@ -12611,6 +12615,10 @@ async function handleInbound(
       user_id: String(from.id),
       ts: new Date((ctx.message?.date ?? 0) * 1000).toISOString(),
       ...(imagePath ? { image_path: imagePath } : {}),
+      // Newline-joined because meta is Record<string,string>; a downloaded inbox path cannot contain
+      // one (the daemon names those files itself). Only ever set for a real album, so a single photo
+      // produces a byte-identical block to the one it always did.
+      ...(albumPaths && albumPaths.length > 1 ? { image_paths: albumPaths.join('\n') } : {}),
       ...(attachmentPath ? { attachment_path: attachmentPath } : {}),
       ...(attach ? {
         attachment_kind: attach.kind,
@@ -13958,11 +13966,58 @@ bot.on('message:text', async ctx => {
   await handleInbound(ctx, text, undefined)
 })
 
+// An ALBUM — several photos picked in one go — reaches the bot as N separate updates that share a
+// `media_group_id`, arriving milliseconds apart. Delivered one at a time they became N messages in
+// the session, which is not what the sender did: they sent one message with several pictures, and
+// the caption (which Telegram puts on exactly ONE of the items, not always the first) belongs to all
+// of them. So the group is buffered on that id and delivered once.
+//
+// The window is a debounce, not a fixed wait: every arrival pushes it out, so a slow group is still
+// delivered whole and a single photo — the overwhelmingly common case — never waits at all, because
+// it carries no media_group_id and takes the direct path below.
+//
+// Buffering happens BEFORE the access gate, which is deliberate and safe: `handleInbound` runs the
+// gate at flush time, so an unauthorized album is dropped then, having cost only a map entry.
+// PHOTOS only. Documents and videos can carry a media_group_id too, but the block's `att=` is one
+// path and their sizes make the download window a different problem — they keep the one-per-message
+// behaviour, and that is a stated exclusion rather than an oversight.
+type PhotoAlbum = { ctx: Context; caption?: string; fileIds: string[]; timer: ReturnType<typeof setTimeout> }
+const photoAlbums = new Map<string, PhotoAlbum>()
+const ALBUM_WINDOW_MS = 900
+
+async function flushPhotoAlbum(album: PhotoAlbum): Promise<void> {
+  const paths: string[] = []
+  for (const id of album.fileIds) {
+    try { paths.push(await channel.downloadAttachment(id, INBOX_DIR)) }
+    catch (err) { process.stderr.write(`daemon: album photo download failed: ${err}\n`) }
+  }
+  if (!paths.length) return
+  // The caption rides with the whole album, and a captionless one says how many pictures it is —
+  // `(photo)` for a set of four reads as a bridge that lost three of them.
+  const text = album.caption ?? (paths.length > 1 ? `(${paths.length} photos)` : '(photo)')
+  await handleInbound(album.ctx, text, async () => paths[0], undefined, undefined, paths)
+}
+
+function bufferPhotoAlbum(ctx: Context, fileId: string): boolean {
+  const gid = ctx.message?.media_group_id
+  if (!gid) return false
+  const key = `${ctx.chat!.id}:${gid}`
+  const existing = photoAlbums.get(key)
+  const album: PhotoAlbum = existing ?? { ctx, fileIds: [], timer: undefined as unknown as ReturnType<typeof setTimeout> }
+  album.fileIds.push(fileId)
+  if (ctx.message?.caption) album.caption = ctx.message.caption
+  clearTimeout(album.timer)
+  album.timer = setTimeout(() => { photoAlbums.delete(key); void flushPhotoAlbum(album) }, ALBUM_WINDOW_MS)
+  photoAlbums.set(key, album)
+  return true
+}
+
 bot.on('message:photo', async ctx => {
+  const photos = ctx.message.photo
+  const best = photos[photos.length - 1]
+  if (bufferPhotoAlbum(ctx, best.file_id)) return
   const caption = ctx.message.caption ?? '(photo)'
   await handleInbound(ctx, caption, async () => {
-    const photos = ctx.message.photo
-    const best = photos[photos.length - 1]
     try {
       return await channel.downloadAttachment(best.file_id, INBOX_DIR)
     } catch (err) {
@@ -14882,7 +14937,7 @@ async function webappSessionFeed(sid: string): Promise<WebappSessionFeed | null>
   const working = turnInProgress(file) || liveSubagents(file) > 0
   const items: WebappSessionFeed['items'] = recentConversation(file, 14).map(c => ({
     role: c.role, text: c.text, ts: c.ts,
-    ...(c.img ? { img: c.img } : {}), ...(c.att ? { att: c.att } : {}), ...(c.cmd ? { cmd: true } : {}),
+    ...(c.img ? { img: c.img } : {}), ...(c.imgs ? { imgs: c.imgs } : {}), ...(c.att ? { att: c.att } : {}), ...(c.cmd ? { cmd: true } : {}),
     ...(c.name ? { name: c.name } : {}), ...(c.args ? { args: c.args } : {}),
     ...(c.agent ? { agent: c.agent } : {}), ...(c.status ? { status: c.status } : {}),
     // uuid only where it's needed: it exists so a clipped row can be re-fetched in full.

@@ -127,7 +127,11 @@ for theme in ("dark", "light"):
         got = {}
         for label, path in (("flat (CONTROL)", OUT / f"5-{theme}-flat.png"),
                             ("over a bubble", OUT / f"5-{theme}-bubble.png"),
-                            ("halo off", OUT / f"5-{theme}-bubble-nohalo.png")):
+                            # Named for what it kills TODAY: the ramp. It killed the halo until the
+                            # halo went (v0.4.160) and that made it identical to the row above it —
+                            # a row that always agrees. The file name is left alone so old outdirs
+                            # still read.
+                            ("scrim off", OUT / f"5-{theme}-bubble-nohalo.png")):
             if not path.exists():
                 print(f"  {line:5s} {label:16s}  (no shot)")
                 continue
@@ -137,7 +141,15 @@ for theme in ("dark", "light"):
                 print(f"  {line:5s} {label:16s}  no ink found — check INK_NEAR")
                 bad += 1
                 continue
-            tag = "" if label == "flat (CONTROL)" else ("  <- under AA" if worst < AA else "  ok")
+            # "scrim off" is a FIXTURE control, not an AA row, and the difference took a wrong grade
+            # to find: the first version required it to fall under AA, which the light theme's name
+            # never does — black type on a blue bubble is 6.34:1 with no help at all. That is a fact
+            # about the colours, not a broken frame. What must be true for the frame to mean anything
+            # is that killing the ramp MOVES the number, i.e. something bright really is behind that
+            # line. Graded below.
+            tag = ("" if label == "flat (CONTROL)"
+                   else f"  (bare, no ramp — flat is {got.get('flat (CONTROL)', 0):.2f})" if label == "scrim off"
+                   else "  <- under AA" if worst < AA else "  ok")
             print(f"  {line:5s} {label:16s}  worst {worst:5.2f}:1   median {med:5.2f}:1{tag}")
         if got.get("flat (CONTROL)") is None or got["flat (CONTROL)"] < AA:
             # Two things produce this, and they are worth telling apart before believing either:
@@ -149,6 +161,15 @@ for theme in ("dark", "light"):
             print("          or this page's own design contrast is. Check which before reading on.")
             bad += 1
         elif got.get("over a bubble") is not None and got["over a bubble"] < AA:
+            bad += 1
+        elif got.get("scrim off") is not None and got["scrim off"] > got["flat (CONTROL)"] * 0.9:
+            # The title carries no treatment of its own any more, so the ramp is the only thing
+            # between it and the transcript. Kill the ramp and the number must MOVE — if it stays at
+            # its flat-ground value, nothing bright was behind that line and every "ok" above this
+            # is vacuous. This is the check that would have caught a fixture scrolled to the wrong
+            # place, which no amount of AA grading can.
+            print("       !! killing the ramp barely moved this line — nothing bright is behind it,")
+            print("          so the numbers above are measuring flat page colour. Check the scroll.")
             bad += 1
 
 print("\n" + ("FAILED — a title line is under AA over a bubble" if bad else "every title line clears AA over a bubble, in both themes"))

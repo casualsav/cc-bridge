@@ -36,7 +36,9 @@ const b = await chromium.launch();
 async function shot(feed, killScrim, name, scrollTo) {
   const p = await b.newPage({ viewport: { width: 375, height: 812 }, deviceScaleFactor: 2 });
   await p.goto("file://" + PAGE, { waitUntil: "domcontentloaded" });
-  if (killScrim) await p.addStyleTag({ content: ".work::before{display:none!important}" });
+  // The row's shading is a PILL on `.work` itself now, not a full-width `::before` — killing a rule
+  // that no longer exists made both frames identical and the comparison vacuous.
+  if (killScrim) await p.addStyleTag({ content: ".work{background:none!important}" });
   await p.evaluate(({ feed, session }) => {
     window.api = async path => path.includes("session/feed") ? feed
       : path.includes("sessions") ? { sessions: [session] } : {};
@@ -46,7 +48,9 @@ async function shot(feed, killScrim, name, scrollTo) {
   if (scrollTo != null) { await p.evaluate(v => { document.getElementById("dfeed").scrollTop = v; }, scrollTo); await p.waitForTimeout(400); }
   const row = await p.evaluate(() => { const r = document.querySelector(".work"); return r ? JSON.parse(JSON.stringify(r.getBoundingClientRect())) : null; });
   if (!row) { await p.close(); return null; }
-  const clip = { x: 0, y: Math.round(row.top) - 4, width: 375, height: Math.round(row.height) + 8 };
+  // Clipped to the PILL, not to the screen's width: its fill stops at the text now, so a full-width
+  // crop is mostly ground the row never paints and the difference washes out below the threshold.
+  const clip = { x: Math.round(row.left), y: Math.round(row.top), width: Math.max(8, Math.round(row.width)), height: Math.round(row.height) };
   const buf = await p.screenshot({ clip });
   writeFileSync(join(OUT, name + ".png"), buf);
   await p.close();
@@ -69,6 +73,8 @@ const worst = (a, c) => page.evaluate(async ([a, b]) => {
   const px = img => { const c = document.createElement("canvas"); c.width = img.width; c.height = img.height;
     c.getContext("2d").drawImage(img, 0, 0); return c.getContext("2d").getImageData(0, 0, img.width, img.height).data; };
   const [pa, pb] = [px(ia), px(ib)];
+  // The right 30% of the PILL — inside its fill, past the end of "…tokens" in every state this
+  // shoots, so the glyph AA difference the header warns about stays out of the sample.
   const W = ia.width, H = ia.height, x0 = Math.floor(W * 0.70);
   let max = 0;
   for (let y = 0; y < H; y++) for (let x = x0; x < W; x++) {

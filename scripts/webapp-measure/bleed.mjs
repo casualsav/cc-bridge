@@ -77,10 +77,15 @@ const m = await p.evaluate(() => {
     })(),
     dockVar: cs(document.documentElement).getPropertyValue("--dock-h").trim(),
     dockBg: cs(dock).backgroundColor,
-    // The dock's SCRIM, which is a different claim from the dock's own box — read off the
-    // pseudo-element, the same trap the ceiling scrim's read carries a few lines below.
-    dockScrimBg: getComputedStyle(dock, "::before").backgroundColor,
-    dockScrimBlur: getComputedStyle(dock, "::before").backdropFilter,
+    // The strip's SCRIM, which is a different claim from the dock's own box — read off the
+    // pseudo-element, the same trap the ceiling scrim's read carries a few lines below. It lives on
+    // the COMPOSER, not the dock: it starts at the capsule's top edge (the owner's ask), so the
+    // working row's band and the air above it stay bare transcript.
+    dockScrimBg: getComputedStyle(document.querySelector(".composer"), "::before").backgroundColor,
+    dockScrimBlur: getComputedStyle(document.querySelector(".composer"), "::before").backdropFilter,
+    // …and WHERE it starts, which is the whole of the correction: its top edge must be the capsule's.
+    scrimTop: (() => { const c = document.querySelector(".composer").getBoundingClientRect();
+      return c.top + parseFloat(getComputedStyle(document.querySelector(".composer")).paddingTop); })(),
     drillPadTop: cs(drill).paddingTop,
     wrapBg: cs(wrap).backgroundColor, wrapBlur: cs(wrap).backdropFilter,
     // The BACK CHIP, not the title. This read `.dtitle` when the title was a capsule and shared the
@@ -185,7 +190,12 @@ check(/blur/.test(m.wrapBlur) && m.wrapBlur === m.headBlur, `…and carries the 
 // neither is checked alone — the old single check read only the box and could not see a scrim at all.
 check(alpha(m.dockBg) === 0 || m.dockBg === "rgba(0, 0, 0, 0)", `the dock's own box paints nothing (${m.dockBg})`);
 check(alpha(m.dockScrimBg) > 0 && alpha(m.dockScrimBg) < 1, `…and its SCRIM is translucent, on the pseudo-element (${m.dockScrimBg})`);
-check(/blur/.test(m.dockScrimBlur), `…and frosts what passes under it (${m.dockScrimBlur})`);
+// INVERTED, and it is the point rather than an omission: this strip must NOT frost. The owner asked
+// for message text to stay readable as it passes under the composer, and a blur is precisely what
+// takes that away — it went out with one for a release. Everything else in the file that carries
+// --chip-glass has its own text to win over what passes behind it; this surface has none.
+check(!/blur/.test(m.dockScrimBlur), `…and does NOT frost — text under it stays readable (${m.dockScrimBlur})`);
+check(!!m.wrap && Math.abs(m.scrimTop - m.wrap.top) <= 0.5, `…and it starts at the capsule's own top edge, not the dock's (${m.scrimTop.toFixed(1)} vs ${m.wrap ? m.wrap.top.toFixed(1) : "-"})`);
 
 // 6. The ceiling scrim. It dissolves the transcript on its way up so a line of text never slides
 //    under Telegram's own buttons.
@@ -218,7 +228,13 @@ const prof = await p.evaluate(() => {
   probe.style.cssText = "position:absolute;left:0;right:0;top:0;height:" + h + "px;background:#fff;z-index:0";
   drill.appendChild(probe);
   const r = probe.getBoundingClientRect();
-  return { h, headBottom: head.bottom, rect: { x: r.x, y: r.y, width: r.width, height: r.height } };
+  // Where the solid part ends, read from the SAME custom property the gradient's stops are built on,
+  // so this cannot drift from the CSS the way a restated pixel figure would.
+  const solid = parseFloat(getComputedStyle(drill).getPropertyValue("--scrim-solid-px") || "0")
+    || (() => { const d = document.createElement("div");
+      d.style.cssText = "position:absolute;height:var(--scrim-solid);visibility:hidden"; drill.appendChild(d);
+      const v = d.getBoundingClientRect().height; d.remove(); return v; })();
+  return { h, solid, headBottom: head.bottom, rect: { x: r.x, y: r.y, width: r.width, height: r.height } };
 });
 const strip = await p.screenshot({ clip: prof.rect });
 const { execFileSync } = await import("node:child_process");
@@ -236,9 +252,25 @@ await p.evaluate(() => document.getElementById("scrimprobe")?.remove());
 const dpr = 2, atHeadBottom = alphas[Math.min(alphas.length - 1, Math.round(prof.headBottom * dpr) - 2)];
 const jumps = alphas.slice(1).map((v, i) => Math.abs(v - alphas[i]));
 check(!!m.scrim && /gradient/.test(m.scrim), `the top scrim is a gradient (${String(m.scrim).slice(0, 40)}…)`);
-check(atHeadBottom > 40 && atHeadBottom < 235,
-  `it is still FADING through the header's band, neither flat nor opaque there (${atHeadBottom}/255 of the probe survives at the header's floor)`);
-check(Math.max(...jumps) <= 12, `no cliff anywhere down the ramp (biggest one-pixel step ${Math.max(...jumps)}/255)`);
+// RE-AIMED, and by an explicit instruction rather than by a shift in taste. This asserted that the
+// ramp was still fading THROUGH the header's band — the guard against a shape that had been tried and
+// rejected for painting a bar across it. The owner then asked for the opposite ("have it start about
+// the same height as one line of regular text below the cwd"), so the band is now inside the solid
+// part by construction and that check could only fail. What survives it is the part that was never
+// about where the solid ends: the profile must still be a RAMP — mid-way down its runway it is
+// neither gone nor solid — and it must reach zero by its own floor with no cliff anywhere.
+const solid = Math.round(prof.solid * dpr), rampMid = Math.min(alphas.length - 1, solid + Math.round((alphas.length - solid) / 2));
+check(alphas[Math.max(0, solid - 4)] < 40, `it is at full strength where the title sits (${alphas[Math.max(0, solid - 4)]}/255 of the probe survives just above the solid part's floor)`);
+check(alphas[rampMid] > 40 && alphas[rampMid] < 235,
+  `…and still a RAMP below it, neither flat nor opaque half way down (${alphas[rampMid]}/255)`);
+// SMOOTHNESS, scale-free — the absolute 12/255 this replaces was really measuring the ramp's
+// LENGTH, and the owner has now shortened it twice ("one line of text distance beneath the name/cwd
+// is all that's needed"). The same total drop over a third of the distance is three times as steep
+// per pixel while being no less smooth. What a cliff actually looks like is one step far out of
+// line with its neighbours, so that is what this asks: no step more than 3x the ramp's own mean.
+const rampSteps = jumps.filter(j => j > 0);
+const meanStep = rampSteps.reduce((a, c) => a + c, 0) / Math.max(1, rampSteps.length);
+check(Math.max(...jumps) <= meanStep * 3, `no cliff anywhere down the ramp (biggest step ${Math.max(...jumps)}/255 against a ${meanStep.toFixed(1)} mean — a cliff is one step out of line, not a short ramp)`);
 check(alphas[alphas.length - 1] > 245, `and it is back to nothing by its own floor (${alphas[alphas.length - 1]}/255)`);
 
 await p.screenshot({ path: join(OUT, "bleed.png") });

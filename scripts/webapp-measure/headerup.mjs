@@ -83,7 +83,8 @@ check(normal.stopParent.includes("vhead"), `the pause is still its own chip (par
 check(normal.stop.left > normal.cap.right, "…to the RIGHT of the capsule, outside it");
 
 // ── 2. FULLSCREEN: the header is in the client's band.
-const fs = await read(await open(true));
+const fsPage = await open(true);
+const fs = await read(fsPage);
 check(fs.fs, "the .fs gate is on in fullscreen");
 check(fs.chromeTop === NOTCH + "px" && fs.chromeH === CHROME + "px",
   `both inset halves are exposed separately (${fs.chromeTop} + ${fs.chromeH})`);
@@ -112,8 +113,52 @@ check(fs.feedPadTop < normal.feedPadTop + NOTCH + CHROME - 30,
   `the feed reclaims the header's row (top padding ${fs.feedPadTop} vs ${normal.feedPadTop} + ${NOTCH + CHROME} of chrome)`);
 const reclaimed = (normal.feedPadTop + NOTCH + CHROME) - fs.feedPadTop;
 check(reclaimed >= 40, `~${reclaimed.toFixed(0)}px of transcript reclaimed`);
-check(near(parseFloat(fs.scrimH), NOTCH + CHROME, 2),
-  `the scrim ends at the band's floor, not a row lower (${fs.scrimH})`);
+// The scrim's SHAPE in fullscreen, measured the way bleed.mjs measures it in normal mode — through a
+// white probe read beneath it — because the height equality this replaces could not tell two very
+// different scrims apart. It asserted `height === the band`, which was true both when the ramp merely
+// ENDED at the band's floor (the old shape: full --bg in the band's top quarter only, leaving the
+// title on half-veiled transcript, which the deleted glyph stroke was covering for) and would be
+// false for any shape that lands the ramp below the band, including the right one. What matters is
+// the profile: solid where the title sits, still falling below it, gone by its own floor.
+const alphas = await (async () => {
+  const rect = await fsPage.evaluate(() => {
+    const drill = document.getElementById("drill");
+    const h = parseFloat(getComputedStyle(drill, "::before").height);
+    // z-index 0 and a child of #drill: inside the scrim's own stacking context, above the feed and
+    // below the scrim. On <body> the scrim never reaches it and the profile reads flat.
+    const probe = document.createElement("div");
+    probe.id = "scrimprobe";
+    probe.style.cssText = "position:absolute;left:0;right:0;top:0;height:" + h + "px;background:#fff;z-index:0";
+    drill.appendChild(probe);
+    const r = probe.getBoundingClientRect();
+    return { x: r.x, y: r.y, width: r.width, height: r.height };
+  });
+  const strip = await fsPage.screenshot({ clip: rect });
+  const { execFileSync } = await import("node:child_process");
+  const out = execFileSync("python3", ["-c", `
+import sys, io
+from PIL import Image
+im = Image.open(io.BytesIO(sys.stdin.buffer.read())).convert("RGB")
+px = im.load()
+print(" ".join(str(px[8, y][0]) for y in range(im.size[1])))
+`], { input: strip }).toString().trim().split(/\s+/).map(Number);
+  await fsPage.evaluate(() => document.getElementById("scrimprobe")?.remove());
+  return out;   // deviceScaleFactor is 1 here, so index === CSS px
+})();
+const atBandFloor = alphas[Math.min(alphas.length - 1, NOTCH + CHROME - 1)];
+const jumps = alphas.slice(1).map((v, i) => Math.abs(v - alphas[i]));
+check(parseFloat(fs.scrimH) > NOTCH + CHROME,
+  `the scrim runs BELOW the band so its ramp has somewhere to land (${fs.scrimH} against ${NOTCH + CHROME}px of chrome)`);
+check(atBandFloor < 60, `…and it is still at full strength where the title sits (${atBandFloor}/255 of the probe survives at the band's floor)`);
+// SMOOTHNESS, scale-free — the absolute 12/255 this replaces was really measuring the ramp's
+// LENGTH, and the owner has now shortened it twice ("one line of text distance beneath the name/cwd
+// is all that's needed"). The same total drop over a third of the distance is three times as steep
+// per pixel while being no less smooth. What a cliff actually looks like is one step far out of
+// line with its neighbours, so that is what this asks: no step more than 3x the ramp's own mean.
+const rampSteps = jumps.filter(j => j > 0);
+const meanStep = rampSteps.reduce((a, c) => a + c, 0) / Math.max(1, rampSteps.length);
+check(Math.max(...jumps) <= meanStep * 3, `no cliff anywhere down the ramp (biggest step ${Math.max(...jumps)}/255 against a ${meanStep.toFixed(1)} mean — a cliff is one step out of line, not a short ramp)`);
+check(alphas[alphas.length - 1] > 245, `and it is back to nothing by its own floor (${alphas[alphas.length - 1]}/255)`);
 
 await b.close();
 console.log(bad ? `\n${bad} FAILED` : "\nall checks passed");

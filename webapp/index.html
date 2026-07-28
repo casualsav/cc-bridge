@@ -158,11 +158,19 @@
        mode byte-identical: the gate is `tg.isFullscreen`, not the insets — an inset that happens to
        report a notch off-fullscreen would otherwise open a gap the window manager already gave us. */
     --safe-top: 0px;
-    /* How far the ceiling scrim runs BELOW the header, so its ramp has somewhere to land softly
-       instead of hitting zero at the cwd's own baseline. Its own variable and not a literal in the
-       gradient, because the gradient's stops are percentages OF this height — the two move together
-       or the shape is not the one that was measured. See #drill::before. */
-    --scrim-tail: 34px;
+    /* The ceiling scrim as TWO LENGTHS rather than percentages of one height, which is what lets the
+       same eased ramp serve both layouts. --scrim-solid is how far full --bg reaches down: here the
+       row's own 10px margin plus the NAME's line box, which lands it --h-pad above the cwd — "the
+       gradient begins some pixels before the CWD", off the owner's Claude-app reference. --scrim-ramp
+       is the runway it falls over, below that.
+       Percentages of a total could not express this: fullscreen wants the solid part to cover the
+       whole chrome band (see html.fs), i.e. a completely different SPLIT of the same shape, and a
+       single percentage list forces one split on both. That mistake shipped for an hour — the
+       fullscreen height was scaled as if the stops ran from the top, so its solid part covered the
+       band's first quarter and the title sat on half-veiled transcript. headerup.mjs measures the
+       profile now instead of the height, which is what caught it. */
+    --scrim-solid: calc(var(--safe-top) + 10px + var(--h-pad) + var(--h-l1));
+    --scrim-ramp: calc(var(--h-l2) + var(--t-msg) * 1.45);
   }
   @supports (color: color-mix(in srgb, red 50%, blue)) {
     /* 36%, which is TELEGRAM'S OWN number: its ✕ Close pill was solved off a screenshot where both its
@@ -361,8 +369,12 @@
      Measured worst-case, over a bright user bubble (scripts/webapp-measure/halo.py): the cwd reads
      5.31:1 dark and 5.88:1 light against a 4.5 floor, up from 1.19 and 2.24 bare. Both halves of the
      fix are load-bearing — with the steeper scrim but no stroke it is 3.43:1, still under. */
-  .dtitle .name, .dtitle .sub { -webkit-text-stroke: 3px var(--bg); paint-order: stroke fill;
-    text-shadow: 0 0 3px var(--bg), 0 0 6px var(--bg); }
+  /* …and the whole treatment is GONE, which is the owner's call and not a cleanup: "it has a border
+     that doesn't look premium at all". He is right, and the paragraph above says why it was there —
+     the cwd had no ground, so the ground was drawn around each letter instead. The scrim's peak now
+     reaches down past that line (see #drill::before), so the letters can be letters. Do not put a
+     glyph-level treatment back without first checking what the ramp is giving that line: every
+     version of this rule was a symptom of a scrim that stopped too high. */
   /* The interrupt keeps NO rule of its own: same fill and same glyph as the back chip, by the owner's
      call, so the base rule above is the whole of it. That supersedes an optical correction that shrank
      its painted disc — both discs measured exactly equal in the rendered PNG, so the size complaint was
@@ -438,26 +450,12 @@
      A plain block, not a flex column: nothing is in normal flow here now except the feed. */
   #drill { position: fixed; inset: 0; background: var(--bg); display: none; z-index: 5; }
   #drill.show { display: block; }
-  /* The dock floats at the floor and paints a SCRIM — not a fill. The strip around the composer is
-     still scrollable transcript, and that is still the point; what changed is that the transcript
-     dissolves on its way under the field instead of running at full strength beside it. The owner's
-     ask, off Telegram's own composer: "it's a bit darker, and as the messages pass beneath it there
-     is a subtle shading". Both halves are the same mechanism.
-     The fill is --bg's OWN colour, so over the page — which is what is behind this strip nearly all
-     of the time — it is literally the page: no band, no edge, nothing to see. Only content passing
-     under it is dimmed, and only by 34% (measured; see dockscrim.mjs), which is what keeps a bubble
-     reading as a bubble moving under glass rather than as a grey bar. The top edge is masked into a
-     14px ramp for the reason every other scrim here is: a hard-edged veil across a line of message
-     text is the cheap line the message fold exists to prevent.
-     It is a ::before rather than a background on #ddock so the blur applies to the BACKDROP and not
-     to the row, the capsule or their text; `z-index: -1` keeps it behind all three, and #ddock's own
-     `z-index: 2` is the stacking context that keeps that -1 from competing with the ceiling scrim. */
+  /* The dock floats at the floor with no fill of its own. Its SCRIM lives on the composer (below),
+     starting at the capsule's own top edge — the owner's correction: "the gradient on the bottom
+     shouldn't start until just at the top of the text input bubble". It ran the whole height of the
+     dock for one release, which veiled the working row's band as well and made the pill sit in a
+     shaded strip rather than on the transcript. */
   #ddock { position: absolute; left: 0; right: 0; bottom: 0; z-index: 2; }
-  #ddock::before { content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
-    background: color-mix(in srgb, var(--bg) 45%, transparent);
-    backdrop-filter: var(--chip-glass); -webkit-backdrop-filter: var(--chip-glass);
-    -webkit-mask-image: linear-gradient(to bottom, transparent, #000 14px);
-    mask-image: linear-gradient(to bottom, transparent, #000 14px); }
   /* The ceiling scrim. Full bleed means the transcript scrolls up into the strip where Telegram
      paints its ✕ Close and its kebab, and a line of message text sliding under those buttons is the
      same defect the collapsed-message fold exists to prevent — text that stops rather than text that
@@ -521,7 +519,13 @@
      --safe-top + 36 + 24 to --safe-top + 12, and the scrim's ramp ends at the band's floor instead of
      46px lower. That is the ~46px of transcript the owner asked to reclaim. */
   html.fs #dfeed { padding-top: calc(var(--safe-top) + var(--sp-3)); }
-  html.fs #drill::before { height: var(--safe-top); }
+  /* Fullscreen moves the SPLIT, not the shape: the solid part covers the client's whole chrome band
+     — where our header now rides, and where its title has to read against whatever scrolls under
+     Telegram's own buttons — and the same ramp lands below it. It was `height: var(--safe-top)`,
+     which put the ramp's zero AT the band's floor and left the title on half-veiled transcript; the
+     deleted glyph stroke was what made that survivable, so this is the fullscreen half of removing
+     it. Nothing else here changes: the ::before rule above reads both lengths. */
+  html.fs { --scrim-solid: var(--safe-top); }
   /* THE RAMP IS STEEPER THAN IT WAS, and that is the second half of removing the title's capsule —
      not a taste pass on the scrim. The capsule was the contrast floor for both title lines, and with
      it gone the ramp is the only ground they have. Where it lands matters: the ramp is zero at the
@@ -536,13 +540,19 @@
      load-bearing rather than decorative: take the halo off these same stops and the cwd falls to
      3.43:1, under the floor again. Neither half is sufficient alone. scripts/webapp-measure/halo.py
      is what says all of that, and validates itself against the flat-ground control first.
-     WHAT THIS IS NOT: the shape that was tried and rejected. That one pushed the ramp BELOW the
-     header, painting a bar across the band the transcript had just been given. This one still
-     reaches zero exactly at the header's bottom edge — never lower — so the transcript still runs
-     clear from there down. What it costs is honest and worth stating: the band above the cwd is now
-     near-solid ground, so the two side chips' glass has less passing behind it than it did. That is
-     the trade the owner's ask forces, and it is the smaller loss — an unreadable path line is a
-     defect, a chip reading slightly more solid at the top of the screen is a texture. */
+     What it costs is honest and worth stating: the band above the cwd is now near-solid ground, so
+     the two side chips' glass has less passing behind it than it did. That is the trade the owner's
+     ask forces, and it is the smaller loss — an unreadable path line is a defect, a chip reading
+     slightly more solid at the top of the screen is a texture.
+     THE PEAK NOW REACHES DOWN TO THE CWD, and that is what retired the glyph treatment rather than
+     tuning it. Off the owner's screenshot of the Claude app: its ground is FLAT its own page colour
+     across the whole title — measured, 31.3/255 in every column that has no glyph in it — and the
+     transcript only begins to emerge a few pixels ABOVE the path line, which is where its ramp
+     starts. Ours held full --bg for the top 20px only, so the cwd sat in the middle of the ramp at
+     ~72% and needed a stroke around every letter to be legible. The stops are the same eased shape,
+     rescaled by 0.964 so full --bg lands at 26px — three above the cwd's own line box — and the tail
+     grew 34 → 48 so the ramp is LONGER than the one it replaces (68px against 60) rather than
+     steeper. The cwd's ground goes ~72% → ~92%, which is what pays for the stroke's removal. */
   /* The TAIL, and it is the whole answer to "harsh and sudden". The ramp used to end at the header's
      bottom edge, which is also where the cwd sits — so every drop of opacity the cwd needed had to be
      spent in the ~9px between its own baseline and the ramp's zero. That is a cliff by construction,
@@ -561,19 +571,25 @@
      It also measures BETTER, which is the part that says the old shape was simply badly spent: the
      cwd reads 5.62:1 over a bright bubble against the cliff's 5.46. */
   #drill::before { content: ""; position: absolute; left: 0; right: 0; top: 0; z-index: 1; pointer-events: none;
-    height: calc(var(--safe-top) + 10px + var(--hbtn-d) + var(--scrim-tail));
-    background: linear-gradient(to top, transparent, var(--bg));
-    background: linear-gradient(to top,
-      color-mix(in srgb, var(--bg) 0%, transparent) 0%,
-      color-mix(in srgb, var(--bg) 4%, transparent) 10%,
-      color-mix(in srgb, var(--bg) 11%, transparent) 20%,
-      color-mix(in srgb, var(--bg) 23%, transparent) 30%,
-      color-mix(in srgb, var(--bg) 40%, transparent) 40%,
-      color-mix(in srgb, var(--bg) 60%, transparent) 46.3%,
-      color-mix(in srgb, var(--bg) 78%, transparent) 52.5%,
-      color-mix(in srgb, var(--bg) 91%, transparent) 58.8%,
-      color-mix(in srgb, var(--bg) 98%, transparent) 66.3%,
-      var(--bg) 75%); }
+    height: calc(var(--scrim-solid) + var(--scrim-ramp));
+    background: linear-gradient(to bottom, var(--bg), transparent);
+    background: linear-gradient(to bottom,
+      /* The curve carries TWO jobs and its shape is where they meet. Through the cwd's own line box
+         — the ramp's first 38% — it barely moves, because that line's whole legibility is the ground
+         under it and it measured 3.75:1 the last time it sat mid-ramp. Below the cwd it is free, and
+         that is where the fade actually happens: a long soft toe, "very light" at the floor. Reading
+         it upward, which is how it is seen as the transcript scrolls: nothing, then a slow gather,
+         then basically solid by the name. */
+      var(--bg) 0 var(--scrim-solid),
+      color-mix(in srgb, var(--bg) 98%, transparent) calc(var(--scrim-solid) + 0.19 * var(--scrim-ramp)),
+      color-mix(in srgb, var(--bg) 94%, transparent) calc(var(--scrim-solid) + 0.38 * var(--scrim-ramp)),
+      color-mix(in srgb, var(--bg) 82%, transparent) calc(var(--scrim-solid) + 0.50 * var(--scrim-ramp)),
+      color-mix(in srgb, var(--bg) 62%, transparent) calc(var(--scrim-solid) + 0.60 * var(--scrim-ramp)),
+      color-mix(in srgb, var(--bg) 42%, transparent) calc(var(--scrim-solid) + 0.70 * var(--scrim-ramp)),
+      color-mix(in srgb, var(--bg) 24%, transparent) calc(var(--scrim-solid) + 0.79 * var(--scrim-ramp)),
+      color-mix(in srgb, var(--bg) 11%, transparent) calc(var(--scrim-solid) + 0.87 * var(--scrim-ramp)),
+      color-mix(in srgb, var(--bg) 4%, transparent) calc(var(--scrim-solid) + 0.94 * var(--scrim-ramp)),
+      color-mix(in srgb, var(--bg) 0%, transparent) 100%); }
   /* A PLAIN BLOCK again, deliberately rather than by neglect. It was a flex column for exactly one
      reason — `.work`'s `margin-top: auto` needed free space to absorb, which a block has none of —
      and that row has left the scroller entirely, so the column had no remaining job. Keeping it
@@ -755,28 +771,30 @@
      in the flex column, and in a floating dock the row's height is already inside --dock-h. Leaving
      it in place zeroed the whole reservation whenever a turn was running, which put the newest
      message 77px UNDER the composer. */
-  .work { position: relative; display: flex; align-items: baseline; gap: 4px; padding: 0 var(--sp-3) 2px; color: var(--hint); font-size: var(--t-meta); }
-  /* A scrim that is INVISIBLE until there is something behind it. Full bleed means the transcript
-     runs under this line, and a bare status line over moving message text is unreadable — but a
-     painted bar would be a grey band across the page in the state it spends most of its life in
-     (nothing behind it at all). The fill is --bg's own colour, so over the page it is literally the
-     page: no edge, no band, nothing to see. Over a passing message it is what makes the line
-     readable.
-     It is the SECOND of two now, and its number was re-derived rather than left alone: the dock
-     itself lays down 45%, so 60% here composites to 1 − 0.55 × 0.40 = 78% — the exact density this
-     line was accepted at, preserved while the strip around it gained its own shading. Keep the two
-     in step or this reads as a stripe: raising the dock's fill without lowering this one darkens
-     the band behind the line, which is a change nobody asked for.
-     The blur left with it. The dock's scrim already frosts everything behind this row, and a second
-     backdrop-filter stacked on the first only compounds the radius.
-     It lives on a ::before rather than on .work so the fill sits behind the TEXT rather than tinting
-     it, and the mask feathers the top and bottom edges — a hard-edged band cutting a line of message
-     text in half is the same "cheap line" the message fold was just rescued from.
-     `inset: -2px 0` bleeds it past the row's own box so the feather has somewhere to happen. */
-  .work::before { content: ""; position: absolute; inset: -2px 0; z-index: -1; pointer-events: none;
-    background: color-mix(in srgb, var(--bg) 60%, transparent);
-    -webkit-mask-image: linear-gradient(to bottom, transparent, #000 8px, #000 calc(100% - 6px), transparent);
-    mask-image: linear-gradient(to bottom, transparent, #000 8px, #000 calc(100% - 6px), transparent); }
+  /* A PILL around the line itself, not a band across the screen — the owner's ask, and the reason the
+     scrim below it is gone rather than restyled. Full-bleed shading was the right shape when the row
+     was the only thing between the transcript and the field; now that the dock lays down its own
+     strip, a second full-width veil sitting on top of it read as a stripe. Hugging the text puts the
+     density exactly where it is needed and nowhere else.
+     The gutter moved to the HOST: the pill shrink-wraps, so a padding on the row would be the pill's
+     own inner air rather than its distance from the screen edge, and the row would start at x=0.
+     11px of inner padding, which is the BUBBLE's own — that lands the line's text on the message
+     column (23px) while the pill's box keeps the feed's 12px gutter. The row's text used to sit at
+     12, aligned with the gutter and 11px left of every message; the pill fixes both at once, and
+     workpin.mjs now measures the two claims separately. */
+  #dworkhost { padding: 0 var(--sp-3) 2px; }
+  .work { display: inline-flex; align-items: baseline; gap: 4px; padding: 3px 11px;
+    border-radius: 999px; background: color-mix(in srgb, var(--bg) 78%, transparent);
+    backdrop-filter: var(--chip-glass); -webkit-backdrop-filter: var(--chip-glass);
+    color: var(--hint); font-size: var(--t-meta); }
+  /* 78% and its own frost, which is exactly what the full-width band carried — the pill has to hold
+     this line's ground ALONE now. It briefly ran at 60% on the arithmetic that the dock's 45% sat
+     underneath it and the two composited back to 78%; that was true for one release, and then the
+     strip's scrim moved down to start at the capsule (the owner's ask), leaving the pill over raw
+     transcript. Measured, it cost the line 3.20:1 → 2.62:1 over a bright bubble. If the strip's scrim
+     ever reaches back up here, this number has to come down again by the same rule.
+     No mask, though: a pill's edge is meant to be an edge. The feathering existed to stop a
+     full-width band from reading as a rule across the page, which is the complaint that retired it. */
   .work .g { width: 1.1em; flex: none; text-align: center; }
   .work .v { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .work .m { flex: none; white-space: nowrap; font-variant-numeric: tabular-nums; margin-left: 4px; }
@@ -810,7 +828,28 @@
      moves — the dock is bottom-anchored, so a shorter top padding lowers the row rather than lifting
      the capsule, and --dock-h is measured to the dock's first INK, so the feed's reservation follows
      by itself in the state where there is no row at all. */
-  .composer { display: flex; gap: var(--sp-2); padding: var(--sp-1) 10px calc(var(--sp-2) + env(safe-area-inset-bottom)); align-items: flex-end; }
+  .composer { position: relative; display: flex; gap: var(--sp-2); padding: var(--sp-1) 10px calc(var(--sp-2) + env(safe-area-inset-bottom)); align-items: flex-end; }
+  /* The strip's scrim, and everything about it is where it STARTS. `inset: var(--sp-1) 0 0` is the
+     composer's own padding-top, i.e. exactly the capsule's top edge, so the transcript runs clear
+     until it reaches the field and dissolves from there down — Telegram's own composer, and the
+     owner's correction to a version that veiled the whole dock.
+     The fill is --bg's OWN colour, so over the page (which is what is behind this strip nearly all of
+     the time) it is literally the page: no band, no edge. Only content passing under it is dimmed,
+     and BARELY — 22%, the owner's calibration ("super subtle, barely noticeable, and text in messages
+     should still be readable as it passes under"). It went out at 45% with the chip glass on it and
+     that was too much of both: the blur is what made the text under it unreadable, so there is no
+     backdrop-filter here at all. This surface is the one place in the file where a frost is WRONG —
+     the capsule and the header chips blur because their own text has to win over what passes behind
+     them, and nothing is written on this strip.
+     The 14px mask is a fade-IN over the capsule's first pixels rather than a hard line across the
+     side margins, where the capsule's own fill does not cover.
+     A ::before rather than a background on .composer so the blur applies to the BACKDROP and not to
+     the capsule and its text; `z-index: -1` keeps it behind them, and #ddock's `z-index: 2` is the
+     stacking context that keeps that -1 from competing with the ceiling scrim. */
+  .composer::before { content: ""; position: absolute; inset: var(--sp-1) 0 0; z-index: -1; pointer-events: none;
+    background: color-mix(in srgb, var(--bg) 22%, transparent);
+    -webkit-mask-image: linear-gradient(to bottom, transparent, #000 14px);
+    mask-image: linear-gradient(to bottom, transparent, #000 14px); }
   /* `align-items: flex-end`, and it is load-bearing twice over. It is what keeps the mic ROUND —
      the default `stretch` would pull a 40px button to the pill's full content height and the glyph
      would no longer sit centred in a circle. It is also what pins both controls to the BOTTOM of
@@ -954,8 +993,38 @@
   .msg.clip.open::after { display: none; }
   .msg.clip.open .more { display: none; }
   .msg .attchip { font-size: var(--t-sub); opacity: .92; margin-bottom: var(--sp-1); }
-  .msg img.thumb { max-width: 100%; min-height: 40px; border-radius: 9px; display: block; }
-  .msg img.thumb + .cap { margin-top: 6px; }
+  /* A photo FILLS its bubble, Telegram-style: the 11px of blue that used to frame it is cancelled by
+     negative margins rather than by a smaller padding, so the text case keeps every number it was
+     tuned with. Measured off the owner's reference at 1.75 image px per CSS px — their photo meets
+     the caption strip with no gap at all, and the caption's ink sits 11.4px below the picture, which
+     is this margin plus the line box's own 4px of leading above the glyphs.
+     `border-radius: inherit` on the image-only case, never a literal: a user bubble's bottom-right
+     corner is --r-xs and the other three --r-md, so any hand-written radius agrees with the bubble on
+     three corners and disagrees on the fourth. */
+  .msg img.thumb { width: calc(100% + 22px); max-width: none; min-height: 40px; display: block;
+    margin: calc(-1 * var(--sp-2)) -11px 0; border-radius: var(--r-md) var(--r-md) 0 0; }
+  /* An ALBUM stacks, 2px apart — Telegram's own gap between the tiles of a group. Only the FIRST
+     picture pulls up through the bubble's top padding and only it is rounded there; the rest sit
+     square against their neighbours, which is what makes several pictures read as one message rather
+     than as a column of separate cards. */
+  .msg img.thumb + img.thumb { margin-top: 2px; border-radius: 0; }
+  .msg img.thumb + .cap { margin-top: 7px; }
+  /* No caption: the picture is the whole bubble, so it bleeds through the bottom padding too and the
+     time rides ON it — the reference's own treatment. Left in the flow it was a 25px strip of blue
+     under the photo carrying nothing but a clock, which is exactly the "large padding" complaint.
+     The scrim is what keeps it readable over a bright photo; a photo is not a controlled background,
+     so opacity alone is not enough. */
+  .msg.imgonly { position: relative; }
+  /* Only the LAST picture bleeds through the bottom padding, and only the ENDS of the stack are
+     rounded — written with :only-of-type / :first-of-type / :last-of-type rather than by overriding
+     the `+` rule above, which would have re-rounded the middles of a three-picture album. */
+  .msg.imgonly img.thumb:last-of-type { margin-bottom: -3px; }
+  .msg.imgonly img.thumb:only-of-type { border-radius: inherit; }
+  .msg.imgonly img.thumb:first-of-type:not(:only-of-type) { border-radius: var(--r-md) var(--r-md) 0 0; }
+  .msg.imgonly img.thumb:last-of-type:not(:only-of-type) { border-radius: 0 0 var(--r-xs) var(--r-md); }
+  .msg.imgonly .tstamp { position: absolute; float: none; right: 8px; bottom: 8px; margin: 0;
+    padding: 2px 7px; border-radius: 999px; background: rgba(0, 0, 0, .35); color: #fff; opacity: 1;
+    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
   .msg code { background: rgba(125,139,153,.25); border-radius: var(--r-xs); padding: 0 var(--sp-1); font: var(--t-mono) ui-monospace, Menlo, monospace; }
   /* Code WRAPS rather than scrolls. A horizontally-scrolling region nested inside a vertically
      scrolling feed has no affordance on touch — real transcript lines run past 600 chars, so the
@@ -1831,15 +1900,17 @@ function bubble(i, n, all) {
     + (i.text ? '<div class="co">' + mdReport(i.text) + "</div>" : "") + "</div>";
   if (i.cmd) return '<div class="msg cmd">' + esc(i.text) + "</div>";
   let inner = "";
-  const placeholder = /^\((?:file|photo|document|video|voice|audio)[:)]?/.test(i.text || "");
+  const placeholder = /^\((?:\d+ )?(?:file|photo|document|video|voice|audio)s?[:)]?/.test(i.text || "");
+  // Every picture in an album, in the order they were sent — `imgs` is set only when there is more
+  // than one, and `img` is still its first, so a single photo takes exactly the path it always did.
   // Already-fetched photos render with their blob URL inline, so a repaint never collapses the
   // bubble's height (the collapse re-broke the scroll position on every poll).
-  if (i.img) inner += thumbCache[i.img]
-    ? '<img class="thumb" src="' + esc(thumbCache[i.img]) + '" alt="photo">'
+  for (const path of (i.imgs && i.imgs.length ? i.imgs : i.img ? [i.img] : [])) inner += thumbCache[path]
+    ? '<img class="thumb" src="' + esc(thumbCache[path]) + '" alt="photo">'
     // A transparent 1x1 until hydrateThumbs swaps in the blob. Without a src, a download that FAILS
     // (it returns early on !r.ok or a throw) leaves a broken-image box in the 40px slot min-height
     // has already reserved.
-    : '<img class="thumb" src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==" data-path="' + esc(i.img) + '" alt="photo">';
+    : '<img class="thumb" src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==" data-path="' + esc(path) + '" alt="photo">';
   if (i.att) inner += '<div class="attchip">📎 ' + esc(String(i.att).split("/").pop()) + "</div>";
   // The card's header. The status rides at the right and is only coloured when it isn't the
   // expected "completed" — see the rule. Both fields are the server's parse of the notification
@@ -1877,7 +1948,11 @@ function bubble(i, n, all) {
   // the newest message being long is exactly when you want to know when it landed. No duplication —
   // `.msg.clip.open .more` is display:none, so only one of the two is ever visible.
   const openNow = i.uuid ? openMsgs.has(i.uuid) : false;
-  return '<div class="msg ' + i.role + (long ? " clip" : "") + (long && openNow ? " open" : "") + '"'
+  // A picture with nothing to say under it is a different bubble, not a styled one: it has no
+  // padding left to show, and the time moves onto the photo. `t` is already the caption after the
+  // placeholder strip, so "(photo)" — which is text the CLI wrote, not the sender — counts as none.
+  const imgOnly = !!i.img && !t && !i.att;
+  return '<div class="msg ' + i.role + (imgOnly ? " imgonly" : "") + (long ? " clip" : "") + (long && openNow ? " open" : "") + '"'
     + (long ? ' onclick="onBubbleTap(this)"' : "")
     + (i.uuid ? ' data-uuid="' + esc(i.uuid) + '"' : "") + ">" + inner +
     (long ? '<div class="more">' + (i.ts ? esc(hhmm(i.ts)) + " · " : "") + (note ? esc(note) + " · " : "") + "tap to expand</div>" : "") + "</div>";
@@ -2032,18 +2107,17 @@ function paintFeed() {
   // Pinning to the BOTTOM is right for a message that fits and wrong for the one this change just
   // unfolded: a reply taller than the screen then lands you on its last line, and you scroll up to
   // find its first — which is worse than the fold, since the fold at least showed the beginning. So
-  // a newest reply that overflows is pinned by its TOP instead. The landing line is the ceiling
-  // scrim's own floor, read off the element rather than restated: above that the scrim is still
-  // ramping, so the line you were sent to read would be the one being dissolved. Measured from the
-  // rects, not offsetTop — offsetTop is relative to the offsetParent's PADDING edge, and this
-  // scroller's padding is the header's whole footprint, so the two disagree by 60px.
+  // a newest reply that overflows is pinned by its TOP instead. Measured from the rects, not
+  // offsetTop — offsetTop is relative to the offsetParent's PADDING edge, and this scroller's
+  // padding is the header's whole footprint, so the two disagree by 60px.
   if (stuck) {
     const el = feed.lastElementChild;
-    // Whichever is LOWER: the scrim's floor, or the feed's own resting content top. They swap over in
-    // fullscreen, where the header rides up into the client's chrome and the scrim shortens to the
-    // inset — so this is the one expression that lands the line clear of both surfaces in both modes.
-    const land = Math.max(parseFloat(getComputedStyle($("drill"), "::before").height) || 0,
-                          parseFloat(getComputedStyle(feed).paddingTop) || 0);
+    // The feed's own resting content top, which is the header's whole reserved footprint (plus the
+    // client's inset in fullscreen) — one number, right in both layouts. NOT the ceiling scrim's
+    // height: that is a FADE rather than a surface, and it now runs 68px past its solid part, so
+    // landing below it would drop the first line a third of the way down the screen. Clearing the
+    // scrim's SOLID part is what matters, and the feed's padding is past it in both modes.
+    const land = parseFloat(getComputedStyle(feed).paddingTop) || 0;
     const tall = el && el.classList.contains("assistant") && el.getBoundingClientRect().height > feed.clientHeight - land;
     feed.scrollTop = tall
       ? feed.scrollTop + el.getBoundingClientRect().top - feed.getBoundingClientRect().top - land

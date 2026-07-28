@@ -32,6 +32,14 @@ test('attachment paths keep quotes (spaces allowed)', () => {
   expect(out).toBe('<tg 7 img="/tmp/a b.jpg">hello</tg>')
 })
 
+test('an album repeats img=, in order, and a single photo is unchanged', () => {
+  // The whole point of the field being set only above one path: a lone photo must produce exactly
+  // the block it produced before albums existed.
+  expect(msg({ message_id: '7', image_path: '/in/a.jpg' })).toBe('<tg 7 img="/in/a.jpg">hello</tg>')
+  expect(msg({ message_id: '8', image_path: '/in/a.jpg', image_paths: '/in/a.jpg\n/in/b.jpg\n/in/c.jpg' }))
+    .toBe('<tg 8 img="/in/a.jpg" img="/in/b.jpg" img="/in/c.jpg">hello</tg>')
+})
+
 test('no metadata degrades to a bare tag', () => {
   expect(msg({})).toBe('<tg>hello</tg>')
 })

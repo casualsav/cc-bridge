@@ -161,9 +161,17 @@ for (const [theme, vars] of [["dark", null], ["light", LIGHT]]) {
     // MARGIN is what fills the rest. A margin cannot be occluded; only ink can.
     check(!!m.work && !!m.last && m.last.bottom <= m.work.top + 0.5,
       `${name}: no message ink under the row at rest  (last message bottom ${m.last ? m.last.bottom.toFixed(1) : "-"} vs row top ${m.work ? m.work.top.toFixed(1) : "-"})`);
-    // The same horizontal spot it has always occupied: the feed's left gutter.
-    check(!!m.glyph && near(m.glyph.left - m.feed.left, m.padLeft),
-      `${name}: the row's text keeps the feed's left gutter  (${m.glyph ? (m.glyph.left - m.feed.left).toFixed(1) : "-"} vs ${m.padLeft})`);
+    // TWO horizontal claims since the row became a pill, and it takes both — one number could not
+    // tell a correctly-aligned pill from a misaligned one. The pill's BOX keeps the feed's gutter
+    // (12), and its first ink lands on the MESSAGE column (the gutter plus a bubble's own 11px
+    // padding), which is where the text of every message beside it sits. Before the pill the ink was
+    // at the gutter itself — aligned with the bubbles' edges and 11px left of their text.
+    check(!!m.work && near(m.work.left - m.feed.left, m.padLeft),
+      `${name}: the row's pill keeps the feed's left gutter  (${m.work ? (m.work.left - m.feed.left).toFixed(1) : "-"} vs ${m.padLeft})`);
+    // Against the ASSISTANT row, not a user bubble: a user bubble is right-aligned, so its left edge
+    // is wherever its 88% cap puts it and has nothing to do with the column.
+    check(!!m.glyph && !!m.asst && near(m.glyph.left, m.asst.left + 11, 1),
+      `${name}: …and its text lands on the message column  (${m.glyph ? m.glyph.left.toFixed(1) : "-"} vs ${m.asst ? (m.asst.left + 11).toFixed(1) : "-"})`);
   }
   // Scrolled to the very bottom is where an overlay treatment would collide with the newest message.
   check(!!at.bottom.last && !!at.bottom.work && at.bottom.last.bottom <= at.bottom.work.top + 0.5,

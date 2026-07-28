@@ -93,7 +93,7 @@ export interface SessionFeed {
   // absent — /clear produces no output, and a stdout entry can arrive with no invocation recorded.
   items: Array<{ role: 'user' | 'assistant' | 'agent' | 'activity' | 'thought' | 'turn' | 'command'; text?: string; ts: number
     blocks?: TurnPart[]
-    uuid?: string; img?: string; att?: string; cmd?: boolean; name?: string; args?: string; agent?: string; status?: string; clipped?: boolean }>
+    uuid?: string; img?: string; imgs?: string[]; att?: string; cmd?: boolean; name?: string; args?: string; agent?: string; status?: string; clipped?: boolean }>
   // The CLI's own working line ("Hyperspacing… · 1m 55s · 5.6k tokens"), lifted straight off the
   // pane. The chat card can't afford it — this screen has none of Telegram's formatting limits, so
   // the drill-in shows the same thing the terminal shows. Present ONLY while the pane is actually
