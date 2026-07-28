@@ -21,7 +21,7 @@ test('empty fleet', () => {
 
 test('full working card: chips, task, footer with bar', () => {
   const c = card({
-    working: true, task: 'refactoring the daemon', model: 'sonnet', effort: 'medium',
+    working: true, state: 'working', task: 'refactoring the daemon', model: 'sonnet', effort: 'medium',
     mode: 'bypassPermissions', agent: 'codex', ctxPct: 62, h5Pct: 41, branch: 'main',
   })
   const out = renderSessionsView([c], NOW)
@@ -34,12 +34,55 @@ test('full working card: chips, task, footer with bar', () => {
   expect(out).toBe(expected)
 })
 
-test('idle card omits chips/task lines when absent', () => {
+test('idle card omits chips/task lines when absent, and marks its last reply ✅', () => {
   const c = card({ working: false, task: 'chatting about tests' })
   const out = renderSessionsView([c], NOW)
   expect(out).toContain('⚪ <b>my-project</b> — idle')
-  expect(out).toContain('💬 chatting about tests')
+  expect(out).toContain('✅ chatting about tests')
+  expect(out).not.toContain('💬')
   expect(out).not.toContain('<code>')
+})
+
+test('waiting card: amber dot, the state word, and the reason INSTEAD of the last reply', () => {
+  const c = card({ state: 'waiting', wait: { why: 'proc', label: 'gh run watch 18832' }, task: 'an older reply' })
+  const out = renderSessionsView([c], NOW)
+  expect(out).toContain('🟡 <b>my-project</b> — waiting')
+  expect(out).toContain('⏸️ waiting: gh run watch 18832')
+  expect(out).not.toContain('an older reply')
+})
+
+test('the pause glyph carries U+FE0F', () => {
+  const c = card({ state: 'waiting', wait: { why: 'ask', label: '@bridge (ask 10)' } })
+  expect(renderSessionsView([c], NOW)).toContain('⏸️')
+})
+
+test('waiting with no reason falls back to the last reply', () => {
+  const c = card({ state: 'waiting', wait: null, task: 'still the last reply' })
+  const out = renderSessionsView([c], NOW)
+  expect(out).toContain('🟡 <b>my-project</b> — waiting')
+  expect(out).toContain('✅ still the last reply')
+})
+
+test('unreported card: grey dot, its own state word, named briefer', () => {
+  const c = card({ state: 'unreported', unreported: { briefer: 'chat' }, task: 'work it never reported' })
+  const out = renderSessionsView([c], NOW)
+  expect(out).toContain('⚪ <b>my-project</b> — unreported')
+  expect(out).toContain('📤 unreported → @chat')
+  expect(out).not.toContain('work it never reported')
+})
+
+test('unreported with no briefer names none', () => {
+  const out = renderSessionsView([card({ state: 'unreported', unreported: null })], NOW)
+  expect(out).toContain('📤 unreported')
+  expect(out).not.toContain('→')
+})
+
+test('a wait label is escaped and truncated like a task', () => {
+  const c = card({ state: 'waiting', wait: { why: 'said', label: '<b>' + 'x'.repeat(200) } })
+  const out = renderSessionsView([c], NOW)
+  const line = out.split('\n').find(l => l.startsWith('⏸'))!
+  expect(line).toContain('&lt;b&gt;')
+  expect(line.endsWith('…')).toBe(true)
 })
 
 test('effort shows even when the model did not parse', () => {
@@ -62,7 +105,7 @@ test('escapes a name containing markup', () => {
 
 test('long task is truncated to ~100 chars with an ellipsis', () => {
   const long = 'x'.repeat(200)
-  const c = card({ working: true, task: long })
+  const c = card({ working: true, state: 'working', task: long })
   const out = renderSessionsView([c], NOW)
   const taskLine = out.split('\n').find(l => l.startsWith('⏳'))!
   expect(taskLine.length).toBeLessThan(long.length)

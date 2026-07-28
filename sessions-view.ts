@@ -17,8 +17,11 @@ function truncate(s: string, max: number): string {
 }
 
 function renderCard(s: SessionCard): string {
-  const dot = !s.alive ? '💀' : s.working ? '🟢' : '⚪'
-  const state = !s.alive ? 'dead' : s.working ? 'working' : 'idle'
+  // Four states, three colours — the mini app's own mismatch (webapp/CLAUDE.md): `unreported` takes
+  // no colour of its own and says itself in the task line instead. 🟡 is the amber dot's stand-in;
+  // there is no still-vs-pulsing distinction to make in text, so the glyph carries it alone.
+  const dot = !s.alive ? '💀' : s.state === 'working' ? '🟢' : s.state === 'waiting' ? '🟡' : '⚪'
+  const state = !s.alive ? 'dead' : s.state
   const lines = [`${dot} <b>${escapeHtml(s.name)}</b> — ${state}`]
 
   const chips: string[] = []
@@ -29,7 +32,16 @@ function renderCard(s: SessionCard): string {
   if (s.agent && s.agent !== 'claude') chips.push(escapeHtml(s.agent))
   if (chips.length) lines.push(`<code>${chips.join(' · ')}</code>`)
 
-  if (s.task) lines.push(`${s.working ? '⏳' : '💬'} ${escapeHtml(truncate(s.task, TASK_MAX))}`)
+  // One line, and a state with something to say says it INSTEAD of the last-reply snippet — the same
+  // precedence the mini app's card uses, for the same reason: the snippet predates the wait. ⏸️ keeps
+  // its U+FE0F (bare U+23F8 paints as two hairline bars beside the emoji on every other row), and an
+  // idle session's last reply is ✅ rather than 💬 — idle now means "done", not merely "quiet".
+  const line =
+    s.state === 'waiting' && s.wait ? `⏸️ waiting: ${escapeHtml(truncate(s.wait.label, TASK_MAX))}`
+    : s.state === 'unreported' ? `📤 unreported${s.unreported ? ` → @${escapeHtml(s.unreported.briefer)}` : ''}`
+    : s.task ? `${s.state === 'working' ? '⏳' : '✅'} ${escapeHtml(truncate(s.task, TASK_MAX))}`
+    : ''
+  if (line) lines.push(line)
 
   const foot: string[] = []
   if (s.branch) foot.push(`🌿 ${escapeHtml(s.branch)}`)
