@@ -5177,7 +5177,7 @@ async function handleCall(
           // happened and its NOTICE was withheld.
           if (outcome === 'delivered') {
             appendLedger(room, { ts: Date.now(), kind: 'btw', from: fromName, to: toName, text: askText, refs })
-            // "↓ Nudged @X" on the SENDER's surface — the half that was missing. deliverAside has
+            // "Informed @X" on the SENDER's surface — the half that was missing. deliverAside has
             // always mirrored the aside on the target's surface, so a session could be steered
             // mid-turn with nothing on the steering side to show for it. Gated on delivery for the
             // same reason the ledger row above is: a refused aside did not happen, and a card

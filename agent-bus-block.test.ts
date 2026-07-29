@@ -184,8 +184,12 @@ test('formatDigestBlock: an aside carries its own glyph, so catch-up shows it wa
 // header would have passed against both bugs, so each case here asserts the three are DIFFERENT.
 test('busSentHeader: each verb names itself, so a sender-side card says which of the three it was', () => {
   expect(busSentHeader('ask', 'kam')).toBe('Messaged <b>@kam</b>')
-  expect(busSentHeader('ack', 'kam')).toBe('↓ Notified <b>@kam</b>')
-  expect(busSentHeader('btw', 'kam')).toBe('↓ Nudged <b>@kam</b>')
+  expect(busSentHeader('ack', 'kam')).toBe('Notified <b>@kam</b>')
+  expect(busSentHeader('btw', 'kam')).toBe('Informed <b>@kam</b>')
+  // NO literal chevron glyph in any of the three: the card draws a real one (sendBusCard's <details>),
+  // and the arrow that shipped in v0.4.247 rendered beside it — the disclosure, twice. The owner's spec
+  // meant that element, not a character.
+  expect(['ask', 'ack', 'btw'].some(v => busSentHeader(v as 'ask', 'kam').includes('↓'))).toBe(false)
   expect(new Set(['ask', 'ack', 'btw'].map(v => busSentHeader(v as 'ask', 'kam'))).size).toBe(3)
 })
 
@@ -195,7 +199,7 @@ test('busGotHeader: the target-side card names the sender and distinguishes ack 
 })
 
 test('bus card headers escape endpoint names — they are agent-authored and land in an HTML message', () => {
-  expect(busSentHeader('btw', 'a<b>&')).toBe('↓ Nudged <b>@a&lt;b&gt;&amp;</b>')
+  expect(busSentHeader('btw', 'a<b>&')).toBe('Informed <b>@a&lt;b&gt;&amp;</b>')
   expect(busGotHeader('ack', '<i>', 'x')).toBe('<b>@&lt;i&gt;</b> notified <b>@x</b>')
 })
 

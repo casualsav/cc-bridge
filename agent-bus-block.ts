@@ -76,8 +76,12 @@ export function formatAsideBlock(from: string, text: string, refs: string[] = []
 // indistinguishable from an ask — and an aside left the sender's surface blank entirely, so the
 // owner could watch his lane message a session and never learn which of the three it had sent.
 export type BusVerb = 'ask' | 'ack' | 'btw'
-const SENT_VERB: Record<BusVerb, string> = { ask: 'Messaged', ack: '↓ Notified', btw: '↓ Nudged' }
-// The SENDER's surface: "Messaged @kam" / "↓ Notified @kam" / "↓ Nudged @kam".
+// The `↓` these three carried until v0.4.258 was a MISREADING of the owner's spec: in "↓ Nudged @weather"
+// the arrow stood for the card's own chevron — the expandable element sendBusCard already draws — so
+// shipping it as a literal glyph drew the disclosure twice. Verb text only here; the chevron is the
+// rich message's <details> and is untouched.
+const SENT_VERB: Record<BusVerb, string> = { ask: 'Messaged', ack: 'Notified', btw: 'Informed' }
+// The SENDER's surface: "Messaged @kam" / "Notified @kam" / "Informed @kam".
 export function busSentHeader(verb: BusVerb, to: string): string {
   return `${SENT_VERB[verb]} <b>@${escapeHtml(to)}</b>`
 }
