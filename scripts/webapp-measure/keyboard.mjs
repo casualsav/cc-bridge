@@ -81,9 +81,9 @@ const snap = p => p.evaluate(() => {
   const last = feed.lastElementChild;
   return {
     kb: getComputedStyle(document.documentElement).getPropertyValue("--kb").trim(),
-    shift: getComputedStyle(document.documentElement).getPropertyValue("--kb-shift").trim(),
+    ride: getComputedStyle(document.documentElement).getPropertyValue("--kb-ride").trim(),
     pre: getComputedStyle(document.documentElement).getPropertyValue("--kb-pre").trim(),
-    moving: document.documentElement.classList.contains("kbmove"),
+    moving: document.documentElement.classList.contains("kbride"),
     drill: r(document.getElementById("drill")), dock: r(document.getElementById("ddock")),
     pill: r(document.querySelector(".inputwrap")), head: r(document.querySelector("#drill .vhead")),
     feed: r(feed), scrollTop: Math.round(feed.scrollTop), maxScroll: Math.round(feed.scrollHeight - feed.clientHeight),
@@ -109,22 +109,53 @@ const raise = async (p, mode, px) => {
     await p.evaluate(h => window.__vvHeight(h), H - px);
   }
 };
-// Mid-flight, at roughly a third of the transition. The JOURNEY is the claim being measured here —
-// the destination is asserted everywhere else in this file — so this reads the surface while it is
-// still supposed to be moving. On a build with no transition it reads the destination, which is the
-// control: the check cannot pass by accident.
-const midFlight = async p => {
-  await p.waitForTimeout(80);
-  return p.evaluate(() => ({
-    drillBottom: +document.getElementById("drill").getBoundingClientRect().bottom.toFixed(1),
-    scrollTop: Math.round(document.getElementById("dfeed").scrollTop),
-    moving: document.documentElement.classList.contains("kbmove"),
-    shift: getComputedStyle(document.documentElement).getPropertyValue("--kb-shift").trim(),
+// One reading of the surface WHILE IT MOVES. Everything here is measured off the RENDERED boxes, so
+// the transform is included — which is the point: after the owner's "it moves independently and
+// staggeringly", the claim under test is that the composer and the transcript are one rigid layer,
+// and rects are the only thing that can say so. `scrollTop` is read too, because the other half of
+// the fix is that the scroller is not written to at all while the surface travels.
+const frame = p => p.evaluate(() => {
+  const dock = document.getElementById("ddock").getBoundingClientRect();
+  const feed = document.getElementById("dfeed");
+  const last = feed.lastElementChild ? feed.lastElementChild.getBoundingClientRect() : null;
+  return {
+    dockTop: +dock.top.toFixed(1), dockBottom: +dock.bottom.toFixed(1),
+    lastBottom: last ? +last.bottom.toFixed(1) : null,
+    gap: last ? +(dock.top - last.bottom).toFixed(1) : null,
+    scrollTop: Math.round(feed.scrollTop),
+    moving: document.documentElement.classList.contains("kbride"),
+    ride: getComputedStyle(document.documentElement).getPropertyValue("--kb-ride").trim(),
     pre: getComputedStyle(document.documentElement).getPropertyValue("--kb-pre").trim(),
     kb: getComputedStyle(document.documentElement).getPropertyValue("--kb").trim(),
     inner: window.innerHeight,
-  }));
+  };
+});
+// Mid-flight, at roughly a quarter of the transition. On a build that does not animate, this reads
+// the destination — which is the control: the check cannot pass by accident.
+const midFlight = async p => { await p.waitForTimeout(80); return frame(p); };
+// Four readings across the journey, for the rigidity claim: it has to hold at EVERY instant, not at
+// one convenient one.
+const acrossRide = async p => {
+  const out = [];
+  for (let i = 0; i < 4; i++) { await p.waitForTimeout(60); out.push(await frame(p)); }
+  return out;
 };
+// EVERY FRAME, from inside the page. Sampling over CDP is ~60ms apart and the defect being measured
+// is ONE FRAME wide — a scroll write lands 16ms behind a compositor transition, which is invisible to
+// a 60ms sample and perfectly visible to an eye watching 20 frames of it. So the recorder runs in
+// rAF, and the claim is that the composer-to-transcript distance never changes at all.
+const recordFrames = p => p.evaluate(ms => new Promise(done => {
+  const rows = [], until = performance.now() + ms;
+  const step = () => {
+    const dock = document.getElementById("ddock").getBoundingClientRect();
+    const feed = document.getElementById("dfeed");
+    const last = feed.lastElementChild ? feed.lastElementChild.getBoundingClientRect() : null;
+    rows.push({ t: Math.round(performance.now()), dock: +dock.top.toFixed(1),
+      gap: last ? +(dock.top - last.bottom).toFixed(1) : null, top: Math.round(feed.scrollTop) });
+    if (performance.now() < until) requestAnimationFrame(step); else done(rows);
+  };
+  requestAnimationFrame(step);
+}), 600);
 const settle = p => p.waitForTimeout(400);
 // An offset the page has never written reads as "", and an offset it has finished with reads "0px".
 // Both mean the same thing — the surface is carrying no journey — and demanding the second would
@@ -147,17 +178,17 @@ for (const mode of ["visual", "layout"]) {
     const down = await snap(p);
     const tag = `${mode}/${where}`;
 
-    // the JOURNEY — eased, not jumped, in both directions
+    // the JOURNEY — eased, not jumped, in both directions, measured on the box that carries it
     const between = (v, a, b) => v > Math.min(a, b) + 8 && v < Math.max(a, b) - 8;
-    ok(`${tag}: RISE is EASED — the surface is still travelling mid-flight`,
-      between(flying.drillBottom, before.drill.bottom, H - KB) && flying.moving,
-      `${before.drill.bottom} → ${flying.drillBottom} → ${H - KB}${flying.moving ? "" : " (not moving)"}`);
+    ok(`${tag}: RISE is EASED — the composer is still travelling mid-flight`,
+      between(flying.dockBottom, H, H - KB) && flying.moving,
+      `${H} → ${flying.dockBottom} → ${H - KB}${flying.moving ? "" : " (not moving)"}`);
     ok(`${tag}: FALL is EASED too`,
-      between(falling.drillBottom, H - KB, H) && falling.moving,
-      `${H - KB} → ${falling.drillBottom} → ${H}`);
+      between(falling.dockBottom, H - KB, H) && falling.moving,
+      `${H - KB} → ${falling.dockBottom} → ${H}`);
     ok(`${tag}: the journey leaves NOTHING behind — no offset, no transition armed`,
-      atRest(up.shift) && atRest(down.shift) && !up.moving && !down.moving,
-      `up ${up.shift}/${up.moving} · down ${down.shift}/${down.moving}`);
+      atRest(up.ride) && atRest(down.ride) && !up.moving && !down.moving,
+      `up ${up.ride}/${up.moving} · down ${down.ride}/${down.moving}`);
 
     // the lift itself, in whichever way this client provides it
     ok(`${tag}: FIXTURE parked ${where === "bottom" ? "at the floor" : "mid-thread"}`,
@@ -186,6 +217,61 @@ for (const mode of ["visual", "layout"]) {
   }
 }
 
+// --- RIGIDITY: transcript and composer are ONE layer while they travel ---------------------------
+// The owner's words on the version this replaced: "the transcript doesn't pin itself to the top of
+// the keyboard — it moves independently and staggeringly, whereas premium apps are completely pinned
+// and move in sync." That is a property, not a preference, and it is measurable: the distance from
+// the composer's top edge to the newest message's bottom must be the SAME at every instant of the
+// journey. It is checked in both modes and in both directions, and beside it the other half — the
+// scroller is never written to while the surface moves, because a scroll write lands a frame late by
+// construction and a frame late IS the stagger.
+for (const mode of ["visual", "layout"]) {
+  const p = await open();
+  await park(p, "bottom");
+  const rest = await frame(p);
+  const rec = recordFrames(p);          // started BEFORE the trigger, so frame 1 is the resting state
+  await raise(p, mode, KB);
+  const rising = await acrossRide(p);
+  const frames = await rec;
+  await settle(p);
+  const up = await frame(p);
+  await raise(p, mode, 0);
+  const falling = await acrossRide(p);
+  await settle(p);
+  const down = await frame(p);
+
+  {
+    const moved = frames.filter(f => f.gap != null);
+    const gaps = moved.map(f => f.gap);
+    const spread = Math.max(...gaps) - Math.min(...gaps);
+    const travelled = Math.max(...moved.map(f => f.dock)) - Math.min(...moved.map(f => f.dock));
+    ok(`rigid ${mode}/RISE: EVERY FRAME holds the gap — one layer, not two clocks`,
+      spread <= 1.01 && travelled > 100,
+      `${moved.length} frames, gap spread ${spread.toFixed(1)}px over ${travelled.toFixed(0)}px of travel`);
+    // The scroller is written ONCE — at the commit, before anything travels — and never again while
+    // the surface moves. Counting TRANSITIONS rather than distinct values is the honest form: the
+    // recording deliberately starts before the trigger, so the resting position and the committed one
+    // are both in it, and that single step is the mechanism working.
+    const steps = moved.filter((f, i) => i && f.top !== moved[i - 1].top).length;
+    ok(`rigid ${mode}/RISE: the scroller is written ONCE, before the travel — never during`,
+      steps <= 1, `${steps} scroll write(s) across ${moved.length} frames`);
+  }
+  for (const [dir, samples, end] of [["RISE", rising, up], ["FALL", falling, down]]) {
+    const gaps = [rest, ...samples, end].map(f => f.gap);
+    const spread = Math.max(...gaps) - Math.min(...gaps);
+    ok(`rigid ${mode}/${dir}: composer-to-transcript gap never changes`, spread <= 1.5,
+      `${gaps.map(g => g.toFixed(1)).join(" · ")} (spread ${spread.toFixed(1)}px)`);
+    ok(`rigid ${mode}/${dir}: …and the surface really moved while it held`,
+      Math.abs(samples[0].dockBottom - end.dockBottom) > 8 || samples.some(f => f.moving),
+      `dock ${samples.map(f => f.dockBottom).join(" → ")} → ${end.dockBottom}`);
+    const tops = samples.map(f => f.scrollTop);
+    ok(`rigid ${mode}/${dir}: the scroller is FROZEN while it travels`,
+      new Set(tops).size === 1, `scrollTop ${tops.join(" · ")}`);
+  }
+  await p.screenshot({ path: `${OUT}/rigid-${mode}.png` });
+  await p.close();
+}
+
 // --- MIRRORING: the page runs the keyboard's own animation from the focus tap --------------------
 // The device beacon settled what is possible here: the DOM gets ONE snapshot, ~500ms after the tap,
 // while the IME's own animation is 285ms. So the page cannot follow the keyboard — it can only start
@@ -203,8 +289,8 @@ for (const mode of ["visual", "layout"]) {
   await p.locator("#dtext").focus();
   const flying = await midFlight(p);
   ok("mirror: the tap alone starts the surface moving — no viewport event involved",
-    flying.drillBottom < before.drill.bottom - 8 && flying.drillBottom > H - KB + 8 && flying.moving,
-    `${before.drill.bottom} → ${flying.drillBottom} → ${H - KB}`);
+    flying.dockBottom < H - 8 && flying.dockBottom > H - KB + 8 && flying.moving,
+    `${H} → ${flying.dockBottom} → ${H - KB}`);
   // The distinction that makes this a MIRROR rather than a compensation: the viewport has not moved
   // at all (innerHeight is untouched, --kb is 0) and the surface is travelling anyway, on room the
   // page has taken in advance.
@@ -224,10 +310,10 @@ for (const mode of ["visual", "layout"]) {
   await settle(p);
   const after = await snap(p);
   ok("reconcile: the real resize costs NOTHING — no second movement",
-    near(reconcile.drillBottom, H - KB, 1.5) && near(after.drill.bottom, H - KB) && !reconcile.moving,
-    `${reconcile.drillBottom} / ${after.drill.bottom} vs ${H - KB}${reconcile.moving ? " (still animating)" : ""}`);
+    near(reconcile.dockBottom, H - KB, 1.5) && near(after.dock.bottom, H - KB) && !reconcile.moving,
+    `${reconcile.dockBottom} / ${after.dock.bottom} vs ${H - KB}${reconcile.moving ? " (still animating)" : ""}`);
   ok("reconcile: the prediction is handed back, not held on top of the real room",
-    atRest(after.shift) && (after.pre === "0px" || after.pre === ""), `pre=${after.pre} shift=${after.shift}`);
+    atRest(after.ride) && (after.pre === "0px" || after.pre === ""), `pre=${after.pre} shift=${after.ride}`);
   ok("reconcile: the transcript is still at the floor", after.atBottom, `${after.scrollTop}/${after.maxScroll}`);
   await p.screenshot({ path: `${OUT}/mirror-reconciled.png` });
   await p.close();
@@ -258,7 +344,7 @@ for (const where of ["bottom", "mid"]) {
   await p.locator("#dtext").focus();
   await p.waitForTimeout(200);
   const after = await snap(p);
-  ok(`focus/${where}: nothing is eased where nothing moved`, !after.moving && atRest(after.shift), `"${after.shift}"/${after.moving}`);
+  ok(`focus/${where}: nothing is eased where nothing moved`, !after.moving && atRest(after.ride), `"${after.ride}"/${after.moving}`);
   await p.screenshot({ path: `${OUT}/focus-${where}.png` });
   ok(`focus/${where}: the viewport was untouched`, after.kb === "0px" && near(after.drill.bottom, H), `${after.kb}`);
   ok(`focus/${where}: ${where === "bottom" ? "stays at the floor" : "a mid-thread reader keeps their place"}`,

@@ -26,7 +26,11 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   resting geometry did not move. Plus the MIRROR: a keyboard seen
                                   #   once is animated from the next FOCUS tap, ~500ms before the
                                   #   client says anything, and the real resize then costs nothing —
-                                  #   with the rollback for a prediction nothing confirms. Last check
+                                  #   with the rollback for a prediction nothing confirms. And
+                                  #   RIGIDITY, recorded every frame from inside the page: composer
+                                  #   and transcript are one transformed layer, the scroller written
+                                  #   once before the travel and never during (pre-change: 69px of
+                                  #   gap variation across 19 scroll writes). Last check
                                   #   proves the temporary debug beacon is gone, not merely disabled
     node cardfoot.mjs [page][out] # a session card's foot carries the SESSION's numbers — the 5h
                                   #   window is account-level and gone from every card, and no card

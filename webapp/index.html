@@ -585,20 +585,35 @@
      laid out against the LAYOUT viewport, which a soft keyboard does not always shrink — so without
      this the chat keeps its full height and the keyboard simply covers the composer and the newest
      messages. --kb is 0 whenever the client did shrink it for us, which keeps that case untouched. */
-  /* --kb-pre is the PREDICTION (room the page takes before the client gives it, from the focus tap)
-     and --kb-shift is the JOURNEY, and both are zero at both ends: on a viewport change the page parks the
+  /* --kb-pre is the PREDICTION — room the page takes before the client gives it, from the focus tap —
+     and it is zero at both ends: on a viewport change the page parks the
      surface where it visually WAS (one frame, no transition), then releases it to 0 with the
      transition armed. So the resting geometry is byte-identical to a build with none of this — the
      only thing that exists between two viewport changes is a 0px offset.
      Why an offset at all: on his phone the client shrinks its own LAYOUT viewport, so --kb never
      moves and there is nothing for a transition to interpolate. This gives both shapes of client the
      same one mechanism, since the offset is measured from where the surface was on screen. */
-  #drill { position: fixed; inset: 0; bottom: calc(var(--kb) + var(--kb-pre, 0px) + var(--kb-shift, 0px)); background: var(--bg); display: none; z-index: 5; }
-  /* Armed only while a keyboard is moving — a permanent transition on `bottom` would also ease a
-     rotation, a fullscreen toggle and the first paint. `html.kbmove` is added for the duration and
-     removed after, by the same function that sets the offset. */
-  html.kbmove #drill { transition: bottom var(--kb-dur) var(--kb-curve); }
-  @media (prefers-reduced-motion: reduce) { html.kbmove #drill { transition: none; } }
+  #drill { position: fixed; inset: 0; bottom: calc(var(--kb) + var(--kb-pre, 0px)); background: var(--bg); display: none; z-index: 5; }
+  /* THE RIDE: one transform, two subscribers, one clock. The composer always travels; the transcript
+     joins it only when it was resting at the floor (`kbridefeed`) — a mid-thread reader must not be
+     moved, and moving the scroller's box is how you move its content. The header is never in this
+     list: the top edge does not move when a keyboard rises.
+     A transform rather than an animated `bottom`, and rather than per-frame scrollTop writes: this is
+     the whole point of the mechanism. The compositor interpolates one layer, so the transcript and the
+     composer cannot fall out of step — which is exactly what the owner saw when the box eased on the
+     compositor while the scroll was re-pinned, a frame late, on the main thread.
+     TWO classes, and the split is load-bearing: `kbride` DECLARES the transform, `kbrideon` arms the
+     transition. Declare both in one rule and adding the class is itself a transform change — none →
+     translateY(dy) — which the browser animates, so the park never lands and the release has nothing
+     to travel from. (Measured: the composer jumped to its destination with the gap perfectly rigid
+     and no motion at all.) Park under `kbride` alone, flush, then arm.
+     Neither class is left on: a permanent transform would make these boxes a containing block for
+     anything fixed inside them, forever, to buy nothing between keyboards. */
+  html.kbride #ddock, html.kbride.kbridefeed #dfeed {
+    transform: translateY(var(--kb-ride, 0px)); will-change: transform; }
+  html.kbrideon #ddock, html.kbrideon.kbridefeed #dfeed {
+    transition: transform var(--kb-dur) var(--kb-curve); }
+  @media (prefers-reduced-motion: reduce) { html.kbrideon #ddock, html.kbrideon.kbridefeed #dfeed { transition: none; } }
   #drill.show { display: block; }
   /* The dock floats at the floor with no fill of its own. Its SCRIM lives on the composer (below),
      starting at the capsule's own top edge — the owner's correction: "the gradient on the bottom
@@ -3156,16 +3171,6 @@ function syncKeyboard() {
   // actually arrived, and holding both would subtract the keyboard twice.
   clearTimeout(kbPreTimer);
   setSurface(window.innerHeight - kbPx, 0);
-  // EVERY viewport change, not only the ones this page had to compensate for. A resize is the moment
-  // the scroller's own height changed underneath the reader; whether we also had to move the surface
-  // is a different question with a different answer on every client.
-  pinIfRiding();
-  // …and once more after the keyboard has finished animating. A rise arrives as a BURST of resizes on
-  // some clients and as one event mid-animation on others, so the height this pin was computed
-  // against may not be the height the reader ends up looking at. Cheap, idempotent, and it cannot
-  // move a mid-thread reader — pinIfRiding is the same guarded call.
-  clearTimeout(kbSettle);
-  kbSettle = setTimeout(pinIfRiding, 350);
 }
 // --- Mirroring the keyboard, because tracking it is impossible here ------------------------------
 //
@@ -3182,13 +3187,11 @@ function syncKeyboard() {
 //   · Telegram's own `viewportChanged` DOES stream intermediate heights — but 500–700ms after the DOM
 //     already moved, overshooting the target (337 · 351 · 359 · 337 · 370 · 373 · 375 · 377 for a true
 //     377) and at one point contradicting itself inside a millisecond (466 → 821 → 466). Riding it
-//     would be jitter, not sync. Its 7ms "lead" over the DOM, seen in one transition of the log, is 3%
-//     of an animation — bought with that noise, it is a bad trade. The DOM stays the source of truth.
+//     would be jitter, not sync. The DOM stays the source of truth.
 //
 // What IS available: the FOCUS event, half a second before the resize. So the page runs the keyboard's
-// OWN animation in parallel — same curve, same duration, started at the same moment — instead of
-// waiting to be told. Not tracking. Mirroring. When the real resize lands, the geometry it brings is
-// where the surface already is, so the reconcile is a no-op rather than a second movement.
+// OWN animation in parallel — same curve, started at the same moment — instead of waiting to be told.
+// Not tracking. Mirroring.
 //
 // It only ever mirrors a keyboard it has ALREADY MEASURED in this session (`kbSeen`), so nothing is
 // guessed; the first rise after a launch is reactive, as before, and teaches it. If the resize never
@@ -3202,59 +3205,70 @@ function predictKeyboard() {
   setSurface(kbLayoutFloor, kbSeen);
   kbPreTimer = setTimeout(() => setSurface(kbLayoutFloor, 0), 900);
 }
-// Seeded at parse time, not on the first event: left null, the FIRST viewport change of the session
-// is swallowed as "nothing to compare against" — and that first change is the keyboard's first rise,
-// the one journey a reader is most likely to be watching for. (It shipped that way for ten minutes;
-// the harness caught it as a rise that never eased while the fall did.)
-let kbFloor = window.innerHeight, kbEnd = 0, kbRide = 0, kbRideUntil = 0;
-const kbDurMs = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--kb-dur")) || 285;
-// The surface's floor has TWO inputs and one meaning: what the client has actually given us
-// (layoutFloor) and what the page is standing in for ahead of it (pre). Their difference is where the
-// floor APPEARS to be, and that is the only number the journey below is about — which is what makes
-// the reconcile free: when the real room arrives, layoutFloor drops by the keyboard and `pre` drops to
-// zero in the same handler, the appearance does not change, and no journey is started for it.
+// --- ONE LAYER, and the scroller frozen while it moves -------------------------------------------
+//
+// The owner, on the version that eased the box and re-pinned the scroll every frame: "the transcript
+// doesn't pin itself to the top of the keyboard — it moves independently and staggeringly, whereas
+// premium apps are completely pinned and move in sync." He is describing a real defect, not a
+// preference: a CSS transition interpolates on the compositor while a `scrollTop` write lands on the
+// main thread a frame later, so the two clocks CANNOT agree. Every frame of that animation showed the
+// transcript a frame behind the composer.
+//
+// So nothing chases anything now. The destination — the layout AND the scroll position — is committed
+// INSTANTLY, in one frame; then the whole visible surface is parked back where it was with a single
+// `translateY` and released. Transcript and composer ride the same transform on the same clock, so
+// they cannot desync even in principle, and the scroller is not written to at all while it travels.
+//
+// Which boxes ride:
+//   · #ddock always — the composer follows the keyboard whoever is reading.
+//   · #dfeed only when the transcript is riding (it was at the floor). A mid-thread reader must not
+//     move, and moving the scroller's BOX is how you move its content; leaving it out is the spec.
+//   · never .vhead — the top edge does not move when a keyboard rises, which is the same reason a
+//     transform on #drill itself was refused: it would slide the header up from below.
+// Content translated past the top of the viewport is clipped by the viewport, and passes UNDER the
+// header on the way (the header is z 2 over a z 0 scroller — the existing full-bleed order).
+let kbRideEnd = 0, kbRideUntil = 0;
+const kbDurMs = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--kb-dur")) || 330;
 function setSurface(layoutFloor, pre) {
   const root = document.documentElement;
+  // A REDUNDANT event changes nothing and must be left to change nothing: his webview sends three or
+  // four per keyboard, and the commit below resets the ride — so acting on the duplicates cancelled
+  // the animation the first one had just started. (Measured: the composer teleported in the
+  // layout-shrink mode, which is the one his phone takes, while the visual-only mode animated fine.)
+  if (layoutFloor === kbLayoutFloor && pre === kbPre) return;
   // What a keyboard costs on this device, learned the first time one lands — never a constant, and
   // never carried across a launch: a rotation or a different keyboard changes it, and a stale guess
   // would mirror the wrong distance.
   if (layoutFloor < kbLayoutFloor - 40) kbSeen = kbLayoutFloor - layoutFloor;
-  const changed = layoutFloor !== kbLayoutFloor || pre !== kbPre;
-  const visual = layoutFloor - pre;
-  const journey = Math.abs(visual - kbFloor) >= 40 && !matchMedia("(prefers-reduced-motion: reduce)").matches;
-  // A write that must NOT animate disarms first — the reconcile is exactly that: the client's room
-  // arrives and the prediction is handed back in the same frame, and the two must cancel silently.
-  // A redundant event (his webview sends three or four per change, and one of them repeats) changes
-  // nothing and must leave a running journey alone — disarming there snapped the ease it was already
-  // half way through, which the harness caught as a rise that eased in one mode and jumped in another.
-  if (changed && !journey) root.classList.remove("kbmove");
+  const dy = (kbLayoutFloor - kbPre) - (layoutFloor - pre);   // how far the surface's floor is about to move; + when it rises
   kbLayoutFloor = layoutFloor;
   kbPre = pre;
+  // 1. COMMIT — layout and scroll, at once, with nothing animating. Anything armed here would turn a
+  //    var write into a drift, and the reconcile (the client's room arriving as the prediction is
+  //    handed back) must cancel out silently.
+  root.classList.remove("kbride", "kbrideon", "kbridefeed");
+  root.style.setProperty("--kb-ride", "0px");
   root.style.setProperty("--kb", kbPx + "px");
   root.style.setProperty("--kb-pre", pre + "px");
-  if (journey) easeSurfaceTo(visual); else kbFloor = visual;
-}
-// Only ever called for a journey worth easing — setSurface owns that decision, because it is the one
-// that knows whether anything moved at all.
-function easeSurfaceTo(floor) {
-  const root = document.documentElement, prev = kbFloor;
-  kbFloor = floor;
-  root.classList.remove("kbmove");
-  root.style.setProperty("--kb-shift", (floor - prev) + "px");
-  void $("drill").offsetHeight;
-  root.classList.add("kbmove");
-  root.style.setProperty("--kb-shift", "0px");
-  clearTimeout(kbEnd);
-  kbEnd = setTimeout(() => root.classList.remove("kbmove"), kbDurMs + 60);
-  // The ride tracks the CURVE rather than being eased itself. A second animation on scrollTop would
-  // be a second clock racing this one; re-pinning every frame while the box interpolates keeps the
-  // newest message on the composer's edge at every instant of the journey, by construction. It ends
-  // when the transition does, and it does nothing at all for a mid-thread reader (pinIfRiding is the
-  // same guarded call that refuses to move them).
-  cancelAnimationFrame(kbRide);
+  const riding = feedAtBottom && $("drill").classList.contains("show");
+  if (riding) pinFeedBottom();
+  // 2. PARK the visible surface back where it was, and release it. Below 40px is not a keyboard — a
+  //    rotation, a URL bar, a client nudging its own chrome — and easing those is motion with no cause
+  //    the reader can see. Reduced motion stops here too, having already committed the destination.
+  if (Math.abs(dy) < 40 || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  root.style.setProperty("--kb-ride", dy + "px");
+  root.classList.toggle("kbridefeed", riding);
+  root.classList.add("kbride");
+  void $("ddock").offsetHeight;   // flush, so the park LANDS before the transition exists
+  root.classList.add("kbrideon");
+  root.style.setProperty("--kb-ride", "0px");
+  clearTimeout(kbRideEnd);
+  kbRideEnd = setTimeout(() => root.classList.remove("kbride", "kbrideon", "kbridefeed"), kbDurMs + 60);
   kbRideUntil = performance.now() + kbDurMs + 60;
-  const step = () => { pinIfRiding(); if (performance.now() < kbRideUntil) kbRide = requestAnimationFrame(step); };
-  kbRide = requestAnimationFrame(step);
+  // One pin AFTER the ride, for the case the commit could not know about: a message landing mid-ride
+  // grows the scroller. Deliberately not during — a scroll write inside the journey is the stagger.
+  clearTimeout(kbSettle);
+  kbSettle = setTimeout(pinIfRiding, kbDurMs + 80);
 }
 // Was the reader at the floor of the transcript? Recorded on SCROLL, and read on resize — never
 // measured after the fact, which is the trap: a resize lands with the scroller already shorter, so
@@ -3262,12 +3276,10 @@ function easeSurfaceTo(floor) {
 // exactly on it a frame earlier.
 let feedAtBottom = true;   // a freshly opened drill is pinned by paintFeed
 function noteFeedPosition() {
-  // Deaf for the length of a journey, and that is load-bearing rather than an optimisation. The ride
-  // pins every frame; each write fires a scroll event that is DISPATCHED a frame later, against a
-  // scroller that has shrunk again in the meantime — so the flag would read "100px from the bottom"
-  // about a position this code had just pinned to the floor, turn itself off, and the ride would die
-  // one frame in. (Measured: scrollTop froze at 1018 of 1344 for the rest of the animation.) Nobody
-  // is hand-scrolling during a 220ms keyboard animation; the surface is.
+  // Deaf for the length of a journey: the commit's own pin fires a scroll event that is dispatched a
+  // frame later, against a scroller whose box has already changed — so the flag would read "320px
+  // from the bottom" about a position this code had just pinned to the floor, and the next keyboard
+  // event would refuse to carry the reader.
   if (performance.now() < kbRideUntil) return;
   const feed = $("dfeed");
   if (feed) feedAtBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;
@@ -3278,10 +3290,10 @@ function noteFeedPosition() {
 // fall. A reader who is mid-thread is not moved in either direction. The state is re-read on every
 // scroll rather than latched at focus, which is what makes "scrolled up while typing, then dismissed
 // the keyboard" behave: by then the reader is no longer at the floor, so nothing follows them.
+function pinFeedBottom() { const feed = $("dfeed"); if (feed) feed.scrollTop = feed.scrollHeight; }
 function pinIfRiding() {
-  const feed = $("dfeed");
-  if (!feed || !$("drill").classList.contains("show") || !feedAtBottom) return;
-  feed.scrollTop = feed.scrollHeight;
+  if (!$("drill").classList.contains("show") || !feedAtBottom) return;
+  pinFeedBottom();
 }
 $("dfeed").addEventListener("scroll", noteFeedPosition, { passive: true });
 if (vv) for (const e of ["resize", "scroll"]) vv.addEventListener(e, syncKeyboard);

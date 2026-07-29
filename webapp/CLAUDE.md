@@ -122,25 +122,38 @@ give it.
   per change and one repeats — changes nothing and must leave a running journey alone. Disarming on
   every call snapped the ease half way through, which the harness caught as a rise that eased in one
   mode and jumped in the other.
-- **The JOURNEY is a parked offset, and it is zero at both ends.** `--kb-shift` puts the surface back
-  where it visually was for one frame (transition disarmed), then releases it to 0 with
-  `html.kbmove` armed — so resting geometry is byte-identical to a build with no easing, which is
-  what `keyboard.mjs` asserts by failing ONLY its 8 journey checks against the pre-easing page.
-  220ms on Material's standard decelerate, against the ~250ms an Android IME takes: the chat lands
-  just *before* the keyboard rather than chasing it. Three refusals, each tried or reasoned to a
-  dead end: a `transform` would be smoother and is wrong (the top edge does not move, so it would
-  slide the header up from below); under 40px is not a keyboard; and reduced motion returns before
-  anything is parked, since parking with the transition dead paints the jump it meant to smooth.
-  **`kbFloor` seeds at parse time** — left null, the first viewport change of a session is swallowed
-  as "nothing to compare against", and that one is the first keyboard rise.
-- **`noteFeedPosition()` is DEAF for the length of a journey, and that is load-bearing.** The ride
-  re-pins every frame; each write fires a scroll event dispatched a frame later against a scroller
-  that has shrunk again, so the flag reads "100px from the floor" about a position just pinned to it,
-  turns itself off, and the ride dies one frame in — measured: scrollTop frozen at 1018 of 1344 for
-  the rest of the animation. Nobody hand-scrolls during a 220ms keyboard animation.
+- **The journey is ONE COMPOSITOR LAYER, and the scroller is frozen while it moves.** The owner, on
+  the version that eased the box and re-pinned `scrollTop` every frame: *"the transcript doesn't pin
+  itself to the top of the keyboard — it moves independently and staggeringly, whereas premium apps
+  are completely pinned and move in sync."* That is a defect with a number: a CSS transition
+  interpolates on the compositor while a scroll write lands on the main thread a frame later, and
+  `keyboard.mjs` measures the result at **69px of gap variation across 19 scroll writes** in one
+  330ms animation. So nothing chases anything now — the destination (layout AND scroll position) is
+  committed instantly in one frame, then the whole visible surface is parked back where it was with a
+  single `translateY` and released. Same var, same clock, same layer: **0.0px of gap variation over
+  354px of travel, one scroll write, before the travel.**
+- **Who rides:** `#ddock` always; `#dfeed` only when the transcript is riding (`kbridefeed`) — moving
+  the scroller's box is how you move its content, so a mid-thread reader is left out by construction;
+  **never `.vhead`**, the same reason a transform on `#drill` was refused (the top edge does not move,
+  so it would slide the header up from below). Content translated past the top is clipped by the
+  viewport and passes UNDER the header on the way, which the existing z-order already provides.
+- **TWO classes, and the split is load-bearing:** `kbride` DECLARES the transform, `kbrideon` arms the
+  transition. In one rule, adding the class is itself a transform change (`none` → `translateY(dy)`)
+  that the browser animates — so the park never lands and the release has nothing to travel from. It
+  measured as a perfectly rigid gap with no motion at all. Neither class survives the ride: a
+  permanent transform makes these boxes a containing block for anything fixed inside them, forever.
+- **A REDUNDANT viewport event must return early.** His webview sends three or four per keyboard, and
+  the commit resets the ride — so acting on the duplicates cancelled the animation the first one had
+  just started, in the layout-shrink mode that is the only one his phone takes.
+- **`noteFeedPosition()` is DEAF for the length of a journey.** The commit's own pin fires a scroll
+  event dispatched a frame later against a box that has already changed, so the flag would read "320px
+  from the floor" about a position just pinned to it and the next keyboard would refuse to carry the
+  reader.
 - **`keyboard.mjs` SIMULATES the keyboard** — a fake `visualViewport` installed before the page's
   script, plus a real viewport resize for the layout-shrink half. It runs the matrix that matters:
-  {at the floor, mid-thread} × {rise, fall} × {visual-only shrink, layout shrink}. What no headless
+  {at the floor, mid-thread} × {rise, fall} × {visual-only shrink, layout shrink}, and records EVERY
+  FRAME from inside the page for the rigidity claim — a 60ms sample cannot see a one-frame lag, and
+  one frame is the whole defect. What no headless
   run can answer is which event Telegram's webview fires for a real keyboard; that leg needs a thumb.
 
 ## Feed
