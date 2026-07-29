@@ -375,9 +375,11 @@ give it.
   (a token would make a frozen indicator inheritable). `waitstate.mjs` measures all of it — sampling
   RENDERED pixels, because a declared colour that resolves to the ground passes every
   computed-style assertion and is invisible on the device.
-- **A state with something to say REPLACES the task line, never appends to it.** The line is one
-  line and the card's height is reflow, so `⏸️ waiting: gh run watch` stands where the last-reply
-  snippet would — which is right on its own terms: the snippet predates the wait. **`⏸️` carries
+- **A state with something to say REPLACES the task line, never appends to it.** The line is
+  `-webkit-line-clamp: 1` (the owner's call, down from 2 on 2026-07-29: a card is a glance, and the
+  second line bought a wrapped fragment rather than a second fact) and the card's height is reflow —
+  the fullest card measures 96px where it was 116. So `⏸️ waiting: gh run watch` stands where the
+  last-reply snippet would — which is right on its own terms: the snippet predates the wait. **`⏸️` carries
   U+FE0F and needs it**: bare U+23F8 resolves to text presentation and paints as two hairline bars
   that read as a broken character beside the emoji on every other row (seen in the contact sheet).
 - **The drill-in header dot (`#ddot`) renders the card's three colours off `SessionFeed.state`** —
@@ -404,7 +406,8 @@ give it.
   4s repaint would replay any reveal forever.
 - **No icon tile on a session card** — built, rejected on the owner's device; the status dot rides
   the title line at 11px, scoped `.sess .dot`. Boxiness is a RATIO (reference corner ≈ 0.33 of card
-  height): `--r-3xl` (26) is derived, the card is 116 by reflow only, the name takes ONE line and
+  height): `--r-3xl` (26) is derived, the card is 96 by reflow only (26/96 = 0.27, nearer the
+  reference than the 0.22 it was at 116 — the one-line clamp moved the card, not the radius), the name takes ONE line and
   ellipsizes (full name on `title`), and a card's `.chip` loses fill AND padding — scoped, since
   the turn-row chip is a real control. `sessions.mjs` carries three control pages, one per design
   round — no single control can falsify all three.

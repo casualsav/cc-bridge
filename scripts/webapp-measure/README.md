@@ -32,11 +32,13 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   once before the travel and never during (pre-change: 69px of
                                   #   gap variation across 19 scroll writes). Last check
                                   #   proves the temporary debug beacon is gone, not merely disabled
-    node cardfoot.mjs [page][out] # a session card's foot carries the SESSION's numbers — the 5h
-                                  #   window is account-level and gone from every card, and no card
-                                  #   carries the 8px gap its empty foot would leave. Three fixture
-                                  #   cards, one per shape the removal touches. Pass a pre-change
-                                  #   page: 6 of 12 fail there
+    node cardfoot.mjs [page][out] # a session card's LOWER HALF: the task line clamps to ONE line
+                                  #   (a long task costs the card no height, and nothing above or
+                                  #   below it moves), and the foot carries the SESSION's numbers —
+                                  #   the 5h window being account-level and gone from every card,
+                                  #   with no card left carrying the 8px gap its empty foot would
+                                  #   leave. Four fixture cards, emptiest to fullest. Pass a
+                                  #   pre-change page: 6 of 18 fail (2 for the clamp alone)
     node composerbox.mjs [page][out] # the TWO-ROW composer: field on the top line, controls on their
                                   #   own line under it, ~3 text lines tall at rest — the rest height
                                   #   measured against its PARTS, the shape, the growth above the

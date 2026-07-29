@@ -571,7 +571,11 @@
      made the CHIP the tallest thing in the title row (21.4 against the name's 20.3), so the row —
      and every card — was a pixel taller than its own type for a box nobody can see. */
   .sess .chip { background: transparent; border-radius: 0; padding: 0; }
-  .sess .task { color: var(--hint-raised); font-size: var(--t-sub); margin-top: 6px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; word-break: break-word; }
+  /* ONE line, the owner's call (2026-07-29, down from two): a card is a glance, and the second line
+     bought a wrapped fragment of a sentence rather than a second fact. The clamp is what draws the
+     ellipsis, so it stays a -webkit-box; the card's height is reflow, so it tightens by exactly one
+     line box and nothing above it moves. */
+  .sess .task { color: var(--hint-raised); font-size: var(--t-sub); margin-top: 6px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; word-break: break-word; }
   .sess .foot { display: flex; align-items: center; gap: var(--sp-2); margin-top: var(--sp-2); font-size: var(--t-meta); color: var(--hint-raised); }
   .sess .foot .bar { flex: 1; margin-top: 0; height: 5px; }
   /* Drill-in (session detail) */
