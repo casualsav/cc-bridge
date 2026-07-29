@@ -398,7 +398,9 @@ give it.
   because "doing something or waiting" is the one thing the card says that the chat does not. Driven
   by the payload's own `chat` flag (`isChatLaneSession` in daemon.ts), **never by matching the name**
   — that label is "Chat" until a handle resolves. `cardfoot.mjs`'s fixture gives the lane a task, a
-  branch and a ctx reading precisely so the bare row is a decision and not an empty payload.
+  branch and a ctx reading precisely so the bare row is a decision and not an empty payload. The same
+  ruling holds on `/sessions` (`sessions-view.ts` returns after the dials): one state, one shape,
+  wherever he reads it — a surface that keeps the old card reads as a different session.
 - **A chat lane's label NEVER carries the numeric Telegram id.** It is `Chat (@handle)`, or plain
   `Chat` until `getChat` answers — the id flashed in the UI and swapped itself out, which the owner
   saw. `warmDmHandles()` runs at webapp start so the resolved name is usually there for the first

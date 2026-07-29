@@ -37,6 +37,12 @@ function renderCard(s: SessionCard): string {
   if (s.mode && s.mode !== 'default') chips.push(escapeHtml(s.mode === 'bypassPermissions' ? 'bypass' : s.mode))
   if (s.agent && s.agent !== 'claude') chips.push(escapeHtml(s.agent))
   if (chips.length) lines.push(`<code>${chips.join(' · ')}</code>`)
+  // The owner's own chat lane stops here: name, state, dials, and nothing else. Same ruling as the
+  // mini app's card (webapp/CLAUDE.md) and extended to this surface at his ask — the chat is where he
+  // watches it work, so a task line repeats the conversation he is already reading and a context bar
+  // belongs to sessions he is not. The STATE stays, on the title line, because that is the one thing
+  // neither surface shows him anywhere else. Read from the payload's flag, never from the name.
+  if (s.chat) return lines.join('\n')
 
   // One line, and a state with something to say says it INSTEAD of the last-reply snippet — the same
   // precedence the mini app's card uses, for the same reason: the snippet predates the wait. An idle

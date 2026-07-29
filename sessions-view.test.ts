@@ -154,3 +154,27 @@ test('multiple sessions are separated by a blank line, in input order', () => {
   expect(idxB).toBeGreaterThan(idxA)
   expect(out).toContain('\n\n⚪ <b>second</b>')
 })
+
+// The owner's chat lane, on this surface too (his ask, 2026-07-29): a title line and its dials, and
+// nothing else — with a payload that carries everything a card COULD show, so the omission is a
+// decision rather than an empty row.
+test('the chat lane renders as a title line and its dials, whatever its payload carries', () => {
+  const chat: SessionCard = { ...card(), chat: true, name: 'Chat (@suchag)', state: 'working', working: true,
+    task: 'Folding the working row into the composer', branch: 'main', ctxPct: 51, h5Pct: 40,
+    model: 'Fable 5', effort: 'high', mode: 'bypassPermissions' }
+  const out = renderSessionsView([chat], new Date(0))
+  expect(out).toContain('Chat (@suchag)')
+  expect(out).toContain('Fable 5')        // its dials are still worth having
+  expect(out).toContain('working')        // and the state it is in — the point of the card
+  expect(out).not.toContain('Folding')    // …but not the transcript it is already showing him
+  expect(out).not.toContain('ctx 51%')
+  expect(out).not.toContain('🌿')
+  expect(out).not.toContain('5h 40%')
+})
+
+// …and the exemption is the LANE's, not everyone's.
+test('an ordinary card is untouched by the chat-lane rule', () => {
+  const out = renderSessionsView([{ ...card(), task: 'Reading the transcript back', ctxPct: 62, branch: 'main' }], new Date(0))
+  expect(out).toContain('Reading the transcript back')
+  expect(out).toContain('ctx 62%')
+})
