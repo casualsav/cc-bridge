@@ -153,6 +153,7 @@ import {
 } from './prompt-relay.ts'
 import { planStuckSweep, planWedgeEscalation, type StuckState } from './stuck-plan.ts'
 import { planContextWarn, planCtxNudge } from './ctx-warn.ts'
+import { planBoxUsageWarn, type UsageWarnMarker } from './usage-warn.ts'
 import { spawnModelFlag, WIDE_CONTEXT_SUFFIX } from './model-window.ts'
 import {
   initStatusCard, statusCardText, statusKeyboard, updateSessionPin, updateTopicPins,
@@ -3672,12 +3673,19 @@ const USAGE_NOTIF_STATE_FILE = join(STATE_DIR, 'usage-notif-state.json')
     if (typeof v === 'number' && Number.isFinite(v)) ctxWarn.set(k, v)
   }
   for (const [k, v] of Object.entries(s.warn ?? {})) {
-    const e = v as { resetKey?: unknown; threshold?: unknown; at?: unknown }
+    const e = v as { resetKey?: unknown; threshold?: unknown; at?: unknown; accountName?: unknown }
     if (e && typeof e.resetKey === 'string' && typeof e.threshold === 'number') {
       // Normalize on load too (not just on save) — idempotent, and it heals a raw key
       // written by an older daemon or a manual edit, so a leftover "Jun 7, 4pm (UTC)"
       // can't read as a new period against the normalized live banner and re-fire.
-      usageWarnState.set(k, { resetKey: normResetKey(e.resetKey), threshold: e.threshold, at: typeof e.at === 'number' ? e.at : 0 })
+      const base = { resetKey: normResetKey(e.resetKey), threshold: e.threshold, at: typeof e.at === 'number' ? e.at : 0 }
+      // `box:`-prefixed entries are usage-warn.ts's box-level consolidation marker (see maybeWarn) —
+      // the ONE key shape in this map that carries `accountName`. A malformed one (missing it) is
+      // dropped rather than half-loaded: a box marker with no account to check freshness against is
+      // useless, and the cost of losing it is at most one repeat ping after a corrupt restart, same
+      // as any other dropped entry here.
+      if (k.startsWith('box:')) { if (typeof e.accountName === 'string' && e.accountName) usageWarnState.set(k, { ...base, accountName: e.accountName } as UsageWarnMarker) }
+      else usageWarnState.set(k, base)
     }
   }
 }
@@ -3726,6 +3734,29 @@ function parseResetTime(line: string): number | null {
   return fire.getTime()
 }
 
+// This account's CURRENT resetKey for `type`, re-derived the same way checkUsageSnapshot's own does
+// (epoch-derived from a live statusline snapshot). null when that account has no readable snapshot
+// right now — the box-marker freshness check (usage-warn.ts) treats that as "still fresh" on purpose.
+function currentResetKeyFor(accountName: string, type: string): string | null {
+  const account = accountByName(accountName)
+  if (!account) return null
+  const snap = readUsageSnapshot(undefined, account)
+  const w = type === 'session' ? snap?.fiveHour : snap?.sevenDay
+  return w ? (w.resetsAt ? `e${Math.round(w.resetsAt / 60_000)}` : `p:${type}`) : null
+}
+
+// The box-level consolidation marker (usage-warn.ts's planBoxUsageWarn) rides in the SAME shared
+// usageWarnState map, under a `box:{type}` key — reusing the file save/load this already has rather
+// than a second map/file. Its value carries one field (`accountName`) the map's declared per-account
+// value type doesn't, since an ordinary per-account entry never needs it — a deliberate, additive cast,
+// not a change to that shared type.
+function getBoxMarker(type: string): UsageWarnMarker | null {
+  return (usageWarnState.get(`box:${type}`) as UsageWarnMarker | undefined) ?? null
+}
+function setBoxMarker(type: string, marker: UsageWarnMarker): void {
+  usageWarnState.set(`box:${type}`, marker)
+}
+
 // Send one usage heads-up per threshold (50/75/90) per reset period for a limit type,
 // deduped via usageWarnState. `resetKey` identifies the reset period (epoch-derived from
 // the snapshot, descriptor-derived from a pane banner) so a fresh period re-arms the alerts.
@@ -3737,18 +3768,33 @@ function maybeWarn(type: string, pct: number, resetKey: string, account: Account
   const prev = usageWarnState.get(stateKey)
   // Ladder dedup scoped to THIS reset period: only fire a threshold higher than the highest
   // already sent for this resetKey. A new period (different resetKey) re-arms all thresholds,
-  // so 50 fires again next window — no cross-period lockout that could swallow it.
+  // so 50 fires again next window — no cross-period lockout that could swallow it. This is DETECTION
+  // and stays per-account even when the box-level consolidation below suppresses the SEND — collapsing
+  // it would risk swallowing a legitimate crossing, and it is also what stops a suppressed account from
+  // retrying this same threshold every poll (a hot loop, not a fix).
   const firedThisPeriod = prev && prev.resetKey === resetKey ? prev.threshold : 0
   if (threshold <= firedThisPeriod) return
   usageWarnState.set(stateKey, { resetKey, threshold, at: Date.now() })
+  // Box-level consolidation (owner: two accounts each crossing 75% independently sent TWO notices for
+  // one box). Delivery only — detection above is unchanged. See usage-warn.ts.
+  const boxMarker = getBoxMarker(type)
+  const plan = planBoxUsageWarn(
+    boxMarker,
+    { type, threshold, accountName: account.name, resetKey },
+    boxMarker ? currentResetKeyFor(boxMarker.accountName, type) : null,
+  )
+  if (plan.send) setBoxMarker(type, plan.nextMarker)
   saveUsageNotifState()
+  if (!plan.send) return
   process.stderr.write(`daemon: usage warn fired type=${stateKey} threshold=${threshold} key="${resetKey}"\n`)
   const emoji = threshold >= 90 ? '🚨' : threshold >= 75 ? '⚠️' : 'ℹ️'
-  const who = account.name === 'main' ? '' : ` (<b>${escapeHtml(account.name)}</b> account)`
+  // No `(name account)` suffix here any more: the notice now speaks for the box, one per threshold —
+  // the owner's own ask, since with one notice covering every account it needn't say which one crossed.
+  // The 100%-hit path (actOnLimitHit) is unrelated and keeps its own account-naming wording unchanged.
   // The snapshot tracks the focused session, so route the heads-up to its topic (forum mode); DM → allowlist.
   void (async () => {
     for (const { chat, thread } of await outboundTargetsFor(focus.activePaneId)) {
-      await channel.sendText(String(chat), `${emoji} You've used ${threshold}% of your ${escapeHtml(type)} limit${who}`, { silent: threshold < 90, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
+      await channel.sendText(String(chat), `${emoji} You've used ${threshold}% of your ${escapeHtml(type)} limit`, { silent: threshold < 90, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
     }
   })()
 }
@@ -15796,6 +15842,15 @@ async function webappSessionFeed(sid: string): Promise<WebappSessionFeed | null>
 async function dismissFeedbackSurvey(pane: string): Promise<void> {
   const cap = await capturePane(pane).catch(() => '')
   if (!cap || !feedbackSurveyOpen(cap)) return
+  // At a NORMAL PROMPT, a paste lands fine with the survey still sitting in scrollback above it —
+  // observed live (v2.1.220, 40+ minutes of clean pastes with the survey unanswered there) — so the
+  // '0' is unneeded AND newly hazardous: `paneAcceptsText` was narrowed (prompt.ts) so a scrolled-past
+  // optional survey no longer blocks a send, meaning this now runs while the input box is healthy. A
+  // '0' typed there is not a dismissal any more — it's a stray character PREPENDED to the message the
+  // caller is about to paste, worse than the block it replaced. Only dismiss when the survey is
+  // actually HOLDING the pane (no normal prompt underneath it); there a stray '0' has nothing of the
+  // user's to land in front of.
+  if (onNormalPrompt(cap)) return
   await sendKeys(pane, ['0'])
   await waitForSettle(pane, 150, 2000).catch(() => {})
 }

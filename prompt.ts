@@ -1111,7 +1111,14 @@ export function paneAcceptsText(cap: string): boolean {
   return !(
     detectUserPrompt(cap) || detectPermissionPrompt(cap) || isUsageLimitChoice(cap)
     || isModelSwitchConfirm(cap) || detectModelPicker(cap) || detectLoginPrompt(cap)
-    || isResumeSessionPrompt(cap) || detectFirstRunScreen(cap) || feedbackSurveyOpen(cap)
+    || isResumeSessionPrompt(cap) || detectFirstRunScreen(cap)
+    // feedbackSurveyOpen alone is too broad HERE: it's a lines.some() over the whole pane, so a
+    // survey that has scrolled up into history keeps matching long after it stopped being live.
+    // Watched on v2.1.220: a real pane sat at a completely normal prompt with the optional survey
+    // still in scrollback, and took dozens of pastes over 40+ minutes without ever answering it —
+    // proof a normal prompt below the survey means the pane is genuinely accepting text, whatever
+    // is above it. Narrowed to only veto when there is NOT also a normal prompt on screen.
+    || (feedbackSurveyOpen(cap) && !onNormalPrompt(cap))
     || detectStuckScreen(cap) || bashModeArmed(cap) || detectEditorState(cap)
   )
 }

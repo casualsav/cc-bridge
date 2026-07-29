@@ -1,6 +1,6 @@
 // Prompt detection from pane captures — select menus vs permission dialogs. Pure functions.
 import { test, expect } from 'bun:test'
-import { slashPaletteEntries, stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, detectFirstRunScreen, isUsageLimitChoice, isResumeSessionPrompt, detectResumeSessionPrompt, detectEditorState, onNormalPrompt, detectModelUnavailable, detectCompacting, compactPercent, permPromptToken, waitingPromptSignature, isRecognizedPrompt, detectStuckScreen, extractGenericOptions, bashModeArmed, detectWorking, isModelSwitchConfirm, slashPaletteRows, slashPaletteWouldMisfire, inputBoxContent, submitLanded, detectModelPicker, parseWorkingStatus } from './prompt.ts'
+import { slashPaletteEntries, stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, detectFirstRunScreen, isUsageLimitChoice, isResumeSessionPrompt, detectResumeSessionPrompt, detectEditorState, onNormalPrompt, detectModelUnavailable, detectCompacting, compactPercent, permPromptToken, waitingPromptSignature, isRecognizedPrompt, detectStuckScreen, extractGenericOptions, bashModeArmed, detectWorking, isModelSwitchConfirm, slashPaletteRows, slashPaletteWouldMisfire, inputBoxContent, submitLanded, detectModelPicker, parseWorkingStatus, feedbackSurveyOpen, paneAcceptsText } from './prompt.ts'
 
 test('stripAnsi removes CSI escape sequences', () => {
   expect(stripAnsi('\x1b[1mbold\x1b[0m text')).toBe('bold text')
@@ -967,6 +967,47 @@ test('the background-agents panel never reads as a spinner on its own (no live l
   ].join('\n')
   expect(detectWorking(pane)).toBe(false)
   expect(parseWorkingStatus(pane)).toBeNull()
+})
+
+// paneAcceptsText vs feedbackSurveyOpen: a scrolled-past survey still visible in scrollback must not
+// block a send once a genuine normal prompt has appeared below it. Real incident (v2.1.220): the pane
+// sat at a completely normal prompt with the optional survey still further up, and took dozens of
+// pastes over 40+ minutes without ever answering it — the webapp composer alone refused every send
+// with "the session is showing a dialog — answer it first" because feedbackSurveyOpen's plain
+// lines.some() keeps matching for as long as the two-liner is anywhere on screen at all.
+const SURVEY_THEN_NORMAL_PROMPT = [
+  '● How is Claude doing this session? (optional)',
+  '  1: Bad    2: Fine   3: Good   0: Dismiss',
+  '',
+  '────────────────────────────────────────────────',
+  '❯ ',
+  '────────────────────────────────────────────────',
+  '  ubuntu@cloud:/home/ubuntu/projects/fugue/webapp (master) | Fable 5',
+  '  ε:high | ✻think | ctx ██░░░░░░░░ 18%/1000k | ↑176.4k ↓705 | $374.7753 | ⧗25h45m',
+  '  5h █████░░░░░░░░░ 33% ↻2h03m | 7d █████████░░░░░ 62% ↻118h03m',
+  '  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents',
+  '',
+  '  ● main',
+  '  ◯ engineer  Compress chart key overlay          10m 48s · ↓ 70.6k tokens',
+].join('\n')
+
+test('paneAcceptsText stops refusing a send once a normal prompt sits below the scrolled-past survey', () => {
+  expect(feedbackSurveyOpen(SURVEY_THEN_NORMAL_PROMPT)).toBe(true)   // the raw predicate still sees it — unchanged
+  expect(onNormalPrompt(SURVEY_THEN_NORMAL_PROMPT)).toBe(true)
+  expect(paneAcceptsText(SURVEY_THEN_NORMAL_PROMPT)).toBe(true)
+})
+
+test('paneAcceptsText keeps refusing the survey when there is no normal prompt below it (narrow case unchanged)', () => {
+  // Same survey, but nothing below it reads as a normal prompt (mid-turn, spinner running) — the
+  // veto this guard exists for still applies.
+  const surveyMidTurn = [
+    '● How is Claude doing this session? (optional)',
+    '  1: Bad    2: Fine   3: Good   0: Dismiss',
+    '✻ Frolicking… (12s · ↓ 1.2k tokens)',
+  ].join('\n')
+  expect(feedbackSurveyOpen(surveyMidTurn)).toBe(true)
+  expect(onNormalPrompt(surveyMidTurn)).toBe(false)
+  expect(paneAcceptsText(surveyMidTurn)).toBe(false)
 })
 
 // ---- first-run wizard (adoption announce) ----
