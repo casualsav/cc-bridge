@@ -141,3 +141,99 @@ export function buildEditPayload(chatId: string | number, messageId: number, ric
     ...(replyMarkup !== undefined ? { reply_markup: replyMarkup } : {}),
   }
 }
+
+// ---- INBOUND rich messages ----
+// Rich Messages are not outbound-only: a client whose composer switched to the rich editor (pasting
+// formatted text from a web page does it) sends a Message carrying `rich_message: { blocks }` and NO
+// `text`. grammy 1.41.1 has no types for the field and `bot.on('message:text')` cannot match it, so
+// such a message matched NO handler at all and vanished without a log line (observed in production
+// 2026-07-29, DM message between 4307 and 4320). Flattening it back to plain text here is what makes
+// it deliverable: the blocks are decoration, the words are the payload.
+//
+// The block/inline vocabulary below was read off a live Bot API response, not a doc: heading ·
+// paragraph · list (nested, ordered, checkbox) · blockquote · pre · divider · details · table, with
+// inline nodes bold/italic/strikethrough/code/url nesting arbitrarily inside each other. Anything
+// unrecognised keeps its `text` rather than being skipped — a future block type must degrade to its
+// words, never to silence.
+
+export type RichInlineNode = { type?: string; text?: RichInline; url?: string }
+export type RichInline = string | RichInlineNode | Array<string | RichInlineNode>
+export type RichBlock = { type?: string; text?: RichInline; blocks?: RichBlock[]; items?: RichListItem[]; cells?: RichCell[][]; summary?: string; language?: string }
+export type RichListItem = { label?: string; blocks?: RichBlock[]; has_checkbox?: boolean; is_checked?: boolean }
+export type RichCell = { text?: RichInline }
+export type IncomingRichMessage = { blocks?: RichBlock[] }
+
+const RICH_MAX_DEPTH = 12   // structures nest arbitrarily; a cap keeps a hostile payload off the stack
+
+function inlineToText(node: RichInline | undefined, depth: number): string {
+  if (node == null || depth > RICH_MAX_DEPTH) return ''
+  if (typeof node === 'string') return node
+  if (Array.isArray(node)) return node.map(n => inlineToText(n, depth + 1)).join('')
+  const inner = inlineToText(node.text, depth + 1)
+  // A link's href is content, not decoration — an anchor whose words differ from its target loses the
+  // target entirely if we keep only the words.
+  if (node.url && node.url !== inner) return inner ? `${inner} (${node.url})` : node.url
+  return inner
+}
+
+function blocksToText(blocks: RichBlock[] | undefined, depth: number, sep = '\n\n'): string {
+  if (!Array.isArray(blocks) || depth > RICH_MAX_DEPTH) return ''
+  return blocks.map(b => blockToText(b, depth + 1)).filter(s => s !== '').join(sep)
+}
+
+function blockToText(block: RichBlock | undefined, depth: number): string {
+  if (!block || depth > RICH_MAX_DEPTH) return ''
+  switch (block.type) {
+    case 'divider': return '---'
+    case 'pre': return inlineToText(block.text, depth)
+    case 'blockquote': return blocksToText(block.blocks, depth)
+    case 'details': {
+      const body = blocksToText(block.blocks, depth)
+      return [block.summary ?? '', body].filter(Boolean).join('\n\n')
+    }
+    case 'table':
+      return (block.cells ?? []).map(row => row.map(c => inlineToText(c?.text, depth)).join(' | ')).join('\n')
+    case 'list':
+      // Items keep their own label ("•", "1.") so an ordered list stays ordered, and a nested list is
+      // indented under its parent item rather than flattened into the same column.
+      return (block.items ?? []).map(item => {
+        const box = item?.has_checkbox ? (item.is_checked ? '[x] ' : '[ ] ') : ''
+        // '\n' between an item's own blocks, not the usual blank line: a nested list belongs directly
+        // under its parent item, not a paragraph away from it.
+        const body = blocksToText(item?.blocks, depth, '\n').replace(/\n/g, '\n  ')
+        return `${item?.label ?? '•'} ${box}${body}`.trimEnd()
+      }).join('\n')
+    default: {
+      // heading, paragraph, and anything Telegram adds later that carries words.
+      const own = inlineToText(block.text, depth)
+      const kids = blocksToText(block.blocks, depth)
+      return [own, kids].filter(Boolean).join('\n\n')
+    }
+  }
+}
+
+// The plain text of an inbound rich message — '' when it carries no words at all.
+export function richMessageToText(rich: unknown): string {
+  const blocks = (rich as IncomingRichMessage | null)?.blocks
+  return blocksToText(blocks, 0).replace(/\n{3,}/g, '\n\n').trim()
+}
+
+// Give a `rich_message` Message the `text` every downstream path already knows how to handle, in
+// place — the same trick the "/Cmd" lowercasing middleware uses, and the reason commands, force-reply
+// flows, the slash relay and handleInbound all keep working for a rich message with no new plumbing.
+// Returns what it did so the caller can log it; a message that already has text is left alone.
+export function normalizeRichInbound(msg: unknown): { normalized: boolean; empty: boolean } {
+  const m = msg as { text?: string; entities?: unknown[]; rich_message?: unknown } | undefined
+  if (!m || typeof m.text === 'string' || !m.rich_message) return { normalized: false, empty: false }
+  const text = richMessageToText(m.rich_message)
+  // A rich message with no extractable words still has to reach the lane — a placeholder is a message
+  // the user can see and correct; silence is the bug this whole path exists to fix.
+  m.text = text || '(rich message with no text)'
+  // A rich message carries no `entities`, and grammy routes commands off the leading `bot_command`
+  // entity — not off the slash. Without this, a rich-composed "/status" misses every bot.command()
+  // and falls through to the raw relay that types it into the live TUI, where the CLI's slash palette
+  // fuzzy-matches it (the /opus→/fable trap). Synthesize the entity so it routes like a typed one.
+  const cmd = /^\/[a-zA-Z0-9_]+(@\w+)?/.exec(m.text)
+  if (cmd) m.entities = [{ type: 'bot_command', offset: 0, length: cmd[0].length }]
+  return { normalized: true, empty: !text }
+}

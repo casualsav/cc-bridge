@@ -122,6 +122,26 @@ the CLI's slash palette fuzzy-matches it — probed live: `/opus` offered `/fabl
 one palette predicate from switching a contextful session to Fable. The stub replies with guidance
 and touches no pane.
 
+## Inbound
+
+**A Bot API 10.1 rich message has `rich_message: { blocks }` and NO `text`** — a composer flips into
+the rich editor on its own when you paste formatted text from a web page, so this is an *ordinary*
+message class, not an exotic one. `bot.on('message:text')` cannot match it and grammy 1.41.1 has no
+type for the field, so one matched no handler at all and vanished with no error and no log line
+(owner's DM, 2026-07-29). The fix is `normalizeRichInbound` in a `bot.use` that runs **before** the
+"/Cmd" fixup: it flattens the blocks into `msg.text` in place, so commands, force-reply flows, the
+slash relay and `handleInbound` all keep working with no second code path — and it **synthesizes the
+leading `bot_command` entity**, because grammy routes commands off that entity and not off the
+slash, so without it a rich-composed `/opus` lands in the unknown-command relay above.
+
+**The LAST `bot.on('message')` is a log-only catch-all, and deleting it re-opens the whole class.**
+Registered after every specific handler, it fires only when none matched and names the loss
+(`NO handler for inbound message … (kind: …)`). Log-only on purpose: what still reaches it is service
+events and media nobody asked the bridge to carry, and typing those into a live pane would be worse
+than the silence. It is what makes "the bridge ignored me" a one-grep answer. `scripts/rich-inbound-dispatch.ts`
+is the proof — real grammy dispatch, the block shape captured off the live API; run it and the
+unfixed half still reports zero handlers.
+
 **Repo perms (group-shared checkouts).** Keep a shared tree group-writable — **setgid,
 group-writable dirs (2775)**, **umask 002**, **`git config core.sharedRepository=group`** — so new
 files land 664. The ONE thing that breaks this: **never `chmod` tracked files to

@@ -104,7 +104,7 @@ import {
 } from './topic-runtime.ts'
 import { startWebapp, type SettingsView as WebappSettingsView, type SessionCard as WebappSessionCard, type SessionFeed as WebappSessionFeed, type AutomationView as WebappAutomationView } from './webapp.ts'
 import { startTunnel, ensureCloudflared, tailscaleFunnelUrl, type Tunnel } from './tunnel.ts'
-import { sendRichMessage, sendRichMessageDraft, editRichMessage, toInputRichMessage, htmlPanelToRich, callTelegram, type InputRichMessage } from './richmsg.ts'
+import { sendRichMessage, sendRichMessageDraft, editRichMessage, toInputRichMessage, htmlPanelToRich, callTelegram, normalizeRichInbound, type InputRichMessage } from './richmsg.ts'
 import { parseAvatars, resolveAvatar, type Avatar } from './avatars.ts'
 import { createAvatarMsgTokens } from './avatar-msg-tokens.ts'
 import { claudingStatus } from './clauding.ts'
@@ -7124,6 +7124,24 @@ async function sendStartHelp(ctx: Context): Promise<void> {
 // only on that edge, so a chatty DM doesn't re-enter the loop on every update.
 bot.use(async (ctx, next) => {
   if (ctx.chat?.type === 'private' && markChatReachable(String(ctx.chat.id))) { armChatPin(String(ctx.chat.id)); void updateSessionPin() }
+  await next()
+})
+
+// Bot API 10.1 rich messages arrive INBOUND too: a composer that switched to the rich editor (pasting
+// formatted text from a web page does it) sends `rich_message: { blocks }` and no `text`, which
+// matches no handler in this file — the message vanished with no error and no log line. Flatten the
+// blocks into `text` here, before anything reads it, so every downstream path (commands, force-reply
+// flows, the slash relay, handleInbound) treats it as the ordinary message it is. Runs first: the
+// "/Cmd" fixup below reads msg.text, so a rich-composed "/status" must already have one.
+bot.use(async (ctx, next) => {
+  for (const [what, msg] of [['message', ctx.message], ['edited_message', ctx.editedMessage]] as const) {
+    const r = normalizeRichInbound(msg)
+    if (r.normalized) {
+      process.stderr.write(r.empty
+        ? `daemon: rich ${what} ${msg!.message_id} carried no extractable text — delivering a placeholder\n`
+        : `daemon: flattened rich ${what} ${msg!.message_id} (${(msg as { text: string }).text.length} chars)\n`)
+    }
+  }
   await next()
 })
 
@@ -14650,6 +14668,25 @@ bot.on('message:sticker', async ctx => {
   await handleInbound(ctx, `(sticker${sticker.emoji ? ` ${sticker.emoji}` : ''})`, undefined, {
     kind: 'sticker', file_id: sticker.file_id, size: sticker.file_size,
   })
+})
+
+// LAST message handler, and the reason a silent drop can't happen twice. Registered after every
+// specific one above, so it only runs when none of them matched — and then it NAMES the loss instead
+// of letting the update evaporate (a rich message did exactly that for months: no handler, no error,
+// no log). Log-only on purpose: the residual classes are service events (a pin, a join) and media
+// nobody asked the bridge to carry, and typing those into a live pane would be a worse bug than the
+// one this closes. The line is what turns "the bridge ignored me" into a one-grep answer.
+const UNHANDLED_MESSAGE_KEYS = [
+  'animation', 'poll', 'dice', 'game', 'location', 'venue', 'contact', 'story', 'paid_media',
+  'invoice', 'successful_payment', 'giveaway', 'checklist', 'pinned_message', 'new_chat_members',
+  'left_chat_member', 'new_chat_title', 'new_chat_photo', 'group_chat_created', 'web_app_data',
+] as const
+bot.on('message', ctx => {
+  const msg = ctx.message as unknown as Record<string, unknown>
+  const kind = UNHANDLED_MESSAGE_KEYS.find(k => msg[k] !== undefined)
+    ?? Object.keys(msg).find(k => !['message_id', 'from', 'chat', 'date', 'message_thread_id', 'is_topic_message', 'reply_to_message', 'entities', 'link_preview_options'].includes(k))
+    ?? 'unknown'
+  process.stderr.write(`daemon: NO handler for inbound message ${ctx.message.message_id} in chat ${ctx.chat.id} (kind: ${kind}) — NOT delivered\n`)
 })
 
 bot.catch(err => {
