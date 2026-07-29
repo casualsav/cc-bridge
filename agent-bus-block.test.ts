@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { formatAskBlock, formatAnswerBlock, formatAsideBlock, formatDigestBlock, formatRosterLine } from './agent-bus-block.ts'
+import { formatAskBlock, formatAnswerBlock, formatAsideBlock, formatDigestBlock, formatRosterLine, busSentHeader, busGotHeader } from './agent-bus-block.ts'
 
 const HINT = (id: number) => `\n↩ reply with: tg answer ${id} "<summary>"  ·  a final text block does NOT reach the asker`
 
@@ -176,4 +176,25 @@ test('formatAsideBlock: refs ride along, escaped like every other block', () => 
 test('formatDigestBlock: an aside carries its own glyph, so catch-up shows it was told mid-turn', () => {
   const out = formatDigestBlock([{ kind: 'btw', from: 'chat', to: 'worker', text: 'design changed' }], '5m')
   expect(out).toContain('💬 chat→worker: design changed')
+})
+
+// ---- bus card headers --------------------------------------------------------------------------
+// The regression these pin: an ack used to render "Messaged @X" — the SAME header an ask renders —
+// and an aside rendered nothing at all on the sender's side. A test that only checked the ask
+// header would have passed against both bugs, so each case here asserts the three are DIFFERENT.
+test('busSentHeader: each verb names itself, so a sender-side card says which of the three it was', () => {
+  expect(busSentHeader('ask', 'kam')).toBe('Messaged <b>@kam</b>')
+  expect(busSentHeader('ack', 'kam')).toBe('↓ Notified <b>@kam</b>')
+  expect(busSentHeader('btw', 'kam')).toBe('↓ Nudged <b>@kam</b>')
+  expect(new Set(['ask', 'ack', 'btw'].map(v => busSentHeader(v as 'ask', 'kam'))).size).toBe(3)
+})
+
+test('busGotHeader: the target-side card names the sender and distinguishes ack from ask', () => {
+  expect(busGotHeader('ask', 'chat', 'kam')).toBe('<b>@chat</b> messaged <b>@kam</b>')
+  expect(busGotHeader('ack', 'chat', 'kam')).toBe('<b>@chat</b> notified <b>@kam</b>')
+})
+
+test('bus card headers escape endpoint names — they are agent-authored and land in an HTML message', () => {
+  expect(busSentHeader('btw', 'a<b>&')).toBe('↓ Nudged <b>@a&lt;b&gt;&amp;</b>')
+  expect(busGotHeader('ack', '<i>', 'x')).toBe('<b>@&lt;i&gt;</b> notified <b>@x</b>')
 })

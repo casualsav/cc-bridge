@@ -133,7 +133,7 @@ import {
   getSeen, markSeen, digestSince, DIGEST_SCAN,
   type BusEndpoint, type BusPending, type LedgerEntry,
 } from './agent-bus.ts'
-import { formatAskBlock, formatAnswerBlock, formatAsideBlock, formatDigestBlock, formatRosterLine, type RosterAgent } from './agent-bus-block.ts'
+import { formatAskBlock, formatAnswerBlock, formatAsideBlock, formatDigestBlock, formatRosterLine, busSentHeader, busGotHeader, type BusVerb, type RosterAgent } from './agent-bus-block.ts'
 import {
   readProcTable, childWaitLabel, childWaitShells, survivorWarning, conversationStart, openOutboundAsk, sessionState,
   setWaitsFile, setWait, clearWait, readWait,
@@ -2853,9 +2853,11 @@ async function notifyBusRich(surfaceSid: string, header: string, body: string): 
   if (!targets.length) return
   for (const { chat, thread } of targets) await sendBusCard(chat, thread, header, body)
 }
-// Outbound: "Messaged @kam" on the asker's surface, the prompt behind the chevron.
-const notifyAskSent = (fromSid: string, toName: string, text: string): Promise<void> =>
-  notifyBusRich(fromSid, `Messaged <b>@${escapeHtml(toName)}</b>`, text)
+// Outbound: "Messaged @kam" on the sender's surface, the message behind the chevron. The verb is
+// explicit at every call site rather than defaulted — an ack that renders as an ask is exactly the
+// bug busSentHeader exists to close, and a default is how it would come back.
+const notifyAskSent = (fromSid: string, toName: string, text: string, verb: BusVerb): Promise<void> =>
+  notifyBusRich(fromSid, busSentHeader(verb, toName), text)
 
 // A plain one-line bus-plumbing notice on a session's OWN surface (its chat DM / topic) — never
 // General. The text-only sibling of notifyBusRich, for short status lines with no body to collapse.
@@ -2920,13 +2922,13 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
       // briefer: it has no session to report back into (see deliverAnswerToAsker), so a daemon notice
       // must not leave the target owing an ack to a name it cannot address.
       if (cur.fromSid !== SYSTEM_SID) markBriefed(cur.toSid, cur.fromSid, cur.fromName, now)
-      void notifyAskSent(cur.fromSid, cur.toName, cur.text)
+      void notifyAskSent(cur.fromSid, cur.toName, cur.text, cur.noReply ? 'ack' : 'ask')
       // Mirror the same card on the TARGET's own surface (its topic / chat DM) so the inbound ask is
       // visible from inside the session too, not only on the asker's side. A `quiet` row is the one
       // exception: a daemon notice whose fact a card on that same chat already carries (the held
       // spawn's approval card, which self-edits into "started on fable"). The delivery is unchanged —
       // only this mirror is withheld, so the session still learns it and the owner reads it once.
-      if (!cur.quiet) void notifyBusRich(cur.toSid, `<b>@${escapeHtml(cur.fromName)}</b> messaged <b>@${escapeHtml(cur.toName)}</b>`, cur.text)
+      if (!cur.quiet) void notifyBusRich(cur.toSid, busGotHeader(cur.noReply ? 'ack' : 'ask', cur.fromName, cur.toName), cur.text)
       // An ack has done its entire job the moment it lands: nothing is coming back, so the row that
       // would otherwise sit here until a reaper or a TTL noticed it is dropped NOW. This one line is
       // the whole `tg ack` mechanism — no hygiene path learned about acks, they just never see one.
@@ -5010,7 +5012,15 @@ async function handleCall(
           // and would ride the target's next catch-up digest — telling it about steering it never got.
           // Caught live, not by a test. `suppressed` is not the tool for this: that flag means the event
           // happened and its NOTICE was withheld.
-          if (outcome === 'delivered') appendLedger(room, { ts: Date.now(), kind: 'btw', from: fromName, to: toName, text: askText, refs })
+          if (outcome === 'delivered') {
+            appendLedger(room, { ts: Date.now(), kind: 'btw', from: fromName, to: toName, text: askText, refs })
+            // "↓ Nudged @X" on the SENDER's surface — the half that was missing. deliverAside has
+            // always mirrored the aside on the target's surface, so a session could be steered
+            // mid-turn with nothing on the steering side to show for it. Gated on delivery for the
+            // same reason the ledger row above is: a refused aside did not happen, and a card
+            // claiming otherwise is worse than silence.
+            void notifyAskSent(fromSid, toName, askText, 'btw')
+          }
           if (outcome !== 'delivered') {
             // FAST-FAIL into the sender's own turn, never a queue. An aside's whole value is being read
             // while the work it steers is still running; delivered late it is worse than undelivered,
@@ -5025,7 +5035,7 @@ async function handleCall(
         appendLedger(room, { ts: Date.now(), kind: verb, from: fromName, to: toName, id: p.id, text: askText, refs })
         if (res.kind === 'hermes') {
           const cfg = hermesEndpoints.get(res.id)!   // resolved from the same map, so it's present
-          void notifyAskSent(fromSid, toName, askText)
+          void notifyAskSent(fromSid, toName, askText, 'ask')   // hermes: acks are refused above, so this is always an ask
           void runHermesAsk(p, cfg)
           text = `asked @${toName} (ask ${p.id}) — running; the answer arrives when it finishes`
         } else {

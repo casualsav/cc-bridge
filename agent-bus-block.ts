@@ -68,6 +68,27 @@ export function formatAsideBlock(from: string, text: string, refs: string[] = []
     + 'NOT a new task: weigh it against what you are doing, then carry on, change course, or drop work it supersedes.)'
 }
 
+// ---- bus CARD headers (the Telegram surface, not the pane) -------------------------------------
+// The chevron card a bus event leaves on a session's own chat/topic — its summary line, with the
+// message itself behind the chevron. The VERB is the only thing telling three events apart that a
+// reader treats very differently: an ask someone is waiting on, an aside that steered a session
+// mid-turn, an ack that just closes a loop. Until 2026-07-29 an ack rendered as "Messaged @X" —
+// indistinguishable from an ask — and an aside left the sender's surface blank entirely, so the
+// owner could watch his lane message a session and never learn which of the three it had sent.
+export type BusVerb = 'ask' | 'ack' | 'btw'
+const SENT_VERB: Record<BusVerb, string> = { ask: 'Messaged', ack: '↓ Notified', btw: '↓ Nudged' }
+// The SENDER's surface: "Messaged @kam" / "↓ Notified @kam" / "↓ Nudged @kam".
+export function busSentHeader(verb: BusVerb, to: string): string {
+  return `${SENT_VERB[verb]} <b>@${escapeHtml(to)}</b>`
+}
+// The TARGET's surface, where the sender has to be named too. An aside is absent on purpose: its
+// card keeps the "sent an aside 💬" wording it has always had — it was never the ambiguous one, and
+// 💬 is vocabulary both the owner and the agents already read.
+const GOT_VERB: Record<'ask' | 'ack', string> = { ask: 'messaged', ack: 'notified' }
+export function busGotHeader(verb: 'ask' | 'ack', from: string, to: string): string {
+  return `<b>@${escapeHtml(from)}</b> ${GOT_VERB[verb]} <b>@${escapeHtml(to)}</b>`
+}
+
 // ---- agent-bus digest (agent-bus P2) ----
 // One recent bus event, shaped for a digest line. Structural (not agent-bus.ts's LedgerEntry) so this
 // module stays import-free and unit-testable in isolation; a LedgerEntry passes it by shape.
