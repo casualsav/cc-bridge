@@ -3220,7 +3220,7 @@ async function openSpawnSheet() {
     // spawnModel's `resolved` over its raw `value`, for the same reason prefMode uses `raw`: under
     // "auto" the configured value is a policy, not a model, and this sheet's job is to name what THIS
     // session will get. The daemon resolves auto the same way at spawn time, so the badge is true.
-    spawnDefaults = { model: d.settings?.spawnModel?.resolved || val("spawnModel"), effort: val("spawnEffort"), mode: d.settings?.prefMode?.raw || "" };
+    spawnDefaults = { model: d.settings?.spawnModel?.resolved || val("spawnModel"), effort: d.settings?.spawnEffort?.resolved || val("spawnEffort"), mode: d.settings?.prefMode?.raw || "" };
     paintSpawn();
   } catch { /* the rows read a bare "Follows Settings" — the spawn still resolves daemon-side */ }
 }

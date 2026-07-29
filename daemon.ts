@@ -29,7 +29,7 @@ import { normalizeCommandOutput } from './ansi.ts'
 import { planSlash } from './slash-policy.ts'
 import { preserveGlobalEffort, reconcileEffortScope } from './effort-scope.ts'
 import { planDrift, driftStateAfter, type DriftState } from './drift-guard.ts'
-import { decideModel, upgradeNeedsConfirm, heldSpawnModel, holdTapData, parseHoldTap, launchFallback, spawnCardHeader, relaunchModel, AUTO_FALLBACK, FABLE, type ModelPolicy, type ModelDecision, type HoldOutcome } from './spawn-model-policy.ts'
+import { decideModel, decideEffort, upgradeNeedsConfirm, heldSpawnModel, holdTapData, parseHoldTap, launchFallback, spawnCardHeader, relaunchModel, AUTO_FALLBACK, AUTO_EFFORT_FALLBACK, FABLE, type ModelPolicy, type ModelDecision, type HoldOutcome } from './spawn-model-policy.ts'
 import { renderSessionsView } from './sessions-view.ts'
 import { detectCurrentMode, onNormalPrompt, inputBoxContent, isModelSwitchConfirm, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType } from './prompt.ts'
 import { modelSwitchEvidence, resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, turnAnchorUuid, liveSubagents, currentTurnFeed, currentTurnActivity, concludedTurnWork, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
@@ -5426,9 +5426,11 @@ async function handleCall(
         })
         const explicitEffort = args.effort ? String(args.effort).trim().toLowerCase().replace(/^med$/, 'medium') : null
         if (explicitEffort && (explicitEffort === 'auto' || !EFFORT_LEVELS.includes(explicitEffort))) { write({ t: 'result', id, ok: false, text: `unknown effort '${explicitEffort}' — one of: low | medium | high | xhigh | max` }); return }
-        // No explicit --effort: same /settings 🐣 fallback as the model above.
-        const defaultSpawnEffort = loadAccess().spawnEffort
-        const effort = explicitEffort ?? (defaultSpawnEffort && EFFORT_LEVELS.includes(defaultSpawnEffort) ? defaultSpawnEffort : null)
+        // No explicit --effort: same /settings 🐣 fallback as the model above, and the same `auto`
+        // rule — the caller's --effort is the decision, and a caller that named none gets a floor
+        // that the confirmation admits is one.
+        const effortChoice = decideEffort(explicitEffort, configuredSpawnEffort(), spawnEffortIsAuto())
+        const effort = effortChoice.effort
         // Default home: its own folder under the /base dir (new topics are created "under" base).
         const dir = args.dir
           ? await resolveNewSessionDir(String(args.dir))
@@ -5446,7 +5448,7 @@ async function handleCall(
         // spawns — failing the work over a missing annotation would cost the task, not the judgment —
         // but under `auto` the confirmation then says the choice was a fallback, which is the point.
         const why = String(args.why ?? '').replace(/\s+/g, ' ').trim().slice(0, 120)
-        const spec: SpawnSpec = { fromSid, topicName, dir, effort, firstMsg: String(args.text ?? '').trim(), headless, why }
+        const spec: SpawnSpec = { fromSid, topicName, dir, effort, firstMsg: String(args.text ?? '').trim(), headless, why, autoEffort: effortChoice.autoFallback }
         // THE GATE. A gated model does not spawn and then ask — nothing starts until the owner taps.
         // The card used to be minted AFTER the session was already running on the default, which made
         // it decorative: it read as control while providing none, and the only thing a tap could still
@@ -5457,7 +5459,7 @@ async function handleCall(
         // no topic tab, no pane, no bus row.
         if (modelChoice.clamped && modelChoice.ask) { text = await holdSpawnForApproval(spec, modelChoice.clamped, launchFallback(modelChoice.model)); break }
         const spawned = await launchSpawn(spec, modelChoice.model,
-          modelChoice.clamped ? clampedClause(modelChoice) : '', spawnReason(spec, modelChoice))
+          modelChoice.clamped ? clampedClause(modelChoice) : '', spawnReason(spec, modelChoice.autoFallback, effortChoice.autoFallback))
         if (!spawned.ok) { write({ t: 'result', id, ok: false, text: spawned.text }); return }
         text = spawned.text
         break
@@ -6332,6 +6334,17 @@ function configuredSpawnModel(): string | null {
 function spawnDefaultLaunchModel(): string | null {
   return loadAccess().spawnModel === SPAWN_MODEL_AUTO ? AUTO_FALLBACK : configuredSpawnModel()
 }
+// …and the effort pair of the two above. `auto` is a DEFAULT, never a launch value: --effort rejects
+// it outright (it is also a statusline state, not a flag level), so it can only ever be a preference
+// that resolves to something else at spawn time.
+const spawnEffortIsAuto = (): boolean => loadAccess().spawnEffort === SPAWN_MODEL_AUTO
+function configuredSpawnEffort(): string | null {
+  const pref = loadAccess().spawnEffort
+  return pref && SPAWN_EFFORT_LEVELS.includes(pref) ? pref : null
+}
+function spawnDefaultLaunchEffort(): string | null {
+  return spawnEffortIsAuto() ? AUTO_EFFORT_FALLBACK : configuredSpawnEffort()
+}
 // One open request per session — a second one replaces it, so an agent retrying can't stack cards.
 type ModelRequest = { sid: string; name: string; alias: string; asker: string; ctxPct: number | null; at: number; live: boolean }
 const modelRequests = new Map<string, ModelRequest>()
@@ -6404,14 +6417,18 @@ function clampedClause(d: ModelDecision): string {
 // Everything a VALIDATED spawn needs, minus the model — which is the one thing a gated spawn is still
 // waiting to learn. Split out of the `tg spawn` case so the same launch runs whether the caller's
 // socket is still open (the ordinary path) or the owner taps a card twenty minutes later.
-type SpawnSpec = { fromSid: string; topicName: string; dir: string; effort: string | null; firstMsg: string; headless: boolean; why?: string }
+type SpawnSpec = { fromSid: string; topicName: string; dir: string; effort: string | null; firstMsg: string; headless: boolean; why?: string; autoEffort?: boolean }
 
-// The one line the owner reads next to the model on the spawn confirmation. The caller's own --why
-// when it gave one; otherwise, under `auto` with no --model, the fallback named AS a fallback —
-// a judgment nobody made is the thing to surface, not to dress up. In fixed mode with no --why there
-// is nothing to say: the model is the configured default and the panel already states it.
-function spawnReason(spec: SpawnSpec, d: ModelDecision): string | null {
-  return spec.why || (d.autoFallback ? 'auto: spawner named no model' : null)
+// The one line the owner reads next to the dials on the spawn confirmation. Two things can put text
+// here and they COMPOSE rather than replace: the caller's own --why, and — under `auto` — whichever
+// dials it left unnamed. A --why that explained the model must not hide the fact that the effort
+// beside it was a floor; a judgment nobody made is exactly what this line exists to surface. In
+// fixed mode with no --why there is nothing to say: the dials are the configured defaults and the
+// panel already states them.
+function spawnReason(spec: SpawnSpec, modelFellBack: boolean, effortFellBack: boolean): string | null {
+  const unnamed = [modelFellBack ? 'model' : null, effortFellBack ? 'effort' : null].filter(Boolean)
+  const note = unnamed.length ? `auto: spawner named no ${unnamed.join(' or ')}` : null
+  return [spec.why || null, note].filter(Boolean).join(' · ') || null
 }
 
 // Create the topic, the session row and the pane, then hand the first message over as a founding ask.
@@ -6576,7 +6593,7 @@ async function resolveSpawnHold(h: SpawnHold, outcome: HoldOutcome): Promise<{ o
   // old "emit no --model, let the CLI decide"), and a declined or slept-through spawn is the last
   // place to hand that choice away. It also cannot resolve to the gated model it is the fallback for.
   const model = heldSpawnModel(outcome, h.alias, launchFallback(h.fallback))
-  const r = await launchSpawn(h.spec, model, '', h.spec.why || null)
+  const r = await launchSpawn(h.spec, model, '', spawnReason(h.spec, false, h.spec.autoEffort === true))
   const ran = model
   const why = outcome === 'approved' ? `on ${h.alias} — you approved it`
     : outcome === 'denied' ? `on ${ran} — the owner declined ${h.alias}`
@@ -6617,7 +6634,7 @@ async function holdSpawnForApproval(spec: SpawnSpec, alias: string, fallback: st
     // "Start on the default" on an unconfigured box, where the tap then launched with no --model at
     // all and the CLI's own default silently won.
     const buttons: Button[][] = [
-      [{ text: `✅ Approve — start on ${alias}`, data: holdTapData('approved', h.id) }, { text: `Use ${fallback.charAt(0).toUpperCase()}${fallback.slice(1)}`, data: holdTapData('denied', h.id) }],
+      [{ text: '✅ Approve', data: holdTapData('approved', h.id) }, { text: `🧠 Use ${fallback.charAt(0).toUpperCase()}${fallback.slice(1)}`, data: holdTapData('denied', h.id) }],
       [{ text: '🔕 Don\'t ask for 1h', data: 'smq:q' }],
     ]
     for (const { chat, thread } of to) {
@@ -6669,6 +6686,14 @@ async function doModelPicker(ctx: Context): Promise<void> {
 // Changing effort mid-conversation pops a "Change effort level?" confirmation in the TUI — see
 // injectEffortChange / the effortconfirm flow, which relays it as Yes/No buttons.
 const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max', 'auto']
+// Effort's version of the model's two-list split — and one collision worth naming. `auto` is a real
+// /effort level (the CLI picking per turn), but it has never been LAUNCHABLE here: --effort rejects
+// it, so a spawn default of 'auto' has always meant "emit no flag", which is what ⚡ Inherit effort
+// already says. As a SPAWN DEFAULT the token is therefore free, and it now carries the same meaning
+// as the model's: no fixed default, the spawning caller decides. `/effort auto` on a live session is
+// untouched — EFFORT_LEVELS below still drives that relay and its pickers.
+const SPAWN_EFFORT_LEVELS = EFFORT_LEVELS.filter(e => e !== SPAWN_MODEL_AUTO)
+const SPAWN_EFFORT_CHOICES = [SPAWN_MODEL_AUTO, ...SPAWN_EFFORT_LEVELS]
 const EFFORT_TIP = '💡 <code>/effort &lt;low|medium|high|xhigh|max|auto&gt;</code> sets reasoning effort.'
 // Display name for a level (the raw token is what's typed to CC); only xhigh needs prettifying.
 function effortLabel(level: string): string {
@@ -9557,9 +9582,10 @@ function settingsKeyboard(): InlineKeyboard {
 function spawnDefaultsText(): string {
   const a = loadAccess()
   const auto = a.spawnModel === SPAWN_MODEL_AUTO
+  const autoEffort = a.spawnEffort === SPAWN_MODEL_AUTO
   return `🐣 <b>Coding-session defaults</b> — the worker sessions agents launch (<code>tg spawn</code>) and the mini-app <b>+</b>. Your chat lane keeps its own model; this never changes it.\n\n` +
     `🧠 Model — <b>${a.spawnModel ? escapeHtml(a.spawnModel) : 'inherit'}</b>\n` +
-    `⚡ Effort — <b>${a.spawnEffort ? escapeHtml(a.spawnEffort) : 'inherit'}</b>\n` +
+    `⚡ Effort — <b>${a.spawnEffort ? escapeHtml(a.spawnEffort) : 'inherit'}</b>${autoEffort ? ` <i>(the spawner picks; ${AUTO_EFFORT_FALLBACK} if it names none)</i>` : ''}\n` +
     `🪟 Context — <b>${spawnWideContext(a.spawnContext1m) ? '1M' : '200k (default)'}</b>\n` +
     `🔥 Fable for coding agents — <b>${a.fableForAgents === 'off' ? 'off' : 'ask me first'}</b>\n` +
     `🛡 Agent asks for another model — <b>${a.spawnModelPolicy === 'agent' ? 'agents choose' : 'ask me first'}</b>` +
@@ -9574,6 +9600,7 @@ function spawnDefaultsText(): string {
 function spawnDefaultsKeyboard(): InlineKeyboard {
   const a = loadAccess()
   const fableOff = a.fableForAgents === 'off'
+  const autoEffort = a.spawnEffort === SPAWN_MODEL_AUTO
   const kb = new InlineKeyboard()
   kb.text(`${a.spawnModel === SPAWN_MODEL_AUTO ? '✅ ' : ''}🎲 auto`, `spd:m:${SPAWN_MODEL_AUTO}`)
   // A model the owner has switched off for coding agents is not OFFERED as their default either —
@@ -9584,7 +9611,8 @@ function spawnDefaultsKeyboard(): InlineKeyboard {
     kb.text(`${a.spawnModel === m ? '✅ ' : ''}${m}`, `spd:m:${m}`)
   }
   kb.row().text(`${a.spawnModel ? '' : '✅ '}🧠 Inherit model`, 'spd:m:off').row()
-  for (const e of EFFORT_LEVELS) kb.text(`${a.spawnEffort === e ? '✅ ' : ''}${e === 'medium' ? 'med' : e}`, `spd:e:${e}`)
+  kb.text(`${autoEffort ? '✅ ' : ''}🎲 auto`, `spd:e:${SPAWN_MODEL_AUTO}`)
+  for (const e of SPAWN_EFFORT_LEVELS) kb.text(`${a.spawnEffort === e ? '✅ ' : ''}${e === 'medium' ? 'med' : e}`, `spd:e:${e}`)
   kb.row().text(`${a.spawnEffort ? '' : '✅ '}⚡ Inherit effort`, 'spd:e:off').row()
   kb.text(`${spawnWideContext(a.spawnContext1m) ? '✅' : '☐'} 🪟 1M context`, 'spd:w:toggle').row()
   kb.text(`🔥 Fable for coding agents: ${fableOff ? 'off' : 'ask me first'}`, 'spd:f:toggle').row()
@@ -11776,7 +11804,7 @@ bot.on('callback_query:data', async ctx => {
       if (v !== 'off' && !SPAWN_MODEL_CHOICES.includes(v)) { await ctx.answerCallbackQuery({ text: 'Unknown model.' }).catch(() => {}); return }
       a.spawnModel = v === 'off' ? undefined : v
     } else {
-      if (v !== 'off' && !EFFORT_LEVELS.includes(v)) { await ctx.answerCallbackQuery({ text: 'Unknown effort.' }).catch(() => {}); return }
+      if (v !== 'off' && !SPAWN_EFFORT_CHOICES.includes(v)) { await ctx.answerCallbackQuery({ text: 'Unknown effort.' }).catch(() => {}); return }
       a.spawnEffort = v === 'off' ? undefined : v
     }
     saveAccess(a)
@@ -15325,7 +15353,7 @@ async function webappReadSettings(): Promise<WebappSettingsView> {
       // badge the model a session started right now would actually get. Showing 'auto' on the sheet
       // would be a dial that names a value nothing launches with.
       spawnModel: { value: a.spawnModel ?? 'off', resolved: spawnDefaultLaunchModel() ?? '', editable: true, options: ['off', SPAWN_MODEL_AUTO, ...MODEL_ALIASES.filter(m => !(m === FABLE && a.fableForAgents === 'off'))], label: 'coding sessions only — not this chat' },
-      spawnEffort: { value: a.spawnEffort ?? 'off', editable: true, options: ['off', ...EFFORT_LEVELS], label: 'coding sessions only — not this chat' },
+      spawnEffort: { value: a.spawnEffort ?? 'off', resolved: spawnDefaultLaunchEffort() ?? '', editable: true, options: ['off', ...SPAWN_EFFORT_CHOICES], label: 'coding sessions only — not this chat' },
       // Who may choose a model. Editable HERE and in /settings 🐣 because it is the knob that decides
       // whether an agent can spend on a model you didn't pick — the same reasoning that put the model
       // default on this tab. A tap in this app is a HUMAN choosing, so it is never itself carded.
@@ -15367,7 +15395,7 @@ function webappSetSetting(userId: string, key: string, value: unknown): string |
     }
     case 'spawnEffort': {
       const v = String(value)
-      if (v !== 'off' && !EFFORT_LEVELS.includes(v)) return `unknown effort — one of: off | ${EFFORT_LEVELS.join(' | ')}`
+      if (v !== 'off' && !SPAWN_EFFORT_CHOICES.includes(v)) return `unknown effort — one of: off | ${SPAWN_EFFORT_CHOICES.join(' | ')}`
       const a = loadAccess(); a.spawnEffort = v === 'off' ? undefined : v; saveAccess(a); return null
     }
     // Only the non-default is stored, same as the /settings toggle: an untouched install keeps no key
@@ -15839,8 +15867,7 @@ async function webappSessionSpawn(
   // a "+" with no model chip must still resolve to a real model rather than dropping to the CLI's own
   // default (the sheet says "follows Settings (auto → opus)" for exactly this reason).
   const model = asked ?? spawnDefaultLaunchModel()
-  const spawnEffortPref = loadAccess().spawnEffort
-  const effort = askedEffort ?? (spawnEffortPref && EFFORT_LEVELS.includes(spawnEffortPref) ? spawnEffortPref : null)
+  const effort = askedEffort ?? spawnDefaultLaunchEffort()
   const askedMode = opts.mode ? String(opts.mode) : null
   if (askedMode && !['default', 'acceptEdits', 'plan', 'bypassPermissions'].includes(askedMode)) return { error: `unknown mode '${askedMode}'` }
   // Same treatment as model/effort above, and the same bug being closed: with no mode dial,

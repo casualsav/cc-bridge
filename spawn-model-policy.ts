@@ -139,6 +139,22 @@ export function heldSpawnModel(outcome: HoldOutcome, alias: string, fallback: st
   return outcome === 'approved' ? alias : fallback
 }
 
+// ---- The same question for EFFORT ----
+//
+// Symmetric with the model's `auto`, and deliberately much smaller: effort costs nothing to get
+// wrong the way a model does, so there is no gate, no card and no ban here — only the same rule
+// about visibility. `auto` means the caller's `--effort` IS the decision; a caller that names none
+// gets a stated fallback and the confirmation says it fell back, rather than presenting a floor as a
+// choice. 'high' because that is what this fleet's sessions already run at: a fallback that quietly
+// downgraded every unspecified spawn would be a change of behaviour wearing a feature's clothes.
+export const AUTO_EFFORT_FALLBACK = 'high'
+
+export function decideEffort(requested: string | null, configuredDefault: string | null, auto: boolean): { effort: string | null; autoFallback: boolean } {
+  if (requested) return { effort: requested, autoFallback: false }
+  if (auto) return { effort: AUTO_EFFORT_FALLBACK, autoFallback: true }
+  return { effort: configuredDefault, autoFallback: false }   // null = inherit, exactly as before
+}
+
 // ---- Relaunching an existing session ----
 //
 // A refresh, a reopen, a revive: the session already exists, so this is not a spawn decision and the

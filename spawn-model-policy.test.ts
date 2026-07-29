@@ -1,7 +1,7 @@
 // Who gets to choose a session's model, and when a late tap has to confirm. Pure.
 // Run: bun test spawn-model-policy.test.ts
 import { test, expect } from 'bun:test'
-import { decideModel, upgradeNeedsConfirm, heldSpawnModel, holdTapData, parseHoldTap, launchFallback, spawnCardHeader, relaunchModel, AUTO_FALLBACK, UPGRADE_CTX_DELTA, type ModelAsk, type ModelDecision } from './spawn-model-policy.ts'
+import { decideModel, upgradeNeedsConfirm, heldSpawnModel, holdTapData, parseHoldTap, launchFallback, spawnCardHeader, relaunchModel, decideEffort, AUTO_FALLBACK, AUTO_EFFORT_FALLBACK, UPGRADE_CTX_DELTA, type ModelAsk, type ModelDecision } from './spawn-model-policy.ts'
 
 const NOW = 1_800_000_000_000
 // The shape of the box that had the incident: an owner-configured default, an agent calling.
@@ -185,6 +185,26 @@ test('with no configured default the fallback is a real model, not the CLI\'s ow
   expect(heldSpawnModel('timeout', 'fable', launchFallback(null))).toBe(AUTO_FALLBACK)
   expect(heldSpawnModel('denied', 'fable', launchFallback('fable'))).toBe(AUTO_FALLBACK)
   expect(heldSpawnModel('approved', 'fable', launchFallback(null))).toBe('fable')
+})
+
+// ---- auto EFFORT (2026-07-29) ----
+//
+// The model's rule, one size smaller: `auto` means the caller's --effort is the decision. No gate and
+// no card — effort does not cost what a model does — only the same honesty about a floor.
+test('auto effort honours the caller, and flags a fallback it had to invent', () => {
+  expect(decideEffort('low', null, true)).toEqual({ effort: 'low', autoFallback: false })
+  expect(decideEffort(null, null, true)).toEqual({ effort: AUTO_EFFORT_FALLBACK, autoFallback: true })
+})
+
+test('auto effort falls back to high — today\'s effective default, not a quiet downgrade', () => {
+  expect(AUTO_EFFORT_FALLBACK).toBe('high')
+})
+
+test('a fixed effort default is unchanged, and so is inherit', () => {
+  expect(decideEffort(null, 'xhigh', false)).toEqual({ effort: 'xhigh', autoFallback: false })
+  expect(decideEffort('low', 'xhigh', false)).toEqual({ effort: 'low', autoFallback: false })
+  // null = emit no --effort at all: the "⚡ Inherit effort" state, byte-for-byte as before.
+  expect(decideEffort(null, null, false)).toEqual({ effort: null, autoFallback: false })
 })
 
 // ---- relaunching an existing session (both sites: refreshSpawnModel + spawnSession's resume chain) ----
