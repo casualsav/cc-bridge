@@ -1,0 +1,12 @@
+{
+  "name": "cc-bridge-command-center-mock",
+  "mode": "preserve",
+  "layout": "app-shell: usage strip / collapsible fleet rail / chat body + composer",
+  "layoutWaiver": "In-app page inside an owner-ruled design system (webapp/CLAUDE.md); layout is the design decision, corpus archetypes are marketing-page shapes and do not apply.",
+  "donors": [
+    { "layer": "palette/type/radius/surface", "donor": "webapp/index.html house tokens", "why": "Preserve mode — every visual layer is pinned by owner rulings and Telegram theme variables; a foreign palette would break the --tg-theme contract." },
+    { "layer": "status accent", "donor": "linear (production principles: low-alpha tint + colored text for status on dark)", "why": "Attention treatment: 9% amber wash + 35% amber inset ring, amber from the app's own .dot.wait literal." }
+  ],
+  "motionWaiver": "The page forbids entrance motion and shadows by standing ruling (4s repaint would replay any reveal); only the existing .dot.on pulse carries motion, already reduced-motion gated.",
+  "patterns": []
+}
