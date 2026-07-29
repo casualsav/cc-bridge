@@ -1,7 +1,7 @@
 // Who gets to choose a session's model, and when a late tap has to confirm. Pure.
 // Run: bun test spawn-model-policy.test.ts
 import { test, expect } from 'bun:test'
-import { decideModel, upgradeNeedsConfirm, heldSpawnModel, holdTapData, parseHoldTap, launchFallback, spawnCardHeader, AUTO_FALLBACK, UPGRADE_CTX_DELTA, type ModelAsk, type ModelDecision } from './spawn-model-policy.ts'
+import { decideModel, upgradeNeedsConfirm, heldSpawnModel, holdTapData, parseHoldTap, launchFallback, spawnCardHeader, relaunchModel, AUTO_FALLBACK, UPGRADE_CTX_DELTA, type ModelAsk, type ModelDecision } from './spawn-model-policy.ts'
 
 const NOW = 1_800_000_000_000
 // The shape of the box that had the incident: an owner-configured default, an agent calling.
@@ -185,6 +185,31 @@ test('with no configured default the fallback is a real model, not the CLI\'s ow
   expect(heldSpawnModel('timeout', 'fable', launchFallback(null))).toBe(AUTO_FALLBACK)
   expect(heldSpawnModel('denied', 'fable', launchFallback('fable'))).toBe(AUTO_FALLBACK)
   expect(heldSpawnModel('approved', 'fable', launchFallback(null))).toBe('fable')
+})
+
+// ---- relaunching an existing session (both sites: refreshSpawnModel + spawnSession's resume chain) ----
+//
+// THE CONTROL, and the first thing to check after any change here: a session's OWN recorded alias
+// wins, for a chat lane too. Both cases below are this box's real lane (1ede4baa, remembered
+// 'fable') — once under a fixed coding default and once under `auto`, which resolves to no alias at
+// all. Neither may move it.
+test('a remembered alias always wins, chat lane included', () => {
+  expect(relaunchModel('fable', 'opus', true, 'opus')).toBe('fable')     // this box's lane, fixed default
+  expect(relaunchModel('fable', null, true, 'opus')).toBe('fable')       // …and under auto
+  expect(relaunchModel('sonnet', 'opus', false, 'opus')).toBe('sonnet')  // an ordinary session
+})
+
+// The leak this closes: a lane with nothing recorded (every lane on a fresh install — no
+// session-models.json exists yet) took the model configured for CODING sessions, on the first revive
+// a new user ever sees, under copy that says it does not.
+test('a chat lane with nothing remembered takes the floor, never the coding default', () => {
+  expect(relaunchModel(null, 'sonnet', true, 'opus')).toBe('opus')
+  expect(relaunchModel(null, null, true, 'opus')).toBe('opus')
+})
+
+test('an ordinary session with nothing remembered still takes the coding default', () => {
+  expect(relaunchModel(null, 'sonnet', false, 'opus')).toBe('sonnet')
+  expect(relaunchModel(null, null, false, 'opus')).toBe('opus')   // nothing configured: the floor
 })
 
 // ---- the spawn confirmation ----

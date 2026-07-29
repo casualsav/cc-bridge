@@ -29,7 +29,7 @@ import { normalizeCommandOutput } from './ansi.ts'
 import { planSlash } from './slash-policy.ts'
 import { preserveGlobalEffort, reconcileEffortScope } from './effort-scope.ts'
 import { planDrift, driftStateAfter, type DriftState } from './drift-guard.ts'
-import { decideModel, upgradeNeedsConfirm, heldSpawnModel, holdTapData, parseHoldTap, launchFallback, spawnCardHeader, AUTO_FALLBACK, FABLE, type ModelPolicy, type ModelDecision, type HoldOutcome } from './spawn-model-policy.ts'
+import { decideModel, upgradeNeedsConfirm, heldSpawnModel, holdTapData, parseHoldTap, launchFallback, spawnCardHeader, relaunchModel, AUTO_FALLBACK, FABLE, type ModelPolicy, type ModelDecision, type HoldOutcome } from './spawn-model-policy.ts'
 import { renderSessionsView } from './sessions-view.ts'
 import { detectCurrentMode, onNormalPrompt, inputBoxContent, isModelSwitchConfirm, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType } from './prompt.ts'
 import { modelSwitchEvidence, resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, turnAnchorUuid, liveSubagents, currentTurnFeed, currentTurnActivity, concludedTurnWork, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
@@ -5567,7 +5567,7 @@ async function handleCall(
           : ''
         let newPane: string | null
         if (!t0.agentSessionId) {
-          newPane = await spawnSession(t0.cwd, '', sid, topicAccount(t0), topicAgent(t0), undefined, { model: refreshSpawnModel(), effort: null })
+          newPane = await spawnSession(t0.cwd, '', sid, topicAccount(t0), topicAgent(t0), undefined, { model: refreshSpawnModel(sid), effort: null })
           text = `reopened @${t0.name} (${sid8}) fresh in ${t0.cwd} — the session never completed a turn, so there was nothing to resume; same name and topic.${othersNote}`
         } else {
           const resumeAlias = topicAgent(t0) === 'claude' ? reopenResumeModelAlias(t0.cwd, t0.agentSessionId) : null
@@ -8176,11 +8176,14 @@ type RestartTarget = { pane: string; sid: string | null; name: string; id: strin
 // about something else. Measured on 2026-07-26: a zero-turn refresh launched Opus because the pane
 // carried a stale @tg_session stamp from a killed session in an unrelated folder, whose remembered
 // alias was opus (sessionForPane reports a stamp verbatim; nothing validates that it still names a
-// live session). A fresh launch floors at fable by design; opus is reachable from here only by
-// declining the Fable credit consent.
-function refreshSpawnModel(): string {
+// live session).
+//
+// It takes a sid only to ask one question of it: is this a CHAT LANE? The coding-session default does
+// not apply to one, and this is one of the two sites that read it anyway — see relaunchModel.
+function refreshSpawnModel(sid: string | null): string {
   const pref = loadAccess().spawnModel
-  return (pref && MODEL_ALIASES.includes(pref) ? pref : null) ?? SPAWN_MODEL_FLOOR
+  return relaunchModel(null, pref && MODEL_ALIASES.includes(pref) ? pref : null,
+    sid != null && isChatLaneSession(sid), SPAWN_MODEL_FLOOR)
 }
 
 // The tail every restart flow shares: health-check each session back to a prompt, give the ones that
@@ -8231,7 +8234,7 @@ async function settleRestartedSessions(
     const alive = await paneAlive(t.pane).catch(() => false)
     const fresh = !alive && t.sid && t.cwd
       ? await spawnSession(t.cwd, t.id ? `--resume ${t.id}` : '', t.sid, topicAccount(getTopicBySession(t.sid)), topicAgent(getTopicBySession(t.sid)),
-          undefined, t.id ? undefined : { model: refreshSpawnModel() })
+          undefined, t.id ? undefined : { model: refreshSpawnModel(t.sid) })
       : null
     if (fresh) { t.pane = fresh; if (t.sid) await reopenSessionTopic(t.sid); retried.push(t) }
     else if (alive) retried.push(t)
@@ -8315,7 +8318,7 @@ async function relaunchFreshSession(t: RestartTarget): Promise<string | 'untouch
   if (t.sid) { recordSessionMode(t.sid, mode); recordSessionEffort(t.sid, effort) }
   // Floor chain only — see refreshSpawnModel for why a remembered alias can never be about this
   // launch. That also retires the old "never Haiku" guard here: the floor can't produce haiku.
-  const model = refreshSpawnModel()
+  const model = refreshSpawnModel(t.sid ?? null)
   setPaneRestarting(t.pane, true)
   try {
     const watcher = t.pane === focus.activePaneId ? focus.paneWatcher : null
@@ -10212,11 +10215,16 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
       // bottoms out at null — a resume/reopen must always emit SOME --model, or the CLI's own default
       // silently wins (that is how a reopen came back on Haiku 4.5, dragging the 1M window down with
       // it: model-window.ts's suffix has no model identifier to ride on with no --model flag at all).
+      // …with ONE exception, and it is the reason this reads through relaunchModel: a CHAT LANE skips
+      // the coding-session default. `ensureChatLane` revives with `-c` and no dials, so a lane whose
+      // model was never recorded came back on the model configured for coding sessions — which four
+      // surfaces now promise it does not touch. Its own remembered alias still wins, first, exactly
+      // as before: this changes only what happens when there is nothing to remember.
       const defaultSpawnModel = loadAccess().spawnModel
       const remembered = prefSid ? sessionModels.get(prefSid) : null
-      const model = remembered
-        ?? (defaultSpawnModel && MODEL_ALIASES.includes(defaultSpawnModel) ? defaultSpawnModel : null)
-        ?? SPAWN_MODEL_FLOOR
+      const model = relaunchModel(remembered ?? null,
+        defaultSpawnModel && MODEL_ALIASES.includes(defaultSpawnModel) ? defaultSpawnModel : null,
+        prefSid != null && isChatLaneSession(prefSid), SPAWN_MODEL_FLOOR)
       modelSource = remembered ? `remembered(${prefSid})` : model === defaultSpawnModel ? 'spawn-default' : 'floor'
       // Widen the guard to include model: it now always resolves to a floor, so a resume with default
       // mode and no effort must still seed the model instead of dropping it.
@@ -11898,7 +11906,7 @@ bot.on('callback_query:data', async ctx => {
     // floor, since there is no conversation to carry one in.
     const extra = t.agentSessionId ? `--resume ${t.agentSessionId}` : ''
     const ok = await spawnSession(t.cwd, extra, sid, topicAccount(t), topicAgent(t), undefined,
-      extra ? undefined : { model: refreshSpawnModel() })
+      extra ? undefined : { model: refreshSpawnModel(sid) })
     if (ok) await reopenSessionTopic(sid)   // reopen the tab NOW, not on first reply
     await channel.sendText(String(ctx.chat!.id), ok
       ? `🚀 Resuming <b>${escapeHtml(t.name)}</b> in <code>${escapeHtml(t.cwd)}</code> — it reopens in its topic shortly.`

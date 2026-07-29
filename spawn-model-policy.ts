@@ -139,6 +139,26 @@ export function heldSpawnModel(outcome: HoldOutcome, alias: string, fallback: st
   return outcome === 'approved' ? alias : fallback
 }
 
+// ---- Relaunching an existing session ----
+//
+// A refresh, a reopen, a revive: the session already exists, so this is not a spawn decision and the
+// gate has nothing to say about it. The order is the whole content — and the middle term is the one
+// that was wrong.
+//
+// REMEMBERED FIRST, ALWAYS, chat lane included. A session's own recorded alias is the only input here
+// that describes THAT session; nothing may override it, or a relaunch silently moves a session the
+// user never asked to move.
+//
+// The coding-session default is skipped for a CHAT LANE. `spawnModel` is documented — on four
+// surfaces since v0.4.214 — as applying to the coding sessions agents launch and NOT to the lane
+// talking to the owner. It was read here anyway, so a lane with no recorded model came back on the
+// coding default: false exactly where a new user reads it first, since a fresh install has no
+// session-models.json at all and every lane on it is unremembered. Chat lanes therefore fall
+// straight to the floor, which belongs to no feature and moves nobody's default onto them.
+export function relaunchModel(remembered: string | null, configuredDefault: string | null, isChatLane: boolean, floor: string): string {
+  return remembered ?? (isChatLane ? floor : configuredDefault ?? floor)
+}
+
 // ---- The spawn confirmation ----
 //
 // `🆕 Spawned @worker (on sonnet, high) — small doc edit`. The one line on a human surface that says
