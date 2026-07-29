@@ -23,11 +23,13 @@ function subagents(s: SessionCard): string {
 }
 
 function renderCard(s: SessionCard): string {
-  // Four states, three colours — the mini app's own mismatch (webapp/CLAUDE.md): `unreported` takes
-  // no colour of its own and says itself in the task line instead. 🟡 is the amber dot's stand-in;
-  // there is no still-vs-pulsing distinction to make in text, so the glyph carries it alone.
+  // Three states on this surface, and `unreported` is not one of them: it reads as DONE (the owner,
+  // 2026-07-29 — "it continuously shows up when work is actually done"). The state is still computed
+  // and still drives the bus (the roster's suffix, the report nudges); it is simply not something he
+  // is shown. 🟡 is the amber dot's stand-in; there is no still-vs-pulsing distinction to make in
+  // text, so the glyph carries it alone.
   const dot = !s.alive ? '💀' : s.state === 'working' ? '🟢' : s.state === 'waiting' ? '🟡' : '⚪'
-  const state = !s.alive ? 'dead' : s.state
+  const state = !s.alive ? 'dead' : s.state === 'unreported' ? 'idle' : s.state
   const lines = [`${dot} <b>${escapeHtml(s.name)}</b> — ${state}`]
 
   const chips: string[] = []
@@ -49,7 +51,6 @@ function renderCard(s: SessionCard): string {
   // session's last reply is ✅ rather than 💬 — idle now means "done", not merely "quiet".
   const line =
     s.state === 'waiting' && s.wait ? `⏳ waiting: ${escapeHtml(truncate(s.wait.label, TASK_MAX))}`
-    : s.state === 'unreported' ? `📤 unreported${s.unreported ? ` → @${escapeHtml(s.unreported.briefer)}` : ''}`
     // Delegated work is still work, and this view was the last surface not saying so: a session whose
     // subagents are editing files sits at its own prompt, so without the count it reads as one line of
     // stale reply text. Same words and same position as the mini app's card (webapp/index.html
@@ -66,7 +67,9 @@ function renderCard(s: SessionCard): string {
   const foot: string[] = []
   if (s.branch) foot.push(`🌿 ${escapeHtml(s.branch)}`)
   if (s.ctxPct != null) foot.push(`ctx ${s.ctxPct}% ${pctBar(s.ctxPct)}`)
-  if (s.h5Pct != null) foot.push(`5h ${s.h5Pct}%`)
+  // No 5h window here either (the owner, 2026-07-29): it is an ACCOUNT-level number, the same on every
+  // row, so repeating it per session said nothing about the session. `h5Pct` stays on the payload for
+  // the sessions-page display that is still to be designed.
   if (foot.length) lines.push(foot.join(' · '))
 
   return lines.join('\n')

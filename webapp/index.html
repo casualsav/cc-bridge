@@ -2185,13 +2185,14 @@ async function renderSessions() {
     // The task line is ONE line and the card's height is reflow, so a state that has something to say
     // says it INSTEAD of the last-reply snippet, never underneath it. For a waiting card the reason is
     // the more useful of the two by definition — the snippet is from before it started waiting.
-    // `unreported` gets no dot colour (three is what a 11px disc can carry) and lives here alone.
+    // `unreported` is NOT one of those states any more (the owner, 2026-07-29: "it continuously shows
+    // up when work is actually done"). It still exists — the bus computes it, the roster shows it and
+    // the report nudges run off it — but on a card it reads as done, like any other finished session.
     const line =
       // 🧑‍💻 working · ⏳ waiting (owner, 2026-07-29): the hourglass reads as "blocked, not moving",
       // so it belongs to the state that IS blocked, and working gets the person at the keyboard. The
       // same pair renders in `/sessions` (sessions-view.ts) — one state, one emoji on every surface.
       s.state === "waiting" && s.wait ? "⏳ waiting: " + esc(s.wait.label)
-      : s.state === "unreported" ? "📤 unreported" + (s.unreported ? " → @" + esc(s.unreported.briefer) : "")
       // ✅, not 💬, on the last-reply line: by the time this branch is reached the state is `idle`,
       // which since the fourth state landed means "at a prompt with nothing pending" — done, not
       // merely quiet. The owner's call. (`/sessions`, the Telegram text view, mirrors this line —

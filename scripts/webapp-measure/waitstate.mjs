@@ -110,7 +110,12 @@ async function measure(page, label, sink) {
   state(said.task?.startsWith("⏳ waiting: CI run 18832"), `a declared wait reads its own reason (${JSON.stringify(said.task)})`);
   state(proc.task?.startsWith("⏳ waiting: gh run watch"), `an inferred wait names the command it is running (${JSON.stringify(proc.task)})`);
   state(!said.task?.includes("Reading the transcript"), "and REPLACES the last-reply snippet, which predates the wait");
-  state(unrep.task?.startsWith("📤 unreported → @lead"), `unreported names who is waiting on the report (${JSON.stringify(unrep.task)})`);
+  // `unreported` left this surface on 2026-07-29 (the owner: "it continuously shows up when work is
+  // actually done"). It is still computed, still on the roster and still what the report nudges run
+  // off — it simply reads as DONE on a card, exactly like an idle session's last reply. A STATE
+  // check, not a guard: the baseline prints the 📤 line, so this must fail there.
+  state(unrep.task?.startsWith("✅ ") && !unrep.task.includes("📤"),
+    `unreported reads as done, like any finished session (${JSON.stringify(unrep.task?.slice(0, 24))})`);
   // A STATE check since the ✅ swap: the baseline prints 💬 here, so this fails there — which is
   // what "idle now means done, not merely quiet" is worth as a claim.
   state(idle.task?.startsWith("✅ "), `an idle card marks its last reply DONE (${JSON.stringify(idle.task?.slice(0, 24))})`);
@@ -162,8 +167,9 @@ async function measure(page, label, sink) {
   state(far(px.wait, px.idle) >= 40, `waiting and idle are TOLD APART on the SCREEN — ${far(px.wait, px.idle)}/255 (${px.wait} vs ${px.idle})`);
   for (const [x, y] of [["work", "wait"], ["wait", "dead"]])
     guard(far(px[x], px[y]) >= 40, `${x} and ${y} stay far apart on the SCREEN — ${far(px[x], px[y])}/255 (${px[x]} vs ${px[y]})`);
-  // The unreported card deliberately does NOT take a fourth colour: three is what an 11px disc carries.
-  guard(far(px.idle, await ink(unrep)) <= 4, "unreported keeps the idle dot — its state lives in the task line");
+  // The unreported card deliberately does NOT take a fourth colour: three is what an 11px disc carries
+  // — and since the state left the task line too, the idle dot is now the whole of what it renders as.
+  guard(far(px.idle, await ink(unrep)) <= 4, "unreported keeps the idle dot — it reads as a finished session");
 
   // ---- 4. It costs the card no height ----------------------------------------------------------
   // Against the SHORT idle card: a wait label is one line and a last-reply snippet is two, so

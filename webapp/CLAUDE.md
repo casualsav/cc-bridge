@@ -368,16 +368,20 @@ give it.
 
 ## Sessions list and spawn sheet
 
-- **A card has FOUR states and THREE dot colours, and the mismatch is the design.** `working`
+- **A card has FOUR states, THREE dot colours and only THREE it renders at all.** `working`
   (green, pulsing) · `waiting` (amber, **still**) · `unreported` and `idle` (both the `--hint` grey).
   The pulse is what says *moving*, so a second animated state would leave two of them reading as
   live — stillness is what tells waiting from working, not the hue. `unreported` deliberately takes
-  no fourth colour: four semantic colours on an 11px disc is past what a disc can carry, so its state
-  lives in the task line alone. The amber is a literal for the same reason `.dot.on`'s green is
+  no fourth colour: four semantic colours on an 11px disc is past what a disc can carry. It no longer
+  takes a task line either — the owner, 2026-07-29: "it continuously shows up when work is actually
+  done", so on BOTH card surfaces it reads as a finished session (`✅ <last reply>`, idle's own grey).
+  The state itself is untouched: `wait-state.ts` still computes it, `tg roster` still shows it, and
+  the bus's report nudges still run off it. It is not user-facing; it is not gone. The amber is a literal for the same reason `.dot.on`'s green is
   (a token would make a frozen indicator inheritable). `waitstate.mjs` measures all of it — sampling
   RENDERED pixels, because a declared colour that resolves to the ground passes every
   computed-style assertion and is invisible on the device.
-- **A state with something to say REPLACES the task line, never appends to it.** The line is
+- **A state with something to say REPLACES the task line, never appends to it** — `waiting` is now
+  the only one that does. The line is
   `-webkit-line-clamp: 1` (the owner's call, down from 2 on 2026-07-29: a card is a glance, and the
   second line bought a wrapped fragment rather than a second fact) and the card's height is reflow —
   the fullest card measures 96px where it was 116. So `⏸️ waiting: gh run watch` stands where the

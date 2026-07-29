@@ -30,7 +30,7 @@ test('full working card: chips, task, footer with bar', () => {
     `🟢 <b>my-project</b> — working\n` +
     `<code>sonnet ⚡med · bypass · codex</code>\n` +
     `🧑‍💻 refactoring the daemon\n` +
-    `🌿 main · ctx 62% ▰▰▰▰▰▰▱▱▱▱ · 5h 41%`
+    `🌿 main · ctx 62% ▰▰▰▰▰▰▱▱▱▱`
   expect(out).toBe(expected)
 })
 
@@ -95,18 +95,30 @@ test('waiting with no reason falls back to the last reply', () => {
   expect(out).toContain('✅ still the last reply')
 })
 
-test('unreported card: grey dot, its own state word, named briefer', () => {
+// The owner, 2026-07-29: "get rid of the unreported state from being user-facing and just default to
+// done — it continuously shows up when work is actually done." The state still exists and still runs
+// the bus's report nudges; this surface simply renders a session that has finished as finished.
+test('unreported reads as DONE: idle word, the last reply, no 📤 anywhere', () => {
   const c = card({ state: 'unreported', unreported: { briefer: 'chat' }, task: 'work it never reported' })
   const out = renderSessionsView([c], NOW)
-  expect(out).toContain('⚪ <b>my-project</b> — unreported')
-  expect(out).toContain('📤 unreported → @chat')
-  expect(out).not.toContain('work it never reported')
+  expect(out).toContain('⚪ <b>my-project</b> — idle')
+  expect(out).toContain('✅ work it never reported')
+  expect(out).not.toContain('📤')
+  expect(out).not.toContain('@chat')
 })
 
-test('unreported with no briefer names none', () => {
-  const out = renderSessionsView([card({ state: 'unreported', unreported: null })], NOW)
-  expect(out).toContain('📤 unreported')
-  expect(out).not.toContain('→')
+test('…and an unreported session with nothing to say says nothing', () => {
+  const out = renderSessionsView([card({ state: 'unreported', unreported: null, task: null })], NOW)
+  expect(out).toContain('⚪ <b>my-project</b> — idle')
+  expect(out).not.toContain('📤')
+})
+
+// The 5h window leaves this surface too — account-level, identical on every row (same ruling as the
+// mini app's cards). It stays on the payload for the sessions-page display still to be designed.
+test('no card carries a 5h reading, however full its payload', () => {
+  const out = renderSessionsView([card({ h5Pct: 41, ctxPct: 62, branch: 'main', task: 'x' })], NOW)
+  expect(out).not.toContain('5h')
+  expect(out).toContain('ctx 62%')
 })
 
 test('a wait label is escaped and truncated like a task', () => {
