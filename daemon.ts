@@ -2848,6 +2848,35 @@ function busDeliver(pane: string, block: string): Promise<boolean> {
 // chevron. outboundTargetsFor resolves the pane to its DM/topic; the body is capped to keep the message
 // under TG's 4096. Falls back to a classic expandable-quote HTML message if the rich send fails.
 const ASK_QUOTE_CAP = 3500
+// A POST is the one bus surface that is NOT a chevron card and NOT silent — the owner's ruling
+// (2026-07-29), from an incident where a worker's blocking question landed in his DM collapsed behind a
+// chevron and he simply missed it. So: expanded by default, no disclosure to open, the same gold 📣 and
+// the sending session's name as the header, and a NOTIFYING send (sound/banner per his client). Every
+// other bus card stays collapsed and silent, deliberately — a post is a session reaching for a human,
+// which none of the others are.
+const POST_CAP = 3800
+async function sendPost(chat: string, fromName: string, body: string): Promise<void> {
+  const shown = body.length > POST_CAP ? body.slice(0, POST_CAP) + '…' : body
+  const html = `📣 <b>@${escapeHtml(fromName)}</b>\n${escapeHtml(shown)}`
+  await channel.sendText(chat, html).catch(e => process.stderr.write(`daemon: post send failed: ${e}\n`))
+}
+
+// The chat lane's copy of a worker's post, as an @system FYI in its CONTEXT (not a card — it is an
+// agent, and a card is not somewhere it can read). Never sent to the poster itself: the chat lane
+// posting to the humans must not wake itself, and a lane's own post is already in front of him.
+async function notifyLanesOfPost(fromSid: string | null, fromName: string, body: string): Promise<void> {
+  for (const { sessionId } of listDmChatSessions()) {
+    if (!sessionId || sessionId === fromSid) continue
+    const pane = await paneForSession(sessionId).catch(() => null)
+    if (!pane) continue
+    const text = `(@${fromName} posted to the humans — if it is a question, you are the one who can answer it: ${body})`
+    const n = createPending({ fromSid: SYSTEM_SID, toSid: sessionId, fromName: 'system',
+      toName: nameForEndpoint(sessionId, busEndpoints()), text, refs: [], noReply: true, quiet: true, depth: 0 }, Date.now())
+    appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'ack', from: 'system', to: n.toName, id: n.id, text: `post relay: @${fromName}` })
+    await tryDeliverAsk(n).catch(() => {})
+  }
+}
+
 // One bus card to one chat/thread — the shared renderer behind every bus surface (ask mirrors,
 // answer mirrors, lane-routed posts), so they all carry the same chevron format.
 async function sendBusCard(chat: string, thread: number | undefined, header: string, body: string): Promise<void> {
@@ -5355,7 +5384,14 @@ async function handleCall(
         if (lanes.length) {
           // Same chevron card as every other bus surface — sent straight to the lane's chat id (not
           // through notifyBusRich's pane resolution) so a dead lane pane can't drop a post.
-          for (const chat of lanes) await sendBusCard(chat, undefined, `📣 <b>@${escapeHtml(fromName)}</b>`, body)
+          for (const chat of lanes) await sendPost(chat, fromName, body)
+          // A post from a WORKER also lands on the chat lane as a bus FYI. A post is the one bus verb
+          // aimed at a human, and a headless worker has no other surface — so when one asks a blocking
+          // question ("Quick check before I build part 1: …") the only party who could answer it is an
+          // orchestrator that was never told (owner-verified, 2026-07-29: the worker sat blocked and he
+          // found it by eyeballing the pane). Every post, not just a question: whether a post awaits a
+          // reply is not knowable from its text, and guessing that wrong is the incident itself.
+          await notifyLanesOfPost(fromSid, fromName, body).catch(() => {})
           text = 'posted to the owner’s chat'
           break
         }
@@ -5401,7 +5437,12 @@ async function handleCall(
         // reader working out why nobody was told needs to see both that the expiry happened and that
         // the notice was withheld. Hiding it would trade a false alarm for a missing record.
         text = es.length
-          ? es.map(e => `${e.kind === 'answer' ? '✓' : e.kind === 'ask' ? '→' : e.kind === 'ack' ? 'ℹ️' : e.kind === 'btw' ? '💬' : e.kind === 'post' ? '📣' : e.kind === 'expire' ? '⌛' : e.kind === 'keys' ? '⌨️' : '·'} ${e.from}${e.to ? `→${e.to}` : ''}${e.id ? ` #${e.id}` : ''}: ${e.text.slice(0, 100)}${e.suppressed ? ' (no notice sent — asker already answered)' : ''}`).join('\n')
+          // A POST is printed IN FULL, alone among the kinds. It is a session reaching for a human, so
+          // history is often the only place its text survives — and a post that BLOCKED its sender on an
+          // answer, clamped to 100 chars, is how one went unanswered on 2026-07-29 (the owner found the
+          // block by eyeballing a pane). Every other kind stays clamped: they are correlation handles
+          // whose payload lives in the pane it was delivered to.
+          ? es.map(e => `${e.kind === 'answer' ? '✓' : e.kind === 'ask' ? '→' : e.kind === 'ack' ? 'ℹ️' : e.kind === 'btw' ? '💬' : e.kind === 'post' ? '📣' : e.kind === 'expire' ? '⌛' : e.kind === 'keys' ? '⌨️' : '·'} ${e.from}${e.to ? `→${e.to}` : ''}${e.id ? ` #${e.id}` : ''}: ${e.kind === 'post' ? e.text : e.text.slice(0, 100)}${e.suppressed ? ' (no notice sent — asker already answered)' : ''}`).join('\n')
           : '(no bus history yet)'
         break
       }
