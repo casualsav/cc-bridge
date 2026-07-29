@@ -254,6 +254,20 @@ export function queuedFor(toSid: string): BusPending[] {
 // the session is doing now is its own work, not the answer to that brief.
 export const BRIEFER_TTL_MS = 24 * 60 * 60_000
 
+// How long after a report its own wrap-up still counts as part of it. Reporting is not the last thing
+// a session does — it answers, then prunes the handoff it was told to prune, commits, deletes a
+// scratch file — and every one of those is a tool call dated AFTER the report. Without this window the
+// flag re-armed on the housekeeping the answer itself asked for: measured on this session 2026-07-29,
+// `tg answer 689` at 01:51:36 and one Edit to the handoff doc at 01:51:50 was enough to read
+// `unreported 5m ago → @chat` while all four asks had been answered.
+//
+// It DEFERS, never suppresses: a session that keeps working past the window flags the moment it
+// passes, so "answered, then kept working" — the case the strict rule exists for — still fires, at
+// most this late. And because `working` outranks `unreported` in sessionState, the marker is only ever
+// READ at a prompt, so the only thing this window can hide is work that finished within it and then
+// stopped. That is a wrap-up by definition.
+export const REPORT_WRAPUP_MS = 3 * 60_000
+
 function reportedMap(): Record<string, number> { ensureLoaded(); return (store.reportedAt ??= {}) }
 function briefedMap(): Record<string, { fromSid: string; fromName: string; at: number }> { ensureLoaded(); return (store.briefedBy ??= {}) }
 
@@ -290,8 +304,10 @@ export function unreportedWorkMarker(args: {
   if (!briefedBy || now - briefedBy.at > BRIEFER_TTL_MS) return null   // nobody is waiting: a human-driven session's human is watching the pane
   if (work.count < 3 && !work.mutating) return null // a glance at a file or one grep is not a result anyone is waiting for
   // Against the LAST ACTIVITY, not the turn start, on purpose — that is what catches "answered, then
-  // kept working", where a report exists but predates the result it would have to describe.
-  if ((args.reportedAt ?? 0) >= work.lastAt) return null   // it reported after finishing
+  // kept working", where a report exists but predates the result it would have to describe. Plus the
+  // wrap-up window, because the strict form called a session's own post-answer housekeeping new work
+  // and told the owner nobody had been told (see REPORT_WRAPUP_MS).
+  if ((args.reportedAt ?? 0) + REPORT_WRAPUP_MS >= work.lastAt) return null   // it reported after finishing
   return { briefer: briefedBy.fromName, since: work.lastAt }
 }
 

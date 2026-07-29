@@ -6,7 +6,7 @@
 // survived the mechanism: it is computed only when someone is already looking, and writes nothing.
 // Every `null` below is a false positive someone would otherwise see a marker for.
 import { test, expect } from 'bun:test'
-import { unreportedWorkMarker, BRIEFER_TTL_MS } from './agent-bus.ts'
+import { unreportedWorkMarker, BRIEFER_TTL_MS, REPORT_WRAPUP_MS } from './agent-bus.ts'
 import { concludedTurnWork } from './transcript.ts'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -56,8 +56,26 @@ test('it reported after finishing — nothing is unreported', () => {
   expect(marker({ reportedAt: WORK.lastAt })).toBeNull()
 })
 
-test('ANSWERED, THEN KEPT WORKING: a report that predates the last activity does not cover it', () => {
-  expect(marker({ reportedAt: WORK.lastAt - 1 })).toEqual(MARKER)
+test('ANSWERED, THEN KEPT WORKING: a report the last activity has left far behind does not cover it', () => {
+  expect(marker({ reportedAt: WORK.lastAt - REPORT_WRAPUP_MS - 1 })).toEqual(MARKER)
+})
+
+// The false positive this session was itself the subject of on 2026-07-29: four asks answered, and
+// the roster read `unreported 5m ago → @chat` because pruning the handoff — housekeeping the answer
+// had just promised — was one Edit dated 14s after `tg answer`. A report is not the last thing a
+// session does, and the flag must not treat its own wrap-up as work nobody was told about.
+test('a REPORT AND ITS WRAP-UP are one act — trailing housekeeping does not re-arm the flag', () => {
+  expect(marker({ reportedAt: WORK.lastAt - 14_000 })).toBeNull()
+  // The window defers; it never suppresses. One millisecond past it and the flag is back.
+  expect(marker({ reportedAt: WORK.lastAt - REPORT_WRAPUP_MS })).toBeNull()
+  expect(marker({ reportedAt: WORK.lastAt - REPORT_WRAPUP_MS - 1 })).toEqual(MARKER)
+})
+
+// A session that never reported at all is not rescued by the window — reportedAt 0 plus three
+// minutes is still 1970, and the whole point is that this case must keep firing.
+test('never reported: the window cannot excuse silence', () => {
+  expect(marker({ reportedAt: undefined })).toEqual(MARKER)
+  expect(marker({ reportedAt: 0 })).toEqual(MARKER)
 })
 
 // What the roster row renders: `since` dates the marker off the last activity (fmtAgo reads it), and
