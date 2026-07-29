@@ -860,9 +860,13 @@ export function bashModeArmed(paneText: string): boolean {
 // markdown bullet ("* retry (3s timeout)") would read as a live pane. parseWorkingLine adds it back
 // because it demands the verb's "…"/"(" shape on top.
 const SPINNER_GLYPHS = '✢✳✶✻✽✺✷✸✹·●◐◓◑◒'
-// 16 lines: a multi-line statusline + input box + hint rows can push the live spinner line
-// ~12 lines above the pane bottom in the worst observed layout, past what an 8-line tail covers.
-const WORKING_TAIL = 16
+// 40 lines: the worst observed layout (v2.1.220) stacks an attached "⎿"-gutter task list (6 lines),
+// a queued-message echo, the "Press up to edit queued messages" input box, a 4-line statusline, and
+// a 3-line background-agents panel below the spinner — ~21 lines of chrome, pushing the live line
+// well past the old 16-line tail. That version also stopped printing "esc to interrupt", so the
+// spinner-timer regex below is detectWorking's only remaining marker and losing the line to a short
+// tail means missing a turn entirely rather than just reading it late.
+const WORKING_TAIL = 40
 // Live spinner status line: glyph, verb, then an elapsed timer — "(12s", "(3m 56s", "(1h 2m" — any
 // h/m/s unit. Anchored to line start (≤2 leading spaces) so quoted spinner text echoed elsewhere in
 // the pane — tool-result "  ⎿  " lines, grep's "NN:" prefixes — can't false-positive.

@@ -1,6 +1,6 @@
 // Prompt detection from pane captures — select menus vs permission dialogs. Pure functions.
 import { test, expect } from 'bun:test'
-import { slashPaletteEntries, stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, detectFirstRunScreen, isUsageLimitChoice, isResumeSessionPrompt, detectResumeSessionPrompt, detectEditorState, onNormalPrompt, detectModelUnavailable, detectCompacting, compactPercent, permPromptToken, waitingPromptSignature, isRecognizedPrompt, detectStuckScreen, extractGenericOptions, bashModeArmed, detectWorking, isModelSwitchConfirm, slashPaletteRows, slashPaletteWouldMisfire, inputBoxContent, submitLanded, detectModelPicker } from './prompt.ts'
+import { slashPaletteEntries, stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, detectFirstRunScreen, isUsageLimitChoice, isResumeSessionPrompt, detectResumeSessionPrompt, detectEditorState, onNormalPrompt, detectModelUnavailable, detectCompacting, compactPercent, permPromptToken, waitingPromptSignature, isRecognizedPrompt, detectStuckScreen, extractGenericOptions, bashModeArmed, detectWorking, isModelSwitchConfirm, slashPaletteRows, slashPaletteWouldMisfire, inputBoxContent, submitLanded, detectModelPicker, parseWorkingStatus } from './prompt.ts'
 
 test('stripAnsi removes CSI escape sequences', () => {
   expect(stripAnsi('\x1b[1mbold\x1b[0m text')).toBe('bold text')
@@ -910,6 +910,63 @@ test('detectWorking ignores quoted/echoed spinner text that is not a live status
 test('detectWorking still catches the legacy "esc to interrupt" footer within the 16-line tail', () => {
   const pane = modernLayout('  ✻ Working… (12s · esc to interrupt)')
   expect(detectWorking(pane)).toBe(true)
+})
+
+// v2.1.220's worst observed layout: an attached "⎿"-gutter task list, a queued-message echo sitting
+// in its own input box, the 4-line statusline, and the 3-line background-agents panel all stack
+// BELOW the spinner — ~21 lines of chrome, past even the modern-layout footer above. This build also
+// stopped printing "esc to interrupt", so the timer regex on the spinner line is the only marker
+// left; missing it here means the working row silently disappears for the whole turn, not just late.
+const v2_1_220Layout = (spinnerLine: string | null) => {
+  const conversation = Array.from({ length: 20 }, (_, i) => `line of conversation ${i + 1}`)
+  const chrome = [
+    '  ⎿  Update Todos',
+    '     ☒ Pull weather countdown strip data',
+    '     ☐ Compress chart key overlay',
+    '     ☐ Re-render dashboard tiles',
+    '     ☐ Verify against last capture',
+    '     ☐ Ship',
+    '',
+    '❯ check the humidity panel next',
+    '',
+    '────────────────────────────────────────────────',
+    '❯ Press up to edit queued messages',
+    '────────────────────────────────────────────────',
+    '  ubuntu@cloud:/home/ubuntu/projects/fugue/webapp (master) | Fable 5',
+    '  ε:high | ✻think | ctx ██░░░░░░░░ 18%/1000k | ↑176.4k ↓705 | $374.7753 | ⧗25h45m',
+    '  5h █████░░░░░░░░░ 33% ↻2h03m | 7d █████████░░░░░ 62% ↻118h03m',
+    '  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents',
+    '',
+    '  ● main',
+    '  ◯ engineer  Compress chart key overlay          10m 48s · ↓ 70.6k tokens',
+    '  ◯ engineer  Verify against last capture           6m 12s · ↓ 22.1k tokens',
+  ]
+  const lines = spinnerLine ? [...conversation, spinnerLine, ...chrome] : [...conversation, ...chrome]
+  return lines.join('\n')
+}
+
+test('detectWorking / parseWorkingStatus reach the spinner past the v2.1.220 task-list + queued-echo + agents-panel stack', () => {
+  const pane = v2_1_220Layout('✢ Compressing weather countdown strip and chart key… (41s · ↓ 1.9k tokens · thought for 6s)')
+  expect(detectWorking(pane)).toBe(true)
+  expect(parseWorkingStatus(pane)).toEqual({ verb: 'Compressing weather countdown strip and chart key', elapsed: '41s', tokens: '1.9k tokens' })
+})
+
+test('the background-agents panel never reads as a spinner on its own (no live line, idle prompt)', () => {
+  // "◯ engineer … 10m 48s · ↓ 70.6k tokens" carries an elapsed time and a token count in the exact
+  // shape a spinner line does, but ◯ is not one of the glyphs the spinner regexes anchor on — a
+  // wider tail window must not turn that near-miss into a false "working" read.
+  const pane = [
+    '  ────────────',
+    '  ❯ ',
+    '  ────────────',
+    '   ? for shortcuts',
+    '',
+    '  ● main',
+    '  ◯ engineer  Compress chart key overlay          10m 48s · ↓ 70.6k tokens',
+    '  ◯ engineer  Verify against last capture           6m 12s · ↓ 22.1k tokens',
+  ].join('\n')
+  expect(detectWorking(pane)).toBe(false)
+  expect(parseWorkingStatus(pane)).toBeNull()
 })
 
 // ---- first-run wizard (adoption announce) ----

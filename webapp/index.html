@@ -2957,6 +2957,33 @@ async function applyDial(kind, val) {
   renderDrill();
 }
 $("dstop").onclick = async () => { if (await sessionAct("stop")) showOk("Interrupted"); };
+// Android voice dictation keeps its insertion session open across a send: clearing the composer
+// below does not end it, and the IME goes on to commit whatever trailing chunk of speech it had
+// already buffered — straight into the now-empty field a beat later. Watched live: the full
+// dictated message sent correctly (the bubble shows all of it), then a fragment of it ("in their
+// current tasks") reappeared in the box on its own. Nothing fires when a dictation session
+// actually ends, so this can't be caught by timing alone — it's caught by shape: arm a one-shot
+// guard with the text that was just sent, and let the very next `input` event decide. A false
+// clear here destroys real typing, so every check leans toward missing the bug rather than firing
+// on it: the guard is single-use (the FIRST input event since the send consumes it, pass or fail —
+// there is never a second look), it expires after 1500ms (residue lands within a beat of the send;
+// dictation resumed minutes later is a NEW message and must never be swept into this), and it
+// requires an exact suffix of the sent text at least 4 characters long (new speech is not an exact
+// tail of the previous message, so this is what actually tells "leftover" apart from "new"). Because
+// the check only runs on that first event and nothing else touches the field in between, the field
+// is necessarily empty right up to that event — so a suffix match can only be the dictation
+// leftover, never residue appended after something the user had already typed.
+let dictationResidueGuard = null;   // { text, at } while armed, else null
+function armDictationResidueGuard(text) { dictationResidueGuard = { text, at: Date.now() }; }
+function checkDictationResidueGuard() {
+  const g = dictationResidueGuard;
+  if (!g) return;
+  dictationResidueGuard = null;   // consumed either way — win or lose, it does not get a second try
+  if (Date.now() - g.at > 1500) return;
+  const cur = $("dtext").value.trim();
+  if (cur.length < 4 || !g.text.endsWith(cur)) return;
+  $("dtext").value = "";   // caller (the oninput handler) runs syncComposerMode right after this
+}
 // Compaction is reached by typing /compact in the composer, so the button is gone. Closing moved to the
 // sessions list (see closeSessionCard) — from inside a session there is nothing left to end but the one
 // you navigated into, and the list is where you can see which of several you mean.
@@ -2967,7 +2994,7 @@ $("dsend").onclick = async () => {
   // attach-and-go, just with a chance to change your mind first.
   if (staged.length) {
     const files = staged.slice();
-    ta.value = ""; clearStage();   // clearStage syncs the composer, so this covers both
+    ta.value = ""; clearStage(); armDictationResidueGuard(text);   // clearStage syncs the composer, so this covers both
     // One upload per file, IN ORDER and awaited: the endpoint takes a single file, and firing them
     // concurrently would let them land in the pane interleaved — a before/after pair arriving in the
     // wrong order is worse than a slower send. The caption rides with the FIRST, the way an album
@@ -2989,7 +3016,7 @@ $("dsend").onclick = async () => {
     return;
   }
   if (!text) return;
-  ta.value = ""; syncComposerMode();
+  ta.value = ""; syncComposerMode(); armDictationResidueGuard(text);
   // Optimistic: the bubble shows the instant you hit send (dimmed while in flight), instead of
   // waiting for the POST + transcript echo + poll round-trip.
   // A COMMAND gets none, and the argument is the file-send one a few lines down, verbatim: the
@@ -3193,7 +3220,7 @@ function syncComposerMode() {
   $("dmic").style.display = showSend ? "none" : "flex";
   growComposer();
 }
-$("dtext").oninput = syncComposerMode;
+$("dtext").oninput = () => { checkDictationResidueGuard(); syncComposerMode(); };
 // A width change re-wraps the text, so the height measured for the old width is stale and the
 // resting scroll position no longer shows the end — measured: a 30px narrower field moved the
 // bottom 44px away without a single keystroke. Nothing else re-enters the resize on a viewport
