@@ -389,6 +389,16 @@ give it.
   (a token would make a frozen indicator inheritable). `waitstate.mjs` measures all of it — sampling
   RENDERED pixels, because a declared colour that resolves to the ground passes every
   computed-style assertion and is invisible on the device.
+- **The ONE exception to that amber: a waiting CHAT lane is green** (`.dot.rest`, the owner
+  2026-07-29 — a chat lane waiting on its human is its resting state, not a stall, and amber reads
+  as a problem where nothing is wrong). It is `.dot.on`'s green **without the pulse**, which is the
+  rule above being obeyed rather than broken: stillness is still what tells waiting from working, so
+  the hue is free to move. Branched off the payload's own `chat` flag beside the bare-title-row
+  rule, never a name match, and it is one branch on one state — every other session's waiting stays
+  amber and the chat lane's own working/idle are untouched. `chatrest.mjs` measures the whole
+  {chat, worker} × {working, waiting, idle} matrix for exactly that reason; the drill-in header
+  (`#ddot`) is NOT in it and still paints a waiting chat lane amber — `SessionFeed` carries no
+  `chat` flag, so closing that gap is a daemon-side payload change nobody has asked for yet.
 - **A state with something to say REPLACES the task line, never appends to it** — `waiting` is now
   the only one that does. The line is
   `-webkit-line-clamp: 1` (the owner's call, down from 2 on 2026-07-29: a card is a glance, and the

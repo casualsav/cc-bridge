@@ -207,6 +207,13 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   must hold on both. Dots are scrolled into view before sampling:
                                   #   a clip outside the image throws, and a control that throws
                                   #   reports nothing
+    node chatrest.mjs [page] [out] # the CHAT lane's waiting dot is green and nobody else's is — the
+                                  #   {chat, worker} × {working, waiting, idle} matrix, colours sampled
+                                  #   from the render against the two literals. The pulse is FROZEN at
+                                  #   its 0% keyframe before each shot: an unfrozen working dot samples
+                                  #   green-over-card at whatever phase the frame caught (52,100,68) and
+                                  #   reads as a colour change on both pages. Same pinned-baseline split
+                                  #   as waitstate: 4 STATE checks must fail there, 9 guards must hold
     node thoughts.mjs [page] [out] # a turn's NARRATION is quoted and its answer is not. Three kinds of
                                   #   claim, three instruments: the marking is structural and fails
                                   #   wholesale on a pre-change page; the ABSENCE of a demotion (same

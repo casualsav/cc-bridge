@@ -559,6 +559,12 @@
      indicator inheritable. Amber built from .dot.dead's construction, not Material's #ffc107, which
      next to that softened red reads as a different palette arriving. */
   .dot.wait { background: #e0a33e; }
+  /* The CHAT lane's waiting, and only that lane's (the owner, 2026-07-29): a chat waiting on its
+     human is its resting state, not a stall, and amber reads as a problem where nothing is wrong.
+     `.dot.on`'s green, deliberately without its pulse — the file's rule is that STILLNESS tells
+     waiting from working and the hue does not, so this borrows the colour and keeps the distinction
+     the pulse carries. It is the same literal as `.dot.on` for the same reason its neighbours are. */
+  .dot.rest { background: #4caf50; }
   .dot.dead { background: #e05555; }
   @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
   .chip { font-size: var(--t-meta); color: var(--hint); background: var(--bg); border-radius: 6px; padding: 2px 7px; white-space: nowrap; }
@@ -2184,7 +2190,12 @@ async function renderSessions() {
     // The dead states below no longer have a producer: /api/sessions drops a session from the list
     // once two reads confirm it gone (webappListSessions), so a card only exists while its session
     // does. Kept as the client's own floor, not as a state to design for.
-    const dot = !s.alive ? "dead" : s.working ? "on" : s.state === "waiting" ? "wait" : "";
+    // The chat lane's waiting is green, not amber (the owner, 2026-07-29): waiting on its human is
+    // what that lane does at rest, so the colour every other card uses for "blocked" reads as a
+    // problem there. Off the payload's own `chat` flag, like the bare title row above it — never a
+    // name match. Every other session's waiting is untouched, and so are the chat lane's own other
+    // states: it is one branch, on one state, on one lane.
+    const dot = !s.alive ? "dead" : s.working ? "on" : s.state === "waiting" ? (s.chat ? "rest" : "wait") : "";
     const chips = dialParts(s);
     // The task line is ONE line and the card's height is reflow, so a state that has something to say
     // says it INSTEAD of the last-reply snippet, never underneath it. For a waiting card the reason is
