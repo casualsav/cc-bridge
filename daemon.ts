@@ -15436,9 +15436,14 @@ function webappSetSetting(userId: string, key: string, value: unknown): string |
 }
 // ---- Fleet dashboard (Sessions tab) ----
 
-// A DM chat lane is labeled with the user's @handle, not their numeric Telegram id (the id means
-// nothing to the owner). Resolved via getChat once per chat and cached for the daemon's lifetime;
-// until the async fetch lands (or for users with no @username), the numeric id shows as fallback.
+// A DM chat lane is labeled with the user's @handle, and NEVER with their numeric Telegram id — the
+// id means nothing to the owner and it is his own account staring back at him out of a UI. Resolved
+// via getChat once per chat and cached for the daemon's lifetime. Until the fetch lands (or for a
+// user with no @username) the card reads plain "Chat": a label that is merely less specific, rather
+// than one that leaks an id and then swaps itself out.
+// warmDmHandles() runs at startup so the common case is resolved long before the mini app is opened —
+// the owner saw the id flash and become the handle, and a cache filled on first READ can only ever be
+// cold for the first paint.
 const tgHandleCache = new Map<string, string | null>()
 function handleForDmChat(chatId: string): string | null {
   if (!tgHandleCache.has(chatId)) {
@@ -15450,10 +15455,12 @@ function handleForDmChat(chatId: string): string | null {
   }
   return tgHandleCache.get(chatId) ?? null
 }
+function warmDmHandles(): void { for (const { chatId } of listDmChatSessions()) handleForDmChat(chatId) }
 
 // Every addressable session for the dashboard: topic sessions, the General anchor, and DM chat
 // lanes (topic mode) — or just the focused pane (DM mode). {sid, name, cwd?, agent} rows; cwd
 // filled from the pane when the store doesn't know it.
+const chatLaneName = (chatId: string): string => { const h = handleForDmChat(chatId); return h ? `Chat (${h})` : 'Chat' }
 function dashboardSessionRows(): Array<{ sid: string; name: string; cwd: string; agent: string }> {
   if (isTopicMode()) {
     const rows = listTopics().filter(t => !t.closed).map(t => ({ sid: t.sessionId, name: t.name, cwd: t.cwd, agent: t.agent ?? 'claude' }))
@@ -15461,7 +15468,7 @@ function dashboardSessionRows(): Array<{ sid: string; name: string; cwd: string;
     if (general && !rows.some(r => r.sid === general)) rows.unshift({ sid: general, name: 'General', cwd: '', agent: 'claude' })
     // DM chat lanes pin to the TOP of the dashboard (owner request), ahead of General and topics.
     for (const { chatId, sessionId } of listDmChatSessions())
-      if (!rows.some(r => r.sid === sessionId)) rows.unshift({ sid: sessionId, name: `Chat (${handleForDmChat(chatId) ?? `DM ${chatId}`})`, cwd: '', agent: 'claude' })
+      if (!rows.some(r => r.sid === sessionId)) rows.unshift({ sid: sessionId, name: chatLaneName(chatId), cwd: '', agent: 'claude' })
     return rows
   }
   // DM mode: same stores, no group — chat lanes pinned first, then live topic rows (which include
@@ -15469,7 +15476,7 @@ function dashboardSessionRows(): Array<{ sid: string; name: string; cwd: string;
   // adopted session outside the store, is appended per-call by webappListSessions.
   const rows = listTopics().filter(t => !t.closed).map(t => ({ sid: t.sessionId, name: t.name, cwd: t.cwd, agent: t.agent ?? 'claude' }))
   for (const { chatId, sessionId } of listDmChatSessions())
-    if (!rows.some(r => r.sid === sessionId)) rows.unshift({ sid: sessionId, name: `Chat (${handleForDmChat(chatId) ?? `DM ${chatId}`})`, cwd: '', agent: 'claude' })
+    if (!rows.some(r => r.sid === sessionId)) rows.unshift({ sid: sessionId, name: chatLaneName(chatId), cwd: '', agent: 'claude' })
   return rows
 }
 
@@ -15543,7 +15550,12 @@ async function paneSurvivors(pane: string): Promise<WaitShell[]> {
 // One dashboard card, read live from the pane: statusline dials + working state + a task line
 // (current activity while working, last-reply snippet while idle). Dead pane ⇒ alive:false card.
 async function webappSessionCard(row: { sid: string; name: string; cwd: string; agent: string }, ctx?: WaitCtx): Promise<WebappSessionCard> {
-  const dead: WebappSessionCard = { sid: row.sid, name: row.name, cwd: row.cwd, agent: row.agent, alive: false, working: false, subagents: 0, task: null, model: null, effort: null, mode: null, ctxPct: null, h5Pct: null, branch: null, tier: null, state: 'idle', wait: null, unreported: null }
+  // `chat` is the LANE's own flag, not a name match: the mini app renders a chat lane as a bare title
+  // row (the owner's ask — the chat itself is where you see what it is doing, so a task line and a
+  // context bar repeat what the conversation already shows). Everything else about the card is
+  // computed exactly as before, including the state the dot renders.
+  const chat = isChatLaneSession(row.sid)
+  const dead: WebappSessionCard = { sid: row.sid, name: row.name, cwd: row.cwd, agent: row.agent, chat, alive: false, working: false, subagents: 0, task: null, model: null, effort: null, mode: null, ctxPct: null, h5Pct: null, branch: null, tier: null, state: 'idle', wait: null, unreported: null }
   const pane = await paneForSession(row.sid).catch(() => null)
   if (!pane || !(await paneAlive(pane).catch(() => false))) return dead
   // A pane that outlived its claude (process died mid-command → pane is a bare shell) must render
@@ -15596,7 +15608,7 @@ async function webappSessionCard(row: { sid: string; name: string; cwd: string; 
   const marker = read.marker
   ;({ state, wait } = read)
   return {
-    sid: row.sid, name: row.name, cwd, agent: row.agent, alive: true, working, subagents, task, state, wait,
+    sid: row.sid, name: row.name, cwd, agent: row.agent, chat, alive: true, working, subagents, task, state, wait,
     unreported: state === 'unreported' && marker ? { briefer: marker.briefer } : null,
     model, effort: sl?.effort ?? null, mode: cap ? detectCurrentMode(cap) : null,
     ctxPct: sl?.ctxPct ?? null, h5Pct: sl?.h5?.pct ?? null,
@@ -16066,6 +16078,7 @@ async function webappAutomationCreate(
 
 async function startFilesWebapp(): Promise<void> {
   if (!WEBAPP_ENABLED) return
+  warmDmHandles()
   try {
     startWebapp({ token: TOKEN!, port: WEBAPP_PORT, staticDir: join(import.meta.dir, 'webapp'),
       isAllowed: uid => loadAccess().allowFrom.includes(uid), log: wlog, resolveStart: resolveStartToken,

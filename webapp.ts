@@ -68,6 +68,10 @@ export interface SettingsView {
 // `wait` carries the reason a waiting card shows; it is null in every other state.
 export interface SessionCard {
   sid: string; name: string; cwd: string; agent: string
+  // The owner's own chat lane. Its card is a bare title row: the conversation is where you see what
+  // it is doing, so the task line and the context bar would only repeat it. Optional so a payload
+  // from an older daemon still renders (as an ordinary card, which is what it was).
+  chat?: boolean
   alive: boolean; working: boolean; subagents: number; task: string | null
   state: 'working' | 'waiting' | 'unreported' | 'idle'
   // Two nullable fields rather than one shared "detail", because each means exactly one thing: `wait`

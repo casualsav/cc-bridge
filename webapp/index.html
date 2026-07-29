@@ -1051,12 +1051,16 @@
   /* No divider rule: in the reference the capsule's own fill is what separates the composer from the
      feed. The rim belongs on the capsule, where it lights an actual edge — put it on this full-bleed
      strip instead and it draws the very hairline the line above says the design doesn't have. */
-  /* The staged-attachment strip. It shares the composer's own 10px inset so the thumbnail's left
-     edge sits on the capsule's, and it is `display: none` when empty rather than an empty flex row —
-     an empty row still pays its padding, which would lift the composer by 10px with nothing in it.
-     The ✕ hangs OUTSIDE the thumbnail's corner (a negative offset, not a corner overlay) because a
-     44px thumb has no room to spare and the mark has to stay a 20px touch target. */
-  #dstage { display: none; align-items: center; gap: var(--sp-2); padding: var(--sp-1) 10px var(--sp-2); }
+  /* The staged-attachment strip, INSIDE the capsule on its own row. Its side padding is the field's
+     own (--sp-2), so a thumbnail's left edge lands on the text's left edge rather than on the
+     capsule's; the 6px on top is the room the ✕ needs, since that mark hangs OUTSIDE the thumbnail's
+     corner (a negative offset, not a corner overlay — a 44px thumb has none to spare and the mark has
+     to stay a 20px touch target) and would otherwise sit on the capsule's own edge. No bottom
+     padding: the capsule's row gap is what separates it from the field, the same gap the field and
+     the controls already use, so the air above and below the text stays symmetric.
+     `display: none` when empty rather than an empty flex row — an empty row would still pay the
+     column's gap, and a capsule 12px taller with nothing in it. */
+  #dstage { display: none; align-items: center; gap: var(--sp-2); padding: 6px var(--sp-2) 0; }
   #dstage.on { display: flex; }
   #dstage .thumb { position: relative; flex: none; }
   #dstage .thumb img, #dstage .thumb .doc { width: 44px; height: 44px; border-radius: 10px; display: block;
@@ -1553,14 +1557,15 @@
        constant (see the ResizeObserver). -->
   <div id="ddock">
   <div id="dworkhost"></div>
-  <!-- A picked file waits HERE until you send it. Above the capsule rather than inside it: the
-       capsule's geometry is derived from the mic down to the half pixel, and a chip in that flex row
-       would take its width from the textarea. A sibling strip pushes the composer down instead,
-       which the feed absorbs the same way it absorbs a growing field. Empty and zero-height with
-       nothing staged. -->
-  <div id="dstage"></div>
   <div class="composer">
     <div class="inputwrap">
+      <!-- A picked file waits HERE until you send it — INSIDE the capsule, on its own row above the
+           field (the owner's ask, once the capsule became two rows). It used to sit outside because
+           the capsule was a single flex ROW and a chip in it would have taken its width from the
+           textarea; in a column it is simply another row, and it takes width from nothing. Absent
+           from the layout entirely when empty (`display: none`), so the column's gap does not pay
+           for a row that is not there. -->
+      <div id="dstage"></div>
       <!-- The IME must not draw an inline prediction in this field, and that is a DELIBERATE trade,
            not a tidy-up: `autocorrect="off"` is what Chromium maps to Android's
            TYPE_TEXT_FLAG_NO_SUGGESTIONS, and that flag takes autocorrect with it. The owner asked
@@ -2193,7 +2198,14 @@ async function renderSessions() {
       // sessions-view.ts renders the same four states from the same payload.)
       : s.task ? (s.working ? "🧑‍💻 " : "✅ ") + (s.subagents > 0 ? esc(s.subagents + " subagent" + (s.subagents === 1 ? "" : "s") + " live · ") : "") + esc(s.task)
       : "";
-    const foot =
+    // The owner's own chat lane is a BARE TITLE ROW — dot, name, dials, ✕ — and nothing else, at all
+    // times (his ask, off the state a freshly cleared lane happened to render). The chat itself is
+    // where he watches it work, so a task line repeats the conversation and a context bar belongs to
+    // sessions he does not read turn by turn. The DOT stays: "doing something or waiting" is exactly
+    // what he asked to keep, and it is the one thing the card says that the chat does not.
+    // Read from the payload's own `chat` flag, never from the name — the label is "Chat (@handle)"
+    // only until a handle resolves.
+    const foot = s.chat ? "" :
       (s.branch ? "<span>🌿 " + esc(s.branch) + "</span>" : "") +
       (s.ctxPct != null ? "<span>ctx " + s.ctxPct + "%</span>" + pctBar(s.ctxPct) : "");
     c.innerHTML =
@@ -2203,7 +2215,7 @@ async function renderSessions() {
       chips.map(x => '<span class="chip">' + x + "</span>").join("") +
       '<button class="cardx" title="Close session" aria-label="Close session ' + esc(s.name) + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>' +
       "</div>" +
-      (line ? '<div class="task">' + line + "</div>" : "") +
+      (line && !s.chat ? '<div class="task">' + line + "</div>" : "") +
       (!s.alive ? '<div class="task">💀 no live pane</div>' : "") +
       // The 5h window is NOT here, by the owner's ruling: it is an ACCOUNT-level number, identical on
       // every card, and repeating it per session said nothing about the session. `h5Pct` stays on the

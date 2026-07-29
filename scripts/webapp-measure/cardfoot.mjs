@@ -40,6 +40,13 @@ const SESSIONS = [
   { sid: "d", name: "a-considerably-longer-session-name-than-fits", alive: true, working: true, cwd: "~/projects/x",
     model: "Sonnet 5", effort: "high", subagents: 2, branch: "feat/two-row-composer", ctxPct: 62, h5Pct: 68, state: "working",
     task: "Reading the transcript back and folding the working row into the composer, then measuring every box it moved" },
+  // The owner's own chat lane, carrying EVERYTHING an ordinary card would render — a task line, a
+  // branch, a context reading — so that the bare title row is a decision the client makes rather than
+  // a payload that happened to be empty. (The screenshot he sent was a freshly cleared lane, which is
+  // the state that has nothing to show anyway; this fixture is the one that can fail.)
+  { sid: "e", name: "Chat (@suchag)", chat: true, alive: true, working: true, cwd: "", model: "Fable 5", effort: "high",
+    mode: "bypassPermissions", subagents: 0, branch: "main", ctxPct: 51, h5Pct: 68, state: "working",
+    task: "Reading the transcript back and folding the working row into the composer" },
 ];
 
 const b = await chromium.launch();
@@ -65,6 +72,7 @@ const cards = await p.evaluate(() => [...document.querySelectorAll("#tab-session
   const lastRow = inked[inked.length - 1];
   return {
     name: c.querySelector(".nm")?.textContent, text: c.textContent,
+    dot: c.querySelector(".dot") ? (c.querySelector(".dot").className.replace("dot", "").trim() || "grey") : null,
     card: r(c), padBottom: parseFloat(getComputedStyle(c).paddingBottom),
     foot: r(foot), footHTML: foot ? foot.innerHTML : null,
     // The bar's fill is a <span> too, and an empty one — count the READINGS, not every span.
@@ -85,9 +93,17 @@ const cards = await p.evaluate(() => [...document.querySelectorAll("#tab-session
 const checks = [];
 const ok = (label, pass, detail) => checks.push({ label, pass, detail });
 const near = (a, b, tol = 0.51) => a != null && b != null && Math.abs(a - b) <= tol;
-const [A, B, C, D] = cards;
+const [A, B, C, D, E] = cards;
 
-ok("FIXTURE: four cards rendered", cards.length === 4, cards.map(c => c.name).join(", "));
+ok("FIXTURE: five cards rendered", cards.length === 5, cards.map(c => c.name).join(", "));
+// ---- the chat lane is a BARE TITLE ROW ---------------------------------------------------------
+ok("FIXTURE: the chat lane's payload carries everything a card could show",
+  !!SESSIONS[4].task && !!SESSIONS[4].branch && SESSIONS[4].ctxPct != null, "task + branch + ctx");
+ok("the chat lane renders no task line", E.taskH === null, `${E.taskH === null ? "absent" : E.taskH + "px"}`);
+ok("…and no foot at all", E.foot === null, E.foot ? "present" : "absent");
+ok("…so it is a title row and nothing else", near(E.card.h, E.titleH + 2 * E.padBottom), `${E.card.h} vs title ${E.titleH} + 2×${E.padBottom}`);
+ok("…while still carrying its indicator and its dials", E.dot === "on" && /Fable 5/.test(E.text), `dot=${E.dot}`);
+ok("an ordinary WORKING card is untouched by that rule", A.taskH !== null && A.foot !== null, `task=${A.taskH} foot=${A.foot ? "present" : "absent"}`);
 // ---- the task line is ONE line ----------------------------------------------------------------
 ok("FIXTURE: the fullest card's task really is too long for one line", D.taskScrollH > D.taskH + 4,
   `wants ${D.taskScrollH}px in a ${D.taskH}px line`);
@@ -111,7 +127,11 @@ ok("the ctx reading is still there", A.footItems?.some(t => /^ctx 41%$/.test(t))
 ok("…with its bar", A.hasBar, `${A.hasBar}`);
 ok("the foot is exactly those two", A.footItems?.length === 2, A.footItems?.join(" · "));
 ok("each card still names its session", cards.every((c, i) => c.name === SESSIONS[i].name), cards.map(c => c.name).join(", "));
-ok("each card still carries its task line", cards.every((c, i) => c.text.includes(SESSIONS[i].task)), "");
+// The chat lane is exempt BY DESIGN — it is the one card that renders no task line — so this asks the
+// question of every other card rather than being loosened for all of them.
+ok("every card but the chat lane still carries its task line",
+  cards.every((c, i) => SESSIONS[i].chat || c.text.includes(SESSIONS[i].task)),
+  cards.filter((c, i) => !SESSIONS[i].chat && !c.text.includes(SESSIONS[i].task)).map(c => c.name).join(",") || "all present");
 
 for (const [i, c] of cards.entries()) {
   const box = await p.locator("#tab-sessions .sess").nth(i).boundingBox();

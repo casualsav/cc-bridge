@@ -210,8 +210,10 @@ give it.
   `meta.image_paths` is set only above one path; `inbound.test.ts` pins the wire format. **Photos
   only** — documents/videos keep one-per-message (`att=` is a single path); a stated exclusion.
 - **A picked file is STAGED (`#dstage`), never sent from the picker**; the composer's text goes as
-  the caption. The stage sits OUTSIDE `.inputwrap` — a chip inside that flex row disturbs geometry
-  derived to the half pixel. `stage.mjs` measures the three misses: `syncComposerMode()` counts a
+  the caption. It sits INSIDE `.inputwrap`, on its own row above the field (the owner's ask once the
+  capsule became two rows). It used to sit outside for a reason that died with the single-row
+  capsule: a chip in that flex ROW took its width from the textarea. In a column it takes width from
+  nothing. It is `display: none` when empty — an empty row would still pay the column's gap. `stage.mjs` measures the three misses: `syncComposerMode()` counts a
   staged file as sendable; `openDrill()` clears the stage (`attachToSession` reads `drillSid` at
   *upload* time — a surviving stage delivers to the wrong session); the object URL is revoked on
   discard. A file send paints NO optimistic row (the echo carries the image; a stub would visibly
@@ -390,6 +392,17 @@ give it.
   itself. A `state`-less payload (an older daemon, or the pre-transcript one) falls back to the
   working boolean, so the dot degrades to what it was rather than to grey.
 
+- **The owner's own chat lane renders as a BARE TITLE ROW** — dot, name, dials, ✕ — at all times, no
+  task line and no foot (his ask: the chat is where he watches it work, so a preview repeats the
+  conversation and a context bar belongs to sessions he does not read turn by turn). The dot stays,
+  because "doing something or waiting" is the one thing the card says that the chat does not. Driven
+  by the payload's own `chat` flag (`isChatLaneSession` in daemon.ts), **never by matching the name**
+  — that label is "Chat" until a handle resolves. `cardfoot.mjs`'s fixture gives the lane a task, a
+  branch and a ctx reading precisely so the bare row is a decision and not an empty payload.
+- **A chat lane's label NEVER carries the numeric Telegram id.** It is `Chat (@handle)`, or plain
+  `Chat` until `getChat` answers — the id flashed in the UI and swapped itself out, which the owner
+  saw. `warmDmHandles()` runs at webapp start so the resolved name is usually there for the first
+  paint; the plain-`Chat` fallback is what guarantees the id never appears at all.
 - **No 5h window on a card, by ruling** — it is an ACCOUNT-level number, the same on every card, so
   it said nothing about the session. `h5Pct` stays on the payload: a 5h/weekly display belongs to
   the sessions PAGE and that design is still to come. **The foot is written only when it has
