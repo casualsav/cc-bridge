@@ -185,6 +185,15 @@
        up — or whenever the client resized the layout viewport for us, which is the same 0 for the
        same reason --safe-top is 0 off-fullscreen: there is nothing left to clear. */
     --kb: 0px;
+    /* How the surface travels when the keyboard does. 220ms against the ~250ms an Android IME takes
+       to animate: the chat should LAND JUST BEFORE the keyboard finishes rather than chase it, since
+       a surface still moving under a keyboard that has stopped is what reads as lag. The curve is
+       Material's standard decelerate — fast off the mark, settling into place — which is the shape
+       every messenger uses for this and the shape the keyboard itself travels on.
+       The duration is read back out of this variable by the script (kbDurMs), so the two cannot
+       drift apart; change it here only. */
+    --kb-dur: 220ms;
+    --kb-curve: cubic-bezier(0.2, 0, 0, 1);
     /* The ceiling scrim as TWO LENGTHS rather than percentages of one height, which is what lets the
        same eased ramp serve both layouts. --scrim-solid is how far full --bg reaches down: here the
        row's own 10px margin plus the NAME's line box, which lands it --h-pad above the cwd — "the
@@ -570,7 +579,19 @@
      laid out against the LAYOUT viewport, which a soft keyboard does not always shrink — so without
      this the chat keeps its full height and the keyboard simply covers the composer and the newest
      messages. --kb is 0 whenever the client did shrink it for us, which keeps that case untouched. */
-  #drill { position: fixed; inset: 0; bottom: var(--kb); background: var(--bg); display: none; z-index: 5; }
+  /* --kb-shift is the JOURNEY, and it is zero at both ends: on a viewport change the page parks the
+     surface where it visually WAS (one frame, no transition), then releases it to 0 with the
+     transition armed. So the resting geometry is byte-identical to a build with none of this — the
+     only thing that exists between two viewport changes is a 0px offset.
+     Why an offset at all: on his phone the client shrinks its own LAYOUT viewport, so --kb never
+     moves and there is nothing for a transition to interpolate. This gives both shapes of client the
+     same one mechanism, since the offset is measured from where the surface was on screen. */
+  #drill { position: fixed; inset: 0; bottom: calc(var(--kb) + var(--kb-shift, 0px)); background: var(--bg); display: none; z-index: 5; }
+  /* Armed only while a keyboard is moving — a permanent transition on `bottom` would also ease a
+     rotation, a fullscreen toggle and the first paint. `html.kbmove` is added for the duration and
+     removed after, by the same function that sets the offset. */
+  html.kbmove #drill { transition: bottom var(--kb-dur) var(--kb-curve); }
+  @media (prefers-reduced-motion: reduce) { html.kbmove #drill { transition: none; } }
   #drill.show { display: block; }
   /* The dock floats at the floor with no fill of its own. Its SCRIM lives on the composer (below),
      starting at the capsule's own top edge — the owner's correction: "the gradient on the bottom
@@ -3122,6 +3143,10 @@ let kbSettle = 0;
 function syncKeyboard() {
   const px = vv ? Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop)) : 0;
   document.documentElement.style.setProperty("--kb", px + "px");
+  // The surface's floor, in SCREEN terms, whichever way this client provides the room: subtracting
+  // --kb covers the client that only shrank the visual viewport, and innerHeight covers the one that
+  // shrank its own window. Both end up as one number that moves when the keyboard does.
+  easeSurfaceTo(window.innerHeight - px);
   // EVERY viewport change, not only the ones this page had to compensate for. A resize is the moment
   // the scroller's own height changed underneath the reader; whether we also had to move the surface
   // is a different question with a different answer on every client.
@@ -3133,12 +3158,64 @@ function syncKeyboard() {
   clearTimeout(kbSettle);
   kbSettle = setTimeout(pinIfRiding, 350);
 }
+// The JOURNEY, and nothing else — the destination is already correct without a line of this. The
+// webview hands the shrink over in essentially one step, which lands as a jump; every messenger eases
+// it, so this parks the surface where it visually was and lets it travel.
+//
+// Park-then-release, in that order and in one frame: set the offset with the transition disarmed,
+// force a layout read so the browser takes it as a START value, then arm and clear it. Skip the
+// forced read and the two writes coalesce into one style recalculation — no transition at all,
+// because nothing ever changed.
+//
+// Three deliberate refusals:
+//  · A `transform` would be smoother (no layout per frame) and is WRONG here: the top edge does not
+//    move when a keyboard rises, and translating the surface slides the header up from below.
+//  · Below 40px is not a keyboard. A rotation, a URL bar, a client nudging its own chrome by a few
+//    pixels — easing those is motion with no cause the reader can see.
+//  · Reduced motion returns before anything is parked, rather than relying on the CSS to kill the
+//    transition: with the transition off, the park would paint for one frame as a jump AWAY from the
+//    resting position, which is worse than the jump it was trying to smooth.
+// Seeded at parse time, not on the first event: left null, the FIRST viewport change of the session
+// is swallowed as "nothing to compare against" — and that first change is the keyboard's first rise,
+// the one journey a reader is most likely to be watching for. (It shipped that way for ten minutes;
+// the harness caught it as a rise that never eased while the fall did.)
+let kbFloor = window.innerHeight, kbEnd = 0, kbRide = 0, kbRideUntil = 0;
+const kbDurMs = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--kb-dur")) || 220;
+function easeSurfaceTo(floor) {
+  const root = document.documentElement, prev = kbFloor;
+  kbFloor = floor;
+  if (Math.abs(floor - prev) < 40) return;
+  if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  root.classList.remove("kbmove");
+  root.style.setProperty("--kb-shift", (floor - prev) + "px");
+  void $("drill").offsetHeight;
+  root.classList.add("kbmove");
+  root.style.setProperty("--kb-shift", "0px");
+  clearTimeout(kbEnd);
+  kbEnd = setTimeout(() => root.classList.remove("kbmove"), kbDurMs + 60);
+  // The ride tracks the CURVE rather than being eased itself. A second animation on scrollTop would
+  // be a second clock racing this one; re-pinning every frame while the box interpolates keeps the
+  // newest message on the composer's edge at every instant of the journey, by construction. It ends
+  // when the transition does, and it does nothing at all for a mid-thread reader (pinIfRiding is the
+  // same guarded call that refuses to move them).
+  cancelAnimationFrame(kbRide);
+  kbRideUntil = performance.now() + kbDurMs + 60;
+  const step = () => { pinIfRiding(); if (performance.now() < kbRideUntil) kbRide = requestAnimationFrame(step); };
+  kbRide = requestAnimationFrame(step);
+}
 // Was the reader at the floor of the transcript? Recorded on SCROLL, and read on resize — never
 // measured after the fact, which is the trap: a resize lands with the scroller already shorter, so
 // the same test run inside the handler says "320px from the bottom" about a reader who was sitting
 // exactly on it a frame earlier.
 let feedAtBottom = true;   // a freshly opened drill is pinned by paintFeed
 function noteFeedPosition() {
+  // Deaf for the length of a journey, and that is load-bearing rather than an optimisation. The ride
+  // pins every frame; each write fires a scroll event that is DISPATCHED a frame later, against a
+  // scroller that has shrunk again in the meantime — so the flag would read "100px from the bottom"
+  // about a position this code had just pinned to the floor, turn itself off, and the ride would die
+  // one frame in. (Measured: scrollTop froze at 1018 of 1344 for the rest of the animation.) Nobody
+  // is hand-scrolling during a 220ms keyboard animation; the surface is.
+  if (performance.now() < kbRideUntil) return;
   const feed = $("dfeed");
   if (feed) feedAtBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;
 }

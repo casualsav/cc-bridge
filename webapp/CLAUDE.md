@@ -95,6 +95,22 @@ give it.
   through the rise AND the fall; a mid-thread reader is not moved in either direction. Measuring
   "was it at the bottom" inside the handler is the trap — by then the scroller is already shorter, so
   a reader who was sitting exactly on the floor measures 320px away from it.
+- **The JOURNEY is a parked offset, and it is zero at both ends.** `--kb-shift` puts the surface back
+  where it visually was for one frame (transition disarmed), then releases it to 0 with
+  `html.kbmove` armed — so resting geometry is byte-identical to a build with no easing, which is
+  what `keyboard.mjs` asserts by failing ONLY its 8 journey checks against the pre-easing page.
+  220ms on Material's standard decelerate, against the ~250ms an Android IME takes: the chat lands
+  just *before* the keyboard rather than chasing it. Three refusals, each tried or reasoned to a
+  dead end: a `transform` would be smoother and is wrong (the top edge does not move, so it would
+  slide the header up from below); under 40px is not a keyboard; and reduced motion returns before
+  anything is parked, since parking with the transition dead paints the jump it meant to smooth.
+  **`kbFloor` seeds at parse time** — left null, the first viewport change of a session is swallowed
+  as "nothing to compare against", and that one is the first keyboard rise.
+- **`noteFeedPosition()` is DEAF for the length of a journey, and that is load-bearing.** The ride
+  re-pins every frame; each write fires a scroll event dispatched a frame later against a scroller
+  that has shrunk again, so the flag reads "100px from the floor" about a position just pinned to it,
+  turns itself off, and the ride dies one frame in — measured: scrollTop frozen at 1018 of 1344 for
+  the rest of the animation. Nobody hand-scrolls during a 220ms keyboard animation.
 - **`keyboard.mjs` SIMULATES the keyboard** — a fake `visualViewport` installed before the page's
   script, plus a real viewport resize for the layout-shrink half. It runs the matrix that matters:
   {at the floor, mid-thread} × {rise, fall} × {visual-only shrink, layout shrink}. What no headless

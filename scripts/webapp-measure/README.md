@@ -19,8 +19,12 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   with the composer both ways; a mid-thread reader is never moved.
                                   #   The keyboard is SIMULATED (a fake visualViewport before the
                                   #   page's script, + a real resize for the layout half) at HIS
-                                  #   measured 354px. Device leg closed 2026-07-29. Last check proves
-                                  #   the temporary debug beacon is gone, not merely disabled
+                                  #   measured 354px. Device leg closed 2026-07-29. Also measures the
+                                  #   JOURNEY — mid-flight samples prove the rise and fall are eased
+                                  #   and that nothing is eased where nothing moved; against the
+                                  #   pre-easing page ONLY those 8 fail, which is what says the
+                                  #   resting geometry did not move. Last check proves the temporary
+                                  #   debug beacon is gone, not merely disabled
     node cardfoot.mjs [page][out] # a session card's foot carries the SESSION's numbers — the 5h
                                   #   window is account-level and gone from every card, and no card
                                   #   carries the 8px gap its empty foot would leave. Three fixture

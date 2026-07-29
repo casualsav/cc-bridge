@@ -50,7 +50,15 @@ const open = async () => {
       removeEventListener: (t, f) => { ls[t] = (ls[t] || []).filter(x => x !== f); },
       dispatchEvent: e => { (ls[e.type] || []).forEach(f => f(e)); return true; } };
     Object.defineProperty(window, "visualViewport", { value: fake, configurable: true });
+    // Two verbs, because ORDER is part of what is being reproduced. The device's own beacon shows
+    // every signal arriving with a CONSISTENT pair (innerHeight 466, visualViewport 466): the client
+    // resizes its window and the events follow. Dispatching a visual-viewport resize BEFORE the
+    // window has shrunk is a state his webview never produces — and it makes the page compute a
+    // compensation it is about to undo, which reads as a jump. So the layout case sets the height
+    // silently, resizes the window (that fires the real resize), then dispatches the vv event too.
+    window.__vvSet = px => { fake.height = px; };
     window.__vvHeight = px => { fake.height = px; fake.dispatchEvent(new Event("resize")); };
+    window.__vvFire = () => fake.dispatchEvent(new Event("resize"));
   }, [H]);
   // Every request the page makes, so the temporary debug beacon that diagnosed the device bug can be
   // proven GONE rather than assumed gone (it posted to /api/kbdebug on exactly these events).
@@ -73,6 +81,8 @@ const snap = p => p.evaluate(() => {
   const last = feed.lastElementChild;
   return {
     kb: getComputedStyle(document.documentElement).getPropertyValue("--kb").trim(),
+    shift: getComputedStyle(document.documentElement).getPropertyValue("--kb-shift").trim(),
+    moving: document.documentElement.classList.contains("kbmove"),
     drill: r(document.getElementById("drill")), dock: r(document.getElementById("ddock")),
     pill: r(document.querySelector(".inputwrap")), head: r(document.querySelector("#drill .vhead")),
     feed: r(feed), scrollTop: Math.round(feed.scrollTop), maxScroll: Math.round(feed.scrollHeight - feed.clientHeight),
@@ -90,10 +100,32 @@ const park = async (p, where) => {
 // LAYOUT: the client shrank its own window too (Android resize mode, Telegram resizing its sheet) —
 // --kb stays 0 and the surface moves by itself. Both must re-pin.
 const raise = async (p, mode, px) => {
-  await p.evaluate(h => window.__vvHeight(h), H - px);
-  if (mode === "layout") await p.setViewportSize({ width: 390, height: H - px });
-  await p.waitForTimeout(250);
+  if (mode === "layout") {
+    await p.evaluate(h => window.__vvSet(h), H - px);
+    await p.setViewportSize({ width: 390, height: H - px });
+    await p.evaluate(() => window.__vvFire());
+  } else {
+    await p.evaluate(h => window.__vvHeight(h), H - px);
+  }
 };
+// Mid-flight, at roughly a third of the transition. The JOURNEY is the claim being measured here —
+// the destination is asserted everywhere else in this file — so this reads the surface while it is
+// still supposed to be moving. On a build with no transition it reads the destination, which is the
+// control: the check cannot pass by accident.
+const midFlight = async p => {
+  await p.waitForTimeout(80);
+  return p.evaluate(() => ({
+    drillBottom: +document.getElementById("drill").getBoundingClientRect().bottom.toFixed(1),
+    scrollTop: Math.round(document.getElementById("dfeed").scrollTop),
+    moving: document.documentElement.classList.contains("kbmove"),
+    shift: getComputedStyle(document.documentElement).getPropertyValue("--kb-shift").trim(),
+  }));
+};
+const settle = p => p.waitForTimeout(400);
+// An offset the page has never written reads as "", and an offset it has finished with reads "0px".
+// Both mean the same thing — the surface is carrying no journey — and demanding the second would
+// fail a page that simply never had to move anything.
+const atRest = v => v === "" || v === "0px";
 
 for (const mode of ["visual", "layout"]) {
   for (const where of ["bottom", "mid"]) {
@@ -101,11 +133,27 @@ for (const mode of ["visual", "layout"]) {
     await park(p, where);
     const before = await snap(p);
     await raise(p, mode, KB);
+    const flying = await midFlight(p);
+    await settle(p);
     const up = await snap(p);
     if (where === "mid") await p.screenshot({ path: `${OUT}/${mode}-${where}-up.png` });
     await raise(p, mode, 0);
+    const falling = await midFlight(p);
+    await settle(p);
     const down = await snap(p);
     const tag = `${mode}/${where}`;
+
+    // the JOURNEY — eased, not jumped, in both directions
+    const between = (v, a, b) => v > Math.min(a, b) + 8 && v < Math.max(a, b) - 8;
+    ok(`${tag}: RISE is EASED — the surface is still travelling mid-flight`,
+      between(flying.drillBottom, before.drill.bottom, H - KB) && flying.moving,
+      `${before.drill.bottom} → ${flying.drillBottom} → ${H - KB}${flying.moving ? "" : " (not moving)"}`);
+    ok(`${tag}: FALL is EASED too`,
+      between(falling.drillBottom, H - KB, H) && falling.moving,
+      `${H - KB} → ${falling.drillBottom} → ${H}`);
+    ok(`${tag}: the journey leaves NOTHING behind — no offset, no transition armed`,
+      atRest(up.shift) && atRest(down.shift) && !up.moving && !down.moving,
+      `up ${up.shift}/${up.moving} · down ${down.shift}/${down.moving}`);
 
     // the lift itself, in whichever way this client provides it
     ok(`${tag}: FIXTURE parked ${where === "bottom" ? "at the floor" : "mid-thread"}`,
@@ -124,6 +172,9 @@ for (const mode of ["visual", "layout"]) {
       ok(`${tag}: FALL — still at the floor`, down.atBottom, `${down.scrollTop}/${down.maxScroll}`);
     } else {
       ok(`${tag}: RISE — a mid-thread reader is not moved`, up.scrollTop === before.scrollTop, `${before.scrollTop} → ${up.scrollTop}`);
+      ok(`${tag}: …not even mid-flight, while the surface travels under them`,
+        flying.scrollTop === before.scrollTop && falling.scrollTop === before.scrollTop,
+        `${before.scrollTop} → ${flying.scrollTop} / ${falling.scrollTop}`);
       ok(`${tag}: FALL — still not moved`, down.scrollTop === before.scrollTop, `${before.scrollTop} → ${down.scrollTop}`);
       ok(`${tag}: …and it never silently ends up at the floor`, !up.atBottom && !down.atBottom, `up=${up.atBottom} down=${down.atBottom}`);
     }
@@ -139,6 +190,7 @@ for (const where of ["bottom", "mid"]) {
   await p.locator("#dtext").focus();
   await p.waitForTimeout(200);
   const after = await snap(p);
+  ok(`focus/${where}: nothing is eased where nothing moved`, !after.moving && atRest(after.shift), `"${after.shift}"/${after.moving}`);
   await p.screenshot({ path: `${OUT}/focus-${where}.png` });
   ok(`focus/${where}: the viewport was untouched`, after.kb === "0px" && near(after.drill.bottom, H), `${after.kb}`);
   ok(`focus/${where}: ${where === "bottom" ? "stays at the floor" : "a mid-thread reader keeps their place"}`,
