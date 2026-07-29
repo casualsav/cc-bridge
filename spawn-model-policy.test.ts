@@ -1,7 +1,7 @@
 // Who gets to choose a session's model, and when a late tap has to confirm. Pure.
 // Run: bun test spawn-model-policy.test.ts
 import { test, expect } from 'bun:test'
-import { decideModel, upgradeNeedsConfirm, heldSpawnModel, holdTapData, parseHoldTap, launchFallback, spawnCardHeader, relaunchModel, decideEffort, fablePolicy, fableRowState, onOff, AUTO_FALLBACK, AUTO_EFFORT_FALLBACK, UPGRADE_CTX_DELTA, type ModelAsk, type ModelDecision } from './spawn-model-policy.ts'
+import { decideModel, upgradeNeedsConfirm, heldSpawnModel, heldSpawnNeedsLine, holdTapData, parseHoldTap, launchFallback, spawnCardHeader, relaunchModel, decideEffort, fablePolicy, fableRowState, onOff, AUTO_FALLBACK, AUTO_EFFORT_FALLBACK, UPGRADE_CTX_DELTA, type ModelAsk, type ModelDecision } from './spawn-model-policy.ts'
 
 const NOW = 1_800_000_000_000
 // The shape of the box that had the incident: an owner-configured default, an agent calling.
@@ -203,6 +203,26 @@ test('with no configured default the fallback is a real model, not the CLI\'s ow
   expect(heldSpawnModel('timeout', 'fable', launchFallback(null))).toBe(AUTO_FALLBACK)
   expect(heldSpawnModel('denied', 'fable', launchFallback('fable'))).toBe(AUTO_FALLBACK)
   expect(heldSpawnModel('approved', 'fable', launchFallback(null))).toBe('fable')
+})
+
+// ---- what the OWNER sees when one resolves (2026-07-29) ----
+//
+// His count: four messages where two carried everything. A tap edits the approval card into "@X
+// started on fable" in front of him, so the extra sentence saying so was the noise. The two outcomes
+// no card reports keep theirs.
+test('a tap owes him no second message — the card he watched change already said it', () => {
+  expect(heldSpawnNeedsLine('approved', true)).toBe(false)
+  expect(heldSpawnNeedsLine('denied', true)).toBe(false)
+})
+
+test('a timeout still says so: nothing was tapped, so that card never changed', () => {
+  expect(heldSpawnNeedsLine('timeout', true)).toBe(true)
+})
+
+// A launch that failed has no spawn card either — silence there would mean he never learns the work
+// did not start, which is the one outcome the whole gate exists to prevent.
+test('a failed launch always says so, however it was resolved', () => {
+  for (const o of ['approved', 'denied', 'timeout'] as const) expect(heldSpawnNeedsLine(o, false)).toBe(true)
 })
 
 // ---- auto EFFORT (2026-07-29) ----

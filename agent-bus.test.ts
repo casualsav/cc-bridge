@@ -31,6 +31,16 @@ test('createPending mints monotonic ids, un-injected, with a TTL from now', () =
   expect(listPending().map(p => p.id).sort()).toEqual([1, 2])
 })
 
+// A `quiet` row is a daemon notice whose fact a card on the target's own chat already carries — the
+// held spawn's "it started on fable". It changes nothing about the delivery; it withholds the
+// "@system messaged @you" mirror card, so the owner reads that fact once instead of twice. Default is
+// unset, and it has to stay unset for agent-to-agent traffic: that mirror is how a human follows the
+// bus at all.
+test('quiet is opt-in per row and off for ordinary traffic', () => {
+  expect(ask().quiet).toBeUndefined()
+  expect(ask({ quiet: true }).quiet).toBe(true)
+})
+
 test('createPending defaults kinds to claude, honors an explicit hermes target', () => {
   const a = ask()                                   // no kinds passed
   expect(a.fromKind).toBe('claude')

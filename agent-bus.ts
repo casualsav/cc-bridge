@@ -104,6 +104,12 @@ export type BusPending = {
                       // through the same retry queue; delivery removes it (see tryDeliverAsk), so no
                       // reaper and no TTL ever sees it. Nothing downstream had to learn about acks —
                       // their rows simply stop existing at the moment they'd start being a problem.
+  quiet?: true        // deliver into the target's CONTEXT, mirror nothing onto its human surface. For a
+                      // daemon notice whose content a card on that same chat already carries — the held
+                      // spawn's "it started" is the whole set today. The row still lands, still logs to
+                      // the ledger, still reaches the session; only the "@system messaged @you" card is
+                      // withheld, because a person reading that chat would see the same fact twice.
+                      // NEVER for agent-to-agent traffic: the mirror is how a human follows the bus.
   founding?: true     // the spawn handler's first-message ask — the only ask a session is guaranteed
                       // to receive before it's ever seen a human turn, so a session ending its own
                       // turn without answering it is a session that finished work nobody will hear
@@ -202,7 +208,7 @@ function ensureLoaded(): void { if (!loaded) loadBus() }
 export function createPending(
   fields: { fromSid: string; toSid: string; fromName: string; toName: string; text: string; refs: string[]
             fromKind?: 'claude' | 'hermes'; toKind?: 'claude' | 'hermes'; depth?: number; noReply?: true
-            founding?: true },
+            quiet?: true; founding?: true },
   now: number,
 ): BusPending {
   ensureLoaded()

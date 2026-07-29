@@ -177,6 +177,16 @@ export function heldSpawnModel(outcome: HoldOutcome, alias: string, fallback: st
   return outcome === 'approved' ? alias : fallback
 }
 
+// Does the resolution owe the HUMAN a sentence of its own? Only when no card in front of him already
+// carries it (owner, 2026-07-29: the approval flow sent four messages where two held everything).
+// A TAP edits the approval card into "@X started on fable" as he watches, so a second message saying
+// the same thing is noise. A TIMEOUT taps nothing — that card still reads "Nothing has started" — and
+// a FAILURE has no spawn card at all, so those two keep their line. The spawner is told either way,
+// over the bus, where it can actually read it; this is only about his chat.
+export function heldSpawnNeedsLine(outcome: HoldOutcome, launched: boolean): boolean {
+  return !launched || outcome === 'timeout'
+}
+
 // ---- The same question for EFFORT ----
 //
 // Symmetric with the model's `auto`, and deliberately much smaller: effort costs nothing to get

@@ -29,7 +29,7 @@ import { normalizeCommandOutput } from './ansi.ts'
 import { planSlash } from './slash-policy.ts'
 import { preserveGlobalEffort, reconcileEffortScope } from './effort-scope.ts'
 import { planDrift, driftStateAfter, type DriftState } from './drift-guard.ts'
-import { decideModel, decideEffort, upgradeNeedsConfirm, heldSpawnModel, holdTapData, parseHoldTap, launchFallback, spawnCardHeader, relaunchModel, fablePolicy, fableRowState, onOff, type FablePolicy, AUTO_FALLBACK, AUTO_EFFORT_FALLBACK, FABLE, type ModelDecision, type HoldOutcome } from './spawn-model-policy.ts'
+import { decideModel, decideEffort, upgradeNeedsConfirm, heldSpawnModel, heldSpawnNeedsLine, holdTapData, parseHoldTap, launchFallback, spawnCardHeader, relaunchModel, fablePolicy, fableRowState, onOff, type FablePolicy, AUTO_FALLBACK, AUTO_EFFORT_FALLBACK, FABLE, type ModelDecision, type HoldOutcome } from './spawn-model-policy.ts'
 import { renderSessionsView } from './sessions-view.ts'
 import { detectCurrentMode, onNormalPrompt, inputBoxContent, isModelSwitchConfirm, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType } from './prompt.ts'
 import { modelSwitchEvidence, resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, turnAnchorUuid, liveSubagents, currentTurnFeed, currentTurnActivity, concludedTurnWork, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
@@ -2922,8 +2922,11 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
       if (cur.fromSid !== SYSTEM_SID) markBriefed(cur.toSid, cur.fromSid, cur.fromName, now)
       void notifyAskSent(cur.fromSid, cur.toName, cur.text)
       // Mirror the same card on the TARGET's own surface (its topic / chat DM) so the inbound ask is
-      // visible from inside the session too, not only on the asker's side.
-      void notifyBusRich(cur.toSid, `<b>@${escapeHtml(cur.fromName)}</b> messaged <b>@${escapeHtml(cur.toName)}</b>`, cur.text)
+      // visible from inside the session too, not only on the asker's side. A `quiet` row is the one
+      // exception: a daemon notice whose fact a card on that same chat already carries (the held
+      // spawn's approval card, which self-edits into "started on fable"). The delivery is unchanged —
+      // only this mirror is withheld, so the session still learns it and the owner reads it once.
+      if (!cur.quiet) void notifyBusRich(cur.toSid, `<b>@${escapeHtml(cur.fromName)}</b> messaged <b>@${escapeHtml(cur.toName)}</b>`, cur.text)
       // An ack has done its entire job the moment it lands: nothing is coming back, so the row that
       // would otherwise sit here until a reaper or a TTL noticed it is dropped NOW. This one line is
       // the whole `tg ack` mechanism — no hygiene path learned about acks, they just never see one.
@@ -6573,13 +6576,18 @@ function spawnHoldMs(): number {
 // cannot recover from. The card's buttons keep working across the restart: they carry the hold id.
 function saveSpawnHolds(): void { writeJsonFile(spawnHoldsFile(), [...spawnHolds.values()]) }
 
-// Tell the SPAWNER, in both places that matter: an @system ack lands in its context (it is an agent
-// whose turn ended minutes ago — a Telegram card is not somewhere it can read), and notifyBusText puts
-// the same sentence on its own human surface. The ack is noReply, so delivery removes the row and no
-// reaper or TTL ever sees it.
-async function notifySpawner(sid: string, plain: string, html: string): Promise<void> {
-  void notifyBusText(sid, html)
-  const p = createPending({ fromSid: SYSTEM_SID, toSid: sid, fromName: 'system', toName: nameForEndpoint(sid, busEndpoints()), text: plain, refs: [], noReply: true, depth: 0 }, Date.now())
+// Tell the SPAWNER where it can actually read it: an @system ack lands in its CONTEXT (it is an agent
+// whose turn ended minutes ago — a Telegram card is not somewhere it can read). The ack is noReply, so
+// delivery removes the row and no reaper or TTL ever sees it.
+//
+// It is `quiet`, and the human surface gets a line only when `html` is given. Both halves are the same
+// owner ruling (2026-07-29): the approval flow put FOUR messages in his chat where two carried
+// everything — the card that self-edits into "started on fable" and the spawn's own chevron card. The
+// bus signal is NOT the noise and stays exactly as it was; what he stopped seeing is its mirror card
+// and the sentence that repeated the card he had just watched change.
+async function notifySpawner(sid: string, plain: string, html: string | null): Promise<void> {
+  if (html) void notifyBusText(sid, html)
+  const p = createPending({ fromSid: SYSTEM_SID, toSid: sid, fromName: 'system', toName: nameForEndpoint(sid, busEndpoints()), text: plain, refs: [], noReply: true, quiet: true, depth: 0 }, Date.now())
   appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'ack', from: 'system', to: p.toName, id: p.id, text: plain })
   await tryDeliverAsk(p).catch(() => {})
 }
@@ -6599,8 +6607,10 @@ async function resolveSpawnHold(h: SpawnHold, outcome: HoldOutcome): Promise<{ o
     : outcome === 'denied' ? `on ${ran} — the owner declined ${h.alias}`
     : `on ${ran} — nobody answered within ${Math.round(spawnHoldMs() / 60_000)}m, so it started on your default rather than not at all`
   process.stderr.write(`daemon: spawn-hold ${h.id} (${h.spec.topicName}, ${h.alias}) → ${outcome}, launched on ${ran}: ${r.ok ? 'ok' : r.text}\n`)
-  const line = r.ok
-    ? `🆕 Held spawn released — <b>@${escapeHtml(h.spec.topicName)}</b> started ${why}.`
+  // The human line is for the outcomes no CARD reports (heldSpawnNeedsLine): a tap has already edited
+  // the approval card in front of him.
+  const line = !heldSpawnNeedsLine(outcome, r.ok) ? null
+    : r.ok ? `🆕 Held spawn released — <b>@${escapeHtml(h.spec.topicName)}</b> started ${why}.`
     : `⚠️ Held spawn <b>@${escapeHtml(h.spec.topicName)}</b> couldn't start: ${escapeHtml(r.text)}`
   await notifySpawner(h.spec.fromSid, r.ok
     ? `(your held spawn of @${h.spec.topicName} has started ${why} — ${r.text})`
