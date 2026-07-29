@@ -106,9 +106,12 @@ give it.
   the DOM, in one transition of the log, is 3% of an animation bought with that noise — refused, and
   the DOM stays the source of truth.
 - **So the page MIRRORS the keyboard instead: the same animation, started from the focus event.**
-  285ms on `cubic-bezier(0.2, 0, 0, 1)` is not a taste call — it is AOSP's
-  `InsetsController.ANIMATION_DURATION_SYNC_IME_MS` and `SYNC_IME_INTERPOLATOR =
-  PathInterpolator(0.2f, 0f, 0f, 1f)`, verified against the source. `--kb-pre` is room the page takes
+  The CURVE is not a taste call — `cubic-bezier(0.2, 0, 0, 1)` is AOSP's `SYNC_IME_INTERPOLATOR =
+  PathInterpolator(0.2f, 0f, 0f, 1f)`, verified against the source. The DURATION is: the IME's own
+  285 (`ANIMATION_DURATION_SYNC_IME_MS`) shipped and read "just a touch too fast" on the device, so
+  **330ms, his calibration**. Ours may exceed the IME's because it starts at the TAP, inside the
+  ~500ms blind window — whose far edge is ~450ms, past which the animation would still be running
+  when the snapshot lands and the reconcile would cut it short. `--kb-dur` is the one number to turn. `--kb-pre` is room the page takes
   **before the client gives it**, and only for a keyboard height it has already MEASURED this session
   (`kbSeen`) — nothing is guessed, the first rise after a launch is reactive and teaches it, and a
   prediction nothing confirms eases back out after 900ms. When the real resize lands, `layoutFloor`

@@ -190,10 +190,15 @@
        SYNC_IME_INTERPOLATOR = PathInterpolator(0.2f, 0f, 0f, 1f), which is this cubic-bezier to the
        digit (verified against the source, not from memory). The page cannot receive that animation —
        the webview is handed one snapshot, measured — so it RUNS THE SAME ONE, started from the focus
-       tap. Matching both numbers is what makes two independent animations look like one.
+       tap. Matching the curve is what makes two independent animations look like one.
+       THE DURATION IS HIS, not the platform's: 285 shipped and read "just a touch too fast" on the
+       device, so 330. It can be longer than the IME's own because ours starts at the TAP, inside the
+       ~500ms the client takes to report the resize at all — the room to tune is that blind window,
+       and its far edge is ~450ms, past which our animation would still be running when the snapshot
+       lands and the reconcile (which must be instantaneous) would cut it short.
        The duration is read back out of this variable by the script (kbDurMs), so the two cannot
-       drift apart; change it here only. */
-    --kb-dur: 285ms;
+       drift apart; change it here only — this is the one number his eye calibrates. */
+    --kb-dur: 330ms;
     --kb-curve: cubic-bezier(0.2, 0, 0, 1);
     /* The ceiling scrim as TWO LENGTHS rather than percentages of one height, which is what lets the
        same eased ramp serve both layouts. --scrim-solid is how far full --bg reaches down: here the
