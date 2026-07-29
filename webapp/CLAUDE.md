@@ -163,11 +163,20 @@ give it.
   once with `--fold-to` as the target colour (`--bg`/`--btn`/`--sec` per variant); overriding
   `background` on a variant silently drops the easing back to linear. `.msg.clip .more` needs its
   `z-index: 1` — `::after` paints after every child.
-- **The NEWEST reply is exempt from the fold:** a trailing `role: "assistant"` row renders unfolded
-  and folds again when anything lands under it. `assistant` only. "Newest" is the transcript's last
-  item, NOT the last DOM row (an optimistic bubble paints after it and would re-fold the reply).
-  `paintFeed` fetches a payload-clipped newest's rest itself — once per uuid, never retried
-  (`api()` toasts its own failures and a poll would raise one every 3s).
+- **The LAST REPLY is exempt from the fold, and stays exempt until the NEXT reply.** Not until the
+  next ROW — the owner, 2026-07-29: "it should stay expanded until your next final message, not right
+  away when I message or while you're working". So his own message and the whole turn that follows
+  land under an open answer. `assistant` only, and read from the PAYLOAD, never the DOM (an
+  optimistic bubble paints after it). `lastReplyIndex()` is that definition, used by the fold and by
+  the auto-fetch alike — those two disagreeing is a message rendered unfolded, clipped at 4000 chars,
+  with no tap left to read the rest. `paintFeed` fetches a payload-clipped last reply's rest itself —
+  once per uuid, never retried (`api()` toasts its own failures and a poll would raise one every 3s).
+- **A hand-opened fold is keyed by `msgKey(i)` — `uuid`, or `role:ts` when the row has none.** The
+  tap sets a class and the 3s poll rebuilds `innerHTML` from the payload, so anything the open state
+  is keyed by must exist for EVERY bubble: rows without a uuid (an optimistic bubble, a transcript
+  entry that carried none) had no key at all and lost the tap on the next repaint — measured, and the
+  owner's "it re-collapses after 3 seconds". `expandFull()` still needs a real uuid; only the open
+  state falls back.
 - **A screen-taller newest reply pins by its TOP**, at max(the ceiling scrim's height, the feed's
   padding-top) — the two swap over in fullscreen. Measured from RECTS, never `offsetTop` (relative
   to the offsetParent's *padding* edge; this scroller's padding is the header's footprint, 60px of

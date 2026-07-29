@@ -1849,6 +1849,10 @@ function showErr(m) { floatToast(); errBox.textContent = m; errBox.classList.add
 function showOk(m) { floatToast(); errBox.textContent = m; errBox.classList.add("show", "ok"); setTimeout(() => errBox.classList.remove("show", "ok"), 2500); }
 
 const LONG_MSG = 700;   // chars past which a feed bubble collapses behind a tap-to-expand
+// Which row is "the last reply" — the one the fold exempts and the one paintFeed fetches in full.
+// ONE definition, because those two disagreeing is a message that renders unfolded and clipped at
+// 4000 chars with no way left to read the rest.
+const lastReplyIndex = items => { let k = -1; (items || []).forEach((x, n) => { if (x.role === "assistant") k = n; }); return k; };
 let WRITE = false;   // set from /api/ls (.write) — gates all edit/delete UI; mirrors WEBAPP_WRITE on the server
 
 // POST a JSON write op with auth; surface server errors (incl. 409 edit conflicts). Returns parsed body or null.
@@ -2396,30 +2400,36 @@ function bubble(i, n, all) {
   // the owner cut (2026-07-29): a cut message reads like every other long one, and a number from the
   // server's internals is not something a reader can act on. `clipped` still drives the FETCH; it
   // just no longer speaks.
-  // …EXCEPT the newest reply, which is never folded: the one message you should never have to tap to
+  // …EXCEPT the LAST REPLY, which is never folded: the one message you should never have to tap to
   // read is the one you are waiting for. `assistant` only — a user bubble keeps its fold whatever its
   // position (you wrote it), and an agent card is a delegated REPORT rather than the answer to the
-  // message you just sent, so it keeps its fold too. And this one folds like any other the moment
-  // something lands under it, which is exactly the owner's ask. `all` is the items array map() hands
-  // in, so "newest" is the TRANSCRIPT's last row rather than the last row on screen: an optimistic
-  // user bubble paints after it, and reading the DOM would re-fold the reply for the two seconds
-  // before the echo arrives and then again when it lands. The PAYLOAD-clipped case is reached from paintFeed, which fetches the rest —
-  // without the fold there is no tap left to do it.
-  const newest = !!all && n === all.length - 1 && i.role === "assistant";
+  // message you just sent, so it keeps its fold too.
+  // It stays open until the NEXT reply, not until the next ROW (the owner, 2026-07-29): it used to be
+  // the transcript's last item, so his own message folded the answer he was still reading, and so did
+  // every activity row of the turn that followed. `all` is the items array map() hands in, so this is
+  // still read from the PAYLOAD rather than the DOM — an optimistic bubble paints after it and would
+  // otherwise re-fold the reply for the two seconds before its echo lands.
+  // The PAYLOAD-clipped case is reached from paintFeed, which fetches the rest — without the fold
+  // there is no tap left to do it.
+  const newest = !!all && i.role === "assistant" && n === lastReplyIndex(all);
   const long = t.length > LONG_MSG && !newest;
   // A transcript-echoed user message has demonstrably reached the session, so two ticks.
   inner += stamp(i.ts, i.role === "user" ? 2 : 0);
   // The fold also carries the time: on a collapsed bubble the floated stamp sits below the cut, and
   // the newest message being long is exactly when you want to know when it landed. No duplication —
   // `.msg.clip.open .more` is display:none, so only one of the two is ever visible.
-  const openNow = i.uuid ? openMsgs.has(i.uuid) : false;
+  // Keyed by uuid where there is one and by role+timestamp where there is not — an optimistic bubble
+  // (a long message you just sent) and any entry the transcript wrote without a uuid had NO key at
+  // all, so the tap that opened it was thrown away by the next 3s repaint. The fetch still needs a
+  // real uuid; only the open state falls back.
+  const openNow = openMsgs.has(msgKey(i));
   // A picture with nothing to say under it is a different bubble, not a styled one: it has no
   // padding left to show, and the time moves onto the photo. `t` is already the caption after the
   // placeholder strip, so "(photo)" — which is text the CLI wrote, not the sender — counts as none.
   const imgOnly = !!i.img && !t && !i.att;
   return '<div class="msg ' + i.role + (imgOnly ? " imgonly" : "") + (long ? " clip" : "") + (long && openNow ? " open" : "") + '"'
     + (long ? ' onclick="onBubbleTap(this)"' : "")
-    + (i.uuid ? ' data-uuid="' + esc(i.uuid) + '"' : "") + ">" + inner +
+    + (i.uuid ? ' data-uuid="' + esc(i.uuid) + '"' : "") + ' data-key="' + esc(msgKey(i)) + '">' + inner +
     (long ? '<div class="more">' + (i.ts ? esc(hhmm(i.ts)) + " · " : "") + "tap to expand</div>" : "") + "</div>";
 }
 // One turn: prose through the same md() a reply gets, plus a one-line chip per tool group. The chip
@@ -2480,15 +2490,19 @@ $("dfeed").addEventListener("toggle", e => {
 // poll — which would read as a broken fetch rather than a broken render.
 const fullText = {};
 const openMsgs = new Set();
+// A bubble's identity for the open state. The uuid when the transcript gave one; otherwise the row's
+// role and timestamp, which are as stable across repaints as the row itself.
+const msgKey = i => i.uuid || (i.role + ":" + (i.ts || 0));
 // uuids whose full text paintFeed fetched by itself, for the unfolded newest reply. Separate from
 // fullText because it must also remember the reads that FAILED — that is the whole point of it.
 const autoFull = new Set();
 function onBubbleTap(el) {
   el.classList.toggle("open");
-  const uuid = el.dataset.uuid;
-  if (!uuid) return;                                  // long but not clipped: everything is already here
-  if (el.classList.contains("open")) { openMsgs.add(uuid); expandFull(uuid); }
-  else openMsgs.delete(uuid);
+  const open = el.classList.contains("open"), key = el.dataset.key, uuid = el.dataset.uuid;
+  if (key) open ? openMsgs.add(key) : openMsgs.delete(key);
+  // The FETCH needs a real uuid — a row without one is either optimistic or already whole, and there
+  // is nothing on the server to ask for. The open state above does not care.
+  if (open && uuid) expandFull(uuid);
 }
 // The clamp is a poll-cost measure, so the one unbounded read happens here, on a deliberate tap.
 async function expandFull(uuid) {
@@ -2598,8 +2612,8 @@ function paintFeed() {
   // happens here. Once per uuid and never retried: api() raises its own toast, so a read that keeps
   // failing would raise one every 3s. It is also the cheap half of the poll — the snapshot already
   // carries 4000 chars of this same message on every tick.
-  const last = items[items.length - 1];
-  if (last && last.role === "assistant" && last.clipped && last.uuid && !autoFull.has(last.uuid)) {
+  const last = items[lastReplyIndex(items)];
+  if (last && last.clipped && last.uuid && !autoFull.has(last.uuid)) {
     autoFull.add(last.uuid);
     expandFull(last.uuid);
   }

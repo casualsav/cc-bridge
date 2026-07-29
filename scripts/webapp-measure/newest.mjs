@@ -3,12 +3,18 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-// The NEWEST reply is not folded — and it folds again once something lands under it.
+// The LAST REPLY is not folded — and it stays that way until the NEXT reply, not until the next row.
 //
 // Four claims, and the last two are the ones that make the first useful rather than merely true:
-//   1. the newest assistant message renders at its full height with no fold bar, however long it is;
+//   1. the last assistant message renders at its full height with no fold bar, however long it is;
 //   2. every OLDER long message still folds at 268px, and a user bubble folds even when it is newest
-//      (the owner scoped this to the session's own replies — you know what you wrote);
+//      (the owner scoped this to the session's own replies — you know what you wrote). His own
+//      message landing under a reply does NOT fold it, and neither does the activity of the turn that
+//      follows — 2026-07-29: "it should stay expanded until your next final message, not right away
+//      when I message or while you're working". The next REPLY is what folds it.
+//   2c. a message OPENED BY HAND stays open across the 3s repaint — including one the transcript
+//      wrote with no uuid, which had no key at all and so lost the tap on the next poll (the owner:
+//      "when I expand a message manually, it re-collapses after 3 seconds");
 //   3. a PAYLOAD-clipped newest reply (the server clamps at 4000 chars) gets its rest fetched, once,
 //      without a tap — unfolding it takes away the only control that used to do that;
 //   4. a reply taller than the screen lands on its FIRST line, not its last. Pinning the feed's
@@ -104,13 +110,45 @@ check(!last.clip && !last.more, `the newest reply is not folded (class "${last.c
 check(last.h > CLIP_MAX + 20, `…and renders at its own height, ${last.h.toFixed(1)}px, past the ${CLIP_MAX}px fold`);
 check(older.every(r => r.clip && Math.abs(r.h - CLIP_MAX) <= 1), `every older long message still folds at ${CLIP_MAX}px (${older.map(r => r.h.toFixed(0)).join(", ")})`);
 
-// ---- 2b: a newest USER bubble keeps its fold, and the reply under it goes back to folded --------
+// ---- 2b: what lands under it, and which of those folds it -------------------------------------
+// His own message: the answer he is reading must not fold because he replied to it.
 await state([...history, { role: "assistant", text: long(9), ts }, { role: "user", text: long(10), ts }]);
 m = await read();
 await p.screenshot({ path: join(OUT, "buried.png") });
-const [buriedReply, newestUser] = m.rows.slice(-2);
+const [replyUnderUser, newestUser] = m.rows.slice(-2);
 check(newestUser.clip && Math.abs(newestUser.h - CLIP_MAX) <= 1, `a long USER message folds even as the newest row (${newestUser.h.toFixed(1)}px)`);
-check(buriedReply.clip && Math.abs(buriedReply.h - CLIP_MAX) <= 1, `the reply folds again once something lands under it (${buriedReply.h.toFixed(1)}px)`);
+check(!replyUnderUser.clip && replyUnderUser.h > CLIP_MAX + 20, `…and it does NOT fold the reply above it (${replyUnderUser.h.toFixed(1)}px)`);
+// The turn that follows: narration and tool rows are the session WORKING, not a new answer.
+await state([...history, { role: "assistant", text: long(9), ts }, { role: "user", text: "go on", ts },
+  { role: "turn", ts, blocks: [{ t: "p", text: "reading the transcript back" }] }]);
+m = await read();
+const replyUnderWork = m.rows[m.rows.length - 3];
+check(!replyUnderWork.clip && replyUnderWork.h > CLIP_MAX + 20, `nor does the activity of the turn that follows (${replyUnderWork.h.toFixed(1)}px)`);
+// The NEXT reply: this is the one that folds it, and it takes the exemption for itself.
+await state([...history, { role: "assistant", text: long(9), ts }, { role: "user", text: "go on", ts },
+  { role: "assistant", text: long(8), ts }]);
+m = await read();
+await p.screenshot({ path: join(OUT, "next-reply.png") });
+const [prevReply, , nextReply] = [m.rows[m.rows.length - 3], m.rows[m.rows.length - 2], m.rows[m.rows.length - 1]];
+check(prevReply.clip && Math.abs(prevReply.h - CLIP_MAX) <= 1, `the NEXT reply is what folds it (${prevReply.h.toFixed(1)}px)`);
+check(!nextReply.clip && nextReply.h > CLIP_MAX + 20, `…and that one is now the open one (${nextReply.h.toFixed(1)}px)`);
+
+// ---- 2c: a hand-opened message survives the repaint, with a uuid and without one ---------------
+// The tap sets a class; the poll rebuilds the feed's innerHTML from the payload. Anything the open
+// state is keyed by has to exist for EVERY bubble, or the repaint quietly throws the tap away.
+await state([...history, { role: "assistant", text: long(9), ts }]);
+const opened = await p.evaluate(() => {
+  const rows = [...document.querySelectorAll("#dfeed .msg.clip")];
+  rows.forEach(r => onBubbleTap(r));
+  return rows.map(r => ({ key: r.dataset.key || null, uuid: r.dataset.uuid || null, open: r.classList.contains("open") }));
+});
+check(opened.length >= 2 && opened.every(o => o.open), `the fixture opens ${opened.length} folded messages by hand`);
+check(opened.every(o => o.key), `every bubble carries an open-state key (${opened.filter(o => !o.key).length} without one)`);
+check(opened.some(o => !o.uuid), `…including ones the transcript gave no uuid (${opened.filter(o => !o.uuid).length} of ${opened.length})`);
+// Force the repaint the poll would do: a new row changes the feed's signature.
+await state([...history, { role: "assistant", text: long(9), ts }, { role: "user", text: "still reading", ts }]);
+const stillOpen = await p.evaluate(() => [...document.querySelectorAll("#dfeed .msg.open")].length);
+check(stillOpen >= opened.length, `all ${opened.length} stay open across a repaint (${stillOpen} open)`);
 
 // ---- 3: payload-clipped newest — the rest arrives without a tap --------------------------------
 await state([...history, { role: "assistant", text: huge, ts, uuid: "u-1", clipped: true }]);

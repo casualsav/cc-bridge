@@ -39,11 +39,13 @@ const FEED = {
     // than as the defect. The owner's screen had this many, and at this count the bar lands ON the
     // text exactly as it does there.
     ...Array.from({ length: 8 }, (_, i) => ({ role: i % 2 ? "assistant" : "user", text: long(i + 1), ts })),
-    // A short row LAST, and it is load-bearing: the newest reply is deliberately never folded
+    // A short REPLY last, and it is load-bearing: the last reply is deliberately never folded
     // (newest.mjs owns that claim), so ending on the eighth long assistant message would leave this
     // fixture with seven clipped cards and fail the count for a reason that has nothing to do with
-    // the squash. Anything that buries the last long one does; a short line is the cheapest.
+    // the squash. It has to be an `assistant` row since 2026-07-29 — the exemption now follows the
+    // last REPLY rather than the last row, so a user bubble no longer buries the long one above it.
     { role: "user", text: "ok", ts },
+    { role: "assistant", text: "Done.", ts },
   ],
 };
 const SESSION = { sid: "abc", name: "cc-bridge", alive: true, working: false, cwd: "~/projects/cc-bridge", model: "Opus 5", effort: "high" };
