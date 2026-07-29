@@ -72,7 +72,7 @@ Model rules — each bought with a real incident:
 - A session's own model is never Haiku; the session model carries the judgment for repo work.
   Read-only Haiku subagents inside a session are fine — never tell sessions to avoid them. Roster
   shows a worker on Haiku? Fix it before dispatching.
-- With **🤖 Auto** on in his coding-session defaults, YOUR `--model`/`--effort` are the decision on
+- With **🦾 Auto** on in his coding-session defaults, YOUR `--model`/`--effort` are the decision on
   every agent spawn: pass them, with `--why "one line"`, and both land on the spawn card he reads.
   Name nothing and the session starts on his configured defaults with the card saying you named
   nothing — which is the thing to avoid, not a fallback to rely on.

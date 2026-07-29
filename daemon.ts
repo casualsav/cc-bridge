@@ -9571,7 +9571,7 @@ function spawnDefaultsText(): string {
   return `🧑‍💻 <b>Coding session defaults</b>\n\n` +
     `🧠 Model — <b>${escapeHtml(configuredSpawnModel())}</b>\n` +
     `⚡ Effort — <b>${escapeHtml(configuredSpawnEffort())}</b>\n` +
-    `🤖 Auto — <b>${a.spawnAuto ? 'agents pick' : 'off'}</b>\n` +
+    `🦾 Auto — <b>${a.spawnAuto ? 'agents pick' : 'off'}</b>\n` +
     `🔥 Fable for coding agents — <b>${a.fableForAgents === 'off' ? 'off' : 'ask me first'}</b>`
 }
 function spawnDefaultsKeyboard(): InlineKeyboard {
@@ -9592,7 +9592,7 @@ function spawnDefaultsKeyboard(): InlineKeyboard {
   // ONE toggle over BOTH dials, and only for AGENT spawns: the rows above stay real values, because
   // they are also what the mini-app + and every new topic launch on. That separation IS this feature —
   // as a value in the model slot, auto silently handed a human's spawn the agent fallback.
-  kb.text(`${a.spawnAuto ? '✅' : '☐'} 🤖 Auto — agents pick`, 'spd:a:toggle').row()
+  kb.text(`${a.spawnAuto ? '✅' : '☐'} 🦾 Auto — agents pick`, 'spd:a:toggle').row()
   kb.text(`🔥 Fable for coding agents: ${fableOff ? 'off' : 'ask me first'}`, 'spd:f:toggle').row()
   return kb.text('‹ Back', 'spd:back')
 }
@@ -11737,7 +11737,7 @@ bot.on('callback_query:data', async ctx => {
     else await showSettings(ctx, 'edit')
     return
   }
-  // 🤖 Auto — ONE toggle over both dials, agent spawns only. Stored only when true, the same
+  // 🦾 Auto — ONE toggle over both dials, agent spawns only. Stored only when true, the same
   // store-only-the-non-default rule the Fable switch uses, so an untouched install carries no key.
   if (data === 'spd:a:toggle') {
     if (!(await cbAuth(ctx))) return
