@@ -125,7 +125,7 @@ import {
   AGENT_BUS_ENABLED, AGENT_BUS_PIN_UI,
   createPending, getPending, removePending, putPending, listPending, markInjected, expirePending, dropExpired, LATE_ANSWER_GRACE_MS, ASK_TTL_MS,
   recordAgentAsk, resetHops, currentHops, BREADTH_NOTICE_AT, askResultText, planAskReap, deliveredReapCandidates, reapNotifiesAsker, queuedFor, type AskDelivery,
-  askerAlreadyResolved, markAskerResolved, reapNoticeSuppressed,
+  askerAlreadyResolved, markAskerResolved, reapNoticeSuppressed, planAssigneeNudge, markNudged,
   unreportedWorkMarker, markReported, markBriefed,
   getReportedAt, getBriefedBy,
   setSessionDepth, resetAllSessionDepth, pruneSessionDepth, nextAskDepth, depthExceeded, depthLimit,
@@ -1729,21 +1729,30 @@ async function kickThinkingMirror(pane: string): Promise<void> {
 // SCOPE IS BUS-ASKS-ONLY BY CONSTRUCTION, via the anchor test that gates the call: a session the owner
 // drives directly from the mini app has no ask, so nothing here can fire at him. That is a property of
 // where this is called from, not a check inside it.
-const nudgedAsks = new Set<number>()   // one nudge per ask, ever. In-memory: a daemon restart may
-                                       // re-nudge once, which is far cheaper than a persisted flag.
+// WHO gets nudged and how often is planAssigneeNudge's call, not this function's — an ask whose
+// assignee has already acked its asker is silence, and `nudgedAt` is persisted so a deploy restart
+// cannot buy a second nudge. Both rules came out of the @weather audit; the reasoning is written down
+// beside the predicate.
 const ANSWER_GRACE_MS = 20_000         // a `tg answer` sent in the same turn lands well inside this
 async function checkConcludedTurnObligations(pane: string): Promise<void> {
   const sid = await sessionForPane(pane).catch(() => null)
   if (!sid) return
-  const open = listPending().filter(p => p.toSid === sid && p.injected && !p.expiredAt && !nudgedAsks.has(p.id))
+  const open = listPending().filter(p => p.toSid === sid && p.injected && !p.expiredAt && p.nudgedAt == null)
   if (!open.length) return
   // The grace exists so a correct answer NEVER raises a false alarm — the negative case is the one
   // that decides whether this is shippable at all. Re-read the pending list after it: `tg answer`
-  // removes the row, so anything still here genuinely went unanswered.
+  // removes the row, so anything still here genuinely went unanswered. The ledger is read AFTER the
+  // grace too, so an ack sent in the same turn counts — that is the commonest way an assignee makes
+  // its progress visible, and nudging it 20s later would be the noise this is here to stop.
   await sleep(ANSWER_GRACE_MS)
+  const ledger = tailLedger(busLedgerRoom(), 400)
   for (const p of listPending().filter(q => open.some(o => o.id === q.id) && !q.expiredAt)) {
-    if (nudgedAsks.has(p.id)) continue
-    nudgedAsks.add(p.id)
+    const verdict = planAssigneeNudge(p, ledger)
+    if (verdict !== 'nudge') {
+      process.stderr.write(`daemon: ask ${p.id} to @${p.toName} concluded a turn unanswered — no nudge (${verdict})\n`)
+      continue
+    }
+    markNudged(p.id, Date.now())
     // NOTHING GOES TO THE ASKER — the owner's ruling on the economics, and it reversed a design I had
     // recommended and he had approved. Flagging the asker spends an orchestrator's turn, at whatever
     // that lane costs, to relay something the session itself is the one able to act on. The nudge is
@@ -1753,10 +1762,14 @@ async function checkConcludedTurnObligations(pane: string): Promise<void> {
     // loop — and is SKIPPED outright if the session has already started working again, where an
     // injection would interleave with new work rather than prompt the old one.
     const cap = await capturePane(pane).catch(() => '')
+    // `at=` is the wall clock the note landed at. Without it these notes were the only thing in a
+    // session's transcript with no time on them, so reconstructing a session's history meant anchoring
+    // each one to whatever event happened to sit next to it (the @weather audit did exactly that).
+    const at = new Date().toISOString().replace(/\.\d+Z$/, 'Z')
     if (cap && onNormalPrompt(cap) && !detectWorking(cap)) {
-      void busDeliver(pane, `<tg @system note=${p.id}>Ask ${p.id} from @${p.fromName} is still open — a final text block does not reach the asker. Send it with: tg answer ${p.id} "<summary>"</tg>`)
+      void busDeliver(pane, `<tg @system note=${p.id} at=${at}>Ask ${p.id} from @${p.fromName} is still open — a final text block does not reach the asker. Send it with: tg answer ${p.id} "<summary>"</tg>`)
     }
-    process.stderr.write(`daemon: ask ${p.id} to @${p.toName} concluded a turn unanswered — session nudged\n`)
+    process.stderr.write(`daemon: ask ${p.id} to @${p.toName} concluded a turn unanswered — session nudged (${at})\n`)
   }
 }
 // `silent` rides in from the reply's own anchor (finalRepliesAfter → busAnchored): a turn another

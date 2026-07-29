@@ -91,6 +91,8 @@ export type BusPending = {
   injected: boolean   // false = still queued (target was busy); true = delivered, awaiting an answer
   expiredAt?: number  // set when the TTL passed; the ask is no longer delivered to the target, but a late
                       // `tg answer` still resolves it until dropExpired() GCs it (LATE_ANSWER_GRACE_MS)
+  nudgedAt?: number   // when this ask's assignee was nudged about it. Persisted, so "once per ask" holds
+                      // across a daemon restart — see planAssigneeNudge.
   askerResolvedAt?: number   // when the daemon decided this asker needs no further notice about this ask
                              // (the TTL notice was withheld because the target had already answered it
                              // since). Persisted so the decision outlives the 200-row ledger window and a
@@ -153,6 +155,7 @@ export function loadBus(): BusState {
         expiresAt: typeof p.expiresAt === 'number' ? p.expiresAt : 0,
         injected: p.injected === true,
         ...(typeof p.expiredAt === 'number' ? { expiredAt: p.expiredAt } : {}),
+        ...(typeof p.nudgedAt === 'number' ? { nudgedAt: p.nudgedAt } : {}),
         ...(typeof p.askerResolvedAt === 'number' ? { askerResolvedAt: p.askerResolvedAt } : {}),
         ...(p.founding === true ? { founding: true as const } : {}),
         depth: typeof p.depth === 'number' ? p.depth : 1,   // pre-depth entry: assume one hop, the safe reading
@@ -360,6 +363,53 @@ export function markAskerResolved(id: number, now: number): void {
   const p = store.pending[String(id)]
   if (!p || p.askerResolvedAt != null) return
   p.askerResolvedAt = now
+  save()
+}
+
+// ---- the open-ask nudge (what the assignee is reminded of, and when) ----
+//
+// The nudge costs the reminded session a whole turn at its own model rates, so the only question that
+// matters is whether it TELLS the session anything. Audited over one session's life (@weather,
+// 2026-07-28/29): 8 nudges, and one predicate separates them cleanly — had the assignee sent the
+// asker anything about this ask yet?
+//
+//   657 · 672 · 678 · 681 · 690  → zero traffic. Every one converted invisible progress into a
+//                                  visible status ack. Signal.
+//   684 · 690(again) · 694       → the assignee had already acked the asker. Noise, and 690 twice.
+//
+// So: silence once the assignee has spoken to its asker. An ack is not an answer and does NOT close
+// the ask — the row stays open, the TTL still runs, and the 60-minute expiry notice is untouched. It
+// only means the asker is no longer in the dark, which is the one thing the nudge exists to fix.
+//
+// Matched on counterparty and time rather than on an ask id, because `tg ack` mints its OWN id: an
+// ack about ask 690 is logged as a new row, so keying on 690 would find nothing and every ack would
+// read as silence. From the assignee, to this asker, since this ask opened — that is the traffic.
+export function assigneeSpokeToAsker(p: BusPending, entries: LedgerEntry[]): boolean {
+  return entries.some(e => (e.kind === 'ack' || e.kind === 'answer')
+    && e.from === p.toName && e.to === p.fromName && e.ts >= p.createdAt)
+}
+
+export type NudgeVerdict = 'nudge' | 'already-nudged' | 'assignee-reported'
+
+// Whether this concluded turn's still-open ask earns a nudge, and if not, which reason — the daemon
+// logs the verdict, so a nudge that did NOT fire is as visible as one that did.
+//
+// `nudgedAt` is PERSISTED on the row, not held in memory. In-memory was the original call ("a daemon
+// restart may re-nudge once, which is far cheaper than a persisted flag") and the audit is what
+// refutes it: ask 690 was nudged at 01:49:31 and again at 02:01:45, once on each side of a deploy
+// restart. On a box that ships several times an hour "once per ask" was never once.
+export function planAssigneeNudge(p: BusPending, entries: LedgerEntry[]): NudgeVerdict {
+  if (p.nudgedAt != null) return 'already-nudged'
+  if (assigneeSpokeToAsker(p, entries)) return 'assignee-reported'
+  return 'nudge'
+}
+
+/** Record that this ask's assignee has been nudged. Survives a restart, so it fires once. Idempotent. */
+export function markNudged(id: number, now: number): void {
+  ensureLoaded()
+  const p = store.pending[String(id)]
+  if (!p || p.nudgedAt != null) return
+  p.nudgedAt = now
   save()
 }
 
