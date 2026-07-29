@@ -550,6 +550,39 @@ function unwrapTg(raw: string): { text: string; img?: string; imgs?: string[]; a
     ...(imgs.length > 1 ? { imgs } : {}), ...(att ? { att } : {}) }
 }
 
+// Every machine payload that can arrive USER-SIDE, classified in ONE place — because it arrives on
+// TWO paths and they disagreed. A block delivered while a turn is running is written as a
+// `queue-operation` first and (once the turn consumes it) as a user entry too, and only the user
+// path knew these shapes: the owner's phone showed a raw `<task-notification>` blob as his own blue
+// bubble with the clean Agent card sitting directly beneath it, the same event twice, once as XML.
+//
+// The outer null means "NOT one of ours" — and that is a deliberate FAIL-OPEN: an unrecognised block
+// renders as whatever it is, ugly and visible, rather than being swallowed by a classifier that
+// doesn't know it. Today's ugly bubble is tomorrow's only evidence that a new block type exists.
+// An inner null means recognised and deliberately renders nothing (an empty stdout, /clear).
+function machineBlockItem(raw: string, ts: number, uuid?: string): { item: ConversationItem | null } | null {
+  if (raw.startsWith('<task-notification>')) return { item: taskNotificationItem(raw, ts, uuid) }
+  // A slash command's own output. It gets the 'command' role — the fourth voice in the feed after
+  // user / session / agent, and the quietest, because this is the CLI talking rather than the
+  // model. foldCommands pairs it with the <command-name> entry so the invocation and its answer
+  // read as one row. Deliberately NOT entity-decoded: what the CLI wrote here is already literal.
+  // It IS normalized, because it was written for a terminal — see ansi.ts.
+  if (raw.startsWith('<local-command-stdout>')) return { item: commandItem(raw, ts, uuid) }
+  // `!` bash mode keeps the command-chip line style and its monospace: a shell's output is
+  // preformatted by nature, where a CLI status sentence is prose. Same reason ansi.ts fences a
+  // table instead of prosing it.
+  if (raw.startsWith('<bash-input>')) {
+    const cmd = tagOf(raw, 'bash-input').trim()
+    return { item: cmd ? { role: 'user', text: `! ${cmd}`, ts, uuid, cmd: true } : null }
+  }
+  if (raw.startsWith('<bash-stdout>')) {
+    const out = [tagOf(raw, 'bash-stdout'), tagOf(raw, 'bash-stderr')].map(s => s.trim()).filter(Boolean).join('\n')
+    return { item: out ? { role: 'user', text: out, ts, uuid, cmd: true } : null }
+  }
+  if (/^<command-name>/.test(raw)) return { item: commandItem(raw, ts, uuid) }
+  return null
+}
+
 function conversationItem(e: Entry): ConversationItem | null {
   const ts = e.timestamp ? Date.parse(e.timestamp) : 0
   const uuid = e.uuid
@@ -585,30 +618,19 @@ function conversationItem(e: Entry): ConversationItem | null {
     // placeholder is written precisely BECAUSE the image carries the meaning, and the feed suppresses
     // it when there is an image to show — so dropping the attribute turns a photo into the caption
     // that exists to stand in for it.
+    // Machine blocks queue exactly like a typed message does — a subagent that finishes mid-turn is
+    // enqueued, not written straight to the user side — so this path classifies them with the same
+    // function the user path uses. Anything unrecognised still falls through to the envelope unwrap
+    // and renders as it always did.
+    const queued = raw ? machineBlockItem(raw, ts, uuid || `queued-${ts}`) : null
+    if (queued) return queued.item
     return raw ? { role: 'user', ...unwrapTg(raw), ts, uuid: uuid || `queued-${ts}` } : null
   }
   if (isRealUserText(e)) {
     const raw = textOf(e.message?.content).trim()
-    if (raw.startsWith('<task-notification>')) return taskNotificationItem(raw, ts, uuid)
-    // A slash command's own output. It gets the 'command' role — the fourth voice in the feed after
-    // user / session / agent, and the quietest, because this is the CLI talking rather than the
-    // model. foldCommands pairs it with the <command-name> entry below so the invocation and its
-    // answer read as one row. Deliberately NOT entity-decoded: what the CLI wrote here is already
-    // literal. It IS normalized, because it was written for a terminal — see ansi.ts.
-    if (raw.startsWith('<local-command-stdout>')) return commandItem(raw, ts, uuid)
-    // `!` bash mode keeps the command-chip line style and its monospace: a shell's output is
-    // preformatted by nature, where a CLI status sentence is prose. Same reason ansi.ts fences a
-    // table instead of prosing it.
-    if (raw.startsWith('<bash-input>')) {
-      const cmd = tagOf(raw, 'bash-input').trim()
-      return cmd ? { role: 'user', text: `! ${cmd}`, ts, uuid, cmd: true } : null
-    }
-    if (raw.startsWith('<bash-stdout>')) {
-      const out = [tagOf(raw, 'bash-stdout'), tagOf(raw, 'bash-stderr')].map(s => s.trim()).filter(Boolean).join('\n')
-      return out ? { role: 'user', text: out, ts, uuid, cmd: true } : null
-    }
+    const machine = machineBlockItem(raw, ts, uuid)
+    if (machine) return machine.item
     if (/^[\s\S]{0,3}?<tg[^>]*>/.test(raw)) return { role: 'user', ...unwrapTg(raw), ts, uuid }
-    if (/^<command-name>/.test(raw)) return commandItem(raw, ts, uuid)
     return { role: 'user', text: raw, ts, uuid }
   }
   if (isMainAssistantText(e) && e.message?.stop_reason !== 'tool_use') {
@@ -644,6 +666,32 @@ function foldCommands(items: ConversationItem[]): ConversationItem[] {
   }
   return out
 }
+
+// The queue row and the user entry are the SAME notification, ~50ms apart: one written when it
+// arrived, one when the turn consumed it. Both now render a card, so both would be a card — the
+// duplication the owner reported, merely prettier. Collapsed here rather than by suppressing one
+// path, because the two regimes are real and BOTH occur in his transcripts: a notification that is
+// consumed writes the user entry (an enqueue with no user entry beside it must still render, or the
+// event disappears), and one that is removed from the queue never does.
+//
+// ADJACENT and IDENTICAL only — same agent, same status, same text, within a second. The CLI's own
+// note says one task-id may notify more than once, so "same agent" alone would fold two genuinely
+// different reports into one. The LATER row wins: it is the one carrying a real transcript uuid, so
+// a clipped card can still fetch its full text.
+const DUP_WINDOW_MS = 1000
+function foldQueuedDuplicates(items: ConversationItem[]): ConversationItem[] {
+  const out: ConversationItem[] = []
+  for (const it of items) {
+    const prev = out[out.length - 1]
+    if (it.role === 'agent' && prev?.role === 'agent' && prev.text === it.text
+        && prev.agent === it.agent && prev.status === it.status && Math.abs(it.ts - prev.ts) <= DUP_WINDOW_MS) {
+      out[out.length - 1] = it
+      continue
+    }
+    out.push(it)
+  }
+  return out
+}
 export function recentConversation(file: string, max = 12): ConversationItem[] {
   const rows: ConversationItem[] = []
   for (const e of readEntries(file)) {
@@ -654,7 +702,7 @@ export function recentConversation(file: string, max = 12): ConversationItem[] {
   // 40k /context body through whole.
   // A cut is reported, not just implied by a trailing ellipsis — and the row keeps its uuid so the
   // client can go and fetch the rest.
-  return foldCommands(rows)
+  return foldQueuedDuplicates(foldCommands(rows))
     .map(it => it.text.length > CONVO_CAP ? { ...it, text: it.text.slice(0, CONVO_CAP) + '…', clipped: true as const } : it)
     .slice(-max)
 }

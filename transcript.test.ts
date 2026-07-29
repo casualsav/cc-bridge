@@ -420,6 +420,73 @@ describe('a subagent report is not the owner talking', () => {
     expect(it.text).toBe('Agent "Map daemon concurrency & hot loop" finished')
   })
 
+  // ---- …AND IT ARRIVES ON TWO PATHS -------------------------------------------------------------
+  //
+  // A subagent that finishes while the parent is mid-turn is QUEUED first and written to the user
+  // side only when the turn consumes it. Only the user path knew this shape, so the owner's phone
+  // showed the raw XML as his own blue bubble with the clean card directly beneath it — the same
+  // event twice, once as a wall of tags (his screenshot, 2026-07-29 00:17, session @weather).
+  const qNote = (content: string, ts: string) => ({ type: 'queue-operation', operation: 'enqueue', timestamp: ts, content })
+  const userAt = (text: string, uuid: string, ts: string) => ({ type: 'user', uuid, timestamp: ts, message: { content: text } })
+
+  test('a notification that arrives QUEUED is a card too, never raw XML', () => {
+    const [it] = recentConversation(fixture([qNote(NOTIFICATION, '2026-07-29T00:17:36.583Z')]), 5)
+    expect(it.role).toBe('agent')
+    expect(it.agent).toBe('Map daemon concurrency & hot loop')
+    expect(it.text.includes('<task-notification>')).toBe(false)
+  })
+
+  test('the queue row and the user entry are ONE card, not two', () => {
+    // 55ms apart in his transcript — the same notification, once on arrival and once on consumption.
+    const f = fixture([qNote(NOTIFICATION, '2026-07-29T00:17:36.583Z'), userAt(NOTIFICATION, 'u9', '2026-07-29T00:17:36.638Z')])
+    const rows = recentConversation(f, 5)
+    expect(rows.length).toBe(1)
+    // The LATER row wins: it carries the real uuid, which is what an expand fetches by.
+    expect(rows[0].uuid).toBe('u9')
+  })
+
+  // The other regime, equally real in his transcripts: enqueue → remove, and NO user entry ever
+  // written. Suppressing the queue row instead of folding the pair would delete this event outright.
+  test('a queued notification with no user entry beside it still renders', () => {
+    const f = fixture([qNote(NOTIFICATION, '2026-07-29T00:17:36.583Z'),
+      { type: 'queue-operation', operation: 'remove', timestamp: '2026-07-29T00:17:52.718Z', content: NOTIFICATION }])
+    expect(recentConversation(f, 5).map(r => r.role)).toEqual(['agent'])
+  })
+
+  // The CLI's own note says one task-id may notify more than once, so "same agent" cannot be the
+  // fold's key — two genuinely different reports from one agent are two events.
+  test('two different reports from the same agent are not folded', () => {
+    const second = NOTIFICATION.replace('## Conclusion', '## Second pass')
+    const f = fixture([userAt(NOTIFICATION, 'u1', '2026-07-29T00:17:36.638Z'), userAt(second, 'u2', '2026-07-29T00:17:36.900Z')])
+    expect(recentConversation(f, 5).length).toBe(2)
+  })
+
+  // …and neither is a repeat of the SAME report an hour later: adjacency in time is half the key,
+  // because a session that re-runs an agent gets the identical summary and result text.
+  test('the same report re-notified later is not folded', () => {
+    const f = fixture([userAt(NOTIFICATION, 'u1', '2026-07-29T00:17:36.638Z'), userAt(NOTIFICATION, 'u2', '2026-07-29T01:22:10.000Z')])
+    expect(recentConversation(f, 5).length).toBe(2)
+  })
+
+  // FAIL OPEN TO VISIBLE. A block shape this file has never seen renders as whatever it is — ugly,
+  // and the only evidence anyone will ever get that a new injected type exists. Swallowing it
+  // silently would make the next one of these invisible instead of merely unpleasant.
+  test('an unrecognised injected block is passed through, not swallowed', () => {
+    const f = fixture([qNote('<harness-signal><kind>unknown</kind></harness-signal>', '2026-07-29T00:17:36.583Z')])
+    const [it] = recentConversation(f, 5)
+    expect(it.role).toBe('user')
+    expect(it.text).toBe('<harness-signal><kind>unknown</kind></harness-signal>')
+  })
+
+  // The regression guard on the feature this path exists for: a HUMAN message queued mid-turn is
+  // still a human message, envelope unwrapped, untouched by any of the above.
+  test('a queued human message is unaffected', () => {
+    const f = fixture([qNote('<tg 42>from telegram</tg>', '2026-07-29T00:17:36.583Z')])
+    const [it] = recentConversation(f, 5)
+    expect(it.role).toBe('user')
+    expect(it.text).toBe('from telegram')
+  })
+
   // Expanding a clipped card must not reveal the markup the collapsed one hid — the same rule the
   // <tg …> envelope has, and the reason both paths go through conversationItem().
   test('the full-text fetch returns the same parsed report', () => {
