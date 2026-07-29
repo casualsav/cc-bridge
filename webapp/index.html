@@ -181,6 +181,10 @@
        mode byte-identical: the gate is `tg.isFullscreen`, not the insets — an inset that happens to
        report a notch off-fullscreen would otherwise open a gap the window manager already gave us. */
     --safe-top: 0px;
+    /* The soft keyboard's own footprint, written by syncKeyboard() and 0px whenever no keyboard is
+       up — or whenever the client resized the layout viewport for us, which is the same 0 for the
+       same reason --safe-top is 0 off-fullscreen: there is nothing left to clear. */
+    --kb: 0px;
     /* The ceiling scrim as TWO LENGTHS rather than percentages of one height, which is what lets the
        same eased ramp serve both layouts. --scrim-solid is how far full --bg reaches down: here the
        row's own 10px margin plus the NAME's line box, which lands it --h-pad above the cwd — "the
@@ -562,7 +566,11 @@
      feed's own top padding, which is where the first message comes to rest). Owning the strip is the
      point: the chat scrolls THROUGH it rather than starting under a grey band.
      A plain block, not a flex column: nothing is in normal flow here now except the feed. */
-  #drill { position: fixed; inset: 0; background: var(--bg); display: none; z-index: 5; }
+  /* `bottom: var(--kb)` AFTER the shorthand, and it is the whole keyboard fix: a fixed element is
+     laid out against the LAYOUT viewport, which a soft keyboard does not always shrink — so without
+     this the chat keeps its full height and the keyboard simply covers the composer and the newest
+     messages. --kb is 0 whenever the client did shrink it for us, which keeps that case untouched. */
+  #drill { position: fixed; inset: 0; bottom: var(--kb); background: var(--bg); display: none; z-index: 5; }
   #drill.show { display: block; }
   /* The dock floats at the floor with no fill of its own. Its SCRIM lives on the composer (below),
      starting at the capsule's own top edge — the owner's correction: "the gradient on the bottom
@@ -3096,6 +3104,44 @@ $("dtext").oninput = syncComposerMode;
 // appearing) do not re-wrap and are harmless; re-measuring on both is simpler than telling them
 // apart, and growComposer is idempotent.
 addEventListener("resize", growComposer);
+// --- The soft keyboard. -------------------------------------------------------------------------
+// Two things have to happen when it rises, and only one of them is scrolling. FIRST the chat has to
+// give up the strip the keyboard now owns, or a scroll to the bottom just files the newest messages
+// underneath it. `visualViewport` is the measurement, not `innerHeight`: the layout viewport is what
+// a `position: fixed` box is laid out against, and a keyboard does not reliably shrink it. Where the
+// client DOES shrink it (an Android webview in resize mode, Telegram resizing its own sheet), the
+// two heights agree and this computes 0 — that case keeps working exactly as it did, which is why
+// this is a max() of a difference rather than a branch on the platform.
+// Telegram's own `viewportChanged` feeds the same recompute: on a client that reports the keyboard
+// only through the SDK, it is the event that fires, and running one function from both is what keeps
+// the two paths from disagreeing.
+const vv = window.visualViewport;
+let kbPx = 0;
+function syncKeyboard() {
+  const px = vv ? Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop)) : 0;
+  const rose = px > kbPx + 1;
+  kbPx = px;
+  document.documentElement.style.setProperty("--kb", px + "px");
+  // Only on the way UP. A keyboard being dismissed hands the space back, and yanking the transcript
+  // at that moment would take the reader off whatever they had just scrolled to in order to dismiss
+  // it. Growth is what the owner asked to follow; shrinkage is the reader's own business.
+  if (rose) pinFeedBottom();
+}
+// ALWAYS to the bottom, never "only if you were already near it" — the owner's ask, and the state a
+// composer tap is nearly always about. The cost is real and named: a reader who scrolled up to quote
+// something and then tapped the field loses that position. If it ever bites, the near-bottom guard
+// is the same 60px test paintFeed and growComposer already use.
+function pinFeedBottom() {
+  const feed = $("dfeed");
+  if (!feed || !$("drill").classList.contains("show")) return;
+  feed.scrollTop = feed.scrollHeight;
+}
+if (vv) for (const e of ["resize", "scroll"]) vv.addEventListener(e, syncKeyboard);
+if (tg) try { tg.onEvent("viewportChanged", syncKeyboard); } catch {}
+// The focus tap itself, because the keyboard's own animation lands a beat later and the transcript
+// should already be at the bottom when it does. The resize that follows pins it again — idempotent,
+// and the second one is what covers a client whose keyboard opens without a focus event of ours.
+$("dtext").addEventListener("focus", pinFeedBottom);
 // The dock floats over the feed, so the space it occupies has to be GIVEN BACK to the scroller as
 // bottom padding — a flex column used to subtract it for free. One observer rather than a call at
 // each site: the dock changes height for the composer growing, the working row arriving or leaving,

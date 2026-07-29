@@ -60,6 +60,24 @@ give it.
   "fix" the prediction-font mismatch instead: the prediction is drawn by the KEYBOARD in the
   device's own UI font, which no `font-family` in the page can reach.
 
+## The soft keyboard
+
+- **The measurement is `visualViewport`, never `innerHeight`, and it is a DIFFERENCE:**
+  `innerHeight − visualViewport.height − offsetTop`. A `position: fixed` box is laid out against the
+  LAYOUT viewport, which a keyboard does not reliably shrink — so `#drill` carries
+  `bottom: var(--kb)` (after the `inset: 0` shorthand, or it is overwritten). Where the client
+  already shrank the layout viewport (Android resize mode, Telegram resizing its sheet) the two
+  heights agree, `--kb` is 0, and that case is byte-identical — which is why this is a max() of a
+  difference and not a branch on the platform. Telegram's `viewportChanged` feeds the same function.
+- **Pinning happens on the way UP only, and ALWAYS to the bottom** (the owner's ask, not the
+  near-bottom guard `paintFeed`/`growComposer` use): a keyboard being dismissed hands the space back
+  and re-pinning there would take the reader off what they just scrolled to. A composer tap pins on
+  its own, because the keyboard's animation lands a beat later. Named cost: a reader who scrolls up
+  to quote something and then taps the field loses that position.
+- **`keyboard.mjs` SIMULATES the keyboard** — a fake `visualViewport` installed before the page's
+  script, which is the signal the page listens to. What no headless run can answer is whether
+  Telegram's webview reports a real keyboard through it at all; that leg needs a thumb.
+
 ## Feed
 
 - **The fold is a veil to the element's FLOOR, not a band above the label:** runs to `bottom: 0`,
