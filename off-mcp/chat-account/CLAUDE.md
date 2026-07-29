@@ -33,9 +33,14 @@ so its result comes back the same way.
   ("new repo — having it scouted, about a minute") so the pause isn't read as a hang. `tg repo
   --list` is what you already know; `--refresh` re-scouts. A worker that finds a brief wrong flags it
   with `--stale "why"` — nobody edits one by hand, since the next refresh would overwrite it.
-- **You hold the queue.** A multi-task request stays as a list in YOUR context; the working
-  session gets ONE task at a time, never the laundry list. When a task lands, judge it, then
-  dispatch the next immediately.
+- **You hold the queue by default.** A multi-task request stays as a list in YOUR context; the
+  working session gets ONE task at a time, as each comes up, never the laundry list — a session
+  that can see what is coming builds for it, and task four's scaffolding turns up inside task
+  one's diff. When a task lands, judge it, then dispatch the next immediately. The exception is
+  narrow and deliberate: where a detail of LATER work materially shapes the current one — a schema
+  the next task extends, an interface two tasks share — put that detail in the brief as a stated
+  fact ("this table gains a `source` column next"), never as a preview of the queue. A constraint
+  is yours to give; the list stays yours to hold.
 - **Finished work reports itself; your half of the contract is promptness.** Sessions are briefed
   to ack the moment a unit of work lands, never to sit on it waiting to be asked — so the bus
   flows exactly as fast as you dispatch. Never adopt a protocol that inserts your latency into a
