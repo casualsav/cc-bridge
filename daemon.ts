@@ -107,6 +107,7 @@ import {
   setPaneRestarting, isPaneRestarting, releasePaneSession, reopenSessionTopic,
   retriggerTopicTyping, paneClaudeLive,
 } from './topic-runtime.ts'
+import { latchMode, type ModeLatch } from './mode-latch.ts'
 import { startWebapp, type SettingsView as WebappSettingsView, type SessionCard as WebappSessionCard, type SessionFeed as WebappSessionFeed, type AutomationView as WebappAutomationView } from './webapp.ts'
 import { startTunnel, ensureCloudflared, tailscaleFunnelUrl, type Tunnel } from './tunnel.ts'
 import { sendRichMessage, sendRichMessageDraft, editRichMessage, toInputRichMessage, htmlPanelToRich, callTelegram, normalizeRichInbound, type InputRichMessage } from './richmsg.ts'
@@ -5587,6 +5588,7 @@ async function handleCall(
         // groupless GC (which otherwise dropped it ~85s later, taking `tg reopen`'s only record of
         // the cwd + conversation with it) for KILL_UNDO_GRACE_MS.
         updateTopic(res.id, { killedAt: Date.now() })
+        markSessionEnding(res.id)   // its card leaves the fleet list now, not when the /exit finally lands
         if (targetPane && alive) {
           // Suppress the lazy topic reopen until /exit lands; the reactive closeTopicForPane closes
           // the tab once the pane dies. closeSessionPane escalates for ~20s, so don't await it here —
@@ -5674,6 +5676,7 @@ async function handleCall(
         // but it no-ops without a group — so a groupless row would stay closed:true and the session
         // would come back invisible to every dashboard and unaddressable on the bus.
         updateTopic(sid, { closed: false, killedAt: undefined })
+        endingSids.delete(sid)   // the revive is what puts the card back
         await reopenSessionTopic(sid)   // reopen the tab now, not on its first reply
         appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'reopen', from: nameForEndpoint(fromSid, busEndpoints()), to: t0.name, text: t0.agentSessionId ? `--resume ${t0.agentSessionId}` : 'fresh' })
         break
@@ -12241,6 +12244,7 @@ bot.on('callback_query:data', async ctx => {
     const pane = await paneForSession(pending.sessionId).catch(() => null)
     const alive = !!pane && await paneAlive(pane).catch(() => false)
     updateTopic(pending.sessionId, { killedAt: Date.now() })
+    markSessionEnding(pending.sessionId)
     if (pane && alive) {
       if (topic?.threadId != null) markTopicClosePending(pending.sessionId)
       // Not awaited — closeSessionPane escalates for ~20s, and a wedged session is the one you're
@@ -15638,6 +15642,32 @@ async function paneSurvivors(pane: string): Promise<WaitShell[]> {
 }
 
 
+// The last permission mode actually SEEN on each session's pane, so a frame whose footer shows a hint
+// instead of the mode indicator doesn't blank the card's chip. Keyed by sid; see mode-latch.ts for why
+// a captured 'default' cannot be trusted as "Ask mode".
+const paneModeLatch: ModeLatch = new Map()
+
+// Sessions whose pane has been told to exit and hasn't died yet. All three end paths — `tg kill`,
+// `/exit @name`, the mini app's ✕ — type /exit and return immediately, and a BUSY session does not
+// read that /exit until its turn ends: measured 2026-07-29, **37s** of a green pulsing card still
+// showing "🧑‍💻 Bash for i in $(seq 1 40)…" for a session the owner had already killed, because the card
+// reads the pane and the pane genuinely was still working. The fleet list drops such a row on the spot
+// — the kill is committed (closeSessionPane escalates to `tmux kill-pane`, so the pane always dies),
+// and reviving the session clears the mark, which is what brings its card back.
+//
+// Memory-only and TTL-bounded, both deliberate: a daemon restart is far longer than any exit takes, and
+// a pane still alive after the window is a kill that did NOT take — which the owner should see, not a
+// row hidden forever.
+const endingSids = new Map<string, number>()
+const ENDING_TTL_MS = 120_000
+function markSessionEnding(sid: string): void { endingSids.set(sid, Date.now()) }
+function sessionEnding(sid: string): boolean {
+  const at = endingSids.get(sid)
+  if (at == null) return false
+  if (Date.now() - at > ENDING_TTL_MS) { endingSids.delete(sid); return false }
+  return true
+}
+
 // One dashboard card, read live from the pane: statusline dials + working state + a task line
 // (current activity while working, last-reply snippet while idle). Dead pane ⇒ alive:false card.
 async function webappSessionCard(row: { sid: string; name: string; cwd: string; agent: string }, ctx?: WaitCtx): Promise<WebappSessionCard> {
@@ -15702,7 +15732,10 @@ async function webappSessionCard(row: { sid: string; name: string; cwd: string; 
     sid: row.sid, name: row.name, cwd, agent: row.agent, chat, alive: true, working, subagents, task, state, wait,
     unreported: state === 'unreported' && marker ? { briefer: marker.briefer } : null,
     errorStatus: read.errorStatus,
-    model, effort: sl?.effort ?? null, mode: cap ? detectCurrentMode(cap) : null,
+    // The mode is LATCHED (mode-latch.ts), not read raw: the footer slot the indicator lives in is
+    // shared with Claude Code's transient hints, so an ordinary frame can carry no indicator at all
+    // and read as 'default' — the mode chip blinking out of a card that never changed mode.
+    model, effort: sl?.effort ?? null, mode: latchMode(paneModeLatch, row.sid, detectCurrentMode(cap)),
     ctxPct: sl?.ctxPct ?? null, h5Pct: sl?.h5?.pct ?? null,
     branch: topicBranchCache.get(row.sid) || null, tier: paneTiers.get(pane) ?? null,
   }
@@ -15721,7 +15754,8 @@ async function webappSessionCard(row: { sid: string; name: string; cwd: string; 
 // a `tg reopen` respawning it) is listed again by the first read that finds it live — the flicker is
 // the whole of the state.
 async function webappListSessions(): Promise<WebappSessionCard[]> {
-  const rows = dashboardSessionRows()
+  // A session being ended is not part of the fleet, however alive its pane still reads (see endingSids).
+  const rows = dashboardSessionRows().filter(r => !sessionEnding(r.sid))
   if (focus.activePaneId) {   // an adopted session outside the store (classic focused loop) is part of the fleet too
     const sid = await sessionForPane(focus.activePaneId).catch(() => null)
     if (sid && !rows.some(r => r.sid === sid)) rows.push({ sid, name: 'Session', cwd: '', agent: 'claude' })
@@ -15885,6 +15919,7 @@ async function webappSessionAction(userId: string, sid: string, action: 'stop' |
       // closeTopicForPane must still see closed:false to actually close the Telegram tab. (The
       // forum_topic_closed handler sets it because there the user already closed the tab himself.)
       if (topic?.threadId != null) markTopicClosePending(sid)
+      markSessionEnding(sid)   // the card you just tapped ✕ on must stop pulsing, not wait out the /exit
       void closeSessionPane(pane, 'webapp-close')   // escalates for up to ~20s — never hold the HTTP request open for it
       return null
     }

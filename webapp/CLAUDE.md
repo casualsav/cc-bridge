@@ -414,6 +414,18 @@ give it.
   disagreed for a release (an amber card opened onto a grey dot) because each read the composite
   itself. A `state`-less payload (an older daemon, or the pre-transcript one) falls back to the
   working boolean, so the dot degrades to what it was rather than to grey.
+- **The mode chip is LATCHED daemon-side, and a payload `mode` of `default` means "Ask mode OR nothing
+  on screen".** Claude Code's footer shares the mode-indicator slot with its transient hints, so a raw
+  read blinks the chip out of a card whose pane never changed mode — measured on the owner's chat lane,
+  which takes a paste on every inbound message. `mode-latch.ts` serves the last mode actually SEEN (5
+  minutes, then it decays so a hand-cycled pane stops claiming the old one) and
+  `scripts/mode-latch-live.ts` manufactures the indicator-less frame — it fails on the pre-fix daemon
+  and is INCONCLUSIVE rather than green when the frame doesn't reproduce. There is nothing to fix in
+  the client: hiding or holding the chip there would be the same blink with a second source of truth.
+- **A session being killed leaves the list on the KILL, not on its pane's death.** `tg kill` / `/exit
+  @name` / the ✕ all type /exit, and a BUSY session doesn't read it until its turn ends — 37s of a green
+  pulsing card for a session the owner had already killed (`endingSids` in daemon.ts, measured by
+  `scripts/webapp-measure/busykill.mjs`; deadcard.mjs covers the idle kill, which needs no mark).
 
 - **The owner's own chat lane renders as a BARE TITLE ROW** — dot, name, dials, ✕ — at all times, no
   task line and no foot (his ask: the chat is where he watches it work, so a preview repeats the
