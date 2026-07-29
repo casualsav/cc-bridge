@@ -354,6 +354,15 @@ async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: strin
     if (!deps.readSettings) return json({ error: 'unavailable' }, 404)
     return json(await deps.readSettings())
   }
+  // ⏳ TEMPORARY — REMOVE WITH THE PAGE'S kbBeacon(). The soft-keyboard fix has one leg no agent can
+  // reach: what an Android Telegram webview actually fires when the keyboard rises. This logs what
+  // the page saw, so one focus-tap on the owner's phone answers it. Read-only, no state, no reply
+  // body worth having — the daemon log IS the instrument.
+  if (url.pathname === '/api/kbdebug') {
+    const q = [...url.searchParams].map(([k, v]) => `${k}=${v}`).join(' ')
+    process.stderr.write(`webapp-kb: ${q}\n`)
+    return json({ ok: true })
+  }
   if (url.pathname === '/api/sessions') {
     if (!deps.listSessions) return json({ error: 'unavailable' }, 404)
     return json({ sessions: await deps.listSessions() })

@@ -69,14 +69,22 @@ give it.
   already shrank the layout viewport (Android resize mode, Telegram resizing its sheet) the two
   heights agree, `--kb` is 0, and that case is byte-identical — which is why this is a max() of a
   difference and not a branch on the platform. Telegram's `viewportChanged` feeds the same function.
-- **Pinning happens on the way UP only, and ALWAYS to the bottom** (the owner's ask, not the
-  near-bottom guard `paintFeed`/`growComposer` use): a keyboard being dismissed hands the space back
-  and re-pinning there would take the reader off what they just scrolled to. A composer tap pins on
-  its own, because the keyboard's animation lands a beat later. Named cost: a reader who scrolls up
-  to quote something and then taps the field loses that position.
+- **Pin on EVERY viewport change, never on `--kb` changing.** That was the device bug (v0.4.233,
+  observed on his phone): the lift worked and the transcript never moved, because a client that
+  shrinks its own layout viewport holds `--kb` at 0 throughout — correctly — and the one handler that
+  would have re-pinned computed 0 → 0. The resize IS the event; whether this page also had to move
+  the surface is a different question with a different answer per client. A trailing 350ms re-pin
+  follows, because a rise arrives as a burst of resizes on some clients and one mid-animation event
+  on others.
+- **Riding is CONDITIONAL, and the state is read on SCROLL, not inside the resize handler.** A
+  transcript resting within 60px of the floor (`paintFeed`'s own guard) rides with the composer
+  through the rise AND the fall; a mid-thread reader is not moved in either direction. Measuring
+  "was it at the bottom" inside the handler is the trap — by then the scroller is already shorter, so
+  a reader who was sitting exactly on the floor measures 320px away from it.
 - **`keyboard.mjs` SIMULATES the keyboard** — a fake `visualViewport` installed before the page's
-  script, which is the signal the page listens to. What no headless run can answer is whether
-  Telegram's webview reports a real keyboard through it at all; that leg needs a thumb.
+  script, plus a real viewport resize for the layout-shrink half. It runs the matrix that matters:
+  {at the floor, mid-thread} × {rise, fall} × {visual-only shrink, layout shrink}. What no headless
+  run can answer is which event Telegram's webview fires for a real keyboard; that leg needs a thumb.
 
 ## Feed
 

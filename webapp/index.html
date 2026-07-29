@@ -3110,38 +3110,80 @@ addEventListener("resize", growComposer);
 // underneath it. `visualViewport` is the measurement, not `innerHeight`: the layout viewport is what
 // a `position: fixed` box is laid out against, and a keyboard does not reliably shrink it. Where the
 // client DOES shrink it (an Android webview in resize mode, Telegram resizing its own sheet), the
-// two heights agree and this computes 0 — that case keeps working exactly as it did, which is why
-// this is a max() of a difference rather than a branch on the platform.
-// Telegram's own `viewportChanged` feeds the same recompute: on a client that reports the keyboard
-// only through the SDK, it is the event that fires, and running one function from both is what keeps
-// the two paths from disagreeing.
-const vv = window.visualViewport;
-let kbPx = 0;
-function syncKeyboard() {
-  const px = vv ? Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop)) : 0;
-  const rose = px > kbPx + 1;
-  kbPx = px;
-  document.documentElement.style.setProperty("--kb", px + "px");
-  // Only on the way UP. A keyboard being dismissed hands the space back, and yanking the transcript
-  // at that moment would take the reader off whatever they had just scrolled to in order to dismiss
-  // it. Growth is what the owner asked to follow; shrinkage is the reader's own business.
-  if (rose) pinFeedBottom();
+// two heights agree, this computes 0, and the client's own resize has already done the job.
+// Telegram's `viewportChanged` and the window's own `resize` feed the same recompute: which of the
+// three fires is the client's business, and running one function from all of them is what keeps the
+// paths from disagreeing. That is not tidiness — it is the bug the owner found on device (v0.4.233):
+// the lift worked and the pin never happened, because the pin hung off --kb CHANGING, and on his
+// phone --kb never moved. The client had shrunk the layout viewport itself, so the composer rose for
+// free and the one event that would have re-pinned the transcript computed 0 → 0 and did nothing.
+// ⏳ TEMPORARY — REMOVE WITH ITS ENDPOINT (webapp.ts `/api/kbdebug`). No agent can hold the phone, so
+// the only way to learn what an Android Telegram webview actually delivers is to have the page say
+// so: one focus-tap, and the daemon log carries every event, every height, and what the transcript
+// did about it. It is fire-and-forget (a bare fetch, never api(), which would raise a toast) and it
+// reports state this page already computes — nothing here changes behaviour.
+const KB_BEACON = true;
+function kbBeacon(why, px) {
+  if (!KB_BEACON) return;
+  try {
+    const feed = $("dfeed");
+    const u = new URL("/api/kbdebug", location.origin);
+    const p = { why, kb: px == null ? "-" : px, inner: window.innerHeight,
+      vvH: vv ? Math.round(vv.height) : "none", vvTop: vv ? Math.round(vv.offsetTop) : "none",
+      tgH: tg && tg.viewportHeight ? Math.round(tg.viewportHeight) : "-",
+      tgStable: tg && tg.viewportStableHeight ? Math.round(tg.viewportStableHeight) : "-",
+      drill: $("drill").classList.contains("show") ? 1 : 0, wasAtBottom: feedAtBottom ? 1 : 0,
+      top: feed ? Math.round(feed.scrollTop) : "-", max: feed ? Math.round(feed.scrollHeight - feed.clientHeight) : "-",
+      clientH: feed ? Math.round(feed.clientHeight) : "-" };
+    for (const k in p) u.searchParams.set(k, String(p[k]));
+    fetch(u, { headers: AUTH }).catch(() => {});
+  } catch {}
 }
-// ALWAYS to the bottom, never "only if you were already near it" — the owner's ask, and the state a
-// composer tap is nearly always about. The cost is real and named: a reader who scrolled up to quote
-// something and then tapped the field loses that position. If it ever bites, the near-bottom guard
-// is the same 60px test paintFeed and growComposer already use.
-function pinFeedBottom() {
+const vv = window.visualViewport;
+let kbSettle = 0;
+function syncKeyboard(why) {
+  const px = vv ? Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop)) : 0;
+  document.documentElement.style.setProperty("--kb", px + "px");
+  kbBeacon(why, px);
+  // EVERY viewport change, not only the ones this page had to compensate for. A resize is the moment
+  // the scroller's own height changed underneath the reader; whether we also had to move the surface
+  // is a different question with a different answer on every client.
+  pinIfRiding();
+  // …and once more after the keyboard has finished animating. A rise arrives as a BURST of resizes on
+  // some clients and as one event mid-animation on others, so the height this pin was computed
+  // against may not be the height the reader ends up looking at. Cheap, idempotent, and it cannot
+  // move a mid-thread reader — pinIfRiding is the same guarded call.
+  clearTimeout(kbSettle);
+  kbSettle = setTimeout(() => { pinIfRiding(); kbBeacon("settle", null); }, 350);
+}
+// Was the reader at the floor of the transcript? Recorded on SCROLL, and read on resize — never
+// measured after the fact, which is the trap: a resize lands with the scroller already shorter, so
+// the same test run inside the handler says "320px from the bottom" about a reader who was sitting
+// exactly on it a frame earlier.
+let feedAtBottom = true;   // a freshly opened drill is pinned by paintFeed
+function noteFeedPosition() {
   const feed = $("dfeed");
-  if (!feed || !$("drill").classList.contains("show")) return;
+  if (feed) feedAtBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;
+}
+// The messenger convention, and the owner's correction to the always-pin this shipped with: the
+// transcript rides with the composer only if it was resting AT the bottom — the same 60px guard
+// paintFeed and growComposer use — and then it stays pinned through the keyboard's rise AND its
+// fall. A reader who is mid-thread is not moved in either direction. The state is re-read on every
+// scroll rather than latched at focus, which is what makes "scrolled up while typing, then dismissed
+// the keyboard" behave: by then the reader is no longer at the floor, so nothing follows them.
+function pinIfRiding() {
+  const feed = $("dfeed");
+  if (!feed || !$("drill").classList.contains("show") || !feedAtBottom) return;
   feed.scrollTop = feed.scrollHeight;
 }
-if (vv) for (const e of ["resize", "scroll"]) vv.addEventListener(e, syncKeyboard);
-if (tg) try { tg.onEvent("viewportChanged", syncKeyboard); } catch {}
-// The focus tap itself, because the keyboard's own animation lands a beat later and the transcript
-// should already be at the bottom when it does. The resize that follows pins it again — idempotent,
-// and the second one is what covers a client whose keyboard opens without a focus event of ours.
-$("dtext").addEventListener("focus", pinFeedBottom);
+$("dfeed").addEventListener("scroll", noteFeedPosition, { passive: true });
+if (vv) for (const e of ["resize", "scroll"]) vv.addEventListener(e, () => syncKeyboard("vv-" + e));
+if (tg) try { tg.onEvent("viewportChanged", () => syncKeyboard("tg-viewportChanged")); } catch {}
+addEventListener("resize", () => syncKeyboard("window-resize"));
+// The focus tap itself, because the keyboard's animation lands a beat later and a transcript that
+// was at the floor should already be there when it does. Its position is re-read first: this is the
+// one moment the reader's intent is unambiguous, and every later resize inherits that answer.
+$("dtext").addEventListener("focus", () => { noteFeedPosition(); kbBeacon("focus", null); pinIfRiding(); });
 // The dock floats over the feed, so the space it occupies has to be GIVEN BACK to the scroller as
 // bottom padding — a flex column used to subtract it for free. One observer rather than a call at
 // each site: the dock changes height for the composer growing, the working row arriving or leaving,
