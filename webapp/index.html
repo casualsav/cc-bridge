@@ -185,14 +185,15 @@
        up — or whenever the client resized the layout viewport for us, which is the same 0 for the
        same reason --safe-top is 0 off-fullscreen: there is nothing left to clear. */
     --kb: 0px;
-    /* How the surface travels when the keyboard does. 220ms against the ~250ms an Android IME takes
-       to animate: the chat should LAND JUST BEFORE the keyboard finishes rather than chase it, since
-       a surface still moving under a keyboard that has stopped is what reads as lag. The curve is
-       Material's standard decelerate — fast off the mark, settling into place — which is the shape
-       every messenger uses for this and the shape the keyboard itself travels on.
+    /* THE KEYBOARD'S OWN ANIMATION, copied from the platform rather than chosen here: AOSP's
+       InsetsController runs a synced IME at ANIMATION_DURATION_SYNC_IME_MS = 285 on
+       SYNC_IME_INTERPOLATOR = PathInterpolator(0.2f, 0f, 0f, 1f), which is this cubic-bezier to the
+       digit (verified against the source, not from memory). The page cannot receive that animation —
+       the webview is handed one snapshot, measured — so it RUNS THE SAME ONE, started from the focus
+       tap. Matching both numbers is what makes two independent animations look like one.
        The duration is read back out of this variable by the script (kbDurMs), so the two cannot
        drift apart; change it here only. */
-    --kb-dur: 220ms;
+    --kb-dur: 285ms;
     --kb-curve: cubic-bezier(0.2, 0, 0, 1);
     /* The ceiling scrim as TWO LENGTHS rather than percentages of one height, which is what lets the
        same eased ramp serve both layouts. --scrim-solid is how far full --bg reaches down: here the
@@ -579,14 +580,15 @@
      laid out against the LAYOUT viewport, which a soft keyboard does not always shrink — so without
      this the chat keeps its full height and the keyboard simply covers the composer and the newest
      messages. --kb is 0 whenever the client did shrink it for us, which keeps that case untouched. */
-  /* --kb-shift is the JOURNEY, and it is zero at both ends: on a viewport change the page parks the
+  /* --kb-pre is the PREDICTION (room the page takes before the client gives it, from the focus tap)
+     and --kb-shift is the JOURNEY, and both are zero at both ends: on a viewport change the page parks the
      surface where it visually WAS (one frame, no transition), then releases it to 0 with the
      transition armed. So the resting geometry is byte-identical to a build with none of this — the
      only thing that exists between two viewport changes is a 0px offset.
      Why an offset at all: on his phone the client shrinks its own LAYOUT viewport, so --kb never
      moves and there is nothing for a transition to interpolate. This gives both shapes of client the
      same one mechanism, since the offset is measured from where the surface was on screen. */
-  #drill { position: fixed; inset: 0; bottom: calc(var(--kb) + var(--kb-shift, 0px)); background: var(--bg); display: none; z-index: 5; }
+  #drill { position: fixed; inset: 0; bottom: calc(var(--kb) + var(--kb-pre, 0px) + var(--kb-shift, 0px)); background: var(--bg); display: none; z-index: 5; }
   /* Armed only while a keyboard is moving — a permanent transition on `bottom` would also ease a
      rotation, a fullscreen toggle and the first paint. `html.kbmove` is added for the duration and
      removed after, by the same function that sets the offset. */
@@ -3141,12 +3143,14 @@ addEventListener("resize", growComposer);
 const vv = window.visualViewport;
 let kbSettle = 0;
 function syncKeyboard() {
-  const px = vv ? Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop)) : 0;
-  document.documentElement.style.setProperty("--kb", px + "px");
+  kbPx = vv ? Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop)) : 0;
   // The surface's floor, in SCREEN terms, whichever way this client provides the room: subtracting
   // --kb covers the client that only shrank the visual viewport, and innerHeight covers the one that
   // shrank its own window. Both end up as one number that moves when the keyboard does.
-  easeSurfaceTo(window.innerHeight - px);
+  // A real viewport change always CLEARS the prediction: the room it was standing in for has now
+  // actually arrived, and holding both would subtract the keyboard twice.
+  clearTimeout(kbPreTimer);
+  setSurface(window.innerHeight - kbPx, 0);
   // EVERY viewport change, not only the ones this page had to compensate for. A resize is the moment
   // the scroller's own height changed underneath the reader; whether we also had to move the surface
   // is a different question with a different answer on every client.
@@ -3158,34 +3162,78 @@ function syncKeyboard() {
   clearTimeout(kbSettle);
   kbSettle = setTimeout(pinIfRiding, 350);
 }
-// The JOURNEY, and nothing else — the destination is already correct without a line of this. The
-// webview hands the shrink over in essentially one step, which lands as a jump; every messenger eases
-// it, so this parks the surface where it visually was and lets it travel.
+// --- Mirroring the keyboard, because tracking it is impossible here ------------------------------
 //
-// Park-then-release, in that order and in one frame: set the offset with the transition disarmed,
-// force a layout read so the browser takes it as a START value, then arm and clear it. Skip the
-// forced read and the two writes coalesce into one style recalculation — no transition at all,
-// because nothing ever changed.
+// MEASURED on the owner's phone (112 beacon events, 2026-07-29, archived beside this repo's
+// composer-keyboard evidence):
+//   · The DOM is handed exactly ONE snapshot. innerHeight goes 820 → 466 in a single event and back;
+//     across every transition in the log there is not one intermediate value. A native app rides the
+//     OS animation frame by frame (WindowInsetsAnimation); this layer cannot, and no amount of
+//     listener wiring changes that. THAT IS THE CEILING.
+//   · The snapshot arrives 490ms and 532ms after the focus tap, in the two rises captured — while the
+//     IME's own animation is 285ms (AOSP InsetsController.ANIMATION_DURATION_SYNC_IME_MS). So by the
+//     time the page learns anything, the keyboard has been fully up for ~200ms. The gap to native was
+//     never the curve; it is that half second.
+//   · Telegram's own `viewportChanged` DOES stream intermediate heights — but 500–700ms after the DOM
+//     already moved, overshooting the target (337 · 351 · 359 · 337 · 370 · 373 · 375 · 377 for a true
+//     377) and at one point contradicting itself inside a millisecond (466 → 821 → 466). Riding it
+//     would be jitter, not sync. Its 7ms "lead" over the DOM, seen in one transition of the log, is 3%
+//     of an animation — bought with that noise, it is a bad trade. The DOM stays the source of truth.
 //
-// Three deliberate refusals:
-//  · A `transform` would be smoother (no layout per frame) and is WRONG here: the top edge does not
-//    move when a keyboard rises, and translating the surface slides the header up from below.
-//  · Below 40px is not a keyboard. A rotation, a URL bar, a client nudging its own chrome by a few
-//    pixels — easing those is motion with no cause the reader can see.
-//  · Reduced motion returns before anything is parked, rather than relying on the CSS to kill the
-//    transition: with the transition off, the park would paint for one frame as a jump AWAY from the
-//    resting position, which is worse than the jump it was trying to smooth.
+// What IS available: the FOCUS event, half a second before the resize. So the page runs the keyboard's
+// OWN animation in parallel — same curve, same duration, started at the same moment — instead of
+// waiting to be told. Not tracking. Mirroring. When the real resize lands, the geometry it brings is
+// where the surface already is, so the reconcile is a no-op rather than a second movement.
+//
+// It only ever mirrors a keyboard it has ALREADY MEASURED in this session (`kbSeen`), so nothing is
+// guessed; the first rise after a launch is reactive, as before, and teaches it. If the resize never
+// comes — a hardware keyboard, a focus that opens nothing — the lift eases back out after 900ms.
+let kbSeen = 0, kbPre = 0, kbPreTimer = 0, kbPx = 0;
+let kbLayoutFloor = window.innerHeight;
+function predictKeyboard() {
+  // Nothing learned yet, or the keyboard is already up (a second tap in the same field), or the page
+  // is mid-prediction: in all three there is nothing to mirror.
+  if (!kbSeen || kbPre || kbLayoutFloor < window.innerHeight - 40) return;
+  setSurface(kbLayoutFloor, kbSeen);
+  kbPreTimer = setTimeout(() => setSurface(kbLayoutFloor, 0), 900);
+}
 // Seeded at parse time, not on the first event: left null, the FIRST viewport change of the session
 // is swallowed as "nothing to compare against" — and that first change is the keyboard's first rise,
 // the one journey a reader is most likely to be watching for. (It shipped that way for ten minutes;
 // the harness caught it as a rise that never eased while the fall did.)
 let kbFloor = window.innerHeight, kbEnd = 0, kbRide = 0, kbRideUntil = 0;
-const kbDurMs = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--kb-dur")) || 220;
+const kbDurMs = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--kb-dur")) || 285;
+// The surface's floor has TWO inputs and one meaning: what the client has actually given us
+// (layoutFloor) and what the page is standing in for ahead of it (pre). Their difference is where the
+// floor APPEARS to be, and that is the only number the journey below is about — which is what makes
+// the reconcile free: when the real room arrives, layoutFloor drops by the keyboard and `pre` drops to
+// zero in the same handler, the appearance does not change, and no journey is started for it.
+function setSurface(layoutFloor, pre) {
+  const root = document.documentElement;
+  // What a keyboard costs on this device, learned the first time one lands — never a constant, and
+  // never carried across a launch: a rotation or a different keyboard changes it, and a stale guess
+  // would mirror the wrong distance.
+  if (layoutFloor < kbLayoutFloor - 40) kbSeen = kbLayoutFloor - layoutFloor;
+  const changed = layoutFloor !== kbLayoutFloor || pre !== kbPre;
+  const visual = layoutFloor - pre;
+  const journey = Math.abs(visual - kbFloor) >= 40 && !matchMedia("(prefers-reduced-motion: reduce)").matches;
+  // A write that must NOT animate disarms first — the reconcile is exactly that: the client's room
+  // arrives and the prediction is handed back in the same frame, and the two must cancel silently.
+  // A redundant event (his webview sends three or four per change, and one of them repeats) changes
+  // nothing and must leave a running journey alone — disarming there snapped the ease it was already
+  // half way through, which the harness caught as a rise that eased in one mode and jumped in another.
+  if (changed && !journey) root.classList.remove("kbmove");
+  kbLayoutFloor = layoutFloor;
+  kbPre = pre;
+  root.style.setProperty("--kb", kbPx + "px");
+  root.style.setProperty("--kb-pre", pre + "px");
+  if (journey) easeSurfaceTo(visual); else kbFloor = visual;
+}
+// Only ever called for a journey worth easing — setSurface owns that decision, because it is the one
+// that knows whether anything moved at all.
 function easeSurfaceTo(floor) {
   const root = document.documentElement, prev = kbFloor;
   kbFloor = floor;
-  if (Math.abs(floor - prev) < 40) return;
-  if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
   root.classList.remove("kbmove");
   root.style.setProperty("--kb-shift", (floor - prev) + "px");
   void $("drill").offsetHeight;
@@ -3237,7 +3285,10 @@ addEventListener("resize", syncKeyboard);
 // The focus tap itself, because the keyboard's animation lands a beat later and a transcript that
 // was at the floor should already be there when it does. Its position is re-read first: this is the
 // one moment the reader's intent is unambiguous, and every later resize inherits that answer.
-$("dtext").addEventListener("focus", () => { noteFeedPosition(); pinIfRiding(); });
+// The focus tap: the earliest the page can know a keyboard is coming, and half a second earlier than
+// the client will tell it. Position first (this is the one moment the reader's intent is unambiguous,
+// and every later resize inherits that answer), then mirror.
+$("dtext").addEventListener("focus", () => { noteFeedPosition(); pinIfRiding(); predictKeyboard(); });
 // The dock floats over the feed, so the space it occupies has to be GIVEN BACK to the scroller as
 // bottom padding — a flex column used to subtract it for free. One observer rather than a call at
 // each site: the dock changes height for the composer growing, the working row arriving or leaving,

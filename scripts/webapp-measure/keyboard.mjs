@@ -82,6 +82,7 @@ const snap = p => p.evaluate(() => {
   return {
     kb: getComputedStyle(document.documentElement).getPropertyValue("--kb").trim(),
     shift: getComputedStyle(document.documentElement).getPropertyValue("--kb-shift").trim(),
+    pre: getComputedStyle(document.documentElement).getPropertyValue("--kb-pre").trim(),
     moving: document.documentElement.classList.contains("kbmove"),
     drill: r(document.getElementById("drill")), dock: r(document.getElementById("ddock")),
     pill: r(document.querySelector(".inputwrap")), head: r(document.querySelector("#drill .vhead")),
@@ -119,6 +120,9 @@ const midFlight = async p => {
     scrollTop: Math.round(document.getElementById("dfeed").scrollTop),
     moving: document.documentElement.classList.contains("kbmove"),
     shift: getComputedStyle(document.documentElement).getPropertyValue("--kb-shift").trim(),
+    pre: getComputedStyle(document.documentElement).getPropertyValue("--kb-pre").trim(),
+    kb: getComputedStyle(document.documentElement).getPropertyValue("--kb").trim(),
+    inner: window.innerHeight,
   }));
 };
 const settle = p => p.waitForTimeout(400);
@@ -182,6 +186,70 @@ for (const mode of ["visual", "layout"]) {
   }
 }
 
+// --- MIRRORING: the page runs the keyboard's own animation from the focus tap --------------------
+// The device beacon settled what is possible here: the DOM gets ONE snapshot, ~500ms after the tap,
+// while the IME's own animation is 285ms. So the page cannot follow the keyboard — it can only start
+// the same animation at the same moment, off the one event it gets early. This block measures that:
+// a keyboard already seen once is mirrored on the NEXT focus with no viewport change at all, and when
+// the real resize finally lands it must cost nothing — the surface is already there.
+{
+  const p = await open();
+  await park(p, "bottom");
+  // Teach it: one full rise and fall, which is exactly what a session's first keyboard does.
+  await raise(p, "layout", KB); await settle(p);
+  await raise(p, "layout", 0); await settle(p);
+
+  const before = await snap(p);
+  await p.locator("#dtext").focus();
+  const flying = await midFlight(p);
+  ok("mirror: the tap alone starts the surface moving — no viewport event involved",
+    flying.drillBottom < before.drill.bottom - 8 && flying.drillBottom > H - KB + 8 && flying.moving,
+    `${before.drill.bottom} → ${flying.drillBottom} → ${H - KB}`);
+  // The distinction that makes this a MIRROR rather than a compensation: the viewport has not moved
+  // at all (innerHeight is untouched, --kb is 0) and the surface is travelling anyway, on room the
+  // page has taken in advance.
+  ok("mirror: it is standing in for the keyboard, not compensating for one",
+    flying.inner === H && flying.kb === "0px" && flying.pre === KB + "px",
+    `inner=${flying.inner} --kb=${flying.kb} --kb-pre=${flying.pre}`);
+  await settle(p);
+  const parked = await snap(p);
+  ok("mirror: it settles exactly where the keyboard will leave it",
+    near(parked.drill.bottom, H - KB) && parked.kb === "0px",
+    `${parked.drill.bottom} vs ${H - KB}, --kb=${parked.kb}`);
+  ok("mirror: …with the transcript already ridden to the floor", parked.atBottom, `${parked.scrollTop}/${parked.maxScroll}`);
+
+  // …and now the client finally hands over the room it was standing in for.
+  await raise(p, "layout", KB);
+  const reconcile = await midFlight(p);
+  await settle(p);
+  const after = await snap(p);
+  ok("reconcile: the real resize costs NOTHING — no second movement",
+    near(reconcile.drillBottom, H - KB, 1.5) && near(after.drill.bottom, H - KB) && !reconcile.moving,
+    `${reconcile.drillBottom} / ${after.drill.bottom} vs ${H - KB}${reconcile.moving ? " (still animating)" : ""}`);
+  ok("reconcile: the prediction is handed back, not held on top of the real room",
+    atRest(after.shift) && (after.pre === "0px" || after.pre === ""), `pre=${after.pre} shift=${after.shift}`);
+  ok("reconcile: the transcript is still at the floor", after.atBottom, `${after.scrollTop}/${after.maxScroll}`);
+  await p.screenshot({ path: `${OUT}/mirror-reconciled.png` });
+  await p.close();
+}
+
+// A focus that opens no keyboard — a hardware keyboard, a client that never resizes — must not leave
+// the surface standing in for room that never arrives.
+{
+  const p = await open();
+  await park(p, "bottom");
+  await raise(p, "layout", KB); await settle(p);
+  await raise(p, "layout", 0); await settle(p);
+  const before = await snap(p);
+  await p.locator("#dtext").focus();
+  await p.waitForTimeout(1400);
+  const after = await snap(p);
+  ok("rollback: a prediction nothing confirms is handed back",
+    near(after.drill.bottom, before.drill.bottom) && (after.pre === "0px" || after.pre === ""),
+    `${before.drill.bottom} → ${after.drill.bottom}, pre=${after.pre}`);
+  await p.close();
+}
+
 // --- the focus tap on its own, with no viewport change at all -----------------------------------
 for (const where of ["bottom", "mid"]) {
   const p = await open();
@@ -204,8 +272,9 @@ ok("the page makes no debug traffic — the beacon is gone, not disabled",
 let bad = 0;
 for (const c of checks) { if (!c.pass) bad++; console.log(`${c.pass ? "PASS" : "FAIL"}  ${c.label.padEnd(66)} ${c.detail}`); }
 console.log(`\n${checks.length - bad}/${checks.length} pass  ·  shots in ${OUT}/`);
-console.log("DEVICE LEG CLOSED 2026-07-29 (owner: \"working perfectly now\"). What his Android Telegram");
-console.log("webview delivers — layout-viewport shrink, --kb 0 throughout, all three signals firing — is");
-console.log("recorded in webapp/CLAUDE.md; a headless run still cannot produce a real keyboard.");
+console.log("THE CEILING, from his device's own beacon: the DOM is handed ONE snapshot ~500ms after the");
+console.log("tap, while the IME animates in 285ms — so per-frame native sync is impossible in this layer.");
+console.log("What is measured here is the MIRROR: the same animation, started from the focus event. Whether");
+console.log("two independent animations read as one is his eye, not this harness.");
 await b.close();
 process.exit(bad ? 1 : 0);

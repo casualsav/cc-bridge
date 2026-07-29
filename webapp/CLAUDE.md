@@ -95,6 +95,30 @@ give it.
   through the rise AND the fall; a mid-thread reader is not moved in either direction. Measuring
   "was it at the bottom" inside the handler is the trap — by then the scroller is already shorter, so
   a reader who was sitting exactly on the floor measures 320px away from it.
+- **THE CEILING, and it is physics, not tuning: this layer CANNOT track the keyboard.** The DOM is
+  handed exactly one snapshot — 112 beacon events, not a single intermediate `innerHeight`/
+  `visualViewport` value in any transition — and it arrives **490ms and 532ms after the focus tap**,
+  while the IME's own animation is 285ms. A native app rides `WindowInsetsAnimation` frame by frame;
+  by the time this page hears anything the keyboard has been fully up for ~200ms. Telegram's
+  `viewportChanged` *does* stream intermediate heights, and they are unusable: 500–700ms after the
+  DOM already moved, overshooting the target (337 · 351 · 359 · 337 · 370 · 373 · 375 · 377 for a
+  true 377) and contradicting themselves inside a millisecond (466 → 821 → 466). Its 7ms "lead" over
+  the DOM, in one transition of the log, is 3% of an animation bought with that noise — refused, and
+  the DOM stays the source of truth.
+- **So the page MIRRORS the keyboard instead: the same animation, started from the focus event.**
+  285ms on `cubic-bezier(0.2, 0, 0, 1)` is not a taste call — it is AOSP's
+  `InsetsController.ANIMATION_DURATION_SYNC_IME_MS` and `SYNC_IME_INTERPOLATOR =
+  PathInterpolator(0.2f, 0f, 0f, 1f)`, verified against the source. `--kb-pre` is room the page takes
+  **before the client gives it**, and only for a keyboard height it has already MEASURED this session
+  (`kbSeen`) — nothing is guessed, the first rise after a launch is reactive and teaches it, and a
+  prediction nothing confirms eases back out after 900ms. When the real resize lands, `layoutFloor`
+  drops by the keyboard and `--kb-pre` drops to zero in the same handler: the surface's *apparent*
+  floor does not change, so the reconcile starts no journey and costs nothing.
+- **`setSurface` owns the disarm decision, and the reason is his webview's redundancy.** A write that
+  must not animate (the reconcile) disarms `kbmove` first; a redundant event — he gets three or four
+  per change and one repeats — changes nothing and must leave a running journey alone. Disarming on
+  every call snapped the ease half way through, which the harness caught as a rise that eased in one
+  mode and jumped in the other.
 - **The JOURNEY is a parked offset, and it is zero at both ends.** `--kb-shift` puts the surface back
   where it visually was for one frame (transition disarmed), then releases it to 0 with
   `html.kbmove` armed — so resting geometry is byte-identical to a build with no easing, which is
