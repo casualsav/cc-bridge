@@ -29,7 +29,7 @@ import { normalizeCommandOutput } from './ansi.ts'
 import { planSlash } from './slash-policy.ts'
 import { preserveGlobalEffort, reconcileEffortScope } from './effort-scope.ts'
 import { planDrift, driftStateAfter, type DriftState } from './drift-guard.ts'
-import { decideModel, decideEffort, upgradeNeedsConfirm, heldSpawnModel, holdTapData, parseHoldTap, launchFallback, spawnCardHeader, relaunchModel, AUTO_FALLBACK, AUTO_EFFORT_FALLBACK, FABLE, type ModelDecision, type HoldOutcome } from './spawn-model-policy.ts'
+import { decideModel, decideEffort, upgradeNeedsConfirm, heldSpawnModel, holdTapData, parseHoldTap, launchFallback, spawnCardHeader, relaunchModel, fablePolicy, fableRowState, onOff, type FablePolicy, AUTO_FALLBACK, AUTO_EFFORT_FALLBACK, FABLE, type ModelDecision, type HoldOutcome } from './spawn-model-policy.ts'
 import { renderSessionsView } from './sessions-view.ts'
 import { detectCurrentMode, onNormalPrompt, inputBoxContent, isModelSwitchConfirm, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType } from './prompt.ts'
 import { modelSwitchEvidence, resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, turnAnchorUuid, liveSubagents, currentTurnFeed, currentTurnActivity, concludedTurnWork, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
@@ -6319,13 +6319,13 @@ const SPAWN_MODEL_FLOOR = AUTO_FALLBACK
 // a /settings change takes effect on the next spawn with no restart.
 let modelAskQuietUntil = 0   // "don't ask for a while" — in memory on purpose: a daemon restart
                              // reopens the asking, which errs toward telling the human, not away.
-function modelPolicyPrefs(): { agentAllowed: string[]; quietUntil: number; auto: boolean; fableOff: boolean } {
+function modelPolicyPrefs(): { agentAllowed: string[]; quietUntil: number; auto: boolean; fable: FablePolicy } {
   const a = loadAccess()
   return {
     agentAllowed: Array.isArray(a.spawnAgentModels) ? a.spawnAgentModels.map(String) : [],
     quietUntil: modelAskQuietUntil,
     auto: a.spawnAuto === true,
-    fableOff: a.fableForAgents === 'off',
+    fable: fablePolicy(a.fableForAgents),
   }
 }
 // The coding-session defaults, and they are always CONCRETE. The "⚡ Inherit" option they used to
@@ -9603,12 +9603,12 @@ function spawnDefaultsText(): string {
   return `🧑‍💻 <b>Coding session defaults</b>\n\n` +
     `🧠 Model — <b>${escapeHtml(configuredSpawnModel())}</b>\n` +
     `⚡ Effort — <b>${escapeHtml(configuredSpawnEffort())}</b>\n` +
-    `🦾 Auto — <b>${a.spawnAuto ? 'agents pick' : 'off'}</b>\n` +
-    `🔥 Fable for coding agents — <b>${a.fableForAgents === 'off' ? 'off' : 'ask me first'}</b>`
+    `🦾 Auto mode (agent picks) — <b>${onOff(a.spawnAuto === true)}</b>\n` +
+    `🔥 Require approvals to spawn Fable — <b>${fableRowState(a.fableForAgents)}</b>`
 }
 function spawnDefaultsKeyboard(): InlineKeyboard {
   const a = loadAccess()
-  const fableOff = a.fableForAgents === 'off'
+  const fableOff = fablePolicy(a.fableForAgents) === 'refuse'
   const model = configuredSpawnModel(), effort = configuredSpawnEffort()
   const kb = new InlineKeyboard()
   // A model the owner has switched off for coding agents is not OFFERED as their default either —
@@ -9624,8 +9624,10 @@ function spawnDefaultsKeyboard(): InlineKeyboard {
   // ONE toggle over BOTH dials, and only for AGENT spawns: the rows above stay real values, because
   // they are also what the mini-app + and every new topic launch on. That separation IS this feature —
   // as a value in the model slot, auto silently handed a human's spawn the agent fallback.
-  kb.text(`${a.spawnAuto ? '✅' : '☐'} 🦾 Auto — agents pick`, 'spd:a:toggle').row()
-  kb.text(`🔥 Fable for coding agents: ${fableOff ? 'off' : 'ask me first'}`, 'spd:f:toggle').row()
+  // Both rows are the STATE, not an instruction: the word on the button is what is true right now and
+  // a tap flips it (owner, 2026-07-29). A checkbox glyph beside the word said the same thing twice.
+  kb.text(`🦾 Auto mode (agent picks) — ${onOff(a.spawnAuto === true)}`, 'spd:a:toggle').row()
+  kb.text(`🔥 Require approvals to spawn Fable — ${fableRowState(a.fableForAgents)}`, 'spd:f:toggle').row()
   return kb.text('‹ Back', 'spd:back')
 }
 
@@ -11786,9 +11788,12 @@ bot.on('callback_query:data', async ctx => {
   if (data === 'spd:f:toggle') {
     if (!(await cbAuth(ctx))) return
     const a = loadAccess()
-    a.fableForAgents = a.fableForAgents === 'off' ? undefined : 'off'
+    // From the RETIRED 'refuse' the tap lands on the default, never straight on 'allow': that config
+    // says "an agent may never have Fable", and the one thing a single tap must not do is turn it into
+    // its exact opposite. 'approve' still needs him, so the tap costs nothing and retires the value.
+    a.fableForAgents = fablePolicy(a.fableForAgents) === 'approve' ? 'allow' : undefined
     saveAccess(a)
-    await ctx.answerCallbackQuery({ text: a.fableForAgents === 'off' ? 'Fable is off for coding agents. Your own picker is unaffected.' : 'A Fable spawn asks you for one tap.' }).catch(() => {})
+    await ctx.answerCallbackQuery({ text: a.fableForAgents === 'allow' ? 'Agent Fable spawns start immediately — no approval.' : 'A Fable spawn waits for your tap.' }).catch(() => {})
     await showHtmlPanel(ctx, 'edit', spawnDefaultsText(), spawnDefaultsKeyboard())
     return
   }
@@ -15370,7 +15375,7 @@ async function webappReadSettings(): Promise<WebappSettingsView> {
       // Real values, always — no 'off' and no 'auto'. The "+" sheet badges these directly again now
       // that a default is never a policy word (the `resolved` companion field that existed for auto
       // went with it).
-      spawnModel: { value: configuredSpawnModel(), editable: true, options: MODEL_ALIASES.filter(m => !(m === FABLE && a.fableForAgents === 'off')), label: 'coding sessions only — not this chat' },
+      spawnModel: { value: configuredSpawnModel(), editable: true, options: MODEL_ALIASES.filter(m => !(m === FABLE && fablePolicy(a.fableForAgents) === 'refuse')), label: 'coding sessions only — not this chat' },
       spawnEffort: { value: configuredSpawnEffort(), editable: true, options: [...SPAWN_EFFORT_LEVELS], label: 'coding sessions only — not this chat' },
       mode: { value: cap ? detectCurrentMode(cap) : null, editable: false, label: 'drives the pane (chat-side)' },
       model: { value: sl?.model ?? null, editable: false },

@@ -25,9 +25,44 @@
 // nobody has taught it yet. Written this way round precisely so the safe default survives new models.
 export const UNGATED_MODELS: readonly string[] = ['opus', 'sonnet', 'haiku']
 
-// The one model with an owner-level on/off switch (prefs `fableForAgents`). Named HERE, once, so the
-// ban, the gate and the fallback below cannot disagree about which string they are all about.
+// The one model with an owner-level switch (prefs `fableForAgents`). Named HERE, once, so the gate,
+// the allowance and the fallback below cannot disagree about which string they are all about.
 export const FABLE = 'fable'
+
+// What an AGENT asking for Fable meets. The panel row — "Require approvals to spawn Fable" — is a
+// plain on/off over the first two:
+//
+//   'approve'  ON, and the default: the spawn is HELD, unstarted, for one owner tap (spawnHoldMinutes,
+//              then the fallback). Nothing about this changed.
+//   'allow'    OFF: no approval, no card, no hold — an agent's Fable spawn launches like any other
+//              model.
+//
+//   'refuse'   RETIRED from the UI (2026-07-29), honoured from config only: Fable is refused outright,
+//              no card and no hold, a retry gets the same answer. Nothing sets it any more and it is
+//              NOT migrated on read — either automatic reading of a config that says "never" would be
+//              wrong, since one of them ('allow') is its exact opposite. It leaves only by a tap, and
+//              that tap lands on 'approve', the answer that still needs a human.
+//
+// None of the three ever covers the owner's own picker: decideModel's humanOrigin branch runs first.
+export type FablePolicy = 'approve' | 'allow' | 'refuse'
+
+export function fablePolicy(pref: string | undefined): FablePolicy {
+  return pref === 'off' ? 'refuse' : pref === 'allow' ? 'allow' : 'approve'
+}
+
+// The two toggle rows in 🧑‍💻 Coding session defaults render their STATE, not an instruction — the word
+// is what is true now and a tap flips it (owner, 2026-07-29). Assembled here, and pinned by tests, for
+// the reason spawnCardHeader is: nothing automated reads these, so a reworded panel fails silently in
+// front of him rather than loudly in the suite.
+export const onOff = (on: boolean): string => on ? 'on' : 'off'
+
+// `refused` is a THIRD word, and it can only appear on an install still carrying the retired
+// 'off' — the alternative was rendering that config as plain `on`, which would be the panel lying
+// about a setting that refuses outright rather than asking.
+export function fableRowState(pref: string | undefined): string {
+  const p = fablePolicy(pref)
+  return p === 'refuse' ? 'refused' : onOff(p === 'approve')
+}
 
 // What a launch resolves to when there is nothing else to resolve it to: `auto` with a caller that
 // named no model, a clamp with no configured default, a held spawn's fallback. It is a floor, not a
@@ -47,7 +82,7 @@ export type ModelAsk = {
   requested: string | null        // the alias the CALLER passed (null = they passed none)
   configuredDefault: string | null // prefs `spawnModel` — a real alias; null only where nothing is set
   auto: boolean                   // prefs `spawnAuto` — agent spawns ride the SPAWNER's dials
-  fableOff: boolean               // prefs `fableForAgents === 'off'` — Fable is not a coding-agent model
+  fable: FablePolicy              // prefs `fableForAgents`, resolved — approve (default) / allow / refuse
   agentAllowed: readonly string[] // prefs `spawnAgentModels` — aliases an agent may pick with no card
   quietUntil: number              // epoch ms of the "don't ask for a while" window; 0 = not quiet
   humanOrigin: boolean            // the caller IS a human (mini-app tap, owner command), not an agent
@@ -85,9 +120,13 @@ export function decideModel(a: ModelAsk): ModelDecision {
   // quietly reinstate the model the owner has switched off, and `spawnAgentModels: ['fable']` did
   // exactly that until this branch existed. No card and no hold: there is nothing left for a human to
   // decide, so telling the caller to wait for a tap would be a lie it then waits on.
-  if (a.fableOff && a.requested === FABLE) {
+  if (a.fable === 'refuse' && a.requested === FABLE) {
     return { model: launchFallback(def), ask: false, clamped: FABLE, banned: true, autoFallback: false }
   }
+  // Approvals switched OFF: Fable is an ordinary model for coding agents. It cannot join
+  // UNGATED_MODELS — that list is the set nothing can make expensive, and this one is a preference the
+  // owner can revoke with a tap — so it is honoured here, per request, and nowhere else.
+  if (a.fable === 'allow' && a.requested === FABLE) return allow(FABLE)
   if (!a.requested) return unspecified(a)
   // Asking for what would have happened anyway is not an override. No card: there is nothing for a
   // human to decide, and a card here would fire on every well-behaved spawn.

@@ -1,12 +1,12 @@
 // Who gets to choose a session's model, and when a late tap has to confirm. Pure.
 // Run: bun test spawn-model-policy.test.ts
 import { test, expect } from 'bun:test'
-import { decideModel, upgradeNeedsConfirm, heldSpawnModel, holdTapData, parseHoldTap, launchFallback, spawnCardHeader, relaunchModel, decideEffort, AUTO_FALLBACK, AUTO_EFFORT_FALLBACK, UPGRADE_CTX_DELTA, type ModelAsk, type ModelDecision } from './spawn-model-policy.ts'
+import { decideModel, upgradeNeedsConfirm, heldSpawnModel, holdTapData, parseHoldTap, launchFallback, spawnCardHeader, relaunchModel, decideEffort, fablePolicy, fableRowState, onOff, AUTO_FALLBACK, AUTO_EFFORT_FALLBACK, UPGRADE_CTX_DELTA, type ModelAsk, type ModelDecision } from './spawn-model-policy.ts'
 
 const NOW = 1_800_000_000_000
 // The shape of the box that had the incident: an owner-configured default, an agent calling.
 const ask = (over: Partial<ModelAsk> = {}): ModelAsk => ({
-  requested: null, configuredDefault: 'opus', auto: false, fableOff: false,
+  requested: null, configuredDefault: 'opus', auto: false, fable: 'approve',
   agentAllowed: [], quietUntil: 0, humanOrigin: false, now: NOW, ...over,
 })
 // The two flags most cases don't exercise, so a case that DOES exercise them says so by naming them.
@@ -127,30 +127,33 @@ test('auto NEVER silently picks fable — the gate is untouched by it', () => {
   expect(decideModel(ask({ auto: true, configuredDefault: null })).model).not.toBe('fable')
 })
 
-// ---- the Fable switch (prefs fableForAgents: 'off') ----
+// ---- the Fable switch (prefs fableForAgents) ----
+//
+// 'refuse' is the RETIRED third state, honoured from config only since 2026-07-29 — these tests stay
+// because the config still exists in the wild and the behaviour behind it is unchanged.
 test('fable off is a flat refusal: no card, no hold, and the caller is told a retry is futile', () => {
-  expect(decideModel(ask({ fableOff: true, requested: 'fable' })))
+  expect(decideModel(ask({ fable: 'refuse', requested: 'fable' })))
     .toEqual(dec({ model: 'opus', ask: false, clamped: 'fable', banned: true }))
 })
 
 // The rule this exists for: a preference set months ago must not quietly reinstate the model the
 // owner switched off. This allowlist ungated fable BEFORE the branch existed.
 test('fable off sits ahead of the named allowlist', () => {
-  expect(decideModel(ask({ fableOff: true, requested: 'fable', agentAllowed: ['fable'] })))
+  expect(decideModel(ask({ fable: 'refuse', requested: 'fable', agentAllowed: ['fable'] })))
     .toEqual(dec({ model: 'opus', ask: false, clamped: 'fable', banned: true }))
 })
 
 // The owner's ruling, 2026-07-29: the switch is about what a coding AGENT may pick. His own pick in
 // his own picker stays sovereign.
 test('fable off does NOT cover the owner\'s own picker', () => {
-  expect(decideModel(ask({ fableOff: true, requested: 'fable', humanOrigin: true })))
+  expect(decideModel(ask({ fable: 'refuse', requested: 'fable', humanOrigin: true })))
     .toEqual(dec({ model: 'fable', ask: false, clamped: null }))
 })
 
 test('fable off leaves every other model exactly as it was', () => {
-  expect(decideModel(ask({ fableOff: true, requested: 'sonnet' }))).toEqual(dec({ model: 'sonnet', ask: false, clamped: null }))
-  expect(decideModel(ask({ fableOff: true }))).toEqual(dec({ model: 'opus', ask: false, clamped: null }))
-  expect(decideModel(ask({ fableOff: true, requested: 'mythos-9' }))).toEqual(dec({ model: 'opus', ask: true, clamped: 'mythos-9' }))
+  expect(decideModel(ask({ fable: 'refuse', requested: 'sonnet' }))).toEqual(dec({ model: 'sonnet', ask: false, clamped: null }))
+  expect(decideModel(ask({ fable: 'refuse' }))).toEqual(dec({ model: 'opus', ask: false, clamped: null }))
+  expect(decideModel(ask({ fable: 'refuse', requested: 'mythos-9' }))).toEqual(dec({ model: 'opus', ask: true, clamped: 'mythos-9' }))
 })
 
 // ---- the fallback resolver ----
@@ -287,4 +290,50 @@ test('the tap codec rejects anything that is not its own card', () => {
 // hold id is a base-36 timestamp, so this has ~4000 years of headroom, but the assert is free.
 test('a tap payload fits Telegram\'s 64-byte callback_data limit', () => {
   expect(Buffer.byteLength(holdTapData('approved', Number.MAX_SAFE_INTEGER.toString(36)))).toBeLessThan(64)
+})
+
+// ---- "Require approvals to spawn Fable" (2026-07-29) ----
+//
+// The row is a plain on/off over approve ↔ allow. `refuse` is the retired third state, honoured from
+// config and reachable by no tap.
+test('fablePolicy resolves the three configs, and anything unknown is the safe one', () => {
+  expect(fablePolicy(undefined)).toBe('approve')     // default: held for one tap
+  expect(fablePolicy('allow')).toBe('allow')         // approvals off
+  expect(fablePolicy('off')).toBe('refuse')          // retired, still honoured
+  // A hand-edited or future value must not silently become the permissive one.
+  expect(fablePolicy('yes')).toBe('approve')
+  expect(fablePolicy('')).toBe('approve')
+})
+
+// Approvals OFF is the whole new behaviour: no card, no hold, no clamp — Fable launches like any
+// other model. A build that merely stopped CARDING would still clamp, and the agent would silently
+// get opus; that is the failure this asserts against.
+test('approvals off: an agent\'s Fable spawn launches immediately, uncarded and unclamped', () => {
+  expect(decideModel(ask({ fable: 'allow', requested: 'fable' })))
+    .toEqual(dec({ model: 'fable', ask: false, clamped: null }))
+})
+
+test('approvals off changes nothing else — every other model, and the default path, are untouched', () => {
+  expect(decideModel(ask({ fable: 'allow', requested: 'sonnet' }))).toEqual(dec({ model: 'sonnet', ask: false, clamped: null }))
+  expect(decideModel(ask({ fable: 'allow' }))).toEqual(dec({ model: 'opus', ask: false, clamped: null }))
+  // An unknown model is still gated: the allowance is about Fable, and is not a licence for the next
+  // expensive thing to arrive under a name nobody has taught this file.
+  expect(decideModel(ask({ fable: 'allow', requested: 'mythos-9' }))).toEqual(dec({ model: 'opus', ask: true, clamped: 'mythos-9' }))
+})
+
+test('approvals ON is unchanged — the default, and still the gate the incident was about', () => {
+  expect(decideModel(ask({ fable: 'approve', requested: 'fable' })))
+    .toEqual(dec({ model: 'opus', ask: true, clamped: 'fable' }))
+})
+
+// The panel strings, to the character — the owner named both titles, and nothing automated reads
+// them, so this test is the only thing between a refactor and a silently reworded panel.
+test('the two toggle rows render their state, in the owner\'s words', () => {
+  expect(onOff(true)).toBe('on')
+  expect(onOff(false)).toBe('off')
+  expect(fableRowState(undefined)).toBe('on')     // approvals required — the default
+  expect(fableRowState('allow')).toBe('off')      // no approval needed
+  // A third word, and it can only ever appear on an install carrying the retired config. Rendering
+  // that as plain `on` would have the panel describe a refusal as a request for a tap.
+  expect(fableRowState('off')).toBe('refused')
 })
