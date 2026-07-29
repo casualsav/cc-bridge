@@ -62,6 +62,20 @@ give it.
 
 ## The soft keyboard
 
+- **WHAT HIS ANDROID TELEGRAM WEBVIEW ACTUALLY DOES — measured, 2026-07-29, and it cost a device
+  round-trip.** The keyboard shrinks the **layout** viewport: `innerHeight` 820 → 466 (a 354px
+  keyboard), and `visualViewport.height` tracks it exactly (466/466, `offsetTop` 0 throughout), so
+  `--kb` computes **0 in every single event** and this page's own compensation never engages there.
+  That is why the v0.4.233 pin — hung off `--kb` changing — could not fire on his phone while the
+  composer still rose. **All three signals fire**: `window.resize`, `visualViewport.resize` and
+  Telegram's `viewportChanged`, typically within 1–3ms of each other, with `viewportChanged` also
+  arriving in bursts of a dozen during launch. **The SDK leads the DOM**: one `viewportChanged`
+  reported `tg.viewportHeight: 466` while `innerHeight` was still 820 and the scroller still 821 tall
+  — so geometry computed from `tg.viewportHeight` would be computed against a stale DOM. Reading the
+  DOM (and re-pinning on the resize that follows 7ms later) is right by construction. At rest
+  `visualViewport.height` reads **1px larger** than `innerHeight` (821 vs 820), which is what the
+  `Math.max(0, …)` clamp is holding back — without it `--kb` would be −1px. Raw log:
+  `$(tg shared)/composer-keyboard/device-kbdebug-2026-07-29.log`.
 - **The measurement is `visualViewport`, never `innerHeight`, and it is a DIFFERENCE:**
   `innerHeight − visualViewport.height − offsetTop`. A `position: fixed` box is laid out against the
   LAYOUT viewport, which a keyboard does not reliably shrink — so `#drill` carries

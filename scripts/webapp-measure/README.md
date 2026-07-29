@@ -13,12 +13,14 @@ somewhere and point at it) before running. Everything renders `file://` — no s
     python3 measure.py <pngs>     # ink bbox vs the button's own disc centre — for ROUND buttons
     python3 rectmeasure.py <pngs> # same, clipped exactly to a RECTANGULAR button (.ghost/paperclip)
     node grow.mjs                 # composer geometry at 1/2/3/6/7/12 lines, paste, and cleared
-    node keyboard.mjs [page][out] # the soft keyboard: the chat gives up the strip it takes and the
-                                  #   transcript rides to the bottom, on a keyboard-driven viewport
-                                  #   shrink AND on a bare composer tap. The keyboard is SIMULATED
-                                  #   (a fake visualViewport installed before the page's script) —
-                                  #   which signal Telegram's webview really fires is the one leg a
-                                  #   device has to answer. Pre-change page: 10 of 15 fail
+    node keyboard.mjs [page][out] # the soft keyboard, as a MATRIX: {resting at the floor, mid-thread}
+                                  #   × {rise, fall} × {only the visual viewport shrank, the client
+                                  #   shrank its layout viewport too}. A transcript at the floor rides
+                                  #   with the composer both ways; a mid-thread reader is never moved.
+                                  #   The keyboard is SIMULATED (a fake visualViewport before the
+                                  #   page's script, + a real resize for the layout half) at HIS
+                                  #   measured 354px. Device leg closed 2026-07-29. Last check proves
+                                  #   the temporary debug beacon is gone, not merely disabled
     node cardfoot.mjs [page][out] # a session card's foot carries the SESSION's numbers — the 5h
                                   #   window is account-level and gone from every card, and no card
                                   #   carries the 8px gap its empty foot would leave. Three fixture

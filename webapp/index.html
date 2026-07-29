@@ -3117,34 +3117,11 @@ addEventListener("resize", growComposer);
 // the lift worked and the pin never happened, because the pin hung off --kb CHANGING, and on his
 // phone --kb never moved. The client had shrunk the layout viewport itself, so the composer rose for
 // free and the one event that would have re-pinned the transcript computed 0 → 0 and did nothing.
-// ⏳ TEMPORARY — REMOVE WITH ITS ENDPOINT (webapp.ts `/api/kbdebug`). No agent can hold the phone, so
-// the only way to learn what an Android Telegram webview actually delivers is to have the page say
-// so: one focus-tap, and the daemon log carries every event, every height, and what the transcript
-// did about it. It is fire-and-forget (a bare fetch, never api(), which would raise a toast) and it
-// reports state this page already computes — nothing here changes behaviour.
-const KB_BEACON = true;
-function kbBeacon(why, px) {
-  if (!KB_BEACON) return;
-  try {
-    const feed = $("dfeed");
-    const u = new URL("/api/kbdebug", location.origin);
-    const p = { why, kb: px == null ? "-" : px, inner: window.innerHeight,
-      vvH: vv ? Math.round(vv.height) : "none", vvTop: vv ? Math.round(vv.offsetTop) : "none",
-      tgH: tg && tg.viewportHeight ? Math.round(tg.viewportHeight) : "-",
-      tgStable: tg && tg.viewportStableHeight ? Math.round(tg.viewportStableHeight) : "-",
-      drill: $("drill").classList.contains("show") ? 1 : 0, wasAtBottom: feedAtBottom ? 1 : 0,
-      top: feed ? Math.round(feed.scrollTop) : "-", max: feed ? Math.round(feed.scrollHeight - feed.clientHeight) : "-",
-      clientH: feed ? Math.round(feed.clientHeight) : "-" };
-    for (const k in p) u.searchParams.set(k, String(p[k]));
-    fetch(u, { headers: AUTH }).catch(() => {});
-  } catch {}
-}
 const vv = window.visualViewport;
 let kbSettle = 0;
-function syncKeyboard(why) {
+function syncKeyboard() {
   const px = vv ? Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop)) : 0;
   document.documentElement.style.setProperty("--kb", px + "px");
-  kbBeacon(why, px);
   // EVERY viewport change, not only the ones this page had to compensate for. A resize is the moment
   // the scroller's own height changed underneath the reader; whether we also had to move the surface
   // is a different question with a different answer on every client.
@@ -3154,7 +3131,7 @@ function syncKeyboard(why) {
   // against may not be the height the reader ends up looking at. Cheap, idempotent, and it cannot
   // move a mid-thread reader — pinIfRiding is the same guarded call.
   clearTimeout(kbSettle);
-  kbSettle = setTimeout(() => { pinIfRiding(); kbBeacon("settle", null); }, 350);
+  kbSettle = setTimeout(pinIfRiding, 350);
 }
 // Was the reader at the floor of the transcript? Recorded on SCROLL, and read on resize — never
 // measured after the fact, which is the trap: a resize lands with the scroller already shorter, so
@@ -3177,13 +3154,13 @@ function pinIfRiding() {
   feed.scrollTop = feed.scrollHeight;
 }
 $("dfeed").addEventListener("scroll", noteFeedPosition, { passive: true });
-if (vv) for (const e of ["resize", "scroll"]) vv.addEventListener(e, () => syncKeyboard("vv-" + e));
-if (tg) try { tg.onEvent("viewportChanged", () => syncKeyboard("tg-viewportChanged")); } catch {}
-addEventListener("resize", () => syncKeyboard("window-resize"));
+if (vv) for (const e of ["resize", "scroll"]) vv.addEventListener(e, syncKeyboard);
+if (tg) try { tg.onEvent("viewportChanged", syncKeyboard); } catch {}
+addEventListener("resize", syncKeyboard);
 // The focus tap itself, because the keyboard's animation lands a beat later and a transcript that
 // was at the floor should already be there when it does. Its position is re-read first: this is the
 // one moment the reader's intent is unambiguous, and every later resize inherits that answer.
-$("dtext").addEventListener("focus", () => { noteFeedPosition(); kbBeacon("focus", null); pinIfRiding(); });
+$("dtext").addEventListener("focus", () => { noteFeedPosition(); pinIfRiding(); });
 // The dock floats over the feed, so the space it occupies has to be GIVEN BACK to the scroller as
 // bottom padding — a flex column used to subtract it for free. One observer rather than a call at
 // each site: the dock changes height for the composer growing, the working row arriving or leaving,
