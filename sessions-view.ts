@@ -39,18 +39,21 @@ function renderCard(s: SessionCard): string {
   if (chips.length) lines.push(`<code>${chips.join(' · ')}</code>`)
 
   // One line, and a state with something to say says it INSTEAD of the last-reply snippet — the same
-  // precedence the mini app's card uses, for the same reason: the snippet predates the wait. ⏸️ keeps
-  // its U+FE0F (bare U+23F8 paints as two hairline bars beside the emoji on every other row), and an
-  // idle session's last reply is ✅ rather than 💬 — idle now means "done", not merely "quiet".
+  // precedence the mini app's card uses, for the same reason: the snippet predates the wait. An idle
+  // session's last reply is ✅ rather than 💬 — idle now means "done", not merely "quiet".
   const line =
-    s.state === 'waiting' && s.wait ? `⏸️ waiting: ${escapeHtml(truncate(s.wait.label, TASK_MAX))}`
+    s.state === 'waiting' && s.wait ? `⏳ waiting: ${escapeHtml(truncate(s.wait.label, TASK_MAX))}`
     : s.state === 'unreported' ? `📤 unreported${s.unreported ? ` → @${escapeHtml(s.unreported.briefer)}` : ''}`
     // Delegated work is still work, and this view was the last surface not saying so: a session whose
     // subagents are editing files sits at its own prompt, so without the count it reads as one line of
     // stale reply text. Same words and same position as the mini app's card (webapp/index.html
     // renderSessions) and the bus roster — a count that reads differently on three surfaces is worse
     // than one that reads nowhere.
-    : s.task ? `${s.state === 'working' ? '⏳' : '✅'} ${subagents(s)}${escapeHtml(truncate(s.task, TASK_MAX))}`
+    // 🧑‍💻 working · ⏳ waiting, and the pair is shared with the mini app's Sessions card (owner,
+    // 2026-07-29): the hourglass means "blocked, not moving", so it belongs to the state that IS
+    // blocked. One state, one emoji, wherever it appears — a surface that keeps the old pair reads as
+    // a different state to the same person.
+    : s.task ? `${s.state === 'working' ? '🧑‍💻' : '✅'} ${subagents(s)}${escapeHtml(truncate(s.task, TASK_MAX))}`
     : ''
   if (line) lines.push(line)
 

@@ -29,7 +29,7 @@ test('full working card: chips, task, footer with bar', () => {
     `🧭 <b>Sessions</b> (1) <i>updated 12:34:56</i>\n\n` +
     `🟢 <b>my-project</b> — working\n` +
     `<code>sonnet ⚡med · bypass · codex</code>\n` +
-    `⏳ refactoring the daemon\n` +
+    `🧑‍💻 refactoring the daemon\n` +
     `🌿 main · ctx 62% ▰▰▰▰▰▰▱▱▱▱ · 5h 41%`
   expect(out).toBe(expected)
 })
@@ -47,7 +47,7 @@ test('waiting card: amber dot, the state word, and the reason INSTEAD of the las
   const c = card({ state: 'waiting', wait: { why: 'proc', label: 'gh run watch 18832' }, task: 'an older reply' })
   const out = renderSessionsView([c], NOW)
   expect(out).toContain('🟡 <b>my-project</b> — waiting')
-  expect(out).toContain('⏸️ waiting: gh run watch 18832')
+  expect(out).toContain('⏳ waiting: gh run watch 18832')
   expect(out).not.toContain('an older reply')
 })
 
@@ -55,9 +55,9 @@ test('waiting card: amber dot, the state word, and the reason INSTEAD of the las
 // at its own prompt, so without this the line is a stale reply snippet on a session that is busy.
 test('live subagents are counted on the task line, in the mini app\'s own words', () => {
   const c = card({ working: true, state: 'working', subagents: 2, task: 'editing wait-state.ts' })
-  expect(renderSessionsView([c], NOW)).toContain('⏳ 2 subagents live · editing wait-state.ts')
+  expect(renderSessionsView([c], NOW)).toContain('🧑‍💻 2 subagents live · editing wait-state.ts')
   const one = card({ working: true, state: 'working', subagents: 1, task: 'editing wait-state.ts' })
-  expect(renderSessionsView([one], NOW)).toContain('⏳ 1 subagent live · editing wait-state.ts')
+  expect(renderSessionsView([one], NOW)).toContain('🧑‍💻 1 subagent live · editing wait-state.ts')
 })
 
 // A session at a prompt with delegated work still running: the parent's turn concluded, so the count
@@ -74,13 +74,18 @@ test('the count rides an idle-looking card too, and none at all adds nothing', (
 test('a waiting card keeps its reason, with no count grafted on', () => {
   const c = card({ state: 'waiting', wait: { why: 'proc', label: 'sleep 900' }, subagents: 2, task: 'older' })
   const out = renderSessionsView([c], NOW)
-  expect(out).toContain('⏸️ waiting: sleep 900')
+  expect(out).toContain('⏳ waiting: sleep 900')
   expect(out).not.toContain('subagent')
 })
 
-test('the pause glyph carries U+FE0F', () => {
-  const c = card({ state: 'waiting', wait: { why: 'ask', label: '@bridge (ask 10)' } })
-  expect(renderSessionsView([c], NOW)).toContain('⏸️')
+// One state, one emoji, on every surface that names it (owner, 2026-07-29). The mini app's Sessions
+// card renders the same pair from the same payload — a drift here shows him two vocabularies for one
+// fleet, which is exactly what this pinning exists to catch.
+test('waiting is ⏳ and working is 🧑‍💻 — and the retired pause glyph is gone', () => {
+  const waiting = renderSessionsView([card({ state: 'waiting', wait: { why: 'ask', label: '@bridge (ask 10)' } })], NOW)
+  expect(waiting).toContain('⏳ waiting: @bridge (ask 10)')
+  expect(waiting).not.toContain('⏸')
+  expect(renderSessionsView([card({ state: 'working', task: 'editing daemon.ts' })], NOW)).toContain('🧑‍💻 editing daemon.ts')
 })
 
 test('waiting with no reason falls back to the last reply', () => {
@@ -107,7 +112,7 @@ test('unreported with no briefer names none', () => {
 test('a wait label is escaped and truncated like a task', () => {
   const c = card({ state: 'waiting', wait: { why: 'said', label: '<b>' + 'x'.repeat(200) } })
   const out = renderSessionsView([c], NOW)
-  const line = out.split('\n').find(l => l.startsWith('⏸'))!
+  const line = out.split('\n').find(l => l.startsWith('⏳'))!
   expect(line).toContain('&lt;b&gt;')
   expect(line.endsWith('…')).toBe(true)
 })
@@ -134,7 +139,7 @@ test('long task is truncated to ~100 chars with an ellipsis', () => {
   const long = 'x'.repeat(200)
   const c = card({ working: true, state: 'working', task: long })
   const out = renderSessionsView([c], NOW)
-  const taskLine = out.split('\n').find(l => l.startsWith('⏳'))!
+  const taskLine = out.split('\n').find(l => l.startsWith('🧑‍💻'))!
   expect(taskLine.length).toBeLessThan(long.length)
   expect(taskLine.endsWith('…')).toBe(true)
 })

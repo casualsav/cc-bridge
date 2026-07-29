@@ -2106,16 +2106,16 @@ async function renderSessions() {
     // the more useful of the two by definition — the snippet is from before it started waiting.
     // `unreported` gets no dot colour (three is what a 11px disc can carry) and lives here alone.
     const line =
-      // U+FE0F on the pause glyph is load-bearing: without it U+23F8 resolves to TEXT presentation
-      // and paints as two hairline bars that read as a broken character beside the emoji on every
-      // other row (seen in the rendered contact sheet, not reasoned about).
-      s.state === "waiting" && s.wait ? "⏸️ waiting: " + esc(s.wait.label)
+      // 🧑‍💻 working · ⏳ waiting (owner, 2026-07-29): the hourglass reads as "blocked, not moving",
+      // so it belongs to the state that IS blocked, and working gets the person at the keyboard. The
+      // same pair renders in `/sessions` (sessions-view.ts) — one state, one emoji on every surface.
+      s.state === "waiting" && s.wait ? "⏳ waiting: " + esc(s.wait.label)
       : s.state === "unreported" ? "📤 unreported" + (s.unreported ? " → @" + esc(s.unreported.briefer) : "")
       // ✅, not 💬, on the last-reply line: by the time this branch is reached the state is `idle`,
       // which since the fourth state landed means "at a prompt with nothing pending" — done, not
       // merely quiet. The owner's call. (`/sessions`, the Telegram text view, mirrors this line —
       // sessions-view.ts renders the same four states from the same payload.)
-      : s.task ? (s.working ? "⏳ " : "✅ ") + (s.subagents > 0 ? esc(s.subagents + " subagent" + (s.subagents === 1 ? "" : "s") + " live · ") : "") + esc(s.task)
+      : s.task ? (s.working ? "🧑‍💻 " : "✅ ") + (s.subagents > 0 ? esc(s.subagents + " subagent" + (s.subagents === 1 ? "" : "s") + " live · ") : "") + esc(s.task)
       : "";
     c.innerHTML =
       // title, because the name ellipsizes: a long one is still readable on a long press, and the

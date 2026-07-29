@@ -176,15 +176,21 @@ export function relaunchModel(remembered: string | null, configuredDefault: stri
 
 // ---- The spawn confirmation ----
 //
-// `🆕 Spawned @worker (on sonnet, high) — small doc edit`. The one line on a human surface that says
-// which model an agent chose and why, so a judgment made outside the owner's sight is at least
-// visible after the fact. Assembled here, and pinned by a test, for the same reason holdTapData is:
-// it is exercised only by a human reading a chat message, so a build that mangles it fails silently
-// in front of him rather than loudly in the suite. Values arrive ESCAPED — the caller owns the
-// surface and therefore owns the escaping; this function only decides the shape.
-export function spawnCardHeader(name: string, dials: readonly string[], reason: string | null): string {
-  const shown = dials.filter(Boolean)
-  return `🆕 Spawned <b>@${name}</b>${shown.length ? ` (on ${shown.join(', ')})` : ''}${reason ? ` — ${reason}` : ''}`
+// `Spawned @worker on Sonnet/High`. The one line on a human surface that says which model an agent
+// chose, so a judgment made outside the owner's sight is at least visible after the fact. A HEADER,
+// and only a header: it sits beside a chevron, where every extra clause competes with the thing the
+// chevron is for. The WHY — the caller's `--why` plus, under auto, the note that a dial was a
+// fallback nobody named — moved into the expanded view next to the first message (see launchSpawn),
+// and on a spawn with no first message, and therefore no chevron, it is not on the card at all; the
+// caller's `ok:` line and the bus ledger still carry it, unchanged.
+//
+// Assembled here, and pinned by a test, for the same reason holdTapData is: it is exercised only by
+// a human reading a chat message, so a build that mangles it fails silently in front of him rather
+// than loudly in the suite. Values arrive ESCAPED — the caller owns the surface and therefore owns
+// the escaping; this function only decides the shape.
+export function spawnCardHeader(name: string, dials: readonly string[]): string {
+  const shown = dials.filter(Boolean).map(d => d.charAt(0).toUpperCase() + d.slice(1))
+  return `Spawned <b>@${name}</b>${shown.length ? ` on ${shown.join('/')}` : ''}`
 }
 
 // ---- The late tap ----

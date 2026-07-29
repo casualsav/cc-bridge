@@ -250,18 +250,18 @@ test('an ordinary session with nothing remembered still takes the coding default
 
 // ---- the spawn confirmation ----
 //
-// The owner named this shape twice, to the character: `(on <model>, <effort>)` and the reason after
-// an em dash. Nothing automated ever reads it — it is a chat message he looks at — so this test is
-// the only thing between a refactor and a silently reworded card.
-test('the spawn card names the model, the effort and the reason', () => {
-  expect(spawnCardHeader('worker', ['sonnet', 'high'], 'small doc edit'))
-    .toBe('🆕 Spawned <b>@worker</b> (on sonnet, high) — small doc edit')
+// The owner named this shape to the character: `Spawned @name on Opus/High`, and nothing else beside
+// the chevron — no 🆕, no reason clause, the dials in display case joined by a slash. Nothing
+// automated ever reads it — it is a chat message he looks at — so this test is the only thing between
+// a refactor and a silently reworded card.
+test('the spawn card is the name and the dials, in display case, and nothing else', () => {
+  expect(spawnCardHeader('cc-bridge', ['opus', 'high'])).toBe('Spawned <b>@cc-bridge</b> on Opus/High')
+  expect(spawnCardHeader('worker', ['sonnet', 'max'])).toBe('Spawned <b>@worker</b> on Sonnet/Max')
 })
 
 test('the spawn card drops what it does not have, and never invents one', () => {
-  expect(spawnCardHeader('worker', ['opus', 'high'], null)).toBe('🆕 Spawned <b>@worker</b> (on opus, high)')
-  expect(spawnCardHeader('worker', ['opus'], null)).toBe('🆕 Spawned <b>@worker</b> (on opus)')
-  expect(spawnCardHeader('worker', [], null)).toBe('🆕 Spawned <b>@worker</b>')   // the pre-2026-07-29 line, verbatim
+  expect(spawnCardHeader('worker', ['opus'])).toBe('Spawned <b>@worker</b> on Opus')
+  expect(spawnCardHeader('worker', [])).toBe('Spawned <b>@worker</b>')
 })
 
 // ---- the tap codec ----

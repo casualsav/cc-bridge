@@ -6458,13 +6458,14 @@ async function launchSpawn(spec: SpawnSpec, model: string | null, clampedNote: s
   // here plus notifyAskSent's "Messaged @X" card on confirmed delivery — which read as clutter
   // for one event. A delivery that then FAILS still says so below, so nothing is lost.
   // The spawn confirmation, and the ONE place the model choice is visible to the person who pays for
-  // it: `🆕 Spawned @name (on sonnet) — small doc edit`. The chevron card is the target (its
-  // collapsible carries the first message); the plain-text fallback mirrors the same header, since it
-  // is what renders where rich messages aren't available. A model that resolved to nothing and a
-  // reason nobody gave both simply drop their clause — this line never invents one.
-  const spawnHeader = spawnCardHeader(escapeHtml(topicName),
-    [model, effort].filter(Boolean).map(d => escapeHtml(d!)), reason ? escapeHtml(reason) : null)
-  if (firstMsg) void notifyBusRich(fromSid, spawnHeader, firstMsg)
+  // it: `Spawned @name on Sonnet/High`, with the first message behind the chevron. The reason rides
+  // INSIDE that chevron, one line above the prompt — it is honesty about a judgment (including "auto:
+  // spawner named no model"), which the owner should be able to reach, not read every time. A model
+  // that resolved to nothing drops its clause; this line never invents one. No chevron means no
+  // expanded view, so a spawn with no first message carries no reason on its card at all — the
+  // caller's `ok:` line and the ledger below are where it survives.
+  const spawnHeader = spawnCardHeader(escapeHtml(topicName), [model, effort].filter(Boolean).map(d => escapeHtml(d!)))
+  if (firstMsg) void notifyBusRich(fromSid, spawnHeader, reason ? `why: ${reason}\n\n${firstMsg}` : firstMsg)
   else void notifyBusText(fromSid, spawnHeader)
   if (firstMsg) {
     // The first message is a TASK, so it goes over the bus as a real ask: the new session gets

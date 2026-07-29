@@ -107,14 +107,19 @@ async function measure(page, label, sink) {
   if (!work || !said || !idle) { state(false, "the fixture renders every card"); return }
 
   // ---- 1. The task line says the state, and replaces the snippet -------------------------------
-  state(said.task?.startsWith("⏸️ waiting: CI run 18832"), `a declared wait reads its own reason (${JSON.stringify(said.task)})`);
-  state(proc.task?.startsWith("⏸️ waiting: gh run watch"), `an inferred wait names the command it is running (${JSON.stringify(proc.task)})`);
+  state(said.task?.startsWith("⏳ waiting: CI run 18832"), `a declared wait reads its own reason (${JSON.stringify(said.task)})`);
+  state(proc.task?.startsWith("⏳ waiting: gh run watch"), `an inferred wait names the command it is running (${JSON.stringify(proc.task)})`);
   state(!said.task?.includes("Reading the transcript"), "and REPLACES the last-reply snippet, which predates the wait");
   state(unrep.task?.startsWith("📤 unreported → @lead"), `unreported names who is waiting on the report (${JSON.stringify(unrep.task)})`);
   // A STATE check since the ✅ swap: the baseline prints 💬 here, so this fails there — which is
   // what "idle now means done, not merely quiet" is worth as a claim.
   state(idle.task?.startsWith("✅ "), `an idle card marks its last reply DONE (${JSON.stringify(idle.task?.slice(0, 24))})`);
-  guard(work.task?.startsWith("⏳ "), "and a working card keeps its activity line");
+  // The working glyph became 🧑‍💻 on 2026-07-29, when ⏳ moved onto `waiting` — the hourglass belongs
+  // to the state that is blocked. That makes it a STATE check, not a guard: the baseline prints ⏳
+  // here, so a guard would have to assert the old glyph to keep passing there, and would then be
+  // pinning the vocabulary this change replaced. What stays a guard is the line EXISTING at all.
+  state(work.task?.startsWith("🧑‍💻 "), `a working card is a person at a keyboard (${JSON.stringify(work.task?.slice(0, 24))})`);
+  guard(!!work.task && work.task.length > 2, `and a working card still names what it is doing (${JSON.stringify(work.task?.slice(0, 30))})`);
 
   // ---- 2. Stillness ----------------------------------------------------------------------------
   // Bound to the CLASS, not to `animationName` alone: an idle dot is also unanimated, so "no
