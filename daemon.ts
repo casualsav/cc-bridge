@@ -2857,7 +2857,7 @@ const ASK_QUOTE_CAP = 3500
 const POST_CAP = 3800
 async function sendPost(chat: string, fromName: string, body: string): Promise<void> {
   const shown = body.length > POST_CAP ? body.slice(0, POST_CAP) + '…' : body
-  const html = `📣 <b>@${escapeHtml(fromName)}</b>\n${escapeHtml(shown)}`
+  const html = `📣 <b>@${escapeHtml(fromName)}</b>\n\n${escapeHtml(shown)}`
   await channel.sendText(chat, html).catch(e => process.stderr.write(`daemon: post send failed: ${e}\n`))
 }
 
