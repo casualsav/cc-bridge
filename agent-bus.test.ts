@@ -4,7 +4,7 @@ import {
   createPending, getPending, removePending, putPending, listPending, markInjected, queuedFor, expirePending, dropExpired,
   recordAgentAsk, resetHops, currentHops, BREADTH_NOTICE_AT, ASK_TTL_MS,
   sessionDepth, setSessionDepth, clearSessionDepth, resetAllSessionDepth, pruneSessionDepth, nextAskDepth, depthExceeded, depthLimit, DEPTH_LIMIT_DEFAULT,
-  normalizeEndpointName, resolveEndpoint, nameForEndpoint, confineRef,
+  normalizeEndpointName, resolveEndpoint, nameForEndpoint, backlogLabel, confineRef,
   getSeen, markSeen, digestSince, SEEN_TTL_MS,
   type BusEndpoint, type LedgerEntry,
 } from './agent-bus.ts'
@@ -357,4 +357,28 @@ test('digestSince suppression is per-entry, not per-kind or per-sender', () => {
     led({ ts: 300, id: 3, kind: 'answer', from: 'me', to: 'chat' }),
   ]
   expect(digestSince(es, 0, { cap: 8 }).map(e => e.id)).toEqual([2, 3])
+})
+
+// A down endpoint is the MOMENT OF CHOICE: the incident was a lane reading "isn't running" as a
+// plumbing fault and reflexively reopening a finished session to deliver brand-new self-contained
+// work — a full backlog replay for context the task never needed. The error has to present the
+// trade, so this pins all three halves of it: spawn is named, reopen is scoped to unfinished work,
+// and the cost is stated. The bare-fault version passed the /isn't running/ assertion above.
+test('resolveEndpoint: a closed endpoint names the spawn-vs-reopen trade, not just the fault', () => {
+  const err = (resolveEndpoint('reviewer', eps) as { error: string }).error
+  expect(err).toMatch(/tg spawn/)
+  expect(err).toMatch(/closed on purpose/)
+  expect(err).toMatch(/full token cost/)
+  // An UNKNOWN endpoint is a different situation — nothing to reopen — and must not carry the advice.
+  expect((resolveEndpoint('nobody', eps) as { error: string }).error).not.toMatch(/tg spawn/)
+})
+
+test('backlogLabel: MB above a megabyte, KB below — never a useless "0.0 MB"', () => {
+  expect(backlogLabel(2_720_000)).toBe('2.7 MB')
+  expect(backlogLabel(1_000_000)).toBe('1.0 MB')
+  expect(backlogLabel(999_999)).toBe('1000 KB')
+  expect(backlogLabel(40_000)).toBe('40 KB')
+  // A transcript smaller than half a KB still reads as 1 KB, never "0 KB" — the caller is deciding
+  // whether a replay is worth paying for, and "0" reads as "no backlog", which is never true.
+  expect(backlogLabel(200)).toBe('1 KB')
 })

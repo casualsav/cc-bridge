@@ -32,7 +32,7 @@ import { planDrift, driftStateAfter, type DriftState } from './drift-guard.ts'
 import { decideModel, decideEffort, upgradeNeedsConfirm, heldSpawnModel, heldSpawnNeedsLine, holdTapData, parseHoldTap, launchFallback, spawnCardHeader, relaunchModel, fablePolicy, fableRowState, onOff, type FablePolicy, AUTO_FALLBACK, AUTO_EFFORT_FALLBACK, FABLE, type ModelDecision, type HoldOutcome } from './spawn-model-policy.ts'
 import { renderSessionsView } from './sessions-view.ts'
 import { detectCurrentMode, onNormalPrompt, inputBoxContent, isModelSwitchConfirm, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType } from './prompt.ts'
-import { modelSwitchEvidence, resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, turnAnchorUuid, liveSubagents, currentTurnFeed, currentTurnActivity, concludedTurnWork, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
+import { modelSwitchEvidence, findSessionFile, resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, turnAnchorUuid, liveSubagents, currentTurnFeed, currentTurnActivity, concludedTurnWork, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
 import {
   AGENT_PANE_OPT, agentExitKeys, agentInterruptKeys, agentLabel, agentResetCommand, agentSubmitKeys,
   CODEX_ENABLED, codexLaunchCommand, normalizeAgent, shellQuote, type AgentKind,
@@ -129,7 +129,7 @@ import {
   unreportedWorkMarker, markReported, markBriefed,
   getReportedAt, getBriefedBy,
   setSessionDepth, resetAllSessionDepth, pruneSessionDepth, nextAskDepth, depthExceeded, depthLimit,
-  resolveEndpoint, nameForEndpoint, normalizeEndpointName, confineRef, sharedDir, ensureSharedDir, appendLedger, tailLedger,
+  resolveEndpoint, nameForEndpoint, normalizeEndpointName, backlogLabel, confineRef, sharedDir, ensureSharedDir, appendLedger, tailLedger,
   getSeen, markSeen, digestSince, DIGEST_SCAN,
   type BusEndpoint, type BusPending, type LedgerEntry,
 } from './agent-bus.ts'
@@ -5598,9 +5598,14 @@ async function handleCall(
           newPane = await spawnSession(t0.cwd, '', sid, topicAccount(t0), topicAgent(t0), undefined, { model: refreshSpawnModel(sid), effort: null })
           text = `reopened @${t0.name} (${sid8}) fresh in ${t0.cwd} — the session never completed a turn, so there was nothing to resume; same name and topic.${othersNote}`
         } else {
-          const resumeAlias = topicAgent(t0) === 'claude' ? reopenResumeModelAlias(t0.cwd, t0.agentSessionId) : null
+          const resumeAlias = topicAgent(t0) === 'claude' ? reopenResumeModelAlias(t0.agentSessionId) : null
           newPane = await spawnSession(t0.cwd, `--resume ${t0.agentSessionId}`, sid, topicAccount(t0), topicAgent(t0), undefined, resumeAlias ? { model: resumeAlias } : undefined)
-          text = `reopening @${t0.name} (${sid8}) in ${t0.cwd} — resuming its own conversation, same topic and name. Give it ~30s to reach a prompt.${othersNote}`
+          // The cost, named at the only moment the caller can still act on it. A one-shot bus verb
+          // has no channel to confirm on — it commits when it is typed — so this is the reopen's
+          // own output rather than a pre-flight prompt: the next self-contained task can go to
+          // `tg spawn` instead, which is the decision this line exists to inform.
+          const backlog = resumeBacklogSize(t0.agentSessionId)
+          text = `reopening @${t0.name} (${sid8}) in ${t0.cwd} — resuming its own conversation, same topic and name. Its whole backlog${backlog ? ` (${backlog} of transcript)` : ''} replays into context at full token cost before it reads anything you send; a self-contained task belongs in a fresh \`tg spawn\` instead. Give it ~30s to reach a prompt.${othersNote}`
         }
         if (!newPane) { write({ t: 'result', id, ok: false, text: `couldn't relaunch @${t0.name} (${sid8}) in ${t0.cwd} — see daemon log` }); return }
         // Clear the kill stamp and un-close the row. reopenSessionTopic handles the Telegram tab,
@@ -7855,18 +7860,27 @@ async function resumeModelAlias(pane: string, cwd: string | null): Promise<strin
 }
 
 // Same transcript-truth read, for `tg reopen`: there's no live pane to have stamped @tg_transcript,
-// so the file is found directly from the row's own cwd + conversation id instead of "newest in this
-// cwd" (which could belong to a live sibling). Unlike resumeModelAlias, an unreadable transcript
+// so the file is found by the row's own conversation id instead of "newest in this cwd" (which could
+// belong to a live sibling). Unlike resumeModelAlias, an unreadable transcript
 // returns null rather than guessing opus — a live pane's transcript going unreadable is unusual; a
 // killed row with nothing left running to have written since is the ordinary case here, and asserting
 // a model dial off no evidence at all would be a guess, not a re-assertion of transcript truth.
-function reopenResumeModelAlias(cwd: string, conversationId: string): string | null {
-  const file = allProjectsDirs()
-    .map(root => join(root, cwd.replace(/\//g, '-'), `${conversationId}.jsonl`))
-    .find(existsSync)
+function reopenResumeModelAlias(conversationId: string): string | null {
+  const file = findSessionFile(conversationId, allProjectsDirs())
   if (!file) return null
   const alias = aliasForModelId(latestModelId(file))
   return alias === 'haiku' ? 'opus' : alias
+}
+
+// What a reopen actually costs, in the one unit that is cheap to know: the size of the conversation
+// transcript that gets replayed. A `stat` on the file the resume path already resolves — no parse,
+// no token count (which would need the whole file read, and would still be an estimate). Named as
+// disk size rather than dressed up as tokens, because an honest proxy beats a confident guess.
+function resumeBacklogSize(conversationId: string | undefined): string | null {
+  if (!conversationId) return null
+  const file = findSessionFile(conversationId, allProjectsDirs())
+  if (!file) return null
+  try { return backlogLabel(statSync(file).size) } catch { return null }
 }
 
 // Type a relaunch line into a pane whose agent has just exited, and CONFIRM it took.

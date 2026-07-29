@@ -606,8 +606,20 @@ export function resolveEndpoint(name: string, endpoints: BusEndpoint[]): { kind:
     return { error: `endpoint "${want}" is ambiguous (${open.length} live endpoints share that name) — rename one to disambiguate` }
   }
   const closed = endpoints.some(e => e.closed && normalizeEndpointName(e.name) === want)
-  if (closed) return { error: `endpoint "${want}" exists but isn't running` }
+  // The moment of choice. A down endpoint used to read as a plumbing fault, and the reflex it
+  // produced was `tg reopen` — which resumed a big FINISHED session to deliver a brand-new
+  // self-contained task, paying a full backlog replay for context the task never needed. So the
+  // error states the trade instead of the fault: a closed session is usually closed on purpose.
+  if (closed) return { error: `endpoint "${want}" exists but isn't running — a session that is down was usually closed on purpose, its work done. For a self-contained task use \`tg spawn\` (fresh context, starts now); \`tg reopen\` is for resuming THIS session's unfinished work and replays its entire backlog at full token cost first.` }
   return { error: `no endpoint named "${want}" — try \`tg roster\` to list them` }
+}
+
+// The size of a resume's backlog, as the reopen line says it. Disk size of the transcript that gets
+// replayed — an honest proxy the caller can read at a glance, never dressed up as a token count
+// (which would need the whole file parsed and would still be an estimate). Sub-MB reads in KB
+// because "0.0 MB" tells a caller nothing about whether reopening is cheap.
+export function backlogLabel(bytes: number): string {
+  return bytes >= 1e6 ? `${(bytes / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1e3))} KB`
 }
 
 // The display name for an endpoint id (for @from attribution / logs); falls back to the raw id when

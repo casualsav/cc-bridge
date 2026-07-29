@@ -648,3 +648,23 @@ describe('modelSwitchEvidence', () => {
     expect(modelSwitchEvidence(f)).toEqual({ answering: 'claude-fable-5', deliberate: false })
   })
 })
+
+// The bug this pins: CC's project-dir encoding replaces a DOT with '-' as well as a slash, so a
+// session under /home/ubuntu/.claude/… is stored as -home-ubuntu--claude-…. Every caller that
+// rebuilt the dir name with cwd.replace(/\//g,'-') found nothing there and silently degraded —
+// `tg reopen` stopped re-asserting the remembered model, and its replay-cost line came out blank.
+// Observed live on a probe session before the fix. findSessionFile scans instead of rebuilding, so
+// it is immune to whatever encoding CC uses next.
+test('findSessionFile finds a session whose cwd contains a dot — the encoding rebuild could not', () => {
+  const { mkdtempSync, mkdirSync } = require('node:fs')
+  const root = mkdtempSync(join(tmpdir(), 'tg-dotroot-'))
+  const cwd = '/home/ubuntu/.claude/work'
+  mkdirSync(join(root, '-home-ubuntu--claude-work'))            // how CC actually names it
+  const file = join(root, '-home-ubuntu--claude-work', 'ddd.jsonl')
+  writeFileSync(file, JSON.stringify({ type: 'user', cwd, message: { content: 'hi' } }) + '\n')
+
+  const { findSessionFile } = require('./transcript.ts')
+  expect(findSessionFile('ddd', [root])).toBe(file)
+  expect(join(root, cwd.replace(/\//g, '-'), 'ddd.jsonl')).not.toBe(file)   // the old rebuild missed it
+  expect(findSessionFile('nosuch', [root])).toBeNull()
+})

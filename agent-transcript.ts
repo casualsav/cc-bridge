@@ -97,6 +97,12 @@ export function findSessionCwd(sessionId: string, roots?: string[]): { cwd: stri
   return cc.findSessionCwd(sessionId, roots) ?? cx.findSessionCwd(sessionId, codexRoots())
 }
 
+// The transcript file behind a session id. CC-only: the callers are the reopen path's model
+// re-assertion and its replay-cost line, both of which already branch on a Claude pane.
+export function findSessionFile(sessionId: string, roots?: string[]): string | null {
+  return cc.findSessionFile(sessionId, roots)
+}
+
 export function agentForSession(sessionId: string, roots?: string[]): 'claude' | 'codex' {
   return cx.findSessionCwd(sessionId, codexRoots()) ? 'codex' : 'claude'
 }

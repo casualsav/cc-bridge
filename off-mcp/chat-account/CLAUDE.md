@@ -114,6 +114,12 @@ Lifecycle and levers:
   running the command). Use it: it is recoverable, not terminal. `tg reopen @name` relaunches it
   in the same folder, resuming its own conversation and keeping its bus name and topic tab. Know
   the undo exists before you decide whether to use the verb.
+- **A session that is down was almost certainly closed on purpose, because its work was done.** So
+  route by what the new task needs, never by which name you recognize. A self-contained ask goes to
+  a fresh `tg spawn`: it starts clean and starts now. `tg reopen` is for resuming work that session
+  left unfinished and that needs its own context back — and it pays for that by replaying the whole
+  backlog into the model at full token cost before your message is even read. Reopening a finished
+  session to hand it unrelated work buys nothing and bills for all of it.
 - `tg slash @name "/compact"` runs a slash command in a session's CLI (refused mid-turn; /exit is
   owner-only) · `tg history` — recent bus events · a `<tg bus-digest since …>` block ahead of an
   ask is ambient catch-up, FYI only: don't reply or act on it.

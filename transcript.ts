@@ -167,6 +167,24 @@ export function listRecentSessions(limit: number, roots: string[] = [PROJECTS_DI
 // The working dir a session was recorded in (read from its transcript) + the projects root it
 // was found under (its account), for relaunching it with `claude --resume <id>` in the right
 // folder under the right CLAUDE_CONFIG_DIR. Null if the session can't be found.
+// The transcript FILE for a session id, found by scanning the project dirs rather than by rebuilding
+// the dir name from a cwd. CC's encoding is not just '/' → '-': a dot goes the same way, so
+// `/home/ubuntu/.claude/…` is stored under `-home-ubuntu--claude-…` and every caller that rebuilt
+// the path with `cwd.replace(/\//g,'-')` silently found nothing for a dotted cwd. Scanning is the
+// same work findSessionCwd already did (a readdir per root plus an existsSync), and it cannot drift
+// from whatever encoding CC uses next.
+export function findSessionFile(sessionId: string, roots: string[] = [PROJECTS_DIR]): string | null {
+  for (const root of roots) {
+    let projectDirs: string[]
+    try { projectDirs = readdirSync(root) } catch { continue }
+    for (const d of projectDirs) {
+      const path = join(root, d, `${sessionId}.jsonl`)
+      if (existsSync(path)) return path
+    }
+  }
+  return null
+}
+
 export function findSessionCwd(sessionId: string, roots: string[] = [PROJECTS_DIR]): { cwd: string; root: string } | null {
   for (const root of roots) {
     let projectDirs: string[]
