@@ -11771,12 +11771,15 @@ bot.on('callback_query:data', async ctx => {
     else await showSettings(ctx, 'edit')
     return
   }
-  // 🦾 Auto — ONE toggle over both dials, agent spawns only. Stored only when true, the same
-  // store-only-the-non-default rule the Fable switch uses, so an untouched install carries no key.
+  // 🦾 Auto — ONE toggle over both dials, agent spawns only. OFF is stored as an explicit `false`,
+  // NOT by deleting the key: since 0.4.229 a config with no preferences at all defaults auto ON
+  // (freshInstallDefaults), so a deleted key on a fresh box reads as "never touched" and comes back
+  // on — the switch would not stay off. An explicit false is also what tells a later reader that this
+  // install has decided, which is the same thing the key's absence used to mean and no longer can.
   if (data === 'spd:a:toggle') {
     if (!(await cbAuth(ctx))) return
     const a = loadAccess()
-    a.spawnAuto = a.spawnAuto ? undefined : true
+    a.spawnAuto = !a.spawnAuto
     saveAccess(a)
     await ctx.answerCallbackQuery({ text: a.spawnAuto ? 'Agent spawns pick their own model and effort.' : 'Agent spawns use your defaults.' }).catch(() => {})
     await showHtmlPanel(ctx, 'edit', spawnDefaultsText(), spawnDefaultsKeyboard())

@@ -93,7 +93,31 @@ function readPrefs(): Partial<Access> {
   if (Object.keys(raw).length === 0) raw = readJsonAccessCached(ACCESS_FILE)
   const out: Partial<Access> = {}
   for (const k of PREF_KEYS) if (raw[k] !== undefined) (out as Record<string, unknown>)[k] = raw[k]
-  return migrateSpawnDials(out)
+  return migrateSpawnDials(freshInstallDefaults(out))
+}
+
+// What a box with NO stored preference at all starts on. Three of the four coding defaults the owner
+// named already fall out of an absent key — model resolves to opus, effort to high, and an absent
+// `fableForAgents` is the approvals gate — so the only one written here is `spawnAuto`.
+//
+// SCOPED TO A KEYLESS CONFIG, never to an absent key, and the difference is the whole safety argument.
+// `spawnAuto` absent is ambiguous: it means "never touched" on a fresh box and "turned off" on one
+// where the owner tapped it, because OFF used to be stored by deleting the key. Defaulting any absent
+// key to ON would therefore flip every install that had deliberately switched it off. Requiring the
+// config to carry no preference AT ALL removes the ambiguity: a box that has saved even one setting is
+// left exactly as it is, and a box that has saved none has expressed nothing to contradict.
+//
+// It reads BOTH files' pref keys (readPrefs already falls back to the legacy combined access.json), so
+// a pre-prefs.json install is not mistaken for a new one.
+//
+// The other half of making this safe lives in the toggle: switching auto OFF now stores `false`
+// instead of deleting the key. Without that, a fresh install that turned auto off would land back on a
+// keyless config and be defaulted straight back ON — a switch that will not stay off.
+//
+// Read-time, like migrateSpawnDials, and for the same reasons: idempotent, survives a rollback, and no
+// file has to be written at the right moment for a config to be correct.
+export function freshInstallDefaults(p: Partial<Access>): Partial<Access> {
+  return Object.keys(p).length === 0 ? { ...p, spawnAuto: true } : p
 }
 
 // `auto` briefly lived IN the spawnModel/spawnEffort slots (0.4.214–0.4.218). The owner's catch was
