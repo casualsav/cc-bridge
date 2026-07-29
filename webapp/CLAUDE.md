@@ -292,6 +292,13 @@ give it.
   itself. A `state`-less payload (an older daemon, or the pre-transcript one) falls back to the
   working boolean, so the dot degrades to what it was rather than to grey.
 
+- **No 5h window on a card, by ruling** — it is an ACCOUNT-level number, the same on every card, so
+  it said nothing about the session. `h5Pct` stays on the payload: a 5h/weekly display belongs to
+  the sessions PAGE and that design is still to come. **The foot is written only when it has
+  content** — it carries `margin-top`, so an empty one is 8px of air under the task line, and the
+  5h reading was often the only thing holding it open. `cardfoot.mjs` measures both, and the air
+  below the last INKED row, since a zero-height foot reports the card's own padding and can never
+  fail. `sessions-view.ts` (the `/sessions` text view) still prints it — untouched, not overlooked.
 - **`#newfab` is static markup, a SIBLING of `#tab-sessions`, toggled by `showTab()`.** The list is
   wiped and rebuilt by a 4s poll — a control re-created under the thumb loses the tap. Building it
   inside `renderSessions()` looks natural and is the bug.

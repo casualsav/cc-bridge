@@ -2138,6 +2138,9 @@ async function renderSessions() {
       // sessions-view.ts renders the same four states from the same payload.)
       : s.task ? (s.working ? "🧑‍💻 " : "✅ ") + (s.subagents > 0 ? esc(s.subagents + " subagent" + (s.subagents === 1 ? "" : "s") + " live · ") : "") + esc(s.task)
       : "";
+    const foot =
+      (s.branch ? "<span>🌿 " + esc(s.branch) + "</span>" : "") +
+      (s.ctxPct != null ? "<span>ctx " + s.ctxPct + "%</span>" + pctBar(s.ctxPct) : "");
     c.innerHTML =
       // title, because the name ellipsizes: a long one is still readable on a long press, and the
       // chat header carries it in full the moment the card is opened.
@@ -2147,11 +2150,14 @@ async function renderSessions() {
       "</div>" +
       (line ? '<div class="task">' + line + "</div>" : "") +
       (!s.alive ? '<div class="task">💀 no live pane</div>' : "") +
-      '<div class="foot">' +
-        (s.branch ? "<span>🌿 " + esc(s.branch) + "</span>" : "") +
-        (s.ctxPct != null ? "<span>ctx " + s.ctxPct + "%</span>" + pctBar(s.ctxPct) : "") +
-        (s.h5Pct != null ? "<span>5h " + s.h5Pct + "%</span>" : "") +
-      "</div>";
+      // The 5h window is NOT here, by the owner's ruling: it is an ACCOUNT-level number, identical on
+      // every card, and repeating it per session said nothing about the session. `h5Pct` stays on the
+      // payload — a proper 5h/weekly display belongs to the sessions PAGE, and that design is still
+      // to come.
+      // The foot is only written when it has something to say. It carries `margin-top`, so an empty
+      // one is not free: it is an 8px gap under the task line, on exactly the cards with the least in
+      // them. (Before the 5h reading left, it was often the only thing holding the row open.)
+      (foot ? '<div class="foot">' + foot + "</div>" : "");
     if (s.alive) c.onclick = () => openDrill(s.sid, s.name);
     // stopPropagation, or closing a session also opens it: the ✕ sits inside the card's own tap target.
     const x = c.querySelector(".cardx");

@@ -13,6 +13,11 @@ somewhere and point at it) before running. Everything renders `file://` — no s
     python3 measure.py <pngs>     # ink bbox vs the button's own disc centre — for ROUND buttons
     python3 rectmeasure.py <pngs> # same, clipped exactly to a RECTANGULAR button (.ghost/paperclip)
     node grow.mjs                 # composer geometry at 1/2/3/6/7/12 lines, paste, and cleared
+    node cardfoot.mjs [page][out] # a session card's foot carries the SESSION's numbers — the 5h
+                                  #   window is account-level and gone from every card, and no card
+                                  #   carries the 8px gap its empty foot would leave. Three fixture
+                                  #   cards, one per shape the removal touches. Pass a pre-change
+                                  #   page: 6 of 12 fail there
     node composerbox.mjs [page][out] # the TWO-ROW composer: field on the top line, controls on their
                                   #   own line under it, ~3 text lines tall at rest — the rest height
                                   #   measured against its PARTS, the shape, the growth above the
