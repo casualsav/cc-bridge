@@ -185,14 +185,16 @@ export function findSessionCwd(sessionId: string, roots: string[] = [PROJECTS_DI
   return null
 }
 
-// CC stores a session at <projects root>/<cwd with '/' → '-'>/<sessionId>.jsonl.
+// CC's project-dir name for a cwd: EVERY non-alphanumeric character becomes '-', not just the
+// slashes — a dot goes the same way, so /home/ubuntu/.claude/x lives under -home-ubuntu--claude-x.
+// The slash-only rebuild returned null for every dotted cwd, silently (see transcript.ts).
 // Resolve the live transcript for a pane's cwd as the most-recently-written .jsonl in
 // that project dir — across every account's root when several are registered.
 export function resolveTranscript(cwd: string, roots: string[] = [PROJECTS_DIR]): string | null {
   let best: string | null = null
   let bestMtime = -1
   for (const root of roots) {
-    const dir = join(root, cwd.replace(/\//g, '-'))
+    const dir = join(root, cwd.replace(/[^a-zA-Z0-9]/g, '-'))
     let files: string[]
     try { files = readdirSync(dir).filter(f => f.endsWith('.jsonl')) } catch { continue }
     for (const f of files) {

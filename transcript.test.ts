@@ -3,7 +3,7 @@ import { test, expect, describe } from 'bun:test'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { modelSwitchEvidence, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnActivity, currentTurnFeed, currentTurnTokens, slashResultAfter, legibleApiError, latestModelId, recentConversation, conversationItemFullText } from './transcript.ts'
+import { modelSwitchEvidence, projectDirName, resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnActivity, currentTurnFeed, currentTurnTokens, slashResultAfter, legibleApiError, latestModelId, recentConversation, conversationItemFullText } from './transcript.ts'
 
 function fixture(entries: object[]): string {
   const f = join(mkdtempSync(join(tmpdir(), 'tg-transcript-')), 'session.jsonl')
@@ -667,4 +667,21 @@ test('findSessionFile finds a session whose cwd contains a dot — the encoding 
   expect(findSessionFile('ddd', [root])).toBe(file)
   expect(join(root, cwd.replace(/\//g, '-'), 'ddd.jsonl')).not.toBe(file)   // the old rebuild missed it
   expect(findSessionFile('nosuch', [root])).toBeNull()
+})
+
+// resolveTranscript's half of the same encoding defect. Measured before the fix: this call returned
+// null for a real bus-probe cwd whose transcripts existed on disk — so transcriptForPane's fallback
+// (the path an UNSTAMPED pane depends on) was dead for every session living under a dotted cwd, and
+// the `-c` revive path could not tell a Codex session from a Claude one there either.
+test('projectDirName maps every non-alphanumeric to "-", so a dotted cwd resolves', () => {
+  const { mkdtempSync, mkdirSync } = require('node:fs')
+  expect(projectDirName('/home/ubuntu/.claude/work')).toBe('-home-ubuntu--claude-work')
+  expect(projectDirName('/home/ubuntu/projects/cc-bridge')).toBe('-home-ubuntu-projects-cc-bridge')  // hyphens survive
+  expect(projectDirName('/tmp/a_b.c')).toBe('-tmp-a-b-c')
+
+  const root = mkdtempSync(join(tmpdir(), 'tg-dotres-'))
+  mkdirSync(join(root, '-home-ubuntu--claude-work'))
+  const file = join(root, '-home-ubuntu--claude-work', 'eee.jsonl')
+  writeFileSync(file, JSON.stringify({ type: 'user', cwd: '/home/ubuntu/.claude/work', message: { content: 'hi' } }) + '\n')
+  expect(resolveTranscript('/home/ubuntu/.claude/work', [root])).toBe(file)
 })
