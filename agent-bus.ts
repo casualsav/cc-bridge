@@ -310,7 +310,11 @@ export function unreportedWorkMarker(args: {
   // kept working", where a report exists but predates the result it would have to describe. Plus the
   // wrap-up window, because the strict form called a session's own post-answer housekeeping new work
   // and told the owner nobody had been told (see REPORT_WRAPUP_MS).
-  if ((args.reportedAt ?? 0) + REPORT_WRAPUP_MS >= work.lastAt) return null   // it reported after finishing
+  // `!= null` rather than `?? 0`: a session that has NEVER reported is a different fact from one that
+  // reported at epoch 0, and folding them together made the window's arithmetic decide the never-case.
+  // Harmless at real epoch scale (three minutes against 1.78e12) and wrong on its face, which is how a
+  // latent trap looks right up until someone passes it a small timestamp — surfaced by the truth table.
+  if (args.reportedAt != null && args.reportedAt + REPORT_WRAPUP_MS >= work.lastAt) return null   // it reported after finishing
   return { briefer: briefedBy.fromName, since: work.lastAt }
 }
 

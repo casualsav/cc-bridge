@@ -131,6 +131,29 @@ function engineProc(procs: ProcRow[], panePid: number): number {
 // because a caller listing several shells may want to treat debris differently from live work.
 export type WaitShell = { label: string; preClear: boolean; named: boolean }
 
+// PACING IS NOT WORK, and this is the significance floor the two 2026-07-29 incidents bought.
+//
+// Neither was stale tracking — readProcTable reads /proc live, so an exited process is already gone.
+// Both were processes genuinely alive at the instant of the read, and both were doing nothing:
+//   · the fleet row read `idle · waiting: sleep 5`, off one tick of a poll loop this session had left
+//     running. A five-second sleep as a session's declared state is a lie every time it is read.
+//   · @weather's retirement needed `--force` because a leftover `sleep 60` counted as "work about to
+//     be lost", so the kill path refused a close that would have lost nothing.
+//
+// One rule answers both, because both surfaces read this list. A `sleep` is the one command that is
+// definitionally not doing anything — it can be neither a useful reason nor work worth warning about.
+// The poll-loop half is what stops the flicker: a `while`/`until … sleep` shell is caught between
+// ticks often enough to otherwise alternate between "waiting: <the condition>" and nothing at all.
+//
+// The accepted cost, stated rather than hidden: a `sleep 3600 && real-work` shell is invisible in both
+// surfaces WHILE IT SLEEPS. It reappears the moment its leaf becomes the real command — so the window
+// where a close loses something silently is exactly the window in which nothing has happened yet.
+const SLEEP_LEAF = /(^|\/)sleep(\s|$)/
+const POLL_LOOP = /\b(while|until)\b[\s\S]*\bsleep\b/
+function isPacing(shell: ProcRow, leaf: ProcRow | null): boolean {
+  return (!!leaf && SLEEP_LEAF.test(leaf.argv())) || POLL_LOOP.test(shell.argv())
+}
+
 // Every background shell under the pane's engine, in the order a reader should meet them: work this
 // conversation started first, debris last. The list is what the kill paths warn with; childWaitLabel
 // is its headline.
@@ -139,7 +162,20 @@ export function childWaitShells(procs: ProcRow[], panePid: number | undefined, s
   // slot, so asking for ITS children hands back init and kthreadd. Refuse the question instead.
   if (!procs.length || !panePid) return []
   const kids = childMap(procs)
-  const found = (kids.get(engineProc(procs, panePid)) ?? []).filter(p => SNAPSHOT_SHELL.test(p.argv()))
+  // The DEEPEST descendant's command ("gh run watch"), not the snapshot shell's own argv, which wraps
+  // the real command in a page of quoting and says nothing to a reader.
+  const leafOf = (shell: ProcRow): ProcRow | null => {
+    let leaf: ProcRow | null = null
+    for (let p: ProcRow | undefined = shell, hop = 0; p && hop < 16; hop++) {
+      const next: ProcRow | undefined = (kids.get(p.pid) ?? [])[0]
+      if (!next) break
+      leaf = next; p = next
+    }
+    return leaf
+  }
+  const found = (kids.get(engineProc(procs, panePid)) ?? [])
+    .filter(p => SNAPSHOT_SHELL.test(p.argv()))
+    .filter(p => !isPacing(p, leafOf(p)))
   // A shell older than this conversation is debris a `/clear` left running. An undated one (startedAt
   // 0) is treated as current: the tag is a claim about age, and we only make it when we measured one.
   const preClear = (p: ProcRow) => !!since && p.startedAt > 0 && p.startedAt < since
@@ -147,14 +183,7 @@ export function childWaitShells(procs: ProcRow[], panePid: number | undefined, s
   // and the live job is the truer one. It is still the label once it is the only child, which is the
   // whole point: the reader learns there is something stale under the pane instead of nothing at all.
   return [...found].sort((a, b) => Number(preClear(a)) - Number(preClear(b))).map(shell => {
-    // The DEEPEST descendant's command ("gh run watch"), not the snapshot shell's own argv, which wraps
-    // the real command in a page of quoting and says nothing to a reader.
-    let leaf: ProcRow | null = null
-    for (let p: ProcRow | undefined = shell, hop = 0; p && hop < 16; hop++) {
-      const next: ProcRow | undefined = (kids.get(p.pid) ?? [])[0]
-      if (!next) break
-      leaf = next; p = next
-    }
+    const leaf = leafOf(shell)
     // A snapshot shell with no child of its own: mid-builtin, or a command that has already exited
     // while the shell tidies up. Real, and rare enough that naming it beats guessing at its argv.
     // (The owner's own incident read exactly this way — between two `sleep 4` ticks of a wedged poll

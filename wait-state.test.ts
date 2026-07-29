@@ -35,8 +35,8 @@ test('an stdio MCP server child is NOT a wait', () => {
 
 // Measured: one box's pane_pid is claude itself, another's is a bash with claude beneath it.
 test('the engine is found under a pane whose pane_pid is a shell', () => {
-  const procs = [P(50, 1, '-bash'), P(100, 50, 'claude --model x'), P(200, 100, SNAP), P(300, 200, 'sleep 240')]
-  expect(childWaitLabel(procs, 50)).toBe('sleep 240')
+  const procs = [P(50, 1, '-bash'), P(100, 50, 'claude --model x'), P(200, 100, SNAP), P(300, 200, 'gh run watch 18832')]
+  expect(childWaitLabel(procs, 50)).toBe('gh run watch 18832')
 })
 
 test('a snapshot shell with no child of its own still reads as a wait', () => {
@@ -50,7 +50,7 @@ test('an unreadable /proc invents no wait', () => {
 // pid 0 is the kernel's parent slot: its "children" are init and kthreadd, so a pane whose pid we
 // could not read must refuse the question rather than ask it about process 0.
 test('a pane with no readable pid invents no wait', () => {
-  const procs = [P(1, 0, '/sbin/init'), P(2, 0, 'kthreadd'), P(100, 1, 'claude'), P(200, 100, SNAP), P(300, 200, 'sleep 240')]
+  const procs = [P(1, 0, '/sbin/init'), P(2, 0, 'kthreadd'), P(100, 1, 'claude'), P(200, 100, SNAP), P(300, 200, 'gh run watch 18832')]
   expect(childWaitLabel(procs, undefined)).toBeNull()
   expect(childWaitLabel(procs, 0)).toBeNull()
 })
@@ -64,8 +64,8 @@ const CLEAR = 20_10_00_000
 const before = CLEAR - 60_000, after = CLEAR + 60_000
 
 test('a child that outlived the /clear is still a wait, and says so', () => {
-  const procs = [P(100, 1, 'claude'), P(200, 100, SNAP, before), P(300, 200, 'sleep 4', before)]
-  expect(childWaitLabel(procs, 100, CLEAR)).toBe('sleep 4 (pre-clear)')
+  const procs = [P(100, 1, 'claude'), P(200, 100, SNAP, before), P(300, 200, 'gh run watch 18832', before)]
+  expect(childWaitLabel(procs, 100, CLEAR)).toBe('gh run watch 18832 (pre-clear)')
 })
 
 // The incident's exact shape: between two ticks of the poll loop the shell has no child to name.
@@ -84,7 +84,7 @@ test('a child of THIS conversation is untagged', () => {
 test('debris never takes the headline from a job this conversation started', () => {
   const procs = [
     P(100, 1, 'claude'),
-    P(200, 100, SNAP, before), P(300, 200, 'sleep 4', before),
+    P(200, 100, SNAP, before), P(300, 200, 'tail -f old.log', before),
     P(400, 100, SNAP, after), P(500, 400, 'gh run watch 18832', after),
   ]
   expect(childWaitLabel(procs, 100, CLEAR)).toBe('gh run watch 18832')
@@ -94,10 +94,10 @@ test('debris never takes the headline from a job this conversation started', () 
 // boundary (a pane with no readable transcript) and no start time (an unreadable stat) both mean the
 // label is exactly what it was before this feature — never a state invented out of a missing read.
 test('an unmeasurable age tags nothing', () => {
-  const procs = [P(100, 1, 'claude'), P(200, 100, SNAP, before), P(300, 200, 'sleep 4', before)]
-  expect(childWaitLabel(procs, 100)).toBe('sleep 4')                       // no boundary
-  const undated = [P(100, 1, 'claude'), P(200, 100, SNAP), P(300, 200, 'sleep 4')]
-  expect(childWaitLabel(undated, 100, CLEAR)).toBe('sleep 4')              // no start time
+  const procs = [P(100, 1, 'claude'), P(200, 100, SNAP, before), P(300, 200, 'gh run watch', before)]
+  expect(childWaitLabel(procs, 100)).toBe('gh run watch')                       // no boundary
+  const undated = [P(100, 1, 'claude'), P(200, 100, SNAP), P(300, 200, 'gh run watch')]
+  expect(childWaitLabel(undated, 100, CLEAR)).toBe('gh run watch')              // no start time
 })
 
 // ---- the list the kill paths warn with ----
@@ -105,12 +105,12 @@ test('an unmeasurable age tags nothing', () => {
 test('every shell is listed, live work first, debris tagged in place', () => {
   const procs = [
     P(100, 1, 'claude'),
-    P(200, 100, SNAP, before), P(300, 200, 'sleep 4', before),
+    P(200, 100, SNAP, before), P(300, 200, 'tail -f old.log', before),
     P(400, 100, SNAP, after), P(500, 400, 'gh run watch 18832', after),
   ]
   expect(childWaitShells(procs, 100, CLEAR)).toEqual([
     { label: 'gh run watch 18832', preClear: false, named: true },
-    { label: 'sleep 4 (pre-clear)', preClear: true, named: true },
+    { label: 'tail -f old.log (pre-clear)', preClear: true, named: true },
   ])
 })
 
