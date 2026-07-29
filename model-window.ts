@@ -26,13 +26,10 @@ export function wideContextModel(model: string): string {
   return model.endsWith(WIDE_CONTEXT_SUFFIX) ? model : `${model}${WIDE_CONTEXT_SUFFIX}`
 }
 
-/**
- * Whether a spawned session should boot with the 1M window. Opt-OUT: unset means on, so an install
- * that has never opened /settings still gets the wide window. Only an explicit `false` disables it.
- */
-export function spawnWideContext(pref: boolean | undefined): boolean {
-  return pref !== false
-}
+// There is no "should this session get the wide window" preference any more (2026-07-29): every
+// launch asks for it and `supportsWideContext` is the only thing that ever says no, because the only
+// real answer is per-MODEL. The opt-out pref that used to live here (`spawnContext1m`) was a knob
+// over a question the model already answers.
 
 /**
  * The `--model` launch flag for a spawned session, or null when no alias resolved (the caller then

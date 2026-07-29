@@ -56,11 +56,8 @@ export interface SettingsView {
   write: boolean
   // `raw` is the machine value behind a displayed one, for a client that has to MATCH a setting
   // rather than print it (prefMode's `value` is a label with an emoji in it; the new-session sheet
-  // needs the mode itself). `resolved` is the same idea one step further on — what a POLICY value
-  // resolves to right now (spawnModel 'auto' is not a model, and the sheet must badge the model a
-  // session started this second would get). Both optional and both ignored by the settings list,
-  // which renders `value`.
-  settings: Record<string, { value: unknown; editable: boolean; options?: string[]; label?: string; raw?: string; resolved?: string }>
+  // needs the mode itself). Optional and ignored by the settings list, which renders `value`.
+  settings: Record<string, { value: unknown; editable: boolean; options?: string[]; label?: string; raw?: string }>
 }
 // One session on the fleet dashboard. `working` and the dials read live from the pane; `task` is
 // the current activity line (working) or the last reply snippet (idle). alive=false ⇒ dead pane.
@@ -96,7 +93,7 @@ export interface SessionFeed {
   // changing model or effort the list snapshot would be stale until that tab is visited again.
   // `cwd` is the chat header's subtitle; model/effort label the composer's picker button.
   cwd?: string; model?: string | null; effort?: string | null
-  // The bridge's configured spawn defaults (/settings 🐣). The picker badges these — they are
+  // The bridge's configured coding-session defaults (/settings 🧑‍💻). The picker badges these — they are
   // genuinely unset ("inherit") as often as not, and then nothing is badged.
   defModel?: string | null; defEffort?: string | null
   // 'turn' = one whole assistant turn as prose paragraphs interleaved with tool CHIPS, which is what

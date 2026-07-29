@@ -6,7 +6,7 @@ import { decideModel, upgradeNeedsConfirm, heldSpawnModel, holdTapData, parseHol
 const NOW = 1_800_000_000_000
 // The shape of the box that had the incident: an owner-configured default, an agent calling.
 const ask = (over: Partial<ModelAsk> = {}): ModelAsk => ({
-  requested: null, configuredDefault: 'opus', auto: false, fableOff: false, policy: 'default-wins',
+  requested: null, configuredDefault: 'opus', auto: false, fableOff: false,
   agentAllowed: [], quietUntil: 0, humanOrigin: false, now: NOW, ...over,
 })
 // The two flags most cases don't exercise, so a case that DOES exercise them says so by naming them.
@@ -43,9 +43,13 @@ test('a human choosing is never clamped and never carded', () => {
   expect(decideModel(ask({ requested: 'fable', humanOrigin: true }))).toEqual(dec({ model: 'fable', ask: false, clamped: null }))
 })
 
-test('policy "agent" restores the old behaviour exactly', () => {
-  expect(decideModel(ask({ requested: 'fable', policy: 'agent' }))).toEqual(dec({ model: 'fable', ask: false, clamped: null }))
-  expect(decideModel(ask({ policy: 'agent' }))).toEqual(dec({ model: 'opus', ask: false, clamped: null }))
+// The `spawnModelPolicy` knob it used to assert is GONE (2026-07-29, the owner's ruling): an agent's
+// explicit --model is simply honoured, and the one case the incident was about keeps the gate. What
+// replaces the test is the rule itself — an ungated request is the agent's own call, with or without
+// any preference, and the gated one is unaffected by that.
+test('an agent\'s explicit model is honoured, and the gate is what still bites', () => {
+  expect(decideModel(ask({ requested: 'sonnet' }))).toEqual(dec({ model: 'sonnet', ask: false, clamped: null }))
+  expect(decideModel(ask({ requested: 'fable' }))).toEqual(dec({ model: 'opus', ask: true, clamped: 'fable' }))
 })
 
 test('the named allowlist lets a test fleet spawn without a card — and only for the names in it', () => {
@@ -88,13 +92,26 @@ test('auto honours the caller\'s own choice, with no card', () => {
     .toEqual(dec({ model: 'opus', ask: false, clamped: null }))
 })
 
+// 2026-07-29, the owner's catch: auto used to BE the value in the model slot, which is also what the
+// mini-app "+" and every new topic read — so his own spawn got the agent fallback instead of his
+// configured model. Auto is a toggle beside the defaults now, and its fallback IS the default.
+test('auto falls back to the CONFIGURED default, not to a hardcoded one', () => {
+  expect(decideModel(ask({ auto: true, configuredDefault: 'sonnet' })))
+    .toEqual(dec({ model: 'sonnet', ask: false, clamped: null, autoFallback: true }))
+  // …and the floor is reached only where nothing is configured at all.
+  expect(decideModel(ask({ auto: true, configuredDefault: null })))
+    .toEqual(dec({ model: AUTO_FALLBACK, ask: false, clamped: null, autoFallback: true }))
+})
+
+test('auto OFF is the same model with nothing to report', () => {
+  expect(decideModel(ask({ auto: false, configuredDefault: 'sonnet' })))
+    .toEqual(dec({ model: 'sonnet', ask: false, clamped: null }))
+})
+
 test('auto with no --model falls back to a stated model, and flags that it fell back', () => {
   // The flag is the feature: the confirmation says "auto: spawner named no model" instead of dressing
   // a floor up as a decision. Never null — that would hand the choice to the CLI's own default.
   expect(decideModel(ask({ auto: true, configuredDefault: null })))
-    .toEqual(dec({ model: AUTO_FALLBACK, ask: false, clamped: null, autoFallback: true }))
-  // Same under the `agent` opt-out, which also has no default to fall to.
-  expect(decideModel(ask({ auto: true, configuredDefault: null, policy: 'agent' })))
     .toEqual(dec({ model: AUTO_FALLBACK, ask: false, clamped: null, autoFallback: true }))
   // And for a human tapping "+" with no model chip: the sheet's "follows Settings" resolves here too.
   expect(decideModel(ask({ auto: true, configuredDefault: null, humanOrigin: true })))
@@ -117,10 +134,8 @@ test('fable off is a flat refusal: no card, no hold, and the caller is told a re
 })
 
 // The rule this exists for: a preference set months ago must not quietly reinstate the model the
-// owner switched off. Both of these ungated fable BEFORE this branch existed.
-test('fable off sits ahead of the agent opt-out and the named allowlist', () => {
-  expect(decideModel(ask({ fableOff: true, requested: 'fable', policy: 'agent' })))
-    .toEqual(dec({ model: 'opus', ask: false, clamped: 'fable', banned: true }))
+// owner switched off. This allowlist ungated fable BEFORE the branch existed.
+test('fable off sits ahead of the named allowlist', () => {
   expect(decideModel(ask({ fableOff: true, requested: 'fable', agentAllowed: ['fable'] })))
     .toEqual(dec({ model: 'opus', ask: false, clamped: 'fable', banned: true }))
 })
@@ -193,6 +208,7 @@ test('with no configured default the fallback is a real model, not the CLI\'s ow
 // no card — effort does not cost what a model does — only the same honesty about a floor.
 test('auto effort honours the caller, and flags a fallback it had to invent', () => {
   expect(decideEffort('low', null, true)).toEqual({ effort: 'low', autoFallback: false })
+  expect(decideEffort(null, 'xhigh', true)).toEqual({ effort: 'xhigh', autoFallback: true })   // the configured default
   expect(decideEffort(null, null, true)).toEqual({ effort: AUTO_EFFORT_FALLBACK, autoFallback: true })
 })
 

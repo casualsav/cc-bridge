@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { spawnModelFlag, spawnWideContext, supportsWideContext, wideContextModel } from './model-window.ts'
+import { spawnModelFlag, supportsWideContext, wideContextModel } from './model-window.ts'
 
 // Mirrors daemon.ts's own MODEL_ALIAS_IDS exactly (duplicated here rather than imported — daemon.ts
 // is not import-safe from a test, which is the whole reason model-window.ts was made pure). Keep the
@@ -26,12 +26,6 @@ test('spawnModelFlag returns null with no alias — the caller then emits no --m
 
 test('spawnModelFlag drops the suffix when wide context is off', () => {
   expect(spawnModelFlag('fable', MODEL_ALIAS_IDS, false)).toBe('--model claude-fable-5')
-})
-
-test('spawnWideContext is opt-OUT: unset (undefined) means on', () => {
-  expect(spawnWideContext(undefined)).toBe(true)
-  expect(spawnWideContext(false)).toBe(false)
-  expect(spawnWideContext(true)).toBe(true)
 })
 
 test('supportsWideContext / wideContextModel agree with spawnModelFlag on haiku', () => {

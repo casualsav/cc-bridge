@@ -2,14 +2,19 @@
 //
 // A `tg spawn --model fable` from an agent once beat a configured default of `opus` with no trace on
 // any human surface — the result line goes back over the socket to the *calling agent*, and the spend
-// (about 5% of a weekly Fable allotment) surfaced only on the bill. The rule this module encodes is
-// the owner's: **the configured default wins, and an agent-supplied model never decides.** A model
-// that differs from the default happens only when it traces to a human — their own default, their own
-// tap in the mini app, or their own tap on the card this decision mints.
+// (about 5% of a weekly Fable allotment) surfaced only on the bill. The rule that bought was "the
+// configured default always wins", enforced for every alias by a `spawnModelPolicy` knob.
 //
-// Deliberately NOT a ranking. There is no "premium" ordering here and none is needed: the default
-// always wins, up or down, so a model the table has never heard of cannot be mis-ranked into being
-// allowed. (The spawn handler's own alias validation already refuses unknown names outright.)
+// **That knob is gone (2026-07-29, the owner's ruling), and the rule with it: an agent's explicit
+// --model is simply honoured.** It was doing nothing the money cared about — a worker picking Sonnet
+// or Haiku for its own throwaway costs him nothing to be wrong about — while making him the referee
+// of those choices. The ONE case the incident was actually about keeps a real mechanism, and it is
+// stronger than the knob ever was: Fable is GATED (a held spawn and a tap) or switched off entirely.
+// What remains here is that gate, the Fable switch, and the fallbacks.
+//
+// Deliberately NOT a ranking. There is no "premium" ordering and none is needed: the gate is an
+// allowlist of the UNGATED, so a model this table has never heard of is gated on arrival rather than
+// mis-ranked into being allowed. (The spawn handler's alias validation refuses unknown names first.)
 //
 // Pure — no daemon state, no I/O — so the whole decision table is unit-testable, and the two call
 // sites (`tg spawn` and the bus-relayed `/model`) can't drift apart.
@@ -38,14 +43,11 @@ export function launchFallback(configuredDefault: string | null): string {
   return configuredDefault && UNGATED_MODELS.includes(configuredDefault) ? configuredDefault : AUTO_FALLBACK
 }
 
-export type ModelPolicy = 'default-wins' | 'agent'
-
 export type ModelAsk = {
   requested: string | null        // the alias the CALLER passed (null = they passed none)
-  configuredDefault: string | null // prefs `spawnModel` as a FIXED alias; null under `auto`, or unset
-  auto: boolean                   // prefs `spawnModel === 'auto'` — no fixed default; the caller decides
+  configuredDefault: string | null // prefs `spawnModel` — a real alias; null only where nothing is set
+  auto: boolean                   // prefs `spawnAuto` — agent spawns ride the SPAWNER's dials
   fableOff: boolean               // prefs `fableForAgents === 'off'` — Fable is not a coding-agent model
-  policy: ModelPolicy
   agentAllowed: readonly string[] // prefs `spawnAgentModels` — aliases an agent may pick with no card
   quietUntil: number              // epoch ms of the "don't ask for a while" window; 0 = not quiet
   humanOrigin: boolean            // the caller IS a human (mini-app tap, owner command), not an agent
@@ -63,12 +65,14 @@ export type ModelDecision = {
 const allow = (model: string | null): ModelDecision =>
   ({ model, ask: false, clamped: null, banned: false, autoFallback: false })
 
-// What a caller that named no model gets. Under `auto` there is no configured default to fall back
-// to and the daemon has no task context to choose with — so it lands on the stated floor and the
-// spawn confirmation SAYS it fell back. A judgment nobody made is the thing to make visible, not to
-// dress up as a decision.
+// What a caller that named no model gets: the owner's configured default, either way. Under `auto`
+// that default is a FALLBACK rather than an instruction — the spawning agent was supposed to choose
+// and didn't — so the decision carries a flag and the confirmation says so. Off, the same model is
+// simply what he configured, and there is nothing to report. (2026-07-29: auto used to be a value in
+// the `spawnModel` slot, which stole that slot from the mini-app "+" — the owner's catch. It is a
+// toggle beside the defaults now, and the floor is only reached where nothing is configured at all.)
 const unspecified = (a: ModelAsk): ModelDecision => a.auto
-  ? { ...allow(AUTO_FALLBACK), autoFallback: true }
+  ? { ...allow(a.configuredDefault ?? AUTO_FALLBACK), autoFallback: true }
   : allow(a.configuredDefault)
 
 export function decideModel(a: ModelAsk): ModelDecision {
@@ -77,16 +81,13 @@ export function decideModel(a: ModelAsk): ModelDecision {
   // This runs FIRST, ahead of the Fable switch: that switch is about what a coding AGENT may pick,
   // and the owner's own pick in his own picker stays sovereign (his ruling, 2026-07-29).
   if (a.humanOrigin) return a.requested ? allow(a.requested) : unspecified(a)
-  // The Fable switch. Ahead of BOTH the `agent` opt-out and the named allowlist, deliberately: a
-  // preference set months ago must not quietly reinstate the model the owner has switched off, and
-  // `spawnAgentModels: ['fable']` did exactly that until this branch existed. No card and no hold —
-  // there is nothing left for a human to decide, so telling the caller to wait for a tap would be a
-  // lie, and it would wait for one that never comes.
+  // The Fable switch, ahead of the named allowlist deliberately: a preference set months ago must not
+  // quietly reinstate the model the owner has switched off, and `spawnAgentModels: ['fable']` did
+  // exactly that until this branch existed. No card and no hold: there is nothing left for a human to
+  // decide, so telling the caller to wait for a tap would be a lie it then waits on.
   if (a.fableOff && a.requested === FABLE) {
     return { model: launchFallback(def), ask: false, clamped: FABLE, banned: true, autoFallback: false }
   }
-  // The explicit opt-out, for a user who wants their orchestrator to choose. One setting, no nagging.
-  if (a.policy === 'agent') return a.requested ? allow(a.requested) : unspecified(a)
   if (!a.requested) return unspecified(a)
   // Asking for what would have happened anyway is not an override. No card: there is nothing for a
   // human to decide, and a card here would fire on every well-behaved spawn.
@@ -94,12 +95,10 @@ export function decideModel(a: ModelAsk): ModelDecision {
   // The named pressure valve (test fleets spawning `--model haiku` all day). A LIST, never an
   // ordering — nothing about it can be extrapolated to a model the user did not name.
   if (a.agentAllowed.includes(a.requested)) return allow(a.requested)
-  // A model the owner has said an agent may pick is the agent's own call, silently. The rule this
-  // module opened with — the configured default always wins — was written from ONE incident, a
-  // `--model fable` beating an opus default and costing about 5% of a weekly Fable allotment, and
-  // applying it to every alias made the owner the referee of choices that cost him nothing. It also ran
-  // the wrong way: an agent asking for `haiku` under an opus default was clamped UP to opus and he was
-  // paged about it, which is how a probe spawn on 2026-07-27 both billed opus and interrupted him.
+  // An ungated model is the agent's own call, silently. This branch is why the policy knob could go:
+  // it already honoured every alias that costs nothing to be wrong about, and the knob only decided
+  // whether to ALSO clamp those — which ran backwards once, clamping a `haiku` request UP to an opus
+  // default and paging the owner about a session that had already started (2026-07-27).
   if (UNGATED_MODELS.includes(a.requested)) return allow(a.requested)
   // Clamped. The card is suppressed inside a quiet window, but the agent is told either way: silence
   // toward the human is the human's own choice, silence toward the caller is a lie about what it got.
@@ -151,8 +150,8 @@ export const AUTO_EFFORT_FALLBACK = 'high'
 
 export function decideEffort(requested: string | null, configuredDefault: string | null, auto: boolean): { effort: string | null; autoFallback: boolean } {
   if (requested) return { effort: requested, autoFallback: false }
-  if (auto) return { effort: AUTO_EFFORT_FALLBACK, autoFallback: true }
-  return { effort: configuredDefault, autoFallback: false }   // null = inherit, exactly as before
+  if (auto) return { effort: configuredDefault ?? AUTO_EFFORT_FALLBACK, autoFallback: true }
+  return { effort: configuredDefault, autoFallback: false }
 }
 
 // ---- Relaunching an existing session ----

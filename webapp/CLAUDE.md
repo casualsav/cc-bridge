@@ -303,7 +303,7 @@ give it.
   that is also the default (the alternative freezes today's default into tomorrow's session).
   `spawnsheet.mjs` pins that a tap puts no `model` on the wire.
 - **The sheet's "default" rows resolve DAEMON-SIDE at spawn time** — `webappSessionSpawn` applies
-  `tg spawn`'s fallback chain (the `/settings` 🐣 spawn defaults; never whatever pane was focused,
+  `tg spawn`'s fallback chain (the `/settings` 🧑‍💻 coding-session defaults; never whatever pane was focused,
   which is the bug it fixed). The chip's badge is read once at sheet-open: a display, never a
   promise. MODE resolves the account's own `permissions.defaultMode`, and **an explicitly named
   mode carries `--permission-mode` even when it is `default`** (`dials.modeExplicit`) — on a box

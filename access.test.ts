@@ -1,4 +1,4 @@
-import { test, expect, beforeEach, beforeAll } from 'bun:test'
+import { test, expect, describe, beforeEach, beforeAll } from 'bun:test'
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -142,4 +142,40 @@ test('a group with no allowFrom of its own keeps falling back, not locked out by
   setAccess({ dmPolicy: 'allowlist', allowFrom: ['100'], groups: { '-500': { requireMention: false } }, pending: {} })
   expect(A.loadAccess().groups['-500']!.allowFrom).toEqual([])   // absent → empty, i.e. "no list of its own"
   expect(A.gate(group('100', '-500')).action).toBe('deliver')    // …so the DM allowlist still decides
+})
+
+// ---- `auto` moved out of the value slots (0.4.220) ----------------------------------------------
+//
+// It lived IN spawnModel/spawnEffort for four releases. Those slots are also what the mini-app "+"
+// and every new topic spawn read, so an auto default silently handed a HUMAN's spawn the agent
+// fallback instead of the model he configured — the owner's catch. The migration is read-time and
+// idempotent: an older build rolled back onto the same file still sees the key it understands.
+describe('the auto migration', () => {
+  const migrateSpawnDials = (p: object) => A.migrateSpawnDials(p as Parameters<typeof A.migrateSpawnDials>[0])
+
+  test('an auto model slot becomes the toggle, and the slot is left unset', () => {
+    expect(migrateSpawnDials({ spawnModel: 'auto', spawnEffort: 'high' }))
+      .toEqual({ spawnAuto: true, spawnEffort: 'high' })
+  })
+
+  test('an auto effort slot does the same', () => {
+    expect(migrateSpawnDials({ spawnModel: 'opus', spawnEffort: 'auto' }))
+      .toEqual({ spawnAuto: true, spawnModel: 'opus' })
+  })
+
+  test('both at once produce ONE toggle', () => {
+    expect(migrateSpawnDials({ spawnModel: 'auto', spawnEffort: 'auto' })).toEqual({ spawnAuto: true })
+  })
+
+  // A migrated slot is left UNSET rather than guessed: 'auto' recorded no model, so writing one here
+  // would invent a preference the owner never expressed. The resolver's floor answers for it.
+  test('a config with real values is returned untouched', () => {
+    const real = { spawnModel: 'sonnet', spawnEffort: 'high' }
+    expect(migrateSpawnDials(real)).toBe(real)
+  })
+
+  test('it is idempotent', () => {
+    const once = migrateSpawnDials({ spawnModel: 'auto' })
+    expect(migrateSpawnDials(once)).toEqual(once)
+  })
 })

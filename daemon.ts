@@ -29,7 +29,7 @@ import { normalizeCommandOutput } from './ansi.ts'
 import { planSlash } from './slash-policy.ts'
 import { preserveGlobalEffort, reconcileEffortScope } from './effort-scope.ts'
 import { planDrift, driftStateAfter, type DriftState } from './drift-guard.ts'
-import { decideModel, decideEffort, upgradeNeedsConfirm, heldSpawnModel, holdTapData, parseHoldTap, launchFallback, spawnCardHeader, relaunchModel, AUTO_FALLBACK, AUTO_EFFORT_FALLBACK, FABLE, type ModelPolicy, type ModelDecision, type HoldOutcome } from './spawn-model-policy.ts'
+import { decideModel, decideEffort, upgradeNeedsConfirm, heldSpawnModel, holdTapData, parseHoldTap, launchFallback, spawnCardHeader, relaunchModel, AUTO_FALLBACK, AUTO_EFFORT_FALLBACK, FABLE, type ModelDecision, type HoldOutcome } from './spawn-model-policy.ts'
 import { renderSessionsView } from './sessions-view.ts'
 import { detectCurrentMode, onNormalPrompt, inputBoxContent, isModelSwitchConfirm, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType } from './prompt.ts'
 import { modelSwitchEvidence, resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, turnAnchorUuid, liveSubagents, currentTurnFeed, currentTurnActivity, concludedTurnWork, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
@@ -148,7 +148,7 @@ import {
 } from './prompt-relay.ts'
 import { planStuckSweep, planWedgeEscalation, type StuckState } from './stuck-plan.ts'
 import { planContextWarn, planCtxNudge } from './ctx-warn.ts'
-import { spawnModelFlag, spawnWideContext, WIDE_CONTEXT_SUFFIX } from './model-window.ts'
+import { spawnModelFlag, WIDE_CONTEXT_SUFFIX } from './model-window.ts'
 import {
   initStatusCard, statusCardText, statusKeyboard, updateSessionPin, updateTopicPins,
   removeSessionPins, refreshSessionPin, forgetChatPin, armChatPin, sessionPins, pinTextCache, persistSessionPins,
@@ -5416,7 +5416,7 @@ async function handleCall(
         if (topicName.startsWith('-')) { write({ t: 'result', id, ok: false, text: `'${topicName}' is not a session name (it starts with a dash) — try 'tg spawn --help'` }); return }
         const explicitModel = args.model ? String(args.model).trim().toLowerCase() : null
         if (explicitModel && !MODEL_ALIASES.includes(explicitModel)) { write({ t: 'result', id, ok: false, text: `unknown model '${explicitModel}' — one of: ${MODEL_ALIASES.join(' | ')}` }); return }
-        // Who chooses. No explicit --model falls back to the persisted /settings 🐣 spawn-defaults
+        // Who chooses. No explicit --model falls back to the persisted /settings 🧑‍💻 coding-session defaults
         // model (validated — a stale/bad pref is ignored silently rather than failing the spawn); an
         // explicit one from an AGENT is a request only for the GATED models (spawn-model-policy.ts) —
         // today that is Fable alone, and every other alias an agent names is its own call.
@@ -5426,10 +5426,10 @@ async function handleCall(
         })
         const explicitEffort = args.effort ? String(args.effort).trim().toLowerCase().replace(/^med$/, 'medium') : null
         if (explicitEffort && (explicitEffort === 'auto' || !EFFORT_LEVELS.includes(explicitEffort))) { write({ t: 'result', id, ok: false, text: `unknown effort '${explicitEffort}' — one of: low | medium | high | xhigh | max` }); return }
-        // No explicit --effort: same /settings 🐣 fallback as the model above, and the same `auto`
+        // No explicit --effort: same /settings 🧑‍💻 fallback as the model above, and the same `auto`
         // rule — the caller's --effort is the decision, and a caller that named none gets a floor
         // that the confirmation admits is one.
-        const effortChoice = decideEffort(explicitEffort, configuredSpawnEffort(), spawnEffortIsAuto())
+        const effortChoice = decideEffort(explicitEffort, configuredSpawnEffort(), spawnDialsAuto())
         const effort = effortChoice.effort
         // Default home: its own folder under the /base dir (new topics are created "under" base).
         const dir = args.dir
@@ -6273,11 +6273,6 @@ async function doModePicker(ctx: Context): Promise<void> {
 // Model picker — buttons for the common aliases plus a tip for any specific name. Shared by
 // /model (no arg) and the 🧠 Model button; the model:set:<alias> callback applies a choice.
 const MODEL_ALIASES = ['fable', 'opus', 'sonnet', 'haiku']
-// The coding-session default can also be 'auto' — "no fixed default, the spawning orchestrator
-// decides". It is NOT an alias: nothing can launch with `--model auto`, so it stays out of
-// MODEL_ALIASES (the launch/validation table) and appears only on the surfaces that OFFER a default.
-const SPAWN_MODEL_AUTO = 'auto'
-const SPAWN_MODEL_CHOICES = [SPAWN_MODEL_AUTO, ...MODEL_ALIASES]
 // The CLI's own 'opus' alias still boots Opus 4.8 (checked on 2.1.205), but opus here should mean
 // Opus 5 — so pin the full id (verified against the live /v1/models list, 2026-07-24) everywhere
 // the bridge sends a model. Drop the pin once the CLI alias catches up. All four aliases are now
@@ -6311,40 +6306,31 @@ const SPAWN_MODEL_FLOOR = AUTO_FALLBACK
 // a /settings change takes effect on the next spawn with no restart.
 let modelAskQuietUntil = 0   // "don't ask for a while" — in memory on purpose: a daemon restart
                              // reopens the asking, which errs toward telling the human, not away.
-function modelPolicyPrefs(): { policy: ModelPolicy; agentAllowed: string[]; quietUntil: number; auto: boolean; fableOff: boolean } {
+function modelPolicyPrefs(): { agentAllowed: string[]; quietUntil: number; auto: boolean; fableOff: boolean } {
   const a = loadAccess()
   return {
-    policy: a.spawnModelPolicy === 'agent' ? 'agent' : 'default-wins',
     agentAllowed: Array.isArray(a.spawnAgentModels) ? a.spawnAgentModels.map(String) : [],
     quietUntil: modelAskQuietUntil,
-    auto: a.spawnModel === SPAWN_MODEL_AUTO,
+    auto: a.spawnAuto === true,
     fableOff: a.fableForAgents === 'off',
   }
 }
-// The configured default as a LAUNCHABLE alias. 'auto' deliberately reads as null here: under auto
-// there is no fixed default, and every caller of this function is asking "what do I launch when
-// nobody named a model" — which under auto is decideModel's `autoFallback` case, not a pref.
-function configuredSpawnModel(): string | null {
+// The coding-session defaults, and they are always CONCRETE. The "⚡ Inherit" option they used to
+// have is gone (the owner's ruling, 2026-07-29): inherit meant "launch with no flag and let whatever
+// the CLI or the focused pane decides win", which is the class of silence that brought a reopen back
+// on Haiku 4.5. So an unset pref resolves to the same floor a spawn would have fallen to anyway, the
+// panel always ticks the value a session would actually get, and there is no state where the default
+// is a question mark.
+function configuredSpawnModel(): string {
   const pref = loadAccess().spawnModel
-  return pref && MODEL_ALIASES.includes(pref) ? pref : null
+  return pref && MODEL_ALIASES.includes(pref) ? pref : AUTO_FALLBACK
 }
-// The same question for the surfaces that must show a launchable answer with no caller in the room
-// (the mini-app "+" sheet, its spawn endpoint): auto resolves to the stated floor rather than to
-// "no --model at all", so a human tapping + under auto gets Opus, not whatever the CLI defaults to.
-function spawnDefaultLaunchModel(): string | null {
-  return loadAccess().spawnModel === SPAWN_MODEL_AUTO ? AUTO_FALLBACK : configuredSpawnModel()
-}
-// …and the effort pair of the two above. `auto` is a DEFAULT, never a launch value: --effort rejects
-// it outright (it is also a statusline state, not a flag level), so it can only ever be a preference
-// that resolves to something else at spawn time.
-const spawnEffortIsAuto = (): boolean => loadAccess().spawnEffort === SPAWN_MODEL_AUTO
-function configuredSpawnEffort(): string | null {
+function configuredSpawnEffort(): string {
   const pref = loadAccess().spawnEffort
-  return pref && SPAWN_EFFORT_LEVELS.includes(pref) ? pref : null
+  return pref && EFFORT_LEVELS.includes(pref) && pref !== 'auto' ? pref : AUTO_EFFORT_FALLBACK
 }
-function spawnDefaultLaunchEffort(): string | null {
-  return spawnEffortIsAuto() ? AUTO_EFFORT_FALLBACK : configuredSpawnEffort()
-}
+// Whether an AGENT's spawn rides the spawner's own dials. Human-originated spawns never ask.
+const spawnDialsAuto = (): boolean => loadAccess().spawnAuto === true
 // One open request per session — a second one replaces it, so an agent retrying can't stack cards.
 type ModelRequest = { sid: string; name: string; alias: string; asker: string; ctxPct: number | null; at: number; live: boolean }
 const modelRequests = new Map<string, ModelRequest>()
@@ -6692,8 +6678,7 @@ const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max', 'auto']
 // already says. As a SPAWN DEFAULT the token is therefore free, and it now carries the same meaning
 // as the model's: no fixed default, the spawning caller decides. `/effort auto` on a live session is
 // untouched — EFFORT_LEVELS below still drives that relay and its pickers.
-const SPAWN_EFFORT_LEVELS = EFFORT_LEVELS.filter(e => e !== SPAWN_MODEL_AUTO)
-const SPAWN_EFFORT_CHOICES = [SPAWN_MODEL_AUTO, ...SPAWN_EFFORT_LEVELS]
+const SPAWN_EFFORT_LEVELS = EFFORT_LEVELS.filter(e => e !== 'auto')
 const EFFORT_TIP = '💡 <code>/effort &lt;low|medium|high|xhigh|max|auto&gt;</code> sets reasoning effort.'
 // Display name for a level (the raw token is what's typed to CC); only xhigh needs prettifying.
 function effortLabel(level: string): string {
@@ -7924,7 +7909,7 @@ async function restartPaneSessionCore(pane: string, id: string | null, accountOv
   // provider and takes no model from here.
   const resumeAlias = agent === 'claude' && id !== null ? await resumeModelAlias(pane, cwd) : null
   const resumeModelArgs = resumeAlias
-    ? spawnModelFlag(resumeAlias, MODEL_ALIAS_IDS, spawnWideContext(loadAccess().spawnContext1m))?.split(/\s+/) ?? []
+    ? spawnModelFlag(resumeAlias, MODEL_ALIAS_IDS, true)?.split(/\s+/) ?? []
     : []
   const watcher = pane === focus.activePaneId ? focus.paneWatcher : null
   // Persist what the pane is ON right now, so if the resume pops the post-update picker (which
@@ -8192,7 +8177,7 @@ async function paneBackUp(pane: string): Promise<boolean> {
 type RestartTarget = { pane: string; sid: string | null; name: string; id: string | null; cwd: string | null }
 
 // The model a refresh asserts when it launches a session with NO conversation to carry one in: the
-// /settings 🐣 spawn default (validated), else the floor. It never bottoms out at null — a launch
+// /settings 🧑‍💻 coding-session default (validated), else the floor. It never bottoms out at null — a launch
 // with no --model at all hands the choice to the CLI's own default, which is how a reopen came back
 // on Haiku 4.5 and dropped the 1M window with it.
 //
@@ -8364,7 +8349,7 @@ async function relaunchFreshSession(t: RestartTarget): Promise<string | 'untouch
       paneTranscriptCache.delete(t.pane)
       ensureFolderTrusted(t.cwd, account)
       const flags = [
-        spawnModelFlag(model, MODEL_ALIAS_IDS, spawnWideContext(loadAccess().spawnContext1m)),
+        spawnModelFlag(model, MODEL_ALIAS_IDS, true),
         effort && effort !== 'auto' && EFFORT_LEVELS.includes(effort) ? `--effort ${effort}` : null,
         mode !== 'default' ? `--permission-mode ${mode}` : null,
       ].filter((f): f is string => !!f)
@@ -9453,13 +9438,12 @@ function baseRowValue(): string {
   if (!cur) return 'not set'
   return cur.split('/').filter(Boolean).pop() || cur
 }
-// The 🐣 row's value on both renderings of the settings panel — one function so the plain and the
+// The 🧑‍💻 row's value on both renderings of the settings panel — one function so the plain and the
 // rich table cannot disagree about what the defaults are. 'auto' says what it means in the row
 // itself: the word alone reads like a mode nobody chose.
 function spawnDefaultsSummary(): string {
   const a = loadAccess()
-  const model = a.spawnModel === SPAWN_MODEL_AUTO ? 'auto (the orchestrator picks)' : a.spawnModel ?? 'inherit'
-  return a.spawnModel || a.spawnEffort ? `${model} · ${a.spawnEffort ?? 'inherit'}` : 'inherit'
+  return `${configuredSpawnModel()} · ${configuredSpawnEffort()}${a.spawnAuto ? ' · auto' : ''}`
 }
 function settingsText(): string {
   const a = loadAccess()
@@ -9474,7 +9458,7 @@ function settingsText(): string {
     `🧷 Preferred mode — <b>${listAccounts().length > 1 ? 'per account' : defModeLabel(MAIN_ACCOUNT.configDir)}</b>\n` +
     `🧹 <code>/clear</code> approval — <b>${a.confirmReset === false ? 'off' : 'on'}</b>\n` +
     `🔀 Limit failover — <b>${a.limitFailover === true ? 'on' : 'off'}</b>\n` +
-    `🐣 Coding-session defaults — <b>${spawnDefaultsSummary()}</b>\n` +
+    `🧑‍💻 Coding session defaults — <b>${spawnDefaultsSummary()}</b>\n` +
     (WEBAPP_ENABLED ? `🗂 File browser — <b>${a.fileBrowser === false ? 'off' : 'on'}</b>\n` : '') +
     (isTopicMode() ? `📂 Base folder — <b>${escapeHtml(baseFolderFull())}</b>\n` : '') +
     (isTopicMode() && AGENT_BUS_PIN_UI ? `☎️ Agent bus — <b>${a.switchboard === false ? 'off' : 'on'}</b>\n` : '') +
@@ -9497,7 +9481,7 @@ function settingsMarkdown(): string {
     ['🧷 Preferred mode', listAccounts().length > 1 ? 'per account' : defModeLabel(MAIN_ACCOUNT.configDir)],
     ['🧹 /clear approval', a.confirmReset === false ? 'off' : 'on'],
     ['🔀 Limit failover', a.limitFailover === true ? 'on' : 'off'],
-    ['🐣 Coding-session defaults', spawnDefaultsSummary()],
+    ['🧑‍💻 Coding session defaults', spawnDefaultsSummary()],
     ...(WEBAPP_ENABLED ? [['🗂 File browser', a.fileBrowser === false ? 'off' : 'on'] as [string, string]] : []),
     ...(isTopicMode() ? [['📂 Base folder', baseRowValue()] as [string, string]] : []),
     ...(isTopicMode() && AGENT_BUS_PIN_UI ? [['☎️ Agent bus', a.switchboard === false ? 'off' : 'on'] as [string, string]] : []),
@@ -9509,7 +9493,7 @@ function settingsMarkdown(): string {
     '🧷 <b>Preferred mode</b> — the permission mode NEW sessions launch in (/mode is the live dial).',
     '🧹 <b>/clear approval</b> — /clear and /new ask for a Yes/No tap first.',
     '🔀 <b>Limit failover</b> — a usage-limited account hands off to the next one.',
-    '🐣 <b>Coding-session defaults</b> — model/effort for the CODING sessions agents launch (<code>tg spawn</code>) and the mini-app <b>+</b>. It does NOT change this chat lane.',
+    '🧑‍💻 <b>Coding session defaults</b> — the model/effort every CODING session launches on: the mini-app <b>+</b>, a new topic, an agent\'s <code>tg spawn</code>. It does NOT change this chat lane.',
     ...(WEBAPP_ENABLED ? ['🗂 <b>File browser</b> — the Files tab in the Mini App. Off removes it (and its file API) entirely; the Sessions/Scheduled/Settings tabs stay.'] : []),
     ...(isTopicMode() ? ['📂 <b>Base folder</b> — new forum topics are created as subfolders of this folder.'] : []),
     ...(isTopicMode() && AGENT_BUS_PIN_UI ? ['☎️ <b>Agent bus</b> — the live roster line on the pinned card. Sessions can still hand work to each other with <code>tg ask</code>.'] : []),
@@ -9561,7 +9545,7 @@ function settingsKeyboard(): InlineKeyboard {
     ['👤', 'acct:panel'], ['🐙', 'gh:panel'], ['⚡', 'set:batch'],
     ['🎙️', 'set:voice'], ['🔊', 'set:tts'], ['💬', 'set:replymode'], ['📌', 'set:pin'],
     ['🧷', 'defmode:panel'], ['🧹', 'set:confirmreset'], ['🔀', 'set:failover'],
-    ['🐣', 'spd:panel'],
+    ['🧑‍💻', 'spd:panel'],
     ...(WEBAPP_ENABLED ? [['🗂', 'set:filebrowser'] as [string, string]] : []),
     ...(isTopicMode() ? [['📂', 'set:base'] as [string, string]] : []),
     ...(isTopicMode() && AGENT_BUS_PIN_UI ? [['☎️', 'set:switchboard'] as [string, string]] : []),
@@ -9574,49 +9558,42 @@ function settingsKeyboard(): InlineKeyboard {
   return kb
 }
 
-// 🐣 Coding-session defaults sub-panel (settings → 🐣): the model/effort agent-spawned CODING
-// sessions boot with (`tg spawn`, the chat agent's launcher; the mini-app +) when the spawner passes
-// no --model/--effort. Preference only — read at spawn time, never touches a live pane; explicit
-// flags on the spawn still win. It is NOT the chat lane's model: that session is the one talking to
-// the owner, and nothing here changes it.
+// 🧑‍💻 Coding session defaults sub-panel (settings → 🧑‍💻): the model/effort every CODING session
+// boots with — the mini-app +, a new topic, and an agent's `tg spawn`. Preference only, read at spawn
+// time; it never touches a live pane and it is NOT the chat lane's model.
+//
+// HEADER, VALUES, BUTTONS — no help text, by ruling (2026-07-29). The panel had grown four italic
+// paragraphs explaining its own knobs, which is what a knob needing a paragraph is telling you: two of
+// the knobs went (the policy toggle, the context picker), and the two that remain say what they do in
+// their own labels.
 function spawnDefaultsText(): string {
   const a = loadAccess()
-  const auto = a.spawnModel === SPAWN_MODEL_AUTO
-  const autoEffort = a.spawnEffort === SPAWN_MODEL_AUTO
-  return `🐣 <b>Coding-session defaults</b> — the worker sessions agents launch (<code>tg spawn</code>) and the mini-app <b>+</b>. Your chat lane keeps its own model; this never changes it.\n\n` +
-    `🧠 Model — <b>${a.spawnModel ? escapeHtml(a.spawnModel) : 'inherit'}</b>\n` +
-    `⚡ Effort — <b>${a.spawnEffort ? escapeHtml(a.spawnEffort) : 'inherit'}</b>${autoEffort ? ` <i>(the spawner picks; ${AUTO_EFFORT_FALLBACK} if it names none)</i>` : ''}\n` +
-    `🪟 Context — <b>${spawnWideContext(a.spawnContext1m) ? '1M' : '200k (default)'}</b>\n` +
-    `🔥 Fable for coding agents — <b>${a.fableForAgents === 'off' ? 'off' : 'ask me first'}</b>\n` +
-    `🛡 Agent asks for another model — <b>${a.spawnModelPolicy === 'agent' ? 'agents choose' : 'ask me first'}</b>` +
-    `${a.spawnAgentModels?.length ? ` <i>(no card for: ${escapeHtml(a.spawnAgentModels.join(', '))})</i>` : ''}\n\n` +
-    (auto
-      ? `<i>🎲 “auto” = no fixed default: the orchestrator that spawns picks per task, and its choice + a one-line reason land on the spawn confirmation. A spawn that names no model starts on ${AUTO_FALLBACK} and says so.</i>\n`
-      : `<i>“inherit” falls back to the focused session's dials at spawn time.</i>\n`) +
-    `<i>🔥 “ask me first” (default): an agent asking for Fable holds the spawn — nothing starts — until you tap Approve or Use ${AUTO_FALLBACK.charAt(0).toUpperCase()}${AUTO_FALLBACK.slice(1)}. “off”: refused outright, with no card. Your OWN pick of Fable, here or in the mini app, is never affected.</i>\n` +
-    `<i>🛡 “ask me first” (default): an agent's <code>--model</code> is a request — the session starts on your model above and you get a one-tap card. Your own choices (this panel, the mini app) are never carded. The no-card list is a prefs.json key (<code>spawnAgentModels</code>) for test fleets.</i>\n` +
-    `<i>🪟 applies to every session the bridge launches — new topics included. Needs a resolved model; a spawn that inherits no model keeps the CLI default.</i>`
+  return `🧑‍💻 <b>Coding session defaults</b>\n\n` +
+    `🧠 Model — <b>${escapeHtml(configuredSpawnModel())}</b>\n` +
+    `⚡ Effort — <b>${escapeHtml(configuredSpawnEffort())}</b>\n` +
+    `🤖 Auto — <b>${a.spawnAuto ? 'agents pick' : 'off'}</b>\n` +
+    `🔥 Fable for coding agents — <b>${a.fableForAgents === 'off' ? 'off' : 'ask me first'}</b>`
 }
 function spawnDefaultsKeyboard(): InlineKeyboard {
   const a = loadAccess()
   const fableOff = a.fableForAgents === 'off'
-  const autoEffort = a.spawnEffort === SPAWN_MODEL_AUTO
+  const model = configuredSpawnModel(), effort = configuredSpawnEffort()
   const kb = new InlineKeyboard()
-  kb.text(`${a.spawnModel === SPAWN_MODEL_AUTO ? '✅ ' : ''}🎲 auto`, `spd:m:${SPAWN_MODEL_AUTO}`)
   // A model the owner has switched off for coding agents is not OFFERED as their default either —
   // picking it here would set a default no agent-spawned session can start on. His own per-session
   // picker still lists it: that is his pick, not an agent's.
   for (const m of MODEL_ALIASES) {
     if (m === FABLE && fableOff) continue
-    kb.text(`${a.spawnModel === m ? '✅ ' : ''}${m}`, `spd:m:${m}`)
+    kb.text(`${model === m ? '✅ ' : ''}${m}`, `spd:m:${m}`)
   }
-  kb.row().text(`${a.spawnModel ? '' : '✅ '}🧠 Inherit model`, 'spd:m:off').row()
-  kb.text(`${autoEffort ? '✅ ' : ''}🎲 auto`, `spd:e:${SPAWN_MODEL_AUTO}`)
-  for (const e of SPAWN_EFFORT_LEVELS) kb.text(`${a.spawnEffort === e ? '✅ ' : ''}${e === 'medium' ? 'med' : e}`, `spd:e:${e}`)
-  kb.row().text(`${a.spawnEffort ? '' : '✅ '}⚡ Inherit effort`, 'spd:e:off').row()
-  kb.text(`${spawnWideContext(a.spawnContext1m) ? '✅' : '☐'} 🪟 1M context`, 'spd:w:toggle').row()
+  kb.row()
+  for (const e of SPAWN_EFFORT_LEVELS) kb.text(`${effort === e ? '✅ ' : ''}${e === 'medium' ? 'med' : e}`, `spd:e:${e}`)
+  kb.row()
+  // ONE toggle over BOTH dials, and only for AGENT spawns: the rows above stay real values, because
+  // they are also what the mini-app + and every new topic launch on. That separation IS this feature —
+  // as a value in the model slot, auto silently handed a human's spawn the agent fallback.
+  kb.text(`${a.spawnAuto ? '✅' : '☐'} 🤖 Auto — agents pick`, 'spd:a:toggle').row()
   kb.text(`🔥 Fable for coding agents: ${fableOff ? 'off' : 'ask me first'}`, 'spd:f:toggle').row()
-  kb.text(`🛡 ${a.spawnModelPolicy === 'agent' ? 'Agents choose the model' : 'Ask me first (recommended)'}`, 'spd:p:toggle').row()
   return kb.text('‹ Back', 'spd:back')
 }
 
@@ -10238,7 +10215,7 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
       const mode = (prefSid ? sessionModes.get(prefSid) : null) ?? lastFocusedMode
       const effort = (prefSid ? sessionEfforts.get(prefSid) : null) ?? fallbackEffort()
       // Model's fallback chain, mirroring `tg spawn`'s (~4873): the session's OWN remembered alias,
-      // then the persisted /settings 🐣 spawn-defaults model (validated — a stale/bad pref is ignored
+      // then the persisted /settings 🧑‍💻 coding-session defaults model (validated — a stale/bad pref is ignored
       // silently, same as that site), then SPAWN_MODEL_FLOOR. Unlike mode/effort this chain never
       // bottoms out at null — a resume/reopen must always emit SOME --model, or the CLI's own default
       // silently wins (that is how a reopen came back on Haiku 4.5, dragging the 1M window down with
@@ -10320,7 +10297,8 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
     const modelFlag = spawnModelFlag(
       mAlias && MODEL_ALIASES.includes(mAlias) ? mAlias : null,
       MODEL_ALIAS_IDS,
-      spawnWideContext(loadAccess().spawnContext1m),
+      true,   // the 1M window is not a knob: model-window.ts withholds the suffix from the models
+              // that 400 on it (haiku), and every other launch wants the wide window.
     )
     if (modelFlag) launchFlags.push(modelFlag)
     if (inherit?.effort && inherit.effort !== 'auto' && EFFORT_LEVELS.includes(inherit.effort)) launchFlags.push(`--effort ${inherit.effort}`)
@@ -11751,7 +11729,7 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
-  // 🐣 Spawn-defaults sub-panel — open / back (settings ⇄ panel).
+  // 🧑‍💻 Coding-session defaults sub-panel — open / back (settings ⇄ panel).
   if (data === 'spd:panel' || data === 'spd:back') {
     if (!(await cbAuth(ctx))) return
     await ctx.answerCallbackQuery().catch(() => {})
@@ -11759,14 +11737,14 @@ bot.on('callback_query:data', async ctx => {
     else await showSettings(ctx, 'edit')
     return
   }
-  // 🪟 1M-context toggle — read at spawn time by spawnSession's launch flags. Opt-out, so the
-  // stored value is only ever `false`; clearing it back to undefined restores the 1M default.
-  if (data === 'spd:w:toggle') {
+  // 🤖 Auto — ONE toggle over both dials, agent spawns only. Stored only when true, the same
+  // store-only-the-non-default rule the Fable switch uses, so an untouched install carries no key.
+  if (data === 'spd:a:toggle') {
     if (!(await cbAuth(ctx))) return
     const a = loadAccess()
-    a.spawnContext1m = spawnWideContext(a.spawnContext1m) ? false : undefined
+    a.spawnAuto = a.spawnAuto ? undefined : true
     saveAccess(a)
-    await ctx.answerCallbackQuery().catch(() => {})
+    await ctx.answerCallbackQuery({ text: a.spawnAuto ? 'Agent spawns pick their own model and effort.' : 'Agent spawns use your defaults.' }).catch(() => {})
     await showHtmlPanel(ctx, 'edit', spawnDefaultsText(), spawnDefaultsKeyboard())
     return
   }
@@ -11782,30 +11760,20 @@ bot.on('callback_query:data', async ctx => {
     await showHtmlPanel(ctx, 'edit', spawnDefaultsText(), spawnDefaultsKeyboard())
     return
   }
-  // Who may choose a spawned session's model. Stored only when it is the NON-default ('agent'), so an
-  // untouched install carries no key and picks up any future change to the shipped default.
-  if (data === 'spd:p:toggle') {
-    if (!(await cbAuth(ctx))) return
-    const a = loadAccess()
-    a.spawnModelPolicy = a.spawnModelPolicy === 'agent' ? undefined : 'agent'
-    saveAccess(a)
-    await ctx.answerCallbackQuery({ text: a.spawnModelPolicy === 'agent' ? 'Agents choose the model.' : 'You get asked first.' }).catch(() => {})
-    await showHtmlPanel(ctx, 'edit', spawnDefaultsText(), spawnDefaultsKeyboard())
-    return
-  }
-  // 🐣 model/effort pick — persisted; read by `tg spawn` when no explicit flag is passed.
+  // 🧑‍💻 model/effort pick — persisted; the default every coding session launches on.
   const spdSet = /^spd:(m|e):([a-z]+)$/.exec(data)
   if (spdSet) {
     if (!(await cbAuth(ctx))) return
     const [, kind, v] = spdSet
     const a = loadAccess()
+    // A real value, always: the "Inherit" chips are gone, so there is no path left that writes an
+    // empty default. 'auto' is no longer a value either — it is the toggle above.
     if (kind === 'm') {
-      // SPAWN_MODEL_CHOICES, not MODEL_ALIASES: 'auto' is a legal DEFAULT and not a legal launch alias.
-      if (v !== 'off' && !SPAWN_MODEL_CHOICES.includes(v)) { await ctx.answerCallbackQuery({ text: 'Unknown model.' }).catch(() => {}); return }
-      a.spawnModel = v === 'off' ? undefined : v
+      if (!MODEL_ALIASES.includes(v)) { await ctx.answerCallbackQuery({ text: 'Unknown model.' }).catch(() => {}); return }
+      a.spawnModel = v
     } else {
-      if (v !== 'off' && !SPAWN_EFFORT_CHOICES.includes(v)) { await ctx.answerCallbackQuery({ text: 'Unknown effort.' }).catch(() => {}); return }
-      a.spawnEffort = v === 'off' ? undefined : v
+      if (!SPAWN_EFFORT_LEVELS.includes(v)) { await ctx.answerCallbackQuery({ text: 'Unknown effort.' }).catch(() => {}); return }
+      a.spawnEffort = v
     }
     saveAccess(a)
     await ctx.answerCallbackQuery().catch(() => {})
@@ -15342,22 +15310,17 @@ async function webappReadSettings(): Promise<WebappSettingsView> {
       fileBrowser: { value: a.fileBrowser !== false, editable: true, label: 'Files tab in this app (reopens on change)' },
       ...(isTopicMode() ? { baseFolder: { value: baseFolderFull(), editable: false, label: 'new topics land here' } } : {}),
       mcp: { value: mcpEnabled(), editable: true, label: 'new sessions only' },
-      // The 🐣 spawn defaults — the same prefs the /settings sub-panel writes. They belong on this
+      // The 🧑‍💻 coding-session defaults — the same prefs the /settings sub-panel writes. They belong on this
       // tab because they are now the ONLY place a global model default is set: the per-session dials
       // below change one session and nothing else. 'off' = unset (the spawn chain falls to its floor).
       // 'auto' is offered here as a DEFAULT, never as a launch alias; Fable drops out of the options
       // when the owner has switched it off for coding agents, so the app can't set a default that no
       // agent-spawned session could start on.
-      // `resolved` rides alongside the raw value the same way prefMode's `raw` does, and for the same
-      // reason: the Settings tab must show what is CONFIGURED ('auto'), while the "+" sheet has to
-      // badge the model a session started right now would actually get. Showing 'auto' on the sheet
-      // would be a dial that names a value nothing launches with.
-      spawnModel: { value: a.spawnModel ?? 'off', resolved: spawnDefaultLaunchModel() ?? '', editable: true, options: ['off', SPAWN_MODEL_AUTO, ...MODEL_ALIASES.filter(m => !(m === FABLE && a.fableForAgents === 'off'))], label: 'coding sessions only — not this chat' },
-      spawnEffort: { value: a.spawnEffort ?? 'off', resolved: spawnDefaultLaunchEffort() ?? '', editable: true, options: ['off', ...SPAWN_EFFORT_CHOICES], label: 'coding sessions only — not this chat' },
-      // Who may choose a model. Editable HERE and in /settings 🐣 because it is the knob that decides
-      // whether an agent can spend on a model you didn't pick — the same reasoning that put the model
-      // default on this tab. A tap in this app is a HUMAN choosing, so it is never itself carded.
-      spawnModelPolicy: { value: a.spawnModelPolicy === 'agent' ? 'agent' : 'ask me first', editable: true, options: ['ask me first', 'agent'], label: 'when an agent asks for another model' },
+      // Real values, always — no 'off' and no 'auto'. The "+" sheet badges these directly again now
+      // that a default is never a policy word (the `resolved` companion field that existed for auto
+      // went with it).
+      spawnModel: { value: configuredSpawnModel(), editable: true, options: MODEL_ALIASES.filter(m => !(m === FABLE && a.fableForAgents === 'off')), label: 'coding sessions only — not this chat' },
+      spawnEffort: { value: configuredSpawnEffort(), editable: true, options: [...SPAWN_EFFORT_LEVELS], label: 'coding sessions only — not this chat' },
       mode: { value: cap ? detectCurrentMode(cap) : null, editable: false, label: 'drives the pane (chat-side)' },
       model: { value: sl?.model ?? null, editable: false },
       effort: { value: sl?.effort ?? null, editable: false },
@@ -15386,24 +15349,18 @@ function webappSetSetting(userId: string, key: string, value: unknown): string |
     case 'confirmReset': { const a = loadAccess(); a.confirmReset = truthy(value); saveAccess(a); return null }
     case 'limitFailover': { const a = loadAccess(); a.limitFailover = truthy(value); saveAccess(a); return null }
     case 'fileBrowser': { const a = loadAccess(); a.fileBrowser = truthy(value); saveAccess(a); return null }
-    // 🐣 spawn defaults, validated against the daemon's own lists exactly like the spd:(m|e)
-    // callbacks — the app's copy of them is UI labelling, not authority. 'off' clears the pref.
+    // 🧑‍💻 coding-session defaults, validated against the daemon's own lists exactly like the
+    // spd:(m|e) callbacks — the app's copy of them is UI labelling, not authority. Real values only:
+    // there is no 'off' (the Inherit chips are gone) and no 'auto' (that is its own toggle).
     case 'spawnModel': {
       const v = String(value)
-      if (v !== 'off' && !SPAWN_MODEL_CHOICES.includes(v)) return `unknown model — one of: off | ${SPAWN_MODEL_CHOICES.join(' | ')}`
-      const a = loadAccess(); a.spawnModel = v === 'off' ? undefined : v; saveAccess(a); return null
+      if (!MODEL_ALIASES.includes(v)) return `unknown model — one of: ${MODEL_ALIASES.join(' | ')}`
+      const a = loadAccess(); a.spawnModel = v; saveAccess(a); return null
     }
     case 'spawnEffort': {
       const v = String(value)
-      if (v !== 'off' && !SPAWN_EFFORT_CHOICES.includes(v)) return `unknown effort — one of: off | ${SPAWN_EFFORT_CHOICES.join(' | ')}`
-      const a = loadAccess(); a.spawnEffort = v === 'off' ? undefined : v; saveAccess(a); return null
-    }
-    // Only the non-default is stored, same as the /settings toggle: an untouched install keeps no key
-    // and so inherits any future change to the shipped default.
-    case 'spawnModelPolicy': {
-      const v = String(value)
-      if (v !== 'agent' && v !== 'ask me first') return 'one of: ask me first | agent'
-      const a = loadAccess(); a.spawnModelPolicy = v === 'agent' ? 'agent' : undefined; saveAccess(a); return null
+      if (!SPAWN_EFFORT_LEVELS.includes(v)) return `unknown effort — one of: ${SPAWN_EFFORT_LEVELS.join(' | ')}`
+      const a = loadAccess(); a.spawnEffort = v; saveAccess(a); return null
     }
     default: return 'unknown or read-only setting'
   }
@@ -15857,7 +15814,7 @@ async function webappSessionSpawn(
   const askedEffort = opts.effort ? String(opts.effort).toLowerCase() : null
   if (askedEffort && !EFFORT_LEVELS.includes(askedEffort)) return { error: `unknown effort '${askedEffort}'` }
   // No explicit dial = the sheet's "default" chip, and it resolves HERE, at spawn time, from the
-  // /settings 🐣 spawn defaults — the same fallback `tg spawn` has always used (~5140). Omitting the
+  // /settings 🧑‍💻 coding-session defaults — the same fallback `tg spawn` has always used (~5140). Omitting the
   // field used to fall through to spawnSession's inherit branch, which reads the model off whatever
   // tmux pane happened to be FOCUSED and the effort off default-effort.json; so a box configured for
   // opus/high could spawn from the mini app on neither, which is the bug behind the relabel. A stale
@@ -15866,8 +15823,8 @@ async function webappSessionSpawn(
   // spawnDefaultLaunchModel, not configuredSpawnModel: under `auto` there is no configured alias, and
   // a "+" with no model chip must still resolve to a real model rather than dropping to the CLI's own
   // default (the sheet says "follows Settings (auto → opus)" for exactly this reason).
-  const model = asked ?? spawnDefaultLaunchModel()
-  const effort = askedEffort ?? spawnDefaultLaunchEffort()
+  const model = asked ?? configuredSpawnModel()
+  const effort = askedEffort ?? configuredSpawnEffort()
   const askedMode = opts.mode ? String(opts.mode) : null
   if (askedMode && !['default', 'acceptEdits', 'plan', 'bypassPermissions'].includes(askedMode)) return { error: `unknown mode '${askedMode}'` }
   // Same treatment as model/effort above, and the same bug being closed: with no mode dial,

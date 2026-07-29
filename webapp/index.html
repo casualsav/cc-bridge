@@ -1379,7 +1379,7 @@
   .dialrow .nm { flex: 1; min-width: 0; }
   .dialrow .nm .n { display: flex; align-items: center; gap: var(--sp-2); }
   .dialrow .nm .d { font-size: var(--t-sub); color: var(--hint-raised); margin-top: 2px; }
-  /* Selected = the session's CURRENT dial (accent text + check). Default = what /settings 🐣 spawns
+  /* Selected = the session's CURRENT dial (accent text + check). Default = what /settings 🧑‍💻 spawns
      with. Deliberately two different marks: they land on the same row as often as not, and a reader
      who only ever sees them together would take one for the other. */
   .dialrow.on { color: var(--link); }
@@ -2042,8 +2042,8 @@ async function renderSettings() {
     fileBrowser: { name: "🗂 File browser", bool: true },
     baseFolder: { name: "📂 Base folder", bool: false },
     mcp: { name: "🔌 MCP mode", bool: true },
-    spawnModel: { name: "🐣 Coding-session model", bool: false },
-    spawnEffort: { name: "🐣 Coding-session effort", bool: false },
+    spawnModel: { name: "🧑‍💻 Coding session model", bool: false },
+    spawnEffort: { name: "🧑‍💻 Coding session effort", bool: false },
     mode: { name: "🛠️ Mode", bool: false },
     model: { name: "🤖 Model", bool: false },
     effort: { name: "⏫ Effort", bool: false },
@@ -2297,8 +2297,10 @@ function bubble(i, n, all) {
     + (i.role === "agent" ? mdReport(t) : i.role === "assistant" ? md(t) : esc(t)) + (i.img ? "</div>" : "");
   if (!inner) return "";
   // A long message collapses to a readable height with a tap to open it, rather than running past
-  // the screen. `clipped` means the payload clamp really did cut it — say so at the fold, and stop
-  // saying it once the rest has actually been fetched.
+  // the screen. The fold used to name the payload clamp — "message truncated at 4000 chars" — which
+  // the owner cut (2026-07-29): a cut message reads like every other long one, and a number from the
+  // server's internals is not something a reader can act on. `clipped` still drives the FETCH; it
+  // just no longer speaks.
   // …EXCEPT the newest reply, which is never folded: the one message you should never have to tap to
   // read is the one you are waiting for. `assistant` only — a user bubble keeps its fold whatever its
   // position (you wrote it), and an agent card is a delegated REPORT rather than the answer to the
@@ -2310,7 +2312,6 @@ function bubble(i, n, all) {
   // without the fold there is no tap left to do it.
   const newest = !!all && n === all.length - 1 && i.role === "assistant";
   const long = t.length > LONG_MSG && !newest;
-  const note = i.clipped && !full ? "message truncated at 4000 chars" : "";
   // A transcript-echoed user message has demonstrably reached the session, so two ticks.
   inner += stamp(i.ts, i.role === "user" ? 2 : 0);
   // The fold also carries the time: on a collapsed bubble the floated stamp sits below the cut, and
@@ -2324,7 +2325,7 @@ function bubble(i, n, all) {
   return '<div class="msg ' + i.role + (imgOnly ? " imgonly" : "") + (long ? " clip" : "") + (long && openNow ? " open" : "") + '"'
     + (long ? ' onclick="onBubbleTap(this)"' : "")
     + (i.uuid ? ' data-uuid="' + esc(i.uuid) + '"' : "") + ">" + inner +
-    (long ? '<div class="more">' + (i.ts ? esc(hhmm(i.ts)) + " · " : "") + (note ? esc(note) + " · " : "") + "tap to expand</div>" : "") + "</div>";
+    (long ? '<div class="more">' + (i.ts ? esc(hhmm(i.ts)) + " · " : "") + "tap to expand</div>" : "") + "</div>";
 }
 // One turn: prose through the same md() a reply gets, plus a one-line chip per tool group. The chip
 // carries only its coordinates — the calls stay in lastDrill, so the sheet reads live data.
@@ -3217,10 +3218,7 @@ async function openSpawnSheet() {
     const val = k => { const v = d.settings?.[k]?.value; return v && v !== "off" ? String(v) : ""; };
     // prefMode's `value` is a LABEL with an emoji in it ("🚨 Bypass"); `raw` is the mode itself, which
     // is what a row can be matched against.
-    // spawnModel's `resolved` over its raw `value`, for the same reason prefMode uses `raw`: under
-    // "auto" the configured value is a policy, not a model, and this sheet's job is to name what THIS
-    // session will get. The daemon resolves auto the same way at spawn time, so the badge is true.
-    spawnDefaults = { model: d.settings?.spawnModel?.resolved || val("spawnModel"), effort: d.settings?.spawnEffort?.resolved || val("spawnEffort"), mode: d.settings?.prefMode?.raw || "" };
+    spawnDefaults = { model: val("spawnModel"), effort: val("spawnEffort"), mode: d.settings?.prefMode?.raw || "" };
     paintSpawn();
   } catch { /* the rows read a bare "Follows Settings" — the spawn still resolves daemon-side */ }
 }

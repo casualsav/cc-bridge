@@ -35,7 +35,7 @@ const PREF_KEYS = [
   'renderMarkdown', 'terminalMirror', 'terminalMirrorFooter', 'sessionPin', 'busDepthLimit', 'replyMode', 'budgetDaily',
   'topicOnEnd', 'scheduleTz', 'batchAllow', 'confirmReset', 'tts', 'updateChecks', 'claudingDraft',
   'autoUpdate', 'limitFailover', 'failoverChain', 'codexModel', 'codexEffort', 'switchboard', 'dmLanes',
-  'chatMapAutowire', 'fileBrowser', 'spawnModel', 'spawnEffort', 'spawnContext1m', 'spawnModelPolicy', 'spawnAgentModels', 'spawnHoldMinutes', 'modelCardChat', 'fableForAgents',
+  'chatMapAutowire', 'fileBrowser', 'spawnModel', 'spawnEffort', 'spawnAuto', 'spawnAgentModels', 'spawnHoldMinutes', 'modelCardChat', 'fableForAgents',
 ] as const satisfies readonly (keyof Access)[]
 
 // Parse a JSON access/prefs file into a partial; {} on missing, moved-aside + {} on corrupt.
@@ -93,6 +93,25 @@ function readPrefs(): Partial<Access> {
   if (Object.keys(raw).length === 0) raw = readJsonAccessCached(ACCESS_FILE)
   const out: Partial<Access> = {}
   for (const k of PREF_KEYS) if (raw[k] !== undefined) (out as Record<string, unknown>)[k] = raw[k]
+  return migrateSpawnDials(out)
+}
+
+// `auto` briefly lived IN the spawnModel/spawnEffort slots (0.4.214–0.4.218). The owner's catch was
+// that those slots are also what the mini-app "+" and every new topic spawn read — so an auto default
+// silently handed a HUMAN's spawn the agent fallback instead of his configured model. Auto is a
+// separate toggle now, and the value slots hold real dials again.
+//
+// Read-time, not a rewrite of his file: it is idempotent, it survives a rollback (an older build sees
+// the key it understands), and nothing has to run at the right moment for a config to be correct. A
+// migrated slot is left UNSET rather than guessed — 'auto' recorded no model, so inventing one here
+// would be inventing a preference he never expressed. Dropped keys (spawnModelPolicy, spawnContext1m)
+// need no code at all: they left PREF_KEYS, so a stored value is simply never read again.
+const AUTO_TOKEN = 'auto'
+export function migrateSpawnDials(p: Partial<Access>): Partial<Access> {
+  if (p.spawnModel !== AUTO_TOKEN && p.spawnEffort !== AUTO_TOKEN) return p
+  const out = { ...p, spawnAuto: true }
+  if (out.spawnModel === AUTO_TOKEN) delete out.spawnModel
+  if (out.spawnEffort === AUTO_TOKEN) delete out.spawnEffort
   return out
 }
 

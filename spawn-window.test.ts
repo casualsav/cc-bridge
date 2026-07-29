@@ -5,7 +5,7 @@
 // It is invisible from the outside — a 200k session looks exactly like a 1M one until it runs out —
 // so the rule is pinned here rather than left to a live check.
 import { expect, test, describe } from 'bun:test'
-import { WIDE_CONTEXT_SUFFIX, wideContextModel, spawnWideContext, spawnModelFlag, supportsWideContext } from './model-window'
+import { WIDE_CONTEXT_SUFFIX, wideContextModel, spawnModelFlag, supportsWideContext } from './model-window'
 
 // daemon.ts's alias table at the launch-flag site. spawnModelFlag itself is the production builder —
 // this test drives it directly, so it fails if the daemon stops appending the suffix.
@@ -74,16 +74,5 @@ describe('no resolved alias', () => {
     // default window. Pinned so the gap is visible rather than assumed closed.
     expect(spawnModelFlag(null, MODEL_ALIAS_IDS, true)).toBeNull()
     expect(spawnModelFlag(undefined, MODEL_ALIAS_IDS, true)).toBeNull()
-  })
-})
-
-describe('spawn default', () => {
-  test('unset means ON — a never-configured install gets the wide window', () => {
-    expect(spawnWideContext(undefined)).toBe(true)
-  })
-
-  test('only an explicit false opts out', () => {
-    expect(spawnWideContext(false)).toBe(false)
-    expect(spawnWideContext(true)).toBe(true)
   })
 })
