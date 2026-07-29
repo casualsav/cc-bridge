@@ -130,7 +130,7 @@ import { initQueue, readLater, writeLater, sweepLaterQueues, LATER_SWEEP_MS } fr
 import {
   AGENT_BUS_ENABLED, AGENT_BUS_PIN_UI,
   createPending, getPending, removePending, putPending, listPending, markInjected, expirePending, dropExpired, LATE_ANSWER_GRACE_MS, ASK_TTL_MS,
-  recordAgentAsk, resetHops, currentHops, BREADTH_NOTICE_AT, askResultText, planAskReap, deliveredReapCandidates, reapNotifiesAsker, queuedFor, type AskDelivery,
+  recordAgentAsk, resetHops, currentHops, BREADTH_NOTICE_AT, askResultText, planAskReap, deliveredReapCandidates, groupClosuresByAskerAndTarget, reapNotifiesAsker, queuedFor, type AskDelivery,
   askerAlreadyResolved, markAskerResolved, reapNoticeSuppressed, planAssigneeNudge, markNudged,
   unreportedWorkMarker, markReported, markBriefed,
   getReportedAt, getBriefedBy,
@@ -139,7 +139,7 @@ import {
   getSeen, markSeen, digestSince, DIGEST_SCAN,
   type BusEndpoint, type BusPending, type LedgerEntry,
 } from './agent-bus.ts'
-import { formatAskBlock, formatAnswerBlock, formatAsideBlock, formatDigestBlock, formatNudgeBlock, formatRosterLine, busSentHeader, busGotHeader, type BusVerb, type RosterAgent } from './agent-bus-block.ts'
+import { formatAskBlock, formatAnswerBlock, formatAsideBlock, formatDigestBlock, formatNudgeBlock, formatRosterLine, closureNoticeText, busSentHeader, busGotHeader, type BusVerb, type RosterAgent } from './agent-bus-block.ts'
 import {
   readProcTable, childWaitLabel, childWaitShells, survivorWarning, conversationStart, openOutboundAsk, sessionState,
   setWaitsFile, setWait, clearWait, readWait,
@@ -3065,7 +3065,10 @@ const LEDGER_SCAN = 200
 // later that we're "still waiting" for a session that is gone. Dropping the row is the fix; who
 // hears about it is a separate question, and reapNotifiesAsker answers it — a never-delivered ask
 // tells the asker so it can re-ask elsewhere, a delivered one is reaped in silence.
-async function reapDeadAsk(p: BusPending, room: string): Promise<void> {
+// Returns the row when its asker must be TOLD, null when the notice is suppressed. The notice itself is
+// sent by notifyAskClosures once this tick's reaps are in: a session dying with several of one asker's
+// asks open used to wake that asker once per ask.
+async function reapDeadAsk(p: BusPending, room: string): Promise<BusPending | null> {
   removePending(p.id)
   const delivered = !!p.injected   // the two sweep passes below already split on exactly this
   // Say nothing about an ask its asker has already been answered about. This reaper fires on every way
@@ -3081,28 +3084,52 @@ async function reapDeadAsk(p: BusPending, room: string): Promise<void> {
   // ambient digest omits it. Two surfaces, one answer.
   appendLedger(room, { ts: Date.now(), kind: 'expire', from: p.toName, to: p.fromName, id: p.id, text: why, ...(stale ? { suppressed: true } : {}) })
   process.stderr.write(`daemon: ask ${p.id} to @${p.toName} (${p.toSid}) reaped — ${why}${stale ? ' (no notice sent — asker already answered)' : ''}\n`)
-  if (stale) return
-  const askerPane = await paneForSession(p.fromSid).catch(() => null)
-  // The asking AGENT hears about this NOW, regardless of the human-facing card below — the delivered
-  // half used to be dropped in total silence, and a live incident (2026-07-26) showed exactly why
-  // that's wrong for a founding ask: the "delivered but the target session ended" line above was the
-  // whole record, and the spawner sat waiting on a report that could never arrive. removePending()
-  // above makes this one-shot per ask, whichever half reaped it.
-  const shown = p.text.length > 80 ? p.text.slice(0, 80) + '…' : p.text
-  if (askerPane) void busDeliver(askerPane, formatAnswerBlock('system', p.id, `(@${p.toName} ended with your ask ${p.id} unanswered: "${shown}")`))
-  // The ❌ Telegram card stays gated as before: a delivered ask that dies mid-turn is overwhelmingly
-  // the SUCCESS path (work done, owner closes the session), and carding him about it read as an alarm
-  // about nothing — see reapNotifiesAsker. The pane block above is the actual fix; it doesn't need the
-  // human paged too.
-  if (!reapNotifiesAsker(p)) return
-  const own = askerPane ? await outboundTargetsFor(askerPane).catch(() => []) : []
-  // Owner fallback ONLY when nobody is left who could act. A headless sender has no surface of its
-  // own, but it has a PANE — and the system block above lands directly in its context, so also
-  // carding the owner told him about something the agent already knew. Fleet-internal by nature.
-  const cardTargets = own.length ? own : askerPane ? [] : await fleetSurfaceFor(askerPane)
-  const card = `❌ Ask ${p.id} to <b>${escapeHtml(p.toName)}</b> was never delivered — that session has ended. Removed from the queue.`
-  for (const { chat, thread } of cardTargets) {
-    void channel.sendText(chat, card, { silent: true, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
+  return stale ? null : p
+}
+
+// ONE closure notice per asker per dead session, for every ask that session took to the grave.
+//
+// It is an ACK, not an answer, and that is the owner's ruling made structural (2026-07-29): a closed ask
+// requires no reply BY CONSTRUCTION, and the standing contract for an `ack=` block is "never answer one",
+// so the chat lane's rule of saying nothing to the owner on an FYI wake is carried by the event's own
+// classification instead of by the recipient remembering. (Both envelopes are bus-anchored, so neither
+// ever pinged his phone — what he was reading was the chat lane's replies to them.)
+//
+// Routed through createPending + tryDeliverAsk rather than a raw busDeliver, so a notice for a busy asker
+// QUEUES on the 15s sweep instead of racing its pane, and `noReply` clears the row the moment it lands.
+async function notifyAskClosures(rows: BusPending[]): Promise<void> {
+  for (const group of groupClosuresByAskerAndTarget(rows)) {
+    const first = group[0]
+    const text = closureNoticeText(first.toName, group.map(p => ({ id: p.id, text: p.text })))
+    const askerPane = await paneForSession(first.fromSid).catch(() => null)
+    // The asking AGENT hears about this regardless of the human-facing card below — the delivered half
+    // used to be dropped in total silence, and a live incident (2026-07-26) showed why that's wrong for a
+    // founding ask: the reap line in the log was the whole record, and the spawner sat waiting on a
+    // report that could never arrive. removePending() in the reaper makes it one-shot per ask.
+    if (askerPane) {
+      const n = createPending({ fromSid: SYSTEM_SID, toSid: first.fromSid, fromName: 'system',
+        toName: nameForEndpoint(first.fromSid, busEndpoints()), text, refs: [], noReply: true, quiet: true, depth: 0 }, Date.now())
+      appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'ack', from: 'system', to: n.toName, id: n.id, text })
+      await tryDeliverAsk(n).catch(() => {})
+    }
+    // The ❌ Telegram card stays gated as before: a delivered ask that dies mid-turn is overwhelmingly
+    // the SUCCESS path (work done, owner closes the session), and carding him about it read as an alarm
+    // about nothing — see reapNotifiesAsker. The pane block above is the actual fix; it doesn't need the
+    // human paged too. Coalesced on the same grouping, for the same reason.
+    const carded = group.filter(reapNotifiesAsker)
+    if (!carded.length) continue
+    const own = askerPane ? await outboundTargetsFor(askerPane).catch(() => []) : []
+    // Owner fallback ONLY when nobody is left who could act. A headless sender has no surface of its
+    // own, but it has a PANE — and the system block above lands directly in its context, so also
+    // carding the owner told him about something the agent already knew. Fleet-internal by nature.
+    const cardTargets = own.length ? own : askerPane ? [] : await fleetSurfaceFor(askerPane)
+    const ids = carded.map(p => p.id)
+    const card = ids.length === 1
+      ? `❌ Ask ${ids[0]} to <b>${escapeHtml(first.toName)}</b> was never delivered — that session has ended. Removed from the queue.`
+      : `❌ Asks ${ids.join(', ')} to <b>${escapeHtml(first.toName)}</b> were never delivered — that session has ended. Removed from the queue.`
+    for (const { chat, thread } of cardTargets) {
+      void channel.sendText(chat, card, { silent: true, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
+    }
   }
 }
 
@@ -3121,7 +3148,13 @@ async function sweepBus(): Promise<void> {
   if (panesDiscovered && reapable.length) {
     for (const sid of new Set(reapable.map(p => p.toSid))) if (await busTargetGone(sid)) goneSids.add(sid)
   }
-  for (const p of planAskReap(reapable, q => goneSids.has(q.toSid), panesDiscovered)) await reapDeadAsk(p, room).catch(() => {})
+  // Both reap passes collect into ONE list, notified at the end of the tick: a session that dies holding
+  // several of an asker's asks is one death, and the asker is woken once about it (see notifyAskClosures).
+  const closed: BusPending[] = []
+  for (const p of planAskReap(reapable, q => goneSids.has(q.toSid), panesDiscovered)) {
+    const told = await reapDeadAsk(p, room).catch(() => null)
+    if (told) closed.push(told)
+  }
   // The other half of 11c: an ask that WAS delivered and whose target then ended (a `tg kill`, a
   // crash) can never be answered either — but the reap above only covers undelivered ones, so this
   // one used to sit out the full TTL and then tell the asker "still open; a late answer will be
@@ -3129,9 +3162,13 @@ async function sweepBus(): Promise<void> {
   // scope now — see deliveredReapCandidates for why excluding them stopped making sense at v0.4.57.
   if (panesDiscovered) {
     for (const p of deliveredReapCandidates(listPending())) {
-      if (await busTargetGone(p.toSid).catch(() => false)) await reapDeadAsk(p, room).catch(() => {})
+      if (await busTargetGone(p.toSid).catch(() => false)) {
+        const told = await reapDeadAsk(p, room).catch(() => null)
+        if (told) closed.push(told)
+      }
     }
   }
+  if (closed.length) await notifyAskClosures(closed).catch(() => {})
   for (const p of expirePending(Date.now())) {
     // Suppress the notice when the target has SUCCESSFULLY answered any ask from this asker since this
     // one was created: that proves it's alive AND bus-fluent, so "still waiting" would be pure noise

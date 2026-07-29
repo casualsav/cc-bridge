@@ -9,7 +9,8 @@
 // in that window would fail every open ask at once and tell every asker their target had ended — a
 // worse bug than the one being fixed. The reap must not run until discovery has landed.
 import { test, expect } from 'bun:test'
-import { planAskReap, deliveredReapCandidates, reapNotifiesAsker, reapNoticeSuppressed, type BusPending, type LedgerEntry } from './agent-bus.ts'
+import { planAskReap, deliveredReapCandidates, reapNotifiesAsker, reapNoticeSuppressed, groupClosuresByAskerAndTarget, type BusPending, type LedgerEntry } from './agent-bus.ts'
+import { closureNoticeText } from './agent-bus-block.ts'
 
 const ask = (over: Partial<BusPending> = {}): BusPending => ({
   id: 95, fromSid: 'sidChat', toSid: 'sidCcbridge', fromKind: 'claude', toKind: 'claude',
@@ -196,4 +197,45 @@ test('447: the never-delivered half is NEVER silenced by a later answer', () => 
 // daemon restart with it.
 test('447: the persisted flag stands in for a proof that has scrolled out of the window', () => {
   expect(reapNoticeSuppressed(ask({ id: 447, injected: true, createdAt: 100, askerResolvedAt: 400 }), [])).toBe(true)
+})
+
+// ---- one session-end, one notice per asker (owner: "noise I shouldn't have to read") ----
+// @weather died holding asks 774 and 776 from one lane; the bus woke that lane twice. The grouping is
+// on BOTH ends: two asks to one dead session are one fact told twice, two dead sessions are two facts.
+test('several asks from one asker to one dead session coalesce into a single notice', () => {
+  const rows = [ask({ id: 774 }), ask({ id: 776 })]
+  const groups = groupClosuresByAskerAndTarget(rows)
+  expect(groups.length).toBe(1)
+  expect(groups[0].map(p => p.id)).toEqual([774, 776])
+})
+
+test('two askers of the same dead session each hear once — never one merged notice', () => {
+  const groups = groupClosuresByAskerAndTarget([ask({ id: 1, fromSid: 'a' }), ask({ id: 2, fromSid: 'b' })])
+  expect(groups.map(g => g.map(p => p.id))).toEqual([[1], [2]])
+})
+
+test('two dead sessions stay two facts for the same asker', () => {
+  const groups = groupClosuresByAskerAndTarget([ask({ id: 1, toSid: 'x', toName: 'x' }), ask({ id: 2, toSid: 'y', toName: 'y' })])
+  expect(groups.map(g => g.map(p => p.id))).toEqual([[1], [2]])
+})
+
+// The single-ask sentence is a preserved control: the commonest death must read exactly as it did before
+// coalescing existed, or this change is visible where nobody asked for a change.
+test('ONE closed ask renders the pre-coalescing sentence, byte for byte', () => {
+  expect(closureNoticeText('weather', [{ id: 774, text: 'do the thing' }]))
+    .toBe('(@weather ended with your ask 774 unanswered: "do the thing")')
+})
+
+test('TWO closed asks render one notice that still names every id and gist', () => {
+  expect(closureNoticeText('weather', [{ id: 774, text: 'build part 1' }, { id: 776, text: 'and part 2' }]))
+    .toBe('(@weather ended; your asks 774, 776 closed unanswered:\n774 — build part 1\n776 — and part 2)')
+})
+
+test('a gist is flattened, de-tagged and clamped — a long multi-line ask cannot reshape the block', () => {
+  const text = 'first line\n  second <b>line</b> ' + 'x'.repeat(200)
+  const out = closureNoticeText('weather', [{ id: 1, text }, { id: 2, text: 'short' }])
+  expect(out).toContain('1 — first line second ‹b›line‹/b›')
+  expect(out).not.toContain('<b>')
+  expect(out.split('\n')).toHaveLength(3)
+  expect(out.split('\n')[1].length).toBeLessThanOrEqual(4 + 81)
 })

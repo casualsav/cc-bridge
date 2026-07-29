@@ -526,6 +526,20 @@ export function deliveredReapCandidates(pendings: BusPending[]): BusPending[] {
   return pendings.filter(p => p.toKind === 'claude' && p.injected)
 }
 
+// One session-end can close several asks from several askers. Each ASKER hears once about each dead
+// TARGET — grouped on both, because two dead sessions are two facts and must not be merged into one
+// sentence, while two asks to the same dead session are one fact told twice. Insertion order is kept
+// on purpose: the ids in the notice then read in the order they were asked.
+export function groupClosuresByAskerAndTarget<T extends { fromSid: string; toSid: string }>(rows: T[]): T[][] {
+  const groups = new Map<string, T[]>()
+  for (const r of rows) {
+    const key = `${r.fromSid} ${r.toSid}`
+    const g = groups.get(key)
+    if (g) g.push(r); else groups.set(key, [r])
+  }
+  return [...groups.values()]
+}
+
 // ---- hop counter (loop guard) ----
 
 // Count one agent→agent ask; returns the new consecutive count. The daemon delivers when

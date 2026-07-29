@@ -139,6 +139,20 @@ export function formatNudgeBlock(items: { id: number; fromName: string; text: st
     + lines.join('\n') + '\n</tg>'
 }
 
+// What a session-end tells an asker about the asks it closed. ONE notice per asker per dead session:
+// @weather died holding two asks from one lane on 2026-07-29 and the bus woke that lane twice, which
+// the owner read as two messages about one dead session ("noise I shouldn't have to read"). The
+// information is not the defect and none of it is dropped — the ids are all listed, each with its gist.
+//
+// The ONE-item string is a preserved control, byte-for-byte what shipped before coalescing, so the
+// common single-ask death cannot drift as a side effect of adding the multi-ask shape.
+export function closureNoticeText(target: string, items: { id: number; text: string }[]): string {
+  const gist = (t: string) => { const f = deTag(t.replace(/\s*\n\s*/g, ' ')).trim(); return f.length > 80 ? f.slice(0, 80) + '…' : f }
+  if (items.length === 1) return `(@${deTag(target)} ended with your ask ${items[0].id} unanswered: "${gist(items[0].text)}")`
+  return `(@${deTag(target)} ended; your asks ${items.map(i => i.id).join(', ')} closed unanswered:\n`
+    + items.map(i => `${i.id} — ${gist(i.text)}`).join('\n') + ')'
+}
+
 // The pinned-card roster line (agent-bus P2) built from the LIVE endpoint names: a compact
 // `☎️ a · b · c`, clamped to a pin-sized budget and ONLY THEN HTML-escaped. Escaping LAST is the whole
 // point: escaping first and slicing after can cut an entity (`&amp;` → `&am`), which is invalid HTML
