@@ -173,7 +173,12 @@ const through = await p.evaluate(() => {
       // passed on the control page while proving nothing.
       head.top + head.height / 2, head.height / 2 - 2),
     behindWrap: hit(187, wrap.top + wrap.height / 2),          // through the frosted capsule
-    besideDock: hit(20, dock.top + 4),                         // the dock's top edge, above the capsule
+    // The dock's top edge, above the capsule — sampled in TWO columns, because which role's message
+    // crosses that edge depends on how tall the dock is, and a user bubble is right-aligned: at 20 it
+    // is not there at all. (The two-row composer moved this band onto a bubble and the check failed
+    // for a transcript that was plainly still scrolling under the dock.) The claim is ink in the
+    // message column, not ink at one x; a clipped feed has none at either.
+    besideDock: hit(20, dock.top + 4) || hit(187, dock.top + 4),
   };
 });
 check(through.topStrip, "the transcript SCROLLS through the top strip — it is dissolved there by the scrim, never clipped short of it");

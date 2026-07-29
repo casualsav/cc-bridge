@@ -117,10 +117,12 @@
        the reference measured against the mic both frames contain (56.1 : 66.7), not a chosen size. */
     --dial-h: 34px;
     --pill-ring: 6px;
-    /* The pill's height AT ONE LINE, and the name matters: the pill now grows with the textarea,
-       but the corner radius must NOT follow it. Tie the radius to the live height and a six-line
-       pill becomes a 74px lozenge instead of a chat field. Fixed at the one-line radius, a tall
-       pill is a rounded rectangle whose bottom-right corner keeps the curve the mic sits in. */
+    /* The mic in its ring — the height a single-row capsule had, and now the height of the CONTROLS'
+       row inside a two-row one. It is still what the corner radius is derived from, and that is the
+       point: --pill-h-1 / 2 = --pill-ring + --mic-d / 2, so the corner's arc and the mic's disc share
+       a centre and the ring reads as even around it. Tie the radius to the LIVE height instead and a
+       capsule that grows becomes a lozenge; fixed here, a tall capsule is a rounded rectangle whose
+       bottom-right corner keeps the curve the mic sits in. */
     --pill-h-1: calc(var(--mic-d) + 2 * var(--pill-ring));
     /* The composer's growth cap, in LINES. Six fully visible lines, then the text scrolls inside
        the field — measured off a real Telegram client by the owner, not chosen here. It is derived
@@ -1058,24 +1060,38 @@
      by the owner's ask, and it is what lets the dock have no fill of its own: the transcript passes
      behind the field, frosted, instead of behind a grey bar. The inset highlight stays; it is the
      rim that reads as a raised surface, and translucency doesn't remove the need for it. */
-  .inputwrap { flex: 1; min-width: 0; display: flex; align-items: flex-end; background: var(--chip-fill);
+  /* TWO ROWS, not one: the field owns the top line at full width, the controls sit on their own line
+     under it — the owner's reference (the Claude Code mobile composer) measured off his screenshot.
+     Its resting box is 189px tall on a 664px-wide container; scaled to our 370px capsule that is
+     105 CSS px, and scaling by the LINE BOX instead (their 41px line against our 21.6) puts it at
+     99 — which is why the parts below add to 103.6 (104 rendered, since growComposer() assigns an
+     integer scrollHeight) rather than to a number somebody picked.
+     No `min-height`: the content IS the resting height now (ring + the field's one-line box + the
+     row gap + the mic + ring). The old `min-height: var(--pill-h-1)` bought the last 0.4px of a
+     one-line capsule and is inert against a box three times that. */
+  .inputwrap { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: stretch;
+    gap: var(--sp-3); background: var(--chip-fill);
     backdrop-filter: var(--chip-glass); -webkit-backdrop-filter: var(--chip-glass);
-    border-radius: calc(var(--pill-h-1) / 2); padding: var(--pill-ring); min-height: var(--pill-h-1); box-shadow: inset 0 1px 0 rgba(255,255,255,.06); }
+    border-radius: calc(var(--pill-h-1) / 2); padding: var(--pill-ring); box-shadow: inset 0 1px 0 rgba(255,255,255,.06); }
+  /* The controls' line. `align-items: center` is what keeps the chip on the mic's axis now that the
+     row's height IS the mic — the margin-bottom that used to do it by hand is gone. The chip pushes
+     the clip and the mic to the far end; the two of them stay adjacent, exactly as they were when
+     all three shared the capsule's single row. */
+  .ctlrow { flex: none; display: flex; align-items: center; }
   /* The model/effort pill, styled after the reference's blue "Open" chip: text only, no icon.
      Height is the reference's proportion against the one control both frames share — a 56.1px chip
-     beside a 66.7px mic, so 0.84 of our 40px mic. The margin is NOT a nudge: at one line the
-     reference centres this chip on the same axis as the mic (measured 46.9 vs 47.4 in a 102px crop),
-     and since `align-items: flex-end` pins it to the capsule's floor, half the difference between it
-     and the mic is exactly what puts the two back on one axis. It stays bottom-anchored when the
-     field grows, like the clip and the mic. */
+     beside a 66.7px mic, so 0.84 of our 40px mic. */
   /* The left inset is CONCENTRIC, the same rule the mic's ring answers to at the other end: the
-     capsule's left arc is centred --pill-h-1/2 in from its edge, so putting the chip's own arc centre
-     on that line — an extra (--pill-h-1 - --dial-h)/2 - --pill-ring, i.e. 3px past the ring — makes
-     the two curves share a centre and the blue end read as nested inside the grey one rather than
-     crowded against it. It holds at EVERY composer height, since both the chip and the capsule's
-     bottom corner are pinned to the same floor. The owner asked for "a little more from the left";
-     this is the amount the geometry names, rather than a nudge. */
-  .dialpill { flex: none; height: var(--dial-h); margin-bottom: calc((var(--mic-d) - var(--dial-h)) / 2);
+     capsule's bottom-left arc is centred --pill-h-1/2 in from each edge, so putting the chip's own
+     arc centre on that point — an extra (--pill-h-1 - --dial-h)/2 - --pill-ring, i.e. 3px past the
+     ring — makes the two curves share a centre and the blue end read as nested inside the grey one
+     rather than crowded against it. The vertical half of that concentricity now comes for free:
+     `align-items: center` on a row whose height is the mic puts the chip's centre --pill-ring +
+     --mic-d/2 = 26px off the floor, which is the same 26. The owner asked for "a little more from
+     the left"; this is the amount the geometry names, rather than a nudge.
+     `margin-right: auto` is what splits the row — it is a LAYOUT job, not a spacing one, so it does
+     not belong to a gap the two right-hand controls would also take. */
+  .dialpill { flex: none; height: var(--dial-h); margin-right: auto;
     margin-left: calc((var(--pill-h-1) - var(--dial-h)) / 2 - var(--pill-ring));
     border: none; border-radius: calc(var(--dial-h) / 2); background: var(--btn); color: var(--btn-text);
     font-size: var(--t-sub); line-height: 1; padding: 0 12px; cursor: pointer;
@@ -1095,9 +1111,12 @@
      item's automatic minimum size is its intrinsic width, and a <textarea>'s is its `cols` default
      (~20 characters) — so the field REFUSED to shrink below ~200px and the capsule overflowed the
      screen instead, at which point the whole page scrolls sideways. Measured: a long model name blew
-     the capsule from 370 to 508px on a 390px viewport. Every other flex child here is `flex: none`,
-     so this is the only item that can give, and it has to be allowed to. */
-  .inputwrap textarea { flex: 1; min-width: 0; resize: none; border: none; outline: none; background: transparent; color: var(--text); padding: var(--ta-pad-y) 0 var(--ta-pad-y) var(--sp-2); font: var(--t-body)/var(--ta-lh) -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; max-height: calc(var(--ta-lines) * var(--ta-lh) * 1em + 2 * var(--ta-pad-y)); overflow-y: auto; }
+     the capsule from 370 to 508px on a 390px viewport. It stays because the chip can still do that
+     to the row below.
+     `flex: none`, NOT `flex: 1`: the capsule is a COLUMN now, so flex's main axis is the height —
+     and `flex: 1` carries `flex-basis: 0`, which would hand the field a size the flex algorithm
+     computes instead of the one growComposer() measures and assigns. */
+  .inputwrap textarea { flex: none; min-width: 0; resize: none; border: none; outline: none; background: transparent; color: var(--text); padding: var(--ta-pad-y) var(--sp-2); font: var(--t-body)/var(--ta-lh) -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; max-height: calc(var(--ta-lines) * var(--ta-lh) * 1em + 2 * var(--ta-pad-y)); overflow-y: auto; }
   .ghost { background: transparent; border: none; color: var(--hint); padding: var(--sp-2) 7px; cursor: pointer; line-height: 1; flex: none; }
   /* The capsule's controls should sit a step above its placeholder, as they do in the reference —
      at one tone the whole capsule reads as decoration rather than two affordances beside a label. */
@@ -1487,9 +1506,6 @@
   <div id="dstage"></div>
   <div class="composer">
     <div class="inputwrap">
-      <!-- Text only, no icon and no emoji, by the owner's call: the model name is the label. It leads
-           the capsule the way the reference's blue "Open" chip does. -->
-      <button id="ddial" class="dialpill" title="Model and effort"><b id="ddialm">Model</b><span class="eff" id="ddiale"></span></button>
       <!-- The IME must not draw an inline prediction in this field, and that is a DELIBERATE trade,
            not a tidy-up: `autocorrect="off"` is what Chromium maps to Android's
            TYPE_TEXT_FLAG_NO_SUGGESTIONS, and that flag takes autocorrect with it. The owner asked
@@ -1507,17 +1523,22 @@
            that read it. -->
       <textarea id="dtext" rows="1" placeholder="Message" autocomplete="off" autocorrect="off"
         writingsuggestions="false" spellcheck="false"></textarea>
-      <button id="datt" class="ghost" title="Attach a file"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>
-      <!-- The round button is mic OR send, never both. The PAPERCLIP stays inside the capsule through
-         both states on purpose: type-then-attach is a real workflow, and sweeping the clip away with
-         the mic the moment text appears would break it silently.
-         Both round buttons are SIBLINGS OF THE TEXTAREA, not overlaid on it: the textarea is the only
-         flex item that grows, so the buttons' width is reserved by the layout itself and text can
-         never run underneath them, however long the placeholder gets. -->
-      <button id="dmic" class="sendbtn" title="Record a voice note"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg></button>
-      <!-- Solid, not outlined: this is the loudest element on the screen, and an outline plane is the
-         quietest glyph treatment there is. Every chat app puts a filled mark on a filled button. -->
-      <button id="dsend" class="sendbtn" title="Send"><svg viewBox="0 0 24 24"><polygon points="22 2 15 22 11 13 2 9 22 2" fill="currentColor"/></svg></button>
+      <!-- The controls' own line, under the field rather than beside it (the owner's reference).
+           Chip at one end, clip and round button at the other; the field above them is full width,
+           so nothing here reserves space inside it any more. -->
+      <div class="ctlrow">
+        <!-- Text only, no icon and no emoji, by the owner's call: the model name is the label. It opens
+             the control row the way the reference's mode chip does. -->
+        <button id="ddial" class="dialpill" title="Model and effort"><b id="ddialm">Model</b><span class="eff" id="ddiale"></span></button>
+        <button id="datt" class="ghost" title="Attach a file"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>
+        <!-- The round button is mic OR send, never both. The PAPERCLIP stays inside the capsule through
+             both states on purpose: type-then-attach is a real workflow, and sweeping the clip away
+             with the mic the moment text appears would break it silently. -->
+        <button id="dmic" class="sendbtn" title="Record a voice note"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg></button>
+        <!-- Solid, not outlined: this is the loudest element on the screen, and an outline plane is the
+             quietest glyph treatment there is. Every chat app puts a filled mark on a filled button. -->
+        <button id="dsend" class="sendbtn" title="Send"><svg viewBox="0 0 24 24"><polygon points="22 2 15 22 11 13 2 9 22 2" fill="currentColor"/></svg></button>
+      </div>
     </div>
     <!-- TWO inputs, because the choice IS the input: there is no API to tell one picker which source
          to open, only differently-declared inputs whose `accept` the platform reads. #dfile keeps its

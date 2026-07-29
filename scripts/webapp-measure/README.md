@@ -13,6 +13,12 @@ somewhere and point at it) before running. Everything renders `file://` — no s
     python3 measure.py <pngs>     # ink bbox vs the button's own disc centre — for ROUND buttons
     python3 rectmeasure.py <pngs> # same, clipped exactly to a RECTANGULAR button (.ghost/paperclip)
     node grow.mjs                 # composer geometry at 1/2/3/6/7/12 lines, paste, and cleared
+    node composerbox.mjs [page][out] # the TWO-ROW composer: field on the top line, controls on their
+                                  #   own line under it, ~3 text lines tall at rest — the rest height
+                                  #   measured against its PARTS, the shape, the growth above the
+                                  #   control row, and everything outside it holding still. Pass a
+                                  #   pre-change page: the rest + shape checks must FAIL there (5 of
+                                  #   54), and growth + nothing-else must pass on BOTH
     node suite.mjs                # the six scroll behaviours, each measured twice (see below)
     node themes.mjs               # feed in dark AND light (see the theming trap below)
     node work.mjs <outdir>        # the live working row: both themes, reduced-motion, and the

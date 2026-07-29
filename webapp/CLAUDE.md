@@ -13,17 +13,30 @@ give it.
 ## Composer geometry
 
 - **`--t-body` is not the message size.** It sizes list rows, settings values **and the composer
-  textarea**, whose line box `--pill-h-1` and the six-line cap build on. Messages use their own
+  textarea**, whose line box the capsule's resting height and the six-line cap build on. Messages use their own
   `--t-msg` on `.msg` (also keeps the two sides matched). The two are currently equal (16px; the
   owner tried 18 and asked for 16 back) — not licence to collapse them, since only `--t-body` drags
   the composer's geometry.
+- **The capsule is TWO ROWS — field on top at full width, controls under it — and its resting
+  height is the SUM OF ITS PARTS, never a picked number:** ring + the field's one-line box + the
+  row gap + the mic + ring = 104px. It came off the owner's reference screenshot (the Claude Code
+  mobile composer, 189px on a 664px container): scaled to our 370px capsule that is 105. There is
+  no `min-height` any more — the content is the resting height, and the old
+  `min-height: var(--pill-h-1)` bought 0.4px of a one-line pill. `composerbox.mjs` measures the
+  rest height against the parts, the two-row shape, the growth and what must not move.
 - **The capsule derives from the mic, never the reverse:** `--pill-h-1 = --mic-d + 2·--pill-ring`
-  (40 + 12 = 52). Nothing sets a pill height by hand. The ring is also the pill's right padding;
-  the model/effort chip's left inset is the same concentricity at the other end. It is geometry,
-  not a nudge — a "tidier" round number breaks the nesting.
-- **`border-radius: calc(var(--pill-h-1) / 2)` — the ONE-LINE height, not the live height.** Tied
-  to the live height, a six-line pill becomes a lozenge. The radius also equals ring + mic-radius,
-  which is what makes the ring read as even *around* the mic.
+  (40 + 12 = 52) — now the CONTROL ROW's height, still the radius's source. Nothing sets a height
+  by hand. The ring is also the capsule's right padding; the model/effort chip's left inset is the
+  same concentricity at the other end. It is geometry, not a nudge — a "tidier" round number
+  breaks the nesting.
+- **`border-radius: calc(var(--pill-h-1) / 2)` — the CONTROL ROW's height, not the live height.**
+  Tied to the live height, a grown capsule becomes a lozenge. The radius also equals ring +
+  mic-radius, which is what makes the ring read as even *around* the mic — and with the controls on
+  the bottom row that now holds at BOTH lower corners: `align-items: center` on a row whose height
+  is the mic puts the chip's arc centre 26px off the floor, exactly where the corner's is.
+- **The field is `flex: none`, and in a column that is load-bearing:** `flex: 1` carries
+  `flex-basis: 0`, so the flex algorithm — not the height `growComposer()` measures and assigns —
+  would size the field.
 - **The growth cap is LINES, not pixels:** `max-height: calc(var(--ta-lines) * var(--ta-lh) * 1em +
   2 * var(--ta-pad-y))`. A pixel constant that is not a whole multiple of the line box shows the
   last line as a sliver at the scroll boundary.

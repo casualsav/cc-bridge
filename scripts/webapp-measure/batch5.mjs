@@ -144,10 +144,13 @@ const ime = await p.evaluate(() => {
 check(ime?.autocorrect === "off", `autocorrect="off" — the attribute Chromium maps to Android's TYPE_TEXT_FLAG_NO_SUGGESTIONS (${ime?.autocorrect})`);
 check(ime?.writing === "false", `writingsuggestions="false" (${ime?.writing})`);
 check(ime?.autocomplete === "off" && ime?.spell === "false", "the two that were already there are still there");
-// The claim that geometry did not move. The composer's settled pill is derived from the mic and is
-// what a font change would silently drag — see --pill-h-1.
+// The claim that geometry did not move. The composer's settled box is derived from its parts and is
+// what a font change would silently drag — the field's own line box is one of them, which is why an
+// IME attribute change is measured against it here. 104 is the TWO-ROW resting height (ring + the
+// one-line field + the row gap + the mic + ring); composerbox.mjs is where that derivation lives and
+// where it is checked against the parts rather than the number.
 const pill = await p.evaluate(() => +document.querySelector(".inputwrap").getBoundingClientRect().height.toFixed(2));
-check(pill === 52, `the one-line capsule is still 52px (${pill})`);
+check(pill === 104, `the resting capsule is still 104px (${pill})`);
 note("NOT VERIFIABLE FROM THIS BOX: whether the keyboard stops drawing the prediction. No Android");
 note("device here and headless Chromium has no IME. Needs one message typed on the owner's phone.");
 
