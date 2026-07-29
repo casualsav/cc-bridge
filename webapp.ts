@@ -56,8 +56,11 @@ export interface SettingsView {
   write: boolean
   // `raw` is the machine value behind a displayed one, for a client that has to MATCH a setting
   // rather than print it (prefMode's `value` is a label with an emoji in it; the new-session sheet
-  // needs the mode itself). Optional and ignored by the settings list, which renders `value`.
-  settings: Record<string, { value: unknown; editable: boolean; options?: string[]; label?: string; raw?: string }>
+  // needs the mode itself). `resolved` is the same idea one step further on — what a POLICY value
+  // resolves to right now (spawnModel 'auto' is not a model, and the sheet must badge the model a
+  // session started this second would get). Both optional and both ignored by the settings list,
+  // which renders `value`.
+  settings: Record<string, { value: unknown; editable: boolean; options?: string[]; label?: string; raw?: string; resolved?: string }>
 }
 // One session on the fleet dashboard. `working` and the dials read live from the pane; `task` is
 // the current activity line (working) or the last reply snippet (idle). alive=false ⇒ dead pane.

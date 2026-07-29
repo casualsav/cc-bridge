@@ -2042,8 +2042,8 @@ async function renderSettings() {
     fileBrowser: { name: "🗂 File browser", bool: true },
     baseFolder: { name: "📂 Base folder", bool: false },
     mcp: { name: "🔌 MCP mode", bool: true },
-    spawnModel: { name: "🐣 New-session model", bool: false },
-    spawnEffort: { name: "🐣 New-session effort", bool: false },
+    spawnModel: { name: "🐣 Coding-session model", bool: false },
+    spawnEffort: { name: "🐣 Coding-session effort", bool: false },
     mode: { name: "🛠️ Mode", bool: false },
     model: { name: "🤖 Model", bool: false },
     effort: { name: "⏫ Effort", bool: false },
@@ -3217,7 +3217,10 @@ async function openSpawnSheet() {
     const val = k => { const v = d.settings?.[k]?.value; return v && v !== "off" ? String(v) : ""; };
     // prefMode's `value` is a LABEL with an emoji in it ("🚨 Bypass"); `raw` is the mode itself, which
     // is what a row can be matched against.
-    spawnDefaults = { model: val("spawnModel"), effort: val("spawnEffort"), mode: d.settings?.prefMode?.raw || "" };
+    // spawnModel's `resolved` over its raw `value`, for the same reason prefMode uses `raw`: under
+    // "auto" the configured value is a policy, not a model, and this sheet's job is to name what THIS
+    // session will get. The daemon resolves auto the same way at spawn time, so the badge is true.
+    spawnDefaults = { model: d.settings?.spawnModel?.resolved || val("spawnModel"), effort: val("spawnEffort"), mode: d.settings?.prefMode?.raw || "" };
     paintSpawn();
   } catch { /* the rows read a bare "Follows Settings" — the spawn still resolves daemon-side */ }
 }

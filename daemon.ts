@@ -29,7 +29,7 @@ import { normalizeCommandOutput } from './ansi.ts'
 import { planSlash } from './slash-policy.ts'
 import { preserveGlobalEffort, reconcileEffortScope } from './effort-scope.ts'
 import { planDrift, driftStateAfter, type DriftState } from './drift-guard.ts'
-import { decideModel, upgradeNeedsConfirm, heldSpawnModel, holdTapData, parseHoldTap, type ModelPolicy, type HoldOutcome } from './spawn-model-policy.ts'
+import { decideModel, upgradeNeedsConfirm, heldSpawnModel, holdTapData, parseHoldTap, launchFallback, spawnCardHeader, AUTO_FALLBACK, FABLE, type ModelPolicy, type ModelDecision, type HoldOutcome } from './spawn-model-policy.ts'
 import { renderSessionsView } from './sessions-view.ts'
 import { detectCurrentMode, onNormalPrompt, inputBoxContent, isModelSwitchConfirm, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType } from './prompt.ts'
 import { modelSwitchEvidence, resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, turnAnchorUuid, liveSubagents, currentTurnFeed, currentTurnActivity, concludedTurnWork, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
@@ -5328,7 +5328,11 @@ async function handleCall(
                 ctxPct: (capNow ? parseStatusline(capNow)?.ctxPct : null) ?? null, at: Date.now(), live: true,
               })
             }
-            text = `!/model ${relay.clamped} needs a human — @${toName} keeps its current model${relay.ask ? '; asked the owner, and it switches in place if they approve' : ' (asking is snoozed right now)'}`
+            // Same split as clampedClause: a banned model has nothing left for a human to decide, so
+            // it must not read as "wait for a tap" — that invites a retry that gets the same answer.
+            text = relay.banned
+              ? `!/model ${relay.clamped} isn't available to coding agents — @${toName} keeps its current model, and nobody was asked`
+              : `!/model ${relay.clamped} needs a human — @${toName} keeps its current model${relay.ask ? '; asked the owner, and it switches in place if they approve' : ' (asking is snoozed right now)'}`
             break
           }
           // awaitReadback:false for the same reason the mini app passes it: the confirm + readback
@@ -5406,7 +5410,7 @@ async function handleCall(
         const fromSid = pane ? await sessionForPane(pane) : null
         if (!fromSid) { write({ t: 'result', id, ok: false, text: '`tg spawn` must run inside a bridged session' }); return }
         const topicName = String(args.name ?? '').trim()
-        if (!topicName) { write({ t: 'result', id, ok: false, text: 'usage: tg spawn <name> [--dir p [--create]] [--model fable|opus|sonnet|haiku] [--effort low…max] ["first message"]' }); return }
+        if (!topicName) { write({ t: 'result', id, ok: false, text: 'usage: tg spawn <name> [--dir p [--create]] [--model fable|opus|sonnet|haiku] [--why "one line"] [--effort low…max] ["first message"]' }); return }
         // A dash-leading name is a mistyped flag (`tg spawn --help` really did spawn a "--help"
         // session, folder and all). tgctl rejects it too; this is the daemon-side backstop.
         if (topicName.startsWith('-')) { write({ t: 'result', id, ok: false, text: `'${topicName}' is not a session name (it starts with a dash) — try 'tg spawn --help'` }); return }
@@ -5438,7 +5442,11 @@ async function handleCall(
         if (existsSync(dir) && !statSync(dir).isDirectory()) { write({ t: 'result', id, ok: false, text: `${dir} is not a directory` }); return }
         try { if (!existsSync(dir)) mkdirSync(dir, { recursive: true }) }
         catch (e) { write({ t: 'result', id, ok: false, text: `couldn't create ${dir}: ${(e as Error)?.message ?? e}` }); return }
-        const spec: SpawnSpec = { fromSid, topicName, dir, effort, firstMsg: String(args.text ?? '').trim(), headless }
+        // The one-line reason the CHOICE is visible by. Optional: a spawn that names no reason still
+        // spawns — failing the work over a missing annotation would cost the task, not the judgment —
+        // but under `auto` the confirmation then says the choice was a fallback, which is the point.
+        const why = String(args.why ?? '').replace(/\s+/g, ' ').trim().slice(0, 120)
+        const spec: SpawnSpec = { fromSid, topicName, dir, effort, firstMsg: String(args.text ?? '').trim(), headless, why }
         // THE GATE. A gated model does not spawn and then ask — nothing starts until the owner taps.
         // The card used to be minted AFTER the session was already running on the default, which made
         // it decorative: it read as control while providing none, and the only thing a tap could still
@@ -5447,9 +5455,9 @@ async function handleCall(
         // Everything above this line has already been validated, so a held spawn cannot fail later on
         // a typo'd folder the caller is no longer around to be told about. Below it, nothing exists yet:
         // no topic tab, no pane, no bus row.
-        if (modelChoice.clamped && modelChoice.ask) { text = await holdSpawnForApproval(spec, modelChoice.clamped, modelChoice.model); break }
+        if (modelChoice.clamped && modelChoice.ask) { text = await holdSpawnForApproval(spec, modelChoice.clamped, launchFallback(modelChoice.model)); break }
         const spawned = await launchSpawn(spec, modelChoice.model,
-          modelChoice.clamped ? clampedClause(modelChoice.clamped, modelChoice.model, false) : '')
+          modelChoice.clamped ? clampedClause(modelChoice) : '', spawnReason(spec, modelChoice))
         if (!spawned.ok) { write({ t: 'result', id, ok: false, text: spawned.text }); return }
         text = spawned.text
         break
@@ -6263,6 +6271,11 @@ async function doModePicker(ctx: Context): Promise<void> {
 // Model picker — buttons for the common aliases plus a tip for any specific name. Shared by
 // /model (no arg) and the 🧠 Model button; the model:set:<alias> callback applies a choice.
 const MODEL_ALIASES = ['fable', 'opus', 'sonnet', 'haiku']
+// The coding-session default can also be 'auto' — "no fixed default, the spawning orchestrator
+// decides". It is NOT an alias: nothing can launch with `--model auto`, so it stays out of
+// MODEL_ALIASES (the launch/validation table) and appears only on the surfaces that OFFER a default.
+const SPAWN_MODEL_AUTO = 'auto'
+const SPAWN_MODEL_CHOICES = [SPAWN_MODEL_AUTO, ...MODEL_ALIASES]
 // The CLI's own 'opus' alias still boots Opus 4.8 (checked on 2.1.205), but opus here should mean
 // Opus 5 — so pin the full id (verified against the live /v1/models list, 2026-07-24) everywhere
 // the bridge sends a model. Drop the pin once the CLI alias catches up. All four aliases are now
@@ -6283,7 +6296,12 @@ const MODEL_TIP = '💡 Tip: <code>/model &lt;name&gt;</code> to set any specifi
 // land with no --model flag at all, see model-window.ts). The floor exists so the bridge never
 // silently downgrades a session's model or its context window; it is not a "preferred" model, only
 // the last-resort one.
-const SPAWN_MODEL_FLOOR = 'fable'
+//
+// It was Fable until 2026-07-29. The floor path is the one with NO HUMAN IN IT by construction — it
+// fires on a refresh, a reopen, an unrecognised pref — so it is exactly where a gated model must not
+// live: every other route to Fable costs a tap, and this one cost nothing. The owner's ruling, taken
+// with `auto` (which resolves no alias of its own and would otherwise have floored here every time).
+const SPAWN_MODEL_FLOOR = AUTO_FALLBACK
 
 // ---- Agent model requests (spawn-model-policy.ts) ----
 // An agent asking for a model is a REQUEST; the human's configured default is what runs. See the
@@ -6291,17 +6309,28 @@ const SPAWN_MODEL_FLOOR = 'fable'
 // a /settings change takes effect on the next spawn with no restart.
 let modelAskQuietUntil = 0   // "don't ask for a while" — in memory on purpose: a daemon restart
                              // reopens the asking, which errs toward telling the human, not away.
-function modelPolicyPrefs(): { policy: ModelPolicy; agentAllowed: string[]; quietUntil: number } {
+function modelPolicyPrefs(): { policy: ModelPolicy; agentAllowed: string[]; quietUntil: number; auto: boolean; fableOff: boolean } {
   const a = loadAccess()
   return {
     policy: a.spawnModelPolicy === 'agent' ? 'agent' : 'default-wins',
     agentAllowed: Array.isArray(a.spawnAgentModels) ? a.spawnAgentModels.map(String) : [],
     quietUntil: modelAskQuietUntil,
+    auto: a.spawnModel === SPAWN_MODEL_AUTO,
+    fableOff: a.fableForAgents === 'off',
   }
 }
+// The configured default as a LAUNCHABLE alias. 'auto' deliberately reads as null here: under auto
+// there is no fixed default, and every caller of this function is asking "what do I launch when
+// nobody named a model" — which under auto is decideModel's `autoFallback` case, not a pref.
 function configuredSpawnModel(): string | null {
   const pref = loadAccess().spawnModel
   return pref && MODEL_ALIASES.includes(pref) ? pref : null
+}
+// The same question for the surfaces that must show a launchable answer with no caller in the room
+// (the mini-app "+" sheet, its spawn endpoint): auto resolves to the stated floor rather than to
+// "no --model at all", so a human tapping + under auto gets Opus, not whatever the CLI defaults to.
+function spawnDefaultLaunchModel(): string | null {
+  return loadAccess().spawnModel === SPAWN_MODEL_AUTO ? AUTO_FALLBACK : configuredSpawnModel()
 }
 // One open request per session — a second one replaces it, so an agent retrying can't stack cards.
 type ModelRequest = { sid: string; name: string; alias: string; asker: string; ctxPct: number | null; at: number; live: boolean }
@@ -6361,8 +6390,13 @@ async function askHumanForModel(r: ModelRequest): Promise<void> {
 // The clause the CALLING AGENT gets. It is told the truth in the same breath as its success, so it
 // neither plans around a model it doesn't have nor retries in a loop (a retry is just another
 // session on the default).
-function clampedClause(clamped: string, ran: string | null, asked: boolean): string {
-  return ` (your --model ${clamped} needs a human${asked ? ' — asked the owner; if they approve, the session switches in place' : ', and asking is snoozed right now'}; running ${ran ?? 'the CLI default'})`
+// A BANNED model gets its own wording rather than reusing the gate's: "needs a human" would invite
+// the caller to wait for a tap that will never come, and then to retry. There is nothing left for
+// anyone to decide, so say that in the same breath as the success.
+function clampedClause(d: ModelDecision): string {
+  const ran = d.model ?? 'the CLI default'
+  if (d.banned) return ` (your --model ${d.clamped} isn't available to coding agents — clamped to ${ran} by your setting, so nobody was asked and a retry gets the same answer)`
+  return ` (your --model ${d.clamped} needs a human${d.ask ? ' — asked the owner; if they approve, the session switches in place' : ', and asking is snoozed right now'}; running ${ran})`
 }
 
 // ---- Spawning, and the gate in front of it ----
@@ -6370,12 +6404,20 @@ function clampedClause(clamped: string, ran: string | null, asked: boolean): str
 // Everything a VALIDATED spawn needs, minus the model — which is the one thing a gated spawn is still
 // waiting to learn. Split out of the `tg spawn` case so the same launch runs whether the caller's
 // socket is still open (the ordinary path) or the owner taps a card twenty minutes later.
-type SpawnSpec = { fromSid: string; topicName: string; dir: string; effort: string | null; firstMsg: string; headless: boolean }
+type SpawnSpec = { fromSid: string; topicName: string; dir: string; effort: string | null; firstMsg: string; headless: boolean; why?: string }
+
+// The one line the owner reads next to the model on the spawn confirmation. The caller's own --why
+// when it gave one; otherwise, under `auto` with no --model, the fallback named AS a fallback —
+// a judgment nobody made is the thing to surface, not to dress up. In fixed mode with no --why there
+// is nothing to say: the model is the configured default and the panel already states it.
+function spawnReason(spec: SpawnSpec, d: ModelDecision): string | null {
+  return spec.why || (d.autoFallback ? 'auto: spawner named no model' : null)
+}
 
 // Create the topic, the session row and the pane, then hand the first message over as a founding ask.
 // Returns what the CALLER is told; it has no socket of its own, because by the time a held spawn runs
 // there is no caller left to write to.
-async function launchSpawn(spec: SpawnSpec, model: string | null, clampedNote: string): Promise<{ ok: boolean; text: string }> {
+async function launchSpawn(spec: SpawnSpec, model: string | null, clampedNote: string, reason: string | null = null): Promise<{ ok: boolean; text: string }> {
   const { fromSid, topicName, dir, effort, firstMsg, headless } = spec
   const group = headless ? null : getGroupChatId()!
   let threadId: number | null = null
@@ -6407,13 +6449,20 @@ async function launchSpawn(spec: SpawnSpec, model: string | null, clampedNote: s
     return { ok: false, text: `spawn failed in ${dir} — see daemon log` }
   }
   const fromName = nameForEndpoint(fromSid, busEndpoints())
-  appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'spawn', from: fromName, to: topicName, text: `${dir}${model ? ` model=${model}` : ''}${effort ? ` effort=${effort}` : ''}` })
+  appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'spawn', from: fromName, to: topicName, text: `${dir}${model ? ` model=${model}` : ''}${effort ? ` effort=${effort}` : ''}${reason ? ` why=${reason}` : ''}` })
   // ONE notice on the SPAWNER's own surface (its DM lane / topic): "Spawned @X" with the first
   // message behind the chevron. This used to be two messages back to back — an instant text ack
   // here plus notifyAskSent's "Messaged @X" card on confirmed delivery — which read as clutter
   // for one event. A delivery that then FAILS still says so below, so nothing is lost.
-  if (firstMsg) void notifyBusRich(fromSid, `Spawned <b>@${escapeHtml(topicName)}</b>`, firstMsg)
-  else void notifyBusText(fromSid, `🆕 Spawned <b>@${escapeHtml(topicName)}</b>`)
+  // The spawn confirmation, and the ONE place the model choice is visible to the person who pays for
+  // it: `🆕 Spawned @name (on sonnet) — small doc edit`. The chevron card is the target (its
+  // collapsible carries the first message); the plain-text fallback mirrors the same header, since it
+  // is what renders where rich messages aren't available. A model that resolved to nothing and a
+  // reason nobody gave both simply drop their clause — this line never invents one.
+  const spawnHeader = spawnCardHeader(escapeHtml(topicName),
+    [model, effort].filter(Boolean).map(d => escapeHtml(d!)), reason ? escapeHtml(reason) : null)
+  if (firstMsg) void notifyBusRich(fromSid, spawnHeader, firstMsg)
+  else void notifyBusText(fromSid, spawnHeader)
   if (firstMsg) {
     // The first message is a TASK, so it goes over the bus as a real ask: the new session gets
     // an id it can `tg answer`, and its result comes back to the spawner instead of surfacing
@@ -6474,7 +6523,7 @@ async function launchSpawn(spec: SpawnSpec, model: string | null, clampedNote: s
   // The no-brief case says so OUT LOUD. It used to be the silent branch — a dropped brief and a
   // deliberately briefless spawn printed the same line bar one clause, which is how two spawns
   // whose briefs never arrived read as successful for half an hour each.
-  return { ok: true, text: `spawned "${topicName}" in ${dir}${model ? ` · model ${model}` : ''}${clampedNote}${effort ? ` · effort ${effort}` : ''}${firstMsg
+  return { ok: true, text: `spawned "${topicName}" in ${dir}${model ? ` · model ${model}` : ''}${reason ? ` (why: ${reason})` : ''}${clampedNote}${effort ? ` · effort ${effort}` : ''}${firstMsg
     ? ' — the first message delivers as an ask once the REPL is up, and its reply comes back to you as the answer'
     : ' — NO first message was given, so it starts idle (a heredoc needs the `-` body argument; `tg spawn --help`)'}. Reach it on the bus as @${topicName}.` }
 }
@@ -6523,9 +6572,12 @@ async function resolveSpawnHold(h: SpawnHold, outcome: HoldOutcome): Promise<{ o
   const timer = spawnHoldTimers.get(h.id)
   if (timer) { clearTimeout(timer); spawnHoldTimers.delete(h.id) }
   saveSpawnHolds()
-  const model = heldSpawnModel(outcome, h.alias, h.fallback)
-  const r = await launchSpawn(h.spec, model, '')
-  const ran = model ?? 'the CLI default'
+  // launchFallback, not h.fallback verbatim: a row persisted before 2026-07-29 can carry `null` (the
+  // old "emit no --model, let the CLI decide"), and a declined or slept-through spawn is the last
+  // place to hand that choice away. It also cannot resolve to the gated model it is the fallback for.
+  const model = heldSpawnModel(outcome, h.alias, launchFallback(h.fallback))
+  const r = await launchSpawn(h.spec, model, '', h.spec.why || null)
+  const ran = model
   const why = outcome === 'approved' ? `on ${h.alias} — you approved it`
     : outcome === 'denied' ? `on ${ran} — the owner declined ${h.alias}`
     : `on ${ran} — nobody answered within ${Math.round(spawnHoldMs() / 60_000)}m, so it started on your default rather than not at all`
@@ -6548,28 +6600,32 @@ function armSpawnHold(h: SpawnHold, ms: number): void {
 // The card, and the answer the CALLING AGENT gets while it waits. Same destination override as
 // askHumanForModel (CC_BRIDGE_MODEL_CARD_CHAT / prefs modelCardChat) — a card is an armed button on a
 // real person's chat, and verifying this feature must not put live "Start on fable" taps in front of him.
-async function holdSpawnForApproval(spec: SpawnSpec, alias: string, fallback: string | null): Promise<string> {
+async function holdSpawnForApproval(spec: SpawnSpec, alias: string, fallback: string): Promise<string> {
   const h: SpawnHold = { id: Date.now().toString(36), spec, alias, fallback, at: Date.now() }
   spawnHolds.set(h.id, h)
   saveSpawnHolds()
   armSpawnHold(h, spawnHoldMs())
   const mins = Math.round(spawnHoldMs() / 60_000)
   const asker = nameForEndpoint(spec.fromSid, busEndpoints())
-  const text = `🧠 <b>@${escapeHtml(asker)}</b> wants to start <b>@${escapeHtml(spec.topicName)}</b> on <b>${escapeHtml(alias)}</b> — a model an agent picks is a request, not a decision.\n\n<b>Nothing has started.</b> The spawn is held until you answer; in ${mins}m with no answer it starts on <b>${escapeHtml(fallback ?? 'the CLI default')}</b>.`
+  const text = `🧠 <b>@${escapeHtml(asker)}</b> wants to start <b>@${escapeHtml(spec.topicName)}</b> on <b>${escapeHtml(alias)}</b> — a model an agent picks is a request, not a decision.\n\n<b>Nothing has started.</b> The spawn is held until you answer; in ${mins}m with no answer it starts on <b>${escapeHtml(fallback)}</b>.`
   const to = modelCardTargets()
   if (to === 'log') {
     process.stderr.write(`daemon: spawn-hold: [card suppressed → log] ${text.replace(/<[^>]+>/g, '').replace(/\n+/g, ' ')}\n`)
   } else {
+    // Two answers, both immediate: approve the model that was asked for, or start now on the
+    // fallback. The second button NAMES the model rather than saying "the default" — it read
+    // "Start on the default" on an unconfigured box, where the tap then launched with no --model at
+    // all and the CLI's own default silently won.
     const buttons: Button[][] = [
-      [{ text: `✅ Start on ${alias}`, data: holdTapData('approved', h.id) }, { text: `Start on ${fallback ?? 'the default'}`, data: holdTapData('denied', h.id) }],
+      [{ text: `✅ Approve — start on ${alias}`, data: holdTapData('approved', h.id) }, { text: `Use ${fallback.charAt(0).toUpperCase()}${fallback.slice(1)}`, data: holdTapData('denied', h.id) }],
       [{ text: '🔕 Don\'t ask for 1h', data: 'smq:q' }],
     ]
     for (const { chat, thread } of to) {
       await channel.sendText(chat, text, { silent: true, buttons, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
     }
   }
-  process.stderr.write(`daemon: spawn-hold ${h.id}: @${asker} asked for ${alias} on ${spec.topicName} — HELD, owner asked (${mins}m fallback → ${fallback ?? 'CLI default'})\n`)
-  return `⏸ HELD, not started — ${alias} needs a human, so nothing is running yet. Asked the owner; on approval @${spec.topicName} starts on ${alias}, and with no answer in ${mins}m it starts on ${fallback ?? 'the CLI default'}. You'll get a system block either way; don't re-issue this spawn.`
+  process.stderr.write(`daemon: spawn-hold ${h.id}: @${asker} asked for ${alias} on ${spec.topicName} — HELD, owner asked (${mins}m fallback → ${fallback})\n`)
+  return `⏸ HELD, not started — ${alias} needs a human, so nothing is running yet. Asked the owner; on approval @${spec.topicName} starts on ${alias}, and with no answer in ${mins}m it starts on ${fallback}. You'll get a system block either way; don't re-issue this spawn.`
 }
 
 // Boot: re-arm the holds this daemon was carrying when it stopped. Anything already past its window
@@ -9369,6 +9425,14 @@ function baseRowValue(): string {
   if (!cur) return 'not set'
   return cur.split('/').filter(Boolean).pop() || cur
 }
+// The 🐣 row's value on both renderings of the settings panel — one function so the plain and the
+// rich table cannot disagree about what the defaults are. 'auto' says what it means in the row
+// itself: the word alone reads like a mode nobody chose.
+function spawnDefaultsSummary(): string {
+  const a = loadAccess()
+  const model = a.spawnModel === SPAWN_MODEL_AUTO ? 'auto (the orchestrator picks)' : a.spawnModel ?? 'inherit'
+  return a.spawnModel || a.spawnEffort ? `${model} · ${a.spawnEffort ?? 'inherit'}` : 'inherit'
+}
 function settingsText(): string {
   const a = loadAccess()
   return `⚙️ <b>Settings</b>\n\n` +
@@ -9382,7 +9446,7 @@ function settingsText(): string {
     `🧷 Preferred mode — <b>${listAccounts().length > 1 ? 'per account' : defModeLabel(MAIN_ACCOUNT.configDir)}</b>\n` +
     `🧹 <code>/clear</code> approval — <b>${a.confirmReset === false ? 'off' : 'on'}</b>\n` +
     `🔀 Limit failover — <b>${a.limitFailover === true ? 'on' : 'off'}</b>\n` +
-    `🐣 Spawn defaults — <b>${a.spawnModel || a.spawnEffort ? `${escapeHtml(a.spawnModel ?? 'inherit')} · ${escapeHtml(a.spawnEffort ?? 'inherit')}` : 'inherit'}</b>\n` +
+    `🐣 Coding-session defaults — <b>${spawnDefaultsSummary()}</b>\n` +
     (WEBAPP_ENABLED ? `🗂 File browser — <b>${a.fileBrowser === false ? 'off' : 'on'}</b>\n` : '') +
     (isTopicMode() ? `📂 Base folder — <b>${escapeHtml(baseFolderFull())}</b>\n` : '') +
     (isTopicMode() && AGENT_BUS_PIN_UI ? `☎️ Agent bus — <b>${a.switchboard === false ? 'off' : 'on'}</b>\n` : '') +
@@ -9405,7 +9469,7 @@ function settingsMarkdown(): string {
     ['🧷 Preferred mode', listAccounts().length > 1 ? 'per account' : defModeLabel(MAIN_ACCOUNT.configDir)],
     ['🧹 /clear approval', a.confirmReset === false ? 'off' : 'on'],
     ['🔀 Limit failover', a.limitFailover === true ? 'on' : 'off'],
-    ['🐣 Spawn defaults', a.spawnModel || a.spawnEffort ? `${a.spawnModel ?? 'inherit'} · ${a.spawnEffort ?? 'inherit'}` : 'inherit'],
+    ['🐣 Coding-session defaults', spawnDefaultsSummary()],
     ...(WEBAPP_ENABLED ? [['🗂 File browser', a.fileBrowser === false ? 'off' : 'on'] as [string, string]] : []),
     ...(isTopicMode() ? [['📂 Base folder', baseRowValue()] as [string, string]] : []),
     ...(isTopicMode() && AGENT_BUS_PIN_UI ? [['☎️ Agent bus', a.switchboard === false ? 'off' : 'on'] as [string, string]] : []),
@@ -9417,7 +9481,7 @@ function settingsMarkdown(): string {
     '🧷 <b>Preferred mode</b> — the permission mode NEW sessions launch in (/mode is the live dial).',
     '🧹 <b>/clear approval</b> — /clear and /new ask for a Yes/No tap first.',
     '🔀 <b>Limit failover</b> — a usage-limited account hands off to the next one.',
-    '🐣 <b>Spawn defaults</b> — model/effort for sessions agents launch over the bus (<code>tg spawn</code>).',
+    '🐣 <b>Coding-session defaults</b> — model/effort for the CODING sessions agents launch (<code>tg spawn</code>) and the mini-app <b>+</b>. It does NOT change this chat lane.',
     ...(WEBAPP_ENABLED ? ['🗂 <b>File browser</b> — the Files tab in the Mini App. Off removes it (and its file API) entirely; the Sessions/Scheduled/Settings tabs stay.'] : []),
     ...(isTopicMode() ? ['📂 <b>Base folder</b> — new forum topics are created as subfolders of this folder.'] : []),
     ...(isTopicMode() && AGENT_BUS_PIN_UI ? ['☎️ <b>Agent bus</b> — the live roster line on the pinned card. Sessions can still hand work to each other with <code>tg ask</code>.'] : []),
@@ -9482,29 +9546,45 @@ function settingsKeyboard(): InlineKeyboard {
   return kb
 }
 
-// 🐣 Spawn-defaults sub-panel (settings → 🐣): the model/effort agent-spawned sessions boot with
-// (`tg spawn`, the chat agent's launcher) when the spawner passes no --model/--effort. Preference
-// only — read at spawn time, never touches a live pane; explicit flags on the spawn still win.
+// 🐣 Coding-session defaults sub-panel (settings → 🐣): the model/effort agent-spawned CODING
+// sessions boot with (`tg spawn`, the chat agent's launcher; the mini-app +) when the spawner passes
+// no --model/--effort. Preference only — read at spawn time, never touches a live pane; explicit
+// flags on the spawn still win. It is NOT the chat lane's model: that session is the one talking to
+// the owner, and nothing here changes it.
 function spawnDefaultsText(): string {
   const a = loadAccess()
-  return `🐣 <b>Spawn defaults</b> — sessions launched by agents (<code>tg spawn</code>)\n\n` +
+  const auto = a.spawnModel === SPAWN_MODEL_AUTO
+  return `🐣 <b>Coding-session defaults</b> — the worker sessions agents launch (<code>tg spawn</code>) and the mini-app <b>+</b>. Your chat lane keeps its own model; this never changes it.\n\n` +
     `🧠 Model — <b>${a.spawnModel ? escapeHtml(a.spawnModel) : 'inherit'}</b>\n` +
     `⚡ Effort — <b>${a.spawnEffort ? escapeHtml(a.spawnEffort) : 'inherit'}</b>\n` +
     `🪟 Context — <b>${spawnWideContext(a.spawnContext1m) ? '1M' : '200k (default)'}</b>\n` +
+    `🔥 Fable for coding agents — <b>${a.fableForAgents === 'off' ? 'off' : 'ask me first'}</b>\n` +
     `🛡 Agent asks for another model — <b>${a.spawnModelPolicy === 'agent' ? 'agents choose' : 'ask me first'}</b>` +
     `${a.spawnAgentModels?.length ? ` <i>(no card for: ${escapeHtml(a.spawnAgentModels.join(', '))})</i>` : ''}\n\n` +
-    `<i>“inherit” falls back to the focused session's dials at spawn time.</i>\n` +
+    (auto
+      ? `<i>🎲 “auto” = no fixed default: the orchestrator that spawns picks per task, and its choice + a one-line reason land on the spawn confirmation. A spawn that names no model starts on ${AUTO_FALLBACK} and says so.</i>\n`
+      : `<i>“inherit” falls back to the focused session's dials at spawn time.</i>\n`) +
+    `<i>🔥 “ask me first” (default): an agent asking for Fable holds the spawn — nothing starts — until you tap Approve or Use ${AUTO_FALLBACK.charAt(0).toUpperCase()}${AUTO_FALLBACK.slice(1)}. “off”: refused outright, with no card. Your OWN pick of Fable, here or in the mini app, is never affected.</i>\n` +
     `<i>🛡 “ask me first” (default): an agent's <code>--model</code> is a request — the session starts on your model above and you get a one-tap card. Your own choices (this panel, the mini app) are never carded. The no-card list is a prefs.json key (<code>spawnAgentModels</code>) for test fleets.</i>\n` +
     `<i>🪟 applies to every session the bridge launches — new topics included. Needs a resolved model; a spawn that inherits no model keeps the CLI default.</i>`
 }
 function spawnDefaultsKeyboard(): InlineKeyboard {
   const a = loadAccess()
+  const fableOff = a.fableForAgents === 'off'
   const kb = new InlineKeyboard()
-  for (const m of MODEL_ALIASES) kb.text(`${a.spawnModel === m ? '✅ ' : ''}${m}`, `spd:m:${m}`)
+  kb.text(`${a.spawnModel === SPAWN_MODEL_AUTO ? '✅ ' : ''}🎲 auto`, `spd:m:${SPAWN_MODEL_AUTO}`)
+  // A model the owner has switched off for coding agents is not OFFERED as their default either —
+  // picking it here would set a default no agent-spawned session can start on. His own per-session
+  // picker still lists it: that is his pick, not an agent's.
+  for (const m of MODEL_ALIASES) {
+    if (m === FABLE && fableOff) continue
+    kb.text(`${a.spawnModel === m ? '✅ ' : ''}${m}`, `spd:m:${m}`)
+  }
   kb.row().text(`${a.spawnModel ? '' : '✅ '}🧠 Inherit model`, 'spd:m:off').row()
   for (const e of EFFORT_LEVELS) kb.text(`${a.spawnEffort === e ? '✅ ' : ''}${e === 'medium' ? 'med' : e}`, `spd:e:${e}`)
   kb.row().text(`${a.spawnEffort ? '' : '✅ '}⚡ Inherit effort`, 'spd:e:off').row()
   kb.text(`${spawnWideContext(a.spawnContext1m) ? '✅' : '☐'} 🪟 1M context`, 'spd:w:toggle').row()
+  kb.text(`🔥 Fable for coding agents: ${fableOff ? 'off' : 'ask me first'}`, 'spd:f:toggle').row()
   kb.text(`🛡 ${a.spawnModelPolicy === 'agent' ? 'Agents choose the model' : 'Ask me first (recommended)'}`, 'spd:p:toggle').row()
   return kb.text('‹ Back', 'spd:back')
 }
@@ -10917,10 +10997,13 @@ bot.on('callback_query:data', async ctx => {
     const h = tap ? spawnHolds.get(tap.id) : undefined
     if (!h) { await ctx.answerCallbackQuery({ text: 'That spawn is no longer waiting.' }).catch(() => {}); await ctx.editMessageReplyMarkup().catch(() => {}); return }
     const approved = tap!.outcome === 'approved'
-    await ctx.answerCallbackQuery({ text: approved ? `Starting on ${h.alias}…` : `Starting on ${h.fallback ?? 'the default'}…` }).catch(() => {})
+    // The same resolution resolveSpawnHold will use — the card must not name a model the launch
+    // won't take (a hold restored from an older row carries a null fallback).
+    const ran = approved ? h.alias : launchFallback(h.fallback)
+    await ctx.answerCallbackQuery({ text: `Starting on ${ran}…` }).catch(() => {})
     const r = await resolveSpawnHold(h, tap!.outcome)
     await ctx.editMessageText(r.ok
-      ? `${approved ? '✅' : '🧠'} <b>@${escapeHtml(h.spec.topicName)}</b> started on <b>${escapeHtml((approved ? h.alias : h.fallback) ?? 'the CLI default')}</b>. <i>(@${escapeHtml(nameForEndpoint(h.spec.fromSid, busEndpoints()))} asked for ${escapeHtml(h.alias)}.)</i>`
+      ? `${approved ? '✅' : '🧠'} <b>@${escapeHtml(h.spec.topicName)}</b> started on <b>${escapeHtml(ran)}</b>. <i>(@${escapeHtml(nameForEndpoint(h.spec.fromSid, busEndpoints()))} asked for ${escapeHtml(h.alias)}.)</i>`
       : `⚠️ <b>@${escapeHtml(h.spec.topicName)}</b> couldn't start: ${escapeHtml(r.text)}`,
       { parse_mode: 'HTML' }).catch(() => {})
     return
@@ -11651,6 +11734,18 @@ bot.on('callback_query:data', async ctx => {
     await showHtmlPanel(ctx, 'edit', spawnDefaultsText(), spawnDefaultsKeyboard())
     return
   }
+  // 🔥 Whether Fable is available to CODING AGENTS at all. Same store-only-the-non-default rule as
+  // the policy toggle below, so an untouched install keeps today's behaviour (gate + one tap). It
+  // never touches the owner's own picker — decideModel's humanOrigin branch runs ahead of this.
+  if (data === 'spd:f:toggle') {
+    if (!(await cbAuth(ctx))) return
+    const a = loadAccess()
+    a.fableForAgents = a.fableForAgents === 'off' ? undefined : 'off'
+    saveAccess(a)
+    await ctx.answerCallbackQuery({ text: a.fableForAgents === 'off' ? 'Fable is off for coding agents. Your own picker is unaffected.' : 'A Fable spawn asks you for one tap.' }).catch(() => {})
+    await showHtmlPanel(ctx, 'edit', spawnDefaultsText(), spawnDefaultsKeyboard())
+    return
+  }
   // Who may choose a spawned session's model. Stored only when it is the NON-default ('agent'), so an
   // untouched install carries no key and picks up any future change to the shipped default.
   if (data === 'spd:p:toggle') {
@@ -11669,7 +11764,8 @@ bot.on('callback_query:data', async ctx => {
     const [, kind, v] = spdSet
     const a = loadAccess()
     if (kind === 'm') {
-      if (v !== 'off' && !MODEL_ALIASES.includes(v)) { await ctx.answerCallbackQuery({ text: 'Unknown model.' }).catch(() => {}); return }
+      // SPAWN_MODEL_CHOICES, not MODEL_ALIASES: 'auto' is a legal DEFAULT and not a legal launch alias.
+      if (v !== 'off' && !SPAWN_MODEL_CHOICES.includes(v)) { await ctx.answerCallbackQuery({ text: 'Unknown model.' }).catch(() => {}); return }
       a.spawnModel = v === 'off' ? undefined : v
     } else {
       if (v !== 'off' && !EFFORT_LEVELS.includes(v)) { await ctx.answerCallbackQuery({ text: 'Unknown effort.' }).catch(() => {}); return }
@@ -15213,8 +15309,15 @@ async function webappReadSettings(): Promise<WebappSettingsView> {
       // The 🐣 spawn defaults — the same prefs the /settings sub-panel writes. They belong on this
       // tab because they are now the ONLY place a global model default is set: the per-session dials
       // below change one session and nothing else. 'off' = unset (the spawn chain falls to its floor).
-      spawnModel: { value: a.spawnModel ?? 'off', editable: true, options: ['off', ...MODEL_ALIASES], label: 'model for new sessions' },
-      spawnEffort: { value: a.spawnEffort ?? 'off', editable: true, options: ['off', ...EFFORT_LEVELS], label: 'effort for new sessions' },
+      // 'auto' is offered here as a DEFAULT, never as a launch alias; Fable drops out of the options
+      // when the owner has switched it off for coding agents, so the app can't set a default that no
+      // agent-spawned session could start on.
+      // `resolved` rides alongside the raw value the same way prefMode's `raw` does, and for the same
+      // reason: the Settings tab must show what is CONFIGURED ('auto'), while the "+" sheet has to
+      // badge the model a session started right now would actually get. Showing 'auto' on the sheet
+      // would be a dial that names a value nothing launches with.
+      spawnModel: { value: a.spawnModel ?? 'off', resolved: spawnDefaultLaunchModel() ?? '', editable: true, options: ['off', SPAWN_MODEL_AUTO, ...MODEL_ALIASES.filter(m => !(m === FABLE && a.fableForAgents === 'off'))], label: 'coding sessions only — not this chat' },
+      spawnEffort: { value: a.spawnEffort ?? 'off', editable: true, options: ['off', ...EFFORT_LEVELS], label: 'coding sessions only — not this chat' },
       // Who may choose a model. Editable HERE and in /settings 🐣 because it is the knob that decides
       // whether an agent can spend on a model you didn't pick — the same reasoning that put the model
       // default on this tab. A tap in this app is a HUMAN choosing, so it is never itself carded.
@@ -15251,7 +15354,7 @@ function webappSetSetting(userId: string, key: string, value: unknown): string |
     // callbacks — the app's copy of them is UI labelling, not authority. 'off' clears the pref.
     case 'spawnModel': {
       const v = String(value)
-      if (v !== 'off' && !MODEL_ALIASES.includes(v)) return `unknown model — one of: off | ${MODEL_ALIASES.join(' | ')}`
+      if (v !== 'off' && !SPAWN_MODEL_CHOICES.includes(v)) return `unknown model — one of: off | ${SPAWN_MODEL_CHOICES.join(' | ')}`
       const a = loadAccess(); a.spawnModel = v === 'off' ? undefined : v; saveAccess(a); return null
     }
     case 'spawnEffort': {
@@ -15724,7 +15827,10 @@ async function webappSessionSpawn(
   // opus/high could spawn from the mini app on neither, which is the bug behind the relabel. A stale
   // or bad pref is ignored silently rather than failing the spawn, exactly as at that site, and with
   // nothing configured this is byte-for-byte the old behaviour.
-  const model = asked ?? configuredSpawnModel()
+  // spawnDefaultLaunchModel, not configuredSpawnModel: under `auto` there is no configured alias, and
+  // a "+" with no model chip must still resolve to a real model rather than dropping to the CLI's own
+  // default (the sheet says "follows Settings (auto → opus)" for exactly this reason).
+  const model = asked ?? spawnDefaultLaunchModel()
   const spawnEffortPref = loadAccess().spawnEffort
   const effort = askedEffort ?? (spawnEffortPref && EFFORT_LEVELS.includes(spawnEffortPref) ? spawnEffortPref : null)
   const askedMode = opts.mode ? String(opts.mode) : null

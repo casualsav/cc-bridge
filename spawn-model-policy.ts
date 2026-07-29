@@ -20,11 +20,31 @@
 // nobody has taught it yet. Written this way round precisely so the safe default survives new models.
 export const UNGATED_MODELS: readonly string[] = ['opus', 'sonnet', 'haiku']
 
+// The one model with an owner-level on/off switch (prefs `fableForAgents`). Named HERE, once, so the
+// ban, the gate and the fallback below cannot disagree about which string they are all about.
+export const FABLE = 'fable'
+
+// What a launch resolves to when there is nothing else to resolve it to: `auto` with a caller that
+// named no model, a clamp with no configured default, a held spawn's fallback. It is a floor, not a
+// preference — the one property that matters is that it is ungated, so no path with no human in it
+// can ever land on a gated model.
+export const AUTO_FALLBACK = 'opus'
+
+// A fallback must be a model an agent could have picked for itself. A configured default that is
+// gated (or a name this file has never heard of) is therefore NOT usable as one: answering a gated
+// request with the gated model is exactly what the gate exists to prevent, and it would happen
+// silently, on the timeout path, with nobody watching.
+export function launchFallback(configuredDefault: string | null): string {
+  return configuredDefault && UNGATED_MODELS.includes(configuredDefault) ? configuredDefault : AUTO_FALLBACK
+}
+
 export type ModelPolicy = 'default-wins' | 'agent'
 
 export type ModelAsk = {
   requested: string | null        // the alias the CALLER passed (null = they passed none)
-  configuredDefault: string | null // prefs `spawnModel`; null = the user has expressed no preference
+  configuredDefault: string | null // prefs `spawnModel` as a FIXED alias; null under `auto`, or unset
+  auto: boolean                   // prefs `spawnModel === 'auto'` — no fixed default; the caller decides
+  fableOff: boolean               // prefs `fableForAgents === 'off'` — Fable is not a coding-agent model
   policy: ModelPolicy
   agentAllowed: readonly string[] // prefs `spawnAgentModels` — aliases an agent may pick with no card
   quietUntil: number              // epoch ms of the "don't ask for a while" window; 0 = not quiet
@@ -36,17 +56,38 @@ export type ModelDecision = {
   model: string | null   // the alias to launch/switch with; null = emit no --model (the CLI's own default)
   ask: boolean           // mint the card on the human surface
   clamped: string | null // the alias that was asked for and did not win — the agent is told this
+  banned: boolean        // clamped by the Fable switch, not by the gate: no card, and a retry is futile
+  autoFallback: boolean  // `auto`, and the caller named nothing — the confirmation has to say so
 }
 
-const allow = (model: string | null): ModelDecision => ({ model, ask: false, clamped: null })
+const allow = (model: string | null): ModelDecision =>
+  ({ model, ask: false, clamped: null, banned: false, autoFallback: false })
+
+// What a caller that named no model gets. Under `auto` there is no configured default to fall back
+// to and the daemon has no task context to choose with — so it lands on the stated floor and the
+// spawn confirmation SAYS it fell back. A judgment nobody made is the thing to make visible, not to
+// dress up as a decision.
+const unspecified = (a: ModelAsk): ModelDecision => a.auto
+  ? { ...allow(AUTO_FALLBACK), autoFallback: true }
+  : allow(a.configuredDefault)
 
 export function decideModel(a: ModelAsk): ModelDecision {
   const def = a.configuredDefault
   // A human choosing is the whole point of the feature — never second-guess one, and never card them.
-  if (a.humanOrigin) return allow(a.requested ?? def)
+  // This runs FIRST, ahead of the Fable switch: that switch is about what a coding AGENT may pick,
+  // and the owner's own pick in his own picker stays sovereign (his ruling, 2026-07-29).
+  if (a.humanOrigin) return a.requested ? allow(a.requested) : unspecified(a)
+  // The Fable switch. Ahead of BOTH the `agent` opt-out and the named allowlist, deliberately: a
+  // preference set months ago must not quietly reinstate the model the owner has switched off, and
+  // `spawnAgentModels: ['fable']` did exactly that until this branch existed. No card and no hold —
+  // there is nothing left for a human to decide, so telling the caller to wait for a tap would be a
+  // lie, and it would wait for one that never comes.
+  if (a.fableOff && a.requested === FABLE) {
+    return { model: launchFallback(def), ask: false, clamped: FABLE, banned: true, autoFallback: false }
+  }
   // The explicit opt-out, for a user who wants their orchestrator to choose. One setting, no nagging.
-  if (a.policy === 'agent') return allow(a.requested ?? def)
-  if (!a.requested) return allow(def)
+  if (a.policy === 'agent') return a.requested ? allow(a.requested) : unspecified(a)
+  if (!a.requested) return unspecified(a)
   // Asking for what would have happened anyway is not an override. No card: there is nothing for a
   // human to decide, and a card here would fire on every well-behaved spawn.
   if (a.requested === def) return allow(def)
@@ -62,7 +103,10 @@ export function decideModel(a: ModelAsk): ModelDecision {
   if (UNGATED_MODELS.includes(a.requested)) return allow(a.requested)
   // Clamped. The card is suppressed inside a quiet window, but the agent is told either way: silence
   // toward the human is the human's own choice, silence toward the caller is a lie about what it got.
-  return { model: def, ask: a.now >= a.quietUntil, clamped: a.requested }
+  // The clamp target goes through launchFallback: an unconfigured box used to clamp to `null` (no
+  // --model at all, the CLI's own default — which is how a reopen came back on Haiku 4.5 and dropped
+  // the 1M window with it), and a box configured for Fable used to answer a Fable request with Fable.
+  return { model: launchFallback(def), ask: a.now >= a.quietUntil, clamped: a.requested, banned: false, autoFallback: false }
 }
 
 // ---- The held spawn ----
@@ -87,8 +131,25 @@ export function parseHoldTap(data: string): { id: string; outcome: 'approved' | 
   const m = /^smh:([uk]):(.+)$/.exec(data)
   return m ? { id: m[2]!, outcome: m[1] === 'u' ? 'approved' : 'denied' } : null
 }
-export function heldSpawnModel(outcome: HoldOutcome, alias: string, fallback: string | null): string | null {
+// The fallback is a resolved alias, never null: a launch with no --model hands the choice to the
+// CLI's own default, and a spawn the owner declined (or slept through) is the last place that should
+// happen. Callers pass it through launchFallback — including for a hold restored from disk, whose row
+// may predate this rule.
+export function heldSpawnModel(outcome: HoldOutcome, alias: string, fallback: string): string {
   return outcome === 'approved' ? alias : fallback
+}
+
+// ---- The spawn confirmation ----
+//
+// `🆕 Spawned @worker (on sonnet, high) — small doc edit`. The one line on a human surface that says
+// which model an agent chose and why, so a judgment made outside the owner's sight is at least
+// visible after the fact. Assembled here, and pinned by a test, for the same reason holdTapData is:
+// it is exercised only by a human reading a chat message, so a build that mangles it fails silently
+// in front of him rather than loudly in the suite. Values arrive ESCAPED — the caller owns the
+// surface and therefore owns the escaping; this function only decides the shape.
+export function spawnCardHeader(name: string, dials: readonly string[], reason: string | null): string {
+  const shown = dials.filter(Boolean)
+  return `🆕 Spawned <b>@${name}</b>${shown.length ? ` (on ${shown.join(', ')})` : ''}${reason ? ` — ${reason}` : ''}`
 }
 
 // ---- The late tap ----

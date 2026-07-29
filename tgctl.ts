@@ -17,7 +17,7 @@
 //   tgctl post   <text|->                       broadcast to the humans in the room
 //   tgctl slash  <name> </cmd>                  inject a slash command into a target session's CLI
 //   tgctl keys   <name> <key>… [--force]        send named keystrokes to a target session's pane
-//   tgctl spawn  <name> [--dir p [--create]] [--model m] [--effort e] [text|-]   start a NEW session in its own topic
+//   tgctl spawn  <name> [--dir p [--create]] [--model m] [--why "…"] [--effort e] [text|-]   start a NEW session in its own topic
 //   tgctl kill   <name> [--force]               end a session you spawned (chat lane: any worker)
 //   tgctl reopen <name>                         bring a closed session back up, conversation intact
 //   tgctl roster                                who's live in the room
@@ -100,10 +100,13 @@ const HELP: Record<string, string> = {
            '  Named keys only: enter esc up down left right 1-9. Words are an `tg ask`, not a keystroke.\n' +
            '  Refused while the target is mid-turn, unless the wedge alert has fired — or --force, which\n' +
            '  carries esc (to interrupt it) and nothing else.',
-  spawn:   'tg spawn <name> [--dir p [--create]] [--model fable|opus|sonnet|haiku] [--effort low…max] [text|-]\n' +
+  spawn:   'tg spawn <name> [--dir p [--create]] [--model fable|opus|sonnet|haiku] [--why "one line"]\n' +
+           '             [--effort low…max] [text|-]\n' +
            '  start a NEW session in its own topic. --dir must already exist unless --create is passed;\n' +
            '  with no --dir the session gets a folder named after it under the base dir.\n' +
-           '  The first message is delivered as an ask once its REPL is up.',
+           '  The first message is delivered as an ask once its REPL is up.\n' +
+           '  --why is one line on why THIS model fits THIS task; it shows on the owner\'s spawn card.\n' +
+           '  Where the default is "auto" there is no configured model — name one, and say why.',
   kill:    'tg kill <name> [--force]   end a session you spawned (a chat lane may end any worker). Undo with tg reopen.\n' +
            '  A session with background shells still running refuses once and names them — killing it kills them.\n' +
            '  --force closes anyway; that second, explicit call is how a script says it meant it.',
@@ -166,7 +169,7 @@ if (BUS.has(cmd)) {
   const flags: Record<string, string | boolean> = {}
   const pos: string[] = []
   for (let i = 0; i < rest.length; i++) {
-    const f = /^--(dir|model|effort|stale)$/.exec(rest[i]!)
+    const f = /^--(dir|model|effort|stale|why)$/.exec(rest[i]!)
     if (rest[i] === '--ref') { const v = rest[++i]; if (v != null) refs.push(v) }
     else if (f) { const v = rest[++i]; if (v != null) flags[f[1]!] = v }   // spawn's flags; harmless elsewhere
     else if (rest[i] === '--create') { flags.create = true }               // spawn: allow a missing --dir

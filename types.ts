@@ -37,7 +37,8 @@ export type Access = {
   failoverChain?: FailoverHop[]  // user-ordered try-in-order hops for limitFailover; unset/partial = default order (accounts main-first, Codex last)
   codexModel?: string      // model every Codex launch (incl. failover) uses; overrides CODEX_MODEL env; unset = env/Codex default
   codexEffort?: string     // Codex reasoning effort (low/medium/high/xhigh); overrides CODEX_REASONING_EFFORT env; unset = default
-  spawnModel?: string      // default model for `tg spawn` (agent-bus session launch) when the spawner passes no --model; unset = spawnSession's own default
+  spawnModel?: string      // default model for CODING sessions (`tg spawn`, the mini-app +) when the spawner passes no --model; unset = spawnSession's own default. 'auto' = no fixed default: the spawning orchestrator's --model IS the decision, and a spawn that names none falls to AUTO_FALLBACK and says so on the confirmation
+  fableForAgents?: 'off'   // whether Fable is available as a CODING-AGENT model. Unset (DEFAULT) = today's gate: an agent's --model fable is held for one owner tap, timing out to the fallback. 'off' = refused outright, no card and no hold — a retry gets the same answer. Never covers the owner's own picker (humanOrigin is sovereign)
   spawnEffort?: string     // default effort for `tg spawn` when the spawner passes no --effort; unset = spawnSession's own default
   spawnContext1m?: boolean // spawned sessions boot with the 1M context window (a `[1m]` suffix on the model id) instead of the 200k default (default ON; only an explicit false opts out)
   spawnModelPolicy?: 'default-wins' | 'agent'  // who may choose a session's model. 'default-wins' (DEFAULT): an agent's --model / relayed /model is a REQUEST — the session takes spawnModel and the human gets a one-tap card. 'agent': the caller's model is honoured silently (pre-0.4.131 behaviour)
