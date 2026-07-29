@@ -114,6 +114,10 @@ Lifecycle and levers:
   running the command). Use it: it is recoverable, not terminal. `tg reopen @name` relaunches it
   in the same folder, resuming its own conversation and keeping its bus name and topic tab. Know
   the undo exists before you decide whether to use the verb.
+- `tg watch @name` — ONE notification when that session next reaches a prompt: armed once, fires
+  once, arrives as an ordinary bus event. Use it instead of polling `tg roster` in a shell loop —
+  end your turn and be woken. It also fires (saying so) if the target ends first, or if an hour
+  passes with it still busy, so it can never leave you waiting on a notification that never comes.
 - **A session that is down was almost certainly closed on purpose, because its work was done.** So
   route by what the new task needs, never by which name you recognize. A self-contained ask goes to
   a fresh `tg spawn`: it starts clean and starts now. `tg reopen` is for resuming work that session

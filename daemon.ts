@@ -108,6 +108,7 @@ import {
   retriggerTopicTyping, paneClaudeLive,
 } from './topic-runtime.ts'
 import { latchMode, type ModeLatch } from './mode-latch.ts'
+import { watchVerdict, watchNoticeText, existingWatch, alreadyWatchingText, type BusWatch, type WatchOutcome } from './watch-plan.ts'
 import { startWebapp, type SettingsView as WebappSettingsView, type SessionCard as WebappSessionCard, type SessionFeed as WebappSessionFeed, type AutomationView as WebappAutomationView } from './webapp.ts'
 import { startTunnel, ensureCloudflared, tailscaleFunnelUrl, type Tunnel } from './tunnel.ts'
 import { sendRichMessage, sendRichMessageDraft, editRichMessage, toInputRichMessage, htmlPanelToRich, callTelegram, normalizeRichInbound, type InputRichMessage } from './richmsg.ts'
@@ -3133,6 +3134,72 @@ async function notifyAskClosures(rows: BusPending[]): Promise<void> {
   }
 }
 
+// ---- `tg watch @name`: one notification when that session next reaches a prompt ----
+//
+// Persisted, because this box redeploys nightly and a watch dropped by a restart is the one outcome its
+// caller cannot recover from — it has already ended its turn and is waiting to be woken. The WATCHER
+// ending is different and drops the watch: there is no context left to deliver into.
+const WATCHES_FILE = join(STATE_DIR, 'bus-watches.json')
+// `seq` rides in the file rather than being derived from the live rows: a watch is REMOVED when it
+// fires, so max(id)+1 handed the next watch the same id as the last one — three consecutive "watch 1"
+// lines in the daemon log for three different watches, which is a log a future incident cannot read.
+// The array shape is what shipped in v0.4.256 and is still on disk here, so it is read as `watches`.
+type WatchStore = { seq: number; watches: BusWatch[] }
+const readWatchStore = (): WatchStore => {
+  const raw = readJsonFile<WatchStore | BusWatch[]>(WATCHES_FILE, { seq: 0, watches: [] })
+  return Array.isArray(raw) ? { seq: raw.reduce((m, w) => Math.max(m, w.id), 0), watches: raw } : raw
+}
+const watchStore = readWatchStore()
+let busWatches: BusWatch[] = watchStore.watches
+const saveWatches = (): void => writeJsonFile(WATCHES_FILE, { seq: watchStore.seq, watches: busWatches })
+const nextWatchId = (): number => ++watchStore.seq
+
+// The fire, delivered exactly like the spawn news and the closure notices: an @system FYI into the
+// watcher's own pane. noReply clears the row on landing, quiet keeps the humans' surfaces out of it,
+// depth 0 is what every system wake carries.
+async function notifyWatchFired(w: BusWatch, outcome: WatchOutcome, now: number): Promise<void> {
+  const text = watchNoticeText(w, outcome, now)
+  process.stderr.write(`daemon: watch ${w.id} on @${w.targetName} fired (${outcome}) → ${w.watcherSid}\n`)
+  const pane = await paneForSession(w.watcherSid).catch(() => null)
+  if (!pane) return
+  const n = createPending({ fromSid: SYSTEM_SID, toSid: w.watcherSid, fromName: 'system',
+    toName: nameForEndpoint(w.watcherSid, busEndpoints()), text, refs: [], noReply: true, quiet: true, depth: 0 }, now)
+  appendLedger(busLedgerRoom(), { ts: now, kind: 'ack', from: 'system', to: n.toName, id: n.id, text })
+  await tryDeliverAsk(n).catch(() => {})
+}
+
+// Evaluated on the 15s bus sweep — nothing new polls — and once at arm time, so a target already at a
+// prompt fires immediately instead of after a sweep's wait.
+async function evaluateWatches(): Promise<void> {
+  if (!busWatches.length) return
+  const now = Date.now()
+  for (const w of [...busWatches]) {
+    if (!busWatches.some(x => x.id === w.id)) continue   // fired on an overlapping pass
+    // A watch nobody is left to notify is dropped, not fired. Same liveness proof the reaper uses, so
+    // the daemon's startup window (every session looks paneless) can't drop the room's watches.
+    if (panesDiscovered && await busTargetGone(w.watcherSid).catch(() => false)) {
+      busWatches = busWatches.filter(x => x.id !== w.id); saveWatches()
+      process.stderr.write(`daemon: watch ${w.id} on @${w.targetName} dropped — its watcher session ended\n`)
+      continue
+    }
+    const pane = await paneForSession(w.targetSid).catch(() => null)
+    const cap = pane ? await capturePane(pane).catch(() => '') : ''
+    // "At a prompt" is the predicate checkConcludedTurnObligations uses for this same question, plus
+    // tryDeliverAsk's bash-mode arm. NOT tryDeliverAsk's gate alone: that one delivers into a working
+    // pane (the CLI queues it), which is right for an ask and wrong for "it is free now".
+    const atPrompt = !!cap && onNormalPrompt(cap) && !detectWorking(cap) && !bashModeArmed(cap)
+    // A session whose END IS COMMITTED counts as gone even while its pane lingers (see endingSids). It
+    // has to: `tg kill` interrupts the turn to type /exit, so a killed-while-busy session really does
+    // reach a prompt for a few seconds on its way out, and firing 'prompt' there would tell the caller
+    // a session being killed is free to take work.
+    const gone = sessionEnding(w.targetSid) || (panesDiscovered ? await busTargetGone(w.targetSid).catch(() => false) : false)
+    const outcome = watchVerdict(w, { atPrompt, gone }, now)
+    if (!outcome) continue
+    busWatches = busWatches.filter(x => x.id !== w.id); saveWatches()   // one notification, always: the row goes first
+    await notifyWatchFired(w, outcome, now).catch(() => {})
+  }
+}
+
 // 15s sweep: reap dead letters, expire un-answered asks (tell the asker) + deliver queued asks whose
 // target is now idle.
 async function sweepBus(): Promise<void> {
@@ -3204,6 +3271,7 @@ async function sweepBus(): Promise<void> {
   for (const p of listPending()) {
     if (!p.injected && !p.expiredAt) await tryDeliverAsk(p).catch(() => {})
   }
+  await evaluateWatches().catch(() => {})   // `tg watch` rides this tick; nothing new polls
 }
 
 // Deliver an answer to the ORIGINAL asker's pane. Shared by tg `answer` (a Claude endpoint answering)
@@ -5652,6 +5720,35 @@ async function handleCall(
       // exits 1, taking the pane and the row's name with it — see relaunchFreshSession's precedent,
       // daemon.ts:7342-7346) so it gets a genuinely fresh launch instead. Same permission test as
       // kill: if you could close it, you can bring it back.
+      // `tg watch <name>` — ONE notification when that session next reaches a prompt (or ends, or is
+      // still busy an hour later). Armed once, fires once, then the row is gone: an orchestrator ends
+      // its turn and is woken by the fire, instead of holding a roster-scraping loop open. One
+      // argument on purpose — the incident it replaces (a hand-rolled watcher matching "idle" on the
+      // wrong row) is fixed by there being one obvious call, not by making the call configurable.
+      case 'watch': {
+        const pane = args.pane ? String(args.pane) : null
+        const fromSid = pane ? await sessionForPane(pane).catch(() => null) : null
+        if (!fromSid) { write({ t: 'result', id, ok: false, text: '`tg watch` must run inside a bridged session' }); return }
+        const target = String(args.name ?? '').trim()
+        if (!target) { write({ t: 'result', id, ok: false, text: 'usage: tg watch <name>' }); return }
+        const endpoints = busEndpoints()
+        const res = resolveEndpoint(target, endpoints)
+        if ('error' in res) { write({ t: 'result', id, ok: false, text: res.error }); return }
+        if (res.id === fromSid) { write({ t: 'result', id, ok: false, text: 'watching yourself would fire the moment your turn ends — nothing to wait for' }); return }
+        // A hermes endpoint is a one-shot with no pane and no prompt to reach, so a watch on one could
+        // only ever fire as its own timeout an hour later. Say so now instead.
+        if (res.kind !== 'claude') { write({ t: 'result', id, ok: false, text: `@${target} is not a session with a prompt to reach (${res.kind}) — nothing to watch` }); return }
+        const already = existingWatch(busWatches, fromSid, res.id)
+        if (already) { text = alreadyWatchingText(already, Date.now()); break }
+        const w: BusWatch = { id: nextWatchId(), watcherSid: fromSid, targetSid: res.id, targetName: nameForEndpoint(res.id, endpoints), armedAt: Date.now() }
+        busWatches.push(w)
+        saveWatches()
+        process.stderr.write(`daemon: watch ${w.id} armed on @${w.targetName} (${res.id}) by ${fromSid}\n`)
+        void evaluateWatches().catch(() => {})   // already at a prompt ⇒ fires now, not in 15s
+        text = `watching @${w.targetName} — ONE notification when it next reaches a prompt, or if it ends first`
+          + ` (nothing is held open; end your turn and it will wake you)`
+        break
+      }
       case 'reopen': {
         const pane = args.pane ? String(args.pane) : null
         const fromSid = pane ? await sessionForPane(pane) : null

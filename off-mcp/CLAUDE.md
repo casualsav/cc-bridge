@@ -85,6 +85,11 @@ by its topic name.
   closes but is never deleted.
 - tg reopen <name> — undo a kill: relaunches the same session in the same folder, resuming its own
   conversation, keeping its bus name and topic tab. Same permission as kill.
+- tg watch <name> — ONE notification when that session next reaches a prompt. Armed once, fires once,
+  delivered as an ordinary bus event, so you end your turn and are woken by it instead of holding a
+  roster-polling loop open (a hand-rolled one matched "idle" on the WRONG row and reported a busy
+  session as free). Already at a prompt → it fires now; the target ends first → it fires saying so;
+  still busy after an hour → it fires saying that. Exactly one notification, always. No options.
 - tg repo <path> — the routing brief for a work repo: what it IS, which directory a request means,
   what proves work there, what makes a task not routine. Cached per box; a repo nobody has scouted
   yet is discovered in the background (~1 min) and arrives as an ack. Found a brief wrong while

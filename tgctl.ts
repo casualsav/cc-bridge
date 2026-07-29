@@ -115,6 +115,11 @@ const HELP: Record<string, string> = {
   wait:    'tg wait <reason|-> | --clear   say what you are blocked on, so the roster shows it instead of\n' +
            '  reading you as idle: "CI run 18832", "@taste to answer". One line. It clears itself when your\n' +
            '  next turn starts, so you never have to remember to unset it.',
+  watch:   'tg watch <name>   ONE notification when that session next reaches a prompt — armed once, fires\n' +
+           '  once, delivered as an ordinary bus event so you can end your turn and be woken by it. Already at a\n' +
+           '  prompt? it fires now. Ends first? it fires saying so. Still busy after an hour? it fires saying that.\n' +
+           '  No options, and no foreground loop to hold open: that loop, hand-rolled off the roster, is what this\n' +
+           '  replaces (one matched "idle" on the wrong row and reported a busy session as free).',
   repo:    'tg repo <path> [--refresh] [--stale "why"] | tg repo --list\n' +
            '  the routing brief for a work repo: what it IS, which directory a request means, what proves\n' +
            '  work there, what makes a task not routine. Cached per box — a repo already scouted answers\n' +
@@ -162,7 +167,7 @@ let name = '', args: Record<string, unknown> = {}
 // dead code that falls through to "unknown command". Cost one live probe run to find.
 // `repo` is not agent-to-agent messaging, but it takes flags, and this branch is the flag-parsing
 // one — same reason `wait` is here while the daemon deliberately keeps it out of AGENT_BUS_VERBS.
-const BUS = new Set(['ask', 'ack', 'btw', 'answer', 'post', 'slash', 'keys', 'spawn', 'kill', 'reopen', 'roster', 'history', 'shared', 'wait', 'repo'])
+const BUS = new Set(['ask', 'ack', 'btw', 'answer', 'post', 'slash', 'keys', 'spawn', 'kill', 'reopen', 'roster', 'history', 'shared', 'wait', 'watch', 'repo'])
 if (BUS.has(cmd)) {
   const rest = process.argv.slice(3)
   const refs: string[] = []
@@ -182,7 +187,7 @@ if (BUS.has(cmd)) {
   }
   // Belt and braces behind the per-subcommand help above: a leading dash is a mistyped flag, never a
   // session name — spawning/killing one would create a folder (and a topic) named after the typo.
-  if ((cmd === 'spawn' || cmd === 'kill' || cmd === 'reopen') && pos[0]?.startsWith('-')) {
+  if ((cmd === 'spawn' || cmd === 'kill' || cmd === 'reopen' || cmd === 'watch') && pos[0]?.startsWith('-')) {
     process.stderr.write(`tg ${cmd}: '${pos[0]}' is not a session name (it starts with a dash) — try 'tg ${cmd} --help'\n`)
     process.exit(2)
   }
@@ -198,6 +203,7 @@ if (BUS.has(cmd)) {
     case 'spawn':   name = 'spawn';   args = { pane, name: pos[0], text: body(pos[1], 'spawn') ?? '', ...flags }; break
     case 'kill':    name = 'kill';    args = { pane, name: pos[0], ...flags }; break   // --force: close past the background-shell warning
     case 'reopen':  name = 'reopen';  args = { pane, name: pos[0] }; break
+    case 'watch':   name = 'watch';   args = { pane, name: pos[0] }; break   // one arg, no options, on purpose
     // A reason short enough to read on a card is an argv string, so `-` stays available but is not
     // the documented shape here (nothing in a wait reason wants Markdown).
     case 'wait':    name = 'wait';    args = { pane, text: flags.clear ? '' : body(pos[0], 'wait') ?? '', ...flags }; break
