@@ -33,6 +33,11 @@ import { decideModel, decideEffort, upgradeNeedsConfirm, heldSpawnModel, heldSpa
 import { renderSessionsView } from './sessions-view.ts'
 import { detectCurrentMode, onNormalPrompt, inputBoxContent, isModelSwitchConfirm, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType } from './prompt.ts'
 import { modelSwitchEvidence, findSessionFile, resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, turnAnchorUuid, liveSubagents, currentTurnFeed, currentTurnActivity, concludedTurnWork, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
+// CC-only, called directly rather than through agent-transcript.ts's dispatcher: the error fields it
+// keys on (isApiErrorMessage/apiErrorStatus) are a Claude Code transcript shape with no Codex
+// equivalent, so — like several other CC-only readers in that dispatcher — a Codex rollout simply
+// never matches and this reads null for it, rather than needing a codex-transcript.ts counterpart.
+import { lastTurnApiError } from './transcript.ts'
 import {
   AGENT_PANE_OPT, agentExitKeys, agentInterruptKeys, agentLabel, agentResetCommand, agentSubmitKeys,
   CODEX_ENABLED, codexLaunchCommand, normalizeAgent, shellQuote, type AgentKind,
@@ -133,7 +138,7 @@ import {
   getSeen, markSeen, digestSince, DIGEST_SCAN,
   type BusEndpoint, type BusPending, type LedgerEntry,
 } from './agent-bus.ts'
-import { formatAskBlock, formatAnswerBlock, formatAsideBlock, formatDigestBlock, formatRosterLine, busSentHeader, busGotHeader, type BusVerb, type RosterAgent } from './agent-bus-block.ts'
+import { formatAskBlock, formatAnswerBlock, formatAsideBlock, formatDigestBlock, formatNudgeBlock, formatRosterLine, busSentHeader, busGotHeader, type BusVerb, type RosterAgent } from './agent-bus-block.ts'
 import {
   readProcTable, childWaitLabel, childWaitShells, survivorWarning, conversationStart, openOutboundAsk, sessionState,
   setWaitsFile, setWait, clearWait, readWait,
@@ -1746,31 +1751,37 @@ async function checkConcludedTurnObligations(pane: string): Promise<void> {
   // its progress visible, and nudging it 20s later would be the noise this is here to stop.
   await sleep(ANSWER_GRACE_MS)
   const ledger = tailLedger(busLedgerRoom(), 400)
+  // Collect every ask this turn's conclusion clears to nudge, then deliver them as ONE block — a
+  // session that let several asks go unanswered across concluded turns gets one prompt, not one per
+  // ask. `markNudged` still stamps each id individually so the once-per-ask guarantee is unchanged.
+  const toNudge: BusPending[] = []
   for (const p of listPending().filter(q => open.some(o => o.id === q.id) && !q.expiredAt)) {
     const verdict = planAssigneeNudge(p, ledger)
     if (verdict !== 'nudge') {
       process.stderr.write(`daemon: ask ${p.id} to @${p.toName} concluded a turn unanswered — no nudge (${verdict})\n`)
       continue
     }
-    markNudged(p.id, Date.now())
-    // NOTHING GOES TO THE ASKER — the owner's ruling on the economics, and it reversed a design I had
-    // recommended and he had approved. Flagging the asker spends an orchestrator's turn, at whatever
-    // that lane costs, to relay something the session itself is the one able to act on. The nudge is
-    // better spent on the session. The 60-minute expiry notice stays as the unchanged backstop, so
-    // nothing is lost that was there before — only the seconds-not-an-hour improvement, deliberately.
-    // The nudge costs that session a whole turn, which is why it fires once per ask and never on a
-    // loop — and is SKIPPED outright if the session has already started working again, where an
-    // injection would interleave with new work rather than prompt the old one.
-    const cap = await capturePane(pane).catch(() => '')
-    // `at=` is the wall clock the note landed at. Without it these notes were the only thing in a
-    // session's transcript with no time on them, so reconstructing a session's history meant anchoring
-    // each one to whatever event happened to sit next to it (the @weather audit did exactly that).
-    const at = new Date().toISOString().replace(/\.\d+Z$/, 'Z')
-    if (cap && onNormalPrompt(cap) && !detectWorking(cap)) {
-      void busDeliver(pane, `<tg @system note=${p.id} at=${at}>Ask ${p.id} from @${p.fromName} is still open — a final text block does not reach the asker. Send it with: tg answer ${p.id} "<summary>"</tg>`)
-    }
-    process.stderr.write(`daemon: ask ${p.id} to @${p.toName} concluded a turn unanswered — session nudged (${at})\n`)
+    toNudge.push(p)
   }
+  if (!toNudge.length) return
+  // NOTHING GOES TO THE ASKER — the owner's ruling on the economics, and it reversed a design I had
+  // recommended and he had approved. Flagging the asker spends an orchestrator's turn, at whatever
+  // that lane costs, to relay something the session itself is the one able to act on. The nudge is
+  // better spent on the session. The 60-minute expiry notice stays as the unchanged backstop, so
+  // nothing is lost that was there before — only the seconds-not-an-hour improvement, deliberately.
+  // The nudge costs that session a whole turn, which is why it fires once per ask and never on a
+  // loop — and is SKIPPED outright if the session has already started working again, where an
+  // injection would interleave with new work rather than prompt the old one.
+  const cap = await capturePane(pane).catch(() => '')
+  // `at=` is the wall clock the note landed at. Without it these notes were the only thing in a
+  // session's transcript with no time on them, so reconstructing a session's history meant anchoring
+  // each one to whatever event happened to sit next to it (the @weather audit did exactly that).
+  const at = new Date().toISOString().replace(/\.\d+Z$/, 'Z')
+  for (const p of toNudge) markNudged(p.id, Date.now())
+  if (cap && onNormalPrompt(cap) && !detectWorking(cap)) {
+    void busDeliver(pane, formatNudgeBlock(toNudge.map(p => ({ id: p.id, fromName: p.fromName, text: p.text })), at))
+  }
+  for (const p of toNudge) process.stderr.write(`daemon: ask ${p.id} to @${p.toName} concluded a turn unanswered — session nudged (${at})\n`)
 }
 // `silent` rides in from the reply's own anchor (finalRepliesAfter → busAnchored): a turn another
 // agent started answers back without pinging the owner's phone, a turn HE started still does.
@@ -5149,22 +5160,27 @@ async function handleCall(
             openAskToSid: !!onAsk,
             now: Date.now(),
           }) : null
+          // Did the last turn die on an upstream API error? Only meaningful when not busy — a session
+          // already back at work has moved past whatever the previous turn ended with.
+          const apiError = tfile ? lastTurnApiError(tfile) : null
           // The third state (wait-state.ts). Only the LABEL is taken here: this line's busy/idle
           // emoji, its subagent count and its unreported suffix already exist and are unchanged, so
           // a waiting agent reads "idle · waiting: gh run watch" rather than silently as done.
-          const { wait } = sessionState({
+          const { state: waitState, wait } = sessionState({
             working: busy,
+            apiError,
             said: tfile ? readWait(e.id, turnAnchorUuid(tfile)) : null,
             ask: openOutboundAsk(listPending(), e.id, p => askerAlreadyResolved(p, wctx.ledger)),
             proc: childWaitLabel(wctx.procs, wctx.panePids.get(pane), conversationStart(tfile)),
             unreported: null,
           })
-          const state = `${busy ? ' · busy' : ' · idle'}`
+          const errored = waitState === 'errored'
+          const state = `${busy ? ' · busy' : errored ? ` · errored${apiError?.status ? ` (${apiError.status})` : ''}` : ' · idle'}`
             + `${subs > 0 ? ` · ${subs} subagent${subs === 1 ? '' : 's'} live` : ''}`
             + `${wait ? ` · waiting: ${wait.label}` : ''}`
             + `${onAsk ? ` · on ask ${onAsk.id}` : ''}`
             + `${marker ? ` · unreported ${fmtAgo(marker.since)} → @${marker.briefer}` : ''}`
-          rows.push(`${busy ? '🟡' : '🟢'} ${nm}${model}${pct}${state}${flair}`)
+          rows.push(`${busy ? '🟡' : errored ? '🔴' : '🟢'} ${nm}${model}${pct}${state}${flair}`)
         }
         text = rows.length ? rows.join('\n') : '(no live agents on the bus)'
         break
@@ -15528,7 +15544,7 @@ async function waitContext(): Promise<WaitCtx> {
 // `marker` rides out with the state because the card needs the briefer's name for its own row, and
 // recomputing it there would mean reading the transcript's concluded work twice.
 function readSessionState(sid: string, tfile: string | null, working: boolean, panePid: number | undefined, ctx?: WaitCtx): {
-  state: SessionState; wait: SessionWait | null; marker: ReturnType<typeof unreportedWorkMarker>
+  state: SessionState; wait: SessionWait | null; marker: ReturnType<typeof unreportedWorkMarker>; errorStatus: number | null
 } {
   // The same marker `tg roster` prints. Its own gate suppresses it while an INBOUND ask is open, so
   // it can never contradict the row that already says why this session is silent.
@@ -15539,15 +15555,20 @@ function readSessionState(sid: string, tfile: string | null, working: boolean, p
     openAskToSid: listPending().some(p => p.injected && !p.expiredAt && p.toKind === 'claude' && p.toSid === sid),
     now: Date.now(),
   }) : null
+  // Read once, fed into sessionState for the precedence decision AND kept here for the card's own
+  // status-code display — sessionState's output stays the plain { state, wait } shape.
+  const apiError = tfile ? lastTurnApiError(tfile) : null
   return {
     ...sessionState({
       working,
+      apiError,
       said: tfile ? readWait(sid, turnAnchorUuid(tfile)) : null,
       ask: openOutboundAsk(listPending(), sid, p => askerAlreadyResolved(p, ctx?.ledger ?? [])),
       proc: ctx && panePid ? childWaitLabel(ctx.procs, panePid, conversationStart(tfile)) : null,
       unreported: marker,
     }),
     marker,
+    errorStatus: apiError?.status ?? null,
   }
 }
 
@@ -15579,7 +15600,7 @@ async function webappSessionCard(row: { sid: string; name: string; cwd: string; 
   // context bar repeat what the conversation already shows). Everything else about the card is
   // computed exactly as before, including the state the dot renders.
   const chat = isChatLaneSession(row.sid)
-  const dead: WebappSessionCard = { sid: row.sid, name: row.name, cwd: row.cwd, agent: row.agent, chat, alive: false, working: false, subagents: 0, task: null, model: null, effort: null, mode: null, ctxPct: null, h5Pct: null, branch: null, tier: null, state: 'idle', wait: null, unreported: null }
+  const dead: WebappSessionCard = { sid: row.sid, name: row.name, cwd: row.cwd, agent: row.agent, chat, alive: false, working: false, subagents: 0, task: null, model: null, effort: null, mode: null, ctxPct: null, h5Pct: null, branch: null, tier: null, state: 'idle', wait: null, unreported: null, errorStatus: null }
   const pane = await paneForSession(row.sid).catch(() => null)
   if (!pane || !(await paneAlive(pane).catch(() => false))) return dead
   // A pane that outlived its claude (process died mid-command → pane is a bare shell) must render
@@ -15634,6 +15655,7 @@ async function webappSessionCard(row: { sid: string; name: string; cwd: string; 
   return {
     sid: row.sid, name: row.name, cwd, agent: row.agent, chat, alive: true, working, subagents, task, state, wait,
     unreported: state === 'unreported' && marker ? { briefer: marker.briefer } : null,
+    errorStatus: read.errorStatus,
     model, effort: sl?.effort ?? null, mode: cap ? detectCurrentMode(cap) : null,
     ctxPct: sl?.ctxPct ?? null, h5Pct: sl?.h5?.pct ?? null,
     branch: topicBranchCache.get(row.sid) || null, tier: paneTiers.get(pane) ?? null,

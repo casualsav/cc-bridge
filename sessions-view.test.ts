@@ -88,6 +88,27 @@ test('waiting is ⏳ and working is 🧑‍💻 — and the retired pause glyph 
   expect(renderSessionsView([card({ state: 'working', task: 'editing daemon.ts' })], NOW)).toContain('🧑‍💻 editing daemon.ts')
 })
 
+// A last turn that died on an upstream API error must not fall through to the stale reply snippet —
+// for this state that snippet IS the raw "API Error: 529 …" text the dying turn produced, which would
+// read as the session's own words rather than the failure it was.
+test('errored card: red dot, the status-coded word, and NOT the raw API-error reply text', () => {
+  const c = card({ state: 'errored', errorStatus: 529, task: 'API Error: 529 Overloaded. This is a server-side issue…' })
+  const out = renderSessionsView([c], NOW)
+  expect(out).toContain('🔴 <b>my-project</b> — errored (529)')
+  expect(out).toContain('⚠️ errored (529)')
+  expect(out).not.toContain('API Error')
+  expect(out).not.toContain('Overloaded')
+})
+
+test('errored card with no status code still reads plainly as errored', () => {
+  const c = card({ state: 'errored', task: 'API Error: something' })
+  const out = renderSessionsView([c], NOW)
+  expect(out).toContain('🔴 <b>my-project</b> — errored')
+  expect(out).not.toContain('errored (')
+  expect(out.split('\n')).toContain('⚠️ errored')
+  expect(out).not.toContain('API Error')
+})
+
 test('waiting with no reason falls back to the last reply', () => {
   const c = card({ state: 'waiting', wait: null, task: 'still the last reply' })
   const out = renderSessionsView([c], NOW)

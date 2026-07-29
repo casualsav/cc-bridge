@@ -61,11 +61,13 @@ export interface SettingsView {
 }
 // One session on the fleet dashboard. `working` and the dials read live from the pane; `task` is
 // the current activity line (working) or the last reply snippet (idle). alive=false ⇒ dead pane.
-// `state` is what the card renders: `working` is the pane, `waiting` is blocked on something outside
-// this session, `unreported` is work finished and told to nobody, and `idle` — the point of the whole
-// thing — now means at a prompt with NOTHING pending. `working` (the boolean) is kept beside it
-// untouched: the drill-in header and the chip logic read it, and it answers a narrower question.
-// `wait` carries the reason a waiting card shows; it is null in every other state.
+// `state` is what the card renders: `working` is the pane, `errored` is a last turn that died on an
+// upstream API error (and outranks every wait signal — the point is a stranded ask must not read as
+// merely "waiting"), `waiting` is blocked on something outside this session, `unreported` is work
+// finished and told to nobody, and `idle` — the point of the whole thing — now means at a prompt with
+// NOTHING pending. `working` (the boolean) is kept beside it untouched: the drill-in header and the
+// chip logic read it, and it answers a narrower question. `wait` carries the reason a waiting card
+// shows; it is null in every other state.
 export interface SessionCard {
   sid: string; name: string; cwd: string; agent: string
   // The owner's own chat lane. Its card is a bare title row: the conversation is where you see what
@@ -73,12 +75,16 @@ export interface SessionCard {
   // from an older daemon still renders (as an ordinary card, which is what it was).
   chat?: boolean
   alive: boolean; working: boolean; subagents: number; task: string | null
-  state: 'working' | 'waiting' | 'unreported' | 'idle'
+  state: 'working' | 'errored' | 'waiting' | 'unreported' | 'idle'
   // Two nullable fields rather than one shared "detail", because each means exactly one thing: `wait`
   // is populated only while waiting, `unreported` only while unreported. A single overloaded field
   // would need `state` read alongside it to be interpretable at all.
   wait: { why: 'said' | 'ask' | 'proc'; label: string } | null
   unreported: { briefer: string } | null
+  // The upstream HTTP status the last turn died with (529, 500, …), when known. Optional/nullable so
+  // a payload from an older daemon, or any card literal built before this field existed, still type-
+  // checks — only the `errored` state ever populates it.
+  errorStatus?: number | null
   model: string | null; effort: string | null; mode: string | null
   ctxPct: number | null; h5Pct: number | null; branch: string | null
   tier: string | null   // 'max' / 'pro' / … from the launch-banner sample (daemon.ts paneTiers); null when never sampled

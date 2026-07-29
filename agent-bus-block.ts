@@ -122,6 +122,23 @@ export function formatDigestBlock(entries: DigestEntry[], sinceLabel: string): s
   return `<tg bus-digest since ${sinceLabel}>\n${lines.join('\n')}\n</tg>`
 }
 
+// The "still open" nudge injected into an assignee's pane when a turn concludes leaving one or more
+// bus asks unanswered (daemon's checkConcludedTurnObligations). ONE item renders exactly the original
+// single-ask sentence — that string is a preserved control, not a style choice, so it must never drift
+// as a side effect of adding the multi-ask shape. 2+ items coalesce into ONE block (mirroring
+// formatDigestBlock's shape) so a session that lets several turns conclude unanswered gets one prompt
+// instead of one per ask, while `markNudged` is still stamped per-id by the caller.
+export function formatNudgeBlock(items: { id: number; fromName: string; text: string }[], at: string): string {
+  if (items.length === 1) {
+    const p = items[0]
+    return `<tg @system note=${p.id} at=${at}>Ask ${p.id} from @${p.fromName} is still open — a final text block does not reach the asker. Send it with: tg answer ${p.id} "<summary>"</tg>`
+  }
+  const ids = items.map(p => p.id).join(',')
+  const lines = items.map(p => `${p.id} from @${deTag(p.fromName)} — ${digestText(p.text)}`)
+  return `<tg @system notes=${ids} at=${at}>${items.length} asks still open — a final text block does not reach the asker. Answer each with: tg answer <id> "<summary>"\n`
+    + lines.join('\n') + '\n</tg>'
+}
+
 // The pinned-card roster line (agent-bus P2) built from the LIVE endpoint names: a compact
 // `☎️ a · b · c`, clamped to a pin-sized budget and ONLY THEN HTML-escaped. Escaping LAST is the whole
 // point: escaping first and slicing after can cut an entity (`&amp;` → `&am`), which is invalid HTML

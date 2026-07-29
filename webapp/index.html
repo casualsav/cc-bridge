@@ -566,6 +566,11 @@
      the pulse carries. It is the same literal as `.dot.on` for the same reason its neighbours are. */
   .dot.rest { background: #4caf50; }
   .dot.dead { background: #e05555; }
+  /* Same red as `.dot.dead`, but PULSING — the pane is alive and could work again the moment a new
+     prompt lands, it just died mid-turn. Reusing `.dot.dead`'s literal keeps "red = broken" one colour
+     everywhere; the animation is the only thing telling this apart from a corpse, mirroring how
+     `.dot.on` vs `.dot.rest` already use stillness (not hue) to separate two reads of the same colour. */
+  .dot.err { background: #e05555; animation: pulse 1.6s ease-in-out infinite; }
   @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
   .chip { font-size: var(--t-meta); color: var(--hint); background: var(--bg); border-radius: 6px; padding: 2px 7px; white-space: nowrap; }
   /* Inside a CARD the chip is not a control — it is the model/effort label, and .sess .foot already
@@ -1194,7 +1199,7 @@
   /* Reduced motion: still the two pulses, additively — the base rules and @keyframes pulse are left
      byte-exact rather than edited, because both indicators are load-bearing and shared. Nothing is
      lost when the animation stops: colour already carries both states (green vs grey, red vs hint). */
-  @media (prefers-reduced-motion: reduce) { .dot.on { animation: none; } }
+  @media (prefers-reduced-motion: reduce) { .dot.on { animation: none; } .dot.err { animation: none; } }
   /* `flex: none` is the other half of keeping this button exactly itself: inside the pill it is a
      flex item, and without it the mic would shrink when the textarea wanted the room. */
   .sendbtn { width: var(--mic-d); height: var(--mic-d); border-radius: 50%; border: none; background: var(--btn); color: var(--btn-text); flex: none; display: flex; align-items: center; justify-content: center; padding: 0; box-shadow: 0 1px 4px rgba(0,0,0,.35); }
@@ -2195,7 +2200,7 @@ async function renderSessions() {
     // problem there. Off the payload's own `chat` flag, like the bare title row above it — never a
     // name match. Every other session's waiting is untouched, and so are the chat lane's own other
     // states: it is one branch, on one state, on one lane.
-    const dot = !s.alive ? "dead" : s.working ? "on" : s.state === "waiting" ? (s.chat ? "rest" : "wait") : "";
+    const dot = !s.alive ? "dead" : s.working ? "on" : s.state === "errored" ? "err" : s.state === "waiting" ? (s.chat ? "rest" : "wait") : "";
     const chips = dialParts(s);
     // The task line is ONE line and the card's height is reflow, so a state that has something to say
     // says it INSTEAD of the last-reply snippet, never underneath it. For a waiting card the reason is
@@ -2204,10 +2209,15 @@ async function renderSessions() {
     // up when work is actually done"). It still exists — the bus computes it, the roster shows it and
     // the report nudges run off it — but on a card it reads as done, like any other finished session.
     const line =
+      // ⚠️ errored — a last turn that died on an upstream API error, checked BEFORE waiting: the whole
+      // point of the state is that a stranded ask must not read as ordinary "waiting" (owner ruling,
+      // see wait-state.ts's sessionState precedence). Same glyph legibleApiError already uses for a
+      // relayed API-error reply, so the mark is not a new vocabulary item.
+      s.state === "errored" ? "⚠️ errored" + (s.errorStatus ? " (" + s.errorStatus + ")" : "")
       // 🧑‍💻 working · ⏳ waiting (owner, 2026-07-29): the hourglass reads as "blocked, not moving",
       // so it belongs to the state that IS blocked, and working gets the person at the keyboard. The
       // same pair renders in `/sessions` (sessions-view.ts) — one state, one emoji on every surface.
-      s.state === "waiting" && s.wait ? "⏳ waiting: " + esc(s.wait.label)
+      : s.state === "waiting" && s.wait ? "⏳ waiting: " + esc(s.wait.label)
       // ✅, not 💬, on the last-reply line: by the time this branch is reached the state is `idle`,
       // which since the fourth state landed means "at a prompt with nothing pending" — done, not
       // merely quiet. The owner's call. (`/sessions`, the Telegram text view, mirrors this line —
@@ -2785,11 +2795,13 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) pain
 async function renderDrill() {
   if (!drillSid) return;
   let d; try { d = await api("/api/session/feed", { sid: drillSid }); } catch { return; }
-    // The card's own three dot colours, on the header it opens onto: green pulsing (working), amber
-  // still (waiting), grey (everything else). It reads `state` where the payload carries it and falls
-  // back to the working boolean where it does not — an older daemon, or the pre-transcript payload.
-  // The COLOUR only, deliberately: the header is two bare lines and nothing else here is conditional.
-  $("ddot").className = "dot " + (d.working ? "on" : d.state === "waiting" ? "wait" : "");
+    // The card's own dot colours, on the header it opens onto: green pulsing (working), red pulsing
+  // (errored), amber still (waiting), grey (everything else) — so the card and the screen it opens
+  // onto never disagree (the bug this composite exists to prevent). It reads `state` where the
+  // payload carries it and falls back to the working boolean where it does not — an older daemon,
+  // or the pre-transcript payload. The COLOUR only, deliberately: the header is two bare lines and
+  // nothing else here is conditional.
+  $("ddot").className = "dot " + (d.working ? "on" : d.state === "errored" ? "err" : d.state === "waiting" ? "wait" : "");
   if (d.cwd) $("dsub").textContent = d.cwd;
   setDial(d);
   lastDrill = d;

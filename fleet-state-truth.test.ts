@@ -1,18 +1,23 @@
 // THE FLEET VOCABULARY, AS A SPEC — and the corpus of everything that has ever lied.
 //
-// `working · waiting · unreported · idle` is a product promise: four words a reader trusts without
-// opening the session. It has been corrected roughly ten times, each correction a live sighting by the
-// owner rather than a failing test. This file exists so the eleventh is a failing test.
+// `working · errored · waiting · unreported · idle` is a product promise: five words a reader trusts
+// without opening the session (`errored` is the newest — a last turn that died on an upstream API
+// error, added so a stranded ask reads as dead rather than merely waiting). It has been corrected
+// roughly ten times, each correction a live sighting by the owner rather than a failing test. This
+// file exists so the next one is a failing test.
 //
 // Two halves:
-//   1. THE TRUTH TABLE — every combination of the classifier's five inputs, with the answer written
-//      out as literal data rather than derived. A spec that recomputes the implementation proves
-//      nothing; this one disagrees loudly when the implementation moves.
+//   1. THE TRUTH TABLE — every combination of the classifier's original five inputs, with the answer
+//      written out as literal data rather than derived (§1b below extends it for the sixth, apiError,
+//      as targeted precedence assertions rather than a full re-enumeration). A spec that recomputes
+//      the implementation proves nothing; this one disagrees loudly when the implementation moves.
 //   2. THE CORPUS — one pinned case per historical incident, each named with the version that fixed
 //      it and the sentence it used to tell the owner.
 //
 // The classifier's inputs, and where each comes from:
 //   working      pane capture (detectWorking / !onNormalPrompt) OR a turn in progress OR live subagents
+//   apiError     transcript.ts's lastTurnApiError — the LAST main-thread assistant entry died on an
+//                upstream failure, and no turn is in progress
 //   said         the session's own `tg wait "reason"`, keyed to its turn anchor (cleared by its next turn)
 //   ask          an open OUTBOUND ask — TTL-bounded, askerAlreadyResolved, and never an `ack` (noReply)
 //   proc         a live background shell under the pane's engine (childWaitLabel)
@@ -81,6 +86,32 @@ test('the label a waiting row carries is the winning signal\'s own words', () =>
   for (const r of [{ working: true }, { unreported: UNREP }, {}]) {
     expect(sessionState({ working: false, said: null, ask: null, proc: null, unreported: null, ...r }).wait).toBeNull()
   }
+})
+
+// ---- 1b. THE SIXTH INPUT: apiError (a last turn that died on an upstream failure) ----------------
+//
+// PRECEDENCE: working > errored > waiting > unreported > idle. `errored` sits directly under
+// `working` and above every wait signal — the whole point is that a session sitting on an
+// unanswered ask AFTER dying must read `errored`, not `waiting`, or the crash is invisible.
+const ERR = { status: 529 }
+test('errored beats every wait signal (said, ask, proc) and unreported', () => {
+  expect(sessionState({ working: false, apiError: ERR, said: SAID, ask: ASK, proc: PROC, unreported: UNREP }).state)
+    .toBe('errored')
+  expect(sessionState({ working: false, apiError: ERR, said: null, ask: null, proc: null, unreported: null }).state)
+    .toBe('errored')
+  // and it carries no label — like working/unreported/idle, it is the whole answer.
+  expect(sessionState({ working: false, apiError: ERR, said: SAID, ask: ASK, proc: PROC, unreported: UNREP }).wait)
+    .toBeNull()
+})
+test('working still beats errored — a session already back at work is not "errored"', () => {
+  expect(sessionState({ working: true, apiError: ERR, said: null, ask: null, proc: null, unreported: null }).state)
+    .toBe('working')
+})
+// Omitting apiError (every pre-existing caller) reads exactly as null did — the 32-row table above
+// is unaffected by this addition.
+test('apiError omitted is the same as apiError: null', () => {
+  expect(sessionState({ working: false, said: null, ask: null, proc: null, unreported: null }).state).toBe('idle')
+  expect(sessionState({ working: false, apiError: null, said: null, ask: null, proc: null, unreported: null }).state).toBe('idle')
 })
 
 // ---- 2. THE CORPUS: every state-display incident, pinned -----------------------------------------

@@ -14,7 +14,7 @@ export const DEFAULT_PROJECTS_DIR = join(homedir(), '.claude', 'projects')
 const PROJECTS_DIR = DEFAULT_PROJECTS_DIR
 
 type Usage = { input_tokens?: number; output_tokens?: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number }
-type Entry = { type?: string; subtype?: string; operation?: string; content?: unknown; uuid?: string; timestamp?: string; cwd?: string; isSidechain?: boolean; isMeta?: boolean; message?: { content?: unknown; stop_reason?: string | null; usage?: Usage; model?: string } }
+type Entry = { type?: string; subtype?: string; operation?: string; content?: unknown; uuid?: string; timestamp?: string; cwd?: string; isSidechain?: boolean; isMeta?: boolean; error?: string; isApiErrorMessage?: boolean; apiErrorStatus?: number; message?: { content?: unknown; stop_reason?: string | null; usage?: Usage; model?: string } }
 
 // Text content of an entry: a bare string, or the joined `text` blocks of a content
 // array (tool_use / thinking blocks contribute nothing).
@@ -783,6 +783,25 @@ export function turnInProgress(file: string): boolean {
   }
   if (!lastAssistant) return false
   return lastAssistant.message?.stop_reason === 'tool_use'
+}
+
+// Did the session's LAST turn die on an upstream API error (rather than conclude normally)? Keyed
+// ONLY on the machine fields CC itself stamps on the synthetic error entry — never on the "API
+// Error: …" text, which a legitimate reply could echo verbatim (e.g. quoting a log). A false red is
+// worse than a missed one. Returns null the instant a new turn is in progress (`sessionState`
+// recomputes every poll, so a fresh prompt clears this for free — no timer, no persisted bit) and
+// null when there's no main-thread assistant entry at all (missing/empty transcript, or a session
+// that has never produced one).
+export function lastTurnApiError(file: string): { status?: number } | null {
+  if (turnInProgress(file)) return null
+  const entries = readEntries(file)
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i]
+    if (e.type !== 'assistant' || e.isSidechain) continue
+    if (e.isApiErrorMessage === true || e.error === 'server_error') return { status: e.apiErrorStatus }
+    return null   // the last main-thread assistant entry concluded normally
+  }
+  return null
 }
 
 // A crashed session leaves its last agent file frozen at stop_reason 'tool_use' forever, and a

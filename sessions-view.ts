@@ -23,13 +23,14 @@ function subagents(s: SessionCard): string {
 }
 
 function renderCard(s: SessionCard): string {
-  // Three states on this surface, and `unreported` is not one of them: it reads as DONE (the owner,
+  // Four states on this surface, and `unreported` is not one of them: it reads as DONE (the owner,
   // 2026-07-29 — "it continuously shows up when work is actually done"). The state is still computed
   // and still drives the bus (the roster's suffix, the report nudges); it is simply not something he
   // is shown. 🟡 is the amber dot's stand-in; there is no still-vs-pulsing distinction to make in
-  // text, so the glyph carries it alone.
-  const dot = !s.alive ? '💀' : s.state === 'working' ? '🟢' : s.state === 'waiting' ? '🟡' : '⚪'
-  const state = !s.alive ? 'dead' : s.state === 'unreported' ? 'idle' : s.state
+  // text, so the glyph carries it alone. `errored` IS shown — a last turn that died on an upstream
+  // API error is the one case a stranded ask must not read as ordinary "waiting".
+  const dot = !s.alive ? '💀' : s.state === 'working' ? '🟢' : s.state === 'errored' ? '🔴' : s.state === 'waiting' ? '🟡' : '⚪'
+  const state = !s.alive ? 'dead' : s.state === 'unreported' ? 'idle' : s.state === 'errored' && s.errorStatus ? `errored (${s.errorStatus})` : s.state
   const lines = [`${dot} <b>${escapeHtml(s.name)}</b> — ${state}`]
 
   const chips: string[] = []
@@ -50,7 +51,12 @@ function renderCard(s: SessionCard): string {
   // precedence the mini app's card uses, for the same reason: the snippet predates the wait. An idle
   // session's last reply is ✅ rather than 💬 — idle now means "done", not merely "quiet".
   const line =
-    s.state === 'waiting' && s.wait ? `⏳ waiting: ${escapeHtml(truncate(s.wait.label, TASK_MAX))}`
+    // Same precedence as the title line's word: an errored card must not fall through to `s.task`,
+    // which is the stale reply snippet — for this state that snippet IS the raw "API Error: 529 …"
+    // text the dying turn produced, and printing it verbatim would read as the session's own words
+    // rather than as the failure it was.
+    s.state === 'errored' ? `⚠️ errored${s.errorStatus ? ` (${s.errorStatus})` : ''}`
+    : s.state === 'waiting' && s.wait ? `⏳ waiting: ${escapeHtml(truncate(s.wait.label, TASK_MAX))}`
     // Delegated work is still work, and this view was the last surface not saying so: a session whose
     // subagents are editing files sits at its own prompt, so without the count it reads as one line of
     // stale reply text. Same words and same position as the mini app's card (webapp/index.html

@@ -295,7 +295,7 @@ export function readWait(sid: string, anchor: string | null, now = Date.now()): 
 
 export type WaitWhy = 'said' | 'ask' | 'proc'
 export type SessionWait = { why: WaitWhy; label: string }
-export type SessionState = 'working' | 'waiting' | 'unreported' | 'idle'
+export type SessionState = 'working' | 'errored' | 'waiting' | 'unreported' | 'idle'
 
 // One card's state. Order is the design: a busy pane beats every wait signal, because a session
 // that asked someone and moved on is working — the open ask is a fact about it, not its state.
@@ -303,17 +303,27 @@ export type SessionState = 'working' | 'waiting' | 'unreported' | 'idle'
 // `unreported` sits below `waiting` and cannot collide with it: unreportedWorkMarker suppresses
 // itself while an inbound ask is open.
 //
+// `errored` sits right below `working` and ABOVE every wait signal: a session whose last turn died
+// on an upstream API error is not "waiting" on the ask it left open — it is dead in the water, and a
+// session sitting on an unanswered ask after dying must show `errored`, not `waiting`, or the one
+// case this exists for (an ask stranded by a crash, not a slow reply) reads as ordinary.
+//
 // Label precedence inside `waiting` is said > ask > proc. The self-declaration is the only signal
 // that knows WHY; between the inferred two, the ask names a counterparty and is the more specific
 // fact. They never stack — one row, one label.
 export function sessionState(args: {
   working: boolean
+  // The last turn's upstream failure (transcript.ts's lastTurnApiError), or null on a normal
+  // conclusion. Optional so every pre-existing caller (and the truth-table's generated rows) is
+  // unaffected by this addition — omitted reads as null, same as passing it explicitly.
+  apiError?: { status?: number } | null
   said: string | null        // the session's own `tg wait` reason, already checked against its turn anchor
   ask: { id: number; toName: string } | null   // an open OUTBOUND ask, already bounded by TTL + askerAlreadyResolved
   proc: string | null        // childWaitLabel
   unreported: { briefer: string; since: number } | null
 }): { state: SessionState; wait: SessionWait | null } {
   if (args.working) return { state: 'working', wait: null }
+  if (args.apiError) return { state: 'errored', wait: null }
   if (args.said) return { state: 'waiting', wait: { why: 'said', label: args.said } }
   if (args.ask) return { state: 'waiting', wait: { why: 'ask', label: `@${args.ask.toName} (ask ${args.ask.id})` } }
   if (args.proc) return { state: 'waiting', wait: { why: 'proc', label: args.proc } }

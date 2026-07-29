@@ -3,7 +3,7 @@ import { test, expect, describe } from 'bun:test'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { modelSwitchEvidence, projectDirName, resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnActivity, currentTurnFeed, currentTurnTokens, slashResultAfter, legibleApiError, latestModelId, recentConversation, conversationItemFullText } from './transcript.ts'
+import { modelSwitchEvidence, projectDirName, resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnActivity, currentTurnFeed, currentTurnTokens, slashResultAfter, legibleApiError, latestModelId, recentConversation, conversationItemFullText, lastTurnApiError } from './transcript.ts'
 
 function fixture(entries: object[]): string {
   const f = join(mkdtempSync(join(tmpdir(), 'tg-transcript-')), 'session.jsonl')
@@ -111,6 +111,38 @@ test('turnInProgress: true while mid-tool, false once a conclusion lands', () =>
 test('turnInProgress: a no-tool turn concludes immediately (no card)', () => {
   const f = fixture([user('q', 'u1'), asst('answer', 'a1')])
   expect(turnInProgress(f)).toBe(false)
+})
+
+// The synthetic entry CC writes when a turn dies on an upstream API error — machine fields only,
+// modeled on a real transcript (@weather, 2026-07-29): model '<synthetic>', stop_reason
+// 'stop_sequence', plus error/isApiErrorMessage/apiErrorStatus alongside `message`.
+const apiErr = (status: number, uuid: string) => ({
+  type: 'assistant', uuid,
+  message: { model: '<synthetic>', stop_reason: 'stop_sequence', content: [{ type: 'text', text: `API Error: ${status} Overloaded.` }] },
+  error: 'server_error', isApiErrorMessage: true, apiErrorStatus: status,
+})
+
+test('lastTurnApiError: the real error-entry shape → {status}', () => {
+  const f = fixture([user('q', 'u1'), apiErr(529, 'a1')])
+  expect(lastTurnApiError(f)).toEqual({ status: 529 })
+})
+
+test('lastTurnApiError: a normal end_turn conclusion → null', () => {
+  const f = fixture([user('q', 'u1'), asst('all done', 'a1')])
+  expect(lastTurnApiError(f)).toBeNull()
+})
+
+test('lastTurnApiError: an error entry followed by a new user message + in-progress turn → null (cleared)', () => {
+  const f = fixture([
+    user('q1', 'u1'), apiErr(529, 'a1'),
+    user('q2', 'u2'), narr('working again', 'a2'), tool('Bash', {}, 't1'),
+  ])
+  expect(lastTurnApiError(f)).toBeNull()
+})
+
+test('lastTurnApiError: missing/empty transcript → null', () => {
+  expect(lastTurnApiError(join(mkdtempSync(join(tmpdir(), 'tg-transcript-')), 'missing.jsonl'))).toBeNull()
+  expect(lastTurnApiError(fixture([]))).toBeNull()
 })
 
 test('currentTurnFeed interleaves narration + tools, dropping the conclusion text', () => {
