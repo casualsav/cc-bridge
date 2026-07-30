@@ -59,6 +59,22 @@ export function watchNoticeText(w: BusWatch, outcome: WatchOutcome, now: number)
   }
 }
 
+// Two arms within ~100ms of each other delivered ONE watch's notification TWICE (live, 2026-07-30 —
+// `tg watch trading3` + `tg watch bridge-rb`, and watch 9 fired at :27.040 and again at :27.045). The
+// evaluation pass re-checks membership BEFORE its awaits (paneForSession / capturePane) and removes the
+// fired row AFTER them, so arm #2's immediate pass overlaps arm #1's still-in-flight one and both see
+// the same watch unfired. Serialising the whole pass is the fix, and a boolean is enough because it
+// gates the WORK, not a poller: a pass skipped while another is running costs nothing, since the 15s
+// bus sweep runs the next one.
+export function serializePasses(pass: () => Promise<void>): () => Promise<void> {
+  let running = false
+  return async () => {
+    if (running) return
+    running = true
+    try { await pass() } finally { running = false }
+  }
+}
+
 // A second arm on the same target from the same session must not fan out into a second notification —
 // a retry loop is exactly what this verb is meant to replace.
 export function existingWatch(watches: BusWatch[], watcherSid: string, targetSid: string): BusWatch | null {

@@ -85,7 +85,12 @@ export async function acquireTokenLock(token: string, stateDir: string): Promise
   const { sock, owner } = lockPaths(token)
   let r = await bind(sock, owner, stateDir)
   if (r === 'inuse') {
-    if (alive(readOwner(owner).pid)) return { ok: false, holder: readOwner(owner) }   // live holder → refuse
+    // ONLY A DEAD NAMED PID JUSTIFIES RECLAIMING. The winner writes `.owner` INSIDE its listen()
+    // callback, so a held lock is briefly unattributed — and a loser that read the absent sidecar as
+    // "no live owner" unlinked a LIVE lock and rebound over it, which is the two-daemons-on-one-token
+    // outcome this whole module exists to prevent. Absent or unreadable ⇒ HELD.
+    const holder = readOwner(owner)
+    if (holder.pid === null || alive(holder.pid)) return { ok: false, holder }         // live or unattributed → refuse
     try { unlinkSync(sock) } catch {}                                                 // stale socket FILE (dead owner) → reclaim and retry once
     r = await bind(sock, owner, stateDir)
     // Still contended after reclaiming a dead owner's socket → another daemon raced us to the lock.

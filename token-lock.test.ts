@@ -2,7 +2,7 @@
 // token refuses and names the incumbent; distinct tokens don't collide; tokenHeldByOther sees a holder
 // from another state dir but not our own; and a stale socket FILE (crash leftover) is reclaimed.
 import { test, expect, afterEach } from 'bun:test'
-import { writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { acquireTokenLock, releaseTokenLock, tokenHeldByOther, tokenLockPath, tokenLockStatus } from './token-lock.ts'
 
 // Unique token per test so cases never share a /tmp lock path; release whatever a test held.
@@ -42,11 +42,35 @@ test('tokenHeldByOther sees another state dir, ignores our own, and clears on re
   expect(await tokenHeldByOther(t, '/s/different')).toBeNull()      // released → free
 })
 
-test('a stale socket file (crash leftover) is reclaimed', async () => {
+// A pid that cannot exist: kill(pid, 0) on anything above pid_max is ESRCH, no race with a real process.
+const deadPid = (): number => Number(readFileSync('/proc/sys/kernel/pid_max', 'utf8').trim()) + 1
+
+test('a stale socket file whose owner pid is DEAD is reclaimed', async () => {
   const t = tok('stale')
-  writeFileSync(tokenLockPath(t), '')   // a leftover at the path with nothing listening
+  writeFileSync(tokenLockPath(t), '')                                          // leftover, nothing listening
+  writeFileSync(`${tokenLockPath(t)}.owner`, `${deadPid()}\n/s/crashed\n`)      // …and its owner is gone
   const got = await acquireTokenLock(t, '/s/after-crash')
-  expect(got.ok).toBe(true)             // bind fails EADDRINUSE → no live holder → unlink + rebind
+  expect(got.ok).toBe(true)             // bind fails EADDRINUSE → named pid is dead → unlink + rebind
+})
+
+// The winner writes `.owner` inside its listen() callback, so a held lock is briefly unattributed. A
+// loser that reads "no owner file" as "no live owner" unlinks a LIVE lock and rebinds — two daemons on
+// one token, in different state dirs, which is the case this lock exists for. Revert the condition to
+// `alive(readOwner(owner).pid)` and this test reports ok: true.
+test('a socket whose .owner is absent counts as HELD, not stale', async () => {
+  const t = tok('unattributed')
+  writeFileSync(tokenLockPath(t), '')   // socket path taken, owner unwritten — the winner's bind window
+  const got = await acquireTokenLock(t, '/s/racer')
+  expect(got.ok).toBe(false)            // only a DEAD NAMED PID justifies reclaiming
+  if (!got.ok) expect(got.holder.pid).toBeNull()
+})
+
+test('an unreadable .owner counts as HELD too', async () => {
+  const t = tok('garbled')
+  writeFileSync(tokenLockPath(t), '')
+  writeFileSync(`${tokenLockPath(t)}.owner`, 'not-a-pid\n')
+  const got = await acquireTokenLock(t, '/s/racer')
+  expect(got.ok).toBe(false)
 })
 
 test('tokenLockStatus reports held + holder while locked, clears after release (for tg doctor)', async () => {

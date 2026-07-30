@@ -18,7 +18,7 @@ import {
   DAEMON_LOG_FILE, WATCHDOG_PID_FILE, HEARTBEAT_FILE, anchorCwd, cwdFaultHint, stableCwd,
   type ShimToDaemon, type DaemonToShim, type InboundParams, type FailoverHop,
 } from './common.ts'
-import { acquireTokenLock } from './token-lock.ts'
+import { acquireTokenLock, tokenLockPath } from './token-lock.ts'
 import { claimInstance } from './instance-lock.ts'
 
 // Before ANY tmux call or spawn: a daemon that inherited a deleted cwd (a watchdog started from a
@@ -115,7 +115,7 @@ import {
   retriggerTopicTyping, paneClaudeLive,
 } from './topic-runtime.ts'
 import { latchMode, type ModeLatch } from './mode-latch.ts'
-import { watchVerdict, watchNoticeText, existingWatch, alreadyWatchingText, type BusWatch, type WatchOutcome } from './watch-plan.ts'
+import { watchVerdict, watchNoticeText, existingWatch, alreadyWatchingText, serializePasses, type BusWatch, type WatchOutcome } from './watch-plan.ts'
 import { startWebapp, type SettingsView as WebappSettingsView, type SessionCard as WebappSessionCard, type SessionFeed as WebappSessionFeed, type AutomationView as WebappAutomationView, type UsageView as WebappUsageView } from './webapp.ts'
 import { startTunnel, ensureCloudflared, tailscaleFunnelUrl, type Tunnel } from './tunnel.ts'
 import { sendRichMessage, sendRichMessageDraft, editRichMessage, toInputRichMessage, htmlPanelToRich, callTelegram, normalizeRichInbound, telegramRefused, type InputRichMessage } from './richmsg.ts'
@@ -282,7 +282,11 @@ if (!SELFTEST) {
   if (!lock.ok) {
     process.stderr.write(
       `daemon: this bot is already bridged by pid ${lock.holder.pid ?? '?'} (state dir ${lock.holder.stateDir ?? '?'}); ` +
-      `refusing to start a second poller for the same token — one token = one daemon.\n`,
+      `refusing to start a second poller for the same token — one token = one daemon.` +
+      // An unattributed holder is a held lock whose owner sidecar we could not read (normally a
+      // sub-millisecond window inside the winner's listen()). It is refused on purpose, and the only
+      // manual cure is removing the lock path — so name it rather than sending the reader after ps.
+      (lock.holder.pid === null ? ` (holder unattributed — if nothing is really listening, remove ${tokenLockPath(TOKEN)})` : '') + `\n`,
     )
     process.exit(0)
   }
@@ -3272,8 +3276,10 @@ async function notifyWatchFired(w: BusWatch, outcome: WatchOutcome, now: number)
 }
 
 // Evaluated on the 15s bus sweep — nothing new polls — and once at arm time, so a target already at a
-// prompt fires immediately instead of after a sweep's wait.
-async function evaluateWatches(): Promise<void> {
+// prompt fires immediately instead of after a sweep's wait. Serialised (see serializePasses): the
+// arm-time pass and the sweep's overlap, and two overlapping passes fire one watch twice.
+const evaluateWatches = serializePasses(evaluateWatchesPass)
+async function evaluateWatchesPass(): Promise<void> {
   if (!busWatches.length) return
   const now = Date.now()
   for (const w of [...busWatches]) {
