@@ -111,7 +111,7 @@ import { latchMode, type ModeLatch } from './mode-latch.ts'
 import { watchVerdict, watchNoticeText, existingWatch, alreadyWatchingText, type BusWatch, type WatchOutcome } from './watch-plan.ts'
 import { startWebapp, type SettingsView as WebappSettingsView, type SessionCard as WebappSessionCard, type SessionFeed as WebappSessionFeed, type AutomationView as WebappAutomationView } from './webapp.ts'
 import { startTunnel, ensureCloudflared, tailscaleFunnelUrl, type Tunnel } from './tunnel.ts'
-import { sendRichMessage, sendRichMessageDraft, editRichMessage, toInputRichMessage, htmlPanelToRich, callTelegram, normalizeRichInbound, type InputRichMessage } from './richmsg.ts'
+import { sendRichMessage, sendRichMessageDraft, editRichMessage, toInputRichMessage, htmlPanelToRich, callTelegram, normalizeRichInbound, telegramRefused, type InputRichMessage } from './richmsg.ts'
 import { parseAvatars, resolveAvatar, type Avatar } from './avatars.ts'
 import { createAvatarMsgTokens } from './avatar-msg-tokens.ts'
 import { claudingStatus } from './clauding.ts'
@@ -1219,18 +1219,25 @@ async function sendAgentText(chats: string[], text: string, threadId?: number, r
         avatarMsgTokens.remember(chat_id, m.message_id, avatarToken)
         replyOnce = undefined; continue
       } catch (e) {
+        // Only a REFUSAL frees us to send again. Telegram never answering is the one case where
+        // "fall through to the main bot" posts the message twice under the avatar AND the bridge bot.
+        if (!telegramRefused(e)) { process.stderr.write(`daemon: avatar reply to chat ${chat_id} has an UNKNOWN outcome, NOT re-sending via the main bot (it may already be in the chat): ${e}\n`); replyOnce = undefined; continue }
         process.stderr.write(`daemon: avatar reply send failed for chat ${chat_id}, falling back to main bot: ${e}\n`)
       }
     }
     // Rich messages (Bot API 10.1) render Claude's markdown natively (tables/headings/code/collapsible)
-    // and work in DM + topics. One raw call per chat — no chunking (no documented length cap). ANY
-    // failure (older Telegram, malformed markdown, network) falls back to the HTML/chunk path so the
-    // reply still lands. On when markdown rendering is enabled (renderMarkdown !== false) AND the reply
-    // has no fenced code block (see above).
+    // and work in DM + topics. One raw call per chat — no chunking (no documented length cap). A
+    // Telegram REFUSAL (older Telegram, markdown it won't parse) falls back to the HTML/chunk path so
+    // the reply still lands; a send whose outcome we never learned does NOT — that fallback is a
+    // second delivery of a message that may already be in the chat. On when markdown rendering is
+    // enabled (renderMarkdown !== false) AND the reply has no fenced code block (see above).
     if (access.renderMarkdown !== false && !hasFencedCode) {
       try { await sendRichMessage(TOKEN!, chat_id, toInputRichMessage(text), { messageThreadId: threadId, ...(silent ? { disableNotification: true } : {}), ...(replyOnce != null ? { replyToMessageId: replyOnce } : {}) }); replyOnce = undefined; continue }
       catch (e) {
         if (isThreadGoneError(e)) throw new TopicThreadGoneError()   // dead thread — HTML fallback would hit it too; let the relay recreate
+        // Abandoning a message we cannot account for is the cheaper error: a visible loss the log
+        // names, against a duplicate the owner has to read and cannot undo. Loud on purpose.
+        if (!telegramRefused(e)) { process.stderr.write(`daemon: rich message to chat ${chat_id} has an UNKNOWN outcome, NOT falling back to HTML (a re-send would duplicate it; it may or may not have landed): ${e}\n`); replyOnce = undefined; continue }
         process.stderr.write(`daemon: rich message send failed, falling back to HTML: ${e}\n`)
       }
     }
@@ -2901,6 +2908,8 @@ async function sendBusCard(chat: string, thread: number | undefined, header: str
   try {
     await sendRichMessage(TOKEN!, chat, { html: richHtml }, { messageThreadId: thread, disableNotification: true })
   } catch (e) {
+    // Same split as sendAgentText's fallback: only a Telegram refusal frees us to send the card again.
+    if (!telegramRefused(e)) { process.stderr.write(`daemon: bus card to chat ${chat} has an UNKNOWN outcome, NOT falling back to HTML (it may already be in the chat): ${e}\n`); return }
     process.stderr.write(`daemon: bus rich notify failed, falling back to HTML: ${e}\n`)
     void channel.sendText(chat, fallback, { silent: true, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
   }
@@ -4689,21 +4698,30 @@ async function relayAuthUrlToTelegram(url: string, paneId: string | null = focus
 
   for (const { chat, thread } of targets) {
     try {
-      let sent: MsgRef
-      try {
-        if (!richHtml) throw new Error('url unsafe for a rich href — use the legacy card')
-        const m = await sendRichMessage(TOKEN!, chat, htmlPanelToRich(richHtml), {
-          ...(thread !== undefined ? { messageThreadId: thread } : {}),
-          replyMarkup: { force_reply: true, input_field_placeholder: 'Authentication code' },
-        })
-        sent = { chatId: String(chat), messageId: String(m.message_id) }
-      } catch {
-        sent = await channel.sendText(chat, legacy, {
-          linkPreview: false,
-          forceReply: { placeholder: 'Authentication code' },
-          ...(thread ? { threadId: String(thread) } : {}),
-        })
+      // An unsafe url never reaches Telegram, so the legacy card is the only send — that check has to
+      // sit OUTSIDE the try, or it looks like a failed send and the refusal split below can't tell the
+      // difference between "nothing was sent" and "we don't know".
+      let sent: MsgRef | null = null
+      if (richHtml) {
+        try {
+          const m = await sendRichMessage(TOKEN!, chat, htmlPanelToRich(richHtml), {
+            ...(thread !== undefined ? { messageThreadId: thread } : {}),
+            replyMarkup: { force_reply: true, input_field_placeholder: 'Authentication code' },
+          })
+          sent = { chatId: String(chat), messageId: String(m.message_id) }
+        } catch (e) {
+          // Two auth prompts is worse than one that needs a re-run: the user would answer whichever
+          // arrived, and only one of them is a registered reply target anyway. Abandon, loudly — the
+          // accepted send carries no id we could register.
+          if (!telegramRefused(e)) { process.stderr.write(`daemon: auth-url card to chat ${chat} has an UNKNOWN outcome, NOT sending the legacy card (it may already be in the chat, and its reply cannot be routed — re-run the login if no code prompt works): ${e}\n`); continue }
+          process.stderr.write(`daemon: auth-url rich card refused for chat ${chat}, falling back to the legacy card: ${e}\n`)
+        }
       }
+      if (!sent) sent = await channel.sendText(chat, legacy, {
+        linkPreview: false,
+        forceReply: { placeholder: 'Authentication code' },
+        ...(thread ? { threadId: String(thread) } : {}),
+      })
       replyTargets.set(refKey(sent), { kind: 'authurl' })
     } catch (e) {
       process.stderr.write(`daemon: auth-url relay to ${chat} failed: ${e}\n`)
@@ -5032,7 +5050,13 @@ async function handleCall(
             })
             sentIds.push(sent.message_id)
             richSent = true
-          } catch (e) { process.stderr.write(`daemon: rich reply failed, falling back to HTML: ${e}\n`) }
+          } catch (e) {
+            // Same split as sendAgentText's fallback. `richSent` is what suppresses the chunk loop, so
+            // an unknown outcome sets it: the message may already be in the chat, and the chunk loop
+            // would be a second copy. No id to report — the send that may have landed never gave one.
+            if (!telegramRefused(e)) { process.stderr.write(`daemon: rich reply to chat ${chat_id} has an UNKNOWN outcome, NOT falling back to HTML (it may already be in the chat): ${e}\n`); richSent = true }
+            else process.stderr.write(`daemon: rich reply failed, falling back to HTML: ${e}\n`)
+          }
         }
 
         if (!richSent) for (let i = 0; i < chunks.length; i++) {
@@ -6812,7 +6836,10 @@ async function launchSpawn(spec: SpawnSpec, model: string | null, clampedNote: s
       const header = `<b>@${escapeHtml(fromName)}</b> messaged <b>@${escapeHtml(topicName)}</b>`
       try {
         await sendRichMessage(TOKEN!, group, { html: `<details><summary>${header}</summary>${escapeHtml(shown).replace(/\n/g, '<br>')}</details>` }, { messageThreadId: threadId, disableNotification: true })
-      } catch {
+      } catch (e) {
+        // Same split as sendAgentText's fallback: a refusal means the card never landed, an unknown
+        // outcome means this mirror may already be in the topic.
+        if (!telegramRefused(e)) { process.stderr.write(`daemon: spawn task mirror for @${topicName} has an UNKNOWN outcome, NOT re-sending it as HTML: ${e}\n`); return }
         void channel.sendText(group, `${header}\n<blockquote expandable>${escapeHtml(shown)}</blockquote>`, { silent: true, threadId: String(threadId) }).catch(() => {})
       }
      } finally { busInFlight.delete(p.id) }
@@ -7411,7 +7438,12 @@ async function sendStartHelp(ctx: Context): Promise<void> {
     const m = await sendRichMessage(TOKEN!, chat, { html: startRichHtml(paired) }, { messageThreadId: thread, replyMarkup: kb })
     noteMsg(chat, thread, m.message_id)
     return
-  } catch (e) { process.stderr.write(`daemon: rich /start send failed, falling back to HTML: ${e}\n`) }
+  } catch (e) {
+    // Same split as sendAgentText's fallback. Two welcome cards is a cosmetic duplicate rather than a
+    // costly one, but the rule is the rule: only a refusal proves nothing landed.
+    if (!telegramRefused(e)) { process.stderr.write(`daemon: rich /start to chat ${chat} has an UNKNOWN outcome, NOT falling back to HTML (it may already be in the chat; /start again if nothing arrived): ${e}\n`); return }
+    process.stderr.write(`daemon: rich /start send failed, falling back to HTML: ${e}\n`)
+  }
   await ctx.reply(startHelpText(paired), { parse_mode: 'HTML', link_preview_options: { is_disabled: true }, reply_markup: kb }).catch(() => {})
 }
 
@@ -9854,7 +9886,12 @@ async function showRichPanel(ctx: Context, mode: 'send' | 'edit', rich: InputRic
     const m = await sendRichMessage(TOKEN!, chat, rich, { messageThreadId: thread, replyMarkup: keyboard })
     noteMsg(chat, thread, m.message_id)
     return
-  } catch (e) { process.stderr.write(`daemon: rich panel send failed, falling back to HTML: ${e}\n`) }
+  } catch (e) {
+    // Same split as sendAgentText's fallback. Duplicating a BUTTON panel is worse than most: two live
+    // panels for one state, and a tap on the stale one acts on it.
+    if (!telegramRefused(e)) { process.stderr.write(`daemon: rich panel to chat ${chat} has an UNKNOWN outcome, NOT falling back to HTML (a second panel would be tappable; re-open it if nothing arrived): ${e}\n`); return }
+    process.stderr.write(`daemon: rich panel send failed, falling back to HTML: ${e}\n`)
+  }
   await ctx.reply(html, { parse_mode: 'HTML', reply_markup: keyboard }).catch(() => {})
 }
 

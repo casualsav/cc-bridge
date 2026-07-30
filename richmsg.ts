@@ -28,20 +28,48 @@ export function htmlPanelToRich(html: string): InputRichMessage {
   return { html: html.replace(/\n/g, '<br>') }
 }
 
+// A failed send is either a REFUSAL or an UNKNOWN OUTCOME, and only the first is safe to retry
+// anywhere. Telegram answering `ok:false` means it read the request and declined it — nothing reached
+// the chat, so re-sending by another route is exactly right, and it is what the rich→HTML fallback
+// exists for (an older client, markdown it won't parse). A rejected fetch, or a reply we can't parse,
+// means we never got Telegram's answer: the message may already be in the chat, and re-sending it is
+// the accepted-but-timed-out double-post — the same symptom as the 2026-07-30 relay race, but
+// duplicating INSIDE one delivery attempt, where a per-reply claim cannot see it.
+// Both keep the exact message text they threw before, because callers match on it (`isThreadGoneError`).
+export class TelegramRefusedError extends Error {
+  readonly error_code?: number
+  constructor(message: string, error_code?: number) { super(message); this.name = 'TelegramRefusedError'; this.error_code = error_code }
+}
+export class TelegramUnknownOutcomeError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) { super(message, options); this.name = 'TelegramUnknownOutcomeError' }
+}
+// The one question a fallback must ask: did Telegram tell us it did NOT send this? Anything else —
+// including an error shape we don't recognise — may have landed, so it is not ours to re-send.
+export function telegramRefused(e: unknown): boolean {
+  return e instanceof TelegramRefusedError
+}
+
 // Raw Bot API caller: POST JSON to api.telegram.org, return the parsed `result`, throw on ok:false
-// or a non-2xx. One place owns the URL/JSON shape so callers stay declarative.
+// or a non-2xx. One place owns the URL/JSON shape so callers stay declarative — and, since it is the
+// only place that can tell a refusal from a lost answer, the only place that classifies one.
 // SECURITY: the fetch URL embeds the bot token — the thrown errors below MUST stay method + Telegram's
 // `description` only. Never interpolate the URL (or `res.url`) into an error: a send-only avatar token
 // (agent-bus P3) surfaces its errors to the agent/room, so a URL there would leak the token.
 export async function callTelegram<T = unknown>(token: string, method: string, payload: Record<string, unknown>): Promise<T> {
-  const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(payload),
-  })
+  let res: Response
+  try {
+    res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+  } catch (e) {
+    // The request may have been fully processed before the socket died. Unknowable from here.
+    throw new TelegramUnknownOutcomeError(`${method}: request failed before Telegram answered`, { cause: e })
+  }
   let body: { ok?: boolean; result?: T; description?: string; error_code?: number }
-  try { body = await res.json() as typeof body } catch { throw new Error(`${method}: non-JSON response (HTTP ${res.status})`) }
-  if (!body.ok) throw new Error(`${method} failed: ${body.error_code ?? res.status} ${body.description ?? ''}`.trim())
+  try { body = await res.json() as typeof body } catch { throw new TelegramUnknownOutcomeError(`${method}: non-JSON response (HTTP ${res.status})`) }
+  if (!body.ok) throw new TelegramRefusedError(`${method} failed: ${body.error_code ?? res.status} ${body.description ?? ''}`.trim(), body.error_code)
   return body.result as T
 }
 

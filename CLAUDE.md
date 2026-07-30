@@ -135,6 +135,23 @@ the proof: it races two deliverers, and dropping the claim from either reports 2
 the four paths also used to send with no log line, which is what made the second copy unattributable;
 they all log in the focused loop's format now — don't quiet them again.
 
+**A failed send is either a REFUSAL or an UNKNOWN OUTCOME, and only a refusal may be re-sent.**
+Telegram answering `ok:false` means it read the request and declined — nothing reached the chat, so the
+rich→HTML fallback is exactly right and must keep working (older Telegram, markdown it won't parse). A
+rejected fetch or an unparseable reply means we never learned the outcome: the message may already be
+in the chat, and falling back posts it twice *inside one delivery attempt*, where the per-reply claim
+above cannot see it. `callTelegram` (`richmsg.ts`) is the only place that can tell them apart and so
+the only place that classifies: `TelegramRefusedError` vs `TelegramUnknownOutcomeError`, both keeping
+their exact former message text because callers match on it (`isThreadGoneError`,
+`markChatUnreachableIfUndeliverable`). Every fallback asks `telegramRefused(e)`; an unknown outcome is
+**abandoned with a loud log line** — a visible loss the log names beats a duplicate the owner has to
+read and cannot undo. **Rich EDITS are the named exclusion** (re-applying an edit yields the same
+message), which is why the guard enumerates by operation and not by log phrase. `rich-fallback.test.ts`
+holds the count at **8** guarded rich-send fallbacks — sendAgentText's avatar + main-bot branches,
+`sendBusCard`, the `tg reply` rich path, the auth-url card, the spawn task mirror, `/start`,
+`showRichPanel` — so a new one with an unguarded fallback fails the suite. Two of the eight were
+found by hand; the enumeration found the other six.
+
 ## Inbound
 
 **A Bot API 10.1 rich message has `rich_message: { blocks }` and NO `text`** — a composer flips into
