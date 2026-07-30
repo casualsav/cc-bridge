@@ -144,15 +144,17 @@ check(card.headDot === 9, `the chat header's dot is untouched at 9px (${card.hea
 near(card.nameSize, 14, 0.1, "the session name steps down to --t-sub");
 near(card.taskSize, 14, 0.1, "the task line is UNTOUCHED at --t-sub");
 
-// The old dashed row is gone, and its space with it: the first card starts one panel padding under
-// the tab bar. On the pre-change page the row is there and pushes the first card down.
+// The old dashed row is gone, and its space with it: the first card starts one panel padding from the
+// top of the list. On the pre-change page the row is there and pushes the first card down.
+// Measured from the LIST's own box, not from the tab bar's bottom — the bar was deleted with the nav
+// restructure (2026-07-30) and `document.querySelector(".tabs")` threw here, taking the run with it.
 const head = await p.evaluate(() => {
-  const t = document.querySelector(".tabs").getBoundingClientRect();
+  const t = document.getElementById("tab-sessions").getBoundingClientRect();
   const c = document.querySelector(".sess").getBoundingClientRect();
-  return { gap: c.top - t.bottom, oldRow: document.querySelectorAll(".newsess").length };
+  return { gap: c.top - t.top, oldRow: document.querySelectorAll(".newsess").length };
 });
 check(head.oldRow === 0, `the dashed "New session" row is gone (${head.oldRow} found)`);
-near(head.gap, 12, 0.5, "the list starts at the panel's own padding under the tab bar");
+near(head.gap, 12, 0.5, "the list starts at the panel's own padding");
 
 // ---- 2. The pill: anchored, shaped, and ABOVE the list -----------------------------------------
 const fab = await p.evaluate(() => {

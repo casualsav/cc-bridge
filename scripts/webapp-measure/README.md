@@ -251,6 +251,31 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   since two surfaces agreeing on the WRONG colour passes equality.
                                   #   Pinned control (841ecf8): the chat-lane and errored checks fail
                                   #   there, every other state's parity already held and is a guard
+    node nav.mjs [page] [out]     # THE NAV RESTRUCTURE: Files is a sheet inside the session that owns
+                                  #   the folder, Scheduled is a pill on the command center's rail, and
+                                  #   the tab row is DELETED (notabs.mjs went with it — a harness whose
+                                  #   subject no longer exists cannot fail; its two surviving claims are
+                                  #   guards in here). Serves the page over HTTP, which is load-bearing:
+                                  #   the deep-link legs run the app's own boot() → api(), and api()
+                                  #   builds new URL(path, location.origin) — on file:// that origin is
+                                  #   the string "null" and throws. Covers the three-card attach sheet,
+                                  #   the sheet's SCOPE (no row and no crumb walks above the session's
+                                  #   cwd), a file opening into the viewer with the sheet out of its way,
+                                  #   the pill (square, unfilled, never over the blue one) with ← out of
+                                  #   Scheduled, both deep-link legs (matching session → its drill +
+                                  #   sheet; no match → sheet standalone at that folder), and the
+                                  #   files-off shell REMOVING the browse card. Pinned control (e5fbc2d):
+                                  #   12/12 state checks fail there, 4 guards hold
+    node dotparity.mjs [page][out] # THE SAME SESSION, THE SAME MOMENT, THE SAME DOT — the Sessions card
+                                  #   and the drill-in header it opens onto, rendered off ONE fixture in
+                                  #   one page, over every state (working · waiting · waiting CHAT lane ·
+                                  #   working chat · unreported · idle · errored). Compares all three
+                                  #   things a dot says: the class, the RENDERED pixel (pulse frozen at
+                                  #   its 0% keyframe first, or shutter timing alone reads as a colour
+                                  #   difference) and whether it animates. Colour anchors on two cases,
+                                  #   since two surfaces agreeing on the WRONG colour passes equality.
+                                  #   Pinned control (841ecf8): the chat-lane and errored checks fail
+                                  #   there, every other state's parity already held and is a guard
     node notabs.mjs [page] [out]  # the tab row HIDDEN behind `SHOW_TABS`, with Settings moved to
                                   #   Telegram's ⋮ menu. The row must render nothing AND cost nothing:
                                   #   height 0 is checked, then the band it owned is HIT-TESTED and the

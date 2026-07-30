@@ -132,7 +132,10 @@ test('serves the real SPA bundle from webapp/ at /', async () => {
   try {
     const html = await (await fetch(`http://127.0.0.1:${server.port}/`)).text()
     expect(html).toContain('telegram-web-app.js')
-    expect(html).toContain('id="list"')
+    // `id="fblist"` — the file browser's rows, which moved into a sheet inside the session drill-in when
+    // the global Files view was deleted (2026-07-30). Still the shape check it always was: the served
+    // bundle is the real page and not a placeholder.
+    expect(html).toContain('id="fblist"')
   } finally { server.stop(true) }
 })
 

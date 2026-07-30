@@ -10991,7 +10991,10 @@ bot.command('files', async ctx => {
   const t = await commandTarget(ctx)
   if (!t) return
   const cwd = (await paneCwd(t.paneId).catch(() => null)) || '/'
-  const full = `${url}/?start=${encodeURIComponent(cwd)}`
+  // The SESSION this folder belongs to, carried in the link: the mini app opens that session and raises
+  // its file sheet, rather than a browser floating free of the thing it belongs to.
+  const linkSid = await sessionForPane(t.paneId).catch(() => null)
+  const full = `${url}/?start=${encodeURIComponent(cwd)}${linkSid ? `&sid=${encodeURIComponent(linkSid)}` : ''}`
   const kb = new InlineKeyboard().webApp('📂 Open Files', full)
   // Telegram allows web_app inline buttons in PRIVATE chats ONLY (a group/topic send → BUTTON_TYPE_INVALID).
   // So inline it in a DM; from a group/topic, DM the button to the sender and note it in the topic.
@@ -11003,7 +11006,7 @@ bot.command('files', async ctx => {
   // Main Mini App deep link (a normal url button), carrying a startapp token that /api/resolve maps
   // back to this cwd. Requires the Main Mini App configured in BotFather (URL = WEBAPP_PUBLIC_URL).
   if (!botUsername) { await channel.sendText(String(ctx.chat!.id), '📂 Starting up — try /files again in a moment.', { ...(t.replyThread ? { threadId: String(t.replyThread) } : {}) }).catch(() => {}); return }
-  const link = `https://t.me/${botUsername}?startapp=${mintStartToken(cwd)}`
+  const link = `https://t.me/${botUsername}?startapp=${mintStartToken(cwd, linkSid)}`
   await bot.api.sendMessage(String(ctx.chat!.id), `📂 <b>Files</b> — <code>${escapeHtml(cwd)}</code>`,   // TG-only: Mini App (webApp) launch — Telegram-only surface
     { parse_mode: 'HTML', reply_markup: new InlineKeyboard().url('📂 Open Files', link),
       ...(t.replyThread ? { message_thread_id: t.replyThread } : {}) }).catch(e => wlog(`/files send failed: ${e}`))
@@ -15692,24 +15695,27 @@ const wlog = (m: string) => process.stderr.write(`daemon: ${m}\n`)
 // in-memory only, a deploy/restart used to expire every open /files link with an "api 404".
 const START_TOKEN_TTL_MS = 24 * 3600_000
 const START_TOKENS_FILE = join(STATE_DIR, 'file-start-tokens.json')
-const fileStartTokens = new Map<string, { cwd: string; exp: number }>()
+// `sid` rides along since 2026-07-30: the mini app opens the SESSION that owns the folder and raises
+// its file sheet, so it needs to know which session that is. Matching by cwd would work for the /files
+// flow (the link's folder IS the session's cwd) and would be a guess the day two sessions share one.
+const fileStartTokens = new Map<string, { cwd: string; sid?: string; exp: number }>()
 try {
-  const saved = JSON.parse(readFileSync(START_TOKENS_FILE, 'utf8')) as Record<string, { cwd: string; exp: number }>
+  const saved = JSON.parse(readFileSync(START_TOKENS_FILE, 'utf8')) as Record<string, { cwd: string; sid?: string; exp: number }>
   for (const [k, v] of Object.entries(saved)) if (v?.exp > Date.now()) fileStartTokens.set(k, v)
 } catch {}
 function saveStartTokens(): void {
   try { writeFileSync(START_TOKENS_FILE, JSON.stringify(Object.fromEntries(fileStartTokens))) } catch {}
 }
-function mintStartToken(cwd: string): string {
+function mintStartToken(cwd: string, sid?: string | null): string {
   for (const [k, v] of fileStartTokens) if (v.exp < Date.now()) fileStartTokens.delete(k)   // cheap GC
   const tok = randomBytes(9).toString('base64url')
-  fileStartTokens.set(tok, { cwd, exp: Date.now() + START_TOKEN_TTL_MS })
+  fileStartTokens.set(tok, { cwd, ...(sid ? { sid } : {}), exp: Date.now() + START_TOKEN_TTL_MS })
   saveStartTokens()
   return tok
 }
-const resolveStartToken = (tok: string): string | null => {
+const resolveStartToken = (tok: string): { cwd: string; sid?: string } | null => {
   const e = fileStartTokens.get(tok)
-  return e && e.exp > Date.now() ? e.cwd : null
+  return e && e.exp > Date.now() ? { cwd: e.cwd, ...(e.sid ? { sid: e.sid } : {}) } : null
 }
 
 // ---- Console tabs (Settings / Usage / Diff) — deps injected into the webapp, each wrapping a reused

@@ -21,9 +21,9 @@ export interface WebappDeps {
   maxInitDataAgeSec?: number               // reject initData older than this (default 3600)
   maxReadBytes?: number                    // text read cap (default 512 KiB)
   maxFind?: number                         // find result cap (default 500)
-  resolveStart?: (token: string) => string | null   // map a deep-link startapp token → starting cwd
+  resolveStart?: (token: string) => { cwd: string; sid?: string } | null   // map a deep-link startapp token → the folder AND the session that owns it (the app opens that session's file sheet)
   canWrite?: boolean                       // enable write endpoints (TELEGRAM_WEBAPP_WRITE); default false → read-only
-  fileBrowser?: () => boolean              // live pref: file browser present in the app (default true). False = the Files tab is omitted from the served shell AND every file endpoint 403s — read live per request so the /settings toggle applies without a restart
+  fileBrowser?: () => boolean              // live pref: file browser present in the app (default true). False = the browse card is omitted from the served shell AND every file endpoint 403s — read live per request so the /settings toggle applies without a restart
   protectedRoots?: string[]                // extra dirs (beyond ~/.claude) that writes must never touch (e.g. a relocated state dir)
   trashDir?: string                        // /api/rm moves deletions here (recoverable); required when canWrite
   maxWriteBytes?: number                   // /api/write size cap (default 2 MiB)
@@ -70,9 +70,9 @@ export interface SettingsView {
 // shows; it is null in every other state.
 export interface SessionCard {
   sid: string; name: string; cwd: string; agent: string
-  // The owner's own chat lane. Its card is a bare title row: the conversation is where you see what
-  // it is doing, so the task line and the context bar would only repeat it. Optional so a payload
-  // from an older daemon still renders (as an ordinary card, which is what it was).
+  // The owner's own chat lane. Since 2026-07-30 its card carries the same fields as any other (the
+  // bare title row was reversed); the flag now drives ONE thing in the client — a waiting chat lane's
+  // resting green dot. Optional so an older daemon's payload still renders.
   chat?: boolean
   alive: boolean; working: boolean; subagents: number; task: string | null
   state: 'working' | 'errored' | 'waiting' | 'unreported' | 'idle'
@@ -360,8 +360,8 @@ async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: strin
   // exchanges it here for the session's cwd (paths don't fit the 64-char startapp limit). Tokens are
   // minted + held by the daemon (see resolveStart); unknown/expired → 404.
   if (url.pathname === '/api/resolve') {
-    const cwd = deps.resolveStart?.(url.searchParams.get('token') || '') ?? null
-    return cwd ? json({ cwd }) : json({ error: 'unknown or expired token' }, 404)
+    const hit = deps.resolveStart?.(url.searchParams.get('token') || '') ?? null
+    return hit ? json(hit) : json({ error: 'unknown or expired token' }, 404)
   }
 
   // ---- Console reads (auth-gated like every /api/*; no canWrite needed) ----

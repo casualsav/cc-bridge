@@ -406,33 +406,50 @@ give it.
   asserts the outcome per action alongside the absent bar, and drives the failure leg on the same
   action to prove the red bar still carries the server's own reason.
 
-## The tab row (hidden — a trial)
+## Navigation (three destinations)
 
-- **`SHOW_TABS` is the ONE switch, and the row is hidden, never deleted** — the owner's
-  look-and-feel trial, with a floating control that reveals the same four buttons as the planned
-  successor. Markup, CSS, `showTab()` and every button's handler stay live, so the flag is the whole
-  revert. `display: none`, not `visibility`/opacity: the trial is the page *without* the strip's
-  height. **The bar was carrying `--safe-top` for every flow view**, so `html.notabs body` takes it
-  over — 0 outside fullscreen, which is why a check run at rest cannot see that half at all
-  (`notabs.mjs` forces the var).
-- **Files and Scheduled have no door while it is false** — accepted by the owner; this is a look,
-  not a navigation change. Sessions remains the view on open.
-- **Settings' only door is the client's ⋮ menu** (`SettingsButton`, i.e. `web_app_setup_settings_button`
-  — every bot since Bot API 6.10, the SDK wrapper since 7.0), feature-detected with a try/catch for
-  the same reason as `NATIVE_BACK`. It is a **TOGGLE** (Settings ⇄ Sessions): with the row hidden it
-  is the only way in and therefore the only way out, and stranding the app in Settings is not what
-  the trial is testing. It closes the drill-in first — that surface is fixed and full-screen, so
-  switching a tab under it reads as a tap that did nothing.
-- **The way HOME from Settings is the client's `BackButton`, and it is NOT gated on fullscreen** —
-  unlike the drill-in's, which has its own ← chip outside fullscreen while this screen has nothing.
-  The ⋮ toggle alone was not findable as a door out: the owner, 2026-07-30, *"from within the settings
-  menu there's no way to get back to the main command center screen without closing and reopening the
-  mini app"*. Showing BackButton is also the only lever there is on the client's ✕ Close — the app
-  contains no `tg.close()` call anywhere, so there is no in-page close to replace.
-- **`BackButton.onClick` is registered ONCE, on `onNativeBack`, which asks what is on screen at TAP
-  time.** Two screens raise the same button now; re-registering per screen would leave a stale handler
-  on any client that no-ops an `offClick`. `showTab()` owns its visibility and skips the work while the
-  drill-in is up — `openDrill`/`closeDrill` own the button on that screen.
+- **There is no tab row and no global Files view** (owner-approved restructure, 2026-07-30). The
+  destinations are: the **command center** (the app's home), **Scheduled** behind its own pill, and
+  **Settings** in the client's ⋮ menu. `showTab()` survives as the plain view switch it always was.
+  Deleted with the row: `SHOW_TABS`/`html.notabs`, the four buttons and their CSS, `notabs.mjs`, and
+  **the floating-reveal idea** — it existed to bring a four-way row back, and there is nothing left for
+  it to reveal. The row also carried `--safe-top` for every flow view; **`body` carries that strip now**
+  (0 outside fullscreen, so only fullscreen sees it — `nav.mjs` forces the var to check it).
+- **Browsing is a SHEET inside the session that owns the folder** (`#fbrowse`, joining the
+  `#spawn`/`#sched` family), reached from the paperclip's sheet as a third card — **Photos · Device ·
+  Session folder**, with the old "Files" card renamed because it has always meant *from your phone*. Two
+  "Files" a thumb apart, meaning different things, is the ambiguity the card placement exists to avoid. A
+  one-tap 📁 in the control row is **PARKED**, not rejected: it costs the dial pill's width budget on a
+  360px viewport, and it is a follow-up only if two taps wear badly.
+- **The scope is STRUCTURAL, not a label:** `fbHost.root` is the session's cwd, the `..` row is not built
+  at the root, and the crumb trail starts at the root's leaf name. There is no tap that leaves the scope.
+- **`ls()`/`renderCrumbs()` take their host from `fbHost`** — one component, one host at a time, the same
+  pattern `dialRow()` uses. `openFilesSheet(root, at)` takes both explicitly because the callers know
+  different things (the paperclip knows the session, a link knows a path and maybe a session).
+- **A session's cwd for the browser comes from the SESSIONS payload, never from the drill-in's
+  subtitle** — that line is home-abbreviated for display (`~/projects/x`) and `/api/ls` cannot resolve a
+  `~`; a root taken from there opens an empty sheet.
+- **A file opens in `#viewer` and the sheet is closed first.** The viewer is z 6 and the sheets are 9/10,
+  so a sheet left standing paints over the file it just opened and its backdrop eats every tap in the
+  viewer's header.
+- **Scheduled's pill is bottom-LEFT, square, icon-only and unfilled.** Two filled pills side by side stop
+  either from being primary. Not "one gutter left of the blue pill" as the design note said: that pill is
+  content-sized, so offsetting from it means arithmetic against a width nothing writes down and a label
+  change would silently stack them. Both non-default views (**Scheduled and Settings**) raise the
+  client's ← — neither has an on-screen way home, and treating one as the exception ships a view with no
+  exit.
+- **A `/files` deep link opens the session that owns the folder AND raises its sheet.** The link carries
+  `&sid=` (and the `startapp` token record carries `sid`, returned by `/api/resolve`) so the match is
+  exact rather than a cwd guess. **With no matching session the sheet opens standalone over the command
+  center** at that folder — a link that no longer opens what it promised is worse than one surface with
+  no session behind it. The cwd match is EQUALITY, never a prefix: `/files` mints the link from a
+  session's cwd, and a prefix would claim a parent folder's link for a child session.
+- **The recursive search died with the global view and has no home.** `/api/find` is untouched
+  server-side, so the day it earns a place in the sheet there is nothing to rebuild but the UI.
+- **`data-files="off"` REMOVES the browse card**, and every handler that reaches for a removed element
+  must be guarded — an unguarded `$("ctxbrowse").onclick` threw at parse time on that configuration and
+  the throw killed the rest of the script, leaving the composer's own constants uninitialised. `nav.mjs`
+  runs that shell.
 
 ## Sessions list and spawn sheet
 
