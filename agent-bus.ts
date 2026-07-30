@@ -599,7 +599,10 @@ export function depthExceeded(depth: number): boolean { return depth > depthLimi
 // A bus endpoint resolved by name. kind 'claude' = a topic session (id = its sessionId); kind
 // 'hermes' = an adapter-driven agent (id = its endpoint name). The daemon builds this list from the
 // topic store + the configured hermes endpoints and passes it in — agent-bus.ts stays grammy/tmux-free.
-export type BusEndpoint = { name: string; kind: 'claude' | 'hermes'; id: string; closed: boolean }
+// `hidden` — off the roster and the fleet surfaces, still resolvable by name (a dev self-test stub).
+// resolveEndpoint deliberately ignores it: hiding an endpoint must never make it unreachable, or the
+// hide becomes a delete with extra steps.
+export type BusEndpoint = { name: string; kind: 'claude' | 'hermes'; id: string; closed: boolean; hidden?: boolean }
 
 // An endpoint name is a topic's display name, minus the auto-appended " · <branch>" and " #<n>"
 // sibling suffixes (mirrors topic-runtime's title base), lower-cased for case-insensitive matching.

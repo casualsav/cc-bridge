@@ -125,7 +125,7 @@ const HELP: Record<string, string> = {
            '  work there, what makes a task not routine. Cached per box — a repo already scouted answers\n' +
            '  instantly; a new one is discovered in the background (~1 min) and arrives as an ack.\n' +
            '  --stale "why" flags a brief you found wrong while working in that repo; never hand-edit one.',
-  roster:  'tg roster   who is live on the bus',
+  roster:  'tg roster [--all]   who is live on the bus (--all also lists hidden endpoints, e.g. dev stubs)',
   history: 'tg history [n]   recent agent-bus activity',
   shared:  'tg shared   print the room\'s shared-workspace dir (put deliverables there)',
   doctor:  'tg doctor   host-side install diagnostic (works with the daemon down)',
@@ -182,6 +182,7 @@ if (BUS.has(cmd)) {
     else if (rest[i] === '--clear') { flags.clear = true }                 // wait: drop the declaration early
     else if (rest[i] === '--refresh') { flags.refresh = true }             // repo: re-scout even if the brief is fresh
     else if (rest[i] === '--list') { flags.list = true }                   // repo: what this box already knows
+    else if (rest[i] === '--all') { flags.all = true }                     // roster: include hidden endpoints
     else if (rest[i] === '--await') { /* P1 is async-only; --await is accepted and ignored */ }
     else pos.push(rest[i]!)
   }
@@ -208,7 +209,7 @@ if (BUS.has(cmd)) {
     // the documented shape here (nothing in a wait reason wants Markdown).
     case 'wait':    name = 'wait';    args = { pane, text: flags.clear ? '' : body(pos[0], 'wait') ?? '', ...flags }; break
     case 'repo':    name = 'repo';    args = { pane, path: pos[0], ...flags }; break
-    case 'roster':  name = 'roster';  args = { pane }; break
+    case 'roster':  name = 'roster';  args = { pane, ...(flags.all ? { all: true } : {}) }; break   // --all: include hidden endpoints (dev stubs)
     case 'history': name = 'history'; args = { pane, n: pos[0] }; break
     case 'shared':  name = 'shared';  args = { pane }; break
   }

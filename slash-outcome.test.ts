@@ -45,3 +45,25 @@ test('pasteGuarded\'s slash branch delegates to pasteSlashVerified, never its ow
   expect(code).not.toMatch(/sendKeys\(/)          // no submit of its own, verified or otherwise
   expect(code).not.toMatch(/paste-buffer/)        // and no second copy of the paste mechanics
 })
+
+// ---- hidden endpoints: the DISPLAY sites filter, resolution does not ----
+// Structural, for the same reason as the pasteGuarded guard above: the two surfaces that list
+// endpoints live in handleCall/busRosterLine, which have no unit harness. The behavioural half — a
+// hidden endpoint still resolving by name — is in agent-bus.test.ts, where resolveEndpoint is pure.
+test('both endpoint DISPLAY surfaces filter hidden, and neither hides it from resolution', () => {
+  // The pinned card's roster line.
+  const line = daemon.slice(daemon.indexOf('async function busRosterLine('))
+  expect(line.slice(0, line.indexOf('\n}\n'))).toContain('!e.hidden')
+  // `tg roster` — filtered, with --all as the documented way back in.
+  const roster = daemon.slice(daemon.indexOf("case 'roster': {"))
+  const body = roster.slice(0, roster.indexOf('\n      }\n'))
+  expect(body).toContain('showAll || !e.hidden')
+  expect(body).toContain('args.all')
+  // And the resolver must NOT: hiding an endpoint that a self-test still has to reach cannot be done
+  // by making it unresolvable. If `hidden` ever appears in agent-bus.ts's resolveEndpoint, `tg ask
+  // @test` has silently become a delete.
+  const bus = readFileSync(new URL('./agent-bus.ts', import.meta.url), 'utf8')
+  const resolve = bus.slice(bus.indexOf('export function resolveEndpoint('))
+  const fn = resolve.slice(0, resolve.indexOf('\n}\n'))
+  expect(fn.split('\n').filter(l => !/^\s*\/\//.test(l)).join('\n')).not.toContain('hidden')
+})

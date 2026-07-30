@@ -10,7 +10,11 @@ import { spawn } from 'node:child_process'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
-export type HermesEndpoint = { name: string; profile: string; cmd?: string[]; timeout_s?: number; cwd?: string }
+// `hidden` — keep the endpoint fully reachable (`tg ask @name` resolves it) while leaving it OFF the
+// roster and the fleet surfaces. That is the shape a dev self-test stub needs: deleting its config would
+// take the self-test with it, and listing it beside real agents makes every roster read a lie about who
+// is actually on the bus. Only the DISPLAY sites read it — never resolveEndpoint.
+export type HermesEndpoint = { name: string; profile: string; cmd?: string[]; timeout_s?: number; cwd?: string; hidden?: true }
 export type HermesTask = { id: number; from: string; room: string; text: string; refs: string[]; sharedDir: string }
 export type HermesResult = { ok: true; text: string } | { ok: false; error: string }
 // Did a child process actually come up? Separated from HermesResult because "dispatched" and

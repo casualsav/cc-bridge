@@ -2779,9 +2779,12 @@ function loadHermesEndpoints(): void {
       ...(Array.isArray(v.cmd) ? { cmd: v.cmd.filter((x): x is string => typeof x === 'string') } : {}),
       ...(typeof v.timeout_s === 'number' ? { timeout_s: v.timeout_s } : {}),
       ...(typeof v.cwd === 'string' ? { cwd: v.cwd } : {}),
+      ...(v.hidden === true ? { hidden: true as const } : {}),
     })
   }
-  if (hermesEndpoints.size) process.stderr.write(`daemon: loaded ${hermesEndpoints.size} hermes endpoint(s): ${[...hermesEndpoints.keys()].join(', ')}\n`)
+  // The log names the hidden ones too, marked: a hidden endpoint that failed to load is otherwise
+  // invisible on every surface, and "why won't @test resolve" would have no answer anywhere.
+  if (hermesEndpoints.size) process.stderr.write(`daemon: loaded ${hermesEndpoints.size} hermes endpoint(s): ${[...hermesEndpoints.values()].map(h => h.hidden ? `${h.name} (hidden)` : h.name).join(', ')}\n`)
 }
 loadHermesEndpoints()
 
@@ -2821,7 +2824,10 @@ function busEndpoints(): BusEndpoint[] {
   const dm = listDmChatSessions().map(d => ({ id: d.sessionId, kind: 'claude' as const, name: 'chat', closed: false }))
   const gen = getGeneralSession()
   const anchor = gen ? [{ id: gen, kind: 'claude' as const, name: 'general', closed: false }] : []
-  const hermes = [...hermesEndpoints.values()].map(h => ({ id: h.name, kind: 'hermes' as const, name: h.name, closed: false }))
+  // `hidden` rides along on the endpoint rather than being filtered out here: resolveEndpoint must
+  // still find it (that is the whole point — reachable by name, absent from the lists), so exactly one
+  // place decides what hidden MEANS and the display sites just honour the flag.
+  const hermes = [...hermesEndpoints.values()].map(h => ({ id: h.name, kind: 'hermes' as const, name: h.name, closed: false, ...(h.hidden ? { hidden: true } : {}) }))
   return [...claude, ...dm, ...anchor, ...hermes]
 }
 // A DM chat lane — the orchestrator surface the owner talks to. Two roles here: a lane may close
@@ -2874,7 +2880,7 @@ async function busRosterLine(): Promise<string | null> {
   let line: string | null = null
   try {
     if (busRoom()) {
-      const eps = busEndpoints().filter(e => !e.closed)
+      const eps = busEndpoints().filter(e => !e.closed && !e.hidden)   // hidden: reachable by name, not on display
       const agents: RosterAgent[] = []   // RAW names — formatRosterLine clamps THEN escapes (never splits an entity)
       for (const e of eps) {
         if (e.kind === 'hermes') { agents.push({ name: nameForEndpoint(e.id, eps) }); continue }   // one-shot: no live ctx%
@@ -5404,7 +5410,12 @@ async function handleCall(
       }
       case 'roster': {
         const rows: string[] = []
-        const eps = busEndpoints()
+        // `tg roster --all` includes hidden endpoints (marked). There IS an escape hatch, on purpose: a
+        // hidden endpoint that failed to load is otherwise invisible on every surface, so "why won't
+        // @test resolve" would be answerable only by grepping the daemon log. Hidden is a display
+        // choice, not a secret.
+        const showAll = args.all === true
+        const eps = busEndpoints().filter(e => showAll || !e.hidden)
         // One process table / pane-pid map / ledger tail for the whole roster, same as the mini app's
         // poll — the scan is per READ, never per agent.
         const wctx = await waitContext()
@@ -5414,7 +5425,7 @@ async function handleCall(
         try { avatars = parseAvatars(readJsonFile(AVATARS_FILE, null)) } catch {}
         for (const e of eps.filter(e => !e.closed)) {
           const nm = nameForEndpoint(e.id, eps)
-          const flair = resolveAvatar(nm, avatars) ? ' · 🎭' : ''
+          const flair = (resolveAvatar(nm, avatars) ? ' · 🎭' : '') + (e.hidden ? ' · hidden' : '')
           if (e.kind === 'hermes') {   // no pane; busy = a `hermes -z` child in flight for it
             const busy = [...hermesInFlight].some(pid => getPending(pid)?.toSid === e.id)
             rows.push(`${busy ? '🟡' : '🟢'} ${nm} · hermes${busy ? ' · busy' : ''}${flair}`)

@@ -247,6 +247,23 @@ test('an id address never resolves an empty name, and a name shadowing an id sta
   expect(resolveEndpoint('aaaa1111', eps2)).toEqual({ kind: 'claude', id: 'bbbb2222' })   // the NAME wins
 })
 
+test('a HIDDEN endpoint still resolves by name — hiding is a display choice, not a delete', () => {
+  // The constraint on the hide: a dev self-test stub is kept OUT of the roster and the fleet surfaces
+  // while staying fully reachable, because deleting its config would take the self-test with it. If
+  // anyone ever "fixes" hiding by filtering here, `tg ask @test` stops working and the stub is
+  // unreachable — which is a delete with extra steps. This test is that tripwire.
+  const eps: BusEndpoint[] = [
+    { id: 'test', kind: 'hermes', name: 'test', closed: false, hidden: true },
+    { id: 'mimo', kind: 'hermes', name: 'mimo', closed: false },
+  ]
+  expect(resolveEndpoint('@test', eps)).toEqual({ kind: 'hermes', id: 'test' })
+  expect(resolveEndpoint('test', eps)).toEqual({ kind: 'hermes', id: 'test' })
+  // And it still participates in ambiguity: two live endpoints sharing a name is an error whether or
+  // not one of them is hidden — silently picking the hidden one would be the worst of both.
+  const clash: BusEndpoint[] = [...eps, { id: 'sess9', kind: 'claude', name: 'test', closed: false }]
+  expect((resolveEndpoint('test', clash) as { error: string }).error).toMatch(/ambiguous/)
+})
+
 test('resolveEndpoint fails loudly: unknown, closed-only, same-kind + cross-kind ambiguous', () => {
   expect(resolveEndpoint('nobody', eps)).toHaveProperty('error')
   expect((resolveEndpoint('reviewer', eps) as { error: string }).error).toMatch(/isn't running/)
