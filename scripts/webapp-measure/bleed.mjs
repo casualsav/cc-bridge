@@ -92,7 +92,7 @@ const m = await p.evaluate(() => {
     // chip family's fill and frost; it is two bare lines of text now and carries neither, so reading
     // it here compared the composer's glass against `none` and failed a rule that is still true.
     // The two side chips are what remain of that family — see CLAUDE.md.
-    headBlur: cs(document.getElementById("dback")).backdropFilter,
+    headBlur: cs(document.querySelector("#drill .dtitle")).backdropFilter,   // the title PILL since 2026-07-30; it was the back chip, which is gone
     // getComputedStyle's SECOND argument is the pseudo-element, and the local `cs` helper drops it —
     // reading the scrim through that helper measures #drill itself and reports "none" for a gradient
     // that is painting perfectly. Called directly for exactly that reason.
@@ -162,11 +162,12 @@ const through = await p.evaluate(() => {
   const wrap = document.querySelector(".inputwrap").getBoundingClientRect();
   return {
     topStrip: hit(187, Math.max(2, head.top / 2)),            // above the header — Telegram's own chrome band
-    // The GAP between the back button and the name capsule — measured, not guessed, since the capsule
-    // is 20% narrower than its span and the gap moved with it. Only a full-width assistant message
+    // BESIDE the pill, halfway between the row's left edge and the pill itself — the strip the back
+    // chip used to occupy, empty since 2026-07-30. Measured rather than guessed, since the pill is
+    // shrink-wrapped and that strip moves with the name's width. Only a full-width assistant message
     // reaches this column (a user bubble is right-aligned), so the band scanned here is wide enough
     // to cross one.
-    besideHead: hit((document.getElementById("dback").getBoundingClientRect().right
+    besideHead: hit((head.left
       + document.querySelector("#drill .dtitle").getBoundingClientRect().left) / 2,
       // The band is clamped INSIDE the header's own height. A wider scan reaches past its bottom edge
       // into the feed below, where the in-flow layout has messages too — which is how this check
@@ -192,7 +193,7 @@ check(through.besideDock, "…and through the dock's margin, where the dock's sc
 // 5. The capsule is the header's surface: translucent AND frosted.
 const alpha = s => { const n = s.match(/[\d.]+/g); return n && n.length === 4 ? parseFloat(n[3]) : 1; };
 check(alpha(m.wrapBg) < 1, `the input capsule is translucent (${m.wrapBg})`);
-check(/blur/.test(m.wrapBlur) && m.wrapBlur === m.headBlur, `…and carries the SAME blur as the header chips (${m.wrapBlur} vs ${m.headBlur})`);
+check(/blur/.test(m.wrapBlur) && m.wrapBlur === m.headBlur, `…and carries the SAME blur as the header's title pill (${m.wrapBlur} vs ${m.headBlur})`);
 // The dock's own BOX still carries no fill, and that is not pedantry: the scrim has to sit on the
 // ::before or it tints the working row, the capsule and their text instead of the backdrop behind
 // them. What the box must not have and what the scrim must have are two halves of one claim, so

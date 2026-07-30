@@ -153,23 +153,17 @@ async function measure(path, label, shotPrefix) {
     guard(repainted === "On", `…and the row repaints with the value the write set (${repainted})`);
     await p.close();
   }
-  // ---- interrupt -------------------------------------------------------------------------------
-  {
-    const p = await open(path);
-    await p.evaluate(() => openDrill("s1", "cc-bridge"));
-    await p.waitForTimeout(600);
-    await p.evaluate(() => document.getElementById("dstop").click());
-    await p.waitForTimeout(900);
-    const t = await bar(p);
-    state(!t.shown, `a successful INTERRUPT raises no bar (shown ${t.shown}, text ${JSON.stringify(t.text)})`);
-    await p.close();
-  }
+  // The INTERRUPT case that used to sit here is gone with the control: v0.4.270 removed the drill-in's
+  // pause chip entirely (the owner's ask), so there is no longer a site to silence — the retired family
+  // is 10 sites, not 11, and its `showDone("Interrupted")` went with the handler.
   // ---- the failure leg, on the same action ------------------------------------------------------
   {
+    // Driven through SPAWN now that the pause chip is gone. Same writeOp path, which is where the
+    // ok/error branch actually lives, so the leg proves the same thing it did through interrupt.
     const p = await open(path, { fail: true });
-    await p.evaluate(() => openDrill("s1", "cc-bridge"));
-    await p.waitForTimeout(600);
-    await p.evaluate(() => document.getElementById("dstop").click());
+    await p.evaluate(async () => { openSpawnSheet(); document.getElementById("spname").value = "test"; });
+    await p.waitForTimeout(300);
+    await p.evaluate(() => document.getElementById("spgo").click());
     await p.waitForTimeout(700);
     const t = await bar(p);
     guard(t.shown && !t.ok && t.text.includes("pane is gone"),

@@ -56,13 +56,14 @@ async function open(fullscreen) {
 const read = p => p.evaluate(() => {
   const r = el => el ? (({ top, bottom, left, right, width, height }) => ({ top, bottom, left, right, width, height }))(el.getBoundingClientRect()) : null;
   const q = s => document.querySelector(s);
-  const stop = document.getElementById("dstop");
   return {
     fs: document.documentElement.classList.contains("fs"),
     head: r(q("#drill .vhead")), cap: r(q("#drill .dtitle")),
-    back: r(document.getElementById("dback")), stop: r(stop),
-    stopParent: stop && stop.parentElement.className,
-    backShown: getComputedStyle(document.getElementById("dback")).display !== "none",
+    // The two chips left on 2026-07-30 (the owner's ask): back is the client's own ← and the pause
+    // had no replacement. Kept as PRESENCE reads so this file fails loudly if either returns without
+    // the fullscreen block being thought about again — the whole point of that block was fitting three
+    // containers into a ~218px band, and there is one now.
+    chips: document.querySelectorAll("#drill .vhead button").length,
     feedPadTop: parseFloat(getComputedStyle(document.getElementById("dfeed")).paddingTop),
     scrimH: getComputedStyle(document.getElementById("drill"), "::before").height,
     chromeTop: getComputedStyle(document.documentElement).getPropertyValue("--chrome-top").trim(),
@@ -78,9 +79,7 @@ const read = p => p.evaluate(() => {
 const normal = await read(await open(false));
 check(!normal.fs, "no .fs class outside fullscreen");
 check(near(normal.head.top, 10), `the header still sits on its own row (top ${normal.head.top})`);
-check(normal.backShown, "our back chip is still the way out");
-check(normal.stopParent.includes("vhead"), `the pause is still its own chip (parent .${normal.stopParent})`);
-check(normal.stop.left > normal.cap.right, "…to the RIGHT of the capsule, outside it");
+check(normal.chips === 0, `the header row carries no buttons at all (${normal.chips})`);
 
 // ── 2. FULLSCREEN: the header is in the client's band.
 const fsPage = await open(true);
@@ -95,16 +94,16 @@ check(fs.head.left >= 60 && fs.head.right <= 300,
   `and inset clear of its buttons (${fs.head.left}…${fs.head.right} of 360)`);
 // …with 10% of the band held back as clearance. The measured insets came off a screenshot, which
 // shows the client's INK and not its touch targets, so the pill was clipping the ✕ and the kebab.
+// A CAP rather than a width since the pill began shrink-wrapping (2026-07-30): a short session name
+// makes it narrower than the cap and that is correct, so what has to hold is "never wider".
 const band = fs.head.right - fs.head.left;
-check(near(fs.cap.width, band * 0.9, 1.5),
-  `the pill keeps 10% of the band clear of them (${fs.cap.width.toFixed(1)} of ${band.toFixed(1)})`);
+check(fs.cap.width <= band * 0.9 + 1.5,
+  `the pill never exceeds 90% of the band, so the client's buttons stay clear (${fs.cap.width.toFixed(1)} of ${band.toFixed(1)})`);
 check(near(fs.cap.left - fs.head.left, fs.head.right - fs.cap.right, 1),
   `…split evenly, so it stays centred (${(fs.cap.left - fs.head.left).toFixed(1)} / ${(fs.head.right - fs.cap.right).toFixed(1)})`);
 
 // ── 3. The pause is folded IN.
-check(fs.stopParent.includes("dtitle"), `the pause moved inside the capsule (parent .${fs.stopParent})`);
-check(fs.stop.left > fs.cap.left && fs.stop.right <= fs.cap.right + 0.5,
-  `…and is within its bounds (${fs.stop.left}…${fs.stop.right} inside ${fs.cap.left}…${fs.cap.right})`);
+check(fs.chips === 0, `…in fullscreen too, where the pause used to fold into the pill (${fs.chips})`);
 check(fs.name.width > 40 && fs.sub.width > 40,
   `the title column still has room (name ${fs.name.width.toFixed(0)}px, cwd ${fs.sub.width.toFixed(0)}px)`);
 
@@ -162,7 +161,11 @@ check(parseFloat(fs.scrimH) > NOTCH + CHROME,
 // check it replaces asked whether the scrim was at full strength at the BAND's floor, which was true
 // of the old fullscreen shape (solid all the way down to --safe-top) and false of the right one — it
 // failed the fix rather than the defect.
-check(near(scrimSolid, fs.name.bottom, 1.5), `the solid part ends at the NAME's floor, the same relationship normal mode has (${scrimSolid.toFixed(1)} vs ${fs.name.bottom.toFixed(1)})`);
+// The relationship changed with the pill's return (2026-07-30) and is still ONE relationship across
+// both modes: the solid part ends where the PILL BEGINS, because below that line the pill's own fill is
+// the ground the title reads against — that is what the scrim no longer has to do, and why the near-
+// solid band that replaced the pill could come back out.
+check(near(scrimSolid, fs.cap.top, 2), `the solid part ends at the PILL's top edge, the same relationship normal mode has (${scrimSolid.toFixed(1)} vs ${fs.cap.top.toFixed(1)})`);
 check(atSolid < 40, `…and is at full strength there (${atSolid}/255 of the probe survives just above it)`);
 check(atBandFloor > 40 && atBandFloor < 235, `…with the fade already running by the band's floor (${atBandFloor}/255)`);
 // SMOOTHNESS, scale-free — the absolute 12/255 this replaces was really measuring the ramp's

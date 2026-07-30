@@ -216,6 +216,19 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   green-over-card at whatever phase the frame caught (52,100,68) and
                                   #   reads as a colour change on both pages. Same pinned-baseline split
                                   #   as waitstate: 4 STATE checks must fail there, 9 guards must hold
+    node drillhead.mjs [page][out] # the session-chat header RESTORED (2026-07-30): a floating name/cwd
+                                  #   pill over the pill-era gradient, transcript to the very top, and
+                                  #   no chips of ours beside it. Drives the client's ← through a
+                                  #   recording SDK stub with isFullscreen FALSE — the case the old gate
+                                  #   excluded — and asserts it is raised, that tapping it lands on the
+                                  #   command center, that no halt affordance survives anywhere in the
+                                  #   drill (read as a class, not as "#dstop is absent"), and that the
+                                  #   pill is SHRINK-WRAPPED by lengthening the name and watching the box
+                                  #   follow ("narrower than the row" passed on the old flex:1 title).
+                                  #   Pinned control (ed2a942): all 5 state checks fail there.
+                                  #   Geometry is header.mjs, the scrim's profile bleed/headerup, the
+                                  #   cwd's contrast halo.py — which now removes the PILL's fill for its
+                                  #   inverted control, the fill being the title's floor since this change
     node toasts.mjs [page] [out]  # the GREEN bar gone and the RED one kept. Drives spawn · close ·
                                   #   settings-write · interrupt through the app's own write path with
                                   #   `fetch` stubbed (writeOp is where the ok/error branch lives, so

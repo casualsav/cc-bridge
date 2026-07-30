@@ -42,8 +42,8 @@ give it.
   last line as a sliver at the scroll boundary.
 - **Half-pixel paint snap:** a box centred by flex *free space* with an odd leftover paints its SVG
   0.5px down-right at every DPR, while `getBoundingClientRect()` reports it centred. So `.sendbtn`
-  (40px) takes a 20px glyph. Boxes positioned by integer padding are immune (`.ghost` is fine;
-  `.chatbtn` was measured, fixed with integer padding, and `header.mjs` asserts the parity). The
+  (40px) takes a 20px glyph. Boxes positioned by integer padding are immune (`.ghost` is fine; the
+  header's `.chatbtn` was measured and fixed the same way before it was retired with the chips). The
   rule is halved free space, not icon-vs-button parity in general.
 - **The send plane's optical nudge belongs to `#dsend` alone** (`translate(-1.5px, 1.5px)`). On a
   shared selector it silently displaced the mic and record-stop, whose artwork is already centred.
@@ -289,42 +289,57 @@ give it.
 
 ## Header, scrims, z-order
 
-- **The title is two bare lines — no capsule.** The two SIDE chips keep fill/lift/glass (the row's
-  only 44px targets); the `--chip-*` family describes the side buttons only.
-- **The ceiling scrim is TWO LENGTHS, not percentages of one height:** `--scrim-solid` reaches the
-  NAME's floor; `--scrim-ramp` is everything below. Through the cwd's own line box the curve barely
-  moves — that line's legibility IS the ground under it; the fade happens below. Fullscreen moves
-  the SPLIT only: `html.fs` sets `--scrim-solid: var(--safe-top)`. Percentages could not express
-  that — the attempt shipped two bugs in an hour.
-- **The ramp keeps FADING through the header's band and lands well past it** (34px). Finish it
-  above the header and glass over flat ground reads as paint (tried, owner-rejected); end it at the
-  header's bottom and every drop the cwd needs happens in 9px — a cliff (shipped once, "very harsh
-  and sudden"). `bleed.mjs` measures the rendered alpha profile — `getComputedStyle` needs the
-  pseudo-element as its second argument, and a hit test must scan a band, not a point. The
-  steepness check is scale-free (no step over 3× the ramp's own mean) — a fixed per-pixel bound
-  really measures the ramp's LENGTH.
-- **No glyph-level contrast treatment on the title lines.** Every stroke/shadow version was a
-  symptom of a scrim stopping too high — fix the ramp, not the glyphs (owner, on the stroke: "a
-  border that doesn't look premium"). Two general traps: stacked `text-shadow`s in the page's own
+- **The title is a PILL again and the row carries nothing else** (the owner, 2026-07-30, reversing
+  8c6ef3f/v0.4.154 now that the chips are gone). Restored from `8c6ef3f^`: stadium radius off
+  `--hbtn-d`, `--chip-lift`, `--chip-glass` — but **NOT `--chip-fill`**. That fill was only ever half
+  the floor and the halo was the other half; with the halo deleted in between, the old transparency
+  measured the cwd at **2.46:1 dark / 2.03:1 light** over a bright bubble (`halo.py`), under AA and
+  against 4.95/5.78 on the build it replaced. So the pill carries **92% of `--bg`** and IS the contrast
+  floor; `halo.py`'s inverted control removes the pill's fill (not the ramp) and the cwd falls to
+  1.18:1, which is what says the fill is load-bearing rather than decorative.
+- **It is SHRINK-WRAPPED (`flex: 0 1 auto; margin-inline: auto`), and that is the difference between a
+  pill and a header bar.** A filled box spanning the row is exactly the look the owner ruled out. In
+  fullscreen the clearance is a `max-width: 90%` cap plus `margin-inline: auto` — `margin-inline: 5%`
+  does not centre a shrink-wrapped box, it offsets it (10.9px against 71.2px, measured).
+  `drillhead.mjs` proves shrink-wrap by lengthening the name and watching the box follow: "narrower
+  than the row" passed on the old `flex: 1` title too.
+- **The back and pause chips are GONE, and `.chatbtn` with them.** Back is the client's own ←, raised
+  un-gated for this screen (see `openDrill`); the pause had **no replacement in this app** — a real
+  function left the mini app, and it lives on only in Telegram (`/stop`, and 👎 on a message).
+- **The ceiling scrim is TWO LENGTHS, not percentages of one height:** `--scrim-solid` is solid
+  `--bg` and `--scrim-ramp` is the eased fall. Since 2026-07-30 the solid part ends at the **pill's
+  top edge** (`--head-top`) and the ramp is the **pill's own band** (`--hbtn-d`) — the pill-era
+  geometry, restored with the pill, because the near-solid band that replaced it IS the header bar the
+  owner rejected. The pill-era build wrote those alphas as PERCENTAGES OF THE ELEMENT and they are not
+  portable: as a percentage the solid part became "the top 26% of whatever this is", which in
+  fullscreen left the client's whole chrome band see-through above the pill. Over the two lengths both
+  modes end the solid part at the same place. Fullscreen lengthens **only the ramp**
+  (`--chrome-h + --sp-3`): our header rides inside the client's band there, so the transcript scrolls
+  under Telegram's buttons and the pill-era length would end 5px above the band's floor.
+- **The ramp still fades THROUGH the band rather than capping it** — the transcript is visibly moving
+  behind the pill, which is the point of the full-bleed feed. `bleed.mjs` and `headerup.mjs` measure the
+  rendered alpha profile (`getComputedStyle` needs the pseudo-element as its second argument; a hit test
+  must scan a band, not a point), and the steepness check is scale-free — no step over 3× the ramp's own
+  mean, because a fixed per-pixel bound really measures the ramp's LENGTH.
+- **No glyph-level contrast treatment on the title lines** (owner, on the stroke: "a border that
+  doesn't look premium"). With the halo AND the near-solid ramp both ruled out, the pill's own fill is
+  the only floor left — which is why its 92% is a measured number and not a taste call. Two general traps: stacked `text-shadow`s in the page's own
   colour still darken it ~6 units through 8-bit rounding and paint an accidental plate; buying
   contrast with a fatter stroke is a lumpy blob at 5px.
-- **The header is three containers, derived CAPSULE-FIRST:** `--hbtn-d = --h-l1 + --h-l2 +
-  2·--h-pad` (36px) and the buttons take that as their HEIGHT, so all three stay equal by
-  construction. Line boxes are px, not `--lh-snug` — a fractional row height puts integer padding
-  back on a half pixel. **Keep both button axes minus `--hbtn-glyph` EVEN** (36−24, 44−24): that
-  parity is why the name's line box is 16 not 15 and why `--hbtn-w` steps by 8. The name rule
+- **`--hbtn-d = --h-l1 + --h-l2 + 2·--h-pad` (36px) survives the buttons it was named for**: it is
+  now the pill's height, its radius's source, the scrim's ramp length and the fullscreen centring
+  offset. Line boxes are px, not `--lh-snug` — a fractional row height puts integer padding back on a
+  half pixel. The name rule
   carries `overflow: hidden`, so ink past the line box is SLICED — `header.mjs` measures clearance
   in pixels (canvas text metrics lied by a whole CSS pixel). `--w-semi` on `.name` is load-bearing.
-- **The buttons are 44×36 stadiums** — radius `calc(--hbtn-d / 2)`, never `50%` (an ellipse whose
-  flanks disagree with the capsule's ends). The height was taken below the 44px touch floor
-  knowingly, twice asked; the width holds the target's area — don't take the height lower.
-  `.dtitle`'s `margin-inline` is the ONE place the row's width budget is written.
+- **Radius is `calc(--hbtn-d / 2)`, never `50%`** — a percentage radius on a non-square box draws an
+  ellipse whose flanks disagree with the ends, and it passes every width check.
 - **The title centres on the dot+name GROUP, not the name** — the name sits ~8px right of the
   cwd's centre, the trade the owner picked; restoring the old `.nmrow::after` mirror is a revert.
   The dot class is shared with the sessions list (`.sess .dot`): a global size bump walks this name
   off its axis.
-- **Nothing in the header is conditional** — `#dstop`'s hide-while-recording branch was deleted
-  deliberately (do not restore). `#dsub` empty is a real state (a deep-linked open precedes the
+- **Nothing in the header is conditional** — there is nothing left in it that could be. `#dsub` empty
+  is a real state (a deep-linked open precedes the
   snapshot); it is `min-height`'s one visible job and the state to render after header changes.
 - **The drill-in is FULL BLEED:** `#dfeed` is `position: absolute; inset: 0` and RESERVES the two
   floating surfaces as its own padding — top = `--safe-top` + the header's footprint, bottom =
@@ -341,13 +356,13 @@ give it.
   box, so `#drill`'s padding-top (the whole fullscreen mechanism) does not move it. And "a message
   is behind the chips" by rect overlap CANNOT FAIL (a clipped message still reports a spanning
   rect) — hit-test with `elementsFromPoint` (`header.mjs` does).
-- **The chips are a SCRIM, not a raised surface**, measured off Telegram's own ✕ pill:
-  `--chip-fill` is **44% of `--bg` at 36%** — a proportion, never a literal hex, because 44% of the
-  ground is darker than the ground on any theme. `--chip-glass` is a filter LIST (`blur(20px)
-  saturate(0.35)`): the saturate takes the colour cast out of a passing bubble without a
-  `brightness()` clamp that would cost the resting colour. Tinting the fill toward `--text` is the
-  wrong direction (tried). No filter makes a transparent chip ignore a bright thing under it —
-  Telegram's own chips merely sit where the scrim already dissolved the content.
+- **`--chip-fill` (44% of `--bg` at 36%) is now the COMPOSER capsule's, not the header's** — a
+  proportion, never a literal hex, because 44% of the ground is darker than the ground on any theme.
+  `--chip-glass` is a filter LIST (`blur(20px) saturate(0.35)`) shared with the header pill: the
+  saturate takes the colour cast out of a passing bubble without a `brightness()` clamp that would cost
+  the resting colour. Tinting a fill toward `--text` is the wrong direction (tried). **No filter makes a
+  transparent surface ignore a bright thing under it** — which is the whole reason the title pill needed
+  a denser fill than this one when it came back.
 - **`#dfeed` carries `z-index: 0`** — it makes the scroller a stacking context so any z-index
   inside the feed stays LOCAL. Without it, `.more`'s `z-index: 1` tied the ceiling scrim's 1 and
   won on tree order — the fold label painted over the scrim at full strength. Any new floating
@@ -368,11 +383,11 @@ give it.
   measured); if a sheet grows toward the top the fix is a `max-height` — `align-items: flex-end`
   overflows *past* padding.
 - **In fullscreen the header rides UP into Telegram's chrome band.** `--chrome-top`/`--chrome-h`
-  are separate because the header centres *inside* the second. The pause control is a DOM MOVE into
-  `.dtitle` — a control faking "not fullscreen" by zeroing a var fails. `.tcol` is `display:
-  contents` outside fullscreen, keeping normal mode byte-identical. `--chrome-l/r` are THE one
-  guess in the file — the API never exposes the buttons' x-extents, so they came off a screenshot
-  (ink, not touch targets; the pill's 10% margin absorbs it). `BackButton` replaces our chip in
+  are separate because the header centres *inside* the second. The pause's DOM move and the `.tcol`
+  wrapper that existed for it are both gone (2026-07-30) — the header is one container in both layouts
+  now, so nothing changes boxes when fullscreen flips. `--chrome-l/r` are THE one guess in the file —
+  the API never exposes the buttons' x-extents, so they came off a screenshot (ink, not touch targets;
+  the pill's 10% cap absorbs it). `BackButton` is raised for this screen in **every** layout now, not
   fullscreen only; whether the client swaps ✕ Close for ← is unverified on a device.
 
 ## Toasts

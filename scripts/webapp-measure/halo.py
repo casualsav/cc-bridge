@@ -131,7 +131,7 @@ for theme in ("dark", "light"):
                             # halo went (v0.4.160) and that made it identical to the row above it —
                             # a row that always agrees. The file name is left alone so old outdirs
                             # still read.
-                            ("scrim off", OUT / f"5-{theme}-bubble-nohalo.png")):
+                            ("pill fill off", OUT / f"5-{theme}-bubble-nohalo.png")):
             if not path.exists():
                 print(f"  {line:5s} {label:16s}  (no shot)")
                 continue
@@ -148,7 +148,7 @@ for theme in ("dark", "light"):
             # is that killing the ramp MOVES the number, i.e. something bright really is behind that
             # line. Graded below.
             tag = ("" if label == "flat (CONTROL)"
-                   else f"  (bare, no ramp — flat is {got.get('flat (CONTROL)', 0):.2f})" if label == "scrim off"
+                   else f"  (floor removed — flat is {got.get('flat (CONTROL)', 0):.2f})" if label == "pill fill off"
                    else "  <- under AA" if worst < AA else "  ok")
             print(f"  {line:5s} {label:16s}  worst {worst:5.2f}:1   median {med:5.2f}:1{tag}")
         if got.get("flat (CONTROL)") is None or got["flat (CONTROL)"] < AA:
@@ -162,14 +162,14 @@ for theme in ("dark", "light"):
             bad += 1
         elif got.get("over a bubble") is not None and got["over a bubble"] < AA:
             bad += 1
-        elif got.get("scrim off") is not None and got["scrim off"] > got["flat (CONTROL)"] * 0.9:
-            # The title carries no treatment of its own any more, so the ramp is the only thing
-            # between it and the transcript. Kill the ramp and the number must MOVE — if it stays at
-            # its flat-ground value, nothing bright was behind that line and every "ok" above this
-            # is vacuous. This is the check that would have caught a fixture scrolled to the wrong
-            # place, which no amount of AA grading can.
-            print("       !! killing the ramp barely moved this line — nothing bright is behind it,")
-            print("          so the numbers above are measuring flat page colour. Check the scroll.")
+        elif got.get("pill fill off") is not None and got["pill fill off"] > got["flat (CONTROL)"] * 0.9:
+            # Whatever is carrying the line's contrast — the halo once, the near-solid ramp after it,
+            # the restored pill's fill since 2026-07-30 — batch5.mjs removes THAT for this frame. Kill
+            # the floor and the number must MOVE: if it stays at its flat-ground value, nothing bright
+            # was behind that line and every "ok" above it is vacuous. This is the check that catches a
+            # fixture scrolled to the wrong place, which no amount of AA grading can.
+            print("       !! removing the title's contrast floor barely moved this line — nothing bright")
+            print("          is behind it, so the numbers above measure flat page colour. Check the scroll.")
             bad += 1
 
 print("\n" + ("FAILED — a title line is under AA over a bubble" if bad else "every title line clears AA over a bubble, in both themes"))

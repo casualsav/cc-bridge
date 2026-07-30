@@ -4,9 +4,14 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-// The chat header: three containers ONE height, a name two steps above the cwd, a capsule 20%
-// narrower than the span it bridges, chips the transcript passes BEHIND, and a title centred on the
-// dot+name group rather than on the name alone.
+// The chat header, which since 2026-07-30 is ONE container: the name/cwd PILL, restored from 8c6ef3f^
+// (the owner's ask), with no back or pause chip beside it. What this measures: the pill's own surface
+// (translucent fill, stadium radius, frost), that it is SHRINK-WRAPPED and centred rather than spanning
+// the row as a bar, a name two steps above the cwd inside it, the transcript passing BEHIND it and
+// visible beside it, and the title centred on the dot+name group rather than on the name alone.
+// The chip geometry this file used to carry — three containers one height, stadium buttons, whole-pixel
+// glyph padding — went with the chips. What those checks protected lives on in the composer's buttons,
+// which composerbox.mjs measures; they are retired here rather than kept green against nothing.
 //
 //   node header.mjs [page]
 //
@@ -48,37 +53,44 @@ const m = await p.evaluate(() => {
   const cs = el => getComputedStyle(el);
   const head = document.querySelector("#drill .vhead");
   const cap = document.querySelector("#drill .dtitle");
-  const back = document.getElementById("dback");
-  const stop = document.getElementById("dstop");
   const name = document.getElementById("dname");
   const dot = document.getElementById("ddot");
   const sub = document.getElementById("dsub");
   const feed = document.getElementById("dfeed");
   const msgs = [...feed.querySelectorAll(".msg")];
   return {
-    head: r(head), cap: r(cap), back: r(back), stop: r(stop),
+    head: r(head), cap: r(cap),
+    gone: { back: !!document.getElementById("dback"), stop: !!document.getElementById("dstop"),
+      chatbtn: document.querySelectorAll("#drill .chatbtn").length,
+      // ANY control in the drill-in that could halt a turn — read as "is there a pause affordance on
+      // this screen", not "is #dstop absent": a re-added button under a new id is the regression.
+      halts: [...document.querySelectorAll("#drill button")].filter(b =>
+        /interrupt|stop|pause|halt/i.test((b.id || "") + " " + (b.title || "") + " " + (b.getAttribute("aria-label") || ""))).map(b => b.id || b.title) },
     name: r(name), dot: r(dot), sub: r(sub), feed: r(feed),
     headPos: cs(head).position,
     headW: head.clientWidth,
     gap: parseFloat(cs(head).gap),
     nameFont: parseFloat(cs(name).fontSize), nameWeight: cs(name).fontWeight,
     subFont: parseFloat(cs(sub).fontSize),
-    capBg: cs(cap).backgroundColor, backBg: cs(back).backgroundColor,
-    backPad: cs(back).padding,
-    backRadius: parseFloat(cs(back).borderTopLeftRadius),
+    capBg: cs(cap).backgroundColor,
+    capRadius: parseFloat(cs(cap).borderTopLeftRadius),
+    capFrost: cs(cap).backdropFilter,
+    capShadow: cs(cap).boxShadow,
     feedPadTop: parseFloat(cs(feed).paddingTop),
     firstMsgTop: msgs.length ? r(msgs[0]).top : null,
     scrollable: feed.scrollHeight - feed.clientHeight,
   };
 });
 
-// 1. Height — the three containers agree, and the row came down.
-check(near(m.back.h, m.cap.h) && near(m.cap.h, m.stop.h), `three containers one height (${m.back.h} / ${m.cap.h} / ${m.stop.h})`);
-check(m.cap.h === 36, `row height 36, was 44 (got ${m.cap.h})`);
-// …and the buttons are no longer round: wider than tall, with a STADIUM radius. A percentage radius
-// on a non-square box draws an ellipse, which is the wrong shape and passes any width check.
-check(m.back.w > m.back.h && m.back.w === m.back.h + 8, `buttons wider than tall (${m.back.w} x ${m.back.h})`);
-check(near(m.backRadius, m.back.h / 2), `stadium radius, not an ellipse (${m.backRadius} vs ${m.back.h / 2})`);
+// 1. The PILL — a surface again, and the only container in the row.
+check(m.cap.h === 36, `pill height 36: its own two line boxes plus padding (got ${m.cap.h})`);
+check(near(m.capRadius, m.cap.h / 2), `stadium radius off that height, not an ellipse (${m.capRadius} vs ${m.cap.h / 2})`);
+check(/blur/.test(m.capFrost || ""), `the frost is back (backdrop-filter: ${m.capFrost})`);
+check(m.capShadow !== "none", `and the rim (box-shadow: ${(m.capShadow || "").slice(0, 44)}…)`);
+// The removals, asserted as a CLASS rather than by id: a pause under a new id is the regression.
+check(!m.gone.back && !m.gone.stop && m.gone.chatbtn === 0,
+  `no back or pause chip in the drill (dback ${m.gone.back}, dstop ${m.gone.stop}, .chatbtn ${m.gone.chatbtn})`);
+check(m.gone.halts.length === 0, `no halt/interrupt affordance anywhere in the drill (${m.gone.halts.join(", ") || "none"})`);
 
 // 2. Type — two steps apart, bold kept, and the taller type still fits the line box it did not grow.
 check(m.nameFont === 14 && m.subFont === 11, `name 14 / cwd 11, two scale steps apart (got ${m.nameFont} / ${m.subFont})`);
@@ -90,7 +102,15 @@ check(m.nameWeight === "600", `name keeps --w-semi (got ${m.nameWeight})`);
 // disagreed with the paint by a whole CSS pixel. Carries its own falsifying control: at 22px the ink
 // must reach both edges, or the probe is measuring nothing.
 const inkRows = async () => {
-  const box = await p.evaluate(() => {
+  // The transcript is scrolled OFF the header band first, and that is not tidiness: this probe finds
+  // ink by absolute luminance, and with the pill's frost restored (2026-07-30) a bright bubble blurred
+  // behind the pill lifts the band's own ground past the threshold — the descender then "reached" the
+  // bottom edge in rows the type never touched (3..31 instead of 3..29, measured). At scroll top the
+  // ground under the name is flat pill-over-bg, which is the assumption the threshold is written for.
+  const box = await p.evaluate(async () => {
+    const f = document.getElementById("dfeed");
+    f.scrollTop = 0;
+    await new Promise(r => requestAnimationFrame(r));
     const r = document.getElementById("dname").getBoundingClientRect();
     return { x: r.x, y: r.y, width: r.width, height: r.height };
   });
@@ -121,15 +141,15 @@ check(over.first === 0 && over.last === over.n - 1,
 await p.evaluate(() => { const n = document.getElementById("dname"); n.style.fontSize = ""; n.textContent = "cc-bridge"; });
 await p.waitForTimeout(120);
 
-// 3. Width — the capsule is 20% narrower than the span between the circles.
-const span = m.headW - m.back.w - m.stop.w - 2 * m.gap;
-check(near(m.cap.w, span * 0.8, 1), `capsule 80% of its span (${m.cap.w.toFixed(1)} vs ${(span * 0.8).toFixed(1)}, span ${span.toFixed(1)})`);
-check(near(m.back.left, m.head.left) && near(m.stop.right, m.head.right), "circles still pinned to the row's ends");
-check(near(m.cap.left - m.back.right, m.stop.left - m.cap.right, 1), "capsule centred in the row");
+// 3. Width — SHRINK-WRAPPED, not a bar. A filled pill spanning the row IS the solid header bar this
+// change exists to avoid, and it would pass every other check in this file.
+check(m.cap.w < m.headW - 8, `pill narrower than the row it floats in (${m.cap.w.toFixed(1)} of ${m.headW})`);
+check(near(m.cap.left - m.head.left, m.head.right - m.cap.right, 1),
+  `and centred in it (${(m.cap.left - m.head.left).toFixed(1)} vs ${(m.head.right - m.cap.right).toFixed(1)} either side)`);
 
 // 4. Translucency + float — the transcript really passes behind the chips.
 const alpha = s => { const n = s.match(/[\d.]+/g); return n && n.length === 4 ? parseFloat(n[3]) : 1; };
-check(alpha(m.capBg) < 1 && alpha(m.backBg) < 1, `chips translucent (capsule ${m.capBg})`);
+check(alpha(m.capBg) < 1, `the pill is translucent, so what passes behind it shows (${m.capBg})`);
 check(m.headPos === "absolute", `header out of flow (position: ${m.headPos})`);
 check(m.feed.top < m.head.top, `feed's box starts ABOVE the header (feed ${m.feed.top}, header ${m.head.top})`);
 check(m.feedPadTop >= m.head.bottom - m.feed.top, `feed's top padding clears the header (${m.feedPadTop} >= ${(m.head.bottom - m.feed.top).toFixed(1)})`);
@@ -162,27 +182,22 @@ const behind = await p.evaluate(() => {
   const under = el => el.closest && el.closest("#dfeed .msg");
   const hit = x => document.elementsFromPoint(x, y).some(under);
   return {
-    // Through the CHIP (the transcript has to be in the stack behind it) and through the GAP
-    // between the back circle and the capsule (where it should be directly visible).
+    // Through the PILL (the transcript has to be in the stack behind it) and BESIDE it, where the row
+    // is now empty and the transcript should be directly visible.
     throughChip: hit(cap.x + cap.width / 2),
-    throughGap: hit((h.x + 44 + cap.x) / 2),
+    throughGap: hit((h.x + cap.x) / 2),
     stack: at(cap.x + cap.width / 2),
   };
 });
-check(behind.throughChip, `transcript is behind the capsule while scrolled (stack: ${behind.stack.slice(0, 4).join(" < ")})`);
-check(behind.throughGap, "transcript is visible through the gap between the chips");
+check(behind.throughChip, `transcript is behind the pill while scrolled (stack: ${behind.stack.slice(0, 4).join(" < ")})`);
+check(behind.throughGap, "…and directly visible beside it, where the chips used to be");
 
 // 5. Centring — on the dot+name GROUP, not on the name alone.
 const groupMid = (m.dot.left + m.name.right) / 2;
 const capMid = m.cap.left + m.cap.w / 2;
-check(near(groupMid, capMid, 1), `dot+name group centred on the capsule (group ${groupMid.toFixed(1)}, capsule ${capMid.toFixed(1)})`);
+check(near(groupMid, capMid, 1), `dot+name group centred on the pill (group ${groupMid.toFixed(1)}, capsule ${capMid.toFixed(1)})`);
 check(m.dot.right <= m.name.left, "dot leads the name");
 check(m.name.left + m.name.w / 2 > capMid, "the NAME alone now sits right of centre — the traded-away axis, stated so a regression reads as a revert");
-
-// 6. Glyph parity — the half-pixel snap the padding exists to prevent.
-// BOTH axes, since the button stopped being square: an odd difference on either one lands the glyph
-// half a pixel off, which is what --hbtn-w's even step exists to prevent.
-check(m.backPad.split(" ").every(v => /^\d+px$/.test(v)), `button padding is a whole pixel on both axes (${m.backPad})`);
 
 await p.screenshot({ path: join(OUT, "header.png") });
 await p.evaluate(() => { document.getElementById("dfeed").scrollTop = 0; });

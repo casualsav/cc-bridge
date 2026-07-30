@@ -218,8 +218,15 @@
        shape failed to do (it took --safe-top, the band's FLOOR, so its solid part ended ~22px below
        the name and the fade landed a line and a half too low on screen). */
     --head-top: calc(var(--safe-top) + 10px);
-    --scrim-solid: calc(var(--head-top) + var(--h-pad) + var(--h-l1));
-    --scrim-ramp: calc(var(--h-l2) + var(--t-msg) * 1.45);
+    /* BOTH LENGTHS WENT BACK to the pill era on 2026-07-30 (8c6ef3f^, the last build with the title
+       pill): solid only through the inset ABOVE the pill, and the eased ramp is the pill's own band,
+       zero at its floor. The values they replaced — solid down to the name's floor, plus a 23px toe —
+       were the compensation for having no pill: they made the band near-solid, which is the "solid
+       header bar" look the owner is explicitly not asking for now that the pill is back. The pill is
+       the contrast floor again, so the ramp does not have to be. --head-top carries fullscreen for
+       free, as before. */
+    --scrim-solid: var(--head-top);
+    --scrim-ramp: var(--hbtn-d);
   }
   @supports (color: color-mix(in srgb, red 50%, blue)) {
     /* 36%, which is TELEGRAM'S OWN number: its ✕ Close pill was solved off a screenshot where both its
@@ -310,31 +317,12 @@
   #drill .vhead { --title-align: center; position: absolute; top: var(--head-top); left: 0; right: 0; z-index: 2;
     margin: 0 10px 2px; padding: 0; border-bottom: none;
     background: transparent; gap: 6px; }
-  /* SELF-CONTAINED, and a single class on purpose. These buttons are deliberately NOT .ghost, and the
-     shared appearance deliberately does NOT live on a `#drill .vhead > *` rule: the base used to be
-     `#drill .vhead .ghost` (1,2,0), which meant every variant had to out-rank an id plus two
-     descendants, and a variant written the obvious way — `#dstop.recording` (1,1,0) — silently lost and
-     did nothing. Twice that night, counting the ✕ that lost its red to `.vhead .ghost` (0,2,0). At (0,1,0) any
-     `.chatbtn.x` variant wins by construction, and scoping is now by markup rather than by location,
-     so it cannot accidentally capture the file viewer's own .vhead buttons either. */
-  /* Both circles are the same painted chip as the capsule between them — same fill, same rim — which
-     is what makes the three read as one row of containers rather than three unrelated shapes.
-     No ::after touch-target lift any more: it existed to bring a 34px button up to the 44px standard,
-     and the button now meets 44 on its own — which is why --hbtn-d's floor is that number. */
-  .chatbtn { width: var(--hbtn-w); height: var(--hbtn-d); border: none; border-radius: calc(var(--hbtn-d) / 2);
-    background: var(--chip-fill); box-shadow: var(--chip-lift); color: var(--text); cursor: pointer; flex: none;
-    backdrop-filter: var(--chip-glass); -webkit-backdrop-filter: var(--chip-glass);
-    /* The PADDING is what fixes the glyph's origin — an integer, so it lands on whole pixels at any
-       button size. Centring it by halving flex free space instead is what put the 19-in-34 button's
-       glyph half a pixel down and right: 15px of free space halves to 7.5, and Blink snaps the SVG's
-       paint origin up to the whole pixel. Measured at exactly +0.50, +0.50 on both of these buttons
-       before this change — the same defect fixed on the composer mic, which CLAUDE.md had recorded
-       here as merely suspected. The flex box below then has zero free space left to halve.
-       TWO axes now that the button is wider than it is tall, and both have to stay integers — which
-       is the whole reason --hbtn-w moves in even steps off --hbtn-d. */
-    padding: calc((var(--hbtn-d) - var(--hbtn-glyph)) / 2) calc((var(--hbtn-w) - var(--hbtn-glyph)) / 2);
-    display: flex; align-items: center; justify-content: center; }
-  .chatbtn svg { width: var(--hbtn-glyph); height: var(--hbtn-glyph); display: block; }
+  /* `.chatbtn` is GONE with the two chips it dressed (the owner, 2026-07-30). It had exactly two users
+     — #dback and #dstop — so nothing inherits it and nothing else in the file referenced it. What its
+     comment recorded and this file still needs elsewhere: a variant must out-rank its base without an
+     id in the selector, and a glyph centred by HALVED FLEX FREE SPACE lands half a pixel off at odd
+     leftovers (integer padding is the fix). Both rules live on in the composer's buttons; --hbtn-* stay,
+     because the header's line boxes and the scrim's solid length are still derived from them. */
   /* 24px, up from 19. Sized against the owner's reference rather than by eye: its paperclip carries
      34x39px of ink beside a 67px mic button, which at our 40px mic scales to 20.3 x 23.3 — a 24px
      glyph puts ours at 21.4 x 22.6, the closest of the sizes tried. `.ghost` has exactly one user
@@ -345,45 +333,36 @@
   /* Two-line title: name over the session's dial line, as the reference has name over "bot". The
      status dot rides ON the name line — centred against a two-line block it would float in the
      gutter, belonging to neither line. (Its own rules stay untouched; only its context moves.) */
-  /* The MIDDLE CONTAINER: a capsule spanning the gap between the two circles and exactly as tall as
-     they are — equal height is what makes the three read as one row. It is now the SOURCE of that
-     height (two line boxes + --h-pad, which --hbtn-d is calc'd from), so min-height restates the
-     number rather than setting it, and earns its keep in one case: #dsub EMPTY, which a deep-linked
-     open really renders (openDrill runs before the snapshot lands). An empty block box is 0 tall,
-     so without it the capsule would collapse between two taller circles. */
-  /* …and 20% NARROWER than the gap it spans, by the owner's ask — the capsule was reaching for both
-     circles and reading as a bar. Expressed as symmetric margins rather than a width so the capsule
-     stays centred and the buttons stay pinned to the row's ends: the span is (100% - 2 x --hbtn-w -
-     2 x 6px gap), and a tenth of that off each side is a fifth off the whole. The percentage resolves
-     against .vhead's content box, which is what makes it track the viewport instead of a guess.
-     It is --hbtn-w and not --hbtn-d in here, and that is the one thing to fix if the buttons ever stop
-     being square-ish: this is the only place the row's WIDTH budget is written down. */
-  /* …and it is NOT A CAPSULE any more. The fill, the rim and the frost are gone by the owner's ask,
-     after the reference his phone actually shows him: a title line over a subtitle line, floating on
-     the transcript, no surface under either. The two CIRCLES keep theirs — he scoped the ask to the
-     pill, and they are the row's only 44px touch targets; two unlabelled glyphs over a moving
-     transcript is a different screen, not this one.
-     What the capsule was quietly doing is the whole of the rest of this change. It was the contrast
-     floor for both lines. The ceiling scrim (#drill::before) ramps to zero at the header's BOTTOM
-     edge, which puts roughly 45% of --bg behind the name and roughly 5% behind the cwd — measured,
-     not estimated. Bare, the cwd sits on whatever message happens to be passing.
-     So the floor moves onto the glyphs themselves, as --title-halo. A halo and NOT a stronger scrim,
-     for a reason already written into this file: extending that ramp down across the header paints a
-     bar over the band the transcript was just given, was tried, and was rejected by the owner. A
-     halo costs no strip at all. It resolves through --bg, so it darkens on a dark theme and lightens
-     on a light one without a second value to keep in sync.
-     `margin-inline` STAYS, and its stated reason has changed while its job has not: it was written
-     as "20% narrower than the gap it spans, so the capsule stops reading as a bar", and there is no
-     capsule to read as anything now. It is still the clearance between the title's text and two
-     touch targets, and still the one place the row's width budget is written down. */
-  .dtitle { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center;
-    margin-inline: calc(10% - 0.2 * var(--hbtn-w) - 1.2px);
-    min-height: var(--hbtn-d); padding: var(--h-pad) var(--sp-3);
+  /* THE PILL IS BACK — restored from 8c6ef3f^, the last build that had it (8c6ef3f, v0.4.154, is where
+     the owner had the fill, the rim and the frost taken off; he asked for the pill again on 2026-07-30,
+     now that the row carries no buttons). Four declarations came back verbatim from that commit:
+     border-radius off --hbtn-d, --chip-fill, --chip-lift, --chip-glass. It is the same painted chip
+     vocabulary the side chips used to be, which is the point — one surface, floating.
+     It is SHRINK-WRAPPED and centred (`flex: 0 1 auto; margin-inline: auto`), where the old rule spanned
+     the row minus two touch targets. That margin's whole job was clearance from #dback and #dstop, and
+     both are gone; spanning the row with a fill is the "solid header bar" the owner is explicitly not
+     asking for. `max-width` keeps it off the screen edges on a wide viewport.
+     `min-height: --hbtn-d` still earns its keep for #dsub EMPTY, which a deep-linked open really
+     renders (openDrill runs before the snapshot lands) — an empty block box is 0 tall.
+     The pill is also the CONTRAST FLOOR for both lines, which is why the ceiling scrim went back to its
+     pill-era stops in the same change (see #drill::before): the steep near-solid ramp that replaced this
+     fill IS a header bar by another name, and the pill makes it unnecessary rather than merely
+     redundant. The two halves are one design and must move together — halo.py measures what the
+     combination gives the cwd. */
+  .dtitle { flex: 0 1 auto; min-width: 0; max-width: calc(100% - 2 * var(--sp-3)); margin-inline: auto;
+    display: flex; flex-direction: column; justify-content: center;
+    min-height: var(--hbtn-d); padding: var(--h-pad) var(--sp-3); border-radius: calc(var(--hbtn-d) / 2);
+    /* NOT `--chip-fill` (44% of --bg at 36%), which is what 8c6ef3f^ used and what the side chips were:
+       that fill was only ever half the floor, and the other half was the glyph halo the owner had
+       deleted in between (d2dcbe8, "a border that doesn't look premium"). Restoring the pill with the
+       old transparency and no halo measured 2.46:1 dark / 2.03:1 light for the cwd over a bright bubble
+       — under AA, against 4.95/5.78 on the build this replaced (halo.py, both runs). He has now ruled
+       out the halo AND the near-solid ramp, so the ground has to come from the pill itself: 92% of --bg,
+       theme-correct by construction, still translucent enough that the transcript is visibly behind it
+       and the frost still has something to blur. */
+    background: color-mix(in srgb, var(--bg) 92%, transparent); box-shadow: var(--chip-lift);
+    backdrop-filter: var(--chip-glass); -webkit-backdrop-filter: var(--chip-glass);
     line-height: var(--lh-snug); text-align: var(--title-align, left); }
-  /* A wrapper that is INVISIBLE to layout until fullscreen folds the pause button in beside it.
-     `display: contents` is exactly this: the box disappears and its children go on being the flex
-     items of .dtitle, so normal mode renders byte-for-byte what it did before the wrapper existed. */
-  .dtitle .tcol { display: contents; }
   .dtitle .nmrow { display: flex; align-items: center; gap: 7px; min-width: 0; justify-content: var(--title-align, flex-start); }
   /* The dot is PART of the centred unit, not a marginal glyph hanging off it — the owner's call, and
      the reversal of a deliberate decision, so it is worth saying what was traded. A 9px inert mirror
@@ -689,33 +668,23 @@
      CWD." Now it does, by construction rather than by a second set of numbers. */
   html.fs { --head-top: calc(var(--chrome-top) + (var(--chrome-h) - var(--hbtn-d)) / 2); }
   html.fs #drill .vhead { left: var(--chrome-l, 72px); right: var(--chrome-r, 70px); margin: 0; }
-  /* The pause folds INSIDE the capsule, on its right, because the band is only ~218px wide and three
-     separate containers cannot live in it: 44 + 44 + gaps leaves 118px for a name and a path. One
-     container spends nothing on gaps and lets the title column keep everything the button does not. */
   /* 10% narrower than the band it is given, 5% off each side. The measured clearance (--chrome-l/r,
      72 and 70 on a 360px viewport) came off a screenshot, and a screenshot cannot see the client's
      touch targets — only its ink — so the pill was landing hard against the ✕ and the kebab. This is
      the margin for that error, and it is the right place for it: widening --chrome-l/r would move the
-     back chip too, on the one path where ours is still showing. A PERCENTAGE, so it tracks the band
-     rather than a viewport it was measured on. */
-  html.fs #drill .dtitle { flex-direction: row; align-items: center; gap: var(--sp-2); margin-inline: 5%;
-    padding-right: var(--h-pad); }
-  html.fs #drill .dtitle .tcol { flex: 1; min-width: 0; display: flex; flex-direction: column;
-    justify-content: center; text-align: var(--title-align, center); }
-  /* Inside the title it is not a chip. It was written that way when the title WAS a capsule (a chip
-     inside a chip reads as a nested surface, and the capsule carried the fill and the frost for
-     both); the capsule has since gone, and the rule survives its original reason because fullscreen
-     is the one place a bare glyph is safe. The header rides up into Telegram's chrome band there,
-     where the ceiling scrim is already at full strength — so this glyph sits on flat --bg, not on a
-     passing message, and it matches the bare controls the owner's reference shows beside bare text.
-     Outside fullscreen the pause is a side chip and KEEPS its fill; that is not the same control in
-     a different state, it is the same control in a different box. */
-  html.fs #drill #dstop { background: transparent; box-shadow: none; backdrop-filter: none;
-    -webkit-backdrop-filter: none; width: auto; height: auto; padding: 0; flex: none; }
-  html.fs #drill #dstop svg { width: 20px; height: 20px; }
-  /* Our own back chip yields to the client's ← when that is up; when it is not, it stays exactly
-     where it has always been. */
-  html.fs.native-back #drill #dback { display: none; }
+     whole header. A PERCENTAGE, so it tracks the band rather than a viewport it was measured on.
+     It stays a COLUMN here now: the row layout existed only to fold the pause button in beside the
+     title, and both the pause and the `.tcol` wrapper it needed left on 2026-07-30. And the clearance
+     is a MAX-WIDTH rather than a margin, because the pill shrink-wraps: `margin-inline: 5%` on a
+     shrink-wrapped box does not centre it, it offsets it — measured at 10.9px one side against 71.2px
+     the other. `auto` centres, and the cap is what actually holds the 10% back. */
+  html.fs #drill .dtitle { margin-inline: auto; max-width: 90%; }
+  /* The RAMP is longer in fullscreen, and only the ramp: our header rides inside the client's own band
+     there, so the transcript scrolls under Telegram's buttons and has to be dissolved at least to the
+     band's floor — the pill-era length (the pill's own band, restored in normal mode) ends 5px above it
+     and would leave a message at near-full strength directly under the kebab. The band plus one line's
+     toe is what it takes; the SOLID part is untouched, so both modes still end it at the pill's top. */
+  html.fs { --scrim-ramp: calc(var(--chrome-h) + var(--sp-3)); }
   /* …and the SPACE that buys, which is the point of the whole block: with the header inside the
      client's own band, the feed no longer reserves a row below it. Top padding falls from
      --safe-top + 36 + 24 to --safe-top + 12, and the scrim's ramp ends at the band's floor instead of
@@ -774,23 +743,27 @@
      cwd reads 5.62:1 over a bright bubble against the cliff's 5.46. */
   #drill::before { content: ""; position: absolute; left: 0; right: 0; top: 0; z-index: 1; pointer-events: none;
     height: calc(var(--scrim-solid) + var(--scrim-ramp));
-    background: linear-gradient(to bottom, var(--bg), transparent);
+    background: linear-gradient(to top, transparent, var(--bg));
+    /* THE PILL-ERA CURVE — 8c6ef3f^'s alphas at 8c6ef3f^'s depths (90 · 70 · 44 · 20 · 6 · 0), but
+       expressed over --scrim-solid + --scrim-ramp instead of as percentages of the element. Those
+       percentages are what that build wrote, and they are NOT portable: the solid part became "the top
+       26% of whatever the element is", which in fullscreen — where the ramp has to run longer — left the
+       client's whole chrome band see-through above the pill. Over the two lengths the solid part is a
+       LENGTH again and both modes end it at the pill's top edge. Normal mode lands within a pixel of
+       what that build painted (solid 10px vs its 12, the same alphas across a 36px ramp vs its 34).
+       Read it upward, which is how it is seen as the transcript scrolls in: nothing at all, a slow
+       gather through the pill's band, solid by the pill's top.
+       It fades THROUGH the header rather than capping it — the transcript stays visibly in motion
+       behind the pill, which is the whole point of the full-bleed feed — and the pill, not this ramp,
+       is what the two title lines read against. bleed.mjs measures the rendered alpha profile and the
+       cwd's contrast; both moved with this change and both are re-asserted there. */
     background: linear-gradient(to bottom,
-      /* The curve carries TWO jobs and its shape is where they meet. Through the cwd's own line box
-         — the ramp's first 38% — it barely moves, because that line's whole legibility is the ground
-         under it and it measured 3.75:1 the last time it sat mid-ramp. Below the cwd it is free, and
-         that is where the fade actually happens: a long soft toe, "very light" at the floor. Reading
-         it upward, which is how it is seen as the transcript scrolls: nothing, then a slow gather,
-         then basically solid by the name. */
       var(--bg) 0 var(--scrim-solid),
-      color-mix(in srgb, var(--bg) 98%, transparent) calc(var(--scrim-solid) + 0.19 * var(--scrim-ramp)),
-      color-mix(in srgb, var(--bg) 94%, transparent) calc(var(--scrim-solid) + 0.38 * var(--scrim-ramp)),
-      color-mix(in srgb, var(--bg) 82%, transparent) calc(var(--scrim-solid) + 0.50 * var(--scrim-ramp)),
-      color-mix(in srgb, var(--bg) 62%, transparent) calc(var(--scrim-solid) + 0.60 * var(--scrim-ramp)),
-      color-mix(in srgb, var(--bg) 42%, transparent) calc(var(--scrim-solid) + 0.70 * var(--scrim-ramp)),
-      color-mix(in srgb, var(--bg) 24%, transparent) calc(var(--scrim-solid) + 0.79 * var(--scrim-ramp)),
-      color-mix(in srgb, var(--bg) 11%, transparent) calc(var(--scrim-solid) + 0.87 * var(--scrim-ramp)),
-      color-mix(in srgb, var(--bg) 4%, transparent) calc(var(--scrim-solid) + 0.94 * var(--scrim-ramp)),
+      color-mix(in srgb, var(--bg) 90%, transparent) calc(var(--scrim-solid) + 0.10 * var(--scrim-ramp)),
+      color-mix(in srgb, var(--bg) 70%, transparent) calc(var(--scrim-solid) + 0.22 * var(--scrim-ramp)),
+      color-mix(in srgb, var(--bg) 44%, transparent) calc(var(--scrim-solid) + 0.37 * var(--scrim-ramp)),
+      color-mix(in srgb, var(--bg) 20%, transparent) calc(var(--scrim-solid) + 0.54 * var(--scrim-ramp)),
+      color-mix(in srgb, var(--bg) 6%, transparent) calc(var(--scrim-solid) + 0.74 * var(--scrim-ramp)),
       color-mix(in srgb, var(--bg) 0%, transparent) 100%); }
   /* A PLAIN BLOCK again, deliberately rather than by neglect. It was a flex column for exactly one
      reason — `.work`'s `margin-top: auto` needed free space to absorb, which a block has none of —
@@ -1560,19 +1533,12 @@
 <div class="tab panel" id="tab-settings"></div>
 
 <div id="drill">
+  <!-- NOTHING BUT THE TITLE. The back chip and the pause chip both left on 2026-07-30 (the owner's
+       ask): back is the client's own ← now, raised for this screen un-gated, and the pause had no
+       replacement — see onNativeBack and the note on `.dtitle`. No `.tcol` wrapper either: it existed
+       only so fullscreen could fold the pause in beside the title, and there is no pause to fold. -->
   <div class="vhead">
-    <button id="dback" class="chatbtn back" title="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg></button>
-    <div class="dtitle"><div class="tcol"><span class="nmrow"><span class="dot" id="ddot"></span><span class="name" id="dname"></span></span><span class="sub" id="dsub"></span></div></div>
-    <!-- A filled red octagon: the drawn equivalent of 🛑, which is what it has to read as instantly.
-         Drawn rather than the emoji so it matches the paperclip and mic, holds one colour instead of
-         rendering differently per platform, and keeps this bar free of the clip-art it was cleared of.
-         With the ✕ gone from this bar, nothing else competes for that red. -->
-    <!-- A PAUSE glyph, and the word is true: this sends a single Escape, Claude Code's own interrupt.
-         The turn halts, the session stays alive at its prompt and the conversation is intact, so the
-         header's only remaining action really is a halt rather than a terminate; terminating moved to
-         the session cards. Two bars in the square's exact bounding box (12.9 units), canonical pause
-         proportions, caps rounded to match the softness of the reference's square. -->
-    <button class="chatbtn stop" id="dstop" title="Interrupt" aria-label="Interrupt this session"><svg viewBox="0 0 24 24"><rect x="5.55" y="5.55" width="3.9" height="12.9" rx="1.7" fill="currentColor"/><rect x="14.55" y="5.55" width="3.9" height="12.9" rx="1.7" fill="currentColor"/></svg></button>
+    <div class="dtitle"><span class="nmrow"><span class="dot" id="ddot"></span><span class="name" id="dname"></span></span><span class="sub" id="dsub"></span></div>
   </div>
   <div id="dfeed"></div>
   <!-- The working row's home: OUTSIDE the scroller, so "static" is structural rather than a position
@@ -1811,13 +1777,8 @@ function syncSafeTop() {
   // The layout gate. A class, not a media query: `isFullscreen` is the only thing that says the
   // client is painting its chrome OVER us, and the insets alone cannot tell that apart from a notch.
   document.documentElement.classList.toggle("fs", full);
-  // The pause button belongs to a different BOX in each layout — inside the capsule up in the chrome
-  // band, a chip of its own on the row below — so it is moved rather than restyled into place.
-  // getElementById directly: syncSafeTop runs before `$` is declared and would hit its dead zone.
-  const head = document.querySelector("#drill .vhead");
-  const cap = head && head.querySelector(".dtitle");
-  const stop = document.getElementById("dstop");
-  if (head && cap && stop) (full ? cap : head).appendChild(stop);
+  // The DOM move that used to live here went with the pause button (2026-07-30): the header is one
+  // container in both layouts now, so nothing has to change boxes when fullscreen flips.
 }
 // Telegram's own chrome colour is NOT in themeParams, and that is the whole reason this constant
 // exists. `header_bg_color` reports #252D3A on the owner's client while the bar it actually paints
@@ -2384,11 +2345,11 @@ function openDrill(sid, name) {
   setDial(null);
   $("dfeed").innerHTML = '<div class="notice">Loading…</div>';
   $("drill").classList.add("show");
-  // Only in fullscreen: outside it the client's header is its own bar above the webview, our back
-  // chip is the only one on screen, and hiding it would leave no way out of the session.
-  if (NATIVE_BACK && tg.isFullscreen) {
-    try { tg.BackButton.show(); document.documentElement.classList.add("native-back"); } catch {}
-  }
+  // UN-GATED since 2026-07-30: the fullscreen condition existed because our own ← chip was the only
+  // one on screen outside fullscreen, and that chip is gone. So this is the way out of a session in
+  // every layout, which is also why the gate coming off and the chip coming out are ONE change — either
+  // alone leaves the screen with no exit or with two.
+  if (NATIVE_BACK) { try { tg.BackButton.show(); } catch {} }
   growComposer();   // first moment the field has a measurable height; sizes it before it is seen
   renderDrill();
   clearInterval(drillTimer);
@@ -2396,11 +2357,11 @@ function openDrill(sid, name) {
 }
 function closeDrill() {
   $("drill").classList.remove("show"); clearInterval(drillTimer); stopWorkGlyph(); drillSid = null;
+  // Hidden unconditionally, then re-raised by showTab if the screen underneath is Settings — the
+  // dispatcher decides what back MEANS at tap time, but each screen still owns whether it is up.
   if (NATIVE_BACK) { try { tg.BackButton.hide(); } catch {} }
-  document.documentElement.classList.remove("native-back");
   renderSessions();
 }
-$("dback").onclick = closeDrill;
 // The client's OWN back arrow, which in fullscreen takes the place of its ✕ Close pill. Worth having
 // for two reasons: it is the platform's gesture rather than a lookalike, and an icon-only ← does not
 // grow with the language the way a localised "Close" does — which is what makes the header's left
@@ -3042,7 +3003,6 @@ async function applyDial(kind, val) {
   showOk(label + " requested…");
   renderDrill();
 }
-$("dstop").onclick = async () => { if (await sessionAct("stop")) showDone("Interrupted"); };
 // Android voice dictation keeps its insertion session open across a send: clearing the composer
 // below does not end it, and the IME goes on to commit whatever trailing chunk of speech it had
 // already buffered — straight into the now-empty field a beat later. Watched live: the full

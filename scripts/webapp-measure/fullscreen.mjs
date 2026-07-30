@@ -52,7 +52,10 @@ async function tops(p) {
   });
   await p.waitForTimeout(400);
   return p.evaluate(() => {
-    const t = s => { const e = document.querySelector(s); return e ? +e.getBoundingClientRect().top.toFixed(2) : null; };
+    // `null` for a box that is not laid out AT ALL — which the tab bar is not since v0.4.265 hid the
+    // row behind SHOW_TABS. A hidden box reports top 0 in every state, so "it moved by the offset"
+    // becomes 0 - 0 and fails against a page that is correct. Skipped loudly below, never silently.
+    const t = s => { const e = document.querySelector(s); return e && e.getClientRects().length ? +e.getBoundingClientRect().top.toFixed(2) : null; };
     return {
       var: getComputedStyle(document.documentElement).getPropertyValue("--safe-top").trim(),
       tabbox: t(".tabs"), tabglyph: t(".tabs button"),
@@ -126,8 +129,10 @@ chk(old.var === FLOOR + "px", `a client reporting no insets gets the ${FLOOR}px 
 // in fullscreen it rides UP INTO the client's chrome band instead of clearing it, which is what buys
 // the transcript that row back. It is checked below against the band's centre, and headerup.mjs
 // covers the rest. The file viewer and the tab bar still clear the chrome in the old way.
-for (const k of ["tabglyph", "viewerhead"])
+for (const k of ["tabglyph", "viewerhead"]) {
+  if (base[k] === null) { console.log("  SKIP  ", `${k} is not laid out on this build — the tab row is hidden behind SHOW_TABS (notabs.mjs owns it)`); continue }
   chk(fs[k] - base[k] === NOTCH + CHROME, `${k} moved down by exactly the offset (${(fs[k] - base[k]).toFixed(2)}px)`);
+}
 // …and where the chat header goes instead: centred in the band the client paints its own buttons on.
 const bandMid = NOTCH + CHROME / 2;
 chk(Math.abs((fs.drillhead + base.pillh / 2) - bandMid) <= 1.5,

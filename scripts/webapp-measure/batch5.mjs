@@ -215,18 +215,23 @@ await shot("4-command-row", await p.evaluate(() => {
 await p.evaluate(() => { feedSig = ""; paintFeed(); }); await p.waitForTimeout(300);
 
 // ── 5. the chat title ───────────────────────────────────────────────────────────────────────────
-console.log("\n5. the header loses its capsule");
+// REVERSED on 2026-07-30: the owner asked for the pill back, now that the row carries no buttons, and
+// the design was restored from 8c6ef3f^ — the build this item's control (batch5-v154) was written
+// against. Same reads, opposite verdicts; the contrast half below matters MORE with the pill than it
+// did without, because the pill is the ground again and halo.py is what says whether it is enough.
+console.log("\n5. the header's title pill (restored)");
 const dt = await p.evaluate(() => {
   const e = document.querySelector("#drill .dtitle"), s = getComputedStyle(e);
   return { bg: s.backgroundColor, shadow: s.boxShadow, filter: s.backdropFilter || s.webkitBackdropFilter };
 });
 const clear = c => c === "rgba(0, 0, 0, 0)" || c === "transparent";
-check(clear(dt.bg), `no fill (${dt.bg})`);
-check(dt.shadow === "none", `no rim (${dt.shadow})`);
-check(dt.filter === "none" || !dt.filter, `no frost (${dt.filter})`);
-// …and the two side chips KEEP theirs. The owner scoped the ask to the pill.
-const btn = await p.evaluate(() => { const s = getComputedStyle(document.getElementById("dback")); return { bg: s.backgroundColor, shadow: s.boxShadow }; });
-check(!clear(btn.bg) && btn.shadow !== "none", `the back chip keeps its fill and rim (${btn.bg})`);
+check(!clear(dt.bg), `the fill is back (${dt.bg})`);
+check(dt.shadow !== "none", `the rim is back (${dt.shadow.slice(0, 40)}…)`);
+check(/blur/.test(dt.filter || ""), `the frost is back (${dt.filter})`);
+// …and the two side chips it used to sit between are GONE, which is why the pill can be a pill again
+// rather than the middle of three containers.
+const chips = await p.evaluate(() => document.querySelectorAll("#drill .vhead button").length);
+check(chips === 0, `no chips left in the row (${chips})`);
 // Text formatting and the indicator, byte-for-byte.
 const txt = await p.evaluate(() => {
   const n = getComputedStyle(document.getElementById("dname")), u = getComputedStyle(document.getElementById("dsub"));
@@ -297,13 +302,14 @@ for (const [theme, vars] of [["dark", null], ["light", LIGHT]]) {
   check(at >= 0, `${theme}: found a scroll position with a bubble behind both lines (${at})`);
   await p.waitForTimeout(200);
   await shot(`5-${theme}-bubble`, band);
-  // …and the same frame with the SCRIM switched off. This variant used to kill the halo, which was
-  // the control that said the halo did work the scrim could not — and once the halo went (v0.4.160,
-  // the owner: "a border that doesn't look premium") that shot became byte-identical to the one
-  // above, i.e. a row that always agrees. Killing the ramp instead asks the question that is now
-  // live: the title has no treatment of its own, so if the ramp is not what makes it legible,
-  // nothing is. It must FAIL AA here — halo.py grades this row inverted.
-  const off = await p.addStyleTag({ content: "#drill::before { display: none !important }" });
+  // …and the same frame with THE PILL'S FILL switched off. This variant has tracked whatever the
+  // title's contrast floor happens to be, which is the only way it stays a real control: it killed the
+  // HALO while the halo was the floor (to v0.4.160, when the owner had the halo deleted), then the
+  // RAMP while the near-solid ramp was (v0.4.164), and since 2026-07-30 the floor is the restored pill,
+  // whose fill is a deliberate 92% of --bg rather than the old chip translucency. Kill the current
+  // floor and the line must FAIL AA — halo.py grades this row inverted. Killing the ramp here now
+  // proves nothing: with a dense pill the ramp barely moves the number, which halo.py itself reports.
+  const off = await p.addStyleTag({ content: "#drill .dtitle { background: transparent !important; backdrop-filter: none !important; -webkit-backdrop-filter: none !important }" });
   await p.waitForTimeout(150);
   await shot(`5-${theme}-bubble-nohalo`, band);
   await off.evaluate(e => e.remove());
@@ -339,8 +345,14 @@ await p.waitForTimeout(700);
 // diff. A neighbouring message line at the same height is the control: it is unarguably in the
 // transcript's plane, so it fixes the scale the label has to match.
 const { execFileSync } = await import("node:child_process");
-const diffAt = async sel => {
-  const clip = await p.evaluate(s => {
+// `band` clamps BOTH crops to one y-range, which is what makes the two numbers comparable: the veil
+// varies with depth, so a control cropped over the scrim's whole extent (its strong top included) and a
+// label cropped to its own strip lower down are being asked different questions. That mattered the day
+// the pill-era gradient came back (2026-07-30): the label read 15.84 against the control's 59.5 and
+// failed a page whose label was plainly still under the scrim. Same depth, same veil, or the ratio is
+// measuring geometry rather than plane.
+const diffAt = async (sel, band) => {
+  const clip = await p.evaluate(([s, band]) => {
     const e = document.querySelector(s); if (!e) return null;
     const r = e.getBoundingClientRect();
     if (r.height < 4 || r.width < 4) return null;
@@ -352,10 +364,10 @@ const diffAt = async sel => {
     // bubble scrolled until its fold label reaches the band has its top a couple of hundred pixels
     // above the screen, so an unclamped crop is mostly off-screen and averages whatever survives.
     const scrim = parseFloat(getComputedStyle(document.getElementById("drill"), "::before").height) || r.bottom;
-    const y0 = Math.max(0, r.y), y1 = Math.min(r.bottom, scrim);
+    const y0 = band ? band.y : Math.max(0, r.y), y1 = band ? band.y + band.height : Math.min(r.bottom, scrim);
     if (y1 - y0 < 4) return null;
     return { x: Math.max(0, Math.round(r.x)), y: Math.round(y0), width: Math.round(r.width), height: Math.round(y1 - y0) };
-  }, sel);
+  }, [sel, band]);
   if (!clip) return null;
   const on = await p.screenshot({ clip });
   const off = await p.addStyleTag({ content: "#drill::before { display: none !important }" });
@@ -387,11 +399,15 @@ const landed = await p.evaluate(() => {
 check(landed >= 0, `found a scroll position with the fold label inside the header band (${landed})`);
 await p.waitForTimeout(300);
 await shot("6-fold-label-behind-header", band);
+const labelBand = await p.evaluate(() => {
+  const r = document.querySelector("#dfeed .msg.clip .more").getBoundingClientRect();
+  return { y: Math.round(Math.max(0, r.y)), height: Math.round(r.height) };
+});
 const labelDelta = await diffAt("#dfeed .msg.clip .more");
-const peerDelta = await diffAt("#dfeed .msg.clip");
-check(peerDelta !== null && peerDelta > 2, `the CONTROL moves when the scrim does — a message in the band is veiled (${peerDelta})`);
+const peerDelta = await diffAt("#dfeed .msg.clip", labelBand);
+check(peerDelta !== null && peerDelta > 2, `the CONTROL moves when the scrim does — a message at the label's own depth is veiled (${peerDelta})`);
 check(labelDelta !== null && peerDelta !== null && labelDelta > peerDelta * 0.5,
-  `…and so does the fold label, at the same rate (${labelDelta} vs the message's ${peerDelta})`);
+  `…and so does the fold label, at the same rate and the same depth (${labelDelta} vs the message's ${peerDelta})`);
 await p.evaluate(items => { window.__feed = { ...window.__feed, items }; feedSig = ""; renderDrill(); }, CHAT);
 await p.waitForTimeout(400);
 
