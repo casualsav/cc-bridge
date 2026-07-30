@@ -17,6 +17,12 @@ import { chromium } from "/home/ubuntu/projects/taste/node_modules/playwright/in
 // than loosened to a substring — the decoration is part of what the owner ordered, so the check
 // asserts it instead of tolerating it, and the WORDS are still checked verbatim on their own.
 //
+// The glyph also OWNS THE CARDS' DOT COLUMN (the owner's ask, same day): its centre sits on the axis
+// every card's status dot centres on. That is asserted two ways, because they can disagree — the
+// element's rect (geometry) and the RENDERED ink's centroid (paint), the second because a box flex
+// centring reports as centred while its contents paint half a pixel off. Both to ±0.5px, and the
+// residual is printed either way rather than rounded into a pass.
+//
 // CONTROL: the page pinned before the ordering. Every state check must FAIL there; the guards (the cards
 // themselves, the header's place, Scheduled's labels) held before and must hold after.
 import { execFileSync } from "node:child_process";
@@ -67,6 +73,32 @@ const WORDS = "Coding Sessions";
 const LABEL = `${GLYPH} ${WORDS}`;
 
 // The panel's children, in order, each named by what it is — which is the whole claim of this file.
+// The intensity-weighted centroid x of the ink inside a CSS-px band, in CSS px — how the PAINTED mark
+// sits, which a rect cannot answer. The band's own top-left pixel is the ground it measures against, so
+// the band must be wider than the mark (callers pad it) and must not straddle two fills.
+const inkCentroid = async (p, band) => {
+  const shot = await p.screenshot({ clip: band });
+  const off = await p.evaluate(async data => {
+    const img = new Image(); img.src = "data:image/png;base64," + data; await img.decode();
+    const c = document.createElement("canvas"); c.width = img.width; c.height = img.height;
+    const ctx = c.getContext("2d"); ctx.drawImage(img, 0, 0);
+    const d = ctx.getImageData(0, 0, img.width, img.height).data;
+    const at = (x, y) => d.slice((y * img.width + x) * 4, (y * img.width + x) * 4 + 3);
+    const bg = at(0, 0);
+    let sum = 0, wsum = 0;
+    for (let x = 0; x < img.width; x++) {
+      let col = 0;
+      for (let y = 0; y < img.height; y++) {
+        const q = at(x, y);
+        col += Math.max(Math.abs(q[0] - bg[0]), Math.abs(q[1] - bg[1]), Math.abs(q[2] - bg[2]));
+      }
+      sum += col; wsum += col * (x + 0.5);
+    }
+    return sum === 0 ? null : { cx: wsum / sum, dpr: img.width };   // device px, plus the band's width in them
+  }, shot.toString("base64"));
+  return off === null ? null : band.x + off.cx / (off.dpr / band.width);
+};
+
 const stack = p => p.evaluate(() => [...document.getElementById("tab-sessions").children].map(e =>
   e.id === "usagehead" ? "usage"
   : e.classList.contains("sechead") ? `label:${e.textContent}`
@@ -99,6 +131,36 @@ async function measure(path, label, shotPrefix) {
     // the owner settled are still verbatim, and the decoration leads them rather than trailing or wrapping.
     state(!!lab && lab.text.startsWith(`${GLYPH} `) && lab.text.slice(GLYPH.length + 1) === WORDS,
       `the glyph leads and the words are untouched behind it (${lab ? JSON.stringify(lab.text) : "no label"})`);
+    // ---- the glyph sits on the cards' dot column ------------------------------------------------
+    // Rects first: the glyph's own element against EVERY card dot, not the first one, so a dot column
+    // that is not a column at all cannot pass on its top row.
+    const cols = await p.evaluate(() => {
+      const g = document.querySelector("#tab-sessions .sechead .sglyph");
+      const mid = e => { const r = e.getBoundingClientRect(); return { cx: r.x + r.width / 2, x: r.x, w: r.width, y: r.y, h: r.height }; };
+      const dots = [...document.querySelectorAll("#tab-sessions .sess .top .dot")].map(mid);
+      const words = document.querySelector("#tab-sessions .sechead .swords");
+      return { glyph: g ? mid(g) : null, dots,
+        names: [...document.querySelectorAll("#tab-sessions .sess .nm")].map(e => e.getBoundingClientRect().x),
+        words: words ? words.textContent : null };
+    });
+    const off = cols.glyph ? cols.dots.map(d => Math.abs(d.cx - cols.glyph.cx)) : [];
+    state(!!cols.glyph && cols.dots.length >= 2 && off.every(v => v <= 0.5),
+      `the glyph's box centres on every card dot's axis — glyph cx ${cols.glyph && cols.glyph.cx}, dots ${cols.dots.map(d => d.cx).join("/")}, residual ${off.map(v => v.toFixed(2)).join("/")}px (≤0.50)`);
+    // The words, still verbatim, now in their own element — and landing on the card NAMES' axis, which
+    // is the same gap read twice and is what makes the label the cards' own title row rather than a
+    // hand-tuned indent.
+    state(cols.words === WORDS, `the words are their own element and verbatim (${JSON.stringify(cols.words)})`);
+    state(cols.names.length >= 2 && cols.names.every(x => Math.abs(x - (cols.glyph ? cols.glyph.x + cols.glyph.w + 8 : -1)) <= 0.5),
+      `…and the words start on the card names' axis — names ${cols.names.join("/")} vs glyph box end + the row's 8px gap ${cols.glyph && (cols.glyph.x + cols.glyph.w + 8)}`);
+    // Then PAINT, at dpr 2: a box centred by flex free space reports centred and paints half a pixel
+    // down-right (this file's neighbours have been bitten by exactly that), so the mark's own ink is read.
+    // Each band is padded 6px past its mark and sits on ONE fill — the label's ground, the card's.
+    const pad = 6;
+    const gInk = cols.glyph ? await inkCentroid(p, { x: cols.glyph.x - pad, y: cols.glyph.y, width: cols.glyph.w + 2 * pad, height: cols.glyph.h }) : null;
+    const dInk = cols.dots.length ? await inkCentroid(p, { x: cols.dots[0].x - pad, y: cols.dots[0].y, width: cols.dots[0].w + 2 * pad, height: cols.dots[0].h }) : null;
+    const inkOff = gInk !== null && dInk !== null ? Math.abs(gInk - dInk) : null;
+    state(inkOff !== null && inkOff <= 0.5,
+      `…and the PAINTED ink agrees — glyph centroid ${gInk && gInk.toFixed(2)} vs dot centroid ${dInk && dInk.toFixed(2)}, residual ${inkOff === null ? "n/a" : inkOff.toFixed(2)}px (≤0.50)`);
     // Vocabulary as computed values, against the SAME class used by the Scheduled view: everything but
     // the transform has to match, or this is a new design element wearing an old class name.
     const other = await p.evaluate(async () => {

@@ -407,10 +407,18 @@ give it.
   `· ✢ ✳ ✶ ✻ ✽`), glyph then a space then the words (the owner's placement, 2026-07-30). It is a
   decoration and nothing else: not animated, not read from any session's state, identical whatever the
   fleet is doing — the *moving* member of that family is the working row, and a second animated one
-  would compete with it. Written as plain text in the label rather than a `::before`, so
-  `listorder.mjs` can assert it: the harness matches the label as glyph + words (`LABEL`) and asserts
-  the two halves separately, rather than being loosened to tolerate a decoration it has no opinion
-  about.
+  would compete with it. It is an ELEMENT rather than a `::before`, so `listorder.mjs` can assert it:
+  the harness matches the label as glyph + words (`LABEL`) and asserts the two halves separately,
+  rather than being loosened to tolerate a decoration it has no opinion about.
+- **The glyph OWNS THE CARDS' DOT COLUMN** (the owner, 2026-07-30) — so scanning down the panel the
+  glyph and every status dot are one column. Nothing in it is a tuned offset: the label's
+  `padding-left` is the card's own 14px less the label's own 2px margin, the glyph's box IS the dot's
+  11px with the glyph centred in it, and the flex `gap` is `.sess .top`'s — which lands the words on
+  the card NAMES' axis for free. A `text-indent` sized to the glyph's ink would be a font-metric
+  constant that the next font step invalidates silently. `listorder.mjs` measures the rect **and** the
+  rendered ink centroid (a box flex-centres while its contents paint off-centre — see the half-pixel
+  snap note), each to ±0.5px: **0.00px on rects, 0.25px on paint** — the residual is the glyph's ink
+  sitting off-centre inside its own advance, and it is printed rather than rounded away.
 - **It renders only where it has something under it, by construction:** emitted before the FIRST worker
   card, so a chat-only fleet gets no label without a condition to keep in sync. With no chat lane it still
   renders — it names the section it heads, and the owner's rule was "at least one coding session".

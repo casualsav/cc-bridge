@@ -1524,7 +1524,15 @@
      `.sechead` — the type step, the colour, the tracking, the margins — and drops ONLY the uppercase,
      because the owner settled that label verbatim and `text-transform` would render it CODING SESSIONS.
      Scoped to this panel so the Scheduled and Settings labels are untouched. */
-  #tab-sessions .sechead { text-transform: none; }
+  /* …and it wears the CARD's title row, so scanning down the panel the glyph and every card's status
+     dot form one column (the owner's ask, 2026-07-30). Nothing here is a nudge: the padding is the
+     card's own 14px less the label's own 2px margin, the glyph's box IS the dot's 11px, and the gap is
+     `.sess .top`'s — which lands the words on the card names' axis too. A `text-indent`/`margin` shift
+     tuned to the glyph's ink would be a font-metric constant; an 11px box centring the glyph is the
+     dot column itself. */
+  #tab-sessions .sechead { text-transform: none; display: flex; align-items: center;
+    gap: var(--sp-2); padding-left: 12px; }
+  #tab-sessions .sechead .sglyph { flex: none; width: 11px; text-align: center; }
 </style>
 </head>
 <body>
@@ -2291,7 +2299,10 @@ async function renderSessions() {
     // no label. A chat-only fleet therefore shows no label at all — there would be nothing under it.
     // The glyph is one frame of the working spinner's own set (WORK_GLYPHS), frozen: a decoration on
     // the section's name, identical whatever the fleet is doing, never coupled to any state.
-    if (!s.chat && s === workerCards[0]) el.insertAdjacentHTML("beforeend", '<div class="sechead">✳ Coding Sessions</div>');
+    // It is its OWN element so it can own the cards' dot column and sit on the dots' axis (the
+    // owner's ask, 2026-07-30); the space between the two spans keeps `textContent` verbatim.
+    if (!s.chat && s === workerCards[0]) el.insertAdjacentHTML("beforeend",
+      '<div class="sechead"><span class="sglyph">✳</span> <span class="swords">Coding Sessions</span></div>');
     const c = document.createElement("div");
     c.className = "sess";
     const dot = dotClass(s);   // shared with the drill-in header — see dotClass
