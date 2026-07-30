@@ -267,9 +267,11 @@ function fmtResetIn(resetsAt: number): string | null {
   return `${Math.floor(h / 24)}d${h % 24 ? `${h % 24}h` : ''}`
 }
 
-// Family name only — "Opus" / "Sonnet" / "Haiku" / "Fable" (no version), for the pin tagline.
+// Family name only — Claude families and known GPT routing families, for the pin tagline.
 export function prettyModel(id: string | null): string | null {
   if (!id) return id
+  const gpt = codexPrettyModel(id)
+  if (gpt !== id) return gpt
   const m = id.match(/(opus|sonnet|haiku|fable)/i)
   return m ? m[1][0].toUpperCase() + m[1].slice(1).toLowerCase() : id
 }

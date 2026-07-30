@@ -52,6 +52,8 @@ test('modelDisplayName normalizes both statusline shapes and rejects non-models'
   expect(modelDisplayName(' claude-sonnet-5 ')).toBe('Sonnet 5')
   expect(modelDisplayName('claude-opus-5')).toBe('Opus 5')
   expect(modelDisplayName('opus')).toBe('Opus')
+  expect(modelDisplayName('gpt-5.6-sol')).toBe('gpt-5.6-sol')
+  expect(modelDisplayName('gpt-5.6-terra')).toBe('gpt-5.6-terra')
   expect(modelDisplayName('casualsav/cc-bridge')).toBe(null)
   expect(modelDisplayName('/home/u/opus-test')).toBe(null)
   expect(modelDisplayName('')).toBe(null)

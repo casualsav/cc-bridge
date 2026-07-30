@@ -15,6 +15,8 @@ const tmp = mkdtempSync(join(tmpdir(), 'sc-test-'))
 test('prettyModel reduces ids to the family word', () => {
   expect(prettyModel('claude-opus-4-8')).toBe('Opus')
   expect(prettyModel('claude-fable-5')).toBe('Fable')
+  expect(prettyModel('gpt-5.6-sol')).toBe('Sol')
+  expect(prettyModel('gpt-5.6-terra')).toBe('Terra')
   expect(prettyModel(null)).toBe(null)
   expect(prettyModel('weird-model')).toBe('weird-model')
 })

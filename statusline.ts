@@ -116,7 +116,10 @@ function statuslineBlockAnywhere(paneText: string): string | null {
 // its version ("Haiku 4.5"). Returns null for anything that isn't a model token.
 const MODEL_TOKEN = /^(?:claude-)?(opus|sonnet|haiku|fable)[-\s]?(\d[\d.-]*)?(?:\s*\[[^\]]*\])?(?:\s*\([^)]*\))?$/i
 export function modelDisplayName(token: string): string | null {
-  const m = token.trim().match(MODEL_TOKEN)
+  const raw = token.trim()
+  const gpt = raw.match(/^(gpt-[\d.]+-(?:sol|terra|luna))(?:\s*\[[^\]]*\])?$/i)
+  if (gpt) return gpt[1].toLowerCase()
+  const m = raw.match(MODEL_TOKEN)
   if (!m) return null
   const family = m[1][0].toUpperCase() + m[1].slice(1).toLowerCase()
   const version = (m[2] ?? '').replace(/-?\d{8}$/, '').replace(/-+$/, '').replace(/-/g, '.')
