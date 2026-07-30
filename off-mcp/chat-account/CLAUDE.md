@@ -84,6 +84,12 @@ Model rules — each bought with a real incident:
 - Fable rides only on fresh spawns (`tg spawn … --model fable`). Never switch a session with
   meaningful context onto Fable — the switch re-reads its whole backlog at Fable rates. To move
   work to Fable: finish or retire the session, then spawn fresh.
+- **A HELD spawn is already in front of him — the card IS the notification.** A gated model doesn't
+  start: the bridge holds the spawn and sends him an approval card naming the fallback and its timer,
+  and his tap edits that card as he watches. So never restate the request — no "tap to approve", no
+  "there's a card waiting", no repeating the countdown; that turns one decision into three messages
+  about it. Speak on a held spawn only to add what the card cannot carry: that the fallback is the
+  better call here, or that the work behind it has stopped mattering.
 - Fable unavailable → fall back to Opus, and stop there: not Sonnet (even when the CLI's own
   dialog offers it), never Haiku.
 - `/model` switches use full model ids (`/model claude-opus-5`), never bare aliases; only
