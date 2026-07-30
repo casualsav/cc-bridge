@@ -1,4 +1,5 @@
 import { chromium } from "/home/ubuntu/projects/taste/node_modules/playwright/index.mjs";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, resolve } from "node:path";
 
@@ -21,8 +22,8 @@ const cases = [
       ],
       selectable: true,
     },
-    compact: "Sol", title: "Select model · OpenAI / Codex",
-    rows: ["Sol\ngpt-5.6-sol", "Terra\ngpt-5.6-terra", "Luna\ngpt-5.6-luna"], disabled: 0,
+    compact: "Sol", title: "Select model",
+    rows: ["Sol\ngpt-5.6-sol", "Terra\ngpt-5.6-terra", "Luna\ngpt-5.6-luna"],
   },
   {
     name: "anthropic",
@@ -35,7 +36,10 @@ const cases = [
       ],
       selectable: true,
     },
-    compact: "Opus", title: "Select model · Anthropic", rows: null, disabled: 0,
+    compact: "Opus", title: "Select model", rows: [
+      "Fable 5\nFor your toughest challenges", "Opus 5\nFor complex tasks",
+      "Sonnet 5\nMost efficient for everyday tasks", "Haiku 4.5\nFastest for quick answers",
+    ],
   },
   {
     name: "unknown-gateway",
@@ -44,8 +48,7 @@ const cases = [
       selected: { id: "some-model", label: "some-model" },
       options: [{ id: "some-model", label: "some-model" }], selectable: false,
     },
-    compact: "some-model", title: "Select model · Gateway · other",
-    rows: ["some-model\nsome-model"], disabled: 1,
+    compact: "some-model", title: "Select model", rows: [],
   },
 ];
 
@@ -67,18 +70,23 @@ for (const c of cases) {
   await page.click("#ddialm");
   const got = await page.evaluate(() => ({
     compact: document.querySelector("#ddialm")?.textContent?.trim(),
-    title: document.querySelector("#dialtitle")?.textContent?.trim(),
+    title: document.querySelector("#dialp1 .dialhead .t")?.textContent?.trim(),
     rows: [...document.querySelectorAll("#dialmodels .dialrow")].map(row => row.innerText.trim()),
-    disabled: document.querySelectorAll("#dialmodels .dialrow:disabled").length,
+    primitives: [...document.querySelectorAll("#dialmodels .dialrow")].map(row => ({
+      cls: row.className, children: [...row.children].map(child => child.tagName + "." + (typeof child.className === "string" ? child.className : child.className.baseVal)),
+    })),
   }));
   console.log(`${c.name}: ${JSON.stringify(got)}`);
   check(got.compact === c.compact, `${c.name}: compact label is ${c.compact}`);
-  check(got.title === c.title, `${c.name}: provider is visible in the menu title`);
-  check(got.disabled === c.disabled, `${c.name}: actionability follows the server selector`);
-  if (c.rows) check(JSON.stringify(got.rows) === JSON.stringify(c.rows), `${c.name}: menu rows come from the server catalog`);
-  else check(got.rows.length === 4 && got.rows.every(row => !row.includes("gpt-")), `${c.name}: native four-model menu remains native`);
+  check(got.title === c.title, `${c.name}: the v0.4.292 menu title is unchanged`);
+  check(JSON.stringify(got.rows) === JSON.stringify(c.rows), `${c.name}: exact labels, order, and notes use the old row template`);
+  check(got.primitives.every(row => /^dialrow(?: on)?$/.test(row.cls) && row.children.join("|") === "SPAN.nm|svg.tick"),
+    `${c.name}: every provider uses the same dialrow DOM primitives`);
   await page.close();
 }
+const source = readFileSync(PAGE, "utf8");
+check((source.match(/function dialRow\(/g) || []).length === 1 && (source.match(/function paintDial\(/g) || []).length === 1,
+  "Anthropic and Codex share one row template and one menu paint path");
 
 const spawn = await browser.newPage({ viewport: { width: 390, height: 812 } });
 await spawn.goto("file://" + PAGE, { waitUntil: "domcontentloaded" });

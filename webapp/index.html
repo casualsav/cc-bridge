@@ -1471,8 +1471,6 @@
     padding: 12px 14px; cursor: pointer; font-size: var(--t-body); }
   .dialrow:first-child { border-top: none; }
   .dialrow:active { background: var(--bg); }
-  .dialrow:disabled { cursor: default; }
-  .dialrow:disabled:active { background: transparent; }
   .dialrow .nm { flex: 1; min-width: 0; }
   .dialrow .nm .n { display: flex; align-items: center; gap: var(--sp-2); }
   .dialrow .nm .d { font-size: var(--t-sub); color: var(--hint-raised); margin-top: 2px; }
@@ -1679,7 +1677,7 @@
       <div class="dialpage" id="dialp1">
         <div class="dialhead">
           <button class="lead" id="dialx" title="Close" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
-          <div class="t" id="dialtitle">Select model</div>
+          <div class="t">Select model</div>
         </div>
         <div class="diallist" id="dialmodels"></div>
         <div class="diallist"><button class="dialrow" id="dialeffort">
@@ -3010,19 +3008,12 @@ function setDial(d) {
 }
 function composerModelRows() {
   const selector = dialNow.modelSelector;
-  if (!selector) return DIAL_MODELS;
-  return selector.options.map(option => {
-    const native = DIAL_MODELS.find(([id]) => id === option.id);
-    // Anthropic keeps its existing explanatory copy. A gateway row names the canonical model id —
-    // the compact label already carries the friendly nickname, and inventing a capability blurb here
-    // would turn provider detection into marketing copy.
-    const detail = selector.provider.kind === "anthropic" && native ? native[2] : option.id;
-    return [option.id, option.label, detail, selector.selectable];
-  });
+  if (!selector || selector.provider.kind === "anthropic") return DIAL_MODELS;
+  if (!selector.selectable) return [];
+  return selector.options.map(option => [option.id, option.label, option.id]);
 }
 function dialRow(kind, row, cur, def) {
-  const enabled = row[3] !== false;
-  return '<button class="dialrow' + (row[0] === cur ? " on" : "") + '" data-k="' + kind + '" data-v="' + row[0] + '"' + (enabled ? "" : " disabled") + ">" +
+  return '<button class="dialrow' + (row[0] === cur ? " on" : "") + '" data-k="' + kind + '" data-v="' + row[0] + '">' +
     '<span class="nm"><span class="n">' + esc(row[1]) +
       (row[0] === def ? '<span class="badge">Default</span>' : "") + "</span>" +
       '<span class="d">' + esc(row[2]) + "</span></span>" +
@@ -3063,8 +3054,6 @@ function bindDialRows(host) {
 }
 function paintDial() {
   const host = DIAL_HOST;
-  const provider = dialNow.modelSelector && dialNow.modelSelector.provider;
-  $("dialtitle").textContent = provider ? "Select model · " + provider.label : "Select model";
   $("dialmodels").innerHTML = host.rows("model").map(m => dialRow("model", m, host.cur("model"), host.def("model"))).join("");
   host.detailKind = "effort";
   $("dialefforts").innerHTML = host.rows("effort").map(e => dialRow("effort", e, host.cur("effort"), host.def("effort"))).join("");
@@ -3078,9 +3067,7 @@ const DIAL_HOST = {
   cur: k => k === "model"
     ? (dialNow.modelSelector?.selected?.id || modelAlias(dialNow.model))
     : dialNow.effort,
-  def: k => k === "model"
-    ? (dialNow.modelSelector?.provider?.kind === "anthropic" ? dialNow.defModel : null)
-    : dialNow.defEffort,
+  def: k => k === "model" ? dialNow.defModel : dialNow.defEffort,
   rows: k => k === "model" ? composerModelRows() : DIAL_LISTS[k](),
   pick: (k, v) => applyDial(k, v),
 };
