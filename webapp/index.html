@@ -1520,6 +1520,11 @@
   .evrow .tx { color: var(--hint); flex: 1; word-break: break-word; }
   .xbtn { background: transparent; border: none; color: #e05555; font-size: var(--t-body); padding: 2px var(--sp-2); cursor: pointer; }
   .sechead { color: var(--hint); font-size: var(--t-meta); text-transform: uppercase; letter-spacing: .4px; margin: var(--sp-4) 2px var(--sp-2); }
+  /* The command center's one section label ("Coding Sessions", 2026-07-30) keeps every other property of
+     `.sechead` — the type step, the colour, the tracking, the margins — and drops ONLY the uppercase,
+     because the owner settled that label verbatim and `text-transform` would render it CODING SESSIONS.
+     Scoped to this panel so the Scheduled and Settings labels are untouched. */
+  #tab-sessions .sechead { text-transform: none; }
 </style>
 </head>
 <body>
@@ -2275,7 +2280,16 @@ async function renderSessions() {
   // is safe here, since nothing in the header is a tap target to lose.
   renderUsage(el, d.usage);
   if (!SESSIONS.length) { el.insertAdjacentHTML("beforeend", '<div class="notice">No live sessions.</div>'); return; }
-  for (const s of SESSIONS) {
+  // ORDER (the owner, 2026-07-30): the usage header, then the CHAT lane's card pinned first whatever
+  // state ordering the daemon sent, then a "Coding Sessions" label, then the workers. Reordered here
+  // rather than daemon-side because the daemon's order serves every surface (`/sessions`, the roster) and
+  // this is one surface's layout. Multiple chat lanes (dmLanes) all lead, in the payload's own order.
+  const chatCards = SESSIONS.filter(s => s.chat), workerCards = SESSIONS.filter(s => !s.chat);
+  for (const s of [...chatCards, ...workerCards]) {
+    // The label goes in before the FIRST worker, which is what makes "only when at least one coding
+    // session exists" structural rather than a condition to keep in sync: no workers, no first worker,
+    // no label. A chat-only fleet therefore shows no label at all — there would be nothing under it.
+    if (!s.chat && s === workerCards[0]) el.insertAdjacentHTML("beforeend", '<div class="sechead">Coding Sessions</div>');
     const c = document.createElement("div");
     c.className = "sess";
     const dot = dotClass(s);   // shared with the drill-in header — see dotClass

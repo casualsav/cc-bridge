@@ -98,7 +98,12 @@ const cards = await p.evaluate(() => [...document.querySelectorAll("#tab-session
 const checks = [];
 const ok = (label, pass, detail) => checks.push({ label, pass, detail });
 const near = (a, b, tol = 0.51) => a != null && b != null && Math.abs(a - b) <= tol;
-const [A, B, C, D, E] = cards;
+// Matched back to the FIXTURE's order by name, because the command center pins the chat lane first
+// (2026-07-30) and this file reads its cards positionally — `[A,B,C,D,E]` off the DOM silently became
+// [chat, …] and 9 checks failed against a page that was correct. Name lookup says what each letter means
+// and cannot be reordered out from under it.
+const byName = n => cards.find(c => c.name === n);
+const [A, B, C, D, E] = SESSIONS.map(f => byName(f.name));
 
 ok("FIXTURE: five cards rendered", cards.length === 5, cards.map(c => c.name).join(", "));
 // ---- the chat lane is a FULL CARD (owner, 2026-07-30, reversing the bare title row) -------------
@@ -139,12 +144,17 @@ ok("the branch is still there", /🌿 main/.test(A.text), A.footItems?.[0]);
 ok("the ctx reading is still there", A.footItems?.some(t => /^ctx 41%$/.test(t)), A.footItems?.join(" · "));
 ok("…with its bar", A.hasBar, `${A.hasBar}`);
 ok("the foot is exactly those two", A.footItems?.length === 2, A.footItems?.join(" · "));
-ok("each card still names its session", cards.every((c, i) => c.name === SESSIONS[i].name), cards.map(c => c.name).join(", "));
+// By SET, not by position: the command center pins the chat lane first (2026-07-30), so the rendered
+// order is deliberately not the payload's. What must hold is that every fixture session got a card.
+ok("each card still names its session",
+  SESSIONS.every(f => cards.some(c => c.name === f.name)) && cards.length === SESSIONS.length,
+  cards.map(c => c.name).join(", "));
 // No exemption left to write around: with the bare row reversed, EVERY card with a task carries its
 // task line — the chat lane included.
+// Each card against ITS OWN fixture row (matched by name), for the reordering reason above.
 ok("every card carries its task line, the chat lane included",
-  cards.every((c, i) => c.text.includes(SESSIONS[i].task)),
-  cards.filter((c, i) => !c.text.includes(SESSIONS[i].task)).map(c => c.name).join(",") || "all present");
+  SESSIONS.every(f => byName(f.name) && byName(f.name).text.includes(f.task)),
+  SESSIONS.filter(f => !byName(f.name) || !byName(f.name).text.includes(f.task)).map(f => f.name).join(",") || "all present");
 
 for (const [i, c] of cards.entries()) {
   const box = await p.locator("#tab-sessions .sess:not(.usage)").nth(i).boundingBox();

@@ -251,6 +251,17 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   since two surfaces agreeing on the WRONG colour passes equality.
                                   #   Pinned control (841ecf8): the chat-lane and errored checks fail
                                   #   there, every other state's parity already held and is a guard
+    node listorder.mjs [page][out] # the command center's ORDER: usage header → the CHAT lane's card,
+                                  #   pinned first → a "Coding Sessions" label → the coding sessions.
+                                  #   The fixture puts the chat lane LAST and idle with the workers
+                                  #   working, so the pin can fail. The label is checked as text AND as
+                                  #   computed style against the Scheduled view's own .sechead — every
+                                  #   property but the uppercase, which this panel drops because the owner
+                                  #   settled the label verbatim (and that the scope did not leak is a
+                                  #   guard). Plus: chat-only ⇒ no label (compound with "a label appeared
+                                  #   where one was due"), no chat lane ⇒ the label still heads the
+                                  #   section, several chat lanes ⇒ all lead and nothing is duplicated.
+                                  #   Pinned control (c156027): 6/6 state checks fail there, 2 guards hold
     node usagehead.mjs [page][out] # the command center's USAGE HEADER: the account's 5h + weekly windows
                                   #   once, above the cards (the owner's 2026-07-30 approval, which
                                   #   SCOPES the old "no 5h anywhere" ruling to cards — cardfoot.mjs

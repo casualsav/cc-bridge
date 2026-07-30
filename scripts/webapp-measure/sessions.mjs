@@ -148,10 +148,18 @@ near(card.taskSize, 14, 0.1, "the task line is UNTOUCHED at --t-sub");
 // top of the list. On the pre-change page the row is there and pushes the first card down.
 // Measured from the LIST's own box, not from the tab bar's bottom — the bar was deleted with the nav
 // restructure (2026-07-30) and `document.querySelector(".tabs")` threw here, taking the run with it.
+// Measured to the panel's FIRST CHILD rather than to the first card: since 2026-07-30 the list can open
+// with a usage header or a "Coding Sessions" label above the cards, and reading `.sess` here measured
+// past them (53.39 against 12) — a real layout the check had no opinion about, reported as a failure.
+// What it is actually asking is unchanged: nothing sits in the panel's own padding any more.
 const head = await p.evaluate(() => {
   const t = document.getElementById("tab-sessions").getBoundingClientRect();
-  const c = document.querySelector(".sess").getBoundingClientRect();
-  return { gap: c.top - t.top, oldRow: document.querySelectorAll(".newsess").length };
+  const el = document.getElementById("tab-sessions").firstElementChild;
+  // …less that child's OWN margin, so the claim is "nothing but the panel's padding is above the list"
+  // whatever the first row happens to be — a card (no margin-top), the usage header, or the section
+  // label (which carries --sp-4 above it by design, and 28 = 12 + 16 is that design, not waste).
+  const m = parseFloat(getComputedStyle(el).marginTop) || 0;
+  return { gap: el.getBoundingClientRect().top - t.top - m, oldRow: document.querySelectorAll(".newsess").length };
 });
 check(head.oldRow === 0, `the dashed "New session" row is gone (${head.oldRow} found)`);
 near(head.gap, 12, 0.5, "the list starts at the panel's own padding");

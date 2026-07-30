@@ -390,6 +390,52 @@ give it.
   the pill's 10% cap absorbs it). `BackButton` is raised for this screen in **every** layout now, not
   fullscreen only; whether the client swaps ✕ Close for ← is unverified on a device.
 
+## The command center's order
+
+- **Usage header → the CHAT lane's card → a "Coding Sessions" label → the coding sessions** (the owner's
+  order, 2026-07-30). The chat card is pinned first **whatever order the payload arrives in and whatever
+  state it is in** — reordered in `renderSessions`, not daemon-side, because the daemon's order serves
+  every surface (`/sessions`, the roster) while this is one surface's layout. Several chat lanes
+  (`dmLanes`) all lead, in the payload's own order. `listorder.mjs`'s fixture puts the chat lane LAST and
+  idle with the workers working, so the pin is falsifiable rather than fixture-shaped.
+- **The label is `.sechead` MINUS the uppercase, scoped to this panel.** The two halves of the ask pull
+  against each other — the class carries `text-transform: uppercase`, which renders CODING SESSIONS, and
+  the owner settled the label verbatim — so verbatim wins and everything else about the class stays (type
+  step, colour, tracking, margins; `listorder.mjs` asserts them against the Scheduled view's own label,
+  and that the scope did not leak). Going back to caps is deleting one declaration.
+- **It renders only where it has something under it, by construction:** emitted before the FIRST worker
+  card, so a chat-only fleet gets no label without a condition to keep in sync. With no chat lane it still
+  renders — it names the section it heads, and the owner's rule was "at least one coding session".
+- **Anything reading this list POSITIONALLY has to match by name.** `cardfoot.mjs` read `[A,B,C,D,E]` off
+  the DOM and silently became `[chat, …]` the day the pin landed — 9 checks failed against a correct page.
+  It maps the fixture's own order back by name now; `sessions.mjs` measures the panel's first CHILD (less
+  that child's margin) rather than its first `.sess`, since the first row may be the header or the label.
+
+## The usage header
+
+- **The account's 5h and weekly windows, ONCE, above the cards** (`#usagehead`, rendered by `renderUsage`
+  inside `renderSessions`). Inside that function rather than as static markup because the 4s poll wipes
+  the panel — safe here, unlike `#newfab`, because nothing in the header is a tap target to lose. It
+  renders **before** the empty-list notice: it describes the account, so a fleet with no sessions still
+  has usage worth reading.
+- **It borrows the card's box and the foot's row, and that is the whole design** — `.sess` fill, radius
+  and padding via the shared class, `.foot`'s size/colour, the cards' own `pctBar`. Two stated
+  differences: `cursor: default` (not a tap target) and two stacked rows, each with its own bar.
+  `usagehead.mjs` checks the sameness as **pixels** against a real card, not as a claim.
+- **`usageWindows` (status-card.ts) is the ONE mapping the pin and the header both go through** — rounded
+  percentage plus `fmtResetIn`'s wording. Two surfaces describing one account must not disagree about it,
+  and "they read the same file" is not that guarantee. `usage-header.test.ts` pins the mapping (rounding,
+  null-not-a-dash, one window, no snapshot); `scripts/usage-parity.ts` prints the header's rows beside the
+  pin's strip from ONE read of the live snapshot.
+- **The source is `usage.json`** (written by `statusline-command.sh` from Claude Code's own `rate_limits`)
+  through `readUsageSnapshot`'s 120s staleness bound — **never** the pane scrape (`statusline.ts`'s
+  `h5`/`d7`), which is per-pane and goes stale on an idle session while a header is account-wide. Stale ⇒
+  no `usage` key ⇒ **no header**: a percentage nobody can date is worse than none, and `0%` would be a lie.
+- **There is no per-model (e.g. Fable) window to show.** Claude Code's statusline JSON exposes
+  `rate_limits.five_hour` and `rate_limits.seven_day` and nothing else; the CLI's `/usage` dashboard has a
+  "Usage by model" **token** breakdown, which is not a limit percentage and would have to be scraped off a
+  driven TUI. Do not derive one from either.
+
 ## Toasts
 
 - **Success confirmations are OFF; failures are not — and the split is the point.** The owner,
