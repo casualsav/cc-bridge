@@ -59,7 +59,7 @@ import {
 import { findSessionHarness, recordSessionHarness } from './session-harness.ts'
 import {
   initAccounts, listAccounts, accountByName, accountForTranscript, accountForProjectsDir,
-  allProjectsDirs, addAccount, removeAccount, renameAccount, accountLoggedIn, healAccountConfigs, healMainStatusline,
+  allProjectsDirs, resolvePaneAccount, addAccount, removeAccount, renameAccount, accountLoggedIn, healAccountConfigs, healMainStatusline,
   MAIN_ACCOUNT, readDefaultMode, writeDefaultMode, projectsDirOf, type Account,
 } from './accounts.ts'
 import { exec, sleep, hashText } from './proc.ts'
@@ -129,7 +129,7 @@ import {
 import { installSendGovernor, asLowPriority } from './throttle.ts'
 import { TelegramAdapter, buttonsToKb } from './telegram-adapter.ts'
 import { refKey, type MsgRef, type Button, type SendOpts } from './channel.ts'
-import { planAuxRelayWork } from './relay-plan.ts'
+import { planAuxRelayWork, relayPresentationRole, type RelayPresentationRole } from './relay-plan.ts'
 import { createMsgTracker } from './msg-tracker.ts'
 import { startEditScheduler, scheduleEdit, scheduleDelete, cancelEdit, touchActiveView } from './edit-scheduler.ts'
 import { initUpdates, startUpdate, bridgeVersion, claudeBin, claudeVersion, sweepUpdateChecks, sweepClaudeInstall, installClaudeLatest } from './updates.ts'
@@ -1598,14 +1598,33 @@ setInterval(() => {
   })()
 }, 15_000).unref?.()
 
-// The account a pane's session runs under, derived from its stamped transcript path (the
-// transcript lives under <configDir>/projects/). Unstamped panes read as main — correct for
-// every pre-multi-account session, and alt accounts always stamp (their seeded settings.json
-// carries the hook).
+// A pane is a DM chat lane only when its stamped session is present in the explicit chat binding.
+// Read-only session resolution avoids minting an identity merely to classify presentation/account.
+async function boundDmChatForPane(pane: string): Promise<string | null> {
+  const sid = await sessionForPane(pane, false).catch(() => null)
+  return sid ? chatIdForDmChatSession(sid) ?? null : null
+}
+
+async function panePresentation(pane: string): Promise<{ role: RelayPresentationRole; dmChat: string | null }> {
+  const dmChat = await boundDmChatForPane(pane)
+  return { role: relayPresentationRole(dmChat !== null, isTopicMode()), dmChat }
+}
+
+async function stopTypingForPane(pane: string): Promise<void> {
+  const presentation = await panePresentation(pane)
+  if (presentation.role === 'dm-chat' && presentation.dmChat) typingPresence.stop(presentation.dmChat)
+  else typingPresence.stop()
+}
+
+// A bound DM chat lane runs on the explicit `chat` account even when its transcript stamp is absent
+// or points at main (gateway children can start before transcript evidence exists). Ordinary panes keep
+// the transcript-derived account, falling back to main.
 async function paneAccount(pane: string | null): Promise<Account> {
   if (!pane) return MAIN_ACCOUNT
+  const explicit = await boundDmChatForPane(pane) !== null ? accountByName('chat') : null
+  if (explicit) return resolvePaneAccount(explicit, null)
   const file = await transcriptForPane(pane, null)   // stamp only — null cwd skips the fallback
-  return file ? accountForTranscript(file) : MAIN_ACCOUNT
+  return resolvePaneAccount(null, file ? accountForTranscript(file) : null)
 }
 
 // The account a topic's session runs on (stamped at topic creation) — revivals/resumes must spawn
@@ -1726,8 +1745,10 @@ function clearThinkingPending(pane: string | null): void { if (pane) thinkingPen
 async function kickThinkingMirror(pane: string): Promise<void> {
   if (!TRANSCRIPT_OUTBOUND) return
   thinkingPendingUntil.set(pane, Date.now() + THINKING_PENDING_MS)
+  const presentation = await panePresentation(pane)
   if (pane === focus.activePaneId) await updateTerminalMirror(false, true).catch(() => {})
-  else if (isTopicMode()) await updateAuxMirror(pane, false, true).catch(() => {})
+  else if (presentation.role !== 'none') await updateAuxMirror(pane, false, true).catch(() => {})
+  if (presentation.role === 'dm-chat' && presentation.dmChat) typingPresence.arm(presentation.dmChat, true)
 }
 
 // Relay one concluded reply to a single outbound target, self-healing a deleted topic. If the send
@@ -1899,9 +1920,11 @@ async function relayLoopTick(gen: number): Promise<void> {
       // create/finalize storm. turnInProgress is the ground truth, so the card caps exactly when the
       // turn concludes. (detectWorking now only feeds ambient signals elsewhere.)
       const working = file ? turnInProgress(file) : !idle
+      const presentation = await panePresentation(paneId)
       relayConcludeTicks = working ? 0 : relayConcludeTicks + 1
-      if (isTopicMode()) { if (working) void emitTopicTyping(paneId) }   // topic mode → typing in the session's own topic
-      else typingPresence.observe(await paneDrivesDmTyping(paneId, working))   // reliable working signal — this bridged pane never shows the spinner; gated to the pane that actually owns the DM
+      if (presentation.role === 'dm-chat' && presentation.dmChat) typingPresence.observe(working, presentation.dmChat)
+      else if (presentation.role === 'topic') { if (working) void emitTopicTyping(paneId) }
+      else typingPresence.observe(await paneDrivesDmTyping(paneId, working))   // classic non-topic DM keeps the pane-ownership gate
       await updateTerminalMirror(working, thinkingPending(paneId)).catch(() => {})   // pending opens/holds the Thinking… card before turnInProgress flips
 
       // DM-only "Clauding…" live draft. DISABLED by default (the indicator was unreliable): gated to
@@ -1954,7 +1977,8 @@ async function relayLoopTick(gen: number): Promise<void> {
             lastRelayedByFile.set(file, r.uuid)
           }
           clearThinkingPending(paneId)   // reply landed → drop the thinking-pending crutch so the card caps/deletes promptly
-          typingPresence.stop()   // reply delivered (or banner suppressed) → clean stop, no tail
+          if (presentation.role === 'dm-chat' && presentation.dmChat) typingPresence.stop(presentation.dmChat)
+          else typingPresence.stop()   // reply delivered (or banner suppressed) → clean stop, no tail
         }
       }
     } catch (e) { process.stderr.write(`daemon: relay tick error, retry next tick: ${e}\n`) }
@@ -2078,13 +2102,10 @@ async function auxRelayTick(): Promise<void> {
     await Promise.all(work.map(({ pane, file }) => (async () => {
       try {
         const working = turnInProgress(file)
-        // The session's own live card in its own topic — same lifecycle as the focused card,
-        // driven by the same transcript turn signal this loop already computes.
-        // Topic-only ON PURPOSE. The aux card's targets are outboundTargetsFor(pane), so in DM mode this
-        // would start posting a live terminal mirror into the owner's private chat — an undesigned
-        // surface nobody has watched. D4 is about replies never arriving and prompts never being seen;
-        // the live mirror is a separate cosmetic feature, so it stays behind the group gate for now.
-        if (isTopicMode()) await updateAuxMirror(pane, working, thinkingPending(pane)).catch(() => {})   // pending opens/holds the card before turnInProgress flips
+        const presentation = await panePresentation(pane)
+        // A bound private-chat lane keeps its DM presentation even when a forum group is also bound.
+        // Other forum panes keep their topic card; groupless unbound/headless panes have no card.
+        if (presentation.role !== 'none') await updateAuxMirror(pane, working, thinkingPending(pane)).catch(() => {})   // pending opens/holds the card before turnInProgress flips
         if (!auxRelayPrimed.has(file)) {
           // A restored (persisted) cursor survives restarts — keep it, so a reply written during
           // the restart window still relays. Only a never-seen transcript skips its existing tail.
@@ -2092,7 +2113,12 @@ async function auxRelayTick(): Promise<void> {
           auxRelayPrimed.add(file)
           return
         }
-        if (working) { auxConcludeTicks.delete(file); void emitTopicTyping(pane); return }   // working → typing in its topic, relay only once the turn concludes
+        if (working) {
+          auxConcludeTicks.delete(file)
+          if (presentation.role === 'dm-chat' && presentation.dmChat) typingPresence.observe(true, presentation.dmChat)
+          else if (presentation.role === 'topic') void emitTopicTyping(pane)
+          return
+        }   // working → sustain presence on its own surface; relay only once the turn concludes
         // Between turns is the only moment a re-assert can land — applySessionModel drives the
         // model picker, which needs a resting prompt. Checked here rather than on its own timer so
         // it rides the transcript read this loop already did.
@@ -2101,8 +2127,11 @@ async function auxRelayTick(): Promise<void> {
           if (dsid) await guardModelDrift(pane, dsid, file).catch(() => { /* transient — next tick */ })
         }
         // Transcript quiet but the pane spinner is live (thinking / pre-first-tool-call): sustain
-        // typing only — relay conclusion stays on the transcript signal.
-        if (detectWorking(await capturePane(pane).catch(() => ''))) void emitTopicTyping(pane)
+        // presence only — relay conclusion stays on the transcript signal.
+        if (detectWorking(await capturePane(pane).catch(() => ''))) {
+          if (presentation.role === 'dm-chat' && presentation.dmChat) typingPresence.observe(true, presentation.dmChat)
+          else if (presentation.role === 'topic') void emitTopicTyping(pane)
+        }
         // Same conclude-debounce as the focused loop: a mid-burst end_turn (auto-continue gap)
         // shouldn't ship interim narration to the topic as if the turn had ended.
         const ticks = (auxConcludeTicks.get(file) ?? 0) + 1
@@ -2117,7 +2146,10 @@ async function auxRelayTick(): Promise<void> {
           // writes a synthetic "You've hit your session limit · resets …" assistant message for EVERY
           // injection attempted while frozen — relaying each spammed the topic. The ⛔ handler already
           // sends one deduped notice.
-          if (r.text.length < 200 && /\b(hit your|used \d+% of your) [\w-]+ limit\b/i.test(r.text)) continue
+          if (r.text.length < 200 && /\b(hit your|used \d+% of your) [\w-]+ limit\b/i.test(r.text)) {
+            if (presentation.role === 'dm-chat' && presentation.dmChat) typingPresence.stop(presentation.dmChat)
+            continue
+          }
           const targets = await outboundTargetsFor(pane)
           // Logged like the focused loop's relay: this path used to send with no log line at all,
           // which is why the live double-send showed ONE relay for TWO messages and could not be
@@ -2128,6 +2160,7 @@ async function auxRelayTick(): Promise<void> {
             await deliverRelayReply(pane, t, r.text, r.busAnchored)   // self-heals a deleted topic (recreate + resend)
           }
           if (r.busAnchored) void checkConcludedTurnObligations(pane).catch(() => {})   // did this turn do what its ask required?
+          if (presentation.role === 'dm-chat' && presentation.dmChat) typingPresence.stop(presentation.dmChat)   // reply delivered → clean DM stop, no tail
         }
       } catch { /* transient (tmux/transcript) — retry next tick */ }
     })()))
@@ -2582,10 +2615,11 @@ async function discoverPanes(): Promise<void> {
   // dashboard with a corpse. Drop it like a pane death (adoption below picks a live replacement if
   // one exists). Mid-restart bounces are exempt (same rule as the registry prune above).
   if (haveFocus && !isPaneRestarting(focus.activePaneId!) && !(await paneClaudeLive(focus.activePaneId!).catch(() => true))) {
+    const deadPane = focus.activePaneId!
+    await stopTypingForPane(deadPane)
     haveFocus = false
     focus.paneWatcher?.stop(); focus.paneWatcher = null
     focus.activePaneId = null
-    typingPresence.stop()
   }
   if (!haveFocus && panes.length) {
     // Headless sessions (e.g. the background 'general' anchor) are background-only by definition
@@ -4941,7 +4975,7 @@ function startPaneWatcher(paneId: string): void {
   focus.paneWatcher = new PaneWatcher(
     paneId,
     text => onPaneEvent(text),
-    () => {
+    async () => {
       process.stderr.write(`daemon: pane ${paneId} died\n`)
       const entry = [...sessions.entries()].find(([, s]) => s.paneId === paneId)
       // Same withholding for a registered (MCP-mode) session: drop it, but don't announce an ending
@@ -4953,8 +4987,8 @@ function startPaneWatcher(paneId: string): void {
       }
       // Off-MCP pane: drop it; if it was the focused one, the discovery rescan re-adopts a survivor.
       const wasActive = focus.activePaneId === paneId || focus.currentSessionId === paneId
+      await stopTypingForPane(paneId).catch(() => {})   // resolve the bound DM before closeTopicForPane can remove it
       focus.activePaneId = null; focus.paneWatcher = null
-      typingPresence.stop()   // the pane driving typing is gone — never leave a stale indicator running
       offMcpPanes.delete(paneId)
       void closeTopicForPane(paneId)
       if (adoptedPaneId === paneId) adoptedPaneId = null   // clear binding so the rescan re-adopts
@@ -4968,7 +5002,13 @@ function startPaneWatcher(paneId: string): void {
       // suppressed a few lines up: closeTopicForPane checks the same flag first thing.
       if (wasActive && !isPaneRestarting(paneId)) void sessionForPane(paneId, false).catch(() => null).then(sid => announceFocusedExit(label, sid ?? paneId))
     },
-    async text => { const w = detectWorking(text); if (isTopicMode()) { if (w) void emitTopicTyping(paneId) } else typingPresence.observe(await paneDrivesDmTyping(paneId, w)) },   // live typing signal, every poll — topic mode routes it to the session's topic (transcript signal is blind mid-thinking); DM gated to the pane that owns it
+    async text => {
+      const working = detectWorking(text)
+      const presentation = await panePresentation(paneId)
+      if (presentation.role === 'dm-chat' && presentation.dmChat) typingPresence.observe(working, presentation.dmChat)
+      else if (presentation.role === 'topic') { if (working) void emitTopicTyping(paneId) }
+      else typingPresence.observe(await paneDrivesDmTyping(paneId, working))
+    },   // live typing signal, every poll — explicit DM chat presentation takes precedence over global topic mode
   )
   focus.paneWatcher.start()
 }
@@ -6683,7 +6723,7 @@ async function performStop(t: CommandTarget): Promise<string> {
   const ok = t.isFocused && t.watcher
     ? await t.watcher.withInjection(() => sendKeys(pane, agentInterruptKeys(agent)))
     : await sendKeys(pane, agentInterruptKeys(agent))
-  typingPresence.stop()   // interrupted turn never relays a conclusion — stop typing now
+  await stopTypingForPane(pane)   // interrupted turn never relays a conclusion — stop its own typing now
   return ok ? `🛑 Sent interrupt (Esc) to ${agentLabel(agent)}.` : 'Could not reach the session pane.'
 }
 
@@ -13447,12 +13487,13 @@ async function handleInbound(
   resetHops()
   resetAllSessionDepth()   // a human is present: every chain is supervised again, so nothing stays past the breaker
 
-  // Topic mode: show typing instantly in the topic the message came from and LATCH it through
-  // Claude's pre-first-token thinking (the relay loops then sustain it — a bare one-shot expired
-  // after ~5s and went dark until the transcript showed work). DM mode keeps the flat keep-alive.
-  // Avoids stray typing in the group's General.
+  // A bound DM chat keeps ordinary DM typing even while a forum group is globally active. Otherwise
+  // topic messages latch their own thread/General presence, and classic non-topic DM keeps the flat
+  // keep-alive. The explicit binding, not thread absence, identifies the DM-chat role.
   const inThreadId = ctx.message?.message_thread_id
-  if (isTopicMode()) {
+  const boundDmChat = ctx.chat?.type === 'private' && getDmChatSession(chat_id) != null
+  if (boundDmChat) typingPresence.arm(chat_id, true)
+  else if (isTopicMode()) {
     if (typeof inThreadId === 'number') armTopicTyping(chat_id, inThreadId)
     // General with an anchored session: latch typing unthreaded (the anchor's replies land here).
     else if (chat_id === getGroupChatId() && getGeneralSession()) armTopicTyping(chat_id, 'general')

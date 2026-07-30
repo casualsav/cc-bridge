@@ -1,19 +1,18 @@
 // Typing presence — keep Telegram's "typing…" chat action lit for a whole turn.
 //
 // Telegram's typing action auto-expires after ~5s, so to hold it for a full turn we re-send it
-// every couple seconds while Claude is working. The model is a single keep-alive window: arm()
-// (on inbound) and observe(true) (each pane poll, from the live `esc to interrupt` footer) push
-// the window out; an independent ping timer re-sends while the window is open and falls silent
-// once work stops. Self-correcting by construction — the timer always runs, gated only on the
-// window, so it can never get stuck on or off.
+// every couple seconds while Claude is working. Each chat has its own keep-alive window: arm()
+// (on inbound) and observe(true, chatId) push only that chat's window out; the no-chat observe/stop
+// forms address only classic, unscoped DM state. An independent ping timer sends only for active
+// windows, so focus changes and unrelated panes cannot extinguish or light a bound chat.
 //
 // Extracted from daemon.ts as a standalone class; the channel adapter is injected via the constructor.
 import type { ChannelAdapter } from './channel.ts'
 
+type TypingState = { workingUntil: number; pendingUntil: number; scoped: boolean }
+
 export class TypingPresence {
-  private chats = new Set<string>()             // chats that have messaged — where typing shows
-  private workingUntil = 0                      // rolling keep-alive while work is observed
-  private pendingUntil = 0                      // startup latch: armed on inbound until first observed work
+  private chats = new Map<string, TypingState>()
   private timer: ReturnType<typeof setInterval> | null = null
   private static readonly PING_MS = 2_000          // « Telegram's ~5s expiry — 2.5x safety margin (Hermes uses 2s)
   private static readonly WORK_GRACE_MS = 8_000    // keep-alive after the last observed work tick (poll is 1.5s)
@@ -23,40 +22,57 @@ export class TypingPresence {
 
   constructor(private channel: ChannelAdapter) {}
 
-  private active(): boolean { const n = Date.now(); return n < this.workingUntil || n < this.pendingUntil }
-
-  private pingAll(): void {
-    for (const chat of this.chats)
-      void this.channel.typing(chat).catch(() => {})
+  private stateFor(chat: string, scoped = false): TypingState {
+    let state = this.chats.get(chat)
+    if (!state) {
+      state = { workingUntil: 0, pendingUntil: 0, scoped }
+      this.chats.set(chat, state)
+    } else if (scoped) state.scoped = true
+    return state
+  }
+  private active(state: TypingState): boolean {
+    const now = Date.now()
+    return now < state.workingUntil || now < state.pendingUntil
+  }
+  private ping(chat: string): void { void this.channel.typing(chat).catch(() => {}) }
+  private pingActive(): void {
+    for (const [chat, state] of this.chats) if (this.active(state)) this.ping(chat)
   }
   private ensureTimer(): void {
-    if (!this.timer) this.timer = setInterval(() => { if (this.active()) this.pingAll() }, TypingPresence.PING_MS)
+    if (!this.timer) this.timer = setInterval(() => this.pingActive(), TypingPresence.PING_MS)
   }
 
   // An inbound message was injected — show presence now and latch it through Claude's startup
   // "thinking" phase (before the first transcript entry, when observe() is still blind).
-  arm(chat_id: string): void {
-    this.chats.add(chat_id)
-    this.pendingUntil = Date.now() + TypingPresence.START_GRACE_MS
-    this.pingAll()
+  arm(chat_id: string, scoped = false): void {
+    const state = this.stateFor(chat_id, scoped)
+    state.pendingUntil = Date.now() + TypingPresence.START_GRACE_MS
+    this.ping(chat_id)
     this.ensureTimer()
   }
 
-  // turnInProgress from each relay tick. Working extends the rolling keep-alive AND ends the
-  // startup latch (Claude has begun). It also re-arms typing if a fresh turn starts right after a
-  // stop() (e.g. two messages answered back-to-back). Not-working does nothing.
-  observe(working: boolean): void {
-    if (working) { this.workingUntil = Date.now() + TypingPresence.WORK_GRACE_MS; this.pendingUntil = 0; this.ensureTimer() }
+  // turnInProgress from each relay tick. A chat id creates/upgrades one bound-DM state; no id
+  // preserves the classic focused behavior without extending independently-scoped chat windows.
+  observe(working: boolean, chatId?: string): void {
+    if (!working) return
+    const states = chatId == null
+      ? [...this.chats.values()].filter(state => !state.scoped)
+      : [this.stateFor(chatId, true)]
+    for (const state of states) {
+      state.workingUntil = Date.now() + TypingPresence.WORK_GRACE_MS
+      state.pendingUntil = 0
+    }
+    this.ensureTimer()
   }
 
-  // The reply has been relayed (or the turn was interrupted): stop typing immediately — Telegram
-  // clears it on the reply's own send, and we don't refresh again, so it vanishes the moment the
-  // answer lands. This is the Hermes "clean stop in finally" — no lingering tail.
-  stop(): void { this.workingUntil = 0; this.pendingUntil = 0 }
-
-  // Re-assert typing right after the daemon sends a non-final message (e.g. the live mirror) —
-  // Telegram clears it on every send, so without this it blinks off until the next tick.
-  retrigger(): void {
-    if (this.chats.size && this.active()) this.pingAll()
+  // An explicit reply stops exactly its bound DM. No id stops only classic focused state.
+  stop(chatId?: string): void {
+    const states = chatId == null
+      ? [...this.chats.values()].filter(state => !state.scoped)
+      : [this.chats.get(chatId)]
+    for (const state of states) if (state) { state.workingUntil = 0; state.pendingUntil = 0 }
   }
+
+  // Re-assert active chats right after a daemon message clears Telegram's typing state.
+  retrigger(): void { this.pingActive() }
 }

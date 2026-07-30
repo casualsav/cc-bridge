@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   initAccounts, listAccounts, accountByName, accountForTranscript, accountForProjectsDir,
-  allProjectsDirs, ACCOUNT_NAME_RE, MAIN_CONFIG_DIR,
+  allProjectsDirs, resolvePaneAccount, ACCOUNT_NAME_RE, MAIN_ACCOUNT, MAIN_CONFIG_DIR,
 } from './accounts.ts'
 
 function freshRegistry(reg?: Record<string, string>): string {
@@ -44,6 +44,17 @@ test('accountForProjectsDir + allProjectsDirs round-trip', () => {
   expect(roots).toEqual([join(MAIN_CONFIG_DIR, 'projects'), '/home/u/.claude-work/projects'])
   expect(accountForProjectsDir(roots[1]).name).toBe('work')
   expect(accountForProjectsDir('/unknown/projects').name).toBe('main')
+})
+
+test('pane account precedence is explicit registered role, then transcript, then main', () => {
+  freshRegistry({ chat: '/home/u/.claude-chat' })
+  const chat = accountByName('chat')
+  if (!chat) throw new Error('expected registered chat account')
+  const work = { name: 'work', configDir: '/home/u/.claude-work' }
+  expect(resolvePaneAccount(chat, null)).toBe(chat)
+  expect(resolvePaneAccount(chat, MAIN_ACCOUNT)).toBe(chat)
+  expect(resolvePaneAccount(null, work)).toBe(work)
+  expect(resolvePaneAccount(null, null).name).toBe('main')
 })
 
 test('account names are safe tokens', () => {

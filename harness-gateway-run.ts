@@ -42,7 +42,8 @@ if (!gatewayEnv) {
 const SAFE_CHILD_ENV = new Set([
   'HOME', 'PATH', 'USER', 'LOGNAME', 'SHELL', 'TERM', 'COLORTERM', 'LANG', 'LANGUAGE',
   'TMPDIR', 'TMP', 'TEMP', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME',
-  'CLAUDE_CONFIG_DIR', 'NO_COLOR', 'FORCE_COLOR', 'SSL_CERT_FILE', 'SSL_CERT_DIR',
+  'CLAUDE_CONFIG_DIR', 'TMUX', 'TMUX_PANE', 'TELEGRAM_STATE_DIR',
+  'NO_COLOR', 'FORCE_COLOR', 'SSL_CERT_FILE', 'SSL_CERT_DIR',
 ])
 const childEnv: Record<string, string> = {}
 for (const [key, value] of Object.entries(launchEnv)) {

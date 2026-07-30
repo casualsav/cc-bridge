@@ -5,6 +5,14 @@
 // a plain synchronous pass so no interleaving can slip a duplicate through.
 
 export type AuxResolved = { pane: string; file: string }
+export type RelayPresentationRole = 'dm-chat' | 'topic' | 'none'
+
+// A pane bound to a private chat keeps that presentation even while a forum group is also bound.
+// Otherwise forum panes use topic presentation; groupless unbound/headless panes have no surface.
+export function relayPresentationRole(boundDmChat: boolean, topicMode: boolean): RelayPresentationRole {
+  if (boundDmChat) return 'dm-chat'
+  return topicMode ? 'topic' : 'none'
+}
 
 // Given each non-focused pane's resolved transcript file (null = the pane's resolution failed or it has
 // no transcript yet) and the file the focused rich-relay loop owns, return the ordered list of unique

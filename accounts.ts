@@ -47,6 +47,12 @@ export function accountByName(name: string): Account | null {
 
 export function projectsDirOf(a: Account): string { return join(a.configDir, 'projects') }
 
+// Pane-owned roles (currently the bound DM chat lane) are authoritative; ordinary panes fall back
+// to transcript ownership, then main when neither signal exists.
+export function resolvePaneAccount(explicit: Account | null, transcript: Account | null): Account {
+  return explicit ?? transcript ?? MAIN_ACCOUNT
+}
+
 // All accounts' projects roots — what /resume and the cwd-fallback transcript resolver scan.
 export function allProjectsDirs(): string[] { return listAccounts().map(projectsDirOf) }
 

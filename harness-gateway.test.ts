@@ -64,7 +64,7 @@ test('gateway launch commands never contain provider credentials', () => {
   expect(command).not.toContain('secret-token')
 })
 
-test('credential-safe runner loads the secret at runtime rather than from argv', () => {
+test('credential-safe runner loads the secret at runtime and preserves bridge session identity', () => {
   const state = mkdtempSync(join(tmpdir(), 'cc-gateway-'))
   try {
     writeFileSync(join(state, 'harness-gateways.json'), JSON.stringify({ test: {
@@ -73,17 +73,29 @@ test('credential-safe runner loads the secret at runtime rather than from argv',
     } }))
     writeFileSync(join(state, '.env'), 'CC_BRIDGE_GATEWAY_TEST_KEY=runtime-secret\nTELEGRAM_BOT_TOKEN=must-not-leak\n')
     const env: Record<string, string | undefined> = {
-      ...process.env, ANTHROPIC_API_KEY: 'must-not-leak', ANTHROPIC_AUTH_TOKEN: 'must-be-replaced',
+      ...process.env,
+      ANTHROPIC_API_KEY: 'must-not-leak',
+      ANTHROPIC_AUTH_TOKEN: 'must-be-replaced',
+      TMUX: '/tmp/cc-bridge-tmux,123,0',
+      TMUX_PANE: '%42',
+      TELEGRAM_STATE_DIR: state,
+      CLAUDE_CONFIG_DIR: join(state, 'claude-config'),
     }
     delete env.CC_BRIDGE_GATEWAY_TEST_KEY
     delete env.TELEGRAM_BOT_TOKEN
     const result = Bun.spawnSync([
       process.execPath, join(import.meta.dir, 'harness-gateway-run.ts'),
       'test', 'model-a', 'model-b', '--', process.execPath, '-e',
-      'process.stdout.write(JSON.stringify({ token: process.env.ANTHROPIC_AUTH_TOKEN, apiKey: process.env.ANTHROPIC_API_KEY, telegram: process.env.TELEGRAM_BOT_TOKEN }))',
-    ], { env: { ...env, TELEGRAM_STATE_DIR: state } })
+      'process.stdout.write(JSON.stringify({ token: process.env.ANTHROPIC_AUTH_TOKEN, apiKey: process.env.ANTHROPIC_API_KEY, sourceKey: process.env.CC_BRIDGE_GATEWAY_TEST_KEY, telegram: process.env.TELEGRAM_BOT_TOKEN, tmux: process.env.TMUX, pane: process.env.TMUX_PANE, state: process.env.TELEGRAM_STATE_DIR, config: process.env.CLAUDE_CONFIG_DIR }))',
+    ], { env })
     expect(result.exitCode).toBe(0)
-    expect(JSON.parse(result.stdout.toString())).toEqual({ token: 'runtime-secret' })
+    expect(JSON.parse(result.stdout.toString())).toEqual({
+      token: 'runtime-secret',
+      tmux: '/tmp/cc-bridge-tmux,123,0',
+      pane: '%42',
+      state,
+      config: join(state, 'claude-config'),
+    })
   } finally { rmSync(state, { recursive: true, force: true }) }
 })
 

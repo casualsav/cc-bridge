@@ -3,7 +3,14 @@
 // transcript file per tick, never the focused file, first pane wins a shared file, order preserved.
 // Run: bun test relay-plan.test.ts
 import { test, expect } from 'bun:test'
-import { planAuxRelayWork } from './relay-plan.ts'
+import { planAuxRelayWork, relayPresentationRole } from './relay-plan.ts'
+
+test('presentation role gives a bound DM chat precedence over topic mode', () => {
+  expect(relayPresentationRole(true, true)).toBe('dm-chat')
+  expect(relayPresentationRole(true, false)).toBe('dm-chat')
+  expect(relayPresentationRole(false, true)).toBe('topic')
+  expect(relayPresentationRole(false, false)).toBe('none')
+})
 
 test('passes through distinct pane/file pairs in order', () => {
   const resolved = [
