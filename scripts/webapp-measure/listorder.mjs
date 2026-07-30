@@ -12,6 +12,11 @@ import { chromium } from "/home/ubuntu/projects/taste/node_modules/playwright/in
 // keeps every other property — and both halves are asserted, including that the Scheduled view's own
 // labels still uppercase (the scope did not leak).
 //
+// Since 2026-07-30 the label also carries a static decoration: one frozen frame of the working
+// spinner's glyph set, BEFORE the words. The text is matched against LABEL (glyph included) rather
+// than loosened to a substring — the decoration is part of what the owner ordered, so the check
+// asserts it instead of tolerating it, and the WORDS are still checked verbatim on their own.
+//
 // CONTROL: the page pinned before the ordering. Every state check must FAIL there; the guards (the cards
 // themselves, the header's place, Scheduled's labels) held before and must hold after.
 import { execFileSync } from "node:child_process";
@@ -56,6 +61,11 @@ const open = async (path, sessions, usage = USAGE) => {
   return p;
 };
 
+// The glyph the label carries, and the words it decorates — kept apart so the two claims stay separate.
+const GLYPH = "✳";
+const WORDS = "Coding Sessions";
+const LABEL = `${GLYPH} ${WORDS}`;
+
 // The panel's children, in order, each named by what it is — which is the whole claim of this file.
 const stack = p => p.evaluate(() => [...document.getElementById("tab-sessions").children].map(e =>
   e.id === "usagehead" ? "usage"
@@ -74,7 +84,7 @@ async function measure(path, label, shotPrefix) {
   {
     const p = await open(path, MIXED);
     const st = await stack(p);
-    state(st.join(" → ") === "usage → card:Chat (@suchag) → label:Coding Sessions → card:cc-bridge → card:memes",
+    state(st.join(" → ") === `usage → card:Chat (@suchag) → label:${LABEL} → card:cc-bridge → card:memes`,
       `header → chat → label → coding sessions, in that order (${st.join(" → ")})`);
     const lab = await p.evaluate(() => {
       const l = document.querySelector("#tab-sessions .sechead");
@@ -82,9 +92,13 @@ async function measure(path, label, shotPrefix) {
       const cs = getComputedStyle(l);
       return { text: l.textContent, transform: cs.textTransform, size: cs.fontSize, colour: cs.color, tracking: cs.letterSpacing, margin: cs.margin };
     });
-    labelled = !!lab && lab.text === "Coding Sessions" && lab.transform === "none";
+    labelled = !!lab && lab.text === LABEL && lab.transform === "none";
     state(labelled,
-      `the label reads exactly "Coding Sessions", un-transformed (${lab ? `${JSON.stringify(lab.text)} / ${lab.transform}` : "no label"})`);
+      `the label reads exactly ${JSON.stringify(LABEL)}, un-transformed (${lab ? `${JSON.stringify(lab.text)} / ${lab.transform}` : "no label"})`);
+    // Stated separately from the whole string above so a change to either half names itself: the words
+    // the owner settled are still verbatim, and the decoration leads them rather than trailing or wrapping.
+    state(!!lab && lab.text.startsWith(`${GLYPH} `) && lab.text.slice(GLYPH.length + 1) === WORDS,
+      `the glyph leads and the words are untouched behind it (${lab ? JSON.stringify(lab.text) : "no label"})`);
     // Vocabulary as computed values, against the SAME class used by the Scheduled view: everything but
     // the transform has to match, or this is a new design element wearing an old class name.
     const other = await p.evaluate(async () => {
@@ -118,7 +132,7 @@ async function measure(path, label, shotPrefix) {
   {
     const p = await open(path, [worker("s1", "cc-bridge")]);
     const st = await stack(p);
-    state(st.join(" → ") === "usage → label:Coding Sessions → card:cc-bridge",
+    state(st.join(" → ") === `usage → label:${LABEL} → card:cc-bridge`,
       `with no chat lane the label still names the section it heads (${st.join(" → ")})`);
     await p.close();
   }
@@ -127,7 +141,7 @@ async function measure(path, label, shotPrefix) {
   {
     const p = await open(path, [worker("s1", "cc-bridge"), chat("s4", "Chat (@suchag)"), chat("s5", "Chat (@second)")]);
     const st = await stack(p);
-    state(st.join(" → ") === "usage → card:Chat (@suchag) → card:Chat (@second) → label:Coding Sessions → card:cc-bridge",
+    state(st.join(" → ") === `usage → card:Chat (@suchag) → card:Chat (@second) → label:${LABEL} → card:cc-bridge`,
       `every chat lane leads, in the payload's own order, and one label follows them (${st.join(" → ")})`);
     guard(await p.evaluate(() => document.querySelectorAll("#tab-sessions .sess:not(.usage)").length === 3),
       "…and no card was lost or duplicated by the reordering");

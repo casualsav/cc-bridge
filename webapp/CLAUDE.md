@@ -403,6 +403,14 @@ give it.
   the owner settled the label verbatim — so verbatim wins and everything else about the class stays (type
   step, colour, tracking, margins; `listorder.mjs` asserts them against the Scheduled view's own label,
   and that the scope did not leak). Going back to caps is deleting one declaration.
+- **The label leads with `✳`, one FROZEN frame of `WORK_GLYPHS`** (the working row's six-glyph spinner —
+  `· ✢ ✳ ✶ ✻ ✽`), glyph then a space then the words (the owner's placement, 2026-07-30). It is a
+  decoration and nothing else: not animated, not read from any session's state, identical whatever the
+  fleet is doing — the *moving* member of that family is the working row, and a second animated one
+  would compete with it. Written as plain text in the label rather than a `::before`, so
+  `listorder.mjs` can assert it: the harness matches the label as glyph + words (`LABEL`) and asserts
+  the two halves separately, rather than being loosened to tolerate a decoration it has no opinion
+  about.
 - **It renders only where it has something under it, by construction:** emitted before the FIRST worker
   card, so a chat-only fleet gets no label without a condition to keep in sync. With no chat lane it still
   renders — it names the section it heads, and the owner's rule was "at least one coding session".

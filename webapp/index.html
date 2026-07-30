@@ -2289,7 +2289,9 @@ async function renderSessions() {
     // The label goes in before the FIRST worker, which is what makes "only when at least one coding
     // session exists" structural rather than a condition to keep in sync: no workers, no first worker,
     // no label. A chat-only fleet therefore shows no label at all — there would be nothing under it.
-    if (!s.chat && s === workerCards[0]) el.insertAdjacentHTML("beforeend", '<div class="sechead">Coding Sessions</div>');
+    // The glyph is one frame of the working spinner's own set (WORK_GLYPHS), frozen: a decoration on
+    // the section's name, identical whatever the fleet is doing, never coupled to any state.
+    if (!s.chat && s === workerCards[0]) el.insertAdjacentHTML("beforeend", '<div class="sechead">✳ Coding Sessions</div>');
     const c = document.createElement("div");
     c.className = "sess";
     const dot = dotClass(s);   // shared with the drill-in header — see dotClass
