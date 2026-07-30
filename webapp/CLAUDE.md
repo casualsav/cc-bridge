@@ -419,42 +419,41 @@ give it.
   rendered ink centroid (a box flex-centres while its contents paint off-centre — see the half-pixel
   snap note), each to ±0.5px: **0.00px on rects, 0.25px on paint** — the residual is the glyph's ink
   sitting off-centre inside its own advance, and it is printed rather than rounded away.
-- **The words stand on the card NAMES' axis, and the box axis is the only column that exists** (the
-  owner's second ask on this label, approved 2026-07-30). It falls out of the gap above rather than
-  being set: box 45.00 against 45.00 for every card. **Do not chase the ink edges to zero** — a text
-  rect is the ADVANCE box and each letterform sits inside its own side bearings, so the names' own ink
-  edges disagree with *each other* (measured @dpr4: `C` 45.75 · `c` 45.50 · `m` 46.00) and no single
-  axis can satisfy them all. What IS asserted is the strongest true claim: same letter, the label's
-  12px/400 `C` against a card's 14px/600 `C`, **0.25px** apart. The per-letterform scatter is printed
-  by `listorder.mjs` and deliberately not gated — it is type, not misalignment.
-- **"The C flush with every session name" IS NOT ACHIEVABLE, by any lever — measured in his own font**
-  (2026-07-30, after two photos and a verbatim spec naming the glyph→C gap as the only permitted lever).
-  Session names start with different letters, and a letterform's left side bearing is its own: in
-  **Roboto** the ink edges of the names' own first letters span **0.75px** (`t` of trading −0.625 from
-  `m` of memes; `C` `c` `u` `i` `U` in between). They do not share an ink column **with each other**, so
-  no single gap can put one `C` on all of them — and neither can a type change, since the label's letter
-  is a `C` whatever size it is. The box axis (**45.00**, exact on every card) is the only column that
-  exists. Best a single gap could do in Roboto: shift the words **0.25px** left, bounding the worst case
-  at 0.375px instead of 0.625 — declined as a font-metric constant baked into a layout, and reported to
-  the owner as his call. `labelaxis.mjs` §2 prints the whole table; do not re-open this without it.
+- **The gap is `--sp-2` MINUS 2px, and the question this label was three rounds of was WHITESPACE, not
+  alignment** (the owner's closing ruling, 2026-07-30: *"all I want is to fix this space between the
+  glyph and the word Coding a little bit"*). The dot FILLS its 11px box; the `✳`'s ink is 8.75 wide
+  inside the same box, so an identical 8px box-gap paints **10.1px** of whitespace after the glyph
+  against **8.1–8.9px** after a dot. Matching the whitespace costs 1.375px (widest card) to 1.6px
+  (mean); **2px** is that rounded to a whole pixel on the tighter side and lands the label on 8.125 —
+  the tightest card's own. **The words therefore start 2px LEFT of the names' box column, by ruling and
+  not by accident:** whitespace parity and box parity cannot both hold while the glyph underfills its
+  box. What `listorder.mjs` gates is the pair no font can move — the exact 2px offset, and the
+  UNDERFILL that the trim exists for (fill that box and the trim is wrong); the parity itself is
+  `labelaxis.mjs` §3's, under the device font.
+- **Do not chase the `C` onto the names' ink edges — it is unreachable by ANY lever, measured in his own
+  font.** A text rect is the advance box and each letterform sits in its own side bearings, so in
+  **Roboto** the names' own first letters span **0.75px** between themselves (`t` of trading 45.125 …
+  `U` 45.875). They do not share an ink column *with each other*, so no gap can put one `C` on all of
+  them — and no type change either, since the label's letter is a `C` whatever size it wears. That ask
+  was closed as unachievable and the trim above happened for a different reason (whitespace); do not read
+  the 2px as an alignment nudge, and do not re-open either without `labelaxis.mjs` §2's table.
 - **THE HARNESS'S FONT IS NOT THE DEVICE'S, and every ink claim in this directory is font-local.**
   Headless Chromium here resolves `-apple-system, system-ui, …` to **DejaVu Sans**; his Android WebView
   resolves it to **Roboto**. That is what let `listorder.mjs` report the label's `C` flush with a card
-  name (DejaVu: 0.000) while his screen had it 0.25–0.625px right. `device-font.mjs` fetches the real
-  Roboto (cached in `.fonts/`, gitignored — a committed binary would ride every deploy) and it is a hard
-  failure when unavailable: a measurement in the wrong font reads exactly like the right one. The
-  standing gates stay in the harness font on purpose — a gate does not depend on the network — so they
-  are regression checks on OUR render, and the device-font question belongs to the probe.
-- **This column was DISPUTED off a phone photo and the photo agreed with the harness** (2026-07-30) —
-  so before re-aligning it, measure. **A photo of this page is measurable, because the page puts a
-  known-size object in every frame: the 11px status dot.** Scale = the dot's ink width ÷ 11, and every
-  other offset in the frame converts to CSS px through it; his crop then read **0.25px** on the glyph
-  and **0.49px** on the `C` — this file's own numbers. What remains is perceptual, not geometric: the
-  `✳`'s ink is **8.8px** wide against the dot's 11, so a reader comparing left EDGES rather than
-  centres sees the label 0.8px inset. Edge-aligning or up-sizing the glyph were both rendered for the
-  owner and **not** taken. The column is built from paddings, so it is width-invariant by
-  construction — `listorder.mjs` now checks two conditions (390/dpr4 and 320/dpr3) and
-  `labelaxis.mjs` sweeps 320–430 × dpr 2–3 × {chat lane, worker} first: worst deviation **0.25px**.
+  name (DejaVu: 0.000) while his screen had it 0.25–0.625px right — three rounds of answering a question
+  about his screen with numbers from a font he never sees. `device-font.mjs` fetches the real Roboto
+  (cached in `.fonts/`, gitignored — a committed binary would ride every deploy) and it is a hard failure
+  when unavailable: a measurement in the wrong font reads exactly like the right one. The standing gates
+  stay in the harness font on purpose — a gate does not depend on the network — so they hold what no font
+  can move (boxes, the underfill's existence) and the device-font claims belong to the probe.
+- **A photo of this page is MEASURABLE, and twice it was the only evidence there was.** The page puts a
+  known-size object in every frame — the 11px status dot — so scale = its ink width ÷ 11 and every offset
+  converts to CSS px through it; with no dot in frame, the ink width of a rendered string (`cwd-fix`,
+  `Coding`) serves, two independent rulers agreeing to 10% being what makes it trustworthy. Read that way
+  his crops gave **+0.49** and **+0.53** for the `C`, and the harness said 0.000 — **the photo was right
+  and the instrument was in the wrong font.** Measure his frame before deciding he is wrong about his own
+  screen. The column itself is padding-built and width-invariant: `listorder.mjs` checks two conditions
+  (390/dpr4, 320/dpr3), `labelaxis.mjs` §1 sweeps 320–430 × dpr 2–3 × {chat lane, worker} at 0.00px.
 - **It renders only where it has something under it, by construction:** emitted before the FIRST worker
   card, so a chat-only fleet gets no label without a condition to keep in sync. With no chat lane it still
   renders — it names the section it heads, and the owner's rule was "at least one coding session".

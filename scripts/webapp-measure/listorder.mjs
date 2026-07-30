@@ -25,6 +25,7 @@ import { chromium } from "/home/ubuntu/projects/taste/node_modules/playwright/in
 //
 // CONTROL: the page pinned before the ordering. Every state check must FAIL there; the guards (the cards
 // themselves, the header's place, Scheduled's labels) held before and must hold after.
+import { inkExtent } from "./device-font.mjs";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -167,7 +168,7 @@ async function measure(path, label, shotPrefix) {
       const mid = e => { const r = e.getBoundingClientRect(); return { cx: r.x + r.width / 2, x: r.x, w: r.width, y: r.y, h: r.height }; };
       const dots = [...document.querySelectorAll("#tab-sessions .sess .top .dot")].map(mid);
       const words = document.querySelector("#tab-sessions .sechead .swords");
-      return { glyph: g ? mid(g) : null, dots,
+      return { glyph: g ? mid(g) : null, dots, words_x: words ? words.getBoundingClientRect().x : null,
         names: [...document.querySelectorAll("#tab-sessions .sess .nm")].map(e => e.getBoundingClientRect().x),
         words: words ? words.textContent : null };
     });
@@ -178,8 +179,15 @@ async function measure(path, label, shotPrefix) {
     // is the same gap read twice and is what makes the label the cards' own title row rather than a
     // hand-tuned indent.
     state(cols.words === WORDS, `the words are their own element and verbatim (${JSON.stringify(cols.words)})`);
-    state(cols.names.length >= 2 && cols.names.every(x => Math.abs(x - (cols.glyph ? cols.glyph.x + cols.glyph.w + 8 : -1)) <= 0.5),
-      `…and the words start on the card names' axis — names ${cols.names.join("/")} vs glyph box end + the row's 8px gap ${cols.glyph && (cols.glyph.x + cols.glyph.w + 8)}`);
+    // The words sit 2px LEFT of the names' box column, and that number is a DERIVATION, not a nudge: the
+    // dot fills its 11px box and the ✳'s ink does not, so equal box gaps paint unequal whitespace and the
+    // owner asked for the whitespace (2026-07-30). Box parity is what was given up for it — asserted here
+    // as the exact offset so that either half moving fails, rather than dropped for being inconvenient.
+    const GAP_TRIM = 2;
+    state(cols.names.length >= 2 && cols.glyph !== null
+      && cols.names.every(x => Math.abs(x - (cols.words_x + GAP_TRIM)) <= 0.1)
+      && Math.abs(cols.words_x - (cols.glyph.x + cols.glyph.w + 8 - GAP_TRIM)) <= 0.1,
+      `…and the words start exactly ${GAP_TRIM}px left of the card names' column — words ${cols.words_x}, names ${cols.names.join("/")}, glyph box end ${cols.glyph && (cols.glyph.x + cols.glyph.w)} + (8 − ${GAP_TRIM})`);
     // Then PAINT, at dpr 2: a box centred by flex free space reports centred and paints half a pixel
     // down-right (this file's neighbours have been bitten by exactly that), so the mark's own ink is read.
     // Each band is padded 6px past its mark and sits on ONE fill — the label's ground, the card's.
@@ -209,58 +217,64 @@ async function measure(path, label, shotPrefix) {
     await p.close();
   }
 
-  // ---- the label's C stands over the card names' own first letter -------------------------------
-  // The owner's second ask on this label (2026-07-30). The words' BOX already sits on the names' box
-  // axis (checked above), and that axis is the only column every card can share: the names differ in
-  // letterform, so their INK edges cannot all coincide with one another, let alone with the label's.
-  // So the claim asserted is the strongest true one: the box axis is exact, and against the SAME
-  // LETTER on a card — the chat lane's capital C — the painted edges agree to within half a pixel
-  // despite the label's 12px/400 against the card's 14px/600. The per-letterform scatter is PRINTED,
-  // not gated: it is type, not misalignment, and a check that demanded 0 across letterforms would be
-  // demanding something no layout can deliver.
+  // ---- the whitespace after the glyph matches the whitespace after a dot ------------------------
+  // The owner's final spec on this label (2026-07-30, closing three rounds of it): "all I want is to fix
+  // this space between the glyph and the word Coding a little bit". What his eye had been reporting all
+  // along is a WHITESPACE, not an alignment — the dot FILLS its 11px box and the ✳'s ink (8.75) does not,
+  // so the same 8px box-gap paints ~10.1px after the glyph against 8.1–8.75px after a dot. Two earlier
+  // asks read as alignment questions and were answered as alignment questions; this is the one he meant.
+  //
+  // WHAT IS GATED HERE, and what deliberately is not. The parity itself — label whitespace == a card's —
+  // is a DEVICE-FONT claim: the trim was derived under Roboto (8.125 vs the tightest card's 8.125), and in
+  // the harness's own DejaVu Sans the same page reads 7.75 against 8.50, because both the glyph's underfill
+  // and the names' side bearings move with the font. Gating parity here would therefore fail a correct
+  // page, so it lives in `labelaxis.mjs` §3, which loads the real font. What IS gated here is what no font
+  // can move: the exact 2px box offset (above), and the trim's PRECONDITION — that the glyph's ink really
+  // does underfill its box on the right. Fill that box and the trim becomes wrong; this is the check that
+  // would notice.
   //
   // TWO CONDITIONS, because a fixture that only ever ran at one width and one DPR is what let this file
-  // pass while the owner's phone was in dispute (2026-07-30 — his screenshot, measured against the 11px
-  // dot in its own frame as the ruler, agreed with these numbers to a quarter pixel, so the page was
-  // right and the single condition was still a gap). The column is built from paddings and so is
-  // width-invariant BY CONSTRUCTION — which is a claim, and this is where it gets checked.
-  // `scripts/webapp-measure/labelaxis.mjs` sweeps the full range; these two are the cheap standing points.
+  // pass while his phone was in dispute — the geometry is padding-derived and so width-invariant BY
+  // CONSTRUCTION, which is a claim, and this is where it gets checked.
   for (const { vw, dpr } of [{ vw: 390, dpr: 4 }, { vw: 320, dpr: 3 }]) {
     const cond = `@${vw}px/dpr${dpr}`;
     const p = await open(path, MIXED, USAGE, dpr, vw);
     const at = await p.evaluate(() => {
       const firstChar = el => { const r = document.createRange(); r.setStart(el.firstChild, 0); r.setEnd(el.firstChild, 1);
         const b = r.getBoundingClientRect(); return { x: b.x, y: b.y, w: b.width, h: b.height, ch: el.firstChild.textContent[0] }; };
+      const box = e => { const r = e.getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height }; };
+      const g = document.querySelector("#tab-sessions .sechead .sglyph");
       const w = document.querySelector("#tab-sessions .sechead .swords");
-      const names = [...document.querySelectorAll("#tab-sessions .sess .nm")];
-      return { label: w ? { ...firstChar(w), size: getComputedStyle(w).fontSize, weight: getComputedStyle(w).fontWeight } : null,
-        names: names.map(n => ({ ...firstChar(n), full: n.textContent, size: getComputedStyle(n).fontSize, weight: getComputedStyle(n).fontWeight })),
-        boxes: { label: w ? w.getBoundingClientRect().x : null, names: names.map(n => n.getBoundingClientRect().x) } };
+      return { glyph: g ? box(g) : null, label: w ? { ...firstChar(w), box: w.getBoundingClientRect().x } : null,
+        cards: [...document.querySelectorAll("#tab-sessions .sess:not(#usagehead)")].map(c => ({
+          full: c.querySelector(".nm").textContent, dot: box(c.querySelector(".top .dot")),
+          nm: firstChar(c.querySelector(".nm")) })) };
     });
-    const band = r => ({ x: r.x - 4, y: r.y, width: r.w + 8, height: r.h });
-    const lab = at.label ? await inkOnset(p, band(at.label), dpr) : null;
-    const inks = [];
-    for (const n of at.names) inks.push({ ...n, ink: await inkOnset(p, band(n), dpr) });
-    // Box axis first — exact, and the reason the ink lands as close as it does.
-    state(at.boxes.label !== null && at.boxes.names.length >= 2 && at.boxes.names.every(x => Math.abs(x - at.boxes.label) <= 0.5),
-      `${cond} the words' box sits on every card name's box axis — label ${at.boxes.label}, names ${at.boxes.names.join("/")}`);
-    // Then the same letter, painted, at 0.25px resolution. NOTE THE FONT: this runs in whatever headless
-    // Chromium resolves the page's stack to on this box (DejaVu Sans), NOT in the Roboto his Android
-    // WebView uses — side bearings differ, so this leg is a regression gate on OUR render and not a claim
-    // about his screen. `labelaxis.mjs` §2 is where the device font is loaded and the two are printed side
-    // by side; a gate does not fetch a font over the network to make its numbers mean more.
-    const twin = inks.find(n => n.ch === "C" && n.ink);
-    const twinOff = lab && twin ? Math.abs(lab.onset - twin.ink.onset) : null;
-    state(twinOff !== null && twinOff <= 0.5,
-      `${cond} …and the label's C paints on a card C's own left edge — ${lab && lab.onset.toFixed(2)} vs ${twin && twin.ink.onset.toFixed(2)} (${twin && JSON.stringify(twin.full)}, ${twin && twin.size}/${twin && twin.weight} against the label's ${at.label && at.label.size}/${at.label && at.label.weight}), residual ${twinOff === null ? "n/a" : twinOff.toFixed(2)}px (≤0.50)`);
-    const px2 = v => v === null || v === undefined ? "n/a" : v.toFixed(2);
-    console.log(`      ink onsets ${cond} — label ${at.label && at.label.ch}: ${px2(lab && lab.onset)} (half ${px2(lab && lab.half)})`
-      + inks.map(n => ` · ${JSON.stringify(n.full)} ${n.ch}: ${px2(n.ink && n.ink.onset)} (half ${px2(n.ink && n.ink.half)})`).join(""));
-    // The zoomed crop the owner reads: the label's C directly above the next card's name, at dpr 4.
+    const gi = at.glyph ? await inkExtent(p, at.glyph, dpr) : null;
+    const li = at.label ? await inkExtent(p, at.label, dpr) : null;
+    const labelGap = gi && li ? li.left - gi.right : null;
+    const cardGaps = [];
+    for (const c of at.cards) {
+      const d = await inkExtent(p, c.dot, dpr), n = await inkExtent(p, c.nm, dpr);
+      if (d && n) cardGaps.push({ full: c.full, ch: c.nm.ch, gap: n.left - d.right });
+    }
+    const tight = cardGaps.length ? Math.min(...cardGaps.map(c => c.gap)) : null;
+    const underfill = gi && at.glyph ? at.glyph.x + at.glyph.w - gi.right : null;
+    state(underfill !== null && underfill >= 0.75,
+      `${cond} the ✳'s ink underfills its 11px box on the right — by ${underfill === null ? "n/a" : underfill.toFixed(2)}px `
+      + `(≥0.75), which is WHY the 2px trim exists: fill the box and the trim is wrong`);
+    // Printed, not gated: these are harness-font whitespaces. The parity they are compared for is checked
+    // in the device font by labelaxis §3 — here they only have to be visible when a number moves.
+    console.log(`      ${cond} glyph box ${at.glyph && at.glyph.x}..${at.glyph && (at.glyph.x + at.glyph.w)} ink `
+      + `${gi ? `${gi.left.toFixed(2)}..${gi.right.toFixed(2)}` : "n/a"} · label whitespace `
+      + `${labelGap === null ? "n/a" : labelGap.toFixed(2)}px vs card gaps `
+      + `${cardGaps.map(c => `${c.ch}:${c.gap.toFixed(2)}`).join(" ")} (tightest ${tight === null ? "n/a" : tight.toFixed(2)}; `
+      + `harness font — parity is labelaxis §3's)`);
+    // The zoomed crop the owner reads: the label directly above the next card's name.
     if (OUT && at.label && vw === 390) {
-      const below = at.names.find(n => n.y > at.label.y);
+      const below = at.cards.find(c => c.nm.y > at.label.y);
       if (below) await p.screenshot({ path: join(OUT, `${shotPrefix}-c-axis-zoom.png`),
-        clip: { x: at.label.x - 12, y: at.label.y - 10, width: 120, height: (below.y + below.h + 10) - (at.label.y - 10) } });
+        clip: { x: at.label.x - 22, y: at.label.y - 10, width: 120, height: (below.nm.y + below.nm.h + 10) - (at.label.y - 10) } });
     }
     await p.close();
   }

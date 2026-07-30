@@ -1,5 +1,5 @@
 import { chromium } from "/home/ubuntu/projects/taste/node_modules/playwright/index.mjs";
-import { ensureDeviceFont, useDeviceFont, inkLeft } from "./device-font.mjs";
+import { ensureDeviceFont, useDeviceFont, inkLeft, inkExtent } from "./device-font.mjs";
 // WHY THIS FILE EXISTS — the section label's column was disputed off the owner's phone twice on
 // 2026-07-30, and the fixture passed both times. A PROBE, not a gate: it prints numbers across the
 // conditions a single-condition fixture cannot see, and those numbers are what settle the argument.
@@ -22,6 +22,11 @@ import { ensureDeviceFont, useDeviceFont, inkLeft } from "./device-font.mjs";
 //    left of where the `m` of `memes` does. §2 prints that spread, which is the finding — one gap cannot
 //    put one C on all of them, so the lever cannot satisfy the spec for every card at once. Whether to
 //    spend it on the average is the owner's call, and this table is what he decides from.
+//
+// §3 is the one the shipped gap is derived from: the WHITESPACE after the ✳ against the whitespace after a
+// dot, in Roboto. That comparison cannot live in `listorder.mjs` — in the harness's DejaVu the same correct
+// page reads 7.75 against 8.50, because the glyph's underfill and the names' bearings both move with the
+// font — so the gate there holds the box offset and this holds the parity.
 //
 // Run: bun scripts/webapp-measure/labelaxis.mjs [page.html]   (defaults to the checkout's page; pass the
 // plugin cache's copy to measure what the daemon is actually SERVING).
@@ -127,5 +132,31 @@ for (const useRoboto of [true, false]) {
   console.log(`   Δ range ${lo.toFixed(3)} … ${hi.toFixed(3)}px · spread ${(hi - lo).toFixed(3)}px · mean ${mean.toFixed(3)}px (+ = the C sits RIGHT of the name)`);
   console.log(`   → a single gap change ${hi - lo <= 0.25 ? "COULD" : "CANNOT"} put the C on every name's ink `
     + `(spread ${(hi - lo).toFixed(3)}px); spent on the mean it would leave ${Math.max(Math.abs(hi - mean), Math.abs(lo - mean)).toFixed(3)}px worst-case\n`);
+}
+// ---- §3 the WHITESPACE the gap was derived from, in the device's font --------------------------------
+{
+  const p = await open(DPR, 390, NAMES, font);
+  const g = await geom(p);
+  const gi = await inkExtent(p, g.glyph, DPR);
+  const li = await inkExtent(p, await firstCharRect(p, null), DPR);
+  const labelGap = li.left - gi.right;
+  console.log(`§3 WHITESPACE PARITY in the device font — the shipped gap's derivation`);
+  console.log(`   ✳ box ${g.glyph.x}..${g.glyph.x + g.glyph.w}  ink ${gi.left.toFixed(3)}..${gi.right.toFixed(3)}`
+    + `  → underfills its box by ${(g.glyph.x + g.glyph.w - gi.right).toFixed(3)}px on the right`);
+  const gaps = [];
+  for (let i = 0; i < g.cards.length; i++) {
+    const r = await firstCharRect(p, i);
+    const dot = await p.evaluate(idx => { const c = [...document.querySelectorAll("#tab-sessions .sess:not(#usagehead)")][idx];
+      const d = c.querySelector(".top .dot").getBoundingClientRect(); return { x: d.x, y: d.y, w: d.width, h: d.height }; }, i);
+    const di = await inkExtent(p, dot, DPR), ni = await inkExtent(p, r, DPR);
+    if (di && ni) gaps.push({ name: g.cards[i].name, ch: r.ch, gap: ni.left - di.right });
+  }
+  for (const c of gaps) console.log(`   card ${c.name.slice(0, 21).padEnd(21)} ${c.ch}  dot ink → name ink: ${c.gap.toFixed(3)}px`);
+  const tight = Math.min(...gaps.map(c => c.gap)), wide = Math.max(...gaps.map(c => c.gap));
+  const mean = gaps.reduce((a, c) => a + c.gap, 0) / gaps.length;
+  console.log(`   cards: ${tight.toFixed(3)} … ${wide.toFixed(3)} (mean ${mean.toFixed(3)})  ·  LABEL: ${labelGap.toFixed(3)}px`);
+  console.log(`   residual vs tightest ${Math.abs(labelGap - tight).toFixed(3)}px · vs mean ${Math.abs(labelGap - mean).toFixed(3)}px`
+    + `  →  ${Math.abs(labelGap - tight) <= 0.5 ? "PARITY HOLDS" : "PARITY LOST"} (the trim is 2px: 1.375 would match the widest card, 1.6 the mean; 2 is the whole pixel on the tighter side)`);
+  await p.close();
 }
 await b.close();

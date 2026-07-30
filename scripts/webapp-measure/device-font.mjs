@@ -52,10 +52,13 @@ export async function useDeviceFont(page, file) {
   }, file);
 }
 
+// BOTH ink edges of a mark, in CSS px. The pair is what a WHITESPACE claim needs — the gap between two
+// marks runs from one's ink RIGHT to the other's ink LEFT, and neither of those is a box edge.
+//
 // An ink read is only sound if the band holds ONE mark on ONE fill. A band that another surface overlaps
 // — the floating pill over the last card is the case that bit this file — reports a confident number
 // about the wrong ink, so the padding columns are checked and an overlapped band returns null.
-export async function inkLeft(page, rect, dpr, pad = 4) {
+export async function inkExtent(page, rect, dpr, pad = 4) {
   const band = { x: rect.x - pad, y: rect.y, width: rect.w + 2 * pad, height: rect.h };
   const shot = await page.screenshot({ clip: band });
   return page.evaluate(async ([data, bx, d, padPx]) => {
@@ -73,8 +76,14 @@ export async function inkLeft(page, rect, dpr, pad = 4) {
     const peak = Math.max(...cols);
     if (!peak) return null;
     const first = cols.findIndex(v => v > peak * 0.02);
+    const last = cols.reduce((a, v, i) => v > peak * 0.02 ? i : a, -1);
     // Ink in the left padding means something else is in the frame: not our mark's edge.
     if (first < Math.floor(padPx * d * 0.5)) return null;
-    return bx + first / d;
+    return { left: bx + first / d, right: bx + (last + 1) / d };
   }, [shot.toString("base64"), band.x, dpr, pad]);
 }
+
+export const inkLeft = async (page, rect, dpr, pad = 4) => {
+  const e = await inkExtent(page, rect, dpr, pad);
+  return e === null ? null : e.left;
+};
