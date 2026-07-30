@@ -5599,7 +5599,17 @@ async function handleCall(
         const cap = await capturePane(targetPane).catch(() => '')
         if (!cap || !onNormalPrompt(cap)) { write({ t: 'result', id, ok: false, text: 'target is mid-turn — retry when it goes idle' }); return }
         if (bashModeArmed(cap)) { write({ t: 'result', id, ok: false, text: 'target has an unsubmitted ! bash command in its input box' }); return }
+        // A box that already holds something is refused rather than typed over. Two relays stacking in
+        // one input box is how `/compact` became `/compact/compact` on 2026-07-30 — and whatever is
+        // sitting there is somebody's text, so clearing it here is not ours to do.
+        const boxNow = inputBoxContent(cap)
+        if (boxNow) { write({ t: 'result', id, ok: false, text: `target has unsubmitted text in its input box (${JSON.stringify(boxNow.slice(0, 40))}) — nothing sent` }); return }
         const toName = nameForEndpoint(res.id, endpoints)
+        // Every exit from here on is written explicitly. This case used to set `text = '!…'` for a
+        // refusal and `break` to the shared `ok: true` write, so a refused relay reached the caller as
+        // `ok: !/mode isn't a command…` with exit 0 — a refusal that reads as a success is the whole
+        // bug this unit is about. There is no '!' convention in this case any more; don't add one back.
+        const fail = (why: string) => { process.stderr.write(`daemon: slash ${command} → @${toName} (${targetPane}) REFUSED — ${why}\n`); write({ t: 'result', id, ok: false, text: why }) }
         appendLedger(room, { ts: Date.now(), kind: 'slash', from: nameForEndpoint(fromSid, endpoints), to: toName, text: command })
         const targets = await outboundTargetsFor(targetPane).catch(() => [])
         const watcher = targetPane === focus.activePaneId ? focus.paneWatcher : null
@@ -5639,23 +5649,29 @@ async function handleCall(
             }
             // Same split as clampedClause: a banned model has nothing left for a human to decide, so
             // it must not read as "wait for a tap" — that invites a retry that gets the same answer.
-            text = relay.banned
-              ? `!/model ${relay.clamped} isn't available to coding agents — @${toName} keeps its current model, and nobody was asked`
-              : `!/model ${relay.clamped} needs a human — @${toName} keeps its current model${relay.ask ? '; asked the owner, and it switches in place if they approve' : ' (asking is snoozed right now)'}`
-            break
+            fail(relay.banned
+              ? `/model ${relay.clamped} isn't available to coding agents — @${toName} keeps its current model, and nobody was asked`
+              : `/model ${relay.clamped} needs a human — @${toName} keeps its current model${relay.ask ? '; asked the owner, and it switches in place if they approve' : ' (asking is snoozed right now)'}`)
+            return
           }
           // awaitReadback:false for the same reason the mini app passes it: the confirm + readback
           // dance runs for up to ~30s and the calling agent is blocked on this result.
           const { error } = await applySessionModel(targetPane, watcher, modelAlias, { awaitReadback: false })
-          if (error) { text = `!${error}`; break }
+          if (error) { fail(error); return }
           void echoSlashResult(targetPane, targets[0]?.chat ?? '', slashAt, targets[0]?.thread ? Number(targets[0].thread) : undefined, command)
           text = `sent /model to @${toName} (${modelAlias}, that session only) — its outcome echoes on that session's surface`
           break
         }
-        const sent = await injectSlash(targetPane, watcher, command, { guardPalette: true })
-        if (!sent.ok) { text = `!${paletteRefusalText(command, sent.offered)}`; break }
+        // settleMs: the caller is a `tg ask`-style CLI call with a 30s socket budget, and the default
+        // 30s post-submit settle spends all of it waiting for a turn the caller isn't waiting for —
+        // measured live: `tg slash … /compact` returned `tgctl: timed out` (exit 1) for a command that
+        // had landed, and the operator retried into a second copy. The answer here is "did it submit",
+        // which submitVerified knows in seconds; the command's own output still echoes below.
+        const sent = await injectSlash(targetPane, watcher, command, { guardPalette: true, settleMs: 3_000 })
+        if (!sent.ok) { fail('unsubmitted' in sent ? unsubmittedSlashText(command, toName) : paletteRefusalText(command, sent.offered)); return }
         void echoSlashResult(targetPane, targets[0]?.chat ?? '', slashAt, targets[0]?.thread ? Number(targets[0].thread) : undefined, command)
-        text = `sent ${command.split(/\s/)[0]} to @${toName} — its outcome echoes on that session's surface`
+        text = `submitted ${command.split(/\s/)[0]} to @${toName} — its input box took it and cleared; the command's own output echoes on that session's surface`
+        process.stderr.write(`daemon: slash ${command} → @${toName} (${targetPane}) submitted\n`)
         break
       }
       // `tg keys <name> <key>… [--force]` — inject named keystrokes into another session's pane.
@@ -5953,10 +5969,11 @@ async function handleCall(
 // typing and submitting, so there's no new timing machinery — just a read of a state we already wait
 // for. See slashPaletteWouldMisfire for why the predicate is "no row matches exactly" rather than
 // "a palette is open" (bare /model legitimately opens one, at both Claude and Codex sessions).
-type SlashSent = { ok: true } | { ok: false; offered: string[] }
+type SlashSent = { ok: true } | { ok: false; offered: string[] } | { ok: false; unsubmitted: true }
 async function injectSlash(paneId: string, watcher: PaneWatcher | null, command: string,
-                           opts?: { guardPalette?: boolean }): Promise<SlashSent> {
+                           opts?: { guardPalette?: boolean; settleMs?: number }): Promise<SlashSent> {
   let offered: string[] | null = null
+  let unsubmitted = false
   const run = async () => {
     await sendKeys(paneId, [command])
     await waitForSettle(paneId, 200, 4000)
@@ -5966,11 +5983,24 @@ async function injectSlash(paneId: string, watcher: PaneWatcher | null, command:
       // nothing runs and nothing is left sitting in the input box for the next injection to corrupt.
       if (offered) { await sendKeys(paneId, ['C-u']); await waitForSettle(paneId, 200, 3000); return }
     }
-    await sendKeys(paneId, agentSubmitKeys(await paneAgentKind(paneId)))
-    await waitForSettle(paneId, 300, 30_000)
+    // THE ENTER IS VERIFIED, exactly as it is for a pasted message (injectText/injectPaste). It was not,
+    // and one Enter is not always enough: with the slash palette open the first Enter can be consumed
+    // by the completion, leaving the command typed in the box while tmux reports success. Observed
+    // live 2026-07-30 — a relayed `/compact` sat unsubmitted in a session's input box for seven
+    // minutes while the bus had already reported "sent".
+    if (!(await submitVerified(paneId, agentSubmitKeys(await paneAgentKind(paneId)), submitLanded))) {
+      unsubmitted = true
+      // Clear it ONLY if what is still sitting there is our own command — the pane must not be left
+      // holding a half-command for the next injection to stack onto, and must not lose anyone's text.
+      const box = inputBoxContent(await capturePane(paneId).catch(() => '')) ?? ''
+      if (box && command.startsWith(box.split(/\s/)[0])) { await sendKeys(paneId, ['C-u']); await waitForSettle(paneId, 200, 3000) }
+      return
+    }
+    await waitForSettle(paneId, 300, opts?.settleMs ?? 30_000)
   }
   await (watcher ? watcher.withInjection(run) : run())
   if (offered) return { ok: false, offered }
+  if (unsubmitted) return { ok: false, unsubmitted: true }
   // EVERY path that types a slash command into a pane funnels through here — a local handler, a
   // relayed `@name /cmd`, a mini-app button — which is why the invalidation belongs here and not at
   // the handlers. See changesPaneContext for why it is a property rather than a list of names.
@@ -6083,6 +6113,13 @@ function paletteRefusalText(command: string, offered: string[]): string {
   return offered.length > 1 ? `${head}. It offered: ${offered.join(' · ')}` : `${head}.`
 }
 
+// The other refusal: the command was typed but two Enters didn't submit it. Says the line was cleared,
+// because the reader's next move is "can I just retry?" and the answer is yes — the box is clean.
+function unsubmittedSlashText(command: string, toName?: string): string {
+  return `${command.split(/\s/)[0]} was typed into ${toName ? `@${toName}'s` : 'the'} input box but never submitted — `
+    + `its TUI swallowed both Enters, so nothing ran. The line was cleared; retry when it's settled.`
+}
+
 // `echo` (the unknown-command fallthrough only) replies with the command's own
 // <local-command-stdout> transcript output — the outcome is the acknowledgement. Commands the
 // bridge already answers (pickers, cards, dedicated confirms) leave it off so nothing
@@ -6102,7 +6139,8 @@ async function relaySlashCommand(
   // local handlers that pass a literal they own don't need it and don't get it.
   const sent = await injectSlash(paneId, watcher, command, { guardPalette: true })
   if (!sent.ok) {
-    await channel.sendText(chat_id, `⚠️ ${escapeHtml(paletteRefusalText(command, sent.offered))}`, opts).catch(() => {})
+    const why = 'unsubmitted' in sent ? unsubmittedSlashText(command) : paletteRefusalText(command, sent.offered)
+    await channel.sendText(chat_id, `⚠️ ${escapeHtml(why)}`, opts).catch(() => {})
     return
   }
   if (!echo) return
@@ -6305,7 +6343,7 @@ async function applySessionModel(
   // Same palette guard the argument form used: bare `/model` is exactly the token that makes the
   // palette dangerous, so a session where it isn't an exact match must not have Enter pressed for it.
   const sent = await injectSlash(pane, watcher, '/model', { guardPalette: true })
-  if (!sent.ok) return { error: paletteRefusalText('/model', sent.offered), model: null }
+  if (!sent.ok) return { error: 'unsubmitted' in sent ? unsubmittedSlashText('/model') : paletteRefusalText('/model', sent.offered), model: null }
   let error: string | null = null
   const pick = async () => {
     // The picker can render a beat after the input box settles — poll rather than take one read
@@ -16338,7 +16376,10 @@ async function webappSessionAction(userId: string, sid: string, action: 'stop' |
   }
   await dismissFeedbackSurvey(pane)
   const sent = await pasteGuarded(pane, watcher, msg)
-  return sent.ok ? null : (sent.offered.length ? paletteRefusalText(msg, sent.offered) : 'delivery failed')
+  // pasteGuarded never reports `unsubmitted` (its non-slash branch delegates to the verified paste
+  // paths, and its slash branch doesn't verify at all — see the class note on injectSlash).
+  const offered = 'offered' in sent ? sent.offered : []
+  return sent.ok ? null : (offered.length ? paletteRefusalText(msg, offered) : 'delivery failed')
 }
 
 // Mini-app "+" new session: create a topic + spawn with the chosen dials — the webapp twin of the
