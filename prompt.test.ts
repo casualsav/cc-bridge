@@ -767,6 +767,21 @@ test('detectStuckScreen returns null for a bash-mode prompt with a pre-typed com
   expect(detectStuckScreen(pane)).toBeNull()
 })
 
+test('onNormalPrompt anchors Claude prompt above no-alt-screen bottom padding', () => {
+  // Live proxy-backed v2.1.220 capture: the TUI rendered at the top of a 50-row pane and left
+  // 32 blank physical rows below the normal composer. Readiness must anchor to the last ink row.
+  const pane = [
+    '──────────────────────────────────────────────',
+    '❯\u00a0',
+    '──────────────────────────────────────────────',
+    '  ubuntu@cloud:/srv/chat | Opus 5 (1M context)',
+    '  ε:high | ✻think | $0.0000 | api 0s | v2.1.220',
+    '  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents',
+    ...Array(32).fill(''),
+  ].join('\n')
+  expect(onNormalPrompt(pane)).toBe(true)
+})
+
 test('onNormalPrompt survives the background-agents HUD below the input box (live false-fire)', () => {
   // Real capture: 4 background agents stack a "● main" + 4 agent rows under the statusline,
   // pushing the ❯ box past a 12-line tail; the footer shows "Waiting for N background agents"

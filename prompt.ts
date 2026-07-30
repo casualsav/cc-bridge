@@ -736,7 +736,12 @@ export function detectAccountTier(cap: string): AccountTier | null {
 // report "another screen" instead of silently switching/mis-reporting.
 export function onNormalPrompt(paneText: string): boolean {
   const lines = paneLines(paneText)
-  const tail = lines.slice(-8).join('\n').toLowerCase()
+  // No-alt-screen TUIs can render at the top of a tall pane and leave many blank physical rows
+  // beneath the live footer. Anchor every tail window to the last ink row, not the pane bottom.
+  const lastNonblank = lines.findLastIndex(l => l.trim().length > 0)
+  if (lastNonblank < 0) return false
+  const live = lines.slice(0, lastNonblank + 1)
+  const tail = live.slice(-8).join('\n').toLowerCase()
   // "! for shell mode" replaces the usual hints while bash mode is armed — still the normal prompt
   // (without it, a pre-typed `!` command idles into a stuck-screen false fire: the `!` prompt row
   // fails the ❯ box check below and the reply's ● bullets then parse as ink options).
@@ -751,14 +756,13 @@ export function onNormalPrompt(paneText: string): boolean {
   // agent) — 4 running agents pushed the ❯ box out of a 12-line window and false-fired the
   // unrecognised-screen guard. 30 covers ~20 agents; the bordered-❯ shape is specific enough
   // that the wider scan can't match a menu.
-  const t = lines.slice(-30)
+  const t = live.slice(-30)
   for (let i = 1; i + 1 < t.length; i++) {
     if (/^\s*[❯!]/.test(t[i]) && /^\s*[─━╭╰└┌├╮╯|]/.test(t[i - 1]) && /^\s*[─━╭╰└┌├╮╯|]/.test(t[i + 1])) return true
   }
   // Codex uses an unbordered `›` composer and a model/mode/cwd footer. Require both so a numbered
   // select-menu cursor (`› 1. …`) is never mistaken for a safe input box.
-  const lastNonblank = lines.findLastIndex(l => l.trim().length > 0)
-  const codex = lines.slice(Math.max(0, lastNonblank - 15), lastNonblank + 1)
+  const codex = live.slice(-16)
   const hasCodexFooter = codex.some(l => /^\s*gpt-[\w.-]+\s+.+\s·\s.+/.test(l))
   const hasCodexComposer = codex.some(l => /^\s*›(?!\s*\d+\.)/.test(l))
   if (hasCodexFooter && hasCodexComposer) return true
