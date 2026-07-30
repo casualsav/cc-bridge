@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test'
 import {
   HARNESS_PANE_OPT, claudeHarnessEnv, harnessLabel, normalizeHarnessProfile,
-  normalizeProxyBaseUrl, parseHarnessSpec, type HarnessProfile,
+  normalizeProxyBaseUrl, parseHarnessSpec, resumeCliModel, type HarnessProfile,
 } from './harness-provider.ts'
 
 test('native Claude remains the migration-safe default', () => {
@@ -39,6 +39,13 @@ test('proxy-backed profiles produce isolated Claude Code process env', () => {
   })
   expect(claudeHarnessEnv({ provider: 'anthropic' }, 'http://127.0.0.1:18765')).toEqual({})
   expect(harnessLabel(profile)).toBe('Claude Code · Codex gpt-5.6-sol')
+})
+
+test('proxy resumes let the target inference profile own the CLI model identity', () => {
+  const gateway: HarnessProfile = { provider: 'gateway', gateway: 'local-codex', model: 'gpt-5.6-sol[1m]', smallModel: 'gpt-5.6-luna[1m]' }
+  expect(resumeCliModel({ provider: 'anthropic' }, 'opus')).toBe('opus')
+  expect(resumeCliModel(gateway, 'opus')).toBeNull()
+  expect(resumeCliModel({ provider: 'codex', model: 'gpt-5.6-sol[1m]', smallModel: 'gpt-5.6-luna[1m]' }, 'opus')).toBeNull()
 })
 
 test('proxy URLs are confined to unauthenticated loopback HTTP', () => {

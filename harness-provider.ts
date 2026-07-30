@@ -70,6 +70,13 @@ export function normalizeHarnessProfile(value: unknown): HarnessProfile {
   return { provider: raw.provider, model: raw.model, smallModel: raw.smallModel ?? fallback }
 }
 
+export function resumeCliModel(profile: HarnessProfile, transcriptModel: string | null): string | null {
+  // Native Anthropic resumes preserve the conversation's Claude alias. A proxy/gateway's model is
+  // process-start transport configuration; passing the source Claude alias as --model overrides it
+  // and makes the CLI footer claim Opus while OpenAI is actually serving the turn.
+  return profile.provider === 'anthropic' ? transcriptModel : null
+}
+
 export function parseHarnessSpec(input: string, gateways: Record<string, GatewayDefinition> = {}): HarnessProfile | null {
   const [rawProvider = '', firstArg, secondArg] = input.trim().split(/\s+/, 3)
   const provider = rawProvider.toLowerCase()

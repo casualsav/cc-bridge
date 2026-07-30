@@ -60,6 +60,14 @@ bar_color() {
   fi
 }
 
+# remaining_color <pct_left> — inverse of a used-budget bar
+remaining_color() {
+  if   [ "${1:-0}" -le 20 ]; then printf '%s' "$RED"
+  elif [ "${1:-0}" -le 50 ]; then printf '%s' "$YELLOW"
+  else                            printf '%s' "$GREEN"
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # read + parse input
 # ---------------------------------------------------------------------------
@@ -94,10 +102,72 @@ def g(*path, default=""):
             return default
     return cur
 
+# A Claude Code process routed through the local Codex gateway receives the true target model in
+# ANTHROPIC_MODEL. Its session JSON may still call the compatibility alias "Opus", so transport
+# identity wins. OpenAI quota is fetched at most once per minute and shared through a private cache;
+# ordinary statusline redraws only read that file.
+proxy_model = os.environ.get("ANTHROPIC_MODEL", "")
+proxy_openai = os.environ.get("CC_BRIDGE_HARNESS_PROXY") == "1" and proxy_model.lower().startswith("gpt-")
+openai_usage = {}
+if proxy_openai:
+    import time, tempfile
+    state = os.environ.get("TELEGRAM_STATE_DIR") or os.path.join(os.environ.get("HOME", ""), ".claude", "channels", "telegram")
+    cache = os.path.join(state, "openai-usage.json")
+    lock = cache + ".lock"
+    def _read_cache(max_age):
+        try:
+            x = json.load(open(cache))
+            return x if time.time() - float(x.get("ts", 0)) <= max_age else {}
+        except Exception:
+            return {}
+    openai_usage = _read_cache(60)
+    if not openai_usage:
+        locked = False
+        try:
+            os.mkdir(lock, 0o700); locked = True
+            auth_path = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.environ.get("HOME", ""), ".config"), "claude-code-proxy", "codex", "auth.json")
+            auth = json.load(open(auth_path))
+            import urllib.request
+            req = urllib.request.Request("https://chatgpt.com/backend-api/wham/usage", headers={
+                "Authorization": "Bearer " + auth["access"],
+                "ChatGPT-Account-Id": auth["accountId"],
+                "User-Agent": "cc-bridge/statusline",
+                "Accept": "application/json",
+            })
+            with urllib.request.urlopen(req, timeout=2) as r:
+                raw = json.load(r).get("rate_limit") or {}
+            snap = {"ts": int(time.time())}
+            for win in (raw.get("primary_window"), raw.get("secondary_window")):
+                if not isinstance(win, dict) or win.get("used_percent") is None: continue
+                seconds = int(win.get("limit_window_seconds") or 0)
+                key = "weekly" if seconds >= 24 * 60 * 60 else "five_hour"
+                snap[key] = {
+                    "remaining": max(0, min(100, 100 - float(win["used_percent"]))),
+                    "resets_at": int(win.get("reset_at") or 0),
+                }
+            if len(snap) > 1:
+                fd, tmp = tempfile.mkstemp(dir=state, prefix=".openai-usage-")
+                with os.fdopen(fd, "w") as f: json.dump(snap, f)
+                os.chmod(tmp, 0o600); os.replace(tmp, cache)
+                openai_usage = snap
+        except Exception:
+            openai_usage = _read_cache(15 * 60)
+        finally:
+            if locked:
+                try: os.rmdir(lock)
+                except Exception: pass
+
+def oug(*path, default=""):
+    cur = openai_usage
+    for k in path:
+        if isinstance(cur, dict) and cur.get(k) is not None: cur = cur[k]
+        else: return default
+    return cur
+
 owner, name = g("workspace", "repo", "owner"), g("workspace", "repo", "name")
 fields = {
     "cwd":             g("cwd"),
-    "model_name":      g("model", "display_name", default="unknown model"),
+    "model_name":      proxy_model.replace("[1m]", "") if proxy_openai else g("model", "display_name", default="unknown model"),
     "version":         g("version"),
     "session_name":    g("session_name"),
     "git_repo":        f"{owner}/{name}" if owner and name else "",
@@ -121,6 +191,10 @@ fields = {
     "rate_5h_reset":   g("rate_limits", "five_hour", "resets_at"),
     "rate_7d_pct":     g("rate_limits", "seven_day", "used_percentage"),
     "rate_7d_reset":   g("rate_limits", "seven_day", "resets_at"),
+    "openai_5h_left":  oug("five_hour", "remaining"),
+    "openai_5h_reset": oug("five_hour", "resets_at"),
+    "openai_7d_left":  oug("weekly", "remaining"),
+    "openai_7d_reset": oug("weekly", "resets_at"),
     "pr_number":       g("pr", "number"),
     "pr_state":        g("pr", "review_state"),
 }
@@ -243,23 +317,40 @@ fi
 [ "${#l2[@]}" -gt 0 ] && emit "${l2[@]}"
 
 # ---------------------------------------------------------------------------
-# LINE 3 — rate-limit budget bars (Claude.ai Pro/Max only; hidden otherwise)
-#   5h ███░░░░░░░░░░░ 24% ↻1h30m | 7d ████████████░░ 88% ↻55h33m
+# LINE 3 — provider rate-limit budget bars
+# Claude reports used%; OpenAI is labelled explicitly and reports remaining%.
 # ---------------------------------------------------------------------------
 l3=()
-if [ -n "$rate_5h_pct" ]; then
-  pct_int=$(printf '%.0f' "$rate_5h_pct")
-  bar=$(progress_bar "$rate_5h_pct" 14)
-  seg="${DIM}5h${R} $(bar_color "$pct_int")${bar}${R} ${pct_int}%"
-  [ -n "$rate_5h_reset" ] && seg="${seg} ${DIM}↻${R}$(fmt_reset "$rate_5h_reset")"
-  l3+=("$seg")
-fi
-if [ -n "$rate_7d_pct" ]; then
-  pct_int=$(printf '%.0f' "$rate_7d_pct")
-  bar=$(progress_bar "$rate_7d_pct" 14)
-  seg="${DIM}7d${R} $(bar_color "$pct_int")${bar}${R} ${pct_int}%"
-  [ -n "$rate_7d_reset" ] && seg="${seg} ${DIM}↻${R}$(fmt_reset "$rate_7d_reset")"
-  l3+=("$seg")
+if [ -n "$openai_5h_left" ] || [ -n "$openai_7d_left" ]; then
+  if [ -n "$openai_5h_left" ]; then
+    pct_int=$(printf '%.0f' "$openai_5h_left")
+    bar=$(progress_bar "$openai_5h_left" 14)
+    seg="${DIM}OpenAI 5h${R} $(remaining_color "$pct_int")${bar}${R} ${pct_int}% left"
+    [ -n "$openai_5h_reset" ] && seg="${seg} ${DIM}↻${R}$(fmt_reset "$openai_5h_reset")"
+    l3+=("$seg")
+  fi
+  if [ -n "$openai_7d_left" ]; then
+    pct_int=$(printf '%.0f' "$openai_7d_left")
+    bar=$(progress_bar "$openai_7d_left" 14)
+    seg="${DIM}OpenAI weekly${R} $(remaining_color "$pct_int")${bar}${R} ${pct_int}% left"
+    [ -n "$openai_7d_reset" ] && seg="${seg} ${DIM}↻${R}$(fmt_reset "$openai_7d_reset")"
+    l3+=("$seg")
+  fi
+else
+  if [ -n "$rate_5h_pct" ]; then
+    pct_int=$(printf '%.0f' "$rate_5h_pct")
+    bar=$(progress_bar "$rate_5h_pct" 14)
+    seg="${DIM}5h${R} $(bar_color "$pct_int")${bar}${R} ${pct_int}%"
+    [ -n "$rate_5h_reset" ] && seg="${seg} ${DIM}↻${R}$(fmt_reset "$rate_5h_reset")"
+    l3+=("$seg")
+  fi
+  if [ -n "$rate_7d_pct" ]; then
+    pct_int=$(printf '%.0f' "$rate_7d_pct")
+    bar=$(progress_bar "$rate_7d_pct" 14)
+    seg="${DIM}7d${R} $(bar_color "$pct_int")${bar}${R} ${pct_int}%"
+    [ -n "$rate_7d_reset" ] && seg="${seg} ${DIM}↻${R}$(fmt_reset "$rate_7d_reset")"
+    l3+=("$seg")
+  fi
 fi
 [ "${#l3[@]}" -gt 0 ] && emit "${l3[@]}"
 

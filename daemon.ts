@@ -51,7 +51,7 @@ import {
 } from './agent.ts'
 import {
   HARNESS_ENV_KEYS, HARNESS_PANE_OPT, claudeHarnessEnv, harnessLabel, normalizeHarnessProfile, normalizeProxyBaseUrl, parseHarnessSpec,
-  serializeHarnessProfile, type BuiltinHarnessProvider, type HarnessProfile,
+  resumeCliModel, serializeHarnessProfile, type BuiltinHarnessProvider, type HarnessProfile,
 } from './harness-provider.ts'
 import {
   gatewayHarnessEnv, gatewayLaunchCommand, gatewayProbeRequest, parseGatewayDefinitions, validGatewayProbeResponse, type GatewayDefinition,
@@ -8391,7 +8391,9 @@ async function restartPaneSessionCore(pane: string, id: string | null, accountOv
   // Read while the OLD transcript is still the pane's — a resume carries its conversation, so it must
   // carry that conversation's model too. Cross-engine (id null) is a fresh launch on the other
   // provider and takes no model from here.
-  const resumeAlias = agent === 'claude' && id !== null ? await resumeModelAlias(pane, cwd) : null
+  const resumeAlias = agent === 'claude' && id !== null
+    ? resumeCliModel(harness, await resumeModelAlias(pane, cwd))
+    : null
   const resumeModelArgs = resumeAlias
     ? spawnModelFlag(resumeAlias, MODEL_ALIAS_IDS, true)?.split(/\s+/) ?? []
     : []
@@ -10773,6 +10775,12 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
         )
       : { provider: 'anthropic' }
     if (agent === 'claude' && !(await harnessProviderReady(harness))) return null
+    // A proxy/gateway model is process-start transport configuration. Never let the resumed
+    // transcript's native Claude alias become a --model flag that overrides that target identity.
+    if (agent === 'claude' && inherit) {
+      inherit = { ...inherit, model: resumeCliModel(harness, inherit.model) }
+      if (harness.provider !== 'anthropic') modelSource = `harness(${harness.model})`
+    }
     // Set the inherited model + effort as LAUNCH FLAGS so the session boots already correct — no
     // typing /model + /effort into a freshly-booting pane (that post-boot injection was the 10-20s
     // slow-spawn lag and it raced the user's first keystrokes). Claude Code restores neither on

@@ -47,6 +47,28 @@ test('adds the block while preserving an existing settings.json without one', ()
   expect(s.statusLine).toBeDefined()
 })
 
+test('proxy statusline shows the gateway model and OpenAI remaining quota from cache', () => {
+  const state = mk()
+  writeFileSync(join(state, 'openai-usage.json'), JSON.stringify({
+    ts: Math.floor(Date.now() / 1000),
+    weekly: { remaining: 82, resets_at: Math.floor(Date.now() / 1000) + 3600 },
+  }))
+  const run = Bun.spawnSync(['bash', join(import.meta.dir, 'statusline-command.sh')], {
+    env: {
+      ...process.env,
+      CC_BRIDGE_HARNESS_PROXY: '1',
+      ANTHROPIC_MODEL: 'gpt-5.6-sol[1m]',
+      TELEGRAM_STATE_DIR: state,
+    },
+    stdin: Buffer.from(JSON.stringify({ cwd: '/srv/chat', model: { display_name: 'Opus 5' }, version: '2.1.220' })),
+  })
+  const out = run.stdout.toString()
+  expect(run.exitCode).toBe(0)
+  expect(out).toContain('gpt-5.6-sol')
+  expect(out).toContain('OpenAI weekly')
+  expect(out).toContain('82% left')
+})
+
 test('no cache script → no-op (creates nothing)', () => {
   const cfg = mk()
   healMainStatusline(join(cfg, 'nope.sh'), cfg)
