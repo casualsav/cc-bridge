@@ -150,7 +150,17 @@ function spawnDaemon(): void {
   process.stderr.write(`watchdog: daemon down — launched ${daemonPath} (pid ${child.pid})\n`)
 }
 
+// The 20s interval and ensure-daemon's SIGUSR1 nudge both call this, and two nudges 128ms apart is
+// what spawned two daemons on 2026-07-30 — `socketAlive()` is awaited, so both passes saw "down" and
+// both spawned. One at a time: a skipped tick costs nothing because the interval comes round again.
+let ticking = false
 async function tick(): Promise<void> {
+  if (ticking) return
+  ticking = true
+  try { await tickOnce() } finally { ticking = false }
+}
+
+async function tickOnce(): Promise<void> {
   rotateLog()
   if (await socketAlive()) return
   // Daemon is down. Before spawning, make sure another live daemon (different state dir / HOME, same

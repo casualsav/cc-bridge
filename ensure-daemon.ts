@@ -254,9 +254,23 @@ async function ensureInstance(stateDir: string, log: number): Promise<void> {
       const liveVer = watchdogVersion(wdPid)
       if (liveVer && liveVer !== CURRENT_VER) {
         try { process.kill(wdPid, 'SIGKILL') } catch {}
-        try { const dp = parseInt(readFileSync(join(stateDir, 'daemon.pid'), 'utf8'), 10); if (dp > 1) process.kill(dp, 'SIGKILL') } catch {}
-        for (const f of ['daemon.sock', 'watchdog.pid', 'daemon.pid']) { try { unlinkSync(join(stateDir, f)) } catch {} }
-        await new Promise(r => setTimeout(r, 300))   // let the socket/pid files clear before the new watchdog boots
+        let dp = 0
+        try { dp = parseInt(readFileSync(join(stateDir, 'daemon.pid'), 'utf8'), 10) } catch {}
+        if (dp > 1) { try { process.kill(dp, 'SIGKILL') } catch {} }
+        // ONLY the outdated watchdog's own marker is removed here. `daemon.pid` is the instance CLAIM
+        // (instance-lock.ts) and `daemon.sock` may still be held by a daemon this sweep failed to
+        // signal — the pid read has its own catch, so a missing or garbage pid file means nothing was
+        // killed while the unlinks ran anyway. Deleting either file is how a DEPLOY produced two
+        // daemons on one socket: the claim file vanishes, so every starter wins `wx`, and the socket
+        // path is freed under a process still serving it. This branch only runs on a version change,
+        // which is exactly when all three 409 bursts happened.
+        try { unlinkSync(join(stateDir, 'watchdog.pid')) } catch {}
+        // Wait for the daemon to be GONE rather than guessing at 300ms — the wait is the point, and a
+        // fixed sleep was both too long when it worked and too short when the kill missed.
+        for (let i = 0; i < 40 && dp > 1; i++) {
+          try { process.kill(dp, 0) } catch { break }
+          await new Promise(r => setTimeout(r, 50))
+        }
         wdPid = 0
         note(log, `ensure-daemon: replaced outdated watchdog (${liveVer} → ${CURRENT_VER}) for ${stateDir}`)
       }

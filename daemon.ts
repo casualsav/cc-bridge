@@ -19,6 +19,7 @@ import {
   type ShimToDaemon, type DaemonToShim, type InboundParams, type FailoverHop,
 } from './common.ts'
 import { acquireTokenLock } from './token-lock.ts'
+import { claimInstance } from './instance-lock.ts'
 
 // Before ANY tmux call or spawn: a daemon that inherited a deleted cwd (a watchdog started from a
 // harness scratch dir) can spawn nothing at all under Bun — `ENOENT … posix_spawn 'tmux'` with
@@ -15303,22 +15304,30 @@ async function socketAlive(): Promise<boolean> {
   })
 }
 
+// The claim is an ATOMIC create of the pid file, taken BEFORE the socket is touched — see
+// instance-lock.ts for the race this closes and why the loser's liveness test needs the startup
+// grace. Written after `listen()`, as it was until v0.4.287, two simultaneous starters each read the
+// previous dead pid and both became the daemon: two pollers on one bot token.
 async function acquireInstance(): Promise<boolean> {
-  try {
-    const existingPid = parseInt(readFileSync(DAEMON_PID_FILE, 'utf8'), 10)
-    if (existingPid > 1 && existingPid !== process.pid) {
-      let processAlive = false
-      try { process.kill(existingPid, 0); processAlive = true } catch {}
-      if (processAlive && await socketAlive()) {
-        process.stderr.write(`telegram daemon: another instance running (pid=${existingPid}), exiting\n`)
-        return false
-      }
-    }
-  } catch {}
-
-  // Take over: clean up stale socket. PID file written after listen() succeeds.
+  mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 })   // the claim needs somewhere to live
+  const claim = await claimInstance({ pidFile: DAEMON_PID_FILE, pid: process.pid, socketAlive, now: Date.now() })
+  if (!claim.ok) {
+    process.stderr.write(`telegram daemon: another instance running (pid=${claim.heldBy}), exiting\n`)
+    return false
+  }
+  // A LIVE socket means a live daemon, whatever the claim file says. The claim can be deleted out
+  // from under a running instance — ensure-daemon's outdated-watchdog sweep used to unlink
+  // `daemon.pid` — and then `wx` has no EEXIST to hit and every starter wins. So the last word
+  // belongs to the socket: never unlink a path someone is serving. Release the claim and step aside.
+  if (await socketAlive()) {
+    process.stderr.write('telegram daemon: the socket is already being served by a live daemon — stepping aside\n')
+    try { if (readFileSync(DAEMON_PID_FILE, 'utf8').trim() === String(process.pid)) unlinkSync(DAEMON_PID_FILE) } catch {}
+    return false
+  }
+  // ONLY the winner clears the socket, and only now that nothing answers on it. That unconditional
+  // unlink is the other half of the old bug: each daemon removed the other's binding, so neither ever
+  // hit EADDRINUSE and both bound the same path.
   try { unlinkSync(SOCKET_PATH) } catch {}
-  mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 })
   return true
 }
 
@@ -15355,10 +15364,16 @@ function shutdown(): void {
   shuttingDown = true
   process.stderr.write('telegram daemon: shutting down\n')
   if (focus.paneWatcher) focus.paneWatcher.stop()
+  // BOTH unlinks are ownership-guarded. A superseded daemon shutting down gracefully must not remove
+  // the survivor's socket path — unguarded, that is why tonight's duplicate had to be SIGKILLed: a
+  // plain SIGTERM would have deleted the live socket on its way out, taking the whole fleet's CLI
+  // with it. Same rule as acquireInstance's winner-only unlink, at the other end of the lifecycle.
   try {
-    if (parseInt(readFileSync(DAEMON_PID_FILE, 'utf8'), 10) === process.pid) unlinkSync(DAEMON_PID_FILE)
+    if (parseInt(readFileSync(DAEMON_PID_FILE, 'utf8'), 10) === process.pid) {
+      unlinkSync(DAEMON_PID_FILE)
+      try { unlinkSync(SOCKET_PATH) } catch {}
+    }
   } catch {}
-  try { unlinkSync(SOCKET_PATH) } catch {}
   try { unlinkSync(HEARTBEAT_FILE) } catch {}   // clean exit → next startup won't read a crash
   setTimeout(() => process.exit(0), 2000)
   void Promise.resolve(bot.stop()).finally(() => process.exit(0))
@@ -15396,8 +15411,8 @@ const server = net.createServer(handleShimConnection)
 
 await new Promise<void>((resolve, reject) => {
   server.listen(SOCKET_PATH, () => {
-    // PID written after listen succeeds — prevents TOCTOU race with concurrent spawns.
-    writeFileSync(DAEMON_PID_FILE, String(process.pid), { mode: 0o600 })
+    // No pid write here: acquireInstance() already holds the claim, and writing it at this point is
+    // what let two starters coexist — the file has to exist BEFORE the window, not after it.
     // A daemon that died between a bridge-driven effort change and its restore left the account's
     // global effortLevel where the CLI put it. The marker names the file and the value; replay it
     // once, here, before anything else can read a default that was never the user's.
