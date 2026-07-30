@@ -15,6 +15,12 @@
 //   bun run deploy --no-restart            # ship to cache but leave the running daemon alone
 //   bun run deploy --commit "msg"          # also commit (version files only) + push after a clean deploy
 //   bun run deploy --dry-run               # print the plan (files, version bump, cache path) and exit
+//   bun run deploy --with daemon.ts …      # ship YOUR uncommitted edit to that file (repeatable)
+//   bun run deploy --without webapp/index.html …   # a dirty file you are NOT releasing: ships as committed
+//
+// WHERE THE BYTES COME FROM: a commit, not the tree — see payload-provenance.ts. A tracked file that is
+// dirty and unnamed refuses the deploy instead of riding along, because this checkout is shared and one
+// session's release used to carry another's mid-task edits. `--with <path>` claims a file as yours.
 //
 // Multi-plugin (multi-channel.md P4): one repo, three plugins in one marketplace.json —
 //   bun run deploy                         # = --plugin tg (default, byte-identical to before)
@@ -33,6 +39,7 @@ import { existsSync, readdirSync, readFileSync, rmSync, mkdirSync, copyFileSync,
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { shipGate } from '../ship-gate.ts'
+import { provenanceGate, dirtyPayloadPaths, materializePayload } from '../payload-provenance.ts'
 
 // PLUGIN-DIR CONTENTS ARE DEPLOY-GENERATED. The shared runtime lives at the repo ROOT (channel.ts,
 // slack-daemon.ts, common.ts, channel-ctl.ts, the slk/dsc ctls, …) — that is the single source of
@@ -91,7 +98,10 @@ function sh(cmd: string, args: string[], cwd?: string): { status: number; stdout
 // `repoDest` (= its path relative to REPO) is where it lives in the git tree / marketplace mirror.
 // For tg the two coincide (source "./" is already flat); for slack/discord the manifest under
 // plugins/claude-<p>/ flattens into the cache but keeps its repo path in the mirror.
-type Payload = { src: string; cacheDest: string; repoDest: string }
+// `srcRel` is repo-relative, NOT an absolute path: the bytes are read from the materialized payload
+// root (a commit's tree + the files `--with` claimed), which is not the checkout — see srcOf below and
+// payload-provenance.ts for why a deploy must not read the working tree directly.
+type Payload = { srcRel: string; cacheDest: string; repoDest: string }
 type PluginCfg = {
   id: string
   mktName: string                       // this plugin's `name` in marketplace.json
@@ -139,7 +149,7 @@ function depFromRoot(name: string): string {
 
 // A root file (channel.ts, slack-daemon.ts, …) sits at the same path in cache and repo.
 function rootPayload(rel: string): Payload {
-  return { src: join(REPO, rel), cacheDest: rel, repoDest: rel }
+  return { srcRel: rel, cacheDest: rel, repoDest: rel }
 }
 
 // A self-contained channel plugin's payload: the runtime closure (source of truth at repo root,
@@ -147,8 +157,8 @@ function rootPayload(rel: string): Payload {
 // file's position in the flat cache; `repoDest` is its committed home under the plugin dir.
 function channelPayload(pluginDir: string, rootFiles: string[]): Payload[] {
   return [
-    ...rootFiles.map(f => ({ src: join(REPO, f), cacheDest: f, repoDest: join(pluginDir, f) })),
-    ...MANIFEST_FILES.map(f => ({ src: join(REPO, pluginDir, f), cacheDest: f, repoDest: join(pluginDir, f) })),
+    ...rootFiles.map(f => ({ srcRel: f, cacheDest: f, repoDest: join(pluginDir, f) })),
+    ...MANIFEST_FILES.map(f => ({ srcRel: join(pluginDir, f), cacheDest: f, repoDest: join(pluginDir, f) })),
   ]
 }
 
@@ -202,12 +212,33 @@ const commitIdx = argv.indexOf('--commit')
 const commitMsg = commitIdx >= 0 ? argv[commitIdx + 1] : null
 if (commitIdx >= 0 && !commitMsg) die('--commit needs a message: --commit "ui: …"')
 const shipIdx = argv.indexOf('--ship-branch')
+// `--with <path>`, repeatable: the files whose UNCOMMITTED bytes this deploy claims as its own (see
+// the provenance gate below). Parsed here with the other flags because its values must be excluded
+// from the bump scan — the file already learned that lesson once with --ship-branch.
+// `--with <path>` claims a dirty file as YOURS (its tree bytes ship — the staging gate);
+// `--without <path>` acknowledges one you are NOT releasing (a sibling's WIP: it ships as committed and
+// its edits are left alone). Every dirty payload file must be one or the other. Repeatable, and parsed
+// here with the other flags because their values must be excluded from the bump scan.
+const flagPaths = (flag: string): { idxs: number[]; paths: string[] } => {
+  const idxs = argv.reduce<number[]>((a, v, i) => (v === flag ? [...a, i] : a), [])
+  const paths = idxs.map(i => argv[i + 1]).filter((v): v is string => !!v && !v.startsWith('--'))
+  if (idxs.length !== paths.length) die(`${flag} needs a repo-relative path: ${flag} daemon.ts`)
+  return { idxs, paths }
+}
+const withArg = flagPaths('--with')
+const withoutArg = flagPaths('--without')
+const named = withArg.paths
+const excluded = withoutArg.paths
+const valueIdxs = new Set([...withArg.idxs, ...withoutArg.idxs])
+const both = named.filter(n => excluded.includes(n))
+if (both.length) die(`a path cannot be both claimed and excluded: ${both.join(', ')}`)
 // Every flag that takes a value must exclude that value here, or it is read as the bump: the first
 // spelling of this gate had `--ship-branch tg/foo` die with `unknown bump "tg/foo"`.
 const bumpArg = argv.find((a, i) =>
   !a.startsWith('--') && a !== commitMsg
   && !(pluginIdx >= 0 && i === pluginIdx + 1)
-  && !(shipIdx >= 0 && i === shipIdx + 1)) ?? 'patch'
+  && !(shipIdx >= 0 && i === shipIdx + 1)
+  && !valueIdxs.has(i - 1)) ?? 'patch'
 
 const CACHE_BASE = join(CACHE_ROOT, cfg.cacheName)
 const DAEMON_PID = join(homedir(), '.claude', 'channels', 'telegram', 'daemon.pid')
@@ -257,26 +288,36 @@ if (!materializeOnly && !dryRun) {
 
 }
 
-// Deliberately OUTSIDE the gate above, so `--dry-run` shows it too. This is pure information, and
-// information you can only obtain by doing the irreversible thing is not a preview. A dirty-payload
-// listing is exactly what someone wants before committing to a deploy, not in the scrollback after.
+// ---- provenance gate: the bytes come from a COMMIT, and dirt is claimed by name ----
+// Deliberately OUTSIDE the branch gate above, so `--dry-run` and `--materialize` are held to it too: a
+// preview that says "fine" for a deploy that would refuse is a lie, and --materialize writes into the
+// checkout, where provenance matters just as much as it does in a release.
 //
-// Not a refusal — in a checkout shared by several sessions the tree is dirty most of the time, so
-// refusing on dirt would block every legitimate deploy. But the payload is copied from the working
-// tree, so uncommitted edits to a shipped file DO go out: name them, so that is a choice.
-{
-  // NOT gitOut: it .trim()s the whole output, which eats the leading status space of the FIRST
-  // porcelain line (" M path" becomes "M path"), so slice(3) then shaved a character off the first
-  // filename it printed. A subtly wrong path is worse than none — it reads as correct.
-  const st = sh('git', ['-C', REPO, 'status', '--porcelain', '--', ...payload.map(p => p.src)])
-  const dirty = (st.status === 0 ? st.stdout : '')
-    .split('\n').map(l => l.slice(3).trimEnd()).filter(Boolean)   // porcelain: 2 status chars + a space, then the path
-  if (dirty.length) {
-    console.log(`⚠️  shipping UNCOMMITTED changes in ${dirty.length} payload file(s):`)
-    for (const f of dirty) console.log(`      ${f}`)
-    console.log('')
-  }
+// This used to be a printed WARNING, with a comment explaining that refusing on dirt would block every
+// legitimate deploy — true of refusing on dirt, and the reason the payload now comes from the commit
+// instead: a dirty file you have not claimed simply ships as its committed version, and only the
+// AMBIGUITY (dirty, unclaimed, therefore possibly a sibling's) is refused. See payload-provenance.ts.
+// The ref whose tree we ship. `--ship-branch <b>` names it explicitly (the branch gate above has
+// already checked you are ON b, so this is HEAD today — spelled out so it stays correct if that
+// ever loosens), otherwise HEAD.
+const payloadRef = shipIdx >= 0 && argv[shipIdx + 1] ? `refs/heads/${argv[shipIdx + 1]}` : 'HEAD'
+// Files the deploy ITSELF dirties, implicitly claimed. Its own version bumps are the whole reason:
+// deploy-then-commit is the staging gate here, so the second deploy before a commit finds plugin.json
+// and marketplace.json dirty by its own hand, and a gate that refused over that could not run twice.
+// A channel plugin's dir is deploy-generated for the same reason.
+const deployOwned = [PLUGIN_JSON, MARKET_JSON, ...(cfg.pluginDir ? [cfg.pluginDir] : [])]
+const payloadRels = payload.map(p => p.srcRel)
+const prov = provenanceGate(dirtyPayloadPaths(REPO, payloadRef, payloadRels), named, excluded, deployOwned, payloadRels)
+if (!prov.ok) die(prov.error)
+if (prov.claimed.length) {
+  console.log(`⚠️  shipping YOUR uncommitted changes in ${prov.claimed.length} claimed file(s):`)
+  for (const f of prov.claimed) console.log(`      ${f}`)
+  console.log('')
 }
+// Everything else ships as `payloadRef` has it. The root is deleted on exit, including after a die().
+const PAYLOAD_ROOT = materializePayload(REPO, payloadRef, prov.carried)
+process.on('exit', () => { try { rmSync(PAYLOAD_ROOT, { recursive: true, force: true }) } catch {} })
+function srcOf(p: Payload): string { return join(PAYLOAD_ROOT, p.srcRel) }
 
 // Replace only the version string (regex, not JSON round-trip) so file formatting/escaping is kept.
 function patchVersion(path: string, to: string) {
@@ -307,7 +348,7 @@ if (dryRun) {
   console.log(`  payload       ${payload.length} files →`)
   let missing = 0
   for (const p of payload) {
-    const ok = existsSync(p.src)
+    const ok = existsSync(srcOf(p))
     if (!ok) missing++
     console.log(`    ${ok ? ' ' : '✗'} ${p.cacheDest}${ok ? '' : '   (MISSING — not on disk yet)'}`)
   }
@@ -316,7 +357,7 @@ if (dryRun) {
 }
 
 // A real deploy needs every payload file present (a missing module would break the daemon in cache).
-for (const p of payload) if (!existsSync(p.src)) die(`payload file missing on disk: ${p.cacheDest} (${p.src})`)
+for (const p of payload) if (!existsSync(srcOf(p))) die(`payload file missing on disk: ${p.cacheDest} (${srcOf(p)})`)
 
 // Copy the resolved payload into `dest`, keyed by `which` position (flat cache vs repo-layout
 // mirror/checkout). Overwrites unconditionally (a cloned/prior dir may already hold the file).
@@ -325,9 +366,13 @@ for (const p of payload) if (!existsSync(p.src)) die(`payload file missing on di
 function syncPayloadInto(dest: string, which: 'cacheDest' | 'repoDest') {
   for (const p of payload) {
     const out = join(dest, p[which])
-    if (resolve(out) === resolve(p.src)) continue
+    // Never write a file over its own source in the CHECKOUT. Before the payload came from a commit
+    // this was a self-copy guard (copyFileSync onto itself truncates); now it is load-bearing for a
+    // different reason — `--materialize` writes at repoDest, and a manifest that lives where it ships
+    // would have the commit's bytes restored over an uncommitted edit. Same skip, sharper reason.
+    if (resolve(out) === resolve(join(REPO, p.srcRel))) continue
     mkdirSync(dirname(out), { recursive: true })
-    copyFileSync(p.src, out)
+    copyFileSync(srcOf(p), out)
   }
 }
 
