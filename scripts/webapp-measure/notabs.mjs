@@ -60,14 +60,26 @@ const open = async path => {
   await p.route("**/telegram-web-app.js", r => r.abort());
   await p.addInitScript(() => {
     window.__sb = { shown: 0, hidden: 0, handlers: [] };
+    window.__bb = { shown: 0, hidden: 0, handlers: [] };
+    // The app has no in-page close control at all, and this counter is what holds that: it must stay 0
+    // through every tap this script makes, on both pages.
+    window.__closed = 0;
     window.Telegram = { WebApp: {
       initData: "user=%7B%22id%22%3A1%7D&hash=x", initDataUnsafe: { user: { id: 1 } },
-      ready() {}, expand() {}, close() {}, themeParams: {}, colorScheme: "dark",
+      ready() {}, expand() {}, close() { window.__closed++; }, themeParams: {}, colorScheme: "dark",
       isExpanded: true, isFullscreen: false, viewportHeight: 812,
       onEvent() {}, offEvent() {}, isVersionAtLeast: () => true,
       HapticFeedback: { impactOccurred() {}, notificationOccurred() {} },
       MainButton: { show() {}, hide() {}, setText() {}, onClick() {} },
-      BackButton: { show() {}, hide() {}, onClick() {} },
+      // Recorded exactly like SettingsButton below: what the page asks the CLIENT to do is the only
+      // observable for a control the client draws in its own chrome.
+      BackButton: {
+        isVisible: false,
+        show() { window.__bb.shown++; this.isVisible = true; },
+        hide() { window.__bb.hidden++; this.isVisible = false; },
+        onClick(f) { window.__bb.handlers.push(f); },
+        offClick() {},
+      },
       SettingsButton: {
         isVisible: false,
         show() { window.__sb.shown++; this.isVisible = true; },
@@ -199,7 +211,65 @@ async function measure(path, label, shotPrefix) {
   await page.evaluate(() => { closeDrill(); showTab("sessions"); });
   await page.waitForTimeout(400);
 
-  // ---- 4. Guards: hidden, not retired ----------------------------------------------------------
+  // ---- 4. The way HOME from Settings: the client's own back control ----------------------------
+  // The ⋮ toggle was a door out and the owner did not find it one ("no way to get back to the main
+  // command center screen without closing and reopening the mini app"), so Settings now raises
+  // BackButton — where every Telegram user already looks. Driven through showTab(), not the ⋮ handler:
+  // the baseline has no ⋮ item at all, and a control that cannot reach the screen under test proves
+  // nothing about what that screen does.
+  const bbAt = async () => page.evaluate(() => ({
+    shown: window.__bb.shown, hidden: window.__bb.hidden,
+    visible: window.Telegram.WebApp.BackButton.isVisible, handlers: window.__bb.handlers.length,
+  }));
+  await page.evaluate(() => showTab("settings"));
+  await page.waitForTimeout(300);
+  const bbSettings = await bbAt();
+  state(bbSettings.visible && bbSettings.handlers === 1,
+    `opening Settings raises the client's back control (visible ${bbSettings.visible}, handlers ${bbSettings.handlers})`);
+  if (OUT) await page.screenshot({ path: join(OUT, `${shotPrefix}-settings-with-back.png`) });
+  await page.evaluate(() => { (window.__bb.handlers[0] || (() => {}))(); });
+  await page.waitForTimeout(400);
+  const afterBack = await tabState(page);
+  const bbHome = await bbAt();
+  state(afterBack.cur === "sessions" && afterBack.shown.join() === "tab-sessions",
+    `tapping back from Settings returns to Sessions (${afterBack.cur}, showing ${afterBack.shown.join("+") || "nothing"})`);
+  // BOTH ends again: "not visible now" is true on a page that never raised it at all.
+  state(bbSettings.visible && !bbHome.visible && bbHome.hidden >= 1,
+    `and the back control goes away with the screen that raised it (${bbSettings.visible} → ${bbHome.visible}, ${bbHome.hidden} hide calls)`);
+
+  // Nothing in Settings closes the app. `close()` is counted across every tap this script has made,
+  // AND every enabled control inside the rendered Settings view is tapped looking for one.
+  await page.evaluate(async () => {
+    await showTab("settings");
+    for (const el of document.querySelectorAll("#tab-settings button:not([disabled]), #tab-settings .setrow > *")) {
+      try { el.click(); } catch {}
+    }
+  });
+  await page.waitForTimeout(400);
+  const closed = await page.evaluate(() => window.__closed);
+  // A GUARD, not a state check: the page has never had a `tg.close()` call anywhere in it, so this
+  // passes on the baseline too. It is here because "the close button is replaced" is the ask, and the
+  // only close control this app has is the CLIENT's own ✕ — which is exactly what BackButton displaces.
+  guard(closed === 0, `nothing in the Settings view can close the mini app (close() calls: ${closed})`);
+  await page.evaluate(() => showTab("sessions"));
+  await page.waitForTimeout(300);
+
+  // The drill-in keeps ITS back control, on the same single registered handler — a guard, since this
+  // is what the page did before Settings joined it.
+  const drillBack = await page.evaluate(async () => {
+    window.Telegram.WebApp.isFullscreen = true;
+    openDrill("s1", "cc-bridge");
+    await new Promise(r => setTimeout(r, 300));
+    const raised = window.Telegram.WebApp.BackButton.isVisible;
+    (window.__bb.handlers[0] || (() => {}))();
+    await new Promise(r => setTimeout(r, 300));
+    window.Telegram.WebApp.isFullscreen = false;
+    return { raised, drill: document.getElementById("drill").classList.contains("show") };
+  });
+  guard(drillBack.raised && !drillBack.drill,
+    `the drill-in still raises the same back control and it still closes that screen (raised ${drillBack.raised}, drill after ${drillBack.drill})`);
+
+  // ---- 5. Guards: hidden, not retired ----------------------------------------------------------
   guard(g.buttons === 4, `all four tab buttons are still in the DOM (${g.buttons})`);
   const reachable = await page.evaluate(async () => {
     const out = {};

@@ -2127,6 +2127,16 @@ async function showTab(name) {
   else if (name === "auto") renderAuto();
   else if (name === "files") { if (!filesLoaded) { filesLoaded = true; ls(cur); } }
   else if (name === "settings") renderSettings();
+  // With the row hidden, Settings has no in-page way home — so the CLIENT's back control is the way
+  // home, which is where every Telegram user already looks for one (the owner, on the ⋮ toggle being
+  // the only door: "there's no way to get back to the main command center screen without closing and
+  // reopening the mini app"). Showing BackButton is also what makes the client offer ← instead of its
+  // ✕ Close, which is the "replace close with back" half. NOT gated on fullscreen, unlike the
+  // drill-in's: that screen has its own ← chip outside fullscreen and this one has nothing at all.
+  // Skipped while the drill-in is up — openDrill/closeDrill own the button on that screen.
+  if (NATIVE_BACK && !SHOW_TABS && !$("drill").classList.contains("show")) {
+    try { name === "settings" ? tg.BackButton.show() : tg.BackButton.hide(); } catch {}
+  }
 }
 document.querySelectorAll("#tabs button").forEach(b => b.onclick = () => showTab(b.dataset.tab));
 $("newfab").onclick = openSpawnSheet;
@@ -2360,9 +2370,17 @@ $("dback").onclick = closeDrill;
 // clearance safe enough to ride up into that row at all.
 // Feature-detected rather than version-checked: the SDK warns and no-ops below Bot API 6.1, and a
 // try/catch around the first real call is the only thing that distinguishes "present" from "works".
+// It is registered ONCE, on a dispatcher, because two screens now raise it — the drill-in and (with
+// the tab row hidden) Settings. `offClick`/re-registering per screen would leave the client holding a
+// stale handler on any client that no-ops one of the two calls; asking "what is on screen" at TAP time
+// cannot go stale.
+function onNativeBack() {
+  if ($("drill").classList.contains("show")) { closeDrill(); return; }
+  showTab("sessions");
+}
 const NATIVE_BACK = (() => {
   if (!tg || !tg.BackButton || typeof tg.BackButton.onClick !== "function") return false;
-  try { tg.BackButton.onClick(closeDrill); return true; } catch { return false; }
+  try { tg.BackButton.onClick(onNativeBack); return true; } catch { return false; }
 })();
 // Settings' only door while the tab row is hidden: the client's OWN ⋮ menu, which
 // `web_app_setup_settings_button` has been able to add an item to for every bot since Bot API 6.10

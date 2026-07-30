@@ -224,8 +224,15 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   ⋮ item is driven both ways through a recording SDK stub (open,
                                   #   return, and from inside the drill-in). Guards that hold on both
                                   #   pages: four buttons still in the DOM, showTab() still switching
-                                  #   every panel, Sessions on open. Pinned control (3681d1e): all 8
-                                  #   state checks must fail there, which is asserted, not eyeballed
+                                  #   every panel, Sessions on open. Also the way HOME from Settings:
+                                  #   the client's BackButton, raised by showTab() and driven through
+                                  #   the same recording stub — reached via showTab(), never the ⋮
+                                  #   handler, since the baseline has no ⋮ item and a control that
+                                  #   cannot reach the screen under test proves nothing about it. Every
+                                  #   enabled control in the rendered Settings view is tapped looking
+                                  #   for a close(); the count must stay 0 (a guard — this app has
+                                  #   never had a tg.close()). Pinned control (3681d1e): all 11 state
+                                  #   checks must fail there, which is asserted, not eyeballed
     node thoughts.mjs [page] [out] # a turn's NARRATION is quoted and its answer is not. Three kinds of
                                   #   claim, three instruments: the marking is structural and fails
                                   #   wholesale on a pre-change page; the ABSENCE of a demotion (same

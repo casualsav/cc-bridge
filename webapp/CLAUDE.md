@@ -392,6 +392,16 @@ give it.
   is the only way in and therefore the only way out, and stranding the app in Settings is not what
   the trial is testing. It closes the drill-in first — that surface is fixed and full-screen, so
   switching a tab under it reads as a tap that did nothing.
+- **The way HOME from Settings is the client's `BackButton`, and it is NOT gated on fullscreen** —
+  unlike the drill-in's, which has its own ← chip outside fullscreen while this screen has nothing.
+  The ⋮ toggle alone was not findable as a door out: the owner, 2026-07-30, *"from within the settings
+  menu there's no way to get back to the main command center screen without closing and reopening the
+  mini app"*. Showing BackButton is also the only lever there is on the client's ✕ Close — the app
+  contains no `tg.close()` call anywhere, so there is no in-page close to replace.
+- **`BackButton.onClick` is registered ONCE, on `onNativeBack`, which asks what is on screen at TAP
+  time.** Two screens raise the same button now; re-registering per screen would leave a stale handler
+  on any client that no-ops an `offClick`. `showTab()` owns its visibility and skips the work while the
+  drill-in is up — `openDrill`/`closeDrill` own the button on that screen.
 
 ## Sessions list and spawn sheet
 
