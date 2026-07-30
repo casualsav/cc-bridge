@@ -81,6 +81,15 @@ export function gatewayLaunchCommand(
     .replace("'--'", '--')
 }
 
+function gatewayAuthHeaders(
+  definition: GatewayDefinition,
+  harnessEnv: Record<string, string>,
+): Record<string, string> {
+  if (definition.auth === 'bearer') return { authorization: `Bearer ${harnessEnv.ANTHROPIC_AUTH_TOKEN}` }
+  if (definition.auth === 'x-api-key') return { 'x-api-key': harnessEnv.ANTHROPIC_API_KEY }
+  return {}
+}
+
 export type GatewayProbeRequest = {
   url: string
   headers: Record<string, string>
@@ -98,13 +107,40 @@ export function gatewayProbeRequest(
   const headers: Record<string, string> = {
     'content-type': 'application/json',
     'anthropic-version': '2023-06-01',
+    ...gatewayAuthHeaders(definition, harnessEnv),
   }
-  if (definition.auth === 'bearer') headers.authorization = `Bearer ${harnessEnv.ANTHROPIC_AUTH_TOKEN}`
-  if (definition.auth === 'x-api-key') headers['x-api-key'] = harnessEnv.ANTHROPIC_API_KEY
   return {
     url: `${definition.baseUrl}/v1/messages`, headers,
     body: { model: profile.model, max_tokens: 1, messages: [{ role: 'user', content: 'Reply OK' }] },
   }
+}
+
+export type GatewayModelsRequest = { url: string; headers: Record<string, string> }
+
+export function gatewayModelsRequest(
+  profile: GatewayHarnessProfile,
+  definitions: Record<string, GatewayDefinition>,
+  env: Record<string, string | undefined>,
+): GatewayModelsRequest | null {
+  const definition = definitions[profile.gateway]
+  const harnessEnv = gatewayHarnessEnv(profile, definitions, env)
+  if (!definition || !harnessEnv) return null
+  return {
+    url: `${definition.baseUrl}/v1/models`,
+    headers: gatewayAuthHeaders(definition, harnessEnv),
+  }
+}
+
+export function gatewayModelIds(value: unknown): string[] | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const data = (value as { data?: unknown }).data
+  if (!Array.isArray(data)) return null
+  const ids = data.flatMap(entry => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return []
+    const id = (entry as { id?: unknown }).id
+    return safeModel(id) ? [id] : []
+  })
+  return [...new Set(ids)]
 }
 
 export function validGatewayProbeResponse(value: unknown): boolean {

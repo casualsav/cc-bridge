@@ -3,7 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  gatewayHarnessEnv, gatewayLaunchCommand, gatewayProbeRequest, parseGatewayDefinitions, validGatewayProbeResponse, type GatewayDefinition,
+  gatewayHarnessEnv, gatewayLaunchCommand, gatewayModelIds, gatewayModelsRequest, gatewayProbeRequest,
+  parseGatewayDefinitions, validGatewayProbeResponse, type GatewayDefinition,
 } from './harness-gateway.ts'
 import { parseHarnessSpec, harnessLabel } from './harness-provider.ts'
 
@@ -113,6 +114,24 @@ test('gateway probes use the Anthropic Messages contract and configured auth', (
       messages: [{ role: 'user', content: 'Reply OK' }],
     },
   })
+})
+
+test('gateway model discovery uses configured auth and accepts only safe model ids', () => {
+  const remote = parseHarnessSpec('gateway minimax', definitions)
+  const local = parseHarnessSpec('gateway local', definitions)
+  if (!remote || remote.provider !== 'gateway' || !local || local.provider !== 'gateway') throw new Error('expected gateway profiles')
+  expect(gatewayModelsRequest(remote, definitions, { CC_BRIDGE_GATEWAY_MINIMAX_KEY: 'secret-token' })).toEqual({
+    url: 'https://api.minimax.io/anthropic/v1/models',
+    headers: { authorization: 'Bearer secret-token' },
+  })
+  expect(gatewayModelsRequest(local, definitions, {})).toEqual({
+    url: 'http://127.0.0.1:11434/anthropic/v1/models', headers: {},
+  })
+  expect(gatewayModelIds({ data: [
+    { id: 'gpt-5.6-sol' }, { id: 'gpt-5.6-sol' }, { id: 'gpt-5.6-terra[1m]' },
+    { id: 'bad model' }, null,
+  ] })).toEqual(['gpt-5.6-sol', 'gpt-5.6-terra[1m]'])
+  expect(gatewayModelIds({ models: [] })).toBeNull()
 })
 
 test('gateway probe responses must use the Anthropic Messages shape', () => {

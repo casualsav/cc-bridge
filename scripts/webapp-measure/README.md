@@ -49,6 +49,9 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   control row, and everything outside it holding still. Pass a
                                   #   pre-change page: the rest + shape checks must FAIL there (5 of
                                   #   54), and growth + nothing-else must pass on BOTH
+    node model-provider.mjs [page] # live composer model picker: provider title, shared compact nickname,
+                                  # server-owned rows/actionability for Anthropic, local Codex and an
+                                  # unknown gateway; also keeps the spawn sheet Anthropic-only
     node suite.mjs                # the six scroll behaviours, each measured twice (see below)
     node themes.mjs               # feed in dark AND light (see the theming trap below)
     node work.mjs <outdir>        # the live working row: both themes, reduced-motion, and the

@@ -1471,6 +1471,8 @@
     padding: 12px 14px; cursor: pointer; font-size: var(--t-body); }
   .dialrow:first-child { border-top: none; }
   .dialrow:active { background: var(--bg); }
+  .dialrow:disabled { cursor: default; }
+  .dialrow:disabled:active { background: transparent; }
   .dialrow .nm { flex: 1; min-width: 0; }
   .dialrow .nm .n { display: flex; align-items: center; gap: var(--sp-2); }
   .dialrow .nm .d { font-size: var(--t-sub); color: var(--hint-raised); margin-top: 2px; }
@@ -1677,7 +1679,7 @@
       <div class="dialpage" id="dialp1">
         <div class="dialhead">
           <button class="lead" id="dialx" title="Close" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
-          <div class="t">Select model</div>
+          <div class="t" id="dialtitle">Select model</div>
         </div>
         <div class="diallist" id="dialmodels"></div>
         <div class="diallist"><button class="dialrow" id="dialeffort">
@@ -2988,26 +2990,39 @@ const effLabel = lv => (DIAL_EFFORTS.find(([v]) => v === lv) || [null, lv])[1] |
 // The statusline reports a display NAME ("Opus 5"); the picker works in aliases ("opus"). Match on
 // the family token — the same test the chat-side /model confirmation uses to read back a switch.
 const modelAlias = name => (DIAL_MODELS.find(([a]) => name && name.toLowerCase().includes(a)) || [null])[0];
-let dialNow = { model: null, effort: null, defModel: null, defEffort: null };
+let dialNow = { model: null, effort: null, defModel: null, defEffort: null, modelSelector: null };
 // Paint the pill from a feed payload (null = opening a session before the first poll answers).
 function setDial(d) {
   // A poll that comes back empty (the statusline is masked by a confirm dialog mid-switch) must
   // not blank a pill that already knows better — hold the last true reading. d === null is the
   // deliberate reset when opening a session, and still clears everything.
   dialNow = d === null
-    ? { model: null, effort: null, defModel: null, defEffort: null }
+    ? { model: null, effort: null, defModel: null, defEffort: null, modelSelector: null }
     : { model: d.model || dialNow.model, effort: d.effort || dialNow.effort,
-        defModel: d.defModel || dialNow.defModel, defEffort: d.defEffort || dialNow.defEffort };
-  // The pill says what the SESSION says, never what our list says it should be: the statusline name
-  // is already normalised ("claude-haiku-4-5-20251001" → "Haiku 4.5"), it covers a model set by full
-  // id from the terminal that no list here knows, and it cannot go stale — the row labels below can,
-  // and a pill reading "Opus 5" at a session actually running something else would be a lie.
-  $("ddialm").textContent = dialNow.model || "Model";
+        defModel: d.defModel || dialNow.defModel, defEffort: d.defEffort || dialNow.defEffort,
+        modelSelector: d.modelSelector || dialNow.modelSelector };
+  const chosen = dialNow.modelSelector && dialNow.modelSelector.selected;
+  // New daemons hand us the pin's own friendly nickname. The old `model` field stays as the fallback
+  // so a page loaded across an upgrade degrades to the byte-for-byte selector it had before.
+  $("ddialm").textContent = (chosen && chosen.label) || dialNow.model || "Model";
   $("ddiale").textContent = dialNow.effort ? effLabel(dialNow.effort) : "";
   if ($("dial").classList.contains("show")) paintDial();
 }
+function composerModelRows() {
+  const selector = dialNow.modelSelector;
+  if (!selector) return DIAL_MODELS;
+  return selector.options.map(option => {
+    const native = DIAL_MODELS.find(([id]) => id === option.id);
+    // Anthropic keeps its existing explanatory copy. A gateway row names the canonical model id —
+    // the compact label already carries the friendly nickname, and inventing a capability blurb here
+    // would turn provider detection into marketing copy.
+    const detail = selector.provider.kind === "anthropic" && native ? native[2] : option.id;
+    return [option.id, option.label, detail, selector.selectable];
+  });
+}
 function dialRow(kind, row, cur, def) {
-  return '<button class="dialrow' + (row[0] === cur ? " on" : "") + '" data-k="' + kind + '" data-v="' + row[0] + '">' +
+  const enabled = row[3] !== false;
+  return '<button class="dialrow' + (row[0] === cur ? " on" : "") + '" data-k="' + kind + '" data-v="' + row[0] + '"' + (enabled ? "" : " disabled") + ">" +
     '<span class="nm"><span class="n">' + esc(row[1]) +
       (row[0] === def ? '<span class="badge">Default</span>' : "") + "</span>" +
       '<span class="d">' + esc(row[2]) + "</span></span>" +
@@ -3048,6 +3063,8 @@ function bindDialRows(host) {
 }
 function paintDial() {
   const host = DIAL_HOST;
+  const provider = dialNow.modelSelector && dialNow.modelSelector.provider;
+  $("dialtitle").textContent = provider ? "Select model · " + provider.label : "Select model";
   $("dialmodels").innerHTML = host.rows("model").map(m => dialRow("model", m, host.cur("model"), host.def("model"))).join("");
   host.detailKind = "effort";
   $("dialefforts").innerHTML = host.rows("effort").map(e => dialRow("effort", e, host.cur("effort"), host.def("effort"))).join("");
@@ -3058,9 +3075,13 @@ function paintDial() {
 const DIAL_HOST = {
   root: "dial", p1: "dialp1", p2: "dialp2", detail: "dialefforts", detailTitle: "dialdetailt",
   detailKind: "effort",
-  cur: k => k === "model" ? modelAlias(dialNow.model) : dialNow.effort,
-  def: k => k === "model" ? dialNow.defModel : dialNow.defEffort,
-  rows: k => DIAL_LISTS[k](),          // no Default row here: this host acts on a LIVE session
+  cur: k => k === "model"
+    ? (dialNow.modelSelector?.selected?.id || modelAlias(dialNow.model))
+    : dialNow.effort,
+  def: k => k === "model"
+    ? (dialNow.modelSelector?.provider?.kind === "anthropic" ? dialNow.defModel : null)
+    : dialNow.defEffort,
+  rows: k => k === "model" ? composerModelRows() : DIAL_LISTS[k](),
   pick: (k, v) => applyDial(k, v),
 };
 $("ddial").onclick = () => {
@@ -3083,7 +3104,7 @@ $("dial").onclick = e => { if (e.target.id === "dial") closeDial(); };
 $("dialeffort").onclick = () => { $("dial").classList.add("p2"); dialHeight(); };
 $("dialback").onclick = () => { $("dial").classList.remove("p2"); dialHeight(); };
 async function applyDial(kind, val) {
-  const label = kind === "model" ? (DIAL_MODELS.find(([a]) => a === val) || [null, val])[1] : effLabel(val);
+  const label = kind === "model" ? (composerModelRows().find(([a]) => a === val) || [null, val])[1] : effLabel(val);
   closeDial();
   if (!(await sessionAct(kind, val))) return;   // writeOp surfaced the error
   // Deliberately no optimistic repaint of the pill: the dial is whatever the SESSION reports, and an

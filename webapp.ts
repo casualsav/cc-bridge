@@ -122,6 +122,12 @@ export interface SessionFeed {
   // changing model or effort the list snapshot would be stale until that tab is visited again.
   // `cwd` is the chat header's subtitle; model/effort label the composer's picker button.
   cwd?: string; model?: string | null; effort?: string | null
+  modelSelector?: {
+    provider: { kind: 'anthropic' | 'openai-codex' | 'gateway'; key: string; label: string }
+    selected: { id: string; label: string } | null
+    options: Array<{ id: string; label: string }>
+    selectable: boolean
+  }
   // The bridge's configured coding-session defaults (/settings 🧑‍💻). The picker badges these — they are
   // genuinely unset ("inherit") as often as not, and then nothing is badged.
   defModel?: string | null; defEffort?: string | null

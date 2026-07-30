@@ -54,7 +54,8 @@ import {
   resumeCliModel, serializeHarnessProfile, type BuiltinHarnessProvider, type HarnessProfile,
 } from './harness-provider.ts'
 import {
-  gatewayHarnessEnv, gatewayLaunchCommand, gatewayProbeRequest, parseGatewayDefinitions, validGatewayProbeResponse, type GatewayDefinition,
+  gatewayHarnessEnv, gatewayLaunchCommand, gatewayModelIds, gatewayModelsRequest, gatewayProbeRequest,
+  parseGatewayDefinitions, validGatewayProbeResponse, type GatewayDefinition,
 } from './harness-gateway.ts'
 import { findSessionHarness, recordSessionHarness } from './session-harness.ts'
 import {
@@ -164,6 +165,7 @@ import { planStuckSweep, planWedgeEscalation, type StuckState } from './stuck-pl
 import { planContextWarn, planCtxNudge } from './ctx-warn.ts'
 import { planBoxUsageWarn, type UsageWarnMarker } from './usage-warn.ts'
 import { spawnModelFlag, WIDE_CONTEXT_SUFFIX } from './model-window.ts'
+import { buildModelSelector, MODEL_ALIASES, MODEL_ALIAS_IDS, planModelSelection, type ModelSelector } from './model-catalog.ts'
 import {
   initStatusCard, statusCardText, statusKeyboard, updateSessionPin, updateTopicPins,
   removeSessionPins, refreshSessionPin, forgetChatPin, armChatPin, sessionPins, pinTextCache, persistSessionPins,
@@ -1562,6 +1564,23 @@ async function gatewayProviderReady(profile: Extract<HarnessProfile, { provider:
     gatewayProbeSuccess.set(key, Date.now())
     return true
   } catch { return false }
+}
+
+const gatewayModelsCache = new Map<string, { at: number; models: string[] | null }>()
+async function discoverGatewayModels(profile: Extract<HarnessProfile, { provider: 'gateway' }>, fresh = false): Promise<string[] | null> {
+  const request = gatewayModelsRequest(profile, loadHarnessGateways(), gatewayEnvLive())
+  if (!request) return null
+  const key = createHash('sha256').update(JSON.stringify(request)).digest('hex')
+  const hit = gatewayModelsCache.get(key)
+  const ttl = hit?.models ? 60_000 : 10_000
+  if (!fresh && hit && Date.now() - hit.at < ttl) return hit.models
+  let models: string[] | null = null
+  try {
+    const response = await fetch(request.url, { headers: request.headers, signal: AbortSignal.timeout(5000) })
+    if (response.ok) models = gatewayModelIds(await response.json().catch(() => null))
+  } catch {}
+  gatewayModelsCache.set(key, { at: Date.now(), models })
+  return models
 }
 
 async function harnessProviderReady(profile: HarnessProfile): Promise<boolean> {
@@ -6751,21 +6770,9 @@ async function doModePicker(ctx: Context): Promise<void> {
   await ctx.reply(`🕹️ <b>Mode</b> — currently ${modeLabel(current)}\n\n${MODE_TIP}`, { parse_mode: 'HTML', reply_markup: modePickerKeyboard(current) })
 }
 
-// Model picker — buttons for the common aliases plus a tip for any specific name. Shared by
-// /model (no arg) and the 🧠 Model button; the model:set:<alias> callback applies a choice.
-const MODEL_ALIASES = ['fable', 'opus', 'sonnet', 'haiku']
-// The CLI's own 'opus' alias still boots Opus 4.8 (checked on 2.1.205), but opus here should mean
-// Opus 5 — so pin the full id (verified against the live /v1/models list, 2026-07-24) everywhere
-// the bridge sends a model. Drop the pin once the CLI alias catches up. All four aliases are now
-// pinned the same way — a bare alias drifts to whatever the CLI resolves it to on its own schedule,
-// which is exactly the Opus 4.8 bug repeated for fable/sonnet/haiku.
-const MODEL_ALIAS_IDS: Record<string, string> = {
-  opus: 'claude-opus-5', fable: 'claude-fable-5',
-  sonnet: 'claude-sonnet-5', haiku: 'claude-haiku-4-5-20251001',
-}
 // (The alias→arg helper that lived here is gone with the last `/model <id>` injection: every
-// model-set surface now picks the row by NAME through applySessionModel. The table above still
-// pins launch-time `--model` flags and the picker's opus fallback.)
+// model-set surface now picks the row by NAME through applySessionModel. MODEL_ALIAS_IDS still pins
+// launch-time `--model` flags and the picker's opus fallback.)
 const MODEL_TIP = '💡 Tip: <code>/model &lt;name&gt;</code> to set any specific model.'
 
 // The terminal fallback for a spawn/reopen that would otherwise resolve to NO model at all. Leaving
@@ -16277,6 +16284,22 @@ async function webappSessionMessage(sid: string, uuid: string): Promise<string |
   const src = await webappSessionSource(sid)
   return src?.file ? conversationItemFullText(src.file, uuid) : null
 }
+async function webappModelSelector(
+  pane: string,
+  file: string | null,
+  statusModel: string | null,
+  freshDiscovery = false,
+): Promise<{ profile: HarnessProfile; selector: ModelSelector }> {
+  const profile = await paneHarnessProfile(pane)
+  const current = profile.provider === 'anthropic'
+    ? (file ? latestModelId(file) : null) ?? statusModel
+    : profile.model
+  const discovered = profile.provider === 'gateway' && profile.gateway === 'local-codex'
+    ? await discoverGatewayModels(profile, freshDiscovery)
+    : null
+  return { profile, selector: buildModelSelector(profile, current, discovered) }
+}
+
 async function webappSessionFeed(sid: string): Promise<WebappSessionFeed | null> {
   const src = await webappSessionSource(sid)
   if (!src) return null
@@ -16288,6 +16311,7 @@ async function webappSessionFeed(sid: string): Promise<WebappSessionFeed | null>
   const acc = loadAccess()
   const cap = await capturePane(pane).catch(() => '')
   const sl = cap ? parseStatusline(cap) : null
+  const { selector: modelSelector } = await webappModelSelector(pane, file, sl?.model ?? null)
   // The live working line off that SAME capture (no second tmux spawn). Absent between turns, and
   // absent on a tick that misses the line — the client treats "no status" as "nothing to show", so
   // there is nothing to hold over.
@@ -16298,6 +16322,7 @@ async function webappSessionFeed(sid: string): Promise<WebappSessionFeed | null>
     // loses it. Abbreviated here rather than in the client, which has no idea what $HOME is.
     cwd: (src.cwd || '').startsWith(homedir()) ? '~' + src.cwd!.slice(homedir().length) : (src.cwd || ''),
     model: sl?.model ?? (file ? modelDisplayName(latestModelId(file) ?? '') : null),
+    modelSelector,
     effort: sl?.effort ?? null,
     defModel: acc.spawnModel ?? null,
     defEffort: acc.spawnEffort ?? null,
@@ -16444,15 +16469,34 @@ async function webappSessionAction(userId: string, sid: string, action: 'stop' |
     const cap = await capturePane(pane).catch(() => '')
     if (!cap || !onNormalPrompt(cap) || detectWorking(cap)) return 'the session is mid-turn — try again when it goes idle'
     if (action === 'model') {
-      if (!MODEL_ALIASES.includes(arg)) return `unknown model — one of: ${MODEL_ALIASES.join(' | ')}`
-      // The picker's session-only key, same as the chat-side surfaces. The choice itself is awaited
-      // (a picker that won't open is an error worth showing the tapper), but the confirm + readback
-      // dance that follows polls for up to ~30s, and the HTTP request must not be held open for it —
-      // hence awaitReadback: false. The 3s feed poll is what reports the new model. The alias is
-      // remembered only once that readback confirms it landed, so a declined switch can't poison the
-      // resume-model store.
-      const { error } = await applySessionModel(pane, watcher, arg, { awaitReadback: false })
-      return error
+      const cwd = await paneCwd(pane).catch(() => null)
+      const file = await transcriptForPane(pane, cwd)
+      const profileAndSelector = await webappModelSelector(pane, file, parseStatusline(cap)?.model ?? null, true)
+      const selection = planModelSelection(profileAndSelector.profile, profileAndSelector.selector, arg)
+      if (selection.kind === 'error') return selection.error
+      if (selection.kind === 'unchanged') return null
+      if (selection.kind === 'anthropic') {
+        // The native path is unchanged: choose the session-only picker row, never `/model <id>`
+        // (that argument form also rewrites the account-wide default).
+        const { error } = await applySessionModel(pane, watcher, selection.alias, { awaitReadback: false })
+        return error
+      }
+      if (!file) return 'could not resolve this conversation — nothing was changed'
+      // Discovery can take a few seconds. Refuse if work started while it was in flight rather than
+      // typing /exit into a turn the user began after tapping the menu.
+      const current = await capturePane(pane).catch(() => '')
+      if (!current || !onNormalPrompt(current) || detectWorking(current)) return 'the session is mid-turn — try again when it goes idle'
+      const conversationId = agentSessionId(file)
+      if (!conversationId) return 'could not resolve this conversation id — nothing was changed'
+      const account = await paneAccount(pane)
+      const resumed = await restartPaneSessionCore(pane, conversationId, account, 'claude', undefined, undefined, selection.profile)
+      if (!resumed) return 'the model switch did not bring the conversation back up'
+      try { recordSessionHarness(conversationId, selection.profile) }
+      catch (error) {
+        process.stderr.write(`daemon: composer model switched but could not persist ${conversationId}: ${error instanceof Error ? error.message : String(error)}\n`)
+        return 'the model changed, but its resume metadata could not be saved'
+      }
+      return null
     }
     if (!EFFORT_LEVELS.includes(arg)) return `unknown effort — one of: ${EFFORT_LEVELS.join(' | ')}`
     // reapplyEffort, not injectEffortChange: mid-conversation Claude Code raises "Change effort

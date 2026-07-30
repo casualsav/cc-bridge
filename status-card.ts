@@ -22,6 +22,9 @@ import { laneForChat, dmLanesOn } from './dm-lanes.ts'
 import { paneForSession } from './topic-runtime.ts'
 import { detectCurrentMode, onNormalPrompt, stripAnsi, type CcMode } from './prompt.ts'
 import { currentTurnTokens } from './agent-transcript.ts'
+import { codexPrettyModel, prettyModel } from './model-nickname.ts'
+
+export { codexPrettyModel, prettyModel } from './model-nickname.ts'
 
 type StatusCardDeps = {
   channel: ChannelAdapter
@@ -267,15 +270,6 @@ function fmtResetIn(resetsAt: number): string | null {
   return `${Math.floor(h / 24)}d${h % 24 ? `${h % 24}h` : ''}`
 }
 
-// Family name only — Claude families and known GPT routing families, for the pin tagline.
-export function prettyModel(id: string | null): string | null {
-  if (!id) return id
-  const gpt = codexPrettyModel(id)
-  if (gpt !== id) return gpt
-  const m = id.match(/(opus|sonnet|haiku|fable)/i)
-  return m ? m[1][0].toUpperCase() + m[1].slice(1).toLowerCase() : id
-}
-
 // Status line for the focused session: 💻 name • model (…) • mode (…). Mode is read live from a
 // pane capture; model from the session's transcript. Both degrade to "—" rather than blocking.
 export async function gitBranch(dir: string): Promise<string | null> {
@@ -446,11 +440,6 @@ export function codexModelFromPane(paneText: string): string | null {
     .find(l => /^\s*gpt-[\w.-]+\s+.+\s·\s.+/.test(l))
   const m = footer?.match(/(gpt-[\w.-]+)/)
   return m ? m[1] : null
-}
-
-export function codexPrettyModel(id: string): string {
-  const family = id.match(/^gpt-[\d.]+-(sol|terra|luna)$/i)?.[1]
-  return family ? family[0].toUpperCase() + family.slice(1).toLowerCase() : id
 }
 
 // Access posture from Codex's `permissions` status item, mapped to the read/auto/yolo trichotomy
