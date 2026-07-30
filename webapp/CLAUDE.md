@@ -427,6 +427,24 @@ give it.
   axis can satisfy them all. What IS asserted is the strongest true claim: same letter, the label's
   12px/400 `C` against a card's 14px/600 `C`, **0.25px** apart. The per-letterform scatter is printed
   by `listorder.mjs` and deliberately not gated — it is type, not misalignment.
+- **"The C flush with every session name" IS NOT ACHIEVABLE, by any lever — measured in his own font**
+  (2026-07-30, after two photos and a verbatim spec naming the glyph→C gap as the only permitted lever).
+  Session names start with different letters, and a letterform's left side bearing is its own: in
+  **Roboto** the ink edges of the names' own first letters span **0.75px** (`t` of trading −0.625 from
+  `m` of memes; `C` `c` `u` `i` `U` in between). They do not share an ink column **with each other**, so
+  no single gap can put one `C` on all of them — and neither can a type change, since the label's letter
+  is a `C` whatever size it is. The box axis (**45.00**, exact on every card) is the only column that
+  exists. Best a single gap could do in Roboto: shift the words **0.25px** left, bounding the worst case
+  at 0.375px instead of 0.625 — declined as a font-metric constant baked into a layout, and reported to
+  the owner as his call. `labelaxis.mjs` §2 prints the whole table; do not re-open this without it.
+- **THE HARNESS'S FONT IS NOT THE DEVICE'S, and every ink claim in this directory is font-local.**
+  Headless Chromium here resolves `-apple-system, system-ui, …` to **DejaVu Sans**; his Android WebView
+  resolves it to **Roboto**. That is what let `listorder.mjs` report the label's `C` flush with a card
+  name (DejaVu: 0.000) while his screen had it 0.25–0.625px right. `device-font.mjs` fetches the real
+  Roboto (cached in `.fonts/`, gitignored — a committed binary would ride every deploy) and it is a hard
+  failure when unavailable: a measurement in the wrong font reads exactly like the right one. The
+  standing gates stay in the harness font on purpose — a gate does not depend on the network — so they
+  are regression checks on OUR render, and the device-font question belongs to the probe.
 - **This column was DISPUTED off a phone photo and the photo agreed with the harness** (2026-07-30) —
   so before re-aligning it, measure. **A photo of this page is measurable, because the page puts a
   known-size object in every frame: the 11px status dot.** Scale = the dot's ink width ÷ 11, and every

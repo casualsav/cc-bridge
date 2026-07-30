@@ -25,3 +25,6 @@ handoff.md
 HANDOFF.md
 PLAN.md
 DECISIONS.md
+
+# fetched by scripts/webapp-measure/device-font.mjs (the device font, cached; never committed)
+scripts/webapp-measure/.fonts/
