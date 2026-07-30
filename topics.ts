@@ -10,8 +10,9 @@
 // cwd key — lets one project host several sessions, each with its own topic. Each entry carries its
 // cwd as data (titles + the no-stamp fallback after a tmux restart).
 import { join } from 'node:path'
+import { renameSync } from 'node:fs'
 import { randomBytes } from 'node:crypto'
-import { STATE_DIR, readJsonFile, writeJsonFile } from './common.ts'
+import { STATE_DIR, readJsonFileStrict, writeJsonFile } from './common.ts'
 import { normalizeAgent, type AgentKind } from './agent.ts'
 import { normalizeHarnessProfile, type HarnessProfile } from './harness-provider.ts'
 
@@ -68,8 +69,23 @@ let store: TopicStore = { groupChatId: null, generalSessionId: null, generalCwd:
 let loaded = false
 let persist = true   // disabled by _resetForTest so unit tests never write to the real STATE_DIR
 
+// Set when the store on disk was unparseable AND we could not move it aside — i.e. those bytes are
+// still the only copy of the session map. Saving here would overwrite them with the empty store the
+// failed read produced, which is precisely how five live sessions were lost on 2026-07-30. Refusing
+// costs persistence of NEW rows until a restart; overwriting costs the entire history, silently.
+let poisoned = false
+let warnedPoisoned = false
+
 function save(): void {
-  if (persist) writeJsonFile(TOPICS_FILE, store)
+  if (!persist) return
+  if (poisoned) {
+    if (!warnedPoisoned) {
+      warnedPoisoned = true
+      process.stderr.write(`topics: REFUSING to write ${TOPICS_FILE} — it holds unparseable bytes we could not move aside; overwriting them would destroy the session map\n`)
+    }
+    return
+  }
+  writeJsonFile(TOPICS_FILE, store)
 }
 
 // Load + validate from disk (tolerant: drops malformed entries rather than throwing). Cached after
@@ -79,7 +95,20 @@ function save(): void {
 // synthesized sessionId and their old key becomes the cwd. The daemon lazily re-attaches them: the
 // first unstamped pane seen in that cwd adopts the entry's sessionId (sessionForPane).
 export function loadTopics(): TopicStore {
-  const raw = readJsonFile<Partial<TopicStore> | null>(TOPICS_FILE, null)
+  // A file that EXISTS but won't parse is not an empty store — it is the last copy of the session
+  // map, half-written. Move it aside so the bytes survive for recovery, and if even that fails,
+  // poison save() rather than letting the empty in-memory store overwrite them.
+  const read = readJsonFileStrict<Partial<TopicStore>>(TOPICS_FILE)
+  if (read.kind === 'corrupt') {
+    let movedAside = false
+    try { renameSync(TOPICS_FILE, `${TOPICS_FILE}.corrupt-${Date.now()}`); movedAside = true } catch {}
+    poisoned = !movedAside
+    process.stderr.write(
+      `topics: ${TOPICS_FILE} is corrupt (${read.err}) — ${movedAside ? 'moved aside; starting from an empty store' : 'COULD NOT move it aside; refusing to overwrite it'}\n`,
+    )
+  }
+  const raw = read.kind === 'ok' ? read.value : null
+  let dropped = 0
   if (raw && typeof raw === 'object') {
     const topics: Record<string, TopicEntry> = {}
     let migrated = false
@@ -88,7 +117,7 @@ export function loadTopics(): TopicStore {
       // Keep an entry only if it satisfies the threadId-xor-headless invariant. A stored entry
       // carrying both is illegal: the real thread wins, since dropping it would orphan a live
       // Telegram topic. The ternary is what enforces the "never both" half.
-      if (!t || (typeof t.threadId !== 'number' && t.headless !== true)) continue
+      if (!t || (typeof t.threadId !== 'number' && t.headless !== true)) { dropped++; continue }
       const isOldFormat = typeof t.cwd !== 'string'
       const sessionId = isOldFormat ? genSessionId() : key
       if (isOldFormat) migrated = true
@@ -128,10 +157,13 @@ export function loadTopics(): TopicStore {
       dmChat,
     }
     loaded = true
+    // A dropped row is a legitimate outcome (the invariant above) but a SILENT one is how the
+    // 2026-07-30 loss went unnoticed for hours — the store shrank and nothing said so.
+    if (dropped) process.stderr.write(`topics: dropped ${dropped} malformed row(s) from ${TOPICS_FILE} (neither a numeric threadId nor headless:true)\n`)
     if (migrated) save()   // persist the re-keyed store so the migration runs once
     return store
   }
-  // missing/corrupt → keep the empty default
+  // absent (or corrupt, handled above) → keep the empty default
   loaded = true
   return store
 }

@@ -103,12 +103,41 @@ function rotateLog(): void {
   } catch {}
 }
 
+// Launch the daemon. Every failure here must be survivable: this runs precisely when the daemon is
+// already down, so a watchdog that dies launching it takes the bridge down with it — which is exactly
+// what happened on 2026-07-30 (`ENOENT … posix_spawn 'bun'`, watchdog gone, bridge down until an
+// unrelated 60s supervisor loop noticed).
+//
+// THE GUARD IS THE 'error' LISTENER, not the try/catch. spawn() reports an unresolvable interpreter
+// ASYNCHRONOUSLY: it returns a child whose pid is undefined and only then emits 'error', and with no
+// listener that becomes an uncaught EXCEPTION. A try/catch around the call cannot see it — verified
+// the hard way, by shipping a try/catch-only fix in 0.4.278 and watching the watchdog die the same
+// way on the next respawn. The try/catch stays for the genuinely synchronous failure (openSync).
+//
+// `process.execPath` rather than a bare 'bun' removes the PATH lookup as a variable. It is NOT the
+// whole story: the ENOENT recurred naming the fully-resolved /home/ubuntu/.bun/bin/bun, a file that
+// has not changed since May — so what makes it transiently unspawnable is NOT established. (Leading
+// hypothesis, unproven: this file's own SIGCHLD reaper waitpid()s the new child before libuv can read
+// its status — the reaper comment above already notes that stealing child status breaks callers.)
+// Since the trigger is unknown, surviving it is the requirement, not explaining it.
 function spawnDaemon(): void {
   const daemonPath = findDaemon()
   if (!daemonPath) { process.stderr.write('watchdog: daemon.ts not found in plugin cache\n'); return }
-  const log = openSync(DAEMON_LOG_FILE, 'a')
-  const child = spawn('bun', [daemonPath], { detached: true, stdio: ['ignore', log, log], env: process.env })
+  let child: ReturnType<typeof spawn>
+  try {
+    const log = openSync(DAEMON_LOG_FILE, 'a')
+    child = spawn(process.execPath, [daemonPath], { detached: true, stdio: ['ignore', log, log], env: process.env })
+  } catch (e) {
+    // Return, don't retry in place: the CHECK_MS tick is already the retry cadence, and looping here
+    // would turn a persistently missing interpreter into a hot loop.
+    process.stderr.write(`watchdog: could not launch ${daemonPath} (${e}) — staying up; retrying in ${CHECK_MS / 1000}s\n`)
+    return
+  }
+  child.on('error', e => process.stderr.write(`watchdog: launch of ${daemonPath} failed (${e}) — staying up; retrying in ${CHECK_MS / 1000}s\n`))
   child.unref()
+  // A pid-less child means the spawn already failed; the listener above reports it. Claiming
+  // "launched … (pid undefined)" here is how the original failure read as a success in the log.
+  if (child.pid == null) return
   process.stderr.write(`watchdog: daemon down — launched ${daemonPath} (pid ${child.pid})\n`)
 }
 
@@ -133,6 +162,18 @@ async function tick(): Promise<void> {
 process.on('SIGTERM', () => {
   try { if (parseInt(readFileSync(WATCHDOG_PID_FILE, 'utf8'), 10) === process.pid) unlinkSync(WATCHDOG_PID_FILE) } catch {}
   process.exit(0)
+})
+
+// Backstops, not the fix (spawnDaemon's 'error' listener is). `tick()` runs under setInterval, so a
+// throw inside it surfaces as an unhandled rejection, and a failing child_process surfaces as an
+// uncaught exception — Bun treats BOTH as fatal. For this process that default is exactly backwards:
+// staying up degraded beats exiting, because nothing else restarts the daemon between sessions. The
+// uncaughtException arm is the one that would have prevented the 2026-07-30 outage on its own.
+process.on('unhandledRejection', e => {
+  process.stderr.write(`watchdog: unhandled rejection in a tick (${e}) — staying up\n`)
+})
+process.on('uncaughtException', e => {
+  process.stderr.write(`watchdog: uncaught exception (${e}) — staying up; the next tick retries\n`)
 })
 
 process.on('SIGUSR1', () => void tick())   // ensure-daemon's nudge: the daemon is down — respawn it NOW

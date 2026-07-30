@@ -477,6 +477,56 @@ async function closeTopicEntry(group: string, sessionId: string, t: { threadId: 
 // topic on the discovery tick and close any with no live session in its cwd. Two consecutive
 // misses (~2 ticks) before closing, so a transient tmux blip can't flap a healthy topic.
 const topicMissCounts = new Map<string, number>()
+
+// Throttles the inconclusive-scan notice in reconcileTopics — it fires per tick (every 30s) for as
+// long as tmux stays unreachable, and the point is to be findable in the log, not to flood it.
+let lastEmptyScanWarnAt = 0
+const EMPTY_SCAN_WARN_INTERVAL_MS = 5 * 60 * 1000
+
+// Re-derive rows for live sessions the store has forgotten, from the tmux stamps that outlived it.
+//
+// Called ONCE at startup. topics.json is otherwise the sole authority for who exists, so a row lost
+// to a truncated write or a bad GC tick never came back on its own: the session stayed invisible to
+// `tg roster` and the dashboards, and its outbound was dropped as "registered to no chat surface"
+// until it happened to emit traffic. The pane stamps are an independent, surviving copy of the same
+// facts (this is exactly what the 2026-07-30 rows were restored by hand from), so startup can rebuild
+// from them instead of waiting.
+//
+// INVARIANTS — this function may only ADD:
+//   · never overwrite or mutate an existing row. A row already in the store is the authority; the
+//     stamps are the fallback. Divergence (a pane moved cwd) resolves in favour of the store.
+//   · never invent a name. The stamps carry no bus name, so a rebuilt row is registered UNNAMED —
+//     addressable by session id and visible on the dashboards, which beats being invisible. Guessing
+//     from the cwd basename would silently mint a second `@proj` that shadows a real one.
+//   · only panes with a live claude and an EXISTING stamp. `sessionForPane(p, false)` must not stamp:
+//     minting a sid here would fabricate a session for any unrelated pane it was handed.
+//   · a DM chat lane is NOT a lost row. Lanes live in `dmChat`, never in `topics` (verified live
+//     2026-07-30: the active lane 27f3ff03 has no topics row and the roster resolves it anyway), so
+//     "no topics row" is its normal state and minting one would list the owner's lane twice.
+export async function rebuildRowsFromStampedPanes(panes: string[]): Promise<void> {
+  const laneSids = new Set(listDmChatSessions().map(l => l.sessionId))
+  let rebuilt = 0
+  for (const p of panes) {
+    const sid = await sessionForPane(p, false).catch(() => null)   // false: read the stamp, never mint one
+    if (!sid || getTopicBySession(sid) || laneSids.has(sid)) continue   // unstamped, already known, or a chat lane — leave it alone
+    if (!(await paneClaudeLive(p).catch(() => false))) continue    // a pane back at its shell is not a session to register
+    const cwd = (await paneCwd(p).catch(() => null)) ?? ''
+    if (!cwd) continue                                             // without a cwd the row can't be titled or re-resolved
+    let agentSessionId: string | undefined
+    try {
+      const { stdout } = await exec('tmux', ['show-options', '-pqv', '-t', p, '@tg_transcript'], { timeout: 2000 })
+      const file = stdout.trim()
+      if (file) agentSessionId = basename(file).replace(/\.jsonl$/, '')
+    } catch {}
+    setTopic(sid, {
+      headless: true, cwd, name: '', closed: false, createdAt: Date.now(),
+      ...(agentSessionId ? { agentSessionId } : {}),
+    })
+    rebuilt++
+    process.stderr.write(`daemon: rebuilt topic row for live session ${sid} from pane ${p} stamps (${cwd}) — unnamed\n`)
+  }
+  if (rebuilt) process.stderr.write(`daemon: roster rebuild added ${rebuilt} row(s) the store had lost\n`)
+}
 export async function reconcileTopics(panes: string[]): Promise<void> {
   // DM mode (no bound group): the store-pruning half still runs — dead groupless rows (headless
   // general, tg-spawned sessions; all threadId==null there) otherwise linger as ghost dashboard
@@ -484,10 +534,24 @@ export async function reconcileTopics(panes: string[]): Promise<void> {
   // backstop) need the group and are skipped without one.
   const group = isTopicMode() ? getGroupChatId() : null
   if (isTopicMode() && !group) return
+  // A scan that returned NO panes while rows exist is a broken scan, not an empty machine — tmux was
+  // unreachable, or the daemon is still coming up. Every row would miss, and two such ticks used to
+  // be enough to delete them all (2026-07-30: five live sessions lost this way). Bail before the miss
+  // counters move, so an inconclusive tick costs nothing instead of costing the store.
+  if (!panes.length && listTopics().length) {
+    if (Date.now() - lastEmptyScanWarnAt > EMPTY_SCAN_WARN_INTERVAL_MS) {
+      lastEmptyScanWarnAt = Date.now()
+      process.stderr.write(`daemon: topic reconcile skipped — pane scan returned 0 panes while ${listTopics().length} row(s) exist (inconclusive, not empty)\n`)
+    }
+    return
+  }
   const liveSids = new Set<string>()
+  const stampedSids = new Set<string>()   // pane EXISTS and still carries this sid — see the removal veto below
   for (const p of panes) {
     const sid = await sessionForPane(p)   // stamps unstamped panes as a side effect — idempotent
-    if (sid && await paneClaudeLive(p)) liveSids.add(sid)   // a pane at a shell (claude exited) is NOT live → its topic closes (2-miss buffer) and won't be regenerated
+    if (!sid) continue
+    stampedSids.add(sid)
+    if (await paneClaudeLive(p)) liveSids.add(sid)   // a pane at a shell (claude exited) is NOT live → its topic closes (2-miss buffer) and won't be regenerated
   }
   for (const s of sessions.values()) {   // MCP-shim sessions hold topics too — don't close theirs
     if (s.paneId) { const sid = await sessionForPane(s.paneId); if (sid) liveSids.add(sid) }
@@ -512,6 +576,11 @@ export async function reconcileTopics(panes: string[]): Promise<void> {
     // it here is what made the undo expire ~85s after a kill. Everything else drops as before.
     if (t.threadId == null) {
       if (t.killedAt && !killGraceExpired(t.killedAt)) { updateTopic(t.sessionId, { closed: true }); continue }
+      // Positive evidence of death is required before deleting the ONLY record of a session. A pane
+      // that still exists and still carries this sid is that evidence's opposite — even with claude
+      // exited, which is a reason to CLOSE a topic, never to erase the row (its cwd + conversation id
+      // are what `tg reopen` and the dashboards need). The stamp is the authority here.
+      if (stampedSids.has(t.sessionId)) { topicMissCounts.delete(t.sessionId); continue }
       removeTopic(t.sessionId); continue
     }
     if (!group) continue   // a threadId without a bound group is stale cross-mode state — leave it for /bind to reconcile
@@ -530,6 +599,12 @@ export async function reconcileTopics(panes: string[]): Promise<void> {
   // rendering a corpse.
   for (const { chatId, sessionId } of listDmChatSessions()) {
     if (liveSids.has(sessionId)) { topicMissCounts.delete(sessionId); continue }
+    // Same positive-evidence rule as the row GC above, and for a sharper reason: losing a lane
+    // BINDING is quieter than losing a row. Text relay keeps working (it routes by pane/focus) while
+    // `tg send` starts refusing with "no chat surface", because file sends resolve through dmChat.
+    // Observed 2026-07-30: the owner's lane lost its binding on a cold recovery and the half-working
+    // state took hours to surface. A live, still-stamped pane is not a dead lane.
+    if (stampedSids.has(sessionId)) { topicMissCounts.delete(sessionId); continue }
     const misses = (topicMissCounts.get(sessionId) ?? 0) + 1
     if (misses < 2) { topicMissCounts.set(sessionId, misses); continue }
     topicMissCounts.delete(sessionId)
@@ -539,7 +614,7 @@ export async function reconcileTopics(panes: string[]): Promise<void> {
   // Same backstop for the General anchor: it has no topic entry, so the loop above never sees it.
   const anchor = getGeneralSession()
   if (anchor) {
-    if (liveSids.has(anchor)) topicMissCounts.delete(anchor)
+    if (liveSids.has(anchor) || stampedSids.has(anchor)) topicMissCounts.delete(anchor)   // same guard: a stamped pane is not a dead anchor
     else {
       const misses = (topicMissCounts.get(anchor) ?? 0) + 1
       if (misses < 2) topicMissCounts.set(anchor, misses)

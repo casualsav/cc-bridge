@@ -102,7 +102,7 @@ import {
 import { getTopicCreate, setTopicCreate, setTopicCreateAgent, removeTopicCreate, topicCreateAgentLabel } from './topic-create.ts'
 import {
   initTopicRuntime, sessionForPane, paneForSession, ensureSessionTopic, closeTopicForPane, markTopicDeleted, markTopicClosePending,
-  reconcileTopics, refreshTopicTitles, topicThreadFor, emitTopicTyping, armTopicTyping, stopTopicTyping, outboundTargetsFor,
+  reconcileTopics, rebuildRowsFromStampedPanes, refreshTopicTitles, topicThreadFor, emitTopicTyping, armTopicTyping, stopTopicTyping, outboundTargetsFor,
   stampPaneSession, topicBranchCache, generalAnchorLost,
   setPaneRestarting, isPaneRestarting, releasePaneSession, reopenSessionTopic,
   retriggerTopicTyping, paneClaudeLive,
@@ -2519,10 +2519,20 @@ function registerSpawnedPane(paneId: string): void {
 // must not run — it would fail every open ask at once and tell every asker their target had ended.
 // Stays false in FORCE_PANE / MCP mode, where discovery never runs: no reap is the old behaviour.
 let panesDiscovered = false
+let rosterRebuilt = false   // one-shot: the startup roster rebuild below runs on the first scan only
 async function discoverPanes(): Promise<void> {
   if (FORCE_PANE || !TRANSCRIPT_OUTBOUND) return
   const panes = await findOffMcpPanes()
   panesDiscovered = true
+  // FIRST scan only: re-derive rows for live sessions topics.json has lost, from the pane stamps
+  // that outlived it (see rebuildRowsFromStampedPanes). Startup is the right and only moment — it
+  // runs before the reconcile below can act on a store that is missing rows, and running it every
+  // tick would resurrect rows that later ticks deliberately retire (a killed session whose pane
+  // lingers). Add-only; it never touches a row the store already has.
+  if (!rosterRebuilt) {
+    rosterRebuilt = true
+    await rebuildRowsFromStampedPanes(panes).catch(e => process.stderr.write(`daemon: roster rebuild failed: ${e}\n`))
+  }
   const live = new Set(panes)
   for (const p of [...offMcpPanes]) {
     if (isPaneRestarting(p)) continue   // planned bounce (claude update) — not a death, keep it registered

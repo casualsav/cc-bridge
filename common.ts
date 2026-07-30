@@ -1,4 +1,4 @@
-import { chmodSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -49,12 +49,47 @@ export function staleDaemonVerdict(mine: string | null, theirs: string | null | 
 
 // Tiny JSON-file persistence for the daemon's small state stores (topics, scheduled messages,
 // session names, pins, usage-notif state): silent read with a fallback, silent best-effort 0600
-// write. NOT for access/prefs — those need mtime caching + atomic temp-rename writes (access.ts).
+// write. NOT for access/prefs — those need mtime caching (access.ts keeps its own reader).
 export function readJsonFile<T>(path: string, fallback: T): T {
   try { return JSON.parse(readFileSync(path, 'utf8')) as T } catch { return fallback }
 }
+
+// The same read, but it says WHICH failure happened — because the two mean opposite things and
+// collapsing them destroyed data on 2026-07-30. 'absent' is a legitimately empty store (a first run):
+// carry on and persist normally. 'corrupt' is a file that EXISTS and holds bytes we could not parse
+// (a truncated whole-file write): those bytes are the only remaining record of the store, so a caller
+// that treats them as "empty" and then saves has silently deleted it. Callers holding durable state
+// must branch on this rather than using the fallback above.
+export type JsonRead<T> = { kind: 'ok'; value: T } | { kind: 'absent' } | { kind: 'corrupt'; err: unknown }
+export function readJsonFileStrict<T>(path: string): JsonRead<T> {
+  let text: string
+  try {
+    text = readFileSync(path, 'utf8')
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { kind: 'absent' }
+    return { kind: 'corrupt', err }   // exists but unreadable (perms, I/O) — not an empty store
+  }
+  try { return { kind: 'ok', value: JSON.parse(text) as T } } catch (err) { return { kind: 'corrupt', err } }
+}
+// Atomic by tmp+rename, not because of power loss but because of READERS: a plain writeFileSync onto
+// the live path leaves a truncated file for as long as the write takes, and a daemon killed in that
+// window (or a sibling process reading it) sees half a JSON document. On 2026-07-30 that truncation
+// was the first domino in losing the session map. rename(2) is atomic within a filesystem, so a
+// reader sees either the old file or the new one, never a partial.
+//
+// The tmp name carries the pid: session-harness.ts and effort-scope.ts already hand-rolled exactly
+// this pattern (with the pid) because THIS helper wasn't atomic, and a shared fixed suffix would let
+// two processes writing different stores collide on one tmp path. New JSON-state writes belong here
+// rather than in a sixth hand-rolled copy. access.ts keeps its own writer on purpose: it has a
+// different on-disk contract (pretty-printed + trailing newline) and its own mtime cache to invalidate.
 export function writeJsonFile(path: string, obj: unknown): void {
-  try { writeFileSync(path, JSON.stringify(obj), { mode: 0o600 }) } catch {}
+  const tmp = `${path}.${process.pid}.tmp`
+  try {
+    writeFileSync(tmp, JSON.stringify(obj), { mode: 0o600 })
+    renameSync(tmp, path)
+  } catch {
+    try { unlinkSync(tmp) } catch {}   // never leave a stray tmp behind on a failed write
+  }
 }
 export const ACCESS_FILE = join(STATE_DIR, 'access.json')
 // Mutable preferences (stream mode, pin, auto-continue, voice, …). Split out from access.json so
