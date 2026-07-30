@@ -227,6 +227,105 @@ test('submitVerified: an unreadable pane is not reported as a delivery failure',
   expect(await pane.submitVerified('%1', ['Enter'], landedPredicate)).toBe(true)
 })
 
+// ---- pasteSlashVerified: the composer's slash path, the last unverified submit in the family ----
+// v0.4.277 verified the RELAY's slash submit (injectSlash); this path still pressed a bare Enter and
+// reported success whatever happened to it. Same reasoning as submitVerified's tests above: a clean
+// live run cannot tell a working fix from a lucky draw, so the fake pane decides when the submit is
+// accepted. `SLASH-BOX: /compact` is a pane holding our typed command; `BOX-EMPTY` is one that took it.
+function fakeSlashPane(opts: { acceptsOnSubmitNo: number | null; occupiedWith?: string }) {
+  let submits = 0, pasted = false, cleared = false, typed = ''
+  execImpl = async (_cmd, args) => {
+    if (args.includes('display-message')) return { stdout: '%1\n' }
+    if (args.includes('set-buffer')) { typed = args[args.length - 1]; return { stdout: '' } }   // what we're about to paste
+    if (args.includes('paste-buffer')) { pasted = true; return { stdout: '' } }
+    if (args.includes('send-keys')) {
+      if (args.includes('C-u')) { cleared = true; return { stdout: '' } }
+      submits++
+      return { stdout: '' }
+    }
+    if (args.includes('capture-pane')) {
+      if (!pasted) return { stdout: opts.occupiedWith ? `SLASH-BOX: ${opts.occupiedWith}` : 'BOX-EMPTY' }
+      if (cleared) return { stdout: 'BOX-EMPTY' }
+      const landed = opts.acceptsOnSubmitNo !== null && submits >= opts.acceptsOnSubmitNo
+      return { stdout: landed ? 'BOX-EMPTY' : `SLASH-BOX: ${typed}` }   // the box shows OUR line until it takes
+    }
+    return { stdout: '' }
+  }
+  return { submits: () => submits, pasted: () => pasted, cleared: () => cleared }
+}
+// The prompt.ts predicates, reduced to what the fake pane renders. boxContent returns null (not '') for
+// an empty box, matching inputBoxContent's contract as pasteSlashVerified reads it.
+const slashPredicates = (palette: string[] = []) => ({
+  submitKeys: ['Enter'],
+  boxContent: (cap: string) => (cap.startsWith('SLASH-BOX: ') ? cap.slice('SLASH-BOX: '.length) : null),
+  wouldMisfire: (_cap: string, _text: string) => (palette.length ? palette : null),
+  landed: (cap: string) => cap.includes('BOX-EMPTY'),
+})
+
+test('pasteSlashVerified: the submit lands — one submit, reports success', async () => {
+  const p = fakeSlashPane({ acceptsOnSubmitNo: 1 })
+  expect(await pane.pasteSlashVerified('%1', '/compact', slashPredicates())).toEqual({ ok: true })
+  expect(p.submits()).toBe(1)
+})
+
+test('pasteSlashVerified: a SWALLOWED Enter is reported, never as success — and our line is cleared', async () => {
+  // THE DEFECT, driven: the palette eats both Enters, so the command sits typed-but-unsubmitted. The
+  // unverified path pressed Enter once and returned ok — which is how a relayed `/compact` was reported
+  // sent while it sat in the box for seven minutes on 2026-07-30, then stacked into `/compact/compact`
+  // on the retry. Nothing ran here, so nothing may claim it did.
+  const p = fakeSlashPane({ acceptsOnSubmitNo: null })
+  expect(await pane.pasteSlashVerified('%1', '/compact', slashPredicates())).toEqual({ ok: false, unsubmitted: true })
+  expect(p.submits()).toBe(2)    // one retry, bounded
+  expect(p.cleared()).toBe(true) // the box is left clean, so a retry can't stack onto a half-command
+})
+
+test('pasteSlashVerified: an OCCUPIED box is refused by name, and nothing is typed into it', async () => {
+  // Whatever is sitting there is somebody's draft: it is not ours to submit, and not ours to clear.
+  const p = fakeSlashPane({ acceptsOnSubmitNo: 1, occupiedWith: 'half a thought' })
+  expect(await pane.pasteSlashVerified('%1', '/compact', slashPredicates()))
+    .toEqual({ ok: false, occupied: 'half a thought' })
+  expect(p.pasted()).toBe(false)
+  expect(p.submits()).toBe(0)
+  expect(p.cleared()).toBe(false)
+})
+
+test('pasteSlashVerified: a palette that would misfire refuses, clears, and never submits', async () => {
+  // The clear here is unconditional (injectSlash's rule): we pasted and pressed nothing, so the box is
+  // ours. The ownership check belongs on the unsubmitted path, where an Enter has already gone in.
+  const p = fakeSlashPane({ acceptsOnSubmitNo: 1 })
+  expect(await pane.pasteSlashVerified('%1', '/mode', slashPredicates(['/model', '/mode'])))
+    .toEqual({ ok: false, offered: ['/model', '/mode'] })
+  expect(p.submits()).toBe(0)
+  expect(p.cleared()).toBe(true)
+})
+
+test('pasteSlashVerified: a dead pane is a delivery failure, not a palette refusal', async () => {
+  execImpl = async (_cmd, args) => {
+    if (args.includes('display-message')) return { stdout: '%9\n' }   // some other pane id → not alive
+    return { stdout: '' }
+  }
+  expect(await pane.pasteSlashVerified('%1', '/compact', slashPredicates())).toEqual({ ok: false, offered: [] })
+})
+
+test('clearOwnTypedLine erases our own unsubmitted line and NEVER someone else\'s text', async () => {
+  let cleared = 0
+  const box = (content: string) => {
+    execImpl = async (_cmd, args) => {
+      if (args.includes('send-keys') && args.includes('C-u')) { cleared++; return { stdout: '' } }
+      if (args.includes('display-message')) return { stdout: '%1\n' }
+      if (args.includes('capture-pane')) return { stdout: `SLASH-BOX: ${content}` }
+      return { stdout: '' }
+    }
+  }
+  const boxContent = slashPredicates().boxContent
+  box('/compact')
+  await pane.clearOwnTypedLine('%1', '/compact', boxContent)
+  expect(cleared).toBe(1)
+  box('someone else was typing this')
+  await pane.clearOwnTypedLine('%1', '/compact', boxContent)
+  expect(cleared).toBe(1)   // untouched — that draft is not ours to erase
+})
+
 // ---- withPaneDelivery -------------------------------------------------------------------------
 // The lock behind the merged-message bug of 2026-07-27: getting text into a pane is a paste followed
 // by a separate Enter, and two deliveries overlapping in that window submitted as ONE message.

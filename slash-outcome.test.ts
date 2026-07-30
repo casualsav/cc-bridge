@@ -30,3 +30,18 @@ test('injectSlash submits through submitVerified rather than a bare sendKeys', (
   expect(fn).toContain('submitVerified(')
   expect(fn).toContain('submitLanded')
 })
+
+// The composer's slash path, the sibling the note above injectSlash flagged and v0.4.281 closed. Its
+// behaviour is unit-tested where the dance lives (pane-io.test.ts drives a fake pane through the
+// swallowed Enter, the occupied box and the palette misfire); this pins the WIRING, which is the part
+// that can silently regress here — a future edit inlining a bare `sendKeys(submit)` back into this
+// branch would compile and pass every behavioural test, because those test pane-io, not the call.
+test('pasteGuarded\'s slash branch delegates to pasteSlashVerified, never its own submit', () => {
+  const body = daemon.slice(daemon.indexOf('async function pasteGuarded('))
+  const fn = body.slice(0, body.indexOf('\n}\n'))
+  expect(fn).toContain('pasteSlashVerified(')
+  expect(fn).toContain('submitLanded')
+  const code = fn.split('\n').filter(l => !/^\s*\/\//.test(l)).join('\n')
+  expect(code).not.toMatch(/sendKeys\(/)          // no submit of its own, verified or otherwise
+  expect(code).not.toMatch(/paste-buffer/)        // and no second copy of the paste mechanics
+})

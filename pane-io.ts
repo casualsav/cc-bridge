@@ -116,6 +116,71 @@ export async function submitVerified(paneId: string, keys: string[], landed: (ca
   return took()
 }
 
+// Clear a typed-but-unsubmitted line, ONLY when what is sitting there is our own. C-u clears without
+// pressing Enter, so nothing runs. Two rules, and both matter: the pane must not be left holding half a
+// command for the next injection to stack onto (that is how a retried `/compact` became
+// `/compact/compact` on 2026-07-30), and it must not lose anyone else's text — whatever we did not type
+// is somebody's draft and is not ours to erase. Shared by every path that types a command, so the two
+// cannot drift apart. `boxContent` is injected because the input-box reader lives in prompt.ts and this
+// module deliberately depends on nothing but proc.ts.
+export async function clearOwnTypedLine(paneId: string, typed: string, boxContent: (cap: string) => string | null): Promise<void> {
+  const box = boxContent(await capturePane(paneId).catch(() => '')) ?? ''
+  if (!box || !typed.startsWith(box.split(/\s/)[0])) return
+  await sendKeys(paneId, ['C-u'])
+  await waitForSettle(paneId, 200, 3000)
+}
+
+// Paste text that starts with "/" into a pane and PROVE the submit landed — the mini-app composer's
+// path, and the last member of the slash-verification family (v0.4.277 fixed the relay's `injectSlash`;
+// this one still pressed a bare Enter and reported success whatever happened to it).
+//
+// It lives here, not in daemon.ts, for the reason the delivery lock does: daemon.ts boots the bot on
+// import, so a test there could only re-implement this dance, and a re-implementation that drifts is a
+// test that proves nothing about what ships. The predicates are injected for the same reason
+// `submitVerified` takes `landed` — "occupied", "would misfire" and "accepted" are prompt.ts's reading
+// of a screen, and this module stays free of that dependency.
+//
+// The caller supplies the lock and the watcher pause; this function assumes it already has its turn.
+export type PastedSlash =
+  | { ok: true }
+  | { ok: false; occupied: string }      // someone's text was already in the box — nothing was typed
+  | { ok: false; offered: string[] }     // the palette would have run something else — nothing submitted
+  | { ok: false; unsubmitted: true }     // typed, two Enters swallowed, our own line cleared
+export async function pasteSlashVerified(paneId: string, text: string, p: {
+  submitKeys: string[]
+  boxContent: (cap: string) => string | null
+  wouldMisfire: (cap: string, text: string) => string[] | null
+  landed: (cap: string) => boolean
+}): Promise<PastedSlash> {
+  if (!(await paneAlive(paneId))) return { ok: false, offered: [] }
+  // Refuse an occupied box rather than typing over it — `tg slash`'s rule, applied to this surface.
+  // The read is taken HERE, after our turn in the delivery queue, so unlike a pre-queue gate it cannot
+  // have gone stale by the time we paste.
+  const before = await capturePane(paneId).catch(() => '')
+  const occupied = before ? p.boxContent(before) : null
+  if (occupied) return { ok: false, occupied }
+  const buf = injectBuffer(paneId)
+  await exec('tmux', ['set-buffer', '-b', buf, '--', text], { timeout: 2000 })
+  await exec('tmux', ['paste-buffer', '-d', '-p', '-b', buf, '-t', paneId], { timeout: 2000 })
+  await waitForSettle(paneId, 200, 4000)
+  const offered = p.wouldMisfire(await capturePane(paneId).catch(() => ''), text)
+  if (offered) {
+    // Unconditional C-u here, exactly as injectSlash's palette guard does it: we pasted a moment ago
+    // and pressed no Enter, so the box holds OUR text and nobody else's — the ownership check the
+    // unsubmitted path needs would only risk leaving our own line behind if a palette overlay confused
+    // the box reader. Leave the pane exactly as it was found.
+    await sendKeys(paneId, ['C-u'])
+    await waitForSettle(paneId, 200, 3000)
+    return { ok: false, offered }
+  }
+  if (!(await submitVerified(paneId, p.submitKeys, p.landed))) {
+    await clearOwnTypedLine(paneId, text, p.boxContent)
+    return { ok: false, unsubmitted: true }
+  }
+  await waitForSettle(paneId, 300, 30_000)
+  return { ok: true }
+}
+
 export async function windowHeightOf(paneId: string): Promise<number | null> {
   try {
     const { stdout } = await exec('tmux', ['display-message', '-p', '-t', paneId, '#{window_height}'], { timeout: 2000 })

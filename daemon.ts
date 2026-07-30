@@ -71,7 +71,7 @@ import { ghAccounts, ghInstalled, ghSwitch, ghLogout, runGhLogin, provisionGh, t
 import {
   capturePane, capturePaneCached, invalidateCapture, paneAlive, sendKeys, sendKeysLiteral, navigateDown, waitForSettle,
   autoSizeWindowOf, paneCommand, paneCwd, PaneWatcher,
-  submitVerified, withPaneDelivery, injectBuffer,
+  submitVerified, withPaneDelivery, injectBuffer, clearOwnTypedLine, pasteSlashVerified, type PastedSlash,
 } from './pane-io.ts'
 import type {
   PendingEntry, GroupPolicy, Access, Session,
@@ -6012,6 +6012,10 @@ async function handleCall(
 // typing and submitting, so there's no new timing machinery — just a read of a state we already wait
 // for. See slashPaletteWouldMisfire for why the predicate is "no row matches exactly" rather than
 // "a palette is open" (bare /model legitimately opens one, at both Claude and Codex sessions).
+// injectSlash's outcomes. `PastedSlash` (pane-io.ts) is this plus `occupied`, which only the composer
+// path can produce: the relay reads the box before it queues, so by the time injectSlash runs, an
+// occupied box has already been refused by name upstream. Kept as two types so each caller narrows on
+// exactly what its own path can return.
 type SlashSent = { ok: true } | { ok: false; offered: string[] } | { ok: false; unsubmitted: true }
 async function injectSlash(paneId: string, watcher: PaneWatcher | null, command: string,
                            opts?: { guardPalette?: boolean; settleMs?: number }): Promise<SlashSent> {
@@ -6033,10 +6037,7 @@ async function injectSlash(paneId: string, watcher: PaneWatcher | null, command:
     // minutes while the bus had already reported "sent".
     if (!(await submitVerified(paneId, agentSubmitKeys(await paneAgentKind(paneId)), submitLanded))) {
       unsubmitted = true
-      // Clear it ONLY if what is still sitting there is our own command — the pane must not be left
-      // holding a half-command for the next injection to stack onto, and must not lose anyone's text.
-      const box = inputBoxContent(await capturePane(paneId).catch(() => '')) ?? ''
-      if (box && command.startsWith(box.split(/\s/)[0])) { await sendKeys(paneId, ['C-u']); await waitForSettle(paneId, 200, 3000) }
+      await clearOwnTypedLine(paneId, command, inputBoxContent)   // our own line only — never anyone's draft
       return
     }
     await waitForSettle(paneId, 300, opts?.settleMs ?? 30_000)
@@ -6060,7 +6061,7 @@ async function injectSlash(paneId: string, watcher: PaneWatcher | null, command:
 // exact fuzzy-match misfire injectSlash guards elsewhere. Mirrors pasteToPane/injectPaste's bracket-
 // paste mechanics (multi-line text needs paste, not send-keys — an embedded newline read as literal
 // keystrokes submits early) with injectSlash's pre-submit palette check spliced in.
-async function pasteGuarded(paneId: string, watcher: PaneWatcher | null, text: string): Promise<SlashSent> {
+async function pasteGuarded(paneId: string, watcher: PaneWatcher | null, text: string): Promise<PastedSlash> {
   // NO withPaneDelivery on this branch, and that is deliberate rather than an oversight: it
   // delegates to injectText/pasteToPane, which take the lock themselves. Wrapping here as well would
   // have this call waiting on a tail its own caller is holding — see withPaneDelivery's note on
@@ -6069,24 +6070,20 @@ async function pasteGuarded(paneId: string, watcher: PaneWatcher | null, text: s
     const ok = watcher ? await injectText(paneId, watcher, text) : await pasteToPane(paneId, text)
     return ok ? { ok: true } : { ok: false, offered: [] }
   }
-  let offered: string[] | null = null
-  const run = async () => {
-    if (!(await paneAlive(paneId))) return
-    const buf = injectBuffer(paneId)
-    await exec('tmux', ['set-buffer', '-b', buf, '--', text], { timeout: 2000 })
-    await exec('tmux', ['paste-buffer', '-d', '-p', '-b', buf, '-t', paneId], { timeout: 2000 })
-    await waitForSettle(paneId, 200, 4000)
-    offered = slashPaletteWouldMisfire(await capturePane(paneId).catch(() => ''), text)
-    // Leave the pane exactly as it was found, same as injectSlash's guard.
-    if (offered) { await sendKeys(paneId, ['C-u']); await waitForSettle(paneId, 200, 3000); return }
-    await sendKeys(paneId, agentSubmitKeys(await paneAgentKind(paneId)))
-    await waitForSettle(paneId, 300, 30_000)
-  }
-  const ran = await withPaneDelivery(paneId,
-    async () => { await (watcher ? watcher.withInjection(run) : run()); return true },
-    () => false)
-  if (!ran) return { ok: false, offered: [] }
-  return offered ? { ok: false, offered } : { ok: true }
+  // THE SUBMIT IS VERIFIED HERE TOO. This branch pressed a bare Enter and reported success whatever
+  // became of it — the same defect v0.4.277 fixed in injectSlash, on the one other path that types a
+  // command into a pane, and the last member of that family. With the palette open the first Enter can
+  // be consumed by the completion, leaving the command sitting in the box while tmux says "sent": on the
+  // relay path that produced a `/compact` unsubmitted for seven minutes, then a retry that stacked into
+  // `/compact/compact`. The dance itself lives in pane-io.ts so it can be driven against a fake pane by
+  // a test that imports the very code that ships (daemon.ts boots the bot on import).
+  const submitKeys = agentSubmitKeys(await paneAgentKind(paneId))
+  const run = () => pasteSlashVerified(paneId, text, {
+    submitKeys, boxContent: inputBoxContent, wouldMisfire: slashPaletteWouldMisfire, landed: submitLanded,
+  })
+  return withPaneDelivery(paneId,
+    () => (watcher ? watcher.withInjection(run) : run()),
+    () => ({ ok: false, offered: [] }))
 }
 
 // Reliably exit a session's pane (used when a user closes/deletes its topic). Unlike injectSlash, the
@@ -15689,6 +15686,9 @@ initScheduler({
     if (text.trimStart().startsWith('/')) {
       const watcher = paneId === focus.activePaneId ? focus.paneWatcher : null
       const sent = await pasteGuarded(paneId, watcher, text)
+      // An occupied input box is somebody's draft, not a delivery failure: 'busy' re-arms this row and
+      // tries again later, which is the same answer paneSafeToType gives for a pane mid-draft above.
+      if (!sent.ok && 'occupied' in sent) return 'busy'
       return sent.ok ? 'ok' : 'failed'
     }
     const ok = paneId === focus.activePaneId && focus.paneWatcher
@@ -16421,10 +16421,13 @@ async function webappSessionAction(userId: string, sid: string, action: 'stop' |
   }
   await dismissFeedbackSurvey(pane)
   const sent = await pasteGuarded(pane, watcher, msg)
-  // pasteGuarded never reports `unsubmitted` (its non-slash branch delegates to the verified paste
-  // paths, and its slash branch doesn't verify at all — see the class note on injectSlash).
-  const offered = 'offered' in sent ? sent.offered : []
-  return sent.ok ? null : (offered.length ? paletteRefusalText(msg, offered) : 'delivery failed')
+  if (sent.ok) return null
+  // Every failure shape says what happened, in the composer's error toast. Reporting "sent" for a
+  // command the CLI never ran is the defect this path shared with the relay: the toast is the only place
+  // this user finds out, and it also hands the draft back so it can be retried or edited.
+  if ('unsubmitted' in sent) return unsubmittedSlashText(msg)
+  if ('occupied' in sent) return `the session already has unsubmitted text in its input box (${JSON.stringify(sent.occupied.slice(0, 40))}) — nothing was sent`
+  return sent.offered.length ? paletteRefusalText(msg, sent.offered) : 'delivery failed'
 }
 
 // Mini-app "+" new session: create a topic + spawn with the chosen dials — the webapp twin of the
