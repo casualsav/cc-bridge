@@ -13850,7 +13850,15 @@ function ensureScoutProfile(): boolean {
   try {
     const cred = join(MAIN_ACCOUNT.configDir, '.credentials.json')
     const dst = join(SCOUT_CONFIG_DIR, '.credentials.json')
-    if (!existsSync(dst) && existsSync(cred)) { copyFileSync(cred, dst); chmodSync(dst, 0o600) }
+    // RE-copy every run, not copy-once. A refresh token rotates on use, so the moment the main
+    // account refreshes, the scout's frozen copy is dead — the scout CLI then fails its own refresh
+    // and BLANKS the file it wrote (observed 2026-07-30: empty tokens, expiresAt 0, every scout
+    // failing "OAuth session expired and could not be refreshed" forever behind the !existsSync
+    // guard). Tracking the main account keeps the scout on a token main is already keeping fresh,
+    // so the scout never refreshes and never rotates the token out from under the owner.
+    if (existsSync(cred) && (!existsSync(dst) || readFileSync(cred, 'utf8') !== readFileSync(dst, 'utf8'))) {
+      copyFileSync(cred, dst); chmodSync(dst, 0o600)
+    }
   } catch (e) { log(`credentials copy failed: ${e}`) }
   try {
     const dst = join(SCOUT_CONFIG_DIR, '.claude.json')
@@ -13872,6 +13880,37 @@ async function gitHeadOf(dir: string): Promise<string | null> {
 }
 
 type ScoutRun = { rec: BriefRecord; violations: string[] }
+
+// A `claude -p` child's diagnosis is in its OUTPUT, not in the exec error. Authentication failure
+// exits 1 with `{"is_error":true,"terminal_reason":"api_error","result":"Failed to authenticate…"}`
+// on STDOUT, while node's own execFile error message is `Command failed: <the entire command line>`
+// — the whole scout prompt echoed, no exit code, no stdout — which is what reached the orchestrator
+// twice on 2026-07-30 and hid the cause completely. So: spawn, keep both streams, and report exit
+// code + stderr + the child's own result line. Never the prompt.
+// stdin is `ignore` on purpose: an open, silent pipe makes the CLI wait and print "no stdin data
+// received in 3s, proceeding without it" — 3s of nothing per scout turn, and stderr noise that reads
+// like the failure.
+const SCOUT_TIMEOUT_MS = 300_000
+function runScoutChild(args: string[], opts: { cwd: string; env: NodeJS.ProcessEnv }): Promise<{ code: number | null; signal: string | null; stdout: string; stderr: string; timedOut: boolean }> {
+  return new Promise(resolve => {
+    const child = spawn('claude', args, { cwd: opts.cwd, env: opts.env, stdio: ['ignore', 'pipe', 'pipe'] })
+    let stdout = '', stderr = '', timedOut = false
+    const cap = 16 * 1024 * 1024
+    child.stdout.on('data', d => { if (stdout.length < cap) stdout += d })
+    child.stderr.on('data', d => { if (stderr.length < cap) stderr += d })
+    const t = setTimeout(() => { timedOut = true; child.kill('SIGKILL') }, SCOUT_TIMEOUT_MS)
+    child.on('error', e => { clearTimeout(t); resolve({ code: null, signal: null, stdout, stderr: `${stderr}spawn failed: ${e}`, timedOut }) })
+    child.on('close', (code, signal) => { clearTimeout(t); resolve({ code, signal, stdout, stderr, timedOut }) })
+  })
+}
+const tail = (s: string, n: number) => { const t = s.trim(); return t.length > n ? `…${t.slice(-n)}` : t }
+function scoutChildError(r: Awaited<ReturnType<typeof runScoutChild>>, parsed: { is_error?: boolean; result?: string; terminal_reason?: string } | null): string {
+  if (r.timedOut) return `the scout child timed out after ${SCOUT_TIMEOUT_MS / 1000}s`
+  const bits = [`exit ${r.code ?? '?'}${r.signal ? ` (${r.signal})` : ''}`]
+  if (parsed?.terminal_reason) bits.push(parsed.terminal_reason)
+  const why = parsed?.result ? String(parsed.result) : ''
+  return `the scout child failed — ${bits.join(', ')}${why ? `: ${tail(why, 400)}` : ''}${r.stderr.trim() ? ` [stderr: ${tail(r.stderr, 400)}]` : ''}`
+}
 // One `claude -p` in the repo, read-only. `env -u TMUX -u TMUX_PANE` is not optional: a `claude -p`
 // launched with a bridged pane's env re-stamps that pane's transcript, which would hand the scout's
 // output to the bridge as if the parent session had said it.
@@ -13880,10 +13919,14 @@ async function scoutRepo(real: string): Promise<ScoutRun> {
   const env: NodeJS.ProcessEnv = { ...process.env, CLAUDE_CONFIG_DIR: SCOUT_CONFIG_DIR, PATH: `${join(homedir(), '.local', 'bin')}:${process.env.PATH ?? ''}` }
   delete env.TMUX; delete env.TMUX_PANE
   const run = async (prompt: string) => {
-    const { stdout } = await exec('claude',
+    const r = await runScoutChild(
       ['-p', '--model', 'sonnet', '--max-turns', '30', '--settings', SCOUT_SETTINGS_FILE, '--output-format', 'json', prompt],
-      { cwd: real, env, timeout: 300_000, maxBuffer: 16 * 1024 * 1024 })
-    return JSON.parse(stdout) as { result?: string; total_cost_usd?: number }
+      { cwd: real, env })
+    let parsed: { result?: string; total_cost_usd?: number; is_error?: boolean; terminal_reason?: string } | null = null
+    try { parsed = JSON.parse(r.stdout) } catch {}
+    if (r.code !== 0 || r.timedOut || parsed?.is_error) throw new Error(scoutChildError(r, parsed))
+    if (!parsed) throw new Error(`the scout child returned unparseable output — ${tail(r.stdout, 400) || '(empty)'}`)
+    return parsed
   }
   let out = await run(scoutPrompt())
   let v = validateBrief(parseBriefJson(String(out.result ?? '')))
