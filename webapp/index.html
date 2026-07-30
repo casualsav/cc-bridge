@@ -575,6 +575,16 @@
   .sess .task { color: var(--hint-raised); font-size: var(--t-sub); margin-top: 6px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; word-break: break-word; }
   .sess .foot { display: flex; align-items: center; gap: var(--sp-2); margin-top: var(--sp-2); font-size: var(--t-meta); color: var(--hint-raised); }
   .sess .foot .bar { flex: 1; margin-top: 0; height: 5px; }
+  /* THE USAGE HEADER: the account's 5h and weekly windows, once, above the cards (the owner, 2026-07-30
+     — the same reasoning that banned them per-CARD is what makes a header the right home: one stat, one
+     place). It is deliberately NOT a new design language — it borrows the card's own box (`.sess` fill,
+     radius and padding, via the shared class) and the foot's own row (`.foot`, same size and colour, the
+     same `pctBar`), and differs in exactly two ways: it is not a tap target (`cursor: default`) and its
+     two rows stack instead of sitting on one line, because each carries its own bar. */
+  .usage { cursor: default; }
+  .usage .foot:first-of-type { margin-top: 0; }
+  .usage .foot .lbl { white-space: nowrap; }
+  .usage .foot .rst { white-space: nowrap; color: var(--hint); }
   /* Drill-in (session detail) */
   /* FULL BLEED, and no padding-top any more: the transcript owns the whole screen, including the
      strip where Telegram paints its ✕ Close and its kebab in fullscreen. The offset those need did
@@ -2238,11 +2248,32 @@ const dotClass = s => s.alive === false ? "dead"
   : "";
 const pctBar = p => p == null ? "" : '<div class="bar"><span style="width:' + Math.max(0, Math.min(100, p)) + '%"></span></div>';
 let SESSIONS = [];
+// One row per window, in the card foot's own grammar: an emoji-led label, the percentage, the bar, then
+// the countdown. The 5h window is the one that bites hourly and leads; weekly sits under it.
+// NOTHING renders when the payload carries no `usage` — an older daemon, or no session has drawn a
+// statusline recently enough for the snapshot to be datable. A percentage nobody can date is worse than
+// no header, and the daemon is what makes that call (it sends nothing rather than a stale number).
+const USAGE_WINDOWS = [["fiveHour", "🕒 5h"], ["sevenDay", "📅 weekly"]];
+function renderUsage(el, usage) {
+  if (!usage) return;
+  const rows = USAGE_WINDOWS.filter(([k]) => usage[k]).map(([k, label]) => {
+    const w = usage[k];
+    return '<div class="foot"><span class="lbl">' + label + " " + w.pct + "%</span>" + pctBar(w.pct) +
+      (w.resetIn ? '<span class="rst">resets in ' + esc(w.resetIn) + "</span>" : "") + "</div>";
+  });
+  if (!rows.length) return;
+  el.insertAdjacentHTML("beforeend", '<div class="sess usage" id="usagehead">' + rows.join("") + "</div>");
+}
 async function renderSessions() {
   const el = $("tab-sessions");
   let d; try { d = await api("/api/sessions"); } catch { if (!SESSIONS.length) el.innerHTML = '<div class="notice">Sessions unavailable.</div>'; return; }
   SESSIONS = d.sessions || [];
   el.innerHTML = "";
+  // The header goes in BEFORE the empty-list notice and before the cards: it describes the account, not
+  // the fleet, so a box with no sessions in it still has usage worth reading. Rendered inside this
+  // function rather than as static markup because the 4s poll wipes the panel — and unlike #newfab that
+  // is safe here, since nothing in the header is a tap target to lose.
+  renderUsage(el, d.usage);
   if (!SESSIONS.length) { el.insertAdjacentHTML("beforeend", '<div class="notice">No live sessions.</div>'); return; }
   for (const s of SESSIONS) {
     const c = document.createElement("div");

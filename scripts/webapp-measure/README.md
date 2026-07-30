@@ -251,6 +251,19 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   since two surfaces agreeing on the WRONG colour passes equality.
                                   #   Pinned control (841ecf8): the chat-lane and errored checks fail
                                   #   there, every other state's parity already held and is a guard
+    node usagehead.mjs [page][out] # the command center's USAGE HEADER: the account's 5h + weekly windows
+                                  #   once, above the cards (the owner's 2026-07-30 approval, which
+                                  #   SCOPES the old "no 5h anywhere" ruling to cards — cardfoot.mjs
+                                  #   still owns that half and its fixture still puts h5Pct on the wire).
+                                  #   "Looks like the cards" is checked as PIXELS against a real card
+                                  #   (fill, radius, padding) and the one difference asserted too (not a
+                                  #   tap target). Plus the states that ship broken: no `usage` on the
+                                  #   wire → NO header rather than 0% (compound with "it appeared with
+                                  #   usage", or the absence is true for the wrong reason), one window →
+                                  #   one row, and an undatable reset → a percentage with no countdown.
+                                  #   Pinned control (49906f3): 8/8 state checks fail there, 2 guards
+                                  #   hold. Parity with the pinned status card lives in
+                                  #   usage-header.test.ts + scripts/usage-parity.ts, not here
     node nav.mjs [page] [out]     # THE NAV RESTRUCTURE: Files is a sheet inside the session that owns
                                   #   the folder, Scheduled is a pill on the command center's rail, and
                                   #   the tab row is DELETED (notabs.mjs went with it — a harness whose

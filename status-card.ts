@@ -241,6 +241,17 @@ export function lastTodosInTranscript(file: string): TodoState | null { return t
 // Live countdown to a reset epoch in the statusline's own duration style ("54m" / "2h13m" /
 // "4d2h"), so the snapshot's epoch renders like the scraped field it replaces. null when the
 // epoch is unknown (0) or already past.
+// ONE mapping from the account's usage snapshot to a rounded percentage plus a worded countdown, shared
+// by the pinned card (below) and the mini app's usage header (daemon.ts's webappReadUsage → the
+// /api/sessions payload). Two surfaces showing the same account cannot round or word it differently,
+// and "we used the same source" is not that guarantee — this is.
+export function usageWindows(snap: { fiveHour?: { pct: number; resetsAt: number }; sevenDay?: { pct: number; resetsAt: number } } | null):
+  { fiveHour?: { pct: number; resetIn: string | null }; sevenDay?: { pct: number; resetIn: string | null } } {
+  const win = (w?: { pct: number; resetsAt: number }) => w ? { pct: Math.round(w.pct), resetIn: fmtResetIn(w.resetsAt) } : undefined
+  const five = win(snap?.fiveHour), seven = win(snap?.sevenDay)
+  return { ...(five ? { fiveHour: five } : {}), ...(seven ? { sevenDay: seven } : {}) }
+}
+
 function fmtResetIn(resetsAt: number): string | null {
   const ms = resetsAt - Date.now()
   if (!resetsAt || ms <= 0) return null
@@ -367,8 +378,13 @@ export async function statusCardText(paneId: string | null): Promise<string> {
   const snap = await deps.usageSnapshotForPane(paneId).catch(() => null)
   if (snap?.fiveHour || snap?.sevenDay) {
     status ??= { ctxPct: null, tokens: null, cost: null, sessionTime: null, apiTime: null, h5: null, d7: null, effort: null, think: false, model: null }
-    if (snap.fiveHour) status.h5 = { pct: Math.round(snap.fiveHour.pct), reset: fmtResetIn(snap.fiveHour.resetsAt) ?? status.h5?.reset ?? '—' }
-    if (snap.sevenDay) status.d7 = { pct: Math.round(snap.sevenDay.pct), reset: fmtResetIn(snap.sevenDay.resetsAt) ?? status.d7?.reset ?? '—' }
+    // Through the shared mapping (usageWindows), so the pin and the mini app's header agree by
+    // construction. The `?? status.h5?.reset ?? '—'` fallbacks are the PIN's own: it always shows a
+    // reset column, and keeps the scraped wording when the epoch is unknown. The header shows nothing
+    // there instead, which is why the mapping returns null rather than a dash.
+    const win = usageWindows(snap)
+    if (win.fiveHour) status.h5 = { pct: win.fiveHour.pct, reset: win.fiveHour.resetIn ?? status.h5?.reset ?? '—' }
+    if (win.sevenDay) status.d7 = { pct: win.sevenDay.pct, reset: win.sevenDay.resetIn ?? status.d7?.reset ?? '—' }
   }
 
   // Head badges: model · effort · mode, then session (5h) · weekly (7d) · context. Mode

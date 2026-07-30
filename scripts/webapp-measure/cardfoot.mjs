@@ -3,8 +3,11 @@
 //
 //   node cardfoot.mjs [pagePath] [outdir]
 //
-// The owner's ruling: the 5h reading is account-level, identical on every card, so repeating it per
-// session said nothing about the session. Two claims, and the second is the one a removal creates:
+// The owner's ruling, SCOPED on 2026-07-30: the 5h reading is account-level, identical on every card, so
+// repeating it per session said nothing about the session — and he approved the command center's usage
+// HEADER as the once-only home for it (usagehead.mjs owns that half). So what this file asserts is
+// unchanged and now precise: no CARD shows it, whatever the payload carries. Two claims, and the second
+// is the one a removal creates:
 //   1. No card renders it, however the payload arrives — including a session whose payload still
 //      carries `h5Pct`, which is the only version of this check that can fail. (The field is left on
 //      the wire on purpose: a proper 5h/weekly display belongs to the sessions page, later.)
@@ -59,7 +62,10 @@ await p.evaluate(sessions => {
 }, SESSIONS);
 await p.waitForTimeout(600);
 
-const cards = await p.evaluate(() => [...document.querySelectorAll("#tab-sessions .sess")].map(c => {
+// `:not(.usage)` — the command center's usage header shares `.sess` (it IS the card's box, deliberately),
+// and this file counts cards positionally. This fixture serves no `usage`, so no header renders today;
+// the exclusion is what keeps that an accident that cannot bite.
+const cards = await p.evaluate(() => [...document.querySelectorAll("#tab-sessions .sess:not(.usage)")].map(c => {
   const r = e => { if (!e) return null; const b = e.getBoundingClientRect(); return { y: +b.y.toFixed(2), h: +b.height.toFixed(2), bottom: +b.bottom.toFixed(2) }; };
   const task = c.querySelector(".task");
   const title = c.querySelector(".top");
@@ -124,7 +130,7 @@ ok("nothing below it moved either: the same gap to the foot",
 // 1. gone, on every card, with the payload still carrying it
 ok("the card with everything shows no 5h reading", !/5h/.test(A.text), A.footItems?.join(" · "));
 ok("…nor does the one whose only number WAS the 5h", !/5h/.test(B.text), B.text.trim().slice(0, 60));
-ok("no card anywhere shows one", !cards.some(c => /5h/.test(c.text)), cards.filter(c => /5h/.test(c.text)).map(c => c.name).join(",") || "none");
+ok("no CARD anywhere shows one (the header is the sanctioned home — usagehead.mjs)", !cards.some(c => /5h/.test(c.text)), cards.filter(c => /5h/.test(c.text)).map(c => c.name).join(",") || "none");
 // 2. …and no card carries the gap it leaves
 ok("a card with nothing to foot renders NO foot", B.foot === null && C.foot === null, `b=${B.foot ? "present" : "absent"} c=${C.foot ? "present" : "absent"}`);
 ok("…so its box ends at its own padding, not 8px past it", near(B.tailAir, B.padBottom) && near(C.tailAir, C.padBottom), `b=${B.tailAir} c=${C.tailAir} vs padding ${B.padBottom}`);
@@ -141,7 +147,7 @@ ok("every card carries its task line, the chat lane included",
   cards.filter((c, i) => !c.text.includes(SESSIONS[i].task)).map(c => c.name).join(",") || "all present");
 
 for (const [i, c] of cards.entries()) {
-  const box = await p.locator("#tab-sessions .sess").nth(i).boundingBox();
+  const box = await p.locator("#tab-sessions .sess:not(.usage)").nth(i).boundingBox();
   await p.screenshot({ path: `${OUT}/card-${c.name}.png`, clip: { x: box.x - 4, y: box.y - 4, width: box.width + 8, height: box.height + 8 } });
 }
 

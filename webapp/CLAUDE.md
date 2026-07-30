@@ -526,15 +526,18 @@ give it.
   keeps the old card reads as a different session.
 - **`chat` on the payload now drives exactly ONE thing in the client: the resting dot colour**
   (`.dot.rest`, above). It is still `isChatLaneSession` daemon-side and still **never a name match** —
-  the label is "Chat" until a handle resolves. The 5h window stays off this card like every other, a
-  separate ruling this reversal did not touch.
+  the label is "Chat" until a handle resolves. The 5h window stays off this card like every other — a
+  separate ruling, now scoped to cards (below).
 - **A chat lane's label NEVER carries the numeric Telegram id.** It is `Chat (@handle)`, or plain
   `Chat` until `getChat` answers — the id flashed in the UI and swapped itself out, which the owner
   saw. `warmDmHandles()` runs at webapp start so the resolved name is usually there for the first
   paint; the plain-`Chat` fallback is what guarantees the id never appears at all.
-- **No 5h window on a card, by ruling** — it is an ACCOUNT-level number, the same on every card, so
-  it said nothing about the session. `h5Pct` stays on the payload: a 5h/weekly display belongs to
-  the sessions PAGE and that design is still to come. **The foot is written only when it has
+- **No 5h window on a CARD — and that ban is SCOPED, not absolute, since 2026-07-30.** The reasoning is
+  unchanged: it is an ACCOUNT-level number, the same on every card, so per-card it said nothing about the
+  session. The owner re-confirmed exactly that and approved the **command center's usage header** as the
+  once-only home for it — so cards stay banned and the header is the sanctioned exception (see *The usage
+  header*). `h5Pct` stays on the card payload untouched, and both `cardfoot.mjs` and `usagehead.mjs` keep
+  a fixture that carries it, so "no card shows it" is a client decision and not an empty payload. **The foot is written only when it has
   content** — it carries `margin-top`, so an empty one is 8px of air under the task line, and the
   5h reading was often the only thing holding it open. `cardfoot.mjs` measures both, and the air
   below the last INKED row, since a zero-height foot reports the card's own padding and can never

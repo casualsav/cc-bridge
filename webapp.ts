@@ -44,9 +44,23 @@ export interface WebappDeps {
   sessionAction?: (userId: string, sid: string, action: SessionAct, text?: string, opts?: { confirmed?: boolean }) => Promise<string | { confirm: string } | null> | string | { confirm: string } | null
   sessionAttach?: (userId: string, sid: string, fileName: string, data: Uint8Array, opts: { caption?: string; voice?: boolean }) => Promise<{ error: string } | { delivered: string; match: string }>   // compose-row file/voice → bubble text + reconcile token
   sessionSpawn?: (userId: string, name: string, opts: { model?: string; effort?: string; mode?: string; headless?: boolean }) => Promise<{ error: string } | { sid: string; name: string }>   // "+" new session with dials
+  // ACCOUNT-level usage, served once per /api/sessions rather than per card: the 5h and weekly rate
+  // windows are the same number on every session, which is exactly why they were taken OFF the cards
+  // (v0.4.232) and why the command center's header is where the owner approved them (2026-07-30).
+  readUsage?: () => Promise<UsageView | null> | UsageView | null
   readAutomation?: () => Promise<AutomationView> | AutomationView    // cron + queued prompts + budget
   automationCancel?: (userId: string, kind: 'cron' | 'queue', id: string) => Promise<string | null> | string | null   // cancel one item → error string or null
   automationCreate?: (userId: string, spec: { when: string; sid: string; text: string }) => Promise<{ error: string } | { summary: string }>   // new cron from the Scheduled tab
+}
+
+// The account's two rate-limit windows, as the pinned status card renders them: a rounded percentage
+// and a countdown string from the SAME snapshot (usage.json, written by statusline-command.sh) and the
+// SAME formatter (fmtResetIn). `resetIn` is null when the reset epoch is unknown or already past.
+// There is no per-model window here because Claude Code exposes none — `rate_limits` carries
+// `five_hour` and `seven_day` and nothing else.
+export interface UsageView {
+  fiveHour?: { pct: number; resetIn: string | null }
+  sevenDay?: { pct: number; resetIn: string | null }
 }
 
 // Settings tab payload: each toggle is {value, editable} so the SPA renders the live state and only
@@ -371,7 +385,11 @@ async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: strin
   }
   if (url.pathname === '/api/sessions') {
     if (!deps.listSessions) return json({ error: 'unavailable' }, 404)
-    return json({ sessions: await deps.listSessions() })
+    // `usage` rides the poll the list already runs — one account-level reading per response, not one
+    // per card. Absent (or null) when no session has drawn a statusline recently enough to date it, and
+    // the client then renders no header at all: a percentage nobody can date is worse than none.
+    const usage = deps.readUsage ? await deps.readUsage() : null
+    return json({ sessions: await deps.listSessions(), ...(usage ? { usage } : {}) })
   }
   if (url.pathname === '/api/session/feed') {
     if (!deps.readSessionFeed) return json({ error: 'unavailable' }, 404)
