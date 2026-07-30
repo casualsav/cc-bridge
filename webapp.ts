@@ -98,6 +98,11 @@ export interface SessionFeed {
   // card. `working` stays beside it untouched — it answers the narrower question the working row and
   // the composer's chip logic ask. Optional only for the payload built before a transcript is found.
   state?: SessionCard['state']
+  // The LANE's own flag, carried for exactly one reason: a waiting chat lane's dot is green-at-rest
+  // and every other waiting session's is amber, so a header without this flag paints the one state
+  // the card paints differently — which is the disagreement the shared `state` above was added to
+  // end. Same source as the card's (`isChatLaneSession`), never a name match.
+  chat?: boolean
   // The drill-in's own dial, carried on the poll it already runs rather than read out of a
   // sessions-list snapshot it may never have loaded — a deep-linked open has none, and after
   // changing model or effort the list snapshot would be stale until that tab is visited again.

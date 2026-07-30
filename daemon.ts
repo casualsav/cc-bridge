@@ -16092,7 +16092,9 @@ async function webappSessionFeed(sid: string): Promise<WebappSessionFeed | null>
     defModel: acc.spawnModel ?? null,
     defEffort: acc.spawnEffort ?? null,
   }
-  if (!file) return { sid, name: row.name, working: detectWorking(cap), ...dial, items: [], ...(status ? { status } : {}) }
+  // `chat` on BOTH returns, including this pre-transcript one: it decides a COLOUR, and a payload that
+  // omits it paints a waiting chat lane amber where its card paints green.
+  if (!file) return { sid, name: row.name, working: detectWorking(cap), chat: isChatLaneSession(sid), ...dial, items: [], ...(status ? { status } : {}) }
   // The SAME composite webappListSessions uses, and for the same reason: a session orchestrating
   // subagents sits at its own prompt with its turn concluded, so `turnInProgress` alone paints it
   // idle for as long as the delegated work runs. The sessions list was fixed for that; this header
@@ -16143,7 +16145,7 @@ async function webappSessionFeed(sid: string): Promise<WebappSessionFeed | null>
   // here rather than folded into the fleet poll the list already runs.
   const ctx = await waitContext()
   const { state } = readSessionState(sid, file, working, ctx.panePids.get(pane), ctx)
-  return { sid, name: row.name, working, state, ...dial, items, ...(status ? { status } : {}) }
+  return { sid, name: row.name, working, state, chat: isChatLaneSession(sid), ...dial, items, ...(status ? { status } : {}) }
 }
 
 // Dashboard actions — the same controls chat grants: stop = the /stop interrupt, compact = the

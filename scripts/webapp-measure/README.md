@@ -216,6 +216,16 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   green-over-card at whatever phase the frame caught (52,100,68) and
                                   #   reads as a colour change on both pages. Same pinned-baseline split
                                   #   as waitstate: 4 STATE checks must fail there, 9 guards must hold
+    node dotparity.mjs [page][out] # THE SAME SESSION, THE SAME MOMENT, THE SAME DOT — the Sessions card
+                                  #   and the drill-in header it opens onto, rendered off ONE fixture in
+                                  #   one page, over every state (working · waiting · waiting CHAT lane ·
+                                  #   working chat · unreported · idle · errored). Compares all three
+                                  #   things a dot says: the class, the RENDERED pixel (pulse frozen at
+                                  #   its 0% keyframe first, or shutter timing alone reads as a colour
+                                  #   difference) and whether it animates. Colour anchors on two cases,
+                                  #   since two surfaces agreeing on the WRONG colour passes equality.
+                                  #   Pinned control (841ecf8): the chat-lane and errored checks fail
+                                  #   there, every other state's parity already held and is a guard
     node notabs.mjs [page] [out]  # the tab row HIDDEN behind `SHOW_TABS`, with Settings moved to
                                   #   Telegram's ⋮ menu. The row must render nothing AND cost nothing:
                                   #   height 0 is checked, then the band it owned is HIT-TESTED and the

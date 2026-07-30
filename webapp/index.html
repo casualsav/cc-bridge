@@ -444,7 +444,15 @@
      pressing it while idle is a harmless no-op. */
   pre { margin: 0; padding: var(--sp-3); overflow: auto; flex: 1; white-space: pre; font: var(--t-mono)/1.45 ui-monospace, Menlo, Consolas, monospace; }
   .notice { padding: var(--sp-5) var(--sp-4); color: var(--hint); text-align: center; }
-  .err { background: #c0392b; color: #fff; padding: var(--sp-2) var(--sp-3); font-size: var(--t-sub); display: none; }
+  /* `:not(.dot)` because this class COLLIDES with the status dot's `errored` variant, and the toast's
+     `display: none` won that collision at every specificity — `.dot.err` sets a background and an
+     animation but no display, so an errored session rendered NO DOT AT ALL on either surface, taking no
+     space and shifting the row. Found by dotparity.mjs, which reads the RENDERED pixel and got nothing.
+     Scoped here rather than declaring a display on `.dot.err`: the dot's siblings all use the UA
+     default and are blockified by their flex parent, so the fix is to stop this rule reaching them, not
+     to give one dot a display value the others don't have. Every real toast (`#err`, `.err.float`,
+     `.err.ok`) still matches. */
+  .err:not(.dot) { background: #c0392b; color: #fff; padding: var(--sp-2) var(--sp-3); font-size: var(--t-sub); display: none; }
   .err.show { display: block; }
   .err.ok { background: #2e7d32; }
   /* FLOATING, and it stays in the body to do it. The element is declared before #drill, which is
@@ -2206,6 +2214,31 @@ async function setSetting(key, value) {
 }
 
 // ---- Sessions dashboard (homepage): one card per session, tap → drill-in ----
+// THE STATUS DOT, for every surface that paints one — the card and the drill-in header both call this
+// and neither writes the mapping itself. Two surfaces each reading the payload their own way is the
+// bug this exists to make impossible: the header's own copy had no chat branch, so a chat lane merely
+// waiting for the owner opened from a solid-green card onto an AMBER dot (his observation, 2026-07-30).
+// The mapping:
+//   dead — a pane that is gone. No producer any more: /api/sessions drops a session once two reads
+//     confirm it (webappListSessions), and the feed has no `alive` field at all — hence `=== false`,
+//     so an absent flag is not read as dead. Kept as the client's own floor.
+//   on   — working (green, pulsing). The pulse is what says MOVING, so no other state animates.
+//   err  — errored: a last turn that died on an upstream API error, checked before waiting because a
+//     stranded ask must not read as ordinary "blocked" (wait-state.ts's own precedence).
+//   rest — a WAITING CHAT LANE, green and still (the owner, 2026-07-29): waiting on its human is that
+//     lane's resting state, and amber reads as a problem where nothing is wrong. Stillness is what
+//     tells waiting from working, so the hue is free to move. Off the payload's `chat` flag — never a
+//     name match, and `SessionFeed` carries the flag for this one reason.
+//   wait — every other session's waiting: amber, still.
+//   ""   — idle and unreported alike, the --hint grey. `unreported` deliberately takes no fourth
+//     colour: four semantic colours on an 11px disc is past what a disc can carry.
+// A payload with no `state` (an older daemon, or the feed built before a transcript is found) falls
+// back to the working boolean, which is what both surfaces read before `state` existed.
+const dotClass = s => s.alive === false ? "dead"
+  : s.working ? "on"
+  : s.state === "errored" ? "err"
+  : s.state === "waiting" ? (s.chat ? "rest" : "wait")
+  : "";
 const pctBar = p => p == null ? "" : '<div class="bar"><span style="width:' + Math.max(0, Math.min(100, p)) + '%"></span></div>';
 let SESSIONS = [];
 async function renderSessions() {
@@ -2217,15 +2250,7 @@ async function renderSessions() {
   for (const s of SESSIONS) {
     const c = document.createElement("div");
     c.className = "sess";
-    // The dead states below no longer have a producer: /api/sessions drops a session from the list
-    // once two reads confirm it gone (webappListSessions), so a card only exists while its session
-    // does. Kept as the client's own floor, not as a state to design for.
-    // The chat lane's waiting is green, not amber (the owner, 2026-07-29): waiting on its human is
-    // what that lane does at rest, so the colour every other card uses for "blocked" reads as a
-    // problem there. Off the payload's own `chat` flag, like the bare title row above it — never a
-    // name match. Every other session's waiting is untouched, and so are the chat lane's own other
-    // states: it is one branch, on one state, on one lane.
-    const dot = !s.alive ? "dead" : s.working ? "on" : s.state === "errored" ? "err" : s.state === "waiting" ? (s.chat ? "rest" : "wait") : "";
+    const dot = dotClass(s);   // shared with the drill-in header — see dotClass
     const chips = dialParts(s);
     // The task line is ONE line and the card's height is reflow, so a state that has something to say
     // says it INSTEAD of the last-reply snippet, never underneath it. For a waiting card the reason is
@@ -2846,13 +2871,10 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) pain
 async function renderDrill() {
   if (!drillSid) return;
   let d; try { d = await api("/api/session/feed", { sid: drillSid }); } catch { return; }
-    // The card's own dot colours, on the header it opens onto: green pulsing (working), red pulsing
-  // (errored), amber still (waiting), grey (everything else) — so the card and the screen it opens
-  // onto never disagree (the bug this composite exists to prevent). It reads `state` where the
-  // payload carries it and falls back to the working boolean where it does not — an older daemon,
-  // or the pre-transcript payload. The COLOUR only, deliberately: the header is two bare lines and
-  // nothing else here is conditional.
-  $("ddot").className = "dot " + (d.working ? "on" : d.state === "errored" ? "err" : d.state === "waiting" ? "wait" : "");
+  // The card's dot, on the header it opens onto — the SAME function, not the same rules written twice
+  // (that is precisely how the two came to disagree). The COLOUR only, deliberately: the header is two
+  // bare lines and nothing else in it is conditional.
+  $("ddot").className = "dot " + dotClass(d);
   if (d.cwd) $("dsub").textContent = d.cwd;
   setDial(d);
   lastDrill = d;

@@ -424,9 +424,9 @@ give it.
   the hue is free to move. Branched off the payload's own `chat` flag beside the bare-title-row
   rule, never a name match, and it is one branch on one state — every other session's waiting stays
   amber and the chat lane's own working/idle are untouched. `chatrest.mjs` measures the whole
-  {chat, worker} × {working, waiting, idle} matrix for exactly that reason; the drill-in header
-  (`#ddot`) is NOT in it and still paints a waiting chat lane amber — `SessionFeed` carries no
-  `chat` flag, so closing that gap is a daemon-side payload change nobody has asked for yet.
+  {chat, worker} × {working, waiting, idle} matrix for exactly that reason. The drill-in header
+  (`#ddot`) is not in that file and does not need to be — it shares the mapping now, and
+  `dotparity.mjs` is where the two surfaces are compared (see `dotClass` below).
 - **A state with something to say REPLACES the task line, never appends to it** — `waiting` is now
   the only one that does. The line is
   `-webkit-line-clamp: 1` (the owner's call, down from 2 on 2026-07-29: a card is a glance, and the
@@ -435,6 +435,19 @@ give it.
   last-reply snippet would — which is right on its own terms: the snippet predates the wait. **`⏸️` carries
   U+FE0F and needs it**: bare U+23F8 resolves to text presentation and paints as two hairline bars
   that read as a broken character beside the emoji on every other row (seen in the contact sheet).
+- **ONE function paints every status dot on every surface: `dotClass(s)`.** The card and the drill-in
+  header both call it and neither writes the mapping itself — two copies is exactly how they came to
+  disagree (the owner, 2026-07-30: a chat lane waiting for him was solid green on the list and amber in
+  the chat view at the same moment, because the header's copy had no `chat` branch and `SessionFeed`
+  carried no `chat` flag to branch on). The flag is on the feed payload now, on **both** its returns
+  including the pre-transcript one. `dotparity.mjs` renders both surfaces off ONE fixture across every
+  state and compares class, **rendered pixel** and animation — a colour match with a pulse mismatch is
+  still two indicators.
+- **`.err` is `:not(.dot)`, and that is a fix, not a nicety.** The toast class's `display: none` reached
+  `.dot.err` at a specificity no `.dot.err` declaration could beat (it sets background and animation,
+  never display), so an **errored** session painted no dot at all on either surface and the row shifted.
+  Do not "simplify" the selector back. Found by reading pixels; a parity check alone passed, because
+  both surfaces agreed on nothing.
 - **The drill-in header dot (`#ddot`) renders the card's three colours off `SessionFeed.state`** —
   green pulsing, amber still, grey — in the card's own precedence (`working` first, then `waiting`).
   It got **the colour only**: the header is two bare lines and nothing in it is conditional. The
