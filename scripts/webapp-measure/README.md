@@ -214,6 +214,18 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   green-over-card at whatever phase the frame caught (52,100,68) and
                                   #   reads as a colour change on both pages. Same pinned-baseline split
                                   #   as waitstate: 4 STATE checks must fail there, 9 guards must hold
+    node notabs.mjs [page] [out]  # the tab row HIDDEN behind `SHOW_TABS`, with Settings moved to
+                                  #   Telegram's ⋮ menu. The row must render nothing AND cost nothing:
+                                  #   height 0 is checked, then the band it owned is HIT-TESTED and the
+                                  #   first card's top read, because an invisible bar still spending its
+                                  #   pixels passes a height check on the wrong page. --safe-top is
+                                  #   FORCED before its check — the bar carried it, and it is 0 in every
+                                  #   non-fullscreen state, so at rest that regression is invisible. The
+                                  #   ⋮ item is driven both ways through a recording SDK stub (open,
+                                  #   return, and from inside the drill-in). Guards that hold on both
+                                  #   pages: four buttons still in the DOM, showTab() still switching
+                                  #   every panel, Sessions on open. Pinned control (3681d1e): all 8
+                                  #   state checks must fail there, which is asserted, not eyeballed
     node thoughts.mjs [page] [out] # a turn's NARRATION is quoted and its answer is not. Three kinds of
                                   #   claim, three instruments: the marking is structural and fails
                                   #   wholesale on a pre-change page; the ABSENCE of a demotion (same

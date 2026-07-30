@@ -375,6 +375,24 @@ give it.
   (ink, not touch targets; the pill's 10% margin absorbs it). `BackButton` replaces our chip in
   fullscreen only; whether the client swaps ✕ Close for ← is unverified on a device.
 
+## The tab row (hidden — a trial)
+
+- **`SHOW_TABS` is the ONE switch, and the row is hidden, never deleted** — the owner's
+  look-and-feel trial, with a floating control that reveals the same four buttons as the planned
+  successor. Markup, CSS, `showTab()` and every button's handler stay live, so the flag is the whole
+  revert. `display: none`, not `visibility`/opacity: the trial is the page *without* the strip's
+  height. **The bar was carrying `--safe-top` for every flow view**, so `html.notabs body` takes it
+  over — 0 outside fullscreen, which is why a check run at rest cannot see that half at all
+  (`notabs.mjs` forces the var).
+- **Files and Scheduled have no door while it is false** — accepted by the owner; this is a look,
+  not a navigation change. Sessions remains the view on open.
+- **Settings' only door is the client's ⋮ menu** (`SettingsButton`, i.e. `web_app_setup_settings_button`
+  — every bot since Bot API 6.10, the SDK wrapper since 7.0), feature-detected with a try/catch for
+  the same reason as `NATIVE_BACK`. It is a **TOGGLE** (Settings ⇄ Sessions): with the row hidden it
+  is the only way in and therefore the only way out, and stranding the app in Settings is not what
+  the trial is testing. It closes the drill-in first — that surface is fixed and full-screen, so
+  switching a tab under it reads as a tap that did nothing.
+
 ## Sessions list and spawn sheet
 
 - **A card has FOUR states, THREE dot colours and only THREE it renders at all.** `working`
