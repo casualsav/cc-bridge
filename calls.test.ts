@@ -83,3 +83,20 @@ test('assertSendable blocks the state dir, exempts inbox and the bus shared work
   // A sibling that merely starts with the exempt name is still state.
   expect(() => assertSendable(file('agent-bus', 'dm', 'shared-drafts', 'x.md'))).toThrow(/channel state/)
 })
+
+// A surfaceless refusal must be LOUD. Tonight's lane failure was quiet — text relay worked, file
+// sends refused, and nothing in the log named the missing binding — so the refusal now always writes
+// a line. Asserted because "we'd see it next time" is exactly the assumption that failed.
+test('a surfaceless refusal writes an unmissable log line naming the pane', async () => {
+  const written: string[] = []
+  const orig = process.stderr.write.bind(process.stderr)
+  ;(process.stderr as unknown as { write: (s: string) => boolean }).write = (s: string) => { written.push(String(s)); return true }
+  try {
+    await expect(resolveTarget({ chat_id: '.', pane: '%0' })).rejects.toThrow('no chat surface')
+  } finally {
+    ;(process.stderr as unknown as { write: typeof orig }).write = orig
+  }
+  const line = written.join('')
+  expect(line).toContain('REFUSED a chat send from pane %0')
+  expect(line).toMatch(/MISSING/)
+})

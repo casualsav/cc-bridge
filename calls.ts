@@ -48,7 +48,15 @@ export async function resolveTarget(args: Record<string, unknown>): Promise<{ ch
   const pane = args.pane ? String(args.pane) : null
   if (pane) {
     const { targets, reason } = await paneOutboundIntent(pane).catch(() => ({ targets: [], reason: 'unresolved' as const }))
-    if (reason === 'surfaceless') throw new Error('this session has no chat surface — its replies reach the mini app and the bus (tg ask/answer/post), not a chat')
+    if (reason === 'surfaceless') {
+      // Say so in the log, every time, unthrottled. This refusal is a DELIBERATE send being denied, so
+      // it can never be noise — and its silence is what made 2026-07-30's lane failure take hours to
+      // surface: the owner's chat-lane binding had been reaped, text relay kept working (it routes by
+      // pane) while `tg send` refused here (file sends resolve through dmChat), and nothing said why.
+      // A guard we cannot watch fail is not a guard.
+      process.stderr.write(`daemon: REFUSED a chat send from pane ${pane} — it resolves to a session with no chat surface. If this session should reach a human, its dmChat/topic binding is MISSING, not absent by design.\n`)
+      throw new Error('this session has no chat surface — its replies reach the mini app and the bus (tg ask/answer/post), not a chat')
+    }
     if (targets[0]) return targets[0]
   }
   return { chat: resolveChatId(s) }
