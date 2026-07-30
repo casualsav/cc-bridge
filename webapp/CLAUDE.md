@@ -419,6 +419,14 @@ give it.
   rendered ink centroid (a box flex-centres while its contents paint off-centre — see the half-pixel
   snap note), each to ±0.5px: **0.00px on rects, 0.25px on paint** — the residual is the glyph's ink
   sitting off-centre inside its own advance, and it is printed rather than rounded away.
+- **The words stand on the card NAMES' axis, and the box axis is the only column that exists** (the
+  owner's second ask on this label, approved 2026-07-30). It falls out of the gap above rather than
+  being set: box 45.00 against 45.00 for every card. **Do not chase the ink edges to zero** — a text
+  rect is the ADVANCE box and each letterform sits inside its own side bearings, so the names' own ink
+  edges disagree with *each other* (measured @dpr4: `C` 45.75 · `c` 45.50 · `m` 46.00) and no single
+  axis can satisfy them all. What IS asserted is the strongest true claim: same letter, the label's
+  12px/400 `C` against a card's 14px/600 `C`, **0.25px** apart. The per-letterform scatter is printed
+  by `listorder.mjs` and deliberately not gated — it is type, not misalignment.
 - **It renders only where it has something under it, by construction:** emitted before the FIRST worker
   card, so a chat-only fleet gets no label without a condition to keep in sync. With no chat lane it still
   renders — it names the section it heads, and the owner's rule was "at least one coding session".

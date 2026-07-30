@@ -54,8 +54,11 @@ const sink = (kind, ok, label) => { results.push({ kind, ok, label }); console.l
 const b = await chromium.launch();
 if (OUT) mkdirSync(OUT, { recursive: true });
 
-const open = async (path, sessions, usage = USAGE) => {
-  const p = await b.newPage({ viewport: { width: 390, height: 812 }, deviceScaleFactor: 2 });
+// dpr is a parameter because one claim in this file is about INK GEOMETRY, not layout: a screenshot's
+// resolution IS the measurement's resolution (0.5px at dpr 2, 0.25px at 4), and the layout it measures
+// is dpr-independent, so the finer page renders the same boxes and only samples their paint closer.
+const open = async (path, sessions, usage = USAGE, dpr = 2) => {
+  const p = await b.newPage({ viewport: { width: 390, height: 812 }, deviceScaleFactor: dpr });
   p.on("pageerror", e => { console.log("PAGEERROR:", e.message); bad++; });
   await p.goto("file://" + path, { waitUntil: "domcontentloaded" });
   await p.evaluate(([ss, u]) => {
@@ -72,7 +75,6 @@ const GLYPH = "✳";
 const WORDS = "Coding Sessions";
 const LABEL = `${GLYPH} ${WORDS}`;
 
-// The panel's children, in order, each named by what it is — which is the whole claim of this file.
 // The intensity-weighted centroid x of the ink inside a CSS-px band, in CSS px — how the PAINTED mark
 // sits, which a rect cannot answer. The band's own top-left pixel is the ground it measures against, so
 // the band must be wider than the mark (callers pad it) and must not straddle two fills.
@@ -99,6 +101,32 @@ const inkCentroid = async (p, band) => {
   return off === null ? null : band.x + off.cx / (off.dpr / band.width);
 };
 
+// The x where a letter's ink STARTS, in CSS px — the left edge an eye reads, which no rect carries: a
+// text rect is the ADVANCE box and every letterform sits inside its own side bearings. `onset` is the
+// first column carrying ink at all (2% of the band's peak, above AA noise); `half` is the first
+// substantially inked one, reported because a light 12px curve and a semibold 14px one ramp at different
+// rates — quoting one number as "the edge" would hide that. The band must hold ONE letter on ONE fill.
+const inkOnset = async (p, band, dpr) => {
+  const shot = await p.screenshot({ clip: band });
+  return p.evaluate(async ([data, bx, d]) => {
+    const img = new Image(); img.src = "data:image/png;base64," + data; await img.decode();
+    const c = document.createElement("canvas"); c.width = img.width; c.height = img.height;
+    const ctx = c.getContext("2d"); ctx.drawImage(img, 0, 0);
+    const px = ctx.getImageData(0, 0, img.width, img.height).data;
+    const at = (x, y) => { const i = (y * img.width + x) * 4; return [px[i], px[i + 1], px[i + 2]]; };
+    const bg = at(0, 0);
+    const cols = [...Array(img.width)].map((_, x) => {
+      let s = 0;
+      for (let y = 0; y < img.height; y++) { const q = at(x, y); s += Math.max(Math.abs(q[0] - bg[0]), Math.abs(q[1] - bg[1]), Math.abs(q[2] - bg[2])); }
+      return s;
+    });
+    const peak = Math.max(...cols);
+    if (peak === 0) return null;
+    return { onset: bx + cols.findIndex(v => v > peak * 0.02) / d, half: bx + cols.findIndex(v => v > peak * 0.5) / d };
+  }, [shot.toString("base64"), band.x, dpr]);
+};
+
+// The panel's children, in order, each named by what it is — which is the whole claim of this file.
 const stack = p => p.evaluate(() => [...document.getElementById("tab-sessions").children].map(e =>
   e.id === "usagehead" ? "usage"
   : e.classList.contains("sechead") ? `label:${e.textContent}`
@@ -178,6 +206,49 @@ async function measure(path, label, shotPrefix) {
     await p.evaluate(() => showTab("sessions"));
     await p.waitForTimeout(400);
     if (OUT) await p.screenshot({ path: join(OUT, `${shotPrefix}-command-center-390.png`), clip: { x: 0, y: 0, width: 390, height: 640 } });
+    await p.close();
+  }
+
+  // ---- the label's C stands over the card names' own first letter -------------------------------
+  // The owner's second ask on this label (2026-07-30). The words' BOX already sits on the names' box
+  // axis (checked above), and that axis is the only column every card can share: the names differ in
+  // letterform, so their INK edges cannot all coincide with one another, let alone with the label's.
+  // So the claim asserted is the strongest true one: the box axis is exact, and against the SAME
+  // LETTER on a card — the chat lane's capital C — the painted edges agree to within half a pixel
+  // despite the label's 12px/400 against the card's 14px/600. The per-letterform scatter is PRINTED,
+  // not gated: it is type, not misalignment, and a check that demanded 0 across letterforms would be
+  // demanding something no layout can deliver.
+  {
+    const p = await open(path, MIXED, USAGE, 4);
+    const at = await p.evaluate(() => {
+      const firstChar = el => { const r = document.createRange(); r.setStart(el.firstChild, 0); r.setEnd(el.firstChild, 1);
+        const b = r.getBoundingClientRect(); return { x: b.x, y: b.y, w: b.width, h: b.height, ch: el.firstChild.textContent[0] }; };
+      const w = document.querySelector("#tab-sessions .sechead .swords");
+      const names = [...document.querySelectorAll("#tab-sessions .sess .nm")];
+      return { label: w ? { ...firstChar(w), size: getComputedStyle(w).fontSize, weight: getComputedStyle(w).fontWeight } : null,
+        names: names.map(n => ({ ...firstChar(n), full: n.textContent, size: getComputedStyle(n).fontSize, weight: getComputedStyle(n).fontWeight })),
+        boxes: { label: w ? w.getBoundingClientRect().x : null, names: names.map(n => n.getBoundingClientRect().x) } };
+    });
+    const band = r => ({ x: r.x - 4, y: r.y, width: r.w + 8, height: r.h });
+    const lab = at.label ? await inkOnset(p, band(at.label), 4) : null;
+    const inks = [];
+    for (const n of at.names) inks.push({ ...n, ink: await inkOnset(p, band(n), 4) });
+    // Box axis first — exact, and the reason the ink lands as close as it does.
+    state(at.boxes.label !== null && at.boxes.names.length >= 2 && at.boxes.names.every(x => Math.abs(x - at.boxes.label) <= 0.5),
+      `the words' box sits on every card name's box axis — label ${at.boxes.label}, names ${at.boxes.names.join("/")}`);
+    // Then the same letter, painted, at 0.25px resolution.
+    const twin = inks.find(n => n.ch === "C" && n.ink);
+    const twinOff = lab && twin ? Math.abs(lab.onset - twin.ink.onset) : null;
+    state(twinOff !== null && twinOff <= 0.5,
+      `…and the label's C paints on a card C's own left edge — ${lab && lab.onset} vs ${twin && twin.ink.onset} (${twin && JSON.stringify(twin.full)}, ${twin && twin.size}/${twin && twin.weight} against the label's ${at.label && at.label.size}/${at.label && at.label.weight}), residual ${twinOff === null ? "n/a" : twinOff.toFixed(2)}px (≤0.50)`);
+    console.log(`      ink onsets @dpr4 — label ${at.label && at.label.ch}: ${lab && lab.onset} (half ${lab && lab.half})`
+      + inks.map(n => ` · ${JSON.stringify(n.full)} ${n.ch}: ${n.ink && n.ink.onset} (half ${n.ink && n.ink.half})`).join(""));
+    // The zoomed crop the owner reads: the label's C directly above the next card's name, at dpr 4.
+    if (OUT && at.label) {
+      const below = at.names.find(n => n.y > at.label.y);
+      if (below) await p.screenshot({ path: join(OUT, `${shotPrefix}-c-axis-zoom.png`),
+        clip: { x: at.label.x - 12, y: at.label.y - 10, width: 120, height: (below.y + below.h + 10) - (at.label.y - 10) } });
+    }
     await p.close();
   }
 
