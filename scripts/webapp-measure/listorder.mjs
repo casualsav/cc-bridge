@@ -244,7 +244,11 @@ async function measure(path, label, shotPrefix) {
     // Box axis first — exact, and the reason the ink lands as close as it does.
     state(at.boxes.label !== null && at.boxes.names.length >= 2 && at.boxes.names.every(x => Math.abs(x - at.boxes.label) <= 0.5),
       `${cond} the words' box sits on every card name's box axis — label ${at.boxes.label}, names ${at.boxes.names.join("/")}`);
-    // Then the same letter, painted, at 0.25px resolution.
+    // Then the same letter, painted, at 0.25px resolution. NOTE THE FONT: this runs in whatever headless
+    // Chromium resolves the page's stack to on this box (DejaVu Sans), NOT in the Roboto his Android
+    // WebView uses — side bearings differ, so this leg is a regression gate on OUR render and not a claim
+    // about his screen. `labelaxis.mjs` §2 is where the device font is loaded and the two are printed side
+    // by side; a gate does not fetch a font over the network to make its numbers mean more.
     const twin = inks.find(n => n.ch === "C" && n.ink);
     const twinOff = lab && twin ? Math.abs(lab.onset - twin.ink.onset) : null;
     state(twinOff !== null && twinOff <= 0.5,
