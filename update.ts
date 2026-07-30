@@ -135,7 +135,9 @@ function killBridge(): void {
 
 function launchBridge(dir: string): void {
   const fd = openSync(LOG_FILE, 'a')
-  const child = spawn('bun', [join(dir, 'ensure-daemon.ts')], { detached: true, stdio: ['ignore', fd, fd], env: process.env })
+  // `cwd` explicit: this restarts the supervision chain, and a chain launched from a cwd that later
+  // disappears cannot spawn tmux or bun at all (2026-07-30 — see common.ts's anchorCwd).
+  const child = spawn('bun', [join(dir, 'ensure-daemon.ts')], { detached: true, stdio: ['ignore', fd, fd], env: process.env, cwd: existsSync(STATE_DIR) ? STATE_DIR : '/' })
   child.unref()
 }
 

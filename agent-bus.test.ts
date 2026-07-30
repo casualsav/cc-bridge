@@ -221,6 +221,32 @@ test('resolveEndpoint maps @name to a single open endpoint of either kind', () =
   expect(resolveEndpoint('@mimo', eps)).toEqual({ kind: 'hermes', id: 'mimo' })
 })
 
+test('a session id is an address, so a recovered UNNAMED row is reachable', () => {
+  // The startup rebuild may not invent names (a guess from the cwd would mint a second `@proj` and
+  // shadow a real one), so recovered rows show on the roster as their session id — and that is what a
+  // reader types. Found live 2026-07-30 mid-fleet-prune: `tg ask @397934cb` → "no endpoint named",
+  // i.e. visible and unreachable, which defeats the point of rebuilding the row at all.
+  const rebuilt: BusEndpoint[] = [
+    { id: '397934cb', kind: 'claude', name: '', closed: false },
+    { id: 'a', kind: 'claude', name: 'architect', closed: false },
+  ]
+  expect(resolveEndpoint('@397934cb', rebuilt)).toEqual({ kind: 'claude', id: '397934cb' })
+  expect(resolveEndpoint('397934CB', rebuilt)).toEqual({ kind: 'claude', id: '397934cb' })   // as displayed, any case
+  expect(resolveEndpoint('architect', rebuilt)).toEqual({ kind: 'claude', id: 'a' })          // names still win
+  // A closed row addressed by id gets the same "closed on purpose" answer as one addressed by name,
+  // not "no such endpoint" — the caller needs to know it EXISTS before being told to spawn instead.
+  expect((resolveEndpoint('r', eps) as { error: string }).error).toMatch(/isn't running/)
+})
+
+test('an id address never resolves an empty name, and a name shadowing an id stays a name', () => {
+  const eps2: BusEndpoint[] = [
+    { id: 'aaaa1111', kind: 'claude', name: '', closed: false },
+    { id: 'bbbb2222', kind: 'claude', name: 'aaaa1111', closed: false },   // pathological, but decide it
+  ]
+  expect(resolveEndpoint('', eps2)).toHaveProperty('error')            // no address given
+  expect(resolveEndpoint('aaaa1111', eps2)).toEqual({ kind: 'claude', id: 'bbbb2222' })   // the NAME wins
+})
+
 test('resolveEndpoint fails loudly: unknown, closed-only, same-kind + cross-kind ambiguous', () => {
   expect(resolveEndpoint('nobody', eps)).toHaveProperty('error')
   expect((resolveEndpoint('reviewer', eps) as { error: string }).error).toMatch(/isn't running/)

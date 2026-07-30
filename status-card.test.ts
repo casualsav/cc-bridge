@@ -146,7 +146,7 @@ test('unreachable-chat marking: only Telegram undeliverable errors mark; inbound
 // ---- the DM pin loop on a multi-user allowlist ----
 // Regression cover for the fresh-install report: several allowlisted ids, only one of whom has ever
 // messaged the bot, and no pinned card appeared.
-function pinDeps(sent: string[], pinned: string[], opts: { unsendable?: Set<string>; pinFails?: Set<string> } = {}) {
+function pinDeps(sent: string[], pinned: string[], opts: { unsendable?: Set<string>; pinFails?: Set<string>; chatLanesExpected?: boolean } = {}) {
   return {
     channel: {
       sendText: async (chatId: string) => {
@@ -168,6 +168,7 @@ function pinDeps(sent: string[], pinned: string[], opts: { unsendable?: Set<stri
     usageSnapshotForPane: async () => null,
     onTopicGone: () => {},
     paneAgentKind: async () => 'claude' as const,
+    ...(opts.chatLanesExpected ? { dmChatLanesExpected: () => true } : {}),
   } as never
 }
 
@@ -216,6 +217,21 @@ test('a per-user DM lane pins its OWN session, never the shared focus', async ()
   focus.activePaneId = null
   _resetLanesForTest()
   setAllowFrom(['111111'])
+})
+
+test('on a chat-lane box, a MISSING lane binding refuses — it never renders the focused pane', async () => {
+  // 2026-07-30: minutes after the owner's chat-lane binding was reaped, his DM's card rendered %332 —
+  // a worker's coding session, its model and context shown as if it were his own conversation. A
+  // missing binding is a fault; `focus` is a fleet-wide pointer and is not this chat's answer.
+  setAllowFrom(['111111'])
+  focus.activePaneId = '%9'
+  initStatusCard(pinDeps([], [], { chatLanesExpected: true }))
+  expect(await paneForDmChat('111111')).toBe(null)
+  // Same box, same empty binding, no chat-lane feature at all (classic single-session DM): focus IS
+  // the conversation there, so the fallback must survive.
+  initStatusCard(pinDeps([], []))
+  expect(await paneForDmChat('111111')).toBe('%9')
+  focus.activePaneId = null
 })
 
 // The fresh DM-only bind, as it actually happens under the minting contract: the daemon comes up

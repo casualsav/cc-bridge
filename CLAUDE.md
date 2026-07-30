@@ -73,6 +73,29 @@ only when you access `webapp/`, so read it yourself before touching `webapp/inde
 - `ACCESS.md`, `TESTING.md`, `docs/fleet-verification.md` (how to verify bus/fleet changes live —
   spawn-a-throwaway recipe, the traps, and what is NOT yet verified).
 
+## Supervision
+
+**A long-lived process may never keep the cwd it INHERITED, and every supervision launch passes `cwd`
+explicitly.** Under Bun a process whose cwd has been *deleted* cannot spawn anything — every spawn
+fails `ENOENT … posix_spawn '<binary>'`, PATH-resolved **and absolute** — while `process.cwd()` keeps
+returning the stale path, so the process looks healthy to itself (detect with `existsSync`, never
+try/catch). `ensure-daemon` runs from a SessionStart hook, so the chain's cwd is some other project's
+session dir; on 2026-07-30 that was twice a `/tmp/predict-replay-*` scratch dir the owning harness then
+deleted, and the daemon that inherited it could not exec `tmux` — pane scan 0 panes every tick, whole
+fleet reading down, and self-perpetuating because each blind window made `tg` calls nudge another
+poisoned watchdog into existence. `anchorCwd` (`common.ts`) is the cure and `cwdFaultHint()` is why an
+ENOENT now names the cwd instead of sending the next reader after PATH. Proof:
+`bun scripts/deleted-cwd-spawn.ts`; enumeration of the launch sites: `supervision-cwd.test.ts`.
+
+**A tmux read that FAILED is not evidence of absence, and only positive evidence may destroy state.**
+`findOffMcpPanes` returns `null` for a failed scan (an empty array means an empty machine, and
+conflating them is what turned blindness into state loss); `paneLiveness` returns `'unknown'` when tmux
+cannot be reached, and every path that closes a topic, drops a row or reaps a lane binding does nothing
+on `'unknown'`. The inconclusive-scan guard counts **all** session records — topic rows, DM chat lanes,
+the General anchor — because it was written counting rows only and a store holding just a lane fell
+straight through it. **A missing binding refuses; it never falls back to a guess:** with `dmChat` empty
+the owner's DM card adopted `focus` and rendered a worker's coding session as his own conversation.
+
 ## Pane delivery
 
 **Every write of user content into a pane goes through `withPaneDelivery` (`pane-io.ts`).** Getting

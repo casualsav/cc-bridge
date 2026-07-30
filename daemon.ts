@@ -15,10 +15,16 @@ import {
   frame, makeLineReader, computeCodeFingerprint, buildVersion, tConfig, readJsonFile, writeJsonFile,
   STATE_DIR, ACCESS_FILE, PREFS_FILE, APPROVED_DIR, ENV_FILE, INBOX_DIR,
   SOCKET_PATH, DAEMON_PID_FILE, PENDING_EVENTS_FILE,
-  DAEMON_LOG_FILE, WATCHDOG_PID_FILE, HEARTBEAT_FILE,
+  DAEMON_LOG_FILE, WATCHDOG_PID_FILE, HEARTBEAT_FILE, anchorCwd, cwdFaultHint, stableCwd,
   type ShimToDaemon, type DaemonToShim, type InboundParams, type FailoverHop,
 } from './common.ts'
 import { acquireTokenLock } from './token-lock.ts'
+
+// Before ANY tmux call or spawn: a daemon that inherited a deleted cwd (a watchdog started from a
+// harness scratch dir) can spawn nothing at all under Bun — `ENOENT … posix_spawn 'tmux'` with
+// /usr/bin/tmux right there — so its pane scan returns 0 panes forever and the whole fleet reads
+// down. That is the 2026-07-30 outage, twice. See common.ts's anchorCwd.
+anchorCwd('daemon')
 import { hopKey, resolveChain, pickNextHop, moveHop } from './failover-chain.ts'
 
 // Code fingerprint captured at startup; sent to shims so they can detect and
@@ -362,6 +368,7 @@ initStatusCard({
     for (const { chatId, sessionId } of listDmChatSessions()) out.push({ chat: chatId, paneId: await paneForSession(sessionId) })
     return out
   },
+  dmChatLanesExpected: () => !!dmChatEligible(),   // survives a lost binding — see paneForDmChat's refusal
   newestMsgId: chat => msgLatest(chat, null),   // pinned card measures its own distance from the conversation
 })
 // onClaudeInstalled fires the stale-session sweep the moment a new binary lands, so the rolling
@@ -2327,13 +2334,19 @@ function remoteControlAncestorPids(): Set<number> {
 // Scan tmux for every adoptable bridge-marked pane (registered MCP + remote-control sessions
 // excluded). Reads the pane option straight off list-panes; the remote-control filter is the only
 // process-tree walk, gated to tagged candidates so it costs nothing when no bridge panes exist.
-async function findOffMcpPanes(): Promise<string[]> {
+//
+// Returns NULL when the tmux call itself failed — a scan that told us nothing, which is a different
+// fact from an empty machine and must never be spent as one. This conflation is what turned the
+// 2026-07-30 daemon blindness (a deleted cwd → `ENOENT posix_spawn 'tmux'` on every call) into state
+// loss: every registered pane looked dead at once, so the prune below reaped the owner's chat-lane
+// binding and the GC came for the rows. Callers treat null as "skip this tick entirely".
+async function findOffMcpPanes(): Promise<string[] | null> {
   let out = ''
   try {
     const { stdout } = await exec('tmux',
       ['list-panes', '-a', '-F', `#{pane_id}\t#{${TELEGRAM_PANE_OPT}}\t#{pane_pid}\t#{${BRIDGE_PANE_OPT}}`], { timeout: 3000 })
     out = stdout
-  } catch { return [] }
+  } catch (e) { lastPaneScanError = e; return null }
 
   const tagged: { paneId: string; panePid: number }[] = []
   for (const line of out.split('\n')) {
@@ -2520,9 +2533,24 @@ function registerSpawnedPane(paneId: string): void {
 // Stays false in FORCE_PANE / MCP mode, where discovery never runs: no reap is the old behaviour.
 let panesDiscovered = false
 let rosterRebuilt = false   // one-shot: the startup roster rebuild below runs on the first scan only
+let lastPaneScanError: unknown = null       // why the last scan failed — reported by the skip below
+let lastPaneScanFailWarnAt = 0              // throttles that report: the tick is every few seconds
+const PANE_SCAN_FAIL_WARN_MS = 60_000
 async function discoverPanes(): Promise<void> {
   if (FORCE_PANE || !TRANSCRIPT_OUTBOUND) return
   const panes = await findOffMcpPanes()
+  // The tmux call FAILED — we learned nothing about any pane. Every consumer below acts on absence
+  // (prune the registry, close topics, reap lane bindings, re-adopt focus), so running them on a
+  // failed scan destroys live state for a reason that has nothing to do with the sessions. Skip the
+  // whole tick, say so once a minute, and leave `panesDiscovered` alone so a boot-time failure still
+  // counts as "discovery hasn't succeeded yet" (which is what keeps the bus dead-letter reap off).
+  if (panes === null) {
+    if (Date.now() - lastPaneScanFailWarnAt > PANE_SCAN_FAIL_WARN_MS) {
+      lastPaneScanFailWarnAt = Date.now()
+      process.stderr.write(`daemon: pane scan FAILED (${lastPaneScanError})${cwdFaultHint()} — skipping this discovery tick entirely; no pane is being treated as dead\n`)
+    }
+    return
+  }
   panesDiscovered = true
   // FIRST scan only: re-derive rows for live sessions topics.json has lost, from the pane stamps
   // that outlived it (see rebuildRowsFromStampedPanes). Startup is the right and only moment — it
@@ -2780,7 +2808,12 @@ async function reapDeadEndpoints(name: string): Promise<void> {
 // All addressable bus endpoints for pure resolution: topic sessions (kind claude, id = sessionId)
 // + configured hermes endpoints (kind hermes, id = name). agent-bus.ts stays grammy/tmux-free.
 function busEndpoints(): BusEndpoint[] {
-  const claude = listTopics().map(t => ({ id: t.sessionId, kind: 'claude' as const, name: t.name, closed: t.closed }))
+  // A lane / anchor session must appear ONCE, under its own name. A topics row for the same sid is a
+  // shadow (minted while the binding was missing — 2026-07-30), and two entries with one id list the
+  // owner's own chat twice: as `chat` and again as a nameless session id. The named entry below wins;
+  // topics.ts's setDmChatSession removes the stored row, and this keeps the roster honest meanwhile.
+  const shadowed = new Set([...listDmChatSessions().map(d => d.sessionId), getGeneralSession() ?? ''])
+  const claude = listTopics().filter(t => !shadowed.has(t.sessionId)).map(t => ({ id: t.sessionId, kind: 'claude' as const, name: t.name, closed: t.closed }))
   // The DM chat lane(s) and the General anchor aren't topics but ARE bus participants — without an
   // endpoint entry, nameForEndpoint falls back to their raw session ids in every rendered bus event
   // ("messaged @bb1c6d35"), and they can't be addressed by name. The DM lane is "chat" (its
@@ -10803,7 +10836,7 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
       registerSpawnedPane(newPane)   // bind/announce now (works even under FORCE_PANE)
     }
     return newPane || null
-  } catch (e) { process.stderr.write(`daemon: spawn session in ${dir} failed: ${e}\n`); return null }
+  } catch (e) { process.stderr.write(`daemon: spawn session in ${dir} failed: ${e}${cwdFaultHint()}\n`); return null }
 }
 
 // Friendly last-activity stamp: relative for the last day, absolute date+time beyond that.
@@ -15297,11 +15330,13 @@ function ensureWatchdog(): void {
   try { const pid = parseInt(readFileSync(WATCHDOG_PID_FILE, 'utf8'), 10); if (pid > 1) { process.kill(pid, 0); return } } catch {}
   try {
     const log = openSync(DAEMON_LOG_FILE, 'a')
-    const child = spawn('bun', [watchdogPath], { detached: true, stdio: ['ignore', log, log], env: process.env })
+    const child = spawn('bun', [watchdogPath], { detached: true, stdio: ['ignore', log, log], env: process.env, cwd: stableCwd() })
+    child.on('error', e => process.stderr.write(`daemon: watchdog launch failed (${e})${cwdFaultHint()}\n`))
     child.unref()
     closeSync(log)
+    if (child.pid == null) return   // async spawn failure — the listener above names it
     process.stderr.write(`daemon: launched watchdog (pid ${child.pid})\n`)
-  } catch (e) { process.stderr.write(`daemon: watchdog launch failed: ${e}\n`) }
+  } catch (e) { process.stderr.write(`daemon: watchdog launch failed: ${e}${cwdFaultHint()}\n`) }
 }
 
 // ---- Shutdown ----
@@ -15391,7 +15426,7 @@ if (FORCE_PANE) {
   // daemon restart between grow and restore) — un-pin to automatic size so Claude stops rendering
   // into a giant pane and the statusline becomes readable again for the pin scraper. Idempotent.
   void (async () => {
-    for (const p of await findOffMcpPanes()) await autoSizeWindowOf(p).catch(() => {})
+    for (const p of (await findOffMcpPanes()) ?? []) await autoSizeWindowOf(p).catch(() => {})   // null = scan failed; nothing to resize
   })()
 } else {
   // Discovery is OFF, and it used to be off in perfect silence. That is a legitimate state — a

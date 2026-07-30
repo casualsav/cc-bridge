@@ -16,6 +16,26 @@ import { dirname, join, basename } from 'node:path'
 
 const CHANNELS_DIR = join(homedir(), '.claude', 'channels')
 
+// This hook runs with the cwd of whatever session started it, and a session's cwd can be a scratch
+// dir that its own harness deletes. A process standing in a deleted dir cannot spawn ANYTHING under
+// Bun (`ENOENT … posix_spawn`, absolute paths included) — so on 2026-07-30 this file launched
+// watchdogs that could not launch daemons, twice, and the fleet read down both times. Anchor before
+// spawning anything; every path in this file is absolute, so moving is free.
+//
+// Deliberately inlined rather than imported from common.ts's anchorCwd (the canonical copy, with the
+// full mechanism written out): importing common.ts would load slot 1's .env into this process, and
+// the env-stripping below exists precisely to keep one instance's token out of another's daemon.
+const STABLE_CWD = existsSync(CHANNELS_DIR) ? CHANNELS_DIR : '/'
+try {
+  const before = process.cwd()
+  if (before !== STABLE_CWD) {
+    process.chdir(STABLE_CWD)
+    // existsSync, not try/catch: process.cwd() keeps returning the stale path after the directory is
+    // gone, so a poisoned process looks healthy to itself.
+    if (!existsSync(before)) process.stderr.write(`ensure-daemon: inherited a DELETED cwd (${before}) — anchored to ${STABLE_CWD}; spawns would have failed with ENOENT\n`)
+  }
+} catch { try { process.chdir(STABLE_CWD) } catch {} }
+
 // Newest plugin-cache copy of daemon.ts (version dirs sort ascending; take the last).
 // Marketplace id (also the plugin-cache dir name).
 const MKT_IDS = ['cc-bridge']
@@ -248,8 +268,14 @@ async function ensureInstance(stateDir: string, log: number): Promise<void> {
       note(log, `ensure-daemon: replaced pre-usr1 watchdog for ${stateDir}`)
     }
     if (!wdPid) {
-      const child = spawn('bun', [watchdogPath], { detached: true, stdio: ['ignore', log, log], env })
+      // `cwd` explicit on every supervision launch — a watchdog must never inherit a session's cwd
+      // (see the anchor at the top of this file). The 'error' listener is not optional either: spawn
+      // reports an unresolvable interpreter ASYNCHRONOUSLY, and with no listener that is an uncaught
+      // exception that kills this hook silently.
+      const child = spawn('bun', [watchdogPath], { detached: true, stdio: ['ignore', log, log], env, cwd: STABLE_CWD })
+      child.on('error', e => note(log, `ensure-daemon: launching the watchdog for ${stateDir} FAILED (${e}) — nothing is supervising this instance`))
       child.unref()
+      if (child.pid == null) return   // spawn already failed; the listener above names it
       note(log, `ensure-daemon: launched watchdog for ${stateDir} (pid ${child.pid}) — it brings up the daemon`)
     } else if (daemonDown) {
       try { process.kill(wdPid, 'SIGUSR1') } catch {}
@@ -259,8 +285,10 @@ async function ensureInstance(stateDir: string, log: number): Promise<void> {
   }
   // No watchdog in this cache (very old build) — spawn the daemon directly, as before.
   if (daemonDown) {
-    const child = spawn('bun', [daemonPath], { detached: true, stdio: ['ignore', log, log], env })
+    const child = spawn('bun', [daemonPath], { detached: true, stdio: ['ignore', log, log], env, cwd: STABLE_CWD })
+    child.on('error', e => note(log, `ensure-daemon: launching daemon ${daemonPath} for ${stateDir} FAILED (${e})`))
     child.unref()
+    if (child.pid == null) return
     note(log, `ensure-daemon: launched daemon ${daemonPath} for ${stateDir} (pid ${child.pid})`)
   }
 }

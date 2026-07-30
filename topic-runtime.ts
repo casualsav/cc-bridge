@@ -6,7 +6,7 @@
 import type { ChannelAdapter } from './channel.ts'
 import { basename } from 'node:path'
 import { exec } from './proc.ts'
-import { paneCwd, paneAlive, paneCommand } from './pane-io.ts'
+import { paneCwd, paneAlive, paneCommand, paneLiveness } from './pane-io.ts'
 import { escapeHtml } from './markdown.ts'
 import { loadAccess } from './access.ts'
 import { accountForTranscript } from './accounts.ts'
@@ -371,7 +371,11 @@ export async function ensureSessionTopic(paneId: string): Promise<void> {
 // mass-pruning the registry and close/reopen-flapping topics.
 export async function closeTopicForPane(pane: string): Promise<void> {
   if (restartingPanes.has(pane)) return   // planned bounce (claude update), not a death
-  if (await paneAlive(pane)) return   // transient registry miss, not a real death
+  // POSITIVE evidence of death, or nothing happens. 'alive' is the transient-registry-miss case this
+  // check was written for; 'unknown' (tmux unreachable — the 2026-07-30 blind daemon) is not evidence
+  // of anything, and everything below this line destroys state: it closes topics, drops rows and
+  // reaps the owner's chat-lane binding.
+  if ((await paneLiveness(pane)) !== 'gone') return
   const sid = paneSessionCache.get(pane)
   if (!sid) return
   if (await paneForSession(sid)) return   // session migrated to another pane (restart respawn) — still live
@@ -425,6 +429,11 @@ export async function generalAnchorLost(group: string): Promise<void> {
 // close — the lane lives only in that DM). Mirrors generalAnchorLost, minus the re-anchor button:
 // the lane just re-provisions itself on the owner's next message (ensureChatLane).
 async function chatLaneLost(chatId: string): Promise<void> {
+  // Say it in the log. Dropping this binding is the single most consequential thing this file does to
+  // an owner's surface — `tg send` starts refusing while text relay keeps working, which reads as
+  // "half the bridge is broken" — and until now it happened in complete silence, so the 2026-07-30
+  // investigation could not even tell WHEN the lane was unbound.
+  process.stderr.write(`daemon: chat lane for chat ${chatId} lost its session — binding dropped (dmChat entry removed)\n`)
   clearDmChatSession(chatId)
   await channel.sendText(chatId, '💤 Chat session ended — your next message starts a fresh one.').catch(() => {})
 }
@@ -534,14 +543,22 @@ export async function reconcileTopics(panes: string[]): Promise<void> {
   // backstop) need the group and are skipped without one.
   const group = isTopicMode() ? getGroupChatId() : null
   if (isTopicMode() && !group) return
-  // A scan that returned NO panes while rows exist is a broken scan, not an empty machine — tmux was
-  // unreachable, or the daemon is still coming up. Every row would miss, and two such ticks used to
-  // be enough to delete them all (2026-07-30: five live sessions lost this way). Bail before the miss
-  // counters move, so an inconclusive tick costs nothing instead of costing the store.
-  if (!panes.length && listTopics().length) {
+  // A scan that returned NO panes while sessions are on record is a broken scan, not an empty machine
+  // — tmux was unreachable, or the daemon is still coming up. Every record would miss, and two such
+  // ticks used to be enough to delete them all (2026-07-30: five live sessions lost this way). Bail
+  // before the miss counters move, so an inconclusive tick costs nothing instead of costing the store.
+  //
+  // Counting EVERY kind of record this function can destroy, not just topic rows: a DM chat lane lives
+  // in `dmChat` and the General anchor in its own field, so a box whose rows were already lost (or one
+  // that only ever had a lane) fell straight through this guard and had its lane binding reaped — the
+  // second loss of the owner's chat lane on 2026-07-30, from the very tick that was supposed to be
+  // protecting it. The guard's subject is "does this scan contradict something we know", so it has to
+  // count everything we know.
+  const known = listTopics().length + listDmChatSessions().length + (getGeneralSession() ? 1 : 0)
+  if (!panes.length && known) {
     if (Date.now() - lastEmptyScanWarnAt > EMPTY_SCAN_WARN_INTERVAL_MS) {
       lastEmptyScanWarnAt = Date.now()
-      process.stderr.write(`daemon: topic reconcile skipped — pane scan returned 0 panes while ${listTopics().length} row(s) exist (inconclusive, not empty)\n`)
+      process.stderr.write(`daemon: topic reconcile skipped — pane scan returned 0 panes while ${known} session record(s) exist (inconclusive, not empty)\n`)
     }
     return
   }

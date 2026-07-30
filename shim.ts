@@ -9,7 +9,7 @@ import { spawn } from 'node:child_process'
 import { openSync, closeSync, statSync, renameSync, mkdirSync, readFileSync } from 'node:fs'
 import net from 'node:net'
 import { join } from 'node:path'
-import { frame, makeLineReader, computeCodeFingerprint, STATE_DIR, SOCKET_PATH, DAEMON_PID_FILE, type ShimToDaemon, type DaemonToShim, buildVersion, staleDaemonVerdict } from './common.ts'
+import { frame, makeLineReader, computeCodeFingerprint, STATE_DIR, SOCKET_PATH, DAEMON_PID_FILE, type ShimToDaemon, type DaemonToShim, buildVersion, staleDaemonVerdict, stableCwd } from './common.ts'
 
 // Our view of the on-disk code. A different fingerprint on the daemon means different code — it
 // does NOT mean the daemon is behind, which is what the build version decides (staleDaemonVerdict).
@@ -83,6 +83,7 @@ function spawnDaemon(): void {
     detached: true,
     stdio: ['ignore', log, log],
     env: process.env,
+    cwd: stableCwd(),   // never the MCP client's cwd — a daemon in a deleted dir can't spawn tmux (see common.ts anchorCwd)
   })
   child.unref()
   if (typeof log === 'number') { try { closeSync(log) } catch {} }   // parent's copy; child keeps its own

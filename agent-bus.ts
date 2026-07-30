@@ -619,7 +619,16 @@ export function resolveEndpoint(name: string, endpoints: BusEndpoint[]): { kind:
   if (open.length > 1) {
     return { error: `endpoint "${want}" is ambiguous (${open.length} live endpoints share that name) — rename one to disambiguate` }
   }
-  const closed = endpoints.some(e => e.closed && normalizeEndpointName(e.name) === want)
+  // A row can legitimately have NO name: the startup rebuild re-derives rows for live sessions the
+  // store lost, and it may not invent names (guessing from a cwd would mint a second `@proj` that
+  // shadows a real one). Those rows show on the roster as their session id — which is what a reader
+  // then types — so the id has to BE an address, or recovered sessions are visible and unreachable
+  // (found live 2026-07-30, mid-fleet-prune: `tg ask @397934cb` → "no endpoint named"). Ids are 8 hex
+  // chars and names are words, so this can only match what was meant; it runs after name resolution,
+  // so a name never loses to an id.
+  const byId = endpoints.filter(e => !e.closed && e.id.toLowerCase() === want)
+  if (byId.length === 1) return { kind: byId[0].kind, id: byId[0].id }
+  const closed = endpoints.some(e => (e.closed && normalizeEndpointName(e.name) === want) || (e.closed && e.id.toLowerCase() === want))
   // The moment of choice. A down endpoint used to read as a plumbing fault, and the reflex it
   // produced was `tg reopen` — which resumed a big FINISHED session to deliver a brand-new
   // self-contained task, paying a full backlog replay for context the task never needed. So the

@@ -10,8 +10,14 @@ import { spawn } from 'node:child_process'
 import { readdirSync, statSync, openSync, existsSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { SOCKET_PATH, STATE_DIR, WATCHDOG_PID_FILE, DAEMON_LOG_FILE } from './common.ts'
+import { SOCKET_PATH, STATE_DIR, WATCHDOG_PID_FILE, DAEMON_LOG_FILE, anchorCwd, cwdFaultHint, stableCwd } from './common.ts'
 import { tokenHeldByOther, readTokenFromEnv } from './token-lock.ts'
+
+// FIRST thing, before anything can spawn: leave whatever cwd we inherited. ensure-daemon runs from a
+// SessionStart hook, so the cwd here is some *other* project's session dir — twice on 2026-07-30 a
+// scratch dir that its harness deleted minutes later, after which this process could not spawn the
+// daemon at all (`ENOENT … posix_spawn`). See common.ts's anchorCwd for the full mechanism.
+anchorCwd('watchdog')
 
 // Our bot token (read from this state dir's .env), to probe the one-daemon-per-token lock before
 // spawning. Null when unreadable → the guard is simply skipped (spawn as before).
@@ -114,26 +120,29 @@ function rotateLog(): void {
 // the hard way, by shipping a try/catch-only fix in 0.4.278 and watching the watchdog die the same
 // way on the next respawn. The try/catch stays for the genuinely synchronous failure (openSync).
 //
-// `process.execPath` rather than a bare 'bun' removes the PATH lookup as a variable. It is NOT the
-// whole story: the ENOENT recurred naming the fully-resolved /home/ubuntu/.bun/bin/bun, a file that
-// has not changed since May — so what makes it transiently unspawnable is NOT established. (Leading
-// hypothesis, unproven: this file's own SIGCHLD reaper waitpid()s the new child before libuv can read
-// its status — the reaper comment above already notes that stealing child status breaks callers.)
-// Since the trigger is unknown, surviving it is the requirement, not explaining it.
+// The TRIGGER is now established, and it was never the interpreter path: a process whose cwd has been
+// deleted cannot spawn anything under Bun — absolute paths ENOENT exactly like PATH lookups (measured,
+// `scripts/deleted-cwd-spawn.ts`). That is why the ENOENT recurred naming the fully-resolved
+// /home/ubuntu/.bun/bin/bun, a file unchanged since May. `anchorCwd` at the top of this file is the
+// cure; `cwd: stableCwd()` below keeps the daemon out of a dead dir even if we were launched into one;
+// the survival machinery here stays, because a launch can still fail for reasons we don't know.
+// `process.execPath` rather than a bare 'bun' remains right on its own terms — one less variable.
 function spawnDaemon(): void {
   const daemonPath = findDaemon()
   if (!daemonPath) { process.stderr.write('watchdog: daemon.ts not found in plugin cache\n'); return }
   let child: ReturnType<typeof spawn>
   try {
     const log = openSync(DAEMON_LOG_FILE, 'a')
-    child = spawn(process.execPath, [daemonPath], { detached: true, stdio: ['ignore', log, log], env: process.env })
+    // `cwd` explicitly, never inherited: this is the one thing that keeps the DAEMON out of a dead
+    // scratch dir even when an older build of this file (or anything else) launched us into one.
+    child = spawn(process.execPath, [daemonPath], { detached: true, stdio: ['ignore', log, log], env: process.env, cwd: stableCwd() })
   } catch (e) {
     // Return, don't retry in place: the CHECK_MS tick is already the retry cadence, and looping here
     // would turn a persistently missing interpreter into a hot loop.
-    process.stderr.write(`watchdog: could not launch ${daemonPath} (${e}) — staying up; retrying in ${CHECK_MS / 1000}s\n`)
+    process.stderr.write(`watchdog: could not launch ${daemonPath} (${e})${cwdFaultHint()} — staying up; retrying in ${CHECK_MS / 1000}s\n`)
     return
   }
-  child.on('error', e => process.stderr.write(`watchdog: launch of ${daemonPath} failed (${e}) — staying up; retrying in ${CHECK_MS / 1000}s\n`))
+  child.on('error', e => process.stderr.write(`watchdog: launch of ${daemonPath} failed (${e})${cwdFaultHint()} — staying up; retrying in ${CHECK_MS / 1000}s\n`))
   child.unref()
   // A pid-less child means the spawn already failed; the listener above reports it. Claiming
   // "launched … (pid undefined)" here is how the original failure read as a success in the log.

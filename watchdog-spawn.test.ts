@@ -12,7 +12,7 @@
 // guaranteed to fail, exactly as it did in production). No bun is broken on this box — only the
 // child's view of it.
 import { test, expect } from 'bun:test'
-import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, existsSync, linkSync, unlinkSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, existsSync, linkSync, unlinkSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -26,8 +26,20 @@ function sandbox(): { home: string; stateDir: string; marker: string } {
   const verDir = join(home, '.claude', 'plugins', 'cache', 'cc-bridge', 'telegram', '9.9.9')
   mkdirSync(verDir, { recursive: true })
   const marker = join(home, 'spawned.marker')
-  writeFileSync(join(verDir, 'daemon.ts'), `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'up'); setInterval(() => {}, 1000)\n`)
+  // The stub records its OWN pid in the marker, so `cleanup` can end it. It parks forever by design (a
+  // daemon that exits would look like a failed launch to the watchdog) and it is spawned DETACHED, so
+  // killing the watchdog does not take it with it: every run of this file used to leave one parked bun
+  // per successful launch behind. That is where the ~20 stray `wd-spawn` processes found on 2026-07-30
+  // came from — a leak in the proof of a fix, quietly outliving the thing it proved.
+  writeFileSync(join(verDir, 'daemon.ts'), `require('node:fs').writeFileSync(${JSON.stringify(marker)}, String(process.pid)); setInterval(() => {}, 1000)\n`)
   return { home, stateDir, marker }
+}
+
+// End the stub daemon this sandbox launched and remove the sandbox. Best-effort by construction: a
+// test that failed before the launch has no pid to read, which is not an error.
+function cleanup(home: string, marker: string): void {
+  try { const pid = parseInt(readFileSync(marker, 'utf8'), 10); if (pid > 1) process.kill(pid, 'SIGKILL') } catch {}
+  try { rmSync(home, { recursive: true, force: true }) } catch {}
 }
 
 test('with no `bun` on PATH the watchdog still launches the daemon and stays up', async () => {
@@ -46,6 +58,7 @@ test('with no `bun` on PATH the watchdog still launches the daemon and stays up'
   expect(aliveAfter).toBe(true)
   expect(existsSync(marker)).toBe(true)
   expect(err).not.toContain('ENOENT')
+  cleanup(home, marker)   // the stub daemon is detached and parks forever — end it, don't leak it
 })
 
 test('an interpreter that vanishes under it does not kill the watchdog', async () => {
@@ -57,7 +70,7 @@ test('an interpreter that vanishes under it does not kill the watchdog', async (
   //
   // This is the case a try/catch cannot cover: spawn() fails ASYNCHRONOUSLY (pid undefined, then an
   // 'error' event), so without a listener it lands as an uncaught exception and Bun exits.
-  const { home, stateDir } = sandbox()
+  const { home, stateDir, marker } = sandbox()
   const link = join(home, 'bun-hardlink')
   linkSync(process.execPath, link)
 
@@ -80,6 +93,7 @@ test('an interpreter that vanishes under it does not kill the watchdog', async (
   expect(err).toMatch(/failed|could not launch/i)   // it must SAY the launch failed
   expect(aliveAfter).toBe(true)                     // and still be standing to retry
   expect(err).not.toContain('Bun v')                // no crash banner — that's what dying looks like
+  cleanup(home, marker)
 })
 
 test('a launch that cannot succeed leaves the watchdog running to retry', async () => {
@@ -98,6 +112,7 @@ test('a launch that cannot succeed leaves the watchdog running to retry', async 
 
   expect(err).toContain('not found in plugin cache')
   expect(aliveAfter).toBe(true)
+  rmSync(home, { recursive: true, force: true })   // no daemon was launched here — only the dir to drop
 })
 
 test('the daemon is launched via an absolute interpreter, never a bare name', () => {

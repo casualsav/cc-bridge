@@ -355,6 +355,13 @@ export function setDmChatSession(chatId: string, sessionId: string, cwd: string)
   const cur = store.dmChat[chatId]
   if (cur && cur.sessionId === sessionId && cur.cwd === cwd) return
   store.dmChat[chatId] = { sessionId, cwd }
+  // A lane is defined by THIS entry and never has a topics row (topic-runtime's rebuild skips lane
+  // sids for exactly that reason). But a row minted while the binding was missing — the startup
+  // rebuild sees a stamped lane pane and an empty `dmChat`, which is precisely the 2026-07-30 state —
+  // shadows the lane the moment it is rebound: the roster then lists the owner's chat twice, once as
+  // `chat` and once as a nameless session id. Binding is when that becomes knowable, so this is where
+  // it is cleaned up, no matter which order the two facts arrived in.
+  if (store.topics[sessionId]?.headless) delete store.topics[sessionId]
   save()
 }
 export function clearDmChatSession(chatId: string): void {

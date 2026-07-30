@@ -15,11 +15,29 @@ export async function capturePane(paneId: string): Promise<string> {
 }
 
 // Pane validation + injection guard (opus-direct Block B).
-export async function paneAlive(paneId: string): Promise<boolean> {
+//
+// Three-valued on purpose. `paneAlive` answers a yes/no question with a "no" whether tmux said "there
+// is no such pane" or tmux could not be reached at all — and those are opposite facts to anyone about
+// to DELETE state on the strength of a death. On 2026-07-30 a daemon that could not exec tmux at all
+// (deleted cwd → ENOENT) read every pane as gone and reaped the owner's chat-lane binding. Callers
+// that only gate an action keep using paneAlive (refusing on 'unknown' is right for them); callers
+// that destroy something ask for the third value and do nothing when they get it.
+//
+// The discriminator is execFile's own error shape: a NUMERIC `code` means tmux ran and exited nonzero
+// (it looked, and there is no such pane), while a string code (ENOENT/ETIMEDOUT) or a kill signal
+// means we never got an answer.
+export type PaneLiveness = 'alive' | 'gone' | 'unknown'
+export async function paneLiveness(paneId: string): Promise<PaneLiveness> {
   try {
     const { stdout } = await exec('tmux', ['display-message', '-p', '-t', paneId, '#{pane_id}'], { timeout: 2000 })
-    return stdout.trim() === paneId
-  } catch { return false }
+    return stdout.trim() === paneId ? 'alive' : 'gone'
+  } catch (e) {
+    const err = e as { code?: unknown; killed?: boolean }
+    return typeof err?.code === 'number' && !err.killed ? 'gone' : 'unknown'
+  }
+}
+export async function paneAlive(paneId: string): Promise<boolean> {
+  return (await paneLiveness(paneId)) === 'alive'
 }
 
 export async function sendKeys(paneId: string, keys: string[]): Promise<boolean> {
@@ -281,7 +299,14 @@ export class PaneWatcher {
     if (this.injecting) return
     let text: string
     try { text = await capturePane(this.paneId) }
-    catch { this.stop(); this.onDead(); return }
+    catch {
+      // A failed capture is not proof of death — it is also what a daemon that cannot reach tmux at
+      // all sees, for every pane at once (2026-07-30: `daemon: pane %330 died` for the owner's live
+      // chat lane, whose binding the death handler then reaped). Confirm before declaring it, and
+      // keep polling on 'unknown': the pane is either fine or will read 'gone' on a later tick.
+      if ((await paneLiveness(this.paneId)) !== 'gone') return
+      this.stop(); this.onDead(); return
+    }
     primeCapture(this.paneId, text)     // write-through: let the relay tick reuse this fresh capture
     this.onPoll?.(text)                 // every poll — a live working signal even when static
     const h = hashText(text)

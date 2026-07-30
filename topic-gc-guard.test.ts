@@ -46,8 +46,11 @@ mock.module('./proc.ts', () => ({
   sleep: async () => {},
 }))
 
-const { reconcileTopics, rebuildRowsFromStampedPanes } = await import('./topic-runtime.ts')
-const { _resetForTest, getTopicBySession, listTopics } = await import('./topics.ts')
+const { reconcileTopics, rebuildRowsFromStampedPanes, initTopicRuntime } = await import('./topic-runtime.ts')
+// A reap that DOES fire notifies its owner, so the lane tests below need a channel wired in. Minimal
+// on purpose: these tests are about what the store keeps, not what Telegram is told.
+initTopicRuntime({ sendText: async () => ({ messageId: '1' }) } as unknown as Parameters<typeof initTopicRuntime>[0])
+const { _resetForTest, getTopicBySession, listTopics, getDmChatSession, setDmChatSession } = await import('./topics.ts')
 
 const ROW = { headless: true as const, cwd: '/tmp/work', name: 'worker', closed: false, createdAt: 1 }
 
@@ -71,6 +74,38 @@ test('an EMPTY pane scan is inconclusive and must delete nothing', async () => {
   panes = {}
   for (let i = 0; i < 4; i++) await reconcileTopics([])
   expect(getTopicBySession('aaaa0002')).toBeTruthy()
+})
+
+test('an EMPTY pane scan must not reap a DM chat lane binding — even with no topic rows', async () => {
+  // 2026-07-30, the SECOND loss of the owner's chat lane. The inconclusive-scan guard counted only
+  // topic rows, so a store holding a lane and nothing else fell straight through it: zero panes, zero
+  // rows, "nothing to protect" — and the lane loop below then reaped the binding of a live session.
+  // `tg send` refuses with "no chat surface" from that moment on while text relay keeps working, which
+  // is why the half-broken state took hours to read. The lane IS a session record; the guard counts it.
+  _resetForTest({ groupChatId: '-100123', topics: {}, dmChat: { '837047563': { sessionId: 'eeee0001', cwd: '/srv/chat' } } })
+  panes = {}
+  for (let i = 0; i < 4; i++) await reconcileTopics([])
+  expect(getDmChatSession('837047563')).toEqual({ sessionId: 'eeee0001', cwd: '/srv/chat' })
+})
+
+test('a scan that DID see panes still reaps a lane whose session is gone', async () => {
+  // The counterpart: the guard must not turn the lane backstop off. A conclusive scan with no pane
+  // carrying the lane's sid is real evidence, and the binding goes after the 2-miss buffer.
+  _resetForTest({ groupChatId: '-100123', topics: {}, dmChat: { '837047563': { sessionId: 'eeee0002', cwd: '/srv/chat' } } })
+  panes = { '%21': { sid: 'ffff0001', cmd: 'claude' } }   // a live pane, but not the lane's
+  for (let i = 0; i < 3; i++) await reconcileTopics(['%21'])
+  expect(getDmChatSession('837047563')).toBeUndefined()
+})
+
+test('binding a chat lane drops a headless row that shadows it', async () => {
+  // The roster listed the owner's chat twice on 2026-07-30 — once as `chat`, once as a nameless
+  // session id — because the startup rebuild had minted a row for the lane's pane while the binding
+  // was missing (log 04:37:58). Rebinding is the moment the shadow becomes knowable, so it is cleaned
+  // up there, whichever order the two facts arrive in.
+  _resetForTest({ groupChatId: '-100123', topics: { '27f3ff03': { ...ROW, name: '', cwd: '/srv/chat' } }, dmChat: {} })
+  setDmChatSession('837047563', '27f3ff03', '/srv/chat')
+  expect(getTopicBySession('27f3ff03')).toBeUndefined()
+  expect(getDmChatSession('837047563')).toEqual({ sessionId: '27f3ff03', cwd: '/srv/chat' })
 })
 
 test('a stamped pane that still exists vetoes deletion even when claude has exited', async () => {

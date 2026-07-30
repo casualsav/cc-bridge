@@ -1,4 +1,4 @@
-import { chmodSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -106,6 +106,55 @@ export const WATCHDOG_PID_FILE = join(STATE_DIR, 'watchdog.pid')
 // Present while the daemon runs; removed on graceful shutdown — so if it survives to the
 // next startup, the previous instance died uncleanly (a crash) and we announce the restart.
 export const HEARTBEAT_FILE = join(STATE_DIR, 'daemon-heartbeat')
+
+// ---- cwd: a supervision process may never keep the one it INHERITED ----
+//
+// Under Bun, a process whose cwd has been DELETED cannot spawn ANYTHING: every `spawn` fails
+// `ENOENT … posix_spawn '<binary>'`, PATH-resolved or absolute (measured — `scripts/deleted-cwd-spawn.ts`).
+// That is what took the fleet down twice on 2026-07-30. A replay harness in another project ran
+// `claude -p` from `/tmp/predict-replay-*` scratch dirs; their SessionStart hooks ran ensure-daemon,
+// which started watchdogs THERE; the harness then deleted the dirs. Each poisoned watchdog spawned a
+// daemon that inherited the same dead cwd, and that daemon could not run `tmux` — so its pane scan
+// returned 0 panes every tick, the whole fleet read down, spawns failed and asks were refused. It was
+// self-perpetuating: every blind window made `tg` calls see the daemon as down and nudge yet another
+// watchdog into existence from yet another scratch dir.
+//
+// The cure is one line at the top of every long-lived process: stand somewhere nobody deletes. The
+// state dir is that place (it must exist for this process to do anything at all), with `/` as the
+// fallback that cannot be removed. Launch sites ALSO pass `cwd` explicitly, which is what rescues a
+// child from a launcher that is already standing in a deleted dir.
+//
+// Detection is `existsSync`, NOT try/catch: `process.cwd()` keeps returning the stale path after the
+// directory is gone (measured), so a process poisoned this way looks perfectly healthy to itself.
+export function stableCwd(): string {
+  return existsSync(STATE_DIR) ? STATE_DIR : '/'
+}
+export function anchorCwd(who: string): void {
+  const stable = stableCwd()
+  let before: string | null = null
+  try { before = process.cwd() } catch {}
+  if (before === stable) return
+  try { process.chdir(stable) } catch (e) {
+    process.stderr.write(`${who}: could not chdir to ${stable} (${e}) — still standing in ${before ?? 'an unreadable cwd'}\n`)
+    return
+  }
+  // Silent on the ordinary case (started somewhere fine, moved anyway). Loud when the inherited cwd
+  // was ALREADY gone: that process was one spawn away from tonight's outage, and the line is the
+  // only evidence the poisoning happened at all.
+  if (before === null || !existsSync(before)) {
+    process.stderr.write(`${who}: inherited a DELETED cwd (${before ?? 'unreadable'}) — anchored to ${stable}; spawns would have failed with ENOENT\n`)
+  }
+}
+
+// Appended to a spawn failure so ENOENT names its real cause. Tonight's log line said
+// `posix_spawn 'tmux'` with /usr/bin/tmux present and PATH intact, and pointed an hour of
+// investigation at PATH. Empty when the cwd is fine, so it costs nothing on unrelated failures.
+export function cwdFaultHint(): string {
+  let cwd: string | null = null
+  try { cwd = process.cwd() } catch { return ` — NOTE: this process has NO readable cwd, which makes every spawn fail with ENOENT regardless of PATH` }
+  if (existsSync(cwd)) return ''
+  return ` — NOTE: this process's cwd (${cwd}) HAS BEEN DELETED, which makes every spawn fail with ENOENT regardless of PATH; that, not PATH, is the fault`
+}
 
 // Load .env into process.env — real env wins. Runs at import time.
 try {

@@ -53,6 +53,11 @@ type StatusCardDeps = {
   // for a lane whose pane has died (updateTopicPins skips those rather than pinning "No active
   // session" unprompted). Optional so a fake-bot unit test, or a channel without the feature, can omit it.
   dmChatLanes?: () => Promise<Array<{ chat: string; paneId: string | null }>>
+  // Does this box run DM chat lanes AT ALL (the `chat` account is provisioned and a workspace
+  // resolves — daemon's dmChatEligible)? Durable across a lost binding, which is the point: it is what
+  // lets paneForDmChat tell "this DM's lane binding is MISSING" from "this DM never had one". Omitted
+  // (fake-bot tests, channels without the feature) ⇒ classic behaviour, focus as the fallback.
+  dmChatLanesExpected?: () => boolean
   // Newest message id seen in a chat (daemon's msg-tracker, fed by every Bot API result). Diagnostics
   // only: it produces the `gap` field on the pin log line — how far the card sits above the
   // conversation. NOTHING acts on it (the distance-based re-mint it once drove was removed on user
@@ -964,6 +969,17 @@ export async function paneForDmChat(chat: string): Promise<string | null> {
   if (chatLane) return paneForSession(chatLane.sessionId).catch(() => null)
   const userLane = dmLanesOn() ? laneForChat(chat) : undefined
   if (userLane) return paneForSession(userLane.sessionId).catch(() => null)
+  // No binding — and on a box that runs chat lanes, a MISSING binding is a fault, not a licence to
+  // guess. `focus` is a fleet-wide pointer: on 2026-07-30, minutes after the owner's lane binding was
+  // reaped, it handed his DM card a worker's coding pane (%332) — that session's model, effort and
+  // context rendered as if it were his own conversation. Refuse instead, loudly, the same way a
+  // surfaceless `tg send` refuses (v0.4.280): a card that says nothing beats a card that lies about
+  // whose session it is. A classic single-session DM install (no chat account provisioned, no lanes)
+  // is a different box and keeps the fallback — there, focus IS the conversation.
+  if (deps.dmChatLanesExpected?.()) {
+    logPinSkip(chat, 'no chat-lane binding for this DM — refusing to render another session’s pane')
+    return null
+  }
   return focus.activePaneId
 }
 
