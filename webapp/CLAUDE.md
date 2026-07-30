@@ -375,6 +375,22 @@ give it.
   (ink, not touch targets; the pill's 10% margin absorbs it). `BackButton` replaces our chip in
   fullscreen only; whether the client swaps ✕ Close for ← is unverified on a device.
 
+## Toasts
+
+- **Success confirmations are OFF; failures are not — and the split is the point.** The owner,
+  2026-07-30, on a green "Spawned test" over his list: the surface behind the bar already shows the
+  outcome (a new card, a dropped card, a repainted settings value), so the bar repeated what the eye
+  had. A failure has no such surface, so `showErr` is untouched — an action failing silently is worse
+  than a redundant confirmation. Retiring the toast function outright would have crossed that line.
+- **`showDone(m)` is the retired family — 11 sites, all still calling with their text**, gated by one
+  `SUCCESS_TOASTS` flag. `showOk` keeps exactly **one** live caller: the dial's `"… requested…"`, which
+  is not a confirmation at all (an effort change can sit behind Claude Code's own confirm for seconds,
+  so it reports a REQUEST and the 3s poll reports the outcome). A blanket no-op inside `showOk` would
+  have taken that one out silently — `toasts.mjs` pins it firing.
+- **Removing a confirmation is only sound if something else says the same thing**, so `toasts.mjs`
+  asserts the outcome per action alongside the absent bar, and drives the failure leg on the same
+  action to prove the red bar still carries the server's own reason.
+
 ## The tab row (hidden — a trial)
 
 - **`SHOW_TABS` is the ONE switch, and the row is hidden, never deleted** — the owner's

@@ -1873,7 +1873,20 @@ function floatToast() {
   errBox.classList.toggle("docked", drilled);
 }
 function showErr(m) { floatToast(); errBox.textContent = m; errBox.classList.add("show"); setTimeout(() => errBox.classList.remove("show"), 4000); }
+// The green bar. Exactly ONE live caller now — the dial's "… requested…", which is not a confirmation
+// of anything: an effort change can sit behind Claude Code's own confirm for seconds, so that bar says
+// a switch was ASKED for and the 3s poll is what says it landed. Every other green bar went through
+// showDone below.
 function showOk(m) { floatToast(); errBox.textContent = m; errBox.classList.add("show", "ok"); setTimeout(() => errBox.classList.remove("show", "ok"), 2500); }
+// SUCCESS CONFIRMATIONS ARE OFF (the owner, 2026-07-30, on a green "Spawned test" sliding over his
+// list): the surface behind the bar already shows the outcome — the card list, the file list, the
+// settings value, the schedule row — so the bar repeated what the eye had already been given. Failures
+// keep their bar (`showErr`); an action failing silently is worse than a redundant confirmation, which
+// is the boundary this split draws and the reason it is a split rather than a deletion of the toast.
+// Every retired site still CALLS through here with its text intact, so the family comes back by
+// flipping this one flag — no machinery, and nothing to re-derive from a diff.
+const SUCCESS_TOASTS = false;
+const showDone = m => { if (SUCCESS_TOASTS) showOk(m); };
 
 const LONG_MSG = 700;   // chars past which a feed bubble collapses behind a tap-to-expand
 // Which row is "the last reply" — the one the fold exempts and the one paintFeed fetches in full.
@@ -1988,7 +2001,7 @@ $("vsave").onclick = async () => {
   vMtime = d.mtime; $("vbody").textContent = ta.value;
   ta.style.display = "none"; $("vbody").style.display = "block";
   $("vsave").style.display = "none"; $("vedit").style.display = "";
-  showOk("Saved");
+  showDone("Saved");
 };
 
 // Per-row ⋯ menu (rename / delete-to-trash); native Telegram popups when available, prompt() otherwise.
@@ -2000,7 +2013,7 @@ function rowMenu(path, type) {
   if (buttons.length < 3) buttons.push({ id: "cancel", type: "cancel" });   // Telegram popups allow ≤3 buttons
   const act = id => {
     if (id === "download") download(path);
-    else if (id === "rename") { const nn = prompt('Rename "' + name + '" to:', name); if (nn && nn !== name) writeOp("/api/rename", { path, newName: nn }).then(d => { if (d) { showOk("Renamed"); ls(cur); } }); }
+    else if (id === "rename") { const nn = prompt('Rename "' + name + '" to:', name); if (nn && nn !== name) writeOp("/api/rename", { path, newName: nn }).then(d => { if (d) { showDone("Renamed"); ls(cur); } }); }
     else if (id === "delete") confirmDelete(path, name);
   };
   if (tg && tg.showPopup) tg.showPopup({ title: name, message: "File actions", buttons }, act);
@@ -2011,7 +2024,7 @@ function rowMenu(path, type) {
   }
 }
 function confirmDelete(path, name) {
-  const go = () => writeOp("/api/rm", { path }).then(d => { if (d) { showOk("Moved to trash"); ls(cur); } });
+  const go = () => writeOp("/api/rm", { path }).then(d => { if (d) { showDone("Moved to trash"); ls(cur); } });
   if (tg && tg.showConfirm) tg.showConfirm('Move "' + name + '" to trash?', ok => { if (ok) go(); });
   else if (confirm('Move "' + name + '" to trash?')) go();
 }
@@ -2019,7 +2032,7 @@ async function newFolder() {
   const n = prompt("New folder name:");
   if (!n) return;
   const d = await writeOp("/api/mkdir", { path: cur, name: n });
-  if (d) { showOk("Folder created"); ls(cur); }
+  if (d) { showDone("Folder created"); ls(cur); }
 }
 // Upload from device: a hidden <input type=file> opens the native picker; each chosen file is POSTed
 // as multipart to /api/upload (into the folder open when picked), then the folder refreshes. Collisions
@@ -2041,7 +2054,7 @@ uploadInput.onchange = async () => {
       okN++;
     } catch { showErr("upload failed: " + f.name); }
   }
-  if (okN) { showOk("Uploaded " + okN + " file" + (okN === 1 ? "" : "s")); if (cur === dir) ls(dir); }
+  if (okN) { showDone("Uploaded " + okN + " file" + (okN === 1 ? "" : "s")); if (cur === dir) ls(dir); }
 };
 
 // Mint a short-lived download token (authed) so a header-less fetch — Telegram's native saver or the
@@ -2210,7 +2223,7 @@ async function renderSettings() {
 }
 async function setSetting(key, value) {
   const d = await writeOp("/api/settings/set", { key, value });
-  if (d) { showOk("Updated"); if (key === "fileBrowser") { location.reload(); return; } renderSettings(); }
+  if (d) { showDone("Updated"); if (key === "fileBrowser") { location.reload(); return; } renderSettings(); }
 }
 
 // ---- Sessions dashboard (homepage): one card per session, tap → drill-in ----
@@ -2329,7 +2342,7 @@ async function closeSessionCard(sid, name) {
     if (!(await askConfirm(d.confirm))) return;
     d = await writeOp("/api/session/act", { sid, action: "close", confirmed: true });
   }
-  if (d) { showOk("Closing…"); renderSessions(); }
+  if (d) { showDone("Closing…"); renderSessions(); }
 }
 // A session's dial — model, effort, mode, agent — as escaped fragments for the LIST card's chips.
 // It used to feed the chat header's subtitle too; that header now shows the session's cwd and its
@@ -3029,7 +3042,7 @@ async function applyDial(kind, val) {
   showOk(label + " requested…");
   renderDrill();
 }
-$("dstop").onclick = async () => { if (await sessionAct("stop")) showOk("Interrupted"); };
+$("dstop").onclick = async () => { if (await sessionAct("stop")) showDone("Interrupted"); };
 // Android voice dictation keeps its insertion session open across a send: clearing the composer
 // below does not end it, and the IME goes on to commit whatever trailing chunk of speech it had
 // already buffered — straight into the now-empty field a beat later. Watched live: the full
@@ -3633,7 +3646,7 @@ $("spgo").onclick = async () => {
   $("spgo").disabled = false;
   if (!d) return;   // writeOp surfaced the error
   closeSheet("spawn"); $("spname").value = "";
-  showOk("Spawned " + d.name);
+  showDone("Spawned " + d.name);
   renderSessions();
   if (d.sid) setTimeout(() => openDrill(d.sid, d.name), 500);
 };
@@ -3663,7 +3676,7 @@ async function renderAuto() {
   el.innerHTML = html;
   el.querySelectorAll(".xbtn").forEach(b => b.onclick = async () => {
     const d2 = await writeOp("/api/auto/cancel", { kind: b.dataset.kind, id: b.dataset.id });
-    if (d2) { showOk("Cancelled"); renderAuto(); }
+    if (d2) { showDone("Cancelled"); renderAuto(); }
   });
   $("schedadd").onclick = openSchedSheet;
 }
@@ -3695,7 +3708,7 @@ $("scgo").onclick = async () => {
   $("scgo").disabled = false;
   if (!d) return;   // writeOp surfaced the error
   closeSheet("sched"); $("scwhen").value = ""; $("sctext").value = "";
-  showOk("Scheduled " + (d.summary || ""));
+  showDone("Scheduled " + (d.summary || ""));
   renderAuto();
 };
 

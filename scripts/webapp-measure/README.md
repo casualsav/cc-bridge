@@ -216,6 +216,18 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   green-over-card at whatever phase the frame caught (52,100,68) and
                                   #   reads as a colour change on both pages. Same pinned-baseline split
                                   #   as waitstate: 4 STATE checks must fail there, 9 guards must hold
+    node toasts.mjs [page] [out]  # the GREEN bar gone and the RED one kept. Drives spawn · close ·
+                                  #   settings-write · interrupt through the app's own write path with
+                                  #   `fetch` stubbed (writeOp is where the ok/error branch lives, so
+                                  #   stubbing writeOp would replace the code under test) and asserts
+                                  #   three things per action: no bar as RENDERED, the outcome still
+                                  #   reaching the screen (new card / dropped card / repainted value —
+                                  #   a removal is only safe because something else says it), and the
+                                  #   failure leg on the same action still raising the red bar with the
+                                  #   server's reason. Plus the one green bar that stays: the dial's
+                                  #   "… requested…", which reports a request and not an outcome.
+                                  #   Pinned control (cf999f2): all 4 no-bar checks fail there, every
+                                  #   outcome and failure check passes
     node dotparity.mjs [page][out] # THE SAME SESSION, THE SAME MOMENT, THE SAME DOT — the Sessions card
                                   #   and the drill-in header it opens onto, rendered off ONE fixture in
                                   #   one page, over every state (working · waiting · waiting CHAT lane ·
