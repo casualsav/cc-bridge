@@ -7,10 +7,15 @@
 // Split like the rest of the codebase: renderHermesPrompt / parseHermesResult / hermesArgv are PURE
 // (unit-tested); runHermes wraps them around child_process.spawn with a hard timeout + kill discipline.
 import { spawn } from 'node:child_process'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 
 export type HermesEndpoint = { name: string; profile: string; cmd?: string[]; timeout_s?: number; cwd?: string }
 export type HermesTask = { id: number; from: string; room: string; text: string; refs: string[]; sharedDir: string }
 export type HermesResult = { ok: true; text: string } | { ok: false; error: string }
+// Did a child process actually come up? Separated from HermesResult because "dispatched" and
+// "answered" are different claims, and the bus used to report the second while only knowing neither.
+export type HermesStart = { ok: true } | { ok: false; error: string }
 
 // Agent runs are minutes; keep the default generous but well under ASK_TTL_MS (30 min) so a hung run
 // answers with an error long before the pending would rot to its TTL.
@@ -44,26 +49,56 @@ export function hermesArgv(cfg: HermesEndpoint, prompt: string): string[] {
   return [...base, prompt]
 }
 
-// Spawn the one-shot, buffer stdout+stderr, enforce a hard timeout with SIGTERM→grace→SIGKILL. Resolves
-// to a HermesResult and NEVER rejects — an errored run is still an "answer" so the asker never hangs.
-export function runHermes(cfg: HermesEndpoint, task: HermesTask): Promise<HermesResult> {
+// `hermes` installs to ~/.local/bin, and the daemon does NOT reliably have that on its PATH: started
+// by hand or by a deploy it inherits a login shell's PATH, but respawned by the watchdog (a bare
+// `bash -c` loop) it inherits the bare one — so the same code found the binary or didn't depending on
+// who last restarted the bridge. Prepend it explicitly, the same way scoutRepo does for `claude`. PURE.
+export function hermesEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const localBin = join(homedir(), '.local', 'bin')
+  const path = base.PATH ?? ''
+  if (path.split(':').includes(localBin)) return { ...base }
+  return { ...base, PATH: path ? `${localBin}:${path}` : localBin }
+}
+
+// Spawn the one-shot and hand back BOTH facts separately: `started` settles as soon as the child is up
+// (or as soon as it is known it never will be — ENOENT, EACCES), `done` carries the answer. The split
+// exists because `tg ask` reports "running" synchronously: with one promise it could only guess, and it
+// guessed "running" for a child that never existed. Neither promise ever rejects.
+export function startHermes(cfg: HermesEndpoint, task: HermesTask): { started: Promise<HermesStart>; done: Promise<HermesResult> } {
   const argv = hermesArgv(cfg, renderHermesPrompt(task))
   const timeoutS = cfg.timeout_s ?? DEFAULT_HERMES_TIMEOUT_S
-  return new Promise<HermesResult>(resolve => {
-    let done = false
+  let settleStart: (s: HermesStart) => void = () => {}
+  let startDone = false
+  const started = new Promise<HermesStart>(res => { settleStart = s => { if (!startDone) { startDone = true; res(s) } } })
+  const done = new Promise<HermesResult>(resolve => {
+    let settled = false
     let timer: ReturnType<typeof setTimeout> | undefined
     let killTimer: ReturnType<typeof setTimeout> | undefined
-    const finish = (r: HermesResult) => { if (done) return; done = true; if (timer) clearTimeout(timer); resolve(r) }
+    // A run that ends before the child was ever confirmed up did not start: settle `started` with the
+    // same cause, so no caller can be told "running" about a process that isn't.
+    const finish = (r: HermesResult) => {
+      if (settled) return; settled = true
+      settleStart(r.ok ? { ok: true } : { ok: false, error: r.error })
+      if (timer) clearTimeout(timer); resolve(r)
+    }
     let child: ReturnType<typeof spawn>
     try {
-      child = spawn(argv[0], argv.slice(1), { cwd: cfg.cwd, stdio: ['ignore', 'pipe', 'pipe'] })
+      child = spawn(argv[0], argv.slice(1), { cwd: cfg.cwd, env: hermesEnv(), stdio: ['ignore', 'pipe', 'pipe'] })
     } catch (e) { finish({ ok: false, error: `hermes spawn failed: ${e instanceof Error ? e.message : String(e)}` }); return }
     let out = '', err = ''
     child.stdout?.on('data', d => { out += String(d) })
     child.stderr?.on('data', d => { err += String(d) })
     const kill = () => { try { child.kill('SIGTERM') } catch {} ; killTimer = setTimeout(() => { try { child.kill('SIGKILL') } catch {} }, 5000); killTimer.unref?.() }
     timer = setTimeout(() => { kill(); finish({ ok: false, error: `hermes timed out after ${timeoutS}s` }) }, timeoutS * 1000)
+    child.on('spawn', () => settleStart({ ok: true }))
     child.on('error', e => finish({ ok: false, error: `hermes process error: ${e.message}` }))
     child.on('close', code => { if (killTimer) clearTimeout(killTimer); finish(parseHermesResult(out, err, code)) })
   })
+  return { started, done }
+}
+
+// The whole run as one promise — every caller that only wants the answer. NEVER rejects: an errored run
+// is still an "answer" so the asker never hangs.
+export function runHermes(cfg: HermesEndpoint, task: HermesTask): Promise<HermesResult> {
+  return startHermes(cfg, task).done
 }

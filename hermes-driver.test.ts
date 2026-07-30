@@ -1,5 +1,7 @@
 import { test, expect } from 'bun:test'
-import { renderHermesPrompt, parseHermesResult, hermesArgv, runHermes, type HermesTask } from './hermes-driver.ts'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
+import { renderHermesPrompt, parseHermesResult, hermesArgv, hermesEnv, runHermes, startHermes, type HermesTask } from './hermes-driver.ts'
 
 const task = (over: Partial<HermesTask> = {}): HermesTask =>
   ({ id: 1, from: 'claude-tg', room: '-100', text: 'summarize the diff', refs: [], sharedDir: '/s/agent-bus/-100/shared', ...over })
@@ -68,4 +70,36 @@ test('runHermes: a non-zero exit becomes an error answer (never hangs)', async (
 test('runHermes: empty output on a clean exit is an error, not an empty answer', async () => {
   const r = await runHermes({ name: 't', profile: 'x', cmd: ['true'] }, task())
   expect(r.ok).toBe(false)
+})
+
+// ---- hermesEnv (pure) — the regression: `hermes` lives in ~/.local/bin, which the daemon's PATH has
+// only when a login shell started it; the watchdog's respawn does not. ----
+
+test('hermesEnv prepends ~/.local/bin to a PATH that lacks it, keeping the rest of the env', () => {
+  const e = hermesEnv({ PATH: '/usr/bin:/bin', HOME: '/home/x' })
+  expect(e.PATH).toBe(`${join(homedir(), '.local', 'bin')}:/usr/bin:/bin`)
+  expect(e.HOME).toBe('/home/x')
+})
+
+test('hermesEnv leaves a PATH that already has ~/.local/bin untouched', () => {
+  const path = `/usr/bin:${join(homedir(), '.local', 'bin')}:/bin`
+  expect(hermesEnv({ PATH: path }).PATH).toBe(path)
+})
+
+// ---- startHermes: "did it come up?" is a separate fact from "what did it answer?" ----
+
+test('startHermes: a missing executable settles `started` as a failure naming the cause', async () => {
+  const { started, done } = startHermes({ name: 't', profile: 'x', cmd: ['definitely-not-a-binary-xyz'] }, task())
+  const s = await started
+  expect(s.ok).toBe(false)
+  expect((s as { error: string }).error).toMatch(/not found|ENOENT|spawn/i)
+  expect((await done).ok).toBe(false)   // and the run still answers rather than hanging
+})
+
+test('startHermes: a real child settles `started` ok before its answer arrives', async () => {
+  const { started, done } = startHermes({ name: 't', profile: 'x', cmd: ['printf', '%s'] }, task({ text: 'PING-XYZ' }))
+  expect((await started).ok).toBe(true)
+  const r = await done
+  expect(r.ok).toBe(true)
+  expect((r as { text: string }).text).toContain('PING-XYZ')
 })

@@ -109,7 +109,7 @@ import {
 } from './topic-runtime.ts'
 import { latchMode, type ModeLatch } from './mode-latch.ts'
 import { watchVerdict, watchNoticeText, existingWatch, alreadyWatchingText, type BusWatch, type WatchOutcome } from './watch-plan.ts'
-import { startWebapp, type SettingsView as WebappSettingsView, type SessionCard as WebappSessionCard, type SessionFeed as WebappSessionFeed, type AutomationView as WebappAutomationView } from './webapp.ts'
+import { startWebapp, type SettingsView as WebappSettingsView, type SessionCard as WebappSessionCard, type SessionFeed as WebappSessionFeed, type AutomationView as WebappAutomationView, type UsageView as WebappUsageView } from './webapp.ts'
 import { startTunnel, ensureCloudflared, tailscaleFunnelUrl, type Tunnel } from './tunnel.ts'
 import { sendRichMessage, sendRichMessageDraft, editRichMessage, toInputRichMessage, htmlPanelToRich, callTelegram, normalizeRichInbound, telegramRefused, type InputRichMessage } from './richmsg.ts'
 import { parseAvatars, resolveAvatar, type Avatar } from './avatars.ts'
@@ -148,7 +148,7 @@ import {
 } from './wait-state.ts'
 import { planTemplateRefresh } from './chat-templates.ts'
 import { laneForChat, bindLane, chatForLaneSession, noteLaneCwd, dmLanesOn, fleetMode, fleetSurface, listLanes, unbindLane } from './dm-lanes.ts'
-import { runHermes, type HermesEndpoint, type HermesTask } from './hermes-driver.ts'
+import { startHermes, type HermesEndpoint, type HermesStart, type HermesTask } from './hermes-driver.ts'
 import {
   initPromptRelay, relayPromptToTelegram, relayPermissionToTelegram, sweepPermStorms,
   permStorms, multiSelectKeyboard, formatPermission, relayStuckScreen, renderStuckHtml,
@@ -161,7 +161,7 @@ import {
   initStatusCard, statusCardText, statusKeyboard, updateSessionPin, updateTopicPins,
   removeSessionPins, refreshSessionPin, forgetChatPin, armChatPin, sessionPins, pinTextCache, persistSessionPins,
   clearAllPins, clearTopicPins, createSessionPin, invalidatePaneStatus, changesPaneContext, paneStatus, lastModelInTranscript, lastVersionInTranscript,
-  prettyModel, modeBadge, lastTodosInTranscript, codexPrettyModel,
+  prettyModel, modeBadge, lastTodosInTranscript, codexPrettyModel, usageWindows,
 } from './status-card.ts'
 import { buildTakeoverBrief } from './takeover-brief.ts'
 import { CODEX_HOME } from './codex-transcript.ts'
@@ -3381,23 +3381,46 @@ async function deliverAnswerToAsker(pending: BusPending, answerer: string, rawBo
   return `answered @${cur.fromName} (ask ${cur.id})${late ? ' (late — delivered after the timeout)' : ''}`
 }
 
-// Run a hermes ask end-to-end: mark it delivered (arms the TTL from spawn), spawn `hermes -z`, and
+// Run a hermes ask end-to-end: spawn `hermes -z`, mark the ask delivered (arms the TTL from spawn), and
 // route the final text (or a readable error) back to the asker via deliverAnswerToAsker. Concurrent —
 // no queue (a subprocess has no busy-pane to clobber); hermesInFlight tracks live children.
-async function runHermesAsk(pending: BusPending, cfg: HermesEndpoint): Promise<void> {
+//
+// RETURNS THE DISPATCH OUTCOME, awaited by the caller, and the rest runs detached. That split is the
+// fix for a failure nobody could see: `hermes` lives in ~/.local/bin, which a watchdog-respawned daemon
+// does not have on its PATH, so the child died with ENOENT — while `tg ask` had already answered
+// "running" and the row sat open until a restart swept it. A child that never came up closes its own
+// ask HERE and names the cause to the asker's own CLI call. Nothing about a hermes dispatch may be
+// reported before it is known.
+async function runHermesAsk(pending: BusPending, cfg: HermesEndpoint): Promise<HermesStart> {
   const room = busLedgerRoom()
+  const task: HermesTask = { id: pending.id, from: pending.fromName, room, text: pending.text, refs: pending.refs, sharedDir: sharedDir(room) }
+  const { started, done } = startHermes(cfg, task)
+  const start = await started
+  if (!start.ok) {
+    // Not an open ask — it never began. Close the row, ledger the cause (so `tg history` shows it
+    // resolved rather than pending forever), and log it; the caller relays the same text as an error.
+    removePending(pending.id)
+    appendLedger(room, { ts: Date.now(), kind: 'answer', from: cfg.name, to: pending.fromName, id: pending.id, text: `⚠️ dispatch failed: ${start.error}`, refs: [] })
+    process.stderr.write(`daemon: hermes ${cfg.name} ask ${pending.id} NOT DISPATCHED — ${start.error}\n`)
+    return start
+  }
   markInjected(pending.id, Date.now())
   hermesInFlight.add(pending.id)
-  try {
-    const task: HermesTask = { id: pending.id, from: pending.fromName, room, text: pending.text, refs: pending.refs, sharedDir: sharedDir(room) }
-    const result = await runHermes(cfg, task)
-    const body = result.ok ? result.text : `⚠️ @${cfg.name} couldn't complete ask ${pending.id}: ${result.error}`
-    const status = await deliverAnswerToAsker(pending, cfg.name, body, [])
-    process.stderr.write(`daemon: hermes ${cfg.name} ask ${pending.id} → ${status}\n`)
-  } catch (e) {
-    process.stderr.write(`daemon: hermes ${cfg.name} ask ${pending.id} threw: ${e}\n`)
-    await deliverAnswerToAsker(pending, cfg.name, `⚠️ @${cfg.name} errored on ask ${pending.id}: ${e instanceof Error ? e.message : String(e)}`, []).catch(() => {})
-  } finally { hermesInFlight.delete(pending.id) }
+  void (async () => {
+    try {
+      const result = await done
+      // Logged BEFORE the delivery await, not after it: the run's own outcome must be on the record
+      // even if handing it back blocks on a busy pane. One silent run cost 80 minutes of guessing.
+      process.stderr.write(`daemon: hermes ${cfg.name} ask ${pending.id} ${result.ok ? `finished (${result.text.length} chars)` : `FAILED — ${result.error}`}\n`)
+      const body = result.ok ? result.text : `⚠️ @${cfg.name} couldn't complete ask ${pending.id}: ${result.error}`
+      const status = await deliverAnswerToAsker(pending, cfg.name, body, [])
+      process.stderr.write(`daemon: hermes ${cfg.name} ask ${pending.id} → ${status}\n`)
+    } catch (e) {
+      process.stderr.write(`daemon: hermes ${cfg.name} ask ${pending.id} threw: ${e}\n`)
+      await deliverAnswerToAsker(pending, cfg.name, `⚠️ @${cfg.name} errored on ask ${pending.id}: ${e instanceof Error ? e.message : String(e)}`, []).catch(() => {})
+    } finally { hermesInFlight.delete(pending.id) }
+  })()
+  return start
 }
 
 // Startup: a hermes ask in agent-bus.json that survived a daemon restart is orphaned — its `hermes -z`
@@ -5274,9 +5297,13 @@ async function handleCall(
         appendLedger(room, { ts: Date.now(), kind: verb, from: fromName, to: toName, id: p.id, text: askText, refs })
         if (res.kind === 'hermes') {
           const cfg = hermesEndpoints.get(res.id)!   // resolved from the same map, so it's present
+          // AWAITED as far as the child coming up — same reasoning as the claude branch below: the
+          // outcome is the answer to "did that land?". A dispatch that failed is reported as a failure
+          // here and leaves no row behind; only past this point does "running" mean a live process.
+          const start = await runHermesAsk(p, cfg)
+          if (!start.ok) { write({ t: 'result', id, ok: false, text: `@${toName} couldn't be started — ${start.error} (ask ${p.id} closed, nothing is running)` }); return }
           void notifyAskSent(fromSid, toName, askText, 'ask')   // hermes: acks are refused above, so this is always an ask
-          void runHermesAsk(p, cfg)
-          text = `asked @${toName} (ask ${p.id}) — running; the answer arrives when it finishes`
+          text = `asked @${toName} (ask ${p.id}) — its \`hermes\` child is up; the answer arrives when it finishes`
         } else {
           // AWAITED (bug 11b): the outcome IS the answer to "did that land?". Reporting the same
           // "asked @X — async" line for a wedged or dead target is what let two asks vanish into
@@ -16054,6 +16081,19 @@ async function webappListSessions(): Promise<WebappSessionCard[]> {
   return confirmed.filter((c): c is WebappSessionCard => c !== null)
 }
 
+// The command center's usage header: the account's 5h and weekly windows, ONCE. Deliberately the same
+// source and the same arithmetic as the pinned status card — `readUsageSnapshot` (usage.json, written by
+// statusline-command.sh on every draw), `Math.round`, and status-card's own `fmtResetIn` — so the two
+// surfaces cannot disagree about the same account. Not the pane scrape (statusline.ts's h5/d7): that is
+// read per-pane and goes stale on an idle session, and a header is account-wide by definition; a stale
+// number with no date on it is worse than no header, which is what `null` renders as.
+// There is NO per-model window to add here: Claude Code's statusline JSON exposes
+// `rate_limits.five_hour` and `rate_limits.seven_day` and nothing else.
+function webappReadUsage(): WebappUsageView | null {
+  const view = usageWindows(readUsageSnapshot())
+  return view.fiveHour || view.sevenDay ? view : null
+}
+
 // Drill-in feed: recent conversation (user + assistant), plus the running turn's thoughts + activity.
 const THOUGHT_MAX = 400   // one narration block in the feed; long enough to read, short enough not to bury the tools
 const FEED_BLOCKS = 10    // live blocks kept, matching the Telegram card's window (MIRROR_THOUGHTS)
@@ -16510,6 +16550,7 @@ async function startFilesWebapp(): Promise<void> {
       readSettings: webappReadSettings, setSetting: webappSetSetting,
       listSessions: webappListSessions, readSessionFeed: webappSessionFeed, readSessionMessage: webappSessionMessage, sessionAction: webappSessionAction,
       sessionAttach: webappSessionAttach, sessionSpawn: webappSessionSpawn,
+      readUsage: webappReadUsage,
       readAutomation: webappReadAutomation, automationCancel: webappAutomationCancel,
       automationCreate: webappAutomationCreate })
   } catch (e) { wlog(`webapp: failed to start: ${e}`); return }
