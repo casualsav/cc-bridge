@@ -76,7 +76,7 @@ import {
   _accessFileCache, onboardedPanes, onboardingState, sessions, permissionOrigin,
   pendingMultiSelect, freeTextPrompts, chatPrompts, replyTargets, stuckCards,
   promptCards, prunePromptCards,
-  lastRelayedByFile, offMcpPanes,
+  lastRelayedByFile, claimRelayDelivery, offMcpPanes,
   usageWarnState, voiceNudged,
   sessionNames, mdOverwritePending, exitNamedPending,
   markChatReachable, isChatUnreachable, markChatUnreachableIfUndeliverable,
@@ -1611,6 +1611,11 @@ function topicAccount(t: TopicEntry | undefined): Account {
 const RELAY_POLL_MS = 1500
 let lastRelayedUuid = ''
 let relayCursorPrimed = false
+// One composed reply must reach a chat ONCE, and cursor discipline cannot deliver that: the four
+// relay-delivery paths below each advance their OWN cursor before their own send, so each is safe
+// alone and none are safe together. Every send is gated on claimRelayDelivery (state.ts, beside the
+// cursor map it backstops) — read its comment, and the live 2026-07-30 double-send it records,
+// before touching any of these cursors.
 // Forum-topics: transcript files whose aux-relay cursor we've primed (so a pane's existing tail
 // isn't relayed when it's first seen by the non-focused relay loop).
 const auxRelayPrimed = new Set<string>()
@@ -1920,7 +1925,10 @@ async function relayLoopTick(gen: number): Promise<void> {
             lastRelayedUuid = r.uuid                 // advance before the send so a fast tick can't double-send
             lastRelayedByFile.set(file, r.uuid)
             process.stderr.write(`daemon: relaying ${r.text.length} chars (uuid ${r.uuid.slice(0, 8)}, reply) to ${targets.map(t => t.chat + (t.thread ? `#${t.thread}` : '')).join(',')}\n`)
-            for (const t of targets) await deliverRelayReply(paneId, t, r.text, r.busAnchored)   // self-heals a deleted topic (recreate + resend)
+            for (const t of targets) {
+              if (!claimRelayDelivery(file, r.uuid, t)) { process.stderr.write(`daemon: relay skipped duplicate (uuid ${r.uuid.slice(0, 8)}) to ${t.chat}${t.thread ? `#${t.thread}` : ''} — already delivered\n`); continue }
+              await deliverRelayReply(paneId, t, r.text, r.busAnchored)   // self-heals a deleted topic (recreate + resend)
+            }
             if (r.busAnchored) void checkConcludedTurnObligations(paneId).catch(() => {})   // did this turn do what its ask required?
           } else {
             lastRelayedUuid = r.uuid                 // banner suppressed — advance past it, nothing to send
@@ -2092,7 +2100,14 @@ async function auxRelayTick(): Promise<void> {
           // sends one deduped notice.
           if (r.text.length < 200 && /\b(hit your|used \d+% of your) [\w-]+ limit\b/i.test(r.text)) continue
           const targets = await outboundTargetsFor(pane)
-          for (const t of targets) await deliverRelayReply(pane, t, r.text, r.busAnchored)   // self-heals a deleted topic (recreate + resend)
+          // Logged like the focused loop's relay: this path used to send with no log line at all,
+          // which is why the live double-send showed ONE relay for TWO messages and could not be
+          // pinned to a path from the log.
+          for (const t of targets) {
+            if (!claimRelayDelivery(file, r.uuid, t)) { process.stderr.write(`daemon: aux relay skipped duplicate (uuid ${r.uuid.slice(0, 8)}) to ${t.chat}${t.thread ? `#${t.thread}` : ''} — already delivered\n`); continue }
+            process.stderr.write(`daemon: aux relaying ${r.text.length} chars (uuid ${r.uuid.slice(0, 8)}, reply) to ${t.chat}${t.thread ? `#${t.thread}` : ''}\n`)
+            await deliverRelayReply(pane, t, r.text, r.busAnchored)   // self-heals a deleted topic (recreate + resend)
+          }
           if (r.busAnchored) void checkConcludedTurnObligations(pane).catch(() => {})   // did this turn do what its ask required?
         }
       } catch { /* transient (tmux/transcript) — retry next tick */ }
@@ -4510,7 +4525,11 @@ async function flushPendingText(): Promise<void> {
     lastRelayedUuid = r.uuid
     lastRelayedByFile.set(file, r.uuid)
     if (/\b(hit your|used \d+% of your) [\w-]+ limit\b/i.test(r.text)) continue   // daemon sends its own ⛔
-    for (const t of targets) await sendAgentText([t.chat], r.text, t.thread, undefined, undefined, r.busAnchored).catch(e => process.stderr.write(`daemon: prompt pre-flush send failed: ${e}\n`))
+    for (const t of targets) {
+      if (!claimRelayDelivery(file, r.uuid, t)) { process.stderr.write(`daemon: pre-flush skipped duplicate (uuid ${r.uuid.slice(0, 8)}) to ${t.chat}${t.thread ? `#${t.thread}` : ''} — already delivered\n`); continue }
+      process.stderr.write(`daemon: pre-flush relaying ${r.text.length} chars (uuid ${r.uuid.slice(0, 8)}, reply) to ${t.chat}${t.thread ? `#${t.thread}` : ''}\n`)
+      await sendAgentText([t.chat], r.text, t.thread, undefined, undefined, r.busAnchored).catch(e => process.stderr.write(`daemon: prompt pre-flush send failed: ${e}\n`))
+    }
   }
 }
 
@@ -4547,7 +4566,11 @@ async function flushPendingTextFor(pane: string): Promise<boolean> {
     if (!r.uuid || r.uuid === (lastRelayedByFile.get(file) ?? '')) continue
     lastRelayedByFile.set(file, r.uuid)   // advance before the await so the conclude-relay can't double-send
     if (/\b(hit your|used \d+% of your) [\w-]+ limit\b/i.test(r.text)) continue   // daemon sends its own ⛔
-    for (const t of targets) await sendAgentText([t.chat], r.text, t.thread, undefined, undefined, r.busAnchored).catch(e => process.stderr.write(`daemon: aux prompt pre-flush send failed: ${e}\n`))
+    for (const t of targets) {
+      if (!claimRelayDelivery(file, r.uuid, t)) { process.stderr.write(`daemon: aux pre-flush skipped duplicate (uuid ${r.uuid.slice(0, 8)}) to ${t.chat}${t.thread ? `#${t.thread}` : ''} — already delivered\n`); continue }
+      process.stderr.write(`daemon: aux pre-flush relaying ${r.text.length} chars (uuid ${r.uuid.slice(0, 8)}, reply) to ${t.chat}${t.thread ? `#${t.thread}` : ''}\n`)
+      await sendAgentText([t.chat], r.text, t.thread, undefined, undefined, r.busAnchored).catch(e => process.stderr.write(`daemon: aux prompt pre-flush send failed: ${e}\n`))
+    }
     sent = true
   }
   return sent

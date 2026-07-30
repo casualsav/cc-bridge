@@ -147,6 +147,29 @@ for (const [file, uuid] of Object.entries(readJsonFile<Record<string, string>>(R
   if (existsSync(file)) lastRelayedByFile.set(file, uuid)
 }
 
+// One composed reply must reach a chat ONCE. Four paths deliver a relayed reply — the focused relay
+// loop, the aux (non-focused) relay loop, and the two pre-menu preamble flushes — and each advances
+// its own cursor before its own send, which makes each SAFE ALONE and none safe together: the
+// cursors are separate reads of separate state (daemon.ts's `lastRelayedUuid` vs `lastRelayedByFile`
+// above), so two paths racing over the same transcript can both see the same reply unrelayed and
+// both send it. Observed live 2026-07-30: the chat lane composed "One housekeeping note…" once (uuid
+// a664d337, 335 chars), the daemon logged exactly ONE relay of it (00:31:50.659Z → 837047563), and
+// the owner received two copies (he quoted both back in message 5129). Cursor discipline cannot fix
+// this — it is per-path by construction — so the guard is a claim keyed by what identifies a
+// delivery: transcript file + reply uuid + chat + thread. First claimer sends, a loser skips.
+// In-memory and bounded: a restart re-delivers at most what its re-primed cursors already allow.
+const claimedDeliveries = new Set<string>()
+const CLAIMED_DELIVERIES_MAX = 500
+export function claimRelayDelivery(file: string, uuid: string, target: { chat: string; thread?: number }): boolean {
+  const key = `${file} ${uuid} ${target.chat} ${target.thread ?? ''}`
+  if (claimedDeliveries.has(key)) return false
+  claimedDeliveries.add(key)
+  // Insertion-ordered, so the oldest keys go first. Trimming can only un-guard a reply far behind
+  // every cursor, which no path will offer again.
+  while (claimedDeliveries.size > CLAIMED_DELIVERIES_MAX) claimedDeliveries.delete(claimedDeliveries.values().next().value!)
+  return true
+}
+
 // ---- Off-MCP panes ----
 export const offMcpPanes = new Set<string>()
 
