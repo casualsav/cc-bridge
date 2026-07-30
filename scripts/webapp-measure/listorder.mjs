@@ -57,8 +57,8 @@ if (OUT) mkdirSync(OUT, { recursive: true });
 // dpr is a parameter because one claim in this file is about INK GEOMETRY, not layout: a screenshot's
 // resolution IS the measurement's resolution (0.5px at dpr 2, 0.25px at 4), and the layout it measures
 // is dpr-independent, so the finer page renders the same boxes and only samples their paint closer.
-const open = async (path, sessions, usage = USAGE, dpr = 2) => {
-  const p = await b.newPage({ viewport: { width: 390, height: 812 }, deviceScaleFactor: dpr });
+const open = async (path, sessions, usage = USAGE, dpr = 2, width = 390) => {
+  const p = await b.newPage({ viewport: { width, height: 812 }, deviceScaleFactor: dpr });
   p.on("pageerror", e => { console.log("PAGEERROR:", e.message); bad++; });
   await p.goto("file://" + path, { waitUntil: "domcontentloaded" });
   await p.evaluate(([ss, u]) => {
@@ -218,8 +218,16 @@ async function measure(path, label, shotPrefix) {
   // despite the label's 12px/400 against the card's 14px/600. The per-letterform scatter is PRINTED,
   // not gated: it is type, not misalignment, and a check that demanded 0 across letterforms would be
   // demanding something no layout can deliver.
-  {
-    const p = await open(path, MIXED, USAGE, 4);
+  //
+  // TWO CONDITIONS, because a fixture that only ever ran at one width and one DPR is what let this file
+  // pass while the owner's phone was in dispute (2026-07-30 — his screenshot, measured against the 11px
+  // dot in its own frame as the ruler, agreed with these numbers to a quarter pixel, so the page was
+  // right and the single condition was still a gap). The column is built from paddings and so is
+  // width-invariant BY CONSTRUCTION — which is a claim, and this is where it gets checked.
+  // `scripts/webapp-measure/labelaxis.mjs` sweeps the full range; these two are the cheap standing points.
+  for (const { vw, dpr } of [{ vw: 390, dpr: 4 }, { vw: 320, dpr: 3 }]) {
+    const cond = `@${vw}px/dpr${dpr}`;
+    const p = await open(path, MIXED, USAGE, dpr, vw);
     const at = await p.evaluate(() => {
       const firstChar = el => { const r = document.createRange(); r.setStart(el.firstChild, 0); r.setEnd(el.firstChild, 1);
         const b = r.getBoundingClientRect(); return { x: b.x, y: b.y, w: b.width, h: b.height, ch: el.firstChild.textContent[0] }; };
@@ -230,21 +238,22 @@ async function measure(path, label, shotPrefix) {
         boxes: { label: w ? w.getBoundingClientRect().x : null, names: names.map(n => n.getBoundingClientRect().x) } };
     });
     const band = r => ({ x: r.x - 4, y: r.y, width: r.w + 8, height: r.h });
-    const lab = at.label ? await inkOnset(p, band(at.label), 4) : null;
+    const lab = at.label ? await inkOnset(p, band(at.label), dpr) : null;
     const inks = [];
-    for (const n of at.names) inks.push({ ...n, ink: await inkOnset(p, band(n), 4) });
+    for (const n of at.names) inks.push({ ...n, ink: await inkOnset(p, band(n), dpr) });
     // Box axis first — exact, and the reason the ink lands as close as it does.
     state(at.boxes.label !== null && at.boxes.names.length >= 2 && at.boxes.names.every(x => Math.abs(x - at.boxes.label) <= 0.5),
-      `the words' box sits on every card name's box axis — label ${at.boxes.label}, names ${at.boxes.names.join("/")}`);
+      `${cond} the words' box sits on every card name's box axis — label ${at.boxes.label}, names ${at.boxes.names.join("/")}`);
     // Then the same letter, painted, at 0.25px resolution.
     const twin = inks.find(n => n.ch === "C" && n.ink);
     const twinOff = lab && twin ? Math.abs(lab.onset - twin.ink.onset) : null;
     state(twinOff !== null && twinOff <= 0.5,
-      `…and the label's C paints on a card C's own left edge — ${lab && lab.onset} vs ${twin && twin.ink.onset} (${twin && JSON.stringify(twin.full)}, ${twin && twin.size}/${twin && twin.weight} against the label's ${at.label && at.label.size}/${at.label && at.label.weight}), residual ${twinOff === null ? "n/a" : twinOff.toFixed(2)}px (≤0.50)`);
-    console.log(`      ink onsets @dpr4 — label ${at.label && at.label.ch}: ${lab && lab.onset} (half ${lab && lab.half})`
-      + inks.map(n => ` · ${JSON.stringify(n.full)} ${n.ch}: ${n.ink && n.ink.onset} (half ${n.ink && n.ink.half})`).join(""));
+      `${cond} …and the label's C paints on a card C's own left edge — ${lab && lab.onset.toFixed(2)} vs ${twin && twin.ink.onset.toFixed(2)} (${twin && JSON.stringify(twin.full)}, ${twin && twin.size}/${twin && twin.weight} against the label's ${at.label && at.label.size}/${at.label && at.label.weight}), residual ${twinOff === null ? "n/a" : twinOff.toFixed(2)}px (≤0.50)`);
+    const px2 = v => v === null || v === undefined ? "n/a" : v.toFixed(2);
+    console.log(`      ink onsets ${cond} — label ${at.label && at.label.ch}: ${px2(lab && lab.onset)} (half ${px2(lab && lab.half)})`
+      + inks.map(n => ` · ${JSON.stringify(n.full)} ${n.ch}: ${px2(n.ink && n.ink.onset)} (half ${px2(n.ink && n.ink.half)})`).join(""));
     // The zoomed crop the owner reads: the label's C directly above the next card's name, at dpr 4.
-    if (OUT && at.label) {
+    if (OUT && at.label && vw === 390) {
       const below = at.names.find(n => n.y > at.label.y);
       if (below) await p.screenshot({ path: join(OUT, `${shotPrefix}-c-axis-zoom.png`),
         clip: { x: at.label.x - 12, y: at.label.y - 10, width: 120, height: (below.y + below.h + 10) - (at.label.y - 10) } });

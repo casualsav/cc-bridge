@@ -427,6 +427,16 @@ give it.
   axis can satisfy them all. What IS asserted is the strongest true claim: same letter, the label's
   12px/400 `C` against a card's 14px/600 `C`, **0.25px** apart. The per-letterform scatter is printed
   by `listorder.mjs` and deliberately not gated — it is type, not misalignment.
+- **This column was DISPUTED off a phone photo and the photo agreed with the harness** (2026-07-30) —
+  so before re-aligning it, measure. **A photo of this page is measurable, because the page puts a
+  known-size object in every frame: the 11px status dot.** Scale = the dot's ink width ÷ 11, and every
+  other offset in the frame converts to CSS px through it; his crop then read **0.25px** on the glyph
+  and **0.49px** on the `C` — this file's own numbers. What remains is perceptual, not geometric: the
+  `✳`'s ink is **8.8px** wide against the dot's 11, so a reader comparing left EDGES rather than
+  centres sees the label 0.8px inset. Edge-aligning or up-sizing the glyph were both rendered for the
+  owner and **not** taken. The column is built from paddings, so it is width-invariant by
+  construction — `listorder.mjs` now checks two conditions (390/dpr4 and 320/dpr3) and
+  `labelaxis.mjs` sweeps 320–430 × dpr 2–3 × {chat lane, worker} first: worst deviation **0.25px**.
 - **It renders only where it has something under it, by construction:** emitted before the FIRST worker
   card, so a chat-only fleet gets no label without a condition to keep in sync. With no chat lane it still
   renders — it names the section it heads, and the owner's rule was "at least one coding session".
