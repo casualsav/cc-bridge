@@ -285,12 +285,21 @@ per-checkout in `.claude/settings.json`:
 
 ### What `bun run deploy` actually ships — everyone gets this wrong the same way
 
-It takes the file **LIST** from `git ls-files` (tracked only) and the file **CONTENT** from the
-**working tree** (`copyFileSync`; no `git archive` anywhere). So: **untracked files never ship**,
+It takes the file **LIST** from `git ls-files` (tracked only), so **untracked files never ship**,
 however dirty the tree — a file you have not `git add`ed is structurally invisible to a deploy.
-And **tracked files ship whatever is in the working tree right now** — a sibling session's
-uncommitted edit to a tracked file *will* go out inside your deploy. Do not reason "it deploys the
-commit"; it does not. That asymmetry is why "commit first" matters for *tracked* files.
+
+The **CONTENT** comes from a **commit** — `git archive` of HEAD (or of the branch `--ship-branch`
+names) into a temp root — with the files you claim overlaid from the tree. Every dirty payload file
+must be acknowledged or the deploy refuses, and there are two answers because there are two
+situations: **`--with <path>`** claims a file as yours and ships your uncommitted bytes (this is
+deploy-then-commit, the staging gate), **`--without <path>`** acknowledges one you are *not*
+releasing — a sibling's WIP — which ships its committed version and leaves the edits alone on disk.
+The deploy's own version bumps are implicitly claimed and always carried from the tree (the shared
+`marketplace.json` holds every plugin's version, so archiving it would revert an uncommitted
+slack/discord bump in the mirror installs read). Until v0.4.284 the content came from the working
+tree unconditionally, and a release carried whatever a sibling had in flight — three times on
+2026-07-30, each behind a warning that printed the files and was read by nobody. `payload-provenance.ts`
+holds the rule; `payload-provenance.test.ts` drives it against real throwaway git repos.
 
 `bun run deploy` refuses to ship from any branch but `main`; to ship a branch deliberately, name
 it: `--ship-branch <branch>` (no bare `--force`, on purpose). `--commit` stages only the version

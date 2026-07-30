@@ -265,9 +265,9 @@ console.log(`\n🚀 deploy [${cfg.id}] ${cur} → ${next}\n`)
 const payload = cfg.payload()
 
 // ---- shipping gate: main only, and say what you're shipping ----
-// A deploy syncs the WORKING TREE (syncPayloadInto copies from REPO, not from git) into the plugin
-// cache and restarts the live daemon. Nothing here previously looked at which branch that tree was
-// on, so a session working on its own branch — the normal shape once sessions get worktrees — could
+// A deploy ships a COMMIT into the plugin cache and restarts the live daemon (which commit: the
+// provenance gate below). Nothing here previously looked at which branch that commit was on, so a
+// session working on its own branch — the normal shape once sessions get worktrees — could
 // ship unreviewed branch code over the live bridge and only find out afterwards. The failure is
 // silent and it lands on the owner's own comms channel, so the default has to be refusal.
 //

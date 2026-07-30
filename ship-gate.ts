@@ -4,10 +4,11 @@
 // deploy script to see whether it refuses, and a test that has to ALMOST ship to the live daemon in
 // order to prove it doesn't is not a test anyone should run.
 //
-// Why the gate exists: a deploy syncs the WORKING TREE (deploy.ts's syncPayloadInto copies from the
-// repo, not from git) into the plugin cache and restarts the live daemon. Nothing checked which
-// branch that tree was on, so a session on its own branch could ship unreviewed code over the
-// owner's own comms channel and only discover it afterwards.
+// Why the gate exists: a deploy ships a COMMIT of this checkout (payload-provenance.ts) into the
+// plugin cache and restarts the live daemon. Nothing checked WHICH commit's branch that was, so a
+// session on its own branch could ship unreviewed code over the owner's own comms channel and only
+// discover it afterwards. Note the two guards answer different questions and neither subsumes the
+// other: this one asks which branch, provenance asks whether the bytes are committed at all.
 
 export type ShipGate =
   | { ok: true; warn?: string }
