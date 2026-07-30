@@ -41,9 +41,8 @@ const SESSIONS = [
     model: "Sonnet 5", effort: "high", subagents: 2, branch: "feat/two-row-composer", ctxPct: 62, h5Pct: 68, state: "working",
     task: "Reading the transcript back and folding the working row into the composer, then measuring every box it moved" },
   // The owner's own chat lane, carrying EVERYTHING an ordinary card would render — a task line, a
-  // branch, a context reading — so that the bare title row is a decision the client makes rather than
-  // a payload that happened to be empty. (The screenshot he sent was a freshly cleared lane, which is
-  // the state that has nothing to show anyway; this fixture is the one that can fail.)
+  // branch, a context reading. Unchanged from the version that pinned the BARE title row here: it was
+  // the fixture that could falsify the omission, and it is the fixture that can falsify the reversal.
   { sid: "e", name: "Chat (@suchag)", chat: true, alive: true, working: true, cwd: "", model: "Fable 5", effort: "high",
     mode: "bypassPermissions", subagents: 0, branch: "main", ctxPct: 51, h5Pct: 68, state: "working",
     task: "Reading the transcript back and folding the working row into the composer" },
@@ -96,14 +95,22 @@ const near = (a, b, tol = 0.51) => a != null && b != null && Math.abs(a - b) <= 
 const [A, B, C, D, E] = cards;
 
 ok("FIXTURE: five cards rendered", cards.length === 5, cards.map(c => c.name).join(", "));
-// ---- the chat lane is a BARE TITLE ROW ---------------------------------------------------------
+// ---- the chat lane is a FULL CARD (owner, 2026-07-30, reversing the bare title row) -------------
+// Same fixture as when the bare row was pinned here — everything populated — with the expectations
+// inverted. The claim now is CONGRUENCY: not merely "it has a task line", but that it is built to the
+// same measurements as an ordinary card, which is what "identical in structure" has to mean.
 ok("FIXTURE: the chat lane's payload carries everything a card could show",
   !!SESSIONS[4].task && !!SESSIONS[4].branch && SESSIONS[4].ctxPct != null, "task + branch + ctx");
-ok("the chat lane renders no task line", E.taskH === null, `${E.taskH === null ? "absent" : E.taskH + "px"}`);
-ok("…and no foot at all", E.foot === null, E.foot ? "present" : "absent");
-ok("…so it is a title row and nothing else", near(E.card.h, E.titleH + 2 * E.padBottom), `${E.card.h} vs title ${E.titleH} + 2×${E.padBottom}`);
+ok("the chat lane renders its task line", E.taskH !== null && E.text.includes(SESSIONS[4].task),
+  `${E.taskH === null ? "absent" : E.taskH + "px"}`);
+ok("…and its foot, with the context bar in it", E.foot !== null && E.hasBar && E.footItems?.some(t => /^ctx 51%$/.test(t)),
+  E.footItems?.join(" · ") || "no foot");
+ok("…to the SAME measurements as an ordinary card, not merely present",
+  near(E.taskH, A.taskH) && near(E.lineBox, A.lineBox) && near(E.taskToFoot, A.taskToFoot) && near(E.card.h, A.card.h),
+  `task ${E.taskH} vs ${A.taskH} · line ${E.lineBox} vs ${A.lineBox} · gap ${E.taskToFoot} vs ${A.taskToFoot} · card ${E.card.h} vs ${A.card.h}`);
 ok("…while still carrying its indicator and its dials", E.dot === "on" && /Fable 5/.test(E.text), `dot=${E.dot}`);
-ok("an ordinary WORKING card is untouched by that rule", A.taskH !== null && A.foot !== null, `task=${A.taskH} foot=${A.foot ? "present" : "absent"}`);
+ok("…and no 5h reading, which is a DIFFERENT ruling and untouched", !/5h/.test(E.text), E.footItems?.join(" · "));
+ok("an ordinary WORKING card is unchanged by the reversal", A.taskH !== null && A.foot !== null, `task=${A.taskH} foot=${A.foot ? "present" : "absent"}`);
 // ---- the task line is ONE line ----------------------------------------------------------------
 ok("FIXTURE: the fullest card's task really is too long for one line", D.taskScrollH > D.taskH + 4,
   `wants ${D.taskScrollH}px in a ${D.taskH}px line`);
@@ -127,11 +134,11 @@ ok("the ctx reading is still there", A.footItems?.some(t => /^ctx 41%$/.test(t))
 ok("…with its bar", A.hasBar, `${A.hasBar}`);
 ok("the foot is exactly those two", A.footItems?.length === 2, A.footItems?.join(" · "));
 ok("each card still names its session", cards.every((c, i) => c.name === SESSIONS[i].name), cards.map(c => c.name).join(", "));
-// The chat lane is exempt BY DESIGN — it is the one card that renders no task line — so this asks the
-// question of every other card rather than being loosened for all of them.
-ok("every card but the chat lane still carries its task line",
-  cards.every((c, i) => SESSIONS[i].chat || c.text.includes(SESSIONS[i].task)),
-  cards.filter((c, i) => !SESSIONS[i].chat && !c.text.includes(SESSIONS[i].task)).map(c => c.name).join(",") || "all present");
+// No exemption left to write around: with the bare row reversed, EVERY card with a task carries its
+// task line — the chat lane included.
+ok("every card carries its task line, the chat lane included",
+  cards.every((c, i) => c.text.includes(SESSIONS[i].task)),
+  cards.filter((c, i) => !c.text.includes(SESSIONS[i].task)).map(c => c.name).join(",") || "all present");
 
 for (const [i, c] of cards.entries()) {
   const box = await p.locator("#tab-sessions .sess").nth(i).boundingBox();

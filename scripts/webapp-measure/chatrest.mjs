@@ -149,9 +149,12 @@ async function measure(page, label, sink) {
   guard(far(px.work, GREEN) <= 6 && work.anim !== "none", `a working worker is unmoved — ${px.work} / ${work.anim}`);
 
   // ---- 4. and the card's own shape is unmoved ----------------------------------------------------
-  // A colour change that reached the markup would show up here first: the chat lane is a bare title
-  // row (no task line, no foot) and a worker card carries its line, on both pages.
-  guard(cwait.task === null && cidle.task === null, `a chat lane is still a bare title row (${JSON.stringify([cwait.task, cidle.task])})`);
+  // The chat lane's own line is NOT asserted here any more. It became a full card on 2026-07-30 (the
+  // bare title row reversed), and this file's control is pinned to the pre-dot-colour page, where the
+  // row was still bare — so any claim about that line is false on the control by construction and
+  // could only be carried as a guard by lying about which change it belongs to. `cardfoot.mjs` owns the
+  // chat card's shape and has a control that can actually see it. What remains here still catches a
+  // colour change that reached the markup: the worker's line, and the two chat cards' equal heights.
   guard(!!wait.task && wait.task.startsWith("⏳ waiting: gh run watch"), `a waiting worker still names its reason (${JSON.stringify(wait.task)})`);
   guard(Math.abs(cwait.height - cidle.height) < 0.5, `and the waiting chat card is the height of an idle one (${cwait.height} vs ${cidle.height})`);
 }

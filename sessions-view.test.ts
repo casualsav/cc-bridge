@@ -188,21 +188,22 @@ test('multiple sessions are separated by a blank line, in input order', () => {
   expect(out).toContain('\n\n⚪ <b>second</b>')
 })
 
-// The owner's chat lane, on this surface too (his ask, 2026-07-29): a title line and its dials, and
-// nothing else — with a payload that carries everything a card COULD show, so the omission is a
-// decision rather than an empty row.
-test('the chat lane renders as a title line and its dials, whatever its payload carries', () => {
+// The owner's chat lane, REVERSED on 2026-07-30: it carries the same fields as any other card again.
+// The payload is unchanged from the version that pinned the bare row — same fixture, opposite
+// expectations — so this test is the record of the reversal rather than a fresh claim. The 5h window
+// stays out, which is a different ruling and untouched by this one.
+test('the chat lane carries the same fields as any other card', () => {
   const chat: SessionCard = { ...card(), chat: true, name: 'Chat (@suchag)', state: 'working', working: true,
     task: 'Folding the working row into the composer', branch: 'main', ctxPct: 51, h5Pct: 40,
     model: 'Fable 5', effort: 'high', mode: 'bypassPermissions' }
   const out = renderSessionsView([chat], new Date(0))
   expect(out).toContain('Chat (@suchag)')
-  expect(out).toContain('Fable 5')        // its dials are still worth having
-  expect(out).toContain('working')        // and the state it is in — the point of the card
-  expect(out).not.toContain('Folding')    // …but not the transcript it is already showing him
-  expect(out).not.toContain('ctx 51%')
-  expect(out).not.toContain('🌿')
-  expect(out).not.toContain('5h 40%')
+  expect(out).toContain('Fable 5')        // its dials
+  expect(out).toContain('working')        // the state it is in
+  expect(out).toContain('Folding')        // the last line
+  expect(out).toContain('ctx 51%')        // and the context bar
+  expect(out).toContain('🌿')
+  expect(out).not.toContain('5h 40%')     // account-level, still out on every card
 })
 
 // …and the exemption is the LANE's, not everyone's.

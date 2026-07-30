@@ -455,15 +455,18 @@ give it.
   pulsing card for a session the owner had already killed (`endingSids` in daemon.ts, measured by
   `scripts/webapp-measure/busykill.mjs`; deadcard.mjs covers the idle kill, which needs no mark).
 
-- **The owner's own chat lane renders as a BARE TITLE ROW** — dot, name, dials, ✕ — at all times, no
-  task line and no foot (his ask: the chat is where he watches it work, so a preview repeats the
-  conversation and a context bar belongs to sessions he does not read turn by turn). The dot stays,
-  because "doing something or waiting" is the one thing the card says that the chat does not. Driven
-  by the payload's own `chat` flag (`isChatLaneSession` in daemon.ts), **never by matching the name**
-  — that label is "Chat" until a handle resolves. `cardfoot.mjs`'s fixture gives the lane a task, a
-  branch and a ctx reading precisely so the bare row is a decision and not an empty payload. The same
-  ruling holds on `/sessions` (`sessions-view.ts` returns after the dials): one state, one shape,
-  wherever he reads it — a surface that keeps the old card reads as a different session.
+- **The owner's own chat lane is a FULL CARD — no `chat` branch left in `renderSessions` at all.**
+  It renders the bare title row (dot, name, dials, ✕) between 2026-07-29 and 2026-07-30 and he
+  reversed that himself once the hidden tab row freed the vertical room; the fields are back to the
+  same task line and foot every other card carries. `cardfoot.mjs` measures CONGRUENCY, not mere
+  presence — same line box, same gap, same card height as an ordinary card — on the fixture that once
+  pinned the bare row, and the old page fails 4 of its checks. `/sessions` (`sessions-view.ts`) lost
+  its early return in the same commit: one state, one shape, wherever he reads it — a surface that
+  keeps the old card reads as a different session.
+- **`chat` on the payload now drives exactly ONE thing in the client: the resting dot colour**
+  (`.dot.rest`, above). It is still `isChatLaneSession` daemon-side and still **never a name match** —
+  the label is "Chat" until a handle resolves. The 5h window stays off this card like every other, a
+  separate ruling this reversal did not touch.
 - **A chat lane's label NEVER carries the numeric Telegram id.** It is `Chat (@handle)`, or plain
   `Chat` until `getChat` answers — the id flashed in the UI and swapped itself out, which the owner
   saw. `warmDmHandles()` runs at webapp start so the resolved name is usually there for the first

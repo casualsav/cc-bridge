@@ -2249,14 +2249,13 @@ async function renderSessions() {
       // sessions-view.ts renders the same four states from the same payload.)
       : s.task ? (s.working ? "🧑‍💻 " : "✅ ") + (s.subagents > 0 ? esc(s.subagents + " subagent" + (s.subagents === 1 ? "" : "s") + " live · ") : "") + esc(s.task)
       : "";
-    // The owner's own chat lane is a BARE TITLE ROW — dot, name, dials, ✕ — and nothing else, at all
-    // times (his ask, off the state a freshly cleared lane happened to render). The chat itself is
-    // where he watches it work, so a task line repeats the conversation and a context bar belongs to
-    // sessions he does not read turn by turn. The DOT stays: "doing something or waiting" is exactly
-    // what he asked to keep, and it is the one thing the card says that the chat does not.
-    // Read from the payload's own `chat` flag, never from the name — the label is "Chat (@handle)"
-    // only until a handle resolves.
-    const foot = s.chat ? "" :
+    // The chat lane is a FULL CARD, like every other session — the owner, 2026-07-30, reversing the
+    // bare title row he asked for on 2026-07-29 ("the chat is where he watches it work") now that the
+    // hidden tab row has left the list more vertical room. There is no `s.chat` branch left in this
+    // card at all: one shape, and the lane differs only in its resting dot (`.dot.rest`, above), which
+    // is about a state and not about what the card carries. `/sessions` (sessions-view.ts) was
+    // un-branched in the same commit — a surface keeping the old shape reads as a different session.
+    const foot =
       (s.branch ? "<span>🌿 " + esc(s.branch) + "</span>" : "") +
       (s.ctxPct != null ? "<span>ctx " + s.ctxPct + "%</span>" + pctBar(s.ctxPct) : "");
     c.innerHTML =
@@ -2266,7 +2265,7 @@ async function renderSessions() {
       chips.map(x => '<span class="chip">' + x + "</span>").join("") +
       '<button class="cardx" title="Close session" aria-label="Close session ' + esc(s.name) + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>' +
       "</div>" +
-      (line && !s.chat ? '<div class="task">' + line + "</div>" : "") +
+      (line ? '<div class="task">' + line + "</div>" : "") +
       (!s.alive ? '<div class="task">💀 no live pane</div>' : "") +
       // The 5h window is NOT here, by the owner's ruling: it is an ACCOUNT-level number, identical on
       // every card, and repeating it per session said nothing about the session. `h5Pct` stays on the

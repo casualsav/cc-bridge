@@ -41,7 +41,11 @@ const SESSIONS = [
   { sid: "s2", name: "memes", cwd: "~/projects/memes", alive: true, working: false, state: "waiting",
     task: "gh run watch", model: "Sonnet 5", effort: "medium", ctxPct: 18, branch: "main" },
   { sid: "s3", name: "store", cwd: "~/projects/store-template", alive: true, working: false, state: "idle",
-    lastReply: "Deployed and verified.", model: "Opus 5", effort: "low", ctxPct: 7, branch: "main" },
+    task: "Deployed and verified.", model: "Opus 5", effort: "low", ctxPct: 7, branch: "main" },
+  // The owner's own chat lane, which since 2026-07-30 is a full card like the rest — here so the
+  // screenshot is the list he actually looks at. Its shape is `cardfoot.mjs`'s claim, not this file's.
+  { sid: "s4", name: "Chat (@suchag)", chat: true, cwd: "", alive: true, working: false, state: "waiting",
+    task: "Hidden behind one flag — measured and shipped.", model: "Fable 5", effort: "high", ctxPct: 34, branch: "main" },
 ];
 
 let bad = 0;

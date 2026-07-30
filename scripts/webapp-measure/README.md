@@ -37,10 +37,12 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   below it moves), and the foot carries the SESSION's numbers —
                                   #   the 5h window being account-level and gone from every card,
                                   #   with no card left carrying the 8px gap its empty foot would
-                                  #   leave — plus the owner's own CHAT LANE, which renders as a bare
-                                  #   title row however full its payload is. Five fixture cards,
-                                  #   emptiest to fullest. Pass a pre-change page: 3 of 24 fail for
-                                  #   the chat row, 2 for the clamp, 6 for the foot
+                                  #   leave — plus the owner's own CHAT LANE, which since 2026-07-30 is
+                                  #   a FULL card again (the bare title row reversed) and is checked for
+                                  #   CONGRUENCY with an ordinary card: same line box, same gap, same
+                                  #   height, not merely "a line is present". Five fixture cards,
+                                  #   emptiest to fullest. Pass a pre-change page: 4 of 25 fail for
+                                  #   the chat card, 2 for the clamp, 6 for the foot
     node composerbox.mjs [page][out] # the TWO-ROW composer: field on the top line, controls on their
                                   #   own line under it, ~3 text lines tall at rest — the rest height
                                   #   measured against its PARTS, the shape, the growth above the
