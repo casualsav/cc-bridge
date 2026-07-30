@@ -3088,8 +3088,8 @@ function closeDial() {
 }
 $("dialx").onclick = closeDial;
 $("dial").onclick = e => { if (e.target.id === "dial") closeDial(); };
-$("dialeffort").onclick = () => { $("dial").classList.add("p2"); dialHeight(); };
-$("dialback").onclick = () => { $("dial").classList.remove("p2"); dialHeight(); };
+$("dialeffort").onclick = () => { $("dial").classList.add("p2"); dialHeight(DIAL_HOST); };
+$("dialback").onclick = () => { $("dial").classList.remove("p2"); dialHeight(DIAL_HOST); };
 async function applyDial(kind, val) {
   const label = kind === "model" ? (composerModelRows().find(([a]) => a === val) || [null, val])[1] : effLabel(val);
   closeDial();

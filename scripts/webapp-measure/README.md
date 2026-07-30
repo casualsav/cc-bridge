@@ -49,6 +49,8 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   control row, and everything outside it holding still. Pass a
                                   #   pre-change page: the rest + shape checks must FAIL there (5 of
                                   #   54), and growth + nothing-else must pass on BOTH
+    node dial-effort.mjs [page]   # v0.4.173 effort-page rise/expand, all six levels, back-to-model
+                                  # collapse/position, shared transition, and delayed close cleanup
     node model-provider.mjs [page] # live composer model picker: the v0.4.292 title, exact Anthropic
                                   # labels/order/notes, one shared row template for Anthropic/Codex,
                                   # truthful empty fallback, and the unchanged Anthropic spawn sheet
