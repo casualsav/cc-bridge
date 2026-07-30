@@ -122,6 +122,19 @@ the CLI's slash palette fuzzy-matches it — probed live: `/opus` offered `/fabl
 one palette predicate from switching a contextful session to Fable. The stub replies with guidance
 and touches no pane.
 
+## Outbound
+
+**"Advance the cursor before the send" is per-path, and therefore not a guard.** Four paths deliver a
+relayed reply — the focused relay loop, the aux (non-focused) relay loop, and the two pre-menu
+preamble flushes — and each advances its OWN cursor (`lastRelayedUuid` vs `lastRelayedByFile`) before
+its own send. Each is safe alone; racing over one transcript, two can both see a reply unrelayed and
+both send it. Observed 2026-07-30: one composed reply (uuid a664d337), one relay log line, two copies
+in the owner's DM. **Every relay send is gated on `claimRelayDelivery` (`state.ts`)** — file + uuid +
+chat + thread; add a fifth delivery path and it goes through the same claim. `relay-dedup.test.ts` is
+the proof: it races two deliverers, and dropping the claim from either reports 2 deliveries. Three of
+the four paths also used to send with no log line, which is what made the second copy unattributable;
+they all log in the focused loop's format now — don't quiet them again.
+
 ## Inbound
 
 **A Bot API 10.1 rich message has `rich_message: { blocks }` and NO `text`** — a composer flips into
