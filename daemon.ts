@@ -57,6 +57,9 @@ import {
   gatewayHarnessEnv, gatewayLaunchCommand, gatewayModelIds, gatewayModelsRequest, gatewayProbeRequest,
   parseGatewayDefinitions, validGatewayProbeResponse, type GatewayDefinition,
 } from './harness-gateway.ts'
+import {
+  resolveRoleHarness, roleHarnessSummary, roleProviderOptions, roleModelUpdate, type SessionRole,
+} from './role-provider.ts'
 import { findSessionHarness, recordSessionHarness } from './session-harness.ts'
 import {
   initAccounts, listAccounts, accountByName, accountForTranscript, accountForProjectsDir,
@@ -6933,7 +6936,7 @@ async function launchSpawn(spec: SpawnSpec, model: string | null, clampedNote: s
   // prompt has nowhere to relay — the session just wedges on the dialog until the ask expires
   // (the 49-minute "busy" general). Bound spawns keep the inherited mode; their prompts relay
   // as tappable cards in the topic.
-  const newPane = await spawnSession(dir, '', sid, MAIN_ACCOUNT, 'claude', undefined, { model, effort, ...(headless ? { mode: 'bypassPermissions' as CcMode } : {}) })
+  const newPane = await spawnSession(dir, '', sid, MAIN_ACCOUNT, 'claude', codingSpawnHarness(), { model, effort, ...(headless ? { mode: 'bypassPermissions' as CcMode } : {}) })
   if (!newPane) {
     removeTopic(sid)
     if (group && threadId != null) void channel.threads!.remove(group, String(threadId)).catch(() => {})
@@ -7773,7 +7776,7 @@ async function launchAgentSession(ctx: Context, kind: AgentKind, paneId: string 
   }
   const dir = (paneId ? await paneCwd(paneId).catch(() => null) : null) ?? lastSessionCwd() ?? homedir()
   const sid = isTopicMode() || lanesHere ? genSessionId() : undefined
-  const ok = await spawnSession(dir, '', sid, MAIN_ACCOUNT, kind)
+  const ok = await spawnSession(dir, '', sid, MAIN_ACCOUNT, kind, codingSpawnHarness())
   // Bind the freshly spawned pane to the sender's lane now — registerSpawnedPane (inside
   // spawnSession) no-ops under dmLanesOn() (each lane pane is bound explicitly, never by focus
   // adoption), so without this the pane would sit unbound until a lucky reactive adopt on the
@@ -10673,6 +10676,34 @@ async function captureInheritedSettings(paneId: string, watcher: PaneWatcher | n
 // with NO post-boot pane-driving at all. This replaced the old type-into-a-booting-pane path, whose
 // REPL-wait + inject round-trips were the 10-20s "new topic is slow / not ready to receive" lag (and
 // they raced the user's own first keystrokes into the fresh pane).
+// The role harness for a spawn site (Accounts panel → 💬 Chat / 🧑💻 Coding sessions run on).
+// A role resolves to native when unset — and returns `undefined` then, so a spawn site that
+// passes it as the harness override stays BYTE-IDENTICAL until the user actually picks a
+// non-Anthropic provider (an override is what arms the boot verification + stamping). Existing
+// sessions are never touched: this is only ever the DEFAULT for the spawn that reads it.
+function chatSpawnHarness(): HarnessProfile | undefined {
+  const h = resolveRoleHarness(loadAccess().chatHarness)
+  return h.provider === 'anthropic' ? undefined : h
+}
+function codingSpawnHarness(): HarnessProfile | undefined {
+  const h = resolveRoleHarness(loadAccess().codeHarness)
+  return h.provider === 'anthropic' ? undefined : h
+}
+
+// The role harness behind a picker row (Accounts panel), non-native only — the ✏️ model button
+// refuses a native role, so callers can trust this is a provider with a model.
+function roleHarnessOf(role: SessionRole): HarnessProfile {
+  return resolveRoleHarness(role === 'chat' ? loadAccess().chatHarness : loadAccess().codeHarness)
+}
+function setRoleHarness(role: SessionRole, profile: HarnessProfile): void {
+  const a = loadAccess()
+  // Native is the absence of a role — storing {provider:'anthropic'} would just be noise.
+  if (profile.provider === 'anthropic') { if (role === 'chat') delete a.chatHarness; else delete a.codeHarness }
+  else if (role === 'chat') a.chatHarness = profile
+  else a.codeHarness = profile
+  saveAccess(a)
+}
+
 async function spawnSession(dir: string, extra = '', presetSessionId?: string, account: Account = MAIN_ACCOUNT, agent: AgentKind = 'claude', harnessOverride?: HarnessProfile, dials?: { model?: string | null; effort?: string | null; mode?: CcMode | null; modeExplicit?: boolean }): Promise<string | null> {
   // Spawn-time install check: a session born on a stale binary stays stale until something bounces
   // it, and spawns are the one event that reliably happens on a box nobody is watching. Gated by
@@ -11014,6 +11045,8 @@ async function accountsPanelText(): Promise<string> {
         ? `\n\n✳️ <b>Codex · ❌ sandbox blocked</b>\n<i>${escapeHtml(readiness.reason.slice(0, 300))}</i>`
         : `\n\n✳️ <b>Codex · not installed/configured</b>\n<i>Install Codex and set CODEX_BIN, then sign in with ChatGPT.</i>`
   return `👤 <b>Accounts &amp; failover</b> — failover <b>${a.limitFailover === true ? 'on' : 'off'}</b>\n\n` +
+    `💬 <b>Chat runs on</b> — ${roleHarnessSummary(resolveRoleHarness(a.chatHarness), gateways)}\n` +
+    `🧑‍💻 <b>Coding sessions run on</b> — ${roleHarnessSummary(resolveRoleHarness(a.codeHarness), gateways)}\n\n` +
     `A usage-limited session tries these in turn — ↑/↓ reorders:\n\n${lines.join('\n')}${codexCfg}\n\n` +
     `🚀 starts a session on an account${isTopicMode() ? ' (it gets its own topic)' : ''} — a first-time account asks you to log in once; the sign-in link relays here.\n` +
     `➕ 👤 adds an account (its own config dir <code>~/.claude-&lt;name&gt;</code>). 🌐 providers are any Anthropic-compatible API — presets (MiniMax · DeepSeek · GLM) or Custom (<code>name baseUrl model</code>); ✏️ edits a provider's model, 🔑 re-keys it.`
@@ -11022,6 +11055,7 @@ function accountsPanelKeyboard(): InlineKeyboard {
   const a = loadAccess()
   const kb = new InlineKeyboard()
   kb.text(a.limitFailover === true ? '🔀 On' : '💤 Off', 'fo:toggle').row()
+  kb.text('💬 Chat', 'rp:chat').text('🧑‍💻 Coding', 'rp:code').row()
   for (const h of failoverChain()) {
     const key = hopKey(h)
     const label = h.kind === 'codex' ? '✳️ Codex' : h.kind === 'gateway' ? `🌐 ${h.name}` : `👤 ${h.account}`
@@ -11040,6 +11074,30 @@ function accountsPanelKeyboard(): InlineKeyboard {
       .text(`⚡ Effort: ${codexLaunchEffort() ?? 'default'}`, 'fo:cxeffort').row()
   }
   return kb.text('➕ Account', 'acct:add').text('➕ Provider', 'gw:add').text('‹ Back', 'acct:back')
+}
+
+// 💬 Chat / 🧑‍💻 Coding role pickers (Accounts panel): which provider NEW sessions of each role
+// spawn on — the same vocabulary as /harness, but as a role DEFAULT. A session's own harness (an
+// explicit /harness, a topic's recorded one) always wins; the role only fills in where nothing
+// else was chosen. Picking Native deletes the role (absence = native), so prefs.json stays clean.
+const ROLE_LABEL: Record<SessionRole, string> = { chat: '💬 Chat', code: '🧑‍💻 Coding sessions' }
+function rolePickerText(role: SessionRole): string {
+  const gateways = loadHarnessGateways()
+  const cur = roleHarnessSummary(roleHarnessOf(role), gateways)
+  const options = roleProviderOptions(gateways).map(o => `• ${escapeHtml(o.label)}`).join('\n')
+  return `${ROLE_LABEL[role]} — currently <b>${cur}</b>\n\n` +
+    `New ${role === 'chat' ? 'chat lane' : 'coding sessions'} spawn on the provider you pick. Tap one:\n\n${options}\n\n` +
+    `✏️ edits the model once a non-native provider is picked.`
+}
+function rolePickerKeyboard(role: SessionRole): InlineKeyboard {
+  const cur = roleHarnessOf(role)
+  const curKey = cur.provider === 'anthropic' ? 'native' : cur.provider === 'gateway' ? `gw:${cur.gateway}` : cur.provider
+  const kb = new InlineKeyboard()
+  for (const o of roleProviderOptions(loadHarnessGateways())) {
+    kb.text(`${o.key === curKey ? '● ' : ''}${o.label}`, `rp:set:${role}:${o.key}`).row()
+  }
+  if (cur.provider !== 'anthropic') kb.text('✏️ Model', `rp:model:${role}`)
+  return kb.text('‹ Back', 'rp:back')
 }
 
 // The GitHub panel (settings → 🐙 GitHub): gh CLI accounts, with switch/logout per account and
@@ -11990,7 +12048,7 @@ bot.on('callback_query:data', async ctx => {
       if (!acct) { await ctx.answerCallbackQuery({ text: 'Unknown account.' }).catch(() => {}); return }
       const dir = (focus.activePaneId ? await paneCwd(focus.activePaneId).catch(() => null) : null) ?? homedir()
       await ctx.answerCallbackQuery({ text: `Starting a ${acct.name} session…` }).catch(() => {})
-      const ok = await spawnSession(dir, '', isTopicMode() ? genSessionId() : undefined, acct)
+      const ok = await spawnSession(dir, '', isTopicMode() ? genSessionId() : undefined, acct, 'claude', codingSpawnHarness())
       const note = ok
         ? `🚀 Starting a <b>${escapeHtml(acct.name)}</b> session in <code>${escapeHtml(dir)}</code>` +
           `${isTopicMode() ? ' — it gets its own topic shortly' : ''}.` +
@@ -12007,6 +12065,54 @@ bot.on('callback_query:data', async ctx => {
       await ctx.answerCallbackQuery().catch(() => {})
     }
     await showHtmlPanel(ctx, 'edit', await accountsPanelText(), accountsPanelKeyboard())
+    return
+  }
+
+  // 💬 Chat / 🧑💻 Coding role pickers (Accounts panel): open the picker, or ✏️ edit the role's
+  // model. The role is a DEFAULT for NEW spawns — an existing session's own harness always wins.
+  const rpMatch = /^rp:(chat|code|back|model:(chat|code))$/.exec(data)
+  if (rpMatch) {
+    if (!(await cbAuth(ctx))) return
+    if (rpMatch[1] === 'back') {
+      await ctx.answerCallbackQuery().catch(() => {})
+      await showHtmlPanel(ctx, 'edit', await accountsPanelText(), accountsPanelKeyboard())
+      return
+    }
+    if (rpMatch[1].startsWith('model:')) {
+      const role = rpMatch[2] as SessionRole
+      const cur = roleHarnessOf(role)
+      if (cur.provider === 'anthropic') { await ctx.answerCallbackQuery({ text: 'Pick a provider first.' }).catch(() => {}); return }
+      await ctx.answerCallbackQuery().catch(() => {})
+      const thread = ctx.callbackQuery.message?.message_thread_id
+      const sent = await channel.sendText(String(ctx.chat!.id),
+        `✏️ <b>${ROLE_LABEL[role]}</b> — reply with the model id to use. Currently: <code>${escapeHtml(cur.model)}</code>.`,
+        { ...(thread ? { threadId: String(thread) } : {}), forceReply: { placeholder: 'model id' } }).catch(() => null)
+      if (sent) replyTargets.set(refKey(sent), { kind: 'rpmodel', role })
+      return
+    }
+    await showHtmlPanel(ctx, 'edit', rolePickerText(rpMatch[1] as SessionRole), rolePickerKeyboard(rpMatch[1] as SessionRole))
+    return
+  }
+  // rp:set:<role>:<pick> — apply a picked provider to a role (native / gateway / built-in).
+  const rpSetMatch = /^rp:set:(chat|code):(native|codex|kimi|grok|cursor|gw:[a-z0-9][a-z0-9_-]{0,31})$/.exec(data)
+  if (rpSetMatch) {
+    if (!(await cbAuth(ctx))) return
+    const role = rpSetMatch[1] as SessionRole
+    const pick = rpSetMatch[2]!
+    if (pick === 'native') {
+      setRoleHarness(role, { provider: 'anthropic' })
+    } else if (pick.startsWith('gw:')) {
+      const name = pick.slice(3)
+      const def = loadHarnessGateways()[name]
+      if (!def) { await ctx.answerCallbackQuery({ text: 'Unknown provider.' }).catch(() => {}); return }
+      setRoleHarness(role, normalizeHarnessProfile({ provider: 'gateway', gateway: name, model: def.model, smallModel: def.smallModel }))
+    } else {
+      const profile = parseHarnessSpec(pick)
+      if (!profile || profile.provider === 'anthropic') { await ctx.answerCallbackQuery({ text: 'Unknown provider.' }).catch(() => {}); return }
+      setRoleHarness(role, profile)
+    }
+    await ctx.answerCallbackQuery({ text: `${ROLE_LABEL[role]} → ${roleHarnessSummary(roleHarnessOf(role), loadHarnessGateways())}` }).catch(() => {})
+    await showHtmlPanel(ctx, 'edit', rolePickerText(role), rolePickerKeyboard(role))
     return
   }
 
@@ -12485,7 +12591,8 @@ bot.on('callback_query:data', async ctx => {
     // `-c` would silently graft this topic onto the wrong one. The bare branch asserts the model
     // floor, since there is no conversation to carry one in.
     const extra = t.agentSessionId ? `--resume ${t.agentSessionId}` : ''
-    const ok = await spawnSession(t.cwd, extra, sid, topicAccount(t), topicAgent(t), undefined,
+    const ok = await spawnSession(t.cwd, extra, sid, topicAccount(t), topicAgent(t),
+      extra ? undefined : codingSpawnHarness(),
       extra ? undefined : { model: refreshSpawnModel(sid) })
     if (ok) await reopenSessionTopic(sid)   // reopen the tab NOW, not on first reply
     await channel.sendText(String(ctx.chat!.id), ok
@@ -12523,7 +12630,7 @@ bot.on('callback_query:data', async ctx => {
     const dir = focus.activePaneId ? await paneCwd(focus.activePaneId).catch(() => null) : null
     if (!dir) { await ctx.answerCallbackQuery({ text: 'No folder to offer — use ✏️ Specify folder.' }).catch(() => {}); return }
     await ctx.answerCallbackQuery({ text: 'Starting…' }).catch(() => {})
-    const ok = await spawnSession(dir, '', genSessionId(), await paneAccount(focus.activePaneId), await paneAgentKind(focus.activePaneId))
+    const ok = await spawnSession(dir, '', genSessionId(), await paneAccount(focus.activePaneId), await paneAgentKind(focus.activePaneId), codingSpawnHarness())
     await ctx.editMessageText(ok
       ? `🚀 Starting a session in <code>${escapeHtml(dir)}</code> — it gets its own topic shortly.`
       : `❌ Couldn't start a session in <code>${escapeHtml(dir)}</code>.`, { parse_mode: 'HTML' }).catch(() => {})
@@ -12537,7 +12644,7 @@ bot.on('callback_query:data', async ctx => {
     const dir = lastSessionCwd()
     if (!dir) { await ctx.answerCallbackQuery({ text: 'That folder is gone — use ✏️ Specify folder.' }).catch(() => {}); return }
     await ctx.answerCallbackQuery({ text: 'Starting…' }).catch(() => {})
-    const ok = await spawnSession(dir, '', isTopicMode() ? genSessionId() : undefined)
+    const ok = await spawnSession(dir, '', isTopicMode() ? genSessionId() : undefined, MAIN_ACCOUNT, 'claude', codingSpawnHarness())
     await ctx.editMessageText(ok
       ? `🚀 Starting a session in <code>${escapeHtml(dir)}</code> — message it here once it's up.`
       : `❌ Couldn't start a session in <code>${escapeHtml(dir)}</code>.`, { parse_mode: 'HTML' }).catch(() => {})
@@ -12567,7 +12674,7 @@ bot.on('callback_query:data', async ctx => {
     const sid = genSessionId()
     setGeneralSession(sid, dir)
     if (!getBaseCwd()) setBaseCwd(dir)
-    const ok = await spawnSession(dir, '', sid)
+    const ok = await spawnSession(dir, '', sid, MAIN_ACCOUNT, 'claude', codingSpawnHarness())
     if (!ok) setGeneralSession(null)
     await ctx.editMessageText(ok
       ? `🚀 Starting the base session in <code>${escapeHtml(dir)}</code> — it lives here in General.`
@@ -12590,7 +12697,7 @@ bot.on('callback_query:data', async ctx => {
     await ctx.answerCallbackQuery({ text: 'Starting…' }).catch(() => {})
     const cwd = await paneCwd(t.paneId).catch(() => null)
     if (!cwd) { await ctx.editMessageText('Couldn\'t read this session\'s folder.').catch(() => {}); return }
-    const ok = await spawnSession(cwd, '', genSessionId(), await paneAccount(t.paneId), await paneAgentKind(t.paneId))
+    const ok = await spawnSession(cwd, '', genSessionId(), await paneAccount(t.paneId), await paneAgentKind(t.paneId), codingSpawnHarness())
     await ctx.editMessageText(ok
       ? `🚀 Starting a sibling session in <code>${escapeHtml(cwd)}</code> — it gets its own topic shortly.`
       : `❌ Couldn't start a session in <code>${escapeHtml(cwd)}</code>.`,
@@ -14300,7 +14407,7 @@ async function ensureHeadlessGeneral(): Promise<void> {
     setTopic(sid, { headless: true, cwd: dir, name: 'general', closed: false, createdAt: Date.now() })
     // Bypass, always: general is headless — no surface to relay a permission prompt to, so any
     // approval dialog would wedge it silently until the asking agent's timeout.
-    const pane = await spawnSession(dir, '', sid, MAIN_ACCOUNT, 'claude', undefined, { mode: 'bypassPermissions' })
+    const pane = await spawnSession(dir, '', sid, MAIN_ACCOUNT, 'claude', codingSpawnHarness(), { mode: 'bypassPermissions' })
     if (!pane) {
       removeTopic(sid)
       process.stderr.write(`daemon: headless general spawn failed in ${dir} — see daemon log\n`)
@@ -14337,7 +14444,7 @@ async function ensureChatLane(ctx: Context, chatId: string, first: InboundParams
       if (notice) await channel.editText({ chatId: String(notice.chat.id), messageId: String(notice.message_id) }, text, buttons ? { buttons } : undefined).catch(() => {})
       else await ctx.reply(text, { parse_mode: 'HTML', ...(buttons ? { reply_markup: buttonsToKb(buttons) } : {}) }).catch(() => {})
     }
-    const pane = await spawnSession(dir, extra, sid, account, 'claude')
+    const pane = await spawnSession(dir, extra, sid, account, 'claude', chatSpawnHarness())
     if (!pane) {
       drain(bufferEvent)   // keep the messages — they replay when a session next appears
       await edit(`❌ Couldn't ${revive ? 'revive' : 'start'} your chat in <code>${escapeHtml(dir)}</code> — your message is buffered.`)
@@ -14943,6 +15050,27 @@ bot.on('message:text', async ctx => {
           }
           saveGatewayDef(target.name, def)
           await ctx.reply(`✅ <b>${escapeHtml(target.name)}</b> model → <code>${escapeHtml(def.model)}</code>.`, { parse_mode: 'HTML' })
+          return
+        }
+        // "✏️ Model" on a ROLE (Accounts panel → 💬 Chat / 🧑💻 Coding): model ids are open-ended,
+        // so this is a force-reply. Validated via roleModelUpdate — a model that doesn't match the
+        // role's provider is refused the same way a /harness model would be.
+        case 'rpmodel': {
+          const cur = roleHarnessOf(target.role)
+          if (cur.provider === 'anthropic') {
+            await ctx.reply('⚠️ That role has no provider yet — pick one from 👤 Accounts first.')
+            return
+          }
+          const next = roleModelUpdate(cur, text.trim())
+          if (!next || next.provider === 'anthropic') {
+            const again = await ctx.reply(
+              `❌ <code>${escapeHtml(text.trim())}</code> isn't a valid model for ${ROLE_LABEL[target.role]}. Try again.`,
+              { parse_mode: 'HTML', reply_markup: { force_reply: true, input_field_placeholder: 'model id' } }).catch(() => null)
+            if (again) replyTargets.set(`${ctx.chat?.id}:${again.message_id}`, target)
+            return
+          }
+          setRoleHarness(target.role, next)
+          await ctx.reply(`✅ ${ROLE_LABEL[target.role]} model → <code>${escapeHtml(next.model)}</code>.`, { parse_mode: 'HTML' })
           return
         }
         // "✏️ Type something" → type the answer into the prompt's free-text field: move the cursor
@@ -16659,7 +16787,7 @@ async function webappSessionSpawn(
     setTopic(sid, { headless: true, cwd: dir, name: topicName, closed: false, createdAt: Date.now() })
     try { topicBranchCache.set(sid, (await exec('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 2000 })).stdout.trim()) }
     catch { topicBranchCache.set(sid, '') }
-    const pane = await spawnSession(dir, '', sid, MAIN_ACCOUNT, 'claude', undefined,
+    const pane = await spawnSession(dir, '', sid, MAIN_ACCOUNT, 'claude', codingSpawnHarness(),
       { model, effort: effort === 'auto' ? null : effort, mode: mode as CcMode, modeExplicit })
     if (!pane) { removeTopic(sid); return { error: `spawn failed in ${dir} — see daemon log` } }
     appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'spawn', from: 'owner', to: topicName, text: `${dir} headless${model ? ` model=${model}` : ''}${effort ? ` effort=${effort}` : ''}${mode ? ` mode=${mode}` : ''}` })
@@ -16673,7 +16801,7 @@ async function webappSessionSpawn(
   setTopic(sid, { threadId, cwd: dir, name: topicName, closed: false, createdAt: Date.now() })
   try { topicBranchCache.set(sid, (await exec('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 2000 })).stdout.trim()) }
   catch { topicBranchCache.set(sid, '') }
-  const pane = await spawnSession(dir, '', sid, MAIN_ACCOUNT, 'claude', undefined,
+  const pane = await spawnSession(dir, '', sid, MAIN_ACCOUNT, 'claude', codingSpawnHarness(),
     { model, effort: effort === 'auto' ? null : effort, mode: mode as CcMode, modeExplicit })
   if (!pane) {
     removeTopic(sid)

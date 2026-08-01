@@ -5,6 +5,7 @@
 // modules) reference them without dragging in the daemon's side effects.
 import type net from 'node:net'
 import type { DaemonToShim, FailoverHop } from './common.ts'
+import type { HarnessProfile } from './harness-provider.ts'
 import type { PromptOption } from './prompt.ts'
 
 export type PendingEntry = { senderId: string; chatId: string; createdAt: number; expiresAt: number; replies: number }
@@ -37,6 +38,8 @@ export type Access = {
   failoverChain?: FailoverHop[]  // user-ordered try-in-order hops for limitFailover; unset/partial = default order (accounts main-first, Codex last)
   codexModel?: string      // model every Codex launch (incl. failover) uses; overrides CODEX_MODEL env; unset = env/Codex default
   codexEffort?: string     // Codex reasoning effort (low/medium/high/xhigh); overrides CODEX_REASONING_EFFORT env; unset = default
+  chatHarness?: HarnessProfile  // the 💬 chat lane's provider (Accounts panel → 💬 Chat): a HarnessProfile; absent/native = Anthropic, exactly as the lane always ran
+  codeHarness?: HarnessProfile  // the 🧑💻 coding sessions' provider (Accounts panel → 🧑💻 Coding): the DEFAULT harness for NEW coding spawns (mini-app +, new topics, tg spawn, General); absent/native = Anthropic
   spawnModel?: string      // default model for CODING sessions — every human-originated spawn (the mini-app +, a new topic) uses it, and it is what an agent spawn falls back to. A real alias; 'auto' is migrated away (see spawnAuto)
   fableForAgents?: 'off' | 'allow'   // what an AGENT asking for Fable meets — the "Require approvals to spawn Fable" row. Unset (DEFAULT, row ON) = the gate: --model fable is held for one owner tap, timing out to the fallback. 'allow' (row OFF) = no approval, it launches like any other model. 'off' = RETIRED from the UI 2026-07-29 (refused outright, no card, no hold); honoured from config, never migrated, and one tap moves it to the default. Never covers the owner's own picker (humanOrigin is sovereign) — see FablePolicy
   spawnEffort?: string     // default effort for CODING sessions, same rule as spawnModel. A real level; 'auto' is migrated away (see spawnAuto)

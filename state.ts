@@ -87,6 +87,7 @@ export type ReplyTarget =
   | { kind: 'gwspec'; panelMsgId?: number }                      // "name baseUrl model" for a new provider (Accounts panel → ➕ Provider)
   | { kind: 'gwkey'; name: string; panelMsgId?: number }         // API key for a pending gateway (def held in pendingGateways); message auto-deleted
   | { kind: 'gwmodel'; name: string; panelMsgId?: number }       // new model id for an existing gateway (Accounts panel → ✏️)
+  | { kind: 'rpmodel'; role: 'chat' | 'code' }                   // new model id for a role harness (Accounts panel → 💬/🧑💻 → ✏️)
   | { kind: 'orphan' }                                           // rehydrated after a restart — enough to delete/disarm it, the original flow is gone
 //
 // Persisted across restarts: memory-only meant a wedged force-reply prompt outlived the process

@@ -36,6 +36,7 @@ const PREF_KEYS = [
   'topicOnEnd', 'scheduleTz', 'batchAllow', 'confirmReset', 'tts', 'updateChecks', 'claudingDraft',
   'autoUpdate', 'limitFailover', 'failoverChain', 'codexModel', 'codexEffort', 'switchboard', 'dmLanes',
   'chatMapAutowire', 'fileBrowser', 'spawnModel', 'spawnEffort', 'spawnAuto', 'spawnAgentModels', 'spawnHoldMinutes', 'modelCardChat', 'fableForAgents',
+  'chatHarness', 'codeHarness',
 ] as const satisfies readonly (keyof Access)[]
 
 // Parse a JSON access/prefs file into a partial; {} on missing, moved-aside + {} on corrupt.
