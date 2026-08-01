@@ -50,7 +50,7 @@ import {
   CODEX_ENABLED, codexLaunchCommand, normalizeAgent, shellQuote, type AgentKind,
 } from './agent.ts'
 import {
-  HARNESS_ENV_KEYS, HARNESS_PANE_OPT, claudeHarnessEnv, harnessLabel, normalizeHarnessProfile, normalizeProxyBaseUrl, parseHarnessSpec,
+  HARNESS_ENV_KEYS, HARNESS_PANE_OPT, claudeHarnessEnv, harnessLabel, launchDisplayModel, normalizeHarnessProfile, normalizeProxyBaseUrl, parseHarnessSpec,
   resumeCliModel, serializeHarnessProfile, type BuiltinHarnessProvider, type HarnessProfile,
 } from './harness-provider.ts'
 import {
@@ -60,6 +60,7 @@ import {
 import {
   resolveRoleHarness, roleHarnessSummary, roleProviderOptions, harnessModelUpdate, rolePanelLine, type SessionRole,
 } from './role-provider.ts'
+import { GATEWAY_PRESETS } from './gateway-presets.ts'
 import { findSessionHarness, recordSessionHarness } from './session-harness.ts'
 import {
   initAccounts, listAccounts, accountByName, accountForTranscript, accountForProjectsDir,
@@ -1423,15 +1424,6 @@ function gatewayConfiguredAndKeyed(name: string): boolean {
   return def.auth === 'none' || !!(def.tokenEnv && gatewayEnvLive()[def.tokenEnv])
 }
 const pendingGateways = new Map<string, GatewayDefinition>()   // a spec awaiting its API-key reply
-
-// Popular Anthropic-Messages-compatible providers, base URLs + current model ids pinned from each
-// provider's own Claude Code docs (2026-07). All use bearer auth (ANTHROPIC_AUTH_TOKEN). The picker
-// pre-fills these so an add is one tap + the key; model is overridable later via /harness gateway.
-const GATEWAY_PRESETS: Array<{ key: string; label: string; baseUrl: string; model: string; smallModel: string }> = [
-  { key: 'minimax', label: 'MiniMax', baseUrl: 'https://api.minimax.io/anthropic', model: 'MiniMax-M3[1m]', smallModel: 'MiniMax-M3[1m]' },
-  { key: 'deepseek', label: 'DeepSeek', baseUrl: 'https://api.deepseek.com/anthropic', model: 'deepseek-v4-pro', smallModel: 'deepseek-v4-flash' },
-  { key: 'zai', label: 'Z.ai (GLM)', baseUrl: 'https://api.z.ai/api/anthropic', model: 'glm-4.7', smallModel: 'glm-4.7' },
-]
 
 function harnessEnvPrefix(profile: HarnessProfile): string {
   if (profile.provider === 'anthropic') return 'env -u CC_BRIDGE_HARNESS_PROXY '
@@ -6947,6 +6939,10 @@ function spawnReason(spec: SpawnSpec, modelFellBack: boolean, effortFellBack: bo
 // there is no caller left to write to.
 async function launchSpawn(spec: SpawnSpec, model: string | null, clampedNote: string, reason: string | null = null): Promise<{ ok: boolean; text: string }> {
   const { fromSid, topicName, dir, effort, firstMsg, headless } = spec
+  // What this spawn will actually RUN on, for the card, the ledger and the ok-line. A non-native
+  // coding role harness owns the model — the resolved alias never reached the CLI (resumeCliModel
+  // drops it), so naming the alias would card "Opus" while DeepSeek serves the turn.
+  const shownModel = launchDisplayModel(model, codingSpawnHarness())
   const group = headless ? null : getGroupChatId()!
   let threadId: number | null = null
   if (group) {
@@ -6977,7 +6973,7 @@ async function launchSpawn(spec: SpawnSpec, model: string | null, clampedNote: s
     return { ok: false, text: `spawn failed in ${dir} — see daemon log` }
   }
   const fromName = nameForEndpoint(fromSid, busEndpoints())
-  appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'spawn', from: fromName, to: topicName, text: `${dir}${model ? ` model=${model}` : ''}${effort ? ` effort=${effort}` : ''}${reason ? ` why=${reason}` : ''}` })
+  appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'spawn', from: fromName, to: topicName, text: `${dir}${shownModel ? ` model=${shownModel}` : ''}${effort ? ` effort=${effort}` : ''}${reason ? ` why=${reason}` : ''}` })
   // ONE notice on the SPAWNER's own surface (its DM lane / topic): "Spawned @X" with the first
   // message behind the chevron. This used to be two messages back to back — an instant text ack
   // here plus notifyAskSent's "Messaged @X" card on confirmed delivery — which read as clutter
@@ -6989,7 +6985,7 @@ async function launchSpawn(spec: SpawnSpec, model: string | null, clampedNote: s
   // that resolved to nothing drops its clause; this line never invents one. No chevron means no
   // expanded view, so a spawn with no first message carries no reason on its card at all — the
   // caller's `ok:` line and the ledger below are where it survives.
-  const spawnHeader = spawnCardHeader(escapeHtml(topicName), [model, effort].filter(Boolean).map(d => escapeHtml(d!)))
+  const spawnHeader = spawnCardHeader(escapeHtml(topicName), [shownModel, effort].filter(Boolean).map(d => escapeHtml(d!)))
   if (firstMsg) void notifyBusRich(fromSid, spawnHeader, reason ? `why: ${reason}\n\n${firstMsg}` : firstMsg)
   else void notifyBusText(fromSid, spawnHeader)
   if (firstMsg) {
@@ -7055,7 +7051,7 @@ async function launchSpawn(spec: SpawnSpec, model: string | null, clampedNote: s
   // The no-brief case says so OUT LOUD. It used to be the silent branch — a dropped brief and a
   // deliberately briefless spawn printed the same line bar one clause, which is how two spawns
   // whose briefs never arrived read as successful for half an hour each.
-  return { ok: true, text: `spawned "${topicName}" in ${dir}${model ? ` · model ${model}` : ''}${reason ? ` (why: ${reason})` : ''}${clampedNote}${effort ? ` · effort ${effort}` : ''}${firstMsg
+  return { ok: true, text: `spawned "${topicName}" in ${dir}${shownModel ? ` · model ${shownModel}` : ''}${reason ? ` (why: ${reason})` : ''}${clampedNote}${effort ? ` · effort ${effort}` : ''}${firstMsg
     ? ' — the first message delivers as an ask once the REPL is up, and its reply comes back to you as the answer'
     : ' — NO first message was given, so it starts idle (a heredoc needs the `-` body argument; `tg spawn --help`)'}. Reach it on the bus as @${topicName}.` }
 }
@@ -11069,7 +11065,7 @@ async function accountsPanelText(): Promise<string> {
     if (h.kind === 'codex') return `${i + 1}. ✳️ Codex`
     if (h.kind === 'gateway') {
       const def = gateways[h.name!]
-      return `${i + 1}. 🌐 <b>${escapeHtml(h.name!)}</b> — <code>${escapeHtml(def ? def.model : '?')}</code>` +
+      return `${i + 1}. 🌐 <b>${escapeHtml(h.name!)}</b> — <code>${escapeHtml(def ? def.model.replace(/\[1m\]$/, '') : '?')}</code>` +
         `${gatewayConfiguredAndKeyed(h.name!) ? '' : ' · ⚠️ no key'}`
     }
     const acct = accountByName(h.account!)
@@ -16890,6 +16886,10 @@ async function webappSessionSpawn(
   // a "+" with no model chip must still resolve to a real model rather than dropping to the CLI's own
   // default (the sheet says "follows Settings (auto → opus)" for exactly this reason).
   const model = asked ?? configuredSpawnModel()
+  // Same truth rule as the bus spawn card: a non-native coding harness owns the model at the CLI, so
+  // the ledger names the harness's model, not the chip the sheet resolved (which may have never
+  // reached the CLI). This is the mini-app twin of launchSpawn's shownModel.
+  const shownModel = launchDisplayModel(model, codingSpawnHarness())
   const effort = askedEffort ?? configuredSpawnEffort()
   const askedMode = opts.mode ? String(opts.mode) : null
   if (askedMode && !['default', 'acceptEdits', 'plan', 'bypassPermissions'].includes(askedMode)) return { error: `unknown mode '${askedMode}'` }
@@ -16919,7 +16919,7 @@ async function webappSessionSpawn(
     const pane = await spawnSession(dir, '', sid, MAIN_ACCOUNT, 'claude', codingSpawnHarness(),
       { model, effort: effort === 'auto' ? null : effort, mode: mode as CcMode, modeExplicit })
     if (!pane) { removeTopic(sid); return { error: `spawn failed in ${dir} — see daemon log` } }
-    appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'spawn', from: 'owner', to: topicName, text: `${dir} headless${model ? ` model=${model}` : ''}${effort ? ` effort=${effort}` : ''}${mode ? ` mode=${mode}` : ''}` })
+    appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'spawn', from: 'owner', to: topicName, text: `${dir} headless${shownModel ? ` model=${shownModel}` : ''}${effort ? ` effort=${effort}` : ''}${mode ? ` mode=${mode}` : ''}` })
     return { sid, name: topicName }
   }
   const group = getGroupChatId()!
@@ -16937,7 +16937,7 @@ async function webappSessionSpawn(
     void channel.threads!.remove(group, String(threadId)).catch(() => {})
     return { error: `spawn failed in ${dir} — see daemon log` }
   }
-  appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'spawn', from: 'owner', to: topicName, text: `${dir}${model ? ` model=${model}` : ''}${effort ? ` effort=${effort}` : ''}${mode ? ` mode=${mode}` : ''}` })
+  appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'spawn', from: 'owner', to: topicName, text: `${dir}${shownModel ? ` model=${shownModel}` : ''}${effort ? ` effort=${effort}` : ''}${mode ? ` mode=${mode}` : ''}` })
   return { sid, name: topicName }
 }
 

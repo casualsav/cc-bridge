@@ -41,6 +41,13 @@ test('roleHarnessSummary: native, gateway, built-in', () => {
     .toBe('codex · gpt-5.6-sol')
 })
 
+test('role surfaces strip the [1m] harness suffix from gateway models', () => {
+  expect(roleHarnessSummary({ provider: 'gateway', gateway: 'deepseek', model: 'deepseek-v4-flash[1m]', smallModel: 'deepseek-v4-flash[1m]' }, gateways))
+    .toBe('🌐 deepseek · deepseek-v4-flash')
+  expect(roleProviderOptions({ ...gateways, deepseek: { ...gateways.deepseek, model: 'deepseek-v4-flash[1m]', smallModel: 'deepseek-v4-flash[1m]' } })
+    .find(o => o.key === 'gw:deepseek')?.label).toBe('deepseek · deepseek-v4-flash')
+})
+
 test('rolePanelLine: the chat line names the LIVE lane, coding names the default', () => {
   const role = { provider: 'gateway' as const, gateway: 'deepseek', model: 'deepseek-v4-pro', smallModel: 'deepseek-v4-flash' }
   const live = { provider: 'gateway' as const, gateway: 'local-codex', model: 'gpt-5.6-sol[1m]', smallModel: 'gpt-5.6-luna[1m]' }
@@ -48,8 +55,10 @@ test('rolePanelLine: the chat line names the LIVE lane, coding names the default
   // No lane yet: the default is the truth, labelled as future-applying.
   expect(rolePanelLine('lane', null, role, gateways)).toBe('💬 Chat runs on — 🌐 deepseek · deepseek-v4-pro (applies when the lane starts)')
   // Live lane differs from the default → both shown, live first.
-  expect(rolePanelLine('lane', live, role, gateways)).toBe('💬 Chat runs on — 🌐 local-codex · gpt-5.6-sol[1m] · new lanes: 🌐 deepseek · deepseek-v4-pro')
+  expect(rolePanelLine('lane', live, role, gateways)).toBe('💬 Chat runs on — 🌐 local-codex · gpt-5.6-sol · new lanes: 🌐 deepseek · deepseek-v4-pro')
   // Live lane matches the default → one clean line.
+  // NB: the [1m] harness suffix is stripped from gateway labels — the value above reads
+  // "gpt-5.6-sol", not "gpt-5.6-sol[1m]", because the suffix is a window selector, not identity.
   expect(rolePanelLine('lane', role, role, gateways)).toBe('💬 Chat runs on — 🌐 deepseek · deepseek-v4-pro')
 })
 

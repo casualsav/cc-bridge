@@ -28,7 +28,7 @@ export type RoleProviderOption = { key: string; label: string }
 
 export function roleProviderOptions(gateways: Record<string, GatewayDefinition>): RoleProviderOption[] {
   const out: RoleProviderOption[] = [{ key: 'native', label: 'Anthropic (native)' }]
-  for (const [name, def] of Object.entries(gateways)) out.push({ key: `gw:${name}`, label: `${name} · ${def.model}` })
+  for (const [name, def] of Object.entries(gateways)) out.push({ key: `gw:${name}`, label: `${name} · ${def.model.replace(/\[1m\]$/, '')}` })
   for (const p of ROLE_BUILTIN_PROVIDERS) {
     const profile = parseHarnessSpec(p)
     out.push({ key: p, label: `${p}${profile && profile.provider !== 'anthropic' ? ` · ${profile.model.replace(/\[1m\]$/, '')}` : ''}` })
@@ -41,7 +41,7 @@ export function roleHarnessSummary(profile: HarnessProfile, gateways: Record<str
   if (profile.provider === 'anthropic') return 'Anthropic (native)'
   if (profile.provider === 'gateway') {
     const def = gateways[profile.gateway]
-    return `🌐 ${profile.gateway} · ${profile.model}${def ? '' : ' · ⚠️ not configured'}`
+    return `🌐 ${profile.gateway} · ${profile.model.replace(/\[1m\]$/, '')}${def ? '' : ' · ⚠️ not configured'}`
   }
   return `${profile.provider} · ${profile.model.replace(/\[1m\]$/, '')}`
 }

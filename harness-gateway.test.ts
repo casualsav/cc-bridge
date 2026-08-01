@@ -134,6 +134,16 @@ test('gateway model discovery uses configured auth and accepts only safe model i
   expect(gatewayModelIds({ models: [] })).toBeNull()
 })
 
+test('gateway probes strip the [1m] harness suffix from the upstream model id', () => {
+  const wide = parseHarnessSpec('gateway minimax MiniMax-M3[1m]', definitions)
+  if (!wide || wide.provider !== 'gateway') throw new Error('expected gateway profile')
+  expect(gatewayProbeRequest(wide, definitions, { CC_BRIDGE_GATEWAY_MINIMAX_KEY: 'secret-token' })?.body.model).toBe('MiniMax-M3')
+  // A model with no suffix is unchanged — the strip is exactly the recognized harness suffix.
+  const plain = parseHarnessSpec('gateway minimax', definitions)
+  if (!plain || plain.provider !== 'gateway') throw new Error('expected gateway profile')
+  expect(gatewayProbeRequest(plain, definitions, { CC_BRIDGE_GATEWAY_MINIMAX_KEY: 'secret-token' })?.body.model).toBe('MiniMax-M2.5')
+})
+
 test('gateway probe responses must use the Anthropic Messages shape', () => {
   expect(validGatewayProbeResponse({ type: 'message', model: 'MiniMax-M3', content: [{ type: 'text', text: 'OK' }] })).toBe(true)
   expect(validGatewayProbeResponse({ ok: true })).toBe(false)

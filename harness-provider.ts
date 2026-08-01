@@ -70,6 +70,15 @@ export function normalizeHarnessProfile(value: unknown): HarnessProfile {
   return { provider: raw.provider, model: raw.model, smallModel: raw.smallModel ?? fallback }
 }
 
+// What a spawn actually RUNS on, for the surfaces that name it (the spawn card, the bus ledger, the
+// spawner's ok-line). A non-native role harness owns the model — the alias never reached the CLI
+// (resumeCliModel drops it), so naming the alias on the card would be the Opus-compatibility lie.
+// When the harness is native (or absent) the alias is exactly what runs.
+export function launchDisplayModel(alias: string | null, harness: HarnessProfile | undefined): string | null {
+  if (harness && harness.provider !== 'anthropic') return harness.model.replace(/\[1m\]$/, '')
+  return alias
+}
+
 export function resumeCliModel(profile: HarnessProfile, transcriptModel: string | null): string | null {
   // Native Anthropic resumes preserve the conversation's Claude alias. A proxy/gateway's model is
   // process-start transport configuration; passing the source Claude alias as --model overrides it
@@ -107,7 +116,7 @@ export function claudeHarnessEnv(profile: HarnessProfile, baseUrl: string): Reco
 
 export function harnessLabel(profile: HarnessProfile): string {
   if (profile.provider === 'anthropic') return 'Claude Code · Anthropic'
-  if (profile.provider === 'gateway') return `Claude Code · Gateway ${profile.gateway} · ${profile.model}`
+  if (profile.provider === 'gateway') return `Claude Code · Gateway ${profile.gateway} · ${profile.model.replace(/\[1m\]$/, '')}`
   const model = profile.model.replace(/\[1m\]$/, '')
   return `Claude Code · ${profile.provider.charAt(0).toUpperCase()}${profile.provider.slice(1)} ${model}`
 }

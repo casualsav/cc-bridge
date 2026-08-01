@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import {
-  HARNESS_PANE_OPT, claudeHarnessEnv, harnessLabel, normalizeHarnessProfile,
+  HARNESS_PANE_OPT, claudeHarnessEnv, harnessLabel, launchDisplayModel, normalizeHarnessProfile,
   normalizeProxyBaseUrl, parseHarnessSpec, resumeCliModel, type HarnessProfile,
 } from './harness-provider.ts'
 
@@ -39,6 +39,23 @@ test('proxy-backed profiles produce isolated Claude Code process env', () => {
   })
   expect(claudeHarnessEnv({ provider: 'anthropic' }, 'http://127.0.0.1:18765')).toEqual({})
   expect(harnessLabel(profile)).toBe('Claude Code · Codex gpt-5.6-sol')
+})
+
+test('launchDisplayModel reports the runtime harness model, never a dropped alias', () => {
+  const deepseek: HarnessProfile = { provider: 'gateway', gateway: 'deepseek', model: 'deepseek-v4-flash[1m]', smallModel: 'deepseek-v4-flash[1m]' }
+  expect(launchDisplayModel('opus', deepseek)).toBe('deepseek-v4-flash')
+  expect(launchDisplayModel(null, deepseek)).toBe('deepseek-v4-flash')
+  // Native (or no) harness: the alias is exactly what runs.
+  expect(launchDisplayModel('opus', undefined)).toBe('opus')
+  expect(launchDisplayModel('sonnet', { provider: 'anthropic' })).toBe('sonnet')
+  expect(launchDisplayModel(null, undefined)).toBeNull()
+  // Proxy harnesses too — the alias never reached the CLI there either.
+  expect(launchDisplayModel('opus', { provider: 'codex', model: 'gpt-5.6-sol[1m]', smallModel: 'gpt-5.6-luna[1m]' })).toBe('gpt-5.6-sol')
+})
+
+test('harnessLabel strips the [1m] suffix from gateway models like it does built-ins', () => {
+  expect(harnessLabel({ provider: 'gateway', gateway: 'deepseek', model: 'deepseek-v4-flash[1m]', smallModel: 'deepseek-v4-flash[1m]' }))
+    .toBe('Claude Code · Gateway deepseek · deepseek-v4-flash')
 })
 
 test('proxy resumes let the target inference profile own the CLI model identity', () => {
