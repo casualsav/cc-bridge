@@ -13369,6 +13369,42 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
+  // Stranded-queue card (strandWatch in sweepStuckPanes): the session went idle with a message
+  // stuck in its input queue. Submit sends Enter (best effort — the CLI's queued view doesn't
+  // always take it), Clear discards with Escape, Full dumps the screen. Stale-tap guards mirror
+  // the bangbox card.
+  const strandMatch = /^strand:(%\d+):(submit|clear|full)$/.exec(data)
+  if (strandMatch) {
+    if (!(await cbAuth(ctx))) return
+    const pane = strandMatch[1]!
+    const action = strandMatch[2]!
+    if (!(await paneAlive(pane).catch(() => false))) {
+      await ctx.answerCallbackQuery({ text: 'That session’s pane is gone.' }).catch(() => {})
+      return
+    }
+    const cap = await capturePane(pane).catch(() => '')
+    if (!cap || !hasQueuedMessages(cap)) {
+      await ctx.answerCallbackQuery({ text: 'Already resolved.' }).catch(() => {})
+      await ctx.editMessageText('✅ The queue already flushed.').catch(() => {})
+      return
+    }
+    if (action === 'full') {
+      await ctx.answerCallbackQuery().catch(() => {})
+      const dump = cleanPaneTail(cap, 60)
+      for (const t of await outboundTargetsFor(pane).catch(() => []))
+        await channel.sendText(String(t.chat), `<pre>${escapeHtml(dump)}</pre>`, { ...(t.thread ? { threadId: String(t.thread) } : {}) }).catch(() => {})
+      return
+    }
+    if (action === 'submit') await paneKeys(pane, ['Enter'], [300, 5000])
+    else await paneKeys(pane, ['Escape'], [200, 2000])
+    const done = !hasQueuedMessages(await capturePane(pane).catch(() => ''))
+    await ctx.answerCallbackQuery().catch(() => {})
+    await ctx.editMessageText(done
+      ? (action === 'submit' ? '⏎ Submitted.' : '✖️ Discarded.')
+      : '⚠️ Still queued — the session may be mid-turn; try Clear, or Full to look at the screen.').catch(() => {})
+    return
+  }
+
   // Armed-bash-box recovery card (guardArmedBashBox): submit the pending `!` command or discard it.
   if (data === 'bangbox:submit' || data === 'bangbox:discard') {
     if (!(await cbAuth(ctx))) return
@@ -15765,6 +15801,13 @@ if (AGENT_BUS_ENABLED) setInterval(() => void sweepBus(), LATER_SWEEP_MS).unref(
 // alert (footer-tier at 75s, generic at 90s) relays an actionable card; a still-stuck screen re-nags
 // quietly once per 30min; recovery clears the timer + prunes the pane's cards.
 const stuckWatch = new Map<string, StuckState>()
+// Stranded-queue watch: a message typed mid-turn that the CLI queued can outlive the turn that
+// was running — if that turn dies (a gateway 503 loop, a crash), the queue never flushes and the
+// session sits idle at a prompt with the user's own text stranded on screen. The pane reads as a
+// perfectly normal prompt, so the stuck watch never fires. Alert once per episode, with levers.
+const STRAND_QUEUE_IDLE_MS = 30_000    // transcript untouched for this long = idle, not working
+const STRAND_QUEUE_ALERT_MS = 120_000  // idle + queued for 2 minutes = stranded, surface it
+const strandWatch = new Map<string, { since: number; carded: boolean }>()
 // Parallel timer for a RECOGNIZED prompt (a select menu or permission prompt — detectStuckScreen
 // vetoes these on purpose, since they're already relayed as a Telegram card with buttons). Recognized
 // just means "a card exists somewhere"; it says nothing about whether anyone tapped it. Runs the exact
@@ -15922,6 +15965,37 @@ async function sweepStuckPanes(): Promise<void> {
       }
       process.stderr.write(`daemon: stuck-screen watchdog ${decision.act} for pane ${pane} (${nm})${own.length ? '' : lane ? ' → @chat' : ' → fleet surface'}\n`)
     }
+    // Stranded-queue check (strandWatch): the pane shows the CLI's queued-input UI but the
+    // transcript has gone quiet — the turn the message was typed into died and nobody will flush
+    // the queue. Mid-turn queuing is the CLI's designed steering feature and must NEVER alert; the
+    // transcript gate is what separates it from a dead turn's leftover queue.
+    if (cap && hasQueuedMessages(cap)) {
+      const tFile = await transcriptForPane(pane, await paneCwd(pane).catch(() => null)).catch(() => null)
+      const busy = tFile ? turnInProgress(tFile) || transcriptFreshWithin(tFile, STRAND_QUEUE_IDLE_MS) : true
+      if (!busy) {
+        const st = strandWatch.get(pane) ?? { since: now, carded: false }
+        strandWatch.set(pane, st)
+        if (now - st.since >= STRAND_QUEUE_ALERT_MS && !st.carded) {
+          st.carded = true
+          const nm = await paneDisplayName(pane)
+          // Headless sessions have no surface of their own — same fleet fallback as the stuck
+          // cards, so a stranded queue on General isn't a silent wedge either.
+          const targets = await outboundTargetsFor(pane).catch(() => [])
+          const surf = targets.length ? targets : await fleetSurfaceFor(pane).catch(() => [])
+          for (const t of surf) {
+            await channel.sendText(String(t.chat),
+              `⚠️ <b>${escapeHtml(nm)}</b> is idle with a message waiting in its input queue — it was typed mid-turn and the queue never flushed. ` +
+              `<b>📨 Submit</b> sends it now · <b>🗑 Clear</b> discards it (resend after) · <b>🖥 Full</b> shows the screen.`,
+              { ...(t.thread ? { threadId: String(t.thread) } : {}), buttons: [[
+                { text: '📨 Submit', data: `strand:${pane}:submit` },
+                { text: '🗑 Clear', data: `strand:${pane}:clear` },
+                { text: '🖥 Full', data: `strand:${pane}:full` },
+              ]] }).catch(() => {})
+          }
+          process.stderr.write(`daemon: stranded-queue alert for pane ${pane} (${nm})\n`)
+        }
+      } else if (strandWatch.has(pane)) strandWatch.delete(pane)
+    } else if (strandWatch.has(pane)) strandWatch.delete(pane)
   }
   // Reap context watermarks for sessions that are no longer live, so the map stays bounded across
   // session churn. Skipped when the sweep saw nothing (a tmux read failure) — same "never delete on
