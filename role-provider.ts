@@ -46,6 +46,26 @@ export function roleHarnessSummary(profile: HarnessProfile, gateways: Record<str
   return `${profile.provider} · ${profile.model.replace(/\[1m\]$/, '')}`
 }
 
+// The Accounts-panel line for a role. The CHAT LANE's line must name what the lane is ACTUALLY
+// running (its per-session harness), not just the role default — a panel that says "chat runs on
+// deepseek" while the orchestrator is served by OpenAI misleads any user, not just this one. When
+// they differ, both are shown: the live value, then what a NEW lane would start on. CODING has no
+// single live session, so its line is the role default, plainly labelled.
+export function rolePanelLine(
+  kind: 'lane' | 'coding',
+  live: HarnessProfile | null,
+  role: HarnessProfile,
+  gateways: Record<string, GatewayDefinition>,
+): string {
+  if (kind === 'coding') return `🧑‍💻 Coding sessions run on — ${roleHarnessSummary(role, gateways)}`
+  const roleSum = roleHarnessSummary(role, gateways)
+  if (!live) return `💬 Chat runs on — ${roleSum} (applies when the lane starts)`
+  const liveSum = roleHarnessSummary(live, gateways)
+  return liveSum === roleSum
+    ? `💬 Chat runs on — ${liveSum}`
+    : `💬 Chat runs on — ${liveSum} · new lanes: ${roleSum}`
+}
+
 // Apply a user-typed model id to a harness (the ✏️ role button, or /model on a session already
 // running on a non-Anthropic provider). Validated through the same normalizer the harness uses
 // everywhere: a model that doesn't match the provider normalizes away to native, so an invalid

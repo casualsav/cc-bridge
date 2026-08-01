@@ -58,7 +58,7 @@ import {
   parseGatewayDefinitions, validGatewayProbeResponse, type GatewayDefinition,
 } from './harness-gateway.ts'
 import {
-  resolveRoleHarness, roleHarnessSummary, roleProviderOptions, harnessModelUpdate, type SessionRole,
+  resolveRoleHarness, roleHarnessSummary, roleProviderOptions, harnessModelUpdate, rolePanelLine, type SessionRole,
 } from './role-provider.ts'
 import { findSessionHarness, recordSessionHarness } from './session-harness.ts'
 import {
@@ -10738,6 +10738,18 @@ function setRoleHarness(role: SessionRole, profile: HarnessProfile): void {
   saveAccess(a)
 }
 
+// The chat lane's LIVE harness — what the orchestrator is actually served by right now (its
+// per-session stamped harness), not the role default. Null when no lane is running. This is the
+// difference between a panel that tells the truth ("chat runs on local-codex") and one that
+// reports a pref the running lane doesn't use.
+async function liveChatLaneHarness(): Promise<HarnessProfile | null> {
+  for (const lane of listDmChatSessions()) {
+    const pane = await paneForSession(lane.sessionId).catch(() => null)
+    if (pane) return paneHarnessProfile(pane)
+  }
+  return null
+}
+
 async function spawnSession(dir: string, extra = '', presetSessionId?: string, account: Account = MAIN_ACCOUNT, agent: AgentKind = 'claude', harnessOverride?: HarnessProfile, dials?: { model?: string | null; effort?: string | null; mode?: CcMode | null; modeExplicit?: boolean }): Promise<string | null> {
   // Spawn-time install check: a session born on a stale binary stays stale until something bounces
   // it, and spawns are the one event that reliably happens on a box nobody is watching. Gated by
@@ -11079,8 +11091,8 @@ async function accountsPanelText(): Promise<string> {
         ? `\n\n✳️ <b>Codex · ❌ sandbox blocked</b>\n<i>${escapeHtml(readiness.reason.slice(0, 300))}</i>`
         : `\n\n✳️ <b>Codex · not installed/configured</b>\n<i>Install Codex and set CODEX_BIN, then sign in with ChatGPT.</i>`
   return `👤 <b>Accounts &amp; failover</b> — failover <b>${a.limitFailover === true ? 'on' : 'off'}</b>\n\n` +
-    `💬 <b>Chat runs on</b> — ${roleHarnessSummary(resolveRoleHarness(a.chatHarness), gateways)}\n` +
-    `🧑‍💻 <b>Coding sessions run on</b> — ${roleHarnessSummary(resolveRoleHarness(a.codeHarness), gateways)}\n\n` +
+    `${rolePanelLine('lane', await liveChatLaneHarness().catch(() => null), resolveRoleHarness(a.chatHarness), gateways)}\n` +
+    `${rolePanelLine('coding', null, resolveRoleHarness(a.codeHarness), gateways)}\n\n` +
     `A usage-limited session tries these in turn — ↑/↓ reorders:\n\n${lines.join('\n')}${codexCfg}\n\n` +
     `🚀 starts a session on an account${isTopicMode() ? ' (it gets its own topic)' : ''} — a first-time account asks you to log in once; the sign-in link relays here.\n` +
     `➕ 👤 adds an account (its own config dir <code>~/.claude-&lt;name&gt;</code>). 🌐 providers are any Anthropic-compatible API — presets (MiniMax · DeepSeek · GLM) or Custom (<code>name baseUrl model</code>); ✏️ edits a provider's model, 🔑 re-keys it.`
@@ -11115,12 +11127,21 @@ function accountsPanelKeyboard(): InlineKeyboard {
 // explicit /harness, a topic's recorded one) always wins; the role only fills in where nothing
 // else was chosen. Picking Native deletes the role (absence = native), so prefs.json stays clean.
 const ROLE_LABEL: Record<SessionRole, string> = { chat: '💬 Chat', code: '🧑‍💻 Coding sessions' }
-function rolePickerText(role: SessionRole): string {
+async function rolePickerText(role: SessionRole): Promise<string> {
   const gateways = loadHarnessGateways()
-  const cur = roleHarnessSummary(roleHarnessOf(role), gateways)
+  const roleSum = roleHarnessSummary(roleHarnessOf(role), gateways)
+  // The lane's line names the LIVE harness; the picker edits the DEFAULT, so when they differ the
+  // header says both — a user picking "what the chat runs on" must see the running truth.
+  const live = role === 'chat' ? await liveChatLaneHarness().catch(() => null) : null
+  const liveSum = live ? roleHarnessSummary(live, gateways) : null
   const options = roleProviderOptions(gateways).map(o => `• ${escapeHtml(o.label)}`).join('\n')
-  return `${ROLE_LABEL[role]} — currently <b>${cur}</b>\n\n` +
-    `New ${role === 'chat' ? 'chat lane' : 'coding sessions'} spawn on the provider you pick. Tap one:\n\n${options}\n\n` +
+  const head = liveSum && liveSum !== roleSum
+    ? `${ROLE_LABEL[role]} — <b>${roleSum}</b> (new lanes) · live lane: <b>${liveSum}</b>`
+    : `${ROLE_LABEL[role]} — <b>${roleSum}</b>`
+  return `${head}\n\n` +
+    (role === 'chat'
+      ? `This sets the default for NEW chat lanes — the live lane keeps its current provider until it restarts (<code>/harness</code> switches it now). Tap one:\n\n${options}\n\n`
+      : `New coding sessions spawn on the provider you pick. Tap one:\n\n${options}\n\n`) +
     `✏️ edits the role's default model; <code>/model &lt;id&gt;</code> inside a session overrides it for that session only.`
 }
 function rolePickerKeyboard(role: SessionRole): InlineKeyboard {
@@ -12124,7 +12145,7 @@ bot.on('callback_query:data', async ctx => {
       if (sent) replyTargets.set(refKey(sent), { kind: 'rpmodel', role })
       return
     }
-    await showHtmlPanel(ctx, 'edit', rolePickerText(rpMatch[1] as SessionRole), rolePickerKeyboard(rpMatch[1] as SessionRole))
+    await showHtmlPanel(ctx, 'edit', await rolePickerText(rpMatch[1] as SessionRole), rolePickerKeyboard(rpMatch[1] as SessionRole))
     return
   }
   // rp:set:<role>:<pick> — apply a picked provider to a role (native / gateway / built-in).
@@ -12146,7 +12167,7 @@ bot.on('callback_query:data', async ctx => {
       setRoleHarness(role, profile)
     }
     await ctx.answerCallbackQuery({ text: `${ROLE_LABEL[role]} → ${roleHarnessSummary(roleHarnessOf(role), loadHarnessGateways())}` }).catch(() => {})
-    await showHtmlPanel(ctx, 'edit', rolePickerText(role), rolePickerKeyboard(role))
+    await showHtmlPanel(ctx, 'edit', await rolePickerText(role), rolePickerKeyboard(role))
     return
   }
 

@@ -1,11 +1,12 @@
 // Role harness defaults (role-provider.ts): resolution, picker options, summaries, model edits.
 import { test, expect } from 'bun:test'
 import {
-  resolveRoleHarness, roleProviderOptions, roleHarnessSummary, harnessModelUpdate, ROLE_BUILTIN_PROVIDERS,
+  resolveRoleHarness, roleProviderOptions, roleHarnessSummary, harnessModelUpdate, rolePanelLine, ROLE_BUILTIN_PROVIDERS,
 } from './role-provider.ts'
 
 const gateways = {
   deepseek: { baseUrl: 'https://api.deepseek.com/anthropic', auth: 'bearer', tokenEnv: 'CC_BRIDGE_GATEWAY_DEEPSEEK_KEY', model: 'deepseek-v4-pro', smallModel: 'deepseek-v4-flash' },
+  'local-codex': { baseUrl: 'http://127.0.0.1:18765', auth: 'none', tokenEnv: '', model: 'gpt-5.6-sol[1m]', smallModel: 'gpt-5.6-luna[1m]' },
 } as const
 
 test('resolveRoleHarness: absent/invalid → native; valid profiles pass through', () => {
@@ -23,7 +24,7 @@ test('resolveRoleHarness: absent/invalid → native; valid profiles pass through
 test('roleProviderOptions: native first, then every gateway, then the built-ins', () => {
   const opts = roleProviderOptions(gateways)
   expect(opts[0]).toEqual({ key: 'native', label: 'Anthropic (native)' })
-  expect(opts.map(o => o.key)).toEqual(['native', 'gw:deepseek', ...ROLE_BUILTIN_PROVIDERS])
+  expect(opts.map(o => o.key)).toEqual(['native', 'gw:deepseek', 'gw:local-codex', ...ROLE_BUILTIN_PROVIDERS])
   expect(opts.find(o => o.key === 'gw:deepseek')?.label).toBe('deepseek · deepseek-v4-pro')
   // Built-ins carry their default model in the label.
   expect(opts.find(o => o.key === 'codex')?.label).toMatch(/^codex · /)
@@ -38,6 +39,18 @@ test('roleHarnessSummary: native, gateway, built-in', () => {
     .toBe('🌐 gone · x · ⚠️ not configured')
   expect(roleHarnessSummary({ provider: 'codex', model: 'gpt-5.6-sol[1m]', smallModel: 'gpt-5.6-luna[1m]' }, gateways))
     .toBe('codex · gpt-5.6-sol')
+})
+
+test('rolePanelLine: the chat line names the LIVE lane, coding names the default', () => {
+  const role = { provider: 'gateway' as const, gateway: 'deepseek', model: 'deepseek-v4-pro', smallModel: 'deepseek-v4-flash' }
+  const live = { provider: 'gateway' as const, gateway: 'local-codex', model: 'gpt-5.6-sol[1m]', smallModel: 'gpt-5.6-luna[1m]' }
+  expect(rolePanelLine('coding', null, role, gateways)).toBe('🧑‍💻 Coding sessions run on — 🌐 deepseek · deepseek-v4-pro')
+  // No lane yet: the default is the truth, labelled as future-applying.
+  expect(rolePanelLine('lane', null, role, gateways)).toBe('💬 Chat runs on — 🌐 deepseek · deepseek-v4-pro (applies when the lane starts)')
+  // Live lane differs from the default → both shown, live first.
+  expect(rolePanelLine('lane', live, role, gateways)).toBe('💬 Chat runs on — 🌐 local-codex · gpt-5.6-sol[1m] · new lanes: 🌐 deepseek · deepseek-v4-pro')
+  // Live lane matches the default → one clean line.
+  expect(rolePanelLine('lane', role, role, gateways)).toBe('💬 Chat runs on — 🌐 deepseek · deepseek-v4-pro')
 })
 
 test('roleModelUpdate: valid model updates, invalid/native refuse', () => {
