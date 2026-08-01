@@ -58,7 +58,7 @@ import {
   parseGatewayDefinitions, validGatewayProbeResponse, type GatewayDefinition,
 } from './harness-gateway.ts'
 import {
-  resolveRoleHarness, roleHarnessSummary, roleProviderOptions, roleModelUpdate, type SessionRole,
+  resolveRoleHarness, roleHarnessSummary, roleProviderOptions, harnessModelUpdate, type SessionRole,
 } from './role-provider.ts'
 import { findSessionHarness, recordSessionHarness } from './session-harness.ts'
 import {
@@ -6380,6 +6380,40 @@ async function relayBashCommand(t: CommandTarget, command: string, chat_id: stri
 // that form changes this session and rewrites the account-wide default with it.
 async function relayModelSet(ctx: Context, paneId: string, watcher: PaneWatcher | null, arg: string): Promise<void> {
   const want = arg.trim().toLowerCase().split(/\s+/)[0]   // family token: opus / sonnet / haiku / fable
+  // A session running on a non-Anthropic provider (an Accounts role default, or /harness) keeps
+  // its model in the harness's transport config — /model <id> is a HARNESS model change there:
+  // validate the id against the provider, relaunch the same conversation in place with it, and
+  // record it (exactly what /harness <provider> <model> does). Claude's picker dance would be
+  // wrong for it — the picker reads the connected API's model list, which a gateway usually
+  // doesn't serve, and a native alias (opus/…) must never become the gateway's --model anyway.
+  const current = await paneHarnessProfile(paneId)
+  if (current.provider !== 'anthropic') {
+    const updated = harnessModelUpdate(current, want)
+    if (!updated || updated.provider === 'anthropic') {
+      await ctx.reply(`❌ <code>${escapeHtml(want)}</code> isn't a valid model for <b>${escapeHtml(harnessLabel(current))}</b>.`, { parse_mode: 'HTML' }).catch(() => {})
+      return
+    }
+    const cwd = await paneCwd(paneId).catch(() => null)
+    const file = await transcriptForPane(paneId, cwd)
+    const nativeId = file ? agentSessionId(file) : null
+    if (!nativeId) { await ctx.reply('❌ I could not resolve this Claude session id, so I left it running unchanged.').catch(() => {}); return }
+    await ctx.reply(`🔄 Switching <b>${escapeHtml(harnessLabel(current))}</b> to model <code>${escapeHtml(updated.model)}</code> — restarting in place…`, { parse_mode: 'HTML' }).catch(() => {})
+    const account = await paneAccount(paneId)
+    const resumed = await restartPaneSessionCore(paneId, nativeId, account, 'claude', undefined, undefined, updated)
+    if (!resumed) {
+      const restored = await restartPaneSessionCore(paneId, nativeId, account, 'claude', undefined, undefined, current)
+      if (restored) { try { recordSessionHarness(nativeId, current) } catch {} }
+      await ctx.reply(restored
+        ? `❌ The new model did not reach a usable prompt, so I restored <b>${escapeHtml(harnessLabel(current))}</b>.`
+        : '❌ The model switch failed and automatic restoration also failed. The transcript is still preserved; use <code>/restart</code> after checking the daemon log.',
+        { parse_mode: 'HTML' }).catch(() => {})
+      return
+    }
+    try { recordSessionHarness(nativeId, updated) }
+    catch (error) { process.stderr.write(`daemon: model switched but could not persist ${nativeId}: ${error instanceof Error ? error.message : String(error)}\n`) }
+    await ctx.reply(`✅ Model set to <b>${escapeHtml(updated.model)}</b> — same conversation, now served by <b>${escapeHtml(harnessLabel(updated))}</b>.`, { parse_mode: 'HTML' }).catch(() => {})
+    return
+  }
   const { error, model: name } = await applySessionModel(paneId, watcher, want)
   if (error) { await ctx.reply(`❌ ${escapeHtml(error)}`, { parse_mode: 'HTML' }).catch(() => {}); return }
   if (name) {
@@ -11087,7 +11121,7 @@ function rolePickerText(role: SessionRole): string {
   const options = roleProviderOptions(gateways).map(o => `• ${escapeHtml(o.label)}`).join('\n')
   return `${ROLE_LABEL[role]} — currently <b>${cur}</b>\n\n` +
     `New ${role === 'chat' ? 'chat lane' : 'coding sessions'} spawn on the provider you pick. Tap one:\n\n${options}\n\n` +
-    `✏️ edits the model once a non-native provider is picked.`
+    `✏️ edits the role's default model; <code>/model &lt;id&gt;</code> inside a session overrides it for that session only.`
 }
 function rolePickerKeyboard(role: SessionRole): InlineKeyboard {
   const cur = roleHarnessOf(role)
@@ -15061,7 +15095,7 @@ bot.on('message:text', async ctx => {
             await ctx.reply('⚠️ That role has no provider yet — pick one from 👤 Accounts first.')
             return
           }
-          const next = roleModelUpdate(cur, text.trim())
+          const next = harnessModelUpdate(cur, text.trim())
           if (!next || next.provider === 'anthropic') {
             const again = await ctx.reply(
               `❌ <code>${escapeHtml(text.trim())}</code> isn't a valid model for ${ROLE_LABEL[target.role]}. Try again.`,

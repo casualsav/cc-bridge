@@ -1,7 +1,7 @@
 // Role harness defaults (role-provider.ts): resolution, picker options, summaries, model edits.
 import { test, expect } from 'bun:test'
 import {
-  resolveRoleHarness, roleProviderOptions, roleHarnessSummary, roleModelUpdate, ROLE_BUILTIN_PROVIDERS,
+  resolveRoleHarness, roleProviderOptions, roleHarnessSummary, harnessModelUpdate, ROLE_BUILTIN_PROVIDERS,
 } from './role-provider.ts'
 
 const gateways = {
@@ -42,15 +42,15 @@ test('roleHarnessSummary: native, gateway, built-in', () => {
 
 test('roleModelUpdate: valid model updates, invalid/native refuse', () => {
   const cur = { provider: 'gateway' as const, gateway: 'deepseek', model: 'deepseek-v4-pro', smallModel: 'deepseek-v4-flash' }
-  expect(roleModelUpdate(cur, 'deepseek-v4-flash'))
+  expect(harnessModelUpdate(cur, 'deepseek-v4-flash'))
     .toEqual({ provider: 'gateway', gateway: 'deepseek', model: 'deepseek-v4-flash', smallModel: 'deepseek-v4-flash' })
   // A gateway is an Anthropic-compatible endpoint: ANY safe model id is a valid pick there.
-  expect(roleModelUpdate(cur, 'kimi-for-coding[1m]'))
+  expect(harnessModelUpdate(cur, 'kimi-for-coding[1m]'))
     .toEqual({ provider: 'gateway', gateway: 'deepseek', model: 'kimi-for-coding[1m]', smallModel: 'deepseek-v4-flash' })
-  expect(roleModelUpdate(cur, 'not a model!')).toBeNull()   // unsafe token
-  expect(roleModelUpdate({ provider: 'anthropic' }, 'anything')).toBeNull()
-  expect(roleModelUpdate({ provider: 'codex', model: 'gpt-5.6-sol[1m]', smallModel: 'gpt-5.6-luna[1m]' }, 'gpt-5.6-terra'))
+  expect(harnessModelUpdate(cur, 'not a model!')).toBeNull()   // unsafe token
+  expect(harnessModelUpdate({ provider: 'anthropic' }, 'anything')).toBeNull()
+  expect(harnessModelUpdate({ provider: 'codex', model: 'gpt-5.6-sol[1m]', smallModel: 'gpt-5.6-luna[1m]' }, 'gpt-5.6-terra'))
     .toMatchObject({ provider: 'codex', model: 'gpt-5.6-terra' })
   // A builtin refuses a model from a different family (the shared normalizer's rule).
-  expect(roleModelUpdate({ provider: 'codex', model: 'gpt-5.6-sol[1m]', smallModel: 'gpt-5.6-luna[1m]' }, 'kimi-for-coding[1m]')).toBeNull()
+  expect(harnessModelUpdate({ provider: 'codex', model: 'gpt-5.6-sol[1m]', smallModel: 'gpt-5.6-luna[1m]' }, 'kimi-for-coding[1m]')).toBeNull()
 })

@@ -46,11 +46,12 @@ export function roleHarnessSummary(profile: HarnessProfile, gateways: Record<str
   return `${profile.provider} · ${profile.model.replace(/\[1m\]$/, '')}`
 }
 
-// Apply a user-typed model id to a role's harness (the ✏️ button). Validated through the same
-// normalizer the harness uses everywhere: a model that doesn't match the provider normalizes
-// away to native, so an invalid pick is REFUSED (null) rather than silently stored. Native roles
-// have no model of their own (the account/spawn defaults decide), so they refuse too.
-export function roleModelUpdate(cur: HarnessProfile, model: string): HarnessProfile | null {
+// Apply a user-typed model id to a harness (the ✏️ role button, or /model on a session already
+// running on a non-Anthropic provider). Validated through the same normalizer the harness uses
+// everywhere: a model that doesn't match the provider normalizes away to native, so an invalid
+// pick is REFUSED (null) rather than silently stored. Native roles have no model of their own
+// (the account/spawn defaults decide), so they refuse too.
+export function harnessModelUpdate(cur: HarnessProfile, model: string): HarnessProfile | null {
   if (cur.provider === 'anthropic') return null
   const next = normalizeHarnessProfile({ ...cur, model })
   return next.provider === cur.provider ? next : null
