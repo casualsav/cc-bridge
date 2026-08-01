@@ -135,6 +135,7 @@ import { installSendGovernor, asLowPriority } from './throttle.ts'
 import { TelegramAdapter, buttonsToKb } from './telegram-adapter.ts'
 import { refKey, type MsgRef, type Button, type SendOpts } from './channel.ts'
 import { planAuxRelayWork, relayPresentationRole, type RelayPresentationRole } from './relay-plan.ts'
+import { planStartupAdoption, shouldSwitchToDiscoveredPane } from './pane-discovery-policy.ts'
 import { createMsgTracker } from './msg-tracker.ts'
 import { startEditScheduler, scheduleEdit, scheduleDelete, cancelEdit, touchActiveView } from './edit-scheduler.ts'
 import { initUpdates, startUpdate, bridgeVersion, claudeBin, claudeVersion, sweepUpdateChecks, sweepClaudeInstall, installClaudeLatest } from './updates.ts'
@@ -2453,7 +2454,7 @@ function lastSessionCwd(): string | null {
 // it was disabled and cost twenty minutes of a hunt. One string, two provenances, in the exact line
 // you go to. Every call site names its own.
 type AdoptWhy = 'auto-discovery' | 'spawn' | 'pane-restart'
-function adoptPane(paneId: string, why: AdoptWhy): void {
+function adoptPane(paneId: string, why: AdoptWhy, announce = true): void {
   offMcpPanes.add(paneId)
   // Stamp the adopt marker on the pane itself so it stays discoverable across daemon restarts and
   // pane respawns — the discoverPanes rescan only adopts @telegram-tagged panes, so a pane bound
@@ -2472,7 +2473,7 @@ function adoptPane(paneId: string, why: AdoptWhy): void {
   let prev = ''
   try { prev = readFileSync(ADOPTED_PANE_FILE, 'utf8').trim() } catch {}
   try { writeFileSync(ADOPTED_PANE_FILE, paneId, { mode: 0o600 }) } catch {}
-  if (prev !== paneId) void announceAdopted(paneId)
+  if (announce && prev !== paneId) void announceAdopted(paneId)
 }
 
 // "Connected" — but if the freshly adopted pane is sitting on Claude's first-run wizard (theme
@@ -2540,7 +2541,7 @@ function focusOffMcpPane(paneId: string): void {
 // A pane beyond the focused one appeared. Topic mode: give it its own topic now, not on first
 // reply. Outside topic mode, extra panes stay registered (so topic/aux bookkeeping sees them) but
 // get no switch UI.
-async function noteDiscoveredPane(paneId: string, why: AdoptWhy): Promise<void> {
+async function noteDiscoveredPane(paneId: string, why: AdoptWhy, initialScan = false): Promise<void> {
   void sampleAccountTier(paneId)   // discovery-tick siblings never pass adoptPane/registerSpawnedPane — this is their only sample point
   const cwd = await paneCwd(paneId)
   // Snapshot a read baseline at discovery: the user has "seen up to now" (nothing yet), so the
@@ -2549,11 +2550,15 @@ async function noteDiscoveredPane(paneId: string, why: AdoptWhy): Promise<void> 
   if (tfile && !lastRelayedByFile.has(tfile)) lastRelayedByFile.set(tfile, latestFinalReply(tfile)?.uuid ?? '')
   if (isTopicMode()) { void ensureSessionTopic(paneId); return }
   if (dmLanesOn()) return   // DM lanes: each pane is its OWN lane (bound by ensureDmLane, streamed by the aux relay) — never the single-slot hint or a focus steal
-  // DM slot check must look at what the focused pane is RUNNING: if its agent exited (pane at a
-  // shell, or gone), the new pane isn't a rival — it's the replacement. Staying "on the current
-  // one" there pointed the DM at a dead pane while the /launch'd session ran undriven.
-  const curCmd = focus.activePaneId ? await paneCommand(focus.activePaneId).catch(() => '') : ''
-  if (curCmd !== 'claude' && curCmd !== 'codex') {
+  // A gateway-backed chat lane commonly has `bun` as the tmux pane's top-level command while a
+  // healthy Claude process runs below it. The old literal claude/codex check called that pane dead,
+  // so every daemon restart let existing coding panes steal focus and emitted a burst of
+  // Connected/Switch notices. Use the same liveness classifier as discoverPanes. The first
+  // successful scan is reconciliation regardless: existing sibling panes never steal focus then.
+  const focusedAgentLive = focus.activePaneId
+    ? await paneClaudeLive(focus.activePaneId).catch(() => true)
+    : false
+  if (shouldSwitchToDiscoveredPane({ initialScan, focusedAgentLive })) {
     adoptPane(paneId, why)
     notifyChats(`🔁 Switched to the new Claude session${cwd ? ` in <code>${escapeHtml(cwd)}</code>` : ''} — the previous pane had no agent running.`)
     return
@@ -2604,6 +2609,7 @@ async function discoverPanes(): Promise<void> {
     return
   }
   panesDiscovered = true
+  const initialScan = !rosterRebuilt
   // FIRST scan only: re-derive rows for live sessions topics.json has lost, from the pane stamps
   // that outlived it (see rebuildRowsFromStampedPanes). Startup is the right and only moment — it
   // runs before the reconcile below can act on a store that is missing rows, and running it every
@@ -2651,13 +2657,25 @@ async function discoverPanes(): Promise<void> {
       // candidate, so focus survives a daemon restart instead of snapping back to candidates[0].
       let prev = ''
       try { prev = readFileSync(ADOPTED_PANE_FILE, 'utf8').trim() } catch {}
-      adoptPane(candidates.includes(prev) ? prev : candidates[0], 'auto-discovery')   // sets focus + adds to offMcpPanes
+      if (initialScan) {
+        // The owner's bound DM chat lane is the restart anchor. A persisted coding-pane focus may
+        // be legitimate during a live process, but it must not turn an ordinary deploy into a coding
+        // session reconnect. All panes here predate this daemon, so startup adoption is silent.
+        const dmChatPanes = new Set<string>()
+        for (const candidate of candidates) {
+          if (await boundDmChatForPane(candidate)) dmChatPanes.add(candidate)
+        }
+        const plan = planStartupAdoption({ candidates, persistedPane: prev, dmChatPanes })
+        if (plan.paneId) adoptPane(plan.paneId, 'auto-discovery', plan.announce)
+      } else {
+        adoptPane(candidates.includes(prev) ? prev : candidates[0], 'auto-discovery')   // sets focus + adds to offMcpPanes
+      }
     }
   }
 
   for (const p of panes) {
     if (p === focus.activePaneId) { offMcpPanes.add(p); continue }
-    if (!offMcpPanes.has(p)) { offMcpPanes.add(p); void noteDiscoveredPane(p, 'auto-discovery') }
+    if (!offMcpPanes.has(p)) { offMcpPanes.add(p); void noteDiscoveredPane(p, 'auto-discovery', initialScan) }
   }
   void refreshTopicTitles(panes)                      // topic mode: retitle on git branch change
   void reconcileTopics(panes)                         // topic mode: close topics whose sessions vanished unseen
