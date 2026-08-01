@@ -12,16 +12,12 @@ import { chromium } from "/home/ubuntu/projects/taste/node_modules/playwright/in
 // keeps every other property — and both halves are asserted, including that the Scheduled view's own
 // labels still uppercase (the scope did not leak).
 //
-// Since 2026-07-30 the label also carries a static decoration: one frozen frame of the working
-// spinner's glyph set, BEFORE the words. The text is matched against LABEL (glyph included) rather
-// than loosened to a substring — the decoration is part of what the owner ordered, so the check
-// asserts it instead of tolerating it, and the WORDS are still checked verbatim on their own.
+// The label also carries the supplied orange pixel glyph before the words. Its SVG is decorative, so
+// `textContent` remains exactly WORDS; the element and path are asserted instead of weakening the label
+// check to a substring.
 //
-// The glyph also OWNS THE CARDS' DOT COLUMN (the owner's ask, same day): its centre sits on the axis
-// every card's status dot centres on. That is asserted two ways, because they can disagree — the
-// element's rect (geometry) and the RENDERED ink's centroid (paint), the second because a box flex
-// centring reports as centred while its contents paint half a pixel off. Both to ±0.5px, and the
-// residual is printed either way rather than rounded into a pass.
+// The glyph's VISUAL centre owns the cards' dot column. The rect/paint checks remain separate because a
+// correctly centred box can still paint off-axis; both stay within ±0.5px.
 //
 // CONTROL: the page pinned before the ordering. Every state check must FAIL there; the guards (the cards
 // themselves, the header's place, Scheduled's labels) held before and must hold after.
@@ -72,9 +68,8 @@ const open = async (path, sessions, usage = USAGE, dpr = 2, width = 390) => {
 };
 
 // The glyph the label carries, and the words it decorates — kept apart so the two claims stay separate.
-const GLYPH = "✳";
 const WORDS = "Coding Sessions";
-const LABEL = `${GLYPH} ${WORDS}`;
+const LABEL = WORDS;
 
 // The intensity-weighted centroid x of the ink inside a CSS-px band, in CSS px — how the PAINTED mark
 // sits, which a rect cannot answer. The band's own top-left pixel is the ground it measures against, so
@@ -158,8 +153,10 @@ async function measure(path, label, shotPrefix) {
       `the label reads exactly ${JSON.stringify(LABEL)}, un-transformed (${lab ? `${JSON.stringify(lab.text)} / ${lab.transform}` : "no label"})`);
     // Stated separately from the whole string above so a change to either half names itself: the words
     // the owner settled are still verbatim, and the decoration leads them rather than trailing or wrapping.
-    state(!!lab && lab.text.startsWith(`${GLYPH} `) && lab.text.slice(GLYPH.length + 1) === WORDS,
-      `the glyph leads and the words are untouched behind it (${lab ? JSON.stringify(lab.text) : "no label"})`);
+    state(!!lab && lab.text === WORDS && await p.evaluate(() => {
+      const svg = document.querySelector("#tab-sessions .sechead .sglyph svg");
+      return !!svg && svg.getAttribute("aria-hidden") === "true" && !!svg.querySelector("path");
+    }), `the decorative inline glyph leads and the words remain verbatim (${lab ? JSON.stringify(lab.text) : "no label"})`);
     // ---- the glyph sits on the cards' dot column ------------------------------------------------
     // Rects first: the glyph's own element against EVERY card dot, not the first one, so a dot column
     // that is not a column at all cannot pass on its top row.
@@ -179,10 +176,8 @@ async function measure(path, label, shotPrefix) {
     // is the same gap read twice and is what makes the label the cards' own title row rather than a
     // hand-tuned indent.
     state(cols.words === WORDS, `the words are their own element and verbatim (${JSON.stringify(cols.words)})`);
-    // The words sit 2px LEFT of the names' box column, and that number is a DERIVATION, not a nudge: the
-    // dot fills its 11px box and the ✳'s ink does not, so equal box gaps paint unequal whitespace and the
-    // owner asked for the whitespace (2026-07-30). Box parity is what was given up for it — asserted here
-    // as the exact offset so that either half moving fails, rather than dropped for being inconvenient.
+    // The words keep their existing 2px-left relationship to card names. This is now a frozen text
+    // coordinate, not a claim about the replacement glyph's whitespace.
     const GAP_TRIM = 2;
     state(cols.names.length >= 2 && cols.glyph !== null
       && cols.names.every(x => Math.abs(x - (cols.words_x + GAP_TRIM)) <= 0.1)
@@ -217,25 +212,10 @@ async function measure(path, label, shotPrefix) {
     await p.close();
   }
 
-  // ---- the whitespace after the glyph matches the whitespace after a dot ------------------------
-  // The owner's final spec on this label (2026-07-30, closing three rounds of it): "all I want is to fix
-  // this space between the glyph and the word Coding a little bit". What his eye had been reporting all
-  // along is a WHITESPACE, not an alignment — the dot FILLS its 11px box and the ✳'s ink (8.75) does not,
-  // so the same 8px box-gap paints ~10.1px after the glyph against 8.1–8.75px after a dot. Two earlier
-  // asks read as alignment questions and were answered as alignment questions; this is the one he meant.
-  //
-  // WHAT IS GATED HERE, and what deliberately is not. The parity itself — label whitespace == a card's —
-  // is a DEVICE-FONT claim: the trim was derived under Roboto (8.125 vs the tightest card's 8.125), and in
-  // the harness's own DejaVu Sans the same page reads 7.75 against 8.50, because both the glyph's underfill
-  // and the names' side bearings move with the font. Gating parity here would therefore fail a correct
-  // page, so it lives in `labelaxis.mjs` §3, which loads the real font. What IS gated here is what no font
-  // can move: the exact 2px box offset (above), and the trim's PRECONDITION — that the glyph's ink really
-  // does underfill its box on the right. Fill that box and the trim becomes wrong; this is the check that
-  // would notice.
-  //
-  // TWO CONDITIONS, because a fixture that only ever ran at one width and one DPR is what let this file
-  // pass while his phone was in dispute — the geometry is padding-derived and so width-invariant BY
-  // CONSTRUCTION, which is a claim, and this is where it gets checked.
+  // ---- the supplied glyph centres over the frozen 11px slot --------------------------------------
+  // The 14.8px SVG intentionally overhangs the old font-glyph slot to match capital-C height. The 2px
+  // trim is retained because moving the gap would move the words. Two widths/DPRs keep the centre and
+  // the padding-derived text coordinates falsifiable.
   for (const { vw, dpr } of [{ vw: 390, dpr: 4 }, { vw: 320, dpr: 3 }]) {
     const cond = `@${vw}px/dpr${dpr}`;
     const p = await open(path, MIXED, USAGE, dpr, vw);
@@ -259,17 +239,16 @@ async function measure(path, label, shotPrefix) {
       if (d && n) cardGaps.push({ full: c.full, ch: c.nm.ch, gap: n.left - d.right });
     }
     const tight = cardGaps.length ? Math.min(...cardGaps.map(c => c.gap)) : null;
-    const underfill = gi && at.glyph ? at.glyph.x + at.glyph.w - gi.right : null;
-    state(underfill !== null && underfill >= 0.75,
-      `${cond} the ✳'s ink underfills its 11px box on the right — by ${underfill === null ? "n/a" : underfill.toFixed(2)}px `
-      + `(≥0.75), which is WHY the 2px trim exists: fill the box and the trim is wrong`);
-    // Printed, not gated: these are harness-font whitespaces. The parity they are compared for is checked
-    // in the device font by labelaxis §3 — here they only have to be visible when a number moves.
+    const glyphCenterOffset = gi && at.glyph ? Math.abs((gi.left + gi.right) / 2 - (at.glyph.x + at.glyph.w / 2)) : null;
+    state(glyphCenterOffset !== null && glyphCenterOffset <= 0.5,
+      `${cond} the supplied glyph centres over its 11px slot — residual ${glyphCenterOffset === null ? "n/a" : glyphCenterOffset.toFixed(2)}px (≤0.50)`);
+    // Printed, not gated: replacing the mark changes this whitespace by design; the text coordinate is
+    // the contract and is measured independently by coding-glyph.mjs.
     console.log(`      ${cond} glyph box ${at.glyph && at.glyph.x}..${at.glyph && (at.glyph.x + at.glyph.w)} ink `
       + `${gi ? `${gi.left.toFixed(2)}..${gi.right.toFixed(2)}` : "n/a"} · label whitespace `
       + `${labelGap === null ? "n/a" : labelGap.toFixed(2)}px vs card gaps `
       + `${cardGaps.map(c => `${c.ch}:${c.gap.toFixed(2)}`).join(" ")} (tightest ${tight === null ? "n/a" : tight.toFixed(2)}; `
-      + `harness font — parity is labelaxis §3's)`);
+      + `diagnostic only — the text coordinate is frozen)`);
     // The zoomed crop the owner reads: the label directly above the next card's name.
     if (OUT && at.label && vw === 390) {
       const below = at.cards.find(c => c.nm.y > at.label.y);

@@ -133,16 +133,16 @@ for (const useRoboto of [true, false]) {
   console.log(`   → a single gap change ${hi - lo <= 0.25 ? "COULD" : "CANNOT"} put the C on every name's ink `
     + `(spread ${(hi - lo).toFixed(3)}px); spent on the mean it would leave ${Math.max(Math.abs(hi - mean), Math.abs(lo - mean)).toFixed(3)}px worst-case\n`);
 }
-// ---- §3 the WHITESPACE the gap was derived from, in the device's font --------------------------------
+// ---- §3 replacement glyph whitespace, reported only (the words are position-frozen) ----------------
 {
   const p = await open(DPR, 390, NAMES, font);
   const g = await geom(p);
   const gi = await inkExtent(p, g.glyph, DPR);
   const li = await inkExtent(p, await firstCharRect(p, null), DPR);
   const labelGap = li.left - gi.right;
-  console.log(`§3 WHITESPACE PARITY in the device font — the shipped gap's derivation`);
-  console.log(`   ✳ box ${g.glyph.x}..${g.glyph.x + g.glyph.w}  ink ${gi.left.toFixed(3)}..${gi.right.toFixed(3)}`
-    + `  → underfills its box by ${(g.glyph.x + g.glyph.w - gi.right).toFixed(3)}px on the right`);
+  console.log(`§3 REPLACEMENT GLYPH — words frozen at the pre-swap coordinate`);
+  console.log(`   glyph box ${g.glyph.x}..${g.glyph.x + g.glyph.w}  ink ${gi.left.toFixed(3)}..${gi.right.toFixed(3)}`
+    + `  → right residual ${(g.glyph.x + g.glyph.w - gi.right).toFixed(3)}px`);
   const gaps = [];
   for (let i = 0; i < g.cards.length; i++) {
     const r = await firstCharRect(p, i);
@@ -155,8 +155,7 @@ for (const useRoboto of [true, false]) {
   const tight = Math.min(...gaps.map(c => c.gap)), wide = Math.max(...gaps.map(c => c.gap));
   const mean = gaps.reduce((a, c) => a + c.gap, 0) / gaps.length;
   console.log(`   cards: ${tight.toFixed(3)} … ${wide.toFixed(3)} (mean ${mean.toFixed(3)})  ·  LABEL: ${labelGap.toFixed(3)}px`);
-  console.log(`   residual vs tightest ${Math.abs(labelGap - tight).toFixed(3)}px · vs mean ${Math.abs(labelGap - mean).toFixed(3)}px`
-    + `  →  ${Math.abs(labelGap - tight) <= 0.5 ? "PARITY HOLDS" : "PARITY LOST"} (the trim is 2px: 1.375 would match the widest card, 1.6 the mean; 2 is the whole pixel on the tighter side)`);
+  console.log(`   reported only: the replacement changes glyph whitespace; the label text coordinate stays frozen`);
   await p.close();
 }
 await b.close();

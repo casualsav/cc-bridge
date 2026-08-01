@@ -256,6 +256,10 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   since two surfaces agreeing on the WRONG colour passes equality.
                                   #   Pinned control (841ecf8): the chat-lane and errored checks fail
                                   #   there, every other state's parity already held and is a guard
+    node coding-glyph.mjs [page]   # supplied orange inline SVG: exact silhouette/color, transparent
+                                  #   dark/light rendering, frozen Coding Sessions x/y/line box against
+                                  #   v0.4.295, 9.25px visual height matching capital-C ink, visual centre
+                                  #   on the status column, no load shift at 320px mobile/800px desktop
     node listorder.mjs [page][out] # the command center's ORDER: usage header → the CHAT lane's card,
                                   #   pinned first → a "Coding Sessions" label → the coding sessions.
                                   #   The fixture puts the chat lane LAST and idle with the workers

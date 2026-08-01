@@ -1524,23 +1524,15 @@
      `.sechead` — the type step, the colour, the tracking, the margins — and drops ONLY the uppercase,
      because the owner settled that label verbatim and `text-transform` would render it CODING SESSIONS.
      Scoped to this panel so the Scheduled and Settings labels are untouched. */
-  /* …and it wears the CARD's title row, so scanning down the panel the glyph and every card's status
-     dot form one column (the owner's ask, 2026-07-30). Nothing here is a nudge: the padding is the
-     card's own 14px less the label's own 2px margin, the glyph's box IS the dot's 11px, and the gap is
-     `.sess .top`'s — which lands the words on the card names' axis too. A `text-indent`/`margin` shift
-     tuned to the glyph's ink would be a font-metric constant; an 11px box centring the glyph is the
-     dot column itself. */
-  /* The gap is the row's own 8 MINUS the glyph's ink underfill, and that subtraction is the owner's ask
-     (2026-07-30): the dot FILLS its 11px box while the ✳'s ink is 8.75 wide inside the same box, so an
-     identical 8px box-gap paints ~10.1px of whitespace after the glyph against ~8.1–8.75px after a dot —
-     the label read loose beside the cards and no alignment of BOXES could answer it. Matching the
-     WHITESPACE takes 1.375px (the widest card) to 1.6px (their mean); 2px is that rounded to a whole
-     pixel on the tighter side, landing the label's ink gap on 8.125 — the tightest card's own. Cost, and
-     it is his call not an oversight: the words now start 2px LEFT of the names' box column, because
-     whitespace parity and box parity cannot both hold while the glyph underfills its box. */
+  /* The supplied orange glyph centres over the card dot's 11px column. Its source canvas had large
+     black margins, so the inline SVG is the cropped silhouette on a 16×10 grid; a 14.8px-wide viewport
+     makes its visual height equal the capital C while its centre stays on the 11px slot. The 6px gap and
+     12px padding stay frozen because they place “Coding Sessions”, whose position is the invariant. */
   #tab-sessions .sechead { text-transform: none; display: flex; align-items: center;
     gap: calc(var(--sp-2) - 2px); padding-left: 12px; }
-  #tab-sessions .sechead .sglyph { flex: none; width: 11px; text-align: center; }
+  #tab-sessions .sechead .sglyph { flex: none; width: 11px; height: 11px; }
+  #tab-sessions .sechead .sglyph svg { display: block; width: 14.8px; height: 11px;
+    position: relative; left: 50%; transform: translateX(-50%); }
 </style>
 </head>
 <body>
@@ -2195,7 +2187,6 @@ async function renderSettings() {
     sessionPin: { name: "📌 Pinned card", bool: true },
     prefMode: { name: "🧷 Preferred mode", bool: false },
     confirmReset: { name: "🧹 /clear approval", bool: true },
-    limitFailover: { name: "🔀 Limit failover", bool: true },
     fileBrowser: { name: "🗂 File browser", bool: true },
     baseFolder: { name: "📂 Base folder", bool: false },
     mcp: { name: "🔌 MCP mode", bool: true },
@@ -2310,7 +2301,7 @@ async function renderSessions() {
     // It is its OWN element so it can own the cards' dot column and sit on the dots' axis (the
     // owner's ask, 2026-07-30); the space between the two spans keeps `textContent` verbatim.
     if (!s.chat && s === workerCards[0]) el.insertAdjacentHTML("beforeend",
-      '<div class="sechead"><span class="sglyph">✳</span> <span class="swords">Coding Sessions</span></div>');
+      '<div class="sechead"><span class="sglyph"><svg viewBox="0 0 16 10" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path fill="#d87756" fill-rule="evenodd" d="M2 0h12v4h2v2h-2v2h-1v2h-1V8h-1v2h-1V8H6v2H5V8H4v2H3V8H2V6H0V4h2V0Zm2 2v2h1V2H4Zm7 0v2h1V2h-1Z"/></svg></span><span class="swords">Coding Sessions</span></div>');
     const c = document.createElement("div");
     c.className = "sess";
     const dot = dotClass(s);   // shared with the drill-in header — see dotClass

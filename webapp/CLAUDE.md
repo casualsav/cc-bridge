@@ -403,40 +403,15 @@ give it.
   the owner settled the label verbatim — so verbatim wins and everything else about the class stays (type
   step, colour, tracking, margins; `listorder.mjs` asserts them against the Scheduled view's own label,
   and that the scope did not leak). Going back to caps is deleting one declaration.
-- **The label leads with `✳`, one FROZEN frame of `WORK_GLYPHS`** (the working row's six-glyph spinner —
-  `· ✢ ✳ ✶ ✻ ✽`), glyph then a space then the words (the owner's placement, 2026-07-30). It is a
-  decoration and nothing else: not animated, not read from any session's state, identical whatever the
-  fleet is doing — the *moving* member of that family is the working row, and a second animated one
-  would compete with it. It is an ELEMENT rather than a `::before`, so `listorder.mjs` can assert it:
-  the harness matches the label as glyph + words (`LABEL`) and asserts the two halves separately,
-  rather than being loosened to tolerate a decoration it has no opinion about.
-- **The glyph OWNS THE CARDS' DOT COLUMN** (the owner, 2026-07-30) — so scanning down the panel the
-  glyph and every status dot are one column. Nothing in it is a tuned offset: the label's
-  `padding-left` is the card's own 14px less the label's own 2px margin, the glyph's box IS the dot's
-  11px with the glyph centred in it, and the flex `gap` is `.sess .top`'s — which lands the words on
-  the card NAMES' axis for free. A `text-indent` sized to the glyph's ink would be a font-metric
-  constant that the next font step invalidates silently. `listorder.mjs` measures the rect **and** the
-  rendered ink centroid (a box flex-centres while its contents paint off-centre — see the half-pixel
-  snap note), each to ±0.5px: **0.00px on rects, 0.25px on paint** — the residual is the glyph's ink
-  sitting off-centre inside its own advance, and it is printed rather than rounded away.
-- **The gap is `--sp-2` MINUS 2px, and the question this label was three rounds of was WHITESPACE, not
-  alignment** (the owner's closing ruling, 2026-07-30: *"all I want is to fix this space between the
-  glyph and the word Coding a little bit"*). The dot FILLS its 11px box; the `✳`'s ink is 8.75 wide
-  inside the same box, so an identical 8px box-gap paints **10.1px** of whitespace after the glyph
-  against **8.1–8.9px** after a dot. Matching the whitespace costs 1.375px (widest card) to 1.6px
-  (mean); **2px** is that rounded to a whole pixel on the tighter side and lands the label on 8.125 —
-  the tightest card's own. **The words therefore start 2px LEFT of the names' box column, by ruling and
-  not by accident:** whitespace parity and box parity cannot both hold while the glyph underfills its
-  box. What `listorder.mjs` gates is the pair no font can move — the exact 2px offset, and the
-  UNDERFILL that the trim exists for (fill that box and the trim is wrong); the parity itself is
-  `labelaxis.mjs` §3's, under the device font.
+- **The label leads with the supplied orange pixel glyph, cropped to its visual bounds as one inline SVG.** The source is a 1280×1280 JPEG with huge black margins; embedding it would add a black box, load shift and 20,085 bytes for a mark whose silhouette is a 16×10 rectilinear grid. The SVG preserves the sampled `#d87756` orange and silhouette, has no network/raster dependency, and is decorative (`aria-hidden`).
+- **The glyph's VISUAL centre owns the cards' status-icon column, while the words are frozen.** The `.sglyph` layout slot remains exactly 11px, matching the dots; the cropped SVG is 14.8px wide and centred over it so its visual ink is 9.25px high — the capital `C`'s measured ink height. Do not move the 12px padding, 6px gap, slot width, card dots or names to “help” it — `coding-glyph.mjs` compares the words' x/y/line box to v0.4.295 and the SVG path centre to every dot centre across mobile/desktop and dark/light.
+- **“Coding Sessions” keeps the v0.4.295 text coordinates exactly.** The old 2px gap trim remains because changing it moves the words; it is no longer justified by the replaced font glyph's underfill. The supplied SVG adapts to the existing slot, not vice versa.
 - **Do not chase the `C` onto the names' ink edges — it is unreachable by ANY lever, measured in his own
   font.** A text rect is the advance box and each letterform sits in its own side bearings, so in
   **Roboto** the names' own first letters span **0.75px** between themselves (`t` of trading 45.125 …
   `U` 45.875). They do not share an ink column *with each other*, so no gap can put one `C` on all of
-  them — and no type change either, since the label's letter is a `C` whatever size it wears. That ask
-  was closed as unachievable and the trim above happened for a different reason (whitespace); do not read
-  the 2px as an alignment nudge, and do not re-open either without `labelaxis.mjs` §2's table.
+  them — and no type change either, since the label's letter is a `C` whatever size it wears. The
+  supplied-glyph ruling now freezes the text coordinates directly; do not reopen name-ink alignment.
 - **THE HARNESS'S FONT IS NOT THE DEVICE'S, and every ink claim in this directory is font-local.**
   Headless Chromium here resolves `-apple-system, system-ui, …` to **DejaVu Sans**; his Android WebView
   resolves it to **Roboto**. That is what let `listorder.mjs` report the label's `C` flush with a card
