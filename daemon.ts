@@ -9978,10 +9978,18 @@ function spawnDefaultsSummary(): string {
   const a = loadAccess()
   return `${configuredSpawnModel()} · ${configuredSpawnEffort()}${a.spawnAuto ? ' · auto' : ''}`
 }
+// The 👤 Accounts row's state line — accounts · failover · providers — shared by the settings
+// root's two renderers (settingsText/settingsMarkdown) so they can't drift. The failover chain
+// and the gateway providers live inside the Accounts panel, so one row carries all three counts.
+function accountsRowSummary(): string {
+  const a = loadAccess()
+  const gw = Object.keys(loadHarnessGateways()).length
+  return `${listAccounts().length} · 🔀 ${a.limitFailover === true ? 'on' : 'off'}${gw ? ` · ${gw} 🌐` : ''}`
+}
 function settingsText(): string {
   const a = loadAccess()
   return `⚙️ <b>Settings</b>\n\n` +
-    `👤 Accounts — <b>${listAccounts().length}</b>\n` +
+    `👤 Accounts — <b>${accountsRowSummary()}</b>\n` +
     `🐙 GitHub — <b>${escapeHtml(ghSummary())}</b>\n` +
     `⚡ Batch allow — <b>${a.batchAllow !== false ? 'on' : 'off'}</b>\n` +
     `🎙️ Voice transcription — <b>${transcribeStatus()}</b>\n` +
@@ -9990,7 +9998,6 @@ function settingsText(): string {
     `📌 Pinned message — <b>${a.sessionPin !== false ? 'on' : 'off'}</b>\n` +
     `🧷 Preferred mode — <b>${listAccounts().length > 1 ? 'per account' : defModeLabel(MAIN_ACCOUNT.configDir)}</b>\n` +
     `🧹 <code>/clear</code> approval — <b>${a.confirmReset === false ? 'off' : 'on'}</b>\n` +
-    `🔀 Limit failover — <b>${a.limitFailover === true ? 'on' : 'off'}</b>\n` +
     `🧑‍💻 Coding session defaults — <b>${spawnDefaultsSummary()}</b>\n` +
     (WEBAPP_ENABLED ? `🗂 File browser — <b>${a.fileBrowser === false ? 'off' : 'on'}</b>\n` : '') +
     (isTopicMode() ? `📂 Base folder — <b>${escapeHtml(baseFolderFull())}</b>\n` : '') +
@@ -10004,7 +10011,7 @@ function settingsText(): string {
 function settingsMarkdown(): string {
   const a = loadAccess()
   const rows: Array<[string, string]> = [
-    ['👤 Accounts', String(listAccounts().length)],
+    ['👤 Accounts', accountsRowSummary()],
     ['🐙 GitHub', ghSummary()],
     ['⚡ Batch allow', a.batchAllow !== false ? 'on' : 'off'],
     ['🎙️ Voice transcription', transcribeStatus()],
@@ -10013,19 +10020,18 @@ function settingsMarkdown(): string {
     ['📌 Pinned message', a.sessionPin !== false ? 'on' : 'off'],
     ['🧷 Preferred mode', listAccounts().length > 1 ? 'per account' : defModeLabel(MAIN_ACCOUNT.configDir)],
     ['🧹 /clear approval', a.confirmReset === false ? 'off' : 'on'],
-    ['🔀 Limit failover', a.limitFailover === true ? 'on' : 'off'],
     ['🧑‍💻 Coding session defaults', spawnDefaultsSummary()],
     ...(WEBAPP_ENABLED ? [['🗂 File browser', a.fileBrowser === false ? 'off' : 'on'] as [string, string]] : []),
     ...(isTopicMode() ? [['📂 Base folder', baseRowValue()] as [string, string]] : []),
     ...(isTopicMode() && AGENT_BUS_PIN_UI ? [['☎️ Agent bus', a.switchboard === false ? 'off' : 'on'] as [string, string]] : []),
   ]
   const help = [
+    '👤 <b>Accounts</b> — the Claude accounts, the failover order, and third-party providers: add accounts, reorder the chain with ↑/↓, and add any Anthropic-compatible provider (🌐) — all in one panel.',
     '⚡ <b>Batch allow</b> — 2+ permission prompts in one turn offer “Allow all this turn”.',
     '💬 <b>Stream</b> — how much of the live activity feed reaches the chat.',
     '📌 <b>Pinned message</b> — the status card pinned to the top of this chat.',
     '🧷 <b>Preferred mode</b> — the permission mode NEW sessions launch in (/mode is the live dial).',
     '🧹 <b>/clear approval</b> — /clear and /new ask for a Yes/No tap first.',
-    '🔀 <b>Limit failover</b> — a usage-limited account hands off to the next one.',
     '🧑‍💻 <b>Coding session defaults</b> — the model/effort every CODING session launches on: the mini-app <b>+</b>, a new topic, an agent\'s <code>tg spawn</code>. It does NOT change this chat lane.',
     ...(WEBAPP_ENABLED ? ['🗂 <b>File browser</b> — the Files tab in the Mini App. Off removes it (and its file API) entirely; the Sessions/Scheduled/Settings tabs stay.'] : []),
     ...(isTopicMode() ? ['📂 <b>Base folder</b> — new forum topics are created as subfolders of this folder.'] : []),
@@ -10082,7 +10088,7 @@ function settingsKeyboard(): InlineKeyboard {
   const buttons: Array<[string, string]> = [
     ['👤', 'acct:panel'], ['🐙', 'gh:panel'], ['⚡', 'set:batch'],
     ['🎙️', 'set:voice'], ['🔊', 'set:tts'], ['💬', 'set:replymode'], ['📌', 'set:pin'],
-    ['🧷', 'defmode:panel'], ['🧹', 'set:confirmreset'], ['🔀', 'set:failover'],
+    ['🧷', 'defmode:panel'], ['🧹', 'set:confirmreset'],
     ['🧑‍💻', 'spd:panel'],
     ...(WEBAPP_ENABLED ? [['🗂', 'set:filebrowser'] as [string, string]] : []),
     ...(isTopicMode() ? [['📂', 'set:base'] as [string, string]] : []),
@@ -10137,67 +10143,27 @@ function spawnDefaultsKeyboard(): InlineKeyboard {
   return kb.text('‹ Back', 'spd:back')
 }
 
-// 🔀 Limit failover sub-panel (settings → 🔀): the try-in-order chain of hops (Claude accounts +
-// Codex) a usage-limited session moves to. Shared resolution (failover-chain.ts) with
-// attemptLimitFailover, so the panel's numbered list is exactly what a real hit would try next.
+// The try-in-order failover chain (Claude accounts + Codex + gateways) a usage-limited session
+// moves to. Shared resolution (failover-chain.ts) with attemptLimitFailover, so the panel's
+// numbered list is exactly what a real hit would try next. It lives in the unified Accounts
+// panel (settings → 👤, or /account) — see accountsPanelText below.
 function failoverChain(): FailoverHop[] {
   return resolveChain(loadAccess().failoverChain ?? [], listAccounts().map(a => a.name), codexAvailable(), Object.keys(loadHarnessGateways()))
-}
-function failoverPanelText(): string {
-  const a = loadAccess()
-  const lines = failoverChain().map((h, i) => {
-    if (h.kind === 'codex') return `${i + 1}. ✳️ Codex`
-    if (h.kind === 'gateway') return `${i + 1}. 🌐 ${escapeHtml(h.name!)}${gatewayConfiguredAndKeyed(h.name!) ? '' : ' · ⚠️ no key'}`
-    const acct = accountByName(h.account!)
-    return `${i + 1}. 👤 ${escapeHtml(h.account!)}${acct && !accountLoggedIn(acct) ? ' · ⚠️ not logged in' : ''}`
-  })
-  // Codex model/effort — shown only when Codex is set up; governs failover-to-Codex AND every Codex
-  // session. Names the CODEX_MODEL env as the source when no in-app choice is set, so it's discoverable.
-  const readiness = currentCodexReadiness()
-  const codexCfg = !CODEX_ENABLED ? '' : readiness.state === 'ready'
-    ? `\n\n✳️ <b>Codex · ✅ ready</b> — model <b>${escapeHtml(loadAccess().codexModel || (process.env.CODEX_MODEL ? `${process.env.CODEX_MODEL} (env)` : 'default'))}</b> · ` +
-      `effort <b>${escapeHtml(codexLaunchEffort() ?? 'default')}</b>\n<i>Used when a session fails over to Codex (and for every Codex session).</i>`
-    : readiness.state === 'login-missing'
-      ? `\n\n✳️ <b>Codex · ⚠️ not logged in</b>\n<code>${escapeHtml(readiness.cli)} login</code>`
-      : readiness.state === 'sandbox-blocked'
-        ? `\n\n✳️ <b>Codex · ❌ sandbox blocked</b>\n<i>${escapeHtml(readiness.reason.slice(0, 300))}</i>`
-        : `\n\n✳️ <b>Codex · not installed/configured</b>\n<i>Install Codex and set CODEX_BIN, then sign in with ChatGPT.</i>`
-  return `🔀 <b>Limit failover</b> — <b>${a.limitFailover === true ? 'on' : 'off'}</b>\n\n` +
-    `On a usage-limit hit, the stuck session tries these in order:\n\n${lines.join('\n')}\n\n` +
-    `Reorder with ↑/↓. ➕ 🌐 adds a 3rd-party API hop (MiniMax · DeepSeek · GLM presets, or custom) — no restart.${codexCfg}`
-}
-function failoverPanelKeyboard(): InlineKeyboard {
-  const a = loadAccess()
-  const kb = new InlineKeyboard()
-  kb.text(a.limitFailover === true ? '🔀 On' : '💤 Off', 'fo:toggle').row()
-  for (const h of failoverChain()) {
-    const key = hopKey(h)
-    const label = h.kind === 'codex' ? '✳️ Codex' : h.kind === 'gateway' ? `🌐 ${h.name}` : `👤 ${h.account}`
-    kb.text('↑', `fo:up:${key}`).text('↓', `fo:down:${key}`).text(label, 'fo:noop')
-    if (h.kind === 'gateway') kb.text('🗑', `gw:rm:${h.name}`)
-    kb.row()
-  }
-  if (codexAvailable()) {
-    const m = codexLaunchModel()
-    kb.text(`✳️ Model: ${m ? codexPrettyModel(m) : 'default'}`, 'fo:cxmodel')
-      .text(`⚡ Effort: ${codexLaunchEffort() ?? 'default'}`, 'fo:cxeffort').row()
-  }
-  return kb.text('➕ 🌐 Gateway', 'gw:add').text('‹ Back', 'fo:back')
 }
 
 // ➕ 🌐 sub-panel: pick a popular provider (base URL + model pre-filled → straight to the key) or
 // Custom (free-text name/baseUrl/model). A provider already configured is marked so a re-tap reads
-// as "update the key", not a surprise overwrite.
+// as "update the key", not a surprise overwrite. Opened from the unified Accounts panel (👤).
 function gatewayAddPanelText(): string {
-  return `🌐 <b>Add a gateway</b>\n\nPick a provider — its base URL and a current model are pre-filled, ` +
-    `so you only enter your API key. Or choose Custom for any other Anthropic-compatible endpoint.\n\n` +
-    `<i>Model is overridable later with</i> <code>/harness gateway &lt;name&gt; &lt;model&gt;</code>.`
+  return `🌐 <b>Add a provider</b>\n\nPick a preset — its base URL and a current model are pre-filled, ` +
+    `so you only enter your API key. Or choose Custom for any other Anthropic-compatible endpoint.` +
+    `\n\n<i>Model is editable later from 👤 Accounts (✏️) or with</i> <code>/harness gateway &lt;name&gt; &lt;model&gt;</code>.`
 }
 function gatewayAddPanelKeyboard(): InlineKeyboard {
   const configured = loadHarnessGateways()
   const kb = new InlineKeyboard()
   for (const p of GATEWAY_PRESETS) kb.text(`🌐 ${p.label}${configured[p.key] ? ' ✓' : ''}`, `gw:add:${p.key}`).row()
-  return kb.text('✏️ Custom', 'gw:add:custom').text('‹ Back', 'set:failover')
+  return kb.text('✏️ Custom', 'gw:add:custom').text('‹ Back', 'acct:panel')
 }
 
 // 🧷 Preferred-mode sub-panel (settings → Preferred mode): Claude Code's permissions.defaultMode — the
@@ -11013,29 +10979,67 @@ bot.command('account', async ctx => {
   await showHtmlPanel(ctx, 'send', await accountsPanelText(), accountsPanelKeyboard())
 })
 
-// The accounts panel — shared by /account and the /settings → 👤 Accounts sub-panel.
+// The unified accounts panel — shared by /account and the /settings → 👤 Accounts sub-panel. One
+// home for all three settings that were split across two panels: the Claude accounts, the
+// user-ordered failover chain (failover-chain.ts), and the third-party gateway providers
+// (harness-gateways.json). The chain's hops ARE the accounts + Codex + gateways, so a single
+// numbered list carries all of them with per-hop details (config dir, usage, login, model, key).
 async function accountsPanelText(): Promise<string> {
   const focusedAcct = await paneAccount(focus.activePaneId)
-  const lines = listAccounts().map(a => {
-    const snap = readUsageSnapshot(undefined, a)
+  const a = loadAccess()
+  const gateways = loadHarnessGateways()
+  const lines = failoverChain().map((h, i) => {
+    if (h.kind === 'codex') return `${i + 1}. ✳️ Codex`
+    if (h.kind === 'gateway') {
+      const def = gateways[h.name!]
+      return `${i + 1}. 🌐 <b>${escapeHtml(h.name!)}</b> — <code>${escapeHtml(def ? def.model : '?')}</code>` +
+        `${gatewayConfiguredAndKeyed(h.name!) ? '' : ' · ⚠️ no key'}`
+    }
+    const acct = accountByName(h.account!)
+    const snap = acct ? readUsageSnapshot(undefined, acct) : null
     const pct = snap?.fiveHour ? ` · ${Math.round(snap.fiveHour.pct)}% of 5h` : ''
-    const login = accountLoggedIn(a) ? '' : ' · ⚠️ not logged in'
-    const focused = a.name === focusedAcct.name && focus.activePaneId ? ' ← focused session' : ''
-    return `👤 <b>${escapeHtml(a.name)}</b> — <code>${escapeHtml(a.configDir)}</code>${pct}${login}${focused}`
+    const login = acct && !accountLoggedIn(acct) ? ' · ⚠️ not logged in' : ''
+    const focused = acct && acct.name === focusedAcct.name && focus.activePaneId ? ' ← focused session' : ''
+    return `${i + 1}. 👤 <b>${escapeHtml(h.account!)}</b> — <code>${escapeHtml(acct ? acct.configDir : '?')}</code>${pct}${login}${focused}`
   })
-  return `<b>Claude accounts</b>\n\n${lines.join('\n')}\n\n` +
-    `🚀 starts a session on that account${isTopicMode() ? ' (it gets its own topic)' : ''} — ` +
-    `a first-time account asks you to log in once; the sign-in link relays here.`
+  // Codex model/effort — shown only when Codex is set up; governs failover-to-Codex AND every Codex
+  // session. Names the CODEX_MODEL env as the source when no in-app choice is set, so it's discoverable.
+  const readiness = currentCodexReadiness()
+  const codexCfg = !CODEX_ENABLED ? '' : readiness.state === 'ready'
+    ? `\n\n✳️ <b>Codex · ✅ ready</b> — model <b>${escapeHtml(loadAccess().codexModel || (process.env.CODEX_MODEL ? `${process.env.CODEX_MODEL} (env)` : 'default'))}</b> · ` +
+      `effort <b>${escapeHtml(codexLaunchEffort() ?? 'default')}</b>\n<i>Used when a session fails over to Codex (and for every Codex session).</i>`
+    : readiness.state === 'login-missing'
+      ? `\n\n✳️ <b>Codex · ⚠️ not logged in</b>\n<code>${escapeHtml(readiness.cli)} login</code>`
+      : readiness.state === 'sandbox-blocked'
+        ? `\n\n✳️ <b>Codex · ❌ sandbox blocked</b>\n<i>${escapeHtml(readiness.reason.slice(0, 300))}</i>`
+        : `\n\n✳️ <b>Codex · not installed/configured</b>\n<i>Install Codex and set CODEX_BIN, then sign in with ChatGPT.</i>`
+  return `👤 <b>Accounts &amp; failover</b> — failover <b>${a.limitFailover === true ? 'on' : 'off'}</b>\n\n` +
+    `A usage-limited session tries these in turn — ↑/↓ reorders:\n\n${lines.join('\n')}${codexCfg}\n\n` +
+    `🚀 starts a session on an account${isTopicMode() ? ' (it gets its own topic)' : ''} — a first-time account asks you to log in once; the sign-in link relays here.\n` +
+    `➕ 👤 adds an account (its own config dir <code>~/.claude-&lt;name&gt;</code>). 🌐 providers are any Anthropic-compatible API — presets (MiniMax · DeepSeek · GLM) or Custom (<code>name baseUrl model</code>); ✏️ edits a provider's model, 🔑 re-keys it.`
 }
 function accountsPanelKeyboard(): InlineKeyboard {
+  const a = loadAccess()
   const kb = new InlineKeyboard()
-  for (const a of listAccounts()) {
-    kb.text(`🚀 ${a.name}`, `acct:launch:${a.name}`)
-    if (a.name !== 'main') kb.text(`🗑 ${a.name}`, `acct:rm:${a.name}`)
+  kb.text(a.limitFailover === true ? '🔀 On' : '💤 Off', 'fo:toggle').row()
+  for (const h of failoverChain()) {
+    const key = hopKey(h)
+    const label = h.kind === 'codex' ? '✳️ Codex' : h.kind === 'gateway' ? `🌐 ${h.name}` : `👤 ${h.account}`
+    kb.text('↑', `fo:up:${key}`).text('↓', `fo:down:${key}`).text(label, 'fo:noop')
+    if (h.kind === 'claude') {
+      kb.text('🚀', `acct:launch:${h.account}`)
+      if (h.account !== 'main') kb.text('🗑', `acct:rm:${h.account}`)
+    } else if (h.kind === 'gateway') {
+      kb.text('✏️', `gw:model:${h.name}`).text('🔑', `gw:key:${h.name}`).text('🗑', `gw:rm:${h.name}`)
+    }
     kb.row()
   }
-  kb.text('➕ Add account', 'acct:add').text('‹ Back', 'acct:back')
-  return kb
+  if (codexAvailable()) {
+    const m = codexLaunchModel()
+    kb.text(`✳️ Model: ${m ? codexPrettyModel(m) : 'default'}`, 'fo:cxmodel')
+      .text(`⚡ Effort: ${codexLaunchEffort() ?? 'default'}`, 'fo:cxeffort').row()
+  }
+  return kb.text('➕ Account', 'acct:add').text('➕ Provider', 'gw:add').text('‹ Back', 'acct:back')
 }
 
 // The GitHub panel (settings → 🐙 GitHub): gh CLI accounts, with switch/logout per account and
@@ -11772,7 +11776,7 @@ bot.on('callback_query:data', async ctx => {
   }
 
   // /settings panel toggles → flip the setting and re-render the panel in place.
-  const setMatch = /^set:(pin|replymode|voice|batch|tts|confirmreset|failover|base|switchboard|filebrowser)$/.exec(data)
+  const setMatch = /^set:(pin|replymode|voice|batch|tts|confirmreset|base|switchboard|filebrowser)$/.exec(data)
   if (setMatch) {
     if (!(await cbAuth(ctx))) return
     await ctx.answerCallbackQuery().catch(() => {})
@@ -11784,10 +11788,6 @@ bot.on('callback_query:data', async ctx => {
     }
     if (setMatch[1] === 'tts') {
       await showHtmlPanel(ctx, 'edit', ttsText(), ttsKeyboard())
-      return
-    }
-    if (setMatch[1] === 'failover') {
-      await showHtmlPanel(ctx, 'edit', failoverPanelText(), failoverPanelKeyboard())
       return
     }
     if (setMatch[1] === 'base') {
@@ -11833,9 +11833,10 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
-  // 🔀 Limit-failover sub-panel (settings → 🔀): on/off toggle + per-hop ↑/↓ reorder. The chain is
-  // only PERSISTED here, on an explicit tap — never on panel open/read, so an untouched chain keeps
-  // reading as today's default order (accounts main-first, Codex last) even after accounts change.
+  // Failover controls inside the unified Accounts panel (settings → 👤, or /account): on/off
+  // toggle + per-hop ↑/↓ reorder. The chain is only PERSISTED here, on an explicit tap — never on
+  // panel open/read, so an untouched chain keeps reading as today's default order (accounts
+  // main-first, Codex last) even after accounts change.
   const foMatch = /^fo:(toggle|back|noop|cxmodel|cxeffort|up:(.+)|down:(.+))$/.exec(data)
   if (foMatch) {
     if (foMatch[1] === 'noop') { await ctx.answerCallbackQuery().catch(() => {}); return }
@@ -11875,12 +11876,14 @@ bot.on('callback_query:data', async ctx => {
       // don't persist then, or an untouched chain gets baked just for tapping an edge arrow.
       if (moved !== resolved) { a.failoverChain = moved; saveAccess(a) }
     }
-    await showHtmlPanel(ctx, 'edit', failoverPanelText(), failoverPanelKeyboard())
+    await showHtmlPanel(ctx, 'edit', await accountsPanelText(), accountsPanelKeyboard())
     return
   }
 
-  // Gateway management from the failover panel: ➕ 🌐 (provider picker → preset or Custom) and 🗑.
-  const gwMatch = /^gw:(add(?::([a-z0-9][a-z0-9_-]{0,31}|custom))?|rm:([a-z0-9][a-z0-9_-]{0,31}))$/.exec(data)
+  // Gateway management inside the unified Accounts panel: ➕ (provider picker → preset or Custom),
+  // ✏️ model, 🔑 re-key, and 🗑. Definitions + secrets are live (harness-gateways.json + .env), so
+  // add/remove/edit take effect without a restart.
+  const gwMatch = /^gw:(add(?::([a-z0-9][a-z0-9_-]{0,31}|custom))?|(?:rm|model|key):([a-z0-9][a-z0-9_-]{0,31}))$/.exec(data)
   if (gwMatch) {
     if (!(await cbAuth(ctx))) return
     if (gwMatch[1].startsWith('add')) {
@@ -11920,8 +11923,34 @@ bot.on('callback_query:data', async ctx => {
       if (sent) replyTargets.set(refKey(sent), { kind: 'gwkey', name: preset.key })
       return
     }
-    // 🗑 remove: drop the definition + its secret, and any saved chain slot referencing it.
+    // ✏️ model / 🔑 re-key / 🗑 remove — `name` is group 3 for all three verbs.
     const name = gwMatch[3]!
+    if (gwMatch[1].startsWith('model:')) {
+      const def = loadHarnessGateways()[name]
+      if (!def) { await ctx.answerCallbackQuery({ text: 'Unknown provider.' }).catch(() => {}); return }
+      await ctx.answerCallbackQuery().catch(() => {})
+      const thread = ctx.callbackQuery.message?.message_thread_id
+      const sent = await channel.sendText(String(ctx.chat!.id),
+        `✏️ <b>${escapeHtml(name)}</b> — reply with the model id to use. Currently: <code>${escapeHtml(def.model)}</code>.`,
+        { ...(thread ? { threadId: String(thread) } : {}), forceReply: { placeholder: 'model id' } }).catch(() => null)
+      if (sent) replyTargets.set(refKey(sent), { kind: 'gwmodel', name, panelMsgId: ctx.callbackQuery.message?.message_id })
+      return
+    }
+    if (gwMatch[1].startsWith('key:')) {
+      const def = loadHarnessGateways()[name]
+      if (!def) { await ctx.answerCallbackQuery({ text: 'Unknown provider.' }).catch(() => {}); return }
+      // Seed the pending slot with the EXISTING definition — the gwkey flow writes the key, saves
+      // the def, and preflights, which is exactly what a re-key needs (only the env changes).
+      pendingGateways.set(name, def)
+      await ctx.answerCallbackQuery().catch(() => {})
+      const thread = ctx.callbackQuery.message?.message_thread_id
+      const sent = await channel.sendText(String(ctx.chat!.id),
+        `🔑 <b>${escapeHtml(name)}</b> — reply with the new API key. I store it in <code>.env</code> and delete your message right after.`,
+        { ...(thread ? { threadId: String(thread) } : {}), forceReply: { placeholder: 'API key' } }).catch(() => null)
+      if (sent) replyTargets.set(refKey(sent), { kind: 'gwkey', name })
+      return
+    }
+    // 🗑 remove: drop the definition + its secret, and any saved chain slot referencing it.
     removeGatewayDef(name)
     const a = loadAccess()
     if (a.failoverChain?.some(h => h.kind === 'gateway' && h.name === name)) {
@@ -11929,7 +11958,7 @@ bot.on('callback_query:data', async ctx => {
       saveAccess(a)
     }
     await ctx.answerCallbackQuery({ text: `Removed gateway ${name}` }).catch(() => {})
-    await showHtmlPanel(ctx, 'edit', failoverPanelText(), failoverPanelKeyboard())
+    await showHtmlPanel(ctx, 'edit', await accountsPanelText(), accountsPanelKeyboard())
     return
   }
 
@@ -14761,7 +14790,7 @@ bot.on('message:text', async ctx => {
           }
           return
         }
-        // Codex model id from the failover panel's ✳️ Model button — takes effect on the NEXT Codex
+        // Codex model id from the Accounts panel's ✳️ Model button — takes effect on the NEXT Codex
         // launch/failover. "default"/"none"/empty clears it back to the CODEX_MODEL env / Codex default.
         case 'codexmodel': {
           const raw = text.trim()
@@ -14781,8 +14810,9 @@ bot.on('message:text', async ctx => {
             : `✳️ <b>Codex model set:</b> <code>${escapeHtml(raw)}</code> — takes effect on the next Codex launch/failover.`,
             { parse_mode: 'HTML' })
           if (target.panelMsgId) {
-            await editRichMessage(TOKEN!, String(ctx.chat!.id), target.panelMsgId, htmlPanelToRich(failoverPanelText()), failoverPanelKeyboard())
-              .catch(() => channel.editText({ chatId: String(ctx.chat!.id), messageId: String(target.panelMsgId) }, failoverPanelText(), { buttons: kbToButtons(failoverPanelKeyboard()) }).catch(() => {}))
+            const panelText = await accountsPanelText()
+            await editRichMessage(TOKEN!, String(ctx.chat!.id), target.panelMsgId, htmlPanelToRich(panelText), accountsPanelKeyboard())
+              .catch(() => channel.editText({ chatId: String(ctx.chat!.id), messageId: String(target.panelMsgId) }, panelText, { buttons: kbToButtons(accountsPanelKeyboard()) }).catch(() => {}))
           }
           return
         }
@@ -14841,8 +14871,9 @@ bot.on('message:text', async ctx => {
             { parse_mode: 'HTML', reply_markup: new InlineKeyboard().text(`🚀 Start a ${r.account.name} session`, `acct:launch:${r.account.name}`) })
           return
         }
-        // Gateway spec "name baseUrl model [auth]" (failover panel → ➕ 🌐). Validate via the shared
-        // parser; auth-less gateways save immediately, otherwise prompt for the key next (kind 'gwkey').
+        // Gateway spec "name baseUrl model [auth]" (Accounts panel → ➕ Provider). Validate via the
+        // shared parser; auth-less gateways save immediately, otherwise prompt for the key next
+        // (kind 'gwkey').
         case 'gwspec': {
           const [rawName, baseUrl, model, rawAuth] = text.trim().split(/\s+/)
           const name = (rawName || '').toLowerCase()
@@ -14862,7 +14893,7 @@ bot.on('message:text', async ctx => {
           }
           if (auth === 'none') {
             saveGatewayDef(name, def)
-            await ctx.reply(`✅ Gateway <b>${escapeHtml(name)}</b> added (no auth) — it's a hop in your failover chain (🔀). Use it live with <code>/harness gateway ${escapeHtml(name)}</code>.`, { parse_mode: 'HTML' })
+            await ctx.reply(`✅ Provider <b>${escapeHtml(name)}</b> added (no auth) — it's a hop in your failover chain (👤 Accounts). Use it live with <code>/harness gateway ${escapeHtml(name)}</code>.`, { parse_mode: 'HTML' })
             return
           }
           pendingGateways.set(name, def)
@@ -14872,12 +14903,13 @@ bot.on('message:text', async ctx => {
           if (sent) replyTargets.set(`${ctx.chat?.id}:${sent.message_id}`, { kind: 'gwkey', name })
           return
         }
-        // API key for a pending gateway: write it to .env (read live at launch — no restart), persist
-        // the definition, scrub the key message, then run the one-token Anthropic preflight.
+        // API key for a pending gateway (a fresh add OR a 🔑 re-key — both seed pendingGateways with
+        // the definition): write it to .env (read live at launch — no restart), persist the
+        // definition, scrub the key message, then run the one-token Anthropic preflight.
         case 'gwkey': {
           const def = pendingGateways.get(target.name)
           if (!def || !def.tokenEnv) {
-            await ctx.reply('⚠️ That gateway add expired — start again from the 🔀 panel.')
+            await ctx.reply('⚠️ That gateway setup expired — start again from 👤 Accounts.')
             return
           }
           writeEnvVars({ [def.tokenEnv]: text.trim() })
@@ -14886,9 +14918,31 @@ bot.on('message:text', async ctx => {
           await ctx.deleteMessage().catch(() => {})   // scrub the secret from the chat
           const ok = await gatewayProviderReady({ provider: 'gateway', gateway: target.name, model: def.model, smallModel: def.smallModel })
           await ctx.reply(ok
-            ? `✅ Gateway <b>${escapeHtml(target.name)}</b> added and verified — it's now a hop in your failover chain (🔀). Use it live anytime with <code>/harness gateway ${escapeHtml(target.name)}</code>.`
-            : `⚠️ Saved <b>${escapeHtml(target.name)}</b>, but its Anthropic Messages preflight failed — double-check the base URL, model id, and key, then re-add from 🔀.`,
+            ? `✅ <b>${escapeHtml(target.name)}</b> is set up and verified — it's a hop in your failover chain (👤 Accounts). Use it live with <code>/harness gateway ${escapeHtml(target.name)}</code>.`
+            : `⚠️ Saved <b>${escapeHtml(target.name)}</b>, but its Anthropic Messages preflight failed — double-check the base URL, model id, and key from 👤 Accounts.`,
             { parse_mode: 'HTML' })
+          return
+        }
+        // "✏️ Model" on a gateway (Accounts panel): model ids are open-ended, so this is a force-reply.
+        // Validated via the shared parser against the CURRENT definition (keeps smallModel), so a
+        // bad id is refused the same way an add would refuse it.
+        case 'gwmodel': {
+          const cur = loadHarnessGateways()[target.name]
+          if (!cur) {
+            await ctx.reply(`⚠️ Provider <b>${escapeHtml(target.name)}</b> no longer exists — start again from 👤 Accounts.`, { parse_mode: 'HTML' })
+            return
+          }
+          const model = text.trim()
+          const def = parseGatewayDefinitions({ [target.name]: { ...cur, model, smallModel: cur.smallModel } })[target.name]
+          if (!def) {
+            const again = await ctx.reply(
+              `❌ <code>${escapeHtml(model)}</code> isn't a valid model id. Try again.`,
+              { parse_mode: 'HTML', reply_markup: { force_reply: true, input_field_placeholder: 'model id' } }).catch(() => null)
+            if (again) replyTargets.set(`${ctx.chat?.id}:${again.message_id}`, target)
+            return
+          }
+          saveGatewayDef(target.name, def)
+          await ctx.reply(`✅ <b>${escapeHtml(target.name)}</b> model → <code>${escapeHtml(def.model)}</code>.`, { parse_mode: 'HTML' })
           return
         }
         // "✏️ Type something" → type the answer into the prompt's free-text field: move the cursor
@@ -15922,9 +15976,9 @@ const resolveStartToken = (tok: string): { cwd: string; sid?: string } | null =>
 
 // Settings the Mini App shows + (when WEBAPP_WRITE) lets you flip. Kept at parity with the
 // /settings panel (settingsMarkdown above): pref-based toggles are read+write; rows whose editor is
-// a rich Telegram sub-panel (accounts, GitHub, TTS engine, preferred mode, failover chain, base
-// folder) show live state read-only, and mode/model/effort drive the tmux pane (async/slower) so
-// they're read-only here too.
+// a rich Telegram sub-panel (accounts, GitHub, TTS engine, preferred mode, base folder) show live
+// state read-only, and mode/model/effort drive the tmux pane (async/slower) so they're read-only
+// here too.
 async function webappReadSettings(): Promise<WebappSettingsView> {
   void refreshGh()   // warm the 🐙 summary for the next render, like the /settings command does
   const a = loadAccess()
@@ -15934,7 +15988,7 @@ async function webappReadSettings(): Promise<WebappSettingsView> {
   return {
     write: WEBAPP_WRITE,
     settings: {
-      accounts: { value: listAccounts().length, editable: false, label: 'managed in /settings' },
+      accounts: { value: accountsRowSummary(), editable: false, label: 'managed in /settings' },
       github: { value: ghSummary(), editable: false },
       batchAllow: { value: a.batchAllow !== false, editable: true, label: '2+ prompts offer "Allow all this turn"' },
       transcribe: { value: transcribeStatus(), editable: false, label: 'engine picked in /settings' },
@@ -15947,7 +16001,6 @@ async function webappReadSettings(): Promise<WebappSettingsView> {
       // says 'per account'.
       prefMode: { value: listAccounts().length > 1 ? 'per account' : defModeLabel(MAIN_ACCOUNT.configDir), raw: readDefaultMode(MAIN_ACCOUNT.configDir), editable: false, label: 'what NEW sessions launch in' },
       confirmReset: { value: a.confirmReset !== false, editable: true, label: '/clear and /new ask first' },
-      limitFailover: { value: a.limitFailover === true, editable: true, label: 'chain ordered in /settings' },
       fileBrowser: { value: a.fileBrowser !== false, editable: true, label: 'Files tab in this app (reopens on change)' },
       ...(isTopicMode() ? { baseFolder: { value: baseFolderFull(), editable: false, label: 'new topics land here' } } : {}),
       mcp: { value: mcpEnabled(), editable: true, label: 'new sessions only' },
@@ -15988,7 +16041,6 @@ function webappSetSetting(userId: string, key: string, value: unknown): string |
     }
     case 'batchAllow': { const a = loadAccess(); a.batchAllow = truthy(value); saveAccess(a); return null }
     case 'confirmReset': { const a = loadAccess(); a.confirmReset = truthy(value); saveAccess(a); return null }
-    case 'limitFailover': { const a = loadAccess(); a.limitFailover = truthy(value); saveAccess(a); return null }
     case 'fileBrowser': { const a = loadAccess(); a.fileBrowser = truthy(value); saveAccess(a); return null }
     // 🧑‍💻 coding-session defaults, validated against the daemon's own lists exactly like the
     // spd:(m|e) callbacks — the app's copy of them is UI labelling, not authority. Real values only:
