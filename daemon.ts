@@ -69,7 +69,7 @@ import {
 } from './accounts.ts'
 import { exec, sleep, hashText } from './proc.ts'
 import {
-  ageLabel, isStale, listBriefRecords, loadBriefRecord, parseBriefJson, renderBrief, saveBriefRecord,
+  ageLabel, deterministicRepoBrief, isStale, listBriefRecords, loadBriefRecord, parseBriefJson, renderBrief, saveBriefRecord,
   scoutPrompt, validateBrief, SCHEMA_VERSION as BRIEF_SCHEMA_VERSION, type BriefRecord,
 } from './repo-brief.ts'
 import { autowireMapImport, shipProductMap } from './chat-map.ts'
@@ -136,6 +136,8 @@ import { TelegramAdapter, buttonsToKb } from './telegram-adapter.ts'
 import { refKey, type MsgRef, type Button, type SendOpts } from './channel.ts'
 import { planAuxRelayWork, relayPresentationRole, type RelayPresentationRole } from './relay-plan.ts'
 import { planStartupAdoption, shouldSwitchToDiscoveredPane } from './pane-discovery-policy.ts'
+import { createScoutCoordinator } from './scout-coordinator.ts'
+import { createRepoContextGate } from './repo-context-gate.ts'
 import { createMsgTracker } from './msg-tracker.ts'
 import { startEditScheduler, scheduleEdit, scheduleDelete, cancelEdit, touchActiveView } from './edit-scheduler.ts'
 import { initUpdates, startUpdate, bridgeVersion, claudeBin, claudeVersion, sweepUpdateChecks, sweepClaudeInstall, installClaudeLatest } from './updates.ts'
@@ -5350,6 +5352,16 @@ async function handleCall(
         if (aside && res.kind !== 'claude') { write({ t: 'result', id, ok: false, text: `@${nameForEndpoint(res.id, endpoints)} is a hermes endpoint — it has no live pane, so there is nothing an aside can reach` }); return }
         const askText = String(args.text ?? '').trim()
         if (!askText) { write({ t: 'result', id, ok: false, text: `empty ${verb}` }); return }
+        // The chat lane cannot dispatch its first repo ask from an unexamined context. Existing workers,
+        // acks and mid-turn asides bypass this gate; only the owner's orchestration ask is stopped once.
+        if (name === 'ask' && res.kind === 'claude') {
+          const targetCwd = getTopicBySession(res.id)?.cwd
+          const repoRoot = targetCwd ? await gitRootOf(targetCwd) : null
+          if (repoRoot) {
+            const preflight = await repoDispatchPreflight(fromSid, repoRoot)
+            if (preflight) { write({ t: 'result', id, ok: false, text: preflight }); return }
+          }
+        }
         const fromName = nameForEndpoint(fromSid, endpoints)
         const toName = nameForEndpoint(res.id, endpoints)
         // Confine + existence-check refs — they get injected into another agent's context.
@@ -5682,6 +5694,7 @@ async function handleCall(
         try { real = realpathSync(raw) } catch { write({ t: 'result', id, ok: false, text: `no such path: ${raw}` }); return }
         try { if (!statSync(real).isDirectory()) throw new Error('not a directory') }
         catch { write({ t: 'result', id, ok: false, text: `not a directory: ${real}` }); return }
+        const sid = pane ? await sessionForPane(pane).catch(() => null) : null
         const rec = loadBriefRecord(STATE_DIR, real)
         // `--stale` is the loop back from the party with ground truth: a worker IN the repo sees a
         // wrong brief long before the orchestrator can. It flags; it never edits. A hand-edited brief
@@ -5694,10 +5707,10 @@ async function handleCall(
         }
         const head = await gitHeadOf(real)
         if (rec && !args.refresh && !isStale(rec, head, Date.now())) {
-          text = renderBrief(rec.brief, { path: real, age: ageLabel(Date.now() - rec.generatedAt), violations: rec.violations })
+          if (sid) repoContextGate.markSeen(sid, real)
+          text = renderBrief(rec.brief, { path: real, age: ageLabel(Date.now() - rec.generatedAt), violations: rec.violations, source: rec.source })
           break
         }
-        const sid = pane ? await sessionForPane(pane).catch(() => null) : null
         const why = !rec ? 'no brief yet' : args.refresh ? 'refresh requested' : rec.stale ? `flagged stale: ${rec.stale}` : 'stale (HEAD moved and the brief is over a fortnight old)'
         text = startScout(real, sid) === 'running'
           ? `🔎 already scouting ${real} — the brief arrives as an ack`
@@ -5900,6 +5913,13 @@ async function handleCall(
           write({ t: 'result', id, ok: false, text: `no such directory: ${dir} — create it first, or pass --create` }); return
         }
         if (existsSync(dir) && !statSync(dir).isDirectory()) { write({ t: 'result', id, ok: false, text: `${dir} is not a directory` }); return }
+        if (existsSync(dir)) {
+          const repoRoot = await gitRootOf(dir)
+          if (repoRoot) {
+            const preflight = await repoDispatchPreflight(fromSid, repoRoot)
+            if (preflight) { write({ t: 'result', id, ok: false, text: preflight }); return }
+          }
+        }
         try { if (!existsSync(dir)) mkdirSync(dir, { recursive: true }) }
         catch (e) { write({ t: 'result', id, ok: false, text: `couldn't create ${dir}: ${(e as Error)?.message ?? e}` }); return }
         // The one-line reason the CHOICE is visible by. Optional: a spawn that names no reason still
@@ -14358,6 +14378,9 @@ function ensureScoutProfile(): boolean {
   return existsSync(join(SCOUT_CONFIG_DIR, '.credentials.json'))
 }
 
+async function gitRootOf(dir: string): Promise<string | null> {
+  try { return (await exec('git', ['rev-parse', '--show-toplevel'], { cwd: dir, timeout: 5000 })).stdout.trim() || null } catch { return null }
+}
 async function gitHeadOf(dir: string): Promise<string | null> {
   try { return (await exec('git', ['rev-parse', 'HEAD'], { cwd: dir, timeout: 5000 })).stdout.trim() || null } catch { return null }
 }
@@ -14427,7 +14450,7 @@ async function scoutRepo(real: string): Promise<ScoutRun> {
     violations: v.violations,
     rec: {
       path: real, brief: v.brief, generatedAt: Date.now(), gitHead: await gitHeadOf(real),
-      violations: v.violations.length, schemaVersion: BRIEF_SCHEMA_VERSION, costUsd: Number(cost.toFixed(4)),
+      violations: v.violations.length, schemaVersion: BRIEF_SCHEMA_VERSION, source: 'model', costUsd: Number(cost.toFixed(4)),
     },
   }
 }
@@ -14441,31 +14464,70 @@ async function notifyScoutResult(sid: string, plain: string): Promise<void> {
   await tryDeliverAsk(p).catch(() => {})
 }
 
-// One scout per repo at a time: two sessions asking about the same repo in the same minute must not
-// pay for two discoveries. The second caller is told a scout is already running and gets the brief
-// the moment it lands, the same way the first does.
-const scoutsRunning = new Map<string, Promise<void>>()
-function startScout(real: string, sid: string | null): 'started' | 'running' {
-  const waiting = scoutsRunning.get(real)
-  if (waiting) { if (sid) void waiting.then(() => { /* the running scout notifies its own requester */ }); return 'running' }
-  const p = runScout(real, sid).finally(() => scoutsRunning.delete(real))
-  scoutsRunning.set(real, p)
-  return 'started'
-}
-async function runScout(real: string, sid: string | null): Promise<void> {
+// One scout per repo at a time. The coordinator owns a SET of requesters, so a second session that
+// joins an in-flight discovery receives the same result instead of relying on the first requester's
+// notification. This is process-local dedup only; the saved record is the durable result.
+async function runScout(real: string): Promise<string> {
   const t0 = Date.now()
-  let note: string
   try {
     const { rec, violations } = await scoutRepo(real)
     saveBriefRecord(STATE_DIR, rec)
     process.stderr.write(`scout: ${real} in ${Math.round((Date.now() - t0) / 1000)}s, $${rec.costUsd ?? '?'}, ${violations.length} schema violation(s) corrected\n`)
     if (violations.length) process.stderr.write(`scout: ${real} violations — ${violations.join(' | ')}\n`)
-    note = `(repo brief ready — \`tg repo ${real}\`)\n\n${renderBrief(rec.brief, { path: real, age: 'just now', violations: violations.length })}`
+    return `(repo brief ready — \`tg repo ${real}\`)\n\n${renderBrief(rec.brief, { path: real, age: 'just now', violations: violations.length, source: rec.source })}`
   } catch (e) {
-    process.stderr.write(`scout: ${real} FAILED after ${Math.round((Date.now() - t0) / 1000)}s: ${e}\n`)
-    note = `(repo scout failed for ${real}: ${e}. Route from what you know, or retry with \`tg repo ${real} --refresh\`.)`
+    const failure = String(e)
+    process.stderr.write(`scout: ${real} MODEL FAILED after ${Math.round((Date.now() - t0) / 1000)}s: ${failure}\n`)
+    const fallback = deterministicRepoBrief(real)
+    const rec: BriefRecord = {
+      path: real,
+      brief: fallback.brief,
+      generatedAt: Date.now(),
+      gitHead: await gitHeadOf(real),
+      violations: fallback.violations.length,
+      schemaVersion: BRIEF_SCHEMA_VERSION,
+      source: 'deterministic',
+    }
+    saveBriefRecord(STATE_DIR, rec)
+    process.stderr.write(`scout: ${real} deterministic fallback saved (${fallback.violations.length} correction(s))\n`)
+    return `(model scout unavailable for ${real}; using bounded deterministic context — \`tg repo ${real} --refresh\` retries the model)\n\n${renderBrief(rec.brief, { path: real, age: 'just now', violations: rec.violations, source: rec.source })}`
   }
-  if (sid) await notifyScoutResult(sid, note).catch(() => {})
+}
+
+const repoContextGate = createRepoContextGate()
+const scoutCoordinator = createScoutCoordinator({
+  run: runScout,
+  notify: async (sid, note, real) => {
+    repoContextGate.markSeen(sid, real)
+    await notifyScoutResult(sid, note)
+  },
+})
+function startScout(real: string, sid: string | null): 'started' | 'running' {
+  return scoutCoordinator.start(real, sid)
+}
+
+// The chat lane gets one deterministic, side-effect-free stop before its first dispatch into a repo.
+// That makes context acquisition a daemon invariant instead of an instruction the model can forget.
+// Claiming the presentation lets an immediate retry proceed while the richer model scout runs.
+async function repoDispatchPreflight(fromSid: string, real: string): Promise<string | null> {
+  if (!repoContextGate.claimPresentation(fromSid, real, !!chatIdForDmChatSession(fromSid))) return null
+  const head = await gitHeadOf(real)
+  let rec = loadBriefRecord(STATE_DIR, real)
+  if (!rec || isStale(rec, head, Date.now())) {
+    const fallback = deterministicRepoBrief(real)
+    rec = {
+      path: real,
+      brief: fallback.brief,
+      generatedAt: Date.now(),
+      gitHead: head,
+      violations: fallback.violations.length,
+      schemaVersion: BRIEF_SCHEMA_VERSION,
+      source: 'deterministic',
+    }
+    saveBriefRecord(STATE_DIR, rec)
+    startScout(real, fromSid)
+  }
+  return `Repository context preflight — no ask/spawn was sent. Review this capsule, correct any assumptions, then retry the command:\n\n${renderBrief(rec.brief, { path: real, age: ageLabel(Date.now() - rec.generatedAt), violations: rec.violations, source: rec.source })}`
 }
 
 // DM typing may only be driven by the pane whose replies actually deliver to the DM. With a chat

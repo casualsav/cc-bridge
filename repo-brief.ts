@@ -8,12 +8,11 @@
 // the overflow usually being the *useful* clause. A model asked for a budget spends what the content
 // seems to need. So the caps are applied here, after the fact, by code that cannot be persuaded.
 import { createHash } from 'node:crypto'
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, type Dirent } from 'node:fs'
+import { basename, join } from 'node:path'
 
-// A field the orchestrator reads to ROUTE: what the repo is, which directory a request means, what a
-// brief to a worker must say, whether the task is reversible. Deliberately not architecture, not how
-// anything works — the worker opens the files, the router never does.
+// Fields the orchestrator reads to route, brief, and avoid repo-specific assumptions. Architecture is
+// included only as a bounded component/flow map: enough to choose and judge work, never a raw graph.
 export type RepoBrief = {
   aka: string            // other names this repo answers to (remote name, product name)
   what: string
@@ -24,6 +23,11 @@ export type RepoBrief = {
   conventions: string[]
   hazards: string[]
   docs: string[]
+  components: string[]   // component/path — responsibility and ownership boundary
+  flows: string[]        // input → processing component → output
+  truth: string[]        // claim — authoritative file/path
+  vocabulary: string[]   // repo/product term — meaning
+  assumptions: string[]  // tempting inference the orchestrator must not make
   unknown: string[]
 }
 
@@ -41,15 +45,20 @@ export const CAPS: Record<keyof RepoBrief, Cap> = {
   conventions: { chars: 140, items: 3 },
   hazards:     { chars: 140, items: 3 },
   docs:        { chars: 80,  items: 3 },
+  components:  { chars: 140, items: 5 },
+  flows:       { chars: 160, items: 3 },
+  truth:       { chars: 120, items: 4 },
+  vocabulary:  { chars: 100, items: 4 },
+  assumptions: { chars: 140, items: 4 },
   unknown:     { chars: 100, items: 3 },
 }
 // Sum of the caps plus labels. The first draft claimed 1,500 over caps summing to 2,280 — the two
 // were never simultaneously satisfiable, so truncation would have been the NORMAL path rather than
 // the exceptional one. A ceiling whose job is to catch the outlier must not fire on the median: the
 // pilot's two real briefs measured 1,818 and 2,109.
-export const RENDER_CEILING = 2800
+export const RENDER_CEILING = 6000
 
-const LIST_FIELDS = ['surfaces', 'conventions', 'hazards', 'docs', 'unknown'] as const
+const LIST_FIELDS = ['surfaces', 'conventions', 'hazards', 'docs', 'components', 'flows', 'truth', 'vocabulary', 'assumptions', 'unknown'] as const
 const isList = (k: keyof RepoBrief): boolean => (LIST_FIELDS as readonly string[]).includes(k)
 
 // A brief with no `what` and no `surfaces` did not answer the question; anything else is usable.
@@ -57,7 +66,10 @@ const isList = (k: keyof RepoBrief): boolean => (LIST_FIELDS as readonly string[
 const REQUIRED: (keyof RepoBrief)[] = ['what', 'surfaces']
 
 export function emptyBrief(): RepoBrief {
-  return { aka: '', what: '', stack: '', verify: '', surfaces: [], deploy: '', conventions: [], hazards: [], docs: [], unknown: [] }
+  return {
+    aka: '', what: '', stack: '', verify: '', surfaces: [], deploy: '', conventions: [], hazards: [], docs: [],
+    components: [], flows: [], truth: [], vocabulary: [], assumptions: [], unknown: [],
+  }
 }
 
 // Cut to `n`, marking the cut so a reader can tell a truncated line from a short one. The mark is
@@ -118,11 +130,16 @@ export function parseBriefJson(raw: string): unknown | null {
 
 const LABELS: Record<keyof RepoBrief, string> = {
   aka: 'aka', what: 'what', stack: 'stack', verify: 'verify', surfaces: 'surfaces',
-  deploy: 'deploy', conventions: 'conventions', hazards: 'hazards', docs: 'docs', unknown: 'unknown',
+  deploy: 'deploy', conventions: 'conventions', hazards: 'hazards', docs: 'docs',
+  components: 'components', flows: 'flows', truth: 'sources of truth', vocabulary: 'vocabulary',
+  assumptions: 'do not assume', unknown: 'unknown',
 }
 // Dropped first when the whole render is still over the ceiling. `what`, `verify` and `surfaces` are
 // never dropped: they are the routing answer itself, and a brief without them is not a brief.
-const SHED_ORDER: (keyof RepoBrief)[] = ['unknown', 'docs', 'conventions', 'hazards', 'aka', 'deploy', 'stack']
+const SHED_ORDER: (keyof RepoBrief)[] = [
+  'unknown', 'vocabulary', 'docs', 'conventions', 'hazards', 'aka', 'deploy', 'stack',
+  'flows', 'truth', 'assumptions', 'components',
+]
 
 function renderFields(b: RepoBrief, skip: Set<keyof RepoBrief>): string {
   const lines: string[] = []
@@ -142,7 +159,7 @@ function renderFields(b: RepoBrief, skip: Set<keyof RepoBrief>): string {
   return lines.join('\n')
 }
 
-export type RenderMeta = { path: string; age?: string; violations?: number; stale?: string }
+export type RenderMeta = { path: string; age?: string; violations?: number; stale?: string; source?: 'model' | 'deterministic' }
 
 // What the orchestrator actually reads. Rendered HERE from validated data with fixed labels, so the
 // ceiling is arithmetic rather than a request: the scout's prose never reaches the reader unmediated.
@@ -158,6 +175,7 @@ export function renderBrief(b: RepoBrief, meta: RenderMeta): string {
   const notes: string[] = []
   if (skip.size) notes.push(`⚠ over the ${RENDER_CEILING}-char ceiling — dropped: ${[...skip].join(', ')}`)
   if (meta.violations) notes.push(`⚠ ${meta.violations} schema violation(s) corrected by the daemon (fields clipped or dropped)`)
+  if (meta.source === 'deterministic') notes.push('⚠ deterministic fallback — architecture/flows require worker verification or a model refresh')
   if (meta.stale) notes.push(`⚠ flagged stale: ${meta.stale}`)
   const out = [head, body, ...notes].filter(Boolean).join('\n')
   // Backstop: a shed of every optional field still leaves what/verify/surfaces, which are capped at
@@ -175,12 +193,13 @@ export type BriefRecord = {
   gitHead: string | null
   violations: number
   schemaVersion: number
+  source?: 'model' | 'deterministic'
   stale?: string        // a worker's --stale reason; forces the next lookup to re-scout
   costUsd?: number
 }
 // Bumped when the field list changes, so a release that changes the schema re-scouts rather than
 // rendering yesterday's shape under today's labels.
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 export const REFRESH_AFTER_MS = 14 * 24 * 60 * 60 * 1000
 
 export const briefsDir = (stateDir: string): string => join(stateDir, 'repo-briefs')
@@ -225,6 +244,91 @@ export function ageLabel(ms: number): string {
   return `${Math.max(1, Math.floor(ms / 60_000))}m ago`
 }
 
+function readSmall(path: string): string {
+  try { return readFileSync(path, 'utf8').slice(0, 64_000) } catch { return '' }
+}
+function readJsonObject(path: string): Record<string, unknown> | null {
+  try {
+    const value = JSON.parse(readFileSync(path, 'utf8'))
+    return value && typeof value === 'object' ? value as Record<string, unknown> : null
+  } catch { return null }
+}
+function readmeSummary(text: string): string {
+  const lines = text.split('\n')
+  const body: string[] = []
+  for (const raw of lines) {
+    const line = raw.trim()
+    if (!line || line.startsWith('#') || line.startsWith('![') || /^\[!/.test(line)) {
+      if (body.length) break
+      continue
+    }
+    body.push(line)
+    if (body.join(' ').length >= 240) break
+  }
+  return body.join(' ')
+}
+
+// A quota-independent floor. This deliberately reports only facts visible in manifests, instruction
+// files and top-level structure; architecture stays explicitly unknown until a model scout or worker
+// verifies it. The result uses the same validator and hard ceiling as model output.
+export function deterministicRepoBrief(real: string): Validation {
+  const pkg = readJsonObject(join(real, 'package.json'))
+  const scripts = pkg?.scripts && typeof pkg.scripts === 'object' ? pkg.scripts as Record<string, unknown> : {}
+  const readmeName = ['README.md', 'README', 'readme.md'].find(name => existsSync(join(real, name)))
+  const summary = readmeName ? readmeSummary(readSmall(join(real, readmeName))) : ''
+  const description = typeof pkg?.description === 'string' ? pkg.description : ''
+  const packageName = typeof pkg?.name === 'string' ? pkg.name : ''
+
+  let entries: Dirent[] = []
+  try { entries = readdirSync(real, { withFileTypes: true }) } catch {}
+  const ignored = new Set(['.git', 'node_modules', 'vendor', 'dist', 'build', '.next', '.cache', '__pycache__'])
+  const dirPriority = ['src', 'app', 'apps', 'lib', 'packages', 'services', 'api', 'server', 'client', 'web', 'scripts', 'tests', 'test', 'docs', 'off-mcp', 'bin', 'assets', 'fixtures']
+  const dirs = entries
+    .filter(e => e.isDirectory() && !e.name.startsWith('.') && !ignored.has(e.name))
+    .map(e => e.name)
+    .sort((a, b) => {
+      const ai = dirPriority.indexOf(a), bi = dirPriority.indexOf(b)
+      return (ai < 0 ? 999 : ai) - (bi < 0 ? 999 : bi) || a.localeCompare(b)
+    })
+    .slice(0, 6)
+  const surfaces = dirs.length
+    ? dirs.map(name => `${name}/ — top-level area; inspect before assigning responsibility`)
+    : ['(root) — no top-level source directories found; inspect before routing']
+
+  const instructionNames = ['CLAUDE.md', 'AGENTS.md', 'CONTRIBUTING.md'].filter(name => existsSync(join(real, name)))
+  const docs = [...instructionNames, ...(readmeName ? [readmeName] : [])].slice(0, 3)
+  const truth = instructionNames.map(name => `${name} — local repository instructions`)
+  if (pkg) truth.push('package.json — package metadata and runnable scripts')
+
+  const has = (name: string) => existsSync(join(real, name))
+  const stack: string[] = []
+  if (pkg) stack.push(has('bun.lock') || has('bun.lockb') ? 'JavaScript/TypeScript · bun' : has('pnpm-lock.yaml') ? 'JavaScript/TypeScript · pnpm' : has('yarn.lock') ? 'JavaScript/TypeScript · yarn' : 'JavaScript/TypeScript · npm')
+  if (has('pyproject.toml') || has('requirements.txt')) stack.push('Python')
+  if (has('Cargo.toml')) stack.push('Rust · cargo')
+  if (has('go.mod')) stack.push('Go')
+
+  const script = (name: string): string => typeof scripts[name] === 'string' ? String(scripts[name]) : ''
+  const verify = script('verify') || script('test') || script('check') || script('lint') || script('build') || 'none — the worker must propose one'
+  const deploy = script('deploy') || (has('Dockerfile') ? 'Dockerfile present — deployment command unknown' : 'unknown')
+  return validateBrief({
+    aka: packageName && packageName !== basename(real) ? packageName : '',
+    what: description || summary || `${basename(real)} repository; purpose not deterministically identified`,
+    stack: stack.join('; ') || 'unknown',
+    verify,
+    surfaces,
+    deploy,
+    conventions: instructionNames.map(name => `Read ${name} before work; fallback did not interpret its rules`),
+    hazards: [],
+    docs,
+    components: surfaces.slice(0, CAPS.components.items),
+    flows: [],
+    truth,
+    vocabulary: [],
+    assumptions: ['Fallback brief: do not assume architecture, component relationships, or runtime flow; require worker verification'],
+    unknown: ['Architecture and data/control flows await model scouting or worker inspection'],
+  })
+}
+
 // The scout's brief. Caps are stated even though they are enforced downstream: a scout that aims at
 // the cap needs fewer clips, and the clip is lossy. Stating them is optimisation, not enforcement —
 // the pilot measured exactly how much of an enforcement they are (none).
@@ -254,12 +358,22 @@ these keys:
   hazards      ${cap('hazards')}   what makes a task here NOT routine — production
                credentials, no tests, a live or shared resource, a file too large to read
   docs         ${cap('docs')}   paths a worker should be told to read FIRST
+  components   ${cap('components')}   "component/path — responsibility and ownership boundary".
+               Only major pieces the orchestrator needs to distinguish; no symbol inventory.
+  flows        ${cap('flows')}   "input → processing component → output" for the few product flows
+               whose direction changes routing or briefing.
+  truth        ${cap('truth')}   "claim — authoritative file/path" for configuration, data, runtime,
+               generated artifacts, or deployment truth.
+  vocabulary   ${cap('vocabulary')}   "repo/product term — meaning" where the owner's wording could
+               otherwise be mistaken for a file, service, model, or environment.
+  assumptions  ${cap('assumptions')}   tempting repo-specific claims the orchestrator must NOT make
+               without worker verification.
   unknown      ${cap('unknown')}   what you could not determine. Be explicit here
                rather than guessing anywhere above.
 
-DO NOT include, in any field: architecture, module graphs, how anything works, dependency
-inventories, file counts, line counts, code-quality opinions, TODOs, git history, or anything about
-the current state of the work. Those are the worker's job, not the router's.
+DO NOT include full module/symbol graphs, dependency inventories, file counts, line counts,
+code-quality opinions, TODOs, git history, or current work state. Distill only architecture and flows
+that change routing, briefing, verification, or risk. The rendered result is hard-capped; prioritize.
 
 Say "unknown" rather than inferring. A confident wrong answer here misroutes real work.
 Output the JSON fence and nothing else.`
