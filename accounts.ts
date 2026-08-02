@@ -12,6 +12,10 @@ import { join, basename } from 'node:path'
 
 export type Account = { name: string; configDir: string }
 
+// Runtime truth for panes whose role can be migrated between registered accounts. Transcript paths
+// remain the durable fallback, but this stamp is available immediately after spawn/restart.
+export const ACCOUNT_PANE_OPT = '@tg_account'
+
 export const MAIN_CONFIG_DIR = join(homedir(), '.claude')
 export const MAIN_ACCOUNT: Account = { name: 'main', configDir: MAIN_CONFIG_DIR }
 

@@ -336,6 +336,11 @@ test('clearOwnTypedLine erases our own unsubmitted line and NEVER someone else\'
 // With an instant sleep the holder below never holds anything and the give-up path cannot fire —
 // the check would have passed for a reason that has nothing to do with the lock.
 
+test('deliveryLockKey survives physical pane replacement for one logical session', () => {
+  expect(pane.deliveryLockKey('%old', 'session-42')).toBe(pane.deliveryLockKey('%fresh', 'session-42'))
+  expect(pane.deliveryLockKey('%old', null)).not.toBe(pane.deliveryLockKey('%fresh', null))
+})
+
 test('withPaneDelivery: two deliveries at one pane RUN ONE AT A TIME, in order', async () => {
   const events: string[] = []
   const body = (tag: string, ms: number) => async () => {

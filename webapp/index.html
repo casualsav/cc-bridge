@@ -1923,10 +1923,9 @@ function floatToast() {
   errBox.classList.toggle("docked", drilled);
 }
 function showErr(m) { floatToast(); errBox.textContent = m; errBox.classList.add("show"); setTimeout(() => errBox.classList.remove("show"), 4000); }
-// The green bar. Exactly ONE live caller now — the dial's "… requested…", which is not a confirmation
-// of anything: an effort change can sit behind Claude Code's own confirm for seconds, so that bar says
-// a switch was ASKED for and the 3s poll is what says it landed. Every other green bar went through
-// showDone below.
+// The green bar has two deliberate direct callers: the dial's "… requested…" (the poll later proves
+// it landed), and Accounts → Chat after the server has transactionally resumed the live conversation.
+// The latter cannot rely on the selected-row styling: that proves the saved default, not the live route.
 function showOk(m) { floatToast(); errBox.textContent = m; errBox.classList.add("show", "ok"); setTimeout(() => errBox.classList.remove("show", "ok"), 2500); }
 // SUCCESS CONFIRMATIONS ARE OFF (the owner, 2026-07-30, on a green "Spawned test" sliding over his
 // list): the surface behind the bar already shows the outcome — the card list, the file list, the
@@ -2310,6 +2309,7 @@ function renderAccounts() {
 }
 async function accountAction(body) {
   const d = await writeOp('/api/provider-accounts/action', { ...body, role: body.role || ACCOUNT_ROLE }); if (!d) return;
+  if (body.action === 'default' && body.role === 'chat') showOk(d.activated ? 'Chat provider is active' : 'Chat default saved · no active chat');
   PROVIDER_ACCOUNTS = await api('/api/provider-accounts?role=' + ACCOUNT_ROLE); renderAccounts();
 }
 function providerFormChanged() {

@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import {
-  PROVIDER_CATALOG, activeFailoverChain, inferGatewayIdentity, projectProviderAccounts,
+  PROVIDER_CATALOG, activeFailoverChain, applyProviderDefaultSelection, inferGatewayIdentity, projectProviderAccounts,
   routeForAccountId,
 } from './provider-accounts.ts'
 import type { FailoverHop } from './common.ts'
@@ -64,4 +64,66 @@ test('account ids resolve to explicit spawn account and harness', () => {
   expect(routeForAccountId('claude:main', gateways)).toEqual({ account: 'main' })
   expect(routeForAccountId('gateway:local-codex', gateways)).toEqual({ harness: { provider: 'gateway', gateway: 'local-codex', model: 'gpt-5.6-sol[1m]', smallModel: 'gpt-5.6-luna[1m]' } })
   expect(routeForAccountId('gateway:missing', gateways)).toBeNull()
+})
+
+test('chat provider selection activates the current chat before saving its default', async () => {
+  const events: string[] = []
+  const result = await applyProviderDefaultSelection('chat', {
+    activateCurrentChat: async () => { events.push('activate'); return null },
+    persistDefault: () => { events.push('persist') },
+  })
+  expect(result).toEqual({ ok: true, activated: true })
+  expect(events).toEqual(['activate', 'persist'])
+})
+
+test('failed chat activation leaves the saved default unchanged', async () => {
+  let persisted = false
+  const result = await applyProviderDefaultSelection('chat', {
+    activateCurrentChat: async () => 'Anthropic Native did not reach a usable prompt',
+    persistDefault: () => { persisted = true },
+  })
+  expect(result).toEqual({ error: 'Anthropic Native did not reach a usable prompt' })
+  expect(persisted).toBe(false)
+})
+
+test('unexpected activation exceptions leave the default unchanged', async () => {
+  let persisted = false
+  const result = await applyProviderDefaultSelection('chat', {
+    activateCurrentChat: async () => { throw new Error('tmux disappeared') },
+    persistDefault: () => { persisted = true },
+  })
+  expect(result).toEqual({ error: 'could not activate the selected provider; the default was not changed' })
+  expect(persisted).toBe(false)
+})
+
+test('failed default persistence rolls the live chat back', async () => {
+  const events: string[] = []
+  const result = await applyProviderDefaultSelection('chat', {
+    activateCurrentChat: async () => { events.push('activate'); return null },
+    persistDefault: () => { events.push('persist'); throw new Error('disk full') },
+    rollbackCurrentChat: async () => { events.push('rollback'); return true },
+  })
+  expect(result).toEqual({ error: 'could not save the provider default; the current chat was restored' })
+  expect(events).toEqual(['activate', 'persist', 'rollback'])
+})
+
+test('failed persistence reports when live-chat rollback also fails', async () => {
+  const result = await applyProviderDefaultSelection('chat', {
+    activateCurrentChat: async () => null,
+    persistDefault: () => { throw new Error('disk full') },
+    rollbackCurrentChat: async () => false,
+  })
+  expect(result).toEqual({ error: 'could not save the provider default, and the current chat could not be restored' })
+})
+
+test('coding provider selection remains a future-session default', async () => {
+  let activated = false
+  let persisted = false
+  const result = await applyProviderDefaultSelection('code', {
+    activateCurrentChat: async () => { activated = true; return null },
+    persistDefault: () => { persisted = true },
+  })
+  expect(result).toEqual({ ok: true, activated: false })
+  expect(activated).toBe(false)
+  expect(persisted).toBe(true)
 })

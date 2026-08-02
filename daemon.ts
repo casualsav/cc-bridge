@@ -61,12 +61,12 @@ import {
   resolveRoleHarness, roleHarnessSummary, roleProviderOptions, harnessModelUpdate, rolePanelLine, type SessionRole,
 } from './role-provider.ts'
 import { GATEWAY_PRESETS } from './gateway-presets.ts'
-import { PROVIDER_CATALOG, projectProviderAccounts, routeForAccountId, type ProviderAccountsView } from './provider-accounts.ts'
+import { PROVIDER_CATALOG, applyProviderDefaultSelection, projectProviderAccounts, routeForAccountId, type ProviderAccountsView, type ProviderRoute } from './provider-accounts.ts'
 import { findSessionHarness, recordSessionHarness } from './session-harness.ts'
 import {
   initAccounts, listAccounts, accountByName, accountForTranscript, accountForProjectsDir,
   allProjectsDirs, resolvePaneAccount, addAccount, removeAccount, renameAccount, accountLoggedIn, healAccountConfigs, healMainStatusline,
-  MAIN_ACCOUNT, readDefaultMode, writeDefaultMode, projectsDirOf, type Account,
+  ACCOUNT_PANE_OPT, MAIN_ACCOUNT, readDefaultMode, writeDefaultMode, projectsDirOf, type Account,
 } from './accounts.ts'
 import { exec, sleep, hashText } from './proc.ts'
 import {
@@ -78,7 +78,7 @@ import { ghAccounts, ghInstalled, ghSwitch, ghLogout, runGhLogin, provisionGh, t
 import {
   capturePane, capturePaneCached, invalidateCapture, paneAlive, sendKeys, sendKeysLiteral, navigateDown, waitForSettle,
   autoSizeWindowOf, paneCommand, paneCwd, PaneWatcher,
-  submitVerified, withPaneDelivery, injectBuffer, clearOwnTypedLine, pasteSlashVerified, type PastedSlash,
+  submitVerified, withPaneDelivery, deliveryLockKey, injectBuffer, clearOwnTypedLine, pasteSlashVerified, type PastedSlash,
 } from './pane-io.ts'
 import type {
   PendingEntry, GroupPolicy, Access, Session,
@@ -425,10 +425,18 @@ const typingPresence = new TypingPresence(channel)
 
 // ---- Pane / tmux layer ----
 
+// Delivery is a logical-session lock when a pane is registered, not merely a physical-pane lock.
+// A transactional restart can replace %old with %fresh; both must still queue behind the same lock
+// while the provider/default operation commits or rolls back.
+async function paneDeliveryKey(paneId: string): Promise<string> {
+  const sid = await sessionForPane(paneId, false).catch(() => null)
+  return deliveryLockKey(paneId, sid)
+}
+
 // Type `text` into the pane's input and submit it with Enter, pausing the watcher
 // so the resulting change isn't mistaken for a new prompt/event.
 async function injectText(paneId: string, watcher: PaneWatcher, text: string): Promise<boolean> {
-  return withPaneDelivery(paneId, () => watcher.withInjection(async () => {
+  return withPaneDelivery(await paneDeliveryKey(paneId), () => watcher.withInjection(async () => {
     const ok = await sendKeysLiteral(paneId, text)
     if (!ok) return false
     return await submitVerified(paneId, agentSubmitKeys(await paneAgentKind(paneId)), submitLanded)
@@ -441,7 +449,7 @@ async function injectText(paneId: string, watcher: PaneWatcher, text: string): P
 // Telegram message — as one block so only the trailing Enter submits. Pauses the
 // watcher so the inject + the agent's reply aren't misread as a new prompt/event.
 async function injectPaste(paneId: string, watcher: PaneWatcher, text: string): Promise<boolean> {
-  return withPaneDelivery(paneId, () => watcher.withInjection(async () => {
+  return withPaneDelivery(await paneDeliveryKey(paneId), () => watcher.withInjection(async () => {
     if (!(await paneAlive(paneId))) return false
     const buf = injectBuffer(paneId)
     await exec('tmux', ['set-buffer', '-b', buf, '--', text], { timeout: 2000 })
@@ -1486,6 +1494,11 @@ async function stampPaneHarness(pane: string, profile: HarnessProfile, sid?: str
   if (sid && getTopicBySession(sid)) updateTopic(sid, { harness: profile })
 }
 
+async function stampPaneAccount(pane: string, account: Account, sid?: string | null): Promise<void> {
+  await exec('tmux', ['set-option', '-p', '-t', pane, ACCOUNT_PANE_OPT, account.name], { timeout: 2000 }).catch(() => {})
+  if (sid && getTopicBySession(sid)) updateTopic(sid, { account: account.name === 'main' ? undefined : account.name })
+}
+
 const PROXY_PID_FILE = join(STATE_DIR, 'claude-code-proxy.pid')
 
 function configuredProxyBinPath(): string | null {
@@ -1664,12 +1677,17 @@ async function stopTypingForPane(pane: string): Promise<void> {
   else typingPresence.stop()
 }
 
-// A bound DM chat lane runs on the explicit `chat` account even when its transcript stamp is absent
-// or points at main (gateway children can start before transcript evidence exists). Ordinary panes keep
-// the transcript-derived account, falling back to main.
+// A runtime account stamp is authoritative after any spawn/restart, including an Accounts → Chat
+// migration. Legacy bound lanes without a stamp retain the dedicated `chat` fallback; ordinary legacy
+// panes retain transcript inference. This avoids mistaking a migrated main-account chat for `chat`.
 async function paneAccount(pane: string | null): Promise<Account> {
   if (!pane) return MAIN_ACCOUNT
-  const explicit = await boundDmChatForPane(pane) !== null ? accountByName('chat') : null
+  let explicit: Account | null = null
+  try {
+    const { stdout } = await exec('tmux', ['show-options', '-pqv', '-t', pane, ACCOUNT_PANE_OPT], { timeout: 2000 })
+    explicit = accountByName(stdout.trim())
+  } catch {}
+  if (!explicit && await boundDmChatForPane(pane) !== null) explicit = accountByName('chat')
   if (explicit) return resolvePaneAccount(explicit, null)
   const file = await transcriptForPane(pane, null)   // stamp only — null cwd skips the fallback
   return resolvePaneAccount(null, file ? accountForTranscript(file) : null)
@@ -6271,7 +6289,7 @@ async function pasteGuarded(paneId: string, watcher: PaneWatcher | null, text: s
   const run = () => pasteSlashVerified(paneId, text, {
     submitKeys, boxContent: inputBoxContent, wouldMisfire: slashPaletteWouldMisfire, landed: submitLanded,
   })
-  return withPaneDelivery(paneId,
+  return withPaneDelivery(await paneDeliveryKey(paneId),
     () => (watcher ? watcher.withInjection(run) : run()),
     () => ({ ok: false, offered: [] }))
 }
@@ -6449,7 +6467,7 @@ async function relayBashCommand(t: CommandTarget, command: string, chat_id: stri
   // arm bash mode is this function, which is now serialised against itself.
   // A lock timeout reports as the unreachable-pane failure. Not a perfect sentence for "the pane was
   // busy for 45 seconds", but honest in effect and it keeps this path to two outcomes.
-  const ok = await withPaneDelivery(t.paneId,
+  const ok = await withPaneDelivery(await paneDeliveryKey(t.paneId),
     () => (t.watcher ? t.watcher.withInjection(run) : run()), () => false as const)
   if (!ok) {
     await channel.sendText(chat_id, '⚠️ Couldn\'t reach the session pane.', t.replyThread ? { threadId: String(t.replyThread) } : undefined).catch(() => {})
@@ -7954,14 +7972,15 @@ bot.command('launch', async ctx => {
 
 // Keep Claude Code as the harness while swapping only its inference provider. This is intentionally
 // separate from /agent codex, which launches the standalone Codex TUI and uses Codex transcripts.
-const harnessSwitchingPanes = new Set<string>()
+const harnessSwitchingSessions = new Set<string>()
 bot.command('harness', async ctx => {
   if (!dmCommandGate(ctx)) return
   const arg = (ctx.match ?? '').toString().trim()
   const t = await commandTarget(ctx)
   if (!t) return
-  if (arg && harnessSwitchingPanes.has(t.paneId)) { await ctx.reply('⏳ A harness switch is already in progress for this session.'); return }
-  if (arg) harnessSwitchingPanes.add(t.paneId)
+  const switchKey = arg ? await paneDeliveryKey(t.paneId) : null
+  if (switchKey && harnessSwitchingSessions.has(switchKey)) { await ctx.reply('⏳ A harness switch is already in progress for this session.'); return }
+  if (switchKey) harnessSwitchingSessions.add(switchKey)
   try {
   const current = await paneHarnessProfile(t.paneId)
   if (!arg) {
@@ -8034,7 +8053,7 @@ bot.command('harness', async ctx => {
     return
   }
   await ctx.reply(`✅ This is still the same Claude Code conversation and tool harness; inference now uses <b>${escapeHtml(harnessLabel(profile))}</b>.`, { parse_mode: 'HTML' })
-  } finally { if (arg) harnessSwitchingPanes.delete(t.paneId) }
+  } finally { if (switchKey) harnessSwitchingSessions.delete(switchKey) }
 })
 
 bot.command('status', async ctx => {
@@ -8344,7 +8363,7 @@ async function typeBriefIntoPane(pane: string, agent: AgentKind, brief: string):
         // The lock goes around the paste→submit window ONLY, not the poll loop above it: this
         // function can spend CROSS_ENGINE_COMPOSER_TIMEOUT_MS waiting for a composer to come up, and
         // holding a pane's delivery queue for that long would be a self-inflicted wedge.
-        return await withPaneDelivery(pane, async () => {
+        return await withPaneDelivery(await paneDeliveryKey(pane), async () => {
           const buf = injectBuffer(pane)
           await exec('tmux', ['set-buffer', '-b', buf, '--', brief], { timeout: 2000 }).catch(() => {})
           await exec('tmux', ['paste-buffer', '-d', '-p', '-b', buf, '-t', pane], { timeout: 2000 }).catch(() => {})
@@ -8645,7 +8664,10 @@ async function restartPaneSessionCore(pane: string, id: string | null, accountOv
         launchVerified = true
       }
       await exec('tmux', ['set-option', '-p', '-t', pane, AGENT_PANE_OPT, agent], { timeout: 2000 }).catch(() => {})
-      if (agent === 'claude') await stampPaneHarness(pane, harness, sid)
+      if (agent === 'claude') {
+        await stampPaneHarness(pane, harness, sid)
+        await stampPaneAccount(pane, account, sid)
+      }
       if (id !== null) {
         if (sid) updateTopic(sid, { ...(agent === 'codex' ? { agent } : { agent: undefined }), agentSessionId: id })
       } else {
@@ -10610,7 +10632,7 @@ bot.command('md', async ctx => {
 // Paste into a pane the watcher isn't driving (a non-focused scheduled target). Mirrors
 // injectPaste minus the watcher pause — safe because no relay loop is reading this pane.
 async function pasteToPane(paneId: string, text: string): Promise<boolean> {
-  return withPaneDelivery(paneId, async () => {
+  return withPaneDelivery(await paneDeliveryKey(paneId), async () => {
     try {
       if (!(await paneAlive(paneId))) return false
       const buf = injectBuffer(paneId)
@@ -11095,7 +11117,10 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
         await exec('tmux', ['kill-pane', '-t', newPane], { timeout: 2000 }).catch(() => {})
         return null
       }
-      if (agent === 'claude') await stampPaneHarness(newPane, harness, presetSessionId)
+      if (agent === 'claude') {
+        await stampPaneHarness(newPane, harness, presetSessionId)
+        await stampPaneAccount(newPane, account, presetSessionId)
+      }
       if (presetSessionId && agent === 'codex') updateTopic(presetSessionId, { agent: 'codex' })
       // Pre-bound topic (user-created tab): stamp its sessionId at birth so discovery resolves
       // the pane straight to that topic instead of minting a fresh id + duplicate topic.
@@ -16495,7 +16520,111 @@ async function webappReadProviderAccounts(role: SessionRole = 'code'): Promise<P
     models: Object.fromEntries(discovered), auto: prefs.limitFailover === true,
   })
 }
-async function webappProviderAccountAction(_userId: string, action: Record<string, unknown>): Promise<{ error: string } | Record<string, unknown>> {
+
+type WebappChatActivation = { rollback: () => Promise<boolean> }
+
+async function webappCurrentChatPane(userId: string): Promise<string | null> {
+  const lane = getDmChatSession(userId)
+  if (lane) {
+    const pane = await paneForSession(lane.sessionId).catch(() => null)
+    if (pane) return pane
+  }
+  return !isTopicMode() ? focus.activePaneId : null
+}
+
+// Called while the Accounts action owns the same per-pane delivery lock as inbound message injection,
+// so the idle check and transactional restart are one critical section.
+async function activateWebappChatRoute(pane: string, route: ProviderRoute): Promise<{ error: string } | WebappChatActivation> {
+  try {
+    if (await paneAgentKind(pane) !== 'claude') return { error: 'the current chat is not running Claude Code, so its provider was not changed' }
+    const cap = await capturePane(pane).catch(() => '')
+    if (!cap || !onNormalPrompt(cap) || detectWorking(cap)) return { error: 'the current chat is mid-turn — choose the account again when it is idle' }
+
+    const cwd = await paneCwd(pane).catch(() => null)
+    // A prior restart may have reused this pane id; force the latest SessionStart stamp rather than a
+    // short-lived cache entry for the route we just left.
+    paneTranscriptCache.delete(pane)
+    const file = await transcriptForPane(pane, cwd)
+    const conversationId = file ? agentSessionId(file) : null
+    if (!file || !conversationId) return { error: 'could not resolve the current chat conversation, so nothing was changed' }
+    // Pane chrome is not authoritative for bridged turns: a fast/background response can look idle.
+    // The transcript stays in-progress until Claude closes the turn, and the delivery lock prevents a
+    // new Telegram turn from starting after this final check.
+    if (turnInProgress(file)) return { error: 'the current chat is mid-turn — choose the account again when it is idle' }
+
+    const currentAccount = accountForTranscript(file)
+    const targetAccount = route.account ? accountByName(route.account) : currentAccount
+    if (!targetAccount || !accountLoggedIn(targetAccount)) return { error: 'the selected Claude account is not logged in' }
+    const currentHarness = await paneHarnessProfile(pane)
+    const targetHarness: HarnessProfile = route.harness ?? { provider: 'anthropic' }
+    if (!(await harnessProviderReady(targetHarness))) return { error: 'the selected provider failed its readiness check' }
+
+    const sid = await sessionForPane(pane, false).catch(() => null)
+    const sameRoute = currentAccount.name === targetAccount.name
+      && serializeHarnessProfile(currentHarness) === serializeHarnessProfile(targetHarness)
+    if (sameRoute) return { rollback: async () => true }
+
+    let mirror: { dest: string; previous: Buffer | null } | null = null
+    const undoMirror = (): void => {
+      if (!mirror) return
+      if (mirror.previous) writeFileSync(mirror.dest, mirror.previous)
+      else rmSync(mirror.dest, { force: true })
+      mirror = null
+    }
+    if (currentAccount.name !== targetAccount.name) {
+      const rel = relative(projectsDirOf(currentAccount), file)
+      if (!rel || rel === '..' || rel.startsWith(`..${sep}`)) return { error: 'the current chat transcript could not be mapped to the selected account' }
+      const dest = join(projectsDirOf(targetAccount), rel)
+      try {
+        mkdirSync(dirname(dest), { recursive: true })
+        mirror = { dest, previous: existsSync(dest) ? readFileSync(dest) : null }
+        copyFileSync(file, dest)
+      } catch {
+        try { undoMirror() } catch {}
+        return { error: 'the current chat history could not be prepared for the selected account' }
+      }
+    }
+
+    const rememberRoute = (account: Account, harness: HarnessProfile): void => {
+      recordSessionHarness(conversationId, harness)
+      if (sid) updateTopic(sid, {
+        account: account.name === 'main' ? undefined : account.name,
+        harness: harness.provider === 'anthropic' ? undefined : harness,
+      })
+    }
+    const restore = async (fromPane: string): Promise<boolean> => {
+      const livePane = sid ? await paneForSession(sid).catch(() => null) : null
+      const restored = await restartPaneSessionCore(livePane ?? fromPane, conversationId, currentAccount, 'claude', undefined, undefined, currentHarness).catch(() => null)
+      if (!restored) return false
+      let remembered = true
+      try { rememberRoute(currentAccount, currentHarness) } catch { remembered = false }
+      try { undoMirror() } catch { remembered = false }
+      return remembered
+    }
+
+    const resumed = await restartPaneSessionCore(pane, conversationId, targetAccount, 'claude', undefined, undefined, targetHarness).catch(() => null)
+    if (!resumed) {
+      const restored = await restore(pane)
+      return { error: restored
+        ? 'the selected provider did not reach a usable prompt; the current chat was restored'
+        : 'the selected provider failed, and the current chat could not be restored automatically' }
+    }
+    try { rememberRoute(targetAccount, targetHarness) }
+    catch (error) {
+      process.stderr.write(`daemon: webapp provider switch could not persist ${conversationId}: ${error instanceof Error ? error.message : String(error)}\n`)
+      const restored = await restore(resumed)
+      return { error: restored
+        ? 'the provider switch could not be saved; the current chat was restored'
+        : 'the provider switch could not be saved, and the current chat could not be restored automatically' }
+    }
+    return { rollback: () => restore(resumed) }
+  } catch (error) {
+    process.stderr.write(`daemon: unexpected webapp provider switch error: ${error instanceof Error ? error.message : String(error)}\n`)
+    return { error: 'the provider switch hit an unexpected error; the default was not changed' }
+  }
+}
+
+async function webappProviderAccountAction(userId: string, action: Record<string, unknown>): Promise<{ error: string } | Record<string, unknown>> {
   const kind = String(action.action ?? '')
   const prefs = loadAccess()
   const gateways = loadHarnessGateways()
@@ -16524,10 +16653,36 @@ async function webappProviderAccountAction(_userId: string, action: Record<strin
     const id = String(action.id ?? '')
     const route = routeForAccountId(id, gateways)
     if (!role || !route || (route.account && !accountByName(route.account))) return { error: 'bad role or account' }
-    if (role === 'chat') prefs.chatProviderAccount = id; else prefs.codeProviderAccount = id
-    if (route.harness) { if (role === 'chat') prefs.chatHarness = route.harness; else prefs.codeHarness = route.harness }
-    else { if (role === 'chat') delete prefs.chatHarness; else delete prefs.codeHarness }
-    saveAccess(prefs); return { ok: true }
+    const pane = role === 'chat' ? await webappCurrentChatPane(userId) : null
+    const switchKey = pane ? await paneDeliveryKey(pane) : null
+    if (switchKey && harnessSwitchingSessions.has(switchKey)) return { error: 'a provider switch is already in progress for the current chat' }
+    if (switchKey) harnessSwitchingSessions.add(switchKey)
+    let rollbackCurrentChat: (() => Promise<boolean>) | undefined
+    try {
+      const select = () => applyProviderDefaultSelection(role, {
+        ...(pane ? { activateCurrentChat: async () => {
+          const activated = await activateWebappChatRoute(pane, route)
+          if ('error' in activated) return activated.error
+          rollbackCurrentChat = activated.rollback
+          return null
+        } } : {}),
+        persistDefault: () => {
+          const latest = loadAccess()
+          if (role === 'chat') latest.chatProviderAccount = id; else latest.codeProviderAccount = id
+          if (route.harness) { if (role === 'chat') latest.chatHarness = route.harness; else latest.codeHarness = route.harness }
+          else { if (role === 'chat') delete latest.chatHarness; else delete latest.codeHarness }
+          saveAccess(latest)
+        },
+        rollbackCurrentChat: async () => rollbackCurrentChat ? rollbackCurrentChat() : true,
+      })
+      // Keep activation, default persistence, and any rollback inside one delivery critical section.
+      // Otherwise a queued Telegram turn could land after activation but before a failed save restores it.
+      return pane && switchKey
+        ? await withPaneDelivery(switchKey, select, () => ({ error: 'the current chat is busy — choose the account again when it is idle' }))
+        : await select()
+    } finally {
+      if (switchKey) harnessSwitchingSessions.delete(switchKey)
+    }
   }
   if (kind === 'model') {
     const id = String(action.id ?? '')

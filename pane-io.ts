@@ -272,6 +272,10 @@ export async function capturePaneCached(paneId: string): Promise<string> {
 // messages from one person must arrive in the order they were sent, which is exactly the case that
 // exposed this.
 const paneDelivery = new Map<string, Promise<void>>()
+// A session key survives a transactional %old → %fresh pane replacement. Callers that cannot yet
+// resolve a registered session retain the historical per-pane isolation.
+export const deliveryLockKey = (paneId: string, sessionId: string | null | undefined): string =>
+  sessionId ? `session:${sessionId}` : `pane:${paneId}`
 // A caller that cannot get its turn gives up rather than waiting forever. Comfortably past the
 // longest legitimate hold (pasteGuarded's slash path can sit in a 30s settle), so this fires only
 // when something is genuinely stuck.

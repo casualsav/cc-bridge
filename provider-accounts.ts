@@ -120,3 +120,34 @@ export function routeForAccountId(id: string, gateways: Record<string, GatewayDe
   }
   return null
 }
+
+export async function applyProviderDefaultSelection(
+  role: 'chat' | 'code',
+  deps: {
+    activateCurrentChat?: () => Promise<string | null>
+    persistDefault: () => void
+    rollbackCurrentChat?: () => Promise<boolean>
+  },
+): Promise<{ ok: true; activated: boolean } | { error: string }> {
+  const activated = role === 'chat' && !!deps.activateCurrentChat
+  if (activated) {
+    try {
+      const error = await deps.activateCurrentChat!()
+      if (error) return { error }
+    } catch {
+      return { error: 'could not activate the selected provider; the default was not changed' }
+    }
+  }
+  try {
+    deps.persistDefault()
+  } catch {
+    if (activated && deps.rollbackCurrentChat) {
+      const restored = await deps.rollbackCurrentChat()
+      return restored
+        ? { error: 'could not save the provider default; the current chat was restored' }
+        : { error: 'could not save the provider default, and the current chat could not be restored' }
+    }
+    return { error: 'could not save the provider default' }
+  }
+  return { ok: true, activated }
+}
