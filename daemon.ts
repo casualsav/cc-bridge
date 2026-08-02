@@ -59,7 +59,7 @@ import {
   parseGatewayDefinitions, validGatewayProbeResponse, type GatewayDefinition,
 } from './harness-gateway.ts'
 import {
-  resolveRoleHarness, roleHarnessSummary, roleProviderOptions, harnessModelUpdate, rolePanelLine, type SessionRole,
+  resolveRoleHarness, roleHarnessSummary, roleProviderOptions, harnessModelUpdate, rolePanelLine, spawnLaunchHarness, type SessionRole,
 } from './role-provider.ts'
 import { GATEWAY_PRESETS } from './gateway-presets.ts'
 import { PROVIDER_CATALOG, applyProviderDefaultSelection, projectProviderAccounts, routeForAccountId, type ProviderAccountsView, type ProviderRoute } from './provider-accounts.ts'
@@ -6025,7 +6025,7 @@ async function handleCall(
         // spawns — failing the work over a missing annotation would cost the task, not the judgment —
         // but under `auto` the confirmation then says the choice was a fallback, which is the point.
         const why = String(args.why ?? '').replace(/\s+/g, ' ').trim().slice(0, 120)
-        const spec: SpawnSpec = { fromSid, topicName, dir, effort, firstMsg: String(args.text ?? '').trim(), headless, why, autoEffort: effortChoice.autoFallback, ...(providerAccount ? { providerAccount } : {}), ...(providerModel ? { providerModel } : {}) }
+        const spec: SpawnSpec = { fromSid, topicName, dir, effort, firstMsg: String(args.text ?? '').trim(), headless, why, autoEffort: effortChoice.autoFallback, ...(providerAccount ? { providerAccount } : {}), ...(providerModel ? { providerModel } : {}), ...(explicitModel && !providerRoute?.harness ? { nativeModel: explicitModel } : {}) }
         // THE GATE. A gated model does not spawn and then ask — nothing starts until the owner taps.
         // The card used to be minted AFTER the session was already running on the default, which made
         // it decorative: it read as control while providing none, and the only thing a tap could still
@@ -7057,7 +7057,11 @@ function clampedClause(d: ModelDecision): string {
 // Everything a VALIDATED spawn needs, minus the model — which is the one thing a gated spawn is still
 // waiting to learn. Split out of the `tg spawn` case so the same launch runs whether the caller's
 // socket is still open (the ordinary path) or the owner taps a card twenty minutes later.
-type SpawnSpec = { fromSid: string; topicName: string; dir: string; effort: string | null; firstMsg: string; headless: boolean; why?: string; autoEffort?: boolean; providerAccount?: string; providerModel?: string }
+// `nativeModel` is the Claude alias the CALLER named (absent when it named none, or named a
+// provider account instead): it is what makes the spawn's engine an explicit choice rather than the
+// coding role's default, and it rides on the spec so a HELD spawn approved twenty minutes later
+// lands on the same engine the caller asked for.
+type SpawnSpec = { fromSid: string; topicName: string; dir: string; effort: string | null; firstMsg: string; headless: boolean; why?: string; autoEffort?: boolean; providerAccount?: string; providerModel?: string; nativeModel?: string }
 
 // The one line the owner reads next to the dials on the spawn confirmation. Two things can put text
 // here and they COMPOSE rather than replace: the caller's own --why, and — under `auto` — whichever
@@ -7081,7 +7085,7 @@ async function launchSpawn(spec: SpawnSpec, model: string | null, clampedNote: s
   const launchAccount = explicit?.account ? accountByName(explicit.account) : defaultRoute.account
   const launchHarness = explicit?.harness
     ? { ...explicit.harness, ...(spec.providerModel ? { model: spec.providerModel } : {}) }
-    : (explicit?.account ? undefined : defaultRoute.harness)
+    : (explicit?.account ? undefined : spawnLaunchHarness(spec.nativeModel, defaultRoute.harness))
   if (!launchAccount || (spec.providerAccount && !explicit)) return { ok: false, text: `provider account '${spec.providerAccount}' is unavailable` }
   // What this spawn will actually RUN on, for the card, the ledger and the ok-line. A non-native
   // coding role harness owns the model — the resolved alias never reached the CLI (resumeCliModel
@@ -17434,7 +17438,7 @@ async function webappSessionSpawn(
   if (asked && !explicitRoute?.harness && !MODEL_ALIASES.includes(asked)) return { error: `unknown model '${asked}'` }
   const harness = explicitRoute?.harness
     ? { ...explicitRoute.harness, ...(asked ? { model: asked } : {}) }
-    : (explicitRoute?.account ? undefined : defaultRoute.harness)
+    : (explicitRoute?.account ? undefined : spawnLaunchHarness(asked, defaultRoute.harness))
   const askedEffort = opts.effort ? String(opts.effort).toLowerCase() : null
   if (askedEffort && !EFFORT_LEVELS.includes(askedEffort)) return { error: `unknown effort '${askedEffort}'` }
   // No explicit dial = the sheet's "default" chip, and it resolves HERE, at spawn time, from the

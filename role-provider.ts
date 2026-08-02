@@ -21,6 +21,19 @@ export function resolveRoleHarness(pref: unknown): HarnessProfile {
   return normalizeHarnessProfile(pref)
 }
 
+// A spawn that NAMES a native Claude alias names the ENGINE along with it. The role default is a
+// default (this file's contract, above) — but it reaches the CLI as transport configuration that
+// DROPS the alias (`resumeCliModel`), so with the coding role on DeepSeek `tg spawn --model opus`
+// launched DeepSeek and said so nowhere the caller could act on: --effort rode through as its own
+// flag, and only the model was silently overruled (observed live on three spawns, 2026-08-01).
+// An explicit PROVIDER account is the other half of the same rule and never reaches here: naming
+// `--account gateway:deepseek --model X` picks that provider's own model, which still wins.
+export function spawnLaunchHarness(
+  explicitAlias: string | null | undefined, roleHarness: HarnessProfile | undefined,
+): HarnessProfile | undefined {
+  return explicitAlias ? undefined : roleHarness
+}
+
 // The picker's provider options for a role: Native, every configured gateway (with its current
 // model), and the built-ins (with their default models). Gateways are the "any provider" escape
 // hatch — a provider not listed here becomes one by adding it as a gateway (Accounts → ➕ Provider).
