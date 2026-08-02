@@ -80,6 +80,7 @@ import {
   capturePane, capturePaneCached, invalidateCapture, paneAlive, sendKeys, sendKeysLiteral, navigateDown, waitForSettle,
   autoSizeWindowOf, paneCommand, paneCwd, PaneWatcher,
   submitVerified, withPaneDelivery, deliveryLockKey, injectBuffer, clearOwnTypedLine, pasteSlashVerified, type PastedSlash,
+  pasteVerified, resubmitVerified, type PasteOutcome,
 } from './pane-io.ts'
 import type {
   PendingEntry, GroupPolicy, Access, Session,
@@ -147,7 +148,7 @@ import { formatChannelBlock } from './inbound.ts'
 import { initQueue, readLater, writeLater, sweepLaterQueues, LATER_SWEEP_MS } from './queue.ts'
 import {
   AGENT_BUS_ENABLED, AGENT_BUS_PIN_UI,
-  createPending, getPending, removePending, putPending, listPending, markInjected, expirePending, dropExpired, LATE_ANSWER_GRACE_MS, ASK_TTL_MS,
+  createPending, getPending, removePending, putPending, listPending, markInjected, markPasted, expirePending, dropExpired, LATE_ANSWER_GRACE_MS, ASK_TTL_MS,
   recordAgentAsk, resetHops, currentHops, BREADTH_NOTICE_AT, askResultText, planAskReap, deliveredReapCandidates, groupClosuresByAskerAndTarget, reapNotifiesAsker, queuedFor, type AskDelivery,
   askerAlreadyResolved, askerKilledTarget, markAskerResolved, reapNoticeSuppressed, planAssigneeNudge, markNudged,
   unreportedWorkMarker, markReported, markBriefed,
@@ -449,15 +450,17 @@ async function injectText(paneId: string, watcher: PaneWatcher, text: string): P
 // bracketed paste (`paste-buffer -p`) lands multiline content — e.g. a relayed
 // Telegram message — as one block so only the trailing Enter submits. Pauses the
 // watcher so the inject + the agent's reply aren't misread as a new prompt/event.
+// The boolean form every existing caller uses: 'landed' or not. Only the bus needs the third value,
+// because only the bus retries a delivery — and a retry is the one decision the outcome changes.
 async function injectPaste(paneId: string, watcher: PaneWatcher, text: string): Promise<boolean> {
+  return (await injectPasteOutcome(paneId, watcher, text)) === 'landed'
+}
+
+async function injectPasteOutcome(paneId: string, watcher: PaneWatcher, text: string): Promise<PasteOutcome> {
   return withPaneDelivery(await paneDeliveryKey(paneId), () => watcher.withInjection(async () => {
-    if (!(await paneAlive(paneId))) return false
-    const buf = injectBuffer(paneId)
-    await exec('tmux', ['set-buffer', '-b', buf, '--', text], { timeout: 2000 })
-    await exec('tmux', ['paste-buffer', '-d', '-p', '-b', buf, '-t', paneId], { timeout: 2000 })
-    await waitForSettle(paneId, 200, 4000)
-    return await submitVerified(paneId, agentSubmitKeys(await paneAgentKind(paneId)), submitLanded)
-  }), () => false)
+    if (!(await paneAlive(paneId))) return 'failed' as PasteOutcome
+    return pasteVerified(paneId, text, agentSubmitKeys(await paneAgentKind(paneId)), submitLanded)
+  }), () => 'failed' as PasteOutcome)   // never got our turn at the lock: nothing was pasted
 }
 
 // Send keys one at a time with a gap. A batched `send-keys k1 k2 k3` can outrun the TUI
@@ -3028,10 +3031,17 @@ async function busRosterLine(): Promise<string | null> {
 // messages so an ask/answer can't interleave with a human paste mid-buffer. Focused pane pauses its
 // watcher (bracket-paste); an off-focus topic pane gets a plain paste. Resolves to whether it landed.
 function busDeliver(pane: string, block: string): Promise<boolean> {
+  return busDeliverOutcome(pane, block).then(o => o === 'landed')
+}
+
+// The three-outcome form. Only tryDeliverAsk uses it, because only a RETRIED delivery has a decision
+// to make: 'failed' may be pasted again, 'unsubmitted' may only be Enter'd again. Everything else on
+// the bus is fire-and-forget and reads the boolean above.
+function busDeliverOutcome(pane: string, block: string): Promise<PasteOutcome> {
   const run = () => (pane === focus.activePaneId && focus.paneWatcher
-    ? injectPaste(pane, focus.paneWatcher, block)
-    : pasteToPane(pane, block))
-  const p = inboundInjectChain.then(run, run) as Promise<boolean>
+    ? injectPasteOutcome(pane, focus.paneWatcher, block)
+    : pasteToPaneOutcome(pane, block))
+  const p = inboundInjectChain.then(run, run) as Promise<PasteOutcome>
   inboundInjectChain = p.then(() => {}, () => {})
   return p
 }
@@ -3132,6 +3142,16 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
     // ledger from creation) + the endpoint's own rows. Claude only — a hermes one-shot has no
     // continuity to catch up, and runHermesAsk never calls this.
     const askBlock = formatAskBlock(cur.fromName, cur.id, cur.text, cur.refs, cur.noReply)
+    // A previous attempt already pasted this block into THIS pane and could not confirm its Enter, so
+    // the text is in that box right now: press Enter again, never paste again. Re-pasting is what put
+    // the same @system ack into the chat lane twice on 2026-08-02, 6s apart, off ONE ledger row — see
+    // PasteOutcome in pane-io.ts. A DIFFERENT pane means the session was restarted since and that box
+    // died with it, so a fresh paste is correct.
+    //
+    // No digest is recomputed on the resubmit path, and that is not an omission: the pasted block
+    // already carries the digest it was built with. Recomputing would either repeat those lines or —
+    // once the watermark moved — drop catch-up the session was promised and never shown.
+    const resubmitting = cur.pastedPane === pane
     let block = askBlock
     const since = getSeen(cur.toSid)
     // No watermark means this endpoint has never taken a bus delivery — so there is nothing it can
@@ -3145,11 +3165,23 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
     // SCOPED TO THIS ENDPOINT'S OWN LANE (`involving`). Room-wide was the bug the owner caught: a
     // one-minute-old @peptides spawn's second message carried two cc-bridge↔chat rows — another
     // lane's conversation, in a context that had no way to know it was not its own.
-    const digest = since > 0 ? digestSince(resolveLedgerNames(tailLedger(room, DIGEST_SCAN)), since, { excludeId: cur.id, excludeFrom: cur.toName, involving: cur.toName, cap: 8 }) : []
+    const digest = since > 0 && !resubmitting ? digestSince(resolveLedgerNames(tailLedger(room, DIGEST_SCAN)), since, { excludeId: cur.id, excludeFrom: cur.toName, involving: cur.toName, cap: 8 }) : []
     const dig = formatDigestBlock(digest, since > 0 ? fmtAgo(since) : 'recently')
     if (dig) block = `${dig}\n${askBlock}`
-    const ok = await busDeliver(pane, block)
+    const outcome = resubmitting ? await resubmitPane(pane) : await busDeliverOutcome(pane, block)
+    // 'unsubmitted' = the block IS in this pane's box; remember which box, so the next attempt Enters
+    // instead of pasting. 'failed' = nothing reached it, so forget any earlier memory and let the next
+    // attempt paste afresh. Logged either way: this state used to be invisible, which is why one
+    // delivery could silently become two.
+    if (outcome !== 'landed') {
+      markPasted(cur.id, outcome === 'unsubmitted' ? pane : null)
+      process.stderr.write(`daemon: ask ${cur.id} to @${cur.toName} ${outcome === 'unsubmitted'
+        ? `pasted into ${pane} but its submit was not confirmed — the retry will press Enter, not paste again`
+        : `could not be pasted into ${pane} — nothing landed; the retry will paste afresh`}\n`)
+    }
+    const ok = outcome === 'landed'
     if (ok) {
+      markPasted(cur.id, null)   // the box is ours no longer — a later retry must paste, not Enter
       const now = Date.now()
       markInjected(cur.id, now)
       // The chain is one hop deeper from here: whatever this session dispatches next inherits it.
@@ -10646,18 +10678,29 @@ bot.command('md', async ctx => {
 // Paste into a pane the watcher isn't driving (a non-focused scheduled target). Mirrors
 // injectPaste minus the watcher pause — safe because no relay loop is reading this pane.
 async function pasteToPane(paneId: string, text: string): Promise<boolean> {
+  return (await pasteToPaneOutcome(paneId, text)) === 'landed'
+}
+
+async function pasteToPaneOutcome(paneId: string, text: string): Promise<PasteOutcome> {
   return withPaneDelivery(await paneDeliveryKey(paneId), async () => {
     try {
-      if (!(await paneAlive(paneId))) return false
-      const buf = injectBuffer(paneId)
-      await exec('tmux', ['set-buffer', '-b', buf, '--', text], { timeout: 2000 })
-      await exec('tmux', ['paste-buffer', '-d', '-p', '-b', buf, '-t', paneId], { timeout: 2000 })
-      await waitForSettle(paneId, 200, 4000)
-      // Verified: false here means the block is sitting unsubmitted in the box, so every caller
-      // reports a stuck delivery instead of recording one that never woke the session.
-      return await submitVerified(paneId, agentSubmitKeys(await paneAgentKind(paneId)), submitLanded)
-    } catch { return false }
-  }, () => false)
+      if (!(await paneAlive(paneId))) return 'failed' as PasteOutcome
+      return await pasteVerified(paneId, text, agentSubmitKeys(await paneAgentKind(paneId)), submitLanded)
+    } catch { return 'failed' as PasteOutcome }
+  }, () => 'failed' as PasteOutcome)
+}
+
+// Press Enter again at a pane whose box already holds our block (a previous attempt's 'unsubmitted').
+// Takes the same lock and the same watcher pause as a paste, because it is the same critical section
+// — but it pastes nothing, so it cannot duplicate the message.
+async function resubmitPane(paneId: string): Promise<PasteOutcome> {
+  const run = async (): Promise<PasteOutcome> => {
+    if (!(await paneAlive(paneId))) return 'failed'
+    return resubmitVerified(paneId, agentSubmitKeys(await paneAgentKind(paneId)), submitLanded)
+  }
+  const watcher = paneId === focus.activePaneId ? focus.paneWatcher : null
+  return withPaneDelivery(await paneDeliveryKey(paneId),
+    watcher ? () => watcher.withInjection(run) : run, () => 'failed' as PasteOutcome)
 }
 
 const DEFAULT_TZ = 'America/Los_Angeles'

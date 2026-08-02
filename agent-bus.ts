@@ -93,6 +93,11 @@ export type BusPending = {
                       // `tg answer` still resolves it until dropExpired() GCs it (LATE_ANSWER_GRACE_MS)
   nudgedAt?: number   // when this ask's assignee was nudged about it. Persisted, so "once per ask" holds
                       // across a daemon restart — see planAssigneeNudge.
+  // The block is sitting in a pane's input box from an attempt whose Enter could not be confirmed.
+  // The PANE is part of the fact: the text is in THAT box and nowhere else, so a session that has
+  // since been restarted into a different pane must be pasted afresh rather than Enter'd at a box
+  // that never held it. Persisted, so a daemon restart cannot forget and re-paste.
+  pastedPane?: string
   askerResolvedAt?: number   // when the daemon decided this asker needs no further notice about this ask
                              // (the TTL notice was withheld because the target had already answered it
                              // since). Persisted so the decision outlives the 200-row ledger window and a
@@ -365,6 +370,19 @@ export function dropExpired(before: number): number {
 export function askerAlreadyResolved(p: BusPending, entries: LedgerEntry[]): boolean {
   if (p.askerResolvedAt != null) return true
   return entries.some(e => e.kind === 'answer' && e.from === p.toName && e.to === p.fromName && e.ts >= p.createdAt)
+}
+
+/**
+ * Remember that this ask's block is sitting unsubmitted in `pane`'s input box, so the next attempt
+ * presses Enter instead of pasting again — see PasteOutcome in pane-io.ts. Pass null to forget it
+ * (the pane is gone, or the block finally submitted).
+ */
+export function markPasted(id: number, pane: string | null): void {
+  ensureLoaded()
+  const p = store.pending[String(id)]
+  if (!p || p.pastedPane === (pane ?? undefined)) return
+  if (pane) p.pastedPane = pane; else delete p.pastedPane
+  save()
 }
 
 /** Record that the asker has been told nothing on purpose — see askerAlreadyResolved. Idempotent. */

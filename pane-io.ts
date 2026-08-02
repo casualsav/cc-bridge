@@ -329,6 +329,51 @@ export async function withPaneDelivery<T>(paneId: string, fn: () => Promise<T>, 
 // would read a leading dash as an option.
 export const injectBuffer = (paneId: string) => `tg-in-${paneId.replace(/[^A-Za-z0-9]+/g, '-')}`
 
+// The paste dance, returning the outcome the boolean threw away. This is `CLAUDE.md` §Outbound's rule
+// carried to the pane: **a failed delivery is either a REFUSAL or an UNKNOWN OUTCOME, and only a
+// refusal may be re-sent.**
+//
+//   'failed'      — tmux refused the paste. NOTHING reached the input box, so a full retry is right.
+//   'unsubmitted' — the paste took, the Enter was not confirmed. The text IS in the box. A retry must
+//                   press Enter again and MUST NOT paste again.
+//   'landed'      — pasted and submitted.
+//
+// The middle one is the whole reason this exists. `submitVerified` returns false for two situations it
+// cannot tell apart — nothing submitted, and "I could not confirm what submitted" — and a caller that
+// reads that as "nothing was delivered" re-pastes. On 2026-08-02 that put the same @system ack into
+// the chat lane twice, 6s apart (ledger held one row for it; the transcript held two copies), waking a
+// Fable lane twice for one event. Re-pasting is also how a block can end up in the box TWICE with one
+// Enter to submit both as one message — the interleave §Pane delivery already documents.
+//
+// The boundary is `paste-buffer`, not `set-buffer`: a buffer that was set but never pasted leaves the
+// box untouched. Everything after a SUCCESSFUL paste-buffer is 'unsubmitted' on any failure, including
+// a thrown one — the text is in the box whatever went wrong afterwards, and that is the fact the
+// retry needs.
+export type PasteOutcome = 'landed' | 'unsubmitted' | 'failed'
+
+export async function pasteVerified(
+  paneId: string, text: string, keys: string[], landed: (cap: string) => boolean,
+): Promise<PasteOutcome> {
+  const buf = injectBuffer(paneId)
+  try {
+    await exec('tmux', ['set-buffer', '-b', buf, '--', text], { timeout: 2000 })
+    await exec('tmux', ['paste-buffer', '-d', '-p', '-b', buf, '-t', paneId], { timeout: 2000 })
+  } catch { return 'failed' }
+  try {
+    await waitForSettle(paneId, 200, 4000)
+    return (await submitVerified(paneId, keys, landed)) ? 'landed' : 'unsubmitted'
+  } catch { return 'unsubmitted' }
+}
+
+// The recovery for 'unsubmitted': press Enter again at a box that already holds the block. Never
+// pastes, so it cannot duplicate — which is the entire point of splitting the outcome.
+export async function resubmitVerified(
+  paneId: string, keys: string[], landed: (cap: string) => boolean,
+): Promise<PasteOutcome> {
+  try { return (await submitVerified(paneId, keys, landed)) ? 'landed' : 'unsubmitted' }
+  catch { return 'unsubmitted' }
+}
+
 // PaneWatcher — ONE poll loop per active session (opus-direct Block C). Captures the pane every
 // 800ms; when the content hash changes it fires onEvent, and onPoll fires every tick (even when
 // unchanged) to drive a live working signal. All daemon coupling enters through the constructor
