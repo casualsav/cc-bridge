@@ -61,6 +61,13 @@ export function pickNextHop(chain: FailoverHop[], current: FailoverHop, availabl
   return null
 }
 
+// Hops at or below the user-visible inactive divider do not participate in automatic limit
+// failover. An absent count preserves the historical behaviour: the entire resolved chain is active.
+export function activeFailoverChain(chain: FailoverHop[], activeCount: number | null | undefined): FailoverHop[] {
+  if (activeCount == null) return chain.slice()
+  return chain.slice(0, Math.max(0, Math.min(chain.length, Math.trunc(activeCount))))
+}
+
 // Pure reorder by one position; bounds-safe (no-op at either edge). Returns a new array.
 export function moveHop(chain: FailoverHop[], key: string, dir: 'up' | 'down'): FailoverHop[] {
   const i = chain.findIndex(h => hopKey(h) === key)

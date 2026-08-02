@@ -26,7 +26,7 @@ import { claimInstance } from './instance-lock.ts'
 // /usr/bin/tmux right there — so its pane scan returns 0 panes forever and the whole fleet reads
 // down. That is the 2026-07-30 outage, twice. See common.ts's anchorCwd.
 anchorCwd('daemon')
-import { hopKey, resolveChain, pickNextHop, moveHop } from './failover-chain.ts'
+import { activeFailoverChain, hopKey, resolveChain, pickNextHop, moveHop } from './failover-chain.ts'
 
 // Code fingerprint captured at startup; sent to shims so they can detect and
 // replace a daemon left running stale code after a plugin upgrade.
@@ -61,6 +61,7 @@ import {
   resolveRoleHarness, roleHarnessSummary, roleProviderOptions, harnessModelUpdate, rolePanelLine, type SessionRole,
 } from './role-provider.ts'
 import { GATEWAY_PRESETS } from './gateway-presets.ts'
+import { PROVIDER_CATALOG, projectProviderAccounts, routeForAccountId, type ProviderAccountsView } from './provider-accounts.ts'
 import { findSessionHarness, recordSessionHarness } from './session-harness.ts'
 import {
   initAccounts, listAccounts, accountByName, accountForTranscript, accountForProjectsDir,
@@ -1399,6 +1400,9 @@ function loadHarnessGateways(): Record<string, GatewayDefinition> {
 function gatewayTokenEnvName(name: string): string {
   return `CC_BRIDGE_GATEWAY_${name.toUpperCase().replace(/-/g, '_')}_KEY`
 }
+function gatewayCredentialSlotCollides(name: string, tokenEnv: string, gateways = loadHarnessGateways()): boolean {
+  return Object.entries(gateways).some(([existingName, def]) => existingName !== name && (def.tokenEnv === tokenEnv || gatewayTokenEnvName(existingName) === tokenEnv))
+}
 function gatewayEnvLive(): Record<string, string | undefined> {
   const env: Record<string, string | undefined> = { ...process.env }
   try {
@@ -1411,14 +1415,41 @@ function gatewayEnvLive(): Record<string, string | undefined> {
 }
 // Gateway definitions are stored live in harness-gateways.json; membership in the failover chain and
 // /harness both read it fresh, so add/remove take effect without a restart.
-function saveGatewayDef(name: string, def: GatewayDefinition): void {
-  writeJsonFile(HARNESS_GATEWAYS_FILE, { ...loadHarnessGateways(), [name]: def })
+function writeHarnessGatewaysOrThrow(defs: Record<string, GatewayDefinition>): void {
+  const tmp = `${HARNESS_GATEWAYS_FILE}.tmp-${process.pid}`
+  writeFileSync(tmp, JSON.stringify(defs, null, 2) + '\n', { mode: 0o600 })
+  renameSync(tmp, HARNESS_GATEWAYS_FILE)
 }
-function removeGatewayDef(name: string): void {
+function saveGatewayDef(name: string, def: GatewayDefinition): void {
+  writeHarnessGatewaysOrThrow({ ...loadHarnessGateways(), [name]: def })
+}
+function saveGatewayModelAndSyncRoles(name: string, def: GatewayDefinition): void {
+  saveGatewayDef(name, def)
+  const a = loadAccess()
+  const id = `gateway:${name}`
+  let changed = false
+  if (a.chatProviderAccount === id || (a.chatHarness?.provider === 'gateway' && a.chatHarness.gateway === name)) {
+    a.chatProviderAccount = id; a.chatHarness = { provider: 'gateway', gateway: name, model: def.model, smallModel: def.smallModel }; changed = true
+  }
+  if (a.codeProviderAccount === id || (a.codeHarness?.provider === 'gateway' && a.codeHarness.gateway === name)) {
+    a.codeProviderAccount = id; a.codeHarness = { provider: 'gateway', gateway: name, model: def.model, smallModel: def.smallModel }; changed = true
+  }
+  if (changed) saveAccess(a)
+}
+function removeGatewayDef(name: string): boolean {
   const all = loadHarnessGateways()
-  delete all[name]
-  writeJsonFile(HARNESS_GATEWAYS_FILE, all)
-  writeEnvVars({ [gatewayTokenEnvName(name)]: null })   // scrub the secret alongside the definition
+  const tokenEnv = all[name]?.tokenEnv ?? gatewayTokenEnvName(name)
+  const next = { ...all }
+  delete next[name]
+  try { writeHarnessGatewaysOrThrow(next) }
+  catch (e) { process.stderr.write(`daemon: gateway removal write failed: ${e}\n`); return false }
+  // Only scrub a credential slot when no remaining (possibly hand-authored legacy) gateway shares it.
+  if (!Object.values(next).some(def => def.tokenEnv === tokenEnv) && !writeEnvVars({ [tokenEnv]: null })) {
+    try { writeHarnessGatewaysOrThrow(all) }
+    catch (e) { process.stderr.write(`daemon: gateway removal rollback failed: ${e}\n`) }
+    return false
+  }
+  return true
 }
 // A gateway hop is dispatchable when it's still configured and (unless auth-less) its key is present.
 function gatewayConfiguredAndKeyed(name: string): boolean {
@@ -4243,7 +4274,8 @@ async function gatherTakeoverBrief(pane: string, cwd: string, fromKind: AgentKin
 // caller keeps the normal arm-and-wait behavior) on any miss or error.
 async function attemptLimitFailover(hitAccount: Account, origin: string | null): Promise<{ to: string; crossEngine: boolean; briefDelivered: boolean } | null> {
   try {
-    if (loadAccess().limitFailover !== true) return null
+    const prefs = loadAccess()
+    if (prefs.limitFailover !== true) return null
     // An account is available unless its OWN snapshot is fresh and a window is maxed; null/stale = ok.
     const snapshotOk = (a: Account): boolean => {
       const snap = readUsageSnapshot(undefined, a)
@@ -4252,7 +4284,17 @@ async function attemptLimitFailover(hitAccount: Account, origin: string | null):
     // The user-ordered try-in-order chain (failover-chain.ts): membership is every registered account
     // + Codex (if set up) regardless of login/cap state — that's applied only here, at pick time — so
     // an untouched chain still resolves to today's default order (accounts main-first, Codex last).
-    const chain = resolveChain(loadAccess().failoverChain ?? [], listAccounts().map(a => a.name), codexAvailable(), Object.keys(loadHarnessGateways()))
+    // Role-specific orders fall back to the legacy shared chain/boundary, so existing installs change
+    // behavior only after someone edits Chat or Coding in the provider sheet.
+    const originSid = origin ? await sessionForPane(origin, false).catch(() => null) : null
+    const failRole: SessionRole = originSid && (chatForLaneSession(originSid) || chatIdForDmChatSession(originSid)) ? 'chat' : 'code'
+    const savedChain = failRole === 'chat' ? (prefs.chatFailoverChain ?? prefs.failoverChain ?? []) : (prefs.codeFailoverChain ?? prefs.failoverChain ?? [])
+    const savedActiveCount = failRole === 'chat' ? (prefs.chatFailoverActiveCount ?? prefs.failoverActiveCount) : (prefs.codeFailoverActiveCount ?? prefs.failoverActiveCount)
+    const roleSpecific = failRole === 'chat'
+      ? prefs.chatFailoverChain !== undefined || prefs.chatFailoverActiveCount !== undefined
+      : prefs.codeFailoverChain !== undefined || prefs.codeFailoverActiveCount !== undefined
+    const resolvedChain = resolveChain(savedChain, listAccounts().map(a => a.name), codexAvailable(), Object.keys(loadHarnessGateways()))
+    const chain = activeFailoverChain(roleSpecific ? resolvedChain.filter(hop => hop.kind !== 'codex') : resolvedChain, savedActiveCount)
     const hopAvailable = (h: FailoverHop): boolean => {
       if (h.kind === 'codex') return codexAvailable()
       if (h.kind === 'gateway') return gatewayConfiguredAndKeyed(h.name!)
@@ -4275,22 +4317,36 @@ async function attemptLimitFailover(hitAccount: Account, origin: string | null):
     if (origin && await paneAgentKind(origin) === 'codex') {
       if (!offMcpPanes.has(origin)) return null
       const next = pickNextHop(chain, { kind: 'codex' }, hopAvailable)
-      if (!next || next.kind !== 'claude') return null
-      const target = accountByName(next.account!)
-      if (!target) return null
+      if (!next) return null
       const cwd = await paneCwd(origin).catch(() => null)
       if (!cwd) return null
+      if (next.kind === 'gateway') {
+        const def = loadHarnessGateways()[next.name!]
+        if (!def) return null
+        const brief = await gatherTakeoverBrief(origin, cwd, 'codex', 'claude')
+        const st = { briefDelivered: true }
+        const profile: HarnessProfile = { provider: 'gateway', gateway: next.name!, model: def.model, smallModel: def.smallModel }
+        if (!(await restartPaneSessionCore(origin, null, MAIN_ACCOUNT, 'claude', brief, st, profile))) return null
+        process.stderr.write(`daemon: limit failover: codex → gateway ${next.name} (pane ${origin})\n`)
+        return { to: `gateway ${next.name}`, crossEngine: true, briefDelivered: st.briefDelivered }
+      }
+      if (next.kind !== 'claude') return null
+      const target = accountByName(next.account!)
+      if (!target) return null
       const brief = await gatherTakeoverBrief(origin, cwd, 'codex', 'claude')
       const st = { briefDelivered: true }
       if (!(await restartPaneSessionCore(origin, null, target, 'claude', brief, st))) return null
       process.stderr.write(`daemon: limit failover: codex → claude (${target.name}) (pane ${origin})\n`)
       return { to: target.name, crossEngine: true, briefDelivered: st.briefDelivered }
     }
-    const current: FailoverHop = { kind: 'claude', account: hitAccount.name }
-    const next = pickNextHop(chain, current, hopAvailable)
-    if (!next) return null
     const pane = await findClaudePane()
     if (!pane) return null
+    const paneProfile = await paneHarnessProfile(pane)
+    const current: FailoverHop = paneProfile.provider === 'gateway'
+      ? { kind: 'gateway', name: paneProfile.gateway }
+      : { kind: 'claude', account: hitAccount.name }
+    const next = pickNextHop(chain, current, hopAvailable)
+    if (!next) return null
     if (next.kind === 'gateway') {
       // Gateway hop: same account + transcript, 3rd-party inference. Lossless `--resume` with the
       // gateway harness applied — the Anthropic cap is on the subscription, gateway requests go to
@@ -5499,6 +5555,17 @@ async function handleCall(
         text = `waiting: ${reason}`
         break
       }
+      case 'providers': {
+        const view = await webappReadProviderAccounts()
+        const lines = view.accounts.map(a => {
+          const roles = [view.defaults.chat === a.id ? 'chat' : '', view.defaults.code === a.id ? 'coding' : ''].filter(Boolean)
+          const state = a.active ? 'active' : 'inactive'
+          const models = a.models.length ? a.models.join(', ') : (a.model ?? 'auto')
+          return `${a.id} — ${a.providerLabel} / ${a.label} · ${a.authLabel} · ${state}${roles.length ? ` · default: ${roles.join('+')}` : ''}\n  models: ${models}`
+        })
+        text = `Auto orchestration: ${view.auto ? 'on' : 'off'}; active failover: ${view.activeCount}/${view.accounts.length}\n${lines.join('\n')}\n\nExplicit launch: tg spawn <name> --account <id> --model <model> --why "why this provider/model fits"`
+        break
+      }
       case 'roster': {
         const rows: string[] = []
         // `tg roster --all` includes hidden endpoints (marked). There IS an escape hatch, on purpose: a
@@ -5881,18 +5948,31 @@ async function handleCall(
         const fromSid = pane ? await sessionForPane(pane) : null
         if (!fromSid) { write({ t: 'result', id, ok: false, text: '`tg spawn` must run inside a bridged session' }); return }
         const topicName = String(args.name ?? '').trim()
-        if (!topicName) { write({ t: 'result', id, ok: false, text: 'usage: tg spawn <name> [--dir p [--create]] [--model fable|opus|sonnet|haiku] [--why "one line"] [--effort low…max] ["first message"]' }); return }
+        if (!topicName) { write({ t: 'result', id, ok: false, text: 'usage: tg spawn <name> [--dir p [--create]] [--account provider-account-id] [--model model] [--why "one line"] [--effort low…max] ["first message"]' }); return }
         // A dash-leading name is a mistyped flag (`tg spawn --help` really did spawn a "--help"
         // session, folder and all). tgctl rejects it too; this is the daemon-side backstop.
         if (topicName.startsWith('-')) { write({ t: 'result', id, ok: false, text: `'${topicName}' is not a session name (it starts with a dash) — try 'tg spawn --help'` }); return }
+        const providerAccount = String(args.account ?? '').trim()
+        const providerRoute = providerAccount ? routeForAccountId(providerAccount, loadHarnessGateways()) : null
+        if (providerAccount && !providerRoute) {
+          write({ t: 'result', id, ok: false, text: `unknown provider account '${providerAccount}' — use the account id shown in Settings → Accounts` }); return
+        }
         const explicitModel = args.model ? String(args.model).trim().toLowerCase() : null
-        if (explicitModel && !MODEL_ALIASES.includes(explicitModel)) { write({ t: 'result', id, ok: false, text: `unknown model '${explicitModel}' — one of: ${MODEL_ALIASES.join(' | ')}` }); return }
-        // Who chooses. No explicit --model falls back to the persisted /settings 🧑‍💻 coding-session defaults
-        // model (validated — a stale/bad pref is ignored silently rather than failing the spawn); an
-        // explicit one from an AGENT is a request only for the GATED models (spawn-model-policy.ts) —
-        // today that is Fable alone, and every other alias an agent names is its own call.
+        const providerModel = providerRoute?.harness && explicitModel ? explicitModel : null
+        if (providerModel && !/^[A-Za-z0-9._:/+-]+(?:\[1m\])?$/.test(providerModel)) {
+          write({ t: 'result', id, ok: false, text: `invalid model id '${providerModel}'` }); return
+        }
+        if (providerModel && providerRoute?.harness) {
+          const discovered = await discoverGatewayModels(providerRoute.harness)
+          if (discovered?.length && !discovered.map(x => x.replace(/\[1m\]$/, '').toLowerCase()).includes(providerModel.replace(/\[1m\]$/, ''))) {
+            write({ t: 'result', id, ok: false, text: `${providerModel} is not available on ${providerAccount}` }); return
+          }
+        }
+        if (explicitModel && !providerRoute?.harness && !MODEL_ALIASES.includes(explicitModel)) { write({ t: 'result', id, ok: false, text: `unknown model '${explicitModel}' — one of: ${MODEL_ALIASES.join(' | ')}` }); return }
+        // Who chooses. Provider accounts own their own model catalog; native Claude aliases retain the
+        // spend gate below. An explicit account/model pair is still recorded on every launch surface.
         const modelChoice = decideModel({
-          requested: explicitModel, configuredDefault: configuredSpawnModel(),
+          requested: providerRoute?.harness ? null : explicitModel, configuredDefault: configuredSpawnModel(),
           ...modelPolicyPrefs(), humanOrigin: false, now: Date.now(),
         })
         const explicitEffort = args.effort ? String(args.effort).trim().toLowerCase().replace(/^med$/, 'medium') : null
@@ -5926,7 +6006,7 @@ async function handleCall(
         // spawns — failing the work over a missing annotation would cost the task, not the judgment —
         // but under `auto` the confirmation then says the choice was a fallback, which is the point.
         const why = String(args.why ?? '').replace(/\s+/g, ' ').trim().slice(0, 120)
-        const spec: SpawnSpec = { fromSid, topicName, dir, effort, firstMsg: String(args.text ?? '').trim(), headless, why, autoEffort: effortChoice.autoFallback }
+        const spec: SpawnSpec = { fromSid, topicName, dir, effort, firstMsg: String(args.text ?? '').trim(), headless, why, autoEffort: effortChoice.autoFallback, ...(providerAccount ? { providerAccount } : {}), ...(providerModel ? { providerModel } : {}) }
         // THE GATE. A gated model does not spawn and then ask — nothing starts until the owner taps.
         // The card used to be minted AFTER the session was already running on the default, which made
         // it decorative: it read as control while providing none, and the only thing a tap could still
@@ -6958,7 +7038,7 @@ function clampedClause(d: ModelDecision): string {
 // Everything a VALIDATED spawn needs, minus the model — which is the one thing a gated spawn is still
 // waiting to learn. Split out of the `tg spawn` case so the same launch runs whether the caller's
 // socket is still open (the ordinary path) or the owner taps a card twenty minutes later.
-type SpawnSpec = { fromSid: string; topicName: string; dir: string; effort: string | null; firstMsg: string; headless: boolean; why?: string; autoEffort?: boolean }
+type SpawnSpec = { fromSid: string; topicName: string; dir: string; effort: string | null; firstMsg: string; headless: boolean; why?: string; autoEffort?: boolean; providerAccount?: string; providerModel?: string }
 
 // The one line the owner reads next to the dials on the spawn confirmation. Two things can put text
 // here and they COMPOSE rather than replace: the caller's own --why, and — under `auto` — whichever
@@ -6977,10 +7057,17 @@ function spawnReason(spec: SpawnSpec, modelFellBack: boolean, effortFellBack: bo
 // there is no caller left to write to.
 async function launchSpawn(spec: SpawnSpec, model: string | null, clampedNote: string, reason: string | null = null): Promise<{ ok: boolean; text: string }> {
   const { fromSid, topicName, dir, effort, firstMsg, headless } = spec
+  const defaultRoute = roleLaunchRoute('code')
+  const explicit = spec.providerAccount ? routeForAccountId(spec.providerAccount, loadHarnessGateways()) : null
+  const launchAccount = explicit?.account ? accountByName(explicit.account) : defaultRoute.account
+  const launchHarness = explicit?.harness
+    ? { ...explicit.harness, ...(spec.providerModel ? { model: spec.providerModel } : {}) }
+    : (explicit?.account ? undefined : defaultRoute.harness)
+  if (!launchAccount || (spec.providerAccount && !explicit)) return { ok: false, text: `provider account '${spec.providerAccount}' is unavailable` }
   // What this spawn will actually RUN on, for the card, the ledger and the ok-line. A non-native
   // coding role harness owns the model — the resolved alias never reached the CLI (resumeCliModel
   // drops it), so naming the alias would card "Opus" while DeepSeek serves the turn.
-  const shownModel = launchDisplayModel(model, codingSpawnHarness())
+  const shownModel = launchDisplayModel(model, launchHarness)
   const group = headless ? null : getGroupChatId()!
   let threadId: number | null = null
   if (group) {
@@ -7004,7 +7091,7 @@ async function launchSpawn(spec: SpawnSpec, model: string | null, clampedNote: s
   // prompt has nowhere to relay — the session just wedges on the dialog until the ask expires
   // (the 49-minute "busy" general). Bound spawns keep the inherited mode; their prompts relay
   // as tappable cards in the topic.
-  const newPane = await spawnSession(dir, '', sid, MAIN_ACCOUNT, 'claude', codingSpawnHarness(), { model, effort, ...(headless ? { mode: 'bypassPermissions' as CcMode } : {}) })
+  const newPane = await spawnSession(dir, '', sid, launchAccount, 'claude', launchHarness, { model, effort, ...(headless ? { mode: 'bypassPermissions' as CcMode } : {}) })
   if (!newPane) {
     removeTopic(sid)
     if (group && threadId != null) void channel.threads!.remove(group, String(threadId)).catch(() => {})
@@ -7844,7 +7931,8 @@ async function launchAgentSession(ctx: Context, kind: AgentKind, paneId: string 
   }
   const dir = (paneId ? await paneCwd(paneId).catch(() => null) : null) ?? lastSessionCwd() ?? homedir()
   const sid = isTopicMode() || lanesHere ? genSessionId() : undefined
-  const ok = await spawnSession(dir, '', sid, MAIN_ACCOUNT, kind, codingSpawnHarness())
+  const codeRoute = roleLaunchRoute('code')
+  const ok = await spawnSession(dir, '', sid, kind === 'claude' ? codeRoute.account : MAIN_ACCOUNT, kind, kind === 'claude' ? codeRoute.harness : undefined)
   // Bind the freshly spawned pane to the sender's lane now — registerSpawnedPane (inside
   // spawnSession) no-ops under dmLanesOn() (each lane pane is bound explicitly, never by focus
   // adoption), so without this the pane would sit unbound until a lucky reactive adopt on the
@@ -9869,13 +9957,13 @@ function toggleMcp(): void {
 // instead of clobbering the whole config (this once reduced .env to a single line — the
 // 2026-06-11 token outage). The write is atomic (temp + rename) so a crash mid-write can't
 // leave a truncated file either.
-function writeEnvVars(updates: Record<string, string | null>): void {
+function writeEnvVars(updates: Record<string, string | null>): boolean {
   let lines: string[] = []
   try { lines = readFileSync(ENV_FILE, 'utf8').split('\n') }
   catch (e) {
     if (existsSync(ENV_FILE)) {
       process.stderr.write(`daemon: env write ABORTED — .env exists but is unreadable, refusing to clobber it: ${e}\n`)
-      return
+      return false
     }
   }
   const keys = new Set(Object.keys(updates))
@@ -9885,7 +9973,8 @@ function writeEnvVars(updates: Record<string, string | null>): void {
     const tmp = `${ENV_FILE}.tmp-${process.pid}`
     writeFileSync(tmp, kept.join('\n') + '\n', { mode: 0o600 })
     renameSync(tmp, ENV_FILE)
-  } catch (e) { process.stderr.write(`daemon: env write failed: ${e}\n`) }
+    return true
+  } catch (e) { process.stderr.write(`daemon: env write failed: ${e}\n`); return false }
 }
 function envHas(key: string): boolean {
   try { return new RegExp(`^${key}=\\S`, 'm').test(readFileSync(ENV_FILE, 'utf8')) } catch { return false }
@@ -10758,17 +10847,48 @@ function codingSpawnHarness(): HarnessProfile | undefined {
   return h.provider === 'anthropic' ? undefined : h
 }
 
+type RoleLaunchRoute = { account: Account; harness: HarnessProfile | undefined; id: string }
+function roleLaunchRoute(role: SessionRole, fallback: Account = MAIN_ACCOUNT): RoleLaunchRoute {
+  const prefs = loadAccess()
+  const id = role === 'chat' ? prefs.chatProviderAccount : prefs.codeProviderAccount
+  const route = id ? routeForAccountId(id, loadHarnessGateways()) : null
+  if (route?.account) {
+    const account = accountByName(route.account)
+    if (account) return { account, harness: undefined, id: `claude:${account.name}` }
+  }
+  if (route?.harness) return { account: fallback, harness: route.harness, id: id! }
+  return {
+    account: fallback,
+    harness: role === 'chat' ? chatSpawnHarness() : codingSpawnHarness(),
+    id: `claude:${fallback.name}`,
+  }
+}
+
 // The role harness behind a picker row (Accounts panel), non-native only — the ✏️ model button
 // refuses a native role, so callers can trust this is a provider with a model.
 function roleHarnessOf(role: SessionRole): HarnessProfile {
   return resolveRoleHarness(role === 'chat' ? loadAccess().chatHarness : loadAccess().codeHarness)
 }
 function setRoleHarness(role: SessionRole, profile: HarnessProfile): void {
-  const a = loadAccess()
+  let a = loadAccess()
+  let canonical = profile
+  if (profile.provider === 'gateway') {
+    const def = loadHarnessGateways()[profile.gateway]
+    if (def) {
+      const updated = { ...def, model: profile.model, smallModel: profile.smallModel }
+      saveGatewayModelAndSyncRoles(profile.gateway, updated)
+      a = loadAccess()
+      canonical = { provider: 'gateway', gateway: profile.gateway, model: updated.model, smallModel: updated.smallModel }
+    }
+    if (role === 'chat') a.chatProviderAccount = `gateway:${profile.gateway}`
+    else a.codeProviderAccount = `gateway:${profile.gateway}`
+  } else {
+    if (role === 'chat') delete a.chatProviderAccount; else delete a.codeProviderAccount
+  }
   // Native is the absence of a role — storing {provider:'anthropic'} would just be noise.
-  if (profile.provider === 'anthropic') { if (role === 'chat') delete a.chatHarness; else delete a.codeHarness }
-  else if (role === 'chat') a.chatHarness = profile
-  else a.codeHarness = profile
+  if (canonical.provider === 'anthropic') { if (role === 'chat') delete a.chatHarness; else delete a.codeHarness }
+  else if (role === 'chat') a.chatHarness = canonical
+  else a.codeHarness = canonical
   saveAccess(a)
 }
 
@@ -12097,13 +12217,18 @@ bot.on('callback_query:data', async ctx => {
       if (sent) replyTargets.set(refKey(sent), { kind: 'gwkey', name })
       return
     }
-    // 🗑 remove: drop the definition + its secret, and any saved chain slot referencing it.
-    removeGatewayDef(name)
+    // 🗑 remove: drop the definition + its secret, and any saved chain/default slot referencing it.
+    if (!removeGatewayDef(name)) { await ctx.answerCallbackQuery({ text: 'Could not securely remove that provider.' }).catch(() => {}); return }
     const a = loadAccess()
-    if (a.failoverChain?.some(h => h.kind === 'gateway' && h.name === name)) {
-      a.failoverChain = a.failoverChain.filter(h => !(h.kind === 'gateway' && h.name === name))
-      saveAccess(a)
-    }
+    const without = (saved: FailoverHop[] | undefined) => (saved ?? []).filter(h => !(h.kind === 'gateway' && h.name === name))
+    a.failoverChain = without(a.failoverChain)
+    a.chatFailoverChain = without(a.chatFailoverChain)
+    a.codeFailoverChain = without(a.codeFailoverChain)
+    if (a.chatProviderAccount === `gateway:${name}`) delete a.chatProviderAccount
+    if (a.codeProviderAccount === `gateway:${name}`) delete a.codeProviderAccount
+    if (a.chatHarness?.provider === 'gateway' && a.chatHarness.gateway === name) delete a.chatHarness
+    if (a.codeHarness?.provider === 'gateway' && a.codeHarness.gateway === name) delete a.codeHarness
+    saveAccess(a)
     await ctx.answerCallbackQuery({ text: `Removed gateway ${name}` }).catch(() => {})
     await showHtmlPanel(ctx, 'edit', await accountsPanelText(), accountsPanelKeyboard())
     return
@@ -12733,7 +12858,8 @@ bot.on('callback_query:data', async ctx => {
     const dir = lastSessionCwd()
     if (!dir) { await ctx.answerCallbackQuery({ text: 'That folder is gone — use ✏️ Specify folder.' }).catch(() => {}); return }
     await ctx.answerCallbackQuery({ text: 'Starting…' }).catch(() => {})
-    const ok = await spawnSession(dir, '', isTopicMode() ? genSessionId() : undefined, MAIN_ACCOUNT, 'claude', codingSpawnHarness())
+    const codeRoute = roleLaunchRoute('code')
+    const ok = await spawnSession(dir, '', isTopicMode() ? genSessionId() : undefined, codeRoute.account, 'claude', codeRoute.harness)
     await ctx.editMessageText(ok
       ? `🚀 Starting a session in <code>${escapeHtml(dir)}</code> — message it here once it's up.`
       : `❌ Couldn't start a session in <code>${escapeHtml(dir)}</code>.`, { parse_mode: 'HTML' }).catch(() => {})
@@ -12763,7 +12889,8 @@ bot.on('callback_query:data', async ctx => {
     const sid = genSessionId()
     setGeneralSession(sid, dir)
     if (!getBaseCwd()) setBaseCwd(dir)
-    const ok = await spawnSession(dir, '', sid, MAIN_ACCOUNT, 'claude', codingSpawnHarness())
+    const codeRoute = roleLaunchRoute('code')
+    const ok = await spawnSession(dir, '', sid, codeRoute.account, 'claude', codeRoute.harness)
     if (!ok) setGeneralSession(null)
     await ctx.editMessageText(ok
       ? `🚀 Starting the base session in <code>${escapeHtml(dir)}</code> — it lives here in General.`
@@ -14574,7 +14701,8 @@ async function ensureHeadlessGeneral(): Promise<void> {
     setTopic(sid, { headless: true, cwd: dir, name: 'general', closed: false, createdAt: Date.now() })
     // Bypass, always: general is headless — no surface to relay a permission prompt to, so any
     // approval dialog would wedge it silently until the asking agent's timeout.
-    const pane = await spawnSession(dir, '', sid, MAIN_ACCOUNT, 'claude', codingSpawnHarness(), { mode: 'bypassPermissions' })
+    const codeRoute = roleLaunchRoute('code')
+    const pane = await spawnSession(dir, '', sid, codeRoute.account, 'claude', codeRoute.harness, { mode: 'bypassPermissions' })
     if (!pane) {
       removeTopic(sid)
       process.stderr.write(`daemon: headless general spawn failed in ${dir} — see daemon log\n`)
@@ -14611,7 +14739,8 @@ async function ensureChatLane(ctx: Context, chatId: string, first: InboundParams
       if (notice) await channel.editText({ chatId: String(notice.chat.id), messageId: String(notice.message_id) }, text, buttons ? { buttons } : undefined).catch(() => {})
       else await ctx.reply(text, { parse_mode: 'HTML', ...(buttons ? { reply_markup: buttonsToKb(buttons) } : {}) }).catch(() => {})
     }
-    const pane = await spawnSession(dir, extra, sid, account, 'claude', chatSpawnHarness())
+    const chatRoute = roleLaunchRoute('chat', account)
+    const pane = await spawnSession(dir, extra, sid, chatRoute.account, 'claude', chatRoute.harness)
     if (!pane) {
       drain(bufferEvent)   // keep the messages — they replay when a session next appears
       await edit(`❌ Couldn't ${revive ? 'revive' : 'start'} your chat in <code>${escapeHtml(dir)}</code> — your message is buffered.`)
@@ -15151,6 +15280,10 @@ bot.on('message:text', async ctx => {
         case 'gwspec': {
           const [rawName, baseUrl, model, rawAuth] = text.trim().split(/\s+/)
           const name = (rawName || '').toLowerCase()
+          if (loadHarnessGateways()[name]) {
+            await ctx.reply('❌ A provider account with that name already exists. Use re-key or choose another name.')
+            return
+          }
           const auth = rawAuth === 'bearer' ? 'bearer' : rawAuth === 'none' ? 'none' : 'x-api-key'
           const tokenEnv = gatewayTokenEnvName(name)
           const parsed = parseGatewayDefinitions({
@@ -15163,6 +15296,10 @@ bot.on('message:text', async ctx => {
               `and baseUrl must be https (or loopback http). Try again.`,
               { parse_mode: 'HTML', reply_markup: { force_reply: true, input_field_placeholder: 'name baseUrl model' } }).catch(() => null)
             if (again) replyTargets.set(`${ctx.chat?.id}:${again.message_id}`, target)
+            return
+          }
+          if (auth !== 'none' && gatewayCredentialSlotCollides(name, tokenEnv)) {
+            await ctx.reply('❌ That provider name collides with an existing credential slot. Choose a distinct name.')
             return
           }
           if (auth === 'none') {
@@ -15186,8 +15323,27 @@ bot.on('message:text', async ctx => {
             await ctx.reply('⚠️ That gateway setup expired — start again from 👤 Accounts.')
             return
           }
-          writeEnvVars({ [def.tokenEnv]: text.trim() })
-          saveGatewayDef(target.name, def)
+          if (gatewayCredentialSlotCollides(target.name, def.tokenEnv)) {
+            pendingGateways.delete(target.name)
+            await ctx.deleteMessage().catch(() => {})
+            await ctx.reply('❌ That provider name now collides with another credential slot. Nothing was saved.')
+            return
+          }
+          const apiKey = text.trim()
+          if (/\s|\0/.test(apiKey)) {
+            await ctx.reply('❌ API keys cannot contain whitespace or line breaks. Start provider setup again.')
+            pendingGateways.delete(target.name)
+            await ctx.deleteMessage().catch(() => {})
+            return
+          }
+          if (!writeEnvVars({ [def.tokenEnv]: apiKey })) {
+            pendingGateways.delete(target.name)
+            await ctx.deleteMessage().catch(() => {})
+            await ctx.reply('❌ Could not securely save that provider credential. Nothing was activated.')
+            return
+          }
+          try { saveGatewayDef(target.name, def) }
+          catch { writeEnvVars({ [def.tokenEnv]: null }); pendingGateways.delete(target.name); await ctx.deleteMessage().catch(() => {}); await ctx.reply('❌ Could not save that provider account. Nothing was activated.'); return }
           pendingGateways.delete(target.name)
           await ctx.deleteMessage().catch(() => {})   // scrub the secret from the chat
           const ok = await gatewayProviderReady({ provider: 'gateway', gateway: target.name, model: def.model, smallModel: def.smallModel })
@@ -15215,7 +15371,7 @@ bot.on('message:text', async ctx => {
             if (again) replyTargets.set(`${ctx.chat?.id}:${again.message_id}`, target)
             return
           }
-          saveGatewayDef(target.name, def)
+          saveGatewayModelAndSyncRoles(target.name, def)
           await ctx.reply(`✅ <b>${escapeHtml(target.name)}</b> model → <code>${escapeHtml(def.model)}</code>.`, { parse_mode: 'HTML' })
           return
         }
@@ -16312,6 +16468,121 @@ const resolveStartToken = (tok: string): { cwd: string; sid?: string } | null =>
 // a rich Telegram sub-panel (accounts, GitHub, TTS engine, preferred mode, base folder) show live
 // state read-only, and mode/model/effort drive the tmux pane (async/slower) so they're read-only
 // here too.
+function legacyRoleAccountId(role: SessionRole): string {
+  const prefs = loadAccess()
+  const explicit = role === 'chat' ? prefs.chatProviderAccount : prefs.codeProviderAccount
+  if (explicit) {
+    const route = routeForAccountId(explicit, loadHarnessGateways())
+    if (route && (!route.account || accountByName(route.account))) return explicit
+  }
+  const harness = resolveRoleHarness(role === 'chat' ? prefs.chatHarness : prefs.codeHarness)
+  return harness.provider === 'gateway' ? `gateway:${harness.gateway}` : 'claude:main'
+}
+async function webappReadProviderAccounts(role: SessionRole = 'code'): Promise<ProviderAccountsView> {
+  const prefs = loadAccess()
+  const gateways = loadHarnessGateways()
+  const savedChain = role === 'chat' ? (prefs.chatFailoverChain ?? prefs.failoverChain ?? []) : (prefs.codeFailoverChain ?? prefs.failoverChain ?? [])
+  const savedActiveCount = role === 'chat' ? (prefs.chatFailoverActiveCount ?? prefs.failoverActiveCount) : (prefs.codeFailoverActiveCount ?? prefs.failoverActiveCount)
+  const chain = resolveChain(savedChain, listAccounts().map(a => a.name), codexAvailable(), Object.keys(gateways)).filter(hop => hop.kind !== 'codex')
+  const discovered = await Promise.all(Object.entries(gateways).map(async ([name, def]) => {
+    const profile = { provider: 'gateway' as const, gateway: name, model: def.model, smallModel: def.smallModel }
+    return [name, await discoverGatewayModels(profile)] as const
+  }))
+  return projectProviderAccounts({
+    claudeAccounts: listAccounts().map(account => ({ name: account.name, ready: accountLoggedIn(account) })),
+    gateways, gatewayReady: Object.fromEntries(Object.keys(gateways).map(name => [name, gatewayConfiguredAndKeyed(name)])),
+    chain, activeCount: savedActiveCount, chatDefault: legacyRoleAccountId('chat'), codeDefault: legacyRoleAccountId('code'),
+    models: Object.fromEntries(discovered), auto: prefs.limitFailover === true,
+  })
+}
+async function webappProviderAccountAction(_userId: string, action: Record<string, unknown>): Promise<{ error: string } | Record<string, unknown>> {
+  const kind = String(action.action ?? '')
+  const prefs = loadAccess()
+  const gateways = loadHarnessGateways()
+  const chainRole: SessionRole = action.role === 'chat' ? 'chat' : 'code'
+  const roleChain = chainRole === 'chat' ? (prefs.chatFailoverChain ?? prefs.failoverChain ?? []) : (prefs.codeFailoverChain ?? prefs.failoverChain ?? [])
+  const chain = resolveChain(roleChain, listAccounts().map(a => a.name), codexAvailable(), Object.keys(gateways)).filter(hop => hop.kind !== 'codex')
+  if (kind === 'move') {
+    const id = String(action.id ?? '')
+    const dir = action.dir === 'up' ? 'up' : action.dir === 'down' ? 'down' : null
+    if (!dir || !chain.some(h => hopKey(h) === id)) return { error: 'bad account or direction' }
+    const moved = moveHop(chain, id, dir)
+    if (chainRole === 'chat') prefs.chatFailoverChain = moved; else prefs.codeFailoverChain = moved
+    saveAccess(prefs); return { ok: true }
+  }
+  if (kind === 'active-count') {
+    const count = Number(action.count)
+    if (!Number.isInteger(count) || count < 0 || count > chain.length) return { error: 'bad active count' }
+    if (chainRole === 'chat') prefs.chatFailoverActiveCount = count; else prefs.codeFailoverActiveCount = count
+    saveAccess(prefs); return { ok: true }
+  }
+  if (kind === 'auto') {
+    prefs.limitFailover = action.value === true; saveAccess(prefs); return { ok: true }
+  }
+  if (kind === 'default') {
+    const role = action.role === 'chat' ? 'chat' : action.role === 'code' ? 'code' : null
+    const id = String(action.id ?? '')
+    const route = routeForAccountId(id, gateways)
+    if (!role || !route || (route.account && !accountByName(route.account))) return { error: 'bad role or account' }
+    if (role === 'chat') prefs.chatProviderAccount = id; else prefs.codeProviderAccount = id
+    if (route.harness) { if (role === 'chat') prefs.chatHarness = route.harness; else prefs.codeHarness = route.harness }
+    else { if (role === 'chat') delete prefs.chatHarness; else delete prefs.codeHarness }
+    saveAccess(prefs); return { ok: true }
+  }
+  if (kind === 'model') {
+    const id = String(action.id ?? '')
+    const model = String(action.model ?? '').trim()
+    const name = id.startsWith('gateway:') ? id.slice(8) : ''
+    const def = gateways[name]
+    if (!def || !/^[A-Za-z0-9._:/+-]+(?:\[1m\])?$/.test(model)) return { error: 'bad account or model' }
+    const profile = { provider: 'gateway' as const, gateway: name, model: def.model, smallModel: def.smallModel }
+    const models = await discoverGatewayModels(profile, true)
+    if (models?.length && !models.map(x => x.replace(/\[1m\]$/, '')).includes(model.replace(/\[1m\]$/, ''))) return { error: 'model is not available from this provider' }
+    const updated = { ...def, model }
+    saveGatewayModelAndSyncRoles(name, updated)
+    return { ok: true }
+  }
+  if (kind === 'add-api') {
+    const provider = String(action.provider ?? '')
+    if (!PROVIDER_CATALOG.some(p => p.id === provider) || provider === 'claude') return { error: 'bad provider' }
+    const name = String(action.name ?? provider).trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-').slice(0, 32)
+    if (!name || gateways[name]) return { error: gateways[name] ? 'that account name already exists' : 'bad account name' }
+    const catalog = PROVIDER_CATALOG.find(p => p.id === provider)!
+    const baseUrl = String(action.baseUrl ?? catalog.baseUrl ?? '').trim()
+    const model = String(action.model ?? catalog.defaultModel ?? '').trim()
+    const apiKey = String(action.apiKey ?? '').trim()
+    if (!baseUrl || !model || !apiKey) return { error: 'base URL, model, and API key are required' }
+    if (/\s|\0/.test(apiKey)) return { error: 'API key cannot contain whitespace or line breaks' }
+    const tokenEnv = gatewayTokenEnvName(name)
+    if (gatewayCredentialSlotCollides(name, tokenEnv, gateways)) return { error: 'that account name collides with an existing credential slot' }
+    const candidate = parseGatewayDefinitions({ [name]: { baseUrl, auth: 'bearer', tokenEnv, model, smallModel: String(action.smallModel ?? model).trim() || model, provider, authMethod: 'api-key', label: String(action.label ?? name).trim() || name } })[name]
+    if (!candidate) return { error: 'invalid endpoint, model, or account name' }
+    if (!writeEnvVars({ [tokenEnv]: apiKey })) return { error: 'could not save the provider credential' }
+    try { saveGatewayDef(name, candidate) }
+    catch { writeEnvVars({ [tokenEnv]: null }); return { error: 'could not save the provider account' } }
+    return { ok: true, id: `gateway:${name}` }
+  }
+  if (kind === 'remove') {
+    const id = String(action.id ?? '')
+    const name = id.startsWith('gateway:') ? id.slice(8) : ''
+    if (!gateways[name] || name === 'local-codex') return { error: name === 'local-codex' ? 'the primary OpenAI OAuth account cannot be removed here' : 'unknown provider account' }
+    if (!removeGatewayDef(name)) return { error: 'could not securely remove the provider account' }
+    const without = (saved: FailoverHop[] | undefined) => (saved ?? []).filter(h => hopKey(h) !== id)
+    prefs.failoverChain = without(prefs.failoverChain)
+    prefs.chatFailoverChain = without(prefs.chatFailoverChain)
+    prefs.codeFailoverChain = without(prefs.codeFailoverChain)
+    if (prefs.chatProviderAccount === id) delete prefs.chatProviderAccount
+    if (prefs.codeProviderAccount === id) delete prefs.codeProviderAccount
+    if (prefs.chatHarness?.provider === 'gateway' && prefs.chatHarness.gateway === name) delete prefs.chatHarness
+    if (prefs.codeHarness?.provider === 'gateway' && prefs.codeHarness.gateway === name) delete prefs.codeHarness
+    prefs.failoverActiveCount = Math.min(prefs.failoverActiveCount ?? prefs.failoverChain.length, prefs.failoverChain.length)
+    prefs.chatFailoverActiveCount = Math.min(prefs.chatFailoverActiveCount ?? prefs.chatFailoverChain.length, prefs.chatFailoverChain.length)
+    prefs.codeFailoverActiveCount = Math.min(prefs.codeFailoverActiveCount ?? prefs.codeFailoverChain.length, prefs.codeFailoverChain.length)
+    saveAccess(prefs); return { ok: true }
+  }
+  return { error: 'unknown provider account action' }
+}
+
 async function webappReadSettings(): Promise<WebappSettingsView> {
   void refreshGh()   // warm the 🐙 summary for the next render, like the /settings command does
   const a = loadAccess()
@@ -16946,13 +17217,22 @@ async function webappSessionAction(userId: string, sid: string, action: 'stop' |
 // forum group is bound) skips the topic entirely: the registry row is the whole session and the
 // mini-app is its only surface.
 async function webappSessionSpawn(
-  userId: string, name: string, opts: { model?: string; effort?: string; mode?: string; headless?: boolean },
+  userId: string, name: string, opts: { account?: string; model?: string; effort?: string; mode?: string; headless?: boolean },
 ): Promise<{ error: string } | { sid: string; name: string }> {
   const headless = opts.headless === true || !isTopicMode()
   const topicName = name.trim().slice(0, 60)
   if (!topicName) return { error: 'name required' }
-  const asked = opts.model ? String(opts.model).toLowerCase() : null
-  if (asked && !MODEL_ALIASES.includes(asked)) return { error: `unknown model '${asked}'` }
+  const defaultRoute = roleLaunchRoute('code')
+  const explicitRoute = opts.account ? routeForAccountId(opts.account, loadHarnessGateways()) : null
+  if (opts.account && !explicitRoute) return { error: 'unknown provider account' }
+  const account = explicitRoute?.account ? accountByName(explicitRoute.account) : defaultRoute.account
+  if (!account) return { error: 'provider account is unavailable' }
+  const asked = opts.model ? String(opts.model).trim().toLowerCase() : null
+  if (asked && explicitRoute?.harness && !/^[A-Za-z0-9._:/+-]+(?:\[1m\])?$/.test(asked)) return { error: `invalid model '${asked}'` }
+  if (asked && !explicitRoute?.harness && !MODEL_ALIASES.includes(asked)) return { error: `unknown model '${asked}'` }
+  const harness = explicitRoute?.harness
+    ? { ...explicitRoute.harness, ...(asked ? { model: asked } : {}) }
+    : (explicitRoute?.account ? undefined : defaultRoute.harness)
   const askedEffort = opts.effort ? String(opts.effort).toLowerCase() : null
   if (askedEffort && !EFFORT_LEVELS.includes(askedEffort)) return { error: `unknown effort '${askedEffort}'` }
   // No explicit dial = the sheet's "default" chip, and it resolves HERE, at spawn time, from the
@@ -16969,7 +17249,7 @@ async function webappSessionSpawn(
   // Same truth rule as the bus spawn card: a non-native coding harness owns the model at the CLI, so
   // the ledger names the harness's model, not the chip the sheet resolved (which may have never
   // reached the CLI). This is the mini-app twin of launchSpawn's shownModel.
-  const shownModel = launchDisplayModel(model, codingSpawnHarness())
+  const shownModel = launchDisplayModel(model, harness)
   const effort = askedEffort ?? configuredSpawnEffort()
   const askedMode = opts.mode ? String(opts.mode) : null
   if (askedMode && !['default', 'acceptEdits', 'plan', 'bypassPermissions'].includes(askedMode)) return { error: `unknown mode '${askedMode}'` }
@@ -16979,7 +17259,7 @@ async function webappSessionSpawn(
   // focused pane). The configured value is Claude Code's own `permissions.defaultMode` for this
   // account — what the chat panel's 🧷 Preferred mode writes and what the webapp Settings tab
   // reports read-only — so "Default" in the sheet follows the same entity both surfaces already name.
-  const configuredMode = readDefaultMode(MAIN_ACCOUNT.configDir)
+  const configuredMode = readDefaultMode(account.configDir)
   const mode = askedMode ?? ((MODES as readonly string[]).includes(configuredMode) ? configuredMode : 'default')
   // Whether the USER named this mode, which is not the same question as which mode it is. spawnSession
   // omits `--permission-mode` for 'default' on the premise that default IS the CLI's normal mode — true
@@ -16996,7 +17276,7 @@ async function webappSessionSpawn(
     setTopic(sid, { headless: true, cwd: dir, name: topicName, closed: false, createdAt: Date.now() })
     try { topicBranchCache.set(sid, (await exec('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 2000 })).stdout.trim()) }
     catch { topicBranchCache.set(sid, '') }
-    const pane = await spawnSession(dir, '', sid, MAIN_ACCOUNT, 'claude', codingSpawnHarness(),
+    const pane = await spawnSession(dir, '', sid, account, 'claude', harness,
       { model, effort: effort === 'auto' ? null : effort, mode: mode as CcMode, modeExplicit })
     if (!pane) { removeTopic(sid); return { error: `spawn failed in ${dir} — see daemon log` } }
     appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'spawn', from: 'owner', to: topicName, text: `${dir} headless${shownModel ? ` model=${shownModel}` : ''}${effort ? ` effort=${effort}` : ''}${mode ? ` mode=${mode}` : ''}` })
@@ -17010,7 +17290,7 @@ async function webappSessionSpawn(
   setTopic(sid, { threadId, cwd: dir, name: topicName, closed: false, createdAt: Date.now() })
   try { topicBranchCache.set(sid, (await exec('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 2000 })).stdout.trim()) }
   catch { topicBranchCache.set(sid, '') }
-  const pane = await spawnSession(dir, '', sid, MAIN_ACCOUNT, 'claude', codingSpawnHarness(),
+  const pane = await spawnSession(dir, '', sid, account, 'claude', harness,
     { model, effort: effort === 'auto' ? null : effort, mode: mode as CcMode, modeExplicit })
   if (!pane) {
     removeTopic(sid)
@@ -17151,6 +17431,7 @@ async function startFilesWebapp(): Promise<void> {
       fileBrowser: () => loadAccess().fileBrowser !== false,   // live pref (settings → 🗂) — omits the Files tab + 403s the file API when off
       protectedRoots: [STATE_DIR],   // fence writes out of a relocated state dir too (~/.claude is fenced by default)
       readSettings: webappReadSettings, setSetting: webappSetSetting,
+      readProviderAccounts: webappReadProviderAccounts, providerAccountAction: webappProviderAccountAction,
       listSessions: webappListSessions, readSessionFeed: webappSessionFeed, readSessionMessage: webappSessionMessage, sessionAction: webappSessionAction,
       sessionAttach: webappSessionAttach, sessionSpawn: webappSessionSpawn,
       readUsage: webappReadUsage,

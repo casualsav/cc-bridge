@@ -17,7 +17,7 @@
 //   tgctl post   <text|->                       broadcast to the humans in the room
 //   tgctl slash  <name> </cmd>                  inject a slash command into a target session's CLI
 //   tgctl keys   <name> <key>… [--force]        send named keystrokes to a target session's pane
-//   tgctl spawn  <name> [--dir p [--create]] [--model m] [--why "…"] [--effort e] [text|-]   start a NEW session in its own topic
+//   tgctl spawn  <name> [--dir p [--create]] [--account id] [--model m] [--why "…"] [--effort e] [text|-]   start a NEW session in its own topic
 //   tgctl kill   <name> [--force]               end a session you spawned (chat lane: any worker)
 //   tgctl reopen <name>                         bring a closed session back up, conversation intact
 //   tgctl roster                                who's live in the room
@@ -100,7 +100,7 @@ const HELP: Record<string, string> = {
            '  Named keys only: enter esc up down left right 1-9. Words are an `tg ask`, not a keystroke.\n' +
            '  Refused while the target is mid-turn, unless the wedge alert has fired — or --force, which\n' +
            '  carries esc (to interrupt it) and nothing else.',
-  spawn:   'tg spawn <name> [--dir p [--create]] [--model fable|opus|sonnet|haiku] [--why "one line"]\n' +
+  spawn:   'tg spawn <name> [--dir p [--create]] [--account provider-account-id] [--model fable|opus|sonnet|haiku] [--why "one line"]\n' +
            '             [--effort low…max] [text|-]\n' +
            '  start a NEW session in its own topic. --dir must already exist unless --create is passed;\n' +
            '  with no --dir the session gets a folder named after it under the base dir.\n' +
@@ -126,6 +126,7 @@ const HELP: Record<string, string> = {
            '  instantly; a new one is discovered in the background (~1 min) and arrives as an ack.\n' +
            '  --stale "why" flags a brief you found wrong while working in that repo; never hand-edit one.',
   roster:  'tg roster [--all]   who is live on the bus (--all also lists hidden endpoints, e.g. dev stubs)',
+  providers:'tg providers   configured provider account ids, active/inactive state, role defaults, and models for tg spawn --account/--model',
   history: 'tg history [n]   recent agent-bus activity',
   shared:  'tg shared   print the room\'s shared-workspace dir (put deliverables there)',
   doctor:  'tg doctor   host-side install diagnostic (works with the daemon down)',
@@ -167,14 +168,14 @@ let name = '', args: Record<string, unknown> = {}
 // dead code that falls through to "unknown command". Cost one live probe run to find.
 // `repo` is not agent-to-agent messaging, but it takes flags, and this branch is the flag-parsing
 // one — same reason `wait` is here while the daemon deliberately keeps it out of AGENT_BUS_VERBS.
-const BUS = new Set(['ask', 'ack', 'btw', 'answer', 'post', 'slash', 'keys', 'spawn', 'kill', 'reopen', 'roster', 'history', 'shared', 'wait', 'watch', 'repo'])
+const BUS = new Set(['ask', 'ack', 'btw', 'answer', 'post', 'slash', 'keys', 'spawn', 'kill', 'reopen', 'roster', 'providers', 'history', 'shared', 'wait', 'watch', 'repo'])
 if (BUS.has(cmd)) {
   const rest = process.argv.slice(3)
   const refs: string[] = []
   const flags: Record<string, string | boolean> = {}
   const pos: string[] = []
   for (let i = 0; i < rest.length; i++) {
-    const f = /^--(dir|model|effort|stale|why)$/.exec(rest[i]!)
+    const f = /^--(dir|account|model|effort|stale|why)$/.exec(rest[i]!)
     if (rest[i] === '--ref') { const v = rest[++i]; if (v != null) refs.push(v) }
     else if (f) { const v = rest[++i]; if (v != null) flags[f[1]!] = v }   // spawn's flags; harmless elsewhere
     else if (rest[i] === '--create') { flags.create = true }               // spawn: allow a missing --dir
@@ -210,6 +211,7 @@ if (BUS.has(cmd)) {
     case 'wait':    name = 'wait';    args = { pane, text: flags.clear ? '' : body(pos[0], 'wait') ?? '', ...flags }; break
     case 'repo':    name = 'repo';    args = { pane, path: pos[0], ...flags }; break
     case 'roster':  name = 'roster';  args = { pane, ...(flags.all ? { all: true } : {}) }; break   // --all: include hidden endpoints (dev stubs)
+    case 'providers': name = 'providers'; args = { pane }; break
     case 'history': name = 'history'; args = { pane, n: pos[0] }; break
     case 'shared':  name = 'shared';  args = { pane }; break
   }

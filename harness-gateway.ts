@@ -1,4 +1,6 @@
 export type GatewayAuth = 'bearer' | 'x-api-key' | 'none'
+export type GatewayProvider = 'openai' | 'gemini' | 'deepseek' | 'custom'
+export type GatewayAuthMethod = 'oauth' | 'api-key' | 'none'
 
 export type GatewayDefinition = {
   baseUrl: string
@@ -6,6 +8,11 @@ export type GatewayDefinition = {
   tokenEnv?: string
   model: string
   smallModel: string
+  // Product-facing identity. Optional so every existing harness-gateways.json remains valid;
+  // provider-accounts.ts infers the old local-codex/deepseek records when these are absent.
+  provider?: GatewayProvider
+  authMethod?: GatewayAuthMethod
+  label?: string
 }
 
 export type GatewayHarnessProfile = {
@@ -47,10 +54,18 @@ export function parseGatewayDefinitions(value: unknown): Record<string, GatewayD
     if (auth !== 'none' && (typeof tokenEnv !== 'string' || !ENV_TOKEN.test(tokenEnv))) continue
     if (auth === 'none' && tokenEnv !== undefined) continue
     if (!safeModel(raw.model) || !safeModel(raw.smallModel)) continue
+    const provider = raw.provider
+    const authMethod = raw.authMethod
+    const label = typeof raw.label === 'string' && raw.label.trim().length <= 48 ? raw.label.trim() : undefined
+    if (provider !== undefined && !['openai', 'gemini', 'deepseek', 'custom'].includes(String(provider))) continue
+    if (authMethod !== undefined && !['oauth', 'api-key', 'none'].includes(String(authMethod))) continue
     result[name] = {
       baseUrl, auth,
       ...(auth !== 'none' ? { tokenEnv: tokenEnv as string } : {}),
       model: raw.model, smallModel: raw.smallModel,
+      ...(provider ? { provider: provider as GatewayProvider } : {}),
+      ...(authMethod ? { authMethod: authMethod as GatewayAuthMethod } : {}),
+      ...(label ? { label } : {}),
     }
   }
   return result

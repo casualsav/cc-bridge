@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { hopKey, resolveChain, pickNextHop, moveHop } from './failover-chain.ts'
+import { activeFailoverChain, hopKey, resolveChain, pickNextHop, moveHop } from './failover-chain.ts'
 import type { FailoverHop } from './common.ts'
 
 const claude = (account: string): FailoverHop => ({ kind: 'claude', account })
@@ -114,4 +114,11 @@ test('resolveChain: gateways drop out entirely when none are configured', () => 
 test('moveHop: reorders a gateway hop by its key', () => {
   const chain = [claude('main'), codex, gateway('minimax')]
   expect(moveHop(chain, 'gateway:minimax', 'up')).toEqual([claude('main'), gateway('minimax'), codex])
+})
+
+test('activeFailoverChain: accounts below the persisted boundary never participate', () => {
+  const chain = [gateway('deepseek'), gateway('local-codex'), claude('main')]
+  expect(activeFailoverChain(chain, 2)).toEqual([gateway('deepseek'), gateway('local-codex')])
+  expect(pickNextHop(activeFailoverChain(chain, 2), gateway('deepseek'), () => true)).toEqual(gateway('local-codex'))
+  expect(activeFailoverChain(chain, undefined)).toEqual(chain)
 })

@@ -249,3 +249,33 @@ test('session/message returns one row in full, 404s an unknown uuid, and is auth
     expect((await fetch(`${base}/api/session/message?sid=s1&uuid=u1`)).status).toBe(401)
   } finally { server.stop(true) }
 })
+
+test('provider accounts API exposes safe account views and gates mutations behind canWrite', async () => {
+  const { startWebapp } = await import('./webapp.ts')
+  const { join } = await import('node:path')
+  const actions: Record<string, unknown>[] = []
+  const roles: Array<string | undefined> = []
+  const view = {
+    accounts: [{ id: 'gateway:local-codex', provider: 'openai', providerLabel: 'OpenAI', label: 'OpenAI subscription', authMethod: 'oauth', authLabel: 'OAuth', ready: true, models: ['gpt-5.6-sol'], model: 'gpt-5.6-sol', active: true, order: 0 }],
+    activeCount: 1, defaults: { chat: 'gateway:local-codex', code: 'gateway:local-codex' }, catalog: [], auto: true,
+  } as const
+  const server = startWebapp({
+    token: TOKEN, isAllowed: id => id === '42', log: () => {}, staticDir: join(import.meta.dir, 'webapp'), port: 0, canWrite: true,
+    readProviderAccounts: role => { roles.push(role); return view as any },
+    providerAccountAction: (_userId, action) => { actions.push(action); return { ok: true } },
+  })
+  const auth = { Authorization: 'tma ' + sign({ auth_date: String(now()), user }) }
+  const base = `http://127.0.0.1:${server.port}`
+  try {
+    const read = await fetch(`${base}/api/provider-accounts?role=chat`, { headers: auth })
+    expect(read.status).toBe(200)
+    const text = await read.text()
+    expect(text).toContain('OpenAI subscription')
+    expect(text).not.toContain('apiKey')
+    expect(text).not.toContain('tokenEnv')
+    expect(roles).toEqual(['chat'])
+    const move = await fetch(`${base}/api/provider-accounts/action`, { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify({ action: 'move', id: 'gateway:local-codex', dir: 'down' }) })
+    expect(move.status).toBe(200)
+    expect(actions).toEqual([{ action: 'move', id: 'gateway:local-codex', dir: 'down' }])
+  } finally { server.stop(true) }
+})

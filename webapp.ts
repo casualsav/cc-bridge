@@ -11,6 +11,7 @@ import { readdir, stat, realpath, writeFile, copyFile, rename, mkdir, cp, rm } f
 import { resolve, basename, dirname, join, sep } from 'node:path'
 import { homedir } from 'node:os'
 import type { TurnPart } from './turn-summary.ts'
+import type { ProviderAccountsView } from './provider-accounts.ts'
 
 export interface WebappDeps {
   token: string                            // bot token — the HMAC key for initData validation
@@ -36,6 +37,8 @@ export interface WebappDeps {
   // filesystem mutations. Every action is audited to daemon.log.
   readSettings?: () => Promise<SettingsView> | SettingsView          // current prefs/state for the Settings tab
   setSetting?: (userId: string, key: string, value: unknown) => Promise<string | null> | string | null   // apply one change (userId = toggling user, for any notice routing); returns an error string or null on ok
+  readProviderAccounts?: (role?: 'chat' | 'code') => Promise<ProviderAccountsView> | ProviderAccountsView
+  providerAccountAction?: (userId: string, action: Record<string, unknown>) => Promise<{ error: string } | Record<string, unknown>> | { error: string } | Record<string, unknown>
   listSessions?: () => Promise<SessionCard[]> | SessionCard[]        // fleet dashboard: one card per live session
   readSessionFeed?: (sid: string) => Promise<SessionFeed | null> | SessionFeed | null   // drill-in: recent conversation + live activity
   readSessionMessage?: (sid: string, uuid: string) => Promise<string | null> | string | null   // ONE row's full unclamped text, for expanding a clipped bubble
@@ -43,7 +46,7 @@ export interface WebappDeps {
   // user's yes first (a /clear under the 🧹 /clear approval setting) — nothing was done in that case.
   sessionAction?: (userId: string, sid: string, action: SessionAct, text?: string, opts?: { confirmed?: boolean }) => Promise<string | { confirm: string } | null> | string | { confirm: string } | null
   sessionAttach?: (userId: string, sid: string, fileName: string, data: Uint8Array, opts: { caption?: string; voice?: boolean }) => Promise<{ error: string } | { delivered: string; match: string }>   // compose-row file/voice → bubble text + reconcile token
-  sessionSpawn?: (userId: string, name: string, opts: { model?: string; effort?: string; mode?: string; headless?: boolean }) => Promise<{ error: string } | { sid: string; name: string }>   // "+" new session with dials
+  sessionSpawn?: (userId: string, name: string, opts: { account?: string; model?: string; effort?: string; mode?: string; headless?: boolean }) => Promise<{ error: string } | { sid: string; name: string }>   // "+" new session with provider/model dials
   // ACCOUNT-level usage, served once per /api/sessions rather than per card: the 5h and weekly rate
   // windows are the same number on every session, which is exactly why they were taken OFF the cards
   // (v0.4.232) and why the command center's header is where the owner approved them (2026-07-30).
@@ -389,6 +392,11 @@ async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: strin
     if (!deps.readSettings) return json({ error: 'unavailable' }, 404)
     return json(await deps.readSettings())
   }
+  if (url.pathname === '/api/provider-accounts') {
+    if (!deps.readProviderAccounts) return json({ error: 'unavailable' }, 404)
+    const role = url.searchParams.get('role') === 'chat' ? 'chat' : 'code'
+    return json(await deps.readProviderAccounts(role))
+  }
   if (url.pathname === '/api/sessions') {
     if (!deps.listSessions) return json({ error: 'unavailable' }, 404)
     // `usage` rides the poll the list already runs — one account-level reading per response, not one
@@ -439,10 +447,11 @@ async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: strin
   if (url.pathname === '/api/session/spawn') {
     if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405)
     if (!deps.sessionSpawn) return json({ error: 'unavailable' }, 404)
-    const body = await req.json().catch(() => null) as { name?: unknown; model?: unknown; effort?: unknown; mode?: unknown; headless?: unknown } | null
+    const body = await req.json().catch(() => null) as { name?: unknown; account?: unknown; model?: unknown; effort?: unknown; mode?: unknown; headless?: unknown } | null
     if (!body || typeof body.name !== 'string' || !body.name.trim()) return json({ error: 'name required' }, 400)
-    deps.log(`webapp: session spawn name=${body.name} model=${body.model ?? '-'} effort=${body.effort ?? '-'} mode=${body.mode ?? '-'} headless=${body.headless === true ? 1 : 0} user=${userId}`)
+    deps.log(`webapp: session spawn name=${body.name} account=${body.account ?? '-'} model=${body.model ?? '-'} effort=${body.effort ?? '-'} mode=${body.mode ?? '-'} headless=${body.headless === true ? 1 : 0} user=${userId}`)
     const r = await deps.sessionSpawn(userId, body.name, {
+      ...(typeof body.account === 'string' && body.account ? { account: body.account } : {}),
       ...(typeof body.model === 'string' && body.model ? { model: body.model } : {}),
       ...(typeof body.effort === 'string' && body.effort ? { effort: body.effort } : {}),
       ...(typeof body.mode === 'string' && body.mode ? { mode: body.mode } : {}),
@@ -500,6 +509,17 @@ async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: strin
     deps.log(`webapp: setting ${body.key}=${JSON.stringify(body.value)} user=${userId}`)
     const err = await deps.setSetting(userId, body.key, body.value)
     return err ? json({ error: err }, 400) : json({ ok: true })
+  }
+  if (url.pathname === '/api/provider-accounts/action') {
+    if (!deps.canWrite) return json({ error: 'read-only', reason: 'editing disabled (set TELEGRAM_WEBAPP_WRITE=1)' }, 403)
+    if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405)
+    if (!deps.providerAccountAction) return json({ error: 'unavailable' }, 404)
+    const body = await req.json().catch(() => null)
+    if (!body || typeof body !== 'object' || Array.isArray(body) || typeof (body as { action?: unknown }).action !== 'string') return json({ error: 'bad body' }, 400)
+    const action = body as Record<string, unknown>
+    deps.log(`webapp: provider account action=${String(action.action)} id=${typeof action.id === 'string' ? action.id : '-'} user=${userId}`)
+    const result = await deps.providerAccountAction(userId, action)
+    return 'error' in result ? json(result, 400) : json(result)
   }
 
   // ---- Upload from device (POST multipart; gated by canWrite). Separate from the JSON write group

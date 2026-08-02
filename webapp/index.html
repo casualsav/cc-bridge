@@ -479,6 +479,34 @@
   .toggle { padding: 6px var(--sp-3); border: none; border-radius: var(--r-sm); background: var(--btn); color: var(--btn-text); font-size: var(--t-sub); cursor: pointer; min-width: 56px; }
   .toggle.off { background: var(--sec); color: var(--hint-raised); box-shadow: inset 0 0 0 1px var(--hint); }
   select.seg { padding: 6px var(--sp-2); border-radius: var(--r-sm); border: none; background: var(--bg); color: var(--text); font-size: var(--t-sub); box-shadow: inset 0 0 0 1px var(--sec); }
+  .setrow.action { cursor: pointer; }
+  .setrow.action .ro { color: var(--link); }
+  .acctsheet { max-height: 88vh; display: flex; flex-direction: column; }
+  #accbody { overflow-y: auto; min-height: 0; padding-bottom: var(--sp-2); }
+  .acctroles { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-2); margin-bottom: var(--sp-3); }
+  .acctrole, .acctitem { background: var(--sec); border-radius: var(--r-lg); padding: var(--sp-3); }
+  .acctrole { border: 2px solid transparent; cursor: pointer; }
+  .acctrole.selected { border-color: var(--accent); }
+  .acctrole .k, .acctmeta { color: var(--hint); font-size: var(--t-meta); }
+  .acctrole .v { font-weight: var(--w-semi); margin-top: 3px; line-height: 1.2; overflow-wrap: anywhere; }
+  .accttop { display:flex; align-items:center; gap:var(--sp-2); margin-bottom:var(--sp-3); }
+  .accttop .copy { flex:1; }
+  .acctitem { margin-bottom: var(--sp-2); }
+  .accthead { display:flex; align-items:center; gap:var(--sp-2); }
+  .accthead .identity { flex:1; min-width:0; }
+  .acctname { font-weight:var(--w-semi); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .acctstatus { width:8px; height:8px; border-radius:50%; background:#6f7782; flex:none; }
+  .acctstatus.ready { background:#35b56a; }
+  .acctmoves { display:flex; gap:4px; }
+  .acctmoves button, .acctactions button, .acctadd { border:0; border-radius:var(--r-sm); background:var(--bg); color:var(--text); padding:6px 9px; }
+  .acctactions { display:flex; flex-wrap:wrap; gap:6px; margin-top:var(--sp-2); }
+  .acctactions button.on { background:var(--btn); color:var(--btn-text); }
+  .acctdivider { display:flex; align-items:center; gap:var(--sp-2); color:var(--hint); font-size:var(--t-meta); margin:var(--sp-3) 0; }
+  .acctdivider::before,.acctdivider::after { content:""; height:1px; background:var(--sec); flex:1; }
+  .acctadd { width:100%; background:var(--btn); color:var(--btn-text); font-size:var(--t-body); margin-top:var(--sp-2); }
+  #accform { display:none; margin-top:var(--sp-3); }
+  #accform.show { display:block; }
+  #accform input, #accform select { margin-top:var(--sp-2); width:100%; padding:var(--sp-3); border:0; border-radius:var(--r-md); background:var(--sec); color:var(--text); font-size:16px; }
   .bar { height: var(--sp-2); border-radius: var(--r-xs); background: var(--bg); overflow: hidden; margin-top: 6px; box-shadow: inset 0 0 0 1px var(--sec); }
   .bar > span { display: block; height: 100%; background: var(--btn); }
   .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
@@ -1366,8 +1394,8 @@
   /* Scroll relief, and the reason the pill can float at all: the pill's own footprint plus a gutter
      either side of it, so the last card can always be scrolled clear of it. */
   #tab-sessions { padding-bottom: calc(var(--fab-h) + 2 * var(--sp-4) + env(safe-area-inset-bottom)); }
-  #spawn, #sched, #fbrowse { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: none; z-index: 9; align-items: flex-end; }
-  #spawn.show, #sched.show, #fbrowse.show { display: flex; }
+  #spawn, #sched, #fbrowse, #accounts { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: none; z-index: 9; align-items: flex-end; }
+  #spawn.show, #sched.show, #fbrowse.show, #accounts.show { display: flex; }
   /* It SLIDES, like #dial / #calls / #addctx — see their block below for the mechanism and the
      reason it is one behaviour rather than four. This sheet is the one that never joined; it appeared
      instantly while every other sheet in the app rose. The transform lives here and the `.up` class
@@ -1383,7 +1411,7 @@
      there leaves the off-screen page showing through the 16px padding strip at the left edge. This
      box's content width is exactly one page, so the other one has nowhere to show. */
   .dialtrack { overflow: hidden; }
-  #spawn.up .sheet, #sched.up .sheet, #fbrowse.up .sheet { transform: translateY(0); }
+  #spawn.up .sheet, #sched.up .sheet, #fbrowse.up .sheet, #accounts.up .sheet { transform: translateY(0); }
   /* The list SCROLLS INSIDE the sheet rather than growing it: a folder with 200 entries would push the
      sheet past the viewport, and `align-items: flex-end` overflows PAST padding (the rule that already
      governs the other sheets). 56vh leaves the crumbs and the head on screen at any folder depth. */
@@ -1776,6 +1804,24 @@
     <div class="seglbl">Message</div>
     <textarea id="sctext" rows="3" placeholder="What to send when it fires"></textarea>
     <div class="sprow"><button id="sccancel" class="cancel">Cancel</button><button id="scgo" class="create">Create</button></div>
+  </div>
+</div>
+
+<div id="accounts">
+  <div class="sheet acctsheet">
+    <div class="shead">AI accounts</div>
+    <div id="accbody"></div>
+    <button class="acctadd" id="accadd">Add provider account</button>
+    <form id="accform">
+      <select id="accprovider" aria-label="Provider"></select>
+      <input id="acclabel" placeholder="Account name" autocomplete="off">
+      <input id="accbase" placeholder="Anthropic-compatible base URL" inputmode="url" autocapitalize="none" autocomplete="off">
+      <input id="accmodel" placeholder="Default model" autocapitalize="none" autocomplete="off">
+      <input id="acckey" placeholder="API key" type="password" autocapitalize="none" autocomplete="new-password">
+      <div class="acctmeta" id="acchelp" style="margin-top:8px"></div>
+      <div class="sprow"><button type="button" id="acccancel" class="cancel">Cancel</button><button type="submit" class="create">Save account</button></div>
+    </form>
+    <div class="sprow"><button id="accclose" class="cancel">Close</button></div>
   </div>
 </div>
 
@@ -2205,10 +2251,13 @@ async function renderSettings() {
     const m = meta[key], s = d.settings[key]; if (!s) continue;
     const editable = W && s.editable;
     const r = document.createElement("div"); r.className = "setrow";
+    if (key === "accounts") { r.classList.add("action"); r.onclick = openAccounts; }
     const lbl = document.createElement("div"); lbl.className = "lbl";
     lbl.innerHTML = '<div>' + m.name + '</div>' + (s.label ? '<div class="sub">' + esc(s.label) + '</div>' : "");
     r.appendChild(lbl);
-    if (m.bool) {
+    if (key === "accounts") {
+      const btn = document.createElement("button"); btn.className = "toggle off"; btn.textContent = "Manage"; r.appendChild(btn);
+    } else if (m.bool) {
       const on = !!s.value;
       const btn = document.createElement("button");
       btn.className = "toggle" + (on ? "" : " off"); btn.textContent = on ? "On" : "Off";
@@ -2227,6 +2276,50 @@ async function renderSettings() {
   }
   el.appendChild(wrap);
 }
+async function openAccounts() {
+  try {
+    PROVIDER_ACCOUNTS = await api("/api/provider-accounts?role=" + ACCOUNT_ROLE); renderAccounts();
+    $("accprovider").innerHTML = (PROVIDER_ACCOUNTS.catalog || []).filter(p => p.id !== 'claude').map(p => '<option value="' + esc(p.id) + '">' + esc(p.label) + ' · API key</option>').join('');
+    providerFormChanged(); openSheet("accounts");
+  } catch {}
+}
+function accountById(id) { return (PROVIDER_ACCOUNTS?.accounts || []).find(a => a.id === id); }
+function accountLabel(id) { const a = accountById(id); return a ? a.label : "Not set"; }
+function renderAccounts() {
+  const v = PROVIDER_ACCOUNTS; if (!v) return;
+  const body = $("accbody"), accounts = v.accounts || [];
+  let html = '<div class="acctroles"><div class="acctrole ' + (ACCOUNT_ROLE === 'chat' ? 'selected' : '') + '" data-acc-role="chat"><div class="k">Chat agent</div><div class="v">' + esc(accountLabel(v.defaults.chat)) + '</div></div><div class="acctrole ' + (ACCOUNT_ROLE === 'code' ? 'selected' : '') + '" data-acc-role="code"><div class="k">Coding agent</div><div class="v">' + esc(accountLabel(v.defaults.code)) + '</div></div></div>';
+  html += '<div class="accttop"><div class="copy"><div>Automatic orchestration</div><div class="acctmeta">May choose a better active provider/model; explicit launches still win.</div></div><button class="toggle ' + (v.auto ? '' : 'off') + '" data-acc-auto="1">' + (v.auto ? 'On' : 'Off') + '</button></div>';
+  html += '<div class="accttop"><div class="copy"><div>' + (ACCOUNT_ROLE === 'chat' ? 'Chat' : 'Coding') + ' failover</div><div class="acctmeta">' + v.activeCount + ' of ' + accounts.length + ' accounts participate</div></div><button class="toggle off" data-acc-count="' + Math.max(0, v.activeCount - 1) + '" ' + (v.activeCount <= 0 ? 'disabled' : '') + '>−</button><button class="toggle off" data-acc-count="' + Math.min(accounts.length, v.activeCount + 1) + '" ' + (v.activeCount >= accounts.length ? 'disabled' : '') + '>+</button></div>';
+  accounts.forEach((a, i) => {
+    if (i === v.activeCount) html += '<div class="acctdivider">Inactive · kept but never auto-selected</div>';
+    const models = (a.models || []).length ? a.models : [a.model].filter(Boolean);
+    html += '<div class="acctitem" data-account="' + esc(a.id) + '"><div class="accthead"><span class="acctstatus ' + (a.ready ? 'ready' : '') + '"></span><div class="identity"><div class="acctname">' + esc(a.label) + '</div><div class="acctmeta">' + esc(a.providerLabel) + ' · ' + esc(a.authLabel) + ' · ' + (a.ready ? 'Ready' : 'Needs attention') + '</div></div><div class="acctmoves"><button data-acc-move="up" ' + (i === 0 ? 'disabled' : '') + '>↑</button><button data-acc-move="down" ' + (i === accounts.length - 1 ? 'disabled' : '') + '>↓</button></div></div>';
+    if (models.length) html += '<select class="seg" data-acc-model="1" style="width:100%;margin-top:8px">' + models.map(m => '<option value="' + esc(m) + '" ' + (m === a.model ? 'selected' : '') + '>' + esc(m.replace(/\[1m\]$/, '')) + '</option>').join('') + '</select>';
+    html += '<div class="acctactions"><button data-acc-default="chat" class="' + (v.defaults.chat === a.id ? 'on' : '') + '">Chat</button><button data-acc-default="code" class="' + (v.defaults.code === a.id ? 'on' : '') + '">Coding</button>' + (a.id.startsWith('gateway:') && a.id !== 'gateway:local-codex' ? '<button data-acc-remove="1">Remove</button>' : '') + '</div></div>';
+  });
+  if (v.activeCount === accounts.length) html += '<div class="acctdivider">Inactive · none</div>';
+  body.innerHTML = html;
+  body.querySelectorAll('[data-acc-role]').forEach(b => b.onclick = async () => { ACCOUNT_ROLE = b.dataset.accRole; PROVIDER_ACCOUNTS = await api('/api/provider-accounts?role=' + ACCOUNT_ROLE); renderAccounts(); });
+  body.querySelectorAll('[data-acc-move]').forEach(b => b.onclick = () => accountAction({ action:'move', id:b.closest('[data-account]').dataset.account, dir:b.dataset.accMove }));
+  body.querySelectorAll('[data-acc-default]').forEach(b => b.onclick = () => accountAction({ action:'default', id:b.closest('[data-account]').dataset.account, role:b.dataset.accDefault }));
+  body.querySelectorAll('[data-acc-model]').forEach(s => s.onchange = () => accountAction({ action:'model', id:s.closest('[data-account]').dataset.account, model:s.value }));
+  body.querySelectorAll('[data-acc-remove]').forEach(b => b.onclick = () => { if (confirm('Remove this provider account? Credentials stay out of the browser and its saved key is no longer used.')) accountAction({ action:'remove', id:b.closest('[data-account]').dataset.account }); });
+  body.querySelector('[data-acc-auto]')?.addEventListener('click', () => accountAction({ action:'auto', value:!v.auto }));
+  body.querySelectorAll('[data-acc-count]').forEach(b => b.onclick = () => accountAction({ action:'active-count', count:Number(b.dataset.accCount) }));
+}
+async function accountAction(body) {
+  const d = await writeOp('/api/provider-accounts/action', { ...body, role: body.role || ACCOUNT_ROLE }); if (!d) return;
+  PROVIDER_ACCOUNTS = await api('/api/provider-accounts?role=' + ACCOUNT_ROLE); renderAccounts();
+}
+function providerFormChanged() {
+  const p = (PROVIDER_ACCOUNTS?.catalog || []).find(x => x.id === $("accprovider").value);
+  if (!p) return;
+  $("accbase").value = p.baseUrl || '';
+  $("accmodel").value = p.defaultModel || '';
+  $("acchelp").textContent = p.id === 'openai' ? 'OpenAI OAuth accounts appear automatically when connected. This form adds an API-key account through an Anthropic-compatible endpoint.' : p.protocol === 'adapter' ? 'This provider needs an Anthropic-compatible adapter URL for the Claude Code harness.' : 'Models are detected automatically after the account is saved.';
+}
+
 async function setSetting(key, value) {
   const d = await writeOp("/api/settings/set", { key, value });
   if (d) { showDone("Updated"); if (key === "fileBrowser") { location.reload(); return; } renderSettings(); }
@@ -2260,6 +2353,8 @@ const dotClass = s => s.alive === false ? "dead"
   : "";
 const pctBar = p => p == null ? "" : '<div class="bar"><span style="width:' + Math.max(0, Math.min(100, p)) + '%"></span></div>';
 let SESSIONS = [];
+let PROVIDER_ACCOUNTS = null;
+let ACCOUNT_ROLE = 'code';
 // One row per window, in the card foot's own grammar: an emoji-led label, the percentage, the bar, then
 // the countdown. The 5h window is the one that bites hourly and leads; weekly sits under it.
 // NOTHING renders when the payload carries no `usage` — an older daemon, or no session has drawn a
@@ -2301,7 +2396,7 @@ async function renderSessions() {
     // It is its OWN element so it can own the cards' dot column and sit on the dots' axis (the
     // owner's ask, 2026-07-30); the space between the two spans keeps `textContent` verbatim.
     if (!s.chat && s === workerCards[0]) el.insertAdjacentHTML("beforeend",
-      '<div class="sechead"><span class="sglyph"><svg viewBox="0 0 16 10" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path fill="#d87756" fill-rule="evenodd" d="M2 0h12v4h2v2h-2v2h-1v2h-1V8h-1v2h-1V8H6v2H5V8H4v2H3V8H2V6H0V4h2V0Zm2 2v2h1V2H4Zm7 0v2h1V2h-1Z"/></svg></span><span class="swords">Coding Sessions</span></div>');
+      '<div class="sechead"><span class="sglyph"><svg viewBox="0 0 16 10" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path fill="#d87756" fill-rule="evenodd" d="M2 0h12v4h2v2h-2v2h-1v2h-1V8h-1v2h-1V8H6v2H5V8H4v2H3V8H2V6H0V4h2V0Zm2 2v2h1V2H4Zm7 0v2h1V2h-1Z"/></svg></span><span class="swords">Sessions</span></div>');
     const c = document.createElement("div");
     c.className = "sess";
     const dot = dotClass(s);   // shared with the drill-in header — see dotClass
@@ -3777,6 +3872,20 @@ async function openSchedSheet() {
   openSheet("sched");
   $("scwhen").focus();
 }
+$("accclose").onclick = () => closeSheet("accounts");
+$("accounts").onclick = e => { if (e.target.id === "accounts") closeSheet("accounts"); };
+$("accadd").onclick = () => { $("accform").classList.add("show"); $("accadd").style.display = "none"; $("acclabel").focus(); };
+$("acccancel").onclick = () => { $("accform").classList.remove("show"); $("accadd").style.display = ""; };
+$("accprovider").onchange = providerFormChanged;
+$("accform").onsubmit = async e => {
+  e.preventDefault();
+  const label = $("acclabel").value.trim(), provider = $("accprovider").value;
+  const d = await writeOp('/api/provider-accounts/action', { action:'add-api', provider, name:label || provider, label:label || provider, baseUrl:$("accbase").value.trim(), model:$("accmodel").value.trim(), apiKey:$("acckey").value });
+  if (!d) return;
+  $("acckey").value = ""; $("acclabel").value = ""; $("accform").classList.remove("show"); $("accadd").style.display = "";
+  PROVIDER_ACCOUNTS = await api('/api/provider-accounts'); renderAccounts();
+};
+
 $("sccancel").onclick = () => closeSheet("sched");
 $("sched").onclick = e => { if (e.target.id === "sched") closeSheet("sched"); };
 $("scgo").onclick = async () => {

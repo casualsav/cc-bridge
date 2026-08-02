@@ -35,7 +35,14 @@ export type Access = {
   updateChecks?: boolean  // daily update-available notification for bridge + Claude (default on)
   autoUpdate?: boolean    // auto-apply updates instead of tap-to-apply cards (default off): bridge on the daily sweep, Claude via install-latest + rolling refresh of idle sessions
   limitFailover?: boolean  // on a usage-limit hit, move the stuck session to a still-available account and resume it there instead of waiting for the reset (default off)
-  failoverChain?: FailoverHop[]  // user-ordered try-in-order hops for limitFailover; unset/partial = default order (accounts main-first, Codex last)
+  failoverChain?: FailoverHop[]  // legacy/shared chain; role-specific chains fall back to this without migration
+  failoverActiveCount?: number   // legacy/shared boundary; role-specific boundaries fall back to this
+  chatFailoverChain?: FailoverHop[]
+  codeFailoverChain?: FailoverHop[]
+  chatFailoverActiveCount?: number
+  codeFailoverActiveCount?: number
+  chatProviderAccount?: string   // provider-account id used when a new chat lane starts
+  codeProviderAccount?: string   // provider-account id used when a new coding session starts
   codexModel?: string      // model every Codex launch (incl. failover) uses; overrides CODEX_MODEL env; unset = env/Codex default
   codexEffort?: string     // Codex reasoning effort (low/medium/high/xhigh); overrides CODEX_REASONING_EFFORT env; unset = default
   chatHarness?: HarnessProfile  // the 💬 chat lane's provider (Accounts panel → 💬 Chat): a HarnessProfile; absent/native = Anthropic, exactly as the lane always ran
