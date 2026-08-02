@@ -5746,13 +5746,17 @@ async function handleCall(
         // A suppressed event is KEPT here and marked, unlike in the digest. History is forensic: a
         // reader working out why nobody was told needs to see both that the expiry happened and that
         // the notice was withheld. Hiding it would trade a false alarm for a missing record.
+        // The mark states THAT nothing was sent and not why: `suppressed` is a boolean, and there are
+        // now two predicates behind it (asker already answered · asker killed the target). It read
+        // "asker already answered" over a kill-suppressed row within an hour of that second one
+        // shipping. The daemon log names the reason, because there it is computed rather than guessed.
         text = es.length
           // A POST is printed IN FULL, alone among the kinds. It is a session reaching for a human, so
           // history is often the only place its text survives — and a post that BLOCKED its sender on an
           // answer, clamped to 100 chars, is how one went unanswered on 2026-07-29 (the owner found the
           // block by eyeballing a pane). Every other kind stays clamped: they are correlation handles
           // whose payload lives in the pane it was delivered to.
-          ? es.map(e => `${e.kind === 'answer' ? '✓' : e.kind === 'ask' ? '→' : e.kind === 'ack' ? 'ℹ️' : e.kind === 'btw' ? '💬' : e.kind === 'post' ? '📣' : e.kind === 'expire' ? '⌛' : e.kind === 'keys' ? '⌨️' : '·'} ${e.from}${e.to ? `→${e.to}` : ''}${e.id ? ` #${e.id}` : ''}: ${e.kind === 'post' ? e.text : e.text.slice(0, 100)}${e.suppressed ? ' (no notice sent — asker already answered)' : ''}`).join('\n')
+          ? es.map(e => `${e.kind === 'answer' ? '✓' : e.kind === 'ask' ? '→' : e.kind === 'ack' ? 'ℹ️' : e.kind === 'btw' ? '💬' : e.kind === 'post' ? '📣' : e.kind === 'expire' ? '⌛' : e.kind === 'keys' ? '⌨️' : '·'} ${e.from}${e.to ? `→${e.to}` : ''}${e.id ? ` #${e.id}` : ''}: ${e.kind === 'post' ? e.text : e.text.slice(0, 100)}${e.suppressed ? ' (no notice sent)' : ''}`).join('\n')
           : '(no bus history yet)'
         break
       }
