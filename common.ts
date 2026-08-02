@@ -91,6 +91,38 @@ export function writeJsonFile(path: string, obj: unknown): void {
     try { unlinkSync(tmp) } catch {}   // never leave a stray tmp behind on a failed write
   }
 }
+
+// ---- Claude Code credential sharing (the shared-login failure class) ----
+
+// A Claude .credentials.json is only worth copying when it carries a live claude.ai OAuth session
+// (accessToken + refreshToken). Claude Code blanks its own file (empty tokens, expiresAt 0) when a
+// refresh fails on a rotated token — the shared-login failure of 2026-08-01/02, when the chat lane's
+// refresh stranded the main config's copy and the fleet wedged for ~17h. Copying a blanked file
+// would propagate the wedge to every config dir it lands in.
+export function hasLiveOauthCredentials(credentialsPath: string): boolean {
+  try {
+    const cred = JSON.parse(readFileSync(credentialsPath, 'utf8')) as { claudeAiOauth?: { accessToken?: string; refreshToken?: string } }
+    return !!(cred.claudeAiOauth?.accessToken && cred.claudeAiOauth?.refreshToken)
+  } catch { return false }
+}
+
+export type CredentialsCopyDecision = 'no-source' | 'leave' | 'refuse-blanked' | 'copy'
+// The copy-once decision for sharing the main login into another config dir. 'leave' when the
+// destination already has credentials; 'refuse-blanked' when the source is present but carries no
+// live OAuth (see hasLiveOauthCredentials) — the wedge would otherwise be copied verbatim.
+export function credentialsCopyDecision(src: string, dst: string): CredentialsCopyDecision {
+  if (!existsSync(src)) return 'no-source'
+  if (existsSync(dst)) return 'leave'
+  return hasLiveOauthCredentials(src) ? 'copy' : 'refuse-blanked'
+}
+
+// The boot/periodic canary's payload: the alert to raise when a credentials file is blanked, or null
+// when it is missing or carries a live login. Returning null means "nothing to say" so the daemon can
+// fire the alert once per blank episode (dedup) rather than on every tick.
+export function blankedCredentialsAlert(credentialsPath: string): string | null {
+  if (!existsSync(credentialsPath) || hasLiveOauthCredentials(credentialsPath)) return null
+  return '🚨 Main account OAuth credentials are BLANKED (empty tokens) — Claude sessions will demand /login. Restore a live copy (the chat account still has one) or run /login; the fleet is wedged until then.'
+}
 export const ACCESS_FILE = join(STATE_DIR, 'access.json')
 // Mutable preferences (stream mode, pin, auto-continue, voice, …). Split out from access.json so
 // static mode can freeze the security half (allowlist) while these stay editable from /settings.

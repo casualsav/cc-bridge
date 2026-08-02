@@ -16,6 +16,7 @@ import {
   STATE_DIR, ACCESS_FILE, PREFS_FILE, APPROVED_DIR, ENV_FILE, INBOX_DIR,
   SOCKET_PATH, DAEMON_PID_FILE, PENDING_EVENTS_FILE,
   DAEMON_LOG_FILE, WATCHDOG_PID_FILE, HEARTBEAT_FILE, anchorCwd, cwdFaultHint, stableCwd,
+  hasLiveOauthCredentials, credentialsCopyDecision, blankedCredentialsAlert,
   type ShimToDaemon, type DaemonToShim, type InboundParams, type FailoverHop,
 } from './common.ts'
 import { acquireTokenLock, tokenLockPath } from './token-lock.ts'
@@ -14282,6 +14283,24 @@ async function ensureDmLane(ctx: Context, chatId: string, first: InboundParams, 
 const CHAT_PROFILE_NOTICE_FILE = join(STATE_DIR, 'chat-profile-notice.json')
 const CHAT_TEMPLATE_DIR = join(import.meta.dir, 'off-mcp', 'chat-account')
 const CHAT_WORKSPACE = '/srv/chat'
+// Canary for the shared-login failure: the moment the main account's .credentials.json reads
+// blanked (empty OAuth tokens), the fleet is wedged — every native-anthropic session demands /login.
+// That state ran ~17h unnoticed once (blanked 2026-08-01 19:58, sessions failing from 2026-08-02
+// 17:17). Fire the alert ONCE per blank episode (deduped on the state, not per tick) at boot and on
+// the slow timer, so a mid-day blanking is caught within a minute instead of at the next session's
+// first login demand. The refresh that blanked the file can't be prevented from here (Claude Code
+// writes its own .credentials.json), but it can be surfaced before anyone has to hit a /login wall.
+let lastCredentialsCanary: 'live' | 'blanked' | null = null
+function canaryMainCredentials(): void {
+  const msg = blankedCredentialsAlert(join(MAIN_ACCOUNT.configDir, '.credentials.json'))
+  const state = msg ? 'blanked' : 'live'
+  if (state === lastCredentialsCanary) return
+  lastCredentialsCanary = state
+  if (!msg) return
+  process.stderr.write(`daemon: ${msg}\n`)
+  notifyChats(msg)
+}
+
 async function ensureChatProfile(): Promise<void> {
   if (isTopicMode()) return
   const allow = loadAccess().allowFrom
@@ -14295,8 +14314,10 @@ async function ensureChatProfile(): Promise<void> {
   // Share the main login instead of asking for a second sign-in.
   try {
     const cred = join(MAIN_ACCOUNT.configDir, '.credentials.json')
-    if (!existsSync(cred)) log('no main .credentials.json — the chat account will need its own login')
-    else if (existsSync(join(configDir, '.credentials.json'))) log('credentials already present — left as is')
+    const decision = credentialsCopyDecision(cred, join(configDir, '.credentials.json'))
+    if (decision === 'no-source') log('no main .credentials.json — the chat account will need its own login')
+    else if (decision === 'leave') log('credentials already present — left as is')
+    else if (decision === 'refuse-blanked') log('main .credentials.json is BLANKED (no live OAuth) — NOT copying a dead login to the chat account')
     else { copyFileSync(cred, join(configDir, '.credentials.json')); chmodSync(join(configDir, '.credentials.json'), 0o600); log('copied the main login') }
   } catch (e) { log(`credentials copy failed: ${e}`) }
   // Onboarding keys ONLY — the main .claude.json also carries the user's whole project history.
@@ -14512,7 +14533,11 @@ function ensureScoutProfile(): boolean {
     // guard). Tracking the main account keeps the scout on a token main is already keeping fresh,
     // so the scout never refreshes and never rotates the token out from under the owner.
     if (existsSync(cred) && (!existsSync(dst) || readFileSync(cred, 'utf8') !== readFileSync(dst, 'utf8'))) {
-      copyFileSync(cred, dst); chmodSync(dst, 0o600)
+      // Refuse a blanked source: the scout CLI would otherwise be handed a dead login and re-blank
+      // the copy it writes (the 2026-07-30 failure this function's comment documents). Keep whatever
+      // the scout already has rather than propagate the wedge.
+      if (!hasLiveOauthCredentials(cred)) log('main .credentials.json is BLANKED (no live OAuth) — NOT re-copying a dead login to the scout')
+      else { copyFileSync(cred, dst); chmodSync(dst, 0o600) }
     }
   } catch (e) { log(`credentials copy failed: ${e}`) }
   try {
@@ -16067,6 +16092,9 @@ setInterval(() => void updateSessionPin(), 10_000)
 // no chat lane, so no session bound to the DM, so no pinned card. Re-check on a slow timer: it early-
 // returns in one statSync once provisioned, so the steady-state cost is nil.
 setInterval(() => void ensureChatProfile().catch(e => process.stderr.write(`chatProfile: recheck failed: ${e}\n`)), 60_000).unref()
+// Credential canary re-check on the same slow timer (deduped inside): catches a mid-day blanking of
+// the main account's OAuth within a minute of it happening.
+setInterval(() => canaryMainCredentials(), 60_000).unref()
 // Agent bus (agent-bus P1): deliver queued agent↔agent asks to idle targets + expire stale ones.
 if (AGENT_BUS_ENABLED) setInterval(() => void sweepBus(), LATER_SWEEP_MS).unref()
 
@@ -17633,6 +17661,8 @@ void (async () => {
           // Seamless upgrade for DM-mode boxes: create the `chat` profile the DM lane needs. Runs
           // here (not before connect) because it may DM the owner; no-ops on every later reconnect.
           void ensureChatProfile().catch(e => process.stderr.write(`chatProfile: provisioning failed: ${e}\n`)).then(() => refreshChatTemplates()).catch(e => process.stderr.write(`chatTemplates: refresh failed: ${e}\n`))
+          // Credential canary — the shared-login blank can wedge the fleet before anyone notices.
+          canaryMainCredentials()
           // Lane hygiene: drop lanes whose chat left the allowlist (their outbound would 403
           // forever) and lanes whose chat has since upgraded to a chat lane (dmChat ⊕ dmLane —
           // two bindings for one DM made outbound resolve two different owner sessions).
