@@ -43,8 +43,13 @@ const MODAL: Record<string, string> = {
 // Box-wide or irreversible, and deliberately NOT probed: running them to find out what they do is
 // the failure. A session chat is the wrong place to end the CLI's login for every session on the
 // machine, or to start an installer.
+// `/login` is NOT here on purpose: it signs in the pane's whole config dir, but the daemon relays
+// the interactive flow — the method-picker buttons, then the sign-in link and the code reply — to
+// the session's chat (relayLoginChoice / relayAuthUrlToTelegram), so a session chat IS a working
+// place to run it; it is the owner's recover path after a blanked credential. `/logout` is the
+// irreversible half and stays blocked: it ends the login for every session on that config dir at
+// once, with no relay to recover from.
 const BLOCKED: Record<string, string> = {
-  '/login': 'signs the CLI in for the whole machine, not this session',
   '/logout': 'signs the CLI out for the whole machine, not this session',
   '/upgrade': 'changes the plan for the whole account',
   '/install-github-app': 'runs an interactive installer',

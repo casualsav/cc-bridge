@@ -37,6 +37,13 @@ test('box-wide and irreversible commands are refused for what they touch', () =>
   expect(planSlash('/migrate-installer')).toMatchObject({ kind: 'refuse' })
 })
 
+// /login is the one box-wide command that passes: the daemon relays its interactive flow (method
+// buttons + sign-in link + code reply) to the session's chat, so a mini-app composer can drive it.
+// /logout is the irreversible half and stays blocked — asserted above.
+test('/login passes through so the daemon can relay its interactive flow to the chat', () => {
+  expect(planSlash('/login')).toEqual({ kind: 'pass', command: '/login' })
+})
+
 test('a bridge command says where it actually lives', () => {
   expect((planSlash('/sessions') as { reason: string }).reason).toContain('Sessions tab')
   expect((planSlash('/settings') as { reason: string }).reason).toContain('Settings tab')
