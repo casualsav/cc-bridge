@@ -16,7 +16,7 @@ import {
   STATE_DIR, ACCESS_FILE, PREFS_FILE, APPROVED_DIR, ENV_FILE, INBOX_DIR,
   SOCKET_PATH, DAEMON_PID_FILE, PENDING_EVENTS_FILE,
   DAEMON_LOG_FILE, WATCHDOG_PID_FILE, HEARTBEAT_FILE, anchorCwd, cwdFaultHint, stableCwd,
-  hasLiveOauthCredentials, credentialsCopyDecision, blankedCredentialsAlert,
+  hasLiveOauthCredentials, credentialsCopyDecision, blankedCredentialsAlert, syncCredentials,
   type ShimToDaemon, type DaemonToShim, type InboundParams, type FailoverHop,
 } from './common.ts'
 import { acquireTokenLock, tokenLockPath } from './token-lock.ts'
@@ -16095,6 +16095,25 @@ setInterval(() => void ensureChatProfile().catch(e => process.stderr.write(`chat
 // Credential canary re-check on the same slow timer (deduped inside): catches a mid-day blanking of
 // the main account's OAuth within a minute of it happening.
 setInterval(() => canaryMainCredentials(), 60_000).unref()
+
+// The credential sync (durability design, approved 2026-08-02): converge every config dir that can
+// hold a claude.ai OAuth login onto the freshest live token — symmetric freshest-wins, so a refresh
+// (or provider switch / failover) in one dir propagates to all the others within a tick and no dir is
+// ever stranded by rotation. The canary rides the same tick. The CLI re-reads .credentials.json at
+// refresh time (observed via strace), so overwriting a live process's file IS picked up at its next
+// refresh — the sync genuinely self-heals, no restart required.
+function credentialSyncDirs(): string[] {
+  const dirs = new Set<string>([MAIN_ACCOUNT.configDir, SCOUT_CONFIG_DIR])
+  for (const a of listAccounts()) dirs.add(a.configDir)
+  return [...dirs]
+}
+function syncFleetCredentials(): void {
+  try {
+    const updated = syncCredentials(credentialSyncDirs())
+    if (updated.length) process.stderr.write(`daemon: credential sync updated ${updated.length} dir(s): ${updated.map(f => f.replace(/\/\.credentials\.json$/, '')).join(', ')}\n`)
+  } catch (e) { process.stderr.write(`daemon: credential sync failed: ${e}\n`) }
+}
+setInterval(() => syncFleetCredentials(), 60_000).unref()
 // Agent bus (agent-bus P1): deliver queued agent↔agent asks to idle targets + expire stale ones.
 if (AGENT_BUS_ENABLED) setInterval(() => void sweepBus(), LATER_SWEEP_MS).unref()
 
@@ -17661,8 +17680,10 @@ void (async () => {
           // Seamless upgrade for DM-mode boxes: create the `chat` profile the DM lane needs. Runs
           // here (not before connect) because it may DM the owner; no-ops on every later reconnect.
           void ensureChatProfile().catch(e => process.stderr.write(`chatProfile: provisioning failed: ${e}\n`)).then(() => refreshChatTemplates()).catch(e => process.stderr.write(`chatTemplates: refresh failed: ${e}\n`))
-          // Credential canary — the shared-login blank can wedge the fleet before anyone notices.
+          // Credential canary + sync — the shared-login blank can wedge the fleet before anyone
+          // notices; the sync converges every config dir onto the freshest token.
           canaryMainCredentials()
+          syncFleetCredentials()
           // Lane hygiene: drop lanes whose chat left the allowlist (their outbound would 403
           // forever) and lanes whose chat has since upgraded to a chat lane (dmChat ⊕ dmLane —
           // two bindings for one DM made outbound resolve two different owner sessions).

@@ -123,6 +123,52 @@ export function blankedCredentialsAlert(credentialsPath: string): string | null 
   if (!existsSync(credentialsPath) || hasLiveOauthCredentials(credentialsPath)) return null
   return '🚨 Main account OAuth credentials are BLANKED (empty tokens) — Claude sessions will demand /login. Restore a live copy (the chat account still has one) or run /login; the fleet is wedged until then.'
 }
+
+// The freshest LIVE credentials file among several config dirs, or null when none is live. "Freshest"
+// is the highest access-token expiresAt — a refresh mints a fresh ~7h expiry, so the rotated token
+// always wins — tie-broken by refreshTokenExpiresAt. Blanked / missing / malformed files are excluded
+// (hasLiveOauthCredentials): a blanked file is never a source, freshest-token-wins is never stale-
+// over-fresh.
+export function freshestCredentials(paths: string[]): string | null {
+  let best: string | null = null
+  let bestAt = -1
+  let bestRefreshAt = -1
+  for (const p of paths) {
+    if (!hasLiveOauthCredentials(p)) continue
+    try {
+      const cred = JSON.parse(readFileSync(p, 'utf8')) as { claudeAiOauth?: { expiresAt?: number; refreshTokenExpiresAt?: number } }
+      const at = cred.claudeAiOauth?.expiresAt ?? 0
+      const rt = cred.claudeAiOauth?.refreshTokenExpiresAt ?? 0
+      if (at > bestAt || (at === bestAt && rt > bestRefreshAt)) { best = p; bestAt = at; bestRefreshAt = rt }
+    } catch { /* not live / unreadable — already excluded above */ }
+  }
+  return best
+}
+
+// Converge a set of config dirs' .credentials.json onto the freshest live token. SYMMETRIC: any dir
+// may be the refresher; the tick after a refresh propagates that token to every other dir, so rotation
+// in one config dir can no longer strand the others (the shared-login failure of 2026-08-01/02). The
+// source dir's own file is never rewritten. Returns the rewritten paths. A dir already holding the
+// freshest token is byte-compared and left untouched — no rewrite, no mtime churn (the caller's
+// control).
+export function syncCredentials(configDirs: string[]): string[] {
+  const files = configDirs.map(d => join(d, '.credentials.json'))
+  const src = freshestCredentials(files)
+  if (!src) return []
+  const updated: string[] = []
+  let srcText: string | null = null
+  for (const f of files) {
+    if (f === src) continue
+    try {
+      const cur = readFileSync(f, 'utf8')
+      if (srcText === null) srcText = readFileSync(src, 'utf8')
+      if (cur === srcText) continue   // byte-identical — no rewrite, no mtime churn
+      writeFileSync(f, srcText, { mode: 0o600 })
+      updated.push(f)
+    } catch { /* unreadable dest — leave it; next tick retries */ }
+  }
+  return updated
+}
 export const ACCESS_FILE = join(STATE_DIR, 'access.json')
 // Mutable preferences (stream mode, pin, auto-continue, voice, …). Split out from access.json so
 // static mode can freeze the security half (allowlist) while these stay editable from /settings.
