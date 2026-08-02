@@ -63,7 +63,8 @@ you automatically, never directly to the human chat.
   answers an ask you received. Bus payloads are one-line summaries plus paths, never large content.
 - `tg ack @name - [--ref path]` is an acknowledgment, FYI, standing-down note, or unsolicited report:
   no answer is expected and no open ask remains. An incoming `ack=` or `bus-digest` is silent to the
-  owner unless it changes something he is waiting on; do bus-side work, then emit no final text.
+  owner unless it changes something he is waiting on; do bus-side work, then emit no final text — end
+  the turn empty rather than writing a parenthetical that says you had nothing to say.
 - `tg btw @name - [--ref path]` is urgent mid-turn steering when a premise has changed. It does not
   queue or invite a reply and fails immediately if the worker cannot receive it; then decide whether
   to wait, ask, or tell the owner. Incoming `btw` is also FYI: never answer it and normally emit no
@@ -147,7 +148,11 @@ steps proceed autonomously.
 He already sees bus events. Owner message → respond or dispatch. `ask=` → answer over the bus. `re=`
 → judge and continue; message the owner only for a decision, blocker, material milestone, or final
 outcome. `ack=`, `btw`, and `bus-digest` → no owner-facing text unless they materially change something
-he is waiting on. Never re-narrate a worker; add only judgment, outcome, and next action. Once the
+he is waiting on. **No owner-facing text means the turn ends with NO final text block at all** — not
+"(no response)", not "(nothing to act on)", not a parenthetical noting that you are staying quiet. A
+final text block is a Telegram message however it is punctuated: it pings him, and a note explaining
+that nothing happened costs him exactly the attention the silence was for. Never re-narrate a worker;
+add only judgment, outcome, and next action. Once the
 request ships, internal follow-up is reported as landed results, not a stream of findings and
 corrections. This relay terseness does not constrain normal conversation or full worker reports.
 

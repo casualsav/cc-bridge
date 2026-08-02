@@ -149,7 +149,7 @@ import {
   AGENT_BUS_ENABLED, AGENT_BUS_PIN_UI,
   createPending, getPending, removePending, putPending, listPending, markInjected, expirePending, dropExpired, LATE_ANSWER_GRACE_MS, ASK_TTL_MS,
   recordAgentAsk, resetHops, currentHops, BREADTH_NOTICE_AT, askResultText, planAskReap, deliveredReapCandidates, groupClosuresByAskerAndTarget, reapNotifiesAsker, queuedFor, type AskDelivery,
-  askerAlreadyResolved, markAskerResolved, reapNoticeSuppressed, planAssigneeNudge, markNudged,
+  askerAlreadyResolved, askerKilledTarget, markAskerResolved, reapNoticeSuppressed, planAssigneeNudge, markNudged,
   unreportedWorkMarker, markReported, markBriefed,
   getReportedAt, getBriefedBy,
   setSessionDepth, resetAllSessionDepth, pruneSessionDepth, nextAskDepth, depthExceeded, depthLimit,
@@ -3303,13 +3303,18 @@ async function reapDeadAsk(p: BusPending, room: string): Promise<BusPending | nu
   // unanswered" (ask 447, 2026-07-27: the owner closed the session by hand and the asker's Fable lane
   // burned a turn on a question that had been settled two asks earlier). See reapNoticeSuppressed for
   // why only the delivered half is silenced.
-  const stale = reapNoticeSuppressed(p, tailLedger(room, LEDGER_SCAN))
+  const ledger = tailLedger(room, LEDGER_SCAN)
+  const stale = reapNoticeSuppressed(p, ledger)
+  // Name WHICH silence this is. One log line covering two predicates said "asker already answered"
+  // about a session that had answered nothing and had simply killed its own worker — a log that
+  // misattributes a suppression is worse than none, because it is the only record either leaves.
+  const quietWhy = askerKilledTarget(p, ledger) ? 'asker killed the target' : 'asker already answered'
   const why = delivered ? 'delivered but the target session ended before answering' : 'never delivered — target session ended'
   // Same contract as the suppressed TTL expiry: the reap is true history and is always recorded, and
   // `suppressed` carries the fact that nothing was sent, so `tg history` shows it marked while the
   // ambient digest omits it. Two surfaces, one answer.
   appendLedger(room, { ts: Date.now(), kind: 'expire', from: p.toName, to: p.fromName, id: p.id, text: why, ...(stale ? { suppressed: true } : {}) })
-  process.stderr.write(`daemon: ask ${p.id} to @${p.toName} (${p.toSid}) reaped — ${why}${stale ? ' (no notice sent — asker already answered)' : ''}\n`)
+  process.stderr.write(`daemon: ask ${p.id} to @${p.toName} (${p.toSid}) reaped — ${why}${stale ? ` (no notice sent — ${quietWhy})` : ''}\n`)
   return stale ? null : p
 }
 

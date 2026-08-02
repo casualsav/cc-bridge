@@ -507,7 +507,25 @@ export function reapNotifiesAsker(p: Pick<BusPending, 'injected'>): boolean { re
 // — "the target never even received this" — which stays true and actionable whatever else that target
 // answered, because that work never started. Silencing it for symmetry would walk back bug 11c.
 export function reapNoticeSuppressed(p: BusPending, entries: LedgerEntry[]): boolean {
-  return p.injected && askerAlreadyResolved(p, entries)
+  return askerKilledTarget(p, entries) || (p.injected && askerAlreadyResolved(p, entries))
+}
+
+// The asker ENDED the target itself, so "@X ended with your ask N unanswered" is telling a session
+// the consequence of its own decision — a wakeup that costs a turn and carries nothing. `tg kill`
+// already appends a row naming both sides, so this needs no new state: the fact was in the ledger
+// before the reap that reads it.
+//
+// Unlike askerAlreadyResolved this covers the NEVER-DELIVERED half too, and the reason the two differ
+// is the reason each exists. A never-delivered reap tells the asker "that work never started", which
+// it may genuinely not know — except when it is the one that stopped it. Killing a target is a claim
+// about every ask in flight to it, not just the delivered ones.
+//
+// Scoped to kills at or after the ask was created, so an earlier kill of a since-reopened endpoint of
+// the same name cannot silence a fresh ask. A close from any other surface (the owner's mini-app
+// Close, /exit, a crash) carries a different `from` and is unaffected — a third party's kill still
+// notifies the asker, which is the control this must not change.
+export function askerKilledTarget(p: BusPending, entries: LedgerEntry[]): boolean {
+  return entries.some(e => e.kind === 'kill' && e.from === p.fromName && e.to === p.toName && e.ts >= p.createdAt)
 }
 
 // The DELIVERED half of the target-gone reap: which rows the caller should run its async liveness

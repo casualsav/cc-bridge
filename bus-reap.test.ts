@@ -239,3 +239,30 @@ test('a gist is flattened, de-tagged and clamped — a long multi-line ask canno
   expect(out.split('\n')).toHaveLength(3)
   expect(out.split('\n')[1].length).toBeLessThanOrEqual(4 + 81)
 })
+
+// ---- the killer needs no notice (the no-op wakeup class) ----
+//
+// Observed 2026-08-02: a session ran `tg kill probeopus`, and the reap woke it with "@probeopus ended
+// with your ask 1094 unanswered" — a turn spent learning the consequence of its own command.
+
+const killRow = (over: Partial<LedgerEntry> = {}): LedgerEntry =>
+  ({ ts: 10, kind: 'kill', from: 'chat', to: 'ccbridge', text: 'exiting', ...over })
+
+test('a reap is silent toward the asker that killed the target', () => {
+  expect(reapNoticeSuppressed(ask({ createdAt: 5 }), [killRow()])).toBe(true)
+  // The never-delivered half too: killing a target is a claim about every ask in flight to it.
+  expect(reapNoticeSuppressed(ask({ createdAt: 5, injected: true }), [killRow()])).toBe(true)
+})
+
+test('THE CONTROL: a third party\'s ask still hears about the same kill', () => {
+  // @other asked; @chat killed. @other has no way to know, so it must still be told.
+  expect(reapNoticeSuppressed(ask({ createdAt: 5, fromName: 'other', fromSid: 'sidOther' }), [killRow()])).toBe(false)
+  // A kill of some OTHER session says nothing about this ask.
+  expect(reapNoticeSuppressed(ask({ createdAt: 5 }), [killRow({ to: 'somebody-else' })])).toBe(false)
+  // An owner-side close (mini-app Close, /exit, a crash) is not the asker's own decision.
+  expect(reapNoticeSuppressed(ask({ createdAt: 5 }), [killRow({ from: 'owner' })])).toBe(false)
+  // A kill that predates the ask is a different, since-reopened endpoint of the same name.
+  expect(reapNoticeSuppressed(ask({ createdAt: 50 }), [killRow({ ts: 10 })])).toBe(false)
+  // And with no kill at all, nothing changes for a delivered-and-unanswered ask.
+  expect(reapNoticeSuppressed(ask({ createdAt: 5, injected: true }), [])).toBe(false)
+})
