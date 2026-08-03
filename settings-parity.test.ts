@@ -1,86 +1,85 @@
-// THE ORDER GATE — the Mini App's settings screen renders the same rows as /settings, in the same
-// order, and neither surface can tell you when that stops being true: each renders its own list and
-// looks correct. This is the same lockstep problem the three Telegram renderers already have
-// (settingsText / settingsMarkdown / settingsKeyboard, daemon.ts) — parked there by ruling, closed
-// here for the surface being built.
+// THE ORDER GATE — and since 2026-08-03 it guards a different seam, because the seam moved.
 //
-// Ground truth is the SOURCE of both lists, read as text, because neither can be imported: daemon.ts
-// starts a daemon on import and webapp/index.html is a browser file. That makes this a static check,
-// so it is written to fail loudly on the thing that actually goes wrong (a row added to one side, or
-// two rows swapped) rather than to pass on anything that parses. Its own falsification is recorded
-// below: swapping two entries in either list fails it.
+// It used to compare the daemon's /settings rows against an ordered `meta` list inside
+// webapp/index.html: two lists, kept in lockstep by this file. The owner ruled that out — "It should
+// be a 1:1 parity of the /settings menu, and both should be front ends of the same backend" — so the
+// app holds no order at all now. `settingsRows()` is the one structure, `/api/settings` serves it,
+// and the client renders what it receives. "Rendered == served" is a BROWSER claim and lives in
+// scripts/webapp-measure/settings-sheets.mjs, which feeds a deliberately wrong order and fails any
+// client that keeps its own.
+//
+// What is left here is the seam that remains inside daemon.ts, and it is the three-renderer lockstep
+// that was previously PARKED — parked only while nothing depended on it, and settingsRows() now does:
+// the app's whole screen is that list, so a row added to settingsMarkdown and forgotten here is a row
+// that silently exists on Telegram and not in the app. The three lists must agree on rows, on order,
+// and on the conditions that drop rows.
+//
+// Ground truth is the SOURCE, read as text, because daemon.ts starts a daemon on import. That makes
+// this a static check, so it is written to fail on what actually goes wrong — a row added to one
+// list, two rows swapped, or a condition dropped from one copy. Its own falsification is recorded:
+// swapping two entries in either list fails it, as does deleting one guard.
 import { test, expect } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 const DIR = import.meta.dir
 const daemonSrc = readFileSync(join(DIR, 'daemon.ts'), 'utf8')
-const appSrc = readFileSync(join(DIR, 'webapp', 'index.html'), 'utf8')
+const between = (from: string, to: string): string => {
+  const start = daemonSrc.indexOf(from)
+  expect(start).toBeGreaterThan(0)
+  const end = daemonSrc.indexOf(to, start)
+  expect(end).toBeGreaterThan(start)
+  return daemonSrc.slice(start, end)
+}
 
 // The /settings ROOT rows, in render order, off settingsMarkdown's `rows` array.
-function rootRows(): string[] {
-  const body = daemonSrc.slice(daemonSrc.indexOf('function settingsMarkdown('))
-  const arr = body.slice(body.indexOf('const rows:'), body.indexOf('const help ='))
+const markdownRows = (): string[] => {
+  const arr = between('function settingsMarkdown(', 'const help =')
   return [...arr.matchAll(/\['([^']+)',/g)].map(m => m[1]!)
 }
-
-// The Mini App's rows, in render order, off renderSettings' `meta` object.
-function appKeys(): string[] {
-  const body = appSrc.slice(appSrc.indexOf('const meta = {'))
-  const obj = body.slice(0, body.indexOf('\n  };'))
-  return [...obj.matchAll(/^\s{4}(\w+):\s*\{/gm)].map(m => m[1]!)
+// The same rows as the structure the Mini App is served.
+const rowsBody = (): string => between('function settingsRows(', '\n}\n')
+const servedRows = (): string[] => [...rowsBody().matchAll(/name: '([^']+)'/g)].map(m => m[1]!)
+// The emoji-only keyboard under the table — one button per row, same order.
+const keyboardBody = (): string => between('function settingsKeyboard(', 'const kb = new InlineKeyboard()')
+const keyboardEmoji = (): string[] => [...keyboardBody().matchAll(/\['([^']+)', '[a-z:]+'\]/g)].map(m => m[1]!)
+// Every key webappReadSettings actually serves, so a row cannot name one that does not exist.
+const servedKeys = (): string[] => {
+  const body = between('async function webappReadSettings(', '\n}\n')
+  return [...body.matchAll(/^ {6}(?:\.\.\.\(.*?\? \{ )?(\w+): \{/gm)].map(m => m[1]!)
 }
 
-// The parity map, and it is the deliverable as much as the assertion: one /settings root row →
-// the app key(s) that carry it. A row with several keys is one Telegram sub-panel spread over
-// several app rows (Model defaults is four dials + two policy toggles); they must sit together and
-// in the panel's own order. A row mapped to [] is enumerated as NOT mirrored, with the reason.
-const PARITY: Array<{ row: RegExp; keys: string[]; why?: string }> = [
-  { row: /Accounts/, keys: ['accounts'] },
-  { row: /Model defaults/, keys: ['spawnModel', 'spawnEffort', 'chatModel', 'chatEffort', 'spawnAuto', 'fableForAgents'] },
-  { row: /GitHub/, keys: ['github'] },
-  { row: /Batch allow/, keys: ['batchAllow'] },
-  { row: /Voice transcription/, keys: ['transcribeBackend', 'transcribeModel'] },
-  { row: /Voice replies/, keys: ['voice', 'ttsMode', 'ttsEngine', 'ttsVoice'] },
-  { row: /Stream/, keys: ['stream'] },
-  { row: /Pinned message/, keys: ['sessionPin'] },
-  { row: /Preferred mode/, keys: ['prefMode'] },
-  { row: /clear approval/, keys: ['confirmReset'] },
-  { row: /File browser/, keys: ['fileBrowser'] },
-  { row: /Base folder/, keys: ['baseFolder'] },
-  { row: /Agent bus/, keys: ['switchboard'] },
-]
-
-// App-only rows: they belong to no /settings root row and are exempt from the order check. Codex's
-// two dials live INSIDE the Accounts panel on Telegram rather than on the root, so they are listed
-// here rather than mapped — parity is against the root list.
-const APP_ONLY = ['codexModel', 'codexEffort', 'mcp', 'mode', 'model', 'effort']
-
-test('every /settings root row is mapped (nothing silently unmirrored)', () => {
-  const rows = rootRows()
-  expect(rows.length).toBeGreaterThan(10)   // the extractor found a real list, not an empty match
-  for (const row of rows)
-    expect(PARITY.some(p => p.row.test(row))).toBe(true)
-  expect(PARITY.length).toBe(rows.length)   // and no map entry for a row that no longer exists
+test('the app is served the same rows /settings renders, in the same order', () => {
+  const md = markdownRows()
+  expect(md.length).toBeGreaterThan(10)   // the extractor found a real list, not an empty match
+  expect(servedRows()).toEqual(md)
 })
 
-test('every mapped app key exists on the settings screen', () => {
-  const keys = appKeys()
-  expect(keys.length).toBeGreaterThan(10)
-  for (const p of PARITY) for (const k of p.keys) expect(keys).toContain(k)
+test('the keyboard has one button per row, in the row order', () => {
+  const rows = markdownRows()
+  const emoji = keyboardEmoji()
+  expect(emoji.length).toBe(rows.length)
+  rows.forEach((row, i) => expect(row.startsWith(emoji[i]!)).toBe(true))
 })
 
-test('SETTINGS_ORDER_GATE — the app renders the /settings rows in the /settings order', () => {
-  const rows = rootRows()
-  const keys = appKeys()
-  // Expected app-key order: each root row's keys, in root-row order.
-  const expected = rows.flatMap(row => PARITY.find(p => p.row.test(row))!.keys)
-  const actual = keys.filter(k => expected.includes(k))
-  expect(actual).toEqual(expected)
+test('the three lists drop rows on the SAME conditions', () => {
+  // Each guard appears once per conditional row, in each of the three lists. A guard deleted from
+  // one copy — the way the conditional rows came to render unconditionally in the app — moves a
+  // count and fails here.
+  const lists = [between('function settingsMarkdown(', 'const help ='), rowsBody(), keyboardBody()]
+  const count = (s: string, needle: string): number => s.split(needle).length - 1
+  for (const guard of ['WEBAPP_ENABLED', 'isTopicMode()', 'AGENT_BUS_PIN_UI']) {
+    const seen = lists.map(s => count(s, guard))
+    expect(new Set(seen).size).toBe(1)
+    expect(seen[0]).toBeGreaterThan(0)
+  }
 })
 
-test('the app adds nothing unaccounted for', () => {
-  const mapped = new Set(PARITY.flatMap(p => p.keys))
-  for (const k of appKeys())
-    if (!mapped.has(k)) expect(APP_ONLY).toContain(k)
+test('every key a row names is a key the payload serves', () => {
+  const keys = new Set(servedKeys())
+  expect(keys.size).toBeGreaterThan(10)
+  const named = [...rowsBody().matchAll(/keys: \[([^\]]+)\]/g)]
+    .flatMap(m => [...m[1]!.matchAll(/'([^']+)'/g)].map(x => x[1]!))
+  expect(named.length).toBeGreaterThan(10)
+  for (const k of named) expect(keys).toContain(k)
 })

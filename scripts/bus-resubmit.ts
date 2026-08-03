@@ -20,10 +20,15 @@
 import { exec, sleep } from '../proc.ts'
 // THE REAL ONES, imported. A harness that re-implements the dance proves only that the harness works.
 import { pasteVerified, resubmitVerified, type PasteOutcome } from '../pane-io.ts'
+import { inputBoxOccupant } from '../prompt.ts'
 
 const REPASTE = process.argv.includes('--repaste')
 const SESSION = `brs-${process.pid}`
 const KEYS = ['Enter']
+// pasteVerified's occupancy guard, the real one — these panes run `cat`, so there is no bordered input
+// box for it to find and it returns null for every capture. A stub that always answered "empty" would
+// pass just as well and would be the harness re-implementing the thing under test.
+const OCCUPANT = inputBoxOccupant
 
 let bad = 0
 const check = (ok: boolean, label: string) => { console.log(`${ok ? 'OK  ' : 'FAIL'}  ${label}`); if (!ok) bad++ }
@@ -50,10 +55,10 @@ const neverLanded = () => false
 // 'failed' delivery is pasted again, an 'unsubmitted' one is only Enter'd again. `--repaste` is the
 // pre-fix rule — anything that did not come back true gets pasted again.
 async function retry(p: string, text: string, outcome: PasteOutcome): Promise<PasteOutcome> {
-  if (REPASTE) return pasteVerified(p, text, KEYS, reallyLanded(text))
+  if (REPASTE) return pasteVerified(p, text, KEYS, reallyLanded(text), OCCUPANT)
   return outcome === 'unsubmitted'
     ? resubmitVerified(p, KEYS, reallyLanded(text))
-    : pasteVerified(p, text, KEYS, reallyLanded(text))
+    : pasteVerified(p, text, KEYS, reallyLanded(text), OCCUPANT)
 }
 
 await exec('tmux', ['new-session', '-d', '-s', SESSION, '-n', 'seed', 'cat'], { timeout: 4000 })
@@ -64,7 +69,7 @@ try {
   // ── 1. THE BUG. The submit is not confirmed, but the text did reach the session.
   {
     const p = await pane('unconfirmed'); await sleep(300)
-    const first = await pasteVerified(p, 'ACK-1092', KEYS, neverLanded)
+    const first = await pasteVerified(p, 'ACK-1092', KEYS, neverLanded, OCCUPANT)
     check(first === 'unsubmitted', `an unconfirmed submit reports 'unsubmitted', not 'failed' (got ${JSON.stringify(first)})`)
     await sleep(400)
     const after = await retry(p, 'ACK-1092', first)
@@ -82,7 +87,7 @@ try {
     const dead = await pane('dead'); await sleep(300)
     await exec('tmux', ['kill-pane', '-t', dead], { timeout: 2000 })
     await sleep(200)
-    const failed = await pasteVerified(dead, 'LOST-MESSAGE', KEYS, reallyLanded('LOST-MESSAGE'))
+    const failed = await pasteVerified(dead, 'LOST-MESSAGE', KEYS, reallyLanded('LOST-MESSAGE'), OCCUPANT)
     check(failed === 'failed', `a refused paste reports 'failed', never 'unsubmitted' (got ${JSON.stringify(failed)})`)
 
     const live = await pane('afterfail'); await sleep(300)
@@ -95,7 +100,7 @@ try {
   // ── 3. CONTROL: an ordinary delivery is untouched — one paste, one Enter, one message.
   {
     const p = await pane('normal'); await sleep(300)
-    const out = await pasteVerified(p, 'ORDINARY', KEYS, reallyLanded('ORDINARY'))
+    const out = await pasteVerified(p, 'ORDINARY', KEYS, reallyLanded('ORDINARY'), OCCUPANT)
     await sleep(500)
     const n = await arrivals(p, 'ORDINARY')
     check(out === 'landed', `a normal delivery reports 'landed' (got ${JSON.stringify(out)})`)
@@ -107,7 +112,7 @@ try {
   //    that actually landed would invent one.
   {
     const p = await pane('empty'); await sleep(300)
-    await pasteVerified(p, 'ALREADY-IN', KEYS, reallyLanded('ALREADY-IN'))
+    await pasteVerified(p, 'ALREADY-IN', KEYS, reallyLanded('ALREADY-IN'), OCCUPANT)
     await sleep(400)
     await resubmitVerified(p, KEYS, reallyLanded('ALREADY-IN'))
     await sleep(500)

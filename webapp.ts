@@ -79,12 +79,22 @@ export interface UsageView {
 // Settings tab payload: each toggle is {value, editable} so the SPA renders the live state and only
 // shows mutation controls for the writable ones (mode/model/effort are read-only here — they drive
 // the tmux pane). `write` mirrors canWrite (server-side mutation gate).
+// ONE root row of the /settings menu, as the Mini App renders it. The app holds no order of its own
+// since 2026-08-03 (the owner: "It should be a 1:1 parity of the /settings menu, and both should be
+// front ends of the same backend") — `rows` below is the whole structure of that screen, conditions
+// included, and a row the daemon does not serve is a row the app cannot draw. `keys` names the
+// settings-payload entries the row carries: one for a plain row, several for a row that opens a
+// sub-panel sheet, in which case `value` is the group's state line.
+export interface SettingsRootRow { id: string; name: string; keys: string[]; value?: string; panel?: 'accounts' | 'github' }
 export interface SettingsView {
   write: boolean
+  rows: SettingsRootRow[]
   // `raw` is the machine value behind a displayed one, for a client that has to MATCH a setting
   // rather than print it (prefMode's `value` is a label with an emoji in it; the new-session sheet
   // needs the mode itself). Optional and ignored by the settings list, which renders `value`.
-  settings: Record<string, { value: unknown; editable: boolean; options?: string[]; label?: string; raw?: string }>
+  // `kind: 'text'` is a free-text setting (a path, an open-ended model id) — the daemon knows which
+  // ones validate as shapes rather than as vocabularies, so the app does not keep a second list.
+  settings: Record<string, { value: unknown; editable: boolean; options?: string[]; label?: string; raw?: string; kind?: 'text'; placeholder?: string }>
 }
 // One session on the fleet dashboard. `working` and the dials read live from the pane; `task` is
 // the current activity line (working) or the last reply snippet (idle). alive=false ⇒ dead pane.

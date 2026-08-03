@@ -255,9 +255,18 @@ function fakeSlashPane(opts: { acceptsOnSubmitNo: number | null; occupiedWith?: 
 }
 // The prompt.ts predicates, reduced to what the fake pane renders. boxContent returns null (not '') for
 // an empty box, matching inputBoxContent's contract as pasteSlashVerified reads it.
+// boxOccupant is the GHOST-AWARE reader (prompt.ts's inputBoxOccupant in production, reduced here to the
+// one property that matters: faint content is not an occupant). It is deliberately a SEPARATE predicate
+// from boxContent — what these tests pin is that pasteSlashVerified asks the ghost-aware one about
+// occupancy. Whether the real reader parses SGR correctly is prompt.test.ts's job, against live captures.
 const slashPredicates = (palette: string[] = []) => ({
   submitKeys: ['Enter'],
   boxContent: (cap: string) => (cap.startsWith('SLASH-BOX: ') ? cap.slice('SLASH-BOX: '.length) : null),
+  boxOccupant: (cap: string) => {
+    if (!cap.startsWith('SLASH-BOX: ')) return null
+    const box = cap.slice('SLASH-BOX: '.length)
+    return box.startsWith('\x1b[2m') ? '' : box
+  },
   wouldMisfire: (_cap: string, _text: string) => (palette.length ? palette : null),
   landed: (cap: string) => cap.includes('BOX-EMPTY'),
 })
@@ -287,6 +296,56 @@ test('pasteSlashVerified: an OCCUPIED box is refused by name, and nothing is typ
   expect(p.pasted()).toBe(false)
   expect(p.submits()).toBe(0)
   expect(p.cleared()).toBe(false)
+})
+
+test('pasteSlashVerified: a box holding only the CLI ghost is NOT occupied — the slash goes through', async () => {
+  // The owner's symptom, as a test: for hours his slash commands were refused against a suggestion the
+  // CLI had painted itself. Same fixture as the test above, differing ONLY in the faint attribute.
+  const p = fakeSlashPane({ acceptsOnSubmitNo: 1, occupiedWith: '\x1b[2mgo ahead on the shape\x1b[0m' })
+  expect(await pane.pasteSlashVerified('%1', '/compact', slashPredicates())).toEqual({ ok: true })
+  expect(p.pasted()).toBe(true)
+  expect(p.submits()).toBe(1)
+})
+
+// ---- pasteVerified's occupancy guard: the PROSE path, which never checked the box at all ----------
+// Until 2026-08-03 a bus ask pasted straight on top of whatever was sitting in the target's composer,
+// and the single Enter that followed submitted the stranded draft and the ask as ONE user turn —
+// somebody's half-written line delivered as instructions under our envelope. The slash paths had
+// refused on this since they were written; the asymmetry is why asks kept landing while slashes were
+// refused against the ghost. Both directions are pinned here, because a guard that refuses everything
+// would pass a one-sided test and brick the bus's main verb.
+const proseOccupant = (cap: string) => {
+  if (!cap.startsWith('BOX: ')) return null
+  const box = cap.slice('BOX: '.length)
+  return box.startsWith('\x1b[2m') ? '' : box
+}
+function fakeProsePane(boxHolds: string) {
+  let pasted = false, submits = 0
+  execImpl = async (_cmd, args) => {
+    if (args.includes('display-message')) return { stdout: '%1\n' }
+    if (args.includes('set-buffer')) return { stdout: '' }
+    if (args.includes('paste-buffer')) { pasted = true; return { stdout: '' } }
+    if (args.includes('send-keys')) { submits++; return { stdout: '' } }
+    if (args.includes('capture-pane')) return { stdout: pasted ? 'BOX-EMPTY' : `BOX: ${boxHolds}` }
+    return { stdout: '' }
+  }
+  return { pasted: () => pasted, submits: () => submits }
+}
+
+test('pasteVerified: a box holding real typed text is refused — nothing is pasted on top of it', async () => {
+  const p = fakeProsePane('half a thought')
+  expect(await pane.pasteVerified('%1', 'the ask', ['Enter'], c => c.includes('BOX-EMPTY'), proseOccupant))
+    .toBe('occupied')
+  expect(p.pasted()).toBe(false)   // the merge this guard exists to prevent
+  expect(p.submits()).toBe(0)
+})
+
+test('pasteVerified: a box holding only the CLI ghost delivers normally', async () => {
+  // The load-bearing half. Refusing here would stop every bus ask to any idle session on the box.
+  const p = fakeProsePane('\x1b[2mgo ahead on the shape\x1b[0m')
+  expect(await pane.pasteVerified('%1', 'the ask', ['Enter'], c => c.includes('BOX-EMPTY'), proseOccupant))
+    .toBe('landed')
+  expect(p.pasted()).toBe(true)
 })
 
 test('pasteSlashVerified: a palette that would misfire refuses, clears, and never submits', async () => {

@@ -14,6 +14,15 @@ export async function capturePane(paneId: string): Promise<string> {
   return stdout
 }
 
+// The same capture with the terminal's attributes KEPT (`-e`). Exactly one question needs them: is
+// the text in the input box something a person typed, or the CLI's own faint suggestion ghost
+// (`inputBoxOccupant`). Every other detector keeps reading the plain capture above — colour is
+// theme-dependent and parsing it is the trap prompt.ts's palette note describes.
+export async function capturePaneStyled(paneId: string): Promise<string> {
+  const { stdout } = await exec('tmux', ['capture-pane', '-p', '-t', paneId, '-J', '-e'], { timeout: 3000 })
+  return stdout
+}
+
 // Pane validation + injection guard (opus-direct Block B).
 //
 // Three-valued on purpose. `paneAlive` answers a yes/no question with a "no" whether tmux said "there
@@ -149,15 +158,18 @@ export type PastedSlash =
 export async function pasteSlashVerified(paneId: string, text: string, p: {
   submitKeys: string[]
   boxContent: (cap: string) => string | null
+  boxOccupant: (styledCap: string) => string | null
   wouldMisfire: (cap: string, text: string) => string[] | null
   landed: (cap: string) => boolean
 }): Promise<PastedSlash> {
   if (!(await paneAlive(paneId))) return { ok: false, offered: [] }
   // Refuse an occupied box rather than typing over it — `tg slash`'s rule, applied to this surface.
   // The read is taken HERE, after our turn in the delivery queue, so unlike a pre-queue gate it cannot
-  // have gone stale by the time we paste.
-  const before = await capturePane(paneId).catch(() => '')
-  const occupied = before ? p.boxContent(before) : null
+  // have gone stale by the time we paste. STYLED, and read through boxOccupant rather than boxContent:
+  // this is the surface where the owner hit the CLI's suggestion ghost, and refusing his slash command
+  // against text he never typed is the bug, not the guard.
+  const before = await capturePaneStyled(paneId).catch(() => '')
+  const occupied = before ? p.boxOccupant(before) : null
   if (occupied) return { ok: false, occupied }
   const buf = injectBuffer(paneId)
   await exec('tmux', ['set-buffer', '-b', buf, '--', text], { timeout: 2000 })
@@ -333,6 +345,8 @@ export const injectBuffer = (paneId: string) => `tg-in-${paneId.replace(/[^A-Za-
 // carried to the pane: **a failed delivery is either a REFUSAL or an UNKNOWN OUTCOME, and only a
 // refusal may be re-sent.**
 //
+//   'occupied'    — somebody's real text was already in the box. NOTHING was typed, and a retry is
+//                   right only once that text is gone — see the note on the check itself below.
 //   'failed'      — tmux refused the paste. NOTHING reached the input box, so a full retry is right.
 //   'unsubmitted' — the paste took, the Enter was not confirmed. The text IS in the box. A retry must
 //                   press Enter again and MUST NOT paste again.
@@ -349,11 +363,26 @@ export const injectBuffer = (paneId: string) => `tg-in-${paneId.replace(/[^A-Za-
 // box untouched. Everything after a SUCCESSFUL paste-buffer is 'unsubmitted' on any failure, including
 // a thrown one — the text is in the box whatever went wrong afterwards, and that is the fact the
 // retry needs.
-export type PasteOutcome = 'landed' | 'unsubmitted' | 'failed'
+export type PasteOutcome = 'landed' | 'unsubmitted' | 'failed' | 'occupied'
 
+// `occupant` is REQUIRED, not optional, and that is the point: a paste into an occupied box
+// concatenates, and the single Enter that follows submits the stranded draft and this message as ONE
+// turn — someone else's half-written words delivered as instructions under our envelope. The slash
+// paths have refused on this since they were written; prose never checked at all, which is why asks
+// kept landing while slashes refused on 2026-08-03. Making it a parameter rather than an import keeps
+// this module free of prompt.ts (see the header); making it required means the next paste path cannot
+// forget it.
+//
+// It must be GHOST-AWARE (`inputBoxOccupant`, never `inputBoxContent`): the CLI paints a suggested
+// next message in the box itself, and refusing on that would brick the bus's main verb on text nobody
+// typed. The read is taken here, inside the caller's delivery lock, so it cannot go stale before the
+// paste — a pre-lock gate would be a TOCTOU.
 export async function pasteVerified(
   paneId: string, text: string, keys: string[], landed: (cap: string) => boolean,
+  occupant: (styledCap: string) => string | null,
 ): Promise<PasteOutcome> {
+  const before = await capturePaneStyled(paneId).catch(() => '')
+  if (before && occupant(before)) return 'occupied'
   const buf = injectBuffer(paneId)
   try {
     await exec('tmux', ['set-buffer', '-b', buf, '--', text], { timeout: 2000 })

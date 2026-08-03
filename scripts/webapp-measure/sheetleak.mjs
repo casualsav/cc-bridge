@@ -20,7 +20,7 @@ const ok = (c, label) => { console.log(`${c ? "OK  " : "FAIL"}  ${label}`); if (
 
 // Every element this build added to the document, by id. A sheet WRAPPER is the backdrop: visible,
 // it covers the screen; unstyled, it is a plain block that pushes content down.
-const ADDED = ["mdef", "voicesheet", "ghsheet", "mdefbody", "voicebody", "ghbody", "accaddclaude"];
+const ADDED = ["mdef", "voicesheet", "ttssheet", "ghsheet", "mdefbody", "voicebody", "ttsbody", "ghbody", "accaddclaude"];
 
 const SESSIONS = [{ sid: "s1", name: "cc-bridge", cwd: "~/projects/cc-bridge", alive: true, working: true, state: "working", task: "t", model: "Opus 5", effort: "high", ctxPct: 40, branch: "main", subagents: 0 }];
 
@@ -31,9 +31,18 @@ const open = async (tab) => {
   await p.goto("file://" + PAGE, { waitUntil: "domcontentloaded" });
   await p.evaluate(([ss, t]) => {
     window.api = async q => q.includes("/api/sessions") ? { sessions: ss }
-      : q.includes("/api/settings") ? { write: true, settings: {
+      // `rows` is the served structure the screen renders (settingsRows() in daemon.ts) — without it
+      // the settings screen is empty, and an empty screen leaks nothing for the wrong reason.
+      : q.includes("/api/settings") ? { write: true, rows: [
+          { id: "accounts", name: "👤 Accounts", keys: ["accounts"], panel: "accounts" },
+          { id: "spawnDefaults", name: "🧑‍💻 Model defaults", keys: ["spawnModel", "spawnEffort"], value: "opus · high" },
+          { id: "github", name: "🐙 GitHub", keys: ["github"], panel: "github" },
+          { id: "batchAllow", name: "⚡ Batch allow", keys: ["batchAllow"] },
+          { id: "tts", name: "🔊 Voice replies", keys: ["voice"], value: "off" },
+        ], settings: {
           accounts: { value: "1", editable: false }, spawnModel: { value: "opus", editable: true, options: ["opus"] },
           spawnEffort: { value: "high", editable: true, options: ["high"] }, github: { value: "x", editable: false },
+          voice: { value: false, editable: true },
           batchAllow: { value: true, editable: true } } }
       : q.includes("/api/github") ? { installed: true, accounts: [], login: { active: false } }
       : q.includes("/api/auto") ? { cron: [], queue: [] } : {};
@@ -62,7 +71,8 @@ const painted = (p) => p.evaluate(ids => ids.map(id => {
   console.log("sessions screen:", JSON.stringify(seen));
   ok(leaking.length === 0, `nothing from the settings build paints on Sessions (leaking: ${JSON.stringify(leaking.map(x => `${x.id} ${x.w}x${x.h} ${x.display}`))})`);
   // The same question asked the other way: does any settings ROW exist outside #tab-settings?
-  const stray = await p.$$eval(".setrow", ns => ns.filter(n => !n.closest("#tab-settings") && !n.closest("#mdef") && !n.closest("#voicesheet")).length);
+  // #accounts is on the list because the ✳️ Codex dials are settings rows living in that sheet now.
+  const stray = await p.$$eval(".setrow", ns => ns.filter(n => !n.closest("#tab-settings") && !n.closest("#mdef") && !n.closest("#voicesheet") && !n.closest("#ttssheet") && !n.closest("#accounts")).length);
   ok(stray === 0, `no settings row is parented outside the settings screen or its sheets (got ${stray})`);
   // And the practical symptom: the sessions list must start at the top of the scroller, not be
   // pushed down by an unstyled block above it.
@@ -84,7 +94,7 @@ const painted = (p) => p.evaluate(ids => ids.map(id => {
   const p = await open("settings");
   const seen = await painted(p);
   ok(seen.every(x => x.present), `every settings element is still in the document (${JSON.stringify(seen.filter(x => !x.present).map(x => x.id))})`);
-  const wrappers = seen.filter(x => ["mdef", "voicesheet", "ghsheet"].includes(x.id));
+  const wrappers = seen.filter(x => ["mdef", "voicesheet", "ttssheet", "ghsheet"].includes(x.id));
   ok(wrappers.every(x => !x.painted), "a CLOSED sheet paints nothing even on its own screen");
   ok((await p.$$("#tab-settings .setrow")).length > 0, "the settings screen still renders its rows");
   // Opening one still works — a fix that hid the sheets for good would pass everything above.

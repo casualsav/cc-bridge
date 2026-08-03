@@ -92,7 +92,10 @@ const open = async (path, opts = {}) => {
         return json({ ok: true });
       }
       if (url.includes("/api/sessions")) return json({ sessions: window.__state.sessions });
-      if (url.includes("/api/settings")) return json({ write: true, settings: window.__state.settings });
+      // `rows` is the served structure the settings screen renders (settingsRows() in daemon.ts) —
+      // the client holds no order of its own, so a payload without it renders an empty screen and
+      // the toggle below would have nothing to click.
+      if (url.includes("/api/settings")) return json({ write: true, rows: [{ id: "confirmReset", name: "🧹 /clear approval", keys: ["confirmReset"] }], settings: window.__state.settings });
       if (url.includes("/api/session/feed")) return json({ sid: session.sid, name: session.name, working: false, state: "idle", items: [] });
       if (url.includes("/api/auto")) return json({ cron: [], queue: [] });
       return json({});

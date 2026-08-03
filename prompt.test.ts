@@ -1,6 +1,6 @@
 // Prompt detection from pane captures — select menus vs permission dialogs. Pure functions.
 import { test, expect } from 'bun:test'
-import { slashPaletteEntries, stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, detectFirstRunScreen, isUsageLimitChoice, isResumeSessionPrompt, detectResumeSessionPrompt, detectEditorState, onNormalPrompt, detectModelUnavailable, detectCompacting, compactPercent, permPromptToken, waitingPromptSignature, isRecognizedPrompt, detectStuckScreen, extractGenericOptions, bashModeArmed, detectWorking, isModelSwitchConfirm, slashPaletteRows, slashPaletteWouldMisfire, inputBoxContent, submitLanded, detectModelPicker, parseWorkingStatus, feedbackSurveyOpen, paneAcceptsText } from './prompt.ts'
+import { slashPaletteEntries, stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, detectFirstRunScreen, isUsageLimitChoice, isResumeSessionPrompt, detectResumeSessionPrompt, detectEditorState, onNormalPrompt, detectModelUnavailable, detectCompacting, compactPercent, permPromptToken, waitingPromptSignature, isRecognizedPrompt, detectStuckScreen, extractGenericOptions, bashModeArmed, detectWorking, isModelSwitchConfirm, slashPaletteRows, slashPaletteWouldMisfire, inputBoxContent, inputBoxOccupant, submitLanded, detectModelPicker, parseWorkingStatus, feedbackSurveyOpen, paneAcceptsText } from './prompt.ts'
 
 test('stripAnsi removes CSI escape sequences', () => {
   expect(stripAnsi('\x1b[1mbold\x1b[0m text')).toBe('bold text')
@@ -1294,6 +1294,37 @@ test('inputBoxContent reads a pasted block still sitting in the box', () => {
 
 test('inputBoxContent is empty once the box has been submitted', () => {
   expect(inputBoxContent(CAP_SUBMITTED)).toBe('')
+})
+
+// Both captured off live 2.1.220 panes on 2026-08-03 with `capture-pane -e`, verbatim down to the
+// escape sequences: %32 held a suggestion ghost, and the control was typed into a test-channel pane by
+// paste-buffer with no Enter. The difference is the whole guard — SGR 2 on the ghost, nothing on the
+// typed line — so a hand-written fixture would prove nothing about either.
+const CAP_GHOST = '  ✻ Sautéed for 7m 32s\n────────────────────────────────────────\n\x1b[39m❯\xa0\x1b[2mgo ahead on the shape, hand unit 2 to a fresh session\x1b[0m\n────────────────────────────────────────\n  ubuntu@cloud:/home/ubuntu/projects/cc-bridge (main) | Opus 5 (1M context)'
+const CAP_TYPED = '  ✻ Sautéed for 7m 32s\n────────────────────────────────────────\n\x1b[39m❯\xa0CONTROL TYPED TEXT probe\n────────────────────────────────────────\n  ubuntu@cloud:/home/ubuntu | Opus 5 (1M context)'
+
+test('inputBoxOccupant reads the CLI suggestion ghost as an empty box', () => {
+  // The owner's bug: this exact string refused his slash commands for hours. The un-ghost-aware reader
+  // is the control — it must still see it, or this test would pass against a reader that sees nothing.
+  expect(inputBoxContent(CAP_GHOST)).toBe('go ahead on the shape, hand unit 2 to a fresh session')
+  expect(inputBoxOccupant(CAP_GHOST)).toBe('')
+})
+
+test('inputBoxOccupant still reads genuinely typed text', () => {
+  expect(inputBoxOccupant(CAP_TYPED)).toBe('CONTROL TYPED TEXT probe')
+})
+
+test('inputBoxOccupant reads SGR params as tokens, not substrings', () => {
+  // `38;5;246` carries three 2s and sets no intensity. A substring test for "2" would blank this box
+  // and hand every occupancy guard a permanent "empty", which fails OPEN — pastes over real drafts.
+  const dim256 = CAP_TYPED.replace('\x1b[39m', '\x1b[38;5;246m')
+  expect(inputBoxOccupant(dim256)).toBe('CONTROL TYPED TEXT probe')
+})
+
+test('inputBoxOccupant keeps line structure when a ghost is dropped', () => {
+  // Dropping faint CHARACTERS must not drop faint NEWLINES: eat one and the border rows collapse into
+  // the prompt row, inputBoxContent finds no box, and null (not '') is what every caller then sees.
+  expect(inputBoxOccupant(CAP_GHOST)).not.toBeNull()
 })
 
 test('inputBoxContent is null when no bordered input box is on screen', () => {

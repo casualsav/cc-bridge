@@ -37,6 +37,12 @@ function sandbox(): { home: string; stateDir: string; marker: string } {
 
 // End the stub daemon this sandbox launched and remove the sandbox. Best-effort by construction: a
 // test that failed before the launch has no pid to read, which is not an error.
+//
+// CALL IT FROM A `finally`, never as the last statement of the test. Cleanup-at-the-end covers only the
+// green path: an assertion that throws skips it, and the stub is DETACHED and parks forever, so a single
+// red run leaks a bun process and its /tmp dir for the life of the box. Three such orphans (2026-08-01
+// ×2, 2026-08-03) were still running when a bug hunt swept the process table on 2026-08-03 — the first
+// fix here closed the success path and left this one open.
 function cleanup(home: string, marker: string): void {
   try { const pid = parseInt(readFileSync(marker, 'utf8'), 10); if (pid > 1) process.kill(pid, 'SIGKILL') } catch {}
   try { rmSync(home, { recursive: true, force: true }) } catch {}
@@ -44,21 +50,22 @@ function cleanup(home: string, marker: string): void {
 
 test('with no `bun` on PATH the watchdog still launches the daemon and stays up', async () => {
   const { home, stateDir, marker } = sandbox()
-  const proc = Bun.spawn([process.execPath, WATCHDOG], {
-    env: { TELEGRAM_STATE_DIR: stateDir, HOME: home, PATH: '/nonexistent-bin' },
-    stdout: 'pipe', stderr: 'pipe',
-  })
-  await Bun.sleep(3000)
-  const aliveAfter = proc.exitCode === null
-  proc.kill('SIGKILL')
-  const err = await Bun.readableStreamToText(proc.stderr)
+  try {
+    const proc = Bun.spawn([process.execPath, WATCHDOG], {
+      env: { TELEGRAM_STATE_DIR: stateDir, HOME: home, PATH: '/nonexistent-bin' },
+      stdout: 'pipe', stderr: 'pipe',
+    })
+    await Bun.sleep(3000)
+    const aliveAfter = proc.exitCode === null
+    proc.kill('SIGKILL')
+    const err = await Bun.readableStreamToText(proc.stderr)
 
-  expect(err).toContain('watchdog: up')
-  // Unfixed: spawn('bun') throws ENOENT, the watchdog dies, and the daemon never starts.
-  expect(aliveAfter).toBe(true)
-  expect(existsSync(marker)).toBe(true)
-  expect(err).not.toContain('ENOENT')
-  cleanup(home, marker)   // the stub daemon is detached and parks forever — end it, don't leak it
+    expect(err).toContain('watchdog: up')
+    // Unfixed: spawn('bun') throws ENOENT, the watchdog dies, and the daemon never starts.
+    expect(aliveAfter).toBe(true)
+    expect(existsSync(marker)).toBe(true)
+    expect(err).not.toContain('ENOENT')
+  } finally { cleanup(home, marker) }   // the stub daemon is detached and parks forever — end it on RED too
 })
 
 test('an interpreter that vanishes under it does not kill the watchdog', async () => {
@@ -71,29 +78,30 @@ test('an interpreter that vanishes under it does not kill the watchdog', async (
   // This is the case a try/catch cannot cover: spawn() fails ASYNCHRONOUSLY (pid undefined, then an
   // 'error' event), so without a listener it lands as an uncaught exception and Bun exits.
   const { home, stateDir, marker } = sandbox()
-  const link = join(home, 'bun-hardlink')
-  linkSync(process.execPath, link)
+  try {
+    const link = join(home, 'bun-hardlink')
+    linkSync(process.execPath, link)
 
-  const proc = Bun.spawn([link, WATCHDOG], {
-    env: { TELEGRAM_STATE_DIR: stateDir, HOME: home, PATH: '/nonexistent-bin' },
-    stdout: 'pipe', stderr: 'pipe',
-  })
-  await Bun.sleep(700)
-  unlinkSync(link)          // the interpreter is now gone from under the running watchdog
-  // Don't wait out the 20s tick: SIGUSR1 is the "respawn now" nudge ensure-daemon itself sends, so it
-  // drives the failing launch immediately — the exact path that died in production.
-  proc.kill('SIGUSR1')
-  await Bun.sleep(2500)
+    const proc = Bun.spawn([link, WATCHDOG], {
+      env: { TELEGRAM_STATE_DIR: stateDir, HOME: home, PATH: '/nonexistent-bin' },
+      stdout: 'pipe', stderr: 'pipe',
+    })
+    await Bun.sleep(700)
+    unlinkSync(link)          // the interpreter is now gone from under the running watchdog
+    // Don't wait out the 20s tick: SIGUSR1 is the "respawn now" nudge ensure-daemon itself sends, so it
+    // drives the failing launch immediately — the exact path that died in production.
+    proc.kill('SIGUSR1')
+    await Bun.sleep(2500)
 
-  const aliveAfter = proc.exitCode === null
-  proc.kill('SIGKILL')
-  const err = await Bun.readableStreamToText(proc.stderr)
+    const aliveAfter = proc.exitCode === null
+    proc.kill('SIGKILL')
+    const err = await Bun.readableStreamToText(proc.stderr)
 
-  expect(err).toContain('watchdog: up')
-  expect(err).toMatch(/failed|could not launch/i)   // it must SAY the launch failed
-  expect(aliveAfter).toBe(true)                     // and still be standing to retry
-  expect(err).not.toContain('Bun v')                // no crash banner — that's what dying looks like
-  cleanup(home, marker)
+    expect(err).toContain('watchdog: up')
+    expect(err).toMatch(/failed|could not launch/i)   // it must SAY the launch failed
+    expect(aliveAfter).toBe(true)                     // and still be standing to retry
+    expect(err).not.toContain('Bun v')                // no crash banner — that's what dying looks like
+  } finally { cleanup(home, marker) }
 })
 
 test('a launch that cannot succeed leaves the watchdog running to retry', async () => {

@@ -66,6 +66,10 @@ export type ProviderAccountsView = {
   defaults: { chat: string; code: string }
   catalog: readonly ProviderCatalogEntry[]
   auto: boolean
+  // The ✳️ Codex launch dials, where /settings puts them: inside the Accounts panel, and only when
+  // Codex is set up. Set by the caller (they are settings keys, not a projection of the chain) and
+  // absent when `codexAvailable()` is false — the same gate the Telegram keyboard uses.
+  codex?: { model: string; effort: string; efforts: string[] }
 }
 
 type ProjectionInput = {

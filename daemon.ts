@@ -40,7 +40,7 @@ import { preserveGlobalEffort, reconcileEffortScope } from './effort-scope.ts'
 import { planDrift, driftStateAfter, type DriftState } from './drift-guard.ts'
 import { decideModel, decideEffort, upgradeNeedsConfirm, heldSpawnModel, heldSpawnNeedsLine, holdTapData, parseHoldTap, launchFallback, spawnCardHeader, relaunchModel, launchDefaultModel, launchDefaultEffort, fablePolicy, fableRowState, onOff, type FablePolicy, AUTO_FALLBACK, AUTO_EFFORT_FALLBACK, FABLE, HAIKU, isClaudeFamily, type ModelDecision, type HoldOutcome } from './spawn-model-policy.ts'
 import { renderSessionsView } from './sessions-view.ts'
-import { detectCurrentMode, onNormalPrompt, inputBoxContent, isModelSwitchConfirm, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType } from './prompt.ts'
+import { detectCurrentMode, onNormalPrompt, inputBoxContent, inputBoxOccupant, isModelSwitchConfirm, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType } from './prompt.ts'
 import { modelSwitchEvidence, findSessionFile, resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, turnAnchorUuid, liveSubagents, currentTurnFeed, currentTurnActivity, concludedTurnWork, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
 // CC-only, called directly rather than through agent-transcript.ts's dispatcher: the error fields it
 // keys on (isApiErrorMessage/apiErrorStatus) are a Claude Code transcript shape with no Codex
@@ -78,7 +78,7 @@ import {
 import { autowireMapImport, shipProductMap } from './chat-map.ts'
 import { ghAccounts, ghInstalled, ghSwitch, ghLogout, runGhLogin, provisionGh, type GhAccount } from './github.ts'
 import {
-  capturePane, capturePaneCached, invalidateCapture, paneAlive, sendKeys, sendKeysLiteral, navigateDown, waitForSettle,
+  capturePane, capturePaneStyled, capturePaneCached, invalidateCapture, paneAlive, sendKeys, sendKeysLiteral, navigateDown, waitForSettle,
   autoSizeWindowOf, paneCommand, paneCwd, PaneWatcher,
   submitVerified, withPaneDelivery, deliveryLockKey, injectBuffer, clearOwnTypedLine, pasteSlashVerified, type PastedSlash,
   pasteVerified, resubmitVerified, type PasteOutcome,
@@ -461,7 +461,7 @@ async function injectPaste(paneId: string, watcher: PaneWatcher, text: string): 
 async function injectPasteOutcome(paneId: string, watcher: PaneWatcher, text: string): Promise<PasteOutcome> {
   return withPaneDelivery(await paneDeliveryKey(paneId), () => watcher.withInjection(async () => {
     if (!(await paneAlive(paneId))) return 'failed' as PasteOutcome
-    return pasteVerified(paneId, text, agentSubmitKeys(await paneAgentKind(paneId)), submitLanded)
+    return pasteVerified(paneId, text, agentSubmitKeys(await paneAgentKind(paneId)), submitLanded, inputBoxOccupant)
   }), () => 'failed' as PasteOutcome)   // never got our turn at the lock: nothing was pasted
 }
 
@@ -1484,15 +1484,29 @@ function harnessEnvPrefix(profile: HarnessProfile): string {
   return `env ${clean} ${assignments} `
 }
 
+// Every pane the DAEMON launches is read through the bridge, never over the shoulder of someone sitting
+// at the terminal — so Claude Code's prompt-suggestion ghost has no reader in any of them, and it is not
+// free: each idle prompt costs a model query (`querySource:"prompt_suggestion"`), fleet-wide, forever.
+// It also writes into the input box, which is the surface every occupancy guard here reads.
+//
+// `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION` is the CLI's OWN supported switch and it is checked FIRST,
+// ahead of the server-side GrowthBook flag (2.1.220: `if (su(env)) return {enabled:false, source:'env'}`),
+// so this is a documented opt-out and not a fight with a remote flag. Prefixed inside this function so
+// all three launch sites and both harness branches inherit it from one place.
+//
+// Deliberately NOT applied to `cc-bridge`/`claude-tg` shell launches: those panes DO have a human in
+// front of them, and taking a CLI feature away from him is not this daemon's call.
+const NO_PROMPT_SUGGESTION = 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=0 '
+
 function claudeHarnessLaunch(profile: HarnessProfile, executable: string, args: string[]): string {
   if (profile.provider === 'gateway') {
     if (!gatewayHarnessEnv(profile, loadHarnessGateways(), gatewayEnvLive()))
       throw new Error(`Gateway ${profile.gateway} is missing or its credential environment variable is unset`)
-    return gatewayLaunchCommand(
+    return NO_PROMPT_SUGGESTION + gatewayLaunchCommand(
       profile, process.execPath, join(import.meta.dir, 'harness-gateway-run.ts'), executable, args,
     )
   }
-  return `${harnessEnvPrefix(profile)}${shellQuote(executable)} ${args.map(shellQuote).join(' ')}`.trimEnd()
+  return `${NO_PROMPT_SUGGESTION}${harnessEnvPrefix(profile)}${shellQuote(executable)} ${args.map(shellQuote).join(' ')}`.trimEnd()
 }
 
 async function stampPaneHarness(pane: string, profile: HarnessProfile, sid?: string | null): Promise<void> {
@@ -3038,6 +3052,13 @@ async function busRosterLine(): Promise<string | null> {
 // Inject a pre-formatted agent-bus block into a pane, serialized on the SAME inbound chain as human
 // messages so an ask/answer can't interleave with a human paste mid-buffer. Focused pane pauses its
 // watcher (bracket-paste); an off-focus topic pane gets a plain paste. Resolves to whether it landed.
+// What a human actually typed into that pane's box, ghost suggestions excluded — for naming the text a
+// refusal refused over. Read AFTER the fact, so it is only ever error prose: the binding read is the
+// one inside pasteVerified's critical section.
+async function boxOccupantOf(pane: string): Promise<string | null> {
+  return inputBoxOccupant(await capturePaneStyled(pane).catch(() => ''))
+}
+
 function busDeliver(pane: string, block: string): Promise<boolean> {
   return busDeliverOutcome(pane, block).then(o => o === 'landed')
 }
@@ -3183,9 +3204,14 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
     // delivery could silently become two.
     if (outcome !== 'landed') {
       markPasted(cur.id, outcome === 'unsubmitted' ? pane : null)
-      process.stderr.write(`daemon: ask ${cur.id} to @${cur.toName} ${outcome === 'unsubmitted'
+      // 'occupied' names the text it refused over, because that is the one failure a human can clear —
+      // and a delivery that silently waits on somebody's half-typed line is unattributable otherwise.
+      const why = outcome === 'unsubmitted'
         ? `pasted into ${pane} but its submit was not confirmed — the retry will press Enter, not paste again`
-        : `could not be pasted into ${pane} — nothing landed; the retry will paste afresh`}\n`)
+        : outcome === 'occupied'
+          ? `was NOT pasted into ${pane} — it already holds typed text (${JSON.stringify((await boxOccupantOf(pane)) ?? '')}); the ask stays open and will retry`
+          : `could not be pasted into ${pane} — nothing landed; the retry will paste afresh`
+      process.stderr.write(`daemon: ask ${cur.id} to @${cur.toName} ${why}\n`)
     }
     const ok = outcome === 'landed'
     if (ok) {
@@ -3241,7 +3267,7 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
 //
 // Collision safety is INHERITED, not built: busDeliver serialises on the same inboundInjectChain as
 // human pastes and lands through withPaneDelivery. No new concurrency work belongs here.
-type AsideDelivery = 'delivered' | 'not-landed' | 'blocked' | 'wedged' | 'no-session'
+type AsideDelivery = 'delivered' | 'not-landed' | 'occupied' | 'blocked' | 'wedged' | 'no-session'
 async function deliverAside(toSid: string, fromName: string, text: string, refs: string[]): Promise<AsideDelivery> {
   const pane = await paneForSession(toSid).catch(() => null)
   if (!pane) return 'no-session'
@@ -3249,8 +3275,12 @@ async function deliverAside(toSid: string, fromName: string, text: string, refs:
   if (!cap) return 'no-session'
   if (!paneAcceptsText(cap)) return 'blocked'
   if (!onNormalPrompt(cap) && !detectWorking(cap)) return 'wedged'
-  const ok = await busDeliver(pane, formatAsideBlock(fromName, text, refs))
-  if (!ok) return 'not-landed'
+  // The outcome form, not the boolean: an aside is the one prose delivery whose sender is still inside
+  // the turn that sent it, so "their box already holds typed text" is a fact it can act on — wait,
+  // escalate, or tell a human — and collapsing it into 'not-landed' would send them to resend forever.
+  const outcome = await busDeliverOutcome(pane, formatAsideBlock(fromName, text, refs))
+  if (outcome === 'occupied') return 'occupied'
+  if (outcome !== 'landed') return 'not-landed'
   // NO markSeen — and this is the line most likely to be "fixed" back in by someone copying
   // tryDeliverAsk. The watermark means "this endpoint has been caught up to HERE", and it is only
   // sound because a delivery that advances it also SHOWS the digest. An aside shows none (a digest is
@@ -3271,6 +3301,7 @@ const asideFailText = (o: AsideDelivery, toName: string): string =>
   o === 'no-session' ? `@${toName} has no live pane — the aside was NOT delivered and nothing is queued`
   : o === 'blocked' ? `@${toName} is holding a dialog (permission prompt, picker or editor) — the aside was NOT delivered and nothing is queued. Answer it or use \`tg keys\`, then resend.`
   : o === 'wedged' ? `@${toName} is neither at a prompt nor working — an unrecognised screen owns its pane, so the aside was NOT delivered and nothing is queued`
+  : o === 'occupied' ? `@${toName}'s input box already holds typed text, so the aside was NOT delivered and nothing is queued — pasting over it would submit their draft and your message as one turn. Wait for them to send or clear it.`
   : `the aside did not land in @${toName}'s pane and nothing is queued — resend it, or use \`tg ask\` if it can wait for their next prompt`
 
 // Synthetic asker id for daemon-originated asks (the context nudge). Deliberately not a session id:
@@ -5882,8 +5913,10 @@ async function handleCall(
         if (bashModeArmed(cap)) { write({ t: 'result', id, ok: false, text: 'target has an unsubmitted ! bash command in its input box' }); return }
         // A box that already holds something is refused rather than typed over. Two relays stacking in
         // one input box is how `/compact` became `/compact/compact` on 2026-07-30 — and whatever is
-        // sitting there is somebody's text, so clearing it here is not ours to do.
-        const boxNow = inputBoxContent(cap)
+        // sitting there is somebody's text, so clearing it here is not ours to do. Its OWN styled read:
+        // `cap` above is colourless, and the faint attribute is the only thing separating a real draft
+        // from the CLI's suggestion ghost — this refusal fired for hours against a ghost on 2026-08-03.
+        const boxNow = inputBoxOccupant(await capturePaneStyled(targetPane).catch(() => ''))
         if (boxNow) { write({ t: 'result', id, ok: false, text: `target has unsubmitted text in its input box (${JSON.stringify(boxNow.slice(0, 40))}) — nothing sent` }); return }
         const toName = nameForEndpoint(res.id, endpoints)
         // Every exit from here on is written explicitly. This case used to set `text = '!…'` for a
@@ -6374,7 +6407,7 @@ async function pasteGuarded(paneId: string, watcher: PaneWatcher | null, text: s
   // a test that imports the very code that ships (daemon.ts boots the bot on import).
   const submitKeys = agentSubmitKeys(await paneAgentKind(paneId))
   const run = () => pasteSlashVerified(paneId, text, {
-    submitKeys, boxContent: inputBoxContent, wouldMisfire: slashPaletteWouldMisfire, landed: submitLanded,
+    submitKeys, boxContent: inputBoxContent, boxOccupant: inputBoxOccupant, wouldMisfire: slashPaletteWouldMisfire, landed: submitLanded,
   })
   return withPaneDelivery(await paneDeliveryKey(paneId),
     () => (watcher ? watcher.withInjection(run) : run()),
@@ -10520,6 +10553,43 @@ async function showRichPanel(ctx: Context, mode: 'send' | 'edit', rich: InputRic
   await ctx.reply(html, { parse_mode: 'HTML', reply_markup: keyboard }).catch(() => {})
 }
 
+// ---- The /settings ROOT, as a structure the Mini App renders -------------------------------------
+//
+// The owner's ruling (2026-08-03): "It should be a 1:1 parity of the /settings menu, and both should
+// be front ends of the same backend." The app used to hold its own ordered `meta` list, kept in step
+// with the Telegram renderers by a test — which is lockstep, not one backend, and it drifted the way
+// lockstep always does: rows /settings has never had (🔌 MCP, the ✳️ Codex dials, the three read-only
+// pane dials) accumulated on the app's screen, and the conditional rows rendered unconditionally.
+//
+// So the ROOT ROW LIST lives here and the app renders what it is served. Every value is the same
+// summary function the two Telegram renderings already share, and every condition is theirs verbatim
+// — a row this list omits is a row the app cannot draw.
+//
+// Deliberately NOT the unification of settingsText/settingsMarkdown/settingsKeyboard onto this list:
+// that is parked (they still build their own arrays), and `settings-parity.test.ts` is what holds
+// the three in step until it isn't. `keys` is the settings-payload keys the row carries — one for a
+// plain row, several for a row that opens a sub-panel (the app renders those in a sheet), and
+// `value` is the group's state line, which a multi-key row has no single control to show.
+type SettingsRootRow = { id: string; name: string; keys: string[]; value?: string; panel?: 'accounts' | 'github' }
+function settingsRows(): SettingsRootRow[] {
+  const a = loadAccess()
+  return [
+    { id: 'accounts', name: '👤 Accounts', keys: ['accounts'], panel: 'accounts' },
+    { id: 'spawnDefaults', name: '🧑‍💻 Model defaults', keys: ['spawnModel', 'spawnEffort', 'chatModel', 'chatEffort', 'spawnAuto', 'fableForAgents'], value: spawnDefaultsSummary() },
+    { id: 'github', name: '🐙 GitHub', keys: ['github'], panel: 'github' },
+    { id: 'batchAllow', name: '⚡ Batch allow', keys: ['batchAllow'] },
+    { id: 'transcribe', name: '🎙️ Voice transcription', keys: ['transcribeBackend', 'transcribeModel'], value: transcribeStatus() },
+    { id: 'tts', name: '🔊 Voice replies', keys: ['voice', 'ttsMode', 'ttsEngine', 'ttsVoice'], value: a.tts?.mode && a.tts.mode !== 'off' ? `${a.tts.mode} · ${a.tts.engine}` : 'off' },
+    { id: 'stream', name: '💬 Stream', keys: ['stream'] },
+    { id: 'sessionPin', name: '📌 Pinned message', keys: ['sessionPin'] },
+    { id: 'prefMode', name: '🧷 Preferred mode', keys: ['prefMode'] },
+    { id: 'confirmReset', name: '🧹 /clear approval', keys: ['confirmReset'] },
+    ...(WEBAPP_ENABLED ? [{ id: 'fileBrowser', name: '🗂 File browser', keys: ['fileBrowser'] }] : []),
+    ...(isTopicMode() ? [{ id: 'baseFolder', name: '📂 Base folder', keys: ['baseFolder'] }] : []),
+    ...(isTopicMode() && AGENT_BUS_PIN_UI ? [{ id: 'switchboard', name: '☎️ Agent bus', keys: ['switchboard'] }] : []),
+  ]
+}
+
 // A sub-panel keeps its existing HTML copy: htmlPanelToRich carries it over the rich html carrier
 // (see richmsg.ts for why the line breaks need rewriting), and the same string is the fallback.
 const showHtmlPanel = (ctx: Context, mode: 'send' | 'edit', html: string, keyboard: InlineKeyboard): Promise<void> =>
@@ -10602,7 +10672,10 @@ async function applySetting(key: string, value: unknown, opts: { userId?: string
       await respawnTerminalMirror()
       return null
     }
-    case 'mcp': { if (truthy(value) !== mcpEnabled()) toggleMcp(); return null }
+    // No 'mcp' case: 🔌 MCP has never been a /settings root row, so the 1:1 parity ruling
+    // (2026-08-03) took its row off the Mini App's screen, and the Mini App was this case's only
+    // caller — Telegram's own /mcp panel calls toggleMcp() directly. Telegram /mcp is now the ONLY
+    // MCP surface; re-adding a row means re-adding this case with it.
     // ---- model defaults, per role. The app's option lists are labelling; these are authority. ----
     case 'spawnModel': case 'chatModel': {
       const v = oneOf(value, MODEL_ALIASES)
@@ -11136,7 +11209,7 @@ async function pasteToPaneOutcome(paneId: string, text: string): Promise<PasteOu
   return withPaneDelivery(await paneDeliveryKey(paneId), async () => {
     try {
       if (!(await paneAlive(paneId))) return 'failed' as PasteOutcome
-      return await pasteVerified(paneId, text, agentSubmitKeys(await paneAgentKind(paneId)), submitLanded)
+      return await pasteVerified(paneId, text, agentSubmitKeys(await paneAgentKind(paneId)), submitLanded, inputBoxOccupant)
     } catch { return 'failed' as PasteOutcome }
   }, () => 'failed' as PasteOutcome)
 }
@@ -17127,13 +17200,18 @@ async function webappReadProviderAccounts(role: SessionRole = 'code'): Promise<P
     const profile = { provider: 'gateway' as const, gateway: name, model: def.model, smallModel: def.smallModel }
     return [name, await discoverGatewayModels(profile)] as const
   }))
-  return projectProviderAccounts({
+  const view = projectProviderAccounts({
     claudeAccounts: listAccounts().map(account => ({ name: account.name, ready: accountLoggedIn(account) })),
     gateways, gatewayReady: Object.fromEntries(Object.keys(gateways).map(name => [name, gatewayConfiguredAndKeyed(name)])),
     chain, activeCount: savedActiveCount, chatDefault: legacyRoleAccountId('chat'), codeDefault: legacyRoleAccountId('code'),
     models: Object.fromEntries(discovered), auto: prefs.limitFailover === true,
     identityOf: accountIdentityOf,
   })
+  // ✳️ Codex model/effort ride with THIS panel because that is where /settings keeps them — the
+  // failover half of 👤 Accounts — and the 1:1 parity ruling took them off the app's settings root.
+  // Same gate as accountsPanelKeyboard's: no Codex, no dials.
+  if (codexAvailable()) view.codex = { model: codexLaunchModel() || 'default', effort: codexLaunchEffort() || 'default', efforts: CODEX_EFFORTS.map(e => e || 'default') }
+  return view
 }
 
 type WebappChatActivation = { rollback: () => Promise<boolean> }
@@ -17406,12 +17484,13 @@ async function webappProviderAccountAction(userId: string, action: Record<string
 async function webappReadSettings(): Promise<WebappSettingsView> {
   void refreshGh()   // warm the 🐙 summary for the next render, like the /settings command does
   const a = loadAccess()
-  const cap = focus.activePaneId ? await capturePane(focus.activePaneId).catch(() => '') : ''
-  const sl = cap ? parseStatusline(cap) : null
   const von = !!a.tts?.mode && a.tts.mode !== 'off'
   const tb = (tConfig('TELEGRAM_TRANSCRIBE') || 'off').toLowerCase()
   return {
     write: WEBAPP_SETTINGS_WRITE,
+    // The screen's whole structure, in /settings' own order and under its own conditions. The app
+    // renders these and nothing else — see settingsRows().
+    rows: settingsRows(),
     settings: {
       accounts: { value: accountsRowSummary(), editable: false, label: 'tap to manage' },
       github: { value: ghSummary(), editable: false },
@@ -17442,9 +17521,8 @@ async function webappReadSettings(): Promise<WebappSettingsView> {
       // 📂 base folder is free TEXT (a path), not an enum: the app renders a field and applySetting
       // refuses a folder that doesn't exist — the same refusal the Telegram force-reply gives, since
       // this is the root new topics fan out under and a mkdir here would invent a surprise root.
-      ...(isTopicMode() ? { baseFolder: { value: baseFolderFull(), editable: true, label: 'new topics land here — must already exist' } } : {}),
+      ...(isTopicMode() ? { baseFolder: { value: baseFolderFull(), editable: true, kind: 'text' as const, placeholder: 'Folder path (must exist)', label: 'new topics land here — must already exist' } } : {}),
       ...(isTopicMode() && AGENT_BUS_PIN_UI ? { switchboard: { value: a.switchboard !== false, editable: true, label: 'roster line on the pinned card' } } : {}),
-      mcp: { value: mcpEnabled(), editable: true, label: 'new sessions only' },
       // The 🧑‍💻 Model defaults — the same prefs the /settings sub-panel writes. They belong on this
       // tab because they are now the ONLY place a global model default is set: the per-session dials
       // below change one session and nothing else. 'off' = unset (the spawn chain falls to its floor).
@@ -17465,11 +17543,11 @@ async function webappReadSettings(): Promise<WebappSettingsView> {
       fableForAgents: { value: fablePolicy(a.fableForAgents) === 'allow' ? 'allow' : 'default', editable: true, options: ['default', 'allow'], label: 'allow = an agent Fable spawn needs no tap' },
       // Codex dials — used on failover and by every Codex session. The model is free text: Codex ids
       // are open-ended, so there is no list to offer and applySetting validates the SHAPE instead.
-      codexModel: { value: codexLaunchModel() || 'default', editable: true, label: "used on failover to Codex — 'default' clears it" },
+      codexModel: { value: codexLaunchModel() || 'default', editable: true, kind: 'text' as const, placeholder: "Model id, or 'default'", label: "used on failover to Codex — 'default' clears it" },
       codexEffort: { value: codexLaunchEffort() || 'default', editable: true, options: CODEX_EFFORTS.map(e => e || 'default'), label: 'used on failover to Codex' },
-      mode: { value: cap ? detectCurrentMode(cap) : null, editable: false, label: 'drives the pane (chat-side)' },
-      model: { value: sl?.model ?? null, editable: false },
-      effort: { value: sl?.effort ?? null, editable: false },
+      // No `mode`/`model`/`effort`: those three read-only pane dials were the app's own rows, off
+      // /settings' root entirely, and the parity ruling took them off the screen (2026-08-03). They
+      // were this function's only reason to capturePane()+parseStatusline() on every settings read.
     },
   }
 }

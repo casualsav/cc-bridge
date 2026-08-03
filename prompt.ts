@@ -787,6 +787,50 @@ export function inputBoxContent(paneText: string): string | null {
   return null
 }
 
+// Drop every character the terminal is painting FAINT (SGR 2), keeping line structure and the escape
+// sequences themselves (stripAnsi removes those downstream). Parsed by SGR parameter TOKEN, never by
+// substring: `\x1b[38;5;246m` contains "2" three times and sets no intensity at all.
+function dropFaint(styled: string): string {
+  let out = '', faint = false, i = 0
+  while (i < styled.length) {
+    if (styled[i] === '\x1b') {
+      const m = /^\x1b\[([0-9;]*)m/.exec(styled.slice(i))
+      if (m) {
+        for (const p of (m[1] || '0').split(';')) {
+          if (p === '2') faint = true
+          else if (p === '' || p === '0' || p === '22') faint = false
+        }
+        i += m[0].length
+        continue
+      }
+    }
+    if (!faint || styled[i] === '\n') out += styled[i]
+    i++
+  }
+  return out
+}
+
+// What is sitting in the input box THAT SOMEBODY ACTUALLY TYPED — the reading every occupancy guard
+// wants, and the one `inputBoxContent` cannot give.
+//
+// Claude Code 2.1.220 writes into its own composer: with `tengu_chomp_inflection` on it renders a
+// model-generated prediction of the user's next message directly in the box, painted faint. It is UI,
+// not input — the CLI drops it the moment real input arrives, which is why no delivery has ever merged
+// with one. Read as a stranded draft it is indistinguishable from one, and on 2026-08-03 that refused
+// the owner's slash commands for hours against text nobody had written (two sessions, independently).
+//
+// Measured on live panes that day: the ghost is `\x1b[2m…\x1b[0m`; text typed into the same box (paste
+// buffer, no Enter, control run on the test channel) carries no intensity attribute whatsoever.
+//
+// Takes a STYLED capture (`capturePaneStyled`) — plain `capturePane` drops colour on purpose, see the
+// palette-reader note below, and this is the one read that needs it back.
+//
+// Named fragility: if a future CLI stops painting suggestions faint, ghosts read as drafts again and we
+// are back to the 2026-08-03 annoyance — a refusal, never a merge. It degrades toward the safe side.
+export function inputBoxOccupant(styledPaneText: string): string | null {
+  return inputBoxContent(dropFaint(styledPaneText))
+}
+
 // Did a submit actually take? A paste+Enter can outrun the TUI and leave the block typed-but-
 // unsubmitted while tmux reports success — this is the check that tells those apart.
 // Deliberately conservative: anything we cannot read as "still sitting in the box" counts as

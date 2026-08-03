@@ -1839,11 +1839,14 @@
   </div>
 </div>
 
-<!-- The three grouped settings sheets. Each one is the Mini App's rendering of ONE /settings
+<!-- The grouped settings sheets. Each one is the Mini App's rendering of ONE /settings
      sub-panel, and each joins the #spawn/#sched/#accounts family (backdrop, 180ms slide,
      reduced-motion gate) rather than inventing a second sheet vocabulary.
      Their bodies are filled by renderSettings from the SAME row builder the flat list uses — a
-     grouped row is the same control in a different container, never a second implementation. -->
+     grouped row is the same control in a different container, never a second implementation.
+     VOICE IS TWO SHEETS, not one, since v0.4.336: /settings' root carries 🎙️ Voice transcription and
+     🔊 Voice replies as two separate rows, so a merged sheet was this app's own deviation from the
+     panel it mirrors. The daemon serves both rows (settingsRows()); these are where they open. -->
 <div id="mdef" class="sheetwrap">
   <div class="sheet">
     <div class="shead">Model defaults</div>
@@ -1854,9 +1857,17 @@
 
 <div id="voicesheet" class="sheetwrap">
   <div class="sheet">
-    <div class="shead">Voice</div>
+    <div class="shead">Voice transcription</div>
     <div class="card" id="voicebody"></div>
     <div class="sprow"><button id="voiceclose" class="cancel">Close</button></div>
+  </div>
+</div>
+
+<div id="ttssheet" class="sheetwrap">
+  <div class="sheet">
+    <div class="shead">Voice replies</div>
+    <div class="card" id="ttsbody"></div>
+    <div class="sprow"><button id="ttsclose" class="cancel">Close</button></div>
   </div>
 </div>
 
@@ -2263,119 +2274,118 @@ $("schedfab").onclick = () => showTab("auto");
 
 const esc = s => String(s == null ? "" : s).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
 
+// The names of the keys that live INSIDE a sub-panel sheet. The ROOT rows' names, order, values and
+// conditions are the DAEMON's (`d.rows`, settingsRows() in daemon.ts) — the owner's 1:1 ruling,
+// 2026-08-03: "both should be front ends of the same backend". The app's own ordered `meta` list is
+// gone with it, and with the list went the rows /settings never had (🔌 MCP, the ✳️ Codex dials, the
+// three read-only pane dials) and the unconditional rendering of the conditional rows.
+// These names stay client-side on purpose: they label a sub-panel's CONTENTS, which each surface
+// renders in its own shape, and no Telegram string exists for them to be 1:1 with.
+const SETTING_NAMES = {
+  spawnModel: "Coding session model", spawnEffort: "Coding session effort",
+  chatModel: "Chat agent model", chatEffort: "Chat agent effort",
+  spawnAuto: "Auto — agent spawns pick", fableForAgents: "Fable for agents",
+  transcribeBackend: "Transcription backend", transcribeModel: "Local Whisper model",
+  voice: "Voice replies", ttsMode: "Speak replies", ttsEngine: "Voice engine", ttsVoice: "Piper voice",
+  codexModel: "✳️ Codex model", codexEffort: "✳️ Codex effort",
+};
+// A served row with several keys renders ONE action row here and its keys inside this sheet; a row
+// with a `panel` opens the sheet that has its own layout (accounts, github) instead of an option
+// list. Keyed by the daemon's row id, so a row it stops serving takes its sheet's contents with it.
+// The settings write gate, remembered from the last /api/settings read so the accounts sheet's own
+// settings rows (the Codex dials) obey it — that sheet is reachable only from the settings screen.
+let SETTINGS_WRITE = false;
+const SETTING_SHEETS = {
+  spawnDefaults: { sheet: "mdef", body: "mdefbody" },
+  transcribe: { sheet: "voicesheet", body: "voicebody" },
+  tts: { sheet: "ttssheet", body: "ttsbody" },
+};
+// ONE control per settings key, whichever container it lands in — the flat list, a sub-panel sheet,
+// or (the Codex dials) the accounts sheet. `repaint` is what runs after a successful write: the
+// screen, or the sheet the row actually lives in.
+function settingRow(key, name, s, editable, repaint) {
+  const r = document.createElement("div"); r.className = "setrow";
+  const lbl = document.createElement("div"); lbl.className = "lbl";
+  lbl.innerHTML = '<div>' + esc(name) + '</div>' + (s.label ? '<div class="sub">' + esc(s.label) + '</div>' : "");
+  r.appendChild(lbl);
+  if (typeof s.value === "boolean") {
+    const on = s.value;
+    const btn = document.createElement("button");
+    btn.className = "toggle" + (on ? "" : " off"); btn.textContent = on ? "On" : "Off";
+    if (editable) btn.onclick = () => setSetting(key, !on, repaint); else btn.disabled = true;
+    r.appendChild(btn);
+  } else if (s.options && editable) {
+    const sel = document.createElement("select"); sel.className = "seg";
+    // `raw` wins over `value` for the selected option: a row may DISPLAY a label (prefMode's
+    // carries an emoji and its own wording) while the options are the daemon's own vocabulary.
+    const cur = s.raw != null ? s.raw : s.value;
+    for (const o of s.options) { const op = document.createElement("option"); op.value = o; op.textContent = o; if (o === cur) op.selected = true; sel.appendChild(op); }
+    sel.onchange = () => setSetting(key, sel.value, repaint);
+    r.appendChild(sel);
+  } else if (s.kind === "text" && editable) {
+    // Text entry: the value IS the control. Committed on blur or Enter, and only when it actually
+    // changed — a tap that opens the keyboard and closes it must not post. The daemon's refusal
+    // (a folder that doesn't exist, an id that isn't one) comes back through writeOp's red bar and
+    // the row is repainted from the server, so a rejected value never sits on screen looking saved.
+    // Which keys are free text is the DAEMON's call (`kind`), since it is the daemon that validates
+    // them as shapes rather than against a vocabulary.
+    const inp = document.createElement("input");
+    inp.className = "ro edit"; inp.value = s.value == null ? "" : String(s.value);
+    inp.placeholder = s.placeholder || ""; inp.autocapitalize = "none"; inp.autocomplete = "off"; inp.spellcheck = false;
+    const commit = () => { const v = inp.value.trim(); if (v && v !== String(s.value)) setSetting(key, v, repaint); else (repaint || renderSettings)(); };
+    inp.onkeydown = e => { if (e.key === "Enter") { e.preventDefault(); inp.blur(); } };
+    inp.onblur = commit;
+    r.appendChild(inp);
+  } else {
+    const ro = document.createElement("div"); ro.className = "ro"; ro.textContent = s.value == null ? "—" : String(s.value);
+    r.appendChild(ro);
+  }
+  return r;
+}
+// A row that opens something rather than carrying a control: a sub-panel sheet, or a panel of its own.
+function settingActionRow(name, sub, open, btnText) {
+  const r = document.createElement("div"); r.className = "setrow action"; r.onclick = open;
+  r.innerHTML = '<div class="lbl"><div>' + name + '</div>' + (sub ? '<div class="sub">' + esc(sub) + '</div>' : "") + '</div>';
+  const btn = document.createElement("button"); btn.className = "toggle off"; btn.textContent = btnText; r.appendChild(btn);
+  return r;
+}
+
 // Settings: live values + (when write enabled) toggles/selects that POST then refresh in place.
 async function renderSettings() {
   const el = $("tab-settings");
   let d; try { d = await api("/api/settings"); } catch { el.innerHTML = '<div class="notice">Settings unavailable.</div>'; return; }
   const W = !!d.write;
-  // MIRRORS THE /settings PANEL ORDER, and `SETTINGS_ORDER_GATE` in settings-parity.test.ts holds it
-  // there — the two lists drifting is invisible on both surfaces (each renders its own order and
-  // looks correct), which is the same lockstep problem the three Telegram renderers have.
-  // The chat-side pane dials (mode/model/effort) close the list; they belong to no /settings row.
-  // `sheet` groups a run of keys behind ONE row on this screen, opening the named sheet — the Mini
-  // App's rendering of a /settings sub-panel. The grouped row appears at the position of the group's
-  // FIRST key, so this list stays the single source of order and the order gate reads it unchanged.
-  const meta = {
-    accounts: { name: "👤 Accounts", bool: false },
-    spawnModel: { name: "Coding session model", bool: false, sheet: "mdef" },
-    spawnEffort: { name: "Coding session effort", bool: false, sheet: "mdef" },
-    chatModel: { name: "Chat agent model", bool: false, sheet: "mdef" },
-    chatEffort: { name: "Chat agent effort", bool: false, sheet: "mdef" },
-    spawnAuto: { name: "Auto — agent spawns pick", bool: true, sheet: "mdef" },
-    fableForAgents: { name: "Fable for agents", bool: false, sheet: "mdef" },
-    github: { name: "🐙 GitHub", bool: false },
-    batchAllow: { name: "⚡ Batch allow", bool: true },
-    transcribeBackend: { name: "Transcription backend", bool: false, sheet: "voice" },
-    transcribeModel: { name: "Local Whisper model", bool: false, sheet: "voice" },
-    voice: { name: "Voice replies", bool: true, sheet: "voice" },
-    ttsMode: { name: "Speak replies", bool: false, sheet: "voice" },
-    ttsEngine: { name: "Voice engine", bool: false, sheet: "voice" },
-    ttsVoice: { name: "Piper voice", bool: false, sheet: "voice" },
-    stream: { name: "💬 Stream", bool: false },
-    sessionPin: { name: "📌 Pinned card", bool: true },
-    prefMode: { name: "🧷 Preferred mode", bool: false },
-    confirmReset: { name: "🧹 /clear approval", bool: true },
-    fileBrowser: { name: "🗂 File browser", bool: true },
-    // Free TEXT, not an enum — a path and an open-ended model id. `text` renders the row's value as a
-    // tappable field; the daemon validates (the folder must already exist, the id must look like one)
-    // and its refusal is what the row shows, so the app never invents a second rule.
-    baseFolder: { name: "📂 Base folder", bool: false, text: "Folder path (must exist)" },
-    switchboard: { name: "☎️ Agent bus", bool: true },
-    codexModel: { name: "✳️ Codex model", bool: false, text: "Model id, or 'default'" },
-    codexEffort: { name: "✳️ Codex effort", bool: false },
-    mcp: { name: "🔌 MCP mode", bool: true },
-    mode: { name: "🛠️ Mode", bool: false },
-    model: { name: "🤖 Model", bool: false },
-    effort: { name: "⏫ Effort", bool: false },
-  };
+  SETTINGS_WRITE = W;
   el.innerHTML = "";
   const head = document.createElement("div");
   head.className = "card"; head.innerHTML = '<div class="k">Channel</div><div class="v">' + (W ? "Editing enabled" : "Read-only — set TELEGRAM_WEBAPP_SETTINGS_WRITE=1 to change") + "</div>";
   el.appendChild(head);
   const wrap = document.createElement("div"); wrap.className = "card";
-  // One row per SHEET group, emitted where its first key sits; the group's own rows are built by the
-  // same builder and appended to the sheet instead of this card.
-  const SHEETS = {
-    mdef: { title: "🧑‍💻 Model defaults", body: "mdefbody", open: () => openSheet("mdef"),
-            sum: s => [s.spawnModel, s.spawnEffort].filter(Boolean).map(x => x.value).join(" · ") },
-    voice: { title: "🎙 Voice", body: "voicebody", open: () => openSheet("voicesheet"),
-             sum: s => "in " + (s.transcribeBackend ? s.transcribeBackend.value : "off") + " · out " + (s.ttsMode ? s.ttsMode.value : "off") },
-  };
-  for (const id in SHEETS) $(SHEETS[id].body).innerHTML = "";
-  const emitted = {};
-  for (const key in meta) {
-    const m = meta[key], s = d.settings[key]; if (!s) continue;
-    const editable = W && s.editable;
-    const r = document.createElement("div"); r.className = "setrow";
-    if (key === "accounts") { r.classList.add("action"); r.onclick = openAccounts; }
-    if (key === "github") { r.classList.add("action"); r.onclick = openGithub; }
-    const lbl = document.createElement("div"); lbl.className = "lbl";
-    lbl.innerHTML = '<div>' + m.name + '</div>' + (s.label ? '<div class="sub">' + esc(s.label) + '</div>' : "");
-    r.appendChild(lbl);
-    if (key === "accounts" || key === "github") {
-      const btn = document.createElement("button"); btn.className = "toggle off"; btn.textContent = "Manage"; r.appendChild(btn);
-    } else if (m.bool) {
-      const on = !!s.value;
-      const btn = document.createElement("button");
-      btn.className = "toggle" + (on ? "" : " off"); btn.textContent = on ? "On" : "Off";
-      if (editable) btn.onclick = () => setSetting(key, !on); else btn.disabled = true;
-      r.appendChild(btn);
-    } else if (s.options && editable) {
-      const sel = document.createElement("select"); sel.className = "seg";
-      // `raw` wins over `value` for the selected option: a row may DISPLAY a label (prefMode's
-      // carries an emoji and its own wording) while the options are the daemon's own vocabulary.
-      const cur = s.raw != null ? s.raw : s.value;
-      for (const o of s.options) { const op = document.createElement("option"); op.value = o; op.textContent = o; if (o === cur) op.selected = true; sel.appendChild(op); }
-      sel.onchange = () => setSetting(key, sel.value);
-      r.appendChild(sel);
-    } else if (m.text && editable) {
-      // Text entry: the value IS the control. Committed on blur or Enter, and only when it actually
-      // changed — a tap that opens the keyboard and closes it must not post. The daemon's refusal
-      // (a folder that doesn't exist, an id that isn't one) comes back through writeOp's red bar and
-      // the row is repainted from the server, so a rejected value never sits on screen looking saved.
-      const inp = document.createElement("input");
-      inp.className = "ro edit"; inp.value = s.value == null ? "" : String(s.value);
-      inp.placeholder = m.text; inp.autocapitalize = "none"; inp.autocomplete = "off"; inp.spellcheck = false;
-      const commit = () => { const v = inp.value.trim(); if (v && v !== String(s.value)) setSetting(key, v); else renderSettings(); };
-      inp.onkeydown = e => { if (e.key === "Enter") { e.preventDefault(); inp.blur(); } };
-      inp.onblur = commit;
-      r.appendChild(inp);
-    } else {
-      const ro = document.createElement("div"); ro.className = "ro"; ro.textContent = s.value == null ? "—" : String(s.value);
-      r.appendChild(ro);
-    }
-    if (m.sheet) {
-      // The control goes into its sheet; the screen gets ONE action row, at the group's first key.
-      $(SHEETS[m.sheet].body).appendChild(r);
-      if (!emitted[m.sheet]) {
-        emitted[m.sheet] = true;
-        const g = SHEETS[m.sheet];
-        const gr = document.createElement("div"); gr.className = "setrow action"; gr.onclick = g.open;
-        gr.innerHTML = '<div class="lbl"><div>' + g.title + '</div><div class="sub">' + esc(g.sum(d.settings)) + '</div></div>';
-        const btn = document.createElement("button"); btn.className = "toggle off"; btn.textContent = "Open"; gr.appendChild(btn);
-        wrap.appendChild(gr);
+  for (const id in SETTING_SHEETS) $(SETTING_SHEETS[id].body).innerHTML = "";
+  // The screen IS the served list — no local order, no local conditions, and nothing rendered that
+  // the daemon did not send. A row whose key is missing from `settings` is skipped rather than drawn
+  // empty; that pairing is the daemon's to keep, and a blank row would hide the break.
+  for (const row of d.rows || []) {
+    const grp = SETTING_SHEETS[row.id];
+    if (grp) {
+      for (const key of row.keys) {
+        const s = d.settings[key]; if (!s) continue;
+        $(grp.body).appendChild(settingRow(key, SETTING_NAMES[key] || key, s, W && s.editable));
       }
-    } else wrap.appendChild(r);
+      wrap.appendChild(settingActionRow(row.name, row.value, () => openSheet(grp.sheet), "Open"));
+      continue;
+    }
+    const s = d.settings[row.keys[0]]; if (!s) continue;
+    if (row.panel) {
+      // 👤 and 🐙 open panels with their own layout — per-account status dots, role buttons, reorder
+      // arrows, a device-code card. An option list would lose function to win symmetry.
+      // The sub is the row's VALUE, not its label ("2 · 🔀 off", not "tap to manage"): /settings shows
+      // the state on these two rows like every other, and this was the last place the two roots read
+      // differently (the owner's ruling, 2026-08-03). The Manage button already says it is tappable.
+      wrap.appendChild(settingActionRow(row.name, s.value, row.panel === "accounts" ? openAccounts : openGithub, "Manage"));
+      continue;
+    }
+    wrap.appendChild(settingRow(row.keys[0], row.name, s, W && s.editable));
   }
   el.appendChild(wrap);
 }
@@ -2383,6 +2393,8 @@ $("mdefclose").onclick = () => closeSheet("mdef");
 $("mdef").onclick = e => { if (e.target.id === "mdef") closeSheet("mdef"); };
 $("voiceclose").onclick = () => closeSheet("voicesheet");
 $("voicesheet").onclick = e => { if (e.target.id === "voicesheet") closeSheet("voicesheet"); };
+$("ttsclose").onclick = () => closeSheet("ttssheet");
+$("ttssheet").onclick = e => { if (e.target.id === "ttssheet") closeSheet("ttssheet"); };
 
 // ---- 🐙 GitHub sheet. Not settings keys: the gh CLI's own accounts, over /api/github. ----
 let ghPoll = null;
@@ -2460,6 +2472,16 @@ function renderAccounts() {
   });
   if (v.activeCount === accounts.length) html += '<div class="acctdivider">Inactive · none</div>';
   body.innerHTML = html;
+  // The ✳️ Codex launch dials, last, because that is where the Telegram Accounts panel puts them —
+  // and they are HERE rather than on the settings screen for the same reason: /settings' root has no
+  // Codex row, so the app's root cannot either (the owner's 1:1 ruling). Same settings keys, same
+  // builder, same authority; only the repaint differs, because this sheet is what has to redraw.
+  // Served only when Codex is set up, the gate accountsPanelKeyboard uses.
+  if (v.codex) {
+    const again = async () => { PROVIDER_ACCOUNTS = await api('/api/provider-accounts?role=' + ACCOUNT_ROLE); renderAccounts(); };
+    body.appendChild(settingRow('codexModel', SETTING_NAMES.codexModel, { value: v.codex.model, editable: true, kind: 'text', placeholder: "Model id, or 'default'", label: 'used on failover to Codex' }, SETTINGS_WRITE, again));
+    body.appendChild(settingRow('codexEffort', SETTING_NAMES.codexEffort, { value: v.codex.effort, editable: true, options: v.codex.efforts, label: 'used on failover to Codex' }, SETTINGS_WRITE, again));
+  }
   body.querySelectorAll('[data-acc-role]').forEach(b => b.onclick = async () => { ACCOUNT_ROLE = b.dataset.accRole; PROVIDER_ACCOUNTS = await api('/api/provider-accounts?role=' + ACCOUNT_ROLE); renderAccounts(); });
   body.querySelectorAll('[data-acc-move]').forEach(b => b.onclick = () => accountAction({ action:'move', id:b.closest('[data-account]').dataset.account, dir:b.dataset.accMove }));
   body.querySelectorAll('[data-acc-default]').forEach(b => b.onclick = () => accountAction({ action:'default', id:b.closest('[data-account]').dataset.account, role:b.dataset.accDefault }));
@@ -2510,9 +2532,11 @@ function providerFormChanged() {
   $("acchelp").textContent = p.id === 'openai' ? 'OpenAI OAuth accounts appear automatically when connected. This form adds an API-key account through an Anthropic-compatible endpoint.' : p.protocol === 'adapter' ? 'This provider needs an Anthropic-compatible adapter URL for the Claude Code harness.' : 'Models are detected automatically after the account is saved.';
 }
 
-async function setSetting(key, value) {
+// `repaint` is the surface the row lives on: the settings screen by default, the accounts sheet for
+// the ✳️ Codex dials that /settings keeps in its Accounts panel.
+async function setSetting(key, value, repaint) {
   const d = await writeOp("/api/settings/set", { key, value });
-  if (d) { showDone("Updated"); if (key === "fileBrowser") { location.reload(); return; } renderSettings(); }
+  if (d) { showDone("Updated"); if (key === "fileBrowser") { location.reload(); return; } (repaint || renderSettings)(); }
 }
 
 // ---- Sessions dashboard (homepage): one card per session, tap → drill-in ----
