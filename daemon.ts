@@ -41,7 +41,7 @@ import { planDrift, driftStateAfter, type DriftState } from './drift-guard.ts'
 import { decideModel, decideEffort, upgradeNeedsConfirm, heldSpawnModel, heldSpawnNeedsLine, holdTapData, parseHoldTap, launchFallback, spawnCardHeader, relaunchModel, launchDefaultModel, launchDefaultEffort, fablePolicy, fableRowState, onOff, type FablePolicy, AUTO_FALLBACK, AUTO_EFFORT_FALLBACK, FABLE, HAIKU, isClaudeFamily, type ModelDecision, type HoldOutcome } from './spawn-model-policy.ts'
 import { renderSessionsView } from './sessions-view.ts'
 import { detectCurrentMode, onNormalPrompt, inputBoxContent, inputBoxOccupant, isModelSwitchConfirm, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType } from './prompt.ts'
-import { modelSwitchEvidence, findSessionFile, resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, turnAnchorUuid, liveSubagents, currentTurnFeed, currentTurnActivity, concludedTurnWork, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
+import { modelSwitchEvidence, findSessionFile, resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, lastAssistantStopReason, turnAnchorUuid, liveSubagents, currentTurnFeed, currentTurnActivity, concludedTurnWork, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
 // CC-only, called directly rather than through agent-transcript.ts's dispatcher: the error fields it
 // keys on (isApiErrorMessage/apiErrorStatus) are a Claude Code transcript shape with no Codex
 // equivalent, so — like several other CC-only readers in that dispatcher — a Codex rollout simply
@@ -427,6 +427,30 @@ healAccountConfigs()   // accounts registered before main settings.json had hook
 // bot is injected here. `observe()` (from the transcript's turnInProgress) is a keep-alive layer
 // on top of the explicit arm()/stop() lifecycle, not the primary gate.
 const typingPresence = new TypingPresence(channel)
+// The continuously-lit warning must close the case on its own — the 2026-08-03 incident left ONE line
+// in a 47k-line log, so the next occurrence has to arrive already diagnosed rather than prompting a
+// screenshot. This supplies the half typing.ts cannot know: which transcript backs that chat, and
+// whether it is the abandoned-`tool_use` suspect (a last assistant entry still awaiting a tool result,
+// with the age that makes "abandoned" legible vs a genuinely long call).
+const LIT_SUSPECT_AGE_MS = 10 * 60_000
+typingPresence.setDiagnoser(chat => {
+  try {
+    const bound = getDmChatSession(chat)
+    if (!bound) return `(chat ${chat} has no dmChat binding — cannot resolve a transcript)`
+    // Synchronous by contract (it runs inside the ping timer), so this reads the resolved-transcript
+    // cache rather than re-resolving: a cache miss says so instead of blocking the timer.
+    const cached = [...paneTranscriptCache.entries()].find(([, v]) => v.path && v.path.includes(bound.sessionId))
+    const file = cached?.[1].path
+      ?? [...paneTranscriptCache.values()].map(v => v.path).find(p => !!p) ?? null
+    if (!file) return `(session ${bound.sessionId}: no transcript in cache — cannot classify)`
+    const st = lastAssistantStopReason(file)
+    const age = st.ageMs == null ? '?' : `${Math.round(st.ageMs / 60_000)}m`
+    return `session ${bound.sessionId} · transcript ${file} · last assistant stop_reason=${st.stopReason ?? '?'} · age ${age}`
+      + (st.stopReason === 'tool_use' && (st.ageMs ?? 0) > LIT_SUSPECT_AGE_MS
+        ? ' ⇒ SUSPECT CONFIRMED (abandoned tool_use): turnInProgress can never go false for this file again'
+        : ' ⇒ NOT the abandoned-tool_use shape — chase the re-arming source named above instead')
+  } catch (e) { return `(diagnosis failed: ${e})` }
+})
 
 // ---- Pane / tmux layer ----
 
@@ -2069,9 +2093,9 @@ async function relayLoopTick(gen: number): Promise<void> {
       const working = file ? turnInProgress(file) : !idle
       const presentation = await panePresentation(paneId)
       relayConcludeTicks = working ? 0 : relayConcludeTicks + 1
-      if (presentation.role === 'dm-chat' && presentation.dmChat) typingPresence.observe(working, presentation.dmChat)
+      if (presentation.role === 'dm-chat' && presentation.dmChat) typingPresence.observe(working, presentation.dmChat, 'focused:turnInProgress')
       else if (presentation.role === 'topic') { if (working) void emitTopicTyping(paneId) }
-      else typingPresence.observe(await paneDrivesDmTyping(paneId, working))   // classic non-topic DM keeps the pane-ownership gate
+      else typingPresence.observe(await paneDrivesDmTyping(paneId, working), undefined, 'focused:turnInProgress')   // classic non-topic DM keeps the pane-ownership gate
       await updateTerminalMirror(working, thinkingPending(paneId)).catch(() => {})   // pending opens/holds the Thinking… card before turnInProgress flips
 
       // DM-only "Clauding…" live draft. DISABLED by default (the indicator was unreliable): gated to
@@ -2262,7 +2286,7 @@ async function auxRelayTick(): Promise<void> {
         }
         if (working) {
           auxConcludeTicks.delete(file)
-          if (presentation.role === 'dm-chat' && presentation.dmChat) typingPresence.observe(true, presentation.dmChat)
+          if (presentation.role === 'dm-chat' && presentation.dmChat) typingPresence.observe(true, presentation.dmChat, 'aux:turnInProgress')
           else if (presentation.role === 'topic') void emitTopicTyping(pane)
           return
         }   // working → sustain presence on its own surface; relay only once the turn concludes
@@ -2276,7 +2300,9 @@ async function auxRelayTick(): Promise<void> {
         // Transcript quiet but the pane spinner is live (thinking / pre-first-tool-call): sustain
         // presence only — relay conclusion stays on the transcript signal.
         if (detectWorking(await capturePane(pane).catch(() => ''))) {
-          if (presentation.role === 'dm-chat' && presentation.dmChat) typingPresence.observe(true, presentation.dmChat)
+          // NAMED SUSPECT: detectWorking is true whenever "esc to interrupt" appears in the pane tail,
+          // so a pane merely DISPLAYING that string (a quote, a paste) claims working here.
+          if (presentation.role === 'dm-chat' && presentation.dmChat) typingPresence.observe(true, presentation.dmChat, 'aux:detectWorking(pane)')
           else if (presentation.role === 'topic') void emitTopicTyping(pane)
         }
         // Same conclude-debounce as the focused loop: a mid-burst end_turn (auto-continue gap)
@@ -5392,11 +5418,14 @@ function startPaneWatcher(paneId: string): void {
       if (wasActive && !isPaneRestarting(paneId)) void sessionForPane(paneId, false).catch(() => null).then(sid => announceFocusedExit(label, sid ?? paneId))
     },
     async text => {
+      // NAMED SUSPECT, and the highest-frequency one: this is the PaneWatcher's per-poll signal, and it
+      // is detectWorking — true whenever "esc to interrupt" is anywhere in the pane tail. A pane that
+      // merely displays that string keeps re-arming typing here every poll.
       const working = detectWorking(text)
       const presentation = await panePresentation(paneId)
-      if (presentation.role === 'dm-chat' && presentation.dmChat) typingPresence.observe(working, presentation.dmChat)
+      if (presentation.role === 'dm-chat' && presentation.dmChat) typingPresence.observe(working, presentation.dmChat, 'watcher:detectWorking(pane)')
       else if (presentation.role === 'topic') { if (working) void emitTopicTyping(paneId) }
-      else typingPresence.observe(await paneDrivesDmTyping(paneId, working))
+      else typingPresence.observe(await paneDrivesDmTyping(paneId, working), undefined, 'watcher:detectWorking(pane)')
     },   // live typing signal, every poll — explicit DM chat presentation takes precedence over global topic mode
   )
   focus.paneWatcher.start()

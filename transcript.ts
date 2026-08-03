@@ -764,6 +764,33 @@ export function turnAnchorUuid(file: string): string | null {
 // card opens exactly once per working turn and closes the instant the turn concludes — no
 // reliance on flaky pane-idle detection (the source of the duplicate-card bug). A no-tools turn
 // concludes immediately, so this returns false for it (no card for a sub-tick reply).
+// Why turnInProgress says what it says — the diagnosis half of the typing instrumentation.
+//
+// turnInProgress returns a bare boolean, and when it is stuck true nobody can tell an abandoned turn
+// (a process died between a tool_use entry and its result, so the transcript's last assistant entry
+// stays 'tool_use' FOREVER) from a genuinely long tool call. That distinction is the whole question
+// behind an indicator that never stops, so it is exported as data rather than re-derived by a caller
+// reaching into readEntries. Read-only; returns nulls rather than throwing on an unreadable file.
+export function lastAssistantStopReason(file: string): { stopReason: string | null; ageMs: number | null } {
+  try {
+    const entries = readEntries(file)
+    let start = -1
+    for (let i = entries.length - 1; i >= 0; i--) if (isRealUserText(entries[i])) { start = i; break }
+    let last: Entry | null = null
+    for (let i = start + 1; i < entries.length; i++) {
+      const e = entries[i]
+      if (e.isSidechain || e.type !== 'assistant') continue
+      last = e
+    }
+    if (!last) return { stopReason: null, ageMs: null }
+    const ts = last.timestamp ? Date.parse(last.timestamp) : NaN
+    return {
+      stopReason: last.message?.stop_reason ?? null,
+      ageMs: Number.isFinite(ts) ? Date.now() - ts : null,
+    }
+  } catch { return { stopReason: null, ageMs: null } }
+}
+
 export function turnInProgress(file: string): boolean {
   const entries = readEntries(file)
   let start = -1

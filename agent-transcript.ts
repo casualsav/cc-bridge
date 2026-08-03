@@ -36,6 +36,11 @@ export const latestFinalReply = (file: string) => (isCodex(file) ? cx.latestFina
 export const finalRepliesAfter = (file: string, afterUuid: string): { uuid: string; text: string; busAnchored: boolean }[] =>
   (isCodex(file) ? cx.finalRepliesAfter(file, afterUuid).map(r => ({ ...r, busAnchored: false })) : cc.finalRepliesAfter(file, afterUuid))
 export const turnInProgress = (file: string) => (isCodex(file) ? cx.turnInProgress(file) : cc.turnInProgress(file))
+// Why turnInProgress says what it says (the typing instrumentation's diagnosis). A Codex rollout has
+// no assistant stop_reason to read, so it answers nulls — honestly "cannot classify" rather than a
+// fabricated verdict, and the warning prints the re-arming source either way.
+export const lastAssistantStopReason = (file: string): { stopReason: string | null; ageMs: number | null } =>
+  (isCodex(file) ? { stopReason: null, ageMs: null } : cc.lastAssistantStopReason(file))
 export const liveSubagents = (file: string) => (isCodex(file) ? 0 : cc.liveSubagents(file))   // Codex rollouts have no subagent files
 export const turnAnchorUuid = (file: string) => (isCodex(file) ? cx.turnAnchorUuid(file) : cc.turnAnchorUuid(file))
 export const currentTurnActivity = (file: string) => (isCodex(file) ? cx.currentTurnActivity(file) : cc.currentTurnActivity(file))
