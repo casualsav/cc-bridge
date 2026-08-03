@@ -85,8 +85,8 @@ These commands are added by the bridge. Everything else belongs to the active te
 | `/voice` | Voice-note replies on/off |
 | `/settings` | Channel settings panel — Claude.ai accounts, GitHub accounts, voice transcription, and more |
 | `/update` | Update menu with a button for each — `/update tg` updates the bridge, `/update claude` updates Claude itself |
-| `/handoff` | Prepare a session handoff — run tests, commit done work, update `PLAN.md`/`DECISIONS.md`, write `HANDOFF.md`, audit plan vs repo (all git-ignored) |
-| `/continue` | Resume work — read `PLAN.md`/`DECISIONS.md`/`HANDOFF.md`/`CLAUDE.md`, run the Verify-state checks, then start the current task |
+| `/handoff` | Prepare a session handoff — run tests, commit done work, update `PLAN.md`/`DECISIONS.md`, write `HANDOFF.md` (one per repo, at the repo root, live items only), audit plan vs repo (all git-ignored) |
+| `/continue` | Resume work — read `PLAN.md`/`DECISIONS.md`/`HANDOFF.md`/`CLAUDE.md`, run the Verify-state checks, then start the current task, deleting each handoff entry as it lands |
 | `/audit` | Audit the repo against `PLAN.md` (subagent) and reconcile task statuses |
 
 **Mode shortcuts:** On Claude, `/mode` opens the permission-mode switcher and `/plan` `/auto` `/default` `/acceptedits` `/bypass` jump straight to one. On Codex, `/mode` opens native `/permissions`; `/model` and `/effort` open Codex's combined model/reasoning picker.

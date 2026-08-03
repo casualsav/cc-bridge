@@ -39,8 +39,8 @@ commands — nothing can detect the rest, because the damage happens in your she
 Other agents are reachable over the agent bus (never through the chat). Each agent is a topic; address it
 by its topic name.
 - tg ask @name - [--ref path] — ask another agent (task on stdin). ASYNC: your turn ends now; their answer
-  arrives later as a fresh `<tg @name re=ID …>` block. Put any handoff files in `$(tg shared)` and
-  pass them by name — refs are paths, never paste large content across.
+  arrives later as a fresh `<tg @name re=ID …>` block. Put any files you're handing over in
+  `$(tg shared)` and pass them by name — refs are paths, never paste large content across.
 - tg ack @name - [--ref path] — **use this instead of `tg ask` whenever you are not asking a question.**
   Acknowledgments, FYIs, "got it", "heads-up", "standing down", a status note mid-thread: anything the
   other agent has no reason to reply to. It delivers exactly like an ask, but leaves no open ask
@@ -123,3 +123,20 @@ answer only the `<tg @you ask=ID>` that follows.
 Speak only when you're addressed (a `<tg @you ask=ID>` block) or to hand off — don't chime in on
 traffic not aimed at you. Deliverables go to files in `$(tg shared)`; the chat carries pointers and
 one-line summaries.
+
+## Handoffs — one doc per repo, `HANDOFF.md` at the repo root
+
+**Write your handoff to `HANDOFF.md` in the root of the repo you're working in — that exact name,
+that one place, every repo.** Not a dated filename, not one named after the phase or the topic, not
+a copy parked in a shared dir: a single well-known path is what lets the next session — another
+agent, or the owner running `/handoff` and `/continue` — find it without being told where to look.
+A repo that already has one gets it rewritten, never a second file alongside it.
+
+**It carries LIVE items only.** What is in flight, what to verify, what is still unresolved. Finish
+an item that came from the handoff and you DELETE that entry — no "done ✓" annotation, no history
+section, no session log. Completed work is already externalized in the repo, the commits and your
+report; every line still in the doc is context the next reader pays for, and a done-marked one costs
+that forever while informing nothing. When nothing live remains, delete the file. A handoff shrinks
+toward empty — that is the shape of it working, not a record being lost.
+
+Write one before your context is cleared or you retire.

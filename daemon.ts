@@ -7746,7 +7746,7 @@ const START_COMMAND_GROUPS: Array<[title: string, lines: string[]]> = [
     `<code>/agent</code> — choose the terminal agent`,
     `<code>/harness</code> — use any configured provider inside Claude Code`,
     `<code>/account</code> — Claude accounts: list · add · remove`,
-    `<code>/handoff</code> — write handoff.md for a fresh agent · <code>/continue</code> — resume from it`,
+    `<code>/handoff</code> — write HANDOFF.md for a fresh agent · <code>/continue</code> — resume from it`,
   ]],
   ['Groups &amp; topics', [
     `<code>/bind</code> — turn a forum group into a session hub, one topic per session`,
@@ -9297,30 +9297,34 @@ bot.command(['update', 'upgrade'], async ctx => {
 // commands into their own Claude setup. They inject the prompt straight into the target session via the
 // normal inbound path (handleInbound resolves the session, arms typing, injects + submits), so Claude
 // runs the instruction exactly as if the user had typed it.
+//
+// The file these write and read is the SAME one the shipped worker guidance names (off-mcp/CLAUDE.md,
+// "Handoffs"): HANDOFF.md at the repo root, one per repo, live items only, finished items deleted
+// rather than marked done. A human driving a session directly and an orchestrator driving one over
+// the bus have to leave each other a doc in the same place or neither path finds the other's.
 const HANDOFF_PROMPT = `Prepare a session handoff. Do these in order:
 
 1. Run the test suite; note results.
 2. Commit any completed work with a descriptive message. Do NOT commit broken code — stash or note it instead.
 3. Update PLAN.md: correct every task status. Do not mark anything done that lacks passing tests + a commit.
 4. Append today's decisions to DECISIONS.md if not already logged.
-5. Overwrite HANDOFF.md with:
-   ## Session summary — [date]
+5. Rewrite HANDOFF.md — that exact name, at the REPO ROOT, one per repo (never a dated or phase-named second file alongside it). It carries LIVE items ONLY:
    ## Current task
    [PLAN.md task ID, status, exact next action — specific enough that a fresh session can execute it without asking anything]
-   ## Files touched this session
-   [file → one-line description]
    ## Verify state
    [exact commands + expected output]
    ## Known issues / gotchas
-   [verbatim errors, workarounds, env quirks]
+   [verbatim errors, workarounds, env quirks — only the ones still biting]
    ## Open questions
    [anything needing a human decision]
-6. AUDIT: Compare PLAN.md against the actual repo. List every task marked done that isn't fully implemented, and every planned item with no task tracking it. Add findings to HANDOFF.md under "## Audit findings".`
+   Anything finished is DELETED, never marked done and never kept as history — the commits and the repo already record it. Drop any section that has no live items. If nothing live remains at all, delete HANDOFF.md.
+6. AUDIT: Compare PLAN.md against the actual repo. List every task marked done that isn't fully implemented, and every planned item with no task tracking it. Add the still-open findings to HANDOFF.md under "## Audit findings".`
 const CONTINUE_PROMPT = `Resume work on this project:
-1. Read PLAN.md, DECISIONS.md, HANDOFF.md, CLAUDE.md.
+1. Read PLAN.md, DECISIONS.md, HANDOFF.md (the one at the repo root — that is the only handoff doc), CLAUDE.md. Say so and continue from PLAN.md if HANDOFF.md is absent.
 2. Run the "Verify state" commands from HANDOFF.md. Report any mismatch before proceeding.
 3. List: (a) current task, (b) next 3 tasks, (c) anything in "Audit findings" or "Open questions".
-4. If open questions block the current task, ask me now — otherwise start the current task.`
+4. If open questions block the current task, ask me now — otherwise start the current task.
+5. As you finish each item you took from HANDOFF.md, DELETE that entry from the file — never mark it done, never keep it as history. Delete HANDOFF.md once nothing live remains.`
 const AUDIT_PROMPT = `Use a subagent to audit the repo against PLAN.md:
 - For each task marked [x]: verify the code exists and its acceptance
   criterion actually passes.
@@ -17785,8 +17789,8 @@ void (async () => {
               { command: 'voice', description: 'Voice replies on/off — replies arrive as voice notes too' },
               { command: 'doctor', description: CODEX_ENABLED ? 'Bridge + Codex readiness — login, sandbox, failover, daemon' : 'Bridge readiness — login, failover, daemon' },
               { command: 'update', description: 'Update the Telegram bridge or Claude itself' },
-              { command: 'handoff', description: 'Write a session handoff (handoff.md) for a fresh agent' },
-              { command: 'continue', description: 'Resume from handoff.md where the last session left off' },
+              { command: 'handoff', description: 'Write a session handoff (HANDOFF.md at the repo root) for a fresh agent' },
+              { command: 'continue', description: 'Resume from HANDOFF.md where the last session left off' },
               { command: 'audit', description: 'Audit the repo against PLAN.md and reconcile task statuses' },
           ]
           // Register the SAME menu for BOTH scopes so the "/" popup shows our commands in DMs AND in the

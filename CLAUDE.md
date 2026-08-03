@@ -360,9 +360,13 @@ inherited: a worker's topic is a mirror for reading, not a channel he is address
 never echoes `disable_notification` back, so the flag cannot be read off a sent message — evidence
 stops at the payload we build (unit-asserted) and the live classification.
 
-**Write a handoff doc before your context is cleared or you retire — `$(tg shared)/handoff-<topic>.md`
-— and carry ONLY live items in it.** Finish an item you took from a handoff and you DELETE that
-entry: no "done ✓" annotation, no history section. Completed work is already externalized in the
-repo, the commits and the report; every line still in the doc is context the next reader pays for,
-and a done-marked one costs that forever while informing nothing. A handoff shrinks toward empty —
-that is the shape of it working, not a record being lost.
+**Write a handoff doc before your context is cleared or you retire — `HANDOFF.md` at the ROOT of the
+repo you are working in, one per repo — and carry ONLY live items in it.** That exact name in that
+one place, never a dated or phase-named file beside it and never a copy in `$(tg shared)`: the
+bridge's own `/handoff` and `/continue` write and read that path (`off-mcp/CLAUDE.md`, "Handoffs"),
+so a doc anywhere else is invisible to whichever of the two paths didn't write it. Finish an item you
+took from a handoff and you DELETE that entry: no "done ✓" annotation, no history section. Completed
+work is already externalized in the repo, the commits and the report; every line still in the doc is
+context the next reader pays for, and a done-marked one costs that forever while informing nothing.
+Delete the file when nothing live remains. A handoff shrinks toward empty — that is the shape of it
+working, not a record being lost.

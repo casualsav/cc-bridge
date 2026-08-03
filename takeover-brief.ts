@@ -10,7 +10,7 @@ export type TakeoverInputs = {
   todos: { done: number; total: number; active: string | null } | null
   gitStat: string | null                                     // `git diff --stat`
   gitStatus: string | null                                   // `git status --short`
-  handoffFile: string | null                                 // $(tg shared)/handoff-<topic>.md, if kept
+  handoffFile: string | null                                 // the repo root's HANDOFF.md, if one is kept
 }
 
 // Clamp a possibly-long field so the typed first turn stays reasonable; keep the head (most relevant).
