@@ -8373,7 +8373,7 @@ const START_COMMAND_GROUPS: Array<[title: string, lines: string[]]> = [
     `<code>/budget</code> — daily $ cap with warnings`,
   ]],
   ['Bridge', [
-    `<code>/settings</code> — mirror · pin · MCP · voice · GitHub sign-in`,
+    `<code>/settings</code> — accounts · models · voice · stream · pin · GitHub`,
     `<code>/voice</code> — voice-note replies on/off`,
     `<code>/doctor</code> — bridge readiness check`,
     `<code>/update</code> — update the bridge or Claude itself`,
@@ -19103,7 +19103,7 @@ void (async () => {
               { command: 'back', description: 'Escape a stuck editor/pager/screen — get the session back to the Claude prompt' },
               { command: 'pin', description: 'Bring the status card down to the bottom (on · off · refresh)' },
               { command: 'sessions', description: 'Live sessions dashboard — model, context, state' },
-              { command: 'settings', description: 'Channel settings — mirror, pin, MCP, voice' },
+              { command: 'settings', description: 'Channel settings — accounts, models, voice, stream, pin, GitHub' },
               { command: 'cron', description: 'Schedule messages (/cron 12h · every 09:00 · */30 9-17 * * 1-5 · cancel)' },
               { command: 'queue', description: 'Queue a prompt for idle, or @reset for the 5h rollover (/queue clear)' },
               { command: 'md', description: 'Create a .md file in the working dir, then reply with its contents' },

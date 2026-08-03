@@ -96,7 +96,9 @@ and the following message starts a fresh chat session.
 
 - The chat session runs its CLAUDE.md *on top of* Claude Code's own system prompt —
   a close approximation of the claude.ai register, not a byte-identical environment
-  (claude.ai's artifacts/styles/memory features don't exist here).
+  (claude.ai's artifacts and styles don't exist here; memory does, but it is Claude Code's
+  own file-based memory under this account's config dir — not claude.ai's, and separate
+  from the main account's, which still never loads).
 - Template upgrades: on boot the daemon auto-refreshes `~/.claude-chat/CLAUDE.md`
   when yours is unedited (byte-identical to an earlier build's template) and notifies
   you either way; a locally edited copy is never touched — merge manually from
