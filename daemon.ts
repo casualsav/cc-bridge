@@ -8165,6 +8165,14 @@ async function codexReadout(ctx: Context, t: CommandTarget, kind: PanelKind): Pr
     await ctx.reply('📈 <b>Usage</b> — the Codex CLI doesn’t surface a usage dashboard. Plan limits reset on OpenAI’s side; in-session token usage is under <code>/context</code>.', { parse_mode: 'HTML' }).catch(() => {})
     return
   }
+  // The rows added after this function was written (/status, /mcp, /hooks) have no Codex reading, and
+  // the fall-through below is /context — so all three answered with a token count under a "Context"
+  // header. Say so plainly instead, like the two branches above: relaying them here would be a guess
+  // about screens nobody has measured on a Codex pane, which is what the panel mechanism exists for.
+  if (kind === 'status' || kind === 'mcp' || kind === 'hooks') {
+    await ctx.reply(`${PANELS[kind].icon} <b>${PANELS[kind].name}</b> — <code>${PANELS[kind].command}</code> is read from Claude Code's panel; this pane is running Codex. Type it in the session itself.`, { parse_mode: 'HTML' }).catch(() => {})
+    return
+  }
   // /context: report the live token counts from the rollout (the current turn's latest token_count).
   const cwd = await paneCwd(t.paneId).catch(() => null)
   const file = cwd ? await transcriptForPane(t.paneId, cwd) : null
@@ -11125,8 +11133,9 @@ async function applySetting(key: string, value: unknown, opts: { userId?: string
     }
     // No 'mcp' case: 🔌 MCP has never been a /settings root row, so the 1:1 parity ruling
     // (2026-08-03) took its row off the Mini App's screen, and the Mini App was this case's only
-    // caller — Telegram's own /mcp panel calls toggleMcp() directly. Telegram /mcp is now the ONLY
-    // MCP surface; re-adding a row means re-adding this case with it.
+    // caller — the /mcp panel called toggleMcp() directly. That command is gone too (the owner made
+    // MCP an install-time choice), so Telegram can no longer turn MCP on or off at all except
+    // through a 🔌 button already sitting in a chat. Re-adding a row means re-adding this case.
     // ---- model defaults, per role. The app's option lists are labelling; these are authority. ----
     case 'spawnModel': case 'chatModel': {
       const v = oneOf(value, MODEL_ALIASES)
@@ -11558,16 +11567,13 @@ function mcpPanelKeyboard(): InlineKeyboard {
   return new InlineKeyboard().text(mcpEnabled() ? '🔁 Turn off' : '🔁 Turn on', 'mcp:toggle')
 }
 
-// /mcp on|off toggles MCP mode for sessions started afterward (relaunch to apply); bare shows the panel.
-bot.command('mcp', async ctx => {
-  if (!dmCommandGate(ctx)) return
-  const arg = (ctx.match ?? '').toString().trim().toLowerCase()
-  if (arg && arg !== 'on' && arg !== 'off') {
-    await ctx.reply('Usage: <code>/mcp on</code> | <code>off</code>', { parse_mode: 'HTML' }); return
-  }
-  if (arg && (arg === 'on') !== mcpEnabled()) toggleMcp()
-  await ctx.reply(mcpPanelText(), { parse_mode: 'HTML', reply_markup: mcpPanelKeyboard() })
-})
+// There is NO `/mcp` command. The owner retired it (2026-08-03): "we don't need a /mcp, the user
+// chooses one or the other during install and that's sufficient" — so MCP mode is an install-time
+// choice, and `/mcp` typed here means the CLI's MCP readout, reached the same way `/status` is.
+// The absence of a stub is deliberate for the same reason it is at repostPinCard: the fall-through
+// lands in the `message:text` slash branch, whose panel check runs BEFORE the unknown-command relay.
+// The panel above stays for the buttons already sitting in chats — a stale 🔌 card must not
+// dead-end — and is the last thing that can toggle MCP from Telegram.
 
 // The /stream panel: current mode + a one-tap cycle button. Shared by the bare command and the
 // button's in-place refresh.

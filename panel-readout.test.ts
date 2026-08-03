@@ -217,13 +217,13 @@ test('panelKindOf routes the bare spellings only', () => {
 // name back to the CLI — `/pin` carries the card — and this holds it there. A re-registered
 // `bot.command('status')` would silently take the name back, and nothing else would notice.
 //
-// KNOWN REMAINING SHADOW, deliberately not asserted: `bot.command('mcp')` still opens the bridge's
-// MCP toggle panel, so a bare `/mcp` is the bridge's, not the CLI's readout (the bus form
-// `tg mcp @name` is unaffected). Flagged in HANDOFF.md, not ruled.
-test('no bridge command shadows the CLI /status, and the menu advertises /pin instead', () => {
+// `/mcp` was the same shadow and the owner retired it outright (2026-08-03): MCP is an install-time
+// choice, so there is no bridge `/mcp` either and a typed one is the CLI's readout.
+test('no bridge command shadows the CLI /status or /mcp, and the menu advertises /pin instead', () => {
   const src = readFileSync(new URL('./daemon.ts', import.meta.url), 'utf8')
-  // Anchored at line start: the deliberate-absence comment NAMES the registration it forbids.
+  // Anchored at line start: the deliberate-absence comments NAME the registrations they forbid.
   expect(src).not.toMatch(/^bot\.command\('status'/m)
+  expect(src).not.toMatch(/^bot\.command\('mcp'/m)
   expect(src).toMatch(/^bot\.command\('pin'/m)
   // setMyCommands: the "/" popup must offer pin and must not offer status.
   const menu = src.match(/const bridgeCommands = \[[\s\S]*?\n {10}\]/)?.[0] ?? ''
