@@ -653,6 +653,19 @@ give it.
   backdrop, 180ms slide, reduced-motion gate; two sheets opening differently is the drift the rule
   prevents. The Surface option left the sheet by ruling (every UI-created session gets a topic);
   the API keeps `headless: true` for bus throwaways — the guard is inverted on purpose.
+- **A sheet WRAPPER must carry `.sheetwrap`, and forgetting it is invisible until it is everywhere.**
+  The wrapper rules (fixed, full-bleed backdrop, `display: none`, `.show` → flex, `.up .sheet` →
+  `translateY(0)`) used to enumerate ids across three separate rules. A sheet added to the markup and
+  to none of the enumerations gets no `display: none` at all — so its backdrop and its whole body lay
+  out as ordinary block content on **every screen**, which is how three settings sheets came to paint
+  on the owner's Sessions screen (v0.4.332, fixed v0.4.335). The class exists so the next sheet gets
+  the behaviour by construction rather than by being remembered in three places.
+  `scripts/webapp-measure/sheetleak.mjs` is the guard, and it sweeps the CLASS rather than that one
+  leak: every element a build adds, on every screen, by computed display AND rect (an unstyled div is
+  `display: block`, and a rect alone reads zero when hidden). Its control runs the same sweep on the
+  surface's OWN screen — the elements must still exist, a closed sheet must paint nothing, an opened
+  one must still paint — because a fix that hid them for good would pass a leak check and ship a dead
+  screen.
 
 ## Narration and the final dot
 
