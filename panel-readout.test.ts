@@ -211,3 +211,23 @@ test('panelKindOf routes the bare spellings only', () => {
   expect(panelKindOf('/compact')).toBe(null)
   expect(panelKindOf('hello')).toBe(null)
 })
+
+// The bridge's own `/status` used to shadow the CLI's: typing it brought the pinned card down,
+// so `@name /status` (the readout) and a bare `/status` did different things. The owner ruled the
+// name back to the CLI — `/pin` carries the card — and this holds it there. A re-registered
+// `bot.command('status')` would silently take the name back, and nothing else would notice.
+//
+// KNOWN REMAINING SHADOW, deliberately not asserted: `bot.command('mcp')` still opens the bridge's
+// MCP toggle panel, so a bare `/mcp` is the bridge's, not the CLI's readout (the bus form
+// `tg mcp @name` is unaffected). Flagged in HANDOFF.md, not ruled.
+test('no bridge command shadows the CLI /status, and the menu advertises /pin instead', () => {
+  const src = readFileSync(new URL('./daemon.ts', import.meta.url), 'utf8')
+  // Anchored at line start: the deliberate-absence comment NAMES the registration it forbids.
+  expect(src).not.toMatch(/^bot\.command\('status'/m)
+  expect(src).toMatch(/^bot\.command\('pin'/m)
+  // setMyCommands: the "/" popup must offer pin and must not offer status.
+  const menu = src.match(/const bridgeCommands = \[[\s\S]*?\n {10}\]/)?.[0] ?? ''
+  expect(menu).toBeTruthy()
+  expect(menu).toContain("{ command: 'pin',")
+  expect(menu).not.toContain("{ command: 'status',")
+})

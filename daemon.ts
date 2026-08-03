@@ -8347,7 +8347,7 @@ const START_COMMAND_GROUPS: Array<[title: string, lines: string[]]> = [
     `<code>/compact</code> — compact the conversation to free up context`,
   ]],
   ['Inspect', [
-    `<code>/status</code> — re-post the status pin`,
+    `<code>/pin</code> — bring the status card down (<code>on</code> · <code>off</code> · <code>refresh</code>)`,
     `<code>/diff</code> — uncommitted changes, with Commit · Push · PR buttons`,
     `<code>/terminal</code> — dump the last N terminal lines (default 40)`,
     `<code>/find</code> — search all sessions' conversations`,
@@ -8684,7 +8684,15 @@ bot.command('harness', async ctx => {
   } finally { if (switchKey) harnessSwitchingSessions.delete(switchKey) }
 })
 
-bot.command('status', async ctx => {
+// Bring the pinned status card forward — the body that used to be `/status`, now reached as bare
+// `/pin`. `/status` belongs to the CLI: it is a readout row (PANELS, panel-readout.ts), and the
+// bridge owning the name meant `@name /status` and a bare `/status` did different things.
+// The absence of a `bot.command('status')` is DELIBERATE and is the named exception to "retire a
+// command with a stub, never a deletion": an unregistered `/status` falls through to the
+// `message:text` slash branch, whose panel check runs BEFORE the unknown-command relay — so it
+// becomes the readout instead of being typed at the TUI's fuzzy-matching palette. A stub here
+// would take the name back. Held by panel-readout.test.ts.
+async function repostPinCard(ctx: Context): Promise<void> {
   const gated = dmCommandGate(ctx)
   if (!gated) return
   const { access, senderId } = gated
@@ -8766,7 +8774,7 @@ bot.command('status', async ctx => {
     }
   }
   await ctx.reply(`🔗 Not paired. Send me a message to get a pairing code.`)
-})
+}
 
 // /mode with no arg pops the picker; /mode <name> jumps straight to that mode.
 const MODE_ALIASES: Record<string, CcMode> = {
@@ -10084,7 +10092,7 @@ bot.command(['bind', 'unbind'], async ctx => {
   await ctx.reply(
     '✅ <b>Bound this forum as the command center.</b>\n\n' +
     `${anchorNote}Each other Claude Code session will get its own topic; General also carries global ` +
-    'commands (/status, /settings). New topics nest under the anchored session’s folder until you ' +
+    'commands (/pin, /settings). New topics nest under the anchored session’s folder until you ' +
     'set one with /base.\n\n' +
     '⚠️ One more setup step: in @BotFather → <i>Bot Settings → Group Privacy → Turn off</i>, so I can ' +
     'see messages you type inside a session’s topic (not just commands). Then remove + re-add me to the group.\n\n' +
@@ -10657,13 +10665,24 @@ function pinPanelKeyboard(): InlineKeyboard {
   return kb
 }
 
-// /pin on|off toggles the pinned status message (default on); bare /pin shows the panel.
-// Off unpins + removes any existing pin; on recreates it.
+// Bare /pin brings THIS chat's (or topic's) card forward — the behaviour that used to be the
+// bridge's `/status`, which now belongs to the CLI readout. /pin on|off toggles the pinned status
+// message (default on) and shows the panel; off unpins + removes any existing pin, on recreates it.
 bot.command('pin', async ctx => {
   if (!dmCommandGate(ctx)) return
   const arg = (ctx.match ?? '').toString().trim().toLowerCase()
   if (arg && arg !== 'on' && arg !== 'off' && arg !== 'refresh') {
-    await ctx.reply('Usage: <code>/pin on</code> | <code>off</code> | <code>refresh</code>', { parse_mode: 'HTML' })
+    await ctx.reply('Usage: <code>/pin</code> (bring the card down) | <code>on</code> | <code>off</code> | <code>refresh</code>', { parse_mode: 'HTML' })
+    return
+  }
+  // Bare /pin: re-post this chat's card at the bottom. Refused while the card is OFF — the pin
+  // ticker skips a disabled card, so posting one would leave a frozen card pinned forever.
+  if (!arg) {
+    if (loadAccess().sessionPin === false) {
+      await ctx.reply('📌 Pinned status card is <b>OFF</b> — turn it on with <code>/pin on</code>.', { parse_mode: 'HTML' })
+      return
+    }
+    await repostPinCard(ctx)
     return
   }
   // /pin refresh re-pins a fresh message — recovers a pin dismissed in the client (which the
@@ -19072,7 +19091,7 @@ void (async () => {
               { command: 'stop', description: 'Interrupt the current task (Esc)' },
               { command: 'cancel', description: 'Clear a stuck force-reply prompt (e.g. an unanswered “name a folder”)' },
               { command: 'back', description: 'Escape a stuck editor/pager/screen — get the session back to the Claude prompt' },
-              { command: 'status', description: 'Re-post the status pin at the bottom' },
+              { command: 'pin', description: 'Bring the status card down to the bottom (on · off · refresh)' },
               { command: 'sessions', description: 'Live sessions dashboard — model, context, state' },
               { command: 'settings', description: 'Channel settings — mirror, pin, MCP, voice' },
               { command: 'cron', description: 'Schedule messages (/cron 12h · every 09:00 · */30 9-17 * * 1-5 · cancel)' },

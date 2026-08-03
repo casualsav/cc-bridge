@@ -79,7 +79,7 @@ These commands are added by the bridge. Everything else belongs to the active te
 | `/md` | Create a `.md` file in the working dir, then reply with its contents |
 | `/budget` | Daily $ cap with 80%/100% warnings (`/budget 20` · `off`) |
 | `/account` | Claude accounts — list, `add <name>`, `remove <name>` (multi-account) |
-| `/status` | Re-post the pinned status card at the bottom (`/pin` toggles it) |
+| `/pin` | Bring the pinned status card down to the bottom (`/pin on` · `off` · `refresh` toggle it) |
 | `/health` | Bridge vitals — instance, uptime, panes, queues, watchdog |
 | `/stream` | Live-activity card style: `thoughts` · `actions` · `off` |
 | `/voice` | Voice-note replies on/off |

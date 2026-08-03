@@ -305,7 +305,7 @@ const CARD_RULE = '────────────────────�
 // preview Telegram shows), rule-separated detail groups below. Deliberately NO session identity:
 // in topic mode the tab is the session, and a pinned card belongs to the chat it is pinned in — the
 // owner re-ruled it a non-issue on 2026-07-28, so this is a decision, not an omission. Rendered into the pinned
-// status message (refreshed in place) and re-posted by /status.
+// status message (refreshed in place) and re-posted by /pin.
 // Backfill a fresh statusline parse from the last good one, field by field — a value the fresh
 // capture reported always wins; only the fields it's MISSING are filled from the prior snapshot. A
 // mid-repaint capture can momentarily drop effort/usage; this fills those rather than blanking the
@@ -846,7 +846,7 @@ export async function updateTopicPins(): Promise<void> {
 //     with nobody present. That class is not bounded or recovered, it is NOT PRODUCED.
 //   * If a card minted with the user present is nevertheless never delivered to their client, there
 //     is NO automatic recovery. Edits to it succeed forever and getChat reports it pinned, so
-//     nothing in the Bot API can see it. `/status` is the recovery, by design.
+//     nothing in the Bot API can see it. `/pin` is the recovery, by design.
 //
 // This replaced a distance-based re-mint (a card >40 messages back was re-created). That bounded the
 // undelivered case automatically, but it also re-posted a card into a live conversation on a schedule
@@ -932,7 +932,7 @@ export function armChatPin(chat: string): void {
 //
 // Past the cap it STOPS and says so. It deliberately does not escalate to a re-mint — see the
 // NO SYSTEM EVENT MAY EVER CAUSE A MINT rule above. The card is replaced by the next thing the user
-// does; `/status` forces it immediately.
+// does; `/pin` forces it immediately.
 const REPIN_CAP = 5
 const rePinAttempts = new Map<string, number>()
 export async function repinIfDropped(chat: string, existing: number): Promise<void> {
@@ -946,7 +946,7 @@ export async function repinIfDropped(chat: string, existing: number): Promise<vo
   const n = (rePinAttempts.get(chat) ?? 0) + 1
   rePinAttempts.set(chat, n)
   if (n > REPIN_CAP) {
-    if (n === REPIN_CAP + 1) process.stderr.write(`pin: chat ${chat} message ${existing} came unpinned ${REPIN_CAP} times — GIVING UP on re-pinning it. Re-pinning cannot fix a card the recipient never received; this one is replaced the next time the user does something, or now via /status\n`)
+    if (n === REPIN_CAP + 1) process.stderr.write(`pin: chat ${chat} message ${existing} came unpinned ${REPIN_CAP} times — GIVING UP on re-pinning it. Re-pinning cannot fix a card the recipient never received; this one is replaced the next time the user does something, or now via /pin\n`)
     return
   }
   await pinCard(chat, chat, existing)
