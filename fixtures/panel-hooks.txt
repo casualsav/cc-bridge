@@ -1,0 +1,45 @@
+
+╭─── Claude Code v2.1.220 ───────────────────────────────────────────────────────────────────────────────────╮
+│                                                    │ Tips for getting started                              │
+│                  Welcome back Sal!                 │ Ask Claude to create a new app or clone a repository  │
+│                                                    │ ───────────────────────────────────────────────────── │
+│                       ▐▛███▜▌                      │ What's new                                            │
+│                      ▝▜█████▛▘                     │ Bug fixes and reliability improvements                │
+│                        ▘▘ ▝▝                       │ Added Claude Opus 5 (`claude-opus-5`), now the defau… │
+│     Sonnet 5 with xhigh effort · Claude Max ·      │ Added `sandbox.network.strictAllowlist` setting to d… │
+│     suchag@gmail.com's Organization                │ /release-notes for more                               │
+│                  /…/scratchpad/p3                  │                                                       │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                     
+                                                    
+❯ /config                                                                                                     
+  ⎿  Disabled auto-compact                          
+                                                    
+❯ /export                                                                                                     
+  ⎿  Export cancelled                               
+                                                                
+❯ /resume 
+  ⎿  Resume cancelled
+                                                    
+❯ /privacy-settings                                                                                           
+  ⎿  "Help improve our AI models" set to false.                   
+
+                                                                                                           
+                                                                                                           
+                                                                 
+                                                                                                              
+                                                         
+                                                                                                           
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   Hooks                                                                                                    
+   4 hooks configured                                                                                      
+                                                                                                            
+   ℹ This menu is read-only. To add or modify hooks, edit settings.json directly or ask Claude. Learn more  
+                                                                                                              
+   ❯ 1.  PreToolUse (1)        Before tool execution                                                          
+     2.  PostToolUse           After tool execution
+     3.  PostToolUseFailure    After tool execution fails                                                     
+     4.  PostToolBatch         After a batch of tool calls resolves                                          
+   ↓ 5.  PermissionDenied      After auto mode classifier denies a tool call                                  
+                                                            
+   Enter to confirm · Esc to cancel                                                                           

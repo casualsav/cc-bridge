@@ -17,8 +17,7 @@
 //   tgctl post   <text|->                       broadcast to the humans in the room
 //   tgctl slash  <name> </cmd>                  inject a slash command into a target session's CLI
 //   tgctl keys   <name> <key>… [--force]        send named keystrokes to a target session's pane
-//   tgctl cost   <name>                         that session's cost report (panel read, prompt restored)
-//   tgctl context <name>                        that session's context report (same cycle)
+//   tgctl cost|context|status|mcp|hooks <name>  read that session's CLI panel (prompt restored afterwards)
 //   tgctl spawn  <name> [--dir p [--create]] [--account id] [--model m] [--why "…"] [--effort e] [text|-]   start a NEW session in its own topic
 //   tgctl kill   <name> [--force]               end a session you spawned (chat lane: any worker)
 //   tgctl reopen <name>                         bring a closed session back up, conversation intact
@@ -105,6 +104,12 @@ const HELP: Record<string, string> = {
   context: 'tg context <name>   that session\'s context report — tokens used of the window, and the per-category\n' +
            '  breakdown (system prompt, tools, memory, skills, messages, free space). Same cycle and same refusals\n' +
            '  as tg cost. For a fleet-wide glance the roster already carries ctx%; this is the breakdown for one.',
+  status:  'tg status <name>   that session\'s CLI status panel: version, model, cwd, session id, MCP state and the\n' +
+           '  CLI\'s own ⚠ diagnostics. The bus copy REDACTS the account identity lines (login, org, email) — a result\n' +
+           '  quoted into a report should not carry them; the owner\'s own chat gets the full block.',
+  mcp:     'tg mcp <name>   that session\'s MCP servers and their auth state (△ needs authentication). A list that\n' +
+           '  scrolls says so: "N of M shown". Read-only — the picker itself is never driven.',
+  hooks:   'tg hooks <name>   the hooks that session is running, by event. Read-only, and the CLI\'s own panel says so.',
   keys:    'tg keys <name> <key>… [--force]   send keystrokes to a wedged session\'s pane — the lever for a\n' +
            '  picker or permission prompt no message can reach (tg ask queues; tg slash needs a normal prompt).\n' +
            '  Named keys only: enter esc up down left right 1-9. Words are an `tg ask`, not a keystroke.\n' +
@@ -184,7 +189,7 @@ let name = '', args: Record<string, unknown> = {}
 // dead code that falls through to "unknown command". Cost one live probe run to find.
 // `repo` is not agent-to-agent messaging, but it takes flags, and this branch is the flag-parsing
 // one — same reason `wait` is here while the daemon deliberately keeps it out of AGENT_BUS_VERBS.
-const BUS = new Set(['ask', 'ack', 'btw', 'answer', 'post', 'slash', 'keys', 'cost', 'context', 'spawn', 'kill', 'reopen', 'roster', 'providers', 'history', 'shared', 'wait', 'watch', 'repo'])
+const BUS = new Set(['ask', 'ack', 'btw', 'answer', 'post', 'slash', 'keys', 'cost', 'context', 'status', 'mcp', 'hooks', 'spawn', 'kill', 'reopen', 'roster', 'providers', 'history', 'shared', 'wait', 'watch', 'repo'])
 if (BUS.has(cmd)) {
   const rest = process.argv.slice(3)
   const refs: string[] = []
@@ -220,8 +225,8 @@ if (BUS.has(cmd)) {
     // Keys are argv words, never stdin: they're a fixed vocabulary, not a body.
     case 'keys':    name = 'keys';    args = { pane, to: pos[0], keys: pos.slice(1), ...flags }; break
     // One target, no body: the answer comes back in this call's own result.
-    case 'cost':    name = 'cost';    args = { pane, to: pos[0] }; break
-    case 'context': name = 'context'; args = { pane, to: pos[0] }; break
+    case 'cost': case 'context': case 'status': case 'mcp': case 'hooks':
+                    name = cmd;       args = { pane, to: pos[0] }; break
     case 'spawn':   name = 'spawn';   args = { pane, name: pos[0], text: body(pos[1], 'spawn') ?? '', ...flags }; break
     case 'kill':    name = 'kill';    args = { pane, name: pos[0], ...flags }; break   // --force: close past the background-shell warning
     case 'reopen':  name = 'reopen';  args = { pane, name: pos[0] }; break

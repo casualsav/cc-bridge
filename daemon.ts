@@ -77,7 +77,7 @@ import {
 } from './repo-brief.ts'
 import { autowireMapImport, shipProductMap } from './chat-map.ts'
 import { ghAccounts, ghInstalled, ghSwitch, ghLogout, runGhLogin, provisionGh, type GhAccount } from './github.ts'
-import { PANELS, panelKindOf, parsePanel, type PanelKind } from './panel-readout.ts'
+import { PANELS, panelKindOf, interactivePanelOf, parsePanel, redactPanelIdentity, type PanelKind } from './panel-readout.ts'
 import {
   capturePane, capturePaneStyled, capturePaneCached, invalidateCapture, paneAlive, sendKeys, sendKeysLiteral, navigateDown, waitForSettle,
   autoSizeWindowOf, paneCommand, paneCwd, PaneWatcher,
@@ -6174,6 +6174,12 @@ async function handleCall(
             `${command} opens a panel the CLI holds until Esc — relaying it wedges the pane. Use \`tg ${panel === 'usage' ? 'cost' : panel} ${String(args.to ?? '')}\`, which reads the figures and puts the prompt back.` })
           return
         }
+        const interactive = interactivePanelOf(command)
+        if (interactive) {
+          write({ t: 'result', id, ok: false, text:
+            `${command} ${interactive} — the bridge can't drive it and relaying it wedges the pane, so nothing was sent.` })
+          return
+        }
         await reapDeadEndpoints(String(args.to ?? ''))
         const endpoints = busEndpoints()
         const res = resolveEndpoint(String(args.to ?? ''), endpoints)
@@ -6275,7 +6281,7 @@ async function handleCall(
       // waiting on the answer, and a panel readout is not something the target has any part in.
       // Guards mirror `tg slash` — live pane, at a normal prompt, and the input-box check readPanel
       // takes for itself. On demand only: nothing here runs unless an agent or the owner asks.
-      case 'cost': case 'context': {
+      case 'cost': case 'context': case 'status': case 'mcp': case 'hooks': {
         const kind = name as PanelKind
         const pane = args.pane ? String(args.pane) : null
         const fromSid = pane ? await sessionForPane(pane) : null
@@ -6305,7 +6311,9 @@ async function handleCall(
         const wedged = o.restored ? '' : `\n\n@${toName}'s pane did NOT return to its prompt — \`tg keys ${toName} esc\``
         if (!o.ok) { write({ t: 'result', id, ok: false, text: `${o.error}${wedged}` }); return }
         const changed = o.layoutChanged ? `(layout changed — raw readout, missing: ${o.missing.join(', ')})\n` : ''
-        text = `${PANELS[kind].command} on @${toName}:\n${changed}${o.text}${wedged}`
+        // The bus copy of /status is redacted: a result quoted into a report or a shared note carries
+        // the owner's login/org/email otherwise. His own chat gets the whole block.
+        text = `${PANELS[kind].command} on @${toName}:\n${changed}${redactPanelIdentity(kind, o.text)}${wedged}`
         break
       }
       // `tg keys <name> <key>… [--force]` — inject named keystrokes into another session's pane.
@@ -8119,6 +8127,14 @@ async function readPanel(t: CommandTarget, kind: PanelKind): Promise<PanelOutcom
   const parsed = parsePanel(kind, raw)
   if (parsed.kind === 'absent') return { ok: false, restored, error: `${cmd} didn't render — nothing to read` }
   return { ok: true, restored, text: parsed.text, layoutChanged: parsed.kind === 'raw', missing: parsed.kind === 'raw' ? parsed.missing : [] }
+}
+
+// One refusal, one voice, for the interactive half of the panel class. Says what the screen is (the
+// measured reason) and that nothing was typed — the second half matters most, because the failure it
+// replaces was a pane left holding that screen with a "✅ sent" receipt in the chat.
+function panelRefusal(command: string, why: string, label?: string | null): string {
+  const whose = label ? ` on <b>@${escapeHtml(label)}</b>` : ''
+  return `⚠️ <code>${escapeHtml(command)}</code>${whose} ${escapeHtml(why)} — it can't return a readout, so nothing was sent.`
 }
 
 // The pane didn't come back — said once, in one voice, wherever the outcome is reported. `label` is
@@ -16488,6 +16504,7 @@ bot.on('message:text', async ctx => {
     // and the CLI holds the screen until a human sends Esc — the wedge the owner hit. Same spelling,
     // because a NEW spelling would have left the old one armed.
     const panel = panelKindOf(command)
+    const interactive = interactivePanelOf(command)
     // Ending a session is the one case that must survive a wedged target, so it skips the idle gate.
     const nt = await namedTarget(ctx, cross[1], ending ? { requireIdle: false } : { spendHint: panel != null })
     if (!nt) return
@@ -16525,6 +16542,9 @@ bot.on('message:text', async ctx => {
       await runReadout(nt.target, String(ctx.chat!.id), panel, nt.name)
       return
     }
+    // The other half of the panel class: a screen whose content IS the interaction. Nothing is typed
+    // — the refusal is the whole feature, because relaying one wedges the target's pane.
+    if (interactive) { await say(panelRefusal(command, interactive, nt.name)); return }
 
     appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'slash', from: 'owner', to: nt.name, text: command })
     void relaySlashCommand(nt.target.paneId, nt.target.watcher, command, String(ctx.chat!.id), true, ctx.message?.message_thread_id)
@@ -16558,6 +16578,16 @@ bot.on('message:text', async ctx => {
     }
     const t = await commandTarget(ctx)
     if (!t) return
+    // The panel class again, on the surface where he types a bare `/mcp` at his OWN session. The
+    // readouts that already have a bot command (/cost, /context, /usage) never reach here; the rest
+    // of the class did, and relaying one wedges the pane he is sitting in.
+    const localPanel = panelKindOf(cmdText)
+    const localInteractive = interactivePanelOf(cmdText)
+    if (localPanel || localInteractive) {
+      if (localInteractive) { await ctx.reply(panelRefusal(cmdText, localInteractive), { parse_mode: 'HTML' }).catch(() => {}); return }
+      await doReadout(ctx, localPanel!)
+      return
+    }
     // A slash command while an effort confirmation is open: dismiss it first so the command isn't
     // typed into the modal (matches the "next message dismisses → No" behaviour for plain messages).
     await dismissPendingEffortConfirm(t.paneId)

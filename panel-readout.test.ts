@@ -7,10 +7,15 @@
 // good fixture is a test that cannot fail.
 import { test, expect } from 'bun:test'
 import { readFileSync } from 'node:fs'
-import { parsePanel, panelKindOf } from './panel-readout.ts'
+import { parsePanel, panelKindOf, interactivePanelOf, redactPanelIdentity } from './panel-readout.ts'
+import { planSlash } from './slash-policy.ts'
 
-const COST = readFileSync(new URL('./fixtures/panel-cost.txt', import.meta.url), 'utf8')
-const CONTEXT = readFileSync(new URL('./fixtures/panel-context.txt', import.meta.url), 'utf8')
+const fixture = (n: string) => readFileSync(new URL(`./fixtures/panel-${n}.txt`, import.meta.url), 'utf8')
+const COST = fixture('cost')
+const CONTEXT = fixture('context')
+const STATUS = fixture('status')
+const MCP = fixture('mcp')
+const HOOKS = fixture('hooks')
 
 // The other shape of the same panel, captured off a pane that had spent nothing: no per-model rows,
 // one aggregate `Usage:` line instead. Both are ordinary states, so both must report.
@@ -100,11 +105,106 @@ test('/usage reads the limits half of the same screen', () => {
   expect(parsePanel('usage', '').kind).toBe('absent')
 })
 
+test('/status reports the block and keeps the operational lines', () => {
+  const out = parsePanel('status', STATUS)
+  expect(out.kind).toBe('report')
+  const text = (out as { text: string }).text
+  expect(text).toContain('Version:          2.1.220')
+  expect(text).toContain('Model:            sonnet (claude-sonnet-5)')
+  expect(text).toContain('MCP servers:      1 need auth')
+  expect(text).toContain('Leftover npm global installation')     // the ⚠ diagnostics ride along
+  expect(text).not.toContain('Esc to cancel')
+})
+
+test('/status without a mandatory line comes back RAW and names it', () => {
+  const mangled = STATUS.split('\n').filter(l => !/^\s*Model:/.test(l)).join('\n')
+  const out = parsePanel('status', mangled)
+  expect(out.kind).toBe('raw')
+  expect((out as { missing: string[] }).missing).toEqual(['Model:'])
+})
+
+test('the bus form of /status drops login, org and email — and only those', () => {
+  const full = (parsePanel('status', STATUS) as { text: string }).text
+  expect(full).toContain('suchag@gmail.com')
+  const bus = redactPanelIdentity('status', full)
+  expect(bus).not.toContain('suchag@gmail.com')
+  expect(bus).not.toContain('Claude Max account')
+  expect(bus).toContain('Version:')
+  expect(bus).toContain('Model:')
+  expect(bus).toContain('cwd:')
+  expect(bus).toContain('MCP servers:')
+  // Every other panel is handed back untouched.
+  expect(redactPanelIdentity('cost', 'Email: x')).toBe('Email: x')
+})
+
+test('/mcp reports the servers and their auth state', () => {
+  const out = parsePanel('mcp', MCP)
+  expect(out.kind).toBe('report')
+  const text = (out as { text: string }).text
+  expect(text).toContain('Manage MCP servers')
+  expect(text).toContain('1 server')
+  expect(text).toContain('needs authentication')
+  expect(text).not.toContain('Esc to cancel')
+  expect(text).not.toContain('for help')
+})
+
+test('/hooks reports the configured hooks and CARRIES the shortfall when the list scrolls', () => {
+  const out = parsePanel('hooks', HOOKS)
+  expect(out.kind).toBe('report')
+  const text = (out as { text: string }).text
+  expect(text).toContain('4 hooks configured')
+  expect(text).toContain('PreToolUse')
+  // The captured panel shows five event rows (including the ❯-highlighted first one) with a ↓ on the
+  // last: the list continues below the screen, and saying so is what separates a report from a
+  // half-report. The header's "4 configured" counts hooks, not rows, so it is NOT an "N of M" case.
+  expect(text).toContain('(5 rows shown; the list continues below the visible screen')
+  expect(text).not.toMatch(/of 4 hooks configured shown/)
+})
+
+test('a list panel without its count line comes back RAW', () => {
+  const mangled = HOOKS.split('\n').filter(l => !/hooks configured/.test(l)).join('\n')
+  const out = parsePanel('hooks', mangled)
+  expect(out.kind).toBe('raw')
+  expect((out as { missing: string[] }).missing[0]).toContain('hooks configured')
+  expect(parsePanel('mcp', COST).kind).toBe('absent')
+})
+
+test('every interactive panel refuses with a measured reason, and none of them is a readout', () => {
+  for (const c of ['/config', '/permissions', '/rewind', '/resume', '/export', '/release-notes', '/privacy-settings', '/help']) {
+    expect(interactivePanelOf(c)).toBeTruthy()
+    expect(panelKindOf(c)).toBe(null)
+  }
+  expect(interactivePanelOf('/config')).toContain('two Escapes')     // measured: it needs a second Esc
+  expect(interactivePanelOf('/rewind')).toContain('restores code')
+  expect(interactivePanelOf('/cost')).toBe(null)
+  expect(interactivePanelOf('/compact')).toBe(null)
+  expect(interactivePanelOf('/config --json')).toBe(null)            // an argument form is the caller's own business
+})
+
+// Coverage by enumeration, not by what turned up while wiring: slash-policy.ts's MODAL map is the
+// list of commands measured to take the screen, so every one of them must be classified here —
+// readout or interactive. A new modal command added there without a class is a pane wedge waiting
+// to happen, and this fails the moment that lands.
+test('every MODAL command slash-policy knows is classified as readout or interactive', () => {
+  const unclassified: string[] = []
+  for (const cmd of ['/cost', '/usage', '/status', '/config', '/mcp', '/hooks', '/permissions',
+                     '/export', '/release-notes', '/help', '/rewind', '/resume', '/privacy-settings']) {
+    // Anchor the list itself: each of these must still be one slash-policy calls modal.
+    const plan = planSlash(cmd)
+    expect(plan.kind).toBe('refuse')
+    if (!panelKindOf(cmd) && !interactivePanelOf(cmd)) unclassified.push(cmd)
+  }
+  expect(unclassified).toEqual([])
+})
+
 test('panelKindOf routes the bare spellings only', () => {
   expect(panelKindOf('/cost')).toBe('cost')
   expect(panelKindOf('/Cost ')).toBe('cost')
   expect(panelKindOf('/usage')).toBe('usage')
   expect(panelKindOf('/context')).toBe('context')
+  expect(panelKindOf('/status')).toBe('status')
+  expect(panelKindOf('/mcp')).toBe('mcp')
+  expect(panelKindOf('/hooks')).toBe('hooks')
   // `/context all` is a wider INLINE dump that never takes the screen — it relays as an ordinary
   // command, so the mechanism must not claim it.
   expect(panelKindOf('/context all')).toBe(null)

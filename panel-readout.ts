@@ -16,7 +16,7 @@
 // pattern-matching whatever it happens to find.
 import { stripAnsi } from './prompt.ts'
 
-export type PanelKind = 'cost' | 'context' | 'usage'
+export type PanelKind = 'cost' | 'context' | 'usage' | 'status' | 'mcp' | 'hooks'
 
 export type PanelParse =
   | { kind: 'report'; text: string }
@@ -27,23 +27,68 @@ export const PANELS: Record<PanelKind, { command: string; icon: string; name: st
   cost:    { command: '/cost',    icon: '📊', name: 'Cost' },
   context: { command: '/context', icon: '📐', name: 'Context' },
   usage:   { command: '/usage',   icon: '📈', name: 'Usage' },
+  status:  { command: '/status',  icon: '🩺', name: 'Status' },
+  mcp:     { command: '/mcp',     icon: '🔌', name: 'MCP' },
+  hooks:   { command: '/hooks',   icon: '🪝', name: 'Hooks' },
 }
 
 // Which panel a slash command opens, or null for anything else. The owner's `@name /cmd` routing,
-// the bus verbs and `tg slash`'s refusal all read THIS one enumeration — so a command cannot be
-// handled on one surface and left to wedge a pane on another.
+// the local slash relay, the bus verbs and `tg slash`'s refusal all read THIS one enumeration — so a
+// command cannot be handled on one surface and left to wedge a pane on another.
 //
 // Bare spellings only, on purpose: `/context all` is a wider INLINE dump that never takes the
 // screen, so it relays as an ordinary command and needs nothing from this mechanism.
 export function panelKindOf(command: string): PanelKind | null {
-  const m = /^\/(cost|context|usage)$/i.exec(command.trim())
+  const m = /^\/(cost|context|usage|status|mcp|hooks)$/i.exec(command.trim())
   return m ? (m[1]!.toLowerCase() as PanelKind) : null
+}
+
+// The OTHER half of the class, and the half that closes the wedge: a screen the bridge can read
+// nothing useful off, because its content IS the interaction. Each was opened, captured and Esc'd on
+// a live 2.1.220 pane (2026-08-03) before it was classified — the reason strings are what was
+// measured, not what the command sounds like it does.
+//
+// Refusing these is the point. Relayed, every one of them types into the pane and leaves the CLI
+// holding the screen; refused, nothing is typed at all.
+const INTERACTIVE: Record<string, string> = {
+  '/config': 'opens the settings list, whose rows toggle on Enter/Space (and which takes two Escapes to close)',
+  '/permissions': 'opens the permission-rule editor, with the rules behind tabs',
+  '/rewind': 'opens the checkpoint picker — Enter there restores code and/or the conversation',
+  '/resume': 'opens the session picker — Enter there switches which conversation the session is in',
+  '/export': 'opens the export picker — Enter there writes a file or the clipboard',
+  '/release-notes': 'opens a version picker; the notes themselves are behind a selection',
+  '/privacy-settings': 'is a toggle screen — read it at claude.ai/settings/data-privacy-controls',
+  '/help': 'prints the CLI\'s static shortcut sheet, identical on every session',
+}
+
+// Why a panel command can't be run for you, or null if it isn't one. Same bare-spelling rule as
+// panelKindOf: an argument form is the caller's own business and relays as usual.
+export function interactivePanelOf(command: string): string | null {
+  const token = command.trim().split(/\s+/)[0]?.toLowerCase() ?? ''
+  return token === command.trim().toLowerCase() ? INTERACTIVE[token] ?? null : null
 }
 
 export function parsePanel(kind: PanelKind, raw: string): PanelParse {
   if (kind === 'cost') return parseCost(raw)
   if (kind === 'context') return parseContext(raw)
+  if (kind === 'status') return parseStatus(raw)
+  if (kind === 'mcp') return parseList(raw, MCP)
+  if (kind === 'hooks') return parseList(raw, HOOKS)
   return parseUsage(raw)
+}
+
+// The bus form of /status drops the account-identity lines. Bus results get quoted into reports and
+// shared notes, and the owner's login/org/email do not belong in that exhaust; version, model, cwd,
+// MCP state and diagnostics are the operationally useful half and stay. His OWN chat gets the whole
+// block — the ruling is about who reads the copy, not about the figures.
+const IDENTITY_LINE = /^\s*(Login method|Organization|Email):/i
+export function redactPanelIdentity(kind: PanelKind, text: string): string {
+  if (kind !== 'status') return text
+  // Collapse the gap the removal leaves: three consecutive labelled lines lifted out of an aligned
+  // block read as a formatting fault, and a redaction that looks like a rendering bug invites
+  // someone to "fix" it back.
+  return text.split('\n').filter(l => !IDENTITY_LINE.test(l))
+    .filter((l, i, a) => l.trim() || (a[i - 1]?.trim() ?? '') !== '').join('\n')
 }
 
 // Strip the common left margin from a block (so a <pre> isn't pushed off-screen) while keeping the
@@ -178,6 +223,92 @@ function compactContext(body: string[]): string | null {
   }
   if (cats.length) { if (out.length) out.push(''); out.push(...cats) }
   return out.join('\n')
+}
+
+// ---- /status ----
+//
+// Measured (fixtures/panel-status.txt): the same tabbed screen /cost opens, on its Status tab —
+// `Label:  value` lines from the tab bar down to `Esc to cancel`, ending with a `System diagnostics`
+// section whose entries are ⚠ lines. Version/Model/cwd are the mandatory set: a status report
+// missing any of them is not a status report, and the identity lines are optional precisely because
+// the bus form redacts them (redactPanelIdentity).
+const STATUS_REQUIRED = ['Version:', 'Model:', 'cwd:']
+
+function parseStatus(raw: string): PanelParse {
+  const lines = paneLines(raw)
+  const tabs = lines.findLastIndex(l => /Settings\s+Status\s+Config\s+Usage\s+Stats/.test(l))
+  const anchor = lines.findLastIndex(l => /^\s*Version:/.test(l))
+  if (tabs < 0 && anchor < 0) return { kind: 'absent' }
+  const start = tabs >= 0 ? tabs + 1 : anchor
+  let end = lines.length
+  for (let i = start; i < lines.length; i++) {
+    const t = lines[i]!.trim()
+    if (/^Esc to cancel/i.test(t) || /^─{10,}/.test(t) || /^❯/.test(t)) { end = i; break }
+  }
+  const body = stripCommonIndent(lines.slice(start, end)) || stripCommonIndent(lines)
+  if (!body) return { kind: 'absent' }
+  const hay = body.toLowerCase()
+  const missing = STATUS_REQUIRED.filter(k => !hay.includes(k.toLowerCase()))
+  return missing.length ? { kind: 'raw', text: body, missing } : { kind: 'report', text: body }
+}
+
+// ---- /mcp and /hooks: the two LIST panels ----
+//
+// Both are a header, a count line the CLI writes itself, and one row per entry — and both SCROLL:
+// /hooks marks the overflow with a `↓` in the row gutter, /config (not a readout) prints
+// `↓ N more below`. The rule for these, and for any list panel added later: read the count from the
+// HEADER, report how many rows were visible, and carry the shortfall in the output. The bridge never
+// arrow-keys a panel to see the rest — driving a UI is the thing this mechanism exists to avoid, and
+// a list that silently shows the first screenful is the half-report the whole design refuses.
+type ListPanel = {
+  header: RegExp             // the panel's own title line
+  count: RegExp              // the CLI's count line, capturing the number
+  countLabel: string         // what that number counts, for the shortfall note
+  row: RegExp                // an entry row
+  end: RegExp                // the footer chrome below the list
+  missing: string[]          // the mandatory set, in words, for the layout-changed report
+}
+const MCP: ListPanel = {
+  header: /^\s*Manage MCP servers\s*$/i, count: /^\s*(\d+)\s+servers?\b/i, countLabel: 'servers',
+  row: /·|needs authentication|✓|△/, end: /for help$|↑\/↓ to navigate|Esc to cancel/i,
+  missing: ['the "Manage MCP servers" header', 'the "N server(s)" count'],
+}
+const HOOKS: ListPanel = {
+  // The gutter carries THREE markers, not one: `↓`/`↑` for the overflow and `❯` on the highlighted
+  // row. Counting only the first two dropped the selected row from every count.
+  header: /^\s*Hooks\s*$/i, count: /^\s*(\d+)\s+hooks? configured/i, countLabel: 'hooks configured',
+  row: /^\s*[↓↑❯]?\s*\d+\.\s+\S/, end: /Enter to confirm|Esc to cancel/i,
+  missing: ['the "Hooks" header', 'the "N hooks configured" count'],
+}
+
+function parseList(raw: string, panel: ListPanel): PanelParse {
+  const lines = paneLines(raw)
+  const start = lines.findLastIndex(l => panel.header.test(l))
+  if (start < 0) return { kind: 'absent' }
+  let end = lines.length
+  for (let i = start + 1; i < lines.length; i++) {
+    if (panel.end.test(lines[i]!.trim()) || /^❯\s*\//.test(lines[i]!.trim())) { end = i; break }
+  }
+  const body = lines.slice(start, end)
+  const text = stripCommonIndent(body)
+  if (!text) return { kind: 'absent' }
+  const countLine = body.find(l => panel.count.test(l))
+  if (!countLine) return { kind: 'raw', text, missing: panel.missing.slice(1) }
+  // The shortfall note: the header's number against the rows actually on screen, plus the CLI's own
+  // overflow marker. Either signal alone under-reports — a list can be truncated with the count
+  // still matching (rows the panel groups), and a `↓` can sit on a list whose count we never found.
+  const total = Number(panel.count.exec(countLine)![1])
+  const rows = body.filter(l => panel.row.test(l) && !panel.count.test(l) && !panel.header.test(l)).length
+  const scrolls = body.some(l => /^\s*[↓↑]\s/.test(l) || /\d+\s+more below/i.test(l))
+  // Two different shortfalls, and conflating them produced the nonsense "4 of 4 hooks shown — the
+  // panel scrolls" on the first live run: the header counts CONFIGURED hooks while the rows are
+  // event types, so the count and the row tally are not the same quantity. Say whichever is true.
+  const note = total > rows && rows > 0
+    ? `\n\n(${rows} of ${total} ${panel.countLabel} shown — the panel scrolls, and the bridge does not drive it)`
+    : scrolls
+      ? `\n\n(${rows} rows shown; the list continues below the visible screen — the panel scrolls, and the bridge does not drive it)`
+      : ''
+  return { kind: 'report', text: text + note }
 }
 
 // ---- /usage ----

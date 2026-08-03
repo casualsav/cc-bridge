@@ -1,0 +1,45 @@
+
+╭─── Claude Code v2.1.220 ───────────────────────────────────────────────────────────────────────────────────╮
+│                                                    │ Tips for getting started                              │
+│                  Welcome back Sal!                 │ Ask Claude to create a new app or clone a repository  │
+│                                                    │ ───────────────────────────────────────────────────── │
+│                       ▐▛███▜▌                      │ What's new                                            │
+│                      ▝▜█████▛▘                     │ Bug fixes and reliability improvements                │
+│                        ▘▘ ▝▝                       │ Added Claude Opus 5 (`claude-opus-5`), now the defau… │
+│     Sonnet 5 with xhigh effort · Claude Max ·      │ Added `sandbox.network.strictAllowlist` setting to d… │
+│     suchag@gmail.com's Organization                │ /release-notes for more                               │
+│                  /…/scratchpad/p3                  │                                                       │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                     
+                                                    
+❯ /config                                                                                                     
+  ⎿  Disabled auto-compact                          
+                                                    
+                                                    
+                                                    
+                                                                
+                                                    
+                                                     
+                                                    
+                                                    
+                                                                  
+                                                     
+                                                    
+                                                    
+                                                     
+                                                                                                              
+                                                         
+                                                                                                           
+                                                    
+                                                                                         
+                                                                                                          
+                                                                                                            
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   Manage MCP servers                                                                                        
+   1 server
+
+     claude.ai
+   ❯ claude.ai Google Drive · △ needs authentication                                                          
+                                                                                                              
+   https://code.claude.com/docs/en/mcp for help             
+   ↑/↓ to navigate · Enter to confirm · Esc to cancel                                                         
