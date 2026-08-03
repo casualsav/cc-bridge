@@ -105,6 +105,9 @@ const HELP: Record<string, string> = {
            '  start a NEW session in its own topic. --dir must already exist unless --create is passed;\n' +
            '  with no --dir the session gets a folder named after it under the base dir.\n' +
            '  The first message is delivered as an ask once its REPL is up.\n' +
+           '  --model takes a native alias, or any model a signed-in provider offers (see tg providers).\n' +
+           '  A name offered by two providers refuses and asks for --account; so does a Claude-family id\n' +
+           '  (claude-opus-5 …), which never resolves to a third-party host unless you name it.\n' +
            '  --why is one line on why THIS model fits THIS task; it shows on the owner\'s spawn card.\n' +
            '  --probe marks a THROWAWAY test pane (bus/behaviour checks you kill afterwards). It is the\n' +
            '  only way to head a session on haiku: without it a --model haiku spawn is upgraded to your\n' +

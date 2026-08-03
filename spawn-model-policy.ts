@@ -41,6 +41,37 @@ export const FABLE = 'fable'
 // kill in a minute it still is.
 export const HAIKU = 'haiku'
 
+// Is this an Anthropic/Claude-family model NAME? The native aliases plus any full id carrying the
+// `claude` token (`claude-opus-5`, `claude-sonnet-4-6`, …).
+//
+// Owner's ruling (2026-08-03): a Claude-family name must NEVER implicitly resolve to a non-native
+// provider, even when a gateway catalog holds the only match. `local-codex` already offers a dozen
+// `claude-*` ids and an OpenRouter-style aggregator would offer every one of them — so "the only
+// match wins" would quietly hand `claude-opus-5` to a reseller. Bare Claude-family names resolve
+// native or refuse; `--account gateway:x --model claude-*` stays legal, because explicitness IS the
+// protection.
+export function isClaudeFamily(model: string | null | undefined): boolean {
+  if (!model) return false
+  const id = model.replace(/\[1m\]$/, '').toLowerCase()
+  return UNGATED_MODELS.includes(id) || id === FABLE || /(?:^|[^a-z0-9])claude(?:[^a-z0-9]|$)/.test(id)
+}
+
+// Is this model id Fable, whoever serves it? Owner's ruling (2026-08-03, reversing a first answer):
+// the approval hold is about the MODEL, not the billing route, so a gateway-hosted fable meets the
+// same gate as the native one and an explicit `--account` does NOT exempt it. `--probe` opens haiku
+// and only haiku — a throwaway pane is a reason to skip a quality rule, never a spend one.
+export function isFableFamily(model: string | null | undefined): boolean {
+  return !!model && /(?:^|[^a-z0-9])fable(?:[^a-z0-9]|$)/i.test(model.replace(/\[1m\]$/, ''))
+}
+
+// Does this model id HEAD a session as Haiku? Matched on the family token, not on the alias, and on
+// the RESOLVED id whatever provider serves it: the ruling is about what heads a coding session, not
+// about who bills the tokens, and a gateway catalog that offers `haiku` / `claude-haiku-4-5` would
+// otherwise walk straight past the rule (`local-codex` offers both today).
+export function isHaikuHead(modelId: string | null | undefined): boolean {
+  return !!modelId && /(?:^|[^a-z0-9])haiku(?:[^a-z0-9]|$)/i.test(modelId.replace(/\[1m\]$/, ''))
+}
+
 // What a refused Haiku head actually runs on: the configured default, through the ordinary resolver,
 // so the ack names whatever the box is really set to rather than a hardcoded alias.
 // The one branch that cannot be delegated: a box whose default IS haiku would resolve the upgrade
@@ -109,6 +140,11 @@ export type ModelAsk = {
   quietUntil: number              // epoch ms of the "don't ask for a while" window; 0 = not quiet
   humanOrigin: boolean            // the caller IS a human (mini-app tap, owner command), not an agent
   probe?: boolean                 // `tg spawn --probe` — a throwaway test pane, not a coding session
+  // The model that will actually HEAD the pane, resolved, whatever provider serves it. Separate from
+  // `requested` on purpose: `requested` is the native alias the PRICING gate reasons about (a
+  // provider account owns its own catalog and is exempt), while this is the head guard's subject —
+  // one question is who pays, the other is what runs.
+  headModel?: string | null
   now: number
 }
 
@@ -118,10 +154,13 @@ export type ModelDecision = {
   clamped: string | null // the alias that was asked for and did not win — the agent is told this
   banned: boolean        // clamped by the Fable switch, not by the gate: no card, and a retry is futile
   autoFallback: boolean  // `auto`, and the caller named nothing — the confirmation has to say so
+  // The head guard fired. The caller must DROP any provider route it had resolved: the upgrade is a
+  // native model, so leaving the gateway in place would launch that provider with the wrong model.
+  headBlocked: boolean
 }
 
 const allow = (model: string | null): ModelDecision =>
-  ({ model, ask: false, clamped: null, banned: false, autoFallback: false })
+  ({ model, ask: false, clamped: null, banned: false, autoFallback: false, headBlocked: false })
 
 // What a caller that named no model gets: the owner's configured default, either way. Under `auto`
 // that default is a FALLBACK rather than an instruction — the spawning agent was supposed to choose
@@ -139,17 +178,22 @@ export function decideModel(a: ModelAsk): ModelDecision {
   // This runs FIRST, ahead of the Fable switch: that switch is about what a coding AGENT may pick,
   // and the owner's own pick in his own picker stays sovereign (his ruling, 2026-07-29).
   if (a.humanOrigin) return a.requested ? allow(a.requested) : unspecified(a)
+  // Fable is matched on the RESOLVED head, so a gateway-hosted fable meets the same switch and the
+  // same hold as the native one — the gate is about the model, not about who invoices it.
+  const fableHead = isFableFamily(a.headModel ?? a.requested)
   // The Fable switch, ahead of the named allowlist deliberately: a preference set months ago must not
   // quietly reinstate the model the owner has switched off, and `spawnAgentModels: ['fable']` did
   // exactly that until this branch existed. No card and no hold: there is nothing left for a human to
   // decide, so telling the caller to wait for a tap would be a lie it then waits on.
-  if (a.fable === 'refuse' && a.requested === FABLE) {
-    return { model: launchFallback(def), ask: false, clamped: FABLE, banned: true, autoFallback: false }
+  if (a.fable === 'refuse' && fableHead) {
+    return { model: launchFallback(def), ask: false, clamped: FABLE, banned: true, autoFallback: false, headBlocked: false }
   }
   // Approvals switched OFF: Fable is an ordinary model for coding agents. It cannot join
   // UNGATED_MODELS — that list is the set nothing can make expensive, and this one is a preference the
   // owner can revoke with a tap — so it is honoured here, per request, and nowhere else.
-  if (a.fable === 'allow' && a.requested === FABLE) return allow(FABLE)
+  // Only the NATIVE request names fable as the launch model; through a provider account the harness
+  // owns the model, so this hands back the ordinary answer and the route does the rest.
+  if (a.fable === 'allow' && fableHead) return a.requested === FABLE ? allow(FABLE) : unspecified(a)
   // Haiku may not HEAD a coding session (owner's ruling). Upgraded, never refused — this repo already
   // decided that question for held spawns: losing a colleague's task buys nothing, so the work runs on
   // the configured default and the caller is told plainly. `banned`, so no card is minted and the
@@ -159,8 +203,19 @@ export function decideModel(a: ModelAsk): ModelDecision {
   // for haiku, or a prefs list naming it, would otherwise wave through the exact thing being ruled
   // out — and BELOW `humanOrigin`, so the owner picking Haiku in his own picker stays sovereign.
   // `--probe` is the one way past it: a throwaway test pane is not a coding session.
-  if (a.requested === HAIKU && !a.probe) {
-    return { model: headUpgradeModel(def), ask: false, clamped: HAIKU, banned: true, autoFallback: false }
+  // Reasons over the RESOLVED head — `headModel` when a provider account supplied one, the native
+  // alias otherwise — so `--account gateway:local-codex --model haiku` meets the same rule as
+  // `--model haiku`. The upgrade is native, so `headBlocked` tells the caller to drop the route it
+  // resolved; leaving it would launch that provider on a model nobody asked for.
+  if (isHaikuHead(a.headModel ?? a.requested) && !a.probe) {
+    return { model: headUpgradeModel(def), ask: false, clamped: HAIKU, banned: true, autoFallback: false, headBlocked: true }
+  }
+  // A provider account never reaches the clamp at the bottom of this function — `requested` is null,
+  // so `unspecified` would answer first. The hold has to be minted here instead, or a gateway fable
+  // would launch unheld. Above the allowlist for the same reason the haiku guard is: neither the
+  // account nor a months-old preference may exempt the model the owner gates.
+  if (fableHead && !a.requested) {
+    return { model: launchFallback(def), ask: a.now >= a.quietUntil, clamped: FABLE, banned: false, autoFallback: false, headBlocked: false }
   }
   if (!a.requested) return unspecified(a)
   // Asking for what would have happened anyway is not an override. No card: there is nothing for a
@@ -179,7 +234,7 @@ export function decideModel(a: ModelAsk): ModelDecision {
   // The clamp target goes through launchFallback: an unconfigured box used to clamp to `null` (no
   // --model at all, the CLI's own default — which is how a reopen came back on Haiku 4.5 and dropped
   // the 1M window with it), and a box configured for Fable used to answer a Fable request with Fable.
-  return { model: launchFallback(def), ask: a.now >= a.quietUntil, clamped: a.requested, banned: false, autoFallback: false }
+  return { model: launchFallback(def), ask: a.now >= a.quietUntil, clamped: a.requested, banned: false, autoFallback: false, headBlocked: false }
 }
 
 // ---- The held spawn ----

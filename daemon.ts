@@ -38,7 +38,7 @@ import { normalizeCommandOutput } from './ansi.ts'
 import { planSlash } from './slash-policy.ts'
 import { preserveGlobalEffort, reconcileEffortScope } from './effort-scope.ts'
 import { planDrift, driftStateAfter, type DriftState } from './drift-guard.ts'
-import { decideModel, decideEffort, upgradeNeedsConfirm, heldSpawnModel, heldSpawnNeedsLine, holdTapData, parseHoldTap, launchFallback, spawnCardHeader, relaunchModel, launchDefaultModel, launchDefaultEffort, fablePolicy, fableRowState, onOff, type FablePolicy, AUTO_FALLBACK, AUTO_EFFORT_FALLBACK, FABLE, HAIKU, type ModelDecision, type HoldOutcome } from './spawn-model-policy.ts'
+import { decideModel, decideEffort, upgradeNeedsConfirm, heldSpawnModel, heldSpawnNeedsLine, holdTapData, parseHoldTap, launchFallback, spawnCardHeader, relaunchModel, launchDefaultModel, launchDefaultEffort, fablePolicy, fableRowState, onOff, type FablePolicy, AUTO_FALLBACK, AUTO_EFFORT_FALLBACK, FABLE, HAIKU, isClaudeFamily, type ModelDecision, type HoldOutcome } from './spawn-model-policy.ts'
 import { renderSessionsView } from './sessions-view.ts'
 import { detectCurrentMode, onNormalPrompt, inputBoxContent, isModelSwitchConfirm, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType } from './prompt.ts'
 import { modelSwitchEvidence, findSessionFile, resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, turnAnchorUuid, liveSubagents, currentTurnFeed, currentTurnActivity, concludedTurnWork, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
@@ -6020,13 +6020,37 @@ async function handleCall(
         // A dash-leading name is a mistyped flag (`tg spawn --help` really did spawn a "--help"
         // session, folder and all). tgctl rejects it too; this is the daemon-side backstop.
         if (topicName.startsWith('-')) { write({ t: 'result', id, ok: false, text: `'${topicName}' is not a session name (it starts with a dash) — try 'tg spawn --help'` }); return }
-        const providerAccount = String(args.account ?? '').trim()
-        const providerRoute = providerAccount ? routeForAccountId(providerAccount, loadHarnessGateways()) : null
+        let providerAccount = String(args.account ?? '').trim()
+        let providerRoute = providerAccount ? routeForAccountId(providerAccount, loadHarnessGateways()) : null
         if (providerAccount && !providerRoute) {
           write({ t: 'result', id, ok: false, text: `unknown provider account '${providerAccount}' — use the account id shown in Settings → Accounts` }); return
         }
         const explicitModel = args.model ? String(args.model).trim().toLowerCase() : null
-        const providerModel = providerRoute?.harness && explicitModel ? explicitModel : null
+        // A bare --model may name ANY model in the fleet, not only a native alias — the caller should
+        // not have to know which account hosts it. Native aliases are RESERVED and never searched for:
+        // `local-codex` already offers `opus`/`sonnet`/`haiku`/`fable`, so without that rule adding a
+        // gateway would silently redefine the fleet's most-used word. Everything else must resolve to
+        // exactly one account; zero and two-plus both REFUSE, because silently picking a provider is
+        // the bug this feature exists to prevent, wearing a feature's clothes.
+        if (explicitModel && !providerAccount && !MODEL_ALIASES.includes(explicitModel)) {
+          // A Claude-family name never resolves implicitly to a reseller (owner's ruling): it is
+          // either a native alias — handled above, so we are past it — or it refuses here and asks
+          // for the account. `--account gateway:x --model claude-*` is unaffected: explicitness is
+          // the protection, and this branch only runs when no account was named.
+          if (isClaudeFamily(explicitModel)) {
+            write({ t: 'result', id, ok: false, text: `'${explicitModel}' is a Claude model name — spawn it natively as one of ${MODEL_ALIASES.join(' | ')}, or name the provider explicitly with --account if you meant a third-party host` }); return
+          }
+          const hosts = await fleetModelHosts(explicitModel)
+          if (!hosts.length) {
+            write({ t: 'result', id, ok: false, text: `no signed-in provider offers '${explicitModel}' — 'tg providers' lists what each account has (native aliases: ${MODEL_ALIASES.join(' | ')})` }); return
+          }
+          if (hosts.length > 1) {
+            write({ t: 'result', id, ok: false, text: `'${explicitModel}' is offered by ${hosts.join(' and ')} — name one with --account` }); return
+          }
+          providerAccount = hosts[0]!
+          providerRoute = routeForAccountId(providerAccount, loadHarnessGateways())
+        }
+        let providerModel = providerRoute?.harness && explicitModel ? explicitModel : null
         if (providerModel && !/^[A-Za-z0-9._:/+-]+(?:\[1m\])?$/.test(providerModel)) {
           write({ t: 'result', id, ok: false, text: `invalid model id '${providerModel}'` }); return
         }
@@ -6045,8 +6069,12 @@ async function handleCall(
         const probe = args.probe === true
         const modelChoice = decideModel({
           requested: providerRoute?.harness ? null : explicitModel, configuredDefault: configuredSpawnModel(),
+          headModel: providerModel ?? explicitModel,
           ...modelPolicyPrefs(), humanOrigin: false, probe, now: Date.now(),
         })
+        // The head guard upgraded to a NATIVE model, so the provider route it was going to ride must
+        // go with it — otherwise the gateway launches on a model nobody asked for.
+        if (modelChoice.headBlocked) { providerAccount = ''; providerRoute = null; providerModel = null }
         const explicitEffort = args.effort ? String(args.effort).trim().toLowerCase().replace(/^med$/, 'medium') : null
         if (explicitEffort && (explicitEffort === 'auto' || !EFFORT_LEVELS.includes(explicitEffort))) { write({ t: 'result', id, ok: false, text: `unknown effort '${explicitEffort}' — one of: low | medium | high | xhigh | max` }); return }
         // No explicit --effort: same /settings 🧑‍💻 fallback as the model above, and the same `auto`
@@ -6088,8 +6116,13 @@ async function handleCall(
         // a typo'd folder the caller is no longer around to be told about. Below it, nothing exists yet:
         // no topic tab, no pane, no bus row.
         if (modelChoice.clamped && modelChoice.ask) { text = await holdSpawnForApproval(spec, modelChoice.clamped, launchFallback(modelChoice.model)); break }
+        // `autoFallback` is computed from what the CALLER named, not from what survived the pricing
+        // gate's nulling: a gateway model sets `requested: null` (a provider owns its own catalog), so
+        // decideModel reports "named no model" for a spawn that named one — observed live on a
+        // `--account gateway:deepseek --model deepseek-v4-flash` spawn, 2026-08-03. Who pays and who
+        // chose are different questions.
         const spawned = await launchSpawn(spec, modelChoice.model,
-          modelChoice.clamped ? clampedClause(modelChoice) : '', spawnReason(spec, modelChoice.autoFallback, effortChoice.autoFallback))
+          modelChoice.clamped ? clampedClause(modelChoice) : '', spawnReason(spec, modelChoice.autoFallback && !explicitModel, effortChoice.autoFallback))
         if (!spawned.ok) { write({ t: 'result', id, ok: false, text: spawned.text }); return }
         text = spawned.text
         break
@@ -7276,9 +7309,33 @@ async function launchSpawn(spec: SpawnSpec, model: string | null, clampedNote: s
   // The no-brief case says so OUT LOUD. It used to be the silent branch — a dropped brief and a
   // deliberately briefless spawn printed the same line bar one clause, which is how two spawns
   // whose briefs never arrived read as successful for half an hour each.
-  return { ok: true, text: `spawned "${topicName}" in ${dir}${shownModel ? ` · model ${shownModel}` : ''}${reason ? ` (why: ${reason})` : ''}${clampedNote}${effort ? ` · effort ${effort}` : ''}${firstMsg
+  // Naming the ALIAS alone is what made the 2026-08-01 bug invisible: `model opus` read identically
+  // whether opus ran or a gateway silently served the turn. So the ack names the provider it resolved
+  // to, says out loud when the spawn overrode a non-native coding default, and — for a provider whose
+  // backend this box cannot interrogate — declines to claim the effort dial was honoured.
+  const runsOn = providerLabelOf(launchHarness)
+  const overrode = defaultRoute.harness && !harnessesMatch(launchHarness, defaultRoute.harness)
+    ? ` — overrode the coding default ${providerLabelOf(defaultRoute.harness)}`
+    : ''
+  const effortClause = effort
+    ? ` · effort ${effort}${launchHarness ? ' (CLI dial; the provider may not honour it)' : ''}`
+    : ''
+  return { ok: true, text: `spawned "${topicName}" in ${dir}${shownModel ? ` · model ${shownModel} via ${runsOn}` : ''}${overrode}${reason ? ` (why: ${reason})` : ''}${clampedNote}${effortClause}${firstMsg
     ? ' — the first message delivers as an ask once the REPL is up, and its reply comes back to you as the answer'
     : ' — NO first message was given, so it starts idle (a heredoc needs the `-` body argument; `tg spawn --help`)'}. Reach it on the bus as @${topicName}.` }
+}
+
+// What a launch RUNS ON, in the ack's words. Absent harness = the native login, which is what every
+// spawn used before providers existed.
+function providerLabelOf(harness: HarnessProfile | undefined): string {
+  if (!harness || harness.provider === 'anthropic') return 'Claude (native)'
+  return harness.provider === 'gateway' ? `🌐 ${harness.gateway}` : harness.provider
+}
+// Same provider AND same model — a role default that merely agrees with the spawn is not an override.
+function harnessesMatch(a: HarnessProfile | undefined, b: HarnessProfile | undefined): boolean {
+  const norm = (h: HarnessProfile | undefined): string => !h || h.provider === 'anthropic'
+    ? 'anthropic' : `${h.provider}:${h.provider === 'gateway' ? h.gateway : ''}:${h.model}`
+  return norm(a) === norm(b)
 }
 
 // ---- Held spawns: the gate that actually holds ----
@@ -7334,7 +7391,13 @@ async function resolveSpawnHold(h: SpawnHold, outcome: HoldOutcome): Promise<{ o
   // old "emit no --model, let the CLI decide"), and a declined or slept-through spawn is the last
   // place to hand that choice away. It also cannot resolve to the gated model it is the fallback for.
   const model = heldSpawnModel(outcome, h.alias, launchFallback(h.fallback))
-  const r = await launchSpawn(h.spec, model, '', spawnReason(h.spec, false, h.spec.autoEffort === true))
+  // A denial or a timeout falls back to a NATIVE alias, so the provider route the caller asked for
+  // has to go with it: a cross-provider fable hold (gateway-hosted, held on the same rule as the
+  // native one since 2026-08-03) would otherwise launch that gateway on the very model the owner
+  // just declined — the fallback alias never reaches the CLI through a harness.
+  const { providerAccount: _pa, providerModel: _pm, ...routeless } = h.spec
+  const spec = outcome === 'approved' ? h.spec : routeless
+  const r = await launchSpawn(spec, model, '', spawnReason(spec, false, spec.autoEffort === true))
   const ran = model
   const why = outcome === 'approved' ? `on ${h.alias} — you approved it`
     : outcome === 'denied' ? `on ${ran} — the owner declined ${h.alias}`
@@ -10566,6 +10629,23 @@ function modelRolePickerKeyboard(role: SessionRole): InlineKeyboard {
 // panel (settings → 👤, or /account) — see accountsPanelText below.
 function failoverChain(): FailoverHop[] {
   return resolveChain(loadAccess().failoverChain ?? [], listAccounts().map(a => a.name), codexAvailable(), Object.keys(loadHarnessGateways()))
+}
+
+// Every signed-in provider account offering this exact model id, as account ids. The catalogs are the
+// providers' own (`discoverGatewayModels`), so a model the box cannot actually reach is never a match.
+// Returns ALL hosts rather than the first: the caller refuses on more than one, and a helper that
+// picked would make that refusal unreachable.
+async function fleetModelHosts(model: string): Promise<string[]> {
+  const want = model.replace(/\[1m\]$/, '').toLowerCase()
+  const gateways = loadHarnessGateways()
+  const hits = await Promise.all(Object.entries(gateways).map(async ([name, def]) => {
+    if (!gatewayConfiguredAndKeyed(name)) return null
+    const catalog = await discoverGatewayModels({ provider: 'gateway', gateway: name, model: def.model, smallModel: def.smallModel })
+      .catch(() => null)
+    const offered = (catalog?.length ? catalog : [def.model]).map(x => x.replace(/\[1m\]$/, '').toLowerCase())
+    return offered.includes(want) ? `gateway:${name}` : null
+  }))
+  return hits.filter((x): x is string => !!x)
 }
 
 // Which SUBSCRIPTION a registered config dir belongs to — the grouping key every "accounts" list

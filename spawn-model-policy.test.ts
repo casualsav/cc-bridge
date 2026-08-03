@@ -1,7 +1,7 @@
 // Who gets to choose a session's model, and when a late tap has to confirm. Pure.
 // Run: bun test spawn-model-policy.test.ts
 import { test, expect } from 'bun:test'
-import { decideModel, upgradeNeedsConfirm, heldSpawnModel, heldSpawnNeedsLine, holdTapData, parseHoldTap, launchFallback, headUpgradeModel, spawnCardHeader, relaunchModel, decideEffort, fablePolicy, fableRowState, onOff, AUTO_FALLBACK, AUTO_EFFORT_FALLBACK, UPGRADE_CTX_DELTA, type ModelAsk, type ModelDecision } from './spawn-model-policy.ts'
+import { decideModel, upgradeNeedsConfirm, heldSpawnModel, heldSpawnNeedsLine, holdTapData, parseHoldTap, launchFallback, headUpgradeModel, isHaikuHead, isClaudeFamily, isFableFamily, spawnCardHeader, relaunchModel, decideEffort, fablePolicy, fableRowState, onOff, AUTO_FALLBACK, AUTO_EFFORT_FALLBACK, UPGRADE_CTX_DELTA, type ModelAsk, type ModelDecision } from './spawn-model-policy.ts'
 
 const NOW = 1_800_000_000_000
 // The shape of the box that had the incident: an owner-configured default, an agent calling.
@@ -11,7 +11,7 @@ const ask = (over: Partial<ModelAsk> = {}): ModelAsk => ({
 })
 // The two flags most cases don't exercise, so a case that DOES exercise them says so by naming them.
 const dec = (over: Partial<ModelDecision> & Pick<ModelDecision, 'model' | 'ask' | 'clamped'>): ModelDecision =>
-  ({ banned: false, autoFallback: false, ...over })
+  ({ banned: false, autoFallback: false, headBlocked: false, ...over })
 
 test('the incident: an agent asking for fable gets the configured default, and the human is asked', () => {
   expect(decideModel(ask({ requested: 'fable' }))).toEqual(dec({ model: 'opus', ask: true, clamped: 'fable' }))
@@ -41,7 +41,7 @@ test('a named ungated model is the agent\'s own call — no clamp, no card', () 
 // nothing for a human to decide, so a retry gets the same answer — the caller is told that instead.
 test('haiku heading a coding session is upgraded to the configured default, with no card', () => {
   expect(decideModel(ask({ requested: 'haiku' })))
-    .toEqual(dec({ model: 'opus', ask: false, clamped: 'haiku', banned: true }))
+    .toEqual(dec({ model: 'opus', ask: false, clamped: 'haiku', banned: true, headBlocked: true }))
 })
 
 test('the upgrade target is the CONFIGURED default, not a hardcoded alias', () => {
@@ -52,7 +52,7 @@ test('a box configured for haiku does not upgrade haiku to haiku', () => {
   // The one branch that cannot be delegated to the ordinary resolver — it would answer with the
   // model being ruled out, silently, and the ack would name it as the fix.
   expect(decideModel(ask({ requested: 'haiku', configuredDefault: 'haiku' })))
-    .toEqual(dec({ model: AUTO_FALLBACK, ask: false, clamped: 'haiku', banned: true }))
+    .toEqual(dec({ model: AUTO_FALLBACK, ask: false, clamped: 'haiku', banned: true, headBlocked: true }))
   expect(headUpgradeModel('haiku')).toBe(AUTO_FALLBACK)
   expect(headUpgradeModel('sonnet')).toBe('sonnet')
 })
@@ -68,6 +68,75 @@ test('the head guard never touches a human\'s own pick, and never touches sonnet
   expect(decideModel(ask({ requested: 'haiku', humanOrigin: true })))
     .toEqual(dec({ model: 'haiku', ask: false, clamped: null }))
   expect(decideModel(ask({ requested: 'sonnet' }))).toEqual(dec({ model: 'sonnet', ask: false, clamped: null }))
+})
+
+// The hole this closed: a provider account is exempt from the PRICING gate (it owns its catalog), so
+// `requested` arrives null and the head guard had nothing to look at — `--account gateway:local-codex
+// --model haiku` headed a coding session on Haiku past yesterday's rule. The ruling is about what runs,
+// not who bills, so the guard reads the RESOLVED id.
+test('a gateway-hosted haiku is head-blocked even though the pricing gate never sees it', () => {
+  expect(decideModel(ask({ requested: null, headModel: 'haiku' })))
+    .toEqual(dec({ model: 'opus', ask: false, clamped: 'haiku', banned: true, headBlocked: true }))
+  expect(decideModel(ask({ requested: null, headModel: 'claude-haiku-4-5-20251001' })).headBlocked).toBe(true)
+})
+
+// `model` on these is the configured default and is IGNORED downstream: a provider harness owns the
+// model at the CLI (`resumeCliModel` withholds the alias), so what matters here is `clamped` and
+// `headBlocked` — the two things the caller acts on.
+test('--probe opens the gateway path exactly as it opens the native one', () => {
+  expect(decideModel(ask({ requested: null, headModel: 'haiku', probe: true })))
+    .toEqual(dec({ model: 'opus', ask: false, clamped: null }))
+})
+
+test('a gateway model that is not haiku is untouched by the head guard', () => {
+  expect(decideModel(ask({ requested: null, headModel: 'deepseek-v4-flash' })))
+    .toEqual(dec({ model: 'opus', ask: false, clamped: null }))
+  expect(decideModel(ask({ requested: null, headModel: 'gpt-5.6-sol' })).headBlocked).toBe(false)
+})
+
+// Owner's ruling 2026-08-03 (reversing his first answer): the Fable hold is about the MODEL, not the
+// billing route. A gateway-hosted fable meets the same gate, and naming the account does not exempt it.
+test('a gateway-hosted fable is held on the same rule as the native one', () => {
+  const d = decideModel(ask({ requested: null, headModel: 'fable' }))
+  expect(d.clamped).toBe('fable')
+  expect(d.ask).toBe(true)
+  expect(d.model).toBe('opus')            // the fallback if nobody answers — never the gated model
+  expect(decideModel(ask({ requested: null, headModel: 'anthropic/fable-5' })).ask).toBe(true)
+})
+
+test('--probe opens haiku and NOT fable — a throwaway pane is not a reason to spend', () => {
+  expect(decideModel(ask({ requested: null, headModel: 'fable', probe: true })).ask).toBe(true)
+  expect(decideModel(ask({ requested: 'fable', probe: true })).ask).toBe(true)
+})
+
+test('the Fable switch reads the resolved head too — off refuses it, allow lets it through', () => {
+  expect(decideModel(ask({ requested: null, headModel: 'fable', fable: 'refuse' })))
+    .toEqual(dec({ model: 'opus', ask: false, clamped: 'fable', banned: true }))
+  // 'allow' through a provider: the harness owns the model, so the decision is the ordinary one and
+  // nothing is clamped or carded.
+  expect(decideModel(ask({ requested: null, headModel: 'fable', fable: 'allow' })))
+    .toEqual(dec({ model: 'opus', ask: false, clamped: null }))
+})
+
+test('the allowlist cannot exempt a gateway fable either — same shape as the haiku guard', () => {
+  expect(decideModel(ask({ requested: null, headModel: 'fable', agentAllowed: ['fable'] })).ask).toBe(true)
+})
+
+// Owner's ruling 2026-08-03: a bare Claude-family name may never resolve to a reseller, however
+// unique the match. `local-codex` offers a dozen claude-* ids today; an aggregator would offer all of
+// them. Explicit --account stays legal — the daemon only consults this when no account was named.
+test('isClaudeFamily covers the aliases and the full ids, and nothing else', () => {
+  for (const id of ['opus', 'sonnet', 'haiku', 'fable', 'claude-opus-5', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001', 'claude-opus-5[1m]', 'anthropic/claude-opus-5'])
+    expect(isClaudeFamily(id)).toBe(true)
+  for (const id of ['gpt-5.6-sol', 'deepseek-v4-flash', 'grok-4.5', 'k2.6', 'composer-2.5', 'claudette', null, ''])
+    expect(isClaudeFamily(id)).toBe(false)
+})
+
+test('isHaikuHead matches the family, not the alias — and does not over-match', () => {
+  for (const id of ['haiku', 'HAIKU', 'claude-haiku-4-5', 'claude-haiku-4-5-20251001', 'haiku[1m]', 'anthropic/claude-haiku-4-5'])
+    expect(isHaikuHead(id)).toBe(true)
+  for (const id of ['opus', 'claude-opus-5[1m]', 'deepseek-v4-flash', 'gpt-5.6-sol', 'haikunator', null, ''])
+    expect(isHaikuHead(id)).toBe(false)
 })
 
 test('a probe asking for the gated model is still gated — --probe is about haiku, not about the gate', () => {
