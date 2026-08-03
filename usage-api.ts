@@ -75,23 +75,61 @@ export function parseUsageResponse(body: unknown): UsageReading | null {
   return reading.fiveHour || reading.sevenDay || scoped.length ? reading : null
 }
 
-// One read for one account. null on ANY failure — no credentials, blanked credentials, a 401 from an
-// expired token, a network error, an unparseable body. The caller's fallback chain is what turns that
-// into a display decision; a throw here would only travel to the same place with more ceremony.
-export async function fetchUsage(configDir: string): Promise<UsageReading | null> {
+// Why a read failed. Five genuinely different situations used to collapse into one `null`, and the
+// daemon logged them all as "no/blanked credentials, expired token, or unreachable" — so when ~25% of
+// polls failed on 2026-08-03 (5 of ~20, on both cold and warm processes, with a token valid throughout)
+// nobody could tell a 401 from a timeout from a rate limit. That is not a log-wording problem: the
+// status code was discarded HERE, at the source, so no caller could have said more.
+//
+// `kind` is for branching (a retry is right for 'network'/'http', pointless for 'no-credentials');
+// `detail` is for the human reading the log.
+export type UsageFailure =
+  | { kind: 'no-credentials'; detail: string }
+  | { kind: 'bad-credentials'; detail: string }
+  | { kind: 'http'; status: number; detail: string }
+  | { kind: 'network'; detail: string }
+  | { kind: 'unparseable'; detail: string }
+export type UsageFetch = { ok: true; reading: UsageReading } | { ok: false; failure: UsageFailure }
+
+// One read for one account, with the reason on failure. The caller's fallback chain turns that into a
+// display decision; a throw here would only travel to the same place with more ceremony.
+export async function fetchUsageResult(configDir: string): Promise<UsageFetch> {
   const credPath = join(configDir, '.credentials.json')
-  if (!hasLiveOauthCredentials(credPath)) return null
+  if (!hasLiveOauthCredentials(credPath)) return { ok: false, failure: { kind: 'no-credentials', detail: `no live oauth credentials at ${credPath}` } }
   let token: string
   // Re-read per call, never cached: Claude Code rewrites this file whenever it refreshes, and a token
   // held from an earlier tick is the one guaranteed way to 401 against a login that is perfectly fine.
-  try { token = JSON.parse(readFileSync(credPath, 'utf8')).claudeAiOauth.accessToken } catch { return null }
-  if (!token) return null
+  try { token = JSON.parse(readFileSync(credPath, 'utf8')).claudeAiOauth.accessToken }
+  catch (e) { return { ok: false, failure: { kind: 'bad-credentials', detail: `unreadable credentials: ${e}` } } }
+  if (!token) return { ok: false, failure: { kind: 'bad-credentials', detail: 'credentials carry no accessToken' } }
+  let res: Response
   try {
-    const res = await fetch(ENDPOINT, {
+    res = await fetch(ENDPOINT, {
       headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'anthropic-beta': 'oauth-2025-04-20' },
       signal: AbortSignal.timeout(TIMEOUT_MS),
     })
-    if (!res.ok) return null
-    return parseUsageResponse(await res.json())
-  } catch { return null }
+  } catch (e) {
+    // AbortSignal.timeout surfaces as a TimeoutError — named separately because "we gave up at 10s" and
+    // "the connection failed" are different problems with different fixes.
+    const name = (e as { name?: string })?.name ?? ''
+    return { ok: false, failure: { kind: 'network', detail: name === 'TimeoutError' ? `timed out after ${TIMEOUT_MS}ms` : `${name || 'fetch failed'}: ${e}` } }
+  }
+  if (!res.ok) {
+    // The body often carries the actual reason (rate-limit window, revoked token); capped because this
+    // goes to a log line, and truncation beats an endpoint dumping a page into it.
+    let body = ''
+    try { body = (await res.text()).slice(0, 200).replace(/\s+/g, ' ').trim() } catch {}
+    return { ok: false, failure: { kind: 'http', status: res.status, detail: `HTTP ${res.status} ${res.statusText}${body ? ` — ${body}` : ''}` } }
+  }
+  let parsed: UsageReading | null
+  try { parsed = parseUsageResponse(await res.json()) }
+  catch (e) { return { ok: false, failure: { kind: 'unparseable', detail: `body did not parse as JSON: ${e}` } } }
+  if (!parsed) return { ok: false, failure: { kind: 'unparseable', detail: 'response carried no five_hour, seven_day or scoped rows' } }
+  return { ok: true, reading: parsed }
+}
+
+// The boolean-ish form, kept for callers that only need "did it work" (scripts/usage-parity.ts).
+export async function fetchUsage(configDir: string): Promise<UsageReading | null> {
+  const r = await fetchUsageResult(configDir)
+  return r.ok ? r.reading : null
 }

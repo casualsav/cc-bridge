@@ -126,7 +126,7 @@ import {
 } from './topic-runtime.ts'
 import { latchMode, type ModeLatch } from './mode-latch.ts'
 import { watchVerdict, watchNoticeText, existingWatch, alreadyWatchingText, serializePasses, type BusWatch, type WatchOutcome } from './watch-plan.ts'
-import { fetchUsage, type UsageReading } from './usage-api.ts'
+import { fetchUsageResult, type UsageReading } from './usage-api.ts'
 import { startWebapp, type SettingsView as WebappSettingsView, type SessionCard as WebappSessionCard, type SessionFeed as WebappSessionFeed, type AutomationView as WebappAutomationView, type UsageView as WebappUsageView } from './webapp.ts'
 import { startTunnel, ensureCloudflared, tailscaleFunnelUrl, type Tunnel } from './tunnel.ts'
 import { sendRichMessage, sendRichMessageDraft, editRichMessage, toInputRichMessage, htmlPanelToRich, callTelegram, normalizeRichInbound, telegramRefused, type InputRichMessage } from './richmsg.ts'
@@ -18132,12 +18132,47 @@ async function webappListSessions(): Promise<WebappSessionCard[]> {
 // and a network round trip on that path would put the endpoint's latency inside every dashboard render.
 const USAGE_API_POLL_MS = 300_000       // 5 min
 const USAGE_API_TTL_MS = 900_000        // 15 min — older than this and the reading is dropped, not shown
-let usageApi: { at: number; reading: UsageReading } | null = null
+// PERSISTED, because a restart used to be a blank slate. `usageApi` was memory-only: the daemon
+// restarted at 20:09:54 on 2026-08-03, its very first poll failed 122ms later, and with no cached
+// reading and no TTL to cushion, webappReadUsage fell back to the statusline snapshot — which carries
+// no scoped[] rows, so the 🔮 Fable row VANISHED from the mini app for 5 minutes while 5h/7d kept
+// rendering. The reading is time-stamped and served only within USAGE_API_TTL_MS, so persisting it
+// cannot show a stale number any longer than the in-memory copy could.
+//
+// The store's loader reads every field it writes — the round-trip class (v0.4.347): a field written
+// and not read back is destroyed on the next save. Here the whole record is one object, read and
+// written as a unit, so there is no field-by-field rebuild to fall out of sync.
+const USAGE_API_STATE_FILE = join(STATE_DIR, 'usage-api.json')
+let usageApi: { at: number; reading: UsageReading } | null =
+  (() => {
+    const s = readJsonFile<{ at?: number; reading?: UsageReading } | null>(USAGE_API_STATE_FILE, null)
+    return s && typeof s.at === 'number' && s.reading ? { at: s.at, reading: s.reading } : null
+  })()
 let usageApiSource: 'api' | 'statusline' | 'none' = 'none'
-async function pollUsageApi(): Promise<void> {
-  const reading = await fetchUsage(MAIN_ACCOUNT.configDir)
-  if (!reading) { wlog('usage-api: no reading (no/blanked credentials, expired token, or unreachable)'); return }
+
+// Cold-start retry: the failure that dropped the Fable row was the FIRST poll of a fresh process, and
+// the next scheduled attempt is 5 minutes away. Short backoff so a transient blip at boot costs
+// seconds rather than a poll cycle; bounded, because a real outage must not become a retry storm.
+const USAGE_COLD_RETRY_MS = [2_000, 8_000, 20_000]
+async function pollUsageApi(coldRetry = 0): Promise<void> {
+  const r = await fetchUsageResult(MAIN_ACCOUNT.configDir)
+  if (!r.ok) {
+    // The REASON, not "no reading": 'http 429' and 'network timed out' and 'no-credentials' need
+    // different responses, and collapsing them is what left a 25%-failure day undiagnosable.
+    const age = usageApi ? ` (serving cached reading from ${Math.round((Date.now() - usageApi.at) / 60_000)}m ago)` : ' (NO cached reading — surfaces fall back to the statusline snapshot, which has no scoped rows)'
+    wlog(`usage-api: poll FAILED [${r.failure.kind}${r.failure.kind === 'http' ? ` ${r.failure.status}` : ''}] ${r.failure.detail}${age}`)
+    // Retry only what a retry can fix, and only at cold start (no cached reading to serve).
+    const retriable = r.failure.kind === 'network' || (r.failure.kind === 'http' && (r.failure.status >= 500 || r.failure.status === 429))
+    if (retriable && !usageApi && coldRetry < USAGE_COLD_RETRY_MS.length) {
+      const wait = USAGE_COLD_RETRY_MS[coldRetry]
+      wlog(`usage-api: cold start with no cached reading — retrying in ${wait / 1000}s (attempt ${coldRetry + 2}/${USAGE_COLD_RETRY_MS.length + 1})`)
+      setTimeout(() => void pollUsageApi(coldRetry + 1), wait).unref?.()
+    }
+    return
+  }
+  const reading = r.reading
   usageApi = { at: Date.now(), reading }
+  writeJsonFile(USAGE_API_STATE_FILE, usageApi)
   const scoped = reading.scoped.map(s => `${s.label} ${Math.round(s.pct)}%`).join(', ') || 'none'
   // The spend read (unit A scope, 2026-08-03). A BOUND, not a ledger: while extra usage is disabled and
   // `used` is 0, nothing is leaving the plan and a call's whole cost is the plan-window consumption the
