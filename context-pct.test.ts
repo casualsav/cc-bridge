@@ -17,6 +17,7 @@ import { join } from 'node:path'
 import { lastContextTokens, currentTurnTokens } from './transcript.ts'
 import { contextPct, ctxWindowTokens, mergeStatus } from './status-card.ts'
 import type { StatuslineData } from './statusline.ts'
+import { upgradeNeedsConfirm } from './spawn-model-policy.ts'
 
 const dir = mkdtempSync(join(tmpdir(), 'ctxpct-'))
 const write = (name: string, lines: unknown[]): string => {
@@ -107,6 +108,26 @@ test('the turn token counts read context per-iteration and output per-turn', () 
   const t = currentTurnTokens(f)
   expect(t.context).toBe(99722)        // a broken version reports 199,375 — the two iterations summed
   expect(t.output).toBe(1676)          // 100 + 1,576: the turn really did generate all of it
+})
+
+// ---- The one site where the artefact changes a DECISION, not just a display.
+// The late-tap gate (`upgradeNeedsConfirm`) asks whether a session grew more than 10 points since the
+// model card was minted; over the threshold it makes the owner confirm before re-billing the whole
+// context at a stronger model's rates. Both readings used to be raw statusline scrapes, so the
+// artefact could land in either one — and it pushes the outcome BOTH ways.
+//
+// Fixture: real fill 10% of 1M (iterations[last] = 99,722), artefact 20% (top-level 199,375).
+test('the upgrade gate flips at the threshold — a spurious confirmation', () => {
+  // Minted at a real 8%; the tap-time reading lands during a two-iteration request.
+  expect(upgradeNeedsConfirm(8, 20)).toBe(true)    // broken: 20 − 8 = 12 > 10 → confirm the owner never needed
+  expect(upgradeNeedsConfirm(8, 10)).toBe(false)   // fixed:  10 − 8 =  2      → no screen, correctly
+})
+
+test('…and the expensive direction — a real cost the gate would have waved through', () => {
+  // The artefact lands in the BASELINE instead: the card is minted mid-request at 20% for a real 10%,
+  // and by tap time the session has genuinely grown to 25%.
+  expect(upgradeNeedsConfirm(20, 25)).toBe(false)  // broken: 25 − 20 =  5 → silent re-billing
+  expect(upgradeNeedsConfirm(10, 25)).toBe(true)   // fixed:  25 − 10 = 15 → the owner is asked
 })
 
 // ---- The belt-and-braces half: panes whose transcript can't be read still get the artefact rejected.

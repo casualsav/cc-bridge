@@ -5997,9 +5997,14 @@ async function handleCall(
           if (relay.clamped) {
             if (relay.ask) {
               const capNow = await capturePane(targetPane).catch(() => '')
+              // The BASELINE half of the upgrade gate (upgradeNeedsConfirm compares this against a
+              // reading taken at tap time). Through contextPct for the same reason as the tap side: an
+              // inflated baseline suppresses a confirmation the owner needed, which is the expensive
+              // direction — the gate exists to stop a silent re-billing.
+              const slNow = capNow ? parseStatusline(capNow) : null
               void askHumanForModel({
                 sid: res.id, name: toName, alias: relay.clamped, asker: nameForEndpoint(fromSid, endpoints),
-                ctxPct: (capNow ? parseStatusline(capNow)?.ctxPct : null) ?? null, at: Date.now(), live: true,
+                ctxPct: contextPct(slNow, await transcriptForPane(targetPane, null).catch(() => null)), at: Date.now(), live: true,
               })
             }
             // Same split as clampedClause: a banned model has nothing left for a human to decide, so
@@ -12573,7 +12578,11 @@ bot.on('callback_query:data', async ctx => {
     // for three hours is still free to switch, one that burned 40% of its window in four minutes is
     // not, and growth is the thing actually being re-billed. `smq:c:` is the informed second tap.
     const capNow = await capturePane(pane).catch(() => '')
-    const ctxNow = (capNow ? parseStatusline(capNow)?.ctxPct : null) ?? null
+    // Through contextPct: this reading DECIDES, it does not only display. On a multi-iteration request
+    // the raw statusline reads ~N× the real fill, and the artefact can push the gate either way — it
+    // manufactures a confirmation screen the growth never justified, and (when it lands in the baseline
+    // instead) it hides real growth by inflating the number the delta is measured from.
+    const ctxNow = contextPct(capNow ? parseStatusline(capNow) : null, await transcriptForPane(pane, null).catch(() => null))
     let confirm = upgradeNeedsConfirm(req.ctxPct, ctxNow)
     if (confirm && req.ctxPct == null) {
       // A card minted before the session's first turn has no baseline to compare against: the pane is
@@ -16876,9 +16885,14 @@ async function sweepStuckPanes(): Promise<void> {
       const sid = await sessionForPane(pane, false).catch(() => null)
       if (sid) {
         liveSids.add(sid)
-        const status = parseStatusline(cap)
+        const scraped = parseStatusline(cap)
         const label = getTopicBySession(sid)?.name || sid
-        if (status?.cost) sessionCost.set(label, status.cost)
+        if (scraped?.cost) sessionCost.set(label, scraped.cost)
+        // Through contextPct, like every other reader of this number: the statusline's own percentage is
+        // a per-request TOTAL on a multi-iteration request and reads ~N× the real fill. Here that costs
+        // more than a wrong display — a spurious crossing fires a nudge, which mints a bus ask and
+        // starts a TURN in the owner's chat lane about a session that is nowhere near full.
+        const status = scraped ? { ...scraped, ctxPct: contextPct(scraped, await transcriptForPane(pane, null).catch(() => null)) } : null
         maybeWarnContext(sid, pane, status?.ctxPct ?? null, label)
         // Same capture: release a held nudge the moment this session is back at a prompt.
         await flushCtxNudge(sid, pane, cap, status).catch(() => {})
