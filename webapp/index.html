@@ -1401,8 +1401,14 @@
   /* Scroll relief, and the reason the pill can float at all: the pill's own footprint plus a gutter
      either side of it, so the last card can always be scrolled clear of it. */
   #tab-sessions { padding-bottom: calc(var(--fab-h) + 2 * var(--sp-4) + env(safe-area-inset-bottom)); }
-  #spawn, #sched, #fbrowse, #accounts { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: none; z-index: 9; align-items: flex-end; }
-  #spawn.show, #sched.show, #fbrowse.show, #accounts.show { display: flex; }
+  /* THE SHEET WRAPPER IS A CLASS, NOT AN ID LIST, and that is a fix rather than a tidy-up. These three
+     rules used to enumerate `#spawn, #sched, #fbrowse, #accounts`; a sheet added to the markup without
+     being added to all three enumerations gets NO `display: none`, so its backdrop and its whole body
+     lay out as ordinary block content on EVERY screen. That shipped in v0.4.332 — the owner saw the
+     settings sheets painting on his Sessions screen. A wrapper now gets the behaviour by carrying
+     `.sheetwrap`, so the next sheet cannot be forgotten by omission. Proof: scripts/webapp-measure/sheetleak.mjs. */
+  .sheetwrap { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: none; z-index: 9; align-items: flex-end; }
+  .sheetwrap.show { display: flex; }
   /* It SLIDES, like #dial / #calls / #addctx — see their block below for the mechanism and the
      reason it is one behaviour rather than four. This sheet is the one that never joined; it appeared
      instantly while every other sheet in the app rose. The transform lives here and the `.up` class
@@ -1418,7 +1424,7 @@
      there leaves the off-screen page showing through the 16px padding strip at the left edge. This
      box's content width is exactly one page, so the other one has nowhere to show. */
   .dialtrack { overflow: hidden; }
-  #spawn.up .sheet, #sched.up .sheet, #fbrowse.up .sheet, #accounts.up .sheet { transform: translateY(0); }
+  .sheetwrap.up .sheet { transform: translateY(0); }
   /* The list SCROLLS INSIDE the sheet rather than growing it: a folder with 200 entries would push the
      sheet past the viewport, and `align-items: flex-end` overflows PAST padding (the rule that already
      governs the other sheets). 56vh leaves the crumbs and the head on screen at any folder depth. */
@@ -1735,7 +1741,7 @@
   </div>
 </div>
 
-<div id="spawn">
+<div id="spawn" class="sheetwrap">
   <div class="sheet">
     <div class="shead" id="spawnhead">New session</div>
     <!-- The composer's model dial, hosted here rather than rebuilt: same .dialpages track, same
@@ -1795,7 +1801,7 @@
      already working over the drill-in, and because leaving the drill to browse is exactly the global
      trip this restructure removes. Scoped by construction: `fbRoot` is the session's cwd and neither
      the crumbs nor the `..` row can walk above it. -->
-<div id="fbrowse">
+<div id="fbrowse" class="sheetwrap">
   <div class="sheet">
     <div class="shead">Session folder</div>
     <div class="crumbs" id="fbcrumbs"></div>
@@ -1803,7 +1809,7 @@
   </div>
 </div>
 
-<div id="sched">
+<div id="sched" class="sheetwrap">
   <div class="sheet">
     <div class="shead">New schedule</div>
     <input id="scwhen" placeholder="2h · every 09:00 · */30 9-17 * * 1-5">
@@ -1814,7 +1820,7 @@
   </div>
 </div>
 
-<div id="accounts">
+<div id="accounts" class="sheetwrap">
   <div class="sheet acctsheet">
     <div class="shead">AI accounts</div>
     <div id="accbody"></div>
@@ -1838,7 +1844,7 @@
      reduced-motion gate) rather than inventing a second sheet vocabulary.
      Their bodies are filled by renderSettings from the SAME row builder the flat list uses — a
      grouped row is the same control in a different container, never a second implementation. -->
-<div id="mdef">
+<div id="mdef" class="sheetwrap">
   <div class="sheet">
     <div class="shead">Model defaults</div>
     <div class="card" id="mdefbody"></div>
@@ -1846,7 +1852,7 @@
   </div>
 </div>
 
-<div id="voicesheet">
+<div id="voicesheet" class="sheetwrap">
   <div class="sheet">
     <div class="shead">Voice</div>
     <div class="card" id="voicebody"></div>
@@ -1858,7 +1864,7 @@
      reads /api/github and posts /api/github/action. The add is a device-code login that runs for
      minutes; the sheet polls for the code and then for the outcome, which is the same staged status
      the Telegram panel shows by editing one message. -->
-<div id="ghsheet">
+<div id="ghsheet" class="sheetwrap">
   <div class="sheet">
     <div class="shead">GitHub</div>
     <div id="ghbody"></div>
