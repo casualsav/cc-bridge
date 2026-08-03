@@ -6,9 +6,12 @@ import {
   sessionDepth, setSessionDepth, clearSessionDepth, resetAllSessionDepth, pruneSessionDepth, nextAskDepth, depthExceeded, depthLimit, DEPTH_LIMIT_DEFAULT,
   normalizeEndpointName, resolveEndpoint, nameForEndpoint, backlogLabel, confineRef,
   getSeen, markSeen, digestSince, SEEN_TTL_MS,
+  systemAskLabel, setBusStateDir,
   type BusEndpoint, type LedgerEntry,
 } from './agent-bus.ts'
-import { writeFileSync } from 'node:fs'
+import { writeFileSync, readFileSync, mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { PREFS_FILE } from './common.ts'
 
 // Pure store + resolution logic only — each test seeds via _resetForTest so nothing touches the
@@ -424,4 +427,68 @@ test('backlogLabel: MB above a megabyte, KB below — never a useless "0.0 MB"',
   // A transcript smaller than half a KB still reads as 1 KB, never "0 KB" — the caller is deciding
   // whether a replay is worth paying for, and "0" reads as "no backlog", which is never true.
   expect(backlogLabel(200)).toBe('1 KB')
+})
+
+// ---- @system ask kinds ----
+//
+// The daemon mints several kinds of ask AS @system, and the owner-facing card for an ANSWERED one
+// read "🧹 handled a context nudge" for every one of them — so a wedged-prompt escalation reached
+// him described as a context nudge (owner-reported 2026-08-03). The kind rides on the row; these
+// hold the three pieces that has to be true end to end.
+
+test('systemAskLabel is specific for an answerable kind and NEUTRAL for everything else', () => {
+  expect(systemAskLabel('ctx-nudge')).toEqual({ icon: '🧹', did: 'handled a context nudge' })
+  expect(systemAskLabel('fleet-alert')).toEqual({ icon: '📡', did: 'handled a fleet alert' })
+  expect(systemAskLabel('surfaceless-block')).toEqual({ icon: '🔓', did: 'handled a blocked session' })
+  // A pre-v0.4.366 row carries no kind; an unknown string is what a hand-edited store or a future
+  // site would produce. Both must be vague-and-true, never specific-and-wrong.
+  expect(systemAskLabel(undefined).did).toBe('answered a @system ask')
+  expect(systemAskLabel('who-knows' as never).did).toBe('answered a @system ask')
+  // The five ack kinds are `noReply` — delivery removes the row, so they cannot be answered and
+  // cannot reach this card. They resolve neutral BY DESIGN; a specific label here would be a claim
+  // about a card that never renders.
+  for (const k of ['post-relay', 'closure-notice', 'watch-fired', 'spawn-news', 'repo-brief'] as const)
+    expect(systemAskLabel(k).did).toBe('answered a @system ask')
+})
+
+// The fix is only as complete as the enumeration behind it: EVERY @system mint site must name its
+// kind, or the card silently falls back to neutral for an ask we actually know the shape of. Counts
+// the sites from the source rather than from the list I happened to touch.
+test('every @system mint site in daemon.ts names a sysKind, and every kind it names is real', () => {
+  const src = readFileSync(new URL('./daemon.ts', import.meta.url), 'utf8')
+  const KNOWN = new Set(['ctx-nudge', 'fleet-alert', 'surfaceless-block', 'post-relay',
+                         'closure-notice', 'watch-fired', 'spawn-news', 'repo-brief'])
+  const sites: string[] = []
+  const unnamed: string[] = []
+  for (let i = src.indexOf('fromSid: SYSTEM_SID'); i !== -1; i = src.indexOf('fromSid: SYSTEM_SID', i + 1)) {
+    const call = src.slice(i, src.indexOf('}, ', i))   // the createPending argument object
+    const kind = /sysKind: '([a-z-]+)'/.exec(call)?.[1]
+    if (kind) sites.push(kind); else unnamed.push(src.slice(i, i + 90))
+  }
+  expect(unnamed).toEqual([])
+  expect(sites.length).toBe(8)                                   // the whole class, not a sample
+  expect(sites.filter(k => !KNOWN.has(k))).toEqual([])
+  expect(new Set(sites).size).toBe(8)                            // one site per kind, no duplicates
+})
+
+// The whitelist trap `noReply` and `quiet` both fell into: loadBus rebuilds each row field by field,
+// so a field it doesn't copy is LOST across a daemon restart. A @system ask outliving one would
+// answer back as neutral — right, but less than we knew at mint time.
+test('sysKind survives a store reload, and a bogus one is dropped', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'bus-syskind-'))
+  const row = (id: number, extra: object) => ({
+    id, fromSid: '@system', toSid: 'y', fromKind: 'claude', toKind: 'claude', fromName: 'system',
+    toName: 'chat', text: 't', refs: [], createdAt: 1, expiresAt: 2, injected: true, ...extra,
+  })
+  try {
+    setBusStateDir(dir)
+    writeFileSync(join(dir, 'agent-bus.json'), JSON.stringify({
+      seq: 3, hops: 0, seen: {}, depth: {},
+      pending: { '1': row(1, { sysKind: 'surfaceless-block' }), '2': row(2, { sysKind: 'nonsense' }), '3': row(3, {}) },
+    }))
+    const s = loadBus()
+    expect(s.pending['1']!.sysKind).toBe('surfaceless-block')
+    expect(s.pending['2']!.sysKind).toBeUndefined()
+    expect(s.pending['3']!.sysKind).toBeUndefined()
+  } finally { setBusStateDir(process.env.TELEGRAM_STATE_DIR!); _resetForTest() }
 })

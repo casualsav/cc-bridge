@@ -74,6 +74,42 @@ export const ASK_TTL_MS = 60 * 60_000
 // record is finally GC'd (dropExpired). Well past any realistic build; a truly-dead ask drops at 24h.
 export const LATE_ANSWER_GRACE_MS = 24 * 3600_000
 
+// The daemon mints several kinds of ask AS @system, and the owner-facing summary of an answer had no
+// way to tell them apart: it read "🧹 handled a context nudge" for every one, so a wedged-prompt
+// escalation reached him described as a context nudge (owner-reported, 2026-08-03). The kind rides on
+// the row because that summary is written where the mint site is long gone.
+//
+// Five of these are `noReply` acks — delivery removes the row, so they can never be answered and can
+// never reach the card. They still name their kind: the row is what `tg history` and a debugging read
+// see, and a site that later drops `noReply` must not silently start lying again.
+export type SystemAskKind =
+  | 'ctx-nudge'          // a session crossed a context step and is idle — the lane decides compact/clear
+  | 'fleet-alert'        // fleet control: a paused chain, an unusually wide fan-out
+  | 'surfaceless-block'  // a session with no Telegram surface is blocked on a screen
+  | 'post-relay'         // ack: another endpoint posted to the humans
+  | 'closure-notice'     // ack: asks this session was waiting on were closed
+  | 'watch-fired'        // ack: a `tg watch` fired
+  | 'spawn-news'         // ack: a held spawn started (or didn't)
+  | 'repo-brief'         // ack: a `tg repo` scout finished
+
+// The same list as a runtime set — loadBus validates against it, so a hand-edited or corrupted
+// agent-bus.json cannot put an unknown string where a kind belongs.
+const SYSTEM_ASK_KINDS = new Set<string>(['ctx-nudge', 'fleet-alert', 'surfaceless-block',
+  'post-relay', 'closure-notice', 'watch-fired', 'spawn-news', 'repo-brief'])
+
+// The lead of the owner-facing card for an ANSWERED @system ask — rendered as "<icon> @who <did>".
+// Specific only where the kind is known and answerable; everything else — an unknown kind, a
+// pre-v0.4.366 row, an ack that somehow got answered — takes the neutral phrasing. A vague label
+// that is true beats a specific one that is not, which is the whole bug this replaces.
+export function systemAskLabel(kind?: SystemAskKind): { icon: string; did: string } {
+  switch (kind) {
+    case 'ctx-nudge':         return { icon: '🧹', did: 'handled a context nudge' }
+    case 'fleet-alert':       return { icon: '📡', did: 'handled a fleet alert' }
+    case 'surfaceless-block': return { icon: '🔓', did: 'handled a blocked session' }
+    default:                  return { icon: '📨', did: 'answered a @system ask' }
+  }
+}
+
 export type BusPending = {
   id: number
   fromSid: string     // asker's endpoint id (a claude sessionId; panes re-resolved at delivery)
@@ -121,6 +157,9 @@ export type BusPending = {
                       // the ledger, still reaches the session; only the "@system messaged @you" card is
                       // withheld, because a person reading that chat would see the same fact twice.
                       // NEVER for agent-to-agent traffic: the mirror is how a human follows the bus.
+  sysKind?: SystemAskKind   // what a @system ask IS — see SystemAskKind. Absent on every row minted
+                      // before v0.4.366 and on any future site that forgets it; both take the neutral
+                      // label rather than a guessed specific one.
   founding?: true     // the spawn handler's first-message ask — the only ask a session is guaranteed
                       // to receive before it's ever seen a human turn, so a session ending its own
                       // turn without answering it is a session that finished work nobody will hear
@@ -215,6 +254,9 @@ export function loadBus(): BusState {
         // loss mirrors a deliberately-silent daemon notice onto the human surface.
         ...(p.noReply === true ? { noReply: true as const } : {}),
         ...(p.quiet === true ? { quiet: true as const } : {}),
+        // Same whitelist trap the two lines above document: a @system ask outliving a restart would
+        // reload with no kind and answer back as the neutral label — right, but less than we knew.
+        ...(SYSTEM_ASK_KINDS.has(p.sysKind as string) ? { sysKind: p.sysKind as SystemAskKind } : {}),
         depth: typeof p.depth === 'number' ? p.depth : 1,   // pre-depth entry: assume one hop, the safe reading
       }
     }
@@ -338,7 +380,7 @@ function nextAskId(now: number): number {
 export function createPending(
   fields: { fromSid: string; toSid: string; fromName: string; toName: string; text: string; refs: string[]
             fromKind?: 'claude' | 'hermes'; toKind?: 'claude' | 'hermes'; depth?: number; noReply?: true
-            quiet?: true; founding?: true },
+            quiet?: true; founding?: true; sysKind?: SystemAskKind },
   now: number,
 ): BusPending {
   ensureLoaded()

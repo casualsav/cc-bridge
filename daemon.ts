@@ -163,6 +163,7 @@ import {
   setSessionDepth, resetAllSessionDepth, pruneSessionDepth, nextAskDepth, depthExceeded, depthLimit,
   resolveEndpoint, nameForEndpoint, normalizeEndpointName, backlogLabel, confineRef, sharedDir, ensureSharedDir, appendLedger, tailLedger,
   getSeen, markSeen, digestSince, DIGEST_SCAN,
+  systemAskLabel,
   type BusEndpoint, type BusPending, type LedgerEntry,
 } from './agent-bus.ts'
 import { formatAskBlock, formatAnswerBlock, formatAsideBlock, formatDigestBlock, formatNudgeBlock, formatRosterLine, closureNoticeText, busSentHeader, busGotHeader, type BusVerb, type RosterAgent } from './agent-bus-block.ts'
@@ -3295,7 +3296,7 @@ async function notifyLanesOfPost(fromSid: string | null, fromName: string, body:
     if (!pane) continue
     const text = `(@${fromName} posted to the humans — if it is a question, you are the one who can answer it: ${body})`
     const n = createPending({ fromSid: SYSTEM_SID, toSid: sessionId, fromName: 'system',
-      toName: nameForEndpoint(sessionId, busEndpoints()), text, refs: [], noReply: true, quiet: true, depth: 0 }, Date.now())
+      toName: nameForEndpoint(sessionId, busEndpoints()), text, refs: [], noReply: true, quiet: true, depth: 0, sysKind: 'post-relay' }, Date.now())
     appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'ack', from: 'system', to: n.toName, id: n.id, text: `post relay: @${fromName}` })
     await tryDeliverAsk(n).catch(() => {})
   }
@@ -3519,7 +3520,7 @@ const SYSTEM_SID = '@system'
 async function wakeOrchestrator(text: string, fallbackSid: string | null): Promise<void> {
   const lane = listDmChatSessions()[0]?.sessionId
   if (!lane) { if (fallbackSid) void notifyBusText(fallbackSid, text.split('\n')[0]!); return }
-  const p = createPending({ fromSid: SYSTEM_SID, toSid: lane, fromName: 'system', toName: nameForEndpoint(lane, busEndpoints()), text, refs: [], depth: 0 }, Date.now())
+  const p = createPending({ fromSid: SYSTEM_SID, toSid: lane, fromName: 'system', toName: nameForEndpoint(lane, busEndpoints()), text, refs: [], depth: 0, sysKind: 'fleet-alert' }, Date.now())
   appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'ask', from: 'system', to: p.toName, id: p.id, text, refs: [] })
   await tryDeliverAsk(p).catch(() => {})
 }
@@ -3621,7 +3622,7 @@ async function notifyAskClosures(rows: BusPending[]): Promise<void> {
     // report that could never arrive. removePending() in the reaper makes it one-shot per ask.
     if (askerPane) {
       const n = createPending({ fromSid: SYSTEM_SID, toSid: first.fromSid, fromName: 'system',
-        toName: nameForEndpoint(first.fromSid, busEndpoints()), text, refs: [], noReply: true, quiet: true, depth: 0 }, Date.now())
+        toName: nameForEndpoint(first.fromSid, busEndpoints()), text, refs: [], noReply: true, quiet: true, depth: 0, sysKind: 'closure-notice' }, Date.now())
       appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'ack', from: 'system', to: n.toName, id: n.id, text })
       await tryDeliverAsk(n).catch(() => {})
     }
@@ -3675,7 +3676,7 @@ async function notifyWatchFired(w: BusWatch, outcome: WatchOutcome, now: number)
   const pane = await paneForSession(w.watcherSid).catch(() => null)
   if (!pane) return
   const n = createPending({ fromSid: SYSTEM_SID, toSid: w.watcherSid, fromName: 'system',
-    toName: nameForEndpoint(w.watcherSid, busEndpoints()), text, refs: [], noReply: true, quiet: true, depth: 0 }, now)
+    toName: nameForEndpoint(w.watcherSid, busEndpoints()), text, refs: [], noReply: true, quiet: true, depth: 0, sysKind: 'watch-fired' }, now)
   appendLedger(busLedgerRoom(), { ts: now, kind: 'ack', from: 'system', to: n.toName, id: n.id, text })
   await tryDeliverAsk(n).catch(() => {})
 }
@@ -3822,9 +3823,12 @@ async function deliverAnswerToAsker(pending: BusPending, answerer: string, rawBo
   // nudge was about. The ledger entry plus the owner-facing card below are its whole audit trail.
   if (cur.fromSid === SYSTEM_SID) {
     appendLedger(room, { ts: Date.now(), kind: 'answer', from: answerer, to: 'system', id: cur.id, text: body, refs })
+    // The card says WHICH @system ask this answers. It read "handled a context nudge" for every kind
+    // — so a wedged-prompt escalation reached him described as a context nudge (owner-reported).
+    const lead = systemAskLabel(cur.sysKind)
     void (async () => {
       for (const { chat, thread } of await fleetSurface()) {
-        await channel.sendText(chat, `🧹 <b>@${escapeHtml(answerer)}</b> handled a context nudge (ask ${cur.id}):\n<blockquote expandable>${escapeHtml(body)}</blockquote>`,
+        await channel.sendText(chat, `${lead.icon} <b>@${escapeHtml(answerer)}</b> ${lead.did} (ask ${cur.id}):\n<blockquote expandable>${escapeHtml(body)}</blockquote>`,
           { silent: true, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
       }
     })()
@@ -4538,7 +4542,7 @@ async function flushCtxNudge(sid: string, pane: string, cap: string, status: Sta
     doing ? `Last turn ended with: ${doing}` : 'No last reply on record.',
     `Levers: \`tg slash ${held.label} "/compact"\` keeps the thread, \`tg slash ${held.label} "/clear"\` empties it. Answer this ask with what you did and why.`,
   ].join('\n\n')
-  const p = createPending({ fromSid: SYSTEM_SID, toSid: lane, fromName: 'system', toName: nameForEndpoint(lane, busEndpoints()), text, refs: [], depth: 0 }, Date.now())
+  const p = createPending({ fromSid: SYSTEM_SID, toSid: lane, fromName: 'system', toName: nameForEndpoint(lane, busEndpoints()), text, refs: [], depth: 0, sysKind: 'ctx-nudge' }, Date.now())
   appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'ask', from: 'system', to: p.toName, id: p.id, text, refs: [] })
   process.stderr.write(`daemon: ctx nudge ask ${p.id} → @${p.toName} about ${held.label} at ${pct}%\n`)
   await tryDeliverAsk(p).catch(() => {})   // 'busy' just means the lane is mid-turn — the 15s sweep retries
@@ -4579,7 +4583,7 @@ async function escalateSurfaceless(paneId: string | null, summary: string): Prom
     `It is BLOCKED until someone answers. \`tg keys ${name} <key>…\` drives the screen holding it (enter esc up down left right 1-9); \`tg kill ${name}\` ends it.`,
     'Nothing was sent to any chat — this ask is the whole notification.',
   ].join('\n\n')
-  const p = createPending({ fromSid: SYSTEM_SID, toSid, fromName: 'system', toName: nameForEndpoint(toSid, endpoints), text, refs: [], depth: 0 }, Date.now())
+  const p = createPending({ fromSid: SYSTEM_SID, toSid, fromName: 'system', toName: nameForEndpoint(toSid, endpoints), text, refs: [], depth: 0, sysKind: 'surfaceless-block' }, Date.now())
   appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'ask', from: 'system', to: p.toName, id: p.id, text, refs: [] })
   process.stderr.write(`daemon: surfaceless block on ${paneId} (@${name}) escalated as ask ${p.id} → @${p.toName}\n`)
   await tryDeliverAsk(p).catch(() => {})
@@ -7876,7 +7880,7 @@ function saveSpawnHolds(): void { writeJsonFile(spawnHoldsFile(), [...spawnHolds
 // and the sentence that repeated the card he had just watched change.
 async function notifySpawner(sid: string, plain: string, html: string | null): Promise<void> {
   if (html) void notifyBusText(sid, html)
-  const p = createPending({ fromSid: SYSTEM_SID, toSid: sid, fromName: 'system', toName: nameForEndpoint(sid, busEndpoints()), text: plain, refs: [], noReply: true, quiet: true, depth: 0 }, Date.now())
+  const p = createPending({ fromSid: SYSTEM_SID, toSid: sid, fromName: 'system', toName: nameForEndpoint(sid, busEndpoints()), text: plain, refs: [], noReply: true, quiet: true, depth: 0, sysKind: 'spawn-news' }, Date.now())
   appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'ack', from: 'system', to: p.toName, id: p.id, text: plain })
   await tryDeliverAsk(p).catch(() => {})
 }
@@ -15741,7 +15745,7 @@ async function scoutRepo(real: string): Promise<ScoutRun> {
 // no answer, leaves no open ask to time out, and the chat lane's own rules already say a turn woken
 // by an ack does its bus-side work and ends without a Telegram message to the owner.
 async function notifyScoutResult(sid: string, plain: string): Promise<void> {
-  const p = createPending({ fromSid: SYSTEM_SID, toSid: sid, fromName: 'system', toName: nameForEndpoint(sid, busEndpoints()), text: plain, refs: [], noReply: true, depth: 0 }, Date.now())
+  const p = createPending({ fromSid: SYSTEM_SID, toSid: sid, fromName: 'system', toName: nameForEndpoint(sid, busEndpoints()), text: plain, refs: [], noReply: true, depth: 0, sysKind: 'repo-brief' }, Date.now())
   appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'ack', from: 'system', to: p.toName, id: p.id, text: `repo brief: ${p.toName}` })
   await tryDeliverAsk(p).catch(() => {})
 }
