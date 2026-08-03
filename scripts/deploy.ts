@@ -39,6 +39,7 @@ import { existsSync, readdirSync, readFileSync, rmSync, mkdirSync, copyFileSync,
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { shipGate } from '../ship-gate.ts'
+import { strandedVersion } from '../stranded-version.ts'
 import { provenanceGate, dirtyPayloadPaths, materializePayload } from '../payload-provenance.ts'
 
 // PLUGIN-DIR CONTENTS ARE DEPLOY-GENERATED. The shared runtime lives at the repo ROOT (channel.ts,
@@ -278,6 +279,30 @@ function gitOut(args: string[]): string {
   const r = sh('git', ['-C', REPO, ...args])
   return r.status === 0 ? r.stdout.trim() : ''
 }
+// ---- stranded-version gate: a PREVIOUS deploy's bumps were never committed ----
+// Runs before this deploy writes its own bump, so it reads the previous one's leftovers rather than
+// its own work. See stranded-version.ts for why this refuses instead of committing: the strand
+// happens at the `git add` after a deploy, which this script is not present for, so the next deploy is
+// the first moment it can be seen — one deploy late, but before the release that would bake it in.
+// Held to --dry-run too, for the reason the provenance gate is: a preview that says "fine" for a
+// deploy that would refuse is a lie.
+if (!materializeOnly) {
+  for (const vf of [PLUGIN_JSON, MARKET_JSON]) {
+    const headSrc = gitOut(['show', `HEAD:${vf}`])
+    // The marketplace holds every plugin's version, so read the one for THIS plugin's entry by name;
+    // plugin.json has a single version. A file git cannot show (new, or no repo) yields '' → null → pass.
+    const pick = (src: string): string | null => {
+      if (!src) return null
+      if (vf !== MARKET_JSON) return src.match(VERSION_RE)?.[2] ?? null
+      const entry = src.split(/\{/).find(chunk => chunk.includes(`"name": "${cfg.mktName}"`))
+      return entry?.match(VERSION_RE)?.[2] ?? null
+    }
+    const treeV = pick(readFileSync(join(REPO, vf), 'utf8'))
+    const gate = strandedVersion(vf, treeV, pick(headSrc), named.includes(vf))
+    if (!gate.ok) die(gate.error)
+  }
+}
+
 if (!materializeOnly && !dryRun) {
   const gate = shipGate(
     gitOut(['rev-parse', '--abbrev-ref', 'HEAD']),
