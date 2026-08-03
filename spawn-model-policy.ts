@@ -19,6 +19,11 @@
 // Pure — no daemon state, no I/O — so the whole decision table is unit-testable, and the two call
 // sites (`tg spawn` and the bus-relayed `/model`) can't drift apart.
 
+// Type-only, so this module stays pure and picks up no runtime dependency: the two roles are named
+// once, in role-provider.ts, and the harness split and the model split must not drift into two
+// vocabularies for the same thing.
+import type { SessionRole } from './role-provider.ts'
+
 // The models an agent may choose for itself, named INDIVIDUALLY. Still not a ranking: an unknown or
 // future alias is not in the list, so it is gated — an unknown price is not a cheap price, and the one
 // mistake this module cannot afford is waving through the next thing that costs like Fable under a name
@@ -237,17 +242,30 @@ export function relaunchModel(remembered: string | null, configuredDefault: stri
 // which is precisely the 2026-08-03 failure. The owner's prefs.json that day held no spawnModel and
 // no spawnEffort at all, the panel showed Opus/high off these fallbacks, and every launch resolved
 // something else because it consulted the raw preference and found nothing.
-export function launchDefaultModel(pref: string | undefined, aliases: readonly string[]): string {
-  return pref && aliases.includes(pref) ? pref : AUTO_FALLBACK
+// TWO ROLES, ONE CHAIN EACH, and the chain itself lives here so no call site can invent its own.
+// The chat term FALLS BACK TO THE CODING TERM when unset — an install upgrading into the split keeps
+// behaving exactly as it did under the single "Model defaults" setting until the owner splits them
+// (his ruling: upgrade-invariance wins). The alternative — a fixed chat fallback — would silently
+// move the chat lane on every box whose coding default is not Opus.
+export type RolePrefs = { spawnModel?: string; spawnEffort?: string; chatModel?: string; chatEffort?: string }
+
+export function launchDefaultModel(role: SessionRole, prefs: RolePrefs, aliases: readonly string[]): string {
+  const ok = (v: string | undefined): v is string => !!v && aliases.includes(v)
+  const chain = role === 'chat' ? [prefs.chatModel, prefs.spawnModel] : [prefs.spawnModel]
+  return chain.find(ok) ?? AUTO_FALLBACK
 }
 
 // `standing` is `/effort default <level>` (default-effort.json), the SECOND term. It predates the
 // panel and its own confirmation promises that new and resumed sessions start there, so it is read
 // rather than replaced — and it is read HERE, so the panel renders the same answer the launch uses
 // whichever of the two stores the user actually set.
-export function launchDefaultEffort(pref: string | undefined, standing: string | null, levels: readonly string[]): string {
+// `standing` is `/effort default <level>` (default-effort.json). It stays GLOBAL and sits under BOTH
+// roles (his ruling: preserves current behaviour, one less concept) — so it is the term AFTER the
+// role chain, never a rival to it.
+export function launchDefaultEffort(role: SessionRole, prefs: RolePrefs, standing: string | null, levels: readonly string[]): string {
   const usable = (v: string | null | undefined): v is string => !!v && levels.includes(v) && v !== 'auto'
-  return usable(pref) ? pref : usable(standing) ? standing : AUTO_EFFORT_FALLBACK
+  const chain = role === 'chat' ? [prefs.chatEffort, prefs.spawnEffort, standing] : [prefs.spawnEffort, standing]
+  return chain.find(usable) ?? AUTO_EFFORT_FALLBACK
 }
 
 // ---- The spawn confirmation ----

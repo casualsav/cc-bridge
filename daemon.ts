@@ -6224,7 +6224,7 @@ async function handleCall(
           : ''
         let newPane: string | null
         if (!t0.agentSessionId) {
-          newPane = await spawnSession(t0.cwd, '', sid, topicAccount(t0), topicAgent(t0), undefined, { model: refreshSpawnModel(), effort: null })
+          newPane = await spawnSession(t0.cwd, '', sid, topicAccount(t0), topicAgent(t0), undefined, { model: refreshSpawnModel(sid), effort: null })
           text = `reopened @${t0.name} (${sid8}) fresh in ${t0.cwd} — the session never completed a turn, so there was nothing to resume; same name and topic.${othersNote}`
         } else {
           const resumeAlias = topicAgent(t0) === 'claude' ? reopenResumeModelAlias(t0.agentSessionId) : null
@@ -7031,17 +7031,24 @@ function modelPolicyPrefs(): { agentAllowed: string[]; quietUntil: number; auto:
 // owner's prefs.json held no spawnModel/spawnEffort at all, the panel read Opus/high off these
 // fallbacks, and every launch resolved something else entirely because it consulted the raw pref and
 // found nothing. A nullable resolver here would rebuild that gap.
-function configuredSpawnModel(): string {
-  return launchDefaultModel(loadAccess().spawnModel, MODEL_ALIASES)
+// Both take the ROLE explicitly. They default to 'code' because that is what every caller that has
+// no lane in hand is: the chat lane is the special case and it always knows it is one.
+function configuredSpawnModel(role: SessionRole = 'code'): string {
+  return launchDefaultModel(role, loadAccess(), MODEL_ALIASES)
 }
 // `/effort default <level>` (default-effort.json) is the SECOND term, not a rival store: it predates
 // the 🧑‍💻 panel and promises in its own confirmation that new and resumed sessions start there, so
 // dropping it would break a documented lever to fix a different one. Order is panel-pref → /effort
 // default → the shown fallback, and the panel renders this same chain, so the promise and the display
 // agree whichever store the user actually set.
-function configuredSpawnEffort(): string {
-  return launchDefaultEffort(loadAccess().spawnEffort, defaultEffortPref, EFFORT_LEVELS)
+function configuredSpawnEffort(role: SessionRole = 'code'): string {
+  return launchDefaultEffort(role, loadAccess(), defaultEffortPref, EFFORT_LEVELS)
 }
+// The role a SESSION belongs to. One predicate, so "is this the chat agent?" cannot be answered two
+// ways — and note what it can NOT be used for: a lane being PROVISIONED is not bound yet (see the
+// `role` parameter on spawnSession).
+const sessionRole = (sid: string | null | undefined): SessionRole =>
+  sid && isChatLaneSession(sid) ? 'chat' : 'code'
 // Whether an AGENT's spawn rides the spawner's own dials. Human-originated spawns never ask.
 const spawnDialsAuto = (): boolean => loadAccess().spawnAuto === true
 // One open request per session — a second one replaces it, so an agent retrying can't stack cards.
@@ -8606,7 +8613,7 @@ async function resumeModelAlias(pane: string, cwd: string | null, sid: string | 
   // and not an edge. Order: the session's own remembered identity, the configured Model default, the
   // floor. No hardcoded model anywhere in it.
   const remembered = sid ? sessionModels.get(sid) ?? null : null
-  return { alias: relaunchModel(remembered, configuredSpawnModel(), SPAWN_MODEL_FLOOR), observed: false }
+  return { alias: relaunchModel(remembered, configuredSpawnModel(sessionRole(sid)), SPAWN_MODEL_FLOOR), observed: false }
 }
 
 // Same transcript-truth read, for `tg reopen`: there's no live pane to have stamped @tg_transcript,
@@ -8808,8 +8815,11 @@ async function restartPaneSessionCore(pane: string, id: string | null, accountOv
       // from the remembered alias, which is exactly the stale value this function is correcting.
       logLaunch('resume-respawn', `${pane}→new-window`,
         resumeAlias ? `dials(${resumeAlias})` : 'cli-default', `spawnSession ${cwd} ${id !== null ? `--resume ${id}` : '(fresh)'}`)
+      // The role rides along: a chat lane restarting keeps resolving against the CHAT default, and
+      // the cross-engine branch (which withholds `sid`) would otherwise lose the only thing that
+      // could tell spawnSession which role it is respawning.
       const launch = () => spawnSession(cwd, id !== null ? `--resume ${id}` : '', id !== null ? (sid ?? undefined) : undefined, account, agent, harness,
-        resumeAlias ? { model: resumeAlias } : undefined)
+        resumeAlias ? { model: resumeAlias } : undefined, sessionRole(sid))
       const fresh = await launch()
       if (!fresh) return null
       if (resumeAlias && sid && resumeObserved) recordSessionModel(sid, resumeAlias)   // the memory converges on what the CONVERSATION said — never on a fallback (resumeModelAlias)
@@ -9075,10 +9085,13 @@ type RestartTarget = { pane: string; sid: string | null; name: string; id: strin
 // alias was opus (sessionForPane reports a stamp verbatim; nothing validates that it still names a
 // live session).
 //
-// It no longer takes a sid: the only question it asked one was "is this a chat lane?", and the
-// answer stopped changing the outcome when Model defaults became both roles' default (v0.4.318).
-function refreshSpawnModel(): string {
-  return relaunchModel(null, configuredSpawnModel(), SPAWN_MODEL_FLOOR)
+// It takes a sid to ask exactly one question of it: which ROLE's default applies. v0.4.318 removed
+// that parameter, because the only question it asked was "is this a chat lane?" and the answer had
+// just stopped changing the outcome; v0.4.319 restores it, because the split gives that same question
+// an answer again. A reversal one version later, on purpose and with the reason recorded — the
+// parameter was never dead weight, it was briefly unused.
+function refreshSpawnModel(sid: string | null): string {
+  return relaunchModel(null, configuredSpawnModel(sessionRole(sid)), SPAWN_MODEL_FLOOR)
 }
 
 // The tail every restart flow shares: health-check each session back to a prompt, give the ones that
@@ -9129,7 +9142,7 @@ async function settleRestartedSessions(
     const alive = await paneAlive(t.pane).catch(() => false)
     const fresh = !alive && t.sid && t.cwd
       ? await spawnSession(t.cwd, t.id ? `--resume ${t.id}` : '', t.sid, topicAccount(getTopicBySession(t.sid)), topicAgent(getTopicBySession(t.sid)),
-          undefined, t.id ? undefined : { model: refreshSpawnModel() })
+          undefined, t.id ? undefined : { model: refreshSpawnModel(t.sid) })
       : null
     if (fresh) { t.pane = fresh; if (t.sid) await reopenSessionTopic(t.sid); retried.push(t) }
     else if (alive) retried.push(t)
@@ -9213,7 +9226,7 @@ async function relaunchFreshSession(t: RestartTarget): Promise<string | 'untouch
   if (t.sid) { recordSessionMode(t.sid, mode); recordSessionEffort(t.sid, effort) }
   // Floor chain only — see refreshSpawnModel for why a remembered alias can never be about this
   // launch. That also retires the old "never Haiku" guard here: the floor can't produce haiku.
-  const model = refreshSpawnModel()
+  const model = refreshSpawnModel(t.sid ?? null)
   setPaneRestarting(t.pane, true)
   try {
     const watcher = t.pane === focus.activePaneId ? focus.paneWatcher : null
@@ -10333,7 +10346,7 @@ function baseRowValue(): string {
 // itself: the word alone reads like a mode nobody chose.
 function spawnDefaultsSummary(): string {
   const a = loadAccess()
-  return `${configuredSpawnModel()} · ${configuredSpawnEffort()}${a.spawnAuto ? ' · auto' : ''}`
+  return `🧑‍💻 ${roleDials('code')} · 💬 ${roleDials('chat')}${a.spawnAuto ? ' · auto' : ''}`
 }
 // The 👤 Accounts row's state line — accounts · failover · providers — shared by the settings
 // root's two renderers (settingsText/settingsMarkdown) so they can't drift. The failover chain
@@ -10389,7 +10402,7 @@ function settingsMarkdown(): string {
     '📌 <b>Pinned message</b> — the status card pinned to the top of this chat.',
     '🧷 <b>Preferred mode</b> — the permission mode NEW sessions launch in (/mode is the live dial).',
     '🧹 <b>/clear approval</b> — /clear and /new ask for a Yes/No tap first.',
-    '🧑‍💻 <b>Model defaults</b> — the model/effort EVERY session launches on: this chat, the mini-app <b>+</b>, a new topic, an agent\'s <code>tg spawn</code>. A session that already has its own model keeps it.',
+    '🧑‍💻 <b>Model defaults</b> — the model/effort each role launches on, set separately: 🧑‍💻 coding sessions (the mini-app <b>+</b>, a new topic, an agent\'s <code>tg spawn</code>) and 💬 the chat agent. A session that already has its own model keeps it.',
     ...(WEBAPP_ENABLED ? ['🗂 <b>File browser</b> — the Files tab in the Mini App. Off removes it (and its file API) entirely; the Sessions/Scheduled/Settings tabs stay.'] : []),
     ...(isTopicMode() ? ['📂 <b>Base folder</b> — new forum topics are created as subfolders of this folder.'] : []),
     ...(isTopicMode() && AGENT_BUS_PIN_UI ? ['☎️ <b>Agent bus</b> — the live roster line on the pinned card. Sessions can still hand work to each other with <code>tg ask</code>.'] : []),
@@ -10473,29 +10486,29 @@ function settingsKeyboard(): InlineKeyboard {
 // paragraphs explaining its own knobs, which is what a knob needing a paragraph is telling you: two of
 // the knobs went (the policy toggle, the context picker), and the two that remain say what they do in
 // their own labels.
+// The two roles' display names, once — the panel row, the picker header and the settings summary all
+// read them from here so a rename cannot land in two of the three.
+const MODEL_ROLE_LABEL: Record<SessionRole, string> = { code: '🧑‍💻 Coding sessions', chat: '💬 Chat agent' }
+const roleDials = (role: SessionRole): string => `${configuredSpawnModel(role)} · ${configuredSpawnEffort(role)}`
+
 function spawnDefaultsText(): string {
   const a = loadAccess()
   return `🧑‍💻 <b>Model defaults</b>\n\n` +
-    `🧠 Model — <b>${escapeHtml(configuredSpawnModel())}</b>\n` +
-    `⚡ Effort — <b>${escapeHtml(configuredSpawnEffort())}</b>\n` +
+    `${MODEL_ROLE_LABEL.code} — <b>${escapeHtml(roleDials('code'))}</b>\n` +
+    `${MODEL_ROLE_LABEL.chat} — <b>${escapeHtml(roleDials('chat'))}</b>\n` +
     `🦾 Auto mode (agent picks) — <b>${onOff(a.spawnAuto === true)}</b>\n` +
     `🔥 Require approvals to spawn Fable — <b>${fableRowState(a.fableForAgents)}</b>`
 }
+
+// Each ROLE opens its own picker. Four model chips and six effort chips per role will not fit one
+// keyboard, and flattening them makes ten chips whose role you can only tell by reading — so the
+// roles are rows here and the dials live one tap in. `spd:r:<role>` opens; `spd:m:<role>:<alias>`
+// and `spd:e:<role>:<level>` set.
 function spawnDefaultsKeyboard(): InlineKeyboard {
   const a = loadAccess()
-  const fableOff = fablePolicy(a.fableForAgents) === 'refuse'
-  const model = configuredSpawnModel(), effort = configuredSpawnEffort()
   const kb = new InlineKeyboard()
-  // A model the owner has switched off for coding agents is not OFFERED as their default either —
-  // picking it here would set a default no agent-spawned session can start on. His own per-session
-  // picker still lists it: that is his pick, not an agent's.
-  for (const m of MODEL_ALIASES) {
-    if (m === FABLE && fableOff) continue
-    kb.text(`${model === m ? '✅ ' : ''}${m}`, `spd:m:${m}`)
-  }
-  kb.row()
-  for (const e of SPAWN_EFFORT_LEVELS) kb.text(`${effort === e ? '✅ ' : ''}${e === 'medium' ? 'med' : e}`, `spd:e:${e}`)
-  kb.row()
+  kb.text(`${MODEL_ROLE_LABEL.code} — ${roleDials('code')}`, 'spd:r:code').row()
+  kb.text(`${MODEL_ROLE_LABEL.chat} — ${roleDials('chat')}`, 'spd:r:chat').row()
   // ONE toggle over BOTH dials, and only for AGENT spawns: the rows above stay real values, because
   // they are also what the mini-app + and every new topic launch on. That separation IS this feature —
   // as a value in the model slot, auto silently handed a human's spawn the agent fallback.
@@ -10504,6 +10517,32 @@ function spawnDefaultsKeyboard(): InlineKeyboard {
   kb.text(`🦾 Auto mode (agent picks) — ${onOff(a.spawnAuto === true)}`, 'spd:a:toggle').row()
   kb.text(`🔥 Require approvals to spawn Fable — ${fableRowState(a.fableForAgents)}`, 'spd:f:toggle').row()
   return kb.text('‹ Back', 'spd:back')
+}
+
+// One role's dials. Header names the role, so a picker opened two taps deep still says what it sets.
+function modelRolePickerText(role: SessionRole): string {
+  return `${MODEL_ROLE_LABEL[role]}\n\n` +
+    `🧠 Model — <b>${escapeHtml(configuredSpawnModel(role))}</b>\n` +
+    `⚡ Effort — <b>${escapeHtml(configuredSpawnEffort(role))}</b>` +
+    (role === 'chat' && loadAccess().chatModel === undefined
+      ? `\n\n<i>Following the coding default — pick one to split them.</i>` : '')
+}
+function modelRolePickerKeyboard(role: SessionRole): InlineKeyboard {
+  const a = loadAccess()
+  const fableOff = fablePolicy(a.fableForAgents) === 'refuse'
+  const model = configuredSpawnModel(role), effort = configuredSpawnEffort(role)
+  const kb = new InlineKeyboard()
+  // A model the owner has switched off for coding agents is not OFFERED as their default either —
+  // picking it here would set a default no agent-spawned session can start on. His own per-session
+  // picker still lists it: that is his pick, not an agent's. The switch is about what an AGENT may
+  // pick, so it gates the CODING row only — the chat lane is his own surface, never an agent's.
+  for (const m of MODEL_ALIASES) {
+    if (m === FABLE && fableOff && role === 'code') continue
+    kb.text(`${model === m ? '✅ ' : ''}${m}`, `spd:m:${role}:${m}`)
+  }
+  kb.row()
+  for (const e of SPAWN_EFFORT_LEVELS) kb.text(`${effort === e ? '✅ ' : ''}${e === 'medium' ? 'med' : e}`, `spd:e:${role}:${e}`)
+  return kb.row().text('‹ Back', 'spd:panel')
 }
 
 // The try-in-order failover chain (Claude accounts + Codex + gateways) a usage-limited session
@@ -11118,7 +11157,13 @@ async function liveChatLaneHarness(): Promise<HarnessProfile | null> {
   return null
 }
 
-async function spawnSession(dir: string, extra = '', presetSessionId?: string, account: Account = MAIN_ACCOUNT, agent: AgentKind = 'claude', harnessOverride?: HarnessProfile, dials?: { model?: string | null; effort?: string | null; mode?: CcMode | null; modeExplicit?: boolean }): Promise<string | null> {
+// `role` is PASSED, never derived, and that is a correctness requirement rather than a style choice:
+// `ensureChatLane` mints the sid, calls this, and only calls `setDmChatSession` AFTER it returns — so
+// `isChatLaneSession(presetSessionId)` is false for a lane being provisioned right now. Derive the
+// role in here and every NEW lane silently takes the CODING default while every REVIVE takes the chat
+// one: correct in every test that reuses an existing lane, wrong on the first path the owner sees.
+// Callers that hold a bound session may pass `sessionRole(sid)`; the default is 'code'.
+async function spawnSession(dir: string, extra = '', presetSessionId?: string, account: Account = MAIN_ACCOUNT, agent: AgentKind = 'claude', harnessOverride?: HarnessProfile, dials?: { model?: string | null; effort?: string | null; mode?: CcMode | null; modeExplicit?: boolean }, role: SessionRole = 'code'): Promise<string | null> {
   // Spawn-time install check: a session born on a stale binary stays stale until something bounces
   // it, and spawns are the one event that reliably happens on a box nobody is watching. Gated by
   // sweepClaudeInstall's own 6h stamp, so all this usually costs is a JSON read, and it must never
@@ -11156,8 +11201,8 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
       : null
     if (agent === 'claude' && !extra) {
       const mode = inherit && inherit.mode !== 'default' ? inherit.mode : lastFocusedMode
-      inherit = { model: configuredSpawnModel(), effort: configuredSpawnEffort(), mode }
-      modelSource = 'configured-default'
+      inherit = { model: configuredSpawnModel(role), effort: configuredSpawnEffort(role), mode }
+      modelSource = `configured-default(${role})`
     }
     // A resumed/continued session keeps its model + conversation, but Claude Code restores NEITHER
     // the permission mode NOR the reasoning effort — seed both. Prefer the session's OWN last-known
@@ -11169,19 +11214,26 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
       // a preset still has one for this dir) so the resumed session keeps its effort/mode instead of
       // dropping to the standing default.
       const prefSid = presetSessionId ?? findTopicByCwd(dir)?.sessionId
+      // An explicit 'chat' wins; otherwise ask the binding. Both directions matter: a REVIVE passes
+      // the role and is not yet re-bound in one ordering, and a caller that forgot to pass it still
+      // gets the right answer for a lane that IS bound. Neither alone covers both.
+      const branchRole: SessionRole = role === 'chat' ? 'chat' : sessionRole(prefSid)
       const mode = (prefSid ? sessionModes.get(prefSid) : null) ?? lastFocusedMode
-      const effort = (prefSid ? sessionEfforts.get(prefSid) : null) ?? configuredSpawnEffort()
+      const effort = (prefSid ? sessionEfforts.get(prefSid) : null) ?? configuredSpawnEffort(branchRole)
       // Model's fallback chain: the session's OWN remembered alias, then the configured Model
       // defaults (the resolver the settings panel renders), then SPAWN_MODEL_FLOOR. Unlike mode this
       // chain never bottoms out at null — a resume/reopen must always emit SOME --model, or the CLI's
       // own default silently wins (that is how a reopen came back on Haiku 4.5, dragging the 1M window
       // down with it: model-window.ts's suffix has no model identifier to ride on with no --model flag
       // at all). The chat lane USED to be excluded from the middle term and fall straight to the floor;
-      // v0.4.318 removed that exclusion with the setting's rename — see relaunchModel.
-      const configuredModel = configuredSpawnModel()
+      // v0.4.318 removed that exclusion, and v0.4.319 gives the lane its OWN default in that slot
+      // instead — the middle term is now per role. `relaunchModel` itself needs no role: the caller
+      // resolves which default to hand it, which keeps the order (remembered → default → floor) in
+      // one place and the role question in another.
+      const configuredModel = configuredSpawnModel(branchRole)
       const remembered = prefSid ? sessionModels.get(prefSid) : null
       const model = relaunchModel(remembered ?? null, configuredModel, SPAWN_MODEL_FLOOR)
-      modelSource = remembered ? `remembered(${prefSid})` : 'configured-default'
+      modelSource = remembered ? `remembered(${prefSid})` : `configured-default(${branchRole})`
       // Widen the guard to include model: it now always resolves to a floor, so a resume with default
       // mode and no effort must still seed the model instead of dropping it.
       if (mode !== 'default' || effort || model) inherit = { model, effort, mode }
@@ -12882,23 +12934,36 @@ bot.on('callback_query:data', async ctx => {
     return
   }
   // 🧑‍💻 model/effort pick — persisted; the default every coding session launches on.
-  const spdSet = /^spd:(m|e):([a-z]+)$/.exec(data)
+  // One ROLE's picker, opened from its row on the panel.
+  const spdRole = /^spd:r:(code|chat)$/.exec(data)
+  if (spdRole) {
+    if (!(await cbAuth(ctx))) return
+    await ctx.answerCallbackQuery().catch(() => {})
+    const role = spdRole[1] as SessionRole
+    await showHtmlPanel(ctx, 'edit', modelRolePickerText(role), modelRolePickerKeyboard(role))
+    return
+  }
+  const spdSet = /^spd:(m|e):(code|chat):([a-z]+)$/.exec(data)
   if (spdSet) {
     if (!(await cbAuth(ctx))) return
-    const [, kind, v] = spdSet
+    const [, kind, roleStr, v] = spdSet
+    const role = roleStr as SessionRole
     const a = loadAccess()
     // A real value, always: the "Inherit" chips are gone, so there is no path left that writes an
-    // empty default. 'auto' is no longer a value either — it is the toggle above.
+    // empty default. 'auto' is no longer a value either — it is the toggle above. Which KEY it lands
+    // in is the whole of the role split: the coding pair keeps the names it has always had, and the
+    // chat pair is new. A tap on the chat row is also the moment the lane stops following the coding
+    // default — writing the key IS the split.
     if (kind === 'm') {
       if (!MODEL_ALIASES.includes(v)) { await ctx.answerCallbackQuery({ text: 'Unknown model.' }).catch(() => {}); return }
-      a.spawnModel = v
+      if (role === 'chat') a.chatModel = v; else a.spawnModel = v
     } else {
       if (!SPAWN_EFFORT_LEVELS.includes(v)) { await ctx.answerCallbackQuery({ text: 'Unknown effort.' }).catch(() => {}); return }
-      a.spawnEffort = v
+      if (role === 'chat') a.chatEffort = v; else a.spawnEffort = v
     }
     saveAccess(a)
     await ctx.answerCallbackQuery().catch(() => {})
-    await showHtmlPanel(ctx, 'edit', spawnDefaultsText(), spawnDefaultsKeyboard())
+    await showHtmlPanel(ctx, 'edit', modelRolePickerText(role), modelRolePickerKeyboard(role))
     return
   }
 
@@ -13024,7 +13089,7 @@ bot.on('callback_query:data', async ctx => {
     const extra = t.agentSessionId ? `--resume ${t.agentSessionId}` : ''
     const ok = await spawnSession(t.cwd, extra, sid, topicAccount(t), topicAgent(t),
       extra ? undefined : codingSpawnHarness(),
-      extra ? undefined : { model: refreshSpawnModel() })
+      extra ? undefined : { model: refreshSpawnModel(sid) })
     if (ok) await reopenSessionTopic(sid)   // reopen the tab NOW, not on first reply
     await channel.sendText(String(ctx.chat!.id), ok
       ? `🚀 Resuming <b>${escapeHtml(t.name)}</b> in <code>${escapeHtml(t.cwd)}</code> — it reopens in its topic shortly.`
@@ -14981,7 +15046,9 @@ async function ensureChatLane(ctx: Context, chatId: string, first: InboundParams
       else await ctx.reply(text, { parse_mode: 'HTML', ...(buttons ? { reply_markup: buttonsToKb(buttons) } : {}) }).catch(() => {})
     }
     const chatRoute = roleLaunchRoute('chat', account)
-    const pane = await spawnSession(dir, extra, sid, chatRoute.account, 'claude', chatRoute.harness)
+    // 'chat' passed EXPLICITLY, for both the fresh provision and the revive. setDmChatSession runs
+    // below, after this returns, so nothing inside spawnSession can discover that this sid is a lane.
+    const pane = await spawnSession(dir, extra, sid, chatRoute.account, 'claude', chatRoute.harness, undefined, 'chat')
     if (!pane) {
       drain(bufferEvent)   // keep the messages — they replay when a session next appears
       await edit(`❌ Couldn't ${revive ? 'revive' : 'start'} your chat in <code>${escapeHtml(dir)}</code> — your message is buffered.`)
@@ -17010,8 +17077,8 @@ async function webappReadSettings(): Promise<WebappSettingsView> {
       // Real values, always — no 'off' and no 'auto'. The "+" sheet badges these directly again now
       // that a default is never a policy word (the `resolved` companion field that existed for auto
       // went with it).
-      spawnModel: { value: configuredSpawnModel(), editable: true, options: MODEL_ALIASES.filter(m => !(m === FABLE && fablePolicy(a.fableForAgents) === 'refuse')), label: 'coding sessions only — not this chat' },
-      spawnEffort: { value: configuredSpawnEffort(), editable: true, options: [...SPAWN_EFFORT_LEVELS], label: 'coding sessions only — not this chat' },
+      spawnModel: { value: configuredSpawnModel(), editable: true, options: MODEL_ALIASES.filter(m => !(m === FABLE && fablePolicy(a.fableForAgents) === 'refuse')), label: 'coding sessions — the chat agent has its own' },
+      spawnEffort: { value: configuredSpawnEffort(), editable: true, options: [...SPAWN_EFFORT_LEVELS], label: 'coding sessions — the chat agent has its own' },
       mode: { value: cap ? detectCurrentMode(cap) : null, editable: false, label: 'drives the pane (chat-side)' },
       model: { value: sl?.model ?? null, editable: false },
       effort: { value: sl?.effort ?? null, editable: false },

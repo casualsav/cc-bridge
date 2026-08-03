@@ -10,6 +10,7 @@ import { test, expect } from 'bun:test'
 import { freshInstallDefaults } from './access.ts'
 import { AUTO_FALLBACK, AUTO_EFFORT_FALLBACK, fablePolicy, fableRowState, onOff, launchDefaultModel, launchDefaultEffort, relaunchModel } from './spawn-model-policy.ts'
 import type { Access } from './types.ts'
+import type { SessionRole } from './role-provider.ts'
 
 // The two value slots ARE daemon.ts's configuredSpawnModel/configuredSpawnEffort — the same
 // functions, not a copy of their logic. They used to be re-implemented here, which is a test that
@@ -17,8 +18,8 @@ import type { Access } from './types.ts'
 //2026-08-03 defect, since what broke was never the arithmetic but which store the launch read.
 const MODEL_ALIASES = ['fable', 'opus', 'sonnet', 'haiku']
 const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max']
-const resolveModel = (p: Partial<Access>, standing: string | null = null) => launchDefaultModel(p.spawnModel, MODEL_ALIASES)
-const resolveEffort = (p: Partial<Access>, standing: string | null = null) => launchDefaultEffort(p.spawnEffort, standing, EFFORT_LEVELS)
+const resolveModel = (p: Partial<Access>, role: SessionRole = 'code') => launchDefaultModel(role, p, MODEL_ALIASES)
+const resolveEffort = (p: Partial<Access>, standing: string | null = null, role: SessionRole = 'code') => launchDefaultEffort(role, p, standing, EFFORT_LEVELS)
 
 test('a keyless config resolves to opus · high · auto ON · approvals ON', () => {
   const fresh = freshInstallDefaults({})
@@ -85,6 +86,53 @@ test('the effort chain is panel pref, then /effort default, then the fallback', 
   expect(resolveEffort({}, null)).toBe(AUTO_EFFORT_FALLBACK)          // …else the shown fallback
   expect(resolveEffort({ spawnEffort: 'auto' }, null)).toBe(AUTO_EFFORT_FALLBACK)   // the legacy token is not a level
   expect(resolveEffort({ spawnEffort: 'bogus' }, 'high')).toBe('high')              // a stale pref is ignored, not honoured
+})
+
+// ---- the two-role split (v0.4.319) ----
+//
+// UPGRADE-INVARIANCE IS THE RULING, and this is the assertion that pins it: an install that upgrades
+// into the split has no chatModel/chatEffort, and must behave exactly as it did under the single
+// setting — chat resolves to the CODING value, not to a fixed fallback of its own. The rejected
+// alternative would silently move the chat lane on every box whose coding default is not Opus, so it
+// is asserted negatively too.
+test('chat with nothing of its own follows the CODING default — upgrade-invariance', () => {
+  const upgraded: Partial<Access> = { spawnModel: 'sonnet', spawnEffort: 'max' }   // no chat keys
+  expect(resolveModel(upgraded, 'chat')).toBe('sonnet')
+  expect(resolveEffort(upgraded, null, 'chat')).toBe('max')
+  expect(resolveModel(upgraded, 'chat')).not.toBe(AUTO_FALLBACK)         // the rejected fixed fallback
+  expect(resolveEffort(upgraded, null, 'chat')).not.toBe(AUTO_EFFORT_FALLBACK)
+})
+
+test('a split config gives each role its own dials, and neither leaks into the other', () => {
+  const split: Partial<Access> = { spawnModel: 'opus', spawnEffort: 'high', chatModel: 'fable', chatEffort: 'high' }
+  expect(resolveModel(split, 'code')).toBe('opus')
+  expect(resolveModel(split, 'chat')).toBe('fable')
+  // The owner's actual pair. Setting chat must not move coding — the failure that would look like
+  // "the split works" while quietly relocating every coding spawn.
+  expect(resolveModel({ spawnModel: 'opus', chatModel: 'fable' }, 'code')).toBe('opus')
+  expect(resolveEffort({ spawnEffort: 'high', chatEffort: 'low' }, null, 'code')).toBe('high')
+})
+
+test('a keyless install shows the same value in both rows', () => {
+  const fresh = freshInstallDefaults({})
+  expect(resolveModel(fresh, 'code')).toBe(resolveModel(fresh, 'chat'))
+  expect(resolveEffort(fresh, null, 'code')).toBe(resolveEffort(fresh, null, 'chat'))
+})
+
+// `/effort default` stays GLOBAL and sits under BOTH roles (his ruling), so it is the term after each
+// role chain — never a rival to it.
+test('/effort default is the last term for both roles, and a role pref outranks it', () => {
+  expect(resolveEffort({}, 'max', 'chat')).toBe('max')
+  expect(resolveEffort({}, 'max', 'code')).toBe('max')
+  expect(resolveEffort({ chatEffort: 'low' }, 'max', 'chat')).toBe('low')
+  expect(resolveEffort({ spawnEffort: 'low' }, 'max', 'chat')).toBe('low')   // via the coding fallback
+})
+
+// A stale/invalid chat pref must fall THROUGH to the coding value, not to the floor — same rule the
+// coding term already has, and the one an `ok()`-per-slot implementation gets wrong.
+test('an invalid chat pref falls through to coding, not to the fallback', () => {
+  expect(resolveModel({ spawnModel: 'sonnet', chatModel: 'bogus' }, 'chat')).toBe('sonnet')
+  expect(resolveEffort({ spawnEffort: 'low', chatEffort: 'auto' }, null, 'chat')).toBe('low')
 })
 
 // ---- the blast radius ----
