@@ -17337,6 +17337,21 @@ async function webappProviderAccountAction(userId: string, action: Record<string
     catch { writeEnvVars({ [tokenEnv]: null }); return { error: 'could not save the provider account' } }
     return { ok: true, id: `gateway:${name}` }
   }
+  // 🔑 Replace a gateway's API key. WRITE-ONLY on purpose: the existing key is never rendered, never
+  // returned, and never round-trips through the browser — the field takes a new one or nothing. The
+  // definition is untouched, so this cannot half-migrate an account the way a re-add would.
+  if (kind === 'key') {
+    const id = String(action.id ?? '')
+    const name = id.startsWith('gateway:') ? id.slice(8) : ''
+    const def = gateways[name]
+    if (!def?.tokenEnv) return { error: 'unknown provider account' }
+    const apiKey = String(action.apiKey ?? '').trim()
+    if (!apiKey) return { error: 'no key given' }
+    if (/\s|\0/.test(apiKey)) return { error: 'API keys cannot contain whitespace or line breaks' }
+    if (!writeEnvVars({ [def.tokenEnv]: apiKey })) return { error: 'could not save the provider credential' }
+    const ok = await gatewayProviderReady({ provider: 'gateway', gateway: name, model: def.model, smallModel: def.smallModel })
+    return { ok: true, verified: ok }
+  }
   if (kind === 'remove') {
     const id = String(action.id ?? '')
     const name = id.startsWith('gateway:') ? id.slice(8) : ''
@@ -17439,6 +17454,46 @@ function webappSetSetting(userId: string, key: string, value: unknown): Promise<
   }
   return applySetting(key, value)
 }
+// ---- 🐙 GitHub for the Mini App: the same four functions the /settings sub-panel has (install the
+// CLI, add an account, switch the active one, log one out). The add is a DEVICE-CODE flow that runs
+// for minutes while a human authorizes on github.com, so it cannot be a request/response: the POST
+// starts it and returns immediately, and the code + URL are polled off `ghLoginState` by the app —
+// the same shape the Telegram panel gets by editing one status message through the stages.
+type GhLoginState = { active: boolean; code?: string; url?: string; done?: string; error?: string }
+let ghLoginState: GhLoginState = { active: false }
+async function webappReadGithub(): Promise<{ installed: boolean; accounts: Array<{ user: string; host: string; active: boolean }>; login: GhLoginState }> {
+  const accounts = await refreshGh()
+  return { installed: !ghMissing, accounts: accounts.map(a => ({ user: a.user, host: a.host, active: a.active })), login: ghLoginState }
+}
+async function webappGithubAction(userId: string, action: Record<string, unknown>): Promise<{ error: string } | Record<string, unknown>> {
+  const kind = String(action.action ?? '')
+  if (kind === 'install') {
+    try { await provisionGh() } catch (e) { return { error: `couldn't install gh: ${String((e as Error)?.message ?? e).slice(0, 200)}` } }
+    await refreshGh()
+    return { ok: true }
+  }
+  if (kind === 'login') {
+    if (ghLoginInFlight) return { error: 'a GitHub login is already in progress' }
+    ghLoginInFlight = true
+    ghLoginState = { active: true }
+    void (async () => {
+      const res = await runGhLogin((code, url) => { ghLoginState = { active: true, code, url } })
+      ghLoginInFlight = false
+      ghLoginState = res.ok ? { active: false, done: res.user || 'ok' } : { active: false, error: res.error }
+      await refreshGh()
+    })()
+    return { ok: true, started: true }
+  }
+  if (kind === 'switch' || kind === 'logout') {
+    const user = String(action.user ?? '')
+    if (!user) return { error: 'no account named' }
+    const err = kind === 'switch' ? await ghSwitch(user) : await ghLogout(user)
+    await refreshGh()
+    return err ? { error: err.slice(0, 190) } : { ok: true }
+  }
+  return { error: 'unknown github action' }
+}
+
 // ---- Fleet dashboard (Sessions tab) ----
 
 // A DM chat lane is labeled with the user's @handle, and NEVER with their numeric Telegram id — the
@@ -18218,6 +18273,7 @@ async function startFilesWebapp(): Promise<void> {
       protectedRoots: [STATE_DIR],   // fence writes out of a relocated state dir too (~/.claude is fenced by default)
       readSettings: webappReadSettings, setSetting: webappSetSetting,
       readProviderAccounts: webappReadProviderAccounts, providerAccountAction: webappProviderAccountAction,
+      readGithub: webappReadGithub, githubAction: webappGithubAction,
       listSessions: webappListSessions, readSessionFeed: webappSessionFeed, readSessionMessage: webappSessionMessage, sessionAction: webappSessionAction,
       sessionAttach: webappSessionAttach, sessionSpawn: webappSessionSpawn,
       readUsage: webappReadUsage,

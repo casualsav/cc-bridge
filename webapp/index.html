@@ -1730,7 +1730,7 @@
 
 <div id="spawn">
   <div class="sheet">
-    <div class="shead">New session</div>
+    <div class="shead" id="spawnhead">New session</div>
     <!-- The composer's model dial, hosted here rather than rebuilt: same .dialpages track, same
          .diallist / .dialrow markup, same dialRow() builder, same DIAL_MODELS/DIAL_EFFORTS tables.
          Page 1 carries no .dialhead — the sheet's own "New session" title is the head. -->
@@ -1822,6 +1822,39 @@
       <div class="sprow"><button type="button" id="acccancel" class="cancel">Cancel</button><button type="submit" class="create">Save account</button></div>
     </form>
     <div class="sprow"><button id="accclose" class="cancel">Close</button></div>
+  </div>
+</div>
+
+<!-- The three grouped settings sheets. Each one is the Mini App's rendering of ONE /settings
+     sub-panel, and each joins the #spawn/#sched/#accounts family (backdrop, 180ms slide,
+     reduced-motion gate) rather than inventing a second sheet vocabulary.
+     Their bodies are filled by renderSettings from the SAME row builder the flat list uses — a
+     grouped row is the same control in a different container, never a second implementation. -->
+<div id="mdef">
+  <div class="sheet">
+    <div class="shead">Model defaults</div>
+    <div class="card" id="mdefbody"></div>
+    <div class="sprow"><button id="mdefclose" class="cancel">Close</button></div>
+  </div>
+</div>
+
+<div id="voicesheet">
+  <div class="sheet">
+    <div class="shead">Voice</div>
+    <div class="card" id="voicebody"></div>
+    <div class="sprow"><button id="voiceclose" class="cancel">Close</button></div>
+  </div>
+</div>
+
+<!-- 🐙 GitHub has no settings KEYS behind it — it is the gh CLI's own account list, so this sheet
+     reads /api/github and posts /api/github/action. The add is a device-code login that runs for
+     minutes; the sheet polls for the code and then for the outcome, which is the same staged status
+     the Telegram panel shows by editing one message. -->
+<div id="ghsheet">
+  <div class="sheet">
+    <div class="shead">GitHub</div>
+    <div id="ghbody"></div>
+    <div class="sprow"><button id="ghclose" class="cancel">Close</button></div>
   </div>
 </div>
 
@@ -2225,22 +2258,25 @@ async function renderSettings() {
   // there — the two lists drifting is invisible on both surfaces (each renders its own order and
   // looks correct), which is the same lockstep problem the three Telegram renderers have.
   // The chat-side pane dials (mode/model/effort) close the list; they belong to no /settings row.
+  // `sheet` groups a run of keys behind ONE row on this screen, opening the named sheet — the Mini
+  // App's rendering of a /settings sub-panel. The grouped row appears at the position of the group's
+  // FIRST key, so this list stays the single source of order and the order gate reads it unchanged.
   const meta = {
     accounts: { name: "👤 Accounts", bool: false },
-    spawnModel: { name: "🧑‍💻 Coding session model", bool: false },
-    spawnEffort: { name: "🧑‍💻 Coding session effort", bool: false },
-    chatModel: { name: "💬 Chat agent model", bool: false },
-    chatEffort: { name: "💬 Chat agent effort", bool: false },
-    spawnAuto: { name: "🦾 Auto (agent spawns)", bool: true },
-    fableForAgents: { name: "🔥 Fable for agents", bool: false },
+    spawnModel: { name: "Coding session model", bool: false, sheet: "mdef" },
+    spawnEffort: { name: "Coding session effort", bool: false, sheet: "mdef" },
+    chatModel: { name: "Chat agent model", bool: false, sheet: "mdef" },
+    chatEffort: { name: "Chat agent effort", bool: false, sheet: "mdef" },
+    spawnAuto: { name: "Auto — agent spawns pick", bool: true, sheet: "mdef" },
+    fableForAgents: { name: "Fable for agents", bool: false, sheet: "mdef" },
     github: { name: "🐙 GitHub", bool: false },
     batchAllow: { name: "⚡ Batch allow", bool: true },
-    transcribeBackend: { name: "🎙 Voice transcription", bool: false },
-    transcribeModel: { name: "🎙 Whisper model", bool: false },
-    voice: { name: "🔊 Voice replies", bool: true },
-    ttsMode: { name: "🔊 Speak replies", bool: false },
-    ttsEngine: { name: "🔊 Voice engine", bool: false },
-    ttsVoice: { name: "🗣 Piper voice", bool: false },
+    transcribeBackend: { name: "Transcription backend", bool: false, sheet: "voice" },
+    transcribeModel: { name: "Local Whisper model", bool: false, sheet: "voice" },
+    voice: { name: "Voice replies", bool: true, sheet: "voice" },
+    ttsMode: { name: "Speak replies", bool: false, sheet: "voice" },
+    ttsEngine: { name: "Voice engine", bool: false, sheet: "voice" },
+    ttsVoice: { name: "Piper voice", bool: false, sheet: "voice" },
     stream: { name: "💬 Stream", bool: false },
     sessionPin: { name: "📌 Pinned card", bool: true },
     prefMode: { name: "🧷 Preferred mode", bool: false },
@@ -2260,15 +2296,26 @@ async function renderSettings() {
   head.className = "card"; head.innerHTML = '<div class="k">Channel</div><div class="v">' + (W ? "Editing enabled" : "Read-only — set TELEGRAM_WEBAPP_SETTINGS_WRITE=1 to change") + "</div>";
   el.appendChild(head);
   const wrap = document.createElement("div"); wrap.className = "card";
+  // One row per SHEET group, emitted where its first key sits; the group's own rows are built by the
+  // same builder and appended to the sheet instead of this card.
+  const SHEETS = {
+    mdef: { title: "🧑‍💻 Model defaults", body: "mdefbody", open: () => openSheet("mdef"),
+            sum: s => [s.spawnModel, s.spawnEffort].filter(Boolean).map(x => x.value).join(" · ") },
+    voice: { title: "🎙 Voice", body: "voicebody", open: () => openSheet("voicesheet"),
+             sum: s => "in " + (s.transcribeBackend ? s.transcribeBackend.value : "off") + " · out " + (s.ttsMode ? s.ttsMode.value : "off") },
+  };
+  for (const id in SHEETS) $(SHEETS[id].body).innerHTML = "";
+  const emitted = {};
   for (const key in meta) {
     const m = meta[key], s = d.settings[key]; if (!s) continue;
     const editable = W && s.editable;
     const r = document.createElement("div"); r.className = "setrow";
     if (key === "accounts") { r.classList.add("action"); r.onclick = openAccounts; }
+    if (key === "github") { r.classList.add("action"); r.onclick = openGithub; }
     const lbl = document.createElement("div"); lbl.className = "lbl";
     lbl.innerHTML = '<div>' + m.name + '</div>' + (s.label ? '<div class="sub">' + esc(s.label) + '</div>' : "");
     r.appendChild(lbl);
-    if (key === "accounts") {
+    if (key === "accounts" || key === "github") {
       const btn = document.createElement("button"); btn.className = "toggle off"; btn.textContent = "Manage"; r.appendChild(btn);
     } else if (m.bool) {
       const on = !!s.value;
@@ -2288,10 +2335,69 @@ async function renderSettings() {
       const ro = document.createElement("div"); ro.className = "ro"; ro.textContent = s.value == null ? "—" : String(s.value);
       r.appendChild(ro);
     }
-    wrap.appendChild(r);
+    if (m.sheet) {
+      // The control goes into its sheet; the screen gets ONE action row, at the group's first key.
+      $(SHEETS[m.sheet].body).appendChild(r);
+      if (!emitted[m.sheet]) {
+        emitted[m.sheet] = true;
+        const g = SHEETS[m.sheet];
+        const gr = document.createElement("div"); gr.className = "setrow action"; gr.onclick = g.open;
+        gr.innerHTML = '<div class="lbl"><div>' + g.title + '</div><div class="sub">' + esc(g.sum(d.settings)) + '</div></div>';
+        const btn = document.createElement("button"); btn.className = "toggle off"; btn.textContent = "Open"; gr.appendChild(btn);
+        wrap.appendChild(gr);
+      }
+    } else wrap.appendChild(r);
   }
   el.appendChild(wrap);
 }
+$("mdefclose").onclick = () => closeSheet("mdef");
+$("mdef").onclick = e => { if (e.target.id === "mdef") closeSheet("mdef"); };
+$("voiceclose").onclick = () => closeSheet("voicesheet");
+$("voicesheet").onclick = e => { if (e.target.id === "voicesheet") closeSheet("voicesheet"); };
+
+// ---- 🐙 GitHub sheet. Not settings keys: the gh CLI's own accounts, over /api/github. ----
+let ghPoll = null;
+async function openGithub() { openSheet("ghsheet"); await renderGithub(); }
+$("ghclose").onclick = () => { closeSheet("ghsheet"); clearInterval(ghPoll); ghPoll = null; };
+$("ghsheet").onclick = e => { if (e.target.id === "ghsheet") { closeSheet("ghsheet"); clearInterval(ghPoll); ghPoll = null; } };
+async function renderGithub() {
+  const body = $("ghbody");
+  let d; try { d = await api("/api/github"); } catch { body.innerHTML = '<div class="notice">GitHub unavailable.</div>'; return; }
+  if (!d.installed) {
+    body.innerHTML = '<div class="notice">The gh CLI isn\'t on this machine yet (~12MB, no root needed).</div>';
+    const b = document.createElement("button"); b.className = "acctadd"; b.textContent = "Install gh";
+    b.onclick = async () => { b.disabled = true; b.textContent = "Installing…"; if (await writeOp("/api/github/action", { action: "install" })) renderGithub(); else { b.disabled = false; b.textContent = "Install gh"; } };
+    body.appendChild(b);
+    return;
+  }
+  let html = "";
+  for (const a of d.accounts) {
+    html += '<div class="acctitem" data-gh="' + esc(a.user) + '"><div class="accthead"><span class="acctstatus ' + (a.active ? "ready" : "") + '"></span>' +
+      '<div class="identity"><div class="acctname">' + esc(a.user) + '</div><div class="acctmeta">' + esc(a.host) + (a.active ? " · active" : "") + '</div></div></div>' +
+      '<div class="acctactions">' + (a.active ? "" : '<button data-gh-switch="1">Make active</button>') + '<button data-gh-out="1">Log out</button></div></div>';
+  }
+  if (!d.accounts.length) html += '<div class="notice">Not signed in to any GitHub account.</div>';
+  // The device-code login's live state, polled: a code to type, then the outcome. Nothing to send back.
+  const L = d.login || {};
+  if (L.active && L.code) html += '<div class="notice">Open <b>' + esc(L.url || "github.com/login/device") + '</b> on any device and enter <b>' + esc(L.code) + '</b>. I\'ll confirm here.</div>';
+  else if (L.active) html += '<div class="notice">Requesting a sign-in code…</div>';
+  else if (L.error) html += '<div class="notice">Login failed: ' + esc(L.error) + '</div>';
+  body.innerHTML = html;
+  const add = document.createElement("button"); add.className = "acctadd"; add.textContent = L.active ? "Sign-in in progress…" : "Add account";
+  add.disabled = !!L.active;
+  add.onclick = async () => { if (await writeOp("/api/github/action", { action: "login" })) { renderGithub(); startGhPoll(); } };
+  body.appendChild(add);
+  if (!L.active) { clearInterval(ghPoll); ghPoll = null; }
+}
+// Poll only while a login is in flight — a human at github.com is the slow part, and the sheet has
+// nothing else that changes on its own.
+function startGhPoll() { clearInterval(ghPoll); ghPoll = setInterval(renderGithub, 2500); }
+$("ghbody").addEventListener("click", async e => {
+  const item = e.target.closest("[data-gh]"); if (!item) return;
+  const user = item.dataset.gh;
+  if (e.target.dataset.ghSwitch) { if (await writeOp("/api/github/action", { action: "switch", user })) renderGithub(); }
+  else if (e.target.dataset.ghOut) { if (confirm("Log out " + user + "?") && await writeOp("/api/github/action", { action: "logout", user })) renderGithub(); }
+});
 async function openAccounts() {
   try {
     PROVIDER_ACCOUNTS = await api("/api/provider-accounts?role=" + ACCOUNT_ROLE); renderAccounts();
@@ -2312,7 +2418,12 @@ function renderAccounts() {
     const models = (a.models || []).length ? a.models : [a.model].filter(Boolean);
     html += '<div class="acctitem" data-account="' + esc(a.id) + '"><div class="accthead"><span class="acctstatus ' + (a.ready ? 'ready' : '') + '"></span><div class="identity"><div class="acctname">' + esc(a.label) + '</div><div class="acctmeta">' + esc(a.providerLabel) + ' · ' + esc(a.authLabel) + ' · ' + (a.ready ? 'Ready' : 'Needs attention') + '</div></div><div class="acctmoves"><button data-acc-move="up" ' + (i === 0 ? 'disabled' : '') + '>↑</button><button data-acc-move="down" ' + (i === accounts.length - 1 ? 'disabled' : '') + '>↓</button></div></div>';
     if (models.length) html += '<select class="seg" data-acc-model="1" style="width:100%;margin-top:8px">' + models.map(m => '<option value="' + esc(m) + '" ' + (m === a.model ? 'selected' : '') + '>' + esc(m.replace(/\[1m\]$/, '')) + '</option>').join('') + '</select>';
-    html += '<div class="acctactions"><button data-acc-default="chat" class="' + (v.defaults.chat === a.id ? 'on' : '') + '">Chat</button><button data-acc-default="code" class="' + (v.defaults.code === a.id ? 'on' : '') + '">Coding</button>' + (a.id.startsWith('gateway:') && a.id !== 'gateway:local-codex' ? '<button data-acc-remove="1">Remove</button>' : '') + '</div></div>';
+    // 🚀 hands off to the SPAWN sheet with this account preselected — one launcher, two hosts, the
+    // same rule the dial row follows. A second launcher here would be a second set of dials to keep
+    // in step with the first. 🔑 is write-only: it takes a new key and never renders the old one.
+    html += '<div class="acctactions"><button data-acc-default="chat" class="' + (v.defaults.chat === a.id ? 'on' : '') + '">Chat</button><button data-acc-default="code" class="' + (v.defaults.code === a.id ? 'on' : '') + '">Coding</button>'
+      + '<button data-acc-launch="1">Launch</button>'
+      + (a.id.startsWith('gateway:') && a.id !== 'gateway:local-codex' ? '<button data-acc-key="1">Key</button><button data-acc-remove="1">Remove</button>' : '') + '</div></div>';
   });
   if (v.activeCount === accounts.length) html += '<div class="acctdivider">Inactive · none</div>';
   body.innerHTML = html;
@@ -2321,6 +2432,21 @@ function renderAccounts() {
   body.querySelectorAll('[data-acc-default]').forEach(b => b.onclick = () => accountAction({ action:'default', id:b.closest('[data-account]').dataset.account, role:b.dataset.accDefault }));
   body.querySelectorAll('[data-acc-model]').forEach(s => s.onchange = () => accountAction({ action:'model', id:s.closest('[data-account]').dataset.account, model:s.value }));
   body.querySelectorAll('[data-acc-remove]').forEach(b => b.onclick = () => { if (confirm('Remove this provider account? Credentials stay out of the browser and its saved key is no longer used.')) accountAction({ action:'remove', id:b.closest('[data-account]').dataset.account }); });
+  body.querySelectorAll('[data-acc-launch]').forEach(b => b.onclick = () => {
+    const id = b.closest('[data-account]').dataset.account;
+    closeSheet('accounts');
+    openSpawnSheet({ account: id, label: accountLabel(id) });
+  });
+  // The key never round-trips: the field starts empty whatever is stored, and nothing reads it back.
+  body.querySelectorAll('[data-acc-key]').forEach(b => b.onclick = async () => {
+    const key = prompt('New API key for ' + accountLabel(b.closest('[data-account]').dataset.account) + ' — it replaces the stored one and is never shown again.');
+    if (!key) return;
+    const d = await writeOp('/api/provider-accounts/action', { action: 'key', id: b.closest('[data-account]').dataset.account, apiKey: key.trim() });
+    // A verified save takes the retired success bar (SUCCESS_TOASTS) like every other confirmation;
+    // a FAILED preflight keeps the red one, because a key that saved but doesn't work has no other
+    // surface to say so — the field is write-only and the row looks identical either way.
+    if (d) d.verified ? showDone('Key saved') : showErr('Key saved, but its preflight failed — check the base URL and model');
+  });
   body.querySelector('[data-acc-auto]')?.addEventListener('click', () => accountAction({ action:'auto', value:!v.auto }));
   body.querySelectorAll('[data-acc-count]').forEach(b => b.onclick = () => accountAction({ action:'active-count', count:Number(b.dataset.accCount) }));
 }
@@ -3729,7 +3855,7 @@ const DIAL_MODES = [
 // DIAL_MODES, so the two hosts cannot disagree about which options exist.
 // No surface here either — every session created from this sheet gets a topic, by the owner's
 // ruling. `headless` remains an API-only option for the throwaways agents spawn over the bus.
-const spawnSel = { model: "", effort: "", mode: "" };
+const spawnSel = { model: "", effort: "", mode: "", account: "" };
 // What each Default row resolves to, read once per sheet open. A DISPLAY of the setting, never a
 // promise: resolution happens daemon-side when Create is pressed, so a /settings change while the
 // sheet sits open leaves the description stale by seconds and the spawn correct.
@@ -3798,7 +3924,11 @@ function closeSheet(id) {
   s.classList.remove("up");
   setTimeout(() => s.classList.remove("show", "p2"), 180);   // matches .sheet's transition
 }
-async function openSpawnSheet() {
+// `on` (optional) is the Accounts sheet's 🚀 handing this sheet an account to launch on — the ONLY
+// difference a delegated launch makes. Cleared on every open so a plain "+" never inherits it.
+async function openSpawnSheet(on) {
+  spawnSel.account = on && on.account ? on.account : "";
+  $("spawnhead").textContent = spawnSel.account ? "New session on " + (on.label || spawnSel.account) : "New session";
   // .show BEFORE painting, for the dial's own reason: a display:none subtree measures 0, so
   // dialHeight would pin the track at zero and the sheet would open empty.
   $("spawn").classList.remove("p2");
@@ -3833,6 +3963,9 @@ $("spgo").onclick = async () => {
     ...(spawnSel.model ? { model: spawnSel.model } : {}),
     ...(spawnSel.effort ? { effort: spawnSel.effort } : {}),
     ...(spawnSel.mode ? { mode: spawnSel.mode } : {}),
+    // A delegated launch (Accounts → 🚀) names the account; a plain "+" sends nothing and the
+    // daemon resolves the role default at spawn time, exactly as it always has.
+    ...(spawnSel.account ? { account: spawnSel.account } : {}),
   });
   $("spgo").disabled = false;
   if (!d) return;   // writeOp surfaced the error

@@ -43,6 +43,11 @@ export interface WebappDeps {
   readSettings?: () => Promise<SettingsView> | SettingsView          // current prefs/state for the Settings tab
   setSetting?: (userId: string, key: string, value: unknown) => Promise<string | null> | string | null   // apply one change (userId = toggling user, for any notice routing); returns an error string or null on ok
   readProviderAccounts?: (role?: 'chat' | 'code') => Promise<ProviderAccountsView> | ProviderAccountsView
+  // 🐙 GitHub: gh CLI accounts + the device-code login's live state. The login runs for minutes, so
+  // the action STARTS it and the app polls this read for the code/URL — there is no request that can
+  // wait for a human at github.com.
+  readGithub?: () => Promise<unknown> | unknown
+  githubAction?: (userId: string, action: Record<string, unknown>) => Promise<{ error: string } | Record<string, unknown>> | { error: string } | Record<string, unknown>
   providerAccountAction?: (userId: string, action: Record<string, unknown>) => Promise<{ error: string } | Record<string, unknown>> | { error: string } | Record<string, unknown>
   listSessions?: () => Promise<SessionCard[]> | SessionCard[]        // fleet dashboard: one card per live session
   readSessionFeed?: (sid: string) => Promise<SessionFeed | null> | SessionFeed | null   // drill-in: recent conversation + live activity
@@ -401,6 +406,10 @@ async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: strin
     if (!deps.readSettings) return json({ error: 'unavailable' }, 404)
     return json(await deps.readSettings())
   }
+  if (url.pathname === '/api/github') {
+    if (!deps.readGithub) return json({ error: 'unavailable' }, 404)
+    return json(await deps.readGithub())
+  }
   if (url.pathname === '/api/provider-accounts') {
     if (!deps.readProviderAccounts) return json({ error: 'unavailable' }, 404)
     const role = url.searchParams.get('role') === 'chat' ? 'chat' : 'code'
@@ -518,6 +527,17 @@ async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: strin
     deps.log(`webapp: setting ${body.key}=${JSON.stringify(body.value)} user=${userId}`)
     const err = await deps.setSetting(userId, body.key, body.value)
     return err ? json({ error: err }, 400) : json({ ok: true })
+  }
+  if (url.pathname === '/api/github/action') {
+    if (!settingsWritable(deps)) return json({ error: 'read-only', reason: 'settings editing disabled (set TELEGRAM_WEBAPP_SETTINGS_WRITE=1)' }, 403)
+    if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405)
+    if (!deps.githubAction) return json({ error: 'unavailable' }, 404)
+    const body = await req.json().catch(() => null)
+    if (!body || typeof body !== 'object' || typeof (body as { action?: unknown }).action !== 'string') return json({ error: 'bad body' }, 400)
+    const action = body as Record<string, unknown>
+    deps.log(`webapp: github action=${String(action.action)} user=${userId}`)
+    const result = await deps.githubAction(userId, action)
+    return 'error' in result ? json(result, 400) : json(result)
   }
   if (url.pathname === '/api/provider-accounts/action') {
     if (!settingsWritable(deps)) return json({ error: 'read-only', reason: 'settings editing disabled (set TELEGRAM_WEBAPP_SETTINGS_WRITE=1)' }, 403)
