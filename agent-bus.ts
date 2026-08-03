@@ -182,6 +182,15 @@ export function loadBus(): BusState {
         ...(typeof p.pastedPane === 'string' ? { pastedPane: p.pastedPane } : {}),
         ...(typeof p.askerResolvedAt === 'number' ? { askerResolvedAt: p.askerResolvedAt } : {}),
         ...(p.founding === true ? { founding: true as const } : {}),
+        // Written by createPending, never read back — so an undelivered `tg ack` that outlived a
+        // restart reloaded as a NORMAL ASK. `noReply` is what removes the row on delivery, so without
+        // it the ack became a pending that never self-clears: it collected the 60-minute "no answer
+        // yet from @X" notice and entered the dead-letter reaper, for an FYI nobody was ever going to
+        // answer. That phantom unanswered ask is the exact noise `tg ack` exists to prevent, so it
+        // belongs closed at the store rather than in the convention. `quiet` rode the same gap: its
+        // loss mirrors a deliberately-silent daemon notice onto the human surface.
+        ...(p.noReply === true ? { noReply: true as const } : {}),
+        ...(p.quiet === true ? { quiet: true as const } : {}),
         depth: typeof p.depth === 'number' ? p.depth : 1,   // pre-depth entry: assume one hop, the safe reading
       }
     }

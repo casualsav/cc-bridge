@@ -106,6 +106,48 @@ test('a corrupt pastedPane is dropped, not trusted', () => {
   } finally { restore() }
 })
 
+// THE INSTRUMENT, not a case. Reading loaders by eye is what hid `pastedPane` for months and
+// `noReply`/`quiet` for longer: `loadBus` rebuilds each pending row field by field, so a field missing
+// from that list is written to disk and silently destroyed on the next save, and NO live row can
+// reveal it — an optional field that happens to be absent looks identical to one the loader drops.
+//
+// So: seed every optional field the type declares AT ONCE, load through the real loader, and assert
+// none vanished. A new optional field on BusPending that its author forgets to add to the rebuild list
+// fails here, on the day it is added. Copy this check when you add a store.
+test('ROUND-TRIP: every declared BusPending field survives the loader', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'bus-roundtrip-'))
+  const row = {
+    id: 1, fromSid: 'a', toSid: 'b', fromKind: 'claude', toKind: 'claude', fromName: 'A', toName: 'B',
+    text: 't', refs: ['r'], createdAt: 1, expiresAt: 2, injected: false, depth: 3,
+    expiredAt: 4, nudgedAt: 5, askerResolvedAt: 6, founding: true,
+    pastedPane: '%1', blockedByBox: 'draft', noReply: true, quiet: true,
+  }
+  writeFileSync(join(dir, 'agent-bus.json'), JSON.stringify({ seq: 1, pending: { '1': row }, seen: {}, depth: {} }))
+  try {
+    setBusStateDir(dir); loadBus()
+    const got = listPending()[0] as unknown as Record<string, unknown>
+    const dropped = Object.keys(row).filter(k => got[k] === undefined)
+    expect(dropped, `loadBus dropped ${dropped.join(', ')} — each is destroyed on the next save`).toEqual([])
+  } finally { restore() }
+})
+
+test('an ack still reads as an ack after a restart — it does not decay into an unanswered ask', () => {
+  // The consequence, stated as behaviour rather than as a field. `noReply` is what removes the row on
+  // delivery; lose it and the ack becomes a pending that never self-clears, drawing a "no answer yet"
+  // notice and a reaper for a message nobody was going to answer.
+  const dir = mkdtempSync(join(tmpdir(), 'bus-roundtrip-'))
+  const row = {
+    id: 2, fromSid: 'a', toSid: 'b', fromKind: 'claude', toKind: 'claude', fromName: 'system', toName: 'B',
+    text: 'fyi', refs: [], createdAt: 1, expiresAt: 2, injected: false, depth: 0, noReply: true, quiet: true,
+  }
+  writeFileSync(join(dir, 'agent-bus.json'), JSON.stringify({ seq: 1, pending: { '2': row }, seen: {}, depth: {} }))
+  try {
+    setBusStateDir(dir); loadBus()
+    expect(listPending()[0].noReply).toBe(true)
+    expect(listPending()[0].quiet).toBe(true)
+  } finally { restore() }
+})
+
 test('a corrupt blockedByBox is dropped, not trusted', () => {
   // Same stance as every other field in that rebuild: a hand-edited or corrupt agent-bus.json must not
   // put a non-string into a notice that gets HTML-escaped and sent to the owner.
