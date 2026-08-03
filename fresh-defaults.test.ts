@@ -36,13 +36,13 @@ test('the panel rows on a fresh install are four states, and none of them is emp
     `🧠 Model — ${resolveModel(fresh)}`,
     `⚡ Effort — ${resolveEffort(fresh)}`,
     `🦾 Auto mode (agent picks) — ${onOff(fresh.spawnAuto === true)}`,
-    `🔥 Require approvals to spawn Fable — ${fableRowState(fresh.fableForAgents)}`,
+    `⏸️ Require approvals to spawn Fable — ${fableRowState(fresh.fableForAgents)}`,
   ]
   expect(rows).toEqual([
     '🧠 Model — opus',
     '⚡ Effort — high',
     '🦾 Auto mode (agent picks) — on',
-    '🔥 Require approvals to spawn Fable — on',
+    '⏸️ Require approvals to spawn Fable — on',
   ])
   for (const r of rows) expect(r).not.toMatch(/— *$/)   // no blank state
 })

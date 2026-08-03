@@ -10346,7 +10346,9 @@ function baseRowValue(): string {
 // itself: the word alone reads like a mode nobody chose.
 function spawnDefaultsSummary(): string {
   const a = loadAccess()
-  return `🧑‍💻 ${roleDials('code')} · 💬 ${roleDials('chat')}${a.spawnAuto ? ' · auto' : ''}`
+  // Same order as the panel's rows (chat first) — the summary is what the row expands into, and the
+  // two reading in opposite orders is the kind of small mismatch that reads as a bug.
+  return `💬 ${roleDials('chat')} · 🧑‍💻 ${roleDials('code')}${a.spawnAuto ? ' · auto' : ''}`
 }
 // The 👤 Accounts row's state line — accounts · failover · providers — shared by the settings
 // root's two renderers (settingsText/settingsMarkdown) so they can't drift. The failover chain
@@ -10494,10 +10496,10 @@ const roleDials = (role: SessionRole): string => `${configuredSpawnModel(role)} 
 function spawnDefaultsText(): string {
   const a = loadAccess()
   return `🧑‍💻 <b>Model defaults</b>\n\n` +
-    `${MODEL_ROLE_LABEL.code} — <b>${escapeHtml(roleDials('code'))}</b>\n` +
     `${MODEL_ROLE_LABEL.chat} — <b>${escapeHtml(roleDials('chat'))}</b>\n` +
+    `${MODEL_ROLE_LABEL.code} — <b>${escapeHtml(roleDials('code'))}</b>\n` +
     `🦾 Auto mode (agent picks) — <b>${onOff(a.spawnAuto === true)}</b>\n` +
-    `🔥 Require approvals to spawn Fable — <b>${fableRowState(a.fableForAgents)}</b>`
+    `⏸️ Require approvals to spawn Fable — <b>${fableRowState(a.fableForAgents)}</b>`
 }
 
 // Each ROLE opens its own picker. Four model chips and six effort chips per role will not fit one
@@ -10507,15 +10509,17 @@ function spawnDefaultsText(): string {
 function spawnDefaultsKeyboard(): InlineKeyboard {
   const a = loadAccess()
   const kb = new InlineKeyboard()
-  kb.text(`${MODEL_ROLE_LABEL.code} — ${roleDials('code')}`, 'spd:r:code').row()
+  // Chat first, coding second — his ordering (2026-08-03). The lane he talks to every day sits above
+  // the sessions it launches.
   kb.text(`${MODEL_ROLE_LABEL.chat} — ${roleDials('chat')}`, 'spd:r:chat').row()
+  kb.text(`${MODEL_ROLE_LABEL.code} — ${roleDials('code')}`, 'spd:r:code').row()
   // ONE toggle over BOTH dials, and only for AGENT spawns: the rows above stay real values, because
   // they are also what the mini-app + and every new topic launch on. That separation IS this feature —
   // as a value in the model slot, auto silently handed a human's spawn the agent fallback.
   // Both rows are the STATE, not an instruction: the word on the button is what is true right now and
   // a tap flips it (owner, 2026-07-29). A checkbox glyph beside the word said the same thing twice.
   kb.text(`🦾 Auto mode (agent picks) — ${onOff(a.spawnAuto === true)}`, 'spd:a:toggle').row()
-  kb.text(`🔥 Require approvals to spawn Fable — ${fableRowState(a.fableForAgents)}`, 'spd:f:toggle').row()
+  kb.text(`⏸️ Require approvals to spawn Fable — ${fableRowState(a.fableForAgents)}`, 'spd:f:toggle').row()
   return kb.text('‹ Back', 'spd:back')
 }
 
