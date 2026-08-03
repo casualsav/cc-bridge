@@ -28,3 +28,17 @@ DECISIONS.md
 
 # fetched by scripts/webapp-measure/device-font.mjs (the device font, cached; never committed)
 scripts/webapp-measure/.fonts/
+
+# Screenshot / measure OUTPUT dirs. Every scripts/webapp-measure/*.mjs writes its PNGs and JSON into
+# a directory beside itself; re-running the script regenerates them, so they are never committed —
+# they were untracked on purpose, and listing them in `git status` every session taught readers to
+# skim the untracked block, which is where a real stray file hides. Ignoring subdirectories only:
+# `cmdcenter-mock/` and `fixtures/` hold tracked inputs and must keep showing new files.
+scripts/webapp-measure/*shots*/
+scripts/webapp-measure/batch5*/
+scripts/webapp-measure/cmdcenter-mock/out/
+scripts/webapp-measure/feed/
+scripts/webapp-measure/feed-work-out/
+scripts/webapp-measure/tmp/
+scripts/webapp-measure/work/
+cardfoot-shots/
