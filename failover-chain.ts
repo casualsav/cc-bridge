@@ -68,6 +68,40 @@ export function activeFailoverChain(chain: FailoverHop[], activeCount: number | 
   return chain.slice(0, Math.max(0, Math.min(chain.length, Math.trunc(activeCount))))
 }
 
+// Display grouping: hops that are the same ACCOUNT collapse to one row. Claude hops group by the
+// subscription behind their config dir (account-identity.ts); everything else is its own group,
+// because an API key is not comparable to an OAuth account and two gateways at one vendor are two
+// credentials the user added on purpose. Group order is first appearance, and the group's first hop
+// is its REPRESENTATIVE — the hop its row's key, 🚀 launch and ↑/↓ all speak for.
+export type HopGroup = { key: string; hops: FailoverHop[] }
+export function chainGroups(chain: FailoverHop[], identityOf: (account: string) => string): HopGroup[] {
+  const byKey = new Map<string, HopGroup>()
+  const out: HopGroup[] = []
+  for (const h of chain) {
+    const key = h.kind === 'claude' ? identityOf(h.account || '') : hopKey(h)
+    const existing = byKey.get(key)
+    if (existing) { existing.hops.push(h); continue }
+    const group = { key, hops: [h] }
+    byKey.set(key, group)
+    out.push(group)
+  }
+  return out
+}
+
+// Reorder one GROUP by one position, addressed by any member's hopKey. Collapsing also normalizes
+// the chain so a group's hops sit together — they are pool-equivalent, so this reorders hops without
+// changing which pools are tried in what order. Ref-equal return means no-op (edge arrow), so the
+// caller can skip persisting an untouched chain.
+export function moveHopGroup(chain: FailoverHop[], key: string, dir: 'up' | 'down', identityOf: (account: string) => string): FailoverHop[] {
+  const groups = chainGroups(chain, identityOf)
+  const i = groups.findIndex(g => g.hops.some(h => hopKey(h) === key))
+  if (i === -1) return chain
+  const j = dir === 'up' ? i - 1 : i + 1
+  if (j < 0 || j >= groups.length) return chain
+  ;[groups[i], groups[j]] = [groups[j]!, groups[i]!]
+  return groups.flatMap(g => g.hops)
+}
+
 // Pure reorder by one position; bounds-safe (no-op at either edge). Returns a new array.
 export function moveHop(chain: FailoverHop[], key: string, dir: 'up' | 'down'): FailoverHop[] {
   const i = chain.findIndex(h => hopKey(h) === key)

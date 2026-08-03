@@ -27,7 +27,8 @@ import { claimInstance } from './instance-lock.ts'
 // /usr/bin/tmux right there — so its pane scan returns 0 panes forever and the whole fleet reads
 // down. That is the 2026-07-30 outage, twice. See common.ts's anchorCwd.
 anchorCwd('daemon')
-import { activeFailoverChain, hopKey, resolveChain, pickNextHop, moveHop } from './failover-chain.ts'
+import { activeFailoverChain, chainGroups, hopKey, resolveChain, pickNextHop, moveHop, moveHopGroup } from './failover-chain.ts'
+import { accountRemovalPlan, readAccountIdentity } from './account-identity.ts'
 
 // Code fingerprint captured at startup; sent to shims so they can detect and
 // replace a daemon left running stale code after a plugin upgrade.
@@ -10557,6 +10558,29 @@ function failoverChain(): FailoverHop[] {
   return resolveChain(loadAccess().failoverChain ?? [], listAccounts().map(a => a.name), codexAvailable(), Object.keys(loadHarnessGateways()))
 }
 
+// Which SUBSCRIPTION a registered config dir belongs to — the grouping key every "accounts" list
+// uses (account-identity.ts). An unregistered or unreadable dir keys on its own name, so a missing
+// oauthAccount can only ever split a row, never merge two.
+function accountIdentityOf(name: string): { key: string; label: string | null } {
+  const acct = accountByName(name)
+  if (!acct) return { key: `claude:${name}`, label: null }
+  const id = readAccountIdentity(acct.configDir)
+  return { key: id.key, label: id.email ? id.label : null }
+}
+const accountGroupKey = (name: string): string => accountIdentityOf(name).key
+// The row a hop belongs to, and the hops behind a row. `chainGroups` is the single definition of
+// both, so the panel's ↑/↓, 🚀 and 🗑 always speak for exactly what the row shows.
+function hopGroupFor(chain: FailoverHop[], key: string): FailoverHop[] {
+  return chainGroups(chain, accountGroupKey).find(g => g.hops.some(h => hopKey(h) === key))?.hops ?? []
+}
+// What a Claude row is CALLED: the subscription (suchag@gmail.com · Max 20x) when the login is
+// readable, else the config dir's registered name — never a list of profiles, which is the thing
+// this row exists to stop showing.
+function accountRowLabel(hops: FailoverHop[]): string {
+  const first = hops[0]?.account || ''
+  return accountIdentityOf(first).label || first
+}
+
 // ➕ 🌐 sub-panel: pick a popular provider (base URL + model pre-filled → straight to the key) or
 // Custom (free-text name/baseUrl/model). A provider already configured is marked so a re-tap reads
 // as "update the key", not a surprise overwrite. Opened from the unified Accounts panel (👤).
@@ -11153,6 +11177,21 @@ function setRoleHarness(role: SessionRole, profile: HarnessProfile): void {
 // per-session stamped harness), not the role default. Null when no lane is running. This is the
 // difference between a panel that tells the truth ("chat runs on local-codex") and one that
 // reports a pref the running lane doesn't use.
+// Config dirs a live chat lane is running on. 🗒 removal skips these: an account row can stand for
+// several profiles, and unregistering the one the owner is talking to right now would be a silent
+// amputation. A failed pane read yields nothing, so the guard errs toward protecting less than it
+// should — which is why `main` is protected unconditionally alongside it.
+async function chatLaneAccountNames(): Promise<string[]> {
+  const names = new Set<string>()
+  for (const lane of listDmChatSessions()) {
+    const pane = await paneForSession(lane.sessionId).catch(() => null)
+    if (!pane) continue
+    const acct = await paneAccount(pane).catch(() => null)
+    if (acct) names.add(acct.name)
+  }
+  return [...names]
+}
+
 async function liveChatLaneHarness(): Promise<HarnessProfile | null> {
   for (const lane of listDmChatSessions()) {
     const pane = await paneForSession(lane.sessionId).catch(() => null)
@@ -11492,19 +11531,24 @@ async function accountsPanelText(): Promise<string> {
   const focusedAcct = await paneAccount(focus.activePaneId)
   const a = loadAccess()
   const gateways = loadHarnessGateways()
-  const lines = failoverChain().map((h, i) => {
+  // One row per ACCOUNT, not per config dir: two profiles signed into one subscription are one
+  // entry (account-identity.ts). The row names the account; its config dirs are an implementation
+  // detail nobody manages from here.
+  const lines = chainGroups(failoverChain(), accountGroupKey).map((group, i) => {
+    const h = group.hops[0]!
     if (h.kind === 'codex') return `${i + 1}. ✳️ Codex`
     if (h.kind === 'gateway') {
       const def = gateways[h.name!]
       return `${i + 1}. 🌐 <b>${escapeHtml(h.name!)}</b> — <code>${escapeHtml(def ? def.model.replace(/\[1m\]$/, '') : '?')}</code>` +
         `${gatewayConfiguredAndKeyed(h.name!) ? '' : ' · ⚠️ no key'}`
     }
-    const acct = accountByName(h.account!)
+    const accts = group.hops.map(x => accountByName(x.account!)).filter((x): x is Account => !!x)
+    const acct = accts[0]
     const snap = acct ? readUsageSnapshot(undefined, acct) : null
     const pct = snap?.fiveHour ? ` · ${Math.round(snap.fiveHour.pct)}% of 5h` : ''
-    const login = acct && !accountLoggedIn(acct) ? ' · ⚠️ not logged in' : ''
-    const focused = acct && acct.name === focusedAcct.name && focus.activePaneId ? ' ← focused session' : ''
-    return `${i + 1}. 👤 <b>${escapeHtml(h.account!)}</b> — <code>${escapeHtml(acct ? acct.configDir : '?')}</code>${pct}${login}${focused}`
+    const login = accts.length && !accts.some(accountLoggedIn) ? ' · ⚠️ not logged in' : ''
+    const focused = accts.some(x => x.name === focusedAcct.name) && focus.activePaneId ? ' ← focused session' : ''
+    return `${i + 1}. 👤 <b>${escapeHtml(accountRowLabel(group.hops))}</b>${pct}${login}${focused}`
   })
   // Codex model/effort — shown only when Codex is set up; governs failover-to-Codex AND every Codex
   // session. Names the CODEX_MODEL env as the source when no in-app choice is set, so it's discoverable.
@@ -11520,22 +11564,30 @@ async function accountsPanelText(): Promise<string> {
   return `👤 <b>Accounts &amp; failover</b> — failover <b>${a.limitFailover === true ? 'on' : 'off'}</b>\n\n` +
     `${rolePanelLine('lane', await liveChatLaneHarness().catch(() => null), resolveRoleHarness(a.chatHarness), gateways)}\n` +
     `${rolePanelLine('coding', null, resolveRoleHarness(a.codeHarness), gateways)}\n\n` +
-    `A usage-limited session tries these in turn — ↑/↓ reorders:\n\n${lines.join('\n')}${codexCfg}\n\n` +
-    `🚀 starts a session on an account${isTopicMode() ? ' (it gets its own topic)' : ''} — a first-time account asks you to log in once; the sign-in link relays here.\n` +
-    `➕ 👤 adds an account (its own config dir <code>~/.claude-&lt;name&gt;</code>). 🌐 providers are any Anthropic-compatible API — presets (MiniMax · DeepSeek · GLM) or Custom (<code>name baseUrl model</code>); ✏️ edits a provider's model, 🔑 re-keys it.`
+    // No instructions block: the buttons are self-describing and the paragraph that used to sit
+    // here pushed the list itself off the first screen. Removed on the owner's instruction.
+    `${lines.join('\n')}${codexCfg}`
 }
 function accountsPanelKeyboard(): InlineKeyboard {
   const a = loadAccess()
   const kb = new InlineKeyboard()
   kb.text(a.limitFailover === true ? '🔀 On' : '💤 Off', 'fo:toggle').row()
   kb.text('💬 Chat', 'rp:chat').text('🧑‍💻 Coding', 'rp:code').row()
-  for (const h of failoverChain()) {
+  // Row per account group; the group's FIRST hop is its representative, so callback data stays a
+  // plain hopKey and ↑/↓/🚀/🗑 all address the same thing the row shows.
+  for (const group of chainGroups(failoverChain(), accountGroupKey)) {
+    const h = group.hops[0]!
     const key = hopKey(h)
-    const label = h.kind === 'codex' ? '✳️ Codex' : h.kind === 'gateway' ? `🌐 ${h.name}` : `👤 ${h.account}`
+    const label = h.kind === 'codex' ? '✳️ Codex' : h.kind === 'gateway' ? `🌐 ${h.name}` : `👤 ${accountRowLabel(group.hops)}`
     kb.text('↑', `fo:up:${key}`).text('↓', `fo:down:${key}`).text(label, 'fo:noop')
     if (h.kind === 'claude') {
+      // 🚀 launches on the group's representative config dir — for the shared account that is
+      // `main`, deliberately: it is the dir the coding fleet already runs on. A specific profile is
+      // still reachable with `tg spawn --account <name>` / `cc-bridge <slot> <name>`.
       kb.text('🚀', `acct:launch:${h.account}`)
-      if (h.account !== 'main') kb.text('🗑', `acct:rm:${h.account}`)
+      // 🗑 unregisters every config dir behind the row, so it goes through a confirm that names them
+      // — and `main` is never removable, which also protects any group containing it.
+      if (!group.hops.some(x => x.account === 'main')) kb.text('🗑', `acct:rmg:${h.account}`)
     } else if (h.kind === 'gateway') {
       kb.text('✏️', `gw:model:${h.name}`).text('🔑', `gw:key:${h.name}`).text('🗑', `gw:rm:${h.name}`)
     }
@@ -12422,7 +12474,9 @@ bot.on('callback_query:data', async ctx => {
     } else {
       const key = foMatch[2] ?? foMatch[3]!
       const resolved = resolveChain(a.failoverChain ?? [], listAccounts().map(x => x.name), codexAvailable(), Object.keys(loadHarnessGateways()))
-      const moved = moveHop(resolved, key, foMatch[1]!.startsWith('up:') ? 'up' : 'down')
+      // Moves a GROUP: the panel's rows are accounts, so ↑ past a two-profile account must clear
+      // both of its hops, not land between them.
+      const moved = moveHopGroup(resolved, key, foMatch[1]!.startsWith('up:') ? 'up' : 'down', accountGroupKey)
       // A no-op move (↑ on the first hop / ↓ on the last) returns the input unchanged (ref-equal) —
       // don't persist then, or an untouched chain gets baked just for tapping an edge arrow.
       if (moved !== resolved) { a.failoverChain = moved; saveAccess(a) }
@@ -12519,7 +12573,7 @@ bot.on('callback_query:data', async ctx => {
   }
 
   // Accounts sub-panel (settings → 👤 Accounts, or the /account command's buttons).
-  const acctMatch = /^acct:(panel|back|add|rm:([A-Za-z0-9_-]+)|launch:([A-Za-z0-9_-]+))$/.exec(data)
+  const acctMatch = /^acct:(panel|back|add|rmg:([A-Za-z0-9_-]+)|rmgo:([A-Za-z0-9_-]+)|launch:([A-Za-z0-9_-]+))$/.exec(data)
   if (acctMatch) {
     if (!(await cbAuth(ctx))) return
     if (acctMatch[1] === 'back') {
@@ -12538,11 +12592,38 @@ bot.on('callback_query:data', async ctx => {
       if (sent) replyTargets.set(refKey(sent), { kind: 'acctname', thread })
       return
     }
-    if (acctMatch[3]) {
+    // 🗑 on an account row: it can stand for more than one config dir, so nothing is unregistered
+    // until a confirm names every dir that goes — and the chat lane's own dir never goes at all.
+    if (acctMatch[2] || acctMatch[3]) {
+      const rep = (acctMatch[2] || acctMatch[3])!
+      const members = hopGroupFor(failoverChain(), `claude:${rep}`).map(h => h.account!).filter(Boolean)
+      const { doomed, kept } = accountRemovalPlan(members, ['main', ...(await chatLaneAccountNames())])
+      if (!doomed.length) {
+        await ctx.answerCallbackQuery({ text: 'Nothing to remove — every profile behind this account is in use.' }).catch(() => {})
+        return
+      }
+      if (acctMatch[2]) {
+        await ctx.answerCallbackQuery().catch(() => {})
+        const list = doomed.map(n => `• <b>${escapeHtml(n)}</b> — <code>${escapeHtml(accountByName(n)?.configDir ?? '?')}</code>`).join('\n')
+        const keptNote = kept.length
+          ? `\n\nKept (in use by the chat lane or the default account): ${kept.map(n => `<b>${escapeHtml(n)}</b>`).join(', ')}`
+          : ''
+        await showHtmlPanel(ctx, 'edit',
+          `🗑 <b>Remove ${escapeHtml(accountRowLabel(hopGroupFor(failoverChain(), `claude:${rep}`)))}?</b>\n\n` +
+          `Unregisters these config dirs (files on disk are kept):\n${list}${keptNote}`,
+          new InlineKeyboard().text('🗑 Remove', `acct:rmgo:${rep}`).text('‹ Cancel', 'acct:panel'))
+        return
+      }
+      for (const n of doomed) removeAccount(n)
+      await ctx.answerCallbackQuery({ text: `Unregistered: ${doomed.join(', ')} (files kept).` }).catch(() => {})
+      await showHtmlPanel(ctx, 'edit', await accountsPanelText(), accountsPanelKeyboard())
+      return
+    }
+    if (acctMatch[4]) {
       // 🚀 Launch a session on this account — the from-Telegram path (the terminal is launch-once;
       // claude-tg 1 <name> stays as the terminal equivalent). Spawned in the focused session's
       // folder (else $HOME); a first-time account hits the login screen, whose URL relays here.
-      const acct = accountByName(acctMatch[3])
+      const acct = accountByName(acctMatch[4])
       if (!acct) { await ctx.answerCallbackQuery({ text: 'Unknown account.' }).catch(() => {}); return }
       const dir = (focus.activePaneId ? await paneCwd(focus.activePaneId).catch(() => null) : null) ?? homedir()
       await ctx.answerCallbackQuery({ text: `Starting a ${acct.name} session…` }).catch(() => {})
@@ -12556,12 +12637,7 @@ bot.on('callback_query:data', async ctx => {
       await channel.sendText(String(ctx.chat!.id), note, { ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
       return
     }
-    if (acctMatch[2]) {
-      const removed = removeAccount(acctMatch[2])
-      await ctx.answerCallbackQuery({ text: removed ? `Account "${acctMatch[2]}" unregistered (files kept).` : 'Already gone.' }).catch(() => {})
-    } else {
-      await ctx.answerCallbackQuery().catch(() => {})
-    }
+    await ctx.answerCallbackQuery().catch(() => {})
     await showHtmlPanel(ctx, 'edit', await accountsPanelText(), accountsPanelKeyboard())
     return
   }
@@ -16838,6 +16914,7 @@ async function webappReadProviderAccounts(role: SessionRole = 'code'): Promise<P
     gateways, gatewayReady: Object.fromEntries(Object.keys(gateways).map(name => [name, gatewayConfiguredAndKeyed(name)])),
     chain, activeCount: savedActiveCount, chatDefault: legacyRoleAccountId('chat'), codeDefault: legacyRoleAccountId('code'),
     models: Object.fromEntries(discovered), auto: prefs.limitFailover === true,
+    identityOf: accountIdentityOf,
   })
 }
 
@@ -16951,18 +17028,23 @@ async function webappProviderAccountAction(userId: string, action: Record<string
   const chainRole: SessionRole = action.role === 'chat' ? 'chat' : 'code'
   const roleChain = chainRole === 'chat' ? (prefs.chatFailoverChain ?? prefs.failoverChain ?? []) : (prefs.codeFailoverChain ?? prefs.failoverChain ?? [])
   const chain = resolveChain(roleChain, listAccounts().map(a => a.name), codexAvailable(), Object.keys(gateways)).filter(hop => hop.kind !== 'codex')
+  const groups = chainGroups(chain, accountGroupKey)
   if (kind === 'move') {
     const id = String(action.id ?? '')
     const dir = action.dir === 'up' ? 'up' : action.dir === 'down' ? 'down' : null
     if (!dir || !chain.some(h => hopKey(h) === id)) return { error: 'bad account or direction' }
-    const moved = moveHop(chain, id, dir)
+    const moved = moveHopGroup(chain, id, dir, accountGroupKey)
     if (chainRole === 'chat') prefs.chatFailoverChain = moved; else prefs.codeFailoverChain = moved
     saveAccess(prefs); return { ok: true }
   }
   if (kind === 'active-count') {
+    // The Mini App counts the ROWS it renders (accounts); the stored count is hops, because that is
+    // what activeFailoverChain slices. Translate rather than restore — changing what the stored
+    // number means would change failover, not just its projection.
     const count = Number(action.count)
-    if (!Number.isInteger(count) || count < 0 || count > chain.length) return { error: 'bad active count' }
-    if (chainRole === 'chat') prefs.chatFailoverActiveCount = count; else prefs.codeFailoverActiveCount = count
+    if (!Number.isInteger(count) || count < 0 || count > groups.length) return { error: 'bad active count' }
+    const hops = groups.slice(0, count).reduce((n, g) => n + g.hops.length, 0)
+    if (chainRole === 'chat') prefs.chatFailoverActiveCount = hops; else prefs.codeFailoverActiveCount = hops
     saveAccess(prefs); return { ok: true }
   }
   if (kind === 'auto') {

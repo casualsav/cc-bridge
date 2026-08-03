@@ -1,7 +1,7 @@
 import type { FailoverHop } from './common.ts'
 import type { GatewayDefinition, GatewayProvider } from './harness-gateway.ts'
 import type { GatewayHarnessProfile } from './harness-gateway.ts'
-import { hopKey } from './failover-chain.ts'
+import { chainGroups, hopKey } from './failover-chain.ts'
 export { activeFailoverChain } from './failover-chain.ts'
 
 export type ProviderId = 'claude' | 'openai' | 'gemini' | 'deepseek' | 'custom'
@@ -55,6 +55,9 @@ export type ProviderAccountView = {
   order: number
   model: string | null
   models: string[]
+  // Config dirs this row stands for. One entry for every row except a Claude account reached through
+  // more than one config dir, where the row is the account and this names the profiles behind it.
+  members: string[]
 }
 
 export type ProviderAccountsView = {
@@ -75,6 +78,9 @@ type ProjectionInput = {
   codeDefault?: string | null
   models?: Record<string, string[] | null | undefined>
   auto?: boolean
+  // The subscription behind a config dir (account-identity.ts). Config dirs sharing a key collapse
+  // to one row. Absent → every config dir is its own row, i.e. the pre-grouping behaviour.
+  identityOf?: (accountName: string) => { key: string; label?: string | null } | null
 }
 
 export function projectProviderAccounts(input: ProjectionInput): ProviderAccountsView {
@@ -82,11 +88,24 @@ export function projectProviderAccounts(input: ProjectionInput): ProviderAccount
     ? input.chain.length
     : Math.max(0, Math.min(input.chain.length, Math.trunc(input.activeCount)))
   const claude = new Map(input.claudeAccounts.map(a => [a.name, a]))
-  const accounts = input.chain.flatMap((hop, chainIndex): ProviderAccountView[] => {
+  const identityOf = input.identityOf
+  // Grouping is keyed the same way for every consumer, so the panel, the Mini App and `tg readout
+  // providers` cannot disagree about what counts as one account.
+  const groupKey = (name: string): string => identityOf?.(name)?.key ?? `claude:${name}`
+  const chainIndexOf = new Map(input.chain.map((hop, i) => [hop, i] as const))
+  const accounts = chainGroups(input.chain, groupKey).flatMap((group): ProviderAccountView[] => {
+    const hop = group.hops[0]!
+    const chainIndex = chainIndexOf.get(hop) ?? 0
     if (hop.kind === 'claude') {
-      const item = claude.get(hop.account || '')
-      if (!item) return []
-      return [{ id: hopKey(hop), provider: 'claude', providerLabel: 'Claude native', label: `Claude · ${item.name}`, auth: 'native', authLabel: 'Native login', ready: item.ready, active: chainIndex < activeBoundary, order: 0, model: null, models: ['opus', 'fable', 'sonnet', 'haiku'] }]
+      const members = group.hops.map(h => claude.get(h.account || '')).filter((x): x is { name: string; ready: boolean } => !!x)
+      if (!members.length) return []
+      const label = (members.length > 1 ? identityOf?.(members[0]!.name)?.label : null) || `Claude · ${members[0]!.name}`
+      return [{
+        id: hopKey(hop), provider: 'claude', providerLabel: 'Claude native', label, auth: 'native', authLabel: 'Native login',
+        // Usable if any config dir behind it is signed in — the row is the subscription, not the dir.
+        ready: members.some(m => m.ready), active: chainIndex < activeBoundary, order: 0, model: null,
+        models: ['opus', 'fable', 'sonnet', 'haiku'], members: members.map(m => m.name),
+      }]
     }
     if (hop.kind !== 'gateway') return []
     const name = hop.name || ''
@@ -100,11 +119,18 @@ export function projectProviderAccounts(input: ProjectionInput): ProviderAccount
       ready: input.gatewayReady[name] === true,
       active: chainIndex < activeBoundary, order: 0, model: def.model.replace(/\[1m\]$/, ''),
       models: [...new Set((input.models?.[name] ?? [def.model]).map(x => x.replace(/\[1m\]$/, '')))],
+      members: [name],
     }]
   }).map((account, order) => ({ ...account, order }))
   const activeCount = accounts.filter(account => account.active).length
   const fallback = accounts[0]?.id ?? 'claude:main'
-  return { accounts, activeCount, defaults: { chat: input.chatDefault || fallback, code: input.codeDefault || fallback }, catalog: PROVIDER_CATALOG, auto: input.auto === true }
+  // A role default still points at a CONFIG DIR (`claude:chat`); the row it belongs to is now the
+  // account. Resolve it to that row's id or the Chat/Coding buttons lose their selected state — the
+  // stored value is untouched, only what the surfaces highlight.
+  const rowOf = new Map(input.chain.map(hop => [hopKey(hop), hop.kind === 'claude' ? groupKey(hop.account || '') : hopKey(hop)] as const))
+  const byGroup = new Map(chainGroups(input.chain, groupKey).map(g => [g.key, hopKey(g.hops[0]!)] as const))
+  const toRow = (id: string | null | undefined): string => (id && byGroup.get(rowOf.get(id) ?? '')) || id || fallback
+  return { accounts, activeCount, defaults: { chat: toRow(input.chatDefault), code: toRow(input.codeDefault) }, catalog: PROVIDER_CATALOG, auto: input.auto === true }
 }
 
 export type ProviderRoute = { account?: string; harness?: GatewayHarnessProfile }
