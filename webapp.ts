@@ -130,6 +130,10 @@ export interface SessionCard {
   errorStatus?: number | null
   model: string | null; effort: string | null; mode: string | null
   ctxPct: number | null; h5Pct: number | null; branch: string | null
+  // The window `ctxPct` is a fraction of ("1000k" / "200k"), so a percentage is never ambiguous between
+  // a 200k worker and a 1M session — the same 31% is 62k tokens or 310k. Optional/nullable: an older
+  // daemon and every pre-existing card literal omit it, and the client just renders the bare percentage.
+  ctxWindow?: string | null
   tier: string | null   // 'max' / 'pro' / … from the launch-banner sample (daemon.ts paneTiers); null when never sampled
 }
 // 'model'/'effort' carry the chosen alias/level in `text` — the mini app's dial picker, applied to

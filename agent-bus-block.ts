@@ -165,7 +165,9 @@ export function closureNoticeText(target: string, items: { id: number; text: str
 // Each agent may carry a context-window % (agent-bus §7): Claude panes report one, Hermes one-shots
 // don't → 🟢<70 / 🟡<90 / 🔴≥90 prefix; agents with no % render name-only. Clamp widened to 110 so
 // several agents' pcts survive (a per-agent `🟢 name 45%` cell blows the old 72 at 3+ agents).
-export type RosterAgent = { name: string; ctxPct?: number | null; subagents?: number }
+// `ctxWindow` ("1000k" / "200k") rides with the percentage because the orchestrator makes compact
+// decisions off this line, and 45% of a 200k worker is not 45% of a 1M session. Absent → bare percentage.
+export type RosterAgent = { name: string; ctxPct?: number | null; ctxWindow?: string | null; subagents?: number }
 export function formatRosterLine(agents: RosterAgent[]): string | null {
   if (agents.length <= 1) return null
   const cell = (a: RosterAgent) => {
@@ -173,7 +175,7 @@ export function formatRosterLine(agents: RosterAgent[]): string | null {
     const subs = n > 0 ? ` · ${n} subagent${n === 1 ? '' : 's'} live` : ''
     if (a.ctxPct == null) return a.name + subs
     const glyph = a.ctxPct < 70 ? '🟢' : a.ctxPct < 90 ? '🟡' : '🔴'
-    return `${glyph} ${a.name} ${a.ctxPct}%${subs}`
+    return `${glyph} ${a.name} ${a.ctxPct}%${a.ctxWindow ? `/${a.ctxWindow}` : ''}${subs}`
   }
   const raw = `☎️ ${agents.map(cell).join(' · ')}`
   const clamped = [...raw].length > 110 ? clampChars(raw, 109) + '…' : raw

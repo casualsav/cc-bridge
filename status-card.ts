@@ -12,6 +12,7 @@ import { STATE_DIR, readJsonFile, writeJsonFile } from './common.ts'
 import { exec } from './proc.ts'
 import { escapeHtml, clampChars } from './markdown.ts'
 import { parseStatusline, pinBar, type StatuslineData } from './statusline.ts'
+import { lastContextTokens } from './transcript.ts'
 import { capturePane, paneCwd } from './pane-io.ts'
 import { focus, isChatUnreachable, markChatUnreachableIfUndeliverable } from './state.ts'
 import { asLowPriority } from './throttle.ts'
@@ -314,17 +315,81 @@ const CARD_RULE = '────────────────────�
 export function mergeStatus(fresh: StatuslineData | null, prev: StatuslineData | undefined): StatuslineData | null {
   if (!fresh) return prev ?? null
   if (!prev) return fresh
+  const ctxPct = guardCtxSpike(fresh, prev)
   return {
-    ctxPct: fresh.ctxPct ?? prev.ctxPct, tokens: fresh.tokens ?? prev.tokens, cost: fresh.cost ?? prev.cost,
+    ctxPct, tokens: fresh.tokens ?? prev.tokens, cost: fresh.cost ?? prev.cost,
+    ctxWindow: fresh.ctxWindow ?? prev.ctxWindow,
     sessionTime: fresh.sessionTime ?? prev.sessionTime, apiTime: fresh.apiTime ?? prev.apiTime,
     h5: fresh.h5 ?? prev.h5, d7: fresh.d7 ?? prev.d7,
     effort: fresh.effort ?? prev.effort, think: fresh.think, model: fresh.model ?? prev.model,
+    // Set only on the read we rejected, so the NEXT read is accepted whatever it says (below).
+    ...(fresh.ctxPct != null && ctxPct !== fresh.ctxPct ? { ctxSpike: true } : {}),
   }
+}
+
+// Belt-and-braces against the multi-iteration artefact (transcript.ts's lastContextTokens is the actual
+// fix; this covers panes whose transcript can't be read). A statusline whose context % suddenly DOUBLES
+// is reporting a per-request total, not context growth — a turn cannot double its own prompt in one
+// tool round. So the doubling read is rejected once and the previous value held.
+//
+// REJECT ONCE, NEVER SMOOTH. `ctxSpike` marks the rejection, and a read following a rejection is taken
+// verbatim however large it is: a genuine jump (a huge paste, a /resume onto a fuller conversation) is
+// then at most one render late, while an artefact — which lasts exactly as long as the request that
+// produced it — is gone by then. A guard that kept rejecting would turn one wrong number into a stuck
+// one, which is the failure this repo has already paid for once with a frozen post-/clear context %.
+const CTX_SPIKE_FACTOR = 2
+const CTX_SPIKE_FLOOR = 3   // below this, doubling is 1%→2% noise and nothing is worth guarding
+function guardCtxSpike(fresh: StatuslineData, prev: StatuslineData): number | null {
+  if (fresh.ctxPct == null) return prev.ctxPct
+  if (prev.ctxSpike) return fresh.ctxPct          // the previous read was already the rejection — take this one
+  if (prev.ctxPct == null || prev.ctxPct < CTX_SPIKE_FLOOR) return fresh.ctxPct
+  return fresh.ctxPct >= prev.ctxPct * CTX_SPIKE_FACTOR ? prev.ctxPct : fresh.ctxPct
+}
+
+// The context % a surface should show for a pane: derived from the transcript when that is possible,
+// the statusline's own only when it isn't. `file` is the pane's transcript (null when unresolved) and
+// the window comes from the statusline's `ctx N%/1000k` — we need the denominator the CLI used, and the
+// statusline is the only thing that states it. Both must be present, since a numerator without its
+// denominator is not a percentage.
+export function contextPct(sl: StatuslineData | null, file: string | null): number | null {
+  const window = ctxWindowTokens(sl?.ctxWindow ?? null)
+  if (file && window) {
+    const tokens = lastContextTokens(file)
+    if (tokens != null) return Math.min(100, Math.round((tokens / window) * 100))
+  }
+  return sl?.ctxPct ?? null
+}
+
+// "1000k" / "200k" → tokens. null for anything else, which sends the caller back to the scraped %.
+export function ctxWindowTokens(w: string | null): number | null {
+  const m = w?.match(/^(\d+)([km])$/i)
+  if (!m) return null
+  return parseInt(m[1], 10) * (m[2].toLowerCase() === 'm' ? 1_000_000 : 1_000)
 }
 
 // Drop a pane's cached status/mode so the next render reflects reality immediately rather than
 // backfilling from a now-wrong snapshot. Called on an explicit reset (/clear, /new): context/cost
 // legitimately jump, and we don't want the last-good caches to paper over the change for a tick.
+// Drop cached status for panes that no longer exist. The map is keyed by tmux pane id and nothing ever
+// removed a dead one, so it accumulated forever — 64 entries on this box, most of them sessions that
+// ended on a model two releases old.
+//
+// POSITIVE EVIDENCE ONLY: `live` must be a CONCLUSIVE pane scan. A failed tmux read returns no panes and
+// is not evidence that the machine is empty — the daemon's own rule (findOffMcpPanes returns null rather
+// than []), and the reason this takes a list instead of asking tmux itself. An empty list prunes nothing.
+export function prunePaneStatus(live: string[]): number {
+  if (!live.length) return 0
+  const keep = new Set(live)
+  let dropped = 0
+  for (const paneId of [...lastGoodStatus.keys()]) {
+    if (keep.has(paneId)) continue
+    lastGoodStatus.delete(paneId); lastGoodMode.delete(paneId); modeDefaultStreak.delete(paneId)
+    dropped++
+  }
+  if (dropped) paneStatusDirty = true
+  return dropped
+}
+
 export function invalidatePaneStatus(paneId: string): void {
   lastGoodStatus.delete(paneId); lastGoodMode.delete(paneId); modeDefaultStreak.delete(paneId)
   paneStatusDirty = true   // persist the drop too, so a restart right after /clear doesn't reload the stale snapshot
@@ -371,15 +436,28 @@ export async function statusCardText(paneId: string | null): Promise<string> {
     if (status && (status.effort || status.ctxPct != null)) { lastGoodStatus.set(paneId, status); paneStatusDirty = true }
   } catch { status = lastGoodStatus.get(paneId) ?? null }   // capture failed → reuse the last-good snapshot instead of blanking the head (which slides the 📁 folder into the pin banner)
   let todos: TodoState | null = null
+  let tfile: string | null = null
   try {
     cwd = await paneCwd(paneId)
-    const file = await deps.transcriptForPane(paneId, cwd)
+    const file = tfile = await deps.transcriptForPane(paneId, cwd)
     // Prefer the transcript's model, then the LIVE statusline model (parseStatusline already lifted
     // it from the pane footer), then the prior value. The statusline fallback is what stops an idle,
     // non-focused session from rendering "🧠 —" when its transcript file can't be resolved.
     model = (file && prettyModel(lastModelInTranscript(file))) || prettyModel(status?.model ?? null) || model
     if (file) todos = lastTodosInTranscript(file)
   } catch {}
+  // The context % is re-derived from the transcript once it's resolved, and the corrected value goes
+  // BACK into lastGoodStatus — that map is what `paneStatus()` serves to the agent-bus roster, and the
+  // orchestrator makes compact/clear decisions off those numbers. Fixing only the card would have left
+  // the roster reading the artefact (see transcript.ts's lastContextTokens).
+  if (status) {
+    const derived = contextPct(status, tfile)
+    if (derived !== status.ctxPct) {
+      status = { ...status, ctxPct: derived }
+      lastGoodStatus.set(paneId, status)
+      paneStatusDirty = true
+    }
+  }
   const branch = cwd ? await gitBranch(cwd) : null
 
   // Account-level 5h/7d override: an idle pane's statusline never re-renders, so its scraped

@@ -2650,7 +2650,10 @@ async function renderSessions() {
     // un-branched in the same commit — a surface keeping the old shape reads as a different session.
     const foot =
       (s.branch ? "<span>🌿 " + esc(s.branch) + "</span>" : "") +
-      (s.ctxPct != null ? "<span>ctx " + s.ctxPct + "%</span>" + pctBar(s.ctxPct) : "");
+      // The window rides with the percentage ("ctx 31%/1000k"): 31% of a 200k worker and 31% of a 1M
+      // session are different amounts of room left, and the bare number cannot tell them apart. Omitted
+      // when the daemon didn't send one, so the row degrades to what it has always shown.
+      (s.ctxPct != null ? "<span>ctx " + s.ctxPct + "%" + (s.ctxWindow ? "/" + esc(s.ctxWindow) : "") + "</span>" + pctBar(s.ctxPct) : "");
     c.innerHTML =
       // title, because the name ellipsizes: a long one is still readable on a long press, and the
       // chat header carries it in full the moment the card is opened.

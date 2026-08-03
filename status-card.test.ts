@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { prettyModel, lastModelInTranscript, lastTodosInTranscript, modeBadge, pinMessageGone, statusKeyboard, mergeStatus, codexModelFromPane, codexPrettyModel, codexStatusHead, parseCodexStatusline } from './status-card.ts'
 import type { StatuslineData } from './statusline.ts'
-import { initStatusCard, updateSessionPin, paneForDmChat, forgetChatPin, armChatPin, repinIfDropped, sessionPins, pinTextCache, changesPaneContext } from './status-card.ts'
+import { initStatusCard, updateSessionPin, paneForDmChat, forgetChatPin, armChatPin, repinIfDropped, sessionPins, pinTextCache, changesPaneContext, prunePaneStatus } from './status-card.ts'
 import { ACCESS_FILE } from './common.ts'
 import { loadAccess } from './access.ts'
 import { focus, markChatReachable, markChatUnreachableIfUndeliverable, isChatUnreachable } from './state.ts'
@@ -474,6 +474,24 @@ test('changesPaneContext stays out of the way of commands that keep the conversa
                      '/rewrite', '/newsletter', '/compacting-is-not-a-command']) {
     expect(changesPaneContext(cmd)).toBe(false)
   }
+})
+
+// The cached-status map is keyed by tmux pane id and nothing removed a dead one, so it grew forever
+// (64 entries on the owner's box, most from sessions that ended two model releases ago). Pruning it is
+// only safe on POSITIVE evidence: a failed tmux read returns no panes and looks exactly like an empty
+// machine, so an empty list must prune nothing — the same rule findOffMcpPanes encodes by returning null.
+test('an empty pane list prunes nothing — a failed scan is not evidence of absence', () => {
+  expect(prunePaneStatus([])).toBe(0)
+})
+
+// Structural guard: the prune must be fed from the ONE scan that has already passed the null check.
+// Calling it anywhere else re-opens the "blindness becomes state loss" class this repo has paid for.
+test('the prune is fed by the conclusive pane scan, past its null guard', () => {
+  const daemon = readFileSync(join(import.meta.dir, 'daemon.ts'), 'utf8')
+  const discover = /async function discoverPanes\(\)[\s\S]*?\n}/.exec(daemon)?.[0] ?? ''
+  expect(discover).toContain('prunePaneStatus(panes)')
+  // …and after the guard that returns when the scan failed, never before it.
+  expect(discover.indexOf('if (panes === null)')).toBeLessThan(discover.indexOf('prunePaneStatus(panes)'))
 })
 
 // Structural guard: the invalidation must stay at the shared injection site. Moving it back into a

@@ -9,6 +9,7 @@ import { stripAnsi } from './prompt.ts'
 export type StatuslineData = {
   ctxPct: number | null
   ctxWindow?: string | null   // the window ctxPct is a fraction of, e.g. "1000k" / "200k" (optional: pre-existing literals predate it)
+  ctxSpike?: boolean          // this reading's ctxPct was REJECTED as a per-request-total artefact (status-card's guardCtxSpike); the next read is taken verbatim
   tokens: string | null
   cost: string | null
   sessionTime: string | null

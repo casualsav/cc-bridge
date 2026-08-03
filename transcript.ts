@@ -13,7 +13,9 @@ import { normalizeCommandOutput } from './ansi.ts'
 export const DEFAULT_PROJECTS_DIR = join(homedir(), '.claude', 'projects')
 const PROJECTS_DIR = DEFAULT_PROJECTS_DIR
 
-type Usage = { input_tokens?: number; output_tokens?: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number }
+// `iterations` is the per-inference breakdown of ONE request. The top-level fields are the request's
+// TOTAL across those iterations — see lastContextTokens for why that distinction is the whole point.
+type Usage = { input_tokens?: number; output_tokens?: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number; iterations?: Usage[] }
 type Entry = { type?: string; subtype?: string; operation?: string; content?: unknown; uuid?: string; timestamp?: string; cwd?: string; isSidechain?: boolean; isMeta?: boolean; error?: string; isApiErrorMessage?: boolean; apiErrorStatus?: number; message?: { content?: unknown; stop_reason?: string | null; usage?: Usage; model?: string } }
 
 // Text content of an entry: a bare string, or the joined `text` blocks of a content
@@ -880,6 +882,33 @@ export function currentTurnTokens(file: string): { output: number; context: numb
     context = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0)
   }
   return { output, context }
+}
+
+// How full the context was at the session's LAST inference, in prompt tokens — the numerator of the
+// context %, read from the transcript instead of trusting the statusline's own.
+//
+// THE TOP-LEVEL USAGE OF A MULTI-ITERATION REQUEST IS A PER-REQUEST TOTAL, NOT A CONTEXT SIZE. When one
+// request runs several inference iterations — a server-side tool call and the continuation after its
+// result — the top-level fields are their SUM, so the same context is counted once per iteration.
+// Measured in this repo's own session on 2026-08-03: iterations of 98,287 and 99,651 cache-read summed
+// to a top-level 197,938, and every surface reported ~20% of a 1M window while the session's real fill
+// was ~10%. The owner watched it "drop" 20→10 when the next single-iteration request landed; nothing had
+// been compacted. `iterations[last]` is the actual last prompt, which is what a context % means.
+//
+// Falls back to the top-level fields when there is no `iterations` array (an older CLI, or a
+// single-iteration request where the two are identical anyway). null when no usage-bearing assistant
+// entry exists at all. Sidechains are skipped: a subagent's prompt is not this session's context.
+export function lastContextTokens(file: string): number | null {
+  const entries = readEntries(file)
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i]
+    if (e.isSidechain || e.type !== 'assistant') continue
+    const u = e.message?.usage
+    if (!u) continue
+    const last = Array.isArray(u.iterations) && u.iterations.length ? u.iterations[u.iterations.length - 1] : u
+    return (last.input_tokens ?? 0) + (last.cache_read_input_tokens ?? 0) + (last.cache_creation_input_tokens ?? 0)
+  }
+  return null
 }
 
 // The current turn's chronological feed of what Claude said and did — narration (text AND thinking

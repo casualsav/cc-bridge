@@ -183,7 +183,7 @@ import {
   initStatusCard, statusCardText, statusKeyboard, updateSessionPin, updateTopicPins,
   removeSessionPins, refreshSessionPin, forgetChatPin, armChatPin, sessionPins, pinTextCache, persistSessionPins,
   clearAllPins, clearTopicPins, createSessionPin, invalidatePaneStatus, changesPaneContext, paneStatus, lastModelInTranscript, lastVersionInTranscript,
-  prettyModel, modeBadge, lastTodosInTranscript, codexPrettyModel, usageWindows,
+  prettyModel, modeBadge, lastTodosInTranscript, codexPrettyModel, usageWindows, contextPct, prunePaneStatus,
 } from './status-card.ts'
 import { buildTakeoverBrief } from './takeover-brief.ts'
 import { CODEX_HOME } from './codex-transcript.ts'
@@ -2687,6 +2687,10 @@ async function discoverPanes(): Promise<void> {
     return
   }
   panesDiscovered = true
+  // Past the null guard above, this list IS conclusive — the one place in the daemon that can say a pane
+  // is gone rather than unreadable, which is what prunePaneStatus needs to drop dead cached statuslines.
+  const prunedStatus = prunePaneStatus(panes)
+  if (prunedStatus) process.stderr.write(`daemon: pane-status: pruned ${prunedStatus} dead pane(s)\n`)
   const initialScan = !rosterRebuilt
   // FIRST scan only: re-derive rows for live sessions topics.json has lost, from the pane stamps
   // that outlived it (see rebuildRowsFromStampedPanes). Startup is the right and only moment — it
@@ -3040,7 +3044,8 @@ async function busRosterLine(): Promise<string | null> {
           const tier = paneTiers.get(pane)
           const file = await transcriptForPane(pane, null).catch(() => null)
           const subs = file ? liveSubagents(file) : 0
-          agents.push({ name: nameForEndpoint(e.id, eps) + (tier ? ` · ${tier}` : ''), ctxPct: paneStatus(pane)?.ctxPct ?? null, subagents: subs })
+          const st = paneStatus(pane)
+          agents.push({ name: nameForEndpoint(e.id, eps) + (tier ? ` · ${tier}` : ''), ctxPct: st?.ctxPct ?? null, ctxWindow: st?.ctxWindow ?? null, subagents: subs })
         }
       }
       line = formatRosterLine(agents)
@@ -5718,7 +5723,6 @@ async function handleCall(
           const cap = await capturePane(pane).catch(() => '')
           const sl = cap ? parseStatusline(cap) : null
           const model = sl?.model ? ` ${sl.model}` : ''
-          const pct = sl?.ctxPct != null ? ` ${sl.ctxPct}%` : ''
           // An open ask is shown, but it no longer DECIDES busy. It used to: an injected, un-expired ask
           // was taken as proof the target was heads-down on it, because a bare pane snapshot reads a
           // between-tool-calls prompt as idle (the false negative that once got a live build declared
@@ -5738,6 +5742,14 @@ async function handleCall(
           // subagents edited files for an hour — twice — so the count both flips busy and says itself,
           // because "busy" alone sends a reader looking at a pane that is genuinely sitting at a prompt.
           const subs = tfile ? liveSubagents(tfile) : 0
+          // `tg roster` scrapes its own statusline rather than reading `paneStatus`, so it is a THIRD
+          // reader of the context % and had to learn the correction independently: the transcript's last
+          // inference (contextPct), not the statusline's per-request total, plus the window it is a
+          // fraction of. This is the line the orchestrator makes compact/clear decisions off — the one
+          // place the artefact cost the most. Computed here rather than beside `model` because it needs
+          // `tfile`, which is resolved above for the busy/subagent reads.
+          const ctx = contextPct(sl, tfile)
+          const pct = ctx != null ? ` ${ctx}%${sl?.ctxWindow ? `/${sl.ctxWindow}` : ''}` : ''
           const busy = subs > 0 || (cap
             ? (tfile ? turnInProgress(tfile) : false) || detectWorking(cap) || !onNormalPrompt(cap)
             : true)
@@ -17844,7 +17856,11 @@ async function webappSessionCard(row: { sid: string; name: string; cwd: string; 
     // shared with Claude Code's transient hints, so an ordinary frame can carry no indicator at all
     // and read as 'default' — the mode chip blinking out of a card that never changed mode.
     model, effort: sl?.effort ?? null, mode: latchMode(paneModeLatch, row.sid, detectCurrentMode(cap)),
-    ctxPct: sl?.ctxPct ?? null, h5Pct: sl?.h5?.pct ?? null,
+    // From the transcript's last inference when it can be read, not the statusline's own percentage —
+    // a multi-iteration request's usage is a per-request TOTAL and reads as ~N× the real fill
+    // (status-card's contextPct; transcript.ts's lastContextTokens for the mechanism). `ctxWindow` rides
+    // along because 31% of 200k and 31% of 1M are different worlds to anyone deciding whether to compact.
+    ctxPct: contextPct(sl, tfile), ctxWindow: sl?.ctxWindow ?? null, h5Pct: sl?.h5?.pct ?? null,
     branch: topicBranchCache.get(row.sid) || null, tier: paneTiers.get(pane) ?? null,
   }
 }
