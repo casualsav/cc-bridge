@@ -87,6 +87,29 @@ poisoned watchdog into existence. `anchorCwd` (`common.ts`) is the cure and `cwd
 ENOENT now names the cwd instead of sending the next reader after PATH. Proof:
 `bun scripts/deleted-cwd-spawn.ts`; enumeration of the launch sites: `supervision-cwd.test.ts`.
 
+**Two daemons present as the bridge getting WORSE, never as broken — and `ss` cannot tell you which one
+answers.** Double sends, repeated disconnect/reconnect, every session reporting success. A socket path
+resolves to exactly ONE inode, but both processes hold LISTEN sockets bound to that name (the second
+unlinked the first's directory entry) and `ss -lxp` shows both; `daemon.pid` can name a third process
+again. The one instrument that answers is `SO_PEERCRED` on a fresh connect:
+
+```
+python3 -c "
+import socket,struct
+s=socket.socket(socket.AF_UNIX); s.connect('$HOME/.claude/channels/telegram/daemon.sock')
+print(struct.unpack('3i', s.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize('3i')))[0])"
+```
+
+**Kill the process that is NOT serving the socket** — this inverts the intuition, and the reason is that
+`ensure-daemon.ts` and the watchdog's `tick()` both test `socketAlive()` and never the pid file, so
+killing the server takes the fleet's CLI down and *then* makes both supervisors declare the daemon down.
+Before concluding "duplicate" at all: `pgrep -f "telegram/[0-9.]*/daemon.ts"` matches **both channels**
+(prod and `telegram-test` run from the same cache path) — the discriminator is `readlink /proc/<pid>/cwd`,
+and skipping it killed a healthy `telegram-test` daemon on 2026-07-30. Confirm the symptom too: two
+pollers on one token log `409 Conflict` every ~5s, so **zero 409s means no conflict**, whatever `ps` looks
+like. This box also runs ~8 unrelated bots against the same Telegram IP, so attribute connections
+(`ss -tnp | grep 149.154`, then `readlink /proc/<pid>/cwd`) before drawing any conclusion.
+
 **A tmux read that FAILED is not evidence of absence, and only positive evidence may destroy state.**
 `findOffMcpPanes` returns `null` for a failed scan (an empty array means an empty machine, and
 conflating them is what turned blindness into state loss); `paneLiveness` returns `'unknown'` when tmux
