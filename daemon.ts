@@ -10548,6 +10548,165 @@ function settingsKeyboard(): InlineKeyboard {
   return kb
 }
 
+// ---- The settings AUTHORITY: one function every surface writes through ----
+//
+// /settings (Telegram inline panels) and the Mini App's settings screen change the same prefs. Two
+// copies of "flip the pref AND do the thing the flip means" is how they drift — and the drift is
+// invisible, because each surface repaints from its own read and looks correct. So the pref write,
+// the validation, and every side effect that is part of the CHANGE live here; each caller keeps only
+// what is genuinely its own presentation (which panel to repaint, which chat to notice).
+//
+// `notify` is how a caller lends its chat to a long-running provision (Piper/Whisper install). The
+// Mini App passes none — it has no chat — and the install still runs; only the progress line is lost.
+// Chat-BOUND follow-ups that need a message id (the TTS API-key force-reply) stay in the callback:
+// they are a conversation, not a state change.
+type SettingNotify = (text: string) => void
+const oneOf = (v: unknown, allowed: readonly string[]): string | null =>
+  allowed.includes(String(v)) ? String(v) : null
+async function applySetting(key: string, value: unknown, opts: { userId?: string; notify?: SettingNotify } = {}): Promise<string | null> {
+  const truthy = (v: unknown) => v === true || v === 'on' || v === 1 || v === '1'
+  const a = loadAccess()
+  switch (key) {
+    // ---- plain prefs (no side effect beyond the write) ----
+    case 'batchAllow': a.batchAllow = truthy(value); saveAccess(a); return null
+    case 'confirmReset': a.confirmReset = truthy(value); saveAccess(a); return null
+    case 'fileBrowser': a.fileBrowser = truthy(value); saveAccess(a); return null
+    // OFF is an explicit `false`, never a deleted key — see the spd:a:toggle comment: on a config
+    // with no preferences at all, freshInstallDefaults reads a missing key as ON.
+    case 'spawnAuto': a.spawnAuto = truthy(value); saveAccess(a); return null
+    // 🔥 Fable for coding agents: 'allow' (no gate) or 'default' (a spawn waits for a tap). The
+    // retired 'refuse' is never written back — a tap out of it lands on the default, never its
+    // opposite; the app offers the same two values for the same reason.
+    case 'fableForAgents': {
+      const v = oneOf(value, ['allow', 'default'])
+      if (!v) return 'unknown Fable policy — one of: allow | default'
+      a.fableForAgents = v === 'allow' ? 'allow' : undefined
+      saveAccess(a); return null
+    }
+    // ---- prefs whose change IS a side effect ----
+    case 'sessionPin': {
+      a.sessionPin = truthy(value); saveAccess(a)
+      if (a.sessionPin) await updateSessionPin(); else await removeSessionPins()
+      return null
+    }
+    case 'switchboard': {
+      a.switchboard = truthy(value); saveAccess(a)
+      rosterCache = { at: 0, line: null }   // memo invalidated so the line (dis)appears on THIS repaint
+      await updateSessionPin()
+      return null
+    }
+    case 'stream': {
+      const v = oneOf(value, STREAM_ORDER)
+      if (!v) return `unknown stream mode — one of: ${STREAM_ORDER.join(' | ')}`
+      a.replyMode = v as Access['replyMode']; saveAccess(a)
+      await respawnTerminalMirror()
+      return null
+    }
+    case 'mcp': { if (truthy(value) !== mcpEnabled()) toggleMcp(); return null }
+    // ---- model defaults, per role. The app's option lists are labelling; these are authority. ----
+    case 'spawnModel': case 'chatModel': {
+      const v = oneOf(value, MODEL_ALIASES)
+      if (!v) return `unknown model — one of: ${MODEL_ALIASES.join(' | ')}`
+      if (key === 'chatModel') a.chatModel = v; else a.spawnModel = v
+      saveAccess(a); return null
+    }
+    case 'spawnEffort': case 'chatEffort': {
+      const v = oneOf(value, SPAWN_EFFORT_LEVELS)
+      if (!v) return `unknown effort — one of: ${SPAWN_EFFORT_LEVELS.join(' | ')}`
+      if (key === 'chatEffort') a.chatEffort = v; else a.spawnEffort = v
+      saveAccess(a); return null
+    }
+    // ---- voice replies (TTS). Three keys, one stored object. ----
+    case 'ttsMode': case 'ttsEngine': case 'ttsVoice': {
+      const tts = { mode: a.tts?.mode ?? 'off', engine: a.tts?.engine ?? 'piper', ...(a.tts?.voice ? { voice: a.tts.voice } : {}) } as NonNullable<Access['tts']>
+      if (key === 'ttsMode') {
+        const v = oneOf(value, ['off', 'all'])
+        if (!v) return 'unknown voice mode — one of: off | all'
+        tts.mode = v as 'off' | 'all'
+      } else if (key === 'ttsEngine') {
+        const v = oneOf(value, ['piper', 'openai', 'elevenlabs'])
+        if (!v) return 'unknown engine — one of: piper | openai | elevenlabs'
+        tts.engine = v as TtsEngine
+      } else {
+        const v = oneOf(value, PIPER_VOICES.map(p => p.id))
+        if (!v) return 'unknown voice'
+        tts.voice = v
+      }
+      a.tts = tts; saveAccess(a)
+      // Piper installs on demand; a hosted engine needs its key, which only a chat can collect.
+      if (tts.mode !== 'off' && tts.engine === 'piper' && !piperReady(tts.voice)) {
+        opts.notify?.('⏳ Installing the Piper voice engine…')
+        void provisionPiper(tts.voice).then(
+          () => opts.notify?.('✅ Piper ready — replies will speak.'),
+          e => opts.notify?.(`⚠️ Piper install failed: ${String(e).slice(0, 150)}`),
+        )
+      }
+      return null
+    }
+    // ---- voice transcription. Backend + key live in .env, not access.json. ----
+    case 'transcribeBackend': {
+      const v = oneOf(value, ['off', 'local', 'groq', 'openai'])
+      if (!v) return 'unknown backend — one of: off | local | groq | openai'
+      // A keyed backend without its key breaks voice SILENTLY, so the switch is refused rather than
+      // committed — the same refusal the Telegram panel gives, and the key never travels through a UI.
+      if ((v === 'groq' && !envHas('GROQ_API_KEY')) || (v === 'openai' && !envHas('OPENAI_API_KEY')))
+        return `${v} needs its API key first — add it in the terminal (keys never go through chat): /telegram:configure transcribe ${v}`
+      writeEnvVars({ TELEGRAM_TRANSCRIBE: v })
+      return null
+    }
+    case 'transcribeModel': {
+      const v = oneOf(value, WHISPER_MODELS)
+      if (!v) return `unknown model — one of: ${WHISPER_MODELS.join(' | ')}`
+      const { gpu } = probeHardware()
+      writeEnvVars({
+        TELEGRAM_TRANSCRIBE: 'local',   // picking a model IS the commit to the local backend
+        TELEGRAM_TRANSCRIBE_MODEL: v,
+        ...(envHas('TELEGRAM_WHISPER_DEVICE') ? {} : { TELEGRAM_WHISPER_DEVICE: gpu ? 'cuda' : 'cpu' }),
+        ...(envHas('TELEGRAM_WHISPER_COMPUTE') ? {} : { TELEGRAM_WHISPER_COMPUTE: 'int8' }),
+      })
+      if (!whisperReady() && !whisperInstalling) void provisionWhisper(noticeChats())
+      else if (whisperReady()) void prepullWhisperModel()
+      return null
+    }
+    // ---- 🧷 preferred mode: permissions.defaultMode in ONE account's config dir. Launch-time only;
+    // it never touches a live pane (/mode does that). `account` defaults to main.
+    case 'prefMode': {
+      const raw = (value && typeof value === 'object' ? value : { mode: value }) as { account?: unknown; mode?: unknown }
+      const acct = raw.account == null ? MAIN_ACCOUNT : accountByName(String(raw.account))
+      if (!acct) return 'unknown account'
+      const mode = oneOf(raw.mode, MODES)
+      if (!mode) return `unknown mode — one of: ${MODES.join(' | ')}`
+      try { writeDefaultMode(acct.configDir, mode) } catch (e) { return `could not save: ${String(e).slice(0, 120)}` }
+      return null
+    }
+    // ---- 📂 base folder: must already EXIST. New topics fan out under it, so a mkdir here would
+    // invent a surprise root rather than a one-off session dir.
+    case 'baseFolder': {
+      const dir = await resolveNewSessionDir(String(value ?? ''))
+      if (!dir || !existsSync(dir)) return `${dir || 'that path'} doesn't exist — create it first`
+      setBaseCwd(dir)
+      return null
+    }
+    // ---- Codex dials (used on failover and by every Codex session) ----
+    case 'codexModel': {
+      const rawV = String(value ?? '').trim()
+      const clear = rawV === '' || /^(default|none|clear|env)$/i.test(rawV)
+      if (!clear && !/^[\w.:-]{1,60}$/.test(rawV)) return "that doesn't look like a model id (e.g. gpt-5.6-sol, or 'default' to clear)"
+      a.codexModel = clear ? undefined : rawV
+      saveAccess(a); return null
+    }
+    case 'codexEffort': {
+      // '' and 'default' are the same value: '' is what the store holds, 'default' is what a UI
+      // shows — a select cannot offer an empty option label.
+      const v = oneOf(String(value ?? '') === 'default' ? '' : value, CODEX_EFFORTS)
+      if (v === null) return `unknown effort — one of: ${CODEX_EFFORTS.filter(Boolean).join(' | ')} | default`
+      a.codexEffort = v || undefined
+      saveAccess(a); return null
+    }
+    default: return 'unknown or read-only setting'
+  }
+}
+
 // 🧑‍💻 Model defaults sub-panel (settings → 🧑‍💻): the model/effort every session boots with — the chat
 // lane, the mini-app +, a new topic, and an agent's `tg spawn`. Preference only, read at launch time;
 // it never touches a live pane.
@@ -12496,31 +12655,22 @@ bot.on('callback_query:data', async ctx => {
       if (sent) replyTargets.set(refKey(sent), { kind: 'basedir', panelMsgId: ctx.callbackQuery.message?.message_id })
       return
     }
+    // The panel owns the FLIP (a tap means "the other one"); applySetting owns the write and every
+    // effect that flip carries — see its header for why neither surface keeps its own copy.
     const a = loadAccess()
     if (setMatch[1] === 'replymode') {
-      const m = replyMode()
-      // Cycle thoughts → actions → off → thoughts.
-      a.replyMode = m === 'thoughts' ? 'actions' : m === 'actions' ? 'off' : 'thoughts'
-      saveAccess(a)
-      await respawnTerminalMirror()   // re-spawn the live card below the panel after a mode change
+      const m = replyMode()   // cycle thoughts → actions → off → thoughts
+      await applySetting('stream', m === 'thoughts' ? 'actions' : m === 'actions' ? 'off' : 'thoughts')
     } else if (setMatch[1] === 'pin') {
-      a.sessionPin = a.sessionPin === false                 // flip
-      saveAccess(a)
-      if (a.sessionPin) await updateSessionPin(); else await removeSessionPins()
+      await applySetting('sessionPin', a.sessionPin === false)
     } else if (setMatch[1] === 'batch') {
-      a.batchAllow = a.batchAllow === false                 // flip (default on)
-      saveAccess(a)
+      await applySetting('batchAllow', a.batchAllow === false)          // default on
     } else if (setMatch[1] === 'confirmreset') {
-      a.confirmReset = a.confirmReset === false             // flip (default on)
-      saveAccess(a)
+      await applySetting('confirmReset', a.confirmReset === false)      // default on
     } else if (setMatch[1] === 'switchboard') {
-      a.switchboard = a.switchboard === false               // flip (default on)
-      saveAccess(a)
-      rosterCache = { at: 0, line: null }   // invalidate the memo so the line (dis)appears on the next repaint, not up to ROSTER_TTL_MS later
-      await updateSessionPin()               // repaint the pinned card(s) now
+      await applySetting('switchboard', a.switchboard === false)        // default on
     } else if (setMatch[1] === 'filebrowser') {
-      a.fileBrowser = a.fileBrowser === false               // flip (default on) — the webapp reads it live per request, no restart
-      saveAccess(a)
+      await applySetting('fileBrowser', a.fileBrowser === false)        // the webapp reads it live per request, no restart
     }
     await showSettings(ctx, 'edit')
     return
@@ -12558,9 +12708,8 @@ bot.on('callback_query:data', async ctx => {
       a.limitFailover = a.limitFailover !== true            // flip (default off)
       saveAccess(a)
     } else if (foMatch[1] === 'cxeffort') {
-      const next = CODEX_EFFORTS[(CODEX_EFFORTS.indexOf((a.codexEffort ?? '') as typeof CODEX_EFFORTS[number]) + 1) % CODEX_EFFORTS.length]
-      a.codexEffort = next || undefined                     // cycle default→low→medium→high→xhigh→default
-      saveAccess(a)
+      // cycle default→low→medium→high→xhigh→default; the panel owns the cycle, applySetting the write
+      await applySetting('codexEffort', CODEX_EFFORTS[(CODEX_EFFORTS.indexOf((a.codexEffort ?? '') as typeof CODEX_EFFORTS[number]) + 1) % CODEX_EFFORTS.length])
     } else {
       const key = foMatch[2] ?? foMatch[3]!
       const resolved = resolveChain(a.failoverChain ?? [], listAccounts().map(x => x.name), codexAvailable(), Object.keys(loadHarnessGateways()))
@@ -12851,23 +13000,19 @@ bot.on('callback_query:data', async ctx => {
       await showSettings(ctx, 'edit')
       return
     }
-    const a = loadAccess()
-    const tts = a.tts ?? { mode: 'off' as const, engine: 'piper' as const }
-    if (ttsMatch[1]) tts.mode = ttsMatch[1] as 'off' | 'all'
-    if (ttsMatch[2]) tts.engine = ttsMatch[2] as TtsEngine
-    if (ttsMatch[3] && PIPER_VOICES[Number(ttsMatch[3])]) tts.voice = PIPER_VOICES[Number(ttsMatch[3])].id
-    a.tts = tts
-    saveAccess(a)
     const chat = String(ctx.chat!.id)
     const thread = ctx.callbackQuery.message?.message_thread_id
-    if (tts.mode !== 'off' && tts.engine === 'piper' && !piperReady(tts.voice)) {
-      const ttsOpts: SendOpts = thread ? { threadId: String(thread) } : {}
-      void channel.sendText(chat, `⏳ Installing Piper${ttsMatch[3] ? `'s ${PIPER_VOICES[Number(ttsMatch[3])].label} voice (~60MB)` : ' (~80MB)'}…`, ttsOpts).catch(() => {})
-      void provisionPiper(tts.voice).then(
-        () => channel.sendText(chat, '✅ Piper voice ready — replies will speak.', ttsOpts).catch(() => {}),
-        e => channel.sendText(chat, `⚠️ Piper install failed: ${escapeHtml(String(e).slice(0, 150))}`, { ...ttsOpts, plain: true }).catch(() => {}),   // pre-escaped text sent WITHOUT parse_mode
-      )
-    }
+    const ttsOpts: SendOpts = { plain: true, ...(thread ? { threadId: String(thread) } : {}) }   // plain: one line interpolates a raw error string
+    const notify: SettingNotify = t => void channel.sendText(chat, t, ttsOpts).catch(() => {})
+    // One tap changes exactly one of the three; applySetting owns the write and the Piper install.
+    const err = ttsMatch[1] ? await applySetting('ttsMode', ttsMatch[1], { notify })
+      : ttsMatch[2] ? await applySetting('ttsEngine', ttsMatch[2], { notify })
+      : PIPER_VOICES[Number(ttsMatch[3])] ? await applySetting('ttsVoice', PIPER_VOICES[Number(ttsMatch[3])].id, { notify })
+      : null
+    if (err) { await ctx.answerCallbackQuery({ text: err, show_alert: true }).catch(() => {}); return }
+    const tts = loadAccess().tts ?? { mode: 'off' as const, engine: 'piper' as const }
+    // The hosted engines' key is a CONVERSATION (a force-reply keyed to a message id), so it stays
+    // here rather than in applySetting — the Mini App has no message to reply to.
     if (tts.mode !== 'off' && (tts.engine === 'openai' || tts.engine === 'elevenlabs') && !engineStatus(tts.engine).ready) {
       const sent = await channel.sendText(chat,
         `🔑 Reply with your <b>${tts.engine === 'openai' ? 'OpenAI' : 'ElevenLabs'}</b> API key — it's stored in the bridge's .env and your message is deleted right away.`,
@@ -12897,14 +13042,10 @@ bot.on('callback_query:data', async ctx => {
       await showHtmlPanel(ctx, 'edit', voiceText(), voiceKeyboard())
       return
     }
-    // off / groq / openai — a keyed backend without its key would break voice silently,
-    // so don't commit the switch until the key is in .env.
-    const needKey = (choice === 'groq' && !envHas('GROQ_API_KEY')) || (choice === 'openai' && !envHas('OPENAI_API_KEY'))
-    if (needKey) {
-      await ctx.answerCallbackQuery({ text: `Not switched — ${choice} needs an API key first. Add it in your terminal (keys never go through chat): /telegram:configure transcribe ${choice}`, show_alert: true }).catch(() => {})
-      return
-    }
-    writeEnvVars({ TELEGRAM_TRANSCRIBE: choice })
+    // off / groq / openai — applySetting refuses a keyed backend whose key isn't in .env yet
+    // (committing it would break voice silently).
+    const err = await applySetting('transcribeBackend', choice)
+    if (err) { await ctx.answerCallbackQuery({ text: `Not switched — ${err}`, show_alert: true }).catch(() => {}); return }
     await ctx.answerCallbackQuery().catch(() => {})
     await showHtmlPanel(ctx, 'edit', voiceText(), voiceKeyboard())
     return
@@ -12913,19 +13054,9 @@ bot.on('callback_query:data', async ctx => {
   if (voiceModelMatch) {
     if (!(await cbAuth(ctx))) return
     await ctx.answerCallbackQuery().catch(() => {})
-    const model = voiceModelMatch[1]
-    const { gpu } = probeHardware()
-    writeEnvVars({
-      TELEGRAM_TRANSCRIBE: 'local',
-      TELEGRAM_TRANSCRIBE_MODEL: model,
-      ...(envHas('TELEGRAM_WHISPER_DEVICE') ? {} : { TELEGRAM_WHISPER_DEVICE: gpu ? 'cuda' : 'cpu' }),
-      ...(envHas('TELEGRAM_WHISPER_COMPUTE') ? {} : { TELEGRAM_WHISPER_COMPUTE: 'int8' }),
-    })
-    // Engine missing → provision it (which also pre-pulls this model's weights). Engine already
-    // there → just pre-pull the newly chosen model's weights in the background. Either way the
-    // first note is instant. Both run detached so the panel refreshes immediately.
-    if (!whisperReady() && !whisperInstalling) void provisionWhisper(noticeChats())
-    else if (whisperReady()) void prepullWhisperModel()
+    // The backend commit, the device/compute defaults and the engine+weights provisioning all live
+    // in applySetting — a pick here and a pick in the Mini App must install the same thing.
+    await applySetting('transcribeModel', voiceModelMatch[1])
     await showHtmlPanel(ctx, 'edit', voiceModelText(), voiceModelKeyboard())
     return
   }
@@ -13026,12 +13157,10 @@ bot.on('callback_query:data', async ctx => {
   const defSet = /^defmode:set:([a-z0-9][a-z0-9_-]{0,15}):(default|acceptEdits|plan|auto|bypassPermissions)$/i.exec(data)
   if (defSet) {
     if (!(await cbAuth(ctx))) return
-    const acct = accountByName(defSet[1])
-    if (!acct) { await ctx.answerCallbackQuery({ text: 'Unknown account.' }).catch(() => {}); return }
     const mode = defSet[2] as CcMode
-    try { writeDefaultMode(acct.configDir, mode) }
-    catch { await ctx.answerCallbackQuery({ text: 'Could not save.' }).catch(() => {}); return }
-    await ctx.answerCallbackQuery({ text: `${acct.name}: ${modeLabel(mode)} on launch` }).catch(() => {})
+    const err = await applySetting('prefMode', { account: defSet[1], mode })
+    if (err) { await ctx.answerCallbackQuery({ text: err }).catch(() => {}); return }
+    await ctx.answerCallbackQuery({ text: `${defSet[1]}: ${modeLabel(mode)} on launch` }).catch(() => {})
     await showRichPanel(ctx, 'edit', toInputRichMessage(defaultModeMarkdown()), defaultModeText(), defaultModeKeyboard())
     return
   }
@@ -13092,10 +13221,9 @@ bot.on('callback_query:data', async ctx => {
   // install has decided, which is the same thing the key's absence used to mean and no longer can.
   if (data === 'spd:a:toggle') {
     if (!(await cbAuth(ctx))) return
-    const a = loadAccess()
-    a.spawnAuto = !a.spawnAuto
-    saveAccess(a)
-    await ctx.answerCallbackQuery({ text: a.spawnAuto ? 'Agent spawns pick their own model and effort.' : 'Agent spawns use your defaults.' }).catch(() => {})
+    const next = !loadAccess().spawnAuto
+    await applySetting('spawnAuto', next)
+    await ctx.answerCallbackQuery({ text: next ? 'Agent spawns pick their own model and effort.' : 'Agent spawns use your defaults.' }).catch(() => {})
     await showHtmlPanel(ctx, 'edit', spawnDefaultsText(), spawnDefaultsKeyboard())
     return
   }
@@ -13104,13 +13232,12 @@ bot.on('callback_query:data', async ctx => {
   // never touches the owner's own picker — decideModel's humanOrigin branch runs ahead of this.
   if (data === 'spd:f:toggle') {
     if (!(await cbAuth(ctx))) return
-    const a = loadAccess()
     // From the RETIRED 'refuse' the tap lands on the default, never straight on 'allow': that config
     // says "an agent may never have Fable", and the one thing a single tap must not do is turn it into
     // its exact opposite. 'approve' still needs him, so the tap costs nothing and retires the value.
-    a.fableForAgents = fablePolicy(a.fableForAgents) === 'approve' ? 'allow' : undefined
-    saveAccess(a)
-    await ctx.answerCallbackQuery({ text: a.fableForAgents === 'allow' ? 'Agent Fable spawns start immediately — no approval.' : 'A Fable spawn waits for your tap.' }).catch(() => {})
+    const next = fablePolicy(loadAccess().fableForAgents) === 'approve' ? 'allow' : 'default'
+    await applySetting('fableForAgents', next)
+    await ctx.answerCallbackQuery({ text: next === 'allow' ? 'Agent Fable spawns start immediately — no approval.' : 'A Fable spawn waits for your tap.' }).catch(() => {})
     await showHtmlPanel(ctx, 'edit', spawnDefaultsText(), spawnDefaultsKeyboard())
     return
   }
@@ -13129,20 +13256,14 @@ bot.on('callback_query:data', async ctx => {
     if (!(await cbAuth(ctx))) return
     const [, kind, roleStr, v] = spdSet
     const role = roleStr as SessionRole
-    const a = loadAccess()
     // A real value, always: the "Inherit" chips are gone, so there is no path left that writes an
     // empty default. 'auto' is no longer a value either — it is the toggle above. Which KEY it lands
     // in is the whole of the role split: the coding pair keeps the names it has always had, and the
     // chat pair is new. A tap on the chat row is also the moment the lane stops following the coding
     // default — writing the key IS the split.
-    if (kind === 'm') {
-      if (!MODEL_ALIASES.includes(v)) { await ctx.answerCallbackQuery({ text: 'Unknown model.' }).catch(() => {}); return }
-      if (role === 'chat') a.chatModel = v; else a.spawnModel = v
-    } else {
-      if (!SPAWN_EFFORT_LEVELS.includes(v)) { await ctx.answerCallbackQuery({ text: 'Unknown effort.' }).catch(() => {}); return }
-      if (role === 'chat') a.chatEffort = v; else a.spawnEffort = v
-    }
-    saveAccess(a)
+    const setKey = kind === 'm' ? (role === 'chat' ? 'chatModel' : 'spawnModel') : (role === 'chat' ? 'chatEffort' : 'spawnEffort')
+    const err = await applySetting(setKey, v)
+    if (err) { await ctx.answerCallbackQuery({ text: kind === 'm' ? 'Unknown model.' : 'Unknown effort.' }).catch(() => {}); return }
     await ctx.answerCallbackQuery().catch(() => {})
     await showHtmlPanel(ctx, 'edit', modelRolePickerText(role), modelRolePickerKeyboard(role))
     return
@@ -15674,7 +15795,7 @@ bot.on('message:text', async ctx => {
             if (again) replyTargets.set(`${ctx.chat?.id}:${again.message_id}`, target)
             return
           }
-          setBaseCwd(dir)
+          await applySetting('baseFolder', text)
           await ctx.reply(`📂 <b>Base folder set:</b> <code>${escapeHtml(dir)}</code>\nNew topics will be created as subfolders here.`, { parse_mode: 'HTML' })
           if (target.panelMsgId) {
             try { await editRichMessage(TOKEN!, String(ctx.chat!.id), target.panelMsgId, toInputRichMessage(settingsMarkdown()), settingsKeyboard()) }
@@ -15687,16 +15808,15 @@ bot.on('message:text', async ctx => {
         case 'codexmodel': {
           const raw = text.trim()
           const clear = raw === '' || /^(default|none|clear|env)$/i.test(raw)
-          if (!clear && !/^[\w.:-]{1,60}$/.test(raw)) {
+          // applySetting validates and writes; a rejection re-arms the same force-reply so a typo
+          // doesn't strand the flow (the panel's own retry contract, not applySetting's).
+          if (await applySetting('codexModel', raw)) {
             const again = await ctx.reply(
               `❌ That doesn't look like a model id. Reply with something like <code>gpt-5.6-sol</code>, or <code>default</code> to clear.`,
               { parse_mode: 'HTML', reply_markup: { force_reply: true, input_field_placeholder: 'Codex model id' } }).catch(() => null)
             if (again) replyTargets.set(`${ctx.chat?.id}:${again.message_id}`, target)
             return
           }
-          const a = loadAccess()
-          a.codexModel = clear ? undefined : raw
-          saveAccess(a)
           await ctx.reply(clear
             ? `✳️ <b>Codex model cleared</b> — using ${process.env.CODEX_MODEL ? `<code>${escapeHtml(process.env.CODEX_MODEL)}</code> (CODEX_MODEL env)` : 'Codex\'s default'}.`
             : `✳️ <b>Codex model set:</b> <code>${escapeHtml(raw)}</code> — takes effect on the next Codex launch/failover.`,
@@ -16934,7 +17054,15 @@ const WEBAPP_ENABLED = /^(1|true|yes|on)$/i.test(process.env.TELEGRAM_WEBAPP_ENA
 const WEBAPP_PORT = Number(process.env.TELEGRAM_WEBAPP_PORT) || (8787 + (Number.isFinite(+INSTANCE_ID) ? Number(INSTANCE_ID) : 0))
 const WEBAPP_TUNNEL = (process.env.TELEGRAM_WEBAPP_TUNNEL ?? 'cloudflared').toLowerCase()
 const WEBAPP_PUBLIC_URL = (process.env.TELEGRAM_WEBAPP_PUBLIC_URL ?? '').replace(/\/+$/, '')
-const WEBAPP_WRITE = /^(1|true|yes|on)$/i.test(process.env.TELEGRAM_WEBAPP_WRITE ?? '')   // edit/delete/rename/upload in the Mini App (default off → read-only)
+const WEBAPP_WRITE = /^(1|true|yes|on)$/i.test(process.env.TELEGRAM_WEBAPP_WRITE ?? '')   // FILE MUTATION ONLY: edit/delete/rename/upload in the Mini App (default off → read-only)
+// SETTINGS writes are a separate flag, and the split is the point: they change prefs the same
+// allowlisted user can already change from /settings with one tap, while TELEGRAM_WEBAPP_WRITE
+// authorises whole-filesystem mutation. Sharing one flag meant the only way to get a working
+// settings screen was to open up the filesystem too. Default ON wherever the Mini App is enabled
+// (same auth, same user, same prefs); set TELEGRAM_WEBAPP_SETTINGS_WRITE=0 to serve them read-only.
+const WEBAPP_SETTINGS_WRITE = process.env.TELEGRAM_WEBAPP_SETTINGS_WRITE
+  ? /^(1|true|yes|on)$/i.test(process.env.TELEGRAM_WEBAPP_SETTINGS_WRITE)
+  : WEBAPP_ENABLED
 const WEBAPP_MAX_UPLOAD_MB = Number(process.env.TELEGRAM_WEBAPP_MAX_UPLOAD_MB) || 50      // /api/upload size cap (device → folder)
 const WEBAPP_TRASH = join(homedir(), '.tg-trash')                                         // /api/rm moves deletions here (recoverable)
 let filesTunnel: Tunnel | null = null
@@ -17236,24 +17364,40 @@ async function webappReadSettings(): Promise<WebappSettingsView> {
   const cap = focus.activePaneId ? await capturePane(focus.activePaneId).catch(() => '') : ''
   const sl = cap ? parseStatusline(cap) : null
   const von = !!a.tts?.mode && a.tts.mode !== 'off'
+  const tb = (tConfig('TELEGRAM_TRANSCRIBE') || 'off').toLowerCase()
   return {
-    write: WEBAPP_WRITE,
+    write: WEBAPP_SETTINGS_WRITE,
     settings: {
-      accounts: { value: accountsRowSummary(), editable: false, label: 'managed in /settings' },
+      accounts: { value: accountsRowSummary(), editable: false, label: 'tap to manage' },
       github: { value: ghSummary(), editable: false },
       batchAllow: { value: a.batchAllow !== false, editable: true, label: '2+ prompts offer "Allow all this turn"' },
-      transcribe: { value: transcribeStatus(), editable: false, label: 'engine picked in /settings' },
+      // 🎙️ transcription: the backend is a real pick here now, and the local Whisper model rides
+      // with it. Both write .env (not access.json) — see applySetting.
+      transcribeBackend: { value: tb, editable: true, options: ['off', 'local', 'groq', 'openai'], label: 'hosted backends need their key in .env first' },
+      transcribeModel: { value: (tConfig('TELEGRAM_TRANSCRIBE_MODEL') || 'base').toLowerCase(), editable: true, options: [...WHISPER_MODELS], label: whisperReady() ? 'local Whisper — engine ready' : 'local Whisper — installs on pick' },
       voice: { value: von, editable: true, label: von ? `on · ${a.tts!.engine}` : 'off' },
+      // 🔊 voice replies, the full three-part shape the Telegram panel has. `voice` above stays as
+      // the plain on/off it always was — the app's own quick toggle, and /voice's shape.
+      ttsMode: { value: a.tts?.mode ?? 'off', editable: true, options: ['off', 'all'] },
+      ttsEngine: { value: a.tts?.engine ?? 'piper', editable: true, options: ['piper', 'openai', 'elevenlabs'], label: 'piper installs locally; the others need a key' },
+      ttsVoice: { value: a.tts?.voice ?? DEFAULT_PIPER_VOICE, editable: true, options: PIPER_VOICES.map(p => p.id), label: 'piper only' },
       stream: { value: replyMode(), editable: true, options: [...STREAM_ORDER] },
       sessionPin: { value: a.sessionPin !== false, editable: true },
       // `raw` rides alongside the label for the mini app's new-session sheet, which has to MATCH this
       // against a mode row rather than print it — the label carries an emoji and its own wording.
       // Always main's: that is the account webappSessionSpawn spawns on, even where the label above
       // says 'per account'.
-      prefMode: { value: listAccounts().length > 1 ? 'per account' : defModeLabel(MAIN_ACCOUNT.configDir), raw: readDefaultMode(MAIN_ACCOUNT.configDir), editable: false, label: 'what NEW sessions launch in' },
+      // Editable only with ONE account: the row is a single value, and with several the modes are
+      // per account — that needs the picker the Telegram panel has, which is the Model-defaults-style
+      // sheet this app does not have yet. Multi-account stays read-only rather than silently writing
+      // main's mode under a label that says 'per account'.
+      prefMode: { value: listAccounts().length > 1 ? 'per account' : defModeLabel(MAIN_ACCOUNT.configDir), raw: readDefaultMode(MAIN_ACCOUNT.configDir), editable: listAccounts().length === 1, options: [...MODES], label: 'what NEW sessions launch in' },
       confirmReset: { value: a.confirmReset !== false, editable: true, label: '/clear and /new ask first' },
       fileBrowser: { value: a.fileBrowser !== false, editable: true, label: 'Files tab in this app (reopens on change)' },
+      // 📂 base folder is free text (a path), not an enum — the client renders it read-only until the
+      // text-entry row lands; the endpoint already validates and accepts it.
       ...(isTopicMode() ? { baseFolder: { value: baseFolderFull(), editable: false, label: 'new topics land here' } } : {}),
+      ...(isTopicMode() && AGENT_BUS_PIN_UI ? { switchboard: { value: a.switchboard !== false, editable: true, label: 'roster line on the pinned card' } } : {}),
       mcp: { value: mcpEnabled(), editable: true, label: 'new sessions only' },
       // The 🧑‍💻 Model defaults — the same prefs the /settings sub-panel writes. They belong on this
       // tab because they are now the ONLY place a global model default is set: the per-session dials
@@ -17266,48 +17410,34 @@ async function webappReadSettings(): Promise<WebappSettingsView> {
       // went with it).
       spawnModel: { value: configuredSpawnModel(), editable: true, options: MODEL_ALIASES.filter(m => !(m === FABLE && fablePolicy(a.fableForAgents) === 'refuse')), label: 'coding sessions — the chat agent has its own' },
       spawnEffort: { value: configuredSpawnEffort(), editable: true, options: [...SPAWN_EFFORT_LEVELS], label: 'coding sessions — the chat agent has its own' },
+      // The CHAT lane's own pair, and the two policy dials that sit beside them on the Telegram
+      // sub-panel. Without these the app could set a coding default and nothing else, which is what
+      // made it look like the panel's poor relation.
+      chatModel: { value: configuredSpawnModel('chat'), editable: true, options: [...MODEL_ALIASES], label: 'the chat agent' },
+      chatEffort: { value: configuredSpawnEffort('chat'), editable: true, options: [...SPAWN_EFFORT_LEVELS], label: 'the chat agent' },
+      spawnAuto: { value: a.spawnAuto === true, editable: true, label: 'agent spawns pick their own model/effort' },
+      fableForAgents: { value: fablePolicy(a.fableForAgents) === 'allow' ? 'allow' : 'default', editable: true, options: ['default', 'allow'], label: 'allow = an agent Fable spawn needs no tap' },
+      // Codex dials — used on failover and by every Codex session. The model is free text (open-ended
+      // ids), so it stays read-only in the client until the text-entry row lands.
+      codexModel: { value: codexLaunchModel() || 'default', editable: false, label: 'used on failover to Codex' },
+      codexEffort: { value: codexLaunchEffort() || 'default', editable: true, options: CODEX_EFFORTS.map(e => e || 'default'), label: 'used on failover to Codex' },
       mode: { value: cap ? detectCurrentMode(cap) : null, editable: false, label: 'drives the pane (chat-side)' },
       model: { value: sl?.model ?? null, editable: false },
       effort: { value: sl?.effort ?? null, editable: false },
     },
   }
 }
-// Apply one settings change from the Mini App. Returns an error string, or null on success. Only the
-// safe pref-based toggles are writable; anything else is rejected (mode/model/effort are read-only).
-function webappSetSetting(userId: string, key: string, value: unknown): string | null {
-  const truthy = (v: unknown) => v === true || v === 'on' || v === 1 || v === '1'
-  switch (key) {
-    case 'voice': setVoiceMode(truthy(value), userId); return null   // notice DMs the toggling user (not the group)
-    case 'mcp': { if (truthy(value) !== mcpEnabled()) toggleMcp(); return null }
-    case 'sessionPin': {
-      const a = loadAccess(); a.sessionPin = truthy(value); saveAccess(a)
-      if (a.sessionPin) void updateSessionPin(); else void removeSessionPins()
-      return null
-    }
-    case 'stream': {
-      if (!(STREAM_ORDER as readonly string[]).includes(String(value))) return 'bad stream mode'
-      const a = loadAccess(); a.replyMode = String(value) as Access['replyMode']; saveAccess(a)
-      void respawnTerminalMirror()
-      return null
-    }
-    case 'batchAllow': { const a = loadAccess(); a.batchAllow = truthy(value); saveAccess(a); return null }
-    case 'confirmReset': { const a = loadAccess(); a.confirmReset = truthy(value); saveAccess(a); return null }
-    case 'fileBrowser': { const a = loadAccess(); a.fileBrowser = truthy(value); saveAccess(a); return null }
-    // 🧑‍💻 Model defaults, validated against the daemon's own lists exactly like the
-    // spd:(m|e) callbacks — the app's copy of them is UI labelling, not authority. Real values only:
-    // there is no 'off' (the Inherit chips are gone) and no 'auto' (that is its own toggle).
-    case 'spawnModel': {
-      const v = String(value)
-      if (!MODEL_ALIASES.includes(v)) return `unknown model — one of: ${MODEL_ALIASES.join(' | ')}`
-      const a = loadAccess(); a.spawnModel = v; saveAccess(a); return null
-    }
-    case 'spawnEffort': {
-      const v = String(value)
-      if (!SPAWN_EFFORT_LEVELS.includes(v)) return `unknown effort — one of: ${SPAWN_EFFORT_LEVELS.join(' | ')}`
-      const a = loadAccess(); a.spawnEffort = v; saveAccess(a); return null
-    }
-    default: return 'unknown or read-only setting'
+// Apply one settings change from the Mini App: a thin adapter over applySetting, which is the
+// authority both surfaces write through. The ONE key that isn't a plain pass-through is `voice` —
+// the app's quick on/off, which DMs the toggling user about a missing engine (a notice the /settings
+// panels raise in their own chat). Everything else, including every validation message, comes from
+// applySetting so the two surfaces cannot answer differently.
+function webappSetSetting(userId: string, key: string, value: unknown): Promise<string | null> | string | null {
+  if (key === 'voice') {
+    setVoiceMode(value === true || value === 'on' || value === 1 || value === '1', userId)   // notice DMs the toggling user (not the group)
+    return null
   }
+  return applySetting(key, value)
 }
 // ---- Fleet dashboard (Sessions tab) ----
 
@@ -18083,7 +18213,7 @@ async function startFilesWebapp(): Promise<void> {
   try {
     startWebapp({ token: TOKEN!, port: WEBAPP_PORT, staticDir: join(import.meta.dir, 'webapp'),
       isAllowed: uid => loadAccess().allowFrom.includes(uid), log: wlog, resolveStart: resolveStartToken,
-      canWrite: WEBAPP_WRITE, trashDir: WEBAPP_TRASH, maxUploadBytes: WEBAPP_MAX_UPLOAD_MB * 1024 * 1024,
+      canWrite: WEBAPP_WRITE, canWriteSettings: WEBAPP_SETTINGS_WRITE, trashDir: WEBAPP_TRASH, maxUploadBytes: WEBAPP_MAX_UPLOAD_MB * 1024 * 1024,
       fileBrowser: () => loadAccess().fileBrowser !== false,   // live pref (settings → 🗂) — omits the Files tab + 403s the file API when off
       protectedRoots: [STATE_DIR],   // fence writes out of a relocated state dir too (~/.claude is fenced by default)
       readSettings: webappReadSettings, setSetting: webappSetSetting,

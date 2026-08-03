@@ -23,7 +23,12 @@ export interface WebappDeps {
   maxReadBytes?: number                    // text read cap (default 512 KiB)
   maxFind?: number                         // find result cap (default 500)
   resolveStart?: (token: string) => { cwd: string; sid?: string } | null   // map a deep-link startapp token → the folder AND the session that owns it (the app opens that session's file sheet)
-  canWrite?: boolean                       // enable write endpoints (TELEGRAM_WEBAPP_WRITE); default false → read-only
+  canWrite?: boolean                       // enable FILE write endpoints (TELEGRAM_WEBAPP_WRITE); default false → read-only
+  // Settings/account mutations are gated separately (TELEGRAM_WEBAPP_SETTINGS_WRITE, default on with
+  // the app): they change prefs this same allowlisted user already flips from /settings with one tap,
+  // where canWrite authorises whole-filesystem mutation. One flag for both meant a working settings
+  // screen could only be bought by opening up the filesystem. Falls back to canWrite when unset.
+  canWriteSettings?: boolean
   fileBrowser?: () => boolean              // live pref: file browser present in the app (default true). False = the browse card is omitted from the served shell AND every file endpoint 403s — read live per request so the /settings toggle applies without a restart
   protectedRoots?: string[]                // extra dirs (beyond ~/.claude) that writes must never touch (e.g. a relocated state dir)
   trashDir?: string                        // /api/rm moves deletions here (recoverable); required when canWrite
@@ -298,6 +303,10 @@ function makeMatcher(q: string): (name: string) => boolean {
   return name => name.toLowerCase().includes(lq)
 }
 
+// The settings/account gate. Unset falls back to canWrite so an embedder that only knows the old
+// flag keeps its old behaviour; the daemon always passes it explicitly.
+const settingsWritable = (deps: WebappDeps): boolean => deps.canWriteSettings ?? !!deps.canWrite
+
 async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: string): Promise<Response> {
   const maxRead = deps.maxReadBytes ?? 512 * 1024
   const maxFind = deps.maxFind ?? 500
@@ -499,9 +508,9 @@ async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: strin
     return 'error' in r ? json({ error: r.error }, 400) : json(r)
   }
 
-  // ---- Settings mutation (POST; gated by canWrite, same as the file writes) ----
+  // ---- Settings mutation (POST; gated by canWriteSettings — NOT the file-write flag) ----
   if (url.pathname === '/api/settings/set') {
-    if (!deps.canWrite) return json({ error: 'read-only', reason: 'editing disabled (set TELEGRAM_WEBAPP_WRITE=1)' }, 403)
+    if (!settingsWritable(deps)) return json({ error: 'read-only', reason: 'settings editing disabled (set TELEGRAM_WEBAPP_SETTINGS_WRITE=1)' }, 403)
     if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405)
     if (!deps.setSetting) return json({ error: 'unavailable' }, 404)
     const body = await req.json().catch(() => null) as { key?: unknown; value?: unknown } | null
@@ -511,7 +520,7 @@ async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: strin
     return err ? json({ error: err }, 400) : json({ ok: true })
   }
   if (url.pathname === '/api/provider-accounts/action') {
-    if (!deps.canWrite) return json({ error: 'read-only', reason: 'editing disabled (set TELEGRAM_WEBAPP_WRITE=1)' }, 403)
+    if (!settingsWritable(deps)) return json({ error: 'read-only', reason: 'settings editing disabled (set TELEGRAM_WEBAPP_SETTINGS_WRITE=1)' }, 403)
     if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405)
     if (!deps.providerAccountAction) return json({ error: 'unavailable' }, 404)
     const body = await req.json().catch(() => null)

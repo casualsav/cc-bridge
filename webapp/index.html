@@ -2221,29 +2221,43 @@ async function renderSettings() {
   const el = $("tab-settings");
   let d; try { d = await api("/api/settings"); } catch { el.innerHTML = '<div class="notice">Settings unavailable.</div>'; return; }
   const W = !!d.write;
-  // Mirrors the /settings panel order; the chat-side pane dials (mode/model/effort) close the list.
+  // MIRRORS THE /settings PANEL ORDER, and `SETTINGS_ORDER_GATE` in settings-parity.test.ts holds it
+  // there — the two lists drifting is invisible on both surfaces (each renders its own order and
+  // looks correct), which is the same lockstep problem the three Telegram renderers have.
+  // The chat-side pane dials (mode/model/effort) close the list; they belong to no /settings row.
   const meta = {
     accounts: { name: "👤 Accounts", bool: false },
+    spawnModel: { name: "🧑‍💻 Coding session model", bool: false },
+    spawnEffort: { name: "🧑‍💻 Coding session effort", bool: false },
+    chatModel: { name: "💬 Chat agent model", bool: false },
+    chatEffort: { name: "💬 Chat agent effort", bool: false },
+    spawnAuto: { name: "🦾 Auto (agent spawns)", bool: true },
+    fableForAgents: { name: "🔥 Fable for agents", bool: false },
     github: { name: "🐙 GitHub", bool: false },
     batchAllow: { name: "⚡ Batch allow", bool: true },
-    transcribe: { name: "🎙 Voice transcription", bool: false },
+    transcribeBackend: { name: "🎙 Voice transcription", bool: false },
+    transcribeModel: { name: "🎙 Whisper model", bool: false },
     voice: { name: "🔊 Voice replies", bool: true },
+    ttsMode: { name: "🔊 Speak replies", bool: false },
+    ttsEngine: { name: "🔊 Voice engine", bool: false },
+    ttsVoice: { name: "🗣 Piper voice", bool: false },
     stream: { name: "💬 Stream", bool: false },
     sessionPin: { name: "📌 Pinned card", bool: true },
     prefMode: { name: "🧷 Preferred mode", bool: false },
     confirmReset: { name: "🧹 /clear approval", bool: true },
     fileBrowser: { name: "🗂 File browser", bool: true },
     baseFolder: { name: "📂 Base folder", bool: false },
+    switchboard: { name: "☎️ Agent bus", bool: true },
+    codexModel: { name: "✳️ Codex model", bool: false },
+    codexEffort: { name: "✳️ Codex effort", bool: false },
     mcp: { name: "🔌 MCP mode", bool: true },
-    spawnModel: { name: "🧑‍💻 Coding session model", bool: false },
-    spawnEffort: { name: "🧑‍💻 Coding session effort", bool: false },
     mode: { name: "🛠️ Mode", bool: false },
     model: { name: "🤖 Model", bool: false },
     effort: { name: "⏫ Effort", bool: false },
   };
   el.innerHTML = "";
   const head = document.createElement("div");
-  head.className = "card"; head.innerHTML = '<div class="k">Channel</div><div class="v">' + (W ? "Editing enabled" : "Read-only — set TELEGRAM_WEBAPP_WRITE=1 to change") + "</div>";
+  head.className = "card"; head.innerHTML = '<div class="k">Channel</div><div class="v">' + (W ? "Editing enabled" : "Read-only — set TELEGRAM_WEBAPP_SETTINGS_WRITE=1 to change") + "</div>";
   el.appendChild(head);
   const wrap = document.createElement("div"); wrap.className = "card";
   for (const key in meta) {
@@ -2264,7 +2278,10 @@ async function renderSettings() {
       r.appendChild(btn);
     } else if (s.options && editable) {
       const sel = document.createElement("select"); sel.className = "seg";
-      for (const o of s.options) { const op = document.createElement("option"); op.value = o; op.textContent = o; if (o === s.value) op.selected = true; sel.appendChild(op); }
+      // `raw` wins over `value` for the selected option: a row may DISPLAY a label (prefMode's
+      // carries an emoji and its own wording) while the options are the daemon's own vocabulary.
+      const cur = s.raw != null ? s.raw : s.value;
+      for (const o of s.options) { const op = document.createElement("option"); op.value = o; op.textContent = o; if (o === cur) op.selected = true; sel.appendChild(op); }
       sel.onchange = () => setSetting(key, sel.value);
       r.appendChild(sel);
     } else {

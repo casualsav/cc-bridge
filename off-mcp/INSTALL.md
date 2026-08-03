@@ -230,7 +230,10 @@ OPENAI_API_KEY=<key>                        # openai only
 # Files Mini App (Q6) — always enabled (the console tabs ship at every level); the file-browser
 # level is what Q6 chose. "No file browser" additionally writes "fileBrowser": false to access.json.
 TELEGRAM_WEBAPP_ENABLED=1
-TELEGRAM_WEBAPP_WRITE=1                      # read/write → 1 · read-only or no file browser → 0
+TELEGRAM_WEBAPP_WRITE=1                      # FILE mutation (edit/delete/rename/upload): read/write → 1 · read-only or no file browser → 0
+# TELEGRAM_WEBAPP_SETTINGS_WRITE=0           # SETTINGS/account changes in the app — separate flag, default ON with the app.
+#                                            # It is NOT the file flag: these are the same prefs the user already flips
+#                                            # from /settings with one tap. Set 0 to serve the settings screen read-only.
 TELEGRAM_WEBAPP_TUNNEL=tailscale            # tailscale = in-group · cloudflared = DM-only (default) · none = use PUBLIC_URL
 TELEGRAM_WEBAPP_PUBLIC_URL=https://files.example.com   # custom-domain option only (overrides the tunnel)
 ```

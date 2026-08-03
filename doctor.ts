@@ -98,7 +98,9 @@ export async function runDoctor(): Promise<number> {
   try { env = readFileSync(ENV_FILE, 'utf8') } catch {}
   const val = (k: string, dflt: string) => env.match(new RegExp('^\\s*' + k + '\\s*=\\s*(\\S+)', 'm'))?.[1] ?? `unset → ${dflt}`
   info('')
-  info(`Files Mini App: ${val('TELEGRAM_WEBAPP_ENABLED', 'off')}   ·   write: ${val('TELEGRAM_WEBAPP_WRITE', 'off')}`)
+  // Two write levels, printed separately because they authorise different things: WRITE is file
+  // mutation, SETTINGS_WRITE is the settings/account screen (default: on wherever the app is).
+  info(`Files Mini App: ${val('TELEGRAM_WEBAPP_ENABLED', 'off')}   ·   file write: ${val('TELEGRAM_WEBAPP_WRITE', 'off')}   ·   settings write: ${val('TELEGRAM_WEBAPP_SETTINGS_WRITE', 'on with the app')}`)
   info(`transcription: ${val('TELEGRAM_TRANSCRIBE', 'off')}   ·   bang-shell: ${val('TELEGRAM_BANG_SHELL', 'off')}`)
 
   // 5. Codex failover prerequisites. Codex is optional, so a missing CLI is informational; once the

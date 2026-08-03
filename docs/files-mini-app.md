@@ -183,8 +183,14 @@ In `~/.claude/channels/telegram/.env` / `access.json`:
   App with client-side tabs. New `webapp.ts` endpoints (`/api/settings` + `/api/settings/set`, `/api/usage`,
   `/api/diff`) call daemon-injected deps (`webappReadSettings`/`webappSetSetting`/`webappReadUsage`/
   `webappReadDiff`) that reuse `loadAccess`/`parseStatusline`/budget/`sendDiff` logic. Reads inherit the
-  initData+allowlist auth; settings mutations also gate on `WEBAPP_WRITE`. Writable toggles: voice, mcp,
-  sessionPin, stream/replyMode (mode/model/effort are read-only — they drive the pane).
+  initData+allowlist auth; settings mutations gate on **`TELEGRAM_WEBAPP_SETTINGS_WRITE`** — a
+  SEPARATE flag from `TELEGRAM_WEBAPP_WRITE`, and defaulting **on** wherever the app is enabled.
+  The split is deliberate: `WEBAPP_WRITE` authorises whole-filesystem mutation, while a settings
+  change is a pref the same allowlisted user already flips from `/settings` with one tap — sharing
+  one flag meant a working settings screen could only be bought by opening up the filesystem.
+  Every write goes through `applySetting` in `daemon.ts` (the authority both surfaces share: it
+  owns validation and every side effect a change carries); `webappSetSetting` is a thin adapter.
+  Read-only by construction: mode/model/effort (they drive the pane).
 - **Rich Messages (Bot API 10.1)** — outbound replies can render natively (tables/headings/code) via
   `sendRichMessage` (`richmsg.ts`, raw HTTP — grammy 1.41.1 has no 10.1 types). Always on (no toggle),
   honored whenever markdown rendering is enabled. The markdown→HTML/chunk path is the fallback; the rich
