@@ -64,6 +64,25 @@ export function setPaneRestarting(pane: string, on: boolean): void {
 }
 export function isPaneRestarting(pane: string): boolean { return restartingPanes.has(pane) }
 
+// The SAME planned bounce, keyed by the thing that survives it. A restart owns a SESSION; the pane is
+// what it is allowed to change, and on the branch where /exit takes the pane with it, it does. Every
+// guard keyed on the pane id therefore stops covering the restart at the exact moment the restart
+// gets interesting — observed on 2026-08-03: the fresh pane was adopted (and announced "🔗 Connected")
+// from inside spawnSession, one statement before setPaneRestarting could mark it, and when that pane
+// then died the chat lane was declared lost and unbound while the restart was still the reason it had
+// no pane. A sid shield covers the whole flow — old pane, the gap, the new pane, and the failure —
+// because the sid is the one identifier that does not move.
+//
+// Set by restartPaneSessionCore only, and always released in its `finally` (plus a bounded grace on
+// the respawn branch, for the boot window a discovery sweep can still land in).
+const restartingSessions = new Set<string>()
+export function setSessionRestarting(sid: string, on: boolean): void {
+  if (on) restartingSessions.add(sid); else restartingSessions.delete(sid)
+}
+export function isSessionRestarting(sid: string | null | undefined): boolean {
+  return !!sid && restartingSessions.has(sid)
+}
+
 // Forget a dead pane's session mapping after its session moved to a NEW pane (restart-in-place
 // where the old pane died) — otherwise close-on-end later resolves the old pane to the still-live
 // session and closes its topic out from under it.
@@ -379,6 +398,7 @@ export async function closeTopicForPane(pane: string): Promise<void> {
   const sid = paneSessionCache.get(pane)
   if (!sid) return
   if (await paneForSession(sid)) return   // session migrated to another pane (restart respawn) — still live
+  if (isSessionRestarting(sid)) return    // a restart owns this session; its pane is allowed to be missing right now
   // A dead DM chat lane is reaped in EVERY mode: it lives only in its DM, so it needs no group and no
   // topic. This used to sit below an `isTopicMode()` return, which made the event path to chatLaneLost
   // dead in DM mode — the one mode chat lanes exist in (audit D7).
@@ -581,7 +601,10 @@ export async function reconcileTopics(panes: string[]): Promise<void> {
   for (const sid of listDismissedSessions()) if (!liveSids.has(sid)) undismissSession(sid)
   // Sessions mid-bounce (claude-update restart) are off the live-pane list but not dead —
   // exempt their sids so a slow restart sweep can't accumulate misses and close their topics.
-  const restartingSids = new Set<string>()
+  // Two sources, because a restart that lost its pane has no entry in the first: the pane→sid cache
+  // only answers for panes that still exist, and the branch where /exit takes the pane is precisely
+  // the one that needs exempting. restartingSessions is that branch's own record.
+  const restartingSids = new Set<string>(restartingSessions)
   for (const p of restartingPanes) { const s = paneSessionCache.get(p); if (s) restartingSids.add(s) }
   for (const t of listTopics()) {
     if (t.closed || liveSids.has(t.sessionId) || restartingSids.has(t.sessionId)) { topicMissCounts.delete(t.sessionId); continue }
@@ -616,6 +639,7 @@ export async function reconcileTopics(panes: string[]): Promise<void> {
   // rendering a corpse.
   for (const { chatId, sessionId } of listDmChatSessions()) {
     if (liveSids.has(sessionId)) { topicMissCounts.delete(sessionId); continue }
+    if (restartingSids.has(sessionId)) { topicMissCounts.delete(sessionId); continue }   // a restart owns it — see closeTopicForPane
     // Same positive-evidence rule as the row GC above, and for a sharper reason: losing a lane
     // BINDING is quieter than losing a row. Text relay keeps working (it routes by pane/focus) while
     // `tg send` starts refusing with "no chat surface", because file sends resolve through dmChat.

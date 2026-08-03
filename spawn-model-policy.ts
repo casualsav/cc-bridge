@@ -50,7 +50,7 @@ export function fablePolicy(pref: string | undefined): FablePolicy {
   return pref === 'off' ? 'refuse' : pref === 'allow' ? 'allow' : 'approve'
 }
 
-// The two toggle rows in 🧑‍💻 Coding session defaults render their STATE, not an instruction — the word
+// The two toggle rows in 🧑‍💻 Model defaults render their STATE, not an instruction — the word
 // is what is true now and a tap flips it (owner, 2026-07-29). Assembled here, and pinned by tests, for
 // the reason spawnCardHeader is: nothing automated reads these, so a reworded panel fails silently in
 // front of him rather than loudly in the suite.
@@ -209,18 +209,45 @@ export function decideEffort(requested: string | null, configuredDefault: string
 // gate has nothing to say about it. The order is the whole content — and the middle term is the one
 // that was wrong.
 //
-// REMEMBERED FIRST, ALWAYS, chat lane included. A session's own recorded alias is the only input here
-// that describes THAT session; nothing may override it, or a relaunch silently moves a session the
-// user never asked to move.
+// REMEMBERED FIRST, ALWAYS. A session's own recorded alias is the only input here that describes
+// THAT session; nothing may override it, or a relaunch silently moves a session the user never
+// asked to move.
 //
-// The coding-session default is skipped for a CHAT LANE. `spawnModel` is documented — on four
-// surfaces since v0.4.214 — as applying to the coding sessions agents launch and NOT to the lane
-// talking to the owner. It was read here anyway, so a lane with no recorded model came back on the
-// coding default: false exactly where a new user reads it first, since a fresh install has no
-// session-models.json at all and every lane on it is unremembered. Chat lanes therefore fall
-// straight to the floor, which belongs to no feature and moves nobody's default onto them.
-export function relaunchModel(remembered: string | null, configuredDefault: string | null, isChatLane: boolean, floor: string): string {
-  return remembered ?? (isChatLane ? floor : configuredDefault ?? floor)
+// THE CHAT LANE IS NOT AN EXCEPTION, as of v0.4.318 — it was one from v0.4.216, when `spawnModel`
+// was documented as governing only the sessions agents launch, so a lane with no recorded model
+// fell past the configured default to the floor. That floor is `opus`, and on 2026-08-03 it is what
+// a restarted chat lane came back on while the owner's default said something else. The setting is
+// now MODEL DEFAULTS and governs both roles (his ruling), so the exclusion — and the `isChatLane`
+// argument that carried it — is gone. `configuredDefault` reaches this function from the same
+// resolver the settings panel renders, so "what the panel shows" and "what a relaunch asserts" are
+// one value by construction; `floor` survives only for a caller that has no resolver to offer.
+export function relaunchModel(remembered: string | null, configuredDefault: string | null, floor: string): string {
+  return remembered ?? configuredDefault ?? floor
+}
+
+// ---- The configured defaults, resolved ----
+//
+// ONE resolver per dial, for the settings panel AND for every launch. They are here, pure, rather
+// than inline in daemon.ts because the acceptance rule for v0.4.318 is that the two agree, and a
+// rule stated as "remember to call the same helper" is a rule that lasts until the next call site.
+//
+// TOTAL BY CONSTRUCTION — an unset preference resolves to the fallback the panel already renders,
+// never to null. That is the property the whole fix rests on: the launch chains read these FIRST, so
+// if they could return null the chain would fall through to inheriting whatever pane holds focus,
+// which is precisely the 2026-08-03 failure. The owner's prefs.json that day held no spawnModel and
+// no spawnEffort at all, the panel showed Opus/high off these fallbacks, and every launch resolved
+// something else because it consulted the raw preference and found nothing.
+export function launchDefaultModel(pref: string | undefined, aliases: readonly string[]): string {
+  return pref && aliases.includes(pref) ? pref : AUTO_FALLBACK
+}
+
+// `standing` is `/effort default <level>` (default-effort.json), the SECOND term. It predates the
+// panel and its own confirmation promises that new and resumed sessions start there, so it is read
+// rather than replaced — and it is read HERE, so the panel renders the same answer the launch uses
+// whichever of the two stores the user actually set.
+export function launchDefaultEffort(pref: string | undefined, standing: string | null, levels: readonly string[]): string {
+  const usable = (v: string | null | undefined): v is string => !!v && levels.includes(v) && v !== 'auto'
+  return usable(pref) ? pref : usable(standing) ? standing : AUTO_EFFORT_FALLBACK
 }
 
 // ---- The spawn confirmation ----

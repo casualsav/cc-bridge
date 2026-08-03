@@ -112,6 +112,12 @@ export async function relayPromptToTelegram(prompt: PromptInfo, paneId: string |
   // headless pane falls back to the fleet surface — a select menu blocks the session until answered.
   const targets = await noticeTargets(paneId)
   if (targets.length === 0) return
+  // Say that a select menu was relayed, and from which pane. Permission prompts have logged this
+  // since they existed; these did not, so when the owner reported two approval cards for one
+  // /effort on 2026-08-03 the daemon log could not say whether a second one had even been sent —
+  // the same unattributable-duplicate class the outbound rules already forbid. One line, here,
+  // covers all three call sites.
+  process.stderr.write(`daemon: relaying select prompt (${prompt.options.length} opts) “${prompt.question}” from pane ${paneId} to ${targets.map(t => t.chat + (t.thread ? `#${t.thread}` : '')).join(',')}\n`)
 
   // The menu is detected from the PANE the instant it appears, but the message Claude wrote just
   // before an AskUserQuestion lands in the transcript a beat later — and that message is the CONTEXT

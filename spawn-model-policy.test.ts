@@ -252,23 +252,38 @@ test('a fixed effort default is unchanged, and so is inherit', () => {
 // wins, for a chat lane too. Both cases below are this box's real lane (1ede4baa, remembered
 // 'fable') — once under a fixed coding default and once under `auto`, which resolves to no alias at
 // all. Neither may move it.
-test('a remembered alias always wins, chat lane included', () => {
-  expect(relaunchModel('fable', 'opus', true, 'opus')).toBe('fable')     // this box's lane, fixed default
-  expect(relaunchModel('fable', null, true, 'opus')).toBe('fable')       // …and under auto
-  expect(relaunchModel('sonnet', 'opus', false, 'opus')).toBe('sonnet')  // an ordinary session
+// THE HEADLINE CASE on this box (owner, 2026-08-03): he runs /clear immediately before /restart, on
+// purpose — clearing first is how the relaunched lane avoids re-reading a whole backlog at Fable
+// rates. So a zero-turn transcript at restart time is the COMMON path here, not an edge, and it is
+// the path that has no transcript truth to read. The chain it falls into must be:
+//   the session's own remembered identity → the configured Model default → the floor.
+// and no hardcoded model may appear anywhere in it. Before v0.4.318 this exact flow returned a
+// literal 'opus' from resumeModelAlias, which is what put his Fable chat lane on Opus.
+test('clear-then-restart: a lane with a remembered identity comes back on IT, not the default', () => {
+  // His lane: remembered fable, Model defaults showing opus, floor opus. Fable, and nothing else.
+  expect(relaunchModel('fable', 'opus', 'opus')).toBe('fable')
+  // Same flow with the default set to fable and nothing remembered — the default, still never a guess.
+  expect(relaunchModel(null, 'fable', 'opus')).toBe('fable')
+  // And the floor only when there is neither.
+  expect(relaunchModel(null, null, 'opus')).toBe('opus')
 })
 
-// The leak this closes: a lane with nothing recorded (every lane on a fresh install — no
-// session-models.json exists yet) took the model configured for CODING sessions, on the first revive
-// a new user ever sees, under copy that says it does not.
-test('a chat lane with nothing remembered takes the floor, never the coding default', () => {
-  expect(relaunchModel(null, 'sonnet', true, 'opus')).toBe('opus')
-  expect(relaunchModel(null, null, true, 'opus')).toBe('opus')
+test('a remembered alias always wins', () => {
+  expect(relaunchModel('fable', 'opus', 'opus')).toBe('fable')     // this box's lane, fixed default
+  expect(relaunchModel('fable', null, 'opus')).toBe('fable')       // …and with nothing configured
+  expect(relaunchModel('sonnet', 'opus', 'opus')).toBe('sonnet')   // an ordinary session
 })
 
-test('an ordinary session with nothing remembered still takes the coding default', () => {
-  expect(relaunchModel(null, 'sonnet', false, 'opus')).toBe('sonnet')
-  expect(relaunchModel(null, null, false, 'opus')).toBe('opus')   // nothing configured: the floor
+// v0.4.318: the chat lane's exclusion is GONE, and this is the assertion that would have caught its
+// absence. There is no isChatLane argument any more — a lane and a coding session are one case here,
+// which is the whole content of the owner's rename to "Model defaults".
+test('anything with nothing remembered takes the configured default — lane and coding session alike', () => {
+  expect(relaunchModel(null, 'sonnet', 'opus')).toBe('sonnet')
+  expect(relaunchModel(null, 'fable', 'opus')).toBe('fable')
+})
+
+test('the floor is reached only when nothing is configured at all', () => {
+  expect(relaunchModel(null, null, 'opus')).toBe('opus')
 })
 
 // ---- the spawn confirmation ----

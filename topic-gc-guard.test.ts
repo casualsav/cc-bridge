@@ -46,7 +46,7 @@ mock.module('./proc.ts', () => ({
   sleep: async () => {},
 }))
 
-const { reconcileTopics, rebuildRowsFromStampedPanes, initTopicRuntime } = await import('./topic-runtime.ts')
+const { reconcileTopics, rebuildRowsFromStampedPanes, initTopicRuntime, setSessionRestarting } = await import('./topic-runtime.ts')
 // A reap that DOES fire notifies its owner, so the lane tests below need a channel wired in. Minimal
 // on purpose: these tests are about what the store keeps, not what Telegram is told.
 initTopicRuntime({ sendText: async () => ({ messageId: '1' }) } as unknown as Parameters<typeof initTopicRuntime>[0])
@@ -94,6 +94,29 @@ test('a scan that DID see panes still reaps a lane whose session is gone', async
   _resetForTest({ groupChatId: '-100123', topics: {}, dmChat: { '837047563': { sessionId: 'eeee0002', cwd: '/srv/chat' } } })
   panes = { '%21': { sid: 'ffff0001', cmd: 'claude' } }   // a live pane, but not the lane's
   for (let i = 0; i < 3; i++) await reconcileTopics(['%21'])
+  expect(getDmChatSession('837047563')).toBeUndefined()
+})
+
+// v0.4.318 — the restart shield, keyed by SESSION id.
+//
+// This is the 2026-08-03 chat-lane loss, reduced: the owner's /restart took the pane with it, the
+// respawned pane died, and the lane was declared lost and unbound WHILE the restart was still the
+// reason it had no pane. The scan is conclusive and the lane's sid is on no pane — everything the
+// reap wants — and it must still not fire, because a restart owns this session right now. The
+// previous shield was keyed on the pane id, which is exactly the identifier a restart is allowed to
+// change, so it stopped covering the flow at the moment the flow got interesting.
+//
+// Both halves are asserted: held while restarting, reaped once the shield is released. A test that
+// only checked the first half would pass against a shield that never lets go.
+test('a chat lane is NOT reaped while a restart owns its session', async () => {
+  _resetForTest({ groupChatId: '-100123', topics: {}, dmChat: { '837047563': { sessionId: 'eeee0009', cwd: '/srv/chat' } } })
+  panes = { '%29': { sid: 'ffff0009', cmd: 'claude' } }   // conclusive scan; the lane's sid is on no pane
+  setSessionRestarting('eeee0009', true)
+  for (let i = 0; i < 3; i++) await reconcileTopics(['%29'])
+  expect(getDmChatSession('837047563')).toEqual({ sessionId: 'eeee0009', cwd: '/srv/chat' })
+  // The restart gave up — the shield goes, and the ordinary backstop reaps as it always did.
+  setSessionRestarting('eeee0009', false)
+  for (let i = 0; i < 3; i++) await reconcileTopics(['%29'])
   expect(getDmChatSession('837047563')).toBeUndefined()
 })
 

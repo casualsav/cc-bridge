@@ -37,7 +37,7 @@ import { normalizeCommandOutput } from './ansi.ts'
 import { planSlash } from './slash-policy.ts'
 import { preserveGlobalEffort, reconcileEffortScope } from './effort-scope.ts'
 import { planDrift, driftStateAfter, type DriftState } from './drift-guard.ts'
-import { decideModel, decideEffort, upgradeNeedsConfirm, heldSpawnModel, heldSpawnNeedsLine, holdTapData, parseHoldTap, launchFallback, spawnCardHeader, relaunchModel, fablePolicy, fableRowState, onOff, type FablePolicy, AUTO_FALLBACK, AUTO_EFFORT_FALLBACK, FABLE, type ModelDecision, type HoldOutcome } from './spawn-model-policy.ts'
+import { decideModel, decideEffort, upgradeNeedsConfirm, heldSpawnModel, heldSpawnNeedsLine, holdTapData, parseHoldTap, launchFallback, spawnCardHeader, relaunchModel, launchDefaultModel, launchDefaultEffort, fablePolicy, fableRowState, onOff, type FablePolicy, AUTO_FALLBACK, AUTO_EFFORT_FALLBACK, FABLE, type ModelDecision, type HoldOutcome } from './spawn-model-policy.ts'
 import { renderSessionsView } from './sessions-view.ts'
 import { detectCurrentMode, onNormalPrompt, inputBoxContent, isModelSwitchConfirm, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType } from './prompt.ts'
 import { modelSwitchEvidence, findSessionFile, resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, turnAnchorUuid, liveSubagents, currentTurnFeed, currentTurnActivity, concludedTurnWork, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
@@ -119,7 +119,8 @@ import {
   initTopicRuntime, sessionForPane, paneForSession, ensureSessionTopic, closeTopicForPane, markTopicDeleted, markTopicClosePending,
   reconcileTopics, rebuildRowsFromStampedPanes, refreshTopicTitles, topicThreadFor, emitTopicTyping, armTopicTyping, stopTopicTyping, outboundTargetsFor,
   stampPaneSession, topicBranchCache, generalAnchorLost,
-  setPaneRestarting, isPaneRestarting, releasePaneSession, reopenSessionTopic,
+  setPaneRestarting, isPaneRestarting, setSessionRestarting, isSessionRestarting,
+  releasePaneSession, reopenSessionTopic,
   retriggerTopicTyping, paneClaudeLive,
 } from './topic-runtime.ts'
 import { latchMode, type ModeLatch } from './mode-latch.ts'
@@ -2547,6 +2548,12 @@ async function announceAdopted(paneId: string): Promise<void> {
   // re-adopts the same pane seconds later stays quiet too — it is the same planned bounce, and the
   // restart's own message already ends with ✅.
   if (isPaneRestarting(paneId)) return
+  // …and the pane flag is not enough, because the pane a restart respawns into is adopted from INSIDE
+  // spawnSession — one statement before the caller can mark it. That is how 2026-08-03 produced two
+  // "🔗 Connected" for one /restart: this guard read false for the fresh pane, and then read false
+  // again when the fresh pane died and discovery adopted a different one. The session id is the
+  // identifier that survives the bounce, so ask it instead.
+  if (isSessionRestarting(await sessionForPane(paneId, false).catch(() => null))) return
   const setup = await settledFirstRunScreen(paneId)
   if (setup) {
     notifyChats('🔗 Found a Claude session on first-run setup — I\'ll walk you through it here ' +
@@ -6217,7 +6224,7 @@ async function handleCall(
           : ''
         let newPane: string | null
         if (!t0.agentSessionId) {
-          newPane = await spawnSession(t0.cwd, '', sid, topicAccount(t0), topicAgent(t0), undefined, { model: refreshSpawnModel(sid), effort: null })
+          newPane = await spawnSession(t0.cwd, '', sid, topicAccount(t0), topicAgent(t0), undefined, { model: refreshSpawnModel(), effort: null })
           text = `reopened @${t0.name} (${sid8}) fresh in ${t0.cwd} — the session never completed a turn, so there was nothing to resume; same name and topic.${othersNote}`
         } else {
           const resumeAlias = topicAgent(t0) === 'claude' ? reopenResumeModelAlias(t0.agentSessionId) : null
@@ -7016,13 +7023,24 @@ function modelPolicyPrefs(): { agentAllowed: string[]; quietUntil: number; auto:
 // on Haiku 4.5. So an unset pref resolves to the same floor a spawn would have fallen to anyway, the
 // panel always ticks the value a session would actually get, and there is no state where the default
 // is a question mark.
+// THE model/effort defaults, for the settings panel AND for every launch that has no better answer.
+// One resolver for both, deliberately: the acceptance rule for v0.4.318 is that what ⚙️ → 🧑‍💻 DISPLAYS
+// is what a fresh session gets, and the only way two surfaces cannot disagree is that there is one
+// function. Both are TOTAL — an unset preference resolves to the shown fallback rather than to null —
+// which is what makes them usable as the first term of a launch's precedence chain: on 2026-08-03 the
+// owner's prefs.json held no spawnModel/spawnEffort at all, the panel read Opus/high off these
+// fallbacks, and every launch resolved something else entirely because it consulted the raw pref and
+// found nothing. A nullable resolver here would rebuild that gap.
 function configuredSpawnModel(): string {
-  const pref = loadAccess().spawnModel
-  return pref && MODEL_ALIASES.includes(pref) ? pref : AUTO_FALLBACK
+  return launchDefaultModel(loadAccess().spawnModel, MODEL_ALIASES)
 }
+// `/effort default <level>` (default-effort.json) is the SECOND term, not a rival store: it predates
+// the 🧑‍💻 panel and promises in its own confirmation that new and resumed sessions start there, so
+// dropping it would break a documented lever to fix a different one. Order is panel-pref → /effort
+// default → the shown fallback, and the panel renders this same chain, so the promise and the display
+// agree whichever store the user actually set.
 function configuredSpawnEffort(): string {
-  const pref = loadAccess().spawnEffort
-  return pref && EFFORT_LEVELS.includes(pref) && pref !== 'auto' ? pref : AUTO_EFFORT_FALLBACK
+  return launchDefaultEffort(loadAccess().spawnEffort, defaultEffortPref, EFFORT_LEVELS)
 }
 // Whether an AGENT's spawn rides the spawner's own dials. Human-originated spawns never ask.
 const spawnDialsAuto = (): boolean => loadAccess().spawnAuto === true
@@ -7442,6 +7460,10 @@ function isEffortConfirm(cap: string): boolean {
 // Keyed by paneId so concurrent effort confirms on different panes don't clobber each other; the
 // tapped button carries its own paneId, so a Yes/No resolves the confirm for the right session.
 const pendingEffortConfirm = new Map<string, { level: string; chatId: string; messageId: number; thread?: number }>()
+// How long injectEffortChange waits for the "Change effort level?" modal before concluding the
+// change applied outright. Generous against a busy TUI, bounded so a wedged pane can't hang the
+// command: the modal is a local repaint, not a round trip.
+const EFFORT_CONFIRM_WAIT_MS = 6_000
 
 // Inject `/effort <level>` into the target session and detect whether CC raised the mid-conversation
 // confirmation. Returns 'confirm' (a Yes/No was relayed — answer pending) or 'applied' (took effect
@@ -7453,10 +7475,25 @@ async function injectEffortChange(t: CommandTarget, level: string, chat_id: stri
   // dedicated card below and the user got TWO different-looking button sets for one confirm.
   pendingEffortConfirm.set(t.paneId, { level, chatId: chat_id, messageId: 0, thread: t.replyThread })
   await scopedEffortChange(t.paneId, 'injectEffortChange', () => injectSlash(t.paneId, t.watcher, `/effort ${level}`))
-  const cap = await capturePane(t.paneId).catch(() => '')
-  if (cap && isEffortConfirm(cap)) {
-    await relayEffortConfirm(t, level, chat_id)
-    return 'confirm'
+  // ONE capture used to decide this, and a modal that had not painted yet read as "no modal": the
+  // reservation was released, the bridge acked "⚡ Effort switched to …", and the modal then landed
+  // in front of the generic prompt relay with nothing suppressing it — two different-looking
+  // approvals for one command, which is what the owner saw on 2026-08-03. The screen is the slow
+  // party here, so WAIT for it: poll to the deadline for the modal, and only conclude "applied" when
+  // the pane is back at a normal prompt (a fresh session really does apply /effort with no confirm).
+  // Undecided at the deadline keeps the reservation and reports 'applied' — an unsuppressed second
+  // card is the failure this exists to prevent, and holding a stale reservation costs only the next
+  // /effort, which supersedes it anyway (dismissPendingEffortConfirm).
+  const deadline = Date.now() + EFFORT_CONFIRM_WAIT_MS
+  for (;;) {
+    const cap = await capturePane(t.paneId).catch(() => '')
+    if (cap && isEffortConfirm(cap)) {
+      await relayEffortConfirm(t, level, chat_id)
+      return 'confirm'
+    }
+    if (Date.now() >= deadline) break
+    if (cap && onNormalPrompt(cap) && !detectUserPrompt(cap)) break   // settled, no modal coming
+    await sleep(250)
   }
   pendingEffortConfirm.delete(t.paneId)   // no modal — release the reservation
   rememberEffort(t.paneId, level)   // applied directly (fresh session) — persist it for resume/restart
@@ -7490,6 +7527,9 @@ async function relayEffortConfirm(t: CommandTarget, level: string, chat_id: stri
       'cached for the current level — switching re-reads the full history on your next message.</blockquote>',
       { buttons: kbToButtons(kb), ...(t.replyThread ? { threadId: String(t.replyThread) } : {}) })
     pendingEffortConfirm.set(t.paneId, { level, chatId: chat_id, messageId: Number(sent.messageId), thread: t.replyThread })
+    // The other half of the pair the select-prompt line now logs: with both, a double approval names
+    // its two producers instead of being deducible from nothing.
+    process.stderr.write(`daemon: relaying effort confirm (${level}) from pane ${t.paneId} to ${chat_id}\n`)
   } catch (e) { process.stderr.write(`daemon: effort-confirm relay failed: ${e}\n`) }
 }
 
@@ -8542,10 +8582,31 @@ async function guardModelDrift(pane: string, sid: string, file: string): Promise
 // Both fallbacks land on opus: a conversation with context may never end up on Haiku, and may not
 // drop to the Fable floor either — fable is for FRESH spawns. Re-asserting fable for a conversation
 // already ON fable is preservation, not a switch, so that one passes through.
-async function resumeModelAlias(pane: string, cwd: string | null): Promise<string> {
+//
+// NO TRUTH IS NOT A REASON TO GUESS. This returned a hardcoded 'opus' when the transcript named no
+// model, and on 2026-08-03 that is exactly what a /restart asserted onto the owner's chat lane: he
+// had run /clear four seconds earlier, so the conversation was a fresh file holding one command
+// marker and zero assistant rows, `latestModelId` was null, and the lane came back on a model
+// nobody had chosen. An empty conversation has no model of its own to preserve — which makes it a
+// LAUNCH, and a launch takes the configured default like every other one. The haiku clamp keeps its
+// hardcode: it is a floor on a real reading, not a substitute for a missing one.
+// `observed` separates the two answers this can give, and the separation is the point: an alias read
+// off the transcript is a FACT about that conversation and may be recorded as its identity; anything
+// else is a launch DECISION and may not. Recording a decision is how session-models.json came to hold
+// `27f3ff03: opus` for the owner's Fable chat lane — the buggy restart guessed opus, the caller
+// converged the memory onto the guess, and the remembered term outranks the default forever after.
+// A fallback that writes itself into the memory it falls back to cannot be corrected by fixing the
+// fallback.
+async function resumeModelAlias(pane: string, cwd: string | null, sid: string | null): Promise<{ alias: string; observed: boolean }> {
   const file = cwd ? await transcriptForPane(pane, cwd).catch(() => null) : null
   const alias = aliasForModelId(file ? latestModelId(file) : null)
-  return !alias || alias === 'haiku' ? 'opus' : alias
+  if (alias) return { alias: alias === 'haiku' ? 'opus' : alias, observed: true }
+  // Nothing to observe — the /clear-then-/restart case, which is this owner's STANDARD flow (he
+  // clears so the relaunch doesn't re-read a backlog at Fable rates), so it is the common path here
+  // and not an edge. Order: the session's own remembered identity, the configured Model default, the
+  // floor. No hardcoded model anywhere in it.
+  const remembered = sid ? sessionModels.get(sid) ?? null : null
+  return { alias: relaunchModel(remembered, configuredSpawnModel(), SPAWN_MODEL_FLOOR), observed: false }
 }
 
 // Same transcript-truth read, for `tg reopen`: there's no live pane to have stamped @tg_transcript,
@@ -8662,9 +8723,12 @@ async function restartPaneSessionCore(pane: string, id: string | null, accountOv
   // Read while the OLD transcript is still the pane's — a resume carries its conversation, so it must
   // carry that conversation's model too. Cross-engine (id null) is a fresh launch on the other
   // provider and takes no model from here.
-  const resumeAlias = agent === 'claude' && id !== null
-    ? resumeCliModel(harness, await resumeModelAlias(pane, cwd))
-    : null
+  const resumeRead = agent === 'claude' && id !== null ? await resumeModelAlias(pane, cwd, sid) : null
+  const resumeAlias = resumeRead ? resumeCliModel(harness, resumeRead.alias) : null
+  // Only a model READ off the conversation may be written back as that session's identity — see
+  // resumeModelAlias. A fallback recorded here outranks the configured default on every future
+  // relaunch, which is how the owner's Fable lane ended up remembered as opus.
+  const resumeObserved = resumeRead?.observed === true
   const resumeModelArgs = resumeAlias
     ? spawnModelFlag(resumeAlias, MODEL_ALIAS_IDS, true)?.split(/\s+/) ?? []
     : []
@@ -8675,8 +8739,14 @@ async function restartPaneSessionCore(pane: string, id: string | null, accountOv
   if (sid) { recordSessionMode(sid, mode); recordSessionEffort(sid, effort) }
   const swapStartMs = Date.now()   // cross-engine only: lower bound for "this is the NEW engine's transcript"
   let relaunched = false           // the in-place relaunch line actually put an agent back in the pane
+  let respawnedInto: string | null = null   // set only once a RESPAWNED pane has been seen back at a prompt
   let launchVerified = harnessOverride === undefined && harness.provider === 'anthropic'
   setPaneRestarting(pane, true)
+  // The sid shield, held for the WHOLE flow — including the branch below where /exit takes the pane
+  // and the session moves to a new one. The pane flag cannot cover that branch: the old pane's id
+  // stops being the session's, and the new pane is adopted from inside spawnSession, before any
+  // statement here could mark it. See setSessionRestarting.
+  if (sid) setSessionRestarting(sid, true)
   try {
     const run = async () => {
       await sendKeys(pane, agentExitKeys(currentAgent))
@@ -8738,10 +8808,11 @@ async function restartPaneSessionCore(pane: string, id: string | null, accountOv
       // from the remembered alias, which is exactly the stale value this function is correcting.
       logLaunch('resume-respawn', `${pane}→new-window`,
         resumeAlias ? `dials(${resumeAlias})` : 'cli-default', `spawnSession ${cwd} ${id !== null ? `--resume ${id}` : '(fresh)'}`)
-      const fresh = await spawnSession(cwd, id !== null ? `--resume ${id}` : '', id !== null ? (sid ?? undefined) : undefined, account, agent, harness,
+      const launch = () => spawnSession(cwd, id !== null ? `--resume ${id}` : '', id !== null ? (sid ?? undefined) : undefined, account, agent, harness,
         resumeAlias ? { model: resumeAlias } : undefined)
+      const fresh = await launch()
       if (!fresh) return null
-      if (resumeAlias && sid) recordSessionModel(sid, resumeAlias)   // the memory converges on what we just asserted
+      if (resumeAlias && sid && resumeObserved) recordSessionModel(sid, resumeAlias)   // the memory converges on what the CONVERSATION said — never on a fallback (resumeModelAlias)
       if (id === null && sid) await stampPaneSession(fresh, sid)
       // The session lives in `fresh` now — drop the dead pane's registry + session mapping so
       // close-on-end can't resolve it back to the (live) session and close its topic.
@@ -8769,13 +8840,39 @@ async function restartPaneSessionCore(pane: string, id: string | null, accountOv
         await rebindCrossEngineSession(fresh, cwd, sid, agent, swapStartMs)
       }
       process.stderr.write(`daemon: restart: pane ${pane} died on /exit — respawned session in ${fresh} (${cwd})\n`)
-      return fresh   // mode + effort re-seeded by spawnSession's resume branch (sessionModes/sessionEfforts)
+      // A LAUNCHED PANE IS NOT A LIVE SESSION. This branch used to return here, and the caller's ✅
+      // fired on the strength of `spawnSession` having returned a pane id. On 2026-08-03 that ✅ was
+      // sent at 02:22:52 and the pane was gone by 02:23:00 — the owner was told his chat lane had
+      // restarted, watched it die, and got the plain session-ended message 39 seconds later. The
+      // in-place branch below has always ended with the pane back at a prompt; this one now has to
+      // earn the same claim. `paneBackUp` is the same check the /restart-all tail uses.
+      if (await waitForPaneBackUp(fresh)) { respawnedInto = fresh; return fresh }
+      // ONE second attempt, then the truth. A restart exists to leave the session running, so the
+      // bridge relaunches it itself rather than handing the owner a dead lane and a message telling
+      // him to send another one — the 2026-08-03 lane came back on its own 60s later anyway, via a
+      // path he could not see and after the plain "session ended" notice had already fired. The
+      // retry is bounded at one because a launch that dies twice is a launch that is going to keep
+      // dying, and the honest failure is more use to him than a loop.
+      process.stderr.write(`daemon: restart: respawned pane ${fresh} did not stay up — relaunching once\n`)
+      const second = await launch()
+      if (second && await waitForPaneBackUp(second)) {
+        offMcpPanes.add(second)
+        setPaneRestarting(second, true)
+        setTimeout(() => setPaneRestarting(second, false), 30_000)
+        if (sid) await reopenSessionTopic(sid)
+        if (pane === focus.activePaneId) adoptPane(second, 'pane-restart')
+        process.stderr.write(`daemon: restart: second attempt brought the session up in ${second} (${cwd})\n`)
+        respawnedInto = second
+        return second
+      }
+      process.stderr.write(`daemon: restart: respawned pane never came back up (two attempts) — reporting the restart down\n`)
+      return null
     }
     // The pane survived /exit but no agent came back into it: the session is DOWN at a shell. Say so
     // — driving mode/effort keystrokes or recording a model here is how a dead session got reported
     // as refreshed. Returning null hands it to the caller's health check and second chance.
     if (!relaunched) { process.stderr.write(`daemon: restart: pane ${pane} is at a shell after the relaunch — reporting it down\n`); return null }
-    if (resumeAlias && sid) recordSessionModel(sid, resumeAlias)   // the memory converges on what we just asserted
+    if (resumeAlias && sid && resumeObserved) recordSessionModel(sid, resumeAlias)   // the memory converges on what the CONVERSATION said — never on a fallback (resumeModelAlias)
     // If the resume popped the post-update "Resume session" picker, the pane is sitting on the menu —
     // don't drive mode/effort keystrokes into it. It's relayed as buttons; the resumesel tap restores
     // both dials once the user picks (restoreResumedDials).
@@ -8783,7 +8880,17 @@ async function restartPaneSessionCore(pane: string, id: string | null, accountOv
     if (agent === 'claude' && mode !== 'default') await switchToMode(pane, mode, watcher)
     if (agent === 'claude') await reapplyEffort(pane, effort, watcher)
     return pane
-  } finally { setPaneRestarting(pane, false) }
+  } finally {
+    setPaneRestarting(pane, false)
+    // The sid shield outlives the call by a grace, and only on the branch that needs it: a respawn
+    // hands `fresh` to a discovery sweep that has not listed it yet, and the same 30s boot window the
+    // pane flag already uses is what that gap costs. Released immediately when the pane never moved —
+    // holding it there would suppress a real death for half a minute after a failed in-place restart.
+    if (sid) {
+      if (respawnedInto) setTimeout(() => setSessionRestarting(sid, false), 30_000)
+      else setSessionRestarting(sid, false)
+    }
+  }
 }
 
 // `/update claude` — do the whole thing, no button, no manual relaunch:
@@ -8931,15 +9038,35 @@ async function paneBackUp(pane: string): Promise<boolean> {
   return !!cap && (onNormalPrompt(cap) || isResumeSessionPrompt(cap))
 }
 
+// The same check, waited out. A freshly respawned pane is not up the instant tmux hands back its id —
+// a cold boot with a trust store to write and a conversation to replay takes seconds — and it can also
+// come up and then die, which is the case that made this necessary (2026-08-03: alive at t+2s, gone at
+// t+10s). So this is not "poll until true": it wants the pane at a prompt AND still there a moment
+// later. `false` means the caller may not claim the session is back.
+const RESPAWN_HEALTH_WINDOW_MS = 30_000
+const RESPAWN_SETTLE_MS = 5_000
+async function waitForPaneBackUp(pane: string): Promise<boolean> {
+  const deadline = Date.now() + RESPAWN_HEALTH_WINDOW_MS
+  while (Date.now() < deadline) {
+    if (await paneBackUp(pane).catch(() => false)) {
+      await sleep(RESPAWN_SETTLE_MS)
+      return await paneBackUp(pane).catch(() => false)
+    }
+    if (!(await paneAlive(pane).catch(() => true))) return false   // the pane is GONE — nothing will bring it back here
+    await sleep(1000)
+  }
+  return false
+}
+
 // One session under restart. `id` is the Claude conversation to resume, or null when there is
 // nothing to resume (the zero-turn refresh lane) — a null id must never reach restartPaneSessionCore,
 // where it means a cross-ENGINE takeover instead.
 type RestartTarget = { pane: string; sid: string | null; name: string; id: string | null; cwd: string | null }
 
 // The model a refresh asserts when it launches a session with NO conversation to carry one in: the
-// /settings 🧑‍💻 coding-session default (validated), else the floor. It never bottoms out at null — a launch
-// with no --model at all hands the choice to the CLI's own default, which is how a reopen came back
-// on Haiku 4.5 and dropped the 1M window with it.
+// configured Model default, else the floor. It never bottoms out at null — a launch with no --model
+// at all hands the choice to the CLI's own default, which is how a reopen came back on Haiku 4.5 and
+// dropped the 1M window with it.
 //
 // It deliberately does NOT consult sessionModels. That memory is keyed by the bridge's session id,
 // and a session with no conversation has no model history of its own — so any hit is necessarily
@@ -8948,12 +9075,10 @@ type RestartTarget = { pane: string; sid: string | null; name: string; id: strin
 // alias was opus (sessionForPane reports a stamp verbatim; nothing validates that it still names a
 // live session).
 //
-// It takes a sid only to ask one question of it: is this a CHAT LANE? The coding-session default does
-// not apply to one, and this is one of the two sites that read it anyway — see relaunchModel.
-function refreshSpawnModel(sid: string | null): string {
-  const pref = loadAccess().spawnModel
-  return relaunchModel(null, pref && MODEL_ALIASES.includes(pref) ? pref : null,
-    sid != null && isChatLaneSession(sid), SPAWN_MODEL_FLOOR)
+// It no longer takes a sid: the only question it asked one was "is this a chat lane?", and the
+// answer stopped changing the outcome when Model defaults became both roles' default (v0.4.318).
+function refreshSpawnModel(): string {
+  return relaunchModel(null, configuredSpawnModel(), SPAWN_MODEL_FLOOR)
 }
 
 // The tail every restart flow shares: health-check each session back to a prompt, give the ones that
@@ -9004,7 +9129,7 @@ async function settleRestartedSessions(
     const alive = await paneAlive(t.pane).catch(() => false)
     const fresh = !alive && t.sid && t.cwd
       ? await spawnSession(t.cwd, t.id ? `--resume ${t.id}` : '', t.sid, topicAccount(getTopicBySession(t.sid)), topicAgent(getTopicBySession(t.sid)),
-          undefined, t.id ? undefined : { model: refreshSpawnModel(t.sid) })
+          undefined, t.id ? undefined : { model: refreshSpawnModel() })
       : null
     if (fresh) { t.pane = fresh; if (t.sid) await reopenSessionTopic(t.sid); retried.push(t) }
     else if (alive) retried.push(t)
@@ -9088,7 +9213,7 @@ async function relaunchFreshSession(t: RestartTarget): Promise<string | 'untouch
   if (t.sid) { recordSessionMode(t.sid, mode); recordSessionEffort(t.sid, effort) }
   // Floor chain only — see refreshSpawnModel for why a remembered alias can never be about this
   // launch. That also retires the old "never Haiku" guard here: the floor can't produce haiku.
-  const model = refreshSpawnModel(t.sid ?? null)
+  const model = refreshSpawnModel()
   setPaneRestarting(t.pane, true)
   try {
     const watcher = t.pane === focus.activePaneId ? focus.paneWatcher : null
@@ -10230,7 +10355,7 @@ function settingsText(): string {
     `📌 Pinned message — <b>${a.sessionPin !== false ? 'on' : 'off'}</b>\n` +
     `🧷 Preferred mode — <b>${listAccounts().length > 1 ? 'per account' : defModeLabel(MAIN_ACCOUNT.configDir)}</b>\n` +
     `🧹 <code>/clear</code> approval — <b>${a.confirmReset === false ? 'off' : 'on'}</b>\n` +
-    `🧑‍💻 Coding session defaults — <b>${spawnDefaultsSummary()}</b>\n` +
+    `🧑‍💻 Model defaults — <b>${spawnDefaultsSummary()}</b>\n` +
     (WEBAPP_ENABLED ? `🗂 File browser — <b>${a.fileBrowser === false ? 'off' : 'on'}</b>\n` : '') +
     (isTopicMode() ? `📂 Base folder — <b>${escapeHtml(baseFolderFull())}</b>\n` : '') +
     (isTopicMode() && AGENT_BUS_PIN_UI ? `☎️ Agent bus — <b>${a.switchboard === false ? 'off' : 'on'}</b>\n` : '') +
@@ -10252,7 +10377,7 @@ function settingsMarkdown(): string {
     ['📌 Pinned message', a.sessionPin !== false ? 'on' : 'off'],
     ['🧷 Preferred mode', listAccounts().length > 1 ? 'per account' : defModeLabel(MAIN_ACCOUNT.configDir)],
     ['🧹 /clear approval', a.confirmReset === false ? 'off' : 'on'],
-    ['🧑‍💻 Coding session defaults', spawnDefaultsSummary()],
+    ['🧑‍💻 Model defaults', spawnDefaultsSummary()],
     ...(WEBAPP_ENABLED ? [['🗂 File browser', a.fileBrowser === false ? 'off' : 'on'] as [string, string]] : []),
     ...(isTopicMode() ? [['📂 Base folder', baseRowValue()] as [string, string]] : []),
     ...(isTopicMode() && AGENT_BUS_PIN_UI ? [['☎️ Agent bus', a.switchboard === false ? 'off' : 'on'] as [string, string]] : []),
@@ -10264,7 +10389,7 @@ function settingsMarkdown(): string {
     '📌 <b>Pinned message</b> — the status card pinned to the top of this chat.',
     '🧷 <b>Preferred mode</b> — the permission mode NEW sessions launch in (/mode is the live dial).',
     '🧹 <b>/clear approval</b> — /clear and /new ask for a Yes/No tap first.',
-    '🧑‍💻 <b>Coding session defaults</b> — the model/effort every CODING session launches on: the mini-app <b>+</b>, a new topic, an agent\'s <code>tg spawn</code>. It does NOT change this chat lane.',
+    '🧑‍💻 <b>Model defaults</b> — the model/effort EVERY session launches on: this chat, the mini-app <b>+</b>, a new topic, an agent\'s <code>tg spawn</code>. A session that already has its own model keeps it.',
     ...(WEBAPP_ENABLED ? ['🗂 <b>File browser</b> — the Files tab in the Mini App. Off removes it (and its file API) entirely; the Sessions/Scheduled/Settings tabs stay.'] : []),
     ...(isTopicMode() ? ['📂 <b>Base folder</b> — new forum topics are created as subfolders of this folder.'] : []),
     ...(isTopicMode() && AGENT_BUS_PIN_UI ? ['☎️ <b>Agent bus</b> — the live roster line on the pinned card. Sessions can still hand work to each other with <code>tg ask</code>.'] : []),
@@ -10334,9 +10459,15 @@ function settingsKeyboard(): InlineKeyboard {
   return kb
 }
 
-// 🧑‍💻 Coding session defaults sub-panel (settings → 🧑‍💻): the model/effort every CODING session
-// boots with — the mini-app +, a new topic, and an agent's `tg spawn`. Preference only, read at spawn
-// time; it never touches a live pane and it is NOT the chat lane's model.
+// 🧑‍💻 Model defaults sub-panel (settings → 🧑‍💻): the model/effort every session boots with — the chat
+// lane, the mini-app +, a new topic, and an agent's `tg spawn`. Preference only, read at launch time;
+// it never touches a live pane.
+//
+// WHAT THIS PANEL SHOWS IS WHAT A LAUNCH GETS — the acceptance rule for v0.4.318, and the reason both
+// values render through configuredSpawnModel/configuredSpawnEffort rather than off `loadAccess()`
+// directly. Those resolvers are what every launch path now reads too, so an unset preference cannot
+// mean Opus/high on this panel and something else at the pane, which is exactly what it meant on
+// 2026-08-03. Renamed from "Coding session defaults" with the chat lane's exclusion (his ruling).
 //
 // HEADER, VALUES, BUTTONS — no help text, by ruling (2026-07-29). The panel had grown four italic
 // paragraphs explaining its own knobs, which is what a knob needing a paragraph is telling you: two of
@@ -10344,7 +10475,7 @@ function settingsKeyboard(): InlineKeyboard {
 // their own labels.
 function spawnDefaultsText(): string {
   const a = loadAccess()
-  return `🧑‍💻 <b>Coding session defaults</b>\n\n` +
+  return `🧑‍💻 <b>Model defaults</b>\n\n` +
     `🧠 Model — <b>${escapeHtml(configuredSpawnModel())}</b>\n` +
     `⚡ Effort — <b>${escapeHtml(configuredSpawnEffort())}</b>\n` +
     `🦾 Auto mode (agent picks) — <b>${onOff(a.spawnAuto === true)}</b>\n` +
@@ -11005,22 +11136,28 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
     try { await exec('tmux', ['has-session'], { timeout: 2000 }) }
     catch { await exec('tmux', ['new-session', '-d', '-s', 'claude-tg', '-x', '220', '-y', '50', '-c', dir], { timeout: 5000 }) }
     if (agent === 'claude') ensureFolderTrusted(dir, account)   // Claude-specific trust store (per account); Codex uses launch sandbox policy
-    // A brand-new Claude session (not --resume/-c) inherits the focused session's model/effort/mode.
-    // Which rule ends up choosing the model, tracked as it is decided so the launch log can name it.
+    // A brand-new Claude session (not --resume/-c) takes the CONFIGURED model/effort defaults, and
+    // inherits only the focused session's permission MODE.
+    //
+    // Model and effort used to inherit too, with the configured default demoted to filling a gap the
+    // capture left. That precedence is what produced 2026-08-03: a tmux bounce put focus on a
+    // hand-launched pane running fable/xhigh, and the next two launches — the owner's chat lane and
+    // his general session — both copied it, while his configured Opus/high was consulted for neither.
+    // Inheritance is a guess about intent that is only ever right by luck; the panel value is the
+    // answer he actually gave, and after his ruling it governs BOTH roles. Mode still inherits: it is
+    // a property of how the fleet is being driven right now, not a per-session preference, and it has
+    // its own standing store (lastFocusedMode) for the cold case.
+    //
+    // Both resolvers are total, so this chain never reaches a CLI default — which is the point.
+    // An explicit dial (tg spawn --model, the mini-app +) still outranks all of it, below.
     let modelSource = 'cli-default'
     let inherit = agent === 'claude' && !extra && focus.activePaneId
       ? await captureInheritedSettings(focus.activePaneId, focus.paneWatcher)
       : null
-    if (inherit?.model) modelSource = `inherit(${focus.activePaneId})`
-    // A brand-new session must still land in the user's standing mode AND effort preferences even
-    // when there's no live pane to inherit from (cold start) or the capture momentarily missed them
-    // (source pane mid-turn / off a prompt screen). Claude Code restores neither for us — effort
-    // not even on --resume — so fill any gap from the persisted preference. Without this, the first
-    // session after a daemon restart boots at 'default' mode / 'high' effort regardless of preference.
     if (agent === 'claude' && !extra) {
       const mode = inherit && inherit.mode !== 'default' ? inherit.mode : lastFocusedMode
-      const effort = inherit?.effort ?? fallbackEffort()
-      if (mode !== 'default' || effort) inherit = { model: inherit?.model ?? null, effort, mode }
+      inherit = { model: configuredSpawnModel(), effort: configuredSpawnEffort(), mode }
+      modelSource = 'configured-default'
     }
     // A resumed/continued session keeps its model + conversation, but Claude Code restores NEITHER
     // the permission mode NOR the reasoning effort — seed both. Prefer the session's OWN last-known
@@ -11033,24 +11170,18 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
       // dropping to the standing default.
       const prefSid = presetSessionId ?? findTopicByCwd(dir)?.sessionId
       const mode = (prefSid ? sessionModes.get(prefSid) : null) ?? lastFocusedMode
-      const effort = (prefSid ? sessionEfforts.get(prefSid) : null) ?? fallbackEffort()
-      // Model's fallback chain, mirroring `tg spawn`'s (~4873): the session's OWN remembered alias,
-      // then the persisted /settings 🧑‍💻 coding-session defaults model (validated — a stale/bad pref is ignored
-      // silently, same as that site), then SPAWN_MODEL_FLOOR. Unlike mode/effort this chain never
-      // bottoms out at null — a resume/reopen must always emit SOME --model, or the CLI's own default
-      // silently wins (that is how a reopen came back on Haiku 4.5, dragging the 1M window down with
-      // it: model-window.ts's suffix has no model identifier to ride on with no --model flag at all).
-      // …with ONE exception, and it is the reason this reads through relaunchModel: a CHAT LANE skips
-      // the coding-session default. `ensureChatLane` revives with `-c` and no dials, so a lane whose
-      // model was never recorded came back on the model configured for coding sessions — which four
-      // surfaces now promise it does not touch. Its own remembered alias still wins, first, exactly
-      // as before: this changes only what happens when there is nothing to remember.
-      const defaultSpawnModel = loadAccess().spawnModel
+      const effort = (prefSid ? sessionEfforts.get(prefSid) : null) ?? configuredSpawnEffort()
+      // Model's fallback chain: the session's OWN remembered alias, then the configured Model
+      // defaults (the resolver the settings panel renders), then SPAWN_MODEL_FLOOR. Unlike mode this
+      // chain never bottoms out at null — a resume/reopen must always emit SOME --model, or the CLI's
+      // own default silently wins (that is how a reopen came back on Haiku 4.5, dragging the 1M window
+      // down with it: model-window.ts's suffix has no model identifier to ride on with no --model flag
+      // at all). The chat lane USED to be excluded from the middle term and fall straight to the floor;
+      // v0.4.318 removed that exclusion with the setting's rename — see relaunchModel.
+      const configuredModel = configuredSpawnModel()
       const remembered = prefSid ? sessionModels.get(prefSid) : null
-      const model = relaunchModel(remembered ?? null,
-        defaultSpawnModel && MODEL_ALIASES.includes(defaultSpawnModel) ? defaultSpawnModel : null,
-        prefSid != null && isChatLaneSession(prefSid), SPAWN_MODEL_FLOOR)
-      modelSource = remembered ? `remembered(${prefSid})` : model === defaultSpawnModel ? 'spawn-default' : 'floor'
+      const model = relaunchModel(remembered ?? null, configuredModel, SPAWN_MODEL_FLOOR)
+      modelSource = remembered ? `remembered(${prefSid})` : 'configured-default'
       // Widen the guard to include model: it now always resolves to a floor, so a resume with default
       // mode and no effort must still seed the model instead of dropping it.
       if (mode !== 'default' || effort || model) inherit = { model, effort, mode }
@@ -12713,7 +12844,7 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
-  // 🧑‍💻 Coding-session defaults sub-panel — open / back (settings ⇄ panel).
+  // 🧑‍💻 Model defaults sub-panel — open / back (settings ⇄ panel).
   if (data === 'spd:panel' || data === 'spd:back') {
     if (!(await cbAuth(ctx))) return
     await ctx.answerCallbackQuery().catch(() => {})
@@ -12893,7 +13024,7 @@ bot.on('callback_query:data', async ctx => {
     const extra = t.agentSessionId ? `--resume ${t.agentSessionId}` : ''
     const ok = await spawnSession(t.cwd, extra, sid, topicAccount(t), topicAgent(t),
       extra ? undefined : codingSpawnHarness(),
-      extra ? undefined : { model: refreshSpawnModel(sid) })
+      extra ? undefined : { model: refreshSpawnModel() })
     if (ok) await reopenSessionTopic(sid)   // reopen the tab NOW, not on first reply
     await channel.sendText(String(ctx.chat!.id), ok
       ? `🚀 Resuming <b>${escapeHtml(t.name)}</b> in <code>${escapeHtml(t.cwd)}</code> — it reopens in its topic shortly.`
@@ -16870,7 +17001,7 @@ async function webappReadSettings(): Promise<WebappSettingsView> {
       fileBrowser: { value: a.fileBrowser !== false, editable: true, label: 'Files tab in this app (reopens on change)' },
       ...(isTopicMode() ? { baseFolder: { value: baseFolderFull(), editable: false, label: 'new topics land here' } } : {}),
       mcp: { value: mcpEnabled(), editable: true, label: 'new sessions only' },
-      // The 🧑‍💻 coding-session defaults — the same prefs the /settings sub-panel writes. They belong on this
+      // The 🧑‍💻 Model defaults — the same prefs the /settings sub-panel writes. They belong on this
       // tab because they are now the ONLY place a global model default is set: the per-session dials
       // below change one session and nothing else. 'off' = unset (the spawn chain falls to its floor).
       // 'auto' is offered here as a DEFAULT, never as a launch alias; Fable drops out of the options
@@ -16908,7 +17039,7 @@ function webappSetSetting(userId: string, key: string, value: unknown): string |
     case 'batchAllow': { const a = loadAccess(); a.batchAllow = truthy(value); saveAccess(a); return null }
     case 'confirmReset': { const a = loadAccess(); a.confirmReset = truthy(value); saveAccess(a); return null }
     case 'fileBrowser': { const a = loadAccess(); a.fileBrowser = truthy(value); saveAccess(a); return null }
-    // 🧑‍💻 coding-session defaults, validated against the daemon's own lists exactly like the
+    // 🧑‍💻 Model defaults, validated against the daemon's own lists exactly like the
     // spd:(m|e) callbacks — the app's copy of them is UI labelling, not authority. Real values only:
     // there is no 'off' (the Inherit chips are gone) and no 'auto' (that is its own toggle).
     case 'spawnModel': {
@@ -17156,9 +17287,18 @@ async function webappSessionCard(row: { sid: string; name: string; cwd: string; 
 async function webappListSessions(): Promise<WebappSessionCard[]> {
   // A session being ended is not part of the fleet, however alive its pane still reads (see endingSids).
   const rows = dashboardSessionRows().filter(r => !sessionEnding(r.sid))
-  if (focus.activePaneId) {   // an adopted session outside the store (classic focused loop) is part of the fleet too
+  // An adopted session outside the store (classic focused loop) is part of the fleet too — it has no
+  // registry row, so the row is synthesised here. NAME IT FROM ITS FOLDER, not from the word
+  // "Session": the placeholder rendered a card titled "Session" with no cwd line and no context bar,
+  // which reads as debris on a tab where every other card is a named session — the owner reported it
+  // as a stray on 2026-08-03, and it was in fact his own live pane. The cwd carries the same
+  // correction: passing '' made the card drop the line that would have identified it.
+  if (focus.activePaneId) {
     const sid = await sessionForPane(focus.activePaneId).catch(() => null)
-    if (sid && !rows.some(r => r.sid === sid)) rows.push({ sid, name: 'Session', cwd: '', agent: 'claude' })
+    if (sid && !rows.some(r => r.sid === sid)) {
+      const cwd = (await paneCwd(focus.activePaneId).catch(() => null)) ?? ''
+      rows.push({ sid, name: cwd ? basename(cwd) : 'Session', cwd, agent: 'claude' })
+    }
   }
   const ctx = await waitContext()
   const cards = await Promise.all(rows.map(r => webappSessionCard(r, ctx)))
@@ -17498,7 +17638,7 @@ async function webappSessionSpawn(
   const askedEffort = opts.effort ? String(opts.effort).toLowerCase() : null
   if (askedEffort && !EFFORT_LEVELS.includes(askedEffort)) return { error: `unknown effort '${askedEffort}'` }
   // No explicit dial = the sheet's "default" chip, and it resolves HERE, at spawn time, from the
-  // /settings 🧑‍💻 coding-session defaults — the same fallback `tg spawn` has always used (~5140). Omitting the
+  // /settings 🧑‍💻 Model defaults — the same fallback `tg spawn` has always used (~5140). Omitting the
   // field used to fall through to spawnSession's inherit branch, which reads the model off whatever
   // tmux pane happened to be FOCUSED and the effort off default-effort.json; so a box configured for
   // opus/high could spawn from the mini app on neither, which is the bug behind the relabel. A stale
