@@ -308,17 +308,29 @@ async function resolveOutbound(paneId: string | null): Promise<{ targets: Outbou
       const owner = chatForLaneSession(sid)
       if (owner) return { targets: [{ chat: owner }], reason: 'targets' }
     }
-    // A sid-bearing pane registered to NO surface, on a box that runs per-chat surfaces (chat
-    // lanes / DM lanes / headless sessions): that's an orphan — an old repair session, a foreign
-    // adoption. Dropping beats interleaving its output unlabelled into every allowlisted DM. A
-    // classic single-session box (none of those structures) keeps the broadcast fallback.
-    if (sid && (listDmChatSessions().length > 0 || listLanes().length > 0 || listTopics().some(t => t.headless && !t.closed))) {
-      const key = paneId ?? sid
+    // A pane registered to NO surface, on a box that runs per-chat surfaces (chat lanes / DM lanes /
+    // headless sessions): that's an orphan — an old repair session, a foreign adoption. Dropping beats
+    // interleaving its output unlabelled into every allowlisted DM. A classic single-session box (none
+    // of those structures) keeps the broadcast fallback.
+    //
+    // Covers a SID-LESS pane too, and that half was the hole. Every rung above requires a sid, so a
+    // pane whose session cannot be resolved skipped all of them and landed on the fan-out below —
+    // broadcasting to every allowlisted DM, the owner's included. The rule was already decided here
+    // for the sid-BEARING orphan; a sid-less one is strictly LESS identifiable, so the same answer
+    // applies with more force. Found while tracing where an unbidden sign-in card could have come
+    // from (2026-08-03): a credential prompt is exactly the payload that must not arrive unattributable.
+    if (listDmChatSessions().length > 0 || listLanes().length > 0 || listTopics().some(t => t.headless && !t.closed)) {
+      const key = paneId ?? sid ?? '-'
       const last = orphanPaneLogAt.get(key) ?? 0
       const now = Date.now()
       if (now - last >= ORPHAN_PANE_LOG_INTERVAL_MS) {
         orphanPaneLogAt.set(key, now)
-        process.stderr.write(`daemon: pane ${paneId} (sid ${sid}) is registered to no chat surface — dropping its outbound (not broadcasting)\n`)
+        // The line names the sid-less case explicitly and says what to do about it: this drop is the
+        // one thing a single-session DM box could hit unexpectedly, and it must be diagnosable from
+        // the log rather than presenting as silence.
+        process.stderr.write(sid
+          ? `daemon: pane ${paneId} (sid ${sid}) is registered to no chat surface — dropping its outbound (not broadcasting)\n`
+          : `daemon: pane ${paneId} has NO resolvable session — dropping its outbound rather than broadcasting it to every allowlisted DM (an unattributable pane must not reach them). If this pane should have a surface, its @tg_session stamp is missing or its session never registered.\n`)
       }
       return { targets: [], reason: 'surfaceless' }
     }
