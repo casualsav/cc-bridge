@@ -78,10 +78,12 @@ import {
 import { autowireMapImport, shipProductMap } from './chat-map.ts'
 import { ghAccounts, ghInstalled, ghSwitch, ghLogout, runGhLogin, provisionGh, type GhAccount } from './github.ts'
 import { PANELS, panelKindOf, interactivePanelOf, parsePanel, redactPanelIdentity, type PanelKind } from './panel-readout.ts'
+import { planPasteRecovery, needsSubmitCard, loadPasteStore, savePasteStore } from './paste-recovery.ts'
 import {
   capturePane, capturePaneStyled, capturePaneCached, invalidateCapture, paneAlive, sendKeys, sendKeysLiteral, navigateDown, waitForSettle,
   autoSizeWindowOf, paneCommand, paneCwd, PaneWatcher,
   submitVerified, withPaneDelivery, deliveryLockKey, injectBuffer, clearOwnTypedLine, pasteSlashVerified, type PastedSlash,
+  paneDeliveriesInFlight, drainPaneDeliveries,
   pasteVerified, resubmitVerified, type PasteOutcome,
 } from './pane-io.ts'
 import type {
@@ -129,7 +131,7 @@ import { latchMode, type ModeLatch } from './mode-latch.ts'
 import { watchVerdict, watchNoticeText, existingWatch, alreadyWatchingText, serializePasses, type BusWatch, type WatchOutcome } from './watch-plan.ts'
 import { fetchUsageResult, type UsageReading } from './usage-api.ts'
 import { startWebapp, type SettingsView as WebappSettingsView, type SessionCard as WebappSessionCard, type SessionFeed as WebappSessionFeed, type AutomationView as WebappAutomationView, type UsageView as WebappUsageView } from './webapp.ts'
-import { startTunnel, ensureCloudflared, tailscaleFunnelUrl, type Tunnel } from './tunnel.ts'
+import { startTunnel, ensureCloudflared, reapOrphanTunnels, tailscaleFunnelUrl, type Tunnel } from './tunnel.ts'
 import { sendRichMessage, sendRichMessageDraft, editRichMessage, toInputRichMessage, htmlPanelToRich, callTelegram, normalizeRichInbound, telegramRefused, type InputRichMessage } from './richmsg.ts'
 import { parseAvatars, resolveAvatar, type Avatar } from './avatars.ts'
 import { createAvatarMsgTokens } from './avatar-msg-tokens.ts'
@@ -1130,6 +1132,78 @@ function notifyChats(text: string, opts?: SendOpts): void {
 let lastRelayedAuthUrl = ''
 
 
+// ---- Stranded-paste provenance + recovery (paste-recovery.ts) ----
+//
+// The record says "we pasted into this pane and never saw it submitted". It exists because the
+// in-process recovery cannot survive the process: a kill inside the paste→Enter window leaves the
+// message in the box with nobody to press Enter. Recovery reads RECORDS and never scans for
+// placeholders, which is what makes it impossible for it to submit a draft that isn't ours.
+const PASTE_INFLIGHT_FILE = join(STATE_DIR, 'paste-inflight.json')
+function markPasteInFlight(paneId: string, block: string, chat: string, thread?: number): void {
+  const store = loadPasteStore(PASTE_INFLIGHT_FILE)
+  store[paneId] = {
+    pane: paneId, chat, at: Date.now(), ...(thread ? { thread } : {}),
+    preview: block.replace(/\s+/g, ' ').trim().slice(0, 60),
+  }
+  savePasteStore(PASTE_INFLIGHT_FILE, store)
+}
+function clearPasteInFlight(paneId: string): void {
+  const store = loadPasteStore(PASTE_INFLIGHT_FILE)
+  if (!store[paneId]) return
+  delete store[paneId]
+  savePasteStore(PASTE_INFLIGHT_FILE, store)
+}
+
+// One card per strand, keyed by what the box held when we asked — so a second strand asks again but
+// a repainted screen does not.
+const pasteCardSent = new Map<string, string>()
+
+// Give a recorded, still-unsent paste the Enter it was owed — and ask about one we cannot attribute.
+// Runs at startup (the restart case this exists for) and on the pane sweep (the case where the pane
+// was mid-turn when the strand happened).
+async function recoverStrandedPastes(): Promise<void> {
+  const store = loadPasteStore(PASTE_INFLIGHT_FILE)
+  const now = Date.now()
+  for (const [paneId, rec] of Object.entries(store)) {
+    const alive = await paneAlive(paneId).catch(() => false)
+    const styled = alive ? await capturePaneStyled(paneId).catch(() => '') : ''
+    const cap = alive ? await capturePane(paneId).catch(() => '') : ''
+    const state = { alive, idle: !!cap && onNormalPrompt(cap) && !detectWorking(cap), occupant: inputBoxOccupant(styled) }
+    const plan = planPasteRecovery(rec, state, now)
+    if (plan.action === 'wait') continue
+    if (plan.action === 'drop') { clearPasteInFlight(paneId); continue }
+    // The owed Enter. Through the same delivery lock as every other write to this pane, and it never
+    // pastes — the text is already in the box, so a re-paste would be the duplicate class.
+    const keys = agentSubmitKeys(await paneAgentKind(paneId))
+    const outcome = await withPaneDelivery(await paneDeliveryKey(paneId),
+      () => resubmitVerified(paneId, keys, submitLanded),
+      () => 'failed' as PasteOutcome)
+    process.stderr.write(`daemon: stranded paste in ${paneId} (chat ${rec.chat}, ${Math.round((now - rec.at) / 1000)}s old) — pressed the owed Enter: ${outcome}\n`)
+    if (outcome === 'landed') clearPasteInFlight(paneId)
+  }
+}
+
+// The other half, and the one that must never press Enter on its own: a pane holding an unsent paste
+// no record explains. Called from the pane sweep with that pane's captures already in hand.
+async function offerStrandedPasteCard(paneId: string, cap: string, styled: string): Promise<void> {
+  const store = loadPasteStore(PASTE_INFLIGHT_FILE)
+  const state = { alive: true, idle: !!cap && onNormalPrompt(cap) && !detectWorking(cap), occupant: inputBoxOccupant(styled) }
+  if (!needsSubmitCard(state, !!store[paneId], pasteCardSent.get(paneId) ?? null)) {
+    if (!state.occupant) pasteCardSent.delete(paneId)
+    return
+  }
+  const targets = await outboundTargetsFor(paneId).catch(() => [])
+  if (!targets.length) return              // no surface to ask on; the bus escalation covers blockers, not drafts
+  pasteCardSent.set(paneId, state.occupant!)
+  for (const { chat, thread } of targets) {
+    await channel.sendText(chat,
+      `📨 An unsent message is sitting in this session's input box (<code>${escapeHtml(state.occupant!)}</code>) — it was pasted but never submitted, and nothing on record says it was ours. Send it?`,
+      { ...(thread ? { threadId: String(thread) } : {}),
+        buttons: [[{ text: '📨 Send it', data: `pastesend:${paneId}` }, { text: '✖️ Leave it', data: 'pastesend:no' }]] },
+    ).catch(() => {})
+  }
+}
+
 // Inbound injections are serialized through one chain: two Telegram messages arriving
 // close together would otherwise drive the same pane concurrently and interleave
 // keystrokes. A failed inject (pane died mid-send) re-buffers for the next session.
@@ -1139,9 +1213,15 @@ function enqueueInboundInject(paneId: string, watcher: PaneWatcher, params: Inbo
   // If an effort-change confirmation is open and the user sent a message instead of tapping, dismiss
   // it first (= "No, go back", keeps the current level) so the message doesn't type into the modal.
   const run = () => dismissPendingEffortConfirm(paneId)
+    // PROVENANCE, WRITTEN BEFORE THE PASTE. If the daemon dies between the paste and its Enter, this
+    // record is the only thing that can tell a stranded message of OURS from a draft somebody typed
+    // — and it has to be on disk before the paste, because the death we are covering happens inside
+    // the next line.
+    .then(() => markPasteInFlight(paneId, block, String(params.meta.chat_id), params.meta.thread ? Number(params.meta.thread) : undefined))
     .then(() => injectPasteOutcome(paneId, watcher, block))
     .then(async outcome => {
       if (outcome === 'landed') {
+        clearPasteInFlight(paneId)
         process.stderr.write(`daemon: inbound injected to pane ${paneId} chat=${params.meta.chat_id}\n`)
         // Off-MCP outbound is handled by the continuous relay loop (startRelayLoop), which
         // relays this turn's reply — and any proactive message — once, keyed by uuid.
@@ -1158,6 +1238,9 @@ function enqueueInboundInject(paneId: string, watcher: PaneWatcher, params: Inbo
       // class (`resubmitPane` cannot paste, which is the point of splitting the outcome).
       if (outcome === 'unsubmitted') {
         const again = await resubmitPane(paneId).catch(() => 'failed' as PasteOutcome)
+        // Landed on the retry → the record has done its job. Still stranded → KEEP it, because the
+        // sweep and the next startup are now the ones that owe this pane an Enter.
+        if (again === 'landed') clearPasteInFlight(paneId)
         process.stderr.write(again === 'landed'
           ? `daemon: inbound submit was not confirmed for pane ${paneId} chat=${params.meta.chat_id} — re-pressed Enter, landed\n`
           : `daemon: inbound STRANDED in pane ${paneId} chat=${params.meta.chat_id} — pasted but not submitted, and the re-Enter also failed (${again}); it is sitting in that input box\n`)
@@ -1166,10 +1249,14 @@ function enqueueInboundInject(paneId: string, watcher: PaneWatcher, params: Inbo
       // 'occupied' is NOT a stranding of ours: nothing was pasted, so there is nothing in the box to
       // submit and re-Entering would submit somebody ELSE's draft. Buffer it like a failed paste.
       if (outcome === 'occupied') {
+        // Nothing of ours went in, so the record must go: leaving it would point the recovery at
+        // somebody else's draft, which is the one thing this design promises never to submit.
+        clearPasteInFlight(paneId)
         process.stderr.write(`daemon: inbound not delivered to pane ${paneId} chat=${params.meta.chat_id} — its input box already holds typed text; buffering\n`)
         bufferEvent(params)
         return
       }
+      clearPasteInFlight(paneId)
       process.stderr.write(`daemon: inbound inject no-op (pane ${paneId} gone) — buffering\n`)
       bufferEvent(params)
     })
@@ -3161,9 +3248,19 @@ function busDeliver(pane: string, block: string): Promise<boolean> {
 // to make: 'failed' may be pasted again, 'unsubmitted' may only be Enter'd again. Everything else on
 // the bus is fire-and-forget and reads the boolean above.
 function busDeliverOutcome(pane: string, block: string): Promise<PasteOutcome> {
-  const run = () => (pane === focus.activePaneId && focus.paneWatcher
-    ? injectPasteOutcome(pane, focus.paneWatcher, block)
-    : pasteToPaneOutcome(pane, block))
+  // Provenance, exactly as the inbound path takes it. A bus block strands the same way a human's
+  // message does — measured on 2026-08-03 when a kill inside the window left an `ask=` block sitting
+  // in a probe's box — and a delivery nobody recorded is a delivery nothing can recover.
+  const run = async () => {
+    markPasteInFlight(pane, block, '')   // a bus block has no chat of its own; the card path needs none
+    const outcome = await (pane === focus.activePaneId && focus.paneWatcher
+      ? injectPasteOutcome(pane, focus.paneWatcher, block)
+      : pasteToPaneOutcome(pane, block))
+    // Anything but a live strand clears it: 'landed' is done, and 'occupied'/'failed' never put our
+    // text in that box — leaving a record there would aim the recovery at somebody else's draft.
+    if (outcome !== 'unsubmitted') clearPasteInFlight(pane)
+    return outcome
+  }
   const p = inboundInjectChain.then(run, run) as Promise<PasteOutcome>
   inboundInjectChain = p.then(() => {}, () => {})
   return p
@@ -13573,6 +13670,29 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
+  // 📨 An unsent paste nobody could attribute — HE decides. This is the only path that submits a box
+  // the daemon did not fill, and it exists because the difference between his half-typed draft and a
+  // paste stranded by a crash cannot be read off the screen. A tap is that difference.
+  const pasteSend = /^pastesend:(.+)$/.exec(data)
+  if (pasteSend) {
+    if (!(await cbAuth(ctx))) return
+    if (pasteSend[1] === 'no') {
+      await ctx.answerCallbackQuery().catch(() => {})
+      await ctx.editMessageText('✖️ Left it in the input box.').catch(() => {})
+      return
+    }
+    const pane = pasteSend[1]!
+    await ctx.answerCallbackQuery({ text: 'Sending…' }).catch(() => {})
+    const keys = agentSubmitKeys(await paneAgentKind(pane))
+    const outcome = await withPaneDelivery(await paneDeliveryKey(pane),
+      () => resubmitVerified(pane, keys, submitLanded),
+      () => 'failed' as PasteOutcome)
+    pasteCardSent.delete(pane)
+    await ctx.editMessageText(outcome === 'landed' ? '📨 Sent.' : `⚠️ Could not send it (${escapeHtml(outcome)}) — the text is still in the box.`,
+      { parse_mode: 'HTML' }).catch(() => {})
+    return
+  }
+
   // /cost or /context confirmed while Claude was working — interrupt (Esc), then run it.
   const readoutMatch = /^readout:(cost|context|cancel)$/.exec(data)
   if (readoutMatch) {
@@ -16986,9 +17106,37 @@ function shutdown(): void {
     }
   } catch {}
   try { unlinkSync(HEARTBEAT_FILE) } catch {}   // clean exit → next startup won't read a crash
-  setTimeout(() => process.exit(0), 2000)
-  void Promise.resolve(bot.stop()).finally(() => process.exit(0))
+  // The daemon OWNS its cloudflared: unstopped, it outlives us as an orphan holding a hostname that
+  // routes nowhere, and the next daemon's tunnel is a different hostname — which is how the owner's
+  // mini-app buttons went stale while 89 dead tunnels stayed registered.
+  if (filesTunnel) { try { filesTunnel.stop(); process.stderr.write('daemon: shutdown — stopped the cloudflared tunnel\n') } catch {} }
+  // DRAIN BEFORE EXIT. A pane delivery is a paste and then a separate Enter; exiting between them
+  // leaves the message in the input box with nobody left to submit it — that is how the owner's
+  // message was stranded on 2026-08-03, 0.7s after a deploy killed the daemon mid-paste. Waiting for
+  // the per-pane chains to quiesce removes the window rather than recovering from it.
+  //
+  // Bounded, and the hard exit stays armed the whole time: a shutdown that hangs is worse than a
+  // stranded message, and the provenance record (paste-recovery.ts) is what covers the residue.
+  const hardExit = setTimeout(() => process.exit(0), SHUTDOWN_HARD_MS)
+  void (async () => {
+    const inFlight = paneDeliveriesInFlight()
+    if (inFlight > 0) process.stderr.write(`daemon: shutdown — draining ${inFlight} pane deliver${inFlight === 1 ? 'y' : 'ies'}\n`)
+    const drained = await drainPaneDeliveries(SHUTDOWN_DRAIN_MS)
+    // "Still held" is not "lost": the chain stays occupied through the post-submit settle, so a
+    // timeout here often means the message landed and the delivery was tidying up. Measured on the
+    // staged race (2026-08-03): the drain held the process 4.0s past the kill, this line printed, and
+    // the message had landed. Provenance is what covers the case where it genuinely had not.
+    if (!drained) process.stderr.write('daemon: shutdown drain budget expired — a delivery still held its pane; if it had not submitted yet, the provenance record recovers it on restart\n')
+    else if (inFlight > 0) process.stderr.write('daemon: shutdown — pane deliveries drained\n')
+    await Promise.resolve(bot.stop()).catch(() => {})
+    clearTimeout(hardExit)
+    process.exit(0)
+  })()
 }
+// The drain's budget, and the backstop that fires whatever the drain is doing. A paste→Enter cycle
+// settles in well under a second; the extra room is for a pane mid-settle, not for a wedged one.
+const SHUTDOWN_DRAIN_MS = 4000
+const SHUTDOWN_HARD_MS = 8000
 
 // Daemon shuts down on SIGTERM/SIGINT only — never on stdin EOF.
 process.on('SIGTERM', shutdown)
@@ -17194,6 +17342,12 @@ async function sweepStuckPanes(): Promise<void> {
     // never see a headless one. Before the early-returns below: a pane wedged on a dialog still has a
     // statusline, and its fill is exactly what a human needs to know about it.
     if (cap) {
+      // An unsent paste sitting at a prompt. The styled read costs a second capture, so it is gated
+      // on the placeholder being visible in the plain one — rare by construction, and the gate keeps
+      // this off every pane on every sweep.
+      if (/\[Pasted text #\d+/.test(cap)) {
+        await offerStrandedPasteCard(pane, cap, await capturePaneStyled(pane).catch(() => '')).catch(() => {})
+      }
       const sid = await sessionForPane(pane, false).catch(() => null)
       if (sid) {
         liveSids.add(sid)
@@ -17333,6 +17487,11 @@ async function sweepStuckPanes(): Promise<void> {
   }
 }
 setInterval(() => void sweepStuckPanes(), 25_000).unref()
+// The recorded-strand half. On the sweep because a pane that was mid-turn when the daemon died is
+// only recoverable once it goes idle — and ONCE AT STARTUP, a few seconds in, which is the case this
+// whole feature exists for: the message pasted moments before the process was killed.
+setInterval(() => void recoverStrandedPastes().catch(() => {}), 25_000).unref()
+setTimeout(() => void recoverStrandedPastes().catch(() => {}), 6_000).unref()
 setInterval(() => { if (loginHeldPanes.size) void sweepLoginHolds() }, 5_000).unref()   // no-op unless a login episode is open
 // Remember the focused pane's permission mode (covers shift+tab changes made in the terminal,
 // which the daemon otherwise never sees) so /resume can inherit it after the pane exits.
@@ -18858,6 +19017,10 @@ async function startFilesWebapp(): Promise<void> {
   }
   if (WEBAPP_TUNNEL === 'cloudflared') {
     const bin = await ensureCloudflared(STATE_DIR, wlog)
+    // Before ours: kill any cloudflared a previous daemon left behind on this port. They are
+    // reparented to init when the daemon dies and never exit on their own — 89 had accumulated by
+    // 2026-08-03, one per restart, each still registered against this origin.
+    await reapOrphanTunnels(WEBAPP_PORT, wlog).catch(() => 0)
     if (bin) filesTunnel = startTunnel({ port: WEBAPP_PORT, bin, log: wlog })
   } else {
     wlog(`webapp: tunnel '${WEBAPP_TUNNEL}' not built-in — set TELEGRAM_WEBAPP_PUBLIC_URL`)

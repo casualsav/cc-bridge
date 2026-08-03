@@ -98,6 +98,26 @@ export interface Tunnel { url(): string | null; stop(): void }
 
 // Spawn cloudflared, stream-scan its output for the trycloudflare URL, and relaunch on exit. `onUrl`
 // fires whenever the public URL (re)appears so the daemon can refresh any launch buttons.
+// Kill quick tunnels left over from previous daemons on THIS origin, and report the count.
+//
+// cloudflared is spawned as the daemon's child but survives its death — reparented to init, still
+// registered against 127.0.0.1:<port>, holding a hostname nobody can reach. They accumulate one per
+// restart: 89 of them had piled up by 2026-08-03, from 19:54 onward, while the mini app served 404s.
+// The port is the discriminator, so a second channel's tunnel on its own port is never touched.
+//
+// Matched by the exact argv we spawn, and it is the same string in both places on purpose: a reaper
+// whose pattern drifts from the launcher silently stops reaping.
+export async function reapOrphanTunnels(port: number, log: (m: string) => void): Promise<number> {
+  const pattern = `cloudflared tunnel --no-autoupdate --url http://127.0.0.1:${port}`
+  try {
+    const out = await new Response(spawn(['pgrep', '-f', pattern], { stdout: 'pipe' }).stdout).text()
+    const pids = out.split('\n').map(s => s.trim()).filter(Boolean).map(Number).filter(n => n > 0 && n !== process.pid)
+    for (const pid of pids) { try { process.kill(pid, 'SIGTERM') } catch {} }
+    if (pids.length) log(`tunnel: reaped ${pids.length} orphaned cloudflared process(es) on port ${port}`)
+    return pids.length
+  } catch { return 0 }
+}
+
 export function startTunnel(opts: {
   port: number; bin: string; log: (m: string) => void; onUrl?: (u: string) => void
 }): Tunnel {

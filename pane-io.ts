@@ -330,6 +330,27 @@ export async function withPaneDelivery<T>(paneId: string, fn: () => Promise<T>, 
   }
 }
 
+// Deliveries in flight or queued, right now. The map holds a tail per pane while anyone is holding
+// or waiting for that pane's turn, and deletes it when the last one finishes — so its size IS the
+// answer, with no second bookkeeping to drift.
+export function paneDeliveriesInFlight(): number { return paneDelivery.size }
+
+// Wait, bounded, for every pane delivery to finish. Called on shutdown, because process death inside
+// the paste→Enter window is the one failure the in-process recovery cannot see: the message is
+// already in the box and the Enter dies with the daemon. Draining removes that window instead of
+// recovering from it (2026-08-03: a deploy killed the daemon 0.7s after the owner's message was
+// pasted into the chat lane, and it sat unsent until a human pressed Enter).
+//
+// Bounded because a shutdown that waits forever is a worse failure than a stranded message: the
+// caller reports the timeout and exits anyway, and the provenance record covers what was lost.
+export async function drainPaneDeliveries(budgetMs: number): Promise<boolean> {
+  const deadline = Date.now() + budgetMs
+  while (paneDelivery.size > 0 && Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 50))
+  }
+  return paneDelivery.size === 0
+}
+
 // The pasted payload's tmux buffer, PER PANE. It was one shared name, and deliveries to different
 // panes run concurrently by design — so pane A's set-buffer, pane B's set-buffer, pane A's
 // paste-buffer put B's message into A's session. Milliseconds wide and never reported, unlike the
