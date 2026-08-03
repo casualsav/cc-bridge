@@ -3635,11 +3635,21 @@ async function deliverAnswerToAsker(pending: BusPending, answerer: string, rawBo
   const deliveredBody = late ? `⏰ (late answer — ask ${cur.id} had timed out)\n\n${body}` : body
   // .catch(false): a rejected paste (a tmux error propagating through the inject chain) must reach the
   // restore path below, not throw past it — the pending is already removed, so a throw would lose the answer.
-  const ok = await busDeliver(askerPane, formatAnswerBlock(answerer, cur.id, deliveredBody, refs)).catch(() => false)
+  const outcome = await busDeliverOutcome(askerPane, formatAnswerBlock(answerer, cur.id, deliveredBody, refs)).catch(() => 'failed' as PasteOutcome)
+  const ok = outcome === 'landed'
   // No ledger row is written past this point on a failure, and that is the whole fix: the `✓` in
   // `tg history` now means the target was actually invoked, not merely that tmux accepted a paste.
   // Covers a dead pane AND a submit that never took (the block left sitting in their input box).
-  if (!ok) { putPending(cur); return `!couldn't deliver to @${cur.fromName} — pane gone, or the message is sitting unsubmitted in their input box; ask kept open` }
+  // The answer body is NOT queued — only the ask is restored — so this sentence is the answerer's whole
+  // instruction, and "sitting unsubmitted in their input box" sent them looking for their answer in a
+  // box that never held it. Third surface with the same conflation (after the TTL notice and
+  // askResultText); hit live while reporting the other two, when @chat's own box was occupied.
+  if (!ok) {
+    putPending(cur)
+    return outcome === 'occupied'
+      ? `!couldn't deliver to @${cur.fromName} — their input box already holds typed text of their own, so nothing was pasted on top of it. Your answer was NOT stored: keep it and re-run \`tg answer ${cur.id}\` once that box clears (the ask is kept open)`
+      : `!couldn't deliver to @${cur.fromName} — pane gone, or the message is sitting unsubmitted in their input box; ask kept open`
+  }
   const mismatch = answerer !== cur.toName ? ` [asked @${cur.toName}]` : ''
   // Surface the incoming answer on the ASKER's OWN surface (the chat DM / its topic) as
   // "@answerer messaged @asker", the answer behind the chevron — NOT a broadcast into General. Mirror
