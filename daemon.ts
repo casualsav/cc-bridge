@@ -10437,8 +10437,8 @@ function settingsText(): string {
   const a = loadAccess()
   return `⚙️ <b>Settings</b>\n\n` +
     `👤 Accounts — <b>${accountsRowSummary()}</b>\n` +
-    `🐙 GitHub — <b>${escapeHtml(ghSummary())}</b>\n` +
     `🧑‍💻 Model defaults — <b>${spawnDefaultsSummary()}</b>\n` +
+    `🐙 GitHub — <b>${escapeHtml(ghSummary())}</b>\n` +
     `⚡ Batch allow — <b>${a.batchAllow !== false ? 'on' : 'off'}</b>\n` +
     `🎙️ Voice transcription — <b>${transcribeStatus()}</b>\n` +
     `🔊 Voice replies — <b>${a.tts?.mode && a.tts.mode !== 'off' ? `${a.tts.mode} · ${a.tts.engine}` : 'off'}</b>\n` +
@@ -10459,8 +10459,8 @@ function settingsMarkdown(): string {
   const a = loadAccess()
   const rows: Array<[string, string]> = [
     ['👤 Accounts', accountsRowSummary()],
-    ['🐙 GitHub', ghSummary()],
     ['🧑‍💻 Model defaults', spawnDefaultsSummary()],
+    ['🐙 GitHub', ghSummary()],
     ['⚡ Batch allow', a.batchAllow !== false ? 'on' : 'off'],
     ['🎙️ Voice transcription', transcribeStatus()],
     ['🔊 Voice replies', a.tts?.mode && a.tts.mode !== 'off' ? `${a.tts.mode} · ${a.tts.engine}` : 'off'],
@@ -10533,7 +10533,7 @@ const showSettings = (ctx: Context, mode: 'send' | 'edit'): Promise<void> =>
 // settingsText()/settingsMarkdown() above, including the conditional Base folder row.
 function settingsKeyboard(): InlineKeyboard {
   const buttons: Array<[string, string]> = [
-    ['👤', 'acct:panel'], ['🐙', 'gh:panel'], ['🧑‍💻', 'spd:panel'], ['⚡', 'set:batch'],
+    ['👤', 'acct:panel'], ['🧑‍💻', 'spd:panel'], ['🐙', 'gh:panel'], ['⚡', 'set:batch'],
     ['🎙️', 'set:voice'], ['🔊', 'set:tts'], ['💬', 'set:replymode'], ['📌', 'set:pin'],
     ['🧷', 'defmode:panel'], ['🧹', 'set:confirmreset'],
     ...(WEBAPP_ENABLED ? [['🗂', 'set:filebrowser'] as [string, string]] : []),
