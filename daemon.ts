@@ -5032,6 +5032,17 @@ async function waitForLoginConfirmation(paneId: string, maxMs = 15_000): Promise
 async function relayAuthUrlToTelegram(url: string, paneId: string | null = focus.activePaneId): Promise<void> {
   // Route to the requesting session's own topic in forum mode; DM mode → the allowlist.
   const targets = await outboundTargetsFor(paneId)
+  // This card asks a human for an authentication code, and until now it wrote NOTHING to the log —
+  // so when one arrived unexplained in the owner's DM on 2026-08-03 with everything already logged
+  // in, the trigger was unknowable in retrospect: no timestamp, no pane, no account, nothing to
+  // correlate against a deploy or a spawn. An owner-facing auth prompt with no trace is a defect on
+  // its own terms, whatever produced it. Logged BEFORE the send and including the zero-target case,
+  // because "which pane asked and where was it about to go" is exactly what the next occurrence needs
+  // — and a card suppressed for having no target is itself a fact worth seeing.
+  const who = paneId ? (await sessionForPane(paneId, false).catch(() => null)) : null
+  const acct = await paneAccount(paneId).catch(() => null)
+  process.stderr.write(`daemon: auth-url card for pane ${paneId ?? '-'} (session ${who ?? '-'}, account ${acct?.name ?? '?'}, config ${acct?.configDir ?? '?'}) → ${
+    targets.length ? targets.map(t => `${t.chat}${t.thread ? `#${t.thread}` : ''}`).join(', ') : 'NO TARGETS (not sent)'}\n`)
   if (targets.length === 0) return
 
   const safe = escapeHtml(url)
@@ -5043,12 +5054,20 @@ async function relayAuthUrlToTelegram(url: string, paneId: string | null = focus
   // skip the rich card entirely and let the legacy <pre> path (which escapes) carry it.
   // ForceReply survives — reply_markup is orthogonal to rich_message — so the reply-with-code flow
   // is unchanged. Any rich failure falls back to the legacy HTML card, byte-identical to before.
+  // WHO is asking, on the card itself. A bare "reply with your authentication code" gives its reader
+  // no way to tell a login they just started from one that appeared unbidden — which is exactly the
+  // position the owner was in on 2026-08-03, holding a credential prompt he could neither attribute
+  // nor safely ignore. Session name and account are the two facts that decide whether to answer it.
+  // Built from the same values the log line carries, so a card and its log row cannot disagree.
+  const sessionName = who ? (getTopicBySession(who)?.name ?? null) : null
+  const provenance = `<i>Requested by ${sessionName ? `<b>${escapeHtml(sessionName)}</b>` : 'a session'}` +
+    `${paneId ? ` (pane ${escapeHtml(paneId)})` : ''} · account <b>${escapeHtml(acct?.name ?? '?')}</b></i>`
   const richHtml = /["<>]/.test(url) ? null :
-    `🔑 <b>Sign-in link from Claude Code</b>\n\n` +
+    `🔑 <b>Sign-in link from Claude Code</b>\n${provenance}\n\n` +
     `<a href="${url}">Open the sign-in page</a> to get your code, then:\n\n` +
     `💬 <b>Reply to this message with your authentication code.</b>`
   const legacy =
-    `🔑 <b>Sign-in link from Claude Code</b>\n\n` +
+    `🔑 <b>Sign-in link from Claude Code</b>\n${provenance}\n\n` +
     `<pre>${safe}</pre>\n` +
     `Open it in your browser to get your code, then:\n\n` +
     `💬 <b>Reply to this message with your authentication code.</b>`
