@@ -38,7 +38,7 @@ import { normalizeCommandOutput } from './ansi.ts'
 import { planSlash } from './slash-policy.ts'
 import { preserveGlobalEffort, reconcileEffortScope } from './effort-scope.ts'
 import { planDrift, driftStateAfter, type DriftState } from './drift-guard.ts'
-import { decideModel, decideEffort, upgradeNeedsConfirm, heldSpawnModel, heldSpawnNeedsLine, holdTapData, parseHoldTap, launchFallback, spawnCardHeader, relaunchModel, launchDefaultModel, launchDefaultEffort, fablePolicy, fableRowState, onOff, type FablePolicy, AUTO_FALLBACK, AUTO_EFFORT_FALLBACK, FABLE, type ModelDecision, type HoldOutcome } from './spawn-model-policy.ts'
+import { decideModel, decideEffort, upgradeNeedsConfirm, heldSpawnModel, heldSpawnNeedsLine, holdTapData, parseHoldTap, launchFallback, spawnCardHeader, relaunchModel, launchDefaultModel, launchDefaultEffort, fablePolicy, fableRowState, onOff, type FablePolicy, AUTO_FALLBACK, AUTO_EFFORT_FALLBACK, FABLE, HAIKU, type ModelDecision, type HoldOutcome } from './spawn-model-policy.ts'
 import { renderSessionsView } from './sessions-view.ts'
 import { detectCurrentMode, onNormalPrompt, inputBoxContent, isModelSwitchConfirm, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType } from './prompt.ts'
 import { modelSwitchEvidence, findSessionFile, resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, turnAnchorUuid, liveSubagents, currentTurnFeed, currentTurnActivity, concludedTurnWork, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
@@ -6039,9 +6039,13 @@ async function handleCall(
         if (explicitModel && !providerRoute?.harness && !MODEL_ALIASES.includes(explicitModel)) { write({ t: 'result', id, ok: false, text: `unknown model '${explicitModel}' — one of: ${MODEL_ALIASES.join(' | ')}` }); return }
         // Who chooses. Provider accounts own their own model catalog; native Claude aliases retain the
         // spend gate below. An explicit account/model pair is still recorded on every launch surface.
+        // A throwaway test pane, asserted by the caller. It is the only thing that distinguishes a
+        // probe from a worker — the same session legitimately spawns both, so identity cannot answer
+        // it — which is why the assertion is explicit and lands in the launch log.
+        const probe = args.probe === true
         const modelChoice = decideModel({
           requested: providerRoute?.harness ? null : explicitModel, configuredDefault: configuredSpawnModel(),
-          ...modelPolicyPrefs(), humanOrigin: false, now: Date.now(),
+          ...modelPolicyPrefs(), humanOrigin: false, probe, now: Date.now(),
         })
         const explicitEffort = args.effort ? String(args.effort).trim().toLowerCase().replace(/^med$/, 'medium') : null
         if (explicitEffort && (explicitEffort === 'auto' || !EFFORT_LEVELS.includes(explicitEffort))) { write({ t: 'result', id, ok: false, text: `unknown effort '${explicitEffort}' — one of: low | medium | high | xhigh | max` }); return }
@@ -6074,7 +6078,7 @@ async function handleCall(
         // spawns — failing the work over a missing annotation would cost the task, not the judgment —
         // but under `auto` the confirmation then says the choice was a fallback, which is the point.
         const why = String(args.why ?? '').replace(/\s+/g, ' ').trim().slice(0, 120)
-        const spec: SpawnSpec = { fromSid, topicName, dir, effort, firstMsg: String(args.text ?? '').trim(), headless, why, autoEffort: effortChoice.autoFallback, ...(providerAccount ? { providerAccount } : {}), ...(providerModel ? { providerModel } : {}), ...(explicitModel && !providerRoute?.harness ? { nativeModel: explicitModel } : {}) }
+        const spec: SpawnSpec = { fromSid, topicName, dir, effort, firstMsg: String(args.text ?? '').trim(), headless, why, autoEffort: effortChoice.autoFallback, ...(probe ? { probe: true } : {}), ...(providerAccount ? { providerAccount } : {}), ...(providerModel ? { providerModel } : {}), ...(explicitModel && !providerRoute?.harness ? { nativeModel: explicitModel } : {}) }
         // THE GATE. A gated model does not spawn and then ask — nothing starts until the owner taps.
         // The card used to be minted AFTER the session was already running on the default, which made
         // it decorative: it read as control while providing none, and the only thing a tap could still
@@ -7115,6 +7119,10 @@ async function askHumanForModel(r: ModelRequest): Promise<void> {
 // anyone to decide, so say that in the same breath as the success.
 function clampedClause(d: ModelDecision): string {
   const ran = d.model ?? 'the CLI default'
+  // Haiku's clamp gets its own sentence: unlike the Fable ban there IS a legitimate way to get what
+  // was asked for, and a caller told only "no" would either retry or give up on a test pane it was
+  // entitled to. Name the flag in the same breath as the refusal.
+  if (d.banned && d.clamped === HAIKU) return ` (--model haiku can't head a coding session — running ${ran}; pass --probe if this is a throwaway test pane)`
   if (d.banned) return ` (your --model ${d.clamped} isn't available to coding agents — clamped to ${ran} by your setting, so nobody was asked and a retry gets the same answer)`
   return ` (your --model ${d.clamped} needs a human${d.ask ? ' — asked the owner; if they approve, the session switches in place' : ', and asking is snoozed right now'}; running ${ran})`
 }
@@ -7128,7 +7136,9 @@ function clampedClause(d: ModelDecision): string {
 // provider account instead): it is what makes the spawn's engine an explicit choice rather than the
 // coding role's default, and it rides on the spec so a HELD spawn approved twenty minutes later
 // lands on the same engine the caller asked for.
-type SpawnSpec = { fromSid: string; topicName: string; dir: string; effort: string | null; firstMsg: string; headless: boolean; why?: string; autoEffort?: boolean; providerAccount?: string; providerModel?: string; nativeModel?: string }
+// `probe` rides the spec for the same reason `nativeModel` does: a HELD spawn approved twenty minutes
+// later must land the way the caller asked, and by then the caller's flags are gone.
+type SpawnSpec = { fromSid: string; topicName: string; dir: string; effort: string | null; firstMsg: string; headless: boolean; why?: string; autoEffort?: boolean; probe?: boolean; providerAccount?: string; providerModel?: string; nativeModel?: string }
 
 // The one line the owner reads next to the dials on the spawn confirmation. Two things can put text
 // here and they COMPOSE rather than replace: the caller's own --why, and — under `auto` — whichever

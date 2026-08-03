@@ -101,11 +101,14 @@ const HELP: Record<string, string> = {
            '  Refused while the target is mid-turn, unless the wedge alert has fired — or --force, which\n' +
            '  carries esc (to interrupt it) and nothing else.',
   spawn:   'tg spawn <name> [--dir p [--create]] [--account provider-account-id] [--model fable|opus|sonnet|haiku] [--why "one line"]\n' +
-           '             [--effort low…max] [text|-]\n' +
+           '             [--effort low…max] [--probe] [text|-]\n' +
            '  start a NEW session in its own topic. --dir must already exist unless --create is passed;\n' +
            '  with no --dir the session gets a folder named after it under the base dir.\n' +
            '  The first message is delivered as an ask once its REPL is up.\n' +
            '  --why is one line on why THIS model fits THIS task; it shows on the owner\'s spawn card.\n' +
+           '  --probe marks a THROWAWAY test pane (bus/behaviour checks you kill afterwards). It is the\n' +
+           '  only way to head a session on haiku: without it a --model haiku spawn is upgraded to your\n' +
+           '  default, because haiku may not head a coding session.\n' +
            '  Where the default is "auto" there is no configured model — name one, and say why.',
   kill:    'tg kill <name> [--force]   end a session you spawned (a chat lane may end any worker). Undo with tg reopen.\n' +
            '  A session with background shells still running refuses once and names them — killing it kills them.\n' +
@@ -179,6 +182,7 @@ if (BUS.has(cmd)) {
     if (rest[i] === '--ref') { const v = rest[++i]; if (v != null) refs.push(v) }
     else if (f) { const v = rest[++i]; if (v != null) flags[f[1]!] = v }   // spawn's flags; harmless elsewhere
     else if (rest[i] === '--create') { flags.create = true }               // spawn: allow a missing --dir
+    else if (rest[i] === '--probe') { flags.probe = true }                 // spawn: a throwaway test pane, not a coding session
     else if (rest[i] === '--force') { flags.force = true }                 // keys: carry esc into a working turn
     else if (rest[i] === '--clear') { flags.clear = true }                 // wait: drop the declaration early
     else if (rest[i] === '--refresh') { flags.refresh = true }             // repo: re-scout even if the brief is fresh

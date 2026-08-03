@@ -34,6 +34,23 @@ export const UNGATED_MODELS: readonly string[] = ['opus', 'sonnet', 'haiku']
 // the allowance and the fallback below cannot disagree about which string they are all about.
 export const FABLE = 'fable'
 
+// The model that may not HEAD a session. Owner's ruling: Haiku is fine as an explorer or subagent
+// inside a session, and fine on a throwaway test pane (`tg spawn --probe`) — but a coding session
+// whose own head is Haiku produces work nobody wants. It stays in UNGATED_MODELS on purpose: the
+// probe path still has to pass, and the list means "cheap to be wrong about", which for a pane you
+// kill in a minute it still is.
+export const HAIKU = 'haiku'
+
+// What a refused Haiku head actually runs on: the configured default, through the ordinary resolver,
+// so the ack names whatever the box is really set to rather than a hardcoded alias.
+// The one branch that cannot be delegated: a box whose default IS haiku would resolve the upgrade
+// straight back to haiku. That case takes AUTO_FALLBACK instead — named here rather than left to
+// recurse, and the ack says which model it landed on either way.
+export function headUpgradeModel(configuredDefault: string | null): string {
+  const resolved = launchFallback(configuredDefault)
+  return resolved === HAIKU ? AUTO_FALLBACK : resolved
+}
+
 // What an AGENT asking for Fable meets. The panel row — "Require approvals to spawn Fable" — is a
 // plain on/off over the first two:
 //
@@ -91,6 +108,7 @@ export type ModelAsk = {
   agentAllowed: readonly string[] // prefs `spawnAgentModels` — aliases an agent may pick with no card
   quietUntil: number              // epoch ms of the "don't ask for a while" window; 0 = not quiet
   humanOrigin: boolean            // the caller IS a human (mini-app tap, owner command), not an agent
+  probe?: boolean                 // `tg spawn --probe` — a throwaway test pane, not a coding session
   now: number
 }
 
@@ -132,6 +150,18 @@ export function decideModel(a: ModelAsk): ModelDecision {
   // UNGATED_MODELS — that list is the set nothing can make expensive, and this one is a preference the
   // owner can revoke with a tap — so it is honoured here, per request, and nowhere else.
   if (a.fable === 'allow' && a.requested === FABLE) return allow(FABLE)
+  // Haiku may not HEAD a coding session (owner's ruling). Upgraded, never refused — this repo already
+  // decided that question for held spawns: losing a colleague's task buys nothing, so the work runs on
+  // the configured default and the caller is told plainly. `banned`, so no card is minted and the
+  // answer to a retry is the same: there is nothing here for a human to decide.
+  //
+  // It sits ABOVE the `requested === def` and `agentAllowed` branches on purpose — a box configured
+  // for haiku, or a prefs list naming it, would otherwise wave through the exact thing being ruled
+  // out — and BELOW `humanOrigin`, so the owner picking Haiku in his own picker stays sovereign.
+  // `--probe` is the one way past it: a throwaway test pane is not a coding session.
+  if (a.requested === HAIKU && !a.probe) {
+    return { model: headUpgradeModel(def), ask: false, clamped: HAIKU, banned: true, autoFallback: false }
+  }
   if (!a.requested) return unspecified(a)
   // Asking for what would have happened anyway is not an override. No card: there is nothing for a
   // human to decide, and a card here would fire on every well-behaved spawn.

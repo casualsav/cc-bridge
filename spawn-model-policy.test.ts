@@ -1,7 +1,7 @@
 // Who gets to choose a session's model, and when a late tap has to confirm. Pure.
 // Run: bun test spawn-model-policy.test.ts
 import { test, expect } from 'bun:test'
-import { decideModel, upgradeNeedsConfirm, heldSpawnModel, heldSpawnNeedsLine, holdTapData, parseHoldTap, launchFallback, spawnCardHeader, relaunchModel, decideEffort, fablePolicy, fableRowState, onOff, AUTO_FALLBACK, AUTO_EFFORT_FALLBACK, UPGRADE_CTX_DELTA, type ModelAsk, type ModelDecision } from './spawn-model-policy.ts'
+import { decideModel, upgradeNeedsConfirm, heldSpawnModel, heldSpawnNeedsLine, holdTapData, parseHoldTap, launchFallback, headUpgradeModel, spawnCardHeader, relaunchModel, decideEffort, fablePolicy, fableRowState, onOff, AUTO_FALLBACK, AUTO_EFFORT_FALLBACK, UPGRADE_CTX_DELTA, type ModelAsk, type ModelDecision } from './spawn-model-policy.ts'
 
 const NOW = 1_800_000_000_000
 // The shape of the box that had the incident: an owner-configured default, an agent calling.
@@ -30,9 +30,48 @@ test('asking for exactly the default is not an override', () => {
 // owner was carded about it. He asked for the gate to fire on Fable alone — the model the incident was
 // actually about — after a probe spawn asking for haiku both billed him for opus and interrupted him to
 // approve a session that had already started. A named model outside the gate is now the agent's call.
+// Amended 2026-08-03: haiku keeps that standing for the case the 2026-07-27 ruling was actually
+// about — a PROBE pane — and loses it as a session head (see the head-guard tests below).
 test('a named ungated model is the agent\'s own call — no clamp, no card', () => {
-  expect(decideModel(ask({ requested: 'haiku' }))).toEqual(dec({ model: 'haiku', ask: false, clamped: null }))
+  expect(decideModel(ask({ requested: 'haiku', probe: true }))).toEqual(dec({ model: 'haiku', ask: false, clamped: null }))
   expect(decideModel(ask({ requested: 'sonnet' }))).toEqual(dec({ model: 'sonnet', ask: false, clamped: null }))
+})
+
+// Haiku may not HEAD a coding session. Upgraded rather than refused, and never carded: there is
+// nothing for a human to decide, so a retry gets the same answer — the caller is told that instead.
+test('haiku heading a coding session is upgraded to the configured default, with no card', () => {
+  expect(decideModel(ask({ requested: 'haiku' })))
+    .toEqual(dec({ model: 'opus', ask: false, clamped: 'haiku', banned: true }))
+})
+
+test('the upgrade target is the CONFIGURED default, not a hardcoded alias', () => {
+  expect(decideModel(ask({ requested: 'haiku', configuredDefault: 'sonnet' })).model).toBe('sonnet')
+})
+
+test('a box configured for haiku does not upgrade haiku to haiku', () => {
+  // The one branch that cannot be delegated to the ordinary resolver — it would answer with the
+  // model being ruled out, silently, and the ack would name it as the fix.
+  expect(decideModel(ask({ requested: 'haiku', configuredDefault: 'haiku' })))
+    .toEqual(dec({ model: AUTO_FALLBACK, ask: false, clamped: 'haiku', banned: true }))
+  expect(headUpgradeModel('haiku')).toBe(AUTO_FALLBACK)
+  expect(headUpgradeModel('sonnet')).toBe('sonnet')
+})
+
+test('--probe is the way past the head guard, and nothing else is', () => {
+  expect(decideModel(ask({ requested: 'haiku', probe: true })).model).toBe('haiku')
+  // Neither of the two settings that wave a model through may re-open it: the guard sits above both.
+  expect(decideModel(ask({ requested: 'haiku', agentAllowed: ['haiku'] })).clamped).toBe('haiku')
+  expect(decideModel(ask({ requested: 'haiku', configuredDefault: 'haiku' })).clamped).toBe('haiku')
+})
+
+test('the head guard never touches a human\'s own pick, and never touches sonnet', () => {
+  expect(decideModel(ask({ requested: 'haiku', humanOrigin: true })))
+    .toEqual(dec({ model: 'haiku', ask: false, clamped: null }))
+  expect(decideModel(ask({ requested: 'sonnet' }))).toEqual(dec({ model: 'sonnet', ask: false, clamped: null }))
+})
+
+test('a probe asking for the gated model is still gated — --probe is about haiku, not about the gate', () => {
+  expect(decideModel(ask({ requested: 'fable', probe: true }))).toEqual(dec({ model: 'opus', ask: true, clamped: 'fable' }))
 })
 
 test('the gated model is still clamped and still asks', () => {
@@ -52,9 +91,13 @@ test('an agent\'s explicit model is honoured, and the gate is what still bites',
   expect(decideModel(ask({ requested: 'fable' }))).toEqual(dec({ model: 'opus', ask: true, clamped: 'fable' }))
 })
 
+// The allowlist's example used to be `['haiku']`. It cannot be, since 2026-08-03: the head guard sits
+// above this branch, so no preference can put haiku back at the head of a coding session (asserted in
+// "--probe is the way past the head guard, and nothing else is"). It still does its job for the model
+// it was actually written for.
 test('the named allowlist lets a test fleet spawn without a card — and only for the names in it', () => {
-  expect(decideModel(ask({ requested: 'haiku', agentAllowed: ['haiku'] }))).toEqual(dec({ model: 'haiku', ask: false, clamped: null }))
-  expect(decideModel(ask({ requested: 'fable', agentAllowed: ['haiku'] }))).toEqual(dec({ model: 'opus', ask: true, clamped: 'fable' }))
+  expect(decideModel(ask({ requested: 'fable', agentAllowed: ['fable'] }))).toEqual(dec({ model: 'fable', ask: false, clamped: null }))
+  expect(decideModel(ask({ requested: 'fable', agentAllowed: ['sonnet'] }))).toEqual(dec({ model: 'opus', ask: true, clamped: 'fable' }))
 })
 
 test('the quiet window silences the CARD, never the agent', () => {
