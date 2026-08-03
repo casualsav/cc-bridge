@@ -3248,8 +3248,11 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
     }
     // 'not-landed', never 'busy': busDeliver now returns false when the block is sitting
     // unsubmitted in the box, and calling that merely-busy is the understatement this fix exists
-    // to remove. Still transient — the 15s sweep retries either way.
-    return ok ? 'delivered' : 'not-landed'
+    // to remove. Still transient — the 15s sweep retries either way. 'occupied' is split out of
+    // 'not-landed' for the same reason 'not-landed' was split out of 'busy': it is the one of the
+    // three the SENDER cannot fix by waiting, and reporting it as ours-sitting-unsubmitted sends
+    // them looking for our message in a box that never held it.
+    return ok ? 'delivered' : outcome === 'occupied' ? 'occupied' : 'not-landed'
   } finally { busInFlight.delete(cur.id) }
 }
 

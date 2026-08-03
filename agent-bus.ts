@@ -481,7 +481,7 @@ export function markNudged(id: number, now: number): void {
 // could not tell a landed ask from one queued behind a pane that would never reach a prompt again.
 // 'busy' = mid-turn, self-clearing. 'wedged' = not at a prompt AND no turn running (the @ccbridge
 // shape — an unrecognized screen owns the pane). 'no-session' = no live pane for the target sid.
-export const ASK_DELIVERY_STATES = ['delivered', 'busy', 'wedged', 'no-session', 'not-landed'] as const
+export const ASK_DELIVERY_STATES = ['delivered', 'busy', 'wedged', 'no-session', 'not-landed', 'occupied'] as const
 export type AskDelivery = (typeof ASK_DELIVERY_STATES)[number]
 
 // The `tg ask` CLI line for an outcome. Pure so ask-delivery.test.ts can pin the whole enumeration:
@@ -502,6 +502,13 @@ export function askResultText(status: AskDelivery, toName: string, id: number): 
     // as delivered; it must never read as done.
     case 'not-landed':
       return `⚠️ QUEUED, NOT DELIVERED — the message is sitting unsubmitted in @${toName}'s input box (ask ${id}); the submit did not take, and the sweep will retry`
+    // The OPPOSITE of 'not-landed', and the distinction is the sender's next move. There nothing of
+    // ours reached the box and a retry is ours to make; here THEIR box already held typed text of
+    // their own, nothing of ours was pasted on top of it, and no retry helps until a human clears it.
+    // Told apart because 'not-landed' sent the reader looking for our message in a box that has never
+    // held it — the same wrong-place error the TTL notice made an hour later.
+    case 'occupied':
+      return `⚠️ QUEUED, NOT DELIVERED — @${toName}'s input box already holds typed text of their OWN (ask ${id}); nothing was pasted on top of it, and the sweep retries until that box clears`
   }
 }
 

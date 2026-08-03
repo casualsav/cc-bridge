@@ -44,6 +44,19 @@ test('11b: a target with no live session is reported as such', () => {
   expect(t).toMatch(/not running|no live/i)
 })
 
+test("an occupied box is never described as OUR message sitting unsubmitted", () => {
+  // The two look alike and lead opposite ways. 'not-landed': our block IS in their box and a retry
+  // presses Enter. 'occupied': their own typed text is in the box, nothing of ours was pasted, and no
+  // retry helps until a human clears it. Told apart because the merged wording sent a reader hunting
+  // for our message in a box that had never held it — verified live on 2026-08-03 against a real
+  // staged draft, which reported the 'not-landed' sentence before this split.
+  const t = askResultText('occupied', 'ccbridge', 95)
+  expect(t).toContain('NOT DELIVERED')
+  expect(t).toMatch(/their|OWN/i)                       // whose text it is, is the whole point
+  expect(t).not.toMatch(/sitting unsubmitted/i)         // that claim belongs to 'not-landed' alone
+  expect(askResultText('not-landed', 'ccbridge', 95)).toMatch(/sitting unsubmitted/i)   // control
+})
+
 // THE TRIPWIRE. Enumerate the outcomes; only 'delivered' may read as done, and no two may collide.
 test('TRIPWIRE: every delivery outcome has its own honest line', () => {
   const seen = new Map<string, AskDelivery>()
