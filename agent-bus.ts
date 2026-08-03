@@ -98,6 +98,12 @@ export type BusPending = {
   // since been restarted into a different pane must be pasted afresh rather than Enter'd at a box
   // that never held it. Persisted, so a daemon restart cannot forget and re-paste.
   pastedPane?: string
+  // The last delivery attempt was REFUSED because the target's input box already held somebody's
+  // typed text (ghost suggestions excluded — inputBoxOccupant). Holds that text, so the TTL notice can
+  // say what is in the way instead of "no answer yet from @X", which describes a silent target and
+  // sends the asker to read a transcript that never received the ask at all. Cleared on any attempt
+  // that gets further, so it can never outlive the block it describes.
+  blockedByBox?: string
   askerResolvedAt?: number   // when the daemon decided this asker needs no further notice about this ask
                              // (the TTL notice was withheld because the target had already answered it
                              // since). Persisted so the decision outlives the 200-row ledger window and a
@@ -167,6 +173,7 @@ export function loadBus(): BusState {
         injected: p.injected === true,
         ...(typeof p.expiredAt === 'number' ? { expiredAt: p.expiredAt } : {}),
         ...(typeof p.nudgedAt === 'number' ? { nudgedAt: p.nudgedAt } : {}),
+        ...(typeof p.blockedByBox === 'string' ? { blockedByBox: p.blockedByBox } : {}),
         ...(typeof p.askerResolvedAt === 'number' ? { askerResolvedAt: p.askerResolvedAt } : {}),
         ...(p.founding === true ? { founding: true as const } : {}),
         depth: typeof p.depth === 'number' ? p.depth : 1,   // pre-depth entry: assume one hop, the safe reading
@@ -383,6 +390,32 @@ export function markPasted(id: number, pane: string | null): void {
   if (!p || p.pastedPane === (pane ?? undefined)) return
   if (pane) p.pastedPane = pane; else delete p.pastedPane
   save()
+}
+
+/**
+ * Record that this ask's delivery was refused because the target's box holds typed text — or, with
+ * null, that it is no longer blocked. Called on EVERY delivery outcome, not just the refusal: a stale
+ * "blocked" reading would misdescribe a later failure of a different kind, which is the class of bug
+ * this field exists to close rather than to join.
+ */
+export function markBoxBlocked(id: number, box: string | null): void {
+  ensureLoaded()
+  const p = store.pending[String(id)]
+  if (!p) return
+  const next = box == null ? undefined : box.slice(0, 120)
+  if (p.blockedByBox === next) return
+  if (next == null) delete p.blockedByBox; else p.blockedByBox = next
+  save()
+}
+
+/**
+ * The typed text standing between this ask and its target, or undefined when there is none to report.
+ * The `injected` half is the guard, not a formality: a DELIVERED ask that still carries a stale flag
+ * must read as an ordinary silent target, because inventing a delivery failure is the worse error —
+ * it stops the asker waiting for an answer that is genuinely still coming.
+ */
+export function boxBlockedFor(p: Pick<BusPending, 'injected' | 'blockedByBox'>): string | undefined {
+  return p.injected ? undefined : p.blockedByBox
 }
 
 /** Record that the asker has been told nothing on purpose — see askerAlreadyResolved. Idempotent. */

@@ -55,7 +55,14 @@ test('with no `bun` on PATH the watchdog still launches the daemon and stays up'
       env: { TELEGRAM_STATE_DIR: stateDir, HOME: home, PATH: '/nonexistent-bin' },
       stdout: 'pipe', stderr: 'pipe',
     })
-    await Bun.sleep(3000)
+    // Wait for the OUTCOME, not for the clock. A flat 3s sleep here is the whole margin the watchdog
+    // has to notice the daemon is down and spawn it, and on this 4-core box a full `bun test` run —
+    // or a deploy, which runs one — eats it: the test red-flaked twice in a row and blocked a deploy
+    // on 2026-08-03 while passing every time in isolation. A flaky red is not a cheap false alarm
+    // here, because `bun run deploy` gates on the suite.
+    const deadline = Date.now() + 20_000
+    while (!existsSync(marker) && proc.exitCode === null && Date.now() < deadline) await Bun.sleep(100)
+    await Bun.sleep(200)   // let the watchdog's own stderr flush past the spawn
     const aliveAfter = proc.exitCode === null
     proc.kill('SIGKILL')
     const err = await Bun.readableStreamToText(proc.stderr)

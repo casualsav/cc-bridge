@@ -150,7 +150,7 @@ import { formatChannelBlock } from './inbound.ts'
 import { initQueue, readLater, writeLater, sweepLaterQueues, LATER_SWEEP_MS } from './queue.ts'
 import {
   AGENT_BUS_ENABLED, AGENT_BUS_PIN_UI,
-  createPending, getPending, removePending, putPending, listPending, markInjected, markPasted, expirePending, dropExpired, LATE_ANSWER_GRACE_MS, ASK_TTL_MS,
+  createPending, getPending, removePending, putPending, listPending, markInjected, markPasted, markBoxBlocked, boxBlockedFor, expirePending, dropExpired, LATE_ANSWER_GRACE_MS, ASK_TTL_MS,
   recordAgentAsk, resetHops, currentHops, BREADTH_NOTICE_AT, askResultText, planAskReap, deliveredReapCandidates, groupClosuresByAskerAndTarget, reapNotifiesAsker, queuedFor, type AskDelivery,
   askerAlreadyResolved, askerKilledTarget, markAskerResolved, reapNoticeSuppressed, planAssigneeNudge, markNudged,
   unreportedWorkMarker, markReported, markBriefed,
@@ -3206,15 +3206,20 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
       markPasted(cur.id, outcome === 'unsubmitted' ? pane : null)
       // 'occupied' names the text it refused over, because that is the one failure a human can clear —
       // and a delivery that silently waits on somebody's half-typed line is unattributable otherwise.
+      // The same text goes on the ROW (markBoxBlocked), because this log line is read by nobody until
+      // someone already suspects a problem, and the TTL notice an hour later is what the asker sees.
+      const blocking = outcome === 'occupied' ? (await boxOccupantOf(pane)) ?? '' : null
+      markBoxBlocked(cur.id, blocking)
       const why = outcome === 'unsubmitted'
         ? `pasted into ${pane} but its submit was not confirmed — the retry will press Enter, not paste again`
-        : outcome === 'occupied'
-          ? `was NOT pasted into ${pane} — it already holds typed text (${JSON.stringify((await boxOccupantOf(pane)) ?? '')}); the ask stays open and will retry`
+        : blocking != null
+          ? `was NOT pasted into ${pane} — it already holds typed text (${JSON.stringify(blocking)}); the ask stays open and will retry`
           : `could not be pasted into ${pane} — nothing landed; the retry will paste afresh`
       process.stderr.write(`daemon: ask ${cur.id} to @${cur.toName} ${why}\n`)
     }
     const ok = outcome === 'landed'
     if (ok) {
+      markBoxBlocked(cur.id, null)   // it delivered, so whatever was in the way is gone
       markPasted(cur.id, null)   // the box is ours no longer — a later retry must paste, not Enter
       const now = Date.now()
       markInjected(cur.id, now)
@@ -3564,12 +3569,22 @@ async function sweepBus(): Promise<void> {
     // Not "abandoned": the record is kept so a late answer still lands.
     const askerPane = await paneForSession(p.fromSid).catch(() => null)
     const targets = askerPane ? await outboundTargetsFor(askerPane).catch(() => []) : []
+    // "No answer yet" describes a target that READ the ask and stayed silent. An ask blocked on an
+    // occupied input box was never delivered at all, and telling the asker to wait sends them to read a
+    // transcript that has never seen it — the wrong place, for an hour. Same record, same retry, honest
+    // words: `blockedByBox` is only ever set by the delivery attempt that was refused, and cleared by
+    // the next one that gets further, so this branch cannot outlive the block.
+    const blocked = boxBlockedFor(p)
     for (const { chat, thread } of targets) {
       void channel.sendText(chat,
-        `⌛ No answer yet from <b>${escapeHtml(p.toName)}</b> to ask ${p.id} — still waiting; a late answer will still be delivered.`,
+        blocked != null
+          ? `⛔ Ask ${p.id} has NOT reached <b>${escapeHtml(p.toName)}</b> — their input box has held typed text (<code>${escapeHtml(blocked.slice(0, 40))}</code>) for ${Math.round(ASK_TTL_MS / 60_000)}m, so every attempt was refused rather than pasted on top of it. Still queued; it delivers as soon as that box clears.`
+          : `⌛ No answer yet from <b>${escapeHtml(p.toName)}</b> to ask ${p.id} — still waiting; a late answer will still be delivered.`,
         { silent: true, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
     }
-    if (askerPane) void busDeliver(askerPane, formatAnswerBlock('system', p.id, `(no answer yet from @${p.toName} after ${Math.round(ASK_TTL_MS / 60_000)}m — still open; a late answer will be delivered if it arrives)`))
+    if (askerPane) void busDeliver(askerPane, formatAnswerBlock('system', p.id, blocked != null
+      ? `(ask ${p.id} was NEVER DELIVERED to @${p.toName} after ${Math.round(ASK_TTL_MS / 60_000)}m — their input box holds typed text (${JSON.stringify(blocked.slice(0, 40))}), so attempts are refused rather than pasted over it. Still queued; it delivers when that box clears — this is not a silent target)`
+      : `(no answer yet from @${p.toName} after ${Math.round(ASK_TTL_MS / 60_000)}m — still open; a late answer will be delivered if it arrives)`))
   }
   for (const p of listPending()) {
     if (!p.injected && !p.expiredAt) await tryDeliverAsk(p).catch(() => {})
