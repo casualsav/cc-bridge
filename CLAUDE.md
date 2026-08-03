@@ -53,6 +53,18 @@ only when you access `webapp/`, so read it yourself before touching `webapp/inde
   done.** "Make sure it works" is not one; neither is a test that would pass against the broken
   version.
 
+## Context economy
+
+- **Change a tracked file with the Edit tool, never in place from the shell** (`perl -pi`, `sed -i`,
+  `cat >>`, a heredoc redirected over an existing file). After a shell write the harness re-injects
+  the WHOLE edited file as a reminder; after an Edit it re-injects only the diff — measured at 17,548
+  tokens across five shell edits in one session. Writing a NEW file from a script is fine; rewriting
+  one already in your context is what costs.
+- **`bun scripts/symbols.ts | grep -i <name>` before you grep a file for a definition.** It prints
+  name → line for every top-level symbol in each tracked `.ts` over 5,000 lines (803 in `daemon.ts`,
+  19 kB whole) — the same session spent 28,655 tokens on 50 greps that produced nothing but line
+  numbers. It indexes definitions, not call sites, so a grep for usage is still a grep.
+
 ## Layout (for working on the repo)
 - `daemon.ts` (Telegram) / `slack-daemon.ts` / `discord-daemon.ts` — the long-lived bot + access gate
   + tmux pane driver + off-MCP outbound, per channel (the bulk of the code).
