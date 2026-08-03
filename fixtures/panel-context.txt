@@ -1,0 +1,45 @@
+
+     Skills · /skills                                                                               
+     └ 68 skills · 10k tokens
+                                                                                                    
+     /context all to expand               
+                                                                                                    
+❯ /context               
+  ⎿  Context Usage                                    
+     ⛁ ⛁ ⛀ ⛀ ⛀ ⛁ ⛁ ⛶ ⛶ ⛶   Sonnet 5                                                                 
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   claude-sonnet-5                                                          
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   53.6k/967k tokens (6%)                                                   
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶                                                                            
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   Estimated usage by category                               
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   ⛁ System prompt: 9.4k tokens (1.0%)                            
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   ⛁ System tools: 15.6k tokens (1.6%)                                      
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   ⛁ Custom agents: 1.1k tokens (0.1%)    
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   ⛁ Memory files: 5.1k tokens (0.5%) 
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛝ ⛝ ⛝   ⛁ Skills: 10k tokens (1.0%)       
+                           ⛁ Messages: 14.5k tokens (1.5%)
+                           ⛶ Free space: 878.4k (90.8%)                              
+                           ⛝ Autocompact buffer: 33k tokens (3.4%)                                  
+                                                                  
+     Auto-compact window: 967k tokens                           
+                                                              
+     MCP tools · /mcp (loaded on-demand)                                             
+     └ 2 tools · 0 tokens                                                                 
+                            
+     Custom agents · .claude/agents/                          
+     └ 9 agents · 1.1k tokens                                 
+                                                                                            
+     Memory files · /memory
+     └ 2 files · 5.1k tokens
+                                                                                  
+     Skills · /skills                                                                               
+     └ 68 skills · 10k tokens                                                                   
+
+     /context all to expand                                                                    
+                                                                                                   
+────────────────────────────────────────────────────────────────────────────────────────────────────
+❯                                                         
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  ubuntu@cloud:/tmp/claude-1001/-home-ubuntu-projects-cc-bridge/a00f6887-dd43-4e5f-91fe-825af6190d… 
+  ε:xhigh | ✻think | ctx ░░░░░░░░░░ 5%/1000k | ↑53.6k ↓6 | $0.1576 | ⧗2m22s | api 3s | Say hi in o… 
+  5h ████░░░░░░░░░░ 25% ↻29m | 7d ██░░░░░░░░░░░░ 17% ↻138h29m
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents

@@ -1,0 +1,45 @@
+│                      ▝▜█████▛▘                     │ Bug fixes and reliability improvements      │
+│                        ▘▘ ▝▝                       │ Added Claude Opus 5 (`claude-opus-5`), now… │
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   Settings  Status   Config   Usage   Stats                                                        
+
+   Session                                                                                          
+
+   Total cost:            $0.1576
+   Total duration (API):  3s                                                                        
+   Total duration (wall): 1m 27s                                                                    
+   Total code changes:    0 lines added, 0 lines removed                                            
+   Usage by model:                                                                                  
+       claude-haiku-4-5:  519 input, 13 output, 0 cache read, 0 cache write ($0.0006)
+        claude-sonnet-5:  2 input, 6 output, 28.9k cache read, 24.7k cache write ($0.1570)
+                                                                                                    
+   Current session                                            
+   █████████████                                      26% used
+   Resets 9:59pm (UTC)                                       
+                                                          
+   Current week (all models)                                                         
+   ████████▌                                          17% used                                      
+   Resets Aug 9, 3:59pm (UTC)                                     
+   +50% weekly limits promo through Aug 19 · clau.de/cc-50-promo
+                                                              
+   Current week (Fable)                                                              
+   ██████▌                                            13% used                            
+   Resets Aug 9, 4pm (UTC)  
+                                                              
+   What's contributing to your limits usage?                  
+   Approximate, based on local sessions on this machine — does not include other devices or 
+   claude.ai               
+                            
+   Last 24h · these are independent characteristics of your usage, not a breakdown
+                                                                                           
+   83% of your usage was at >150k context                                                       
+    Longer sessions are more expensive even when cached. /compact mid-task, /clear                
+    when switching to new tasks.                                                               
+                                                                                                   
+   Skills, subagents, plugins, and MCP servers                                                      
+   No attribution data yet · accumulates as you use Claude
+                                                                                                    
+   d to day · w to week                                                                             
+                                                                                                    
+   Usage credits                                             
+   Usage credits are off · /usage-credits to turn them on     
