@@ -5123,6 +5123,72 @@ async function handleModelUnavailable(text: string, paneId: string | null = focu
 type CompactWatch = { chat: string; thread?: number; msgId: number; startedAt: number; lastFilled: number; notCompacting: number; timer: ReturnType<typeof setTimeout> }
 const compactWatches = new Map<string, CompactWatch>()
 
+// ---- Card persistence across daemon restarts ----
+// The map above is the ONLY thing stopping a second card ("the map guard is set synchronously… so
+// repeated frames in the same compaction never post a second card"), and a restart wipes it. The next
+// pane frame then finds no watch, posts a NEW card, and the old card's msgId is gone so nothing can
+// ever edit it again — it freezes mid-bar. Observed 2026-08-03 in the owner's DM: two restarts 26s
+// apart during one compaction produced three cards (33% · restart · 48% · 63%), each frozen where it
+// stood. Same defect mirror.ts fixed for the live card ("one dup per mid-turn deploy"), so this is its
+// resume-or-cap, copied deliberately rather than reinvented.
+const COMPACT_STATE_FILE = join(STATE_DIR, 'compact-cards.json')
+type PersistedCompact = { pane: string; chat: string; thread?: number; msgId: number; startedAt: number; lastFilled: number }
+
+function persistCompactWatches(): void {
+  const rows: PersistedCompact[] = []
+  for (const [pane, w] of compactWatches) {
+    if (!w.msgId) continue   // the opening card hasn't been posted yet — nothing to resume or cap
+    rows.push({ pane, chat: w.chat, thread: w.thread, msgId: w.msgId, startedAt: w.startedAt, lastFilled: w.lastFilled })
+  }
+  writeJsonFile(COMPACT_STATE_FILE, rows)
+}
+
+// Adopt-or-defer-or-cap, run once per persisted card on boot.
+//
+// The deferral is NOT decoration. `detectCompacting` reads a live capture, and right after boot that
+// capture can be empty or mid-redraw — the tick loop already distrusts a single not-compacting read
+// for exactly this reason (`notCompacting < 2`). Capping early is precisely the failure being fixed:
+// the still-running compaction's next frame opens a fresh card under a prematurely-capped one, so a
+// wrong verdict here costs the same duplicate it is meant to prevent. Same ~30s budget as mirror.ts.
+const COMPACT_RESTORE_TRIES = 20
+async function restoreCompactWatches(tries = 0): Promise<void> {
+  const saved = readJsonFile<PersistedCompact[]>(COMPACT_STATE_FILE, [])
+  if (!Array.isArray(saved) || !saved.length) return
+  const undecided: PersistedCompact[] = []
+  for (const s of saved) {
+    if (!s || typeof s.pane !== 'string' || typeof s.msgId !== 'number' || !s.msgId) continue
+    if (compactWatches.has(s.pane)) continue   // a live frame already opened this pane's watch — it owns the card
+    const cap = await capturePane(s.pane).catch(() => '')
+    if (!cap) {
+      // An unreadable pane is not proof the compaction ended — it is the cold-boot blip, or a pane
+      // that genuinely died. Defer; on the last try, cap (a dead pane's card must not freeze either).
+      if (tries < COMPACT_RESTORE_TRIES) { undecided.push(s); continue }
+      scheduleEdit({ chat: s.chat, mid: s.msgId, thread: s.thread, source: 'compact', render: () => '⚠️ Compaction interrupted (session ended)' })
+      process.stderr.write(`daemon: capped orphaned compaction card (pane ${s.pane} unreadable, msg ${s.msgId})\n`)
+      continue
+    }
+    if (detectCompacting(cap)) {
+      compactWatches.set(s.pane, {
+        chat: s.chat, thread: s.thread, msgId: s.msgId, startedAt: s.startedAt || Date.now(),
+        lastFilled: s.lastFilled ?? 0, notCompacting: 0, timer: setTimeout(() => {}, 0),
+      })
+      process.stderr.write(`daemon: resumed compaction card across restart (pane ${s.pane}, msg ${s.msgId})\n`)
+      void resumeCompactionTick(s.pane)
+      continue
+    }
+    // Readable and NOT compacting: it finished while we were down. One read is enough here — unlike
+    // the empty capture above, this is positive evidence of a live pane at rest.
+    const secs = Math.round((Date.now() - (s.startedAt || Date.now())) / 1000)
+    scheduleEdit({ chat: s.chat, mid: s.msgId, thread: s.thread, source: 'compact', render: () => `✅ Compacted${secs >= 2 ? ` · ${secs}s` : ''}` })
+    process.stderr.write(`daemon: capped completed compaction card (pane ${s.pane}, msg ${s.msgId}, ${secs}s)\n`)
+  }
+  persistCompactWatches()
+  if (undecided.length) {
+    writeJsonFile(COMPACT_STATE_FILE, undecided)
+    setTimeout(() => void restoreCompactWatches(tries + 1), COMPACT_TICK_MS)
+  }
+}
+
 // The card's progress bar in Claude Code's own ▰/▱ style (matching the bar it draws on the pane).
 // 20 cells, so each ▰ is exactly one 5% step. `filled` is 0..WIDTH.
 const COMPACT_BAR_WIDTH = 20
@@ -5176,42 +5242,59 @@ async function startCompactionWatch(pane: string, initialText = ''): Promise<voi
   if (!msg) { compactWatches.delete(pane); return }
   slot.msgId = Number(msg.messageId)
   slot.lastFilled = openPct == null ? 0 : compactCells(openPct)
-  const tick = async (): Promise<void> => {
-    const w = compactWatches.get(pane)
-    if (!w) return
-    const elapsed = Date.now() - w.startedAt
-    const cap = await capturePane(pane).catch(() => '')
-    const still = detectCompacting(cap)
-    if (still && elapsed < 5 * 60_000) {
-      w.notCompacting = 0
-      // Register a new frame ONLY when compaction crosses a 5% cell boundary (never on a null reading)
-      // — so the card reports ≤20 times across the whole run, not once per 3s tick. capturePane is
-      // local; the scheduler paces/coalesces the Telegram edit and skips flooded chats.
-      const pct = compactPercent(cap)
-      const filled = pct == null ? w.lastFilled : compactCells(pct)
-      if (filled !== w.lastFilled) {   // 5% boundary crossed
-        w.lastFilled = filled
-        scheduleEdit({ chat: w.chat, mid: w.msgId, thread: w.thread, source: 'compact',
-          render: () => `🗜️ Compacting conversation…\n<code>${compactProgress(pct)}</code>` })
-      }
-      w.timer = setTimeout(() => void tick(), COMPACT_TICK_MS)
-    } else if (!still && elapsed < 5 * 60_000 && ++w.notCompacting < 2) {
-      // A single not-compacting read can be a mid-redraw capture — confirm on the next tick
-      // before declaring done, else a false ✅ ends the watch and the next frame opens a new card.
-      w.timer = setTimeout(() => void tick(), COMPACT_TICK_MS)
-    } else if (cap === '') {
-      // An empty capture means the pane is gone (dead session), NOT a finished compaction — the
-      // "no longer compacting" test would otherwise post a false ✅. Stop the watch on a neutral card.
-      compactWatches.delete(pane)
-      scheduleEdit({ chat: w.chat, mid: w.msgId, thread: w.thread, source: 'compact', render: () => '⚠️ Compaction interrupted (session ended)' })
-    } else {
-      compactWatches.delete(pane)
-      const secs = Math.round(elapsed / 1000)
-      const done = `✅ Compacted${secs >= 2 ? ` · ${secs}s` : ''}`
-      scheduleEdit({ chat: w.chat, mid: w.msgId, thread: w.thread, source: 'compact', render: () => done })   // scheduler lands the end state once the budget frees
+  process.stderr.write(`daemon: opened compaction card (pane ${pane}, msg ${slot.msgId}, chat ${slot.chat})\n`)
+  persistCompactWatches()   // the msgId exists now — a restart from here on can resume instead of duplicating
+  slot.timer = setTimeout(() => void compactionTick(pane), COMPACT_TICK_MS)
+}
+
+// One poll of a pane's compaction, rescheduling itself. Split out of startCompactionWatch (where it
+// was a closure) so a watch RESTORED from disk can drive the same loop — a resumed card must age,
+// finish and cap through exactly this code, not a second copy of it.
+async function compactionTick(pane: string): Promise<void> {
+  const w = compactWatches.get(pane)
+  if (!w) return
+  const elapsed = Date.now() - w.startedAt
+  const cap = await capturePane(pane).catch(() => '')
+  const still = detectCompacting(cap)
+  if (still && elapsed < 5 * 60_000) {
+    w.notCompacting = 0
+    // Register a new frame ONLY when compaction crosses a 5% cell boundary (never on a null reading)
+    // — so the card reports ≤20 times across the whole run, not once per 3s tick. capturePane is
+    // local; the scheduler paces/coalesces the Telegram edit and skips flooded chats.
+    const pct = compactPercent(cap)
+    const filled = pct == null ? w.lastFilled : compactCells(pct)
+    if (filled !== w.lastFilled) {   // 5% boundary crossed
+      w.lastFilled = filled
+      persistCompactWatches()   // so a restart resumes at the bar the user can currently see
+      scheduleEdit({ chat: w.chat, mid: w.msgId, thread: w.thread, source: 'compact',
+        render: () => `🗜️ Compacting conversation…\n<code>${compactProgress(pct)}</code>` })
     }
+    w.timer = setTimeout(() => void compactionTick(pane), COMPACT_TICK_MS)
+  } else if (!still && elapsed < 5 * 60_000 && ++w.notCompacting < 2) {
+    // A single not-compacting read can be a mid-redraw capture — confirm on the next tick
+    // before declaring done, else a false ✅ ends the watch and the next frame opens a new card.
+    w.timer = setTimeout(() => void compactionTick(pane), COMPACT_TICK_MS)
+  } else if (cap === '') {
+    // An empty capture means the pane is gone (dead session), NOT a finished compaction — the
+    // "no longer compacting" test would otherwise post a false ✅. Stop the watch on a neutral card.
+    compactWatches.delete(pane)
+    persistCompactWatches()
+    process.stderr.write(`daemon: capped compaction card (pane ${pane}, msg ${w.msgId}) — pane gone\n`)
+    scheduleEdit({ chat: w.chat, mid: w.msgId, thread: w.thread, source: 'compact', render: () => '⚠️ Compaction interrupted (session ended)' })
+  } else {
+    compactWatches.delete(pane)
+    persistCompactWatches()
+    const secs = Math.round(elapsed / 1000)
+    const done = `✅ Compacted${secs >= 2 ? ` · ${secs}s` : ''}`
+    process.stderr.write(`daemon: capped compaction card (pane ${pane}, msg ${w.msgId}) — done in ${secs}s\n`)
+    scheduleEdit({ chat: w.chat, mid: w.msgId, thread: w.thread, source: 'compact', render: () => done })   // scheduler lands the end state once the budget frees
   }
-  slot.timer = setTimeout(() => void tick(), COMPACT_TICK_MS)
+}
+
+// Drive a card adopted from disk. Its `timer` slot is a placeholder, so the loop must be kicked once.
+function resumeCompactionTick(pane: string): void {
+  const w = compactWatches.get(pane)
+  if (w) w.timer = setTimeout(() => void compactionTick(pane), COMPACT_TICK_MS)
 }
 
 function startPaneWatcher(paneId: string): void {
@@ -17152,6 +17235,12 @@ setInterval(() => void sweepDeletedTopics(), TOPIC_SWEEP_MS).unref()
 // Inject /later queue items whenever their session goes idle.
 setInterval(() => void sweepLaterQueues(), LATER_SWEEP_MS).unref()
 setInterval(() => void sweepPermStorms(), 5_000).unref()
+// Compaction cards left live by the previous process: resume the ones whose pane is still compacting,
+// cap the rest. Deliberately NOT deferred to a later tick — a compaction takes ~1-2 minutes, so a card
+// adopted late is a card the user watched sit frozen. restoreCompactWatches does its own deferring
+// when a boot-time capture cannot yet answer.
+void restoreCompactWatches()
+
 // Stale-session sweep: hourly (auto-update can land any time), first pass shortly after boot.
 setTimeout(() => void sweepSessionVersions(), 3 * 60_000).unref()
 setInterval(() => void sweepSessionVersions(), 3_600_000).unref()
