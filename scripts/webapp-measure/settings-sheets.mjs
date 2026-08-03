@@ -50,6 +50,8 @@ const settingsFixture = (write) => ({
     prefMode: { value: "🛡 Ask", raw: "default", editable: true, options: ["default", "acceptEdits", "plan", "auto", "bypassPermissions"] },
     confirmReset: { value: true, editable: true },
     fileBrowser: { value: true, editable: true },
+    baseFolder: { value: "~/projects", editable: true, label: "must already exist" },
+    codexModel: { value: "default", editable: true },
     mcp: { value: false, editable: true },
     mode: { value: null, editable: false }, model: { value: null, editable: false }, effort: { value: null, editable: false },
   },
@@ -153,6 +155,44 @@ const open = async (write, gh = GH) => {
   const g = (await p.evaluate(() => window.__posts)).find(x => x.path.includes("/api/github/action"));
   ok(!!g && g.body.action === "switch" && g.body.user === "alt",
     `Make active posts switch/alt (got ${JSON.stringify(g && g.body)})`);
+  await p.close();
+}
+
+// ---- 6 (phase D): the two TEXT rows ------------------------------------------------------------
+// A field posts on commit, and — the half that is easy to get wrong — does NOT post when the value
+// did not change. A tap that opens the keyboard and closes it must be free; without that rule every
+// visit to the screen would rewrite the base folder and the Codex model.
+{
+  const p = await open(true);
+  const fields = await p.$$eval("#tab-settings input.ro.edit", ns => ns.map(n => n.value));
+  ok(fields.length === 2 && fields.includes("~/projects") && fields.includes("default"),
+    `both text rows render as fields carrying their value (got ${JSON.stringify(fields)})`);
+
+  // Guarded like the sheet checks above so the CONTROL run reports failures instead of throwing.
+  const base = await p.$("#tab-settings input.ro.edit");
+  if (base) { await base.fill("~/work"); await base.evaluate(n => n.blur()); }
+  await p.waitForTimeout(150);
+  const w = (await p.evaluate(() => window.__posts)).find(x => x.body && x.body.key === "baseFolder");
+  ok(!!w && w.body.value === "~/work", `a changed folder posts baseFolder=~/work (got ${JSON.stringify(w && w.body)})`);
+
+  const p2 = await open(true);
+  const f2 = await p2.$("#tab-settings input.ro.edit");
+  if (f2) { await f2.click(); await f2.evaluate(n => n.blur()); }
+  await p2.waitForTimeout(150);
+  ok((await p2.evaluate(() => window.__posts)).length === 0, "focus and blur with no edit posts NOTHING");
+  // Enter commits too — the keyboard's own done key is the natural gesture on a phone.
+  const f3 = await p2.$("#tab-settings input.ro.edit");
+  if (f3) { await f3.fill("~/elsewhere"); await f3.press("Enter"); }
+  await p2.waitForTimeout(150);
+  const e = (await p2.evaluate(() => window.__posts)).find(x => x.body && x.body.key === "baseFolder");
+  ok(!!e && e.body.value === "~/elsewhere", `Enter commits (got ${JSON.stringify(e && e.body)})`);
+  await p.close(); await p2.close();
+}
+{
+  // Write off: the text rows fall back to plain read-only values, not disabled inputs a thumb can
+  // still focus. An input rendered "disabled" would still read as a field that ought to work.
+  const p = await open(false);
+  ok((await p.$$("#tab-settings input.ro.edit")).length === 0, "write off: no text FIELD is rendered at all");
   await p.close();
 }
 

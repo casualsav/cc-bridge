@@ -17409,9 +17409,10 @@ async function webappReadSettings(): Promise<WebappSettingsView> {
       prefMode: { value: listAccounts().length > 1 ? 'per account' : defModeLabel(MAIN_ACCOUNT.configDir), raw: readDefaultMode(MAIN_ACCOUNT.configDir), editable: listAccounts().length === 1, options: [...MODES], label: 'what NEW sessions launch in' },
       confirmReset: { value: a.confirmReset !== false, editable: true, label: '/clear and /new ask first' },
       fileBrowser: { value: a.fileBrowser !== false, editable: true, label: 'Files tab in this app (reopens on change)' },
-      // 📂 base folder is free text (a path), not an enum — the client renders it read-only until the
-      // text-entry row lands; the endpoint already validates and accepts it.
-      ...(isTopicMode() ? { baseFolder: { value: baseFolderFull(), editable: false, label: 'new topics land here' } } : {}),
+      // 📂 base folder is free TEXT (a path), not an enum: the app renders a field and applySetting
+      // refuses a folder that doesn't exist — the same refusal the Telegram force-reply gives, since
+      // this is the root new topics fan out under and a mkdir here would invent a surprise root.
+      ...(isTopicMode() ? { baseFolder: { value: baseFolderFull(), editable: true, label: 'new topics land here — must already exist' } } : {}),
       ...(isTopicMode() && AGENT_BUS_PIN_UI ? { switchboard: { value: a.switchboard !== false, editable: true, label: 'roster line on the pinned card' } } : {}),
       mcp: { value: mcpEnabled(), editable: true, label: 'new sessions only' },
       // The 🧑‍💻 Model defaults — the same prefs the /settings sub-panel writes. They belong on this
@@ -17432,9 +17433,9 @@ async function webappReadSettings(): Promise<WebappSettingsView> {
       chatEffort: { value: configuredSpawnEffort('chat'), editable: true, options: [...SPAWN_EFFORT_LEVELS], label: 'the chat agent' },
       spawnAuto: { value: a.spawnAuto === true, editable: true, label: 'agent spawns pick their own model/effort' },
       fableForAgents: { value: fablePolicy(a.fableForAgents) === 'allow' ? 'allow' : 'default', editable: true, options: ['default', 'allow'], label: 'allow = an agent Fable spawn needs no tap' },
-      // Codex dials — used on failover and by every Codex session. The model is free text (open-ended
-      // ids), so it stays read-only in the client until the text-entry row lands.
-      codexModel: { value: codexLaunchModel() || 'default', editable: false, label: 'used on failover to Codex' },
+      // Codex dials — used on failover and by every Codex session. The model is free text: Codex ids
+      // are open-ended, so there is no list to offer and applySetting validates the SHAPE instead.
+      codexModel: { value: codexLaunchModel() || 'default', editable: true, label: "used on failover to Codex — 'default' clears it" },
       codexEffort: { value: codexLaunchEffort() || 'default', editable: true, options: CODEX_EFFORTS.map(e => e || 'default'), label: 'used on failover to Codex' },
       mode: { value: cap ? detectCurrentMode(cap) : null, editable: false, label: 'drives the pane (chat-side)' },
       model: { value: sl?.model ?? null, editable: false },

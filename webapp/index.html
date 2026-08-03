@@ -479,6 +479,13 @@
   .toggle { padding: 6px var(--sp-3); border: none; border-radius: var(--r-sm); background: var(--btn); color: var(--btn-text); font-size: var(--t-sub); cursor: pointer; min-width: 56px; }
   .toggle.off { background: var(--sec); color: var(--hint-raised); box-shadow: inset 0 0 0 1px var(--hint); }
   select.seg { padding: 6px var(--sp-2); border-radius: var(--r-sm); border: none; background: var(--bg); color: var(--text); font-size: var(--t-sub); box-shadow: inset 0 0 0 1px var(--sec); }
+  /* A text-entry value. It borrows .ro's type and colour so an editable path reads as the same row
+     it replaces, and takes select.seg's inset ring so the two editable controls match each other.
+     Right-aligned like every other value; it grows to the row's free space and no further. */
+  input.ro.edit { flex: 1; min-width: 0; max-width: 62%; text-align: right; padding: 6px var(--sp-2);
+    border: none; border-radius: var(--r-sm); background: var(--bg); color: var(--text);
+    box-shadow: inset 0 0 0 1px var(--sec); font-family: inherit; }
+  input.ro.edit:focus { outline: none; box-shadow: inset 0 0 0 1px var(--btn); }
   .setrow.action { cursor: pointer; }
   .setrow.action .ro { color: var(--link); }
   .acctsheet { max-height: 88vh; display: flex; flex-direction: column; }
@@ -2282,9 +2289,12 @@ async function renderSettings() {
     prefMode: { name: "🧷 Preferred mode", bool: false },
     confirmReset: { name: "🧹 /clear approval", bool: true },
     fileBrowser: { name: "🗂 File browser", bool: true },
-    baseFolder: { name: "📂 Base folder", bool: false },
+    // Free TEXT, not an enum — a path and an open-ended model id. `text` renders the row's value as a
+    // tappable field; the daemon validates (the folder must already exist, the id must look like one)
+    // and its refusal is what the row shows, so the app never invents a second rule.
+    baseFolder: { name: "📂 Base folder", bool: false, text: "Folder path (must exist)" },
     switchboard: { name: "☎️ Agent bus", bool: true },
-    codexModel: { name: "✳️ Codex model", bool: false },
+    codexModel: { name: "✳️ Codex model", bool: false, text: "Model id, or 'default'" },
     codexEffort: { name: "✳️ Codex effort", bool: false },
     mcp: { name: "🔌 MCP mode", bool: true },
     mode: { name: "🛠️ Mode", bool: false },
@@ -2331,6 +2341,18 @@ async function renderSettings() {
       for (const o of s.options) { const op = document.createElement("option"); op.value = o; op.textContent = o; if (o === cur) op.selected = true; sel.appendChild(op); }
       sel.onchange = () => setSetting(key, sel.value);
       r.appendChild(sel);
+    } else if (m.text && editable) {
+      // Text entry: the value IS the control. Committed on blur or Enter, and only when it actually
+      // changed — a tap that opens the keyboard and closes it must not post. The daemon's refusal
+      // (a folder that doesn't exist, an id that isn't one) comes back through writeOp's red bar and
+      // the row is repainted from the server, so a rejected value never sits on screen looking saved.
+      const inp = document.createElement("input");
+      inp.className = "ro edit"; inp.value = s.value == null ? "" : String(s.value);
+      inp.placeholder = m.text; inp.autocapitalize = "none"; inp.autocomplete = "off"; inp.spellcheck = false;
+      const commit = () => { const v = inp.value.trim(); if (v && v !== String(s.value)) setSetting(key, v); else renderSettings(); };
+      inp.onkeydown = e => { if (e.key === "Enter") { e.preventDefault(); inp.blur(); } };
+      inp.onblur = commit;
+      r.appendChild(inp);
     } else {
       const ro = document.createElement("div"); ro.className = "ro"; ro.textContent = s.value == null ? "—" : String(s.value);
       r.appendChild(ro);
