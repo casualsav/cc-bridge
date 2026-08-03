@@ -250,6 +250,31 @@ function footerIsLive(lines: string[], footerIdx: number): boolean {
   return contentBelow <= 1
 }
 
+// A footer is a row of KEY HINTS, and until 2026-08-03 nothing said so: SELECT_HINT's alternatives
+// include the bare phrase `to navigate`, which is ordinary English, and a chat session's own reply —
+// "an agent doesn't need headings to navigate, it needs rules it can't misread" — became the live
+// footer of an imaginary menu. The daemon then read two painted conversation rows as its options and
+// the working spinner as its question, and sent that card to the owner's DM.
+//
+// So a candidate footer must also LOOK like one: short, and carrying a key the user could press.
+// Every real footer measured on 2.1.220 does ("↑/↓ to navigate · Enter to confirm · Esc to cancel",
+// "Enter to select · Esc to cancel", "space to select", "shift+tab to approve"); prose does not.
+const FOOTER_KEY = /[↑↓←→]|\b(enter|esc|escape|tab|space)\b/i
+function footerShaped(line: string): boolean {
+  const t = line.trim()
+  return t.length <= 72 && FOOTER_KEY.test(t)
+}
+
+// The CLI's own status lines, which are never a question. The relayed card that started this carried
+// the question "✻ Cogitated for 16s"; an earlier one carried "Ran 4 shell commands". A pane cannot be
+// mid-turn and waiting for an answer at the same time, so a "question" in this shape is proof the
+// walk-up ran off the top of a menu that was never there.
+const STATUS_NOT_A_QUESTION = /^\s*(?:[✻✽✢·*]\s*)?(?:[A-Z][a-z]+(?:ed|ing)\s+for\s+\d+[a-z]?\s*\d*[a-z]*|Ran\s+\d+\s+\w+|Read\s+\d+\s+file)/
+
+// A painted bridge envelope is inbound TEXT, never a menu option: `❯ <tg 7590>…` is the owner's own
+// message as the CLI drew it. One of these in the option block means the whole block is conversation.
+const PAINTED_ENVELOPE = /^<tg[\s@]/
+
 export function detectUserPrompt(paneText: string): PromptInfo | null {
   // The review/submit tab carries the same select-menu footer as a question, but
   // it's driven programmatically, not relayed — keep it out of detection entirely.
@@ -296,7 +321,7 @@ export function detectUserPrompt(paneText: string): PromptInfo | null {
   // line below it is scrollback (a scrolled-up past prompt), not the active one.
   let footerIdx = -1
   for (let i = lines.length - 1; i >= 0; i--) {
-    if (SELECT_HINT.test(lines[i]) || MULTI_HINT.test(lines[i])) { footerIdx = i; break }
+    if ((SELECT_HINT.test(lines[i]) || MULTI_HINT.test(lines[i])) && footerShaped(lines[i])) { footerIdx = i; break }
   }
   if (footerIdx === -1) return null
   // Only chrome (statusline, the todo panel, borders, mode hints) may sit below a LIVE prompt's footer;
@@ -329,9 +354,11 @@ export function detectUserPrompt(paneText: string): PromptInfo | null {
   const chat = parsed.some(o => CHAT_LABEL.test(o.label))
   const options = parsed.filter(o => !FREE_TEXT_LABEL.test(o.label) && !CHAT_LABEL.test(o.label))
   if (options.length === 0 && !freeText) return null
+  if (parsed.some(o => PAINTED_ENVELOPE.test(o.label.trim()))) return null
 
   const question = findQuestionAbove(lines, topOpt - 1)
   if (!question) return null
+  if (STATUS_NOT_A_QUESTION.test(question)) return null
 
   const multiSelect = MULTI_HINT.test(lines[footerIdx])
     || region.some(l => CHECKBOX_GLYPH.test(l) || BRACKET_BOX_OPT.test(l))

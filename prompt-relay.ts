@@ -11,7 +11,7 @@ import { capturePane, paneCwd, paneAlive, type PaneWatcher } from './pane-io.ts'
 import { focus, pendingMultiSelect, freeTextPrompts, chatPrompts, stuckCards, replyTargets, promptCards, prunePromptCards } from './state.ts'
 import { loadAccess } from './access.ts'
 import { finalRepliesAfter } from './agent-transcript.ts'
-import { detectPermissionPrompt, onNormalPrompt, permPromptToken, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen } from './prompt.ts'
+import { detectPermissionPrompt, detectWorking, onNormalPrompt, permPromptToken, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen } from './prompt.ts'
 
 type PromptRelayDeps = {
   channel: ChannelAdapter
@@ -23,17 +23,32 @@ type PromptRelayDeps = {
   verifyPromptClosed: (paneId?: string | null) => Promise<void>
   paneKeys: (paneId: string, keys: string[], settle?: [number, number]) => Promise<boolean>
   fleetSurface: (paneId: string | null) => Promise<Array<{ chat: string; thread?: number }>>
+  // A blocking event on a session with NO surface of its own: raise it on the bus with whoever is
+  // driving that session. Never resolves to a Telegram chat — see noticeTargets.
+  escalateSurfaceless: (paneId: string | null, summary: string) => Promise<void>
 }
 let deps: PromptRelayDeps
 export function initPromptRelay(d: PromptRelayDeps): void { deps = d }
 
-// Where a BLOCKING event about `paneId` goes. Its own surface when it has one; otherwise the fleet
-// surface (bug 11a) — a headless session's outboundTargetsFor is [] by design, and the old
-// `if (targets.length === 0) return` turned "this session is stuck and needs a human" into silence.
-// Only the three blocking relays use this; ordinary reply/mirror traffic still routes pane-only.
-async function noticeTargets(paneId: string | null): Promise<Array<{ chat: string; thread?: number }>> {
+// Where a BLOCKING event about `paneId` goes. Its own surface when it has one — and when it has
+// none, an ask on the BUS to whoever is driving it, never a Telegram surface belonging to somebody
+// else. This is the fix for a card the owner received on 2026-08-03: a headless probe raised a
+// genuine question, `outboundTargetsFor` was [] by design, and the fleet-surface fallback delivered
+// its picker into his DM, where it read as the bridge asking him something.
+//
+// The old fallback existed for a real reason (bug 11a): silence turned "this session is stuck and
+// needs a human" into nothing at all. The bus ask keeps that promise and improves on it — it reaches
+// the agent that spawned the session, which is the one that can actually answer, instead of the
+// human furthest from the decision.
+//
+// It must be a BUS ask and not a walk up to some surface: the spawner is often headless too (an
+// orchestrator lane driving probes is), so "climb until you find a Telegram chat" lands right back
+// in his DM. A bus ask needs no surface at all, which is exactly why it terminates.
+async function noticeTargets(paneId: string | null, summary: string): Promise<Array<{ chat: string; thread?: number }>> {
   const own = await deps.outboundTargetsFor(paneId)
-  return own.length ? own : await deps.fleetSurface(paneId)
+  if (own.length) return own
+  await deps.escalateSurfaceless(paneId, summary).catch(() => {})
+  return []
 }
 
 // Render a prompt as Telegram HTML: bold question, then each numbered option with
@@ -108,9 +123,21 @@ export function singleAnswerKeyboard(prompt: PromptInfo, prefix: 'prompt' | 'mq'
 
 export async function relayPromptToTelegram(prompt: PromptInfo, paneId: string | null = focus.activePaneId, name?: string): Promise<void> {
   if (!paneId) return
+  // A pane cannot be mid-turn AND waiting for an answer, so a select menu detected on a WORKING pane
+  // is the detector having run off the top of a menu that was never there — which is exactly how a
+  // card headed "✻ Cogitated for 16s" reached the owner's DM on 2026-08-03.
+  //
+  // Measured before shipping, because this is the guard that could swallow a real question: a live
+  // AskUserQuestion pane (probe3, 2026-08-03) reads `detectWorking` FALSE while its picker is up —
+  // the CLI stops the spinner to ask. Logged when it fires, so a future CLI that keeps painting a
+  // spinner over questions shows up as suppressed prompts in the log rather than as silence.
+  if (detectWorking(await capturePane(paneId).catch(() => ''))) {
+    process.stderr.write(`daemon: NOT relaying select prompt “${prompt.question}” from pane ${paneId} — the pane reads as working\n`)
+    return
+  }
   // Route to the requesting session's own topic in forum mode; DM mode → the allowlist. A surface-less
-  // headless pane falls back to the fleet surface — a select menu blocks the session until answered.
-  const targets = await noticeTargets(paneId)
+  // headless pane raises it on the bus instead — a select menu blocks the session until answered.
+  const targets = await noticeTargets(paneId, `is waiting on a question: “${prompt.question}”`)
   if (targets.length === 0) return
   // Say that a select menu was relayed, and from which pane. Permission prompts have logged this
   // since they existed; these did not, so when the owner reported two approval cards for one
@@ -259,8 +286,8 @@ export async function sweepPermStorms(): Promise<void> {
 export async function relayPermissionToTelegram(perm: PermissionPrompt, paneId: string | null = focus.activePaneId): Promise<void> {
   if (!paneId) return
   // Route to the requesting session's own topic in forum mode; DM mode → the allowlist. A surface-less
-  // headless pane falls back to the fleet surface — an unanswered permission prompt blocks it forever.
-  const targets = await noticeTargets(paneId)
+  // headless pane raises it on the bus instead — an unanswered permission prompt blocks it forever.
+  const targets = await noticeTargets(paneId, `is blocked on a permission prompt: “${perm.question}”`)
   if (targets.length === 0) return
 
   const storm = permStorms.get(paneId) ?? { count: 0, armed: false }

@@ -405,7 +405,7 @@ async function fleetSurfaceFor(paneId: string | null): Promise<Array<{ chat: str
   if (sid && isSessionDismissed(sid)) return []
   return fleetSurface()
 }
-initPromptRelay({ channel, outboundTargetsFor, flushPendingText, transcriptForPane, lastRelayedUuid: () => lastRelayedUuid, resetPromptDedup, verifyPromptClosed, paneKeys, fleetSurface: fleetSurfaceFor })
+initPromptRelay({ channel, outboundTargetsFor, flushPendingText, transcriptForPane, lastRelayedUuid: () => lastRelayedUuid, resetPromptDedup, verifyPromptClosed, paneKeys, fleetSurface: fleetSurfaceFor, escalateSurfaceless })
 initQueue({ channel, outboundTargetsFor, deliverToPane: (pane, text) => pane === focus.activePaneId && focus.paneWatcher ? injectText(pane, focus.paneWatcher, text) : pasteToPane(pane, text) })
 initTopicRuntime(channel)
 let botUsername = ''
@@ -4445,6 +4445,47 @@ async function flushCtxNudge(sid: string, pane: string, cap: string, status: Sta
   appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'ask', from: 'system', to: p.toName, id: p.id, text, refs: [] })
   process.stderr.write(`daemon: ctx nudge ask ${p.id} → @${p.toName} about ${held.label} at ${pct}%\n`)
   await tryDeliverAsk(p).catch(() => {})   // 'busy' just means the lane is mid-turn — the 15s sweep retries
+}
+
+// A blocking event on a session with NO Telegram surface goes to whoever is DRIVING that session, as
+// a bus ask — never into a chat that belongs to someone else. On 2026-08-03 the fleet-surface
+// fallback put a headless probe's picker in the OWNER's DM, where it read as the bridge asking him
+// something; he was also the person least able to answer it, since the probe was another agent's.
+//
+// Spawner first, chat lane second, and it stops there. It is deliberately not "walk up until you
+// find a surface": the spawner is frequently headless itself (an orchestrator lane driving probes
+// is), so a walk-up arrives right back at his DM. A bus ask needs no surface, which is what makes
+// this terminate.
+const surfacelessEscalations = new Map<string, { summary: string; at: number }>()
+const SURFACELESS_REPEAT_MS = 10 * 60_000
+async function escalateSurfaceless(paneId: string | null, summary: string): Promise<void> {
+  if (!paneId) return
+  // A picker repaints on every poll. Without this the block would mint one ask per sweep, which is
+  // the ask storm the bus already has scars from.
+  const seen = surfacelessEscalations.get(paneId)
+  if (seen && seen.summary === summary && Date.now() - seen.at < SURFACELESS_REPEAT_MS) return
+  surfacelessEscalations.set(paneId, { summary, at: Date.now() })
+
+  const sid = await sessionForPane(paneId, false).catch(() => null)
+  if (!sid) return
+  const endpoints = busEndpoints()
+  const name = nameForEndpoint(sid, endpoints) || sid
+  const spawner = getTopicBySession(sid)?.spawnedBy
+  const usable = spawner && spawner !== sid && !(await busTargetGone(spawner).catch(() => true)) ? spawner : null
+  const toSid = usable ?? listDmChatSessions()[0]?.sessionId ?? null
+  if (!toSid || toSid === sid) {
+    process.stderr.write(`daemon: surfaceless block on ${paneId} (@${name}) — ${summary} — and NOBODY to escalate to; nothing sent\n`)
+    return
+  }
+  const text = [
+    `@${name} has no Telegram surface of its own and ${summary}`,
+    `It is BLOCKED until someone answers. \`tg keys ${name} <key>…\` drives the screen holding it (enter esc up down left right 1-9); \`tg kill ${name}\` ends it.`,
+    'Nothing was sent to any chat — this ask is the whole notification.',
+  ].join('\n\n')
+  const p = createPending({ fromSid: SYSTEM_SID, toSid, fromName: 'system', toName: nameForEndpoint(toSid, endpoints), text, refs: [], depth: 0 }, Date.now())
+  appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'ask', from: 'system', to: p.toName, id: p.id, text, refs: [] })
+  process.stderr.write(`daemon: surfaceless block on ${paneId} (@${name}) escalated as ask ${p.id} → @${p.toName}\n`)
+  await tryDeliverAsk(p).catch(() => {})
 }
 
 // A limit is exhausted: relay it (Claude can't, being limited) and schedule the reset
