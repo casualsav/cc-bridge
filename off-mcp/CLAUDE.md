@@ -69,6 +69,15 @@ by its topic name.
   earn — the recorded gap is what saves your successor from re-deriving it.
 - tg slash @name "/compact" — run a slash command in another session's CLI (rejected while the
   target is mid-turn — retry when idle; its outcome echoes in that session's topic). /exit is owner-only.
+  A command that opens a PANEL (`/cost`, `/usage`, `/context`) is refused here and pointed at the verbs
+  below: relayed, it types the command and walks away, and the CLI holds the screen until someone sends
+  Esc — a wedged pane reported to you as a successful send.
+- tg cost @name · tg context @name — that session's cost report (total cost, API/wall duration, lines
+  added/removed, per-model tokens) or context report (tokens of the window + the per-category
+  breakdown). Runs the panel, reads the figures, Escs back to the prompt and verifies it came back;
+  the answer lands in YOUR result, and nothing is delivered to the target. Mid-turn is refused, never
+  interrupted — a cost question has no business ending someone's turn — and the refusal carries that
+  session's last scraped $ figure. On demand only: nothing polls, and nothing fires on its own.
 - tg keys @name <key>… [--force] — send keystrokes to a session's pane: the lever for a wedge on a
   picker or a permission prompt, which no message can reach (an ask queues behind it, slash needs a
   normal prompt). Named keys only — `enter esc up down left right 1-9`; there is no free-text form,

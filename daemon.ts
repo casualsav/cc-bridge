@@ -77,6 +77,7 @@ import {
 } from './repo-brief.ts'
 import { autowireMapImport, shipProductMap } from './chat-map.ts'
 import { ghAccounts, ghInstalled, ghSwitch, ghLogout, runGhLogin, provisionGh, type GhAccount } from './github.ts'
+import { PANELS, panelKindOf, parsePanel, type PanelKind } from './panel-readout.ts'
 import {
   capturePane, capturePaneStyled, capturePaneCached, invalidateCapture, paneAlive, sendKeys, sendKeysLiteral, navigateDown, waitForSettle,
   autoSizeWindowOf, paneCommand, paneCwd, PaneWatcher,
@@ -3443,6 +3444,13 @@ const notifyWideFanOut = (breadth: number): Promise<void> => wakeOrchestrator(
 // Absolute session cost, NOT spend-since-the-last-human-message: a delta would need a baseline
 // snapshot per reset, and this is an informational line, not an accounting ledger.
 const sessionCost = new Map<string, string>()
+// What that sweep last saw for ONE session — so a panel command refused mid-turn can say a figure
+// instead of nothing. Keyed exactly as the sweep keys it (topic name, else the session id), because
+// a lookup that misses would report "no figure" for a session we have one for. Nothing new polls:
+// this reads a value the fleet sweep already wrote, which is what keeps the feature on-demand.
+function lastSeenSpend(sid: string): string | null {
+  return sessionCost.get(getTopicBySession(sid)?.name || sid) ?? null
+}
 function fleetSpendLine(): string {
   const rows = [...sessionCost.entries()].filter(([, c]) => c)
   return rows.length ? rows.map(([name, c]) => `${name} ${c}`).join(' · ') : ''
@@ -3918,7 +3926,7 @@ async function commandTarget(ctx: Context): Promise<CommandTarget | null> {
 //
 // `requireIdle: false` is for closing a session: a wedged or mid-turn session is a normal thing to
 // want to end, and demanding a prompt would refuse precisely when the lever is needed.
-async function namedTarget(ctx: Context, rawName: string, opts: { requireIdle?: boolean } = {}):
+async function namedTarget(ctx: Context, rawName: string, opts: { requireIdle?: boolean; spendHint?: boolean } = {}):
     Promise<{ target: CommandTarget; name: string; sessionId: string } | null> {
   const say = (t: string) => ctx.reply(t, { parse_mode: 'HTML' }).catch(() => {})
   const wanted = rawName.replace(/^@/, '').replace(/:$/, '')
@@ -3946,7 +3954,13 @@ async function namedTarget(ctx: Context, rawName: string, opts: { requireIdle?: 
   }
   if (opts.requireIdle !== false) {
     const cap = await capturePane(pane).catch(() => '')
-    if (!cap || !onNormalPrompt(cap)) { await say(`⏳ <b>@${escapeHtml(name)}</b> is mid-turn — retry when it goes idle.`); return null }
+    if (!cap || !onNormalPrompt(cap)) {
+      // A cost question refused with nothing is a wasted round trip; the sweep already knows a
+      // figure for this session, so the refusal carries it (spendHint — panel commands only).
+      const spend = opts.spendHint ? lastSeenSpend(res.id) : null
+      await say(`⏳ <b>@${escapeHtml(name)}</b> is mid-turn — retry when it goes idle.${spend ? ` Last seen <code>${escapeHtml(spend)}</code>.` : ''}`)
+      return null
+    }
     if (bashModeArmed(cap)) { await say(`⚠️ <b>@${escapeHtml(name)}</b> has an unsubmitted ! bash command in its input box.`); return null }
   }
   const isFocused = pane === focus.activePaneId
@@ -6150,6 +6164,16 @@ async function handleCall(
         const command = String(args.command ?? '').trim()
         if (!/^\/\S/.test(command)) { write({ t: 'result', id, ok: false, text: 'not a slash command — usage: tg slash <name> "/compact"' }); return }
         if (/^\/(exit|quit)\b/i.test(command)) { write({ t: 'result', id, ok: false, text: 'session-ending commands are owner-only' }); return }
+        // A panel command relayed from here types the command and walks away, and the CLI holds the
+        // screen until someone sends Esc — a wedged pane, reported as a successful send. The verbs
+        // below run the same command properly (capture, parse, Esc, verify) and hand back figures.
+        // /usage points at `tg cost` because they are literally the same screen: /cost is its alias.
+        const panel = panelKindOf(command)
+        if (panel) {
+          write({ t: 'result', id, ok: false, text:
+            `${command} opens a panel the CLI holds until Esc — relaying it wedges the pane. Use \`tg ${panel === 'usage' ? 'cost' : panel} ${String(args.to ?? '')}\`, which reads the figures and puts the prompt back.` })
+          return
+        }
         await reapDeadEndpoints(String(args.to ?? ''))
         const endpoints = busEndpoints()
         const res = resolveEndpoint(String(args.to ?? ''), endpoints)
@@ -6243,6 +6267,45 @@ async function handleCall(
         void echoSlashResult(targetPane, targets[0]?.chat ?? '', slashAt, targets[0]?.thread ? Number(targets[0].thread) : undefined, command)
         text = `submitted ${command.split(/\s/)[0]} to @${toName} — its input box took it and cleared; the command's own output echoes on that session's surface`
         process.stderr.write(`daemon: slash ${command} → @${toName} (${targetPane}) submitted\n`)
+        break
+      }
+      // `tg cost <name>` / `tg context <name>` — the bus half of the panel-command mechanism: run
+      // that session's panel, read the figures, restore its prompt. The report comes back in THIS
+      // result (roster-shaped) rather than as a bus message: the caller asked a question and is
+      // waiting on the answer, and a panel readout is not something the target has any part in.
+      // Guards mirror `tg slash` — live pane, at a normal prompt, and the input-box check readPanel
+      // takes for itself. On demand only: nothing here runs unless an agent or the owner asks.
+      case 'cost': case 'context': {
+        const kind = name as PanelKind
+        const pane = args.pane ? String(args.pane) : null
+        const fromSid = pane ? await sessionForPane(pane) : null
+        if (!fromSid) { write({ t: 'result', id, ok: false, text: `\`tg ${name}\` must run inside a bridged session` }); return }
+        await reapDeadEndpoints(String(args.to ?? ''))
+        const endpoints = busEndpoints()
+        const res = resolveEndpoint(String(args.to ?? ''), endpoints)
+        if ('error' in res) { write({ t: 'result', id, ok: false, text: res.error }); return }
+        if (res.kind !== 'claude') { write({ t: 'result', id, ok: false, text: `${PANELS[kind].command} needs a live session target (a hermes endpoint has no CLI)` }); return }
+        const targetPane = await paneForSession(res.id).catch(() => null)
+        if (!targetPane || !(await paneAlive(targetPane).catch(() => false))) {
+          if (!(targetPane && isPaneRestarting(targetPane))) updateTopic(res.id, { closed: true })
+          write({ t: 'result', id, ok: false, text: 'target session has no live pane' }); return
+        }
+        const toName = nameForEndpoint(res.id, endpoints)
+        const cap = await capturePane(targetPane).catch(() => '')
+        if (!cap || !onNormalPrompt(cap)) {
+          const spend = lastSeenSpend(res.id)
+          write({ t: 'result', id, ok: false, text: `@${toName} is mid-turn — retry when it goes idle${spend ? ` (last seen ${spend})` : ''}` }); return
+        }
+        if (await paneAgentKind(targetPane) === 'codex') {
+          write({ t: 'result', id, ok: false, text: `@${toName} runs the Codex CLI, which has no ${PANELS[kind].command} panel` }); return
+        }
+        const isFocused = targetPane === focus.activePaneId
+        appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'slash', from: nameForEndpoint(fromSid, endpoints), to: toName, text: PANELS[kind].command })
+        const o = await readPanel({ paneId: targetPane, watcher: isFocused ? focus.paneWatcher : null, isFocused }, kind)
+        const wedged = o.restored ? '' : `\n\n@${toName}'s pane did NOT return to its prompt — \`tg keys ${toName} esc\``
+        if (!o.ok) { write({ t: 'result', id, ok: false, text: `${o.error}${wedged}` }); return }
+        const changed = o.layoutChanged ? `(layout changed — raw readout, missing: ${o.missing.join(', ')})\n` : ''
+        text = `${PANELS[kind].command} on @${toName}:\n${changed}${o.text}${wedged}`
         break
       }
       // `tg keys <name> <key>… [--force]` — inject named keystrokes into another session's pane.
@@ -7917,135 +7980,11 @@ async function dismissPendingEffortConfirm(paneId: string): Promise<void> {
     '⚡ Effort change dismissed — kept the current level.').catch(() => {})
 }
 
-// Run /cost and relay the readout it prints.
-// Strip the common left margin from a block (so a <pre> isn't pushed off-screen) while
-// keeping the inner monospace alignment; trims leading/trailing blank lines.
-function stripCommonIndent(lines: string[]): string {
-  const nonblank = lines.filter(l => l.trim())
-  if (!nonblank.length) return ''
-  const indent = Math.min(...nonblank.map(l => l.match(/^\s*/)![0].length))
-  const out = lines.map(l => l.slice(indent))
-  while (out.length && !out[0].trim()) out.shift()
-  while (out.length && !out[out.length - 1].trim()) out.pop()
-  return out.join('\n')
-}
-
-// /context renders inline as a "⎿ Context Usage …" block after the command echo — pull the
-// whole block (it can run past one screen, hence a scrollback capture upstream), then reflow
-// it for mobile. Falls back to the raw block if the shape isn't recognized.
-function extractContextReadout(raw: string): string | null {
-  const lines = raw.split('\n').map(l => stripAnsi(l).replace(/\s+$/, '').replace('⎿', ' '))
-  // Anchor on the "Context Usage" header itself, not the `❯ /context` echo: on short
-  // terminals the output block and the command echo land in either order, so reading
-  // "everything after the prompt" can miss the block entirely. Fall back to the echo.
-  let start = lines.findLastIndex(l => /Context Usage/i.test(l))
-  if (start < 0) { const p = lines.findLastIndex(l => /❯\s*\/context\b/.test(l)); start = p < 0 ? -1 : p + 1 }
-  if (start < 0) return null
-  const body: string[] = []
-  for (let i = start; i < lines.length; i++) {
-    if (/^─{10,}/.test(lines[i].trim()) || /Press up to edit queued/i.test(lines[i]) || /^❯\s*\//.test(lines[i].trim())) break
-    body.push(lines[i])
-  }
-  return compactContext(body) ?? (stripCommonIndent(body) || null)
-}
-
-// The raw /context block is a 2-D square grid with the per-category legend wedged to its right;
-// on a phone the wide grid rows shove the labels off-screen and wrap mid-sentence. Reflow into a
-// compact readout: a one-line usage summary + a short bar, then one category per full-width line.
-// Returns null (→ caller falls back to the raw block) if the usage figures aren't found.
-function compactContext(body: string[]): string | null {
-  const stripGrid = (l: string) => l.replace(/^(?:[^\sA-Za-z0-9(]+\s+)+/, '').trim()
-  const usageIdx = body.findIndex(l => /[\d.]+[kKmM]?\s*\/\s*[\d.]+[kKmM]?\s*tokens?\s*\(\d+%\)/.test(l))
-
-  // Each legend entry is "<Name>: <tokens> … (NN.N%)" — anchoring on the name+colon skips the
-  // leading grid squares and the category-color glyph without needing to know their codepoints.
-  const cats: string[] = []
-  for (const l of body) {
-    const m = l.match(/([A-Za-z][A-Za-z ./&-]*?):\s*([\d.]+[kKmM]?)\b[^()]*?\((\d+(?:\.\d+)?%)\)/)
-    if (m) cats.push(`• ${m[1].trim()} — ${m[2]} (${m[3]})`)
-  }
-  if (usageIdx < 0 && cats.length === 0) return null
-
-  const out: string[] = []
-  if (usageIdx >= 0) {
-    const summary = stripGrid(body[usageIdx])
-    out.push(summary)
-    const pm = summary.match(/\((\d+)%\)/)
-    if (pm) {
-      const filled = Math.round((Math.max(0, Math.min(100, Number(pm[1]))) / 100) * 10)
-      out.push('▰'.repeat(filled) + '▱'.repeat(10 - filled))
-    }
-  }
-  if (cats.length) { if (out.length) out.push(''); out.push(...cats) }
-  return out.join('\n')
-}
-
-// /cost now prints an inline "Session / Total cost: …" block (it used to be a modal). Anchor on
-// the "Total cost:" line — the most stable marker — then take the surrounding block: back up to the
-// "Session" header just above it, and read forward until the input box / next prompt / footer
-// chrome. Falls back to the old modal shape (tab bar "Settings Status … Stats" … "Esc to cancel")
-// for older Claude Code builds.
-function extractCostReadout(raw: string): string | null {
-  const lines = raw.split('\n').map(l => stripAnsi(l).replace(/\s+$/, '').replace('⎿', ' '))
-  const anchor = lines.findLastIndex(l => /Total cost:/i.test(l))
-  if (anchor < 0) {
-    let start = lines.findIndex(l => /Settings\s+Status\s+Config\s+Usage\s+Stats/.test(l))
-    start = start < 0 ? 0 : start + 1
-    let end = lines.findIndex((l, i) => i > start && /Esc to cancel/i.test(l))
-    if (end < 0) end = lines.length
-    return stripCommonIndent(lines.slice(start, end)) || null
-  }
-  // Start at the "Session" header just above the cost line if it's right there, else the cost line.
-  let start = anchor
-  for (let i = anchor; i >= Math.max(0, anchor - 3); i--) {
-    if (/^\s*Session\b/.test(lines[i])) { start = i; break }
-  }
-  // End at the input box border / next prompt / footer chrome below the block.
-  let end = lines.length
-  for (let i = anchor + 1; i < lines.length; i++) {
-    const t = lines[i].trim()
-    if (/^─{10,}/.test(t) || /^[╭╮╰╯]/.test(t) || /^❯/.test(t) || /Press up to edit/i.test(t) ||
-        /shift\+tab to cycle|esc to (interrupt|cancel)/i.test(t)) { end = i; break }
-  }
-  return stripCommonIndent(lines.slice(start, end)) || null
-}
-
-// /cost (a modal) and /context (inline) are read-only readouts, but typed while Claude is
-// working they just queue — so doReadout gates on the working state and confirms before
-// interrupting; idle, it runs straight away.
-// /usage opens a full-screen usage dashboard (5h/7d limits + resets). Injected via runReadout, the
-// rendered screen is captured and relayed here, then Esc'd out. Anchor on the `/usage` echo when
-// present; keep content lines (alnum/%), drop box-drawing/bars and the input/statusline footer.
-function extractUsageReadout(raw: string): string | null {
-  const lines = raw.split('\n').map(l => stripAnsi(l).replace(/\s+$/, ''))
-  // The dashboard is a full-screen tabbed view ("Settings Status Config Usage Stats") that overwrites
-  // the input line, so the `/usage` echo isn't in the capture — anchor on the tab header instead, which
-  // also excludes our own scrollback above it. Fall back to the Session/cost anchors.
-  let start = lines.findLastIndex(l => /Settings\s+Status\s+Config\s+Usage\s+Stats/i.test(l))
-  if (start >= 0) start++; else start = lines.findLastIndex(l => /^\s*(Session|Total cost:)/i.test(l))
-  if (start < 0) return null
-  let body = lines.slice(start)
-  // Drop the advice paragraphs / skills+subagents tables / credits / footer chrome below the limits.
-  const end = body.findIndex(l => /What's contributing|Esc to cancel|Usage credits|^\s*[dw] to (day|week)/i.test(l))
-  if (end >= 0) body = body.slice(0, end)
-  // Drop the verbose per-model token breakdown (wraps badly on a phone).
-  const mStart = body.findIndex(l => /Usage by model:/i.test(l))
-  const mEnd = mStart >= 0 ? body.findIndex((l, i) => i > mStart && /Current session/i.test(l)) : -1
-  if (mStart >= 0 && mEnd > mStart) body = [...body.slice(0, mStart), ...body.slice(mEnd)]
-  // Compress the wide "█▌                3% used" limit bars; collapse alignment padding; drop blanks.
-  body = body.flatMap(l => {
-    const used = l.match(/(\d+)%\s*used/)
-    if (used && /[█▉▊▋▌▍▎▏░▒▓▰▱]/.test(l)) {
-      const f = Math.round(Math.max(0, Math.min(100, +used[1])) / 10)
-      return ['▰'.repeat(f) + '▱'.repeat(10 - f) + ` ${used[1]}% used`]
-    }
-    const t = l.replace(/ {3,}/g, ' ').trimEnd()
-    return t.trim() ? [t] : []
-  })
-  return stripCommonIndent(body).trim() || null
-}
-
-async function doReadout(ctx: Context, kind: 'cost' | 'context' | 'usage'): Promise<void> {
+// The panel readouts — /cost, /context, /usage — run through ONE drive cycle (readPanel below) and
+// one instance table (panel-readout.ts), which is also where the parsers and their mandatory
+// anchors live. Typed while Claude is working they would merely queue, so doReadout gates on the
+// working state and confirms before interrupting; idle, it runs straight away.
+async function doReadout(ctx: Context, kind: PanelKind): Promise<void> {
   if (!dmCommandGate(ctx)) return
   const t = await commandTarget(ctx)
   if (!t) return
@@ -8067,7 +8006,7 @@ async function doReadout(ctx: Context, kind: 'cost' | 'context' | 'usage'): Prom
 // So for a Codex pane we read the live token figures from the rollout instead of typing a CC
 // command the CLI would reject. Cost and per-account usage limits aren't surfaced by the Codex
 // CLI at all — say so plainly rather than relaying a no-op.
-async function codexReadout(ctx: Context, t: CommandTarget, kind: 'cost' | 'context' | 'usage'): Promise<void> {
+async function codexReadout(ctx: Context, t: CommandTarget, kind: PanelKind): Promise<void> {
   if (kind === 'cost') {
     await ctx.reply('📊 <b>Cost</b> — the Codex CLI doesn’t report per-session cost. Track spend via your OpenAI/ChatGPT plan dashboard.', { parse_mode: 'HTML' }).catch(() => {})
     return
@@ -8086,13 +8025,63 @@ async function codexReadout(ctx: Context, t: CommandTarget, kind: 'cost' | 'cont
   await ctx.reply(`📐 <b>Context</b> — <code>${ctxK}${outK}</code>`, { parse_mode: 'HTML' }).catch(() => {})
 }
 
-// Inject the command, capture + relay its real output (chunked), then return to the prompt. Acts on
-// the target session (topic mode) or the focused one; off-focus there's no watcher to pause.
-async function runReadout(t: CommandTarget, chatId: string, kind: 'cost' | 'context' | 'usage'): Promise<void> {
+// ---- The panel-command mechanism ----
+//
+// ONE drive cycle for every panel: pre-flight the input box, type, palette-guard, submit, capture,
+// Esc, and VERIFY the pane came back to its prompt. Callers are the owner's own chat (doReadout),
+// the owner's `@name /cmd`, and the bus verbs — all of them go through here, so a panel command can
+// never reach a pane by a path that skips the Esc. That was the whole bug: the relay typed /cost,
+// the CLI held the screen, and the pane was wedged until a human sent Esc by hand.
+//
+// The Esc and the verification are UNCONDITIONAL, including for a panel that renders inline and
+// needs neither (/context). A per-kind "this one doesn't need it" branch is what breaks the day the
+// CLI changes how a panel renders — which is exactly what happened to /cost, now an alias of
+// /usage and a full-screen dashboard where it used to print inline.
+type PanelOutcome =
+  | { ok: true; text: string; layoutChanged: boolean; missing: string[]; restored: boolean }
+  | { ok: false; error: string; restored: boolean }
+
+// The pane's prompt back after the panel closed, or the panel still holding the screen. Esc is
+// re-sent (bounded) rather than trusted once, and the answer is REPORTED either way — a wedged pane
+// the reader is told about is recoverable; a wedged pane nobody mentions is the failure.
+//
+// The ONE state that stops it is a WORKING pane, and that guard was written after watching this fire
+// into a live turn (2026-08-03, @costprobe): Escape there does not close a panel, it INTERRUPTS
+// somebody's work — the exact thing a cost query has no business doing. Note it branches on the
+// pane's observed state, never on which panel was asked for: a kind that "doesn't need Esc" is the
+// branch that breaks the day the CLI changes how that kind renders.
+async function escToPrompt(paneId: string): Promise<boolean> {
+  for (let i = 0; i < 3; i++) {
+    if (detectWorking(await capturePane(paneId).catch(() => ''))) return false
+    await sendKeys(paneId, ['Escape'])
+    await waitForSettle(paneId, 200, 2000)
+    if (onNormalPrompt(await capturePane(paneId).catch(() => ''))) return true
+  }
+  return false
+}
+
+async function readPanel(t: CommandTarget, kind: PanelKind): Promise<PanelOutcome> {
   const paneId = t.paneId
-  const cmd = kind === 'cost' ? '/cost' : kind === 'usage' ? '/usage' : '/context'
+  const cmd = PANELS[kind].command
   let refused: string[] | null = null
+  let bail: string | null = null
+  let restored = false
+  let raw = ''
   const drive = async () => {
+    // Both pre-flight reads happen HERE, inside the delivery lock, so nothing can paste into this
+    // pane between the check and the typing.
+    //
+    // Someone's unsubmitted text is refused, never typed over: this path types into another
+    // session's input box, and the C-u below would take their draft with it. Read styled, so the
+    // CLI's ghost suggestion isn't mistaken for a human's.
+    const occupant = inputBoxOccupant(await capturePaneStyled(paneId).catch(() => ''))
+    if (occupant) { bail = `unsubmitted text is sitting in the input box (${JSON.stringify(occupant.slice(0, 40))}) — ${cmd} was not sent`; return }
+    // And the pane must be resting. The callers all gate on this too; this one exists because that
+    // gate is a READ taken before the call — a turn that starts in between (a bus ask landing, the
+    // owner typing) turned `tg context` into "didn't render" while the command sat QUEUED in the
+    // target's box and ran itself minutes later. Measured, not theorised.
+    const before = await capturePane(paneId).catch(() => '')
+    if (!before || detectWorking(before) || !onNormalPrompt(before)) { bail = `the pane is not at a resting prompt — ${cmd} was not typed`; restored = true; return }
     // DON'T resize the window. The old grow-to-80 (resize → capture → restore) fired a SIGWINCH on a
     // pane the user may be watching, and Claude's TUI stacks its "────" section dividers down the
     // screen on resize — a flood of green rules that covers the statusline, so the pin scraper reads
@@ -8108,24 +8097,52 @@ async function runReadout(t: CommandTarget, chatId: string, kind: 'cost' | 'cont
     // typed the name blind, and that is how `/cost` — merged into `/usage` in CLI 2.1.x and surviving
     // only as an alias — submitted whatever its session's palette happened to highlight, which on a
     // box with different skills installed is not the same command twice running.
-    refused = slashPaletteWouldMisfire(await capturePane(paneId).catch(() => ''), cmd)
-    if (refused) { await sendKeys(paneId, ['C-u']); await waitForSettle(paneId, 200, 2000); return '' }
+    const typed = await capturePane(paneId).catch(() => '')
+    // The same race again, now with our text in the box: submitting into a turn that has just
+    // started QUEUES the command instead of running it. Take our typing back and refuse.
+    if (detectWorking(typed)) {
+      await sendKeys(paneId, ['C-u']); await waitForSettle(paneId, 200, 2000)
+      bail = `the pane started a turn while ${cmd} was being typed — nothing was submitted`; restored = true; return
+    }
+    refused = slashPaletteWouldMisfire(typed, cmd)
+    // Nothing was submitted on a refusal, so C-u clears our own typing — and the restore below still
+    // runs, because "did the pane come back" is asked the same way whatever happened above it.
+    if (refused) { await sendKeys(paneId, ['C-u']); await waitForSettle(paneId, 200, 2000); restored = await escToPrompt(paneId); return }
     await sendKeys(paneId, ['Enter'])
     await waitForSettle(paneId, 400, 6000)
-    const buf = await exec('tmux', ['capture-pane', '-p', '-t', paneId, '-S', '-200', '-J'], { timeout: 3000 }).then(r => r.stdout).catch(() => '')
-    await sendKeys(paneId, ['Escape'])              // close the modal / clear the input → back to the terminal
-    await waitForSettle(paneId, 200, 2000)
-    return buf
+    raw = await exec('tmux', ['capture-pane', '-p', '-t', paneId, '-S', '-200', '-J'], { timeout: 3000 }).then(r => r.stdout).catch(() => '')
+    restored = await escToPrompt(paneId)            // close the panel → back to the prompt, verified
   }
-  const raw = t.isFocused && t.watcher ? await t.watcher.withInjection(drive) : await drive()
-  const threadRefusal: SendOpts = t?.replyThread ? { threadId: String(t.replyThread) } : {}
-  if (refused) { await sendChunkRetrying(chatId, `⚠️ ${escapeHtml(paletteRefusalText(cmd, refused))}`, threadRefusal); return }
-  const out = kind === 'cost' ? extractCostReadout(raw) : kind === 'usage' ? extractUsageReadout(raw) : extractContextReadout(raw)
+  await (t.isFocused && t.watcher ? t.watcher.withInjection(drive) : drive())
+  if (bail) return { ok: false, restored, error: bail }
+  if (refused) return { ok: false, restored, error: paletteRefusalText(cmd, refused) }
+  const parsed = parsePanel(kind, raw)
+  if (parsed.kind === 'absent') return { ok: false, restored, error: `${cmd} didn't render — nothing to read` }
+  return { ok: true, restored, text: parsed.text, layoutChanged: parsed.kind === 'raw', missing: parsed.kind === 'raw' ? parsed.missing : [] }
+}
+
+// The pane didn't come back — said once, in one voice, wherever the outcome is reported. `label` is
+// the session's bus name when the caller has one (`@name`), the bare pane otherwise.
+function panelWedgeWarning(kind: PanelKind, label: string | null): string {
+  const whose = label ? `<b>@${escapeHtml(label)}</b>'s pane` : 'the pane'
+  return `⚠️ ${whose} did not return to its prompt after ${PANELS[kind].command} — send Esc` +
+    (label ? ` (<code>tg keys ${escapeHtml(label)} esc</code>)` : '')
+}
+
+// Telegram-side wrapper: run the panel and relay the outcome (chunked) to a chat.
+async function runReadout(t: CommandTarget, chatId: string, kind: PanelKind, label?: string | null): Promise<void> {
+  const o = await readPanel(t, kind)
   const threadOpt: SendOpts = t?.replyThread ? { threadId: String(t.replyThread) } : {}
-  if (!out) { await sendChunkRetrying(chatId, `Could not read /${kind} output.`, { ...threadOpt, plain: true }); return }
-  const title = kind === 'cost' ? '📊 <b>Cost</b>' : kind === 'usage' ? '📈 <b>Usage</b>' : '📐 <b>Context</b>'
+  const wedge = o.restored ? '' : `\n\n${panelWedgeWarning(kind, label ?? null)}`
+  if (!o.ok) { await sendChunkRetrying(chatId, `⚠️ ${escapeHtml(o.error)}${wedge}`, threadOpt); return }
+  const { icon, name } = PANELS[kind]
+  // A layout change hands back the raw block under a warning rather than a report with a line
+  // silently missing — and it names the anchor that moved, which is what makes it fixable.
+  const head = o.layoutChanged
+    ? `${icon} <b>${name}</b>\n⚠️ ${escapeHtml(PANELS[kind].command)} layout changed — raw readout (missing: ${escapeHtml(o.missing.join(', '))})`
+    : `${icon} <b>${name}</b>`
   const limit = Math.max(1, Math.min(loadAccess().textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT))
-  for (const c of chunkHtml(`${title}\n<pre><code class="language-javascript">${escapeHtml(out)}</code></pre>`, limit)) {
+  for (const c of chunkHtml(`${head}\n<pre><code class="language-javascript">${escapeHtml(o.text)}</code></pre>${wedge}`, limit)) {
     await sendChunkRetrying(chatId, c, threadOpt)
   }
 }
@@ -16467,8 +16484,12 @@ bot.on('message:text', async ctx => {
     // chat lane). A name that doesn't resolve fails loudly in namedTarget, the only real error here.
     const command = cross[2].trim()
     const ending = /^\/(exit|quit)\b/i.test(command)
+    // A panel command is intercepted rather than relayed: relayed, it types /cost and walks away,
+    // and the CLI holds the screen until a human sends Esc — the wedge the owner hit. Same spelling,
+    // because a NEW spelling would have left the old one armed.
+    const panel = panelKindOf(command)
     // Ending a session is the one case that must survive a wedged target, so it skips the idle gate.
-    const nt = await namedTarget(ctx, cross[1], ending ? { requireIdle: false } : {})
+    const nt = await namedTarget(ctx, cross[1], ending ? { requireIdle: false } : { spendHint: panel != null })
     if (!nt) return
     const topic = getTopicBySession(nt.sessionId)
 
@@ -16493,6 +16514,15 @@ bot.on('message:text', async ctx => {
     if (/^\/restart\b/i.test(command)) {
       appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'slash', from: 'owner', to: nt.name, text: command })
       await restartTargetSession(ctx, nt.target.paneId, nt.name)
+      return
+    }
+
+    if (panel) {
+      appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'slash', from: 'owner', to: nt.name, text: command })
+      // A Codex pane has no such panel and typing one there is a prompt, not a command.
+      if (await paneAgentKind(nt.target.paneId) === 'codex') { await codexReadout(ctx, nt.target, panel); return }
+      // No "✅ sent" receipt: unlike a relay this AWAITS the answer, and the figures are the receipt.
+      await runReadout(nt.target, String(ctx.chat!.id), panel, nt.name)
       return
     }
 

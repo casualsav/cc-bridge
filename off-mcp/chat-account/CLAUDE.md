@@ -115,7 +115,11 @@ Read the alert's window: manual nudges apply only to 1M workers; 200k workers us
   (`enter esc up down left right 1-9`); it is refused mid-turn unless a wedge alert fired. `--force`
   permits only `esc` to interrupt.
 - `tg slash @name "/compact"` sends a slash command at a normal prompt; it is refused mid-turn and
-  `/exit` is owner-only.
+  `/exit` is owner-only. A panel command (`/cost`, `/usage`, `/context`) is refused there: relayed, it
+  types the command and walks away, and the CLI holds the screen until someone sends Esc.
+- `tg cost @name` and `tg context @name` read those panels properly — run it, parse the figures, Esc
+  back to the prompt and verify it returned. The report lands in your own result; nothing reaches the
+  target. Mid-turn is refused (with that session's last scraped $ figure), never interrupted.
 
 Reports cover one unit with evidence: what changed; exact checks with command, exit status, and
 relevant output or live receipt; which claims were live-observed, code-reviewed only, or never

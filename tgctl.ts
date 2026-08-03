@@ -17,6 +17,8 @@
 //   tgctl post   <text|->                       broadcast to the humans in the room
 //   tgctl slash  <name> </cmd>                  inject a slash command into a target session's CLI
 //   tgctl keys   <name> <key>… [--force]        send named keystrokes to a target session's pane
+//   tgctl cost   <name>                         that session's cost report (panel read, prompt restored)
+//   tgctl context <name>                        that session's context report (same cycle)
 //   tgctl spawn  <name> [--dir p [--create]] [--account id] [--model m] [--why "…"] [--effort e] [text|-]   start a NEW session in its own topic
 //   tgctl kill   <name> [--force]               end a session you spawned (chat lane: any worker)
 //   tgctl reopen <name>                         bring a closed session back up, conversation intact
@@ -94,7 +96,15 @@ const HELP: Record<string, string> = {
            '  than none, so the decision to wait, escalate to `tg ask`, or tell a human stays yours.',
   answer:  'tg answer <id> <text|-> [--ref path]…   answer an ask you received (id from its <tg …ask=ID> block)',
   post:    'tg post <text|->   say something to the humans in the room',
-  slash:   'tg slash <name> "/compact"   run a slash command in another session\'s CLI (rejected mid-turn; /exit is owner-only)',
+  slash:   'tg slash <name> "/compact"   run a slash command in another session\'s CLI (rejected mid-turn; /exit is owner-only).\n' +
+           '  A command that opens a PANEL (/cost, /usage, /context) is refused here and pointed at the verb\n' +
+           '  below: relayed, it types the command and walks away, and the CLI holds the screen until Esc.',
+  cost:    'tg cost <name>   that session\'s cost report — total cost, API/wall duration, lines added/removed,\n' +
+           '  per-model tokens. Runs the CLI panel, reads the figures, Escs back to the prompt, and answers HERE\n' +
+           '  (nothing is delivered to the target). Refused while it is mid-turn, with its last scraped $ figure.',
+  context: 'tg context <name>   that session\'s context report — tokens used of the window, and the per-category\n' +
+           '  breakdown (system prompt, tools, memory, skills, messages, free space). Same cycle and same refusals\n' +
+           '  as tg cost. For a fleet-wide glance the roster already carries ctx%; this is the breakdown for one.',
   keys:    'tg keys <name> <key>… [--force]   send keystrokes to a wedged session\'s pane — the lever for a\n' +
            '  picker or permission prompt no message can reach (tg ask queues; tg slash needs a normal prompt).\n' +
            '  Named keys only: enter esc up down left right 1-9. Words are an `tg ask`, not a keystroke.\n' +
@@ -174,7 +184,7 @@ let name = '', args: Record<string, unknown> = {}
 // dead code that falls through to "unknown command". Cost one live probe run to find.
 // `repo` is not agent-to-agent messaging, but it takes flags, and this branch is the flag-parsing
 // one — same reason `wait` is here while the daemon deliberately keeps it out of AGENT_BUS_VERBS.
-const BUS = new Set(['ask', 'ack', 'btw', 'answer', 'post', 'slash', 'keys', 'spawn', 'kill', 'reopen', 'roster', 'providers', 'history', 'shared', 'wait', 'watch', 'repo'])
+const BUS = new Set(['ask', 'ack', 'btw', 'answer', 'post', 'slash', 'keys', 'cost', 'context', 'spawn', 'kill', 'reopen', 'roster', 'providers', 'history', 'shared', 'wait', 'watch', 'repo'])
 if (BUS.has(cmd)) {
   const rest = process.argv.slice(3)
   const refs: string[] = []
@@ -209,6 +219,9 @@ if (BUS.has(cmd)) {
     case 'slash':   name = 'slash';   args = { pane, to: pos[0], command: pos[1] ?? '' }; break
     // Keys are argv words, never stdin: they're a fixed vocabulary, not a body.
     case 'keys':    name = 'keys';    args = { pane, to: pos[0], keys: pos.slice(1), ...flags }; break
+    // One target, no body: the answer comes back in this call's own result.
+    case 'cost':    name = 'cost';    args = { pane, to: pos[0] }; break
+    case 'context': name = 'context'; args = { pane, to: pos[0] }; break
     case 'spawn':   name = 'spawn';   args = { pane, name: pos[0], text: body(pos[1], 'spawn') ?? '', ...flags }; break
     case 'kill':    name = 'kill';    args = { pane, name: pos[0], ...flags }; break   // --force: close past the background-shell warning
     case 'reopen':  name = 'reopen';  args = { pane, name: pos[0] }; break
