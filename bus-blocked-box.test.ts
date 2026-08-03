@@ -131,6 +131,33 @@ test('ROUND-TRIP: every declared BusPending field survives the loader', () => {
   } finally { restore() }
 })
 
+// The same instrument one level up: `loadBus` rebuilds the STORE field by field too, so a top-level key
+// missing from that list is destroyed on the next save exactly as a pending field would be — and with
+// less to notice, because no row shows it. Seed every declared BusState key at once and assert none
+// vanished. `used` (the ask-id cooldown map) is the reason this exists: losing it on a restart would
+// hand a just-retired id straight back out, which is the collision the rotation is built to prevent.
+test('ROUND-TRIP: every declared BusState key survives the loader', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'bus-roundtrip-'))
+  const state = {
+    seq: 42, hops: 3,
+    pending: {},
+    seen: { s1: 111 },
+    depth: { s1: 2 },
+    reportedAt: { s1: 222 },
+    briefedBy: { s1: { fromSid: 'a', fromName: 'A', at: 333 } },
+    used: { '42': 444 },
+  }
+  writeFileSync(join(dir, 'agent-bus.json'), JSON.stringify(state))
+  try {
+    setBusStateDir(dir)
+    const got = loadBus() as unknown as Record<string, unknown>
+    const dropped = Object.keys(state).filter(k => got[k] === undefined)
+    expect(dropped, `loadBus dropped ${dropped.join(', ')} — each is destroyed on the next save`).toEqual([])
+    expect(got.seq).toBe(42)
+    expect(got.used).toEqual({ '42': 444 })
+  } finally { restore() }
+})
+
 test('an ack still reads as an ack after a restart — it does not decay into an unanswered ask', () => {
   // The consequence, stated as behaviour rather than as a field. `noReply` is what removes the row on
   // delivery; lose it and the ack becomes a pending that never self-clears, drawing a "no answer yet"

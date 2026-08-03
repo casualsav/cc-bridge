@@ -152,6 +152,7 @@ import { initQueue, readLater, writeLater, sweepLaterQueues, LATER_SWEEP_MS } fr
 import {
   AGENT_BUS_ENABLED, AGENT_BUS_PIN_UI,
   createPending, getPending, removePending, putPending, listPending, markInjected, markPasted, markBoxBlocked, boxBlockedFor, expirePending, dropExpired, LATE_ANSWER_GRACE_MS, ASK_TTL_MS,
+  setLiveAskIdProbe,
   recordAgentAsk, resetHops, currentHops, BREADTH_NOTICE_AT, askResultText, planAskReap, deliveredReapCandidates, groupClosuresByAskerAndTarget, reapNotifiesAsker, queuedFor, type AskDelivery,
   askerAlreadyResolved, askerKilledTarget, markAskerResolved, reapNoticeSuppressed, planAssigneeNudge, markNudged,
   unreportedWorkMarker, markReported, markBriefed,
@@ -3243,6 +3244,11 @@ async function notifyBusText(surfaceSid: string, text: string): Promise<void> {
 // pane is re-resolved from the sessionId every time (panes churn on respawn/adopt). busInFlight
 // guards the immediate attempt (in the `ask` handler) from racing the 15s sweep into a double-inject.
 const busInFlight = new Set<number>()
+// Ask ids rotate now (agent-bus.ts ASK_ID_MODULUS), so the mint must not hand out an id this process
+// is still holding. Both in-flight sets outlive the pending row for a moment — busInFlight claims
+// BEFORE the row is removed, and a hermes child keeps running after its answer lands — so the persisted
+// registry alone is not the whole live set. Registered once; the mint asks, agent-bus keeps no daemon state.
+setLiveAskIdProbe(id => busInFlight.has(id) || hermesInFlight.has(id))
 async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
   const cur = getPending(p.id)
   if (!cur || cur.injected || cur.expiredAt || busInFlight.has(cur.id)) return 'busy'   // never deliver a timed-out ask to the target
@@ -5817,7 +5823,13 @@ async function handleCall(
           text = `aside delivered to @${toName} — it surfaces between their tool calls; nothing is queued and no answer is expected`
           break
         }
-        const p = createPending({ fromSid, toSid: res.id, toKind: res.kind, fromName, toName, text: askText, refs, depth: askDepth, ...(noReply ? { noReply } : {}) }, Date.now())
+        // The mint can refuse: ask ids rotate, and a window with every id live has nowhere to put this
+        // one. It needs ASK_ID_MODULUS asks open at once (the live registry runs at single digits), so
+        // this is unreachable in practice — but it is the one mint with a caller waiting on a socket, so
+        // it is the one that gets to say so instead of throwing into the log.
+        let p: BusPending
+        try { p = createPending({ fromSid, toSid: res.id, toKind: res.kind, fromName, toName, text: askText, refs, depth: askDepth, ...(noReply ? { noReply } : {}) }, Date.now()) }
+        catch (e) { write({ t: 'result', id, ok: false, text: `${e instanceof Error ? e.message : e} — nothing was sent; answer or close some open asks and retry` }); return }
         appendLedger(room, { ts: Date.now(), kind: verb, from: fromName, to: toName, id: p.id, text: askText, refs })
         if (res.kind === 'hermes') {
           const cfg = hermesEndpoints.get(res.id)!   // resolved from the same map, so it's present

@@ -232,11 +232,12 @@ test('CORPUS v0.4.230: a genuine background process still reads as waiting, slee
 // safe by a different route: a delivered ack row is removed from `pending`, so it cannot fake an open
 // ask against the receiver either — checked 2026-07-29, not assumed.)
 test('CORPUS: an ack never makes its sender wait, and a resolved ask stops counting', () => {
-  const p = (over: object) => ({ id: 1, fromSid: 'me', fromKind: 'claude', toName: 'taste', ...over })
+  const p = (over: object) => ({ id: 1, createdAt: 1, fromSid: 'me', fromKind: 'claude', toName: 'taste', ...over })
   expect(openOutboundAsk([p({ noReply: true as const })], 'me', () => false)).toBeNull()
   expect(openOutboundAsk([p({ expiredAt: 1 })], 'me', () => false)).toBeNull()
   expect(openOutboundAsk([p({})], 'me', () => true)).toBeNull()      // askerAlreadyResolved
   expect(openOutboundAsk([p({})], 'me', () => false)).toEqual({ id: 1, toName: 'taste' })
-  // Oldest first: with two open, the one waiting longest is the honest label.
-  expect(openOutboundAsk([p({ id: 9 }), p({ id: 4 })], 'me', () => false)).toEqual({ id: 4, toName: 'taste' })
+  // Oldest first: with two open, the one waiting longest is the honest label — read off `createdAt`,
+  // because ask ids rotate and the older ask here deliberately carries the HIGHER id (a wrapped window).
+  expect(openOutboundAsk([p({ id: 4, createdAt: 200 }), p({ id: 9, createdAt: 100 })], 'me', () => false)).toEqual({ id: 9, toName: 'taste' })
 })

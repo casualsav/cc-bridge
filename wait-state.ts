@@ -230,15 +230,17 @@ export function childWaitLabel(procs: ProcRow[], panePid: number | undefined, si
 // on ask 242" incident — which would pin the ASKER at "waiting" for good. askerAlreadyResolved is the
 // daemon's one reading of "this asker is not sitting waiting on that", already used by the TTL notice;
 // this inherits it rather than deciding for itself.
-export function openOutboundAsk<P extends { id: number; fromSid: string; fromKind: string; toName: string; expiredAt?: number; noReply?: true }>(
+export function openOutboundAsk<P extends { id: number; createdAt: number; fromSid: string; fromKind: string; toName: string; expiredAt?: number; noReply?: true }>(
   pendings: P[],
   sid: string,
   resolved: (p: P) => boolean,
 ): { id: number; toName: string } | null {
-  // Oldest first: with two open asks the one that has been waiting longest is the honest label.
+  // Oldest first: with two open asks the one that has been waiting longest is the honest label. By
+  // `createdAt`, not by id — ask ids rotate within a fixed window (agent-bus.ts ASK_ID_MODULUS), so a
+  // lower id no longer means an earlier ask once the counter has wrapped past it.
   const open = pendings
     .filter(p => p.fromKind === 'claude' && p.fromSid === sid && !p.expiredAt && !p.noReply && !resolved(p))
-    .sort((a, b) => a.id - b.id)
+    .sort((a, b) => a.createdAt - b.createdAt)
   return open.length ? { id: open[0].id, toName: open[0].toName } : null
 }
 

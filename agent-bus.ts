@@ -127,8 +127,27 @@ export type BusPending = {
                       // about.
 }
 
+// ---- ask-id rotation ----
+//
+// Ask ids ROTATE inside a fixed window instead of climbing forever: a monotonic counter had reached
+// #1259 in a few weeks, and the id is a handle a human reads in `tg history`, on cards and in an ask
+// block. The window is 1..ASK_ID_MODULUS — note the 1, not 0: `tg history` renders the handle behind a
+// truthiness test (`e.id ? …`), so an id of 0 would print its row with no `#N` at all.
+//
+// Size is measured, not guessed: the live dm-room ledger over 10 days is 117 asks/day mean, 210 peak.
+// A thousand ids is ~8.5 days between reuses at the mean, 4.8 at the peak — against a hard reference
+// horizon of ASK_TTL_MS (60m) + LATE_ANSWER_GRACE_MS (24h) = 25h, so ~4.6x headroom at peak.
+export const ASK_ID_MODULUS = 1000
+// An id is not handed out again within this long, even once nothing live holds it. Skip-if-live covers
+// every holder the daemon can enumerate; it cannot cover the one that matters most — `<tg @x ask=N>`
+// and its `tg answer N` footer sit in a session's own context for as long as that conversation lives,
+// and a stale `tg answer` typed from it is the "answer lands on the wrong ask" failure this whole
+// change is judged against. 48h is double the hard horizon above; at the measured rate it parks ~234
+// of 1000 ids, so three-quarters of the window stays free and the cost is invisible.
+export const ID_COOLDOWN_MS = 48 * 3600_000
+
 export type BusState = {
-  seq: number                             // monotonic ask-id counter
+  seq: number                             // last minted ask id — rotates within 1..ASK_ID_MODULUS
   hops: number                            // consecutive agent→agent asks since the last human message
   pending: Record<string, BusPending>     // keyed by String(id)
   // Per-endpoint digest watermark (agent-bus P2): endpoint id → the ts we last caught it up. On the
@@ -142,9 +161,14 @@ export type BusState = {
   // that had never heard of them, so every read must tolerate the key being absent.
   reportedAt?: Record<string, number>   // sid → when it last sent anything outbound on the bus
   briefedBy?: Record<string, { fromSid: string; fromName: string; at: number }>   // sid → who last briefed it
+  // ---- id rotation ----
+  // ask id → when it was last minted. The cooldown map (see ID_COOLDOWN_MS); pruned at every mint, so
+  // it is bounded by the window and by the cooldown, never by uptime. Optional for the same reason the
+  // two above are: agent-bus.json exists in production written by builds that never heard of it.
+  used?: Record<string, number>
 }
 
-const empty = (): BusState => ({ seq: 0, hops: 0, pending: {}, seen: {}, depth: {}, reportedAt: {}, briefedBy: {} })
+const empty = (): BusState => ({ seq: 0, hops: 0, pending: {}, seen: {}, depth: {}, reportedAt: {}, briefedBy: {}, used: {} })
 let store: BusState = empty()
 let loaded = false
 let persist = true   // disabled by _resetForTest so unit tests never write to the real STATE_DIR
@@ -210,6 +234,10 @@ export function loadBus(): BusState {
       if (!b || typeof b.fromSid !== 'string' || typeof b.at !== 'number' || !Number.isFinite(b.at)) continue
       briefedBy[k] = { fromSid: b.fromSid, fromName: typeof b.fromName === 'string' ? b.fromName : '', at: b.at }
     }
+    // The cooldown map. Dropping it on a read would be silent and would cost exactly what it exists to
+    // buy: a restart would forget that an id was in use last hour and hand it straight back out.
+    const used: Record<string, number> = {}
+    for (const [k, v] of Object.entries(raw.used ?? {})) if (typeof v === 'number' && Number.isFinite(v)) used[k] = v
     store = {
       seq: typeof raw.seq === 'number' ? raw.seq : 0,
       hops: typeof raw.hops === 'number' ? raw.hops : 0,
@@ -218,6 +246,7 @@ export function loadBus(): BusState {
       depth,
       reportedAt,
       briefedBy,
+      used,
     }
     loaded = true
     return store
@@ -230,6 +259,80 @@ function ensureLoaded(): void { if (!loaded) loadBus() }
 
 // ---- pending-ask registry ----
 
+// Ask ids the DAEMON is holding that have no pending row to prove it. Two in-memory sets qualify:
+// `busInFlight` (the delivery claim, taken before the row is removed) and `hermesInFlight` (a live
+// `hermes -z` child). A setter registered once at boot rather than a parameter on createPending's ten
+// call sites — agent-bus.ts stays free of daemon state, and there is one daemon per process.
+let liveAskIdProbe: (id: number) => boolean = () => false
+export function setLiveAskIdProbe(fn: (id: number) => boolean): void { liveAskIdProbe = fn }
+
+/** Every holder of an id that rotation must not step on: a persisted row, or a daemon-held claim. */
+function idIsLive(id: number): boolean {
+  return store.pending[String(id)] != null || liveAskIdProbe(id)
+}
+
+/**
+ * Clear the registry down to the reaper's OWN bound, run at the moment the counter is about to step
+ * backwards (a wrap, or the one-time drop from a pre-rotation seq). Three clauses, no new policy about
+ * what counts as dead — the predicate is shared with sweepBus so the two can never drift:
+ *
+ *   1. stamp anything whose TTL has elapsed (expirePending), so no row escapes the GC below merely
+ *      because the periodic sweep hasn't fired yet;
+ *   2. drop what the grace window has outlived (dropExpired) — the reaper's own call;
+ *   3. drop rows whose `createdAt` is past that same grace even when `expiredAt` was NEVER stamped.
+ *      That is the one case the periodic sweep cannot reach: a row minted just before a long daemon
+ *      outage is never stamped, so the expiredAt-keyed GC skips it forever.
+ *
+ * What survives is a row created inside the last ~25h that is genuinely still open — somebody is
+ * waiting on it, so it keeps its id and the mint steps over it.
+ *
+ * It NEVER notifies and never suppresses a notice: every row it drops is one dropExpired would have
+ * taken, which by construction has already been through expirePending's "no answer yet" (or had it
+ * deliberately withheld). The purge moves WHEN the GC happens, never WHETHER an asker is told — and
+ * living here, with no channel access, is the enforcement rather than the convention.
+ */
+export function purgeAtWrap(now: number): { purged: number; kept: number } {
+  ensureLoaded()
+  expirePending(now)
+  const before = Object.keys(store.pending).length
+  dropExpired(now - LATE_ANSWER_GRACE_MS)
+  const stale = Object.values(store.pending).filter(p => p.createdAt <= now - LATE_ANSWER_GRACE_MS)
+  for (const p of stale) delete store.pending[String(p.id)]
+  const kept = Object.keys(store.pending).length
+  if (stale.length) save()
+  return { purged: before - kept, kept }
+}
+
+/**
+ * The next ask id. Advances within 1..ASK_ID_MODULUS and skips anything still referenced, in two tiers
+ * that must not be collapsed: LIVE is a hard skip (reusing it would deliver an answer to the wrong
+ * asker), the 48h cooldown is a SOFT one. If every free id is merely cooling, the coolest is taken
+ * anyway — a soft constraint may degrade the id's staleness margin, but it may never refuse traffic the
+ * bus can actually carry. Only a genuinely full window throws, which needs ASK_ID_MODULUS asks live at
+ * once (the live registry runs at single digits); a loud refusal there beats a wrong delivery.
+ */
+function nextAskId(now: number): number {
+  const used = (store.used ??= {})
+  for (const [k, v] of Object.entries(used)) if (now - v > ID_COOLDOWN_MS) delete used[k]
+  if (store.seq % ASK_ID_MODULUS + 1 <= store.seq) {
+    const { purged, kept } = purgeAtWrap(now)
+    process.stderr.write(`agent-bus: ask ids wrapped ${store.seq}→${store.seq % ASK_ID_MODULUS + 1}: purged ${purged} dead row(s), ${kept} still open${kept ? ` (${Object.keys(store.pending).join(', ')})` : ''}\n`)
+  }
+  let coolest: number | null = null
+  let coolestAt = Infinity
+  for (let i = 0; i < ASK_ID_MODULUS; i++) {
+    const id = (store.seq + i) % ASK_ID_MODULUS + 1
+    if (idIsLive(id)) continue
+    const at = used[String(id)]
+    if (at == null) { store.seq = id; used[String(id)] = now; return id }
+    if (at < coolestAt) { coolest = id; coolestAt = at }
+  }
+  if (coolest == null) throw new Error(`agent bus saturated: all ${ASK_ID_MODULUS} ask ids are live`)
+  store.seq = coolest
+  used[String(coolest)] = now
+  return coolest
+}
+
 // Mint a pending ask (un-injected: it may have to wait for a busy target to reach a normal prompt).
 // The daemon marks it injected once actually delivered, then arms the TTL against expiresAt.
 export function createPending(
@@ -239,7 +342,7 @@ export function createPending(
   now: number,
 ): BusPending {
   ensureLoaded()
-  const id = ++store.seq
+  const id = nextAskId(now)
   const p: BusPending = {
     id, ...fields,
     fromKind: fields.fromKind ?? 'claude', toKind: fields.toKind ?? 'claude',
@@ -273,10 +376,11 @@ export function markInjected(id: number, now: number): void {
 
 // Un-injected asks for a target session — the delivery queue the daemon sweeps when that session
 // sits at a normal prompt (so an ask to a busy agent waits politely instead of clobbering its turn).
-// Oldest first (FIFO by ask id).
+// Oldest first — by `createdAt`, NOT by id. Ids rotate (see ASK_ID_MODULUS), so a lower id stopped
+// meaning an earlier ask: across a wrap an id sort would hand the target its newest queued ask first.
 export function queuedFor(toSid: string): BusPending[] {
   ensureLoaded()
-  return Object.values(store.pending).filter(p => !p.injected && !p.expiredAt && p.toSid === toSid).sort((a, b) => a.id - b.id)
+  return Object.values(store.pending).filter(p => !p.injected && !p.expiredAt && p.toSid === toSid).sort((a, b) => a.createdAt - b.createdAt)
 }
 
 // ---- unreported work ----

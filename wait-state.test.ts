@@ -145,7 +145,7 @@ test('the kill warning counts, pluralises, and never truncates silently', () => 
 // ---- signal 2: outbound asks ----
 
 const ask = (o: Partial<Parameters<typeof openOutboundAsk<any>>[0][number]> = {}) =>
-  ({ id: 1, fromSid: 'me', fromKind: 'claude', toName: 'taste', ...o }) as any
+  ({ id: 1, createdAt: 1, fromSid: 'me', fromKind: 'claude', toName: 'taste', ...o }) as any
 
 test('an open outbound ask is a wait; an answered, expired, ack or inbound one is not', () => {
   const never = () => false
@@ -162,9 +162,12 @@ test('a prose-answered ask stops being a wait once the asker is resolved', () =>
   expect(openOutboundAsk([ask()], 'me', () => true)).toBeNull()
 })
 
-test('with two open asks the oldest is the label', () => {
-  expect(openOutboundAsk([ask({ id: 7, toName: 'b' }), ask({ id: 3, toName: 'a' })], 'me', () => false))
-    .toEqual({ id: 3, toName: 'a' })
+// The fixture says WAITING LONGEST with `createdAt`, and gives the older ask the HIGHER id — which is
+// the shape a wrapped counter produces (ask ids rotate: agent-bus.ts ASK_ID_MODULUS). Sorting by id
+// read "oldest" off the wrong row here the moment the window wrapped.
+test('with two open asks the oldest is the label — by age, not by id', () => {
+  expect(openOutboundAsk([ask({ id: 3, createdAt: 200, toName: 'b' }), ask({ id: 7, createdAt: 100, toName: 'a' })], 'me', () => false))
+    .toEqual({ id: 7, toName: 'a' })
 })
 
 // ---- signal 3: the declaration ----
