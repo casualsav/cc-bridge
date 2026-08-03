@@ -19,13 +19,17 @@ import { join } from 'node:path'
 const WORKER = join(import.meta.dir, 'off-mcp', 'CLAUDE.md')
 const CHAT_LANE = join(import.meta.dir, 'off-mcp', 'chat-account', 'CLAUDE.md')
 
-// A verb is "documented" where it appears as a command: at the start of a bullet (`- tg ask …`) or
-// inside backticks (`` `tg ack @name` ``). Deliberately NOT a bare `tg \w+` match — the `<tg …>`
-// block syntax the templates also describe would otherwise register "tg bus" (from `<tg bus-digest>`)
-// as a verb.
+// A verb is "documented" wherever it appears as a command — `- tg ask …`, `` `tg ack @name` ``, or
+// plain prose ("tg roster shows who's live"). The one shape excluded is the `<tg …>` BLOCK syntax the
+// templates also describe, which would otherwise register "tg bus" (from `<tg bus-digest>`) as a verb:
+// hence the `<` lookbehind rather than a bullet/backtick requirement.
+//
+// It used to require the bullet or the backticks, and that made it a test of REGISTER rather than of
+// coverage: the chat-lane template was rewritten into dense prose that documents every verb without a
+// backtick in sight, and the parity check reported eighteen missing verbs that were all present.
 function documentedVerbs(path: string): Set<string> {
   const src = readFileSync(path, 'utf8')
-  return new Set([...src.matchAll(/(?:^-\s*|`)tg ([a-z]+)/gm)].map(m => m[1]))
+  return new Set([...src.matchAll(/(?<!<)\btg ([a-z]+)\b/g)].map(m => m[1]!))
 }
 
 // A verb the WORKER template documents that a chat lane genuinely should NOT have.
@@ -36,9 +40,11 @@ function documentedVerbs(path: string): Set<string> {
 // sentence explaining why a chat lane shouldn't have the verb, that IS the finding, and the fix is
 // to document the verb in both templates rather than to exempt it here.
 const CHAT_LANE_EXEMPT: Record<string, string> = {
-  // Empty on purpose: every bus verb currently belongs in both templates. An orchestrator is a
-  // first-class bus participant, so the default answer to "should the chat lane know about this
-  // verb" is yes.
+  // A worker reaches the humans only through `tg post`, because its topic is a mirror nobody reads.
+  // The chat lane IS the humans' chat: its final text block is delivered to the owner as a Telegram
+  // message, so `tg post` would be a second path to the same person and its most likely use is
+  // saying something to him twice. The chat-lane template documents the reply path instead.
+  post: 'The chat lane speaks to the owner with its final text block, which is delivered to him as a Telegram message; tg post would be a redundant second path to the same person, and the template documents the reply path instead.',
 }
 
 // "Articulate a reason" made mechanical. A word count is crude, but it is enough to stop `''`,
