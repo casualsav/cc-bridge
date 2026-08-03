@@ -1113,14 +1113,39 @@ function enqueueInboundInject(paneId: string, watcher: PaneWatcher, params: Inbo
   // If an effort-change confirmation is open and the user sent a message instead of tapping, dismiss
   // it first (= "No, go back", keeps the current level) so the message doesn't type into the modal.
   const run = () => dismissPendingEffortConfirm(paneId)
-    .then(() => injectPaste(paneId, watcher, block))
-    .then(ok => {
-      if (ok) {
+    .then(() => injectPasteOutcome(paneId, watcher, block))
+    .then(async outcome => {
+      if (outcome === 'landed') {
         process.stderr.write(`daemon: inbound injected to pane ${paneId} chat=${params.meta.chat_id}\n`)
         // Off-MCP outbound is handled by the continuous relay loop (startRelayLoop), which
         // relays this turn's reply — and any proactive message — once, keyed by uuid.
+        return
       }
-      else { process.stderr.write(`daemon: inbound inject no-op (pane ${paneId} gone) — buffering\n`); bufferEvent(params) }
+      // 'unsubmitted' — the paste LANDED and only the Enter was not confirmed, so the owner's message
+      // is sitting in the box. This branch used to collapse into the buffer path below, which is wrong
+      // twice over: it reports "pane gone" about a live pane, and the buffer NEVER REPLAYS off-MCP
+      // (replayBuffer runs only from a shim `subscribe`, which a plugin-less session never sends). So
+      // the message stranded silently and indefinitely — the owner's 7283 sat in the chat lane on
+      // 2026-08-03 until a human pressed Enter, while every later delivery was correctly refused over
+      // it. A bus ask has had this recovery since the three-outcome split; inbound never did.
+      // Re-Enter, NEVER re-paste: the text is already in the box and pasting again is the duplicate
+      // class (`resubmitPane` cannot paste, which is the point of splitting the outcome).
+      if (outcome === 'unsubmitted') {
+        const again = await resubmitPane(paneId).catch(() => 'failed' as PasteOutcome)
+        process.stderr.write(again === 'landed'
+          ? `daemon: inbound submit was not confirmed for pane ${paneId} chat=${params.meta.chat_id} — re-pressed Enter, landed\n`
+          : `daemon: inbound STRANDED in pane ${paneId} chat=${params.meta.chat_id} — pasted but not submitted, and the re-Enter also failed (${again}); it is sitting in that input box\n`)
+        return
+      }
+      // 'occupied' is NOT a stranding of ours: nothing was pasted, so there is nothing in the box to
+      // submit and re-Entering would submit somebody ELSE's draft. Buffer it like a failed paste.
+      if (outcome === 'occupied') {
+        process.stderr.write(`daemon: inbound not delivered to pane ${paneId} chat=${params.meta.chat_id} — its input box already holds typed text; buffering\n`)
+        bufferEvent(params)
+        return
+      }
+      process.stderr.write(`daemon: inbound inject no-op (pane ${paneId} gone) — buffering\n`)
+      bufferEvent(params)
     })
     .catch(err => process.stderr.write(`daemon: inbound inject failed: ${err}\n`))
   inboundInjectChain = inboundInjectChain.then(run, run)

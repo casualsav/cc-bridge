@@ -174,6 +174,12 @@ export function loadBus(): BusState {
         ...(typeof p.expiredAt === 'number' ? { expiredAt: p.expiredAt } : {}),
         ...(typeof p.nudgedAt === 'number' ? { nudgedAt: p.nudgedAt } : {}),
         ...(typeof p.blockedByBox === 'string' ? { blockedByBox: p.blockedByBox } : {}),
+        // Was written by markPasted and then DROPPED here, so the field's own comment ("Persisted, so
+        // a daemon restart cannot forget and re-paste") described a safety that did not exist: after a
+        // restart the retry pasted a block that was already in the box, which is the duplicate class
+        // the three-outcome split exists to prevent. Restored 2026-08-03; the pane id is re-validated
+        // at use, so a stale one from a session that has since been restarted is harmless.
+        ...(typeof p.pastedPane === 'string' ? { pastedPane: p.pastedPane } : {}),
         ...(typeof p.askerResolvedAt === 'number' ? { askerResolvedAt: p.askerResolvedAt } : {}),
         ...(p.founding === true ? { founding: true as const } : {}),
         depth: typeof p.depth === 'number' ? p.depth : 1,   // pre-depth entry: assume one hop, the safe reading

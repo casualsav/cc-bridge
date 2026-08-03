@@ -72,6 +72,40 @@ test('the blocking text survives the restart read — loadBus rebuilds rows fiel
   } finally { restore() }
 })
 
+test('pastedPane survives the restart read — the field its own comment promised', () => {
+  // It was written by markPasted and dropped by loadBus, so the comment ("Persisted, so a daemon
+  // restart cannot forget and re-paste") described a safety that did not exist: after a restart the
+  // retry re-PASTED a block already sitting in the box — the duplicate class the three-outcome split
+  // exists to prevent. Same silent-drop mechanism as blockedByBox above; this is the regression pin.
+  const dir = mkdtempSync(join(tmpdir(), 'bus-blocked-'))
+  const row = {
+    id: 9, fromSid: 'asker', toSid: 'target', fromKind: 'claude', toKind: 'claude',
+    fromName: 'chat', toName: 'worker', text: 'the ask', refs: [], depth: 1,
+    createdAt: 1, expiresAt: 2, injected: false, pastedPane: '%14',
+  }
+  writeFileSync(join(dir, 'agent-bus.json'), JSON.stringify({ pending: { '9': row } }))
+  try {
+    setBusStateDir(dir); loadBus()
+    expect(listPending()[0].pastedPane).toBe('%14')
+  } finally { restore() }
+})
+
+test('a corrupt pastedPane is dropped, not trusted', () => {
+  // A non-string here would be compared against a real pane id at the retry (`cur.pastedPane === pane`)
+  // — never equal, so it fails toward re-pasting. Dropped rather than carried.
+  const dir = mkdtempSync(join(tmpdir(), 'bus-blocked-'))
+  const row = {
+    id: 10, fromSid: 'asker', toSid: 'target', fromKind: 'claude', toKind: 'claude',
+    fromName: 'chat', toName: 'worker', text: 'the ask', refs: [], depth: 1,
+    createdAt: 1, expiresAt: 2, injected: false, pastedPane: 42,
+  }
+  writeFileSync(join(dir, 'agent-bus.json'), JSON.stringify({ pending: { '10': row } }))
+  try {
+    setBusStateDir(dir); loadBus()
+    expect(listPending()[0].pastedPane).toBeUndefined()
+  } finally { restore() }
+})
+
 test('a corrupt blockedByBox is dropped, not trusted', () => {
   // Same stance as every other field in that rebuild: a hand-edited or corrupt agent-bus.json must not
   // put a non-string into a notice that gets HTML-escaped and sent to the owner.
