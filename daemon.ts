@@ -126,6 +126,7 @@ import {
 } from './topic-runtime.ts'
 import { latchMode, type ModeLatch } from './mode-latch.ts'
 import { watchVerdict, watchNoticeText, existingWatch, alreadyWatchingText, serializePasses, type BusWatch, type WatchOutcome } from './watch-plan.ts'
+import { fetchUsage, type UsageReading } from './usage-api.ts'
 import { startWebapp, type SettingsView as WebappSettingsView, type SessionCard as WebappSessionCard, type SessionFeed as WebappSessionFeed, type AutomationView as WebappAutomationView, type UsageView as WebappUsageView } from './webapp.ts'
 import { startTunnel, ensureCloudflared, tailscaleFunnelUrl, type Tunnel } from './tunnel.ts'
 import { sendRichMessage, sendRichMessageDraft, editRichMessage, toInputRichMessage, htmlPanelToRich, callTelegram, normalizeRichInbound, telegramRefused, type InputRichMessage } from './richmsg.ts'
@@ -17886,16 +17887,59 @@ async function webappListSessions(): Promise<WebappSessionCard[]> {
   return confirmed.filter((c): c is WebappSessionCard => c !== null)
 }
 
-// The command center's usage header: the account's 5h and weekly windows, ONCE. Deliberately the same
-// source and the same arithmetic as the pinned status card — `readUsageSnapshot` (usage.json, written by
-// statusline-command.sh on every draw), `Math.round`, and status-card's own `fmtResetIn` — so the two
+// ── The usage header's two sources ───────────────────────────────────────────
+// PRIMARY is the OAuth endpoint (usage-api.ts): server truth, and the only source that has the
+// per-model weekly window. FALLBACK is the statusline snapshot. Their failure sets are near-disjoint —
+// the endpoint dies on a network outage or an expired token, the snapshot dies when no session has drawn
+// a statusline for 120s — which is the whole reason for keeping both rather than picking one.
+//
+// Polled on a timer instead of on demand: `/api/sessions` is re-fetched every 4s by the open mini app,
+// and a network round trip on that path would put the endpoint's latency inside every dashboard render.
+const USAGE_API_POLL_MS = 300_000       // 5 min
+const USAGE_API_TTL_MS = 900_000        // 15 min — older than this and the reading is dropped, not shown
+let usageApi: { at: number; reading: UsageReading } | null = null
+let usageApiSource: 'api' | 'statusline' | 'none' = 'none'
+async function pollUsageApi(): Promise<void> {
+  const reading = await fetchUsage(MAIN_ACCOUNT.configDir)
+  if (!reading) { wlog('usage-api: no reading (no/blanked credentials, expired token, or unreachable)'); return }
+  usageApi = { at: Date.now(), reading }
+  const scoped = reading.scoped.map(s => `${s.label} ${Math.round(s.pct)}%`).join(', ') || 'none'
+  // The spend read (unit A scope, 2026-08-03). A BOUND, not a ledger: while extra usage is disabled and
+  // `used` is 0, nothing is leaving the plan and a call's whole cost is the plan-window consumption the
+  // rows already show. It is not a per-request cost breakdown and must never be planned on as one.
+  const sp = reading.spend
+  wlog(`usage-api: 5h=${reading.fiveHour ? Math.round(reading.fiveHour.pct) + '%' : '—'} 7d=${reading.sevenDay ? Math.round(reading.sevenDay.pct) + '%' : '—'} scoped=[${scoped}]`
+    + (sp ? ` spend=${(sp.usedMinor / 100).toFixed(2)}${sp.currency} enabled=${sp.enabled} extraUsage=${sp.extraUsage}` : ' spend=—'))
+}
+
+// The command center's usage header: the account's rate windows, ONCE, from ONE source. Through the same
+// `usageWindows` mapping (Math.round + status-card's fmtResetIn) as the pinned status card, so the two
 // surfaces cannot disagree about the same account. Not the pane scrape (statusline.ts's h5/d7): that is
 // read per-pane and goes stale on an idle session, and a header is account-wide by definition; a stale
 // number with no date on it is worse than no header, which is what `null` renders as.
-// There is NO per-model window to add here: Claude Code's statusline JSON exposes
-// `rate_limits.five_hour` and `rate_limits.seven_day` and nothing else.
+//
+// NEVER BLENDS. One source fills the whole view; a row taking its percentage from the endpoint and its
+// countdown from the snapshot would be an artefact neither source would claim. The switch is logged
+// rather than badged — a marker in the UI changes no decision the owner makes off a percentage — and
+// when both are fresh and disagree beyond a rounding point or two, that is logged too, because a
+// fallback that silently differs from the primary is the instruments-lie trap.
+const USAGE_DISAGREE_PTS = 3
 function webappReadUsage(): WebappUsageView | null {
-  const view = usageWindows(readUsageSnapshot())
+  const api = usageApi && Date.now() - usageApi.at <= USAGE_API_TTL_MS ? usageApi.reading : null
+  const snap = readUsageSnapshot()
+  if (api && snap) {
+    for (const [k, label] of [['fiveHour', '5h'], ['sevenDay', '7d']] as const) {
+      const a = api[k], s = snap[k]
+      if (a && s && Math.abs(Math.round(a.pct) - Math.round(s.pct)) > USAGE_DISAGREE_PTS)
+        wlog(`usage: DISAGREE ${label} api=${Math.round(a.pct)}% statusline=${Math.round(s.pct)}% (serving api)`)
+    }
+  }
+  const source = api ? 'api' : snap ? 'statusline' : 'none'
+  if (source !== usageApiSource) {
+    wlog(`usage: source ${usageApiSource} → ${source}`)
+    usageApiSource = source
+  }
+  const view = usageWindows(api ?? snap)
   return view.fiveHour || view.sevenDay ? view : null
 }
 
@@ -18402,6 +18446,10 @@ async function webappAutomationCreate(
 async function startFilesWebapp(): Promise<void> {
   if (!WEBAPP_ENABLED) return
   warmDmHandles()
+  // The header's primary source. Kicked once now so the first dashboard open has a reading rather than
+  // the fallback, then on its own timer; every call fails soft to null and the fallback covers the gap.
+  void pollUsageApi()
+  setInterval(() => void pollUsageApi(), USAGE_API_POLL_MS).unref?.()
   try {
     startWebapp({ token: TOKEN!, port: WEBAPP_PORT, staticDir: join(import.meta.dir, 'webapp'),
       isAllowed: uid => loadAccess().allowFrom.includes(uid), log: wlog, resolveStart: resolveStartToken,

@@ -66,14 +66,20 @@ export interface WebappDeps {
   automationCreate?: (userId: string, spec: { when: string; sid: string; text: string }) => Promise<{ error: string } | { summary: string }>   // new cron from the Scheduled tab
 }
 
-// The account's two rate-limit windows, as the pinned status card renders them: a rounded percentage
-// and a countdown string from the SAME snapshot (usage.json, written by statusline-command.sh) and the
-// SAME formatter (fmtResetIn). `resetIn` is null when the reset epoch is unknown or already past.
-// There is no per-model window here because Claude Code exposes none — `rate_limits` carries
-// `five_hour` and `seven_day` and nothing else.
+// The account's rate-limit windows, as the pinned status card renders them: a rounded percentage and a
+// countdown string through the SAME formatter (fmtResetIn). `resetIn` is null when the reset epoch is
+// unknown or already past.
+//
+// TWO sources can fill this (daemon.ts's webappReadUsage): the OAuth usage endpoint (primary) and the
+// statusline snapshot (fallback). ONE of them fills the WHOLE view — percentage, bar and countdown are
+// never mixed across sources, because a row assembled from two readings is an artefact neither source
+// would claim. `scoped` is the per-model weekly window ("🔮 Fable"); only the endpoint has it, so it is
+// absent whenever the fallback is in use. The statusline JSON structurally cannot carry it —
+// `rate_limits` there is `five_hour` + `seven_day` and nothing else.
 export interface UsageView {
   fiveHour?: { pct: number; resetIn: string | null }
   sevenDay?: { pct: number; resetIn: string | null }
+  scoped?: { label: string; pct: number; resetIn: string | null }[]
 }
 
 // Settings tab payload: each toggle is {value, editable} so the SPA renders the live state and only

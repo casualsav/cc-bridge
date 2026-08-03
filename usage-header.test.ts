@@ -41,6 +41,34 @@ test('one window present does not invent the other', () => {
   expect(v.sevenDay).toBeUndefined()
 })
 
+// The per-model weekly rows go through the SAME mapping as the two account windows — same rounding,
+// same countdown wording — so "🔮 Fable" cannot render in a different grammar from "📅 weekly" one row
+// above it. A broken version formats them at the call site in webapp/index.html and drifts on the day
+// either one changes.
+test('scoped windows round and word exactly like the account windows', () => {
+  const v = usageWindows({
+    sevenDay: { pct: 13.5, resetsAt: at(5000) },
+    scoped: [{ label: 'Fable', pct: 9.6, resetsAt: at(5000) }],
+  })
+  expect(v.scoped).toEqual([{ label: 'Fable', pct: 10, resetIn: '3d11h' }])
+  expect(v.scoped![0].resetIn).toBe(v.sevenDay!.resetIn)
+})
+
+// The label is the server's (`scope.model.display_name`), carried through untouched: a rename upstream
+// must render as the new name, never as a hardcoded "Fable".
+test('the scoped label is carried verbatim, never derived', () => {
+  const v = usageWindows({ scoped: [{ label: 'Fable 5.5', pct: 1, resetsAt: 0 }] })
+  expect(v.scoped).toEqual([{ label: 'Fable 5.5', pct: 1, resetIn: null }])
+})
+
+// The statusline fallback has no scoped windows at all. Absent must stay absent — an empty array in the
+// payload would be indistinguishable, at the client, from "the endpoint says you have none".
+test('no scoped windows leaves the key off entirely', () => {
+  const v = usageWindows({ fiveHour: { pct: 5, resetsAt: at(10) } })
+  expect(v.scoped).toBeUndefined()
+  expect('scoped' in v).toBe(false)
+})
+
 // No snapshot at all → an empty object, which is what daemon.ts's webappReadUsage turns into a payload
 // with no `usage` key, which is what makes the client render no header. A percentage nobody can date is
 // worse than no header, and this is the first link in that chain.

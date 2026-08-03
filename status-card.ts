@@ -253,11 +253,22 @@ export function lastTodosInTranscript(file: string): TodoState | null { return t
 // by the pinned card (below) and the mini app's usage header (daemon.ts's webappReadUsage → the
 // /api/sessions payload). Two surfaces showing the same account cannot round or word it differently,
 // and "we used the same source" is not that guarantee — this is.
-export function usageWindows(snap: { fiveHour?: { pct: number; resetsAt: number }; sevenDay?: { pct: number; resetsAt: number } } | null):
-  { fiveHour?: { pct: number; resetIn: string | null }; sevenDay?: { pct: number; resetIn: string | null } } {
+// `scoped` are the per-model weekly windows (usage-api.ts) — same rounding, same countdown wording, so a
+// "🔮 Fable" row cannot render in a different grammar from the 📅 weekly row above it. The pinned card
+// ignores the field; it renders 5h/weekly only, and adding a third badge there is a separate decision.
+export function usageWindows(snap: {
+  fiveHour?: { pct: number; resetsAt: number }
+  sevenDay?: { pct: number; resetsAt: number }
+  scoped?: { label: string; pct: number; resetsAt: number }[]
+} | null): {
+  fiveHour?: { pct: number; resetIn: string | null }
+  sevenDay?: { pct: number; resetIn: string | null }
+  scoped?: { label: string; pct: number; resetIn: string | null }[]
+} {
   const win = (w?: { pct: number; resetsAt: number }) => w ? { pct: Math.round(w.pct), resetIn: fmtResetIn(w.resetsAt) } : undefined
   const five = win(snap?.fiveHour), seven = win(snap?.sevenDay)
-  return { ...(five ? { fiveHour: five } : {}), ...(seven ? { sevenDay: seven } : {}) }
+  const scoped = (snap?.scoped ?? []).map(s => ({ label: s.label, ...win(s)! }))
+  return { ...(five ? { fiveHour: five } : {}), ...(seven ? { sevenDay: seven } : {}), ...(scoped.length ? { scoped } : {}) }
 }
 
 function fmtResetIn(resetsAt: number): string | null {

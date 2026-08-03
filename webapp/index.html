@@ -2575,13 +2575,18 @@ let ACCOUNT_ROLE = 'code';
 // statusline recently enough for the snapshot to be datable. A percentage nobody can date is worse than
 // no header, and the daemon is what makes that call (it sends nothing rather than a stale number).
 const USAGE_WINDOWS = [["fiveHour", "🕒 5h"], ["sevenDay", "📅 weekly"]];
+function usageRow(label, w) {
+  return '<div class="foot"><span class="lbl">' + label + " " + w.pct + "%</span>" + pctBar(w.pct) +
+    (w.resetIn ? '<span class="rst">resets in ' + esc(w.resetIn) + "</span>" : "") + "</div>";
+}
 function renderUsage(el, usage) {
   if (!usage) return;
-  const rows = USAGE_WINDOWS.filter(([k]) => usage[k]).map(([k, label]) => {
-    const w = usage[k];
-    return '<div class="foot"><span class="lbl">' + label + " " + w.pct + "%</span>" + pctBar(w.pct) +
-      (w.resetIn ? '<span class="rst">resets in ' + esc(w.resetIn) + "</span>" : "") + "</div>";
-  });
+  const rows = USAGE_WINDOWS.filter(([k]) => usage[k]).map(([k, label]) => usageRow(label, usage[k]));
+  // Per-model weekly windows ("🔮 Fable"), under the account-wide rows and in the same grammar. The LABEL
+  // IS SERVER-SUPPLIED (the API's scope.model.display_name) and is never hardcoded here — a rename
+  // upstream should just render. Only the OAuth endpoint carries these, so they are absent whenever the
+  // header is on its statusline fallback; that is a missing row, never a zero.
+  for (const w of usage.scoped || []) rows.push(usageRow("🔮 " + esc(w.label), w));
   if (!rows.length) return;
   el.insertAdjacentHTML("beforeend", '<div class="sess usage" id="usagehead">' + rows.join("") + "</div>");
 }
