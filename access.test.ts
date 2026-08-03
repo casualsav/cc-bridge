@@ -179,3 +179,46 @@ describe('the auto migration', () => {
     expect(migrateSpawnDials(once)).toEqual(once)
   })
 })
+
+// ---- a preference a panel can WRITE but nobody can READ BACK (v0.4.319) ----
+//
+// PREF_KEYS is an allowlist on BOTH sides — saveAccess copies only listed keys into prefs.json and
+// readPrefs copies only listed keys out. A new preference that is not on it is therefore written by
+// the handler, dropped on the way to disk, and re-read as absent. On a settings panel that renders
+// its own state, the symptom is not an error: the card re-renders IDENTICALLY, Telegram refuses the
+// edit with "message is not modified", and the button looks dead. That is exactly what the owner hit
+// tapping 💬 Chat agent → fable on 2026-08-03, minutes after the two-role split shipped with a full
+// green resolver matrix — because every test in it drove the pure resolvers and none drove the
+// round trip.
+//
+// So this asserts the ROUND TRIP, not the constant: a test that read PREF_KEYS would pass against a
+// build whose writer used a different list.
+describe('every settings preference survives save → load', () => {
+  test('the two-role Model defaults keys round-trip', () => {
+    const a = A.loadAccess()
+    a.spawnModel = 'opus'; a.spawnEffort = 'high'
+    a.chatModel = 'fable'; a.chatEffort = 'high'
+    A.saveAccess(a)
+    state._accessFileCache.clear()
+    const back = A.loadAccess()
+    expect(back.chatModel).toBe('fable')      // dropped before v0.4.319 — the dead-button bug
+    expect(back.chatEffort).toBe('high')
+    expect(back.spawnModel).toBe('opus')      // and the split did not disturb the coding pair
+    expect(back.spawnEffort).toBe('high')
+  })
+
+  // The panel's own rule, in the form the bug broke: after the tap, what the panel re-reads must
+  // DIFFER from what it showed before. Equality here is precisely the "nothing happened" state.
+  test('setting the chat role changes what the panel would render', () => {
+    const before = A.loadAccess()
+    before.spawnModel = 'opus'; before.chatModel = undefined
+    A.saveAccess(before); state._accessFileCache.clear()
+    const shown = A.loadAccess().chatModel ?? A.loadAccess().spawnModel   // chat follows coding
+    const a = A.loadAccess(); a.chatModel = 'fable'
+    A.saveAccess(a); state._accessFileCache.clear()
+    const after = A.loadAccess().chatModel ?? A.loadAccess().spawnModel
+    expect(shown).toBe('opus')
+    expect(after).toBe('fable')
+    expect(after).not.toBe(shown)
+  })
+})
