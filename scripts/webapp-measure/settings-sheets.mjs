@@ -100,19 +100,19 @@ const open = async (write, gh = GH) => {
 // ---- 3: a control inside a sheet still writes, with the right key and value --------------------
 {
   const p = await open(true);
-  await p.click("#tab-settings .setrow:nth-child(2)");            // open Model defaults
+  await p.click("#tab-settings .setrow:nth-child(2)", { timeout: 2000 }).catch(() => {});            // open Model defaults
   await p.waitForTimeout(250);
   // Guarded so the CONTROL run (a page with no sheets) reports failures instead of throwing on the
   // first missing selector and hiding every check after it.
   ok(await p.$eval("#mdef", n => n.classList.contains("show")).catch(() => false), "tapping the group row opens its sheet");
-  await p.selectOption("#mdefbody .setrow:nth-child(3) select", "haiku").catch(() => {});   // chatModel
+  await p.selectOption("#mdefbody .setrow:nth-child(3) select", "haiku", { timeout: 2000 }).catch(() => {});   // chatModel
   await p.waitForTimeout(150);
   const posts = await p.evaluate(() => window.__posts);
   const m = posts.find(x => x.path.includes("/api/settings/set"));
   ok(!!m && m.body.key === "chatModel" && m.body.value === "haiku",
     `the chat-model select posts chatModel=haiku (got ${JSON.stringify(m && m.body)})`);
   // And the toggle inside the same sheet, which takes a different branch of the builder.
-  await p.click("#mdefbody .setrow:nth-child(5) button").catch(() => {});         // spawnAuto, currently false
+  await p.click("#mdefbody .setrow:nth-child(5) button", { timeout: 2000 }).catch(() => {});         // spawnAuto, currently false
   await p.waitForTimeout(150);
   const t = (await p.evaluate(() => window.__posts)).filter(x => x.body && x.body.key === "spawnAuto")[0];
   ok(!!t && t.body.value === true, `the auto toggle posts spawnAuto=true (got ${JSON.stringify(t && t.body)})`);
@@ -122,7 +122,7 @@ const open = async (write, gh = GH) => {
 // ---- 4: read-only stays read-only through the sheets -------------------------------------------
 {
   const p = await open(false);
-  await p.click("#tab-settings .setrow:nth-child(2)");
+  await p.click("#tab-settings .setrow:nth-child(2)", { timeout: 2000 }).catch(() => {});
   await p.waitForTimeout(250);
   const operable = await p.$$eval("#mdefbody .setrow", rs => rs.filter(r => {
     const s = r.querySelector("select"), btn = r.querySelector("button");
@@ -137,7 +137,7 @@ const open = async (write, gh = GH) => {
 // ---- 5: GitHub's device-code flow shows its code ------------------------------------------------
 {
   const p = await open(true, { ...GH, login: { active: true, code: "WXYZ-1234", url: "https://github.com/login/device" } });
-  await p.click("#tab-settings .setrow:nth-child(3)");            // GitHub row
+  await p.click("#tab-settings .setrow:nth-child(3)", { timeout: 2000 }).catch(() => {});            // GitHub row
   await p.waitForTimeout(300);
   const body = await p.$eval("#ghbody", n => n.textContent).catch(() => "");
   ok(await p.$eval("#ghsheet", n => n.classList.contains("show")).catch(() => false), "the GitHub row opens its sheet");
@@ -148,9 +148,9 @@ const open = async (write, gh = GH) => {
 {
   // The actions, on a settled login.
   const p = await open(true);
-  await p.click("#tab-settings .setrow:nth-child(3)");
+  await p.click("#tab-settings .setrow:nth-child(3)", { timeout: 2000 }).catch(() => {});
   await p.waitForTimeout(300);
-  await p.click('#ghbody [data-gh="alt"] [data-gh-switch]').catch(() => {});
+  await p.click('#ghbody [data-gh="alt"] [data-gh-switch]', { timeout: 2000 }).catch(() => {});
   await p.waitForTimeout(150);
   const g = (await p.evaluate(() => window.__posts)).find(x => x.path.includes("/api/github/action"));
   ok(!!g && g.body.action === "switch" && g.body.user === "alt",
@@ -193,6 +193,61 @@ const open = async (write, gh = GH) => {
   // still focus. An input rendered "disabled" would still read as a field that ought to work.
   const p = await open(false);
   ok((await p.$$("#tab-settings input.ro.edit")).length === 0, "write off: no text FIELD is rendered at all");
+  await p.close();
+}
+
+// ---- 7: the Claude-account controls (1.5 register, 1.7 two-step remove) -------------------------
+// The claim that matters for 1.7 is the SHAPE: the confirm must show what the DAEMON said would go,
+// and a declined confirm must remove nothing. A one-shot remove would look identical until the day
+// a row stood for two config dirs.
+{
+  const p = await open(true);
+  await p.evaluate(() => {
+    window.api = async q => q.includes("/api/provider-accounts") ? {
+      accounts: [{ id: "claude:main", label: "main", providerLabel: "Claude", authLabel: "subscription", ready: true, models: ["opus"], model: "opus" },
+                 { id: "claude:work", label: "work", providerLabel: "Claude", authLabel: "subscription", ready: true, models: ["opus"], model: "opus" }],
+      activeCount: 2, defaults: { chat: "claude:main", code: "claude:main" }, catalog: [], auto: false,
+    } : q.includes("/api/settings") ? { write: true, settings: {} } : {};
+    window.writeOp = async (path, body) => {
+      window.__posts.push({ path, body });
+      return body.action === "remove-claude-plan"
+        ? { ok: true, plan: { label: "work", doomed: [{ name: "work", configDir: "/home/u/.claude-work" }], kept: ["main"] } }
+        : { ok: true };
+    };
+    window.confirm = m => { window.__confirm = m; return window.__answer; };
+    window.prompt = () => window.__prompt;
+  });
+  await p.evaluate(() => { window.__answer = false; window.__prompt = null; return openAccounts(); }).catch(() => {});
+  await p.waitForTimeout(300);
+
+  ok(!!(await p.$('[data-account="claude:work"] [data-acc-rmclaude]')), "a non-main Claude row offers Remove");
+  ok(!(await p.$('[data-account="claude:main"] [data-acc-rmclaude]')), "the main account offers NO Remove");
+
+  // Declined confirm: the plan is requested, the removal is not sent.
+  await p.click('[data-account="claude:work"] [data-acc-rmclaude]', { timeout: 2000 }).catch(() => {});
+  await p.waitForTimeout(200);
+  const posts1 = await p.evaluate(() => window.__posts.filter(x => String(x.body.action || "").startsWith("remove-claude")));
+  const shown = await p.evaluate(() => window.__confirm || "");
+  ok(posts1.length === 1 && posts1[0].body.action === "remove-claude-plan", `declined: only the PLAN was requested (got ${JSON.stringify(posts1.map(x => x.body.action))})`);
+  ok(shown.includes("/home/u/.claude-work") && shown.includes("main"), "the confirm names the daemon's doomed dir AND what is kept");
+
+  // Accepted confirm: now the removal goes.
+  await p.evaluate(() => { window.__answer = true; });
+  await p.click('[data-account="claude:work"] [data-acc-rmclaude]', { timeout: 2000 }).catch(() => {});
+  await p.waitForTimeout(200);
+  const posts2 = await p.evaluate(() => window.__posts.filter(x => x.body.action === "remove-claude"));
+  ok(posts2.length === 1 && posts2[0].body.name === "work", `accepted: remove-claude posted for work (got ${JSON.stringify(posts2.map(x => x.body))})`);
+
+  // 1.5 register: a name posts; a cancelled prompt posts nothing.
+  await p.evaluate(() => { window.__prompt = null; });
+  await p.click("#accaddclaude", { timeout: 2000 }).catch(() => {});
+  await p.waitForTimeout(150);
+  ok((await p.evaluate(() => window.__posts.filter(x => x.body.action === "add-claude"))).length === 0, "a cancelled name prompt posts NOTHING");
+  await p.evaluate(() => { window.__prompt = "  WORK2 "; });
+  await p.click("#accaddclaude", { timeout: 2000 }).catch(() => {});
+  await p.waitForTimeout(150);
+  const addp = await p.evaluate(() => window.__posts.filter(x => x.body.action === "add-claude"));
+  ok(addp.length === 1 && addp[0].body.name === "work2", `register posts the trimmed, lowercased name (got ${JSON.stringify(addp.map(x => x.body))})`);
   await p.close();
 }
 

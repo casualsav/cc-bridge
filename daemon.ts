@@ -17337,6 +17337,36 @@ async function webappProviderAccountAction(userId: string, action: Record<string
     catch { writeEnvVars({ [tokenEnv]: null }); return { error: 'could not save the provider account' } }
     return { ok: true, id: `gateway:${name}` }
   }
+  // ➕ Register a Claude account. This is NOT a login: it takes a NAME and creates that account's own
+  // config dir (~/.claude-<name>), exactly like the Telegram force-reply. The sign-in happens later,
+  // on the account's first LAUNCH, where the CLI's own URL is relayed — which is why this is plain
+  // text entry and needs no hand-off.
+  if (kind === 'add-claude') {
+    const r = addAccount(String(action.name ?? '').trim().toLowerCase())
+    return r.ok ? { ok: true, id: `claude:${r.account.name}`, name: r.account.name, configDir: r.account.configDir } : { error: r.error }
+  }
+  // 🗑 on a Claude account row. TWO STEPS, and the split is the point: a row can stand for several
+  // config dirs, so nothing is unregistered until a confirm has NAMED every dir that goes. The plan
+  // is computed HERE for both steps — the app renders it and never derives it, or the confirm could
+  // name one set while the removal takes another.
+  if (kind === 'remove-claude-plan' || kind === 'remove-claude') {
+    const rep = String(action.name ?? '')
+    const group = hopGroupFor(failoverChain(), `claude:${rep}`)
+    const members = group.map(h => h.account!).filter(Boolean)
+    if (!members.length) return { error: 'unknown account' }
+    // main and any account a chat lane is running on are never removable — the same protection the
+    // Telegram flow applies, recomputed on the CONFIRMING call too rather than trusted from step one.
+    const { doomed, kept } = accountRemovalPlan(members, ['main', ...(await chatLaneAccountNames())])
+    if (!doomed.length) return { error: 'nothing to remove — every profile behind this account is in use' }
+    const plan = {
+      label: accountRowLabel(group),
+      doomed: doomed.map(n => ({ name: n, configDir: accountByName(n)?.configDir ?? '?' })),
+      kept,
+    }
+    if (kind === 'remove-claude-plan') return { ok: true, plan }
+    for (const n of doomed) removeAccount(n)
+    return { ok: true, removed: doomed, plan }
+  }
   // 🔑 Replace a gateway's API key. WRITE-ONLY on purpose: the existing key is never rendered, never
   // returned, and never round-trips through the browser — the field takes a new one or nothing. The
   // definition is untouched, so this cannot half-migrate an account the way a re-add would.

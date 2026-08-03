@@ -1819,6 +1819,7 @@
     <div class="shead">AI accounts</div>
     <div id="accbody"></div>
     <button class="acctadd" id="accadd">Add provider account</button>
+    <button class="acctadd" id="accaddclaude">Add Claude account</button>
     <form id="accform">
       <select id="accprovider" aria-label="Provider"></select>
       <input id="acclabel" placeholder="Account name" autocomplete="off">
@@ -2445,7 +2446,11 @@ function renderAccounts() {
     // in step with the first. 🔑 is write-only: it takes a new key and never renders the old one.
     html += '<div class="acctactions"><button data-acc-default="chat" class="' + (v.defaults.chat === a.id ? 'on' : '') + '">Chat</button><button data-acc-default="code" class="' + (v.defaults.code === a.id ? 'on' : '') + '">Coding</button>'
       + '<button data-acc-launch="1">Launch</button>'
-      + (a.id.startsWith('gateway:') && a.id !== 'gateway:local-codex' ? '<button data-acc-key="1">Key</button><button data-acc-remove="1">Remove</button>' : '') + '</div></div>';
+      + (a.id.startsWith('gateway:') && a.id !== 'gateway:local-codex' ? '<button data-acc-key="1">Key</button><button data-acc-remove="1">Remove</button>' : '')
+      // A Claude account row removes through the two-step plan/confirm, never the gateway path: the
+      // row can stand for several config dirs and the confirm has to name them.
+      + (a.id.startsWith('claude:') && a.id !== 'claude:main' ? '<button data-acc-rmclaude="1">Remove</button>' : '')
+      + '</div></div>';
   });
   if (v.activeCount === accounts.length) html += '<div class="acctdivider">Inactive · none</div>';
   body.innerHTML = html;
@@ -2454,6 +2459,20 @@ function renderAccounts() {
   body.querySelectorAll('[data-acc-default]').forEach(b => b.onclick = () => accountAction({ action:'default', id:b.closest('[data-account]').dataset.account, role:b.dataset.accDefault }));
   body.querySelectorAll('[data-acc-model]').forEach(s => s.onchange = () => accountAction({ action:'model', id:s.closest('[data-account]').dataset.account, model:s.value }));
   body.querySelectorAll('[data-acc-remove]').forEach(b => b.onclick = () => { if (confirm('Remove this provider account? Credentials stay out of the browser and its saved key is no longer used.')) accountAction({ action:'remove', id:b.closest('[data-account]').dataset.account }); });
+  // The two-step Claude-account removal: ask the daemon what would go, show THAT, then confirm. The
+  // app never computes the doomed list — a confirm naming one set while the removal takes another is
+  // exactly the failure a two-step flow exists to prevent.
+  body.querySelectorAll('[data-acc-rmclaude]').forEach(b => b.onclick = async () => {
+    const name = b.closest('[data-account]').dataset.account.slice(7);   // 'claude:' prefix
+    const p = await writeOp('/api/provider-accounts/action', { action: 'remove-claude-plan', name });
+    if (!p) return;
+    const dirs = p.plan.doomed.map(d => d.name + ' — ' + d.configDir).join('\n');
+    const keptNote = p.plan.kept.length ? '\n\nKept (in use): ' + p.plan.kept.join(', ') : '';
+    if (!confirm('Remove ' + p.plan.label + '?\n\nUnregisters these config dirs (the files on disk stay):\n\n' + dirs + keptNote)) return;
+    if (await writeOp('/api/provider-accounts/action', { action: 'remove-claude', name })) {
+      PROVIDER_ACCOUNTS = await api('/api/provider-accounts?role=' + ACCOUNT_ROLE); renderAccounts();
+    }
+  });
   body.querySelectorAll('[data-acc-launch]').forEach(b => b.onclick = () => {
     const id = b.closest('[data-account]').dataset.account;
     closeSheet('accounts');
@@ -4047,6 +4066,17 @@ async function openSchedSheet() {
 $("accclose").onclick = () => closeSheet("accounts");
 $("accounts").onclick = e => { if (e.target.id === "accounts") closeSheet("accounts"); };
 $("accadd").onclick = () => { $("accform").classList.add("show"); $("accadd").style.display = "none"; $("acclabel").focus(); };
+// ➕ Claude account: a NAME, not a login. It creates that account's config dir; the sign-in comes
+// later on its first Launch, where the CLI's own URL is relayed — which is why one prompt is the
+// whole flow here, and why the confirmation points at Launch as the next step.
+$("accaddclaude").onclick = async () => {
+  const name = prompt("Name the new Claude account — short and simple, e.g. work.\n\nIt gets its own config dir (~/.claude-<name>). You'll sign in the first time you launch a session on it.");
+  if (!name) return;
+  const d = await writeOp("/api/provider-accounts/action", { action: "add-claude", name: name.trim().toLowerCase() });
+  if (!d) return;   // writeOp surfaced the daemon's own refusal (bad name, already exists)
+  PROVIDER_ACCOUNTS = await api("/api/provider-accounts?role=" + ACCOUNT_ROLE); renderAccounts();
+  showDone(d.name + " registered — Launch it to sign in");
+};
 $("acccancel").onclick = () => { $("accform").classList.remove("show"); $("accadd").style.display = ""; };
 $("accprovider").onchange = providerFormChanged;
 $("accform").onsubmit = async e => {
