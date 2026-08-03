@@ -8746,7 +8746,6 @@ async function restartPaneSessionCore(pane: string, id: string | null, accountOv
   if (sid) { recordSessionMode(sid, mode); recordSessionEffort(sid, effort) }
   const swapStartMs = Date.now()   // cross-engine only: lower bound for "this is the NEW engine's transcript"
   let relaunched = false           // the in-place relaunch line actually put an agent back in the pane
-  let respawnedInto: string | null = null   // set only once a RESPAWNED pane has been seen back at a prompt
   let launchVerified = harnessOverride === undefined && harness.provider === 'anthropic'
   setPaneRestarting(pane, true)
   // The sid shield, held for the WHOLE flow — including the branch below where /exit takes the pane
@@ -8856,7 +8855,7 @@ async function restartPaneSessionCore(pane: string, id: string | null, accountOv
       // restarted, watched it die, and got the plain session-ended message 39 seconds later. The
       // in-place branch below has always ended with the pane back at a prompt; this one now has to
       // earn the same claim. `paneBackUp` is the same check the /restart-all tail uses.
-      if (await waitForPaneBackUp(fresh)) { respawnedInto = fresh; return fresh }
+      if (await waitForPaneBackUp(fresh)) return fresh
       // ONE second attempt, then the truth. A restart exists to leave the session running, so the
       // bridge relaunches it itself rather than handing the owner a dead lane and a message telling
       // him to send another one — the 2026-08-03 lane came back on its own 60s later anyway, via a
@@ -8872,7 +8871,6 @@ async function restartPaneSessionCore(pane: string, id: string | null, accountOv
         if (sid) await reopenSessionTopic(sid)
         if (pane === focus.activePaneId) adoptPane(second, 'pane-restart')
         process.stderr.write(`daemon: restart: second attempt brought the session up in ${second} (${cwd})\n`)
-        respawnedInto = second
         return second
       }
       process.stderr.write(`daemon: restart: respawned pane never came back up (two attempts) — reporting the restart down\n`)
@@ -8892,14 +8890,17 @@ async function restartPaneSessionCore(pane: string, id: string | null, accountOv
     return pane
   } finally {
     setPaneRestarting(pane, false)
-    // The sid shield outlives the call by a grace, and only on the branch that needs it: a respawn
-    // hands `fresh` to a discovery sweep that has not listed it yet, and the same 30s boot window the
-    // pane flag already uses is what that gap costs. Released immediately when the pane never moved —
-    // holding it there would suppress a real death for half a minute after a failed in-place restart.
-    if (sid) {
-      if (respawnedInto) setTimeout(() => setSessionRestarting(sid, false), 30_000)
-      else setSessionRestarting(sid, false)
-    }
+    // THE SID SHIELD IS RELEASED HERE AND ONLY HERE — synchronously, on every exit path: respawn
+    // success, respawn failure after the retry, the in-place branch, and a throw mid-flight. One
+    // release point is the whole reason it can be trusted as "a restart is running right now", which
+    // is what the /restart refusal reads.
+    //
+    // It used to linger 30s after a respawn, to cover the window where discovery has not yet listed
+    // the fresh pane. That job belongs to the PANE flag, which still holds it (armed on `fresh` with
+    // its own timer) — and the sid shield does not need it: on success `paneForSession(sid)` already
+    // resolves to the live new pane, so every reap path's first guard covers the lane. Lingering only
+    // bought a refusal of the owner's next /restart.
+    if (sid) setSessionRestarting(sid, false)
   }
 }
 
@@ -10363,6 +10364,7 @@ function settingsText(): string {
   return `⚙️ <b>Settings</b>\n\n` +
     `👤 Accounts — <b>${accountsRowSummary()}</b>\n` +
     `🐙 GitHub — <b>${escapeHtml(ghSummary())}</b>\n` +
+    `🧑‍💻 Model defaults — <b>${spawnDefaultsSummary()}</b>\n` +
     `⚡ Batch allow — <b>${a.batchAllow !== false ? 'on' : 'off'}</b>\n` +
     `🎙️ Voice transcription — <b>${transcribeStatus()}</b>\n` +
     `🔊 Voice replies — <b>${a.tts?.mode && a.tts.mode !== 'off' ? `${a.tts.mode} · ${a.tts.engine}` : 'off'}</b>\n` +
@@ -10370,7 +10372,6 @@ function settingsText(): string {
     `📌 Pinned message — <b>${a.sessionPin !== false ? 'on' : 'off'}</b>\n` +
     `🧷 Preferred mode — <b>${listAccounts().length > 1 ? 'per account' : defModeLabel(MAIN_ACCOUNT.configDir)}</b>\n` +
     `🧹 <code>/clear</code> approval — <b>${a.confirmReset === false ? 'off' : 'on'}</b>\n` +
-    `🧑‍💻 Model defaults — <b>${spawnDefaultsSummary()}</b>\n` +
     (WEBAPP_ENABLED ? `🗂 File browser — <b>${a.fileBrowser === false ? 'off' : 'on'}</b>\n` : '') +
     (isTopicMode() ? `📂 Base folder — <b>${escapeHtml(baseFolderFull())}</b>\n` : '') +
     (isTopicMode() && AGENT_BUS_PIN_UI ? `☎️ Agent bus — <b>${a.switchboard === false ? 'off' : 'on'}</b>\n` : '') +
@@ -10385,6 +10386,7 @@ function settingsMarkdown(): string {
   const rows: Array<[string, string]> = [
     ['👤 Accounts', accountsRowSummary()],
     ['🐙 GitHub', ghSummary()],
+    ['🧑‍💻 Model defaults', spawnDefaultsSummary()],
     ['⚡ Batch allow', a.batchAllow !== false ? 'on' : 'off'],
     ['🎙️ Voice transcription', transcribeStatus()],
     ['🔊 Voice replies', a.tts?.mode && a.tts.mode !== 'off' ? `${a.tts.mode} · ${a.tts.engine}` : 'off'],
@@ -10392,19 +10394,18 @@ function settingsMarkdown(): string {
     ['📌 Pinned message', a.sessionPin !== false ? 'on' : 'off'],
     ['🧷 Preferred mode', listAccounts().length > 1 ? 'per account' : defModeLabel(MAIN_ACCOUNT.configDir)],
     ['🧹 /clear approval', a.confirmReset === false ? 'off' : 'on'],
-    ['🧑‍💻 Model defaults', spawnDefaultsSummary()],
     ...(WEBAPP_ENABLED ? [['🗂 File browser', a.fileBrowser === false ? 'off' : 'on'] as [string, string]] : []),
     ...(isTopicMode() ? [['📂 Base folder', baseRowValue()] as [string, string]] : []),
     ...(isTopicMode() && AGENT_BUS_PIN_UI ? [['☎️ Agent bus', a.switchboard === false ? 'off' : 'on'] as [string, string]] : []),
   ]
   const help = [
     '👤 <b>Accounts</b> — the Claude accounts, the failover order, and third-party providers: add accounts, reorder the chain with ↑/↓, and add any Anthropic-compatible provider (🌐) — all in one panel.',
+    '🧑‍💻 <b>Model defaults</b> — the model/effort each role launches on, set separately: 🧑‍💻 coding sessions (the mini-app <b>+</b>, a new topic, an agent\'s <code>tg spawn</code>) and 💬 the chat agent. A session that already has its own model keeps it.',
     '⚡ <b>Batch allow</b> — 2+ permission prompts in one turn offer “Allow all this turn”.',
     '💬 <b>Stream</b> — how much of the live activity feed reaches the chat.',
     '📌 <b>Pinned message</b> — the status card pinned to the top of this chat.',
     '🧷 <b>Preferred mode</b> — the permission mode NEW sessions launch in (/mode is the live dial).',
     '🧹 <b>/clear approval</b> — /clear and /new ask for a Yes/No tap first.',
-    '🧑‍💻 <b>Model defaults</b> — the model/effort each role launches on, set separately: 🧑‍💻 coding sessions (the mini-app <b>+</b>, a new topic, an agent\'s <code>tg spawn</code>) and 💬 the chat agent. A session that already has its own model keeps it.',
     ...(WEBAPP_ENABLED ? ['🗂 <b>File browser</b> — the Files tab in the Mini App. Off removes it (and its file API) entirely; the Sessions/Scheduled/Settings tabs stay.'] : []),
     ...(isTopicMode() ? ['📂 <b>Base folder</b> — new forum topics are created as subfolders of this folder.'] : []),
     ...(isTopicMode() && AGENT_BUS_PIN_UI ? ['☎️ <b>Agent bus</b> — the live roster line on the pinned card. Sessions can still hand work to each other with <code>tg ask</code>.'] : []),
@@ -10458,10 +10459,9 @@ const showSettings = (ctx: Context, mode: 'send' | 'edit'): Promise<void> =>
 // settingsText()/settingsMarkdown() above, including the conditional Base folder row.
 function settingsKeyboard(): InlineKeyboard {
   const buttons: Array<[string, string]> = [
-    ['👤', 'acct:panel'], ['🐙', 'gh:panel'], ['⚡', 'set:batch'],
+    ['👤', 'acct:panel'], ['🐙', 'gh:panel'], ['🧑‍💻', 'spd:panel'], ['⚡', 'set:batch'],
     ['🎙️', 'set:voice'], ['🔊', 'set:tts'], ['💬', 'set:replymode'], ['📌', 'set:pin'],
     ['🧷', 'defmode:panel'], ['🧹', 'set:confirmreset'],
-    ['🧑‍💻', 'spd:panel'],
     ...(WEBAPP_ENABLED ? [['🗂', 'set:filebrowser'] as [string, string]] : []),
     ...(isTopicMode() ? [['📂', 'set:base'] as [string, string]] : []),
     ...(isTopicMode() && AGENT_BUS_PIN_UI ? [['☎️', 'set:switchboard'] as [string, string]] : []),
@@ -11637,10 +11637,21 @@ bot.command('restart', async ctx => {
 // `label` names the session when it isn't the caller's own.
 async function restartTargetSession(ctx: Context, paneId: string, label: string | null): Promise<void> {
   const who = label ? ` <b>@${escapeHtml(label)}</b>` : ''
-  // A restart already owns this pane — its core, or the boot window after a respawn. Say so once and
-  // touch neither the pane nor the first restart's message: two of these interleaving on one pane is
-  // how a session ends up sitting at a bare shell.
-  if (isPaneRestarting(paneId)) { await ctx.reply(`♻️ Already restarting${who} — hold on.`, { parse_mode: 'HTML' }); return }
+  // A restart already owns this SESSION. Two of these interleaving is how a session ends up sitting
+  // at a bare shell, so the refusal is right — but it must mean "one is running", and nothing else.
+  //
+  // It used to read `isPaneRestarting`, and that flag carries a SECOND meaning: a 30-second
+  // sweep-exemption armed on the respawned pane, so discovery (which has not listed it yet) cannot
+  // mistake a booting session for a dead one. The two purposes want opposite lifetimes — the
+  // exemption needs to outlive the call, the refusal must end with it — and conflating them refused
+  // the owner's very next `/restart` for half a minute AFTER he had been told "✅ Restarted"
+  // (observed on the test bot, 2026-08-03: respawn 03:51:53, second /restart inside the window).
+  // The sid shield is the one that means in-flight, and it is released in restartPaneSessionCore's
+  // `finally` — every exit path, including the throwing one.
+  const targetSid = await sessionForPane(paneId, false).catch(() => null)
+  if (isSessionRestarting(targetSid) || isPaneRestarting(paneId) && !targetSid) {
+    await ctx.reply(`♻️ Already restarting${who} — hold on.`, { parse_mode: 'HTML' }); return
+  }
   if (!onNormalPrompt(await capturePane(paneId))) {
     await ctx.reply(`⚠️ The terminal is on another screen (menu/prompt) — finish or /stop that first, then /restart.`)
     return

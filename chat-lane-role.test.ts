@@ -75,3 +75,54 @@ test("ensureChatLane's spawn passes the role explicitly", async () => {
   expect(call).not.toBeNull()
   expect(call![0]).toContain("'chat'")
 })
+
+// ---- the restart shield's ONE meaning (v0.4.322) ----
+//
+// "♻️ Already restarting — hold on." must mean a restart is running RIGHT NOW, and nothing else.
+// It used to read `isPaneRestarting`, a flag that also carries a 30-second sweep exemption armed on
+// the respawned pane — so the owner's second /restart was refused for half a minute AFTER he had
+// been told "✅ Restarted" (test bot, 2026-08-03: respawn 03:51:53, step 6 inside the window).
+//
+// The two purposes want opposite lifetimes: the exemption must OUTLIVE the call, the refusal must
+// END with it. So they are two flags now, and this pins both halves — the failing case the owner
+// hit, and the control that the refusal still fires when it should.
+test('the session shield ends with the restart; the pane exemption outlives it', async () => {
+  const rt = await import('./topic-runtime.ts')
+  const sid = 'dddd4444', freshPane = '%99'
+
+  // Mid-flight: the core has entered, the shield is up, a second /restart must be refused.
+  rt.setSessionRestarting(sid, true)
+  expect(rt.isSessionRestarting(sid)).toBe(true)
+
+  // The respawn arms the PANE exemption on the new pane and the core returns — its `finally`
+  // releases the session shield synchronously, on every exit path.
+  rt.setPaneRestarting(freshPane, true)
+  rt.setSessionRestarting(sid, false)
+
+  // The failing case: a second /restart on a once-restarted lane must now go straight through…
+  expect(rt.isSessionRestarting(sid)).toBe(false)
+  // …while the sweep exemption on the fresh pane is still up, which is what it is for. If these two
+  // ever read the same, the conflation is back.
+  expect(rt.isPaneRestarting(freshPane)).toBe(true)
+  expect(rt.isSessionRestarting(sid)).not.toBe(rt.isPaneRestarting(freshPane))
+
+  rt.setPaneRestarting(freshPane, false)
+})
+
+// An unknown sid is not a restarting one — a lane whose pane cannot be resolved must not be refused
+// forever on a `null` that happens to be falsy in the right direction.
+test('an unresolved session is not treated as restarting', async () => {
+  const rt = await import('./topic-runtime.ts')
+  expect(rt.isSessionRestarting(null)).toBe(false)
+  expect(rt.isSessionRestarting(undefined)).toBe(false)
+  expect(rt.isSessionRestarting('never-seen')).toBe(false)
+})
+
+// The refusal's CALL SITE, for the same reason the role one exists: every assertion above still
+// passes if restartTargetSession goes back to reading the pane flag. Read the source.
+test('the /restart refusal reads the session shield, not the pane exemption', async () => {
+  const src = await Bun.file(new URL('./daemon.ts', import.meta.url)).text()
+  const guard = /const targetSid = await sessionForPane[\s\S]{0,220}?Already restarting/.exec(src)
+  expect(guard).not.toBeNull()
+  expect(guard![0]).toContain('isSessionRestarting(targetSid)')
+})
