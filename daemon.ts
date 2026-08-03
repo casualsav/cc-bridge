@@ -1739,6 +1739,41 @@ async function paneAccount(pane: string | null): Promise<Account> {
   return resolvePaneAccount(null, file ? accountForTranscript(file) : null)
 }
 
+// The config dir a pane's claude process is ACTUALLY running on, read from its environment rather
+// than inferred. `paneAccount` above resolves through the tmux stamp, the DM binding, then the
+// transcript — every one of which a hand-made or externally-launched pane can lack, in which case it
+// answers `main`/~/.claude no matter what the process is really using. Measured 2026-08-03: a scratch
+// pane deliberately launched on an isolated CLAUDE_CONFIG_DIR was logged as `account main, config
+// /home/ubuntu/.claude` by the auth-card line. That is the pane class most likely to produce a
+// surprise credential prompt, so it is exactly the one the log must not misattribute.
+//
+// Read-only and best-effort: returns null when the pane, the process or /proc cannot be read, and the
+// caller keeps the stamped answer. Only the auth-card log uses it — `paneAccount` stays the resolver
+// for ROUTING (a mismatch is a reporting fact, not a licence to route somewhere else).
+async function paneConfigDirFromProc(pane: string | null): Promise<string | null> {
+  if (!pane) return null
+  try {
+    const { stdout } = await exec('tmux', ['display-message', '-p', '-t', pane, '#{pane_pid}'], { timeout: 2000 })
+    const panePid = Number(stdout.trim())
+    if (!Number.isFinite(panePid) || panePid <= 1) return null
+    // The pane's own process is usually claude itself (the daemon execs it directly); when a shell
+    // owns the pane, claude is its child. Check both, nearest first.
+    for (const pid of [panePid, ...readdirSync('/proc').filter(d => /^\d+$/.test(d))
+      .filter(d => { try { return readFileSync(`/proc/${d}/stat`, 'utf8').split(') ')[1]?.split(' ')[1] === String(panePid) } catch { return false } })]) {
+      let env = ''
+      try { env = readFileSync(`/proc/${pid}/environ`, 'utf8') } catch { continue }
+      const hit = env.split('\0').find(v => v.startsWith('CLAUDE_CONFIG_DIR='))
+      if (hit) return hit.slice('CLAUDE_CONFIG_DIR='.length)
+      // A claude running on the DEFAULT config sets no such var — distinguish it from "not claude"
+      // by the command name, so an unstamped default-account pane reports the truth too.
+      try {
+        if (readFileSync(`/proc/${pid}/comm`, 'utf8').trim() === 'claude') return MAIN_ACCOUNT.configDir
+      } catch {}
+    }
+  } catch {}
+  return null
+}
+
 // The account a topic's session runs on (stamped at topic creation) — revivals/resumes must spawn
 // on it, or an alt-account topic (e.g. the chat-General setup) silently comes back on main.
 function topicAccount(t: TopicEntry | undefined): Account {
@@ -5041,7 +5076,15 @@ async function relayAuthUrlToTelegram(url: string, paneId: string | null = focus
   // — and a card suppressed for having no target is itself a fact worth seeing.
   const who = paneId ? (await sessionForPane(paneId, false).catch(() => null)) : null
   const acct = await paneAccount(paneId).catch(() => null)
-  process.stderr.write(`daemon: auth-url card for pane ${paneId ?? '-'} (session ${who ?? '-'}, account ${acct?.name ?? '?'}, config ${acct?.configDir ?? '?'}) → ${
+  // The stamp is the fast path; /proc is the truth. When they disagree the DISAGREEMENT is the
+  // interesting event — it means this pane's account cannot be inferred from bridge state, which is
+  // both why a card from it would be surprising and why naming the wrong account would send its reader
+  // to check the wrong credentials.
+  const realCfg = await paneConfigDirFromProc(paneId)
+  const mismatch = realCfg && acct && realCfg !== acct.configDir
+    ? ` ⚠️ STAMP DISAGREES: process is really on ${realCfg} (the stamped account is a guess — this pane carries no @cc_account marker)`
+    : ''
+  process.stderr.write(`daemon: auth-url card for pane ${paneId ?? '-'} (session ${who ?? '-'}, account ${acct?.name ?? '?'}, config ${realCfg ?? acct?.configDir ?? '?'})${mismatch} → ${
     targets.length ? targets.map(t => `${t.chat}${t.thread ? `#${t.thread}` : ''}`).join(', ') : 'NO TARGETS (not sent)'}\n`)
   if (targets.length === 0) return
 
