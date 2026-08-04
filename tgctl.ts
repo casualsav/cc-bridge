@@ -201,6 +201,10 @@ if (BUS.has(cmd)) {
     else if (f) { const v = rest[++i]; if (v != null) flags[f[1]!] = v }   // spawn's flags; harmless elsewhere
     else if (rest[i] === '--create') { flags.create = true }               // spawn: allow a missing --dir
     else if (rest[i] === '--probe') { flags.probe = true }                 // spawn: a throwaway test pane, not a coding session
+    // spawn: the OWNER named this model, relayed by the chat lane. Accepted from a chat lane and
+    // NOWHERE else (the daemon re-checks — this flag is a claim, not an authorisation), and every
+    // surface that honours one says "owner-named override" so he can see a marker he never gave.
+    else if (rest[i] === '--owner-named') { flags.ownerNamed = true }
     else if (rest[i] === '--force') { flags.force = true }                 // keys: carry esc into a working turn
     else if (rest[i] === '--clear') { flags.clear = true }                 // wait: drop the declaration early
     else if (rest[i] === '--refresh') { flags.refresh = true }             // repo: re-scout even if the brief is fresh

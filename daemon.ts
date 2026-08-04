@@ -6570,9 +6570,20 @@ async function handleCall(
         // probe from a worker — the same session legitimately spawns both, so identity cannot answer
         // it — which is why the assertion is explicit and lands in the launch log.
         const probe = args.probe === true
+        // 🦾 Auto OFF: the owner's default rules every spawn and an AGENT may not override it. The one
+        // hole is the owner speaking THROUGH the chat lane — his own surface, and the only session
+        // whose whole job is relaying him — so `--owner-named` is accepted from a chat lane and from
+        // nowhere else. Nothing can verify the claim; what makes it safe is that every ack and card
+        // honouring one SAYS "owner-named override", on a card he reads. A marker he never authorised
+        // is a lie told to his face in his own chat, which is the one place it cannot survive.
+        const ownerNamed = args.ownerNamed === true && isChatLaneSession(fromSid)
         const modelChoice = decideModel({
           requested: providerRoute?.harness ? null : explicitModel, configuredDefault: configuredSpawnModel(),
           headModel: providerModel ?? explicitModel,
+          // VERBATIM, so the "not applied" clause quotes what the caller typed rather than the family
+          // token it normalises to — the mistake three neighbouring clauses already make.
+          requestedRaw: args.model ? String(args.model).trim() : null,
+          newSession: true, ownerNamed,
           ...modelPolicyPrefs(), humanOrigin: false, probe, now: Date.now(),
         })
         // The head guard upgraded to a NATIVE model, so the provider route it was going to ride must
@@ -6624,8 +6635,15 @@ async function handleCall(
         // decideModel reports "named no model" for a spawn that named one — observed live on a
         // `--account gateway:deepseek --model deepseek-v4-flash` spawn, 2026-08-03. Who pays and who
         // chose are different questions.
+        // One clause, and the order is the precedence: an ignored flag and a clamp cannot both be
+        // true (a flag that was ignored never reached the gate), and an owner-named override that was
+        // ALSO clamped reports the clamp — he needs to know his Fable pick is waiting on his tap far
+        // more than he needs to be told it was his.
+        const modelClause = modelChoice.overrodeFlag ? overrodeFlagClause(modelChoice)
+          : modelChoice.clamped ? clampedClause(modelChoice)
+          : modelChoice.ownerNamed ? ownerNamedClause(modelChoice) : ''
         const spawned = await launchSpawn(spec, modelChoice.model,
-          modelChoice.clamped ? clampedClause(modelChoice) : '', spawnReason(spec, modelChoice.autoFallback && !explicitModel, effortChoice.autoFallback))
+          modelClause, spawnReason(spec, modelChoice.autoFallback && !explicitModel, effortChoice.autoFallback))
         if (!spawned.ok) { write({ t: 'result', id, ok: false, text: spawned.text }); return }
         text = spawned.text
         break
@@ -7658,6 +7676,24 @@ async function askHumanForModel(r: ModelRequest): Promise<void> {
 // A BANNED model gets its own wording rather than reusing the gate's: "needs a human" would invite
 // the caller to wait for a tap that will never come, and then to retry. There is nothing left for
 // anyone to decide, so say that in the same breath as the success.
+// 🦾 Auto OFF ignored the caller's flag. Silence here would be the worst possible answer — an
+// orchestrator would believe it had placed a Fable worker for an hour — so the caller is told in the
+// same breath as its success, exactly like a clamp, and told that a retry is pointless.
+//
+// It quotes `overrodeFlag`, which is the caller's string VERBATIM. The three clauses around this one
+// report the normalised family token instead, so an agent grepping its own ack for what it asked
+// does not find it; that is a live handoff item and this does not become a fourth instance of it.
+function overrodeFlagClause(d: ModelDecision): string {
+  const ran = d.model ?? 'the CLI default'
+  return ` (running ${ran} — 🦾 Auto is off, so the configured default wins and your --model ${d.overrodeFlag} was not applied; a retry gets the same answer. The owner can name a model himself.)`
+}
+
+// The owner's own choice, relayed by the chat lane. Said out loud on every surface that honours it:
+// nothing can verify the marker, so making it VISIBLE to the one person who can falsify it is the
+// entire check.
+const ownerNamedClause = (d: ModelDecision): string =>
+  ` (owner-named override — running ${d.model ?? 'the CLI default'} because the owner named it, not the agent)`
+
 function clampedClause(d: ModelDecision): string {
   const ran = d.model ?? 'the CLI default'
   // Haiku's clamp gets its own sentence: unlike the Fable ban there IS a legitimate way to get what

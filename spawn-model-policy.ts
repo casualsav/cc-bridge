@@ -139,6 +139,21 @@ export type ModelAsk = {
   agentAllowed: readonly string[] // prefs `spawnAgentModels` — aliases an agent may pick with no card
   quietUntil: number              // epoch ms of the "don't ask for a while" window; 0 = not quiet
   humanOrigin: boolean            // the caller IS a human (mini-app tap, owner command), not an agent
+  // The owner named this model THROUGH an agent — accepted from the chat lane only, because that is
+  // the surface he speaks on and the one session whose whole job is relaying him. Nothing can verify
+  // the claim, which is why it is not left silent: every ack and card that honours one says "owner-
+  // named override", so a marker no one authorised is a lie told on a card he reads. (Owner's ruling,
+  // overriding a proposal to refuse relayed overrides outright: routing his spoken word to another
+  // surface makes Auto-off cost him something it was never meant to cost.)
+  ownerNamed?: boolean
+  requestedRaw?: string | null    // the caller's alias VERBATIM, for a clause that must quote what they typed
+  // This ask is about STARTING a session. The Auto-off rule is scoped to it because the ruling was —
+  // *"every spawn is hand-selected…"* — and because the other caller of this gate is a live session's
+  // model SWITCH, where ignoring the alias would make `@name /model sonnet` do nothing at all and say
+  // nothing about it. Same gate, same money, different question: who chooses what a session STARTS on
+  // is the owner's to take away from agents; silently dropping a switch request is just a broken verb.
+  // Opt-IN, so a call site that has not thought about it keeps today's behaviour.
+  newSession?: boolean
   probe?: boolean                 // `tg spawn --probe` — a throwaway test pane, not a coding session
   // The model that will actually HEAD the pane, resolved, whatever provider serves it. Separate from
   // `requested` on purpose: `requested` is the native alias the PRICING gate reasons about (a
@@ -157,9 +172,26 @@ export type ModelDecision = {
   // The head guard fired. The caller must DROP any provider route it had resolved: the upgrade is a
   // native model, so leaving the gateway in place would launch that provider with the wrong model.
   headBlocked: boolean
+  // Auto is OFF and an AGENT passed a model flag, so the flag was not applied. Carries the caller's
+  // string VERBATIM, never the normalised family token — an agent that greps its own ack for what it
+  // asked will not find `haiku` when it passed `claude-haiku-4-5-20251001`, which is a live defect in
+  // three neighbouring clauses and not one this is going to join. Null when nothing was overridden.
+  //
+  // It is separate from `clamped` because they are different events: `clamped` means the gate judged
+  // the model too expensive and a human may still approve it, while this means the owner has said
+  // agents do not choose. A retry cannot change this one, and no card is minted for it.
+  overrodeFlag: string | null
+  // The owner's own choice, relayed by the chat lane, was honoured. Every surface that reports this
+  // spawn must SAY so — that visibility is the entire check on a marker nothing can verify.
+  ownerNamed: boolean
 }
 
-const allow = (model: string | null): ModelDecision =>
+// The gate's own answer, before the Auto-off terms are stamped on. Every branch below returns this
+// shape so the two new fields are decided in exactly ONE place rather than repeated across six
+// literals, where the next branch would forget them.
+type GateDecision = Omit<ModelDecision, 'overrodeFlag' | 'ownerNamed'>
+
+const allow = (model: string | null): GateDecision =>
   ({ model, ask: false, clamped: null, banned: false, autoFallback: false, headBlocked: false })
 
 // What a caller that named no model gets: the owner's configured default, either way. Under `auto`
@@ -168,11 +200,53 @@ const allow = (model: string | null): ModelDecision =>
 // simply what he configured, and there is nothing to report. (2026-07-29: auto used to be a value in
 // the `spawnModel` slot, which stole that slot from the mini-app "+" — the owner's catch. It is a
 // toggle beside the defaults now, and the floor is only reached where nothing is configured at all.)
-const unspecified = (a: ModelAsk): ModelDecision => a.auto
+const unspecified = (a: ModelAsk): GateDecision => a.auto
   ? { ...allow(a.configuredDefault ?? AUTO_FALLBACK), autoFallback: true }
   : allow(a.configuredDefault)
 
+// AUTO OFF means the configured default rules every spawn and an AGENT may not override it — the
+// owner's ruling, 2026-08-04: *"off means the default wins, a named override by the user is still
+// possible."* Two things follow, and the second is the one that is easy to get wrong.
+//
+// It is implemented by NULLING the agent's request and then running the ordinary gate, rather than
+// by returning the default early. That matters: the Fable switch, the haiku head guard and the
+// provider-route terms all still have to run — a route can put a banned model at the head of a pane
+// with no `--model` in sight — and an early return would quietly exempt exactly those cases from the
+// guards written to catch them. Nulling the request changes who chooses; it does not change what is
+// allowed.
+//
+// A caller that named nothing is untouched: there is no flag to ignore, so OFF is simply the default,
+// which is what it has always been.
+function ignoredFlag(a: ModelAsk): string | null {
+  if (a.auto || a.humanOrigin || a.ownerNamed || !a.newSession) return null
+  if (!a.requested) return null
+  // THE ONE ESCALATION (owner's addendum, 2026-08-04). A coding agent spawning a sub-worker on Fable
+  // is a real thing that happens, and refusing it to the default silently would throw away a request
+  // he might well have said yes to. So while Fable APPROVALS are on, an agent-named fable-family
+  // model is not ignored: it falls through to the gate, which holds the spawn and cards him —
+  // approve launches it as asked, decline or a lapsed timer launches the default, exactly as the
+  // hold already works.
+  //
+  // Scoped to `approve` because that is the only policy with a gate to escalate THROUGH: under
+  // `allow` Fable is an ordinary model and under `refuse` it is banned outright, and in both the
+  // flag is ignored to the default like any other.
+  if (a.fable === 'approve' && isFableFamily(a.headModel ?? a.requested)) return null
+  return a.requestedRaw ?? a.requested
+}
+
 export function decideModel(a: ModelAsk): ModelDecision {
+  const overrodeFlag = ignoredFlag(a)
+  // The head goes with the flag ONLY when the head CAME from the flag. A provider route resolves its
+  // own head independently of `--model`, and dropping that would exempt a routed haiku or fable from
+  // the guards written to catch exactly it — the ignored flag would have bought the caller a pass on
+  // a rule the flag had nothing to do with.
+  const gate = decideGate(overrodeFlag
+    ? { ...a, requested: null, headModel: a.headModel === a.requested ? null : a.headModel }
+    : a)
+  return { ...gate, overrodeFlag, ownerNamed: a.ownerNamed === true && a.requested != null }
+}
+
+function decideGate(a: ModelAsk): GateDecision {
   const def = a.configuredDefault
   // A human choosing is the whole point of the feature — never second-guess one, and never card them.
   // This runs FIRST, ahead of the Fable switch: that switch is about what a coding AGENT may pick,

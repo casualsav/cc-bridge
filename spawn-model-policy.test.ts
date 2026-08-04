@@ -1,24 +1,41 @@
 // Who gets to choose a session's model, and when a late tap has to confirm. Pure.
 // Run: bun test spawn-model-policy.test.ts
 import { test, expect } from 'bun:test'
-import { decideModel, upgradeNeedsConfirm, heldSpawnModel, heldSpawnNeedsLine, holdTapData, parseHoldTap, launchFallback, headUpgradeModel, isHaikuHead, isClaudeFamily, isFableFamily, spawnCardHeader, relaunchModel, decideEffort, fablePolicy, fableRowState, onOff, AUTO_FALLBACK, AUTO_EFFORT_FALLBACK, UPGRADE_CTX_DELTA, type ModelAsk, type ModelDecision } from './spawn-model-policy.ts'
+import { decideModel, FABLE, upgradeNeedsConfirm, heldSpawnModel, heldSpawnNeedsLine, holdTapData, parseHoldTap, launchFallback, headUpgradeModel, isHaikuHead, isClaudeFamily, isFableFamily, spawnCardHeader, relaunchModel, decideEffort, fablePolicy, fableRowState, onOff, AUTO_FALLBACK, AUTO_EFFORT_FALLBACK, UPGRADE_CTX_DELTA, type ModelAsk, type ModelDecision } from './spawn-model-policy.ts'
 
 const NOW = 1_800_000_000_000
-// The shape of the box that had the incident: an owner-configured default, an agent calling.
+// The shape of the box that had the incident: an owner-configured default, an agent calling — and
+// `auto: true`, which is 🦾 Auto ON.
+//
+// THIS DEFAULT MOVED FROM false TO true ON 2026-08-04, BECAUSE THE TOGGLE'S MEANING MOVED, NOT
+// BECAUSE THE INCIDENT PIN WAS WEAKENED. Until that day `auto` decided only what a caller who named
+// NOTHING received (a fallback that the ack announced, or the plain configured default), and the
+// gate below judged agent picks in either state. The owner's ruling made OFF mean something
+// strictly stronger — an agent may not pick at all — so under OFF there is no agent pick left for
+// the gate to judge, and a gate test written with `auto: false` would exercise nothing.
+//
+// The gate therefore belongs to the ON state now, and every test here runs in it. The incident
+// itself is pinned in BOTH states: under ON the gate catches it and cards him, and under OFF it
+// cannot start unasked either — held for his tap while Fable approvals are on, refused to the
+// configured default when they are not. That is a stronger pin than this file has ever carried,
+// which is the point of the migration and the reason it is not a dilution.
+// `newSession: true` because this file's subject is a SPAWN. The live-session model switch shares
+// this gate and is deliberately outside the Auto-off rule — see 'a live-session switch is outside the
+// Auto-off rule' at the bottom.
 const ask = (over: Partial<ModelAsk> = {}): ModelAsk => ({
-  requested: null, configuredDefault: 'opus', auto: false, fable: 'approve',
-  agentAllowed: [], quietUntil: 0, humanOrigin: false, now: NOW, ...over,
+  requested: null, configuredDefault: 'opus', auto: true, fable: 'approve',
+  agentAllowed: [], quietUntil: 0, humanOrigin: false, newSession: true, now: NOW, ...over,
 })
 // The two flags most cases don't exercise, so a case that DOES exercise them says so by naming them.
 const dec = (over: Partial<ModelDecision> & Pick<ModelDecision, 'model' | 'ask' | 'clamped'>): ModelDecision =>
-  ({ banned: false, autoFallback: false, headBlocked: false, ...over })
+  ({ banned: false, autoFallback: false, headBlocked: false, overrodeFlag: null, ownerNamed: false, ...over })
 
 test('the incident: an agent asking for fable gets the configured default, and the human is asked', () => {
   expect(decideModel(ask({ requested: 'fable' }))).toEqual(dec({ model: 'opus', ask: true, clamped: 'fable' }))
 })
 
 test('no --model at all is the ordinary spawn — the default, no card', () => {
-  expect(decideModel(ask())).toEqual(dec({ model: 'opus', ask: false, clamped: null }))
+  expect(decideModel(ask({ auto: false }))).toEqual(dec({ model: 'opus', ask: false, clamped: null }))
 })
 
 test('asking for exactly the default is not an override', () => {
@@ -75,51 +92,51 @@ test('the head guard never touches a human\'s own pick, and never touches sonnet
 // --model haiku` headed a coding session on Haiku past yesterday's rule. The ruling is about what runs,
 // not who bills, so the guard reads the RESOLVED id.
 test('a gateway-hosted haiku is head-blocked even though the pricing gate never sees it', () => {
-  expect(decideModel(ask({ requested: null, headModel: 'haiku' })))
+  expect(decideModel(ask({ auto: false, requested: null, headModel: 'haiku' })))
     .toEqual(dec({ model: 'opus', ask: false, clamped: 'haiku', banned: true, headBlocked: true }))
-  expect(decideModel(ask({ requested: null, headModel: 'claude-haiku-4-5-20251001' })).headBlocked).toBe(true)
+  expect(decideModel(ask({ auto: false, requested: null, headModel: 'claude-haiku-4-5-20251001' })).headBlocked).toBe(true)
 })
 
 // `model` on these is the configured default and is IGNORED downstream: a provider harness owns the
 // model at the CLI (`resumeCliModel` withholds the alias), so what matters here is `clamped` and
 // `headBlocked` — the two things the caller acts on.
 test('--probe opens the gateway path exactly as it opens the native one', () => {
-  expect(decideModel(ask({ requested: null, headModel: 'haiku', probe: true })))
+  expect(decideModel(ask({ auto: false, requested: null, headModel: 'haiku', probe: true })))
     .toEqual(dec({ model: 'opus', ask: false, clamped: null }))
 })
 
 test('a gateway model that is not haiku is untouched by the head guard', () => {
-  expect(decideModel(ask({ requested: null, headModel: 'deepseek-v4-flash' })))
+  expect(decideModel(ask({ auto: false, requested: null, headModel: 'deepseek-v4-flash' })))
     .toEqual(dec({ model: 'opus', ask: false, clamped: null }))
-  expect(decideModel(ask({ requested: null, headModel: 'gpt-5.6-sol' })).headBlocked).toBe(false)
+  expect(decideModel(ask({ auto: false, requested: null, headModel: 'gpt-5.6-sol' })).headBlocked).toBe(false)
 })
 
 // Owner's ruling 2026-08-03 (reversing his first answer): the Fable hold is about the MODEL, not the
 // billing route. A gateway-hosted fable meets the same gate, and naming the account does not exempt it.
 test('a gateway-hosted fable is held on the same rule as the native one', () => {
-  const d = decideModel(ask({ requested: null, headModel: 'fable' }))
+  const d = decideModel(ask({ auto: false, requested: null, headModel: 'fable' }))
   expect(d.clamped).toBe('fable')
   expect(d.ask).toBe(true)
   expect(d.model).toBe('opus')            // the fallback if nobody answers — never the gated model
-  expect(decideModel(ask({ requested: null, headModel: 'anthropic/fable-5' })).ask).toBe(true)
+  expect(decideModel(ask({ auto: false, requested: null, headModel: 'anthropic/fable-5' })).ask).toBe(true)
 })
 
 test('--probe opens haiku and NOT fable — a throwaway pane is not a reason to spend', () => {
-  expect(decideModel(ask({ requested: null, headModel: 'fable', probe: true })).ask).toBe(true)
+  expect(decideModel(ask({ auto: false, requested: null, headModel: 'fable', probe: true })).ask).toBe(true)
   expect(decideModel(ask({ requested: 'fable', probe: true })).ask).toBe(true)
 })
 
 test('the Fable switch reads the resolved head too — off refuses it, allow lets it through', () => {
-  expect(decideModel(ask({ requested: null, headModel: 'fable', fable: 'refuse' })))
+  expect(decideModel(ask({ auto: false, requested: null, headModel: 'fable', fable: 'refuse' })))
     .toEqual(dec({ model: 'opus', ask: false, clamped: 'fable', banned: true }))
   // 'allow' through a provider: the harness owns the model, so the decision is the ordinary one and
   // nothing is clamped or carded.
-  expect(decideModel(ask({ requested: null, headModel: 'fable', fable: 'allow' })))
+  expect(decideModel(ask({ auto: false, requested: null, headModel: 'fable', fable: 'allow' })))
     .toEqual(dec({ model: 'opus', ask: false, clamped: null }))
 })
 
 test('the allowlist cannot exempt a gateway fable either — same shape as the haiku guard', () => {
-  expect(decideModel(ask({ requested: null, headModel: 'fable', agentAllowed: ['fable'] })).ask).toBe(true)
+  expect(decideModel(ask({ auto: false, requested: null, headModel: 'fable', agentAllowed: ['fable'] })).ask).toBe(true)
 })
 
 // Owner's ruling 2026-08-03: a bare Claude-family name may never resolve to a reseller, however
@@ -184,7 +201,7 @@ test('with no configured default the agent still does not decide — and the cla
   expect(decideModel(ask({ requested: 'fable', configuredDefault: null })))
     .toEqual(dec({ model: AUTO_FALLBACK, ask: true, clamped: 'fable' }))
   // …but a spawn that asked for NOTHING on an unconfigured box is unchanged: no --model, CLI default.
-  expect(decideModel(ask({ configuredDefault: null }))).toEqual(dec({ model: null, ask: false, clamped: null }))
+  expect(decideModel(ask({ auto: false, configuredDefault: null }))).toEqual(dec({ model: null, ask: false, clamped: null }))
 })
 
 // The reason the ungated set is a NAMED LIST rather than a "gate fable only" condition: the next
@@ -264,7 +281,7 @@ test('fable off does NOT cover the owner\'s own picker', () => {
 
 test('fable off leaves every other model exactly as it was', () => {
   expect(decideModel(ask({ fable: 'refuse', requested: 'sonnet' }))).toEqual(dec({ model: 'sonnet', ask: false, clamped: null }))
-  expect(decideModel(ask({ fable: 'refuse' }))).toEqual(dec({ model: 'opus', ask: false, clamped: null }))
+  expect(decideModel(ask({ auto: false, fable: 'refuse' }))).toEqual(dec({ model: 'opus', ask: false, clamped: null }))
   expect(decideModel(ask({ fable: 'refuse', requested: 'mythos-9' }))).toEqual(dec({ model: 'opus', ask: true, clamped: 'mythos-9' }))
 })
 
@@ -462,7 +479,7 @@ test('approvals off: an agent\'s Fable spawn launches immediately, uncarded and 
 
 test('approvals off changes nothing else — every other model, and the default path, are untouched', () => {
   expect(decideModel(ask({ fable: 'allow', requested: 'sonnet' }))).toEqual(dec({ model: 'sonnet', ask: false, clamped: null }))
-  expect(decideModel(ask({ fable: 'allow' }))).toEqual(dec({ model: 'opus', ask: false, clamped: null }))
+  expect(decideModel(ask({ auto: false, fable: 'allow' }))).toEqual(dec({ model: 'opus', ask: false, clamped: null }))
   // An unknown model is still gated: the allowance is about Fable, and is not a licence for the next
   // expensive thing to arrive under a name nobody has taught this file.
   expect(decideModel(ask({ fable: 'allow', requested: 'mythos-9' }))).toEqual(dec({ model: 'opus', ask: true, clamped: 'mythos-9' }))
@@ -483,4 +500,151 @@ test('the two toggle rows render their state, in the owner\'s words', () => {
   // A third word, and it can only ever appear on an install carrying the retired config. Rendering
   // that as plain `on` would have the panel describe a refusal as a request for a tap.
   expect(fableRowState('off')).toBe('refused')
+})
+
+// ---- 🦾 Auto OFF: the default wins and an AGENT may not override it ----
+//
+// Owner's ruling, 2026-08-04: *"off means the default wins, a named override by the user is still
+// possible. On means every spawn is hand-selected by the chat agent as the right fit for the task,
+// with the default as the 'North Star'."*
+
+// THE INCIDENT, RE-RUN UNDER OFF. Under ON (the top of this file) the gate catches it and cards him.
+// Under OFF it cannot happen at all: the flag never reaches the gate, so there is no expensive pick
+// to approve and no card to mint. The same event, made impossible two different ways — which is why
+// moving the gate tests to ON is a stronger pin than leaving them, not a weaker one.
+// The incident WAS a fable spawn, so under OFF it meets the one escalation rather than the refusal:
+// while approvals are on it is HELD and he is carded, because a coding agent spawning a sub-worker
+// on Fable is a request he might say yes to, and refusing it to the default silently would throw it
+// away (owner's addendum, 2026-08-04). Either way it never starts on Fable unasked, which is the
+// property the incident is pinned for.
+test('the incident under Auto OFF is HELD for his tap, not silently defaulted', () => {
+  expect(decideModel(ask({ auto: false, requested: 'fable' })))
+    .toEqual(dec({ model: 'opus', ask: true, clamped: 'fable' }))
+})
+
+// With approvals OFF there is no gate to escalate through, so fable is ignored to the default like
+// any other flag — the two halves of the addendum's state table.
+test('under Auto OFF with approvals off, an agent\'s fable is refused to the default like any flag', () => {
+  expect(decideModel(ask({ auto: false, requested: 'fable', fable: 'allow' })))
+    .toEqual(dec({ model: 'opus', ask: false, clamped: null, overrodeFlag: 'fable' }))
+  expect(decideModel(ask({ auto: false, requested: 'fable', fable: 'refuse' })))
+    .toEqual(dec({ model: 'opus', ask: false, clamped: null, overrodeFlag: 'fable' }))
+})
+
+// The agent is TOLD. Silently using the default would leave an orchestrator believing it had placed
+// a Fable worker for an hour, which is the failure mode that makes a silent policy worse than a loud
+// refusal.
+test('an ignored flag is reported, never swallowed', () => {
+  expect(decideModel(ask({ auto: false, requested: 'sonnet' })).overrodeFlag).toBe('sonnet')
+  expect(decideModel(ask({ auto: false, requested: 'haiku' })).overrodeFlag).toBe('haiku')
+})
+
+// It quotes what the CALLER TYPED. Three neighbouring clauses report the normalised family token
+// instead, so an agent grepping its own ack for what it asked does not find it — a live handoff item
+// (post-gate-clause-parking-lot), and not one this is going to join.
+test('the ignored flag is the caller\'s own string, not the normalised family token', () => {
+  expect(decideModel(ask({ auto: false, requested: 'haiku', requestedRaw: 'claude-haiku-4-5-20251001' })).overrodeFlag)
+    .toBe('claude-haiku-4-5-20251001')
+  // Fable-family only reaches this clause with approvals off — with them on it escalates to the hold
+  // instead, so the verbatim check uses the state where the flag really is ignored.
+  expect(decideModel(ask({ auto: false, requested: 'fable', requestedRaw: 'anthropic/fable-5', fable: 'allow' })).overrodeFlag)
+    .toBe('anthropic/fable-5')
+})
+
+// A caller that named nothing has nothing to ignore: OFF is simply the configured default, exactly
+// as it always was. Nothing to report, so no clause fires.
+test('naming nothing under OFF is untouched — no override, nothing to report', () => {
+  expect(decideModel(ask({ auto: false }))).toEqual(dec({ model: 'opus', ask: false, clamped: null }))
+  expect(decideModel(ask({ auto: false })).overrodeFlag).toBeNull()
+})
+
+// A human's own pick is sovereign in BOTH states — the mini-app spawn sheet is a person tapping
+// chips, and OFF was never meant to take his own picker away from him.
+test('OFF does not touch a human-origin pick', () => {
+  expect(decideModel(ask({ auto: false, requested: 'sonnet', humanOrigin: true })))
+    .toEqual(dec({ model: 'sonnet', ask: false, clamped: null }))
+})
+
+// The owner speaking THROUGH the chat lane. Nothing can verify the claim, which is why every surface
+// that honours one says "owner-named override" — the marker is made auditable to the one person who
+// can falsify it, rather than trusted.
+test('an owner-named override is honoured under OFF, and flagged as one', () => {
+  const d = decideModel(ask({ auto: false, requested: 'sonnet', ownerNamed: true }))
+  expect(d.model).toBe('sonnet')
+  expect(d.overrodeFlag).toBeNull()
+  expect(d.ownerNamed).toBe(true)
+})
+
+// The marker is about a CHOICE. Set with no model named, it claims an override that never happened,
+// and a surface reporting "owner-named override" over an ordinary default spawn is a lie about him.
+test('the marker means nothing when no model was named', () => {
+  expect(decideModel(ask({ auto: false, ownerNamed: true })).ownerNamed).toBe(false)
+})
+
+// The owner's standing fleet rule, unchanged by any of this: the Fable hold keys on what the spawn
+// RESOLVES TO, not on who asked for it. So his own named fable still waits for his tap.
+test('an owner-named fable still holds for his tap — the hold is about the model, not the asker', () => {
+  expect(decideModel(ask({ auto: false, requested: 'fable', ownerNamed: true })))
+    .toEqual(dec({ model: 'opus', ask: true, clamped: 'fable', ownerNamed: true }))
+})
+
+// THE RATIFIED PRECISION. A provider route resolves its own head independently of `--model`, so an
+// ignored flag must not buy the caller a pass on a guard the flag had nothing to do with.
+test('a route-resolved head still meets the guards under OFF, even while a flag is ignored', () => {
+  const d = decideModel(ask({ auto: false, requested: 'sonnet', headModel: 'haiku' }))
+  expect(d.headBlocked).toBe(true)      // the ROUTE's haiku head is still caught
+  expect(d.clamped).toBe('haiku')
+  expect(d.overrodeFlag).toBe('sonnet') // and the ignored flag is still reported
+})
+
+// The other half of that rule: when the head DID come from the ignored flag, it goes with it —
+// otherwise an ignored `--model fable` would still be judged, and reported, as a fable spawn.
+test('a head that came from the ignored flag is ignored with it', () => {
+  // haiku, not fable: a fable head under approvals escalates to the hold instead of being ignored,
+  // and the head-dropping rule is what is under test here. Without the drop, the ignored flag's own
+  // head would still be judged — and reported — as a haiku spawn that was never going to run.
+  expect(decideModel(ask({ auto: false, requested: 'haiku', headModel: 'haiku' })))
+    .toEqual(dec({ model: 'opus', ask: false, clamped: null, overrodeFlag: 'haiku' }))
+})
+
+// The NAMED EXCLUSION. The other caller of this gate is a live session's model switch, which is the
+// same decision one turn later for the same money — but "the owner's default wins" is about what a
+// session STARTS on. Ignoring a switch request would make `@name /model sonnet` do nothing and say
+// nothing, which is not a policy, it is a broken verb. Opt-in, so a call site that has not thought
+// about this keeps today's behaviour rather than inheriting a rule nobody applied to it.
+test('a live-session switch is outside the Auto-off rule', () => {
+  const d = decideModel(ask({ auto: false, requested: 'sonnet', newSession: false }))
+  expect(d.overrodeFlag).toBeNull()
+  expect(d.model).toBe('sonnet')
+  // And the gate still bites there exactly as before — the exclusion is from the OFF rule, not from
+  // the gate.
+  expect(decideModel(ask({ auto: false, requested: 'fable', newSession: false })))
+    .toMatchObject({ model: 'opus', clamped: 'fable', ask: true, overrodeFlag: null })
+})
+
+// The addendum's own row, stated as a table so the next reader does not have to derive it. The
+// property that holds across every cell: under OFF an agent never STARTS a session on a model the
+// owner did not choose — by refusal where there is no gate, by a hold where there is one.
+test('the Auto OFF state table for an agent-named fable', () => {
+  const off = (fable: 'approve' | 'allow' | 'refuse') =>
+    decideModel(ask({ auto: false, requested: 'fable', fable }))
+  expect(off('approve')).toMatchObject({ model: 'opus', ask: true, clamped: 'fable', overrodeFlag: null })
+  expect(off('allow')).toMatchObject({ model: 'opus', ask: false, clamped: null, overrodeFlag: 'fable' })
+  expect(off('refuse')).toMatchObject({ model: 'opus', ask: false, clamped: null, overrodeFlag: 'fable' })
+  // and in NO cell does the session actually launch on fable
+  for (const p of ['approve', 'allow', 'refuse'] as const) expect(off(p).model).not.toBe('fable')
+})
+
+// The escalation reads the RESOLVED head, like every other fable rule on this box — a gateway-hosted
+// fable under OFF is held on the same terms, and naming the account does not buy a way past it.
+//
+// `requested: null` is the REAL shape and not a convenience: a provider account owns its own catalog,
+// so the pricing gate is handed no alias and the head is the only thing that knows what will run.
+// (A first draft of this test paired `requested: 'sonnet'` with a fable head — a combination the call
+// site cannot produce, since naming an account nulls the request. It failed, and the input was wrong
+// rather than the code.)
+test('the OFF escalation keys on the resolved head, not the alias', () => {
+  expect(decideModel(ask({ auto: false, requested: null, headModel: 'anthropic/fable-5' })))
+    .toMatchObject({ ask: true, clamped: FABLE, overrodeFlag: null })
+  expect(decideModel(ask({ auto: false, requested: null, headModel: 'anthropic/fable-5' })).model).not.toBe('fable')
 })
