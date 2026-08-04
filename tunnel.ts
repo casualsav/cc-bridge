@@ -42,6 +42,31 @@ const CF_VERSION = '2026.6.0'
 const CF_SHA256: Record<string, string> = {
   'linux-arm64': '8482ebf1e74a2a4a1a9f1e090e17e3de08423f94100ece6789287cb26fb9480f',
 }
+// THE PIN IS ALSO THE FLOOR — one number to maintain, not two. A discovered binary is trusted only
+// at or above it. Before this, `which cloudflared` won unconditionally, so a box that had installed
+// cloudflared for unrelated work ran the bridge's tunnel on whatever it happened to have: this one
+// carried 2026.3.0 under a pinned 2026.6.0 for months and nothing ever said so, which is the exact
+// thing a pin exists to prevent. What we actually need is not "our build" but "not a build old
+// enough to speak a different edge protocol", and a floor buys that without re-downloading onto
+// every box that already has a good one.
+export function parseCfVersion(text: string | null): [number, number, number] | null {
+  const m = text && /(\d+)\.(\d+)\.(\d+)/.exec(text)
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null
+}
+// Unparseable counts as BELOW the floor: fetching a build we know is the safe direction, and the
+// fetch-failure fallback in ensureCloudflared still uses the odd binary rather than leaving the
+// user with no tunnel at all.
+export function cfVersionAtLeast(text: string | null, floor: string = CF_VERSION): boolean {
+  const got = parseCfVersion(text), want = parseCfVersion(floor)
+  if (!got || !want) return false
+  for (let i = 0; i < 3; i++) if (got[i] !== want[i]) return got[i]! > want[i]!
+  return true
+}
+// `<bin> --version` prints to stdout; a binary that won't exec at all reads as unparseable (null).
+async function cfVersionOf(bin: string): Promise<string | null> {
+  try { return await new Response(spawn([bin, '--version']).stdout).text() } catch { return null }
+}
+
 // Map node platform/arch → the release asset (and whether it's a .tgz needing extraction).
 export function cfAsset(platform = process.platform, arch = process.arch): { name: string; key: string; tgz: boolean } | null {
   const la: Record<string, string> = { x64: 'amd64', arm64: 'arm64', arm: 'arm', ia32: '386' }
@@ -52,11 +77,27 @@ export function cfAsset(platform = process.platform, arch = process.arch): { nam
   return null
 }
 
-// Ensure a cloudflared binary exists: reuse a system/cached one, else fetch the pinned release into
-// <stateDir>/bin (checksum-verified where pinned, else --version-checked) and chmod +x. Null on failure.
+// Ensure a usable cloudflared exists: reuse a system/cached one IF it meets the floor, else fetch the
+// pinned release into <stateDir>/bin (checksum-verified where pinned, else --version-checked) and
+// chmod +x. Null on failure.
+//
+// An EXPLICIT path is the operator's stated choice — an air-gapped install drops a binary in
+// deliberately — so it is always honoured, and a stale one is named rather than refused. Only
+// DISCOVERY (PATH, then our own cache) is gated on the floor; a cached binary below it is one we
+// fetched under an older pin, which is exactly the case that should be replaced.
 export async function ensureCloudflared(stateDir: string, log: (m: string) => void, explicit?: string): Promise<string | null> {
-  const found = findCloudflared(stateDir, explicit)
-  if (found) return found
+  if (explicit && existsSync(explicit)) {
+    if (!cfVersionAtLeast(await cfVersionOf(explicit)))
+      log(`tunnel: WARNING ${explicit} is older than the pinned cloudflared ${CF_VERSION} — using it anyway (explicitly configured)`)
+    return explicit
+  }
+  const found = findCloudflared(stateDir)
+  if (found) {
+    const v = await cfVersionOf(found)
+    if (cfVersionAtLeast(v)) return found
+    // Not an error yet: we fetch the pin below and only fall back here if that fails.
+    log(`tunnel: ${found} is ${parseCfVersion(v)?.join('.') ?? 'an unreadable version'}, below the pinned ${CF_VERSION} — fetching the pinned build instead`)
+  }
   const asset = cfAsset()
   if (!asset) { log('tunnel: no cloudflared build for this platform — set WEBAPP_PUBLIC_URL'); return null }
   const binDir = join(stateDir, 'bin')
@@ -89,6 +130,12 @@ export async function ensureCloudflared(stateDir: string, log: (m: string) => vo
     }
     return dest
   } catch (e) {
+    // A degraded quick tunnel beats no Mini App — but the staleness is NAMED, never inherited in
+    // silence, which is the whole lesson of the binary that shadowed this pin for months.
+    if (found) {
+      log(`tunnel: cloudflared fetch failed (${(e as Error).message}) — FALLING BACK to ${found}, which is below the pinned ${CF_VERSION}; a stale cloudflared is a plausible cause of a tunnel that comes up and then 404s at the edge`)
+      return found
+    }
     log(`tunnel: cloudflared fetch failed (${(e as Error).message}) — install it or set WEBAPP_PUBLIC_URL`)
     return null
   }
