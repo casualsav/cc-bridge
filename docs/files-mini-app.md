@@ -114,7 +114,8 @@ In `~/.claude/channels/telegram/.env` / `access.json`:
   but its URL rotates each run → **DM-only**; **`tailscale`** = a stable Funnel `*.ts.net` URL the daemon
   reads from `tailscale status` (funnel set up once at install via `tailscale funnel --bg <port>`) → works
   **in-group** and is the **recommended install pick**; `none` = use `WEBAPP_PUBLIC_URL`).
-- `WEBAPP_PUBLIC_URL=https://…` (stable domain / named tunnel; overrides cloudflared).
+- `WEBAPP_PUBLIC_URL=https://…` (stable domain / named tunnel; overrides cloudflared — §6a is the
+  recipe if you already run a Cloudflare named tunnel).
 - `WEBAPP_PORT=…` (localhost bind port; default e.g. 8787).
 - `WEBAPP_WRITE=true|false` (default false → read-only). When on, the Mini App gains in-app **edit /
   delete-to-trash / new-folder / rename / upload-from-device**; deletions go to `~/.tg-trash`
@@ -125,6 +126,102 @@ In `~/.claude/channels/telegram/.env` / `access.json`:
   from the DOM and every file endpoint (ls/read/download/dl-token/find/resolve/upload/write/rm/mkdir/
   rename) 403s. The console tabs (Sessions / Scheduled / Settings) keep working. Read live per request,
   so flipping it needs no restart; the read-only vs read/write level stays `WEBAPP_WRITE`.
+
+## 6a. Recipe: a stable hostname on a Cloudflare named tunnel you already run
+
+The quick tunnel is the zero-config default and stays that way. But a box that already fronts other
+sites through a **named** Cloudflare tunnel has everything this needs — the account, the login, the
+zone, the running daemon — and the bridge only has to be told. Two edits, no new account, no
+`tunnel login`, no inbound port. This is the cheapest of the three stable-URL options and it is not
+the same shape as "domain + reverse proxy": there is no reverse proxy in it at all.
+
+Replace `bridge.example.com` with a hostname on your own zone throughout.
+
+**1 — find the port the webapp is bound to.** It is `TELEGRAM_WEBAPP_PORT` in the channel `.env`,
+defaulting to `8787 + <instance id>`. Confirm what is actually listening rather than trusting the
+default, because a second bridge instance derives a different port:
+
+```sh
+grep TELEGRAM_WEBAPP_PORT ~/.claude/channels/telegram/.env
+ss -tlnp | grep <port>          # expect exactly one bun process, bound to 127.0.0.1
+```
+
+**2 — add one ingress rule** to the tunnel's config (`~/.cloudflared/config.yml`, or wherever your
+`ExecStart` `--config` points). Copy the file first if it fronts live sites:
+
+```yaml
+ingress:
+  - hostname: bridge.example.com
+    service: http://localhost:8795        # ← the port from step 1
+  # … your existing rules …
+  - service: http_status:404              # ← this catch-all MUST stay last
+```
+
+**Rules match in order and the first match wins, so a rule added *below* a wildcard that already
+covers your hostname is dead** — a `*.example.com` rule earlier in the file will swallow
+`bridge.example.com`. Put the bridge rule above any wildcard for the same zone, and never above
+nothing: the `http_status:404` entry is required to be the final rule and cloudflared refuses the
+config otherwise.
+
+**3 — point DNS at the tunnel** (a proxied CNAME to `<tunnel-id>.cfargotunnel.com`; the CLI writes
+it for you):
+
+```sh
+cloudflared tunnel route dns <tunnel-name-or-id> bridge.example.com
+```
+
+**4 — restart the tunnel, then verify the hostname serves the app before touching the bridge at
+all.** The two byte counts matching is the check — a 200 alone can come from someone else's rule:
+
+```sh
+sudo systemctl restart cloudflared-tunnel     # your unit name
+curl -s -o /dev/null -w '%{http_code} %{size_download}\n' https://bridge.example.com/
+curl -s -o /dev/null -w '%{http_code} %{size_download}\n' http://127.0.0.1:<port>/
+```
+
+**5 — tell the daemon**, in `~/.claude/channels/telegram/.env`:
+
+```
+TELEGRAM_WEBAPP_PUBLIC_URL=https://bridge.example.com
+```
+
+Leave `TELEGRAM_WEBAPP_TUNNEL` alone. `startFilesWebapp()` returns as soon as it sees a public URL,
+*before* the tunnel branch is consulted, so the setting is simply never read — and deleting the one
+line restores the previous behaviour exactly. Restart the daemon
+(`kill "$(cat ~/.claude/channels/telegram/daemon.pid)"`; the watchdog respawns it) and read the log:
+
+```
+daemon: webapp: public url https://bridge.example.com
+```
+
+**No `tunnel: up at …` line may follow it, and `pgrep -af 'cloudflared tunnel --no-autoupdate'`
+must come back empty.** That absence is the whole point: no quick tunnel is spawned, so nothing
+rotates, so a `/files` button minted today still opens next week.
+
+**6 — register the same URL as the bot's Main Mini App** in @BotFather (`/mybots` → your bot → Bot
+Settings → Configure Mini App). `web_app` inline buttons are rejected outside private chats, so
+`/files` in a group or topic sends a `t.me/<bot>?startapp=…` link instead, and that link resolves
+through BotFather's registered URL — *not* through `WEBAPP_PUBLIC_URL`. Skip this and the DM button
+works while the group one does not, which reads like a half-failed change and isn't one.
+
+**Verifying you did not break the sites already on the tunnel.** Editing shared ingress is the only
+risky step here. Capture a baseline **before** the edit and diff it after — the failures a busy box
+already has are the reason to record them rather than trust memory:
+
+```sh
+for h in bridge.example.com site-a.example.com site-b.example.net; do
+  printf '%-28s %s\n' "$h" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 12 https://$h/)"
+done | tee /tmp/tunnel-after.txt
+diff /tmp/tunnel-before.txt /tmp/tunnel-after.txt
+```
+
+**Trap — a pre-installed `cloudflared` shadows the pinned one.** `ensureCloudflared()` prefers a
+system binary on `PATH` and only downloads the checksum-pinned build when none is found, so a box
+that has had `cloudflared` installed for other work runs the bridge's quick tunnel on *that*
+version, however old. It matters for the quick-tunnel path only (this recipe uses your own named
+tunnel and your own binary), but it is worth knowing when a quick tunnel comes up, logs a URL, and
+then serves `404` from Cloudflare's edge while the local port serves `200`: check
+`cloudflared --version` against `CF_VERSION` in `tunnel.ts` before assuming the bridge is at fault.
 
 ## 7. Phasing
 - **Phase 0 — inline baseline:** ~~inline-keyboard explorer~~ **skipped** (decided 2026-06-15). Mini App only.
