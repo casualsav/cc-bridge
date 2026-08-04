@@ -35,13 +35,23 @@ const open = async (tab) => {
       // the settings screen is empty, and an empty screen leaks nothing for the wrong reason.
       : q.includes("/api/settings") ? { write: true, rows: [
           { id: "accounts", name: "👤 Accounts", keys: ["accounts"], panel: "accounts" },
-          { id: "spawnDefaults", name: "🧑‍💻 Model defaults", keys: ["spawnModel", "spawnEffort"], value: "opus · high" },
+          // Grouped exactly as the daemon serves it (settingsRows()): the two roles are GROUPS, so the
+          // sheet renders one button each. The flat `keys` union is what the screen checks a row
+          // against; a fixture that kept only the old flat shape would never run the group path.
+          { id: "spawnDefaults", name: "🧑‍💻 Defaults", keys: ["spawnModel", "spawnEffort", "spawnMode", "chatModel", "chatEffort", "chatMode"], value: "💬 opus · high · no default · 🧑‍💻 opus · high · 🚨 Bypass",
+            groups: [
+              { label: "💬 Chat agent", keys: ["chatModel", "chatEffort", "chatMode"], value: "opus · high · no default" },
+              { label: "🧑‍💻 Coding sessions", keys: ["spawnModel", "spawnEffort", "spawnMode"], value: "opus · high · 🚨 Bypass" },
+            ] },
           { id: "github", name: "🐙 GitHub", keys: ["github"], panel: "github" },
           { id: "batchAllow", name: "⚡ Batch allow", keys: ["batchAllow"] },
           { id: "tts", name: "🔊 Voice replies", keys: ["voice"], value: "off" },
         ], settings: {
           accounts: { value: "1", editable: false }, spawnModel: { value: "opus", editable: true, options: ["opus"] },
           spawnEffort: { value: "high", editable: true, options: ["high"] }, github: { value: "x", editable: false },
+          spawnMode: { value: "🚨 Bypass", raw: "bypassPermissions", editable: true, options: ["default", "bypassPermissions"] },
+          chatModel: { value: "opus", editable: true, options: ["opus"] }, chatEffort: { value: "high", editable: true, options: ["high"] },
+          chatMode: { value: "no default", raw: "", editable: true, options: ["default", "bypassPermissions"] },
           voice: { value: false, editable: true },
           batchAllow: { value: true, editable: true } } }
       : q.includes("/api/github") ? { installed: true, accounts: [], login: { active: false } }
@@ -97,6 +107,20 @@ const painted = (p) => p.evaluate(ids => ids.map(id => {
   const wrappers = seen.filter(x => ["mdef", "voicesheet", "ttssheet", "ghsheet"].includes(x.id));
   ok(wrappers.every(x => !x.painted), "a CLOSED sheet paints nothing even on its own screen");
   ok((await p.$$("#tab-settings .setrow")).length > 0, "the settings screen still renders its rows");
+
+  // The grouped Defaults sheet: one BUTTON per served group, its rows hidden until that button is
+  // tapped. Measured as PAINT, not markup — a group rendered with display:"" from the start would
+  // still be in the DOM and would still pass a presence check while showing six flat rows, which is
+  // the shape this replaced. The control is the tap: after it, the group's rows must paint.
+  const shown = () => p.$$eval("#mdefbody .setrow", ns => ns.filter(n => n.getBoundingClientRect().height > 0).length);
+  await p.evaluate(() => openSheet("mdef"));
+  await p.waitForTimeout(300);
+  const btns = await p.$$eval("#mdefbody .setrow.action", ns => ns.map(n => n.textContent));
+  ok(btns.length === 2, `the Defaults sheet renders one button per group (got ${btns.length}: ${JSON.stringify(btns)})`);
+  ok(await shown() === 2, `a collapsed group paints no rows — only its own buttons (visible rows: ${await shown()})`);
+  await p.$$eval("#mdefbody .setrow.action", ns => ns[0].click());
+  await p.waitForTimeout(200);
+  ok(await shown() === 5, `tapping a group paints its three rows (2 buttons + 3 = 5, got ${await shown()})`);
   // Opening one still works — a fix that hid the sheets for good would pass everything above.
   await p.evaluate(() => openSheet("mdef"));
   await p.waitForTimeout(300);

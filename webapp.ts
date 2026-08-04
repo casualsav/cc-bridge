@@ -91,12 +91,17 @@ export interface UsageView {
 // included, and a row the daemon does not serve is a row the app cannot draw. `keys` names the
 // settings-payload entries the row carries: one for a plain row, several for a row that opens a
 // sub-panel sheet, in which case `value` is the group's state line.
-export interface SettingsRootRow { id: string; name: string; keys: string[]; value?: string; panel?: 'accounts' | 'github' }
+// `groups` splits a multi-key row into named sub-groups the app renders as one button each, with the
+// group's own state line — the Defaults row's two roles. Optional: a row without it renders its keys
+// flat, which is every other row. The split is served rather than inferred client-side for the same
+// reason the row list is: a second copy of "which keys belong to the chat agent" would drift.
+export interface SettingsGroup { label: string; keys: string[]; value?: string }
+export interface SettingsRootRow { id: string; name: string; keys: string[]; value?: string; panel?: 'accounts' | 'github'; groups?: SettingsGroup[] }
 export interface SettingsView {
   write: boolean
   rows: SettingsRootRow[]
   // `raw` is the machine value behind a displayed one, for a client that has to MATCH a setting
-  // rather than print it (prefMode's `value` is a label with an emoji in it; the new-session sheet
+  // rather than print it (a mode row's `value` is a label with an emoji in it; the new-session sheet
   // needs the mode itself). Optional and ignored by the settings list, which renders `value`.
   // `kind: 'text'` is a free-text setting (a path, an open-ended model id) — the daemon knows which
   // ones validate as shapes rather than as vocabularies, so the app does not keep a second list.

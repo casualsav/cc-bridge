@@ -1849,7 +1849,7 @@
      panel it mirrors. The daemon serves both rows (settingsRows()); these are where they open. -->
 <div id="mdef" class="sheetwrap">
   <div class="sheet">
-    <div class="shead">Model defaults</div>
+    <div class="shead">Defaults</div>
     <div class="card" id="mdefbody"></div>
     <div class="sprow"><button id="mdefclose" class="cancel">Close</button></div>
   </div>
@@ -2282,7 +2282,8 @@ const esc = s => String(s == null ? "" : s).replace(/[&<>]/g, c => ({ "&": "&amp
 // These names stay client-side on purpose: they label a sub-panel's CONTENTS, which each surface
 // renders in its own shape, and no Telegram string exists for them to be 1:1 with.
 const SETTING_NAMES = {
-  spawnModel: "Coding session model", spawnEffort: "Coding session effort",
+  spawnModel: "Coding session model", spawnEffort: "Coding session effort", spawnMode: "Coding session mode",
+  chatMode: "Chat agent mode",
   chatModel: "Chat agent model", chatEffort: "Chat agent effort",
   spawnAuto: "Auto — agent spawns pick", fableForAgents: "Fable for agents",
   transcribeBackend: "Transcription backend", transcribeModel: "Local Whisper model",
@@ -2316,7 +2317,7 @@ function settingRow(key, name, s, editable, repaint) {
     r.appendChild(btn);
   } else if (s.options && editable) {
     const sel = document.createElement("select"); sel.className = "seg";
-    // `raw` wins over `value` for the selected option: a row may DISPLAY a label (prefMode's
+    // `raw` wins over `value` for the selected option: a row may DISPLAY a label (a mode row's
     // carries an emoji and its own wording) while the options are the daemon's own vocabulary.
     const cur = s.raw != null ? s.raw : s.value;
     for (const o of s.options) { const op = document.createElement("option"); op.value = o; op.textContent = o; if (o === cur) op.selected = true; sel.appendChild(op); }
@@ -2368,9 +2369,31 @@ async function renderSettings() {
   for (const row of d.rows || []) {
     const grp = SETTING_SHEETS[row.id];
     if (grp) {
-      for (const key of row.keys) {
-        const s = d.settings[key]; if (!s) continue;
-        $(grp.body).appendChild(settingRow(key, SETTING_NAMES[key] || key, s, W && s.editable));
+      // A row the daemon sent `groups` for renders one BUTTON per group inside the sheet — the
+      // accounts sheet's language — each expanding its own keys in place. The grouping is served,
+      // never inferred here (see SettingsRootRow.groups). Without it the keys render flat, which is
+      // what every other grouped row does.
+      if (row.groups) {
+        for (const g of row.groups) {
+          const rows = document.createElement("div"); rows.style.display = "none";
+          for (const key of g.keys) {
+            const s = d.settings[key]; if (!s) continue;
+            rows.appendChild(settingRow(key, SETTING_NAMES[key] || key, s, W && s.editable));
+          }
+          if (!rows.childElementCount) continue;   // a group whose keys the daemon didn't send draws nothing
+          const btn = settingActionRow(g.label, g.value, () => {
+            const open = rows.style.display !== "none";
+            rows.style.display = open ? "none" : "";
+            btn.querySelector("button").textContent = open ? "Open" : "Close";
+          }, "Open");
+          $(grp.body).appendChild(btn);
+          $(grp.body).appendChild(rows);
+        }
+      } else {
+        for (const key of row.keys) {
+          const s = d.settings[key]; if (!s) continue;
+          $(grp.body).appendChild(settingRow(key, SETTING_NAMES[key] || key, s, W && s.editable));
+        }
       }
       wrap.appendChild(settingActionRow(row.name, row.value, () => openSheet(grp.sheet), "Open"));
       continue;
@@ -3966,8 +3989,8 @@ const SPAWN_HOST = {
   },
 };
 // A raw alias rendered as the dial renders it — /api/settings answers "opus"/"high", and the sheet
-// must not be the one surface in the app that says "opus" where every other says "Opus 5". prefMode
-// already answers with a label, so it falls through unchanged.
+// must not be the one surface in the app that says "opus" where every other says "Opus 5". The mode
+// rows already answer with a label, so they fall through unchanged.
 const dialLabel = (kind, v) => (DIAL_LISTS[kind]().find(([a]) => a === v) || [null, v])[1];
 // The drill row's inline value: the chosen option's name, or the configured default's when nothing is
 // chosen. "not set" only where the box has configured nothing — the honest reading of an empty list
@@ -4020,9 +4043,11 @@ async function openSpawnSheet(on) {
   try {
     const d = await api("/api/settings");
     const val = k => { const v = d.settings?.[k]?.value; return v && v !== "off" ? String(v) : ""; };
-    // prefMode's `value` is a LABEL with an emoji in it ("🚨 Bypass"); `raw` is the mode itself, which
-    // is what a row can be matched against.
-    spawnDefaults = { model: val("spawnModel"), effort: val("spawnEffort"), mode: d.settings?.prefMode?.raw || "" };
+    // The row's `value` is a LABEL ("🚨 Bypass", or "no default"); `raw` is the mode itself, which is
+    // what a chip can be matched against. Empty raw means no configured default — every chip then
+    // reads as an explicit pick, and picking none sends none, which is exactly right: the daemon
+    // falls back to the account's own permissions.defaultMode, as it did before this row existed.
+    spawnDefaults = { model: val("spawnModel"), effort: val("spawnEffort"), mode: d.settings?.spawnMode?.raw || "" };
     paintSpawn();
   } catch { /* the rows read a bare "Follows Settings" — the spawn still resolves daemon-side */ }
 }

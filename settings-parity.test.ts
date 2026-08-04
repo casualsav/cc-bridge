@@ -83,3 +83,30 @@ test('every key a row names is a key the payload serves', () => {
   expect(named.length).toBeGreaterThan(10)
   for (const k of named) expect(keys).toContain(k)
 })
+
+// The 🧷 Preferred mode row is RETIRED (v0.4.371, the owner's ruling): a per-role mode in the
+// bridge's own prefs replaced a per-ACCOUNT write of Claude Code's `permissions.defaultMode`. The
+// removal is only as good as its residue — a leftover row id, callback or panel builder is a dead
+// button, and the app renders whatever the daemon serves.
+//
+// `accounts.ts`'s readDefaultMode/writeDefaultMode SURVIVE and are the one named exception: account
+// seeding still writes that key, and webappSessionSpawn still reads it as its LAST fallback so a box
+// that had set the old row keeps launching the way it did. That is the upgrade-invariance term, not
+// residue. Validated against the pre-change tree, where every needle below is present.
+test('nothing of the retired 🧷 Preferred mode row is left on any surface', () => {
+  const src = [
+    readFileSync(new URL('./daemon.ts', import.meta.url), 'utf8'),
+    readFileSync(new URL('./webapp.ts', import.meta.url), 'utf8'),
+    readFileSync(new URL('./webapp/index.html', import.meta.url), 'utf8'),
+    readFileSync(new URL('./scripts/settings-authority-gate.ts', import.meta.url), 'utf8'),
+    readFileSync(new URL('./scripts/settings-parity-live.ts', import.meta.url), 'utf8'),
+  ].join('\n')
+  for (const needle of ['prefMode', 'defmode:', 'defModeLabel', 'defaultModeText', 'defaultModeMarkdown', 'defaultModeKeyboard'])
+    expect([needle, src.includes(needle)]).toEqual([needle, false])
+  // …and the two keys that replaced it reach every layer that has to carry them.
+  for (const key of ['spawnMode', 'chatMode']) {
+    expect([key, readFileSync(new URL('./types.ts', import.meta.url), 'utf8').includes(`${key}?: string`)]).toEqual([key, true])
+    expect([key, readFileSync(new URL('./access.ts', import.meta.url), 'utf8').includes(`'${key}'`)]).toEqual([key, true])
+    expect([key, src.includes(key)]).toEqual([key, true])
+  }
+})

@@ -38,7 +38,7 @@ import { normalizeCommandOutput } from './ansi.ts'
 import { planSlash } from './slash-policy.ts'
 import { preserveGlobalEffort, reconcileEffortScope } from './effort-scope.ts'
 import { planDrift, driftStateAfter, type DriftState } from './drift-guard.ts'
-import { decideModel, decideEffort, upgradeNeedsConfirm, heldSpawnModel, heldSpawnNeedsLine, holdTapData, parseHoldTap, launchFallback, spawnCardHeader, relaunchModel, launchDefaultModel, launchDefaultEffort, fablePolicy, fableRowState, onOff, type FablePolicy, AUTO_FALLBACK, AUTO_EFFORT_FALLBACK, FABLE, HAIKU, isClaudeFamily, type ModelDecision, type HoldOutcome } from './spawn-model-policy.ts'
+import { decideModel, decideEffort, upgradeNeedsConfirm, heldSpawnModel, heldSpawnNeedsLine, holdTapData, parseHoldTap, launchFallback, spawnCardHeader, relaunchModel, launchDefaultModel, launchDefaultEffort, launchDefaultMode, fablePolicy, fableRowState, onOff, type FablePolicy, AUTO_FALLBACK, AUTO_EFFORT_FALLBACK, FABLE, HAIKU, isClaudeFamily, type ModelDecision, type HoldOutcome } from './spawn-model-policy.ts'
 import { renderSessionsView } from './sessions-view.ts'
 import { detectCurrentMode, onNormalPrompt, inputBoxContent, inputBoxOccupant, isModelSwitchConfirm, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType } from './prompt.ts'
 import { modelSwitchEvidence, findSessionFile, resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, lastAssistantStopReason, turnAnchorUuid, liveSubagents, currentTurnFeed, currentTurnActivity, concludedTurnWork, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
@@ -7585,6 +7585,11 @@ function configuredSpawnModel(role: SessionRole = 'code'): string {
 function configuredSpawnEffort(role: SessionRole = 'code'): string {
   return launchDefaultEffort(role, loadAccess(), defaultEffortPref, EFFORT_LEVELS)
 }
+// The third dial, and the only one that can answer "nothing configured" — see launchDefaultMode.
+// null here is what keeps an upgrade invisible: the launch chain falls back to what it did before.
+function configuredSpawnMode(role: SessionRole = 'code'): CcMode | null {
+  return launchDefaultMode(role, loadAccess(), MODES) as CcMode | null
+}
 // The role a SESSION belongs to. One predicate, so "is this the chat agent?" cannot be answered two
 // ways — and note what it can NOT be used for: a lane being PROVISIONED is not bound yet (see the
 // `role` parameter on spawnSession).
@@ -10929,14 +10934,13 @@ function settingsText(): string {
   const a = loadAccess()
   return `⚙️ <b>Settings</b>\n\n` +
     `👤 Accounts — <b>${accountsRowSummary()}</b>\n` +
-    `🧑‍💻 Model defaults — <b>${spawnDefaultsSummary()}</b>\n` +
+    `🧑‍💻 Defaults — <b>${spawnDefaultsSummary()}</b>\n` +
     `🐙 GitHub — <b>${escapeHtml(ghSummary())}</b>\n` +
     `⚡ Batch allow — <b>${a.batchAllow !== false ? 'on' : 'off'}</b>\n` +
     `🎙️ Voice transcription — <b>${transcribeStatus()}</b>\n` +
     `🔊 Voice replies — <b>${a.tts?.mode && a.tts.mode !== 'off' ? `${a.tts.mode} · ${a.tts.engine}` : 'off'}</b>\n` +
     `💬 Stream — <b>${replyMode()}</b>\n` +
     `📌 Pinned message — <b>${a.sessionPin !== false ? 'on' : 'off'}</b>\n` +
-    `🧷 Preferred mode — <b>${listAccounts().length > 1 ? 'per account' : defModeLabel(MAIN_ACCOUNT.configDir)}</b>\n` +
     `🧹 <code>/clear</code> approval — <b>${a.confirmReset === false ? 'off' : 'on'}</b>\n` +
     (WEBAPP_ENABLED ? `🗂 File browser — <b>${a.fileBrowser === false ? 'off' : 'on'}</b>\n` : '') +
     (isTopicMode() ? `📂 Base folder — <b>${escapeHtml(baseFolderFull())}</b>\n` : '') +
@@ -10951,14 +10955,13 @@ function settingsMarkdown(): string {
   const a = loadAccess()
   const rows: Array<[string, string]> = [
     ['👤 Accounts', accountsRowSummary()],
-    ['🧑‍💻 Model defaults', spawnDefaultsSummary()],
+    ['🧑‍💻 Defaults', spawnDefaultsSummary()],
     ['🐙 GitHub', ghSummary()],
     ['⚡ Batch allow', a.batchAllow !== false ? 'on' : 'off'],
     ['🎙️ Voice transcription', transcribeStatus()],
     ['🔊 Voice replies', a.tts?.mode && a.tts.mode !== 'off' ? `${a.tts.mode} · ${a.tts.engine}` : 'off'],
     ['💬 Stream', replyMode()],
     ['📌 Pinned message', a.sessionPin !== false ? 'on' : 'off'],
-    ['🧷 Preferred mode', listAccounts().length > 1 ? 'per account' : defModeLabel(MAIN_ACCOUNT.configDir)],
     ['🧹 /clear approval', a.confirmReset === false ? 'off' : 'on'],
     ...(WEBAPP_ENABLED ? [['🗂 File browser', a.fileBrowser === false ? 'off' : 'on'] as [string, string]] : []),
     ...(isTopicMode() ? [['📂 Base folder', baseRowValue()] as [string, string]] : []),
@@ -10966,11 +10969,10 @@ function settingsMarkdown(): string {
   ]
   const help = [
     '👤 <b>Accounts</b> — the Claude accounts, the failover order, and third-party providers: add accounts, reorder the chain with ↑/↓, and add any Anthropic-compatible provider (🌐) — all in one panel.',
-    '🧑‍💻 <b>Model defaults</b> — the model/effort each role launches on, set separately: 🧑‍💻 coding sessions (the mini-app <b>+</b>, a new topic, an agent\'s <code>tg spawn</code>) and 💬 the chat agent. A session that already has its own model keeps it.',
+    '🧑‍💻 <b>Defaults</b> — the model, effort and permission mode each role launches on, set separately: 🧑‍💻 coding sessions (the mini-app <b>+</b>, a new topic, an agent\'s <code>tg spawn</code>) and 💬 the chat agent. A session that already has its own dials keeps them.',
     '⚡ <b>Batch allow</b> — 2+ permission prompts in one turn offer “Allow all this turn”.',
     '💬 <b>Stream</b> — how much of the live activity feed reaches the chat.',
     '📌 <b>Pinned message</b> — the status card pinned to the top of this chat.',
-    '🧷 <b>Preferred mode</b> — the permission mode NEW sessions launch in (/mode is the live dial).',
     '🧹 <b>/clear approval</b> — /clear and /new ask for a Yes/No tap first.',
     ...(WEBAPP_ENABLED ? ['🗂 <b>File browser</b> — the Files tab in the Mini App. Off removes it (and its file API) entirely; the Sessions/Scheduled/Settings tabs stay.'] : []),
     ...(isTopicMode() ? ['📂 <b>Base folder</b> — new forum topics are created as subfolders of this folder.'] : []),
@@ -11029,19 +11031,32 @@ async function showRichPanel(ctx: Context, mode: 'send' | 'edit', rich: InputRic
 // the three in step until it isn't. `keys` is the settings-payload keys the row carries — one for a
 // plain row, several for a row that opens a sub-panel (the app renders those in a sheet), and
 // `value` is the group's state line, which a multi-key row has no single control to show.
-type SettingsRootRow = { id: string; name: string; keys: string[]; value?: string; panel?: 'accounts' | 'github' }
+// Structurally mirrors webapp.ts's SettingsRootRow (which is what the app is typed against) — the
+// two are separate declarations, so a field added to one and not the other type-errors at the
+// assignment rather than silently serving something the app has no type for. `groups` is documented
+// there.
+type SettingsRootRow = { id: string; name: string; keys: string[]; value?: string; panel?: 'accounts' | 'github'
+                         groups?: Array<{ label: string; keys: string[]; value?: string }> }
 function settingsRows(): SettingsRootRow[] {
   const a = loadAccess()
   return [
     { id: 'accounts', name: '👤 Accounts', keys: ['accounts'], panel: 'accounts' },
-    { id: 'spawnDefaults', name: '🧑‍💻 Model defaults', keys: ['spawnModel', 'spawnEffort', 'chatModel', 'chatEffort', 'spawnAuto', 'fableForAgents'], value: spawnDefaultsSummary() },
+    // The two roles are GROUPS here, not a flat key list, so the app can render one button each
+    // (the accounts sheet's language) instead of six rows. The grouping is the daemon's, like every
+    // other condition on this screen: a client-side key list would be a second copy of it. `keys`
+    // stays the flat union — it is what the app checks a row against before drawing it.
+    { id: 'spawnDefaults', name: '🧑‍💻 Defaults', keys: ['spawnModel', 'spawnEffort', 'spawnMode', 'chatModel', 'chatEffort', 'chatMode', 'spawnAuto', 'fableForAgents'], value: spawnDefaultsSummary(),
+      groups: [
+        { label: MODEL_ROLE_LABEL.chat, keys: ['chatModel', 'chatEffort', 'chatMode'], value: roleDials('chat') },
+        { label: MODEL_ROLE_LABEL.code, keys: ['spawnModel', 'spawnEffort', 'spawnMode'], value: roleDials('code') },
+        { label: '🦾 Agent spawns', keys: ['spawnAuto', 'fableForAgents'] },
+      ] },
     { id: 'github', name: '🐙 GitHub', keys: ['github'], panel: 'github' },
     { id: 'batchAllow', name: '⚡ Batch allow', keys: ['batchAllow'] },
     { id: 'transcribe', name: '🎙️ Voice transcription', keys: ['transcribeBackend', 'transcribeModel'], value: transcribeStatus() },
     { id: 'tts', name: '🔊 Voice replies', keys: ['voice', 'ttsMode', 'ttsEngine', 'ttsVoice'], value: a.tts?.mode && a.tts.mode !== 'off' ? `${a.tts.mode} · ${a.tts.engine}` : 'off' },
     { id: 'stream', name: '💬 Stream', keys: ['stream'] },
     { id: 'sessionPin', name: '📌 Pinned message', keys: ['sessionPin'] },
-    { id: 'prefMode', name: '🧷 Preferred mode', keys: ['prefMode'] },
     { id: 'confirmReset', name: '🧹 /clear approval', keys: ['confirmReset'] },
     ...(WEBAPP_ENABLED ? [{ id: 'fileBrowser', name: '🗂 File browser', keys: ['fileBrowser'] }] : []),
     ...(isTopicMode() ? [{ id: 'baseFolder', name: '📂 Base folder', keys: ['baseFolder'] }] : []),
@@ -11064,7 +11079,7 @@ function settingsKeyboard(): InlineKeyboard {
   const buttons: Array<[string, string]> = [
     ['👤', 'acct:panel'], ['🧑‍💻', 'spd:panel'], ['🐙', 'gh:panel'], ['⚡', 'set:batch'],
     ['🎙️', 'set:voice'], ['🔊', 'set:tts'], ['💬', 'set:replymode'], ['📌', 'set:pin'],
-    ['🧷', 'defmode:panel'], ['🧹', 'set:confirmreset'],
+    ['🧹', 'set:confirmreset'],
     ...(WEBAPP_ENABLED ? [['🗂', 'set:filebrowser'] as [string, string]] : []),
     ...(isTopicMode() ? [['📂', 'set:base'] as [string, string]] : []),
     ...(isTopicMode() && AGENT_BUS_PIN_UI ? [['☎️', 'set:switchboard'] as [string, string]] : []),
@@ -11201,16 +11216,18 @@ async function applySetting(key: string, value: unknown, opts: { userId?: string
       else if (whisperReady()) void prepullWhisperModel()
       return null
     }
-    // ---- 🧷 preferred mode: permissions.defaultMode in ONE account's config dir. Launch-time only;
-    // it never touches a live pane (/mode does that). `account` defaults to main.
-    case 'prefMode': {
-      const raw = (value && typeof value === 'object' ? value : { mode: value }) as { account?: unknown; mode?: unknown }
-      const acct = raw.account == null ? MAIN_ACCOUNT : accountByName(String(raw.account))
-      if (!acct) return 'unknown account'
-      const mode = oneOf(raw.mode, MODES)
+    // ---- 🧷 the two role modes: a BRIDGE preference, applied as an explicit --permission-mode at
+    // spawn. Launch-time only; nothing touches a live pane (/mode does that). '' clears it back to
+    // "no default", which is a real state and not the `default` mode — see launchDefaultMode.
+    // The retired 🧷 Preferred mode row wrote Claude Code's own permissions.defaultMode per ACCOUNT
+    // instead. Nothing here reads or writes that key any more; the values already in each account's
+    // settings.json still govern launches the bridge does not make.
+    case 'spawnMode': case 'chatMode': {
+      if (value === '' || value === null) { if (key === 'chatMode') delete a.chatMode; else delete a.spawnMode; saveAccess(a); return null }
+      const mode = oneOf(value, MODES)
       if (!mode) return `unknown mode — one of: ${MODES.join(' | ')}`
-      try { writeDefaultMode(acct.configDir, mode) } catch (e) { return `could not save: ${String(e).slice(0, 120)}` }
-      return null
+      if (key === 'chatMode') a.chatMode = mode; else a.spawnMode = mode
+      saveAccess(a); return null
     }
     // ---- 📂 base folder: must already EXIST. New topics fan out under it, so a mkdir here would
     // invent a surprise root rather than a one-off session dir.
@@ -11240,7 +11257,8 @@ async function applySetting(key: string, value: unknown, opts: { userId?: string
   }
 }
 
-// 🧑‍💻 Model defaults sub-panel (settings → 🧑‍💻): the model/effort every session boots with — the chat
+// 🧑‍💻 Defaults sub-panel (settings → 🧑‍💻): the model, effort and permission mode every session boots
+// with — the chat
 // lane, the mini-app +, a new topic, and an agent's `tg spawn`. Preference only, read at launch time;
 // it never touches a live pane.
 //
@@ -11257,11 +11275,18 @@ async function applySetting(key: string, value: unknown, opts: { userId?: string
 // The two roles' display names, once — the panel row, the picker header and the settings summary all
 // read them from here so a rename cannot land in two of the three.
 const MODEL_ROLE_LABEL: Record<SessionRole, string> = { code: '🧑‍💻 Coding sessions', chat: '💬 Chat agent' }
-const roleDials = (role: SessionRole): string => `${configuredSpawnModel(role)} · ${configuredSpawnEffort(role)}`
+const roleDials = (role: SessionRole): string =>
+  `${configuredSpawnModel(role)} · ${configuredSpawnEffort(role)} · ${modeRowLabel(role)}`
+// A role's mode as a person reads it. Unset says so in words: "no default" is not the `default`
+// mode, and rendering the two the same would make an unconfigured box look configured.
+const modeRowLabel = (role: SessionRole): string => {
+  const m = configuredSpawnMode(role)
+  return m ? modeLabel(m) : 'no default'
+}
 
 function spawnDefaultsText(): string {
   const a = loadAccess()
-  return `🧑‍💻 <b>Model defaults</b>\n\n` +
+  return `🧑‍💻 <b>Defaults</b>\n\n` +
     `${MODEL_ROLE_LABEL.chat} — <b>${escapeHtml(roleDials('chat'))}</b>\n` +
     `${MODEL_ROLE_LABEL.code} — <b>${escapeHtml(roleDials('code'))}</b>\n` +
     `🦾 Auto mode (agent picks) — <b>${onOff(a.spawnAuto === true)}</b>\n` +
@@ -11293,7 +11318,8 @@ function spawnDefaultsKeyboard(): InlineKeyboard {
 function modelRolePickerText(role: SessionRole): string {
   return `${MODEL_ROLE_LABEL[role]}\n\n` +
     `🧠 Model — <b>${escapeHtml(configuredSpawnModel(role))}</b>\n` +
-    `⚡ Effort — <b>${escapeHtml(configuredSpawnEffort(role))}</b>` +
+    `⚡ Effort — <b>${escapeHtml(configuredSpawnEffort(role))}</b>\n` +
+    `🧷 Mode — <b>${escapeHtml(modeRowLabel(role))}</b>` +
     (role === 'chat' && loadAccess().chatModel === undefined
       ? `\n\n<i>Following the coding default — pick one to split them.</i>` : '')
 }
@@ -11312,6 +11338,15 @@ function modelRolePickerKeyboard(role: SessionRole): InlineKeyboard {
   }
   kb.row()
   for (const e of SPAWN_EFFORT_LEVELS) kb.text(`${effort === e ? '✅ ' : ''}${e === 'medium' ? 'med' : e}`, `spd:e:${role}:${e}`)
+  kb.row()
+  // Five modes over two rows, and a tap on the CURRENT one clears it back to "no default" — the only
+  // way out of a configured mode, since there is no sixth chip for "none" (a chip for the absence of
+  // a setting reads as a setting). `spd:d:` = defaults→mode, beside spd:m: model and spd:e: effort.
+  const mode = configuredSpawnMode(role)
+  MODES.forEach((m, i) => {
+    kb.text(`${mode === m ? '✅ ' : ''}${modeLabel(m)}`, `spd:d:${role}:${m}`)
+    if (i === 2) kb.row()
+  })
   return kb.row().text('‹ Back', 'spd:panel')
 }
 
@@ -11376,50 +11411,6 @@ function gatewayAddPanelKeyboard(): InlineKeyboard {
   const kb = new InlineKeyboard()
   for (const p of GATEWAY_PRESETS) kb.text(`🌐 ${p.label}${configured[p.key] ? ' ✓' : ''}`, `gw:add:${p.key}`).row()
   return kb.text('✏️ Custom', 'gw:add:custom').text('‹ Back', 'acct:panel')
-}
-
-// 🧷 Preferred-mode sub-panel (settings → Preferred mode): Claude Code's permissions.defaultMode — the
-// mode each account's sessions LAUNCH in. Saved in the account's settings.json, so a user's choice
-// (bypass / auto / acceptEdits / plan / default) survives every relaunch path — `claude update`,
-// plain `claude`, a bridge respawn. Per account; multi-account owners pin each independently. /mode
-// is still the live dial — this only sets what NEW launches start in.
-function defModeLabel(configDir: string): string {
-  const m = readDefaultMode(configDir)
-  return modeLabel(((MODES as readonly string[]).includes(m) ? m : 'default') as CcMode)
-}
-function defaultModeText(): string {
-  const lines = listAccounts().map(a =>
-    `${a.name === 'main' ? '🏠' : '👤'} <b>${escapeHtml(a.name)}</b> — ${defModeLabel(a.configDir)}`)
-  return `🧷 <b>Preferred mode</b> — the permission mode new or relaunched sessions start in.\n\n` +
-    `${lines.join('\n')}\n\n` +
-    `Saved in each account's <code>settings.json</code> (<code>permissions.defaultMode</code>), so it ` +
-    `survives updates &amp; restarts. <code>/mode</code> still changes the current session live.`
-}
-// Rich rendering of the same panel: Account | Launches in as a native table, with the settings.json
-// explainer folded into a collapsible. defaultModeText() stays the fallback.
-function defaultModeMarkdown(): string {
-  const rows = listAccounts().map(a =>
-    `| ${a.name === 'main' ? '🏠' : '👤'} ${escapeHtml(a.name)} | ${defModeLabel(a.configDir)} |`)
-  return `## 🧷 Preferred mode\n\nThe permission mode new or relaunched sessions start in.\n\n` +
-    `| Account | Launches in |\n|---|---|\n${rows.join('\n')}\n\n` +
-    `<details><summary>Where this is saved</summary>` +
-    `Each account's <code>settings.json</code> (<code>permissions.defaultMode</code>), so it survives ` +
-    `updates &amp; restarts.<br><code>/mode</code> still changes the current session live.</details>`
-}
-function defaultModeKeyboard(): InlineKeyboard {
-  const accts = listAccounts()
-  const multi = accts.length > 1
-  const kb = new InlineKeyboard()
-  for (const a of accts) {
-    const cur = readDefaultMode(a.configDir)
-    if (multi) kb.text(`— ${a.name} —`, 'defmode:noop').row()
-    MODES.forEach((m, i) => {
-      kb.text(`${m === cur ? '● ' : ''}${modeLabel(m)}`, `defmode:set:${a.name}:${m}`)
-      if ((i + 1) % 3 === 0) kb.row()
-    })
-    kb.row()
-  }
-  return kb.text('‹ Back', 'defmode:back')
 }
 
 // Voice-replies sub-panel (ROADMAP #15): mode off/all + engine piper/openai/elevenlabs.
@@ -12018,11 +12009,21 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
     // Both resolvers are total, so this chain never reaches a CLI default — which is the point.
     // An explicit dial (tg spawn --model, the mini-app +) still outranks all of it, below.
     let modelSource = 'cli-default'
+    // A mode that came from the role's configured default is ALWAYS passed explicitly, 'default'
+    // included — the same rule `modeExplicit` gives a named one. Without it a configured 'default'
+    // would emit no flag and the account's own permissions.defaultMode would win, which is the
+    // 2026-08 mini-app incident this feature exists to end rather than repeat.
+    let modeFromConfig = false
     let inherit = agent === 'claude' && !extra && focus.activePaneId
       ? await captureInheritedSettings(focus.activePaneId, focus.paneWatcher)
       : null
     if (agent === 'claude' && !extra) {
-      const mode = inherit && inherit.mode !== 'default' ? inherit.mode : lastFocusedMode
+      // The configured role mode is the FIRST term now. Where it is unset the old chain runs
+      // unchanged — inheriting the focused pane, else the last mode the owner was in — because that
+      // is what "nothing configured" has always meant here (launchDefaultMode's null).
+      const configured = configuredSpawnMode(role)
+      const mode = configured ?? (inherit && inherit.mode !== 'default' ? inherit.mode : lastFocusedMode)
+      if (configured) modeFromConfig = true
       inherit = { model: configuredSpawnModel(role), effort: configuredSpawnEffort(role), mode }
       modelSource = `configured-default(${role})`
     }
@@ -12040,7 +12041,9 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
       // the role and is not yet re-bound in one ordering, and a caller that forgot to pass it still
       // gets the right answer for a lane that IS bound. Neither alone covers both.
       const branchRole: SessionRole = role === 'chat' ? 'chat' : sessionRole(prefSid)
-      const mode = (prefSid ? sessionModes.get(prefSid) : null) ?? lastFocusedMode
+      const configuredMode = configuredSpawnMode(branchRole)
+      const mode = (prefSid ? sessionModes.get(prefSid) : null) ?? configuredMode ?? lastFocusedMode
+      if (!(prefSid && sessionModes.get(prefSid)) && configuredMode) modeFromConfig = true
       const effort = (prefSid ? sessionEfforts.get(prefSid) : null) ?? configuredSpawnEffort(branchRole)
       // Model's fallback chain: the session's OWN remembered alias, then the configured Model
       // defaults (the resolver the settings panel renders), then SPAWN_MODEL_FLOOR. Unlike mode this
@@ -12143,7 +12146,7 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
     // settings.json (`permissions.defaultMode`), which this box does: without the flag, a mini-app
     // spawn whose sheet said "Ask" launched in the account's bypassPermissions. Only an explicitly
     // named mode opts in, so every inherited or implied mode keeps the old rule byte-for-byte.
-    if (inherit?.mode && (inherit.mode !== 'default' || dials?.modeExplicit)) launchFlags.push(`--permission-mode ${inherit.mode}`)
+    if (inherit?.mode && (inherit.mode !== 'default' || dials?.modeExplicit || modeFromConfig)) launchFlags.push(`--permission-mode ${inherit.mode}`)
     let cmd: string
     if (agent === 'codex') {
       const explicitResume = /(?:^|\s)--resume\s+([^\s]+)/.exec(extra)?.[1]
@@ -13676,29 +13679,10 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
-  // 🧷 Preferred-mode sub-panel — open the panel, go back to settings, or no-op (account header tap)
-  if (data === 'defmode:noop') { await ctx.answerCallbackQuery().catch(() => {}); return }
-  if (data === 'defmode:panel' || data === 'defmode:back') {
-    if (!(await cbAuth(ctx))) return
-    await ctx.answerCallbackQuery().catch(() => {})
-    if (data === 'defmode:panel') {
-      await showRichPanel(ctx, 'edit', toInputRichMessage(defaultModeMarkdown()), defaultModeText(), defaultModeKeyboard())
-    } else await showSettings(ctx, 'edit')
-    return
-  }
-  // 🧷 Preferred-mode pick — persist permissions.defaultMode for the chosen account (launch-time only;
-  // does NOT touch the live session — /mode does that). Survives `claude update` and every relaunch.
-  const defSet = /^defmode:set:([a-z0-9][a-z0-9_-]{0,15}):(default|acceptEdits|plan|auto|bypassPermissions)$/i.exec(data)
-  if (defSet) {
-    if (!(await cbAuth(ctx))) return
-    const mode = defSet[2] as CcMode
-    const err = await applySetting('prefMode', { account: defSet[1], mode })
-    if (err) { await ctx.answerCallbackQuery({ text: err }).catch(() => {}); return }
-    await ctx.answerCallbackQuery({ text: `${defSet[1]}: ${modeLabel(mode)} on launch` }).catch(() => {})
-    await showRichPanel(ctx, 'edit', toInputRichMessage(defaultModeMarkdown()), defaultModeText(), defaultModeKeyboard())
-    return
-  }
-
+  // The retired 🧷 preferred-mode callbacks are gone with the panel (v0.4.371). A stale button in an
+  // old message now falls through to the unknown-callback branch and says so, which is the right
+  // answer: the setting it wrote no longer exists on this surface. (The literal callback prefix is
+  // deliberately not written anywhere here — settings-parity.test.ts greps for it as residue.)
   // 📨 An unsent paste nobody could attribute — HE decides. This is the only path that submits a box
   // the daemon did not fill, and it exists because the difference between his half-typed draft and a
   // paste stranded by a crash cannot be read off the screen. A tap is that difference.
@@ -13763,7 +13747,7 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
-  // 🧑‍💻 Model defaults sub-panel — open / back (settings ⇄ panel).
+  // 🧑‍💻 Defaults sub-panel — open / back (settings ⇄ panel).
   if (data === 'spd:panel' || data === 'spd:back') {
     if (!(await cbAuth(ctx))) return
     await ctx.answerCallbackQuery().catch(() => {})
@@ -13805,6 +13789,20 @@ bot.on('callback_query:data', async ctx => {
     if (!(await cbAuth(ctx))) return
     await ctx.answerCallbackQuery().catch(() => {})
     const role = spdRole[1] as SessionRole
+    await showHtmlPanel(ctx, 'edit', modelRolePickerText(role), modelRolePickerKeyboard(role))
+    return
+  }
+  // The mode chips. Tapping the mode that is already set CLEARS it (back to "no default"), which is
+  // the only way out — see modelRolePickerKeyboard for why there is no "none" chip.
+  const spdMode = /^spd:d:(code|chat):([A-Za-z]+)$/.exec(data)
+  if (spdMode) {
+    if (!(await cbAuth(ctx))) return
+    const role = spdMode[1] as SessionRole
+    const picked = spdMode[2] as CcMode
+    const key = role === 'chat' ? 'chatMode' : 'spawnMode'
+    const err = await applySetting(key, configuredSpawnMode(role) === picked ? '' : picked)
+    if (err) { await ctx.answerCallbackQuery({ text: 'Unknown mode.' }).catch(() => {}); return }
+    await ctx.answerCallbackQuery().catch(() => {})
     await showHtmlPanel(ctx, 'edit', modelRolePickerText(role), modelRolePickerKeyboard(role))
     return
   }
@@ -18068,15 +18066,15 @@ async function webappReadSettings(): Promise<WebappSettingsView> {
       ttsVoice: { value: a.tts?.voice ?? DEFAULT_PIPER_VOICE, editable: true, options: PIPER_VOICES.map(p => p.id), label: 'piper only' },
       stream: { value: replyMode(), editable: true, options: [...STREAM_ORDER] },
       sessionPin: { value: a.sessionPin !== false, editable: true },
-      // `raw` rides alongside the label for the mini app's new-session sheet, which has to MATCH this
-      // against a mode row rather than print it — the label carries an emoji and its own wording.
-      // Always main's: that is the account webappSessionSpawn spawns on, even where the label above
-      // says 'per account'.
-      // Editable only with ONE account: the row is a single value, and with several the modes are
-      // per account — that needs the picker the Telegram panel has, which is the Model-defaults-style
-      // sheet this app does not have yet. Multi-account stays read-only rather than silently writing
-      // main's mode under a label that says 'per account'.
-      prefMode: { value: listAccounts().length > 1 ? 'per account' : defModeLabel(MAIN_ACCOUNT.configDir), raw: readDefaultMode(MAIN_ACCOUNT.configDir), editable: listAccounts().length === 1, options: [...MODES], label: 'what NEW sessions launch in' },
+      // The two role modes. `raw` rides alongside the label for the mini app's new-session sheet,
+      // which has to MATCH a mode rather than print it — the label carries an emoji and its own
+      // wording. `raw` is '' when nothing is configured, and that is a real state the sheet must
+      // render as "no default", never as 'default' (they are different modes).
+      // Always editable, and no 'per account' state: these are the BRIDGE's preferences now, one per
+      // role, so a second Claude account changes nothing about them. That is the whole reason the
+      // 🧷 Preferred mode row it replaces could not be edited from here with more than one account.
+      spawnMode: { value: modeRowLabel('code'), raw: configuredSpawnMode('code') ?? '', editable: true, options: [...MODES], label: 'what new coding sessions launch in' },
+      chatMode: { value: modeRowLabel('chat'), raw: configuredSpawnMode('chat') ?? '', editable: true, options: [...MODES], label: 'what the chat agent launches in' },
       confirmReset: { value: a.confirmReset !== false, editable: true, label: '/clear and /new ask first' },
       fileBrowser: { value: a.fileBrowser !== false, editable: true, label: 'Files tab in this app (reopens on change)' },
       // 📂 base folder is free TEXT (a path), not an enum: the app renders a field and applySetting
@@ -18084,7 +18082,7 @@ async function webappReadSettings(): Promise<WebappSettingsView> {
       // this is the root new topics fan out under and a mkdir here would invent a surprise root.
       ...(isTopicMode() ? { baseFolder: { value: baseFolderFull(), editable: true, kind: 'text' as const, placeholder: 'Folder path (must exist)', label: 'new topics land here — must already exist' } } : {}),
       ...(isTopicMode() && AGENT_BUS_PIN_UI ? { switchboard: { value: a.switchboard !== false, editable: true, label: 'roster line on the pinned card' } } : {}),
-      // The 🧑‍💻 Model defaults — the same prefs the /settings sub-panel writes. They belong on this
+      // The 🧑‍💻 Defaults — the same prefs the /settings sub-panel writes. They belong on this
       // tab because they are now the ONLY place a global model default is set: the per-session dials
       // below change one session and nothing else. 'off' = unset (the spawn chain falls to its floor).
       // 'auto' is offered here as a DEFAULT, never as a launch alias; Fable drops out of the options
@@ -18829,7 +18827,7 @@ async function webappSessionSpawn(
   const askedEffort = opts.effort ? String(opts.effort).toLowerCase() : null
   if (askedEffort && !EFFORT_LEVELS.includes(askedEffort)) return { error: `unknown effort '${askedEffort}'` }
   // No explicit dial = the sheet's "default" chip, and it resolves HERE, at spawn time, from the
-  // /settings 🧑‍💻 Model defaults — the same fallback `tg spawn` has always used (~5140). Omitting the
+  // /settings 🧑‍💻 Defaults — the same fallback `tg spawn` has always used (~5140). Omitting the
   // field used to fall through to spawnSession's inherit branch, which reads the model off whatever
   // tmux pane happened to be FOCUSED and the effort off default-effort.json; so a box configured for
   // opus/high could spawn from the mini app on neither, which is the bug behind the relabel. A stale
@@ -18849,16 +18847,22 @@ async function webappSessionSpawn(
   // Same treatment as model/effort above, and the same bug being closed: with no mode dial,
   // spawnSession took the mode off whatever pane was FOCUSED, so the sheet could say one thing and
   // the session start in another (measured: a mini-app spawn came up bypassPermissions off the
-  // focused pane). The configured value is Claude Code's own `permissions.defaultMode` for this
-  // account — what the chat panel's 🧷 Preferred mode writes and what the webapp Settings tab
-  // reports read-only — so "Default" in the sheet follows the same entity both surfaces already name.
-  const configuredMode = readDefaultMode(account.configDir)
-  const mode = askedMode ?? ((MODES as readonly string[]).includes(configuredMode) ? configuredMode : 'default')
+  // focused pane).
+  // Three terms, and the LAST one is why this reads a CLI key the settings screen no longer writes:
+  // the coding role's configured mode wins, but where nothing is configured the account's own
+  // permissions.defaultMode must still decide, exactly as it did before the role modes existed.
+  // Dropping it would change what a `+` spawn launches in on every box that had set the old 🧷 row —
+  // the upgrade-invariance this whole split is built to hold.
+  const acctMode = readDefaultMode(account.configDir)
+  const mode = askedMode ?? configuredSpawnMode('code')
+    ?? ((MODES as readonly string[]).includes(acctMode) ? acctMode : 'default')
   // Whether the USER named this mode, which is not the same question as which mode it is. spawnSession
   // omits `--permission-mode` for 'default' on the premise that default IS the CLI's normal mode — true
   // only where the account has not configured otherwise. This box configures bypassPermissions, so a
   // user who picks "Ask" and gets no flag lands in bypass. An explicitly named mode carries the flag.
-  const modeExplicit = askedMode != null
+  // A CONFIGURED role mode counts as named too: it is a decision the owner made on the settings
+  // screen, so it must beat the account key rather than be silently overridden by it.
+  const modeExplicit = askedMode != null || configuredSpawnMode('code') != null
   const dir = join(getBaseCwd() ?? homedir(), topicName.toLowerCase().replace(/[^\w.-]+/g, '-'))
   try { if (!existsSync(dir)) mkdirSync(dir, { recursive: true }) }
   catch (e) { return { error: `couldn't create ${dir}: ${(e as Error)?.message ?? e}` } }

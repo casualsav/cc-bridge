@@ -60,7 +60,7 @@ const BOGUS: Record<string, string> = {
   stream: 'sideways', spawnModel: 'gpt-4', spawnEffort: 'ludicrous', chatModel: 'gpt-4',
   chatEffort: 'ludicrous', fableForAgents: 'always', ttsMode: 'sometimes', ttsEngine: 'espeak',
   ttsVoice: 'nobody', transcribeBackend: 'deepgram', transcribeModel: 'gigantic',
-  prefMode: 'godmode', codexEffort: 'ludicrous', codexModel: 'not a model id!!',
+  spawnMode: 'godmode', chatMode: 'sudo', codexEffort: 'ludicrous', codexModel: 'not a model id!!',
 }
 
 const settings = await readSettings()

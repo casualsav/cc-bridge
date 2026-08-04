@@ -641,10 +641,14 @@ give it.
 - **The sheet's "default" rows resolve DAEMON-SIDE at spawn time** — `webappSessionSpawn` applies
   `tg spawn`'s fallback chain (the `/settings` 🧑‍💻 coding-session defaults; never whatever pane was focused,
   which is the bug it fixed). The chip's badge is read once at sheet-open: a display, never a
-  promise. MODE resolves the account's own `permissions.defaultMode`, and **an explicitly named
-  mode carries `--permission-mode` even when it is `default`** (`dials.modeExplicit`) — on a box
-  configured for bypass, "Ask" without the flag launched in bypass. Preferred-mode preselection
-  reads `prefMode.raw` — `value` is a label with an emoji in it.
+  promise. MODE resolves in three terms and the last one is why a retired setting is still read:
+  the coding role's configured `spawnMode`, then the account's own `permissions.defaultMode` — the
+  key the removed 🧷 Preferred mode row used to write, kept as the fallback so a box that had set it
+  launches as it always did. **An explicitly named mode carries `--permission-mode` even when it is
+  `default`** (`dials.modeExplicit`), and a CONFIGURED role mode counts as named for the same
+  reason — on a box configured for bypass, "Ask" without the flag launched in bypass. Preselection
+  reads `spawnMode.raw`, which is EMPTY when nothing is configured: no chip is badged, every pick is
+  explicit, and picking none sends none. `value` is a label ("🚨 Bypass", or "no default").
 - **`#spname`'s focus ring is `--btn`.** Unstyled, `outline-style` resolves to `auto` and every
   platform paints its own — which is why `spawnsheet.mjs` samples pixels; a computed-style
   assertion passes on the broken page. The "blue reads as the owner's voice" ruling is about the

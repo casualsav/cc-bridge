@@ -9,7 +9,6 @@
 //
 // Deliberately NOT covered here, each for a stated reason rather than an omission:
 //   ttsMode=all, transcribeModel — their side effect is an 80MB+ background install on a shared box
-//   prefMode                     — writes permissions.defaultMode into the OWNER's real ~/.claude
 //   mcp                          — renames a file inside the installed plugin dir
 //   sessionPin, switchboard      — their side effect is a pinned CARD in a live chat; the pref half
 //                                  is checked here, the card half needs a human's eye on the chat
@@ -58,6 +57,11 @@ const PROBES: Probe[] = [
   { key: 'spawnEffort', to: 'high', read: () => prefs().spawnEffort, expect: 'high' },
   { key: 'chatModel', to: 'sonnet', read: () => prefs().chatModel, expect: 'sonnet' },
   { key: 'chatEffort', to: 'high', read: () => prefs().chatEffort, expect: 'high' },
+  // The two keys that replaced 🧷 Preferred mode. They are here BECAUSE of what they replaced: that
+  // row wrote Claude Code's permissions.defaultMode into the owner's real ~/.claude, so it was carved
+  // out of this sweep by name and was the one settings row nobody could ever check end to end.
+  { key: 'spawnMode', to: 'plan', read: () => prefs().spawnMode, expect: 'plan' },
+  { key: 'chatMode', to: 'acceptEdits', read: () => prefs().chatMode, expect: 'acceptEdits' },
   { key: 'ttsEngine', to: 'openai', read: () => (prefs().tts as { engine?: string })?.engine, expect: 'openai' },
   { key: 'ttsVoice', to: 'en_GB-alan-medium', read: () => (prefs().tts as { voice?: string })?.voice, expect: 'en_GB-alan-medium' },
   { key: 'sessionPin', to: false, read: () => prefs().sessionPin, expect: false, note: 'pref half only — the unpin lands in a live chat' },

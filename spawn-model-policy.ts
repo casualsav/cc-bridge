@@ -332,7 +332,8 @@ export function relaunchModel(remembered: string | null, configuredDefault: stri
 // behaving exactly as it did under the single "Model defaults" setting until the owner splits them
 // (his ruling: upgrade-invariance wins). The alternative — a fixed chat fallback — would silently
 // move the chat lane on every box whose coding default is not Opus.
-export type RolePrefs = { spawnModel?: string; spawnEffort?: string; chatModel?: string; chatEffort?: string }
+export type RolePrefs = { spawnModel?: string; spawnEffort?: string; chatModel?: string; chatEffort?: string
+                          spawnMode?: string; chatMode?: string }
 
 export function launchDefaultModel(role: SessionRole, prefs: RolePrefs, aliases: readonly string[]): string {
   const ok = (v: string | undefined): v is string => !!v && aliases.includes(v)
@@ -351,6 +352,28 @@ export function launchDefaultEffort(role: SessionRole, prefs: RolePrefs, standin
   const usable = (v: string | null | undefined): v is string => !!v && levels.includes(v) && v !== 'auto'
   const chain = role === 'chat' ? [prefs.chatEffort, prefs.spawnEffort, standing] : [prefs.spawnEffort, standing]
   return chain.find(usable) ?? AUTO_EFFORT_FALLBACK
+}
+
+// The third dial, and the ONE that is deliberately NOT total — read the paragraph above before
+// "fixing" that. Unset means *no configured mode*, and the launch chain then keeps its pre-0.4.371
+// behaviour byte for byte (inherit the focused pane's mode, else lastFocusedMode). A fallback here
+// would apply a mode nobody chose to every spawn on every box the moment they upgraded, which is the
+// opposite of the upgrade-invariance the chat chain above exists to protect — and modes are not
+// models: landing on the wrong one means a session that either stops to ask about everything or asks
+// about nothing.
+//
+// Same two-term chain as the others, for the same reason: a box that sets only the coding mode gets
+// its chat lane following it until the owner splits them.
+//
+// The replaced mechanism was Claude Code's own `permissions.defaultMode`, per ACCOUNT config dir. It
+// is not read here and not written anywhere by settings any more: it still governs launches the
+// bridge does not make (a bare `claude`), and a role's mode now beats it by always being passed
+// explicitly. Importing those values into this pref was rejected on purpose — `bypassPermissions`
+// set for a terminal is not a decision about what the bridge should spawn.
+export function launchDefaultMode(role: SessionRole, prefs: RolePrefs, modes: readonly string[]): string | null {
+  const ok = (v: string | undefined): v is string => !!v && modes.includes(v)
+  const chain = role === 'chat' ? [prefs.chatMode, prefs.spawnMode] : [prefs.spawnMode]
+  return chain.find(ok) ?? null
 }
 
 // ---- The spawn confirmation ----
