@@ -53,8 +53,10 @@ export interface WebappDeps {
   readSessionFeed?: (sid: string) => Promise<SessionFeed | null> | SessionFeed | null   // drill-in: recent conversation + live activity
   readSessionMessage?: (sid: string, uuid: string) => Promise<string | null> | string | null   // ONE row's full unclamped text, for expanding a clipped bubble
   // stop/compact/send → error string, or null on success, or `{ confirm }` when the action needs the
-  // user's yes first (a /clear under the 🧹 /clear approval setting) — nothing was done in that case.
-  sessionAction?: (userId: string, sid: string, action: SessionAct, text?: string, opts?: { confirmed?: boolean }) => Promise<string | { confirm: string } | null> | string | { confirm: string } | null
+  // user's yes first (a /clear under the 🧹 /clear approval setting) — nothing was done in that case —
+  // or `{ navigate }` when the text was a bridge command this app can show (a composer `/files`),
+  // which likewise did nothing to the session.
+  sessionAction?: (userId: string, sid: string, action: SessionAct, text?: string, opts?: { confirmed?: boolean }) => Promise<SessionActionResult> | SessionActionResult
   sessionAttach?: (userId: string, sid: string, fileName: string, data: Uint8Array, opts: { caption?: string; voice?: boolean }) => Promise<{ error: string } | { delivered: string; match: string }>   // compose-row file/voice → bubble text + reconcile token
   sessionSpawn?: (userId: string, name: string, opts: { account?: string; model?: string; effort?: string; mode?: string; headless?: boolean }) => Promise<{ error: string } | { sid: string; name: string }>   // "+" new session with provider/model dials
   // ACCOUNT-level usage, served once per /api/sessions rather than per card: the 5h and weekly rate
@@ -144,6 +146,12 @@ export interface SessionCard {
 // 'model'/'effort' carry the chosen alias/level in `text` — the mini app's dial picker, applied to
 // the session's own pane by the same /model and /effort injections the chat-side pickers use.
 export type SessionAct = 'stop' | 'compact' | 'send' | 'close' | 'model' | 'effort'
+// Mirrors daemon.ts's WebappActionResult. Both non-null OBJECT shapes mean "nothing was done to the
+// session" and travel as a 200; the string channel stays reserved for real failures.
+export type SessionActionResult =
+  | string | null
+  | { confirm: string }
+  | { navigate: { to: 'sessions' | 'settings' | 'scheduled' | 'files'; note: string; cwd?: string } }
 export interface SessionFeed {
   sid: string; name: string; working: boolean
   // The SAME four states the card renders, so the header dot a card opens onto cannot contradict the
@@ -481,7 +489,11 @@ async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: strin
     const r = await deps.sessionAction(userId, body.sid, action, typeof body.text === 'string' ? body.text : undefined,
       body.confirmed === true ? { confirmed: true } : undefined)
     // A confirm is a 200 with nothing done — it is a question, not a failure, and routing it through
-    // the 400/error channel would surface it as the composer's red toast instead of a dialog.
+    // the 400/error channel would surface it as the composer's red toast instead of a dialog. A
+    // navigate is the same shape of answer (the daemon did nothing and is telling the app where to
+    // go), so it rides the same channel — matched by KEY, not by "is an object", or a new result
+    // shape silently becomes `{confirm: undefined}` and renders an empty dialog.
+    if (r && typeof r === 'object' && 'navigate' in r) return json({ navigate: r.navigate })
     if (r && typeof r === 'object') return json({ confirm: r.confirm })
     return r ? json({ error: r }, 400) : json({ ok: true })
   }

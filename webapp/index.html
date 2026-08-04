@@ -3293,7 +3293,24 @@ async function sendToSession(text) {
     if (!(await askConfirm(d.confirm))) return false;
     d = await writeOp("/api/session/act", { sid, action: "send", text, confirmed: true });
   }
+  // A bridge command the app can show comes back as { navigate } with the session untouched — the
+  // same "nothing was done" 200 the confirm rides. The daemon decides WHICH screen (slash-policy.ts
+  // is the one table); this only knows how to open one. The work indicator is cleared because
+  // navigation starts no turn, and nothing here can arrive as a status to replace it.
+  if (d && d.navigate) { workOptimisticAt = 0; await goNavigate(d.navigate); return true; }
   return !!d;
+}
+
+// The four destinations, and the whole reason `cwd` is on the wire: the files sheet is scoped to the
+// session that owns the folder, and its root must be the daemon's own absolute path — the drill-in
+// subtitle is home-abbreviated (`~/projects/x`) and /api/ls cannot resolve a `~`.
+async function goNavigate(nav) {
+  if (nav.note) showOk(nav.note);
+  if (nav.to === "files") { await openFilesSheet(nav.cwd, nav.cwd); return; }
+  // Every other target is a view, and the drill-in is an overlay above all of them — leaving it up
+  // would switch a screen nobody can see.
+  if ($("drill").classList.contains("show")) closeDrill();
+  await showTab(nav.to === "scheduled" ? "auto" : nav.to);
 }
 
 // ---- The composer's model/effort dial: a pill in the capsule → a two-page bottom sheet ----

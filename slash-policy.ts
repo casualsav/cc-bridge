@@ -19,7 +19,12 @@ export type SlashPlan =
   | { kind: 'model'; arg: string }                      // route to the session-only model path
   | { kind: 'effort'; arg: string }                     // route to the session-only effort path
   | { kind: 'exit' }                                    // owner-gated; routed to the close action
+  | { kind: 'navigate'; to: NavTarget; note: string }   // a bridge command with a destination IN this app
   | { kind: 'refuse'; reason: string }
+
+// The client's three views plus the browse sheet. `files` is not a view: browsing is a sheet inside
+// the session that owns the folder, so it is the one target that needs that session's cwd.
+export type NavTarget = 'sessions' | 'settings' | 'scheduled' | 'files'
 
 // A command is one segment, no second slash. Without this `/tmp/foo is where I put it` was pasted
 // at the CLI as a command, because "starts with a slash" was the whole test.
@@ -58,15 +63,48 @@ const BLOCKED: Record<string, string> = {
   '/bug': 'opens an interactive report flow', '/feedback': 'opens an interactive report flow',
 }
 
-// Names the BRIDGE owns that Claude Code does not. Pasting one gets "Unknown command" at best and a
-// palette misfire at worst, so each says where it actually lives instead.
+// Bridge commands that have a DESTINATION IN THIS APP. That question — not "is it ours" — is the
+// layer's whole definition: a name the bridge owns and the app can show goes there, and a name the
+// bridge owns and the app cannot show says where it lives instead (BRIDGE_ONLY below).
+//
+// `/files` was in NEITHER table, so it fell through to the CLI, where the slash palette fuzzy-matched
+// it — observed on the owner's screen, one palette predicate from running `/fable-method` in a live
+// coding session. That is the bug this table closes, and the reason it is a table rather than a
+// special case for one command.
+// `note` is EMPTY where the screen that opens is the answer. This app retired success confirmations
+// on the rule that the surface behind the bar already shows the outcome, and a navigation is the
+// most visible outcome there is — so a note is carried only where the destination does NOT explain
+// itself: landing on Settings after typing `/voice` shows you a screen without saying why.
+const NAVIGATE: Record<string, { to: NavTarget; note: string }> = {
+  '/files':    { to: 'files',     note: '' },
+  '/sessions': { to: 'sessions',  note: '' },
+  '/settings': { to: 'settings',  note: '' },
+  '/cron':     { to: 'scheduled', note: '' },
+  '/new':      { to: 'sessions',  note: 'The + button spawns a session.' },
+  '/launch':   { to: 'sessions',  note: 'The + button starts a fresh session.' },
+  '/account':  { to: 'settings',  note: 'Accounts live in settings.' },
+  '/harness':  { to: 'settings',  note: 'Providers live in settings, under accounts.' },
+  '/voice':    { to: 'settings',  note: 'Voice replies are a settings row.' },
+  '/stream':   { to: 'settings',  note: 'Reply streaming is a settings row.' },
+  '/queue':    { to: 'scheduled', note: 'Queued prompts live on the Scheduled board.' },
+  '/later':    { to: 'scheduled', note: 'Queued prompts live on the Scheduled board.' },
+  '/budget':   { to: 'scheduled', note: 'The daily cap lives on the Scheduled board.' },
+}
+
+// Names the BRIDGE owns that this app CANNOT show — so each says where it actually lives. Pasting one
+// at the CLI gets "Unknown command" at best and a palette misfire at worst.
+//
+// The destinations these name are the ones a reader will go looking for, so they must track the app:
+// the 2026-07-30 restructure deleted the tab ROW, leaving three views reached as the command center,
+// the Scheduled pill and the ⋮ menu. `/find` used to point at a "Files tab" that no longer exists at
+// all, and the recursive search it names has no home in the app yet — so it says that rather than
+// sending someone to a screen that cannot do it.
 const BRIDGE_ONLY: Record<string, string> = {
-  '/sessions': 'the Sessions tab', '/settings': 'the Settings tab', '/new': 'the + button on the Sessions tab',
-  '/find': 'the Files tab', '/queue': 'the Scheduled tab', '/later': 'the Scheduled tab',
-  '/budget': 'the Scheduled tab', '/pin': 'the chat', '/start': 'the chat', '/health': 'the chat',
+  '/find': 'no home in this app yet — browse the session’s folder from the paperclip instead',
+  '/pin': 'the chat', '/start': 'the chat', '/health': 'the chat',
   '/mode': 'the chat', '/plan': 'the chat', '/auto': 'the chat', '/acceptedits': 'the chat',
-  '/bypass': 'the chat', '/yolo': 'the chat', '/agent': 'the chat', '/launch': 'the chat',
-  '/harness': 'the chat', '/bind': 'the chat', '/unbind': 'the chat', '/claim': 'the chat',
+  '/bypass': 'the chat', '/yolo': 'the chat', '/agent': 'the chat',
+  '/bind': 'the chat', '/unbind': 'the chat', '/claim': 'the chat',
   '/base': 'the chat', '/diff': 'the chat', '/terminal': 'the chat', '/reset': 'the chat',
 }
 
@@ -78,6 +116,10 @@ export function planSlash(text: string): SlashPlan {
   const name = token.toLowerCase()
   const arg = trimmed.slice(token.length).trim()
 
+  // Navigation is checked FIRST: a bridge command with a destination must never reach the CLI, and
+  // must never be refused with prose for a screen this app can simply open.
+  const nav = NAVIGATE[name]
+  if (nav) return { kind: 'navigate', to: nav.to, note: nav.note }
   if (BRIDGE_ONLY[name]) return { kind: 'refuse', reason: `${name} is a bridge command, not a session command — it lives in ${BRIDGE_ONLY[name]}.` }
   if (BLOCKED[name]) return { kind: 'refuse', reason: `${name} ${BLOCKED[name]}, so it isn't available from a session chat.` }
   if (MODAL[name]) return { kind: 'refuse', reason: `${name} ${MODAL[name]} in the terminal, which this chat can't drive. Run it in the session's own pane.` }

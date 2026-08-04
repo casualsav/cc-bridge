@@ -35,7 +35,7 @@ import { accountRemovalPlan, readAccountIdentity } from './account-identity.ts'
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
 import { normalizeCommandOutput } from './ansi.ts'
-import { planSlash } from './slash-policy.ts'
+import { planSlash, type NavTarget } from './slash-policy.ts'
 import { preserveGlobalEffort, reconcileEffortScope } from './effort-scope.ts'
 import { planDrift, driftStateAfter, type DriftState } from './drift-guard.ts'
 import { decideModel, decideEffort, upgradeNeedsConfirm, heldSpawnModel, heldSpawnNeedsLine, holdTapData, parseHoldTap, launchFallback, spawnCardHeader, relaunchModel, launchDefaultModel, launchDefaultEffort, launchDefaultMode, fablePolicy, fableRowState, onOff, type FablePolicy, AUTO_FALLBACK, AUTO_EFFORT_FALLBACK, FABLE, HAIKU, isClaudeFamily, type ModelDecision, type HoldOutcome } from './spawn-model-policy.ts'
@@ -18685,7 +18685,12 @@ const WEBAPP_RESET_COMMANDS = new Set(['/clear', '/reset'])
 
 // `{ confirm }` is not an error and does not share the error channel: it means the daemon did
 // NOTHING and is asking. The client raises its own confirm and re-sends with confirmed: true.
-type WebappActionResult = string | { confirm: string } | null
+// A navigate result rides the SAME 200 channel as a confirm and for the same reason: the daemon did
+// nothing wrong and is not reporting a failure, so the 400/error channel would surface it as the
+// composer's red toast. `cwd` is filled server-side for the files target from paneCwd — the client
+// must never derive it from the drill-in subtitle, which is home-abbreviated (`~/projects/x`) and
+// unresolvable by /api/ls.
+type WebappActionResult = string | { confirm: string } | { navigate: { to: NavTarget; note: string; cwd?: string } } | null
 
 async function webappSessionAction(userId: string, sid: string, action: 'stop' | 'compact' | 'send' | 'close' | 'model' | 'effort', text?: string, opts?: { confirmed?: boolean }): Promise<WebappActionResult> {
   const pane = await paneForSession(sid).catch(() => null)
@@ -18787,6 +18792,25 @@ async function webappSessionAction(userId: string, sid: string, action: 'stop' |
   // the composer's error toast, which also hands the draft back so it can be edited.
   const plan = planSlash(msg)
   if (plan.kind === 'refuse') return plan.reason
+  // A bridge command the app can SHOW opens that screen instead of being refused with prose about
+  // it — and, crucially, instead of reaching the CLI. `/files` was in neither table before this and
+  // fell through to the pane, where the slash palette fuzzy-matched it. Nothing is typed here, so
+  // this returns before every pane read below: navigation is not a session action and must not
+  // refuse mid-turn.
+  if (plan.kind === 'navigate') {
+    if (plan.to === 'files') {
+      // The same live pref the Telegram /files command reads, and the same wording. With it off the
+      // browse card is REMOVED from the app and every file endpoint 403s, so navigating there would
+      // open a sheet that cannot list anything — a worse answer than the pane paste this replaced.
+      if (loadAccess().fileBrowser === false) return '🗂 File browser is off — turn it on in /settings → 🗂 File browser (no restart needed).'
+      const cwd = await paneCwd(pane).catch(() => null)
+      // Without a folder there is nothing to open; say so rather than raising the sheet at whatever
+      // root the client happened to hold last.
+      if (!cwd) return 'could not read this session’s folder — try the paperclip’s Session folder card'
+      return { navigate: { to: plan.to, note: plan.note, cwd } }
+    }
+    return { navigate: { to: plan.to, note: plan.note } }
+  }
   // The dial's own path, reached by recursion so the validation, the mid-turn guard and the
   // session-only application are the SAME code the picker uses — and so `/model sonnet` stops being
   // the one surface on the box that changes the default for every future session.
