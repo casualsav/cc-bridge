@@ -20,9 +20,13 @@ graphify-out/
 .claude/settings.local.json
 
 # session handoff docs — local, ephemeral working notes the /handoff + /continue
-# bridge commands write and read across sessions; never commit them (they go stale)
-handoff.md
-HANDOFF.md
+# bridge commands write and read across sessions; never commit them (they go stale).
+# ANCHORED to the repo root on purpose: unanchored, `handoff.md` matches at any depth
+# and silently swallowed docs/handoff.md — the shipped CONVENTION for these files, which
+# a deploy takes from `git ls-files` and would therefore never have carried.
+/handoff.md
+/HANDOFF.md
+/handoff/
 PLAN.md
 DECISIONS.md
 

@@ -139,19 +139,42 @@ Speak only when you're addressed (a `<tg @you ask=ID>` block) or to hand off —
 traffic not aimed at you. Deliverables go to files in `$(tg shared)`; the chat carries pointers and
 one-line summaries.
 
-## Handoffs — one doc per repo, `HANDOFF.md` at the repo root
+## Handoffs — one per repo: `HANDOFF.md` is an INDEX, the items live in `handoff/`
 
-**Write your handoff to `HANDOFF.md` in the root of the repo you're working in — that exact name,
-that one place, every repo.** Not a dated filename, not one named after the phase or the topic, not
-a copy parked in a shared dir: a single well-known path is what lets the next session — another
-agent, or the owner running `/handoff` and `/continue` — find it without being told where to look.
-A repo that already has one gets it rewritten, never a second file alongside it.
+**`HANDOFF.md` at the root of the repo you're working in — that exact name, that one place, every
+repo.** A single well-known path is what lets the next session — another agent, or the owner running
+`/handoff` and `/continue` — find it without being told where to look. Never a dated filename, never
+a second doc alongside it, never a copy parked in a shared dir.
 
-**It carries LIVE items only.** What is in flight, what to verify, what is still unresolved. Finish
-an item that came from the handoff and you DELETE that entry — no "done ✓" annotation, no history
-section, no session log. Completed work is already externalized in the repo, the commits and your
-report; every line still in the doc is context the next reader pays for, and a done-marked one costs
-that forever while informing nothing. When nothing live remains, delete the file. A handoff shrinks
-toward empty — that is the shape of it working, not a record being lost.
+**It is an index and holds nothing else**: one line per open item, `- [slug](handoff/slug.md) —
+one-line hook`, no prose above, between or below. Each item is its own file in `handoff/`, carrying
+what a successor needs to take it cold — the state now, the next step, and the check that proves it
+done, because a handoff item is an ask nobody has sent yet. Read the index for the shape of the
+work and stop; open only the files for items you are taking. A fresh worker's context is the
+scarcest thing in the fleet, and a monolith makes every spawn swallow seventy items to find its two.
+
+**Finish an item and you DELETE its file and its index line** — no "done ✓", no history section, no
+dated sibling. Completed work is already externalized in the repo, the commits and your report; a
+done-marked line costs every later reader forever while informing nothing. When no items remain,
+delete the index and the item files; `facts.md` is not an item and outlives them, so `handoff/`
+itself goes only once it is empty too. A handoff shrinks toward empty — that is the shape of it
+working, not a record being lost.
+
+**`handoff/facts.md` is the one unindexed file:** standing truths about the repo or the box that
+pruning must not delete. Membership test — if finishing every open item would leave the statement
+still true and still worth reading, it is a fact, not an item.
+
+The invariant is every index line has a file and every file has a line. Silence is health; a `<` is
+a dangling entry, a `>` an orphaned file no reader will ever be routed to:
+
+```sh
+diff <(grep -o '](handoff/[^)]*)' HANDOFF.md | sed 's|](handoff/||; s|)||' | sort) \
+     <(ls handoff/ | grep -v '^facts\.md$' | sort)
+```
+
+A repo whose HANDOFF.md is still one monolithic document keeps working exactly as before — same
+rules, one file. Stay in the shape the repo has; converting one is a deliberate prune, not something
+you do on the way past. Whether `handoff/` is tracked inherits the repo's existing answer for
+HANDOFF.md. Full convention, including migration: `docs/handoff.md` in the cc-bridge repo.
 
 Write one before your context is cleared or you retire.
