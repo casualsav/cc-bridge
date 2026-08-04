@@ -1431,6 +1431,12 @@
   #fblist { max-height: 56vh; overflow-y: auto; margin: 0; padding: 0; list-style: none; }
   #fbrowse .crumbs { margin-bottom: var(--sp-2); }
   .sheet .shead { font-weight: var(--w-semi); font-size: var(--t-title); margin-bottom: var(--sp-3); }
+  /* A readout is as tall as the CLI made it, so it is CAPPED and scrolls inside the sheet. A sheet
+     that grows toward the top is fixed with a max-height, never `align-items: flex-end` — that
+     overflows PAST the padding. The global `pre` carries `flex: 1`, which sizes to nothing in a
+     non-flex sheet, so the height is stated here. */
+  #readout pre { max-height: 52vh; flex: none; padding: var(--sp-3) 0; }
+  #readout #rowarn { margin-bottom: var(--sp-2); }
   /* --t-body, and this one is a BUG FIX wearing a design change: iOS Safari zooms the whole page when
      a field under 16px takes focus, and the sheet's 14px field did exactly that. */
   .sheet input, .sheet textarea { width: 100%; padding: var(--sp-3); border-radius: var(--r-md); border: none; background: var(--sec); color: var(--text); font-size: var(--t-body); }
@@ -1817,6 +1823,23 @@
     <div class="seglbl">Message</div>
     <textarea id="sctext" rows="3" placeholder="What to send when it fires"></textarea>
     <div class="sprow"><button id="sccancel" class="cancel">Cancel</button><button id="scgo" class="create">Create</button></div>
+  </div>
+</div>
+
+<!-- A CLI panel the bridge drove and read back (/cost, /context, /usage, /status, /mcp, /hooks). A
+     glance-and-dismiss object, which is what a sheet IS — the viewer was considered and refused: it
+     is a workbench whose Download, Edit and back-to-folder controls would all be dead here, and
+     suppressing three of five controls to save markup is renting the wrong room because it is
+     furnished. It joins the .sheetwrap family and adds NO tokens and NO motion of its own: the
+     backdrop, the 180ms slide and the reduced-motion gate all come from the class, which is the whole
+     reason that class exists (three settings sheets once painted on the Sessions screen for want of
+     it). sheetleak.mjs sweeps it like every other. -->
+<div id="readout" class="sheetwrap">
+  <div class="sheet">
+    <div class="shead" id="rohead"></div>
+    <div class="acctmeta" id="rowarn" style="display:none"></div>
+    <pre id="robody"></pre>
+    <div class="sprow"><button id="roclose" class="cancel">Close</button></div>
   </div>
 </div>
 
@@ -3298,7 +3321,23 @@ async function sendToSession(text) {
   // is the one table); this only knows how to open one. The work indicator is cleared because
   // navigation starts no turn, and nothing here can arrive as a status to replace it.
   if (d && d.navigate) { workOptimisticAt = 0; await goNavigate(d.navigate); return true; }
+  // A panel the daemon drove and read back. Same "nothing was done to the session" 200, and the work
+  // indicator is cleared for the same reason: reading a panel starts no turn, so no status will ever
+  // arrive to replace it.
+  if (d && d.readout) { workOptimisticAt = 0; showReadout(d.readout); return true; }
   return !!d;
+}
+
+// The readout sheet. Text goes in with textContent, never innerHTML: this is a captured TERMINAL
+// SCREEN — arbitrary bytes from a CLI the page does not control — and the one thing it must never do
+// is let that screen write markup into this app.
+function showReadout(r) {
+  $("rohead").textContent = `${r.icon} ${r.name}`;
+  const warn = $("rowarn");
+  warn.textContent = r.warning || "";
+  warn.style.display = r.warning ? "block" : "none";
+  $("robody").textContent = r.text;
+  openSheet("readout");
 }
 
 // The four destinations, and the whole reason `cwd` is on the wire: the files sheet is scoped to the
@@ -4169,6 +4208,7 @@ $("accform").onsubmit = async e => {
 };
 
 $("sccancel").onclick = () => closeSheet("sched");
+$("roclose").onclick = () => closeSheet("readout");
 $("sched").onclick = e => { if (e.target.id === "sched") closeSheet("sched"); };
 $("scgo").onclick = async () => {
   const when = $("scwhen").value.trim(), text = $("sctext").value.trim();

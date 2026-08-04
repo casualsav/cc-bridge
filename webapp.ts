@@ -152,6 +152,7 @@ export type SessionActionResult =
   | string | null
   | { confirm: string }
   | { navigate: { to: 'sessions' | 'settings' | 'scheduled' | 'files'; note: string; cwd?: string } }
+  | { readout: { icon: string; name: string; command: string; text: string; warning?: string } }
 export interface SessionFeed {
   sid: string; name: string; working: boolean
   // The SAME four states the card renders, so the header dot a card opens onto cannot contradict the
@@ -494,6 +495,7 @@ async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: strin
     // go), so it rides the same channel — matched by KEY, not by "is an object", or a new result
     // shape silently becomes `{confirm: undefined}` and renders an empty dialog.
     if (r && typeof r === 'object' && 'navigate' in r) return json({ navigate: r.navigate })
+    if (r && typeof r === 'object' && 'readout' in r) return json({ readout: r.readout })
     if (r && typeof r === 'object') return json({ confirm: r.confirm })
     return r ? json({ error: r }, 400) : json({ ok: true })
   }

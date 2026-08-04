@@ -18,17 +18,43 @@ test('an ordinary CLI command passes through untouched, custom ones included', (
   // The denylist must not become an allowlist: a user's own skill command is unknown to this file
   // and has to work anyway.
   expect(planSlash('/taste-suite:taste-audit')).toMatchObject({ kind: 'pass' })
-  expect(planSlash('/context')).toEqual({ kind: 'pass', command: '/context' })
+  // `/context all` is a wider INLINE dump that never takes the screen, so it stays an ordinary
+  // command. Bare `/context` opens the panel and is read back instead (below).
+  expect(planSlash('/context all')).toEqual({ kind: 'pass', command: '/context all' })
 })
 
-// Every name here was measured on a live pane: it left the CLI on a full-screen dialog that the
-// mini app has no way to answer. /status parking the Settings screen is the observed failure.
+// Every name here was measured on a live pane: it left the CLI on a full-screen dialog that the mini
+// app has no way to answer. /status parking the Settings screen is the observed failure.
+//
+// SHORTER SINCE v0.4.379: the six with a READER moved out (below). This list is now the screens with
+// no reader at all, where "this chat can't drive it" is still the whole truth.
 test('a command that opens a full-screen dialog is refused, with what it opens', () => {
-  for (const c of ['/status', '/config', '/mcp', '/hooks', '/permissions', '/export', '/help', '/resume', '/rewind', '/cost', '/usage']) {
+  for (const c of ['/config', '/permissions', '/export', '/help', '/resume', '/rewind']) {
     const p = planSlash(c)
     expect(p.kind).toBe('refuse')
     expect((p as { reason: string }).reason).toContain(c)
   }
+})
+
+// The panels the bridge can DRIVE: type it, capture the screen, Esc the pane home, hand the text
+// back. The refusal these used to get was right about the CLI's screen and wrong about ours, and the
+// reader already ships — `tg cost` and `@name /cost` have used it for weeks.
+//
+// Read off `panelKindOf`, the one enumeration every surface shares, so a panel cannot be readable in
+// Telegram and a wedge in the mini app. Bare `/context` is in it; `/context all` is not (above), and
+// that split is the enumeration's own.
+test('a panel the bridge can read is read, not refused', () => {
+  for (const [cmd, panel] of [['/cost', 'cost'], ['/context', 'context'], ['/usage', 'usage'],
+                              ['/status', 'status'], ['/mcp', 'mcp'], ['/hooks', 'hooks']] as const) {
+    expect(planSlash(cmd)).toEqual({ kind: 'readout', panel })
+  }
+})
+
+// /context used to be `pass` — it was in no table at all, so bare `/context` was typed at the CLI and
+// left its panel standing on the pane with the composer reporting success. The same class as the
+// /status incident that built this file, surviving in the one command nobody had listed.
+test('bare /context no longer reaches the pane unread', () => {
+  expect(planSlash('/context').kind).not.toBe('pass')
 })
 
 test('box-wide and irreversible commands are refused for what they touch', () => {

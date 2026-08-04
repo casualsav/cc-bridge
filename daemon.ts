@@ -18726,7 +18726,13 @@ const WEBAPP_RESET_COMMANDS = new Set(['/clear', '/reset'])
 // composer's red toast. `cwd` is filled server-side for the files target from paneCwd — the client
 // must never derive it from the drill-in subtitle, which is home-abbreviated (`~/projects/x`) and
 // unresolvable by /api/ls.
-type WebappActionResult = string | { confirm: string } | { navigate: { to: NavTarget; note: string; cwd?: string } } | null
+type WebappActionResult = string | { confirm: string } | { navigate: { to: NavTarget; note: string; cwd?: string } }
+  // A panel the bridge drove and read back. Same 200 channel as the two above and for the same
+  // reason — the session was not sent a message and nothing failed. `warning` carries the two states
+  // the Telegram path also reports rather than hiding: the pane did not return to its prompt, or the
+  // panel's layout moved and this is the raw block.
+  | { readout: { icon: string; name: string; command: string; text: string; warning?: string } }
+  | null
 
 async function webappSessionAction(userId: string, sid: string, action: 'stop' | 'compact' | 'send' | 'close' | 'model' | 'effort', text?: string, opts?: { confirmed?: boolean }): Promise<WebappActionResult> {
   const pane = await paneForSession(sid).catch(() => null)
@@ -18846,6 +18852,33 @@ async function webappSessionAction(userId: string, sid: string, action: 'stop' |
       return { navigate: { to: plan.to, note: plan.note, cwd } }
     }
     return { navigate: { to: plan.to, note: plan.note } }
+  }
+  // A panel the bridge can drive: type it, capture the screen, Esc the pane home, hand the text back.
+  // `readPanel` is the SAME core `tg cost` and `@name /cost` have used for weeks — this adds a
+  // surface, not a mechanism, which is why the per-command parsing needs no new evidence.
+  //
+  // It carries its OWN copies of the pane guards rather than falling through to the ones below,
+  // because those are followed by the paste that actually sends a message, and this path must not
+  // reach it. Same three checks, same wording, same order.
+  if (plan.kind === 'readout') {
+    const cap0 = await capturePane(pane).catch(() => '')
+    if (bashModeArmed(cap0)) return 'the session has an unsubmitted ! bash command in its input box'
+    if (!paneAcceptsText(cap0)) return 'the session is showing a dialog — answer it first'
+    // A readout TYPES into the pane, so it takes the same mid-turn refusal a command does. Reading a
+    // panel out of a running turn would interrupt the turn to answer a question about it.
+    if (!onNormalPrompt(cap0) || detectWorking(cap0)) return 'the session is mid-turn — try again when it goes idle'
+    // The watcher is the one this session's own sends already use, so the panel read pauses the same
+    // poller a paste would rather than racing it.
+    const o = await readPanel({ paneId: pane, watcher, isFocused: false }, plan.panel)
+    if (!o.ok) return o.error
+    const p = PANELS[plan.panel]
+    // Both non-fatal states are REPORTED rather than smoothed over: a pane left off its prompt is the
+    // wedge this whole class exists to prevent, and a moved layout means the text is the raw block
+    // rather than a parsed report with a line silently missing.
+    const warning = !o.restored ? `The pane did not return to its prompt after ${p.command} — send Esc from the session.`
+      : o.layoutChanged ? `${p.command}'s layout changed — this is the raw screen (missing: ${o.missing.join(', ')}).`
+      : undefined
+    return { readout: { icon: p.icon, name: p.name, command: p.command, text: o.text, ...(warning ? { warning } : {}) } }
   }
   // The dial's own path, reached by recursion so the validation, the mid-turn guard and the
   // session-only application are the SAME code the picker uses — and so `/model sonnet` stops being

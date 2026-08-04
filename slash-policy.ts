@@ -13,6 +13,8 @@
 // observed failure was `/status` parking Claude Code's Settings screen and refusing every send after
 // it with "the session is showing a dialog", from a composer that had just reported success.
 
+import { panelKindOf, type PanelKind } from './panel-readout.ts'
+
 export type SlashPlan =
   | { kind: 'prose' }                                   // not a command at all — deliver as a message
   | { kind: 'pass'; command: string }                   // hand to the CLI, as today
@@ -20,6 +22,7 @@ export type SlashPlan =
   | { kind: 'effort'; arg: string }                     // route to the session-only effort path
   | { kind: 'exit' }                                    // owner-gated; routed to the close action
   | { kind: 'navigate'; to: NavTarget; note: string }   // a bridge command with a destination IN this app
+  | { kind: 'readout'; panel: PanelKind }               // a full-screen CLI panel the bridge can read and hand back
   | { kind: 'refuse'; reason: string }
 
 // The client's three views plus the browse sheet. `files` is not a view: browsing is a sheet inside
@@ -35,10 +38,14 @@ const COMMAND_TOKEN = /^\/[a-zA-Z][\w:-]*$/
 
 // Full-screen dialogs, measured (see the header). `/model` and `/effort` are NOT here: bare they
 // open a picker and are refused below, with an argument they route to the dial's own path.
+// The six that MOVED OUT of this table, and why: `/cost` `/context` `/usage` `/status` `/mcp`
+// `/hooks` are exactly `panelKindOf`'s set — the panels the bridge can DRIVE and read back (type the
+// command, capture the screen, Esc the pane home) rather than merely refuse. The refusal was correct
+// about the CLI's own screen and wrong about ours, and the reader it needed already ships and is
+// already proven on `tg cost` and `@name /cost`. What stays here is the rest: screens with no reader,
+// where "this chat can't drive it" is still the whole truth.
 const MODAL: Record<string, string> = {
-  '/cost': 'opens a full-screen dashboard', '/usage': 'opens a full-screen dashboard',
-  '/status': 'opens the CLI\'s Status screen', '/config': 'opens the CLI\'s Config screen',
-  '/mcp': 'opens the MCP server list', '/hooks': 'opens the hooks editor',
+  '/config': 'opens the CLI\'s Config screen',
   '/permissions': 'opens the permission-rule editor', '/export': 'opens an export picker',
   '/release-notes': 'opens the release-notes browser', '/help': 'opens the help screen',
   '/rewind': 'opens the checkpoint picker', '/resume': 'opens the session picker',
@@ -120,6 +127,19 @@ export function planSlash(text: string): SlashPlan {
   // must never be refused with prose for a screen this app can simply open.
   const nav = NAVIGATE[name]
   if (nav) return { kind: 'navigate', to: nav.to, note: nav.note }
+  // A panel the bridge can read. Ahead of BRIDGE_ONLY and MODAL because both of those are ways of
+  // saying "not here", and this one IS here. `panelKindOf` is the single enumeration every surface
+  // reads — the Telegram command, the owner's `@name /cmd` routing, the bus verbs, `tg slash`'s
+  // refusal — so a panel cannot be readable on one surface and a wedge on another.
+  //
+  // Bare spellings only, which `panelKindOf` already enforces: `/context all` is a wider INLINE dump
+  // that never takes the screen, so it relays as an ordinary command and needs none of this.
+  // `arg` is checked here, not inside panelKindOf: this function matched on the bare TOKEN, so
+  // `/context all` reached the enumeration as `/context` and was classified as a panel — turning the
+  // wider inline dump into a screen-read. The enumeration is bare-spellings-only by design; honouring
+  // that means asking it only about a command that HAS no argument.
+  const panel = arg ? null : panelKindOf(name)
+  if (panel) return { kind: 'readout', panel }
   if (BRIDGE_ONLY[name]) return { kind: 'refuse', reason: `${name} is a bridge command, not a session command — it lives in ${BRIDGE_ONLY[name]}.` }
   if (BLOCKED[name]) return { kind: 'refuse', reason: `${name} ${BLOCKED[name]}, so it isn't available from a session chat.` }
   if (MODAL[name]) return { kind: 'refuse', reason: `${name} ${MODAL[name]} in the terminal, which this chat can't drive. Run it in the session's own pane.` }

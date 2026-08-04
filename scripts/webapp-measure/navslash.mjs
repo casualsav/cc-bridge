@@ -36,7 +36,7 @@ const SESSION = { sid: "s1", name: "cc-bridge", cwd: CWD, alive: true, working: 
 
 // The REAL classifier, once, for every command this script exercises. Anything that is not a
 // `navigate` comes back as its own kind and the checks below assert the page leaves it alone.
-const COMMANDS = ["/files", "/sessions", "/settings", "/cron", "/voice", "/clear"];
+const COMMANDS = ["/files", "/sessions", "/settings", "/cron", "/voice", "/clear", "/cost", "/context"];
 const PLANS = JSON.parse(execFileSync("bun", ["-e", `
   const { planSlash } = await import(${JSON.stringify(join(REPO, "slash-policy.ts"))})
   const out = {}
@@ -97,6 +97,14 @@ const open = async path => {
       if (plan && plan.kind === "navigate") {
         return j({ navigate: { to: plan.to, note: plan.note, ...(plan.to === "files" ? { cwd: CWD } : {}) } });
       }
+      // Mirrors daemon.ts's readout branch. The text is a captured TERMINAL SCREEN, so the fixture
+      // carries markup in it deliberately: a page that renders this with innerHTML would inject it,
+      // and the check below is what says it does not.
+      if (plan && plan.kind === "readout") {
+        return j({ readout: { icon: "📊", name: "Cost", command: "/cost",
+          text: "Total cost: $1.23\n<img src=x onerror=\"window.__pwned=1\">\nDuration: 4m 2s",
+          ...(body.text.trim() === "/context" ? { warning: "/context's layout changed — this is the raw screen (missing: total)." } : {}) } });
+      }
       return j({ ok: true });
     }
     return j({});
@@ -131,6 +139,15 @@ const screen = p => p.evaluate(() => {
     sheet: !!s && s.classList.contains("show"),
     sheetRoots: s ? [...s.querySelectorAll(".crumbs a")].map(a => a.dataset.p) : [],
     toast: err && err.classList.contains("show") ? err.textContent : "",
+    readout: (() => {
+      const r = document.getElementById("readout");
+      if (!r || !r.classList.contains("show")) return null;
+      const w = document.getElementById("rowarn");
+      return { head: document.getElementById("rohead").textContent,
+        body: document.getElementById("robody").textContent,
+        warn: w && w.style.display !== "none" ? w.textContent : "",
+        imgs: r.querySelectorAll("img").length, pwned: !!window.__pwned };
+    })(),
   };
 });
 
@@ -174,6 +191,29 @@ const run = async (path, live) => {
   await typeSend(p, "/settings");
   s = await screen(p);
   expect(s.tabs.includes("tab-settings") && !s.toast, "/settings navigates with NO note");
+  await close(p);
+
+  // A PANEL the bridge drove and read back. It lands in its own sheet — a glance-and-dismiss object,
+  // which is what a sheet is — and the pane is never sent a message.
+  p = await open(path);
+  await typeSend(p, "/cost");
+  s = await screen(p);
+  expect(!!s.readout, "/cost opens the readout sheet");
+  if (live) {
+    sink(s.readout.head === "📊 Cost", `[live] the sheet names the panel (${s.readout && s.readout.head})`);
+    sink(s.readout.body.includes("Total cost: $1.23"), "[live] the captured screen is shown verbatim");
+    // The text is a terminal screen the page does not control. textContent, never innerHTML.
+    sink(s.readout.imgs === 0 && !s.readout.pwned, "[live] the captured screen cannot inject markup into the app");
+    sink(s.readout.warn === "", "[live] a clean read carries no warning");
+  }
+  await close(p);
+
+  // Both non-fatal states are REPORTED rather than smoothed over — a moved layout means this is the
+  // raw screen, not a parsed report with a line silently missing.
+  p = await open(path);
+  await typeSend(p, "/context");
+  s = await screen(p);
+  expect(!!(s.readout && s.readout.warn), "/context's layout warning is shown, not swallowed");
   await close(p);
 
   // The four ambiguous verbs stay pane-passed. `/clear` is the one with a real CLI meaning AND a real

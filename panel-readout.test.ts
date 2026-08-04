@@ -187,14 +187,26 @@ test('every interactive panel refuses with a measured reason, and none of them i
 // to happen, and this fails the moment that lands.
 test('every MODAL command slash-policy knows is classified as readout or interactive', () => {
   const unclassified: string[] = []
+  const leaked: string[] = []
+  const mismatched: string[] = []
   for (const cmd of ['/cost', '/usage', '/status', '/config', '/mcp', '/hooks', '/permissions',
                      '/export', '/release-notes', '/help', '/rewind', '/resume', '/privacy-settings']) {
-    // Anchor the list itself: each of these must still be one slash-policy calls modal.
     const plan = planSlash(cmd)
-    expect(plan.kind).toBe('refuse')
+    // THE ANCHOR, and it is the property rather than the verdict: a command measured to take the
+    // screen must never reach the pane. `pass` is the wedge. Until v0.4.379 this asserted `refuse`,
+    // which was the only safe answer there was; six of these now have a READER, so the safe set is
+    // {readout, refuse} and asserting `refuse` would forbid the fix rather than guard the hazard.
+    if (plan.kind === 'pass') leaked.push(cmd)
     if (!panelKindOf(cmd) && !interactivePanelOf(cmd)) unclassified.push(cmd)
+    // The two files must agree about WHICH: a panel with a reader is planned as a readout, and one
+    // without is refused. Disagreement is how a panel becomes readable on one surface and a wedge on
+    // another, which is the exact failure this pair of files exists to prevent.
+    const expected = panelKindOf(cmd) ? 'readout' : 'refuse'
+    if (plan.kind !== expected) mismatched.push(`${cmd}: slash-policy says ${plan.kind}, panelKindOf implies ${expected}`)
   }
+  expect(leaked).toEqual([])
   expect(unclassified).toEqual([])
+  expect(mismatched).toEqual([])
 })
 
 test('panelKindOf routes the bare spellings only', () => {
