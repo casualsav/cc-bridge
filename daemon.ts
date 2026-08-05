@@ -128,7 +128,7 @@ import {
   retriggerTopicTyping, paneClaudeLive,
 } from './topic-runtime.ts'
 import { latchMode, type ModeLatch } from './mode-latch.ts'
-import { watchVerdict, watchNoticeText, existingWatch, alreadyWatchingText, serializePasses, type BusWatch, type WatchOutcome } from './watch-plan.ts'
+import { watchVerdict, watchNoticeText, existingWatch, alreadyWatchingText, adoptCause, serializePasses, type BusWatch, type WatchOutcome } from './watch-plan.ts'
 import { fetchUsageResult, type UsageReading } from './usage-api.ts'
 import { startWebapp, type SettingsView as WebappSettingsView, type SessionCard as WebappSessionCard, type SessionFeed as WebappSessionFeed, type AutomationView as WebappAutomationView, type UsageView as WebappUsageView } from './webapp.ts'
 import { startTunnel, ensureCloudflared, reapOrphanTunnels, tailscaleFunnelUrl, type Tunnel } from './tunnel.ts'
@@ -3702,7 +3702,10 @@ async function evaluateWatchesPass(): Promise<void> {
     // "At a prompt" is the predicate checkConcludedTurnObligations uses for this same question, plus
     // tryDeliverAsk's bash-mode arm. NOT tryDeliverAsk's gate alone: that one delivers into a working
     // pane (the CLI queues it), which is right for an ask and wrong for "it is free now".
-    const atPrompt = !!cap && onNormalPrompt(cap) && !detectWorking(cap) && !bashModeArmed(cap)
+    // …plus "not compacting": compaction is work the spinner doesn't always own, and a pane mid-/compact
+    // is not free — for a hand-armed watch either. A caused watch would otherwise report the very
+    // command it is waiting on as complete the moment the CLI redrew a prompt-shaped screen under it.
+    const atPrompt = !!cap && onNormalPrompt(cap) && !detectWorking(cap) && !bashModeArmed(cap) && !detectCompacting(cap)
     // A session whose END IS COMMITTED counts as gone even while its pane lingers (see endingSids). It
     // has to: `tg kill` interrupts the turn to type /exit, so a killed-while-busy session really does
     // reach a prompt for a few seconds on its way out, and firing 'prompt' there would tell the caller
@@ -6413,7 +6416,28 @@ async function handleCall(
         const sent = await injectSlash(targetPane, watcher, command, { guardPalette: true, settleMs: 3_000 })
         if (!sent.ok) { fail('unsubmitted' in sent ? unsubmittedSlashText(command, toName) : paletteRefusalText(command, sent.offered)); return }
         void echoSlashResult(targetPane, targets[0]?.chat ?? '', slashAt, targets[0]?.thread ? Number(targets[0].thread) : undefined, command)
+        // A COMPLETION event for the submitter, on the one command class where it has something to
+        // sequence behind: `/compact` returned "submitted" and then nothing, ever, so the caller had no
+        // way to learn when the session it had just emptied was usable again (owner, 2026-08-05). There
+        // is no CLI-emitted completion to read — the observable is the target reaching a prompt again,
+        // which is precisely what `tg watch` already reports, persisted across restarts, deduped and
+        // serialised against double-firing. So this ARMS that mechanism rather than adding a second one;
+        // `cause` is all that differs (the notice names the command, and the arm takes a grace).
+        // Scope is changesPaneContext — the commands after which the caller's picture of the session is
+        // stale — not every slash: a completion notice for a command nobody is waiting on is noise that
+        // costs the target a turn.
+        const causal = changesPaneContext(command) && res.id !== fromSid
+        if (causal) {
+          const already = existingWatch(busWatches, fromSid, res.id)
+          const w = already
+            ? adoptCause(already, command, Date.now())
+            : { id: nextWatchId(), watcherSid: fromSid, targetSid: res.id, targetName: toName, armedAt: Date.now(), cause: command }
+          if (!already) busWatches.push(w)
+          saveWatches()
+          process.stderr.write(`daemon: watch ${w.id} ${already ? 'adopted' : 'armed'} on @${toName} (${res.id}) by ${fromSid} — completion of ${command}\n`)
+        }
         text = `submitted ${command.split(/\s/)[0]} to @${toName} — its input box took it and cleared; the command's own output echoes on that session's surface`
+          + (causal ? `. You get ONE completion notice when @${toName} is back at a prompt — end your turn, it will wake you` : '')
         process.stderr.write(`daemon: slash ${command} → @${toName} (${targetPane}) submitted\n`)
         break
       }

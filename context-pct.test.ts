@@ -167,3 +167,35 @@ test('a missing fresh reading still backfills from the previous snapshot', () =>
   expect(merged.ctxPct).toBe(37)
   expect(merged.ctxWindow).toBe('1000k')
 })
+
+// ---- the compaction boundary (owner, 2026-08-05) ----
+// A slashed /compact on @weather left `tg roster` and the mini app's Sessions card reading 47%/1000k for
+// eleven minutes while `tg context` read 47.3k/1M = 5%. Compaction writes a summary and NO usage of its
+// own, so the backwards scan walked past the boundary and returned the PRE-compact prompt size — which
+// every surface then reported as the present. A broken version answers 470000 for the fixture below.
+const compactSummary = () =>
+  ({ type: 'user', isCompactSummary: true, timestamp: '2026-08-05T01:21:00.496Z',
+     message: { role: 'user', content: 'This session is being continued from a previous conversation…' } })
+
+test('the scan stops at a compaction boundary instead of reporting the pre-compact prompt', () => {
+  const f = write('compacted.jsonl', [
+    assistant({ input_tokens: 71, cache_read_input_tokens: 469_929, cache_creation_input_tokens: 0, output_tokens: 12 }),
+    compactSummary(),
+  ])
+  expect(lastContextTokens(f)).toBeNull()
+  // …and the caller falls back to the CLI's own scraped percentage, which is 0 in that window.
+  expect(contextPct({ ctxPct: 0, ctxWindow: '1000k' } as StatuslineData, f)).toBe(0)
+  expect(contextPct({ ctxPct: 0, ctxWindow: '1000k' } as StatuslineData, f)).not.toBe(47)
+})
+
+// The control: the moment the session speaks again the transcript-derived value is back in charge, so an
+// ordinary session's context % is untouched by this fix — including one that compacted an hour ago.
+test('an assistant turn after the boundary is read normally', () => {
+  const f = write('compacted-then-spoke.jsonl', [
+    assistant({ input_tokens: 71, cache_read_input_tokens: 469_929, cache_creation_input_tokens: 0, output_tokens: 12 }),
+    compactSummary(),
+    assistant({ input_tokens: 40, cache_read_input_tokens: 47_260, cache_creation_input_tokens: 0, output_tokens: 30 }),
+  ])
+  expect(lastContextTokens(f)).toBe(47_300)
+  expect(contextPct({ ctxPct: 0, ctxWindow: '1000k' } as StatuslineData, f)).toBe(5)
+})

@@ -16,7 +16,7 @@ const PROJECTS_DIR = DEFAULT_PROJECTS_DIR
 // `iterations` is the per-inference breakdown of ONE request. The top-level fields are the request's
 // TOTAL across those iterations — see lastContextTokens for why that distinction is the whole point.
 type Usage = { input_tokens?: number; output_tokens?: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number; iterations?: Usage[] }
-type Entry = { type?: string; subtype?: string; operation?: string; content?: unknown; uuid?: string; timestamp?: string; cwd?: string; isSidechain?: boolean; isMeta?: boolean; error?: string; isApiErrorMessage?: boolean; apiErrorStatus?: number; message?: { content?: unknown; stop_reason?: string | null; usage?: Usage; model?: string } }
+type Entry = { type?: string; subtype?: string; operation?: string; content?: unknown; uuid?: string; timestamp?: string; cwd?: string; isSidechain?: boolean; isMeta?: boolean; isCompactSummary?: boolean; error?: string; isApiErrorMessage?: boolean; apiErrorStatus?: number; message?: { content?: unknown; stop_reason?: string | null; usage?: Usage; model?: string } }
 
 // Text content of an entry: a bare string, or the joined `text` blocks of a content
 // array (tool_use / thinking blocks contribute nothing).
@@ -931,10 +931,22 @@ export function currentTurnTokens(file: string): { output: number; context: numb
 // Falls back to the top-level fields when there is no `iterations` array (an older CLI, or a
 // single-iteration request where the two are identical anyway). null when no usage-bearing assistant
 // entry exists at all. Sidechains are skipped: a subagent's prompt is not this session's context.
+//
+// THE SCAN STOPS AT A COMPACTION BOUNDARY. Compaction replaces the conversation with a summary and
+// writes no usage of its own — the next usage-bearing entry appears only when the session next speaks.
+// Walking past the boundary therefore returns the PRE-compact prompt size, which every context surface
+// then reports as the present: `tg roster` and the mini app's Sessions card both showed @weather at
+// 47%/1000k for eleven minutes after a compact that left it at 5% (owner, 2026-08-05). Cache
+// invalidation could not have saved it — `injectSlash` already drops the cached statusline for any
+// changesPaneContext command, and the next render re-derived the same wrong number from this file.
+// null hands the caller back to the CLI's own scraped percentage (contextPct), which reads 0% in that
+// window: what Claude Code itself displays until the next request, and the only honest answer available
+// outside the /context panel.
 export function lastContextTokens(file: string): number | null {
   const entries = readEntries(file)
   for (let i = entries.length - 1; i >= 0; i--) {
     const e = entries[i]
+    if (e.isCompactSummary) return null
     if (e.isSidechain || e.type !== 'assistant') continue
     const u = e.message?.usage
     if (!u) continue
