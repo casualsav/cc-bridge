@@ -139,6 +139,12 @@ export function materializePayload(repo: string, ref: string, carry: string[]): 
 //   .fingerprint .gitref .healthy .in_use .orphaned_at — deploy/supervision bookkeeping.
 //   .selftest-state — written into the cache dir by the deploy's own `--selftest` gate.
 //
+// ⚠️ WRITING A NEW FILE BESIDE THE PAYLOAD — into a cache version dir or the marketplace mirror, from
+// the daemon, a supervisor, a hook, a gate — MEANS ADDING ITS TOP-LEVEL NAME HERE. This list is an
+// enumeration of what the runtime writes, not a category the prune can infer: anything under a pruned
+// root that is not payload and not named here is DELETED by the next deploy, at the moment the file's
+// author is no longer watching.
+//
 // NOT here, and deliberately: the `.pre-<ts>` rollback backup. deploy writes it as a SIBLING of the
 // version dir (`${newCache}.pre-…`, under the cache base), never inside it, so no prune can reach it.
 // Move it inside the version dir and a same-version redeploy would prune away its own rollback.
