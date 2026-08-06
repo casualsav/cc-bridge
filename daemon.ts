@@ -17000,7 +17000,17 @@ bot.on('message:text', async ctx => {
 
   // Relay unhandled slash commands to CC via tmux (after gate check). In topic mode the command
   // targets the topic's session and replies in-thread; in DM it targets the focused session.
-  if (text.startsWith('/') && (ctx.chat?.type === 'private' || isTopicMode())) {
+  // A FORWARDED MESSAGE IS CONTENT, NEVER A COMMAND. The owner forwards notes out of another agent's
+  // DM; one of them began with `/predict sf`, which is not a command he was issuing — but this branch
+  // read the slash and relayed it, and the CLI's palette fuzzy-matches an unknown command rather than
+  // rejecting it. `formatChannelBlock` wraps ordinary content in `<tg …>`, so once it falls through
+  // here it structurally cannot reach the palette at all.
+  //
+  // Typed commands are untouched BY CONSTRUCTION: a message the owner types carries no
+  // `forward_origin`. Confirmed present for the real case on 2026-08-06 — a message forwarded out of
+  // his Hermes bot's DM carries `{type: 'user', sender_user: {is_bot: true, username: 'salahsmimobot'}}`.
+  // His accepted trade: forwarding a command to run it stops working, which is the documented caveat.
+  if (text.startsWith('/') && !ctx.message?.forward_origin && (ctx.chat?.type === 'private' || isTopicMode())) {
     // Telegram appends "@botname" to tapped/autocompleted commands in groups. Strip OUR suffix
     // before relaying (CC reads "/xyz@bot" as plain text, not a command — it became a prompt);
     // a command addressed to a DIFFERENT bot isn't ours to relay at all.
