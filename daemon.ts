@@ -181,7 +181,7 @@ import {
 } from './prompt-relay.ts'
 import { planStuckSweep, planWedgeEscalation, type StuckState } from './stuck-plan.ts'
 import { planContextWarn, planCtxNudge } from './ctx-warn.ts'
-import { ledgerKey, planDrain, formatDigest, loadDelivered, saveDelivered, readLedger, writeLedger, markableOutcome } from './inbound-ledger.ts'
+import { ledgerKey, planDrain, formatDigest, loadDelivered, saveDelivered, readLedger, writeLedger, markableOutcome, retainAfterDigest, describeSendFailure } from './inbound-ledger.ts'
 import { readHandoffState, ctxNudgeHandoffClause, handoffAnnotation } from './handoff-state.ts'
 import { planBoxUsageWarn, type UsageWarnMarker } from './usage-warn.ts'
 import { spawnModelFlag, WIDE_CONTEXT_SUFFIX } from './model-window.ts'
@@ -2730,7 +2730,7 @@ function adoptPane(paneId: string, why: AdoptWhy, announce = true): void {
   // case, so an off-MCP install — the documented default — buffered undelivered messages forever and
   // never read one back. A pane has just become available, which is exactly the condition the ledger
   // has been waiting on. Idempotent, so re-adoption after a daemon restart costs nothing.
-  drainInboundLedger()
+  void drainInboundLedger()
 }
 
 // "Connected" — but if the freshly adopted pane is sitting on Claude's first-run wizard (theme
@@ -4279,7 +4279,12 @@ const DIGEST_ARMED_FILE = join(STATE_DIR, 'inbound-digest.enabled')
 // typing a days-old instruction into a live session makes it act on intent the sender has moved past,
 // invisibly, which is worse than the silence it replaces. Idempotent: whatever is handled leaves the
 // file, so calling this on every focus change costs nothing after the first.
-function drainInboundLedger(): void {
+// One digest attempt per daemon run. The failure this instruments is undiagnosed, so it may well be
+// systematic — and an un-cleared ledger is re-offered to every later drain by design. Without this
+// floor a permanently-failing send would log its loud failure on every drain, and the sweep-driven
+// drain makes that every 25 seconds.
+let digestAttempted = false
+async function drainInboundLedger(): Promise<void> {
   const entries = readLedger(PENDING_EVENTS_FILE)
   if (!entries.length) return
   const plan = planDrain(entries, deliveredKeys, Date.now())
@@ -4288,18 +4293,41 @@ function drainInboundLedger(): void {
   // replay into a box that was STILL dirty (the very condition that buffered the message) came back
   // 'occupied', re-buffered, and was dropped by the next drain as already-delivered. Same inversion
   // as v0.4.383, one hop further down the same path. The delivery paths stamp their own outcomes.
-  for (const e of plan.replay) emitInbound(e.params)
-  const armed = existsSync(DIGEST_ARMED_FILE)
-  if (armed && plan.digest.length) {
-    const chat = plan.digest[0]?.params?.meta?.chat_id
-    if (chat) void channel.sendText(String(chat), escapeHtml(formatDigest(plan.digest))).catch(() => {})
-  }
-  // Stale entries survive unless they were actually surfaced. Nothing here deletes an undelivered
-  // message silently — that is the one outcome this whole unit exists to make impossible.
-  writeLedger(PENDING_EVENTS_FILE, armed ? [] : plan.digest)
+  // The stale entries are written back BEFORE anything is attempted, and the replays are dropped from
+  // the file here rather than after the send: a refused replay re-appends through `bufferEvent`, and
+  // an await between the two would let that append be clobbered by this write.
+  writeLedger(PENDING_EVENTS_FILE, plan.digest)
   saveDelivered(STATE_DIR, deliveredKeys)
+  for (const e of plan.replay) emitInbound(e.params)
+
+  // THE DIGEST, SEND-CONFIRMED-THEN-CLEAR. Every clause here is a defect that fired on 2026-08-06:
+  // the send was fire-and-forget with its rejection swallowed, the ledger was cleared regardless, and
+  // the log line reported `digest sent` off the ARM FILE — outside the `if (chat)`, outside the
+  // length check, and never having seen the promise. It read "sent" for a message nobody received.
+  // What it says now is what happened, and a failure keeps the entries for the next drain.
+  const armed = existsSync(DIGEST_ARMED_FILE)
+  let digestNote = `held; arm with: touch ${DIGEST_ARMED_FILE}`
+  if (armed && plan.digest.length && digestAttempted) {
+    digestNote = 'digest already attempted this run — not retried'
+  } else if (armed && plan.digest.length) {
+    digestAttempted = true
+    const chat = plan.digest[0]?.params?.meta?.chat_id
+    if (!chat) {
+      digestNote = 'digest NOT SENT — the oldest entry carries no chat_id; entries kept'
+    } else try {
+      await channel.sendText(String(chat), escapeHtml(formatDigest(plan.digest)))
+      // Confirmed. Re-read rather than trusting `plan`: the await is seconds long and a refused
+      // replay may have re-buffered into this file meanwhile.
+      writeLedger(PENDING_EVENTS_FILE, retainAfterDigest(readLedger(PENDING_EVENTS_FILE), plan.digest))
+      digestNote = `digest DELIVERED to ${chat}`
+    } catch (e) {
+      digestNote = `digest SEND FAILED (${describeSendFailure(e)}) — ${plan.digest.length} entries KEPT for the next run`
+    }
+  } else if (armed) {
+    digestNote = 'armed, nothing stale to digest'
+  }
   process.stderr.write(`daemon: inbound ledger drained — ${plan.replay.length} replayed, ` +
-    `${plan.digest.length} too old to replay (${armed ? 'digest sent' : `held; arm with: touch ${DIGEST_ARMED_FILE}`}), ` +
+    `${plan.digest.length} too old to replay (${digestNote}), ` +
     `${plan.alreadyDelivered.length} already delivered\n`)
 }
 
@@ -17191,7 +17219,7 @@ function handleShimConnection(socket: net.Socket): void {
             process.stderr.write(`daemon: session ${sessionId} registered (focus pinned to ${FORCE_PANE})\n`)
           } else if (!adoptionHolds && (focus.currentSessionId === null || focus.currentSessionId === sessionId || !sessions.has(focus.currentSessionId))) {
             setFocus(sessionId)
-            drainInboundLedger()
+            void drainInboundLedger()
           } else {
             process.stderr.write(`daemon: session ${sessionId} registered (focus stays on ${focus.currentSessionId ?? adoptedPaneId})\n`)
           }

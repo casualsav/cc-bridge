@@ -161,3 +161,41 @@ export function readLedger(path: string): LedgerEntry[] {
 export function writeLedger(path: string, entries: LedgerEntry[]): void {
   try { writeFileSync(path, entries.map(e => JSON.stringify(e)).join('\n') + (entries.length ? '\n' : ''), { mode: 0o600 }) } catch {}
 }
+
+// ---- Digest clearing, after a send whose outcome is actually known ------------------------------
+//
+// THE MEASURED FAILURE, SECOND HALF. v0.4.383's drain cleared the ledger whether or not the digest
+// send resolved (`sendText(...).catch(() => {})`, then `writeLedger(… armed ? [] : …)` regardless)
+// and logged `(digest sent)` off the ARM FILE, outside the `if (chat)` and outside the promise. On
+// 2026-08-06 the owner's 27-entry digest never arrived, the entries were cleared anyway, and the
+// error had been swallowed — so there is nothing left to diagnose it with. The cause remains OPEN;
+// the startup-ordering story once written here was refuted (a never-started grammy `Bot` sends fine
+// via `bot.api`, and the real 27-entry digest sends fine at full size).
+
+/**
+ * What the ledger should hold after a digest send RESOLVED. Not simply `[]`: the send is awaited, and
+ * a replay refused during that window re-buffers through `bufferEvent` — clearing wholesale would
+ * destroy exactly the entry the drain was trying to save. So this removes the digested keys from
+ * whatever the file holds NOW and keeps everything else.
+ *
+ * On a FAILED send this is never called: the ledger is left exactly as it is, which is the whole
+ * point of send-confirmed-then-clear.
+ */
+export function retainAfterDigest(current: LedgerEntry[], digested: LedgerEntry[]): LedgerEntry[] {
+  const gone = new Set(digested.map(e => ledgerKey(e.params.meta)))
+  return current.filter(e => !gone.has(ledgerKey(e.params.meta)))
+}
+
+/**
+ * A send failure, in the form the log needs to be diagnosable a week later. A `GrammyError` carries
+ * the two fields that actually identify a Telegram refusal — `error_code` and `description` — and
+ * they are read structurally rather than by `instanceof`, so this module stays free of a grammy
+ * import and works on whatever the adapter throws.
+ */
+export function describeSendFailure(e: unknown): string {
+  const o = e as { error_code?: unknown; description?: unknown; method?: unknown } | null
+  if (o && typeof o === 'object' && (o.error_code !== undefined || o.description !== undefined)) {
+    return `Telegram ${o.error_code ?? '?'}${o.method ? ` on ${String(o.method)}` : ''}: ${String(o.description ?? '')}`.trim()
+  }
+  return String(e && typeof e === 'object' && 'message' in o! ? (e as Error).message : e)
+}
