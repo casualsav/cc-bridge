@@ -4283,7 +4283,12 @@ function drainInboundLedger(): void {
   const entries = readLedger(PENDING_EVENTS_FILE)
   if (!entries.length) return
   const plan = planDrain(entries, deliveredKeys, Date.now())
-  for (const e of plan.replay) { noteDelivered(e.params.meta); emitInbound(e.params) }
+  // NOT STAMPED HERE — see markableOutcome. This loop is the FOURTH marking site, and the one
+  // v0.4.384's hotfix missed while closing the other three: it stamped before `emitInbound`, so a
+  // replay into a box that was STILL dirty (the very condition that buffered the message) came back
+  // 'occupied', re-buffered, and was dropped by the next drain as already-delivered. Same inversion
+  // as v0.4.383, one hop further down the same path. The delivery paths stamp their own outcomes.
+  for (const e of plan.replay) emitInbound(e.params)
   const armed = existsSync(DIGEST_ARMED_FILE)
   if (armed && plan.digest.length) {
     const chat = plan.digest[0]?.params?.meta?.chat_id
