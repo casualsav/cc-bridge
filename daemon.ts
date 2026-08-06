@@ -181,6 +181,7 @@ import {
 } from './prompt-relay.ts'
 import { planStuckSweep, planWedgeEscalation, type StuckState } from './stuck-plan.ts'
 import { planContextWarn, planCtxNudge } from './ctx-warn.ts'
+import { ledgerKey, planDrain, formatDigest, loadDelivered, saveDelivered, readLedger, writeLedger } from './inbound-ledger.ts'
 import { readHandoffState, ctxNudgeHandoffClause, handoffAnnotation } from './handoff-state.ts'
 import { planBoxUsageWarn, type UsageWarnMarker } from './usage-warn.ts'
 import { spawnModelFlag, WIDE_CONTEXT_SUFFIX } from './model-window.ts'
@@ -2723,6 +2724,11 @@ function adoptPane(paneId: string, why: AdoptWhy, announce = true): void {
   try { prev = readFileSync(ADOPTED_PANE_FILE, 'utf8').trim() } catch {}
   try { writeFileSync(ADOPTED_PANE_FILE, paneId, { mode: 0o600 }) } catch {}
   if (announce && prev !== paneId) void announceAdopted(paneId)
+  // THE CALL SITE THAT WAS MISSING. The ledger's only reader used to be the MCP shim's `register`
+  // case, so an off-MCP install — the documented default — buffered undelivered messages forever and
+  // never read one back. A pane has just become available, which is exactly the condition the ledger
+  // has been waiting on. Idempotent, so re-adoption after a daemon restart costs nothing.
+  drainInboundLedger()
 }
 
 // "Connected" — but if the freshly adopted pane is sitting on Claude's first-run wizard (theme
@@ -2952,14 +2958,22 @@ function emitInbound(params: InboundParams, targetPane?: string | null): void {
   // Forum-topics mode: a message typed in a session's topic is delivered to THAT session, not
   // whichever is focused. The focused pane keeps the watcher (pause mirror during inject); any other
   // pane gets a plain paste (no watcher to pause). See handleInbound for how targetPane is resolved.
+  // Handed to a session ⇒ remember the key, so a later ledger drain (or a Telegram re-offer of an
+  // update this run never confirmed) cannot deliver the same message a second time. Recorded on the
+  // ATTEMPT rather than on confirmed arrival, deliberately: the delivery paths below are
+  // fire-and-forget, so there is no confirmation to hang this on until the hot-path write lands with
+  // the other loss window. Erring here means a duplicate is missed, never a message suppressed.
   if (targetPane) {
+    noteDelivered(params.meta)
     if (targetPane === focus.activePaneId && focus.paneWatcher) enqueueInboundInject(targetPane, focus.paneWatcher, params)
     else pasteInbound(targetPane, params)
     return
   }
   if (focus.activePaneId && focus.paneWatcher) {
+    noteDelivered(params.meta)
     enqueueInboundInject(focus.activePaneId, focus.paneWatcher, params)
   } else if (focus.activeShim) {
+    noteDelivered(params.meta)
     focus.activeShim.write({ t: 'inbound', params })
   } else {
     bufferEvent(params)
@@ -4231,21 +4245,49 @@ function bufferEvent(params: InboundParams): void {
   }
 }
 
-function replayBuffer(): void {
-  // Truncate first so new events buffer fresh; deliver from the in-memory copy through
-  // emitInbound, so a replay uses the same focused-session path (pane inject / socket)
-  // as a live message. Called only after setFocus, so focus is set and won't re-buffer.
-  let lines: string[] = []
-  try {
-    lines = readFileSync(PENDING_EVENTS_FILE, 'utf8').split('\n').filter(l => l.trim())
-    writeFileSync(PENDING_EVENTS_FILE, '', { mode: 0o600 })
-  } catch { return }
-  for (const line of lines) {
-    try {
-      const msg = JSON.parse(line) as DaemonToShim
-      if (msg.t === 'inbound') emitInbound(msg.params)
-    } catch {}
+// Keys of messages already handed to a session, so a Telegram re-offer and a ledger replay cannot
+// both land. In memory during a run, persisted lazily; every way it can fail leans toward a
+// DUPLICATE rather than a suppression (inbound-ledger.ts explains why that direction is the design).
+const deliveredKeys = loadDelivered(STATE_DIR)
+let deliveredSaveTimer: ReturnType<typeof setTimeout> | null = null
+function noteDelivered(meta: Record<string, string>): void {
+  deliveredKeys.add(ledgerKey(meta))
+  if (deliveredSaveTimer) return
+  deliveredSaveTimer = setTimeout(() => { deliveredSaveTimer = null; saveDelivered(STATE_DIR, deliveredKeys) }, 5000)
+}
+
+// Firing the digest is a DELIBERATE act, not a consequence of deploying. The 21 entries this shipped
+// for are the owner's own messages and he reads them from the audit file first; a startup digest that
+// announced them before he got there would be the disclosure, which is not this mechanism's job.
+// Touch this file when he says so — that is the whole trigger, and removing it disarms it again.
+const DIGEST_ARMED_FILE = join(STATE_DIR, 'inbound-digest.enabled')
+
+// Drain what the ledger is still holding. THIS IS THE FIX: `replayBuffer` had exactly one caller —
+// the MCP shim's `register` case — so an off-MCP install (the documented default) wrote to this file
+// and never once read it back. It held 27 entries going back a week, 21 of which no transcript has
+// any record of being delivered.
+//
+// Fresh entries replay through the normal path; stale ones are KEPT and surfaced only when armed —
+// typing a days-old instruction into a live session makes it act on intent the sender has moved past,
+// invisibly, which is worse than the silence it replaces. Idempotent: whatever is handled leaves the
+// file, so calling this on every focus change costs nothing after the first.
+function drainInboundLedger(): void {
+  const entries = readLedger(PENDING_EVENTS_FILE)
+  if (!entries.length) return
+  const plan = planDrain(entries, deliveredKeys, Date.now())
+  for (const e of plan.replay) { noteDelivered(e.params.meta); emitInbound(e.params) }
+  const armed = existsSync(DIGEST_ARMED_FILE)
+  if (armed && plan.digest.length) {
+    const chat = plan.digest[0]?.params?.meta?.chat_id
+    if (chat) void channel.sendText(String(chat), escapeHtml(formatDigest(plan.digest))).catch(() => {})
   }
+  // Stale entries survive unless they were actually surfaced. Nothing here deletes an undelivered
+  // message silently — that is the one outcome this whole unit exists to make impossible.
+  writeLedger(PENDING_EVENTS_FILE, armed ? [] : plan.digest)
+  saveDelivered(STATE_DIR, deliveredKeys)
+  process.stderr.write(`daemon: inbound ledger drained — ${plan.replay.length} replayed, ` +
+    `${plan.digest.length} too old to replay (${armed ? 'digest sent' : `held; arm with: touch ${DIGEST_ARMED_FILE}`}), ` +
+    `${plan.alreadyDelivered.length} already delivered\n`)
 }
 
 // ---- Pane event dispatch ----
@@ -17122,7 +17164,7 @@ function handleShimConnection(socket: net.Socket): void {
             process.stderr.write(`daemon: session ${sessionId} registered (focus pinned to ${FORCE_PANE})\n`)
           } else if (!adoptionHolds && (focus.currentSessionId === null || focus.currentSessionId === sessionId || !sessions.has(focus.currentSessionId))) {
             setFocus(sessionId)
-            replayBuffer()
+            drainInboundLedger()
           } else {
             process.stderr.write(`daemon: session ${sessionId} registered (focus stays on ${focus.currentSessionId ?? adoptedPaneId})\n`)
           }
