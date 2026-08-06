@@ -132,46 +132,22 @@ for (const key of readJsonFile<string[]>(REPLY_TARGETS_FILE, [])) {
 const RELAY_CURSORS_FILE = join(STATE_DIR, 'relay-cursors.json')
 class PersistedCursorMap extends Map<string, string> {
   private timer: ReturnType<typeof setTimeout> | null = null
-  constructor(private readonly path: string) { super() }
   override set(file: string, uuid: string): this {
     super.set(file, uuid)
     if (!this.timer) {
       this.timer = setTimeout(() => {
         this.timer = null
-        writeJsonFile(this.path, Object.fromEntries(this))
+        writeJsonFile(RELAY_CURSORS_FILE, Object.fromEntries(this))
       }, 250)
       this.timer.unref?.()
     }
     return this
   }
 }
-export const lastRelayedByFile: Map<string, string> = new PersistedCursorMap(RELAY_CURSORS_FILE)
+export const lastRelayedByFile: Map<string, string> = new PersistedCursorMap()
 for (const [file, uuid] of Object.entries(readJsonFile<Record<string, string>>(RELAY_CURSORS_FILE, {}))) {
   if (existsSync(file)) lastRelayedByFile.set(file, uuid)
 }
-
-// The same cursor, for the chat lane's narration-as-messages path (transcript.ts narrationAfter),
-// keyed `<entry uuid>#<block index>`. Persisted for the same reason the reply cursor is: a deploy
-// lands mid-turn constantly, and without it every restart would re-offer the running turn's whole
-// narration — which the delivery claim (in-memory, cleared by the restart) could no longer catch.
-const NARRATION_CURSORS_FILE = join(STATE_DIR, 'narration-cursors.json')
-export const lastNarratedByFile: Map<string, string> = new PersistedCursorMap(NARRATION_CURSORS_FILE)
-for (const [file, id] of Object.entries(readJsonFile<Record<string, string>>(NARRATION_CURSORS_FILE, {}))) {
-  if (existsSync(file)) lastNarratedByFile.set(file, id)
-}
-
-// Entries already delivered as narration. finalRepliesAfter picks a turn's LAST assistant text
-// entry whatever its stop_reason, so a turn that ends without an answer block (an interrupt, an
-// error) offers its final narration paragraph as the "reply" — which the chat lane has already sent.
-// The two paths key their claims differently (uuid vs uuid#block), so only this can see the overlap.
-// Bounded like claimedDeliveries; trimming can only un-guard an entry far behind every cursor.
-const narratedEntries = new Set<string>()
-const NARRATED_ENTRIES_MAX = 500
-export function markNarrated(file: string, uuid: string): void {
-  narratedEntries.add(`${file} ${uuid}`)
-  while (narratedEntries.size > NARRATED_ENTRIES_MAX) narratedEntries.delete(narratedEntries.values().next().value!)
-}
-export function wasNarrated(file: string, uuid: string): boolean { return narratedEntries.has(`${file} ${uuid}`) }
 
 // One composed reply must reach a chat ONCE. Four paths deliver a relayed reply — the focused relay
 // loop, the aux (non-focused) relay loop, and the two pre-menu preamble flushes — and each advances

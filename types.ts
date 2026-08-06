@@ -24,11 +24,6 @@ export type Access = {
   renderMarkdown?: boolean
   terminalMirror?: 'tools' | 'digest' | 'off' | boolean
   terminalMirrorFooter?: boolean   // show the live "✻ <verb>… · <elapsed> · <tokens>" footer on the mirror card (default off everywhere — the default card opens on the "Thinking…" placeholder instead; was always-on in DM until 0.3.110)
-  // How the DM CHAT LANE (the conversational agent in the bot's DM — never a coding session, never a
-  // DM *lane*) shows its reasoning. 'messages' (default): mid-turn narration ships as ordinary,
-  // persistent messages and the live card keeps only the activity indicators. 'bubbles': today's
-  // rendering, narration inside the self-editing card. Lives in prefs.json; read via loadAccess().
-  chatLaneReasoning?: 'messages' | 'bubbles'
   sessionPin?: boolean
   busDepthLimit?: number   // loop-breaker: max agent→agent chain depth before an ask is refused (default DEPTH_LIMIT_DEFAULT; floor 2). Depth is oversight, not volume — see agent-bus.ts
   budgetDaily?: number    // daily $ cap — warn at 80% and 100% of summed session cost growth (unset = off)

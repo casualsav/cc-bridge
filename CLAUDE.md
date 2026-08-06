@@ -193,21 +193,6 @@ the proof: it races two deliverers, and dropping the claim from either reports 2
 the four paths also used to send with no log line, which is what made the second copy unattributable;
 they all log in the focused loop's format now — don't quiet them again.
 
-**The FIFTH delivery path is the chat lane's reasoning, and it is the only one that sends mid-turn.**
-The DM chat lane is conversational, so its narration relays as ordinary messages
-(`relayChatLaneNarration` in the focused and aux loops, off `narrationAfter`) and its card renders the
-ACTIVITY body instead of thought bubbles (`cardBodyStyle`) — one prefs.json value,
-`chatLaneReasoning: 'messages' | 'bubbles'`, drives both halves so they cannot disagree. Three things
-about it are load-bearing: the gate is **chat lane, not DM** (a DM *lane* is a work session and keeps
-its bubbles); it fires **while the turn is working**, because reasoning delivered after the answer it
-was leading to is worse than the transient card it replaces; and it goes through `claimRelayDelivery`
-like every other path, keyed `<uuid>#<block>` since one entry can hold several paragraphs. Its cursor
-is persisted (`narration-cursors.json`) — memory-only, every mid-turn deploy would re-offer the whole
-running turn with the in-memory claim already cleared. `finalRepliesAfter` picks a turn's last
-assistant text whatever its `stop_reason`, so an interrupted turn offers a paragraph this path already
-sent: `markNarrated`/`wasNarrated` is how the reply loops see that overlap (the two claims are keyed
-differently and cannot). `chat-lane-reasoning.test.ts` holds the lot.
-
 **A failed send is either a REFUSAL or an UNKNOWN OUTCOME, and only a refusal may be re-sent.**
 Telegram answering `ok:false` means it read the request and declined — nothing reached the chat, so the
 rich→HTML fallback is exactly right and must keep working (older Telegram, markdown it won't parse). A
