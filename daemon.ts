@@ -181,7 +181,7 @@ import {
 } from './prompt-relay.ts'
 import { planStuckSweep, planWedgeEscalation, type StuckState } from './stuck-plan.ts'
 import { planContextWarn, planCtxNudge } from './ctx-warn.ts'
-import { ledgerKey, planDrain, formatDigest, loadDelivered, saveDelivered, readLedger, writeLedger, markableOutcome, retainAfterDigest, describeSendFailure } from './inbound-ledger.ts'
+import { ledgerKey, planDrain, formatDigest, loadDelivered, saveDelivered, readLedger, writeLedger, markableOutcome, retainAfterDigest, describeSendFailure, type LedgerEntry as InboundLedgerEntry } from './inbound-ledger.ts'
 import { readHandoffState, ctxNudgeHandoffClause, handoffAnnotation } from './handoff-state.ts'
 import { planBoxUsageWarn, type UsageWarnMarker } from './usage-warn.ts'
 import { spawnModelFlag, WIDE_CONTEXT_SUFFIX } from './model-window.ts'
@@ -2966,6 +2966,16 @@ function emitInbound(params: InboundParams, targetPane?: string | null): void {
   // buffered AND already stamped, so the drain drops it as "already delivered" and the message is
   // gone. Measured on the canary 2026-08-06: `10 already delivered, 0 replayed`, ledger emptied.
   // The stamp now lives beside the outcome, in the delivery paths themselves (markableOutcome).
+  //
+  // …but the SET is read here, and until v0.4.388 it was read in exactly one place — `planDrain` —
+  // so it protected the drain from Telegram and never Telegram from the drain. The window: a message
+  // is handled, refused, buffered, and the daemon dies before the next `getUpdates` confirms the
+  // batch; Telegram re-offers it, it is delivered fresh, and the ledger copy is still eligible for
+  // replay. Both land. Positive match only, so every way the set can fail leans toward a duplicate.
+  if (deliveredKeys.has(ledgerKey(params.meta))) {
+    process.stderr.write(`daemon: inbound ${params.meta.chat_id}/${params.meta.message_id ?? '?'} already delivered — not delivering it a second time\n`)
+    return
+  }
   if (targetPane) {
     if (targetPane === focus.activePaneId && focus.paneWatcher) enqueueInboundInject(targetPane, focus.paneWatcher, params)
     else pasteInbound(targetPane, params)
@@ -3968,13 +3978,24 @@ type CommandTarget = { paneId: string; watcher: PaneWatcher | null; isFocused: b
 // that tolerate "no session" (e.g. /schedule defers into a null pane).
 async function targetPaneOf(ctx: Context): Promise<{ paneId: string | null; thread?: number }> {
   const thread = ctx.message?.message_thread_id ?? ctx.callbackQuery?.message?.message_thread_id ?? ctx.editedMessage?.message_thread_id
+  return paneForAddress(String(ctx.chat?.id ?? ''), ctx.chat?.type, thread)
+}
+
+// The same resolution, keyed by an ADDRESS rather than a grammy Context — chat id, chat type and
+// thread are exactly what a ledger entry's `meta` carries, which is what the ledger drain needs.
+// `drainInboundLedger` used to replay with no target at all, so `emitInbound` sent every recovered
+// message to whatever held FOCUS: in topic mode a message addressed to session B's topic, buffered
+// while B's box was dirty, replayed into session A. Silent, and only invisible so far because the
+// drain had never run anywhere but startup. targetPaneOf is now a two-line wrapper over this so the
+// two can never drift.
+async function paneForAddress(chatId: string, chatType: string | undefined, thread: number | undefined): Promise<{ paneId: string | null; thread?: number }> {
   if (isTopicMode() && typeof thread === 'number') {
     const sid = getSessionByThread(thread)
     return { paneId: sid ? await paneForSession(sid) : null, thread }
   }
   // General with an anchored session → that session, regardless of focus. Anchor missing or its
   // pane dead → fall through to the focused session (the pre-anchor behavior).
-  if (isTopicMode() && String(ctx.chat?.id ?? '') === getGroupChatId()) {
+  if (isTopicMode() && chatId === getGroupChatId()) {
     const anchorPane = await generalAnchorPane()
     if (anchorPane) return { paneId: anchorPane }
   }
@@ -3983,15 +4004,14 @@ async function targetPaneOf(ctx: Context): Promise<{ paneId: string | null; thre
   // through to focus, same as today. NOT topic-gated: a group-less DM-mode box runs chat lanes too
   // (v0.4.2 auto-provision), and gating this on topic mode left its whole command surface — and
   // permission-card taps — pointed at the stale focused session (the /terminal split-brain).
-  if (ctx.chat?.type === 'private') {
-    const dc = getDmChatSession(String(ctx.chat.id))
+  if (chatType === 'private') {
+    const dc = getDmChatSession(chatId)
     const pane = dc ? await paneForSession(dc.sessionId).catch(() => null) : null
     if (pane) return { paneId: pane }
   }
   // DM lanes: a command (/terminal, /mode, /clear, /stop, …) targets the SENDER's own lane pane, not
   // whichever lane happens to hold focus. Falls through to focus only when this chat has no live lane.
   if (dmLanesOn() && !isTopicMode()) {
-    const chatId = String(ctx.chat?.id ?? '')
     const lane = chatId ? laneForChat(chatId) : undefined
     const pane = lane ? await paneForSession(lane.sessionId).catch(() => null) : null
     if (pane) return { paneId: pane }
@@ -4284,9 +4304,17 @@ const DIGEST_ARMED_FILE = join(STATE_DIR, 'inbound-digest.enabled')
 // floor a permanently-failing send would log its loud failure on every drain, and the sweep-driven
 // drain makes that every 25 seconds.
 let digestAttempted = false
+// The drain is now on a 25s sweep, and its digest send is awaited — so two runs can overlap. One at
+// a time: a second concurrent drain would re-plan against a ledger the first has already rewritten.
+let draining = false
 async function drainInboundLedger(): Promise<void> {
+  if (draining) return
   const entries = readLedger(PENDING_EVENTS_FILE)
   if (!entries.length) return
+  draining = true
+  try { await drainOnce(entries) } finally { draining = false }
+}
+async function drainOnce(entries: InboundLedgerEntry[]): Promise<void> {
   const plan = planDrain(entries, deliveredKeys, Date.now())
   // NOT STAMPED HERE — see markableOutcome. This loop is the FOURTH marking site, and the one
   // v0.4.384's hotfix missed while closing the other three: it stamped before `emitInbound`, so a
@@ -4298,7 +4326,14 @@ async function drainInboundLedger(): Promise<void> {
   // an await between the two would let that append be clobbered by this write.
   writeLedger(PENDING_EVENTS_FILE, plan.digest)
   saveDelivered(STATE_DIR, deliveredKeys)
-  for (const e of plan.replay) emitInbound(e.params)
+  // TO THE PANE IT WAS ADDRESSED TO, not to whatever holds focus — see paneForAddress. A null target
+  // still means "focus", which is right for the DM shapes and for an MCP shim session.
+  for (const e of plan.replay) {
+    const m = e.params.meta
+    const thread = m.thread ? Number(m.thread) : undefined
+    const to = await paneForAddress(String(m.chat_id ?? ''), m.chat_type, Number.isFinite(thread) ? thread : undefined).catch(() => ({ paneId: null }))
+    emitInbound(e.params, to.paneId)
+  }
 
   // THE DIGEST, SEND-CONFIRMED-THEN-CLEAR. Every clause here is a defect that fired on 2026-08-06:
   // the send was fire-and-forget with its rejection swallowed, the ledger was cleared regardless, and
@@ -15309,6 +15344,12 @@ async function handleInbound(
     content,
     meta: {
       chat_id,
+      // WHERE IT WAS ADDRESSED, carried so a BUFFERED message can still be routed later. The ledger
+      // stores `meta` verbatim, and chat_id alone cannot address a topic — every topic in a forum
+      // group shares it — so a replay had nothing to aim at and went to whatever held focus.
+      // `formatChannelBlock` enumerates the keys it prints, so neither of these reaches a pane.
+      ...(typeof ctx.message?.message_thread_id === 'number' ? { thread: String(ctx.message.message_thread_id) } : {}),
+      ...(ctx.chat?.type ? { chat_type: ctx.chat.type } : {}),
       ...(msgId != null ? { message_id: String(msgId) } : {}),
       user: senderDisplayName(from),   // agent-bus P4: @username → first_name → id (was: id when no username)
       user_id: String(from.id),
@@ -16396,6 +16437,8 @@ bot.on('edited_message', async ctx => {
     content: text,
     meta: {
       chat_id: chat, message_id: String(em.message_id), edited: 'true',   // → the `e` flag: this text replaces their previous message
+      ...(typeof em.message_thread_id === 'number' ? { thread: String(em.message_thread_id) } : {}),   // addressing, for a buffered replay — see handleInbound
+      ...(ctx.chat?.type ? { chat_type: ctx.chat.type } : {}),
       user: senderDisplayName(ctx.from!), user_id: String(ctx.from?.id),   // @username → first_name → id, matching handleInbound
       ts: new Date((em.edit_date ?? em.date) * 1000).toISOString(),
     },
@@ -17723,6 +17766,19 @@ async function sweepStuckPanes(): Promise<void> {
     for (const sid of [...pendingCtxNudge.keys()]) if (!liveSids.has(sid)) pendingCtxNudge.delete(sid)   // died before it went idle
     pruneSessionDepth(liveSids)   // same "never delete on uncertainty" rule: only when the sweep saw panes
   }
+  // THE DRAIN TRIGGER. Until v0.4.388 the ledger was read back only by `adoptPane` and the MCP shim's
+  // `register` — both meaning "a session just became available", neither meaning "the box on an
+  // already-adopted pane just cleared", which is the condition that actually gates delivery. A message
+  // refused for a dirty input box therefore waited for a daemon restart. Staged live on the canary
+  // 2026-08-06: ten refusals at 02:59:58, the daemon alive and scraping that pane for three minutes,
+  // and no drain until the restart at 03:03:00 forced one.
+  //
+  // It RETRIES rather than detecting the clear, which is what the bus has always done for an occupied
+  // box (sweepBus re-arms and the sweep tries again) — a shipped pattern beats a new sense, and a
+  // retry into a still-dirty box costs one capture and a refusal that re-buffers. `drainInboundLedger`
+  // returns immediately on an empty ledger, so the common case is one small file read per sweep.
+  // Gated on having seen a pane: with nothing live, every replay would re-buffer and re-hint.
+  if (panes.size) void drainInboundLedger()
 }
 setInterval(() => void sweepStuckPanes(), 25_000).unref()
 // The recorded-strand half. On the sweep because a pane that was mid-turn when the daemon died is

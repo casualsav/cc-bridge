@@ -83,9 +83,11 @@ test('retainAfterDigest keys on the full ledger key, so an EDIT of a digested me
 // The log line is the other half of the fix: it used to assert an outcome nothing checked. Pin the
 // shape of what the daemon now writes, so "digest sent" can never again mean "the arm file exists".
 test('CONTROL: the drain never logs a digest outcome it did not observe', async () => {
+  // `drainOnce` is the body; `drainInboundLedger` is the one-at-a-time wrapper in front of it.
   const src = await Bun.file(join(import.meta.dir, 'daemon.ts')).text()
-  const fn = src.slice(src.indexOf('async function drainInboundLedger'))
+  const fn = src.slice(src.indexOf('async function drainOnce'))
   const body = fn.slice(0, fn.indexOf('\n}\n'))
+  expect(body).toContain('planDrain(')   // this really is the drain, not whatever moved above it
   expect(body).not.toMatch(/armed \? 'digest sent'/)            // ← the v0.4.383 line
   expect(body).toMatch(/await channel\.sendText\(/)             // awaited, so the outcome is known
   expect(body).toMatch(/digest SEND FAILED/)                    // and a failure says so, loudly
