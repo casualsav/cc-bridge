@@ -20,9 +20,9 @@
 // use. Why not simply refuse on any dirt: this tree is dirty most of the time, so that refusal fires
 // constantly, needs an override, and an override used routinely is decoration.
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, rmSync, mkdirSync, copyFileSync, existsSync } from 'node:fs'
+import { mkdtempSync, rmSync, mkdirSync, copyFileSync, existsSync, readdirSync, rmdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 
 export type ProvenanceVerdict =
   // `carried` — dirty files whose WORKING-TREE bytes ship: the ones `--with` claimed, plus the deploy's
@@ -126,4 +126,53 @@ export function materializePayload(repo: string, ref: string, carry: string[]): 
     copyFileSync(src, join(root, rel))
   }
   return root
+}
+
+// Names at the TOP LEVEL of a pruned root that the prune below never touches: they are not payload,
+// and deleting one breaks the thing the payload runs inside.
+//
+//   node_modules, bun.lock, package.json — the daemon's deps. bun.lock/package.json are payload files
+//     for tg (tracked) but deploy-GENERATED for slack/discord, so protecting them unconditionally is
+//     the only rule that is right in both lineages. Cost, accepted: a package.json genuinely deleted
+//     from git survives in the cache — which is what you want in a dir the daemon boots from.
+//   .git — the marketplace mirror is a real clone. A prune that skipped this would delete the repo.
+//   .fingerprint .gitref .healthy .in_use .orphaned_at — deploy/supervision bookkeeping.
+//   .selftest-state — written into the cache dir by the deploy's own `--selftest` gate.
+//
+// NOT here, and deliberately: the `.pre-<ts>` rollback backup. deploy writes it as a SIBLING of the
+// version dir (`${newCache}.pre-…`, under the cache base), never inside it, so no prune can reach it.
+// Move it inside the version dir and a same-version redeploy would prune away its own rollback.
+export const PRUNE_PROTECT = [
+  'node_modules', 'bun.lock', 'package.json', '.git',
+  '.fingerprint', '.gitref', '.healthy', '.in_use', '.orphaned_at', '.selftest-state',
+]
+
+// Delete everything under `root` that this deploy did not just write. The counterpart to the sync:
+// the sync is additive, so without this a file deleted from git lives in the cache forever — cloned
+// forward by every later deploy. A stranded `*.test.ts` is loadable by NAME (the test runner globs),
+// which is how one broke `bun test` in the cache after the v0.4.391 revert.
+//
+// `keep` is the exact set of paths the sync just wrote, passed in — never a second derivation of
+// "what git tracks". Two derivations of one list drift, and the drift deletes live payload.
+export function prunePayloadDir(root: string, keep: string[], protect: string[] = PRUNE_PROTECT): string[] {
+  const kept = new Set(keep.map(p => resolve(p)))
+  const guarded = new Set(protect)
+  const removed: string[] = []
+  const walk = (dir: string, rel: string) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      if (!rel && guarded.has(e.name)) continue          // top-level names only, by design
+      const abs = join(dir, e.name)
+      const r = rel ? `${rel}/${e.name}` : e.name
+      if (e.isDirectory()) {
+        walk(abs, r)
+        // Removing a file can empty its directory; an orphan's parent must not linger.
+        try { rmdirSync(abs) } catch {}
+      } else if (!kept.has(resolve(abs))) {
+        rmSync(abs, { force: true })
+        removed.push(r)
+      }
+    }
+  }
+  if (existsSync(root)) walk(root, '')
+  return removed
 }

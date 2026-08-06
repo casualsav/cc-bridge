@@ -40,7 +40,7 @@ import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { shipGate } from '../ship-gate.ts'
 import { strandedVersion } from '../stranded-version.ts'
-import { provenanceGate, dirtyPayloadPaths, materializePayload } from '../payload-provenance.ts'
+import { provenanceGate, dirtyPayloadPaths, materializePayload, prunePayloadDir } from '../payload-provenance.ts'
 import { syncConventionBlock } from '../installed-copies.ts'
 import { stopSupervisors, healthCheck, rollback, markHealthy, stampGitref, pruneOldVersions } from '../upgrade-core.ts'
 
@@ -419,6 +419,21 @@ function syncPayloadInto(dest: string, which: 'cacheDest' | 'repoDest') {
   }
 }
 
+// Where the payload lands under `dest` — the SAME expression syncPayloadInto writes at, which is what
+// makes it safe to feed to the prune below as the keep-set. Deriving "what should be here" a second
+// way (from git, say) is how a keep-set drifts from what was written, and that drift deletes payload.
+function payloadDests(dest: string, which: 'cacheDest' | 'repoDest'): string[] {
+  return payload.map(p => join(dest, p[which]))
+}
+
+// Remove whatever survives in `root` from an earlier version (the cache dir is CLONED from the previous
+// one) but is no longer payload. Reports what it took: a deploy that silently deletes files in a dir the
+// daemon boots from is not something to discover from a diff later.
+function pruneInto(root: string, dest: string, which: 'cacheDest' | 'repoDest') {
+  const gone = prunePayloadDir(root, payloadDests(dest, which))
+  if (gone.length) step(`pruned ${gone.length} stale file(s) no longer in the payload:\n      ${gone.join('\n      ')}`)
+}
+
 // The pinned package.json stub for a channel plugin dir (committed) / cache (seeded) — same bytes as
 // ensure-daemon's self-heal manifest, so deps resolve to the exact pinned versions.
 function writePkgStub(dir: string) {
@@ -480,6 +495,9 @@ if (backupDir) {
 // ---- 2. sync the payload into the cache copy (flat), then stamp its manifests to the new version ----
 step(`syncing ${payload.length} files → cache/${cfg.cacheName}/${next}`)
 syncPayloadInto(newCache, 'cacheDest')
+// Before the gates below, not after: a stale file is loadable by name (the cache's `bun test` globs
+// `*.test.ts`), and a gate that fails should fail on the payload, not on last version's leftovers.
+pruneInto(newCache, newCache, 'cacheDest')
 patchVersion(join(newCache, '.claude-plugin', 'plugin.json'), next)
 // The shared marketplace.json ships in the cache ONLY for tg (source "./"); slack/discord caches
 // carry just their plugin.json. Stamp this plugin's entry where it exists.
@@ -562,6 +580,10 @@ if (existsSync(MKT)) {
   // The mirror is a repo-layout clone (Claude Code copies `source` subdirs from it), so sync at
   // repo paths and stamp this plugin's plugin.json + its marketplace entry there.
   syncPayloadInto(MKT, 'repoDest')
+  // Scoped by plugin: tg's payload IS the whole tracked tree, so its root is the mirror itself;
+  // slack/discord ship a subset, and pruning the mirror root on their deploy would delete every
+  // other plugin and the tg payload with it.
+  pruneInto(cfg.pluginDir ? join(MKT, cfg.pluginDir) : MKT, MKT, 'repoDest')
   if (cfg.pluginDir) writePkgStub(join(MKT, cfg.pluginDir))
   patchVersion(join(MKT, PLUGIN_JSON), next)
   if (existsSync(join(MKT, MARKET_JSON))) patchMarketVersion(join(MKT, MARKET_JSON), cfg.mktName, next)

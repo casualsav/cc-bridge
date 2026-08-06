@@ -7,10 +7,10 @@
 // 2026-07-30). See payload-provenance.ts.
 import { test, expect, afterAll } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { provenanceGate, dirtyPayloadPaths, materializePayload } from './payload-provenance.ts'
+import { provenanceGate, dirtyPayloadPaths, materializePayload, prunePayloadDir, PRUNE_PROTECT } from './payload-provenance.ts'
 
 const made: string[] = []
 afterAll(() => { for (const d of made) rmSync(d, { recursive: true, force: true }) })
@@ -169,4 +169,77 @@ test('materializePayload ships the ref you name, not the current branch', async 
   made.push(fromSide, fromMain)
   expect(readFileSync(join(fromSide, 'daemon.ts'), 'utf8')).toBe('side-branch work\n')
   expect(readFileSync(join(fromMain, 'daemon.ts'), 'utf8')).toBe('committed\n')
+})
+
+// ---- the delete pass ---------------------------------------------------------------------------
+// The sync is additive and the cache dir is cloned from the previous version, so a file deleted from
+// git used to live in the cache forever. Driven against real dirs: the defect is a filesystem one.
+function cacheLike(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'prov-cache-'))
+  made.push(dir)
+  writeFileSync(join(dir, 'daemon.ts'), 'payload\n')
+  mkdirSync(join(dir, 'nested'))
+  writeFileSync(join(dir, 'nested', 'mod.ts'), 'payload\n')
+  return dir
+}
+const keepOf = (dir: string) => [join(dir, 'daemon.ts'), join(dir, 'nested', 'mod.ts')]
+
+test('a file no longer in the payload is pruned; payload files are untouched', async () => {
+  const dir = cacheLike()
+  writeFileSync(join(dir, 'stranded.test.ts'), 'orphan\n')   // the v0.4.391 shape: loadable BY NAME
+  const gone = prunePayloadDir(dir, keepOf(dir))
+  expect(gone).toEqual(['stranded.test.ts'])
+  expect(existsSync(join(dir, 'stranded.test.ts'))).toBe(false)
+  expect(readFileSync(join(dir, 'daemon.ts'), 'utf8')).toBe('payload\n')
+  expect(readFileSync(join(dir, 'nested', 'mod.ts'), 'utf8')).toBe('payload\n')
+})
+
+test('every protected name survives — bookkeeping, deps, and the mirror\'s own git repo', async () => {
+  const dir = cacheLike()
+  for (const name of PRUNE_PROTECT) {
+    // Each protected name as a DIR with a file inside and as a plain file: the prune matches on the
+    // top-level name, and node_modules/.git/.in_use are dirs while .healthy/bun.lock are files.
+    mkdirSync(join(dir, name, 'deep'), { recursive: true })
+    writeFileSync(join(dir, name, 'deep', 'inside'), 'protected\n')
+  }
+  const gone = prunePayloadDir(dir, keepOf(dir))
+  expect(gone).toEqual([])
+  for (const name of PRUNE_PROTECT) expect(existsSync(join(dir, name, 'deep', 'inside'))).toBe(true)
+  // ...and the same names in their FILE form (.healthy, .gitref, bun.lock are plain files in a cache).
+  const flat = cacheLike()
+  for (const name of PRUNE_PROTECT) writeFileSync(join(flat, name), 'protected\n')
+  expect(prunePayloadDir(flat, keepOf(flat))).toEqual([])
+  for (const name of PRUNE_PROTECT) expect(existsSync(join(flat, name))).toBe(true)
+})
+
+test('a protected NAME protects only the top level, not a payload dir that happens to share it', async () => {
+  // `nested/package.json` is not a top-level name, so it prunes like anything else. The guard is a
+  // list of roots the runtime writes, not a filename blacklist.
+  const dir = cacheLike()
+  writeFileSync(join(dir, 'nested', 'package.json'), 'stale\n')
+  expect(prunePayloadDir(dir, keepOf(dir))).toEqual(['nested/package.json'])
+})
+
+test('a directory emptied by the prune goes with it; one still holding payload stays', async () => {
+  const dir = cacheLike()
+  mkdirSync(join(dir, 'gone-dir'))
+  writeFileSync(join(dir, 'gone-dir', 'old.ts'), 'orphan\n')
+  prunePayloadDir(dir, keepOf(dir))
+  expect(existsSync(join(dir, 'gone-dir'))).toBe(false)
+  expect(existsSync(join(dir, 'nested'))).toBe(true)
+})
+
+test('a scoped root leaves its siblings alone — the slack/discord mirror case', async () => {
+  // slack ships a SUBSET of the mirror, so its prune root is the plugin dir. Rooting it at the mirror
+  // would delete every other plugin and the whole tg payload.
+  const mkt = mkdtempSync(join(tmpdir(), 'prov-mkt-'))
+  made.push(mkt)
+  writeFileSync(join(mkt, 'daemon.ts'), 'tg payload\n')                       // another plugin's file
+  mkdirSync(join(mkt, 'plugins', 'claude-slack'), { recursive: true })
+  writeFileSync(join(mkt, 'plugins', 'claude-slack', 'slack-daemon.ts'), 'payload\n')
+  writeFileSync(join(mkt, 'plugins', 'claude-slack', 'dropped.ts'), 'orphan\n')
+  const gone = prunePayloadDir(join(mkt, 'plugins', 'claude-slack'),
+    [join(mkt, 'plugins', 'claude-slack', 'slack-daemon.ts')])
+  expect(gone).toEqual(['dropped.ts'])
+  expect(existsSync(join(mkt, 'daemon.ts'))).toBe(true)
 })
