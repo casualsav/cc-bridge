@@ -219,3 +219,22 @@ test('prune keeps the newest N and never touches a renamed failure', () => {
   expect(pruneOldVersions(base, 2)).toEqual(['0.1.0', '0.2.0'])
   expect(readdirSync(base).sort()).toEqual(['0.3.0', '0.4.0', '0.5.0.failed-1'])
 })
+
+// ---- the cross-install reap predicate ----
+// Pure restatement of the rule ensure-daemon's reap now applies, pinned here because the incident it
+// encodes cost the fleet its bridge: on 2026-08-06 a sandboxed deploy SIGKILLed the production daemon
+// from this exact code path, AFTER the pid-first stop had correctly refused the same pids by name.
+function reapable(dir: string, myCacheRoot: string): boolean {
+  const seg = '.claude/plugins/cache'
+  return !(dir.includes(seg) && !dir.startsWith(myCacheRoot))
+}
+
+test('another install\'s cache is NEVER reaped — the 2026-08-06 fleet outage', () => {
+  const mine = '/tmp/dh-sbx/.claude/plugins/cache'
+  expect(reapable('/home/ubuntu/.claude/plugins/cache/cc-bridge/telegram/0.4.381', mine)).toBe(false)
+  expect(reapable('/tmp/dh-sbx/.claude/plugins/cache/cc-bridge/telegram/0.4.382', mine)).toBe(true)
+})
+
+test('a bridge run from a source CHECKOUT is still reaped — the case the reap exists for', () => {
+  expect(reapable('/home/ubuntu/projects/cc-bridge', '/home/ubuntu/.claude/plugins/cache')).toBe(true)
+})

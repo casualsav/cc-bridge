@@ -246,7 +246,18 @@ const bumpArg = argv.find((a, i) =>
 const CACHE_BASE = join(CACHE_ROOT, cfg.cacheName)
 // Every path derives from homedir(), which is what makes a sandboxed run (HOME=/tmp/…) reach only
 // sandbox state — verified live on 2026-08-06 by a --dry-run under a sandbox HOME.
+//
+// EXCEPT THIS ONE, and that exception drew blood. `TELEGRAM_STATE_DIR` is exported into every bridged
+// session, so it is INHERITED by a deploy run under a sandbox $HOME — on 2026-08-06 a sandbox deploy
+// shipped into /tmp/dh-sbx's cache while stopping, unlinking and health-checking PRODUCTION's state
+// dir, and took the fleet's socket with it. An env var that points outside this $HOME is never what
+// the caller meant; refuse rather than operate on two different installs at once.
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'telegram')
+if (!STATE_DIR.startsWith(homedir())) {
+  die(`TELEGRAM_STATE_DIR (${STATE_DIR}) is outside HOME (${homedir()}).\n` +
+      `  A deploy would ship into one install's cache and restart another's daemon.\n` +
+      `  Unset it, or point it inside this HOME: env -u TELEGRAM_STATE_DIR bun run deploy`)
+}
 const DAEMON_PID = join(STATE_DIR, 'daemon.pid')
 const DAEMON_LOG = join(STATE_DIR, 'daemon.log')
 const SOCKET = join(STATE_DIR, 'daemon.sock')

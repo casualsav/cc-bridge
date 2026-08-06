@@ -16,6 +16,10 @@ import { dirname, join, basename } from 'node:path'
 import { pickVersion } from './upgrade-core.ts'
 
 const CHANNELS_DIR = join(homedir(), '.claude', 'channels')
+// Whose plugin cache is ours. Used by the foreign-process reap to tell "a bridge run from a source
+// checkout" (reap it) from "another install's bridge, under its own $HOME" (never touch it).
+const MY_CACHE_ROOT = join(homedir(), '.claude', 'plugins', 'cache')
+const CACHE_SEGMENT = join('.claude', 'plugins', 'cache')
 
 // This hook runs with the cwd of whatever session started it, and a session's cwd can be a scratch
 // dir that its own harness deletes. A process standing in a deleted dir cannot spawn ANYTHING under
@@ -148,6 +152,17 @@ function reapForeignBridges(log: number): void {
       const dir = dirname(p.script)
       if (dir === daemonDir) continue                                            // the canonical build — keep
       if (!existsSync(join(dir, '.claude-plugin', 'plugin.json'))) continue      // not a bridge tree — leave unrelated software alone
+      // ANOTHER INSTALL'S CACHE IS NOT OURS TO REAP. This test used to be "not my daemonDir ⇒ foreign",
+      // which is true for a daemon someone ran from a source checkout (the case this exists for) and
+      // catastrophically false for one running out of a DIFFERENT $HOME's plugin cache: on 2026-08-06 a
+      // sandboxed deploy (HOME=/tmp/…) reached this line and SIGKILLed the production daemon and its
+      // watchdog, taking the whole fleet's bridge down. The pid-first stop in upgrade-core.ts had
+      // already refused those same pids by name — the relaunch let them back in through this door.
+      // A checkout-run bridge sits under no cache root at all and is still reaped, so nothing is lost.
+      if (dir.includes(CACHE_SEGMENT) && !dir.startsWith(MY_CACHE_ROOT)) {
+        note(log, `ensure-daemon: left another install's ${kind} alone (pid ${p.pid}, ${p.script}) — not under ${MY_CACHE_ROOT}`)
+        continue
+      }
       try {
         process.kill(p.pid, 'SIGKILL')
         note(log, `ensure-daemon: reaped foreign bridge ${kind} (pid ${p.pid}, ${p.script}) — the bridge runs ONLY from the plugin cache (${daemonDir})`)
