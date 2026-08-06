@@ -41,7 +41,7 @@ import { planDrift, driftStateAfter, type DriftState } from './drift-guard.ts'
 import { decideModel, decideEffort, upgradeNeedsConfirm, heldSpawnModel, heldSpawnNeedsLine, holdTapData, parseHoldTap, launchFallback, spawnCardHeader, relaunchModel, launchDefaultModel, launchDefaultEffort, launchDefaultMode, fablePolicy, fableRowState, onOff, type FablePolicy, AUTO_FALLBACK, AUTO_EFFORT_FALLBACK, FABLE, HAIKU, isClaudeFamily, type ModelDecision, type HoldOutcome } from './spawn-model-policy.ts'
 import { renderSessionsView } from './sessions-view.ts'
 import { detectCurrentMode, onNormalPrompt, inputBoxContent, inputBoxOccupant, isModelSwitchConfirm, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, paneRunsTypedInput, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType } from './prompt.ts'
-import { modelSwitchEvidence, findSessionFile, resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, lastAssistantStopReason, turnAnchorUuid, liveSubagents, currentTurnFeed, currentTurnActivity, concludedTurnWork, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
+import { modelSwitchEvidence, findSessionFile, resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, narrationAfter, turnInProgress, lastAssistantStopReason, turnAnchorUuid, liveSubagents, currentTurnFeed, currentTurnActivity, concludedTurnWork, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
 // CC-only, called directly rather than through agent-transcript.ts's dispatcher: the error fields it
 // keys on (isApiErrorMessage/apiErrorStatus) are a Claude Code transcript shape with no Codex
 // equivalent, so — like several other CC-only readers in that dispatcher — a Codex rollout simply
@@ -96,6 +96,7 @@ import {
   pendingMultiSelect, freeTextPrompts, chatPrompts, replyTargets, stuckCards,
   promptCards, prunePromptCards,
   lastRelayedByFile, claimRelayDelivery, offMcpPanes,
+  lastNarratedByFile, markNarrated, wasNarrated,
   usageWarnState, voiceNudged,
   sessionNames, mdOverwritePending, exitNamedPending,
   markChatReachable, isChatUnreachable, markChatUnreachableIfUndeliverable,
@@ -1835,6 +1836,44 @@ async function panePresentation(pane: string): Promise<{ role: RelayPresentation
   return { role: relayPresentationRole(dmChat !== null, isTopicMode()), dmChat }
 }
 
+// ---- Chat-lane reasoning as ordinary messages ---------------------------------------------------
+// The chat lane is the conversational agent in the bot's DM, and its reasoning used to live only in
+// the self-editing activity card — which re-renders every few seconds, so a paragraph the owner was
+// mid-read of was overwritten by the next one. Reasoning that matters has to PERSIST, so for this one
+// class of session the turn's mid-turn narration relays as ordinary messages and the card keeps only
+// the activity indicators (mirror.ts's chatLaneActivityOnly).
+//
+// The gate is CHAT LANE, not "DM": a DM *lane* (dmLanes — a per-person work session in its own DM)
+// codes, and keeps its thought bubbles, as does every topic. One prefs.json value drives both halves,
+// so the card and the messages can never disagree about which rendering is in force.
+const chatLaneReasoningAsMessages = (): boolean => loadAccess().chatLaneReasoning !== 'bubbles'
+
+// Ship whatever narration this transcript has produced since our cursor. Runs while the turn is still
+// WORKING — reasoning delivered after the answer it was leading to would be worse than what it
+// replaces. Silent: several buzzes per turn for thinking-out-loud is noise; the answer keeps its own
+// notification class. Every send is claimed (file + id + chat + thread) like the reply paths, so the
+// focused and aux loops racing over one transcript cannot double-post.
+async function relayChatLaneNarration(pane: string, file: string): Promise<void> {
+  const known = lastNarratedByFile.has(file)
+  const items = narrationAfter(file, lastNarratedByFile.get(file) ?? '')
+  if (!items.length) return
+  // First sight of this transcript: adopt its tail as the cursor and send nothing. A daemon that
+  // just started (or just adopted this pane) has no business replaying reasoning already on screen.
+  if (!known) { lastNarratedByFile.set(file, items[items.length - 1].id); return }
+  for (const it of items) {
+    lastNarratedByFile.set(file, it.id)   // advance before the send, like the reply loops
+    markNarrated(file, it.uuid)           // the reply loops skip an entry already sent as narration
+    let targets: Awaited<ReturnType<typeof outboundTargetsFor>>
+    try { targets = await outboundTargetsFor(pane) }
+    catch (e) { process.stderr.write(`daemon: narration target-resolve failed: ${e}\n`); return }
+    for (const t of targets) {
+      if (!claimRelayDelivery(file, it.id, t)) { process.stderr.write(`daemon: narration skipped duplicate (id ${it.id}) to ${t.chat}${t.thread ? `#${t.thread}` : ''} — already delivered\n`); continue }
+      process.stderr.write(`daemon: relaying ${it.text.length} chars (id ${it.id}, narration) to ${t.chat}${t.thread ? `#${t.thread}` : ''}\n`)
+      await deliverRelayReply(pane, t, it.text, true)
+    }
+  }
+}
+
 async function stopTypingForPane(pane: string): Promise<void> {
   const presentation = await panePresentation(pane)
   if (presentation.role === 'dm-chat' && presentation.dmChat) typingPresence.stop(presentation.dmChat)
@@ -2191,6 +2230,9 @@ async function relayLoopTick(gen: number): Promise<void> {
       else if (presentation.role === 'topic') { if (working) void emitTopicTyping(paneId) }
       else typingPresence.observe(await paneDrivesDmTyping(paneId, working), undefined, 'focused:turnInProgress')   // classic non-topic DM keeps the pane-ownership gate
       await updateTerminalMirror(working, thinkingPending(paneId)).catch(() => {})   // pending opens/holds the Thinking… card before turnInProgress flips
+      // Chat lane only: its reasoning ships as ordinary messages, mid-turn (not at conclusion).
+      if (file && presentation.role === 'dm-chat' && chatLaneReasoningAsMessages())
+        await relayChatLaneNarration(paneId, file).catch(e => process.stderr.write(`daemon: narration relay failed: ${e}\n`))
 
       // DM-only "Clauding…" live draft. DISABLED by default (the indicator was unreliable): gated to
       // require an explicit claudingDraft:true opt-in (was default-on). All the machinery is kept intact
@@ -2223,6 +2265,9 @@ async function relayLoopTick(gen: number): Promise<void> {
         const isBanner = (t: string) => t.length < 200 && /\b(hit your|used \d+% of your) [\w-]+ limit\b/i.test(t)
         for (const r of finalRepliesAfter(file, lastRelayedUuid)) {
           if (!r.uuid || r.uuid === lastRelayedUuid) continue
+          // A turn that ends without an answer block (interrupt, error) offers its last NARRATION
+          // paragraph here — the chat lane already sent that one as a message. Advance past it.
+          if (wasNarrated(file, r.uuid)) { lastRelayedUuid = r.uuid; lastRelayedByFile.set(file, r.uuid); continue }
           if (!isBanner(r.text)) {
             // Resolve delivery targets BEFORE advancing the cursor — a rejection here must not skip
             // past an undelivered reply. On failure leave the cursor put and retry the reply next tick.
@@ -2371,6 +2416,9 @@ async function auxRelayTick(): Promise<void> {
         // A bound private-chat lane keeps its DM presentation even when a forum group is also bound.
         // Other forum panes keep their topic card; groupless unbound/headless panes have no card.
         if (presentation.role !== 'none') await updateAuxMirror(pane, working, thinkingPending(pane)).catch(() => {})   // pending opens/holds the card before turnInProgress flips
+        // Chat lane only, and BEFORE the working-early-return below — narration is mid-turn by design.
+        if (presentation.role === 'dm-chat' && chatLaneReasoningAsMessages())
+          await relayChatLaneNarration(pane, file).catch(e => process.stderr.write(`daemon: aux narration relay failed: ${e}\n`))
         if (!auxRelayPrimed.has(file)) {
           // A restored (persisted) cursor survives restarts — keep it, so a reply written during
           // the restart window still relays. Only a never-seen transcript skips its existing tail.
@@ -2408,6 +2456,7 @@ async function auxRelayTick(): Promise<void> {
         for (const r of finalRepliesAfter(file, cursor)) {
           if (!r.uuid || r.uuid === (lastRelayedByFile.get(file) ?? '')) continue
           lastRelayedByFile.set(file, r.uuid)     // advance before the await so a fast tick can't double-send
+          if (wasNarrated(file, r.uuid)) continue   // already sent as narration (see the focused loop's note)
           clearThinkingPending(pane)   // a real reply relayed → drop the thinking-pending crutch so the card caps/deletes
           // Suppress Claude's own usage-limit banner echo, like the focused loop: a limited session
           // writes a synthetic "You've hit your session limit · resets …" assistant message for EVERY
@@ -17884,6 +17933,7 @@ initMirror({
   richToken: TOKEN,
   loadAccess,
   replyMode,
+  chatLaneActivityOnly: async pane => !!pane && chatLaneReasoningAsMessages() && await boundDmChatForPane(pane) !== null,
   getActivePaneId: () => focus.activePaneId,
   retriggerTyping: () => { typingPresence.retrigger(); retriggerTopicTyping() },
   resolveTranscriptForPane: async pane => transcriptForPane(pane, await paneCwd(pane)),

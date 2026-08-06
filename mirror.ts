@@ -69,6 +69,10 @@ type MirrorDeps = {
   richToken: string
   loadAccess: () => Access
   replyMode: () => 'thoughts' | 'actions' | 'off'
+  // Is this pane the DM chat lane, WITH reasoning-as-messages on? Then its narration relays as
+  // ordinary messages (daemon.ts owns that), so the card must not also render it as thought
+  // bubbles — it shows the activity indicators instead. Async: the answer is a pane→session lookup.
+  chatLaneActivityOnly: (paneId: string | null) => Promise<boolean>
   getActivePaneId: () => string | null
   retriggerTyping: () => void
   // The pane's transcript, resolved by the daemon (stamped @tg_transcript path first, cwd
@@ -301,6 +305,13 @@ export function renderThoughtsMirror(feed: FeedItem[], done: boolean): string {
   return done ? appendFooterLine(body, '✅ <b>Done</b>') : body
 }
 
+// WHICH body a card renders. The only difference the chat lane makes: its reasoning is relayed as
+// ordinary messages, so the thoughts body would duplicate it — it takes the actions body (the
+// activity indicators) instead. 'actions' and 'off' are unaffected; there is nothing to move.
+export function cardBodyStyle(mode: 'thoughts' | 'actions' | 'off', chatLaneActivityOnly: boolean): 'thoughts' | 'actions' | 'off' {
+  return mode === 'thoughts' && chatLaneActivityOnly ? 'actions' : mode
+}
+
 // ---- The card lifecycle (shared by the focused card and per-pane aux cards) ----
 class MirrorCard {
   msgIds = new Map<string, number>()   // chat_id → the live mirror message id
@@ -434,6 +445,10 @@ class MirrorCard {
     // placeholder rather than reading currentTurnFeed, which would still return the PREVIOUS,
     // concluded turn (the "idle session shows a stale, still-active card on a new message" bug).
     if (forceThinking && !done && !footerOn()) { this.body = await this.renderThinking(paneId); return true }
+    // The chat lane's reasoning lives in the chat as messages, so its card renders the ACTIONS body
+    // (the activity indicators) instead of the thoughts body. One routing decision over the existing
+    // renderers — every other session, including a DM *lane* (which codes), is untouched.
+    const style = cardBodyStyle(mode, await deps.chatLaneActivityOnly(paneId).catch(() => false))
     const file = paneId ? await deps.resolveTranscriptForPane(paneId).catch(() => null) : null
     // Keep the card's identity (pane + turn anchor) CURRENT while the turn runs, not frozen at
     // open: a card opened off the inbound thinking-kick captures them cold (pane unresolved,
@@ -448,7 +463,7 @@ class MirrorCard {
 
     // The capture feeds the digest body and the footer's verb/tokens scrape — with the footer
     // disabled, thoughts/actions don't need it at all (saves a tmux spawn per sync).
-    const needCap = (mode === 'actions' && mirrorMode() === 'digest') || (!done && footerOn())
+    const needCap = (style === 'actions' && mirrorMode() === 'digest') || (!done && footerOn())
     const cap = needCap ? await mirrorCapture(paneId) : ''
     // Refresh the footer pieces from Claude's spinner line, but only when a fresh reading exists — a
     // tick that misses the line (it scrolls) keeps the last good verb/tokens instead of flickering.
@@ -459,7 +474,7 @@ class MirrorCard {
     }
 
     let body: string | null
-    if (mode === 'thoughts') body = renderThoughtsMirror(file ? currentTurnFeed(file, done) : [], done) || null   // `done` → drop the reply (relayed on its own)
+    if (style === 'thoughts') body = renderThoughtsMirror(file ? currentTurnFeed(file, done) : [], done) || null   // `done` → drop the reply (relayed on its own)
     else {
       // actions (legacy 'tools'/'final')
       if (mirrorMode() === 'off') { this.body = ''; return false }

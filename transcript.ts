@@ -1062,6 +1062,41 @@ export function currentTurnFeed(file: string, concluded = false): FeedItem[] {
   return out
 }
 
+// The same mid-turn narration currentTurnFeed shows in the live card, but as DELIVERABLE units:
+// identified (entry uuid + block index, since one entry can hold several text blocks) so each
+// paragraph can be relayed as an ordinary message exactly once. The chat lane uses this instead of
+// thought bubbles — a card re-renders itself every few seconds, so reasoning read there disappears
+// mid-read; a message persists. Coding sessions keep the card (daemon.ts owns that gate).
+//
+// Scoped to the CURRENT turn, like currentTurnFeed: a cursor from a previous turn simply isn't in
+// this turn's list, so a new turn returns all of its narration so far, and a mid-turn restart with a
+// persisted cursor resumes exactly where it stopped.
+export function narrationAfter(file: string, cursor: string): { id: string; uuid: string; text: string }[] {
+  const entries = readEntries(file)
+  let start = -1
+  for (let i = entries.length - 1; i >= 0; i--) if (isRealUserText(entries[i])) { start = i; break }
+  const items: { id: string; uuid: string; text: string }[] = []
+  for (let i = start + 1; i < entries.length; i++) {
+    const e = entries[i]
+    // stop_reason 'tool_use' is what makes a text block narration rather than the turn's answer —
+    // the answer relays on its own path, and including it here would double-send it.
+    if (e.isSidechain || e.type !== 'assistant' || e.message?.stop_reason !== 'tool_use') continue
+    const content = e.message?.content
+    if (!Array.isArray(content)) continue
+    ;(content as any[]).forEach((b, bi) => {
+      // Same two block shapes the feed reads; `thinking` is inert today (Claude Code persists it
+      // empty) and stays here for the day it isn't.
+      const text = b?.type === 'text' && typeof b.text === 'string' ? b.text.trim()
+        : b?.type === 'thinking' && typeof b.thinking === 'string' ? b.thinking.trim() : ''
+      if (!text || isCommandNoise(text)) return
+      items.push({ id: `${e.uuid ?? ''}#${bi}`, uuid: e.uuid ?? '', text })
+    })
+  }
+  if (!cursor) return items
+  const at = items.findIndex(it => it.id === cursor)
+  return at < 0 ? items : items.slice(at + 1)
+}
+
 // Cross-session search (ROADMAP #5): scan transcripts newest-first for `query` in the
 // conversation text (user + main-thread assistant), returning up to `limit` matching sessions
 // with a snippet around the latest hit. Bounded to the newest `maxFiles` transcripts so a big
