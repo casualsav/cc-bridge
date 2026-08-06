@@ -13,6 +13,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import { readdirSync, openSync, writeSync, existsSync, readFileSync, readlinkSync, writeFileSync, unlinkSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, basename } from 'node:path'
+import { pickVersion } from './upgrade-core.ts'
 
 const CHANNELS_DIR = join(homedir(), '.claude', 'channels')
 
@@ -43,30 +44,14 @@ function findDaemon(): string | null {
   const cacheRoot = join(homedir(), '.claude', 'plugins', 'cache')
   const base = MKT_IDS.map(n => join(cacheRoot, n, 'telegram')).find(p => existsSync(p))
     ?? join(cacheRoot, MKT_IDS[0], 'telegram')
-  let versions: string[]
-  // Only real version dirs (x.y.z) — never a backup/temp dir like 0.0.6.bak-… or .build-…,
-  // which would otherwise sort highest and get launched. Numeric sort so 0.0.10 > 0.0.9.
-  try { versions = readdirSync(base).filter(v => /^\d+\.\d+\.\d+$/.test(v)) } catch { return null }
-  versions.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
-  for (const v of versions.reverse()) {
-    const p = join(base, v, 'daemon.ts')
-    if (!existsSync(p)) continue
-    // A version dir whose OWN manifest disagrees with its name is an aborted clone, not a release.
-    // deploy.ts seeds a new version dir by copying the previous one (for node_modules) BEFORE it
-    // syncs the payload and stamps the manifest, so a deploy that dies in that window leaves the
-    // previous version's code sitting under a new, higher number — and "highest wins" above would
-    // launch it in preference to the real release. That is not hypothetical: on 2026-07-26 a 0.4.76
-    // holding 0.4.75's bytes was created that way and the daemon respawned into it, so "deployed"
-    // and "what a phone loads" silently diverged. Refusing here is the cheap half of the fix and
-    // would have prevented it on its own.
-    // FAILS OPEN on a missing or unreadable manifest — an older cache copy may predate it, and
-    // "launch nothing" is a worse failure than "launch something plausible".
-    let stamped: string | null = null
-    try { stamped = JSON.parse(readFileSync(join(base, v, '.claude-plugin', 'plugin.json'), 'utf8'))?.version ?? null } catch { stamped = null }
-    if (stamped && stamped !== v) continue
-    return p
-  }
-  return null
+  // The rule this used to spell out inline now lives in upgrade-core.ts's `versionDirIsSelectable`,
+  // shared with the watchdog (which had a weaker one) and with the rollback (which depends on the two
+  // agreeing). Its reasons are unchanged and recorded there: a dir whose OWN manifest disagrees with
+  // its name is an aborted clone, not a release — deploy seeds a version dir by cloning the previous
+  // one BEFORE syncing the payload, and on 2026-07-26 a 0.4.76 holding 0.4.75's bytes was launched
+  // that way, so "deployed" and "what a phone loads" silently diverged.
+  const v = pickVersion(base)
+  return v ? join(base, v, 'daemon.ts') : null
 }
 
 // Every configured bridge instance: a `telegram` or `telegram-<id>` state dir whose .env carries a

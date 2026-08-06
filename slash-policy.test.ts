@@ -141,7 +141,7 @@ test('/exit and /quit are their own plan, so the caller can gate and clean up', 
 // a pane where the slash palette fuzzy-matches the name and runs whatever it lands on. Before
 // v0.4.381 both returned `{kind:'pass'}` — that is what a broken version gives here.
 test('the session-baton pair is refused, never passed to the pane', () => {
-  for (const cmd of ['/handoff', '/continue', '/HANDOFF']) {
+  for (const cmd of ['/handoff', '/continue', '/audit', '/HANDOFF']) {
     const plan = planSlash(cmd)
     expect(plan.kind).toBe('refuse')
     expect((plan as { reason: string }).reason).toContain('bridge command')

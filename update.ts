@@ -2,8 +2,9 @@
 // Self-contained self-updater for the off-MCP Telegram bridge. Runs DETACHED (spawned by the
 // daemon's /update command or `tg update`), because it restarts the very daemon that launched it
 // and rebuilds the cache dir the daemon runs from — so it must not depend on the daemon being
-// alive, and must not live-import anything from the cache dir it's about to replace. Only node
-// builtins + global fetch; it loads its own .env and talks to Telegram over raw HTTP.
+// alive, and must not live-import anything from the cache dir it's about to replace. It is STAGED AS
+// A DIRECTORY (updates.ts copies it plus its siblings to /update-run/), so it may import
+// upgrade-core.ts — the machinery it shares with scripts/deploy.ts — and nothing else.
 //
 //   bun update.ts <chat_id> [check]
 //
@@ -17,6 +18,7 @@ import {
 } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { stopSupervisors, pruneOldVersions } from './upgrade-core.ts'
 
 const HOME = homedir()
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(HOME, '.claude', 'channels', 'telegram')
@@ -102,35 +104,16 @@ function newestSemverDir(): string | null {
   } catch { return null }
 }
 
-// Keep the newest `keep` version dirs (the live one + a couple of manual-rollback fallbacks) and
-// delete the rest. Nothing else prunes them, so daily auto-updates otherwise accrete a full
-// node_modules copy (tens of MB) per version forever. The SEMVER filter excludes .build-*/backup
-// dirs, and numeric collation ranks per-component (0.0.10 > 0.0.9). Per-dir rmSync is best-effort:
-// a prune failure must never fail an otherwise-successful update.
-function pruneOldVersions(keep = 3): string[] {
-  const removed: string[] = []
-  try {
-    const dirs = readdirSync(CACHE_BASE).filter(d => SEMVER.test(d) && existsSync(join(CACHE_BASE, d, 'daemon.ts')))
-    dirs.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))   // ascending — newest last
-    for (const d of dirs.slice(0, Math.max(0, dirs.length - keep))) {
-      try { rmSync(join(CACHE_BASE, d), { recursive: true, force: true }); removed.push(d) } catch {}
-    }
-  } catch {}
-  return removed
-}
-
+// Behaviour here is deliberately unchanged — pids first, then this cache tree's paths, then the
+// rogue-checkout sweep that catches a daemon someone ran by hand from a source tree (`cd ~/cc-bridge
+// && bun daemon.ts`), which survives cache-path kills, keeps polling the token and 409-fights every
+// freshly launched daemon, so both the restart AND the rollback "fail to come up" while the user
+// keeps talking to the untouched checkout process. `sweepStrayCheckouts` is that last tier, opt-in
+// because its pattern cannot be rooted anywhere: /update runs in production by definition and takes
+// it; deploy and any sandboxed run never do. The cache-path patterns are now ABSOLUTE, which is the
+// fix — the old ones matched every install on the box, including from a sandbox.
 function killBridge(): void {
-  // The last two patterns catch a daemon/watchdog run BY HAND from a source checkout (`cd
-  // ~/cc-bridge && bun daemon.ts`). Field failure: such a rogue survives the cache-path kills,
-  // keeps polling the bot token, and 409-fights every freshly launched cache daemon — both the
-  // update's restart AND its rollback then "fail to come up" while the user keeps talking to the
-  // untouched checkout process.
-  for (const pat of ['telegram/[^/]*/daemon\\.ts', 'telegram/[^/]*/watchdog\\.ts', 'cc-bridge/daemon\\.ts', 'cc-bridge/watchdog\\.ts']) {
-    try { execSync(`pkill -f '${pat}'`) } catch {}
-  }
-  for (const f of [SOCKET, join(STATE_DIR, 'daemon.pid'), join(STATE_DIR, 'watchdog.pid')]) {
-    try { rmSync(f) } catch {}
-  }
+  stopSupervisors({ stateDir: STATE_DIR, cacheBase: CACHE_BASE, sweepStrayCheckouts: true })
 }
 
 function launchBridge(dir: string): void {
@@ -339,7 +322,7 @@ async function main(): Promise<void> {
     // Prune build/backups, keep the immediate predecessor as a manual fallback.
     if (preBackup) { try { rmSync(preBackup, { recursive: true, force: true }) } catch {} }
     // Reap stale version dirs the update just superseded (keep newest 3 incl. the one now live).
-    const pruned = pruneOldVersions(3)
+    const pruned = pruneOldVersions(CACHE_BASE, 3)
     if (pruned.length) log(`pruned ${pruned.length} old version dir(s): ${pruned.join(', ')}`)
     return
   }

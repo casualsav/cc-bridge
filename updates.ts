@@ -5,7 +5,7 @@
 // daemon (they drive panes); the upd:* buttons call back into startUpdate from there.
 import { join } from 'node:path'
 import { homedir } from 'node:os'
-import { readFileSync, existsSync, openSync, copyFileSync } from 'node:fs'
+import { readFileSync, existsSync, openSync, copyFileSync, mkdirSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { STATE_DIR, DAEMON_LOG_FILE, readJsonFile, writeJsonFile } from './common.ts'
 import { exec } from './proc.ts'
@@ -14,6 +14,10 @@ import { loadAccess } from './access.ts'
 import { isTopicMode, getGroupChatId } from './topics.ts'
 import { listAccounts } from './accounts.ts'
 import type { ChannelAdapter, Button } from './channel.ts'
+
+// Siblings update.ts imports, staged beside it. Keep in step with update.ts's import list — the
+// startUpdate check below turns a miss into a reported error rather than a detached crash.
+const UPDATE_RUN_DEPS = ['upgrade-core.ts'] as const
 
 // `onClaudeInstalled` lets a successful auto-install kick the daemon's stale-session sweep straight
 // away instead of waiting out its hourly tick — this module is a leaf (it must never import daemon
@@ -31,8 +35,21 @@ export function startUpdate(chatId: string, mode: 'apply' | 'check', progressMsg
   try {
     const src = join(import.meta.dir, 'update.ts')
     if (!existsSync(src)) return { ok: false, error: 'update.ts not found in plugin cache' }
-    const runner = join(STATE_DIR, 'update-run.ts')
+    // A DIRECTORY, not a lone file. The property that matters is unchanged — the updater must outlive
+    // the cache dir it is about to replace, so it runs from a stable spot outside it — but staging one
+    // file meant update.ts could import nothing, which is why it carried its own copy of machinery
+    // deploy also has, and why the two drifted through seven divergences. Its siblings come with it now.
+    const runDir = join(STATE_DIR, 'update-run')
+    mkdirSync(runDir, { recursive: true })
+    const runner = join(runDir, 'update.ts')
     copyFileSync(src, runner)
+    for (const dep of UPDATE_RUN_DEPS) {
+      const from = join(import.meta.dir, dep)
+      // A missing sibling is fatal HERE, where it can still be reported, rather than as an unresolved
+      // import inside a detached process whose stderr goes to the daemon log.
+      if (!existsSync(from)) return { ok: false, error: `${dep} not found in plugin cache — cannot stage the updater` }
+      copyFileSync(from, join(runDir, dep))
+    }
     const log = openSync(DAEMON_LOG_FILE, 'a')
     const child = spawn('bun', [runner, chatId, mode, progressMsgId != null ? String(progressMsgId) : ''], { detached: true, stdio: ['ignore', log, log], env: process.env })
     child.unref()

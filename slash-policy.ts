@@ -118,7 +118,8 @@ const BRIDGE_ONLY: Record<string, string> = {
   // reaching the pane is the worst outcome available: an unregistered slash falls through to the
   // TUI's palette, which fuzzy-matches it (probed live: `/opus` offered `/fable` as its top match).
   // They were in neither table until v0.4.381, which is the same hole `/files` fell through.
-  '/handoff': 'the chat', '/continue': 'the chat',
+  // `/audit` is registered in the same daemon loop as the two above and had the identical hole.
+  '/handoff': 'the chat', '/continue': 'the chat', '/audit': 'the chat',
 }
 
 /** Why this command can't be run at a session, or null if it isn't a bridge command. */

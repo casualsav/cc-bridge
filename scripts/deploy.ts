@@ -35,13 +35,14 @@
 // failed build never mutates your working tree.
 
 import { spawnSync } from 'node:child_process'
-import { existsSync, readdirSync, readFileSync, rmSync, mkdirSync, copyFileSync, renameSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, writeFileSync, rmSync, mkdirSync, copyFileSync, renameSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { shipGate } from '../ship-gate.ts'
 import { strandedVersion } from '../stranded-version.ts'
 import { provenanceGate, dirtyPayloadPaths, materializePayload } from '../payload-provenance.ts'
 import { syncConventionBlock } from '../installed-copies.ts'
+import { stopSupervisors, healthCheck, rollback, markHealthy, stampGitref, pruneOldVersions } from '../upgrade-core.ts'
 
 // PLUGIN-DIR CONTENTS ARE DEPLOY-GENERATED. The shared runtime lives at the repo ROOT (channel.ts,
 // slack-daemon.ts, common.ts, channel-ctl.ts, the slk/dsc ctls, …) — that is the single source of
@@ -72,13 +73,13 @@ function step(msg: string) { console.log(`• ${msg}`) }
 // `.slice`/`.split`/`.trim` on its output throws a bare TypeError instead of failing usefully. Here that
 // becomes a nonzero status with the spawn error surfaced as stderr, making every call site below safe
 // and every `die()` message real.
-function sh(cmd: string, args: string[], cwd?: string): { status: number; stdout: string; stderr: string } {
+function sh(cmd: string, args: string[], cwd?: string, env?: Record<string, string>): { status: number; stdout: string; stderr: string } {
   // 64 MiB, because the default is 1 MiB and `bun build` prints the WHOLE bundle to stdout — which
   // crossed 1 MiB at v0.4.100 (1,064,568 bytes). spawnSync SIGTERMs a child that overruns maxBuffer,
   // so the type-check gate below started reporting "type-check failed" while printing a complete,
   // correct bundle and an empty stderr: a growing daemon.ts silently became an unshippable one.
   // Bounded rather than Infinity — this box is memory-tight and a runaway command should still stop.
-  const r = spawnSync(cmd, args, { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+  const r = spawnSync(cmd, args, { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, ...(env ? { env: { ...process.env, ...env } } : {}) })
   const stdout = r.stdout ?? ''
   // Name the signal when there is one: a signal-killed child otherwise reports an empty stderr, and
   // every die() below prefers stderr — which is how the maxBuffer kill above read as a build error.
@@ -243,7 +244,12 @@ const bumpArg = argv.find((a, i) =>
   && !valueIdxs.has(i - 1)) ?? 'patch'
 
 const CACHE_BASE = join(CACHE_ROOT, cfg.cacheName)
-const DAEMON_PID = join(homedir(), '.claude', 'channels', 'telegram', 'daemon.pid')
+// Every path derives from homedir(), which is what makes a sandboxed run (HOME=/tmp/…) reach only
+// sandbox state — verified live on 2026-08-06 by a --dry-run under a sandbox HOME.
+const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'telegram')
+const DAEMON_PID = join(STATE_DIR, 'daemon.pid')
+const DAEMON_LOG = join(STATE_DIR, 'daemon.log')
+const SOCKET = join(STATE_DIR, 'daemon.sock')
 const PLUGIN_JSON = cfg.pluginJson
 
 // ---- compute the new version (from this plugin's plugin.json) ----
@@ -449,6 +455,16 @@ if (freshCache) {
     mkdirSync(newCache, { recursive: true })
   }
 }
+// Re-deploying a version that already exists overwrites it in place, so the bytes that were serving
+// traffic a moment ago have no other copy anywhere — and the rollback below would have nothing to
+// restore. `/update` has always taken this backup; deploy never did. `.pre-<ts>` fails SEMVER, so no
+// supervisor can select it while it waits.
+const backupDir = freshCache ? null : `${newCache}.pre-${Date.now()}`
+if (backupDir) {
+  step(`backing up the existing ${next} → ${basename(backupDir)} (rollback target if this ship fails)`)
+  const r = sh('cp', ['-a', newCache, backupDir])
+  if (r.status !== 0) die(`backing up the existing cache dir failed: ${r.stderr}`)
+}
 
 // ---- 2. sync the payload into the cache copy (flat), then stamp its manifests to the new version ----
 step(`syncing ${payload.length} files → cache/${cfg.cacheName}/${next}`)
@@ -501,6 +517,23 @@ if (tests.status !== 0) {
   die(`tests failed — checkout left untouched:\n${(tests.stderr || tests.stdout || '(no output)').slice(-4000)}`)
 }
 step('tests OK')
+// The gate /update had and deploy did not: EXECUTE the freshly-built module — every import plus the
+// top-level init wiring — with `--selftest`, which evaluates everything and exits 0 before any
+// socket, watchdog or polling. `bun build` parses and transpiles; `tsc` types. Neither runs the
+// thing, so neither catches a top-level eval failure, and a build that cannot boot is exactly the
+// class the rollback below exists for. Dummy token + throwaway state dir so it needs no real config.
+step('self-test (executing the built module)')
+const selftest = sh('bun', [cfg.daemonEntry, '--selftest'], newCache, {
+  TELEGRAM_BOT_TOKEN: 'SELFTEST:0', TELEGRAM_STATE_DIR: join(newCache, '.selftest-state'),
+})
+if (selftest.status !== 0) {
+  if (freshCache) rmSync(newCache, { recursive: true, force: true })
+  die(`self-test failed — checkout left untouched:\n${(selftest.stderr || selftest.stdout || '(no output)').slice(-4000)}`)
+}
+step('self-test OK')
+// IDENTITY of these bytes, for whoever reads this dir later and for /update, which otherwise falls
+// back to "dir name == clone version" when deciding whether a cache is current.
+stampGitref(newCache, gitOut(['rev-parse', payloadRef]) || 'unknown')
 
 // ---- 5. build passed: materialize the self-contained plugin dir, stamp the checkout + mirror ----
 // slack/discord: regenerate the committed runtime copies + pinned package.json so the plugin dir
@@ -529,38 +562,73 @@ function cmdlineOf(pid: number): string {
   try { return readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ') } catch {}
   const r = sh('ps', ['-p', String(pid), '-o', 'args=']); return r.status === 0 ? r.stdout.trim() : ''
 }
+// ROLLBACK. Reverts everything this deploy did that outlives the process, in the one order that
+// works, and then reports which check failed — a false rollback has to be diagnosable from its own
+// artifact, or the next person cannot tell "the build was bad" from "the health check was flaky".
+//
+// The checkout's version files are reverted too, which is a deploy-only concern (/update never
+// touches a checkout): leaving them bumped would claim a version installed nowhere, which is exactly
+// what the stranded-version gate trips over on the NEXT deploy.
+function rollbackAndDie(why: string, detail: string, failedCheck: string): never {
+  console.error(`\n✗ ${why}\n  ${detail}`)
+  step('rolling back')
+  stopSupervisors({ stateDir: STATE_DIR, cacheBase: CACHE_BASE })
+  const plan = rollback({ cacheBase: CACHE_BASE, failedVersion: next, backupDir })
+  if (plan.renamedTo) step(`failed build renamed → ${basename(plan.renamedTo)} (bytes kept for diagnosis)`)
+  if (plan.restoredBackup) step(`restored the pre-deploy ${next}`)
+  // Revert the two version files this deploy stamped. Path-scoped: the checkout is shared.
+  sh('git', ['checkout', 'HEAD', '--', PLUGIN_JSON, MARKET_JSON], REPO)
+  step(`reverted ${PLUGIN_JSON} + ${MARKET_JSON} in the checkout`)
+  if (!plan.target) {
+    console.error('\n🛑 nothing selectable left in the cache — manual recovery needed')
+    process.exit(1)
+  }
+  step(`relaunching ${plan.target} (${plan.targetBasis})`)
+  const ed = join(CACHE_BASE, plan.target, 'ensure-daemon.ts')
+  if (existsSync(ed)) sh('bun', [ed], join(CACHE_BASE, plan.target))
+  // The record. Written where the failure happened, in the words the checks themselves produced.
+  const record = [
+    `deploy of ${next} FAILED and was rolled back`,
+    `failed check: ${failedCheck}`,
+    `detail: ${detail}`,
+    `now running: ${plan.target} (${plan.targetBasis})`,
+    plan.renamedTo ? `failed bytes: ${plan.renamedTo}` : '',
+  ].filter(Boolean).join('\n')
+  try { writeFileSync(join(CACHE_BASE, 'last-rollback.txt'), record + '\n', { mode: 0o644 }) } catch {}
+  console.error(`\n${record}\n`)
+  process.exit(1)
+}
+
 if (!cfg.restartTelegram) {
   step(`[${cfg.id}] cache shipped — its daemon comes up via the plugin's SessionStart hook (telegram daemon untouched)`)
 } else if (noRestart) {
   step('--no-restart: leaving the running daemon as-is')
-} else if (!existsSync(DAEMON_PID)) {
-  step('no daemon.pid found — nothing running to restart (a session start will launch the new code)')
 } else {
-  const oldPid = parseInt(readFileSync(DAEMON_PID, 'utf8').trim(), 10)
-  step(`restarting daemon (old pid ${oldPid})`)
-  try { process.kill(oldPid, 'SIGTERM') } catch {}
-  // Wait for the old process to actually exit (and release the socket) so ensure-daemon sees it
-  // down. Then proactively respawn from the new cache rather than waiting on the watchdog's lazy
-  // 20s poll — ensure-daemon is idempotent and gates on socket liveness, so it won't race the
-  // watchdog into a double-spawn.
-  for (let i = 0; i < 20; i++) { Bun.sleepSync(250); try { process.kill(oldPid, 0) } catch { break } }
+  const logOffset = (() => { try { return statSync(DAEMON_LOG).size } catch { return 0 } })()
+  step('stopping daemon + watchdog (pid-first)')
+  // PID-FIRST, and the stray-checkout sweep stays OFF here. The pattern it uses cannot be rooted at a
+  // cache path, so it matches any bridge-shaped process on the box — /update opts into it because it
+  // runs in production by definition; a deploy (which is also how this mechanism gets TESTED under a
+  // sandbox $HOME) must never fire it.
+  const stopped = stopSupervisors({ stateDir: STATE_DIR, cacheBase: CACHE_BASE })
+  step(`stopped ${stopped.killed.length ? `pid(s) ${stopped.killed.join(', ')}` : 'nothing by pid'}` +
+    (stopped.skipped.length ? ` · skipped ${stopped.skipped.map(s => `${s.pid} (${s.why})`).join(', ')}` : ''))
+  for (let i = 0; i < 20; i++) { Bun.sleepSync(250); if (!existsSync(DAEMON_PID)) break }
   const ed = join(newCache, 'ensure-daemon.ts')
-  if (existsSync(ed)) { step('respawning via ensure-daemon'); sh('bun', [ed], newCache) }
-  let newPid = 0
-  for (let i = 0; i < 60; i++) { // up to ~30s: covers bun startup + the watchdog fallback path
-    Bun.sleepSync(500)
-    let p = 0
-    try { p = parseInt(readFileSync(DAEMON_PID, 'utf8').trim(), 10) } catch {}
-    if (p && p !== oldPid) { try { process.kill(p, 0); newPid = p; break } catch {} }
-  }
-  if (!newPid) die(`daemon did not come back within 30s — check ~/.claude/channels/telegram for logs`)
-  const line = cmdlineOf(newPid)
-  if (!line.includes(`/${next}/`)) {
-    console.error(`⚠ daemon respawned (pid ${newPid}) but not from cache/${next}:\n  ${line}`)
-    console.error(`  (a stale .pid or a higher cache version may be winning — check ${CACHE_BASE})`)
-  } else {
-    step(`daemon up: pid ${newPid} on cache/${next}`)
-  }
+  if (!existsSync(ed)) die(`no ensure-daemon.ts in cache/${next} — cannot restart`)
+  step('respawning via ensure-daemon')
+  sh('bun', [ed], newCache)
+  step('health-check (functional AND identity)')
+  const health = await healthCheck({
+    socketPath: SOCKET, logFile: DAEMON_LOG, logOffset, pidFile: DAEMON_PID, expectVersion: next,
+  })
+  if (!health.ok) rollbackAndDie(`the new build did not come up healthy`, health.detail, health.failed ?? 'unknown')
+  step(`daemon up on cache/${next} — ${health.detail}`)
+  // Positive evidence of goodness, and the only thing a later rollback can aim at with confidence.
+  markHealthy(newCache, { version: next, gitref: gitOut(['rev-parse', payloadRef]) || 'unknown', at: Date.now() })
+  const pruned = pruneOldVersions(CACHE_BASE, 3)
+  if (pruned.length) step(`pruned ${pruned.length} old version dir(s): ${pruned.join(', ')}`)
+  if (backupDir) { try { rmSync(backupDir, { recursive: true, force: true }) } catch {} }
 }
 
 // ---- 6b. refresh the installed copies that live outside the cache ----

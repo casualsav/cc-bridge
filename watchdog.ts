@@ -12,6 +12,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { SOCKET_PATH, STATE_DIR, WATCHDOG_PID_FILE, DAEMON_LOG_FILE, anchorCwd, cwdFaultHint, stableCwd } from './common.ts'
 import { tokenHeldByOther, readTokenFromEnv } from './token-lock.ts'
+import { pickVersion } from './upgrade-core.ts'
 
 // FIRST thing, before anything can spawn: leave whatever cwd we inherited. ensure-daemon runs from a
 // SessionStart hook, so the cwd here is some *other* project's session dir — twice on 2026-07-30 a
@@ -74,20 +75,17 @@ try { writeFileSync(WATCHDOG_PID_FILE, `${process.pid}\nusr1`, { mode: 0o600 }) 
 // Newest plugin-cache copy of daemon.ts (version dirs sort ascending; take the last).
 // Marketplace id (also the plugin-cache dir name).
 const MKT_IDS = ['cc-bridge']
+// ONE predicate, shared with ensure-daemon and with the rollback (upgrade-core.ts). This function
+// used to have its own weaker rule — highest dir with a daemon.ts — while ensure-daemon refused a dir
+// whose manifest disagreed with its name. Two selectors that disagree mean a dir one of them calls
+// unlaunchable is still launchable by the other, which defeats a rollback: rollback works by making
+// the failed dir unselectable, and "unselectable" has to mean the same thing to everyone.
 function findDaemon(): string | null {
   const cacheRoot = join(homedir(), '.claude', 'plugins', 'cache')
   const base = MKT_IDS.map(n => join(cacheRoot, n, 'telegram')).find(p => existsSync(p))
     ?? join(cacheRoot, MKT_IDS[0], 'telegram')
-  let versions: string[]
-  // Only real version dirs (x.y.z) — never a backup/temp dir like 0.0.6.bak-… or .build-…,
-  // which would otherwise sort highest and get launched. Numeric sort so 0.0.10 > 0.0.9.
-  try { versions = readdirSync(base).filter(v => /^\d+\.\d+\.\d+$/.test(v)) } catch { return null }
-  versions.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
-  for (const v of versions.reverse()) {
-    const p = join(base, v, 'daemon.ts')
-    if (existsSync(p)) return p
-  }
-  return null
+  const v = pickVersion(base)
+  return v ? join(base, v, 'daemon.ts') : null
 }
 
 function socketAlive(): Promise<boolean> {
