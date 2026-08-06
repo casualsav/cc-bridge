@@ -1,6 +1,6 @@
 // What a slash command typed into a mini app chat should do. Pure, no IO. Run: bun test slash-policy.test.ts
 import { test, expect } from 'bun:test'
-import { planSlash } from './slash-policy.ts'
+import { planSlash, bridgeOnlyReason } from './slash-policy.ts'
 
 test('anything not a command is prose, and so is a path', () => {
   expect(planSlash('hello there')).toEqual({ kind: 'prose' })
@@ -135,4 +135,22 @@ test('bare /model and /effort point at the dial rather than opening a picker', (
 test('/exit and /quit are their own plan, so the caller can gate and clean up', () => {
   expect(planSlash('/exit')).toEqual({ kind: 'exit' })
   expect(planSlash('/QUIT')).toEqual({ kind: 'exit' })
+})
+
+// The failure being pinned: these are BOT commands with no CLI counterpart, so `pass` sends them to
+// a pane where the slash palette fuzzy-matches the name and runs whatever it lands on. Before
+// v0.4.381 both returned `{kind:'pass'}` — that is what a broken version gives here.
+test('the session-baton pair is refused, never passed to the pane', () => {
+  for (const cmd of ['/handoff', '/continue', '/HANDOFF']) {
+    const plan = planSlash(cmd)
+    expect(plan.kind).toBe('refuse')
+    expect((plan as { reason: string }).reason).toContain('bridge command')
+  }
+})
+
+test('bridgeOnlyReason is the shared answer, so tg slash and the composer cannot disagree', () => {
+  expect(bridgeOnlyReason('/handoff')).toContain('it lives in the chat')
+  expect(bridgeOnlyReason('/continue')).toContain('it lives in the chat')
+  expect(bridgeOnlyReason('/compact')).toBe(null)   // a real CLI command still relays
+  expect(bridgeOnlyReason('/nonsense')).toBe(null)
 })

@@ -113,6 +113,18 @@ const BRIDGE_ONLY: Record<string, string> = {
   '/bypass': 'the chat', '/yolo': 'the chat', '/agent': 'the chat',
   '/bind': 'the chat', '/unbind': 'the chat', '/claim': 'the chat',
   '/base': 'the chat', '/diff': 'the chat', '/terminal': 'the chat', '/reset': 'the chat',
+  // The session-baton pair. They are BOT commands — the daemon bundles their instruction text and
+  // injects it through the normal inbound path — and the CLI has no command by either name, so
+  // reaching the pane is the worst outcome available: an unregistered slash falls through to the
+  // TUI's palette, which fuzzy-matches it (probed live: `/opus` offered `/fable` as its top match).
+  // They were in neither table until v0.4.381, which is the same hole `/files` fell through.
+  '/handoff': 'the chat', '/continue': 'the chat',
+}
+
+/** Why this command can't be run at a session, or null if it isn't a bridge command. */
+export function bridgeOnlyReason(name: string): string | null {
+  const where = BRIDGE_ONLY[name.toLowerCase()]
+  return where ? `${name} is a bridge command, not a session command — it lives in ${where}.` : null
 }
 
 export function planSlash(text: string): SlashPlan {
@@ -140,7 +152,8 @@ export function planSlash(text: string): SlashPlan {
   // that means asking it only about a command that HAS no argument.
   const panel = arg ? null : panelKindOf(name)
   if (panel) return { kind: 'readout', panel }
-  if (BRIDGE_ONLY[name]) return { kind: 'refuse', reason: `${name} is a bridge command, not a session command — it lives in ${BRIDGE_ONLY[name]}.` }
+  const bridgeOnly = bridgeOnlyReason(name)
+  if (bridgeOnly) return { kind: 'refuse', reason: bridgeOnly }
   if (BLOCKED[name]) return { kind: 'refuse', reason: `${name} ${BLOCKED[name]}, so it isn't available from a session chat.` }
   if (MODAL[name]) return { kind: 'refuse', reason: `${name} ${MODAL[name]} in the terminal, which this chat can't drive. Run it in the session's own pane.` }
   // Bare /model and /effort open a picker — the same undriveable dialog as anything in MODAL — so

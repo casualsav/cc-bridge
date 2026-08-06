@@ -41,6 +41,7 @@ import { dirname, join, resolve } from 'node:path'
 import { shipGate } from '../ship-gate.ts'
 import { strandedVersion } from '../stranded-version.ts'
 import { provenanceGate, dirtyPayloadPaths, materializePayload } from '../payload-provenance.ts'
+import { syncConventionBlock } from '../installed-copies.ts'
 
 // PLUGIN-DIR CONTENTS ARE DEPLOY-GENERATED. The shared runtime lives at the repo ROOT (channel.ts,
 // slack-daemon.ts, common.ts, channel-ctl.ts, the slk/dsc ctls, …) — that is the single source of
@@ -560,6 +561,18 @@ if (!cfg.restartTelegram) {
   } else {
     step(`daemon up: pid ${newPid} on cache/${next}`)
   }
+}
+
+// ---- 6b. refresh the installed copies that live outside the cache ----
+// `/update` has always done this and deploy never did, so a box that ships by deploy ran a current
+// daemon against a stale convention in ~/.claude/CLAUDE.md — invisible, because each half was
+// internally consistent (installed-copies.ts has the measurement). Source is PAYLOAD_ROOT, not the
+// checkout: what gets installed must be the bytes that just shipped, not whatever is dirty on disk.
+// Runs AFTER the restart, so a build that never came up cannot leave a newer convention behind than
+// the daemon serving it. Never fails a deploy — a convention refresh is not worth losing a ship.
+{
+  const note = syncConventionBlock(PAYLOAD_ROOT, homedir())
+  if (note) step(`${note} — new sessions pick it up on their next start`)
 }
 
 // ---- 7. optional commit + push ----

@@ -35,7 +35,7 @@ import { accountRemovalPlan, readAccountIdentity } from './account-identity.ts'
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
 import { normalizeCommandOutput } from './ansi.ts'
-import { planSlash, type NavTarget } from './slash-policy.ts'
+import { planSlash, bridgeOnlyReason, type NavTarget } from './slash-policy.ts'
 import { preserveGlobalEffort, reconcileEffortScope } from './effort-scope.ts'
 import { planDrift, driftStateAfter, type DriftState } from './drift-guard.ts'
 import { decideModel, decideEffort, upgradeNeedsConfirm, heldSpawnModel, heldSpawnNeedsLine, holdTapData, parseHoldTap, launchFallback, spawnCardHeader, relaunchModel, launchDefaultModel, launchDefaultEffort, launchDefaultMode, fablePolicy, fableRowState, onOff, type FablePolicy, AUTO_FALLBACK, AUTO_EFFORT_FALLBACK, FABLE, HAIKU, isClaudeFamily, type ModelDecision, type HoldOutcome } from './spawn-model-policy.ts'
@@ -181,6 +181,7 @@ import {
 } from './prompt-relay.ts'
 import { planStuckSweep, planWedgeEscalation, type StuckState } from './stuck-plan.ts'
 import { planContextWarn, planCtxNudge } from './ctx-warn.ts'
+import { readHandoffState, ctxNudgeHandoffClause, handoffAnnotation } from './handoff-state.ts'
 import { planBoxUsageWarn, type UsageWarnMarker } from './usage-warn.ts'
 import { spawnModelFlag, WIDE_CONTEXT_SUFFIX } from './model-window.ts'
 import { buildModelSelector, MODEL_ALIASES, MODEL_ALIAS_IDS, planModelSelection, type ModelSelector } from './model-catalog.ts'
@@ -4538,13 +4539,20 @@ async function flushCtxNudge(sid: string, pane: string, cap: string, status: Sta
     const last = file ? latestFinalReply(file) : null
     if (last?.text) doing = last.text.replace(/\s+/g, ' ').slice(0, 200)
   } catch {}
+  // A clear throws the session's context away, and whatever it knew that never reached the repo goes
+  // with it — which is what a handoff is for. This is the one event already firing at that moment, so
+  // the clause rides an ask that is being sent anyway rather than becoming a mechanism of its own.
+  // Conditional on the file existing (handoff-state.ts): most repos keep none, and a clause about a
+  // document that isn't there is how a clause stops being read.
+  const handoff = await paneCwd(pane).then(cwd => cwd ? readHandoffState(cwd) : null).catch(() => null)
   const pct = status?.ctxPct ?? held.step
   const win = status?.ctxWindow ? ` of ${status.ctxWindow}` : ''
   const text = [
     `@${held.label} has crossed ${held.step}% context (now ${pct}%${win}) and is IDLE at a prompt — decide now, before it starts another turn.`,
     doing ? `Last turn ended with: ${doing}` : 'No last reply on record.',
+    ctxNudgeHandoffClause(handoff, fmtAgo),
     `Levers: \`tg slash ${held.label} "/compact"\` keeps the thread, \`tg slash ${held.label} "/clear"\` empties it. Answer this ask with what you did and why.`,
-  ].join('\n\n')
+  ].filter(Boolean).join('\n\n')
   const p = createPending({ fromSid: SYSTEM_SID, toSid: lane, fromName: 'system', toName: nameForEndpoint(lane, busEndpoints()), text, refs: [], depth: 0, sysKind: 'ctx-nudge' }, Date.now())
   appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'ask', from: 'system', to: p.toName, id: p.id, text, refs: [] })
   process.stderr.write(`daemon: ctx nudge ask ${p.id} → @${p.toName} about ${held.label} at ${pct}%\n`)
@@ -6133,6 +6141,14 @@ async function handleCall(
             openAskToSid: !!onAsk,
             now: Date.now(),
           }) : null
+          // Same economics as `unreported` directly above, and the same ruling behind it: computed
+          // only because someone is already reading the roster, never injected into a pane, never a
+          // refusal. It is what makes a repo whose handoff has stopped moving visible BEFORE a retire
+          // rather than after one. `paneCwd` is already resolved above for the transcript read.
+          // An unreadable cwd yields NO note rather than a note about the daemon's own repo — this
+          // annotation names a session's repo, and naming the wrong one is worse than silence.
+          const rosterCwd = await paneCwd(pane).catch(() => null)
+          const handoffNote = rosterCwd ? handoffAnnotation(readHandoffState(rosterCwd), fmtAgo) : null
           // Did the last turn die on an upstream API error? Only meaningful when not busy — a session
           // already back at work has moved past whatever the previous turn ended with.
           const apiError = tfile ? lastTurnApiError(tfile) : null
@@ -6153,6 +6169,7 @@ async function handleCall(
             + `${wait ? ` · waiting: ${wait.label}` : ''}`
             + `${onAsk ? ` · on ask ${onAsk.id}` : ''}`
             + `${marker ? ` · unreported ${fmtAgo(marker.since)} → @${marker.briefer}` : ''}`
+            + `${handoffNote ? ` · ${handoffNote}` : ''}`
           rows.push(`${busy ? '🟡' : errored ? '🔴' : '🟢'} ${nm}${model}${pct}${state}${flair}`)
         }
         text = rows.length ? rows.join('\n') : '(no live agents on the bus)'
@@ -6325,6 +6342,12 @@ async function handleCall(
             `${command} ${interactive} — the bridge can't drive it and relaying it wedges the pane, so nothing was sent.` })
           return
         }
+        // A BRIDGE command has no CLI counterpart, so relaying it is worse than refusing: the pane's
+        // slash palette fuzzy-matches an unregistered name and runs whatever it lands on. Same table
+        // the mini-app composer reads (slash-policy.ts) — a command cannot be refused on one surface
+        // and typed into a pane from another.
+        const bridgeOnly = bridgeOnlyReason(command.split(/\s+/)[0])
+        if (bridgeOnly) { write({ t: 'result', id, ok: false, text: bridgeOnly }); return }
         await reapDeadEndpoints(String(args.to ?? ''))
         const endpoints = busEndpoints()
         const res = resolveEndpoint(String(args.to ?? ''), endpoints)
@@ -6723,9 +6746,16 @@ async function handleCall(
         // if OTHER closed rows already share the name, spell out the sid so the undo is precise.
         const otherClosed = listTopics().filter(t => t.closed && t.sessionId !== res.id && normalizeEndpointName(t.name) === normalizeEndpointName(target))
         const sidNote = otherClosed.length ? ` (this one specifically: \`tg reopen ${res.id.slice(0, 8)}\`)` : ''
+        // ANNOTATION, NEVER A REFUSAL. A gate here would take the shape of the survivor warning above
+        // — and would fire on the COMMON case, a worker that finished, reported, and is being retired
+        // cleanly, which trains a `--force` reflex that then carries the one real catch through with
+        // the rest. So the state is stated and the kill proceeds; the kill is reversible (`tg reopen`
+        // resumes the same conversation in the same folder), which is what makes stating it enough.
+        const killHandoff = topic.cwd ? handoffAnnotation(readHandoffState(topic.cwd), fmtAgo) : null
+        const handoffNote = killHandoff ? `\n${killHandoff} — prune it before this is final` : ''
         text = alive
-          ? `ending @${target} — undo with \`tg reopen ${target}\`${sidNote}`
-          : `@${target} was already down — \`tg reopen ${target}\` brings it back${sidNote}`
+          ? `ending @${target} — undo with \`tg reopen ${target}\`${sidNote}${handoffNote}`
+          : `@${target} was already down — \`tg reopen ${target}\` brings it back${sidNote}${handoffNote}`
         break
       }
       // `tg reopen <name or session id>` — the undo for `tg kill`. Relaunches the SAME session id in
@@ -10068,13 +10098,9 @@ bot.command(['update', 'upgrade'], async ctx => {
 // stays in the shape it finds — a /handoff that silently restructured someone's repo would be a
 // migration nobody asked for, and migration is a prune that wants a human's judgment about what is
 // already stale. Converting is available on request; it is not a side effect of writing a handoff.
-const HANDOFF_PROMPT = `Prepare a session handoff. Do these in order:
+const HANDOFF_PROMPT = `Prepare a session handoff. THE HANDOFF IS STEP 1, on purpose: you are running this because context is short, and the doc is the one artefact that must not be written with whatever is left over after everything else.
 
-1. Run the test suite; note results.
-2. Commit any completed work with a descriptive message. Do NOT commit broken code — stash or note it instead.
-3. Update PLAN.md: correct every task status. Do not mark anything done that lacks passing tests + a commit.
-4. Append today's decisions to DECISIONS.md if not already logged.
-5. Update the handoff — HANDOFF.md, that exact name, at the REPO ROOT, one per repo (never a dated or phase-named second file alongside it). FIRST detect which shape this repo uses, and STAY IN IT — do not convert one to the other unless I ask:
+1. Update the handoff — HANDOFF.md, that exact name, at the REPO ROOT, one per repo (never a dated or phase-named second file alongside it). FIRST detect which shape this repo uses, and STAY IN IT — do not convert one to the other unless I ask:
 
    (a) INDEX + FOLDER — a \`handoff/\` directory exists at the repo root:
        - One file per open item, \`handoff/<slug>.md\`, carrying what a successor needs to take it cold: the state now, the exact next action, and the check that proves it done. You own your item files outright — edit only the ones your work touched.
@@ -10097,14 +10123,18 @@ const HANDOFF_PROMPT = `Prepare a session handoff. Do these in order:
        Drop any section that has no live items. If nothing live remains at all, delete HANDOFF.md.
 
    In BOTH shapes: anything finished is DELETED, never marked done and never kept as history — the commits and the repo already record it.
-6. AUDIT: Compare PLAN.md against the actual repo. List every task marked done that isn't fully implemented, and every planned item with no task tracking it. Still-open findings become new handoff items — item files plus index lines in shape (a), an "## Audit findings" section in shape (b).`
+2. Run the test suite; note results. Anything failing that a successor would have to deal with becomes a handoff ITEM in the shape you used above — not a paragraph in your reply to me, which nobody will be reading when they pick this up.
+3. Commit any completed work with a descriptive message. Do NOT commit broken code — stash or note it instead. This is what makes step 1's deletions safe: a finished item is deleted because the repo and the commits already carry it.
+4. ONLY IF this repo actually keeps them: correct every task status in PLAN.md (nothing marked done that lacks passing tests + a commit), and append today's decisions to DECISIONS.md. Most repos keep neither — skip this step silently rather than creating them.
+5. ONLY IF PLAN.md exists: audit it against the actual repo — every task marked done that isn't fully implemented, every planned item with no task tracking it. Still-open findings become handoff ITEMS in the shape from step 1. Do not open a section for them; a section only grows.`
 const CONTINUE_PROMPT = `Resume work on this project:
 0. "This project" is the repo you are ALREADY IN — your current working directory. Do not go looking for a richer or more familiar checkout elsewhere on the box, and never adopt one you find: another tree is another session's, and on a shared checkout that is somebody's live work. A thin repo is not the wrong repo. If the docs below are absent HERE, say that and stop; if you ever run a command outside this directory, name the directory in the same breath as the result.
-1. Read PLAN.md, DECISIONS.md, CLAUDE.md, and the handoff at the repo root — HANDOFF.md, the only handoff doc. Say so and continue from PLAN.md if HANDOFF.md is absent.
+1. Read CLAUDE.md and the handoff at the repo root — HANDOFF.md, the only handoff doc. Say so and ask what to work on if HANDOFF.md is absent; do not invent a queue for yourself.
    If a \`handoff/\` directory exists, HANDOFF.md is an INDEX: read it plus \`handoff/facts.md\`, and open ONLY the item files you are actually taking — reading every item to find your two is the cost that shape exists to remove. Otherwise HANDOFF.md is a single document; read all of it.
+   Read PLAN.md and DECISIONS.md too IF this repo keeps them. Most don't — their absence is normal and not worth reporting.
 2. Run the verify/check commands the handoff gives you (the "Verify state" section, or the check line in each item file you opened). Report any mismatch before proceeding.
-3. List: (a) current task, (b) next 3 tasks, (c) anything under audit findings or open questions.
-4. If open questions block the current task, ask me now — otherwise start the current task.
+3. Take the item you were BRIEFED on, and only that one. If you were given no item, say what the handoff holds and ask which to take — a handoff is a set of open items, not a queue to work through, and picking your own next task is how work nobody asked for gets done.
+4. If open questions block the item you took, ask NOW rather than guessing — over the bus to whoever briefed you if you were briefed by another agent (\`tg answer <id>\` on the ask you are working, or \`tg ask @<name>\`), otherwise here.
 5. As you finish each item you took, DELETE it — its file AND its index line in the folder shape, its entry in the monolith. Never mark it done, never keep it as history. In the folder shape, run the invariant check afterwards and expect silence:
    diff <(grep -o '](handoff/[^)]*)' HANDOFF.md | sed 's|](handoff/||; s|)||' | sort) <(ls handoff/ | grep -v '^facts\\.md$' | sort)
    Delete the handoff once no items remain — keeping \`handoff/facts.md\` if it still holds standing truths.`
