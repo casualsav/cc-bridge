@@ -181,7 +181,7 @@ import {
 } from './prompt-relay.ts'
 import { planStuckSweep, planWedgeEscalation, type StuckState } from './stuck-plan.ts'
 import { planContextWarn, planCtxNudge } from './ctx-warn.ts'
-import { ledgerKey, planDrain, formatDigest, loadDelivered, saveDelivered, readLedger, writeLedger } from './inbound-ledger.ts'
+import { ledgerKey, planDrain, formatDigest, loadDelivered, saveDelivered, readLedger, writeLedger, markableOutcome } from './inbound-ledger.ts'
 import { readHandoffState, ctxNudgeHandoffClause, handoffAnnotation } from './handoff-state.ts'
 import { planBoxUsageWarn, type UsageWarnMarker } from './usage-warn.ts'
 import { spawnModelFlag, WIDE_CONTEXT_SUFFIX } from './model-window.ts'
@@ -1225,6 +1225,8 @@ function enqueueInboundInject(paneId: string, watcher: PaneWatcher, params: Inbo
     .then(async outcome => {
       if (outcome === 'landed') {
         clearPasteInFlight(paneId)
+        // Stamped HERE, against the outcome, and nowhere earlier — see markableOutcome.
+        if (markableOutcome(outcome)) noteDelivered(params.meta)
         process.stderr.write(`daemon: inbound injected to pane ${paneId} chat=${params.meta.chat_id}\n`)
         // Off-MCP outbound is handled by the continuous relay loop (startRelayLoop), which
         // relays this turn's reply — and any proactive message — once, keyed by uuid.
@@ -2958,21 +2960,22 @@ function emitInbound(params: InboundParams, targetPane?: string | null): void {
   // Forum-topics mode: a message typed in a session's topic is delivered to THAT session, not
   // whichever is focused. The focused pane keeps the watcher (pause mirror during inject); any other
   // pane gets a plain paste (no watcher to pause). See handleInbound for how targetPane is resolved.
-  // Handed to a session ⇒ remember the key, so a later ledger drain (or a Telegram re-offer of an
-  // update this run never confirmed) cannot deliver the same message a second time. Recorded on the
-  // ATTEMPT rather than on confirmed arrival, deliberately: the delivery paths below are
-  // fire-and-forget, so there is no confirmation to hang this on until the hot-path write lands with
-  // the other loss window. Erring here means a duplicate is missed, never a message suppressed.
+  // NOTHING IS STAMPED HERE. v0.4.383 stamped the dedup key at these three points — before the
+  // delivery was attempted — on the reasoning that the paths below are fire-and-forget so there is
+  // no outcome to wait for. That inverted the failure direction: a delivery that ends 'occupied' is
+  // buffered AND already stamped, so the drain drops it as "already delivered" and the message is
+  // gone. Measured on the canary 2026-08-06: `10 already delivered, 0 replayed`, ledger emptied.
+  // The stamp now lives beside the outcome, in the delivery paths themselves (markableOutcome).
   if (targetPane) {
-    noteDelivered(params.meta)
     if (targetPane === focus.activePaneId && focus.paneWatcher) enqueueInboundInject(targetPane, focus.paneWatcher, params)
     else pasteInbound(targetPane, params)
     return
   }
   if (focus.activePaneId && focus.paneWatcher) {
-    noteDelivered(params.meta)
     enqueueInboundInject(focus.activePaneId, focus.paneWatcher, params)
   } else if (focus.activeShim) {
+    // The one place an attempt IS the outcome: a socket write to a live shim has no refusal branch —
+    // there is no input box to be occupied, and a dead shim throws rather than buffering.
     noteDelivered(params.meta)
     focus.activeShim.write({ t: 'inbound', params })
   } else {
@@ -3055,7 +3058,9 @@ function pasteInbound(paneId: string, params: InboundParams): void {
   const block = formatChannelBlock(params)
   const run = () => pasteToPane(paneId, block)
     .then(ok => ok
-      ? process.stderr.write(`daemon: inbound pasted to topic pane ${paneId} chat=${params.meta.chat_id}\n`)
+      // Stamped on the OUTCOME, never on the attempt (markableOutcome) — the `false` branch below
+      // buffers, and a message that is both buffered and stamped can never be drained again.
+      ? (noteDelivered(params.meta), process.stderr.write(`daemon: inbound pasted to topic pane ${paneId} chat=${params.meta.chat_id}\n`))
       : (process.stderr.write(`daemon: topic pane ${paneId} gone — buffering\n`), bufferEvent(params), void dumpStuckPane(paneId)))
     .catch(err => process.stderr.write(`daemon: topic inbound paste failed: ${err}\n`))
   inboundInjectChain = inboundInjectChain.then(run, run)

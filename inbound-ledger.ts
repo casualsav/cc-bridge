@@ -56,6 +56,28 @@ export function ledgerKey(meta: InboundMeta): string {
   return [meta.chat_id ?? '', meta.message_id ?? '', meta.ts ?? '', meta.edited ?? ''].join(':')
 }
 
+/**
+ * May a delivery with this outcome be stamped as delivered?
+ *
+ * ONLY `'landed'`. This function exists because v0.4.383 got it wrong in the one place it claimed to
+ * have thought hardest about, and the mistake made the whole drain inert.
+ *
+ * That version stamped the key in `emitInbound`, BEFORE handing the message to
+ * `enqueueInboundInject` — reasoning that the delivery paths are fire-and-forget so there is no
+ * confirmation to wait for, and that erring early could only cost a missed duplicate. It is the
+ * opposite: a delivery that ends `'occupied'` is written to the ledger AND already stamped, so
+ * `planDrain` drops it as "already delivered" forever. Observed live on the canary 2026-08-06 —
+ * ten buffered messages reported `10 already delivered`, none replayed, ledger emptied, content
+ * unrecoverable. The buffer's own recovery path destroyed what it existed to protect.
+ *
+ * `'unsubmitted'` is NOT markable either: the text is in the box but nothing has been submitted, and
+ * the re-Enter path may still fail. Anything but `'landed'` leaves the key unstamped, so the worst
+ * case is a duplicate — the direction this was always supposed to fail in.
+ */
+export function markableOutcome(outcome: string): boolean {
+  return outcome === 'landed'
+}
+
 export type DrainPlan = {
   replay: LedgerEntry[]        // fresh enough to type into a session
   digest: LedgerEntry[]        // too old to replay — surface, never inject
