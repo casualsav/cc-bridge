@@ -796,6 +796,19 @@ export function onNormalPrompt(paneText: string): boolean {
   return false
 }
 
+// Will text typed into this pane RUN, or merely queue? onNormalPrompt alone answers the wrong
+// question: the "Press up to edit queued messages" bar is a ❯ row between two box borders, so it
+// reads as a normal prompt — and it is exactly what Claude Code paints while working with something
+// pending. A `/compact` submitted through that gate on 2026-08-06 sat unexecuted in @cc-handoff's
+// queue for ten minutes while the bridge reported it submitted and then reported it complete; the
+// same class had already cost a silently-queued `/clear` (see hasQueuedMessages).
+//
+// Both terms are load-bearing and neither implies the other: a pane can be working with an empty
+// queue, and a queue can outlive the spinner's line falling outside detectWorking's tail.
+export function paneRunsTypedInput(paneText: string): boolean {
+  return onNormalPrompt(paneText) && !detectWorking(paneText) && !hasQueuedMessages(paneText)
+}
+
 // What is sitting in the session's input box, or null when no bordered input box is on screen (a
 // modal, a picker, a surface we don't parse). Same bordered-❯ shape onNormalPrompt trusts: a prompt
 // row directly between two box-border rows, which a menu cursor never is.

@@ -40,7 +40,7 @@ import { preserveGlobalEffort, reconcileEffortScope } from './effort-scope.ts'
 import { planDrift, driftStateAfter, type DriftState } from './drift-guard.ts'
 import { decideModel, decideEffort, upgradeNeedsConfirm, heldSpawnModel, heldSpawnNeedsLine, holdTapData, parseHoldTap, launchFallback, spawnCardHeader, relaunchModel, launchDefaultModel, launchDefaultEffort, launchDefaultMode, fablePolicy, fableRowState, onOff, type FablePolicy, AUTO_FALLBACK, AUTO_EFFORT_FALLBACK, FABLE, HAIKU, isClaudeFamily, type ModelDecision, type HoldOutcome } from './spawn-model-policy.ts'
 import { renderSessionsView } from './sessions-view.ts'
-import { detectCurrentMode, onNormalPrompt, inputBoxContent, inputBoxOccupant, isModelSwitchConfirm, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType } from './prompt.ts'
+import { detectCurrentMode, onNormalPrompt, inputBoxContent, inputBoxOccupant, isModelSwitchConfirm, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, paneRunsTypedInput, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType } from './prompt.ts'
 import { modelSwitchEvidence, findSessionFile, resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, lastAssistantStopReason, turnAnchorUuid, liveSubagents, currentTurnFeed, currentTurnActivity, concludedTurnWork, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
 // CC-only, called directly rather than through agent-transcript.ts's dispatcher: the error fields it
 // keys on (isApiErrorMessage/apiErrorStatus) are a Claude Code transcript shape with no Codex
@@ -3725,7 +3725,10 @@ async function evaluateWatchesPass(): Promise<void> {
     // …plus "not compacting": compaction is work the spinner doesn't always own, and a pane mid-/compact
     // is not free — for a hand-armed watch either. A caused watch would otherwise report the very
     // command it is waiting on as complete the moment the CLI redrew a prompt-shaped screen under it.
-    const atPrompt = !!cap && onNormalPrompt(cap) && !detectWorking(cap) && !bashModeArmed(cap) && !detectCompacting(cap)
+    // …and "its queue is empty" (paneRunsTypedInput carries that term): a pane still holding the very
+    // command this watch reports the completion of has not completed it, whatever the spinner's line
+    // is doing. That is how watch 35 fired `prompt` 35s into a turn that never ran its /compact.
+    const atPrompt = !!cap && paneRunsTypedInput(cap) && !bashModeArmed(cap) && !detectCompacting(cap)
     // A session whose END IS COMMITTED counts as gone even while its pane lingers (see endingSids). It
     // has to: `tg kill` interrupts the turn to type /exit, so a killed-while-busy session really does
     // reach a prompt for a few seconds on its way out, and firing 'prompt' there would tell the caller
@@ -6406,7 +6409,10 @@ async function handleCall(
           write({ t: 'result', id, ok: false, text: 'target session has no live pane' }); return
         }
         const cap = await capturePane(targetPane).catch(() => '')
-        if (!cap || !onNormalPrompt(cap)) { write({ t: 'result', id, ok: false, text: 'target is mid-turn — retry when it goes idle' }); return }
+        // paneRunsTypedInput, not onNormalPrompt: the queued-messages bar IS a bordered ❯ row, so the
+        // bare prompt read passes on a busy pane and the CLI then queues the command instead of running
+        // it — reported as submitted, and (for a changesPaneContext command) as complete moments later.
+        if (!cap || !paneRunsTypedInput(cap)) { write({ t: 'result', id, ok: false, text: 'target is mid-turn — retry when it goes idle' }); return }
         if (bashModeArmed(cap)) { write({ t: 'result', id, ok: false, text: 'target has an unsubmitted ! bash command in its input box' }); return }
         // A box that already holds something is refused rather than typed over. Two relays stacking in
         // one input box is how `/compact` became `/compact/compact` on 2026-07-30 — and whatever is
@@ -6485,6 +6491,17 @@ async function handleCall(
         // which submitVerified knows in seconds; the command's own output still echoes below.
         const sent = await injectSlash(targetPane, watcher, command, { guardPalette: true, settleMs: 3_000 })
         if (!sent.ok) { fail('unsubmitted' in sent ? unsubmittedSlashText(command, toName) : paletteRefusalText(command, sent.offered)); return }
+        // The braces to the gate's belt: the target can start a turn between the capture above and the
+        // paste, and injectSlash cannot tell "ran" from "queued" — submitLanded counts a queued command
+        // as landed on purpose. A queued command is NOT a delivery: it runs whenever that turn ends, so
+        // no watch is armed (its fire would time the wrong event) and the caller is told what actually
+        // happened rather than "submitted".
+        const settled = await capturePane(targetPane).catch(() => '')
+        if (settled && hasQueuedMessages(settled)) {
+          fail(`@${toName} QUEUED ${command} instead of running it — it went busy between the check and the paste. `
+            + `The command is sitting in its input queue and runs when that turn ends; nothing is watching for it, and re-sending stacks a second copy behind the first.`)
+          return
+        }
         void echoSlashResult(targetPane, targets[0]?.chat ?? '', slashAt, targets[0]?.thread ? Number(targets[0].thread) : undefined, command)
         // A COMPLETION event for the submitter, on the one command class where it has something to
         // sequence behind: `/compact` returned "submitted" and then nothing, ever, so the caller had no

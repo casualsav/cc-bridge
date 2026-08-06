@@ -71,7 +71,11 @@ by its topic name.
   target is mid-turn — retry when idle; its outcome echoes in that session's topic). /exit is owner-only.
   A command that opens a PANEL (`/cost`, `/usage`, `/context`) is refused here and pointed at the verbs
   below: relayed, it types the command and walks away, and the CLI holds the screen until someone sends
-  Esc — a wedged pane reported to you as a successful send.
+  Esc — a wedged pane reported to you as a successful send. **Mid-turn is a REFUSAL, never a queue:**
+  a slash the CLI queues does not run until that turn ends, so compacting a busy session is two steps —
+  `tg watch @name`, then `tg slash` when it fires. A rare "QUEUED … instead of running it" reply means
+  the target went busy between the check and the paste: the command will run when its turn ends, nothing
+  is watching for it, and re-sending stacks a second copy behind the first.
 - tg cost @name · tg context @name · tg status @name · tg mcp @name · tg hooks @name — read one of
   that session's CLI panels: cost (total, API/wall duration, lines ±, per-model tokens), context
   (window use + per-category breakdown), status (version, model, cwd, session id, MCP state, the
