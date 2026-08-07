@@ -105,6 +105,7 @@ import { looksLikeArgForm, exitCommandArg } from './named-command.ts'
 import { initMirror, updateTerminalMirror, respawnTerminalMirror, abandonMirror, updateAuxMirror, dropAuxMirror, auxMirrorPanes } from './mirror.ts'
 import { parseStatusline, modelDisplayName, type StatuslineData } from './statusline.ts'
 import { turnParts, capChips } from './turn-summary.ts'
+import { planEffortApply, effortSuffix, driveEffortChange, type EffortOutcome } from './effort-plan.ts'
 import { normalizeKeys, planKeyInjection, planKeyRate, KEY_NAMES } from './keys-plan.ts'
 import {
   STATIC, initAccess, loadAccess, saveAccess, gate, dmCommandGate, isMentioned,
@@ -984,6 +985,54 @@ async function reapplyEffort(paneId: string, effort: string | null, watcher: Pan
     }
   }
   await scopedEffortChange(paneId, 'reapplyEffort', () => (watcher ? watcher.withInjection(run) : run()))
+}
+
+// How long applyEffort waits for the "Change effort level?" modal, and how long it then waits for
+// the statusline to agree. Both bounded: a caller on the bus is holding a 30s socket.
+const EFFORT_MODAL_WAIT_MS = 8_000
+const EFFORT_READBACK_MS = 8_000
+// THE one path every bridge-driven effort change takes — the mini app's dial and a bus `tg slash`
+// alike. Three rules, each of which was a live failure first (2026-08-07, @weather twice):
+//   - a RAISE is refused mid-turn (effort-plan.ts carries the measurement and the reasoning);
+//   - the write goes through withPaneDelivery, so it queues behind an in-flight paste instead of
+//     interleaving with one — reapplyEffort was one of the enumerated sites outside that lock;
+//   - AND THE NON-NEGOTIABLE: if the modal is still standing when the deadline passes, press Esc and
+//     report failure. A session with no terminal user sat on that dialog until a human forced Esc
+//     through the bus. A change that did not happen is recoverable; a wedged headless session is not.
+// Success is the STATUSLINE reading the target level — never the injection returning, and never our
+// own record. `reapplyEffort` above is deliberately untouched: it serves the restore paths (resume,
+// restart, drift), where there is no caller to refuse to and no turn to protect.
+async function applyEffort(pane: string, level: string, watcher: PaneWatcher | null): Promise<EffortOutcome> {
+  const cap0 = await capturePane(pane).catch(() => '')
+  if (!cap0) return { ok: false, reason: 'could not read the session pane — nothing was typed' }
+  const file = await transcriptForPane(pane, await paneCwd(pane).catch(() => null)).catch(() => null)
+  // The composite, not detectWorking alone: that predicate reads FALSE for the first seconds of a
+  // turn, before the first tool call, and that is exactly the window the owner's tap landed in.
+  const busy = detectWorking(cap0) || (file ? turnInProgress(file) || liveSubagents(file) > 0 : false)
+  const target = level.toLowerCase()
+  const plan = planEffortApply({
+    target, current: parseStatusline(cap0)?.effort ?? null,
+    atPrompt: paneRunsTypedInput(cap0), busy, levels: EFFORT_LEVELS,
+  })
+  if (plan.kind === 'refuse') return { ok: false, reason: plan.reason }
+  if (plan.kind === 'noop') { rememberEffort(pane, plan.level); return { ok: true, level: plan.level, already: true } }
+  // The loop itself lives in effort-plan.ts with its I/O injected: the rule that matters is what
+  // happens at the DEADLINE, and a real CLI that always answers in time can never demonstrate it.
+  const drive = async (): Promise<EffortOutcome> => {
+    const r = await driveEffortChange({
+      capture: () => capturePane(pane).catch(() => ''),
+      send: keys => sendKeys(pane, keys),
+      isConfirm: isEffortConfirm,
+      readEffort: cap => parseStatusline(cap)?.effort ?? null,
+      settle: () => waitForSettle(pane, 200, 3000),
+      sleep, now: Date.now,
+    }, target, plan.expectConfirm, { modalMs: EFFORT_MODAL_WAIT_MS, readbackMs: EFFORT_READBACK_MS, pollMs: 300 })
+    if (r.ok) rememberEffort(pane, r.level)   // persist for resume/restart — the CLI won't
+    return r
+  }
+  return await scopedEffortChange(pane, 'applyEffort', () => withPaneDelivery(pane,
+    () => (watcher ? watcher.withInjection(drive) : drive()),
+    () => ({ ok: false as const, reason: 'another delivery to this session is in flight — nothing was typed' })))
 }
 
 // After a resumed session clears the post-update "Resume session" picker, Claude Code brings it back
@@ -6220,6 +6269,13 @@ async function handleCall(
           const cap = await capturePane(pane).catch(() => '')
           const sl = cap ? parseStatusline(cap) : null
           const model = sl?.model ? ` ${sl.model}` : ''
+          // Effort, from the same capture the model comes off. The statusline's `ε:` is the ONLY
+          // reading that survives an in-session change: a bridge-side record is stamped at spawn and
+          // goes stale the moment anyone runs /effort, and settings.json's effortLevel is
+          // account-global (scopedEffortChange puts it straight back). Where the box's statusline
+          // doesn't print ε — it is the owner's own script, not a CLI guarantee — the last-known
+          // level is shown LABELLED as such, never as a bare value somebody would read as live.
+          const effort = effortSuffix(sl?.effort ?? null, sessionEfforts.get(e.id) ?? null)
           // An open ask is shown, but it no longer DECIDES busy. It used to: an injected, un-expired ask
           // was taken as proof the target was heads-down on it, because a bare pane snapshot reads a
           // between-tool-calls prompt as idle (the false negative that once got a live build declared
@@ -6289,7 +6345,7 @@ async function handleCall(
             + `${onAsk ? ` · on ask ${onAsk.id}` : ''}`
             + `${marker ? ` · unreported ${fmtAgo(marker.since)} → @${marker.briefer}` : ''}`
             + `${handoffNote ? ` · ${handoffNote}` : ''}`
-          rows.push(`${busy ? '🟡' : errored ? '🔴' : '🟢'} ${nm}${model}${pct}${state}${flair}`)
+          rows.push(`${busy ? '🟡' : errored ? '🔴' : '🟢'} ${nm}${model}${effort}${pct}${state}${flair}`)
         }
         text = rows.length ? rows.join('\n') : '(no live agents on the bus)'
         break
@@ -6514,6 +6570,19 @@ async function handleCall(
         // the box. This supersedes the MODEL_ALIAS_IDS pin that used to live here: applySessionModel
         // chooses the row by name, so there is no CLI alias left to drift. Bare `/model` (no
         // argument) still relays through below — it opens the picker for a human and writes nothing.
+        // `/effort <level>` from the bus takes applyEffort, NOT the chat flow's injectEffortChange:
+        // that one relays the CLI's confirm as Yes/No BUTTONS into the owner's Telegram chat, so an
+        // agent's dial change would land in front of a human as a question about a decision they did
+        // not make. applyEffort answers the modal itself, Escs out rather than leaving one standing,
+        // and the result line carries the statusline readback — the caller gets the level the session
+        // is actually on, not the level we asked for. Bare `/effort` is refused by slash-policy.
+        const effortArg = /^\/effort\s+(\S+)$/i.exec(command)?.[1]?.toLowerCase()
+        if (effortArg && EFFORT_LEVELS.includes(effortArg)) {
+          const r = await applyEffort(targetPane, effortArg, watcher)
+          if (!r.ok) { fail(r.reason); return }
+          text = `@${toName} is on effort ${r.level}${r.already ? ' already — nothing was typed' : ''} (read from its statusline)`
+          break
+        }
         const modelAlias = /^\/model\s+(\S+)$/i.exec(command)?.[1]?.toLowerCase()
         if (modelAlias && MODEL_ALIASES.includes(modelAlias)) {
           // The same gate the spawn takes, and for the same money: moving a LIVE session onto a
@@ -6635,7 +6704,14 @@ async function handleCall(
         const changed = o.layoutChanged ? `(layout changed — raw readout, missing: ${o.missing.join(', ')})\n` : ''
         // The bus copy of /status is redacted: a result quoted into a report or a shared note carries
         // the owner's login/org/email otherwise. His own chat gets the whole block.
-        text = `${PANELS[kind].command} on @${toName}:\n${changed}${redactPanelIdentity(kind, o.text)}${wedged}`
+        // /status has no effort row in this CLI (2.1.224) and the panel is the only thing readPanel
+        // knows, so the level is appended from the pane's own statusline — the same ε: the roster
+        // reads, taken from the capture above. Labelled as its source, because a reader who cannot
+        // tell a panel row from a statusline scrape cannot tell which one a CLI update broke.
+        const effortLine = kind === 'status'
+          ? `\neffort (statusline):${effortSuffix(parseStatusline(cap)?.effort ?? null, sessionEfforts.get(res.id) ?? null) || ' —'}`
+          : ''
+        text = `${PANELS[kind].command} on @${toName}:\n${changed}${redactPanelIdentity(kind, o.text)}${effortLine}${wedged}`
         break
       }
       // `tg keys <name> <key>… [--force]` — inject named keystrokes into another session's pane.
@@ -19082,6 +19158,15 @@ async function webappSessionAction(userId: string, sid: string, action: 'stop' |
     // the whole of a running turn (which is why `tg ask` may legitimately deliver mid-turn), while
     // detectWorking is the one that says a turn is in flight. Guarding on onNormalPrompt alone let
     // both dials through mid-turn and left `/model haiku` sitting in the queued-messages box.
+    // EFFORT has its own gate now (applyEffort → planEffortApply): a raise is refused mid-turn
+    // because only a raise raises the modal, and a lower goes in while the turn runs — measured,
+    // not assumed. It reads the pane itself, so it must not be pre-gated by the model guard below:
+    // that one refuses on `detectWorking` alone, which is FALSE for the first seconds of a turn and
+    // is how the tap that wedged @weather got through in the first place.
+    if (action === 'effort') {
+      const r = await applyEffort(pane, arg, watcher)
+      return r.ok ? null : r.reason
+    }
     const cap = await capturePane(pane).catch(() => '')
     if (!cap || !onNormalPrompt(cap) || detectWorking(cap)) return 'the session is mid-turn — try again when it goes idle'
     if (action === 'model') {
@@ -19114,13 +19199,7 @@ async function webappSessionAction(userId: string, sid: string, action: 'stop' |
       }
       return null
     }
-    if (!EFFORT_LEVELS.includes(arg)) return `unknown effort — one of: ${EFFORT_LEVELS.join(' | ')}`
-    // reapplyEffort, not injectEffortChange: mid-conversation Claude Code raises "Change effort
-    // level?", and the chat flow answers it by relaying Yes/No buttons to Telegram — which would
-    // strand a mini-app user waiting on a card in a chat they may not be looking at. The user has
-    // already made that choice by tapping the level, so accept the confirm for them.
-    void reapplyEffort(pane, arg, watcher).then(() => rememberEffort(pane, arg))
-    return null
+    return null   // effort returned above, before the model guard
   }
   const msg = (text ?? '').trim()
   if (!msg) return 'empty message'
