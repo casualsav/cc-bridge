@@ -4,7 +4,7 @@ import { test, expect } from 'bun:test'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { turnParts, summarizeTurn } from './turn-summary.ts'
+import { turnParts, summarizeTurn, capChips } from './turn-summary.ts'
 import { currentTurnFeed } from './transcript.ts'
 import type { FeedItem } from './transcript.ts'
 
@@ -206,4 +206,35 @@ test('a long command still clips its TAIL — its first words are the informativ
   const chip = turnParts(currentTurnFeed(f)).find(p => p.t === 'chip') as { t: 'chip'; calls: Array<{ target: string }> }
   expect(chip.calls[0]!.target.startsWith('grep -rn')).toBe(true)
   expect(chip.calls[0]!.target.endsWith('…')).toBe(true)
+})
+
+// The chip WINDOW, and its direction is the whole point. The mini app's drill-in showed a 12-chip
+// turn as its first 10 and never sent the two newest: the work list froze at 19:41 while the
+// session ran to 19:43 and beyond (measured against the owner's own weather transcript,
+// 2026-08-07). A window filled from the front describes the beginning of a turn forever; the
+// Telegram card has always taken `slice(-MIRROR_THOUGHTS)` and never had this.
+test('the chip window keeps the NEWEST chips, and narration is never windowed', () => {
+  const feed: FeedItem[] = []
+  for (let i = 0; i < 15; i++) feed.push(tool(i % 2 ? 'Bash' : 'Read', 'x' + i))
+  const parts = turnParts(feed)
+  expect(parts.filter(p => p.t === 'chip').length).toBe(15)
+  const kept = capChips(parts, 10)
+  expect(kept.length).toBe(10)
+  // The LAST chip of the turn is the one a reader needs — it is what the session is doing now.
+  expect(kept[kept.length - 1]).toEqual(parts[parts.length - 1]!)
+  expect(kept[0]).toEqual(parts[5]!)
+})
+
+test('the chip window drops chips only — prose survives it whole', () => {
+  const feed: FeedItem[] = [text('opening thought')]
+  for (let i = 0; i < 12; i++) { feed.push(tool(i % 2 ? 'Bash' : 'Read', 'x' + i)); }
+  feed.push(text('closing thought'))
+  const kept = capChips(turnParts(feed), 3)
+  expect(kept.filter(p => p.t === 'p').map(p => (p as { text: string }).text)).toEqual(['opening thought', 'closing thought'])
+  expect(kept.filter(p => p.t === 'chip').length).toBe(3)
+})
+
+test('a turn under the window is returned untouched', () => {
+  const parts = turnParts([text('a'), tool('Bash', 'ls'), text('b')])
+  expect(capChips(parts, 10)).toEqual(parts)
 })

@@ -159,6 +159,19 @@ function chipLabel(kind: string, calls: TurnCall[]): string {
   return n === 1 ? tool : `${tool} ×${n}`
 }
 
+// The chip window, and its DIRECTION is the whole feature: the newest chips survive, the oldest
+// fall off — the same way the Telegram card has always taken `slice(-MIRROR_THOUGHTS)`. Filled from
+// the front instead, a window describes the START of a turn forever: the mini app showed a 12-chip
+// turn as its first 10 and never sent the two newest, so the work list froze at 19:41 while the
+// session ran on past 19:43 (the owner's weather transcript, 2026-08-07 — the screenshot that
+// reported this). Only chips are windowed; narration is never dropped, whatever the count.
+export function capChips(parts: TurnPart[], max: number): TurnPart[] {
+  const drop = parts.filter(p => p.t === 'chip').length - max
+  if (drop <= 0) return parts
+  let seen = 0
+  return parts.filter(p => p.t !== 'chip' || ++seen > drop)
+}
+
 export function turnParts(feed: FeedItem[]): TurnPart[] {
   const out: TurnPart[] = []
   let chip: Extract<TurnPart, { t: 'chip' }> | null = null

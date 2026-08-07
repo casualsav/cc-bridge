@@ -104,7 +104,7 @@ import {
 import { looksLikeArgForm, exitCommandArg } from './named-command.ts'
 import { initMirror, updateTerminalMirror, respawnTerminalMirror, abandonMirror, updateAuxMirror, dropAuxMirror, auxMirrorPanes } from './mirror.ts'
 import { parseStatusline, modelDisplayName, type StatuslineData } from './statusline.ts'
-import { turnParts } from './turn-summary.ts'
+import { turnParts, capChips } from './turn-summary.ts'
 import { normalizeKeys, planKeyInjection, planKeyRate, KEY_NAMES } from './keys-plan.ts'
 import {
   STATIC, initAccess, loadAccess, saveAccess, gate, dmCommandGate, isMentioned,
@@ -18808,7 +18808,11 @@ function webappReadUsage(): WebappUsageView | null {
 
 // Drill-in feed: recent conversation (user + assistant), plus the running turn's thoughts + activity.
 const THOUGHT_MAX = 400   // one narration block in the feed; long enough to read, short enough not to bury the tools
-const FEED_BLOCKS = 10    // live blocks kept, matching the Telegram card's window (MIRROR_THOUGHTS)
+// Chips kept in the drill-in's turn item — the NEWEST ones (capChips; the oldest fall off as work
+// arrives). 30, not the card's 10: this window used to be justified by matching MIRROR_THOUGHTS,
+// but the constraint that number answers is Telegram's message size, which this surface does not
+// have — the drill-in scrolls and folds. Narration is not windowed at all.
+const FEED_BLOCKS = 30
 // sid → its dashboard row and transcript file. Shared by the feed and the single-message fetch so
 // they can't resolve the same session to different transcripts.
 async function webappSessionSource(sid: string): Promise<{ row: { sid: string; name: string; cwd: string; agent: string }; pane: string; cwd: string | null; file: string | null } | null> {
@@ -18911,8 +18915,7 @@ async function webappSessionFeed(sid: string): Promise<WebappSessionFeed | null>
     let cut = items.length
     while (cut > 0 && items[cut - 1]!.role === 'assistant') cut--
     const concluded = items.splice(cut)
-    let chips = 0
-    items.push({ role: 'turn', ts: Date.now(), blocks: parts.filter(p => p.t !== 'chip' || ++chips <= FEED_BLOCKS) })
+    items.push({ role: 'turn', ts: Date.now(), blocks: capChips(parts, FEED_BLOCKS) })
     items.push(...concluded)
   }
   // The header dot's state, read the SAME way the card reads it (readSessionState) so a card and the
