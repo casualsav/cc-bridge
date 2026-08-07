@@ -991,7 +991,33 @@
   .msg.bcard .dl-meta { color: var(--hint); }
   /* One row per changed file: name on the left, churn on the right. A two-column row, not a table —
      the right column is two short numbers and a table would buy alignment nobody can see at 12px. */
-  .msg.bcard .df { display: flex; align-items: baseline; gap: var(--sp-2); font-size: var(--t-sub); padding: 3px 0; }
+  /* A file row's height, as a token, because the fold's cap below is a row COUNT and has to become a
+     length somewhere — and a picked pixel value is what drifts the day the type scale moves.
+     THE LINE BOX IS THE MONO PATH'S, not the row's own: `.df` is a FLEX container, and a flex
+     container has no inline content of its own, so its height comes from its tallest ITEM. Deriving
+     this from --t-sub (the row's declared font-size) gave 27px against a real 25.5 and left row 16
+     half-shown under the veil. The path (--t-mono at 1.5) is the tallest child; --t-meta on the churn
+     column is shorter. `cards.mjs` §9 re-measures this against a rendered row, because the arithmetic
+     being right today is not the same claim as it staying right. */
+  .msg.bcard { --df-lh: 1.5; --df-h: calc(var(--t-mono) * var(--df-lh) + 6px); }
+  .msg.bcard .df { display: flex; align-items: baseline; gap: var(--sp-2); font-size: var(--t-sub);
+    line-height: var(--df-lh); padding: 3px 0; }
+  /* THE FILE-LIST FOLD. A 200-file diff is a wall of rows above the patch you opened the card for,
+     so past --flist-cap rows the list veils to its floor and carries a "tap to expand" bar — the
+     feed's own fold, on an inner element.
+     THE CAP IS 15, and it is a judgement made from the rendered result rather than a round number:
+     15 rows is 405px, about half a 844px screen, which still leaves the patch visible below the fold
+     on the same screenful. It is also necessarily above 12, because a 12-file diff is the control
+     that must render exactly as it did before this existed.
+     Nothing here re-declares the veil: the eased 7-stop ramp lives ONCE on the `.msg.clip::after`
+     rule this selector was added to, and only --fold-to (the ground it resolves to) is set per
+     variant. Overriding `background` here instead would silently drop the easing back to linear —
+     the same trap the feed's own note warns about. */
+  .msg.bcard { --flist-cap: 15; }
+  .msg.bcard .flist.fclip { position: relative; overflow: hidden; padding-bottom: var(--fold-h);
+    max-height: calc(var(--flist-cap) * var(--df-h) + var(--fold-h)); }
+  .msg.bcard .flist.fclip.open { max-height: none; padding-bottom: 0; }
+  .msg.bcard .flist.fclip.open::after, .msg.bcard .flist.fclip.open .more { display: none; }
   .msg.bcard .df .fp { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     direction: rtl; text-align: left; font: var(--t-mono)/1.5 ui-monospace, Menlo, Consolas, monospace; }
   .msg.bcard .df .fc { flex: none; font-size: var(--t-meta); font-variant-numeric: tabular-nums; }
@@ -1358,7 +1384,7 @@
      further up. The stops approximate a smoothstep, so it leaves the text imperceptibly and lands
      on the ground firmly. color-mix carries the alpha; the plain two-stop declaration above it is
      the fallback an engine without color-mix keeps, which is exactly today's look. */
-  .msg.clip::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 136px;
+  .msg.clip::after, .msg.bcard .flist.fclip::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 136px;
     --fold-to: var(--bg);
     background: linear-gradient(transparent, var(--fold-to));
     background: linear-gradient(to bottom,
@@ -1378,8 +1404,11 @@
      child — including this label. The veil runs to the element's floor now (it is what puts a clean
      band of ground under the last ghost of text instead of cutting it with this strip's edge), which
      without the z-index would paint straight over the label. */
-  .msg.clip .more { position: absolute; left: 0; right: 0; bottom: 0; z-index: 1; text-align: center; font-size: var(--t-meta); line-height: 1; opacity: .8; padding: var(--sp-1) 0 6px; background: var(--bg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .msg.clip .more, .msg.bcard .flist.fclip .more { position: absolute; left: 0; right: 0; bottom: 0; z-index: 1; text-align: center; font-size: var(--t-meta); line-height: 1; opacity: .8; padding: var(--sp-1) 0 6px; background: var(--bg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .msg.user.clip .more { background: var(--btn); }
+  /* The card's ground, mirroring the agent bubble's own override — both sit on --sec. */
+  .msg.bcard .flist.fclip::after { --fold-to: var(--sec); }
+  .msg.bcard .flist.fclip .more { background: var(--sec); cursor: pointer; }
   .msg.clip.open { max-height: none; padding-bottom: var(--sp-2); }
   .msg.clip.open::after { display: none; }
   .msg.clip.open .more { display: none; }
@@ -3529,7 +3558,7 @@ function fillCards() {
       // The newest line is what the card was opened for, so the box rests at its floor.
       pre.scrollTop = pre.scrollHeight;
     } else if (c.kind === "diff") {
-      fillDiff(c.diff, meta, body);
+      fillDiff(c, meta, body);
     } else if (c.kind === "health") {
       meta.textContent = "";
       body.appendChild(kvBlock(c.rows));
@@ -3581,14 +3610,27 @@ function kvRow(k, v) {
 // classifier (session-cards.ts's diffLineKind) rather than a second copy of the test here — a hunk
 // header reading as a heading on one surface and as context on the other is exactly the drift the
 // shared producer exists to stop.
-function fillDiff(d, meta, body) {
+function fillDiff(c, meta, body) {
+  const d = c.diff;
   if (d.clean) {
     meta.textContent = "";
     body.textContent = "✨ Working tree clean — nothing to diff.";
     return;
   }
+  // The totals are read from the WHOLE file list, never from what the fold happens to show — a
+  // header that changed when you opened a fold would be describing the viewport instead of the diff.
   const total = d.files.reduce((n, f) => n + f.added + f.removed, 0);
   meta.textContent = d.files.length + (d.files.length === 1 ? " file" : " files") + " · " + total + " lines";
+  // EVERY row is built, always. The cap is a max-height on the list, so the rows past it are veiled
+  // rather than dropped — "opening the fold shows the rest" is then true by construction, and there
+  // is no second code path that could disagree with the count in the header above.
+  const flist = document.createElement("div");
+  flist.className = "flist";
+  const cap = parseInt(getComputedStyle(body.closest(".msg.bcard")).getPropertyValue("--flist-cap"), 10) || 15;
+  if (d.files.length > cap) {
+    flist.classList.add("fclip");
+    if (c.filesOpen) flist.classList.add("open");
+  }
   for (const f of d.files) {
     const row = document.createElement("div");
     row.className = "df";
@@ -3608,8 +3650,22 @@ function fillDiff(d, meta, body) {
     r.textContent = "−" + f.removed;
     cnt.append(a, r);
     row.append(p, cnt);
-    body.appendChild(row);
+    flist.appendChild(row);
   }
+  if (flist.classList.contains("fclip")) {
+    const more = document.createElement("div");
+    more.className = "more";
+    // The label names what is BEHIND the fold, not "tap to expand": the count is the fact a reader
+    // wants before deciding to open it, and the header's total is about churn rather than rows.
+    const hidden = d.files.length - cap;
+    more.textContent = "+" + hidden + " more file" + (hidden === 1 ? "" : "s") + " · tap to expand";
+    // The open state lives on the CARD, not on the DOM: fillCards rebuilds these nodes on every feed
+    // repaint, so a class set here alone is gone within one 3s poll — the same failure the feed's own
+    // folds hit before they were keyed by msgKey.
+    flist.onclick = () => { c.filesOpen = !c.filesOpen; fillCards(); };
+    flist.appendChild(more);
+  }
+  body.appendChild(flist);
   if (d.untracked && d.untracked.length) body.appendChild(kvBlock([["Untracked", d.untracked.join("\n")]]));
   if (d.patch) {
     const pre = document.createElement("pre");

@@ -64,10 +64,19 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   the terminal live markup and asserts it created ZERO elements;
                                   #   §4 samples rendered PIXELS for the diff colours and pins the
                                   #   `+++`-before-`+` ordering that paints file headers green.
-                                  #   Pass a pre-change page: 34 of 41 fail. The 7 that pass on both
-                                  #   are the guard half (no injection, no page widening, dismiss
-                                  #   leaves nothing) — they are not controls, they are the claim
-                                  #   that this change did not cause what they forbid
+                                  #   §8 sweeps every class in the card markup against every rule in
+                                  #   the page and fails on anything outside a named exclusion list —
+                                  #   three names (card, meta, cm) collided with unscoped rules, each
+                                  #   legal CSS invisible to computed-style assertions. §9 is the
+                                  #   /diff file-list fold: rows veiled not dropped, totals honest in
+                                  #   both states, the cap's arithmetic re-measured against a real
+                                  #   row, and the open state surviving a repaint.
+                                  #   TWO controls, both run to completion: the pre-cards page fails
+                                  #   48 of 56, the pre-FOLD commit fails exactly the 10 fold checks
+                                  #   and nothing else. What passes on all three is the guard half
+                                  #   (no injection, no page widening, dismiss leaves nothing) — not
+                                  #   controls, but the claim that this change did not cause what
+                                  #   they forbid
     node work.mjs <outdir>        # the live working row: both themes, reduced-motion, and the
                                   #   status-absent control (the row must NOT render without it)
     node fullscreen.mjs           # the fullscreen top offset on every top-anchored surface, driven

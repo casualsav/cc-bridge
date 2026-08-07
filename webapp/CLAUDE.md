@@ -240,6 +240,25 @@ give it.
   `cards.mjs` §8 is the standing guard: it enumerates every rule in the page that matches a card node
   and fails on anything outside a named exclusion list (`.msg`, `.dot`, `.cardx` — the deliberate
   reuses — plus the universal reset and the feed's own floor gutter).
+- **The `/diff` file list folds past `--flist-cap` (15) rows, and every row is still BUILT.** The cap
+  is a `max-height` on the list, so the rows past it are veiled rather than dropped — "opening the
+  fold shows the rest" is then true by construction, with no second code path to disagree with the
+  header's count. **The totals are read from the whole file list, never from what the fold shows**: a
+  header that changed when you opened a fold would be describing the viewport, not the diff.
+  - **15 is judged from the rendered result and is necessarily above 12** — a 12-file diff is the
+    control that must stay pixel-identical (it is, verified by SHA of the card's own screenshot
+    against the pre-fold commit). 15 rows is 406px, about half a phone screen, which still leaves the
+    patch visible below the fold on the same screenful.
+  - **The eased ramp is not re-declared.** `.msg.bcard .flist.fclip::after` was added to the existing
+    `.msg.clip::after` selector, and only `--fold-to` is set per variant — overriding `background`
+    instead silently drops the easing back to linear, which is the feed's own stated trap.
+  - **`--df-h` derives from `--t-mono`, not `--t-sub`.** `.df` is a FLEX container, so its height
+    comes from its tallest ITEM (the mono path), not from the row's own declared font-size. Deriving
+    from `--t-sub` gave 27px against a real 25.5 and left row 16 half-shown under the veil.
+    `cards.mjs` §9 re-measures the arithmetic against a rendered row.
+  - **The open state lives on the CARD (`c.filesOpen`), not on the DOM node.** `fillCards` rebuilds
+    those nodes on every repaint, so a class set on the element alone is gone within one 3s poll —
+    the same failure the feed's own folds hit before they were keyed by `msgKey`.
 - **Pane bytes go in as TEXT NODES.** A terminal capture and a patch are arbitrary bytes from a CLI
   this page does not control — the same rule `showReadout` states for the panel sheet. `cards.mjs` §2
   feeds the card live markup and asserts zero elements were created.

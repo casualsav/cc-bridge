@@ -264,7 +264,81 @@ const leak = await q(() => {
 });
 check(leak.length === 0, `no foreign selector reaches the card markup${leak.length ? ":\n        " + leak.join("\n        ") : ""}`);
 
-// ---- 9. Dismiss removes it ---------------------------------------------------------------------
+// ---- 9. The file-list fold ---------------------------------------------------------------------
+// A many-file diff veils its list past --flist-cap rows rather than running as a wall above the
+// patch. Three claims: the rows are VEILED and never dropped (the count must survive), the totals
+// describe the whole diff in both fold states, and the cap's arithmetic holds against a REAL
+// rendered row — the derivation was wrong once (it used --t-sub, the row's declared size, where a
+// flex row actually takes its height from its tallest CHILD) and left row 16 half-shown.
+await q(() => { localCards = []; paintFeed(); });
+const MANY = { kind: "diff", command: "/diff", diff: {
+  cwd: "/home/ubuntu/projects/cc-bridge", clean: false, truncated: false, stat: "", untracked: [],
+  files: Array.from({ length: 57 }, (_, i) => ({ path: "src/module-" + i + "/handler.ts", added: (i * 7) % 90 + 1, removed: (i * 3) % 40 })),
+  patch: "@@ -1 +1 @@\n context\n+added\n-removed\n" } };
+await add(MANY);
+const fold = await q(() => {
+  const el = document.querySelector("#dfeed .msg.bcard");
+  const l = el?.querySelector(".flist");
+  const bar = l?.querySelector(".more");
+  const rows = [...(el?.querySelectorAll(".df") || [])];
+  const cap = el ? parseInt(getComputedStyle(el).getPropertyValue("--flist-cap"), 10) : NaN;
+  const veil = l ? getComputedStyle(l, "::after") : null;
+  return {
+    cap, built: rows.length, folded: !!l?.classList.contains("fclip"),
+    rowH: rows[0]?.getBoundingClientRect().height, listH: l?.getBoundingClientRect().height,
+    // Rows sitting entirely above the bar — the honest reading of "the cap shows N rows".
+    above: bar ? rows.filter(r => r.getBoundingClientRect().bottom <= bar.getBoundingClientRect().top + 0.5).length : -1,
+    bar: bar?.textContent, meta: el?.querySelector(".cmeta")?.textContent,
+    veilEased: !!veil && /color-mix|linear-gradient/.test(veil.background) && veil.background.split(",").length > 4,
+  };
+});
+check(fold.folded === true, "a 57-file diff folds its list");
+check(fold.built === 57, `…with every row BUILT, not dropped (${fold.built})`);
+check(fold.above === fold.cap, `…exactly --flist-cap (${fold.cap}) rows above the bar (${fold.above})`);
+// The arithmetic, against a rendered row: cap × row + the bar's reserved strip.
+check(Math.abs(fold.listH - (fold.cap * fold.rowH + 24)) < 1,
+  `…and the cap's derivation holds on a real row (${fold.cap} × ${fold.rowH} + 24 = ${(fold.cap * fold.rowH + 24).toFixed(1)} vs ${fold.listH?.toFixed(1)})`);
+check(/\+42 more files/.test(fold.bar || ""), `…the bar names what is behind it (${fold.bar})`);
+check(fold.veilEased === true, "…the veil is the feed's own eased ramp, not a re-declared linear one");
+check(/57 files · 3477 lines/.test(fold.meta || ""), `…and the totals describe the WHOLE diff (${fold.meta})`);
+
+const opened = await p.evaluate(async () => {
+  document.querySelector("#dfeed .msg.bcard .flist")?.click();
+  await new Promise(r => setTimeout(r, 200));
+  const l = document.querySelector("#dfeed .msg.bcard .flist");
+  const rows = [...document.querySelectorAll("#dfeed .msg.bcard .df")];
+  const bar = l?.querySelector(".more");
+  return { open: !!l?.classList.contains("open"), listH: l?.getBoundingClientRect().height ?? 0,
+    lastVisible: !!rows.length && rows[rows.length - 1].getBoundingClientRect().height > 0,
+    barHidden: !!bar && getComputedStyle(bar).display === "none",
+    meta: document.querySelector("#dfeed .msg.bcard .cmeta")?.textContent ?? "" };
+});
+check(opened.open === true && opened.listH > (fold.listH ?? 0) * 2, `opening the fold shows the rest (${fold.listH?.toFixed(0)} → ${opened.listH.toFixed(0)}px)`);
+check(opened.lastVisible === true, "…including the last file row");
+check(opened.barHidden === true, "…and the bar goes away, like the feed's own open fold");
+check(/57 files · 3477 lines/.test(opened.meta), `…the totals are unchanged by the fold state (${opened.meta})`);
+
+// The open state must survive a repaint — it lives on the card, not on the DOM node fillCards rebuilds.
+const survived = await p.evaluate(() => {
+  lastDrill.items.push({ role: "assistant", text: "another reply", ts: Date.now() });
+  paintFeed();
+  return !!document.querySelector("#dfeed .msg.bcard .flist")?.classList.contains("open");
+});
+check(survived === true, "…and survives a feed repaint (the state is on the card, not the node)");
+
+// THE CONTROL: at or below the cap nothing folds, and the rendering is the pre-fold one. Pinned by
+// geometry here; the pixel comparison against the committed page is in the report.
+await q(() => { localCards = []; paintFeed(); });
+await add(DIFF);
+const small = await q(() => {
+  const l = document.querySelector("#dfeed .msg.bcard .flist");
+  return { folded: l?.classList.contains("fclip"), bar: !!l?.querySelector(".more"),
+    maxH: l ? getComputedStyle(l).maxHeight : null, rows: document.querySelectorAll("#dfeed .msg.bcard .df").length };
+});
+check(small.folded === false && small.bar === false, "a diff at or below the cap does not fold");
+check(small.maxH === "none", `…and carries no cap at all (max-height: ${small.maxH})`);
+
+// ---- 10. Dismiss removes it --------------------------------------------------------------------
 await p.evaluate(() => document.querySelector("#dfeed .msg.bcard .cardx")?.click());
 await p.waitForTimeout(120);
 const gone = await q(() => document.querySelectorAll("#dfeed .msg.bcard").length);
