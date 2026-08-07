@@ -264,9 +264,19 @@
   ul { list-style: none; margin: 0; padding: 0; }
   li { padding: 11px var(--sp-3); border-bottom: 1px solid var(--sec); display: flex; gap: 10px; align-items: center; cursor: pointer; }
   li:active { background: var(--sec); }
-  .ico { width: 20px; text-align: center; }
-  .name { flex: 1; word-break: break-all; }
-  .meta { color: var(--hint); font-size: var(--t-meta); white-space: nowrap; }
+  /* The file browser's row parts, SCOPED to the list they are built for (`row()` appends only ever
+     to #fblist). They were global, and `ico`/`name`/`meta` are exactly the words a new component
+     reaches for — so a `<span class="name">` anywhere else in this page silently inherited
+     `flex: 1; word-break: break-all`, and a `<span class="meta">` inherited a 12px nowrap. That is
+     not hypothetical: the bridge command cards' patch lines took `.meta` and rendered every file
+     header at 12px/nowrap inside a 13px/pre block, which no computed-style assertion could see
+     because the foreign rule set properties the card never declared.
+     The rule for this file: a class PRIVATE to one component may not claim a common word globally.
+     Deliberately shared vocabulary (.msg, .dot, .chip, .cardx) is the opposite case and stays
+     global on purpose — see webapp/CLAUDE.md. */
+  #fblist .ico { width: 20px; text-align: center; }
+  #fblist .name { flex: 1; word-break: break-all; }
+  #fblist .meta { color: var(--hint); font-size: var(--t-meta); white-space: nowrap; }
   /* z-index 6 is LOAD-BEARING, and its absence was not a latent trap but a live defect: with no
      z-index this box painted in step 8 (positioned, auto) while every surface it must cover paints
      in step 9 — the (deleted) tab bar at 2, .newfab (3), #drill (5). Being last in the body cannot save
@@ -1081,9 +1091,13 @@
     background: transparent; border: none; font-size: var(--t-sub); cursor: pointer; }
   .msg.turn .chip .cl { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .msg.turn .chip .cv { margin-left: auto; color: var(--text); font-size: var(--t-body); }
-  /* Chip and sheet row share these. Colour ONLY — a tinted pill re-cards the line above uncards. */
-  .cp { color: var(--add); font-style: normal; }
-  .cm { color: var(--del); font-style: normal; }
+  /* Chip and sheet row share these. Colour ONLY — a tinted pill re-cards the line above uncards.
+     Both are written by `stat()`, which has exactly those TWO hosts, so the selector names them
+     rather than claiming `.cp`/`.cm` for the whole page. Globally, `.cm` reached the command cards'
+     header meta and was masked only by specificity — a landmine, not a visible bug: delete the
+     card's own colour declaration for any reason and the line turns red from 400 lines away. */
+  .msg.turn .chip .cp, #calllist .cp { color: var(--add); font-style: normal; }
+  .msg.turn .chip .cm, #calllist .cm { color: var(--del); font-style: normal; }
   /* A concluded turn folds its thinking into a native <details>: the marker is the affordance, so
      only type is set. Open state survives the repaint in JS — see openTurns. */
   .msg.turn summary { cursor: pointer; color: var(--hint); font-size: var(--t-sub); }
@@ -1601,13 +1615,17 @@
      box is exactly it — the gap to the next node is then the 9px padding twice, which the connector
      assumes. The node is 17 + 2 borders because `*` does not match a pseudo-element, so it keeps
      content-box sizing; an ODD 19 puts its centre on 9.5, where a 1px rule sits exactly. */
-  .row { display: flex; align-items: center; gap: 10px; padding: 9px 0; position: relative; font-size: var(--t-sub); line-height: 18px; }
-  .row::before { content: ""; width: 17px; height: 17px; flex: none; border: 1px solid var(--hint); border-radius: 50%; }
+  /* SCOPED to #calllist, the only place `row` is built. Unscoped, `.row` claimed the most generic
+     word in UI for a component that has exactly one host — and it carries a ::before node dot and a
+     ::after connector, so anything else named `row` would have grown a circle and a rule out of
+     nowhere. Found by scopecheck.mjs, not by eye. */
+  #calllist .row { display: flex; align-items: center; gap: 10px; padding: 9px 0; position: relative; font-size: var(--t-sub); line-height: 18px; }
+  #calllist .row::before { content: ""; width: 17px; height: 17px; flex: none; border: 1px solid var(--hint); border-radius: 50%; }
   /* ONE rule, on the PAIR: the connector exists BETWEEN nodes, so a border per row hangs a stub off
      the first and the last. -9/18 is exactly the gap the 9px padding leaves in the gutter. */
-  .row + .row::after { content: ""; position: absolute; left: 9px; top: -9px; width: 1px; height: 18px; background: var(--sec); }
+  #calllist .row + .row::after { content: ""; position: absolute; left: 9px; top: -9px; width: 1px; height: 18px; background: var(--sec); }
   /* Mono is the TARGET's alone: it is the only part that is a literal string from the machine. */
-  .row .tgt { flex: 1; min-width: 0; color: var(--hint); font: var(--t-mono) ui-monospace, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #calllist .row .tgt { flex: 1; min-width: 0; color: var(--hint); font: var(--t-mono) ui-monospace, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* The grab handle is decoration, not a control — the sheet is dismissed by the ✕, the backdrop or
      Back. Sized off the reference against its mic (64x5 : 66.7). */
   .dialgrab { width: 38px; height: 3px; border-radius: 2px; background: var(--hint); opacity: .5; margin: 8px auto 0; }

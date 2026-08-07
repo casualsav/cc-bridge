@@ -222,10 +222,20 @@ give it.
   signature, so a live terminal refreshing every 5s repaints nothing and fights no scroll.
   `openDrill` clears the list: the live tick reads `drillSid` at FETCH time, so a card carried into
   the next session starts polling that session's pane within 5s.
-- **EVERY class name in this markup was swept against the page's existing selectors, and three
-  collided.** This file has unscoped single-class rules, so a new component picking an obvious name
-  silently inherits them — legal CSS, no error, invisible to any computed-style assertion because
-  the foreign rule sets a property yours does not. All three were caught by reading rendered output:
+- **THE RULE THIS FILE NOW HOLDS: a class PRIVATE to one component may not claim a common word
+  globally.** Deliberately shared vocabulary is the opposite case and stays global on purpose —
+  `.msg`, `.dot`, `.chip`, `.cardx`, `.sechead`, `.notice` are borrowed by design. Six private rules
+  wearing generic names were scoped to their owners when this was found: `.ico` `.name` `.meta` →
+  `#fblist` (the file browser's `row()`), `.cp` `.cm` → `.msg.turn .chip` and `#calllist` (both
+  written by `stat()`), and `.row` → `#calllist`. That last one was the worst of them and nobody had
+  noticed: the most generic word in UI, owned by one component, carrying a `::before` node dot and a
+  `::after` connector — anything else named `row` would have grown a circle and a rule out of
+  nowhere. **`scripts/webapp-measure/scopecheck.mjs` is the guard**, and it checks BOTH directions:
+  no reserved word declared unscoped, and no shared class that has stopped being global (the same
+  defect with the sign flipped, which the first check cannot see). It found `.row` itself.
+- **The three that actually collided with the command cards**, each legal CSS setting a property the
+  card never declared — which is why no computed-style assertion could see them and all three were
+  caught by reading rendered output:
   - `card` → **`bcard`**. `.card .v { font-size: --t-body }` / `.card .k { --t-meta }` (the
     settings/detail card) put the metric values two type steps above their labels.
   - `meta` → **`dl-meta`**, and the other four line kinds took the `dl-` prefix with it. The page's

@@ -77,6 +77,15 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   (no injection, no page widening, dismiss leaves nothing) — not
                                   #   controls, but the claim that this change did not cause what
                                   #   they forbid
+    node scopecheck.mjs [page]    # A class PRIVATE to one component may not claim a common word
+                                  #   globally. Pure name check over the stylesheet, milliseconds, no
+                                  #   browser — the cheap half of the collision class that cost three
+                                  #   real defects (.card/.meta/.cm reaching the command cards). It
+                                  #   checks BOTH directions: no reserved word declared unscoped, AND
+                                  #   no deliberately-shared class (.msg .dot .chip .cardx) that has
+                                  #   stopped being global. It found .row — one host, a ::before node
+                                  #   dot and a ::after connector, claiming the most generic word in
+                                  #   UI. Control: run it on a pre-scoping page, it names all five
     node work.mjs <outdir>        # the live working row: both themes, reduced-motion, and the
                                   #   status-absent control (the row must NOT render without it)
     node fullscreen.mjs           # the fullscreen top offset on every top-anchored surface, driven
