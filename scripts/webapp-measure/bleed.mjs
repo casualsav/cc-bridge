@@ -82,6 +82,11 @@ const m = await p.evaluate(() => {
     // the COMPOSER, not the dock: it starts at the capsule's top edge (the owner's ask), so the
     // working row's band and the air above it stay bare transcript.
     dockScrimBg: getComputedStyle(document.querySelector(".composer"), "::before").backgroundColor,
+    // The scrim is a GRADIENT since 2026-08-07 (the owner's "very light gradient … about halfway
+    // through"), so its colour lives in background-IMAGE and background-color is transparent. The
+    // claim being checked never changed — translucent, and not opaque anywhere — but a check that
+    // reads only backgroundColor now reads rgba(0,0,0,0) and calls a working scrim a failure.
+    dockScrimImg: getComputedStyle(document.querySelector(".composer"), "::before").backgroundImage,
     dockScrimBlur: getComputedStyle(document.querySelector(".composer"), "::before").backdropFilter,
     // …and WHERE it starts, which is the whole of the correction: its top edge must be the capsule's.
     scrimTop: (() => { const c = document.querySelector(".composer").getBoundingClientRect();
@@ -199,7 +204,15 @@ check(/blur/.test(m.wrapBlur) && m.wrapBlur === m.headBlur, `…and carries the 
 // them. What the box must not have and what the scrim must have are two halves of one claim, so
 // neither is checked alone — the old single check read only the box and could not see a scrim at all.
 check(alpha(m.dockBg) === 0 || m.dockBg === "rgba(0, 0, 0, 0)", `the dock's own box paints nothing (${m.dockBg})`);
-check(alpha(m.dockScrimBg) > 0 && alpha(m.dockScrimBg) < 1, `…and its SCRIM is translucent, on the pseudo-element (${m.dockScrimBg})`);
+// Translucent in EITHER form: a flat fill (what this was) or a gradient (what it is). Every stop is
+// read, so an opaque stop anywhere fails — which is the thing this check has always been protecting
+// against, and the gradient must not become a way to smuggle one in.
+const scrimStops = (m.dockScrimImg && m.dockScrimImg !== "none")
+  ? [...m.dockScrimImg.matchAll(/(rgba?|color)\([^)]*\)/g)].map(x => x[0])
+  : [m.dockScrimBg];
+const scrimAlphas = scrimStops.map(alpha);
+check(scrimStops.length > 0 && scrimAlphas.every(a => a < 1) && scrimAlphas.some(a => a > 0),
+  `…and its SCRIM is translucent at every stop, on the pseudo-element (${scrimStops.length} stop(s), alphas ${scrimAlphas.map(a => a.toFixed(2)).join("/")})`);
 // INVERTED, and it is the point rather than an omission: this strip must NOT frost. The owner asked
 // for message text to stay readable as it passes under the composer, and a blur is precisely what
 // takes that away — it went out with one for a release. Everything else in the file that carries
