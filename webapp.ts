@@ -57,6 +57,9 @@ export interface WebappDeps {
   // or `{ navigate }` when the text was a bridge command this app can show (a composer `/files`),
   // which likewise did nothing to the session.
   sessionAction?: (userId: string, sid: string, action: SessionAct, text?: string, opts?: { confirmed?: boolean }) => Promise<SessionActionResult> | SessionActionResult
+  // Re-capture a session's pane tail for the live terminal card. Read-only; null = unreadable.
+  sessionTerminal?: (sid: string, lines: number) => Promise<{ text: string } | null>
+
   sessionAttach?: (userId: string, sid: string, fileName: string, data: Uint8Array, opts: { caption?: string; voice?: boolean }) => Promise<{ error: string } | { delivered: string; match: string }>   // compose-row file/voice → bubble text + reconcile token
   sessionSpawn?: (userId: string, name: string, opts: { account?: string; model?: string; effort?: string; mode?: string; headless?: boolean }) => Promise<{ error: string } | { sid: string; name: string }>   // "+" new session with provider/model dials
   // ACCOUNT-level usage, served once per /api/sessions rather than per card: the 5h and weekly rate
@@ -153,6 +156,11 @@ export type SessionActionResult =
   | { confirm: string }
   | { navigate: { to: 'sessions' | 'settings' | 'scheduled' | 'files'; note: string; cwd?: string } }
   | { readout: { icon: string; name: string; command: string; text: string; warning?: string } }
+  // A bridge command rendered in the chat (`/terminal`, `/diff`, `/health`). Same 200 channel as the
+  // three above: the session was not sent a message. The daemon owns the payload's shape
+  // (SessionCardPayload); this type stays structural so the server is not a second place to update
+  // when a card gains a field.
+  | { card: { kind: string; command: string } & Record<string, unknown> }
 export interface SessionFeed {
   sid: string; name: string; working: boolean
   // The SAME four states the card renders, so the header dot a card opens onto cannot contradict the
@@ -469,6 +477,15 @@ async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: strin
     const text = await deps.readSessionMessage(url.searchParams.get('sid') || '', url.searchParams.get('uuid') || '')
     return text == null ? json({ error: 'unknown message' }, 404) : json({ text })
   }
+  // The live terminal card's refresh. A GET of its own rather than a repeat of `/api/session/act`:
+  // that route is a POST that logs an audited action and runs the slash policy, and neither belongs
+  // on a tick that fires every 5s. This one only re-captures a pane it is already showing.
+  if (url.pathname === '/api/session/terminal') {
+    if (!deps.sessionTerminal) return json({ error: 'unavailable' }, 404)
+    const lines = Math.max(5, Math.min(parseInt(url.searchParams.get('lines') || '', 10) || 30, 200))
+    const r = await deps.sessionTerminal(url.searchParams.get('sid') || '', lines)
+    return r ? json(r) : json({ error: 'pane unreadable' }, 404)
+  }
   if (url.pathname === '/api/auto') {
     if (!deps.readAutomation) return json({ error: 'unavailable' }, 404)
     return json(await deps.readAutomation())
@@ -496,6 +513,7 @@ async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: strin
     // shape silently becomes `{confirm: undefined}` and renders an empty dialog.
     if (r && typeof r === 'object' && 'navigate' in r) return json({ navigate: r.navigate })
     if (r && typeof r === 'object' && 'readout' in r) return json({ readout: r.readout })
+    if (r && typeof r === 'object' && 'card' in r) return json({ card: r.card })
     if (r && typeof r === 'object') return json({ confirm: r.confirm })
     return r ? json({ error: r }, 400) : json({ ok: true })
   }

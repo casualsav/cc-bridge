@@ -35,7 +35,8 @@ import { accountRemovalPlan, readAccountIdentity } from './account-identity.ts'
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
 import { normalizeCommandOutput } from './ansi.ts'
-import { planSlash, bridgeOnlyReason, type NavTarget } from './slash-policy.ts'
+import { planSlash, bridgeOnlyReason, type NavTarget, type CardKind } from './slash-policy.ts'
+import { collectDiff, type DiffCard } from './session-cards.ts'
 import { preserveGlobalEffort, reconcileEffortScope } from './effort-scope.ts'
 import { planDrift, driftStateAfter, type DriftState } from './drift-guard.ts'
 import { decideModel, decideEffort, upgradeNeedsConfirm, heldSpawnModel, heldSpawnNeedsLine, holdTapData, parseHoldTap, launchFallback, spawnCardHeader, relaunchModel, launchDefaultModel, launchDefaultEffort, launchDefaultMode, fablePolicy, fableRowState, onOff, type FablePolicy, AUTO_FALLBACK, AUTO_EFFORT_FALLBACK, FABLE, HAIKU, isClaudeFamily, type ModelDecision, type HoldOutcome } from './spawn-model-policy.ts'
@@ -10620,35 +10621,33 @@ bot.command(['queue', 'later'], async ctx => {   // /later kept as a hidden alia
 
 // Send the working-tree diff: --stat summary first, then the patch in chunked <pre> blocks.
 // Untracked files are listed by name (git diff HEAD doesn't show their contents).
-const DIFF_SEND_CAP = 16_000   // chars of patch relayed before truncating (≈4–5 messages)
+//
+// The git reads themselves live in session-cards.ts, because the mini app renders the same answer as
+// a card and two implementations of "what does /diff mean" is how two surfaces come to disagree.
+// This function is now the TELEGRAM RENDERING of that answer and nothing else; every string it sends
+// is the one it sent before, including the verbatim `--stat` block (`d.stat`).
 async function sendDiff(chat: string, paneId: string, thread?: number): Promise<void> {
   const opts: SendOpts = thread ? { threadId: String(thread) } : {}
   const cwd = await paneCwd(paneId).catch(() => null)
   if (!cwd) { await channel.sendText(chat, 'Could not read the session folder.', opts).catch(() => {}); return }
-  try {
-    const { stdout: por } = await exec('git', ['-C', cwd, 'status', '--porcelain'], { timeout: 4000 })
-    if (!por.trim()) { await channel.sendText(chat, '✨ Working tree clean — nothing to diff.', opts).catch(() => {}); return }
-    const { stdout: stat } = await exec('git', ['-C', cwd, 'diff', 'HEAD', '--stat'], { timeout: 6000 }).catch(() => ({ stdout: '' }))
-    let { stdout: diff } = await exec('git', ['-C', cwd, 'diff', 'HEAD'], { timeout: 10000, maxBuffer: 32 * 1024 * 1024 }).catch(() => ({ stdout: '' }))
-    const untracked = por.split('\n').filter(l => l.startsWith('??')).map(l => l.slice(3).trim()).filter(Boolean)
-    let head = `📄 <b>Diff</b> — <code>${escapeHtml(cwd)}</code>`
-    if (stat.trim()) head += `\n<pre>${escapeHtml(stat.trim().slice(0, 3000))}</pre>`
-    if (untracked.length) head += `\n🆕 untracked: ${untracked.slice(0, 10).map(f => `<code>${escapeHtml(f)}</code>`).join(', ')}${untracked.length > 10 ? ` +${untracked.length - 10} more` : ''}`
-    await channel.sendText(chat, head, opts).catch(() => {})
-    if (!diff.trim()) return
-    const truncated = diff.length > DIFF_SEND_CAP
-    if (truncated) diff = diff.slice(0, DIFF_SEND_CAP)
-    const limit = Math.max(1, Math.min(loadAccess().textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT))
-    for (const c of chunkHtml(`<pre><code class="language-diff">${escapeHtml(diff)}</code></pre>`, limit)) {
-      await channel.sendText(chat, c, opts).catch(() => {})
-    }
-    if (truncated) await channel.sendText(chat, `✂️ Diff truncated (large change) — full diff: <code>git diff HEAD</code> in <code>${escapeHtml(cwd)}</code>.`, opts).catch(() => {})
-  } catch (e) {
-    const msg = String((e as { stderr?: string })?.stderr ?? (e as Error)?.message ?? e)
-    await channel.sendText(chat, /not a git repository/i.test(msg)
+  const d = await collectDiff(cwd)
+  if ('error' in d) {
+    await channel.sendText(chat, /isn't a git repository/.test(d.error)
       ? `📂 <code>${escapeHtml(cwd)}</code> isn't a git repository — nothing to diff.`
-      : `❌ Couldn't diff: <pre>${escapeHtml(msg.slice(0, 600))}</pre>`, opts).catch(() => {})
+      : `❌ Couldn't diff: <pre>${escapeHtml(d.error)}</pre>`, opts).catch(() => {})
+    return
   }
+  if (d.clean) { await channel.sendText(chat, '✨ Working tree clean — nothing to diff.', opts).catch(() => {}); return }
+  let head = `📄 <b>Diff</b> — <code>${escapeHtml(cwd)}</code>`
+  if (d.stat) head += `\n<pre>${escapeHtml(d.stat.slice(0, 3000))}</pre>`
+  if (d.untracked.length) head += `\n🆕 untracked: ${d.untracked.slice(0, 10).map(f => `<code>${escapeHtml(f)}</code>`).join(', ')}${d.untracked.length > 10 ? ` +${d.untracked.length - 10} more` : ''}`
+  await channel.sendText(chat, head, opts).catch(() => {})
+  if (!d.patch.trim()) return
+  const limit = Math.max(1, Math.min(loadAccess().textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT))
+  for (const c of chunkHtml(`<pre><code class="language-diff">${escapeHtml(d.patch)}</code></pre>`, limit)) {
+    await channel.sendText(chat, c, opts).catch(() => {})
+  }
+  if (d.truncated) await channel.sendText(chat, `✂️ Diff truncated (large change) — full diff: <code>git diff HEAD</code> in <code>${escapeHtml(cwd)}</code>.`, opts).catch(() => {})
 }
 
 // /diff — the session's uncommitted changes.
@@ -11694,61 +11693,79 @@ bot.command('settings', async ctx => {
 // /health — the bridge's own vitals (ROADMAP #14): instance, version, uptime, adopted panes,
 // queue depths, watchdog, last crash. Debugs the meta-layer from the phone instead of the log.
 const DAEMON_STARTED = Date.now()
-const sendHealth = async (ctx: Context): Promise<void> => {
-  if (!dmCommandGate(ctx)) return
-  const lines: string[] = [`🩺 <b>Bridge health</b> — instance <code>${escapeHtml(INSTANCE_ID)}</code> · v${escapeHtml(bridgeVersion())}`]
-  lines.push(`⏱ Daemon up ${formatDuration(Date.now() - DAEMON_STARTED)} (pid ${process.pid})`)
-  const paneBits: string[] = []
+
+// The vitals, as PLAIN values — one gathering, three renderings (Telegram's rich table, its HTML
+// fallback, and the mini app's card). It stays in daemon.ts rather than joining session-cards.ts
+// because every input is live daemon state: a module boundary here would be a dozen parameters wide
+// and would buy nothing but the boundary.
+//
+// Nothing is HTML-escaped here. Each renderer escapes for its own target, and a value pre-escaped
+// for Telegram would arrive at the mini app reading `foo &amp; bar`.
+type HealthCard = {
+  rows: Array<[string, string]>
+  panes: string[]
+  crash: string | null
+  others: string[]
+}
+async function collectHealth(): Promise<HealthCard> {
+  const panes: string[] = []
   for (const p of offMcpPanes) {
     const cwd = await paneCwd(p).catch(() => null)
-    paneBits.push(`${p === focus.activePaneId ? '★' : '·'} <code>${escapeHtml(p)}</code> ${escapeHtml(cwd ? basename(cwd) : '?')}`)
+    panes.push(`${p === focus.activePaneId ? '★' : '·'} ${p} ${cwd ? basename(cwd) : '?'}`)
   }
-  lines.push(`🖥 Panes (${offMcpPanes.size}): ${paneBits.join('  ') || 'none'}`)
-  const later = readLater()
-  const laterN = Object.values(later).reduce((n, items) => n + items.length, 0)
-  lines.push(`🗒 Queues: ${laterN} queued · ${scheduledCount()} scheduled · ${revivalQueues.size} reviving`)
+  const laterN = Object.values(readLater()).reduce((n, items) => n + items.length, 0)
   const codexHealth = currentCodexReadiness()
   const codexHealthText = codexHealth.state === 'ready' ? '✅ ready'
     : codexHealth.state === 'login-missing' ? '⚠️ not logged in'
     : codexHealth.state === 'sandbox-blocked' ? '❌ sandbox blocked'
     : 'not installed/configured'
-  if (CODEX_ENABLED) lines.push(`✳️ Codex: ${codexHealthText}`)
   let wd = 'not running'
   try {
     const wpid = parseInt(readFileSync(WATCHDOG_PID_FILE, 'utf8').trim(), 10)
     if (wpid && !Number.isNaN(wpid)) { process.kill(wpid, 0); wd = `alive (pid ${wpid})` }
   } catch {}
-  lines.push(`🐶 Watchdog: ${wd}`)
-  let crash: string | undefined
+  let crash: string | null = null
   try {
     const tail = readFileSync(DAEMON_LOG_FILE, 'utf8').split('\n').slice(-400)
-    crash = tail.reverse().find(l => /watchdog: daemon down|FATAL|Uncaught|panic/i.test(l))
-    if (crash) lines.push(`💥 Last crash: <code>${escapeHtml(crash.slice(0, 160))}</code>`)
+    crash = tail.reverse().find(l => /watchdog: daemon down|FATAL|Uncaught|panic/i.test(l))?.slice(0, 160) ?? null
   } catch {}
   let others: string[] = []
   try {
     const { stdout } = await exec('pgrep', ['-af', 'telegram/[0-9.]+/daemon.ts'], { timeout: 2000 })
-    others = stdout.trim().split('\n').filter(l => l && !l.startsWith(String(process.pid))).map(l => l.split(' ')[0])
-    if (others.length) lines.push(`👥 Other bridge daemons: ${others.map(p => `<code>${escapeHtml(p)}</code>`).join(' ')}`)
+    others = stdout.trim().split('\n').filter(l => l && !l.startsWith(String(process.pid))).map(l => l.split(' ')[0]!)
   } catch {}
-  // Rich: the scalar vitals become a Metric | Value table, and the bits that only matter when
-  // something is wrong (which panes, a crash line, rival daemons) hide behind a collapsible instead
-  // of padding the card on a healthy bridge. `lines` above stays the HTML fallback.
   const rows: Array<[string, string]> = [
-    ['🩺 Instance', `${escapeHtml(INSTANCE_ID)} · v${escapeHtml(bridgeVersion())}`],
+    ['🩺 Instance', `${INSTANCE_ID} · v${bridgeVersion()}`],
     ['⏱ Uptime', `${formatDuration(Date.now() - DAEMON_STARTED)} · pid ${process.pid}`],
     ['🖥 Panes', String(offMcpPanes.size)],
     ['🗒 Queues', `${laterN} queued · ${scheduledCount()} scheduled · ${revivalQueues.size} reviving`],
     ...(CODEX_ENABLED ? [['✳️ Codex', codexHealthText] as [string, string]] : []),
-    ['🐶 Watchdog', escapeHtml(wd)],
+    ['🐶 Watchdog', wd],
   ]
+  return { rows, panes, crash, others }
+}
+
+const sendHealth = async (ctx: Context): Promise<void> => {
+  if (!dmCommandGate(ctx)) return
+  const h = await collectHealth()
+  const lines: string[] = [`🩺 <b>Bridge health</b> — instance <code>${escapeHtml(INSTANCE_ID)}</code> · v${escapeHtml(bridgeVersion())}`]
+  lines.push(`⏱ Daemon up ${formatDuration(Date.now() - DAEMON_STARTED)} (pid ${process.pid})`)
+  lines.push(`🖥 Panes (${offMcpPanes.size}): ${h.panes.map(escapeHtml).join('  ') || 'none'}`)
+  lines.push(`🗒 ${h.rows.find(r => r[0] === '🗒 Queues')![1]}`)
+  if (CODEX_ENABLED) lines.push(`✳️ Codex: ${h.rows.find(r => r[0] === '✳️ Codex')![1]}`)
+  lines.push(`🐶 Watchdog: ${escapeHtml(h.rows.find(r => r[0] === '🐶 Watchdog')![1])}`)
+  if (h.crash) lines.push(`💥 Last crash: <code>${escapeHtml(h.crash)}</code>`)
+  if (h.others.length) lines.push(`👥 Other bridge daemons: ${h.others.map(p => `<code>${escapeHtml(p)}</code>`).join(' ')}`)
+  // Rich: the scalar vitals become a Metric | Value table, and the bits that only matter when
+  // something is wrong (which panes, a crash line, rival daemons) hide behind a collapsible instead
+  // of padding the card on a healthy bridge. `lines` above stays the HTML fallback.
   const detail = [
-    `<b>Panes</b><br>${paneBits.join('<br>') || 'none'}`,
-    ...(crash ? [`<b>Last crash</b><br><code>${escapeHtml(crash.slice(0, 160))}</code>`] : []),
-    ...(others.length ? [`<b>Other bridge daemons</b><br>${others.map(p => `<code>${escapeHtml(p)}</code>`).join(' ')}`] : []),
+    `<b>Panes</b><br>${h.panes.map(escapeHtml).join('<br>') || 'none'}`,
+    ...(h.crash ? [`<b>Last crash</b><br><code>${escapeHtml(h.crash)}</code>`] : []),
+    ...(h.others.length ? [`<b>Other bridge daemons</b><br>${h.others.map(p => `<code>${escapeHtml(p)}</code>`).join(' ')}`] : []),
   ].join('<br><br>')
   const md = `## 🩺 Bridge health\n\n| Metric | Value |\n|---|---|\n` +
-    rows.map(([k, v]) => `| ${k} | ${v} |`).join('\n') +
+    h.rows.map(([k, v]) => `| ${k} | ${escapeHtml(v)} |`).join('\n') +
     `\n\n<details><summary>Details</summary>${detail}</details>`
   await showRichPanel(ctx, 'send', toInputRichMessage(md), lines.join('\n'))
 }
@@ -18949,7 +18966,68 @@ type WebappActionResult = string | { confirm: string } | { navigate: { to: NavTa
   // the Telegram path also reports rather than hiding: the pane did not return to its prompt, or the
   // panel's layout moved and this is the raw block.
   | { readout: { icon: string; name: string; command: string; text: string; warning?: string } }
+  // A bridge command that RENDERS in the chat. Same 200 channel, same reason: nothing was sent to the
+  // session. `error` is the card's own failure state and travels here rather than on the 400 string
+  // channel deliberately — a command that ran and could not answer belongs in the transcript where
+  // the user can still see what they asked, not in a toast that disappears.
+  | { card: SessionCardPayload }
   | null
+
+export type SessionCardPayload =
+  | { kind: 'terminal'; command: string; lines: number; text: string }
+  | { kind: 'diff'; command: string; diff: DiffCard }
+  | { kind: 'health'; command: string; rows: Array<[string, string]>; panes: string[]; crash: string | null; others: string[] }
+  | { kind: 'error'; command: string; reason: string }
+
+// `/terminal [N]` — the same bounds the Telegram command uses (5..200, default 30), so the two
+// surfaces show the same amount of pane when asked the same way.
+const TERMINAL_CARD_DEFAULT_LINES = 30
+export function terminalCardLines(arg: string): number {
+  const n = parseInt(arg.trim(), 10)
+  return Number.isFinite(n) ? Math.max(5, Math.min(n, 200)) : TERMINAL_CARD_DEFAULT_LINES
+}
+
+// One card, built from the shared producers. Every failure returns an `error` card rather than
+// throwing: the card IS the report, and a command that ran and could not answer must say so where
+// the user can still see what they asked.
+async function buildSessionCard(pane: string, kind: CardKind, arg: string): Promise<SessionCardPayload> {
+  if (kind === 'terminal') {
+    const lines = terminalCardLines(arg)
+    const text = await captureTerminalTail(pane, lines)
+    if (text === null) return { kind: 'error', command: '/terminal', reason: 'Could not read the session pane.' }
+    if (!text) return { kind: 'error', command: '/terminal', reason: 'Nothing recent to show.' }
+    return { kind: 'terminal', command: '/terminal', lines, text }
+  }
+  if (kind === 'diff') {
+    const cwd = await paneCwd(pane).catch(() => null)
+    if (!cwd) return { kind: 'error', command: '/diff', reason: 'Could not read the session folder.' }
+    const d = await collectDiff(cwd)
+    if ('error' in d) return { kind: 'error', command: '/diff', reason: d.error }
+    return { kind: 'diff', command: '/diff', diff: d }
+  }
+  const h = await collectHealth()
+  return { kind: 'health', command: '/health', ...h }
+}
+
+// The pane tail, cleaned. `null` means the capture FAILED (which the card reports as an error);
+// an empty string means the pane is genuinely quiet. Conflating them would report a broken read as
+// a quiet session, which is the same mistake `findOffMcpPanes` exists to avoid.
+async function captureTerminalTail(pane: string, lines: number): Promise<string | null> {
+  try {
+    const raw = (await exec('tmux', ['capture-pane', '-p', '-t', pane, '-S', `-${lines + 20}`, '-J'], { timeout: 3000 })).stdout
+    return cleanPaneTail(raw, lines)
+  } catch { return null }
+}
+
+// The live terminal card's refresh tick. Read-only, and it deliberately does NOT check pane
+// liveness beyond the capture: a session that just ended still has a pane worth showing the last
+// frame of, and the capture failing is what says it is gone.
+async function webappSessionTerminal(sid: string, lines: number): Promise<{ text: string } | null> {
+  const pane = await paneForSession(sid).catch(() => null)
+  if (!pane) return null
+  const text = await captureTerminalTail(pane, lines)
+  return text === null ? null : { text }
+}
 
 async function webappSessionAction(userId: string, sid: string, action: 'stop' | 'compact' | 'send' | 'close' | 'model' | 'effort', text?: string, opts?: { confirmed?: boolean }): Promise<WebappActionResult> {
   const pane = await paneForSession(sid).catch(() => null)
@@ -19096,6 +19174,35 @@ async function webappSessionAction(userId: string, sid: string, action: 'stop' |
       : o.layoutChanged ? `${p.command}'s layout changed — this is the raw screen (missing: ${o.missing.join(', ')}).`
       : undefined
     return { readout: { icon: p.icon, name: p.name, command: p.command, text: o.text, ...(warning ? { warning } : {}) } }
+  }
+  // A bridge command that renders as a card. Unlike a readout it TYPES NOTHING into the pane — a
+  // terminal tail is a tmux capture, a diff is a git read, health is daemon state — so it takes none
+  // of the readout's pane guards and works fine mid-turn. Watching a running turn is most of the
+  // point of `/terminal`, and refusing it while the session is busy would refuse it when it matters.
+  if (plan.kind === 'card') return { card: await buildSessionCard(pane, plan.card, plan.arg) }
+  // A permission-mode switch, applied to THIS pane. It carries the same three guards
+  // `handleModeCommand` applies on the Telegram side, in the same order — the pane must be on its
+  // normal prompt, must not hold an armed `!` bash box, and the switch itself goes through
+  // `switchToMode`, which is the only thing on the box that changes a mode. The AUTHORIZATION is
+  // upstream and identical: `dmCommandGate` reduces to `loadAccess().allowFrom.includes(sender)`,
+  // and startWebapp's `isAllowed` is that same call against that same file, so this is not a weaker
+  // door onto bypass mode — it is the same door.
+  if (plan.kind === 'mode') {
+    const cap = await capturePane(pane).catch(() => '')
+    if (bashModeArmed(cap)) return 'the session has an unsubmitted ! bash command in its input box'
+    if (!onNormalPrompt(cap)) return 'the session is showing a dialog — answer it first'
+    const reached = await switchToMode(pane, plan.arg, watcher)
+    if (reached === null) {
+      return plan.arg === 'bypassPermissions'
+        ? 'Not available — this session was launched without bypass enabled.'
+        : plan.arg === 'auto' ? 'Not available — auto mode requires a qualifying plan or prior detection.'
+        : `Could not switch to ${modeLabel(plan.arg)}.`
+    }
+    if (reached !== plan.arg) return `Switched to ${modeLabel(reached)} (target ${modeLabel(plan.arg)} not reached).`
+    // No success message: the mode chip on this session's own card repaints within the poll, and this
+    // app retired success confirmations on the rule that the surface behind the bar already says it.
+    void updateSessionPin()
+    return null
   }
   // The dial's own path, reached by recursion so the validation, the mid-turn guard and the
   // session-only application are the SAME code the picker uses — and so `/model sonnet` stops being
@@ -19370,6 +19477,7 @@ async function startFilesWebapp(): Promise<void> {
       readGithub: webappReadGithub, githubAction: webappGithubAction,
       listSessions: webappListSessions, readSessionFeed: webappSessionFeed, readSessionMessage: webappSessionMessage, sessionAction: webappSessionAction,
       sessionAttach: webappSessionAttach, sessionSpawn: webappSessionSpawn,
+      sessionTerminal: webappSessionTerminal,
       readUsage: webappReadUsage,
       readAutomation: webappReadAutomation, automationCancel: webappAutomationCancel,
       automationCreate: webappAutomationCreate })

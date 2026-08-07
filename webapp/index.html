@@ -926,6 +926,96 @@
      carries a /context table across) still renders as `pre.code`. Alignment, never demotion. */
   .msg.command { background: transparent; max-width: 100%; padding: 0; border-radius: 0; margin-bottom: var(--sp-4); }
   .msg.command .co { margin-top: 3px; }
+  /* ---- Bridge command cards (/terminal, /diff, /health) ----
+     THE CLASS IS `bcard`, NOT `card`, and that is a fix rather than a preference: `.card` is already
+     taken in this file (the settings/detail card at the top), and its `.card .v { font-size:
+     --t-body }` and `.card .k { --t-meta }` reach any element carrying the name. A feed card called
+     `.card` therefore rendered its metric VALUES two steps larger than their labels — seen on the
+     rendered shot, not in the stylesheet, because both rules are legal and neither is an error.
+     Renaming is the whole fix; do not re-add `card` as a second class to "keep it readable".
+     A bridge command's ANSWER, rendered where it was asked. It borrows the agent row's construction
+     for the same reason that row does — raised fill, full width — because it is the same class of
+     thing: content the app produced that is neither the owner's words nor the session's. Nothing
+     here is a new colour or a new corner.
+     The RADIUS is inherited from .msg (--r-md) and deliberately not restated. A card in the feed is
+     a bubble that got structured; giving it .sess's --r-3xl would import the sessions list's corner
+     system into a surface that has its own.
+     `white-space: normal` is the one thing that MUST be overridden: .msg is pre-wrap so a plain
+     bubble keeps the transcript's own line breaks, and under it every newline between these child
+     elements would render as a blank line. */
+  .msg.bcard { background: var(--sec); max-width: 100%; padding: var(--sp-3); white-space: normal; margin-bottom: var(--sp-4); }
+  .msg.bcard .ch { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--t-sub); font-weight: var(--w-semi); }
+  /* The title IS the invocation, in the mono face .msg.command's own `.cn` uses — "a local command
+     renders as its invocation over its output" is this file's existing shape for a command result,
+     and a friendly restatement ("Live terminal") beside a command the user typed one second ago is
+     a line that informs nobody. The icon carries the identity instead. */
+  .msg.bcard .ct { font: var(--t-mono)/1.4 ui-monospace, Menlo, Consolas, monospace; font-weight: var(--w-semi); }
+  /* The title's trailing meta (line count, folder, file tally). margin-left:auto pins it right; the
+     weight is reset because .ch is semibold and this is the quiet half of the line.
+     `cmeta`, not `cm`: this file already carries an unscoped `.cm { color: var(--del) }` for the turn
+     chips, which reaches any element with that name. Ours only looked right because a three-class
+     selector outranks a one-class one on colour — delete the colour declaration below and the line
+     turns red. A name nothing else claims is the fix; specificity is not. */
+  .msg.bcard .ch .cmeta { margin-left: auto; font-size: var(--t-meta); font-weight: 400; color: var(--hint-raised);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .msg.bcard .cb { margin-top: var(--sp-2); }
+  /* The card's failure state. A LEFT RULE in the stop red rather than a red fill or red type: the
+     reason is prose the user has to read, and --text on the raised fill is what stays legible on
+     both themes. The rule is the signal; the words stay words. */
+  .msg.bcard.bad .cb { border-left: 2px solid var(--stop-red); padding-left: var(--sp-3); color: var(--text); }
+  /* A terminal capture and a patch are both PANE BYTES: monospace, no wrap, scrolled inside their
+     own box. `overflow-x: auto` here and never on the page — a card that widens the feed would put
+     every bubble on a horizontal scroller.
+     The ground is --bg against the card's --sec, which is the same figure/ground step the .chip uses
+     inside .sess: the app already says "inset" that way, and it needs no border to do it. */
+  .msg.bcard pre.term, .msg.bcard pre.patch { margin: 0; padding: var(--sp-2) var(--sp-3); background: var(--bg);
+    border-radius: var(--r-sm); font: var(--t-mono)/1.45 ui-monospace, Menlo, Consolas, monospace;
+    white-space: pre; overflow: auto; max-height: 40vh; overscroll-behavior: contain; }
+  /* The live tail reads bottom-up — the newest line is the one you opened this for — so the box is
+     scrolled to its floor on every refresh (fillCards), and this keeps the last line off the edge. */
+  .msg.bcard pre.term { display: block; }
+  /* The diff's line classes. --add/--del already exist for the file viewer, so a patch is coloured
+     the same everywhere in this app. The hunk header takes --link rather than a fourth colour: it is
+     a position marker, and the file's own convention is that blue means "a place you can go".
+     EVERY ONE IS PREFIXED `dl-`, and uniformly rather than only where a collision exists today:
+     a bare `meta` collided with this file's own unscoped `.meta` rule (line ~269) and rendered every
+     file-header line at 12px/nowrap inside a 13px/pre block — measured, not reasoned. `add`, `del`,
+     `hunk` and `context` are unclaimed today and would fail the same way the moment someone adds a
+     rule by one of those names, which is exactly how `.meta` and `.card` both happened. The kind
+     VOCABULARY is unchanged (session-cards.ts still returns `meta`); only the class carries the
+     prefix. */
+  .msg.bcard .dl { display: block; }
+  .msg.bcard .dl-add { color: var(--add); }
+  .msg.bcard .dl-del { color: var(--del); }
+  .msg.bcard .dl-hunk { color: var(--link); }
+  .msg.bcard .dl-meta { color: var(--hint); }
+  /* One row per changed file: name on the left, churn on the right. A two-column row, not a table —
+     the right column is two short numbers and a table would buy alignment nobody can see at 12px. */
+  .msg.bcard .df { display: flex; align-items: baseline; gap: var(--sp-2); font-size: var(--t-sub); padding: 3px 0; }
+  .msg.bcard .df .fp { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    direction: rtl; text-align: left; font: var(--t-mono)/1.5 ui-monospace, Menlo, Consolas, monospace; }
+  .msg.bcard .df .fc { flex: none; font-size: var(--t-meta); font-variant-numeric: tabular-nums; }
+  .msg.bcard .df .fc .a { color: var(--add); }
+  .msg.bcard .df .fc .d { color: var(--del); margin-left: 6px; }
+  /* Health's Metric | Value rows, and the diff's untracked list. The label column is sized by its
+     content and the value takes the rest, so a long value wraps under itself rather than pushing the
+     label off — the usage header's own two-row construction, at card scale. */
+  /* ONE grid for the whole block, not a flex row per line: the values have to start on a common
+     axis, and rows sized independently cannot do that — "Instance" and "Watchdog" are different
+     widths, so each value landed at its own x and the block read as ragged text rather than a table.
+     `max-content` takes the column from the WIDEST label, which is why there is no picked width
+     here to drift; `.kv` is `display: contents` so its two spans become the grid's own items. */
+  .msg.bcard .kvs { display: grid; grid-template-columns: max-content 1fr; column-gap: var(--sp-3); row-gap: 3px;
+    font-size: var(--t-sub); margin-top: var(--sp-1); }
+  .msg.bcard .kv { display: contents; }
+  .msg.bcard .kv .k { color: var(--hint-raised); }
+  .msg.bcard .kv .v { min-width: 0; word-break: break-word; white-space: pre-line; }
+  /* The fold for the detail half (panes, crash, rival daemons on /health; the patch beyond the cap).
+     <details> is what the turn rows already use for the same job, so the disclosure behaves the same
+     way in both places and needs no script. */
+  .msg.bcard details { margin-top: var(--sp-2); }
+  .msg.bcard summary { cursor: pointer; color: var(--hint); font-size: var(--t-sub); }
+  .msg.bcard .note { margin-top: var(--sp-2); color: var(--hint); font-size: var(--t-meta); }
   /* A subagent's report — the THIRD voice, and the only one that is neither the owner nor this
      session. The app had exactly two treatments and this arrives on the USER side of the transcript,
      so without its own it wore the owner's blue and read as his words. It takes the console's
@@ -2774,6 +2864,11 @@ let drillSid = null, drillTimer = null, lastDrill = null, optimistic = [];
 let staged = [], stagedUrls = [];
 function openDrill(sid, name) {
   drillSid = sid; lastDrill = null; optimistic = []; workOptimisticAt = 0; feedSig = "";
+  // A card answers a question about the session it was run in — carried into the next one it would
+  // show another session's pane, folder and churn under this session's name. Same reasoning as the
+  // staged file below, and the live terminal's tick reads `drillSid` at FETCH time, so a surviving
+  // card would start polling the newly opened session within 5s.
+  localCards = [];
   // A file staged in one session must not follow you into the next: attachToSession reads drillSid at
   // UPLOAD time, so a stage that survived the switch would silently deliver to whichever session you
   // opened last. Same reasoning as the optimistic rows cleared above it.
@@ -3133,7 +3228,10 @@ function paintFeed() {
   }
   const rows = items.map(bubble)
     .concat(optimistic.map(o => '<div class="msg user' + (o.state === "pending" ? " pending" : "") + '">' + esc(o.text)
-      + stamp(o.at, o.state === "pending" ? 0 : 1) + "</div>"));
+      + stamp(o.at, o.state === "pending" ? 0 : 1) + "</div>"))
+    // Bridge command cards last: they are the newest thing in the chat when they appear, and they
+    // are not transcript rows, so they have no timestamp to sort against the payload's.
+    .concat(localCards.map(cardShell));
   const html = rows.length ? rows.join("") : '<div class="notice">No conversation yet.</div>';
   // Unchanged — never disturb the scroll while the user reads back. The working line still has to
   // tick: during a turn the transcript rows DON'T change, so this is the branch every poll takes
@@ -3141,6 +3239,9 @@ function paintFeed() {
   if (html === feedSig) return paintWork();
   feedSig = html;
   feed.innerHTML = html;
+  // The card shells are in the signature; their CONTENT is not, so it has to be re-filled after
+  // every swap. Before the scroll re-pin below, because filling a card changes the feed's height.
+  fillCards();
   // Before the scroll re-pin: re-opening a fold changes the feed's height. The index within the turn
   // stands in for the block index — the wrapper's shape is the server's, so it is read off the DOM.
   feed.querySelectorAll(".msg.turn").forEach(m => m.querySelectorAll("details").forEach((d, n) => {
@@ -3325,6 +3426,11 @@ async function sendToSession(text) {
   // indicator is cleared for the same reason: reading a panel starts no turn, so no status will ever
   // arrive to replace it.
   if (d && d.readout) { workOptimisticAt = 0; showReadout(d.readout); return true; }
+  // A bridge command that renders in the chat. Same "nothing was done to the session" 200 as the
+  // three above, and the work indicator is cleared for the same reason: a card starts no turn, so no
+  // status will ever arrive to replace it. An `error` card rides this channel too — the command ran
+  // and could not answer, which belongs in the chat beside what was asked, not in a toast.
+  if (d && d.card) { workOptimisticAt = 0; addCard(d.card); return true; }
   return !!d;
 }
 
@@ -3338,6 +3444,210 @@ function showReadout(r) {
   warn.style.display = r.warning ? "block" : "none";
   $("robody").textContent = r.text;
   openSheet("readout");
+}
+
+// ---- Bridge command cards ----
+//
+// A card is a CLIENT-SIDE row: the answer to /terminal, /diff or /health, which are not transcript
+// entries and must never become them. The feed is rebuilt from the payload every 3s, so a card
+// injected into the DOM is wiped within one poll — it lives in this list instead and paintFeed
+// re-emits it on every repaint.
+//
+// The SHELL is in the signature (stable per card) and the CONTENT is not: filled by fillCards()
+// after the innerHTML swap, exactly as paintWork() keeps the ticking clock out of feedSig. A live
+// terminal refreshing its text therefore repaints nothing and fights no scroll.
+let localCards = [];
+let cardSeq = 0;
+const TERMINAL_REFRESH_MS = 5000;
+const TERMINAL_LIFETIME_MS = 30000;   // the Telegram card's own cadence and lifetime
+
+function addCard(card) {
+  const c = { ...card, cid: "c" + ++cardSeq };
+  // A live terminal runs for 30s and then FREEZES on its last frame. The Telegram card deletes
+  // itself at this point because it shares a scrollback with real messages; here the card is already
+  // ephemeral (it dies with the drill-in), and a row vanishing under the thumb is the worse failure.
+  if (c.kind === "terminal") { c.until = Date.now() + TERMINAL_LIFETIME_MS; c.live = true; }
+  localCards.push(c);
+  paintFeed();
+  if (c.kind === "terminal") armTerminalTick();
+}
+
+let terminalTimer = 0;
+function armTerminalTick() {
+  if (terminalTimer) return;
+  terminalTimer = setInterval(async () => {
+    const live = localCards.filter(c => c.kind === "terminal" && c.live);
+    if (!live.length) { clearInterval(terminalTimer); terminalTimer = 0; return; }
+    for (const c of live) {
+      if (Date.now() >= c.until) { c.live = false; fillCards(); continue; }
+      // A RAW fetch, deliberately not api(): api() raises its own error toast, and a tick that fires
+      // every 5s would raise one every 5s for the whole life of a card whose pane went away. Failure
+      // ENDS the card instead — a pane that stopped being readable is a real outcome, and the last
+      // frame plus a reason beats an empty box that keeps ticking.
+      const d = await fetch("/api/session/terminal?sid=" + encodeURIComponent(drillSid) + "&lines=" + c.lines,
+        { headers: AUTH }).then(r => r.ok ? r.json() : null).catch(() => null);
+      if (!d || typeof d.text !== "string") { c.live = false; c.ended = "the pane stopped responding"; fillCards(); continue; }
+      c.text = d.text;
+      fillCards();
+    }
+  }, TERMINAL_REFRESH_MS);
+}
+
+// The shell — signature-bearing, so everything in it must be STABLE for the life of the card.
+// The live tail, the patch and the metric values are all filled later by fillCards().
+function cardShell(c) {
+  const bad = c.kind === "error" ? " bad" : "";
+  const icon = c.kind === "terminal" ? "📺" : c.kind === "diff" ? "📄" : c.kind === "health" ? "🩺" : "⚠️";
+  return '<div class="msg bcard' + bad + '" data-cid="' + esc(c.cid) + '">'
+    + '<div class="ch"><span>' + icon + '</span><span class="ct">' + esc(c.command || "") + "</span>"
+    + '<span class="cmeta" data-slot="meta"></span>'
+    + (c.kind === "terminal" ? '<span class="dot" data-slot="dot"></span>' : "")
+    + '<button class="cardx" title="Dismiss" aria-label="Dismiss ' + esc(c.command || "card") + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>'
+    + "</div>"
+    + '<div class="cb" data-slot="body"></div></div>';
+}
+
+// Content goes in as TEXT NODES, never innerHTML. A terminal capture and a patch are arbitrary bytes
+// from a CLI this page does not control, and the one thing they must never do is write markup into
+// this app — the same rule showReadout states for the panel sheet.
+function fillCards() {
+  for (const c of localCards) {
+    const el = $("dfeed").querySelector('.msg.bcard[data-cid="' + c.cid + '"]');
+    if (!el) continue;
+    const meta = el.querySelector('[data-slot="meta"]');
+    const body = el.querySelector('[data-slot="body"]');
+    body.textContent = "";
+    if (c.kind === "terminal") {
+      meta.textContent = c.ended ? c.ended : c.live ? c.lines + " lines · live" : c.lines + " lines · ended";
+      // Green pulsing while it refreshes, grey and still once it stops — the sessions list's own
+      // working/idle mapping, so "live" reads the same everywhere in this app.
+      el.querySelector('[data-slot="dot"]').className = "dot" + (c.live ? " on" : "");
+      const pre = document.createElement("pre");
+      pre.className = "term";
+      pre.textContent = c.text || "";
+      body.appendChild(pre);
+      // The newest line is what the card was opened for, so the box rests at its floor.
+      pre.scrollTop = pre.scrollHeight;
+    } else if (c.kind === "diff") {
+      fillDiff(c.diff, meta, body);
+    } else if (c.kind === "health") {
+      meta.textContent = "";
+      body.appendChild(kvBlock(c.rows));
+      const detail = [];
+      if (c.panes && c.panes.length) detail.push(["Panes", c.panes.join("\n")]);
+      if (c.crash) detail.push(["Last crash", c.crash]);
+      if (c.others && c.others.length) detail.push(["Other bridge daemons", c.others.join(" ")]);
+      // The bits that only matter when something is wrong sit behind a fold, so a healthy bridge is
+      // six rows and nothing else — the same split the Telegram rich card makes with <details>.
+      if (detail.length) {
+        const d = document.createElement("details");
+        const s = document.createElement("summary");
+        s.textContent = "Details";
+        d.appendChild(s);
+        d.appendChild(kvBlock(detail));
+        body.appendChild(d);
+      }
+    } else {
+      meta.textContent = "";
+      body.textContent = c.reason || "Something went wrong.";
+    }
+  }
+  bindCardDismiss();
+}
+
+// The rows share ONE grid so their values align on a common axis (see .kvs). A row on its own is
+// still a block of one — the container is what carries the column, not the row.
+function kvBlock(pairs) {
+  const box = document.createElement("div");
+  box.className = "kvs";
+  for (const [k, v] of pairs) box.appendChild(kvRow(k, v));
+  return box;
+}
+
+function kvRow(k, v) {
+  const row = document.createElement("div");
+  row.className = "kv";
+  const ke = document.createElement("span");
+  ke.className = "k";
+  ke.textContent = k;
+  const ve = document.createElement("span");
+  ve.className = "v";
+  ve.textContent = v;
+  row.append(ke, ve);
+  return row;
+}
+
+// Added / removed per file, then the patch. The four line classes come from the SERVER's own
+// classifier (session-cards.ts's diffLineKind) rather than a second copy of the test here — a hunk
+// header reading as a heading on one surface and as context on the other is exactly the drift the
+// shared producer exists to stop.
+function fillDiff(d, meta, body) {
+  if (d.clean) {
+    meta.textContent = "";
+    body.textContent = "✨ Working tree clean — nothing to diff.";
+    return;
+  }
+  const total = d.files.reduce((n, f) => n + f.added + f.removed, 0);
+  meta.textContent = d.files.length + (d.files.length === 1 ? " file" : " files") + " · " + total + " lines";
+  for (const f of d.files) {
+    const row = document.createElement("div");
+    row.className = "df";
+    const p = document.createElement("span");
+    p.className = "fp";
+    // The path is `direction: rtl` so a long one ellipsizes at its FRONT — the filename is the part
+    // you need and the leading directories are the part you can lose. The Unicode bidi isolate keeps
+    // that from reordering anything inside the string itself.
+    p.textContent = "⁦" + f.path + "⁩";
+    const cnt = document.createElement("span");
+    cnt.className = "fc";
+    const a = document.createElement("span");
+    a.className = "a";
+    a.textContent = "+" + f.added;
+    const r = document.createElement("span");
+    r.className = "d";
+    r.textContent = "−" + f.removed;
+    cnt.append(a, r);
+    row.append(p, cnt);
+    body.appendChild(row);
+  }
+  if (d.untracked && d.untracked.length) body.appendChild(kvBlock([["Untracked", d.untracked.join("\n")]]));
+  if (d.patch) {
+    const pre = document.createElement("pre");
+    pre.className = "patch";
+    for (const line of d.patch.split("\n")) {
+      const s = document.createElement("span");
+      s.className = "dl dl-" + diffLineKind(line);
+      s.textContent = line + "\n";
+      pre.appendChild(s);
+    }
+    body.appendChild(pre);
+  }
+  if (d.truncated) {
+    const n = document.createElement("div");
+    n.className = "note";
+    n.textContent = "Diff truncated (large change) — run git diff HEAD in " + d.cwd + " for the rest.";
+    body.appendChild(n);
+  }
+}
+
+// Mirrors session-cards.ts's diffLineKind. The two are the same four branches in the same order —
+// `+++`/`---` before `+`/`-`, or every file header paints green.
+function diffLineKind(line) {
+  if (line.startsWith("+++") || line.startsWith("---")) return "meta";
+  if (/^(diff |index |new file|deleted file|similarity |rename |old mode|new mode)/.test(line)) return "meta";
+  if (line.startsWith("@@")) return "hunk";
+  if (line.startsWith("+")) return "add";
+  if (line.startsWith("-")) return "del";
+  return "context";
+}
+
+// Re-bound after every repaint: the feed's innerHTML swap destroys the buttons the previous bind
+// held. Same reason #newfab is static markup rather than built inside renderSessions.
+function bindCardDismiss() {
+  for (const c of localCards) {
+    const el = $("dfeed").querySelector('.msg.bcard[data-cid="' + c.cid + '"] .cardx');
+    if (el) el.onclick = () => { localCards = localCards.filter(x => x.cid !== c.cid); paintFeed(); };
+  }
 }
 
 // The four destinations, and the whole reason `cwd` is on the wire: the files sheet is scoped to the

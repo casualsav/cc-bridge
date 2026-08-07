@@ -56,6 +56,18 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   # truthful empty fallback, and the unchanged Anthropic spawn sheet
     node suite.mjs                # the six scroll behaviours, each measured twice (see below)
     node themes.mjs               # feed in dark AND light (see the theming trap below)
+    node cards.mjs [page][out]    # BRIDGE COMMAND CARDS — /terminal, /diff and /health rendered in
+                                  #   the chat. The load-bearing check is §5: a card must survive a
+                                  #   feed REPAINT, which is the whole reason they are a client-side
+                                  #   list and not injected DOM (the 3s poll rebuilds the feed from
+                                  #   the payload, so injected rows die within one tick). §2 feeds
+                                  #   the terminal live markup and asserts it created ZERO elements;
+                                  #   §4 samples rendered PIXELS for the diff colours and pins the
+                                  #   `+++`-before-`+` ordering that paints file headers green.
+                                  #   Pass a pre-change page: 34 of 41 fail. The 7 that pass on both
+                                  #   are the guard half (no injection, no page widening, dismiss
+                                  #   leaves nothing) — they are not controls, they are the claim
+                                  #   that this change did not cause what they forbid
     node work.mjs <outdir>        # the live working row: both themes, reduced-motion, and the
                                   #   status-absent control (the row must NOT render without it)
     node fullscreen.mjs           # the fullscreen top offset on every top-anchored surface, driven

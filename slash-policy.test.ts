@@ -154,3 +154,52 @@ test('bridgeOnlyReason is the shared answer, so tg slash and the composer cannot
   expect(bridgeOnlyReason('/compact')).toBe(null)   // a real CLI command still relays
   expect(bridgeOnlyReason('/nonsense')).toBe(null)
 })
+
+// ---- Bridge commands that RENDER in the mini app (v0.4.393) ----
+//
+// The failure being pinned in the first two: before this these names were BRIDGE_ONLY entries, so a
+// broken version answers `{kind:'refuse'}` with "it lives in the chat" — which was true of the
+// Telegram bot and false of an app that can show all three.
+test('the three card commands plan as cards, not refusals', () => {
+  expect(planSlash('/terminal')).toEqual({ kind: 'card', card: 'terminal', arg: '' })
+  expect(planSlash('/diff')).toEqual({ kind: 'card', card: 'diff', arg: '' })
+  expect(planSlash('/health')).toEqual({ kind: 'card', card: 'health', arg: '' })
+})
+
+test('the hidden aliases route with their commands, so muscle memory never reaches the palette', () => {
+  expect(planSlash('/t')).toMatchObject({ kind: 'card', card: 'terminal' })
+  expect(planSlash('/doctor')).toMatchObject({ kind: 'card', card: 'health' })
+})
+
+test('an argument rides along to the card producer rather than defeating the match', () => {
+  // `/terminal 60` is a line count. It must NOT fall through to `pass` the way an argument defeats
+  // the panel readouts — those are bare-spellings-only because `/context all` is a different thing;
+  // a line count is the same thing, larger.
+  expect(planSlash('/terminal 60')).toEqual({ kind: 'card', card: 'terminal', arg: '60' })
+})
+
+test('the permission-mode switches route to the session-only path', () => {
+  expect(planSlash('/plan')).toEqual({ kind: 'mode', arg: 'plan' })
+  expect(planSlash('/bypass')).toEqual({ kind: 'mode', arg: 'bypassPermissions' })
+  expect(planSlash('/yolo')).toEqual({ kind: 'mode', arg: 'bypassPermissions' })
+  expect(planSlash('/acceptedits')).toEqual({ kind: 'mode', arg: 'acceptEdits' })
+  // `/default` was in NEITHER table before this: a live Telegram mode command whose name the CLI does
+  // not register, so it fell through to `pass` and the TUI's fuzzy-matching palette. Same hole
+  // `/files` fell through, on a sibling of the five names above.
+  expect(planSlash('/default')).toEqual({ kind: 'mode', arg: 'default' })
+})
+
+test('/mode takes an argument and refuses its bare picker', () => {
+  expect(planSlash('/mode plan')).toEqual({ kind: 'mode', arg: 'plan' })
+  expect(planSlash('/mode acceptEdits')).toEqual({ kind: 'mode', arg: 'acceptEdits' })
+  expect(planSlash('/mode')).toMatchObject({ kind: 'refuse' })
+  expect((planSlash('/mode nonsense') as { reason: string }).reason).toContain("isn't a mode")
+})
+
+test('the names that stay bridge-only stay bridge-only', () => {
+  // The other half of the classification: moving three names out must not quietly take their
+  // neighbours with them. These have no destination and no rendering in this app.
+  for (const cmd of ['/pin', '/start', '/bind', '/claim', '/base', '/agent', '/reset', '/find']) {
+    expect(planSlash(cmd).kind).toBe('refuse')
+  }
+})

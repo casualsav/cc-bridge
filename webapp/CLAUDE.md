@@ -210,6 +210,49 @@ give it.
   "Always clear" dialog button was declined (Settings has the toggle). `miniclear.mjs` drives it
   (temporal control; its feed check passes on the broken build — only the pane knows).
 
+## Bridge command cards
+
+- **A command card is a CLIENT-SIDE row (`localCards`), re-emitted by `paintFeed` — never DOM
+  injected into the feed.** `/terminal`, `/diff` and `/health` answer in the chat, and their answers
+  are not transcript entries. The feed is rebuilt from the payload every 3s, so a card appended to
+  the DOM is wiped within one poll; `cards.mjs` §5 drives a real repaint and is the check that
+  catches it, because every other check in that file passes on a card that vanishes a tick later.
+  The card's SHELL is in `feedSig` (stable per card) and its CONTENT is not — filled by `fillCards()`
+  after the innerHTML swap, the same split `paintWork()` uses to keep a ticking clock out of the
+  signature, so a live terminal refreshing every 5s repaints nothing and fights no scroll.
+  `openDrill` clears the list: the live tick reads `drillSid` at FETCH time, so a card carried into
+  the next session starts polling that session's pane within 5s.
+- **EVERY class name in this markup was swept against the page's existing selectors, and three
+  collided.** This file has unscoped single-class rules, so a new component picking an obvious name
+  silently inherits them — legal CSS, no error, invisible to any computed-style assertion because
+  the foreign rule sets a property yours does not. All three were caught by reading rendered output:
+  - `card` → **`bcard`**. `.card .v { font-size: --t-body }` / `.card .k { --t-meta }` (the
+    settings/detail card) put the metric values two type steps above their labels.
+  - `meta` → **`dl-meta`**, and the other four line kinds took the `dl-` prefix with it. The page's
+    own `.meta { font-size: --t-meta; white-space: nowrap }` rendered every patch file-header line at
+    12px/nowrap inside a 13px/pre block. `add`/`del`/`hunk`/`context` are unclaimed *today* — they are
+    prefixed anyway, because being unclaimed is not a property that holds. The kind vocabulary is
+    unchanged; `session-cards.ts` still returns `meta`.
+  - `cm` → **`cmeta`**. `.cm { color: var(--del) }` (the turn chips) reached the header's trailing
+    meta and was masked only because a three-class selector outranks a one-class one on colour.
+    Deleting our colour declaration would have turned the line red. **Specificity is not the fix; a
+    name nothing else claims is.**
+  `cards.mjs` §8 is the standing guard: it enumerates every rule in the page that matches a card node
+  and fails on anything outside a named exclusion list (`.msg`, `.dot`, `.cardx` — the deliberate
+  reuses — plus the universal reset and the feed's own floor gutter).
+- **Pane bytes go in as TEXT NODES.** A terminal capture and a patch are arbitrary bytes from a CLI
+  this page does not control — the same rule `showReadout` states for the panel sheet. `cards.mjs` §2
+  feeds the card live markup and asserts zero elements were created.
+- **The metric rows share ONE grid (`.kvs`, `max-content 1fr`) and `.kv` is `display: contents`.**
+  A flex row per line sizes each label independently, so every value starts at its own x and the
+  block reads as ragged text rather than a table. The column comes from the widest label, which is
+  what keeps a picked width out of it.
+- **A live terminal FREEZES after 30s; it does not delete itself.** The Telegram card deletes because
+  it shares a scrollback with real messages. Here the card is already ephemeral (it dies with the
+  drill-in), and a row vanishing under the thumb is the worse failure. Its refresh uses a RAW fetch,
+  never `api()` — `api()` raises its own error toast, and a 5s tick against a pane that went away
+  would raise one every 5s for the life of the card.
+
 ## Attachments
 
 - **An ALBUM is ONE message.** Telegram delivers N photos as N updates sharing a `media_group_id`,

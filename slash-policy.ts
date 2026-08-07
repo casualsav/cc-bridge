@@ -23,7 +23,18 @@ export type SlashPlan =
   | { kind: 'exit' }                                    // owner-gated; routed to the close action
   | { kind: 'navigate'; to: NavTarget; note: string }   // a bridge command with a destination IN this app
   | { kind: 'readout'; panel: PanelKind }               // a full-screen CLI panel the bridge can read and hand back
+  | { kind: 'card'; card: CardKind; arg: string }       // a bridge command that RENDERS in the chat
+  | { kind: 'mode'; arg: CcModeName }                   // a permission-mode switch, routed like model/effort
   | { kind: 'refuse'; reason: string }
+
+// The bridge commands that answer with a rendered card rather than a refusal. Each one was a
+// BRIDGE_ONLY entry saying "it lives in the chat" until v0.4.393 — true of the Telegram bot and
+// false of this app, which can show all three.
+export type CardKind = 'terminal' | 'diff' | 'health'
+
+// Claude Code's permission modes, by the name `switchToMode` takes. Spelled here rather than
+// imported from daemon.ts because this file is the pure classifier and imports no daemon state.
+export type CcModeName = 'default' | 'plan' | 'auto' | 'acceptEdits' | 'bypassPermissions'
 
 // The client's three views plus the browse sheet. `files` is not a view: browsing is a sheet inside
 // the session that owns the folder, so it is the one target that needs that session's cwd.
@@ -108,11 +119,9 @@ const NAVIGATE: Record<string, { to: NavTarget; note: string }> = {
 // sending someone to a screen that cannot do it.
 const BRIDGE_ONLY: Record<string, string> = {
   '/find': 'no home in this app yet — browse the session’s folder from the paperclip instead',
-  '/pin': 'the chat', '/start': 'the chat', '/health': 'the chat',
-  '/mode': 'the chat', '/plan': 'the chat', '/auto': 'the chat', '/acceptedits': 'the chat',
-  '/bypass': 'the chat', '/yolo': 'the chat', '/agent': 'the chat',
+  '/pin': 'the chat', '/start': 'the chat', '/agent': 'the chat',
   '/bind': 'the chat', '/unbind': 'the chat', '/claim': 'the chat',
-  '/base': 'the chat', '/diff': 'the chat', '/terminal': 'the chat', '/reset': 'the chat',
+  '/base': 'the chat', '/reset': 'the chat',
   // The session-baton pair. They are BOT commands — the daemon bundles their instruction text and
   // injects it through the normal inbound path — and the CLI has no command by either name, so
   // reaching the pane is the worst outcome available: an unregistered slash falls through to the
@@ -120,6 +129,41 @@ const BRIDGE_ONLY: Record<string, string> = {
   // They were in neither table until v0.4.381, which is the same hole `/files` fell through.
   // `/audit` is registered in the same daemon loop as the two above and had the identical hole.
   '/handoff': 'the chat', '/continue': 'the chat', '/audit': 'the chat',
+}
+
+// Bridge commands the app RENDERS. The membership test is the one BRIDGE_ONLY's comment states and
+// this is its other side: a name the bridge owns and the app can show. These three answer a question
+// about the session or the bridge, so a card in the chat IS the answer — where NAVIGATE's members
+// answer by opening the screen that holds it.
+//
+// The hidden aliases are here because the muscle memory is real: `/t` and `/doctor` are live in
+// Telegram, and a name that works there and falls through to the CLI's fuzzy-matching palette here
+// is the `/files` hole again.
+const CARDS: Record<string, CardKind> = {
+  '/terminal': 'terminal', '/t': 'terminal',
+  '/diff': 'diff',
+  '/health': 'health', '/doctor': 'health',
+}
+
+// The permission-mode switches. They route exactly as `/model <name>` and `/effort <level>` do —
+// through the session-only path that applies to THIS pane — and for the same reason: the mode is a
+// property of the session you are standing in.
+//
+// `/default` is in this table though it was never in BRIDGE_ONLY: it is a live Telegram mode command
+// whose name the CLI does not register, so before this it fell through to the palette, which
+// fuzzy-matches. That is the same hole `/files` fell through, on a sibling of the five names being
+// routed here — leaving it open while closing its family would be the harder thing to explain.
+const MODES: Record<string, CcModeName> = {
+  '/plan': 'plan', '/auto': 'auto', '/default': 'default',
+  '/acceptedits': 'acceptEdits', '/bypass': 'bypassPermissions', '/yolo': 'bypassPermissions',
+}
+
+// `/mode <alias>` — the argument form. Mirrors daemon.ts's MODE_ALIASES; bare `/mode` opens a picker
+// in Telegram, which is the undriveable dialog this app refuses everywhere else.
+const MODE_ARGS: Record<string, CcModeName> = {
+  default: 'default', normal: 'default', plan: 'plan', auto: 'auto',
+  acceptedits: 'acceptEdits', accept: 'acceptEdits', edits: 'acceptEdits',
+  bypass: 'bypassPermissions', bypasspermissions: 'bypassPermissions', yolo: 'bypassPermissions',
 }
 
 /** Why this command can't be run at a session, or null if it isn't a bridge command. */
@@ -153,6 +197,23 @@ export function planSlash(text: string): SlashPlan {
   // that means asking it only about a command that HAS no argument.
   const panel = arg ? null : panelKindOf(name)
   if (panel) return { kind: 'readout', panel }
+  // A bridge command this app renders. Ahead of BRIDGE_ONLY for the same reason `navigate` is: both
+  // of those tables are ways of saying "not here", and these three are here. `arg` rides along —
+  // `/terminal 60` is a line count, and the card producer is the one that bounds it.
+  const card = CARDS[name]
+  if (card) return { kind: 'card', card, arg }
+  // A permission-mode switch. Bare `/mode` opens the picker, which is the same undriveable dialog
+  // MODAL names — so it is refused toward the control that does this properly, exactly as bare
+  // `/model` and `/effort` are.
+  const mode = MODES[name]
+  if (mode) return { kind: 'mode', arg: mode }
+  if (name === '/mode') {
+    const picked = arg && MODE_ARGS[arg.toLowerCase().replace(/[-_\s]/g, '')]
+    if (picked) return { kind: 'mode', arg: picked }
+    return { kind: 'refuse', reason: arg
+      ? `${arg} isn't a mode — try plan, auto, acceptEdits, bypass or default.`
+      : 'Bare /mode opens a picker the chat can\'t drive — use /mode <name>, or /plan, /auto, /acceptedits, /bypass.' }
+  }
   const bridgeOnly = bridgeOnlyReason(name)
   if (bridgeOnly) return { kind: 'refuse', reason: bridgeOnly }
   if (BLOCKED[name]) return { kind: 'refuse', reason: `${name} ${BLOCKED[name]}, so it isn't available from a session chat.` }
