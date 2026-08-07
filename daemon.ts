@@ -1582,6 +1582,12 @@ async function transcriptForPane(pane: string | null, cwd: string | null, requir
     if (claimant) process.stderr.write(`daemon: transcript ${basename(fb)} belongs to session ${claimant.sessionId} (${claimant.name}) — not relaying it for pane ${pane ?? '-'}\n`)
     return null
   }
+  // EVERY accepted fallback says so, with everything needed to judge it after the fact: which pane,
+  // which file, and what the session's own row claims. This is the instrument for the hole the
+  // tombstone was built to close — if that fix is complete, an accepted fallback only ever happens
+  // for a genuinely unstamped pane in a folder with one session, and the line is rare and boring.
+  // A burst of these naming a session whose recorded id is `-` is the hole having a second door.
+  process.stderr.write(`daemon: transcript FALLBACK accepted ${basename(fb)} for pane ${pane ?? '-'} (session ${sid ?? '-'}, recorded ${(sid ? getTopicBySession(sid)?.agentSessionId : null) ?? '-'}, file conv ${owner ?? '-'})\n`)
   return fb
 }
 
@@ -19144,11 +19150,19 @@ async function webappSessionAction(userId: string, sid: string, action: 'stop' |
       // forum_topic_closed handler sets it because there the user already closed the tab himself.)
       if (topic?.threadId != null) markTopicClosePending(sid)
       markSessionEnding(sid)   // the card you just tapped ✕ on must stop pulsing, not wait out the /exit
+      // ✕ IS A KILL, and it must be recorded as one — `tg kill` writes this and the ✕ did not, which
+      // is the whole difference between the two paths. Without it the reap treated the row as a
+      // session that merely vanished, and the row (with its agentSessionId) went; the next session in
+      // that folder then adopted this one's transcript. It also gives ✕ the same `tg reopen` window.
+      updateTopic(sid, { killedAt: Date.now() })
       void closeSessionPane(pane, 'webapp-close')   // escalates for up to ~20s — never hold the HTTP request open for it
       return null
     }
     if (!topic && !pane) return 'unknown session'
-    if (topic && topic.threadId == null) removeTopic(sid)   // headless: the registry row IS the whole session
+    // Headless and already dead: CLOSE the row, never delete it. It renders on no surface either way,
+    // and keeping it is what stops the next session in this folder from being served this one's
+    // conversation (transcriptForPane's ownership guard is a lookup against these rows).
+    if (topic && topic.threadId == null) updateTopic(sid, { closed: true, killedAt: Date.now() })
     return null                                             // a dead topic session is reaped by the reconcile sweep
   }
   if (!pane || !(await paneAlive(pane).catch(() => false))) return 'no live pane for this session'

@@ -143,11 +143,14 @@ test('a stamped pane that still exists vetoes deletion even when claude has exit
 
 test('a row with no pane anywhere is still collected (the guard is not a leak)', async () => {
   // The guard must not turn the GC off: a genuinely absent session, on a scan that DID see panes,
-  // still gets removed after the 2-miss buffer.
+  // is still collected after the 2-miss buffer. Since v0.4.402 "collected" means CLOSED rather than
+  // deleted — it renders on no surface, exactly as before, and it still answers the ownership guard
+  // that keeps the next session in its folder off its transcript. The assertion moved from "the row
+  // is gone" to "the row is closed"; what must never come back is an OPEN row for a dead session.
   _resetForTest({ groupChatId: '-100123', topics: { aaaa0004: { ...ROW } } })
   panes = { '%9': { sid: 'bbbb9999', cmd: 'claude' } }   // a live pane, but not this row's
   for (let i = 0; i < 3; i++) await reconcileTopics(['%9'])
-  expect(getTopicBySession('aaaa0004')).toBeUndefined()
+  expect(getTopicBySession('aaaa0004')?.closed).toBe(true)
 })
 
 // --- 4b: startup rebuild -----------------------------------------------------------------------
@@ -193,4 +196,33 @@ test('rebuild skips a pane whose claude has exited', async () => {
   panes = { '%19': { sid: 'cccc0004', cmd: 'bash', cwd: '/home/u/proj' } }
   await rebuildRowsFromStampedPanes(['%19'])
   expect(listTopics().length).toBe(0)
+})
+
+// v0.4.402 — THE TOMBSTONE. A headless row is the only record of who owned a conversation, and the
+// ownership guard in transcriptForPane is a lookup against exactly these rows. Delete the row and the
+// guard goes blind: a NEW session in that folder, whose own .jsonl does not exist yet (Claude Code
+// writes it at the first turn), resolves the folder's newest file — the dead session's — and every
+// permissive caller believes it, the outbound relay included. The owner hit this through the mini
+// app's ✕, which is the close path that leaves no `killedAt` behind.
+test('a dead headless row is KEPT as a tombstone carrying its agentSessionId, never deleted', async () => {
+  const row = { ...ROW, name: 'dead-worker', cwd: '/tmp/repo', agentSessionId: 'a770517e-conv-id' }
+  _resetForTest({ groupChatId: '-100123', topics: { bbbb0100: row } })
+  panes = { '%40': { sid: 'ffff0100', cmd: 'claude' } }        // a conclusive scan, without our session
+  for (let i = 0; i < 4; i++) await reconcileTopics(['%40'])
+  const t = getTopicBySession('bbbb0100')
+  expect(t).toBeTruthy()
+  expect(t!.agentSessionId).toBe('a770517e-conv-id')           // the whole point of keeping it
+  expect(t!.cwd).toBe('/tmp/repo')
+  expect(t!.closed).toBe(true)                                 // renders on no surface, still answers the guard
+})
+
+test('a tombstone survives the kill-undo grace expiring — the conversation it names outlives it', async () => {
+  // The second removal pass used to drop a killed headless row once KILL_UNDO_GRACE_MS had passed.
+  // The undo window is about `tg reopen`; the transcript that row identifies stays on disk long after,
+  // so the row has to outlive the window it was kept for.
+  const long_ago = Date.now() - 8 * 24 * 60 * 60 * 1000
+  _resetForTest({ groupChatId: '-100123', topics: { bbbb0101: { ...ROW, closed: true, killedAt: long_ago, agentSessionId: 'old-conv-id' } } })
+  panes = { '%41': { sid: 'ffff0101', cmd: 'claude' } }
+  for (let i = 0; i < 4; i++) await reconcileTopics(['%41'])
+  expect(getTopicBySession('bbbb0101')?.agentSessionId).toBe('old-conv-id')
 })

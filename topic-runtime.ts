@@ -627,23 +627,24 @@ export async function reconcileTopics(panes: string[]): Promise<void> {
     // on no surface) for the undo window — `tg reopen` needs its cwd + conversation id, and dropping
     // it here is what made the undo expire ~85s after a kill. Everything else drops as before.
     if (t.threadId == null) {
-      if (t.killedAt && !killGraceExpired(t.killedAt)) { updateTopic(t.sessionId, { closed: true }); continue }
-      // Positive evidence of death is required before deleting the ONLY record of a session. A pane
-      // that still exists and still carries this sid is that evidence's opposite — even with claude
-      // exited, which is a reason to CLOSE a topic, never to erase the row (its cwd + conversation id
-      // are what `tg reopen` and the dashboards need). The stamp is the authority here.
+      // A dead headless row becomes a TOMBSTONE — closed, so it renders on no surface, but kept,
+      // because it is the only record of who owned its conversation. `transcriptForPane`'s ownership
+      // guard is a lookup against exactly these rows: delete one and a NEW session in that folder
+      // (whose own .jsonl does not exist until its first turn) resolves the dead session's file, and
+      // every permissive caller believes it — the outbound relay included. Deleting it also cost the
+      // undo `killedAt` was written for. Rows are ~150 bytes and one per session ever created; the
+      // conversation a tombstone names stays resolvable for as long as its .jsonl is on disk, so any
+      // clock-based pruning re-opens this hole at the moment nobody remembers it exists.
       if (stampedSids.has(t.sessionId)) { topicMissCounts.delete(t.sessionId); continue }
-      removeTopic(t.sessionId); continue
+      updateTopic(t.sessionId, { closed: true }); continue
     }
     if (!group) continue   // a threadId without a bound group is stale cross-mode state — leave it for /bind to reconcile
     await closeTopicEntry(group, t.sessionId, { ...t, threadId: t.threadId })
   }
-  // Second pass, for the rows the loop above skips because they're already closed: retire a killed
-  // groupless row once its undo window has passed. Without this the grace would trade an expiring
-  // undo for rows that live forever. Topic-mode rows keep their closed entries as history, as before.
-  for (const t of listTopics()) {
-    if (t.threadId == null && t.killedAt && killGraceExpired(t.killedAt)) removeTopic(t.sessionId)
-  }
+  // The second pass that retired a killed groupless row once its undo window passed is GONE (v0.4.402).
+  // The window is about `tg reopen`; the transcript the row identifies stays on disk long after it,
+  // and the row is what stops a later session in that folder from adopting that transcript. So the
+  // row outlives the window it was kept for — see the tombstone note above.
   // DM chat lanes FIRST — above the `!group` return below. They have no topic entry and no group to
   // fail into, so this backstop was written for the groupless case, yet it sat BELOW that return and
   // was therefore dead in exactly the mode it exists for (audit D7): a dead chat lane was never
