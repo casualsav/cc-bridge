@@ -177,6 +177,30 @@ give it.
   entry that carried none) had no key at all and lost the tap on the next repaint — measured, and the
   owner's "it re-collapses after 3 seconds". `expandFull()` still needs a real uuid; only the open
   state falls back.
+- **A tap on a bubble's BODY copies; only the fold bar expands; nothing collapses by hand** (the
+  owner, 2026-08-07). Three consequences that look like bugs if you don't know the ruling: the
+  bubble handler is on EVERY bubble, not just long ones (a short message copies too); `onMoreTap`
+  **must** `stopPropagation()`, or the same tap that expands also raises the pill over what it just
+  opened; and `copyFor` — the one bubble showing a pill — lives outside the DOM beside `openMsgs`,
+  because the 3s repaint would otherwise take the pill away under the thumb. Scope is `bubble()`'s
+  own rows: turn rows and command cards were never in it, and the `a, button` bail-out is what
+  leaves a control inside a bubble its own tap (`md()` renders no anchors *today*, which is not a
+  property that holds). A live text selection's release arrives here as a click and is refused —
+  selecting text is itself a way of copying. **An `imgonly` bubble is refused a pill** — the
+  renderer strips the CLI's `(photo)` placeholder *before* deciding `imgonly`, so that placeholder is
+  the row's only text and the clipboard measurably got the literal `"(photo)"`. A captioned photo is
+  not `imgonly` and keeps the pill; the caption is text somebody wrote.
+- **The copy is read from the PAYLOAD and un-clips first.** A collapsed bubble's DOM text is cut by
+  `max-height`, and a `clipped` row never held the whole message at all — so `copyMsg` awaits
+  `expandFull(uuid)` before reading. Copying the server's clamp is a silent truncation, which is the
+  one failure a copy button may not have.
+- **Collapse is automatic and counted from the OPEN, not from the newest row:** `openMsgs` is a Map
+  key → the transcript's length when it was opened, and `paintFeed` drops a key once `BURIED_ROWS`
+  (3) rows have arrived since. "N rows from the end" is the rule that looks equivalent and
+  re-collapses a message you just opened deep in the scrollback, on the very next poll. The rects
+  are read BEFORE the innerHTML swap (they must describe the paint the reader is looking at), and a
+  bubble still on screen is never collapsed however much lands under it. `msgtap.mjs` measures all
+  of it; on the pre-change page 13 of its checks fail and its §7 guards pass on both.
 - **A screen-taller newest reply pins by its TOP**, at max(the ceiling scrim's height, the feed's
   padding-top) — the two swap over in fullscreen. Measured from RECTS, never `offsetTop` (relative
   to the offsetParent's *padding* edge; this scroller's padding is the header's footprint, 60px of

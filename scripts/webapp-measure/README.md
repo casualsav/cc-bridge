@@ -114,6 +114,17 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   clear by seconds and reports a transcript that is already gone.
                                   #   Flips prefs.json's confirmReset and restores the box's own value.
                                   #   Control is TEMPORAL (daemon-side change): 5 checks fail pre-fix
+    node msgtap.mjs [page]        # TAPS ON A BUBBLE (the owner's 2026-08-07 interaction): the body
+                                  #   raises a copy pill and never folds, the "tap to expand" bar is
+                                  #   the only way to expand, there is no manual collapse left, and
+                                  #   an opened message collapses itself 3 rows after the open —
+                                  #   never while it is still on screen. §4 is the one that matters:
+                                  #   the copy carries the FULL message, spied at the clipboard API,
+                                  #   for a row whose payload text is the server's clamp. §7 is the
+                                  #   guard half and passes on BOTH pages (links, selections, turn
+                                  #   rows, command cards). §8 refuses a pill to an image-only
+                                  #   bubble (its only text is the CLI's "(photo)") and keeps one on
+                                  #   a captioned photo. Pass a pre-change page: 16 fail
     node ghostecho.mjs [page]     # an optimistic bubble must recognise its own CLIPPED echo. Over
                                   #   CONVO_CAP the echo comes back shorter than what you typed, so
                                   #   exact-text reconciliation can never match and the feed showed

@@ -1460,6 +1460,16 @@
   .msg.clip.open { max-height: none; padding-bottom: var(--sp-2); }
   .msg.clip.open::after { display: none; }
   .msg.clip.open .more { display: none; }
+  /* The fold bar is now the ONLY way to expand (a tap on the body copies instead), so it is a real
+     control and says so. */
+  .msg.clip .more { cursor: pointer; }
+  /* The copy pill a tap on the body raises. `position: relative` is scoped to the bubble showing one
+     — .msg.clip already carries it, and giving it to every bubble would change what any future
+     absolutely-positioned child anchors to. Above `.more`'s z-index 1, which is why this is 2; the
+     ladder stays local because #dfeed is its own stacking context. No new visual language: the
+     page's own .chip carries the fill, radius, type step and colour, and this rule only places it. */
+  .msg.copyon { position: relative; }
+  .copyb { position: absolute; top: var(--sp-1); right: var(--sp-1); z-index: 2; border: none; cursor: pointer; }
   .msg .attchip { font-size: var(--t-sub); opacity: .92; margin-bottom: var(--sp-1); }
   /* A photo FILLS its bubble, Telegram-style: the 11px of blue that used to frame it is cancelled by
      negative margins rather than by a smaller padding, so the text case keeps every number it was
@@ -3113,14 +3123,21 @@ function bubble(i, n, all) {
   // all, so the tap that opened it was thrown away by the next 3s repaint. The fetch still needs a
   // real uuid; only the open state falls back.
   const openNow = openMsgs.has(msgKey(i));
+  // The copy pill is rendered from state for the same reason the open fold is: this feed's innerHTML
+  // is rebuilt from the payload every 3s, so a pill appended to the DOM would vanish under the thumb
+  // within one poll.
+  const copyNow = copyFor === msgKey(i);
   // A picture with nothing to say under it is a different bubble, not a styled one: it has no
   // padding left to show, and the time moves onto the photo. `t` is already the caption after the
   // placeholder strip, so "(photo)" — which is text the CLI wrote, not the sender — counts as none.
   const imgOnly = !!i.img && !t && !i.att;
-  return '<div class="msg ' + i.role + (imgOnly ? " imgonly" : "") + (long ? " clip" : "") + (long && openNow ? " open" : "") + '"'
-    + (long ? ' onclick="onBubbleTap(this)"' : "")
+  // EVERY bubble takes the tap now, not just a long one: the tap copies, and "a tap does something
+  // here and nothing there" is the worse answer for a short message.
+  return '<div class="msg ' + i.role + (imgOnly ? " imgonly" : "") + (long ? " clip" : "") + (long && openNow ? " open" : "")
+    + (copyNow ? " copyon" : "") + '" onclick="onBubbleTap(event, this)"'
     + (i.uuid ? ' data-uuid="' + esc(i.uuid) + '"' : "") + ' data-key="' + esc(msgKey(i)) + '">' + inner +
-    (long ? '<div class="more">' + (i.ts ? esc(hhmm(i.ts)) + " · " : "") + "tap to expand</div>" : "") + "</div>";
+    (copyNow ? '<button class="chip copyb" onclick="copyMsg(event, this)">Copy</button>' : "") +
+    (long ? '<div class="more" onclick="onMoreTap(event, this)">' + (i.ts ? esc(hhmm(i.ts)) + " · " : "") + "tap to expand</div>" : "") + "</div>";
 }
 // One turn: prose through the same md() a reply gets, plus a one-line chip per tool group. The chip
 // carries only its coordinates — the calls stay in lastDrill, so the sheet reads live data.
@@ -3174,25 +3191,87 @@ $("dfeed").addEventListener("toggle", e => {
   const k = e.target.dataset.tk;
   if (k) e.target.open ? openTurns.add(k) : openTurns.delete(k);
 }, true);
+// A tap on the feed's own ground dismisses a standing copy pill. It runs AFTER the bubbles' inline
+// handlers (they are inside it), so a tap that just raised a pill is not this one.
+$("dfeed").addEventListener("click", e => {
+  if (copyFor && !e.target.closest(".msg")) { copyFor = null; paintFeed(); }
+});
 // Tapping a long bubble opens it; for a CLIPPED one that also fetches the rest. Both the open state and
 // the fetched text live OUTSIDE the DOM on purpose: paintFeed replaces innerHTML whenever the feed
 // changes, so a bubble holding either in its markup would collapse and lose its fetch on the next 3s
 // poll — which would read as a broken fetch rather than a broken render.
 const fullText = {};
-const openMsgs = new Set();
+// key -> the transcript's length when it was opened. The VALUE is what makes burial computable: an
+// opened message collapses itself once BURIED_ROWS rows have arrived SINCE the open, which a plain
+// "N rows from the newest" rule cannot express — that one re-collapses a message you just opened
+// deep in the scrollback, on the very next poll.
+const openMsgs = new Map();
+const BURIED_ROWS = 3;
+// The one bubble showing a copy pill, by msgKey. Outside the DOM for the same reason as the above.
+let copyFor = null;
 // A bubble's identity for the open state. The uuid when the transcript gave one; otherwise the row's
 // role and timestamp, which are as stable across repaints as the row itself.
 const msgKey = i => i.uuid || (i.role + ":" + (i.ts || 0));
 // uuids whose full text paintFeed fetched by itself, for the unfolded newest reply. Separate from
 // fullText because it must also remember the reads that FAILED — that is the whole point of it.
 const autoFull = new Set();
-function onBubbleTap(el) {
-  el.classList.toggle("open");
-  const open = el.classList.contains("open"), key = el.dataset.key, uuid = el.dataset.uuid;
-  if (key) open ? openMsgs.add(key) : openMsgs.delete(key);
+// A tap on a bubble's BODY offers to copy it — it never expands and never collapses (the owner,
+// 2026-08-07). Expanding is the fold bar's alone; collapsing is automatic (see paintFeed).
+function onBubbleTap(e, el) {
+  // Anything inside the bubble that is already a control keeps its own tap. md() renders no anchors
+  // today, so this is the guard for the day it does — and for any control a bubble grows.
+  if (e.target.closest("a, button")) return;
+  // The release of a long-press selection arrives here as a click. Raising a pill then would fight
+  // the selection the reader just made — which is itself a way of copying.
+  if (String(window.getSelection() || "")) return;
+  const key = el.dataset.key;
+  // An image-only bubble has nothing to copy: the renderer strips the CLI's "(photo)" placeholder
+  // before deciding `imgonly`, so the row's only text IS that placeholder — measured, the clipboard
+  // got the literal "(photo)". A captioned photo is not imgonly and keeps its pill. It still
+  // DISMISSES a standing pill: the tap landed somewhere that offers nothing, which is a dismissal.
+  copyFor = copyFor === key || el.classList.contains("imgonly") ? null : key;
+  paintFeed();
+}
+// The fold bar, and only the fold bar, expands. stopPropagation is what makes that true: without it
+// the tap continues to the bubble and raises the pill over the message it just opened.
+function onMoreTap(e, el) {
+  e.stopPropagation();
+  const wrap = el.closest(".msg"), key = wrap.dataset.key, uuid = wrap.dataset.uuid;
+  if (key) openMsgs.set(key, (lastDrill && lastDrill.items ? lastDrill.items.length : 0));
+  copyFor = null;
   // The FETCH needs a real uuid — a row without one is either optimistic or already whole, and there
   // is nothing on the server to ask for. The open state above does not care.
-  if (open && uuid) expandFull(uuid);
+  if (uuid) expandFull(uuid);
+  paintFeed();
+}
+// The row behind a key, for the copy. Read from the PAYLOAD rather than the DOM: a collapsed bubble's
+// text is cut by max-height, and a payload-clipped one never held the whole message at all.
+const itemByKey = key => ((lastDrill && lastDrill.items) || []).find(i => msgKey(i) === key);
+async function copyMsg(e, el) {
+  e.stopPropagation();
+  const wrap = el.closest(".msg"), key = wrap.dataset.key, uuid = wrap.dataset.uuid;
+  const it = itemByKey(key);
+  if (!it) return;
+  // A clipped row's payload text is the server's clamp; the whole message only exists behind
+  // /api/session/message. Copying the clamp would be a silent truncation, which is the one failure
+  // a copy button must not have.
+  if (it.clipped && uuid && !fullText[uuid]) await expandFull(uuid);
+  const text = (uuid && fullText[uuid]) || it.text || "";
+  copyFor = null;
+  paintFeed();
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) await navigator.clipboard.writeText(text);
+    else throw new Error("no clipboard");
+  } catch {
+    // Older WebViews (and any context that refuses the async API) still take the selection route.
+    const ta = document.createElement("textarea");
+    ta.value = text; ta.setAttribute("readonly", ""); ta.style.cssText = "position:fixed;top:-1000px;opacity:0";
+    document.body.appendChild(ta); ta.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch {}
+    ta.remove();
+    if (!ok) showErr("Copy unavailable here");
+  }
 }
 // The clamp is a poll-cost measure, so the one unbounded read happens here, on a deliberate tap.
 async function expandFull(uuid) {
@@ -3306,6 +3385,23 @@ function paintFeed() {
   if (last && last.clipped && last.uuid && !autoFull.has(last.uuid)) {
     autoFull.add(last.uuid);
     expandFull(last.uuid);
+  }
+  // Burial: an opened message collapses itself once BURIED_ROWS rows have arrived since the open —
+  // there is no manual collapse any more. Read BEFORE the innerHTML swap below, so the rects are of
+  // the paint the reader is actually looking at. The guard is the whole rule's other half: a bubble
+  // still on screen is never collapsed under the eye reading it, however much has landed under it.
+  if (openMsgs.size) {
+    const fr = feed.getBoundingClientRect();
+    // Matched by dataset rather than an attribute selector — a key is a uuid or `role:ts`, and one
+    // of those carries a colon.
+    const painted = [...feed.querySelectorAll(".msg[data-key]")];
+    for (const [k, at] of [...openMsgs]) {
+      if (items.length - at < BURIED_ROWS) continue;
+      const el = painted.find(e => e.dataset.key === k);
+      const r = el && el.getBoundingClientRect();
+      if (r && r.bottom > fr.top && r.top < fr.bottom) continue;
+      openMsgs.delete(k);
+    }
   }
   const rows = items.map(bubble)
     .concat(optimistic.map(o => '<div class="msg user' + (o.state === "pending" ? " pending" : "") + '">' + esc(o.text)
