@@ -383,23 +383,61 @@ export function isBusAnchored(raw: unknown): boolean {
   return typeof raw === 'string' && BUS_ANCHOR.test(raw.trim())
 }
 
-export function finalRepliesAfter(file: string, afterUuid: string): { uuid: string; text: string; busAnchored: boolean }[] {
+// Claude Code's own re-prompt when a model response carries no text block at all: the CLI writes
+// this meta user entry and runs the model AGAIN, so a turn cannot end silently. Verified in the
+// claude 2.1.224 binary (telemetry `query_thinking_only_response`) — it fires on stop_reason
+// end_turn/stop_sequence with no non-empty text in that response, once per turn, and the only way
+// out is an env-named tool allowlist (`CLAUDE_CODE_TERMINAL_MCP_TOOLS`) that keys off which tool ran
+// last, not off what woke the turn. It is the CLI's string and there is no setting that turns it off.
+//
+// A bus-woken turn is INSTRUCTED to end that way — an ack, a bus-digest, a nudge already discharged
+// with `tg answer` all reach their reader over the bus, so the lane's final text block would be a
+// Telegram message to the owner about a conversation he is not in (off-mcp/chat-account/CLAUDE.md).
+// Three of them reached his chat on 2026-08-07: "(nothing to send — ack noted, memory updated)" and
+// two like it. We cannot stop the CLI asking, so we refuse to RELAY what it forced.
+//
+// Scoped to bus-anchored turns on purpose, and the two halves of that are separate promises:
+// an OWNER-anchored turn re-prompted this way keeps today's behaviour exactly — a reply he is
+// waiting on that we swallow is far worse than a line of noise he can see. And silence stays
+// PERMITTED rather than forced: the nudge only exists because the turn produced no text, so a bus
+// turn that composes a reply of its own has no nudge in front of it and delivers unchanged.
+const THINKING_ONLY_NUDGE = /^\[Your previous response had no visible output\b/
+function isThinkingOnlyNudge(e: Entry): boolean {
+  return e.type === 'user' && !e.isSidechain && e.isMeta === true && THINKING_ONLY_NUDGE.test(textOf(e.message?.content).trim())
+}
+
+type FinalReply = { uuid: string; text: string; busAnchored: boolean }
+
+export function finalRepliesAfter(file: string, afterUuid: string): FinalReply[] {
   const entries = readEntries(file)
   const at = afterUuid ? entries.findIndex(e => e.uuid === afterUuid) : -1
-  if (afterUuid && at < 0) { const latest = latestFinalReply(file); return latest ? [{ ...latest, busAnchored: latestBusAnchored(entries) }] : [] }
+  // Lost cursor (compaction/rotation): scan from the top and keep only the last turn's conclusion,
+  // so a lost cursor never dumps the whole backlog. It runs the SAME scan rather than reading the
+  // tail its own way — a second reader of this transcript is a second place the nudge can escape.
+  if (afterUuid && at < 0) return scanFinalReplies(entries, -1).slice(-1)
+  return scanFinalReplies(entries, at)
+}
 
-  const out: { uuid: string; text: string; busAnchored: boolean }[] = []
-  let pending: { uuid: string; text: string; busAnchored: boolean } | null = null
+function scanFinalReplies(entries: Entry[], at: number): FinalReply[] {
+  const out: FinalReply[] = []
+  let pending: FinalReply | null = null
   const flush = () => { if (pending) { out.push(pending); pending = null } }
   // The anchor carried forward from the last real user entry SEEN IN THIS SCAN. Starting from the
   // cursor means the first turn's own anchor may sit before it, so seed from the entries behind us
   // rather than defaulting — a reply replayed after a restart would otherwise be classed human and
   // ping for a bus conversation, which is the exact noise this exists to stop.
   let anchorIsBus = latestBusAnchored(entries.slice(0, at + 1))
+  let nudged = false
   for (let i = at + 1; i < entries.length; i++) {
     const e = entries[i]
-    if (isRealUserText(e)) { flush(); anchorIsBus = isBusAnchored(e.message?.content); continue }  // turn boundary (real prompts only — not injected skill/meta entries)
-    if (isMainAssistantText(e)) { const text = lastTextOf(e.message?.content).trim(); if (!isCommandNoise(text)) pending = { uuid: e.uuid ?? '', text: legibleApiError(text), busAnchored: anchorIsBus } }
+    if (isRealUserText(e)) { flush(); anchorIsBus = isBusAnchored(e.message?.content); nudged = false; continue }  // turn boundary (real prompts only — not injected skill/meta entries)
+    if (isThinkingOnlyNudge(e)) { nudged = true; continue }
+    if (isMainAssistantText(e)) {
+      const text = lastTextOf(e.message?.content).trim()
+      if (isCommandNoise(text)) continue
+      if (anchorIsBus && nudged) continue  // the CLI forced this out of a turn that was told to stay silent
+      pending = { uuid: e.uuid ?? '', text: legibleApiError(text), busAnchored: anchorIsBus }
+    }
   }
   flush()
   return out
