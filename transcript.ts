@@ -378,9 +378,18 @@ export function latestModelId(file: string): string | null {
 // Anything unrecognised counts as HUMAN. This gates whether a reply pings the owner's phone, and the
 // failure directions are not symmetric — a missed ping is a message he never learns about, an extra
 // one is noise he can see.
+// A bus delivery may carry an ambient catch-up block PREPENDED to the envelope — `block = dig +
+// "\n" + askBlock` (daemon.ts) — and ONLY a bus delivery ever does: an inbound human message is
+// wrapped `<tg 42>…`, which cannot match this. Measured live on 2026-08-07: an ack that arrived
+// behind a `<tg bus-digest since 4m ago>` block classed HUMAN, because the envelope no longer sat
+// within the three leading characters BUS_ANCHOR allows. That turn therefore both pinged the owner
+// and escaped the nudge suppression below — and a digest-prefixed wake is one of the three kinds
+// this is supposed to cover. Strip the block before the test rather than loosening BUS_ANCHOR
+// itself, which must stay anchored to the start of the string.
+const BUS_DIGEST_PREFIX = /^<tg\s+bus-digest\b[\s\S]*?<\/tg>\s*/
 const BUS_ANCHOR = /^[\s\S]{0,3}?<tg\s+@[\w.-]+\s+(?:ask|ack|re)=/
 export function isBusAnchored(raw: unknown): boolean {
-  return typeof raw === 'string' && BUS_ANCHOR.test(raw.trim())
+  return typeof raw === 'string' && BUS_ANCHOR.test(raw.trim().replace(BUS_DIGEST_PREFIX, ''))
 }
 
 // Claude Code's own re-prompt when a model response carries no text block at all: the CLI writes

@@ -126,6 +126,27 @@ test('a lost cursor does not resurrect the forced text', () => {
   expect(finalRepliesAfter(nudgedFixture('<tg @weather ack=91>compact scheduled</tg>'), 'gone-uuid')).toEqual([])
 })
 
+// ---- The digest-prefixed wake -----------------------------------------------------------------
+// FOUND LIVE, not reasoned: the first real bus ack sent at this fix arrived behind a catch-up block
+// and classed HUMAN, so the turn it woke both pinged the owner and sat outside the suppression above.
+// The digest is prepended only on the bus delivery path; an inbound human message is wrapped
+// `<tg 42>…` and can never carry one.
+const DIGEST = '<tg bus-digest since 4m ago>\n✓ lanefix→chat #666: fixed and deployed\n</tg>\n'
+
+test('a digest-prefixed envelope is still a BUS anchor', () => {
+  expect(isBusAnchored(DIGEST + '<tg @lanefix ack=671>live-check ack</tg>')).toBe(true)
+  expect(isBusAnchored(DIGEST + '<tg @lanefix ask=12>do the thing</tg>')).toBe(true)
+  // …and stripping the block must not turn a human message into a bus one. It cannot carry a digest
+  // in the first place, so the only thing to pin is that the envelope test still runs after the strip.
+  expect(isBusAnchored(DIGEST + '<tg 42>did the deploy land?</tg>')).toBe(false)
+  expect(isBusAnchored('<tg 42>did the deploy land?</tg>')).toBe(false)
+})
+
+test('a digest-prefixed turn forced to speak by the CLI also delivers nothing', () => {
+  // The live failure, end to end: this is the exact anchor shape read off the chat lane's transcript.
+  expect(finalRepliesAfter(nudgedFixture(DIGEST + '<tg @lanefix ack=671>live-check ack</tg>'), '')).toEqual([])
+})
+
 // ---- The aside (`tg btw`) and the anchor ---------------------------------------------------------
 // AN ASIDE IS DELIBERATELY *NOT* A BUS ANCHOR, and this is the one decision in that feature that a
 // reasonable person would get backwards. `<tg @name btw>` looks exactly like the blocks above and the
