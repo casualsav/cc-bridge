@@ -106,6 +106,7 @@ import { initMirror, updateTerminalMirror, respawnTerminalMirror, abandonMirror,
 import { parseStatusline, modelDisplayName, type StatuslineData } from './statusline.ts'
 import { turnParts, capChips } from './turn-summary.ts'
 import { planEffortApply, effortSuffix, driveEffortChange, type EffortOutcome } from './effort-plan.ts'
+import { decideFallbackTranscript } from './transcript-owner.ts'
 import { normalizeKeys, planKeyInjection, planKeyRate, KEY_NAMES } from './keys-plan.ts'
 import {
   STATIC, initAccess, loadAccess, saveAccess, gate, dmCommandGate, isMentioned,
@@ -1520,7 +1521,12 @@ async function rememberPaneAgentTranscript(pane: string, path: string): Promise<
     catch (error) { process.stderr.write(`daemon: could not persist harness for ${conversation}: ${error instanceof Error ? error.message : String(error)}\n`) }
   }
 }
-async function transcriptForPane(pane: string | null, cwd: string | null): Promise<string | null> {
+// `requireOwned` is the drill-in's ask: serve a file only when it is this session's OWN — the pane's
+// stamped file, or a fallback whose conversation id matches the session's recorded one. A session
+// that has not spoken yet matches neither and gets nothing, which renders as an empty transcript,
+// which is the truth. Every other caller keeps the old permissive resolution (an unstamped pre-hook
+// pane in a one-session folder still has to find its conversation).
+async function transcriptForPane(pane: string | null, cwd: string | null, requireOwned = false): Promise<string | null> {
   if (pane) {
     const hit = paneTranscriptCache.get(pane)
     let path: string | null
@@ -1557,18 +1563,25 @@ async function transcriptForPane(pane: string | null, cwd: string | null): Promi
   // Ownership guard for the same hole with DEAD siblings: newest-in-project-dir has no notion of
   // which session wrote the file, so when two sessions share a cwd (e.g. a headless 'general'
   // agent and a DM lane both in $HOME) a pane could adopt the other's transcript once its pane
-  // died — and relay a foreign conversation into this pane's chat, unlabelled. If the file's
-  // conversation id is registered to a DIFFERENT session, this pane gets nothing.
+  // died — and relay a foreign conversation into this pane's chat, unlabelled. Two answers now, and
+  // transcript-owner.ts holds both: whether this file may be READ (the claimant test as before,
+  // plus POSITIVE ownership for a surface that asks for it), and whether the guess may be WRITTEN
+  // DOWN — which it may not, ever. The old code recorded it, so one wrong guess became the session's
+  // permanent identity: the guard could never fire for it again and `tg reopen` would resume the
+  // dead conversation.
   const owner = agentSessionId(fb)
-  if (owner) {
-    const sid = pane ? await sessionForPane(pane, false).catch(() => null) : null
-    const claimant = listTopics().find(t => t.agentSessionId === owner && t.sessionId !== sid)
-    if (claimant) {
-      process.stderr.write(`daemon: transcript ${basename(fb)} belongs to session ${claimant.sessionId} (${claimant.name}) — not relaying it for pane ${pane ?? '-'}\n`)
-      return null
-    }
+  const sid = pane ? await sessionForPane(pane, false).catch(() => null) : null
+  const claimant = owner ? listTopics().find(t => t.agentSessionId === owner && t.sessionId !== sid) : undefined
+  const d = decideFallbackTranscript({
+    file: fb, fileConversationId: owner,
+    sessionRecordedId: (sid ? getTopicBySession(sid)?.agentSessionId : null) ?? null,
+    claimantSessionId: claimant?.sessionId ?? null, claimantName: claimant?.name ?? null,
+    requireOwned,
+  })
+  if (!d.use) {
+    if (claimant) process.stderr.write(`daemon: transcript ${basename(fb)} belongs to session ${claimant.sessionId} (${claimant.name}) — not relaying it for pane ${pane ?? '-'}\n`)
+    return null
   }
-  if (pane) await rememberPaneAgentTranscript(pane, fb)
   return fb
 }
 
@@ -18897,7 +18910,11 @@ async function webappSessionSource(sid: string): Promise<{ row: { sid: string; n
   const pane = await paneForSession(sid).catch(() => null)
   if (!pane) return null
   const cwd = row.cwd || (await paneCwd(pane).catch(() => null))
-  return { row, pane, cwd, file: await transcriptForPane(pane, cwd) }
+  // requireOwned: the drill-in renders these rows AS THIS SESSION'S conversation, so a guess is not
+  // good enough here. A session that has not spoken yet has no file of its own — Claude Code writes
+  // the JSONL at the first turn — and the folder's newest .jsonl belongs to whoever was here before.
+  // Empty is the true state, and it is what the client already renders ("No conversation yet.").
+  return { row, pane, cwd, file: await transcriptForPane(pane, cwd, true) }
 }
 // Full text of one feed row, for expanding a clipped bubble. Reads the transcript directly — the
 // payload clamp is a poll-cost measure, never a limit on what may be read.
