@@ -500,6 +500,65 @@ describe('a subagent report is not the owner talking', () => {
     expect(recentConversation(f, 5).length).toBe(2)
   })
 
+  // ---- …AND ONE OF THEM IS NOT FOR A HUMAN AT ALL -----------------------------------------------
+  //
+  // `run_in_background` Bash finishes through the same block, and its notification is the harness
+  // waking the MODEL: the output file is ready. The owner's @weather feed filled with cards quoting
+  // the sleep-loop timers that session uses as measurement windows, which read as the session
+  // talking gibberish rather than working. Bodies below are the real shape from his transcripts.
+  const BG = (summary: string) => `<task-notification>
+<task-id>b3692uiq0</task-id>
+<tool-use-id>toolu_018fqexd16GN2KbeEHwUynuG</tool-use-id>
+<output-file>/tmp/claude-1001/-home-ubuntu-projects-weather/3a14327d/tasks/b3692uiq0.output</output-file>
+<status>completed</status>
+<summary>${summary}</summary>
+</task-notification>`
+  const TIMER = BG('Background command "cd /home/ubuntu/projects/weather; until grep -q DONE3 /tmp/x 2&gt;/dev/null; do sleep 300; done; echo ready" completed (exit code 0)')
+
+  test('a background-command notice renders nothing, on either path', () => {
+    expect(recentConversation(fixture([user(TIMER, 'u1')]), 5)).toEqual([])
+    expect(recentConversation(fixture([qNote(TIMER, '2026-08-08T00:17:36.583Z')]), 5)).toEqual([])
+  })
+
+  // Failures go too: the model is told, and it says so in its own words if it matters. A card that
+  // quotes the shell line is the same noise whatever the exit code was.
+  test('a FAILED background command is dropped the same way', () => {
+    const failed = BG('Background command "bun test" failed (exit code 1)').replace('<status>completed', '<status>failed')
+    expect(recentConversation(fixture([user(failed, 'u1')]), 5)).toEqual([])
+  })
+
+  // The rest of the class, enumerated from the same census — the Monitor tool's three sentences and
+  // the resume-time orphan scan. Same block, same absent <result>, same audience (the model), so
+  // they go through the same one predicate rather than growing a second path.
+  test.each([
+    'Monitor event: "background sleep job finishing"',
+    'Monitor "Wait for first rows to land in market_history.db" stream ended',
+    'Monitor "Seed 508 compose build outcome" stopped',
+    '2 background shell command task(s) from the previous session have no completion record. They have been marked stopped.',
+  ])('harness notice dropped: %s', summary => {
+    expect(recentConversation(fixture([user(BG(summary), 'u1')]), 5)).toEqual([])
+  })
+
+  // The half of the match that keeps it narrow. A subagent report ALWAYS carries a <result> (495
+  // notifications censused over 400 transcripts on this box: every agent one had it, every
+  // background-command one did not), so a report is safe even if its text opens with the sentence.
+  test('an agent report is untouched — including one whose own words start that way', () => {
+    const quoting = NOTIFICATION.replace('## Conclusion', 'Background command "x" completed (exit code 0) — here is why')
+    const [it] = recentConversation(fixture([user(quoting, 'u1')]), 5)
+    expect(it.role).toBe('agent')
+    expect(it.text.startsWith('Background command')).toBe(true)
+  })
+
+  // …and the drop never reaches the model's OWN prose, which is the thing that must keep relaying.
+  // An assistant entry is not a machine block and never enters this classifier at all.
+  test('a session that talks about its background command still speaks', () => {
+    const f = fixture([user('<tg 1>status?</tg>', 'u1'),
+      { type: 'assistant', uuid: 'a1', message: { content: [{ type: 'text', text: 'Background command "sleep 300" completed (exit code 0) — window closed, results below.' }] } }])
+    const rows = recentConversation(f, 5)
+    expect(rows.map(r => r.role)).toEqual(['user', 'assistant'])
+    expect(rows[1].text.startsWith('Background command')).toBe(true)
+  })
+
   // FAIL OPEN TO VISIBLE. A block shape this file has never seen renders as whatever it is — ugly,
   // and the only evidence anyone will ever get that a new injected type exists. Swallowing it
   // silently would make the next one of these invisible instead of merely unpleasant.

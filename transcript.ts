@@ -566,8 +566,38 @@ const unescapeXml = (s: string) => s.replace(/&(amp|lt|gt|quot|apos|#39);/g, (_,
 // the agent's actual report in <result>. Only the last two are for a human. The ids and the
 // output-file path are dropped rather than folded away — they are two opaque tokens and a /tmp path
 // nothing on a phone can act on.
-function taskNotificationItem(raw: string, ts: number, uuid?: string): ConversationItem {
+//
+// …but the Task tool is not the only thing that finishes through this block, and the others are
+// addressed to the MODEL, not to a human: `run_in_background` Bash and the Monitor tool both notify
+// this way, and the notice is nothing but the wake-up saying the output file is ready. A session
+// that uses sleep-loop background commands as wall-clock timers emits one per window, and the
+// owner's @weather feed filled with cards quoting `until grep -q DONE3 …; do sleep 300; done` —
+// which reads as the session talking gibberish rather than working, to the point that he doubted it
+// was running at all.
+//
+// DROPPED, not collapsed. This feed has no low-value lane to collapse into (its four voices are
+// user / session / agent / command, and each is something someone said), and a row reading "a timer
+// fired" would not earn its line either. What such an event actually MEANT is in the model's own
+// prose two rows down, which still relays untouched.
+const HARNESS_NOTICE = [
+  /^Background command "/,               // run_in_background Bash: completed / failed / was stopped
+  /^Monitor "/, /^Monitor event: "/,     // the Monitor tool: an event fired, the stream ended, stopped
+  /^\d+ background shell command task\(s\) from the previous session/,  // resume-time orphan scan
+]
+function taskNotificationItem(raw: string, ts: number, uuid?: string): ConversationItem | null {
   const summary = unescapeXml(tagOf(raw, 'summary').trim())
+  // BOTH halves required, so nothing that merely reads like this can be caught. Reaching here is
+  // already structural — only machineBlockItem calls this, and only for an entry whose whole body IS
+  // a <task-notification> block, which the harness alone writes; model prose can never be one. On
+  // top of that the notification must carry no <result> and its summary must be one of the CLI's own
+  // sentences above. Censused over the last 600 transcripts on this box (~500 notifications): every
+  // `Agent "…" finished` carried a <result> and every notice above carried none — but the enumerated
+  // prefixes stay, because "no result" alone would silently swallow the first agent report that
+  // arrives without one, and losing a subagent's work is far worse than one ugly card.
+  //
+  // The failures and the stops go with the successes: an exit code the harness reports to the model
+  // is not news to a human either, and the model says so in its own words when it matters.
+  if (!raw.includes('<result>') && HARNESS_NOTICE.some(re => re.test(summary))) return null
   // Normalized for the same reason a slash command's output is: an agent that pastes terminal
   // output into its report pastes the escape codes with it, and the card renders the report as a
   // markdown document — so bold becomes bold and a pasted tree or grid keeps its columns. Rare (3
