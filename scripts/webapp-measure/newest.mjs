@@ -7,11 +7,15 @@ import { fileURLToPath } from "node:url";
 //
 // Four claims, and the last two are the ones that make the first useful rather than merely true:
 //   1. the last assistant message renders at its full height with no fold bar, however long it is;
-//   2. every OLDER long message still folds at 268px, and a user bubble folds even when it is newest
-//      (the owner scoped this to the session's own replies — you know what you wrote). His own
-//      message landing under a reply does NOT fold it, and neither does the activity of the turn that
-//      follows — 2026-07-29: "it should stay expanded until your next final message, not right away
-//      when I message or while you're working". The next REPLY is what folds it.
+//   2. every BURIED long message still folds at 268px. His own message landing under a reply does NOT
+//      fold it, and neither does the activity of the turn that follows — 2026-07-29: "it should stay
+//      expanded until your next final message, not right away when I message or while you're
+//      working". The next REPLY is what folds it.
+//      "a user bubble folds even when it is newest" was one of these claims until 2026-08-08, when the
+//      owner reversed it: the message you just sent rides open until it is BURIED. This file keeps
+//      only the consequence it needs — the scrollback here is built to bury its own last user row, so
+//      "every older long message folds" stays a claim about age and not about role — and the
+//      exemption itself belongs to `userfold.mjs`, which owns the boundary.
 //   2c. a message OPENED BY HAND stays open across the 3s repaint — including one the transcript
 //      wrote with no uuid, which had no key at all and so lost the tap on the next poll (the owner:
 //      "when I expand a message manually, it re-collapses after 3 seconds");
@@ -24,9 +28,17 @@ import { fileURLToPath } from "node:url";
 //
 //   node newest.mjs [page] [outdir]
 //
-// Pre-change control: node newest.mjs /path/to/old.html — the SEVEN claim checks must fail there,
-// while the fixture precondition and the two no-regression checks (an older message and a user
-// bubble still fold) pass on both pages. That is how this was written.
+// Pre-change control: node newest.mjs /path/to/old.html — the claim checks must fail there, while the
+// fixture precondition and the no-regression check (a buried long message still folds) pass on both
+// pages. That is how this was written, with SEVEN claims and TWO no-regression checks.
+// Since 2026-08-08 the count is EIGHT and ONE: the user bubble crossed from one half to the other
+// when the owner reversed its fold, so it is now a claim rather than a thing this change must not
+// disturb. Measured against the page that shipped immediately before that reversal — which already
+// carries every other claim in this file — exactly ONE of the twenty checks fails there, and it is
+// that one.
+// §2c's instrument was repaired the same day: it drove the hand-open through `onBubbleTap(r)`, the
+// handler's pre-2026-08-07 shape, and had been ABORTING the process on the TypeError since — so
+// §3 and §4 were silently not running at all. It opens through the fold bar now, like the app does.
 
 const REPO = fileURLToPath(new URL("../..", import.meta.url)).replace(/\/$/, "");
 const PAGE = process.argv[2] || join(REPO, "webapp", "index.html");
@@ -45,6 +57,12 @@ const history = [
   { role: "user", text: "short one", ts },
   { role: "assistant", text: "Short reply.", ts },
   ...Array.from({ length: 4 }, (_, i) => ({ role: i % 2 ? "assistant" : "user", text: long(i + 1), ts })),
+  // The scrollback has to BURY its own last user row (2026-08-08: the newest user message is exempt
+  // from the fold until BURIED_ROWS rows have landed on it). Without this row the fixture's own
+  // `long(3)` sat two rows from the end in state 1 and rendered unfolded, which is the exemption
+  // working correctly and would have read here as "an older message stopped folding". Short, so it
+  // is not one of the four long rows the count below asserts.
+  { role: "assistant", text: "Noted.", ts },
 ];
 
 let bad = 0;
@@ -108,7 +126,9 @@ const older = m.rows.slice(0, -1).filter(r => r.chars > 400);
 check(older.length === 4, `the fixture carries ${older.length} older long messages behind the newest (4)`);
 check(!last.clip && !last.more, `the newest reply is not folded (class "${last.cls}", fold bar ${last.more})`);
 check(last.h > CLIP_MAX + 20, `…and renders at its own height, ${last.h.toFixed(1)}px, past the ${CLIP_MAX}px fold`);
-check(older.every(r => r.clip && Math.abs(r.h - CLIP_MAX) <= 1), `every older long message still folds at ${CLIP_MAX}px (${older.map(r => r.h.toFixed(0)).join(", ")})`);
+// "Older" here means BURIED — the fixture's scrollback carries its own trailing row for that (see
+// history), so every one of these four is past the exemption at both ends of the conversation.
+check(older.every(r => r.clip && Math.abs(r.h - CLIP_MAX) <= 1), `every buried long message still folds at ${CLIP_MAX}px (${older.map(r => r.h.toFixed(0)).join(", ")})`);
 
 // ---- 2b: what lands under it, and which of those folds it -------------------------------------
 // His own message: the answer he is reading must not fold because he replied to it.
@@ -116,7 +136,11 @@ await state([...history, { role: "assistant", text: long(9), ts }, { role: "user
 m = await read();
 await p.screenshot({ path: join(OUT, "buried.png") });
 const [replyUnderUser, newestUser] = m.rows.slice(-2);
-check(newestUser.clip && Math.abs(newestUser.h - CLIP_MAX) <= 1, `a long USER message folds even as the newest row (${newestUser.h.toFixed(1)}px)`);
+// Reversed 2026-08-08: the newest user row is exempt too, and rides open until it is buried. Asserted
+// here rather than dropped because this state — your message under an open reply, both unfolded — is
+// what every turn now ends on, and the check below is about the REPLY not folding while it stands.
+// The boundary (one row, two rows, three) is userfold.mjs's.
+check(!newestUser.clip && newestUser.h > CLIP_MAX + 20, `a long USER message rides OPEN as the newest row (${newestUser.h.toFixed(1)}px)`);
 check(!replyUnderUser.clip && replyUnderUser.h > CLIP_MAX + 20, `…and it does NOT fold the reply above it (${replyUnderUser.h.toFixed(1)}px)`);
 // The turn that follows: narration and tool rows are the session WORKING, not a new answer.
 await state([...history, { role: "assistant", text: long(9), ts }, { role: "user", text: "go on", ts },
@@ -136,11 +160,24 @@ check(!nextReply.clip && nextReply.h > CLIP_MAX + 20, `…and that one is now th
 // ---- 2c: a hand-opened message survives the repaint, with a uuid and without one ---------------
 // The tap sets a class; the poll rebuilds the feed's innerHTML from the payload. Anything the open
 // state is keyed by has to exist for EVERY bubble, or the repaint quietly throws the tap away.
+//
+// Opened through the FOLD BAR, which is the only thing that opens one since the owner's 2026-08-07
+// ruling (a tap on the body copies; nothing collapses by hand). This used to call `onBubbleTap(r)`
+// with the row as its first argument, which was the handler's old shape and threw on the current
+// page — the instrument, not the app. Clicking `.more` drives the page's own inline handler and so
+// cannot go stale that way again.
 await state([...history, { role: "assistant", text: long(9), ts }]);
 const opened = await p.evaluate(() => {
-  const rows = [...document.querySelectorAll("#dfeed .msg.clip")];
-  rows.forEach(r => onBubbleTap(r));
-  return rows.map(r => ({ key: r.dataset.key || null, uuid: r.dataset.uuid || null, open: r.classList.contains("open") }));
+  // Re-queried every pass: onMoreTap repaints the feed, so every node from the previous pass is
+  // already detached. An opened row keeps `.clip` and gains `.open`, which is what makes
+  // `:not(.open)` the list of rows still to tap.
+  for (let i = document.querySelectorAll("#dfeed .msg.clip").length; i > 0; i--) {
+    const more = document.querySelector("#dfeed .msg.clip:not(.open) .more");
+    if (!more) break;
+    more.click();
+  }
+  return [...document.querySelectorAll("#dfeed .msg.clip")]
+    .map(r => ({ key: r.dataset.key || null, uuid: r.dataset.uuid || null, open: r.classList.contains("open") }));
 });
 check(opened.length >= 2 && opened.every(o => o.open), `the fixture opens ${opened.length} folded messages by hand`);
 check(opened.every(o => o.key), `every bubble carries an open-state key (${opened.filter(o => !o.key).length} without one)`);

@@ -128,6 +128,11 @@ export interface SessionCard {
   // resting green dot. Optional so an older daemon's payload still renders.
   chat?: boolean
   alive: boolean; working: boolean; subagents: number; task: string | null
+  // The pane's own working line, same shape and same parser as SessionFeed.status below. Present ONLY
+  // while the session is working, and absent when the poll missed the line — so it is optional twice
+  // over, and an older daemon's payload simply keeps the task line it always had. The card renders it
+  // INSTEAD of `task`: what a session is doing right now outranks the last thing it said.
+  status?: { verb: string; elapsed: string | null; tokens: string | null }
   state: 'working' | 'errored' | 'waiting' | 'unreported' | 'idle'
   // Two nullable fields rather than one shared "detail", because each means exactly one thing: `wait`
   // is populated only while waiting, `unreported` only while unreported. A single overloaded field

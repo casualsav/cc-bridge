@@ -18838,12 +18838,18 @@ async function webappSessionCard(row: { sid: string; name: string; cwd: string; 
   } catch {}
   // Outside the try on purpose: a session with no readable transcript still has a pane, and a pane
   // that reads working must render working. Only the transcript-fed signals go quiet without a file.
+  // The CLI's own working line ("Hyperspacing… · 1m 55s"), off the capture this card already took —
+  // the same parser and the same shape the drill-in feed carries, so the two surfaces cannot describe
+  // one turn differently. WORKING sessions only: a pane at a prompt has no current verb, and a
+  // spinner line still sitting in its scrollback would name a turn that ended minutes ago.
+  const status = working ? parseWorkingStatus(cap) : null
   const panePid = ctx?.panePids.get(pane)
   const read = readSessionState(row.sid, tfile, working, panePid, ctx)
   const marker = read.marker
   ;({ state, wait } = read)
   return {
     sid: row.sid, name: row.name, cwd, agent: row.agent, chat, alive: true, working, subagents, task, state, wait,
+    ...(status ? { status } : {}),
     unreported: state === 'unreported' && marker ? { briefer: marker.briefer } : null,
     errorStatus: read.errorStatus,
     // The mode is LATCHED (mode-latch.ts), not read raw: the footer slot the indicator lives in is

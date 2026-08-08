@@ -184,8 +184,14 @@ check(!afterClear.some(t => t.startsWith("/clear")), `/clear paints no blue bubb
 // shows, with no leftover optimistic bubble standing in it.
 await p.evaluate(() => { window.__feed = { ...window.__feed, items: [] }; renderDrill(); });
 await p.waitForTimeout(600);
-const cleared = await p.evaluate(() => document.getElementById("dfeed").textContent.trim());
-check(cleared === "No conversation yet.", `a cleared session shows the new-session empty state (got ${JSON.stringify(cleared.slice(0, 60))})`);
+// Since 2026-08-08 that empty state is the Claude Code glyph, not "No conversation yet." (the
+// owner) — so what is read is the mark and the ABSENCE of any row, rather than a sentence.
+// emptyglyph.mjs owns the glyph's own geometry; this stays a check that /clear lands there.
+const cleared = await p.evaluate(() => {
+  const feed = document.getElementById("dfeed");
+  return { glyph: !!feed.querySelector(".emptyglyph svg"), rows: feed.querySelectorAll(".msg").length, text: feed.textContent.trim() };
+});
+check(cleared.glyph && cleared.rows === 0, `a cleared session shows the new-session empty state (got ${JSON.stringify(cleared)})`);
 await shot("4-after-clear");
 await p.evaluate(items => { window.__feed = { ...window.__feed, items }; renderDrill(); }, CHAT);
 await p.waitForTimeout(500);

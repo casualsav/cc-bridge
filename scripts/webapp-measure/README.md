@@ -234,6 +234,33 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   lands on its FIRST line rather than its last — in fullscreen
                                   #   too, where the scrim and the feed's padding swap over. Same
                                   #   page-path control: 7 checks fail pre-change
+    node userfold.mjs [page]      # THE MESSAGE YOU JUST SENT rides open until it is BURIED (the owner,
+                                  #   2026-08-08), reversing "a user bubble keeps its fold whatever its
+                                  #   position". The boundary is the claim, so it is measured at one,
+                                  #   two and three rows landing on top — "it eventually folds" is true
+                                  #   of a page with no exemption at all. Plus: a newer message of
+                                  #   yours takes the exemption with it, and a payload-CLIPPED exempt
+                                  #   row fetches its own rest untapped, which is the fold and the
+                                  #   auto-fetch reading ONE predicate (they disagreeing is a row shown
+                                  #   unfolded and cut at 4000 chars with no tap left). Guards, passing
+                                  #   on both pages: the last-reply exemption, and a buried long user
+                                  #   message still folding. Pinned control (22cf65b): 8/8 state checks
+                                  #   fail there, 4 guards hold
+    node emptyglyph.mjs [page]    # AN EMPTY CONVERSATION shows the Claude Code glyph (the owner,
+                                  #   2026-08-08) where "No conversation yet." was: the mark AND the
+                                  #   absent sentence, since a page rendering both would pass either
+                                  #   alone. Its 66% is measured against the FEED's content width — a
+                                  #   percentage declared against an inset box is a different number no
+                                  #   computed-style check can tell apart — and its top is compared to
+                                  #   the notice's own first line box, read off the control page in the
+                                  #   same run rather than written down as a constant. The exit is a
+                                  #   CLONE (the original dies in paintFeed's innerHTML swap), so the
+                                  #   clone is caught by a MutationObserver rather than by racing a
+                                  #   250ms transition, and asserted gone afterwards; reduced motion
+                                  #   raises none. Guards: a feed with rows shows no glyph, and the
+                                  #   list's own "No live sessions." notice is untouched — `.notice` is
+                                  #   shared vocabulary. Pinned control (22cf65b): 7/7 state checks fail
+                                  #   there, 2 guards hold
     node sessions.mjs [page] [out] # the Sessions page: the reference's card geometry (radius, padding,
                                   #   the icon tile, the type step) and the new-session PILL that
                                   #   floats over the list. The geometry half fails wholesale on a

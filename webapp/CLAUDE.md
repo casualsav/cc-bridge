@@ -166,11 +166,19 @@ give it.
 - **The LAST REPLY is exempt from the fold, and stays exempt until the NEXT reply.** Not until the
   next ROW — the owner, 2026-07-29: "it should stay expanded until your next final message, not right
   away when I message or while you're working". So his own message and the whole turn that follows
-  land under an open answer. `assistant` only, and read from the PAYLOAD, never the DOM (an
+  land under an open answer. Read from the PAYLOAD, never the DOM (an
   optimistic bubble paints after it). `lastReplyIndex()` is that definition, used by the fold and by
   the auto-fetch alike — those two disagreeing is a message rendered unfolded, clipped at 4000 chars,
   with no tap left to read the rest. `paintFeed` fetches a payload-clipped last reply's rest itself —
   once per uuid, never retried (`api()` toasts its own failures and a poll would raise one every 3s).
+- **The NEWEST USER MESSAGE is the second exempt row** (the owner, 2026-08-08, reversing "a user
+  bubble keeps its fold whatever its position — you wrote it"): the optimistic bubble paints
+  unfolded, so the echo folding it a second later read as the app closing his message under his
+  thumb. `newestUserExempt` — the LAST user row, until `BURIED_ROWS` rows land after it (the same
+  burial constant hand-opened folds count with; a newer user message takes the exemption with it).
+  Shared by `bubble()` and the auto-fetch like `lastReplyIndex`, and the auto-fetch covers a
+  payload-clipped exempt user row for the same no-tap-left reason. Agent cards are still never
+  exempt. `userfold.mjs` measures it against a pinned pre-change control.
 - **A hand-opened fold is keyed by `msgKey(i)` — `uuid`, or `role:ts` when the row has none.** The
   tap sets a class and the 3s poll rebuilds `innerHTML` from the payload, so anything the open state
   is keyed by must exist for EVERY bubble: rows without a uuid (an optimistic bubble, a transcript
@@ -222,8 +230,23 @@ give it.
   surviving prefix retire each other (a server-issued match token is not available for pane-typed
   text). `ghostecho.mjs` asserts all of it; its guards pass on both pages on purpose.
 - **`/clear` renders NOTHING in the feed** — dropped in `transcript.ts` (`RESET_COMMANDS`). Its
-  entry can only ever head a fresh file, so the existing "No conversation yet." renders; a lone
+  entry can only ever head a fresh file, so the empty state renders; a lone
   `/clear` on a blank screen reads as debris from the wipe.
+- **The empty state is the Claude Code glyph, not a sentence** (the owner, 2026-08-08): the same
+  SVG path the sessions label carries, at **40% of the feed's content width and CENTRED in it, both
+  axes** — his amendment to the first build, which was 66% and anchored where the old notice's first
+  line sat. Centred in the CONTENT box specifically: the feed reserves the header's footprint and the
+  dock as its own padding, so that box is the visible chat area and the border box is a different
+  answer no stylesheet reading tells apart. On the first SEND it flies upward — a CLONE parked at the
+  real element's rect (`flyEmptyGlyph`), because the innerHTML swap takes the real node away in the
+  same tick. **The clone is given the original's HEIGHT as well as its width**: the resting element is
+  a full-height flex box that centres the glyph inside itself, so a clone left to shrink-wrap centres
+  it in nothing and jumps to the feed's top edge before it flies. Gated on the optimistic row
+  existing (a slash command paints none, and a flying clone would leave a duplicate over a
+  still-standing empty state) and on `prefers-reduced-motion`. Every other route out (a pane-side
+  message on the 3s poll) plainly disappears — the animation is the send's own affordance, not a
+  state transition. `.notice` itself still serves "No live sessions." on the list.
+  `emptyglyph.mjs` measures it.
 - **A composer `/clear` asks first, on the DAEMON's authority** — `confirmReset` is ONE setting for
   every surface, read in `webappSessionAction`, never trusted from the client. The gate sits after
   every existing refusal (a mid-turn `/clear` keeps its plain reason). `{ confirm }` is a **200**
@@ -643,8 +666,14 @@ give it.
   {chat, worker} × {working, waiting, idle} matrix for exactly that reason. The drill-in header
   (`#ddot`) is not in that file and does not need to be — it shares the mapping now, and
   `dotparity.mjs` is where the two surfaces are compared (see `dotClass` below).
-- **A state with something to say REPLACES the task line, never appends to it** — `waiting` is now
-  the only one that does. The line is
+- **A state with something to say REPLACES the task line, never appends to it** — `waiting` does
+  (below), and since 2026-08-08 so does `working` when the payload carries `status`: the card renders
+  `✳ <verb>… · <elapsed>` (the pane's own clauding line, scraped by the same `parseWorkingStatus`
+  the drill-in feed uses, attached in `webappSessionCard` off the capture the card already takes —
+  working sessions only, since a prompt-side spinner line in scrollback would name a turn that ended)
+  instead of the last-reply snippet, which is the owner's ask: what a session is doing right now
+  outranks the last thing it said. No clock smoothing on the card — the 4s poll rebuilds the panel
+  whole. The `🧑‍💻` task branch stands as the scrape-miss fallback; `waitstate.mjs` pins both. The line is
   `-webkit-line-clamp: 1` (the owner's call, down from 2 on 2026-07-29: a card is a glance, and the
   second line bought a wrapped fragment rather than a second fact) and the card's height is reflow —
   the fullest card measures 96px where it was 116. So `⏸️ waiting: gh run watch` stands where the

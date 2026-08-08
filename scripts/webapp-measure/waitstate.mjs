@@ -14,7 +14,9 @@ import { chromium } from "/home/ubuntu/projects/taste/node_modules/playwright/in
 //   working one caught mid-fade.
 //
 //   The TASK LINE is a replacement, not an addition — a waiting card shows its reason INSTEAD of the
-//   last-reply snippet (which is from before it started waiting), and must not grow the card.
+//   last-reply snippet (which is from before it started waiting), and must not grow the card. Since
+//   2026-08-08 a WORKING card follows the same rule with the pane's own live line ("✳ Hyperspacing…
+//   · 1m 55s"), and falls back to the activity snippet when the poll missed that line.
 //
 // The CONTROL runs against the pinned pre-feature copy of the page, rendered from git, and the harness FAILS if a
 // check the feature is supposed to introduce passes there: a check that is already green without the
@@ -46,7 +48,16 @@ writeFileSync(BASE, execFileSync("git", ["show", `${BASELINE}:webapp/index.html`
 // on purpose: it is what a waiting or unreported card must be shown to replace rather than append to.
 const TASK = "Reading the transcript back and folding the working row into the composer";
 const SESSIONS = [
-  { sid: "s0", name: "cc-bridge", state: "working", working: true, alive: true, task: TASK, wait: null, unreported: null },
+  // A working card carries the pane's own working line since 2026-08-08 and renders THAT instead of
+  // the snippet — the same replacement rule `waiting` follows, for the same reason: what the session
+  // is doing this second outranks the last thing it said.
+  { sid: "s0", name: "cc-bridge", state: "working", working: true, alive: true, task: TASK, wait: null, unreported: null,
+    status: { verb: "Hyperspacing", elapsed: "1m 55s", tokens: "5.6k tokens" } },
+  // The scrape MISS, which is a real state and not a fixture convenience: the poll can land between
+  // turns or catch the line as it scrolls, and the card must fall back to the activity snippet rather
+  // than to nothing. A guard — the fallback is what the page did before this change, so it holds on
+  // both pages, which is exactly the claim.
+  { sid: "s7", name: "polyscan-ui", state: "working", working: true, alive: true, task: TASK, wait: null, unreported: null },
   { sid: "s1", name: "taste", state: "waiting", working: false, alive: true, task: TASK,
     wait: { why: "said", label: "CI run 18832" }, unreported: null },
   { sid: "s2", name: "polyscan", state: "waiting", working: false, alive: true, task: TASK,
@@ -102,8 +113,8 @@ async function measure(page, label, sink) {
     };
   }));
   const by = n => rows.find(r => r.name === n);
-  const [work, said, proc, unrep, idle, dead, short] =
-    ["cc-bridge", "taste", "polyscan", "dm-bridge", "webapp", "store-template", "suite-index"].map(by);
+  const [work, said, proc, unrep, idle, dead, short, workBare] =
+    ["cc-bridge", "taste", "polyscan", "dm-bridge", "webapp", "store-template", "suite-index", "polyscan-ui"].map(by);
   if (!work || !said || !idle) { state(false, "the fixture renders every card"); return }
 
   // ---- 1. The task line says the state, and replaces the snippet -------------------------------
@@ -119,11 +130,20 @@ async function measure(page, label, sink) {
   // A STATE check since the ✅ swap: the baseline prints 💬 here, so this fails there — which is
   // what "idle now means done, not merely quiet" is worth as a claim.
   state(idle.task?.startsWith("✅ "), `an idle card marks its last reply DONE (${JSON.stringify(idle.task?.slice(0, 24))})`);
-  // The working glyph became 🧑‍💻 on 2026-07-29, when ⏳ moved onto `waiting` — the hourglass belongs
-  // to the state that is blocked. That makes it a STATE check, not a guard: the baseline prints ⏳
-  // here, so a guard would have to assert the old glyph to keep passing there, and would then be
-  // pinning the vocabulary this change replaced. What stays a guard is the line EXISTING at all.
-  state(work.task?.startsWith("🧑‍💻 "), `a working card is a person at a keyboard (${JSON.stringify(work.task?.slice(0, 24))})`);
+  // A working card reads the pane's LIVE line (the owner, 2026-08-08) — the verb and its clock, not
+  // the last reply. A STATE check on both halves: the baseline knows nothing about `status` and
+  // prints the snippet behind 🧑‍💻, so a guard here would be pinning the line this change replaced.
+  state(work.task?.startsWith("✳ Hyperspacing…"), `a working card names the CLI's own verb (${JSON.stringify(work.task?.slice(0, 24))})`);
+  state(work.task?.includes(" · 1m 55s") && !work.task.includes("Reading the transcript"),
+    `…with its clock, and INSTEAD of the snippet, which predates the turn (${JSON.stringify(work.task)})`);
+  // The fallback: a working session whose spinner line the poll missed keeps the line it has always
+  // had — the check that says the verb was ADDED to the state that has one rather than taken away
+  // from the state that has not. The SNIPPET half is a guard (the baseline prints it too); the GLYPH
+  // half is the 2026-07-29 person-at-a-keyboard check, unchanged in every respect but which card it
+  // is read off, and it stays a state check because the baseline prints ⏳ there.
+  guard(workBare?.task?.includes("Reading the transcript"),
+    `a working card with no scraped line keeps the activity snippet (${JSON.stringify(workBare?.task?.slice(0, 30))})`);
+  state(workBare?.task?.startsWith("🧑‍💻 "), `…behind the person at a keyboard (${JSON.stringify(workBare?.task?.slice(0, 24))})`);
   guard(!!work.task && work.task.length > 2, `and a working card still names what it is doing (${JSON.stringify(work.task?.slice(0, 30))})`);
 
   // ---- 2. Stillness ----------------------------------------------------------------------------

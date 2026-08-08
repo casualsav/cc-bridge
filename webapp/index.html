@@ -856,6 +856,23 @@
      scrim's 1 and the header/dock's 2. */
   #dfeed { position: absolute; inset: 0; overflow-y: auto; z-index: 0;
     padding: calc(var(--safe-top) + var(--hbtn-d) + 24px) var(--sp-3) calc(var(--dock-h, 60px) - 10px); }
+  /* An empty conversation shows the Claude Code glyph instead of "No conversation yet." (the owner,
+     2026-08-08). 40% of the chat's width and CENTRED in it, vertically as well — his amendment to the
+     first build, which anchored it where that sentence's first line used to start. `height: 100%`
+     resolves against #dfeed's CONTENT box, i.e. the band between the header's footprint and the dock,
+     which is the visible chat area and therefore the thing to centre in; no side padding, so the 40%
+     is of that same content width rather than of an inset box. The height follows the 16:10 viewBox
+     rather than being declared. `.notice` is untouched: it still carries "No live sessions.". */
+  .emptyglyph { height: 100%; display: flex; align-items: center; justify-content: center; }
+  .emptyglyph svg { display: block; width: 40%; height: auto; }
+  /* The exit. What flies is a CLONE parked at the real element's rect (flyEmptyGlyph) — the original
+     is wiped by paintFeed's innerHTML swap in the same tick, so there is nothing left to animate. It
+     is appended to #drill and not to the feed for that same reason, and z-index 1 puts it exactly
+     where a feed row sits in the drill's ladder: over the transcript, under the header and the dock,
+     so it passes BEHIND the header on the way out like any scrolled content. */
+  .emptyglyph.flyaway { position: fixed; z-index: 1; pointer-events: none;
+    transition: transform 250ms ease-in, opacity 250ms ease-in; }
+  .emptyglyph.flyaway.gone { transform: translateY(-100vh); opacity: 0; }
   /* ASYMMETRIC padding, and the asymmetry is the point: the bubble hugs the meta block far tighter
      than it pads a line of text, which is what makes the time read as tucked into the corner. Pulling
      all four sides in instead would drag the top edge onto the first line and change every bubble
@@ -2204,6 +2221,8 @@ const LONG_MSG = 700;   // chars past which a feed bubble collapses behind a tap
 // ONE definition, because those two disagreeing is a message that renders unfolded and clipped at
 // 4000 chars with no way left to read the rest.
 const lastReplyIndex = items => { let k = -1; (items || []).forEach((x, n) => { if (x.role === "assistant") k = n; }); return k; };
+// The same, for the message YOU last sent — the other row the fold now exempts (see newestUserExempt).
+const lastUserIndex = items => { let k = -1; (items || []).forEach((x, n) => { if (x.role === "user") k = n; }); return k; };
 let WRITE = false;   // set from /api/ls (.write) — gates all edit/delete UI; mirrors WEBAPP_WRITE on the server
 
 // POST a JSON write op with auth; surface server errors (incl. 409 edit conflicts). Returns parsed body or null.
@@ -2863,6 +2882,14 @@ async function renderSessions() {
       // so it belongs to the state that IS blocked, and working gets the person at the keyboard. The
       // same pair renders in `/sessions` (sessions-view.ts) — one state, one emoji on every surface.
       : s.state === "waiting" && s.wait ? "⏳ waiting: " + esc(s.wait.label)
+      // A WORKING card says what the pane says it is doing THIS SECOND — the clauding verb and its
+      // clock, not the last message it sent (the owner, 2026-08-08: "when the session is thinking and
+      // I go back to the main screen I want the most accurate latest state"). ✳ is one frozen frame of
+      // the working row's own spinner set (WORK_GLYPHS), so the line reads as the same indicator the
+      // chat shows. No clock smoothing here, unlike the drill-in's row: the 4s poll rebuilds this
+      // panel whole, so a ticker would be a second source of truth for a number that is already
+      // refreshed. The 🧑‍💻 branch below stands when the scrape missed the line.
+      : s.working && s.status ? "✳ " + esc(s.status.verb) + "…" + (s.status.elapsed ? " · " + esc(s.status.elapsed) : "")
       // ✅, not 💬, on the last-reply line: by the time this branch is reached the state is `idle`,
       // which since the fourth state landed means "at a prompt with nothing pending" — done, not
       // merely quiet. The owner's call. (`/sessions`, the Telegram text view, mirrors this line —
@@ -3101,17 +3128,21 @@ function bubble(i, n, all) {
   // server's internals is not something a reader can act on. `clipped` still drives the FETCH; it
   // just no longer speaks.
   // …EXCEPT the LAST REPLY, which is never folded: the one message you should never have to tap to
-  // read is the one you are waiting for. `assistant` only — a user bubble keeps its fold whatever its
-  // position (you wrote it), and an agent card is a delegated REPORT rather than the answer to the
-  // message you just sent, so it keeps its fold too.
-  // It stays open until the NEXT reply, not until the next ROW (the owner, 2026-07-29): it used to be
-  // the transcript's last item, so his own message folded the answer he was still reading, and so did
-  // every activity row of the turn that followed. `all` is the items array map() hands in, so this is
-  // still read from the PAYLOAD rather than the DOM — an optimistic bubble paints after it and would
-  // otherwise re-fold the reply for the two seconds before its echo lands.
+  // read is the one you are waiting for. It stays open until the NEXT reply, not until the next ROW
+  // (the owner, 2026-07-29): it used to be the transcript's last item, so his own message folded the
+  // answer he was still reading, and so did every activity row of the turn that followed.
+  // …AND the message you just sent, which rides open until it is buried (the owner, 2026-08-08,
+  // reversing "a user bubble keeps its fold whatever its position — you wrote it"): the optimistic
+  // bubble paints unfolded, so folding it the moment its echo lands reads as the app closing your
+  // message under your thumb. `newestUserExempt` is that rule, and it ends at BURIED_ROWS — an
+  // agent card is still never exempt, being a delegated REPORT rather than either half of this
+  // conversation.
+  // `all` is the items array map() hands in, so both are read from the PAYLOAD rather than the DOM —
+  // an optimistic bubble paints after it and would otherwise re-fold the reply for the two seconds
+  // before its echo lands.
   // The PAYLOAD-clipped case is reached from paintFeed, which fetches the rest — without the fold
   // there is no tap left to do it.
-  const newest = !!all && i.role === "assistant" && n === lastReplyIndex(all);
+  const newest = !!all && (i.role === "assistant" ? n === lastReplyIndex(all) : i.role === "user" && newestUserExempt(all, n));
   const long = t.length > LONG_MSG && !newest;
   // A transcript-echoed user message has demonstrably reached the session, so two ticks.
   inner += stamp(i.ts, i.role === "user" ? 2 : 0);
@@ -3207,6 +3238,21 @@ const fullText = {};
 // deep in the scrollback, on the very next poll.
 const openMsgs = new Map();
 const BURIED_ROWS = 3;
+// The message you just sent rides OPEN until it is buried (the owner, 2026-08-08: "when I send a
+// message I don't want it to collapse until it's buried in the conversation"). The symptom was the
+// snap: an optimistic bubble paints unfolded, and its transcript echo folded it a second later, so a
+// long message you had just written closed itself under your thumb.
+//
+// Burial is the SAME `BURIED_ROWS` a hand-opened fold is counted with — one rule for "this has moved
+// up the scrollback", not a second number to keep in step. It is counted from the END here rather
+// than from an open, because nothing was opened: the row's own position is the whole state.
+// Only the LAST user row qualifies, so a newer message of yours takes the exemption with it.
+// Used by bubble() AND by paintFeed's auto-fetch — those two disagreeing is the trap lastReplyIndex
+// carries the same warning about.
+const newestUserExempt = (items, n) => {
+  const k = lastUserIndex(items);
+  return k >= 0 && n === k && (items || []).length - 1 - k < BURIED_ROWS;
+};
 // The one bubble showing a copy pill, by msgKey. Outside the DOM for the same reason as the above.
 let copyFor = null;
 // A bubble's identity for the open state. The uuid when the transcript gave one; otherwise the row's
@@ -3313,6 +3359,35 @@ const TICK2 = '<svg class="ticks ticks2" viewBox="0 0 15 8" fill="none" stroke="
 // measured, disclosed on the contact sheet, and chosen with that on the table. A no-wrap wrapper
 // around dot+first-word would "fix" it by changing which design was picked.
 const FINAL_DOT = '<svg class="fin" width="5" height="5" viewBox="0 0 5 5" aria-hidden="true"><circle cx="2.5" cy="2.5" r="2.5" fill="currentColor"/></svg>';
+// What an empty conversation shows (the owner, 2026-08-08, in place of "No conversation yet."). The
+// SAME artwork the Coding Sessions label carries — one mark for one product, so a second copy of the
+// path is a thing that can drift, not a second design. Decorative: the empty screen says the rest.
+const EMPTY_GLYPH = '<div class="emptyglyph"><svg viewBox="0 0 16 10" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><path fill="#d87756" fill-rule="evenodd" d="M2 0h12v4h2v2h-2v2h-1v2h-1V8h-1v2h-1V8H6v2H5V8H4v2H3V8H2V6H0V4h2V0Zm2 2v2h1V2H4Zm7 0v2h1V2h-1Z"/></svg></div>';
+// The glyph leaves upward on the first send, and it is a CLONE that leaves: paintFeed's innerHTML
+// swap takes the real element away in the same tick, so animating that one shows nothing. Parked at
+// its own rect, so the journey starts exactly where the reader was looking. Reduced motion gets the
+// plain disappearance — no clone at all, rather than a clone that jumps.
+// Every OTHER route out of the empty state (a message arriving from the pane side on the 3s poll)
+// disappears the same way it always did: this is the send's own affordance, not a state transition.
+function flyEmptyGlyph() {
+  const el = $("dfeed").querySelector(".emptyglyph");
+  if (!el || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const r = el.getBoundingClientRect();
+  const fly = el.cloneNode(true);
+  fly.className = "emptyglyph flyaway";
+  // HEIGHT as well as width, and it is load-bearing: the resting element is a full-height flex box
+  // that centres the glyph in it, so a clone left to shrink-wrap its content would centre the glyph
+  // in nothing and start the journey from the top of the feed — a jump, exactly where the eye is.
+  fly.style.left = r.left + "px"; fly.style.top = r.top + "px";
+  fly.style.width = r.width + "px"; fly.style.height = r.height + "px";
+  $("drill").appendChild(fly);
+  // .gone next frame, for #dial's reason: setting the position and the transform in one tick leaves
+  // the transition nothing to animate from.
+  requestAnimationFrame(() => fly.classList.add("gone"));
+  const done = () => fly.remove();
+  fly.addEventListener("transitionend", done);
+  setTimeout(done, 600);   // the backstop: a transition that never fires must not leave the clone on screen
+}
 function stamp(ts, ticks) {
   if (!ts) return "";
   return '<span class="tstamp">' + esc(hhmm(ts)) + (ticks === 2 ? TICK2 : ticks ? TICK1 : "") + "</span>";
@@ -3381,10 +3456,16 @@ function paintFeed() {
   // happens here. Once per uuid and never retried: api() raises its own toast, so a read that keeps
   // failing would raise one every 3s. It is also the cheap half of the poll — the snapshot already
   // carries 4000 chars of this same message on every tick.
-  const last = items[lastReplyIndex(items)];
-  if (last && last.clipped && last.uuid && !autoFull.has(last.uuid)) {
-    autoFull.add(last.uuid);
-    expandFull(last.uuid);
+  // BOTH exempt rows, from the one predicate each: the newest reply, and the message you just sent
+  // while it is still unburied. A row rendered unfolded whose payload the server cut at 4000 chars,
+  // with no fold bar left to fetch the rest, is the same defect whichever side of the conversation
+  // wrote it.
+  const uk = lastUserIndex(items);
+  for (const row of [items[lastReplyIndex(items)], newestUserExempt(items, uk) ? items[uk] : null]) {
+    if (row && row.clipped && row.uuid && !autoFull.has(row.uuid)) {
+      autoFull.add(row.uuid);
+      expandFull(row.uuid);
+    }
   }
   // Burial: an opened message collapses itself once BURIED_ROWS rows have arrived since the open —
   // there is no manual collapse any more. Read BEFORE the innerHTML swap below, so the rects are of
@@ -3409,7 +3490,7 @@ function paintFeed() {
     // Bridge command cards last: they are the newest thing in the chat when they appear, and they
     // are not transcript rows, so they have no timestamp to sort against the payload's.
     .concat(localCards.map(cardShell));
-  const html = rows.length ? rows.join("") : '<div class="notice">No conversation yet.</div>';
+  const html = rows.length ? rows.join("") : EMPTY_GLYPH;
   // Unchanged — never disturb the scroll while the user reads back. The working line still has to
   // tick: during a turn the transcript rows DON'T change, so this is the branch every poll takes
   // while the session is busy, and returning outright would freeze the clock it exists to show.
@@ -4082,6 +4163,11 @@ $("dsend").onclick = async () => {
   // every custom skill command, and both should keep saying so. The dial's own /model and /effort
   // never come through here at all.
   if (!INSTANT_CMD.test(text)) workOptimisticAt = Date.now();
+  // Before the paint, because the paint is what removes it: the clone has to be taken while the real
+  // glyph is still standing and still where the reader last saw it. Gated on the optimistic row for
+  // the same reason — a slash command paints none, so the empty state SURVIVES this paint and flying
+  // its glyph away would leave a copy of it sitting on the screen it just left.
+  if (o) flyEmptyGlyph();
   paintFeed();
   $("dfeed").scrollTop = $("dfeed").scrollHeight;   // sending always reveals your own message
   if (await sendToSession(text)) { if (o) o.state = "sent"; paintFeed(); setTimeout(renderDrill, 800); }

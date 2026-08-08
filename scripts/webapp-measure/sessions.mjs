@@ -106,7 +106,10 @@ check(Math.abs(card.pad[0] - 12) <= 0.5 && Math.abs(card.pad[1] - 14) <= 0.5
    && Math.abs(card.pad[2] - 12) <= 0.5 && Math.abs(card.pad[3] - 14) <= 0.5,
   `card padding is back to 12/14 — the --sp-4 was hosting the tile (${card.pad.join("/")})`);
 near(card.margin, 8, 0.5, "and the gap between cards is the reference's own 8");
-near(card.ratio, 0.22, 0.02, "so the corner is ~0.22 of the card's height (--r-2xl on 128 was 0.16)");
+// --r-3xl (26) is derived, the card is 96 by reflow only: 26/96 = 0.27, nearer the reference (0.33)
+// than the 0.22 it read at the pre-clamp 116px height (webapp/CLAUDE.md, "Sessions list and spawn
+// sheet" — the 2026-07-29 one-line task-line clamp moved the card, not the radius).
+near(card.ratio, 0.27, 0.02, "so the corner is ~0.27 of the card's height (--r-3xl on 96, post-clamp)");
 near(card.cardxMargin, -12, 0.5, "the ✕'s 44px target is pulled off the title row's height");
 near(card.topRow, 20, 0.6, "which leaves the title row at exactly the name's line box");
 check(card.nmClip === "nowrap" && card.nmEllipsis === "ellipsis",
@@ -206,9 +209,24 @@ const probe = async () => p.evaluate(() => {
   return { top: under && (under.id === "newfab" || f.contains(under)),
     cardBehind: stack.some(e => e.classList && e.classList.contains("sess")) };
 });
-await p.evaluate(() => scrollTo(0, 300));
+// Scroll to wherever a card's own middle lines up with the pill's, computed from the rendered
+// rects rather than a fixed pixel guess — the 96px-tall reflowed card (was 116) leaves less than
+// half the scroll range this fixture used to need, so a fixed 300 overshoots past the last card
+// entirely and lands on bare list background. Targets the SECOND-TO-LAST card, keeping this
+// distinct from the relief check below, which scrolls to the true end of the list.
+// Null-safe like every other read in this section: the pre-change control page has no #newfab,
+// and 300 is as good a guess as any when there's no pill to line a card up with.
+const scrollTarget = await p.evaluate(() => {
+  const fe = document.getElementById("newfab"); if (!fe) return 300;
+  const cards = [...document.querySelectorAll(".sess")];
+  const c = cards[cards.length - 2].getBoundingClientRect();
+  const f = fe.getBoundingClientRect();
+  return scrollY + (c.top + c.height / 2) - (f.top + f.height / 2);
+});
+await p.evaluate(y => scrollTo(0, y), scrollTarget);
 await p.waitForTimeout(200);
 const hit = await probe();
+console.log(`  (scrolled to ${scrollTarget.toFixed(1)}, measured overlap: cardBehind=${hit.cardBehind}, top=${hit.top})`);
 check(hit.cardBehind, "a card really is behind the pill at this scroll position (else the probe proves nothing)");
 check(hit.top, "the pill is what you hit there — it paints ABOVE the list");
 // The falsifying control for that probe: break the layering and require the same check to fail.
