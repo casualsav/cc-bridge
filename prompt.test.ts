@@ -259,34 +259,37 @@ test('fableConsentContinueOption is null on screens that are not this dialog', (
 
 // The regression for 2026-08-08: the owner tapped Fable on a Telegram surface, the CLI raised the
 // credit consent, and the driver had no step for it — it polled the consent out and left the pane
-// parked on it, which is the wedge. Against the old behaviour every 'consent' expectation below
-// reads 'wait', which is precisely the defect.
-test('planModelDialogStep answers the owner’s own Fable tap, in the order the CLI raises the dialogs', () => {
-  // Consent first, cache confirm behind it — one loop, both answered, then the readback ends it.
-  expect(planModelDialogStep(CREDIT_CONSENT, 'fable', 'Opus 5', 'accept')).toEqual({ act: 'consent', option: 1 })
-  expect(planModelDialogStep(CACHE_CONFIRM, 'fable', 'Opus 5', 'accept')).toEqual({ act: 'confirm' })
-  expect(planModelDialogStep('', 'fable', 'Fable 5', 'accept')).toEqual({ act: 'done' })
+// parked on it, which is the wedge. Against that behaviour every expectation below reads 'wait',
+// which is precisely the defect: neither branch here may be a parked pane.
+test('planModelDialogStep never leaves the credit consent standing — spend approved or not', () => {
+  // 'ask' (nobody approved a spend — the DEFAULT, and everything with no human behind it) declines.
+  const asked = planModelDialogStep(CREDIT_CONSENT, 'fable', 'Opus 5', 'ask')
+  expect(asked.act).toBe('decline')
+  expect(asked.act === 'decline' && asked.reason).toContain('approved')
+  // 'allow' (this user approved spending their credits) answers it — consent first, cache confirm
+  // behind it, then the readback ends the loop.
+  expect(planModelDialogStep(CREDIT_CONSENT, 'fable', 'Opus 5', 'allow')).toEqual({ act: 'consent', option: 1 })
+  // The cache confirm is answered on BOTH paths — it is a disclosure, not a spending decision.
+  expect(planModelDialogStep(CACHE_CONFIRM, 'fable', 'Opus 5', 'ask')).toEqual({ act: 'confirm' })
+  expect(planModelDialogStep(CACHE_CONFIRM, 'fable', 'Opus 5', 'allow')).toEqual({ act: 'confirm' })
+  expect(planModelDialogStep('', 'fable', 'Fable 5', 'ask')).toEqual({ act: 'done' })
   // Nothing on screen yet (the dialog renders a beat late) is a wait, never a conclusion.
-  expect(planModelDialogStep('', 'fable', 'Opus 5', 'accept')).toEqual({ act: 'wait' })
+  expect(planModelDialogStep('', 'fable', 'Opus 5', 'ask')).toEqual({ act: 'wait' })
 })
 
-test('planModelDialogStep leaves the credit consent alone when the human did not ask for the switch', () => {
-  const step = planModelDialogStep(CREDIT_CONSENT, 'fable', 'Opus 5', 'leave')
-  expect(step.act).toBe('leave')
-  // …and it is REPORTED rather than swallowed, so a drift-guard or bus switch that didn't land says why.
-  expect(step.act === 'leave' && step.reason).toContain('human')
-  // The cache confirm is answered on every path — it is a disclosure, not a decision.
-  expect(planModelDialogStep(CACHE_CONFIRM, 'fable', 'Opus 5', 'leave')).toEqual({ act: 'confirm' })
-})
-
-test('planModelDialogStep declines — and does not wedge on — the buy/request variants', () => {
-  // The variant with no continue option is still RECOGNISED (the old option-anchored predicate went
-  // blind here and returned 'wait' forever, which is a parked pane).
-  const buy = CREDIT_CONSENT.replace('Continue with Fable 5', 'Yes, buy usage credits')
-  const step = planModelDialogStep(buy, 'fable', 'Opus 5', 'accept')
-  expect(step.act).toBe('decline')
-  expect(step.act === 'decline' && step.reason).toContain('usage credits')
-  expect(isModelConsentDialog(buy)).toBe(true)
+test('planModelDialogStep never BUYS credits, even for a user who approved spending them', () => {
+  // Approving credit use is not approving a purchase. Every primary option that costs money rather
+  // than spending an existing balance is declined on the 'allow' path too — and the dialog is still
+  // RECOGNISED, so it is Esc'd and reported rather than parked on (the option-anchored predicate
+  // this replaced went blind here and returned 'wait' forever).
+  for (const primary of ['Yes, buy usage credits', 'Buy usage credits', 'Yes, re-enable and continue',
+    'Set up usage credits on claude.ai', 'Request more from your admin']) {
+    const buy = CREDIT_CONSENT.replace('Continue with Fable 5', primary)
+    const step = planModelDialogStep(buy, 'fable', 'Opus 5', 'allow')
+    expect(step.act).toBe('decline')
+    expect(step.act === 'decline' && step.reason).toContain('BUY')
+    expect(isModelConsentDialog(buy)).toBe(true)
+  }
 })
 
 test('isModelSwitchConfirm ignores every other screen that could be up when a model change lands', () => {

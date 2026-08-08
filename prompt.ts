@@ -901,31 +901,34 @@ export function isModelSwitchConfirm(paneText: string): boolean {
   return /switch model\?/.test(low) && /\byes,\s*switch to\b/.test(low)
 }
 
-// The CREDIT consent's "keep going, on credits I already have" option — its 1-based option number,
-// or null when this pane is not showing that dialog OR the dialog offers no such option.
-//
-// Both halves matter. A human who taps Fable on a bridge surface has ALREADY made the model choice
-// this dialog asks about, so leaving it standing wedges the session on a question its own initiator
-// answered a second ago (observed on @weather, 2026-08-08: the pane parked, and the wedge alert's
-// reader Esc'd the owner's own switch). But the dialog is not always that question. Read off
-// 2.1.226: its primary option is "Continue with Fable 5" only when the account HAS credits to spend
-// — otherwise the same slot reads "Yes, buy usage credits" / "Buy usage credits" / "Set up usage
-// credits on claude.ai" / "Request more from your admin", which are purchases and provisioning, and
-// no tap on a model button is consent to any of them.
-//
-// So this matches by the option's LITERAL label against the model the QUESTION names — never by
-// index, never by "the first option" — and returns null for every buy/request variant, which is
-// what leaves those for the human. The dialog also has a "Checking usage credits…" loading state
-// with no options at all; that is a null here too, and the caller's poll rides it out.
-// The CREDIT consent, recognised by its QUESTION and nothing else. Anchoring on the accept option
-// instead is the trap: the option is exactly what varies (see below), so an option-anchored
-// predicate goes blind on the buy/request variants — the ones where the pane is MOST likely to sit
-// there forever, because nobody is coming to spend money on its behalf.
+// The CREDIT consent, recognised by its QUESTION and nothing else. Anchoring on an option is the
+// trap: the options are exactly what varies, so an option-anchored predicate goes blind on the
+// variants where the pane is MOST likely to sit forever, because nobody is coming to spend money on
+// its behalf.
 export function isModelConsentDialog(paneText: string): boolean {
   const p = detectUserPrompt(paneText)
   return !!p && /^\s*switch to\s+.+\?\s*$/i.test(p.question)
 }
 
+// The CREDIT consent's "keep going, on the credits this account already has" option — its 1-based
+// number, or null when the dialog on screen offers no such option.
+//
+// This option IS the spend, which is the whole reason it needs approval. Read off 2.1.226:
+//
+//     N = overagesEnabled && balance.amount > 0 ; M = overagesEnabled && balance === null
+//     D = !blocked && (N || M) ; H = D ? "Continue with Fable 5" : <buy / request variants>
+//
+// — "Continue with <model>" appears PRECISELY when usage credits are enabled and a balance exists
+// (or is unknown), beside body text reading "Continuing on Fable 5 uses usage credits — you have $X
+// in credits." It is not the harmless half of this dialog.
+//
+// Matched by the option's LITERAL label against the model the QUESTION names — never by index,
+// never by "the first option". Every other primary option the dialog can carry ("Yes, buy usage
+// credits", "Buy usage credits", "Yes, re-enable and continue", "Set up usage credits on
+// claude.ai", "Request more from your admin") is a PURCHASE or a provisioning request rather than a
+// spend of credits already bought, and returns null here: approving credit use is not approving a
+// purchase, and no preference in this file authorises one. The dialog's "Checking usage credits…"
+// loading state carries no options at all; also null, and the caller's poll rides it out.
 export function fableConsentContinueOption(paneText: string): number | null {
   const prompt = detectUserPrompt(paneText)
   if (!prompt) return null
@@ -942,29 +945,37 @@ export function fableConsentContinueOption(paneText: string): number | null {
 //
 //   · a Fable pick can raise BOTH dialogs, consent FIRST and cache confirm behind it, so the caller
 //     must keep stepping rather than treating the first answer as the end;
-//   · 'leave' (a switch the BRIDGE decided) never answers the consent — that stays a human's;
-//   · 'accept' (the human's own tap on a model) answers it, but only via the continue option.
+//   · the cache confirm is a DISCLOSURE (the next reply re-reads the history) — answered on every
+//     path, because a user who picked a model in a picker has already answered it;
+//   · the credit consent is a SPEND, and `consent` is the ONE thing that may answer it: the
+//     resolved preference of the identified human whose own tap started this switch.
+//
+// 'ask' — the default, and what every switch with no human behind it gets (bus, drift guard,
+// auto-refresh) — declines: Esc, leaving the session at its own prompt on its old model, and
+// reports why to whoever asked. That is a switch that didn't happen, which is a nuisance; the two
+// alternatives are worse. Pressing it spends someone's money on an approval they never gave.
+// Leaving the dialog standing for a human to tap is the wedge this whole path exists to prevent
+// (@weather, 2026-08-08), and it wedges hardest on the user who would never approve it anyway.
 //
 // `currentModel` is the statusline readback — "the target is already showing" is `done`, which is
 // how a fresh session with no dialogs at all terminates the loop immediately.
 export type ModelDialogStep =
   | { act: 'confirm' }                     // the cache confirm — its accept is option 1
-  | { act: 'consent'; option: number }     // the credit consent, and the human already said yes
-  | { act: 'decline'; reason: string }     // consent, but the only options cost money — Esc out
-  | { act: 'leave'; reason: string }       // consent on a switch the human didn't ask for — theirs
+  | { act: 'consent'; option: number }     // the credit consent, and this user has approved the spend
+  | { act: 'decline'; reason: string }     // the credit consent, unapproved or a purchase — Esc out
   | { act: 'done' }
   | { act: 'wait' }
 export function planModelDialogStep(
-  paneText: string, alias: string, currentModel: string | null, consent: 'accept' | 'leave',
+  paneText: string, alias: string, currentModel: string | null, consent: 'allow' | 'ask',
 ): ModelDialogStep {
   if (paneText && isModelSwitchConfirm(paneText)) return { act: 'confirm' }
   if (paneText && isModelConsentDialog(paneText)) {
-    if (consent !== 'accept') {
-      return { act: 'leave', reason: `${alias} needs a usage-credit decision this switch can't make — the dialog is on the pane for a human to answer` }
+    if (consent !== 'allow') {
+      return { act: 'decline', reason: `${alias} is asking to run on usage credits, and nobody here has approved spending them — nothing was changed, and the session is still on its old model` }
     }
     const option = fableConsentContinueOption(paneText)
     if (option === null) {
-      return { act: 'decline', reason: `${alias} needs usage credits, and this dialog only offers to buy or request them — nothing was changed` }
+      return { act: 'decline', reason: `${alias} needs usage credits, and this dialog only offers to BUY or request them — approving credit use is not approving a purchase, so nothing was changed` }
     }
     return { act: 'consent', option }
   }
