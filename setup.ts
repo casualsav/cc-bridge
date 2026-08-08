@@ -9,7 +9,7 @@
 import { createInterface } from 'node:readline'
 import { stdin, stdout } from 'node:process'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, writeFileSync, readFileSync, copyFileSync, chmodSync, appendFileSync, openSync, mkdtempSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync, readFileSync, copyFileSync, chmodSync, appendFileSync, openSync, mkdtempSync, rmSync } from 'node:fs'
 import { homedir, platform, tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { spawn } from 'node:child_process'
@@ -544,7 +544,14 @@ async function setupWebappHosting(cfg: Config): Promise<void> {
   if (dnsName) {
     let certOk = false
     for (let attempt = 1; attempt <= 3 && !certOk; attempt++) {
-      const r = run('tailscale', ['cert', dnsName], { timeout: 60_000, cwd: mkdtempSync(join(tmpdir(), 'cc-bridge-cert-')) })
+      // The throwaway dir is removed on every path out of the attempt — the retry that loops back
+      // here, a `break`, and a throw from `run` alike. Created inline as the `cwd` argument it was
+      // never removed at all, so a setup run left one dir per attempt behind (81 of them under /tmp
+      // on this box, 2026-08-08, from the same class of leak as the test suite's fixtures).
+      const certDir = mkdtempSync(join(tmpdir(), 'cc-bridge-cert-'))
+      let r: RunResult
+      try { r = run('tailscale', ['cert', dnsName], { timeout: 60_000, cwd: certDir }) }
+      finally { rmSync(certDir, { recursive: true, force: true }) }
       if (r.ok) { certOk = true; break }
       const out = `${r.out}${r.err}`
       if (/does not support getting TLS certs|certs.*not.*enabled|500/i.test(out)) {
