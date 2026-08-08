@@ -888,8 +888,9 @@ export function submitLanded(paneText: string): boolean {
 //   "Switch model?"      — the CACHE confirm. Raised on every switch on a conversation with cached
 //                          history. It only discloses that the next reply re-reads the history, so
 //                          a user who picked a model in a picker has already answered it.
-//   "Switch to Fable 5?" — the CREDIT consent. A spending decision, and `detectUserPrompt` above
-//                          already relays it as tappable buttons for the user to answer themselves.
+//   "Switch to Fable 5?" — the CREDIT consent. A spending decision, so it is never answered off a
+//                          bridge-internal decision; `fableConsentContinueOption` below is what a
+//                          HUMAN's own tap drives, and `detectUserPrompt` relays it otherwise.
 //
 // This returns true for the first and MUST return false for the second. Both anchors are required:
 // the question wording, and the option wording. The credit dialog fails both — its question names
@@ -898,6 +899,77 @@ export function submitLanded(paneText: string): boolean {
 export function isModelSwitchConfirm(paneText: string): boolean {
   const low = stripAnsi(paneText).toLowerCase()
   return /switch model\?/.test(low) && /\byes,\s*switch to\b/.test(low)
+}
+
+// The CREDIT consent's "keep going, on credits I already have" option — its 1-based option number,
+// or null when this pane is not showing that dialog OR the dialog offers no such option.
+//
+// Both halves matter. A human who taps Fable on a bridge surface has ALREADY made the model choice
+// this dialog asks about, so leaving it standing wedges the session on a question its own initiator
+// answered a second ago (observed on @weather, 2026-08-08: the pane parked, and the wedge alert's
+// reader Esc'd the owner's own switch). But the dialog is not always that question. Read off
+// 2.1.226: its primary option is "Continue with Fable 5" only when the account HAS credits to spend
+// — otherwise the same slot reads "Yes, buy usage credits" / "Buy usage credits" / "Set up usage
+// credits on claude.ai" / "Request more from your admin", which are purchases and provisioning, and
+// no tap on a model button is consent to any of them.
+//
+// So this matches by the option's LITERAL label against the model the QUESTION names — never by
+// index, never by "the first option" — and returns null for every buy/request variant, which is
+// what leaves those for the human. The dialog also has a "Checking usage credits…" loading state
+// with no options at all; that is a null here too, and the caller's poll rides it out.
+// The CREDIT consent, recognised by its QUESTION and nothing else. Anchoring on the accept option
+// instead is the trap: the option is exactly what varies (see below), so an option-anchored
+// predicate goes blind on the buy/request variants — the ones where the pane is MOST likely to sit
+// there forever, because nobody is coming to spend money on its behalf.
+export function isModelConsentDialog(paneText: string): boolean {
+  const p = detectUserPrompt(paneText)
+  return !!p && /^\s*switch to\s+.+\?\s*$/i.test(p.question)
+}
+
+export function fableConsentContinueOption(paneText: string): number | null {
+  const prompt = detectUserPrompt(paneText)
+  if (!prompt) return null
+  const model = /^\s*switch to\s+(.+?)\s*\?\s*$/i.exec(prompt.question)?.[1]
+  if (!model) return null
+  const want = `continue with ${model.toLowerCase()}`
+  const idx = prompt.options.findIndex(o => o.label.trim().toLowerCase() === want)
+  return idx < 0 ? null : idx + 1
+}
+
+// What to do with whatever is on the pane one step after a model pick was committed. The whole
+// decision, kept pure and out of the driver loop, because the loop's keystrokes are untestable and
+// this is where every judgment that matters lives:
+//
+//   · a Fable pick can raise BOTH dialogs, consent FIRST and cache confirm behind it, so the caller
+//     must keep stepping rather than treating the first answer as the end;
+//   · 'leave' (a switch the BRIDGE decided) never answers the consent — that stays a human's;
+//   · 'accept' (the human's own tap on a model) answers it, but only via the continue option.
+//
+// `currentModel` is the statusline readback — "the target is already showing" is `done`, which is
+// how a fresh session with no dialogs at all terminates the loop immediately.
+export type ModelDialogStep =
+  | { act: 'confirm' }                     // the cache confirm — its accept is option 1
+  | { act: 'consent'; option: number }     // the credit consent, and the human already said yes
+  | { act: 'decline'; reason: string }     // consent, but the only options cost money — Esc out
+  | { act: 'leave'; reason: string }       // consent on a switch the human didn't ask for — theirs
+  | { act: 'done' }
+  | { act: 'wait' }
+export function planModelDialogStep(
+  paneText: string, alias: string, currentModel: string | null, consent: 'accept' | 'leave',
+): ModelDialogStep {
+  if (paneText && isModelSwitchConfirm(paneText)) return { act: 'confirm' }
+  if (paneText && isModelConsentDialog(paneText)) {
+    if (consent !== 'accept') {
+      return { act: 'leave', reason: `${alias} needs a usage-credit decision this switch can't make — the dialog is on the pane for a human to answer` }
+    }
+    const option = fableConsentContinueOption(paneText)
+    if (option === null) {
+      return { act: 'decline', reason: `${alias} needs usage credits, and this dialog only offers to buy or request them — nothing was changed` }
+    }
+    return { act: 'consent', option }
+  }
+  if (currentModel?.toLowerCase().includes(alias)) return { act: 'done' }
+  return { act: 'wait' }
 }
 
 // The `/model` PICKER — what bare `/model` (no argument) opens. Its two commit keys do very

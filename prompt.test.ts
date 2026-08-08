@@ -1,6 +1,6 @@
 // Prompt detection from pane captures — select menus vs permission dialogs. Pure functions.
 import { test, expect } from 'bun:test'
-import { slashPaletteEntries, stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, detectFirstRunScreen, isUsageLimitChoice, isResumeSessionPrompt, detectResumeSessionPrompt, detectEditorState, onNormalPrompt, detectModelUnavailable, detectCompacting, compactPercent, permPromptToken, waitingPromptSignature, isRecognizedPrompt, detectStuckScreen, extractGenericOptions, bashModeArmed, detectWorking, isModelSwitchConfirm, slashPaletteRows, slashPaletteWouldMisfire, inputBoxContent, inputBoxOccupant, submitLanded, detectModelPicker, parseWorkingStatus, feedbackSurveyOpen, paneAcceptsText } from './prompt.ts'
+import { slashPaletteEntries, stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, detectFirstRunScreen, isUsageLimitChoice, isResumeSessionPrompt, detectResumeSessionPrompt, detectEditorState, onNormalPrompt, detectModelUnavailable, detectCompacting, compactPercent, permPromptToken, waitingPromptSignature, isRecognizedPrompt, detectStuckScreen, extractGenericOptions, bashModeArmed, detectWorking, isModelSwitchConfirm, fableConsentContinueOption, planModelDialogStep, isModelConsentDialog, slashPaletteRows, slashPaletteWouldMisfire, inputBoxContent, inputBoxOccupant, submitLanded, detectModelPicker, parseWorkingStatus, feedbackSurveyOpen, paneAcceptsText } from './prompt.ts'
 
 test('stripAnsi removes CSI escape sequences', () => {
   expect(stripAnsi('\x1b[1mbold\x1b[0m text')).toBe('bold text')
@@ -212,6 +212,81 @@ test('isModelSwitchConfirm matches the cache confirm and NEVER the credit consen
   expect(isModelSwitchConfirm(CREDIT_CONSENT)).toBe(false)
   // ...and the credit dialog is not merely unmatched, it is RELAYED — the user answers it themselves.
   expect(detectUserPrompt(CREDIT_CONSENT)?.question).toBe('Switch to Fable 5?')
+})
+
+// The other half of that boundary. A human who taps Fable has answered "Switch to Fable 5?" already,
+// so the tap drives the CONTINUE option — but only that one. Every other primary option this dialog
+// can carry (read off the CLI 2.1.226 binary, which picks between them on whether credits exist)
+// spends money or files a request, and a model tap consents to neither.
+test('fableConsentContinueOption finds the continue option by label, matched to the question', () => {
+  expect(fableConsentContinueOption(CREDIT_CONSENT)).toBe(1)
+  // Position is not what identifies it — the same dialog with the options swapped answers with 2.
+  const swapped = CREDIT_CONSENT
+    .replace('     1. Continue with Fable 5', '     1. No, keep my current model')
+    .replace('   ❯ 2. No, keep my current model', '   ❯ 2. Continue with Fable 5')
+  expect(fableConsentContinueOption(swapped)).toBe(2)
+  // The label must name the model the QUESTION names: a "Continue with" for something else is not
+  // the answer to this question.
+  expect(fableConsentContinueOption(CREDIT_CONSENT.replace('Continue with Fable 5', 'Continue with browser tools'))).toBeNull()
+})
+
+test('fableConsentContinueOption refuses every buy/provision variant of the same dialog', () => {
+  for (const primary of [
+    'Yes, buy usage credits',
+    'Buy usage credits',
+    'Yes, re-enable and continue',
+    'Set up usage credits on claude.ai',
+    'Manage usage credits on claude.ai',
+    'Request usage credits from your admin',
+    'Request more from your admin',
+  ]) {
+    const dialog = CREDIT_CONSENT.replace('Continue with Fable 5', primary)
+    expect(fableConsentContinueOption(dialog)).toBeNull()
+    // Still a recognised question, so it is still relayed to the human — refusing to press it is
+    // not the same as pretending it isn't there.
+    expect(detectUserPrompt(dialog)?.question).toBe('Switch to Fable 5?')
+  }
+})
+
+test('fableConsentContinueOption is null on screens that are not this dialog', () => {
+  expect(fableConsentContinueOption('')).toBeNull()
+  expect(fableConsentContinueOption(CACHE_CONFIRM)).toBeNull()   // "Yes, switch to …" is the other dialog
+  // The dialog's own loading state ("Checking usage credits…") carries no options at all.
+  expect(fableConsentContinueOption([
+    '▔'.repeat(60), '   Switch to Fable 5?', '', '   Checking usage credits…', '',
+  ].join('\n'))).toBeNull()
+})
+
+// The regression for 2026-08-08: the owner tapped Fable on a Telegram surface, the CLI raised the
+// credit consent, and the driver had no step for it — it polled the consent out and left the pane
+// parked on it, which is the wedge. Against the old behaviour every 'consent' expectation below
+// reads 'wait', which is precisely the defect.
+test('planModelDialogStep answers the owner’s own Fable tap, in the order the CLI raises the dialogs', () => {
+  // Consent first, cache confirm behind it — one loop, both answered, then the readback ends it.
+  expect(planModelDialogStep(CREDIT_CONSENT, 'fable', 'Opus 5', 'accept')).toEqual({ act: 'consent', option: 1 })
+  expect(planModelDialogStep(CACHE_CONFIRM, 'fable', 'Opus 5', 'accept')).toEqual({ act: 'confirm' })
+  expect(planModelDialogStep('', 'fable', 'Fable 5', 'accept')).toEqual({ act: 'done' })
+  // Nothing on screen yet (the dialog renders a beat late) is a wait, never a conclusion.
+  expect(planModelDialogStep('', 'fable', 'Opus 5', 'accept')).toEqual({ act: 'wait' })
+})
+
+test('planModelDialogStep leaves the credit consent alone when the human did not ask for the switch', () => {
+  const step = planModelDialogStep(CREDIT_CONSENT, 'fable', 'Opus 5', 'leave')
+  expect(step.act).toBe('leave')
+  // …and it is REPORTED rather than swallowed, so a drift-guard or bus switch that didn't land says why.
+  expect(step.act === 'leave' && step.reason).toContain('human')
+  // The cache confirm is answered on every path — it is a disclosure, not a decision.
+  expect(planModelDialogStep(CACHE_CONFIRM, 'fable', 'Opus 5', 'leave')).toEqual({ act: 'confirm' })
+})
+
+test('planModelDialogStep declines — and does not wedge on — the buy/request variants', () => {
+  // The variant with no continue option is still RECOGNISED (the old option-anchored predicate went
+  // blind here and returned 'wait' forever, which is a parked pane).
+  const buy = CREDIT_CONSENT.replace('Continue with Fable 5', 'Yes, buy usage credits')
+  const step = planModelDialogStep(buy, 'fable', 'Opus 5', 'accept')
+  expect(step.act).toBe('decline')
+  expect(step.act === 'decline' && step.reason).toContain('usage credits')
+  expect(isModelConsentDialog(buy)).toBe(true)
 })
 
 test('isModelSwitchConfirm ignores every other screen that could be up when a model change lands', () => {

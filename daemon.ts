@@ -41,7 +41,7 @@ import { preserveGlobalEffort, reconcileEffortScope } from './effort-scope.ts'
 import { planDrift, driftStateAfter, type DriftState } from './drift-guard.ts'
 import { decideModel, decideEffort, upgradeNeedsConfirm, heldSpawnModel, heldSpawnNeedsLine, holdTapData, parseHoldTap, launchFallback, spawnCardHeader, relaunchModel, launchDefaultModel, launchDefaultEffort, launchDefaultMode, fablePolicy, fableRowState, onOff, type FablePolicy, AUTO_FALLBACK, AUTO_EFFORT_FALLBACK, FABLE, HAIKU, isClaudeFamily, type ModelDecision, type HoldOutcome } from './spawn-model-policy.ts'
 import { renderSessionsView } from './sessions-view.ts'
-import { detectCurrentMode, onNormalPrompt, inputBoxContent, inputBoxOccupant, isModelSwitchConfirm, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, paneRunsTypedInput, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType } from './prompt.ts'
+import { detectCurrentMode, onNormalPrompt, inputBoxContent, inputBoxOccupant, isModelSwitchConfirm, planModelDialogStep, isModelConsentDialog, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, paneRunsTypedInput, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType } from './prompt.ts'
 import { modelSwitchEvidence, findSessionFile, resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, lastAssistantStopReason, turnAnchorUuid, liveSubagents, currentTurnFeed, currentTurnActivity, concludedTurnWork, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
 // CC-only, called directly rather than through agent-transcript.ts's dispatcher: the error fields it
 // keys on (isApiErrorMessage/apiErrorStatus) are a Claude Code transcript shape with no Codex
@@ -4776,8 +4776,12 @@ async function escalateSurfaceless(paneId: string | null, summary: string): Prom
     process.stderr.write(`daemon: surfaceless block on ${paneId} (@${name}) — ${summary} — and NOBODY to escalate to; nothing sent\n`)
     return
   }
+  const drove = recentBridgeAction(paneId)
   const text = [
     `@${name} has no Telegram surface of its own and ${summary}`,
+    // Attribution, when the bridge itself put the screen there: a reader who Escs a dialog the OWNER
+    // raised cancels the owner's action, which is exactly what happened to @weather on 2026-08-08.
+    ...(drove ? [`The bridge was ${drove} — so this screen may be that action's own confirmation, not a question from the session.`] : []),
     `It is BLOCKED until someone answers. \`tg keys ${name} <key>…\` drives the screen holding it (enter esc up down left right 1-9); \`tg kill ${name}\` ends it.`,
     'Nothing was sent to any chat — this ask is the whole notification.',
   ].join('\n\n')
@@ -6635,7 +6639,9 @@ async function handleCall(
           }
           // awaitReadback:false for the same reason the mini app passes it: the confirm + readback
           // dance runs for up to ~30s and the calling agent is blocked on this result.
-          const { error } = await applySessionModel(targetPane, watcher, modelAlias, { awaitReadback: false })
+          const { error } = await applySessionModel(targetPane, watcher, modelAlias, {
+            awaitReadback: false, by: { human: false, label: `@${nameForEndpoint(fromSid, endpoints) || 'an agent'} over the bus` },
+          })
           if (error) { fail(error); return }
           void echoSlashResult(targetPane, targets[0]?.chat ?? '', slashAt, targets[0]?.thread ? Number(targets[0].thread) : undefined, command)
           text = `sent /model to @${toName} (${modelAlias}, that session only) — its outcome echoes on that session's surface`
@@ -7432,7 +7438,9 @@ async function relayModelSet(ctx: Context, paneId: string, watcher: PaneWatcher 
     await ctx.reply(`✅ Model set to <b>${escapeHtml(updated.model)}</b> — same conversation, now served by <b>${escapeHtml(harnessLabel(updated))}</b>.`, { parse_mode: 'HTML' }).catch(() => {})
     return
   }
-  const { error, model: name } = await applySessionModel(paneId, watcher, want)
+  const { error, model: name } = await applySessionModel(paneId, watcher, want, {
+    by: { human: true, label: 'the owner, with /model' },
+  })
   if (error) { await ctx.reply(`❌ ${escapeHtml(error)}`, { parse_mode: 'HTML' }).catch(() => {}); return }
   if (name) {
     // (applySessionModel already remembered the alias against this session — it records only on a
@@ -7451,23 +7459,71 @@ async function relayModelSet(ctx: Context, paneId: string, watcher: PaneWatcher 
 // reported by the roster as a bare "busy" with the model and context readouts missing. Observed
 // live on 2026-07-26 against a throwaway session; a single Escape clears it.
 // isModelSwitchConfirm lives in prompt.ts with the other pane-text predicates, and is tested there
-// against BOTH dialogs' literal text — accepting the credit consent on a user's behalf would be a
-// worse failure than the wedge this fixes, so that boundary is pinned by assertion, not by comment.
-// Wait out the confirm and accept it. Mirrors reapplyEffort, including WHY it polls rather than
-// taking one post-settle capture: the dialog can render a beat after the input box settles, and a
-// single read races it. Bails early when the statusline already shows the target model — a fresh
-// session with nothing cached applies with no dialog at all.
-async function acceptModelSwitch(paneId: string, watcher: PaneWatcher | null, alias: string): Promise<void> {
+// against BOTH dialogs' literal text — accepting the credit consent off a bridge-internal decision
+// would be a worse failure than the wedge this fixes, so that boundary is pinned by assertion, not
+// by comment. Wait out the confirm and accept it. Mirrors reapplyEffort, including WHY it polls
+// rather than taking one post-settle capture: the dialog can render a beat after the input box
+// settles, and a single read races it. Bails early when the statusline already shows the target
+// model — a fresh session with nothing cached applies with no dialog at all.
+//
+// A Fable pick can raise BOTH dialogs, credit consent FIRST and cache confirm behind it (the order
+// is the CLI's, read off 2.1.226's picker handler), so this answers whatever is on screen and keeps
+// looping rather than returning after one. `consent` is the human's, carried down from the surface
+// they tapped: with 'accept' the "Continue with <model>" option is pressed, because tapping Fable on
+// a bridge surface IS the answer to "Switch to Fable 5?" and leaving it standing wedges the session
+// on its own initiator's question. Everything else — a daemon-initiated switch, and every buy /
+// provision variant of the dialog — is left alone for the human, which is what the returned reason
+// reports. Returns null when nothing was left standing.
+async function acceptModelSwitch(
+  paneId: string, watcher: PaneWatcher | null, alias: string, consent: 'accept' | 'leave',
+): Promise<string | null> {
+  let unanswered: string | null = null
   const run = async () => {
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < 14; i++) {
       await waitForSettle(paneId, 200, 2500)
       const cap = await capturePane(paneId).catch(() => '')
-      if (cap && isModelSwitchConfirm(cap)) { await sendKeys(paneId, ['1', 'Enter']); return }
-      if (parseStatusline(cap)?.model?.toLowerCase().includes(alias)) return
+      const step = planModelDialogStep(cap, alias, parseStatusline(cap)?.model ?? null, consent)
+      if (step.act === 'done') return
+      if (step.act === 'confirm') { await sendKeys(paneId, ['1', 'Enter']); continue }
+      if (step.act === 'consent') { await sendKeys(paneId, [String(step.option), 'Enter']); continue }
+      if (step.act === 'decline') {
+        // Escape so the session is left at its own prompt rather than parked on a dialog nobody
+        // here may answer — a switch that didn't happen, not a session taken out of service.
+        await sendKeys(paneId, ['Escape'])
+        unanswered = step.reason
+        return
+      }
+      if (step.act === 'leave') { unanswered = step.reason; return }
       await sleep(400)
     }
   }
   await (watcher ? watcher.withInjection(run) : run())
+  return unanswered
+}
+
+// The last action the BRIDGE drove into a pane, and who asked for it — quoted by the alerts that
+// fire when a pane is found sitting on a dialog nobody answered.
+//
+// It exists because of what those alerts cost when they don't carry it: @weather's model switch
+// (2026-08-08) parked on a dialog, the surfaceless-block ask reached the chat lane reading only
+// "is waiting on a question: 'Switch to Fable 5?'", and the reader — with no way to tell an
+// owner-initiated switch from a session asking something of its own — sent Esc and cancelled the
+// owner's own action. One line of attribution turns that guess into a decision.
+//
+// Deliberately a plain TTL record and not a lifecycle: it is evidence about the recent past, not
+// state anything branches on, so a stale entry must expire on its own rather than depend on some
+// clearing path having run. The window is generous next to the alert timers that read it.
+const paneActionOrigin = new Map<string, { what: string; at: number }>()
+const ACTION_ORIGIN_TTL_MS = 15 * 60_000
+function noteBridgeAction(pane: string, what: string): void {
+  paneActionOrigin.set(pane, { what, at: Date.now() })
+}
+function recentBridgeAction(pane: string | null): string | null {
+  if (!pane) return null
+  const rec = paneActionOrigin.get(pane)
+  if (!rec) return null
+  if (Date.now() - rec.at > ACTION_ORIGIN_TTL_MS) { paneActionOrigin.delete(pane); return null }
+  return rec.what
 }
 
 // The picker row each alias names. The row LABEL is what we match (by leading token), never the
@@ -7507,9 +7563,16 @@ async function moveModelHighlight(pane: string, target: number, seen: ModelPicke
 // form: a switch that didn't happen is a nuisance, a silent global-default rewrite is the bug.
 // `awaitReadback: false` returns as soon as the choice is committed and finishes the confirm +
 // readback in the background — for the mini app, whose HTTP request must not be held open for it.
+//
+// `by` is WHO asked, and it decides one thing: whether the Fable credit consent is answered here
+// (a human's own tap) or left standing for a human (everything the bridge decides on its own). It
+// is also what the pane's dialog alerts quote — see noteBridgeAction. Callers pass it; the default
+// is the safe half of both.
 async function applySessionModel(
-  pane: string, watcher: PaneWatcher | null, alias: string, opts?: { awaitReadback?: boolean },
+  pane: string, watcher: PaneWatcher | null, alias: string,
+  opts?: { awaitReadback?: boolean; by?: { human: boolean; label: string } },
 ): Promise<{ error: string | null; model: string | null }> {
+  noteBridgeAction(pane, `switching this session to ${alias}, asked for by ${opts?.by?.label ?? 'the bridge'}`)
   const rowName = MODEL_PICKER_ROW[alias]
   if (!rowName) return { error: `unknown model — one of: ${MODEL_ALIASES.join(' | ')}`, model: null }
   // Same palette guard the argument form used: bare `/model` is exactly the token that makes the
@@ -7543,23 +7606,25 @@ async function applySessionModel(
     process.stderr.write(`daemon: model switch to ${alias} in pane ${pane} aborted: ${error}\n`)
     return { error, model: null }
   }
-  // A session with cached history still raises the "Switch model?" confirm after the pick; the Fable
-  // CREDIT consent is never answered here (that boundary is pinned in prompt.ts) and simply never
-  // lands, which the readback below reports truthfully.
-  const finish = async (): Promise<string | null> => {
-    await acceptModelSwitch(pane, watcher, alias)
+  // A session with cached history still raises the "Switch model?" confirm after the pick, and a
+  // Fable pick can raise the CREDIT consent in front of it. acceptModelSwitch answers what it may
+  // and names what it left standing, so a switch that didn't land says WHY instead of reading as a
+  // silent no-op — the readback is still what decides whether it landed.
+  const finish = async (): Promise<{ model: string | null; reason: string | null }> => {
+    const unanswered = await acceptModelSwitch(pane, watcher, alias, opts?.by?.human ? 'accept' : 'leave')
     for (let i = 0; i < 8; i++) {
       await sleep(300)
       const cur = await readCurrentModel(pane, watcher).catch(() => null)
       if (cur && cur.toLowerCase().includes(alias)) {
         void sessionForPane(pane, false).then(sid => recordSessionModel(sid, alias)).catch(() => {})
-        return cur
+        return { model: cur, reason: null }
       }
     }
-    return null
+    return { model: null, reason: unanswered }
   }
   if (opts?.awaitReadback === false) { void finish(); return { error: null, model: null } }
-  return { error: null, model: await finish() }
+  const done = await finish()
+  return { error: done.reason, model: done.model }
 }
 
 // Run a `!<cmd>` shell command on the host (in the focused pane's cwd) and relay stdout/stderr back.
@@ -9451,7 +9516,9 @@ async function guardModelDrift(pane: string, sid: string, file: string): Promise
   if (!cap || !onNormalPrompt(cap) || detectWorking(cap)) { driftStates.set(sid, state); return }   // retry next tick, no attempt spent
   process.stderr.write(`daemon: drift-guard: ${sid} answered on ${answering} but is pinned to ${pin} with no /model recorded — re-asserting (attempt ${plan.attempt})\n`)
   const watcher = pane === focus.activePaneId ? focus.paneWatcher : null
-  const { error } = await applySessionModel(pane, watcher, plan.alias, { awaitReadback: false })
+  const { error } = await applySessionModel(pane, watcher, plan.alias, {
+    awaitReadback: false, by: { human: false, label: "the drift guard, re-asserting this session's pinned model" },
+  })
   for (const { chat, thread } of await fleetSurfaceFor(pane)) {
     await channel.sendText(chat, `🎯 ${label} drifted to <b>${escapeHtml(answering ?? '?')}</b> with no /model recorded — re-asserted <b>${escapeHtml(plan.alias)}</b> (attempt ${plan.attempt})${error ? ` · ${escapeHtml(error)}` : ''}`,
       { silent: true, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
@@ -10159,13 +10226,12 @@ async function relaunchFreshSession(t: RestartTarget): Promise<string | 'untouch
   finally { setPaneRestarting(t.pane, false) }
 }
 
-// The Fable CREDIT consent ("Switch to Fable 5?" / "Continue with Fable 5") — a spending decision,
-// which is why isModelSwitchConfirm is written to stay FALSE for it and detectUserPrompt relays it to
-// the human as buttons. This predicate exists only to RECOGNISE it, never to accept it.
-function isFableCreditConsent(cap: string): boolean {
-  const p = detectUserPrompt(cap)
-  return !!p && /switch to .+\?/i.test(p.question) && p.options.some(o => /continue with /i.test(o.label))
-}
+// The Fable CREDIT consent ("Switch to Fable 5?") — a spending decision, which is why
+// isModelSwitchConfirm is written to stay FALSE for it. This predicate exists only to RECOGNISE it,
+// never to accept it; the one path that answers it is a human's own model tap, via
+// planModelDialogStep. It used to require a "Continue with …" option, which made it blind to the
+// dialog's buy/request variants — the variants an unattended refresh is least able to survive.
+const isFableCreditConsent = isModelConsentDialog
 
 // A refreshed session that boots on Fable can land parked on the credit consent with nobody there to
 // answer it — an unattended refresh that wedges a session is worse than one that doesn't get Fable.
@@ -10187,7 +10253,9 @@ async function declineFableForOpus(pane: string, sid: string | null): Promise<vo
   await waitForSettle(pane, 200, 5000)
   // Session-only, like every other bridge-driven switch — the argument form would also rewrite
   // ~/.claude/settings.json's account-wide default, and a daemon fallback may never do that.
-  const r = await applySessionModel(pane, watcher, 'opus')
+  const r = await applySessionModel(pane, watcher, 'opus', {
+    by: { human: false, label: 'the auto-refresh, falling back after declining the Fable credit consent' },
+  })
   if (r.error) { process.stderr.write(`daemon: auto-refresh: opus fallback in ${pane} failed: ${r.error}\n`); return }
   recordSessionModel(sid, 'opus')
   process.stderr.write(`daemon: auto-refresh: declined the Fable credit consent in ${pane}, fell back to opus\n`)
@@ -13380,7 +13448,9 @@ bot.on('callback_query:data', async ctx => {
     await ctx.answerCallbackQuery({ text: `Switching to ${req.alias}…` }).catch(() => {})
     modelRequests.delete(req.sid)
     const watcher = pane === focus.activePaneId ? focus.paneWatcher : null
-    const { error } = await applySessionModel(pane, watcher, req.alias, { awaitReadback: false })
+    const { error } = await applySessionModel(pane, watcher, req.alias, {
+      awaitReadback: false, by: { human: true, label: `the owner, approving @${req.asker}'s request on this card` },
+    })
     // Either way the alias becomes this session's PIN — which is also the whole mid-turn story: a
     // refusal here leaves the pin set, and the drift guard's between-turns tick re-asserts a pin at
     // the next resting prompt. Existing machinery, not a second timer that would have to learn the
@@ -14097,7 +14167,9 @@ bot.on('callback_query:data', async ctx => {
     // handles the "Switch model?" cache confirm that parks the pane on a dialog rather than the new
     // model, deliberately does NOT answer the usage-credits dialog, and only reports a name once the
     // readback reflects the request; anything else falls through to the truthful label below.
-    const { error, model } = await applySessionModel(t.paneId, t.watcher, alias)
+    const { error, model } = await applySessionModel(t.paneId, t.watcher, alias, {
+      by: { human: true, label: 'the owner, tapping the model buttons' },
+    })
     const label = model ? `now ${escapeHtml(model)}` : error ? escapeHtml(error) : 'did not switch'
     await ctx.editMessageText(`🧠 <b>Model</b> — ${label}\n\n${MODEL_TIP}`, {
       parse_mode: 'HTML', reply_markup: modelPickerKeyboard(),
@@ -17804,8 +17876,12 @@ async function sweepStuckPanes(): Promise<void> {
       const nm = await paneDisplayName(pane)
       const sid = await sessionForPane(pane, false).catch(() => null)
       const blocked = sid ? queuedFor(sid).length : 0
+      const drove = recentBridgeAction(pane)
       await wakeOrchestrator([
         `❓ <b>${escapeHtml(nm)}</b> has an unanswered prompt — a card was relayed but nobody tapped it.`,
+        // Same attribution as escalateSurfaceless, and for the same reason: whether Esc is the right
+        // lever here depends entirely on whether the session raised this or the bridge did.
+        ...(drove ? [`The bridge was ${escapeHtml(drove)} — this may be that action's own confirmation rather than the session asking something.`] : []),
         blocked ? `${blocked} ask${blocked === 1 ? '' : 's'} queued behind it.` : 'Nothing queued behind it yet.',
         `Last lines of its pane:\n${cleanPaneTail(cap, 12)}`,
         `Levers: \`tg keys ${nm} enter\` (or esc / a digit — for a picker or permission prompt) · \`tg slash ${nm} "/clear"\` · \`tg kill ${nm}\` (then \`tg reopen ${nm}\`).`,
@@ -18041,7 +18117,7 @@ setInterval(() => void sweepClaudeInstall(), 6 * 3_600_000).unref()
 // sweep-delete would strand the "🗜️ Compacting…" card forever. Entries are short-lived + self-cleaning.
 const PANE_STATE_MAPS: { delete(k: string): boolean; keys(): IterableIterator<string> }[] = [
   resumeRelayed, paneTranscriptCache, thinkingPendingUntil, stuckDumpAt, editorHeld,
-  modelUnavailAlerted, staleSessionNotified, auxPromptStates, stuckWatch,
+  modelUnavailAlerted, staleSessionNotified, auxPromptStates, stuckWatch, paneActionOrigin,
   loginHeldPanes, wedgeEscalated,   // Sets — same delete(k)/keys() shape the sweep needs
 ]
 function forgetPane(paneId: string): void {
@@ -19210,7 +19286,9 @@ async function webappSessionAction(userId: string, sid: string, action: 'stop' |
       if (selection.kind === 'anthropic') {
         // The native path is unchanged: choose the session-only picker row, never `/model <id>`
         // (that argument form also rewrites the account-wide default).
-        const { error } = await applySessionModel(pane, watcher, selection.alias, { awaitReadback: false })
+        const { error } = await applySessionModel(pane, watcher, selection.alias, {
+          awaitReadback: false, by: { human: true, label: 'the owner, on the mini app’s model dial' },
+        })
         return error
       }
       if (!file) return 'could not resolve this conversation — nothing was changed'
