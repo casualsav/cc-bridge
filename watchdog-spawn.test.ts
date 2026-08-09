@@ -12,11 +12,33 @@
 // guaranteed to fail, exactly as it did in production). No bun is broken on this box — only the
 // child's view of it.
 import { test, expect } from 'bun:test'
-import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, existsSync, linkSync, unlinkSync, rmSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, existsSync, linkSync, unlinkSync, rmSync, copyFileSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 const WATCHDOG = join(import.meta.dir, 'watchdog.ts')
+
+// A deletable stand-in for the real interpreter, for the "it vanishes under us" case below.
+//
+// It used to be a hardlink into the /tmp fixture, which stopped being possible on 2026-08-08 when
+// /tmp became tmpfs on this box: a hardlink cannot cross devices, so every run failed EXDEV and
+// blocked `bun run deploy` (which gates on this suite). The fix is to stop assuming the fixture and
+// the binary share a filesystem — link BESIDE the binary, where they share one by construction, and
+// copy only when that directory is not writable (a system-wide install). The copy is the fallback
+// rather than the default because it is ~90MB, and on a tmpfs fixture that is 90MB of RAM.
+function throwawayInterpreter(sandboxDir: string): { path: string; cleanup: () => void } {
+  try {
+    const dir = mkdtempSync(join(dirname(process.execPath), '.wd-link-'))
+    const path = join(dir, 'bun')
+    linkSync(process.execPath, path)
+    return { path, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
+  } catch {
+    const path = join(sandboxDir, 'bun-copy')
+    copyFileSync(process.execPath, path)
+    chmodSync(path, 0o755)
+    return { path, cleanup: () => rmSync(path, { force: true }) }
+  }
+}
 
 // A sandbox HOME whose plugin cache holds a stub daemon.ts that touches a marker and parks, so a
 // SUCCESSFUL launch is observable without starting a bridge.
@@ -77,17 +99,17 @@ test('with no `bun` on PATH the watchdog still launches the daemon and stays up'
 
 test('an interpreter that vanishes under it does not kill the watchdog', async () => {
   // The production failure, reproduced exactly and safely. spawnDaemon() uses process.execPath, so we
-  // launch the watchdog through a HARD LINK to the real bun (same inode, same filesystem — no 91MB
-  // copy, and execPath reports the link path) and then delete the link. Its next respawn attempt hits
-  // `ENOENT … posix_spawn <link>` — the same error, on the same code path — without touching the real
-  // bun binary this box depends on.
+  // launch the watchdog through a deletable stand-in for the real bun (a hardlink where one is
+  // possible — same inode, no 91MB copy — and execPath reports that path) and then delete it. Its next
+  // respawn attempt hits `ENOENT … posix_spawn <path>` — the same error, on the same code path —
+  // without touching the real bun binary this box depends on.
   //
   // This is the case a try/catch cannot cover: spawn() fails ASYNCHRONOUSLY (pid undefined, then an
   // 'error' event), so without a listener it lands as an uncaught exception and Bun exits.
   const { home, stateDir, marker } = sandbox()
+  const interp = throwawayInterpreter(home)
   try {
-    const link = join(home, 'bun-hardlink')
-    linkSync(process.execPath, link)
+    const link = interp.path
 
     const proc = Bun.spawn([link, WATCHDOG], {
       env: { TELEGRAM_STATE_DIR: stateDir, HOME: home, PATH: '/nonexistent-bin' },
@@ -108,7 +130,7 @@ test('an interpreter that vanishes under it does not kill the watchdog', async (
     expect(err).toMatch(/failed|could not launch/i)   // it must SAY the launch failed
     expect(aliveAfter).toBe(true)                     // and still be standing to retry
     expect(err).not.toContain('Bun v')                // no crash banner — that's what dying looks like
-  } finally { cleanup(home, marker) }
+  } finally { interp.cleanup(); cleanup(home, marker) }
 })
 
 test('a launch that cannot succeed leaves the watchdog running to retry', async () => {
