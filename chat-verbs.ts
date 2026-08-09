@@ -14,7 +14,35 @@
 
 export const CHAT_VERBS: readonly { verb: string; re: RegExp }[] = [
   { verb: 'launch', re: /^\s*@launch(?=\s|$)/i },
+  { verb: 'kill', re: /^\s*@kill(?=\s|$)/i },
+  { verb: 'reopen', re: /^\s*@reopen(?=\s|$)/i },
 ]
+
+// `@kill <name> [force]` / `@reopen <name|sid-prefix>` — a verb whose whole argument is a session
+// name. Returns null when the text is not that verb at all.
+//
+// Junk after the name is REFUSED rather than ignored: `@kill web now please` is a typo or a
+// sentence, and quietly killing @web on the strength of the first two words is the kind of helpful
+// that gets something ended that shouldn't be. `force` is the one trailing word that means something,
+// spelled without dashes because this is a chat, not a CLI.
+export type ParsedNameVerb =
+  | { kind: 'name'; name: string; force: boolean }
+  | { kind: 'error'; error: string }
+
+export function parseNameVerb(raw: string, verb: 'kill' | 'reopen'): ParsedNameVerb | null {
+  const head = new RegExp(`^\\s*@${verb}(?=\\s|$)`, 'i').exec(raw)
+  if (!head) return null
+  const usage = verb === 'kill' ? 'usage: @kill <name> [force]' : 'usage: @reopen <name>'
+  const rest = raw.slice(head[0].length).trim()
+  if (!rest) return { kind: 'error', error: usage }
+  const parts = rest.split(/\s+/)
+  const name = parts[0]!
+  if (name.startsWith('-') || name.startsWith('@')) return { kind: 'error', error: `'${name}' is not a session name — ${usage}` }
+  const extra = parts.slice(1)
+  const force = verb === 'kill' && extra.length === 1 && /^(force|--force)$/i.test(extra[0]!)
+  if (extra.length && !force) return { kind: 'error', error: `I only understood the name "${name}" — ${usage}` }
+  return { kind: 'name', name, force }
+}
 
 // The verb this text explicitly names, or null. Only ever matched at the START of the message: an
 // `@launch` in the middle of a sentence is prose about the feature, not a use of it.
@@ -22,6 +50,21 @@ export function chatVerbIn(text: string): string | null {
   for (const { verb, re } of CHAT_VERBS) if (re.test(text)) return verb
   return null
 }
+
+// ---- The two voices --------------------------------------------------------------------------
+//
+// `kill` and `reopen` have ONE implementation and two callers: the bus verb an agent runs, and the
+// gesture the owner types in his chat. The rules and the outcomes are identical; the only thing that
+// differs is the gesture a recovery hint can name — he cannot run `tg reopen web` from Telegram and
+// an agent cannot type `@reopen web`. So the dialect is a parameter, and it lives here, next to the
+// verb table, because two hand-written copies of "how do I undo this" drift and the drift is
+// invisible until someone follows the wrong one.
+export type Gestures = 'cli' | 'chat'
+export const undoGesture = (g: Gestures, name: string): string =>
+  g === 'cli' ? `\`tg reopen ${name}\`` : `"@reopen ${name}"`
+export const forceGesture = (g: Gestures, name: string): string =>
+  g === 'cli' ? `re-run as \`tg kill ${name} --force\`` : `send "@kill ${name} force"`
+export const spawnGesture = (g: Gestures): string => g === 'cli' ? '`tg spawn`' : '`@launch`'
 
 export type OwnerRoute = 'verb' | 'force-reply' | 'session-reply' | 'lane'
 

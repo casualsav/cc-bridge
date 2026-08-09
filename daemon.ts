@@ -191,7 +191,7 @@ import { spawnModelFlag, WIDE_CONTEXT_SUFFIX } from './model-window.ts'
 import { buildModelSelector, MODEL_ALIASES, MODEL_ALIAS_IDS, planModelSelection, type ModelSelector } from './model-catalog.ts'
 import { parseLaunch, type ParsedLaunch } from './launch-command.ts'
 import { createMsgRoutes, type MsgRouteMap } from './msg-routes.ts'
-import { chatVerbIn, planOwnerRoute } from './chat-verbs.ts'
+import { chatVerbIn, planOwnerRoute, parseNameVerb, undoGesture, forceGesture, spawnGesture, type Gestures } from './chat-verbs.ts'
 import {
   initStatusCard, statusCardText, statusKeyboard, updateSessionPin, updateTopicPins,
   removeSessionPins, refreshSessionPin, forgetChatPin, armChatPin, sessionPins, pinTextCache, persistSessionPins,
@@ -3299,6 +3299,131 @@ function sessionCloseDenial(from: string, targetSid: string, targetName: string,
   if (isChatLaneSession(targetSid)) return `@${targetName} is a chat lane, the owner's own surface — owner-only`
   if (topic?.spawnedBy === from || isChatLaneSession(from)) return null
   return `@${targetName} wasn't spawned by you — only its spawner or the chat lane can close it`
+}
+
+
+// ---- `kill` / `reopen`, shared by the bus verb and the owner's chat gesture ----
+//
+// ONE implementation with TWO VOICES. The rules, the ledger rows and the recovery hints are identical
+// whichever surface asked; what differs is the gesture a hint can name — the CLI's `tg reopen web` is
+// something the owner cannot run from Telegram, and `@reopen web` is something an agent cannot. So the
+// dialect is a parameter rather than a second copy of the text, because two copies of "how do I undo
+// this" drift, and the drift is invisible until someone follows the wrong one.
+
+async function runSessionKill(fromSid: string, target: string, force: boolean, g: Gestures): Promise<{ ok: boolean; text: string }> {
+        const endpoints = busEndpoints()
+        const res = resolveEndpoint(target, endpoints)
+        if ('error' in res) { return { ok: false, text: res.error } }
+        const topic = getTopicBySession(res.id)
+        const denial = sessionCloseDenial(fromSid, res.id, target, topic ?? null)
+        if (denial) { return { ok: false, text: denial } }
+        if (!topic) { return { ok: false, text: `@${target} has no session entry to close` } }
+        const targetPane = await paneForSession(res.id).catch(() => null)
+        const alive = !!targetPane && await paneAlive(targetPane).catch(() => false)
+        // Name what dies before it dies. This sits BEFORE the killedAt stamp on purpose: a refused
+        // kill must leave no trace, or the row is marked deliberately-killed by a call that killed
+        // nothing. The agent-side contract is a second, explicit invocation — `--force` — rather than
+        // a prompt, because the caller here is as often an agent as a human and a question has
+        // nowhere to be answered in a one-shot CLI call.
+        if (targetPane && alive && !force) {
+          const shells = await paneSurvivors(targetPane)
+          if (shells.length) {
+            return { ok: false, text: `${survivorWarning(shells)}\n${forceGesture(g, target)} to close it anyway` }
+          }
+        }
+        // Stamp the row as deliberately killed BEFORE the pane dies: it exempts the row from the
+        // groupless GC (which otherwise dropped it ~85s later, taking `tg reopen`'s only record of
+        // the cwd + conversation with it) for KILL_UNDO_GRACE_MS.
+        updateTopic(res.id, { killedAt: Date.now() })
+        markSessionEnding(res.id)   // its card leaves the fleet list now, not when the /exit finally lands
+        if (targetPane && alive) {
+          // Suppress the lazy topic reopen until /exit lands; the reactive closeTopicForPane closes
+          // the tab once the pane dies. closeSessionPane escalates for ~20s, so don't await it here —
+          // a wedged session (the reason you're killing it) would hold the CLI call open.
+          if (topic.threadId != null) markTopicClosePending(res.id)
+          void closeSessionPane(targetPane, 'bus-kill')
+        }
+        // An already-dead session is left ALONE, entry and all: dropping the row here would be the one
+        // close that `tg reopen` can't undo (the row is what remembers the folder + conversation).
+        appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'kill', from: nameForEndpoint(fromSid, endpoints), to: target, text: alive ? 'exiting' : 'already dead' })
+        // The hint is only unambiguous while this is the sole closed row under that name: with the
+        // killedAt just stamped above it IS the newest, so a bare `tg reopen <name>` picks it — but
+        // if OTHER closed rows already share the name, spell out the sid so the undo is precise.
+        const otherClosed = listTopics().filter(t => t.closed && t.sessionId !== res.id && normalizeEndpointName(t.name) === normalizeEndpointName(target))
+        const sidNote = otherClosed.length ? ` (this one specifically: ${undoGesture(g, res.id.slice(0, 8))})` : ''
+        // ANNOTATION, NEVER A REFUSAL. A gate here would take the shape of the survivor warning above
+        // — and would fire on the COMMON case, a worker that finished, reported, and is being retired
+        // cleanly, which trains a `--force` reflex that then carries the one real catch through with
+        // the rest. So the state is stated and the kill proceeds; the kill is reversible (`tg reopen`
+        // resumes the same conversation in the same folder), which is what makes stating it enough.
+        const killHandoff = topic.cwd ? handoffAnnotation(readHandoffState(topic.cwd), fmtAgo) : null
+        const handoffNote = killHandoff ? `\n${killHandoff} — prune it before this is final` : ''
+        return { ok: true, text: alive
+          ? `ending @${target} — undo with ${undoGesture(g, target)}${sidNote}${handoffNote}`
+          : `@${target} was already down — ${undoGesture(g, target)} brings it back${sidNote}${handoffNote}` }
+}
+
+async function runSessionReopen(fromSid: string, target: string, g: Gestures): Promise<{ ok: boolean; text: string }> {
+        let text: string
+        // resolveEndpoint deliberately refuses CLOSED endpoints ("exists but isn't running"), which is
+        // every reopen target — so resolve against the registry directly. A sid (or an unambiguous
+        // prefix of one) wins over a name match, so a killed row stays reachable precisely even when
+        // several closed rows share its display name (see resolveReopenTarget).
+        const rows: Array<[string, TopicEntry]> = listTopics().map(({ sessionId, ...e }) => [sessionId, e])
+        const { hit, reason, others } = resolveReopenTarget(rows, target, normalizeEndpointName)
+        if (reason === 'live-only') { return { ok: false, text: `@${target} is already live — nothing to reopen` } }
+        if (reason === 'none' || !hit) { return { ok: false, text: `no session named "${target}" to reopen (a session id or its prefix works too) — a headless session's entry is dropped when its pane dies, and only ${g === 'cli' ? '`tg spawn`' : 'a fresh `@launch`'} can bring that back` } }
+        const [sid, t0] = hit
+        const sid8 = sid.slice(0, 8)
+        const denial = sessionCloseDenial(fromSid, sid, t0.name, t0)
+        if (denial) { return { ok: false, text: denial } }
+        if (!t0.closed && !t0.killedAt) { return { ok: false, text: `@${t0.name} (${sid8}) is already live` } }
+        if (!t0.closed && t0.killedAt) {
+          // `tg kill` stamps killedAt on the spot, but the row's own closed:true lands only on the
+          // next reconcile sweep (topic-runtime.ts:492, up to ~90s behind) — so the row can still read
+          // open here for a session whose pane is already gone. Poll the PANE, not the row, or a
+          // reopen in this window is wrongly refused as "already live".
+          const deadline = Date.now() + 30_000
+          let gone = false
+          while (Date.now() < deadline) {
+            const p = await paneForSession(sid).catch(() => null)
+            if (!p || !(await paneAlive(p).catch(() => false))) { gone = true; break }
+            await sleep(1000)
+          }
+          if (!gone) { return { ok: false, text: `@${t0.name} (${sid8}) is still shutting down — retry in a few seconds` } }
+        }
+        // Skipped once killedAt is set: the wait above already confirmed the pane is gone, and
+        // re-checking here would re-refuse the very teardown window that wait just cleared.
+        if (!t0.killedAt) {
+          const livePane = await paneForSession(sid).catch(() => null)
+          if (livePane && await paneAlive(livePane).catch(() => false)) { return { ok: false, text: `@${t0.name} (${sid8}) is already up` } }
+        }
+        const othersNote = others.length
+          ? ` ${others.length} other closed row${others.length === 1 ? ' shares' : 's share'} this name — reopen a specific one by sid: ${others.map(s => s.slice(0, 8)).join(', ')}.`
+          : ''
+        let newPane: string | null
+        if (!t0.agentSessionId) {
+          newPane = await spawnSession(t0.cwd, '', sid, topicAccount(t0), topicAgent(t0), undefined, { model: refreshSpawnModel(sid), effort: null })
+          text = `reopened @${t0.name} (${sid8}) fresh in ${t0.cwd} — the session never completed a turn, so there was nothing to resume; same name and topic.${othersNote}`
+        } else {
+          const resumeAlias = topicAgent(t0) === 'claude' ? reopenResumeModelAlias(t0.agentSessionId) : null
+          newPane = await spawnSession(t0.cwd, `--resume ${t0.agentSessionId}`, sid, topicAccount(t0), topicAgent(t0), undefined, resumeAlias ? { model: resumeAlias } : undefined)
+          // The cost, named at the only moment the caller can still act on it. A one-shot bus verb
+          // has no channel to confirm on — it commits when it is typed — so this is the reopen's
+          // own output rather than a pre-flight prompt: the next self-contained task can go to
+          // `tg spawn` instead, which is the decision this line exists to inform.
+          const backlog = resumeBacklogSize(t0.agentSessionId)
+          text = `reopening @${t0.name} (${sid8}) in ${t0.cwd} — resuming its own conversation, same topic and name. Its whole backlog${backlog ? ` (${backlog} of transcript)` : ''} replays into context at full token cost before it reads anything you send; a self-contained task belongs in a fresh ${spawnGesture(g)} instead. Give it ~30s to reach a prompt.${othersNote}`
+        }
+        if (!newPane) { return { ok: false, text: `couldn't relaunch @${t0.name} (${sid8}) in ${t0.cwd} — see daemon log` } }
+        // Clear the kill stamp and un-close the row. reopenSessionTopic handles the Telegram tab,
+        // but it no-ops without a group — so a groupless row would stay closed:true and the session
+        // would come back invisible to every dashboard and unaddressable on the bus.
+        updateTopic(sid, { closed: false, killedAt: undefined })
+        endingSids.delete(sid)   // the revive is what puts the card back
+        await reopenSessionTopic(sid)   // reopen the tab now, not on its first reply
+        appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'reopen', from: nameForEndpoint(fromSid, busEndpoints()), to: t0.name, text: t0.agentSessionId ? `--resume ${t0.agentSessionId}` : 'fresh' })
+        return { ok: true, text }
 }
 
 // The room = the bound forum group. The bus requires topic mode (an endpoint IS a topic's session).
@@ -6981,57 +7106,9 @@ async function handleCall(
         if (!fromSid) { write({ t: 'result', id, ok: false, text: '`tg kill` must run inside a bridged session' }); return }
         const target = String(args.name ?? '').trim()
         if (!target) { write({ t: 'result', id, ok: false, text: 'usage: tg kill <name>' }); return }
-        const endpoints = busEndpoints()
-        const res = resolveEndpoint(target, endpoints)
-        if ('error' in res) { write({ t: 'result', id, ok: false, text: res.error }); return }
-        const topic = getTopicBySession(res.id)
-        const denial = sessionCloseDenial(fromSid, res.id, target, topic ?? null)
-        if (denial) { write({ t: 'result', id, ok: false, text: denial }); return }
-        if (!topic) { write({ t: 'result', id, ok: false, text: `@${target} has no session entry to close` }); return }
-        const targetPane = await paneForSession(res.id).catch(() => null)
-        const alive = !!targetPane && await paneAlive(targetPane).catch(() => false)
-        // Name what dies before it dies. This sits BEFORE the killedAt stamp on purpose: a refused
-        // kill must leave no trace, or the row is marked deliberately-killed by a call that killed
-        // nothing. The agent-side contract is a second, explicit invocation — `--force` — rather than
-        // a prompt, because the caller here is as often an agent as a human and a question has
-        // nowhere to be answered in a one-shot CLI call.
-        if (targetPane && alive && !args.force) {
-          const shells = await paneSurvivors(targetPane)
-          if (shells.length) {
-            write({ t: 'result', id, ok: false, text: `${survivorWarning(shells)}\nre-run as \`tg kill ${target} --force\` to close anyway` })
-            return
-          }
-        }
-        // Stamp the row as deliberately killed BEFORE the pane dies: it exempts the row from the
-        // groupless GC (which otherwise dropped it ~85s later, taking `tg reopen`'s only record of
-        // the cwd + conversation with it) for KILL_UNDO_GRACE_MS.
-        updateTopic(res.id, { killedAt: Date.now() })
-        markSessionEnding(res.id)   // its card leaves the fleet list now, not when the /exit finally lands
-        if (targetPane && alive) {
-          // Suppress the lazy topic reopen until /exit lands; the reactive closeTopicForPane closes
-          // the tab once the pane dies. closeSessionPane escalates for ~20s, so don't await it here —
-          // a wedged session (the reason you're killing it) would hold the CLI call open.
-          if (topic.threadId != null) markTopicClosePending(res.id)
-          void closeSessionPane(targetPane, 'bus-kill')
-        }
-        // An already-dead session is left ALONE, entry and all: dropping the row here would be the one
-        // close that `tg reopen` can't undo (the row is what remembers the folder + conversation).
-        appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'kill', from: nameForEndpoint(fromSid, endpoints), to: target, text: alive ? 'exiting' : 'already dead' })
-        // The hint is only unambiguous while this is the sole closed row under that name: with the
-        // killedAt just stamped above it IS the newest, so a bare `tg reopen <name>` picks it — but
-        // if OTHER closed rows already share the name, spell out the sid so the undo is precise.
-        const otherClosed = listTopics().filter(t => t.closed && t.sessionId !== res.id && normalizeEndpointName(t.name) === normalizeEndpointName(target))
-        const sidNote = otherClosed.length ? ` (this one specifically: \`tg reopen ${res.id.slice(0, 8)}\`)` : ''
-        // ANNOTATION, NEVER A REFUSAL. A gate here would take the shape of the survivor warning above
-        // — and would fire on the COMMON case, a worker that finished, reported, and is being retired
-        // cleanly, which trains a `--force` reflex that then carries the one real catch through with
-        // the rest. So the state is stated and the kill proceeds; the kill is reversible (`tg reopen`
-        // resumes the same conversation in the same folder), which is what makes stating it enough.
-        const killHandoff = topic.cwd ? handoffAnnotation(readHandoffState(topic.cwd), fmtAgo) : null
-        const handoffNote = killHandoff ? `\n${killHandoff} — prune it before this is final` : ''
-        text = alive
-          ? `ending @${target} — undo with \`tg reopen ${target}\`${sidNote}${handoffNote}`
-          : `@${target} was already down — \`tg reopen ${target}\` brings it back${sidNote}${handoffNote}`
+        const r = await runSessionKill(fromSid, target, args.force === true, 'cli')
+        if (!r.ok) { write({ t: 'result', id, ok: false, text: r.text }); return }
+        text = r.text
         break
       }
       // `tg reopen <name or session id>` — the undo for `tg kill`. Relaunches the SAME session id in
@@ -7075,64 +7152,9 @@ async function handleCall(
         if (!fromSid) { write({ t: 'result', id, ok: false, text: '`tg reopen` must run inside a bridged session' }); return }
         const target = String(args.name ?? '').trim()
         if (!target) { write({ t: 'result', id, ok: false, text: 'usage: tg reopen <name or session id>' }); return }
-        // resolveEndpoint deliberately refuses CLOSED endpoints ("exists but isn't running"), which is
-        // every reopen target — so resolve against the registry directly. A sid (or an unambiguous
-        // prefix of one) wins over a name match, so a killed row stays reachable precisely even when
-        // several closed rows share its display name (see resolveReopenTarget).
-        const rows: Array<[string, TopicEntry]> = listTopics().map(({ sessionId, ...e }) => [sessionId, e])
-        const { hit, reason, others } = resolveReopenTarget(rows, target, normalizeEndpointName)
-        if (reason === 'live-only') { write({ t: 'result', id, ok: false, text: `@${target} is already live — nothing to reopen` }); return }
-        if (reason === 'none' || !hit) { write({ t: 'result', id, ok: false, text: `no session named "${target}" to reopen (a session id or its prefix works too) — a headless session's entry is dropped when its pane dies, and only ${'`tg spawn`'} can bring that back` }); return }
-        const [sid, t0] = hit
-        const sid8 = sid.slice(0, 8)
-        const denial = sessionCloseDenial(fromSid, sid, t0.name, t0)
-        if (denial) { write({ t: 'result', id, ok: false, text: denial }); return }
-        if (!t0.closed && !t0.killedAt) { write({ t: 'result', id, ok: false, text: `@${t0.name} (${sid8}) is already live` }); return }
-        if (!t0.closed && t0.killedAt) {
-          // `tg kill` stamps killedAt on the spot, but the row's own closed:true lands only on the
-          // next reconcile sweep (topic-runtime.ts:492, up to ~90s behind) — so the row can still read
-          // open here for a session whose pane is already gone. Poll the PANE, not the row, or a
-          // reopen in this window is wrongly refused as "already live".
-          const deadline = Date.now() + 30_000
-          let gone = false
-          while (Date.now() < deadline) {
-            const p = await paneForSession(sid).catch(() => null)
-            if (!p || !(await paneAlive(p).catch(() => false))) { gone = true; break }
-            await sleep(1000)
-          }
-          if (!gone) { write({ t: 'result', id, ok: false, text: `@${t0.name} (${sid8}) is still shutting down — retry in a few seconds` }); return }
-        }
-        // Skipped once killedAt is set: the wait above already confirmed the pane is gone, and
-        // re-checking here would re-refuse the very teardown window that wait just cleared.
-        if (!t0.killedAt) {
-          const livePane = await paneForSession(sid).catch(() => null)
-          if (livePane && await paneAlive(livePane).catch(() => false)) { write({ t: 'result', id, ok: false, text: `@${t0.name} (${sid8}) is already up` }); return }
-        }
-        const othersNote = others.length
-          ? ` ${others.length} other closed row${others.length === 1 ? ' shares' : 's share'} this name — reopen a specific one by sid: ${others.map(s => s.slice(0, 8)).join(', ')}.`
-          : ''
-        let newPane: string | null
-        if (!t0.agentSessionId) {
-          newPane = await spawnSession(t0.cwd, '', sid, topicAccount(t0), topicAgent(t0), undefined, { model: refreshSpawnModel(sid), effort: null })
-          text = `reopened @${t0.name} (${sid8}) fresh in ${t0.cwd} — the session never completed a turn, so there was nothing to resume; same name and topic.${othersNote}`
-        } else {
-          const resumeAlias = topicAgent(t0) === 'claude' ? reopenResumeModelAlias(t0.agentSessionId) : null
-          newPane = await spawnSession(t0.cwd, `--resume ${t0.agentSessionId}`, sid, topicAccount(t0), topicAgent(t0), undefined, resumeAlias ? { model: resumeAlias } : undefined)
-          // The cost, named at the only moment the caller can still act on it. A one-shot bus verb
-          // has no channel to confirm on — it commits when it is typed — so this is the reopen's
-          // own output rather than a pre-flight prompt: the next self-contained task can go to
-          // `tg spawn` instead, which is the decision this line exists to inform.
-          const backlog = resumeBacklogSize(t0.agentSessionId)
-          text = `reopening @${t0.name} (${sid8}) in ${t0.cwd} — resuming its own conversation, same topic and name. Its whole backlog${backlog ? ` (${backlog} of transcript)` : ''} replays into context at full token cost before it reads anything you send; a self-contained task belongs in a fresh \`tg spawn\` instead. Give it ~30s to reach a prompt.${othersNote}`
-        }
-        if (!newPane) { write({ t: 'result', id, ok: false, text: `couldn't relaunch @${t0.name} (${sid8}) in ${t0.cwd} — see daemon log` }); return }
-        // Clear the kill stamp and un-close the row. reopenSessionTopic handles the Telegram tab,
-        // but it no-ops without a group — so a groupless row would stay closed:true and the session
-        // would come back invisible to every dashboard and unaddressable on the bus.
-        updateTopic(sid, { closed: false, killedAt: undefined })
-        endingSids.delete(sid)   // the revive is what puts the card back
-        await reopenSessionTopic(sid)   // reopen the tab now, not on its first reply
-        appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'reopen', from: nameForEndpoint(fromSid, busEndpoints()), to: t0.name, text: t0.agentSessionId ? `--resume ${t0.agentSessionId}` : 'fresh' })
+        const r = await runSessionReopen(fromSid, target, 'cli')
+        if (!r.ok) { write({ t: 'result', id, ok: false, text: r.text }); return }
+        text = r.text
         break
       }
       default:
@@ -15478,6 +15500,24 @@ const OWNER_CHAT_VERBS: readonly OwnerChatVerb[] = [
       return true
     },
   },
+  // `@kill <name> [force]` / `@reopen <name>` — the bus verbs, in his voice. The lane's sid is the
+  // caller, which is what gives them the lane's authority (close any worker, never a chat lane) —
+  // that sid IS him, so the existing rule is the right one and no chat-specific gate is added.
+  ...(['kill', 'reopen'] as const).map(verb => ({
+    verb,
+    run: async (ctx: Context, chatId: string, laneSid: string, text: string, msgId?: number) => {
+      const parsed = parseNameVerb(text, verb)
+      if (!parsed) return false
+      const reply = (t: string): Promise<unknown> => ctx.reply(t).catch(() => {})
+      if (parsed.kind === 'error') { await reply(parsed.error); return true }
+      if (msgId != null) void channel.react({ chatId, messageId: String(msgId) }, verb === 'kill' ? '🫡' : '🚀').catch(() => {})
+      const r = verb === 'kill'
+        ? await runSessionKill(laneSid, parsed.name, parsed.force, 'chat')
+        : await runSessionReopen(laneSid, parsed.name, 'chat')
+      await reply(r.text)
+      return true
+    },
+  })),
 ]
 
 // ---- Reply-to-route: a native Telegram reply is an address ----
@@ -15496,7 +15536,14 @@ async function routeOwnerReply(ctx: Context, chatId: string, sid: string, text: 
   // into the lane, where the owner would read the lane's answer as the worker's.
   const pane = await paneForSession(sid).catch(() => null)
   if (!pane || !(await paneAlive(pane).catch(() => false))) {
-    await reply(`@${name} isn't running any more — your message wasn't delivered. Start a fresh one with "@launch ${name} ${text.trim().slice(0, 40)}${text.trim().length > 40 ? '…' : ''}", or reply to a live session's message instead.`)
+    // WHICH gesture depends on whether the row survives. `@reopen` brings back the conversation he
+    // was just in; `@launch` starts a fresh context under the same name. Offering `@launch` for a
+    // session he killed thirty seconds ago would throw away the thing he is replying INTO.
+    const row = getTopicBySession(sid)
+    const fresh = `"@launch ${name} ${text.trim().slice(0, 40)}${text.trim().length > 40 ? '…' : ''}"`
+    await reply(row
+      ? `@${name} isn't running — "@reopen ${name}" brings it back with its conversation, or ${fresh} starts a fresh one. Nothing was delivered.`
+      : `@${name} isn't running any more and there's no session left to reopen — start a fresh one with ${fresh}. Nothing was delivered.`)
     return true
   }
   // Delivered as a bus ask from the lane, exactly as `@launch` does at a live name: same machinery,
