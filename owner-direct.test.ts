@@ -51,6 +51,42 @@ test('both direct gestures mint through ONE dispatch, so they can never drift ap
   }
 })
 
+test('his own ask confirms by REACTION and gets no sender card — and the reaction fires on DELIVERY', () => {
+  // The card echoed his own words back one message under the message he had just typed. The reaction
+  // has to sit in tryDeliverAsk's landed branch, not at dispatch: an ask handed to a BUSY target waits
+  // for the sweep, and a reaction fired at parse time marks as delivered something still queued.
+  const ok = daemon.slice(daemon.indexOf('if (cur.ownerDirect) {', daemon.indexOf('async function tryDeliverAsk(')))
+  expect(ok.slice(0, 700)).toContain("REACTIONS.delivered")
+  // notifyAskSent must be the ELSE of that branch — not a line above it that runs regardless.
+  expect(ok.slice(0, 700)).toContain('} else void notifyAskSent(')
+  // The id rides the ROW, so the sweep that lands it minutes later still knows what to react to.
+  expect(daemon).toContain('ownerMsgId: msgId')
+})
+
+// COVERAGE BY ENUMERATION, not by the sites that turned up while fixing this. Telegram accepts only a
+// fixed emoji set from a bot; channel.react casts into that union and every call site swallows the
+// rejection, so a wrong emoji is a confirmation that silently never appears on a surface that looks
+// shipped. Four were doing that when this was written — 🚀 (@launch, @reopen), ⏰ (@schedule), ✅/❌ (a
+// typed permission answer) — and none of them could be found by reading the code, only by typechecking
+// the literals. The table is the fix; this is the guard that keeps a new bare literal out.
+test('every reaction the daemon sends comes from the typed table — no bare literal at a call site', () => {
+  expect(daemon).toContain("} satisfies Record<string, ReactionTypeEmoji['emoji']>")
+  // Non-greedy to the `},` because the ref object itself carries parens (`String(msgId)`); the emoji
+  // argument never does. A regex that reaches zero call sites passes every per-site assertion under
+  // it, so the count is checked first and against the real number, not against zero.
+  const calls = [...daemon.matchAll(/channel\.react\(\{[\s\S]*?\},\s*([^()]+?)\)/g)].map(m => m[1]!.trim())
+  expect(calls.length).toBe(11)
+  // Two arguments are values, not literals, and cannot be checked at build time: `tg react`'s emoji
+  // comes from an agent and `ackReaction` from the owner's own config. Named, so the exception is a
+  // decision rather than a hole.
+  const exempt = new Set(['emoji', 'access.ackReaction'])
+  for (const arg of calls) {
+    if (exempt.has(arg)) continue
+    for (const branch of arg.split(':').map(s => s.trim().split('? ').pop()!.trim()))
+      expect(branch).toStartWith('REACTIONS.')
+  }
+})
+
 test("the answer card is routable — replying to it continues the thread with the SESSION that spoke", () => {
   // Without the msg-route the card is a dead end: he replies, and msg-routes has nothing to resolve,
   // so his follow-up lands in the lane as ordinary conversation — the exact thing he asked not to

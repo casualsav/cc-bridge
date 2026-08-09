@@ -386,7 +386,21 @@ still lands somewhere that resolves. The one behaviour that differs is the tail:
 an agent that would read it, judge it and speak — the round trip the gesture exists to skip. Restore the
 paste and nothing errors; he simply gets his worker's answer secondhand, in his orchestrator's words. The
 card is `📨 From @name`, expanded and notifying for the same reason a post is (he is waiting on it), and
-routable — replying continues the thread with the session that spoke, never with the lane. Accepted cost,
+routable — replying continues the thread with the session that spoke, never with the lane. **The outbound
+half confirms with a REACTION on his own message and no card** (his ruling: the card echoed his words back
+one message under the message he had just typed) — fired in `tryDeliverAsk`'s landed branch, the only place
+delivery is confirmed, off `ownerMsgId` on the row, because an ask handed to a busy target lands on a later
+sweep.
+
+**EVERY reaction the daemon sends comes from `REACTIONS`, one table typed `satisfies Record<string,
+ReactionTypeEmoji['emoji']>`.** Telegram takes only a fixed emoji set from a bot, `channel.react` casts into
+that union, and every call site swallows the rejection — so an emoji outside the set is a confirmation that
+silently never appears on a surface that looks shipped. Four were doing exactly that from the day they
+landed (🚀 on `@launch`/`@reopen`, ⏰ on `@schedule`, ✅/❌ on a typed permission answer) and no amount of
+reading the code could find them; only typechecking the literals did. The table is where the checker refuses
+the next one, and `owner-direct.test.ts` enumerates the call sites so a bare literal cannot come back — with
+two named exceptions that are arguments rather than literals (`tg react`'s emoji from an agent,
+`ackReaction` from the owner's config). Accepted cost,
 not an oversight: work dispatched this way is invisible to the lane, which is the only party that can see
 two workers heading for the same file. `owner-direct.test.ts` pins the routing and the single mint.
 

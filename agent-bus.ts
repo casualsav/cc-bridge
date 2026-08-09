@@ -167,6 +167,10 @@ export type BusPending = {
   // lane is an agent that would read the answer, judge it and speak, which is the round trip this
   // gesture exists to skip. deliverAnswerToAsker reads this and sends him the card instead.
   ownerDirect?: true
+  // His own message's id, so the DELIVERY can react on it. Persisted with the row because the
+  // confirmation belongs at the moment the ask actually lands — which for a busy target is a sweep
+  // minutes later, in a different process lifetime than the one that read his message.
+  ownerMsgId?: number
   founding?: true     // the spawn handler's first-message ask — the only ask a session is guaranteed
                       // to receive before it's ever seen a human turn, so a session ending its own
                       // turn without answering it is a session that finished work nobody will hear
@@ -387,7 +391,7 @@ function nextAskId(now: number): number {
 export function createPending(
   fields: { fromSid: string; toSid: string; fromName: string; toName: string; text: string; refs: string[]
             fromKind?: 'claude' | 'hermes'; toKind?: 'claude' | 'hermes'; depth?: number; noReply?: true
-            quiet?: true; founding?: true; ownerDirect?: true; sysKind?: SystemAskKind },
+            quiet?: true; founding?: true; ownerDirect?: true; ownerMsgId?: number; sysKind?: SystemAskKind },
   now: number,
 ): BusPending {
   ensureLoaded()

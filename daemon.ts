@@ -3717,6 +3717,29 @@ function busDeliverOutcome(pane: string, block: string): Promise<PasteOutcome> {
 // <details> collapsible: `header` (already-safe HTML) is the summary, `body` hides behind its tappable
 // chevron. outboundTargetsFor resolves the pane to its DM/topic; the body is capped to keep the message
 // under TG's 4096. Falls back to a classic expandable-quote HTML message if the rich send fails.
+// EVERY reaction this daemon sends, in one typed table, and the type is the whole point. Telegram
+// accepts only a fixed emoji set from a bot; `channel.react` casts into that union and every call
+// site swallows the rejection — so an emoji outside the set is a confirmation that silently never
+// appears, on a surface that looks shipped. Four had been doing exactly that since they landed:
+// 🚀 (@launch, @reopen), ⏰ (@schedule) and ✅/❌ (a typed permission answer). Nothing was broken
+// enough to report and nothing ever fired.
+//
+// `satisfies` keeps the literal types while making the CHECKER refuse the next bad one here, at the
+// table, rather than at a call site where the cast would have compiled it either way. A new reaction
+// goes in this table; a bare literal at a call site is the thing this exists to stop.
+const REACTIONS = {
+  delivered: '👌',   // his own direct ask reached the session (tryDeliverAsk's landed branch)
+  launched: '⚡',     // @launch / @reopen — a session is coming up. ONE glyph for both, as 🚀 was
+  scheduled: '🤝',   // @schedule — booked. The set holds no clock, and an agreement is the nearest true thing
+  allowed: '👍',     // a permission answered by typing y/n…
+  denied: '👎',      // …and its refusal
+  killed: '🫡',      // @kill
+  watching: '👀',    // @watch
+  received: '✍',    // a message was taken and typed into a pane
+} satisfies Record<string, ReactionTypeEmoji['emoji']>
+// The two reactions NOT in the table, both by construction: `tg react`'s emoji is an argument from
+// an agent, and `ackReaction` is whatever the owner configured. Neither can be checked here — a
+// wrong one there is a bad argument, not a bad build.
 const ASK_QUOTE_CAP = 3500
 // A POST is the one bus surface that is NOT a chevron card and NOT silent — the owner's ruling
 // (2026-07-29), from an incident where a worker's blocking question landed in his DM collapsed behind a
@@ -3910,7 +3933,18 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
       // briefer: it has no session to report back into (see deliverAnswerToAsker), so a daemon notice
       // must not leave the target owing an ack to a name it cannot address.
       if (cur.fromSid !== SYSTEM_SID) markBriefed(cur.toSid, cur.fromSid, cur.fromName, now)
-      void notifyAskSent(cur.fromSid, cur.toName, cur.text, cur.noReply ? 'ack' : 'ask', cur.toSid)
+      // HIS OWN direct ask confirms with a REACTION on the message he typed, and gets no card: the
+      // card showed him his own words back, behind a chevron, one message under the message he had
+      // just sent (his ruling, 2026-08-09). A reaction says the same thing on the message itself.
+      //
+      // It lives HERE, in the `ok` branch, because this is the only place delivery is CONFIRMED — an
+      // ask handed to a busy target waits for the 15s sweep, and a reaction fired at dispatch would
+      // mark as delivered a message still sitting in the queue. That is also why the message id is on
+      // the row rather than closed over: the sweep that lands it may be a later process entirely.
+      if (cur.ownerDirect) {
+        const chat = cur.ownerMsgId != null ? chatIdForDmChatSession(cur.fromSid) : null
+        if (chat) void channel.react({ chatId: chat, messageId: String(cur.ownerMsgId) }, REACTIONS.delivered).catch(() => {})
+      } else void notifyAskSent(cur.fromSid, cur.toName, cur.text, cur.noReply ? 'ack' : 'ask', cur.toSid)
       // Mirror the same card on the TARGET's own surface (its topic / chat DM) so the inbound ask is
       // visible from inside the session too, not only on the asker's side. A `quiet` row is the one
       // exception: a daemon notice whose fact a card on that same chat already carries (the held
@@ -7665,7 +7699,7 @@ async function relayBashCommand(t: CommandTarget, command: string, chat_id: stri
       t.replyThread ? { threadId: String(t.replyThread) } : undefined).catch(() => {})
     return
   }
-  void channel.react({ chatId: chat_id, messageId: String(message_id) }, '✍').catch(() => {})
+  void channel.react({ chatId: chat_id, messageId: String(message_id) }, REACTIONS.received).catch(() => {})
 
   const file = await transcriptForPane(t.paneId, await paneCwd(t.paneId))
   if (!file) return
@@ -7738,7 +7772,7 @@ async function relayModelSet(ctx: Context, paneId: string, watcher: PaneWatcher 
     // confirmed readback, which is what `name` being set means.)
     await ctx.reply(`✅ Model set to <b>${escapeHtml(name)}</b>`, { parse_mode: 'HTML' }).catch(() => {})
   } else {
-    void channel.react({ chatId: String(ctx.chat!.id), messageId: String(ctx.message!.message_id) }, '✍').catch(() => {})
+    void channel.react({ chatId: String(ctx.chat!.id), messageId: String(ctx.message!.message_id) }, REACTIONS.received).catch(() => {})
   }
 }
 
@@ -10748,7 +10782,7 @@ for (const [name, prompt] of [['handoff', HANDOFF_PROMPT], ['continue', CONTINUE
     const msgId = ctx.message?.message_id
     const chat_id = String(ctx.chat?.id ?? '')
     await handleInbound(ctx, prompt, undefined)
-    if (msgId != null) void channel.react({ chatId: chat_id, messageId: String(msgId) }, '✍').catch(() => {})
+    if (msgId != null) void channel.react({ chatId: chat_id, messageId: String(msgId) }, REACTIONS.received).catch(() => {})
   })
 }
 
@@ -15779,7 +15813,7 @@ const OWNER_CHAT_VERBS: readonly OwnerChatVerb[] = [
       const plan = parseSchedule(arg, tz, Date.now())
       if (!plan) { await reply(SCHEDULE_USAGE); return true }
       if (plan.kind === 'error') { await reply(plan.error); return true }
-      if (msgId != null) void channel.react({ chatId, messageId: String(msgId) }, '⏰').catch(() => {})
+      if (msgId != null) void channel.react({ chatId, messageId: String(msgId) }, REACTIONS.scheduled).catch(() => {})
       // The zone is named on the FIRST chat-created schedule that rides the fallback default, so a
       // wrong-timezone surprise happens here rather than at 3am. Silent once he has set his own.
       const tzNote = access.scheduleTz ? '' : ` ${tz} — set yours with /cron tz`
@@ -15805,7 +15839,7 @@ const OWNER_CHAT_VERBS: readonly OwnerChatVerb[] = [
       if (!parsed) return false
       const reply = (t: string): Promise<unknown> => ctx.reply(t).catch(() => {})
       if (parsed.kind === 'error') { await reply(parsed.error); return true }
-      if (msgId != null) void channel.react({ chatId, messageId: String(msgId) }, verb === 'kill' ? '🫡' : verb === 'watch' ? '👀' : '🚀').catch(() => {})
+      if (msgId != null) void channel.react({ chatId, messageId: String(msgId) }, verb === 'kill' ? REACTIONS.killed : verb === 'watch' ? REACTIONS.watching : REACTIONS.launched).catch(() => {})
       const r = verb === 'kill' ? await runSessionKill(laneSid, parsed.name, parsed.force, 'chat')
         : verb === 'reopen' ? await runSessionReopen(laneSid, parsed.name, 'chat')
         : await runSessionWatch(laneSid, parsed.name, 'chat', chatId)
@@ -15824,7 +15858,7 @@ const OWNER_CHAT_VERBS: readonly OwnerChatVerb[] = [
 // "not a routable reply", and the message continues into the lane exactly as before: a reply to the
 // lane's own message (never recorded, §chat-lane skip), a reply to bridge UI (pin card, settings, a
 // readout — never recorded), or a reply to something older than the store's bounds.
-async function routeOwnerReply(ctx: Context, chatId: string, sid: string, text: string): Promise<boolean> {
+async function routeOwnerReply(ctx: Context, chatId: string, sid: string, text: string, msgId?: number): Promise<boolean> {
   const reply = (t: string): Promise<unknown> => ctx.reply(t).catch(() => {})
   const name = getTopicBySession(sid)?.name || nameForEndpoint(sid, busEndpoints())
   // The row outlives the session on purpose: a dead target must be NAMED, never silently rerouted
@@ -15846,7 +15880,7 @@ async function routeOwnerReply(ctx: Context, chatId: string, sid: string, text: 
   // he typed with his thumb is the same gesture as the address he types with a name.
   const laneSid = getDmChatSession(chatId)?.sessionId
   if (!laneSid || laneSid === sid) return false   // no lane to mint from, or the lane itself → ordinary conversation
-  await ownerDirectDispatch(reply, laneSid, sid, text)
+  await ownerDirectDispatch(reply, laneSid, sid, text, msgId)
   return true
 }
 
@@ -15860,13 +15894,13 @@ async function routeOwnerReply(ctx: Context, chatId: string, sid: string, text: 
 // a name the roster has never heard of. So the lane keeps the attribution and `ownerDirect` carries
 // the only difference that changes behaviour: the answer is a card to him, not a paste into the lane.
 async function ownerDirectDispatch(
-  reply: (t: string) => Promise<unknown>, laneSid: string, toSid: string, text: string,
+  reply: (t: string) => Promise<unknown>, laneSid: string, toSid: string, text: string, msgId?: number,
 ): Promise<void> {
   const endpoints = busEndpoints()
   const fromName = nameForEndpoint(laneSid, endpoints)
   const toName = nameForEndpoint(toSid, endpoints)
   let p: BusPending
-  try { p = createPending({ fromSid: laneSid, toSid, toKind: 'claude', fromName, toName, text, refs: [], ownerDirect: true }, Date.now()) }
+  try { p = createPending({ fromSid: laneSid, toSid, toKind: 'claude', fromName, toName, text, refs: [], ownerDirect: true, ...(msgId != null ? { ownerMsgId: msgId } : {}) }, Date.now()) }
   catch (e) { await reply(`${e instanceof Error ? e.message : e} — nothing was sent`); return }
   appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'ask', from: fromName, to: toName, id: p.id, text, refs: [] })
   const outcome = await tryDeliverAsk(p).catch(() => 'busy' as const)
@@ -15906,8 +15940,8 @@ async function routeOwnerAddress(ctx: Context, chatId: string, laneSid: string, 
   const target = live[0]!
   if (target.kind !== 'claude') { await reply(`@${want} is a hermes endpoint — this addresses Claude sessions`); return true }
   if (target.id === laneSid) return false   // his own lane by name: ordinary conversation, not a bus hop
-  if (msgId != null) void channel.react({ chatId, messageId: String(msgId) }, '📨').catch(() => {})
-  await ownerDirectDispatch(reply, laneSid, target.id, parsed.message)
+  // No react here — the confirmation belongs to DELIVERY, not to parsing (tryDeliverAsk's ok branch).
+  await ownerDirectDispatch(reply, laneSid, target.id, parsed.message, msgId)
   return true
 }
 
@@ -15926,7 +15960,7 @@ async function runOwnerLaunch(ctx: Context, chatId: string, laneSid: string, par
   const { name, model, effort, message } = parsed
   // Acknowledge the parse instantly: a spawn takes seconds, and silence in between is exactly what
   // "the bridge ignored me" feels like.
-  if (msgId != null) void channel.react({ chatId, messageId: String(msgId) }, '🚀').catch(() => {})
+  if (msgId != null) void channel.react({ chatId, messageId: String(msgId) }, REACTIONS.launched).catch(() => {})
   await reapDeadEndpoints(name)
   const endpoints = busEndpoints()
   const res = resolveEndpoint(name, endpoints)
@@ -16045,7 +16079,7 @@ async function handleInbound(
       permMatch[1]!.toLowerCase().startsWith('y') ? 'allow' : 'deny',
     )
     if (msgId != null) {
-      const emoji = permMatch[1]!.toLowerCase().startsWith('y') ? '✅' : '❌'
+      const emoji = permMatch[1]!.toLowerCase().startsWith('y') ? REACTIONS.allowed : REACTIONS.denied
       void channel.react({ chatId: chat_id, messageId: String(msgId) }, emoji).catch(() => {})
     }
     return
@@ -16193,7 +16227,7 @@ async function handleInbound(
       // instead of a switch for exactly that reason.
       if (plan === 'address' && await routeOwnerAddress(ctx, chat_id, lane.sessionId, content, msgId)) return
       if ((plan === 'session-reply' || plan === 'address') && repliedToSid && repliedToSid !== lane.sessionId) {
-        if (await routeOwnerReply(ctx, chat_id, repliedToSid, content)) return
+        if (await routeOwnerReply(ctx, chat_id, repliedToSid, content, msgId)) return
       }
     }
   }
@@ -17279,7 +17313,7 @@ bot.on('edited_message', async ctx => {
       ts: new Date((em.edit_date ?? em.date) * 1000).toISOString(),
     },
   }, targetPane)
-  void channel.react({ chatId: String(chat), messageId: String(em.message_id) }, '✍').catch(() => {})
+  void channel.react({ chatId: String(chat), messageId: String(em.message_id) }, REACTIONS.received).catch(() => {})
 })
 
 bot.on('message:text', async ctx => {
