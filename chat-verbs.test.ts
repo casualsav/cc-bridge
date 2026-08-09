@@ -65,8 +65,16 @@ test('junk after the name is REFUSED, never trimmed to the first word', () => {
   expect(parseNameVerb('@kill @web', 'kill')).toMatchObject({ kind: 'error' })
 })
 
+test('@watch takes a name and refuses force — there is nothing to force about waiting', () => {
+  expect(parseNameVerb('@watch web', 'watch')).toEqual({ kind: 'name', name: 'web', force: false })
+  expect(parseNameVerb('@watch web force', 'watch')).toEqual(
+    { kind: 'error', error: 'I only understood the name "web" — usage: @watch <name>' })
+  expect(parseNameVerb('@watch', 'watch')).toEqual({ kind: 'error', error: 'usage: @watch <name>' })
+})
+
 test('a name verb only matches its own verb, and never mid-sentence', () => {
   expect(parseNameVerb('@kill web', 'reopen')).toBeNull()
+  expect(parseNameVerb('@watch web', 'kill')).toBeNull()
   expect(parseNameVerb('should I @kill web?', 'kill')).toBeNull()
   expect(parseNameVerb('@killer web', 'kill')).toBeNull()
 })

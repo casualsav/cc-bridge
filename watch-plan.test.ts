@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { watchVerdict, watchNoticeText, existingWatch, alreadyWatchingText, adoptCause, SLASH_ARM_GRACE_MS, WATCH_TTL_MS, type BusWatch } from './watch-plan.ts'
+import { watchVerdict, watchNoticeText, watchCardText, existingWatch, alreadyWatchingText, adoptCause, SLASH_ARM_GRACE_MS, WATCH_TTL_MS, type BusWatch } from './watch-plan.ts'
 
 const T0 = 1_700_000_000_000
 const watch = (over: Partial<BusWatch> = {}): BusWatch => ({
@@ -97,4 +97,41 @@ test('a hand-armed watch already on that target ADOPTS the command — one row, 
   expect(w.armedAt).toBe(T0)                                // the grace belongs to THIS submission
   expect(watchVerdict(w, { atPrompt: true, gone: false }, T0 + 1)).toBeNull()
   expect(watchNoticeText(w, 'prompt', T0 + 60_000)).toContain('the /clear you sent')
+})
+
+// ---- The chat-armed fire ------------------------------------------------------------------------
+// A watch the OWNER armed cards his chat instead of nudging the watcher's pane. The card is written
+// for a person: no CLI verb in it, and the `prompt` case says out loud that a reply reaches the
+// session, because that gesture is the reason the card carries a route subject at all.
+const chatWatch = watch({ chatOrigin: { chatId: '837' } })
+
+test('the chat card names the session and the outcome, for all three', () => {
+  expect(watchCardText(chatWatch, 'prompt', T0 + 240_000)).toEqual({
+    header: '⏰ @weather is at a prompt',
+    body: 'The watch you armed 4m ago has fired. Reply to this message to send it something.' })
+  expect(watchCardText(chatWatch, 'gone', T0 + 60_000).header).toBe('⏰ @weather ended')
+  expect(watchCardText(chatWatch, 'gone', T0 + 60_000).body).toContain('nothing left to wait for')
+  expect(watchCardText(chatWatch, 'timeout', T0 + WATCH_TTL_MS).header).toBe('⏰ @weather is still busy')
+  expect(watchCardText(chatWatch, 'timeout', T0 + WATCH_TTL_MS).body).toContain('"@watch weather"')
+})
+
+test('the chat card never names a CLI verb — he cannot run one', () => {
+  for (const outcome of ['prompt', 'gone', 'timeout'] as const) {
+    const c = watchCardText(chatWatch, outcome, T0 + 60_000)
+    expect(`${c.header} ${c.body}`).not.toContain('tg ')
+  }
+})
+
+test('chatOrigin rides on the row, so a restart mid-watch still knows where the fire belongs', () => {
+  // The rows are persisted verbatim; this is the round-trip that promise rests on.
+  const revived: BusWatch = JSON.parse(JSON.stringify(chatWatch))
+  expect(revived.chatOrigin).toEqual({ chatId: '837' })
+  // …and it changes nothing about WHEN a watch fires — only where the notification goes.
+  expect(watchVerdict(revived, { atPrompt: true, gone: false }, T0 + 1000))
+    .toBe(watchVerdict(watch(), { atPrompt: true, gone: false }, T0 + 1000))
+})
+
+test('an agent-armed watch is untouched — no chatOrigin, and the parenthetical notice as before', () => {
+  expect(watch().chatOrigin).toBeUndefined()
+  expect(watchNoticeText(watch(), 'prompt', T0 + 240_000)).toContain('(@weather is at a prompt')
 })

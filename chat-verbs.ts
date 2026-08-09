@@ -16,6 +16,7 @@ export const CHAT_VERBS: readonly { verb: string; re: RegExp }[] = [
   { verb: 'launch', re: /^\s*@launch(?=\s|$)/i },
   { verb: 'kill', re: /^\s*@kill(?=\s|$)/i },
   { verb: 'reopen', re: /^\s*@reopen(?=\s|$)/i },
+  { verb: 'watch', re: /^\s*@watch(?=\s|$)/i },
 ]
 
 // `@kill <name> [force]` / `@reopen <name|sid-prefix>` — a verb whose whole argument is a session
@@ -29,10 +30,10 @@ export type ParsedNameVerb =
   | { kind: 'name'; name: string; force: boolean }
   | { kind: 'error'; error: string }
 
-export function parseNameVerb(raw: string, verb: 'kill' | 'reopen'): ParsedNameVerb | null {
+export function parseNameVerb(raw: string, verb: 'kill' | 'reopen' | 'watch'): ParsedNameVerb | null {
   const head = new RegExp(`^\\s*@${verb}(?=\\s|$)`, 'i').exec(raw)
   if (!head) return null
-  const usage = verb === 'kill' ? 'usage: @kill <name> [force]' : 'usage: @reopen <name>'
+  const usage = verb === 'kill' ? 'usage: @kill <name> [force]' : `usage: @${verb} <name>`
   const rest = raw.slice(head[0].length).trim()
   if (!rest) return { kind: 'error', error: usage }
   const parts = rest.split(/\s+/)

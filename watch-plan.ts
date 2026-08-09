@@ -17,6 +17,14 @@ export type BusWatch = {
   // The slash command whose COMPLETION this watch reports, when it was armed by `tg slash` rather than
   // by hand (see SLASH_ARM_GRACE_MS). Absent ⇒ a hand-armed `tg watch`, unchanged in every respect.
   cause?: string
+  // Armed by the OWNER from his chat (`@watch web`), not by an agent on the bus. It changes exactly one
+  // thing — where the fire goes — and it has to: the ordinary fire is a QUIET @system ask into the
+  // watcher's pane, and the watcher here is his chat lane, whose own contract is that an ack-woken turn
+  // ends without speaking. Delivered there, the one verb that promises never to leave you waiting would
+  // go silent. So a chat-armed watch cards the CHAT instead, and never both (two notifications for one
+  // event, with the lane likely to relay a third). Persisted with the row, so a restart mid-watch still
+  // knows where the fire belongs.
+  chatOrigin?: { chatId: string }
 }
 // A caused watch is armed at SUBMIT time, when the target is by definition still at the prompt the
 // command was typed into — the pane needs a moment to start working, and an immediate evaluation would
@@ -115,6 +123,29 @@ export function adoptCause(w: BusWatch, command: string, now: number): BusWatch 
   w.armedAt = now
   return w
 }
+// The chat-armed fire, as a card in the same family as Spawned/Messaged: a header he reads at a
+// glance and a body carrying the age and the one thing to do next. Separate from watchNoticeText
+// because that one is a parenthetical aimed at an AGENT's context and names CLI verbs; this is
+// addressed to a person, and the only gesture it names is one his thumb can perform.
+//
+// The `prompt` body says "reply to this message" out loud. That is not decoration: the card's
+// reply-to-route subject is the watched session, so the answer to "it's free now" is one gesture
+// away, and a capability nobody is told about is one nobody uses.
+export function watchCardText(w: BusWatch, outcome: WatchOutcome, now: number): { header: string; body: string } {
+  const age = ago(Math.max(0, now - w.armedAt))
+  switch (outcome) {
+    case 'prompt':
+      return { header: `⏰ @${w.targetName} is at a prompt`,
+               body: `The watch you armed ${age} ago has fired. Reply to this message to send it something.` }
+    case 'gone':
+      return { header: `⏰ @${w.targetName} ended`,
+               body: `It never reached a prompt, so there is nothing left to wait for. Watch closed.` }
+    case 'timeout':
+      return { header: `⏰ @${w.targetName} is still busy`,
+               body: `It has not reached a prompt in ${age} — watch closed. Send "@watch ${w.targetName}" again if you still need it.` }
+  }
+}
+
 export function alreadyWatchingText(w: BusWatch, now: number): string {
   return `already watching @${w.targetName} (armed ${ago(Math.max(0, now - w.armedAt))} ago) — it will fire once, on its own`
 }

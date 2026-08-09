@@ -131,7 +131,7 @@ import {
   retriggerTopicTyping, paneClaudeLive,
 } from './topic-runtime.ts'
 import { latchMode, type ModeLatch } from './mode-latch.ts'
-import { watchVerdict, watchNoticeText, existingWatch, alreadyWatchingText, adoptCause, serializePasses, type BusWatch, type WatchOutcome } from './watch-plan.ts'
+import { watchVerdict, watchNoticeText, watchCardText, existingWatch, alreadyWatchingText, adoptCause, serializePasses, type BusWatch, type WatchOutcome } from './watch-plan.ts'
 import { fetchUsageResult, type UsageReading } from './usage-api.ts'
 import { startWebapp, type SettingsView as WebappSettingsView, type SessionCard as WebappSessionCard, type SessionFeed as WebappSessionFeed, type AutomationView as WebappAutomationView, type UsageView as WebappUsageView } from './webapp.ts'
 import { startTunnel, ensureCloudflared, reapOrphanTunnels, tailscaleFunnelUrl, type Tunnel } from './tunnel.ts'
@@ -3426,6 +3426,33 @@ async function runSessionReopen(fromSid: string, target: string, g: Gestures): P
         return { ok: true, text }
 }
 
+// `watch`, shared by the bus verb and the owner's chat gesture. `chatId` present ⇒ the fire cards HIS
+// chat instead of nudging the watcher's pane (see BusWatch.chatOrigin for why that is not optional).
+async function runSessionWatch(fromSid: string, target: string, g: Gestures, chatId?: string): Promise<{ ok: boolean; text: string }> {
+  const endpoints = busEndpoints()
+  const res = resolveEndpoint(target, endpoints)
+  if ('error' in res) return { ok: false, text: res.error }
+  if (res.id === fromSid) {
+    return { ok: false, text: g === 'chat'
+      ? `that's your own chat — you'd be watching yourself`
+      : 'watching yourself would fire the moment your turn ends — nothing to wait for' }
+  }
+  // A hermes endpoint is a one-shot with no pane and no prompt to reach, so a watch on one could
+  // only ever fire as its own timeout an hour later. Say so now instead.
+  if (res.kind !== 'claude') return { ok: false, text: `@${target} is not a session with a prompt to reach (${res.kind}) — nothing to watch` }
+  const already = existingWatch(busWatches, fromSid, res.id)
+  if (already) return { ok: true, text: alreadyWatchingText(already, Date.now()) }
+  const w: BusWatch = { id: nextWatchId(), watcherSid: fromSid, targetSid: res.id, targetName: nameForEndpoint(res.id, endpoints), armedAt: Date.now(), ...(chatId ? { chatOrigin: { chatId } } : {}) }
+  busWatches.push(w)
+  saveWatches()
+  process.stderr.write(`daemon: watch ${w.id} armed on @${w.targetName} (${res.id}) by ${fromSid}${chatId ? ` (chat ${chatId})` : ''}\n`)
+  void evaluateWatches().catch(() => {})   // already at a prompt ⇒ fires now, not in 15s
+  return { ok: true, text: g === 'chat'
+    ? `Watching @${w.targetName} — one message here when it next reaches a prompt, or if it ends first. Nothing else will fire.`
+    : `watching @${w.targetName} — ONE notification when it next reaches a prompt, or if it ends first`
+      + ` (nothing is held open; end your turn and it will wake you)` }
+}
+
 // The room = the bound forum group. The bus requires topic mode (an endpoint IS a topic's session).
 function busRoom(): string | null { return isTopicMode() ? getGroupChatId() : null }
 // Storage key for the ledger + the shared dir. 'dm' is the synthetic room used when no group is
@@ -3929,7 +3956,16 @@ const nextWatchId = (): number => ++watchStore.seq
 // depth 0 is what every system wake carries.
 async function notifyWatchFired(w: BusWatch, outcome: WatchOutcome, now: number): Promise<void> {
   const text = watchNoticeText(w, outcome, now)
-  process.stderr.write(`daemon: watch ${w.id} on @${w.targetName} fired (${outcome}) → ${w.watcherSid}\n`)
+  process.stderr.write(`daemon: watch ${w.id} on @${w.targetName} fired (${outcome}) → ${w.chatOrigin ? `chat ${w.chatOrigin.chatId}` : w.watcherSid}\n`)
+  // Armed from his chat ⇒ the fire IS the notification, and it goes to him as a card whose subject is
+  // the watched session (so "it's free now" and "then do this" are one reply apart). EITHER/OR with
+  // the pane nudge below, never both: the lane would relay a second copy of an event he has already
+  // been shown, and a quiet ask into the lane is exactly where this notice goes to die.
+  if (w.chatOrigin) {
+    const card = watchCardText(w, outcome, now)
+    await sendBusCard(w.chatOrigin.chatId, undefined, escapeHtml(card.header), card.body, w.targetSid).catch(() => {})
+    return
+  }
   const pane = await paneForSession(w.watcherSid).catch(() => null)
   if (!pane) return
   const n = createPending({ fromSid: SYSTEM_SID, toSid: w.watcherSid, fromName: 'system',
@@ -7128,22 +7164,9 @@ async function handleCall(
         if (!fromSid) { write({ t: 'result', id, ok: false, text: '`tg watch` must run inside a bridged session' }); return }
         const target = String(args.name ?? '').trim()
         if (!target) { write({ t: 'result', id, ok: false, text: 'usage: tg watch <name>' }); return }
-        const endpoints = busEndpoints()
-        const res = resolveEndpoint(target, endpoints)
-        if ('error' in res) { write({ t: 'result', id, ok: false, text: res.error }); return }
-        if (res.id === fromSid) { write({ t: 'result', id, ok: false, text: 'watching yourself would fire the moment your turn ends — nothing to wait for' }); return }
-        // A hermes endpoint is a one-shot with no pane and no prompt to reach, so a watch on one could
-        // only ever fire as its own timeout an hour later. Say so now instead.
-        if (res.kind !== 'claude') { write({ t: 'result', id, ok: false, text: `@${target} is not a session with a prompt to reach (${res.kind}) — nothing to watch` }); return }
-        const already = existingWatch(busWatches, fromSid, res.id)
-        if (already) { text = alreadyWatchingText(already, Date.now()); break }
-        const w: BusWatch = { id: nextWatchId(), watcherSid: fromSid, targetSid: res.id, targetName: nameForEndpoint(res.id, endpoints), armedAt: Date.now() }
-        busWatches.push(w)
-        saveWatches()
-        process.stderr.write(`daemon: watch ${w.id} armed on @${w.targetName} (${res.id}) by ${fromSid}\n`)
-        void evaluateWatches().catch(() => {})   // already at a prompt ⇒ fires now, not in 15s
-        text = `watching @${w.targetName} — ONE notification when it next reaches a prompt, or if it ends first`
-          + ` (nothing is held open; end your turn and it will wake you)`
+        const r = await runSessionWatch(fromSid, target, 'cli')
+        if (!r.ok) { write({ t: 'result', id, ok: false, text: r.text }); return }
+        text = r.text
         break
       }
       case 'reopen': {
@@ -15503,17 +15526,17 @@ const OWNER_CHAT_VERBS: readonly OwnerChatVerb[] = [
   // `@kill <name> [force]` / `@reopen <name>` — the bus verbs, in his voice. The lane's sid is the
   // caller, which is what gives them the lane's authority (close any worker, never a chat lane) —
   // that sid IS him, so the existing rule is the right one and no chat-specific gate is added.
-  ...(['kill', 'reopen'] as const).map(verb => ({
+  ...(['kill', 'reopen', 'watch'] as const).map(verb => ({
     verb,
     run: async (ctx: Context, chatId: string, laneSid: string, text: string, msgId?: number) => {
       const parsed = parseNameVerb(text, verb)
       if (!parsed) return false
       const reply = (t: string): Promise<unknown> => ctx.reply(t).catch(() => {})
       if (parsed.kind === 'error') { await reply(parsed.error); return true }
-      if (msgId != null) void channel.react({ chatId, messageId: String(msgId) }, verb === 'kill' ? '🫡' : '🚀').catch(() => {})
-      const r = verb === 'kill'
-        ? await runSessionKill(laneSid, parsed.name, parsed.force, 'chat')
-        : await runSessionReopen(laneSid, parsed.name, 'chat')
+      if (msgId != null) void channel.react({ chatId, messageId: String(msgId) }, verb === 'kill' ? '🫡' : verb === 'watch' ? '👀' : '🚀').catch(() => {})
+      const r = verb === 'kill' ? await runSessionKill(laneSid, parsed.name, parsed.force, 'chat')
+        : verb === 'reopen' ? await runSessionReopen(laneSid, parsed.name, 'chat')
+        : await runSessionWatch(laneSid, parsed.name, 'chat', chatId)
       await reply(r.text)
       return true
     },
