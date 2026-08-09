@@ -55,6 +55,31 @@ test('a dial token on the NEXT line is message text, not a dial', () => {
   expect(p('@launch t\nopus/high do it')).toMatchObject({ model: null, effort: null, message: 'opus/high do it' })
 })
 
+// `@spawn` is the same verb spelled the way the CLI spells it. Asserted as EQUIVALENCE over every
+// case above rather than as one happy-path sample: the whole risk of an alias is a branch that only
+// one spelling reaches, and a same-object check covers the dial token, the refusals and the
+// message-boundary rule in one pass. The already-live branch needs no case of its own — it is chosen
+// downstream of this parse, from a ParsedLaunch that is byte-identical either way.
+test('@spawn parses identically to @launch, case for case', () => {
+  const cases = [
+    '@launch test opus/high send me the word ping',
+    '@launch general name the top 10 processes using the most ram on this box',
+    '@launch t sonnet go', '@launch t /xhigh go', '@launch t opus/med go',
+    '@launch notes high level summary of X',
+    '@launch t /srv/chat is where it lives',
+    '@launch t opus/turbo go', '@launch t gpt5/high go',
+    '@launch t gpt5 is not a model',
+    '@launch t fable/max fix the bug:\n\n  - step one',
+    '@launch t\nopus/high do it',
+    '@launch test', '@launch', '@launch --help x',
+  ]
+  for (const c of cases) expect(p(c.replace('@launch', '@spawn'))).toEqual(p(c))
+  // And it is still a verb only at the start, on a whole word.
+  expect(p('what is @spawn anyway')).toBeNull()
+  expect(p('@spawner test do the thing')).toBeNull()
+  expect(p('@SPAWN t Opus/High go')).toMatchObject({ name: 't', model: 'opus', effort: 'high', message: 'go' })
+})
+
 test('empty message and a dash name refuse before anything is created', () => {
   expect(p('@launch test')).toEqual({ kind: 'error', error: `no message — ${LAUNCH_USAGE}` })
   expect(p('@launch test opus/high')).toEqual({ kind: 'error', error: `no message — ${LAUNCH_USAGE}` })

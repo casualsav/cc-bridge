@@ -1,4 +1,4 @@
-// `@launch <name> [model[/effort]|/effort] <message>` — the owner starting or reaching a coding
+// `@launch|@spawn <name> [model[/effort]|/effort] <message>` — the owner starting or reaching a coding
 // session from his own chat, in one line. The daemon intercepts it before the text can reach his chat
 // lane's pane; this file is the whole grammar, kept pure so the collisions below are unit-tested
 // rather than discovered in his DM.
@@ -7,12 +7,14 @@
 // no dials, so `name` is the first word of the message — which means the dial token can only be
 // consumed when the WHOLE token parses as dials. Everything else is a message word.
 
+import { LAUNCH_RE } from './chat-verbs.ts'
+
 export type LaunchDials = { model: string | null; effort: string | null }
 export type ParsedLaunch =
   | { kind: 'launch'; name: string; model: string | null; effort: string | null; message: string }
   | { kind: 'error'; error: string }
 
-export const LAUNCH_USAGE = 'usage: @launch <name> [model/effort] <message>'
+export const LAUNCH_USAGE = 'usage: @launch|@spawn <name> [model/effort] <message>'
 
 // `med` is the one abbreviation the socket verb already accepts; keep the two in step.
 const normEffort = (e: string): string => e === 'med' ? 'medium' : e
@@ -47,9 +49,10 @@ function parseDialToken(
 }
 
 // Returns null when the text is not an `@launch` at all — the caller must then leave it entirely
-// alone, because it is an ordinary message to the chat lane.
+// alone, because it is an ordinary message to the chat lane. The head regex is the verb table's own
+// (`LAUNCH_RE`), so the `@spawn` spelling cannot be recognised as a verb and then parse as nothing.
 export function parseLaunch(raw: string, models: readonly string[], efforts: readonly string[]): ParsedLaunch | null {
-  const head = /^\s*@launch(?=\s|$)/i.exec(raw)
+  const head = LAUNCH_RE.exec(raw)
   if (!head) return null
   let rest = raw.slice(head[0].length)
   // Spaces and tabs only, once the name is behind us: a dial token on the NEXT line was never a dial,

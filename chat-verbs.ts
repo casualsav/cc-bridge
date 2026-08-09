@@ -12,8 +12,14 @@
 // `@launch x do y` would create a folder named after the whole sentence. Both places ask this
 // function.
 
+// `@spawn` is the SAME verb under a second spelling — the CLI's verb is `tg spawn`, so that is the
+// word the owner reaches for in chat. One regex, one table row, one handler: an alias that got its
+// own row would be a second code path to keep in step, and the drift would show up as one spelling
+// quietly missing a branch. `chatVerbIn` therefore reports the canonical name for both.
+export const LAUNCH_RE = /^\s*@(?:launch|spawn)(?=\s|$)/i
+
 export const CHAT_VERBS: readonly { verb: string; re: RegExp }[] = [
-  { verb: 'launch', re: /^\s*@launch(?=\s|$)/i },
+  { verb: 'launch', re: LAUNCH_RE },
   { verb: 'kill', re: /^\s*@kill(?=\s|$)/i },
   { verb: 'reopen', re: /^\s*@reopen(?=\s|$)/i },
   { verb: 'watch', re: /^\s*@watch(?=\s|$)/i },
