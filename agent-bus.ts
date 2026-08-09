@@ -647,29 +647,47 @@ export type AskDelivery = (typeof ASK_DELIVERY_STATES)[number]
 
 // The `tg ask` CLI line for an outcome. Pure so ask-delivery.test.ts can pin the whole enumeration:
 // exactly one outcome may read as done, and no two may collide.
-export function askResultText(status: AskDelivery, toName: string, id: number): string {
+//
+// `ahead` — how many asks this target is ALREADY holding unanswered (this one excluded). One ask behind
+// a session and five read identically from outside, so an orchestrator fanning work out has no way to
+// see it is building a bottleneck until things stop coming back: five went behind one session on
+// 2026-08-09 and the sender only worked it out from what hadn't returned. The roster carries the same
+// number, but a roster only informs whoever goes and looks — this line lands in the reply to the very
+// command that did the stacking, which is the moment the decision is being made.
+//
+// IT RIDES 'delivered' TOO, which is the whole point and was the first draft's mistake. A mid-turn
+// target still TAKES an ask — the CLI queues it in that session's own message queue — so the stacked
+// asks in that incident were every one of them reported `delivered`. A depth that appeared only on the
+// queued outcomes would stay silent in exactly the case it exists for (measured live, same day).
+export function askResultText(status: AskDelivery, toName: string, id: number, ahead = 0): string {
   const answer = `they answer with \`tg answer ${id}\``
+  // Rides inside the `(ask N…)` parenthesis rather than trailing the line: the number is about THIS
+  // message's position, and read after the "they answer with" instruction it would land past the point
+  // where a sender has stopped reading.
+  const q = `ask ${id}${ahead > 0 ? `, ${ahead} unanswered ahead of it` : ''}`
   switch (status) {
+    // "delivered" stays honest about what it claims — the pane took it — and the count says where it
+    // landed: at the back of that session's queue, not in front of it.
     case 'delivered':
-      return `delivered to @${toName} (ask ${id}) — async; ${answer}`
+      return `delivered to @${toName} (${q}) — async; ${answer}`
     case 'busy':
-      return `⏳ QUEUED, not yet delivered — @${toName} is mid-turn (ask ${id}); it lands when they reach a prompt, then ${answer}`
+      return `⏳ QUEUED, not yet delivered — @${toName} is mid-turn (${q}); it lands when they reach a prompt, then ${answer}`
     case 'wedged':
-      return `⚠️ QUEUED, NOT DELIVERED — @${toName}'s pane is not at a prompt and no turn is running (ask ${id}); it may be wedged, and nothing reaches it until it recovers`
+      return `⚠️ QUEUED, NOT DELIVERED — @${toName}'s pane is not at a prompt and no turn is running (${q}); it may be wedged, and nothing reaches it until it recovers`
     case 'no-session':
-      return `⚠️ QUEUED, NOT DELIVERED — @${toName} has no live session right now (ask ${id}); the ask stays open in case it comes back`
+      return `⚠️ QUEUED, NOT DELIVERED — @${toName} has no live session right now (${q}); the ask stays open in case it comes back`
     // The paste reached the pane but the submit did not take — the block is sitting in @toName's
     // input box, unsent. tmux reports that as a success, which is exactly how it used to be recorded
     // as delivered; it must never read as done.
     case 'not-landed':
-      return `⚠️ QUEUED, NOT DELIVERED — the message is sitting unsubmitted in @${toName}'s input box (ask ${id}); the submit did not take, and the sweep will retry`
+      return `⚠️ QUEUED, NOT DELIVERED — the message is sitting unsubmitted in @${toName}'s input box (${q}); the submit did not take, and the sweep will retry`
     // The OPPOSITE of 'not-landed', and the distinction is the sender's next move. There nothing of
     // ours reached the box and a retry is ours to make; here THEIR box already held typed text of
     // their own, nothing of ours was pasted on top of it, and no retry helps until a human clears it.
     // Told apart because 'not-landed' sent the reader looking for our message in a box that has never
     // held it — the same wrong-place error the TTL notice made an hour later.
     case 'occupied':
-      return `⚠️ QUEUED, NOT DELIVERED — @${toName}'s input box already holds typed text of their OWN (ask ${id}); nothing was pasted on top of it, and the sweep retries until that box clears`
+      return `⚠️ QUEUED, NOT DELIVERED — @${toName}'s input box already holds typed text of their OWN (${q}); nothing was pasted on top of it, and the sweep retries until that box clears`
   }
 }
 

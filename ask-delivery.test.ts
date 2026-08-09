@@ -8,6 +8,7 @@
 // 'delivered' — may read as done. Adding a new outcome without giving it a distinguishable, honest
 // line turns the enumeration test red instead of shipping another silent success.
 import { test, expect } from 'bun:test'
+import { readFileSync } from 'node:fs'
 import { askResultText, ASK_DELIVERY_STATES, type AskDelivery } from './agent-bus.ts'
 
 // The exact pre-fix string, kept as a regression fixture: it must never come back for an outcome that
@@ -55,6 +56,67 @@ test("an occupied box is never described as OUR message sitting unsubmitted", ()
   expect(t).toMatch(/their|OWN/i)                       // whose text it is, is the whole point
   expect(t).not.toMatch(/sitting unsubmitted/i)         // that claim belongs to 'not-landed' alone
   expect(askResultText('not-landed', 'ccbridge', 95)).toMatch(/sitting unsubmitted/i)   // control
+})
+
+// ---- queue depth: the number that stops a fan-out building a bottleneck --------------------------
+//
+// Five asks behind one session read exactly like one from outside — both are "busy" — so an
+// orchestrator stacked five without seeing it and learned only from what never came back (owner's
+// box, 2026-08-09). The count rides the reply to the command doing the stacking.
+
+test('a queued outcome names how many the target already holds unanswered', () => {
+  const t = askResultText('busy', 'ccbridge', 95, 4)
+  expect(t).toContain('4 unanswered ahead of it')
+  // Inside the `(ask N …)` parenthesis, not trailing the line: a sender has stopped reading by the
+  // time the "they answer with" instruction is over.
+  expect(t).toMatch(/\(ask 95, 4 unanswered ahead of it\)/)
+  // And it is the ONLY difference — the rest of the outcome's line is untouched.
+  expect(t.replace(', 4 unanswered ahead of it', '')).toBe(askResultText('busy', 'ccbridge', 95))
+})
+
+// THE ONE THIS UNIT EXISTS FOR, and the half a first draft got backwards. A mid-turn target still
+// TAKES an ask (the CLI queues it), so the stacked asks in that incident were every one of them
+// reported 'delivered' — measured live against a real probe the same day, three sends, three
+// "delivered", `queuedFor` empty throughout. A depth shown only on the queued outcomes would be
+// silent in precisely the case it was built for.
+test('DELIVERED carries the depth too — that outcome is where a fan-out actually stacks', () => {
+  const t = askResultText('delivered', 'ccbridge', 95, 3)
+  expect(t).toContain('3 unanswered ahead of it')
+  expect(t).toMatch(/^delivered\b/)                    // still says what it did: the pane took it
+  expect(t).not.toMatch(/QUEUED|NOT DELIVERED/)        // and does not borrow an outcome it isn't
+})
+
+test('every outcome carries the depth — there is no silent one', () => {
+  for (const s of ASK_DELIVERY_STATES) {
+    expect(askResultText(s, 'ccbridge', 95, 3), `outcome "${s}" took the message but did not say how deep`)
+      .toContain('3 unanswered ahead of it')
+  }
+})
+
+test('an empty queue says nothing at all — no "0 already queued"', () => {
+  for (const s of ASK_DELIVERY_STATES) {
+    expect(askResultText(s, 'ccbridge', 95, 0)).toBe(askResultText(s, 'ccbridge', 95))
+    expect(askResultText(s, 'ccbridge', 95, 0)).not.toMatch(/ahead of it/)
+  }
+})
+
+// The roster half of the same fact. STRUCTURAL, like the hidden-endpoint guards in
+// slash-outcome.test.ts and for the same reason: `case 'roster'` lives inside handleCall's switch,
+// which needs a socket, a tmux pane and a live endpoint store to run. It would have failed against
+// the line as it stood before this unit, which is what earns it a place.
+test('the roster line reports queue depth beside the one ask it already named', () => {
+  const daemon = readFileSync(new URL('./daemon.ts', import.meta.url), 'utf8')
+  const roster = daemon.slice(daemon.indexOf("case 'roster': {"))
+  const body = roster.slice(0, roster.indexOf('\n      }\n'))
+  // openAsksFor, NOT queuedFor: the bus-side queue is empty for the stack this counts (see the note
+  // on openAsksFor in daemon.ts). Pinned by name because the two readers are one word apart and the
+  // wrong one produces a segment that is always absent.
+  expect(body).toContain('openAsksFor(e.id)')
+  expect(body).not.toContain('queuedFor(e.id)')
+  expect(body).toMatch(/\$\{queued \? ` · \$\{queued\} queued`/)
+  // `on ask N` names the injected row only — the segment it sits beside, and the reason the rest were
+  // invisible. If that ever goes away, this count is describing something no reader can see.
+  expect(body).toContain('· on ask ')
 })
 
 // THE TRIPWIRE. Enumerate the outcomes; only 'delivered' may read as done, and no two may collide.

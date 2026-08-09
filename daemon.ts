@@ -3624,6 +3624,21 @@ async function notifyBusText(surfaceSid: string, text: string, subjectSid?: stri
   }
 }
 
+// Every ask this session is still holding — and it is deliberately NOT `queuedFor`, which was the
+// first (wrong) answer here. Asks stack in TWO places and the bus-side queue is the rarer one:
+// tryDeliverAsk hands an ask to a working pane on purpose, because the CLI queues it there, so a
+// stacked ask is `injected: true` and `queuedFor` returns zero for it. Measured live on 2026-08-09:
+// three asks sent to a probe mid-turn all reported `delivered` and sat in its queued-messages bar,
+// with `queuedFor` reporting an empty queue throughout. Counting only the bus side would have shipped
+// a depth indicator that reads 0 in exactly the fan-out this was built for.
+//
+// Counts acks and queued asides too: a reader sizing "can this session take more" is sizing turn cost,
+// not how many replies are owed back. Expired rows are out — the asker has already been told.
+const openAsksFor = (sid: string): BusPending[] =>
+  listPending().filter(p => p.toSid === sid && p.toKind === 'claude' && !p.expiredAt)
+// The same set, this message excluded — what askResultText turns into "you are the sixth".
+const asksAheadOf = (p: BusPending): number => openAsksFor(p.toSid).filter(q => q.id !== p.id).length
+
 // Deliver a queued ask NOW iff its target pane is live and at a normal prompt (never mid-turn). The
 // pane is re-resolved from the sessionId every time (panes churn on respawn/adopt). busInFlight
 // guards the immediate attempt (in the `ask` handler) from racing the 15s sweep into a double-inject.
@@ -6411,7 +6426,7 @@ async function handleCall(
             ? (outcome === 'delivered'
                 ? `acked @${toName} — delivered; nothing is queued and no answer is expected`
                 : `@${toName} is busy — the ack is queued and lands when it goes idle`)
-            : askResultText(outcome, toName, p.id)
+            : askResultText(outcome, toName, p.id, asksAheadOf(p))
         }
         break
       }
@@ -6511,7 +6526,15 @@ async function handleCall(
           // and the roster reported "busy · on ask 242" for a session doing nothing. That blocked a real
           // command (namedTarget's idle gate reads the pane, so the two disagreed) and it silently skews
           // every context-hygiene decision that keys on this line.
-          const onAsk = listPending().find(pp => pp.injected && !pp.expiredAt && pp.toKind === 'claude' && pp.toSid === e.id)
+          const open = openAsksFor(e.id)
+          const onAsk = open.find(pp => pp.injected)
+          // …and everything stacked BEHIND that one. `on ask N` names a single row, so a session
+          // holding five reads exactly like a session holding one — which is how an orchestrator
+          // fanning six writers out put five behind the same session without ever seeing it (owner's
+          // box, 2026-08-09); it surfaced only as work that stopped coming back. Both stacks count
+          // (see openAsksFor): the CLI's queued-messages bar is where they actually pile up, and every
+          // one of those was reported to its sender as `delivered`.
+          const queued = open.length - (onAsk ? 1 : 0)
           // The composite performReset uses for the same question, and for the same reason: either half
           // alone has a blind spot. turnInProgress only flips true after the first tool call, so early
           // thinking is invisible to it; a bridged pane can lack the "esc to interrupt" footer, so
@@ -6570,6 +6593,7 @@ async function handleCall(
             + `${subs > 0 ? ` · ${subs} subagent${subs === 1 ? '' : 's'} live` : ''}`
             + `${wait ? ` · waiting: ${wait.label}` : ''}`
             + `${onAsk ? ` · on ask ${onAsk.id}` : ''}`
+            + `${queued ? ` · ${queued} queued` : ''}`
             + `${marker ? ` · unreported ${fmtAgo(marker.since)} → @${marker.briefer}` : ''}`
             + `${handoffNote ? ` · ${handoffNote}` : ''}`
           rows.push(`${busy ? '🟡' : errored ? '🔴' : '🟢'} ${nm}${model}${effort}${pct}${state}${flair}`)
@@ -15650,7 +15674,7 @@ async function routeOwnerReply(ctx: Context, chatId: string, sid: string, text: 
   catch (e) { await reply(`${e instanceof Error ? e.message : e} — nothing was sent`); return true }
   appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'ask', from: fromName, to: toName, id: p.id, text, refs: [] })
   const outcome = await tryDeliverAsk(p).catch(() => 'busy' as const)
-  if (outcome !== 'delivered') await reply(askResultText(outcome, toName, p.id))
+  if (outcome !== 'delivered') await reply(askResultText(outcome, toName, p.id, asksAheadOf(p)))
   return true
 }
 
@@ -15707,7 +15731,7 @@ async function ownerLaunchAsk(
   catch (e) { await reply(`${e instanceof Error ? e.message : e} — nothing was sent`); return }
   appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'ask', from: fromName, to: toName, id: p.id, text: message, refs: [] })
   const outcome = await tryDeliverAsk(p).catch(() => 'busy' as const)
-  if (outcome !== 'delivered') { await reply(askResultText(outcome, toName, p.id)); return }
+  if (outcome !== 'delivered') { await reply(askResultText(outcome, toName, p.id, asksAheadOf(p))); return }
   // A running session's dials cannot be changed without restarting it, and it is NOT restarted for
   // them — a re-billed context is a cost he didn't ask for. So the line names what it is actually
   // running, which is what makes "ignored" informative rather than just a refusal.
