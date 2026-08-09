@@ -3361,8 +3361,12 @@ async function runSessionKill(fromSid: string, target: string, force: boolean, g
         // resumes the same conversation in the same folder), which is what makes stating it enough.
         const killHandoff = topic.cwd ? handoffAnnotation(readHandoffState(topic.cwd), fmtAgo) : null
         const handoffNote = killHandoff ? `\n${killHandoff} — prune it before this is final` : ''
+        // The two voices again (see `Gestures`): a CLI caller gets the present tense, because `tg kill`
+        // returns while the /exit is still escalating and an agent reads that line as the state. His
+        // chat gets the confirmation he asked for — he is not tracking a teardown, he is being told the
+        // thing is done. The undo rides both, unchanged: it is the whole reason a kill can be casual.
         return { ok: true, text: alive
-          ? `ending @${target} — undo with ${undoGesture(g, target)}${sidNote}${handoffNote}`
+          ? `${g === 'chat' ? `✅ Killed the @${target} session` : `ending @${target}`} — undo with ${undoGesture(g, target)}${sidNote}${handoffNote}`
           : `@${target} was already down — ${undoGesture(g, target)} brings it back${sidNote}${handoffNote}` }
 }
 
@@ -3404,10 +3408,17 @@ async function runSessionReopen(fromSid: string, target: string, g: Gestures): P
         const othersNote = others.length
           ? ` ${others.length} other closed row${others.length === 1 ? ' shares' : 's share'} this name — reopen a specific one by sid: ${others.map(s => s.slice(0, 8)).join(', ')}.`
           : ''
+        // Same two voices as the kill above. The CLI keeps its distinction between a session rebuilt
+        // fresh and one still replaying its backlog ("reopened" vs "reopening") — an agent acts on that
+        // difference. His chat gets the one confirmation he asked for; the tail still says which of the
+        // two happened and that a resume needs ~30s, so the past tense is not covering anything up.
+        const reopenLead = g === 'chat'
+          ? `✅ re-opened @${t0.name} (${sid8})`
+          : `${t0.agentSessionId ? 'reopening' : 'reopened'} @${t0.name} (${sid8})`
         let newPane: string | null
         if (!t0.agentSessionId) {
           newPane = await spawnSession(t0.cwd, '', sid, topicAccount(t0), topicAgent(t0), undefined, { model: refreshSpawnModel(sid), effort: null })
-          text = `reopened @${t0.name} (${sid8}) fresh in ${t0.cwd} — the session never completed a turn, so there was nothing to resume; same name and topic.${othersNote}`
+          text = `${reopenLead} fresh in ${t0.cwd} — the session never completed a turn, so there was nothing to resume; same name and topic.${othersNote}`
         } else {
           const resumeAlias = topicAgent(t0) === 'claude' ? reopenResumeModelAlias(t0.agentSessionId) : null
           newPane = await spawnSession(t0.cwd, `--resume ${t0.agentSessionId}`, sid, topicAccount(t0), topicAgent(t0), undefined, resumeAlias ? { model: resumeAlias } : undefined)
@@ -3416,7 +3427,7 @@ async function runSessionReopen(fromSid: string, target: string, g: Gestures): P
           // own output rather than a pre-flight prompt: the next self-contained task can go to
           // `tg spawn` instead, which is the decision this line exists to inform.
           const backlog = resumeBacklogSize(t0.agentSessionId)
-          text = `reopening @${t0.name} (${sid8}) in ${t0.cwd} — resuming its own conversation, same topic and name. Its whole backlog${backlog ? ` (${backlog} of transcript)` : ''} replays into context at full token cost before it reads anything you send; a self-contained task belongs in a fresh ${spawnGesture(g)} instead. Give it ~30s to reach a prompt.${othersNote}`
+          text = `${reopenLead} in ${t0.cwd} — resuming its own conversation, same topic and name. Its whole backlog${backlog ? ` (${backlog} of transcript)` : ''} replays into context at full token cost before it reads anything you send; a self-contained task belongs in a fresh ${spawnGesture(g)} instead. Give it ~30s to reach a prompt.${othersNote}`
         }
         if (!newPane) { return { ok: false, text: `couldn't relaunch @${t0.name} (${sid8}) in ${t0.cwd} — see daemon log` } }
         // Clear the kill stamp and un-close the row. reopenSessionTopic handles the Telegram tab,
@@ -15960,7 +15971,9 @@ async function runOwnerLaunch(ctx: Context, chatId: string, laneSid: string, par
   const { name, model, effort, message } = parsed
   // Acknowledge the parse instantly: a spawn takes seconds, and silence in between is exactly what
   // "the bridge ignored me" feels like.
-  if (msgId != null) void channel.react({ chatId, messageId: String(msgId) }, REACTIONS.launched).catch(() => {})
+  // No reaction on @launch (his ruling, 2026-08-09): the spawn card carries the name, the dials and the
+  // first prompt behind a chevron, and a tick beside it says less than the card already does. The verbs
+  // that keep one are the ones whose whole answer is "it happened".
   await reapDeadEndpoints(name)
   const endpoints = busEndpoints()
   const res = resolveEndpoint(name, endpoints)
