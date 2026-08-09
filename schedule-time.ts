@@ -30,6 +30,28 @@ const DOW: Record<string, number> = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fr
 // default, so this is the one input that gets an error instead of a schedule.
 const BARE_NUMBER = /^(\d{1,2})(?=\s|$)/
 
+// Exported so `/cron` and the mini app's ➕ composer answer this input the same way `@schedule` does.
+// They used to schedule it — `13 do X` as 13 days with the message "o X" — and now that
+// splitLeadingDuration no longer swallows the word, they would fall to a generic usage line, which
+// tells him the syntax without telling him which half of it was ambiguous.
+export function ambiguousBareNumber(input: string): string | null {
+  const bare = BARE_NUMBER.exec(input.trim())
+  if (!bare) return null
+  const n = bare[1]!
+  return `"${n}" could be ${n.padStart(2, '0')}:00 or ${n} minutes — write "${n.padStart(2, '0')}:00" or "${n}m".`
+}
+
+// A five-field prefix made ENTIRELY of bare numbers — `1 2 3 4 5 do the thing`. It is a legal cron
+// expression (minute 1 of hour 2, on day 3 of month 4, if it is a Friday) and it is almost never what
+// someone typing five numbers in front of a message meant; the message survives intact, so nothing
+// looks wrong until the job fires next April. Every cron expression anyone writes on purpose carries
+// at least one `*`, `/`, `-` or `,`, so requiring one costs nothing real and turns a silent
+// misreading into a question. Same standard as the bare-number refusal below.
+export function allBareNumericCron(expr: string): boolean {
+  const fields = expr.trim().split(/\s+/)
+  return fields.length === 5 && fields.every(f => /^\d+$/.test(f))
+}
+
 export function parseSchedule(arg: string, tz: string, now: number): SchedulePlan | null {
   const input = arg.trim()
   if (!input) return { kind: 'error', error: SCHEDULE_USAGE }
@@ -37,6 +59,9 @@ export function parseSchedule(arg: string, tz: string, now: number): SchedulePla
   // Cron first: five fields then the message. A cron expression never parses as any other shape, and
   // trying it later would let `*/30` be read as a wall clock.
   const cron = /^(\S+\s+\S+\s+\S+\s+\S+\s+\S+)\s+(.+)$/s.exec(input)
+  if (cron && parseCron(cron[1]!) && allBareNumericCron(cron[1]!)) {
+    return { kind: 'error', error: `"${cron[1]}" reads as a cron expression (minute, hour, day, month, weekday) — if that is what you meant, write it with "*" for the fields you don't care about; if those five numbers are part of the message, put the time first.` }
+  }
   if (cron && parseCron(cron[1]!)) {
     const [, expr, text] = cron
     const fires: number[] = []
@@ -92,11 +117,8 @@ export function parseSchedule(arg: string, tz: string, now: number): SchedulePla
   // placed afterwards can never fire, and the ambiguous input would silently schedule two weeks out
   // under a mangled message. (That is live behaviour in `/cron` today; not fixed here, but named in the
   // report rather than inherited quietly.)
-  const bare = BARE_NUMBER.exec(input)
-  if (bare) {
-    const n = bare[1]!
-    return { kind: 'error', error: `"${n}" could be ${n.padStart(2, '0')}:00 or ${n} minutes — write "${n.padStart(2, '0')}:00" or "${n}m".` }
-  }
+  const ambiguous = ambiguousBareNumber(input)
+  if (ambiguous) return { kind: 'error', error: ambiguous }
 
   // Relative durations, unchanged: `2h`, `1h30m`, `45m`.
   const { ms, rest } = splitLeadingDuration(input)

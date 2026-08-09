@@ -192,7 +192,7 @@ import { buildModelSelector, MODEL_ALIASES, MODEL_ALIAS_IDS, planModelSelection,
 import { parseLaunch, type ParsedLaunch } from './launch-command.ts'
 import { createMsgRoutes, type MsgRouteMap } from './msg-routes.ts'
 import { chatVerbIn, planOwnerRoute, parseNameVerb, undoGesture, forceGesture, spawnGesture, type Gestures } from './chat-verbs.ts'
-import { parseSchedule, SCHEDULE_USAGE } from './schedule-time.ts'
+import { parseSchedule, SCHEDULE_USAGE, ambiguousBareNumber, allBareNumericCron } from './schedule-time.ts'
 import {
   initStatusCard, statusCardText, statusKeyboard, updateSessionPin, updateTopicPins,
   removeSessionPins, refreshSessionPin, forgetChatPin, armChatPin, sessionPins, pinTextCache, persistSessionPins,
@@ -12225,6 +12225,12 @@ bot.command(['cron', 'schedule'], async ctx => {
   // Full cron grammar: `/cron */30 9-17 * * 1-5 check CI`. Five fields then the message; tried
   // before the other grammars (a cron expr never parses as `every …` or a leading duration).
   const cronMatch = /^(\S+\s+\S+\s+\S+\s+\S+\s+\S+)\s+(.+)$/s.exec(arg)
+  // Five bare numbers in front of a message is a legal cron expression and almost never the intent —
+  // see allBareNumericCron. Ask instead of scheduling something that next fires in April.
+  if (cronMatch && parseCron(cronMatch[1]) && allBareNumericCron(cronMatch[1])) {
+    await ctx.reply(`<code>${escapeHtml(cronMatch[1])}</code> reads as a cron expression (minute, hour, day, month, weekday). If that is what you meant, write it with <code>*</code> for the fields you don't care about; if those numbers are part of the message, put the time first.`, { parse_mode: 'HTML' })
+    return
+  }
   if (cronMatch && parseCron(cronMatch[1])) {
     const [, expr, text] = cronMatch
     const tz = loadAccess().scheduleTz ?? DEFAULT_TZ
@@ -12272,6 +12278,13 @@ bot.command(['cron', 'schedule'], async ctx => {
   // One-shot: `/schedule <time> <message>` queues immediately; bare `/schedule <time>` falls
   // through to the force-reply so the message can be composed in a follow-up.
   const { ms, rest: oneShotText } = splitLeadingDuration(arg)
+  // Same refusal `@schedule` gives: `/cron 13 do X` used to schedule 13 DAYS out with the message
+  // "o X" (splitLeadingDuration ran into the word), and a generic usage line here would tell him the
+  // syntax without telling him which half of what he typed was the ambiguous one.
+  if (!ms) {
+    const ambiguous = ambiguousBareNumber(arg)
+    if (ambiguous) { await ctx.reply(ambiguous); return }
+  }
   if (!ms) {
     await ctx.reply('Usage: <code>/cron 2h ping the server</code> — or <code>/cron 12h</code> then reply with the message.\nRecurring: <code>/cron every 09:00 …</code> | <code>every weekday 09:00 …</code> | <code>every mon 09:00 …</code>\nCron exprs: <code>/cron */30 9-17 * * 1-5 check CI</code> (min hour dom mon dow; timezone: <code>/cron tz</code>).\nUnits: <code>s m h d w</code> (e.g. <code>1h30m</code>). Cancel with <code>/cron cancel</code>.', { parse_mode: 'HTML' })
     return
@@ -17097,6 +17110,8 @@ bot.on('message:text', async ctx => {
         // "➕ Add" → parse "time message" out of the one line, then queue.
         case 'schedcompose': {
           const { ms, rest } = splitLeadingDuration(text.trim())
+          const ambiguous = ms ? null : ambiguousBareNumber(text)
+          if (ambiguous) { await ctx.reply(ambiguous); return }
           if (!ms || !rest) {
             await ctx.reply('Couldn\'t read that — send it as <b>time message</b>, e.g. <code>2h ping the server</code>. Try <code>/cron</code> again.', { parse_mode: 'HTML' })
             return

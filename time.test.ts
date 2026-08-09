@@ -125,3 +125,25 @@ t3('describeCron labels the common shapes', () => {
   e3(describeCron('30 8 * * 1-5')).toBe('weekdays 08:30')
   e3(describeCron('0 9 1 * *')).toBe('cron 0 9 1 * *')
 })
+
+// ---- The greedy-duration footgun (fixed 2026-08-09) --------------------------------------------
+// `/cron 13 do X` scheduled 13 DAYS out with the message "o X": the unit letter was allowed to be
+// the first letter of the next WORD. Every case below is the same class, and the legitimate
+// spellings underneath it are the control — a fix that refuses those is not a fix.
+test('a duration unit may not be the start of a word', () => {
+  expect(splitLeadingDuration('13 do X')).toEqual({ ms: null, rest: '13 do X' })
+  expect(splitLeadingDuration('2hours ping')).toEqual({ ms: null, rest: '2hours ping' })
+  expect(splitLeadingDuration('5 minutes from now go')).toEqual({ ms: null, rest: '5 minutes from now go' })
+  expect(splitLeadingDuration('3 weeks of data')).toEqual({ ms: null, rest: '3 weeks of data' })
+})
+
+test('CONTROL: every legitimate spelling still parses', () => {
+  expect(splitLeadingDuration('2h ping')).toEqual({ ms: 2 * 36e5, rest: 'ping' })
+  expect(splitLeadingDuration('1h30m ping')).toEqual({ ms: 36e5 + 30 * 6e4, rest: 'ping' })
+  expect(splitLeadingDuration('1h 30m ping')).toEqual({ ms: 36e5 + 30 * 6e4, rest: 'ping' })
+  expect(splitLeadingDuration('7 m ping')).toEqual({ ms: 7 * 6e4, rest: 'ping' })
+  expect(splitLeadingDuration('3 w later')).toEqual({ ms: 3 * 6048e5, rest: 'later' })
+  expect(splitLeadingDuration('45m')).toEqual({ ms: 45 * 6e4, rest: '' })
+  expect(splitLeadingDuration('12h')).toEqual({ ms: 12 * 36e5, rest: '' })
+  expect(splitLeadingDuration('do X')).toEqual({ ms: null, rest: 'do X' })
+})

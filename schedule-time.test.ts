@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { parseSchedule, SCHEDULE_USAGE } from './schedule-time.ts'
+import { parseSchedule, SCHEDULE_USAGE, ambiguousBareNumber, allBareNumericCron } from './schedule-time.ts'
 import { nextWallClock } from './time.ts'
 
 const TZ = 'Europe/Madrid'
@@ -74,4 +74,31 @@ test('a DST boundary resolves to the wall clock, not to a fixed offset', () => {
   // Madrid leaves DST on 2026-10-25. 09:00 the day after is UTC+1, not UTC+2.
   const beforeChange = Date.UTC(2026, 9, 25, 12, 0)
   expect(at(nextWallClock(TZ, 9, 0, beforeChange).at)).toBe('2026-10-26T08:00:00.000Z')
+})
+
+// ---- The swept class: parses that resolved to something wildly unintended, silently ------------
+test('five bare numbers are a QUESTION, not a cron expression', () => {
+  const p = plan('1 2 3 4 5 do the thing')
+  expect(p).toMatchObject({ kind: 'error' })
+  expect((p as { error: string }).error).toContain('reads as a cron expression')
+  // CONTROL: a real cron expression is untouched — every one anyone writes carries * / - or ,
+  expect(plan('*/30 9-17 * * 1-5 check CI')).toMatchObject({ kind: 'recur' })
+  expect(plan('0 9 * * 1 monday standup')).toMatchObject({ kind: 'recur' })
+  expect(allBareNumericCron('1 2 3 4 5')).toBe(true)
+  expect(allBareNumericCron('0 9 * * 1')).toBe(false)
+  expect(allBareNumericCron('1 2 3 4')).toBe(false)
+})
+
+test('the shared refusal is the SAME sentence on every surface', () => {
+  // /cron and the mini-app composer call this directly; @schedule reaches it through parseSchedule.
+  expect(ambiguousBareNumber('13 do X')).toBe('"13" could be 13:00 or 13 minutes — write "13:00" or "13m".')
+  expect(ambiguousBareNumber('2h ping')).toBeNull()
+  expect(ambiguousBareNumber('do X')).toBeNull()
+  expect((plan('13 do X') as { error: string }).error).toBe(ambiguousBareNumber('13 do X')!)
+})
+
+test('a message that merely STARTS with a word beginning in a unit letter is not a duration', () => {
+  // The /cron footgun, at the @schedule door: these must reach the message, not the clock.
+  expect(plan('2h do the deploy')).toMatchObject({ kind: 'once', text: 'do the deploy' })
+  expect(plan('tomorrow 9am download the report')).toMatchObject({ kind: 'once', text: 'download the report' })
 })

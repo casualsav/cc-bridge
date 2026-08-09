@@ -12,8 +12,15 @@ export function parseDuration(s: string): number | null {
 // Split a leading duration off a string: the contiguous run of duration units at the start, and
 // the remaining text. "2h" → { ms, rest: '' }; "2h ping the server" → { ms, rest: 'ping the
 // server' }; "do X" → { ms: null, rest: 'do X' }. Powers the one-shot `/schedule <time> <msg>`.
+//
+// `(?![a-z])` — THE UNIT LETTER MAY NOT BE THE START OF A WORD. Without it this ran greedily into the
+// MESSAGE: `/cron 13 do X` read as 13 **d**ays with the text "o X", and `2hours ping` as 2h with the
+// text "ours ping" — scheduled silently, wildly far out, under a mangled message. The lookahead is
+// what distinguishes a unit from a word starting with the same letter, so every legitimate spelling
+// still parses (`2h`, `1h30m`, `1h 30m`, `7 m`, `3 w`) and only the swallows stop matching. Found by
+// a test written for `@schedule`'s ambiguity refusal, 2026-08-09.
 export function splitLeadingDuration(s: string): { ms: number | null; rest: string } {
-  const m = s.match(/^((?:\d+\s*[smhdw]\s*)+)(.*)$/is)
+  const m = s.match(/^((?:\d+\s*[smhdw](?![a-z])\s*)+)(.*)$/is)
   if (!m) return { ms: null, rest: s.trim() }
   return { ms: parseDuration(m[1]), rest: m[2].trim() }
 }
