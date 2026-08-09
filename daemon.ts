@@ -189,6 +189,7 @@ import { readHandoffState, ctxNudgeHandoffClause, handoffAnnotation } from './ha
 import { planBoxUsageWarn, type UsageWarnMarker } from './usage-warn.ts'
 import { spawnModelFlag, WIDE_CONTEXT_SUFFIX } from './model-window.ts'
 import { buildModelSelector, MODEL_ALIASES, MODEL_ALIAS_IDS, planModelSelection, type ModelSelector } from './model-catalog.ts'
+import { parseLaunch, type ParsedLaunch } from './launch-command.ts'
 import {
   initStatusCard, statusCardText, statusKeyboard, updateSessionPin, updateTopicPins,
   removeSessionPins, refreshSessionPin, forgetChatPin, armChatPin, sessionPins, pinTextCache, persistSessionPins,
@@ -15414,6 +15415,106 @@ bot.on('callback_query:data', async ctx => {
 type AttachmentMeta = { kind: string; file_id: string; size?: number; mime?: string; name?: string; transcribed?: boolean }
 
 const PERMISSION_REPLY_RE = /^\s*(y|yes|n|no)\s+([a-km-z]{5})\s*$/i
+
+// ---- `@launch <name> [model/effort] <message>` — the owner's one-line launcher ----
+//
+// Two paths and one rule: a name that is ALREADY LIVE is messaged, and only a name that isn't is
+// spawned — `@launch general …` names a session that is usually up, and refusing it as a duplicate
+// (what `tg spawn` does) would turn his most ordinary use into an error.
+//
+// Both paths mint their work from the CHAT LANE's session id, and that single choice is what routes
+// every reply back into his DM with no new outbound plumbing: the spawn card, the founding ask and
+// the answer all travel the surfaces a chat lane already has.
+async function runOwnerLaunch(ctx: Context, chatId: string, laneSid: string, parsed: ParsedLaunch, msgId?: number): Promise<void> {
+  const reply = (t: string): Promise<unknown> => ctx.reply(t).catch(() => {})
+  if (parsed.kind === 'error') { await reply(parsed.error); return }
+  const { name, model, effort, message } = parsed
+  // Acknowledge the parse instantly: a spawn takes seconds, and silence in between is exactly what
+  // "the bridge ignored me" feels like.
+  if (msgId != null) void channel.react({ chatId, messageId: String(msgId) }, '🚀').catch(() => {})
+  await reapDeadEndpoints(name)
+  const endpoints = busEndpoints()
+  const res = resolveEndpoint(name, endpoints)
+  if (!('error' in res)) {
+    if (res.kind !== 'claude') { await reply(`@${nameForEndpoint(res.id, endpoints)} is a hermes endpoint — @launch reaches Claude sessions`); return }
+    await ownerLaunchAsk(reply, laneSid, res.id, endpoints, message, model, effort)
+    return
+  }
+  // Ambiguity is the one resolve failure that must NOT spawn: two live sessions share the name, so
+  // there is nothing to pick and a third would only make it worse. Every other failure — no such
+  // endpoint, or one that is closed — means spawn, which is the whole do-what-I-mean of this command.
+  if (endpoints.filter(e => !e.closed && normalizeEndpointName(e.name) === normalizeEndpointName(name)).length > 1) {
+    await reply(res.error); return
+  }
+  const spawned = await ownerLaunchSpawn(laneSid, name, model, effort, message)
+  // Success is already on his surface — launchSpawn mints the "Spawned @X on Opus/High" card into
+  // this same DM. A second line here would say it twice.
+  if (!spawned.ok) await reply(spawned.text)
+}
+
+// The name is live: deliver as a bus ask from the lane, so the answer comes back the way every other
+// fleet result does.
+async function ownerLaunchAsk(
+  reply: (t: string) => Promise<unknown>, laneSid: string, toSid: string, endpoints: BusEndpoint[],
+  message: string, model: string | null, effort: string | null,
+): Promise<void> {
+  const toName = nameForEndpoint(toSid, endpoints)
+  if (toSid === laneSid) { await reply(`@${toName} is your own chat lane — say it here instead`); return }
+  // repoDispatchPreflight and the depth breaker are deliberately NOT run here. Both gate the chat lane
+  // AGENT dispatching work it hasn't examined; this is the owner typing, and handleInbound has already
+  // reset the hop guard, so the chain is at depth 0 by construction.
+  const fromName = nameForEndpoint(laneSid, endpoints)
+  let p: BusPending
+  try { p = createPending({ fromSid: laneSid, toSid, toKind: 'claude', fromName, toName, text: message, refs: [] }, Date.now()) }
+  catch (e) { await reply(`${e instanceof Error ? e.message : e} — nothing was sent`); return }
+  appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'ask', from: fromName, to: toName, id: p.id, text: message, refs: [] })
+  const outcome = await tryDeliverAsk(p).catch(() => 'busy' as const)
+  if (outcome !== 'delivered') { await reply(askResultText(outcome, toName, p.id)); return }
+  // A running session's dials cannot be changed without restarting it, and it is NOT restarted for
+  // them — a re-billed context is a cost he didn't ask for. So the line names what it is actually
+  // running, which is what makes "ignored" informative rather than just a refusal.
+  if (model || effort) {
+    const running = [sessionModels.get(toSid), sessionEfforts.get(toSid)].filter(Boolean).join('/')
+    const asked = [model, effort].filter(Boolean).join('/')
+    await reply(running
+      ? `delivered to @${toName} (already running ${running} — dials ignored)`
+      : `delivered to @${toName} (already running; this box has no record of its dials, so the ${asked} you named was not applied)`)
+  }
+  // Delivered with no dials named needs no line from here: tryDeliverAsk's "Messaged @X" card is
+  // already on this chat.
+}
+
+// The name is free: spawn, through the same primitives `tg spawn` uses.
+async function ownerLaunchSpawn(
+  laneSid: string, name: string, model: string | null, effort: string | null, message: string,
+): Promise<{ ok: boolean; text: string }> {
+  // `humanOrigin`, NOT `ownerNamed`: the daemon read these words off his own message, so no agent is
+  // asserting that he said them — which is the entire reason `ownerNamed` exists. decideGate's first
+  // branch then leaves his pick sovereign: no approval card for a model he typed with his own thumb,
+  // Fable included (his ruling, on this feature: a card asking him to approve his own hand is a
+  // reflex tap, not a decision). Everything else composes untouched — 🦾 Auto, the configured
+  // defaults when he names nothing, and the held-spawn path below if the gate ever does fire.
+  const modelChoice = decideModel({
+    requested: model, configuredDefault: configuredSpawnModel(), headModel: model, requestedRaw: model,
+    newSession: true, humanOrigin: true, ...modelPolicyPrefs(), now: Date.now(),
+  })
+  const effortChoice = decideEffort(effort, configuredSpawnEffort(), spawnDialsAuto())
+  const dir = join(getBaseCwd() ?? homedir(), name.toLowerCase().replace(/[^\w.-]+/g, '-'))
+  try { if (!existsSync(dir)) mkdirSync(dir, { recursive: true }) }
+  catch (e) { return { ok: false, text: `couldn't create ${dir}: ${(e as Error)?.message ?? e}` } }
+  const spec: SpawnSpec = {
+    fromSid: laneSid, topicName: name, dir, effort: effortChoice.effort, firstMsg: message,
+    headless: !isTopicMode(), autoEffort: effortChoice.autoFallback, ...(model ? { nativeModel: model } : {}),
+  }
+  // Unreachable while `humanOrigin` is true — kept so that a later change to the gate cannot turn
+  // this path into the one spawn that starts a gated model without asking.
+  if (modelChoice.clamped && modelChoice.ask) {
+    return { ok: true, text: await holdSpawnForApproval(spec, modelChoice.clamped, launchFallback(modelChoice.model)) }
+  }
+  return launchSpawn(spec, modelChoice.model, '',
+    spawnReason(spec, modelChoice.autoFallback && !model, effortChoice.autoFallback))
+}
+
 async function handleInbound(
   ctx: Context,
   text: string,
@@ -15564,6 +15665,17 @@ async function handleInbound(
         ...(attach.transcribed ? { attachment_transcribed: 'true' } : {}),
       } : {}),
     },
+  }
+
+  // `@launch <name> [model/effort] <message>` — intercepted here, so it never reaches the chat lane's
+  // pane as text. Scoped to a private chat with a BOUND lane: that lane's sid is what both paths mint
+  // from, and there is no sane substitute for it. A DM with no lane yet falls through untouched — the
+  // existing auto-provision runs and the next @launch is native. Matched on `content`, so a voice note
+  // saying it works too.
+  if (ctx.chat?.type === 'private') {
+    const lane = getDmChatSession(chat_id)
+    const launch = lane ? parseLaunch(content, MODEL_ALIASES, SPAWN_EFFORT_LEVELS) : null
+    if (lane && launch) { await runOwnerLaunch(ctx, chat_id, lane.sessionId, launch, msgId); return }
   }
 
   // Forum-topics routing: a message sent inside a session's topic carries its message_thread_id.
