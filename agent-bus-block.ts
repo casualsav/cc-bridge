@@ -28,7 +28,15 @@ function refsAttr(refs: string[]): string {
 // `ask=` would contradict the rule they already follow. And the footer inverts, because an ack's
 // pending row is gone the moment it lands: `tg answer` on one returns "already closed", and an agent
 // that tried would reasonably conclude the bus is broken and say so.
-export function formatAskBlock(from: string, askId: number, text: string, refs: string[] = [], noReply = false): string {
+// `owner` marks an ask the HUMAN typed himself (`@name <message>` in his DM, or a reply to a session's
+// card) rather than one his chat lane composed. The sender NAME cannot carry that — it stays the lane's
+// endpoint so a worker reaching back with `tg ack @<from>` still lands somewhere that resolves — so the
+// distinction rides as an attribute, in the slot `refs` already uses, after the id BUS_ANCHOR matches on.
+//
+// It exists to change how the answer is WRITTEN: a session that cannot tell the two apart writes its
+// report to an orchestrator when a person is reading it on a phone. The footer says so in words,
+// because an attribute nobody is told how to read changes nothing.
+export function formatAskBlock(from: string, askId: number, text: string, refs: string[] = [], noReply = false, owner = false): string {
   // One terse self-describing line after the tag: a stale/fresh session with no bus instructions in its
   // loaded CLAUDE.md still learns the reply verb; a fluent agent just ignores it. (Outside the <tg …>
   // tag so the inbound parse is unchanged.)
@@ -38,8 +46,9 @@ export function formatAskBlock(from: string, askId: number, text: string, refs: 
     // global "Reply = final text block, auto-delivered" rule, which is TRUE on the owner's lane and
     // false here, and its answer sat in its pane reaching nobody. Saying what will NOT happen
     // contradicts that rule at the exact point the two collide.
-    : `↩ reply with: tg answer ${askId} "<summary>"  ·  a final text block does NOT reach the asker`
-  return `<tg @${from} ${noReply ? 'ack' : 'ask'}=${askId}${refsAttr(refs)}>${text}</tg>\n${footer}`
+    : `↩ reply with: tg answer ${askId} "<summary>"  ·  a final text block does NOT reach the asker${
+        owner ? '  ·  THE OWNER typed this himself — your answer goes to him in Telegram, not to an agent: write it for a person' : ''}`
+  return `<tg @${from} ${noReply ? 'ack' : 'ask'}=${askId}${owner ? ' from=owner' : ''}${refsAttr(refs)}>${text}</tg>\n${footer}`
 }
 
 // Block injected INTO the asker's pane when the target answers. `re` echoes the ask id so the asker

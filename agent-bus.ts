@@ -265,6 +265,15 @@ export function loadBus(): BusState {
         // loss mirrors a deliberately-silent daemon notice onto the human surface.
         ...(p.noReply === true ? { noReply: true as const } : {}),
         ...(p.quiet === true ? { quiet: true as const } : {}),
+        // The SAME trap, hit a third time and observed in production this time (2026-08-09): an open
+        // owner-direct ask that outlived a restart reloaded as an ordinary lane ask, so its answer was
+        // typed into the chat agent and no delivery reaction ever fired. A deploy is a restart, which
+        // makes this the common case rather than the rare one — ask 846 was minted, the daemon was
+        // redeployed while it was open, and the answer went to the orchestrator. Every optional field
+        // on BusPending must be listed here; `agent-bus-persist.test.ts` enumerates them so the fourth
+        // one cannot be forgotten the way these three were.
+        ...(p.ownerDirect === true ? { ownerDirect: true as const } : {}),
+        ...(typeof p.ownerMsgId === 'number' ? { ownerMsgId: p.ownerMsgId } : {}),
         // Same whitelist trap the two lines above document: a @system ask outliving a restart would
         // reload with no kind and answer back as the neutral label — right, but less than we knew.
         ...(SYSTEM_ASK_KINDS.has(p.sysKind as string) ? { sysKind: p.sysKind as SystemAskKind } : {}),

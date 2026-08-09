@@ -3739,13 +3739,13 @@ function busDeliverOutcome(pane: string, block: string): Promise<PasteOutcome> {
 // table, rather than at a call site where the cast would have compiled it either way. A new reaction
 // goes in this table; a bare literal at a call site is the thing this exists to stop.
 const REACTIONS = {
-  delivered: '👌',   // his own direct ask reached the session (tryDeliverAsk's landed branch)
-  launched: '⚡',     // @launch / @reopen — a session is coming up. ONE glyph for both, as 🚀 was
+  delivered: '👀',   // his own direct ask reached the session (tryDeliverAsk's landed branch) — his pick
+                     // 2026-08-09, replacing 👌. Same glyph as `watching` and that is not a collision to
+                     // tidy up: they are different acts, and either one can move without the other.
   scheduled: '🤝',   // @schedule — booked. The set holds no clock, and an agreement is the nearest true thing
   allowed: '👍',     // a permission answered by typing y/n…
   denied: '👎',      // …and its refusal
-  killed: '🫡',      // @kill
-  watching: '👀',    // @watch
+  watching: '👀',    // @watch, the one session verb that answers in nothing but this
   received: '✍',    // a message was taken and typed into a pane
 } satisfies Record<string, ReactionTypeEmoji['emoji']>
 // The two reactions NOT in the table, both by construction: `tg react`'s emoji is an argument from
@@ -3882,7 +3882,7 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
     // already receiving, never a live push into a busy pane). Excludes this very ask (already in the
     // ledger from creation) + the endpoint's own rows. Claude only — a hermes one-shot has no
     // continuity to catch up, and runHermesAsk never calls this.
-    const askBlock = formatAskBlock(cur.fromName, cur.id, cur.text, cur.refs, cur.noReply)
+    const askBlock = formatAskBlock(cur.fromName, cur.id, cur.text, cur.refs, cur.noReply, cur.ownerDirect)
     // A previous attempt already pasted this block into THIS pane and could not confirm its Enter, so
     // the text is in that box right now: press Enter again, never paste again. Re-pasting is what put
     // the same @system ack into the chat lane twice on 2026-08-02, 6s apart, off ONE ledger row — see
@@ -15850,7 +15850,12 @@ const OWNER_CHAT_VERBS: readonly OwnerChatVerb[] = [
       if (!parsed) return false
       const reply = (t: string): Promise<unknown> => ctx.reply(t).catch(() => {})
       if (parsed.kind === 'error') { await reply(parsed.error); return true }
-      if (msgId != null) void channel.react({ chatId, messageId: String(msgId) }, verb === 'kill' ? REACTIONS.killed : verb === 'watch' ? REACTIONS.watching : REACTIONS.launched).catch(() => {})
+      // @watch alone keeps a reaction (his ruling, 2026-08-09). The rule is not "which verbs are
+      // important" but which have anything else to say: @kill and @reopen now answer in words ("✅
+      // Killed the @x session"), so a tick beside them repeats it, exactly as @launch's did over its
+      // spawn card. @watch arms silently and says nothing until it fires — the reaction IS its
+      // confirmation, and without it the gesture looks ignored for however long the target stays busy.
+      if (msgId != null && verb === 'watch') void channel.react({ chatId, messageId: String(msgId) }, REACTIONS.watching).catch(() => {})
       const r = verb === 'kill' ? await runSessionKill(laneSid, parsed.name, parsed.force, 'chat')
         : verb === 'reopen' ? await runSessionReopen(laneSid, parsed.name, 'chat')
         : await runSessionWatch(laneSid, parsed.name, 'chat', chatId)
