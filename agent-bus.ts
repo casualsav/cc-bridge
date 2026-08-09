@@ -91,11 +91,12 @@ export type SystemAskKind =
   | 'watch-fired'        // ack: a `tg watch` fired
   | 'spawn-news'         // ack: a held spawn started (or didn't)
   | 'repo-brief'         // ack: a `tg repo` scout finished
+  | 'slash-parked'       // ack: a `tg slash --at-next-prompt` ran, was refused, or closed unrun
 
 // The same list as a runtime set — loadBus validates against it, so a hand-edited or corrupted
 // agent-bus.json cannot put an unknown string where a kind belongs.
 const SYSTEM_ASK_KINDS = new Set<string>(['ctx-nudge', 'fleet-alert', 'surfaceless-block',
-  'post-relay', 'closure-notice', 'watch-fired', 'spawn-news', 'repo-brief'])
+  'post-relay', 'closure-notice', 'watch-fired', 'spawn-news', 'repo-brief', 'slash-parked'])
 
 // The lead of the owner-facing card for an ANSWERED @system ask — rendered as "<icon> @who <did>".
 // Specific only where the kind is known and answerable; everything else — an unknown kind, a

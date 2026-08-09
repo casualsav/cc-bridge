@@ -95,7 +95,10 @@ const HELP: Record<string, string> = {
            '  than none, so the decision to wait, escalate to `tg ask`, or tell a human stays yours.',
   answer:  'tg answer <id> <text|-> [--ref path]…   answer an ask you received (id from its <tg …ask=ID> block)',
   post:    'tg post <text|->   say something to the humans in the room',
-  slash:   'tg slash <name> "/compact"   run a slash command in another session\'s CLI (rejected mid-turn; /exit is owner-only).\n' +
+  slash:   'tg slash <name> "/compact" [--at-next-prompt]   run a slash command in another session\'s CLI\n' +
+           '  (rejected mid-turn; /exit is owner-only). --at-next-prompt holds it instead and runs it the moment\n' +
+           '  that session is free, ahead of anything queued for it — one notice comes back either way, so you\n' +
+           '  end your turn rather than watching for idle (a busy session goes idle→busy in under a second).\n' +
            '  A command that opens a PANEL (/cost, /usage, /context) is refused here and pointed at the verb\n' +
            '  below: relayed, it types the command and walks away, and the CLI holds the screen until Esc.',
   cost:    'tg cost <name>   that session\'s cost report — total cost, API/wall duration, lines added/removed,\n' +
@@ -210,6 +213,7 @@ if (BUS.has(cmd)) {
     else if (rest[i] === '--refresh') { flags.refresh = true }             // repo: re-scout even if the brief is fresh
     else if (rest[i] === '--list') { flags.list = true }                   // repo: what this box already knows
     else if (rest[i] === '--all') { flags.all = true }                     // roster: include hidden endpoints
+    else if (rest[i] === '--at-next-prompt') { flags.atNextPrompt = true } // slash: hold it until the target is free
     else if (rest[i] === '--await') { /* P1 is async-only; --await is accepted and ignored */ }
     else pos.push(rest[i]!)
   }
@@ -225,7 +229,7 @@ if (BUS.has(cmd)) {
     case 'btw':     name = 'btw';     args = { pane, to: pos[0], text: body(pos[1], 'btw') ?? '', refs }; break
     case 'answer':  name = 'answer';  args = { pane, id: pos[0], text: body(pos[1], 'answer') ?? '', refs }; break
     case 'post':    name = 'post';    args = { pane, text: body(pos[0], 'post') ?? '' }; break
-    case 'slash':   name = 'slash';   args = { pane, to: pos[0], command: pos[1] ?? '' }; break
+    case 'slash':   name = 'slash';   args = { pane, to: pos[0], command: pos[1] ?? '', ...flags }; break
     // Keys are argv words, never stdin: they're a fixed vocabulary, not a body.
     case 'keys':    name = 'keys';    args = { pane, to: pos[0], keys: pos.slice(1), ...flags }; break
     // One target, no body: the answer comes back in this call's own result.

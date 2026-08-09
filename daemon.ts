@@ -132,6 +132,7 @@ import {
 } from './topic-runtime.ts'
 import { latchMode, type ModeLatch } from './mode-latch.ts'
 import { watchVerdict, watchNoticeText, watchCardText, existingWatch, alreadyWatchingText, adoptCause, serializePasses, type BusWatch, type WatchOutcome } from './watch-plan.ts'
+import { parkVerdict, existingPark, alreadyParkedText, parkedText, parkNoticeText, type ParkedSlash, type ParkResult } from './slash-park.ts'
 import { fetchUsageResult, type UsageReading } from './usage-api.ts'
 import { startWebapp, type SettingsView as WebappSettingsView, type SessionCard as WebappSessionCard, type SessionFeed as WebappSessionFeed, type AutomationView as WebappAutomationView, type UsageView as WebappUsageView } from './webapp.ts'
 import { startTunnel, ensureCloudflared, reapOrphanTunnels, tailscaleFunnelUrl, type Tunnel } from './tunnel.ts'
@@ -3462,7 +3463,18 @@ async function runSessionWatch(fromSid: string, target: string, g: Gestures, cha
 // that was inline in `case 'slash'`. The reason to have one copy is the same reason the input-box
 // guard exists at all — two relays stacking in one box is how `/compact` became `/compact/compact`
 // (2026-07-30) — and a second caller with its own hand-copied dance is that bug waiting again.
-type SlashRelay = { ok: true; text: string } | { ok: false; why: string }
+// `retry` marks the refusals that are about WHEN, not about the command: the pane is mid-turn, its
+// box is occupied, its ! bash line is armed, it has no pane this instant. A caller holding the
+// command for later (the park below) tries again on the next sweep; the verb reports them exactly as
+// before. Flagged here rather than string-matched at the call site — the refusal texts are read by
+// humans and would be re-worded without anyone thinking about a matcher.
+type SlashRelay = { ok: true; text: string } | { ok: false; why: string; retry?: true }
+
+// The refusal an orchestrator hits most, and the one that used to be a dead end: the target goes
+// busy again within a second of reaching a prompt whenever anything is queued for it, so "retry when
+// it goes idle" is advice nobody can act on by hand. It names the flag that does it for them.
+const MID_TURN_REFUSAL =
+  'target is mid-turn — retry when it goes idle, or re-send with --at-next-prompt and the bridge runs it the moment they are free'
 
 async function relaySlashToSession(
   fromSid: string, toSid: string, command: string, endpoints: BusEndpoint[], room: string,
@@ -3470,21 +3482,21 @@ async function relaySlashToSession(
   const targetPane = await paneForSession(toSid).catch(() => null)
   if (!targetPane || !(await paneAlive(targetPane).catch(() => false))) {
     if (!(targetPane && isPaneRestarting(targetPane))) updateTopic(toSid, { closed: true })
-    return { ok: false, why: 'target session has no live pane' }
+    return { ok: false, why: 'target session has no live pane', retry: true }
   }
   const cap = await capturePane(targetPane).catch(() => '')
   // paneRunsTypedInput, not onNormalPrompt: the queued-messages bar IS a bordered ❯ row, so the
   // bare prompt read passes on a busy pane and the CLI then queues the command instead of running
   // it — reported as submitted, and (for a changesPaneContext command) as complete moments later.
-  if (!cap || !paneRunsTypedInput(cap)) return { ok: false, why: 'target is mid-turn — retry when it goes idle' }
-  if (bashModeArmed(cap)) return { ok: false, why: 'target has an unsubmitted ! bash command in its input box' }
+  if (!cap || !paneRunsTypedInput(cap)) return { ok: false, why: MID_TURN_REFUSAL, retry: true }
+  if (bashModeArmed(cap)) return { ok: false, why: 'target has an unsubmitted ! bash command in its input box', retry: true }
   // A box that already holds something is refused rather than typed over. Two relays stacking in
   // one input box is how `/compact` became `/compact/compact` on 2026-07-30 — and whatever is
   // sitting there is somebody's text, so clearing it here is not ours to do. Its OWN styled read:
   // `cap` above is colourless, and the faint attribute is the only thing separating a real draft
   // from the CLI's suggestion ghost — this refusal fired for hours against a ghost on 2026-08-03.
   const boxNow = inputBoxOccupant(await capturePaneStyled(targetPane).catch(() => ''))
-  if (boxNow) return { ok: false, why: `target has unsubmitted text in its input box (${JSON.stringify(boxNow.slice(0, 40))}) — nothing sent` }
+  if (boxNow) return { ok: false, why: `target has unsubmitted text in its input box (${JSON.stringify(boxNow.slice(0, 40))}) — nothing sent`, retry: true }
   const toName = nameForEndpoint(toSid, endpoints)
   // Every exit from here on is explicit. This case used to set `text = '!…'` for a refusal and break
   // to a shared `ok: true` write, so a refused relay reached the caller as `ok:` with exit 0 — a
@@ -4180,6 +4192,72 @@ async function evaluateWatchesPass(): Promise<void> {
   }
 }
 
+// ---- `tg slash … --at-next-prompt`: hold a command until the target is free ----
+//
+// Persisted for the same reason watches are: the submitter has ended its turn and is waiting to be
+// woken, so a park dropped by a restart is the one outcome it cannot recover from.
+const PARKS_FILE = join(STATE_DIR, 'bus-parked-slashes.json')
+type ParkStore = { seq: number; parks: ParkedSlash[] }
+const parkStore = readJsonFile<ParkStore>(PARKS_FILE, { seq: 0, parks: [] })
+let parkedSlashes: ParkedSlash[] = parkStore.parks ?? []
+const saveParks = (): void => writeJsonFile(PARKS_FILE, { seq: parkStore.seq, parks: parkedSlashes })
+const nextParkId = (): number => ++parkStore.seq
+const dropPark = (id: number): void => { parkedSlashes = parkedSlashes.filter(x => x.id !== id); saveParks() }
+
+// The submitter's one notice — the same quiet @system FYI a watch fires as, and for the same
+// reasons: noReply clears the row on landing, quiet keeps the humans' surfaces out of a message
+// addressed to an agent, depth 0 is what every system wake carries.
+async function notifyParkOutcome(p: ParkedSlash, r: ParkResult, now: number): Promise<void> {
+  const text = parkNoticeText(p, r, now)
+  process.stderr.write(`daemon: park ${p.id} (${p.command} → @${p.targetName}) closed as ${r.kind} → ${p.submitterSid}\n`)
+  const pane = await paneForSession(p.submitterSid).catch(() => null)
+  if (!pane) return
+  const n = createPending({ fromSid: SYSTEM_SID, toSid: p.submitterSid, fromName: 'system',
+    toName: nameForEndpoint(p.submitterSid, busEndpoints()), text, refs: [], noReply: true, quiet: true, depth: 0, sysKind: 'slash-parked' }, now)
+  appendLedger(busLedgerRoom(), { ts: now, kind: 'ack', from: 'system', to: n.toName, id: n.id, text })
+  await tryDeliverAsk(n).catch(() => {})
+}
+
+// Serialised for the reason evaluateWatches is: the arm-time pass and the sweep's overlap, and two
+// passes seeing the same park unrun would relay the command TWICE into one prompt.
+const evaluateParks = serializePasses(evaluateParksPass)
+async function evaluateParksPass(): Promise<void> {
+  if (!parkedSlashes.length) return
+  const now = Date.now()
+  for (const p of [...parkedSlashes]) {
+    if (!parkedSlashes.some(x => x.id === p.id)) continue   // ran on an overlapping pass
+    // Nobody left to notify ⇒ drop it rather than run it. A command whose submitter has ended is a
+    // command nobody is sequencing behind, and typing it into a live session would be a change no
+    // agent asked for and none would see. Same liveness proof the reaper uses, so the daemon's
+    // startup window (every session looks paneless) cannot clear the box's parks.
+    if (panesDiscovered && await busTargetGone(p.submitterSid).catch(() => false)) {
+      dropPark(p.id)
+      process.stderr.write(`daemon: park ${p.id} (${p.command} → @${p.targetName}) dropped — its submitter ended\n`)
+      continue
+    }
+    const pane = await paneForSession(p.targetSid).catch(() => null)
+    const cap = pane ? await capturePane(pane).catch(() => '') : ''
+    // The same "free right now" predicate the watch pass uses — including "not compacting", because a
+    // pane mid-/compact redraws a prompt-shaped screen it is not actually at.
+    const atPrompt = !!cap && paneRunsTypedInput(cap) && !bashModeArmed(cap) && !detectCompacting(cap)
+    const gone = sessionEnding(p.targetSid) || (panesDiscovered ? await busTargetGone(p.targetSid).catch(() => false) : false)
+    const verdict = parkVerdict(p, { atPrompt, gone }, now)
+    if (!verdict) continue
+    if (verdict === 'run') {
+      const r = await relaySlashToSession(p.submitterSid, p.targetSid, p.command, busEndpoints(), busLedgerRoom())
+      // It went busy (or its box filled) between the read and the paste — exactly the race this verb
+      // exists to win, so losing one round is not a failure. Stays parked for the next sweep; the TTL
+      // is what stops it looping forever.
+      if (!r.ok && r.retry) continue
+      dropPark(p.id)
+      await notifyParkOutcome(p, r.ok ? { kind: 'ran', text: r.text } : { kind: 'refused', why: r.why }, now).catch(() => {})
+      continue
+    }
+    dropPark(p.id)
+    await notifyParkOutcome(p, { kind: verdict }, now).catch(() => {})
+  }
+}
+
 // 15s sweep: reap dead letters, expire un-answered asks (tell the asker) + deliver queued asks whose
 // target is now idle.
 async function sweepBus(): Promise<void> {
@@ -4258,6 +4336,18 @@ async function sweepBus(): Promise<void> {
       ? `(ask ${p.id} was NEVER DELIVERED to @${p.toName} after ${Math.round(ASK_TTL_MS / 60_000)}m — their input box holds typed text (${JSON.stringify(blocked.slice(0, 40))}), so attempts are refused rather than pasted over it. Still queued; it delivers when that box clears — this is not a silent target)`
       : `(no answer yet from @${p.toName} after ${Math.round(ASK_TTL_MS / 60_000)}m — still open; a late answer will be delivered if it arrives)`))
   }
+  // BEFORE the delivery loop below, and the order is deliberate: this sweep is what makes a session
+  // busy again within a second of reaching a prompt, so a parked command evaluated after the
+  // deliveries would lose the same race a human loses by hand.
+  //
+  // What that buys, exactly — because the honest scope is narrower than it first looks. It wins
+  // against the asks the BRIDGE still holds (the wedged/occupied/no-pane backlog delivered right
+  // here). It does NOT jump a session's own CLI queue: an ask handed to a working pane is already in
+  // the CLI's message queue and runs before the pane is ever at a prompt again, so the park waits for
+  // it. Measured live 2026-08-09 — ask 810 stacked at 08:41, answered 08:42:20, parked /clear
+  // submitted 08:42:33. Nothing short of an interrupt could reorder that, and an interrupt is not
+  // something a bus verb may do to somebody's turn.
+  await evaluateParks().catch(() => {})
   for (const p of listPending()) {
     if (!p.injected && !p.expiredAt) await tryDeliverAsk(p).catch(() => {})
   }
@@ -6940,6 +7030,22 @@ async function handleCall(
         const res = resolveEndpoint(String(args.to ?? ''), endpoints)
         if ('error' in res) { write({ t: 'result', id, ok: false, text: res.error }); return }
         if (res.kind !== 'claude') { write({ t: 'result', id, ok: false, text: 'slash needs a live session target (a hermes endpoint has no CLI)' }); return }
+        // `--at-next-prompt`: don't relay now, hold it and let the daemon relay it at the target's
+        // next prompt (see slash-park.ts). NOT the implicit behaviour of a mid-turn refusal — turning
+        // a refusal into an action taken later would change every existing caller silently, and some
+        // of them want to know now.
+        if (args.atNextPrompt === true) {
+          if (res.id === fromSid) { write({ t: 'result', id, ok: false, text: 'parking a command for yourself would fire it the moment your own turn ends — just run it' }); return }
+          const already = existingPark(parkedSlashes, fromSid, res.id)
+          if (already) { write({ t: 'result', id, ok: true, text: alreadyParkedText(already, command, Date.now()) }); return }
+          const p: ParkedSlash = { id: nextParkId(), submitterSid: fromSid, targetSid: res.id, targetName: nameForEndpoint(res.id, endpoints), command, parkedAt: Date.now() }
+          parkedSlashes.push(p)
+          saveParks()
+          process.stderr.write(`daemon: park ${p.id} armed — ${command} → @${p.targetName} (${res.id}) by ${fromSid}\n`)
+          void evaluateParks().catch(() => {})   // already at a prompt ⇒ it goes in now, not in 15s
+          write({ t: 'result', id, ok: true, text: parkedText(p) })
+          return
+        }
         const relayed = await relaySlashToSession(fromSid, res.id, command, endpoints, room)
         if (!relayed.ok) { write({ t: 'result', id, ok: false, text: relayed.why }); return }
         text = relayed.text

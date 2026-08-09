@@ -67,15 +67,23 @@ by its topic name.
   what changed; how it was verified — saying which claims were observed live, which are code-reviewed
   only, and which never fired; what remains uncertain. Never claim confidence a live test didn't
   earn — the recorded gap is what saves your successor from re-deriving it.
-- tg slash @name "/compact" — run a slash command in another session's CLI (rejected while the
-  target is mid-turn — retry when idle; its outcome echoes in that session's topic). /exit is owner-only.
+- tg slash @name "/compact" [--at-next-prompt] — run a slash command in another session's CLI
+  (rejected while the target is mid-turn; its outcome echoes in that session's topic). /exit is owner-only.
   A command that opens a PANEL (`/cost`, `/usage`, `/context`) is refused here and pointed at the verbs
   below: relayed, it types the command and walks away, and the CLI holds the screen until someone sends
   Esc — a wedged pane reported to you as a successful send. **Mid-turn is a REFUSAL, never a queue:**
-  a slash the CLI queues does not run until that turn ends, so compacting a busy session is two steps —
-  `tg watch @name`, then `tg slash` when it fires. A rare "QUEUED … instead of running it" reply means
-  the target went busy between the check and the paste: the command will run when its turn ends, nothing
-  is watching for it, and re-sending stacks a second copy behind the first.
+  a slash the CLI queues does not run until that turn ends. **Don't hand-roll the wait — that is a race
+  you lose.** A busy session goes idle→busy in under a second whenever anything is queued for it, because
+  the bridge's own sweep hands it the next ask the instant it sees a prompt; watching for idle and then
+  slashing loses to that by construction. `--at-next-prompt` parks the command and the bridge runs it
+  at the prompt IT sees, ahead of anything IT would hand them there — ONE notice comes back either way
+  (it ran, it was refused, the target ended, or an hour passed unfree), so you end your turn instead of
+  waiting. It removes the RACE, not the backlog: messages already in that session's own CLI queue still
+  run first and nothing short of an interrupt can jump them. One parked command per target per sender;
+  a different one is refused rather than replacing it. A rare
+  "QUEUED … instead of running it" reply means the target went busy between the check and the paste: the
+  command will run when its turn ends, nothing is watching for it, and re-sending stacks a second copy
+  behind the first.
 - tg cost @name · tg context @name · tg status @name · tg mcp @name · tg hooks @name — read one of
   that session's CLI panels: cost (total, API/wall duration, lines ±, per-model tokens), context
   (window use + per-category breakdown), status (version, model, cwd, session id, MCP state, the
