@@ -1437,8 +1437,14 @@ async function sendChunkRetrying(chat_id: string, text: string, opts: SendOpts):
 // session so a native reply to any of them routes back (msg-routes.ts). It is passed DOWN rather
 // than ids being plumbed back up: a chunked reply is four messages and all four must answer to the
 // same session, which is one line here and four call-site bookkeeping bugs waiting to happen there.
-async function sendAgentText(chats: string[], text: string, threadId?: number, replyTo?: number, avatarToken?: string, silent = false, routeSid?: string | null): Promise<void> {
+// Returns the message ids Telegram actually gave back, in send order. The relay path logs INTENT
+// ("relaying N chars") before the call and used to log no outcome at all, so "was it delivered?"
+// was unanswerable from the log for any past send — asked once about a real message on 2026-08-09
+// and it could not be answered. An id is proof the API accepted it; an empty array means every
+// path either refused or was abandoned as an unknown outcome, both of which log their own line.
+async function sendAgentText(chats: string[], text: string, threadId?: number, replyTo?: number, avatarToken?: string, silent = false, routeSid?: string | null): Promise<number[]> {
   const access = loadAccess()
+  const sentIds: number[] = []
   // The current render/chunk path — also the fallback when rich messages are off or error out. `reply`
   // (agent-bus P4 addressing) lands on the FIRST chunk only; the rest are continuations of it.
   const sendHtmlPath = async (chat_id: string, reply?: number): Promise<void> => {
@@ -1453,7 +1459,9 @@ async function sendAgentText(chats: string[], text: string, threadId?: number, r
     let first = true
     for (const c of chunks) {
       const opts = first && reply != null ? { ...base, replyTo: String(reply) } : base
-      rememberMsgRoute(chat_id, await sendChunkRetrying(chat_id, c, opts) ?? undefined, routeSid)
+      const id = await sendChunkRetrying(chat_id, c, opts) ?? undefined
+      if (id != null) sentIds.push(Number(id))
+      rememberMsgRoute(chat_id, id, routeSid)
       first = false
     }
   }
@@ -1473,6 +1481,7 @@ async function sendAgentText(chats: string[], text: string, threadId?: number, r
         const m = await sendRichMessage(avatarToken, chat_id, toInputRichMessage(text), { messageThreadId: threadId, ...(silent ? { disableNotification: true } : {}), ...(replyOnce != null ? { replyToMessageId: replyOnce } : {}) })
         avatarMsgTokens.remember(chat_id, m.message_id, avatarToken)
         rememberMsgRoute(chat_id, m.message_id, routeSid)
+        if (m.message_id != null) sentIds.push(m.message_id)
         replyOnce = undefined; continue
       } catch (e) {
         // Only a REFUSAL frees us to send again. Telegram never answering is the one case where
@@ -1491,6 +1500,7 @@ async function sendAgentText(chats: string[], text: string, threadId?: number, r
       try {
         const m = await sendRichMessage(TOKEN!, chat_id, toInputRichMessage(text), { messageThreadId: threadId, ...(silent ? { disableNotification: true } : {}), ...(replyOnce != null ? { replyToMessageId: replyOnce } : {}) })
         rememberMsgRoute(chat_id, m?.message_id, routeSid)
+        if (m?.message_id != null) sentIds.push(m.message_id)
         replyOnce = undefined; continue
       }
       catch (e) {
@@ -1504,6 +1514,7 @@ async function sendAgentText(chats: string[], text: string, threadId?: number, r
     await sendHtmlPath(chat_id, replyOnce); replyOnce = undefined
   }
   if (access.tts?.mode === 'all') void sendTtsVoice(text, chats.map(chat => ({ chat, thread: threadId })))
+  return sentIds
 }
 
 // Voice replies (ROADMAP #15): speak `text` and drop the voice note after the text message.
@@ -2248,8 +2259,12 @@ async function deliverRelayReply(paneId: string, target: { chat: string; thread?
   // null → the shared bridge bot, exactly as before.
   const avatar = target.thread != null && busRoom() === target.chat ? await avatarForPane(paneId) : null
   try {
-    await sendAgentText([target.chat], text, target.thread, replyTo, avatar?.token, silent,
+    const ids = await sendAgentText([target.chat], text, target.thread, replyTo, avatar?.token, silent,
       await sessionForPane(paneId).catch(() => null))
+    // OUTCOME, not intent. The `relaying N chars` line above is written before the call; without this
+    // one the log can say a send was attempted and never that it landed, which is what made a real
+    // "did he get it?" question unanswerable on 2026-08-09. An empty list is itself the answer.
+    process.stderr.write(`daemon: relay delivered to ${target.chat}${target.thread ? `#${target.thread}` : ''} → message id ${ids.length ? ids.join(',') : 'NONE (no id came back)'}\n`)
     releaseTyping(target.thread)
     turnTrigger.delete(route); recentSenders.delete(route)   // turn delivered → next turn's FIRST poster becomes the addressee
   } catch (e) {

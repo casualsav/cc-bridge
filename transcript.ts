@@ -98,36 +98,63 @@ const THINKING_ONLY_NUDGE = /^\[Your previous response had no visible output\b/
 //   (/model, /clear) is run in the terminal and needs no model turn. Relaying it sent noise to
 //   Telegram for a command the user ran locally.
 //
-//   The re-prompt echo. Under CLI 2.1.224 the "no visible output" nudge was PERSISTED as a user
-//   meta entry (isThinkingOnlyNudge, below) and the model answered it with prose. Under 2.1.225+
-//   the nudge is not written to the transcript at all, and what the model does with it is ECHO IT
-//   BACK as an ordinary assistant text block — a real API message, real requestId, 29 output
-//   tokens. Both halves of the old defence therefore failed at once: the meta row the bus-anchored
-//   drop keys on never appears, and the echo is indistinguishable from a reply to every reader
-//   that only asks "is this assistant text?". On 2026-08-09 the owner received the literal string
-//   `[Your previous response had no visible output. Please continue and produce a user-visible
-//   response.]` as a Telegram message and quoted it back asking what it was (observed: rows 452
-//   and 475 of the chat lane's own transcript, twelve occurrences in that file alone).
+//   The BRACKETED FILLER LINE — a final text block that is one line and wholly enclosed in `[…]`.
+//   This one member covers the whole no-output class, and it is measured rather than reasoned.
+//   Survey of every turn-conclusion text block in this box's real transcripts (scripts/filler-survey.ts,
+//   2026-08-09, 6632 blocks across ~150 sessions written by CLI 2.1.205 → 2.1.226): 33 matched, and
+//   all 33 were filler — 28 the CLI's own re-prompt echoed back, 2 deliberate test canaries, 3 the
+//   model's own notes to nobody. ZERO were a reply. Prose people actually send is not wrapped in
+//   brackets end to end; a bracketed aside inside a real message never matches, because the whole
+//   trimmed text must be the bracket.
 //
-// So the echo is dropped BY CONTENT, on every anchor — owner turns included. That is deliberately
-// wider than the bus-only drop below: no reply a human wants to read begins with the harness's own
-// re-prompt, so there is nothing here to weigh against the certainty of the leak.
-//   The PLACEHOLDER answer to that same nudge. Before a session learned to echo the string back it
-//   satisfied the re-prompt the cheapest way there is: a lone "." — sometimes "…", sometimes a bare
-//   dash. It exists only because the CLI refuses a text-less turn, and it carries no word for anyone
-//   to read. Dropped on every anchor for the same reason as the echo: there is no message a human
-//   wants that consists entirely of punctuation, so nothing is being weighed against the leak. The
-//   test is WORDLESSNESS, not a list of strings — the moment one letter appears it is a reply and
-//   delivers ("ok.", "done", "no" all pass straight through).
+//   What produces them, characterised against CLI 2.1.226 (the survey is the evidence; the received
+//   wisdom was wrong in both directions):
 //
-// RULING, 2026-08-09: these three ARE the filter, and there is no other. v0.5.33 additionally
-// dropped a chat lane's whole final text block whenever a bus verb had woken the turn, and inside
-// the hour that ate a real report to the owner (1952 characters, uuid 036648c6). His words on
-// reading it: "I don't want any messages filtered" beyond this class. So the boundary is content
-// and nothing else — never who woke the turn, never which surface it lands on.
+//     * ECHO — the dominant shape now, and new in 2.1.225 (0 before it, 7 in 2.1.225, 21 in 2.1.226).
+//       A turn whose response carried no text at all gets re-prompted OUT OF BAND: nothing is
+//       persisted, and the model answers by reproducing the re-prompt verbatim as ordinary assistant
+//       text — real requestId, real output tokens. The owner received one on 2026-08-09 and quoted
+//       it back asking what it was.
+//     * THE META ROW STILL EXISTS on 2.1.226 — it did NOT stop being written, contrary to what this
+//       file asserted between the echo fix and today. It became RARE: 72 rows under 2.1.220, 5 under
+//       2.1.224, 2 under 2.1.225, 1 under 2.1.226. It appears when the response held THINKING but no
+//       text (the thinking row is persisted, then the meta row, then the forced prose); the
+//       out-of-band path appears when the response held nothing at all. So `isThinkingOnlyNudge`
+//       below is live code on the current CLI, not legacy.
+//     * NOT EVERY BRACKETED LINE IS THE CLI'S DOING. `[Turn handled via bus — no owner-facing text
+//       needed.]` reached the owner at 16:22:26Z on 2026-08-09 out of a turn with a single end_turn
+//       response and no nudge anywhere near it: the model wrote it unprompted, following a
+//       convention that told it to stay silent. No structural signal exists for that one — it is
+//       indistinguishable from a reply by shape, position and stop_reason alike. Only the brackets
+//       tell it apart, which is why the rule is content and why it is this rule.
+//
+//   The single verbatim re-prompt string is kept as its own test as well: `isThinkingOnlyNudge`
+//   needs it to recognise the meta ROW, where the bracket rule cannot help.
+//
+//   The PLACEHOLDER. Before sessions learned to echo the string back they satisfied the re-prompt
+//   the cheapest way there is: a lone "." — sometimes "…", sometimes a bare dash. Same origin, and
+//   the test is WORDLESSNESS rather than a list of strings, so one letter makes it a reply and it
+//   delivers ("ok.", "done", "no" and a bare emoji all pass straight through).
+//
+// RULING, 2026-08-09: these ARE the filter, and there is no other. v0.5.33 additionally dropped a
+// chat lane's whole final text block whenever a bus verb had woken the turn, and inside the hour
+// that ate a real report to the owner (1952 characters, uuid 036648c6). His words on reading it:
+// "I don't want any messages filtered" beyond this class. So the boundary is content and nothing
+// else — never who woke the turn, never which surface it lands on. And it is pinned to real
+// captured 2.1.226 rows in filler-cli.test.ts, so the next CLI change breaks a test rather than
+// his chat.
 function isHarnessNoise(text: string): boolean {
   const t = text.trim()
-  return /^no response requested\.?$/i.test(t) || THINKING_ONLY_NUDGE.test(t) || isWordlessPlaceholder(t)
+  return /^no response requested\.?$/i.test(t) || THINKING_ONLY_NUDGE.test(t)
+    || isBracketedFiller(t) || isWordlessPlaceholder(t)
+}
+
+// One line, wholly enclosed in brackets, and no nested bracket — so a real reply that happens to
+// END on a bracketed aside cannot match, and neither can a multi-line message. Length-capped at a
+// tweet: the longest filler ever observed is 117 characters, and a genuinely long bracketed block
+// is far likelier to be someone's deliberate content than the harness's shrug.
+function isBracketedFiller(t: string): boolean {
+  return t.length <= 280 && !t.includes('\n') && /^\[[^[\]]*\]$/.test(t)
 }
 
 // No letter and no digit anywhere in it — an emoji-only reply is a real one and stays, so the test
@@ -455,13 +482,15 @@ export function isBusAnchored(raw: unknown): boolean {
 // PERMITTED rather than forced: the nudge only exists because the turn produced no text, so a bus
 // turn that composes a reply of its own has no nudge in front of it and delivers unchanged.
 //
-// CLI 2.1.225 STOPPED WRITING THIS ROW (verified against the chat lane's own transcripts: twelve of
-// them under 2.1.224, none under 2.1.225/2.1.226, where the model echoes the nudge as assistant text
-// instead — see isHarnessNoise, which is what now catches it). The row is still honoured because a
-// transcript written by the older CLI is still read after an upgrade, and because a bus turn that
-// answers the nudge with real PROSE is only ever detectable through it. That detection is now blind
-// on the new CLI: a forced prose reply out of a bus-woken turn will relay again, and nothing in the
-// transcript marks it. Left as a known gap rather than guessed at — the observable leak is the echo.
+// THIS ROW IS STILL WRITTEN ON 2.1.226 — it became rare, it did not stop. This file previously
+// asserted the opposite ("CLI 2.1.225 STOPPED WRITING THIS ROW"), inferred from one session's
+// transcripts, and the whole v0.5.33 misadventure was built on top of that inference. Counted
+// across every transcript on the box instead (scripts/filler-survey.ts, 2026-08-09): 72 rows under
+// 2.1.220, 5 under 2.1.224, **2 under 2.1.225 and 1 under 2.1.226**. What changed is which path a
+// text-less turn takes — a response holding THINKING but no text still persists the thinking row
+// and then this one, while a response holding NOTHING is re-prompted out of band and persists
+// neither, which is where the echo (isHarnessNoise) comes from. So this is live code on the current
+// CLI, and the two mechanisms coexist rather than one having replaced the other.
 function isThinkingOnlyNudge(e: Entry): boolean {
   return e.type === 'user' && !e.isSidechain && e.isMeta === true && THINKING_ONLY_NUDGE.test(textOf(e.message?.content).trim())
 }
