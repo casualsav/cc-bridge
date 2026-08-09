@@ -667,13 +667,20 @@ give it.
   (`#ddot`) is not in that file and does not need to be — it shares the mapping now, and
   `dotparity.mjs` is where the two surfaces are compared (see `dotClass` below).
 - **A state with something to say REPLACES the task line, never appends to it** — `waiting` does
-  (below), and since 2026-08-08 so does `working` when the payload carries `status`: the card renders
+  (below), and so does `working` when the payload carries `status`: the card renders
   `✳ <verb>… · <elapsed>` (the pane's own clauding line, scraped by the same `parseWorkingStatus`
-  the drill-in feed uses, attached in `webappSessionCard` off the capture the card already takes —
-  working sessions only, since a prompt-side spinner line in scrollback would name a turn that ended)
-  instead of the last-reply snippet, which is the owner's ask: what a session is doing right now
-  outranks the last thing it said. No clock smoothing on the card — the 4s poll rebuilds the panel
-  whole. The `🧑‍💻` task branch stands as the scrape-miss fallback; `waitstate.mjs` pins both. The line is
+  the drill-in feed uses, attached in `webappSessionCard` off the capture the card already takes).
+  **`status` is present ONLY in the pre-tool window** — the turn is running and has called no tool
+  yet (`preTool`, the owner 2026-08-09 narrowing his 2026-08-08 ask). That window is the one moment
+  the card has nothing else true to say, and the verb is the interim state proving the session has
+  his message; the first build sent it for the whole turn and it stood on top of the tool line he
+  already had, which is the thing he asked to get back. So the tool line is untouched and outranks
+  the verb the instant a tool runs, and the client's branch needs no condition of its own — a
+  `status` on the payload IS the window. Gated server-side and false in both turns whose activity the
+  card cannot see (no readable transcript; subagents live past the parent turn) — guessing "still
+  thinking" for those is how the verb creeps back over the line. No clock smoothing on the card — the
+  4s poll rebuilds the panel whole. The `🧑‍💻` task branch stands as the scrape-miss fallback;
+  `waitstate.mjs` pins both. The line is
   `-webkit-line-clamp: 1` (the owner's call, down from 2 on 2026-07-29: a card is a glance, and the
   second line bought a wrapped fragment rather than a second fact) and the card's height is reflow —
   the fullest card measures 96px where it was 116. So `⏸️ waiting: gh run watch` stands where the

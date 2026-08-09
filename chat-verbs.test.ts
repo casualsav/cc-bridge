@@ -1,7 +1,7 @@
 import { test, expect } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { CHAT_VERBS, chatVerbIn, planOwnerRoute, parseNameVerb, undoGesture, forceGesture, spawnGesture, type OwnerRoute } from './chat-verbs.ts'
+import { CHAT_VERBS, chatVerbIn, planOwnerRoute, parseNameVerb, parseAddress, undoGesture, forceGesture, spawnGesture, type OwnerRoute } from './chat-verbs.ts'
 
 test('a verb is recognised only at the START of the message', () => {
   expect(chatVerbIn('@launch test do the thing')).toBe('launch')
@@ -19,6 +19,10 @@ const CHAIN: Array<[string, Parameters<typeof planOwnerRoute>[0], OwnerRoute]> =
     { text: '@launch test do the thing', forceReplyArmed: true, repliedToSid: 'sid-worker', laneSid: 'sid-lane' }, 'verb'],
   ['an armed force-reply beats a session reply',
     { text: '/srv/chat', forceReplyArmed: true, repliedToSid: 'sid-worker', laneSid: 'sid-lane' }, 'force-reply'],
+  ['an armed force-reply also beats a TYPED address — a folder answer starting with @ is still a folder',
+    { text: '@srv/chat is the one', forceReplyArmed: true, repliedToSid: 'sid-worker', laneSid: 'sid-lane' }, 'force-reply'],
+  ['a typed address beats a session reply — the name he typed outranks the message he tapped',
+    { text: '@general status?', forceReplyArmed: false, repliedToSid: 'sid-worker', laneSid: 'sid-lane' }, 'address'],
   ['a session reply beats the lane',
     { text: 'and the other one?', forceReplyArmed: false, repliedToSid: 'sid-worker', laneSid: 'sid-lane' }, 'session-reply'],
   ['a reply to the LANE itself is ordinary conversation, never a route',
@@ -31,6 +35,28 @@ const CHAIN: Array<[string, Parameters<typeof planOwnerRoute>[0], OwnerRoute]> =
 for (const [name, input, want] of CHAIN) {
   test(`precedence: ${name}`, () => { expect(planOwnerRoute(input)).toBe(want) })
 }
+
+// ---- `@<name> <message>` — the bare address -----------------------------------------------------
+test('an address is a name and a message, and the message survives verbatim', () => {
+  expect(parseAddress('@general ship the fix')).toEqual({ name: 'general', message: 'ship the fix' })
+  expect(parseAddress('  @cc-bridge  what broke?  ')).toEqual({ name: 'cc-bridge', message: 'what broke?' })
+  expect(parseAddress('@397934cb status')).toEqual({ name: '397934cb', message: 'status' })   // a sid prefix is an address too
+  // Multi-line: the whole body after the name, newlines and all.
+  expect(parseAddress('@web do this\nand that')).toEqual({ name: 'web', message: 'do this\nand that' })
+})
+
+test('what is NOT an address — every one of these must stay ordinary conversation', () => {
+  expect(parseAddress('@general')).toBeNull()              // a bare name with nothing to say
+  expect(parseAddress('what did @general say?')).toBeNull()   // mid-sentence: prose about a session
+  expect(parseAddress('@ general do it')).toBeNull()
+  expect(parseAddress('')).toBeNull()
+  // The verbs own their own spelling — otherwise `@kill web` would parse as a message "web" to a
+  // session called "kill", and the weaker grammar would eat the stronger one.
+  for (const v of CHAT_VERBS) expect(parseAddress(`@${v.verb} web do the thing`)).toBeNull()
+  // `@name /cmd` is the slash relay's spelling, handled before this and never re-parsed here: two
+  // grammars for one gesture is how the weaker one becomes a silent misfire.
+  expect(parseAddress('@general /compact')).toBeNull()
+})
 
 test('one outcome, two voices — each names a gesture its own caller can actually perform', () => {
   // The failure this prevents is a chat card telling the owner to run `tg reopen web`, which he

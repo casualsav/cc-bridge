@@ -162,6 +162,7 @@ import {
   setLiveAskIdProbe,
   recordAgentAsk, resetHops, currentHops, BREADTH_NOTICE_AT, askResultText, planAskReap, deliveredReapCandidates, groupClosuresByAskerAndTarget, reapNotifiesAsker, queuedFor, type AskDelivery,
   askerAlreadyResolved, askerKilledTarget, markAskerResolved, reapNoticeSuppressed, planAssigneeNudge, markNudged,
+  answerRouteFor,
   unreportedWorkMarker, markReported, markBriefed,
   getReportedAt, getBriefedBy,
   setSessionDepth, resetAllSessionDepth, pruneSessionDepth, nextAskDepth, depthExceeded, depthLimit,
@@ -192,7 +193,7 @@ import { spawnModelFlag, WIDE_CONTEXT_SUFFIX } from './model-window.ts'
 import { buildModelSelector, MODEL_ALIASES, MODEL_ALIAS_IDS, planModelSelection, type ModelSelector } from './model-catalog.ts'
 import { parseLaunch, type ParsedLaunch } from './launch-command.ts'
 import { createMsgRoutes, type MsgRouteMap } from './msg-routes.ts'
-import { chatVerbIn, planOwnerRoute, parseNameVerb, undoGesture, forceGesture, spawnGesture, type Gestures } from './chat-verbs.ts'
+import { chatVerbIn, planOwnerRoute, parseNameVerb, parseAddress, undoGesture, forceGesture, spawnGesture, type Gestures } from './chat-verbs.ts'
 import { parseSchedule, SCHEDULE_USAGE, ambiguousBareNumber, allBareNumericCron } from './schedule-time.ts'
 import {
   initStatusCard, statusCardText, statusKeyboard, updateSessionPin, updateTopicPins,
@@ -3730,6 +3731,21 @@ async function sendPost(chat: string, fromName: string, body: string): Promise<v
   await channel.sendText(chat, html).catch(e => process.stderr.write(`daemon: post send failed: ${e}\n`))
 }
 
+// A worker answering something the OWNER addressed to it himself (`@name <message>`, or a reply to one
+// of these cards). Rendered like a post and for the same reason he ruled on posts: he is WAITING for
+// this one, and a chevron he has to open — silent, indistinguishable from the agent-to-agent traffic
+// mirrored beside it — is how a reply gets missed. So: expanded, notifying, and headed with the name
+// he addressed. Routable, like every card with a session behind it: replying continues the thread.
+const OWNER_ANSWER_CAP = POST_CAP
+async function sendOwnerAnswerCard(chat: string, fromName: string, body: string, subjectSid: string): Promise<void> {
+  const shown = body.length > OWNER_ANSWER_CAP ? body.slice(0, OWNER_ANSWER_CAP) + '…' : body
+  const html = `📨 <b>From @${escapeHtml(fromName)}</b>\n\n${escapeHtml(shown)}`
+  const ref = await channel.sendText(chat, html).catch(e => {
+    process.stderr.write(`daemon: owner answer card from @${fromName} failed: ${e}\n`); return null
+  })
+  rememberMsgRoute(chat, ref?.messageId, subjectSid)
+}
+
 // The chat lane's copy of a worker's post, as an @system FYI in its CONTEXT (not a card — it is an
 // agent, and a card is not somewhere it can read). Never sent to the poster itself: the chat lane
 // posting to the humans must not wake itself, and a lane's own post is already in front of him.
@@ -4379,7 +4395,12 @@ async function deliverAnswerToAsker(pending: BusPending, answerer: string, rawBo
   // A @system ask (the context nudge) has no asker session to deliver back into — and must not
   // borrow one: injecting the answer into the WORKER would wake it and grow the very context the
   // nudge was about. The ledger entry plus the owner-facing card below are its whole audit trail.
-  if (cur.fromSid === SYSTEM_SID) {
+  const ownerChat = cur.ownerDirect ? chatIdForDmChatSession(cur.fromSid) : null
+  const route = answerRouteFor(cur, { systemSid: SYSTEM_SID, ownerChat })
+  if (cur.ownerDirect && route !== 'owner-card' && route !== 'system') {
+    process.stderr.write(`daemon: ask ${cur.id} is ownerDirect but @${cur.fromName} has no DM chat lane — delivering into the pane instead\n`)
+  }
+  if (route === 'system') {
     appendLedger(room, { ts: Date.now(), kind: 'answer', from: answerer, to: 'system', id: cur.id, text: body, refs })
     // The card says WHICH @system ask this answers. It read "handled a context nudge" for every kind
     // — so a wedged-prompt escalation reached him described as a context nudge (owner-reported).
@@ -4391,6 +4412,24 @@ async function deliverAnswerToAsker(pending: BusPending, answerer: string, rawBo
       }
     })()
     return `logged (ask ${cur.id}) — @system has no session to deliver into; the owner got the summary`
+  }
+  // The owner addressed this session himself, so the answer goes to HIM and stops there — not into
+  // the chat lane whose sid the row carries. Typing it into the lane would wake his orchestrator to
+  // read, judge and speak about an exchange he is already reading, which is the whole round trip the
+  // direct address exists to skip. The lane's chat id is read from the store rather than from its
+  // pane: a dead lane pane must not be able to swallow an answer he is waiting for.
+  //
+  // The accepted cost, stated because it is a real one: work he dispatches this way is work the lane
+  // does not know about, and the lane is the only party that can see two workers heading for the same
+  // file. Direct is what he asked for; the coordination is his to hold on these threads.
+  if (route === 'owner-card') {
+    appendLedger(room, { ts: Date.now(), kind: 'answer', from: answerer, to: cur.fromName, id: cur.id, text: body, refs })
+    // Refs are named, not attached: they are paths in the shared dir, and the pointer is the whole
+    // convention. Dropping them would lose the only address the deliverable has on his surface.
+    const shown = [cur.expiredAt != null ? `⏰ (late answer — ask ${cur.id} had timed out)\n\n` : '', body,
+      refs.length ? `\n\n📎 ${refs.join('\n📎 ')}` : ''].join('')
+    await sendOwnerAnswerCard(ownerChat!, answerer, shown, cur.toSid)
+    return `answered the owner directly (ask ${cur.id})`
   }
   const askerPane = await paneForSession(cur.fromSid).catch(() => null)
   if (!askerPane) { putPending(cur); return `!@${cur.fromName}'s session is no longer running — not delivered` }
@@ -15803,18 +15842,72 @@ async function routeOwnerReply(ctx: Context, chatId: string, sid: string, text: 
     return true
   }
   // Delivered as a bus ask from the lane, exactly as `@launch` does at a live name: same machinery,
-  // same "Messaged @X" card, and the answer comes back the way every other fleet result does.
+  // same "Messaged @X" card — and the answer comes back to HIM (ownerDirectDispatch), because a reply
+  // he typed with his thumb is the same gesture as the address he types with a name.
   const laneSid = getDmChatSession(chatId)?.sessionId
   if (!laneSid || laneSid === sid) return false   // no lane to mint from, or the lane itself → ordinary conversation
+  await ownerDirectDispatch(reply, laneSid, sid, text)
+  return true
+}
+
+// The one mint behind both direct gestures — `@name <message>` and a reply to a session's card. They
+// are the same act (he named a session and typed at it) and any difference between them would be an
+// accident of which one was written first.
+//
+// The asker row is the CHAT LANE, and stays the lane even though he is the one asking: `fromSid` is
+// how the answer finds his DM, and `fromName` has to be an endpoint that still RESOLVES — a worker
+// that reaches back with `tg ack @<from>` must land somewhere real, and a synthetic "@owner" would be
+// a name the roster has never heard of. So the lane keeps the attribution and `ownerDirect` carries
+// the only difference that changes behaviour: the answer is a card to him, not a paste into the lane.
+async function ownerDirectDispatch(
+  reply: (t: string) => Promise<unknown>, laneSid: string, toSid: string, text: string,
+): Promise<void> {
   const endpoints = busEndpoints()
   const fromName = nameForEndpoint(laneSid, endpoints)
-  const toName = nameForEndpoint(sid, endpoints)
+  const toName = nameForEndpoint(toSid, endpoints)
   let p: BusPending
-  try { p = createPending({ fromSid: laneSid, toSid: sid, toKind: 'claude', fromName, toName, text, refs: [] }, Date.now()) }
-  catch (e) { await reply(`${e instanceof Error ? e.message : e} — nothing was sent`); return true }
+  try { p = createPending({ fromSid: laneSid, toSid, toKind: 'claude', fromName, toName, text, refs: [], ownerDirect: true }, Date.now()) }
+  catch (e) { await reply(`${e instanceof Error ? e.message : e} — nothing was sent`); return }
   appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'ask', from: fromName, to: toName, id: p.id, text, refs: [] })
   const outcome = await tryDeliverAsk(p).catch(() => 'busy' as const)
   if (outcome !== 'delivered') await reply(askResultText(outcome, toName, p.id, asksAheadOf(p)))
+}
+
+// ---- `@<name> <message>` — the owner addressing a session directly ----
+//
+// The typed twin of the reply gesture above: he names a live session and his words go straight to it,
+// its answer comes back as a card he can reply to, and his chat lane is in neither direction.
+//
+// Returns FALSE when the name is nobody, and that is the design — the message carries on down the
+// chain (a reply gesture, then the lane) exactly as it does today. `@anthropic shipped X` is a
+// sentence, and a grammar that refuses every sentence starting with an @ would be worse than no
+// grammar. The one loud failure is a name the bus KNOWS and that is no longer running: he meant a
+// session, so it is named rather than swallowed — the same two gestures routeOwnerReply offers.
+async function routeOwnerAddress(ctx: Context, chatId: string, laneSid: string, text: string, msgId?: number): Promise<boolean> {
+  const parsed = parseAddress(text)
+  if (!parsed) return false
+  const reply = (t: string): Promise<unknown> => ctx.reply(t).catch(() => {})
+  await reapDeadEndpoints(parsed.name)
+  const endpoints = busEndpoints()
+  const want = normalizeEndpointName(parsed.name)
+  const live = endpoints.filter(e => !e.closed && (normalizeEndpointName(e.name) === want || e.id.toLowerCase() === want))
+  if (live.length > 1) {
+    await reply(`@${want} is ambiguous — ${live.length} live sessions share that name. Rename one, or reply to a message from the one you mean.`)
+    return true
+  }
+  if (!live.length) {
+    // Known but down, or never known at all. Only the first is his — the second is prose.
+    const known = endpoints.some(e => normalizeEndpointName(e.name) === want || e.id.toLowerCase() === want)
+    if (!known) return false
+    const fresh = `"@launch ${want} ${parsed.message.slice(0, 40)}${parsed.message.length > 40 ? '…' : ''}"`
+    await reply(`@${want} isn't running — "@reopen ${want}" brings it back with its conversation, or ${fresh} starts a fresh one. Nothing was delivered.`)
+    return true
+  }
+  const target = live[0]!
+  if (target.kind !== 'claude') { await reply(`@${want} is a hermes endpoint — this addresses Claude sessions`); return true }
+  if (target.id === laneSid) return false   // his own lane by name: ordinary conversation, not a bus hop
+  if (msgId != null) void channel.react({ chatId, messageId: String(msgId) }, '📨').catch(() => {})
+  await ownerDirectDispatch(reply, laneSid, target.id, parsed.message)
   return true
 }
 
@@ -16093,8 +16186,14 @@ async function handleInbound(
       const plan = planOwnerRoute({ text: content, forceReplyArmed: false, repliedToSid, laneSid: lane.sessionId })
       if (plan === 'verb') {
         for (const v of OWNER_CHAT_VERBS) if (await v.run(ctx, chat_id, lane.sessionId, content, msgId)) return
-      } else if (plan === 'session-reply') {
-        if (await routeOwnerReply(ctx, chat_id, repliedToSid!, content)) return
+      }
+      // `address` is the one plan that can decline (the name is nobody), so it CASCADES rather than
+      // returning: an unresolved `@word` that is also a reply to a session's card must still route on
+      // the gesture, and after that it is ordinary conversation. Written as a fall-through chain
+      // instead of a switch for exactly that reason.
+      if (plan === 'address' && await routeOwnerAddress(ctx, chat_id, lane.sessionId, content, msgId)) return
+      if ((plan === 'session-reply' || plan === 'address') && repliedToSid && repliedToSid !== lane.sessionId) {
+        if (await routeOwnerReply(ctx, chat_id, repliedToSid, content)) return
       }
     }
   }
@@ -19400,6 +19499,7 @@ async function webappSessionCard(row: { sid: string; name: string; cwd: string; 
   let state: WebappSessionCard['state'] = 'idle'
   let wait: WebappSessionCard['wait'] = null
   let tfile: string | null = null
+  let preTool = false   // this turn is running and has used no tool yet — the clauding verb's whole window
   try {
     const file = await transcriptForPane(pane, cwd || null)
     if (file) {
@@ -19417,6 +19517,9 @@ async function webappSessionCard(row: { sid: string; name: string; cwd: string; 
         const acts = currentTurnActivity(file)
         const a = acts[acts.length - 1]
         task = a ? `${a.tool}${a.detail ? ` ${a.detail}` : ''}` : null
+        // The gap this turn is in: prompted, thinking, nothing done yet. It is the ONE window the
+        // clauding verb fills (see `status` below) — the moment the card has nothing else true to say.
+        preTool = acts.length === 0
       }
       task ??= latestFinalReply(file)?.text.replace(/\s+/g, ' ').slice(0, 140) ?? null
       tfile = file
@@ -19426,9 +19529,16 @@ async function webappSessionCard(row: { sid: string; name: string; cwd: string; 
   // that reads working must render working. Only the transcript-fed signals go quiet without a file.
   // The CLI's own working line ("Hyperspacing… · 1m 55s"), off the capture this card already took —
   // the same parser and the same shape the drill-in feed carries, so the two surfaces cannot describe
-  // one turn differently. WORKING sessions only: a pane at a prompt has no current verb, and a
-  // spinner line still sitting in its scrollback would name a turn that ended minutes ago.
-  const status = working ? parseWorkingStatus(cap) : null
+  // one turn differently.
+  //
+  // ONLY IN THE PRE-TOOL WINDOW (the owner, 2026-08-09, narrowing his 2026-08-08 ask): between his
+  // prompt landing and the turn's first tool call there is nothing else true to put on the card, and
+  // the verb is the interim state that says the session HAS the message. The moment a tool runs, the
+  // tool line is the more specific fact and takes the row back — the first build showed the verb for
+  // the whole turn, which cost him the tool line he already had. `preTool` is false with no readable
+  // transcript and false while only subagents are live: both are turns whose activity this card
+  // cannot see, and guessing "still thinking" for them is how the verb creeps back over the line.
+  const status = working && preTool ? parseWorkingStatus(cap) : null
   const panePid = ctx?.panePids.get(pane)
   const read = readSessionState(row.sid, tfile, working, panePid, ctx)
   const marker = read.marker

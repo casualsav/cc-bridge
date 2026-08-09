@@ -2882,9 +2882,11 @@ async function renderSessions() {
       // so it belongs to the state that IS blocked, and working gets the person at the keyboard. The
       // same pair renders in `/sessions` (sessions-view.ts) — one state, one emoji on every surface.
       : s.state === "waiting" && s.wait ? "⏳ waiting: " + esc(s.wait.label)
-      // A WORKING card says what the pane says it is doing THIS SECOND — the clauding verb and its
-      // clock, not the last message it sent (the owner, 2026-08-08: "when the session is thinking and
-      // I go back to the main screen I want the most accurate latest state"). ✳ is one frozen frame of
+      // The interim state between his prompt landing and the turn's first tool call — the clauding
+      // verb and its clock, which is all that is true of a session that has his message and has not
+      // done anything with it yet (the owner, 2026-08-08, narrowed 2026-08-09). NO condition here
+      // beyond `status` existing: the daemon sends it only inside that window, and the tool line
+      // below takes the row back the moment a tool runs. ✳ is one frozen frame of
       // the working row's own spinner set (WORK_GLYPHS), so the line reads as the same indicator the
       // chat shows. No clock smoothing here, unlike the drill-in's row: the 4s poll rebuilds this
       // panel whole, so a ticker would be a second source of truth for a number that is already

@@ -377,6 +377,19 @@ the thing most likely to be "fixed" back:
   is one guard, the anchor list the second — keep both. (Accepted cost: an idle aside classes
   human, so a reply it draws pings — the cheap direction.)
 
+**AN OWNER-DIRECT ASK IS ANSWERED TO THE OWNER, AND THE LANE IT WAS MINTED FROM IS NEVER WOKEN BY IT.**
+`@name <message>` typed in his DM, and a native reply to a session's card, both mint an ordinary bus ask
+carrying `ownerDirect` — the asker row names his chat lane because that is the only session id his DM can
+be found from, and `fromName` stays the lane's endpoint name so a worker reaching back with `tg ack @<from>`
+still lands somewhere that resolves. The one behaviour that differs is the tail: `answerRouteFor`
+(`agent-bus.ts`) sends the answer to him as a card instead of typing it into the lane, because the lane is
+an agent that would read it, judge it and speak — the round trip the gesture exists to skip. Restore the
+paste and nothing errors; he simply gets his worker's answer secondhand, in his orchestrator's words. The
+card is `📨 From @name`, expanded and notifying for the same reason a post is (he is waiting on it), and
+routable — replying continues the thread with the session that spoke, never with the lane. Accepted cost,
+not an oversight: work dispatched this way is invisible to the lane, which is the only party that can see
+two workers heading for the same file. `owner-direct.test.ts` pins the routing and the single mint.
+
 **THE BUS DIGEST CARRIES ONLY A SESSION'S OWN LANE** — the events this endpoint sent or was sent,
 since its own watermark; never the room's. Two guards: no watermark → no digest at all (a fresh
 spawn has nothing to catch up on), and `digestSince`'s `involving` scopes the rest. A `post` has no

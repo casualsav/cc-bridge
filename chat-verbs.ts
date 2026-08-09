@@ -68,7 +68,27 @@ export const forceGesture = (g: Gestures, name: string): string =>
   g === 'cli' ? `re-run as \`tg kill ${name} --force\`` : `send "@kill ${name} force"`
 export const spawnGesture = (g: Gestures): string => g === 'cli' ? '`tg spawn`' : '`@launch`'
 
-export type OwnerRoute = 'verb' | 'force-reply' | 'session-reply' | 'lane'
+// ---- `@<name> <message>` — the bare address -----------------------------------------------------
+//
+// The owner naming a session and typing at it. Deliberately NOT a row in CHAT_VERBS, and the reason is
+// the shape of the token: a verb is a fixed word, so claiming `@launch` can never eat prose, while
+// `@anything` can. So this form is weaker in both directions — it ranks BELOW an armed force-reply
+// prompt (a folder answer that starts with an @ is still a folder name), and the name is resolved
+// against the LIVE roster daemon-side, with anything that resolves to nobody continuing down the chain
+// as ordinary conversation. `@anthropic shipped X` is a sentence, not a syntax error.
+//
+// A payload starting with `/` is refused here because `@name /cmd` is already THE spelling for acting
+// on another session's CLI (handled ahead of this, in bot.on('message:text')). Two grammars for one
+// gesture is how the weaker one becomes a silent misfire.
+export type ParsedAddress = { name: string; message: string }
+export function parseAddress(raw: string): ParsedAddress | null {
+  if (chatVerbIn(raw)) return null
+  const m = /^\s*@([A-Za-z0-9][\w.-]*)\s+(\S[\s\S]*)$/.exec(raw)
+  if (!m || m[2]!.startsWith('/')) return null
+  return { name: m[1]!, message: m[2]!.trim() }
+}
+
+export type OwnerRoute = 'verb' | 'force-reply' | 'address' | 'session-reply' | 'lane'
 
 // THE PRECEDENCE CHAIN, in one place, because it is decided in two: the force-reply flows run in
 // `bot.on('message:text')` and the verbs run inside `handleInbound`, so the order between them would
@@ -77,6 +97,10 @@ export type OwnerRoute = 'verb' | 'force-reply' | 'session-reply' | 'lane'
 //   verb          — a TYPED verb is a stated intent and outranks every gesture, including the prompt
 //                   it was typed into (a folder prompt answered `@launch x do y` is not a folder).
 //   force-reply   — an armed one-shot prompt owns a reply aimed at it.
+//   address       — `@name <message>`: a typed address, but on a token that can also be prose, so it
+//                   sits below the prompt and MAY FALL THROUGH — the daemon returns false when the
+//                   name is nobody, and the caller carries on to the gesture and then the lane.
+//                   It is the one outcome here that is not final; every other one owns its message.
 //   session-reply — a native reply to a message a session sent: an address made with his thumb.
 //   lane          — everything else, today's path, untouched.
 //
@@ -87,6 +111,7 @@ export function planOwnerRoute(i: {
 }): OwnerRoute {
   if (chatVerbIn(i.text)) return 'verb'
   if (i.forceReplyArmed) return 'force-reply'
+  if (parseAddress(i.text)) return 'address'
   if (i.repliedToSid && i.repliedToSid !== i.laneSid) return 'session-reply'
   return 'lane'
 }

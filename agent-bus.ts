@@ -161,6 +161,12 @@ export type BusPending = {
   sysKind?: SystemAskKind   // what a @system ask IS — see SystemAskKind. Absent on every row minted
                       // before v0.4.366 and on any future site that forgets it; both take the neutral
                       // label rather than a guessed specific one.
+  // The OWNER typed this himself, at a session, from his chat surface (`@name <message>`, or a native
+  // reply to a session's card). The asker row still names his chat lane — that is the only session id
+  // his surface can be found from — but he is not it, and the answer must not be typed into it: the
+  // lane is an agent that would read the answer, judge it and speak, which is the round trip this
+  // gesture exists to skip. deliverAnswerToAsker reads this and sends him the card instead.
+  ownerDirect?: true
   founding?: true     // the spawn handler's first-message ask — the only ask a session is guaranteed
                       // to receive before it's ever seen a human turn, so a session ending its own
                       // turn without answering it is a session that finished work nobody will hear
@@ -381,7 +387,7 @@ function nextAskId(now: number): number {
 export function createPending(
   fields: { fromSid: string; toSid: string; fromName: string; toName: string; text: string; refs: string[]
             fromKind?: 'claude' | 'hermes'; toKind?: 'claude' | 'hermes'; depth?: number; noReply?: true
-            quiet?: true; founding?: true; sysKind?: SystemAskKind },
+            quiet?: true; founding?: true; ownerDirect?: true; sysKind?: SystemAskKind },
   now: number,
 ): BusPending {
   ensureLoaded()
@@ -404,6 +410,28 @@ export function listPending(): BusPending[] { ensureLoaded(); return Object.valu
 // vanished between resolve and paste) so the ask stays open for a retry instead of being silently
 // lost. Keyed by p.id, so it can't collide with a freshly-minted ask.
 export function putPending(p: BusPending): void { ensureLoaded(); store.pending[String(p.id)] = p; save() }
+
+// WHERE AN ANSWER GOES. deliverAnswerToAsker has three tails and the choice between them is one
+// decision, so it lives here as a function rather than as two `if`s buried in the delivery: a build
+// that stops honouring `ownerDirect` fails a test instead of quietly typing the owner's answer into
+// his orchestrator, which is a thing nobody would notice until the orchestrator spoke.
+//
+//   'system'     — a daemon-minted ask: no asker session exists to deliver into (and borrowing the
+//                  worker's own pane would wake it about a notice concerning its own context).
+//   'owner-card' — the owner addressed the target himself and has a DM surface: the answer is a card
+//                  to him, and the lane named by `fromSid` is not woken at all.
+//   'pane'       — every ordinary agent→agent answer: typed into the asker's session.
+//
+// ownerDirect with NO surface falls back to 'pane' rather than dropping the answer: an answer the
+// chat lane has to relay is a worse outcome than the one he asked for, and a lost one is worse still.
+export type AnswerRoute = 'system' | 'owner-card' | 'pane'
+export function answerRouteFor(
+  p: Pick<BusPending, 'fromSid' | 'ownerDirect'>, o: { systemSid: string; ownerChat?: string | null },
+): AnswerRoute {
+  if (p.fromSid === o.systemSid) return 'system'
+  if (p.ownerDirect && o.ownerChat) return 'owner-card'
+  return 'pane'
+}
 
 // Mark an ask delivered AND re-arm its TTL from the delivery moment, so the answer window (ASK_TTL_MS)
 // starts when the target actually receives it — not when the ask was minted. Without this, a target
