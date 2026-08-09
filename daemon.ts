@@ -16043,6 +16043,11 @@ async function runOwnerLaunch(ctx: Context, chatId: string, laneSid: string, par
   // No reaction on @launch (his ruling, 2026-08-09): the spawn card carries the name, the dials and the
   // first prompt behind a chevron, and a tick beside it says less than the card already does. The verbs
   // that keep one are the ones whose whole answer is "it happened".
+  //
+  // That ruling is about the SPAWN half, and the two halves differ on purpose (his ruling, 2026-08-09,
+  // on the ownerDirect fix): a name that is already live is a DELIVERY of his message to a running
+  // session — plain `@name` by another spelling — so it earns the ✅ delivery tick tryDeliverAsk fires
+  // off `ownerMsgId`, exactly as `@name <message>` does. A launch is not a delivery; it gets the card.
   await reapDeadEndpoints(name)
   const endpoints = busEndpoints()
   const res = resolveEndpoint(name, endpoints)
