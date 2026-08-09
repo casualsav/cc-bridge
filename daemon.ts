@@ -190,6 +190,8 @@ import { planBoxUsageWarn, type UsageWarnMarker } from './usage-warn.ts'
 import { spawnModelFlag, WIDE_CONTEXT_SUFFIX } from './model-window.ts'
 import { buildModelSelector, MODEL_ALIASES, MODEL_ALIAS_IDS, planModelSelection, type ModelSelector } from './model-catalog.ts'
 import { parseLaunch, type ParsedLaunch } from './launch-command.ts'
+import { createMsgRoutes, type MsgRouteMap } from './msg-routes.ts'
+import { chatVerbIn, planOwnerRoute } from './chat-verbs.ts'
 import {
   initStatusCard, statusCardText, statusKeyboard, updateSessionPin, updateTopicPins,
   removeSessionPins, refreshSessionPin, forgetChatPin, armChatPin, sessionPins, pinTextCache, persistSessionPins,
@@ -860,6 +862,20 @@ function recordSessionEffort(sid: string | null, effort: string | null): void {
 // to read it from) nor report it. Mirrors sessionEfforts exactly; stores the ALIAS ('fable' /
 // 'opus' / 'sonnet' / 'haiku'), not the display name or the pinned full id — spawnModelFlag does
 // the MODEL_ALIAS_IDS lookup at launch time.
+// Which session each message the bridge SENT came from, so a native Telegram reply to it routes
+// back there (msg-routes.ts holds the store and its two bounds). Written on every relayed reply and
+// on the bus cards whose SUBJECT is a session; read only on the owner's DM.
+const MSG_ROUTES_FILE = join(STATE_DIR, 'msg-routes.json')
+const msgRoutes = createMsgRoutes(readJsonFile<MsgRouteMap>(MSG_ROUTES_FILE, {}),
+  { save: snap => writeJsonFile(MSG_ROUTES_FILE, snap) })
+// Never map a message to the chat lane: a reply to the lane's own message is ordinary conversation
+// and must take today's path untouched, so the row is not written rather than written-and-skipped —
+// nothing downstream can then mistake it for an address.
+function rememberMsgRoute(chat: string, messageId: number | string | undefined, sid: string | null | undefined): void {
+  if (!messageId || !sid || isChatLaneSession(sid)) return
+  msgRoutes.remember(chat, messageId, sid)
+}
+
 const SESSION_MODELS_FILE = join(STATE_DIR, 'session-models.json')
 const sessionModels = new Map<string, string>(Object.entries(readJsonFile<Record<string, string>>(SESSION_MODELS_FILE, {})))
 function recordSessionModel(sid: string | null, alias: string | null): void {
@@ -1397,14 +1413,14 @@ function isThreadGoneError(e: unknown): boolean {
 // Thin wrapper over channel.sendText: the 429 retry/backoff now lives in the adapter (which throws
 // after exhausting retries → caught here as a failure). A dead-thread error propagates as
 // TopicThreadGoneError so the relay recreates the topic; any other send failure is logged and swallowed.
-async function sendChunkRetrying(chat_id: string, text: string, opts: SendOpts): Promise<boolean> {
+async function sendChunkRetrying(chat_id: string, text: string, opts: SendOpts): Promise<string | null> {
   try {
-    await channel.sendText(chat_id, text, opts)
-    return true
+    const ref = await channel.sendText(chat_id, text, opts)
+    return ref?.messageId ?? null
   } catch (e) {
     if (isThreadGoneError(e)) throw new TopicThreadGoneError()   // let the relay recreate the topic
     process.stderr.write(`daemon: transcript relay send failed: ${e}\n`)
-    return false
+    return null
   }
 }
 
@@ -1414,7 +1430,11 @@ async function sendChunkRetrying(chat_id: string, text: string, opts: SendOpts):
 // the start; this relay never was, so every worker answer that ended one of my turns pinged his phone
 // for a conversation he is not in. That was the actual source of the noise, not the cards it was
 // blamed on. Human-anchored replies stay loud and that is the half nobody notices until it breaks.
-async function sendAgentText(chats: string[], text: string, threadId?: number, replyTo?: number, avatarToken?: string, silent = false): Promise<void> {
+// `routeSid` is the session this text IS — every message id it produces is recorded against that
+// session so a native reply to any of them routes back (msg-routes.ts). It is passed DOWN rather
+// than ids being plumbed back up: a chunked reply is four messages and all four must answer to the
+// same session, which is one line here and four call-site bookkeeping bugs waiting to happen there.
+async function sendAgentText(chats: string[], text: string, threadId?: number, replyTo?: number, avatarToken?: string, silent = false, routeSid?: string | null): Promise<void> {
   const access = loadAccess()
   // The current render/chunk path — also the fallback when rich messages are off or error out. `reply`
   // (agent-bus P4 addressing) lands on the FIRST chunk only; the rest are continuations of it.
@@ -1430,7 +1450,7 @@ async function sendAgentText(chats: string[], text: string, threadId?: number, r
     let first = true
     for (const c of chunks) {
       const opts = first && reply != null ? { ...base, replyTo: String(reply) } : base
-      await sendChunkRetrying(chat_id, c, opts)
+      rememberMsgRoute(chat_id, await sendChunkRetrying(chat_id, c, opts) ?? undefined, routeSid)
       first = false
     }
   }
@@ -1449,6 +1469,7 @@ async function sendAgentText(chats: string[], text: string, threadId?: number, r
       try {
         const m = await sendRichMessage(avatarToken, chat_id, toInputRichMessage(text), { messageThreadId: threadId, ...(silent ? { disableNotification: true } : {}), ...(replyOnce != null ? { replyToMessageId: replyOnce } : {}) })
         avatarMsgTokens.remember(chat_id, m.message_id, avatarToken)
+        rememberMsgRoute(chat_id, m.message_id, routeSid)
         replyOnce = undefined; continue
       } catch (e) {
         // Only a REFUSAL frees us to send again. Telegram never answering is the one case where
@@ -1464,7 +1485,11 @@ async function sendAgentText(chats: string[], text: string, threadId?: number, r
     // second delivery of a message that may already be in the chat. On when markdown rendering is
     // enabled (renderMarkdown !== false) AND the reply has no fenced code block (see above).
     if (access.renderMarkdown !== false && !hasFencedCode) {
-      try { await sendRichMessage(TOKEN!, chat_id, toInputRichMessage(text), { messageThreadId: threadId, ...(silent ? { disableNotification: true } : {}), ...(replyOnce != null ? { replyToMessageId: replyOnce } : {}) }); replyOnce = undefined; continue }
+      try {
+        const m = await sendRichMessage(TOKEN!, chat_id, toInputRichMessage(text), { messageThreadId: threadId, ...(silent ? { disableNotification: true } : {}), ...(replyOnce != null ? { replyToMessageId: replyOnce } : {}) })
+        rememberMsgRoute(chat_id, m?.message_id, routeSid)
+        replyOnce = undefined; continue
+      }
       catch (e) {
         if (isThreadGoneError(e)) throw new TopicThreadGoneError()   // dead thread — HTML fallback would hit it too; let the relay recreate
         // Abandoning a message we cannot account for is the cheaper error: a visible loss the log
@@ -2210,7 +2235,8 @@ async function deliverRelayReply(paneId: string, target: { chat: string; thread?
   // null → the shared bridge bot, exactly as before.
   const avatar = target.thread != null && busRoom() === target.chat ? await avatarForPane(paneId) : null
   try {
-    await sendAgentText([target.chat], text, target.thread, replyTo, avatar?.token, silent)
+    await sendAgentText([target.chat], text, target.thread, replyTo, avatar?.token, silent,
+      await sessionForPane(paneId).catch(() => null))
     releaseTyping(target.thread)
     turnTrigger.delete(route); recentSenders.delete(route)   // turn delivered → next turn's FIRST poster becomes the addressee
   } catch (e) {
@@ -3404,38 +3430,44 @@ async function notifyLanesOfPost(fromSid: string | null, fromName: string, body:
 
 // One bus card to one chat/thread — the shared renderer behind every bus surface (ask mirrors,
 // answer mirrors, lane-routed posts), so they all carry the same chevron format.
-async function sendBusCard(chat: string, thread: number | undefined, header: string, body: string): Promise<void> {
+// `subjectSid` is the session the card is ABOUT, not the surface it lands on — replying to
+// "Spawned @test" means talking to @test, not to the session that spawned it. Cards with no session
+// as their subject (bridge UI: the pin card, settings, readouts) pass nothing and stay unroutable.
+async function sendBusCard(chat: string, thread: number | undefined, header: string, body: string, subjectSid?: string | null): Promise<void> {
   const shown = body.length > ASK_QUOTE_CAP ? body.slice(0, ASK_QUOTE_CAP) + '…' : body
   const richHtml = `<details><summary>${header}</summary>${escapeHtml(shown).replace(/\n/g, '<br>')}</details>`
   const fallback = `${header}\n<blockquote expandable>${escapeHtml(shown)}</blockquote>`
   try {
-    await sendRichMessage(TOKEN!, chat, { html: richHtml }, { messageThreadId: thread, disableNotification: true })
+    const m = await sendRichMessage(TOKEN!, chat, { html: richHtml }, { messageThreadId: thread, disableNotification: true })
+    rememberMsgRoute(chat, m?.message_id, subjectSid)
   } catch (e) {
     // Same split as sendAgentText's fallback: only a Telegram refusal frees us to send the card again.
     if (!telegramRefused(e)) { process.stderr.write(`daemon: bus card to chat ${chat} has an UNKNOWN outcome, NOT falling back to HTML (it may already be in the chat): ${e}\n`); return }
     process.stderr.write(`daemon: bus rich notify failed, falling back to HTML: ${e}\n`)
-    void channel.sendText(chat, fallback, { silent: true, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
+    void channel.sendText(chat, fallback, { silent: true, ...(thread ? { threadId: String(thread) } : {}) })
+      .then(ref => rememberMsgRoute(chat, ref?.messageId, subjectSid)).catch(() => {})
   }
 }
-async function notifyBusRich(surfaceSid: string, header: string, body: string): Promise<void> {
+async function notifyBusRich(surfaceSid: string, header: string, body: string, subjectSid?: string | null): Promise<void> {
   const pane = await paneForSession(surfaceSid).catch(() => null)
   const targets = pane ? await outboundTargetsFor(pane).catch(() => []) : []
   if (!targets.length) return
-  for (const { chat, thread } of targets) await sendBusCard(chat, thread, header, body)
+  for (const { chat, thread } of targets) await sendBusCard(chat, thread, header, body, subjectSid)
 }
 // Outbound: "Messaged @kam" on the sender's surface, the message behind the chevron. The verb is
 // explicit at every call site rather than defaulted — an ack that renders as an ask is exactly the
 // bug busSentHeader exists to close, and a default is how it would come back.
-const notifyAskSent = (fromSid: string, toName: string, text: string, verb: BusVerb): Promise<void> =>
-  notifyBusRich(fromSid, busSentHeader(verb, toName), text)
+const notifyAskSent = (fromSid: string, toName: string, text: string, verb: BusVerb, toSid?: string | null): Promise<void> =>
+  notifyBusRich(fromSid, busSentHeader(verb, toName), text, toSid)
 
 // A plain one-line bus-plumbing notice on a session's OWN surface (its chat DM / topic) — never
 // General. The text-only sibling of notifyBusRich, for short status lines with no body to collapse.
-async function notifyBusText(surfaceSid: string, text: string): Promise<void> {
+async function notifyBusText(surfaceSid: string, text: string, subjectSid?: string | null): Promise<void> {
   const pane = await paneForSession(surfaceSid).catch(() => null)
   const targets = pane ? await outboundTargetsFor(pane).catch(() => []) : []
   for (const { chat, thread } of targets) {
-    void channel.sendText(chat, text, { silent: true, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
+    void channel.sendText(chat, text, { silent: true, ...(thread ? { threadId: String(thread) } : {}) })
+      .then(ref => rememberMsgRoute(chat, ref?.messageId, subjectSid)).catch(() => {})
   }
 }
 
@@ -3529,7 +3561,7 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
       // briefer: it has no session to report back into (see deliverAnswerToAsker), so a daemon notice
       // must not leave the target owing an ack to a name it cannot address.
       if (cur.fromSid !== SYSTEM_SID) markBriefed(cur.toSid, cur.fromSid, cur.fromName, now)
-      void notifyAskSent(cur.fromSid, cur.toName, cur.text, cur.noReply ? 'ack' : 'ask')
+      void notifyAskSent(cur.fromSid, cur.toName, cur.text, cur.noReply ? 'ack' : 'ask', cur.toSid)
       // Mirror the same card on the TARGET's own surface (its topic / chat DM) so the inbound ask is
       // visible from inside the session too, not only on the asker's side. A `quiet` row is the one
       // exception: a daemon notice whose fact a card on that same chat already carries (the held
@@ -5320,7 +5352,7 @@ async function flushPendingText(): Promise<void> {
     for (const t of targets) {
       if (!claimRelayDelivery(file, r.uuid, t)) { process.stderr.write(`daemon: pre-flush skipped duplicate (uuid ${r.uuid.slice(0, 8)}) to ${t.chat}${t.thread ? `#${t.thread}` : ''} — already delivered\n`); continue }
       process.stderr.write(`daemon: pre-flush relaying ${r.text.length} chars (uuid ${r.uuid.slice(0, 8)}, reply) to ${t.chat}${t.thread ? `#${t.thread}` : ''}\n`)
-      await sendAgentText([t.chat], r.text, t.thread, undefined, undefined, r.busAnchored).catch(e => process.stderr.write(`daemon: prompt pre-flush send failed: ${e}\n`))
+      await sendAgentText([t.chat], r.text, t.thread, undefined, undefined, r.busAnchored, await sessionForPane(focus.activePaneId!).catch(() => null)).catch(e => process.stderr.write(`daemon: prompt pre-flush send failed: ${e}\n`))
     }
   }
 }
@@ -5361,7 +5393,7 @@ async function flushPendingTextFor(pane: string): Promise<boolean> {
     for (const t of targets) {
       if (!claimRelayDelivery(file, r.uuid, t)) { process.stderr.write(`daemon: aux pre-flush skipped duplicate (uuid ${r.uuid.slice(0, 8)}) to ${t.chat}${t.thread ? `#${t.thread}` : ''} — already delivered\n`); continue }
       process.stderr.write(`daemon: aux pre-flush relaying ${r.text.length} chars (uuid ${r.uuid.slice(0, 8)}, reply) to ${t.chat}${t.thread ? `#${t.thread}` : ''}\n`)
-      await sendAgentText([t.chat], r.text, t.thread, undefined, undefined, r.busAnchored).catch(e => process.stderr.write(`daemon: aux prompt pre-flush send failed: ${e}\n`))
+      await sendAgentText([t.chat], r.text, t.thread, undefined, undefined, r.busAnchored, await sessionForPane(pane).catch(() => null)).catch(e => process.stderr.write(`daemon: aux prompt pre-flush send failed: ${e}\n`))
     }
     sent = true
   }
@@ -5991,6 +6023,12 @@ async function handleCall(
           })
           sentIds.push(Number(ref.messageId))
         }
+        // A forced `tg reply` is the session talking as much as a relayed one is, so it carries the
+        // same reply-to-route mapping (msg-routes.ts) — every part of a chunked one.
+        {
+          const senderSid = args.pane ? await sessionForPane(String(args.pane)).catch(() => null) : null
+          for (const id of sentIds) rememberMsgRoute(chat_id, id, senderSid)
+        }
         text = sentIds.length === 1 ? `sent (id: ${sentIds[0]})` : `sent ${sentIds.length} parts (ids: ${sentIds.join(', ')})`
         break
       }
@@ -6170,7 +6208,7 @@ async function handleCall(
             // mid-turn with nothing on the steering side to show for it. Gated on delivery for the
             // same reason the ledger row above is: a refused aside did not happen, and a card
             // claiming otherwise is worse than silence.
-            void notifyAskSent(fromSid, toName, askText, 'btw')
+            void notifyAskSent(fromSid, toName, askText, 'btw', res.id)
           }
           if (outcome !== 'delivered') {
             // FAST-FAIL into the sender's own turn, never a queue. An aside's whole value is being read
@@ -6197,7 +6235,7 @@ async function handleCall(
           // here and leaves no row behind; only past this point does "running" mean a live process.
           const start = await runHermesAsk(p, cfg)
           if (!start.ok) { write({ t: 'result', id, ok: false, text: `@${toName} couldn't be started — ${start.error} (ask ${p.id} closed, nothing is running)` }); return }
-          void notifyAskSent(fromSid, toName, askText, 'ask')   // hermes: acks are refused above, so this is always an ask
+          void notifyAskSent(fromSid, toName, askText, 'ask', null)   // hermes: acks are refused above, so this is always an ask
           text = `asked @${toName} (ask ${p.id}) — its \`hermes\` child is up; the answer arrives when it finishes`
         } else {
           // AWAITED (bug 11b): the outcome IS the answer to "did that land?". Reporting the same
@@ -8147,8 +8185,8 @@ async function launchSpawn(spec: SpawnSpec, model: string | null, clampedNote: s
   // expanded view, so a spawn with no first message carries no reason on its card at all — the
   // caller's `ok:` line and the ledger below are where it survives.
   const spawnHeader = spawnCardHeader(escapeHtml(topicName), [shownModel, effort].filter(Boolean).map(d => escapeHtml(d!)))
-  if (firstMsg) void notifyBusRich(fromSid, spawnHeader, reason ? `why: ${reason}\n\n${firstMsg}` : firstMsg)
-  else void notifyBusText(fromSid, spawnHeader)
+  if (firstMsg) void notifyBusRich(fromSid, spawnHeader, reason ? `why: ${reason}\n\n${firstMsg}` : firstMsg, sid)
+  else void notifyBusText(fromSid, spawnHeader, sid)
   if (firstMsg) {
     // The first message is a TASK, so it goes over the bus as a real ask: the new session gets
     // an id it can `tg answer`, and its result comes back to the spawner instead of surfacing
@@ -15416,6 +15454,64 @@ type AttachmentMeta = { kind: string; file_id: string; size?: number; mime?: str
 
 const PERMISSION_REPLY_RE = /^\s*(y|yes|n|no)\s+([a-km-z]{5})\s*$/i
 
+// ---- The owner's chat-surface verbs ----
+//
+// ONE ordered table, so the third verb is a row here plus its own module rather than another carve
+// through handleInbound's routing chain. `run` returns true when it OWNED the message (handled it,
+// errors included) and false when the text was not its verb at all. The prefix half lives in
+// chat-verbs.ts because the force-reply flows in bot.on('message:text') must consult it too, and
+// chat-verbs.test.ts pins the two lists together.
+type OwnerChatVerb = {
+  verb: string
+  run: (ctx: Context, chatId: string, laneSid: string, text: string, msgId?: number) => Promise<boolean>
+}
+const OWNER_CHAT_VERBS: readonly OwnerChatVerb[] = [
+  {
+    verb: 'launch',
+    run: async (ctx, chatId, laneSid, text, msgId) => {
+      const parsed = parseLaunch(text, MODEL_ALIASES, SPAWN_EFFORT_LEVELS)
+      if (!parsed) return false
+      await runOwnerLaunch(ctx, chatId, laneSid, parsed, msgId)
+      return true
+    },
+  },
+]
+
+// ---- Reply-to-route: a native Telegram reply is an address ----
+//
+// He replies to a message a session sent and the text goes to THAT session, no prefix. The bridge
+// sent every one of those messages, so it is the only party that can resolve the gesture.
+//
+// Returns true when this reply was OWNED — routed, or refused with a line that says why. False means
+// "not a routable reply", and the message continues into the lane exactly as before: a reply to the
+// lane's own message (never recorded, §chat-lane skip), a reply to bridge UI (pin card, settings, a
+// readout — never recorded), or a reply to something older than the store's bounds.
+async function routeOwnerReply(ctx: Context, chatId: string, sid: string, text: string): Promise<boolean> {
+  const reply = (t: string): Promise<unknown> => ctx.reply(t).catch(() => {})
+  const name = getTopicBySession(sid)?.name || nameForEndpoint(sid, busEndpoints())
+  // The row outlives the session on purpose: a dead target must be NAMED, never silently rerouted
+  // into the lane, where the owner would read the lane's answer as the worker's.
+  const pane = await paneForSession(sid).catch(() => null)
+  if (!pane || !(await paneAlive(pane).catch(() => false))) {
+    await reply(`@${name} isn't running any more — your message wasn't delivered. Start a fresh one with "@launch ${name} ${text.trim().slice(0, 40)}${text.trim().length > 40 ? '…' : ''}", or reply to a live session's message instead.`)
+    return true
+  }
+  // Delivered as a bus ask from the lane, exactly as `@launch` does at a live name: same machinery,
+  // same "Messaged @X" card, and the answer comes back the way every other fleet result does.
+  const laneSid = getDmChatSession(chatId)?.sessionId
+  if (!laneSid || laneSid === sid) return false   // no lane to mint from, or the lane itself → ordinary conversation
+  const endpoints = busEndpoints()
+  const fromName = nameForEndpoint(laneSid, endpoints)
+  const toName = nameForEndpoint(sid, endpoints)
+  let p: BusPending
+  try { p = createPending({ fromSid: laneSid, toSid: sid, toKind: 'claude', fromName, toName, text, refs: [] }, Date.now()) }
+  catch (e) { await reply(`${e instanceof Error ? e.message : e} — nothing was sent`); return true }
+  appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'ask', from: fromName, to: toName, id: p.id, text, refs: [] })
+  const outcome = await tryDeliverAsk(p).catch(() => 'busy' as const)
+  if (outcome !== 'delivered') await reply(askResultText(outcome, toName, p.id))
+  return true
+}
+
 // ---- `@launch <name> [model/effort] <message>` — the owner's one-line launcher ----
 //
 // Two paths and one rule: a name that is ALREADY LIVE is messaged, and only a name that isn't is
@@ -15667,15 +15763,34 @@ async function handleInbound(
     },
   }
 
-  // `@launch <name> [model/effort] <message>` — intercepted here, so it never reaches the chat lane's
-  // pane as text. Scoped to a private chat with a BOUND lane: that lane's sid is what both paths mint
-  // from, and there is no sane substitute for it. A DM with no lane yet falls through untouched — the
-  // existing auto-provision runs and the next @launch is native. Matched on `content`, so a voice note
-  // saying it works too.
+  // ---- The owner's chat-surface verbs, in precedence order ----
+  //
+  // Everything here is scoped to a private chat with a BOUND chat lane: that lane's sid is what the
+  // verbs mint from and what "ordinary conversation" means, and there is no sane substitute for it.
+  // A DM with no lane yet falls through untouched — the existing auto-provision runs, and the next
+  // message is handled natively. Matched on `content`, so a voice note saying it works too.
+  //
+  // Order, and each step is a promise:
+  //   1. an EXPLICIT verb (the table) — a typed verb is a stated intent and outranks any gesture;
+  //   2. an explicit REPLY to a message a session sent (msg-routes) — a thumb-made address;
+  //   3. today's routing into the lane.
+  // Force-reply prompts sit ahead of all three, in bot.on('message:text'), and step 1 is why they
+  // stand aside for a verb (chatVerbIn there): answering a folder prompt with `@launch x do y` is
+  // not a folder name.
   if (ctx.chat?.type === 'private') {
     const lane = getDmChatSession(chat_id)
-    const launch = lane ? parseLaunch(content, MODEL_ALIASES, SPAWN_EFFORT_LEVELS) : null
-    if (lane && launch) { await runOwnerLaunch(ctx, chat_id, lane.sessionId, launch, msgId); return }
+    if (lane) {
+      const repliedTo = ctx.message?.reply_to_message?.message_id
+      const repliedToSid = repliedTo != null ? msgRoutes.sidFor(chat_id, repliedTo) : undefined
+      // forceReplyArmed is false here by construction: an armed prompt was already handled (or stood
+      // aside for a verb) in bot.on('message:text'), which runs first.
+      const plan = planOwnerRoute({ text: content, forceReplyArmed: false, repliedToSid, laneSid: lane.sessionId })
+      if (plan === 'verb') {
+        for (const v of OWNER_CHAT_VERBS) if (await v.run(ctx, chat_id, lane.sessionId, content, msgId)) return
+      } else if (plan === 'session-reply') {
+        if (await routeOwnerReply(ctx, chat_id, repliedToSid!, content)) return
+      }
+    }
   }
 
   // Forum-topics routing: a message sent inside a session's topic carries its message_thread_id.
@@ -16776,7 +16891,13 @@ bot.on('message:text', async ctx => {
   if (replyTo) {
     const replyKey = `${ctx.chat?.id}:${replyTo.message_id}`
     const target = replyTargets.get(replyKey)
-    if (target) {
+    // An EXPLICIT verb outranks the prompt it was typed into: answering "📂 which folder?" with
+    // `@launch x do y` is not a folder name, and resolveNewSessionDir would happily create a
+    // directory out of the whole sentence. The prompt stays ARMED (nothing is consumed), so the
+    // real answer still works afterwards.
+    if (target && planOwnerRoute({ text, forceReplyArmed: true }) !== 'force-reply') {
+      process.stderr.write(`daemon: force-reply ${target.kind} stood aside for an explicit @${chatVerbIn(text)}\n`)
+    } else if (target) {
       // authurl stays armed — the login input tolerates retries; everything else is one-shot.
       if (target.kind !== 'authurl') replyTargets.delete(replyKey)
       // Replying "cancel" (or /cancel) abandons the flow and deletes the prompt, so an unanswered
