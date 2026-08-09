@@ -112,9 +112,28 @@ const THINKING_ONLY_NUDGE = /^\[Your previous response had no visible output\b/
 // So the echo is dropped BY CONTENT, on every anchor — owner turns included. That is deliberately
 // wider than the bus-only drop below: no reply a human wants to read begins with the harness's own
 // re-prompt, so there is nothing here to weigh against the certainty of the leak.
+//   The PLACEHOLDER answer to that same nudge. Before a session learned to echo the string back it
+//   satisfied the re-prompt the cheapest way there is: a lone "." — sometimes "…", sometimes a bare
+//   dash. It exists only because the CLI refuses a text-less turn, and it carries no word for anyone
+//   to read. Dropped on every anchor for the same reason as the echo: there is no message a human
+//   wants that consists entirely of punctuation, so nothing is being weighed against the leak. The
+//   test is WORDLESSNESS, not a list of strings — the moment one letter appears it is a reply and
+//   delivers ("ok.", "done", "no" all pass straight through).
+//
+// RULING, 2026-08-09: these three ARE the filter, and there is no other. v0.5.33 additionally
+// dropped a chat lane's whole final text block whenever a bus verb had woken the turn, and inside
+// the hour that ate a real report to the owner (1952 characters, uuid 036648c6). His words on
+// reading it: "I don't want any messages filtered" beyond this class. So the boundary is content
+// and nothing else — never who woke the turn, never which surface it lands on.
 function isHarnessNoise(text: string): boolean {
   const t = text.trim()
-  return /^no response requested\.?$/i.test(t) || THINKING_ONLY_NUDGE.test(t)
+  return /^no response requested\.?$/i.test(t) || THINKING_ONLY_NUDGE.test(t) || isWordlessPlaceholder(t)
+}
+
+// No letter and no digit anywhere in it — an emoji-only reply is a real one and stays, so the test
+// is for the ABSENCE of a word rather than the presence of punctuation.
+function isWordlessPlaceholder(t: string): boolean {
+  return t.length > 0 && t.length <= 8 && /^[.…,;:!?\-–—_*~`'"()\[\]\s]+$/.test(t)
 }
 
 // An API failure is also written as a synthetic assistant entry, whose whole body is

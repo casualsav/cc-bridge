@@ -2207,38 +2207,17 @@ async function paneTurnIsBusAnchored(pane: string | null): Promise<boolean> {
   const last = finalRepliesAfter(file, '').slice(-1)[0]
   return last?.busAnchored === true
 }
-// PROSE OUT OF A BUS-WOKEN TURN NEVER ENTERS A CHAT LANE'S CONVERSATION (the owner, 2026-08-09,
-// quoting one back: "[Ending turn silently — internal progress only…]").
-//
-// The mechanism, which is not the agent's fault and cannot be fixed in a convention. A session woken
-// by an ack, an aside or a digest is supposed to end its turn with no text. Claude Code treats a
-// text-less turn as a fault and re-prompts it — and since CLI 2.1.225 that re-prompt is NOT written
-// to the transcript, so `isThinkingOnlyNudge` (which is what `scanFinalReplies` keys its existing
-// drop on) sees nothing. The model, told to produce user-visible output, writes exactly the kind of
-// note it should never send: a bracketed apology for having nothing to say. That note is a genuine
-// assistant text block by every test there is, so no content rule can catch it honestly.
-//
-// The ANCHOR can. A turn started by the bus has already delivered its result over the bus — `tg
-// answer` for an ask, `tg ack` for a report — so prose from it is, by construction, either the
-// forced note or a duplicate of something already sent. In a worker's TOPIC that prose is harmless
-// (a topic is a mirror for reading). In a chat lane it is not a mirror: that surface IS the owner's
-// conversation, and anything landing there reads as the assistant addressing him.
-//
-// So it is dropped for chat lanes only, LOUDLY (the log names the session and the text) and
-// recoverably: the reply is still in the transcript and still renders in the mini app's feed, so
-// nothing is destroyed — it simply stops being a message he has to read. A lane that genuinely needs
-// him mid-bus-turn has `tg post`, which is the sanctioned way for a session to reach a human and is
-// not a final text block.
-function busProseMuted(sid: string | null, busAnchored: boolean): boolean {
-  return busAnchored && sid != null && chatIdForDmChatSession(sid) != null
-}
-
+// NOTHING IS FILTERED HERE, BY RULING (the owner, 2026-08-09). v0.5.33 dropped every bus-anchored
+// final text block a CHAT LANE produced, on the reasoning that such a turn had already delivered its
+// result over the bus. That reasoning is wrong for `re=`: an answer arriving from a worker wakes the
+// lane precisely so the lane can tell HIM, and the bus is not where that goes. It cost a real report
+// within the hour — 1952 characters summarising three files he had just sent in, dropped to the log
+// (daemon.log 2026-08-09T16:05:06Z, uuid 036648c6). His ruling on reading this: "I don't want any
+// messages filtered" beyond the reply-less filler class, which is caught BY CONTENT in
+// transcript.ts's `isHarnessNoise` — the harness's own re-prompt echo and the placeholder responses
+// emitted only to satisfy it. An anchor cannot tell a real reply from filler, so it must not try.
 async function deliverRelayReply(paneId: string, target: { chat: string; thread?: number }, text: string, silent = false): Promise<void> {
   const laneSid = await sessionForPane(paneId).catch(() => null)
-  if (busProseMuted(laneSid, silent)) {
-    process.stderr.write(`daemon: MUTED bus-turn prose from chat lane ${laneSid} (${text.length} chars) — ${JSON.stringify(text.slice(0, 120))}\n`)
-    return
-  }
   // Multi-session DM attribution: a reply landing in a DM (no thread) from a session that is NOT
   // that chat's own bound lane/chat-lane gets a source line — a topic carries its session's
   // identity structurally, a DM doesn't, so foreign output must never read as the user's current
@@ -5890,7 +5869,6 @@ async function flushPendingText(): Promise<void> {
     for (const t of targets) {
       if (!claimRelayDelivery(file, r.uuid, t)) { process.stderr.write(`daemon: pre-flush skipped duplicate (uuid ${r.uuid.slice(0, 8)}) to ${t.chat}${t.thread ? `#${t.thread}` : ''} — already delivered\n`); continue }
       const preSid = await sessionForPane(focus.activePaneId!).catch(() => null)
-      if (busProseMuted(preSid, r.busAnchored)) { process.stderr.write(`daemon: MUTED bus-turn prose from chat lane ${preSid} (pre-flush, ${r.text.length} chars)\n`); continue }
       process.stderr.write(`daemon: pre-flush relaying ${r.text.length} chars (uuid ${r.uuid.slice(0, 8)}, reply) to ${t.chat}${t.thread ? `#${t.thread}` : ''}\n`)
       await sendAgentText([t.chat], r.text, t.thread, undefined, undefined, r.busAnchored, preSid).catch(e => process.stderr.write(`daemon: prompt pre-flush send failed: ${e}\n`))
     }
@@ -5933,7 +5911,6 @@ async function flushPendingTextFor(pane: string): Promise<boolean> {
     for (const t of targets) {
       if (!claimRelayDelivery(file, r.uuid, t)) { process.stderr.write(`daemon: aux pre-flush skipped duplicate (uuid ${r.uuid.slice(0, 8)}) to ${t.chat}${t.thread ? `#${t.thread}` : ''} — already delivered\n`); continue }
       const auxSid = await sessionForPane(pane).catch(() => null)
-      if (busProseMuted(auxSid, r.busAnchored)) { process.stderr.write(`daemon: MUTED bus-turn prose from chat lane ${auxSid} (aux pre-flush, ${r.text.length} chars)\n`); continue }
       process.stderr.write(`daemon: aux pre-flush relaying ${r.text.length} chars (uuid ${r.uuid.slice(0, 8)}, reply) to ${t.chat}${t.thread ? `#${t.thread}` : ''}\n`)
       await sendAgentText([t.chat], r.text, t.thread, undefined, undefined, r.busAnchored, auxSid).catch(e => process.stderr.write(`daemon: aux prompt pre-flush send failed: ${e}\n`))
     }

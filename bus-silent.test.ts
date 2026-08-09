@@ -202,6 +202,49 @@ test('THE NEGATIVE CASE: a real reply that MENTIONS the nudge still delivers', (
   expect(finalRepliesAfter(f, '').map(r => r.text.slice(0, 30))).toEqual(['That string is an internal nud'])
 })
 
+// ---- The PLACEHOLDER answer to the nudge, and the ruling that this class is the whole filter ----
+// Before a session learned to echo the nudge back it answered it the cheapest way there is: a lone
+// ".". Same origin as the echo — it exists only because the CLI refuses a text-less turn — and same
+// treatment, dropped by content on every anchor.
+//
+// The negative cases below are the load-bearing half. On 2026-08-09 the bridge shipped a filter that
+// dropped a chat lane's ENTIRE final text block whenever a bus verb had woken the turn, and within
+// the hour it ate a 1952-character report the owner was waiting for. His ruling: nothing is filtered
+// but this class. So every test here that expects a reply THROUGH is pinning that ruling, and one of
+// them turning green on a "harmless" widening is how the whole failure comes back.
+function replyFixture(text: string, anchor = '<tg @midi2score re=856>done</tg>'): string {
+  const dir = mkdtempSync(join(tmpdir(), 'bus-filler-'))
+  const f = join(dir, 's.jsonl')
+  writeFileSync(f, [
+    { type: 'user', uuid: 'u1', timestamp: '2026-08-09T00:00:00Z', message: { role: 'user', content: anchor } },
+    { type: 'assistant', uuid: 'a1', timestamp: '2026-08-09T00:00:01Z', message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text }] } },
+  ].map(r => JSON.stringify(r)).join('\n') + '\n')
+  return f
+}
+const delivered = (text: string, anchor?: string) => finalRepliesAfter(replyFixture(text, anchor), '').map(r => r.text)
+
+test('a wordless placeholder is filler and never becomes a message', () => {
+  for (const filler of ['.', '..', '...', '…', '-', '—', '*', '(.)']) expect(delivered(filler)).toEqual([])
+  // …and on a human anchor too: the CLI re-prompts his turns the same way.
+  expect(delivered('.', '<tg 42>did it land?</tg>')).toEqual([])
+})
+
+test('the relay drops nothing of its own — the content class above is the only filter', () => {
+  // The tests above pin the READER. This pins the writer: v0.5.33 filtered in daemon.ts, downstream
+  // of everything here, so a green suite said nothing about it. Any future drop belongs in
+  // isHarnessNoise, where a reply can be weighed against the words it actually contains.
+  const daemon = readFileSync(join(import.meta.dir, 'daemon.ts'), 'utf8')
+  expect(daemon).not.toContain('busProseMuted')
+  expect(daemon).not.toContain('MUTED bus-turn prose')
+})
+
+test('THE RULING: one letter makes it a reply, and every real reply delivers', () => {
+  // The v0.5.33 casualty's own shape — a bus `re=` wake in a chat lane, whose whole point is to
+  // carry a worker's answer to the owner. It delivers. So does the shortest possible real answer.
+  for (const real of ['ok.', 'no', 'done', 'Yes — they move real work.', '👍'])
+    expect(delivered(real)).toEqual([real])
+})
+
 // ---- The aside (`tg btw`) and the anchor ---------------------------------------------------------
 // AN ASIDE IS DELIBERATELY *NOT* A BUS ANCHOR, and this is the one decision in that feature that a
 // reasonable person would get backwards. `<tg @name btw>` looks exactly like the blocks above and the
