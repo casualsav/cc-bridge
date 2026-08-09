@@ -2,7 +2,7 @@ import { test, expect } from 'bun:test'
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { isBusAnchored, finalRepliesAfter } from './transcript.ts'
+import { isBusAnchored, finalRepliesAfter, latestFinalReply, recentConversation } from './transcript.ts'
 
 // WHO STARTED THE TURN decides whether its reply pings the owner's phone. The bus mirror cards were
 // already silent; the reply RELAY never was, which is where the noise actually came from.
@@ -145,6 +145,61 @@ test('a digest-prefixed envelope is still a BUS anchor', () => {
 test('a digest-prefixed turn forced to speak by the CLI also delivers nothing', () => {
   // The live failure, end to end: this is the exact anchor shape read off the chat lane's transcript.
   expect(finalRepliesAfter(nudgedFixture(DIGEST + '<tg @lanefix ack=671>live-check ack</tg>'), '')).toEqual([])
+})
+
+// ---- The ECHO: the same nudge under CLI 2.1.225+ ----------------------------------------------
+// The shape above stopped existing. 2.1.225 no longer writes the meta row at all; the nudge reaches
+// the model out-of-band and what lands in the transcript is the model ECHOING IT BACK as ordinary
+// assistant text — a real API message with a requestId and 29 output tokens. Both halves of the
+// defence above went blind at once: the row `nudged` keys on never appears, and the echo looks like
+// any other reply. On 2026-08-09 the owner received the string as a Telegram message and quoted it
+// back asking what it was; the fixture below is his turn, in the recorded shape (rows 449-452 of the
+// chat lane's transcript: silent-turn Bash → tool result → the echo).
+function echoFixture(anchor: string): string {
+  const dir = mkdtempSync(join(tmpdir(), 'bus-echo-'))
+  const f = join(dir, 's.jsonl')
+  writeFileSync(f, [
+    { type: 'user', uuid: 'u1', timestamp: '2026-08-09T00:00:00Z', message: { role: 'user', content: anchor } },
+    { type: 'assistant', uuid: 'a0', timestamp: '2026-08-09T00:00:01Z', message: { role: 'assistant', stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'true', description: 'End internal turn silently' } }] } },
+    { type: 'user', uuid: 'r1', timestamp: '2026-08-09T00:00:02Z', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: '(Bash completed with no output)' }] } },
+    { type: 'assistant', uuid: 'a1', timestamp: '2026-08-09T00:00:03Z', message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: NUDGE }] } },
+  ].map(r => JSON.stringify(r)).join('\n') + '\n')
+  return f
+}
+
+test('THE LEAK: an OWNER turn whose only output is the echoed nudge delivers nothing', () => {
+  // This is the one he saw. Note the anchor: human, so every anchor-based defence lets it through —
+  // only reading the text itself stops it.
+  expect(finalRepliesAfter(echoFixture('<tg 9899>Nice. It worked</tg>'), '')).toEqual([])
+})
+
+test('the echo is dropped on a bus anchor too, and by the idle reader as well as the focused one', () => {
+  const bus = echoFixture('<tg @weather ack=91>compact scheduled</tg>')
+  expect(finalRepliesAfter(bus, '')).toEqual([])
+  // latestFinalReply is the SECOND relay path (aux/idle panes) and reads the transcript its own way;
+  // an unguarded reader there is a leak with no anchor logic in front of it at all.
+  expect(latestFinalReply(bus)).toBeNull()
+  expect(latestFinalReply(echoFixture('<tg 9899>Nice. It worked</tg>'))).toBeNull()
+})
+
+test('the mini-app feed does not render the echo either', () => {
+  // The feed is a chat surface too — he reads it in the app, so a string suppressed in Telegram and
+  // shown there is the same leak wearing a different coat.
+  const items = recentConversation(echoFixture('<tg 9899>Nice. It worked</tg>'))
+  expect(items.some(i => i.text.includes('no visible output'))).toBe(false)
+  expect(items.map(i => i.role)).toEqual(['user'])
+})
+
+test('THE NEGATIVE CASE: a real reply that MENTIONS the nudge still delivers', () => {
+  // What the lane actually said when he asked what the string was. Dropping by content is only safe
+  // while it stays anchored at the start of the text — an explanation about the nudge is a reply.
+  const dir = mkdtempSync(join(tmpdir(), 'bus-echo-neg-'))
+  const f = join(dir, 's.jsonl')
+  writeFileSync(f, [
+    { type: 'user', uuid: 'u1', timestamp: '2026-08-09T00:00:00Z', message: { role: 'user', content: '<tg 9905>What was this from?</tg>' } },
+    { type: 'assistant', uuid: 'a1', timestamp: '2026-08-09T00:00:01Z', message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: `That string is an internal nudge from the CLI: "${NUDGE}" — you were never meant to see it.` }] } },
+  ].map(r => JSON.stringify(r)).join('\n') + '\n')
+  expect(finalRepliesAfter(f, '').map(r => r.text.slice(0, 30))).toEqual(['That string is an internal nud'])
 })
 
 // ---- The aside (`tg btw`) and the anchor ---------------------------------------------------------

@@ -84,12 +84,37 @@ function isRealUserText(e: Entry): boolean {
   return e.type === 'user' && !e.isSidechain && !e.isMeta && textOf(e.message?.content).trim() !== ''
 }
 
-// Claude Code writes a synthetic assistant entry "No response requested." when a slash command
-// (e.g. /model, /clear) is run directly in the terminal and needs no model turn. It isn't a real
-// reply, so the relay readers skip it — otherwise running /model in the terminal relays this noise
-// to Telegram instead of staying silent.
-function isCommandNoise(text: string): boolean {
-  return /^no response requested\.?$/i.test(text.trim())
+// The CLI's re-prompt for a turn that produced no text. It reaches this file in two shapes — a
+// persisted user meta entry (old CLI) and the model's own echo of it (new CLI) — so the pattern is
+// defined once here and both readers below use it.
+const THINKING_ONLY_NUDGE = /^\[Your previous response had no visible output\b/
+
+// Text that came out of the HARNESS rather than out of the conversation. Every reader that can put
+// assistant text on a chat surface gates on this — it is the one place the class is defined.
+//
+// Two members, and the second is why this is no longer named for slash commands:
+//
+//   "No response requested." — Claude Code's synthetic assistant entry when a slash command
+//   (/model, /clear) is run in the terminal and needs no model turn. Relaying it sent noise to
+//   Telegram for a command the user ran locally.
+//
+//   The re-prompt echo. Under CLI 2.1.224 the "no visible output" nudge was PERSISTED as a user
+//   meta entry (isThinkingOnlyNudge, below) and the model answered it with prose. Under 2.1.225+
+//   the nudge is not written to the transcript at all, and what the model does with it is ECHO IT
+//   BACK as an ordinary assistant text block — a real API message, real requestId, 29 output
+//   tokens. Both halves of the old defence therefore failed at once: the meta row the bus-anchored
+//   drop keys on never appears, and the echo is indistinguishable from a reply to every reader
+//   that only asks "is this assistant text?". On 2026-08-09 the owner received the literal string
+//   `[Your previous response had no visible output. Please continue and produce a user-visible
+//   response.]` as a Telegram message and quoted it back asking what it was (observed: rows 452
+//   and 475 of the chat lane's own transcript, twelve occurrences in that file alone).
+//
+// So the echo is dropped BY CONTENT, on every anchor — owner turns included. That is deliberately
+// wider than the bus-only drop below: no reply a human wants to read begins with the harness's own
+// re-prompt, so there is nothing here to weigh against the certainty of the leak.
+function isHarnessNoise(text: string): boolean {
+  const t = text.trim()
+  return /^no response requested\.?$/i.test(t) || THINKING_ONLY_NUDGE.test(t)
 }
 
 // An API failure is also written as a synthetic assistant entry, whose whole body is
@@ -344,7 +369,7 @@ export function latestFinalReply(file: string): { uuid: string; text: string } |
     const e = entries[i]
     if (!isMainAssistantText(e)) continue
     const text = lastTextOf(e.message?.content).trim()
-    if (isCommandNoise(text)) continue
+    if (isHarnessNoise(text)) continue
     return { uuid: e.uuid ?? '', text: legibleApiError(text) }
   }
   return null
@@ -410,7 +435,14 @@ export function isBusAnchored(raw: unknown): boolean {
 // waiting on that we swallow is far worse than a line of noise he can see. And silence stays
 // PERMITTED rather than forced: the nudge only exists because the turn produced no text, so a bus
 // turn that composes a reply of its own has no nudge in front of it and delivers unchanged.
-const THINKING_ONLY_NUDGE = /^\[Your previous response had no visible output\b/
+//
+// CLI 2.1.225 STOPPED WRITING THIS ROW (verified against the chat lane's own transcripts: twelve of
+// them under 2.1.224, none under 2.1.225/2.1.226, where the model echoes the nudge as assistant text
+// instead — see isHarnessNoise, which is what now catches it). The row is still honoured because a
+// transcript written by the older CLI is still read after an upgrade, and because a bus turn that
+// answers the nudge with real PROSE is only ever detectable through it. That detection is now blind
+// on the new CLI: a forced prose reply out of a bus-woken turn will relay again, and nothing in the
+// transcript marks it. Left as a known gap rather than guessed at — the observable leak is the echo.
 function isThinkingOnlyNudge(e: Entry): boolean {
   return e.type === 'user' && !e.isSidechain && e.isMeta === true && THINKING_ONLY_NUDGE.test(textOf(e.message?.content).trim())
 }
@@ -443,7 +475,7 @@ function scanFinalReplies(entries: Entry[], at: number): FinalReply[] {
     if (isThinkingOnlyNudge(e)) { nudged = true; continue }
     if (isMainAssistantText(e)) {
       const text = lastTextOf(e.message?.content).trim()
-      if (isCommandNoise(text)) continue
+      if (isHarnessNoise(text)) continue
       if (anchorIsBus && nudged) continue  // the CLI forced this out of a turn that was told to stay silent
       pending = { uuid: e.uuid ?? '', text: legibleApiError(text), busAnchored: anchorIsBus }
     }
@@ -739,7 +771,7 @@ function conversationItem(e: Entry): ConversationItem | null {
   }
   if (isMainAssistantText(e) && e.message?.stop_reason !== 'tool_use') {
     const text = lastTextOf(e.message?.content).trim()
-    if (!isCommandNoise(text)) return { role: 'assistant', text, ts, uuid }
+    if (!isHarnessNoise(text)) return { role: 'assistant', text, ts, uuid }
   }
   return null
 }
