@@ -14990,7 +14990,7 @@ bot.on('callback_query:data', async ctx => {
       await ctx.editMessageText(`✖️ Cancelled — <b>@${escapeHtml(pending.name)}</b> kept.`, { parse_mode: 'HTML' }).catch(() => {})
       return
     }
-    await ctx.answerCallbackQuery({ text: 'Ending…' }).catch(() => {})
+    await ctx.answerCallbackQuery({ text: 'Closing…' }).catch(() => {})
     const topic = getTopicBySession(pending.sessionId)
     const pane = await paneForSession(pending.sessionId).catch(() => null)
     const alive = !!pane && await paneAlive(pane).catch(() => false)
@@ -15003,14 +15003,14 @@ bot.on('callback_query:data', async ctx => {
       // it turns "Ending…" into a claim: the caller learns it's gone rather than that we asked.
       void closeSessionPane(pane, 'owner-exit-named').then(() => paneAlive(pane).catch(() => false)).then(stillUp => {
         void ctx.editMessageText(stillUp
-          ? `⚠️ <b>@${escapeHtml(pending.name)}</b> did not exit — it may be wedged. <code>tg kill ${escapeHtml(pending.name)}</code> from a session, or close its topic.`
-          : `🚪 <b>@${escapeHtml(pending.name)}</b> ended — <code>tg reopen ${escapeHtml(pending.name)}</code> brings it back.`,
+          ? `⚠️ <b>@${escapeHtml(pending.name)}</b> did not close — it may be wedged. <code>tg kill ${escapeHtml(pending.name)}</code> from a session, or close its topic.`
+          : `🚪 <b>@${escapeHtml(pending.name)}</b> closed — <code>tg reopen ${escapeHtml(pending.name)}</code> brings it back.`,
           { parse_mode: 'HTML' }).catch(() => {})
       }).catch(() => {})
     }
     appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'kill', from: 'owner', to: pending.name, text: alive ? 'exiting' : 'already dead' })
     await ctx.editMessageText(alive
-      ? `🚪 Ending <b>@${escapeHtml(pending.name)}</b>…`   // replaced with the outcome once the pane is actually gone
+      ? `🚪 Closing <b>@${escapeHtml(pending.name)}</b>…`   // replaced with the outcome once the pane is actually gone
       : `💀 <b>@${escapeHtml(pending.name)}</b> was already down — <code>tg reopen ${escapeHtml(pending.name)}</code> brings it back.`,
       { parse_mode: 'HTML' }).catch(() => {})
     return
@@ -17913,9 +17913,9 @@ bot.on('message:text', async ctx => {
       if (!topic) { await say(`⚠️ <b>@${escapeHtml(nt.name)}</b> has no session entry to close.`); return }
       const id = randomBytes(4).toString('hex')
       exitNamedPending.set(id, { sessionId: nt.sessionId, name: nt.name, cwd: topic.cwd })
-      const kb = new InlineKeyboard().text(`🚪 End @${nt.name}`, `exitnamed:yes:${id}`).text('✖️ No', `exitnamed:no:${id}`)
+      const kb = new InlineKeyboard().text(`🚪 Close @${nt.name}`, `exitnamed:yes:${id}`).text('✖️ No', `exitnamed:no:${id}`)
       await ctx.reply(
-        `⚠️ End <b>@${escapeHtml(nt.name)}</b>?\n📁 <code>${escapeHtml(topic.cwd)}</code>\n\nIts conversation is kept — <code>tg reopen ${escapeHtml(nt.name)}</code> brings the same session back.`,
+        `⚠️ Close <b>@${escapeHtml(nt.name)}</b>?\n📁 <code>${escapeHtml(topic.cwd)}</code>\n\nIts conversation is kept — <code>tg reopen ${escapeHtml(nt.name)}</code> brings the same session back.`,
         { parse_mode: 'HTML', reply_markup: kb })
       return
     }
