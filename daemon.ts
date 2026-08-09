@@ -74,7 +74,7 @@ import {
 import { exec, sleep, hashText } from './proc.ts'
 import {
   ageLabel, deterministicRepoBrief, isStale, listBriefRecords, loadBriefRecord, parseBriefJson, renderBrief, saveBriefRecord,
-  scoutPrompt, validateBrief, SCHEMA_VERSION as BRIEF_SCHEMA_VERSION, type BriefRecord,
+  scoutPrompt, validateBrief, resolveBriefRoot, SCHEMA_VERSION as BRIEF_SCHEMA_VERSION, type BriefRecord, type GitRun,
 } from './repo-brief.ts'
 import { autowireMapImport, shipProductMap } from './chat-map.ts'
 import { ghAccounts, ghInstalled, ghSwitch, ghLogout, runGhLogin, provisionGh, type GhAccount } from './github.ts'
@@ -6323,7 +6323,7 @@ async function handleCall(
         // acks and mid-turn asides bypass this gate; only the owner's orchestration ask is stopped once.
         if (name === 'ask' && res.kind === 'claude') {
           const targetCwd = getTopicBySession(res.id)?.cwd
-          const repoRoot = targetCwd ? await gitRootOf(targetCwd) : null
+          const repoRoot = targetCwd ? await repoBriefRoot(targetCwd) : null
           if (repoRoot) {
             const preflight = await repoDispatchPreflight(fromSid, repoRoot)
             if (preflight) { write({ t: 'result', id, ok: false, text: preflight }); return }
@@ -6714,6 +6714,17 @@ async function handleCall(
         try { real = realpathSync(raw) } catch { write({ t: 'result', id, ok: false, text: `no such path: ${raw}` }); return }
         try { if (!statSync(real).isDirectory()) throw new Error('not a directory') }
         catch { write({ t: 'result', id, ok: false, text: `not a directory: ${real}` }); return }
+        // A linked worktree answers with its parent's brief — the same key the spawn/ask preflight
+        // now uses, so the two surfaces cannot disagree about what a directory IS. Narrow on purpose:
+        // ONLY when the path asked about is itself a worktree root. An arbitrary subdirectory keeps
+        // today's behaviour (it keys on itself), because canonicalizing those would silently re-key
+        // every existing sub-path brief on the box.
+        let inheritedFrom: string | null = null
+        const rootInfo = await resolveBriefRoot(real, briefGit)
+        if (rootInfo && rootInfo.toplevel === real && rootInfo.root !== real) { inheritedFrom = real; real = rootInfo.root }
+        // One line, only when the answer is about a different path than the one asked about — a brief
+        // headed with a path you did not name reads as the wrong brief.
+        const inheritNote = inheritedFrom ? `(${inheritedFrom} is a linked worktree — this is the brief for its main worktree ${real})\n\n` : ''
         const sid = pane ? await sessionForPane(pane).catch(() => null) : null
         const rec = loadBriefRecord(STATE_DIR, real)
         // `--stale` is the loop back from the party with ground truth: a worker IN the repo sees a
@@ -6728,15 +6739,15 @@ async function handleCall(
         const head = await gitHeadOf(real)
         if (rec && !args.refresh && !isStale(rec, head, Date.now())) {
           if (sid) repoContextGate.markSeen(sid, real)
-          text = renderBrief(rec.brief, { path: real, age: ageLabel(Date.now() - rec.generatedAt), violations: rec.violations, source: rec.source })
+          text = inheritNote + renderBrief(rec.brief, { path: real, age: ageLabel(Date.now() - rec.generatedAt), violations: rec.violations, source: rec.source })
           break
         }
         const why = !rec ? 'no brief yet' : args.refresh ? 'refresh requested' : rec.stale ? `flagged stale: ${rec.stale}` : 'stale (HEAD moved and the brief is over a fortnight old)'
-        text = startScout(real, sid) === 'running'
+        text = inheritNote + (startScout(real, sid) === 'running'
           ? `🔎 already scouting ${real} — the brief arrives as an ack`
           : `🔎 ${real}: ${why} — scouting now (~1 min). ` + (sid
             ? 'It arrives as an ack; say a line to whoever is waiting so the pause is not read as a hang.'
-            : 'Not a bridged session, so nothing can be delivered to you — run `tg repo` again in a minute to read it.')
+            : 'Not a bridged session, so nothing can be delivered to you — run `tg repo` again in a minute to read it.'))
         break
       }
       // `tg slash <name> "/compact"` — inject a slash command into another session's CLI over the
@@ -7117,7 +7128,7 @@ async function handleCall(
         }
         if (existsSync(dir) && !statSync(dir).isDirectory()) { write({ t: 'result', id, ok: false, text: `${dir} is not a directory` }); return }
         if (existsSync(dir)) {
-          const repoRoot = await gitRootOf(dir)
+          const repoRoot = await repoBriefRoot(dir)
           if (repoRoot) {
             const preflight = await repoDispatchPreflight(fromSid, repoRoot)
             if (preflight) { write({ t: 'result', id, ok: false, text: preflight }); return }
@@ -16508,8 +16519,17 @@ function ensureScoutProfile(): boolean {
   return existsSync(join(SCOUT_CONFIG_DIR, '.credentials.json'))
 }
 
-async function gitRootOf(dir: string): Promise<string | null> {
-  try { return (await exec('git', ['rev-parse', '--show-toplevel'], { cwd: dir, timeout: 5000 })).stdout.trim() || null } catch { return null }
+// One git reader for brief keying, with the "any failure is null" contract resolveBriefRoot is built
+// on — a timeout, a missing git and a non-repo directory all mean the same thing here: no key.
+const briefGit: GitRun = async (args, cwd) => {
+  try { return (await exec('git', args, { cwd, timeout: 5000 })).stdout.trim() || null } catch { return null }
+}
+// The path a brief is keyed by — a LINKED WORKTREE resolves to its parent, so it inherits rather than
+// being scouted as a repo nobody knows (see resolveBriefRoot for the why and the fall-throughs). This
+// replaced a bare `--show-toplevel` reader; both of its callers were keying briefs, so there is no
+// remaining caller that wants the worktree's own root.
+async function repoBriefRoot(dir: string): Promise<string | null> {
+  return (await resolveBriefRoot(dir, briefGit))?.root ?? null
 }
 async function gitHeadOf(dir: string): Promise<string | null> {
   try { return (await exec('git', ['rev-parse', 'HEAD'], { cwd: dir, timeout: 5000 })).stdout.trim() || null } catch { return null }

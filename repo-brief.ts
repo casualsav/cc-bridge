@@ -9,7 +9,7 @@
 // seems to need. So the caps are applied here, after the fact, by code that cannot be persuaded.
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, type Dirent } from 'node:fs'
-import { basename, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 
 // Fields the orchestrator reads to route, brief, and avoid repo-specific assumptions. Architecture is
 // included only as a bounded component/flow map: enough to choose and judge work, never a raw graph.
@@ -201,6 +201,36 @@ export type BriefRecord = {
 // rendering yesterday's shape under today's labels.
 export const SCHEMA_VERSION = 3
 export const REFRESH_AFTER_MS = 14 * 24 * 60 * 60 * 1000
+
+// ---- which path a brief is KEYED by ----
+//
+// A LINKED WORKTREE INHERITS ITS PARENT'S BRIEF. Briefs are keyed by path, and the key used to come
+// from `git rev-parse --show-toplevel`, which inside a linked worktree is the worktree itself — so a
+// worktree of an already-scouted repo was a repo nobody had scouted: the first-contact gate stopped
+// the spawn, the preflight showed the deterministic fallback (strictly worse than the parent's real
+// brief), and a full model scout burned rediscovering a repo we already knew. Hit while fanning six
+// writers into worktrees, at the moment fanning out quickly was the point (owner's box, 2026-08-09).
+//
+// `--git-common-dir` is what tells them apart: in a linked worktree it is the MAIN repo's `.git`,
+// and in an ordinary checkout it is this repo's own — so the parent of that directory is the answer
+// in both cases and there is no is-it-a-worktree branch to get wrong. Everything else falls through
+// to the toplevel, which is today's behaviour and the right one:
+//   · a SUBMODULE's common dir is `…/.git/modules/<name>` — a genuinely different repo
+//   · a worktree of a BARE repo has no main worktree to inherit from
+//   · git too old for `--path-format=absolute` (pre-2.31) returns nothing and nothing changes
+export type GitRun = (args: string[], cwd: string) => Promise<string | null>
+export type BriefRoot = { root: string; toplevel: string }
+
+export async function resolveBriefRoot(dir: string, git: GitRun): Promise<BriefRoot | null> {
+  const toplevel = await git(['rev-parse', '--show-toplevel'], dir)
+  if (!toplevel) return null
+  const common = await git(['rev-parse', '--path-format=absolute', '--git-common-dir'], dir)
+  if (!common || basename(common) !== '.git') return { root: toplevel, toplevel }
+  const parent = dirname(common)
+  // A main worktree that isn't on disk cannot be scouted; keying a brief there would store it against
+  // a path no session will ever run in.
+  return { root: existsSync(parent) ? parent : toplevel, toplevel }
+}
 
 export const briefsDir = (stateDir: string): string => join(stateDir, 'repo-briefs')
 export const briefPath = (stateDir: string, realPath: string): string =>
