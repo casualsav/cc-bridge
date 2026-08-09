@@ -3454,6 +3454,156 @@ async function runSessionWatch(fromSid: string, target: string, g: Gestures, cha
       + ` (nothing is held open; end your turn and it will wake you)` }
 }
 
+// `tg slash`'s pane half: everything from "where is the target's pane" to "it submitted", extracted
+// whole so there is ONE copy of it. The command-shape refusals (panel, interactive, bridge-only,
+// /exit) stay with the verb — they are decided from the text alone and need no pane.
+//
+// Extracted, not rewritten: every guard, every refusal string and every ordering below is the code
+// that was inline in `case 'slash'`. The reason to have one copy is the same reason the input-box
+// guard exists at all — two relays stacking in one box is how `/compact` became `/compact/compact`
+// (2026-07-30) — and a second caller with its own hand-copied dance is that bug waiting again.
+type SlashRelay = { ok: true; text: string } | { ok: false; why: string }
+
+async function relaySlashToSession(
+  fromSid: string, toSid: string, command: string, endpoints: BusEndpoint[], room: string,
+): Promise<SlashRelay> {
+  const targetPane = await paneForSession(toSid).catch(() => null)
+  if (!targetPane || !(await paneAlive(targetPane).catch(() => false))) {
+    if (!(targetPane && isPaneRestarting(targetPane))) updateTopic(toSid, { closed: true })
+    return { ok: false, why: 'target session has no live pane' }
+  }
+  const cap = await capturePane(targetPane).catch(() => '')
+  // paneRunsTypedInput, not onNormalPrompt: the queued-messages bar IS a bordered ❯ row, so the
+  // bare prompt read passes on a busy pane and the CLI then queues the command instead of running
+  // it — reported as submitted, and (for a changesPaneContext command) as complete moments later.
+  if (!cap || !paneRunsTypedInput(cap)) return { ok: false, why: 'target is mid-turn — retry when it goes idle' }
+  if (bashModeArmed(cap)) return { ok: false, why: 'target has an unsubmitted ! bash command in its input box' }
+  // A box that already holds something is refused rather than typed over. Two relays stacking in
+  // one input box is how `/compact` became `/compact/compact` on 2026-07-30 — and whatever is
+  // sitting there is somebody's text, so clearing it here is not ours to do. Its OWN styled read:
+  // `cap` above is colourless, and the faint attribute is the only thing separating a real draft
+  // from the CLI's suggestion ghost — this refusal fired for hours against a ghost on 2026-08-03.
+  const boxNow = inputBoxOccupant(await capturePaneStyled(targetPane).catch(() => ''))
+  if (boxNow) return { ok: false, why: `target has unsubmitted text in its input box (${JSON.stringify(boxNow.slice(0, 40))}) — nothing sent` }
+  const toName = nameForEndpoint(toSid, endpoints)
+  // Every exit from here on is explicit. This case used to set `text = '!…'` for a refusal and break
+  // to a shared `ok: true` write, so a refused relay reached the caller as `ok:` with exit 0 — a
+  // refusal that reads as a success. There is no '!' convention left here; don't add one back.
+  const fail = (why: string): SlashRelay => {
+    process.stderr.write(`daemon: slash ${command} → @${toName} (${targetPane}) REFUSED — ${why}\n`)
+    return { ok: false, why }
+  }
+  appendLedger(room, { ts: Date.now(), kind: 'slash', from: nameForEndpoint(fromSid, endpoints), to: toName, text: command })
+  const targets = await outboundTargetsFor(targetPane).catch(() => [])
+  const watcher = targetPane === focus.activePaneId ? focus.paneWatcher : null
+  // The refusal rides the caller's own result rather than an outbound send. A headless/surfaceless
+  // target has no chat to send to, so `targets[0]?.chat ?? ''` silently swallowed it (sendText to ''
+  // fails into a .catch) and the caller was told "sent" for a command that never ran — measured live
+  // on 2026-07-26. So await the injection, return a refusal to whoever is listening, and only then
+  // fire the echo. NOT a fix to the guard, which worked: the guard refused correctly and left the
+  // pane clean.
+  const slashAt = Date.now()
+  // A bus-relayed `/model <alias>` is a per-session switch like every other surface, so it goes
+  // through the picker's session-only key rather than the argument form — that form ALSO
+  // rewrites ~/.claude/settings.json, which would let one agent retarget every new session on
+  // the box. This supersedes the MODEL_ALIAS_IDS pin that used to live here: applySessionModel
+  // chooses the row by name, so there is no CLI alias left to drift. Bare `/model` (no
+  // argument) still relays through below — it opens the picker for a human and writes nothing.
+  // `/effort <level>` from the bus takes applyEffort, NOT the chat flow's injectEffortChange:
+  // that one relays the CLI's confirm as Yes/No BUTTONS into the owner's Telegram chat, so an
+  // agent's dial change would land in front of a human as a question about a decision they did
+  // not make. applyEffort answers the modal itself, Escs out rather than leaving one standing,
+  // and the result line carries the statusline readback — the caller gets the level the session
+  // is actually on, not the level we asked for. Bare `/effort` is refused by slash-policy.
+  const effortArg = /^\/effort\s+(\S+)$/i.exec(command)?.[1]?.toLowerCase()
+  if (effortArg && EFFORT_LEVELS.includes(effortArg)) {
+    const r = await applyEffort(targetPane, effortArg, watcher)
+    if (!r.ok) return fail(r.reason)
+    return { ok: true, text: `@${toName} is on effort ${r.level}${r.already ? ' already — nothing was typed' : ''} (read from its statusline)` }
+  }
+  const modelAlias = /^\/model\s+(\S+)$/i.exec(command)?.[1]?.toLowerCase()
+  if (modelAlias && MODEL_ALIASES.includes(modelAlias)) {
+    // The same gate the spawn takes, and for the same money: moving a LIVE session onto a
+    // costlier model is the identical decision one turn later. Nothing is applied on a clamp —
+    // the session keeps the model it has until a human taps. (The bridge's own re-assertions —
+    // drift guard, failover, resume — never come through here: they restore a model that was
+    // already chosen rather than choosing one.)
+    const relay = decideModel({
+      requested: modelAlias, configuredDefault: configuredSpawnModel(),
+      ...modelPolicyPrefs(), humanOrigin: false, now: Date.now(),
+    })
+    if (relay.clamped) {
+      if (relay.ask) {
+        const capNow = await capturePane(targetPane).catch(() => '')
+        // The BASELINE half of the upgrade gate (upgradeNeedsConfirm compares this against a
+        // reading taken at tap time). Through contextPct for the same reason as the tap side: an
+        // inflated baseline suppresses a confirmation the owner needed, which is the expensive
+        // direction — the gate exists to stop a silent re-billing.
+        const slNow = capNow ? parseStatusline(capNow) : null
+        void askHumanForModel({
+          sid: toSid, name: toName, alias: relay.clamped, asker: nameForEndpoint(fromSid, endpoints),
+          ctxPct: contextPct(slNow, await transcriptForPane(targetPane, null).catch(() => null)), at: Date.now(), live: true,
+        })
+      }
+      // Same split as clampedClause: a banned model has nothing left for a human to decide, so
+      // it must not read as "wait for a tap" — that invites a retry that gets the same answer.
+      return fail(relay.banned
+        ? `/model ${relay.clamped} isn't available to coding agents — @${toName} keeps its current model, and nobody was asked`
+        : `/model ${relay.clamped} needs a human — @${toName} keeps its current model${relay.ask ? '; asked the owner, and it switches in place if they approve' : ' (asking is snoozed right now)'}`)
+    }
+    // awaitReadback:false for the same reason the mini app passes it: the confirm + readback
+    // dance runs for up to ~30s and the calling agent is blocked on this result.
+    const { error } = await applySessionModel(targetPane, watcher, modelAlias, {
+      awaitReadback: false, by: { label: `@${nameForEndpoint(fromSid, endpoints) || 'an agent'} over the bus` },
+    })
+    if (error) return fail(error)
+    void echoSlashResult(targetPane, targets[0]?.chat ?? '', slashAt, targets[0]?.thread ? Number(targets[0].thread) : undefined, command)
+    return { ok: true, text: `sent /model to @${toName} (${modelAlias}, that session only) — its outcome echoes on that session's surface` }
+  }
+  // settleMs: the caller is a `tg ask`-style CLI call with a 30s socket budget, and the default
+  // 30s post-submit settle spends all of it waiting for a turn the caller isn't waiting for —
+  // measured live: `tg slash … /compact` returned `tgctl: timed out` (exit 1) for a command that
+  // had landed, and the operator retried into a second copy. The answer here is "did it submit",
+  // which submitVerified knows in seconds; the command's own output still echoes below.
+  const sent = await injectSlash(targetPane, watcher, command, { guardPalette: true, settleMs: 3_000 })
+  if (!sent.ok) return fail('unsubmitted' in sent ? unsubmittedSlashText(command, toName) : paletteRefusalText(command, sent.offered))
+  // The braces to the gate's belt: the target can start a turn between the capture above and the
+  // paste, and injectSlash cannot tell "ran" from "queued" — submitLanded counts a queued command
+  // as landed on purpose. A queued command is NOT a delivery: it runs whenever that turn ends, so
+  // no watch is armed (its fire would time the wrong event) and the caller is told what actually
+  // happened rather than "submitted".
+  const settled = await capturePane(targetPane).catch(() => '')
+  if (settled && hasQueuedMessages(settled)) {
+    return fail(`@${toName} QUEUED ${command} instead of running it — it went busy between the check and the paste. `
+      + `The command is sitting in its input queue and runs when that turn ends; nothing is watching for it, and re-sending stacks a second copy behind the first.`)
+  }
+  void echoSlashResult(targetPane, targets[0]?.chat ?? '', slashAt, targets[0]?.thread ? Number(targets[0].thread) : undefined, command)
+  // A COMPLETION event for the submitter, on the one command class where it has something to
+  // sequence behind: `/compact` returned "submitted" and then nothing, ever, so the caller had no
+  // way to learn when the session it had just emptied was usable again (owner, 2026-08-05). There
+  // is no CLI-emitted completion to read — the observable is the target reaching a prompt again,
+  // which is precisely what `tg watch` already reports, persisted across restarts, deduped and
+  // serialised against double-firing. So this ARMS that mechanism rather than adding a second one;
+  // `cause` is all that differs (the notice names the command, and the arm takes a grace).
+  // Scope is changesPaneContext — the commands after which the caller's picture of the session is
+  // stale — not every slash: a completion notice for a command nobody is waiting on is noise that
+  // costs the target a turn.
+  const causal = changesPaneContext(command) && toSid !== fromSid
+  if (causal) {
+    const already = existingWatch(busWatches, fromSid, toSid)
+    const w = already
+      ? adoptCause(already, command, Date.now())
+      : { id: nextWatchId(), watcherSid: fromSid, targetSid: toSid, targetName: toName, armedAt: Date.now(), cause: command }
+    if (!already) busWatches.push(w)
+    saveWatches()
+    process.stderr.write(`daemon: watch ${w.id} ${already ? 'adopted' : 'armed'} on @${toName} (${toSid}) by ${fromSid} — completion of ${command}\n`)
+  }
+  process.stderr.write(`daemon: slash ${command} → @${toName} (${targetPane}) submitted\n`)
+  return { ok: true, text:
+    `submitted ${command.split(/\s/)[0]} to @${toName} — its input box took it and cleared; the command's own output echoes on that session's surface`
+    + (causal ? `. You get ONE completion notice when @${toName} is back at a prompt — end your turn, it will wake you` : '') }
+}
+
 // The room = the bound forum group. The bus requires topic mode (an endpoint IS a topic's session).
 function busRoom(): string | null { return isTopicMode() ? getGroupChatId() : null }
 // Storage key for the ledger + the shared dir. 'dm' is the synthetic room used when no group is
@@ -6790,144 +6940,9 @@ async function handleCall(
         const res = resolveEndpoint(String(args.to ?? ''), endpoints)
         if ('error' in res) { write({ t: 'result', id, ok: false, text: res.error }); return }
         if (res.kind !== 'claude') { write({ t: 'result', id, ok: false, text: 'slash needs a live session target (a hermes endpoint has no CLI)' }); return }
-        const targetPane = await paneForSession(res.id).catch(() => null)
-        if (!targetPane || !(await paneAlive(targetPane).catch(() => false))) {
-          if (!(targetPane && isPaneRestarting(targetPane))) updateTopic(res.id, { closed: true })
-          write({ t: 'result', id, ok: false, text: 'target session has no live pane' }); return
-        }
-        const cap = await capturePane(targetPane).catch(() => '')
-        // paneRunsTypedInput, not onNormalPrompt: the queued-messages bar IS a bordered ❯ row, so the
-        // bare prompt read passes on a busy pane and the CLI then queues the command instead of running
-        // it — reported as submitted, and (for a changesPaneContext command) as complete moments later.
-        if (!cap || !paneRunsTypedInput(cap)) { write({ t: 'result', id, ok: false, text: 'target is mid-turn — retry when it goes idle' }); return }
-        if (bashModeArmed(cap)) { write({ t: 'result', id, ok: false, text: 'target has an unsubmitted ! bash command in its input box' }); return }
-        // A box that already holds something is refused rather than typed over. Two relays stacking in
-        // one input box is how `/compact` became `/compact/compact` on 2026-07-30 — and whatever is
-        // sitting there is somebody's text, so clearing it here is not ours to do. Its OWN styled read:
-        // `cap` above is colourless, and the faint attribute is the only thing separating a real draft
-        // from the CLI's suggestion ghost — this refusal fired for hours against a ghost on 2026-08-03.
-        const boxNow = inputBoxOccupant(await capturePaneStyled(targetPane).catch(() => ''))
-        if (boxNow) { write({ t: 'result', id, ok: false, text: `target has unsubmitted text in its input box (${JSON.stringify(boxNow.slice(0, 40))}) — nothing sent` }); return }
-        const toName = nameForEndpoint(res.id, endpoints)
-        // Every exit from here on is written explicitly. This case used to set `text = '!…'` for a
-        // refusal and `break` to the shared `ok: true` write, so a refused relay reached the caller as
-        // `ok: !/mode isn't a command…` with exit 0 — a refusal that reads as a success is the whole
-        // bug this unit is about. There is no '!' convention in this case any more; don't add one back.
-        const fail = (why: string) => { process.stderr.write(`daemon: slash ${command} → @${toName} (${targetPane}) REFUSED — ${why}\n`); write({ t: 'result', id, ok: false, text: why }) }
-        appendLedger(room, { ts: Date.now(), kind: 'slash', from: nameForEndpoint(fromSid, endpoints), to: toName, text: command })
-        const targets = await outboundTargetsFor(targetPane).catch(() => [])
-        const watcher = targetPane === focus.activePaneId ? focus.paneWatcher : null
-        // The refusal rides THIS result rather than an outbound send. A headless/surfaceless target has
-        // no chat to send to, so `targets[0]?.chat ?? ''` silently swallowed it (sendText to '' fails
-        // into a .catch) and the caller was told "sent" for a command that never ran — measured live on
-        // 2026-07-26. So await the injection, report a refusal here where the caller is already
-        // listening, and only then fire the echo. NOT a fix to the guard, which worked: the guard
-        // refused correctly and left the pane clean. The owner's `@name /cmd` path was never affected —
-        // its chat id is his own chat — and the same swallowing already applied to the pre-existing
-        // "Unknown command" echo, so nothing here regressed.
-        const slashAt = Date.now()
-        // A bus-relayed `/model <alias>` is a per-session switch like every other surface, so it goes
-        // through the picker's session-only key rather than the argument form — that form ALSO
-        // rewrites ~/.claude/settings.json, which would let one agent retarget every new session on
-        // the box. This supersedes the MODEL_ALIAS_IDS pin that used to live here: applySessionModel
-        // chooses the row by name, so there is no CLI alias left to drift. Bare `/model` (no
-        // argument) still relays through below — it opens the picker for a human and writes nothing.
-        // `/effort <level>` from the bus takes applyEffort, NOT the chat flow's injectEffortChange:
-        // that one relays the CLI's confirm as Yes/No BUTTONS into the owner's Telegram chat, so an
-        // agent's dial change would land in front of a human as a question about a decision they did
-        // not make. applyEffort answers the modal itself, Escs out rather than leaving one standing,
-        // and the result line carries the statusline readback — the caller gets the level the session
-        // is actually on, not the level we asked for. Bare `/effort` is refused by slash-policy.
-        const effortArg = /^\/effort\s+(\S+)$/i.exec(command)?.[1]?.toLowerCase()
-        if (effortArg && EFFORT_LEVELS.includes(effortArg)) {
-          const r = await applyEffort(targetPane, effortArg, watcher)
-          if (!r.ok) { fail(r.reason); return }
-          text = `@${toName} is on effort ${r.level}${r.already ? ' already — nothing was typed' : ''} (read from its statusline)`
-          break
-        }
-        const modelAlias = /^\/model\s+(\S+)$/i.exec(command)?.[1]?.toLowerCase()
-        if (modelAlias && MODEL_ALIASES.includes(modelAlias)) {
-          // The same gate the spawn takes, and for the same money: moving a LIVE session onto a
-          // costlier model is the identical decision one turn later. Nothing is applied on a clamp —
-          // the session keeps the model it has until a human taps. (The bridge's own re-assertions —
-          // drift guard, failover, resume — never come through here: they restore a model that was
-          // already chosen rather than choosing one.)
-          const relay = decideModel({
-            requested: modelAlias, configuredDefault: configuredSpawnModel(),
-            ...modelPolicyPrefs(), humanOrigin: false, now: Date.now(),
-          })
-          if (relay.clamped) {
-            if (relay.ask) {
-              const capNow = await capturePane(targetPane).catch(() => '')
-              // The BASELINE half of the upgrade gate (upgradeNeedsConfirm compares this against a
-              // reading taken at tap time). Through contextPct for the same reason as the tap side: an
-              // inflated baseline suppresses a confirmation the owner needed, which is the expensive
-              // direction — the gate exists to stop a silent re-billing.
-              const slNow = capNow ? parseStatusline(capNow) : null
-              void askHumanForModel({
-                sid: res.id, name: toName, alias: relay.clamped, asker: nameForEndpoint(fromSid, endpoints),
-                ctxPct: contextPct(slNow, await transcriptForPane(targetPane, null).catch(() => null)), at: Date.now(), live: true,
-              })
-            }
-            // Same split as clampedClause: a banned model has nothing left for a human to decide, so
-            // it must not read as "wait for a tap" — that invites a retry that gets the same answer.
-            fail(relay.banned
-              ? `/model ${relay.clamped} isn't available to coding agents — @${toName} keeps its current model, and nobody was asked`
-              : `/model ${relay.clamped} needs a human — @${toName} keeps its current model${relay.ask ? '; asked the owner, and it switches in place if they approve' : ' (asking is snoozed right now)'}`)
-            return
-          }
-          // awaitReadback:false for the same reason the mini app passes it: the confirm + readback
-          // dance runs for up to ~30s and the calling agent is blocked on this result.
-          const { error } = await applySessionModel(targetPane, watcher, modelAlias, {
-            awaitReadback: false, by: { label: `@${nameForEndpoint(fromSid, endpoints) || 'an agent'} over the bus` },
-          })
-          if (error) { fail(error); return }
-          void echoSlashResult(targetPane, targets[0]?.chat ?? '', slashAt, targets[0]?.thread ? Number(targets[0].thread) : undefined, command)
-          text = `sent /model to @${toName} (${modelAlias}, that session only) — its outcome echoes on that session's surface`
-          break
-        }
-        // settleMs: the caller is a `tg ask`-style CLI call with a 30s socket budget, and the default
-        // 30s post-submit settle spends all of it waiting for a turn the caller isn't waiting for —
-        // measured live: `tg slash … /compact` returned `tgctl: timed out` (exit 1) for a command that
-        // had landed, and the operator retried into a second copy. The answer here is "did it submit",
-        // which submitVerified knows in seconds; the command's own output still echoes below.
-        const sent = await injectSlash(targetPane, watcher, command, { guardPalette: true, settleMs: 3_000 })
-        if (!sent.ok) { fail('unsubmitted' in sent ? unsubmittedSlashText(command, toName) : paletteRefusalText(command, sent.offered)); return }
-        // The braces to the gate's belt: the target can start a turn between the capture above and the
-        // paste, and injectSlash cannot tell "ran" from "queued" — submitLanded counts a queued command
-        // as landed on purpose. A queued command is NOT a delivery: it runs whenever that turn ends, so
-        // no watch is armed (its fire would time the wrong event) and the caller is told what actually
-        // happened rather than "submitted".
-        const settled = await capturePane(targetPane).catch(() => '')
-        if (settled && hasQueuedMessages(settled)) {
-          fail(`@${toName} QUEUED ${command} instead of running it — it went busy between the check and the paste. `
-            + `The command is sitting in its input queue and runs when that turn ends; nothing is watching for it, and re-sending stacks a second copy behind the first.`)
-          return
-        }
-        void echoSlashResult(targetPane, targets[0]?.chat ?? '', slashAt, targets[0]?.thread ? Number(targets[0].thread) : undefined, command)
-        // A COMPLETION event for the submitter, on the one command class where it has something to
-        // sequence behind: `/compact` returned "submitted" and then nothing, ever, so the caller had no
-        // way to learn when the session it had just emptied was usable again (owner, 2026-08-05). There
-        // is no CLI-emitted completion to read — the observable is the target reaching a prompt again,
-        // which is precisely what `tg watch` already reports, persisted across restarts, deduped and
-        // serialised against double-firing. So this ARMS that mechanism rather than adding a second one;
-        // `cause` is all that differs (the notice names the command, and the arm takes a grace).
-        // Scope is changesPaneContext — the commands after which the caller's picture of the session is
-        // stale — not every slash: a completion notice for a command nobody is waiting on is noise that
-        // costs the target a turn.
-        const causal = changesPaneContext(command) && res.id !== fromSid
-        if (causal) {
-          const already = existingWatch(busWatches, fromSid, res.id)
-          const w = already
-            ? adoptCause(already, command, Date.now())
-            : { id: nextWatchId(), watcherSid: fromSid, targetSid: res.id, targetName: toName, armedAt: Date.now(), cause: command }
-          if (!already) busWatches.push(w)
-          saveWatches()
-          process.stderr.write(`daemon: watch ${w.id} ${already ? 'adopted' : 'armed'} on @${toName} (${res.id}) by ${fromSid} — completion of ${command}\n`)
-        }
-        text = `submitted ${command.split(/\s/)[0]} to @${toName} — its input box took it and cleared; the command's own output echoes on that session's surface`
-          + (causal ? `. You get ONE completion notice when @${toName} is back at a prompt — end your turn, it will wake you` : '')
-        process.stderr.write(`daemon: slash ${command} → @${toName} (${targetPane}) submitted\n`)
+        const relayed = await relaySlashToSession(fromSid, res.id, command, endpoints, room)
+        if (!relayed.ok) { write({ t: 'result', id, ok: false, text: relayed.why }); return }
+        text = relayed.text
         break
       }
       // `tg cost <name>` / `tg context <name>` — the bus half of the panel-command mechanism: run
