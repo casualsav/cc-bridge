@@ -17,6 +17,7 @@ export const CHAT_VERBS: readonly { verb: string; re: RegExp }[] = [
   { verb: 'kill', re: /^\s*@kill(?=\s|$)/i },
   { verb: 'reopen', re: /^\s*@reopen(?=\s|$)/i },
   { verb: 'watch', re: /^\s*@watch(?=\s|$)/i },
+  { verb: 'schedule', re: /^\s*@schedule(?=\s|$)/i },
 ]
 
 // `@kill <name> [force]` / `@reopen <name|sid-prefix>` — a verb whose whole argument is a session

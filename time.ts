@@ -59,6 +59,19 @@ function zonedToUtc(tz: string, y: number, m: number, d: number, hh: number, mm:
   return utc
 }
 
+// The next time the wall clock in `tz` reads hh:mm, strictly after `after`. `rolled` says the time
+// had already passed today and this is tomorrow's — the caller SAYS so on its confirmation, because
+// "scheduled for 09:00" silently meaning 23 hours from now is the surprise this flag exists to stop.
+// `forceTomorrow` is the explicit `tomorrow 9am` prefix, which skips today even when it hasn't passed.
+export function nextWallClock(tz: string, hh: number, mm: number, after: number, forceTomorrow = false):
+  { at: number; rolled: boolean } {
+  const today = wallParts(tz, after)
+  const candidate = zonedToUtc(tz, today.y, today.m, today.d, hh, mm)
+  if (!forceTomorrow && candidate > after) return { at: candidate, rolled: false }
+  const next = wallParts(tz, after + 864e5)
+  return { at: zonedToUtc(tz, next.y, next.m, next.d, hh, mm), rolled: !forceTomorrow }
+}
+
 // Next fire time strictly after `after` for a recurrence, on `tz`'s wall clock.
 export function nextRecurrence(r: Recurrence, after: number): number {
   if (r.kind === 'cron') return nextCron(r.expr, after, r.tz) ?? after + 864e5

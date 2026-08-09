@@ -4740,7 +4740,9 @@ async function renderAuto() {
   const el = $("tab-auto");
   let d; try { d = await api("/api/auto"); } catch { el.innerHTML = '<div class="notice">Automation unavailable.</div>'; return; }
   let html = "";
-  html += '<div class="sechead">Scheduled (/cron)</div>';
+  // Not "(/cron)" any more: the owner's own `@schedule` writes into this same list, and a header
+  // naming one of its two doors reads as "your chat schedules are somewhere else".
+  html += '<div class="sechead">Scheduled</div>';
   html += d.cron.length ? d.cron.map(m =>
     '<div class="evrow"><span class="who">' + (m.recurLabel ? "🔁 " + esc(m.recurLabel) : new Date(m.fireAt).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })) + "</span>" +
     '<span class="tx">' + esc(m.sessionLabel) + ": " + esc(m.text) + "</span>" +

@@ -85,4 +85,9 @@ export type Session = {
 export type PendingMultiSelect = { paneId: string; options: PromptOption[]; selected: Set<number> }
 export type FreeTextPrompt = { paneId: string; downCount: number; tabbed: boolean; question: string }
 export type ChatPrompt = { paneId: string; downCount: number; tabbed: boolean; useEscape: boolean }
-export type ScheduledMessage = { id: string; fireAt: number; chatId: string; paneId: string | null; sessionLabel: string; text: string; thread?: number; recur?: import('./time.ts').Recurrence; cwd?: string }   // cwd: revive folder when a recurring job's session is gone
+// `origin: 'chat'` — created by the owner's `@schedule` gesture rather than by /cron. It changes ONE
+// thing: at fire time the payload re-enters the inbound intercept path (verbs → reply-route → lane)
+// instead of being pasted into a pane, which is what makes `@schedule 9am @launch weather …` work and
+// what gives every future verb scheduling for free. It MUST be persisted with the row: a reboot that
+// forgot it would turn a scheduled `@launch weather …` into a literal paste of that text into a pane.
+export type ScheduledMessage = { id: string; fireAt: number; chatId: string; paneId: string | null; sessionLabel: string; text: string; thread?: number; recur?: import('./time.ts').Recurrence; cwd?: string; origin?: 'chat' }   // cwd: revive folder when a recurring job's session is gone

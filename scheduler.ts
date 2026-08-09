@@ -44,6 +44,11 @@ type SchedulerDeps = {
   // deliver there — cron jobs outlive their sessions. Returns the new pane id, or null when the
   // spawn/delivery failed.
   reviveAndInject: (cwd: string, text: string) => Promise<string | null>
+  // A chat-created schedule (`@schedule`) fires its payload back through the INBOUND intercept path,
+  // as if the owner had typed it at that moment — so `@launch`, `@kill`, `@watch` and everything
+  // added later are schedulable without this file learning what any of them are. The daemon owns
+  // that path; the scheduler only knows the row said `origin: 'chat'`.
+  deliverChatOrigin: (msg: ScheduledMessage) => Promise<InjectOutcome>
   // Send a panel as a rich message with the classic HTML string as its fallback. The daemon owns
   // the bot token and the fallback plumbing, so it injects this rather than scheduler.ts calling
   // the raw rich API itself.
@@ -128,6 +133,10 @@ async function fireScheduled(id: string): Promise<void> {
 
 async function deliverScheduled(msg: ScheduledMessage): Promise<InjectOutcome> {
   const note = chatNotifier(msg)
+  // BEFORE the paneId guard, not after: a chat-created row legitimately has no pane, because its
+  // target is the intercept path rather than a session. Ordering this the other way round would
+  // report every `@schedule` as "the session is gone".
+  if (msg.origin === 'chat') return deps.deliverChatOrigin(msg)
   if (!msg.paneId || !(await paneAlive(msg.paneId))) {
     // Recurring jobs outlive sessions: revive one in the job's folder and deliver there. The new
     // pane becomes the job's target so the next fire injects directly.

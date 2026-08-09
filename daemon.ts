@@ -192,6 +192,7 @@ import { buildModelSelector, MODEL_ALIASES, MODEL_ALIAS_IDS, planModelSelection,
 import { parseLaunch, type ParsedLaunch } from './launch-command.ts'
 import { createMsgRoutes, type MsgRouteMap } from './msg-routes.ts'
 import { chatVerbIn, planOwnerRoute, parseNameVerb, undoGesture, forceGesture, spawnGesture, type Gestures } from './chat-verbs.ts'
+import { parseSchedule, SCHEDULE_USAGE } from './schedule-time.ts'
 import {
   initStatusCard, statusCardText, statusKeyboard, updateSessionPin, updateTopicPins,
   removeSessionPins, refreshSessionPin, forgetChatPin, armChatPin, sessionPins, pinTextCache, persistSessionPins,
@@ -15523,6 +15524,61 @@ const OWNER_CHAT_VERBS: readonly OwnerChatVerb[] = [
       return true
     },
   },
+  // `@schedule <when> <payload>` — one line, into the SAME store /cron and the mini-app Scheduled tab
+  // already use. The payload re-enters this very table at fire time, which is why scheduling a verb
+  // needs no scheduler code: `@schedule 9am @launch weather …` composes for free, and so will
+  // whatever verb is added next.
+  {
+    verb: 'schedule',
+    run: async (ctx: Context, chatId: string, laneSid: string, text: string, msgId?: number) => {
+      const head = /^\s*@schedule(?=\s|$)/i.exec(text)
+      if (!head) return false
+      const reply = (t: string): Promise<unknown> => ctx.reply(t).catch(() => {})
+      const arg = text.slice(head[0].length).trim()
+      const access = loadAccess()
+      const tz = access.scheduleTz ?? DEFAULT_TZ
+
+      // The list is rendered HERE rather than reusing scheduledListText(): that one is HTML built for
+      // the /cron dashboard and ends in "Tap to cancel:", which is a lie on a surface with no buttons.
+      // This one prints the IDS, because "@schedule cancel <id>" is the whole reason he asked for it.
+      if (!arg || /^list$/i.test(arg)) {
+        const rows = listScheduled()
+        await reply(rows.length
+          ? rows.map(r => `${r.id} · ${r.recurLabel ? `🔁 ${r.recurLabel}, next ${fmtWhen(r.fireAt)}` : fmtWhen(r.fireAt)} — ${r.text}`).join('\n')
+            + `\n\n"@schedule cancel <id>" to stop one.`
+          : 'Nothing scheduled.')
+        return true
+      }
+      const cancel = /^cancel\s+(\S+)$/i.exec(arg)
+      if (cancel) {
+        const id = cancel[1]!
+        const row = listScheduled().find(r => r.id === id)
+        if (!row) { await reply(`No scheduled job with id ${id} — "@schedule list" shows the ids.`); return true }
+        cancelScheduled(id)
+        await reply(`Cancelled ${id} — ${row.recurLabel ?? fmtWhen(row.fireAt)}: ${row.text}`)
+        return true
+      }
+      if (/^cancel$/i.test(arg)) { await reply('Which one? "@schedule list" shows the ids, then "@schedule cancel <id>".'); return true }
+
+      const plan = parseSchedule(arg, tz, Date.now())
+      if (!plan) { await reply(SCHEDULE_USAGE); return true }
+      if (plan.kind === 'error') { await reply(plan.error); return true }
+      if (msgId != null) void channel.react({ chatId, messageId: String(msgId) }, '⏰').catch(() => {})
+      // The zone is named on the FIRST chat-created schedule that rides the fallback default, so a
+      // wrong-timezone surprise happens here rather than at 3am. Silent once he has set his own.
+      const tzNote = access.scheduleTz ? '' : ` ${tz} — set yours with /cron tz`
+      const id = randomBytes(4).toString('hex')
+      // The label the mini app's Scheduled board prints in front of the payload ("chat: @launch …").
+      // Short on purpose: for a chat-created row the payload IS the interesting half, and the board's
+      // row is one line.
+      addScheduled({ id, fireAt: plan.fireAt, chatId, paneId: null, sessionLabel: 'chat',
+        text: plan.text, origin: 'chat', ...(plan.kind === 'recur' ? { recur: plan.recur } : {}) })
+      await reply(plan.kind === 'recur'
+        ? `Scheduled ${recurrenceLabel(plan.recur)}${tzNote} — next ${fmtWhen(plan.fireAt)}: ${plan.text}\n"@schedule cancel ${id}" to stop it.`
+        : `Scheduled for ${fmtWhen(plan.fireAt)}${plan.rolled ? ' (tomorrow — that time has already passed today)' : ''}${tzNote}: ${plan.text}\n"@schedule cancel ${id}" to stop it.`)
+      return true
+    },
+  },
   // `@kill <name> [force]` / `@reopen <name>` — the bus verbs, in his voice. The lane's sid is the
   // caller, which is what gives them the lane's authority (close any worker, never a chat lane) —
   // that sid IS him, so the existing rule is the right one and no chat-specific gate is added.
@@ -18342,30 +18398,66 @@ loadScheduledReset()
 // Re-arm any persisted /schedule messages (overdue ones fire shortly after load).
 // Wire the scheduler's daemon dependencies first: inject into the focused pane (with the
 // watcher paused) when it's the active one, else plain-paste into the target pane.
+// A scheduled message is a TIMER keystroke with nobody watching — gated on paneSafeToType (the
+// strict, unattended-typing gate) before either injection path runs. 'busy' lets the scheduler re-arm
+// the SAME row instead of reporting a delivery failure. Named rather than inline because the
+// chat-origin path falls back to it for a payload that is not a verb.
+async function scheduledInjectToPane(paneId: string, text: string): Promise<'ok' | 'busy' | 'failed'> {
+  if (!(await paneSafeToType(paneId))) return 'busy'
+  // Scheduled text reaches the pane as raw literals, same as the mini-app composer — so a
+  // leading "/" takes the same palette guard. Plain text keeps the proven paste path.
+  if (text.trimStart().startsWith('/')) {
+    const watcher = paneId === focus.activePaneId ? focus.paneWatcher : null
+    const sent = await pasteGuarded(paneId, watcher, text)
+    // An occupied input box is somebody's draft, not a delivery failure: 'busy' re-arms this row and
+    // tries again later, which is the same answer paneSafeToType gives for a pane mid-draft above.
+    if (!sent.ok && 'occupied' in sent) return 'busy'
+    return sent.ok ? 'ok' : 'failed'
+  }
+  const ok = paneId === focus.activePaneId && focus.paneWatcher
+    ? await injectPaste(paneId, focus.paneWatcher, text)
+    : await pasteToPane(paneId, text)
+  return ok ? 'ok' : 'failed'
+}
+
+// A stand-in Context for a payload the SCHEDULER is replaying: the verb handlers only ever use
+// `ctx.reply` (their own output) and the chat/message fields, and a fired schedule has no inbound
+// message behind it. Replies go to the chat the schedule was created in.
+function scheduledCtx(chatId: string): Context {
+  return {
+    chat: { id: Number(chatId), type: 'private' },
+    reply: (t: string) => channel.sendText(chatId, t, { silent: true }),
+  } as unknown as Context
+}
+
 initScheduler({
   channel,
   loadAccess,
+  // A chat-created schedule re-enters the SAME inbound path his typing does. Announced first, in one
+  // line, because a spawn card appearing at 07:30 with nothing to explain it is mystery traffic —
+  // and then the payload produces whatever it normally produces (a card, a reply, a refusal).
+  deliverChatOrigin: async msg => {
+    const lane = getDmChatSession(msg.chatId)
+    if (!lane) {
+      // No lane: refuse VISIBLY. A scheduled `@launch` that silently did not run is the failure this
+      // whole batch has been closing, and guessing a target would be worse than skipping.
+      void channel.sendText(msg.chatId, `⏰ Skipped the scheduled <code>${escapeHtml(msg.text)}</code> — this chat has no live session to run it through.`, { silent: true }).catch(() => {})
+      return 'failed'
+    }
+    const when = msg.recur ? recurrenceLabel(msg.recur) : 'one-off'
+    void channel.sendText(msg.chatId, `⏰ <b>Scheduled (${escapeHtml(when)})</b> — running <code>${escapeHtml(msg.text)}</code>`, { silent: true }).catch(() => {})
+    const ctx = scheduledCtx(msg.chatId)
+    for (const v of OWNER_CHAT_VERBS) if (await v.run(ctx, msg.chatId, lane.sessionId, msg.text)) return 'ok'
+    // Not a verb: deliver it to the lane the way a typed message would land there.
+    const pane = await paneForSession(lane.sessionId).catch(() => null)
+    if (!pane) return 'failed'
+    return scheduledInjectToPane(pane, msg.text)
+  },
   showPanel: (ctx, rich, html, keyboard) => showRichPanel(ctx, 'send', rich, html, keyboard),
   // A scheduled message is a TIMER keystroke with nobody watching — gated on paneSafeToType
   // (the strict, unattended-typing gate) before either injection path runs. 'busy' lets the
   // scheduler re-arm the SAME row instead of reporting a delivery failure.
-  injectToPane: async (paneId, text) => {
-    if (!(await paneSafeToType(paneId))) return 'busy'
-    // Scheduled text reaches the pane as raw literals, same as the mini-app composer — so a
-    // leading "/" takes the same palette guard. Plain text keeps the proven paste path.
-    if (text.trimStart().startsWith('/')) {
-      const watcher = paneId === focus.activePaneId ? focus.paneWatcher : null
-      const sent = await pasteGuarded(paneId, watcher, text)
-      // An occupied input box is somebody's draft, not a delivery failure: 'busy' re-arms this row and
-      // tries again later, which is the same answer paneSafeToType gives for a pane mid-draft above.
-      if (!sent.ok && 'occupied' in sent) return 'busy'
-      return sent.ok ? 'ok' : 'failed'
-    }
-    const ok = paneId === focus.activePaneId && focus.paneWatcher
-      ? await injectPaste(paneId, focus.paneWatcher, text)
-      : await pasteToPane(paneId, text)
-    return ok ? 'ok' : 'failed'
-  },
+  injectToPane: scheduledInjectToPane,
   // A recurring job's session died → revive one in its folder, wait for the REPL prompt, deliver.
   reviveAndInject: async (cwd, text) => {
     const pane = await spawnSession(cwd, '', isTopicMode() ? genSessionId() : undefined)
