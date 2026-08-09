@@ -8463,7 +8463,10 @@ function clampedClause(d: ModelDecision): string {
 // lands on the same engine the caller asked for.
 // `probe` rides the spec for the same reason `nativeModel` does: a HELD spawn approved twenty minutes
 // later must land the way the caller asked, and by then the caller's flags are gone.
-type SpawnSpec = { fromSid: string; topicName: string; dir: string; effort: string | null; firstMsg: string; headless: boolean; why?: string; autoEffort?: boolean; probe?: boolean; providerAccount?: string; providerModel?: string; nativeModel?: string }
+// `ownerDirect`/`ownerMsgId` ride the SPEC rather than being set at the mint, because a held spawn is
+// launched later from the stored spec with no caller left to re-assert them — and the first message of
+// an owner's `@launch` is his words, so its answer belongs to him and not to the lane that minted it.
+type SpawnSpec = { fromSid: string; topicName: string; dir: string; effort: string | null; firstMsg: string; headless: boolean; why?: string; autoEffort?: boolean; probe?: boolean; providerAccount?: string; providerModel?: string; nativeModel?: string; ownerDirect?: true; ownerMsgId?: number }
 
 // The one line the owner reads next to the dials on the spawn confirmation. Two things can put text
 // here and they COMPOSE rather than replace: the caller's own --why, and — under `auto` — whichever
@@ -8547,7 +8550,8 @@ async function launchSpawn(spec: SpawnSpec, model: string | null, clampedNote: s
     // only make some later, unrelated ask fail, or trip the pause silently (its notice fires
     // on the exact crossing turn only). Spawns stay ungated, exactly as they were when this
     // was a raw paste. Digest/markSeen are skipped too: a session seconds old has no history.
-    const p = createPending({ fromSid, toSid: sid, fromName, toName: topicName, text: firstMsg, refs: [], founding: true }, Date.now())
+    const p = createPending({ fromSid, toSid: sid, fromName, toName: topicName, text: firstMsg, refs: [], founding: true,
+      ...(spec.ownerDirect ? { ownerDirect: spec.ownerDirect } : {}), ...(spec.ownerMsgId != null ? { ownerMsgId: spec.ownerMsgId } : {}) }, Date.now())
     appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'ask', from: fromName, to: topicName, id: p.id, text: firstMsg, refs: [] })
     // Reserve the ask for THIS closure before anything can see it: the pending exists now but
     // the pane won't be at a prompt for up to 45s, and the 15s sweep would otherwise inject it
@@ -8565,7 +8569,9 @@ async function launchSpawn(spec: SpawnSpec, model: string | null, clampedNote: s
       }
       // busDeliver serializes on the same inject chain as human inbound, so the ask block can't
       // interleave with a message the owner types into the new topic mid-boot.
-      if (!(await busDeliver(newPane, formatAskBlock(fromName, p.id, firstMsg, [])).catch(() => false))) {
+      // `from=owner` for the same reason the flag exists: this founding message is the owner's own
+      // words, and the new session has to write its answer for a person rather than for an orchestrator.
+      if (!(await busDeliver(newPane, formatAskBlock(fromName, p.id, firstMsg, [], false, !!spec.ownerDirect)).catch(() => false))) {
         removePending(p.id)   // never leave a ghost ask the spawner will be told timed out
         if (group && threadId != null) void channel.sendText(group, `⚠️ Spawned <b>${escapeHtml(topicName)}</b>, but its first message didn't paste — send it again in its topic.`, { threadId: String(threadId) }).catch(() => {})
         else void notifyBusText(fromSid, `⚠️ Spawned <b>@${escapeHtml(topicName)}</b>, but its first message didn't paste — send it again.`)
@@ -15963,18 +15969,22 @@ async function routeOwnerReply(ctx: Context, chatId: string, sid: string, text: 
 // that reaches back with `tg ack @<from>` must land somewhere real, and a synthetic "@owner" would be
 // a name the roster has never heard of. So the lane keeps the attribution and `ownerDirect` carries
 // the only difference that changes behaviour: the answer is a card to him, not a paste into the lane.
+// Returns the delivery outcome, because `@launch` at a LIVE name is this same act and has one thing
+// to add on top of it (a dials-ignored line). It reuses this rather than minting beside it: a second
+// mint is exactly how the launch path came to be missing `ownerDirect` in the first place.
 async function ownerDirectDispatch(
   reply: (t: string) => Promise<unknown>, laneSid: string, toSid: string, text: string, msgId?: number,
-): Promise<void> {
+): Promise<AskDelivery | 'refused'> {
   const endpoints = busEndpoints()
   const fromName = nameForEndpoint(laneSid, endpoints)
   const toName = nameForEndpoint(toSid, endpoints)
   let p: BusPending
   try { p = createPending({ fromSid: laneSid, toSid, toKind: 'claude', fromName, toName, text, refs: [], ownerDirect: true, ...(msgId != null ? { ownerMsgId: msgId } : {}) }, Date.now()) }
-  catch (e) { await reply(`${e instanceof Error ? e.message : e} — nothing was sent`); return }
+  catch (e) { await reply(`${e instanceof Error ? e.message : e} — nothing was sent`); return 'refused' }
   appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'ask', from: fromName, to: toName, id: p.id, text, refs: [] })
   const outcome = await tryDeliverAsk(p).catch(() => 'busy' as const)
   if (outcome !== 'delivered') await reply(askResultText(outcome, toName, p.id, asksAheadOf(p)))
+  return outcome
 }
 
 // ---- `@<name> <message>` — the owner addressing a session directly ----
@@ -16038,7 +16048,7 @@ async function runOwnerLaunch(ctx: Context, chatId: string, laneSid: string, par
   const res = resolveEndpoint(name, endpoints)
   if (!('error' in res)) {
     if (res.kind !== 'claude') { await reply(`@${nameForEndpoint(res.id, endpoints)} is a hermes endpoint — @launch reaches Claude sessions`); return }
-    await ownerLaunchAsk(reply, laneSid, res.id, endpoints, message, model, effort)
+    await ownerLaunchAsk(reply, laneSid, res.id, endpoints, message, model, effort, msgId)
     return
   }
   // Ambiguity is the one resolve failure that must NOT spawn: two live sessions share the name, so
@@ -16047,30 +16057,27 @@ async function runOwnerLaunch(ctx: Context, chatId: string, laneSid: string, par
   if (endpoints.filter(e => !e.closed && normalizeEndpointName(e.name) === normalizeEndpointName(name)).length > 1) {
     await reply(res.error); return
   }
-  const spawned = await ownerLaunchSpawn(laneSid, name, model, effort, message)
+  const spawned = await ownerLaunchSpawn(laneSid, name, model, effort, message, msgId)
   // Success is already on his surface — launchSpawn mints the "Spawned @X on Opus/High" card into
   // this same DM. A second line here would say it twice.
   if (!spawned.ok) await reply(spawned.text)
 }
 
 // The name is live: deliver as a bus ask from the lane, so the answer comes back the way every other
-// fleet result does.
+// fleet result does — which for a message the OWNER typed means back to HIM. `@launch <live name>` is
+// `@name <message>` with dials in front of it, so it goes through the same dispatch and inherits
+// `ownerDirect`; minting its own ask is what sent every launch answer into the lane instead.
 async function ownerLaunchAsk(
   reply: (t: string) => Promise<unknown>, laneSid: string, toSid: string, endpoints: BusEndpoint[],
-  message: string, model: string | null, effort: string | null,
+  message: string, model: string | null, effort: string | null, msgId?: number,
 ): Promise<void> {
   const toName = nameForEndpoint(toSid, endpoints)
   if (toSid === laneSid) { await reply(`@${toName} is your own chat lane — say it here instead`); return }
   // repoDispatchPreflight and the depth breaker are deliberately NOT run here. Both gate the chat lane
   // AGENT dispatching work it hasn't examined; this is the owner typing, and handleInbound has already
   // reset the hop guard, so the chain is at depth 0 by construction.
-  const fromName = nameForEndpoint(laneSid, endpoints)
-  let p: BusPending
-  try { p = createPending({ fromSid: laneSid, toSid, toKind: 'claude', fromName, toName, text: message, refs: [] }, Date.now()) }
-  catch (e) { await reply(`${e instanceof Error ? e.message : e} — nothing was sent`); return }
-  appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'ask', from: fromName, to: toName, id: p.id, text: message, refs: [] })
-  const outcome = await tryDeliverAsk(p).catch(() => 'busy' as const)
-  if (outcome !== 'delivered') { await reply(askResultText(outcome, toName, p.id, asksAheadOf(p))); return }
+  const outcome = await ownerDirectDispatch(reply, laneSid, toSid, message, msgId)
+  if (outcome !== 'delivered') return
   // A running session's dials cannot be changed without restarting it, and it is NOT restarted for
   // them — a re-billed context is a cost he didn't ask for. So the line names what it is actually
   // running, which is what makes "ignored" informative rather than just a refusal.
@@ -16087,7 +16094,7 @@ async function ownerLaunchAsk(
 
 // The name is free: spawn, through the same primitives `tg spawn` uses.
 async function ownerLaunchSpawn(
-  laneSid: string, name: string, model: string | null, effort: string | null, message: string,
+  laneSid: string, name: string, model: string | null, effort: string | null, message: string, msgId?: number,
 ): Promise<{ ok: boolean; text: string }> {
   // `humanOrigin`, NOT `ownerNamed`: the daemon read these words off his own message, so no agent is
   // asserting that he said them — which is the entire reason `ownerNamed` exists. decideGate's first
@@ -16106,6 +16113,8 @@ async function ownerLaunchSpawn(
   const spec: SpawnSpec = {
     fromSid: laneSid, topicName: name, dir, effort: effortChoice.effort, firstMsg: message,
     headless: !isTopicMode(), autoEffort: effortChoice.autoFallback, ...(model ? { nativeModel: model } : {}),
+    // His words, so his answer: the founding ask is owner-direct exactly as `@name <message>` is.
+    ownerDirect: true, ...(msgId != null ? { ownerMsgId: msgId } : {}),
   }
   // Unreachable while `humanOrigin` is true — kept so that a later change to the gate cannot turn
   // this path into the one spawn that starts a gated model without asking.

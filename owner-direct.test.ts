@@ -40,15 +40,41 @@ test('owner-direct with NO surface falls back to the pane rather than dropping t
 // Two properties of the daemon side, each one line and each the whole feature if it goes missing.
 const daemon = readFileSync(join(import.meta.dir, 'daemon.ts'), 'utf8')
 
-test('both direct gestures mint through ONE dispatch, so they can never drift apart', () => {
-  // `@name <message>` and a reply to a card are the same act. Two mints is how one of them quietly
-  // loses `ownerDirect` and starts answering into the lane again.
-  const mints = [...daemon.matchAll(/createPending\(\{[^}]*ownerDirect: true/g)]
-  expect(mints.length).toBe(1)
-  for (const fn of ['routeOwnerAddress', 'routeOwnerReply']) {
-    const body = daemon.slice(daemon.indexOf(`async function ${fn}(`), daemon.indexOf(`async function ${fn}(`) + 3000)
-    expect(body).toContain('ownerDirectDispatch')
-  }
+// EVERY gesture that carries the owner's own words, enumerated — not the ones that turned up while
+// fixing the last one. `@launch`/`@spawn` was missing from this list for as long as it existed: its
+// first message minted a plain ask, so the answer to the owner's opening question was typed into his
+// orchestrator (observed live, ask 881 → @weather). The enumeration is the guard; the list of gestures
+// is the thing that must be complete, and a new one belongs here on the day it is written.
+test('every owner-typed gesture mints an ownerDirect ask, through a named site', () => {
+  // Three gestures, two mint sites: the two DIRECT gestures share `ownerDirectDispatch`, and a SPAWN
+  // cannot use it (there is no session to deliver into until the pane exists), so it carries the flag
+  // on its spec instead. Any third mint is a path drifting off on its own.
+  const at = (needle: string): number => { const i = daemon.indexOf(needle); expect(i).toBeGreaterThan(-1); return i }
+  const sites = [
+    { fn: 'async function ownerDirectDispatch(', end: '// ---- `@<name> <message>`' },
+    { fn: 'async function launchSpawn(', end: 'async function holdSpawnForApproval(' },
+  ]
+  const mints = [...daemon.matchAll(/createPending\(\{[^}]*ownerDirect/g)].map(m => m.index!)
+  expect(mints.length).toBe(sites.length)
+  for (const m of mints)
+    expect(sites.some(s => m > at(s.fn) && m < at(s.end))).toBe(true)
+
+  // And each gesture reaches one of those two sites rather than minting beside it.
+  const body = (fn: string, len = 3000): string => daemon.slice(at(fn), at(fn) + len)
+  for (const fn of ['async function routeOwnerAddress(', 'async function routeOwnerReply(', 'async function ownerLaunchAsk('])
+    expect(body(fn)).toContain('ownerDirectDispatch')
+  // The spawn half: the flag is set on the spec `@launch` builds, and read where the founding ask is
+  // minted. Set-but-never-read is the failure a grep for the field alone would miss.
+  expect(body('async function ownerLaunchSpawn(', 2000)).toContain('ownerDirect: true')
+  expect(body('async function launchSpawn(', 9000)).toContain('spec.ownerDirect ? { ownerDirect: spec.ownerDirect }')
+})
+
+test("a spawned session is TOLD the founding message is the owner's — same reason the flag exists", () => {
+  // `from=owner` in the ask block is what makes the new session write its answer for a person. It is
+  // the same argument `formatAskBlock` takes everywhere else, so the risk is passing the flag to the
+  // ROW and forgetting the BLOCK — the session then answers correctly-routed prose written for an agent.
+  const spawn = daemon.slice(daemon.indexOf('async function launchSpawn('), daemon.indexOf('async function holdSpawnForApproval('))
+  expect(spawn).toContain('formatAskBlock(fromName, p.id, firstMsg, [], false, !!spec.ownerDirect)')
 })
 
 test('his own ask confirms by REACTION and gets no sender card — and the reaction fires on DELIVERY', () => {
