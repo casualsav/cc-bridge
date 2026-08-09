@@ -154,7 +154,7 @@ import { createRepoContextGate } from './repo-context-gate.ts'
 import { createMsgTracker } from './msg-tracker.ts'
 import { startEditScheduler, scheduleEdit, scheduleDelete, cancelEdit, touchActiveView } from './edit-scheduler.ts'
 import { initUpdates, startUpdate, bridgeVersion, claudeBin, claudeVersion, sweepUpdateChecks, sweepClaudeInstall, installClaudeLatest } from './updates.ts'
-import { formatChannelBlock } from './inbound.ts'
+import { formatChannelBlock, appBlock } from './inbound.ts'
 import { initQueue, readLater, writeLater, sweepLaterQueues, LATER_SWEEP_MS } from './queue.ts'
 import {
   AGENT_BUS_ENABLED, AGENT_BUS_PIN_UI,
@@ -20189,7 +20189,11 @@ async function webappSessionAction(userId: string, sid: string, action: 'stop' |
     return { confirm: 'Clear this conversation? The session keeps running — the transcript above is gone.' }
   }
   await dismissFeedbackSurvey(pane)
-  const sent = await pasteGuarded(pane, watcher, msg)
+  // The mini app's own envelope (inbound.ts). Prose ONLY: a slash command must reach the CLI as the
+  // characters the CLI parses, and `<tg from=app>/compact</tg>` is not a command — it is that text.
+  // planSlash has already told us which this is, so the test is its verdict rather than a second
+  // reading of the leading character.
+  const sent = await pasteGuarded(pane, watcher, plan.kind === 'prose' ? appBlock(msg) : msg)
   if (sent.ok) return null
   // Every failure shape says what happened, in the composer's error toast. Reporting "sent" for a
   // command the CLI never ran is the defect this path shared with the relay: the toast is the only place

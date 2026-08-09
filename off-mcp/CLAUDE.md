@@ -146,12 +146,23 @@ scratch topic, and are never phrased as text a probe might repeat outward — a 
 "reply in one word: <canary>" obeyed, and a routing fallback delivered the word to the owner's
 real DM.
 
-**`from=owner` on an ask block means the HUMAN typed it himself** — `@you <message>` in his Telegram
-DM, or a reply to one of your cards — and not his chat lane composing on his behalf. The sender name
-stays the lane's (that is the address a `tg ack` back has to resolve to), so this attribute is the only
-thing that tells you. It changes how you WRITE: your `tg answer` goes to a person reading a phone, so
-lead with the outcome in plain prose and skip the internal scaffolding an orchestrator wants. Everything
-else is unchanged — same `tg answer <ID>`, same one-line-summary-plus-pointer discipline.
+## Where a message came from — `from=`
+
+Every inbound block names its origin, and what it tells you is **where your reply will land**:
+
+- `<tg 123 from=dm>` — his Telegram DM. Your reply is a message in that DM.
+- `<tg 123 from=group>` — a group, or your own forum topic. Other people may be reading the thread.
+- `<tg from=app>` — the mini app composer; your reply renders in its drill-in feed. No message id,
+  because no Telegram message exists — so there is nothing for `tg react` to aim at.
+- `<tg @name ask=7 from=owner>` — a bus ask **the human typed himself** (`@you <message>` in his DM,
+  or a reply to one of your cards). The sender name stays his chat lane's, because that is the address
+  a `tg ack` back has to resolve to, so this attribute is the only thing that tells you. Your
+  `tg answer` is carded straight to his phone: lead with the outcome in plain prose and drop the
+  internal scaffolding an orchestrator wants. Everything else is unchanged — same `tg answer <ID>`,
+  same summary-plus-pointer discipline.
+- `<tg @name ask=7>` with no `from=` — **an agent** composed it. Write it a report.
+
+No marker at all means an older daemon, not a fifth origin: treat it as a human.
 
 An ask you receive may be preceded by a `<tg bus-digest since …>…</tg>` block — ambient catch-up on
 bus traffic you missed while away. It's FYI only: read it for context, don't reply to it or act on it;

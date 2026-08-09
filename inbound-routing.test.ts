@@ -32,12 +32,20 @@ test('the addressing survives a round-trip through the ledger file', () => {
 // The reason these two keys could be added to `meta` at all, rather than to the ledger row: the
 // block the agent reads ENUMERATES the keys it prints. If that ever changes to a dump, the routing
 // keys would start appearing in every session's context — so pin it here.
-test('neither routing key reaches the pane — the block enumerates what it prints', () => {
+//
+// `chat_type` is the one that now has a READING in the block (2026-08-09): it is rendered as the
+// origin word a session branches on, never as Telegram's own vocabulary. `thread` still reaches
+// nothing — it is an address, and the session has no use for one.
+test('the routing keys are not dumped — chat_type renders as an origin, thread not at all', () => {
   const withRouting = formatChannelBlock(topicMsg('41', '900').params)
-  const without = formatChannelBlock({ content: 'work on 900', meta: { chat_id: '-1002200', message_id: '900', ts: '2026-08-06T02:59:58.000Z' } })
-  expect(withRouting).toBe(without)
+  expect(withRouting).toContain('from=group')
   expect(withRouting).not.toContain('thread')
-  expect(withRouting).not.toContain('supergroup')
+  expect(withRouting).not.toContain('supergroup')   // the WORD Telegram uses is still not in his context
+  expect(withRouting).not.toContain('-1002200')
+  // An unknown chat_type writes no marker at all rather than guessing one — a replayed ledger row
+  // from an older build lands here, and a wrong origin is worse than an absent one.
+  const unknown = formatChannelBlock({ content: 'work on 900', meta: { chat_id: '-1002200', message_id: '900', ts: '2026-08-06T02:59:58.000Z' } })
+  expect(unknown).not.toContain('from=')
 })
 
 // The precedence `paneForAddress` implements, asserted against the source so the drain and the live
