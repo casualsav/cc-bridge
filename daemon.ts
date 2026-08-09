@@ -3999,7 +3999,10 @@ async function deliverAnswerToAsker(pending: BusPending, answerer: string, rawBo
   // Surface the incoming answer on the ASKER's OWN surface (the chat DM / its topic) as
   // "@answerer messaged @asker", the answer behind the chevron — NOT a broadcast into General. Mirror
   // of the outbound "Messaged @X" card. (The mismatch note, if any, rides in the header.)
-  void notifyBusRich(cur.fromSid, `<b>@${escapeHtml(answerer)}</b> messaged <b>@${escapeHtml(cur.fromName)}</b>${late ? ' · late' : ''}${escapeHtml(mismatch)}`, body)
+  // Subject = the ANSWERER, so a native reply to "@worker messaged @chat" goes back to @worker. On a
+  // group-less box this is the most common card in the owner's DM by far — every worker result
+  // reaches him as one — which makes it the card reply-to-route exists for.
+  void notifyBusRich(cur.fromSid, `<b>@${escapeHtml(answerer)}</b> messaged <b>@${escapeHtml(cur.fromName)}</b>${late ? ' · late' : ''}${escapeHtml(mismatch)}`, body, cur.toSid)
   appendLedger(room, { ts: Date.now(), kind: 'answer', from: answerer, to: cur.fromName, id: cur.id, text: body, refs })
   return `answered @${cur.fromName} (ask ${cur.id})${late ? ' (late — delivered after the timeout)' : ''}`
 }
