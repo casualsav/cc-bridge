@@ -33,7 +33,7 @@ import { accountRemovalPlan, readAccountIdentity } from './account-identity.ts'
 // Code fingerprint captured at startup; sent to shims so they can detect and
 // replace a daemon left running stale code after a plugin upgrade.
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
-import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
+import { mdToTelegramHtml, chunkHtml, escapeHtml, hasMarkdownTable } from './markdown.ts'
 import { normalizeCommandOutput } from './ansi.ts'
 import { planSlash, bridgeOnlyReason, type NavTarget, type CardKind } from './slash-policy.ts'
 import { collectDiff, type DiffCard } from './session-cards.ts'
@@ -1470,13 +1470,20 @@ async function sendAgentText(chats: string[], text: string, threadId?: number, r
   // is worse under rich. Route any such reply through the classic HTML/<pre> path to keep copy +
   // contained horizontal scroll; a code-bearing reply forgoes native tables/headings (rare to mix).
   const hasFencedCode = /(^|\n)[ \t]{0,3}```/.test(text)
+  // A TABLE OUTRANKS THE CODE-FENCE BYPASS (the owner, 2026-08-09). The bypass above exists because
+  // rich renders a code block worse than the classic <pre> does — no copy button, wrapping instead of
+  // contained scroll — and that trade is right for a reply that is mostly code. It is the wrong way
+  // round for a reply carrying a TABLE, because classic cannot render a table at all: Telegram has no
+  // table entity, so the pipes arrive as pipes. A message holding both takes the renderer that can
+  // show the thing it cannot otherwise show.
+  const richEligible = access.renderMarkdown !== false && (!hasFencedCode || hasMarkdownTable(text))
   let replyOnce = replyTo   // agent-bus P4: the reply-to lands on the FIRST message actually sent, then clears
   for (const chat_id of chats) {
     // agent-bus §6: route the reply under the session's OWN avatar bot when it has one AND rich is
     // eligible; remember the sent id so a later `tg edit` re-sends via the SAME bot. ANY avatar failure
     // → fall through to the main-bot rich/HTML path below (which keeps the deleted-topic / 429
     // recoveries), logged so a repeatedly-failing avatar (or an accepted-but-timed-out double-post) shows.
-    if (avatarToken && access.renderMarkdown !== false && !hasFencedCode) {
+    if (avatarToken && richEligible) {
       try {
         const m = await sendRichMessage(avatarToken, chat_id, toInputRichMessage(text), { messageThreadId: threadId, ...(silent ? { disableNotification: true } : {}), ...(replyOnce != null ? { replyToMessageId: replyOnce } : {}) })
         avatarMsgTokens.remember(chat_id, m.message_id, avatarToken)
@@ -1496,7 +1503,7 @@ async function sendAgentText(chats: string[], text: string, threadId?: number, r
     // the reply still lands; a send whose outcome we never learned does NOT — that fallback is a
     // second delivery of a message that may already be in the chat. On when markdown rendering is
     // enabled (renderMarkdown !== false) AND the reply has no fenced code block (see above).
-    if (access.renderMarkdown !== false && !hasFencedCode) {
+    if (richEligible) {
       try {
         const m = await sendRichMessage(TOKEN!, chat_id, toInputRichMessage(text), { messageThreadId: threadId, ...(silent ? { disableNotification: true } : {}), ...(replyOnce != null ? { replyToMessageId: replyOnce } : {}) })
         rememberMsgRoute(chat_id, m?.message_id, routeSid)
@@ -3796,8 +3803,28 @@ async function sendPost(chat: string, fromName: string, body: string): Promise<v
 // mirrored beside it — is how a reply gets missed. So: expanded, notifying, and headed with the name
 // he addressed. Routable, like every card with a session behind it: replying continues the thread.
 const OWNER_ANSWER_CAP = POST_CAP
+// A TABLE IN THE ANSWER TAKES THE RICH RENDERER (the owner, 2026-08-09, on receiving a ccusage table
+// through this card as raw pipes: "when things like tables are displayed, it should pick it up and be
+// a rich message"). This card escapes its body into classic HTML, which is right for ordinary prose
+// and cannot render a table at all — so the same answer read cleanly when a worker replied in chat
+// (the relay path sends rich) and read as pipe soup when he addressed the worker directly. The
+// content decides, not the surface. Everything else about the card is unchanged: expanded,
+// notifying, and routable, all three by his earlier ruling.
 async function sendOwnerAnswerCard(chat: string, fromName: string, body: string, subjectSid: string): Promise<void> {
   const shown = body.length > OWNER_ANSWER_CAP ? body.slice(0, OWNER_ANSWER_CAP) + '…' : body
+  if (loadAccess().renderMarkdown !== false && hasMarkdownTable(shown)) {
+    try {
+      const m = await sendRichMessage(TOKEN!, chat, toInputRichMessage(`📨 **From @${fromName}**\n\n${shown}`), {})
+      rememberMsgRoute(chat, m?.message_id, subjectSid)
+      return
+    } catch (e) {
+      // Same split as every other rich send: only a REFUSAL frees us to send the card again. An
+      // unknown outcome may already be on his phone, and a second copy of an answer he is waiting
+      // on is worse than the table he loses by not retrying.
+      if (!telegramRefused(e)) { process.stderr.write(`daemon: owner answer card from @${fromName} has an UNKNOWN outcome, NOT falling back to HTML (it may already be in the chat): ${e}\n`); return }
+      process.stderr.write(`daemon: owner answer card rich send failed, falling back to HTML: ${e}\n`)
+    }
+  }
   const html = `📨 <b>From @${escapeHtml(fromName)}</b>\n\n${escapeHtml(shown)}`
   const ref = await channel.sendText(chat, html).catch(e => {
     process.stderr.write(`daemon: owner answer card from @${fromName} failed: ${e}\n`); return null

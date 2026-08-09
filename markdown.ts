@@ -85,6 +85,25 @@ function balanceHtml(html: string): string {
   return out
 }
 
+// DOES THIS TEXT CONTAIN A MARKDOWN TABLE? The owner's rule, 2026-08-09: "it doesn't need to be
+// that every message is a rich message, but when things like tables are displayed, it should pick it
+// up and be a rich message." A table is the one construct the classic HTML path cannot render at
+// all — Telegram has no table entity, so the pipes arrive as pipes — while rich messages render it
+// natively. So the CONTENT decides which renderer a message gets, and this is the question.
+//
+// The separator row is the signal, not the pipes: prose quoting a `|` is common, a line of nothing
+// but pipes, dashes and colons under another pipe-bearing line is not. Both leading/trailing-pipe
+// and bare styles count, since Claude emits the former and tools like ccusage emit either.
+export function hasMarkdownTable(md: string): boolean {
+  const lines = md.split('\n')
+  for (let i = 1; i < lines.length; i++) {
+    const sep = lines[i].trim()
+    if (!sep.includes('-') || !/^\|?[\s:|-]+\|[\s:|-]*$/.test(sep)) continue
+    if (lines[i - 1].includes('|')) return true   // a header row directly above it
+  }
+  return false
+}
+
 export function mdToTelegramHtml(md: string): string {
   const lines = md.split('\n')
   const out: string[] = []

@@ -112,8 +112,8 @@ test('every rich-SEND fallback in daemon.ts is guarded by telegramRefused', asyn
     expect(catchBody).toContain('telegramRefused')
   }
   // Locked at the enumerated count — sendAgentText's avatar + main-bot branches, sendBusCard, the
-  // `tg reply` rich path, the auth-url card, the spawn task mirror, /start, and showRichPanel — so a
-  // new rich send with an unguarded fallback trips the assertion above, and one that quietly
-  // disappears trips this.
-  expect(sendSites).toBe(8)
+  // `tg reply` rich path, the auth-url card, the spawn task mirror, /start, showRichPanel, and the
+  // owner-answer card's table path — so a new rich send with an unguarded fallback trips the
+  // assertion above, and one that quietly disappears trips this.
+  expect(sendSites).toBe(9)
 })
