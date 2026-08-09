@@ -3468,7 +3468,7 @@ async function runSessionWatch(fromSid: string, target: string, g: Gestures, cha
 // command for later (the park below) tries again on the next sweep; the verb reports them exactly as
 // before. Flagged here rather than string-matched at the call site — the refusal texts are read by
 // humans and would be re-worded without anyone thinking about a matcher.
-type SlashRelay = { ok: true; text: string } | { ok: false; why: string; retry?: true }
+type SlashRelay = { ok: true; text: string } | { ok: false; why: string; retry?: true; paneGone?: boolean }
 
 // The refusal an orchestrator hits most, and the one that used to be a dead end: the target goes
 // busy again within a second of reaching a prompt whenever anything is queued for it, so "retry when
@@ -3481,8 +3481,11 @@ async function relaySlashToSession(
 ): Promise<SlashRelay> {
   const targetPane = await paneForSession(toSid).catch(() => null)
   if (!targetPane || !(await paneAlive(targetPane).catch(() => false))) {
-    if (!(targetPane && isPaneRestarting(targetPane))) updateTopic(toSid, { closed: true })
-    return { ok: false, why: 'target session has no live pane', retry: true }
+    // The topic row is NOT closed here — the CALLER does it, and only a caller that asked to reach
+    // this session. A park's evaluation pass asked for nothing: it polls, and losing a round is its
+    // normal operation, so closing somebody's topic row from inside it is a mutation by a verb that
+    // did nothing. `paneGone` carries the same condition that used to sit here, unchanged.
+    return { ok: false, why: 'target session has no live pane', retry: true, paneGone: !(targetPane && isPaneRestarting(targetPane)) }
   }
   const cap = await capturePane(targetPane).catch(() => '')
   // paneRunsTypedInput, not onNormalPrompt: the queued-messages bar IS a bordered ❯ row, so the
@@ -7047,7 +7050,12 @@ async function handleCall(
           return
         }
         const relayed = await relaySlashToSession(fromSid, res.id, command, endpoints, room)
-        if (!relayed.ok) { write({ t: 'result', id, ok: false, text: relayed.why }); return }
+        // Someone asked to reach this session and it is gone — that is what closes the row (see
+        // relaySlashToSession's own note on why it no longer does this itself).
+        if (!relayed.ok) {
+          if (relayed.paneGone) updateTopic(res.id, { closed: true })
+          write({ t: 'result', id, ok: false, text: relayed.why }); return
+        }
         text = relayed.text
         break
       }

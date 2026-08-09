@@ -46,6 +46,22 @@ test('pasteGuarded\'s slash branch delegates to pasteSlashVerified, never its ow
   expect(code).not.toMatch(/paste-buffer/)        // and no second copy of the paste mechanics
 })
 
+// A poll may not mutate. `relaySlashToSession` is shared by the verb (somebody asked to reach that
+// session) and by the parked-slash sweep (nobody asked — it polls, and losing a round is its normal
+// operation). Closing a topic row from inside it meant a park that did nothing could mark somebody's
+// session closed, once per sweep, purely for being between panes. Structural for the same reason as
+// the guards above — this lives in daemon.ts with no unit harness — and it FAILS against the code as
+// it stood in v0.5.24, where the updateTopic call was inside the shared function.
+test('the shared slash relay closes nobody\'s topic row — the caller that asked does', () => {
+  const body = daemon.slice(daemon.indexOf('async function relaySlashToSession('))
+  const fn = body.slice(0, body.indexOf('\n}\n'))
+  expect(fn).not.toContain('updateTopic(')
+  expect(fn).toContain('paneGone')                       // it REPORTS the fact instead
+  const slash = daemon.slice(daemon.indexOf("case 'slash': {"))
+  const verb = slash.slice(0, slash.indexOf('\n      }\n'))
+  expect(verb).toContain('if (relayed.paneGone) updateTopic(res.id, { closed: true })')
+})
+
 // ---- hidden endpoints: the DISPLAY sites filter, resolution does not ----
 // Structural, for the same reason as the pasteGuarded guard above: the two surfaces that list
 // endpoints live in handleCall/busRosterLine, which have no unit harness. The behavioural half — a

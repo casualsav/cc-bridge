@@ -119,11 +119,14 @@ by its topic name.
   still busy after an hour → it fires saying that. Exactly one notification, always. No options.
 - tg repo <path> — the routing brief for a work repo: what it IS, which directory a request means,
   what proves work there, what makes a task not routine. Cached per box; a repo nobody has scouted
-  yet is discovered in the background (~1 min) and arrives as an ack. Found a brief wrong while
+  yet is discovered in the background (~1 min) and arrives as an ack. A linked git WORKTREE inherits
+  its parent repo's brief — same key, no second scout, so spawning a writer into one costs nothing. Found a brief wrong while
   working in that repo? `tg repo <path> --stale "why"` — you are the one who can see it, and the
   next lookup re-scouts. Never hand-edit a brief: a refresh overwrites it.
-- tg roster — who's live. · tg post - — say something to the humans (stdin). · tg history — recent
-  bus events.
+- tg roster — who's live, and how deep each one's queue is: `· 4 queued` counts the asks a session is
+  holding unanswered beyond the one it is on, so a bottleneck is visible BEFORE you add to it (the
+  same number rides every `tg ask` reply). · tg post - — say something to the humans (stdin). ·
+  tg history — recent bus events.
 - `tg <verb> --help` prints that verb's usage without doing anything.
 
 **Need a throwaway session to test bus behaviour?** `tg spawn` IS the sanctioned way — there is no
