@@ -24,8 +24,21 @@ export function toInputRichMessage(text: string, mode: 'markdown' | 'html' = 'ma
 // Carry an existing HTML panel (a `\n`-separated string built for parse_mode:'HTML') over the html
 // carrier. Rich parses HTML into BLOCKS, so a bare "\n" collapses to a space — every line break must
 // become <br> or the panel renders as one run-on paragraph. Inline <b>/<i>/<code> survive as-is.
+// Panels are bridge-built and carry no <pre>, so the blanket replace is right HERE and wrong for
+// rendered agent markdown — see richHtmlBreaks.
 export function htmlPanelToRich(html: string): InputRichMessage {
   return { html: html.replace(/\n/g, '<br>') }
+}
+
+// The same conversion for HTML that came out of `mdToTelegramHtml`, where a blanket replace is
+// WRONG: rich keeps the newlines inside a <pre> block and drops <br>s there, so converting them
+// welds a fenced code block into one line. Measured against the live API 2026-08-10 — blanket
+// replace stored "fenced line 1fenced line 2"; leaving every newline alone instead collapsed the
+// PARAGRAPHS ("a list: • first • second" on one line). Neither half is optional, so the split is
+// the fix: <br> outside <pre>, verbatim inside it.
+export function richHtmlBreaks(html: string): string {
+  return html.split(/(<pre(?:\s[^>]*)?>[\s\S]*?<\/pre>)/)
+    .map((seg, i) => i % 2 ? seg : seg.replace(/\n/g, '<br>')).join('')
 }
 
 // A failed send is either a REFUSAL or an UNKNOWN OUTCOME, and only the first is safe to retry

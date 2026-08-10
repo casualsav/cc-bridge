@@ -53,7 +53,9 @@ test('the owner-answer card consults the content before choosing classic HTML', 
   // notifying, and routable — replying to it continues the thread with the session that answered.
   expect(fn).toContain('rememberMsgRoute(chat, m?.message_id, subjectSid)')
   expect(fn).not.toContain('disableNotification')
-  // …and the classic path is still there underneath it, for every answer that is just prose.
+  // …and the classic path is still there underneath it. Its ROLE changed on 2026-08-10: it used to
+  // take every answer without a table (which reached him as raw markdown, the defect), and now takes
+  // only code-bearing ones — where classic's <pre> beats rich's. Both branches render.
   expect(fn).toContain('📨 <b>From @')
 })
 
@@ -72,5 +74,7 @@ test('rendering off still means off — the content rule never overrides the set
   // renderMarkdown: false is a deliberate choice (a client that mangles it, a user who wants plain
   // text). A table must not smuggle rich past it, so the setting is the outer term in both places.
   expect(daemon).toContain('access.renderMarkdown !== false && (!hasFencedCode')
-  expect(daemon).toContain("loadAccess().renderMarkdown !== false && hasMarkdownTable(shown)")
+  // The owner card's gate widened on 2026-08-10 (a table-only gate sent every other answer raw), but
+  // the SETTING is still the outer term — which is the whole claim this test makes.
+  expect(daemon).toContain("loadAccess().renderMarkdown !== false && (!hasFencedCode || hasMarkdownTable(shown))")
 })

@@ -136,7 +136,7 @@ import { parkVerdict, existingPark, alreadyParkedText, parkedText, parkNoticeTex
 import { fetchUsageResult, type UsageReading } from './usage-api.ts'
 import { startWebapp, type SettingsView as WebappSettingsView, type SessionCard as WebappSessionCard, type SessionFeed as WebappSessionFeed, type AutomationView as WebappAutomationView, type UsageView as WebappUsageView } from './webapp.ts'
 import { startTunnel, ensureCloudflared, reapOrphanTunnels, tailscaleFunnelUrl, type Tunnel } from './tunnel.ts'
-import { sendRichMessage, sendRichMessageDraft, editRichMessage, toInputRichMessage, htmlPanelToRich, callTelegram, normalizeRichInbound, telegramRefused, type InputRichMessage } from './richmsg.ts'
+import { sendRichMessage, sendRichMessageDraft, editRichMessage, toInputRichMessage, htmlPanelToRich, richHtmlBreaks, callTelegram, normalizeRichInbound, telegramRefused, type InputRichMessage } from './richmsg.ts'
 import { parseAvatars, resolveAvatar, type Avatar } from './avatars.ts'
 import { createAvatarMsgTokens } from './avatar-msg-tokens.ts'
 import { claudingStatus } from './clauding.ts'
@@ -3852,7 +3852,14 @@ const OWNER_ANSWER_CAP = POST_CAP
 // notifying, and routable, all three by his earlier ruling.
 async function sendOwnerAnswerCard(chat: string, fromName: string, body: string, subjectSid: string): Promise<void> {
   const shown = body.length > OWNER_ANSWER_CAP ? body.slice(0, OWNER_ANSWER_CAP) + '…' : body
-  if (loadAccess().renderMarkdown !== false && hasMarkdownTable(shown)) {
+  // The rich carrier used to be gated on a TABLE, so every answer without one — the overwhelming
+  // majority — fell to the `escapeHtml` line below and reached him as raw markdown. The gate now
+  // mirrors sendAgentText's exactly, which is where the owner's ruling on this trade already lives:
+  // rich renders a fenced code block worse than the classic <pre> does (no copy button, wrapping
+  // instead of contained scroll), so code routes classic — unless a TABLE is also present, which
+  // classic cannot render at all. Either way the body is RENDERED; only the renderer differs.
+  const hasFencedCode = /(^|\n)[ \t]{0,3}```/.test(shown)
+  if (loadAccess().renderMarkdown !== false && (!hasFencedCode || hasMarkdownTable(shown))) {
     try {
       const m = await sendRichMessage(TOKEN!, chat, toInputRichMessage(`📨 **From @${fromName}**\n\n${shown}`), {})
       rememberMsgRoute(chat, m?.message_id, subjectSid)
@@ -3865,7 +3872,10 @@ async function sendOwnerAnswerCard(chat: string, fromName: string, body: string,
       process.stderr.write(`daemon: owner answer card rich send failed, falling back to HTML: ${e}\n`)
     }
   }
-  const html = `📨 <b>From @${escapeHtml(fromName)}</b>\n\n${escapeHtml(shown)}`
+  // The ENVELOPE stays bridge-built and escaped; only the BODY is rendered. That split is the whole
+  // anti-impersonation story: an agent's text passes through a renderer that escapes first and emits
+  // a fixed tag whitelist, so it can never produce the header's markup or close it.
+  const html = `📨 <b>From @${escapeHtml(fromName)}</b>\n\n${mdToTelegramHtml(shown)}`
   const ref = await channel.sendText(chat, html).catch(e => {
     process.stderr.write(`daemon: owner answer card from @${fromName} failed: ${e}\n`); return null
   })
@@ -3895,8 +3905,20 @@ async function notifyLanesOfPost(fromSid: string | null, fromName: string, body:
 // as their subject (bridge UI: the pin card, settings, readouts) pass nothing and stay unroutable.
 async function sendBusCard(chat: string, thread: number | undefined, header: string, body: string, subjectSid?: string | null): Promise<void> {
   const shown = body.length > ASK_QUOTE_CAP ? body.slice(0, ASK_QUOTE_CAP) + '…' : body
-  const richHtml = `<details><summary>${header}</summary>${escapeHtml(shown).replace(/\n/g, '<br>')}</details>`
-  const fallback = `${header}\n<blockquote expandable>${escapeHtml(shown)}</blockquote>`
+  // RENDERED, not escaped. `escapeHtml` alone put the agent's raw markdown on his phone — literal
+  // `**bold**`, and a code span's backticks sitting hard against the next letter, which reads as an
+  // accent over it (measured: Telegram stores plain U+0060, so this was never an entity bug — see
+  // sendOwnerAnswerCard). mdToTelegramHtml is the same renderer the lane's own replies use.
+  //
+  // THE SANITIZATION IS UNCHANGED, and by construction rather than by care: mdToTelegramHtml escapes
+  // its input FIRST and then emits only its own tag whitelist, so an agent's text still cannot
+  // introduce markup — in particular it cannot emit `</details>` or `</blockquote>` and break the
+  // envelope. What it CAN now do is render bold, which is the point of the change.
+  const rendered = mdToTelegramHtml(shown)
+  const richHtml = `<details><summary>${header}</summary>${richHtmlBreaks(rendered)}</details>`
+  // `<pre>` nested inside an expandable blockquote is accepted by the classic parser (verified live
+  // against the API, 2026-08-10) — so the degraded path renders too, rather than falling back to raw.
+  const fallback = `${header}\n<blockquote expandable>${rendered}</blockquote>`
   try {
     const m = await sendRichMessage(TOKEN!, chat, { html: richHtml }, { messageThreadId: thread, disableNotification: true })
     rememberMsgRoute(chat, m?.message_id, subjectSid)
@@ -8680,13 +8702,17 @@ async function launchSpawn(spec: SpawnSpec, model: string | null, clampedNote: s
       if (!group || threadId == null) return
       const shown = firstMsg.length > ASK_QUOTE_CAP ? firstMsg.slice(0, ASK_QUOTE_CAP) + '…' : firstMsg
       const header = `<b>@${escapeHtml(fromName)}</b> messaged <b>@${escapeHtml(topicName)}</b>`
+      // The SECOND chevron-card builder, and the reason the fix was enumerated rather than applied
+      // where the symptom was reported: this one is hand-rolled beside sendBusCard, so a render fix
+      // made only there would leave every spawn's first message reaching him as raw markdown.
+      const rendered = mdToTelegramHtml(shown)
       try {
-        await sendRichMessage(TOKEN!, group, { html: `<details><summary>${header}</summary>${escapeHtml(shown).replace(/\n/g, '<br>')}</details>` }, { messageThreadId: threadId, disableNotification: true })
+        await sendRichMessage(TOKEN!, group, { html: `<details><summary>${header}</summary>${richHtmlBreaks(rendered)}</details>` }, { messageThreadId: threadId, disableNotification: true })
       } catch (e) {
         // Same split as sendAgentText's fallback: a refusal means the card never landed, an unknown
         // outcome means this mirror may already be in the topic.
         if (!telegramRefused(e)) { process.stderr.write(`daemon: spawn task mirror for @${topicName} has an UNKNOWN outcome, NOT re-sending it as HTML: ${e}\n`); return }
-        void channel.sendText(group, `${header}\n<blockquote expandable>${escapeHtml(shown)}</blockquote>`, { silent: true, threadId: String(threadId) }).catch(() => {})
+        void channel.sendText(group, `${header}\n<blockquote expandable>${rendered}</blockquote>`, { silent: true, threadId: String(threadId) }).catch(() => {})
       }
      } finally { busInFlight.delete(p.id) }
     })()
