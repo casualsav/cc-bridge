@@ -47,7 +47,10 @@ import { modelSwitchEvidence, findSessionFile, resolveTranscript, resolveAgentTr
 // keys on (isApiErrorMessage/apiErrorStatus) are a Claude Code transcript shape with no Codex
 // equivalent, so — like several other CC-only readers in that dispatcher — a Codex rollout simply
 // never matches and this reads null for it, rather than needing a codex-transcript.ts counterpart.
-import { lastTurnApiError } from './transcript.ts'
+// `turnAnchorIsBus` joins it for a simpler reason than the shape argument above: its only caller is
+// the Stop hook, and a Stop hook is a Claude Code feature — a Codex pane runs none, so there is no
+// rollout for a dispatcher to read.
+import { lastTurnApiError, turnAnchorIsBus } from './transcript.ts'
 import {
   AGENT_PANE_OPT, agentExitKeys, agentInterruptKeys, agentLabel, agentResetCommand, agentSubmitKeys,
   CODEX_ENABLED, codexLaunchCommand, normalizeAgent, shellQuote, type AgentKind,
@@ -68,7 +71,7 @@ import { PROVIDER_CATALOG, applyProviderDefaultSelection, projectProviderAccount
 import { findSessionHarness, recordSessionHarness } from './session-harness.ts'
 import {
   initAccounts, listAccounts, accountByName, accountForTranscript, accountForProjectsDir,
-  allProjectsDirs, resolvePaneAccount, addAccount, removeAccount, renameAccount, accountLoggedIn, healAccountConfigs, healMainStatusline,
+  allProjectsDirs, resolvePaneAccount, addAccount, removeAccount, renameAccount, accountLoggedIn, healAccountConfigs, healMainStatusline, healStopHook,
   ACCOUNT_PANE_OPT, MAIN_ACCOUNT, readDefaultMode, writeDefaultMode, projectsDirOf, type Account,
 } from './accounts.ts'
 import { exec, sleep, hashText } from './proc.ts'
@@ -161,7 +164,7 @@ import {
   createPending, getPending, removePending, putPending, listPending, markInjected, markPasted, markBoxBlocked, boxBlockedFor, expirePending, dropExpired, LATE_ANSWER_GRACE_MS, ASK_TTL_MS,
   setLiveAskIdProbe,
   recordAgentAsk, resetHops, currentHops, BREADTH_NOTICE_AT, askResultText, planAskReap, deliveredReapCandidates, groupClosuresByAskerAndTarget, reapNotifiesAsker, queuedFor, type AskDelivery,
-  askerAlreadyResolved, askerKilledTarget, markAskerResolved, reapNoticeSuppressed, planAssigneeNudge, markNudged,
+  askerAlreadyResolved, askerKilledTarget, markAskerResolved, reapNoticeSuppressed, planAssigneeNudge, markNudged, owesAnswer,
   answerRouteFor,
   unreportedWorkMarker, markReported, markBriefed,
   getReportedAt, getBriefedBy,
@@ -171,7 +174,7 @@ import {
   systemAskLabel, ackWakesNow, laneAwaitsSender,
   type BusEndpoint, type BusPending, type LedgerEntry,
 } from './agent-bus.ts'
-import { formatAskBlock, formatAnswerBlock, formatAsideBlock, formatDigestBlock, formatNudgeBlock, formatRosterLine, closureNoticeText, busSentHeader, busGotHeader, type BusVerb, type RosterAgent } from './agent-bus-block.ts'
+import { formatAskBlock, formatAnswerBlock, formatAsideBlock, formatDigestBlock, formatNudgeBlock, formatStopReason, formatRosterLine, closureNoticeText, busSentHeader, busGotHeader, type BusVerb, type RosterAgent } from './agent-bus-block.ts'
 import {
   readProcTable, childWaitLabel, childWaitShells, survivorWarning, conversationStart, openOutboundAsk, sessionState,
   setWaitsFile, setWait, clearWait, readWait,
@@ -428,6 +431,7 @@ initAccess({ getBotUsername: () => botUsername })
 initAccounts(STATE_DIR)
 setWaitsFile(join(STATE_DIR, 'waits.json'))   // `tg wait` declarations; security-free, so neither access.json nor prefs.json
 healMainStatusline()   // ensure THIS HOME's statusline (script + block) from the cache — fixes a fresh/hermes HOME + refreshes a stale script
+healStopHook()         // the Stop hook that answers an open ask inside the turn — installs on boxes that predate it
 healAccountConfigs()   // accounts registered before main settings.json had hooks get them now
 
 // ---- Typing presence ----
@@ -2211,7 +2215,7 @@ const ANSWER_GRACE_MS = 20_000         // a `tg answer` sent in the same turn la
 async function checkConcludedTurnObligations(pane: string): Promise<void> {
   const sid = await sessionForPane(pane).catch(() => null)
   if (!sid) return
-  const open = listPending().filter(p => p.toSid === sid && p.injected && !p.expiredAt && p.nudgedAt == null)
+  const open = listPending().filter(p => owesAnswer(p, sid))
   if (!open.length) return
   // The grace exists so a correct answer NEVER raises a false alarm — the negative case is the one
   // that decides whether this is shippable at all. Re-read the pending list after it: `tg answer`
@@ -2264,6 +2268,17 @@ async function paneTurnIsBusAnchored(pane: string | null): Promise<boolean> {
   if (!file) return false
   const last = finalRepliesAfter(file, '').slice(-1)[0]
   return last?.busAnchored === true
+}
+// The same question at a different MOMENT: the stop hook asks while the turn is still ending, so it
+// reads the turn's ANCHOR instead of its last concluded reply (see transcript.ts's turnAnchorIsBus —
+// asking the reply is what made the hook a no-op on its first live run). Fails false, which fails
+// open: an unreadable transcript lets the turn end and leaves the 20s nudge to catch it.
+async function paneTurnAnchorIsBus(pane: string | null): Promise<boolean> {
+  if (!pane) return false
+  const cwd = await paneCwd(pane).catch(() => null)
+  const file = await transcriptForPane(pane, cwd).catch(() => null)
+  if (!file) return false
+  try { return turnAnchorIsBus(file) } catch { return false }
 }
 // NOTHING IS FILTERED HERE, BY RULING (the owner, 2026-08-09). v0.5.33 dropped every bus-anchored
 // final text block a CHAT LANE produced, on the reasoning that such a turn had already delivered its
@@ -6969,6 +6984,50 @@ async function handleCall(
         const status = await deliverAnswerToAsker(p, answerer, String(args.text ?? '').trim(), refs)
         if (status.startsWith('!')) { write({ t: 'result', id, ok: false, text: status.slice(1) }); return }
         text = status
+        break
+      }
+      // The `Stop` hook asking, at the moment a session's turn is ending, whether that session still
+      // owes an answer (hook-stop.ts). An empty result means "let the turn end" — the ONLY other
+      // result is the reason to refuse it with, which the hook hands back to the model inside the
+      // turn that is still running. Nothing is typed into a pane from here.
+      //
+      // It is the same repair `checkConcludedTurnObligations` performs 20s later, moved to the one
+      // moment where it costs neither a turn nor the wait: same rows (`owesAnswer`), same verdict
+      // (`planAssigneeNudge`), same once-per-ask budget (`markNudged`) — so whichever path speaks
+      // first, the other stays silent, and neither can loop.
+      //
+      // ANCHOR-GATED, exactly as the post-turn nudge is. A turn the OWNER started must be allowed to
+      // end even while some unrelated ask sits open; refusing it there would derail his turn into
+      // answering someone else's question. `paneTurnIsBusAnchored` fails false, which fails open.
+      //
+      // NOT in AGENT_BUS_VERBS: with the bus off there are no pending rows, so this answers empty on
+      // its own — and a hook that started erroring the day the bus was switched off would be a
+      // puzzle nobody would connect back to it.
+      case 'stop-hook': {
+        text = ''
+        const pane = args.pane ? String(args.pane) : null
+        const sid = pane ? await sessionForPane(pane).catch(() => null) : null
+        if (!sid) break
+        const open = listPending().filter(p => owesAnswer(p, sid))
+        if (!open.length) break
+        // From here on the call is LOGGED whatever it decides. A hook that declines is invisible by
+        // construction (its whole output is silence), so without this the difference between "the
+        // hook never ran" and "the hook ran and stood aside" is unanswerable from the box — which is
+        // exactly where the first live run of it left us. Gated on open rows, so the quiet case (every
+        // turn of every session that owes nothing) still logs nothing.
+        if (!await paneTurnAnchorIsBus(pane)) {
+          process.stderr.write(`daemon: stop hook stood aside for @${nameForEndpoint(sid, busEndpoints())} — ${open.length} ask(s) open but this turn is not bus-anchored\n`)
+          break
+        }
+        const ledger = tailLedger(busLedgerRoom(), 400)
+        const toNudge = open.filter(p => planAssigneeNudge(p, ledger) === 'nudge')
+        if (!toNudge.length) {
+          process.stderr.write(`daemon: stop hook stood aside for @${nameForEndpoint(sid, busEndpoints())} — ${open.length} ask(s) open, none earning a nudge\n`)
+          break
+        }
+        for (const p of toNudge) markNudged(p.id, Date.now())
+        for (const p of toNudge) process.stderr.write(`daemon: ask ${p.id} to @${p.toName} unanswered at the turn's end — stop hook refused it (answer owed)\n`)
+        text = formatStopReason(toNudge.map(p => ({ id: p.id, fromName: p.fromName })))
         break
       }
       // `tg wait "CI run 18832"` — the session says what it is blocked on, so the roster stops

@@ -178,6 +178,32 @@ export function healMainStatusline(cacheScript: string = join(import.meta.dir, '
   }
 }
 
+// The `Stop` hook row (hook-stop.ts) — added at daemon startup for THIS config dir, because setup.ts
+// only writes it at install time and every box that installed before this feature existed would
+// otherwise run a version whose whole point never fires. Same shape and same restraint as
+// healMainStatusline: added only when ABSENT (matched on the script name, so a user who rewrote the
+// command keeps it), never clobbering, and hot-reloaded by Claude Code onto running sessions.
+//
+// The command is a GLOB over the cache rather than this module's own absolute path, and that is not a
+// detail: an absolute path pins the row to the version that wrote it, so the next deploy would leave
+// every session running a hook out of a pruned directory. The glob is byte-identical to setup.ts's,
+// which is what keeps the two writers from fighting over the row.
+const STOP_HOOK_CMD =
+  'bun "$(ls -d ~/.claude/plugins/cache/cc-bridge/telegram/*/ 2>/dev/null | sort -V | tail -1)hook-stop.ts" 2>/dev/null || true'
+export function healStopHook(configDir: string = MAIN_CONFIG_DIR): void {
+  const dest = join(configDir, 'settings.json')
+  let cur: Record<string, unknown> = {}
+  try { cur = JSON.parse(readFileSync(dest, 'utf8')) } catch { return }   // no settings.json yet → setup.ts's job
+  const hooks = (cur.hooks ??= {}) as Record<string, unknown[]>
+  const stop = (hooks.Stop ??= []) as unknown[]
+  if (JSON.stringify(stop).includes('hook-stop.ts')) return
+  stop.push({ hooks: [{ type: 'command', command: STOP_HOOK_CMD }] })
+  try {
+    writeFileSync(dest, JSON.stringify(cur, null, 2) + '\n', { mode: 0o600 })
+    process.stderr.write(`accounts: added the Stop hook (hook-stop.ts) to ${dest}\n`)
+  } catch (e) { process.stderr.write(`accounts: Stop hook heal failed (${dest}): ${e}\n`) }
+}
+
 // Whether an account has completed /login (credentials present in its config dir).
 export function accountLoggedIn(a: Account): boolean {
   return existsSync(join(a.configDir, '.credentials.json'))

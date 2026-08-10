@@ -907,6 +907,23 @@ export function conversationItemFullText(file: string, uuid: string): string | n
 // The uuid of the entry anchoring the current turn (the last REAL user prompt). The mirror card
 // persists this as the open card's turn identity, so a daemon restart can tell "same turn —
 // resume editing the existing card" from "new turn — cap the orphan and open fresh".
+// Was the turn that is ending RIGHT NOW started by the bus? Read off the ANCHOR — the last real user
+// message — rather than off the last final reply, which is the same question asked of a different
+// row and the wrong one at this moment.
+//
+// The distinction is not academic; it is what made the Stop hook a no-op on its first live run
+// (2026-08-10, @stophook4: "1 ask open but this turn is not bus-anchored"). `finalRepliesAfter` needs
+// a concluded reply to classify, and a Stop hook runs while the turn is still ending — on a session's
+// FIRST turn there is no earlier reply either, so the answer was false for exactly the case the hook
+// exists to catch. The anchor is written when the turn STARTS, so it is always there to read.
+export function turnAnchorIsBus(file: string): boolean {
+  const entries = readEntries(file)
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (isRealUserText(entries[i]!)) return isBusAnchored(textOf(entries[i]!.message?.content))
+  }
+  return false
+}
+
 export function turnAnchorUuid(file: string): string | null {
   const entries = readEntries(file)
   for (let i = entries.length - 1; i >= 0; i--) {

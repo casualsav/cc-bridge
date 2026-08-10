@@ -2,7 +2,7 @@ import { test, expect } from 'bun:test'
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { isBusAnchored, finalRepliesAfter, latestFinalReply, recentConversation } from './transcript.ts'
+import { isBusAnchored, finalRepliesAfter, latestFinalReply, recentConversation, turnAnchorIsBus } from './transcript.ts'
 
 // WHO STARTED THE TURN decides whether its reply pings the owner's phone. The bus mirror cards were
 // already silent; the reply RELAY never was, which is where the noise actually came from.
@@ -65,6 +65,38 @@ test('finalRepliesAfter: a reply replayed from a cursor keeps its own anchor', (
   // pinged for a bus conversation, which is the exact noise this exists to stop.
   const replies = finalRepliesAfter(fixture(), 'a1')
   expect(replies.map(r => r.busAnchored)).toEqual([true, false])
+})
+
+// ---- THE SAME QUESTION, ASKED WHILE THE TURN IS STILL ENDING -----------------------------------
+//
+// The Stop hook runs before a reply is a concluded reply, so it reads the turn's ANCHOR. The
+// regression it was born from: a session's FIRST turn has no earlier reply at all, so asking
+// `finalRepliesAfter` returned false for exactly the case the hook exists to catch — a fresh spawn
+// that ended its founding turn without answering (@stophook4, 2026-08-10).
+test('turnAnchorIsBus: read from the anchor, a first turn classifies before any reply exists', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'anchor-first-'))
+  const bus = join(dir, 'bus.jsonl')
+  writeFileSync(bus, JSON.stringify(
+    { type: 'user', uuid: 'u1', timestamp: '2026-08-10T00:00:00Z', message: { role: 'user', content: '<tg @cc-bridge ask=966>say hi</tg>' } }) + '\n')
+  expect(turnAnchorIsBus(bus)).toBe(true)
+  // …and the reply-based reader is blind here, which is the whole reason this function exists.
+  expect(finalRepliesAfter(bus, '').slice(-1)[0]).toBeUndefined()
+
+  const human = join(dir, 'human.jsonl')
+  writeFileSync(human, JSON.stringify(
+    { type: 'user', uuid: 'u1', timestamp: '2026-08-10T00:00:00Z', message: { role: 'user', content: '<tg 42>did the deploy land?</tg>' } }) + '\n')
+  expect(turnAnchorIsBus(human)).toBe(false)
+})
+
+test('turnAnchorIsBus: the LATEST anchor wins, and an unreadable/empty file is human', () => {
+  // The fixture's last real user message is human, even though a bus turn sits earlier in it — a
+  // worker mid-session whose owner then typed at it must be allowed to end its turn.
+  expect(turnAnchorIsBus(fixture())).toBe(false)
+  const dir = mkdtempSync(join(tmpdir(), 'anchor-empty-'))
+  const empty = join(dir, 'e.jsonl')
+  writeFileSync(empty, '')
+  expect(turnAnchorIsBus(empty)).toBe(false)        // nothing to read → fails open (no block)
+  expect(turnAnchorIsBus(join(dir, 'missing.jsonl'))).toBe(false)
 })
 
 // ---- Claude Code's thinking-only nudge --------------------------------------------------------

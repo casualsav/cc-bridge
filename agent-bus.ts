@@ -707,6 +707,13 @@ export function assigneeSpokeToAsker(p: BusPending, entries: LedgerEntry[]): boo
     && e.from === p.toName && e.to === p.fromName && e.ts >= p.createdAt)
 }
 
+// The rows a session might still owe an answer for, as ONE predicate — two delivery points read it
+// now (the stop hook that refuses a turn's end, and the 20s post-turn nudge that backstops it), and a
+// third would be the one that quietly disagreed about what "still open" means. `nudgedAt == null` is
+// the shared budget: whichever path speaks first spends it, so nothing is ever said twice.
+export const owesAnswer = (p: BusPending, sid: string): boolean =>
+  p.toSid === sid && p.injected && !p.expiredAt && p.nudgedAt == null
+
 export type NudgeVerdict = 'nudge' | 'already-nudged' | 'assignee-reported'
 
 // Whether this concluded turn's still-open ask earns a nudge, and if not, which reason — the daemon

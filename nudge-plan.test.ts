@@ -6,7 +6,7 @@
 // session's life, which the daemon log and ledger.jsonl agree on. Five carried information, three did
 // not, and this file is the rule that tells them apart.
 import { test, expect } from 'bun:test'
-import { planAssigneeNudge, assigneeSpokeToAsker, loadBus, setBusStateDir, _resetForTest, type BusPending, type LedgerEntry } from './agent-bus.ts'
+import { planAssigneeNudge, assigneeSpokeToAsker, owesAnswer, loadBus, setBusStateDir, _resetForTest, type BusPending, type LedgerEntry } from './agent-bus.ts'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -111,6 +111,21 @@ test('the @weather audit: 5 nudges survive, 3 are silenced', () => {
   expect(verdicts).toEqual([
     'nudge', 'nudge', 'nudge', 'nudge', 'assignee-reported', 'nudge', 'assignee-reported', 'assignee-reported',
   ])
+})
+
+// ---- WHICH ROWS EITHER PATH LOOKS AT ----
+//
+// Two deliverers now read this: the Stop hook that refuses a turn's end (daemon's `stop-hook` verb,
+// answering hook-stop.ts) and the 20s post-turn nudge that backstops it. They must agree on what
+// "still open" means, or one of them speaks about a row the other has finished with.
+test('owesAnswer: this session, delivered, not expired, not already spoken about', () => {
+  const p = ask()
+  expect(owesAnswer(p, 'sidWeather')).toBe(true)
+  expect(owesAnswer(p, 'sidChat')).toBe(false)                        // the ASKER owes nothing
+  expect(owesAnswer({ ...p, injected: false }, 'sidWeather')).toBe(false)   // still queued — never delivered
+  expect(owesAnswer({ ...p, expiredAt: T('02:47:35') }, 'sidWeather')).toBe(false)
+  // The shared budget: whichever path spent it, the other stays silent.
+  expect(owesAnswer({ ...p, nudgedAt: T('01:49:31') }, 'sidWeather')).toBe(false)
 })
 
 // ---- the persisted half ----

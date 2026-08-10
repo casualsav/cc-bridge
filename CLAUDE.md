@@ -354,6 +354,23 @@ after a grace so a same-turn answer is never raced. **Nothing goes to the asker*
 expiry notice is the backstop); the nudge costs a turn, so it fires once and never at a session
 already working; scope is bus-asks-only by construction, from the anchor test that gates the call.
 
+**The `Stop` hook says the same thing 23 seconds earlier and for free, and the two share ONE budget.**
+`hook-stop.ts` runs as a Claude Code Stop hook, asks the daemon (`stop-hook` verb) whether this
+session still owes an answer, and refuses the turn's end with the reason — so the model sends it
+inside the turn that is already running instead of being woken into a new one. Measured on a live
+spawn 2026-08-10: reason delivered 0.2s after the turn tried to end, against 22.9s and a whole extra
+turn for the nudge. It is the same rows (`owesAnswer`), the same verdict (`planAssigneeNudge`) and the
+same once-per-ask stamp (`markNudged`) — which is also the loop guard, and it is OURS rather than the
+CLI's: block once per ask, never once per stop. **The 20s nudge is the backstop and must not be
+deleted** — it covers every session the hook cannot reach (another box, a Codex pane, a settings.json
+without the row, a hook that failed). **The gate reads the turn's ANCHOR, not its last reply**
+(`turnAnchorIsBus`): `finalRepliesAfter` needs a concluded reply and a Stop hook runs while the turn
+is still ending, so on a session's FIRST turn it answered false for exactly the case the hook exists
+to catch — the hook shipped as a silent no-op and only the "stood aside" log line said so. Everything
+about it fails OPEN: no pane, no daemon, a slow socket, an unreadable transcript → the turn ends. The
+row is installed by `setup.ts` at install time and by `healStopHook` at daemon startup for boxes that
+predate it.
+
 **`tg btw` is the ASIDE — the one bus message that lands MID-TURN** (every other verb waits for a
 prompt, so a redirect otherwise arrives after the turn it meant to redirect). Its invariants, each
 the thing most likely to be "fixed" back:

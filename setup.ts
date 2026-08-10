@@ -800,6 +800,14 @@ function patchSettings(mode: Mode): void {
   if (!JSON.stringify(promptSubmit).includes('stamp-transcript.ts')) {
     promptSubmit.push({ hooks: [{ type: 'command', command: `bun "${cacheGlob}stamp-transcript.ts" >/dev/null 2>&1 || true` }] })
   }
+  // A third hook, and the one that is NOT silenced: hook-stop refuses a turn's end while the bus
+  // still holds an ask that session owes an answer for, and its refusal IS its stdout — redirect that
+  // and the hook becomes a no-op that looks installed (see hook-stop.ts). stderr is dropped and the
+  // command can never fail, because this runs at the end of every turn of every session on the box.
+  const stop = (s.hooks.Stop ||= [])
+  if (!JSON.stringify(stop).includes('hook-stop.ts')) {
+    stop.push({ hooks: [{ type: 'command', command: `bun "${cacheGlob}hook-stop.ts" 2>/dev/null || true` }] })
+  }
   writeFileSync(SETTINGS, JSON.stringify(s, null, 2) + '\n')
   console.log(C.ok('  ✓ settings.json (marketplace + plugin + SessionStart hooks + statusline)'))
 

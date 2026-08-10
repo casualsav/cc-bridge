@@ -160,6 +160,23 @@ export function formatNudgeBlock(items: { id: number; fromName: string; text: st
     + lines.join('\n') + '\n</tg>'
 }
 
+// The SAME obligation, said at the moment the turn tries to END rather than 20s after it — the
+// daemon's `stop-hook` verb, answering the Stop hook a session runs on its way out.
+//
+// Deliberately NOT formatNudgeBlock. That string is wrapped in a `<tg @system …>` envelope because it
+// is injected into the pane as a user message, and the envelope is what classifies the turn it starts;
+// a stop hook's `reason` starts no turn — it is guidance handed back inside the one still running. So:
+// the same facts, no envelope, and phrased as the thing to do next rather than as news.
+export function formatStopReason(items: { id: number; fromName: string }[]): string {
+  const how = (id: string) => `Send it before this turn ends: tg answer ${id} "<summary>"`
+  if (items.length === 1) {
+    const p = items[0]!
+    return `Ask ${p.id} from @${deTag(p.fromName)} is still open — a final text block does not reach the asker. ${how(String(p.id))}`
+  }
+  const list = items.map(p => `${p.id} from @${deTag(p.fromName)}`).join(' · ')
+  return `${items.length} asks are still open — a final text block does not reach the asker. ${how('<id>')}\n${list}`
+}
+
 // What a session-end tells an asker about the asks it closed. ONE notice per asker per dead session:
 // @weather died holding two asks from one lane on 2026-07-29 and the bus woke that lane twice, which
 // the owner read as two messages about one dead session ("noise I shouldn't have to read"). The
