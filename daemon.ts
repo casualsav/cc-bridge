@@ -166,6 +166,7 @@ import {
   setLiveAskIdProbe,
   recordAgentAsk, resetHops, currentHops, BREADTH_NOTICE_AT, askResultText, planAskReap, deliveredReapCandidates, groupClosuresByAskerAndTarget, reapNotifiesAsker, queuedFor, type AskDelivery,
   askerAlreadyResolved, askerKilledTarget, markAskerResolved, reapNoticeSuppressed, planAssigneeNudge, markNudged, owesAnswer,
+  isOwnerAddress,
   answerRouteFor,
   unreportedWorkMarker, markReported, markBriefed,
   getReportedAt, getBriefedBy,
@@ -6838,6 +6839,18 @@ async function handleCall(
         const aside = name === 'btw'
         const noReply = name === 'ack' ? true as const : undefined
         const verb = aside ? 'btw' : noReply ? 'ack' : 'ask'
+        // `@owner` IS THE HUMAN, and reaching him is `tg post` under a second spelling — one path, the
+        // way `@spawn` is `@launch` (his ruling, 2026-08-10, on a report to him that arrived as a
+        // collapsed "cc-bridge notified @chat" chevron: "replies to me aren't technically @chat,
+        // that's the chat agent, I'm @owner"). Routed by REWRITING the call rather than by a branch
+        // that builds its own card, because a second delivery path is how one of them quietly stops
+        // being expanded, notifying and routable. An ASIDE is refused: it lands mid-turn in a pane,
+        // and he has none.
+        if (isOwnerAddress(String(args.to ?? ''))) {
+          if (aside) { write({ t: 'result', id, ok: false, text: 'an aside lands mid-turn in a session\'s pane, and @owner has none — use `tg ack @owner -` (it reaches him as a card he can reply to)' }); return }
+          await handleCall('post', { pane: args.pane, text: args.text }, write, id)
+          return
+        }
         const room = busLedgerRoom()
         const pane = args.pane ? String(args.pane) : null
         const fromSid = pane ? await sessionForPane(pane) : null
@@ -7527,6 +7540,9 @@ async function handleCall(
         // A dash-leading name is a mistyped flag (`tg spawn --help` really did spawn a "--help"
         // session, folder and all). tgctl rejects it too; this is the daemon-side backstop.
         if (topicName.startsWith('-')) { write({ t: 'result', id, ok: false, text: `'${topicName}' is not a session name (it starts with a dash) — try 'tg spawn --help'` }); return }
+        // @owner is the human's own address. A session wearing it would take every message meant for
+        // him — resolveEndpoint answers names before anything else — so it is refused at the mint.
+        if (isOwnerAddress(topicName)) { write({ t: 'result', id, ok: false, text: `'${topicName}' is reserved — @owner addresses the human, not a session` }); return }
         let providerAccount = String(args.account ?? '').trim()
         let providerRoute = providerAccount ? routeForAccountId(providerAccount, loadHarnessGateways()) : null
         if (providerAccount && !providerRoute) {

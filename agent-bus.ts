@@ -977,6 +977,14 @@ export function normalizeEndpointName(name: string): string {
   return name.trim().replace(/^@/, '').replace(/ · [^·]*$/, '').replace(/ #\d+$/, '').trim().toLowerCase()
 }
 
+// `@owner` is THE HUMAN — the one address on this bus with no session behind it, and therefore no
+// pane, no id, no depth and no pending row. It is a RESERVED NAME: `resolveEndpoint` would otherwise
+// hand a session that happened to be called "owner" every message meant for him, so a spawn may not
+// take it. Reaching him is `tg post` under this spelling (daemon's ask/ack case rewrites the call),
+// which is what keeps his card expanded, notifying and routable with no second delivery path.
+export const OWNER_ADDRESS = 'owner'
+export const isOwnerAddress = (name: string): boolean => normalizeEndpointName(name) === OWNER_ADDRESS
+
 // Resolve `@name` to a single OPEN endpoint of EITHER kind, or an error the caller relays back to the
 // asker (fail loudly — never silently drop). Ambiguity — two open endpoints share a base name,
 // INCLUDING across kinds (a topic "mimo" and a hermes "mimo") — is an explicit error, not a pick.

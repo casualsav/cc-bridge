@@ -9,7 +9,7 @@
 import { test, expect } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { answerRouteFor } from './agent-bus.ts'
+import { answerRouteFor, isOwnerAddress } from './agent-bus.ts'
 
 const SYS = '@system'
 const row = (o: Partial<{ fromSid: string; ownerDirect: true }> = {}) => ({ fromSid: 'sid-lane', ...o })
@@ -150,4 +150,39 @@ test("the answer card is routable — replying to it continues the thread with t
   const card = daemon.slice(daemon.indexOf('async function sendOwnerAnswerCard('), daemon.indexOf('// The chat lane\'s copy of a worker\'s post'))
   expect(card).toContain('rememberMsgRoute')
   expect(daemon).toContain('await sendOwnerAnswerCard(ownerChat!, answerer, shown, cur.toSid)')
+})
+
+// ---- @owner: the human's own address ------------------------------------------------------------
+//
+// The owner, 2026-08-10, on a report that reached him as a collapsed "cc-bridge notified @chat"
+// chevron: "replies to me aren't technically @chat, that's the chat agent, I'm @owner". So `@owner`
+// is an address, and it is `tg post` under a second spelling — the card he already gets from a post:
+// expanded, notifying, routable.
+test('@owner is recognised whatever the sigil or case, and nothing else is', () => {
+  expect(isOwnerAddress('owner')).toBe(true)
+  expect(isOwnerAddress('@owner')).toBe(true)
+  expect(isOwnerAddress('  @Owner  ')).toBe(true)
+  expect(isOwnerAddress('chat')).toBe(false)
+  expect(isOwnerAddress('owners')).toBe(false)
+  expect(isOwnerAddress('')).toBe(false)
+})
+
+// ONE DELIVERY PATH, and this is the assertion that keeps it that way: the ask/ack case REWRITES the
+// call as a post rather than building its own card. A second path is how one of them quietly stops
+// being expanded, notifying or routable — which is the defect being fixed here, not a hypothetical.
+test('an ack/ask to @owner is rewritten as a post, and an aside to him is refused', () => {
+  const busCase = daemon.slice(daemon.indexOf("case 'ask': case 'ack': case 'btw': {"), daemon.indexOf("case 'answer': {"))
+  expect(busCase).toContain('isOwnerAddress(String(args.to ?? \'\'))')
+  expect(busCase).toContain("await handleCall('post', { pane: args.pane, text: args.text }, write, id)")
+  // The refusal comes FIRST, inside the same branch: an aside lands mid-turn in a pane and he has none.
+  const branch = busCase.slice(busCase.indexOf('isOwnerAddress'))
+  expect(branch.indexOf('if (aside)')).toBeLessThan(branch.indexOf("handleCall('post'"))
+})
+
+// A session called "owner" would take every message meant for him — resolveEndpoint answers names
+// before anything else — so the mint refuses the name rather than the delivery discovering it later.
+test('a session may not be named owner', () => {
+  const spawnCase = daemon.slice(daemon.indexOf("case 'spawn': {"), daemon.indexOf("case 'kill': {"))
+  expect(spawnCase).toContain('isOwnerAddress(topicName)')
+  expect(spawnCase).toContain('is reserved — @owner addresses the human')
 })

@@ -127,6 +127,13 @@ by its topic name.
   holding unanswered beyond the one it is on, so a bottleneck is visible BEFORE you add to it (the
   same number rides every `tg ask` reply). · tg post - — say something to the humans (stdin). ·
   tg history — recent bus events.
+- **`@owner` IS THE HUMAN — the one address with no session behind it.** `tg ack @owner -` (or
+  `tg ask @owner -`) is `tg post` under a second spelling: it reaches him as an expanded, notifying
+  card he can reply to, never a collapsed chevron. Use it for anything meant for a person — a report
+  he asked for, a blocking question — and address the CHAT LANE (`@chat`, or whatever it is called
+  here) only when you mean the orchestrating agent, which is a different reader with a different
+  job. His ruling, 2026-08-10: "replies to me aren't technically @chat, that's the chat agent, I'm
+  @owner". `tg btw @owner` is refused — an aside lands mid-turn in a pane, and he has none.
 - `tg <verb> --help` prints that verb's usage without doing anything.
 
 **Need a throwaway session to test bus behaviour?** `tg spawn` IS the sanctioned way — there is no

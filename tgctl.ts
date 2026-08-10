@@ -94,7 +94,9 @@ const HELP: Record<string, string> = {
            '  take it right now this FAILS back to you immediately rather than queueing — late steering is worse\n' +
            '  than none, so the decision to wait, escalate to `tg ask`, or tell a human stays yours.',
   answer:  'tg answer <id> <text|-> [--ref path]…   answer an ask you received (id from its <tg …ask=ID> block)',
-  post:    'tg post <text|->   say something to the humans in the room',
+  post:    'tg post <text|->   say something to the humans in the room. `tg ack @owner -` is the same\n' +
+           '  thing addressed: @owner IS the human, and it reaches him as a card he can reply to. The chat\n' +
+           '  lane (@chat) is an AGENT — address it when you mean the orchestrator, not the person.',
   slash:   'tg slash <name> "/compact" [--at-next-prompt]   run a slash command in another session\'s CLI\n' +
            '  (rejected mid-turn; /exit is owner-only). --at-next-prompt holds it instead and runs it the moment\n' +
            '  that session is free, ahead of anything queued for it — one notice comes back either way, so you\n' +
