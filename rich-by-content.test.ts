@@ -56,7 +56,7 @@ test('the owner-answer card consults the content before choosing classic HTML', 
   // …and the classic path is still there underneath it. Its ROLE changed on 2026-08-10: it used to
   // take every answer without a table (which reached him as raw markdown, the defect), and now takes
   // only code-bearing ones — where classic's <pre> beats rich's. Both branches render.
-  expect(fn).toContain('📣 <b>@')
+  expect(fn).toContain('📨 <b>@')
 })
 
 test('a table outranks the code-fence bypass in the relay path', () => {

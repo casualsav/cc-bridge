@@ -3826,7 +3826,7 @@ const REACTIONS = {
 const ASK_QUOTE_CAP = 3500
 // A POST is the one bus surface that is NOT a chevron card and NOT silent — the owner's ruling
 // (2026-07-29), from an incident where a worker's blocking question landed in his DM collapsed behind a
-// chevron and he simply missed it. So: expanded by default, no disclosure to open, the same gold 📣 and
+// chevron and he simply missed it. So: expanded by default, no disclosure to open, the same 📨 and
 // the sending session's name as the header, and a NOTIFYING send (sound/banner per his client). Every
 // other bus card stays collapsed and silent, deliberately — a post is a session reaching for a human,
 // which none of the others are.
@@ -3843,7 +3843,7 @@ const POST_CAP = 3800
 // chevron — so it kept shipping raw markdown after the rest stopped.
 async function sendPost(chat: string, fromName: string, body: string, fromSid?: string | null): Promise<void> {
   const shown = body.length > POST_CAP ? body.slice(0, POST_CAP) + '…' : body
-  const html = `📣 <b>@${escapeHtml(fromName)}</b>\n\n${mdToTelegramHtml(shown)}`
+  const html = `📨 <b>@${escapeHtml(fromName)}</b>\n\n${mdToTelegramHtml(shown)}`
   const ref = await channel.sendText(chat, html).catch(e => {
     process.stderr.write(`daemon: post send failed: ${e}\n`); return null
   })
@@ -3856,13 +3856,14 @@ async function sendPost(chat: string, fromName: string, body: string, fromSid?: 
 // mirrored beside it — is how a reply gets missed. So: expanded, notifying, and headed with the name
 // he addressed. Routable, like every card with a session behind it: replying continues the thread.
 //
-// 📣 IS THE ATTENTION GLYPH, AND IT MEANS ONE THING: A SESSION IS REACHING FOR A HUMAN (his ruling,
+// 📨 IS THE ATTENTION GLYPH, AND IT MEANS ONE THING: A SESSION IS REACHING FOR A HUMAN (his ruling,
 // 2026-08-10). This card carried "📨 From @name" while the horn post carried "📣 @name", which made
 // two members of one class look like two classes — they were already identical in every other
 // property (expanded, no disclosure, notifying, routable, headed with the session's name), so the
-// header was the last thing disagreeing. It is now the SAME header, byte for byte: `📣 @name`. He
+// header was the last thing disagreeing. It is now the SAME header, byte for byte: `📨 @name`. He
 // dropped the "From" himself, and it was carrying nothing — the glyph already says a session is
-// talking and the name already says which.
+// talking and the name already says which; he then picked the envelope over the horn for the pair
+// (2026-08-10), so 📣 is gone from this class entirely.
 //
 // The boundary is what keeps it informative: the collapsed, silent, agent-to-agent chevron cards
 // must NEVER take it, because a glyph that appears on traffic he does not have to read stops meaning
@@ -3887,7 +3888,7 @@ async function sendOwnerAnswerCard(chat: string, fromName: string, body: string,
   const hasFencedCode = /(^|\n)[ \t]{0,3}```/.test(shown)
   if (loadAccess().renderMarkdown !== false && (!hasFencedCode || hasMarkdownTable(shown))) {
     try {
-      const m = await sendRichMessage(TOKEN!, chat, toInputRichMessage(`📣 **@${fromName}**\n\n${shown}`), {})
+      const m = await sendRichMessage(TOKEN!, chat, toInputRichMessage(`📨 **@${fromName}**\n\n${shown}`), {})
       rememberMsgRoute(chat, m?.message_id, subjectSid)
       return
     } catch (e) {
@@ -3901,7 +3902,7 @@ async function sendOwnerAnswerCard(chat: string, fromName: string, body: string,
   // The ENVELOPE stays bridge-built and escaped; only the BODY is rendered. That split is the whole
   // anti-impersonation story: an agent's text passes through a renderer that escapes first and emits
   // a fixed tag whitelist, so it can never produce the header's markup or close it.
-  const html = `📣 <b>@${escapeHtml(fromName)}</b>\n\n${mdToTelegramHtml(shown)}`
+  const html = `📨 <b>@${escapeHtml(fromName)}</b>\n\n${mdToTelegramHtml(shown)}`
   const ref = await channel.sendText(chat, html).catch(e => {
     process.stderr.write(`daemon: owner answer card from @${fromName} failed: ${e}\n`); return null
   })
@@ -7148,7 +7149,7 @@ async function handleCall(
           break
         }
         // agent-bus P3: if this endpoint has a send-only avatar bot, the post goes out under that bot's
-        // own name+picture (no "📣 name:" prefix — the bot IS the identity). Fresh read = hot-reload; the
+        // own name+picture (no "📨 name:" prefix — the bot IS the identity). Fresh read = hot-reload; the
         // whole lookup is guarded so a corrupt/unreadable avatars.json just degrades to the shared bot.
         // Avatars are group members, so with no group bound there's nowhere for them to post: the
         // unbound fan-out below always goes out over the bridge bot.
@@ -7156,7 +7157,7 @@ async function handleCall(
         if (room) { try { avatar = resolveAvatar(fromName, parseAvatars(readJsonFile(AVATARS_FILE, null))) } catch {} }
         // No bound group → the post fans out to every allowlisted chat instead of the room.
         const bridgePost = async (): Promise<void> => {
-          const html = `📣 <b>${escapeHtml(fromName)}</b>: ${escapeHtml(body)}`
+          const html = `📨 <b>${escapeHtml(fromName)}</b>: ${escapeHtml(body)}`
           if (room) { await channel.sendText(String(room), html); return }
           // The no-group fan-out lands in DMs, which is the one surface reply-routing reads — so these
           // copies are recorded too. The `room` branch above is a group and deliberately is not.
@@ -7203,7 +7204,7 @@ async function handleCall(
           // answer, clamped to 100 chars, is how one went unanswered on 2026-07-29 (the owner found the
           // block by eyeballing a pane). Every other kind stays clamped: they are correlation handles
           // whose payload lives in the pane it was delivered to.
-          ? es.map(e => `${e.kind === 'answer' ? '✓' : e.kind === 'ask' ? '→' : e.kind === 'ack' ? 'ℹ️' : e.kind === 'btw' ? '💬' : e.kind === 'post' ? '📣' : e.kind === 'expire' ? '⌛' : e.kind === 'keys' ? '⌨️' : '·'} ${e.from}${e.to ? `→${e.to}` : ''}${e.id ? ` #${e.id}` : ''}: ${e.kind === 'post' ? e.text : e.text.slice(0, 100)}${e.suppressed ? ' (no notice sent)' : ''}`).join('\n')
+          ? es.map(e => `${e.kind === 'answer' ? '✓' : e.kind === 'ask' ? '→' : e.kind === 'ack' ? 'ℹ️' : e.kind === 'btw' ? '💬' : e.kind === 'post' ? '📨' : e.kind === 'expire' ? '⌛' : e.kind === 'keys' ? '⌨️' : '·'} ${e.from}${e.to ? `→${e.to}` : ''}${e.id ? ` #${e.id}` : ''}: ${e.kind === 'post' ? e.text : e.text.slice(0, 100)}${e.suppressed ? ' (no notice sent)' : ''}`).join('\n')
           : '(no bus history yet)'
         break
       }

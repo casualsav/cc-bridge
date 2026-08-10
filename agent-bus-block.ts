@@ -134,7 +134,7 @@ function deliveredText(text: string): string { return deTag(text).trim() }
 export function formatDigestBlock(entries: DigestEntry[], sinceLabel: string): string {
   if (!entries.length) return ''
   const lines = entries.map(e => {
-    const glyph = e.kind === 'answer' ? '✓' : e.kind === 'ask' ? '→' : e.kind === 'ack' ? 'ℹ️' : e.kind === 'btw' ? '💬' : e.kind === 'post' ? '📣' : e.kind === 'expire' ? '⌛' : '·'
+    const glyph = e.kind === 'answer' ? '✓' : e.kind === 'ask' ? '→' : e.kind === 'ack' ? 'ℹ️' : e.kind === 'btw' ? '💬' : e.kind === 'post' ? '📨' : e.kind === 'expire' ? '⌛' : '·'
     // from/to are endpoint names — de-tagged too (not just text): a topic named with a `<` would break
     // the block framing the same way raw text would.
     const who = `${deTag(e.from)}${e.to ? `→${deTag(e.to)}` : ''}${e.id != null ? ` #${e.id}` : ''}`

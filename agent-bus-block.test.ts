@@ -67,7 +67,7 @@ test('formatDigestBlock renders one glyphed line per entry inside a since-labell
   ], '12m')).toBe(
     '<tg bus-digest since 12m>\n' +
     '→ exec→analysis #4: scrape pricing\n' +
-    '📣 mimo: bus is live\n' +
+    '📨 mimo: bus is live\n' +
     '✓ analysis→exec #4: 900 rows\n' +
     '</tg>')
 })

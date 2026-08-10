@@ -385,7 +385,8 @@ still lands somewhere that resolves. The one behaviour that differs is the tail:
 (`agent-bus.ts`) sends the answer to him as a card instead of typing it into the lane, because the lane is
 an agent that would read it, judge it and speak — the round trip the gesture exists to skip. Restore the
 paste and nothing errors; he simply gets his worker's answer secondhand, in his orchestrator's words. The
-card is `📨 From @name`, expanded and notifying for the same reason a post is (he is waiting on it), and
+card is `📨 @name` — the same header a post carries, because both are one class: a session reaching for a
+human. That glyph appears nowhere else on a session's traffic. Expanded and notifying for the same reason a post is (he is waiting on it), and
 routable — replying continues the thread with the session that spoke, never with the lane. **The outbound
 half confirms with a REACTION on his own message and no card** (his ruling: the card echoed his words back
 one message under the message he had just typed) — fired in `tryDeliverAsk`'s landed branch, the only place
