@@ -829,7 +829,7 @@ function conversationItem(e: Entry): ConversationItem | null {
 // storage (the transcript, the bus ledger) and DELIVERY into a session's pane are both untouched
 // by it, and both were measured whole. Anything it does cut is flagged `clipped` so the client can
 // say so rather than trailing off.
-const CONVO_CAP = 4000
+export const CONVO_CAP = 4000
 // An invocation and the output it produced are two separate transcript entries — always, in every
 // shape the CLI writes (censused over 1053 command entries on this box, never combined). Rendered
 // as two rows they read as two unrelated events with a gap between them, so a stdout row that lands

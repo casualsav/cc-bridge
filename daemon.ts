@@ -50,7 +50,8 @@ import { modelSwitchEvidence, findSessionFile, resolveTranscript, resolveAgentTr
 // `turnAnchorIsBus` joins it for a simpler reason than the shape argument above: its only caller is
 // the Stop hook, and a Stop hook is a Claude Code feature — a Codex pane runs none, so there is no
 // rollout for a dispatcher to read.
-import { lastTurnApiError, turnAnchorIsBus } from './transcript.ts'
+import { lastTurnApiError, turnAnchorIsBus, CONVO_CAP } from './transcript.ts'
+import { initOutboundFeed, recordOutbound, outboundFor, outboundText, mergeOutbound } from './outbound-feed.ts'
 import {
   AGENT_PANE_OPT, agentExitKeys, agentInterruptKeys, agentLabel, agentResetCommand, agentSubmitKeys,
   CODEX_ENABLED, codexLaunchCommand, normalizeAgent, shellQuote, type AgentKind,
@@ -430,6 +431,7 @@ let botUsername = ''
 initAccess({ getBotUsername: () => botUsername })
 initAccounts(STATE_DIR)
 setWaitsFile(join(STATE_DIR, 'waits.json'))   // `tg wait` declarations; security-free, so neither access.json nor prefs.json
+initOutboundFeed(STATE_DIR)   // display mirror of what sessions said over the bus (outbound-feed.ts)
 healMainStatusline()   // ensure THIS HOME's statusline (script + block) from the cache — fixes a fresh/hermes HOME + refreshes a stale script
 healStopHook()         // the Stop hook that answers an open ask inside the turn — installs on boxes that predate it
 healAccountConfigs()   // accounts registered before main settings.json had hooks get them now
@@ -6737,6 +6739,11 @@ async function handleCall(
         {
           const senderSid = args.pane ? await sessionForPane(String(args.pane)).catch(() => null) : null
           for (const id of sentIds) rememberMsgRoute(chat_id, id, senderSid)
+          // …and the session's own copy for its mini-app feed, for the same reason a bus answer needs
+          // one: a forced `tg reply` is words in a command argument, invisible to its transcript. The
+          // ordinary relayed reply is NOT recorded here — that one IS a transcript row, and recording
+          // it would print every reply twice.
+          if (senderSid && msgText) recordOutbound({ sid: senderSid, ts: Date.now(), kind: 'chat', text: msgText })
         }
         text = sentIds.length === 1 ? `sent (id: ${sentIds[0]})` : `sent ${sentIds.length} parts (ids: ${sentIds.join(', ')})`
         break
@@ -6912,6 +6919,7 @@ async function handleCall(
           // happened and its NOTICE was withheld.
           if (outcome === 'delivered') {
             appendLedger(room, { ts: Date.now(), kind: 'btw', from: fromName, to: toName, text: askText, refs })
+            recordOutbound({ sid: fromSid, ts: Date.now(), kind: 'btw', to: toName, text: askText })
             // "Informed @X" on the SENDER's surface — the half that was missing. deliverAside has
             // always mirrored the aside on the target's surface, so a session could be steered
             // mid-turn with nothing on the steering side to show for it. Gated on delivery for the
@@ -6937,6 +6945,9 @@ async function handleCall(
         try { p = createPending({ fromSid, toSid: res.id, toKind: res.kind, fromName, toName, text: askText, refs, depth: askDepth, ...(noReply ? { noReply } : {}) }, Date.now()) }
         catch (e) { write({ t: 'result', id, ok: false, text: `${e instanceof Error ? e.message : e} — nothing was sent; answer or close some open asks and retry` }); return }
         appendLedger(room, { ts: Date.now(), kind: verb, from: fromName, to: toName, id: p.id, text: askText, refs })
+        // The sender's own copy for its mini-app feed — the words left through a command argument, so
+        // its transcript holds no trace of them (outbound-feed.ts).
+        recordOutbound({ sid: fromSid, ts: Date.now(), kind: verb === 'ack' ? 'ack' : 'ask', to: toName, text: askText })
         if (res.kind === 'hermes') {
           const cfg = hermesEndpoints.get(res.id)!   // resolved from the same map, so it's present
           // AWAITED as far as the child coming up — same reasoning as the claude branch below: the
@@ -6981,8 +6992,12 @@ async function handleCall(
         }
         // Shared with async hermes-run completion: re-checks/clears the pending, restores on a failed
         // delivery, logs/cards only a real delivery, and flags an answerer≠target mismatch.
-        const status = await deliverAnswerToAsker(p, answerer, String(args.text ?? '').trim(), refs)
+        const answerText = String(args.text ?? '').trim()
+        const status = await deliverAnswerToAsker(p, answerer, answerText, refs)
         if (status.startsWith('!')) { write({ t: 'result', id, ok: false, text: status.slice(1) }); return }
+        // The answering session's own copy, for its mini-app feed. Keyed on the ANSWERER where we
+        // know it (a session may answer an ask addressed to another), falling back to the target.
+        recordOutbound({ sid: answererSid ?? p.toSid, ts: Date.now(), kind: 'answer', to: p.fromName, text: answerText })
         text = status
         break
       }
@@ -7187,6 +7202,7 @@ async function handleCall(
         if (!body) { write({ t: 'result', id, ok: false, text: 'empty post' }); return }
         if (fromSid) markReported(fromSid)   // it spoke on the bus — a post to the humans counts too
         appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'post', from: fromName, text: body })
+        if (fromSid) recordOutbound({ sid: fromSid, ts: Date.now(), kind: 'post', text: body })
         // Posts are for the human(s), and the humans follow the work from their DM chat lanes when
         // those exist — an unthreaded group send lands in the General topic, which the owner doesn't
         // watch (learned the hard way: a shipped-phase announcement went unseen). So: lanes first,
@@ -20104,7 +20120,13 @@ function webappReadUsage(): WebappUsageView | null {
 }
 
 // Drill-in feed: recent conversation (user + assistant), plus the running turn's thoughts + activity.
-const THOUGHT_MAX = 400   // one narration block in the feed; long enough to read, short enough not to bury the tools
+// One narration paragraph in the feed. 400 was "long enough to read, short enough not to bury the
+// tools"; raised to 1200 on the owner's ask for more of a turn's reasoning (2026-08-10), which is a
+// different trade than the one 400 answered — a paragraph cut mid-sentence is the tool line winning
+// an argument nobody had. It is the only knob on this that exists: the CLI persists its `thinking`
+// blocks EMPTY (308 of them across every session that ran on this box in 24h, 0 characters), so a
+// turn's actual reasoning is not in the transcript to show at any cap.
+const THOUGHT_MAX = 1200
 // Chips kept in the drill-in's turn item — the NEWEST ones (capChips; the oldest fall off as work
 // arrives). 30, not the card's 10: this window used to be justified by matching MIRROR_THOUGHTS,
 // but the constraint that number answers is Telegram's message size, which this surface does not
@@ -20127,6 +20149,11 @@ async function webappSessionSource(sid: string): Promise<{ row: { sid: string; n
 // Full text of one feed row, for expanding a clipped bubble. Reads the transcript directly — the
 // payload clamp is a poll-cost measure, never a limit on what may be read.
 async function webappSessionMessage(sid: string, uuid: string): Promise<string | null> {
+  // An `ob:` uuid is a bus row, which lives in the outbound mirror rather than the transcript — and
+  // it is checked FIRST because it needs no pane: the expansion must keep working for a session that
+  // has since been closed.
+  const ob = outboundText(sid, uuid)
+  if (ob != null) return ob
   const src = await webappSessionSource(sid)
   return src?.file ? conversationItemFullText(src.file, uuid) : null
 }
@@ -20181,14 +20208,18 @@ async function webappSessionFeed(sid: string): Promise<WebappSessionFeed | null>
   // idle for as long as the delegated work runs. The sessions list was fixed for that; this header
   // was not, so one screen showed the dot pulsing while the other showed the session stopped.
   const working = turnInProgress(file) || liveSubagents(file) > 0
-  const items: WebappSessionFeed['items'] = recentConversation(file, 14).map(c => ({
+  // WHAT THE SESSION SAID OVER THE BUS, folded in by timestamp. Those words left through a command
+  // argument (`tg answer 964 "…"`), so the transcript holds nothing but the session's own "Answered."
+  // — which is what the owner's drill-in showed him for a 3,000-word explanation on 2026-08-10. The
+  // rule he set: the mini app shows everything a session says, wherever it was addressed.
+  const items: WebappSessionFeed['items'] = mergeOutbound(recentConversation(file, 14).map(c => ({
     role: c.role, text: c.text, ts: c.ts,
     ...(c.img ? { img: c.img } : {}), ...(c.imgs ? { imgs: c.imgs } : {}), ...(c.att ? { att: c.att } : {}), ...(c.cmd ? { cmd: true } : {}),
     ...(c.name ? { name: c.name } : {}), ...(c.args ? { args: c.args } : {}),
     ...(c.agent ? { agent: c.agent } : {}), ...(c.status ? { status: c.status } : {}),
     // uuid only where it's needed: it exists so a clipped row can be re-fetched in full.
     ...(c.clipped ? { clipped: true, ...(c.uuid ? { uuid: c.uuid } : {}) } : {}),
-  }))
+  })), outboundFor(sid), CONVO_CAP) as WebappSessionFeed['items']
   // The turn anchored at the last user message — running OR just concluded — as ONE item: narration
   // paragraphs and tool CHIPS in transcript order, so a turn reads as one piece of prose with its
   // work sitting between the paragraphs instead of as a separate stream of activity rows that

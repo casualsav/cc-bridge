@@ -211,7 +211,14 @@ export interface SessionFeed {
   // absent — /clear produces no output, and a stdout entry can arrive with no invocation recorded.
   items: Array<{ role: 'user' | 'assistant' | 'agent' | 'activity' | 'thought' | 'turn' | 'command'; text?: string; ts: number
     blocks?: TurnPart[]
-    uuid?: string; img?: string; imgs?: string[]; att?: string; cmd?: boolean; name?: string; args?: string; agent?: string; status?: string; clipped?: boolean }>
+    uuid?: string; img?: string; imgs?: string[]; att?: string; cmd?: boolean; name?: string; args?: string; agent?: string; status?: string; clipped?: boolean
+    // `via`/`to` mark an assistant row the session said OVER THE BUS rather than into its pane —
+    // an answer, a post, an ask to another agent (outbound-feed.ts). Its words never reach the
+    // transcript, so without these rows the drill-in shows the session's "Answered." and nothing
+    // else. Rendered as an ordinary bubble; `to` is the endpoint, absent on a post (that goes to
+    // the humans). A row carrying `via` has a `uuid` whatever its length — its full text comes
+    // from the mirror, not from the transcript.
+    via?: 'answer' | 'post' | 'ack' | 'ask' | 'btw' | 'chat'; to?: string }>
   // The CLI's own working line ("Hyperspacing… · 1m 55s · 5.6k tokens"), lifted straight off the
   // pane. The chat card can't afford it — this screen has none of Telegram's formatting limits, so
   // the drill-in shows the same thing the terminal shows. Present ONLY while the pane is actually

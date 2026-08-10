@@ -1085,9 +1085,9 @@
      into feed") and reads as a heading without it. --hint-raised, not --hint: this line sits on the
      raised fill, which is exactly the case that variable exists for (--hint falls under AA there). */
   .msg.agent { background: var(--sec); max-width: 100%; }
-  .msg.agent .ah { display: flex; gap: var(--sp-2); align-items: baseline; margin-bottom: 3px; font-size: var(--t-meta); color: var(--hint-raised); }
-  .msg.agent .ah .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
-  .msg.agent .ah .lb { color: var(--hint-raised); }
+  .msg.agent .ah, .msg.bus .ah { display: flex; gap: var(--sp-2); align-items: baseline; margin-bottom: 3px; font-size: var(--t-meta); color: var(--hint-raised); }
+  .msg.agent .ah .nm, .msg.bus .ah .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+  .msg.agent .ah .lb, .msg.bus .ah .lb { color: var(--hint-raised); }
   /* The status word is stated plainly and coloured only when it is NOT the expected one — a red
      "completed" on every card would be decoration, and a failure that looked like every success
      would be worse than no status at all. */
@@ -2217,6 +2217,9 @@ const SUCCESS_TOASTS = false;
 const showDone = m => { if (SUCCESS_TOASTS) showOk(m); };
 
 const LONG_MSG = 700;   // chars past which a feed bubble collapses behind a tap-to-expand
+// A bus row's header verb. The row is the session's own words either way — this says who they went
+// to, which for agent-to-agent traffic is the only thing distinguishing them from a reply to YOU.
+const VIA_LABEL = { answer: "Answered · ", post: "Posted · ", ack: "FYI · ", ask: "Asked · ", btw: "Aside · ", chat: "Sent · " };
 // Which row is "the last reply" — the one the fold exempts and the one paintFeed fetches in full.
 // ONE definition, because those two disagreeing is a message that renders unfolded and clipped at
 // 4000 chars with no way left to read the rest.
@@ -3114,6 +3117,12 @@ function bubble(i, n, all) {
   if (i.role === "agent") inner += '<div class="ah"><span class="nm"><span class="lb">Agent · </span>'
     + esc(i.agent || "") + "</span>"
     + (i.status ? '<span class="st' + (i.status === "completed" ? "" : " bad") + '">' + esc(i.status) + "</span>" : "") + "</div>";
+  // A row the session said OVER THE BUS — an answer, a post, an ask to another agent — carries where
+  // it went. Same header element the agent card uses, so it needs no CSS of its own. Without the
+  // line these read as the session talking to YOU, which for agent-to-agent traffic it wasn't; the
+  // words are still the session's own, which is why the row is an ordinary bubble either way.
+  if (i.via) inner += '<div class="ah"><span class="nm"><span class="lb">' + esc(VIA_LABEL[i.via] || "Sent") + "</span>"
+    + esc(i.to ? "@" + i.to : i.via === "post" ? "the humans" : "") + "</span></div>";
   // Once the full text has been fetched it replaces the clamped copy, and because it lives in a cache
   // rather than in the DOM it survives the 3s repaint that would otherwise throw it away.
   const full = i.uuid ? fullText[i.uuid] : null;
@@ -3166,7 +3175,7 @@ function bubble(i, n, all) {
   const imgOnly = !!i.img && !t && !i.att;
   // EVERY bubble takes the tap now, not just a long one: the tap copies, and "a tap does something
   // here and nothing there" is the worse answer for a short message.
-  return '<div class="msg ' + i.role + (imgOnly ? " imgonly" : "") + (long ? " clip" : "") + (long && openNow ? " open" : "")
+  return '<div class="msg ' + i.role + (i.via ? " bus" : "") + (imgOnly ? " imgonly" : "") + (long ? " clip" : "") + (long && openNow ? " open" : "")
     + (copyNow ? " copyon" : "") + '" onclick="onBubbleTap(event, this)"'
     + (i.uuid ? ' data-uuid="' + esc(i.uuid) + '"' : "") + ' data-key="' + esc(msgKey(i)) + '">' + inner +
     (copyNow ? '<button class="chip copyb" onclick="copyMsg(event, this)">Copy</button>' : "") +
