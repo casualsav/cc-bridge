@@ -105,7 +105,11 @@ export function busGotHeader(verb: 'ask' | 'ack', from: string, to: string): str
 // ---- agent-bus digest (agent-bus P2) ----
 // One recent bus event, shaped for a digest line. Structural (not agent-bus.ts's LedgerEntry) so this
 // module stays import-free and unit-testable in isolation; a LedgerEntry passes it by shape.
-export type DigestEntry = { kind: string; from: string; to?: string; id?: number; text: string }
+// `deferred` marks an FYI that was never pasted into this endpoint's pane — the digest IS its
+// delivery, not a summary of one it already read. Those lines are rendered verbatim: clamping them
+// would mean the only copy the target ever sees is a truncated one, which is a fidelity loss the
+// ambient lines can afford and a delivery cannot.
+export type DigestEntry = { kind: string; from: string; to?: string; id?: number; text: string; deferred?: true }
 
 // Swap ANGLE BRACKETS for look-alikes so a `</tg>` / `<tg …>` embedded in ANY inlined field of a digest
 // block (prior ask/answer text, OR an endpoint/topic name in from/to) can't prematurely close or
@@ -120,6 +124,10 @@ function digestText(text: string): string {
   return flat.length > 100 ? flat.slice(0, 99) + '…' : flat
 }
 
+// A deferred FYI keeps its newlines and its length; only the angle brackets are neutralized, because
+// that guard is about the BLOCK not being closed early and applies to every field regardless.
+function deliveredText(text: string): string { return deTag(text).trim() }
+
 // A compact catch-up of bus events an agent missed, prepended to an ask when it's delivered (see
 // daemon tryDeliverAsk). Glyphs mirror `tg history`. `sinceLabel` is a caller-formatted age ("12m" /
 // "recently"). No entries → '' so the caller prepends nothing (never an empty block).
@@ -130,7 +138,7 @@ export function formatDigestBlock(entries: DigestEntry[], sinceLabel: string): s
     // from/to are endpoint names — de-tagged too (not just text): a topic named with a `<` would break
     // the block framing the same way raw text would.
     const who = `${deTag(e.from)}${e.to ? `→${deTag(e.to)}` : ''}${e.id != null ? ` #${e.id}` : ''}`
-    return `${glyph} ${who}: ${digestText(e.text)}`
+    return `${glyph} ${who}: ${e.deferred ? deliveredText(e.text) : digestText(e.text)}`
   })
   return `<tg bus-digest since ${sinceLabel}>\n${lines.join('\n')}\n</tg>`
 }

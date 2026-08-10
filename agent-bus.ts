@@ -98,6 +98,35 @@ export type SystemAskKind =
 const SYSTEM_ASK_KINDS = new Set<string>(['ctx-nudge', 'fleet-alert', 'surfaceless-block',
   'post-relay', 'closure-notice', 'watch-fired', 'spawn-news', 'repo-brief', 'slash-parked'])
 
+// ---- Which FYIs wake a chat lane, and which ride its next delivery ----
+//
+// A no-reply FYI pasted into a chat lane's pane costs a full model turn that delivers nothing to the
+// owner — measured 2026-08-09/10 on the live lane: three FYI wakes, 8/6/3 API requests each, zero
+// messages out, every one of them ending in the CLI's "no visible output" re-prompt (which fires
+// once per turn, from inside the CLI's query loop, and which the bridge cannot suppress). So an FYI
+// with nothing waiting on it is RECORDED and rides the next digest instead.
+//
+// THE BOUNDARY IS PURPOSE, NOT VERB (the owner's rule, 2026-08-10): **if the lane is — or may be —
+// WAITING on it, it wakes; if it is merely informed by it, it rides.** The counter-example that
+// forces the split is `watch-fired`: the lane arms `tg watch` precisely to be woken so it can
+// dispatch the moment a pane frees up, so deferring one stalls the fleet for exactly as long as the
+// lane is quiet, which is when a queue is most likely waiting on it.
+//
+// Solicited → wakes. Unsolicited → rides. An agent's own `tg ack` carries no kind and always rides:
+// `ack` means nothing is waiting, which is the definition of the deferred class.
+const WAKING_ACK_KINDS = new Set<string>([
+  'watch-fired',    // the lane ARMED this and is waiting to dispatch on it
+  'closure-notice', // asks the lane was waiting on were closed unanswered
+  'spawn-news',     // a held spawn the lane dispatched started (or didn't)
+  'slash-parked',   // a command the lane parked ran, was refused, or closed unrun
+  'repo-brief',     // a scout the lane requested finished; it may be holding a dispatch on it
+])
+// `post-relay` is the one @system ack that rides: another endpoint spoke to the humans, which is
+// news to the lane and nothing it armed.
+export function ackWakesNow(sysKind?: SystemAskKind): boolean {
+  return sysKind != null && WAKING_ACK_KINDS.has(sysKind)
+}
+
 // The lead of the owner-facing card for an ANSWERED @system ask — rendered as "<icon> @who <did>".
 // Specific only where the kind is known and answerable; everything else — an unknown kind, a
 // pre-v0.4.366 row, an ack that somehow got answered — takes the neutral phrasing. A vague label
@@ -684,7 +713,10 @@ export function markNudged(id: number, now: number): void {
 // could not tell a landed ask from one queued behind a pane that would never reach a prompt again.
 // 'busy' = mid-turn, self-clearing. 'wedged' = not at a prompt AND no turn running (the @ccbridge
 // shape — an unrecognized screen owns the pane). 'no-session' = no live pane for the target sid.
-export const ASK_DELIVERY_STATES = ['delivered', 'busy', 'wedged', 'no-session', 'not-landed', 'occupied'] as const
+// 'deferred' = an FYI that will never be pasted: it was recorded, and the target reads it in the
+// digest on its next delivery (ackWakesNow). It is NOT a failure and NOT a retry state — the sweep
+// must never pick it up — but it is not 'delivered' either, because nothing reached a pane.
+export const ASK_DELIVERY_STATES = ['delivered', 'deferred', 'busy', 'wedged', 'no-session', 'not-landed', 'occupied'] as const
 export type AskDelivery = (typeof ASK_DELIVERY_STATES)[number]
 
 // The `tg ask` CLI line for an outcome. Pure so ask-delivery.test.ts can pin the whole enumeration:
@@ -712,6 +744,11 @@ export function askResultText(status: AskDelivery, toName: string, id: number, a
     // landed: at the back of that session's queue, not in front of it.
     case 'delivered':
       return `delivered to @${toName} (${q}) — async; ${answer}`
+    // Honest about both halves: it is safely recorded (nothing to retry, nothing to chase) and it has
+    // not reached them yet. A sender that reads this as "delivered" would go looking for a reaction
+    // that is minutes away.
+    case 'deferred':
+      return `📥 QUEUED for @${toName}'s next wake (${q}) — an FYI does not wake a chat lane; it rides the next delivery that lane takes, in full`
     case 'busy':
       return `⏳ QUEUED, not yet delivered — @${toName} is mid-turn (${q}); it lands when they reach a prompt, then ${answer}`
     case 'wedged':
@@ -1001,6 +1038,10 @@ export type LedgerEntry = {
   // suppressed non-event is not news). Without this the two surfaces disagreed about whether anything
   // had happened at all, which cost a wrong three-branch diagnosis of a working predicate.
   suppressed?: boolean
+  // Set by digestSince on the rows it hands to a flush, NEVER persisted: a deferred FYI is derived
+  // from the watermark (see the note there), not recorded at append time. It travels only far enough
+  // to tell the block builder to render this line verbatim instead of clamping it.
+  deferred?: true
 }
 
 // Append one bus event. Best-effort: a write failure (disk full / perms) must never break delivery,
@@ -1060,6 +1101,13 @@ export const DIGEST_SCAN = 200
 // and the failure to fear is a session repeating it outward as if it were its own.
 // A `post` (addressed to the humans, no `to`) drops out of every scoped digest by construction, and
 // that is correct rather than collateral: it is the definitional cross-lane broadcast.
+//
+// A DEFERRED FYI is identified STRUCTURALLY rather than by a flag on the row, and the reason is the
+// watermark: an ack that was delivered advances `seen` past its own timestamp on landing, so it can
+// never appear in a later digest at all. Therefore every `ack` still inside the window and addressed
+// TO this endpoint is, by construction, one that was recorded instead of pasted (or one whose paste
+// failed, where showing it in full is equally right). Those rows are the whole point of the flush, so
+// they are never dropped by the cap and never clamped — `cap` still bounds the ambient rest.
 export function digestSince(
   entries: LedgerEntry[], sinceTs: number,
   opts: { excludeId?: number; excludeFrom?: string; involving?: string; cap: number },
@@ -1070,7 +1118,14 @@ export function digestSince(
     (opts.excludeId == null || e.id !== opts.excludeId) &&
     (opts.excludeFrom == null || e.from !== opts.excludeFrom) &&
     (opts.involving == null || e.from === opts.involving || e.to === opts.involving))
-  return kept.slice(-Math.max(1, opts.cap))
+  const isFyi = (e: LedgerEntry): boolean =>
+    opts.involving != null && e.kind === 'ack' && e.to === opts.involving
+  const fyis = kept.filter(isFyi)
+  if (!fyis.length) return kept.slice(-Math.max(1, opts.cap))
+  // Deferred FYIs survive the cap and carry `deferred` so the block builder renders them verbatim;
+  // the ambient rows around them are still capped and still clamped.
+  const ambient = new Set(kept.filter(e => !isFyi(e)).slice(-Math.max(1, opts.cap)))
+  return kept.filter(e => isFyi(e) || ambient.has(e)).map(e => isFyi(e) ? { ...e, deferred: true as const } : e)
 }
 
 // Test seam: mirror topics.ts — seed the in-memory store, mark loaded, disable disk persistence.

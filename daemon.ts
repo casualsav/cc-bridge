@@ -168,7 +168,7 @@ import {
   setSessionDepth, resetAllSessionDepth, pruneSessionDepth, nextAskDepth, depthExceeded, depthLimit,
   resolveEndpoint, nameForEndpoint, normalizeEndpointName, backlogLabel, confineRef, sharedDir, ensureSharedDir, appendLedger, tailLedger,
   getSeen, markSeen, digestSince, DIGEST_SCAN,
-  systemAskLabel,
+  systemAskLabel, ackWakesNow,
   type BusEndpoint, type BusPending, type LedgerEntry,
 } from './agent-bus.ts'
 import { formatAskBlock, formatAnswerBlock, formatAsideBlock, formatDigestBlock, formatNudgeBlock, formatRosterLine, closureNoticeText, busSentHeader, busGotHeader, type BusVerb, type RosterAgent } from './agent-bus-block.ts'
@@ -1278,12 +1278,45 @@ async function offerStrandedPasteCard(paneId: string, cap: string, styled: strin
   }
 }
 
+// The catch-up block a HUMAN message carries into a bound chat lane — the flush half of the deferred
+// FYI (tryDeliverAsk's defer branch is the other). Scoped exactly as the bus-side digest is: this
+// endpoint's own lane only, never the room's, and NOTHING AT ALL without a watermark, because a lane
+// that has never taken a bus delivery has nothing it can have missed.
+//
+// Returns the lane's identity alongside the block so the caller can advance the watermark against the
+// paste OUTCOME rather than against having built the string.
+function flushDigestFor(sid: string): { block: string; sid: string; name: string; count: number } | null {
+  const since = getSeen(sid)
+  if (since <= 0) return null
+  const name = nameForEndpoint(sid, busEndpoints())
+  const room = busLedgerRoom()
+  const entries = digestSince(resolveLedgerNames(tailLedger(room, DIGEST_SCAN)), since,
+    { excludeFrom: name, involving: name, cap: 8 })
+  if (!entries.length) return null
+  const block = formatDigestBlock(entries, fmtAgo(since))
+  if (!block) return null
+  return { block, sid, name, count: entries.filter(e => e.deferred).length }
+}
+// The human-inbound entry point: a DM with a bound chat lane is the only inbound that can carry one.
+function inboundDigestFor(chatId: string): { block: string; sid: string; name: string; count: number } | null {
+  const lane = getDmChatSession(String(chatId))
+  return lane ? flushDigestFor(lane.sessionId) : null
+}
+
 // Inbound injections are serialized through one chain: two Telegram messages arriving
 // close together would otherwise drive the same pane concurrently and interleave
 // keystrokes. A failed inject (pane died mid-send) re-buffers for the next session.
 let inboundInjectChain: Promise<unknown> = Promise.resolve()
 function enqueueInboundInject(paneId: string, watcher: PaneWatcher, params: InboundParams): void {
-  const block = formatChannelBlock(params)
+  // THE OTHER HALF OF THE DEFERRED FYI. Until now the digest was prepended only on the bus delivery
+  // path — a human message is wrapped `<tg 42>…` and could never carry one — so a lane whose only
+  // other traffic is the owner would hold its FYIs forever. This is the carrier that makes "it rides
+  // the next delivery" true rather than aspirational, and it is why no flush timer is needed.
+  //
+  // A digest-prefixed envelope is still classed by the envelope BEHIND it (isBusAnchored strips the
+  // block first), so his message stays HUMAN and the reply it draws still pings his phone.
+  const flush = inboundDigestFor(params.meta.chat_id)
+  const block = flush ? `${flush.block}\n${formatChannelBlock(params)}` : formatChannelBlock(params)
   // If an effort-change confirmation is open and the user sent a message instead of tapping, dismiss
   // it first (= "No, go back", keeps the current level) so the message doesn't type into the modal.
   const run = () => dismissPendingEffortConfirm(paneId)
@@ -1298,6 +1331,13 @@ function enqueueInboundInject(paneId: string, watcher: PaneWatcher, params: Inbo
         clearPasteInFlight(paneId)
         // Stamped HERE, against the outcome, and nowhere earlier — see markableOutcome.
         if (markableOutcome(outcome)) noteDelivered(params.meta)
+        // The watermark moves only now, for the same reason tryDeliverAsk moves it only on `ok`: it
+        // may advance only when the digest was actually SHOWN. A paste that never landed leaves the
+        // window open, so the FYIs it carried ride the next attempt instead of being marked read.
+        if (flush) {
+          markSeen(flush.sid, Date.now())
+          process.stderr.write(`daemon: flushed ${flush.count} deferred FYI(s) to @${flush.name} on inbound\n`)
+        }
         process.stderr.write(`daemon: inbound injected to pane ${paneId} chat=${params.meta.chat_id}\n`)
         // Off-MCP outbound is handled by the continuous relay loop (startRelayLoop), which
         // relays this turn's reply — and any proactive message — once, keyed by uuid.
@@ -3920,6 +3960,33 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
   if (!cur || cur.injected || cur.expiredAt || busInFlight.has(cur.id)) return 'busy'   // never deliver a timed-out ask to the target
   busInFlight.add(cur.id)   // claim BEFORE the awaits so the immediate attempt + the 15s sweep can't both proceed
   try {
+    // ---- The FYI that does not wake a chat lane ----
+    //
+    // Pasting an unsolicited FYI into the lane's pane buys a full model turn that delivers nothing to
+    // the owner and then pays the CLI's no-visible-output re-prompt on top (ackWakesNow carries the
+    // measurement and the boundary). So it is recorded here and read in the digest on the lane's next
+    // delivery — human message or bus ask, both carry one now.
+    //
+    // What still happens, and each is deliberate: the LEDGER row is already written by the caller and
+    // is what the flush reads; `markBriefed` is stamped exactly as a landed delivery would (deferral
+    // moves when the PANE sees it, never the bus bookkeeping); the sender gets its card; the owner
+    // gets the target-side card immediately, so his surface is unchanged and only the lane's turn
+    // moves. The row is dropped because an ack's row never outlives its delivery.
+    //
+    // What must NOT happen: `markSeen` — the watermark means "caught up to HERE" and is only sound
+    // because whatever advances it also SHOWS the digest. Advancing it now would mark this very FYI
+    // as seen by a session that was never given it, which is the one way this feature loses a
+    // message. `setSessionDepth`/`markInjected` are skipped for the same structural reason: no turn
+    // was dispatched, so there is no chain to deepen and nothing was injected.
+    if (cur.noReply && isChatLaneSession(cur.toSid) && !ackWakesNow(cur.sysKind)) {
+      const now = Date.now()
+      if (cur.fromSid !== SYSTEM_SID) markBriefed(cur.toSid, cur.fromSid, cur.fromName, now)
+      void notifyAskSent(cur.fromSid, cur.toName, cur.text, 'ack', cur.toSid)
+      if (!cur.quiet) void notifyBusRich(cur.toSid, busGotHeader('ack', cur.fromName, cur.toName), cur.text)
+      removePending(cur.id)
+      process.stderr.write(`daemon: ack ${cur.id} from @${cur.fromName} DEFERRED for @${cur.toName} — rides its next delivery (sysKind ${cur.sysKind ?? 'agent'})\n`)
+      return 'deferred'
+    }
     const pane = await paneForSession(cur.toSid).catch(() => null)
     if (!pane) return 'no-session'
     const cap = await capturePane(pane).catch(() => '')
@@ -4536,8 +4603,20 @@ async function deliverAnswerToAsker(pending: BusPending, answerer: string, rawBo
   const deliveredBody = late ? `⏰ (late answer — ask ${cur.id} had timed out)\n\n${body}` : body
   // .catch(false): a rejected paste (a tmux error propagating through the inject chain) must reach the
   // restore path below, not throw past it — the pending is already removed, so a throw would lose the answer.
-  const outcome = await busDeliverOutcome(askerPane, formatAnswerBlock(answerer, cur.id, deliveredBody, refs)).catch(() => 'failed' as PasteOutcome)
+  // THE THIRD FLUSH CARRIER, and the one that is easy to leave out: an ANSWER wakes the asker just as
+  // an ask wakes the target, but it never carried a digest, so a lane whose fleet is busy and whose
+  // owner is quiet could hold its deferred FYIs indefinitely while taking a dozen deliveries. Riding
+  // one here is free — the turn is happening either way — and the classification is unchanged, since
+  // isBusAnchored strips the digest and reads the `re=` envelope behind it.
+  const flush = flushDigestFor(cur.fromSid)
+  const answerBlock = formatAnswerBlock(answerer, cur.id, deliveredBody, refs)
+  const outcome = await busDeliverOutcome(askerPane, flush ? `${flush.block}\n${answerBlock}` : answerBlock).catch(() => 'failed' as PasteOutcome)
   const ok = outcome === 'landed'
+  // Only on a landed paste, for the same reason every other markSeen is gated on one.
+  if (ok && flush) {
+    markSeen(cur.fromSid, Date.now())
+    process.stderr.write(`daemon: flushed ${flush.count} deferred FYI(s) to @${cur.fromName} on an answer\n`)
+  }
   // No ledger row is written past this point on a failure, and that is the whole fix: the `✓` in
   // `tg history` now means the target was actually invoked, not merely that tmux accepted a paste.
   // Covers a dead pane AND a submit that never took (the block left sitting in their input box).
@@ -6806,7 +6885,11 @@ async function handleCall(
           text = noReply
             ? (outcome === 'delivered'
                 ? `acked @${toName} — delivered; nothing is queued and no answer is expected`
-                : `@${toName} is busy — the ack is queued and lands when it goes idle`)
+                : outcome === 'deferred'
+                  // Not a failure and not a delay to wait out: it is recorded, and it reaches them in
+                  // full on their next delivery. Said plainly so a sender doesn't chase a reaction.
+                  ? `acked @${toName} — queued for their next wake; an FYI does not wake a chat lane, and it rides their next delivery in full. Nothing is expected of either of you`
+                  : `@${toName} is busy — the ack is queued and lands when it goes idle`)
             : askResultText(outcome, toName, p.id, asksAheadOf(p))
         }
         break
