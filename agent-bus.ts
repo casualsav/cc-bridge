@@ -127,6 +127,31 @@ export function ackWakesNow(sysKind?: SystemAskKind): boolean {
   return sysKind != null && WAKING_ACK_KINDS.has(sysKind)
 }
 
+// THE VERB IS NOT THE ONLY EVIDENCE. An FYI from a session the lane has an OPEN ASK with wakes it
+// whatever the verb says: the open ask is the rule above, machine-checked — the lane dispatched work
+// to THIS sender and has not been told how it went, so it is waiting on them by construction.
+//
+// The miss that forces it (2026-08-10, live): a lane told a worker to "ack with the tip hash" while
+// holding a decision on that worker's report. The ack deferred exactly as specified, and the lane's
+// queue stalled six minutes until the owner's next message flushed it. `tg answer <id>` would have
+// woken it — the verb was simply wrong — which is why this is a NET rather than a redesign: worker
+// verb discipline is not something a lane can enforce, and the cost of the net is bounded below.
+//
+// Scoped to the SENDER, and that scope is the whole design. "Any open ask" would wake a lane with one
+// outstanding dispatch on every unrelated FYI in the room — the exact cost the defer was built to
+// remove. What survives the scope is a real cost and an accepted one: a worker acking progress notes
+// mid-task now wakes the lane once per note, for as long as its own ask is open.
+//
+// Three exclusions, each a row where the lane is not the party waiting:
+//   · an EXPIRED ask — the lane was already told it timed out, an hour ago
+//   · an ACK row queued behind a busy target — an ack is not an ask and nothing awaits it
+//   · an OWNER-DIRECT ask — the asker row names the lane because his DM can only be found from it,
+//     but `answerRouteFor` cards that answer to HIM and never types it into the lane
+export function laneAwaitsSender(pendings: BusPending[], laneSid: string, senderSid: string): boolean {
+  return pendings.some(p =>
+    p.fromSid === laneSid && p.toSid === senderSid && !p.noReply && !p.expiredAt && !p.ownerDirect)
+}
+
 // The lead of the owner-facing card for an ANSWERED @system ask — rendered as "<icon> @who <did>".
 // Specific only where the kind is known and answerable; everything else — an unknown kind, a
 // pre-v0.4.366 row, an ack that somehow got answered — takes the neutral phrasing. A vague label

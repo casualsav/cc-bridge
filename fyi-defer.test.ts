@@ -12,7 +12,7 @@
 import { test, expect } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { ackWakesNow, digestSince, askResultText, ASK_DELIVERY_STATES, type LedgerEntry } from './agent-bus.ts'
+import { ackWakesNow, laneAwaitsSender, digestSince, askResultText, ASK_DELIVERY_STATES, type BusPending, type LedgerEntry } from './agent-bus.ts'
 import { formatDigestBlock } from './agent-bus-block.ts'
 
 const daemon = readFileSync(join(import.meta.dir, 'daemon.ts'), 'utf8')
@@ -48,6 +48,43 @@ test('every no-reply @system ack kind the daemon mints has a deliberate class', 
   const classified = new Set(['watch-fired', 'closure-notice', 'spawn-news', 'slash-parked', 'repo-brief', 'post-relay'])
   for (const k of minted)
     expect(classified.has(k), `sysKind '${k}' is minted as a no-reply ack but no class was chosen for it — decide whether the lane is WAITING on it`).toBe(true)
+})
+
+// ---- The open ask: the rule, machine-checked ----------------------------------------------------
+//
+// The live miss (2026-08-10): a lane told a worker to "ack with the tip hash" while holding a decision
+// on that worker's report; the ack deferred to spec and the lane's queue stalled six minutes. An open
+// ask from the lane to THAT sender is the evidence the owner's rule asks for.
+
+const ask = (over: Partial<BusPending>): BusPending => ({
+  id: 1, fromSid: 'lane', toSid: 'worker', fromKind: 'claude', toKind: 'claude', fromName: 'chat',
+  toName: 'worker', text: 'do the thing', refs: [], createdAt: 1, expiresAt: 9e9, injected: true, ...over,
+})
+
+test('an ack from a session the lane has an open ask with WAKES it', () => {
+  expect(laneAwaitsSender([ask({})], 'lane', 'worker')).toBe(true)
+  // Queued behind a busy target counts too: the lane is waiting either way.
+  expect(laneAwaitsSender([ask({ injected: false })], 'lane', 'worker')).toBe(true)
+})
+
+test('the scope is the SENDER — an unrelated open ask does not wake the lane', () => {
+  // The control, and the reason the discriminator is not "the lane has any open ask": a lane with one
+  // outstanding dispatch would otherwise be woken by every FYI in the room, which is the entire cost
+  // the defer exists to remove.
+  expect(laneAwaitsSender([ask({})], 'lane', 'someone-else')).toBe(false)
+  expect(laneAwaitsSender([], 'lane', 'worker')).toBe(false)
+  // An ask the sender made OF the lane is the other direction — the sender is waiting, not the lane.
+  expect(laneAwaitsSender([ask({ fromSid: 'worker', toSid: 'lane' })], 'lane', 'worker')).toBe(false)
+})
+
+test('the three rows where the lane is not the waiting party', () => {
+  // Expired: the lane was told an hour ago that this one timed out.
+  expect(laneAwaitsSender([ask({ expiredAt: 5 })], 'lane', 'worker')).toBe(false)
+  // An ack of the lane's own, queued behind a busy target: an ack is not an ask.
+  expect(laneAwaitsSender([ask({ noReply: true })], 'lane', 'worker')).toBe(false)
+  // Owner-direct: the row names the lane because his DM can only be found from it, but the answer is
+  // carded to HIM and never typed into the lane — so the lane is not waiting on it.
+  expect(laneAwaitsSender([ask({ ownerDirect: true })], 'lane', 'worker')).toBe(false)
 })
 
 // ---- It arrives, in full, and survives a busy room ---------------------------------------------
@@ -117,7 +154,8 @@ test("'deferred' reads as neither delivered nor failed", () => {
 // ---- The wiring the pure functions cannot see --------------------------------------------------
 
 test('the defer branch records and drops, and never touches the watermark', () => {
-  const i = daemon.indexOf('if (cur.noReply && isChatLaneSession(cur.toSid) && !ackWakesNow(cur.sysKind)) {')
+  const i = daemon.indexOf('if (cur.noReply && isChatLaneSession(cur.toSid) && !ackWakesNow(cur.sysKind)\n'
+    + '        && !laneAwaitsSender(listPending(), cur.toSid, cur.fromSid)) {')
   expect(i).toBeGreaterThan(-1)
   const branch = daemon.slice(i, daemon.indexOf("return 'deferred'", i))
   // THE INVARIANT. Advancing `seen` here would mark this very FYI as read by a session that was never

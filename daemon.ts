@@ -168,7 +168,7 @@ import {
   setSessionDepth, resetAllSessionDepth, pruneSessionDepth, nextAskDepth, depthExceeded, depthLimit,
   resolveEndpoint, nameForEndpoint, normalizeEndpointName, backlogLabel, confineRef, sharedDir, ensureSharedDir, appendLedger, tailLedger,
   getSeen, markSeen, digestSince, DIGEST_SCAN,
-  systemAskLabel, ackWakesNow,
+  systemAskLabel, ackWakesNow, laneAwaitsSender,
   type BusEndpoint, type BusPending, type LedgerEntry,
 } from './agent-bus.ts'
 import { formatAskBlock, formatAnswerBlock, formatAsideBlock, formatDigestBlock, formatNudgeBlock, formatRosterLine, closureNoticeText, busSentHeader, busGotHeader, type BusVerb, type RosterAgent } from './agent-bus-block.ts'
@@ -4026,7 +4026,12 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
     // as seen by a session that was never given it, which is the one way this feature loses a
     // message. `setSessionDepth`/`markInjected` are skipped for the same structural reason: no turn
     // was dispatched, so there is no chain to deepen and nothing was injected.
-    if (cur.noReply && isChatLaneSession(cur.toSid) && !ackWakesNow(cur.sysKind)) {
+    //
+    // `laneAwaitsSender` is the class boundary read off the pending rows rather than off the verb: an
+    // open ask from this lane TO this sender is evidence the lane is waiting on them, whatever verb
+    // they reached back with. It carries the miss it repairs, and the cost it accepts.
+    if (cur.noReply && isChatLaneSession(cur.toSid) && !ackWakesNow(cur.sysKind)
+        && !laneAwaitsSender(listPending(), cur.toSid, cur.fromSid)) {
       const now = Date.now()
       if (cur.fromSid !== SYSTEM_SID) markBriefed(cur.toSid, cur.fromSid, cur.fromName, now)
       void notifyAskSent(cur.fromSid, cur.toName, cur.text, 'ack', cur.toSid)
