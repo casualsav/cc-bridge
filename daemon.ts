@@ -3831,10 +3831,23 @@ const ASK_QUOTE_CAP = 3500
 // other bus card stays collapsed and silent, deliberately — a post is a session reaching for a human,
 // which none of the others are.
 const POST_CAP = 3800
-async function sendPost(chat: string, fromName: string, body: string): Promise<void> {
+// ROUTABLE, like every other card with a session behind it. A post is the most session-authored
+// thing on this surface — a worker speaking to the humans in its own words, often a question — and
+// it was the ONE such card that recorded no msg-route, so his native reply to it fell through to the
+// lane as ordinary conversation (observed 2026-08-10: @midi2score's post, his reply "I'm getting the
+// same error", injected into the lane's pane instead). The reply-target lookup was never the defect;
+// the row it looks up was simply never written.
+//
+// The body is RENDERED for the same reason the chevron cards now are (v0.5.45). This flat card was
+// missed by that sweep because the enumeration keyed on `<details><summary>`, and a post carries no
+// chevron — so it kept shipping raw markdown after the rest stopped.
+async function sendPost(chat: string, fromName: string, body: string, fromSid?: string | null): Promise<void> {
   const shown = body.length > POST_CAP ? body.slice(0, POST_CAP) + '…' : body
-  const html = `📣 <b>@${escapeHtml(fromName)}</b>\n\n${escapeHtml(shown)}`
-  await channel.sendText(chat, html).catch(e => process.stderr.write(`daemon: post send failed: ${e}\n`))
+  const html = `📣 <b>@${escapeHtml(fromName)}</b>\n\n${mdToTelegramHtml(shown)}`
+  const ref = await channel.sendText(chat, html).catch(e => {
+    process.stderr.write(`daemon: post send failed: ${e}\n`); return null
+  })
+  rememberMsgRoute(chat, ref?.messageId, fromSid)
 }
 
 // A worker answering something the OWNER addressed to it himself (`@name <message>`, or a reply to one
@@ -7105,7 +7118,7 @@ async function handleCall(
         if (lanes.length) {
           // Same chevron card as every other bus surface — sent straight to the lane's chat id (not
           // through notifyBusRich's pane resolution) so a dead lane pane can't drop a post.
-          for (const chat of lanes) await sendPost(chat, fromName, body)
+          for (const chat of lanes) await sendPost(chat, fromName, body, fromSid)
           // A post from a WORKER also lands on the chat lane as a bus FYI. A post is the one bus verb
           // aimed at a human, and a headless worker has no other surface — so when one asks a blocking
           // question ("Quick check before I build part 1: …") the only party who could answer it is an
@@ -7127,7 +7140,12 @@ async function handleCall(
         const bridgePost = async (): Promise<void> => {
           const html = `📣 <b>${escapeHtml(fromName)}</b>: ${escapeHtml(body)}`
           if (room) { await channel.sendText(String(room), html); return }
-          for (const chat of loadAccess().allowFrom) await channel.sendText(chat, html).catch(() => {})
+          // The no-group fan-out lands in DMs, which is the one surface reply-routing reads — so these
+          // copies are recorded too. The `room` branch above is a group and deliberately is not.
+          for (const chat of loadAccess().allowFrom) {
+            const ref = await channel.sendText(chat, html).catch(() => null)
+            rememberMsgRoute(chat, ref?.messageId, fromSid)
+          }
         }
         if (room && avatar) {
           // Plain text (no parse_mode): with the prefix gone, HTML buys nothing and any body (with `<`/`&`)
