@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { prettyModel, lastModelInTranscript, lastTodosInTranscript, modeBadge, pinMessageGone, statusKeyboard, mergeStatus, codexModelFromPane, codexPrettyModel, codexStatusHead, parseCodexStatusline } from './status-card.ts'
 import type { StatuslineData } from './statusline.ts'
-import { initStatusCard, updateSessionPin, paneForDmChat, forgetChatPin, armChatPin, repinIfDropped, sessionPins, pinTextCache, changesPaneContext, prunePaneStatus } from './status-card.ts'
+import { initStatusCard, updateSessionPin, paneForDmChat, forgetChatPin, armChatPin, repinIfDropped, sessionPins, pinTextCache, changesPaneContext, prunePaneStatus, dropGoneCard } from './status-card.ts'
 import { ACCESS_FILE } from './common.ts'
 import { loadAccess } from './access.ts'
 import { focus, markChatReachable, markChatUnreachableIfUndeliverable, isChatUnreachable } from './state.ts'
@@ -449,6 +449,27 @@ test('requirement 1: the daemon still arms on every user-present event', () => {
   expect(daemon).toContain("markChatReachable(chat_id); armChatPin(chat_id)")            // any gated private message
   expect(daemon).toMatch(/bot\.command\('start'[\s\S]{0,400}armChatPin/)               // /start
   expect(daemon).toContain("armChatPin(chatId); await forgetChatPin(chatId, 'lane-ready')") // lane-ready
+})
+
+// A "gone" verdict is read off an error STRING, and one of the strings it matches ("message can't be
+// edited") is not a delete — so a false verdict used to drop tracking and leave the card pinned, while
+// the next tick minted its replacement: two pinned cards, the first of them untracked and therefore
+// unreachable by /pin or removeSessionPins. Observed live 2026-08-10 (chat 837047563, 10820 declared
+// gone, 10825 minted 10s later). Every gone-branch must also take the card OUT of the chat.
+test('a card declared gone is unpinned and deleted, not just untracked', async () => {
+  const calls: string[] = []
+  initStatusCard({ ...(pinDeps([], []) as unknown as object),
+    channel: { unpin: async ({ messageId }: { messageId: string }) => { calls.push(`unpin:${messageId}`) },
+               deleteMessage: async ({ messageId }: { messageId: string }) => { calls.push(`del:${messageId}`) } } } as never)
+  await dropGoneCard('111111', 10820)
+  expect(calls).toEqual(['unpin:10820', 'del:10820'])
+})
+
+test('every gone-verdict branch drops the card from the chat', () => {
+  const src = readFileSync(join(import.meta.dir, 'status-card.ts'), 'utf8')
+  const branches = src.split('\n').filter(l => l.includes('pinMessageGone(e)') && l.includes('sessionPins.delete'))
+  expect(branches).toHaveLength(3)                      // General card · topic card · DM card
+  for (const b of branches) expect(b).toContain('dropGoneCard(')
 })
 
 // The /compact staleness bug: the pin held a pre-compaction context % for many turns because

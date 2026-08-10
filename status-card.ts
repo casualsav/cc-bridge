@@ -645,6 +645,18 @@ export function pinMessageGone(e: unknown): boolean {
   return /message to edit not found|message can'?t be edited|message to pin not found|MESSAGE_ID_INVALID/i.test(d)
 }
 
+// A card Telegram says is GONE must also stop being PINNED. "Gone" is a verdict read off an error
+// string, and one of the strings it matches ("message can't be edited") is not a delete at all — so
+// on a false verdict the untracked card stays pinned forever while the next tick mints its
+// replacement, and the user has two pinned cards and no way to lose the first (removeSessionPins and
+// /pin only ever touch what is tracked). Observed live 2026-08-10, chat 837047563: message 10820
+// declared gone at 22:30:47, 10825 minted 10s later, both still pinned. Unpin+delete is a no-op when
+// the message really is gone, so the repair costs nothing in the case the verdict is right.
+export async function dropGoneCard(chat: string, messageId: number): Promise<void> {
+  await deps.channel.unpin({ chatId: chat, messageId: String(messageId) }).catch(() => {})
+  await deps.channel.deleteMessage({ chatId: chat, messageId: String(messageId) }).catch(() => {})
+}
+
 // Telegram's "message is not modified" — the edit was a genuine no-op because the pin already shows
 // this exact text, so it's safe to mark the cache current. EVERY other edit error (429 rate-limit,
 // network blip, "thread not found") must NOT update the cache: if it does, the next cycle sees
@@ -763,7 +775,7 @@ export async function updateTopicPins(): Promise<void> {
           render: () => text,
           onSent: () => { pinTextCache.set(key, text) },
           onError: e => {
-            if (pinMessageGone(e)) { sessionPins.delete(key); pinTextCache.delete(key); persistSessionPins(); cancelEdit(group, existing) }
+            if (pinMessageGone(e)) { sessionPins.delete(key); pinTextCache.delete(key); persistSessionPins(); cancelEdit(group, existing); void dropGoneCard(group, existing) }
             else if (pinNotModified(e)) pinTextCache.set(key, text)   // already current — safe to cache
             // else: transient (429 / network) — leave cache stale so next cycle retries
           } })
@@ -807,7 +819,7 @@ export async function updateTopicPins(): Promise<void> {
         onSent: () => { pinTextCache.set(key, text) },
         onError: e => {
           if (topicThreadGone(e)) { sessionPins.delete(key); pinTextCache.delete(key); persistSessionPins(); cancelEdit(group, existing); deps.onTopicGone(t.sessionId, threadId) }   // tab gone → drop tracking; daemon tears down its session
-          else if (pinMessageGone(e)) { sessionPins.delete(key); pinTextCache.delete(key); persistSessionPins(); cancelEdit(group, existing) }   // recreated on the next tick
+          else if (pinMessageGone(e)) { sessionPins.delete(key); pinTextCache.delete(key); persistSessionPins(); cancelEdit(group, existing); void dropGoneCard(group, existing) }   // recreated on the next tick
           else if (pinNotModified(e)) pinTextCache.set(key, text)   // current → cache; transient → next cycle retries
         } })
       continue
@@ -1004,7 +1016,7 @@ async function upsertChatPin(chat: string, text: string, buttons: Button[][], pa
         // holds, and the user's next message mints the replacement. (This line once read "the next
         // cycle recreates it", which the create gate had made false — a stale comment beside a correct
         // fix is how the next investigation starts.)
-        if (pinMessageGone(e)) { sessionPins.delete(chat); pinTextCache.delete(chat); persistSessionPins(); cancelEdit(chat, existing); process.stderr.write(`pin: chat ${chat} message ${existing} is gone — tracking dropped; the next message in this chat mints a replacement\n`) }
+        if (pinMessageGone(e)) { sessionPins.delete(chat); pinTextCache.delete(chat); persistSessionPins(); cancelEdit(chat, existing); void dropGoneCard(chat, existing); process.stderr.write(`pin: chat ${chat} message ${existing} is gone — tracking dropped and unpinned; the next message in this chat mints a replacement (${String((e as { description?: string })?.description ?? e)})\n`) }
         else if (pinNotModified(e)) pinTextCache.set(chat, text)   // already current — safe to cache
       } })
     return
