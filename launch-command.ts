@@ -60,12 +60,18 @@ export function parseLaunch(raw: string, models: readonly string[], efforts: rea
   const eat = (s: string): string => s.replace(/^[ \t]+/, '')
 
   rest = rest.replace(/^\s+/, '')
-  const name = /^[^\s]+/.exec(rest)?.[0]
+  const token = /^[^\s]+/.exec(rest)?.[0]
+  if (!token) return { kind: 'error', error: LAUNCH_USAGE }
+  rest = eat(rest.slice(token.length))
+  // `@launch @cc-bridge …` — the sigil typed twice, because every OTHER way of naming a session on
+  // this surface wants one. Dropped rather than refused: it is never ambiguous, and left alone it
+  // reaches the folder name, where the sanitiser turns it into a leading dash and spawns "-cc-bridge",
+  // directory and all. Stripped BEFORE the dash check so `@--help` is still the refusal below.
+  const name = token.replace(/^@+/, '')
   if (!name) return { kind: 'error', error: LAUNCH_USAGE }
   // A dash-leading name is a mistyped flag, and `tg spawn --help` really did spawn a "--help" session
   // once, folder and all. Same refusal here, before anything is created.
   if (name.startsWith('-')) return { kind: 'error', error: `'${name}' is not a session name (it starts with a dash) — ${LAUNCH_USAGE}` }
-  rest = eat(rest.slice(name.length))
 
   let model: string | null = null
   let effort: string | null = null

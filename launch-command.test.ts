@@ -80,6 +80,19 @@ test('@spawn parses identically to @launch, case for case', () => {
   expect(p('@SPAWN t Opus/High go')).toMatchObject({ name: 't', model: 'opus', effort: 'high', message: 'go' })
 })
 
+// The sigil typed twice: every other way of naming a session on this surface wants one, so `@launch
+// @cc-bridge …` is the likely typo, not an exotic one. Left alone it reached the folder name, where
+// the sanitiser turned it into a dash and spawned "-cc-bridge", directory and all.
+test('a leading @ on the name is dropped, not spawned as part of it', () => {
+  expect(p('@launch @cc-bridge do the thing')).toEqual(
+    { kind: 'launch', name: 'cc-bridge', model: null, effort: null, message: 'do the thing' })
+  expect(p('@spawn @test opus/high go')).toMatchObject({ name: 'test', model: 'opus', effort: 'high', message: 'go' })
+  expect(p('@launch @@test go')).toMatchObject({ name: 'test', message: 'go' })
+  // Stripping happens BEFORE the dash refusal, so a mistyped flag behind a sigil is still refused.
+  expect((p('@launch @--help x') as { error: string }).error).toContain('starts with a dash')
+  expect(p('@launch @ do the thing')).toEqual({ kind: 'error', error: LAUNCH_USAGE })
+})
+
 test('empty message and a dash name refuse before anything is created', () => {
   expect(p('@launch test')).toEqual({ kind: 'error', error: `no message — ${LAUNCH_USAGE}` })
   expect(p('@launch test opus/high')).toEqual({ kind: 'error', error: `no message — ${LAUNCH_USAGE}` })

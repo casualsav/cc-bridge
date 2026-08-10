@@ -7515,8 +7515,8 @@ async function handleCall(
         const explicitEffort = args.effort ? String(args.effort).trim().toLowerCase().replace(/^med$/, 'medium') : null
         if (explicitEffort && (explicitEffort === 'auto' || !EFFORT_LEVELS.includes(explicitEffort))) { write({ t: 'result', id, ok: false, text: `unknown effort '${explicitEffort}' — one of: low | medium | high | xhigh | max` }); return }
         // No explicit --effort: same /settings 🧑‍💻 fallback as the model above, and the same `auto`
-        // rule — the caller's --effort is the decision, and a caller that named none gets a floor
-        // that the confirmation admits is one.
+        // rule — the caller's --effort is the decision, and a caller that named none gets the
+        // configured default (a floor where nothing is configured).
         const effortChoice = decideEffort(explicitEffort, configuredSpawnEffort(), spawnDialsAuto())
         const effort = effortChoice.effort
         // Default home: its own folder under the /base dir (new topics are created "under" base).
@@ -7543,7 +7543,7 @@ async function handleCall(
         // spawns — failing the work over a missing annotation would cost the task, not the judgment —
         // but under `auto` the confirmation then says the choice was a fallback, which is the point.
         const why = String(args.why ?? '').replace(/\s+/g, ' ').trim().slice(0, 120)
-        const spec: SpawnSpec = { fromSid, topicName, dir, effort, firstMsg: String(args.text ?? '').trim(), headless, why, autoEffort: effortChoice.autoFallback, ...(probe ? { probe: true } : {}), ...(providerAccount ? { providerAccount } : {}), ...(providerModel ? { providerModel } : {}), ...(explicitModel && !providerRoute?.harness ? { nativeModel: explicitModel } : {}) }
+        const spec: SpawnSpec = { fromSid, topicName, dir, effort, firstMsg: String(args.text ?? '').trim(), headless, why, ...(probe ? { probe: true } : {}), ...(providerAccount ? { providerAccount } : {}), ...(providerModel ? { providerModel } : {}), ...(explicitModel && !providerRoute?.harness ? { nativeModel: explicitModel } : {}) }
         // THE GATE. A gated model does not spawn and then ask — nothing starts until the owner taps.
         // The card used to be minted AFTER the session was already running on the default, which made
         // it decorative: it read as control while providing none, and the only thing a tap could still
@@ -7553,11 +7553,10 @@ async function handleCall(
         // a typo'd folder the caller is no longer around to be told about. Below it, nothing exists yet:
         // no topic tab, no pane, no bus row.
         if (modelChoice.clamped && modelChoice.ask) { text = await holdSpawnForApproval(spec, modelChoice.clamped, launchFallback(modelChoice.model)); break }
-        // `autoFallback` is computed from what the CALLER named, not from what survived the pricing
-        // gate's nulling: a gateway model sets `requested: null` (a provider owns its own catalog), so
-        // decideModel reports "named no model" for a spawn that named one — observed live on a
-        // `--account gateway:deepseek --model deepseek-v4-flash` spawn, 2026-08-03. Who pays and who
-        // chose are different questions.
+        // The override is read from what the CALLER named, not from what survived the pricing gate's
+        // nulling: a gateway model sets `requested: null` (a provider owns its own catalog), so the
+        // gate's own view of a `--account gateway:deepseek --model deepseek-v4-flash` spawn is that it
+        // named nothing — observed live 2026-08-03. Who pays and who chose are different questions.
         // One clause, and the order is the precedence: an ignored flag and a clamp cannot both be
         // true (a flag that was ignored never reached the gate), and an owner-named override that was
         // ALSO clamped reports the clamp — he needs to know his Fable pick is waiting on his tap far
@@ -7565,8 +7564,9 @@ async function handleCall(
         const modelClause = modelChoice.overrodeFlag ? overrodeFlagClause(modelChoice)
           : modelChoice.clamped ? clampedClause(modelChoice)
           : modelChoice.ownerNamed ? ownerNamedClause(modelChoice) : ''
-        const spawned = await launchSpawn(spec, modelChoice.model,
-          modelClause, spawnReason(spec, modelChoice.autoFallback && !explicitModel, effortChoice.autoFallback))
+        const spawned = await launchSpawn(spec, modelChoice.model, modelClause,
+          spawnReason(spec, autoDialOverride(explicitModel, configuredSpawnModel(), AUTO_FALLBACK),
+            autoDialOverride(explicitEffort, configuredSpawnEffort(), AUTO_EFFORT_FALLBACK)))
         if (!spawned.ok) { write({ t: 'result', id, ok: false, text: spawned.text }); return }
         text = spawned.text
         break
@@ -8605,18 +8605,31 @@ function clampedClause(d: ModelDecision): string {
 // `refs` ride the spec for the same reason: the founding ask is minted inside launchSpawn, so a file
 // the owner attached to an `@launch` has nowhere else to travel. Set only by the owner's launcher —
 // `tg spawn` has no --ref, so an agent-made spawn leaves it absent and the block is byte-identical.
-type SpawnSpec = { fromSid: string; topicName: string; dir: string; effort: string | null; firstMsg: string; headless: boolean; why?: string; autoEffort?: boolean; probe?: boolean; providerAccount?: string; providerModel?: string; nativeModel?: string; ownerDirect?: true; ownerMsgId?: number; refs?: string[] }
+type SpawnSpec = { fromSid: string; topicName: string; dir: string; effort: string | null; firstMsg: string; headless: boolean; why?: string; probe?: boolean; providerAccount?: string; providerModel?: string; nativeModel?: string; ownerDirect?: true; ownerMsgId?: number; refs?: string[] }
 
 // The one line the owner reads next to the dials on the spawn confirmation. Two things can put text
-// here and they COMPOSE rather than replace: the caller's own --why, and — under `auto` — whichever
-// dials it left unnamed. A --why that explained the model must not hide the fact that the effort
-// beside it was a floor; a judgment nobody made is exactly what this line exists to surface. In
-// fixed mode with no --why there is nothing to say: the dials are the configured defaults and the
-// panel already states them.
-function spawnReason(spec: SpawnSpec, modelFellBack: boolean, effortFellBack: boolean): string | null {
-  const unnamed = [modelFellBack ? 'model' : null, effortFellBack ? 'effort' : null].filter(Boolean)
-  const note = unnamed.length ? `auto: spawner named no ${unnamed.join(' or ')}` : null
+// here and they COMPOSE rather than replace: the caller's own --why, and — under `auto` — a dial the
+// spawning agent chose FOR ITSELF instead of the configured default. A --why that explained the model
+// must not hide an effort the agent picked beside it; a judgment the owner didn't make is exactly what
+// this line exists to surface.
+//
+// A spawn that names NOTHING says nothing (his ruling, 2026-08-10). It used to report "auto: spawner
+// named no model", which fires on every ordinary default spawn — his own `@launch` included — so the
+// line was on the card whenever there was least to say, and an actual override had nothing to stand
+// out against. The defaults are on the settings panel; only a departure from them is news.
+function spawnReason(spec: SpawnSpec, modelOverride: string | null, effortOverride: string | null): string | null {
+  const chose = [modelOverride ? `model ${modelOverride}` : null, effortOverride ? `effort ${effortOverride}` : null].filter(Boolean)
+  const note = chose.length ? `auto: spawner overrode the default — ${chose.join(', ')}` : null
   return [spec.why || null, note].filter(Boolean).join(' · ') || null
+}
+
+// The dial an agent named, when `auto` is on and it differs from the configured default — null in
+// every other case. Fixed mode reports nothing because there the default is an instruction and a
+// named dial was already ignored (decideModel's `overrodeFlag` clause says so, on its own line);
+// under `auto` the agent is the one choosing, so its choice is the judgment worth naming.
+function autoDialOverride(named: string | null, configuredDefault: string | null, floor: string): string | null {
+  if (!named || !spawnDialsAuto()) return null
+  return named.toLowerCase() === (configuredDefault ?? floor).toLowerCase() ? null : named
 }
 
 // Create the topic, the session row and the pane, then hand the first message over as a founding ask.
@@ -8672,8 +8685,8 @@ async function launchSpawn(spec: SpawnSpec, model: string | null, clampedNote: s
   // for one event. A delivery that then FAILS still says so below, so nothing is lost.
   // The spawn confirmation, and the ONE place the model choice is visible to the person who pays for
   // it: `Spawned @name on Sonnet/High`, with the first message behind the chevron. The reason rides
-  // INSIDE that chevron, one line above the prompt — it is honesty about a judgment (including "auto:
-  // spawner named no model"), which the owner should be able to reach, not read every time. A model
+  // INSIDE that chevron, one line above the prompt — it is honesty about a judgment (a `--why`, or a
+  // dial an agent chose over his default), which he should be able to reach, not read every time. A model
   // that resolved to nothing drops its clause; this line never invents one. No chevron means no
   // expanded view, so a spawn with no first message carries no reason on its card at all — the
   // caller's `ok:` line and the ledger below are where it survives.
@@ -8839,7 +8852,9 @@ async function resolveSpawnHold(h: SpawnHold, outcome: HoldOutcome): Promise<{ o
   // just declined — the fallback alias never reaches the CLI through a harness.
   const { providerAccount: _pa, providerModel: _pm, ...routeless } = h.spec
   const spec = outcome === 'approved' ? h.spec : routeless
-  const r = await launchSpawn(spec, model, '', spawnReason(spec, false, spec.autoEffort === true))
+  // No dial note on a released hold: the model is the one the owner just tapped on (or the fallback
+  // the card names), so the card he read IS the reason. His own `--why` still rides along.
+  const r = await launchSpawn(spec, model, '', spawnReason(spec, null, null))
   const ran = model
   const why = outcome === 'approved' ? `on ${h.alias} — you approved it`
     : outcome === 'denied' ? `on ${ran} — the owner declined ${h.alias}`
@@ -16273,7 +16288,7 @@ async function ownerLaunchSpawn(
   catch (e) { return { ok: false, text: `couldn't create ${dir}: ${(e as Error)?.message ?? e}` } }
   const spec: SpawnSpec = {
     fromSid: laneSid, topicName: name, dir, effort: effortChoice.effort, firstMsg: message,
-    headless: !isTopicMode(), autoEffort: effortChoice.autoFallback, ...(model ? { nativeModel: model } : {}),
+    headless: !isTopicMode(), ...(model ? { nativeModel: model } : {}),
     // His words, so his answer: the founding ask is owner-direct exactly as `@name <message>` is.
     ownerDirect: true, ...(msgId != null ? { ownerMsgId: msgId } : {}),
     ...(files?.length ? { refs: files } : {}),
@@ -16283,8 +16298,10 @@ async function ownerLaunchSpawn(
   if (modelChoice.clamped && modelChoice.ask) {
     return { ok: true, text: await holdSpawnForApproval(spec, modelChoice.clamped, launchFallback(modelChoice.model)) }
   }
-  return launchSpawn(spec, modelChoice.model, '',
-    spawnReason(spec, modelChoice.autoFallback && !model, effortChoice.autoFallback))
+  // No reason line on his own launcher: the dials here are either the configured defaults (which the
+  // settings panel already states) or the ones he typed with his own thumb, and the card he gets back
+  // names them. The line is for a dial an AGENT chose in his absence.
+  return launchSpawn(spec, modelChoice.model, '')
 }
 
 async function handleInbound(
