@@ -74,7 +74,37 @@ test("a spawned session is TOLD the founding message is the owner's — same rea
   // the same argument `formatAskBlock` takes everywhere else, so the risk is passing the flag to the
   // ROW and forgetting the BLOCK — the session then answers correctly-routed prose written for an agent.
   const spawn = daemon.slice(daemon.indexOf('async function launchSpawn('), daemon.indexOf('async function holdSpawnForApproval('))
-  expect(spawn).toContain('formatAskBlock(fromName, p.id, firstMsg, [], false, !!spec.ownerDirect)')
+  expect(spawn).toContain('formatAskBlock(fromName, p.id, firstMsg, foundingRefs, false, !!spec.ownerDirect)')
+})
+
+// A photo or a document he attaches to one of these gestures is HALF the message, and until 2026-08-09
+// it was dropped in silence: the daemon downloaded the file, routed on the caption alone, and minted the
+// ask with `refs: []`. The target read "look at this" with nothing to look at, and no surface anywhere
+// said a file had been sent — which is the shape of bug that gets diagnosed as the worker being careless.
+//
+// Enumerated by ROUTE, not by the one that turned up: all four gestures reach a session, so all four
+// carry the file. The three direct ones funnel through `ownerDirectDispatch`; the spawn half carries it
+// on the spec, for the same reason `ownerDirect` rides there.
+test('a file he attached rides the gesture — every owner-typed route carries it as refs', () => {
+  const at = (needle: string): number => { const i = daemon.indexOf(needle); expect(i).toBeGreaterThan(-1); return i }
+  const body = (fn: string, len = 3000): string => daemon.slice(at(fn), at(fn) + len)
+
+  // The source: the same inbox paths the lane gets as image_path/image_paths/attachment_path.
+  const inbound = body('const inboundFiles =', 300)
+  for (const p of ['albumPaths', 'imagePath', 'attachmentPath']) expect(inbound).toContain(p)
+
+  // Every gesture hands them to the dispatch (or the spec), rather than each deciding for itself.
+  expect(daemon).toContain('routeOwnerAddress(ctx, chat_id, lane.sessionId, content, msgId, inboundFiles)')
+  expect(daemon).toContain('routeOwnerReply(ctx, chat_id, repliedToSid, content, msgId, inboundFiles)')
+  expect(daemon).toContain('v.run(ctx, chat_id, lane.sessionId, content, msgId, inboundFiles)')
+  for (const fn of ['async function routeOwnerAddress(', 'async function routeOwnerReply(', 'async function ownerLaunchAsk('])
+    expect(body(fn)).toMatch(/ownerDirectDispatch\([^)]*, files\)/)
+
+  // And the mint USES them. `refs: []` is what shipped for a year, so the assertion is on the field
+  // reaching createPending, not on the parameter existing.
+  expect(body('async function ownerDirectDispatch(')).toContain('refs, ownerDirect: true')
+  expect(body('async function ownerLaunchSpawn(', 2000)).toContain('{ refs: files }')
+  expect(body('async function launchSpawn(', 9000)).toContain('const foundingRefs = spec.refs ?? []')
 })
 
 test('his own ask confirms by REACTION and gets no sender card — and the reaction fires on DELIVERY', () => {

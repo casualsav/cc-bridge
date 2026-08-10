@@ -8466,7 +8466,10 @@ function clampedClause(d: ModelDecision): string {
 // `ownerDirect`/`ownerMsgId` ride the SPEC rather than being set at the mint, because a held spawn is
 // launched later from the stored spec with no caller left to re-assert them — and the first message of
 // an owner's `@launch` is his words, so its answer belongs to him and not to the lane that minted it.
-type SpawnSpec = { fromSid: string; topicName: string; dir: string; effort: string | null; firstMsg: string; headless: boolean; why?: string; autoEffort?: boolean; probe?: boolean; providerAccount?: string; providerModel?: string; nativeModel?: string; ownerDirect?: true; ownerMsgId?: number }
+// `refs` ride the spec for the same reason: the founding ask is minted inside launchSpawn, so a file
+// the owner attached to an `@launch` has nowhere else to travel. Set only by the owner's launcher —
+// `tg spawn` has no --ref, so an agent-made spawn leaves it absent and the block is byte-identical.
+type SpawnSpec = { fromSid: string; topicName: string; dir: string; effort: string | null; firstMsg: string; headless: boolean; why?: string; autoEffort?: boolean; probe?: boolean; providerAccount?: string; providerModel?: string; nativeModel?: string; ownerDirect?: true; ownerMsgId?: number; refs?: string[] }
 
 // The one line the owner reads next to the dials on the spawn confirmation. Two things can put text
 // here and they COMPOSE rather than replace: the caller's own --why, and — under `auto` — whichever
@@ -8550,9 +8553,10 @@ async function launchSpawn(spec: SpawnSpec, model: string | null, clampedNote: s
     // only make some later, unrelated ask fail, or trip the pause silently (its notice fires
     // on the exact crossing turn only). Spawns stay ungated, exactly as they were when this
     // was a raw paste. Digest/markSeen are skipped too: a session seconds old has no history.
-    const p = createPending({ fromSid, toSid: sid, fromName, toName: topicName, text: firstMsg, refs: [], founding: true,
+    const foundingRefs = spec.refs ?? []
+    const p = createPending({ fromSid, toSid: sid, fromName, toName: topicName, text: firstMsg, refs: foundingRefs, founding: true,
       ...(spec.ownerDirect ? { ownerDirect: spec.ownerDirect } : {}), ...(spec.ownerMsgId != null ? { ownerMsgId: spec.ownerMsgId } : {}) }, Date.now())
-    appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'ask', from: fromName, to: topicName, id: p.id, text: firstMsg, refs: [] })
+    appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'ask', from: fromName, to: topicName, id: p.id, text: firstMsg, refs: foundingRefs })
     // Reserve the ask for THIS closure before anything can see it: the pending exists now but
     // the pane won't be at a prompt for up to 45s, and the 15s sweep would otherwise inject it
     // through tryDeliverAsk while the closure is still waiting — the same block, twice.
@@ -8571,7 +8575,7 @@ async function launchSpawn(spec: SpawnSpec, model: string | null, clampedNote: s
       // interleave with a message the owner types into the new topic mid-boot.
       // `from=owner` for the same reason the flag exists: this founding message is the owner's own
       // words, and the new session has to write its answer for a person rather than for an orchestrator.
-      if (!(await busDeliver(newPane, formatAskBlock(fromName, p.id, firstMsg, [], false, !!spec.ownerDirect)).catch(() => false))) {
+      if (!(await busDeliver(newPane, formatAskBlock(fromName, p.id, firstMsg, foundingRefs, false, !!spec.ownerDirect)).catch(() => false))) {
         removePending(p.id)   // never leave a ghost ask the spawner will be told timed out
         if (group && threadId != null) void channel.sendText(group, `⚠️ Spawned <b>${escapeHtml(topicName)}</b>, but its first message didn't paste — send it again in its topic.`, { threadId: String(threadId) }).catch(() => {})
         else void notifyBusText(fromSid, `⚠️ Spawned <b>@${escapeHtml(topicName)}</b>, but its first message didn't paste — send it again.`)
@@ -15831,17 +15835,19 @@ const PERMISSION_REPLY_RE = /^\s*(y|yes|n|no)\s+([a-km-z]{5})\s*$/i
 // errors included) and false when the text was not its verb at all. The prefix half lives in
 // chat-verbs.ts because the force-reply flows in bot.on('message:text') must consult it too, and
 // chat-verbs.test.ts pins the two lists together.
+// `files` are the inbox paths that rode in with the message (a photo, an album, a document); only
+// `@launch` reads them, and every other row ignores the parameter exactly as it ignores `msgId`.
 type OwnerChatVerb = {
   verb: string
-  run: (ctx: Context, chatId: string, laneSid: string, text: string, msgId?: number) => Promise<boolean>
+  run: (ctx: Context, chatId: string, laneSid: string, text: string, msgId?: number, files?: string[]) => Promise<boolean>
 }
 const OWNER_CHAT_VERBS: readonly OwnerChatVerb[] = [
   {
     verb: 'launch',
-    run: async (ctx, chatId, laneSid, text, msgId) => {
+    run: async (ctx, chatId, laneSid, text, msgId, files) => {
       const parsed = parseLaunch(text, MODEL_ALIASES, SPAWN_EFFORT_LEVELS)
       if (!parsed) return false
-      await runOwnerLaunch(ctx, chatId, laneSid, parsed, msgId)
+      await runOwnerLaunch(ctx, chatId, laneSid, parsed, msgId, files)
       return true
     },
   },
@@ -15934,7 +15940,7 @@ const OWNER_CHAT_VERBS: readonly OwnerChatVerb[] = [
 // "not a routable reply", and the message continues into the lane exactly as before: a reply to the
 // lane's own message (never recorded, §chat-lane skip), a reply to bridge UI (pin card, settings, a
 // readout — never recorded), or a reply to something older than the store's bounds.
-async function routeOwnerReply(ctx: Context, chatId: string, sid: string, text: string, msgId?: number): Promise<boolean> {
+async function routeOwnerReply(ctx: Context, chatId: string, sid: string, text: string, msgId?: number, files?: string[]): Promise<boolean> {
   const reply = (t: string): Promise<unknown> => ctx.reply(t).catch(() => {})
   const name = getTopicBySession(sid)?.name || nameForEndpoint(sid, busEndpoints())
   // The row outlives the session on purpose: a dead target must be NAMED, never silently rerouted
@@ -15956,7 +15962,7 @@ async function routeOwnerReply(ctx: Context, chatId: string, sid: string, text: 
   // he typed with his thumb is the same gesture as the address he types with a name.
   const laneSid = getDmChatSession(chatId)?.sessionId
   if (!laneSid || laneSid === sid) return false   // no lane to mint from, or the lane itself → ordinary conversation
-  await ownerDirectDispatch(reply, laneSid, sid, text, msgId)
+  await ownerDirectDispatch(reply, laneSid, sid, text, msgId, files)
   return true
 }
 
@@ -15972,16 +15978,25 @@ async function routeOwnerReply(ctx: Context, chatId: string, sid: string, text: 
 // Returns the delivery outcome, because `@launch` at a LIVE name is this same act and has one thing
 // to add on top of it (a dials-ignored line). It reuses this rather than minting beside it: a second
 // mint is exactly how the launch path came to be missing `ownerDirect` in the first place.
+//
+// `refs` are the files he attached to the message, as absolute inbox paths. They are NOT run through
+// `confineRef` and must not be: that gate exists because an AGENT naming a path is asserting something
+// about the host, and confining refs to the shared dir is what stops one agent reading a file into
+// another's context. Here the daemon downloaded the file itself, off a photo he sent with his own
+// thumb — there is no assertion to check, and the inbox is where every other inbound file already
+// reaches the lane (`image_path`/`attachment_path`). Until 2026-08-09 this passed `[]` and the file
+// was silently dropped: the target got his caption and no way to know a picture had ever existed.
 async function ownerDirectDispatch(
   reply: (t: string) => Promise<unknown>, laneSid: string, toSid: string, text: string, msgId?: number,
+  refs: string[] = [],
 ): Promise<AskDelivery | 'refused'> {
   const endpoints = busEndpoints()
   const fromName = nameForEndpoint(laneSid, endpoints)
   const toName = nameForEndpoint(toSid, endpoints)
   let p: BusPending
-  try { p = createPending({ fromSid: laneSid, toSid, toKind: 'claude', fromName, toName, text, refs: [], ownerDirect: true, ...(msgId != null ? { ownerMsgId: msgId } : {}) }, Date.now()) }
+  try { p = createPending({ fromSid: laneSid, toSid, toKind: 'claude', fromName, toName, text, refs, ownerDirect: true, ...(msgId != null ? { ownerMsgId: msgId } : {}) }, Date.now()) }
   catch (e) { await reply(`${e instanceof Error ? e.message : e} — nothing was sent`); return 'refused' }
-  appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'ask', from: fromName, to: toName, id: p.id, text, refs: [] })
+  appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'ask', from: fromName, to: toName, id: p.id, text, refs })
   const outcome = await tryDeliverAsk(p).catch(() => 'busy' as const)
   if (outcome !== 'delivered') await reply(askResultText(outcome, toName, p.id, asksAheadOf(p)))
   return outcome
@@ -15997,7 +16012,7 @@ async function ownerDirectDispatch(
 // sentence, and a grammar that refuses every sentence starting with an @ would be worse than no
 // grammar. The one loud failure is a name the bus KNOWS and that is no longer running: he meant a
 // session, so it is named rather than swallowed — the same two gestures routeOwnerReply offers.
-async function routeOwnerAddress(ctx: Context, chatId: string, laneSid: string, text: string, msgId?: number): Promise<boolean> {
+async function routeOwnerAddress(ctx: Context, chatId: string, laneSid: string, text: string, msgId?: number, files?: string[]): Promise<boolean> {
   const parsed = parseAddress(text)
   if (!parsed) return false
   const reply = (t: string): Promise<unknown> => ctx.reply(t).catch(() => {})
@@ -16021,7 +16036,7 @@ async function routeOwnerAddress(ctx: Context, chatId: string, laneSid: string, 
   if (target.kind !== 'claude') { await reply(`@${want} is a hermes endpoint — this addresses Claude sessions`); return true }
   if (target.id === laneSid) return false   // his own lane by name: ordinary conversation, not a bus hop
   // No react here — the confirmation belongs to DELIVERY, not to parsing (tryDeliverAsk's ok branch).
-  await ownerDirectDispatch(reply, laneSid, target.id, parsed.message, msgId)
+  await ownerDirectDispatch(reply, laneSid, target.id, parsed.message, msgId, files)
   return true
 }
 
@@ -16034,7 +16049,7 @@ async function routeOwnerAddress(ctx: Context, chatId: string, laneSid: string, 
 // Both paths mint their work from the CHAT LANE's session id, and that single choice is what routes
 // every reply back into his DM with no new outbound plumbing: the spawn card, the founding ask and
 // the answer all travel the surfaces a chat lane already has.
-async function runOwnerLaunch(ctx: Context, chatId: string, laneSid: string, parsed: ParsedLaunch, msgId?: number): Promise<void> {
+async function runOwnerLaunch(ctx: Context, chatId: string, laneSid: string, parsed: ParsedLaunch, msgId?: number, files?: string[]): Promise<void> {
   const reply = (t: string): Promise<unknown> => ctx.reply(t).catch(() => {})
   if (parsed.kind === 'error') { await reply(parsed.error); return }
   const { name, model, effort, message } = parsed
@@ -16053,7 +16068,7 @@ async function runOwnerLaunch(ctx: Context, chatId: string, laneSid: string, par
   const res = resolveEndpoint(name, endpoints)
   if (!('error' in res)) {
     if (res.kind !== 'claude') { await reply(`@${nameForEndpoint(res.id, endpoints)} is a hermes endpoint — @launch reaches Claude sessions`); return }
-    await ownerLaunchAsk(reply, laneSid, res.id, endpoints, message, model, effort, msgId)
+    await ownerLaunchAsk(reply, laneSid, res.id, endpoints, message, model, effort, msgId, files)
     return
   }
   // Ambiguity is the one resolve failure that must NOT spawn: two live sessions share the name, so
@@ -16062,7 +16077,7 @@ async function runOwnerLaunch(ctx: Context, chatId: string, laneSid: string, par
   if (endpoints.filter(e => !e.closed && normalizeEndpointName(e.name) === normalizeEndpointName(name)).length > 1) {
     await reply(res.error); return
   }
-  const spawned = await ownerLaunchSpawn(laneSid, name, model, effort, message, msgId)
+  const spawned = await ownerLaunchSpawn(laneSid, name, model, effort, message, msgId, files)
   // Success is already on his surface — launchSpawn mints the "Spawned @X on Opus/High" card into
   // this same DM. A second line here would say it twice.
   if (!spawned.ok) await reply(spawned.text)
@@ -16074,14 +16089,14 @@ async function runOwnerLaunch(ctx: Context, chatId: string, laneSid: string, par
 // `ownerDirect`; minting its own ask is what sent every launch answer into the lane instead.
 async function ownerLaunchAsk(
   reply: (t: string) => Promise<unknown>, laneSid: string, toSid: string, endpoints: BusEndpoint[],
-  message: string, model: string | null, effort: string | null, msgId?: number,
+  message: string, model: string | null, effort: string | null, msgId?: number, files?: string[],
 ): Promise<void> {
   const toName = nameForEndpoint(toSid, endpoints)
   if (toSid === laneSid) { await reply(`@${toName} is your own chat lane — say it here instead`); return }
   // repoDispatchPreflight and the depth breaker are deliberately NOT run here. Both gate the chat lane
   // AGENT dispatching work it hasn't examined; this is the owner typing, and handleInbound has already
   // reset the hop guard, so the chain is at depth 0 by construction.
-  const outcome = await ownerDirectDispatch(reply, laneSid, toSid, message, msgId)
+  const outcome = await ownerDirectDispatch(reply, laneSid, toSid, message, msgId, files)
   if (outcome !== 'delivered') return
   // A running session's dials cannot be changed without restarting it, and it is NOT restarted for
   // them — a re-billed context is a cost he didn't ask for. So the line names what it is actually
@@ -16100,6 +16115,7 @@ async function ownerLaunchAsk(
 // The name is free: spawn, through the same primitives `tg spawn` uses.
 async function ownerLaunchSpawn(
   laneSid: string, name: string, model: string | null, effort: string | null, message: string, msgId?: number,
+  files?: string[],
 ): Promise<{ ok: boolean; text: string }> {
   // `humanOrigin`, NOT `ownerNamed`: the daemon read these words off his own message, so no agent is
   // asserting that he said them — which is the entire reason `ownerNamed` exists. decideGate's first
@@ -16120,6 +16136,7 @@ async function ownerLaunchSpawn(
     headless: !isTopicMode(), autoEffort: effortChoice.autoFallback, ...(model ? { nativeModel: model } : {}),
     // His words, so his answer: the founding ask is owner-direct exactly as `@name <message>` is.
     ownerDirect: true, ...(msgId != null ? { ownerMsgId: msgId } : {}),
+    ...(files?.length ? { refs: files } : {}),
   }
   // Unreachable while `humanOrigin` is true — kept so that a later change to the gate cannot turn
   // this path into the one spawn that starts a gated model without asking.
@@ -16282,6 +16299,11 @@ async function handleInbound(
     },
   }
 
+  // The files that rode in with this message, as absolute inbox paths — the same three the meta block
+  // above hands the lane (`image_path` / `image_paths` / `attachment_path`), in the one shape the bus
+  // carries. An album's paths ARE the full set and already include `imagePath` (its first).
+  const inboundFiles = albumPaths?.length ? albumPaths : [imagePath, attachmentPath].filter((p): p is string => !!p)
+
   // ---- The owner's chat-surface verbs, in precedence order ----
   //
   // Everything here is scoped to a private chat with a BOUND chat lane: that lane's sid is what the
@@ -16305,15 +16327,15 @@ async function handleInbound(
       // aside for a verb) in bot.on('message:text'), which runs first.
       const plan = planOwnerRoute({ text: content, forceReplyArmed: false, repliedToSid, laneSid: lane.sessionId })
       if (plan === 'verb') {
-        for (const v of OWNER_CHAT_VERBS) if (await v.run(ctx, chat_id, lane.sessionId, content, msgId)) return
+        for (const v of OWNER_CHAT_VERBS) if (await v.run(ctx, chat_id, lane.sessionId, content, msgId, inboundFiles)) return
       }
       // `address` is the one plan that can decline (the name is nobody), so it CASCADES rather than
       // returning: an unresolved `@word` that is also a reply to a session's card must still route on
       // the gesture, and after that it is ordinary conversation. Written as a fall-through chain
       // instead of a switch for exactly that reason.
-      if (plan === 'address' && await routeOwnerAddress(ctx, chat_id, lane.sessionId, content, msgId)) return
+      if (plan === 'address' && await routeOwnerAddress(ctx, chat_id, lane.sessionId, content, msgId, inboundFiles)) return
       if ((plan === 'session-reply' || plan === 'address') && repliedToSid && repliedToSid !== lane.sessionId) {
-        if (await routeOwnerReply(ctx, chat_id, repliedToSid, content, msgId)) return
+        if (await routeOwnerReply(ctx, chat_id, repliedToSid, content, msgId, inboundFiles)) return
       }
     }
   }
