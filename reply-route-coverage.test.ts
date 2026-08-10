@@ -52,6 +52,31 @@ test('the post handler passes the AUTHOR, not nothing — the row needs a subjec
   expect(post).toContain('rememberMsgRoute(chat, ref?.messageId, fromSid)')
 })
 
+// ---- 📣 MEANS ONE THING: A SESSION IS REACHING FOR A HUMAN --------------------------------------
+// His ruling, 2026-08-10. The glyph is only worth anything while it stays scarce, so the negative
+// half is the load-bearing one: put it on the collapsed, silent, agent-to-agent chevron traffic and
+// it stops meaning "read this" — which is the failure that cannot be seen from inside the code.
+
+test('both surfaces that reach for a human carry the SAME header — 📣 @name, no other word', () => {
+  const post = bodyOf('async function sendPost(', 1400)
+  const answer = bodyOf('async function sendOwnerAnswerCard(', 2400)
+  expect(post).toContain('📣 <b>@${escapeHtml(fromName)}</b>')
+  expect(answer).toContain('📣 <b>@${escapeHtml(fromName)}</b>')   // the classic branch, identical to the post's
+  expect(answer).toContain('📣 **@${fromName}**')                  // …and the rich branch, so it can't depend on the renderer
+  // "From" is gone from both branches: the glyph says a session is talking, the name says which.
+  expect(answer).not.toContain('From @')
+})
+
+test('the silent chevron cards never take the attention glyph', () => {
+  // sendBusCard is the agent-to-agent mirror: collapsed, silent, and not addressed to him. A 📣 here
+  // is the whole way this convention dies.
+  const card = bodyOf('async function sendBusCard(', 1600)
+  expect(card).not.toContain('📣')
+  // The bridge's own decision cards keep their own icons — they are the bridge asking, not a session
+  // speaking — so the glyph stays a statement about WHO is talking.
+  expect(bodyOf('async function holdSpawnForApproval(', 1200)).not.toContain('📣')
+})
+
 // ---- THE CONTROLS. Each of these must keep landing in the chat lane. ---------------------------
 
 test('the chat lane is never a reply target — its own messages stay ordinary conversation', () => {

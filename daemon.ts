@@ -3855,6 +3855,19 @@ async function sendPost(chat: string, fromName: string, body: string, fromSid?: 
 // this one, and a chevron he has to open — silent, indistinguishable from the agent-to-agent traffic
 // mirrored beside it — is how a reply gets missed. So: expanded, notifying, and headed with the name
 // he addressed. Routable, like every card with a session behind it: replying continues the thread.
+//
+// 📣 IS THE ATTENTION GLYPH, AND IT MEANS ONE THING: A SESSION IS REACHING FOR A HUMAN (his ruling,
+// 2026-08-10). This card carried "📨 From @name" while the horn post carried "📣 @name", which made
+// two members of one class look like two classes — they were already identical in every other
+// property (expanded, no disclosure, notifying, routable, headed with the session's name), so the
+// header was the last thing disagreeing. It is now the SAME header, byte for byte: `📣 @name`. He
+// dropped the "From" himself, and it was carrying nothing — the glyph already says a session is
+// talking and the name already says which.
+//
+// The boundary is what keeps it informative: the collapsed, silent, agent-to-agent chevron cards
+// must NEVER take it, because a glyph that appears on traffic he does not have to read stops meaning
+// "read this". Bridge-authored decisions keep their own icons (🔐 permission, 🧠 held spawn) — those
+// are the bridge asking, not a session speaking.
 const OWNER_ANSWER_CAP = POST_CAP
 // A TABLE IN THE ANSWER TAKES THE RICH RENDERER (the owner, 2026-08-09, on receiving a ccusage table
 // through this card as raw pipes: "when things like tables are displayed, it should pick it up and be
@@ -3874,7 +3887,7 @@ async function sendOwnerAnswerCard(chat: string, fromName: string, body: string,
   const hasFencedCode = /(^|\n)[ \t]{0,3}```/.test(shown)
   if (loadAccess().renderMarkdown !== false && (!hasFencedCode || hasMarkdownTable(shown))) {
     try {
-      const m = await sendRichMessage(TOKEN!, chat, toInputRichMessage(`📨 **From @${fromName}**\n\n${shown}`), {})
+      const m = await sendRichMessage(TOKEN!, chat, toInputRichMessage(`📣 **@${fromName}**\n\n${shown}`), {})
       rememberMsgRoute(chat, m?.message_id, subjectSid)
       return
     } catch (e) {
@@ -3888,7 +3901,7 @@ async function sendOwnerAnswerCard(chat: string, fromName: string, body: string,
   // The ENVELOPE stays bridge-built and escaped; only the BODY is rendered. That split is the whole
   // anti-impersonation story: an agent's text passes through a renderer that escapes first and emits
   // a fixed tag whitelist, so it can never produce the header's markup or close it.
-  const html = `📨 <b>From @${escapeHtml(fromName)}</b>\n\n${mdToTelegramHtml(shown)}`
+  const html = `📣 <b>@${escapeHtml(fromName)}</b>\n\n${mdToTelegramHtml(shown)}`
   const ref = await channel.sendText(chat, html).catch(e => {
     process.stderr.write(`daemon: owner answer card from @${fromName} failed: ${e}\n`); return null
   })
