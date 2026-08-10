@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { parseLaunch, LAUNCH_USAGE } from './launch-command.ts'
+import { parseLaunch, parseSpawnAddress, parseLaunchArgs, LAUNCH_USAGE, SPAWN_SLASH_USAGE } from './launch-command.ts'
 
 const MODELS = ['fable', 'opus', 'sonnet', 'haiku']
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
@@ -78,6 +78,59 @@ test('@spawn parses identically to @launch, case for case', () => {
   expect(p('what is @spawn anyway')).toBeNull()
   expect(p('@spawner test do the thing')).toBeNull()
   expect(p('@SPAWN t Opus/High go')).toMatchObject({ name: 't', model: 'opus', effort: 'high', message: 'go' })
+})
+
+// ---- The other two spellings, asserted as EQUIVALENCE over the same cases ----------------------
+//
+// Same reasoning as the `@spawn` run above: the risk of a second spelling is a branch only one of
+// them reaches, and a same-object check covers the dial token, the refusals and the message-boundary
+// rule in one pass. Only the usage line in an error may differ — it has to name the form he typed.
+const CASES = [
+  '@launch test opus/high send me the word ping',
+  '@launch general name the top 10 processes using the most ram on this box',
+  '@launch t sonnet go', '@launch t /xhigh go', '@launch t opus/med go',
+  '@launch notes high level summary of X',
+  '@launch t /srv/chat is where it lives',
+  '@launch t gpt5 is not a model',
+  '@launch t fable/max fix the bug:\n\n  - step one',
+  '@launch t\nopus/high do it',
+]
+
+test('`@<name> /spawn …` is the same verb target-first, and parses identically', () => {
+  const s = (raw: string) => parseSpawnAddress(raw, MODELS, EFFORTS)
+  for (const c of CASES) {
+    const [, name, tail] = /^@launch[ \t]+(\S+)([\s\S]*)$/.exec(c)!
+    expect(s(`@${name} /spawn${tail}`)).toEqual(p(c))
+  }
+  expect(s('@cc-bridge /spawn opus/high hello')).toEqual(
+    { kind: 'launch', name: 'cc-bridge', model: 'opus', effort: 'high', message: 'hello' })
+  // Not this spelling at all → null, so the caller carries on down its chain.
+  expect(s('@general /compact')).toBeNull()          // an ordinary slash relay
+  expect(s('@general ship the fix')).toBeNull()      // an ordinary address
+  expect(s('@general /spawning stuff')).toBeNull()   // whole word only
+  expect(s('what about @general /spawn x')).toBeNull()
+  // The message is still required, and the refusal names the form he typed.
+  expect(s('@web /spawn')).toEqual({ kind: 'error', error: `no message — ${SPAWN_SLASH_USAGE}` })
+  expect(s('@web /spawn opus/turbo go')).toMatchObject({ kind: 'error' })
+})
+
+test('`/launch <name> …` and `/spawn <name> …` parse identically to the sigil form', () => {
+  const a = (args: string, verb: 'launch' | 'spawn' = 'launch') => parseLaunchArgs(args, MODELS, EFFORTS, verb)
+  for (const c of CASES) {
+    const args = c.slice('@launch'.length)
+    expect(a(args)).toEqual(p(c))
+    expect(a(args, 'spawn')).toEqual(p(c))
+  }
+  expect(a(' cc-bridge opus/high hello', 'spawn')).toEqual(
+    { kind: 'launch', name: 'cc-bridge', model: 'opus', effort: 'high', message: 'hello' })
+  // NO ARGS IS NULL, NOT AN ERROR: that is what leaves bare `/launch` its own long-standing meaning.
+  expect(a('')).toBeNull()
+  expect(a('   ')).toBeNull()
+  // Args that don't parse are refused rather than falling back to that meaning — and the usage names
+  // the command he typed, not the sigil form.
+  expect(a(' test')).toEqual({ kind: 'error', error: 'no message — usage: /launch <name> [model/effort] <message>' })
+  expect(a(' test', 'spawn')).toEqual({ kind: 'error', error: 'no message — usage: /spawn <name> [model/effort] <message>' })
+  expect((a(' --help x') as { error: string }).error).toContain('starts with a dash')
 })
 
 // The sigil typed twice: every other way of naming a session on this surface wants one, so `@launch

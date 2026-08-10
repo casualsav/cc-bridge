@@ -24,6 +24,23 @@ test('@spawn is @launch under another spelling, and is reported as launch', () =
   expect(CHAT_VERBS.some(v => v.verb === 'spawn')).toBe(false)
 })
 
+// `@<name> /spawn …` is the THIRD spelling of the same verb — target-first, like every other
+// cross-session gesture on this surface. The slash is the whole point: `@web spawn a worker for X`
+// must stay an ordinary message to @web, and only a leading `/` separates them with no guessing.
+test('the target-first spelling is the launch verb, and only with the slash', () => {
+  expect(chatVerbIn('@cc-bridge /spawn opus/high hello')).toBe('launch')
+  expect(chatVerbIn('  @web /SPAWN go')).toBe('launch')
+  expect(chatVerbIn('@web spawn a worker for X')).toBeNull()      // no slash: an ordinary message
+  expect(chatVerbIn('@web /spawning stuff')).toBeNull()           // whole word only
+  expect(chatVerbIn('@web /compact')).toBeNull()                  // an ordinary slash relay
+  expect(chatVerbIn('what about @web /spawn x')).toBeNull()       // start of the message only
+  // Tested AFTER the table, so a name that is itself a verb stays that verb's malformed input rather
+  // than becoming a session called "kill".
+  expect(chatVerbIn('@kill /spawn x')).toBe('kill')
+  // Still one row and one handler — the third spelling did not buy itself a second code path.
+  expect(CHAT_VERBS.filter(v => v.verb === 'launch')).toHaveLength(1)
+})
+
 // ---- THE PRECEDENCE CHAIN, asserted as an order rather than as four separate rules -------------
 // verb > force-reply > session-reply > lane. Each row below is the SAME message under one more
 // competing claim, so a reordering breaks the run rather than one isolated case.
@@ -32,6 +49,8 @@ const CHAIN: Array<[string, Parameters<typeof planOwnerRoute>[0], OwnerRoute]> =
     { text: '@launch test do the thing', forceReplyArmed: true, repliedToSid: 'sid-worker', laneSid: 'sid-lane' }, 'verb'],
   ['the alias spelling has the same precedence — it is the same verb',
     { text: '@spawn test do the thing', forceReplyArmed: true, repliedToSid: 'sid-worker', laneSid: 'sid-lane' }, 'verb'],
+  ['the target-first spelling has the same precedence — still the same verb',
+    { text: '@web /spawn go', forceReplyArmed: true, repliedToSid: 'sid-worker', laneSid: 'sid-lane' }, 'verb'],
   ['an armed force-reply beats a session reply',
     { text: '/srv/chat', forceReplyArmed: true, repliedToSid: 'sid-worker', laneSid: 'sid-lane' }, 'force-reply'],
   ['an armed force-reply also beats a TYPED address — a folder answer starting with @ is still a folder',
@@ -125,6 +144,24 @@ test('a name verb only matches its own verb, and never mid-sentence', () => {
 // force-reply block stands aside for them — and they read different lists. A verb handled but not
 // recognised here would be swallowed by any armed force-reply prompt; recognised but not handled, it
 // would stand a prompt aside and then do nothing at all. Both are silent.
+// THE OTHER HALF OF THE TARGET-FIRST SPELLING. `@name /cmd` is claimed by the cross-session slash
+// relay, which runs in bot.on('message:text') BEFORE handleInbound ever sees the verb table — so a
+// relay that keeps `/spawn` sends it to namedTarget, which refuses a name that doesn't exist yet.
+// Static, and it is a wiring check, not a behaviour one: what it can catch is the guard being dropped.
+test('the cross-session slash relay stands aside for /spawn, and only in the DM', () => {
+  const daemon = readFileSync(join(import.meta.dir, 'daemon.ts'), 'utf8')
+  const relay = daemon.slice(daemon.indexOf('const cross = /^@(\\S+)'), daemon.indexOf('const result = gate(ctx)', daemon.indexOf('const cross = /^@(\\S+)')))
+  expect(relay).toContain('!spawnAddress')
+  // Scoped to the DM: in a bound group the relay keeps the spelling and keeps failing loudly, rather
+  // than falling through to be typed into a pane as prompt text.
+  const guard = daemon.slice(daemon.indexOf('const spawnAddress ='), daemon.indexOf('const cross = /^@(\\S+)'))
+  expect(guard).toContain("ctx.chat?.type === 'private'")
+  expect(guard).toContain('LAUNCH_SLASH_RE.test(text)')
+  // …and `/spawn` is a REGISTERED command, which is what keeps the bare slash spelling off the
+  // unknown-command relay that types the text into a live pane for the CLI's palette to guess at.
+  expect(daemon).toContain("bot.command('spawn'")
+})
+
 test('every verb in the daemon table is in the prefix list, and vice versa', () => {
   const daemon = readFileSync(join(import.meta.dir, 'daemon.ts'), 'utf8')
   const table = daemon.slice(daemon.indexOf('const OWNER_CHAT_VERBS'), daemon.indexOf('// ---- Reply-to-route'))

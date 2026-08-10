@@ -18,6 +18,16 @@
 // quietly missing a branch. `chatVerbIn` therefore reports the canonical name for both.
 export const LAUNCH_RE = /^\s*@(?:launch|spawn)(?=\s|$)/i
 
+// `@<name> /spawn [model/effort] <message>` — the SAME verb again, spelled TARGET-FIRST, which is how
+// every other cross-session gesture on this surface reads (`@name /compact`, `@name /clear`). The
+// slash is what makes it safe: `@name spawn a worker for X` has to stay an ordinary message to @name,
+// and only a leading `/` can tell the two apart with no guessing about the first word.
+//
+// Not a row of its own — a row is a second handler, and the whole point is that this reaches the one
+// launch handler. `chatVerbIn` tests it AFTER the table so `@kill /spawn …` is still the kill verb's
+// malformed input rather than a session named "kill".
+export const LAUNCH_SLASH_RE = /^\s*@([A-Za-z0-9][\w.-]*)\s+\/spawn(?=\s|$)/i
+
 export const CHAT_VERBS: readonly { verb: string; re: RegExp }[] = [
   { verb: 'launch', re: LAUNCH_RE },
   { verb: 'kill', re: /^\s*@kill(?=\s|$)/i },
@@ -56,7 +66,7 @@ export function parseNameVerb(raw: string, verb: 'kill' | 'reopen' | 'watch'): P
 // `@launch` in the middle of a sentence is prose about the feature, not a use of it.
 export function chatVerbIn(text: string): string | null {
   for (const { verb, re } of CHAT_VERBS) if (re.test(text)) return verb
-  return null
+  return LAUNCH_SLASH_RE.test(text) ? 'launch' : null
 }
 
 // ---- The two voices --------------------------------------------------------------------------
@@ -84,8 +94,9 @@ export const spawnGesture = (g: Gestures): string => g === 'cli' ? '`tg spawn`' 
 // as ordinary conversation. `@anthropic shipped X` is a sentence, not a syntax error.
 //
 // A payload starting with `/` is refused here because `@name /cmd` is already THE spelling for acting
-// on another session's CLI (handled ahead of this, in bot.on('message:text')). Two grammars for one
-// gesture is how the weaker one becomes a silent misfire.
+// on another session's CLI (handled ahead of this, in bot.on('message:text')) — and `/spawn`, the one
+// member of that shape aimed at a name that does NOT exist yet, is a verb by the rule above and never
+// reaches here either. Two grammars for one gesture is how the weaker one becomes a silent misfire.
 export type ParsedAddress = { name: string; message: string }
 export function parseAddress(raw: string): ParsedAddress | null {
   if (chatVerbIn(raw)) return null

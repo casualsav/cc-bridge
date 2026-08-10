@@ -191,9 +191,9 @@ import { readHandoffState, ctxNudgeHandoffClause, handoffAnnotation } from './ha
 import { planBoxUsageWarn, type UsageWarnMarker } from './usage-warn.ts'
 import { spawnModelFlag, WIDE_CONTEXT_SUFFIX } from './model-window.ts'
 import { buildModelSelector, MODEL_ALIASES, MODEL_ALIAS_IDS, planModelSelection, type ModelSelector } from './model-catalog.ts'
-import { parseLaunch, type ParsedLaunch } from './launch-command.ts'
+import { parseLaunch, parseSpawnAddress, parseLaunchArgs, type ParsedLaunch } from './launch-command.ts'
 import { createMsgRoutes, type MsgRouteMap } from './msg-routes.ts'
-import { chatVerbIn, planOwnerRoute, parseNameVerb, parseAddress, undoGesture, forceGesture, spawnGesture, type Gestures } from './chat-verbs.ts'
+import { chatVerbIn, planOwnerRoute, parseNameVerb, parseAddress, undoGesture, forceGesture, spawnGesture, LAUNCH_SLASH_RE, type Gestures } from './chat-verbs.ts'
 import { parseSchedule, SCHEDULE_USAGE, ambiguousBareNumber, allBareNumericCron } from './schedule-time.ts'
 import {
   initStatusCard, statusCardText, statusKeyboard, updateSessionPin, updateTopicPins,
@@ -9562,12 +9562,46 @@ async function launchAgentSession(ctx: Context, kind: AgentKind, paneId: string 
     { parse_mode: 'HTML' })
 }
 
+// `/launch <name> [model/effort] <message>` — the one-line launcher, reached from the slash menu
+// instead of the `@` sigil. The SAME handler `@launch` runs (runOwnerLaunch): one grammar, one
+// already-live-name rule, one spawn card. Returns false when the command carried no arguments, which
+// is how bare `/launch` keeps the meaning it has always had.
+//
+// It needs the DM's chat lane, because that lane's sid is what the launch mints from and what routes
+// every reply back to him. In a group there is none, so it says so instead of quietly launching
+// something else.
+async function runSlashLaunch(ctx: Context, verb: 'launch' | 'spawn'): Promise<boolean> {
+  const parsed = parseLaunchArgs((ctx.match ?? '').toString(), MODEL_ALIASES, SPAWN_EFFORT_LEVELS, verb)
+  if (!parsed) return false
+  const chatId = String(ctx.chat!.id)
+  const lane = ctx.chat?.type === 'private' ? getDmChatSession(chatId) : null
+  if (!lane) {
+    await ctx.reply(`<code>/${verb} &lt;name&gt; …</code> works in our DM — that is where the chat lane it launches from lives.`,
+      { parse_mode: 'HTML' }).catch(() => {})
+    return true
+  }
+  await runOwnerLaunch(ctx, chatId, lane.sessionId, parsed, ctx.message?.message_id)
+  return true
+}
+
 // The menu-visible "get me a session" command — what `cc-bridge` does from a terminal, minus the
 // terminal: bootstraps tmux if needed and spawns Claude Code in the last-used folder.
 bot.command('launch', async ctx => {
   if (!dmCommandGate(ctx)) return
+  if (await runSlashLaunch(ctx, 'launch')) return
   const { paneId } = await targetPaneOf(ctx)
   await launchAgentSession(ctx, 'claude', paneId)
+})
+
+// `/spawn` is the same verb under the CLI's word, exactly as `@spawn` is — kept out of the
+// setMyCommands menu for the same reason /yolo is, an alias earns no second row. Registering it as a
+// COMMAND is also what keeps it off the unknown-slash relay, which would otherwise type `/spawn …`
+// into a live pane for the CLI's palette to fuzzy-match. Bare, it has no fresh-session meaning of its
+// own to fall back on — this verb takes a name — so it answers with the usage.
+bot.command('spawn', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  if (await runSlashLaunch(ctx, 'spawn')) return
+  await ctx.reply('usage: /spawn &lt;name&gt; [model/effort] &lt;message&gt;', { parse_mode: 'HTML' }).catch(() => {})
 })
 
 // Keep Claude Code as the harness while swapping only its inference provider. This is intentionally
@@ -16006,7 +16040,11 @@ const OWNER_CHAT_VERBS: readonly OwnerChatVerb[] = [
   {
     verb: 'launch',
     run: async (ctx, chatId, laneSid, text, msgId, files) => {
+      // Two spellings, one row and one handler: `@launch|@spawn <name> …` and the target-first
+      // `@<name> /spawn …`. Everything downstream sees the same ParsedLaunch, so neither spelling can
+      // reach a branch the other doesn't.
       const parsed = parseLaunch(text, MODEL_ALIASES, SPAWN_EFFORT_LEVELS)
+        ?? parseSpawnAddress(text, MODEL_ALIASES, SPAWN_EFFORT_LEVELS)
       if (!parsed) return false
       await runOwnerLaunch(ctx, chatId, laneSid, parsed, msgId, files)
       return true
@@ -18075,8 +18113,19 @@ bot.on('message:text', async ctx => {
   // THE one supported spelling for acting on another session. Two commands are intercepted rather
   // than relayed, because neither is something the target's CLI can run: /exit has to go through the
   // undoable close path, and /restart is a bridge command the CLI would just reject.
+  //
+  // `/spawn` is the ONE payload of this shape that is not a relay and never reaches a pane: it names
+  // a session that does not exist yet, so there is nothing to relay to and `namedTarget` would refuse
+  // it loudly. It stands aside here and is handled as the launch verb, one spelling of it, in
+  // handleInbound below — which is also what makes `@<name> /spawn` work at a name that IS live
+  // (delivered as a message, exactly as `@launch <live name>` is).
+  //
+  // Standing aside is scoped to the DM, because that is the only surface the launch verb runs on (it
+  // mints from the chat lane). In a bound group the relay keeps this spelling and keeps failing
+  // loudly, which beats falling through to be typed into a pane as prompt text.
+  const spawnAddress = ctx.chat?.type === 'private' && LAUNCH_SLASH_RE.test(text)
   const cross = /^@(\S+)\s+(\/\S[\s\S]*)$/.exec(text)
-  if (cross && (ctx.chat?.type === 'private' || isTopicMode())
+  if (cross && !spawnAddress && (ctx.chat?.type === 'private' || isTopicMode())
       && (!botUsername || cross[1].toLowerCase() !== botUsername.toLowerCase())) {
     const result = gate(ctx)
     if (result.action !== 'deliver') {
