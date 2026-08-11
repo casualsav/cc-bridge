@@ -20204,7 +20204,19 @@ async function webappSessionFeed(sid: string): Promise<WebappSessionFeed | null>
   // The live working line off that SAME capture (no second tmux spawn). Absent between turns, and
   // absent on a tick that misses the line — the client treats "no status" as "nothing to show", so
   // there is nothing to hold over.
-  const status = cap ? parseWorkingStatus(cap) : null
+  //
+  // GATED ON `detectWorking`, WHICH IS THE STRICTER READ OF THE SAME CAPTURE: it wants "esc to
+  // interrupt" or a spinner line carrying a real TIMER, where parseWorkingStatus will settle for a
+  // verb. That difference is the whole guard. An idle pane keeps showing the last turn's screen
+  // forever, so a line that parses wrongly parses wrongly on every 3s poll — and one did, pinning a
+  // permanent working row on a reply of Claude's whose first line held an ellipsis (2026-08-11).
+  //
+  // It is deliberately NOT gated on this feed's `working`, which is read from the TRANSCRIPT and lags
+  // the pane by the seconds between a prompt landing and the first assistant entry: gating on it made
+  // the row vanish for the whole thinking pause after every message he sent, which is exactly when a
+  // person most wants to see it (his report, same day). The pane knows first; the transcript knows
+  // later; this row is about the pane.
+  const status = cap && detectWorking(cap) ? parseWorkingStatus(cap) : null
   const dial = {
     // Home-abbreviated, because this is the header's one-line subtitle and it truncates from the
     // END — `~/projects/x` keeps the leaf that identifies the session where `/home/ubuntu/projec…`

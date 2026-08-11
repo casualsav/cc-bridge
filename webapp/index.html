@@ -2269,6 +2269,12 @@ const SUCCESS_TOASTS = false;
 const showDone = m => { if (SUCCESS_TOASTS) showOk(m); };
 
 const LONG_MSG = 700;   // chars past which a feed bubble collapses behind a tap-to-expand
+// A bus row's header: where the words went, since the row is the session's own words either way and
+// nothing else distinguishes an answer to another agent from a reply to YOU.
+// A POST has no addressee — it is the definitional broadcast to the humans — and in the owner's own
+// feed "the humans" is him, which is why it read as odd (his words, 2026-08-11). So that one case is
+// a whole phrase rather than a verb plus a target: "Sent to you". The rest keep `verb · @who`.
+const VIA_LABEL = { answer: "Answered · ", post: "Sent to you", ack: "FYI · ", ask: "Asked · ", btw: "Aside · ", chat: "Sent · " };
 // Which row is "the last reply" — the one the fold exempts and the one paintFeed fetches in full.
 // ONE definition, because those two disagreeing is a message that renders unfolded and clipped at
 // 4000 chars with no way left to read the rest.
@@ -3166,13 +3172,14 @@ function bubble(i, n, all) {
   if (i.role === "agent") inner += '<div class="ah"><span class="nm"><span class="lb">Agent · </span>'
     + esc(i.agent || "") + "</span>"
     + (i.status ? '<span class="st' + (i.status === "completed" ? "" : " bad") + '">' + esc(i.status) + "</span>" : "") + "</div>";
-  // A row the session said OVER THE BUS (`via`/`to`) renders as an ORDINARY BUBBLE, with no header
-  // naming where it went — the owner, 2026-08-11: "I don't need to see 'posted' at all in the mini
-  // app, it's just supposed to be a clean CLI/IDE type experience". The words are the session's own
-  // either way, which is what makes the plain bubble honest. Accepted cost, named because it is the
-  // reason the line existed: agent-to-agent traffic now reads as if it were said to YOU. The `via`
-  // FIELD is untouched and still load-bearing — it is what routes an expansion to the outbound
-  // mirror instead of the transcript.
+  // A row the session said OVER THE BUS carries where it went. Same header element the agent card
+  // uses, so it needs no CSS of its own. Removed on the owner's ask that morning ("I don't need to
+  // see 'posted'"), restored on his ask the same afternoon with the wording fixed — the objection was
+  // "the humans" naming HIM in his own feed, not the line itself. Without it, agent-to-agent traffic
+  // reads as the session talking to YOU, which it wasn't. The `to` is dropped for a post: its label
+  // is already a whole sentence naming the reader.
+  if (i.via) inner += '<div class="ah"><span class="nm"><span class="lb">' + esc(VIA_LABEL[i.via] || "Sent") + "</span>"
+    + esc(i.via === "post" ? "" : i.to ? "@" + i.to : "") + "</span></div>";
   // Once the full text has been fetched it replaces the clamped copy, and because it lives in a cache
   // rather than in the DOM it survives the 3s repaint that would otherwise throw it away.
   const full = i.uuid ? fullText[i.uuid] : null;
@@ -3673,14 +3680,12 @@ function syncWorkClock(elapsed) {
 }
 function paintWork() {
   const feed = $("dfeed");
-  // THE ROW IS GATED ON THE SESSION ACTUALLY WORKING, not on a status line having parsed. `status` is
-  // a read of the PANE and the pane keeps showing the last turn's screen forever, so a line that
-  // parses wrongly parses wrongly on every 3s poll — which is how the owner got a permanent working
-  // row reading "Gone — v0.5.63 live. Bus rows…" off a reply of mine (2026-08-11; the parser was
-  // tightened too, in prompt.ts). `working` comes from the TRANSCRIPT (turnInProgress || live
-  // subagents), so it ends when the turn does whatever the screen looks like. The Telegram card has
-  // always been gated this way (`working && preTool`); this is the mini app catching up.
-  const st = lastDrill && lastDrill.working ? lastDrill.status : null;
+  // The row follows `status`, and `status` alone — the DAEMON decides whether the pane is working
+  // (`detectWorking`, the timer-anchored read) and simply does not ship one otherwise. A gate here on
+  // this payload's `working` was tried and reverted the same day: that field comes from the
+  // transcript, which lags the pane by the whole thinking pause after a prompt lands, so the row
+  // disappeared for the seconds a person most wants it. One gate, on the side that knows first.
+  const st = lastDrill && lastDrill.status;
   // The optimistic window covers the gap between hitting send and the first poll that sees the pane
   // working. It is bounded: a send that never starts a turn must not leave a permanent lie on screen.
   const show = st || (workOptimisticAt && Date.now() - workOptimisticAt < 20000);

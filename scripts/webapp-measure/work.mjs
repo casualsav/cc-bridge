@@ -12,12 +12,12 @@ const FEED = { sid:"eea261db", name:"cc-bridge", working:true,
     { role:"assistant", text:"Reading the client's feed renderer to place this correctly.", ts:1785200060000 },
   ] };
 const NO_STATUS = { ...FEED, status: undefined };
-// A CONCLUDED turn whose pane still parses as a status line. `status` is a read of the SCREEN, which
-// keeps showing the last turn forever, so a mis-parse repeats on every 3s poll — the owner's mini app
-// held a permanent row reading "Gone — v0.5.63 live. Bus rows…" off a reply of Claude's whose first
-// line carried an ellipsis mid-sentence (2026-08-11). The row follows `working`, which comes from the
-// transcript and ends when the turn does.
-const STALE_STATUS = { ...FEED, working: false, status: { verb: "Gone — v0.5.63 live. Bus rows", elapsed: null, tokens: null } };
+// A status with the transcript NOT yet showing a turn — the seconds between his message landing and
+// the first assistant entry. The row must be up: the pane knows first, and a gate on `working` here
+// (tried and reverted 2026-08-11) blanked the row for the whole thinking pause after every prompt.
+// The mis-parse this looks like it should catch is gated in the DAEMON instead, which ships no status
+// for a pane `detectWorking` calls idle — see prompt.test.ts, "a REPLY is not a spinner line".
+const EARLY_STATUS = { ...FEED, working: false };
 const SESSION = { sid:"eea261db", name:"cc-bridge", alive:true, working:true, cwd:"~/projects/cc-bridge",
   model:"Opus 5", effort:"high" };
 const OUT = process.argv[2] || "work";
@@ -51,12 +51,12 @@ const b = await chromium.launch();
   await p.close();
 }
 
-// ---- Second control: a status on a CONCLUDED turn -> still no row (the 2026-08-11 permanent row). ----
+// ---- Second control: a status BEFORE the transcript catches up -> the row is already up. ----
 {
-  const p = await openPage(b, { vars: null, feed: STALE_STATUS });
+  const p = await openPage(b, { vars: null, feed: EARLY_STATUS });
   const has = await p.evaluate(() => !!document.querySelector(".work"));
-  console.log("CONTROL (status present, turn concluded) — .work present:", has,
-    has ? "FINDING: the row outlives the turn!" : "OK, the row follows `working`");
+  console.log("CONTROL (status present, transcript not yet working) — .work present:", has,
+    has ? "OK, the pane knows first" : "FINDING: blank for the whole thinking pause!");
   await p.close();
 }
 

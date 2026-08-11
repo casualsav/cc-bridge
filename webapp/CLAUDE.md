@@ -382,18 +382,19 @@ give it.
 
 ## Working row
 
-- **The row follows `working`, NOT the presence of a parsed `status`.** `status` is a read of the
-  PANE, and a pane keeps showing the last turn's screen forever — so a line that parses wrongly
-  parses wrongly on every 3s poll and the row never comes down. That is exactly what happened
-  (2026-08-11): `●` is Claude Code's bullet for a REPLY as well as a spinner frame, and a reply whose
-  first line carried `FYI · …` mid-sentence parsed as a live turn, pinning a permanent row reading
-  "Gone — v0.5.63 live. Bus rows…". `working` comes from the TRANSCRIPT (`turnInProgress ||
-  liveSubagents`) and ends when the turn does, whatever the screen looks like — the Telegram card was
-  always gated this way (`working && preTool`); this was the mini app catching up. The parser was
-  tightened in the same change (`prompt.ts`: an ellipsis must CLOSE the line, not merely appear in
-  it), and both halves are needed — a parse can still be wrong, and only the gate bounds how long a
-  wrong one is visible. `work.mjs`'s second control is the guard; it renders the row on the
-  pre-change page and nothing on this one.
+- **The row follows `status`, and the ONE gate on it is the daemon's `detectWorking` — not this
+  payload's `working`.** Both were got wrong in one day (2026-08-11) and the pair is the lesson.
+  `status` alone pinned a PERMANENT row: `●` is Claude Code's bullet for a REPLY as well as a spinner
+  frame, so a reply whose first line carried `FYI · …` mid-sentence parsed as a live turn, and an idle
+  pane re-parsed it on every 3s poll ("Gone — v0.5.63 live. Bus rows…"). Gating on `working` then
+  blanked the row for the whole thinking pause after every prompt — that field is read from the
+  TRANSCRIPT, which lags the pane by the seconds between a message landing and the first assistant
+  entry, which is exactly when a person is watching for it. So the gate belongs on the side that
+  knows FIRST and is STRICTER about it: `detectWorking` wants "esc to interrupt" or a spinner line
+  with a real TIMER, where `parseWorkingStatus` will settle for a verb — the mis-parsed reply satisfies
+  the second and never the first. The parser was tightened in the same change (`prompt.ts`: the
+  ellipsis must CLOSE the line), and `prompt.test.ts` holds both halves; `work.mjs`'s second control
+  is the mini app's own — a status with `working: false` must still paint.
 - **Its spacing derives from its NEIGHBOURS**, not its own padding: above is the feed's floor
   gutter, below is `#dworkhost`'s 2px plus the composer's `--sp-1`. A padding-top on `#dworkhost`
   is inert — `--dock-h` measures to the dock's first *ink*, so that box growing moves everything
