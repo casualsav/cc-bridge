@@ -1093,9 +1093,16 @@ function parseOneWorkingLine(line: string): WorkingLine | null {
     else if (!tokens && /\btokens?\b/i.test(field)) tokens = field.replace(/^[↑↓]\s*/, '').trim()
   }
   // What separates a spinner line from a list item: `*` is a spinner frame AND a markdown bullet,
-  // and prose is full of the latter. A real one always trails its verb with "…" or reports a field
-  // this parser recognises; "* retry the deploy (3s timeout)" does neither.
-  if (!/…|\.\.\./.test(rest) && !elapsed && !tokens) return null
+  // and `●` — Claude Code's own bullet for a REPLY — is in the spinner set too, so the glyph decides
+  // nothing on its own. A real line reports a field this parser recognises, or CLOSES with its
+  // ellipsis: "Hyperspacing…", "Compressing the strip… (41s · 1.9k tokens)". Nothing follows the "…"
+  // but an optional parenthetical.
+  //
+  // Containing an ellipsis ANYWHERE was the old test, and prose is full of them: the owner's mini app
+  // sat on a permanent working row reading "Gone — v0.5.63 live. Bus rows…" (2026-08-11), which was a
+  // reply of mine whose first line happened to carry `FYI · …` mid-sentence. It never cleared,
+  // because an idle pane re-parses the same line on every poll.
+  if (!elapsed && !tokens && !/(?:…|\.\.\.)\s*(?:\([^)]*\))?\s*$/.test(rest)) return null
   return { verb, elapsed, tokens }
 }
 

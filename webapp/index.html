@@ -140,16 +140,14 @@
        content, so the radius carries what the height cannot — 26/116 = 0.22, against 0.16 at --r-2xl.
        That derivation is why it steps 6 and not 4. Do not "tidy" it back onto the ramp. */
     --r-3xl: 26px;
-    /* The page takes the client's HEADER colour, not its chat background — the owner's trial, so the
-       mini app reads as one surface with the Telegram bar above it instead of a lighter panel bolted
-       under it (measured off his screenshot: their bar #1D2733 against our page #212D3B). Every
-       gradient, veil and scrim in this file is a color-mix of --bg, so this one token carries all of
-       them; nothing else needs to move.
-       The fallback CHAIN is what makes it safe to try: `header_bg_color` is a Bot API 7.0 theme
-       param, so a client that does not send it lands on exactly the colour this page has always
-       used. What it cannot cover is a theme whose header happens to equal its secondary_bg_color —
-       --sec is what every raised surface here is (agent cards, settings cards, dividers), and it
-       would flatten into the page. That is a look-and-see, which is why this is its own commit. */
+    /* The one surface every gradient, veil and scrim in this file is a color-mix of — so this token
+       carries all of them and nothing else moves with it.
+       This chain is now the LIGHT-theme answer and the pre-6.9 fallback only: on a dark theme
+       pinChromeColour() overrides it with PAGE_DARK and tells Telegram to paint its chrome the same,
+       which is the reverse of the 2026-07-30 trial that took the client's header colour from here.
+       What the chain cannot cover is a theme whose header equals its secondary_bg_color — --sec is
+       what every raised surface here is (agent cards, settings cards, dividers), and it would flatten
+       into the page. Owning the dark ground is what takes that risk off the dark path. */
     --bg: var(--tg-theme-header-bg-color, var(--tg-theme-bg-color, #17212b));
     --sec: var(--tg-theme-secondary-bg-color, #232e3c);
     --text: var(--tg-theme-text-color, #f5f5f5);
@@ -163,6 +161,10 @@
        hardcoding a grey keeps it following a custom Telegram theme.
        Deliberately NOT applied to .dot: its idle state is var(--hint) and stays byte-exact. */
     --hint-raised: var(--hint);
+    /* The composer capsule's edge. A literal here and a --text mix under @supports, because a
+       box-shadow whose colour does not parse drops the WHOLE declaration — the top highlight with
+       it — and this is the one edge the box has. */
+    --capsule-edge: rgba(255, 255, 255, .16);
     /* Stop red. Saturation taken from the stop-sign emoji, NOT sampled from the reference JPEG (whose
        circle is duller and slightly pink) — the owner asked for the emoji's red specifically.
        Tokenised on purpose, and note this is the OPPOSITE call from .dot.on's hardcoded green: that
@@ -248,6 +250,10 @@
      against a declared alpha before believing either. */
   :root { --chip-tint: color-mix(in srgb, var(--bg) 44%, #000);
     --chip-fill: color-mix(in srgb, var(--chip-tint) 36%, transparent);
+      /* Mixed from --text rather than left as the white literal below, for the same reason --chip-fill
+         is a proportion: on a LIGHT theme a white hairline is invisible and this one has to be an edge
+         on any ground. Same rendering as the fallback wherever --text is white. */
+      --capsule-edge: color-mix(in srgb, var(--text) 16%, transparent);
       --hint-raised: color-mix(in srgb, var(--hint) 80%, var(--text));
       --add: color-mix(in srgb, #3fb950 80%, var(--text)); --del: color-mix(in srgb, #f85149 80%, var(--text)); }
   }
@@ -1091,9 +1097,9 @@
      into feed") and reads as a heading without it. --hint-raised, not --hint: this line sits on the
      raised fill, which is exactly the case that variable exists for (--hint falls under AA there). */
   .msg.agent { background: var(--sec); max-width: 100%; }
-  .msg.agent .ah, .msg.bus .ah { display: flex; gap: var(--sp-2); align-items: baseline; margin-bottom: 3px; font-size: var(--t-meta); color: var(--hint-raised); }
-  .msg.agent .ah .nm, .msg.bus .ah .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
-  .msg.agent .ah .lb, .msg.bus .ah .lb { color: var(--hint-raised); }
+  .msg.agent .ah { display: flex; gap: var(--sp-2); align-items: baseline; margin-bottom: 3px; font-size: var(--t-meta); color: var(--hint-raised); }
+  .msg.agent .ah .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+  .msg.agent .ah .lb { color: var(--hint-raised); }
   /* The status word is stated plainly and coloured only when it is NOT the expected one — a red
      "completed" on every card would be decoration, and a failure that looked like every success
      would be worse than no status at all. */
@@ -1354,7 +1360,15 @@
   .inputwrap { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: stretch;
     gap: var(--sp-3); background: var(--chip-fill);
     backdrop-filter: var(--chip-glass); -webkit-backdrop-filter: var(--chip-glass);
-    border-radius: calc(var(--pill-h-1) / 2); padding: var(--pill-ring); box-shadow: inset 0 1px 0 rgba(255,255,255,.06); }
+    /* A full RING, not just the top highlight it used to carry: on the near-black ground (PAGE_DARK)
+       the fill lands within a few channels of the page and the box lost its edge — the owner,
+       2026-08-11, "the text input box needs a little better outline". INSET, and it must stay inset:
+       a border or an outline would add to the box, and this capsule's resting height is the sum of
+       its parts (composerbox.mjs re-measures that arithmetic). 16% was picked off a rendered ladder
+       at 8/12/16/22 — 22 reads as a drawn stroke rather than an edge, which is the failure to stay
+       under. The top highlight rides one step up with it so the ring does not flatten it. */
+    border-radius: calc(var(--pill-h-1) / 2); padding: var(--pill-ring);
+    box-shadow: inset 0 0 0 1px var(--capsule-edge), inset 0 1px 0 rgba(255,255,255,.08); }
   /* The controls' line. `align-items: center` is what keeps the chip on the mic's axis now that the
      row's height IS the mic — the margin-bottom that used to do it by hand is gone. The chip pushes
      the clip and the mic to the far end; the two of them stay adjacent, exactly as they were when
@@ -2127,6 +2141,23 @@
 <script>
 const tg = window.Telegram && window.Telegram.WebApp;
 if (tg) { tg.ready(); tg.expand(); }
+// FULLSCREEN IS ASKED FOR, NOT INHERITED — the entry point decides it otherwise, and the two
+// disagree: opening the app from the chat LIST honours the client's preference, while the button
+// inside the chat opens it windowed with Telegram's header. Nothing in the payload says which way it
+// was launched, so the page requests it either way and lets the client answer. Guarded on
+// `isFullscreen` because a request while already fullscreen comes back as a
+// `fullscreenFailed`/ALREADY_FULLSCREEN — a real failure event for a state that is already correct.
+// 8.0 is the API that added it; below that there is nothing to ask for and the page stays windowed.
+// The layout follows from `fullscreenChanged` exactly as it already did — this changes WHEN that
+// event arrives, not what happens on it. Telegram keeps a transparent top bar with ✕ and the kebab
+// painted over the content in fullscreen; that is theirs and cannot be removed.
+//
+// The owner asked for this page, 2026-08-11, and the follow-on he sent elsewhere ("give the weather
+// dashboard the same fix") was misread on the bus as a re-report against this one — which is the only
+// reason a paragraph of per-launch instrumentation briefly shipped here. It is gone: there was never
+// a question about THIS page to answer.
+if (tg && tg.isVersionAtLeast && tg.isVersionAtLeast("8.0") && !tg.isFullscreen)
+  try { tg.requestFullscreen(); } catch {}
 
 // --- Fullscreen top offset (see --safe-top). ---------------------------------------------------
 // Telegram gives the offset in two halves that STACK: safeAreaInset is the device's (notch, status
@@ -2154,17 +2185,24 @@ function syncSafeTop() {
   // The DOM move that used to live here went with the pause button (2026-07-30): the header is one
   // container in both layouts now, so nothing has to change boxes when fullscreen flips.
 }
-// Telegram's own chrome colour is NOT in themeParams, and that is the whole reason this constant
-// exists. `header_bg_color` reports #252D3A on the owner's client while the bar it actually paints
-// measures #1D2733 — sampled off his screenshots, where the status bar and the ✕ Claude Code row are
-// the same flat value to the unit. No variable carries it, so the page is pinned to the sampled hex:
-// his instruction, "settle it by sampling the exact hex colour number".
+// THE PAGE OWNS ITS GROUND AND TELLS TELEGRAM WHAT TO PAINT ABOVE IT — the inverse of the arrangement
+// this function shipped with (2026-07-30), and the same job under the same name: page and chrome, one
+// colour. It used to drag --bg onto a hex SAMPLED off the owner's screenshots (#1D2733), because
+// themeParams cannot be asked — `header_bg_color` reports #252D3A on his client while the bar it
+// actually paints measures #1D2733. `setHeaderColor` (Bot API 6.9 for an arbitrary #RRGGBB) removes
+// the need to guess at all: whatever ground the page resolves, the chrome is SET to it. So the
+// sampled constant is retired, the page's dark ground is a token again, and a colour change is one
+// line rather than a screenshot-sampling exercise.
+//
 // Gated on the resolved theme being DARK, and read from a rendered probe rather than from
 // tg.colorScheme: the flag is only as good as the client that sets it, while the probe answers the
-// question actually being asked — is the page we are about to override a dark one. A light theme
-// keeps its own colours, where this mismatch has not been measured and a dark constant would be a
-// disaster rather than a mismatch.
-const TG_CHROME_DARK = "#1D2733";
+// question actually being asked — is the page we are about to override a dark one. A LIGHT theme
+// keeps its own colours and still gets its chrome matched, which is the half that costs nothing.
+//
+// The version gate is not defensive noise: below 6.9 `setHeaderColor` accepts only the keywords
+// 'bg_color'/'secondary_bg_color', and a hex there is refused by the client — so an old client keeps
+// today's mismatched bar instead of a page that thinks it fixed something.
+const PAGE_DARK = "#0D1117";
 function pinChromeColour() {
   const root = document.documentElement;
   root.style.removeProperty("--bg");   // ask the theme first, or this reads its own last answer
@@ -2173,7 +2211,15 @@ function pinChromeColour() {
   document.body.appendChild(probe);
   const [r, g, b] = (getComputedStyle(probe).backgroundColor.match(/\d+/g) || [255, 255, 255]).map(Number);
   probe.remove();
-  if ((0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 < 0.5) root.style.setProperty("--bg", TG_CHROME_DARK);
+  const dark = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 < 0.5;
+  if (dark) root.style.setProperty("--bg", PAGE_DARK);
+  const hex = dark ? PAGE_DARK : "#" + [r, g, b].map(n => n.toString(16).padStart(2, "0")).join("");
+  // setBackgroundColor is the ground BEHIND the page (overscroll, the gap under a sheet) and takes a
+  // hex from 6.1 — it is set from the same value for the same reason, never from a second decision.
+  try {
+    if (tg && tg.isVersionAtLeast && tg.isVersionAtLeast("6.9")) tg.setHeaderColor(hex);
+    if (tg && tg.setBackgroundColor) tg.setBackgroundColor(hex);
+  } catch {}
 }
 pinChromeColour();
 if (tg) {
@@ -2223,9 +2269,6 @@ const SUCCESS_TOASTS = false;
 const showDone = m => { if (SUCCESS_TOASTS) showOk(m); };
 
 const LONG_MSG = 700;   // chars past which a feed bubble collapses behind a tap-to-expand
-// A bus row's header verb. The row is the session's own words either way — this says who they went
-// to, which for agent-to-agent traffic is the only thing distinguishing them from a reply to YOU.
-const VIA_LABEL = { answer: "Answered · ", post: "Posted · ", ack: "FYI · ", ask: "Asked · ", btw: "Aside · ", chat: "Sent · " };
 // Which row is "the last reply" — the one the fold exempts and the one paintFeed fetches in full.
 // ONE definition, because those two disagreeing is a message that renders unfolded and clipped at
 // 4000 chars with no way left to read the rest.
@@ -3123,12 +3166,13 @@ function bubble(i, n, all) {
   if (i.role === "agent") inner += '<div class="ah"><span class="nm"><span class="lb">Agent · </span>'
     + esc(i.agent || "") + "</span>"
     + (i.status ? '<span class="st' + (i.status === "completed" ? "" : " bad") + '">' + esc(i.status) + "</span>" : "") + "</div>";
-  // A row the session said OVER THE BUS — an answer, a post, an ask to another agent — carries where
-  // it went. Same header element the agent card uses, so it needs no CSS of its own. Without the
-  // line these read as the session talking to YOU, which for agent-to-agent traffic it wasn't; the
-  // words are still the session's own, which is why the row is an ordinary bubble either way.
-  if (i.via) inner += '<div class="ah"><span class="nm"><span class="lb">' + esc(VIA_LABEL[i.via] || "Sent") + "</span>"
-    + esc(i.to ? "@" + i.to : i.via === "post" ? "the humans" : "") + "</span></div>";
+  // A row the session said OVER THE BUS (`via`/`to`) renders as an ORDINARY BUBBLE, with no header
+  // naming where it went — the owner, 2026-08-11: "I don't need to see 'posted' at all in the mini
+  // app, it's just supposed to be a clean CLI/IDE type experience". The words are the session's own
+  // either way, which is what makes the plain bubble honest. Accepted cost, named because it is the
+  // reason the line existed: agent-to-agent traffic now reads as if it were said to YOU. The `via`
+  // FIELD is untouched and still load-bearing — it is what routes an expansion to the outbound
+  // mirror instead of the transcript.
   // Once the full text has been fetched it replaces the clamped copy, and because it lives in a cache
   // rather than in the DOM it survives the 3s repaint that would otherwise throw it away.
   const full = i.uuid ? fullText[i.uuid] : null;
@@ -3181,7 +3225,7 @@ function bubble(i, n, all) {
   const imgOnly = !!i.img && !t && !i.att;
   // EVERY bubble takes the tap now, not just a long one: the tap copies, and "a tap does something
   // here and nothing there" is the worse answer for a short message.
-  return '<div class="msg ' + i.role + (i.via ? " bus" : "") + (imgOnly ? " imgonly" : "") + (long ? " clip" : "") + (long && openNow ? " open" : "")
+  return '<div class="msg ' + i.role + (imgOnly ? " imgonly" : "") + (long ? " clip" : "") + (long && openNow ? " open" : "")
     + (copyNow ? " copyon" : "") + '" onclick="onBubbleTap(event, this)"'
     + (i.uuid ? ' data-uuid="' + esc(i.uuid) + '"' : "") + ' data-key="' + esc(msgKey(i)) + '">' + inner +
     (copyNow ? '<button class="chip copyb" onclick="copyMsg(event, this)">Copy</button>' : "") +
@@ -3629,7 +3673,14 @@ function syncWorkClock(elapsed) {
 }
 function paintWork() {
   const feed = $("dfeed");
-  const st = lastDrill && lastDrill.status;
+  // THE ROW IS GATED ON THE SESSION ACTUALLY WORKING, not on a status line having parsed. `status` is
+  // a read of the PANE and the pane keeps showing the last turn's screen forever, so a line that
+  // parses wrongly parses wrongly on every 3s poll — which is how the owner got a permanent working
+  // row reading "Gone — v0.5.63 live. Bus rows…" off a reply of mine (2026-08-11; the parser was
+  // tightened too, in prompt.ts). `working` comes from the TRANSCRIPT (turnInProgress || live
+  // subagents), so it ends when the turn does whatever the screen looks like. The Telegram card has
+  // always been gated this way (`working && preTool`); this is the mini app catching up.
+  const st = lastDrill && lastDrill.working ? lastDrill.status : null;
   // The optimistic window covers the gap between hitting send and the first poll that sees the pane
   // working. It is bounded: a send that never starts a turn must not leave a permanent lie on screen.
   const show = st || (workOptimisticAt && Date.now() - workOptimisticAt < 20000);

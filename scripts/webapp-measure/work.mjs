@@ -12,6 +12,12 @@ const FEED = { sid:"eea261db", name:"cc-bridge", working:true,
     { role:"assistant", text:"Reading the client's feed renderer to place this correctly.", ts:1785200060000 },
   ] };
 const NO_STATUS = { ...FEED, status: undefined };
+// A CONCLUDED turn whose pane still parses as a status line. `status` is a read of the SCREEN, which
+// keeps showing the last turn forever, so a mis-parse repeats on every 3s poll — the owner's mini app
+// held a permanent row reading "Gone — v0.5.63 live. Bus rows…" off a reply of Claude's whose first
+// line carried an ellipsis mid-sentence (2026-08-11). The row follows `working`, which comes from the
+// transcript and ends when the turn does.
+const STALE_STATUS = { ...FEED, working: false, status: { verb: "Gone — v0.5.63 live. Bus rows", elapsed: null, tokens: null } };
 const SESSION = { sid:"eea261db", name:"cc-bridge", alive:true, working:true, cwd:"~/projects/cc-bridge",
   model:"Opus 5", effort:"high" };
 const OUT = process.argv[2] || "work";
@@ -42,6 +48,15 @@ const b = await chromium.launch();
   const p = await openPage(b, { vars: null, feed: NO_STATUS });
   const has = await p.evaluate(() => !!document.querySelector(".work"));
   console.log("CONTROL (status absent) — .work present:", has, has ? "FINDING: renders anyway!" : "OK, absent as expected");
+  await p.close();
+}
+
+// ---- Second control: a status on a CONCLUDED turn -> still no row (the 2026-08-11 permanent row). ----
+{
+  const p = await openPage(b, { vars: null, feed: STALE_STATUS });
+  const has = await p.evaluate(() => !!document.querySelector(".work"));
+  console.log("CONTROL (status present, turn concluded) — .work present:", has,
+    has ? "FINDING: the row outlives the turn!" : "OK, the row follows `working`");
   await p.close();
 }
 

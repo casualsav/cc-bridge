@@ -382,6 +382,18 @@ give it.
 
 ## Working row
 
+- **The row follows `working`, NOT the presence of a parsed `status`.** `status` is a read of the
+  PANE, and a pane keeps showing the last turn's screen forever — so a line that parses wrongly
+  parses wrongly on every 3s poll and the row never comes down. That is exactly what happened
+  (2026-08-11): `●` is Claude Code's bullet for a REPLY as well as a spinner frame, and a reply whose
+  first line carried `FYI · …` mid-sentence parsed as a live turn, pinning a permanent row reading
+  "Gone — v0.5.63 live. Bus rows…". `working` comes from the TRANSCRIPT (`turnInProgress ||
+  liveSubagents`) and ends when the turn does, whatever the screen looks like — the Telegram card was
+  always gated this way (`working && preTool`); this was the mini app catching up. The parser was
+  tightened in the same change (`prompt.ts`: an ellipsis must CLOSE the line, not merely appear in
+  it), and both halves are needed — a parse can still be wrong, and only the gate bounds how long a
+  wrong one is visible. `work.mjs`'s second control is the guard; it renders the row on the
+  pre-change page and nothing on this one.
 - **Its spacing derives from its NEIGHBOURS**, not its own padding: above is the feed's floor
   gutter, below is `#dworkhost`'s 2px plus the composer's `--sp-1`. A padding-top on `#dworkhost`
   is inert — `--dock-h` measures to the dock's first *ink*, so that box growing moves everything
@@ -417,16 +429,34 @@ give it.
   variables with dark fallbacks in `:root`. A light-theme check that sets the media feature renders
   the dark theme and passes without testing anything — set the variables (`themes.mjs`). Removing a
   bubble exposes whatever its fill was hiding.
-- **The page is PINNED to Telegram's chrome colour — a TRIAL in its own commit.** The
-  `--tg-theme-header-bg-color` param is NOT what the client paints, so `pinChromeColour()` sets
-  `--bg` to the hex sampled off the owner's screenshots — his instruction. Gated on the RESOLVED
-  page being dark, read from a rendered probe, never `tg.colorScheme`; a light theme keeps its own
-  colours. It re-runs on `themeChanged` — **any fixture that injects theme variables must call it
-  too**, or a dark-loaded page keeps the pinned `--bg` under black type. Every veil, scrim and fill
-  is a `color-mix` of `--bg`, so the one token carries all of them (`headercolor.mjs` asserts it,
-  plus the no-param fallback control). Known risk, revertable alone: `--sec` is every raised
-  surface, and on a theme whose header colour sits near its secondary they flatten — the harness
-  warns on proximity; how close is too close is the owner's eye.
+- **THE PAGE OWNS ITS GROUND AND TELLS TELEGRAM WHAT TO PAINT ABOVE IT** (`pinChromeColour()`, the
+  owner 2026-08-11 — "is it possible to change the bg color including the top part?"). This is the
+  INVERSE of what shipped on 2026-07-30, which dragged `--bg` onto `#1D2733` sampled off his
+  screenshots because `--tg-theme-header-bg-color` is not what the client paints (it reports
+  `#252D3A` while the bar measures `#1D2733`). `setHeaderColor` takes an arbitrary `#RRGGBB` from Bot
+  API **6.9**, so the guess is unnecessary: the page resolves its ground — `PAGE_DARK` (`#0D1117`,
+  his pick off a five-way ladder) on a dark theme, the theme's own on a light one — and sets the
+  header and the page background from that ONE value. Still gated on the RESOLVED page being dark,
+  read from a rendered probe, never `tg.colorScheme`; still re-run on `themeChanged`, so **any
+  fixture that injects theme variables must call it too**, or a dark-loaded page keeps `PAGE_DARK`
+  under black type. Every veil, scrim and fill is a `color-mix` of `--bg`, so the one token carries
+  all of them. **Below 6.9 the header is left alone** — the client refuses a hex there, and a page
+  that "set" it would be reporting a no-op as success. `headercolor.mjs` measures both halves: the
+  derived surfaces, and — with a **recording stub SDK installed before the page's script, and the
+  real SDK blocked at the network** — that the client is actually told, in both themes and on an old
+  version. Nothing else can see that call; a headless page has no chrome to paint. Remaining watch
+  item: `--sec` is every raised surface and does NOT move with the ground, so the darker it goes the
+  more raised cards read as blue slabs on it (conspicuous at true black, disclosed on the ladder);
+  the harness prints the separation.
+- **The composer capsule's edge is a 1px INSET ring at 16% of `--text`, and inset is load-bearing.**
+  On the near-black ground its fill lands within a few channels of the page, so the top-highlight-only
+  treatment it carried left the box with no edge (the owner: "the text input box needs a little better
+  outline"). A `border` or `outline` would add to the box, and this capsule's resting height is the
+  sum of its parts — `composerbox.mjs`'s 54 checks are what that would break. 16% came off a rendered
+  ladder at 8/12/16/22: at 22 it reads as a drawn stroke rather than an edge. Mixed from `--text`
+  rather than left a white literal, so it is an edge on a light theme too; the `:root` fallback stays
+  a literal because a box-shadow whose colour does not parse drops the WHOLE declaration, top
+  highlight included.
 
 ## Header, scrims, z-order
 

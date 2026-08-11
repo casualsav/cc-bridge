@@ -1044,6 +1044,24 @@ test('detectWorking / parseWorkingStatus reach the spinner past the v2.1.220 tas
   expect(parseWorkingStatus(pane)).toEqual({ verb: 'Compressing weather countdown strip and chart key', elapsed: '41s', tokens: '1.9k tokens' })
 })
 
+test('a REPLY is not a spinner line, however many ellipses its prose carries', () => {
+  // The line that pinned a permanent working row on the owner's mini app (2026-08-11). `●` is Claude
+  // Code's bullet for a reply AND a spinner frame, and this reply's first line carries `FYI · …`
+  // mid-sentence — under the old "contains an ellipsis anywhere" test it parsed as a live turn, and
+  // an idle pane re-parsed the same line on every 3s poll forever.
+  const reply = '● Gone — v0.5.63 live. Bus rows (Posted · the humans, Answered · @chat, FYI · …) now render as ordinary bubbles with no header line at all.'
+  const pane = ['  ❯ ', '  ────────────', '   ? for shortcuts'].join('\n')
+  expect(parseWorkingStatus([reply, pane].join('\n'))).toBeNull()
+  expect(detectWorking([reply, pane].join('\n'))).toBe(false)
+  // The shapes that must keep parsing: the ellipsis CLOSES the verb, with or without a parenthetical.
+  expect(parseWorkingStatus('✻ Hyperspacing…')).toEqual({ verb: 'Hyperspacing', elapsed: null, tokens: null })
+  expect(parseWorkingStatus('✻ Hyperspacing… (2m 3s · ↑ 5.6k tokens · esc to interrupt)'))
+    .toEqual({ verb: 'Hyperspacing', elapsed: '2m 3s', tokens: '5.6k tokens' })
+  // A reply ENDING in an ellipsis still gets through the parser — accepted, and the reason the mini
+  // app's row is now gated on the session actually working rather than on this parse alone.
+  expect(parseWorkingStatus('● Deploying…')).not.toBeNull()
+})
+
 test('the background-agents panel never reads as a spinner on its own (no live line, idle prompt)', () => {
   // "◯ engineer … 10m 48s · ↓ 70.6k tokens" carries an elapsed time and a token count in the exact
   // shape a spinner line does, but ◯ is not one of the glyphs the spinner regexes anchor on — a
