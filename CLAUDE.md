@@ -394,21 +394,31 @@ the thing most likely to be "fixed" back:
   is one guard, the anchor list the second — keep both. (Accepted cost: an idle aside classes
   human, so a reply it draws pings — the cheap direction.)
 
-**AN OWNER-DIRECT ASK IS ANSWERED TO THE OWNER, AND THE LANE IT WAS MINTED FROM IS NEVER WOKEN BY IT.**
-`@name <message>` typed in his DM, and a native reply to a session's card, both mint an ordinary bus ask
-carrying `ownerDirect` — the asker row names his chat lane because that is the only session id his DM can
-be found from, and `fromName` stays the lane's endpoint name so a worker reaching back with `tg ack @<from>`
-still lands somewhere that resolves. The one behaviour that differs is the tail: `answerRouteFor`
-(`agent-bus.ts`) sends the answer to him as a card instead of typing it into the lane, because the lane is
-an agent that would read it, judge it and speak — the round trip the gesture exists to skip. Restore the
-paste and nothing errors; he simply gets his worker's answer secondhand, in his orchestrator's words. The
-card is `📨 @name` — the same header a post carries, because both are one class: a session reaching for a
-human. That glyph appears nowhere else on a session's traffic. Expanded and notifying for the same reason a post is (he is waiting on it), and
-routable — replying continues the thread with the session that spoke, never with the lane. **The outbound
-half confirms with a REACTION on his own message and no card** (his ruling: the card echoed his words back
-one message under the message he had just typed) — fired in `tryDeliverAsk`'s landed branch, the only place
-delivery is confirmed, off `ownerMsgId` on the row, because an ask handed to a busy target lands on a later
-sweep.
+**HIS OWN MESSAGE TO A SESSION IS A HUMAN MESSAGE, AND THE REPLY IS ROUTED — NOT AN ASK.** `@name
+<message>` typed in his DM, and a native reply to a session's card, are delivered by
+`ownerDirectDispatch` (`daemon.ts`) as the ordinary inbound envelope (`formatChannelBlock`, `<tg 123
+from=dm>`): no ask id, no `tg answer` obligation, no `from=owner` footer. Until v0.5.69 they were bus
+asks, and a bus ask cannot be answered with a reply — so the words left through a command argument and
+what stayed in the transcript was the session narrating the exchange in the third person ("Answered him
+and handed the repo work to @cc-bridge"). His ruling, 2026-08-11: two artifacts per exchange, and the
+one he can read was the wrong one. What carries the answer instead is `owner-reply.ts` — a one-shot
+route armed on the landed paste, matched at relay time against **the turn's own anchor** (a reply's
+`anchorText`, from `finalRepliesAfter`), never against "the next reply", which on a session already
+mid-turn is somebody else's answer. The card is `📨 @name` (`sendOwnerAnswerCard`) — the header a post
+carries, because both are one class: a session reaching for a human. Expanded, notifying and routable.
+Three things it must keep: the DM card is the **fifth delivery of one uuid** and claims through
+`claimRelayDelivery` like the other four; it is consumed **before** the session's own surface is
+written, which is what makes that copy silent (one ping, on the card he is waiting for); and delivery
+is confirmed by a **REACTION on his own message, never a card** (his ruling — the card echoed his words
+back one message under the message he had just typed). With no ask row there is no expiry notice, no
+Stop-hook obligation and nothing chasing a session that ignores him: he sees silence, which is the
+trade he chose. **The one gesture still minting an `ownerDirect` ask is `@launch <new name>`** — a
+brand-new session has no pane to deliver into until it boots, so its founding message keeps the ask
+machinery and `answerRouteFor`'s owner-card tail (`agent-bus.ts`), and a session he launches still
+narrates its first turn. **Accepted cost, not an oversight: work he hands out this way is invisible to
+his chat lane**, which is the only party that can see two workers heading for the same file — direct is
+what he asked for, and the coordination is his to hold on those threads. `owner-direct.test.ts`
+enumerates every gesture, both relay loops and the single remaining mint.
 
 **EVERY reaction the daemon sends comes from `REACTIONS`, one table typed `satisfies Record<string,
 ReactionTypeEmoji['emoji']>`.** Telegram takes only a fixed emoji set from a bot, `channel.react` casts into
@@ -418,9 +428,7 @@ landed (🚀 on `@launch`/`@reopen`, ⏰ on `@schedule`, ✅/❌ on a typed perm
 reading the code could find them; only typechecking the literals did. The table is where the checker refuses
 the next one, and `owner-direct.test.ts` enumerates the call sites so a bare literal cannot come back — with
 two named exceptions that are arguments rather than literals (`tg react`'s emoji from an agent,
-`ackReaction` from the owner's config). Accepted cost,
-not an oversight: work dispatched this way is invisible to the lane, which is the only party that can see
-two workers heading for the same file. `owner-direct.test.ts` pins the routing and the single mint.
+`ackReaction` from the owner's config).
 
 **THE BUS DIGEST CARRIES ONLY A SESSION'S OWN LANE** — the events this endpoint sent or was sent,
 since its own watermark; never the room's. Two guards: no watermark → no digest at all (a fresh

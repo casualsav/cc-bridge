@@ -33,8 +33,13 @@ export const latestFinalReply = (file: string) => (isCodex(file) ? cx.latestFina
 // envelope to read it from, so they answer FALSE — loud, today's behaviour. A stated default, not an
 // inference: the two failure directions are not symmetric, and a missed ping is a message he never
 // learns about while an extra one is noise he can see.
-export const finalRepliesAfter = (file: string, afterUuid: string): { uuid: string; text: string; busAnchored: boolean }[] =>
-  (isCodex(file) ? cx.finalRepliesAfter(file, afterUuid).map(r => ({ ...r, busAnchored: false })) : cc.finalRepliesAfter(file, afterUuid))
+// `anchorText` answers the same question one level finer — which message started this turn — and a
+// Codex rollout cannot answer it either: its `turn_started` line carries an id, not the text that was
+// typed. So it answers EMPTY, which matches nothing. The consequence is bounded and named: the owner's
+// direct `@name` message to a CODEX session is delivered and answered normally, but its reply reaches
+// only that session's own surface, never the card back to his DM (owner-reply.ts).
+export const finalRepliesAfter = (file: string, afterUuid: string): { uuid: string; text: string; busAnchored: boolean; anchorText: string }[] =>
+  (isCodex(file) ? cx.finalRepliesAfter(file, afterUuid).map(r => ({ ...r, busAnchored: false, anchorText: '' })) : cc.finalRepliesAfter(file, afterUuid))
 export const turnInProgress = (file: string) => (isCodex(file) ? cx.turnInProgress(file) : cc.turnInProgress(file))
 // Why turnInProgress says what it says (the typing instrumentation's diagnosis). A Codex rollout has
 // no assistant stop_reason to read, so it answers nulls — honestly "cannot classify" rather than a

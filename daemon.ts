@@ -198,6 +198,7 @@ import { spawnModelFlag, WIDE_CONTEXT_SUFFIX } from './model-window.ts'
 import { buildModelSelector, MODEL_ALIASES, MODEL_ALIAS_IDS, planModelSelection, type ModelSelector } from './model-catalog.ts'
 import { parseLaunch, parseSpawnAddress, parseLaunchArgs, type ParsedLaunch } from './launch-command.ts'
 import { createMsgRoutes, type MsgRouteMap } from './msg-routes.ts'
+import { createOwnerReplyRoutes, ownerReplyMarker, type OwnerReplyRoute } from './owner-reply.ts'
 import { chatVerbIn, planOwnerRoute, parseNameVerb, parseAddress, undoGesture, forceGesture, spawnGesture, LAUNCH_SLASH_RE, type Gestures } from './chat-verbs.ts'
 import { parseSchedule, SCHEDULE_USAGE, ambiguousBareNumber, allBareNumericCron } from './schedule-time.ts'
 import {
@@ -885,6 +886,15 @@ function rememberMsgRoute(chat: string, messageId: number | string | undefined, 
   if (!messageId || !sid || isChatLaneSession(sid)) return
   msgRoutes.remember(chat, messageId, sid)
 }
+
+// The other half of the owner's direct thread: his `@name <message>` is delivered into that session
+// as an ORDINARY human message, so nothing about it says where the answer goes. This is what says it
+// — armed when his message lands, matched at relay time against the turn's own anchor, consumed once.
+// Persisted for the reason relay cursors are (state.ts): a deploy lands mid-turn constantly here, and
+// a route lost with the process is an answer he never receives at all.
+const OWNER_REPLIES_FILE = join(STATE_DIR, 'owner-replies.json')
+const ownerReplyRoutes = createOwnerReplyRoutes(readJsonFile<OwnerReplyRoute[]>(OWNER_REPLIES_FILE, []),
+  { save: rows => writeJsonFile(OWNER_REPLIES_FILE, rows) })
 
 const SESSION_MODELS_FILE = join(STATE_DIR, 'session-models.json')
 const sessionModels = new Map<string, string>(Object.entries(readJsonFile<Record<string, string>>(SESSION_MODELS_FILE, {})))
@@ -2420,11 +2430,15 @@ async function relayLoopTick(gen: number): Promise<void> {
             catch (e) { process.stderr.write(`daemon: relay target-resolve failed, retry next tick: ${e}\n`); break }
             lastRelayedUuid = r.uuid                 // advance before the send so a fast tick can't double-send
             lastRelayedByFile.set(file, r.uuid)
+            // Did the owner start this turn from his DM? Consumed here, before the sends: it decides
+            // both that he gets a card and that the session's own surface stays quiet for this one.
+            const ownerRoutes = await ownerRoutesForReply(paneId, r.anchorText)
             process.stderr.write(`daemon: relaying ${r.text.length} chars (uuid ${r.uuid.slice(0, 8)}, reply) to ${targets.map(t => t.chat + (t.thread ? `#${t.thread}` : '')).join(',')}\n`)
             for (const t of targets) {
               if (!claimRelayDelivery(file, r.uuid, t)) { process.stderr.write(`daemon: relay skipped duplicate (uuid ${r.uuid.slice(0, 8)}) to ${t.chat}${t.thread ? `#${t.thread}` : ''} — already delivered\n`); continue }
-              await deliverRelayReply(paneId, t, r.text, r.busAnchored)   // self-heals a deleted topic (recreate + resend)
+              await deliverRelayReply(paneId, t, r.text, r.busAnchored || ownerRoutes.length > 0)   // self-heals a deleted topic (recreate + resend)
             }
+            await deliverOwnerDirectReply(paneId, file, r, ownerRoutes)
             if (r.busAnchored) void checkConcludedTurnObligations(paneId).catch(() => {})   // did this turn do what its ask required?
           } else {
             lastRelayedUuid = r.uuid                 // banner suppressed — advance past it, nothing to send
@@ -2607,14 +2621,18 @@ async function auxRelayTick(): Promise<void> {
             continue
           }
           const targets = await outboundTargetsFor(pane)
+          // The owner's direct thread, same as the focused loop — and this is the loop that actually
+          // carries it: the session he addressed is a worker, which is never the focused pane.
+          const ownerRoutes = await ownerRoutesForReply(pane, r.anchorText)
           // Logged like the focused loop's relay: this path used to send with no log line at all,
           // which is why the live double-send showed ONE relay for TWO messages and could not be
           // pinned to a path from the log.
           for (const t of targets) {
             if (!claimRelayDelivery(file, r.uuid, t)) { process.stderr.write(`daemon: aux relay skipped duplicate (uuid ${r.uuid.slice(0, 8)}) to ${t.chat}${t.thread ? `#${t.thread}` : ''} — already delivered\n`); continue }
             process.stderr.write(`daemon: aux relaying ${r.text.length} chars (uuid ${r.uuid.slice(0, 8)}, reply) to ${t.chat}${t.thread ? `#${t.thread}` : ''}\n`)
-            await deliverRelayReply(pane, t, r.text, r.busAnchored)   // self-heals a deleted topic (recreate + resend)
+            await deliverRelayReply(pane, t, r.text, r.busAnchored || ownerRoutes.length > 0)   // self-heals a deleted topic (recreate + resend)
           }
+          await deliverOwnerDirectReply(pane, file, r, ownerRoutes)
           if (r.busAnchored) void checkConcludedTurnObligations(pane).catch(() => {})   // did this turn do what its ask required?
           if (presentation.role === 'dm-chat' && presentation.dmChat) typingPresence.stop(presentation.dmChat)   // reply delivered → clean DM stop, no tail
         }
@@ -7010,7 +7028,12 @@ async function handleCall(
         if (status.startsWith('!')) { write({ t: 'result', id, ok: false, text: status.slice(1) }); return }
         // The answering session's own copy, for its mini-app feed. Keyed on the ANSWERER where we
         // know it (a session may answer an ask addressed to another), falling back to the target.
-        recordOutbound({ sid: answererSid ?? p.toSid, ts: Date.now(), kind: 'answer', to: p.fromName, text: answerText })
+        // `to` is WHERE IT WENT, not who the row names as asker. On an ownerDirect ask those differ:
+        // the asker row carries the chat lane's name (his DM is only findable from that session), but
+        // answerRouteFor sends the answer to HIM as a card — the daemon's own result even says
+        // "answered the owner directly". Recording `p.fromName` labelled that "Answered · @chat" in
+        // his feed, naming a lane that never saw it (his report, 2026-08-11).
+        recordOutbound({ sid: answererSid ?? p.toSid, ts: Date.now(), kind: 'answer', to: p.ownerDirect ? 'owner' : p.fromName, text: answerText })
         text = status
         break
       }
@@ -16256,40 +16279,125 @@ async function routeOwnerReply(ctx: Context, chatId: string, sid: string, text: 
   return true
 }
 
-// The one mint behind both direct gestures — `@name <message>` and a reply to a session's card. They
-// are the same act (he named a session and typed at it) and any difference between them would be an
-// accident of which one was written first.
+// The one delivery behind both direct gestures — `@name <message>` and a reply to a session's card.
+// They are the same act (he named a session and typed at it) and any difference between them would be
+// an accident of which one was written first.
 //
-// The asker row is the CHAT LANE, and stays the lane even though he is the one asking: `fromSid` is
-// how the answer finds his DM, and `fromName` has to be an endpoint that still RESOLVES — a worker
-// that reaches back with `tg ack @<from>` must land somewhere real, and a synthetic "@owner" would be
-// a name the roster has never heard of. So the lane keeps the attribution and `ownerDirect` carries
-// the only difference that changes behaviour: the answer is a card to him, not a paste into the lane.
-// Returns the delivery outcome, because `@launch` at a LIVE name is this same act and has one thing
-// to add on top of it (a dials-ignored line). It reuses this rather than minting beside it: a second
-// mint is exactly how the launch path came to be missing `ownerDirect` in the first place.
+// HIS MESSAGE IS A HUMAN MESSAGE, NOT AN ASK (his ruling, 2026-08-11). Until then it was minted as a
+// bus ask, which a session must close with `tg answer` — so its words left through a command argument
+// and what stayed in the transcript was the session narrating the exchange in the third person
+// ("Answered him and handed the repo work to @cc-bridge"). Two artifacts per exchange where there
+// should be one, and the one he can read was the wrong one. His words now land in exactly the envelope
+// a message in that session's own topic lands in: no ask id, no `tg answer` obligation, no `from=owner`
+// footer. The session replies the way it replies to anyone — a final text block — and `ownerReplyRoutes`
+// is what carries that block back to the DM he typed from, additively (the session's own surface still
+// gets it, so the pane's topic still reads as a conversation).
 //
-// `refs` are the files he attached to the message, as absolute inbox paths. They are NOT run through
-// `confineRef` and must not be: that gate exists because an AGENT naming a path is asserting something
-// about the host, and confining refs to the shared dir is what stops one agent reading a file into
-// another's context. Here the daemon downloaded the file itself, off a photo he sent with his own
-// thumb — there is no assertion to check, and the inbox is where every other inbound file already
-// reaches the lane (`image_path`/`attachment_path`). Until 2026-08-09 this passed `[]` and the file
-// was silently dropped: the target got his caption and no way to know a picture had ever existed.
+// What goes away with the ask row, deliberately: no queue-and-retry (a busy pane takes human text and
+// the CLI queues it, which is what a topic message does today), no 60-minute expiry notice, no
+// Stop-hook obligation, and no `tg history` row. The safety net went with them — nothing chases a
+// session that ignores him — and that is the trade he chose: he can see silence.
+//
+// Returns the delivery outcome, because `@launch` at a LIVE name is this same act and has one thing to
+// add on top of it (a dials-ignored line). It reuses this rather than delivering beside it: a second
+// delivery path is exactly how the launch path came to be missing `ownerDirect` in the first place.
+//
+// `refs` are the files he attached to the message, as absolute inbox paths, and they ride the same
+// `img=`/`att=` attributes the lane's own inbound carries. They are NOT run through `confineRef` and
+// must not be: that gate exists because an AGENT naming a path is asserting something about the host.
+// Here the daemon downloaded the file itself, off a photo he sent with his own thumb — there is no
+// assertion to check. Until 2026-08-09 this dropped them entirely: the target got his caption and no
+// way to know a picture had ever existed.
+type OwnerMsgDelivery = 'delivered' | 'no-session' | 'blocked' | 'not-landed'
+// Extension, because that is all a downloaded inbox path carries by the time it reaches here — the
+// three metas handleInbound splits by source (`image_path` / `image_paths` / `attachment_path`) are
+// already flattened into one list by the routing above. A misread only picks the wrong attribute name
+// for a path the agent Reads either way; dropping the file, which is what shipped for a year, does not.
+const INBOX_IMAGE_RE = /\.(jpe?g|png|gif|webp|heic|heif|bmp|tiff?)$/i
 async function ownerDirectDispatch(
   reply: (t: string) => Promise<unknown>, laneSid: string, toSid: string, text: string, msgId?: number,
   refs: string[] = [],
-): Promise<AskDelivery | 'refused'> {
-  const endpoints = busEndpoints()
-  const fromName = nameForEndpoint(laneSid, endpoints)
-  const toName = nameForEndpoint(toSid, endpoints)
-  let p: BusPending
-  try { p = createPending({ fromSid: laneSid, toSid, toKind: 'claude', fromName, toName, text, refs, ownerDirect: true, ...(msgId != null ? { ownerMsgId: msgId } : {}) }, Date.now()) }
-  catch (e) { await reply(`${e instanceof Error ? e.message : e} — nothing was sent`); return 'refused' }
-  appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'ask', from: fromName, to: toName, id: p.id, text, refs })
-  const outcome = await tryDeliverAsk(p).catch(() => 'busy' as const)
-  if (outcome !== 'delivered') await reply(askResultText(outcome, toName, p.id, asksAheadOf(p)))
-  return outcome
+): Promise<OwnerMsgDelivery> {
+  const toName = nameForEndpoint(toSid, busEndpoints())
+  const chat = chatIdForDmChatSession(laneSid)
+  const pane = await paneForSession(toSid).catch(() => null)
+  if (!pane) { await reply(`@${toName} isn't running any more — nothing was delivered.`); return 'no-session' }
+  const cap = await capturePane(pane).catch(() => '')
+  if (!cap) { await reply(`@${toName}'s session couldn't be read — nothing was delivered.`); return 'no-session' }
+  // The permissive gate, exactly as a human message takes: MID-TURN IS FINE (the CLI queues it, which
+  // is the whole point of delivering his words as human text), a dialog holding the box is not. There
+  // is no queue behind this one — a refusal is told to him now, because he is right there and can
+  // resend, and a message silently waiting on a modal is the failure this reports instead.
+  if (!paneAcceptsText(cap)) {
+    await reply(`@${toName} is showing a dialog it has to answer first — nothing was delivered. Send it again once it's clear.`)
+    return 'blocked'
+  }
+  const imgs = refs.filter(p => INBOX_IMAGE_RE.test(p))
+  const atts = refs.filter(p => !INBOX_IMAGE_RE.test(p))
+  const params: InboundParams = {
+    content: text,
+    meta: {
+      // His own chat and his own id: `formatChannelBlock` prints `@sender` only for someone who is not
+      // the owner, and reads `chat_type` for the `from=dm` marker the session classifies on.
+      chat_id: chat ?? '', chat_type: 'private',
+      ...(chat ? { user_id: chat, user: 'owner' } : {}),
+      ...(msgId != null ? { message_id: String(msgId) } : {}),
+      ...(imgs.length > 1 ? { image_paths: imgs.join('\n') } : imgs.length ? { image_path: imgs[0]! } : {}),
+      ...(atts.length ? { attachment_path: atts[0]! } : {}),
+    },
+  }
+  const block = formatChannelBlock(params)
+  // The same serialized paste every bus block and human message takes (one chain per pane), and NOT
+  // emitInbound: that path stamps the delivered-ledger and buffers a failure under HIS chat id, which
+  // a later drain would replay into the lane — his message, delivered to the wrong session, hours late.
+  const outcome = await busDeliverOutcome(pane, block).catch(() => 'failed' as PasteOutcome)
+  if (outcome !== 'landed') {
+    await reply(outcome === 'occupied'
+      ? `@${toName} already has typed text sitting in its input box — nothing was delivered.`
+      : `Couldn't type it into @${toName}'s session — nothing was delivered. Try again.`)
+    return 'not-landed'
+  }
+  // Arm the answer's route BEFORE anything else can observe the delivery: the session may conclude a
+  // turn seconds from now, and a reply that beats its own route reaches only the session's own surface.
+  if (chat) ownerReplyRoutes.arm({ sid: toSid, chat, name: toName, marker: ownerReplyMarker(block) })
+  else process.stderr.write(`daemon: owner-direct message to @${toName} delivered, but @${nameForEndpoint(laneSid, busEndpoints())} has no DM chat lane — its reply will only reach that session's own surface\n`)
+  process.stderr.write(`daemon: owner-direct message delivered to @${toName} (${pane}, ${text.length} chars${msgId != null ? `, msg ${msgId}` : ''})\n`)
+  // Confirmed by a REACTION on the message he typed, and no card: the card showed him his own words
+  // back, one message under the message he had just sent (his ruling, 2026-08-09). It fires here
+  // because here IS the delivery — the ask's queue-and-sweep, which is why this used to live in
+  // tryDeliverAsk's landed branch, no longer exists on this path.
+  if (chat && msgId != null) void channel.react({ chatId: chat, messageId: String(msgId) }, REACTIONS.delivered).catch(() => {})
+  // Mirrored on the TARGET's own surface (its topic / chat DM), so a reader of that topic sees the
+  // question its next reply answers — he typed it in his DM, so nothing else would put it there.
+  void notifyBusRich(toSid, `<b>@owner</b> messaged <b>@${escapeHtml(toName)}</b>`, text, toSid)
+  return 'delivered'
+}
+
+// ---- The outbound half: his session's plain reply, carded to his DM ----------------------------
+//
+// Read at RELAY time, off the turn's own anchor, for the reason owner-reply.ts states: arming on a
+// timestamp hands him whatever the target concluded next, which on a busy session is somebody else's
+// answer. Consumed BEFORE the session's own surface is written so an owner-direct reply can go out
+// quiet there — he is getting the notifying card, and the same words pinging twice is noise the
+// worker-topic rule already refuses.
+async function ownerRoutesForReply(paneId: string, anchorText: string): Promise<OwnerReplyRoute[]> {
+  const sid = await sessionForPane(paneId).catch(() => null)
+  return sid ? ownerReplyRoutes.consume(sid, anchorText) : []
+}
+// The FIFTH delivery path of one relayed reply, and it claims like the other four (state.ts): the DM
+// card is a second delivery of the same uuid, so without the claim two relay ticks racing over one
+// transcript put the answer on his phone twice — the 2026-07-30 double-send, in a new place.
+async function deliverOwnerDirectReply(paneId: string, file: string, r: { uuid: string; text: string }, routes: OwnerReplyRoute[]): Promise<void> {
+  if (!routes.length) return
+  const sid = await sessionForPane(paneId).catch(() => null)
+  for (const route of routes) {
+    if (!claimRelayDelivery(file, r.uuid, { chat: route.chat })) {
+      process.stderr.write(`daemon: owner-direct card skipped duplicate (uuid ${r.uuid.slice(0, 8)}) to ${route.chat} — already delivered\n`)
+      continue
+    }
+    process.stderr.write(`daemon: owner-direct relaying ${r.text.length} chars (uuid ${r.uuid.slice(0, 8)}) from @${route.name} to ${route.chat}\n`)
+    await sendOwnerAnswerCard(route.chat, route.name, r.text, sid ?? route.sid)
+  }
 }
 
 // ---- `@<name> <message>` — the owner addressing a session directly ----
@@ -20205,18 +20313,28 @@ async function webappSessionFeed(sid: string): Promise<WebappSessionFeed | null>
   // absent on a tick that misses the line — the client treats "no status" as "nothing to show", so
   // there is nothing to hold over.
   //
-  // GATED ON `detectWorking`, WHICH IS THE STRICTER READ OF THE SAME CAPTURE: it wants "esc to
-  // interrupt" or a spinner line carrying a real TIMER, where parseWorkingStatus will settle for a
-  // verb. That difference is the whole guard. An idle pane keeps showing the last turn's screen
-  // forever, so a line that parses wrongly parses wrongly on every 3s poll — and one did, pinning a
-  // permanent working row on a reply of Claude's whose first line held an ellipsis (2026-08-11).
+  // GATED ON THE COMPOSITE — `detectWorking(pane) || turnInProgress || liveSubagents` — which is the
+  // same "is it busy" the rest of the daemon already uses (readSessionState, effort-plan's `busy`),
+  // and it is a composite for exactly the reason this row needed three attempts to get right. Each
+  // half alone drops the row while the turn is still running:
   //
-  // It is deliberately NOT gated on this feed's `working`, which is read from the TRANSCRIPT and lags
-  // the pane by the seconds between a prompt landing and the first assistant entry: gating on it made
-  // the row vanish for the whole thinking pause after every message he sent, which is exactly when a
-  // person most wants to see it (his report, same day). The pane knows first; the transcript knows
-  // later; this row is about the pane.
-  const status = cap && detectWorking(cap) ? parseWorkingStatus(cap) : null
+  // - `detectWorking` ALONE flaps. It wants "esc to interrupt" in the tail or a spinner line matching
+  //   WORKING_TIMER_RE, whose glyph class omits the `*` frame that `parseOneWorkingLine` explicitly
+  //   accepts — so on whichever 3s poll catches that frame (and the footer is often not in the tail
+  //   at all) a live turn reads idle. Measured on a real working pane, 2026-08-11: 4 misses in 10
+  //   ticks, then 1 in 20, while parseWorkingStatus reported `Waddling (5m 32s · 14.7k tokens)`
+  //   throughout. That is the owner's "coming in and out the whole time", and it is why v0.5.67's
+  //   gate did more harm than the bug it fixed.
+  // - `working` ALONE blanks the row for the whole thinking pause after every prompt: it is read from
+  //   the TRANSCRIPT and lags the pane by those seconds. The pane knows first; the transcript knows
+  //   longer.
+  //
+  // Their UNION keeps the row up for the whole turn and still drops it the moment the turn ends,
+  // which is the one thing an ungated `parseWorkingStatus` could not do: an idle pane keeps showing
+  // the last turn's screen forever, so a line that parses wrongly parses wrongly on every poll — one
+  // did, pinning a permanent row on a reply whose first line held an ellipsis (2026-08-11).
+  const paneWorking = cap ? detectWorking(cap) : false
+  const status = cap ? parseWorkingStatus(cap) : null
   const dial = {
     // Home-abbreviated, because this is the header's one-line subtitle and it truncates from the
     // END — `~/projects/x` keeps the leaf that identifies the session where `/home/ubuntu/projec…`
@@ -20230,7 +20348,8 @@ async function webappSessionFeed(sid: string): Promise<WebappSessionFeed | null>
   }
   // `chat` on BOTH returns, including this pre-transcript one: it decides a COLOUR, and a payload that
   // omits it paints a waiting chat lane amber where its card paints green.
-  if (!file) return { sid, name: row.name, working: detectWorking(cap), chat: isChatLaneSession(sid), ...dial, items: [], ...(status ? { status } : {}) }
+  // Pre-transcript, the pane is the only half that exists, so the composite reduces to it.
+  if (!file) return { sid, name: row.name, working: paneWorking, chat: isChatLaneSession(sid), ...dial, items: [], ...(paneWorking && status ? { status } : {}) }
   // The SAME composite webappListSessions uses, and for the same reason: a session orchestrating
   // subagents sits at its own prompt with its turn concluded, so `turnInProgress` alone paints it
   // idle for as long as the delegated work runs. The sessions list was fixed for that; this header
@@ -20290,7 +20409,7 @@ async function webappSessionFeed(sid: string): Promise<WebappSessionFeed | null>
   // here rather than folded into the fleet poll the list already runs.
   const ctx = await waitContext()
   const { state } = readSessionState(sid, file, working, ctx.panePids.get(pane), ctx)
-  return { sid, name: row.name, working, state, chat: isChatLaneSession(sid), ...dial, items, ...(status ? { status } : {}) }
+  return { sid, name: row.name, working, state, chat: isChatLaneSession(sid), ...dial, items, ...(status && (paneWorking || working) ? { status } : {}) }
 }
 
 // Dashboard actions — the same controls chat grants: stop = the /stop interrupt, compact = the

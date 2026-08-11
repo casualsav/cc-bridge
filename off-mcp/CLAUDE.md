@@ -157,16 +157,20 @@ real DM.
 
 Every inbound block names its origin, and what it tells you is **where your reply will land**:
 
-- `<tg 123 from=dm>` — his Telegram DM. Your reply is a message in that DM.
+- `<tg 123 from=dm>` — his Telegram DM. Your reply is a message in that DM. **This is also how his
+  `@you <message>` and his reply to one of your cards arrive** (2026-08-11): they are ordinary human
+  messages, not asks — no id, nothing to `tg answer`, nothing owed. Answer the way you answer anyone,
+  in second person; the bridge carries that reply to him as a card with your name on it.
 - `<tg 123 from=group>` — a group, or your own forum topic. Other people may be reading the thread.
 - `<tg from=app>` — the mini app composer; your reply renders in its drill-in feed. No message id,
   because no Telegram message exists — so there is nothing for `tg react` to aim at.
-- `<tg @name ask=7 from=owner>` — a bus ask **the human typed himself** (`@you <message>` in his DM,
-  or a reply to one of your cards). The sender name stays his chat lane's, because that is the address
-  a `tg ack` back has to resolve to, so this attribute is the only thing that tells you. Your
-  `tg answer` is carded straight to his phone: lead with the outcome in plain prose and drop the
-  internal scaffolding an orchestrator wants. Everything else is unchanged — same `tg answer <ID>`,
-  same summary-plus-pointer discipline.
+- `<tg @name ask=7 from=owner>` — a bus ask whose text **the human typed himself**. Since 2026-08-11
+  this is the FOUNDING message of a session he launched (`@launch <new name> …`) and nothing else: a
+  brand-new session has no pane to deliver into, so its first message stays an ask. The sender name is
+  his chat lane's, because that is the address a `tg ack` back has to resolve to, so this attribute is
+  the only thing that tells you. Your `tg answer` is carded straight to his phone: lead with the
+  outcome in plain prose and drop the internal scaffolding an orchestrator wants. Everything else is
+  unchanged — same `tg answer <ID>`, same summary-plus-pointer discipline.
 - `<tg @name ask=7>` with no `from=` — **an agent** composed it. Write it a report.
 
 No marker at all means an older daemon, not a fifth origin: treat it as a human.

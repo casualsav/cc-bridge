@@ -503,7 +503,13 @@ function isThinkingOnlyNudge(e: Entry): boolean {
   return e.type === 'user' && !e.isSidechain && e.isMeta === true && THINKING_ONLY_NUDGE.test(textOf(e.message?.content).trim())
 }
 
-type FinalReply = { uuid: string; text: string; busAnchored: boolean }
+// `anchorText` is the turn's anchoring user entry verbatim — WHO STARTED THIS TURN, not merely
+// whether it was the bus. The owner-direct route needs the identity rather than the class: his
+// message is matched against the block that was pasted (owner-reply.ts), so a turn he did not start
+// can never consume the route, however long his message waits in the CLI's queue. Empty when the scan
+// began mid-file with no anchor behind it — an unidentifiable turn matches nothing, which is the safe
+// direction for a delivery.
+type FinalReply = { uuid: string; text: string; busAnchored: boolean; anchorText: string }
 
 export function finalRepliesAfter(file: string, afterUuid: string): FinalReply[] {
   const entries = readEntries(file)
@@ -524,16 +530,17 @@ function scanFinalReplies(entries: Entry[], at: number): FinalReply[] {
   // rather than defaulting — a reply replayed after a restart would otherwise be classed human and
   // ping for a bus conversation, which is the exact noise this exists to stop.
   let anchorIsBus = latestBusAnchored(entries.slice(0, at + 1))
+  let anchorText = latestAnchorText(entries.slice(0, at + 1))
   let nudged = false
   for (let i = at + 1; i < entries.length; i++) {
     const e = entries[i]
-    if (isRealUserText(e)) { flush(); anchorIsBus = isBusAnchored(e.message?.content); nudged = false; continue }  // turn boundary (real prompts only — not injected skill/meta entries)
+    if (isRealUserText(e)) { flush(); anchorIsBus = isBusAnchored(e.message?.content); anchorText = textOf(e.message?.content); nudged = false; continue }  // turn boundary (real prompts only — not injected skill/meta entries)
     if (isThinkingOnlyNudge(e)) { nudged = true; continue }
     if (isMainAssistantText(e)) {
       const text = lastTextOf(e.message?.content).trim()
       if (isHarnessNoise(text)) continue
       if (anchorIsBus && nudged) continue  // the CLI forced this out of a turn that was told to stay silent
-      pending = { uuid: e.uuid ?? '', text: legibleApiError(text), busAnchored: anchorIsBus }
+      pending = { uuid: e.uuid ?? '', text: legibleApiError(text), busAnchored: anchorIsBus, anchorText }
     }
   }
   flush()
@@ -544,6 +551,12 @@ function scanFinalReplies(entries: Entry[], at: number): FinalReply[] {
 function latestBusAnchored(entries: Entry[]): boolean {
   for (let i = entries.length - 1; i >= 0; i--) if (isRealUserText(entries[i])) return isBusAnchored(entries[i].message?.content)
   return false
+}
+// The same entry's TEXT — seeded for the same reason: a reply relayed from a cursor that sits inside
+// its own turn must still name what started it, or a restart would leave the owner's route unmatched.
+function latestAnchorText(entries: Entry[]): string {
+  for (let i = entries.length - 1; i >= 0; i--) if (isRealUserText(entries[i])) return textOf(entries[i].message?.content)
+  return ''
 }
 
 // Bash-mode (`!` prefix) result: the transcript records the run as a user entry
