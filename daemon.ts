@@ -8813,6 +8813,22 @@ async function launchSpawn(spec: SpawnSpec, model: string | null, clampedNote: s
   const spawnHeader = spawnCardHeader(escapeHtml(topicName), [shownModel, effort].filter(Boolean).map(d => escapeHtml(d!)))
   if (firstMsg) void notifyBusRich(fromSid, spawnHeader, reason ? `why: ${reason}\n\n${firstMsg}` : firstMsg, sid)
   else void notifyBusText(fromSid, spawnHeader, sid)
+  // …EXCEPT when the words are the OWNER'S. `@launch <new name> <message>` is `@name <message>` at a
+  // session that does not exist yet, and his ruling on the second is the ruling on the first: his
+  // message is a HUMAN message. Delivered as an ask, the new session cannot answer it with a reply —
+  // it must call `tg answer`, so the words leave through a command argument and its first turn narrates
+  // the exchange in the third person ("Said hi."). He watched that happen on 2026-08-11 and asked for
+  // the ask to go: three artifacts for one greeting, and the one he could read was the wrong one. The
+  // reason this kept the ask at all — no pane to deliver into at mint time — is answered by WHERE the
+  // delivery happens: the closure below already waits for the REPL, so by the time anything is pasted
+  // the pane is exactly as ready as a live session's.
+  //
+  // With no ask row goes the ask's whole safety net: no expiry notice, no Stop-hook obligation, nothing
+  // chasing a session that ignores him. Identical to what `@name <message>` already trades away.
+  // A launch with NO DM chat lane behind it keeps the ask — `ownerReplyRoutes` has no chat to card, and
+  // the ask's owner-card tail is then the only thing that carries the answer to him at all.
+  const ownerChat = spec.ownerDirect ? chatIdForDmChatSession(fromSid) : null
+  const humanFounding = !!ownerChat && !loadAccess().launchFoundingAsk
   if (firstMsg) {
     // The first message is a TASK, so it goes over the bus as a real ask: the new session gets
     // an id it can `tg answer`, and its result comes back to the spawner instead of surfacing
@@ -8823,16 +8839,23 @@ async function launchSpawn(spec: SpawnSpec, model: string | null, clampedNote: s
     // on the exact crossing turn only). Spawns stay ungated, exactly as they were when this
     // was a raw paste. Digest/markSeen are skipped too: a session seconds old has no history.
     const foundingRefs = spec.refs ?? []
-    const p = createPending({ fromSid, toSid: sid, fromName, toName: topicName, text: firstMsg, refs: foundingRefs, founding: true,
+    const p = humanFounding ? null : createPending({ fromSid, toSid: sid, fromName, toName: topicName, text: firstMsg, refs: foundingRefs, founding: true,
       ...(spec.ownerDirect ? { ownerDirect: spec.ownerDirect } : {}), ...(spec.ownerMsgId != null ? { ownerMsgId: spec.ownerMsgId } : {}) }, Date.now())
-    appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'ask', from: fromName, to: topicName, id: p.id, text: firstMsg, refs: foundingRefs })
     // Reserve the ask for THIS closure before anything can see it: the pending exists now but
     // the pane won't be at a prompt for up to 45s, and the 15s sweep would otherwise inject it
     // through tryDeliverAsk while the closure is still waiting — the same block, twice.
     // tryDeliverAsk bails on a busInFlight id at entry, before its own claim, so it can't
     // release this reservation; the finally below does, leaving the ordinary sweep/TTL
     // lifecycle in charge of an ask the closure failed to deliver.
-    busInFlight.add(p.id)
+    if (p) {
+      appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'ask', from: fromName, to: topicName, id: p.id, text: firstMsg, refs: foundingRefs })
+      busInFlight.add(p.id)
+    }
+    // Built HERE, not in the closure: the marker his answer is matched on is read off these exact
+    // bytes, so the block that is armed and the block that is pasted are one value by construction.
+    const block = p
+      ? formatAskBlock(fromName, p.id, firstMsg, foundingRefs, false, !!spec.ownerDirect)
+      : ownerInboundBlock(firstMsg, ownerChat, spec.ownerMsgId, foundingRefs)
     void (async () => {   // wait for the REPL, then deliver — same shape as the scheduler's reviveAndInject
      try {
       for (let i = 0; i < 45; i++) {
@@ -8840,17 +8863,25 @@ async function launchSpawn(spec: SpawnSpec, model: string | null, clampedNote: s
         const cap = stripAnsi(await capturePane(newPane).catch(() => ''))
         if (/[❯>]\s*$/m.test(cap) || /\? for shortcuts/.test(cap)) break
       }
-      // busDeliver serializes on the same inject chain as human inbound, so the ask block can't
+      // busDeliver serializes on the same inject chain as human inbound, so the block can't
       // interleave with a message the owner types into the new topic mid-boot.
-      // `from=owner` for the same reason the flag exists: this founding message is the owner's own
-      // words, and the new session has to write its answer for a person rather than for an orchestrator.
-      if (!(await busDeliver(newPane, formatAskBlock(fromName, p.id, firstMsg, foundingRefs, false, !!spec.ownerDirect)).catch(() => false))) {
-        removePending(p.id)   // never leave a ghost ask the spawner will be told timed out
+      // On the ask path, `from=owner` for the same reason the flag exists: the founding message is the
+      // owner's own words, and the new session has to write its answer for a person rather than for an
+      // orchestrator. On the human path the envelope says it by being the one his DM already wears.
+      if (!(await busDeliver(newPane, block).catch(() => false))) {
+        if (p) removePending(p.id)   // never leave a ghost ask the spawner will be told timed out
         if (group && threadId != null) void channel.sendText(group, `⚠️ Spawned <b>${escapeHtml(topicName)}</b>, but its first message didn't paste — send it again in its topic.`, { threadId: String(threadId) }).catch(() => {})
         else void notifyBusText(fromSid, `⚠️ Spawned <b>@${escapeHtml(topicName)}</b>, but its first message didn't paste — send it again.`)
         return
       }
-      markInjected(p.id, Date.now())   // arms the answer window from the moment it actually landed
+      if (p) markInjected(p.id, Date.now())   // arms the answer window from the moment it actually landed
+      // The human path's equivalent, and it is armed for the same reason on the same instant: the new
+      // session's first reply is his, and a reply that beats its own route reaches only that session's
+      // own surface. Off the block that was pasted, never rebuilt beside it (owner-reply.ts).
+      else {
+        ownerReplyRoutes.arm({ sid, chat: ownerChat!, name: topicName, marker: ownerReplyMarker(block) })
+        process.stderr.write(`daemon: founding message delivered to @${topicName} as the owner's own words (${newPane}, ${firstMsg.length} chars) — its reply cards back to ${ownerChat}\n`)
+      }
       // The spawner is now this session's briefer. Stamped HERE as well as in tryDeliverAsk,
       // because a spawn's first message never goes through that function — it is delivered by
       // this closure, so a spawned session would otherwise have no briefer at all, and the
@@ -8865,7 +8896,9 @@ async function launchSpawn(spec: SpawnSpec, model: string | null, clampedNote: s
       // mirror into — the spawner's "Spawned @X" card is its only surface.
       if (!group || threadId == null) return
       const shown = firstMsg.length > ASK_QUOTE_CAP ? firstMsg.slice(0, ASK_QUOTE_CAP) + '…' : firstMsg
-      const header = `<b>@${escapeHtml(fromName)}</b> messaged <b>@${escapeHtml(topicName)}</b>`
+      // `@owner` on the human path, because that is who typed it: the lane minted the spawn, but the
+      // words in this card are his, and naming the lane there is the third-person narration again.
+      const header = `<b>@${escapeHtml(p ? fromName : 'owner')}</b> messaged <b>@${escapeHtml(topicName)}</b>`
       // The SECOND chevron-card builder, and the reason the fix was enumerated rather than applied
       // where the symptom was reported: this one is hand-rolled beside sendBusCard, so a render fix
       // made only there would leave every spawn's first message reaching him as raw markdown.
@@ -8878,7 +8911,7 @@ async function launchSpawn(spec: SpawnSpec, model: string | null, clampedNote: s
         if (!telegramRefused(e)) { process.stderr.write(`daemon: spawn task mirror for @${topicName} has an UNKNOWN outcome, NOT re-sending it as HTML: ${e}\n`); return }
         void channel.sendText(group, `${header}\n<blockquote expandable>${rendered}</blockquote>`, { silent: true, threadId: String(threadId) }).catch(() => {})
       }
-     } finally { busInFlight.delete(p.id) }
+     } finally { if (p) busInFlight.delete(p.id) }
     })()
   }
   // The no-brief case says so OUT LOUD. It used to be the silent branch — a dropped brief and a
@@ -8896,7 +8929,9 @@ async function launchSpawn(spec: SpawnSpec, model: string | null, clampedNote: s
     ? ` · effort ${effort}${launchHarness ? ' (CLI dial; the provider may not honour it)' : ''}`
     : ''
   return { ok: true, text: `spawned "${topicName}" in ${dir}${shownModel ? ` · model ${shownModel} via ${runsOn}` : ''}${overrode}${reason ? ` (why: ${reason})` : ''}${clampedNote}${effortClause}${firstMsg
-    ? ' — the first message delivers as an ask once the REPL is up, and its reply comes back to you as the answer'
+    ? (humanFounding
+      ? ' — the first message delivers as the owner\'s own words once the REPL is up, and the reply it draws cards straight back to him'
+      : ' — the first message delivers as an ask once the REPL is up, and its reply comes back to you as the answer')
     : ' — NO first message was given, so it starts idle (a heredoc needs the `-` body argument; `tg spawn --help`)'}. Reach it on the bus as @${topicName}.` }
 }
 
@@ -16314,6 +16349,27 @@ type OwnerMsgDelivery = 'delivered' | 'no-session' | 'blocked' | 'not-landed'
 // already flattened into one list by the routing above. A misread only picks the wrong attribute name
 // for a path the agent Reads either way; dropping the file, which is what shipped for a year, does not.
 const INBOX_IMAGE_RE = /\.(jpe?g|png|gif|webp|heic|heif|bmp|tiff?)$/i
+// His words in the envelope every inbound message wears — ONE builder, because the two places that
+// deliver them (this dispatch, and a spawn's founding message) must produce the same bytes: the
+// marker `ownerReplyRoutes` matches his answer on is read off the block that was pasted, so a second
+// builder drifting by one attribute is an answer that silently never comes back.
+function ownerInboundBlock(text: string, chat: string | null | undefined, msgId?: number, refs: string[] = []): string {
+  const imgs = refs.filter(p => INBOX_IMAGE_RE.test(p))
+  const atts = refs.filter(p => !INBOX_IMAGE_RE.test(p))
+  const params: InboundParams = {
+    content: text,
+    meta: {
+      // His own chat and his own id: `formatChannelBlock` prints `@sender` only for someone who is not
+      // the owner, and reads `chat_type` for the `from=dm` marker the session classifies on.
+      chat_id: chat ?? '', chat_type: 'private',
+      ...(chat ? { user_id: chat, user: 'owner' } : {}),
+      ...(msgId != null ? { message_id: String(msgId) } : {}),
+      ...(imgs.length > 1 ? { image_paths: imgs.join('\n') } : imgs.length ? { image_path: imgs[0]! } : {}),
+      ...(atts.length ? { attachment_path: atts[0]! } : {}),
+    },
+  }
+  return formatChannelBlock(params)
+}
 async function ownerDirectDispatch(
   reply: (t: string) => Promise<unknown>, laneSid: string, toSid: string, text: string, msgId?: number,
   refs: string[] = [],
@@ -16332,21 +16388,7 @@ async function ownerDirectDispatch(
     await reply(`@${toName} is showing a dialog it has to answer first — nothing was delivered. Send it again once it's clear.`)
     return 'blocked'
   }
-  const imgs = refs.filter(p => INBOX_IMAGE_RE.test(p))
-  const atts = refs.filter(p => !INBOX_IMAGE_RE.test(p))
-  const params: InboundParams = {
-    content: text,
-    meta: {
-      // His own chat and his own id: `formatChannelBlock` prints `@sender` only for someone who is not
-      // the owner, and reads `chat_type` for the `from=dm` marker the session classifies on.
-      chat_id: chat ?? '', chat_type: 'private',
-      ...(chat ? { user_id: chat, user: 'owner' } : {}),
-      ...(msgId != null ? { message_id: String(msgId) } : {}),
-      ...(imgs.length > 1 ? { image_paths: imgs.join('\n') } : imgs.length ? { image_path: imgs[0]! } : {}),
-      ...(atts.length ? { attachment_path: atts[0]! } : {}),
-    },
-  }
-  const block = formatChannelBlock(params)
+  const block = ownerInboundBlock(text, chat, msgId, refs)
   // The same serialized paste every bus block and human message takes (one chain per pane), and NOT
   // emitInbound: that path stamps the delivered-ledger and buffers a failure under HIS chat id, which
   // a later drain would replay into the lane — his message, delivered to the wrong session, hours late.

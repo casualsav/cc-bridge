@@ -116,15 +116,20 @@ const body = (fn: string, len = 3000): string => daemon.slice(at(fn), at(fn) + l
 test('every owner-typed gesture reaches the ONE dispatch — none delivers beside it', () => {
   for (const fn of ['async function routeOwnerAddress(', 'async function routeOwnerReply(', 'async function ownerLaunchAsk('])
     expect(body(fn)).toContain('ownerDirectDispatch')
-  // The dispatch delivers the HUMAN envelope. formatChannelBlock is the same builder every inbound
-  // message goes through, which is the whole ruling: no ask id, no `tg answer` obligation, no footer.
+  // The dispatch delivers the HUMAN envelope. ownerInboundBlock wraps the same formatChannelBlock every
+  // inbound message goes through, which is the whole ruling: no ask id, no `tg answer` obligation, no
+  // footer.
   const dispatch = body('async function ownerDirectDispatch(', 4000)
-  expect(dispatch).toContain('formatChannelBlock(params)')
+  expect(dispatch).toContain('ownerInboundBlock(text, chat, msgId, refs)')
+  expect(body('function ownerInboundBlock(', 1200)).toContain('formatChannelBlock(params)')
   expect(dispatch).not.toContain('createPending(')
   expect(dispatch).not.toContain('formatAskBlock(')
-  // The SPAWN half is the stated exception and still an ask: `@launch <new name>` has no session to
-  // deliver into until the pane exists, so its founding message keeps the ask machinery (and with it
-  // `ownerDirect`, which is what routes that answer to him). It is the only ownerDirect mint left.
+  // ONE builder, and this is the count that keeps it one: the founding message of a launch wears the
+  // same envelope, and the marker his answer is matched on is read off those bytes. Two builders
+  // drifting by one attribute is an answer that silently never comes back.
+  expect([...daemon.matchAll(/ownerInboundBlock\(/g)].length).toBe(3)   // the definition + both callers
+  // The ONE ownerDirect mint left is the launch's REVERT path — the founding ask, reached only with
+  // `launchFoundingAsk` on or with no DM lane to card an answer back to.
   const mints = [...daemon.matchAll(/createPending\(\{[^}]*ownerDirect/g)].map(m => m.index!)
   expect(mints.length).toBe(1)
   expect(mints[0]!).toBeGreaterThan(at('async function launchSpawn('))
@@ -187,9 +192,10 @@ test('a file he attached rides the gesture — every owner-typed route carries i
   for (const fn of ['async function routeOwnerAddress(', 'async function routeOwnerReply(', 'async function ownerLaunchAsk('])
     expect(body(fn)).toMatch(/ownerDirectDispatch\([^)]*, files\)/)
   // And the delivery USES them: the same `img=`/`att=` attributes every other inbound message carries,
-  // so the session Reads a path rather than being told a file exists.
-  const dispatch = body('async function ownerDirectDispatch(', 4000)
-  for (const k of ['image_path', 'image_paths', 'attachment_path']) expect(dispatch).toContain(k)
+  // so the session Reads a path rather than being told a file exists. In the shared builder, so a file
+  // he attaches to an `@launch` rides its founding message too.
+  const builder = body('function ownerInboundBlock(', 1200)
+  for (const k of ['image_path', 'image_paths', 'attachment_path']) expect(builder).toContain(k)
   expect(body('async function ownerLaunchSpawn(', 2000)).toContain('{ refs: files }')
   expect(body('async function launchSpawn(', 9000)).toContain('const foundingRefs = spec.refs ?? []')
 })
@@ -203,14 +209,47 @@ test('his message confirms by REACTION on the message he typed — no card echoi
   expect(dispatch.indexOf('REACTIONS.delivered')).toBeGreaterThan(dispatch.indexOf("if (outcome !== 'landed')"))
 })
 
-// ---- The spawn half, which is still an ask ------------------------------------------------------
+// ---- The spawn half: his founding message is a human message too --------------------------------
+//
+// `@launch <new name> <message>` was the last gesture still minting an ask, on the grounds that a
+// session which does not exist yet has no pane to deliver into. What that missed is WHERE the delivery
+// happens: the closure waits for the REPL first, so the pane is as ready as a live session's by the
+// time anything is pasted. Until 2026-08-11 the founding turn therefore produced three artifacts for
+// one greeting — a prose text block that reached nobody, the `tg answer` payload, and "Said hi."
+const spawn = daemon.slice(at('async function launchSpawn('), at('async function holdSpawnForApproval('))
 
-test("a spawned session is TOLD the founding message is the owner's — same reason the flag exists", () => {
+test('the founding message wears the human envelope, and the ask is what the revert switch restores', () => {
+  expect(spawn).toContain('const humanFounding = !!ownerChat && !loadAccess().launchFoundingAsk')
+  // The ask row is minted ONLY on the revert path — `p` null is the human path, and every piece of ask
+  // machinery hangs off `p` so none of it can half-fire.
+  expect(spawn).toContain('const p = humanFounding ? null : createPending({')
+  for (const guarded of ['if (p) removePending(p.id)', 'if (p) markInjected(p.id, Date.now())', 'if (p) busInFlight.delete(p.id)'])
+    expect(spawn).toContain(guarded)
+  // Both blocks are built from ONE expression, so the bytes armed and the bytes pasted cannot diverge.
+  expect(spawn).toContain('ownerInboundBlock(firstMsg, ownerChat, spec.ownerMsgId, foundingRefs)')
+  expect(spawn).toContain('busDeliver(newPane, block)')
+})
+
+test('a launch with NO DM chat lane keeps the ask — the answer has nowhere else to go', () => {
+  // `ownerReplyRoutes` cards into a chat; with none, the ask's owner-card tail is the only thing that
+  // carries the answer to him at all. Losing it would be worse than the narration this removes.
+  expect(spawn).toContain('const ownerChat = spec.ownerDirect ? chatIdForDmChatSession(fromSid) : null')
+  expect(spawn).toContain('!!ownerChat &&')
+})
+
+test('the founding route is armed off the pasted block, and only once it landed', () => {
+  const arm = spawn.indexOf('ownerReplyRoutes.arm({ sid, chat: ownerChat!')
+  expect(arm).toBeGreaterThan(spawn.indexOf('if (!(await busDeliver(newPane, block)'))
+  expect(spawn).toContain('marker: ownerReplyMarker(block)')
+})
+
+test("an AGENT's spawn is untouched — its founding message is still an ask it must answer", () => {
+  // `tg spawn` sets no ownerDirect, so ownerChat is null and humanFounding is false by construction:
+  // the spawner is a session waiting on `tg answer`, and a reply-shaped answer would reach nobody.
+  expect(body('async function ownerLaunchSpawn(', 2000)).toContain('ownerDirect: true')
   // `from=owner` in the ask block is what makes the new session write its answer for a person. Passing
   // the flag to the ROW and forgetting the BLOCK gives correctly-routed prose written for an agent.
-  const spawn = daemon.slice(at('async function launchSpawn('), at('async function holdSpawnForApproval('))
   expect(spawn).toContain('formatAskBlock(fromName, p.id, firstMsg, foundingRefs, false, !!spec.ownerDirect)')
-  expect(body('async function ownerLaunchSpawn(', 2000)).toContain('ownerDirect: true')
 })
 
 test('an owner-direct answer with a DM surface is a card to him, never a paste into the lane', () => {

@@ -35,7 +35,7 @@ const PREF_KEYS = [
   'renderMarkdown', 'terminalMirror', 'terminalMirrorFooter', 'sessionPin', 'busDepthLimit', 'replyMode', 'budgetDaily',
   'topicOnEnd', 'scheduleTz', 'batchAllow', 'confirmReset', 'tts', 'updateChecks', 'claudingDraft',
   'autoUpdate', 'limitFailover', 'failoverChain', 'failoverActiveCount', 'chatFailoverChain', 'codeFailoverChain', 'chatFailoverActiveCount', 'codeFailoverActiveCount', 'chatProviderAccount', 'codeProviderAccount', 'codexModel', 'codexEffort', 'switchboard', 'dmLanes',
-  'chatMapAutowire', 'fileBrowser', 'spawnModel', 'spawnEffort', 'spawnMode', 'chatModel', 'chatEffort', 'chatMode', 'spawnAuto', 'spawnAgentModels', 'spawnHoldMinutes', 'modelCardChat', 'fableForAgents', 'creditConsent',
+  'chatMapAutowire', 'fileBrowser', 'spawnModel', 'spawnEffort', 'spawnMode', 'chatModel', 'chatEffort', 'chatMode', 'spawnAuto', 'spawnAgentModels', 'spawnHoldMinutes', 'launchFoundingAsk', 'modelCardChat', 'fableForAgents', 'creditConsent',
   'chatHarness', 'codeHarness',
 ] as const satisfies readonly (keyof Access)[]
 

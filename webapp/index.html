@@ -3644,6 +3644,14 @@ const INSTANT_CMD = /^\/(clear|model|effort|status|context|cost|help|rename|conf
 // row rather than as a user bubble, which is what makes an optimistic bubble a duplicate.
 const COMMAND_TOKEN = /^\/[a-zA-Z][\w:-]*(\s|$)/;
 let workTimer = null, workPhase = 0, workOptimisticAt = 0;
+// The status the row is CURRENTLY rendering — the live one when the poll carried one, the last one
+// otherwise. It exists because the pane's working line is not continuously readable: measured on a
+// real turn (`scripts/work-row-gap.ts`, 2026-08-11) the line vanished from the capture for FOUR
+// consecutive seconds while the transcript still reported the turn in progress, so the payload
+// carried `working: true` and no `status` and the row blinked out mid-turn — the owner's report, and
+// the third distinct failure of this one row. Held only while the payload says the session is
+// working; cleared with the row, so nothing survives into the next turn.
+let workShown = null;
 // ---- The elapsed clock ------------------------------------------------------------------------
 // The pane's number arrives once per 3s poll and is whatever the terminal last painted, so showing
 // it directly made the time lurch. Instead it SEEDS a local clock, and the displayed value is
@@ -3685,17 +3693,27 @@ function paintWork() {
   // this payload's `working` was tried and reverted the same day: that field comes from the
   // transcript, which lags the pane by the whole thinking pause after a prompt lands, so the row
   // disappeared for the seconds a person most wants it. One gate, on the side that knows first.
-  const st = lastDrill && lastDrill.status;
+  const live = lastDrill && lastDrill.status;
+  // …and it holds through a poll the pane could not be read on, because `working` — the TRANSCRIPT's
+  // own composite, the same one the session card's dot follows — is the half that knows the turn is
+  // still running when the pane's spinner line is momentarily not there to parse. Three covers, in
+  // the order they become true: the optimistic window from the send, the live status, then this hold.
+  const working = !!(lastDrill && lastDrill.working);
+  const st = live || (working ? workShown : null);
   // The optimistic window covers the gap between hitting send and the first poll that sees the pane
   // working. It is bounded: a send that never starts a turn must not leave a permanent lie on screen.
-  const show = st || (workOptimisticAt && Date.now() - workOptimisticAt < 20000);
+  const show = st || working || (workOptimisticAt && Date.now() - workOptimisticAt < 20000);
   let el = $("dwork");
-  // Every teardown goes through here, /clear's silent path included: no status and no optimistic
-  // window means the row goes and BOTH timers stop with it. A ticker that outlived its row would be
-  // a clock counting for a turn that ended.
-  if (!show) { if (el) el.remove(); stopWorkGlyph(); stopWorkTick(); workClock = null; return; }
-  if (st) workOptimisticAt = 0;   // the real thing arrived
-  syncWorkClock(st && st.elapsed);
+  // Every teardown goes through here, /clear's silent path included: no status, nothing working and
+  // no optimistic window means the row goes and BOTH timers stop with it. A ticker that outlived its
+  // row would be a clock counting for a turn that ended.
+  if (!show) { if (el) el.remove(); stopWorkGlyph(); stopWorkTick(); workClock = null; workShown = null; return; }
+  workShown = st;
+  if (live) workOptimisticAt = 0;   // the real thing arrived
+  // Only off a LIVE reading. Re-feeding the held one would re-seed the clock backwards the moment the
+  // hole outlasts RESEED_DROP; left alone it keeps counting from wall time, which is the whole reason
+  // the clock is derived rather than incremented.
+  if (live) syncWorkClock(live.elapsed);
   const stuck = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;
   if (!el) {
     el = document.createElement("div");
@@ -3729,7 +3747,10 @@ function stopWorkGlyph() { if (workTimer) { clearInterval(workTimer); workTimer 
 // Tokens come straight from the pane and are allowed to jump; only the time is smoothed.
 function paintWorkMeta() {
   const el = $("dwork"); if (!el) return;
-  const st = lastDrill && lastDrill.status;
+  // `workShown`, not the payload's own status: this also runs from the 1s ticker, and reading the
+  // payload directly would blank the time and the token count on exactly the polls paintWork is
+  // holding the row up through.
+  const st = workShown;
   const sec = workSeconds();
   // A shape parseElapsed didn't recognise is shown as the pane wrote it rather than dropped — the
   // clock is an improvement on that string, not a precondition for showing one.

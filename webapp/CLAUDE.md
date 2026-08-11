@@ -382,17 +382,31 @@ give it.
 
 ## Working row
 
-- **The row follows `status`, and the ONE gate on it is the daemon's `detectWorking` — not this
-  payload's `working`.** Both were got wrong in one day (2026-08-11) and the pair is the lesson.
+- **THE ROW HAS THREE COVERS AND NEEDS ALL THREE, because neither the pane nor the transcript is
+  readable for the whole turn.** In the order they become true: the optimistic window armed at send
+  (`workOptimisticAt`, bounded at 20s); the live `status`; and — since 2026-08-11 — a HOLD on the last
+  status for as long as the payload's `working` is true. The hold is not belt-and-braces: measured on a
+  real turn (`bun scripts/work-row-gap.ts <pane> <file.jsonl> "<prompt>"`, which prints the holes),
+  the pane's spinner line was unreadable for **four consecutive seconds** mid-turn while the transcript
+  still reported it running — payload `working: true`, no `status`, and the row blinked out under the
+  owner. `paintWorkMeta` reads the SAME held value (`workShown`), or the 1s ticker blanks the clock on
+  exactly those polls. The clock is re-seeded off a LIVE reading only: re-feeding the held `elapsed`
+  drags it backwards once the hole outlasts `RESEED_DROP`, while leaving it alone keeps it counting
+  from wall time, which is what a derived clock is for. `work.mjs`'s HOLD check drives the two-payload
+  SEQUENCE that is the defect (a single payload passes on the broken page) and its release, and the
+  page-path argument is there so both can be run against a pre-change copy.
+- **The daemon's gate on `status` is `detectWorking(pane) || working`, and this payload's `working` is
+  what the hold above reads.** Both halves were got wrong in one day (2026-08-11) and the pair is the
+  lesson.
   `status` alone pinned a PERMANENT row: `●` is Claude Code's bullet for a REPLY as well as a spinner
   frame, so a reply whose first line carried `FYI · …` mid-sentence parsed as a live turn, and an idle
   pane re-parsed it on every 3s poll ("Gone — v0.5.63 live. Bus rows…"). Gating on `working` then
   blanked the row for the whole thinking pause after every prompt — that field is read from the
   TRANSCRIPT, which lags the pane by the seconds between a message landing and the first assistant
-  entry, which is exactly when a person is watching for it. So the gate belongs on the side that
-  knows FIRST and is STRICTER about it: `detectWorking` wants "esc to interrupt" or a spinner line
-  with a real TIMER, where `parseWorkingStatus` will settle for a verb — the mis-parsed reply satisfies
-  the second and never the first. The parser was tightened in the same change (`prompt.ts`: the
+  entry, which is exactly when a person is watching for it. So the gate is their UNION, and the half
+  that carries the pre-transcript seconds is the stricter one: `detectWorking` wants "esc to interrupt"
+  or a spinner line with a real TIMER, where `parseWorkingStatus` will settle for a verb — the
+  mis-parsed reply satisfies the second and never the first. The parser was tightened in the same change (`prompt.ts`: the
   ellipsis must CLOSE the line), and `prompt.test.ts` holds both halves; `work.mjs`'s second control
   is the mini app's own — a status with `working: false` must still paint.
 - **Its spacing derives from its NEIGHBOURS**, not its own padding: above is the feed's floor
