@@ -42,7 +42,7 @@ import { planDrift, driftStateAfter, type DriftState } from './drift-guard.ts'
 import { decideModel, decideEffort, upgradeNeedsConfirm, heldSpawnModel, heldSpawnNeedsLine, holdTapData, parseHoldTap, launchFallback, spawnCardHeader, relaunchModel, launchDefaultModel, launchDefaultEffort, launchDefaultMode, fablePolicy, fableRowState, onOff, type FablePolicy, AUTO_FALLBACK, AUTO_EFFORT_FALLBACK, FABLE, HAIKU, isClaudeFamily, type ModelDecision, type HoldOutcome } from './spawn-model-policy.ts'
 import { renderSessionsView } from './sessions-view.ts'
 import { detectCurrentMode, onNormalPrompt, inputBoxContent, inputBoxOccupant, isModelSwitchConfirm, planModelDialogStep, isModelConsentDialog, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, paneRunsTypedInput, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType } from './prompt.ts'
-import { modelSwitchEvidence, findSessionFile, resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, lastAssistantStopReason, turnAnchorUuid, liveSubagents, currentTurnFeed, currentTurnActivity, concludedTurnWork, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
+import { modelSwitchEvidence, findSessionFile, resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, lastAssistantStopReason, turnAnchorUuid, liveSubagents, currentTurnFeed, currentTurnSpan, currentTurnActivity, concludedTurnWork, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
 // CC-only, called directly rather than through agent-transcript.ts's dispatcher: the error fields it
 // keys on (isApiErrorMessage/apiErrorStatus) are a Claude Code transcript shape with no Codex
 // equivalent, so — like several other CC-only readers in that dispatcher — a Codex rollout simply
@@ -20263,7 +20263,13 @@ async function webappSessionFeed(sid: string): Promise<WebappSessionFeed | null>
     let cut = items.length
     while (cut > 0 && items[cut - 1]!.role === 'assistant') cut--
     const concluded = items.splice(cut)
-    items.push({ role: 'turn', ts: Date.now(), blocks: capChips(parts, FEED_BLOCKS) })
+    // `workedSec` is the turn's OWN clock and its presence IS "this turn has ended" — the client
+    // reads nothing else to decide between the live chips and the concluded summary, so the two
+    // states cannot disagree about which one a repaint is painting. Absent while working, because a
+    // duration that is still climbing is what the working row's own clock already shows.
+    const span = working ? null : currentTurnSpan(file)
+    items.push({ role: 'turn', ts: Date.now(), blocks: capChips(parts, FEED_BLOCKS),
+      ...(span ? { workedSec: Math.max(0, Math.round((span.endedAt - span.startedAt) / 1000)) } : {}) })
     items.push(...concluded)
   }
   // The header dot's state, read the SAME way the card reads it (readSessionState) so a card and the

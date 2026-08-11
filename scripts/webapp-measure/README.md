@@ -86,6 +86,13 @@ somewhere and point at it) before running. Everything renders `file://` — no s
                                   #   stopped being global. It found .row — one host, a ::before node
                                   #   dot and a ::after connector, claiming the most generic word in
                                   #   UI. Control: run it on a pre-scoping page, it names all five
+    node turnworked.mjs [page]    # a CONCLUDED turn folds its per-kind chips into one "Worked for …"
+                                  #   line that opens the sheet on EVERY call of the turn, in order —
+                                  #   plus the tap flash, which no screenshot can see (the WebView's
+                                  #   -webkit-tap-highlight-color, read as a computed value on three
+                                  #   screens; the harness default is a visible rgba(0,0,0,0.18)).
+                                  #   Control: on a pre-change page 17 fail (§1 flash, §2 fold, §4
+                                  #   sheet) and §3/§5 pass on BOTH — a running turn is untouched
     node work.mjs <outdir>        # the live working row: both themes, reduced-motion, and the
                                   #   status-absent control (the row must NOT render without it)
     node fullscreen.mjs           # the fullscreen top offset on every top-anchored surface, driven

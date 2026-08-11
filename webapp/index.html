@@ -251,7 +251,13 @@
       --hint-raised: color-mix(in srgb, var(--hint) 80%, var(--text));
       --add: color-mix(in srgb, #3fb950 80%, var(--text)); --del: color-mix(in srgb, #f85149 80%, var(--text)); }
   }
-  * { box-sizing: border-box; }
+  /* The tap flash is the WebView's, not ours: Android paints a filled rectangle over the whole
+     element box of anything tappable, which on a full-width chip or a card reads as a bulky square
+     nobody drew (the owner, 2026-08-11: "all places where a click results in a bulky square
+     highlight"). It INHERITS, so `*` is belt-and-braces over `html` — and it is not a focus ring:
+     `.sheet input:focus`'s outline is a typing affordance and stays. Nothing replaces the flash;
+     no :active state was asked for. */
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   body { margin: 0; font: var(--t-body)/1.45 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); }
   /* Form controls don't inherit fonts by default (the composer was silently falling back to the
      UA's monospace); give them the app stack — later per-element rules (#vedit-area) still win. */
@@ -3191,25 +3197,56 @@ const stat = x => (x.plus ? '<i class="cp">+' + x.plus + "</i>" : "") + (x.minus
 // ADJACENT paragraphs go in ONE quote, and a chip ends the run — mirror.ts merges adjacent thought
 // paragraphs into one shaded quote on the Telegram card, and two surfaces rendering the same blocks
 // as three quotes and one quote is exactly the drift turn-summary.ts was extracted to stop.
+// ONCE THE TURN HAS ENDED the per-kind chips fold into ONE "Worked for 2m 30s" line (the owner,
+// 2026-08-11). It is a replacement, not an addition: while the turn runs the chips ARE the live
+// report, and afterwards each of them would open a list of its own kind — the summary exists to be
+// the one way back into everything that happened, so leaving them beside it makes three taps out of
+// one answer. `workedSec` present is the whole signal (webapp.ts), so the swap can never half-happen.
+// The narration is untouched — it is prose, and prose is not activity.
+// Chips still FLUSH the quote run where they stood, concluded or not: the paragraph grouping is a
+// property of the turn, not of which side of the end it is being read from, and re-merging quotes at
+// turn end would reflow the reader's screen for nothing.
 function turnRow(i, n) {
   let out = "", quote = [];
+  const done = typeof i.workedSec === "number";
   const flush = () => { if (quote.length) out += '<div class="tq">' + quote.join("") + "</div>"; quote = []; };
   (i.blocks || []).forEach((b, bi) => {
     if (b.t === "chip") {
       flush();
-      out += '<button class="chip" data-t="' + n + '" data-b="' + bi + '" onclick="openCalls(' + n + "," + bi + ')"><span class="cl">' + esc(b.label || "")
+      if (!done) out += '<button class="chip" data-t="' + n + '" data-b="' + bi + '" onclick="openCalls(' + n + "," + bi + ')"><span class="cl">' + esc(b.label || "")
         + "</span>" + stat(b) + '<span class="cv">›</span></button>';
     } else quote.push('<div class="tp">' + md(b.text || "") + "</div>");
   });
   flush();
+  // A turn with no chips at all never had a summary to fold — it is narration the server sent for
+  // its own reasons, and "Worked for 4s" over nothing is a row that answers no question.
+  if (done && (i.blocks || []).some(b => b.t === "chip"))
+    out += '<button class="chip" data-t="' + n + '" data-worked="1" onclick="openWorked(' + n + ')"><span class="cl">Worked for '
+      + fmtElapsed(i.workedSec) + '</span><span class="cv">›</span></button>';
   return '<div class="msg turn"' + (i.uuid ? ' data-uuid="' + esc(i.uuid) + '"' : "") + ">" + out + "</div>";
 }
 // One row per call, in the order they ran: two calls on the same target are two rows, never merged.
 function openCalls(t, b) {
   const it = (lastDrill ? lastDrill.items : [])[t], blk = it && (it.blocks || [])[b];
   if (!blk) return;
-  $("calltitle").textContent = blk.label || "";
-  $("calllist").innerHTML = (blk.calls || []).map(c => '<div class="row"><span>' + esc(c.verb || "")
+  showCalls(blk.label || "", blk.calls || []);
+}
+// The whole turn, in the order it ran — every chip's calls concatenated, which is the same list the
+// live chips showed between them and the only one left once they have folded. Flattened here rather
+// than shipped as a second array: one source, so a call cannot appear in a chip and not in the turn.
+// Bounded by the payload's own chip window (FEED_BLOCKS, oldest-first): a turn past it lost those
+// chips before this row existed, and inventing a second, wider fetch for this sheet would make the
+// summary and the chips disagree about the same turn.
+function openWorked(t) {
+  const it = (lastDrill ? lastDrill.items : [])[t];
+  if (!it) return;
+  const calls = [];
+  (it.blocks || []).forEach(b => { if (b.t === "chip") calls.push(...(b.calls || [])); });
+  showCalls("Worked for " + fmtElapsed(it.workedSec), calls);
+}
+function showCalls(title, calls) {
+  $("calltitle").textContent = title;
+  $("calllist").innerHTML = calls.map(c => '<div class="row"><span>' + esc(c.verb || "")
     + '</span><span class="tgt">' + esc(c.target || "") + "</span>" + stat(c) + "</div>").join("");
   // .show before paint, .up next frame — #dial's shape, for its reason: setting display and
   // transform in one tick leaves the transition nothing to animate from.

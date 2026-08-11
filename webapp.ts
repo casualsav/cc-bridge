@@ -211,6 +211,9 @@ export interface SessionFeed {
   // absent — /clear produces no output, and a stdout entry can arrive with no invocation recorded.
   items: Array<{ role: 'user' | 'assistant' | 'agent' | 'activity' | 'thought' | 'turn' | 'command'; text?: string; ts: number
     blocks?: TurnPart[]
+    // A turn row only: how long the turn took, present ONLY once it has concluded. The client folds
+    // the chips into one "Worked for …" line on exactly that signal — see daemon.ts, where it is set.
+    workedSec?: number
     uuid?: string; img?: string; imgs?: string[]; att?: string; cmd?: boolean; name?: string; args?: string; agent?: string; status?: string; clipped?: boolean
     // `via`/`to` mark an assistant row the session said OVER THE BUS rather than into its pane —
     // an answer, a post, an ask to another agent (outbound-feed.ts). Its words never reach the

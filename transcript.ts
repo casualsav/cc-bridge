@@ -1236,6 +1236,30 @@ export function currentTurnFeed(file: string, concluded = false): FeedItem[] {
   return out
 }
 
+// How long the turn `currentTurnFeed` describes has been running: its anchoring user message to the
+// newest entry after it. The pane's own elapsed counter cannot answer this — the working line is
+// gone from the pane the moment the turn ends, which is exactly when the mini app's "Worked for …"
+// summary appears. Sidechain entries count: a session waiting on its subagents is still working.
+export function currentTurnSpan(file: string): { startedAt: number; endedAt: number } | null {
+  const entries = readEntries(file)
+  let start = -1
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (isRealUserText(entries[i]!)) { start = i; break }
+  }
+  if (start < 0) return null
+  const at = (i: number): number | null => {
+    const t = Date.parse(entries[i]?.timestamp ?? '')
+    return Number.isFinite(t) ? t : null
+  }
+  const startedAt = at(start)
+  if (startedAt === null) return null
+  for (let i = entries.length - 1; i > start; i--) {
+    const endedAt = at(i)
+    if (endedAt !== null) return { startedAt, endedAt: Math.max(endedAt, startedAt) }
+  }
+  return null
+}
+
 // Cross-session search (ROADMAP #5): scan transcripts newest-first for `query` in the
 // conversation text (user + main-thread assistant), returning up to `limit` matching sessions
 // with a snippet around the latest hit. Bounded to the newest `maxFiles` transcripts so a big

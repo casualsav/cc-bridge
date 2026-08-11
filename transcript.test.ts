@@ -3,7 +3,7 @@ import { test, expect, describe } from 'bun:test'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { modelSwitchEvidence, projectDirName, resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnActivity, currentTurnFeed, currentTurnTokens, slashResultAfter, legibleApiError, latestModelId, recentConversation, conversationItemFullText, lastTurnApiError } from './transcript.ts'
+import { modelSwitchEvidence, projectDirName, resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnActivity, currentTurnFeed, currentTurnTokens, slashResultAfter, legibleApiError, latestModelId, recentConversation, conversationItemFullText, lastTurnApiError, currentTurnSpan } from './transcript.ts'
 
 function fixture(entries: object[]): string {
   const f = join(mkdtempSync(join(tmpdir(), 'tg-transcript-')), 'session.jsonl')
@@ -187,6 +187,38 @@ test('currentTurnFeed(concluded) drops a trailing-tool reply so it never folds i
   expect(currentTurnFeed(f, false).some(i => i.kind === 'text' && i.text === 'the answer')).toBe(true)
   expect(currentTurnFeed(f, true).some(i => i.kind === 'text' && i.text === 'the answer')).toBe(false)
   expect(currentTurnFeed(f, true).some(i => i.kind === 'text' && i.text === 'checking things')).toBe(true)
+})
+
+describe('currentTurnSpan', () => {
+  // The mini app's "Worked for …" clock. Timestamps are the transcript's own, because the pane's
+  // elapsed counter is gone by the time this line is drawn.
+  const at = (e: object, iso: string) => ({ ...e, timestamp: iso })
+  const T0 = '2026-08-11T10:00:00.000Z', T1 = '2026-08-11T10:02:30.000Z'
+
+  test('measures the anchoring user message to the newest entry', () => {
+    const f = fixture([
+      at(user('old', 'u0'), '2026-08-11T09:00:00.000Z'), at(asst('old answer', 'a0'), '2026-08-11T09:00:05.000Z'),
+      at(user('go', 'u1'), T0), at(tool('Read', { file_path: '/x' }, 't1'), '2026-08-11T10:01:00.000Z'),
+      at(asst('done', 'a1'), T1),
+    ])
+    expect(currentTurnSpan(f)).toEqual({ startedAt: Date.parse(T0), endedAt: Date.parse(T1) })
+  })
+
+  test('counts sidechain entries — a session waiting on its subagents is still working', () => {
+    const f = fixture([at(user('go', 'u1'), T0), at(asst('spawned', 'a1'), '2026-08-11T10:00:10.000Z'), at(sub('worker report', 's1'), T1)])
+    expect(currentTurnSpan(f)?.endedAt).toBe(Date.parse(T1))
+  })
+
+  test('an unstamped or absent anchor is null, never a span measured from zero', () => {
+    expect(currentTurnSpan(fixture([at(asst('orphan', 'a1'), T1)]))).toBe(null)      // no user message at all
+    expect(currentTurnSpan(fixture([user('go', 'u1'), at(asst('x', 'a1'), T1)]))).toBe(null)   // anchor carries no timestamp
+    expect(currentTurnSpan(fixture([at(user('go', 'u1'), T0)]))).toBe(null)          // nothing after the anchor yet
+  })
+
+  test('a clock that went backwards clamps to zero rather than reporting a negative turn', () => {
+    const f = fixture([at(user('go', 'u1'), T1), at(asst('done', 'a1'), T0)])
+    expect(currentTurnSpan(f)).toEqual({ startedAt: Date.parse(T1), endedAt: Date.parse(T1) })
+  })
 })
 
 test('turnInProgress: an injected meta user entry (Skill instructions) is not a turn boundary', () => {

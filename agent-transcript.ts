@@ -51,6 +51,9 @@ export const currentTurnTokens = (file: string) => (isCodex(file) ? cx.currentTu
 export const concludedTurnWork = (file: string) => (isCodex(file) ? { count: 0, mutating: false, lastAt: 0 } : cc.concludedTurnWork(file))
 export const latestModelId = (file: string) => (isCodex(file) ? null : cc.latestModelId(file))   // Codex rollouts don't record a per-turn model
 export const currentTurnFeed = (file: string, concluded = false) => (isCodex(file) ? cx.currentTurnFeed(file, concluded) : cc.currentTurnFeed(file, concluded))
+// CC-only, and a stated exclusion rather than a gap: a Codex turn carries no "Worked for …" summary
+// in the mini app, which is the one surface that reads this. Nothing else degrades without it.
+export const currentTurnSpan = (file: string) => (isCodex(file) ? null : cc.currentTurnSpan(file))
 export const bashResultAfter = (file: string, sinceMs: number) => (isCodex(file) ? cx.bashResultAfter(file, sinceMs) : cc.bashResultAfter(file, sinceMs))
 export const slashResultAfter = (file: string, sinceMs: number) => (isCodex(file) ? null : cc.slashResultAfter(file, sinceMs))   // CC-only: Codex logs no local command stdout
 // Codex rollouts lack the user/assistant pairing recentConversation needs — surface just the latest reply.

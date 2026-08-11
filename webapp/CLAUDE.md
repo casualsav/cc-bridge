@@ -256,6 +256,28 @@ give it.
   dialog. `/reset` is in the gate's set though slash-policy refuses it first — deliberate. An
   "Always clear" dialog button was declined (Settings has the toggle). `miniclear.mjs` drives it
   (temporal control; its feed check passes on the broken build — only the pane knows).
+- **A CONCLUDED turn shows ONE "Worked for …" line where its chips were — a replacement, never an
+  addition** (the owner, 2026-08-11). While the turn runs the per-kind chips ARE the live report;
+  afterwards each would open a list of its own kind, so the summary exists to be the single way back
+  into everything that happened and leaving the chips beside it makes three taps out of one answer.
+  **`workedSec`'s PRESENCE is the whole state signal** — set in `webappSessionFeed` only when the
+  turn is not `working`, so the client reads nothing else and the two renderings cannot half-swap on
+  a repaint. The clock is the TRANSCRIPT's (`currentTurnSpan`: the anchoring user entry to the newest
+  entry, sidechains included), because the pane's own elapsed counter is gone from the screen at
+  exactly the moment this line appears. Codex panes get no span — stated in `agent-transcript.ts`,
+  not a gap. **A chip still flushes its quote run when it renders nothing**: the paragraph grouping
+  belongs to the turn, and re-merging the quotes at turn end would reflow the reader's screen for
+  nothing. The sheet's list inherits the payload's chip window (`FEED_BLOCKS`, oldest-first) — a
+  second, wider fetch for this one sheet would have the summary and the chips describing the same
+  turn differently. `turnworked.mjs` §2–§4 measures the fold and the flattened list; §3/§5 are the
+  guards that a RUNNING turn is untouched, and pass on both pages.
+- **The bulky square on tap is the WebView's `-webkit-tap-highlight-color`, declared away on `*`**
+  (the owner, 2026-08-11) — and the reason it needs a line here is that **no screenshot can see it**:
+  headless Chromium never paints the flash, so a "tidy-up" of the universal rule loses it invisibly.
+  `turnworked.mjs` §1 reads the computed value on three screens (the harness default is a visible
+  `rgba(0,0,0,0.18)`, which is what makes the check falsifiable). It is NOT the `.sheet input:focus`
+  ring — that is a typing affordance and stays — and nothing replaces the flash, because no `:active`
+  state was asked for.
 
 ## Bridge command cards
 
