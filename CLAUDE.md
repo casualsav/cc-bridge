@@ -424,10 +424,16 @@ written, which is what makes that copy silent (one ping, on the card he is waiti
 is confirmed by a **REACTION on his own message, never a card** (his ruling — the card echoed his words
 back one message under the message he had just typed). With no ask row there is no expiry notice, no
 Stop-hook obligation and nothing chasing a session that ignores him: he sees silence, which is the
-trade he chose. **The one gesture still minting an `ownerDirect` ask is `@launch <new name>`** — a
-brand-new session has no pane to deliver into until it boots, so its founding message keeps the ask
-machinery and `answerRouteFor`'s owner-card tail (`agent-bus.ts`), and a session he launches still
-narrates its first turn. **Accepted cost, not an oversight: work he hands out this way is invisible to
+trade he chose. **`@launch <new name>` is the same message, and no longer an ask** (v0.5.76): "a
+brand-new session has no pane to deliver into" was answered by WHERE the delivery happens — the closure
+in `launchSpawn` already waits for the REPL, so the founding message goes in through the same
+`ownerInboundBlock` with its route armed off the pasted bytes. It kept the ask until 2026-08-11, and
+the cost was a first turn spent narrating: prose that reached nobody, the `tg answer` payload, then
+"Said hi." Two cases still mint one, and both are about the answer having somewhere to go: the
+`launchFoundingAsk` pref (the revert switch), and a launch with no DM chat lane, where
+`answerRouteFor`'s owner-card tail (`agent-bus.ts`) is the only route home. An agent's `tg spawn` sets
+no `ownerDirect` and is untouched — its spawner is a session waiting on `tg answer`.
+**Accepted cost, not an oversight: work he hands out this way is invisible to
 his chat lane**, which is the only party that can see two workers heading for the same file — direct is
 what he asked for, and the coordination is his to hold on those threads. `owner-direct.test.ts`
 enumerates every gesture, both relay loops and the single remaining mint.
