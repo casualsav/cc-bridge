@@ -304,6 +304,14 @@ export function resolveTranscript(cwd: string, roots: string[] = [PROJECTS_DIR])
   return best
 }
 
+// When this conversation began. `/clear` starts a NEW transcript file, so the file's own creation
+// time dates the CURRENT context — which is what tells anything older than it apart from this
+// session's own history. `null` when the filesystem has no birth time; callers fall back to their
+// unbounded behaviour rather than inventing a floor from mtime (that would be "now", every time).
+export function transcriptStartedAt(file: string): number | null {
+  try { const t = statSync(file).birthtimeMs; return t > 0 ? t : null } catch { return null }
+}
+
 // One tool call's name + a short representative detail, for the tool-feed mirror mode.
 export type Activity = { tool: string; detail: string }
 

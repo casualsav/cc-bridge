@@ -103,11 +103,15 @@ export type FeedRow = { role: string; text: string; ts: number; uuid?: string; c
 //
 // The WINDOW is the transcript's own: rows older than its first item are dropped rather than
 // prepended, or opening a drill-in would show a session's whole bus history above the conversation
-// it is scrolled to. An empty feed takes them all — a session whose every word went out over the bus
-// has nothing else to show, and that is precisely the case this exists for.
-export function mergeOutbound(items: FeedRow[], rows: OutboundRow[], cap: number): FeedRow[] {
+// it is scrolled to. An empty feed falls back to `floorTs` — the moment the CURRENT transcript
+// began. A session whose every word went out over the bus still shows all of them (they happened
+// after it started), which is the case this exemption exists for; but a session that has just been
+// /cleared has an empty feed too, and there the bus rows are the discarded context coming back —
+// four of them repainted a cleared cc-bridge drill-in on 2026-08-11, which is how this was found.
+// `floorTs` 0 keeps the old unbounded behaviour for a caller that cannot date the transcript.
+export function mergeOutbound(items: FeedRow[], rows: OutboundRow[], cap: number, floorTs = 0): FeedRow[] {
   if (!rows.length) return items
-  const floor = items.length ? items[0]!.ts : 0
+  const floor = items.length ? items[0]!.ts : floorTs
   const mine: FeedRow[] = rows
     .filter(r => r.ts >= floor)
     .map(r => ({

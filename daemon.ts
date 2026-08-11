@@ -50,7 +50,7 @@ import { modelSwitchEvidence, findSessionFile, resolveTranscript, resolveAgentTr
 // `turnAnchorIsBus` joins it for a simpler reason than the shape argument above: its only caller is
 // the Stop hook, and a Stop hook is a Claude Code feature — a Codex pane runs none, so there is no
 // rollout for a dispatcher to read.
-import { lastTurnApiError, turnAnchorIsBus, CONVO_CAP } from './transcript.ts'
+import { lastTurnApiError, turnAnchorIsBus, transcriptStartedAt, CONVO_CAP } from './transcript.ts'
 import { initOutboundFeed, recordOutbound, outboundFor, outboundText, mergeOutbound } from './outbound-feed.ts'
 import {
   AGENT_PANE_OPT, agentExitKeys, agentInterruptKeys, agentLabel, agentResetCommand, agentSubmitKeys,
@@ -20247,7 +20247,7 @@ async function webappSessionFeed(sid: string): Promise<WebappSessionFeed | null>
     ...(c.agent ? { agent: c.agent } : {}), ...(c.status ? { status: c.status } : {}),
     // uuid only where it's needed: it exists so a clipped row can be re-fetched in full.
     ...(c.clipped ? { clipped: true, ...(c.uuid ? { uuid: c.uuid } : {}) } : {}),
-  })), outboundFor(sid), CONVO_CAP) as WebappSessionFeed['items']
+  })), outboundFor(sid), CONVO_CAP, transcriptStartedAt(file) ?? 0) as WebappSessionFeed['items']
   // The turn anchored at the last user message — running OR just concluded — as ONE item: narration
   // paragraphs and tool CHIPS in transcript order, so a turn reads as one piece of prose with its
   // work sitting between the paragraphs instead of as a separate stream of activity rows that

@@ -64,6 +64,15 @@ test('rows older than the feed window are dropped, but an EMPTY feed takes them 
   expect(mergeOutbound([], [row(50, 'ancient')], 4000).map(r => r.text)).toEqual(['ancient'])
 })
 
+// …and "all" is bounded by when the transcript itself began, or /clear repaints the context it just
+// discarded: the feed goes empty, the exemption above fires, and every bus row comes back.
+test('an empty feed is floored at the transcript start, so a cleared session shows nothing', () => {
+  const rows = [row(50, 'before the clear'), row(150, 'after it')]
+  expect(mergeOutbound([], rows, 4000, 100).map(r => r.text)).toEqual(['after it'])
+  // A session that has only ever spoken over the bus started before its own rows, so it keeps them.
+  expect(mergeOutbound([], rows, 4000, 10).map(r => r.text)).toEqual(['before the clear', 'after it'])
+})
+
 test('a long row is clamped and flagged, so the client knows to fetch the rest', () => {
   const long = 'x'.repeat(50)
   const [only] = mergeOutbound([], [row(1, long)], 10)
