@@ -50,6 +50,10 @@ export interface WebappDeps {
   githubAction?: (userId: string, action: Record<string, unknown>) => Promise<{ error: string } | Record<string, unknown>> | { error: string } | Record<string, unknown>
   providerAccountAction?: (userId: string, action: Record<string, unknown>) => Promise<{ error: string } | Record<string, unknown>> | { error: string } | Record<string, unknown>
   listSessions?: () => Promise<SessionCard[]> | SessionCard[]        // fleet dashboard: one card per live session
+  listAgents?: () => Promise<AgentRow[]> | AgentRow[]                // the non-Claude bus agents (Hermes endpoints), rendered as their own section under the sessions
+  // Close / reopen a pane-backed agent. Same auth stance as the ask: it is the lifecycle of a session
+  // this user already drives from chat, not a filesystem write.
+  agentAct?: (userId: string, name: string, action: AgentAct) => Promise<string | null> | string | null   // error string, or null on success
   readSessionFeed?: (sid: string) => Promise<SessionFeed | null> | SessionFeed | null   // drill-in: recent conversation + live activity
   readSessionMessage?: (sid: string, uuid: string) => Promise<string | null> | string | null   // ONE row's full unclamped text, for expanding a clipped bubble
   // stop/compact/send → error string, or null on success, or `{ confirm }` when the action needs the
@@ -151,6 +155,22 @@ export interface SessionCard {
   ctxWindow?: string | null
   tier: string | null   // 'max' / 'pro' / … from the launch-banner sample (daemon.ts paneTiers); null when never sampled
 }
+// One NON-Claude agent on the bus: a Hermes endpoint (hermes-endpoints.json), driven as a one-shot
+// `hermes -z` subprocess per ask. It has no pane, no transcript and no drill-in, so this row carries
+// everything the daemon can know about one — that it is configured, and whether a task is running on
+// it right now. Hidden endpoints never appear here, the same exclusion `tg roster` makes.
+// `pane: true` is the endpoint that keeps a LIVE REPL and therefore a conversation — `live` says
+// whether that pane is up right now, and `ctxPct`/`model` are read off its status line, the same two
+// facts a session card carries. A one-shot endpoint has none of them: it has no pane to be up, no
+// context to fill, and its row is name + busy exactly as before.
+export interface AgentRow {
+  name: string; kind: 'hermes'; profile: string; busy: boolean
+  pane?: boolean; live?: boolean; ctxPct?: number | null; model?: string | null
+}
+// Closing an agent kills its pane and KEEPS its session id, which is what makes reopening it the same
+// conversation rather than a fresh one. There is no third action: a one-shot endpoint has nothing to
+// close, and the daemon refuses it rather than pretending.
+export type AgentAct = 'close' | 'reopen'
 // 'model'/'effort' carry the chosen alias/level in `text` — the mini app's dial picker, applied to
 // the session's own pane by the same /model and /effort injections the chat-side pickers use.
 export type SessionAct = 'stop' | 'compact' | 'send' | 'close' | 'model' | 'effort'
@@ -478,7 +498,11 @@ async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: strin
     // per card. Absent (or null) when no session has drawn a statusline recently enough to date it, and
     // the client then renders no header at all: a percentage nobody can date is worse than none.
     const usage = deps.readUsage ? await deps.readUsage() : null
-    return json({ sessions: await deps.listSessions(), ...(usage ? { usage } : {}) })
+    // `agents` rides the same poll for the same reason: it is a handful of config rows plus one live
+    // flag, and a second endpoint for them would be a second clock the two sections could disagree on.
+    // Omitted when empty, so a box with no Hermes endpoints sends exactly what it always did.
+    const agents = deps.listAgents ? await deps.listAgents() : []
+    return json({ sessions: await deps.listSessions(), ...(usage ? { usage } : {}), ...(agents.length ? { agents } : {}) })
   }
   if (url.pathname === '/api/session/feed') {
     if (!deps.readSessionFeed) return json({ error: 'unavailable' }, 404)
@@ -531,6 +555,16 @@ async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: strin
     if (r && typeof r === 'object' && 'card' in r) return json({ card: r.card })
     if (r && typeof r === 'object') return json({ confirm: r.confirm })
     return r ? json({ error: r }, 400) : json({ ok: true })
+  }
+  if (url.pathname === '/api/agent/act') {
+    if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405)
+    if (!deps.agentAct) return json({ error: 'unavailable' }, 404)
+    const body = await req.json().catch(() => null) as { name?: unknown; action?: unknown } | null
+    const action = String(body?.action || '') as AgentAct
+    if (!body || typeof body.name !== 'string' || !body.name.trim() || !['close', 'reopen'].includes(action)) return json({ error: 'bad body' }, 400)
+    deps.log(`webapp: agent ${action} name=${body.name} user=${userId}`)
+    const err = await deps.agentAct(userId, body.name.trim(), action)
+    return err ? json({ error: err }, 400) : json({ ok: true })
   }
   // "+" new session with dials (same auth stance as session/act — spawning a topic session is a
   // chat-level control, not a filesystem write). Audited.

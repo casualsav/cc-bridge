@@ -14,7 +14,11 @@ import { join } from 'node:path'
 // roster and the fleet surfaces. That is the shape a dev self-test stub needs: deleting its config would
 // take the self-test with it, and listing it beside real agents makes every roster read a lie about who
 // is actually on the bus. Only the DISPLAY sites read it — never resolveEndpoint.
-export type HermesEndpoint = { name: string; profile: string; cmd?: string[]; timeout_s?: number; cwd?: string; hidden?: true }
+// `pane: true` drives this endpoint as a LIVE REPL in a tmux pane (hermes-pane.ts) instead of a
+// one-shot `hermes -z` per ask. That is what buys continuity: `-z` opens a new session every run and
+// recalls nothing (measured against hermes 0.20.0, 2026-08-11), while the REPL remembers, including
+// across a close and a `--resume`.
+export type HermesEndpoint = { name: string; profile: string; cmd?: string[]; timeout_s?: number; cwd?: string; hidden?: true; pane?: true }
 export type HermesTask = { id: number; from: string; room: string; text: string; refs: string[]; sharedDir: string }
 export type HermesResult = { ok: true; text: string } | { ok: false; error: string }
 // Did a child process actually come up? Separated from HermesResult because "dispatched" and

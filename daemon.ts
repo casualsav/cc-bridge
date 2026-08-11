@@ -7,7 +7,8 @@ import {
   statSync, renameSync, realpathSync, readlinkSync, chmodSync, unlinkSync, existsSync, openSync, closeSync, copyFileSync,
   accessSync, constants as fsConstants,
 } from 'node:fs'
-import { homedir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
+import { Database as SqliteDatabase } from 'bun:sqlite'
 import { join, basename, dirname, relative, sep } from 'node:path'
 import { execFileSync, spawn } from 'node:child_process'
 import net from 'node:net'
@@ -138,7 +139,7 @@ import { latchMode, type ModeLatch } from './mode-latch.ts'
 import { watchVerdict, watchNoticeText, watchCardText, existingWatch, alreadyWatchingText, adoptCause, serializePasses, type BusWatch, type WatchOutcome } from './watch-plan.ts'
 import { parkVerdict, existingPark, alreadyParkedText, parkedText, parkNoticeText, type ParkedSlash, type ParkResult } from './slash-park.ts'
 import { fetchUsageResult, type UsageReading } from './usage-api.ts'
-import { startWebapp, type SettingsView as WebappSettingsView, type SessionCard as WebappSessionCard, type SessionFeed as WebappSessionFeed, type AutomationView as WebappAutomationView, type UsageView as WebappUsageView } from './webapp.ts'
+import { startWebapp, type SettingsView as WebappSettingsView, type SessionCard as WebappSessionCard, type SessionFeed as WebappSessionFeed, type AutomationView as WebappAutomationView, type UsageView as WebappUsageView, type AgentRow as WebappAgentRow } from './webapp.ts'
 import { startTunnel, ensureCloudflared, reapOrphanTunnels, tailscaleFunnelUrl, type Tunnel } from './tunnel.ts'
 import { sendRichMessage, sendRichMessageDraft, editRichMessage, toInputRichMessage, htmlPanelToRich, richHtmlBreaks, callTelegram, normalizeRichInbound, telegramRefused, type InputRichMessage } from './richmsg.ts'
 import { parseAvatars, resolveAvatar, type Avatar } from './avatars.ts'
@@ -184,7 +185,12 @@ import {
 } from './wait-state.ts'
 import { planTemplateRefresh } from './chat-templates.ts'
 import { laneForChat, bindLane, chatForLaneSession, noteLaneCwd, dmLanesOn, fleetMode, fleetSurface, listLanes, unbindLane } from './dm-lanes.ts'
-import { startHermes, type HermesEndpoint, type HermesStart, type HermesTask } from './hermes-driver.ts'
+import { startHermes, hermesEnv, DEFAULT_HERMES_TIMEOUT_S, type HermesEndpoint, type HermesStart, type HermesTask } from './hermes-driver.ts'
+import {
+  hermesChatArgv, hermesAtPrompt, hermesWorking, parseHermesStatus, parseHermesExport,
+  assistantReplySince, newSessionId, parseSessionIds, runHermesTurn, hermesStatePath, hermesFeedItems,
+  parseHermesActivity, isHermesSessionCommand, type HermesStoreRow,
+} from './hermes-pane.ts'
 import {
   initPromptRelay, relayPromptToTelegram, relayPermissionToTelegram, sweepPermStorms,
   permStorms, multiSelectKeyboard, formatPermission, relayStuckScreen, renderStuckHtml,
@@ -3346,6 +3352,7 @@ function loadHermesEndpoints(): void {
       ...(typeof v.timeout_s === 'number' ? { timeout_s: v.timeout_s } : {}),
       ...(typeof v.cwd === 'string' ? { cwd: v.cwd } : {}),
       ...(v.hidden === true ? { hidden: true as const } : {}),
+      ...(v.pane === true ? { pane: true as const } : {}),
     })
   }
   // The log names the hidden ones too, marked: a hidden endpoint that failed to load is otherwise
@@ -4772,6 +4779,192 @@ async function runHermesAsk(pending: BusPending, cfg: HermesEndpoint): Promise<H
     } finally { hermesInFlight.delete(pending.id) }
   })()
   return start
+}
+
+// ---- Hermes as a LIVE PANE (continuity) --------------------------------------------------------
+//
+// `hermes -z` forgets: measured 2026-08-11 against hermes 0.20.0, four one-shot runs — two with
+// `-c <name>`, two with `--resume latest` — each opened a NEW session row and answered NONE when
+// asked what the previous message said. The REPL remembers, and remembers across a kill: the same
+// probe recalled its word after the pane was killed and relaunched with `--resume <id>`.
+//
+// So a pane-backed endpoint (`"pane": true` in hermes-endpoints.json) keeps ONE tmux session per
+// agent, types asks into it, and reads the answer out of the session store. The pane says WHEN a turn
+// ended; the export says WHAT was said (hermes-pane.ts states why the capture is not the source).
+//
+// This is not a second bus: an ask is minted, delivered and answered through exactly the same rows
+// and the same `deliverAnswerToAsker` as the one-shot path. Only the transport differs.
+const HERMES_PANES_FILE = join(STATE_DIR, 'hermes-panes.json')
+// `seen` is the export's message count at the end of the last turn — the watermark a reply is
+// computed against. It is persisted because a daemon restart must not re-card the whole conversation
+// as if the agent had just said it.
+type HermesPaneRec = { sessionId: string | null; seen: number }
+const hermesPaneStates = (): Record<string, HermesPaneRec> => readJsonFile<Record<string, HermesPaneRec>>(HERMES_PANES_FILE, {}) ?? {}
+function setHermesPaneState(name: string, rec: HermesPaneRec): void {
+  const all = hermesPaneStates()
+  all[name] = rec
+  writeJsonFile(HERMES_PANES_FILE, all)
+}
+const hermesTmuxName = (name: string) => `cc-hermes-${name}`
+// The pane, or null when that agent has no live session. A FAILED tmux read returns null like an
+// absent one here, which is safe in this direction only because every caller either launches (an
+// idempotent `has-session` check guards it) or reports "not running" — nothing destroys state on it.
+async function hermesPaneOf(name: string): Promise<string | null> {
+  try {
+    const { stdout } = await exec('tmux', ['list-panes', '-t', hermesTmuxName(name), '-F', '#{pane_id}'], { timeout: 4000 })
+    return stdout.trim().split('\n')[0] || null
+  } catch { return null }
+}
+// WHEN this pane was created, from tmux itself (epoch seconds). The adoption floor has to survive a
+// daemon restart and has to be right for a pane nobody stamped, and a state field is neither: tmux has
+// held the answer all along. After a `--resume` the pane is newer than the session it resumed, which is
+// harmless — adoption only runs when no session is on record, and a resume puts one there.
+async function hermesPaneSince(name: string): Promise<number | null> {
+  try {
+    const { stdout } = await exec('tmux', ['display-message', '-p', '-t', hermesTmuxName(name), '#{session_created}'], { timeout: 4000 })
+    const n = Number(stdout.trim())
+    return Number.isFinite(n) && n > 0 ? n : null
+  } catch { return null }
+}
+const HERMES_BOOT_TIMEOUT_S = 90
+async function ensureHermesPane(cfg: HermesEndpoint): Promise<{ pane: string } | { error: string }> {
+  const live = await hermesPaneOf(cfg.name)
+  if (live) return { pane: live }
+  const rec = hermesPaneStates()[cfg.name]
+  // RESUME when we know the id — this is the whole of "close and reopen keeps the conversation", and
+  // launching without it silently starts a fresh context that answers as if nothing was ever said.
+  const argv = hermesChatArgv({ name: cfg.name, profile: cfg.profile, ...(cfg.cmd ? { cmd: cfg.cmd } : {}) }, rec?.sessionId ?? null)
+  const dir = cfg.cwd || homedir()
+  try {
+    await exec('tmux', ['new-session', '-d', '-s', hermesTmuxName(cfg.name), '-x', '200', '-y', '50', '-c', dir, ...argv],
+      { timeout: 10_000, env: hermesEnv() })
+  } catch (e) { return { error: `couldn't start its pane — ${e instanceof Error ? e.message : e}` } }
+  for (let i = 0; i < HERMES_BOOT_TIMEOUT_S; i++) {
+    await sleep(1000)
+    const pane = await hermesPaneOf(cfg.name)
+    if (!pane) continue
+    if (hermesAtPrompt(stripAnsi(await capturePane(pane).catch(() => '')))) {
+      process.stderr.write(`daemon: hermes pane ${cfg.name} up (${pane}${rec?.sessionId ? `, resumed ${rec.sessionId}` : ', new session'})\n`)
+      return { pane }
+    }
+  }
+  return { error: `its pane didn't reach a prompt in ${HERMES_BOOT_TIMEOUT_S}s` }
+}
+// Close: the PANE goes, the session id STAYS. That asymmetry is the feature — the next ask (or an
+// explicit reopen) relaunches with `--resume <id>` and the conversation continues where it stopped.
+async function killHermesPane(name: string): Promise<boolean> {
+  try { await exec('tmux', ['kill-session', '-t', hermesTmuxName(name)], { timeout: 5000 }); return true } catch { return false }
+}
+async function hermesSessionIds(cfg: HermesEndpoint): Promise<string[]> {
+  try {
+    const { stdout } = await exec('hermes', ['--profile', cfg.profile, 'sessions', 'list'], { timeout: 30_000, env: hermesEnv() })
+    return parseSessionIds(stdout)
+  } catch { return [] }
+}
+async function hermesExport(cfg: HermesEndpoint, sessionId: string): Promise<ReturnType<typeof parseHermesExport>> {
+  const out = join(tmpdir(), `cc-hermes-${cfg.name}-${sessionId}.jsonl`)
+  try {
+    await exec('hermes', ['--profile', cfg.profile, 'sessions', 'export', '--format', 'jsonl', '--session-id', sessionId, '--yes', out],
+      { timeout: 60_000, env: hermesEnv() })
+    return parseHermesExport(readFileSync(out, 'utf8'))
+  } catch { return null }
+  finally { try { rmSync(out, { force: true }) } catch {} }
+}
+// One turn on a pane-backed endpoint, start to finish. Bounded twice, because the two waits fail for
+// different reasons: a turn that never STARTS means the paste didn't take, and a turn that never ENDS
+// means the agent is stuck — the second is the endpoint's own `timeout_s`, the same dial the one-shot
+// path honours.
+async function runHermesPaneTurn(cfg: HermesEndpoint, text: string): Promise<{ ok: true; reply: string } | { ok: false; error: string }> {
+  const up = await ensureHermesPane(cfg)
+  if ('error' in up) return { ok: false, error: up.error }
+  const pane = up.pane
+  const r = await runHermesTurn({
+    capture: async () => stripAnsi(await capturePane(pane).catch(() => '')),
+    // The same serialized paste every human message and bus block takes (one chain per pane), so two
+    // asks to one agent cannot interleave into a single input box.
+    deliver: async t => (await busDeliverOutcome(pane, t).catch(() => 'failed' as PasteOutcome)) === 'landed',
+    sessionIds: () => hermesSessionIds(cfg),
+    exportSession: id => hermesExport(cfg, id),
+    sleep, now: Date.now,
+  }, text, hermesPaneStates()[cfg.name] ?? { sessionId: null, seen: 0 }, { timeoutMs: (cfg.timeout_s ?? DEFAULT_HERMES_TIMEOUT_S) * 1000 })
+  if (r.state) setHermesPaneState(cfg.name, r.state)
+  return r.ok ? { ok: true, reply: r.reply } : { ok: false, error: r.error }
+}
+// The pane twin of runHermesAsk: same pending row, same ledger, same deliverAnswerToAsker. The whole
+// turn is detached after the dispatch check for the same reason the one-shot is — a run takes minutes
+// and the caller is a socket or a chat message.
+async function runHermesPaneAsk(pending: BusPending, cfg: HermesEndpoint): Promise<HermesStart> {
+  const up = await ensureHermesPane(cfg)
+  if ('error' in up) {
+    removePending(pending.id)
+    appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'answer', from: cfg.name, to: pending.fromName, id: pending.id, text: `⚠️ dispatch failed: ${up.error}`, refs: [] })
+    process.stderr.write(`daemon: hermes pane ${cfg.name} ask ${pending.id} NOT DISPATCHED — ${up.error}\n`)
+    return { ok: false, error: up.error }
+  }
+  markInjected(pending.id, Date.now())
+  hermesInFlight.add(pending.id)
+  void (async () => {
+    try {
+      const r = await runHermesPaneTurn(cfg, pending.text)
+      process.stderr.write(`daemon: hermes pane ${cfg.name} ask ${pending.id} ${r.ok ? `finished (${r.reply.length} chars)` : `FAILED — ${r.error}`}\n`)
+      const body = r.ok ? r.reply : `⚠️ @${cfg.name} couldn't complete ask ${pending.id}: ${r.error}`
+      process.stderr.write(`daemon: hermes pane ${cfg.name} ask ${pending.id} → ${await deliverAnswerToAsker(pending, cfg.name, body, [])}\n`)
+    } catch (e) {
+      process.stderr.write(`daemon: hermes pane ${cfg.name} ask ${pending.id} threw: ${e}\n`)
+      await deliverAnswerToAsker(pending, cfg.name, `⚠️ @${cfg.name} errored on ask ${pending.id}: ${e instanceof Error ? e.message : String(e)}`, []).catch(() => {})
+    } finally { hermesInFlight.delete(pending.id) }
+  })()
+  return { ok: true }
+}
+// The drill-in's conversation, read straight out of hermes' own SQLite store. READ-ONLY, and every
+// failure is an empty conversation rather than an error: the file is absent until a profile has run,
+// and this is a schema we do not own — a chat that degrades to "nothing yet" is honest, where a red
+// toast every 3 seconds would be noise about somebody else's upgrade. Newest `limit` rows, oldest
+// first, which is the order the feed renders.
+function hermesStoreMessages(cfg: HermesEndpoint, sessionId: string, limit: number): HermesStoreRow[] {
+  const path = hermesStatePath(cfg.profile, homedir())
+  if (!existsSync(path)) return []
+  let db: SqliteDatabase | null = null
+  try {
+    db = new SqliteDatabase(path, { readonly: true })
+    const rows = db.query('SELECT id, role, content, tool_name, timestamp FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?')
+      .all(sessionId, limit) as HermesStoreRow[]
+    return rows.reverse()
+  } catch (e) {
+    process.stderr.write(`daemon: hermes store read failed for ${cfg.name} (${sessionId}): ${e}\n`)
+    return []
+  } finally { try { db?.close() } catch {} }
+}
+
+// WHICH session the pane is on, when we do not already know — after a `/clear`, or for a pane whose
+// first message was typed in the drill-in rather than dispatched as an ask (the bus path discovers its
+// own by diffing the id list around a turn; this one has no turn to bracket).
+//
+// Two conditions, and both are load-bearing. `source='cli'` excludes the sessions this profile's
+// GATEWAY opens for the owner's own DM chats — the store holds those too, and adopting one would
+// render his private conversation with mimo inside the bridge's drill-in. `started_at >= since`
+// excludes anything older than this pane, including the session it just cleared. Null when neither
+// holds, which renders as an empty conversation: correct after a reset, and honest before a first
+// message.
+function hermesAdoptSession(cfg: HermesEndpoint, since: number): { id: string; count: number } | null {
+  const path = hermesStatePath(cfg.profile, homedir())
+  if (!existsSync(path)) return null
+  let db: SqliteDatabase | null = null
+  try {
+    db = new SqliteDatabase(path, { readonly: true })
+    const row = db.query("SELECT id, message_count FROM sessions WHERE source = 'cli' AND started_at >= ? ORDER BY started_at DESC LIMIT 1")
+      .get(since) as { id: string; message_count: number | null } | null
+    return row ? { id: row.id, count: row.message_count ?? 0 } : null
+  } catch (e) {
+    process.stderr.write(`daemon: hermes session adoption failed for ${cfg.name}: ${e}\n`)
+    return null
+  } finally { try { db?.close() } catch {} }
+}
+
+// ONE entry point for both transports, so nothing upstream has to know which an endpoint uses: every
+// caller that dispatched a Hermes ask keeps calling this, and the config decides.
+function dispatchHermesAsk(pending: BusPending, cfg: HermesEndpoint): Promise<HermesStart> {
+  return cfg.pane ? runHermesPaneAsk(pending, cfg) : runHermesAsk(pending, cfg)
 }
 
 // Startup: a hermes ask in agent-bus.json that survived a daemon restart is orphaned — its `hermes -z`
@@ -6984,7 +7177,7 @@ async function handleCall(
           // AWAITED as far as the child coming up — same reasoning as the claude branch below: the
           // outcome is the answer to "did that land?". A dispatch that failed is reported as a failure
           // here and leaves no row behind; only past this point does "running" mean a live process.
-          const start = await runHermesAsk(p, cfg)
+          const start = await dispatchHermesAsk(p, cfg)
           if (!start.ok) { write({ t: 'result', id, ok: false, text: `@${toName} couldn't be started — ${start.error} (ask ${p.id} closed, nothing is running)` }); return }
           void notifyAskSent(fromSid, toName, askText, 'ask', null)   // hermes: acks are refused above, so this is always an ask
           text = `asked @${toName} (ask ${p.id}) — its \`hermes\` child is up; the answer arrives when it finishes`
@@ -16291,6 +16484,16 @@ const OWNER_CHAT_VERBS: readonly OwnerChatVerb[] = [
 async function routeOwnerReply(ctx: Context, chatId: string, sid: string, text: string, msgId?: number, files?: string[]): Promise<boolean> {
   const reply = (t: string): Promise<unknown> => ctx.reply(t).catch(() => {})
   const name = getTopicBySession(sid)?.name || nameForEndpoint(sid, busEndpoints())
+  // A HERMES answer card carries an endpoint NAME where a session id would be, and there is no pane
+  // behind it — not now and not ever. His reply is a fresh task for that agent. Checked before the
+  // liveness read below, which would otherwise report a one-shot subprocess as a dead session and
+  // offer him "@reopen" for something that was never running.
+  if (hermesEndpoints.has(normalizeEndpointName(sid))) {
+    const lane = getDmChatSession(chatId)?.sessionId
+    if (!lane) return false   // no lane to mint from — falls through to the ordinary conversation
+    await ownerHermesAsk(reply, lane, sid, text, msgId, files)
+    return true
+  }
   // The row outlives the session on purpose: a dead target must be NAMED, never silently rerouted
   // into the lane, where the owner would read the lane's answer as the worker's.
   const pane = await paneForSession(sid).catch(() => null)
@@ -16415,6 +16618,51 @@ async function ownerDirectDispatch(
   return 'delivered'
 }
 
+// ---- `@mimo <prompt>` — the owner addressing a NON-Claude agent -------------------------------
+//
+// The Hermes twin of the dispatch above, and everything that differs about it follows from one fact:
+// there is no pane. No text to type, no `paneAcceptsText` gate, no landed/occupied outcome, no
+// `ownerReplyRoutes` (nothing will conclude a turn), and no mirror on the target's surface — it has
+// none. What carries his words is an ask row minted from his LANE with `ownerDirect` set, which is
+// exactly what makes `answerRouteFor` card the result to his DM rather than typing it into the lane;
+// the run may take minutes, and the ask is the only thing holding the return address meanwhile.
+//
+// Refusals are told to him NOW rather than queued, for the same reason the pane dispatch tells him: he
+// is right there and can retry. The cap is the fork-bomb backstop `tg ask` already checks, checked
+// before the mint so a refused ask leaves no row.
+type OwnerAskOutcome = { ok: true; id: number } | { ok: false; error: string }
+async function ownerHermesAskCore(laneSid: string, name: string, text: string, refs: string[] = []): Promise<OwnerAskOutcome> {
+  const cfg = hermesEndpoints.get(normalizeEndpointName(name))
+  if (!cfg) return { ok: false, error: `@${name} isn't a configured agent — nothing was sent.` }
+  if (hermesInFlight.size >= HERMES_MAX_CONCURRENT) return { ok: false, error: `Too many agent tasks are running (${hermesInFlight.size}) — try again shortly. Nothing was sent.` }
+  const fromName = nameForEndpoint(laneSid, busEndpoints())
+  let p: BusPending
+  try { p = createPending({ fromSid: laneSid, toSid: cfg.name, toKind: 'hermes', fromName, toName: cfg.name, text, refs, ownerDirect: true }, Date.now()) }
+  catch (e) { return { ok: false, error: `${e instanceof Error ? e.message : e} — nothing was sent.` } }
+  // LEDGER ONLY, and no `recordOutbound`: that feed is what a session SAID, rendered in its own
+  // drill-in, and the lane said none of this — he did. The row exists so `tg history` can account for
+  // the run; putting it in the lane's mouth is the third-person narration the direct gestures exist to
+  // remove.
+  appendLedger(busLedgerRoom(), { ts: Date.now(), kind: 'ask', from: fromName, to: cfg.name, id: p.id, text, refs })
+  // AWAITED as far as the run coming up, exactly as the `tg ask` path awaits it — a one-shot child
+  // (`hermes` lives in ~/.local/bin, which a watchdog-respawned daemon's PATH lacks) or a pane that
+  // has to reach its prompt. A dispatch that never started is reported as a failure rather than as a
+  // task he is waiting on; past this point "running" means it is really running.
+  const start = await dispatchHermesAsk(p, cfg)
+  if (!start.ok) return { ok: false, error: `@${cfg.name} couldn't be started — ${start.error}. Nothing is running.` }
+  process.stderr.write(`daemon: owner-direct ask ${p.id} → @${cfg.name} (hermes, ${text.length} chars)\n`)
+  return { ok: true, id: p.id }
+}
+async function ownerHermesAsk(reply: (t: string) => Promise<unknown>, laneSid: string, name: string, text: string, msgId?: number, refs: string[] = []): Promise<void> {
+  const r = await ownerHermesAskCore(laneSid, name, text, refs)
+  if (!r.ok) { await reply(r.error); return }
+  // The same confirmation the pane dispatch gives — a REACTION on the message he typed, never a card
+  // echoing his own words back to him (his ruling, 2026-08-09). The answer arrives on its own as the
+  // ask's owner card, whenever the run finishes.
+  const chat = chatIdForDmChatSession(laneSid)
+  if (chat && msgId != null) void channel.react({ chatId: chat, messageId: String(msgId) }, REACTIONS.delivered).catch(() => {})
+}
+
 // ---- The outbound half: his session's plain reply, carded to his DM ----------------------------
 //
 // Read at RELAY time, off the turn's own anchor, for the reason owner-reply.ts states: arming on a
@@ -16473,7 +16721,13 @@ async function routeOwnerAddress(ctx: Context, chatId: string, laneSid: string, 
     return true
   }
   const target = live[0]!
-  if (target.kind !== 'claude') { await reply(`@${want} is a hermes endpoint — this addresses Claude sessions`); return true }
+  // A Hermes endpoint takes his words as an ASK, and that is not an exception to the human-message
+  // ruling — it is what the ruling MEANS where there is no pane. His words became a human message
+  // because an ask made a session answer through `tg answer` while its own transcript narrated the
+  // exchange in the third person. A Hermes endpoint has no pane to type into and no transcript to
+  // narrate anything: one `hermes -z` run IS the answer, so the ask row is the only shape that can
+  // carry it, and `ownerDirect` is what routes it to his DM instead of into his lane.
+  if (target.kind === 'hermes') { await ownerHermesAsk(reply, laneSid, target.id, parsed.message, msgId, files); return true }
   if (target.id === laneSid) return false   // his own lane by name: ordinary conversation, not a bus hop
   // No react here — the confirmation belongs to DELIVERY, not to parsing (tryDeliverAsk's ok branch).
   await ownerDirectDispatch(reply, laneSid, target.id, parsed.message, msgId, files)
@@ -20194,6 +20448,42 @@ async function webappListSessions(): Promise<WebappSessionCard[]> {
   return confirmed.filter((c): c is WebappSessionCard => c !== null)
 }
 
+// The non-Claude agents on the bus, for the command center's own section. Hidden endpoints are left
+// out here exactly as they are from `tg roster` — reachable by name, absent from every list — and
+// `busy` is that roster's own test, a live `hermes -z` child dispatched for this endpoint. No pane is
+// touched: a Hermes endpoint IS its config plus that one flag, which is why this read is synchronous
+// while the session list next to it is a fleet-wide pane scan.
+async function webappListAgents(): Promise<WebappAgentRow[]> {
+  return await Promise.all([...hermesEndpoints.values()].filter(h => !h.hidden).map(async h => {
+    const row: WebappAgentRow = {
+      name: h.name, kind: 'hermes' as const, profile: h.profile,
+      busy: [...hermesInFlight].some(pid => getPending(pid)?.toSid === h.name),
+    }
+    if (!h.pane) return row
+    // A pane-backed agent has the two facts a session card carries — is it up, and how full is its
+    // context — read off the SAME status line the turn detector reads. A pane that is down is a real
+    // and ordinary state here (closed on purpose; the next ask resumes it), never an error.
+    const pane = await hermesPaneOf(h.name)
+    const cap = pane ? stripAnsi(await capturePane(pane).catch(() => '')) : ''
+    const st = cap ? parseHermesStatus(cap) : null
+    return { ...row, pane: true, live: !!pane, busy: row.busy || (!!cap && hermesWorking(cap)), ctxPct: st?.ctxPct ?? null, model: st?.model ?? null }
+  }))
+}
+// Close / reopen one. Close kills the pane and keeps the session id; reopen relaunches on that id, so
+// the conversation continues rather than restarting — the asymmetry IS the feature (see
+// killHermesPane). A one-shot endpoint is refused rather than silently doing nothing: it has no pane.
+async function webappAgentAct(_userId: string, name: string, action: 'close' | 'reopen'): Promise<string | null> {
+  const cfg = hermesEndpoints.get(normalizeEndpointName(name))
+  if (!cfg) return `@${name} isn't a configured agent.`
+  if (!cfg.pane) return `@${cfg.name} runs one task at a time with no session of its own — there is nothing to ${action}.`
+  if (action === 'close') {
+    if (!(await hermesPaneOf(cfg.name))) return `@${cfg.name} isn't running.`
+    return (await killHermesPane(cfg.name)) ? null : `Couldn't close @${cfg.name}'s session.`
+  }
+  const up = await ensureHermesPane(cfg)
+  return 'error' in up ? `Couldn't reopen @${cfg.name} — ${up.error}` : null
+}
+
 // ── The usage header's two sources ───────────────────────────────────────────
 // PRIMARY is the OAuth endpoint (usage-api.ts): server truth, and the only source that has the
 // per-model weekly window. FALLBACK is the statusline snapshot. Their failure sets are near-disjoint —
@@ -20203,6 +20493,14 @@ async function webappListSessions(): Promise<WebappSessionCard[]> {
 // Polled on a timer instead of on demand: `/api/sessions` is re-fetched every 4s by the open mini app,
 // and a network round trip on that path would put the endpoint's latency inside every dashboard render.
 const USAGE_API_POLL_MS = 300_000       // 5 min
+// OFF for a canary channel. The endpoint is rate-limited PER ACCOUNT, and every bridge on a box
+// authenticates as the same one unless it sets CLAUDE_CONFIG_DIR — so a prod daemon and a test daemon
+// started around the same time fire two requests inside the same millisecond, forever. Measured
+// 2026-08-11: prod 20:45:53.954 / test 20:45:54.020, four cycles running, 32 shared 429s that day, and
+// when the 15-minute cache aged out under them the owner's usage header went blank. A test bot nobody
+// reads a usage header on has nothing to lose by not asking. Default ON: a real bridge must keep the
+// primary source, and a flag that quietly degrades production is not worth the requests it saves.
+const USAGE_API_POLL = !/^(0|false|no|off)$/i.test(process.env.TELEGRAM_USAGE_POLL ?? '')
 const USAGE_API_TTL_MS = 900_000        // 15 min — older than this and the reading is dropped, not shown
 // PERSISTED, because a restart used to be a blank slate. `usageApi` was memory-only: the daemon
 // restarted at 20:09:54 on 2026-08-03, its very first poll failed 122ms later, and with no cached
@@ -20320,6 +20618,15 @@ async function webappSessionMessage(sid: string, uuid: string): Promise<string |
   // has since been closed.
   const ob = outboundText(sid, uuid)
   if (ob != null) return ob
+  // An agent row's uuid is `<session>:<rowid>`, and the unclamped text comes straight back out of the
+  // store — the payload clamp is a poll-cost measure here exactly as it is for a transcript, never a
+  // limit on what may be read.
+  const agent = agentEndpointFor(sid)
+  if (agent) {
+    const [session, rowId] = uuid.split(':')
+    const row = session && rowId ? hermesStoreMessages(agent, session, 1000).find(r => String(r.id) === rowId) : null
+    return row?.content ?? null
+  }
   const src = await webappSessionSource(sid)
   return src?.file ? conversationItemFullText(src.file, uuid) : null
 }
@@ -20339,7 +20646,83 @@ async function webappModelSelector(
   return { profile, selector: buildModelSelector(profile, current, discovered) }
 }
 
+// ---- An AGENT's drill-in ------------------------------------------------------------------------
+//
+// A pane-backed Hermes agent gets the same chat screen a coding session gets, addressed by a pseudo
+// session id (`agent:<name>`). It is a pseudo id rather than a real one because none of the machinery
+// behind a session id — a topics row, a pane stamp, a Claude transcript — describes an agent, and
+// minting a fake one of each would put a non-Claude session into every path that walks the fleet.
+// The prefix is the whole of the fiction: three functions branch on it, and everything else keeps
+// working the way it did.
+const AGENT_SID_PREFIX = 'agent:'
+function agentEndpointFor(sid: string): HermesEndpoint | null {
+  if (!sid.startsWith(AGENT_SID_PREFIX)) return null
+  const cfg = hermesEndpoints.get(normalizeEndpointName(sid.slice(AGENT_SID_PREFIX.length)))
+  // A one-shot endpoint has no conversation to open — it is a subprocess per ask, by config.
+  return cfg?.pane ? cfg : null
+}
+const AGENT_FEED_ITEMS = 60
+async function webappAgentFeed(cfg: HermesEndpoint): Promise<WebappSessionFeed> {
+  const sid = AGENT_SID_PREFIX + cfg.name
+  const pane = await hermesPaneOf(cfg.name)
+  const cap = pane ? stripAnsi(await capturePane(pane).catch(() => '')) : ''
+  const working = !!cap && hermesWorking(cap)
+  const st = cap ? parseHermesStatus(cap) : null
+  const act = working ? parseHermesActivity(cap) : null
+  let rec = hermesPaneStates()[cfg.name]
+  // Self-healing: with no session on record, adopt the pane's own. The drill-in is the surface where a
+  // conversation is STARTED (his message goes straight into the pane, no ask row to bracket), so
+  // without this the chat he just typed into would stay blank until something dispatched a bus ask.
+  // `seen` is set to the adopted count so his own drill-in messages are never re-carded to his DM as
+  // the agent's next answer.
+  if (!rec?.sessionId && pane) {
+    const since = await hermesPaneSince(cfg.name)
+    const found = since != null ? hermesAdoptSession(cfg, since) : null
+    if (found) {
+      rec = { sessionId: found.id, seen: found.count }
+      setHermesPaneState(cfg.name, rec)
+      process.stderr.write(`daemon: hermes pane ${cfg.name} adopted session ${found.id} (${found.count} msgs)\n`)
+    }
+  }
+  const items = rec?.sessionId ? hermesFeedItems(hermesStoreMessages(cfg, rec.sessionId, AGENT_FEED_ITEMS), rec.sessionId) : []
+  return {
+    sid, name: cfg.name, working, state: working ? 'working' : 'idle',
+    // The subtitle names WHAT this is, in the slot a session spends on its folder — an agent has no
+    // working directory the owner chose, and repeating the name there would say nothing twice.
+    cwd: `hermes · ${cfg.profile}${pane ? '' : ' · closed'}`,
+    model: st?.model ?? null, effort: null,
+    items, ...(act ? { status: act } : {}),
+  }
+}
+// His message, typed into the agent's pane. NO ask row and no DM card: this is a chat he is watching,
+// so the answer belongs on the screen he typed it on — the same trade the drill-in makes for a coding
+// session, where a reply reaches the pane's own surface and nothing is minted. A closed agent is
+// REOPENED by sending to it (on its own session), because that is what the card promises.
+async function webappAgentSend(cfg: HermesEndpoint, text: string): Promise<string | null> {
+  const up = await ensureHermesPane(cfg)
+  if ('error' in up) return `Couldn't reach @${cfg.name} — ${up.error}`
+  const cap = stripAnsi(await capturePane(up.pane).catch(() => ''))
+  // Mid-turn is fine — hermes queues typed text the way the CLI does — but a pane that is not at a
+  // prompt AND not working is a screen nobody has identified, and typing into one is how a message
+  // gets eaten by a picker.
+  if (!hermesAtPrompt(cap) && !hermesWorking(cap)) return `@${cfg.name}'s pane isn't at a prompt — nothing was sent.`
+  if ((await busDeliverOutcome(up.pane, text).catch(() => 'failed' as PasteOutcome)) !== 'landed') return `Couldn't type that into @${cfg.name}'s pane.`
+  // `/clear` and its siblings move the pane to a DIFFERENT session, so the id we read the drill-in by
+  // is now a pointer at an abandoned conversation — which is exactly what the owner saw: he cleared it
+  // and the app kept showing the old thread (2026-08-11). Dropping the id empties the chat, which is
+  // what he asked for, and the next real message discovers the new session.
+  if (isHermesSessionCommand(text)) { setHermesPaneState(cfg.name, { sessionId: null, seen: 0 }); return null }
+  // The watermark moves with the conversation: the DM/bus path computes a reply as what the store
+  // gained past `seen`, and a message typed here that nobody advanced past would be re-carded to him
+  // as the agent's next answer.
+  const rec = hermesPaneStates()[cfg.name]
+  if (rec?.sessionId) setHermesPaneState(cfg.name, { ...rec, seen: hermesStoreMessages(cfg, rec.sessionId, 1000).length })
+  return null
+}
+
 async function webappSessionFeed(sid: string): Promise<WebappSessionFeed | null> {
+  const agent = agentEndpointFor(sid)
+  if (agent) return webappAgentFeed(agent)
   const src = await webappSessionSource(sid)
   if (!src) return null
   const { row, pane, file } = src
@@ -20560,6 +20943,16 @@ async function webappSessionTerminal(sid: string, lines: number): Promise<{ text
 }
 
 async function webappSessionAction(userId: string, sid: string, action: 'stop' | 'compact' | 'send' | 'close' | 'model' | 'effort', text?: string, opts?: { confirmed?: boolean }): Promise<WebappActionResult> {
+  // An agent's drill-in speaks the same two verbs its card does and refuses the rest by NAME. A
+  // refusal that says which control does not exist here is the difference between "this app is
+  // broken" and "that dial belongs to a coding session": /compact, /stop and the model picker are
+  // Claude Code's, and an agent has none of them.
+  const agent = agentEndpointFor(sid)
+  if (agent) {
+    if (action === 'send') return text?.trim() ? webappAgentSend(agent, text.trim()) : 'nothing to send'
+    if (action === 'close') return (await killHermesPane(agent.name)) ? null : `@${agent.name} isn't running.`
+    return `@${agent.name} is a Hermes agent — ${action} is a Claude Code control and it has none.`
+  }
   const pane = await paneForSession(sid).catch(() => null)
   // Close runs BEFORE the liveness bail: ending an already-dead session must still clean up its row.
   if (action === 'close') {
@@ -21011,8 +21404,12 @@ async function startFilesWebapp(): Promise<void> {
   warmDmHandles()
   // The header's primary source. Kicked once now so the first dashboard open has a reading rather than
   // the fallback, then on its own timer; every call fails soft to null and the fallback covers the gap.
-  void pollUsageApi()
-  setInterval(() => void pollUsageApi(), USAGE_API_POLL_MS).unref?.()
+  // Switched off entirely on a canary (TELEGRAM_USAGE_POLL=0) — the statusline snapshot still fills the
+  // header there, at no request cost, because it is scraped from panes this daemon already reads.
+  if (USAGE_API_POLL) {
+    void pollUsageApi()
+    setInterval(() => void pollUsageApi(), USAGE_API_POLL_MS).unref?.()
+  } else wlog('usage-api: polling disabled (TELEGRAM_USAGE_POLL=0) — the header serves the statusline snapshot')
   try {
     startWebapp({ token: TOKEN!, port: WEBAPP_PORT, staticDir: join(import.meta.dir, 'webapp'),
       isAllowed: uid => loadAccess().allowFrom.includes(uid), log: wlog, resolveStart: resolveStartToken,
@@ -21022,7 +21419,7 @@ async function startFilesWebapp(): Promise<void> {
       readSettings: webappReadSettings, setSetting: webappSetSetting,
       readProviderAccounts: webappReadProviderAccounts, providerAccountAction: webappProviderAccountAction,
       readGithub: webappReadGithub, githubAction: webappGithubAction,
-      listSessions: webappListSessions, readSessionFeed: webappSessionFeed, readSessionMessage: webappSessionMessage, sessionAction: webappSessionAction,
+      listSessions: webappListSessions, listAgents: webappListAgents, agentAct: webappAgentAct, readSessionFeed: webappSessionFeed, readSessionMessage: webappSessionMessage, sessionAction: webappSessionAction,
       sessionAttach: webappSessionAttach, sessionSpawn: webappSessionSpawn,
       sessionTerminal: webappSessionTerminal,
       readUsage: webappReadUsage,

@@ -19,12 +19,15 @@ const b = await chromium.launch();
 const p = await b.newPage({ viewport: { width: 375, height: 812 } });
 p.on("pageerror", e => console.log("PAGEERROR:", e.message));
 await p.goto("file://" + page, { waitUntil: "domcontentloaded" });
-await p.evaluate(list => {
-  window.api = async u => u.includes("/api/sessions") ? { sessions: list } : { accounts: [], jobs: [], settings: [], write: false };
+// The WHOLE payload is served, not `sessions` alone: the response also carries `usage` and `agents`,
+// and a probe that drops them renders a page the daemon never sends.
+await p.evaluate(pl => {
+  window.api = async u => u.includes("/api/sessions") ? pl : { accounts: [], jobs: [], settings: [], write: false };
   showTab("sessions");
-}, payload.sessions);
+}, payload);
 await p.waitForTimeout(600);
 await p.screenshot({ path: out, fullPage: true });
 for (const s of payload.sessions) console.log(`${s.state.padEnd(11)} ${s.name}  ${s.wait ? JSON.stringify(s.wait) : s.unreported ? JSON.stringify(s.unreported) : ""}`);
+for (const a of payload.agents || []) console.log(`${(a.busy ? "busy" : "ready").padEnd(11)} ${a.name}  ${a.kind}/${a.profile}`);
 await b.close();
 console.log(`→ ${out}`);

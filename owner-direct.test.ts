@@ -128,12 +128,49 @@ test('every owner-typed gesture reaches the ONE dispatch — none delivers besid
   // same envelope, and the marker his answer is matched on is read off those bytes. Two builders
   // drifting by one attribute is an answer that silently never comes back.
   expect([...daemon.matchAll(/ownerInboundBlock\(/g)].length).toBe(3)   // the definition + both callers
-  // The ONE ownerDirect mint left is the launch's REVERT path — the founding ask, reached only with
-  // `launchFoundingAsk` on or with no DM lane to card an answer back to.
+  // TWO ownerDirect mints, each one because there is no pane to paste a human message into. The
+  // launch's REVERT path — the founding ask, reached only with `launchFoundingAsk` on or with no DM
+  // lane to card an answer back to — and the HERMES dispatch, where the target is a one-shot
+  // subprocess: it has no pane at all, so the ask row is the only thing that can hold the return
+  // address for the minutes its run takes. A third would need the same justification.
   const mints = [...daemon.matchAll(/createPending\(\{[^}]*ownerDirect/g)].map(m => m.index!)
-  expect(mints.length).toBe(1)
-  expect(mints[0]!).toBeGreaterThan(at('async function launchSpawn('))
-  expect(mints[0]!).toBeLessThan(at('async function holdSpawnForApproval('))
+  expect(mints.length).toBe(2)
+  const launchMint = mints.find(i => i > at('async function launchSpawn(') && i < at('async function holdSpawnForApproval('))
+  expect(launchMint).toBeDefined()
+  const hermesMint = mints.find(i => i !== launchMint)!
+  expect(hermesMint).toBeGreaterThan(at('async function ownerHermesAskCore('))
+  expect(hermesMint).toBeLessThan(at('async function ownerHermesAsk('))
+})
+
+// The Hermes half of the same enumeration. `@mimo <prompt>` and the mini app's Agents section are ONE
+// gesture with two spellings, and the thing that must not drift between them is the return address:
+// both mint from his DM chat lane with ownerDirect, which is the only reason the answer cards to his
+// DM instead of being typed into his orchestrator.
+test('a non-Claude target takes his words as an ownerDirect ask, and both surfaces use one core', () => {
+  // BOTH typed gestures, not just the one written first: `@mimo <prompt>` and a native reply to an
+  // agent's own answer card. The reply path checks for a Hermes name BEFORE its liveness read, which
+  // would otherwise offer him "@reopen" for a subprocess that was never running.
+  expect(body('async function routeOwnerAddress(', 4000)).toContain('ownerHermesAsk(')
+  const replyFn = body('async function routeOwnerReply(', 2500)
+  expect(replyFn).toContain('ownerHermesAsk(')
+  expect(replyFn.indexOf('hermesEndpoints.has(')).toBeLessThan(replyFn.indexOf('paneForSession(sid)'))
+  const core = body('async function ownerHermesAskCore(', 2200)
+  expect(core).toContain("toKind: 'hermes'")
+  expect(core).toContain('ownerDirect: true')
+  // ONE dispatch for both transports — the config decides whether his words go to a one-shot child or
+  // a live pane, and nothing upstream of here knows which. Awaited either way: a dispatch that never
+  // came up is a failure to report, not a task to wait on.
+  expect(core).toContain('dispatchHermesAsk(p, cfg)')
+  expect(core).toContain('hermesInFlight.size >= HERMES_MAX_CONCURRENT')   // the cap, BEFORE the mint — a refused ask leaves no row
+  // The mini app does NOT mint an ask any more: a pane-backed agent is talked to through its drill-in
+  // composer, where his words go straight into the pane and the answer lands on the screen he typed
+  // it on. The ask exists for the surfaces that have nowhere else to put an answer — his DM.
+  expect(daemon).not.toContain('webappAgentAsk')
+  // Confirmed by a reaction on the message he typed, exactly as the pane dispatch is — never a card
+  // echoing his own words back at him.
+  const wrap = body('async function ownerHermesAsk(', 900)
+  expect(wrap).toContain('REACTIONS.delivered')
+  expect(wrap).not.toContain('sendOwnerAnswerCard')
 })
 
 test('his message is delivered mid-turn like any human message, and never through emitInbound', () => {
@@ -284,7 +321,7 @@ test('every reaction the daemon sends comes from the typed table — no bare lit
   // argument never does. A regex that reaches zero call sites passes every per-site assertion under
   // it, so the count is checked first and against the real number, not against zero.
   const calls = [...daemon.matchAll(/channel\.react\(\{[\s\S]*?\},\s*([^()]+?)\)/g)].map(m => m[1]!.trim())
-  expect(calls.length).toBe(11)
+  expect(calls.length).toBe(12)
   // Two arguments are values, not literals, and cannot be checked at build time: `tg react`'s emoji
   // comes from an agent and `ackReaction` from the owner's own config. Named, so the exception is a
   // decision rather than a hole.

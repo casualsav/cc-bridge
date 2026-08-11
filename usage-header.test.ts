@@ -6,6 +6,8 @@
 // own countdown formatting. That passes any "same source" review and still drifts the day one of them
 // changes — which is the failure this file exists to make impossible.
 import { test, expect } from 'bun:test'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { usageWindows } from './status-card.ts'
 
 const at = (mins: number) => Date.now() + mins * 60_000
@@ -74,4 +76,27 @@ test('no scoped windows leaves the key off entirely', () => {
 // worse than no header, and this is the first link in that chain.
 test('no snapshot yields nothing to render', () => {
   expect(usageWindows(null)).toEqual({})
+})
+
+// ---- The poll switch (2026-08-11) ---------------------------------------------------------------
+// The endpoint is rate-limited PER ACCOUNT, and two bridges on one box authenticate as the same
+// account unless one sets CLAUDE_CONFIG_DIR — prod and the canary fired inside the same millisecond
+// every 5 minutes (20:45:53.954 / 20:45:54.020), and when the 15-minute cache aged out under the 429s
+// the owner's header went blank. So a canary can stop asking. Source-asserted because the guard lives
+// in startFilesWebapp, which owns a listening socket: what can go wrong is the flag being read and the
+// call sites left outside it, and that is exactly what this sees.
+test('usage polling is switchable off, defaults ON, and BOTH call sites sit behind the flag', () => {
+  const daemon = readFileSync(join(import.meta.dir, 'daemon.ts'), 'utf8')
+  // Default ON: the flag is a NEGATIVE match, so an unset env var polls. A positive match ("is it
+  // truthy?") would silently disable the header on every install that never heard of the variable.
+  expect(daemon).toContain("const USAGE_API_POLL = !/^(0|false|no|off)$/i.test(process.env.TELEGRAM_USAGE_POLL ?? '')")
+  const guard = daemon.indexOf('if (USAGE_API_POLL) {')
+  expect(guard).toBeGreaterThan(-1)
+  // Every poll call site is inside that block — the kick AND the interval. One left outside is a
+  // daemon that still bursts on startup, which is the half that cost the 429s today.
+  for (const site of [...daemon.matchAll(/void pollUsageApi\(\)|setInterval\(\(\) => void pollUsageApi\(\)/g)]) {
+    expect(site.index!).toBeGreaterThan(guard)
+    expect(site.index!).toBeLessThan(daemon.indexOf('} else', guard))
+  }
+  expect([...daemon.matchAll(/pollUsageApi\(/g)].length).toBe(4)   // definition, its own retry, the kick, the interval
 })

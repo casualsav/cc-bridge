@@ -223,6 +223,60 @@ test('console endpoints: sessions/auto reads + session act route to deps; missin
   } finally { server.stop(true) }
 })
 
+// The Agents section: the list rides the sessions poll (one clock for the whole screen), and the two
+// lifecycle verbs are their own POST. There is no "ask" endpoint — a pane-backed agent is talked to
+// through the drill-in composer, i.e. /api/session/act on its `agent:<name>` pseudo sid, which is the
+// same path a coding session's chat uses.
+test('agents ride the sessions payload, and close/reopen routes to the dep with its body validated', async () => {
+  const { startWebapp } = await import('./webapp.ts')
+  const { join } = await import('node:path')
+  const acted: Array<[string, string, string]> = []
+  const server = startWebapp({
+    token: TOKEN, isAllowed: id => id === '42', log: () => {}, staticDir: join(import.meta.dir, 'webapp'), port: 0,
+    listSessions: () => [],
+    listAgents: () => [{ name: 'mimo', kind: 'hermes', profile: 'mimo', busy: false, pane: true, live: true, ctxPct: 2, model: 'mimo-v2.5-pro' }],
+    agentAct: (u, name, action) => { acted.push([u, name, action]); return name === 'gone' ? 'no such agent' : null },
+  })
+  const auth = { Authorization: 'tma ' + sign({ auth_date: String(now()), user }) }
+  const hdrs = { ...auth, 'content-type': 'application/json' }
+  const base = `http://127.0.0.1:${server.port}`
+  try {
+    const d = await (await fetch(`${base}/api/sessions`, { headers: auth })).json()
+    expect(d.agents[0]).toEqual({ name: 'mimo', kind: 'hermes', profile: 'mimo', busy: false, pane: true, live: true, ctxPct: 2, model: 'mimo-v2.5-pro' })
+    const ok = await fetch(`${base}/api/agent/act`, { method: 'POST', headers: hdrs, body: JSON.stringify({ name: ' mimo ', action: 'close' }) })
+    expect(ok.status).toBe(200)
+    expect(await ok.json()).toEqual({ ok: true })
+    expect(acted).toEqual([['42', 'mimo', 'close']])   // trimmed before the daemon sees it
+    // The daemon's own refusal travels the 400/error channel, which the app paints as its red toast.
+    const err = await fetch(`${base}/api/agent/act`, { method: 'POST', headers: hdrs, body: JSON.stringify({ name: 'gone', action: 'reopen' }) })
+    expect(err.status).toBe(400)
+    expect((await err.json()).error).toBe('no such agent')
+    // An action outside the pair never reaches the daemon: 'send' belongs to the drill-in, and a typo
+    // must not silently do nothing.
+    for (const body of [{ name: 'mimo', action: 'send' }, { name: 'mimo' }, { action: 'close' }, {}])
+      expect((await fetch(`${base}/api/agent/act`, { method: 'POST', headers: hdrs, body: JSON.stringify(body) })).status).toBe(400)
+    expect((await fetch(`${base}/api/agent/act`, { method: 'GET', headers: auth })).status).toBe(405)
+    expect((await fetch(`${base}/api/agent/act`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status).toBe(401)   // unauthed
+  } finally { server.stop(true) }
+})
+
+// A daemon with no Hermes endpoints sends what it always sent — the key is absent, not an empty array,
+// so an older client and this one agree about a box that has none.
+test('no agents configured ⇒ no `agents` key, and the act endpoint 404s with no dep', async () => {
+  const { startWebapp } = await import('./webapp.ts')
+  const { join } = await import('node:path')
+  const server = startWebapp({
+    token: TOKEN, isAllowed: id => id === '42', log: () => {}, staticDir: join(import.meta.dir, 'webapp'), port: 0,
+    listSessions: () => [], listAgents: () => [],
+  })
+  const auth = { Authorization: 'tma ' + sign({ auth_date: String(now()), user }) }
+  const base = `http://127.0.0.1:${server.port}`
+  try {
+    expect(await (await fetch(`${base}/api/sessions`, { headers: auth })).json()).toEqual({ sessions: [] })
+    expect((await fetch(`${base}/api/agent/act`, { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify({ name: 'mimo', action: 'close' }) })).status).toBe(404)
+  } finally { server.stop(true) }
+})
+
 // The on-demand full-text read behind an expanded bubble. It exists so the feed's payload clamp can
 // stay small: the clamp is there to keep a 14-item poll every 3s cheap, and raising it pays that cost
 // on every tick for every item to serve the rare long one.

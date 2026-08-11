@@ -1796,6 +1796,12 @@
   #tab-sessions .sechead { text-transform: none; display: flex; align-items: center;
     gap: calc(var(--sp-2) - 2px); padding-left: 12px; }
   #tab-sessions .sechead .sglyph { flex: none; width: 11px; height: 11px; }
+  /* The Agents label's robot mark (the owner's artwork, traced to a 20×16 grid) shares the Sessions
+     glyph's geometry exactly: the 11px slot, the 11px box, the same left/translate centring, and the
+     same 9.25px of ink height — `meet` scaling makes that height fall out of the width, so the ONLY
+     thing this rule changes is the width the wider aspect needs (20/16 × 9.25). Change it and the two
+     labels stop sharing an axis. */
+  #tab-sessions .sechead .sglyph.rbt svg { width: 11.6px; }
   #tab-sessions .sechead .sglyph svg { display: block; width: 14.8px; height: 11px;
     position: relative; left: 50%; transform: translate(-50%, -1px); }
 </style>
@@ -2871,6 +2877,9 @@ const dotClass = s => s.alive === false ? "dead"
   : "";
 const pctBar = p => p == null ? "" : '<div class="bar"><span style="width:' + Math.max(0, Math.min(100, p)) + '%"></span></div>';
 let SESSIONS = [];
+// A Hermes agent's drill-in is addressed by a pseudo session id. The daemon owns the meaning; this
+// constant exists so the client never spells the prefix twice (daemon.ts's AGENT_SID_PREFIX).
+const AGENT_SID = "agent:";
 let PROVIDER_ACCOUNTS = null;
 let ACCOUNT_ROLE = 'code';
 // One row per window, in the card foot's own grammar: an emoji-led label, the percentage, the bar, then
@@ -2904,7 +2913,9 @@ async function renderSessions() {
   // function rather than as static markup because the 4s poll wipes the panel — and unlike #newfab that
   // is safe here, since nothing in the header is a tap target to lose.
   renderUsage(el, d.usage);
-  if (!SESSIONS.length) { el.insertAdjacentHTML("beforeend", '<div class="notice">No live sessions.</div>'); return; }
+  // The notice no longer returns: the agents section below describes CONFIGURED endpoints, not the
+  // fleet, so a box with no live pane still has them to show. With no sessions the loop is a no-op.
+  if (!SESSIONS.length) el.insertAdjacentHTML("beforeend", '<div class="notice">No live sessions.</div>');
   // ORDER (the owner, 2026-07-30): the usage header, then the CHAT lane's card pinned first whatever
   // state ordering the daemon sent, then a "Coding Sessions" label, then the workers. Reordered here
   // rather than daemon-side because the daemon's order serves every surface (`/sessions`, the roster) and
@@ -2991,8 +3002,60 @@ async function renderSessions() {
     if (x) x.onclick = e => { e.stopPropagation(); closeSessionCard(s.sid, s.name); };
     el.appendChild(c);
   }
+  renderAgents(el, d.agents);
 }
-
+// The bus's NON-Claude agents (Hermes endpoints — @mimo and its kind), under the coding sessions.
+// The card carries a name, a live/busy dot and its kind, which is all the daemon can know about a
+// one-shot `hermes -z` subprocess: no pane, no transcript, no drill-in to open and no session to
+// close. A TAP hands it a task, and that is the whole interaction — the run answers minutes later as
+// a card in the Telegram DM, because there is no thread here to answer into and the app may be shut
+// by then. Exactly what `@mimo <prompt>` typed in the chat does, through the same daemon call.
+// The label wears the owner's robot mark in the Sessions label's OWN geometry: the same 11px
+// status-icon slot, the same 9.25px ink height, the same centring — only the aspect differs, so only
+// the width does (see `.sglyph.rbt svg`). Both labels' words therefore sit on one axis.
+function renderAgents(el, agents) {
+  if (!agents || !agents.length) return;
+  el.insertAdjacentHTML("beforeend", '<div class="sechead"><span class="sglyph rbt"><svg viewBox="0 0 20 16" aria-hidden="true" focusable="false"><g fill="#d87756" fill-rule="evenodd"><path d="M4.9 2.5H15.5A1.9 1.9 0 0 1 17.4 4.4V14.1A1.9 1.9 0 0 1 15.5 16H4.9A1.9 1.9 0 0 1 3 14.1V4.4A1.9 1.9 0 0 1 4.9 2.5ZM8.75 8.88a1.47 1.47 0 1 0-2.94 0 1.47 1.47 0 1 0 2.94 0ZM14.44 8.88a1.47 1.47 0 1 0-2.94 0 1.47 1.47 0 1 0 2.94 0Z"/><rect x="9.4" y="0" width="1.5" height="3.2" rx=".75"/><rect x="0" y="6.6" width="1.9" height="6" rx=".75"/><rect x="18.1" y="6.6" width="1.9" height="6" rx=".75"/></g></svg></span><span class="swords">Agents</span></div>');
+  for (const a of agents) {
+    const c = document.createElement("div");
+    c.className = "sess";
+    // The dot reads the same three ways a session's does, and the third only exists for a pane-backed
+    // agent: pulsing while it works, still green at rest, and DEAD when its pane is closed — which is
+    // an ordinary state here, not a failure, because the next task reopens it on its own session.
+    const closed = a.pane && !a.live;
+    const dot = a.busy ? "on" : closed ? "dead" : "rest";
+    // A one-shot endpoint has no context to show and no session to close: it gets the kind chip it
+    // always had, and no ✕. Everything conditional on this card is conditional on `pane`.
+    const foot = a.pane && a.ctxPct != null
+      ? '<div class="foot"><span>ctx ' + a.ctxPct + "%</span>" + pctBar(a.ctxPct) + "</div>" : "";
+    c.innerHTML =
+      '<div class="top"><span class="dot ' + dot + '"></span>' +
+      '<span class="nm" title="' + esc(a.name) + '">' + esc(a.name) + "</span>" +
+      '<span class="chip">' + esc(a.model || a.kind) + "</span>" +
+      (a.pane && a.live ? '<button class="cardx" title="Close session" aria-label="Close session ' + esc(a.name) + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>' : "") +
+      "</div>" +
+      // "Closed" says what a tap will DO, because closing one here is reversible and the reopen keeps
+      // the conversation — a bare 💀, borrowed from the session card, would read as something lost.
+      '<div class="task">' + (a.busy ? "🧑‍💻 running a task" : closed ? "💤 closed — a new task reopens it where it left off" : "✅ ready") + "</div>" +
+      foot;
+    // The same drill-in a coding session opens, on a pseudo sid the daemon resolves back to the
+    // endpoint (`agent:<name>`). A CLOSED agent opens too, and the composer reopens it on its own
+    // session when he sends — refusing the tap would refuse the thing the card promises.
+    c.onclick = () => openDrill(AGENT_SID + a.name, a.name);
+    const x = c.querySelector(".cardx");
+    if (x) x.onclick = e => { e.stopPropagation(); closeAgentCard(a.name); };
+    el.appendChild(c);
+  }
+}
+// Closing an agent is NOT the session ✕'s warning, and the difference is real: this kills a pane and
+// keeps the conversation, so the next task picks it up where it stopped. Asking "this ends the
+// session" for something reversible teaches the dialog to be ignored on the card where it isn't.
+async function closeAgentCard(name) {
+  if (!(await askConfirm('Close @' + name + "'s session? It reopens on your next task, with its conversation."))) return;
+  if (!(await writeOp("/api/agent/act", { name, action: "close" }))) return;
+  showDone("@" + name + " closed");
+  renderSessions();
+}
 // Telegram's own confirm where the webview offers it (as the file-trash path already does), the browser's
 // otherwise — never no confirm. Closing from the LIST is more exposed than closing from inside a session:
 // there you had navigated into the one you meant, here you are thumb-scrolling past several. So it asks,

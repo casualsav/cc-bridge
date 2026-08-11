@@ -438,6 +438,41 @@ his chat lane**, which is the only party that can see two workers heading for th
 what he asked for, and the coordination is his to hold on those threads. `owner-direct.test.ts`
 enumerates every gesture, both relay loops and the single remaining mint.
 
+**A NON-CLAUDE target is the stated exception, and it is not a relapse: `@mimo <prompt>` mints an
+`ownerDirect` ASK.** The human-message ruling above replaced an ask because an ask made a *session*
+answer through `tg answer` while its own transcript narrated the exchange in the third person. A Hermes
+endpoint has neither half of that: no pane to paste into, no transcript to narrate, and one `hermes -z`
+run IS the answer — so the ask row is the only thing that can hold the return address for the minutes a
+run takes, and `ownerDirect` is what makes `answerRouteFor` card the result to his DM instead of typing
+it into his lane. `ownerHermesAskCore` is the ONE core, shared by all three gestures (the typed
+`@name`, a native reply to an agent's answer card, and the mini app's Agents section) so the return
+address cannot drift between them; the reply gesture tests for a Hermes name *before* its liveness read,
+or a one-shot subprocess is reported as a dead session and offered `@reopen`. No `recordOutbound`: that
+feed is what a session said, and the lane said none of this. `owner-direct.test.ts` holds the mint count
+at **2** — this and the launch's revert path — and each is there because there is no pane.
+
+**`hermes -z` FORGETS, so a Hermes endpoint with `"pane": true` is driven as a live REPL instead.**
+Measured against hermes 0.20.0 (2026-08-11): four one-shot runs — two with `-c <name>`, two with
+`--resume latest` — each opened a NEW session row and answered NONE when asked what the previous
+message said; those flags apply to interactive mode. `hermes … chat --cli` in a tmux pane remembers,
+and remembers across a kill + `--resume <id>`, which is what makes closing an agent reversible: the
+PANE goes, the session id stays. Three things the design rests on, each verified live rather than
+read: the pane's INPUT LINE is the state (`<profile> ❯` idle, `⚕ ❯ … Ctrl+C cancel` working) — never
+the spinner, whose word changes per frame; the ANSWER is read from `hermes sessions export`, never the
+capture, because a terminal is a viewport and the reply may be longer than the screen; and the reply is
+what the export GAINED past a persisted watermark, or every turn re-cards the whole conversation.
+**Its drill-in is a PSEUDO session id (`agent:<name>`) and reads hermes' SQLite store directly.** Three
+functions branch on the prefix (feed, action, message) and nothing else in the daemon learns about a
+non-Claude session — minting a real sid would put one into every path that walks the fleet. The
+conversation is read from `state.db` read-only (2ms) rather than `sessions export` (1–2s), because this
+screen polls every 3 seconds; the export stays the one-shot path's reader, where it runs once per turn.
+A message typed in that composer goes STRAIGHT INTO THE PANE — no ask row, no DM card, exactly as a
+coding session's drill-in works — and it advances the watermark, or the DM path would re-card his own
+chat message as the agent's next answer. `runHermesTurn` (`hermes-pane.ts`) holds the loop with its primitives injected, so it runs from the
+daemon, from `scripts/hermes-pane-turn.ts` against a real pane, and from `hermes-pane.test.ts` on a fake
+clock — a loop only the daemon can run is a loop debugged in production. `dispatchHermesAsk` is the one
+entry point: the config picks the transport and nothing upstream knows which.
+
 **EVERY reaction the daemon sends comes from `REACTIONS`, one table typed `satisfies Record<string,
 ReactionTypeEmoji['emoji']>`.** Telegram takes only a fixed emoji set from a bot, `channel.react` casts into
 that union, and every call site swallows the rejection — so an emoji outside the set is a confirmation that
