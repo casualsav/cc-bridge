@@ -336,6 +336,18 @@ tree unconditionally, and a release carried whatever a sibling had in flight —
 2026-07-30, each behind a warning that printed the files and was read by nobody. `payload-provenance.ts`
 holds the rule; `payload-provenance.test.ts` drives it against real throwaway git repos.
 
+**`--without` DROPS A FILE'S DEPENDENTS WITH IT, and nothing in the build can tell you otherwise.**
+The two answers are per-FILE, but a change is not: `--with daemon.ts --without transcript.ts` ships a
+NEW caller beside an OLD callee, and TypeScript never sees the pair — the cache type-checks against
+its own copies, boots clean, and runs. v0.5.72 (2026-08-11) shipped a tree `daemon.ts` reading
+`r.anchorText` beside the committed `transcript.ts`, where that field does not exist: both relay loops
+passed `undefined` into `ownerReplyRoutes.consume`, which returns nothing on a falsy anchor, so every
+owner-direct reply reached the session's own surface and **no card ever went to his DM** — no crash,
+no log line, and the evidence is a message that simply never came back. The instrument is a grep whose
+answer is 0 vs N, run against the CACHE and not the tree: `grep -c <the new symbol>
+cache/<ver>/{caller,callee}.ts`. So `--without` is for a sibling's INDEPENDENT work; the moment your
+change spans two files, they ship together or neither does.
+
 `bun run deploy` refuses to ship from any branch but `main`; to ship a branch deliberately, name
 it: `--ship-branch <branch>` (no bare `--force`, on purpose). `--commit` stages only the version
 files it owns.
