@@ -1550,6 +1550,28 @@
      tail was simply invisible. Wrapping mangles an ASCII table's columns; silently hiding the end of
      a command does worse. */
   .msg pre.code { background: rgba(0,0,0,.28); border-radius: var(--r-sm); padding: var(--sp-2) 10px; font: var(--t-mono)/1.45 ui-monospace, Menlo, monospace; margin: var(--sp-1) 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+  /* A GFM table, styled with ELEMENT selectors scoped to the bubble — the rules are private to this
+     one component and a class would have to claim a common word to name them.
+     It takes the bubble's WIDTH and wraps inside its columns (`white-space: normal`, against the
+     bubble's pre-wrap), so the ordinary 2–4 column table never scrolls. `overflow-wrap: break-word`
+     and NOT the bubble's own `word-break: break-word`: the second one shreds words mid-letter to
+     whatever width a column got, which on a narrow screen rendered "Yesterday" as five stacked
+     fragments. It does not enter the column's min-content width, so the columns are sized by their
+     longest WORD — and the residue of that (a table whose words alone outrun the screen) is what
+     `.tblw` scrolls, the one case `pre.code`'s wrap-don't-scroll trade above does not cover: a
+     column IS the content of a table, and shredding it hides the data just as thoroughly.
+     Rules are horizontal only and the outer edges carry none — a boxed grid is heavier than the
+     data, and the first/last cells sit flush with the prose so the table reads as part of the
+     message rather than an inset object. */
+  .msg .tblw { overflow-x: auto; margin: var(--sp-2) 0; }
+  .msg table { width: 100%; border-collapse: collapse; white-space: normal;
+    font-size: var(--t-sub); line-height: 1.4; font-variant-numeric: tabular-nums; }
+  .msg th, .msg td { padding: 5px var(--sp-2); text-align: left; vertical-align: top;
+    word-break: normal; overflow-wrap: break-word; border-bottom: 1px solid rgba(125,139,153,.22); }
+  .msg th:first-child, .msg td:first-child { padding-left: 0; }
+  .msg th:last-child, .msg td:last-child { padding-right: 0; }
+  .msg th { font-weight: var(--w-semi); color: var(--hint-raised); border-bottom-color: rgba(125,139,153,.45); }
+  .msg tbody tr:last-child td { border-bottom: none; }
   /* Timestamp: floated INSIDE the bubble at bottom-right so the last line of text wraps around it,
      as the reference does, instead of reserving a row under every message. `.msg` gets flow-root so
      the float is contained and can't escape the bubble's height. */
@@ -3189,15 +3211,65 @@ if (tg && tg.SettingsButton && typeof tg.SettingsButton.onClick === "function") 
     tg.SettingsButton.show();
   } catch {}
 }
+// One row of a GFM table → its cells. The leading/trailing pipes are optional, and a `\|` is a
+// literal pipe rather than a column edge (GFM's own escape; a pipe inside a code span still splits,
+// which is GFM's behaviour too).
+function tblCells(line) {
+  let t = line.trim();
+  if (t.startsWith("|")) t = t.slice(1);
+  if (/(^|[^\\])\|$/.test(t)) t = t.slice(0, -1);
+  return t.split(/(?<!\\)\|/).map(c => c.trim().replace(/\\\|/g, "|"));
+}
+// GFM tables → real <table>s, run over ESCAPED text before the inline rules, so a cell's markup is
+// this function's and its content is still plain markdown for those rules to pick up.
+// The block is recognised the way GFM recognises one — a header line, then a delimiter line whose
+// cell COUNT MATCHES — which is what keeps prose that merely contains a pipe out of a table.
+// The newline that separated the surrounding prose from the block is dropped: the bubble is
+// `white-space: pre-wrap`, so a kept one would print a blank line above a box that already starts
+// on its own.
+function mdTables(h) {
+  const lines = h.split("\n");
+  let out = "", buf = [], afterTbl = false;
+  const flush = () => { out += buf.join("\n"); buf = []; };
+  for (let i = 0; i < lines.length;) {
+    const head = lines[i].includes("|") ? tblCells(lines[i]) : null;
+    const delim = head && i + 1 < lines.length && lines[i + 1].includes("-") ? tblCells(lines[i + 1]) : null;
+    if (!(head && delim && delim.length === head.length && delim.every(c => /^:?-+:?$/.test(c)))) {
+      if (!(afterTbl && !lines[i].trim())) { buf.push(lines[i]); afterTbl = false; }
+      i++;
+      continue;
+    }
+    // ":" on a side pins that side; both is centred. Anything else keeps the reading direction.
+    const at = delim.map(c => c.endsWith(":") ? (c.startsWith(":") ? ' style="text-align:center"' : ' style="text-align:right"') : "");
+    const row = (tag, cells) => "<tr>" + head.map((_, k) => "<" + tag + at[k] + ">" + (cells[k] || "") + "</" + tag + ">").join("") + "</tr>";
+    let body = "";
+    let j = i + 2;
+    for (; j < lines.length && lines[j].trim() && lines[j].includes("|"); j++) body += row("td", tblCells(lines[j]));
+    while (buf.length && !buf[buf.length - 1].trim()) buf.pop();
+    flush();
+    // No newlines inside the markup: mdReport's line rules run over md()'s output, and a `-` at the
+    // head of a line of table markup would become a bullet.
+    out += '<div class="tblw"><table><thead>' + row("th", head) + "</thead><tbody>" + body + "</tbody></table></div>";
+    afterTbl = true;
+    i = j;
+  }
+  flush();
+  return out;
+}
 // Minimal markdown for assistant bubbles (escape-first, so it can never inject): fenced code,
-// inline code, bold, italic. Anything fancier stays plain text.
+// inline code, bold, italic, and GFM tables. Anything fancier stays plain text.
+// Fenced blocks are split out first — pipes inside code are code, not columns.
 function md(s) {
-  let h = esc(s);
-  h = h.replace(/```(\w*)\n?([\s\S]*?)```/g, (m, lang, c) => '<pre class="code">' + c.replace(/\n$/, "") + "</pre>");
-  h = h.replace(/`([^`\n]+)`/g, "<code>$1</code>");
-  h = h.replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>");
-  h = h.replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,!?:]|$)/g, "$1<i>$2</i>");
-  return h;
+  return s.split(/(```[\s\S]*?```)/).map(part => {
+    if (part.startsWith("```")) return esc(part).replace(/```(\w*)\n?([\s\S]*?)```/g, (m, lang, c) => '<pre class="code">' + c.replace(/\n$/, "") + "</pre>");
+    let h = mdTables(esc(part));
+    h = h.replace(/`([^`\n]+)`/g, "<code>$1</code>");
+    h = h.replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>");
+    // `>` joins the openers so a cell that STARTS in italic still italicises — after mdTables the
+    // only `>` in the string is one of our own tags' (a typed one is already `&gt;`).
+    h = h.replace(/(^|[\s(>])\*([^*\n]+)\*(?=[\s).,!?:<]|$)/g, "$1<i>$2</i>");
+    return h;
+  }).join("");
 }
 // Block markdown — headings and bullets — for the AGENT CARD BODY and a local command's OUTPUT, and
 // nothing else. Both are structured documents (that is what a delegated task returns, and what

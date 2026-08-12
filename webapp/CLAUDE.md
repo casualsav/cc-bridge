@@ -438,6 +438,18 @@ give it.
   **`inherit`**, never a literal — the four corners differ and a hand-written value disagrees on
   one. The text bubble's bottom was measured against Telegram and is already tighter; leave it.
 
+- **A GFM table is the ONE region in a bubble allowed to scroll sideways**, against `pre.code`'s
+  stated wrap-don't-scroll trade — shredding a column hides the data as thoroughly as clipping a
+  line does, and only the residue scrolls: cells carry `overflow-wrap: break-word`, which sizes the
+  columns by their longest WORD, so an ordinary 2–4 column table fits and `.tblw` never scrolls at
+  all. The bubble's own `word-break: break-word` is what must not reach them (it rendered
+  "Yesterday" as five stacked fragments in a narrow column).
+- **`mdTables` runs on ESCAPED text before the inline rules and emits NO newline** — inside its
+  markup or around it. `mdReport`'s heading/bullet rules run line-wise over `md()`'s output, so a
+  `-` starting a line of table markup would become a bullet; and the bubble is `white-space:
+  pre-wrap`, so the newline that separated the prose from the block would print a blank line above
+  a box that already starts on its own.
+
 ## Colour and theming
 
 - **Theming ignores `prefers-color-scheme` completely.** Colours come from the `--tg-theme-*`
