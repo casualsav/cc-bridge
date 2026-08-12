@@ -99,15 +99,25 @@ test('a feed with no tools produces only p parts — no empty chip', () => {
   expect(turnParts([])).toEqual([])
 })
 
-test('an agent chip targets the subagent type, an unknown tool is its own kind and verb', () => {
+test('an agent chip names its type, carries the prompt; an unknown tool is its own kind and verb', () => {
   const parts = turnParts([
-    tool('Task', 'fix it', { agent: { type: 'coder', prompt: 'fix it' } }),
+    tool('Task', 'fix it', { agent: { type: 'coder', prompt: 'Fix the failing test in x.ts' } }),
     tool('WebFetch', 'https://e.com'),
   ])
   expect(parts).toEqual([
-    { t: 'chip', kind: 'agent', label: 'Delegated a task', calls: [{ verb: 'Delegated', target: 'coder' }] },
+    { t: 'chip', kind: 'agent', label: 'Delegated coder', calls: [{ verb: 'Delegated', target: 'coder', prompt: 'Fix the failing test in x.ts' }] },
     { t: 'chip', kind: 'tool', label: 'WebFetch', calls: [{ verb: 'WebFetch', target: 'https://e.com' }] },
   ])
+})
+
+// The prompt takes the payload's display clamp — these blocks ride a 3s poll.
+test('an agent call clamps a huge prompt and non-agent calls never carry one', () => {
+  const big = 'x'.repeat(5000)
+  const parts = turnParts([tool('Task', '', { agent: { type: 'coder', prompt: big } }), tool('Bash', 'ls')])
+  const agent = (parts[0] as any).calls[0]
+  expect(agent.prompt.length).toBe(4001)
+  expect(agent.prompt.endsWith('…')).toBe(true)
+  expect('prompt' in (parts[1] as any).calls[0]).toBe(false)
 })
 
 test('a call with no detail falls back to an em dash rather than an empty row', () => {
@@ -122,7 +132,7 @@ test('labels pluralise at n=1 and n=2 for every kind', () => {
   expect([label('Read', 1), label('Read', 2)]).toEqual(['Read a file', 'Read 2 files'])
   expect([label('Grep', 1), label('Grep', 2)]).toEqual(['Searched', 'Searched 2 times'])
   expect([label('Bash', 1), label('Bash', 2)]).toEqual(['Ran a command', 'Ran 2 commands'])
-  expect([label('Task', 1), label('Task', 2)]).toEqual(['Delegated a task', 'Delegated 2 tasks'])
+  expect([label('Task', 1), label('Task', 2)]).toEqual(['Delegated x', 'Delegated 2 tasks'])
   expect([label('WebFetch', 1), label('WebFetch', 2)]).toEqual(['WebFetch', 'WebFetch ×2'])
 })
 

@@ -21447,7 +21447,7 @@ async function webappSessionFeed(sid: string): Promise<WebappSessionFeed | null>
     role: c.role, text: c.text, ts: c.ts,
     ...(c.img ? { img: c.img } : {}), ...(c.imgs ? { imgs: c.imgs } : {}), ...(c.att ? { att: c.att } : {}), ...(c.cmd ? { cmd: true } : {}),
     ...(c.name ? { name: c.name } : {}), ...(c.args ? { args: c.args } : {}),
-    ...(c.agent ? { agent: c.agent } : {}), ...(c.status ? { status: c.status } : {}),
+    ...(c.agent ? { agent: c.agent } : {}), ...(c.status ? { status: c.status } : {}), ...(c.prompt ? { prompt: c.prompt } : {}),
     // uuid only where it's needed: it exists so a clipped row can be re-fetched in full.
     ...(c.clipped ? { clipped: true, ...(c.uuid ? { uuid: c.uuid } : {}) } : {}),
   })), outboundFor(sid), CONVO_CAP, transcriptStartedAt(file) ?? 0) as WebappSessionFeed['items']

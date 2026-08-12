@@ -644,7 +644,10 @@ export function modelSwitchEvidence(file: string): ModelSwitch {
 // `name`/`args` are the invocation; `text` is the output, already normalized (ansi.ts) — either half
 // can be absent, because a command like /clear produces no output and a stdout entry can arrive with
 // no invocation recorded on the user side.
-export type ConversationItem = { role: 'user' | 'assistant' | 'agent' | 'command'; text: string; ts: number; uuid?: string; img?: string; imgs?: string[]; att?: string; cmd?: boolean; name?: string; args?: string; agent?: string; status?: string; clipped?: true }
+// `prompt` (agent rows only) = the prompt the subagent was handed, resolved from its Task tool_use
+// via `tuid` (the notification's <tool-use-id>). `tuid` is plumbing: recentConversation strips it
+// after the resolve, so it never reaches a client.
+export type ConversationItem = { role: 'user' | 'assistant' | 'agent' | 'command'; text: string; ts: number; uuid?: string; img?: string; imgs?: string[]; att?: string; cmd?: boolean; name?: string; args?: string; agent?: string; status?: string; prompt?: string; tuid?: string; clipped?: true }
 
 // ---- Machine payloads that arrive USER-SIDE -----------------------------------------------------
 // Several things the harness writes are user-type entries carrying no user words at all. They pass
@@ -710,7 +713,8 @@ function taskNotificationItem(raw: string, ts: number, uuid?: string): Conversat
   const status = tagOf(raw, 'status').trim()
   // A notification with no report still has to render: the header line alone says an agent finished,
   // which is the whole content of that event.
-  return { role: 'agent', text: result || summary, ts, uuid, ...(agent ? { agent } : {}), ...(status ? { status } : {}) }
+  const tuid = tagOf(raw, 'tool-use-id').trim()
+  return { role: 'agent', text: result || summary, ts, uuid, ...(agent ? { agent } : {}), ...(status ? { status } : {}), ...(tuid ? { tuid } : {}) }
 }
 // One transcript entry → its feed row, UNCLAMPED, or null if the entry isn't one. Shared by the
 // polled feed (which clamps) and the on-demand full-text fetch (which doesn't), so the two can never
@@ -899,7 +903,18 @@ function foldQueuedDuplicates(items: ConversationItem[]): ConversationItem[] {
 }
 export function recentConversation(file: string, max = 12): ConversationItem[] {
   const rows: ConversationItem[] = []
+  // Task tool_use id → the prompt it was handed, collected in the same walk. The tool_use always
+  // precedes its notification, so a running map is complete by the time an agent row resolves.
+  const prompts = new Map<string, string>()
   for (const e of readEntries(file)) {
+    if (e.type === 'assistant' && Array.isArray(e.message?.content)) {
+      for (const b of e.message!.content as any[]) {
+        if (b?.type === 'tool_use' && (b.name === 'Task' || b.name === 'Agent') && typeof b.id === 'string') {
+          const p = agentInfo(b.input)?.prompt
+          if (p) prompts.set(b.id, p)
+        }
+      }
+    }
     const it = conversationItem(e)
     if (it) rows.push(it)
   }
@@ -907,7 +922,14 @@ export function recentConversation(file: string, max = 12): ConversationItem[] {
   // 40k /context body through whole.
   // A cut is reported, not just implied by a trailing ellipsis — and the row keeps its uuid so the
   // client can go and fetch the rest.
+  // The tuid is resolved to its prompt here and STRIPPED either way — it is a toolu_… token no
+  // client can act on, and the payload-machinery test enumerates it as a leak. The prompt takes the
+  // same display clamp the text does.
   return foldQueuedDuplicates(foldCommands(rows))
+    .map(({ tuid, ...it }) => {
+      const p = tuid ? prompts.get(tuid) : undefined
+      return p ? { ...it, prompt: p.length > CONVO_CAP ? p.slice(0, CONVO_CAP) + '…' : p } : it
+    })
     .map(it => it.text.length > CONVO_CAP ? { ...it, text: it.text.slice(0, CONVO_CAP) + '…', clipped: true as const } : it)
     .slice(-max)
 }

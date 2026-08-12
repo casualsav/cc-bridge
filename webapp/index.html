@@ -1105,6 +1105,10 @@
      would be worse than no status at all. */
   .msg.agent .ah .st { flex: none; }
   .msg.agent .ah .st.bad { color: var(--del); }
+  /* The tap-through to the prompt the subagent was handed. A real <button>, so onBubbleTap's
+     a,button bail-out leaves it its own tap and the card body still copies. The chevron is the
+     affordance, same as the turn chips'. */
+  .msg.agent .ah .pv { flex: none; background: none; border: 0; padding: 0; font: inherit; color: var(--hint-raised); cursor: pointer; }
   /* A report's headings. One size step above the body and nothing else: <b> already carries the
      weight, and the pre-wrap newline already carries the break, so a margin here would double-space
      against it. Scoped to the two rows that run mdReport() — no assistant reply renders one.
@@ -1707,6 +1711,13 @@
   #calllist .row + .row::after { content: ""; position: absolute; left: 9px; top: -9px; width: 1px; height: 18px; background: var(--sec); }
   /* Mono is the TARGET's alone: it is the only part that is a literal string from the machine. */
   #calllist .row .tgt { flex: 1; min-width: 0; color: var(--hint); font: var(--t-mono) ui-monospace, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* A Delegated row is a BUTTON — it opens the prompt the subagent was handed. The reset only
+     undoes button chrome; the geometry stays #calllist .row's own, so the node dot and connector
+     hold for it like any other row. The chevron is the affordance, as on the turn chips. */
+  #calllist button.row { width: 100%; background: none; border: 0; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+  #calllist .row .cv { flex: none; color: var(--hint); }
+  /* The prompt itself, swapped into the same sheet: prose somebody wrote, pre-wrapped verbatim. */
+  #calllist .pbody { white-space: pre-wrap; overflow-wrap: break-word; font-size: var(--t-sub); line-height: 1.45; color: var(--text); padding: 2px 0 var(--sp-4); }
   /* The grab handle is decoration, not a control — the sheet is dismissed by the ✕, the backdrop or
      Back. Sized off the reference against its mic (64x5 : 66.7). */
   .dialgrab { width: 38px; height: 3px; border-radius: 2px; background: var(--hint); opacity: .5; margin: 8px auto 0; }
@@ -3234,6 +3245,9 @@ function bubble(i, n, all) {
   // payload, so nothing here re-reads markup.
   if (i.role === "agent") inner += '<div class="ah"><span class="nm"><span class="lb">Agent · </span>'
     + esc(i.agent || "") + "</span>"
+    // The tap-through to the prompt this agent was handed. Only when the server resolved one — a
+    // dead button on the cards that predate the field would be an affordance that does nothing.
+    + (i.prompt ? '<button class="pv" onclick="openAgentPrompt(' + n + ')">Prompt ›</button>' : "")
     + (i.status ? '<span class="st' + (i.status === "completed" ? "" : " bad") + '">' + esc(i.status) + "</span>" : "") + "</div>";
   // A row the session said OVER THE BUS carries where it went. Same header element the agent card
   // uses, so it needs no CSS of its own. Removed on the owner's ask that morning ("I don't need to
@@ -3358,15 +3372,43 @@ function openWorked(t) {
   (it.blocks || []).forEach(b => { if (b.t === "chip") calls.push(...(b.calls || [])); });
   showCalls("Worked for " + fmtElapsed(it.workedSec), calls);
 }
+// The calls the sheet is showing, kept for the prompt tap-through. Outside the DOM like every other
+// piece of sheet state: the list is rebuilt on each open, so an index into this array is stable for
+// exactly the lifetime of the markup that carries it.
+let sheetCalls = [];
 function showCalls(title, calls) {
+  sheetCalls = calls;
   $("calltitle").textContent = title;
-  $("calllist").innerHTML = calls.map(c => '<div class="row"><span>' + esc(c.verb || "")
-    + '</span><span class="tgt">' + esc(c.target || "") + "</span>" + stat(c) + "</div>").join("");
+  // A call carrying a prompt (a subagent spawn) renders as a button — tapping it swaps the sheet to
+  // the prompt the agent was handed. Every other call stays the plain row it always was.
+  $("calllist").innerHTML = calls.map((c, k) => {
+    const inner = "<span>" + esc(c.verb || "") + '</span><span class="tgt">' + esc(c.target || "") + "</span>" + stat(c);
+    return c.prompt ? '<button class="row" onclick="openCallPrompt(' + k + ')">' + inner + '<span class="cv">›</span></button>'
+      : '<div class="row">' + inner + "</div>";
+  }).join("");
   // .show before paint, .up next frame — #dial's shape, for its reason: setting display and
   // transform in one tick leaves the transition nothing to animate from.
   const s = $("calls");
   s.classList.add("show");
   requestAnimationFrame(() => s.classList.add("up"));
+}
+// The prompt a subagent was handed, in the same sheet — from an agent card's "Prompt ›" or a
+// Delegated row. Replaces the sheet's content rather than stacking a second surface; closing
+// closes, like every other one-shot sheet view.
+function showPrompt(title, text) {
+  $("calltitle").textContent = title;
+  $("calllist").innerHTML = '<div class="pbody">' + esc(text || "") + "</div>";
+  const s = $("calls");
+  s.classList.add("show");
+  requestAnimationFrame(() => s.classList.add("up"));
+}
+function openAgentPrompt(n) {
+  const it = (lastDrill ? lastDrill.items : [])[n];
+  if (it && it.prompt) showPrompt("Agent · " + (it.agent || ""), it.prompt);
+}
+function openCallPrompt(k) {
+  const c = sheetCalls[k];
+  if (c && c.prompt) showPrompt("Delegated " + (c.target && c.target !== "—" ? c.target : "task"), c.prompt);
 }
 function closeCalls() {
   const s = $("calls");

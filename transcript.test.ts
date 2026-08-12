@@ -477,6 +477,26 @@ describe('a subagent report is not the owner talking', () => {
     expect(it.text).toBe('The session runs **claude-opus-5[1m]**, not opus[1m] plain.')
   })
 
+  // The card carries the prompt its Task call was handed — resolved via the notification's
+  // <tool-use-id> against the tool_use block's own id, and the id itself still never ships.
+  test('the card carries the prompt of its Task call, and the id still never ships', () => {
+    const spawn = { type: 'assistant', uuid: 'a1', timestamp: '2026-07-29T00:10:00.000Z',
+      message: { stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 'toolu_01V9wPXt1E5YSfnecJLLRJsJ', name: 'Task',
+        input: { subagent_type: 'explorer', prompt: 'Map the daemon concurrency and report.' } }] } }
+    const [it] = recentConversation(fixture([spawn, user(NOTIFICATION, 'u1')]), 5)
+    expect(it.role).toBe('agent')
+    expect(it.prompt).toBe('Map the daemon concurrency and report.')
+    const whole = JSON.stringify(it)
+    expect(whole.includes('toolu_01')).toBe(false)
+    expect(whole.includes('tuid')).toBe(false)
+  })
+
+  test('a notification with no matching Task call ships no prompt and no plumbing', () => {
+    const [it] = recentConversation(fixture([user(NOTIFICATION, 'u1')]), 5)
+    expect(it.prompt).toBeUndefined()
+    expect(JSON.stringify(it).includes('tuid')).toBe(false)
+  })
+
   test('a report with no result still renders as its summary line', () => {
     const empty = NOTIFICATION.replace(/<result>[\s\S]*<\/result>/, '<result></result>')
     const [it] = recentConversation(fixture([user(empty, 'u1')]), 5)

@@ -10,7 +10,7 @@
 //
 // Markup is deliberately absent here. `text` fields are plain and UNESCAPED; each renderer escapes
 // on the way out (mirror.ts wraps them in <i>/<code>, the mini app text-escapes into the DOM).
-import type { FeedItem } from './transcript.ts'
+import { CONVO_CAP, type FeedItem } from './transcript.ts'
 
 export type TurnBlock =
   | { kind: 'thought'; text: string }                    // one visual paragraph of narration
@@ -131,7 +131,9 @@ export function blockLine(b: TurnBlock): string {
 //     repeat edits of one file into a single line; the mini app's detail sheet must show two calls
 //     to the same file as two rows, so that fold is exactly what cannot be reused here.
 //   - a chip carries an added/removed PAIR, not a net delta.
-export type TurnCall = { verb: string; target: string; plus?: number; minus?: number }
+// `prompt` (agent calls only) = the prompt the subagent was handed, so the detail sheet can open
+// it — a "Delegated" row that names only the agent type answers none of "what was it asked".
+export type TurnCall = { verb: string; target: string; plus?: number; minus?: number; prompt?: string }
 export type TurnPart =
   | { t: 'p'; text: string }
   | { t: 'chip'; kind: string; label: string; plus?: number; minus?: number; calls: TurnCall[] }
@@ -154,7 +156,9 @@ function chipLabel(kind: string, calls: TurnCall[]): string {
   if (kind === 'read') return n === 1 ? 'Read a file' : `Read ${n} files`
   if (kind === 'search') return n === 1 ? 'Searched' : `Searched ${n} times`
   if (kind === 'run') return n === 1 ? 'Ran a command' : `Ran ${n} commands`
-  if (kind === 'agent') return n === 1 ? 'Delegated a task' : `Delegated ${n} tasks`
+  // A single spawn names its agent on the chip itself — "Delegated a task" says nothing the reader
+  // can use, and the target is already the subagent type (or the task description as its fallback).
+  if (kind === 'agent') return n === 1 ? (calls[0].target !== '—' ? `Delegated ${calls[0].target}` : 'Delegated a task') : `Delegated ${n} tasks`
   const tool = calls[0].verb
   return n === 1 ? tool : `${tool} ×${n}`
 }
@@ -201,6 +205,12 @@ export function turnParts(feed: FeedItem[]): TurnPart[] {
     const call: TurnCall = { verb, target: target || '—' }
     if (it.plus !== undefined) call.plus = it.plus
     if (it.minus !== undefined) call.minus = it.minus
+    // The same display clamp the feed's text takes (CONVO_CAP): these blocks ride a 3s poll, and
+    // the sheet is a display surface, not storage.
+    if (kind === 'agent' && it.agent?.prompt) {
+      const p = it.agent.prompt
+      call.prompt = p.length > CONVO_CAP ? p.slice(0, CONVO_CAP) + '…' : p
+    }
     if (chip && chip.kind !== kind) flush()
     if (!chip) chip = { t: 'chip', kind, label: '', calls: [] }
     chip.calls.push(call)

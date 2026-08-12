@@ -234,7 +234,9 @@ export interface SessionFeed {
     // A turn row only: how long the turn took, present ONLY once it has concluded. The client folds
     // the chips into one "Worked for …" line on exactly that signal — see daemon.ts, where it is set.
     workedSec?: number
-    uuid?: string; img?: string; imgs?: string[]; att?: string; cmd?: boolean; name?: string; args?: string; agent?: string; status?: string; clipped?: boolean
+    // `prompt` (agent rows only) = the prompt the subagent was handed, resolved server-side from
+    // its Task tool_use; the card's "Prompt ›" tap-through renders it.
+    uuid?: string; img?: string; imgs?: string[]; att?: string; cmd?: boolean; name?: string; args?: string; agent?: string; status?: string; prompt?: string; clipped?: boolean
     // `via`/`to` mark an assistant row the session said OVER THE BUS rather than into its pane —
     // an answer, a post, an ask to another agent (outbound-feed.ts). Its words never reach the
     // transcript, so without these rows the drill-in shows the session's "Answered." and nothing
