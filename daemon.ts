@@ -4786,6 +4786,18 @@ async function deliverAnswerToAsker(pending: BusPending, answerer: string, rawBo
   // group-less box this is the most common card in the owner's DM by far — every worker result
   // reaches him as one — which makes it the card reply-to-route exists for.
   void notifyBusRich(cur.fromSid, `<b>@${escapeHtml(answerer)}</b> messaged <b>@${escapeHtml(cur.fromName)}</b>${late ? ' · late' : ''}${escapeHtml(mismatch)}`, body, cur.toSid)
+  // ...and "Answered @asker" on the ANSWERER's own surface, the sender-side half every other verb
+  // already had. Until 2026-08-12 the card above was an answer's ONLY one, so answering a HEADLESS
+  // worker — surfaceless by construction, `resolveOutbound` returns no targets — carded nobody at
+  // all: the owner watched his lane rule on two of @weather's asks with nothing on his screen but
+  // the activity mirror's "Ran 1 shell command". A sender always has a surface; an asker may not.
+  // The asker's own copy is the card above, so nothing is doubled — the two land on two surfaces.
+  //
+  // Resolved from the answerer's NAME, not `cur.toSid`: on a mismatch (`[asked @X]` above) toSid is
+  // the session that was asked, and this card belongs to the one that actually replied. A hermes
+  // endpoint resolves to its name rather than a sid and simply has no pane — no card, no error.
+  const answered = resolveEndpoint(answerer, busEndpoints())
+  if (!('error' in answered)) void notifyAskSent(answered.id, cur.fromName, body, 'answer', cur.fromSid)
   appendLedger(room, { ts: Date.now(), kind: 'answer', from: answerer, to: cur.fromName, id: cur.id, text: body, refs })
   return `answered @${cur.fromName} (ask ${cur.id})${late ? ' (late — delivered after the timeout)' : ''}`
 }

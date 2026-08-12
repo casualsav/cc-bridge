@@ -182,15 +182,18 @@ test('formatDigestBlock: an aside carries its own glyph, so catch-up shows it wa
 // The regression these pin: an ack used to render "Messaged @X" — the SAME header an ask renders —
 // and an aside rendered nothing at all on the sender's side. A test that only checked the ask
 // header would have passed against both bugs, so each case here asserts the three are DIFFERENT.
-test('busSentHeader: each verb names itself, so a sender-side card says which of the three it was', () => {
+test('busSentHeader: each verb names itself, so a sender-side card says which of the four it was', () => {
   expect(busSentHeader('ask', 'kam')).toBe('Messaged <b>@kam</b>')
   expect(busSentHeader('ack', 'kam')).toBe('Notified <b>@kam</b>')
   expect(busSentHeader('btw', 'kam')).toBe('Informed <b>@kam</b>')
-  // NO literal chevron glyph in any of the three: the card draws a real one (sendBusCard's <details>),
+  // The fourth verb, and the one whose absence was a missing card rather than a wrong word: an
+  // answer used to card only the ASKER's surface, which a headless worker does not have.
+  expect(busSentHeader('answer', 'kam')).toBe('Answered <b>@kam</b>')
+  // NO literal chevron glyph in any of them: the card draws a real one (sendBusCard's <details>),
   // and the arrow that shipped in v0.4.247 rendered beside it — the disclosure, twice. The owner's spec
   // meant that element, not a character.
-  expect(['ask', 'ack', 'btw'].some(v => busSentHeader(v as 'ask', 'kam').includes('↓'))).toBe(false)
-  expect(new Set(['ask', 'ack', 'btw'].map(v => busSentHeader(v as 'ask', 'kam'))).size).toBe(3)
+  expect(['ask', 'ack', 'btw', 'answer'].some(v => busSentHeader(v as 'ask', 'kam').includes('↓'))).toBe(false)
+  expect(new Set(['ask', 'ack', 'btw', 'answer'].map(v => busSentHeader(v as 'ask', 'kam'))).size).toBe(4)
 })
 
 test('busGotHeader: the target-side card names the sender and distinguishes ack from ask', () => {

@@ -84,13 +84,18 @@ export function formatAsideBlock(from: string, text: string, refs: string[] = []
 // mid-turn, an ack that just closes a loop. Until 2026-07-29 an ack rendered as "Messaged @X" —
 // indistinguishable from an ask — and an aside left the sender's surface blank entirely, so the
 // owner could watch his lane message a session and never learn which of the three it had sent.
-export type BusVerb = 'ask' | 'ack' | 'btw'
+// `answer` joined the three on 2026-08-12, and the gap it closes is a whole DIRECTION rather than a
+// wording: an answer's only card goes to the ASKER's surface, so a lane answering a HEADLESS worker
+// (no topic, no DM — `resolveOutbound` returns `surfaceless`) carded nobody at all, and the owner
+// watched his lane rule on two of @weather's asks with nothing on his screen but the activity
+// mirror's "Ran 1 shell command". The sender's own surface is the one that always exists.
+export type BusVerb = 'ask' | 'ack' | 'btw' | 'answer'
 // The `↓` these three carried until v0.4.258 was a MISREADING of the owner's spec: in "↓ Nudged @weather"
 // the arrow stood for the card's own chevron — the expandable element sendBusCard already draws — so
 // shipping it as a literal glyph drew the disclosure twice. Verb text only here; the chevron is the
 // rich message's <details> and is untouched.
-const SENT_VERB: Record<BusVerb, string> = { ask: 'Messaged', ack: 'Notified', btw: 'Informed' }
-// The SENDER's surface: "Messaged @kam" / "Notified @kam" / "Informed @kam".
+const SENT_VERB: Record<BusVerb, string> = { ask: 'Messaged', ack: 'Notified', btw: 'Informed', answer: 'Answered' }
+// The SENDER's surface: "Messaged @kam" / "Notified @kam" / "Informed @kam" / "Answered @kam".
 export function busSentHeader(verb: BusVerb, to: string): string {
   return `${SENT_VERB[verb]} <b>@${escapeHtml(to)}</b>`
 }
