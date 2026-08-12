@@ -7,6 +7,7 @@ import type net from 'node:net'
 import type { DaemonToShim, FailoverHop } from './common.ts'
 import type { HarnessProfile } from './harness-provider.ts'
 import type { PromptOption } from './prompt.ts'
+import type { TtsProviderId } from './tts-providers.ts'
 
 export type PendingEntry = { senderId: string; chatId: string; createdAt: number; expiresAt: number; replies: number }
 export type GroupPolicy = { requireMention: boolean; allowFrom: string[] }
@@ -31,7 +32,11 @@ export type Access = {
   scheduleTz?: string     // IANA timezone for recurring /schedule wall-clock times (default America/Los_Angeles)
   batchAllow?: boolean    // 2+ permission prompts in one turn offer "Allow all this turn" (default on)
   confirmReset?: boolean  // /clear & /new ask for a Yes/No tap before wiping the conversation (default on)
-  tts?: { mode: 'off' | 'all'; engine: 'piper' | 'openai' | 'elevenlabs'; voice?: string }   // voice replies (ROADMAP #15); voice = piper voice id
+  // Voice replies (ROADMAP #15). mode: off · all (speak every reply) · manual (speak only what a
+  // gesture asks for). engine: the local piper, the two built-in hosted ones, or any id in
+  // tts-providers.ts's registry (minimax today) — a marketplace install registers its own key.
+  // `voice` is the PIPER voice id only; a registered provider takes its voice from its own env var.
+  tts?: { mode: 'off' | 'all' | 'manual'; engine: 'piper' | 'openai' | 'elevenlabs' | TtsProviderId; voice?: string }
   updateChecks?: boolean  // daily update-available notification for bridge + Claude (default on)
   autoUpdate?: boolean    // auto-apply updates instead of tap-to-apply cards (default off): bridge on the daily sweep, Claude via install-latest + rolling refresh of idle sessions
   limitFailover?: boolean  // on a usage-limit hit, move the stuck session to a still-available account and resume it there instead of waiting for the reset (default off)

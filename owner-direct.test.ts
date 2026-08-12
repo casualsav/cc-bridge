@@ -321,7 +321,7 @@ test('every reaction the daemon sends comes from the typed table — no bare lit
   // argument never does. A regex that reaches zero call sites passes every per-site assertion under
   // it, so the count is checked first and against the real number, not against zero.
   const calls = [...daemon.matchAll(/channel\.react\(\{[\s\S]*?\},\s*([^()]+?)\)/g)].map(m => m[1]!.trim())
-  expect(calls.length).toBe(12)
+  expect(calls.length).toBe(13)   // +1: the manual-TTS gesture's ✍ receipt (v0.5.91)
   // Two arguments are values, not literals, and cannot be checked at build time: `tg react`'s emoji
   // comes from an agent and `ackReaction` from the owner's own config. Named, so the exception is a
   // decision rather than a hole.

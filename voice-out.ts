@@ -1,17 +1,23 @@
 // Text→speech for outbound replies (ROADMAP #15) — the mirror of voice.ts (speech→text).
 //
 // Engines: piper (local, free, default — provisioned on first enable like Whisper), openai
-// (gpt-4o-mini-tts, OPENAI_API_KEY), elevenlabs (eleven_turbo_v2_5, ELEVENLABS_API_KEY).
-// All three produce an .ogg/opus file ready for sendVoice; the caller deletes it after sending.
+// (gpt-4o-mini-tts, OPENAI_API_KEY), elevenlabs (eleven_turbo_v2_5, ELEVENLABS_API_KEY), plus every
+// entry in the user-registrable provider table (tts-providers.ts — minimax today).
+// All produce an .ogg/opus file ready for sendVoice; the caller deletes it after sending.
 // Pure helpers + filesystem only — the daemon wires settings, provision notes, and sending.
+//
+// MODES: 'off' · 'all' (speak every reply) · 'manual' (speak only what a gesture asks for — the
+// reply-"tts" trigger). 'manual' must NEVER be folded into the auto-speak gate in daemon.ts, which
+// tests `=== 'all'` on purpose: widening it to `!== 'off'` would speak every reply on his phone.
 import { join } from 'node:path'
 import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { STATE_DIR, tConfig } from './common.ts'
 import { exec } from './proc.ts'
+import { ttsProvider, type TtsProviderId } from './tts-providers.ts'
 
-export type TtsMode = 'off' | 'all'
-export type TtsEngine = 'piper' | 'openai' | 'elevenlabs'
+export type TtsMode = 'off' | 'all' | 'manual'
+export type TtsEngine = 'piper' | 'openai' | 'elevenlabs' | TtsProviderId
 
 const PIPER_DIR = join(STATE_DIR, 'piper')
 const PIPER_BIN = join(PIPER_DIR, 'piper', 'piper')
@@ -113,12 +119,45 @@ export function speakable(text: string, cap = 1500): string {
   return t
 }
 
+// Convert a container Telegram will not accept as a voice note into opus, using the ffmpeg the piper
+// path already provisions. MiniMax returns mp3 (verified against a working implementation, not
+// documentation), and an mp3 posted as a voice message is exactly the "voice_compatible is flaky"
+// symptom — the file was never opus. One step, shared by every provider that returns anything else.
+async function toOpus(src: string, out: string): Promise<void> {
+  const ff = ffmpegBin()
+  if (!ff) throw new Error('ffmpeg missing (needed to convert this provider\'s audio to a voice note)')
+  await exec(ff, ['-y', '-i', src, '-c:a', 'libopus', '-b:a', '32k', '-ac', '1', out], { timeout: 60_000 })
+}
+
+// The manual gesture: a reply whose whole body is "tts" asks for the message it replies to to be
+// spoken. Deliberately narrow — a bare token and nothing else — because this consumes the message
+// instead of delivering it into a session, and a loose match would swallow real prose. Leading and
+// trailing whitespace and a single trailing punctuation mark are tolerated, because phones add them.
+export function isTtsTrigger(text: string): boolean {
+  return /^\s*tts\s*[.!]?\s*$/i.test(text)
+}
+
 // Synthesize `text` to an opus voice file; returns its path (caller unlinks) or throws.
-// `voice` applies to piper (a PIPER_VOICES id; default Lessac).
-export async function synthesize(text: string, engine: TtsEngine, voice?: string): Promise<string> {
-  const t = speakable(text)
+// `voice` applies to piper (a PIPER_VOICES id; default Lessac); a registered provider takes its voice
+// from its own env var. `cap` bounds what is spoken — the auto-speak path keeps speakable's default,
+// while a gesture that names one message renders it whole (the owner's ruling).
+export async function synthesize(text: string, engine: TtsEngine, voice?: string, cap?: number): Promise<string> {
+  const provider = ttsProvider(engine)
+  const t = speakable(text, cap ?? (provider ? provider.maxChars : undefined))
   if (!t) throw new Error('nothing speakable')
   const out = join(tmpdir(), `tg-tts-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.ogg`)
+  // A registered provider (tts-providers.ts): the entry owns the HTTP call and says which container
+  // it produced; normalising to opus happens here so a provider entry never learns about delivery.
+  if (provider) {
+    const key = tConfig(provider.tokenEnv)
+    if (!key) throw new Error(`${provider.tokenEnv} not set`)
+    const audio = await provider.render(t, { key, voice: voice || tConfig(provider.voiceEnv) || provider.defaultVoice })
+    if (audio.format === 'opus') { writeFileSync(out, audio.bytes); return out }
+    const raw = `${out}.${audio.format}`
+    writeFileSync(raw, audio.bytes)
+    try { await toOpus(raw, out) } finally { try { unlinkSync(raw) } catch {} }
+    return out
+  }
   if (engine === 'openai') {
     const key = tConfig('OPENAI_API_KEY')
     if (!key) throw new Error('OPENAI_API_KEY not set')
@@ -147,13 +186,11 @@ export async function synthesize(text: string, engine: TtsEngine, voice?: string
   // piper: text on stdin via a temp file, wav out, then ffmpeg → opus.
   const pv = voice && PIPER_VOICES.some(v => v.id === voice) ? voice : DEFAULT_PIPER_VOICE
   if (!piperReady(pv)) throw new Error(`piper not provisioned (voice ${pv})`)
-  const ff = ffmpegBin()
-  if (!ff) throw new Error('ffmpeg missing')
   const txt = `${out}.txt`, wav = `${out}.wav`
   writeFileSync(txt, t)
   try {
     await exec('bash', ['-c', `'${PIPER_BIN}' --model '${voiceModel(pv)}' --output_file '${wav}' < '${txt}'`], { timeout: 120_000 })
-    await exec(ff, ['-y', '-i', wav, '-c:a', 'libopus', '-b:a', '32k', '-ac', '1', out], { timeout: 60_000 })
+    await toOpus(wav, out)
   } finally {
     try { unlinkSync(txt) } catch {}
     try { unlinkSync(wav) } catch {}

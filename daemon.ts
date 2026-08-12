@@ -220,7 +220,8 @@ import { CODEX_HOME } from './codex-transcript.ts'
 import { currentCodexReadiness } from './codex-health.ts'
 import { TypingPresence } from './typing.ts'
 import { transcribe, transcribeProvider, transcribeStatus } from './voice.ts'
-import { synthesize, provisionPiper, piperReady, engineStatus, PIPER_VOICES, DEFAULT_PIPER_VOICE, type TtsEngine } from './voice-out.ts'
+import { synthesize, provisionPiper, piperReady, engineStatus, speakable, isTtsTrigger, PIPER_VOICES, DEFAULT_PIPER_VOICE, type TtsEngine, type TtsMode } from './voice-out.ts'
+import { TTS_PROVIDERS, ttsProvider } from './tts-providers.ts'
 import { parseDuration, formatDuration, fmtWhen, splitLeadingDuration, nextRecurrence, recurrenceLabel, parseCron, nextCron, type Recurrence } from './time.ts'
 import {
   initScheduler, loadScheduledMsgs, cancelScheduled, addScheduled, scheduledCount, listScheduled,
@@ -1588,6 +1589,40 @@ async function sendAgentText(chats: string[], text: string, threadId?: number, r
   if (access.tts?.mode === 'all') void sendTtsVoice(text, chats.map(chat => ({ chat, thread: threadId })))
   return sentIds
 }
+
+// The reply-"tts" gesture. Telegram hands the replied-to message over in full (reply_to_message is a
+// whole Message), so this works on EITHER author's messages at ANY age with no store of our own —
+// which is why the gesture is a reply rather than a reaction: a reaction update carries no text, and
+// nothing here maps a message id back to one.
+//
+// Unlike the automatic path this is NOT fire-and-forget: he pressed something and is waiting, so a
+// failure answers in the chat. The whole message is rendered — no 1500-char clamp — because he named
+// exactly one message; Telegram's own 4096 ceiling is the bound (the owner's ruling).
+async function speakRepliedMessage(ctx: Context, chatId: string, msgId?: number): Promise<void> {
+  const src = ctx.message?.reply_to_message
+  const text = (src && 'text' in src ? src.text : undefined) ?? (src && 'caption' in src ? src.caption : undefined) ?? ''
+  if (!src) { await ctx.reply('Reply "tts" to a message and I\'ll speak that message.').catch(() => {}); return }
+  if (!text.trim()) { await ctx.reply('That message has no text to speak.').catch(() => {}); return }
+  const tts = loadAccess().tts
+  if (!tts?.mode || tts.mode === 'off') {
+    await ctx.reply('🔇 Voice replies are off — turn them on in /settings → 🔊 Voice replies (pick <b>manual</b> to keep it gesture-only).', { parse_mode: 'HTML' }).catch(() => {})
+    return
+  }
+  if (msgId != null) void channel.react({ chatId, messageId: String(msgId) }, REACTIONS.received).catch(() => {})
+  const engine = tts.engine ?? 'piper'
+  try {
+    const file = await synthesize(text, engine, tts.voice, MANUAL_TTS_CAP)
+    await channel.sendFile(chatId, file, { kind: 'voice', ...(msgId ? { replyTo: String(msgId) } : {}) })
+    try { unlinkSync(file) } catch {}
+  } catch (e) {
+    const why = e instanceof Error ? e.message : String(e)
+    process.stderr.write(`daemon: manual tts (${engine}) failed: ${why}\n`)
+    await ctx.reply(`🔇 Couldn't speak that — ${escapeHtml(why.slice(0, 300))}`, { parse_mode: 'HTML' }).catch(() => {})
+  }
+}
+// Telegram caps a text message at 4096 characters, so a single message can never exceed it — this is
+// the natural bound the owner chose over a truncation notice, and it is stated rather than implied.
+const MANUAL_TTS_CAP = 4096
 
 // Voice replies (ROADMAP #15): speak `text` and drop the voice note after the text message.
 // Fire-and-forget — synthesis failures log and never block the text path. Zero Claude usage:
@@ -12526,12 +12561,15 @@ async function applySetting(key: string, value: unknown, opts: { userId?: string
     case 'ttsMode': case 'ttsEngine': case 'ttsVoice': {
       const tts = { mode: a.tts?.mode ?? 'off', engine: a.tts?.engine ?? 'piper', ...(a.tts?.voice ? { voice: a.tts.voice } : {}) } as NonNullable<Access['tts']>
       if (key === 'ttsMode') {
-        const v = oneOf(value, ['off', 'all'])
-        if (!v) return 'unknown voice mode — one of: off | all'
-        tts.mode = v as 'off' | 'all'
+        // 'manual' = armed but silent until a gesture asks. The auto-speak gate stays `=== 'all'`.
+        const v = oneOf(value, ['off', 'all', 'manual'])
+        if (!v) return 'unknown voice mode — one of: off | all | manual'
+        tts.mode = v as TtsMode
       } else if (key === 'ttsEngine') {
-        const v = oneOf(value, ['piper', 'openai', 'elevenlabs'])
-        if (!v) return 'unknown engine — one of: piper | openai | elevenlabs'
+        // The registered providers come from the TABLE, so a new entry appears here with no edit.
+        const engines = ['piper', 'openai', 'elevenlabs', ...TTS_PROVIDERS.map(p => p.id)]
+        const v = oneOf(value, engines)
+        if (!v) return `unknown engine — one of: ${engines.join(' | ')}`
         tts.engine = v as TtsEngine
       } else {
         const v = oneOf(value, PIPER_VOICES.map(p => p.id))
@@ -17296,6 +17334,14 @@ async function handleInbound(
   // Force-reply prompts sit ahead of all three, in bot.on('message:text'), and step 1 is why they
   // stand aside for a verb (chatVerbIn there): answering a folder prompt with `@launch x do y` is
   // not a folder name.
+  // The manual voice gesture, AHEAD of every routing decision below: a reply of "tts" is about the
+  // message it points at, not a message for whatever session that card belongs to. It CONSUMES the
+  // reply (returns) — falling through would type "tts" into a live pane, which is the exact class of
+  // bug the force-reply switch shipped on 2026-08-13.
+  if (ctx.chat?.type === 'private' && isTtsTrigger(content)) {
+    await speakRepliedMessage(ctx, chat_id, msgId)
+    return
+  }
   if (ctx.chat?.type === 'private') {
     const lane = getDmChatSession(chat_id)
     if (lane) {
