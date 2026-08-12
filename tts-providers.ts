@@ -26,6 +26,10 @@ export type TtsAudio = { bytes: Uint8Array; format: 'opus' | 'mp3' }
 
 export type TtsProviderId = 'minimax'
 
+// One selectable voice, as a picker needs it: the id the API takes, a human label, and the group it
+// files under (minimax's ids are language-prefixed, and 332 rows have to be grouped by something).
+export type VoiceChoice = { id: string; label: string; group?: string; description?: string }
+
 export type TtsProvider = {
   id: TtsProviderId
   label: string
@@ -34,6 +38,15 @@ export type TtsProvider = {
   defaultVoice: string
   maxChars: number          // the provider's own documented per-request ceiling
   render(text: string, cfg: { key: string; voice: string; fetchImpl?: typeof fetch }): Promise<TtsAudio>
+  // OPTIONAL, and the optionality is the design: piper has a fixed five, openai a fixed enum,
+  // minimax a live endpoint, elevenlabs a keyed one nobody here has a key for. A provider that
+  // cannot enumerate simply omits this and the panel offers typed ids instead — no special case.
+  //
+  // WHAT IT IS NOT: authoritative. Measured 2026-08-13 — minimax's list holds 332 voices and omits
+  // BOTH ids this box has actually rendered with (`podcast_host`, `English_Insightful_Speaker`).
+  // So a picker may never treat "not in the list" as "not a voice", and the typed-id path is a
+  // primary route rather than an escape hatch.
+  listVoices?(cfg: { key: string; fetchImpl?: typeof fetch }): Promise<VoiceChoice[]>
 }
 
 // MiniMax `t2a_v2`. Every field below is read off a working implementation on this box
@@ -71,6 +84,50 @@ const MINIMAX: TtsProvider = {
     const hex = body.data?.audio
     if (!hex) throw new Error('minimax tts returned no audio')
     return { bytes: hexToBytes(hex), format: 'mp3' }
+  },
+  // POST /v1/get_voice, same bearer key (~1s, 332 rows). `voice_name` is a human label the ids do
+  // not carry ("Expressive Narrator" for `English_expressive_narrator`), and the id's own language
+  // prefix is the only grouping key the payload offers.
+  async listVoices(cfg) {
+    const doFetch = cfg.fetchImpl ?? fetch
+    const res = await doFetch('https://api.minimax.io/v1/get_voice', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${cfg.key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ voice_type: 'all' }),
+    })
+    if (!res.ok) throw new Error(`minimax voices ${res.status}: ${(await res.text()).slice(0, 200)}`)
+    const body = await res.json() as {
+      base_resp?: { status_code?: number; status_msg?: string }
+      system_voice?: Array<{ voice_id?: string; voice_name?: string; description?: unknown }>
+    }
+    // Same envelope trap as render: a 200 can carry the failure.
+    if (body.base_resp?.status_code !== 0) throw new Error(`minimax voices error ${body.base_resp?.status_code ?? '?'}: ${body.base_resp?.status_msg ?? 'unknown'}`)
+    const rows = (body.system_voice ?? [])
+      .filter((v): v is { voice_id: string; voice_name?: string; description?: unknown } => !!v.voice_id)
+    // GROUPING IS EARNED, NOT ASSUMED. `English_expressive_narrator` → English, but the prefix is
+    // just "text before an underscore" and plenty of ids are not languages at all: measured on the
+    // live 332, a bare prefix rule invents 27 groups including `Arrogant`, `Robot` and `podcast`,
+    // and splits Greek from greek. So a prefix becomes a group only when at least two voices share
+    // it (case-insensitively), and everything else files under Other — which stays reachable,
+    // because the picker also offers All languages and a typed id.
+    const norm = (id: string): string | undefined => /^([A-Za-z]+)_/.exec(id)?.[1]?.toLowerCase()
+    const counts = new Map<string, number>()
+    for (const v of rows) { const p = norm(v.voice_id); if (p) counts.set(p, (counts.get(p) ?? 0) + 1) }
+    const pretty = new Map<string, string>()   // first-seen capitalisation wins the label
+    for (const v of rows) {
+      const p = norm(v.voice_id)
+      const raw = /^([A-Za-z]+)_/.exec(v.voice_id)?.[1]
+      if (p && raw && !pretty.has(p)) pretty.set(p, raw[0]!.toUpperCase() + raw.slice(1))
+    }
+    return rows.map(v => {
+      const p = norm(v.voice_id)
+      return {
+        id: v.voice_id,
+        label: v.voice_name || v.voice_id,
+        group: p && (counts.get(p) ?? 0) >= 2 ? pretty.get(p)! : 'Other',
+        description: Array.isArray(v.description) ? String(v.description[0] ?? '') : typeof v.description === 'string' ? v.description : undefined,
+      }
+    })
   },
 }
 

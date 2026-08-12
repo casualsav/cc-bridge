@@ -178,3 +178,74 @@ test('the refusal log names the message SHAPE and never its content', () => {
   expect(messageShape({ text: 'a private sentence' })).not.toContain('private')
   expect(messageShape({})).toBe('none')
 })
+
+// ---- the voice field: four mechanisms become one -------------------------------------------------
+//
+// Before this unit `access.tts.voice` was consulted for PIPER ONLY, elevenlabs read
+// TELEGRAM_TTS_VOICE, openai hardcoded 'alloy' with no override at all, and a registered provider
+// read its own env var. So the picker showed piper's five voices whatever engine was selected, and
+// switching engines silently changed which mechanism was in charge.
+import { resolveVoice, engineVoices, OPENAI_VOICES, DEFAULT_PIPER_VOICE } from './voice-out.ts'
+
+test('the per-engine setting wins, and each engine keeps its OWN voice', () => {
+  const tts = { voices: { piper: 'en_US-ryan-high', minimax: 'podcast_host', openai: 'sage', elevenlabs: 'XYZ' } }
+  expect(resolveVoice('piper', tts)).toBe('en_US-ryan-high')
+  expect(resolveVoice('minimax', tts)).toBe('podcast_host')
+  expect(resolveVoice('openai', tts)).toBe('sage')
+  expect(resolveVoice('elevenlabs', tts)).toBe('XYZ')
+})
+
+test('the LEGACY single field is read for piper alone', () => {
+  // It only ever meant piper. Reading it for every engine would hand minimax an
+  // `en_US-lessac-medium` on the first upgrade — a voice id that provider has never heard of.
+  const legacy = { voice: 'en_US-amy-medium' }
+  expect(resolveVoice('piper', legacy)).toBe('en_US-amy-medium')
+  expect(resolveVoice('minimax', legacy)).not.toBe('en_US-amy-medium')
+  expect(resolveVoice('openai', legacy)).not.toBe('en_US-amy-medium')
+  expect(resolveVoice('elevenlabs', legacy)).not.toBe('en_US-amy-medium')
+})
+
+test('with nothing set, every engine still resolves to a voice it can actually speak', () => {
+  expect(resolveVoice('piper', {})).toBe(DEFAULT_PIPER_VOICE)
+  expect(resolveVoice('openai', {})).toBe('alloy')
+  expect(OPENAI_VOICES.map(v => v.id)).toContain('alloy')
+  // minimax falls to its env var, or the table's default when unset — both are real voice ids.
+  expect(resolveVoice('minimax', {}).length).toBeGreaterThan(0)
+  expect(resolveVoice('elevenlabs', {}).length).toBeGreaterThan(0)
+})
+
+test('a per-engine pick does not leak across engines', () => {
+  // The control for the defect this replaces: setting one engine's voice must leave the others
+  // exactly where they were.
+  const only = { voices: { minimax: 'podcast_host' } }
+  expect(resolveVoice('minimax', only)).toBe('podcast_host')
+  expect(resolveVoice('piper', only)).toBe(DEFAULT_PIPER_VOICE)
+  expect(resolveVoice('openai', only)).toBe('alloy')
+})
+
+test('engineVoices enumerates what it can and says null for what it cannot', async () => {
+  expect((await engineVoices('piper'))!.length).toBe(5)
+  expect((await engineVoices('openai'))!.map(v => v.id)).toContain('shimmer')
+  // elevenlabs has no listVoices on the seam — null means "typing an id is the only way in", which
+  // is what the panel renders instead of an empty browser.
+  expect(await engineVoices('elevenlabs')).toBeNull()
+})
+
+test('minimax parses its list into grouped choices, and a 200-with-error is still an error', async () => {
+  const ok = stubFetch({ body: { base_resp: { status_code: 0 }, system_voice: [
+    { voice_id: 'English_expressive_narrator', voice_name: 'Expressive Narrator', description: ['A voice'] },
+    { voice_id: 'english_second_one' },                 // same language, different capitalisation
+    { voice_id: 'Spanish_Narrator', voice_name: 'Narrador' },
+    { voice_id: 'podcast_host' },                       // a prefix that is NOT a language
+    { voice_name: 'no id at all' },                     // must be dropped
+  ] } })
+  const got = await minimax.listVoices!({ key: 'K', fetchImpl: ok.impl })
+  expect(got.map(v => v.id)).toEqual(['English_expressive_narrator', 'english_second_one', 'Spanish_Narrator', 'podcast_host'])
+  // A prefix is a group only when >=2 voices share it, case-insensitively. Measured on the live 332,
+  // the naive rule invents `Arrogant`, `Robot` and `podcast` as languages and splits Greek/greek.
+  expect(got.map(v => v.group)).toEqual(['English', 'English', 'Other', 'Other'])
+  expect(got[0]!.label).toBe('Expressive Narrator')
+  expect(got[3]!.label).toBe('podcast_host')            // falls back to the id rather than blank
+  const bad = stubFetch({ body: { base_resp: { status_code: 1004, status_msg: 'insufficient balance' } } })
+  await expect(minimax.listVoices!({ key: 'K', fetchImpl: bad.impl })).rejects.toThrow(/1004/)
+})

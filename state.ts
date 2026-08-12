@@ -81,6 +81,7 @@ export type ReplyTarget =
   | { kind: 'acctname'; thread?: number }                        // name for a new Claude account (settings → Accounts → ➕)
   | { kind: 'newsession'; anchor?: boolean }                     // folder for /new in General (spawn → own topic; anchor → becomes the General base session)
   | { kind: 'ttskey'; engine: TtsEngine; env: string; label: string }   // API key for a hosted TTS engine (settings → 🔊 Voice replies); env/label carried so a registered provider needs no branch here
+  | { kind: 'ttsvoice'; engine: TtsEngine }                      // a typed voice id (settings → 🔊 → ✏️); validated by a real render before it is kept
   | { kind: 'stucktext'; paneId: string }                        // raw text typed into a wedged pane (stuck-screen dump)
   | { kind: 'budget'; panelMsgId?: number }                      // daily $ cap (or 'off') from the /budget panel's set button
   | { kind: 'basedir'; panelMsgId?: number }                     // folder for /base's set button (settings → 📂 Base folder)

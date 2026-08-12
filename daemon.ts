@@ -221,8 +221,8 @@ import { CODEX_HOME } from './codex-transcript.ts'
 import { currentCodexReadiness } from './codex-health.ts'
 import { TypingPresence } from './typing.ts'
 import { transcribe, transcribeProvider, transcribeStatus } from './voice.ts'
-import { synthesize, provisionPiper, piperReady, engineStatus, speakable, isTtsTrigger, PIPER_VOICES, DEFAULT_PIPER_VOICE, type TtsEngine, type TtsMode } from './voice-out.ts'
-import { TTS_PROVIDERS, ttsProvider } from './tts-providers.ts'
+import { synthesize, provisionPiper, piperReady, engineStatus, speakable, isTtsTrigger, resolveVoice, engineVoices, OPENAI_VOICES, PIPER_VOICES, DEFAULT_PIPER_VOICE, type TtsEngine, type TtsMode } from './voice-out.ts'
+import { TTS_PROVIDERS, ttsProvider, type VoiceChoice } from './tts-providers.ts'
 import { parseDuration, formatDuration, fmtWhen, splitLeadingDuration, nextRecurrence, recurrenceLabel, parseCron, nextCron, type Recurrence } from './time.ts'
 import {
   initScheduler, loadScheduledMsgs, cancelScheduled, addScheduled, scheduledCount, listScheduled,
@@ -1620,7 +1620,7 @@ async function speakRepliedMessage(ctx: Context, chatId: string, msgId?: number)
   if (msgId != null) void channel.react({ chatId, messageId: String(msgId) }, REACTIONS.received).catch(() => {})
   const engine = tts.engine ?? 'piper'
   try {
-    const file = await synthesize(text, engine, tts.voice, MANUAL_TTS_CAP)
+    const file = await synthesize(text, engine, resolveVoice(engine, tts), MANUAL_TTS_CAP)
     await channel.sendFile(chatId, file, { kind: 'voice', ...(msgId ? { replyTo: String(msgId) } : {}) })
     try { unlinkSync(file) } catch {}
   } catch (e) {
@@ -1640,7 +1640,7 @@ async function sendTtsVoice(text: string, targets: Array<{ chat: string; thread?
   const tts = loadAccess().tts
   const engine = tts?.engine ?? 'piper'
   try {
-    const file = await synthesize(text, engine, tts?.voice)
+    const file = await synthesize(text, engine, resolveVoice(engine, tts))
     for (const { chat, thread } of targets) {
       await channel.sendFile(String(chat), file, { kind: 'voice', silent: true, ...(thread ? { threadId: String(thread) } : {}) })
         .catch(e => process.stderr.write(`daemon: tts send failed: ${e}\n`))
@@ -12568,7 +12568,7 @@ async function applySetting(key: string, value: unknown, opts: { userId?: string
     }
     // ---- voice replies (TTS). Three keys, one stored object. ----
     case 'ttsMode': case 'ttsEngine': case 'ttsVoice': {
-      const tts = { mode: a.tts?.mode ?? 'off', engine: a.tts?.engine ?? 'piper', ...(a.tts?.voice ? { voice: a.tts.voice } : {}) } as NonNullable<Access['tts']>
+      const tts = { mode: a.tts?.mode ?? 'off', engine: a.tts?.engine ?? 'piper', ...(a.tts?.voice ? { voice: a.tts.voice } : {}), ...(a.tts?.voices ? { voices: a.tts.voices } : {}) } as NonNullable<Access['tts']>
       if (key === 'ttsMode') {
         // 'manual' = armed but silent until a gesture asks. The auto-speak gate stays `=== 'all'`.
         const v = oneOf(value, ['off', 'all', 'manual'])
@@ -12581,15 +12581,20 @@ async function applySetting(key: string, value: unknown, opts: { userId?: string
         if (!v) return `unknown engine — one of: ${engines.join(' | ')}`
         tts.engine = v as TtsEngine
       } else {
-        const v = oneOf(value, PIPER_VOICES.map(p => p.id))
-        if (!v) return 'unknown voice'
-        tts.voice = v
+        // PER-ENGINE now (the four-mechanism unification): the value is validated against the
+        // SELECTED engine's catalog, and an engine that cannot enumerate its voices accepts any
+        // non-blank id — the provider's own list is not authoritative, so refusing an unlisted id
+        // here would refuse voices that demonstrably work.
+        const cat = await engineVoices(tts.engine).catch(() => null)
+        const v = cat ? oneOf(value, cat.map(c => c.id)) : String(value ?? '').trim()
+        if (!v) return cat ? `unknown voice for ${tts.engine}` : 'a voice id cannot be blank'
+        tts.voices = { ...tts.voices, [tts.engine]: v }
       }
       a.tts = tts; saveAccess(a)
       // Piper installs on demand; a hosted engine needs its key, which only a chat can collect.
-      if (tts.mode !== 'off' && tts.engine === 'piper' && !piperReady(tts.voice)) {
+      if (tts.mode !== 'off' && tts.engine === 'piper' && !piperReady(resolveVoice('piper', tts))) {
         opts.notify?.('⏳ Installing the Piper voice engine…')
-        void provisionPiper(tts.voice).then(
+        void provisionPiper(resolveVoice('piper', tts)).then(
           () => opts.notify?.('✅ Piper ready — replies will speak.'),
           e => opts.notify?.(`⚠️ Piper install failed: ${String(e).slice(0, 150)}`),
         )
@@ -12822,9 +12827,12 @@ function gatewayAddPanelKeyboard(): InlineKeyboard {
 function ttsText(): string {
   const t = loadAccess().tts
   const mode = t?.mode ?? 'off', eng = t?.engine ?? 'piper'
-  const st = engineStatus(eng, t?.voice)
-  const voiceLabel = PIPER_VOICES.find(v => v.id === (t?.voice ?? DEFAULT_PIPER_VOICE))?.label ?? t?.voice
-  return `🔊 <b>Voice replies</b> — mode <b>${mode}</b> · engine <b>${eng}</b>${eng === 'piper' ? ` · 🗣 <b>${escapeHtml(voiceLabel ?? '')}</b>` : ''} (${st.ready ? '✅ ready' : `needs ${escapeHtml(st.missing)}`})\n\n` +
+  const st = engineStatus(eng, resolveVoice(eng, t))
+  // The voice line is now the RESOLVED one for the selected engine, whatever supplied it — the old
+  // line looked piper's label up whatever engine was on, so a minimax box read "🗣 Lessac".
+  const voiceId = resolveVoice(eng, t)
+  const voiceLabel = PIPER_VOICES.find(v => v.id === voiceId)?.label ?? voiceId
+  return `🔊 <b>Voice replies</b> — mode <b>${mode}</b> · engine <b>${eng}</b> · 🗣 <b>${escapeHtml(voiceLabel)}</b> (${st.ready ? '✅ ready' : `needs ${escapeHtml(st.missing)}`})\n\n` +
     `💬 <b>All</b> — every reply arrives as a voice note after the text.\n` +
     `✋ <b>Manual</b> — nothing speaks on its own; reply <code>tts</code> to any message and I speak that one.\n` +
     `Zero extra Claude usage either way — it speaks text already written.\n\n` +
@@ -12846,13 +12854,142 @@ function ttsKeyboard(): InlineKeyboard {
     TTS_PROVIDERS.forEach(p => kb.text(e(`☁️ ${p.label}`, p.id), `tts:eng:${p.id}`))
     kb.row()
   }
-  if (eng === 'piper') {
-    const cur = t?.voice ?? DEFAULT_PIPER_VOICE
-    PIPER_VOICES.forEach((v, i) => { kb.text(v.id === cur ? `● ${v.label}` : v.label, `tts:pv:${i}`); if (i === 2) kb.row() })
-    kb.row()
-  }
+  // Browse and type are CO-EQUAL, side by side, and that is a measured decision rather than a
+  // layout preference: minimax's own list omits both voice ids this box has actually rendered with,
+  // so "type one in" is a primary route to a working voice, not a fallback for experts.
+  kb.text('🗣 Browse voices', 'ttsv:list:0').text('✏️ Type a voice id', 'ttsv:custom').row()
   kb.text('‹ Back', 'tts:back')
   return kb
+}
+
+// ---- the voice picker -----------------------------------------------------------------------
+//
+// One fixed sentence for every audition, so what changes between two taps is the VOICE and nothing
+// else. Short on purpose: it is rendered on every tap and the user is waiting.
+const VOICE_SAMPLE = 'Hello — this is how I will read your messages.'
+const VOICE_PAGE = 6
+
+// A provider's list is a network call (~1s for minimax's 332), and the picker pages through it. One
+// cached copy per engine, refreshed when the panel is opened at page 0.
+const voiceCache = new Map<string, { at: number; voices: VoiceChoice[] }>()
+async function voicesFor(engine: TtsEngine, refresh: boolean): Promise<VoiceChoice[] | null> {
+  const hit = voiceCache.get(engine)
+  if (hit && !refresh) return hit.voices
+  const voices = await engineVoices(engine)
+  if (voices) voiceCache.set(engine, { at: Date.now(), voices })
+  return voices
+}
+
+// Plain words for a non-technical reader. The provider's own message is kept only where it IS plain
+// ("voice id not exist"); everything else is translated, because the acceptance bar is that a
+// failure never arrives as a raw API error.
+function friendlyTtsError(e: unknown, engine: TtsEngine): string {
+  const raw = e instanceof Error ? e.message : String(e)
+  if (/not set$/.test(raw)) return `That engine needs its API key first — tap ${engineStatus(engine).missing} in the panel to add it.`
+  if (/voice id not exist|invalid voice/i.test(raw)) return 'That voice id does not exist. Check the spelling — ids are case-sensitive, and some carry a language prefix like <code>English_</code>.'
+  if (/\b401\b|unauthor|invalid api key/i.test(raw)) return 'The API key was rejected. Add it again in the panel and check it was pasted whole.'
+  if (/insufficient balance|quota|\b429\b/i.test(raw)) return 'That provider says the account is out of credit or rate-limited. Nothing is wrong with your settings.'
+  if (/piper not provisioned/.test(raw)) return 'The local voice engine is still installing — try again in a minute.'
+  if (/timed out|ETIMEDOUT|ENOTFOUND|fetch failed/i.test(raw)) return 'Could not reach that provider just now. Try again in a moment.'
+  return `That did not work: ${escapeHtml(raw.slice(0, 160))}`
+}
+
+// Can this engine's voices be listed WITHOUT a network call? Only those can be a Mini App dropdown;
+// a live list belongs in the Telegram picker, where it can be paged and auditioned.
+const ttsEngineIsEnumerable = (engine: string): boolean => engine === 'piper' || engine === 'openai'
+const staticVoiceIds = (engine: TtsEngine): string[] =>
+  engine === 'openai' ? OPENAI_VOICES.map(v => v.id) : PIPER_VOICES.map(v => v.id)
+
+// Which language group the picker is showing, per chat. Not persisted: it is a position in a
+// browse, not a preference.
+const voiceGroup = new Map<string, string>()
+
+// The rows the picker is currently paging through: the engine's voices, narrowed to the chosen
+// group. Index positions in THIS array are what the callbacks carry.
+function visibleVoices(all: VoiceChoice[], chat: string): VoiceChoice[] {
+  const g = voiceGroup.get(chat)
+  return g ? all.filter(v => (v.group ?? 'Other') === g) : all
+}
+
+async function showVoicePicker(ctx: Context, chat: string, page: number, refresh = false): Promise<void> {
+  const t = loadAccess().tts
+  const engine = (t?.engine ?? 'piper') as TtsEngine
+  const current = resolveVoice(engine, t)
+  let all: VoiceChoice[] | null
+  try { all = await voicesFor(engine, refresh) }
+  catch (e) {
+    await showHtmlPanel(ctx, 'edit', `🗣 <b>Voices</b> — ${engine}\n\n${friendlyTtsError(e, engine)}`,
+      new InlineKeyboard().text('✏️ Type a voice id', 'ttsv:custom').row().text('‹ Back', 'ttsv:back'))
+    return
+  }
+  // No list for this engine (elevenlabs today) — typing an id is the ONLY way, and the panel says so
+  // plainly instead of showing an empty browser.
+  if (!all) {
+    await showHtmlPanel(ctx, 'edit',
+      `🗣 <b>Voices</b> — ${engine}\n\nThis engine can't list its voices, so pick one on the provider's site and type its id here.\n\nNow using: <code>${escapeHtml(current)}</code>`,
+      new InlineKeyboard().text('✏️ Type a voice id', 'ttsv:custom').row().text('‹ Back', 'ttsv:back'))
+    return
+  }
+  const rows = visibleVoices(all, chat)
+  const pages = Math.max(1, Math.ceil(rows.length / VOICE_PAGE))
+  const p = Math.min(Math.max(0, page), pages - 1)
+  const slice = rows.slice(p * VOICE_PAGE, p * VOICE_PAGE + VOICE_PAGE)
+  const groups = [...new Set(all.map(v => v.group ?? 'Other'))]
+  const g = voiceGroup.get(chat)
+
+  const kb = new InlineKeyboard()
+  slice.forEach((v, i) => {
+    const idx = p * VOICE_PAGE + i
+    kb.text(v.id === current ? `● ${v.label}` : v.label, `ttsv:v:${idx}`)
+    if (i % 2 === 1) kb.row()
+  })
+  if (slice.length % 2 === 1) kb.row()
+  if (pages > 1) {
+    kb.text(p > 0 ? '‹ Prev' : ' ', p > 0 ? `ttsv:list:${p - 1}` : 'ttsv:noop')
+      .text(`${p + 1}/${pages}`, 'ttsv:noop')
+      .text(p < pages - 1 ? 'Next ›' : ' ', p < pages - 1 ? `ttsv:list:${p + 1}` : 'ttsv:noop').row()
+  }
+  if (groups.length > 1) kb.text(g ? `🌐 ${g} ▾` : '🌐 All languages ▾', 'ttsv:grp').row()
+  kb.text('✏️ Type a voice id', 'ttsv:custom').row().text('‹ Back', 'ttsv:back')
+
+  await showHtmlPanel(ctx, 'edit',
+    `🗣 <b>Voices</b> — ${engine}${g ? ` · ${escapeHtml(g)}` : ''}\n\n` +
+    `Tap a voice to <b>hear it</b> — I'll send a sample, then offer to make it your default.\n\n` +
+    `Now using: <code>${escapeHtml(current)}</code>\n` +
+    `<i>${rows.length} voice${rows.length === 1 ? '' : 's'}${groups.length > 1 && !g ? ` across ${groups.length} languages` : ''}. Not listed? Type its id — the list is not the full set.</i>`, kb)
+}
+
+// Audition: render the fixed sample in ONE voice and send it as a voice bubble, then offer to keep
+// it. The render is the validation too — a voice that cannot speak never becomes a default.
+async function auditionVoice(ctx: Context, chat: string, id: string, label: string, thread?: number): Promise<void> {
+  const t = loadAccess().tts
+  const engine = (t?.engine ?? 'piper') as TtsEngine
+  try {
+    if (engine === 'piper' && !piperReady(id)) {
+      await channel.sendText(chat, '⏳ Installing that voice first — this takes a minute.', { plain: true, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
+      await provisionPiper(id)
+    }
+    const file = await synthesize(VOICE_SAMPLE, engine, id, 4096)
+    await channel.sendFile(chat, file, { kind: 'voice', ...(thread ? { threadId: String(thread) } : {}) })
+    try { unlinkSync(file) } catch {}
+    await showHtmlPanel(ctx, 'edit',
+      `🗣 <b>${escapeHtml(label)}</b>\n<code>${escapeHtml(id)}</code>\n\nThat's how it sounds. Keep it?`,
+      new InlineKeyboard().text('✅ Use this voice', `ttsv:use:${encodeURIComponent(id)}`).row().text('‹ Back to voices', 'ttsv:list:0'))
+  } catch (e) {
+    process.stderr.write(`daemon: voice audition (${engine}/${id}) failed: ${e}\n`)
+    await showHtmlPanel(ctx, 'edit', `🗣 <b>${escapeHtml(label)}</b>\n\n${friendlyTtsError(e, engine)}`,
+      new InlineKeyboard().text('‹ Back to voices', 'ttsv:list:0'))
+  }
+}
+
+// Write the voice for the SELECTED engine. Per-engine by construction — this is the field that
+// replaced the four mechanisms, and nothing here can write another engine's slot.
+function setEngineVoice(engine: TtsEngine, id: string): void {
+  const a = loadAccess()
+  const tts = { mode: a.tts?.mode ?? 'off', engine: a.tts?.engine ?? 'piper', ...(a.tts?.voice ? { voice: a.tts.voice } : {}), voices: { ...a.tts?.voices } } as NonNullable<Access['tts']>
+  tts.voices![engine] = id
+  a.tts = tts
+  saveAccess(a)
 }
 bot.command('settings', async ctx => {
   if (!dmCommandGate(ctx)) return
@@ -15222,6 +15359,62 @@ bot.on('callback_query:data', async ctx => {
       if (sent) replyTargets.set(refKey(sent), { kind: 'ttskey', engine: tts.engine, ...keyed })
     }
     await showHtmlPanel(ctx, 'edit', ttsText(), ttsKeyboard())
+    return
+  }
+
+  // ---- the voice picker: browse, audition, keep, or type an id ----
+  const ttsvMatch = /^ttsv:(?:list:(\d+)|v:(\d+)|use:(.+)|(grp)|g:(\d+)|(custom)|(back)|(noop))$/.exec(data)
+  if (ttsvMatch) {
+    if (!(await cbAuth(ctx))) return
+    await ctx.answerCallbackQuery().catch(() => {})
+    const chat = String(ctx.chat!.id)
+    const thread = ctx.callbackQuery.message?.message_thread_id
+    if (ttsvMatch[8]) return                                   // noop: a spacer button
+    if (ttsvMatch[7]) { await showHtmlPanel(ctx, 'edit', ttsText(), ttsKeyboard()); return }
+    const t = loadAccess().tts
+    const engine = (t?.engine ?? 'piper') as TtsEngine
+
+    if (ttsvMatch[6]) {                                        // ✏️ type a voice id
+      const sent = await channel.sendText(chat,
+        `✏️ Reply with the voice id for <b>${escapeHtml(engine)}</b>. I'll speak a sample back so you can hear it before it's kept.`,
+        { ...(thread ? { threadId: String(thread) } : {}), forceReply: { placeholder: 'voice id' } }).catch(() => null)
+      if (sent) replyTargets.set(refKey(sent), { kind: 'ttsvoice', engine })
+      return
+    }
+    if (ttsvMatch[4]) {                                        // 🌐 language chooser
+      const all = await voicesFor(engine, false).catch(() => null)
+      const groups = [...new Set((all ?? []).map(v => v.group ?? 'Other'))]
+      const kb = new InlineKeyboard()
+      kb.text('All languages', 'ttsv:g:-1').row()
+      groups.forEach((g, i) => { kb.text(g, `ttsv:g:${i}`); if (i % 3 === 2) kb.row() })
+      kb.row().text('‹ Back to voices', 'ttsv:list:0')
+      await showHtmlPanel(ctx, 'edit', `🌐 <b>Language</b>\n\nNarrow the list — ${groups.length} to choose from.`, kb)
+      return
+    }
+    if (ttsvMatch[5] !== undefined) {                          // a language picked
+      const all = await voicesFor(engine, false).catch(() => null)
+      const groups = [...new Set((all ?? []).map(v => v.group ?? 'Other'))]
+      const pick = Number(ttsvMatch[5])
+      if (pick < 0 || !groups[pick]) voiceGroup.delete(chat); else voiceGroup.set(chat, groups[pick]!)
+      await showVoicePicker(ctx, chat, 0)
+      return
+    }
+    if (ttsvMatch[2] !== undefined) {                          // a voice tapped → audition it
+      const all = await voicesFor(engine, false).catch(() => null)
+      const v = all ? visibleVoices(all, chat)[Number(ttsvMatch[2])] : undefined
+      if (!v) { await showVoicePicker(ctx, chat, 0, true); return }   // list moved under them
+      await auditionVoice(ctx, chat, v.id, v.label, thread)
+      return
+    }
+    if (ttsvMatch[3]) {                                        // ✅ keep it
+      const id = decodeURIComponent(ttsvMatch[3])
+      setEngineVoice(engine, id)
+      await showHtmlPanel(ctx, 'edit', ttsText(), ttsKeyboard())
+      await channel.sendText(chat, `✅ Voice set — <b>${escapeHtml(engine)}</b> will speak as <code>${escapeHtml(id)}</code>.`,
+        { ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
+      return
+    }
+    await showVoicePicker(ctx, chat, Number(ttsvMatch[1] ?? 0), Number(ttsvMatch[1] ?? 0) === 0)
     return
   }
 
@@ -18691,6 +18884,35 @@ bot.on('message:text', async ctx => {
           await ctx.reply(`🔑 ${target.label} key saved — voice replies are ready.`)
           return
         }
+        // A typed voice id (🔊 → ✏️). VALIDATED BY A REAL RENDER, which doubles as the audition —
+        // the provider's list is not authoritative, so "is this a voice?" can only be answered by
+        // asking it to speak. A rejection re-arms the prompt in plain words rather than stranding
+        // the flow, and nothing is written until the render succeeds.
+        case 'ttsvoice': {
+          const id = text.trim()
+          const chat = String(ctx.chat!.id)
+          if (!id || /\s/.test(id)) {
+            const again = await ctx.reply('A voice id is a single word with no spaces. Try again.',
+              { reply_markup: { force_reply: true, input_field_placeholder: 'voice id' } }).catch(() => null)
+            if (again) replyTargets.set(`${ctx.chat?.id}:${again.message_id}`, target)
+            return
+          }
+          await ctx.reply('🎧 Trying that voice…').catch(() => {})
+          try {
+            if (target.engine === 'piper' && !piperReady(id)) await provisionPiper(id)
+            const file = await synthesize(VOICE_SAMPLE, target.engine, id, 4096)
+            await channel.sendFile(chat, file, { kind: 'voice' })
+            try { unlinkSync(file) } catch {}
+            setEngineVoice(target.engine, id)
+            await ctx.reply(`✅ That's <code>${escapeHtml(id)}</code> — kept as your <b>${escapeHtml(target.engine)}</b> voice.`, { parse_mode: 'HTML' })
+          } catch (e) {
+            process.stderr.write(`daemon: typed voice (${target.engine}/${id}) rejected: ${e}\n`)
+            const again = await ctx.reply(`${friendlyTtsError(e, target.engine)}\n\nReply with another id, or tap ‹ Back in /settings → 🔊.`,
+              { parse_mode: 'HTML', reply_markup: { force_reply: true, input_field_placeholder: 'voice id' } }).catch(() => null)
+            if (again) replyTargets.set(`${ctx.chat?.id}:${again.message_id}`, target)
+          }
+          return
+        }
         // Folder for /new in General → spawn a session there (it creates its own topic).
         case 'newsession': {
           const dir = await resolveNewSessionDir(text)
@@ -20455,6 +20677,8 @@ async function webappReadSettings(): Promise<WebappSettingsView> {
   void refreshGh()   // warm the 🐙 summary for the next render, like the /settings command does
   const a = loadAccess()
   const von = !!a.tts?.mode && a.tts.mode !== 'off'
+  const ttsEng = (a.tts?.engine ?? 'piper') as TtsEngine
+  const ttsEnumerable = ttsEngineIsEnumerable(ttsEng)
   const tb = (tConfig('TELEGRAM_TRANSCRIBE') || 'off').toLowerCase()
   return {
     write: WEBAPP_SETTINGS_WRITE,
@@ -20478,7 +20702,16 @@ async function webappReadSettings(): Promise<WebappSettingsView> {
       // from either surface (found 2026-08-13, one deploy after it shipped).
       ttsMode: { value: a.tts?.mode ?? 'off', editable: true, options: ['off', 'all', 'manual'], label: 'manual = silent until you reply "tts" to a message' },
       ttsEngine: { value: a.tts?.engine ?? 'piper', editable: true, options: ['piper', 'openai', 'elevenlabs', ...TTS_PROVIDERS.map(p => p.id)], label: 'piper installs locally; the others need a key' },
-      ttsVoice: { value: a.tts?.voice ?? DEFAULT_PIPER_VOICE, editable: true, options: PIPER_VOICES.map(p => p.id), label: 'piper only' },
+      // The voice is per-ENGINE now, so the app shows the selected engine's — it offered piper's
+      // five whatever engine was on. An engine whose catalog is a live list (minimax: 332, and the
+      // list is not authoritative) is not an options array: that browse needs auditioning, which is
+      // the Telegram panel's job, so the app points at it rather than rendering a dropdown that
+      // cannot let you hear anything.
+      ttsVoice: {
+        value: resolveVoice(ttsEng, a.tts), editable: ttsEnumerable,
+        ...(ttsEnumerable ? { options: staticVoiceIds(ttsEng) } : {}),
+        label: ttsEnumerable ? `voices for ${ttsEng}` : 'browse and hear voices in Telegram: /settings → 🔊 → 🗣',
+      },
       stream: { value: replyMode(), editable: true, options: [...STREAM_ORDER] },
       sessionPin: { value: a.sessionPin !== false, editable: true },
       // The two role modes. `raw` rides alongside the label for the mini app's new-session sheet,

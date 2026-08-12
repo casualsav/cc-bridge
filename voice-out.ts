@@ -14,10 +14,50 @@ import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { STATE_DIR, tConfig } from './common.ts'
 import { exec } from './proc.ts'
-import { ttsProvider, type TtsProviderId } from './tts-providers.ts'
+import { ttsProvider, type TtsProviderId, type VoiceChoice } from './tts-providers.ts'
 
 export type TtsMode = 'off' | 'all' | 'manual'
 export type TtsEngine = 'piper' | 'openai' | 'elevenlabs' | TtsProviderId
+
+// OpenAI's voices are a fixed enum baked into the model — there is no list endpoint to ask, so this
+// IS the catalog. Previously the request hardcoded `alloy` with no override at all.
+export const OPENAI_VOICES: readonly VoiceChoice[] = [
+  'alloy', 'ash', 'ballad', 'coral', 'echo', 'fable', 'nova', 'onyx', 'sage', 'shimmer', 'verse',
+].map(id => ({ id, label: id[0]!.toUpperCase() + id.slice(1) }))
+
+// ONE resolver, replacing four mechanisms that disagreed (the parked item this unit un-parks):
+// `access.tts.voice` was consulted for piper only, elevenlabs read TELEGRAM_TTS_VOICE, openai
+// hardcoded alloy, and a registered provider read its own voiceEnv. So the picker showed piper's
+// voices whatever engine was on, and switching engines silently changed which mechanism was in
+// charge.
+//
+// Precedence, and the middle rung is why nothing on a configured box moves: the per-engine SETTING,
+// then the engine's env var (how every box is configured today — TELEGRAM_MINIMAX_VOICE is what the
+// owner's DM runs on right now), then the engine's default.
+export function resolveVoice(engine: TtsEngine, tts?: { voice?: string; voices?: Record<string, string> }): string {
+  const chosen = tts?.voices?.[engine]
+    // Legacy single field: it only ever meant piper, so it is read for piper alone. Reading it for
+    // every engine would hand a hosted engine an `en_US-lessac-medium` on the first upgrade.
+    ?? (engine === 'piper' ? tts?.voice : undefined)
+  if (chosen) return chosen
+  const provider = ttsProvider(engine)
+  if (provider) return tConfig(provider.voiceEnv) || provider.defaultVoice
+  if (engine === 'elevenlabs') return tConfig('TELEGRAM_TTS_VOICE') || '21m00Tcm4TlvDq8ikWAM'   // Rachel
+  if (engine === 'openai') return tConfig('TELEGRAM_OPENAI_VOICE') || 'alloy'
+  return DEFAULT_PIPER_VOICE
+}
+
+// The engine's selectable voices, or null when it cannot enumerate them and a typed id is the only
+// way in. Async because a provider's list is a network call.
+export async function engineVoices(engine: TtsEngine): Promise<VoiceChoice[] | null> {
+  if (engine === 'piper') return PIPER_VOICES.map(v => ({ id: v.id, label: v.label }))
+  if (engine === 'openai') return [...OPENAI_VOICES]
+  const provider = ttsProvider(engine)
+  if (!provider?.listVoices) return null            // elevenlabs, and any provider that cannot list
+  const key = tConfig(provider.tokenEnv)
+  if (!key) throw new Error(`${provider.tokenEnv} not set`)
+  return provider.listVoices({ key })
+}
 
 const PIPER_DIR = join(STATE_DIR, 'piper')
 const PIPER_BIN = join(PIPER_DIR, 'piper', 'piper')
@@ -172,7 +212,9 @@ export async function synthesize(text: string, engine: TtsEngine, voice?: string
     const res = await fetch('https://api.openai.com/v1/audio/speech', {
       method: 'POST',
       headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'gpt-4o-mini-tts', voice: 'alloy', input: t, response_format: 'opus' }),
+      // The voice is the CALLER's now — it was hardcoded here, which is why openai was the one
+      // engine with no voice setting at all.
+      body: JSON.stringify({ model: 'gpt-4o-mini-tts', voice: voice || resolveVoice('openai'), input: t, response_format: 'opus' }),
     })
     if (!res.ok) throw new Error(`openai tts ${res.status}: ${(await res.text()).slice(0, 200)}`)
     writeFileSync(out, Buffer.from(await res.arrayBuffer()))
@@ -181,8 +223,8 @@ export async function synthesize(text: string, engine: TtsEngine, voice?: string
   if (engine === 'elevenlabs') {
     const key = tConfig('ELEVENLABS_API_KEY')
     if (!key) throw new Error('ELEVENLABS_API_KEY not set')
-    const voice = tConfig('TELEGRAM_TTS_VOICE') || '21m00Tcm4TlvDq8ikWAM'   // Rachel
-    const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voice}?output_format=opus_48000_64`, {
+    const ev = voice || resolveVoice('elevenlabs')   // was read straight from the env here, ignoring the setting
+    const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${ev}?output_format=opus_48000_64`, {
       method: 'POST',
       headers: { 'xi-api-key': key, 'Content-Type': 'application/json' },
       body: JSON.stringify({ text: t, model_id: 'eleven_turbo_v2_5' }),
