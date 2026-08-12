@@ -18,6 +18,8 @@
 // itself, so "resume" names no decision), and laying the card out this way is the whole preparation
 // it needs.
 
+import { escapeHtml } from './markdown.ts'
+
 // What tapping a worker row would actually do — and what it costs. Read off the topics row plus its
 // transcript; see classifyWorker.
 export type ReopenCost =
@@ -139,49 +141,71 @@ export function clamp(text: string, max: number): string {
   return t.length <= max ? t : `${t.slice(0, max - 1).trimEnd()}…`
 }
 
-// Row text is an AGENT'S OWN WORDS quoted inside a markdown card, and it arrives full of backticks,
-// asterisks and link syntax. Two things go wrong if it is passed through: the formatting bleeds into
-// the card, and — worse — clamping can cut mid-entity, leaving an unbalanced marker that makes
-// Telegram refuse the whole message. A refused card falls back to HTML, so this is a legibility bug
-// on a good day and a card that renders as one run-on line on a bad one. Strip, then clamp.
+// Row text is an AGENT'S OWN WORDS quoted inside a bridge-built card, and it arrives full of
+// backticks, asterisks and link syntax that would otherwise bleed into the row as stray formatting
+// or literal punctuation. This is a LEGIBILITY fix and nothing more: it was first written believing
+// a clamp cutting an entity in half would make Telegram REFUSE the card, which was measured false on
+// 2026-08-13 — the rich markdown carrier accepts an unbalanced `**`, an unclosed fence, a cut link
+// and a cut emoji alike. Refusal lives only in the strict carriers (`parse_mode` HTML/MarkdownV2),
+// and this card is neither. Don't re-derive a safety story from this function's existence.
 export function plain(text: string): string {
   return text.replace(/[`*_~|]/g, '').replace(/[[\]]/g, '').replace(/\s+/g, ' ').trim()
 }
 
-function costLine(cost: ReopenCost): string {
-  if (cost.kind === 'fresh') return 'starts fresh · it never completed a turn'
-  if (cost.kind === 'gone') return '⚠️ transcript gone — nothing to resume'
-  // The steer away from reopening finished work, as a number rather than as prose: a reopen replays
-  // the whole backlog into context at full token cost before it reads anything new.
-  return `${cost.midFlight ? '⏳ stopped mid-turn' : '🏁 finished its turn'} · replays${cost.backlog ? ` ${cost.backlog}` : ''}`
+// The snippet under a row. One line at 456px, hard — the owner's first look at this card reported
+// chat snippets wrapping several lines mid-row, which is what turns a list into prose.
+const SNIPPET = 40
+
+// The TAIL of a row's first line: the one fact that changes what tapping it does. Nothing is printed
+// for the default (a session that finished its turn and will resume), because a label repeated on
+// every row is not information — it was on all six of the owner's rows and carried nothing. What
+// survives is the replay SIZE, which is the number the decision actually turns on, plus a marker for
+// each state that is NOT the default.
+function costTail(cost: ReopenCost): string {
+  if (cost.kind === 'fresh') return '✨ fresh'
+  if (cost.kind === 'gone') return '⚠️ no transcript'
+  return `${cost.backlog ?? 'resumes'}${cost.midFlight ? ' · ⏳ mid-turn' : ''}`
 }
 
-function renderRow(row: Row, n: number | null, now: number): string {
+// One row = one line, plus at most one indented snippet line. Returns the LINES, never a joined
+// string: the caller decides the separator, and the whole defect this replaced was a separator that
+// vanished (a bare "\n" collapses to a space in the rich carrier, so nine rows rendered as one
+// paragraph). The leading number sits at line start so it maps to the keypad button under it.
+function renderRow(row: Row, n: number | null, now: number): string[] {
   if (row.kind === 'chat') {
-    const head = row.live ? '**● now**' : `**${n}.**`
-    const handle = row.title
-      ? `${row.hint === 'last' ? '↩ ' : ''}_${clamp(plain(row.title), 44)}_`
-      : '_(nothing said yet)_'
-    return `${head} ${ago(row.mtime, now)} — ${handle}`
+    if (row.live) return [`● <b>now</b> · ${ago(row.mtime, now)}`]
+    const snip = row.title ? clamp(plain(row.title), SNIPPET) : ''
+    return [`<b>${n}</b> · ${ago(row.mtime, now)}`,
+      ...(snip ? [`　<i>${escapeHtml(row.hint === 'last' ? `↩ ${snip}` : snip)}</i>`] : [])]
   }
-  const head = n === null ? '**·**' : `**${n}.**`
-  const last = row.last ? `\n    ${clamp(plain(row.last), 52)}` : ''
-  return `${head} **${clamp(plain(row.name), 22)}** · ${clamp(row.folder, 16)} · ${ago(row.at, now)}${last}\n    ${costLine(row.cost)}`
+  // The folder is printed only when it says something the name does not. "cc-bridge · cc-bridge"
+  // was on half the owner's rows.
+  const folder = row.folder && row.folder !== row.name ? ` · ${escapeHtml(clamp(row.folder, 16))}` : ''
+  // An untappable row keeps the column but takes no number — a bare '·' where the digit would be,
+  // so the numbered rows above and below still line up with the keypad.
+  const head = n === null ? '· ' : `<b>${n}</b> · `
+  const snip = row.last ? clamp(plain(row.last), SNIPPET) : ''
+  return [`${head}<b>${escapeHtml(clamp(plain(row.name), 20))}</b>${folder} · ${ago(row.at, now)} · ${costTail(row.cost)}`,
+    ...(snip ? [`　<i>${escapeHtml(snip)}</i>`] : [])]
 }
 
-// The card body. Markdown, for a rich message — the buttons ride in reply_markup beside it, which is
-// why "More" cannot be a <details> block: a collapsible renders text, and these rows need taps.
+// The card body, as a `\n`-separated HTML panel — the shape `htmlPanelToRich` carries onto the rich
+// html carrier by rewriting every "\n" into a <br>. It is NOT markdown: the markdown carrier reflows
+// single newlines into a paragraph, which is exactly how the first version of this card reached the
+// owner as one continuous block of prose. The buttons ride in reply_markup beside it.
 export function renderCard(sections: Section[], now: number): string {
   const taps = numberRows(sections)
   const numberOf = new Map<Row, number>(taps.map(t => [t.row, t.n]))
-  const out: string[] = ['🕘 **Resume**']
+  const out: string[] = ['🕘 <b>Resume</b>']
   for (const s of sections) {
     if (!s.rows.length) continue
-    out.push(`\n**${s.title}** — ${s.note}`)
-    for (const row of s.rows) out.push(renderRow(row, numberOf.get(row) ?? null, now))
-    if (s.total > s.shown) out.push(`_showing ${s.shown} of ${s.total}_`)
+    // The count rides in the HEADER rather than in a footer under the rows: it is a fact about the
+    // section, and as a trailing line it read as one more row.
+    const count = s.total > s.shown ? `${s.shown} of ${s.total}` : s.note
+    out.push('', `<b>${s.title.toUpperCase()}</b> · ${count}`)
+    for (const row of s.rows) out.push('', ...renderRow(row, numberOf.get(row) ?? null, now))
   }
-  if (!taps.length) out.push('\n_Nothing resumable here yet._')
+  if (!taps.length) out.push('', '<i>Nothing resumable here yet.</i>')
   return out.join('\n')
 }
 
@@ -210,17 +234,17 @@ export function cardButtons(sections: Section[], expanded: Expanded): ButtonSpec
 // and comes straight back at the top of this same list.
 export function swapConfirmText(title: string, currentTitle: string | null): string {
   return [
-    '🔄 **Swap this chat onto another conversation?**',
+    '🔄 <b>Swap this chat onto another conversation?</b>',
     '',
-    `**Into:** _${clamp(title, 60)}_`,
-    currentTitle ? `**Leaving:** _${clamp(currentTitle, 60)}_` : '',
+    `<b>Into</b> · <i>${escapeHtml(clamp(plain(title), 60))}</i>`,
+    currentTitle ? `<b>Leaving</b> · <i>${escapeHtml(clamp(plain(currentTitle), 60))}</i>` : '',
     '',
-    'This ends the conversation running here now. It is **not** deleted — it stays on disk and comes back at the top of `/resume`, so you can swap straight back.',
+    'This ends the conversation running here now. It is <b>not</b> deleted — it stays on disk and comes back at the top of /resume, so you can swap straight back.',
   ].filter(Boolean).join('\n')
 }
 
 // Refused because the lane is mid-turn. Says WHEN to retry, not just no: a bare refusal on the one
 // surface the user is standing on reads as a broken button.
 export function swapBusyText(): string {
-  return '⏳ This chat is mid-turn — swapping now would kill the turn in flight.\n\nWait for it to finish (or `/stop` it), then run `/resume` again.'
+  return '⏳ This chat is mid-turn — swapping now would kill the turn in flight.\n\nWait for it to finish (or /stop it), then run /resume again.'
 }

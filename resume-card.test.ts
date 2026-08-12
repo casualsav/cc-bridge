@@ -45,7 +45,7 @@ test('a transcript-gone worker offers no tap', () => {
   expect((taps[0].row as WorkerRow).sid).toBe('aaaa1111')
   expect(cardButtons(sections, { c: false, w: false }).flat().some(b => b.data.includes('gone1111'))).toBe(false)
   // The row still RENDERS — a hidden dead session is a session the owner keeps looking for.
-  expect(renderCard(sections, NOW)).toContain('transcript gone')
+  expect(renderCard(sections, NOW)).toContain('no transcript')
 })
 
 // ---- the three reopen costs ---------------------------------------------------------------------
@@ -63,10 +63,10 @@ test('each cost renders its own line, and continues names the replay', () => {
     worker({ sid: 'b', cost: { kind: 'fresh' } }),
     worker({ sid: 'c', cost: { kind: 'gone' } }),
   ] }], NOW)
-  expect(card).toContain('replays 1.2 MB')
+  expect(card).toContain('1.2 MB')
   expect(card).toContain('mid-turn')
-  expect(card).toContain('never completed a turn')
-  expect(card).toContain('transcript gone')
+  expect(card).toContain('fresh')
+  expect(card).toContain('no transcript')
 })
 
 // ---- ranking, capping, expansion ----------------------------------------------------------------
@@ -78,12 +78,12 @@ test('workers rank newest-activity first and report N of M', () => {
   expect(ranked.rows[0].sid).toBe('w0')
   expect(ranked.total).toBe(40)
   expect(renderCard([{ key: 'w', title: 'Workers', note: '', rows: ranked.rows, shown: WORKER_ROWS, total: 40 }], NOW))
-    .toContain(`showing ${WORKER_ROWS} of 40`)
+    .toContain(`${WORKER_ROWS} of 40`)
   // Expanded shows more and stops claiming completeness only when it IS complete.
   const more = rankWorkers(rows, WORKER_ROWS_MORE)
   expect(more.rows).toHaveLength(WORKER_ROWS_MORE)
   expect(renderCard([{ key: 'w', title: 'Workers', note: '', rows: more.rows, shown: WORKER_ROWS_MORE, total: WORKER_ROWS_MORE }], NOW))
-    .not.toContain('showing')
+    .not.toContain(`${WORKER_ROWS_MORE} of`)
 })
 
 test('More is offered only for a section with hidden rows, and carries the next expansion', () => {
@@ -142,7 +142,7 @@ test('the swap confirm names both sides and says it is reversible', () => {
   const t = swapConfirmText('the new one', 'the running one')
   expect(t).toContain('the new one')
   expect(t).toContain('the running one')
-  expect(t).toMatch(/not.*deleted/i)
+  expect(t).toMatch(/not<\/b> deleted|not.*deleted/i)
   expect(t).toContain('/resume')
 })
 
@@ -171,8 +171,84 @@ test('a chat row says WHICH handle it is showing', () => {
   expect(last).toContain('↩')
 })
 
-test('a conversation with no handle at all renders honestly, and is still tappable', () => {
+test('a conversation with no handle renders as a bare row, not a placeholder line', () => {
   const row = chatRow({ title: '' })
-  expect(renderCard([{ key: 'c', title: 'Chat', note: '', shown: 1, total: 1, rows: [row] }], NOW)).toContain('nothing said yet')
+  const lines = renderCard([{ key: 'c', title: 'Chat', note: 'past', shown: 1, total: 1, rows: [row] }], NOW).split('\n')
+  // The row is there and tappable; it just has nothing to quote, so it spends no line saying so.
+  expect(lines.filter(l => l.startsWith('<b>1</b>'))).toHaveLength(1)
+  expect(lines.some(l => l.startsWith('　'))).toBe(false)
   expect(tappable(row)).toBe(true)
+})
+
+// ---- layout: one row, one line -------------------------------------------------------------------
+//
+// The owner's first look at this card (0.5.85) reported it as one continuous paragraph: the rich
+// MARKDOWN carrier reflows single newlines, so nine rows welded together. The card is an HTML panel
+// now (htmlPanelToRich turns each "\n" into a <br>), and these pin the shape that fixes it — they
+// fail against a render that joins rows, repeats a default label, or prints the folder twice.
+
+const fullCard = () => renderCard([
+  { key: 'c', title: 'Chat', note: 'past', shown: 2, total: 9, rows: [
+    chatRow({ id: 'live', title: 'now', live: true }),
+    chatRow({ id: 'c1', title: 'a fairly long opening line that will certainly need clamping down', mtime: NOW - 3_600_000 }),
+  ] },
+  { key: 'w', title: 'Workers', note: 'ended', shown: 3, total: 40, rows: [
+    worker({ sid: 'w1', name: 'cc-bridge', folder: 'cc-bridge' }),
+    worker({ sid: 'w2', name: 'api', folder: 'cc-bridge', cost: { kind: 'continues', backlog: '2 MB', midFlight: true } }),
+    worker({ sid: 'w3', name: 'old', cost: { kind: 'gone' }, last: null }),
+  ] },
+], NOW)
+
+test('every numbered row starts its own line, at line start', () => {
+  const lines = fullCard().split('\n')
+  // One line per number, and the number is the first thing on it (it maps to the keypad button).
+  for (const n of [1, 2, 3]) {
+    const hits = lines.filter(l => l.startsWith(`<b>${n}</b>`))
+    expect(hits).toHaveLength(1)
+  }
+  // No line carries two rows — the exact defect: a line holding two numbers.
+  expect(lines.filter(l => /<b>\d<\/b>.*<b>\d<\/b>/.test(l))).toHaveLength(0)
+})
+
+test('rows are separated by a blank line, and snippets stay on their own line', () => {
+  const lines = fullCard().split('\n')
+  for (let i = 0; i < lines.length; i++) {
+    if (!/^<b>\d<\/b>/.test(lines[i])) continue
+    expect(lines[i - 1]).toBe('')              // hard separation above every row
+    const next = lines[i + 1]
+    if (next && next !== '') expect(next.startsWith('　')).toBe(true)   // only an indented snippet may follow
+  }
+})
+
+test('a snippet is one short line, never a wrapping paragraph', () => {
+  for (const l of fullCard().split('\n').filter(l => l.startsWith('　'))) {
+    expect(l.replace(/<[^>]+>/g, '').trim().length).toBeLessThanOrEqual(42)
+  }
+})
+
+test('the default state prints no label — only the non-default ones do', () => {
+  const card = fullCard()
+  // "finished its turn" was on all six of the owner's rows and said nothing; the replay size stays.
+  expect(card).not.toContain('finished its turn')
+  expect(card).toContain('1.2 MB')
+  expect(card).toContain('⏳ mid-turn')      // non-default: named
+  expect(card).toContain('⚠️ no transcript') // non-default: named
+  // …and the marker appears only on the rows that are actually in that state.
+  expect(card.split('\n').filter(l => l.includes('⏳ mid-turn'))).toHaveLength(1)
+})
+
+test('the folder prints only when it differs from the name', () => {
+  const card = fullCard()
+  expect(card).not.toContain('cc-bridge</b> · cc-bridge')   // the duplication the owner reported
+  expect(card).not.toContain('· · ')                        // …and no empty column where a number would be
+  expect(card).toContain('<b>api</b> · cc-bridge')          // …but a real difference survives
+})
+
+test('section headers are distinct from rows and carry the count', () => {
+  const lines = fullCard().split('\n')
+  const headers = lines.filter(l => /^<b>[A-Z]+<\/b>/.test(l))
+  expect(headers).toHaveLength(2)
+  expect(headers[1]).toContain('3 of 40')
+  // A header is preceded by a blank line and is not itself a numbered row.
+  for (const h of headers) expect(lines[lines.indexOf(h) - 1]).toBe('')
 })

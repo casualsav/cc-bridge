@@ -13680,10 +13680,13 @@ const resumeKb = (rows: ButtonSpec[][]): InlineKeyboard => {
   return kb
 }
 
+// showHtmlPanel, NOT the markdown carrier: rich parses markdown as a DOCUMENT, so single newlines
+// reflow into a paragraph — the card's first version reached the owner as nine rows welded into one
+// block of prose (2026-08-13). htmlPanelToRich rewrites every "\n" as a <br>, which is what makes a
+// row a row, and the same string is the classic-HTML fallback.
 async function showDmResumeCard(ctx: Context, lane: { sessionId: string; cwd: string }, expanded: Expanded, mode: 'send' | 'edit'): Promise<void> {
   const sections = await buildDmResumeSections(lane, expanded)
-  const md = renderCard(sections, Date.now())
-  await showRichPanel(ctx, mode, toInputRichMessage(md), mdToTelegramHtml(md), resumeKb(cardButtons(sections, expanded)))
+  await showHtmlPanel(ctx, mode, renderCard(sections, Date.now()), resumeKb(cardButtons(sections, expanded)))
 }
 
 // /resume — list the most recent Claude Code sessions (across all projects) with their last
@@ -16003,15 +16006,23 @@ bot.on('callback_query:data', async ctx => {
       }
       if (liveFile && turnInProgress(liveFile)) {
         await ctx.answerCallbackQuery({ text: 'Mid-turn.' }).catch(() => {})
-        await ctx.reply(mdToTelegramHtml(swapBusyText()), { parse_mode: 'HTML' }).catch(() => {})
+        await ctx.reply(swapBusyText(), { parse_mode: 'HTML' }).catch(() => {})
         return
       }
       await ctx.answerCallbackQuery().catch(() => {})
       if (verb === 'rsw') {
-        const titleOf = (id: string) => listRecentSessions(25, allProjectsDirs(), lane.cwd).find(s => s.sessionId === id)?.title ?? id
+        // The SAME handle the card showed, including its fallback: most lane conversations have no
+        // opening line (measured: 11 of the 30 most recent here), and quoting the bare uuid at the
+        // confirm step would name a different thing than the row the user just tapped.
+        const recents = listRecentSessions(25, allProjectsDirs(), lane.cwd)
+        const titleOf = (id: string) => {
+          const t = recents.find(s => s.sessionId === id)?.title
+          if (t) return t
+          const file = findSessionFile(id, allProjectsDirs())
+          return (file ? latestFinalReply(file)?.text : null) ?? id
+        }
         const liveId = liveFile ? basename(liveFile).replace(/\.jsonl$/, '') : null
-        const md = swapConfirmText(titleOf(arg), liveId ? titleOf(liveId) : null)
-        await showRichPanel(ctx, 'edit', toInputRichMessage(md), mdToTelegramHtml(md),
+        await showHtmlPanel(ctx, 'edit', swapConfirmText(titleOf(arg), liveId ? titleOf(liveId) : null),
           new InlineKeyboard().text('🔄 Swap', `rswgo:${arg}`).text('‹ Back', 'rres:cw'))
         return
       }
