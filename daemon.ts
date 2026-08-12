@@ -177,7 +177,7 @@ import {
   setSessionDepth, resetAllSessionDepth, pruneSessionDepth, nextAskDepth, depthExceeded, depthLimit,
   resolveEndpoint, nameForEndpoint, normalizeEndpointName, backlogLabel, confineRef, sharedDir, ensureSharedDir, appendLedger, tailLedger,
   getSeen, markSeen, digestSince, DIGEST_SCAN,
-  systemAskLabel, ackWakesNow, laneAwaitsSender,
+  systemAskLabel, ackWakesNow, laneAwaitsSender, laneBriefedSender,
   type BusEndpoint, type BusPending, type LedgerEntry,
 } from './agent-bus.ts'
 import { formatAskBlock, formatAnswerBlock, formatAsideBlock, formatDigestBlock, formatNudgeBlock, formatStopReason, formatRosterLine, closureNoticeText, busSentHeader, busGotHeader, type BusVerb, type RosterAgent } from './agent-bus-block.ts'
@@ -4120,8 +4120,13 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
     // `laneAwaitsSender` is the class boundary read off the pending rows rather than off the verb: an
     // open ask from this lane TO this sender is evidence the lane is waiting on them, whatever verb
     // they reached back with. It carries the miss it repairs, and the cost it accepts.
+    // `laneBriefedSender` is the same rule with the evidence a pending row cannot carry: the ask that
+    // commissioned the work has usually CLOSED by the time the report is written, so an open-rows
+    // test misses exactly the completion reports the lane is waiting for. It reads the sender's
+    // briefer, which outlives the ask. (Incident: an 8-hour parked unit report, 2026-08-12.)
     if (cur.noReply && isChatLaneSession(cur.toSid) && !ackWakesNow(cur.sysKind)
-        && !laneAwaitsSender(listPending(), cur.toSid, cur.fromSid)) {
+        && !laneAwaitsSender(listPending(), cur.toSid, cur.fromSid)
+        && !laneBriefedSender(getBriefedBy(cur.fromSid), cur.toSid)) {
       const now = Date.now()
       if (cur.fromSid !== SYSTEM_SID) markBriefed(cur.toSid, cur.fromSid, cur.fromName, now)
       void notifyAskSent(cur.fromSid, cur.toName, cur.text, 'ack', cur.toSid)

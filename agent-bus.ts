@@ -152,6 +152,33 @@ export function laneAwaitsSender(pendings: BusPending[], laneSid: string, sender
     p.fromSid === laneSid && p.toSid === senderSid && !p.noReply && !p.expiredAt && !p.ownerDirect)
 }
 
+// A BRIEF OUTLIVES ITS ASK, AND `laneAwaitsSender` CANNOT SEE THAT. It reads OPEN rows, so the moment
+// a worker answers the dispatch it stops counting as awaited — and a completion report is written
+// AFTER that, which is precisely when it is written. So the report on work the lane commissioned lands
+// in the "merely informed" class and parks.
+//
+// The incident, 2026-08-12: a worker's finished-unit report (ack #89, on work the lane briefed under
+// an ask that had already closed) sat undelivered for **8 hours**, until an unrelated owner message
+// woke the lane and flushed the digest. Nothing was lost — the digest is sound — but a completion
+// report is not catch-up material, and the lane could not act on work it had commissioned.
+//
+// Same rule as ever, one more piece of evidence for it: `briefedBy` records who dispatched work INTO
+// a session and, unlike a pending row, is not cleared when the ask closes. If this lane is that
+// briefer, an FYI back from them is a report on its own dispatch — it is waiting on it by
+// construction, exactly as an open ask means it is.
+//
+// KNOWN LIMIT, accepted by the owner when he chose this over "every ack wakes" (2026-08-12): the map
+// holds only the MOST RECENT briefer per session, so a worker this lane briefed and someone else
+// briefed afterwards no longer matches, and its report rides the digest. That is the acceptable
+// direction — it fails toward the digest, never toward silence. Measured cost of the wider rule it
+// was chosen over: ~7 lane wakes/day against ~3 for this one, the difference being ambient chatter
+// (10 of 18 observed deferrals were `post-relay`, which is news the lane never armed).
+export function laneBriefedSender(
+  briefedBy: { fromSid: string } | undefined, laneSid: string,
+): boolean {
+  return !!briefedBy && briefedBy.fromSid === laneSid
+}
+
 // The lead of the owner-facing card for an ANSWERED @system ask — rendered as "<icon> @who <did>".
 // Specific only where the kind is known and answerable; everything else — an unknown kind, a
 // pre-v0.4.366 row, an ack that somehow got answered — takes the neutral phrasing. A vague label

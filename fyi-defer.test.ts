@@ -12,7 +12,7 @@
 import { test, expect } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { ackWakesNow, laneAwaitsSender, digestSince, askResultText, ASK_DELIVERY_STATES, type BusPending, type LedgerEntry } from './agent-bus.ts'
+import { ackWakesNow, laneAwaitsSender, laneBriefedSender, digestSince, askResultText, ASK_DELIVERY_STATES, type BusPending, type LedgerEntry } from './agent-bus.ts'
 import { formatDigestBlock } from './agent-bus-block.ts'
 
 const daemon = readFileSync(join(import.meta.dir, 'daemon.ts'), 'utf8')
@@ -155,7 +155,8 @@ test("'deferred' reads as neither delivered nor failed", () => {
 
 test('the defer branch records and drops, and never touches the watermark', () => {
   const i = daemon.indexOf('if (cur.noReply && isChatLaneSession(cur.toSid) && !ackWakesNow(cur.sysKind)\n'
-    + '        && !laneAwaitsSender(listPending(), cur.toSid, cur.fromSid)) {')
+    + '        && !laneAwaitsSender(listPending(), cur.toSid, cur.fromSid)\n'
+    + '        && !laneBriefedSender(getBriefedBy(cur.fromSid), cur.toSid)) {')
   expect(i).toBeGreaterThan(-1)
   const branch = daemon.slice(i, daemon.indexOf("return 'deferred'", i))
   // THE INVARIANT. Advancing `seen` here would mark this very FYI as read by a session that was never
@@ -203,4 +204,40 @@ test('every delivery a lane can take carries the flush', () => {
   expect(daemon).toContain('const flush = flushDigestFor(cur.fromSid)')
   const answer = daemon.slice(daemon.indexOf('const flush = flushDigestFor(cur.fromSid)'))
   expect(answer.slice(0, 900)).toContain('if (ok && flush)')   // watermark on the landed paste only
+})
+
+// ---- The brief that outlives its ask -------------------------------------------------------------
+//
+// The second live miss (2026-08-12), and the one that cost the most: a worker's completion report on
+// work THIS LANE briefed sat undelivered for EIGHT HOURS, until an unrelated owner message flushed
+// the digest. `laneAwaitsSender` could not catch it and never could — it reads OPEN rows, and the
+// commissioning ask closes before the report is written, which is the normal order of events. So the
+// evidence has to be the brief, which outlives the ask.
+
+test('an ack from a worker THIS lane briefed wakes it, even with no ask left open', () => {
+  expect(laneBriefedSender({ fromSid: 'lane' }, 'lane')).toBe(true)
+  // The failing case, stated as the incident: no open rows at all, and it must still wake.
+  expect(laneAwaitsSender([], 'lane', 'worker')).toBe(false)      // what the old gate saw
+  expect(laneBriefedSender({ fromSid: 'lane' }, 'lane')).toBe(true) // what the new one sees
+})
+
+test('a worker this lane never briefed still rides — the ambient class is untouched', () => {
+  // THE CONTROL. This is the ~4 wakes/day the owner declined to buy: 10 of 18 observed deferrals
+  // were `post-relay`, news the lane never armed. A predicate that returned true here would be the
+  // rejected "every ack wakes" rule wearing this one's name.
+  expect(laneBriefedSender({ fromSid: 'someone-else' }, 'lane')).toBe(false)
+  expect(laneBriefedSender(undefined, 'lane')).toBe(false)
+})
+
+test('the briefer is matched by SID, not by name', () => {
+  // Names are display strings and are reused across a kill/reopen; the sid is the identity. Matching
+  // on a name would wake the lane for a different session that happened to inherit the name.
+  expect(laneBriefedSender({ fromSid: 'lane-2' }, 'lane')).toBe(false)
+})
+
+test('the DEFERRED log line survives — the next wrong-class incident must diagnose itself', () => {
+  // Both misses were found from this line (or from its absence). It is the only record that an FYI
+  // parked rather than landed, and the owner asked for it explicitly when approving this change.
+  expect(daemon).toContain('DEFERRED for @')
+  expect(daemon).toContain('rides its next delivery')
 })
