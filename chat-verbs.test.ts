@@ -101,7 +101,7 @@ test('one outcome, two voices — each names a gesture its own caller can actual
   expect(forceGesture('cli', 'web')).toBe('re-run as `tg kill web --force`')
   expect(forceGesture('chat', 'web')).toBe('send "@kill web force"')
   expect(spawnGesture('cli')).toBe('`tg spawn`')
-  expect(spawnGesture('chat')).toBe('`@launch`')
+  expect(spawnGesture('chat')).toBe('"@launch"')
   // Neither dialect may leak the other's syntax.
   for (const s of [undoGesture('chat', 'web'), forceGesture('chat', 'web'), spawnGesture('chat')]) expect(s).not.toContain('tg ')
   for (const s of [undoGesture('cli', 'web'), forceGesture('cli', 'web'), spawnGesture('cli')]) expect(s).not.toContain('@')
@@ -174,4 +174,19 @@ test('every verb in the daemon table is in the prefix list, and vice versa', () 
     ...[...table.matchAll(/\(\[([^\]]+)\] as const\)\.map/g)].flatMap(m => [...m[1]!.matchAll(/'([a-z-]+)'/g)].map(x => x[1]!)),
   ].sort()
   expect(handled).toEqual(CHAT_VERBS.map(v => v.verb).sort())
+})
+
+// A CHAT-voice string is delivered inside a PLAIN Telegram message — no parse_mode, nothing renders.
+// So it may not carry markup: the owner read "a fresh `@launch` instead" with the backticks visible
+// (2026-08-13), from the one gesture in this table that had not been converted to the quoted form.
+// The CLI voice is the opposite case and keeps its backticks: it lands in a terminal transcript where
+// they are the convention.
+test('no chat-voice gesture carries markup a plain message cannot render', () => {
+  for (const s of [undoGesture('chat', 'web'), forceGesture('chat', 'web'), spawnGesture('chat')]) {
+    expect(s).not.toContain('`')
+    expect(s).not.toContain('**')
+  }
+  // …and the CLI voice still speaks in backticks, so this never becomes "strip markup everywhere".
+  expect(undoGesture('cli', 'web')).toContain('`')
+  expect(spawnGesture('cli')).toContain('`')
 })

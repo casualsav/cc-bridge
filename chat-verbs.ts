@@ -82,7 +82,12 @@ export const undoGesture = (g: Gestures, name: string): string =>
   g === 'cli' ? `\`tg reopen ${name}\`` : `"@reopen ${name}"`
 export const forceGesture = (g: Gestures, name: string): string =>
   g === 'cli' ? `re-run as \`tg kill ${name} --force\`` : `send "@kill ${name} force"`
-export const spawnGesture = (g: Gestures): string => g === 'cli' ? '`tg spawn`' : '`@launch`'
+// The chat forms are QUOTED, never backticked, and that is not a style choice: these strings go to
+// the owner inside a PLAIN Telegram message, where a backtick is a backtick. He read one live on
+// 2026-08-13 — "a self-contained task belongs in a fresh `@launch` instead", markers and all. Its
+// two siblings above had already switched to quotes; this one was missed, and the test below pinned
+// the backticked value rather than asking what the surface does with it.
+export const spawnGesture = (g: Gestures): string => g === 'cli' ? '`tg spawn`' : '"@launch"'
 
 // ---- `@<name> <message>` — the bare address -----------------------------------------------------
 //

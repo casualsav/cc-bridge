@@ -1,4 +1,5 @@
 import { test, expect } from 'bun:test'
+import { readFileSync } from 'node:fs'
 import {
   buildChatRows, classifyWorker, rankWorkers, tappable, numberRows, rowCallback,
   renderCard, cardButtons, encodeExpanded, decodeExpanded, swapConfirmText, swapBusyText, plain,
@@ -251,4 +252,20 @@ test('section headers are distinct from rows and carry the count', () => {
   expect(headers[1]).toContain('3 of 40')
   // A header is preceded by a blank line and is not itself a numbered row.
   for (const h of headers) expect(lines[lines.indexOf(h) - 1]).toBe('')
+})
+
+// ---- the chat surface renders nothing: no markup may reach it ------------------------------------
+//
+// SOURCE-LEVEL enumeration, because these strings are inline template literals in daemon.ts rather
+// than values a unit test can call. The owner's reopen confirmation reached him with literal
+// backticks around @launch; the gesture helper that produced it is pinned in chat-verbs.test.ts, and
+// this covers the OTHER shape — a `g === 'chat'` ternary arm written with markup in place.
+test('no chat-voice branch in the kill/reopen/watch verbs emits markup', () => {
+  const src = readFileSync(new URL('./daemon.ts', import.meta.url), 'utf8')
+  // Every `g === 'cli' ? A : B` in the file: B is the chat voice and may not contain a backtick.
+  const offenders: string[] = []
+  for (const m of src.matchAll(/g === 'cli' \? (?:'[^']*'|`[^`]*`) : ('[^']*'|`[^`]*`)/g)) {
+    if (m[1].includes('\\`') || /`.*`/.test(m[1].slice(1, -1))) offenders.push(m[1])
+  }
+  expect(offenders).toEqual([])
 })

@@ -3495,7 +3495,7 @@ async function runSessionReopen(fromSid: string, target: string, g: Gestures): P
         const rows: Array<[string, TopicEntry]> = listTopics().map(({ sessionId, ...e }) => [sessionId, e])
         const { hit, reason, others } = resolveReopenTarget(rows, target, normalizeEndpointName)
         if (reason === 'live-only') { return { ok: false, text: `@${target} is already live — nothing to reopen` } }
-        if (reason === 'none' || !hit) { return { ok: false, text: `no session named "${target}" to reopen (a session id or its prefix works too) — a headless session's entry is dropped when its pane dies, and only ${g === 'cli' ? '`tg spawn`' : 'a fresh `@launch`'} can bring that back` } }
+        if (reason === 'none' || !hit) { return { ok: false, text: `no session named "${target}" to reopen (a session id or its prefix works too) — a headless session's entry is dropped when its pane dies, and only ${g === 'cli' ? '`tg spawn`' : 'a fresh "@launch"'} can bring that back` } }
         const [sid, t0] = hit
         const sid8 = sid.slice(0, 8)
         const denial = sessionCloseDenial(fromSid, sid, t0.name, t0)
