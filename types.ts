@@ -39,7 +39,9 @@ export type Access = {
   // `voice` is the LEGACY single field and meant piper alone (see resolveVoice); `voices` is the
   // per-engine map that replaced it, so switching engines no longer changes which of four mechanisms
   // decides the voice. The old field is still read for piper, so an existing config keeps its pick.
-  tts?: { mode: 'off' | 'all' | 'manual'; engine: 'piper' | 'openai' | 'elevenlabs' | TtsProviderId; voice?: string; voices?: Record<string, string> }
+  // `speeds` is the per-engine speech-rate map (resolveSpeed: setting → engine env → 1.0), shaped
+  // like `voices` for the same reason — the mechanism behind the number is per-engine.
+  tts?: { mode: 'off' | 'all' | 'manual'; engine: 'piper' | 'kokoro' | 'openai' | 'elevenlabs' | TtsProviderId; voice?: string; voices?: Record<string, string>; speeds?: Record<string, number> }
   updateChecks?: boolean  // daily update-available notification for bridge + Claude (default on)
   autoUpdate?: boolean    // auto-apply updates instead of tap-to-apply cards (default off): bridge on the daily sweep, Claude via install-latest + rolling refresh of idle sessions
   limitFailover?: boolean  // on a usage-limit hit, move the stuck session to a still-available account and resume it there instead of waiting for the reset (default off)

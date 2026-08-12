@@ -221,7 +221,7 @@ import { CODEX_HOME } from './codex-transcript.ts'
 import { currentCodexReadiness } from './codex-health.ts'
 import { TypingPresence } from './typing.ts'
 import { transcribe, transcribeProvider, transcribeStatus } from './voice.ts'
-import { synthesize, provisionPiper, piperReady, engineStatus, speakable, isTtsTrigger, resolveVoice, engineVoices, OPENAI_VOICES, PIPER_VOICES, DEFAULT_PIPER_VOICE, type TtsEngine, type TtsMode } from './voice-out.ts'
+import { synthesize, provisionPiper, piperReady, engineStatus, speakable, isTtsTrigger, resolveVoice, resolveSpeed, engineSpeedSupport, engineVoices, OPENAI_VOICES, PIPER_VOICES, KOKORO_VOICES, DEFAULT_PIPER_VOICE, TTS_ENGINES, SPEED_CHOICES, SPEED_MIN, SPEED_MAX, type TtsEngine, type TtsMode } from './voice-out.ts'
 import { TTS_PROVIDERS, ttsProvider, type VoiceChoice } from './tts-providers.ts'
 import { parseDuration, formatDuration, fmtWhen, splitLeadingDuration, nextRecurrence, recurrenceLabel, parseCron, nextCron, type Recurrence } from './time.ts'
 import {
@@ -1620,7 +1620,7 @@ async function speakRepliedMessage(ctx: Context, chatId: string, msgId?: number)
   if (msgId != null) void channel.react({ chatId, messageId: String(msgId) }, REACTIONS.received).catch(() => {})
   const engine = tts.engine ?? 'piper'
   try {
-    const file = await synthesize(text, engine, resolveVoice(engine, tts), MANUAL_TTS_CAP)
+    const file = await synthesize(text, engine, resolveVoice(engine, tts), MANUAL_TTS_CAP, resolveSpeed(engine, tts))
     await channel.sendFile(chatId, file, { kind: 'voice', ...(msgId ? { replyTo: String(msgId) } : {}) })
     try { unlinkSync(file) } catch {}
   } catch (e) {
@@ -1640,7 +1640,7 @@ async function sendTtsVoice(text: string, targets: Array<{ chat: string; thread?
   const tts = loadAccess().tts
   const engine = tts?.engine ?? 'piper'
   try {
-    const file = await synthesize(text, engine, resolveVoice(engine, tts))
+    const file = await synthesize(text, engine, resolveVoice(engine, tts), undefined, resolveSpeed(engine, tts))
     for (const { chat, thread } of targets) {
       await channel.sendFile(String(chat), file, { kind: 'voice', silent: true, ...(thread ? { threadId: String(thread) } : {}) })
         .catch(e => process.stderr.write(`daemon: tts send failed: ${e}\n`))
@@ -12461,7 +12461,7 @@ function settingsRows(): SettingsRootRow[] {
     { id: 'github', name: '🐙 GitHub', keys: ['github'], panel: 'github' },
     { id: 'batchAllow', name: '⚡ Batch allow', keys: ['batchAllow'] },
     { id: 'transcribe', name: '🎙️ Voice transcription', keys: ['transcribeBackend', 'transcribeModel'], value: transcribeStatus() },
-    { id: 'tts', name: '🔊 Voice replies', keys: ['voice', 'ttsMode', 'ttsEngine', 'ttsVoice'], value: a.tts?.mode && a.tts.mode !== 'off' ? `${a.tts.mode} · ${a.tts.engine}` : 'off' },
+    { id: 'tts', name: '🔊 Voice replies', keys: ['voice', 'ttsMode', 'ttsEngine', 'ttsVoice', 'ttsSpeed'], value: a.tts?.mode && a.tts.mode !== 'off' ? `${a.tts.mode} · ${a.tts.engine}` : 'off' },
     { id: 'stream', name: '💬 Stream', keys: ['stream'] },
     { id: 'sessionPin', name: '📌 Pinned message', keys: ['sessionPin'] },
     { id: 'confirmReset', name: '🧹 /clear approval', keys: ['confirmReset'] },
@@ -12571,20 +12571,26 @@ async function applySetting(key: string, value: unknown, opts: { userId?: string
       if (key === 'chatEffort') a.chatEffort = v; else a.spawnEffort = v
       saveAccess(a); return null
     }
-    // ---- voice replies (TTS). Three keys, one stored object. ----
-    case 'ttsMode': case 'ttsEngine': case 'ttsVoice': {
-      const tts = { mode: a.tts?.mode ?? 'off', engine: a.tts?.engine ?? 'piper', ...(a.tts?.voice ? { voice: a.tts.voice } : {}), ...(a.tts?.voices ? { voices: a.tts.voices } : {}) } as NonNullable<Access['tts']>
+    // ---- voice replies (TTS). Four keys, one stored object. ----
+    case 'ttsMode': case 'ttsEngine': case 'ttsVoice': case 'ttsSpeed': {
+      const tts = { mode: a.tts?.mode ?? 'off', engine: a.tts?.engine ?? 'piper', ...(a.tts?.voice ? { voice: a.tts.voice } : {}), ...(a.tts?.voices ? { voices: a.tts.voices } : {}), ...(a.tts?.speeds ? { speeds: a.tts.speeds } : {}) } as NonNullable<Access['tts']>
       if (key === 'ttsMode') {
         // 'manual' = armed but silent until a gesture asks. The auto-speak gate stays `=== 'all'`.
         const v = oneOf(value, ['off', 'all', 'manual'])
         if (!v) return 'unknown voice mode — one of: off | all | manual'
         tts.mode = v as TtsMode
       } else if (key === 'ttsEngine') {
-        // The registered providers come from the TABLE, so a new entry appears here with no edit.
-        const engines = ['piper', 'openai', 'elevenlabs', ...TTS_PROVIDERS.map(p => p.id)]
-        const v = oneOf(value, engines)
-        if (!v) return `unknown engine — one of: ${engines.join(' | ')}`
+        // ONE list (voice-out.ts's TTS_ENGINES): local engines + the registered provider table.
+        const v = oneOf(value, TTS_ENGINES)
+        if (!v) return `unknown engine — one of: ${TTS_ENGINES.join(' | ')}`
         tts.engine = v as TtsEngine
+      } else if (key === 'ttsSpeed') {
+        // Per-engine, like the voice — and an engine with no lever REFUSES in plain words rather
+        // than storing a number that silently does nothing (elevenlabs' model takes none).
+        if (!engineSpeedSupport(tts.engine)) return `${tts.engine} has no speed control — this setting applies to engines that support one (kokoro, piper, openai, minimax)`
+        const v = Number(value)
+        if (!(v >= SPEED_MIN && v <= SPEED_MAX)) return `speed must be between ${SPEED_MIN}× and ${SPEED_MAX}×`
+        tts.speeds = { ...tts.speeds, [tts.engine]: v }
       } else {
         // PER-ENGINE now (the four-mechanism unification): the value is validated against the
         // SELECTED engine's catalog, and an engine that cannot enumerate its voices accepts any
@@ -12836,12 +12842,17 @@ function ttsText(): string {
   // The voice line is now the RESOLVED one for the selected engine, whatever supplied it — the old
   // line looked piper's label up whatever engine was on, so a minimax box read "🗣 Lessac".
   const voiceId = resolveVoice(eng, t)
-  const voiceLabel = PIPER_VOICES.find(v => v.id === voiceId)?.label ?? voiceId
-  return `🔊 <b>Voice replies</b> — mode <b>${mode}</b> · engine <b>${eng}</b> · 🗣 <b>${escapeHtml(voiceLabel)}</b> (${st.ready ? '✅ ready' : `needs ${escapeHtml(st.missing)}`})\n\n` +
+  const voiceLabel = (eng === 'piper' ? PIPER_VOICES.find(v => v.id === voiceId)?.label : eng === 'kokoro' ? KOKORO_VOICES.find(v => v.id === voiceId)?.label : undefined) ?? voiceId
+  // The speed reads as part of the state line where the engine has one, and as its absence in plain
+  // words where it does not — never a number that silently does nothing.
+  const speedBit = engineSpeedSupport(eng) ? ` · ⏩ <b>${resolveSpeed(eng, t)}×</b>` : ' · ⏩ no speed control on this engine'
+  return `🔊 <b>Voice replies</b> — mode <b>${mode}</b> · engine <b>${eng}</b> · 🗣 <b>${escapeHtml(voiceLabel)}</b>${speedBit} (${st.ready ? '✅ ready' : `needs ${escapeHtml(st.missing)}`})\n\n` +
     `💬 <b>All</b> — every reply arrives as a voice note after the text.\n` +
     `✋ <b>Manual</b> — nothing speaks on its own; reply <code>tts</code> to any message and I speak that one.\n` +
     `Zero extra Claude usage either way — it speaks text already written.\n\n` +
-    `🆓 <b>Piper</b> — local &amp; free, auto-installs (~80MB; needs ffmpeg — installed with it if missing)\n☁️ <b>OpenAI</b> — ~$0.015/1k chars (OPENAI_API_KEY)\n☁️ <b>ElevenLabs</b> — best voices, priciest (ELEVENLABS_API_KEY)` +
+    `🆓 <b>Piper</b> — local &amp; free, auto-installs (~80MB; needs ffmpeg — installed with it if missing)\n` +
+    `🆓 <b>Kokoro</b> — local &amp; free, no auto-install (a kokoro-onnx setup on this machine; TELEGRAM_KOKORO_DIR points at it)\n` +
+    `☁️ <b>OpenAI</b> — ~$0.015/1k chars (OPENAI_API_KEY)\n☁️ <b>ElevenLabs</b> — best voices, priciest (ELEVENLABS_API_KEY)` +
     // The registered providers print themselves, so a second entry in the table needs no edit here.
     TTS_PROVIDERS.map(p => `\n☁️ <b>${escapeHtml(p.label)}</b> — hosted (${escapeHtml(p.tokenEnv)})`).join('')
 }
@@ -12853,10 +12864,16 @@ function ttsKeyboard(): InlineKeyboard {
   const kb = new InlineKeyboard()
     .text(m('🔇 Off', 'off'), 'tts:mode:off').text(m('💬 All', 'all'), 'tts:mode:all').text(m('✋ Manual', 'manual'), 'tts:mode:manual').row()
     .text(e('🆓 Piper', 'piper'), 'tts:eng:piper').text(e('☁️ OpenAI', 'openai'), 'tts:eng:openai').text(e('☁️ 11Labs', 'elevenlabs'), 'tts:eng:elevenlabs').row()
-  // Registered providers get their own row rather than a fourth button on the one above: at his
-  // phone's 456px a 4-button row truncates the labels to initials.
-  if (TTS_PROVIDERS.length) {
-    TTS_PROVIDERS.forEach(p => kb.text(e(`☁️ ${p.label}`, p.id), `tts:eng:${p.id}`))
+  // Kokoro + the registered providers share the second engine row rather than widening the one
+  // above: at his phone's 456px a 4-button row truncates the labels to initials.
+  kb.text(e('🆓 Kokoro', 'kokoro'), 'tts:eng:kokoro')
+  TTS_PROVIDERS.forEach(p => kb.text(e(`☁️ ${p.label}`, p.id), `tts:eng:${p.id}`))
+  kb.row()
+  // The speed row renders only where the selected engine HAS the lever; the panel text carries the
+  // plain-words absence for the one that does not, so nothing here is a button that scolds.
+  if (engineSpeedSupport(eng as TtsEngine)) {
+    const cur = resolveSpeed(eng as TtsEngine, t)
+    SPEED_CHOICES.forEach(s => kb.text(cur === s ? `● ${s}×` : `${s}×`, `tts:spd:${s}`))
     kb.row()
   }
   // Browse and type are CO-EQUAL, side by side, and that is a measured decision rather than a
@@ -12895,15 +12912,16 @@ function friendlyTtsError(e: unknown, engine: TtsEngine): string {
   if (/\b401\b|unauthor|invalid api key/i.test(raw)) return 'The API key was rejected. Add it again in the panel and check it was pasted whole.'
   if (/insufficient balance|quota|\b429\b/i.test(raw)) return 'That provider says the account is out of credit or rate-limited. Nothing is wrong with your settings.'
   if (/piper not provisioned/.test(raw)) return 'The local voice engine is still installing — try again in a minute.'
+  if (/kokoro not installed/.test(raw)) return 'Kokoro is not installed on this machine — it needs a local kokoro-onnx setup (venv + model weights), with TELEGRAM_KOKORO_DIR in the bridge\'s .env pointing at it. Piper stays the zero-setup local engine.'
   if (/timed out|ETIMEDOUT|ENOTFOUND|fetch failed/i.test(raw)) return 'Could not reach that provider just now. Try again in a moment.'
   return `That did not work: ${escapeHtml(raw.slice(0, 160))}`
 }
 
 // Can this engine's voices be listed WITHOUT a network call? Only those can be a Mini App dropdown;
 // a live list belongs in the Telegram picker, where it can be paged and auditioned.
-const ttsEngineIsEnumerable = (engine: string): boolean => engine === 'piper' || engine === 'openai'
+const ttsEngineIsEnumerable = (engine: string): boolean => engine === 'piper' || engine === 'openai' || engine === 'kokoro'
 const staticVoiceIds = (engine: TtsEngine): string[] =>
-  engine === 'openai' ? OPENAI_VOICES.map(v => v.id) : PIPER_VOICES.map(v => v.id)
+  engine === 'openai' ? OPENAI_VOICES.map(v => v.id) : engine === 'kokoro' ? KOKORO_VOICES.map(v => v.id) : PIPER_VOICES.map(v => v.id)
 
 // Which language group the picker is showing, per chat. Not persisted: it is a position in a
 // browse, not a preference.
@@ -12974,7 +12992,9 @@ async function auditionVoice(ctx: Context, chat: string, id: string, label: stri
       await channel.sendText(chat, '⏳ Installing that voice first — this takes a minute.', { plain: true, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
       await provisionPiper(id)
     }
-    const file = await synthesize(VOICE_SAMPLE, engine, id, 4096)
+    // The audition renders at the CONFIGURED speed — what you hear is what a kept voice will sound
+    // like, or the sample is a promise the setting then breaks.
+    const file = await synthesize(VOICE_SAMPLE, engine, id, 4096, resolveSpeed(engine, t))
     await channel.sendFile(chat, file, { kind: 'voice', ...(thread ? { threadId: String(thread) } : {}) })
     try { unlinkSync(file) } catch {}
     await showHtmlPanel(ctx, 'edit',
@@ -12991,7 +13011,7 @@ async function auditionVoice(ctx: Context, chat: string, id: string, label: stri
 // replaced the four mechanisms, and nothing here can write another engine's slot.
 function setEngineVoice(engine: TtsEngine, id: string): void {
   const a = loadAccess()
-  const tts = { mode: a.tts?.mode ?? 'off', engine: a.tts?.engine ?? 'piper', ...(a.tts?.voice ? { voice: a.tts.voice } : {}), voices: { ...a.tts?.voices } } as NonNullable<Access['tts']>
+  const tts = { mode: a.tts?.mode ?? 'off', engine: a.tts?.engine ?? 'piper', ...(a.tts?.voice ? { voice: a.tts.voice } : {}), voices: { ...a.tts?.voices }, ...(a.tts?.speeds ? { speeds: a.tts.speeds } : {}) } as NonNullable<Access['tts']>
   tts.voices![engine] = id
   a.tts = tts
   saveAccess(a)
@@ -15328,11 +15348,11 @@ bot.on('callback_query:data', async ctx => {
   // The engine alternation is BUILT FROM THE TABLE, so a new provider is selectable the moment its
   // record exists — the previous hardcoded list is exactly what made `manual`/`minimax` writable by
   // applySetting and unreachable from the phone.
-  const ttsMatch = new RegExp(`^tts:(?:mode:(off|all|manual)|eng:(piper|openai|elevenlabs|${TTS_PROVIDERS.map(p => p.id).join('|')})|pv:(\\d)|(back))$`).exec(data)
+  const ttsMatch = new RegExp(`^tts:(?:mode:(off|all|manual)|eng:(${TTS_ENGINES.join('|')})|pv:(\\d)|spd:([0-9.]+)|(back))$`).exec(data)
   if (ttsMatch) {
     if (!(await cbAuth(ctx))) return
     await ctx.answerCallbackQuery().catch(() => {})
-    if (ttsMatch[4]) {   // back
+    if (ttsMatch[5]) {   // back
       await showSettings(ctx, 'edit')
       return
     }
@@ -15340,9 +15360,10 @@ bot.on('callback_query:data', async ctx => {
     const thread = ctx.callbackQuery.message?.message_thread_id
     const ttsOpts: SendOpts = { plain: true, ...(thread ? { threadId: String(thread) } : {}) }   // plain: one line interpolates a raw error string
     const notify: SettingNotify = t => void channel.sendText(chat, t, ttsOpts).catch(() => {})
-    // One tap changes exactly one of the three; applySetting owns the write and the Piper install.
+    // One tap changes exactly one of the four; applySetting owns the write and the Piper install.
     const err = ttsMatch[1] ? await applySetting('ttsMode', ttsMatch[1], { notify })
       : ttsMatch[2] ? await applySetting('ttsEngine', ttsMatch[2], { notify })
+      : ttsMatch[4] ? await applySetting('ttsSpeed', ttsMatch[4], { notify })
       : PIPER_VOICES[Number(ttsMatch[3])] ? await applySetting('ttsVoice', PIPER_VOICES[Number(ttsMatch[3])].id, { notify })
       : null
     if (err) { await ctx.answerCallbackQuery({ text: err, show_alert: true }).catch(() => {}); return }
@@ -20706,7 +20727,7 @@ async function webappReadSettings(): Promise<WebappSettingsView> {
       // providers were writable there and absent here, so a mode the daemon runs was unreachable
       // from either surface (found 2026-08-13, one deploy after it shipped).
       ttsMode: { value: a.tts?.mode ?? 'off', editable: true, options: ['off', 'all', 'manual'], label: 'manual = silent until you reply "tts" to a message' },
-      ttsEngine: { value: a.tts?.engine ?? 'piper', editable: true, options: ['piper', 'openai', 'elevenlabs', ...TTS_PROVIDERS.map(p => p.id)], label: 'piper installs locally; the others need a key' },
+      ttsEngine: { value: a.tts?.engine ?? 'piper', editable: true, options: [...TTS_ENGINES], label: 'piper installs locally; kokoro needs its own install; the others need a key' },
       // The voice is per-ENGINE now, so the app shows the selected engine's — it offered piper's
       // five whatever engine was on. An engine whose catalog is a live list (minimax: 332, and the
       // list is not authoritative) is not an options array: that browse needs auditioning, which is
@@ -20716,6 +20737,13 @@ async function webappReadSettings(): Promise<WebappSettingsView> {
         value: resolveVoice(ttsEng, a.tts), editable: ttsEnumerable,
         ...(ttsEnumerable ? { options: staticVoiceIds(ttsEng) } : {}),
         label: ttsEnumerable ? `voices for ${ttsEng}` : 'browse and hear voices in Telegram: /settings → 🔊 → 🗣',
+      },
+      // Speech speed, per engine. Not editable where the engine has no lever — the label IS the
+      // plain-words state, and applySetting refuses the write for any client that tries anyway.
+      ttsSpeed: {
+        value: `${resolveSpeed(ttsEng, a.tts)}×`, raw: String(resolveSpeed(ttsEng, a.tts)), editable: engineSpeedSupport(ttsEng),
+        ...(engineSpeedSupport(ttsEng) ? { options: SPEED_CHOICES.map(s => String(s)) } : {}),
+        label: engineSpeedSupport(ttsEng) ? `speech rate for ${ttsEng}` : `${ttsEng} has no speed control`,
       },
       stream: { value: replyMode(), editable: true, options: [...STREAM_ORDER] },
       sessionPin: { value: a.sessionPin !== false, editable: true },

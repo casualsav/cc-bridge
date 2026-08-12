@@ -11,19 +11,77 @@
 // tests `=== 'all'` on purpose: widening it to `!== 'off'` would speak every reply on his phone.
 import { join } from 'node:path'
 import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { tmpdir, homedir } from 'node:os'
 import { STATE_DIR, tConfig } from './common.ts'
 import { exec } from './proc.ts'
-import { ttsProvider, type TtsProviderId, type VoiceChoice } from './tts-providers.ts'
+import { TTS_PROVIDERS, ttsProvider, type TtsProviderId, type VoiceChoice } from './tts-providers.ts'
 
 export type TtsMode = 'off' | 'all' | 'manual'
-export type TtsEngine = 'piper' | 'openai' | 'elevenlabs' | TtsProviderId
+export type TtsEngine = 'piper' | 'kokoro' | 'openai' | 'elevenlabs' | TtsProviderId
+
+// EVERY selectable engine, in panel order — the one list applySetting's allowlist, the settings
+// payload's options, the panel keyboard and the callback regex all read, because the hardcoded
+// copies are exactly how 'manual'/'minimax' shipped writable-but-unreachable once already.
+export const TTS_ENGINES: readonly TtsEngine[] = ['piper', 'kokoro', 'openai', 'elevenlabs', ...TTS_PROVIDERS.map(p => p.id)]
 
 // OpenAI's voices are a fixed enum baked into the model — there is no list endpoint to ask, so this
 // IS the catalog. Previously the request hardcoded `alloy` with no override at all.
 export const OPENAI_VOICES: readonly VoiceChoice[] = [
   'alloy', 'ash', 'ballad', 'coral', 'echo', 'fable', 'nova', 'onyx', 'sage', 'shimmer', 'verse',
 ].map(id => ({ id, label: id[0]!.toUpperCase() + id.slice(1) }))
+
+// ---- Kokoro-82M: local, free, no key — like piper, so an ENGINE arm and not a provider entry ----
+//
+// It is NOT auto-provisioned: the install is a python venv + 338MB of weights built outside this
+// repo (kokoro-onnx + onnxruntime; see the spike at ~/projects/kokoro-spike for the working shape),
+// and a marketplace install that lacks it gets a plain-words "not installed" state, never a stack
+// trace. TELEGRAM_KOKORO_DIR points at the install; the default is where this box's install lives.
+// Render is SUBPROCESS-PER-RENDER through scripts/kokoro-render.py — the recorded decision (bus ask
+// 99): ~2.6s cold start on a manual-gesture path, versus a resident 0.5-1.2GB python that would be
+// this box's prime earlyoom target. The script is the seam if that trade ever flips.
+const KOKORO_DIR = (): string => tConfig('TELEGRAM_KOKORO_DIR') || join(homedir(), 'projects', 'kokoro-spike')
+const kokoroPython = (): string => join(KOKORO_DIR(), '.venv', 'bin', 'python')
+export function kokoroReady(): boolean {
+  const d = KOKORO_DIR()
+  return existsSync(kokoroPython()) && existsSync(join(d, 'models', 'kokoro-v1.0.onnx'))
+    && existsSync(join(d, 'models', 'voices-v1.0.bin')) && !!ffmpegBin()
+}
+
+// The FIXED English roster from the model card's VOICES.md (fetched 2026-08-12), grades verbatim —
+// there is no list endpoint, the weights ship every voice, and the grade is the one fact a picker
+// can offer that the id does not carry. Non-English voices exist in the same weights and stay
+// reachable through the typed-id path, which is primary for every engine anyway.
+export const KOKORO_VOICES: readonly VoiceChoice[] = [
+  { id: 'af_heart', label: 'Heart (US·f · A)', group: 'American' },
+  { id: 'af_bella', label: 'Bella (US·f · A-)', group: 'American' },
+  { id: 'af_nicole', label: 'Nicole (US·f · B-)', group: 'American' },
+  { id: 'af_aoede', label: 'Aoede (US·f · C+)', group: 'American' },
+  { id: 'af_kore', label: 'Kore (US·f · C+)', group: 'American' },
+  { id: 'af_sarah', label: 'Sarah (US·f · C+)', group: 'American' },
+  { id: 'af_alloy', label: 'Alloy (US·f · C)', group: 'American' },
+  { id: 'af_nova', label: 'Nova (US·f · C)', group: 'American' },
+  { id: 'af_sky', label: 'Sky (US·f · C-)', group: 'American' },
+  { id: 'af_jessica', label: 'Jessica (US·f · D)', group: 'American' },
+  { id: 'af_river', label: 'River (US·f · D)', group: 'American' },
+  { id: 'am_fenrir', label: 'Fenrir (US·m · C+)', group: 'American' },
+  { id: 'am_michael', label: 'Michael (US·m · C+)', group: 'American' },
+  { id: 'am_puck', label: 'Puck (US·m · C+)', group: 'American' },
+  { id: 'am_echo', label: 'Echo (US·m · D)', group: 'American' },
+  { id: 'am_eric', label: 'Eric (US·m · D)', group: 'American' },
+  { id: 'am_liam', label: 'Liam (US·m · D)', group: 'American' },
+  { id: 'am_onyx', label: 'Onyx (US·m · D)', group: 'American' },
+  { id: 'am_santa', label: 'Santa (US·m · D-)', group: 'American' },
+  { id: 'am_adam', label: 'Adam (US·m · F+)', group: 'American' },
+  { id: 'bf_emma', label: 'Emma (GB·f · B-)', group: 'British' },
+  { id: 'bf_isabella', label: 'Isabella (GB·f · C)', group: 'British' },
+  { id: 'bf_alice', label: 'Alice (GB·f · D)', group: 'British' },
+  { id: 'bf_lily', label: 'Lily (GB·f · D)', group: 'British' },
+  { id: 'bm_fable', label: 'Fable (GB·m · C)', group: 'British' },
+  { id: 'bm_george', label: 'George (GB·m · C)', group: 'British' },
+  { id: 'bm_lewis', label: 'Lewis (GB·m · D+)', group: 'British' },
+  { id: 'bm_daniel', label: 'Daniel (GB·m · D)', group: 'British' },
+]
+export const DEFAULT_KOKORO_VOICE: string = 'af_heart'   // the card's only A; a picked voice overrides
 
 // ONE resolver, replacing four mechanisms that disagreed (the parked item this unit un-parks):
 // `access.tts.voice` was consulted for piper only, elevenlabs read TELEGRAM_TTS_VOICE, openai
@@ -42,15 +100,44 @@ export function resolveVoice(engine: TtsEngine, tts?: { voice?: string; voices?:
   if (chosen) return chosen
   const provider = ttsProvider(engine)
   if (provider) return tConfig(provider.voiceEnv) || provider.defaultVoice
+  if (engine === 'kokoro') return tConfig('TELEGRAM_KOKORO_VOICE') || DEFAULT_KOKORO_VOICE
   if (engine === 'elevenlabs') return tConfig('TELEGRAM_TTS_VOICE') || '21m00Tcm4TlvDq8ikWAM'   // Rachel
   if (engine === 'openai') return tConfig('TELEGRAM_OPENAI_VOICE') || 'alloy'
   return DEFAULT_PIPER_VOICE
+}
+
+// ---- Speech speed — the same three-rung resolution as resolveVoice: per-engine setting, then the
+// engine's env var, then 1.0. Per-engine because the MECHANISM is per-engine (kokoro synthesizes at
+// speed natively, piper stretches phoneme length, minimax/openai take a request field) and so is
+// the sound of any given multiplier.
+// ElevenLabs is the one engine with NO lever on the model in use — engineSpeedSupport is what lets
+// every surface say that in plain words instead of silently ignoring the setting.
+const SPEED_ENV: Partial<Record<string, string>> = {
+  piper: 'TELEGRAM_PIPER_SPEED', kokoro: 'TELEGRAM_KOKORO_SPEED', openai: 'TELEGRAM_OPENAI_SPEED',
+}
+// The panel's choices; the bound every write is validated against. 0.5–2.0 is the intersection of
+// what the supporting engines accept (minimax documents 0.5–2, openai 0.25–4, kokoro's card
+// suggests the speed param for pacing; piper's length_scale is unbounded but extreme values slur).
+export const SPEED_CHOICES: readonly number[] = [0.8, 1, 1.2, 1.5, 2]
+export const SPEED_MIN = 0.5, SPEED_MAX = 2
+export function engineSpeedSupport(engine: TtsEngine): boolean {
+  const provider = ttsProvider(engine)
+  if (provider) return !!provider.speedEnv   // declaring the env IS declaring the capability
+  return engine !== 'elevenlabs'
+}
+export function resolveSpeed(engine: TtsEngine, tts?: { speeds?: Record<string, number> }): number {
+  const set = tts?.speeds?.[engine]
+  if (typeof set === 'number' && set >= SPEED_MIN && set <= SPEED_MAX) return set
+  const env = Number(tConfig(ttsProvider(engine)?.speedEnv ?? SPEED_ENV[engine] ?? '') || '')
+  if (env >= SPEED_MIN && env <= SPEED_MAX) return env
+  return 1
 }
 
 // The engine's selectable voices, or null when it cannot enumerate them and a typed id is the only
 // way in. Async because a provider's list is a network call.
 export async function engineVoices(engine: TtsEngine): Promise<VoiceChoice[] | null> {
   if (engine === 'piper') return PIPER_VOICES.map(v => ({ id: v.id, label: v.label }))
+  if (engine === 'kokoro') return [...KOKORO_VOICES]
   if (engine === 'openai') return [...OPENAI_VOICES]
   const provider = ttsProvider(engine)
   if (!provider?.listVoices) return null            // elevenlabs, and any provider that cannot list
@@ -116,6 +203,9 @@ export function piperReady(voice: string = DEFAULT_PIPER_VOICE): boolean {
 export function engineStatus(engine: TtsEngine, voice?: string): { ready: boolean; missing: string } {
   const provider = ttsProvider(engine)
   if (provider) return { ready: !!tConfig(provider.tokenEnv), missing: provider.tokenEnv }
+  // Kokoro never auto-installs (a venv + 338MB of weights is a deliberate act, not a side effect of
+  // a settings tap), so `missing` is the pointer a marketplace user needs, in plain words.
+  if (engine === 'kokoro') return { ready: kokoroReady(), missing: 'a local Kokoro install (point TELEGRAM_KOKORO_DIR at a kokoro-onnx setup)' }
   if (engine === 'piper') return { ready: piperReady(voice), missing: 'local engine (auto-installs on select)' }
   if (engine === 'openai') return { ready: !!tConfig('OPENAI_API_KEY'), missing: 'OPENAI_API_KEY' }
   return { ready: !!tConfig('ELEVENLABS_API_KEY'), missing: 'ELEVENLABS_API_KEY' }
@@ -189,7 +279,11 @@ export function isTtsTrigger(text: string): boolean {
 // `voice` applies to piper (a PIPER_VOICES id; default Lessac); a registered provider takes its voice
 // from its own env var. `cap` bounds what is spoken — the auto-speak path keeps speakable's default,
 // while a gesture that names one message renders it whole (the owner's ruling).
-export async function synthesize(text: string, engine: TtsEngine, voice?: string, cap?: number): Promise<string> {
+// `speed` multiplies speech rate (resolveSpeed's output; 1 = the engine's natural pace). Each
+// engine takes it through its OWN mechanism — kokoro's native speed param, piper's inverse
+// length_scale, a request field for openai and any provider declaring speedEnv. ElevenLabs has no
+// lever (engineSpeedSupport says so to every surface) and ignores it here by construction.
+export async function synthesize(text: string, engine: TtsEngine, voice?: string, cap?: number, speed = 1): Promise<string> {
   const provider = ttsProvider(engine)
   const t = speakable(text, cap ?? (provider ? provider.maxChars : undefined))
   if (!t) throw new Error('nothing speakable')
@@ -199,7 +293,7 @@ export async function synthesize(text: string, engine: TtsEngine, voice?: string
   if (provider) {
     const key = tConfig(provider.tokenEnv)
     if (!key) throw new Error(`${provider.tokenEnv} not set`)
-    const audio = await provider.render(t, { key, voice: voice || tConfig(provider.voiceEnv) || provider.defaultVoice })
+    const audio = await provider.render(t, { key, voice: voice || tConfig(provider.voiceEnv) || provider.defaultVoice, speed })
     if (audio.format === 'opus') { writeFileSync(out, audio.bytes); return out }
     const raw = `${out}.${audio.format}`
     writeFileSync(raw, audio.bytes)
@@ -213,8 +307,10 @@ export async function synthesize(text: string, engine: TtsEngine, voice?: string
       method: 'POST',
       headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
       // The voice is the CALLER's now — it was hardcoded here, which is why openai was the one
-      // engine with no voice setting at all.
-      body: JSON.stringify({ model: 'gpt-4o-mini-tts', voice: voice || resolveVoice('openai'), input: t, response_format: 'opus' }),
+      // engine with no voice setting at all. `speed` rides only when it says something (the API's
+      // documented 0.25–4 field; default 1) — code-reviewed against the API reference, not run
+      // against a live key on this box.
+      body: JSON.stringify({ model: 'gpt-4o-mini-tts', voice: voice || resolveVoice('openai'), input: t, response_format: 'opus', ...(speed !== 1 ? { speed } : {}) }),
     })
     if (!res.ok) throw new Error(`openai tts ${res.status}: ${(await res.text()).slice(0, 200)}`)
     writeFileSync(out, Buffer.from(await res.arrayBuffer()))
@@ -233,13 +329,38 @@ export async function synthesize(text: string, engine: TtsEngine, voice?: string
     writeFileSync(out, Buffer.from(await res.arrayBuffer()))
     return out
   }
-  // piper: text on stdin via a temp file, wav out, then ffmpeg → opus.
+  if (engine === 'kokoro') {
+    if (!kokoroReady()) throw new Error('kokoro not installed')
+    // The voice id rides a shell line and can be a TYPED id, so it is shape-checked rather than
+    // catalog-checked (the roster is not authoritative; an apostrophe is not a voice).
+    const kv = voice || resolveVoice('kokoro')
+    if (!/^[A-Za-z0-9_-]+$/.test(kv)) throw new Error('voice id not exist')
+    const txt = `${out}.txt`, wav = `${out}.wav`
+    const script = join(import.meta.dir, 'scripts', 'kokoro-render.py')
+    writeFileSync(txt, t)
+    try {
+      // Text through a temp file on stdin, piper's own idiom (never argv — a reply is arbitrary
+      // bytes). The script logs voice+speed to stderr, which is where a render's parameters are
+      // observable. 5min bound: the spike measured ~2min for 500 words, plus the 2.6s cold start;
+      // the manual cap (4096 chars) fits inside it.
+      await exec('bash', ['-c', `'${kokoroPython()}' '${script}' '${KOKORO_DIR()}' '${kv}' '${speed}' '${wav}' < '${txt}'`], { timeout: 300_000 })
+      await toOpus(wav, out)
+    } finally {
+      try { unlinkSync(txt) } catch {}
+      try { unlinkSync(wav) } catch {}
+    }
+    return out
+  }
+  // piper: text on stdin via a temp file, wav out, then ffmpeg → opus. Speed is the INVERSE of
+  // --length_scale ("phoneme length", verified against the 2023.11.14-2 binary's --help): 1.5×
+  // speech is 1/1.5 of the length.
   const pv = voice && PIPER_VOICES.some(v => v.id === voice) ? voice : DEFAULT_PIPER_VOICE
   if (!piperReady(pv)) throw new Error(`piper not provisioned (voice ${pv})`)
   const txt = `${out}.txt`, wav = `${out}.wav`
   writeFileSync(txt, t)
   try {
-    await exec('bash', ['-c', `'${PIPER_BIN}' --model '${voiceModel(pv)}' --output_file '${wav}' < '${txt}'`], { timeout: 120_000 })
+    const scale = speed !== 1 ? ` --length_scale ${(1 / speed).toFixed(3)}` : ''
+    await exec('bash', ['-c', `'${PIPER_BIN}' --model '${voiceModel(pv)}'${scale} --output_file '${wav}' < '${txt}'`], { timeout: 120_000 })
     await toOpus(wav, out)
   } finally {
     try { unlinkSync(txt) } catch {}

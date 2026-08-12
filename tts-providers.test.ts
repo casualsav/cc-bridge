@@ -44,6 +44,21 @@ test('the request matches the shape a working implementation sends', async () =>
   expect(body.model).toBe('speech-02-hd')
 })
 
+// The speed lever, in the SYNTHESIS PAYLOAD — the observable that matters. voice_setting.speed is
+// the API's own field (documented 0.5–2); absent a resolved speed the request keeps saying 1.
+test('the resolved speed rides in voice_setting.speed, and 1 is the default', async () => {
+  const { impl, seen } = stubFetch({ body: okBody('4944330300') })
+  await minimax.render('x', { key: 'K', voice: 'v', speed: 1.5, fetchImpl: impl })
+  expect(JSON.parse(seen.init!.body as string).voice_setting.speed).toBe(1.5)
+  const second = stubFetch({ body: okBody('4944330300') })
+  await minimax.render('x', { key: 'K', voice: 'v', fetchImpl: second.impl })
+  expect(JSON.parse(second.seen.init!.body as string).voice_setting.speed).toBe(1)
+})
+
+test('declaring speedEnv is declaring the capability (minimax has the field)', () => {
+  expect(minimax.speedEnv).toBe('TELEGRAM_MINIMAX_SPEED')
+})
+
 test('audio comes back hex-encoded, and is decoded to mp3 bytes', async () => {
   const { impl } = stubFetch({ body: okBody('494433') })   // "ID3" — an mp3 header
   const out = await minimax.render('x', { key: 'K', voice: 'v', fetchImpl: impl })
@@ -102,19 +117,21 @@ test('every mode and engine applySetting accepts is reachable from BOTH surfaces
   // is how the two drift apart in the first place.
   const modes = /oneOf\(value, \['off', 'all', 'manual'\]\)/.test(src)
   expect(modes).toBe(true)
-  const engines = /const engines = \['piper', 'openai', 'elevenlabs', \.\.\.TTS_PROVIDERS\.map\(p => p\.id\)\]/.test(src)
-  expect(engines).toBe(true)
+  // Engines went one step further than list-parity: the writer, both surfaces and the callback
+  // regex all read ONE exported list (voice-out.ts's TTS_ENGINES), so they cannot drift at all.
+  expect(src).toContain('oneOf(value, TTS_ENGINES)')
 
   // Surface 1 — the Telegram panel: a button per mode, and a callback regex that admits it.
   for (const mode of ['off', 'all', 'manual']) expect(src).toContain(`'tts:mode:${mode}'`)
   expect(src).toContain("mode:(off|all|manual)")
-  // The engine alternation is BUILT from the table, so it cannot omit a provider.
-  expect(src).toContain('eng:(piper|openai|elevenlabs|${TTS_PROVIDERS.map(p => p.id).join(\'|\')})')
+  // The engine alternation is BUILT from the one list, so it cannot omit an engine.
+  expect(src).toContain("eng:(${TTS_ENGINES.join('|')})")
   expect(src).toContain("`tts:eng:${p.id}`")
+  expect(src).toContain("'tts:eng:kokoro'")
 
   // Surface 2 — the mini app's option lists.
   expect(src).toContain("options: ['off', 'all', 'manual']")
-  expect(src).toContain("options: ['piper', 'openai', 'elevenlabs', ...TTS_PROVIDERS.map(p => p.id)]")
+  expect(src).toContain('options: [...TTS_ENGINES]')
 })
 
 test('a registered provider reports ITS OWN key, not the elevenlabs catch-all', () => {

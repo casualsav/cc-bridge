@@ -35,9 +35,14 @@ export type TtsProvider = {
   label: string
   tokenEnv: string          // the .env variable holding this provider's key
   voiceEnv: string          // the .env variable overriding its voice id
+  // Present ⇔ the provider's API takes a speech-speed parameter: the env var is the override rung
+  // of resolveSpeed (voice-out.ts), and declaring it is declaring the capability — a provider
+  // without one is reported as "no speed control" in plain words rather than silently ignoring the
+  // setting. `render` receives the resolved multiplier via cfg.speed either way.
+  speedEnv?: string
   defaultVoice: string
   maxChars: number          // the provider's own documented per-request ceiling
-  render(text: string, cfg: { key: string; voice: string; fetchImpl?: typeof fetch }): Promise<TtsAudio>
+  render(text: string, cfg: { key: string; voice: string; speed?: number; fetchImpl?: typeof fetch }): Promise<TtsAudio>
   // OPTIONAL, and the optionality is the design: piper has a fixed five, openai a fixed enum,
   // minimax a live endpoint, elevenlabs a keyed one nobody here has a key for. A provider that
   // cannot enumerate simply omits this and the panel offers typed ids instead — no special case.
@@ -61,6 +66,7 @@ const MINIMAX: TtsProvider = {
   label: 'MiniMax',
   tokenEnv: 'MINIMAX_API_KEY',
   voiceEnv: 'TELEGRAM_MINIMAX_VOICE',
+  speedEnv: 'TELEGRAM_MINIMAX_SPEED',
   defaultVoice: 'English_expressive_narrator',
   maxChars: 10_000,
   async render(text, cfg) {
@@ -71,7 +77,9 @@ const MINIMAX: TtsProvider = {
       body: JSON.stringify({
         model: 'speech-02-hd',
         text,
-        voice_setting: { voice_id: cfg.voice, speed: 1, vol: 1, pitch: 0 },
+        // speed is the API's own voice_setting field (documented 0.5–2; resolveSpeed enforces the
+        // same bound before it gets here).
+        voice_setting: { voice_id: cfg.voice, speed: cfg.speed ?? 1, vol: 1, pitch: 0 },
         audio_setting: { sample_rate: 32000, bitrate: 128000, format: 'mp3', channel: 1 },
       }),
     })
