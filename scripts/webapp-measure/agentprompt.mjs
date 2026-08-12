@@ -80,10 +80,12 @@ const cardsSeen = await p.evaluate(() => [...document.querySelectorAll("#dfeed .
   name: m.querySelector(".ah .nm")?.textContent ?? "", pv: !!m.querySelector(".ah .pv"),
 })));
 chk(cardsSeen.length === 2, `two report cards rendered (${cardsSeen.length})`);
-const linked = cardsSeen.find(c => c.name.includes("Map the feed"));
+// The linked card is headed by the agent TYPE (the owner, 2026-08-12), the orphan by the summary's
+// task description — the only name it has.
+const linked = cardsSeen.find(c => c.name.includes("explorer"));
 const orphan = cardsSeen.find(c => c.name.includes("Orphan report"));
-chk(linked && linked.pv, "the card whose Task call exists shows the Prompt › button");
-chk(orphan && !orphan.pv, "CONTROL — a notification resolving to no spawn shows NO button");
+chk(linked && linked.pv, "the card whose Task call exists shows the Prompt › button and the TYPE as its name");
+chk(orphan && !orphan.pv, "CONTROL — a notification resolving to no spawn shows NO button and keeps the summary name");
 chk(!(await p.evaluate(t => document.body.innerText.includes(t), PROMPT_A)),
   "CONTROL — the prompt text is invisible before the tap");
 await p.evaluate(() => document.querySelector("#dfeed .msg.agent .ah .pv")?.click());
@@ -94,7 +96,7 @@ let sheet = await p.evaluate(() => ({
   body: document.querySelector("#calllist .pbody")?.textContent ?? "",
 }));
 chk(sheet.up, "tapping Prompt › opens the sheet");
-chk(sheet.title === "Agent · Map the feed", `the sheet is titled for the agent (${JSON.stringify(sheet.title)})`);
+chk(sheet.title === "Agent · explorer", `the sheet is titled for the agent (${JSON.stringify(sheet.title)})`);
 chk(sheet.body.includes(PROMPT_A), "…and shows the prompt the agent was handed");
 await p.evaluate(() => closeCalls());
 await p.waitForTimeout(250);
@@ -104,25 +106,21 @@ await p.waitForTimeout(150);
 chk(await p.evaluate(() => !document.getElementById("calls").classList.contains("up") && !!document.querySelector("#dfeed .copyb")),
   "a tap on the card BODY still copies and opens no sheet");
 
-// ---- The live turn's chip → calls sheet → prompt ----
+// ---- The live turn's chip → the prompt in ONE tap (a single-spawn chip skips the list) ----
 const chipLabels = await p.evaluate(() => [...document.querySelectorAll("#dfeed .msg.turn .chip .cl")].map(e => e.textContent));
 chk(chipLabels.includes("Delegated coder"), `the spawn's chip names the agent type (${JSON.stringify(chipLabels)})`);
 await p.evaluate(() => [...document.querySelectorAll("#dfeed .msg.turn .chip")]
   .find(c => c.textContent.includes("Delegated"))?.click());
 await p.waitForTimeout(250);
-const rows = await p.evaluate(() => [...document.querySelectorAll("#calllist .row")].map(r => ({
-  tag: r.tagName, text: r.textContent })));
-chk(rows.some(r => r.tag === "BUTTON" && r.text.includes("coder") && r.text.includes("›")),
-  "the Delegated row is a button with the chevron affordance");
-await p.evaluate(() => document.querySelector("#calllist button.row")?.click());
-await p.waitForTimeout(150);
 sheet = await p.evaluate(() => ({
   title: document.getElementById("calltitle").textContent,
   body: document.querySelector("#calllist .pbody")?.textContent ?? "",
   bolds: document.querySelectorAll("#calllist .pbody b").length,
+  listRows: document.querySelectorAll("#calllist .row").length,
 }));
+chk(sheet.listRows === 0 && sheet.body.includes(PROMPT_B),
+  "one tap from the feed lands ON the prompt — no list in between");
 chk(sheet.title === "Delegated coder", `the prompt view is titled for the spawn (${JSON.stringify(sheet.title)})`);
-chk(sheet.body.includes(PROMPT_B), "…and shows the prompt verbatim");
 chk(sheet.bolds === 0 && sheet.body.includes("<b>anything</b>"),
   "markup in a prompt renders as TEXT, never as elements");
 await p.evaluate(() => closeCalls());

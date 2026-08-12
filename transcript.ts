@@ -903,15 +903,22 @@ function foldQueuedDuplicates(items: ConversationItem[]): ConversationItem[] {
 }
 export function recentConversation(file: string, max = 12): ConversationItem[] {
   const rows: ConversationItem[] = []
-  // Task tool_use id → the prompt it was handed, collected in the same walk. The tool_use always
-  // precedes its notification, so a running map is complete by the time an agent row resolves.
-  const prompts = new Map<string, string>()
+  // Task tool_use id → what its notification's card needs: the prompt it was handed, and the
+  // header label — the agent TYPE, or the model where the spawn wasn't a named agent (the owner,
+  // 2026-08-12: "Agent · explorer", not the task description the summary carries). The tool_use
+  // always precedes its notification, so a running map is complete by the time an agent row
+  // resolves.
+  const spawns = new Map<string, { prompt: string; label?: string }>()
   for (const e of readEntries(file)) {
     if (e.type === 'assistant' && Array.isArray(e.message?.content)) {
       for (const b of e.message!.content as any[]) {
         if (b?.type === 'tool_use' && (b.name === 'Task' || b.name === 'Agent') && typeof b.id === 'string') {
-          const p = agentInfo(b.input)?.prompt
-          if (p) prompts.set(b.id, p)
+          const info = agentInfo(b.input)
+          if (info?.prompt) {
+            const model = typeof (b.input as Record<string, unknown>)?.model === 'string' ? (b.input as Record<string, string>).model : ''
+            const label = info.type && info.type !== 'general-purpose' ? info.type : model || info.type
+            spawns.set(b.id, { prompt: info.prompt, ...(label ? { label } : {}) })
+          }
         }
       }
     }
@@ -927,8 +934,9 @@ export function recentConversation(file: string, max = 12): ConversationItem[] {
   // same display clamp the text does.
   return foldQueuedDuplicates(foldCommands(rows))
     .map(({ tuid, ...it }) => {
-      const p = tuid ? prompts.get(tuid) : undefined
-      return p ? { ...it, prompt: p.length > CONVO_CAP ? p.slice(0, CONVO_CAP) + '…' : p } : it
+      const s = tuid ? spawns.get(tuid) : undefined
+      if (!s) return it   // no linkage: the summary's task description stays the header
+      return { ...it, prompt: s.prompt.length > CONVO_CAP ? s.prompt.slice(0, CONVO_CAP) + '…' : s.prompt, ...(s.label ? { agent: s.label } : {}) }
     })
     .map(it => it.text.length > CONVO_CAP ? { ...it, text: it.text.slice(0, CONVO_CAP) + '…', clipped: true as const } : it)
     .slice(-max)

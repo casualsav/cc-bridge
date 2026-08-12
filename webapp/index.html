@@ -3357,7 +3357,16 @@ function turnRow(i, n) {
 function openCalls(t, b) {
   const it = (lastDrill ? lastDrill.items : [])[t], blk = it && (it.blocks || [])[b];
   if (!blk) return;
-  showCalls(blk.label || "", blk.calls || []);
+  // A delegation chip holding ONE spawn opens the prompt itself — the one-row list in between was
+  // a tap that answered nothing (the owner, 2026-08-12). Two or more spawns still need the list to
+  // pick from, and a spawn the server sent no prompt for still needs the row to say who ran.
+  const calls = blk.calls || [];
+  if (blk.kind === "agent" && calls.length === 1 && calls[0].prompt) { showCallPrompt(calls[0]); return; }
+  showCalls(blk.label || "", calls);
+}
+// One call's prompt view — the shared destination of the direct chip tap and a Delegated row tap.
+function showCallPrompt(c) {
+  showPrompt("Delegated " + (c.target && c.target !== "—" ? c.target : "task"), c.prompt);
 }
 // The whole turn, in the order it ran — every chip's calls concatenated, which is the same list the
 // live chips showed between them and the only one left once they have folded. Flattened here rather
@@ -3408,7 +3417,7 @@ function openAgentPrompt(n) {
 }
 function openCallPrompt(k) {
   const c = sheetCalls[k];
-  if (c && c.prompt) showPrompt("Delegated " + (c.target && c.target !== "—" ? c.target : "task"), c.prompt);
+  if (c && c.prompt) showCallPrompt(c);
 }
 function closeCalls() {
   const s = $("calls");

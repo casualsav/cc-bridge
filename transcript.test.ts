@@ -478,22 +478,32 @@ describe('a subagent report is not the owner talking', () => {
   })
 
   // The card carries the prompt its Task call was handed — resolved via the notification's
-  // <tool-use-id> against the tool_use block's own id, and the id itself still never ships.
+  // <tool-use-id> against the tool_use block's own id, and the id itself still never ships. The
+  // header takes the agent TYPE over the summary's task description (the owner, 2026-08-12).
+  const spawnEntry = (input: Record<string, unknown>) => ({ type: 'assistant', uuid: 'a1', timestamp: '2026-07-29T00:10:00.000Z',
+    message: { stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 'toolu_01V9wPXt1E5YSfnecJLLRJsJ', name: 'Task', input }] } })
   test('the card carries the prompt of its Task call, and the id still never ships', () => {
-    const spawn = { type: 'assistant', uuid: 'a1', timestamp: '2026-07-29T00:10:00.000Z',
-      message: { stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 'toolu_01V9wPXt1E5YSfnecJLLRJsJ', name: 'Task',
-        input: { subagent_type: 'explorer', prompt: 'Map the daemon concurrency and report.' } }] } }
-    const [it] = recentConversation(fixture([spawn, user(NOTIFICATION, 'u1')]), 5)
+    const [it] = recentConversation(fixture([spawnEntry({ subagent_type: 'explorer', prompt: 'Map the daemon concurrency and report.' }), user(NOTIFICATION, 'u1')]), 5)
     expect(it.role).toBe('agent')
     expect(it.prompt).toBe('Map the daemon concurrency and report.')
+    expect(it.agent).toBe('explorer')
     const whole = JSON.stringify(it)
     expect(whole.includes('toolu_01')).toBe(false)
     expect(whole.includes('tuid')).toBe(false)
   })
 
-  test('a notification with no matching Task call ships no prompt and no plumbing', () => {
+  // "The agent name, or the model if it's not a named agent" — general-purpose is the unnamed case.
+  test('an unnamed agent labels by model, and by type when no model is named', () => {
+    const [byModel] = recentConversation(fixture([spawnEntry({ subagent_type: 'general-purpose', model: 'sonnet', prompt: 'p' }), user(NOTIFICATION, 'u1')]), 5)
+    expect(byModel.agent).toBe('sonnet')
+    const [byType] = recentConversation(fixture([spawnEntry({ subagent_type: 'general-purpose', prompt: 'p' }), user(NOTIFICATION, 'u1')]), 5)
+    expect(byType.agent).toBe('general-purpose')
+  })
+
+  test('a notification with no matching Task call ships no prompt and keeps the summary name', () => {
     const [it] = recentConversation(fixture([user(NOTIFICATION, 'u1')]), 5)
     expect(it.prompt).toBeUndefined()
+    expect(it.agent).toBe('Map daemon concurrency & hot loop')
     expect(JSON.stringify(it).includes('tuid')).toBe(false)
   })
 
