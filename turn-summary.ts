@@ -10,7 +10,7 @@
 //
 // Markup is deliberately absent here. `text` fields are plain and UNESCAPED; each renderer escapes
 // on the way out (mirror.ts wraps them in <i>/<code>, the mini app text-escapes into the DOM).
-import { CONVO_CAP, type FeedItem } from './transcript.ts'
+import { CONVO_CAP, agentLabel, type FeedItem } from './transcript.ts'
 
 export type TurnBlock =
   | { kind: 'thought'; text: string }                    // one visual paragraph of narration
@@ -156,9 +156,10 @@ function chipLabel(kind: string, calls: TurnCall[]): string {
   if (kind === 'read') return n === 1 ? 'Read a file' : `Read ${n} files`
   if (kind === 'search') return n === 1 ? 'Searched' : `Searched ${n} times`
   if (kind === 'run') return n === 1 ? 'Ran a command' : `Ran ${n} commands`
-  // A single spawn names its agent on the chip itself — "Delegated a task" says nothing the reader
-  // can use, and the target is already the subagent type (or the task description as its fallback).
-  if (kind === 'agent') return n === 1 ? (calls[0].target !== '—' ? `Delegated ${calls[0].target}` : 'Delegated a task') : `Delegated ${n} tasks`
+  // A single spawn wears the CARD's own vocabulary — "Agent · explorer", the one label rule
+  // (agentLabel) — so the chip and the report card it becomes cannot call the spawn two things
+  // (the owner, 2026-08-12, on "Delegated explorer").
+  if (kind === 'agent') return n === 1 ? (calls[0].target !== '—' ? `Agent · ${calls[0].target}` : 'Agent') : `Agents ×${n}`
   const tool = calls[0].verb
   return n === 1 ? tool : `${tool} ×${n}`
 }
@@ -200,7 +201,8 @@ export function turnParts(feed: FeedItem[]): TurnPart[] {
     const [kind, verb] = chipKind(it.tool)
     const detail = it.detail || ''
     const target = kind === 'edit' || kind === 'read' ? (detail.split('/').pop() || detail)
-      : kind === 'agent' ? (it.agent?.type?.trim() || detail)
+      // The card's label rule: the agent name, or the model when it's not a named agent.
+      : kind === 'agent' ? (agentLabel({ type: it.agent?.type?.trim(), model: it.agent?.model }) || detail)
       : detail
     const call: TurnCall = { verb, target: target || '—' }
     if (it.plus !== undefined) call.plus = it.plus

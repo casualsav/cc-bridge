@@ -3365,8 +3365,9 @@ function openCalls(t, b) {
   showCalls(blk.label || "", calls);
 }
 // One call's prompt view — the shared destination of the direct chip tap and a Delegated row tap.
+// Titled in the card's own vocabulary, the same label the chip wears.
 function showCallPrompt(c) {
-  showPrompt("Delegated " + (c.target && c.target !== "—" ? c.target : "task"), c.prompt);
+  showPrompt("Agent" + (c.target && c.target !== "—" ? " · " + c.target : ""), c.prompt);
 }
 // The whole turn, in the order it ran — every chip's calls concatenated, which is the same list the
 // live chips showed between them and the only one left once they have folded. Flattened here rather

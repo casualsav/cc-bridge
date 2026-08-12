@@ -915,8 +915,7 @@ export function recentConversation(file: string, max = 12): ConversationItem[] {
         if (b?.type === 'tool_use' && (b.name === 'Task' || b.name === 'Agent') && typeof b.id === 'string') {
           const info = agentInfo(b.input)
           if (info?.prompt) {
-            const model = typeof (b.input as Record<string, unknown>)?.model === 'string' ? (b.input as Record<string, string>).model : ''
-            const label = info.type && info.type !== 'general-purpose' ? info.type : model || info.type
+            const label = agentLabel(info)
             spawns.set(b.id, { prompt: info.prompt, ...(label ? { label } : {}) })
           }
         }
@@ -1186,7 +1185,7 @@ export function lastContextTokens(file: string): number | null {
 // skipped.
 // `lines` is the net line delta of a file edit (+grew / −shrank; null for non-edit tools),
 // shown by the thoughts-stream tool summaries.
-export type FeedItem = { kind: 'text'; text: string } | { kind: 'tool'; tool: string; detail: string; lines?: number | null; plus?: number; minus?: number; agent?: { type: string; prompt: string } }
+export type FeedItem = { kind: 'text'; text: string } | { kind: 'tool'; tool: string; detail: string; lines?: number | null; plus?: number; minus?: number; agent?: { type: string; prompt: string; model?: string } }
 
 // Net line delta of a file-mutating tool call, approximated from the tool INPUT (new vs old
 // string line counts) — no tool_result parsing needed, and close enough for a feed badge.
@@ -1221,12 +1220,21 @@ function editLinePair(name: string, input: unknown): { plus: number; minus: numb
 }
 // A subagent (Task/Agent) spawn's identity for the mirror chevron: which agent type + the full prompt
 // it was handed. Carried RAW (untruncated) — the mirror caps + escapes it at render.
-function agentInfo(input: unknown): { type: string; prompt: string } | undefined {
+function agentInfo(input: unknown): { type: string; prompt: string; model?: string } | undefined {
   if (!input || typeof input !== 'object') return undefined
   const o = input as Record<string, unknown>
   const type = typeof o.subagent_type === 'string' ? o.subagent_type : ''
   const prompt = typeof o.prompt === 'string' ? o.prompt : typeof o.description === 'string' ? o.description : ''
-  return (type || prompt) ? { type, prompt } : undefined
+  const model = typeof o.model === 'string' ? o.model : undefined
+  return (type || prompt) ? { type, prompt, ...(model ? { model } : {}) } : undefined
+}
+
+// "The agent name, or the model if it's not a named agent" (the owner, 2026-08-12) — the ONE label
+// rule the report card's header and the turn chip both apply, so the two surfaces cannot disagree
+// about what a spawn is called. general-purpose is the unnamed case.
+export function agentLabel(info: { type?: string; model?: string } | undefined): string {
+  if (!info) return ''
+  return info.type && info.type !== 'general-purpose' ? info.type : info.model || info.type || ''
 }
 // `concluded` = the turn has ended (pass it at card finalize, false while the turn is live). The
 // turn's REPLY — its last main-thread assistant text block — is relayed as its own message, so when

@@ -99,15 +99,23 @@ test('a feed with no tools produces only p parts — no empty chip', () => {
   expect(turnParts([])).toEqual([])
 })
 
-test('an agent chip names its type, carries the prompt; an unknown tool is its own kind and verb', () => {
+test('an agent chip wears the card vocabulary, carries the prompt; an unknown tool is its own kind and verb', () => {
   const parts = turnParts([
     tool('Task', 'fix it', { agent: { type: 'coder', prompt: 'Fix the failing test in x.ts' } }),
     tool('WebFetch', 'https://e.com'),
   ])
   expect(parts).toEqual([
-    { t: 'chip', kind: 'agent', label: 'Delegated coder', calls: [{ verb: 'Delegated', target: 'coder', prompt: 'Fix the failing test in x.ts' }] },
+    { t: 'chip', kind: 'agent', label: 'Agent · coder', calls: [{ verb: 'Delegated', target: 'coder', prompt: 'Fix the failing test in x.ts' }] },
     { t: 'chip', kind: 'tool', label: 'WebFetch', calls: [{ verb: 'WebFetch', target: 'https://e.com' }] },
   ])
+})
+
+// The chip applies the SAME label rule the report card does: a general-purpose spawn is not a
+// named agent, so its model is the name.
+test('an unnamed spawn chips by model', () => {
+  const parts = turnParts([tool('Task', 'do it', { agent: { type: 'general-purpose', prompt: 'p', model: 'sonnet' } })])
+  expect((parts[0] as any).label).toBe('Agent · sonnet')
+  expect((parts[0] as any).calls[0].target).toBe('sonnet')
 })
 
 // The prompt takes the payload's display clamp — these blocks ride a 3s poll.
@@ -132,7 +140,7 @@ test('labels pluralise at n=1 and n=2 for every kind', () => {
   expect([label('Read', 1), label('Read', 2)]).toEqual(['Read a file', 'Read 2 files'])
   expect([label('Grep', 1), label('Grep', 2)]).toEqual(['Searched', 'Searched 2 times'])
   expect([label('Bash', 1), label('Bash', 2)]).toEqual(['Ran a command', 'Ran 2 commands'])
-  expect([label('Task', 1), label('Task', 2)]).toEqual(['Delegated x', 'Delegated 2 tasks'])
+  expect([label('Task', 1), label('Task', 2)]).toEqual(['Agent · x', 'Agents ×2'])
   expect([label('WebFetch', 1), label('WebFetch', 2)]).toEqual(['WebFetch', 'WebFetch ×2'])
 })
 

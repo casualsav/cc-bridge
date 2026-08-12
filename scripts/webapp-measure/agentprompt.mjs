@@ -108,9 +108,9 @@ chk(await p.evaluate(() => !document.getElementById("calls").classList.contains(
 
 // ---- The live turn's chip → the prompt in ONE tap (a single-spawn chip skips the list) ----
 const chipLabels = await p.evaluate(() => [...document.querySelectorAll("#dfeed .msg.turn .chip .cl")].map(e => e.textContent));
-chk(chipLabels.includes("Delegated coder"), `the spawn's chip names the agent type (${JSON.stringify(chipLabels)})`);
+chk(chipLabels.includes("Agent · coder"), `the spawn's chip wears the card vocabulary (${JSON.stringify(chipLabels)})`);
 await p.evaluate(() => [...document.querySelectorAll("#dfeed .msg.turn .chip")]
-  .find(c => c.textContent.includes("Delegated"))?.click());
+  .find(c => c.textContent.includes("Agent"))?.click());
 await p.waitForTimeout(250);
 sheet = await p.evaluate(() => ({
   title: document.getElementById("calltitle").textContent,
@@ -120,7 +120,7 @@ sheet = await p.evaluate(() => ({
 }));
 chk(sheet.listRows === 0 && sheet.body.includes(PROMPT_B),
   "one tap from the feed lands ON the prompt — no list in between");
-chk(sheet.title === "Delegated coder", `the prompt view is titled for the spawn (${JSON.stringify(sheet.title)})`);
+chk(sheet.title === "Agent · coder", `the prompt view is titled for the spawn (${JSON.stringify(sheet.title)})`);
 chk(sheet.bolds === 0 && sheet.body.includes("<b>anything</b>"),
   "markup in a prompt renders as TEXT, never as elements");
 await p.evaluate(() => closeCalls());
