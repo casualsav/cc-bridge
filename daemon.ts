@@ -42,6 +42,7 @@ import { preserveGlobalEffort, reconcileEffortScope } from './effort-scope.ts'
 import { planDrift, driftStateAfter, type DriftState } from './drift-guard.ts'
 import { decideModel, decideEffort, upgradeNeedsConfirm, heldSpawnModel, heldSpawnNeedsLine, holdTapData, parseHoldTap, launchFallback, spawnCardHeader, relaunchModel, launchDefaultModel, launchDefaultEffort, launchDefaultMode, fablePolicy, fableRowState, onOff, type FablePolicy, AUTO_FALLBACK, AUTO_EFFORT_FALLBACK, FABLE, HAIKU, isClaudeFamily, type ModelDecision, type HoldOutcome } from './spawn-model-policy.ts'
 import { renderSessionsView } from './sessions-view.ts'
+import { buildChatRows, classifyWorker, rankWorkers, renderCard, cardButtons, decodeExpanded, swapConfirmText, swapBusyText, CHAT_ROWS, CHAT_ROWS_MORE, WORKER_ROWS, WORKER_ROWS_MORE, type Expanded, type Section, type WorkerRow, type ButtonSpec } from './resume-card.ts'
 import { detectCurrentMode, onNormalPrompt, inputBoxContent, inputBoxOccupant, isModelSwitchConfirm, planModelDialogStep, isModelConsentDialog, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, paneRunsTypedInput, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType } from './prompt.ts'
 import { modelSwitchEvidence, findSessionFile, resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, lastAssistantStopReason, turnAnchorUuid, liveSubagents, currentTurnFeed, currentTurnSpan, currentTurnActivity, concludedTurnWork, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
 // CC-only, called directly rather than through agent-transcript.ts's dispatcher: the error fields it
@@ -13606,10 +13607,92 @@ function senderDisplayName(from: { username?: string; first_name?: string; id: n
   return from.username ?? from.first_name ?? String(from.id)
 }
 
+// ---- DM /resume: the browser card ---------------------------------------------------------------
+//
+// DM mode has one chat and no topics, so /resume has to carry its own context: the lane's own past
+// conversations (tapping one SWAPS this chat onto it) and the ended worker sessions (tapping one
+// reopens it). resume-card.ts holds the pure half — assembly, ranking, capping, rendering — and
+// everything that touches disk or tmux stays here.
+//
+// This REPLACES the DM gate below ("this DM drives a single session, /exit it first"), which fires
+// off focus.activePaneId and is a single-session-DM assumption from before chat lanes: in lane mode
+// the fleet is real (163 rows on the owner's box) and a swap is the whole point of the feature.
+// Classic DM with no lane bound keeps the old behaviour untouched.
+const dmResumeLane = (chatId: string) => listDmChatSessions().find(d => d.chatId === chatId) ?? null
+
+async function buildDmResumeSections(lane: { sessionId: string; cwd: string }, expanded: Expanded): Promise<Section[]> {
+  // Chat rows. The LIVE conversation is the most recently written transcript in the lane's folder —
+  // the same resolution the relay uses — and buildChatRows marks it rather than dropping it, so the
+  // card can never offer a tap that /exits this conversation to resume this conversation.
+  const liveFile = resolveTranscript(lane.cwd, allProjectsDirs())
+  const liveId = liveFile ? basename(liveFile).replace(/\.jsonl$/, '') : null
+  const chat = buildChatRows(
+    listRecentSessions(25, allProjectsDirs(), lane.cwd),
+    liveId,
+    expanded.c ? CHAT_ROWS_MORE : CHAT_ROWS)
+  // A lane conversation usually opens with the bridge's own envelope, which listRecentSessions skips
+  // as non-prose — so most of these rows have no opening line and would render as a bare date. Fall
+  // back to the LAST thing that conversation said, for the rendered rows only (one file read each),
+  // and mark which handle it is: the renderer prefixes '↩' rather than passing one off as the other.
+  for (const row of chat.rows) {
+    if (row.title) continue
+    const file = findSessionFile(row.id, allProjectsDirs())
+    const last = file ? latestFinalReply(file)?.text : null
+    if (last) { row.title = last; row.hint = 'last' }
+  }
+
+  // Worker rows: the ended sessions in the registry, not the recent-transcript list. A closed row is
+  // a tombstone kept forever (topic-runtime.ts's row GC), so this list only grows — the cap and its
+  // "N of M" footer are what keep it honest.
+  const candidates: WorkerRow[] = []
+  for (const t of listTopics()) {
+    if (!t.closed || isChatLaneSession(t.sessionId)) continue
+    const file = t.agentSessionId ? findSessionFile(t.agentSessionId, allProjectsDirs()) : null
+    let at = t.killedAt ?? t.createdAt
+    if (file) { try { at = statSync(file).mtimeMs } catch {} }
+    candidates.push({
+      kind: 'worker', sid: t.sessionId, name: t.name, folder: basename(t.cwd) || t.cwd, at, last: null,
+      // Which of the three a reopen is depends only on the conversation id + whether its transcript
+      // is still on disk, so it is known before ranking; the cost DETAIL below needs a file read and
+      // is filled in only for the rows that actually render.
+      cost: classifyWorker(t.agentSessionId, { file, midFlight: false, backlog: null }),
+    })
+  }
+  const workers = rankWorkers(candidates, expanded.w ? WORKER_ROWS_MORE : WORKER_ROWS)
+  for (const row of workers.rows) {
+    if (row.cost.kind !== 'continues') continue
+    const t = getTopicBySession(row.sid)
+    const file = t?.agentSessionId ? findSessionFile(t.agentSessionId, allProjectsDirs()) : null
+    if (!file) continue
+    row.last = latestFinalReply(file)?.text ?? null
+    row.cost = { kind: 'continues', backlog: resumeBacklogSize(t!.agentSessionId), midFlight: turnInProgress(file) }
+  }
+
+  return [
+    { key: 'c', title: 'Chat', note: 'this conversation’s past', rows: chat.rows, shown: chat.rows.filter(r => !r.live).length, total: chat.total },
+    { key: 'w', title: 'Workers', note: 'ended sessions', rows: workers.rows, shown: workers.rows.length, total: workers.total },
+  ]
+}
+
+const resumeKb = (rows: ButtonSpec[][]): InlineKeyboard => {
+  const kb = new InlineKeyboard()
+  for (const line of rows) { for (const b of line) kb.text(b.text, b.data); kb.row() }
+  return kb
+}
+
+async function showDmResumeCard(ctx: Context, lane: { sessionId: string; cwd: string }, expanded: Expanded, mode: 'send' | 'edit'): Promise<void> {
+  const sections = await buildDmResumeSections(lane, expanded)
+  const md = renderCard(sections, Date.now())
+  await showRichPanel(ctx, mode, toInputRichMessage(md), mdToTelegramHtml(md), resumeKb(cardButtons(sections, expanded)))
+}
+
 // /resume — list the most recent Claude Code sessions (across all projects) with their last
 // activity, each tappable to relaunch via `claude --resume` in a fresh pane.
 bot.command('resume', async ctx => {
   if (!dmCommandGate(ctx)) return
+  // DM chat lane: the browser card above, which carries its own context and needs no empty slot.
+  const laneHere = !isTopicMode() ? dmResumeLane(String(ctx.chat?.id ?? '')) : null
+  if (laneHere) { await showDmResumeCard(ctx, laneHere, { c: false, w: false }, 'send'); return }
   // Resuming spawns a new pane, so in a DM it only fills an empty slot.
   // Group (topic) mode spawns freely: each resumed session gets its own topic.
   if (dmLanesOn() && !isTopicMode()) {
@@ -15883,6 +15966,72 @@ bot.on('callback_query:data', async ctx => {
       ? `🔄 Resuming in <code>${escapeHtml(dir)}</code> — reconnecting…`
       : `❌ Couldn't resume that session in <code>${escapeHtml(dir)}</code>.`,
       { parse_mode: 'HTML' }).catch(() => {})
+    return
+  }
+
+  // ---- DM /resume card taps ----
+  // The authority behind every one of these is the OWNER's: the tap originates in his access-gated
+  // DM (cbAuth), and the card only exists in a chat that owns a lane. So they act as the lane's sid —
+  // which already holds fleet-wide close/reopen rights (isChatLaneSession) — and a tap arriving from
+  // anywhere else is REFUSED rather than downgraded to some weaker identity.
+  const dmCardLane = () => dmResumeLane(String(ctx.chat?.id ?? ''))
+  const resumeCardMatch = /^(rres|rsw|rswgo|rro):(.+)$/.exec(data)
+  if (resumeCardMatch) {
+    if (!(await cbAuth(ctx))) return
+    const [, verb, arg] = resumeCardMatch
+    const lane = dmCardLane()
+    if (!lane) {
+      await ctx.answerCallbackQuery({ text: 'This card only works in its own chat.' }).catch(() => {})
+      return
+    }
+    if (verb === 'rres') {   // expand a section — the card is re-rendered from scratch, so no state to go stale
+      await ctx.answerCallbackQuery().catch(() => {})
+      await showDmResumeCard(ctx, lane, decodeExpanded(arg), 'edit')
+      return
+    }
+    const lanePane = await paneForSession(lane.sessionId).catch(() => null)
+    if (verb === 'rsw' || verb === 'rswgo') {
+      // A swap ENDS the conversation the user is typing in, so: never straight from the row (rsw is
+      // the confirm), and never into a turn in flight — the lane is the one session with no other
+      // surface to complain on. turnInProgress on the live transcript is the ground truth the rest of
+      // the daemon uses for "working".
+      const liveFile = lanePane ? resolveTranscript(lane.cwd, allProjectsDirs()) : null
+      if (!lanePane) {
+        await ctx.answerCallbackQuery({ text: 'This chat has no live session.' }).catch(() => {})
+        await ctx.reply('🚫 This chat has no live session to swap — send a message and it starts one.').catch(() => {})
+        return
+      }
+      if (liveFile && turnInProgress(liveFile)) {
+        await ctx.answerCallbackQuery({ text: 'Mid-turn.' }).catch(() => {})
+        await ctx.reply(mdToTelegramHtml(swapBusyText()), { parse_mode: 'HTML' }).catch(() => {})
+        return
+      }
+      await ctx.answerCallbackQuery().catch(() => {})
+      if (verb === 'rsw') {
+        const titleOf = (id: string) => listRecentSessions(25, allProjectsDirs(), lane.cwd).find(s => s.sessionId === id)?.title ?? id
+        const liveId = liveFile ? basename(liveFile).replace(/\.jsonl$/, '') : null
+        const md = swapConfirmText(titleOf(arg), liveId ? titleOf(liveId) : null)
+        await showRichPanel(ctx, 'edit', toInputRichMessage(md), mdToTelegramHtml(md),
+          new InlineKeyboard().text('🔄 Swap', `rswgo:${arg}`).text('‹ Back', 'rres:cw'))
+        return
+      }
+      // The swap itself: the SAME core topic mode's `resumehere:` uses — /exit in place, relaunch
+      // `--resume` in the same pane. The pane survives, so its @tg_session stamp does, and with it
+      // the dmChat binding, the pin and outbound routing.
+      await ctx.editMessageText('🔄 Swapping this chat onto that conversation — reconnecting…').catch(() => {})
+      const ok = await restartPaneSessionCore(lanePane, arg)
+      await ctx.editMessageText(ok
+        ? '✅ Swapped. The conversation you left is on disk — it’s back at the top of /resume whenever you want it.'
+        : '❌ Couldn’t swap — the relaunch didn’t take. Check /sessions; /new starts a fresh chat here.')
+        .catch(() => {})
+      return
+    }
+    // rro — reopen an ended worker. runSessionReopen is the whole machinery (resolution, the
+    // permission check, the teardown wait, fresh-vs-resume, un-closing the row, the ledger); a sid
+    // is passed rather than a name because 162 tombstones share a handful of names.
+    await ctx.answerCallbackQuery({ text: 'Reopening…' }).catch(() => {})
+    const r = await runSessionReopen(lane.sessionId, arg, 'chat')
+    await ctx.reply(r.ok ? r.text : `❌ ${r.text}`).catch(() => {})
     return
   }
 
