@@ -42,6 +42,7 @@ import { preserveGlobalEffort, reconcileEffortScope } from './effort-scope.ts'
 import { planDrift, driftStateAfter, type DriftState } from './drift-guard.ts'
 import { decideModel, decideEffort, upgradeNeedsConfirm, heldSpawnModel, heldSpawnNeedsLine, holdTapData, parseHoldTap, launchFallback, spawnCardHeader, relaunchModel, launchDefaultModel, launchDefaultEffort, launchDefaultMode, fablePolicy, fableRowState, onOff, type FablePolicy, AUTO_FALLBACK, AUTO_EFFORT_FALLBACK, FABLE, HAIKU, isClaudeFamily, type ModelDecision, type HoldOutcome } from './spawn-model-policy.ts'
 import { renderSessionsView } from './sessions-view.ts'
+import { parseHermesProfileList, upsertHermesEndpoint, removeHermesEndpoint } from './hermes-registry.ts'
 import { buildChatRows, classifyWorker, rankWorkers, renderCard, cardButtons, decodeExpanded, swapConfirmText, swapBusyText, CHAT_ROWS, CHAT_ROWS_MORE, WORKER_ROWS, WORKER_ROWS_MORE, type Expanded, type Section, type WorkerRow, type ButtonSpec } from './resume-card.ts'
 import { detectCurrentMode, onNormalPrompt, inputBoxContent, inputBoxOccupant, isModelSwitchConfirm, planModelDialogStep, isModelConsentDialog, type CcMode, detectUserPrompt, detectPermissionPrompt, permPromptToken, detectLoginPrompt, detectFirstRunScreen, type FirstRunScreen, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, detectWorking, detectStuckScreen, bashModeArmed, submitLanded, hasQueuedMessages, paneRunsTypedInput, feedbackSurveyOpen, slashPaletteWouldMisfire, detectModelPicker, parseWorkingStatus, type ModelPicker, type PromptInfo, type PromptOption, type PermissionPrompt, type StuckScreen, detectAccountTier, type AccountTier, paneAcceptsText, safeToType } from './prompt.ts'
 import { modelSwitchEvidence, findSessionFile, resolveTranscript, resolveAgentTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, lastAssistantStopReason, turnAnchorUuid, liveSubagents, currentTurnFeed, currentTurnSpan, currentTurnActivity, concludedTurnWork, currentTurnTokens, latestModelId, listRecentSessions, findSessionCwd, searchTranscripts, bashResultAfter, slashResultAfter, recentConversation, conversationItemFullText, agentSessionId, agentForSession } from './agent-transcript.ts'
@@ -13742,6 +13743,49 @@ bot.command('resume', async ctx => {
     { parse_mode: 'HTML', reply_markup: kb })
 })
 
+// ---- /agents — register hermes agents from Telegram ---------------------------------------------
+//
+// A hermes endpoint used to be reachable only by hand-editing hermes-endpoints.json on the box and
+// restarting the daemon. This panel is the whole lifecycle: list, add (profile → mode → name),
+// remove. Deliberately a COMMAND rather than a /settings row — a root row would have to be mirrored
+// across the five settings renderings that `settings-parity.test.ts` only holds three of (see
+// handoff/settings-renderings-parity-gap.md), and `/account` already sets the precedent that a
+// panel can live behind its own command.
+//
+// No API keys anywhere in this flow: a hermes profile owns its own credentials, which is what makes
+// this shorter than the gateway sibling it is modelled on.
+// ONE charset for the whole flow: the `hz:` callback payloads are bound to it, so a name outside it
+// produces a button Telegram will deliver and the handler will not match — a dead ✖. It is also what
+// keeps `@name` a single addressable token.
+const HERMES_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/
+
+function hermesPanelText(): string {
+  const eps = [...hermesEndpoints.values()]
+  const rows = eps.map(h => {
+    // Named by CONSEQUENCE, not by the flag: `pane` is the difference between an agent that
+    // remembers the conversation and one that starts blank every message (measured, hermes 0.20.0).
+    const mode = h.pane ? '💬 remembers' : '⚡ forgets each message'
+    return `• <b>${escapeHtml(h.name)}</b> — <code>${escapeHtml(h.profile)}</code> · ${mode}${h.hidden ? ' · hidden' : ''}`
+  })
+  return `🤖 <b>Agents</b> — non-Claude endpoints on the bus\n\n` +
+    (rows.length ? rows.join('\n') : '<i>None registered yet.</i>') +
+    `\n\n<i>Address one from any chat with @name. Each runs on a hermes profile, which brings its own model and credentials.</i>`
+}
+function hermesPanelKeyboard(): InlineKeyboard {
+  const kb = new InlineKeyboard()
+  // A hidden endpoint is reachable by name but absent from every list — so it gets no remove button
+  // here either, exactly as it gets no roster row. Whoever hand-wrote it can hand-remove it.
+  // A hand-written key outside HERMES_NAME_RE (a space, punctuation) gets NO button rather than a
+  // dead one: its callback data could never match the handler's regex, and a button that silently
+  // does nothing is worse than an absent one. It stays listed above, and stays hand-removable.
+  for (const h of [...hermesEndpoints.values()].filter(h => !h.hidden && HERMES_NAME_RE.test(h.name))) kb.text(`✖ ${h.name}`, `hz:rm:${h.name}`).row()
+  return kb.text('➕ Agent', 'hz:add')
+}
+bot.command('agents', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  await showHtmlPanel(ctx, 'send', hermesPanelText(), hermesPanelKeyboard())
+})
+
 // /account — multi-account management. Bare: list the registered Claude accounts (config dirs)
 // with login + usage state. `add <name>` registers ~/.claude-<name> and seeds its settings.json
 // (statusline + hooks) so bridge sessions on it work out of the box; `remove <name>` unregisters
@@ -14733,6 +14777,84 @@ bot.on('callback_query:data', async ctx => {
       if (moved !== resolved) { a.failoverChain = moved; saveAccess(a) }
     }
     await showHtmlPanel(ctx, 'edit', await accountsPanelText(), accountsPanelKeyboard())
+    return
+  }
+
+  // ---- /agents panel: register a hermes endpoint ----
+  // Three taps then one word: profile → mode → name. The PROFILE PICKER IS THE VALIDATION — the
+  // options come from `hermes profile list` itself, so a typo'd profile (which would mint an
+  // endpoint that can never answer) is not expressible. A box where that command won't run can only
+  // produce dead endpoints, so failing to enumerate and failing to register are the same state here.
+  const hzMatch = /^hz:(add|prof:([a-z0-9][a-z0-9_-]{0,31})|mode:([a-z0-9][a-z0-9_-]{0,31}):([01])|rm:([a-z0-9][a-z0-9_-]{0,31}))$/.exec(data)
+  if (hzMatch) {
+    if (!(await cbAuth(ctx))) return
+    const thread = ctx.callbackQuery?.message?.message_thread_id
+    if (hzMatch[1] === 'add') {
+      await ctx.answerCallbackQuery().catch(() => {})
+      let profiles: string[] = []
+      let err = ''
+      try {
+        const { stdout } = await exec('hermes', ['profile', 'list'], { timeout: 10_000, env: hermesEnv() })
+        profiles = parseHermesProfileList(stdout)
+      } catch (e) { err = e instanceof Error ? e.message : String(e) }
+      if (!profiles.length) {
+        await showHtmlPanel(ctx, 'edit',
+          `🤖 <b>Add an agent</b>\n\n❌ Couldn't list hermes profiles${err ? ` — <code>${escapeHtml(err.slice(0, 200))}</code>` : ' (none found)'}.\n\n` +
+          `<i>Every agent runs on a profile, so there is nothing safe to offer until this works. Check <code>hermes profile list</code> on the box.</i>`,
+          new InlineKeyboard().text('↻ Retry', 'hz:add').text('‹ Back', 'hz:panel'))
+        return
+      }
+      const kb = new InlineKeyboard()
+      // Already-registered profiles are still offered: two agents may share one profile, and a
+      // re-registration is how the owner switches an existing agent's mode.
+      const taken = new Set([...hermesEndpoints.values()].map(h => h.profile))
+      for (const p of profiles) kb.text(`${taken.has(p) ? '• ' : ''}${p}`, `hz:prof:${p}`).row()
+      await showHtmlPanel(ctx, 'edit',
+        `🤖 <b>Add an agent</b> — pick its hermes profile:\n\n<i>The profile brings the model and its credentials. A • marks one an agent already uses; sharing is allowed.</i>`,
+        kb.text('‹ Back', 'hz:panel'))
+      return
+    }
+    if (hzMatch[2]) {   // profile chosen → the one choice that changes what the agent IS
+      await ctx.answerCallbackQuery().catch(() => {})
+      await showHtmlPanel(ctx, 'edit',
+        `🤖 <b>${escapeHtml(hzMatch[2])}</b> — how should it handle a conversation?\n\n` +
+        `💬 <b>Chat</b> keeps a session open, so it remembers what you said before.\n` +
+        `⚡ <b>One-shot</b> answers each message from scratch and forgets it — cheaper, and right for a tool you ask isolated questions.`,
+        new InlineKeyboard()
+          .text('💬 Chat', `hz:mode:${hzMatch[2]}:1`).text('⚡ One-shot', `hz:mode:${hzMatch[2]}:0`).row()
+          .text('‹ Back', 'hz:add'))
+      return
+    }
+    if (hzMatch[3]) {   // mode chosen → ask for the bus name
+      await ctx.answerCallbackQuery().catch(() => {})
+      const sent = await channel.sendText(String(ctx.chat!.id),
+        `🤖 <b>Name it</b> — reply with the name you'll address it by (<code>@name</code>).\n\n` +
+        `Profile <code>${escapeHtml(hzMatch[3])}</code> · ${hzMatch[4] === '1' ? '💬 remembers' : '⚡ forgets each message'}.`,
+        { ...(thread ? { threadId: String(thread) } : {}), forceReply: { placeholder: 'agent name' } }).catch(() => null)
+      if (sent) replyTargets.set(refKey(sent), { kind: 'hermesname', profile: hzMatch[3], pane: hzMatch[4] === '1', panelMsgId: ctx.callbackQuery?.message?.message_id })
+      return
+    }
+    // ✖ remove. The PANE is killed with the row because it is the only half that costs anything to
+    // leave running; hermes keeps the session id, so re-registering the same name resumes the same
+    // conversation (killHermesPane's asymmetry, and the reason a remove here is not destructive).
+    const name = hzMatch[5]!
+    const had = hermesEndpoints.get(name)
+    if (!removeHermesEndpoint(HERMES_ENDPOINTS_FILE, name)) {
+      await ctx.answerCallbackQuery({ text: 'Could not remove that agent.' }).catch(() => {})
+      return
+    }
+    if (had?.pane) await killHermesPane(name).catch(() => false)
+    loadHermesEndpoints()
+    // The toast names the inheritance, because nothing else can: hermes keeps the session behind a
+    // removed agent, so reusing this name later silently continues the OLD conversation.
+    await ctx.answerCallbackQuery({ text: had?.pane ? `Removed ${name} — its session is kept, so re-registering that name resumes the conversation.` : `Removed ${name}` }).catch(() => {})
+    await showHtmlPanel(ctx, 'edit', hermesPanelText(), hermesPanelKeyboard())
+    return
+  }
+  if (data === 'hz:panel') {
+    if (!(await cbAuth(ctx))) return
+    await ctx.answerCallbackQuery().catch(() => {})
+    await showHtmlPanel(ctx, 'edit', hermesPanelText(), hermesPanelKeyboard())
     return
   }
 
@@ -18534,6 +18656,35 @@ bot.on('message:text', async ctx => {
             { parse_mode: 'HTML', reply_markup: new InlineKeyboard().text(`🚀 Start a ${r.account.name} session`, `acct:launch:${r.account.name}`) })
           return
         }
+        // The name for a new hermes agent (/agents → ➕, after profile + mode). Last step: write the
+        // file, then re-read it into the live Map so `@name` resolves without a daemon restart.
+        case 'hermesname': {
+          const name = normalizeEndpointName(text.trim().split(/\s+/)[0] ?? '')
+          // `normalizeEndpointName` lowercases and trims but does not restrict the CHARSET, so it
+          // would happily accept "my agent!" — a key nothing can then address, since `@name` is one
+          // token and the panel's own callback data is charset-bound. Refuse at the point of entry
+          // rather than writing an endpoint the owner can see and never reach.
+          if (!HERMES_NAME_RE.test(name)) {
+            await ctx.reply('Names are letters, digits, - and _ (max 32, starting with a letter or digit) — that is what makes <code>@name</code> addressable. Try another.', { parse_mode: 'HTML' })
+            break
+          }
+          // The collision check is against EVERY bus endpoint, not just the hermes ones: a hermes
+          // agent sharing a name with a live session would shadow it in resolveEndpoint, and the
+          // symptom would be a message going to the wrong agent rather than an error.
+          const clash = busEndpoints().find(e => normalizeEndpointName(e.name) === name)
+          if (clash) { await ctx.reply(`❌ "${escapeHtml(name)}" is already taken by ${clash.kind === 'hermes' ? 'an agent' : 'a session'}. Pick another name.`, { parse_mode: 'HTML' }); break }
+          const r = upsertHermesEndpoint(HERMES_ENDPOINTS_FILE, { name, profile: target.profile, pane: target.pane })
+          if (!r.ok) { await ctx.reply(`❌ ${escapeHtml(r.error)}`, { parse_mode: 'HTML' }); break }
+          // Every consumer reads this Map per call (busEndpoints rebuilds on each resolution), so a
+          // re-read IS the hot reload — no restart, and nothing holds a stale snapshot. A HAND edit
+          // to the file still needs one, unchanged.
+          loadHermesEndpoints()
+          await ctx.reply(
+            `✅ <b>@${escapeHtml(name)}</b> is registered — profile <code>${escapeHtml(target.profile)}</code>, ${target.pane ? '💬 remembers your conversation' : '⚡ forgets each message'}.\n\n` +
+            `Address it from any chat: <code>@${escapeHtml(name)} your message</code>.`,
+            { parse_mode: 'HTML' })
+          break
+        }
         // Gateway spec "name baseUrl model [auth]" (Accounts panel → ➕ Provider). Validate via the
         // shared parser; auth-less gateways save immediately, otherwise prompt for the key next
         // (kind 'gwkey').
@@ -21659,6 +21810,7 @@ void (async () => {
               { command: 'md', description: 'Create a .md file in the working dir, then reply with its contents' },
               { command: 'launch', description: 'Start a fresh Claude Code session (revives a dead pane)' },
               { command: 'resume', description: 'Resume a recent session (lists them with times)' },
+              { command: 'agents', description: 'Non-Claude agents on the bus — add, list, remove' },
               { command: 'find', description: 'Search all sessions\' conversations (/find <text>)' },
               { command: 'files', description: 'Browse / download / edit files in this session\'s folder' },
               { command: 'base', description: 'Folder new topics are created under (/base ~/projects)' },

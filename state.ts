@@ -88,6 +88,7 @@ export type ReplyTarget =
   | { kind: 'gwkey'; name: string; panelMsgId?: number }         // API key for a pending gateway (def held in pendingGateways); message auto-deleted
   | { kind: 'gwmodel'; name: string; panelMsgId?: number }       // new model id for an existing gateway (Accounts panel → ✏️)
   | { kind: 'rpmodel'; role: 'chat' | 'code' }                   // new model id for a role harness (Accounts panel → 💬/🧑💻 → ✏️)
+  | { kind: 'hermesname'; profile: string; pane: boolean; panelMsgId?: number }   // name for a new hermes agent (/agents → ➕, profile + mode already chosen)
   | { kind: 'orphan' }                                           // rehydrated after a restart — enough to delete/disarm it, the original flow is gone
 //
 // Persisted across restarts: memory-only meant a wedged force-reply prompt outlived the process
