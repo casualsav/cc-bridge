@@ -265,3 +265,21 @@ test('a skill invocation renders as what he typed, not as the skill it loaded', 
   const [item] = hermesFeedItems([{ id: 9, role: 'user', content: SKILL, tool_name: null, timestamp: 1 }], 'S')
   expect(item).toEqual({ role: 'user', text: '/predict sf', ts: 1000, uuid: 'S:9' })
 })
+
+// A watermark that stops SHORT of a reply already delivered makes the next turn re-send it. This is
+// the exact sequence the owner hit on 2026-08-13: he typed in the drill-in (which advanced `seen` at
+// SEND time, before the answer existed), the agent answered there, and his next `@mimo` over chat
+// came back with that answer glued in front of the new one. The slice is pure, so the regression is
+// expressible here even though the fix lives in the daemon's feed poll.
+test('an answer already delivered is not re-emitted by the next turn', () => {
+  const msg = (role: 'user' | 'assistant', content: string) => ({ role, content })
+  // drill-in: his message lands (2 rows), the watermark moves to 2 — the reply does not exist yet.
+  const afterSend = { id: 'S', messages: [msg('user', 'first'), msg('assistant', 'FIRST ANSWER')] }
+  const seenAtSendTime = 1   // what webappAgentSend recorded: everything up to and including his text
+  // The old behaviour, pinned as the defect: the next turn's slice reaches back over that answer.
+  const next = { id: 'S', messages: [...afterSend.messages, msg('user', 'second'), msg('assistant', 'SECOND ANSWER')] }
+  expect(assistantReplySince(next, seenAtSendTime)).toBe('FIRST ANSWER\n\nSECOND ANSWER')
+  // The fix advances the watermark once the drill-in has RENDERED the answer, so the next turn
+  // returns only its own.
+  expect(assistantReplySince(next, afterSend.messages.length)).toBe('SECOND ANSWER')
+})

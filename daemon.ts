@@ -18664,17 +18664,29 @@ bot.on('message:text', async ctx => {
           // would happily accept "my agent!" — a key nothing can then address, since `@name` is one
           // token and the panel's own callback data is charset-bound. Refuse at the point of entry
           // rather than writing an endpoint the owner can see and never reach.
+          // EVERY exit here is a `return`, never a `break`: the switch does not end the handler, so a
+          // break falls through into the ordinary inbound path and the name he typed is delivered
+          // into the chat lane as a message. Observed live 2026-08-13 — the lane answered him about
+          // the agent-registration exchange it had just been handed.
+          //
+          // A retryable refusal RE-ARMS the prompt, because the target was already consumed at the
+          // top of this block; without it the flow dies silently and he starts the three taps again.
+          const rearm = async (msg: string): Promise<void> => {
+            const again = await ctx.reply(msg, { parse_mode: 'HTML', reply_markup: { force_reply: true, input_field_placeholder: 'agent name' } }).catch(() => null)
+            if (again) replyTargets.set(`${ctx.chat?.id}:${again.message_id}`, target)
+          }
           if (!HERMES_NAME_RE.test(name)) {
-            await ctx.reply('Names are letters, digits, - and _ (max 32, starting with a letter or digit) — that is what makes <code>@name</code> addressable. Try another.', { parse_mode: 'HTML' })
-            break
+            await rearm('Names are letters, digits, - and _ (max 32, starting with a letter or digit) — that is what makes <code>@name</code> addressable. Try another.')
+            return
           }
           // The collision check is against EVERY bus endpoint, not just the hermes ones: a hermes
           // agent sharing a name with a live session would shadow it in resolveEndpoint, and the
           // symptom would be a message going to the wrong agent rather than an error.
           const clash = busEndpoints().find(e => normalizeEndpointName(e.name) === name)
-          if (clash) { await ctx.reply(`❌ "${escapeHtml(name)}" is already taken by ${clash.kind === 'hermes' ? 'an agent' : 'a session'}. Pick another name.`, { parse_mode: 'HTML' }); break }
+          if (clash) { await rearm(`❌ "${escapeHtml(name)}" is already taken by ${clash.kind === 'hermes' ? 'an agent' : 'a session'}. Pick another name.`); return }
           const r = upsertHermesEndpoint(HERMES_ENDPOINTS_FILE, { name, profile: target.profile, pane: target.pane })
-          if (!r.ok) { await ctx.reply(`❌ ${escapeHtml(r.error)}`, { parse_mode: 'HTML' }); break }
+          // NOT re-armed: this is a corrupt or unwritable config file, which no retyped name fixes.
+          if (!r.ok) { await ctx.reply(`❌ ${escapeHtml(r.error)}`, { parse_mode: 'HTML' }); return }
           // Every consumer reads this Map per call (busEndpoints rebuilds on each resolution), so a
           // re-read IS the hot reload — no restart, and nothing holds a stale snapshot. A HAND edit
           // to the file still needs one, unchanged.
@@ -18683,7 +18695,7 @@ bot.on('message:text', async ctx => {
             `✅ <b>@${escapeHtml(name)}</b> is registered — profile <code>${escapeHtml(target.profile)}</code>, ${target.pane ? '💬 remembers your conversation' : '⚡ forgets each message'}.\n\n` +
             `Address it from any chat: <code>@${escapeHtml(name)} your message</code>.`,
             { parse_mode: 'HTML' })
-          break
+          return
         }
         // Gateway spec "name baseUrl model [auth]" (Accounts panel → ➕ Provider). Validate via the
         // shared parser; auth-less gateways save immediately, otherwise prompt for the key next
@@ -20996,6 +21008,22 @@ async function webappAgentFeed(cfg: HermesEndpoint): Promise<WebappSessionFeed> 
     }
   }
   const items = rec?.sessionId ? hermesFeedItems(hermesStoreMessages(cfg, rec.sessionId, AGENT_FEED_ITEMS), rec.sessionId) : []
+  // THE DRILL-IN IS A DELIVERY SURFACE: what it has rendered, he has seen. The watermark has to
+  // advance HERE and not only in webappAgentSend, which moves it at SEND time — before the reply it
+  // is about exists. That left every drill-in turn's answer uncovered, and the next bus/chat turn
+  // computed its own reply as "everything past the watermark" and re-sent the old answer alongside
+  // the new one (his report, 2026-08-13: "when I first @tagged mimo over chat, it sent me its
+  // previous response along with the current").
+  //
+  // Never while an ask is in flight for this endpoint: that turn's reply is exactly the slice past
+  // `seen`, so advancing under it would turn a real answer into "its turn ended without an answer".
+  // Idle-only for the same reason — a half-written turn is not a delivered one.
+  if (rec?.sessionId && !working && !listPending().some(p => p.toKind === 'hermes' && p.toName === cfg.name)) {
+    const delivered = hermesStoreMessages(cfg, rec.sessionId, 1000).length
+    // Only on a CHANGE: this runs on every 3s poll, and writing an identical record each tick would
+    // rewrite the state file twenty times a minute for nothing.
+    if (delivered !== rec.seen) setHermesPaneState(cfg.name, { ...rec, seen: delivered })
+  }
   return {
     sid, name: cfg.name, working, state: working ? 'working' : 'idle',
     // The subtitle names WHAT this is, in the slot a session spends on its folder — an agent has no

@@ -97,3 +97,25 @@ test('a JSON array is refused too — it parses, but it is not the store', () =>
     expect(readFileSync(file, 'utf8')).toBe('["mimo"]')
   })
 })
+
+// ---- the reply-target switch must never fall through -------------------------------------------
+//
+// SOURCE-LEVEL, because this switch lives inside daemon.ts's message handler and has no unit
+// harness. It does NOT end the handler: a `break` resumes the ordinary inbound path, which delivers
+// the text into the chat lane's pane. Shipped that way in v0.5.88 — the owner replied with a new
+// agent's name and his chat session was handed the registration exchange as a turn, and answered
+// about it. Every case in that switch exits with `return`.
+import { readFileSync as readSrc } from 'node:fs'
+test('no case in the force-reply switch exits with a bare break', () => {
+  const src = readSrc(new URL('./daemon.ts', import.meta.url), 'utf8')
+  const start = src.indexOf('      switch (target.kind) {')
+  expect(start).toBeGreaterThan(0)
+  const end = src.indexOf('\n      }\n    }\n  }\n', start)
+  expect(end).toBeGreaterThan(start)
+  const body = src.slice(start, end)
+  expect(body.match(/case '/g)!.length).toBeGreaterThan(10)   // the slice really is the switch
+  const offenders = body.split('\n')
+    .filter(l => !/^\s*(\/\/|\*)/.test(l))          // comments may DISCUSS break; only code counts
+    .filter(l => /\bbreak\b/.test(l))
+  expect(offenders).toEqual([])
+})
