@@ -67,7 +67,15 @@ export function piperReady(voice: string = DEFAULT_PIPER_VOICE): boolean {
 }
 
 // Engine availability for the settings panel: ready / what's missing.
+//
+// A REGISTERED PROVIDER IS ANSWERED FROM THE TABLE, and the lookup comes FIRST. The elevenlabs arm
+// below is a catch-all `return`, not an `=== 'elevenlabs'` test, so every provider id fell into it
+// and the panel reported minimax as "needs ELEVENLABS_API_KEY" — a key that has nothing to do with
+// it. Harmless only while no surface could select a provider; this ships in the same unit that makes
+// one selectable.
 export function engineStatus(engine: TtsEngine, voice?: string): { ready: boolean; missing: string } {
+  const provider = ttsProvider(engine)
+  if (provider) return { ready: !!tConfig(provider.tokenEnv), missing: provider.tokenEnv }
   if (engine === 'piper') return { ready: piperReady(voice), missing: 'local engine (auto-installs on select)' }
   if (engine === 'openai') return { ready: !!tConfig('OPENAI_API_KEY'), missing: 'OPENAI_API_KEY' }
   return { ready: !!tConfig('ELEVENLABS_API_KEY'), missing: 'ELEVENLABS_API_KEY' }

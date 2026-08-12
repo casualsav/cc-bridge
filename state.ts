@@ -14,6 +14,7 @@ import { STATE_DIR, readJsonFile, writeJsonFile } from './common.ts'
 import type { DaemonToShim } from './common.ts'
 import type { Access, Session, PendingMultiSelect, FreeTextPrompt, ChatPrompt, ActiveShim } from './types.ts'
 import type { PaneWatcher } from './pane-io.ts'
+import type { TtsEngine } from './voice-out.ts'
 
 // ---- Focused-session pointers ----
 // The daemon mirrors the focused session into these four live pointers so the rest of the code
@@ -79,7 +80,7 @@ export type ReplyTarget =
   | { kind: 'md'; path: string; display: string }                // contents for a /md file
   | { kind: 'acctname'; thread?: number }                        // name for a new Claude account (settings → Accounts → ➕)
   | { kind: 'newsession'; anchor?: boolean }                     // folder for /new in General (spawn → own topic; anchor → becomes the General base session)
-  | { kind: 'ttskey'; engine: 'openai' | 'elevenlabs' }          // API key for a hosted TTS engine (settings → 🔊 Voice replies)
+  | { kind: 'ttskey'; engine: TtsEngine; env: string; label: string }   // API key for a hosted TTS engine (settings → 🔊 Voice replies); env/label carried so a registered provider needs no branch here
   | { kind: 'stucktext'; paneId: string }                        // raw text typed into a wedged pane (stuck-screen dump)
   | { kind: 'budget'; panelMsgId?: number }                      // daily $ cap (or 'off') from the /budget panel's set button
   | { kind: 'basedir'; panelMsgId?: number }                     // folder for /base's set button (settings → 📂 Base folder)

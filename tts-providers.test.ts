@@ -1,8 +1,10 @@
 import { test, expect } from 'bun:test'
+import { readFileSync } from 'node:fs'
 import { TTS_PROVIDERS, ttsProvider, hexToBytes } from './tts-providers.ts'
-import { isTtsTrigger, speakable } from './voice-out.ts'
+import { isTtsTrigger, speakable, engineStatus } from './voice-out.ts'
 
 const minimax = ttsProvider('minimax')!
+const daemonSrc = (): string => readFileSync(new URL('./daemon.ts', import.meta.url), 'utf8')
 
 // A fetch stub that records what the provider sent and replies with what we tell it to.
 const stubFetch = (reply: { ok?: boolean; status?: number; body: unknown; text?: string }) => {
@@ -85,4 +87,94 @@ test('the manual path speaks the whole message where the automatic one clamps', 
   expect(speakable(long, 4096)).not.toContain('Message truncated.') // the gesture's bound
   // …and the stripping still applies on both paths.
   expect(speakable('**bold** `code` [x](http://y)', 4096)).toBe('bold code x')
+})
+
+// ---- reachability: what the WRITER accepts, the two SURFACES must offer --------------------------
+//
+// The gap this pins: applySetting took `manual` and every table provider from the day they shipped,
+// and neither surface listed them — so a mode the daemon runs could not be selected from the phone,
+// and the only lever was a hand-edit of prefs.json. A test that reads one side only would have
+// passed against exactly that build; these compare the two sides against each other.
+
+test('every mode and engine applySetting accepts is reachable from BOTH surfaces', () => {
+  const src = daemonSrc()
+  // The writer's own allowlists, read out of applySetting rather than restated here — restating them
+  // is how the two drift apart in the first place.
+  const modes = /oneOf\(value, \['off', 'all', 'manual'\]\)/.test(src)
+  expect(modes).toBe(true)
+  const engines = /const engines = \['piper', 'openai', 'elevenlabs', \.\.\.TTS_PROVIDERS\.map\(p => p\.id\)\]/.test(src)
+  expect(engines).toBe(true)
+
+  // Surface 1 — the Telegram panel: a button per mode, and a callback regex that admits it.
+  for (const mode of ['off', 'all', 'manual']) expect(src).toContain(`'tts:mode:${mode}'`)
+  expect(src).toContain("mode:(off|all|manual)")
+  // The engine alternation is BUILT from the table, so it cannot omit a provider.
+  expect(src).toContain('eng:(piper|openai|elevenlabs|${TTS_PROVIDERS.map(p => p.id).join(\'|\')})')
+  expect(src).toContain("`tts:eng:${p.id}`")
+
+  // Surface 2 — the mini app's option lists.
+  expect(src).toContain("options: ['off', 'all', 'manual']")
+  expect(src).toContain("options: ['piper', 'openai', 'elevenlabs', ...TTS_PROVIDERS.map(p => p.id)]")
+})
+
+test('a registered provider reports ITS OWN key, not the elevenlabs catch-all', () => {
+  // The defect: engineStatus' last arm is a bare `return`, so every provider id fell into it and the
+  // panel read "engine minimax (needs ELEVENLABS_API_KEY)". The control is that the answer NAMES the
+  // provider's own env var — asserting `ready === false` would have passed against the broken build.
+  for (const p of TTS_PROVIDERS) expect(engineStatus(p.id).missing).toBe(p.tokenEnv)
+  expect(engineStatus('elevenlabs').missing).toBe('ELEVENLABS_API_KEY')
+  expect(engineStatus('openai').missing).toBe('OPENAI_API_KEY')
+})
+
+test('a provider can be handed its key through the same force-reply as the hosted engines', () => {
+  const src = daemonSrc()
+  // The env var rides on the reply target instead of being re-derived in the handler; a hardcoded
+  // pair there is what made the flow openai/elevenlabs-only.
+  expect(src).toContain('writeEnvVars({ [target.env]: key })')
+  expect(src).toContain("{ kind: 'ttskey', engine: tts.engine, ...keyed }")
+  expect(src).not.toContain("target.engine === 'openai' ? 'OPENAI_API_KEY' : 'ELEVENLABS_API_KEY'")
+})
+
+// ---- which message shapes the gesture can actually speak -----------------------------------------
+//
+// THE CAUSE OF THE FIRST LIVE DEFECT. He replied "tts" to what looks like an ordinary text bubble and
+// got "no text to speak" — because every relayed Claude reply is sent by sendAgentText as a Bot API
+// 10.1 RICH message, which carries `rich_message.blocks` and no `text` field at all. `.text ??
+// .caption` looked exhaustive and missed the single most common shape in that DM.
+import { repliedSpeakable, messageShape } from './tts-shapes.ts'
+
+test('words are found in text, in a caption, and in a rich card\'s blocks', () => {
+  expect(repliedSpeakable({ text: 'plain words' })).toEqual({ text: 'plain words', from: 'text' })
+  expect(repliedSpeakable({ caption: 'a photo caption', photo: [{}] })).toEqual({ text: 'a photo caption', from: 'caption' })
+})
+
+// THE CONTROL, and the reason this test can fail: run it against `.text ?? .caption` — the shipped
+// v0.5.91 resolver — and this is the case that returns ''. It is the shape of every Claude reply in
+// his DM, captured off the live block format in richmsg.test.ts.
+test('a rich message — what a relayed Claude reply IS — yields its words', () => {
+  const claudeReply = { message_id: 11264, rich_message: { blocks: [
+    { type: 'heading', text: 'Resume', size: 2 },
+    { type: 'paragraph', text: ['worker ', { type: 'bold', text: 'cc-bridge' }, ' is idle'] },
+  ] } }
+  const got = repliedSpeakable(claudeReply)
+  expect(got.from).toBe('rich')
+  expect(got.text).toBe('Resume\n\nworker cc-bridge is idle')
+  expect(got.text.length).toBeGreaterThan(0)   // '' is exactly what the broken build returned
+})
+
+test('a shape with no words anywhere refuses cleanly rather than throwing', () => {
+  for (const src of [{ voice: {} }, { photo: [{}] }, { document: {} }, {}, null, undefined])
+    expect(repliedSpeakable(src)).toEqual({ text: '', from: 'none' })
+  expect(repliedSpeakable({ rich_message: { blocks: [] } })).toEqual({ text: '', from: 'none' })
+  // A whitespace-only text must not be "found" and then fail the emptiness check downstream.
+  expect(repliedSpeakable({ text: '   ' }).from).toBe('none')
+})
+
+test('the refusal log names the message SHAPE and never its content', () => {
+  const shape = messageShape({ message_id: 9, from: { id: 1 }, chat: { id: 2 }, date: 0, voice: { duration: 7 }, caption_entities: [] })
+  expect(shape).toBe('voice,caption_entities')
+  // The words themselves must never reach the log — this runs on his own DM traffic.
+  expect(messageShape({ text: 'a private sentence', message_id: 1 })).toBe('text')
+  expect(messageShape({ text: 'a private sentence' })).not.toContain('private')
+  expect(messageShape({})).toBe('none')
 })

@@ -144,6 +144,7 @@ import { fetchUsageResult, type UsageReading } from './usage-api.ts'
 import { startWebapp, type SettingsView as WebappSettingsView, type SessionCard as WebappSessionCard, type SessionFeed as WebappSessionFeed, type AutomationView as WebappAutomationView, type UsageView as WebappUsageView, type AgentRow as WebappAgentRow } from './webapp.ts'
 import { startTunnel, ensureCloudflared, reapOrphanTunnels, tailscaleFunnelUrl, type Tunnel } from './tunnel.ts'
 import { sendRichMessage, sendRichMessageDraft, editRichMessage, toInputRichMessage, htmlPanelToRich, richHtmlBreaks, callTelegram, normalizeRichInbound, telegramRefused, type InputRichMessage } from './richmsg.ts'
+import { repliedSpeakable, messageShape } from './tts-shapes.ts'
 import { parseAvatars, resolveAvatar, type Avatar } from './avatars.ts'
 import { createAvatarMsgTokens } from './avatar-msg-tokens.ts'
 import { claudingStatus } from './clauding.ts'
@@ -1600,9 +1601,17 @@ async function sendAgentText(chats: string[], text: string, threadId?: number, r
 // exactly one message; Telegram's own 4096 ceiling is the bound (the owner's ruling).
 async function speakRepliedMessage(ctx: Context, chatId: string, msgId?: number): Promise<void> {
   const src = ctx.message?.reply_to_message
-  const text = (src && 'text' in src ? src.text : undefined) ?? (src && 'caption' in src ? src.caption : undefined) ?? ''
   if (!src) { await ctx.reply('Reply "tts" to a message and I\'ll speak that message.').catch(() => {}); return }
-  if (!text.trim()) { await ctx.reply('That message has no text to speak.').catch(() => {}); return }
+  const { text, from } = repliedSpeakable(src)
+  // BOTH outcomes are logged, with the FIELD the words came from (or the message's field names when
+  // there were none) and never their content. The gesture's first live defect cost a round trip
+  // purely because this path was silent: the refusal reached his phone and left nothing behind that
+  // said which shape he had replied to.
+  process.stderr.write(`daemon: manual tts ${text ? `source=${from}` : `REFUSED (no speakable text; shape: ${messageShape(src)})`} msg=${src.message_id}\n`)
+  if (!text.trim()) {
+    await ctx.reply('That message has no text or caption to speak — reply <code>tts</code> to a text message, or to a photo/file with a caption.', { parse_mode: 'HTML' }).catch(() => {})
+    return
+  }
   const tts = loadAccess().tts
   if (!tts?.mode || tts.mode === 'off') {
     await ctx.reply('🔇 Voice replies are off — turn them on in /settings → 🔊 Voice replies (pick <b>manual</b> to keep it gesture-only).', { parse_mode: 'HTML' }).catch(() => {})
@@ -12816,8 +12825,12 @@ function ttsText(): string {
   const st = engineStatus(eng, t?.voice)
   const voiceLabel = PIPER_VOICES.find(v => v.id === (t?.voice ?? DEFAULT_PIPER_VOICE))?.label ?? t?.voice
   return `🔊 <b>Voice replies</b> — mode <b>${mode}</b> · engine <b>${eng}</b>${eng === 'piper' ? ` · 🗣 <b>${escapeHtml(voiceLabel ?? '')}</b>` : ''} (${st.ready ? '✅ ready' : `needs ${escapeHtml(st.missing)}`})\n\n` +
-    `Claude's replies arrive as voice notes after the text. Zero extra Claude usage — it speaks text already written.\n\n` +
-    `🆓 <b>Piper</b> — local &amp; free, auto-installs (~80MB; needs ffmpeg — installed with it if missing)\n☁️ <b>OpenAI</b> — ~$0.015/1k chars (OPENAI_API_KEY)\n☁️ <b>ElevenLabs</b> — best voices, priciest (ELEVENLABS_API_KEY)`
+    `💬 <b>All</b> — every reply arrives as a voice note after the text.\n` +
+    `✋ <b>Manual</b> — nothing speaks on its own; reply <code>tts</code> to any message and I speak that one.\n` +
+    `Zero extra Claude usage either way — it speaks text already written.\n\n` +
+    `🆓 <b>Piper</b> — local &amp; free, auto-installs (~80MB; needs ffmpeg — installed with it if missing)\n☁️ <b>OpenAI</b> — ~$0.015/1k chars (OPENAI_API_KEY)\n☁️ <b>ElevenLabs</b> — best voices, priciest (ELEVENLABS_API_KEY)` +
+    // The registered providers print themselves, so a second entry in the table needs no edit here.
+    TTS_PROVIDERS.map(p => `\n☁️ <b>${escapeHtml(p.label)}</b> — hosted (${escapeHtml(p.tokenEnv)})`).join('')
 }
 function ttsKeyboard(): InlineKeyboard {
   const t = loadAccess().tts
@@ -12825,8 +12838,14 @@ function ttsKeyboard(): InlineKeyboard {
   const m = (label: string, v: string) => (mode === v ? `● ${label}` : label)
   const e = (label: string, v: string) => (eng === v ? `● ${label}` : label)
   const kb = new InlineKeyboard()
-    .text(m('🔇 Off', 'off'), 'tts:mode:off').text(m('💬 All', 'all'), 'tts:mode:all').row()
+    .text(m('🔇 Off', 'off'), 'tts:mode:off').text(m('💬 All', 'all'), 'tts:mode:all').text(m('✋ Manual', 'manual'), 'tts:mode:manual').row()
     .text(e('🆓 Piper', 'piper'), 'tts:eng:piper').text(e('☁️ OpenAI', 'openai'), 'tts:eng:openai').text(e('☁️ 11Labs', 'elevenlabs'), 'tts:eng:elevenlabs').row()
+  // Registered providers get their own row rather than a fourth button on the one above: at his
+  // phone's 456px a 4-button row truncates the labels to initials.
+  if (TTS_PROVIDERS.length) {
+    TTS_PROVIDERS.forEach(p => kb.text(e(`☁️ ${p.label}`, p.id), `tts:eng:${p.id}`))
+    kb.row()
+  }
   if (eng === 'piper') {
     const cur = t?.voice ?? DEFAULT_PIPER_VOICE
     PIPER_VOICES.forEach((v, i) => { kb.text(v.id === cur ? `● ${v.label}` : v.label, `tts:pv:${i}`); if (i === 2) kb.row() })
@@ -15164,7 +15183,10 @@ bot.on('callback_query:data', async ctx => {
 
   // Voice-transcription sub-panel → switch backend (live; daemon reads .env per voice note).
   // Voice-replies sub-panel taps: mode/engine selection + provisioning side effects.
-  const ttsMatch = /^tts:(?:mode:(off|all)|eng:(piper|openai|elevenlabs)|pv:(\d)|(back))$/.exec(data)
+  // The engine alternation is BUILT FROM THE TABLE, so a new provider is selectable the moment its
+  // record exists — the previous hardcoded list is exactly what made `manual`/`minimax` writable by
+  // applySetting and unreachable from the phone.
+  const ttsMatch = new RegExp(`^tts:(?:mode:(off|all|manual)|eng:(piper|openai|elevenlabs|${TTS_PROVIDERS.map(p => p.id).join('|')})|pv:(\\d)|(back))$`).exec(data)
   if (ttsMatch) {
     if (!(await cbAuth(ctx))) return
     await ctx.answerCallbackQuery().catch(() => {})
@@ -15185,11 +15207,19 @@ bot.on('callback_query:data', async ctx => {
     const tts = loadAccess().tts ?? { mode: 'off' as const, engine: 'piper' as const }
     // The hosted engines' key is a CONVERSATION (a force-reply keyed to a message id), so it stays
     // here rather than in applySetting — the Mini App has no message to reply to.
-    if (tts.mode !== 'off' && (tts.engine === 'openai' || tts.engine === 'elevenlabs') && !engineStatus(tts.engine).ready) {
+    // Which env var and label to ask for, resolved from the provider table where there is one — a
+    // selectable engine whose key can never be supplied is half a feature, and the registered
+    // providers became selectable in this same unit.
+    const provider = ttsProvider(tts.engine)
+    const keyed = provider ? { env: provider.tokenEnv, label: provider.label }
+      : tts.engine === 'openai' ? { env: 'OPENAI_API_KEY', label: 'OpenAI' }
+      : tts.engine === 'elevenlabs' ? { env: 'ELEVENLABS_API_KEY', label: 'ElevenLabs' }
+      : null
+    if (tts.mode !== 'off' && keyed && !engineStatus(tts.engine).ready) {
       const sent = await channel.sendText(chat,
-        `🔑 Reply with your <b>${tts.engine === 'openai' ? 'OpenAI' : 'ElevenLabs'}</b> API key — it's stored in the bridge's .env and your message is deleted right away.`,
+        `🔑 Reply with your <b>${escapeHtml(keyed.label)}</b> API key — it's stored in the bridge's .env and your message is deleted right away.`,
         { ...(thread ? { threadId: String(thread) } : {}), forceReply: { placeholder: 'API key' } }).catch(() => null)
-      if (sent) replyTargets.set(refKey(sent), { kind: 'ttskey', engine: tts.engine })
+      if (sent) replyTargets.set(refKey(sent), { kind: 'ttskey', engine: tts.engine, ...keyed })
     }
     await showHtmlPanel(ctx, 'edit', ttsText(), ttsKeyboard())
     return
@@ -18654,9 +18684,11 @@ bot.on('message:text', async ctx => {
             await ctx.reply('❌ That doesn\'t look like an API key — open /settings → 🔊 Voice replies to retry.')
             return
           }
-          writeEnvVars({ [target.engine === 'openai' ? 'OPENAI_API_KEY' : 'ELEVENLABS_API_KEY']: key })
+          // The env var and label ride on the target (set where the prompt was raised), so a
+          // registered provider collects its key through this same flow with no branch here.
+          writeEnvVars({ [target.env]: key })
           await ctx.deleteMessage().catch(() => {})
-          await ctx.reply(`🔑 ${target.engine === 'openai' ? 'OpenAI' : 'ElevenLabs'} key saved — voice replies are ready.`)
+          await ctx.reply(`🔑 ${target.label} key saved — voice replies are ready.`)
           return
         }
         // Folder for /new in General → spawn a session there (it creates its own topic).
@@ -20440,8 +20472,12 @@ async function webappReadSettings(): Promise<WebappSettingsView> {
       voice: { value: von, editable: true, label: von ? `on · ${a.tts!.engine}` : 'off' },
       // 🔊 voice replies, the full three-part shape the Telegram panel has. `voice` above stays as
       // the plain on/off it always was — the app's own quick toggle, and /voice's shape.
-      ttsMode: { value: a.tts?.mode ?? 'off', editable: true, options: ['off', 'all'] },
-      ttsEngine: { value: a.tts?.engine ?? 'piper', editable: true, options: ['piper', 'openai', 'elevenlabs'], label: 'piper installs locally; the others need a key' },
+      // The two lists MUST stay supersets of nothing — they are what the app can reach, and
+      // applySetting's own allowlists are the authority they mirror. 'manual' and the registered
+      // providers were writable there and absent here, so a mode the daemon runs was unreachable
+      // from either surface (found 2026-08-13, one deploy after it shipped).
+      ttsMode: { value: a.tts?.mode ?? 'off', editable: true, options: ['off', 'all', 'manual'], label: 'manual = silent until you reply "tts" to a message' },
+      ttsEngine: { value: a.tts?.engine ?? 'piper', editable: true, options: ['piper', 'openai', 'elevenlabs', ...TTS_PROVIDERS.map(p => p.id)], label: 'piper installs locally; the others need a key' },
       ttsVoice: { value: a.tts?.voice ?? DEFAULT_PIPER_VOICE, editable: true, options: PIPER_VOICES.map(p => p.id), label: 'piper only' },
       stream: { value: replyMode(), editable: true, options: [...STREAM_ORDER] },
       sessionPin: { value: a.sessionPin !== false, editable: true },
