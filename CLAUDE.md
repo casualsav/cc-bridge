@@ -180,6 +180,17 @@ asks **`paneRunsTypedInput`** (`prompt.ts`) instead. The class cost a silently-q
 *and then complete* (the completion watch read the same screen). Fixed v0.4.385 at three sites;
 fixture is that incident's own capture in `prompt-queued.test.ts`.
 
+**"Continue with Fable 5" IS the credit spend, so consent is per-USER and its default declines.**
+Read off the CLI 2.1.226 binary: that primary option appears precisely when usage credits are
+enabled and a balance exists, beside body text naming them — v0.5.1 pressed it on any human's tap
+and the reasoning ("tapping Fable already answered the question") was sound on a wrong premise.
+`Access.creditConsent` maps a Telegram user id to `'allow' | 'never'`; **absent and `'never'` behave
+identically** (decline, Esc, report), because the default of a money question must be the one that
+cannot cost anyone anything, and no user id (bus, drift guard, auto-refresh) resolves any other way.
+Even on `'allow'` the buy/provision variants are declined — approving credit *use* is not approving
+a *purchase*. Fixture: `CREDIT_CONSENT` in `prompt.test.ts`; the branch has never fired live
+(HANDOFF.md carries the capture that would close it).
+
 **Retiring a slash command means a stub handler, never a deleted one** — an unregistered command
 falls through to the unknown-command relay, which types it into the live TUI where the palette
 fuzzy-matches it (probed live: `/opus` offered `/fable` as top match). The stub replies with
@@ -293,6 +304,12 @@ move** (a `git stash -u` once destroyed ~50 uncommitted lines of a sibling's in-
   Undo your own change: `git checkout HEAD -- path/you/own.ts`. Genuinely need a clean tree: ask
   the orchestrator to sequence it; do not take one.
 - Before any git verb, `git status` — treat files you did not touch as someone's live work.
+
+- The same rule off-tree: **never widen a cleanup glob past the dirs your own run created.**
+  `/tmp/claude-tg-*.lock` are LIVE bridge sockets, and an `rm -rf /tmp/<prefix>-*` written to tidy up
+  after a probe took 2,185 accumulated dirs with it (2026-08-08). Counting under /tmp is a streaming
+  `opendirSync` pass bucketed by prefix, never a glob per prefix — /tmp on this box has held 3M
+  entries.
 
 **Recovering work that disappeared:** the working tree (untracked included) is snapshotted to
 hidden refs under `refs/cc-bridge/autosave/` — `bun autosave.ts list | show <ref> | restore <ref>
