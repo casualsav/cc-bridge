@@ -54,6 +54,16 @@ feed half of `transcript.ts`.
   past. The shared-checkout section governs whose files you may touch.
 - Turn the ask into a check that can fail before you start, and watch it pass before reporting
   done. "Make sure it works" is not one.
+- **A green unit suite can pass from the right direction while the system runs the wrong one** —
+  test across the SEAM (attempt → outcome → buffer → drain), and bind a model test to the shipped
+  code with a source-reading control you have watched FAIL against `git show HEAD:<file>`.
+  `inbound-ledger.ts` passed all 16 of its tests while the stamping inversion one function away in
+  the call site destroyed ten messages (2026-08-06). Enumerate by SYMBOL, not by function — a
+  `grep -n <symbol>` prints the fourth site a function-scoped fix misses. Pin:
+  `inbound-seam.test.ts`.
+- **bun leaks `mock.module` ACROSS test files** — `calls.test.ts`'s `topic-runtime` stub is
+  indistinguishable from a neighbour's fix working; assertions that must not be faked go through
+  `outboundTargetsFor`.
 
 ## Context economy
 
@@ -61,6 +71,9 @@ feed half of `transcript.ts`.
   `sed -i`, `cat >>`, a heredoc over an existing file) — a shell write re-injects the WHOLE file
   into context, an Edit only the diff (measured: 17,548 tokens across five shell edits). Writing
   a NEW file from a script is fine.
+- **`agent-bus.ts` holds a literal NUL byte** (a `${fromSid}\0${toSid}` map key) — deliberate and
+  correct, but plain `grep` then calls the whole file binary and prints NOTHING, silently. Search
+  it with `grep -a`.
 - **`bun scripts/symbols.ts | grep -i <name>` before grepping a file for a definition** — name →
   line for every top-level symbol in tracked `.ts` over 5,000 lines. Definitions only; a grep for
   usage is still a grep.
@@ -159,6 +172,14 @@ Proof: `scripts/pane-delivery-race.ts` (a real pane; `--unlocked` reproduces the
 half `pane-io.test.ts` (must keep using the eagerly-captured `realSleep`, or the give-up path
 cannot fire while the check still passes).
 
+**`onNormalPrompt` answers "is there an input box", never "will typed text RUN"** — the "Press up
+to edit queued messages" bar is a ❯ row between two box borders, exactly the shape it trusts, so it
+is TRUE on a busy pane and `submitLanded` counts a queued command as landed. Anything that types
+asks **`paneRunsTypedInput`** (`prompt.ts`) instead. The class cost a silently-queued `/clear` and,
+2026-08-06, a `/compact` that sat in a queue for ten minutes while the bus reported it submitted
+*and then complete* (the completion watch read the same screen). Fixed v0.4.385 at three sites;
+fixture is that incident's own capture in `prompt-queued.test.ts`.
+
 **Retiring a slash command means a stub handler, never a deleted one** — an unregistered command
 falls through to the unknown-command relay, which types it into the live TUI where the palette
 fuzzy-matches it (probed live: `/opus` offered `/fable` as top match). The stub replies with
@@ -243,8 +264,21 @@ silently gone. The instrument is a grep against the CACHE, not the tree: `grep -
 cache/<ver>/{caller,callee}.ts`, 0 vs N. A change spanning two files ships together or not at
 all; `--without` is only for a sibling's INDEPENDENT work.
 
+**A deploy DELETES anything under a cache version dir or the marketplace mirror that is not payload
+and not in `PRUNE_PROTECT`** (`payload-provenance.ts`) — so any file the runtime writes BESIDE the
+payload (daemon, supervisor, hook, gate) must have its top-level name added to that list, or the
+next deploy removes it; it is an enumeration, not a rule the prune can infer. The `.pre-<ts>`
+rollback backup is safe only as a SIBLING of the version dir — move it inside and a same-version
+redeploy prunes its own rollback.
+
 Deploy refuses to ship from any branch but `main`; name a branch deliberately with
 `--ship-branch <branch>` (no bare `--force`, on purpose).
+
+**The chat lane holds delegated commit/push authority here** (owner, 2026-07-28, replacing the
+previous day's per-batch "say the word" flow): commit + push at clean boundaries — unit landed,
+verified, report accepted; explicit paths; in-flight work left out. Owner-facing DESIGN iterations
+still get his on-device look before being treated as done, and a session with reason to override
+holds and says why.
 
 ## ⚠️ This checkout is shared by concurrent agent sessions
 

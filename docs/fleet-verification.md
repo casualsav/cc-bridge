@@ -101,6 +101,31 @@ at 807 chars, including the very message the clear discarded. Fixed by advancing
 watermark when a session's conversation id changes; if you touch `rememberPaneAgentTranscript`, keep
 that. Also: a cleared pane drops its `ctx` segment entirely, so the reading is `null`, **not 0**.
 
+## Driving the owner's OWN gestures live, with no Telegram client
+
+`@name <message>`, a native reply to a session's card and `@launch` are things only he can type —
+but the scheduler runs them for you. On the TEST channel
+(`TELEGRAM_STATE_DIR=~/.claude/channels/telegram-test`): `tg spawn` a lane and a worker; write
+`topics.json`'s `dmChat` to `{"<his chat>": {"sessionId": "<lane sid>", "cwd": "<dir>"}}`; write one
+row into `scheduled-messages.json` with `"origin": "chat"` and the gesture as its `text`.
+`deliverChatOrigin` then runs it through `OWNER_CHAT_VERBS` exactly as a typed DM does. Both files
+are read at BOOT — restart the daemon for either to take effect.
+
+**Restart FIRST, and give the scheduled row ~90s of lead.** Both relay loops PRIME a new
+transcript by setting its cursor to the latest reply already in it and returning, so a reply that
+lands before the priming tick is skipped forever. Restarting *after* the probe replies produces a
+clean-looking run with no delivery and nothing in the log to say why — a false negative that reads
+exactly like the feature being broken.
+
+**A card that actually LEFT the process writes a `msg-routes.json` row** (`<chat>:<message id>` →
+the speaking session's sid). Telegram returns a message id only on an accepted send, so that row is
+positive evidence of delivery; the absence of a failure line in the log is not. Same instrument for
+any bus or owner card.
+
+Restore what the rig wrote: `dmChat` back to `{}`, `scheduled-messages.json` and
+`owner-replies.json` to `[]`, then `tg kill` both sessions (a session bound as the chat lane refuses
+`tg kill` until the binding is gone AND the daemon has reloaded it).
+
 ## Where to look
 
 - A session's conversation: `@tg_transcript` pane option → that JSONL. Synthetic entries

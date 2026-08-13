@@ -734,7 +734,9 @@ give it.
   the bus's report nudges still run off it. It is not user-facing; it is not gone. The amber is a literal for the same reason `.dot.on`'s green is
   (a token would make a frozen indicator inheritable). `waitstate.mjs` measures all of it — sampling
   RENDERED pixels, because a declared colour that resolves to the ground passes every
-  computed-style assertion and is invisible on the device.
+  computed-style assertion and is invisible on the device. **Its control is pinned to `dd2767f`**
+  (`WAITSTATE_BASELINE` overrides): re-baselining moves that pin deliberately, never back to `HEAD`,
+  which silently turns the control into a copy of the page under test.
 - **The ONE exception to that amber: a waiting CHAT lane is green** (`.dot.rest`, the owner
   2026-07-29 — a chat lane waiting on its human is its resting state, not a stall, and amber reads
   as a problem where nothing is wrong). It is `.dot.on`'s green **without the pulse**, which is the
