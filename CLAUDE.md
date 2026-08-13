@@ -366,6 +366,17 @@ after a grace so a same-turn answer is never raced. **Nothing goes to the asker*
 expiry notice is the backstop); the nudge costs a turn, so it fires once and never at a session
 already working; scope is bus-asks-only by construction, from the anchor test that gates the call.
 
+**EVERY ACK DELIVERS LIKE AN ASK — the FYI-defer class is ABOLISHED, by owner ruling (2026-08-13:
+"bus messages are instant").** From v0.5.44 to v0.5.108 an unsolicited FYI to a chat lane rode the
+lane's next delivery inside the digest to save the wake's model turn, and three generations of wake
+predicates plus a shadow registry grew around the exemptions — each generation forced by a stall the
+previous one shipped (6 minutes, then 8 hours). Do not reintroduce a defer to save wake cost: the
+forced-text noise it compensated for is carried by the content filters (`isEnclosedFiller` & co),
+and the wake cost is the owner's accepted price for an instant bus. The digest stays as ambient
+catch-up only, and `digestSince`'s `excludeIds` keeps rows still queued for an endpoint out of that
+endpoint's digest — in flight is not catch-up, and a preview plus the sweep's paste is the same
+message twice.
+
 **The `Stop` hook says the same thing 23 seconds earlier and for free, and the two share ONE budget.**
 `hook-stop.ts` runs as a Claude Code Stop hook, asks the daemon (`stop-hook` verb) whether this
 session still owes an answer, and refuses the turn's end with the reason — so the model sends it

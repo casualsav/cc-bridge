@@ -177,8 +177,7 @@ import {
   setSessionDepth, resetAllSessionDepth, pruneSessionDepth, nextAskDepth, depthExceeded, depthLimit,
   resolveEndpoint, nameForEndpoint, normalizeEndpointName, backlogLabel, confineRef, sharedDir, ensureSharedDir, appendLedger, tailLedger,
   getSeen, markSeen, digestSince, DIGEST_SCAN,
-  systemAskLabel, ackWakesNow, laneAwaitsSender, laneBriefedSender,
-  openExpectationRow, graceExpectationRow, closeExpectationRowsFor, registryVerdict, pruneExpectationRows,
+  systemAskLabel,
   type BusEndpoint, type BusPending, type LedgerEntry,
 } from './agent-bus.ts'
 import { formatAskBlock, formatAnswerBlock, formatAsideBlock, formatDigestBlock, formatNudgeBlock, formatStopReason, formatRosterLine, closureNoticeText, busSentHeader, busGotHeader, type BusVerb, type RosterAgent } from './agent-bus-block.ts'
@@ -200,7 +199,6 @@ import {
   type OpenclawCfg,
 } from './openclaw-driver.ts'
 import { silentTurnEnvPrefix, probeSilentTurns, describeProbe, isSilentTurnScope, type SilentTurnScope } from './silent-turns.ts'
-import { recordShadow, type ShadowState } from './expectations.ts'
 import {
   initPromptRelay, relayPromptToTelegram, relayPermissionToTelegram, sweepPermStorms,
   permStorms, multiSelectKeyboard, formatPermission, relayStuckScreen, renderStuckHtml,
@@ -1358,8 +1356,9 @@ async function offerStrandedPasteCard(paneId: string, cap: string, styled: strin
   }
 }
 
-// The catch-up block a HUMAN message carries into a bound chat lane — the flush half of the deferred
-// FYI (tryDeliverAsk's defer branch is the other). Scoped exactly as the bus-side digest is: this
+// The catch-up block a HUMAN message carries into a bound chat lane — ambient catch-up on bus
+// traffic the lane missed (and, at the v0.5.112 cutover, the delivery of any FYI the retired defer
+// class had recorded but not yet flushed). Scoped exactly as the bus-side digest is: this
 // endpoint's own lane only, never the room's, and NOTHING AT ALL without a watermark, because a lane
 // that has never taken a bus delivery has nothing it can have missed.
 //
@@ -1370,8 +1369,11 @@ function flushDigestFor(sid: string): { block: string; sid: string; name: string
   if (since <= 0) return null
   const name = nameForEndpoint(sid, busEndpoints())
   const room = busLedgerRoom()
+  // A row still queued for THIS endpoint is in flight, not catch-up — the sweep will paste it in
+  // full, and a digest that previews it delivers the same words twice (digestSince's excludeIds).
+  const inFlight = new Set(listPending().filter(p => p.toSid === sid && !p.expiredAt).map(p => p.id))
   const entries = digestSince(resolveLedgerNames(tailLedger(room, DIGEST_SCAN)), since,
-    { excludeFrom: name, involving: name, cap: 8 })
+    { excludeIds: inFlight, excludeFrom: name, involving: name, cap: 8 })
   if (!entries.length) return null
   const block = formatDigestBlock(entries, fmtAgo(since))
   if (!block) return null
@@ -3503,11 +3505,6 @@ async function reapDeadEndpoints(name: string): Promise<void> {
       || !(await paneClaudeLive(pane).catch(() => false))
     if (dead) {
       updateTopic(row.sessionId, { closed: true })
-      // Rows in BOTH directions go with it — nothing can arrive from a dead session, and a wake with
-      // nobody to wake is dead weight. This runs on the same POSITIVE evidence that closes the topic
-      // row (a pane that answered "gone"), never on a failed read: `paneAlive`'s catch already resolves
-      // to false only after the pane resolved, and the guards above skip a restarting pane.
-      closeExpectationRowsFor(row.sessionId)
       process.stderr.write(`bus: reaped dead endpoint "${row.name}" (${row.sessionId})\n`)
     }
   }
@@ -3706,9 +3703,6 @@ async function runSessionWatch(fromSid: string, target: string, g: Gestures, cha
   const w: BusWatch = { id: nextWatchId(), watcherSid: fromSid, targetSid: res.id, targetName: nameForEndpoint(res.id, endpoints), armedAt: Date.now(), ...(chatId ? { chatOrigin: { chatId } } : {}) }
   busWatches.push(w)
   saveWatches()
-  // The dispatch IS the expectation: a lane arms a watch precisely so it can act when the pane frees,
-  // which is the counter-example that forced the wake/ride split to exist in the first place.
-  openExpectationRow({ byLane: fromSid, onSession: res.id, kind: 'watch', ref: w.id, label: `watch @${w.targetName}` })
   process.stderr.write(`daemon: watch ${w.id} armed on @${w.targetName} (${res.id}) by ${fromSid}${chatId ? ` (chat ${chatId})` : ''}\n`)
   void evaluateWatches().catch(() => {})   // already at a prompt ⇒ fires now, not in 15s
   return { ok: true, text: g === 'chat'
@@ -4187,59 +4181,13 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
   if (!cur || cur.injected || cur.expiredAt || busInFlight.has(cur.id)) return 'busy'   // never deliver a timed-out ask to the target
   busInFlight.add(cur.id)   // claim BEFORE the awaits so the immediate attempt + the 15s sweep can't both proceed
   try {
-    // ---- The FYI that does not wake a chat lane ----
-    //
-    // Pasting an unsolicited FYI into the lane's pane buys a full model turn that delivers nothing to
-    // the owner and then pays the CLI's no-visible-output re-prompt on top (ackWakesNow carries the
-    // measurement and the boundary). So it is recorded here and read in the digest on the lane's next
-    // delivery — human message or bus ask, both carry one now.
-    //
-    // What still happens, and each is deliberate: the LEDGER row is already written by the caller and
-    // is what the flush reads; `markBriefed` is stamped exactly as a landed delivery would (deferral
-    // moves when the PANE sees it, never the bus bookkeeping); the sender gets its card; the owner
-    // gets the target-side card immediately, so his surface is unchanged and only the lane's turn
-    // moves. The row is dropped because an ack's row never outlives its delivery.
-    //
-    // What must NOT happen: `markSeen` — the watermark means "caught up to HERE" and is only sound
-    // because whatever advances it also SHOWS the digest. Advancing it now would mark this very FYI
-    // as seen by a session that was never given it, which is the one way this feature loses a
-    // message. `setSessionDepth`/`markInjected` are skipped for the same structural reason: no turn
-    // was dispatched, so there is no chain to deepen and nothing was injected.
-    //
-    // `laneAwaitsSender` is the class boundary read off the pending rows rather than off the verb: an
-    // open ask from this lane TO this sender is evidence the lane is waiting on them, whatever verb
-    // they reached back with. It carries the miss it repairs, and the cost it accepts.
-    // `laneBriefedSender` is the same rule with the evidence a pending row cannot carry: the ask that
-    // commissioned the work has usually CLOSED by the time the report is written, so an open-rows
-    // test misses exactly the completion reports the lane is waiting for. It reads the sender's
-    // briefer, which outlives the ask. (Incident: an 8-hour parked unit report, 2026-08-12.)
-    // ---- PHASE A SHADOW: the registry is consulted here and DECIDES NOTHING ----
-    // Both verdicts are computed and the disagreement is recorded (expectations.ts carries the design
-    // and the gate). The registry's claim is "every dispatch opens a row", and the way that claim fails
-    // is a dispatch path nobody enumerated — a disagreement is that path announcing itself, which is
-    // why it resets the clean-day streak rather than being averaged away.
-    const predicatesWake = ackWakesNow(cur.sysKind)
-      || laneAwaitsSender(listPending(), cur.toSid, cur.fromSid)
-      || laneBriefedSender(getBriefedBy(cur.fromSid), cur.toSid)
-    if (cur.noReply && isChatLaneSession(cur.toSid)) {
-      const reg = registryVerdict(cur.toSid, cur.fromSid, cur.sysKind)
-      const agreed = reg.wake === predicatesWake
-      noteShadow(agreed, agreed ? null
-        : `${cur.fromName}→${cur.toName} ${cur.sysKind ?? 'agent-ack'}: registry ${reg.wake ? 'WAKE' : 'ride'} (${reg.why}) vs predicates ${predicatesWake ? 'WAKE' : 'ride'}`)
-      process.stderr.write(`daemon: shadow ack ${cur.id} ${cur.fromName}→${cur.toName} — predicates ${predicatesWake ? 'wake' : 'ride'} · registry ${reg.wake ? 'wake' : 'ride'} (${reg.why}) — ${agreed ? 'agree' : 'DISAGREE'}\n`)
-    }
-    if (cur.noReply && isChatLaneSession(cur.toSid) && !predicatesWake) {
-      const now = Date.now()
-      if (cur.fromSid !== SYSTEM_SID) markBriefed(cur.toSid, cur.fromSid, cur.fromName, now)
-      // The brief IS a dispatch: it records who put work INTO this session, and unlike a pending row it
-      // outlives the ask that carried it — which is the whole of the 8-hour incident.
-      if (cur.fromSid !== SYSTEM_SID) openExpectationRow({ byLane: cur.fromSid, onSession: cur.toSid, kind: "brief", label: cur.text.slice(0, 80) }, now)
-      void notifyAskSent(cur.fromSid, cur.toName, cur.text, 'ack', cur.toSid)
-      if (!cur.quiet) void notifyBusRich(cur.toSid, busGotHeader('ack', cur.fromName, cur.toName), cur.text)
-      removePending(cur.id)
-      process.stderr.write(`daemon: ack ${cur.id} from @${cur.fromName} DEFERRED for @${cur.toName} — rides its next delivery (sysKind ${cur.sysKind ?? 'agent'})\n`)
-      return 'deferred'
-    }
+    // AN ACK DELIVERS EXACTLY LIKE AN ASK — no defer branch here, and that is a ruling, not an
+    // omission. From v0.5.44 to v0.5.108 an unsolicited FYI to a chat lane was recorded instead of
+    // pasted and rode the lane's next delivery inside the digest; the owner abolished that class on
+    // 2026-08-13 ("bus messages are instant") and accepted the wake cost it was saving. The digest
+    // machinery below stays — it is ambient catch-up, and it is also what delivered any FYI still
+    // recorded-but-unflushed at the moment the defer branch was removed. agent-bus.ts carries the
+    // full history at the predicates' old site; do not reintroduce a defer to save wake cost.
     const pane = await paneForSession(cur.toSid).catch(() => null)
     if (!pane) return 'no-session'
     const cap = await capturePane(pane).catch(() => '')
@@ -4278,7 +4226,9 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
     // SCOPED TO THIS ENDPOINT'S OWN LANE (`involving`). Room-wide was the bug the owner caught: a
     // one-minute-old @peptides spawn's second message carried two cc-bridge↔chat rows — another
     // lane's conversation, in a context that had no way to know it was not its own.
-    const digest = since > 0 && !resubmitting ? digestSince(resolveLedgerNames(tailLedger(room, DIGEST_SCAN)), since, { excludeId: cur.id, excludeFrom: cur.toName, involving: cur.toName, cap: 8 }) : []
+    // excludeIds: rows still queued for this endpoint are in flight, not catch-up — this same sweep
+    // pastes them in full, and previewing one in the digest delivers the same words twice.
+    const digest = since > 0 && !resubmitting ? digestSince(resolveLedgerNames(tailLedger(room, DIGEST_SCAN)), since, { excludeId: cur.id, excludeIds: new Set(listPending().filter(p => p.toSid === cur.toSid && !p.expiredAt).map(p => p.id)), excludeFrom: cur.toName, involving: cur.toName, cap: 8 }) : []
     const dig = formatDigestBlock(digest, since > 0 ? fmtAgo(since) : 'recently')
     if (dig) block = `${dig}\n${askBlock}`
     const outcome = resubmitting ? await resubmitPane(pane) : await busDeliverOutcome(pane, block)
@@ -4316,9 +4266,6 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
       // briefer: it has no session to report back into (see deliverAnswerToAsker), so a daemon notice
       // must not leave the target owing an ack to a name it cannot address.
       if (cur.fromSid !== SYSTEM_SID) markBriefed(cur.toSid, cur.fromSid, cur.fromName, now)
-      // The brief IS a dispatch: it records who put work INTO this session, and unlike a pending row it
-      // outlives the ask that carried it — which is the whole of the 8-hour incident.
-      if (cur.fromSid !== SYSTEM_SID) openExpectationRow({ byLane: cur.fromSid, onSession: cur.toSid, kind: "brief", label: cur.text.slice(0, 80) }, now)
       // HIS OWN direct ask confirms with a REACTION on the message he typed, and gets no card: the
       // card showed him his own words back, behind a chevron, one message under the message he had
       // just sent (his ruling, 2026-08-09). A reaction says the same thing on the message itself.
@@ -4413,40 +4360,6 @@ const asideFailText = (o: AsideDelivery, toName: string): string =>
 // Synthetic asker id for daemon-originated asks (the context nudge). Deliberately not a session id:
 // nothing resolves it to a pane, and deliverAnswerToAsker branches on it rather than trying.
 const SYSTEM_SID = '@system'
-
-// ---- Phase A shadow accounting -------------------------------------------------------------------
-// A file rather than log-grepping: the daily counts ride the reports the orchestrator already gets,
-// and a grep over a rotating log is not a number anyone can quote. Bounded by construction — 60 days
-// of counters and the last 40 disagreement samples.
-const SHADOW_FILE = join(STATE_DIR, 'expectation-shadow.json')
-function noteShadow(agreed: boolean, sample: string | null): void {
-  const now = Date.now()
-  const cur = readJsonFile<ShadowState | null>(SHADOW_FILE, null) ?? { startedAt: now, days: [], samples: [] }
-  writeJsonFile(SHADOW_FILE, recordShadow(cur, agreed, sample, now))
-}
-// ONE-TIME BACKFILL, and the shadow is worthless without it. Rows are opened by dispatches, so every
-// ask already in flight when this build landed has none — and the shadow would read each of those as
-// "registry rides, predicates wake" and count an unenumerated dispatch path that does not exist. That
-// is noise in exactly the counter the cutover gate reads. Backfilling the OPEN rows makes the
-// disagreement log mean what it claims from the first day. Idempotent (openExpectation supersedes on
-// the same key), and cheap enough to run at every boot rather than needing a stamp.
-function backfillExpectations(): void {
-  let n = 0
-  for (const p of listPending()) {
-    if (p.noReply || p.ownerDirect || p.expiredAt || p.toKind !== 'claude') continue
-    openExpectationRow({ byLane: p.fromSid, onSession: p.toSid, kind: 'ask', ref: p.id, label: p.text.slice(0, 80) }, p.createdAt)
-    n++
-  }
-  if (n) process.stderr.write(`daemon: backfilled ${n} expectation row(s) from asks already open\n`)
-}
-backfillExpectations()
-
-// Pruning is a WRITE and rides an existing tick rather than a timer of its own. Every bound the
-// registry has is a TTL, so nothing is lost by pruning late — only by pruning eagerly inside a read.
-setInterval(() => {
-  const n = pruneExpectationRows()
-  if (n > 0) process.stderr.write(`daemon: pruned ${n} expired expectation row(s)\n`)
-}, 3_600_000).unref?.()
 
 // Wake the orchestrator lane with a real ask. Fleet-control signals (a paused chain, an unusually
 // wide fan-out) are ITS problem to act on, and a Telegram card in the owner's DM is not an event:
@@ -4846,11 +4759,6 @@ async function deliverAnswerToAsker(pending: BusPending, answerer: string, rawBo
   const cur = getPending(pending.id)
   if (!cur) return `!ask ${pending.id} is already closed (answered, or its 24h late-answer window elapsed)`
   removePending(cur.id)
-  // THE ANSWER DOES NOT CLOSE THE EXPECTATION — it starts the completion-report window. The report on
-  // commissioned work is written AFTER the ask closes (the normal order, not an edge case), and an
-  // open-rows test misses exactly that: a finished-unit report parked 8 hours on 2026-08-12. The grace
-  // is measured, not chosen — expectations.ts carries the ledger numbers behind 8h.
-  graceExpectationRow(cur.fromSid, cur.toSid, cur.id)
   // A @system ask (the context nudge) has no asker session to deliver back into — and must not
   // borrow one: injecting the answer into the WORKER would wake it and grow the very context the
   // nudge was about. The ledger entry plus the owner-facing card below are its whole audit trail.
@@ -7450,13 +7358,6 @@ async function handleCall(
         try { p = createPending({ fromSid, toSid: res.id, toKind: res.kind, fromName, toName, text: askText, refs, depth: askDepth, ...(noReply ? { noReply } : {}) }, Date.now()) }
         catch (e) { write({ t: 'result', id, ok: false, text: `${e instanceof Error ? e.message : e} — nothing was sent; answer or close some open asks and retry` }); return }
         appendLedger(room, { ts: Date.now(), kind: verb, from: fromName, to: toName, id: p.id, text: askText, refs })
-        // An ASK opens an expectation; an ack does not — `ack` means nothing is waiting on you, which
-        // is the definition of the class the defer parks. (The owner-direct exclusion needs no test
-        // here: those rows are minted by ownerHermesAskCore and the launch path, never through this
-        // handler, so no row is opened for them at all.)
-        if (!noReply) {
-          openExpectationRow({ byLane: fromSid, onSession: res.id, kind: 'ask', ref: p.id, label: askText.slice(0, 80) })
-        }
         // The sender's own copy for its mini-app feed — the words left through a command argument, so
         // its transcript holds no trace of them (outbound-feed.ts).
         recordOutbound({ sid: fromSid, ts: Date.now(), kind: verb === 'ack' ? 'ack' : 'ask', to: toName, text: askText })
@@ -7480,11 +7381,7 @@ async function handleCall(
           text = noReply
             ? (outcome === 'delivered'
                 ? `acked @${toName} — delivered; nothing is queued and no answer is expected`
-                : outcome === 'deferred'
-                  // Not a failure and not a delay to wait out: it is recorded, and it reaches them in
-                  // full on their next delivery. Said plainly so a sender doesn't chase a reaction.
-                  ? `acked @${toName} — queued for their next wake; an FYI does not wake a chat lane, and it rides their next delivery in full. Nothing is expected of either of you`
-                  : `@${toName} is busy — the ack is queued and lands when it goes idle`)
+                : `@${toName} is busy — the ack is queued and lands when it goes idle`)
             : askResultText(outcome, toName, p.id, asksAheadOf(p))
         }
         break
@@ -7919,7 +7816,6 @@ async function handleCall(
           const p: ParkedSlash = { id: nextParkId(), submitterSid: fromSid, targetSid: res.id, targetName: nameForEndpoint(res.id, endpoints), command, parkedAt: Date.now() }
           parkedSlashes.push(p)
           saveParks()
-          openExpectationRow({ byLane: fromSid, onSession: res.id, kind: 'slash', ref: p.id, label: `parked ${command} → @${p.targetName}` })
           process.stderr.write(`daemon: park ${p.id} armed — ${command} → @${p.targetName} (${res.id}) by ${fromSid}\n`)
           void evaluateParks().catch(() => {})   // already at a prompt ⇒ it goes in now, not in 15s
           write({ t: 'result', id, ok: true, text: parkedText(p) })
@@ -9372,13 +9268,6 @@ async function launchSpawn(spec: SpawnSpec, model: string | null, clampedNote: s
       // this closure, so a spawned session would otherwise have no briefer at all, and the
       // unreported-work check would stay silent for the very sessions it exists for.
       if (fromSid !== SYSTEM_SID) markBriefed(sid, fromSid, fromName, Date.now())
-      // Two rows, because a spawn is two dispatches at once: the `spawn` row is what a `spawn-news`
-      // @system ack matches (it arrives from @system, so nothing keyed on this session could), and the
-      // `brief` row is the work itself, which outlives the founding ask exactly as any other brief does.
-      if (fromSid !== SYSTEM_SID) {
-        openExpectationRow({ byLane: fromSid, onSession: sid, kind: 'spawn', label: `spawned @${topicName}` })
-        openExpectationRow({ byLane: fromSid, onSession: sid, kind: 'brief', label: firstMsg.slice(0, 80) })
-      }
       // No asker-side card here (tryDeliverAsk's notifyAskSent equivalent): the "Spawned @X"
       // chevron above already carries this exact text on the spawner's surface.
       // Mirror the delivered task into the new topic: the paste lands only in the pane, so

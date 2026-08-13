@@ -349,6 +349,20 @@ test('digestSince drops the current ask (excludeId) and self-authored rows (excl
   expect(digestSince(es, 0, { excludeId: 7, excludeFrom: 'me', cap: 8 }).map(e => e.id)).toEqual([1, 3])
 })
 
+test('digestSince: `excludeIds` drops rows still queued for this endpoint (in flight is not catch-up)', () => {
+  // Since every ack delivers (2026-08-13), an ack behind a busy pane sits PENDING with its ledger row
+  // already written. A digest flushed to that endpoint before the sweep lands it would preview the
+  // same words the sweep then pastes in full — one message, delivered twice. The caller names the
+  // pending ids and they are left out entirely: not as FYI, not as ambient.
+  const es = [
+    led({ ts: 100, id: 1, kind: 'ack', from: 'worker', to: 'me' }),   // landed long ago — keep (FYI)
+    led({ ts: 200, id: 9, kind: 'ack', from: 'worker', to: 'me' }),   // still queued — drop entirely
+    led({ ts: 300, id: 4, kind: 'ask', from: 'exec', to: 'me' }),     // still queued — drop entirely
+  ]
+  const got = digestSince(es, 0, { excludeIds: new Set([9, 4]), involving: 'me', cap: 8 })
+  expect(got.map(e => e.id)).toEqual([1])
+})
+
 test('digestSince: `involving` scopes the digest to ONE endpoint\'s lane', () => {
   // The bug the owner caught: a one-minute-old @peptides spawn's second message arrived carrying two
   // cc-bridge↔chat rows. The digest was room-wide, so every other lane's conversation qualified as

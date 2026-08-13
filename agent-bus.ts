@@ -12,10 +12,6 @@ import { isAbsolute, join, resolve, sep } from 'node:path'
 import { appendFileSync, mkdirSync, readFileSync } from 'node:fs'
 import { STATE_DIR, readJsonFile, writeJsonFile } from './common.ts'
 import { loadAccess } from './access.ts'
-import {
-  openExpectation, graceExpectation, closeExpectationsFor, pruneExpectations, parseExpectations,
-  expectationWaking, registryWouldWake, type Expectation, type ExpectationKind, type ExpectationMap,
-} from './expectations.ts'
 
 // Where THIS PROCESS keeps its bus state. Defaults to Telegram's state dir, so daemon.ts and every
 // existing test are unaffected; the Slack/Discord daemons call setBusStateDir() once at boot to get
@@ -102,139 +98,16 @@ export type SystemAskKind =
 const SYSTEM_ASK_KINDS = new Set<string>(['ctx-nudge', 'fleet-alert', 'surfaceless-block',
   'post-relay', 'closure-notice', 'watch-fired', 'spawn-news', 'repo-brief', 'slash-parked'])
 
-// ---- Which FYIs wake a chat lane, and which ride its next delivery ----
+// ---- Every ack DELIVERS — the FYI-defer class is abolished (owner ruling, 2026-08-13) ------------
 //
-// A no-reply FYI pasted into a chat lane's pane costs a full model turn that delivers nothing to the
-// owner — measured 2026-08-09/10 on the live lane: three FYI wakes, 8/6/3 API requests each, zero
-// messages out, every one of them ending in the CLI's "no visible output" re-prompt (which fires
-// once per turn, from inside the CLI's query loop, and which the bridge cannot suppress). So an FYI
-// with nothing waiting on it is RECORDED and rides the next digest instead.
-//
-// THE BOUNDARY IS PURPOSE, NOT VERB (the owner's rule, 2026-08-10): **if the lane is — or may be —
-// WAITING on it, it wakes; if it is merely informed by it, it rides.** The counter-example that
-// forces the split is `watch-fired`: the lane arms `tg watch` precisely to be woken so it can
-// dispatch the moment a pane frees up, so deferring one stalls the fleet for exactly as long as the
-// lane is quiet, which is when a queue is most likely waiting on it.
-//
-// Solicited → wakes. Unsolicited → rides. An agent's own `tg ack` carries no kind and always rides:
-// `ack` means nothing is waiting, which is the definition of the deferred class.
-const WAKING_ACK_KINDS = new Set<string>([
-  'watch-fired',    // the lane ARMED this and is waiting to dispatch on it
-  'closure-notice', // asks the lane was waiting on were closed unanswered
-  'spawn-news',     // a held spawn the lane dispatched started (or didn't)
-  'slash-parked',   // a command the lane parked ran, was refused, or closed unrun
-  'repo-brief',     // a scout the lane requested finished; it may be holding a dispatch on it
-])
-// `post-relay` is the one @system ack that rides: another endpoint spoke to the humans, which is
-// news to the lane and nothing it armed.
-export function ackWakesNow(sysKind?: SystemAskKind): boolean {
-  return sysKind != null && WAKING_ACK_KINDS.has(sysKind)
-}
-
-// THE VERB IS NOT THE ONLY EVIDENCE. An FYI from a session the lane has an OPEN ASK with wakes it
-// whatever the verb says: the open ask is the rule above, machine-checked — the lane dispatched work
-// to THIS sender and has not been told how it went, so it is waiting on them by construction.
-//
-// The miss that forces it (2026-08-10, live): a lane told a worker to "ack with the tip hash" while
-// holding a decision on that worker's report. The ack deferred exactly as specified, and the lane's
-// queue stalled six minutes until the owner's next message flushed it. `tg answer <id>` would have
-// woken it — the verb was simply wrong — which is why this is a NET rather than a redesign: worker
-// verb discipline is not something a lane can enforce, and the cost of the net is bounded below.
-//
-// Scoped to the SENDER, and that scope is the whole design. "Any open ask" would wake a lane with one
-// outstanding dispatch on every unrelated FYI in the room — the exact cost the defer was built to
-// remove. What survives the scope is a real cost and an accepted one: a worker acking progress notes
-// mid-task now wakes the lane once per note, for as long as its own ask is open.
-//
-// Three exclusions, each a row where the lane is not the party waiting:
-//   · an EXPIRED ask — the lane was already told it timed out, an hour ago
-//   · an ACK row queued behind a busy target — an ack is not an ask and nothing awaits it
-//   · an OWNER-DIRECT ask — the asker row names the lane because his DM can only be found from it,
-//     but `answerRouteFor` cards that answer to HIM and never types it into the lane
-export function laneAwaitsSender(pendings: BusPending[], laneSid: string, senderSid: string): boolean {
-  return pendings.some(p =>
-    p.fromSid === laneSid && p.toSid === senderSid && !p.noReply && !p.expiredAt && !p.ownerDirect)
-}
-
-// A BRIEF OUTLIVES ITS ASK, AND `laneAwaitsSender` CANNOT SEE THAT. It reads OPEN rows, so the moment
-// a worker answers the dispatch it stops counting as awaited — and a completion report is written
-// AFTER that, which is precisely when it is written. So the report on work the lane commissioned lands
-// in the "merely informed" class and parks.
-//
-// The incident, 2026-08-12: a worker's finished-unit report (ack #89, on work the lane briefed under
-// an ask that had already closed) sat undelivered for **8 hours**, until an unrelated owner message
-// woke the lane and flushed the digest. Nothing was lost — the digest is sound — but a completion
-// report is not catch-up material, and the lane could not act on work it had commissioned.
-//
-// Same rule as ever, one more piece of evidence for it: `briefedBy` records who dispatched work INTO
-// a session and, unlike a pending row, is not cleared when the ask closes. If this lane is that
-// briefer, an FYI back from them is a report on its own dispatch — it is waiting on it by
-// construction, exactly as an open ask means it is.
-//
-// KNOWN LIMIT, accepted by the owner when he chose this over "every ack wakes" (2026-08-12): the map
-// holds only the MOST RECENT briefer per session, so a worker this lane briefed and someone else
-// briefed afterwards no longer matches, and its report rides the digest. That is the acceptable
-// direction — it fails toward the digest, never toward silence. Measured cost of the wider rule it
-// was chosen over: ~7 lane wakes/day against ~3 for this one, the difference being ambient chatter
-// (10 of 18 observed deferrals were `post-relay`, which is news the lane never armed).
-export function laneBriefedSender(
-  briefedBy: { fromSid: string } | undefined, laneSid: string,
-): boolean {
-  return !!briefedBy && briefedBy.fromSid === laneSid
-}
-
-// ---- The expectation registry (Phase A — shadow) -------------------------------------------------
-//
-// The state half of expectations.ts, which carries the design. In Phase A NOTHING here decides
-// anything: `expectationWakeRow` is read beside the three predicates above and the disagreement is
-// logged. Phase B — deleting those predicates — is a separate gate on the shadow's numbers.
-export function openExpectationRow(
-  row: { byLane: string; onSession: string; kind: ExpectationKind; ref?: number; label: string },
-  now = Date.now(),
-): void {
-  ensureLoaded()
-  // Rows use the same monotonic sequence as everything else in this store, so an id is unique across a
-  // restart and readable next to an ask id in the log.
-  store.seq += 1
-  store.expectations = openExpectation(store.expectations ?? {}, { id: store.seq, ...row }, now)
-  save()
-}
-// The seeding ask was answered: start the completion-report window rather than closing the row.
-export function graceExpectationRow(laneSid: string, senderSid: string, askId: number, now = Date.now()): void {
-  ensureLoaded()
-  const before = store.expectations ?? {}
-  const after = graceExpectation(before, laneSid, senderSid, askId, now)
-  if (after === before) return
-  store.expectations = after
-  save()
-}
-// A session ended — POSITIVE EVIDENCE ONLY. Never call this off a failed liveness read: a stale row
-// costs one wake, a dropped live one costs a stall.
-export function closeExpectationRowsFor(sid: string): void {
-  ensureLoaded()
-  const after = closeExpectationsFor(store.expectations ?? {}, sid)
-  if (Object.keys(after).length === Object.keys(store.expectations ?? {}).length) return
-  store.expectations = after
-  save()
-}
-// The read the shadow compares against — verdict plus the reason, so one log line can diagnose a wake.
-export function registryVerdict(laneSid: string, senderSid: string, sysKind: string | undefined, now = Date.now()): { wake: boolean; why: string } {
-  ensureLoaded()
-  return registryWouldWake(store.expectations ?? {}, laneSid, senderSid, sysKind, now)
-}
-export function listExpectations(): Expectation[] {
-  ensureLoaded()
-  return Object.values(store.expectations ?? {})
-}
-// Pruning is a WRITE and lives on its own tick, so no reader can lose a row to a bad clock.
-export function pruneExpectationRows(now = Date.now()): number {
-  ensureLoaded()
-  const before = store.expectations ?? {}
-  const after = pruneExpectations(before, now)
-  const dropped = Object.keys(before).length - Object.keys(after).length
-  if (dropped > 0) { store.expectations = after; save() }
-  return dropped
-}
+// From v0.5.44 to v0.5.108 an unsolicited FYI to a chat lane was recorded and rode the lane's next
+// delivery inside the digest, to save the model turn a wake costs — and three generations of
+// predicates (`ackWakesNow`, `laneAwaitsSender`, `laneBriefedSender`) plus a shadow expectation
+// registry grew around deciding which FYIs were exempt. Each generation was forced by a stall the
+// previous one shipped (6 minutes, then 8 hours). The owner ended the design: the bus is instant,
+// an ack pastes exactly like an ask, and the wake cost is accepted. DO NOT reintroduce a defer to
+// save that cost — the CLI's forced-text class the defer once compensated for is carried by the
+// content filters (isEnclosedFiller & co, measured), never by holding messages back.
 
 // The lead of the owner-facing card for an ANSWERED @system ask — rendered as "<icon> @who <did>".
 // Specific only where the kind is known and answerable; everything else — an unknown kind, a
@@ -354,15 +227,9 @@ export type BusState = {
   // it is bounded by the window and by the cooldown, never by uptime. Optional for the same reason the
   // two above are: agent-bus.json exists in production written by builds that never heard of it.
   used?: Record<string, number>
-  // ---- the expectation registry (Phase A: written and read, but the three predicates still decide) ----
-  // Keyed `lane|session|kind`. Optional for the same reason as everything above it: production files
-  // predate it. It sits BESIDE `pending` and never inside it — a pending row is a message awaiting
-  // delivery and is deleted on delivery, while an expectation is work awaiting an outcome and has to
-  // survive exactly that deletion (expectations.ts carries the incident).
-  expectations?: ExpectationMap
 }
 
-const empty = (): BusState => ({ seq: 0, hops: 0, pending: {}, seen: {}, depth: {}, reportedAt: {}, briefedBy: {}, used: {}, expectations: {} })
+const empty = (): BusState => ({ seq: 0, hops: 0, pending: {}, seen: {}, depth: {}, reportedAt: {}, briefedBy: {}, used: {} })
 let store: BusState = empty()
 let loaded = false
 let persist = true   // disabled by _resetForTest so unit tests never write to the real STATE_DIR
@@ -453,9 +320,6 @@ export function loadBus(): BusState {
       reportedAt,
       briefedBy,
       used,
-      // Read back every field it writes, or the next save destroys it (v0.4.347's class) —
-      // parseExpectations is that reader and stays in step with the row type.
-      expectations: parseExpectations(raw.expectations),
     }
     loaded = true
     return store
@@ -838,10 +702,9 @@ export function markNudged(id: number, now: number): void {
 // could not tell a landed ask from one queued behind a pane that would never reach a prompt again.
 // 'busy' = mid-turn, self-clearing. 'wedged' = not at a prompt AND no turn running (the @ccbridge
 // shape — an unrecognized screen owns the pane). 'no-session' = no live pane for the target sid.
-// 'deferred' = an FYI that will never be pasted: it was recorded, and the target reads it in the
-// digest on its next delivery (ackWakesNow). It is NOT a failure and NOT a retry state — the sweep
-// must never pick it up — but it is not 'delivered' either, because nothing reached a pane.
-export const ASK_DELIVERY_STATES = ['delivered', 'deferred', 'busy', 'wedged', 'no-session', 'not-landed', 'occupied'] as const
+// ('deferred' — an FYI recorded to ride the next digest instead of pasting — was a state from
+// v0.5.44 until the owner abolished the defer class on 2026-08-13; every ack delivers now.)
+export const ASK_DELIVERY_STATES = ['delivered', 'busy', 'wedged', 'no-session', 'not-landed', 'occupied'] as const
 export type AskDelivery = (typeof ASK_DELIVERY_STATES)[number]
 
 // The `tg ask` CLI line for an outcome. Pure so ask-delivery.test.ts can pin the whole enumeration:
@@ -869,11 +732,6 @@ export function askResultText(status: AskDelivery, toName: string, id: number, a
     // landed: at the back of that session's queue, not in front of it.
     case 'delivered':
       return `delivered to @${toName} (${q}) — async; ${answer}`
-    // Honest about both halves: it is safely recorded (nothing to retry, nothing to chase) and it has
-    // not reached them yet. A sender that reads this as "delivered" would go looking for a reaction
-    // that is minutes away.
-    case 'deferred':
-      return `📥 QUEUED for @${toName}'s next wake (${q}) — an FYI does not wake a chat lane; it rides the next delivery that lane takes, in full`
     case 'busy':
       return `⏳ QUEUED, not yet delivered — @${toName} is mid-turn (${q}); it lands when they reach a prompt, then ${answer}`
     case 'wedged':
@@ -1235,20 +1093,28 @@ export const DIGEST_SCAN = 200
 // A `post` (addressed to the humans, no `to`) drops out of every scoped digest by construction, and
 // that is correct rather than collateral: it is the definitional cross-lane broadcast.
 //
-// A DEFERRED FYI is identified STRUCTURALLY rather than by a flag on the row, and the reason is the
-// watermark: an ack that was delivered advances `seen` past its own timestamp on landing, so it can
-// never appear in a later digest at all. Therefore every `ack` still inside the window and addressed
-// TO this endpoint is, by construction, one that was recorded instead of pasted (or one whose paste
-// failed, where showing it in full is equally right). Those rows are the whole point of the flush, so
-// they are never dropped by the cap and never clamped — `cap` still bounds the ambient rest.
+// A never-pasted FYI is identified STRUCTURALLY rather than by a flag on the row, and the reason is
+// the watermark: an ack that was delivered advances `seen` past its own timestamp on landing, so it
+// can never appear in a later digest at all. Therefore every `ack` still inside the window and
+// addressed TO this endpoint is, by construction, one the pane never saw. Those rows are rendered
+// verbatim — never dropped by the cap and never clamped (`cap` still bounds the ambient rest) —
+// because for a row with no pending sibling the digest IS the delivery (the defer class of
+// v0.5.44–v0.5.108 minted exactly those, and any still in a window flush here).
+//
+// `excludeIds` is the other half of that construction, needed since every ack QUEUES (2026-08-13):
+// an ack waiting behind a busy pane already has its ledger row, and a digest flushed to that same
+// endpoint before the sweep lands it would show a message the sweep is still going to paste — the
+// same words delivered twice. A row with an open pending row is IN FLIGHT, not catch-up, so the
+// caller names those ids and they are left out entirely.
 export function digestSince(
   entries: LedgerEntry[], sinceTs: number,
-  opts: { excludeId?: number; excludeFrom?: string; involving?: string; cap: number },
+  opts: { excludeId?: number; excludeIds?: ReadonlySet<number>; excludeFrom?: string; involving?: string; cap: number },
 ): LedgerEntry[] {
   const kept = entries.filter(e =>
     e.ts > sinceTs &&
     !e.suppressed &&                    // its notice was withheld on purpose; the digest reads as news
     (opts.excludeId == null || e.id !== opts.excludeId) &&
+    (e.id == null || !opts.excludeIds?.has(e.id)) &&
     (opts.excludeFrom == null || e.from !== opts.excludeFrom) &&
     (opts.involving == null || e.from === opts.involving || e.to === opts.involving))
   const isFyi = (e: LedgerEntry): boolean =>
