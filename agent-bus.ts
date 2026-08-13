@@ -12,6 +12,10 @@ import { isAbsolute, join, resolve, sep } from 'node:path'
 import { appendFileSync, mkdirSync, readFileSync } from 'node:fs'
 import { STATE_DIR, readJsonFile, writeJsonFile } from './common.ts'
 import { loadAccess } from './access.ts'
+import {
+  openExpectation, graceExpectation, closeExpectationsFor, pruneExpectations, parseExpectations,
+  expectationWaking, registryWouldWake, type Expectation, type ExpectationKind, type ExpectationMap,
+} from './expectations.ts'
 
 // Where THIS PROCESS keeps its bus state. Defaults to Telegram's state dir, so daemon.ts and every
 // existing test are unaffected; the Slack/Discord daemons call setBusStateDir() once at boot to get
@@ -179,6 +183,59 @@ export function laneBriefedSender(
   return !!briefedBy && briefedBy.fromSid === laneSid
 }
 
+// ---- The expectation registry (Phase A — shadow) -------------------------------------------------
+//
+// The state half of expectations.ts, which carries the design. In Phase A NOTHING here decides
+// anything: `expectationWakeRow` is read beside the three predicates above and the disagreement is
+// logged. Phase B — deleting those predicates — is a separate gate on the shadow's numbers.
+export function openExpectationRow(
+  row: { byLane: string; onSession: string; kind: ExpectationKind; ref?: number; label: string },
+  now = Date.now(),
+): void {
+  ensureLoaded()
+  // Rows use the same monotonic sequence as everything else in this store, so an id is unique across a
+  // restart and readable next to an ask id in the log.
+  store.seq += 1
+  store.expectations = openExpectation(store.expectations ?? {}, { id: store.seq, ...row }, now)
+  save()
+}
+// The seeding ask was answered: start the completion-report window rather than closing the row.
+export function graceExpectationRow(laneSid: string, senderSid: string, askId: number, now = Date.now()): void {
+  ensureLoaded()
+  const before = store.expectations ?? {}
+  const after = graceExpectation(before, laneSid, senderSid, askId, now)
+  if (after === before) return
+  store.expectations = after
+  save()
+}
+// A session ended — POSITIVE EVIDENCE ONLY. Never call this off a failed liveness read: a stale row
+// costs one wake, a dropped live one costs a stall.
+export function closeExpectationRowsFor(sid: string): void {
+  ensureLoaded()
+  const after = closeExpectationsFor(store.expectations ?? {}, sid)
+  if (Object.keys(after).length === Object.keys(store.expectations ?? {}).length) return
+  store.expectations = after
+  save()
+}
+// The read the shadow compares against — verdict plus the reason, so one log line can diagnose a wake.
+export function registryVerdict(laneSid: string, senderSid: string, sysKind: string | undefined, now = Date.now()): { wake: boolean; why: string } {
+  ensureLoaded()
+  return registryWouldWake(store.expectations ?? {}, laneSid, senderSid, sysKind, now)
+}
+export function listExpectations(): Expectation[] {
+  ensureLoaded()
+  return Object.values(store.expectations ?? {})
+}
+// Pruning is a WRITE and lives on its own tick, so no reader can lose a row to a bad clock.
+export function pruneExpectationRows(now = Date.now()): number {
+  ensureLoaded()
+  const before = store.expectations ?? {}
+  const after = pruneExpectations(before, now)
+  const dropped = Object.keys(before).length - Object.keys(after).length
+  if (dropped > 0) { store.expectations = after; save() }
+  return dropped
+}
+
 // The lead of the owner-facing card for an ANSWERED @system ask — rendered as "<icon> @who <did>".
 // Specific only where the kind is known and answerable; everything else — an unknown kind, a
 // pre-v0.4.366 row, an ack that somehow got answered — takes the neutral phrasing. A vague label
@@ -297,9 +354,15 @@ export type BusState = {
   // it is bounded by the window and by the cooldown, never by uptime. Optional for the same reason the
   // two above are: agent-bus.json exists in production written by builds that never heard of it.
   used?: Record<string, number>
+  // ---- the expectation registry (Phase A: written and read, but the three predicates still decide) ----
+  // Keyed `lane|session|kind`. Optional for the same reason as everything above it: production files
+  // predate it. It sits BESIDE `pending` and never inside it — a pending row is a message awaiting
+  // delivery and is deleted on delivery, while an expectation is work awaiting an outcome and has to
+  // survive exactly that deletion (expectations.ts carries the incident).
+  expectations?: ExpectationMap
 }
 
-const empty = (): BusState => ({ seq: 0, hops: 0, pending: {}, seen: {}, depth: {}, reportedAt: {}, briefedBy: {}, used: {} })
+const empty = (): BusState => ({ seq: 0, hops: 0, pending: {}, seen: {}, depth: {}, reportedAt: {}, briefedBy: {}, used: {}, expectations: {} })
 let store: BusState = empty()
 let loaded = false
 let persist = true   // disabled by _resetForTest so unit tests never write to the real STATE_DIR
@@ -390,6 +453,9 @@ export function loadBus(): BusState {
       reportedAt,
       briefedBy,
       used,
+      // Read back every field it writes, or the next save destroys it (v0.4.347's class) —
+      // parseExpectations is that reader and stays in step with the row type.
+      expectations: parseExpectations(raw.expectations),
     }
     loaded = true
     return store

@@ -153,10 +153,23 @@ test("'deferred' reads as neither delivered nor failed", () => {
 
 // ---- The wiring the pure functions cannot see --------------------------------------------------
 
+test('the three predicates still DECIDE — the registry is consulted beside them, not instead', () => {
+  // Phase A. The registry's verdict is computed and logged next to theirs and changes nothing; the
+  // cutover is its own gate on the shadow's numbers, so a build where the registry decides must fail
+  // here rather than ship quietly.
+  const decide = daemon.indexOf('const predicatesWake = ackWakesNow(cur.sysKind)\n'
+    + '      || laneAwaitsSender(listPending(), cur.toSid, cur.fromSid)\n'
+    + '      || laneBriefedSender(getBriefedBy(cur.fromSid), cur.toSid)')
+  expect(decide).toBeGreaterThan(-1)
+  expect(daemon).toContain('if (cur.noReply && isChatLaneSession(cur.toSid) && !predicatesWake) {')
+  // The shadow reads the registry and records the disagreement; it must never gate the branch.
+  const shadow = daemon.slice(decide, daemon.indexOf('if (cur.noReply && isChatLaneSession(cur.toSid) && !predicatesWake) {', decide))
+  expect(shadow).toContain('registryVerdict')
+  expect(shadow).toContain('noteShadow')
+})
+
 test('the defer branch records and drops, and never touches the watermark', () => {
-  const i = daemon.indexOf('if (cur.noReply && isChatLaneSession(cur.toSid) && !ackWakesNow(cur.sysKind)\n'
-    + '        && !laneAwaitsSender(listPending(), cur.toSid, cur.fromSid)\n'
-    + '        && !laneBriefedSender(getBriefedBy(cur.fromSid), cur.toSid)) {')
+  const i = daemon.indexOf('if (cur.noReply && isChatLaneSession(cur.toSid) && !predicatesWake) {')
   expect(i).toBeGreaterThan(-1)
   const branch = daemon.slice(i, daemon.indexOf("return 'deferred'", i))
   // THE INVARIANT. Advancing `seen` here would mark this very FYI as read by a session that was never
