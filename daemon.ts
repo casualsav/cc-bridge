@@ -465,7 +465,7 @@ async function reprobeSilentTurns(why: string): Promise<void> {
   // re-probe, pin the CLI, or carry on with the backstops (owner-reporting-surface).
   void wakeOrchestrator(
     [`⚠️ Silent turns disabled — the CLI's no-visible-output re-prompt is back on ${version ?? '?'}, so bus turns are being forced to produce text again.`,
-     `The relay's content filters (isThinkingOnlyNudge / isHarnessNoise / isBracketedFiller) still drop it, which is why this is a degradation and not a leak.`,
+     `The relay's content filters (isThinkingOnlyNudge / isHarnessNoise / isEnclosedFiller) still drop it, which is why this is a degradation and not a leak.`,
      `The rollout scope was "${scope}" and is now "off". Re-probe with a later CLI before turning it back on.`].join('\n'),
     null)
 }

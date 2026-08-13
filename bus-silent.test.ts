@@ -108,7 +108,10 @@ const NUDGE = '[Your previous response had no visible output. Please continue an
 
 // One bus/human turn pair in the exact recorded shape: prompt → tool call → tool result → a
 // text-less assistant response → the CLI's meta re-prompt → the text it forced.
-function nudgedFixture(anchor: string): string {
+// `forced` is the text the CLI's re-prompt pulled out of the turn. It is a PARAMETER because the two
+// callers now test different halves: the bus-anchor drop (any text, muted by anchor) and the owner
+// negative case (a real reply, which must survive). Its default is the shape the survey recorded.
+function nudgedFixture(anchor: string, forced = '(nothing to send — ack noted, memory updated)'): string {
   const dir = mkdtempSync(join(tmpdir(), 'bus-nudge-'))
   const f = join(dir, 's.jsonl')
   writeFileSync(f, [
@@ -117,7 +120,7 @@ function nudgedFixture(anchor: string): string {
     { type: 'user', uuid: 'r1', timestamp: '2026-08-07T00:00:02Z', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] } },
     { type: 'assistant', uuid: 'a1', timestamp: '2026-08-07T00:00:03Z', message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'thinking', thinking: 'nothing to say' }] } },
     { type: 'user', uuid: 'n1', isMeta: true, timestamp: '2026-08-07T00:00:04Z', message: { role: 'user', content: NUDGE } },
-    { type: 'assistant', uuid: 'a2', timestamp: '2026-08-07T00:00:05Z', message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: '(nothing to send — ack noted, memory updated)' }] } },
+    { type: 'assistant', uuid: 'a2', timestamp: '2026-08-07T00:00:05Z', message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: forced }] } },
   ].map(r => JSON.stringify(r)).join('\n') + '\n')
   return f
 }
@@ -129,8 +132,14 @@ test('a bus-woken turn forced to speak by the CLI delivers nothing', () => {
 test('THE NEGATIVE CASE: an owner turn re-prompted the same way still delivers', () => {
   // The failure direction that matters. He asked; the turn went text-less; the CLI made it speak.
   // Whatever it then said is his answer, and swallowing it means he never learns anything went wrong.
-  const replies = finalRepliesAfter(nudgedFixture('<tg 42>did the deploy land?</tg>'), '')
-  expect(replies.map(r => r.text)).toEqual(['(nothing to send — ack noted, memory updated)'])
+  //
+  // The forced text here is a REPLY. It used to be `(nothing to send — ack noted, memory updated)`,
+  // which v0.5.105 reclassified as filler by content on every anchor — so that fixture would now be
+  // testing the content rule instead of the anchor rule it was written for. What this pins is that a
+  // human-anchored turn is never muted for having been re-prompted; filler-cli.test.ts owns the
+  // content half.
+  const replies = finalRepliesAfter(nudgedFixture('<tg 42>did the deploy land?</tg>', 'Yes — 0.5.104 is live and the health check passed.'), '')
+  expect(replies.map(r => r.text)).toEqual(['Yes — 0.5.104 is live and the health check passed.'])
   expect(replies[0].busAnchored).toBe(false)
 })
 

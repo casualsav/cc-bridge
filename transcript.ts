@@ -146,15 +146,35 @@ const THINKING_ONLY_NUDGE = /^\[Your previous response had no visible output\b/
 function isHarnessNoise(text: string): boolean {
   const t = text.trim()
   return /^no response requested\.?$/i.test(t) || THINKING_ONLY_NUDGE.test(t)
-    || isBracketedFiller(t) || isWordlessPlaceholder(t)
+    || isEnclosedFiller(t) || isWordlessPlaceholder(t)
 }
 
-// One line, wholly enclosed in brackets, and no nested bracket — so a real reply that happens to
-// END on a bracketed aside cannot match, and neither can a multi-line message. Length-capped at a
-// tweet: the longest filler ever observed is 117 characters, and a genuinely long bracketed block
-// is far likelier to be someone's deliberate content than the harness's shrug.
-function isBracketedFiller(t: string): boolean {
-  return t.length <= 280 && !t.includes('\n') && /^\[[^[\]]*\]$/.test(t)
+// One line, wholly enclosed in brackets OR parentheses, nothing nested — so a real reply that happens
+// to END on a bracketed aside cannot match, and neither can a multi-line message. Length-capped at a
+// tweet: a genuinely long enclosed block is far likelier to be someone's deliberate content than the
+// harness's shrug.
+//
+// THE PARENTHESISED HALF IS A WEAKER RULE THAN THE BRACKETED ONE, and the difference is worth knowing
+// before anyone widens it further. Measured 2026-08-13 over 2724 turn conclusions (CLI 2.1.205 →
+// 2.1.229, `bun scripts/filler-survey.ts`): 38 parenthesised conclusions, on 8 separate days, and
+// every one was filler — `(staying silent per standing instruction)`, `(nothing to send — ack noted,
+// memory updated)`. Zero were replies. But:
+//
+//   · the bracketed class is 151-of-163 the CLI's OWN fixed string, while every parenthesised match is
+//     prose a model composed. Measured false positives are zero; the STRUCTURAL risk is not, because a
+//     future real reply in parentheses is far likelier than one in brackets.
+//   · the 280/one-line/no-nesting boundary excluded NOTHING in that corpus — all 38 sat inside it. It
+//     is inherited from the bracketed rule as a precaution, not a boundary any evidence has tested.
+//   · it knowingly eats 2–3 courtesy lines a day of the "nothing needed from you" species. That is the
+//     owner's stated preference (2026-08-12, "stop sending me these useless messages"), weighed against
+//     his 2026-08-09 "no filtering beyond this class" — the pair is why this rule is content-only and
+//     never scoped by who woke the turn.
+//
+// If the structural risk ever fires, the recovery is that the reply stays in the transcript and the
+// mini-app feed still renders it — this removes a message he has to read, never a record he might want.
+function isEnclosedFiller(t: string): boolean {
+  if (t.length > 280 || t.includes('\n')) return false
+  return /^\[[^[\]]*\]$/.test(t) || /^\([^()]*\)$/.test(t)
 }
 
 // No letter and no digit anywhere in it — an emoji-only reply is a real one and stays, so the test

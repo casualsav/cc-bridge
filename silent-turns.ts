@@ -15,7 +15,7 @@
 // consequences, and none of them is optional:
 //   1. every CLI version bump re-probes (`probeSilentTurns`, wired into the install path) — a
 //      measurement that can expire is not allowed to be assumed;
-//   2. the content backstops (isThinkingOnlyNudge / isHarnessNoise / isBracketedFiller in
+//   2. the content backstops (isThinkingOnlyNudge / isHarnessNoise / isEnclosedFiller in
 //      transcript.ts) STAY ARMED. They are what catches the leak the day this stops working;
 //   3. a CONFIRMED regression disables the scope by itself. Nothing here is load-bearing enough to
 //      keep asserting after the evidence says otherwise.

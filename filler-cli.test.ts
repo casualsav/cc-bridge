@@ -129,6 +129,41 @@ test('the bracketed note is filler on every anchor — the three real ones, verb
   }
 })
 
+// ---- SHAPE 4: the parenthesised note (v0.5.105) ------------------------------------------------
+
+test('the parenthesised note is filler too — real matches, verbatim off the survey', () => {
+  // The class the bracketed rule could not see, and the leak that forced it: a chat lane sent one of
+  // these to the owner this week. Measured 2026-08-13 over 2724 conclusions (CLI 2.1.205 → 2.1.229):
+  // 38 parenthesised conclusions on 8 separate days, every one filler, none a reply. These four are
+  // transcribed from that survey.
+  for (const text of [
+    '(staying silent per standing instruction)',
+    '(nothing to send — ack noted, memory updated)',
+    '(no message to the owner — this turn was woken by an FYI ack and a digest; memory updated, nothing to relay)',
+    '(Duplicate digest — nothing to act on.)',
+  ]) {
+    expect(finalRepliesAfter(unpromptedBracket(HUMAN, text), '')).toEqual([])
+    expect(latestFinalReply(unpromptedBracket(BUS, text))).toBeNull()
+  }
+})
+
+test('the parenthesised rule is the WEAKER half, and its boundary is what keeps it honest', () => {
+  // Every match in the survey sat inside the 280/one-line/no-nesting boundary, so nothing measured
+  // ever tested it — these pin the choice rather than a measurement, and they are the shapes a real
+  // reply is most likely to take. A model writing prose in parentheses is far likelier than one
+  // writing prose in brackets, which is exactly why this half needs the boundary the other one has.
+  const real = [
+    'Fixed (the two renamed helpers are in the diff).',      // ends on a parenthetical
+    '(a) first\n(b) second',                                 // starts with a paren, multi-line
+    '(nested (parens) here)',                                // nested — not the shrug's shape
+    '(' + 'x'.repeat(300) + ')',                             // past the cap: length reads as content
+  ]
+  for (const text of real) {
+    expect(finalRepliesAfter(unpromptedBracket(BUS, text), '').map(r => r.text)).toEqual([text])
+    expect(finalRepliesAfter(unpromptedBracket(HUMAN, text), '').map(r => r.text)).toEqual([text])
+  }
+})
+
 // ---- The boundary: everything else delivers ----------------------------------------------------
 
 test('THE RULING: a real reply delivers, whatever woke the turn and whatever it looks like', () => {
