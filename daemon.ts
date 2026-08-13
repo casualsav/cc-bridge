@@ -11533,57 +11533,31 @@ bot.command(['update', 'upgrade'], async ctx => {
 // normal inbound path (handleInbound resolves the session, arms typing, injects + submits), so Claude
 // runs the instruction exactly as if the user had typed it.
 //
-// The file these write and read is the SAME one the shipped worker guidance names (off-mcp/CLAUDE.md,
-// "Handoffs"): HANDOFF.md at the repo root, one per repo, live items only, finished items deleted
-// rather than marked done. A human driving a session directly and an orchestrator driving one over
-// the bus have to leave each other a doc in the same place or neither path finds the other's.
-//
-// TWO SHAPES, and the prompts must not assume either. The convention (docs/handoff.md) makes
-// HANDOFF.md an INDEX over one-file-per-item in `handoff/`; every other repo on this box still holds
-// a single monolithic HANDOFF.md, and both are correct. So step 5 DETECTS (`handoff/` exists?) and
-// stays in the shape it finds — a /handoff that silently restructured someone's repo would be a
-// migration nobody asked for, and migration is a prune that wants a human's judgment about what is
-// already stale. Converting is available on request; it is not a side effect of writing a handoff.
+// The file these write and read is the SAME one the shipped worker guidance names
+// (off-mcp/CLAUDE.md, "Handoff"): HANDOFF.md at the repo root, one per repo, unfinished work only,
+// finished items deleted rather than marked done. A human driving a session directly and an
+// orchestrator driving one over the bus have to leave each other a doc in the same place or
+// neither path finds the other's. The index-plus-`handoff/`-directory shape is retired (owner
+// ruling, 2026-08-13): /handoff folds a leftover one back into the single file, /continue still
+// reads one it meets, and handoff-state.ts keeps parsing both.
 const HANDOFF_PROMPT = `Prepare a session handoff. THE HANDOFF IS STEP 1, on purpose: you are running this because context is short, and the doc is the one artefact that must not be written with whatever is left over after everything else.
 
-1. Update the handoff — HANDOFF.md, that exact name, at the REPO ROOT, one per repo (never a dated or phase-named second file alongside it). FIRST detect which shape this repo uses, and STAY IN IT — do not convert one to the other unless I ask:
-
-   (a) INDEX + FOLDER — a \`handoff/\` directory exists at the repo root:
-       - One file per open item, \`handoff/<slug>.md\`, carrying what a successor needs to take it cold: the state now, the exact next action, and the check that proves it done. You own your item files outright — edit only the ones your work touched.
-       - \`handoff/facts.md\` is the one unindexed file: standing truths about the repo or the box that pruning must not delete. Membership test — if finishing every open item would leave the statement true and still worth reading, it is a fact, not an item.
-       - Anything finished: DELETE its file AND its index line. Never a "done" mark, never a history section.
-       - Write HANDOFF.md LAST, from the files that actually exist: one line per item, \`- [slug](handoff/slug.md) — one-line hook\`, and NOTHING else — no prose above, between or below.
-       - Run the invariant check and expect SILENCE (a \`<\` line is a dangling index entry, a \`>\` line an orphaned file):
-         diff <(grep -o '](handoff/[^)]*)' HANDOFF.md | sed 's|](handoff/||; s|)||' | sort) <(ls handoff/ | grep -v '^facts\\.md$' | sort)
-       - If no items remain, delete HANDOFF.md and the item files; keep \`handoff/facts.md\` if it still holds standing truths, and remove \`handoff/\` only once it is empty too.
-
-   (b) MONOLITH — no \`handoff/\` directory: rewrite HANDOFF.md as a single document carrying LIVE items ONLY:
-       ## Current task
-       [PLAN.md task ID, status, exact next action — specific enough that a fresh session can execute it without asking anything]
-       ## Verify state
-       [exact commands + expected output]
-       ## Known issues / gotchas
-       [verbatim errors, workarounds, env quirks — only the ones still biting]
-       ## Open questions
-       [anything needing a human decision]
-       Drop any section that has no live items. If nothing live remains at all, delete HANDOFF.md.
-
-   In BOTH shapes: anything finished is DELETED, never marked done and never kept as history — the commits and the repo already record it.
-2. Run the test suite; note results. Anything failing that a successor would have to deal with becomes a handoff ITEM in the shape you used above — not a paragraph in your reply to me, which nobody will be reading when they pick this up.
-3. Commit any completed work with a descriptive message. Do NOT commit broken code — stash or note it instead. This is what makes step 1's deletions safe: a finished item is deleted because the repo and the commits already carry it.
-4. ONLY IF this repo actually keeps them: correct every task status in PLAN.md (nothing marked done that lacks passing tests + a commit), and append today's decisions to DECISIONS.md. Most repos keep neither — skip this step silently rather than creating them.
-5. ONLY IF PLAN.md exists: audit it against the actual repo — every task marked done that isn't fully implemented, every planned item with no task tracking it. Still-open findings become handoff ITEMS in the shape from step 1. Do not open a section for them; a section only grows.`
+1. Update the handoff — HANDOFF.md, that exact name, at the REPO ROOT, one per repo (never a dated or phase-named second file alongside it). A single document carrying UNFINISHED work only:
+   ## Current task — [status + exact next action, specific enough that a fresh session can execute it without asking anything]
+   ## Verify state — [exact commands + expected output]
+   ## Known issues / gotchas — [verbatim errors, workarounds, env quirks — only the ones still biting]
+   ## Open questions — [anything needing a human decision]
+   Drop any section with nothing live. Anything finished is DELETED, never marked done and never kept as history — the commits and the repo already record it. If nothing live remains at all, delete HANDOFF.md. A leftover \`handoff/\` directory is the retired index shape: fold its still-live items into HANDOFF.md and delete the directory.
+2. Run the test suite; note results. Anything failing that a successor would have to deal with goes IN the handoff — not in your reply to me, which nobody will be reading when they pick this up.
+3. Commit any completed work with a descriptive message. Do NOT commit broken code — note it in the handoff instead. This is what makes step 1's deletions safe: a finished item is deleted because the repo and the commits already carry it.
+4. ONLY IF this repo actually keeps them: correct every task status in PLAN.md (nothing marked done that lacks passing tests + a commit) and append today's decisions to DECISIONS.md; still-open audit findings go in the handoff. Most repos keep neither — skip this step silently rather than creating them.`
 const CONTINUE_PROMPT = `Resume work on this project:
 0. "This project" is the repo you are ALREADY IN — your current working directory. Do not go looking for a richer or more familiar checkout elsewhere on the box, and never adopt one you find: another tree is another session's, and on a shared checkout that is somebody's live work. A thin repo is not the wrong repo. If the docs below are absent HERE, say that and stop; if you ever run a command outside this directory, name the directory in the same breath as the result.
-1. Read CLAUDE.md and the handoff at the repo root — HANDOFF.md, the only handoff doc. Say so and ask what to work on if HANDOFF.md is absent; do not invent a queue for yourself.
-   If a \`handoff/\` directory exists, HANDOFF.md is an INDEX: read it plus \`handoff/facts.md\`, and open ONLY the item files you are actually taking — reading every item to find your two is the cost that shape exists to remove. Otherwise HANDOFF.md is a single document; read all of it.
-   Read PLAN.md and DECISIONS.md too IF this repo keeps them. Most don't — their absence is normal and not worth reporting.
-2. Run the verify/check commands the handoff gives you (the "Verify state" section, or the check line in each item file you opened). Report any mismatch before proceeding.
+1. Read CLAUDE.md and HANDOFF.md at the repo root — the only handoff doc, a single document of unfinished work; read all of it. Say so and ask what to work on if it is absent; do not invent a queue for yourself. (A repo with a legacy \`handoff/\` directory: HANDOFF.md indexes it — open only the item files you are taking.) Read PLAN.md and DECISIONS.md too IF this repo keeps them; their absence is normal and not worth reporting.
+2. Run the verify commands the handoff gives you. Report any mismatch before proceeding.
 3. Take the item you were BRIEFED on, and only that one. If you were given no item, say what the handoff holds and ask which to take — a handoff is a set of open items, not a queue to work through, and picking your own next task is how work nobody asked for gets done.
 4. If open questions block the item you took, ask NOW rather than guessing — over the bus to whoever briefed you if you were briefed by another agent (\`tg answer <id>\` on the ask you are working, or \`tg ask @<name>\`), otherwise here.
-5. As you finish each item you took, DELETE it — its file AND its index line in the folder shape, its entry in the monolith. Never mark it done, never keep it as history. In the folder shape, run the invariant check afterwards and expect silence:
-   diff <(grep -o '](handoff/[^)]*)' HANDOFF.md | sed 's|](handoff/||; s|)||' | sort) <(ls handoff/ | grep -v '^facts\\.md$' | sort)
-   Delete the handoff once no items remain — keeping \`handoff/facts.md\` if it still holds standing truths.`
+5. As you finish each item you took, DELETE its entry — never mark it done, never keep it as history. Delete HANDOFF.md once nothing live remains.`
 const AUDIT_PROMPT = `Use a subagent to audit the repo against PLAN.md:
 - For each task marked [x]: verify the code exists and its acceptance
   criterion actually passes.
