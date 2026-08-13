@@ -198,6 +198,7 @@ import {
   startOpenclaw, openclawSessionsFile, pickOpenclawSession, openclawCtxPct, openclawFeedItems,
   type OpenclawCfg,
 } from './openclaw-driver.ts'
+import { silentTurnEnvPrefix, probeSilentTurns, describeProbe, isSilentTurnScope, type SilentTurnScope } from './silent-turns.ts'
 import {
   initPromptRelay, relayPromptToTelegram, relayPermissionToTelegram, sweepPermStorms,
   permStorms, multiSelectKeyboard, formatPermission, relayStuckScreen, renderStuckHtml,
@@ -428,8 +429,54 @@ initStatusCard({
   newestMsgId: chat => msgLatest(chat, null),   // pinned card measures its own distance from the conversation
 })
 // onClaudeInstalled fires the stale-session sweep the moment a new binary lands, so the rolling
-// refresh follows the install by seconds rather than waiting out its hourly tick.
-initUpdates({ channel, onClaudeInstalled: () => void sweepSessionVersions() })
+// refresh follows the install by seconds rather than waiting out its hourly tick — and re-probes the
+// silent-turn exemption, which is undocumented CLI behaviour and therefore a measurement with an
+// expiry date rather than a fact (silent-turns.ts).
+initUpdates({ channel, onClaudeInstalled: () => { void sweepSessionVersions(); void reprobeSilentTurns('a new CLI was installed') } })
+
+// ---- R1: is the silent-turn exemption still there? ----------------------------------------------
+//
+// Runs on a CLI install and on the first startup after the version string moves. Never on a timer and
+// never at every boot: each run is a handful of real model calls, and the thing it measures only
+// changes when the binary does.
+const SILENT_TURN_STAMP = join(STATE_DIR, 'silent-turns.json')
+type SilentTurnStamp = { version: string; verdict: string; at: number }
+function silentTurnScope(): SilentTurnScope {
+  const v = loadAccess().silentTurns
+  return isSilentTurnScope(v) ? v : 'off'
+}
+async function reprobeSilentTurns(why: string): Promise<void> {
+  const version = await claudeVersion().catch(() => null)
+  const p = await probeSilentTurns({ bin: claudeBin() })
+  const line = describeProbe(p, version)
+  process.stderr.write(`daemon: silent-turn re-probe (${why}): ${line}\n`)
+  writeJsonFile(SILENT_TURN_STAMP, { version: version ?? '?', verdict: p.verdict, at: Date.now() } satisfies SilentTurnStamp)
+  // ONLY a confirmed regression disables it. An inconclusive run — the model never chose silence, so
+  // the exemption was never exercised — changes nothing: acting on an unexercised probe is the exact
+  // mistake that made four takes of the original A/B worthless.
+  if (p.verdict !== 'regressed') return
+  const scope = silentTurnScope()
+  if (scope === 'off') return
+  const a = loadAccess(); a.silentTurns = 'off'; saveAccess(a)
+  process.stderr.write(`daemon: silent turns DISABLED (was ${scope}) — the CLI re-prompts again; the content backstops in transcript.ts are carrying it\n`)
+  // The lane, not the owner's chat: this is fleet control, and it is the party that decides whether to
+  // re-probe, pin the CLI, or carry on with the backstops (owner-reporting-surface).
+  void wakeOrchestrator(
+    [`⚠️ Silent turns disabled — the CLI's no-visible-output re-prompt is back on ${version ?? '?'}, so bus turns are being forced to produce text again.`,
+     `The relay's content filters (isThinkingOnlyNudge / isHarnessNoise / isBracketedFiller) still drop it, which is why this is a degradation and not a leak.`,
+     `The rollout scope was "${scope}" and is now "off". Re-probe with a later CLI before turning it back on.`].join('\n'),
+    null)
+}
+// First boot on a version this box has not probed. Deliberately fire-and-forget behind the daemon's
+// own startup: a probe is model calls, and nothing about starting up may wait on them.
+void (async () => {
+  if (silentTurnScope() === 'off') return
+  const v = await claudeVersion().catch(() => null)
+  if (!v) return
+  const last = readJsonFile<Partial<SilentTurnStamp>>(SILENT_TURN_STAMP, {})
+  if (last?.version === v) return
+  await reprobeSilentTurns(`first run on CLI ${v}`)
+})()
 // The fleet fallback is for panes with no surface BY NATURE (a headless session). A session whose
 // topic the user DELETED is a different thing: outboundTargetsFor returns [] there deliberately
 // (topic-runtime.ts, "must NOT fall through to General's unthreaded chat"), and re-routing its cards
@@ -13795,7 +13842,14 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
     // upgrade itself ("Auto-update failed: no write permission to npm prefix", printed in every
     // spawned pane), so the fleet silently froze on an old client while ~/.local/bin sat current.
     // Prepend rather than replace: the user's own bin dir wins, everything else still resolves.
-    const envPrefix = `PATH='${homedir().replace(/'/g, `'\\''`)}/.local/bin':"$PATH" `
+    // R1: the exemption that lets a bus turn end with no user-visible output (silent-turns.ts states
+    // the measurement and why it is treated as expiring). It rides the launch COMMAND because a tmux
+    // window inherits the tmux server's environment and not the daemon's — the same reason the PATH
+    // fix below is here. The name is `basename(dir)` rather than a new parameter: at scope `probe`
+    // that is the scratch session's own folder, and past that stage the ROLE decides and the name is
+    // not consulted at all.
+    const envPrefix = silentTurnEnvPrefix(silentTurnScope(), role === 'chat' ? 'chat' : 'code', basename(dir))
+      + `PATH='${homedir().replace(/'/g, `'\\''`)}/.local/bin':"$PATH" `
       + (account.name === 'main'
       ? `HOME='${homedir().replace(/'/g, `'\\''`)}' `
       : `CLAUDE_CONFIG_DIR='${account.configDir.replace(/'/g, `'\\''`)}' `)
