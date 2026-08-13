@@ -8,7 +8,7 @@
 // separate CLI invocations sharing one key, and the second recalled the first's word.
 //
 // What follows from having no pane, each of which is a thing NOT to reintroduce:
-//   · the SESSION KEY is derived from the endpoint name — nothing to persist, nothing to adopt
+//   · the SESSION KEY is derived from the endpoint name and a GENERATION — see below
 //   · BUSY is a live child of ours, not a regex over an input line
 //   · the ANSWER is this run's own stdout, not a store diff past a watermark
 //
@@ -20,7 +20,9 @@ import { startRun, stderrTail, type RunResult, type RunStart } from './agent-run
 // A `driver: 'openclaw'` row of hermes-endpoints.json. `profile` is OpenClaw's AGENT ID (`main` on a
 // default install), the same slot a Hermes endpoint spends on its profile name — one field, because
 // every external endpoint answers the same question with it: which of that tool's personas is this.
-export type OpenclawCfg = { name: string; profile: string; cmd?: string[]; timeout_s?: number; cwd?: string }
+// `gen` is not config — it comes from the lifecycle store below and rides along so every key the
+// driver builds is built one way.
+export type OpenclawCfg = { name: string; profile: string; gen?: number; cmd?: string[]; timeout_s?: number; cwd?: string }
 
 // Agent runs are minutes; the same bound the Hermes one-shot takes, and for the same reason — it must
 // stay well under ASK_TTL_MS so a hung run answers with an error long before the pending rots.
@@ -29,8 +31,40 @@ export const DEFAULT_OPENCLAW_TIMEOUT_S = 600
 // `cc-bridge:<name>`. OpenClaw NAMESPACES what it is given — the key above is stored as
 // `agent:<profile>:cc-bridge:<name>` — so anything matching a stored key matches on the TAIL, never
 // on equality (measured off `openclaw sessions --json`, 2026-08-13).
-export function openclawSessionKey(name: string): string { return `cc-bridge:${name}` }
-export function openclawKeySuffix(name: string): string { return `:${openclawSessionKey(name)}` }
+//
+// The GENERATION is what makes closing an agent mean something. The gateway has no "end this
+// session" verb — a key is a conversation forever — so closing bumps the generation and the next
+// turn opens a NEW conversation under `cc-bridge:<name>#<gen>`, which is what every other session in
+// this fleet does when it is closed and re-opened (the owner, 2026-08-13: close should complete it,
+// and a re-open should be a fresh context window unless he asks to resume). The old conversation is
+// not deleted — it stays in the gateway under its own key, which is the only thing a resume could
+// ever be built on. Generation 0 renders the historical key EXACTLY, so a lost lifecycle file lands
+// every agent back on its first conversation rather than on an invented one.
+export function openclawSessionKey(name: string, gen = 0): string {
+  return gen > 0 ? `cc-bridge:${name}#${gen}` : `cc-bridge:${name}`
+}
+export function openclawKeySuffix(name: string, gen = 0): string { return `:${openclawSessionKey(name, gen)}` }
+
+// The lifecycle store (`openclaw-lives.json`), one record per endpoint, and the ONLY state the
+// bridge keeps for an openclaw agent. `closed` is the card's state, not a permission: the next task
+// clears it, exactly as a closed pane-backed agent is reopened by its next task — but on the
+// generation the close already bumped, so what comes back is a fresh conversation and not the old
+// one. Both helpers are pure and total: an absent or junk record reads as generation 0, open.
+export type OpenclawLife = { gen: number; closed: boolean }
+export type OpenclawLives = Record<string, Partial<OpenclawLife>>
+export function openclawLife(lives: OpenclawLives | null | undefined, name: string): OpenclawLife {
+  const r = lives?.[name]
+  const gen = typeof r?.gen === 'number' && r.gen > 0 ? Math.floor(r.gen) : 0
+  return { gen, closed: r?.closed === true }
+}
+// Close: the conversation this key names is done with. Reopen: nothing to restore, just stop saying
+// closed — the fresh context window is already implied by the generation.
+export function closeOpenclaw(lives: OpenclawLives, name: string): OpenclawLives {
+  return { ...lives, [name]: { gen: openclawLife(lives, name).gen + 1, closed: true } }
+}
+export function openOpenclaw(lives: OpenclawLives, name: string): OpenclawLives {
+  return { ...lives, [name]: { gen: openclawLife(lives, name).gen, closed: false } }
+}
 
 // `cmd` replaces the BINARY only (a test stub stands in for `openclaw`), not the flag list — unlike
 // the Hermes driver, where `cmd` is the whole base. The flags here are the contract with the gateway
@@ -40,7 +74,7 @@ export function openclawArgv(cfg: OpenclawCfg, prompt: string): string[] {
   return [
     ...bin, 'agent',
     '--agent', cfg.profile,
-    '--session-key', openclawSessionKey(cfg.name),
+    '--session-key', openclawSessionKey(cfg.name, cfg.gen),
     // Its own deadline, inside ours: the gateway can then answer "timeout" as a status, which is a far
     // better error than a killed child that never said anything.
     '--timeout', String(cfg.timeout_s ?? DEFAULT_OPENCLAW_TIMEOUT_S),
@@ -123,11 +157,15 @@ export type OpenclawSession = {
 // On disk the index is a MAP keyed by session key — `{"agent:main:cc-bridge:claw": {…}}` — and NOT
 // the `{sessions:[{key,…}]}` array the CLI prints. The two shapes carry the same records; this reads
 // the file, so it reads the map.
-export function pickOpenclawSession(sessionsJson: string, name: string): OpenclawSession | null {
+//
+// The GENERATION is part of the match, not a filter after it: a closed agent's old rows are still in
+// the index and picking the newest of them would show a card the ctx% and model of a conversation
+// the owner just ended.
+export function pickOpenclawSession(sessionsJson: string, name: string, gen = 0): OpenclawSession | null {
   let d: Record<string, unknown> | null = null
   try { d = JSON.parse(sessionsJson) as Record<string, unknown> } catch { return null }
   if (!d || typeof d !== 'object' || Array.isArray(d)) return null
-  const suffix = openclawKeySuffix(name)
+  const suffix = openclawKeySuffix(name, gen)
   // Newest wins: a key is reused across runs, but a reset or an agent rename can leave an older row
   // that still ends the same way.
   let best: OpenclawSession | null = null

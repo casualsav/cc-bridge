@@ -5,12 +5,55 @@ import { expect, test } from 'bun:test'
 import {
   openclawSessionKey, openclawArgv, parseOpenclawResult, pickOpenclawSession,
   openclawCtxPct, openclawFeedItems, openclawSessionsFile, DEFAULT_OPENCLAW_TIMEOUT_S,
+  openclawLife, closeOpenclaw, openOpenclaw,
 } from './openclaw-driver.ts'
 
 const cfg = { name: 'claw', profile: 'main' }
 
-test('the session key is what makes an agent remember — derived from the name, nothing else', () => {
+test('the session key is what makes an agent remember — derived from the name and its generation', () => {
   expect(openclawSessionKey('claw')).toBe('cc-bridge:claw')
+})
+
+test('generation 0 renders the HISTORICAL key exactly — a lost lifecycle file is not amnesia', () => {
+  expect(openclawSessionKey('claw', 0)).toBe(openclawSessionKey('claw'))
+  expect(openclawLife({}, 'claw')).toEqual({ gen: 0, closed: false })
+  expect(openclawLife({ claw: { gen: -3 } }, 'claw').gen).toBe(0)
+})
+
+test('closing bumps the generation, so the next turn opens a DIFFERENT conversation', () => {
+  const closed = closeOpenclaw({}, 'claw')
+  expect(openclawLife(closed, 'claw')).toEqual({ gen: 1, closed: true })
+  expect(openclawSessionKey('claw', 1)).toBe('cc-bridge:claw#1')
+  expect(openclawSessionKey('claw', 1)).not.toBe(openclawSessionKey('claw'))
+  // Twice closed is two conversations behind, never a toggle back onto the first.
+  expect(openclawLife(closeOpenclaw(closed, 'claw'), 'claw').gen).toBe(2)
+})
+
+test('reopening does NOT restore the closed conversation — it only stops saying closed', () => {
+  const reopened = openOpenclaw(closeOpenclaw({}, 'claw'), 'claw')
+  expect(openclawLife(reopened, 'claw')).toEqual({ gen: 1, closed: false })
+})
+
+test('closing one agent leaves every other record alone', () => {
+  const lives = closeOpenclaw({ other: { gen: 4, closed: false } }, 'claw')
+  expect(openclawLife(lives, 'other')).toEqual({ gen: 4, closed: false })
+})
+
+test('a closed agent shows its NEW conversation, never the one the owner just ended', () => {
+  // Both rows are in the gateway's index — closing deletes nothing — and the newest is the old one.
+  const raw = JSON.stringify({
+    'agent:main:cc-bridge:claw': { sessionId: 'ended', updatedAt: 200 },
+    'agent:main:cc-bridge:claw#1': { sessionId: 'fresh', updatedAt: 100 },
+  })
+  expect(pickOpenclawSession(raw, 'claw', 1)!.sessionId).toBe('fresh')
+  expect(pickOpenclawSession(raw, 'claw', 0)!.sessionId).toBe('ended')
+  // Before its first turn the new generation has no row at all: an empty conversation, honestly.
+  expect(pickOpenclawSession(raw, 'claw', 2)).toBeNull()
+})
+
+test('argv carries the generation, or a close would keep talking to the closed conversation', () => {
+  const a = openclawArgv({ ...cfg, gen: 2 }, 'hi')
+  expect(a[a.indexOf('--session-key') + 1]).toBe('cc-bridge:claw#2')
 })
 
 test('argv carries agent, key, both timeouts and the prompt LAST', () => {

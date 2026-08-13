@@ -196,7 +196,7 @@ import {
 } from './hermes-pane.ts'
 import {
   startOpenclaw, openclawSessionsFile, pickOpenclawSession, openclawCtxPct, openclawFeedItems,
-  type OpenclawCfg,
+  openclawLife, closeOpenclaw, openOpenclaw, type OpenclawCfg, type OpenclawLives,
 } from './openclaw-driver.ts'
 import { silentTurnEnvPrefix, probeSilentTurns, describeProbe, isSilentTurnScope, type SilentTurnScope } from './silent-turns.ts'
 import {
@@ -5088,8 +5088,20 @@ function hermesAdoptSession(cfg: HermesEndpoint, since: number): { id: string; c
 // does not have.
 const OPENCLAW_STATE_DIR = process.env.OPENCLAW_STATE_DIR ?? join(homedir(), '.openclaw')
 const isOpenclaw = (cfg: HermesEndpoint): boolean => cfg.driver === 'openclaw'
+// The lifecycle file is small and the daemon is its only writer, so it is read on demand rather than
+// cached: a stale generation would put a turn into a conversation the owner has closed, and that is
+// not a failure any later read repairs.
+const OPENCLAW_LIVES_FILE = join(STATE_DIR, 'openclaw-lives.json')
+const openclawLives = (): OpenclawLives => readJsonFile<OpenclawLives>(OPENCLAW_LIVES_FILE, {})
+const openclawGen = (name: string): number => openclawLife(openclawLives(), name).gen
+const openclawClosed = (name: string): boolean => openclawLife(openclawLives(), name).closed
+// A task on a closed agent reopens it, exactly as a task on a closed pane-backed agent does — on the
+// generation the close already bumped, so what it opens is a fresh conversation.
+function openclawReopenForTurn(name: string): void {
+  if (openclawClosed(name)) writeJsonFile(OPENCLAW_LIVES_FILE, openOpenclaw(openclawLives(), name))
+}
 const openclawCfg = (cfg: HermesEndpoint): OpenclawCfg => ({
-  name: cfg.name, profile: cfg.profile,
+  name: cfg.name, profile: cfg.profile, gen: openclawGen(cfg.name),
   ...(cfg.cmd ? { cmd: cfg.cmd } : {}), ...(cfg.timeout_s ? { timeout_s: cfg.timeout_s } : {}), ...(cfg.cwd ? { cwd: cfg.cwd } : {}),
 })
 // Turns started from the DRILL-IN, keyed by endpoint name — they carry no ask id, so hermesInFlight
@@ -5103,7 +5115,7 @@ const openclawBusy = (name: string): boolean =>
 function openclawIndex(cfg: HermesEndpoint): ReturnType<typeof pickOpenclawSession> {
   const file = openclawSessionsFile(cfg.profile, OPENCLAW_STATE_DIR)
   if (!existsSync(file)) return null
-  try { return pickOpenclawSession(readFileSync(file, 'utf8'), cfg.name) } catch (e) {
+  try { return pickOpenclawSession(readFileSync(file, 'utf8'), cfg.name, openclawGen(cfg.name)) } catch (e) {
     process.stderr.write(`daemon: openclaw index read failed for ${cfg.name}: ${e}\n`)
     return null
   }
@@ -5111,6 +5123,7 @@ function openclawIndex(cfg: HermesEndpoint): ReturnType<typeof pickOpenclawSessi
 // One turn, wherever it came from. The reply is THIS RUN'S OWN STDOUT — never a diff of the store
 // past a watermark, which is the Hermes shape and the source of its re-carding bug.
 async function runOpenclawTurn(cfg: HermesEndpoint, text: string): Promise<{ ok: true; reply: string } | { ok: false; error: string }> {
+  openclawReopenForTurn(cfg.name)
   openclawTurns.add(cfg.name)
   try {
     const r = await startOpenclaw(openclawCfg(cfg), text).done
@@ -5122,6 +5135,7 @@ async function runOpenclawTurn(cfg: HermesEndpoint, text: string): Promise<{ ok:
 async function runOpenclawAsk(pending: BusPending, cfg: HermesEndpoint): Promise<HermesStart> {
   const room = busLedgerRoom()
   const task: HermesTask = { id: pending.id, from: pending.fromName, room, text: pending.text, refs: pending.refs, sharedDir: sharedDir(room) }
+  openclawReopenForTurn(cfg.name)
   const { started, done } = startOpenclaw(openclawCfg(cfg), renderHermesPrompt(task))
   const start = await started
   if (!start.ok) {
@@ -21275,11 +21289,12 @@ async function webappListAgents(): Promise<WebappAgentRow[]> {
       busy: [...hermesInFlight].some(pid => getPending(pid)?.toSid === h.name),
     }
     // An openclaw agent carries the same two facts, read from its gateway's index instead of a pane:
-    // `live` is unconditionally true because the conversation exists whether or not anything is
-    // running — the pane's notion of "down" has no counterpart here.
+    // `live` is its lifecycle record rather than a process, because there is no process — closed
+    // means the owner ended that conversation and the next task opens a fresh one. `closeEnds` is
+    // what the card branches on, so the client never has to know which transport this is.
     if (isOpenclaw(h)) {
       const s = openclawIndex(h)
-      return { ...row, pane: true, live: true, busy: openclawBusy(h.name), ctxPct: openclawCtxPct(s), model: s?.model ?? null }
+      return { ...row, pane: true, live: !openclawClosed(h.name), closeEnds: true, busy: openclawBusy(h.name), ctxPct: openclawCtxPct(s), model: s?.model ?? null }
     }
     if (!h.pane) return row
     // A pane-backed agent has the two facts a session card carries — is it up, and how full is its
@@ -21297,11 +21312,16 @@ async function webappListAgents(): Promise<WebappAgentRow[]> {
 async function webappAgentAct(_userId: string, name: string, action: 'close' | 'reopen'): Promise<string | null> {
   const cfg = hermesEndpoints.get(normalizeEndpointName(name))
   if (!cfg) return `@${name} isn't a configured agent.`
-  // An openclaw agent has a conversation but no process of ours: its session lives in the gateway and
-  // outlives every turn, so there is nothing here to close and nothing that needs reopening. Refused
-  // rather than faked — "closed" would have to mean forgetting its context, which is the opposite of
-  // what the button promises everywhere else.
-  if (isOpenclaw(cfg)) return `@${cfg.name} lives in the openclaw gateway — its conversation is always open, so there is nothing to ${action}.`
+  // An openclaw agent has no process to kill, so closing it is a bump of its conversation generation
+  // (openclaw-driver.ts): the conversation it was in is complete, and everything after it opens a
+  // fresh context window. The owner's ruling, 2026-08-13 — a close that promised to come back "with
+  // its conversation" was the one session in his fleet that did not mean what closing means. The old
+  // conversation stays in the gateway under its own key; nothing is deleted.
+  if (isOpenclaw(cfg)) {
+    const lives = openclawLives()
+    writeJsonFile(OPENCLAW_LIVES_FILE, action === 'close' ? closeOpenclaw(lives, cfg.name) : openOpenclaw(lives, cfg.name))
+    return null
+  }
   if (!cfg.pane) return `@${cfg.name} runs one task at a time with no session of its own — there is nothing to ${action}.`
   if (action === 'close') {
     if (!(await hermesPaneOf(cfg.name))) return `@${cfg.name} isn't running.`
@@ -21575,6 +21595,7 @@ async function webappAgentSend(cfg: HermesEndpoint, text: string): Promise<strin
   // deliver by hand and no watermark to advance. A dispatch that never starts is the one thing worth
   // waiting for, since it is the only failure he would otherwise see as silence.
   if (isOpenclaw(cfg)) {
+    openclawReopenForTurn(cfg.name)
     const { started, done } = startOpenclaw(openclawCfg(cfg), text)
     openclawTurns.add(cfg.name)
     void done.then(r => {
@@ -21853,7 +21874,9 @@ async function webappSessionAction(userId: string, sid: string, action: 'stop' |
   const agent = agentEndpointFor(sid)
   if (agent) {
     if (action === 'send') return text?.trim() ? webappAgentSend(agent, text.trim()) : 'nothing to send'
-    if (action === 'close') return (await killHermesPane(agent.name)) ? null : `@${agent.name} isn't running.`
+    // Closing from inside the drill-in is the same verb the card's ✕ is, so it goes through the same
+    // function — an openclaw agent has no pane and killHermesPane would report it as not running.
+    if (action === 'close') return isOpenclaw(agent) ? await webappAgentAct(userId, agent.name, 'close') : (await killHermesPane(agent.name)) ? null : `@${agent.name} isn't running.`
     return `@${agent.name} is a Hermes agent — ${action} is a Claude Code control and it has none.`
   }
   const pane = await paneForSession(sid).catch(() => null)

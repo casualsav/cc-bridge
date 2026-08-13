@@ -493,8 +493,16 @@ So do not reintroduce, in this order of temptation: a **pane** (the gateway is t
 **stored session id** (the key is derived from the endpoint name — change `openclawSessionKey` and every
 agent silently starts a fresh conversation, which reads as amnesia and not as a bug), a **watermark**
 (the answer is the run's own stdout, never a store diff — the shape that re-carded old Hermes replies),
-and a **busy regex** (busy is a live child of ours). `close`/`reopen` are REFUSED rather than faked: its
-conversation outlives every turn, so "closed" could only mean forgetting the context. The drill-in reads
+and a **busy regex** (busy is a live child of ours). **`close` ENDS THE CONVERSATION, by bumping a
+GENERATION in the key** — `cc-bridge:<name>#<gen>` — because the gateway has no end-a-session verb and the
+owner's ruling (2026-08-13) is that closing must mean here what it means on every other session in the
+fleet: complete it, and open a fresh context window next time. That generation is the one piece of state
+the bridge keeps for an openclaw agent (`openclaw-lives.json`), and it is not the stored session id above:
+**generation 0 renders the historical key exactly**, so a lost file lands every agent back on its first
+conversation rather than on an invented one. The old conversation is never deleted — it stays in the
+gateway under its own key, which is the only thing a resume could be built on; no resume gesture exists
+yet. `reopen` only clears the closed flag (the next task does that anyway); the fresh window is already
+implied by the bump. The drill-in reads
 `sessions.json` and the session JSONL straight off disk (`openclaw-driver.ts`), because that screen polls
 every 3s and `openclaw sessions --json` is a subprocess per poll — the same split the Hermes drill-in
 makes against SQLite. The gateway is supervised by openclaw's own systemd user unit (`openclaw gateway

@@ -166,9 +166,14 @@ export interface SessionCard {
 export interface AgentRow {
   name: string; kind: 'hermes'; profile: string; busy: boolean
   pane?: boolean; live?: boolean; ctxPct?: number | null; model?: string | null
+  // Does closing this one END its conversation? The card's confirm and its closed caption promise
+  // opposite things either way, so the answer travels as a fact ABOUT the agent rather than as the
+  // transport it can be derived from — the client has no business knowing what an openclaw is.
+  closeEnds?: boolean
 }
-// Closing an agent kills its pane and KEEPS its session id, which is what makes reopening it the same
-// conversation rather than a fresh one. There is no third action: a one-shot endpoint has nothing to
+// Closing a pane-backed agent kills its pane and KEEPS its session id, which is what makes reopening
+// it the same conversation rather than a fresh one; a `closeEnds` agent has no pane and closing it
+// completes the conversation instead. There is no third action: a one-shot endpoint has nothing to
 // close, and the daemon refuses it rather than pretending.
 export type AgentAct = 'close' | 'reopen'
 // 'model'/'effort' carry the chosen alias/level in `text` — the mini app's dial picker, applied to

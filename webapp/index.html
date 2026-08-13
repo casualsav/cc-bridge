@@ -3069,22 +3069,29 @@ function renderAgents(el, agents) {
       "</div>" +
       // "Closed" says what a tap will DO, because closing one here is reversible and the reopen keeps
       // the conversation — a bare 💀, borrowed from the session card, would read as something lost.
-      '<div class="task">' + (a.busy ? "🧑‍💻 running a task" : closed ? "💤 closed — a new task reopens it where it left off" : "✅ ready") + "</div>" +
+      // A `closeEnds` agent says the opposite thing for the same reason: what comes back is a new
+      // conversation, and a caption promising the old one back is the bug this line was written for.
+      '<div class="task">' + (a.busy ? "🧑‍💻 running a task" : closed ? (a.closeEnds ? "💤 closed — a new task starts a fresh conversation" : "💤 closed — a new task reopens it where it left off") : "✅ ready") + "</div>" +
       foot;
     // The same drill-in a coding session opens, on a pseudo sid the daemon resolves back to the
     // endpoint (`agent:<name>`). A CLOSED agent opens too, and the composer reopens it on its own
     // session when he sends — refusing the tap would refuse the thing the card promises.
     c.onclick = () => openDrill(AGENT_SID + a.name, a.name);
     const x = c.querySelector(".cardx");
-    if (x) x.onclick = e => { e.stopPropagation(); closeAgentCard(a.name); };
+    if (x) x.onclick = e => { e.stopPropagation(); closeAgentCard(a.name, a.closeEnds); };
     el.appendChild(c);
   }
 }
 // Closing an agent is NOT the session ✕'s warning, and the difference is real: this kills a pane and
 // keeps the conversation, so the next task picks it up where it stopped. Asking "this ends the
 // session" for something reversible teaches the dialog to be ignored on the card where it isn't.
-async function closeAgentCard(name) {
-  if (!(await askConfirm('Close @' + name + "'s session? It reopens on your next task, with its conversation."))) return;
+// `closeEnds` is the agent for which that reasoning inverts — its conversation IS what closing ends,
+// so it gets the warning, and promising it back was the owner's 2026-08-13 report.
+async function closeAgentCard(name, closeEnds) {
+  const q = closeEnds
+    ? 'Close @' + name + "'s session? This ends the conversation — the next task starts a fresh one."
+    : 'Close @' + name + "'s session? It reopens on your next task, with its conversation.";
+  if (!(await askConfirm(q))) return;
   if (!(await writeOp("/api/agent/act", { name, action: "close" }))) return;
   showDone("@" + name + " closed");
   renderSessions();
