@@ -1000,6 +1000,22 @@ test('detectWorking ignores quoted/echoed spinner text that is not a live status
   expect(detectWorking(grepped)).toBe(false)
 })
 
+test('detectWorking accepts the `*` spinner frame by its full shape (live capture, CLI 2.1.229)', () => {
+  // Real capture, 2026-08-13: `*` is one frame of the live cycle, and rejecting it made every
+  // consumer of this predicate flap at the frame-sampling rate — the mini app's working row first.
+  expect(detectWorking(modernLayout('* Musing… (9m 57s · ↓ 31.0k tokens)'))).toBe(true)
+})
+
+test('detectWorking still refuses a markdown bullet that carries a duration', () => {
+  // The reason `*` is not in SPINNER_GLYPHS: a bullet with "(3s …" satisfies the timer regex. The
+  // star branch demands the verb's closing ellipsis plus a whole-field elapsed, which prose lacks.
+  expect(detectWorking(modernLayout('* retry the deploy (3s timeout)'))).toBe(false)
+  expect(detectWorking(modernLayout('* rerun the suite (3m grace, then kill)'))).toBe(false)
+  // Echoed star lines are anchored out exactly like the other glyphs.
+  expect(detectWorking(modernLayout('  ⎿  * Musing… (9m 57s · ↓ 31.0k tokens)'))).toBe(false)
+  expect(detectWorking(modernLayout('     * Musing… (9m 57s)'))).toBe(false)
+})
+
 test('detectWorking still catches the legacy "esc to interrupt" footer within the 16-line tail', () => {
   const pane = modernLayout('  ✻ Working… (12s · esc to interrupt)')
   expect(detectWorking(pane)).toBe(true)

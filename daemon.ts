@@ -21738,13 +21738,14 @@ async function webappSessionFeed(sid: string): Promise<WebappSessionFeed | null>
   // and it is a composite for exactly the reason this row needed three attempts to get right. Each
   // half alone drops the row while the turn is still running:
   //
-  // - `detectWorking` ALONE flaps. It wants "esc to interrupt" in the tail or a spinner line matching
-  //   WORKING_TIMER_RE, whose glyph class omits the `*` frame that `parseOneWorkingLine` explicitly
-  //   accepts — so on whichever 3s poll catches that frame (and the footer is often not in the tail
-  //   at all) a live turn reads idle. Measured on a real working pane, 2026-08-11: 4 misses in 10
-  //   ticks, then 1 in 20, while parseWorkingStatus reported `Waddling (5m 32s · 14.7k tokens)`
-  //   throughout. That is the owner's "coming in and out the whole time", and it is why v0.5.67's
-  //   gate did more harm than the bug it fixed.
+  // - `detectWorking` ALONE flaps. It reads ONE animation frame per capture, so any frame its shape
+  //   rules reject reads as an idle tick mid-turn. Measured on a real working pane, 2026-08-11: 4
+  //   misses in 10 ticks, then 1 in 20, while parseWorkingStatus reported `Waddling (5m 32s · 14.7k
+  //   tokens)` throughout. That is the owner's "coming in and out the whole time", and it is why
+  //   v0.5.67's gate did more harm than the bug it fixed. The `*` frame — every measured miss, twice
+  //   (2026-08-11, 2026-08-13) — is accepted by shape since the STAR_SPINNER_RE branch (prompt.ts),
+  //   but the class is one-frame sampling itself, so a new CLI frame reopens it and the transcript
+  //   half has to keep covering.
   // - `working` ALONE blanks the row for the whole thinking pause after every prompt: it is read from
   //   the TRANSCRIPT and lags the pane by those seconds. The pane knows first; the transcript knows
   //   longer.

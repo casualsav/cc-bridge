@@ -1029,7 +1029,8 @@ export function bashModeArmed(paneText: string): boolean {
 // added in one place. `*` is in Claude Code's own set (see detectCompacting) but is deliberately NOT
 // in here: this class is used by predicates that only require a duration after the glyph, where a
 // markdown bullet ("* retry (3s timeout)") would read as a live pane. parseWorkingLine adds it back
-// because it demands the verb's "…"/"(" shape on top.
+// because it demands the verb's "…"/"(" shape on top, and detectWorking's STAR_SPINNER_RE branch
+// re-admits it the same way.
 const SPINNER_GLYPHS = '✢✳✶✻✽✺✷✸✹·●◐◓◑◒'
 // 40 lines: the worst observed layout (v2.1.220) stacks an attached "⎿"-gutter task list (6 lines),
 // a queued-message echo, the "Press up to edit queued messages" input box, a 4-line statusline, and
@@ -1042,6 +1043,15 @@ const WORKING_TAIL = 40
 // h/m/s unit. Anchored to line start (≤2 leading spaces) so quoted spinner text echoed elsewhere in
 // the pane — tool-result "  ⎿  " lines, grep's "NN:" prefixes — can't false-positive.
 const WORKING_TIMER_RE = new RegExp(`^\\s{0,2}[${SPINNER_GLYPHS}][^\\n]*?\\(\\d+\\s*[hms]`)
+// The `*` frame is in the live cycle too — v2.1.229 paints "* Musing… (9m 57s · ↓ 31.0k tokens)" on
+// a share of captures — but it cannot join SPINNER_GLYPHS: that class only requires a duration after
+// the glyph, and a markdown bullet ("* retry the deploy (3s timeout)") satisfies it. A `*` line
+// counts as working only with the full spinner SHAPE — ellipsis closing the verb, then a whole-field
+// elapsed parseOneWorkingLine recognises — which no plain bullet carries. Without this branch every
+// capture that sampled the `*` frame read idle (measured 3/30 and 16/40 ticks on live turns,
+// 2026-08-13), and each consumer of this predicate — the drill-in's working row first, whenever the
+// transcript half of its gate reads no turn — flapped at exactly that rate.
+const STAR_SPINNER_RE = /^\s{0,2}\*\s+\S[^\n(]*(?:…|\.\.\.)\s*\(/
 
 // True while Claude Code is mid-turn. The TUI shows a spinner + "esc to interrupt" footer while
 // working and clears it when the turn ends, so the footer is the ground truth. Markers are
@@ -1050,7 +1060,7 @@ const WORKING_TIMER_RE = new RegExp(`^\\s{0,2}[${SPINNER_GLYPHS}][^\\n]*?\\(\\d+
 export function detectWorking(paneText: string): boolean {
   const tail = paneLines(paneText).slice(-WORKING_TAIL)
   if (/esc to interrupt/i.test(tail.join('\n'))) return true
-  return tail.some(l => WORKING_TIMER_RE.test(l))
+  return tail.some(l => WORKING_TIMER_RE.test(l) || (STAR_SPINNER_RE.test(l) && parseOneWorkingLine(l)?.elapsed != null))
 }
 
 // The SAME line detectWorking tests for, read instead of counted: "✻ Hyperspacing… (1m 55s · ↓ 5.6k
