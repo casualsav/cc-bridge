@@ -140,7 +140,8 @@ externalized?", never how full the window is:
 
 HANDOFF.md at a repo's root is the one handoff file: unfinished work only. Finished work leaves
 the file — pruned, never marked done — and there is one canonical copy per repo (a worktree's is
-absorbed at merge).
+absorbed at merge). Standing truths — protocols, quirks, environment constraints — belong in the
+repo's own CLAUDE.md, never in the handoff; completed work belongs nowhere in it, in any form.
 
 Levers:
 

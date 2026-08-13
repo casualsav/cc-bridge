@@ -11,6 +11,9 @@ exact next step, and the check that proves it done. Finished work is DELETED —
 remains, delete the file. A handoff shrinks toward empty — that is the shape of it working, not a
 record being lost.
 
+Standing truths — protocols, quirks, environment constraints — belong in the repo's own
+`CLAUDE.md`, never in the handoff; completed work belongs nowhere in it, in any form.
+
 Two rules that keep items honest:
 
 - **Taking an item verifies its premise before doing any work** — an item whose premise is gone
@@ -20,6 +23,8 @@ Two rules that keep items honest:
   fires on an item waiting for a human, so parked items are the one class that accumulates —
   the who/what line is what lets a reader skip one without re-deriving why it is stuck.
 
-The index-plus-`handoff/`-directory convention is retired (owner ruling, 2026-08-13). A repo that
-still carries one: fold the still-live items (and any standing truths from `handoff/facts.md`)
-into `HANDOFF.md` and delete the directory — `/handoff` does this fold itself.
+The index-plus-`handoff/`-directory convention is retired (owner ruling, 2026-08-13), and so is
+its `facts.md` (owner ruling, 2026-08-13: "HANDOFF.md and the repo's CLAUDE.md are enough" — a
+never-pruned file invited completed-work records into a doc every session loads). A repo that
+still carries a `handoff/` directory: fold the still-live items into `HANDOFF.md`, move anything
+standing into the repo's `CLAUDE.md`, and delete the directory — `/handoff` does this fold itself.

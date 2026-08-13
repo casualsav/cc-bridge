@@ -1,6 +1,9 @@
 # Prune-by-default handoff hygiene — design note
 
 **Status:** proposal. Nothing here is built. Written 2026-08-06 against HEAD `c2d6feb` (tg v0.4.380).
+**Superseded on the two-shape premise** (owner rulings, 2026-08-13): the index-plus-`handoff/`
+convention and its `facts.md` are both retired. Everything below that reasons about two shapes or
+carrying `facts.md` is a record of that moment, not live convention — `docs/handoff.md` is.
 **Decision asked for:** approve or cut items from the change list in §6. Each is independently
 shippable; §6.1 is a config fix with no code, §6.2–§6.4 are code, §6.5–§6.6 are docs.
 

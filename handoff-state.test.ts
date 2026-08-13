@@ -38,10 +38,10 @@ test('a monolith is read as lines, and says so', () => {
   expect(describeHandoff(h!)).toBe('a single document, 4 lines')
 })
 
-test('a monolith beside a facts.md is still a monolith', () => {
+test('a monolith beside a leftover handoff/ dir is still a monolith', () => {
   // The trap: detecting the shape from `handoff/` existing would call this an index and report zero
   // items for a document full of work. The shape is read from the FILE.
-  const h = readHandoffState(repo({ 'HANDOFF.md': '# Current task\nship it\n', 'handoff/facts.md': 'standing truth' }))
+  const h = readHandoffState(repo({ 'HANDOFF.md': '# Current task\nship it\n', 'handoff/old-item.md': 'leftover' }))
   expect(h?.shape).toBe('monolith')
 })
 

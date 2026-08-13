@@ -109,7 +109,9 @@ log or a scratch topic, never phrased as text a probe might repeat outward.
 
 `HANDOFF.md` at the root of the repo you're working in — one file, unfinished work only. Write it
 before your context is cleared or you retire; prune as work completes — finished work leaves the
-file, and an empty handoff is deleted, not kept.
+file, and an empty handoff is deleted, not kept. Standing truths — protocols, quirks, environment
+constraints — belong in the repo's own `CLAUDE.md`, never in the handoff; completed work belongs
+nowhere in it, in any form.
 
 ## CLAUDE.md hygiene
 

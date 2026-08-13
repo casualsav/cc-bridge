@@ -50,7 +50,7 @@ export function readHandoffState(dir: string): HandoffState | null {
     const body = readFileSync(path, 'utf8')
     const mtimeMs = statSync(path).mtimeMs
     // The index shape is detected from the FILE, not from `handoff/` existing: a repo can keep a
-    // `handoff/facts.md` (standing truths, never an item) with a monolithic HANDOFF.md beside it,
+    // leftover `handoff/` directory (the convention is retired) with a monolithic HANDOFF.md beside it,
     // and calling that an index would report an item count of zero for a document full of work.
     const items = body.split('\n').filter(l => INDEX_LINE.test(l)).length
     if (items > 0) return { shape: 'index', count: items, mtimeMs }

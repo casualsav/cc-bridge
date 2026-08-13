@@ -206,8 +206,8 @@ test('a replay that ages past the freshness window becomes a digest line, never 
 // Everything above is a model — both arms pass whatever daemon.ts does, because the policy is a
 // parameter. That is the shape the bug already exploited twice: a suite that passes from the right
 // direction while the system runs the wrong one. So the model gets a control that reads the shipped
-// source, and it is an ENUMERATION rather than a list of the sites I happened to look at
-// (handoff/facts.md). A new marking site fails this test until someone states its policy here.
+// source, and it is an ENUMERATION rather than a list of the sites I happened to look at.
+// A new marking site fails this test until someone states its policy here.
 
 test('CONTROL: every noteDelivered call site in daemon.ts is accounted for', () => {
   const src = readFileSync(join(import.meta.dir, 'daemon.ts'), 'utf8').split('\n')
