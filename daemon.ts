@@ -21285,7 +21285,7 @@ async function webappListSessions(): Promise<WebappSessionCard[]> {
 async function webappListAgents(): Promise<WebappAgentRow[]> {
   return await Promise.all([...hermesEndpoints.values()].filter(h => !h.hidden).map(async h => {
     const row: WebappAgentRow = {
-      name: h.name, kind: 'hermes' as const, profile: h.profile,
+      name: h.name, kind: isOpenclaw(h) ? 'openclaw' as const : 'hermes' as const, profile: h.profile,
       busy: [...hermesInFlight].some(pid => getPending(pid)?.toSid === h.name),
     }
     // An openclaw agent carries the same two facts, read from its gateway's index instead of a pane:

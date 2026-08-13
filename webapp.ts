@@ -164,7 +164,10 @@ export interface SessionCard {
 // facts a session card carries. A one-shot endpoint has none of them: it has no pane to be up, no
 // context to fill, and its row is name + busy exactly as before.
 export interface AgentRow {
-  name: string; kind: 'hermes'; profile: string; busy: boolean
+  // `kind` is the chip's FALLBACK, shown whenever the agent has no model to name — which for a
+  // freshly closed one is every render, since its next conversation does not exist yet. So it has to
+  // name the tool honestly: a card reading "hermes" over an openclaw agent is what the owner saw.
+  name: string; kind: 'hermes' | 'openclaw'; profile: string; busy: boolean
   pane?: boolean; live?: boolean; ctxPct?: number | null; model?: string | null
   // Does closing this one END its conversation? The card's confirm and its closed caption promise
   // opposite things either way, so the answer travels as a fact ABOUT the agent rather than as the
