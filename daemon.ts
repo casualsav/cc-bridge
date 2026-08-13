@@ -188,12 +188,16 @@ import {
 } from './wait-state.ts'
 import { planTemplateRefresh } from './chat-templates.ts'
 import { laneForChat, bindLane, chatForLaneSession, noteLaneCwd, dmLanesOn, fleetMode, fleetSurface, listLanes, unbindLane } from './dm-lanes.ts'
-import { startHermes, hermesEnv, DEFAULT_HERMES_TIMEOUT_S, type HermesEndpoint, type HermesStart, type HermesTask } from './hermes-driver.ts'
+import { startHermes, hermesEnv, renderHermesPrompt, DEFAULT_HERMES_TIMEOUT_S, type HermesEndpoint, type HermesStart, type HermesTask } from './hermes-driver.ts'
 import {
   hermesChatArgv, hermesAtPrompt, hermesWorking, parseHermesStatus, parseHermesExport,
   assistantReplySince, newSessionId, parseSessionIds, runHermesTurn, hermesStatePath, hermesFeedItems,
   parseHermesActivity, isHermesSessionCommand, type HermesStoreRow,
 } from './hermes-pane.ts'
+import {
+  startOpenclaw, openclawSessionsFile, pickOpenclawSession, openclawCtxPct, openclawFeedItems,
+  type OpenclawCfg,
+} from './openclaw-driver.ts'
 import {
   initPromptRelay, relayPromptToTelegram, relayPermissionToTelegram, sweepPermStorms,
   permStorms, multiSelectKeyboard, formatPermission, relayStuckScreen, renderStuckHtml,
@@ -3394,6 +3398,9 @@ function loadHermesEndpoints(): void {
     if (!name) continue
     hermesEndpoints.set(name, {
       name, profile: v.profile,
+      // Unknown driver → the default. A typo must not make an endpoint UNREACHABLE (that reads as the
+      // bridge losing an agent); it makes it answer wrong, loudly, on the first ask.
+      ...(v.driver === 'openclaw' ? { driver: 'openclaw' as const } : {}),
       ...(Array.isArray(v.cmd) ? { cmd: v.cmd.filter((x): x is string => typeof x === 'string') } : {}),
       ...(typeof v.timeout_s === 'number' ? { timeout_s: v.timeout_s } : {}),
       ...(typeof v.cwd === 'string' ? { cwd: v.cwd } : {}),
@@ -5024,9 +5031,78 @@ function hermesAdoptSession(cfg: HermesEndpoint, since: number): { id: string; c
   } finally { try { db?.close() } catch {} }
 }
 
-// ONE entry point for both transports, so nothing upstream has to know which an endpoint uses: every
+// ---- An OPENCLAW endpoint: a context window with NO pane -----------------------------------------
+//
+// The third transport, and the simplest, because the continuity lives outside the bridge: OpenClaw's
+// gateway holds the session and one `openclaw agent --session-key K` per turn hops into it. Nothing
+// here keeps a pane, a session id, or a watermark — read openclaw-driver.ts before adding any of the
+// three back, because each one exists on the Hermes side to work around something this transport
+// does not have.
+const OPENCLAW_STATE_DIR = process.env.OPENCLAW_STATE_DIR ?? join(homedir(), '.openclaw')
+const isOpenclaw = (cfg: HermesEndpoint): boolean => cfg.driver === 'openclaw'
+const openclawCfg = (cfg: HermesEndpoint): OpenclawCfg => ({
+  name: cfg.name, profile: cfg.profile,
+  ...(cfg.cmd ? { cmd: cfg.cmd } : {}), ...(cfg.timeout_s ? { timeout_s: cfg.timeout_s } : {}), ...(cfg.cwd ? { cwd: cfg.cwd } : {}),
+})
+// Turns started from the DRILL-IN, keyed by endpoint name — they carry no ask id, so hermesInFlight
+// (which is ask ids) cannot see them, and without this the agent reads idle while it is working.
+const openclawTurns = new Set<string>()
+const openclawBusy = (name: string): boolean =>
+  openclawTurns.has(name) || [...hermesInFlight].some(pid => getPending(pid)?.toSid === name)
+
+// The index row for this endpoint's conversation. Every failure is `null` = "no conversation yet",
+// which is the truth before a first turn and the honest degradation for a store we do not own.
+function openclawIndex(cfg: HermesEndpoint): ReturnType<typeof pickOpenclawSession> {
+  const file = openclawSessionsFile(cfg.profile, OPENCLAW_STATE_DIR)
+  if (!existsSync(file)) return null
+  try { return pickOpenclawSession(readFileSync(file, 'utf8'), cfg.name) } catch (e) {
+    process.stderr.write(`daemon: openclaw index read failed for ${cfg.name}: ${e}\n`)
+    return null
+  }
+}
+// One turn, wherever it came from. The reply is THIS RUN'S OWN STDOUT — never a diff of the store
+// past a watermark, which is the Hermes shape and the source of its re-carding bug.
+async function runOpenclawTurn(cfg: HermesEndpoint, text: string): Promise<{ ok: true; reply: string } | { ok: false; error: string }> {
+  openclawTurns.add(cfg.name)
+  try {
+    const r = await startOpenclaw(openclawCfg(cfg), text).done
+    return r.ok ? { ok: true, reply: r.text } : { ok: false, error: r.error }
+  } finally { openclawTurns.delete(cfg.name) }
+}
+// The bus twin of runHermesAsk: same pending row, same ledger, same deliverAnswerToAsker, same
+// dispatch-outcome-before-anything-is-claimed discipline.
+async function runOpenclawAsk(pending: BusPending, cfg: HermesEndpoint): Promise<HermesStart> {
+  const room = busLedgerRoom()
+  const task: HermesTask = { id: pending.id, from: pending.fromName, room, text: pending.text, refs: pending.refs, sharedDir: sharedDir(room) }
+  const { started, done } = startOpenclaw(openclawCfg(cfg), renderHermesPrompt(task))
+  const start = await started
+  if (!start.ok) {
+    removePending(pending.id)
+    appendLedger(room, { ts: Date.now(), kind: 'answer', from: cfg.name, to: pending.fromName, id: pending.id, text: `⚠️ dispatch failed: ${start.error}`, refs: [] })
+    process.stderr.write(`daemon: openclaw ${cfg.name} ask ${pending.id} NOT DISPATCHED — ${start.error}\n`)
+    return start
+  }
+  markInjected(pending.id, Date.now())
+  hermesInFlight.add(pending.id)
+  openclawTurns.add(cfg.name)
+  void (async () => {
+    try {
+      const result = await done
+      process.stderr.write(`daemon: openclaw ${cfg.name} ask ${pending.id} ${result.ok ? `finished (${result.text.length} chars)` : `FAILED — ${result.error}`}\n`)
+      const body = result.ok ? result.text : `⚠️ @${cfg.name} couldn't complete ask ${pending.id}: ${result.error}`
+      process.stderr.write(`daemon: openclaw ${cfg.name} ask ${pending.id} → ${await deliverAnswerToAsker(pending, cfg.name, body, [])}\n`)
+    } catch (e) {
+      process.stderr.write(`daemon: openclaw ${cfg.name} ask ${pending.id} threw: ${e}\n`)
+      await deliverAnswerToAsker(pending, cfg.name, `⚠️ @${cfg.name} errored on ask ${pending.id}: ${e instanceof Error ? e.message : String(e)}`, []).catch(() => {})
+    } finally { hermesInFlight.delete(pending.id); openclawTurns.delete(cfg.name) }
+  })()
+  return start
+}
+
+// ONE entry point for every transport, so nothing upstream has to know which an endpoint uses: every
 // caller that dispatched a Hermes ask keeps calling this, and the config decides.
 function dispatchHermesAsk(pending: BusPending, cfg: HermesEndpoint): Promise<HermesStart> {
+  if (isOpenclaw(cfg)) return runOpenclawAsk(pending, cfg)
   return cfg.pane ? runHermesPaneAsk(pending, cfg) : runHermesAsk(pending, cfg)
 }
 
@@ -7243,7 +7319,10 @@ async function handleCall(
           const start = await dispatchHermesAsk(p, cfg)
           if (!start.ok) { write({ t: 'result', id, ok: false, text: `@${toName} couldn't be started — ${start.error} (ask ${p.id} closed, nothing is running)` }); return }
           void notifyAskSent(fromSid, toName, askText, 'ask', null)   // hermes: acks are refused above, so this is always an ask
-          text = `asked @${toName} (ask ${p.id}) — its \`hermes\` child is up; the answer arrives when it finishes`
+          // Name the TOOL that is running, not the endpoint class: `hermes` was the only external
+          // driver when this line was written, and telling a reader that an openclaw agent's "hermes
+          // child" is up sends it to the wrong log the one time it needs one.
+          text = `asked @${toName} (ask ${p.id}) — its \`${cfg.driver ?? 'hermes'}\` child is up; the answer arrives when it finishes`
         } else {
           // AWAITED (bug 11b): the outcome IS the answer to "did that land?". Reporting the same
           // "asked @X — async" line for a wedged or dead target is what let two asks vanish into
@@ -21142,6 +21221,13 @@ async function webappListAgents(): Promise<WebappAgentRow[]> {
       name: h.name, kind: 'hermes' as const, profile: h.profile,
       busy: [...hermesInFlight].some(pid => getPending(pid)?.toSid === h.name),
     }
+    // An openclaw agent carries the same two facts, read from its gateway's index instead of a pane:
+    // `live` is unconditionally true because the conversation exists whether or not anything is
+    // running — the pane's notion of "down" has no counterpart here.
+    if (isOpenclaw(h)) {
+      const s = openclawIndex(h)
+      return { ...row, pane: true, live: true, busy: openclawBusy(h.name), ctxPct: openclawCtxPct(s), model: s?.model ?? null }
+    }
     if (!h.pane) return row
     // A pane-backed agent has the two facts a session card carries — is it up, and how full is its
     // context — read off the SAME status line the turn detector reads. A pane that is down is a real
@@ -21158,6 +21244,11 @@ async function webappListAgents(): Promise<WebappAgentRow[]> {
 async function webappAgentAct(_userId: string, name: string, action: 'close' | 'reopen'): Promise<string | null> {
   const cfg = hermesEndpoints.get(normalizeEndpointName(name))
   if (!cfg) return `@${name} isn't a configured agent.`
+  // An openclaw agent has a conversation but no process of ours: its session lives in the gateway and
+  // outlives every turn, so there is nothing here to close and nothing that needs reopening. Refused
+  // rather than faked — "closed" would have to mean forgetting its context, which is the opposite of
+  // what the button promises everywhere else.
+  if (isOpenclaw(cfg)) return `@${cfg.name} lives in the openclaw gateway — its conversation is always open, so there is nothing to ${action}.`
   if (!cfg.pane) return `@${cfg.name} runs one task at a time with no session of its own — there is nothing to ${action}.`
   if (action === 'close') {
     if (!(await hermesPaneOf(cfg.name))) return `@${cfg.name} isn't running.`
@@ -21341,11 +21432,38 @@ const AGENT_SID_PREFIX = 'agent:'
 function agentEndpointFor(sid: string): HermesEndpoint | null {
   if (!sid.startsWith(AGENT_SID_PREFIX)) return null
   const cfg = hermesEndpoints.get(normalizeEndpointName(sid.slice(AGENT_SID_PREFIX.length)))
-  // A one-shot endpoint has no conversation to open — it is a subprocess per ask, by config.
-  return cfg?.pane ? cfg : null
+  if (!cfg) return null
+  // What earns a drill-in is a CONVERSATION, not a pane: an openclaw endpoint has one in its gateway
+  // and no pane at all. A Hermes one-shot has neither — it is a subprocess per ask, by config.
+  return cfg.pane || isOpenclaw(cfg) ? cfg : null
 }
 const AGENT_FEED_ITEMS = 60
+// An openclaw agent's drill-in: two file reads, no tmux, no state of ours. `working` is our own live
+// child — exact, where the Hermes side has to infer it from an input line — and the conversation is
+// whatever its gateway has written, which is why nothing here needs to be reconciled with a
+// watermark. A missing index or transcript renders an empty chat, never an error.
+function webappOpenclawFeed(cfg: HermesEndpoint): WebappSessionFeed {
+  const sid = AGENT_SID_PREFIX + cfg.name
+  const s = openclawIndex(cfg)
+  let items: ReturnType<typeof openclawFeedItems> = []
+  if (s?.sessionFile && existsSync(s.sessionFile)) {
+    try { items = openclawFeedItems(readFileSync(s.sessionFile, 'utf8'), { limit: AGENT_FEED_ITEMS }) } catch (e) {
+      process.stderr.write(`daemon: openclaw transcript read failed for ${cfg.name}: ${e}\n`)
+    }
+  }
+  const working = openclawBusy(cfg.name)
+  return {
+    sid, name: cfg.name, working, state: working ? 'working' : 'idle',
+    // The subtitle names WHAT this is, in the slot a session spends on its folder. `· gateway` is not
+    // decoration: it is the whole reason this agent has a context window and no pane, and the first
+    // thing to check when it answers with amnesia.
+    cwd: `openclaw · ${cfg.profile} · gateway`,
+    model: s?.model ?? null, effort: null,
+    items, ...(working ? { status: { verb: 'working', elapsed: null, tokens: null } } : {}),
+  }
+}
 async function webappAgentFeed(cfg: HermesEndpoint): Promise<WebappSessionFeed> {
+  if (isOpenclaw(cfg)) return webappOpenclawFeed(cfg)
   const sid = AGENT_SID_PREFIX + cfg.name
   const pane = await hermesPaneOf(cfg.name)
   const cap = pane ? stripAnsi(await capturePane(pane).catch(() => '')) : ''
@@ -21398,6 +21516,20 @@ async function webappAgentFeed(cfg: HermesEndpoint): Promise<WebappSessionFeed> 
 // session, where a reply reaches the pane's own surface and nothing is minted. A closed agent is
 // REOPENED by sending to it (on its own session), because that is what the card promises.
 async function webappAgentSend(cfg: HermesEndpoint, text: string): Promise<string | null> {
+  // An openclaw turn is a subprocess of OURS, minutes long, and this call is an HTTP request the mini
+  // app is waiting on — so it is DETACHED, exactly as a bus ask is. His message and the reply both
+  // land in the gateway's transcript, which the 3-second poll is already reading; there is nothing to
+  // deliver by hand and no watermark to advance. A dispatch that never starts is the one thing worth
+  // waiting for, since it is the only failure he would otherwise see as silence.
+  if (isOpenclaw(cfg)) {
+    const { started, done } = startOpenclaw(openclawCfg(cfg), text)
+    openclawTurns.add(cfg.name)
+    void done.then(r => {
+      process.stderr.write(`daemon: openclaw ${cfg.name} drill-in turn ${r.ok ? `finished (${r.text.length} chars)` : `FAILED — ${r.error}`}\n`)
+    }).catch(() => {}).finally(() => openclawTurns.delete(cfg.name))
+    const start = await started
+    return start.ok ? null : `Couldn't reach @${cfg.name} — ${start.error}`
+  }
   const up = await ensureHermesPane(cfg)
   if ('error' in up) return `Couldn't reach @${cfg.name} — ${up.error}`
   const cap = stripAnsi(await capturePane(up.pane).catch(() => ''))

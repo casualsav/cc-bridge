@@ -473,6 +473,23 @@ daemon, from `scripts/hermes-pane-turn.ts` against a real pane, and from `hermes
 clock — a loop only the daemon can run is a loop debugged in production. `dispatchHermesAsk` is the one
 entry point: the config picks the transport and nothing upstream knows which.
 
+**AN OPENCLAW ENDPOINT (`"driver": "openclaw"`) HAS A CONTEXT WINDOW AND NO PANE — every piece of the
+Hermes pane exists to work around something this transport does not have.** OpenClaw's gateway is a
+persistent server that holds the session, so `openclaw agent --session-key K` is a stateless hop into a
+stateful conversation: verified 2026-08-13 against openclaw 2026.7.1-2 by priming a key from the CLI and
+recalling the word through a bus ask — and again across a full gateway restart, which no pane survives.
+So do not reintroduce, in this order of temptation: a **pane** (the gateway is the held process), a
+**stored session id** (the key is derived from the endpoint name — change `openclawSessionKey` and every
+agent silently starts a fresh conversation, which reads as amnesia and not as a bug), a **watermark**
+(the answer is the run's own stdout, never a store diff — the shape that re-carded old Hermes replies),
+and a **busy regex** (busy is a live child of ours). `close`/`reopen` are REFUSED rather than faked: its
+conversation outlives every turn, so "closed" could only mean forgetting the context. The drill-in reads
+`sessions.json` and the session JSONL straight off disk (`openclaw-driver.ts`), because that screen polls
+every 3s and `openclaw sessions --json` is a subprocess per poll — the same split the Hermes drill-in
+makes against SQLite. The gateway is supervised by openclaw's own systemd user unit (`openclaw gateway
+install`), not by this daemon; if an agent answers with amnesia, check that unit first. Registration is
+still by hand in `hermes-endpoints.json` — the in-Telegram `hz:` picker enumerates Hermes profiles only.
+
 **EVERY reaction the daemon sends comes from `REACTIONS`, one table typed `satisfies Record<string,
 ReactionTypeEmoji['emoji']>`.** Telegram takes only a fixed emoji set from a bot, `channel.react` casts into
 that union, and every call site swallows the rejection — so an emoji outside the set is a confirmation that
