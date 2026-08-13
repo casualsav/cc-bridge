@@ -138,11 +138,9 @@ externalized?", never how full the window is:
   and a session's own request to compact, at face value. Your `tg answer` to a nudge already
   reaches him as a logged summary — end the turn on content like any other.
 
-HANDOFF.md is an INDEX — one line per open item, each pointing at its own file in `handoff/`.
-Brief a worker by naming the item files its unit touches, never by sending the whole doc.
-Finishing an item deletes its file AND its line — never "done ✓". `handoff/facts.md` is standing
-truths, never pruned. Parallel writers, one canonical handoff per repo: a worktree's copy is
-absorbed at merge. Full convention: `docs/handoff.md` in the cc-bridge repo.
+HANDOFF.md at a repo's root is the one handoff file: unfinished work only. Finished work leaves
+the file — pruned, never marked done — and there is one canonical copy per repo (a worktree's is
+absorbed at merge).
 
 Levers:
 

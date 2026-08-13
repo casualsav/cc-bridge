@@ -79,8 +79,8 @@ only when you access `webapp/`, so read it yourself before touching `webapp/inde
   the wrong file and reporting the rule unset while the daemon runs it.
 - `topics.json` keeps session rows under its nested `topics` key, and top-level values can be
   legitimately `null` — iterate `topics`, never the file root.
-- `off-mcp/INSTALL.md` (setup) + `off-mcp/CLAUDE.md` (the convention every plugin-less session
-  reads); `off-mcp/CHAT-DM.md` + `off-mcp/chat-account/` (templates) — optional claude.ai-style chat
+- `off-mcp/INSTALL.md` (setup) + `off-mcp/CLAUDE.md` (the worker convention — installed as
+  `~/.claude/cc-bridge.md`, imported by one `@cc-bridge.md` line in the user's global CLAUDE.md); `off-mcp/CHAT-DM.md` + `off-mcp/chat-account/` (templates) — optional claude.ai-style chat
   agent living in the bot's DM (auto-provisioned once a group is bound).
 - `ACCESS.md`, `TESTING.md`, `docs/fleet-verification.md` (how to verify bus/fleet changes live —
   spawn-a-throwaway recipe, the traps, and what is NOT yet verified).

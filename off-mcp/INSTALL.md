@@ -566,15 +566,17 @@ re-stamps as a self-heal before the reply the daemon relays is written.
   install ours (write the `statusLine` entry + copy the script above), overriding theirs. **Only**
   leave an existing statusline untouched if it already shows **all** of those fields (the pin
   parses them from any reasonably-formatted line). When in doubt, install ours.
-- Append this repo's `off-mcp/CLAUDE.md` into `~/.claude/CLAUDE.md` so every plugin-less
-  session knows how to chat + use `tg`. **Wrap it in these exact marker comments** so `/update`
-  can keep it current automatically (the updater swaps the content between them; a marker-less
-  legacy block is migrated into markers on the first update):
+- Copy this repo's `off-mcp/CLAUDE.md` to `~/.claude/cc-bridge.md` — that file is wholly ours
+  and `/update` overwrites it. Then add this block to `~/.claude/CLAUDE.md` (create the file if
+  the user has none), so every plugin-less session imports the convention while the user's own
+  file stays clean and non-bridge sessions carry only the one import:
   ```
   <!-- BEGIN claude-tg (off-mcp convention — auto-synced by /update; edits inside are overwritten) -->
-  …contents of off-mcp/CLAUDE.md…
+  @cc-bridge.md
   <!-- END claude-tg -->
   ```
+  A pre-import install — the whole convention inline between those markers, or a marker-less
+  legacy block — is collapsed to this shape by the first `/update`.
 
 ## 3. Restart Claude Code (the one restart)
 **Ask the human to restart Claude Code.** On restart it downloads the plugin and the

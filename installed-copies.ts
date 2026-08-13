@@ -1,5 +1,6 @@
-// installed-copies.ts — the off-mcp convention block that lives OUTSIDE the plugin cache, in the
-// user's own `~/.claude/CLAUDE.md`, and therefore does not ship with a build.
+// installed-copies.ts — the off-mcp convention that lives OUTSIDE the plugin cache: the doc itself
+// in `~/.claude/cc-bridge.md` (wholly ours, overwritten on sync) plus one `@cc-bridge.md` import
+// line between markers in the user's own `~/.claude/CLAUDE.md`. Neither ships with a build.
 //
 // THE CLASS THIS EXISTS TO CLOSE. Everything a session reads at startup comes from files the plugin
 // cache does not own. `/update` refreshed them (update.ts's `syncInstalledCopies`); `bun run deploy`
@@ -22,43 +23,55 @@ export const CONV_BEGIN = '<!-- BEGIN claude-tg (off-mcp convention — auto-syn
 export const CONV_END = '<!-- END claude-tg -->'
 // First line of off-mcp/CLAUDE.md across its lifetimes, for installs predating the markers.
 export const CONV_HEADINGS = ['# Telegram bridge (no MCP)', '# Reachable over Telegram (no MCP)']
+// What lives between the markers since the convention moved into its own file: one import line.
+export const CONV_IMPORT = '@cc-bridge.md'
 
 /**
- * Rewrite the convention block in `<home>/.claude/CLAUDE.md` from `<srcDir>/off-mcp/CLAUDE.md`.
+ * Sync the convention from `<srcDir>/off-mcp/CLAUDE.md`: write the doc to
+ * `<home>/.claude/cc-bridge.md` and keep the marker block in `<home>/.claude/CLAUDE.md` down to
+ * the one `@cc-bridge.md` import line — a fat pre-import block (marker-wrapped, or the legacy
+ * heading through to the next top-level `#`) collapses to it.
  *
- * Conservative in the same three ways update.ts is, and for the same reasons: it never CREATES the
- * file (absent means the user opted out of the convention, not that it needs installing), it only
- * ever replaces content it can identify as its own (a marker pair, or the legacy heading through to
- * the next top-level `#`), and it preserves everything outside that span. Returns a note when it
- * wrote, `null` when there was nothing to do — a caller reports the note and never fails on `null`.
+ * Conservative in the same three ways update.ts is, and for the same reasons: it never CREATES
+ * `CLAUDE.md` (absent means the user opted out of the convention, not that it needs installing),
+ * it only ever replaces content it can identify as its own, and it preserves everything outside
+ * that span — `cc-bridge.md` is written only for an install that carries our block. Returns a
+ * note when it wrote, `null` when there was nothing to do — a caller reports the note and never
+ * fails on `null`.
  */
 export function syncConventionBlock(srcDir: string, home: string): string | null {
   try {
-    const template = readFileSync(join(srcDir, 'off-mcp', 'CLAUDE.md'), 'utf8').trim()
+    const template = readFileSync(join(srcDir, 'off-mcp', 'CLAUDE.md'), 'utf8').trim() + '\n'
     const dest = join(home, '.claude', 'CLAUDE.md')
     if (!existsSync(dest)) return null
-    const wrapped = `${CONV_BEGIN}\n${template}\n${CONV_END}`
     const cur = readFileSync(dest, 'utf8')
+    const wrapped = `${CONV_BEGIN}\n${CONV_IMPORT}\n${CONV_END}`
     // Match a marker block under ANY past project name (by its signature) and rewrite it to the
     // current pair, so renaming the project never doubles the block.
     const mk = cur.match(/<!-- BEGIN (\S+) \(off-mcp convention — auto-synced by \/update; edits inside are overwritten\) -->/)
     const begin = mk?.[0] ?? CONV_BEGIN
     const end = mk ? `<!-- END ${mk[1]} -->` : CONV_END
     const b = cur.indexOf(begin), e = cur.indexOf(end)
+    let next: string | null = null
     if (b !== -1 && e !== -1 && e > b) {
-      const next = cur.slice(0, b) + wrapped + cur.slice(e + end.length)
-      if (next === cur) return null
-      writeFileSync(dest, next)
-      return 'refreshed the off-mcp convention in ~/.claude/CLAUDE.md'
+      next = cur.slice(0, b) + wrapped + cur.slice(e + end.length)
+    } else {
+      const heading = CONV_HEADINGS.find(h => cur.includes(h))
+      const hi = heading ? cur.indexOf(heading) : -1
+      if (heading && hi !== -1) {
+        const after = cur.indexOf('\n# ', hi + heading.length)
+        const tail = after === -1 ? '' : cur.slice(after + 1)
+        next = cur.slice(0, hi) + wrapped + (tail ? '\n\n' + tail : '\n')
+      }
     }
-    // Legacy, marker-less: replace from our heading to the next top-level "# " (or EOF), migrating
-    // it into markers. Our block has only the one top-level heading, so this span is exact.
-    const heading = CONV_HEADINGS.find(h => cur.includes(h))
-    if (!heading) return null
-    const hi = cur.indexOf(heading)
-    const after = cur.indexOf('\n# ', hi + heading.length)
-    const tail = after === -1 ? '' : cur.slice(after + 1)
-    writeFileSync(dest, cur.slice(0, hi) + wrapped + (tail ? '\n\n' + tail : '\n'))
-    return 'migrated + refreshed the off-mcp convention in ~/.claude/CLAUDE.md'
+    if (next == null) return null   // no block of ours anywhere — the user opted out
+    const doc = join(home, '.claude', 'cc-bridge.md')
+    const docStale = !existsSync(doc) || readFileSync(doc, 'utf8') !== template
+    if (docStale) writeFileSync(doc, template)
+    if (next !== cur) {
+      writeFileSync(dest, next)
+      return 'migrated ~/.claude/CLAUDE.md to the @cc-bridge.md import'
+    }
+    return docStale ? 'refreshed the off-mcp convention in ~/.claude/cc-bridge.md' : null
   } catch { return null }
 }

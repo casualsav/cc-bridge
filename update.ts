@@ -157,11 +157,13 @@ const logSize = () => { try { return statSync(LOG_FILE).size } catch { return 0 
 const shortVer = (sha: string) => sha.slice(0, 7)
 
 // ---- Re-sync installed COPIES that live outside the plugin cache ----
-// The daemon code updates with the cache, but two files are copied into ~/.claude at install
-// time and otherwise go stale across versions: the off-mcp convention block in CLAUDE.md and
-// the statusline script. Refresh both from the just-updated clone so convention/statusline
-// changes ship with /update. Conservative: only touches files that already exist / already
-// carry our block, never creates where the user opted out, never clobbers a custom statusline.
+// The daemon code updates with the cache, but files copied into ~/.claude at install time
+// otherwise go stale across versions: the off-mcp convention (its own ~/.claude/cc-bridge.md,
+// plus one @cc-bridge.md import line between markers in CLAUDE.md) and the statusline script.
+// Refresh both from the just-updated clone so convention/statusline changes ship with /update.
+// Conservative: only touches files that already exist / already carry our block, never creates
+// where the user opted out, never clobbers a custom statusline. A fat pre-import block
+// (marker-wrapped or legacy marker-less) collapses to the import line.
 const GLOBAL_MD = join(HOME, '.claude', 'CLAUDE.md')
 const STATUSLINE_DEST = join(HOME, '.claude', 'statusline-command.sh')
 const STATUSLINE_SIG = 'Claude Code status line'   // header line unique to our script
@@ -169,24 +171,24 @@ const CONV_BEGIN = '<!-- BEGIN claude-tg (off-mcp convention — auto-synced by 
 const CONV_END = '<!-- END claude-tg -->'
 // First line of off-mcp/CLAUDE.md across its lifetimes (legacy, marker-less installs).
 const CONV_HEADINGS = ['# Telegram bridge (no MCP)', '# Reachable over Telegram (no MCP)']
+const CONV_IMPORT = '@cc-bridge.md'
 
 function syncInstalledCopies(): string[] {
   const notes: string[] = []
-  // 1. Convention block in ~/.claude/CLAUDE.md.
+  // 1. The convention: ~/.claude/cc-bridge.md + the import line in ~/.claude/CLAUDE.md.
   try {
-    const template = readFileSync(join(MP, 'off-mcp', 'CLAUDE.md'), 'utf8').trim()
-    const wrapped = `${CONV_BEGIN}\n${template}\n${CONV_END}`
+    const template = readFileSync(join(MP, 'off-mcp', 'CLAUDE.md'), 'utf8').trim() + '\n'
     if (existsSync(GLOBAL_MD)) {
       const cur = readFileSync(GLOBAL_MD, 'utf8')
+      const wrapped = `${CONV_BEGIN}\n${CONV_IMPORT}\n${CONV_END}`
       // Match a marker block under ANY past name (by its signature) and rewrite it to the
       // current pair, so renaming the project never doubles the block.
       const mk = cur.match(/<!-- BEGIN (\S+) \(off-mcp convention — auto-synced by \/update; edits inside are overwritten\) -->/)
       const begin = mk?.[0] ?? CONV_BEGIN, end = mk ? `<!-- END ${mk[1]} -->` : CONV_END
       const b = cur.indexOf(begin), e = cur.indexOf(end)
+      let next: string | null = null
       if (b !== -1 && e !== -1 && e > b) {
-        // Already marker-wrapped → swap the block in place.
-        const next = cur.slice(0, b) + wrapped + cur.slice(e + end.length)
-        if (next !== cur) { writeFileSync(GLOBAL_MD, next); notes.push('refreshed the off-mcp convention in CLAUDE.md') }
+        next = cur.slice(0, b) + wrapped + cur.slice(e + end.length)
       } else {
         // Legacy, marker-less: replace from our heading to the next top-level "# " (or EOF),
         // migrating it into markers. Our block has only the one top-level heading, so this is
@@ -196,9 +198,15 @@ function syncInstalledCopies(): string[] {
         if (heading && hi !== -1) {
           const after = cur.indexOf('\n# ', hi + heading.length)
           const tail = after === -1 ? '' : cur.slice(after + 1)
-          writeFileSync(GLOBAL_MD, cur.slice(0, hi) + wrapped + (tail ? '\n\n' + tail : '\n'))
-          notes.push('migrated + refreshed the off-mcp convention in CLAUDE.md')
+          next = cur.slice(0, hi) + wrapped + (tail ? '\n\n' + tail : '\n')
         }
+      }
+      if (next != null) {   // a block of ours exists — an absent one means the user opted out
+        const doc = join(HOME, '.claude', 'cc-bridge.md')
+        const docStale = !existsSync(doc) || readFileSync(doc, 'utf8') !== template
+        if (docStale) writeFileSync(doc, template)
+        if (next !== cur) { writeFileSync(GLOBAL_MD, next); notes.push('migrated CLAUDE.md to the @cc-bridge.md import') }
+        else if (docStale) notes.push('refreshed the off-mcp convention in cc-bridge.md')
       }
     }
   } catch {}
