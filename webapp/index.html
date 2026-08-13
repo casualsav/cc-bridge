@@ -1610,8 +1610,9 @@
        #viewer carried no z-index at all and the pill therefore painted OVER it; #viewer's own rule
        carries the finding. Also under the sheets (9/10) and the toast (11). An error outranks a
        launcher: .err.float spans the width at the bottom and covers this while it is up, on purpose.
-     - The radius is half the HEIGHT, never 50% — a percentage radius on a non-square box draws an
-       ellipse whose flanks disagree with the ends.
+     - It is a CIRCLE carrying nothing but the + (the owner, 2026-08-13), at the height the labelled
+       pill had. The radius is still half the HEIGHT rather than 50%: the two agree while the box is
+       square, and the derivation is what keeps a later width change from drawing an ellipse.
      - No drop shadow and no entrance motion. This file separates surfaces by fill and inset rings,
        and an opaque --btn over --bg/--sec is a hue jump rather than a value one, so it needs no lift;
        and since the list repaints every 4s, any reveal or stagger would replay every 4 seconds.
@@ -1619,25 +1620,22 @@
      at full scroll that card's floor clears the pill's top by --sp-4. */
   .newfab { display: none; position: fixed; z-index: 3; right: var(--sp-4);
     bottom: calc(var(--sp-4) + env(safe-area-inset-bottom));
-    height: var(--fab-h); border-radius: calc(var(--fab-h) / 2); padding: 0 20px; border: none;
-    align-items: center; gap: 7px; background: var(--btn); color: var(--btn-text);
-    font-family: inherit; font-size: var(--t-body); font-weight: var(--w-semi); cursor: pointer; }
+    height: var(--fab-h); width: var(--fab-h); border-radius: calc(var(--fab-h) / 2); padding: 0; border: none;
+    align-items: center; justify-content: center; background: var(--btn); color: var(--btn-text);
+    cursor: pointer; }
   .newfab.show { display: flex; }
   .newfab:active { filter: brightness(1.1); }
   /* Even against an even --fab-h: the glyph is centred by halved flex free space, and an odd
      difference puts the SVG's paint origin half a pixel down-right (see .sendbtn). */
   .newfab svg { width: 20px; height: 20px; display: block; }
   /* SCHEDULED, the second global, on the same rail at the OPPOSITE CORNER — the command center has no
-     header row any more, so this rail and the card list are the only surfaces there are. Square (so the
-     radius rule above draws a circle by construction), ICON-ONLY and unfilled: two filled pills side by
-     side stop either from being the primary action, and New session keeps the blue and the word.
-     BOTTOM-LEFT, and not "one gutter left of the blue pill" as the design note said: that pill is
-     content-sized (its label is a word), so offsetting from it means arithmetic against a width nothing
-     writes down — and a label change would silently stack them. Two corners need no arithmetic, and the
-     easiest corner for the writing thumb stays the primary action's. Nothing about the list's bottom
-     padding changes: same rail, same height. */
-  .newfab.quiet { width: var(--fab-h); padding: 0; justify-content: center;
-    right: auto; left: var(--sp-4); background: var(--sec); color: var(--text); }
+     header row any more, so this rail and the card list are the only surfaces there are. UNFILLED, and
+     that is now the ONLY thing separating the two: since the owner made New session a bare + (2026-08-13)
+     both are the same circle, so the blue is what says which one is the primary action. BOTTOM-LEFT,
+     and not "one gutter left of the blue circle": two corners need no arithmetic, and the easiest
+     corner for the writing thumb stays the primary action's. Nothing about the list's bottom padding
+     changes: same rail, same height. */
+  .newfab.quiet { right: auto; left: var(--sp-4); background: var(--sec); color: var(--text); }
   /* Scroll relief, and the reason the pill can float at all: the pill's own footprint plus a gutter
      either side of it, so the last card can always be scrolled clear of it. */
   #tab-sessions { padding-bottom: calc(var(--fab-h) + 2 * var(--sp-4) + env(safe-area-inset-bottom)); }
@@ -1843,7 +1841,7 @@
 <div class="err" id="err"></div>
 
 <div class="tab show panel" id="tab-sessions"><div class="notice">Loading sessions…</div></div>
-<button class="newfab" id="newfab"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>New session</button>
+<button class="newfab" id="newfab" title="New session" aria-label="New session"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
 <!-- Scheduled's own door, and it is STATIC MARKUP beside the other pill for the reason #newfab is: the
      card list is wiped and rebuilt by a 4s poll, so a control created inside renderSessions() loses the
      tap it was under. showTab() owns both pills' visibility. -->

@@ -171,25 +171,29 @@ near(head.gap, 12, 0.5, "the list starts at the panel's own padding");
 const fab = await p.evaluate(() => {
   const f = document.getElementById("newfab"); if (!f) return null;
   const cs = getComputedStyle(f), r = f.getBoundingClientRect();
-  return { pos: cs.position, z: cs.zIndex, h: r.height, radius: parseFloat(cs.borderTopLeftRadius),
-    fill: cs.backgroundColor, font: parseFloat(cs.fontSize),
+  return { pos: cs.position, z: cs.zIndex, h: r.height, w: r.width, radius: parseFloat(cs.borderTopLeftRadius),
+    fill: cs.backgroundColor,
     glyph: f.querySelector("svg") ? f.querySelector("svg").getBoundingClientRect().width : 0,
     right: innerWidth - r.right, bottom: innerHeight - r.bottom, shadow: cs.boxShadow,
-    label: f.textContent.trim(), svg: !!f.querySelector("svg") };
+    label: f.textContent.trim(), svg: !!f.querySelector("svg"), aria: f.getAttribute("aria-label") };
 });
 // Every read below is null-safe on purpose: the pre-change page has no pill at all, and a control run
 // has to print a readable column of failures rather than die on the first one.
 check(!!fab, "the new-session pill exists");
 check(fab?.pos === "fixed", `it is fixed to the viewport (${fab?.pos})`);
 near(fab?.h ?? 0, 44, 0.5, "pill height — the reference's 38.5 up a tenth on the owner's ask");
-near(fab?.radius ?? 0, (fab?.h ?? 0) / 2 || -1, 0.6, "its radius is half its height — a stadium, not an ellipse");
+// The owner, 2026-08-13: "just a circle with a plus in the middle. Same height." So the height is
+// unchanged and the WIDTH is what moved — a square box the half-height radius then rounds to a circle.
+near(fab?.w ?? 0, fab?.h ?? -1, 0.5, "it is SQUARE — a circle, not a stadium");
+near(fab?.radius ?? 0, (fab?.h ?? 0) / 2 || -1, 0.6, "its radius is half its height — a circle, not an ellipse");
 near(fab?.right ?? -1, 16, 0.5, "anchored --sp-4 from the right edge (reference: 14.5)");
 near(fab?.bottom ?? -1, 16, 0.5, "and --sp-4 from the bottom (reference: 14)");
 check(fab?.shadow === "none", `no drop shadow (${fab?.shadow})`);
-check(fab?.label === "New session", `it reads "New session" (${JSON.stringify(fab?.label)})`);
+check(fab?.label === "", `it carries NO label — the + is the whole button (${JSON.stringify(fab?.label)})`);
 check(!!fab?.svg, "the + is a stroke icon, not an emoji");
-near(fab?.font ?? 0, 16, 0.1, "its label is --t-body, two points up from the shipped --t-sub");
-near(fab?.glyph ?? 0, 20, 0.5, "and the + grows with it, staying EVEN against an even height");
+// The word left, so the name has to survive somewhere a screen reader can reach it.
+check(fab?.aria === "New session", `it is still named for assistive tech (${JSON.stringify(fab?.aria)})`);
+near(fab?.glyph ?? 0, 20, 0.5, "the + stays EVEN against an even height (see .sendbtn's half-pixel snap)");
 // The blue the app already uses. Compared through a rendered probe rather than by string, since --btn
 // is a var() chain that resolves differently once Telegram injects a theme.
 const btnMatches = await p.evaluate(() => {
