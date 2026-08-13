@@ -529,19 +529,37 @@ function isThinkingOnlyNudge(e: Entry): boolean {
 // can never consume the route, however long his message waits in the CLI's queue. Empty when the scan
 // began mid-file with no anchor behind it — an unidentifiable turn matches nothing, which is the safe
 // direction for a delivery.
-type FinalReply = { uuid: string; text: string; busAnchored: boolean; anchorText: string }
+// `suppressed` marks a reply the relay must NOT send, carried back instead of skipped so the delivery
+// paths can say so once and move their cursor past it. Only present when the caller opts in — see
+// `finalRepliesAfter`'s `includeSuppressed`.
+type FinalReply = { uuid: string; text: string; busAnchored: boolean; anchorText: string; suppressed?: SuppressReason }
+// Which rule removed it, because the two have very different implications for a reader who thinks a
+// message went missing: `harness-noise` is the content filter (isHarnessNoise — the CLI's re-prompt,
+// its echo, an enclosed one-liner), `forced-silent-turn` is the anchor rule (a bus-woken turn the CLI
+// re-prompted, whose forced text is by construction not a reply).
+export type SuppressReason = 'harness-noise' | 'forced-silent-turn'
 
-export function finalRepliesAfter(file: string, afterUuid: string): FinalReply[] {
+// `includeSuppressed` carries the dropped replies back FLAGGED instead of skipping them, for the four
+// delivery paths that want to log a drop. It is opt-in so every other reader — the prompt relay, the
+// Discord/Slack copies, the anchor probes — is byte-identical to before: a caller that forgets to
+// filter must not start sending filler, so the default stays "you cannot see them".
+//
+// THE READER STILL DOES NOT LOG. It is called on every relay poll tick and again by cursor priming, so
+// a log line here would re-emit for the same suppressed reply every few seconds — spam, not evidence
+// (handoff/relay-suppression-log-line.md, and the owner and chat lane both ruled on it). What makes
+// the logging once-per-reply is the CURSOR the delivery loops already advance, exactly as they do for
+// a suppressed banner.
+export function finalRepliesAfter(file: string, afterUuid: string, opts: { includeSuppressed?: boolean } = {}): FinalReply[] {
   const entries = readEntries(file)
   const at = afterUuid ? entries.findIndex(e => e.uuid === afterUuid) : -1
   // Lost cursor (compaction/rotation): scan from the top and keep only the last turn's conclusion,
   // so a lost cursor never dumps the whole backlog. It runs the SAME scan rather than reading the
   // tail its own way — a second reader of this transcript is a second place the nudge can escape.
-  if (afterUuid && at < 0) return scanFinalReplies(entries, -1).slice(-1)
-  return scanFinalReplies(entries, at)
+  if (afterUuid && at < 0) return scanFinalReplies(entries, -1, opts).slice(-1)
+  return scanFinalReplies(entries, at, opts)
 }
 
-function scanFinalReplies(entries: Entry[], at: number): FinalReply[] {
+function scanFinalReplies(entries: Entry[], at: number, opts: { includeSuppressed?: boolean } = {}): FinalReply[] {
   const out: FinalReply[] = []
   let pending: FinalReply | null = null
   const flush = () => { if (pending) { out.push(pending); pending = null } }
@@ -558,8 +576,24 @@ function scanFinalReplies(entries: Entry[], at: number): FinalReply[] {
     if (isThinkingOnlyNudge(e)) { nudged = true; continue }
     if (isMainAssistantText(e)) {
       const text = lastTextOf(e.message?.content).trim()
-      if (isHarnessNoise(text)) continue
-      if (anchorIsBus && nudged) continue  // the CLI forced this out of a turn that was told to stay silent
+      // A suppressed reply is FLUSHED as its own row rather than becoming `pending`: it is not the
+      // turn's conclusion for any purpose — it must never overwrite a real reply pending from earlier
+      // in the same turn, and a later real reply must still replace nothing.
+      const reason: SuppressReason | null = isHarnessNoise(text) ? 'harness-noise'
+        : anchorIsBus && nudged ? 'forced-silent-turn'   // the CLI forced this out of a turn told to stay silent
+        : null
+      if (reason) {
+        // FLUSH FIRST, so the array stays in FILE order. `pending` is only emitted at a turn boundary,
+        // so pushing this row straight out would place it BEFORE a real reply that preceded it in the
+        // file — and the delivery loops advance their cursor per row, so they would end on the earlier
+        // uuid and re-derive this suppressed reply on every tick, logging it forever. Once-per-reply is
+        // the cursor's job, and the cursor can only do it if it never moves backwards.
+        if (opts.includeSuppressed) {
+          flush()
+          out.push({ uuid: e.uuid ?? '', text, busAnchored: anchorIsBus, anchorText, suppressed: reason })
+        }
+        continue
+      }
       pending = { uuid: e.uuid ?? '', text: legibleApiError(text), busAnchored: anchorIsBus, anchorText }
     }
   }

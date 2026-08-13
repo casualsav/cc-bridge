@@ -10,6 +10,7 @@
 import { basename } from 'node:path'
 import { statSync } from 'node:fs'
 import * as cc from './transcript.ts'
+import type { SuppressReason } from './transcript.ts'
 import * as cx from './codex-transcript.ts'
 import type { AgentKind } from './agent.ts'
 
@@ -38,8 +39,14 @@ export const latestFinalReply = (file: string) => (isCodex(file) ? cx.latestFina
 // typed. So it answers EMPTY, which matches nothing. The consequence is bounded and named: the owner's
 // direct `@name` message to a CODEX session is delivered and answered normally, but its reply reaches
 // only that session's own surface, never the card back to his DM (owner-reply.ts).
-export const finalRepliesAfter = (file: string, afterUuid: string): { uuid: string; text: string; busAnchored: boolean; anchorText: string }[] =>
-  (isCodex(file) ? cx.finalRepliesAfter(file, afterUuid).map(r => ({ ...r, busAnchored: false, anchorText: '' })) : cc.finalRepliesAfter(file, afterUuid))
+// `includeSuppressed` passes straight through to the Claude reader; a Codex rollout never carries a
+// suppressed reply, because the class exists only where Claude Code's no-visible-output re-prompt does
+// — a different harness with no such mechanism, stated here rather than left to be inferred from an
+// always-empty field.
+export const finalRepliesAfter = (
+  file: string, afterUuid: string, opts: { includeSuppressed?: boolean } = {},
+): { uuid: string; text: string; busAnchored: boolean; anchorText: string; suppressed?: SuppressReason }[] =>
+  (isCodex(file) ? cx.finalRepliesAfter(file, afterUuid).map(r => ({ ...r, busAnchored: false, anchorText: '' })) : cc.finalRepliesAfter(file, afterUuid, opts))
 export const turnInProgress = (file: string) => (isCodex(file) ? cx.turnInProgress(file) : cc.turnInProgress(file))
 // Why turnInProgress says what it says (the typing instrumentation's diagnosis). A Codex rollout has
 // no assistant stop_reason to read, so it answers nulls — honestly "cannot classify" rather than a

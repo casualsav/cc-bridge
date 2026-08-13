@@ -2407,6 +2407,22 @@ async function paneTurnAnchorIsBus(pane: string | null): Promise<boolean> {
 // messages filtered" beyond the reply-less filler class, which is caught BY CONTENT in
 // transcript.ts's `isHarnessNoise` — the harness's own re-prompt echo and the placeholder responses
 // emitted only to satisfy it. An anchor cannot tell a real reply from filler, so it must not try.
+// ONE FORMAT, FOUR PATHS. A suppressed reply is dropped by transcript.ts and, until v0.5.106, left no
+// trace at all: proving a drop meant finding the transcript by hand and re-running the reader against
+// it, which is useless for the report this will actually generate — "the bridge ate my reply". The
+// preview is what makes that answerable in one grep, and it is the safety valve for the parenthesised
+// rule shipped in v0.5.105, whose structural risk is real even at a measured-zero false-positive rate.
+//
+// ONCE PER REPLY comes from the CURSOR, not from a set of its own: each caller advances past the
+// suppressed uuid exactly as it already does for a suppressed banner, so the next tick never re-derives
+// it. That is why this takes the path name — the shape is shared, the origin is not. (Across a daemon
+// restart a still-uncursored reply can log a second time; that is a new process re-deriving it, and one
+// line per process beats a persisted set for a message nobody delivered.)
+function logSuppressedReply(where: string, file: string, r: { uuid: string; text: string; suppressed?: string; busAnchored: boolean }): void {
+  const preview = r.text.replace(/\s+/g, ' ').trim().slice(0, 120)
+  process.stderr.write(`daemon: ${where} SUPPRESSED ${r.text.length} chars (uuid ${r.uuid.slice(0, 8)}, ${r.suppressed}, ${r.busAnchored ? 'bus' : 'human'}-anchored) — not relayed: ${JSON.stringify(preview)} [${basename(file)}]\n`)
+}
+
 async function deliverRelayReply(paneId: string, target: { chat: string; thread?: number }, text: string, silent = false): Promise<void> {
   const laneSid = await sessionForPane(paneId).catch(() => null)
   // Multi-session DM attribution: a reply landing in a DM (no thread) from a session that is NOT
@@ -2525,8 +2541,16 @@ async function relayLoopTick(gen: number): Promise<void> {
         // Suppress Claude's own usage-limit banner echo (the ⛔ handler sends a richer one), but
         // only a short banner-shaped block — a real reply that merely mentions a limit isn't eaten.
         const isBanner = (t: string) => t.length < 200 && /\b(hit your|used \d+% of your) [\w-]+ limit\b/i.test(t)
-        for (const r of finalRepliesAfter(file, lastRelayedUuid)) {
+        for (const r of finalRepliesAfter(file, lastRelayedUuid, { includeSuppressed: true })) {
           if (!r.uuid || r.uuid === lastRelayedUuid) continue
+          // Advance past it and say so ONCE — the same shape the banner branch below uses, which is
+          // what makes "once" the cursor's job rather than a second piece of per-reply state.
+          if (r.suppressed) {
+            lastRelayedUuid = r.uuid
+            lastRelayedByFile.set(file, r.uuid)
+            logSuppressedReply('relay', file, r)
+            continue
+          }
           if (!isBanner(r.text)) {
             // Resolve delivery targets BEFORE advancing the cursor — a rejection here must not skip
             // past an undelivered reply. On failure leave the cursor put and retry the reply next tick.
@@ -2713,9 +2737,10 @@ async function auxRelayTick(): Promise<void> {
         auxConcludeTicks.set(file, ticks)
         if (ticks < RELAY_CONCLUDE_TICKS) return
         const cursor = lastRelayedByFile.get(file) ?? ''
-        for (const r of finalRepliesAfter(file, cursor)) {
+        for (const r of finalRepliesAfter(file, cursor, { includeSuppressed: true })) {
           if (!r.uuid || r.uuid === (lastRelayedByFile.get(file) ?? '')) continue
           lastRelayedByFile.set(file, r.uuid)     // advance before the await so a fast tick can't double-send
+          if (r.suppressed) { logSuppressedReply('aux relay', file, r); continue }
           clearThinkingPending(pane)   // a real reply relayed → drop the thinking-pending crutch so the card caps/deletes
           // Suppress Claude's own usage-limit banner echo, like the focused loop: a limited session
           // writes a synthetic "You've hit your session limit · resets …" assistant message for EVERY
@@ -6519,10 +6544,11 @@ async function flushPendingText(): Promise<void> {
   const file = await transcriptForPane(focus.activePaneId, cwd)
   if (!file) return
   const targets = await outboundTargetsFor(focus.activePaneId)
-  for (const r of finalRepliesAfter(file, lastRelayedUuid)) {
+  for (const r of finalRepliesAfter(file, lastRelayedUuid, { includeSuppressed: true })) {
     if (!r.uuid || r.uuid === lastRelayedUuid) continue
     lastRelayedUuid = r.uuid
     lastRelayedByFile.set(file, r.uuid)
+    if (r.suppressed) { logSuppressedReply('pre-flush', file, r); continue }
     if (/\b(hit your|used \d+% of your) [\w-]+ limit\b/i.test(r.text)) continue   // daemon sends its own ⛔
     for (const t of targets) {
       if (!claimRelayDelivery(file, r.uuid, t)) { process.stderr.write(`daemon: pre-flush skipped duplicate (uuid ${r.uuid.slice(0, 8)}) to ${t.chat}${t.thread ? `#${t.thread}` : ''} — already delivered\n`); continue }
@@ -6562,9 +6588,10 @@ async function flushPendingTextFor(pane: string): Promise<boolean> {
   if (!file || !lastRelayedByFile.has(file)) return false   // unprimed cursor → don't dump backlog
   const targets = await outboundTargetsFor(pane)
   let sent = false
-  for (const r of finalRepliesAfter(file, lastRelayedByFile.get(file) ?? '')) {
+  for (const r of finalRepliesAfter(file, lastRelayedByFile.get(file) ?? '', { includeSuppressed: true })) {
     if (!r.uuid || r.uuid === (lastRelayedByFile.get(file) ?? '')) continue
     lastRelayedByFile.set(file, r.uuid)   // advance before the await so the conclude-relay can't double-send
+    if (r.suppressed) { logSuppressedReply('aux pre-flush', file, r); continue }
     if (/\b(hit your|used \d+% of your) [\w-]+ limit\b/i.test(r.text)) continue   // daemon sends its own ⛔
     for (const t of targets) {
       if (!claimRelayDelivery(file, r.uuid, t)) { process.stderr.write(`daemon: aux pre-flush skipped duplicate (uuid ${r.uuid.slice(0, 8)}) to ${t.chat}${t.thread ? `#${t.thread}` : ''} — already delivered\n`); continue }
