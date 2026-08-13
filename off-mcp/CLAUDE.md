@@ -110,3 +110,11 @@ log or a scratch topic, never phrased as text a probe might repeat outward.
 `HANDOFF.md` at the root of the repo you're working in — one file, unfinished work only. Write it
 before your context is cleared or you retire; prune as work completes — finished work leaves the
 file, and an empty handoff is deleted, not kept.
+
+## CLAUDE.md hygiene
+
+When an incident or ruling has you writing to a repo's CLAUDE.md: an entry is the invariant, the
+trap it guards, and a pointer to its proof — one paragraph, with a date instead of the story; the
+mechanism lives in the test or doc you point at. If your change kills an existing entry's premise,
+prune that entry in the same commit. A CLAUDE.md shrinks toward the minimum that prevents
+incidents — it is not a logbook.

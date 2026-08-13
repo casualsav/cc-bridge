@@ -22,9 +22,23 @@ The repo is a 3-channel marketplace (Telegram/Slack/Discord — `.claude-plugin/
 
 ## What belongs in this file
 
-A paragraph earns its place only if a future session would break something without it: the
-invariant and the trap it guards, one line on the incident or ruling where one exists. Nothing
-the code, a test, or a measure script already records.
+This file is loaded into every session that works here — every paragraph costs every session
+forever, so it is pruned like a handoff: toward the minimum that still prevents incidents, never
+grown as a record.
+
+- **An entry is the invariant, the trap it guards, and a pointer to its proof — one paragraph.**
+  The mechanism lives in the test, script, or `docs/` file the pointer names, never here. An
+  incident or ruling earns a date and one line, not its story. Nothing to point at is usually
+  the finding: write the check, then the entry.
+- **Not here:** anything the code, a test, or a measure script already records; how a fix works
+  (the diff says that); correction history; a second entry on a rule already stated — sharpen
+  the existing one instead of adding a sibling.
+- **The change that kills an entry's premise prunes the entry in the same commit** — removing
+  the mechanism, adding the enforcing test, retiring the workflow. That is "remove what your
+  change orphaned", applied here.
+- **A stale entry from an older change** may be deleted only with proof its trap can no longer
+  fire (the symbol is gone, the test now enforces it) — deletion with proof is not a drive-by.
+  Merely doubting it, flag it instead.
 
 **Mini-app invariants live in [`webapp/CLAUDE.md`](webapp/CLAUDE.md)** — read it before touching
 `webapp/index.html`, `scripts/webapp-measure/`, or the `webapp*` endpoints in `daemon.ts` / the
