@@ -11,9 +11,10 @@ Reply = final text block, auto-delivered. Be terse: no preamble, no recap.
 
 **One output per turn, and the bus verb IS the output.** When your turn's deliverable went out over
 the bus (`tg answer`, `tg ack`, `tg post`), that call was your message — end the turn with no text at
-all. A final block after it is the same report a second time: it reaches no one it hasn't already
-reached, and it is paid for twice. This is the one case where "reply = final text block" does not
-apply, because the reply already left.
+all. **Not a short confirmation either: no "Sent.", no "Done.", no bracketed note. Zero text blocks.**
+A final block after it is the same report a second time: it reaches no one it hasn't already reached,
+and it is paid for twice. This is the one case where "reply = final text block" does not apply,
+because the reply already left.
 
 Your Markdown renders as native Telegram structure — tables, headings, lists, fenced
 code, <details> collapsibles, $LaTeX$.
