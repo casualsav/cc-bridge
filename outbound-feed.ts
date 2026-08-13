@@ -128,3 +128,39 @@ export function mergeOutbound(items: FeedRow[], rows: OutboundRow[], cap: number
   // happened in (the command ran, then the daemon wrote this row).
   return [...items, ...mine].sort((a, b) => a.ts - b.ts || Number(a.via != null) - Number(b.via != null))
 }
+
+// ---- one output per turn ------------------------------------------------------------------------
+//
+// THE OWNER'S RULE, 2026-08-13: "the final message and the message over the bus are the same thing.
+// We don't need to double pay output messages for no benefit" — and, on the surface it is read from:
+// "when I open the mini app, I should see the message that was sent over the bus. Not the message and
+// a recap of the message."
+//
+// The shape he hit: @weather answered ask 225 over the bus (4482 chars, 2964 output tokens) and then
+// wrote its turn's final text block recapping the same work (1989 chars, 744 more tokens) — a 25%
+// surcharge on a message that was delivered to nobody, and two rows in his drill-in for one turn.
+//
+// So a turn's prose conclusion is hidden from the FEED when both hold:
+//   · the turn was BUS-anchored — its deliverable was owed over the bus, so prose is a recap by
+//     construction (a turn the owner started is untouched: that prose is his answer), and
+//   · the session actually SENT something over the bus in that turn — the row he should see exists.
+//
+// That second term is what makes this not v0.5.33, whose casualty was a lane relaying a worker's
+// answer to the owner as prose on a bus-woken turn with NO outbound row of its own. It would not be
+// hidden here. And this is display-only: nothing that would be DELIVERED is dropped, and the
+// transcript keeps every word.
+export function recapUuids(
+  conclusions: readonly { uuid: string; busAnchored: boolean }[],
+  tsByUuid: ReadonlyMap<string, number>,
+  outbound: readonly OutboundRow[],
+): Set<string> {
+  const hidden = new Set<string>()
+  let prevTs = 0
+  for (const c of conclusions) {
+    const ts = tsByUuid.get(c.uuid) ?? 0
+    if (!ts) continue                     // older than the rendered window — nothing to hide
+    if (c.busAnchored && outbound.some(o => o.ts > prevTs && o.ts <= ts)) hidden.add(c.uuid)
+    prevTs = ts
+  }
+  return hidden
+}

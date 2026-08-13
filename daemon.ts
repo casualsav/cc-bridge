@@ -54,7 +54,7 @@ import { modelSwitchEvidence, findSessionFile, resolveTranscript, resolveAgentTr
 // the Stop hook, and a Stop hook is a Claude Code feature — a Codex pane runs none, so there is no
 // rollout for a dispatcher to read.
 import { lastTurnApiError, turnAnchorIsBus, transcriptStartedAt, CONVO_CAP } from './transcript.ts'
-import { initOutboundFeed, recordOutbound, outboundFor, outboundText, mergeOutbound } from './outbound-feed.ts'
+import { initOutboundFeed, recordOutbound, outboundFor, outboundText, mergeOutbound, recapUuids } from './outbound-feed.ts'
 import {
   AGENT_PANE_OPT, agentExitKeys, agentInterruptKeys, agentLabel, agentResetCommand, agentSubmitKeys,
   CODEX_ENABLED, codexLaunchCommand, normalizeAgent, shellQuote, type AgentKind,
@@ -21779,7 +21779,25 @@ async function webappSessionFeed(sid: string): Promise<WebappSessionFeed | null>
   // argument (`tg answer 964 "…"`), so the transcript holds nothing but the session's own "Answered."
   // — which is what the owner's drill-in showed him for a 3,000-word explanation on 2026-08-10. The
   // rule he set: the mini app shows everything a session says, wherever it was addressed.
-  const items: WebappSessionFeed['items'] = mergeOutbound(recentConversation(file, 14).map(c => ({
+  // ONE OUTPUT PER TURN. A bus-anchored turn that already sent its report over the bus does not also
+  // get its prose recap rendered here — he should see the message that was sent, not the message and
+  // a recap of it (his rule, 2026-08-13; recapUuids carries the incident and the v0.5.33 guard).
+  // Display-only: nothing delivered is affected, and the transcript keeps every word.
+  const convo = recentConversation(file, 14)
+  // A Codex rollout's fallback item carries no uuid — narrowed rather than asserted, because that
+  // branch is a different reader with a different shape and this rule simply does not apply to it.
+  // Read through a loose view for the uuid/ts pair only: `recentConversation` is a union of two
+  // reader shapes (a Codex rollout item has no uuid), and narrowing it here would rewrite the mapping
+  // below for no gain. The filtered array is handed back at its original type, and an empty rule set
+  // passes the array through untouched — the common case costs nothing.
+  const withUuid = convo as ReadonlyArray<{ uuid?: string; ts: number }>
+  const recaps = recapUuids(
+    finalRepliesAfter(file, ''),
+    new Map(withUuid.flatMap(c => (c.uuid ? [[c.uuid, c.ts] as [string, number]] : []))),
+    outboundFor(sid),
+  )
+  const visible = (recaps.size ? withUuid.filter(c => !(c.uuid && recaps.has(c.uuid))) : convo) as typeof convo
+  const items: WebappSessionFeed['items'] = mergeOutbound(visible.map(c => ({
     role: c.role, text: c.text, ts: c.ts,
     ...(c.img ? { img: c.img } : {}), ...(c.imgs ? { imgs: c.imgs } : {}), ...(c.att ? { att: c.att } : {}), ...(c.cmd ? { cmd: true } : {}),
     ...(c.name ? { name: c.name } : {}), ...(c.args ? { args: c.args } : {}),

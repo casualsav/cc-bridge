@@ -77,7 +77,11 @@ test('ONE FORMAT, FOUR PATHS: every delivery path logs through the one helper', 
   // `lastRelayedByFile.get(file) ?? ''` as its cursor, whose own parenthesis defeats any `[^)]*`
   // pattern — the first version of this test read 3 and blamed the code.
   expect((daemon.match(/includeSuppressed: true/g) ?? []).length).toBe(4)
-  expect((daemon.match(/finalRepliesAfter\(/g) ?? []).length).toBe(5)   // the four + paneTurnIsBusAnchored
+  // Six readers, and the count is pinned so a NEW one has to justify itself here rather than appear:
+  // the four delivery paths, `paneTurnIsBusAnchored` (a classifier, sends nothing), and the drill-in's
+  // recap check (display-only — it reads conclusions to hide a duplicate row, and delivers nothing).
+  // A seventh that IS a delivery path must log through the helper above.
+  expect((daemon.match(/finalRepliesAfter\(/g) ?? []).length).toBe(6)
   const logs = daemon.match(/logSuppressedReply\(/g) ?? []
   expect(logs.length).toBe(5)            // one definition + one call per path
   // Each opt-in must be followed by a branch that logs and skips — a path that opts in and then
