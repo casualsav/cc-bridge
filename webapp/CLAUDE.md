@@ -449,6 +449,16 @@ give it.
   `-` starting a line of table markup would become a bullet; and the bubble is `white-space:
   pre-wrap`, so the newline that separated the prose from the block would print a blank line above
   a box that already starts on its own.
+- **The price of those two decisions: an inline rule can no longer be stopped by a newline, so a
+  code span MUST NOT be able to pair across the markup** — hence `[^`\n<]` and not `[^`\n]`. `<code>`
+  is an HTML FORMATTING element: one opening in a `<th>` and closing in a later `<td>` is misnested,
+  and the parser's adoption agency keeps it on the list of active formatting elements and
+  RECONSTRUCTS it inside **every following bubble** — one bad message renders the rest of the feed
+  monospace under the inline-code chip, through every 3s repaint (the owner, 2026-08-15; a clipped
+  subagent card whose closing fence the 4000-char clamp had cut). Excluding `<` costs nothing a user
+  typed: `md()` escapes first, so their `<` is already `&lt;`. Proof: `webapp-md-nesting.test.ts`
+  (the string) and `scripts/webapp-measure/mdnest.mjs` (the parser, with the pre-change page as its
+  control).
 
 ## Colour and theming
 

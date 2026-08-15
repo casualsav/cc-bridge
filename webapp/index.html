@@ -3268,7 +3268,14 @@ function md(s) {
   return s.split(/(```[\s\S]*?```)/).map(part => {
     if (part.startsWith("```")) return esc(part).replace(/```(\w*)\n?([\s\S]*?)```/g, (m, lang, c) => '<pre class="code">' + c.replace(/\n$/, "") + "</pre>");
     let h = mdTables(esc(part));
-    h = h.replace(/`([^`\n]+)`/g, "<code>$1</code>");
+    // `<` closes a code span for the same reason `>` opens an italic below: md() escapes FIRST, so a
+    // typed `<` is already `&lt;` here and every remaining `<` is one of our own tags'. Without it a
+    // span can pair ACROSS mdTables' markup — which is not a cosmetic bug, because `<code>` is an HTML
+    // formatting element: one opening in a `<th>` and closing in a later `<td>` is misnested, and the
+    // parser's adoption agency then RECONSTRUCTS it inside every following bubble. The owner's feed
+    // flipped to monospace at a subagent's table card and stayed there (2026-08-15). Proof:
+    // webapp-md-nesting.test.ts, and scripts/webapp-measure/mdnest.mjs through a real parser.
+    h = h.replace(/`([^`\n<]+)`/g, "<code>$1</code>");
     h = h.replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>");
     // `>` joins the openers so a cell that STARTS in italic still italicises — after mdTables the
     // only `>` in the string is one of our own tags' (a typed one is already `&gt;`).
