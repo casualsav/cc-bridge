@@ -873,13 +873,29 @@ export function inputBoxOccupant(styledPaneText: string): string | null {
 
 // Did a submit actually take? A paste+Enter can outrun the TUI and leave the block typed-but-
 // unsubmitted while tmux reports success — this is the check that tells those apart.
-// Deliberately conservative: anything we cannot read as "still sitting in the box" counts as
-// landed, because inventing a delivery failure is worse than missing one. Working or queued both
-// mean the input was accepted.
-export function submitLanded(paneText: string): boolean {
-  if (detectWorking(paneText) || hasQueuedMessages(paneText)) return true
-  const box = inputBoxContent(paneText)
-  return box === null || box === ''
+//
+// THE BOX IS THE ANSWER, AND IT IS ASKED FIRST. Text still sitting in the input box is a delivery
+// that did not take, whatever else the pane is doing. Until 2026-08-15 this short-circuited on
+// `detectWorking || hasQueuedMessages` and returned true WITHOUT EVER READING THE BOX — so on a busy
+// pane `submitVerified` never retried its Enter, `pasteVerified` could not return 'unsubmitted', and
+// the inbound path deleted its own paste-in-flight record, disarming the 25s recovery sweep built for
+// exactly this. The owner's message sat in the chat lane's box for 16m48s behind it; the whole log
+// since 2026-06-28 holds ZERO `STRANDED` lines, because on a busy pane that branch could not fire.
+// The blindness was working-ONLY: the same box on an idle pane always read correctly.
+//
+// Ghost-aware, so it takes a STYLED capture (`capturePaneStyled`) — every caller reaches it through
+// `submitVerified`, which now captures with `-e`. Reading the box instead of the working flag is only
+// safe because this read drops the faint suggestion Claude Code paints INTO the box; on a plain
+// capture that ghost would read as a stranded delivery and be re-Entered forever.
+//
+// Still conservative where conservatism is warranted: a screen with no box we can parse (a modal, a
+// picker) counts as landed, because inventing a delivery failure is worse than missing one.
+// `detectWorking`/`hasQueuedMessages` are gone from here rather than reordered — working and queued
+// both empty the box, so as terms they only ever fired when the box already agreed.
+export function submitLanded(styledPaneText: string): boolean {
+  const box = inputBoxOccupant(styledPaneText)
+  if (box === null) return true
+  return box === ''
 }
 
 // Claude Code raises TWO different dialogs when the model changes, and telling them apart is a

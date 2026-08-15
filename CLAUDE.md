@@ -180,6 +180,19 @@ asks **`paneRunsTypedInput`** (`prompt.ts`) instead. The class cost a silently-q
 *and then complete* (the completion watch read the same screen). Fixed v0.4.385 at three sites;
 fixture is that incident's own capture in `prompt-queued.test.ts`.
 
+**A submit is verified against the input BOX, never against the pane's mood.** `submitLanded`
+(`prompt.ts`) reads `inputBoxOccupant` on a STYLED capture and nothing else — text still in the box is
+a delivery that did not take, whatever the spinner says. It short-circuited on `detectWorking ||
+hasQueuedMessages` until v0.5.122, so on a busy pane `submitVerified` never retried its Enter,
+`pasteVerified` could not return `'unsubmitted'`, and the inbound path deleted its own
+paste-in-flight record — disarming the 25s recovery sweep built for exactly this. The owner's message
+sat in the chat lane's box for 16m48s (2026-08-15) and the whole log since 2026-06-28 held ZERO
+`STRANDED` lines, because that branch could not fire. Ghost-awareness is load-bearing: on a plain
+capture the CLI's faint suggestion reads as a stranded delivery and gets re-Entered forever. Proof:
+`scripts/pane-submit-wedge.ts` (a real pane; `--cache <dir>` runs the same probe against a deployed
+copy and must FAIL there); fixtures `fixtures/pane-{busy,idle}-unsubmitted.*` in `prompt.test.ts`,
+where `CAP_WORKING`'s EMPTY box is the control the gap hid behind.
+
 **"Continue with Fable 5" IS the credit spend, so consent is per-USER and its default declines.**
 Read off the CLI 2.1.226 binary: that primary option appears precisely when usage credits are
 enabled and a balance exists, beside body text naming them — v0.5.1 pressed it on any human's tap

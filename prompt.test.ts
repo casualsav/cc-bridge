@@ -1,5 +1,6 @@
 // Prompt detection from pane captures — select menus vs permission dialogs. Pure functions.
 import { test, expect } from 'bun:test'
+import { readFileSync } from 'node:fs'
 import { slashPaletteEntries, stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, detectFirstRunScreen, isUsageLimitChoice, isResumeSessionPrompt, detectResumeSessionPrompt, detectEditorState, onNormalPrompt, detectModelUnavailable, detectCompacting, compactPercent, permPromptToken, waitingPromptSignature, isRecognizedPrompt, detectStuckScreen, extractGenericOptions, bashModeArmed, detectWorking, isModelSwitchConfirm, fableConsentContinueOption, planModelDialogStep, isModelConsentDialog, slashPaletteRows, slashPaletteWouldMisfire, inputBoxContent, inputBoxOccupant, submitLanded, detectModelPicker, parseWorkingStatus, feedbackSurveyOpen, paneAcceptsText } from './prompt.ts'
 
 test('stripAnsi removes CSI escape sequences', () => {
@@ -1451,4 +1452,35 @@ test('submitLanded is true on an emptied box, a working pane, and an unparsed sc
   expect(submitLanded(CAP_SUBMITTED)).toBe(true)
   expect(submitLanded(CAP_WORKING)).toBe(true)
   expect(submitLanded(CAP_MODAL)).toBe(true)   // conservative: never invent a delivery failure
+})
+
+// The gap the two fixtures above could not see, and the whole of the 2026-08-15 wedge: a pane that is
+// WORKING **with our text still in its box**. `CAP_WORKING` is the control for this pair and has an
+// EMPTY box — so a predicate that short-circuited on `detectWorking` passed both of them while
+// reporting every stranded mid-turn delivery as landed. The owner's message sat in the chat lane's box
+// for 16m48s that night behind exactly this.
+//
+// Both captures are REAL, taken off a live 2.1.233 pane by `scripts/pane-submit-wedge.ts` (a scratch
+// pane on a private tmux server): the same box, once while the pane was mid-turn and once after the
+// turn was interrupted. The idle one is the control that keeps the instrument honest — a reader that
+// sees nothing would pass the busy assertion for the wrong reason.
+const CAP_BUSY_UNSUBMITTED = readFileSync(new URL('./fixtures/pane-busy-unsubmitted.ansi', import.meta.url), 'utf8')
+const CAP_IDLE_UNSUBMITTED = readFileSync(new URL('./fixtures/pane-idle-unsubmitted.txt', import.meta.url), 'utf8')
+
+test('submitLanded is FALSE on a WORKING pane whose box still holds the text', () => {
+  // The fixture really is both things at once, or the assertion below proves nothing.
+  expect(detectWorking(CAP_BUSY_UNSUBMITTED)).toBe(true)
+  expect(inputBoxOccupant(CAP_BUSY_UNSUBMITTED)).toContain('WEDGE-PROBE-MARKER')
+  expect(submitLanded(CAP_BUSY_UNSUBMITTED)).toBe(false)
+  // The control: same box, turn over. It read correctly all along — the blindness was working-only.
+  expect(detectWorking(CAP_IDLE_UNSUBMITTED)).toBe(false)
+  expect(submitLanded(CAP_IDLE_UNSUBMITTED)).toBe(false)
+})
+
+test('submitLanded reads the box GHOST-AWARE — a CLI suggestion is not an unsubmitted delivery', () => {
+  // Reading the box instead of the working flag is only safe because the read drops the faint
+  // suggestion the CLI paints into the box itself; otherwise every landed delivery on a pane showing
+  // one would be re-Entered forever.
+  expect(submitLanded(CAP_GHOST)).toBe(true)
+  expect(submitLanded(CAP_TYPED)).toBe(false)
 })

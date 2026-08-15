@@ -113,8 +113,12 @@ export async function waitForSettle(paneId: string, pollMs: number, maxMs: numbe
 // mid-turn is a no-op (observed on a live pane, it neither started a turn nor disturbed the one
 // running). Failing to retry a genuinely swallowed key is the worse error.
 export async function submitVerified(paneId: string, keys: string[], landed: (cap: string) => boolean): Promise<boolean> {
+  // STYLED (`-e`), because `landed` reads the input box and the box is where the CLI paints its own
+  // faint suggestion ghost. On a plain capture that ghost is indistinguishable from a stranded
+  // delivery, and every submit onto a pane showing one would be re-Entered. The rest of pane-io keeps
+  // reading plain captures — this is the one question that needs the attributes back.
   const took = async () => {
-    const cap = await capturePane(paneId).catch(() => '')
+    const cap = await capturePaneStyled(paneId).catch(() => '')
     return !cap || landed(cap)   // pane unreadable: don't invent a delivery failure
   }
   await sendKeys(paneId, keys)

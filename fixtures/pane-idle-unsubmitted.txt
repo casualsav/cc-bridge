@@ -1,0 +1,50 @@
+
+╭─── Claude Code v2.1.233 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                    │ Tips for getting started                                                                                                                        │
+│                  Welcome back Sal!                 │ Ask Claude to create a new app or clone a repository                                                                                            │
+│                                                    │ ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── │
+│                       ▐▛███▜▌                      │ What's new                                                                                                                                      │
+│                      ▝▜█████▛▘                     │ Added GitLab merge request URL support to the `--worktree` flag and the `claude agents` view (where MRs display as `!N`)                        │
+│                        ▘▘ ▝▝                       │ Added an opt-in `forward_user_identity` apps gateway setting on Anthropic upstreams that sends the signed-in user's identity as headers, so a … │
+│    Haiku 4.5 · Claude Max · suchag@gmail.com's     │ Added opt-in memory cgroup support for Bash tool commands on Linux (`CLAUDE_CODE_TOOL_MEMORY_LIMIT`) so a runaway build can't stall the session │
+│    Organization                                    │ /release-notes for more                                                                                                                         │
+│              /…/scratchpad/wedge-cwd               │                                                                                                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+❯ Run the bash command `sleep 60` and then say done.
+
+  Ran 1 shell command
+  ⎿  Interrupted · What should Claude do instead?
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                                                                        You've used 81% of your weekly limit · resets Aug 16, 4pm (UTC)
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ WEDGE-PROBE-MARKER this text was pasted and never submitted
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ubuntu@cloud:/tmp/claude-1001/-home-ubuntu-projects-cc-bridge/88b03e02-7c68-43f8-a962-d6ee4a510a73/scratchpad/wedge-cwd | Haiku 4.5
+  ✻think | ctx ██░░░░░░░░ 18%/200k | ↑35.4k ↓261 | $0.0295 | ⧗8s | api 4s | Run sleep command and confirm completion | v2.1.233
+  5h ████░░░░░░░░░░ 31% ↻56m | 7d ███████████░░░ 81% ↻31h56m
+  ⏸ manual mode on
