@@ -170,7 +170,7 @@ import { formatChannelBlock, appBlock } from './inbound.ts'
 import { initQueue, readLater, writeLater, sweepLaterQueues, LATER_SWEEP_MS } from './queue.ts'
 import {
   AGENT_BUS_ENABLED, AGENT_BUS_PIN_UI,
-  createPending, getPending, removePending, putPending, listPending, markInjected, markPasted, markPastedAt, markUnconfirmed, awaitingConfirmation, markBoxBlocked, boxBlockedFor, expirePending, dropExpired, LATE_ANSWER_GRACE_MS, ASK_TTL_MS,
+  createPending, getPending, removePending, putPending, listPending, markInjected, markPasted, markPastedAt, markUnconfirmed, awaitingConfirmation, markBoxBlocked, boxBlockedFor, expirePending, heldTooLong, markHeldNotified, dropExpired, LATE_ANSWER_GRACE_MS, ASK_TTL_MS,
   setLiveAskIdProbe,
   recordAgentAsk, resetHops, currentHops, BREADTH_NOTICE_AT, askResultText, planAskReap, deliveredReapCandidates, groupClosuresByAskerAndTarget, reapNotifiesAsker, queuedFor, type AskDelivery,
   askerAlreadyResolved, askerKilledTarget, markAskerResolved, reapNoticeSuppressed, planAssigneeNudge, markNudged, owesAnswer,
@@ -4775,22 +4775,51 @@ async function sweepBus(): Promise<void> {
     // Not "abandoned": the record is kept so a late answer still lands.
     const askerPane = await paneForSession(p.fromSid).catch(() => null)
     const targets = askerPane ? await outboundTargetsFor(askerPane).catch(() => []) : []
-    // "No answer yet" describes a target that READ the ask and stayed silent. An ask blocked on an
-    // occupied input box was never delivered at all, and telling the asker to wait sends them to read a
-    // transcript that has never seen it — the wrong place, for an hour. Same record, same retry, honest
-    // words: `blockedByBox` is only ever set by the delivery attempt that was refused, and cleared by
-    // the next one that gets further, so this branch cannot outlive the block.
-    const blocked = boxBlockedFor(p)
+    // Every row reaching here was DELIVERED (or pasted and proved unconfirmable) — expirePending no
+    // longer stamps a still-queued row, so "no answer yet" now describes what it says: a target that
+    // read the ask and stayed silent. The undelivered halves — box-blocked, mid-turn, wedged — are the
+    // held loop below, which says which one and does not bar the row.
     for (const { chat, thread } of targets) {
       void channel.sendText(chat,
-        blocked != null
-          ? `⛔ Ask ${p.id} has NOT reached <b>${escapeHtml(p.toName)}</b> — their input box has held typed text (<code>${escapeHtml(blocked.slice(0, 40))}</code>) for ${Math.round(ASK_TTL_MS / 60_000)}m, so every attempt was refused rather than pasted on top of it. Still queued; it delivers as soon as that box clears.`
-          : `⌛ No answer yet from <b>${escapeHtml(p.toName)}</b> to ask ${p.id} — still waiting; a late answer will still be delivered.`,
+        `⌛ No answer yet from <b>${escapeHtml(p.toName)}</b> to ask ${p.id} — still waiting; a late answer will still be delivered.`,
         { silent: true, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
     }
-    if (askerPane) void busDeliver(askerPane, formatAnswerBlock('system', p.id, blocked != null
-      ? `(ask ${p.id} was NEVER DELIVERED to @${p.toName} after ${Math.round(ASK_TTL_MS / 60_000)}m — their input box holds typed text (${JSON.stringify(blocked.slice(0, 40))}), so attempts are refused rather than pasted over it. Still queued; it delivers when that box clears — this is not a silent target)`
-      : `(no answer yet from @${p.toName} after ${Math.round(ASK_TTL_MS / 60_000)}m — still open; a late answer will be delivered if it arrives)`))
+    if (askerPane) void busDeliver(askerPane, formatAnswerBlock('system', p.id,
+      `(no answer yet from @${p.toName} after ${Math.round(ASK_TTL_MS / 60_000)}m — still open; a late answer will be delivered if it arrives)`))
+  }
+  // A row that is STILL IN THE BUS QUEUE at the hour mark. It is not expired and not barred: the sweep
+  // below keeps offering it, and it lands at the target's next prompt. The notice exists because an
+  // hour of silence is worth one line to the asker — and because the line it used to get said "a late
+  // answer will still be delivered" over a row the same sweep had just made undeliverable (ask 535).
+  //
+  // The screen is READ rather than guessed. This fires once per ask, after an hour, so a capture is
+  // affordable here in a way it would not be in the delivery path — and "held" without which of
+  // mid-turn / wedged / gone sends the asker looking in the wrong place, which is the whole failure
+  // this replaces.
+  for (const p of heldTooLong(Date.now())) {
+    markHeldNotified(p.id, Date.now())
+    const blocked = boxBlockedFor(p)
+    const pane = await paneForSession(p.toSid).catch(() => null)
+    const cap = pane ? await capturePane(pane).catch(() => '') : ''
+    const gate = cap
+      ? planAskGate({ atPrompt: onNormalPrompt(cap), working: detectWorking(cap), queued: hasQueuedMessages(cap), bashArmed: bashModeArmed(cap) })
+      : null
+    const why = blocked != null
+      ? `their input box has held typed text (${JSON.stringify(blocked.slice(0, 40))}), so every attempt was refused rather than pasted on top of it — it delivers as soon as that box clears`
+      : gate === 'busy' ? `they have been mid-turn the whole time — it delivers at their next prompt`
+      : gate === 'wedged' ? `their pane is not at a prompt and no turn is running, so it may be wedged — nothing reaches them until it recovers`
+      : gate === 'deliver' ? `they are at a prompt now — the next sweep delivers it, within 15s`
+      : `they have no live session right now — it stays queued in case one comes back`
+    const mins = Math.round(ASK_TTL_MS / 60_000)
+    const askerPane = await paneForSession(p.fromSid).catch(() => null)
+    for (const { chat, thread } of askerPane ? await outboundTargetsFor(askerPane).catch(() => []) : []) {
+      void channel.sendText(chat,
+        `⏳ Ask ${p.id} is still HELD for <b>${escapeHtml(p.toName)}</b> after ${mins}m — it has NOT been delivered and it is not lost: ${escapeHtml(why)}.`,
+        { silent: true, ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
+    }
+    if (askerPane) void busDeliver(askerPane, formatAnswerBlock('system', p.id,
+      `(ask ${p.id} has been HELD in the bus queue for @${p.toName} for ${mins}m — never delivered, and still queued: ${why}. Nothing is lost and nothing needs re-sending; a delivery still happens on its own.)`))
+    process.stderr.write(`daemon: ask ${p.id} to @${p.toName} still HELD after ${mins}m — ${why}\n`)
   }
   // BEFORE the delivery loop below, and the order is deliberate: this sweep is what makes a session
   // busy again within a second of reaching a prompt, so a parked command evaluated after the

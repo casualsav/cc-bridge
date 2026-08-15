@@ -93,6 +93,10 @@ test('queuedFor returns only un-injected asks for a target, oldest first', () =>
 test('expirePending marks (not deletes) aged-out asks so a late answer still resolves', () => {
   const fresh = ask()
   const stale = ask()
+  // Both DELIVERED: expirePending is the answer window, and since ask 535 a still-queued row is not
+  // its business at all (it goes to heldTooLong — bus-held-ttl.test.ts owns that half).
+  markInjected(fresh.id, 1000)
+  markInjected(stale.id, 1000)
   // age `stale` out by hand
   getPending(stale.id)!.expiresAt = 500
   const gone = expirePending(1000)
@@ -105,7 +109,12 @@ test('expirePending marks (not deletes) aged-out asks so a late answer still res
 })
 
 test('expired asks are dropped from the delivery queue but GC only after the grace window', () => {
-  const q = ask()   // un-injected, so it would normally be in queuedFor
+  // A DELIVERED ask that timed out. It used to be an un-injected one, and that was the defect: a row
+  // the bus was still holding for a busy target got `expiredAt` stamped and left the delivery queue
+  // for good (ask 535, 2026-08-15 — chat's ask 523 caught mid-flight). A held row now stays queued;
+  // what leaves the queue is a row whose ANSWER never came.
+  const q = ask()
+  markInjected(q.id, 900)
   getPending(q.id)!.expiresAt = 500
   expirePending(1000)                              // expiredAt = 1000
   expect(queuedFor('bbbb')).toEqual([])            // expired → no longer offered to the target

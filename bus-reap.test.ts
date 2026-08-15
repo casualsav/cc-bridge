@@ -248,10 +248,17 @@ test('a gist is flattened, de-tagged and clamped — a long multi-line ask canno
 const killRow = (over: Partial<LedgerEntry> = {}): LedgerEntry =>
   ({ ts: 10, kind: 'kill', from: 'chat', to: 'ccbridge', text: 'exiting', ...over })
 
-test('a reap is silent toward the asker that killed the target', () => {
-  expect(reapNoticeSuppressed(ask({ createdAt: 5 }), [killRow()])).toBe(true)
-  // The never-delivered half too: killing a target is a claim about every ask in flight to it.
+test('a reap is silent toward the asker that killed the target — but only about asks it RECEIVED', () => {
   expect(reapNoticeSuppressed(ask({ createdAt: 5, injected: true }), [killRow()])).toBe(true)
+  // THE NEVER-DELIVERED HALF IS NOT SILENCED, and this line is the 2026-08-15 lesson (ask 535).
+  // It used to be: "killing a target is a claim about every ask in flight to it" — true while an
+  // undelivered row meant the target was wedged or gone, so the killer already knew what it was
+  // ending. R-1 changed the meaning: a held row is now the ordinary state of a unit queued behind a
+  // HEALTHY busy worker. Killing a stalled worker is the orchestrator's standard recovery move, and
+  // under the old reading every unit queued behind it vanished with no notice on any surface —
+  // watched live at 23:08:04Z on a scratch probe ("no notice sent — asker killed the target" over an
+  // ask that had never been delivered). The asker cannot re-issue what it was never told it lost.
+  expect(reapNoticeSuppressed(ask({ createdAt: 5 }), [killRow()])).toBe(false)
 })
 
 test('THE CONTROL: a third party\'s ask still hears about the same kill', () => {

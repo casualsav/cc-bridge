@@ -165,6 +165,10 @@ export type BusPending = {
   // sends the asker to read a transcript that never received the ask at all. Cleared on any attempt
   // that gets further, so it can never outlive the block it describes.
   blockedByBox?: string
+  // The row was still HELD in the bus queue when its first TTL elapsed, and its asker has been told
+  // so — once. Not `expiredAt`: a held row is healthy and still deliverable, and stamping the field
+  // that bars delivery would be the defect this exists to name. See heldTooLong.
+  heldNoticeAt?: number
   askerResolvedAt?: number   // when the daemon decided this asker needs no further notice about this ask
                              // (the TTL notice was withheld because the target had already answered it
                              // since). Persisted so the decision outlives the 200-row ledger window and a
@@ -283,6 +287,9 @@ export function loadBus(): BusState {
         ...(typeof p.pastedAt === 'number' ? { pastedAt: p.pastedAt } : {}),
         ...(typeof p.unconfirmedAt === 'number' ? { unconfirmedAt: p.unconfirmedAt } : {}),
         ...(typeof p.askerResolvedAt === 'number' ? { askerResolvedAt: p.askerResolvedAt } : {}),
+        // "Told once" has to mean once across restarts too — this box ships several times an hour, and
+        // an in-memory flag would re-notify every asker holding a long-held row on each deploy.
+        ...(typeof p.heldNoticeAt === 'number' ? { heldNoticeAt: p.heldNoticeAt } : {}),
         ...(p.founding === true ? { founding: true as const } : {}),
         // Written by createPending, never read back — so an undelivered `tg ack` that outlived a
         // restart reloaded as a NORMAL ASK. `noReply` is what removes the row on delivery, so without
@@ -597,16 +604,57 @@ export function unreportedWorkMarker(args: {
   return { briefer: briefedBy.fromName, since: work.lastAt }
 }
 
-// Mark (don't delete) every not-yet-expired pending whose TTL has passed and return them — the daemon
-// tells each asker "no answer yet". The record is KEPT (expiredAt stamped) so a late `tg answer` can
-// still be delivered; dropExpired() GCs it later. Covers both injected-awaiting-answer AND still-queued.
+// STILL QUEUED FOR DELIVERY: the bus is holding this row and intends to hand it over at the target's
+// next prompt. The three exclusions are the three ways a row stops being deliverable — it arrived
+// (`injected`), it is pasted and awaiting or past R-4's transcript proof (`pastedAt`, which
+// markUnconfirmed deliberately leaves set), or it is already barred (`expiredAt`). Exactly
+// tryDeliverAsk's own bail set, named once so the TTL can ask the same question the sweep asks.
+export const stillQueued = (p: BusPending): boolean =>
+  !p.injected && p.pastedAt == null && p.expiredAt == null
+
+// Mark (don't delete) every not-yet-expired pending whose ANSWER WINDOW has passed and return them —
+// the daemon tells each asker "no answer yet". The record is KEPT (expiredAt stamped) so a late
+// `tg answer` can still be delivered; dropExpired() GCs it later.
+//
+// A STILL-QUEUED row is excluded, and that is the fix for ask 535's defect 2 (owner ruling: the TTL
+// arms at DELIVERY). It used to cover them: `expiresAt` is stamped at creation, so once R-1 made a
+// held row a real and long-lived state, a target busy for over an hour meant the ask queued behind it
+// was stamped `expiredAt` while still in the bus's own queue — and `expiredAt` is what tryDeliverAsk
+// bails on, so the row became permanently undeliverable while its asker was told a late answer would
+// still arrive. Held rows go to heldTooLong instead, which tells the truth and bars nothing.
+//
+// Stamping only where the meaning holds is why this is the fix rather than teaching tryDeliverAsk to
+// ignore `expiredAt` on held rows: three readers share this one field — the delivery bail, the
+// dropExpired GC key, and the reap's candidate split — and a value that meant "expired, but still
+// deliverable, and do not GC me" for one subset would have to be re-derived by every one of them.
 export function expirePending(now: number): BusPending[] {
   ensureLoaded()
-  const expired = Object.values(store.pending).filter(p => !p.expiredAt && p.expiresAt <= now)
+  const expired = Object.values(store.pending).filter(p => !p.expiredAt && p.expiresAt <= now && !stillQueued(p))
   if (!expired.length) return []
   for (const p of expired) p.expiredAt = now
   save()
   return expired
+}
+
+// Rows still waiting in the BUS queue when their first TTL elapsed, whose asker has not been told yet.
+// The daemon sends one honest notice per row ("held — the target is mid-turn — it lands at their next
+// prompt") and stamps heldNoticeAt. Nothing here bars delivery: a held row is healthy, and the sweep
+// keeps offering it every 15s until the target reaches a prompt or its session ends (the reap).
+//
+// Once per row, not per hour: the repeat would be a new wake cost nobody asked for, and the rows that
+// outlive every surface are taken by the wrap purge's createdAt clause (ask-id-rotation.test.ts).
+export function heldTooLong(now: number): BusPending[] {
+  ensureLoaded()
+  return Object.values(store.pending).filter(p => stillQueued(p) && p.heldNoticeAt == null && p.expiresAt <= now)
+}
+
+/** Record that this held row's asker has been told it is still queued. Idempotent; fires once. */
+export function markHeldNotified(id: number, now: number): void {
+  ensureLoaded()
+  const p = store.pending[String(id)]
+  if (!p || p.heldNoticeAt != null) return
+  p.heldNoticeAt = now
+  save()
 }
 
 // GC expired asks whose grace window has fully elapsed (a late answer never came). Returns how many
@@ -853,8 +901,15 @@ export function reapNotifiesAsker(p: Pick<BusPending, 'injected'>): boolean { re
 // DELIVERED asks only, and the asymmetry is deliberate. A never-delivered reap makes a different claim
 // — "the target never even received this" — which stays true and actionable whatever else that target
 // answered, because that work never started. Silencing it for symmetry would walk back bug 11c.
+//
+// BOTH predicates now sit behind `injected`, and the kill half moved there on 2026-08-15 (ask 535).
+// It was written when a never-delivered row meant the target was wedged or already gone, so the asker
+// that typed `tg kill` knew what it was ending. R-1 changed what the state means: a held row is the
+// ordinary condition of a unit queued behind a HEALTHY busy worker, and killing a stalled worker is
+// the orchestrator's standard recovery move — so the old reading discarded every unit queued behind
+// that worker with no notice on any surface. Watched live at 23:08:04Z that day on a scratch probe.
 export function reapNoticeSuppressed(p: BusPending, entries: LedgerEntry[]): boolean {
-  return askerKilledTarget(p, entries) || (p.injected && askerAlreadyResolved(p, entries))
+  return p.injected && (askerKilledTarget(p, entries) || askerAlreadyResolved(p, entries))
 }
 
 // The asker ENDED the target itself, so "@X ended with your ask N unanswered" is telling a session
@@ -862,10 +917,10 @@ export function reapNoticeSuppressed(p: BusPending, entries: LedgerEntry[]): boo
 // already appends a row naming both sides, so this needs no new state: the fact was in the ledger
 // before the reap that reads it.
 //
-// Unlike askerAlreadyResolved this covers the NEVER-DELIVERED half too, and the reason the two differ
-// is the reason each exists. A never-delivered reap tells the asker "that work never started", which
-// it may genuinely not know — except when it is the one that stopped it. Killing a target is a claim
-// about every ask in flight to it, not just the delivered ones.
+// It used to cover the NEVER-DELIVERED half too, on the reading that "killing a target is a claim
+// about every ask in flight to it". Its caller no longer asks it about those rows — see
+// reapNoticeSuppressed for why R-1 broke that reading — so this predicate is now purely "did the
+// asker end this target itself", with the delivered/never-delivered split owned one level up.
 //
 // Scoped to kills at or after the ask was created, so an earlier kill of a since-reopened endpoint of
 // the same name cannot silence a fresh ask. A close from any other surface (the owner's mini-app

@@ -77,6 +77,22 @@ test('SOURCE R-2: nothing can suppress the expiry notice', () => {
   expect(expiry).toContain('outboundTargetsFor')
 })
 
+test('SOURCE (ask 535): the sweep tells a HELD row\'s asker the truth, and never bars the row', () => {
+  // Defect 2 of the v0.5.128 reproduction. `expiresAt` is stamped at creation and `expiredAt` is what
+  // tryDeliverAsk bails on, so before this the ask queued behind a target busy >60m was stamped by the
+  // same sweep that promised its asker "a late answer will still be delivered". Watched failing in
+  // bus-held-ttl.test.ts against a pre-fix build; this binds the daemon half to the store half.
+  const held = region(daemon, 'for (const p of heldTooLong(Date.now()))', 'BEFORE the delivery loop below')
+  expect(held).toContain('markHeldNotified')
+  expect(held).toContain('still HELD')
+  expect(held).not.toContain('a late answer will still be delivered')
+  // The expiry loop above it stops claiming to describe an undelivered ask — that branch moved here.
+  const expiry = region(daemon, 'for (const p of expirePending(Date.now()))', 'for (const p of heldTooLong')
+  expect(expiry).not.toContain('has NOT reached')
+  // And the store half: a still-queued row is outside the answer window's business.
+  expect(bus).toContain('p.expiresAt <= now && !stillQueued(p)')
+})
+
 // ---- R-3: the nudge suppression is ask-scoped ---------------------------------------------------
 
 const ask = (over: Partial<BusPending> = {}): BusPending => ({

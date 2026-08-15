@@ -339,6 +339,21 @@ pane stamps), after snapshotting first. Fails open. Override: `CC_BRIDGE_ALLOW_T
 **A bus ask is answered with `tg answer`; a final text block is not an answer** — it reaches
 nobody, and the ask envelope says so at the collision point.
 
+**THE BUS OWNS ITS QUEUE, and a HELD row is healthy — never let one age, never let one go quiet.**
+An ask to a mid-turn target is `'busy'` and waits in the bus's queue for the 15s sweep
+(`planAskGate`, never a bare `onNormalPrompt` — that is TRUE on a working pane, which is how ten
+blocks went into @weather's CLI queue on 2026-08-15 and none became a turn). Three things follow, and
+each was a separate live loss: `injected` is stamped only on transcript proof, never on the paste;
+`expiredAt` — the field `tryDeliverAsk` bails on and `dropExpired` GCs on — is stamped only on a row
+that was DELIVERED, because a held row that expires becomes permanently undeliverable while its asker
+is told a late answer will still arrive (caught mid-flight on ask 523, owner ruling 2026-08-15: the
+TTL arms at delivery, and the hour-mark notice for a held row says which of mid-turn/wedged/gone it
+is); and the reap's suppression is DELIVERED-ONLY — killing a stalled worker is the orchestrator's
+standard recovery, so silencing its never-delivered rows discards the queued units without telling
+the one session that could re-issue them. Proof: `ask-parity.test.ts` (source-bound),
+`bus-held-ttl.test.ts` (simulated clock, watched failing against a pre-fix build),
+`bus-reap.test.ts`.
+
 **Auto-delivery of an unanswered ask is RULED OUT — never add it.** It would ship a status line
 as a deliverable, race a genuine late `tg answer`, and make the contract unlearnable. What ships
 instead: `checkConcludedTurnObligations` nudges THE SESSION once per ask, after a grace; nothing
