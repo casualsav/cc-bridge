@@ -4,7 +4,7 @@ import type { ReactionTypeEmoji, InlineQueryResultArticle } from 'grammy/types'
 import { createHash, randomBytes } from 'node:crypto'
 import {
   readFileSync, writeFileSync, appendFileSync, mkdirSync, readdirSync, rmSync,
-  statSync, renameSync, realpathSync, readlinkSync, chmodSync, unlinkSync, existsSync, openSync, closeSync, copyFileSync,
+  statSync, renameSync, realpathSync, readlinkSync, chmodSync, unlinkSync, existsSync, openSync, closeSync, readSync, copyFileSync,
   accessSync, constants as fsConstants,
 } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
@@ -115,6 +115,7 @@ import { turnParts, capChips } from './turn-summary.ts'
 import { planEffortApply, effortSuffix, driveEffortChange, type EffortOutcome } from './effort-plan.ts'
 import { decideFallbackTranscript } from './transcript-owner.ts'
 import { normalizeKeys, planKeyInjection, planKeyRate, KEY_NAMES } from './keys-plan.ts'
+import { planAskGate, planInjectionConfirm, blockCarriesAsk, CONFIRM_WINDOW_MS } from './ask-parity.ts'
 import { parseKeysCallback, keysKeyboard, pickerKeyboard, keysCardText, pickerCardText, describePane,
   PREVIEW_LINES, PREVIEW_TTL_MS, previewKey, armPreview, disarmPreview, strandedPreviews,
   type PaneRead, type KeysReceipt, type PreviewRecord, type PreviewStore } from './keys-card.ts'
@@ -169,7 +170,7 @@ import { formatChannelBlock, appBlock } from './inbound.ts'
 import { initQueue, readLater, writeLater, sweepLaterQueues, LATER_SWEEP_MS } from './queue.ts'
 import {
   AGENT_BUS_ENABLED, AGENT_BUS_PIN_UI,
-  createPending, getPending, removePending, putPending, listPending, markInjected, markPasted, markBoxBlocked, boxBlockedFor, expirePending, dropExpired, LATE_ANSWER_GRACE_MS, ASK_TTL_MS,
+  createPending, getPending, removePending, putPending, listPending, markInjected, markPasted, markPastedAt, markUnconfirmed, awaitingConfirmation, markBoxBlocked, boxBlockedFor, expirePending, dropExpired, LATE_ANSWER_GRACE_MS, ASK_TTL_MS,
   setLiveAskIdProbe,
   recordAgentAsk, resetHops, currentHops, BREADTH_NOTICE_AT, askResultText, planAskReap, deliveredReapCandidates, groupClosuresByAskerAndTarget, reapNotifiesAsker, queuedFor, type AskDelivery,
   askerAlreadyResolved, askerKilledTarget, markAskerResolved, reapNoticeSuppressed, planAssigneeNudge, markNudged, owesAnswer,
@@ -4181,7 +4182,9 @@ const busInFlight = new Set<number>()
 setLiveAskIdProbe(id => busInFlight.has(id) || hermesInFlight.has(id))
 async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
   const cur = getPending(p.id)
-  if (!cur || cur.injected || cur.expiredAt || busInFlight.has(cur.id)) return 'busy'   // never deliver a timed-out ask to the target
+  // `pastedAt` is R-4's in-flight state: the block is pasted and awaiting transcript proof. Re-pasting
+  // it would be the duplicate class, so this sweep leaves it to confirmInjections.
+  if (!cur || cur.injected || cur.expiredAt || cur.pastedAt != null || busInFlight.has(cur.id)) return 'busy'   // never deliver a timed-out ask to the target
   busInFlight.add(cur.id)   // claim BEFORE the awaits so the immediate attempt + the 15s sweep can't both proceed
   try {
     // AN ACK DELIVERS EXACTLY LIKE AN ASK — no defer branch here, and that is a ruling, not an
@@ -4195,10 +4198,20 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
     if (!pane) return 'no-session'
     const cap = await capturePane(pane).catch(() => '')
     if (!cap) return 'no-session'
-    // Not at a prompt: 'busy' if a turn is actually running (self-clearing), 'wedged' if nothing is —
-    // the @ccbridge shape, where an unrecognized screen owns the pane and no ask will ever land (11b).
-    if (!onNormalPrompt(cap)) return detectWorking(cap) ? 'busy' : 'wedged'
-    if (bashModeArmed(cap)) return 'busy'
+    // R-1 (2026-08-15) — THE RESTORATION. v0.3.35 promised "deliver iff the target is at a normal
+    // prompt (never mid-turn) … an ask to a busy agent waits politely instead of clobbering its
+    // turn", and `onNormalPrompt` did not keep it: the queued-messages bar is a ❯ row between two
+    // borders, so it reads TRUE mid-turn. The ask was pasted anyway and the CLI's own message queue
+    // took it — a queue the bus cannot see, inspect or re-drive. Ten blocks went into @weather's
+    // mid-turn pane on 2026-08-15 and not one became a turn; two of them (asks 472, 474) were
+    // recorded delivered and expired unanswered six hours later.
+    //
+    // 'busy' keeps the row in the BUS's queue for the 15s sweep, which is where it always belonged.
+    const gate = planAskGate({
+      atPrompt: onNormalPrompt(cap), working: detectWorking(cap),
+      queued: hasQueuedMessages(cap), bashArmed: bashModeArmed(cap),
+    })
+    if (gate !== 'deliver') return gate
     const room = busLedgerRoom()
     // Digest (agent-bus P2): prepend the bus activity this endpoint missed since it was last caught up,
     // so the ask arrives WITH ambient context — pull-not-push (only ever handed over on a delivery it's
@@ -4258,41 +4271,13 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
     if (ok) {
       markBoxBlocked(cur.id, null)   // it delivered, so whatever was in the way is gone
       markPasted(cur.id, null)   // the box is ours no longer — a later retry must paste, not Enter
-      const now = Date.now()
-      markInjected(cur.id, now)
-      // The chain is one hop deeper from here: whatever this session dispatches next inherits it.
-      // A @system ask carries depth 0, so a threshold crossing leaves its target supervised.
-      setSessionDepth(cur.toSid, cur.depth ?? 1)
-      markSeen(cur.toSid, now)   // advance the watermark only on a LANDED delivery — a failed paste keeps the window open for the retry
-      // Whoever just briefed this session is now waiting to hear back. Stamped BEFORE the ack's
-      // removePending below, because that row stops existing a few lines from here. @system is not a
-      // briefer: it has no session to report back into (see deliverAnswerToAsker), so a daemon notice
-      // must not leave the target owing an ack to a name it cannot address.
-      if (cur.fromSid !== SYSTEM_SID) markBriefed(cur.toSid, cur.fromSid, cur.fromName, now)
-      // HIS OWN direct ask confirms with a REACTION on the message he typed, and gets no card: the
-      // card showed him his own words back, behind a chevron, one message under the message he had
-      // just sent (his ruling, 2026-08-09). A reaction says the same thing on the message itself.
-      //
-      // It lives HERE, in the `ok` branch, because this is the only place delivery is CONFIRMED — an
-      // ask handed to a busy target waits for the 15s sweep, and a reaction fired at dispatch would
-      // mark as delivered a message still sitting in the queue. That is also why the message id is on
-      // the row rather than closed over: the sweep that lands it may be a later process entirely.
-      if (cur.ownerDirect) {
-        const chat = cur.ownerMsgId != null ? chatIdForDmChatSession(cur.fromSid) : null
-        if (chat) void channel.react({ chatId: chat, messageId: String(cur.ownerMsgId) }, REACTIONS.delivered).catch(() => {})
-      } else void notifyAskSent(cur.fromSid, cur.toName, cur.text, cur.noReply ? 'ack' : 'ask', cur.toSid)
-      // Mirror the same card on the TARGET's own surface (its topic / chat DM) so the inbound ask is
-      // visible from inside the session too, not only on the asker's side. A `quiet` row is the one
-      // exception: a daemon notice whose fact a card on that same chat already carries (the held
-      // spawn's approval card, which self-edits into "started on fable"). The delivery is unchanged —
-      // only this mirror is withheld, so the session still learns it and the owner reads it once.
-      if (!cur.quiet) void notifyBusRich(cur.toSid, busGotHeader(cur.noReply ? 'ack' : 'ask', cur.fromName, cur.toName), cur.text)
-      // An ack has done its entire job the moment it lands: nothing is coming back, so the row that
-      // would otherwise sit here until a reaper or a TTL noticed it is dropped NOW. This one line is
-      // the whole `tg ack` mechanism — no hygiene path learned about acks, they just never see one.
-      // It has to live here rather than at the call site because the 15s sweep re-delivers a queued
-      // ack to a busy target through this same function, and that delivery must drop the row too.
-      if (cur.noReply) removePending(cur.id)
+      // R-4 (2026-08-15): THE PASTE LANDED. THE DELIVERY IS NOT PROVED. Everything that assumes the
+      // target has the block — the injected stamp and its TTL, the digest watermark, the briefed
+      // stamp, the cards, and an ack's removal — now lives in `onAskConfirmed`, which runs when the
+      // ask block is found in the target's transcript. On 2026-08-15 this branch fired for asks 472
+      // and 474 against a pane whose CLI queue then discarded them, and everything below ran on a
+      // delivery that never happened.
+      markPastedAt(cur.id, Date.now())
     }
     // 'not-landed', never 'busy': busDeliver now returns false when the block is sitting
     // unsubmitted in the box, and calling that merely-busy is the understatement this fix exists
@@ -4302,6 +4287,99 @@ async function tryDeliverAsk(p: BusPending): Promise<AskDelivery> {
     // them looking for our message in a box that never held it.
     return ok ? 'delivered' : outcome === 'occupied' ? 'occupied' : 'not-landed'
   } finally { busInFlight.delete(cur.id) }
+}
+
+// ---- R-4: a delivery is not delivered until the target's transcript shows it --------------------
+//
+// Everything that assumes the target HAS the ask lives here, and it runs only on proof. Lifted whole
+// out of tryDeliverAsk's `ok` branch on 2026-08-15, after asks 472 and 474 ran every line of it
+// against a pane whose CLI queue then discarded them.
+function onAskConfirmed(cur: BusPending, now: number): void {
+  markInjected(cur.id, now)   // …which also starts the TTL, from the moment it actually arrived
+  // The chain is one hop deeper from here: whatever this session dispatches next inherits it.
+  // A @system ask carries depth 0, so a threshold crossing leaves its target supervised.
+  setSessionDepth(cur.toSid, cur.depth ?? 1)
+  markSeen(cur.toSid, now)   // the watermark may advance only when the digest was actually SHOWN
+  // Whoever just briefed this session is now waiting to hear back. Stamped BEFORE the ack's
+  // removePending below, because that row stops existing a few lines from here. @system is not a
+  // briefer: it has no session to report back into (see deliverAnswerToAsker), so a daemon notice
+  // must not leave the target owing an ack to a name it cannot address.
+  if (cur.fromSid !== SYSTEM_SID) markBriefed(cur.toSid, cur.fromSid, cur.fromName, now)
+  // HIS OWN direct ask confirms with a REACTION on the message he typed, and gets no card: the card
+  // showed him his own words back, behind a chevron, one message under the message he had just sent
+  // (his ruling, 2026-08-09). A reaction says the same thing on the message itself. The message id is
+  // on the row rather than closed over: the sweep that confirms it may be a later process entirely.
+  if (cur.ownerDirect) {
+    const chat = cur.ownerMsgId != null ? chatIdForDmChatSession(cur.fromSid) : null
+    if (chat) void channel.react({ chatId: chat, messageId: String(cur.ownerMsgId) }, REACTIONS.delivered).catch(() => {})
+  } else if (!cur.founding) void notifyAskSent(cur.fromSid, cur.toName, cur.text, cur.noReply ? 'ack' : 'ask', cur.toSid)
+  // Mirror the same card on the TARGET's own surface (its topic / chat DM) so the inbound ask is
+  // visible from inside the session too. A `quiet` row is the one exception: a daemon notice whose
+  // fact a card on that same chat already carries (the held spawn's approval card).
+  // A FOUNDING row's two cards were already sent by the spawn closure ("Spawned @X" on the spawner's
+  // surface, and the task mirrored into the new topic), which is why it deliberately sends no
+  // asker-side card of its own. Re-sending them here would card one spawn twice.
+  if (!cur.quiet && !cur.founding) void notifyBusRich(cur.toSid, busGotHeader(cur.noReply ? 'ack' : 'ask', cur.fromName, cur.toName), cur.text)
+  // An ack has done its entire job the moment it ARRIVES: nothing is coming back, so the row that
+  // would otherwise sit here until a reaper or a TTL noticed it is dropped now.
+  if (cur.noReply) removePending(cur.id)
+}
+
+// Is the ask block in the target's conversation? Read from the tail of the transcript rather than the
+// whole file — a live session's JSONL runs to megabytes and this asks every 15s. The needle is
+// `ask=<id>` (formatAskBlock's own marker), not the ask's prose, which an answer quoting it back
+// would false-positive on.
+const CONFIRM_TAIL_BYTES = 512 * 1024
+async function askBlockInTranscript(sid: string, id: number): Promise<boolean> {
+  try {
+    const pane = await paneForSession(sid).catch(() => null)
+    const file = pane ? await transcriptForPane(pane, null).catch(() => null) : null
+    if (!file) return false
+    const size = statSync(file).size
+    const start = Math.max(0, size - CONFIRM_TAIL_BYTES)
+    const fd = openSync(file, 'r')
+    try {
+      const buf = Buffer.allocUnsafe(size - start)
+      readSync(fd, buf, 0, buf.length, start)
+      return blockCarriesAsk(buf.toString('utf8'), id)
+    } finally { closeSync(fd) }
+  } catch { return false }
+}
+
+// The sweep. Promotes a pasted ask to delivered on proof, and REPORTS one that never arrived — it
+// never re-pastes, because nothing can see the CLI's queue and a retry cannot tell "swallowed" from
+// "about to run". Loud beats clever: silence is the thing this whole restoration removes.
+async function confirmInjections(): Promise<void> {
+  const now = Date.now()
+  for (const cur of awaitingConfirmation()) {
+    const seen = await askBlockInTranscript(cur.toSid, cur.id).catch(() => false)
+    const plan = planInjectionConfirm({ seen, pastedAt: cur.pastedAt!, now })
+    if (plan === 'wait') continue
+    if (plan === 'confirm') {
+      // Elapsed is read BEFORE the promotion: markInjected deletes `pastedAt` from the very row object
+      // this loop is holding, so reading it afterwards printed "after NaNs" (live, 0.5.127).
+      const waited = Math.round((now - cur.pastedAt!) / 1000)
+      onAskConfirmed(cur, now)
+      process.stderr.write(`daemon: ask ${cur.id} to @${cur.toName} CONFIRMED in its transcript after ${waited}s\n`)
+      continue
+    }
+    // Unconfirmed, and TERMINAL. `markUnconfirmed` leaves `pastedAt` set on purpose: tryDeliverAsk
+    // bails on that field, and it is the only thing keeping this row out of the delivery queue. The
+    // first cut cleared it instead, which dropped the row straight back into the sweep and replayed it
+    // every ~135s — the duplicate class this whole design exists to avoid, shipped and caught live 40
+    // minutes later. An ack has nobody to answer it, so an unconfirmed one is closed rather than left
+    // to collect a TTL notice for a reply that was never coming.
+    markUnconfirmed(cur.id, now)
+    if (cur.noReply) removePending(cur.id)
+    process.stderr.write(`daemon: ask ${cur.id} to @${cur.toName} was pasted but NEVER appeared in its conversation after ${Math.round(CONFIRM_WINDOW_MS / 1000)}s — reporting to @${cur.fromName}\n`)
+    const askerPane = await paneForSession(cur.fromSid).catch(() => null)
+    for (const { chat, thread } of askerPane ? await outboundTargetsFor(askerPane).catch(() => []) : [])
+      void channel.sendText(chat,
+        `⚠️ Ask ${cur.id} was pasted into <b>${escapeHtml(cur.toName)}</b>'s pane but never appeared in its conversation — the CLI took it and did not run it. Nothing was re-sent (that would duplicate). Re-send it yourself if it still matters.`,
+        { ...(thread ? { threadId: String(thread) } : {}) }).catch(() => {})
+    if (askerPane) void busDeliver(askerPane, formatAnswerBlock('system', cur.id,
+      `(ask ${cur.id} was PASTED into @${cur.toName}'s pane but never entered its conversation — the CLI accepted and discarded it. Not re-sent, because nothing can see that queue and a retry would duplicate. Re-send if it still matters.)`))
+  }
 }
 
 // ---- The aside (`tg btw`) ----------------------------------------------------------------------
@@ -4684,25 +4762,14 @@ async function sweepBus(): Promise<void> {
   }
   if (closed.length) await notifyAskClosures(closed).catch(() => {})
   for (const p of expirePending(Date.now())) {
-    // Suppress the notice when the target has SUCCESSFULLY answered any ask from this asker since this
-    // one was created: that proves it's alive AND bus-fluent, so "still waiting" would be pure noise
-    // (the exact false alarm after kam answered 14 & 12 but left the instruct-ask 16 un-answered).
-    // Computed BEFORE the append so the flag can ride the entry — the predicate only reads `answer`
-    // rows, so the entry being in or out of the window can't change its result.
-    // The predicate itself now lives in agent-bus.ts, so the session-end reaper above answers this
-    // question the same way instead of not asking it at all — which is how a suppressed timeout still
-    // produced a stale "ended unanswered" hours later.
-    const provenLive = askerAlreadyResolved(p, tailLedger(room, LEDGER_SCAN))
-    // The expiry is TRUE HISTORY and is always recorded — the row really did expire. `suppressed`
-    // carries the fact that no notice went out, so `tg history` can show it marked while the ambient
-    // digest omits it. Before this, the ledger announced an expiry whose notice had been deliberately
-    // withheld, and the two surfaces disagreeing about one event read as a fired alarm — which is
-    // exactly what it was mistaken for.
-    appendLedger(room, { ts: Date.now(), kind: 'expire', from: p.toName, to: p.fromName, id: p.id, text: 'timed out', ...(provenLive ? { suppressed: true } : {}) })
-    // Stamp the decision on the row before moving on: the ledger proof scrolls out of the 200-row
-    // window long before the 24h late-answer grace elapses, and the reaper that runs when the target
-    // session finally ends must still know the asker was answered.
-    if (provenLive) { markAskerResolved(p.id, Date.now()); process.stderr.write(`daemon: ask ${p.id} expired but @${p.toName} has since answered @${p.fromName} — suppressing timeout notice\n`); continue }
+    // R-2 (2026-08-15) — THE RESTORATION. v0.3.35 announced EVERY expiry, unconditionally, and silent
+    // expiry was impossible in any code path. `88d4e8c` (2026-07-24) bundled the correct routing fix
+    // below with a suppression: withhold the notice when the target has answered ANY ask from this
+    // asker since. Counterparty-scoped, not ask-scoped — so on 2026-08-15 one answer to ask 469
+    // silenced the timeout notices for 472 and 474, the asks queued behind it, and two units of work
+    // vanished with nobody told. The noise that suppression was aimed at is solved by the routing
+    // (the asker's own surface, never General), which is the half of that commit that was right.
+    appendLedger(room, { ts: Date.now(), kind: 'expire', from: p.toName, to: p.fromName, id: p.id, text: 'timed out' })
     // Bus plumbing NEVER goes to General — the human-facing notice goes to the ASKER's OWN surface (its
     // chat DM / topic), and the "still open" system line goes into the asker's pane (its agent context).
     // Not "abandoned": the record is kept so a late answer still lands.
@@ -9272,7 +9339,11 @@ async function launchSpawn(spec: SpawnSpec, model: string | null, clampedNote: s
         else void notifyBusText(fromSid, `⚠️ Spawned <b>@${escapeHtml(topicName)}</b>, but its first message didn't paste — send it again.`)
         return
       }
-      if (p) markInjected(p.id, Date.now())   // arms the answer window from the moment it actually landed
+      // R-4 (2026-08-15): PASTED, not proved. A spawn's first message is delivered by this closure and
+      // never through tryDeliverAsk, so it used to arm the answer window straight off the paste — the
+      // exact shape of ask 428 on 2026-08-15, whose brief sat unsubmitted in a fresh REPL for 15
+      // minutes while the bus counted it delivered. confirmInjections promotes it on transcript proof.
+      if (p) markPastedAt(p.id, Date.now())
       // The human path's equivalent, and it is armed for the same reason on the same instant: the new
       // session's first reply is his, and a reply that beats its own route reaches only that session's
       // own surface. Off the block that was pasted, never rebuilt beside it (owner-reply.ts).
@@ -20485,6 +20556,9 @@ setInterval(() => void sweepStuckPanes(), 25_000).unref()
 // A /keys preview armed when we went down: its 30s timer died with the process, so the screenshot
 // would sit in the chat forever. One sweep at startup is the whole recovery — see armKeysPreview.
 setTimeout(() => void revertStrandedKeysPreviews().catch(() => {}), 4_000).unref()
+// R-4: prove or report every pasted-but-unconfirmed ask. Runs on the bus's own cadence, so a
+// confirmation normally lands within seconds of the target's next turn boundary.
+setInterval(() => void confirmInjections().catch(() => {}), 15_000).unref()
 setInterval(() => void recoverStrandedPastes().catch(() => {}), 25_000).unref()
 setTimeout(() => void recoverStrandedPastes().catch(() => {}), 6_000).unref()
 setInterval(() => { if (loginHeldPanes.size) void sweepLoginHolds() }, 5_000).unref()   // no-op unless a login episode is open

@@ -12,6 +12,7 @@ import { isAbsolute, join, resolve, sep } from 'node:path'
 import { appendFileSync, mkdirSync, readFileSync } from 'node:fs'
 import { STATE_DIR, readJsonFile, writeJsonFile } from './common.ts'
 import { loadAccess } from './access.ts'
+import { assigneeSpokeAboutAsk } from './ask-parity.ts'
 
 // Where THIS PROCESS keeps its bus state. Defaults to Telegram's state dir, so daemon.ts and every
 // existing test are unaffected; the Slack/Discord daemons call setBusStateDir() once at boot to get
@@ -146,6 +147,18 @@ export type BusPending = {
   // since been restarted into a different pane must be pasted afresh rather than Enter'd at a box
   // that never held it. Persisted, so a daemon restart cannot forget and re-paste.
   pastedPane?: string
+  // R-4 (2026-08-15): when the block was pasted into the target's pane, for a delivery whose arrival
+  // has not yet been PROVED. `injected` no longer follows from a successful paste — on 2026-08-15 ten
+  // blocks were pasted into @weather's mid-turn pane and not one became a turn, while the bus recorded
+  // two of them (asks 472, 474) as delivered and started their answer clocks. Cleared when the ask
+  // block is found in the target's transcript (→ injected) or when the window closes unconfirmed.
+  pastedAt?: number
+  // R-4: the confirmation window closed with no proof, and the asker has been told. TERMINAL — the row
+  // is never re-pasted, because nothing can see the CLI's queue and a retry cannot tell "swallowed"
+  // from "about to run". Without this the unconfirmed row fell straight back into the delivery queue
+  // and replayed every ~135s, which is exactly the duplicate class R-4 was written to avoid (live,
+  // 2026-08-15: acks 487/488/490/492/493 re-delivered into the chat lane, one per wake).
+  unconfirmedAt?: number
   // The last delivery attempt was REFUSED because the target's input box already held somebody's
   // typed text (ghost suggestions excluded — inputBoxOccupant). Holds that text, so the TTL notice can
   // say what is in the way instead of "no answer yet from @X", which describes a silent target and
@@ -265,6 +278,10 @@ export function loadBus(): BusState {
         // the three-outcome split exists to prevent. Restored 2026-08-03; the pane id is re-validated
         // at use, so a stale one from a session that has since been restarted is harmless.
         ...(typeof p.pastedPane === 'string' ? { pastedPane: p.pastedPane } : {}),
+        // R-4: persisted for the same reason pastedPane is — a restart inside the confirmation window
+        // must not re-paste a block that is already on its way into the target's conversation.
+        ...(typeof p.pastedAt === 'number' ? { pastedAt: p.pastedAt } : {}),
+        ...(typeof p.unconfirmedAt === 'number' ? { unconfirmedAt: p.unconfirmedAt } : {}),
         ...(typeof p.askerResolvedAt === 'number' ? { askerResolvedAt: p.askerResolvedAt } : {}),
         ...(p.founding === true ? { founding: true as const } : {}),
         // Written by createPending, never read back — so an undelivered `tg ack` that outlived a
@@ -466,8 +483,38 @@ export function markInjected(id: number, now: number): void {
   if (!p || p.injected) return
   p.injected = true
   p.expiresAt = now + ASK_TTL_MS
+  delete p.pastedAt   // proved arrived; the confirmation sweep has no further business with this row
   save()
 }
+
+/**
+ * R-4: record that the block was PASTED, which is not the same as delivered. The confirmation sweep
+ * turns this into `injected` once the ask block appears in the target's transcript, or reports it
+ * unconfirmed and clears it (`markPastedAt(id, null)`) — never silently promotes it.
+ */
+export function markPastedAt(id: number, at: number | null): void {
+  ensureLoaded()
+  const p = store.pending[String(id)]
+  if (!p) return
+  if (at == null) { if (p.pastedAt == null) return; delete p.pastedAt } else p.pastedAt = at
+  save()
+}
+
+/**
+ * Record that the confirmation window closed with no proof. Terminal: `pastedAt` is deliberately LEFT
+ * SET, because tryDeliverAsk bails on it — that is what keeps the row out of the delivery queue.
+ */
+export function markUnconfirmed(id: number, now: number): void {
+  ensureLoaded()
+  const p = store.pending[String(id)]
+  if (!p || p.unconfirmedAt != null) return
+  p.unconfirmedAt = now
+  save()
+}
+
+/** Rows pasted but not yet proved delivered — the confirmation sweep's queue. */
+export const awaitingConfirmation = (): BusPending[] =>
+  listPending().filter(p => !p.injected && !p.expiredAt && p.unconfirmedAt == null && typeof p.pastedAt === 'number')
 
 // Un-injected asks for a target session — the delivery queue the daemon sweeps when that session
 // sits at a normal prompt (so an ask to a busy agent waits politely instead of clobbering its turn).
@@ -659,10 +706,11 @@ export function markAskerResolved(id: number, now: number): void {
 // Matched on counterparty and time rather than on an ask id, because `tg ack` mints its OWN id: an
 // ack about ask 690 is logged as a new row, so keying on 690 would find nothing and every ack would
 // read as silence. From the assignee, to this asker, since this ask opened — that is the traffic.
-export function assigneeSpokeToAsker(p: BusPending, entries: LedgerEntry[]): boolean {
-  return entries.some(e => (e.kind === 'ack' || e.kind === 'answer')
-    && e.from === p.toName && e.to === p.fromName && e.ts >= p.createdAt)
-}
+// R-3 (2026-08-15): NARROWED TO ASK SCOPE, and re-exported from ask-parity.ts where the reasoning
+// lives. The counterparty-scoped version above silenced the chase for asks 472 and 474 on the
+// strength of an answer to 469 — the ask they were queued behind, whose landing was supposed to
+// START them. `assigneeSpokeAboutAsk` asks whether the traffic REFERENCES this ask instead.
+export { assigneeSpokeAboutAsk } from './ask-parity.ts'
 
 // The rows a session might still owe an answer for, as ONE predicate — two delivery points read it
 // now (the stop hook that refuses a turn's end, and the 20s post-turn nudge that backstops it), and a
@@ -682,7 +730,7 @@ export type NudgeVerdict = 'nudge' | 'already-nudged' | 'assignee-reported'
 // restart. On a box that ships several times an hour "once per ask" was never once.
 export function planAssigneeNudge(p: BusPending, entries: LedgerEntry[]): NudgeVerdict {
   if (p.nudgedAt != null) return 'already-nudged'
-  if (assigneeSpokeToAsker(p, entries)) return 'assignee-reported'
+  if (assigneeSpokeAboutAsk(p, entries)) return 'assignee-reported'
   return 'nudge'
 }
 

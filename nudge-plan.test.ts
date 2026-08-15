@@ -6,7 +6,7 @@
 // session's life, which the daemon log and ledger.jsonl agree on. Five carried information, three did
 // not, and this file is the rule that tells them apart.
 import { test, expect } from 'bun:test'
-import { planAssigneeNudge, assigneeSpokeToAsker, owesAnswer, loadBus, setBusStateDir, _resetForTest, type BusPending, type LedgerEntry } from './agent-bus.ts'
+import { planAssigneeNudge, assigneeSpokeAboutAsk, owesAnswer, loadBus, setBusStateDir, _resetForTest, type BusPending, type LedgerEntry } from './agent-bus.ts'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -46,12 +46,24 @@ test('only the assignee talking to THIS asker counts as reporting', () => {
 
 // An ack is not an answer: the row stays open, the TTL runs on, the 60-minute expiry notice is
 // untouched. It only means the asker is no longer in the dark, which is the whole job of the nudge.
-test('the assignee acked its asker: silence, and the ask stays open', () => {
+test('the assignee acked its asker ABOUT THIS ASK: silence, and the ask stays open', () => {
   const p = ask({ id: 694, createdAt: T('02:00:51') })
-  const acked = [entry({ kind: 'ack', from: 'weather', to: 'chat', ts: T('02:01:05') })]
-  expect(assigneeSpokeToAsker(p, acked)).toBe(true)
+  // The ack names the ask (R-3, 2026-08-15). It used to be enough that the ack merely went to this
+  // asker, which is what let an answer to ask 469 silence the chase for 472 and 474 on 2026-08-15.
+  const acked = [entry({ kind: 'ack', from: 'weather', to: 'chat', ts: T('02:01:05'), text: 'status on 694: two hours out' })]
+  expect(assigneeSpokeAboutAsk(p, acked)).toBe(true)
   expect(planAssigneeNudge(p, acked)).toBe('assignee-reported')
   expect(p.nudgedAt).toBeUndefined()   // nothing is stamped — a later ack-free ask is still nudgeable
+})
+
+// R-3, the 2026-08-15 regression case: the assignee is talking to this asker, but about something
+// else entirely. That is not "the asker knows about THIS ask", and it must not buy silence.
+test('an ack about a DIFFERENT ask does not silence this one', () => {
+  const p = ask({ id: 472, createdAt: T('01:47:00') })
+  expect(planAssigneeNudge(p, [
+    entry({ kind: 'answer', from: 'weather', to: 'chat', id: 469, ts: T('01:50:00'), text: 'Live since 09:20Z — /h/kmia draws our own computation' }),
+    entry({ kind: 'ack', from: 'weather', to: 'chat', ts: T('01:51:00'), text: 'deploying the index estimator now' }),
+  ])).toBe('nudge')
 })
 
 test('an answer counts too — it is the strongest form of having spoken', () => {
@@ -62,10 +74,20 @@ test('an answer counts too — it is the strongest form of having spoken', () =>
 
 // `tg ack` mints its OWN pending id, so an ack about ask 690 is logged under a different id. Keying
 // the match on 690 would find nothing and every ack would read as silence — the bug this pins.
-test('an ack is matched on counterparty and time, never on the ask id it is about', () => {
-  const p = ask()
-  const ackWithItsOwnId = [entry({ kind: 'ack', from: 'weather', to: 'chat', id: 691, ts: T('01:49:37') })]
+// `tg ack` mints its OWN id, so an ack about ask 690 is logged as row 691 — keying on the ROW id
+// would find nothing and every ack would read as silence. That is why the predicate never matched on
+// the row id, and it still does not. R-3 (2026-08-15) changed the other half: it now asks whether the
+// ack REFERENCES this ask, because counterparty-and-time alone let an answer to ask 469 silence the
+// chase for 472 and 474 — the asks queued behind it.
+test('an ack is matched on what it REFERENCES, never on the row id it was minted with', () => {
+  const p = ask()   // ask 690
+  const ackWithItsOwnId = [entry({ kind: 'ack', from: 'weather', to: 'chat', id: 691, ts: T('01:49:37'),
+    text: '690 in progress — pre-build reality check done as you asked' })]
   expect(planAssigneeNudge(p, ackWithItsOwnId)).toBe('assignee-reported')
+  // …and the same row, minted the same way, about something else entirely: still silence toward 690.
+  const ackAboutAnother = [entry({ kind: 'ack', from: 'weather', to: 'chat', id: 691, ts: T('01:49:37'),
+    text: '684 received and queued behind the map' })]
+  expect(planAssigneeNudge(p, ackAboutAnother)).toBe('nudge')
 })
 
 // ---- shape 3: THE DOUBLE. ask 690, nudged 01:49:31 and again 02:01:45 ----
@@ -78,8 +100,8 @@ test('THE 690 DOUBLE: a restart cannot buy a second nudge', () => {
   const nudged = ask({ nudgedAt: T('01:49:31') })
   expect(planAssigneeNudge(nudged, [])).toBe('already-nudged')          // the stamp is on the persisted row
   const acks = [
-    entry({ kind: 'ack', from: 'weather', to: 'chat', ts: T('01:49:37') }),
-    entry({ kind: 'ack', from: 'weather', to: 'chat', ts: T('02:01:05') }),
+    entry({ kind: 'ack', from: 'weather', to: 'chat', ts: T('01:49:37'), text: '690 in progress — pre-build reality check done as you asked' }),
+    entry({ kind: 'ack', from: 'weather', to: 'chat', ts: T('02:01:05'), text: '694 rework noted — requirement understood' }),
   ]
   expect(planAssigneeNudge(nudged, acks)).toBe('already-nudged')
   // Belt and braces: even if the stamp were somehow lost, the acks alone now silence it.
@@ -92,19 +114,23 @@ test('THE 690 DOUBLE: a restart cannot buy a second nudge', () => {
 // it fired. Five had none. If this ever prints a different split, the rule has drifted from the data
 // it was derived from.
 test('the @weather audit: 5 nudges survive, 3 are silenced', () => {
-  const runs: Array<{ id: number; opened: string; traffic: string[] }> = [
+  const runs: Array<{ id: number; opened: string; traffic: Array<[string, string]> }> = [
     { id: 657, opened: '2026-07-28T23:07:11Z', traffic: [] },
     { id: 672, opened: '2026-07-29T00:36:25Z', traffic: [] },
     { id: 678, opened: '2026-07-29T00:57:56Z', traffic: [] },
     { id: 681, opened: '2026-07-29T01:19:30Z', traffic: [] },
-    { id: 684, opened: '2026-07-29T01:26:18Z', traffic: ['2026-07-29T01:26:27Z'] },
+    { id: 684, opened: '2026-07-29T01:26:18Z', traffic: [ ['2026-07-29T01:26:27Z', '684 received and queued behind the map (681) per your sequencing'] ] },
     { id: 690, opened: '2026-07-29T01:47:35Z', traffic: [] },
-    { id: 690, opened: '2026-07-29T01:47:35Z', traffic: ['2026-07-29T01:49:37Z', '2026-07-29T02:01:05Z'] },
-    { id: 694, opened: '2026-07-29T02:00:51Z', traffic: ['2026-07-29T02:01:05Z'] },
+    { id: 690, opened: '2026-07-29T01:47:35Z', traffic: [ ['2026-07-29T01:49:37Z', '690 in progress — pre-build reality check done as you asked'], ['2026-07-29T02:01:05Z', '694 rework noted — requirement understood'] ] },
+    { id: 694, opened: '2026-07-29T02:00:51Z', traffic: [ ['2026-07-29T02:01:05Z', '694 rework noted — requirement understood'] ] },
   ]
+  // The ack TEXTS are the real ledger rows (agent-bus/*/ledger.jsonl, 2026-07-29), recovered when
+  // R-3 narrowed the predicate to ask scope. Every one of the three suppressing acks names its ask
+  // id in its first words — so the narrowing costs this audit nothing, which is the point of
+  // re-running it against real text rather than the counterparty-only fixture it started as.
   const verdicts = runs.map(r => planAssigneeNudge(
     ask({ id: r.id, createdAt: Date.parse(r.opened) }),
-    r.traffic.map(ts => entry({ kind: 'ack', from: 'weather', to: 'chat', ts: Date.parse(ts) })),
+    r.traffic.map(([ts, text]) => entry({ kind: 'ack', from: 'weather', to: 'chat', ts: Date.parse(ts!), text })),
   ))
   expect(verdicts.filter(v => v === 'nudge')).toHaveLength(5)
   expect(verdicts.filter(v => v === 'assignee-reported')).toHaveLength(3)

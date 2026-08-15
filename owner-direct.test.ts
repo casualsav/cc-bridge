@@ -260,7 +260,10 @@ test('the founding message wears the human envelope, and the ask is what the rev
   // The ask row is minted ONLY on the revert path — `p` null is the human path, and every piece of ask
   // machinery hangs off `p` so none of it can half-fire.
   expect(spawn).toContain('const p = humanFounding ? null : createPending({')
-  for (const guarded of ['if (p) removePending(p.id)', 'if (p) markInjected(p.id, Date.now())', 'if (p) busInFlight.delete(p.id)'])
+  // `markPastedAt`, not `markInjected`, since R-4 (2026-08-15): the founding closure records a PASTE
+  // and confirmInjections promotes it on transcript proof. Ask 428 took this path and sat unsubmitted
+  // in a fresh REPL for fifteen minutes while the bus counted it delivered.
+  for (const guarded of ['if (p) removePending(p.id)', 'if (p) markPastedAt(p.id, Date.now())', 'if (p) busInFlight.delete(p.id)'])
     expect(spawn).toContain(guarded)
   // Both blocks are built from ONE expression, so the bytes armed and the bytes pasted cannot diverge.
   expect(spawn).toContain('ownerInboundBlock(firstMsg, ownerChat, spec.ownerMsgId, foundingRefs)')
